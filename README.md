@@ -358,9 +358,25 @@ When prompted during setup you can choose how to obtain the `telcoin-network` bi
 | Option | Description | Notes |
 |---|---|---|
 | Build from source | Clones the GitHub repo and compiles with `cargo build --release` | Takes 20-40 min, requires ~4GB RAM during build |
-| Pre-built binary | Downloads the latest release from GitHub | Fastest option |
-| Docker | Pulls the official Docker image | Requires Docker installed |
+| Pre-built binary | Downloads a release binary | **Coming soon** — check [releases](https://github.com/Telcoin-Association/tn-node-deployment/releases) |
+| Docker | Pulls the official Docker Hub image | **Coming soon** — `docker pull telcoin/telcoin-network:latest` |
 | Existing binary | Use a binary already on this machine | Useful if you have already compiled it |
+
+---
+
+## Network Binding
+
+During setup you will be asked how the node should listen for incoming P2P connections:
+
+**IPv6** — recommended for cloud and data centre servers. Binds to all IPv6 interfaces (`::`) and is NAT-free, meaning no router port forward is required.
+
+**IPv4** — for home or bare metal servers. The script will auto-detect your server's internal IP address (e.g. `10.x.x.x` on cloud, `192.168.x.x` on home networks) and ask you to confirm it. You will also need to forward TCP/UDP port 30303 on your router to this server.
+
+**Important distinction for cloud/data centre operators:**
+- **Internal IP** (e.g. `10.70.70.2`) — what the node binds its listener to. Auto-detected by the script via `hostname -I`.
+- **External/Public IP** — what peers use to reach your node. Fetched automatically via `api.ipify.org` and used for validator key registration in `node-info.yaml`.
+
+These are two different addresses on cloud servers and the script handles both correctly.
 
 ---
 
@@ -400,11 +416,32 @@ Store your BLS passphrase separately from the key files — in a password manage
 
 ---
 
-## Known Issues and Notes
+## Changelog
 
-- **Block sync from 0 (current)** — as of April 2026 the Adiri testnet is running a version of the node software where the new database is in place but state sync is not yet fully implemented. The PRs enabling proper sync are in review. Observers will connect to peers correctly but remain at block 0 until the next testnet restart which will include the sync fixes. This is expected behaviour and not a problem with your node setup.
-- **Epoch data** — some historical epoch data gets garbage collected by validators and may not be available to new observers joining mid-chain. This produces `failed to retrieve epoch` warnings in logs which are non-fatal.
-- **Build from source** — requires the `tn-contracts` submodule to be present. The scripts handle this automatically with `--recurse-submodules`.
+### v1.0.4
+- IPv6/IPv4 binding descriptions updated to neutral wording — no longer implies one is better for a specific environment type
+- RPC access descriptions updated with clearer guidance on when to use Public vs Private, including security warning about nginx
+- Coming soon options (pre-built binary, Docker) now pause and show a clear message before returning to the menu, so operators know their selection was received and why it is unavailable
+
+### v1.0.3
+- IPv4 binding now auto-detects the server's internal IP address rather than using `0.0.0.0` — correctly handles cloud/data centre environments where internal and external IPs differ
+- Removed IPv4+IPv6 combined binding option (not supported by the node)
+- Pre-built binary download marked as coming soon — will use official GitHub releases
+- Docker install marked as coming soon — will use official Docker Hub image
+
+### v1.0.1
+- Added validator on-chain status check via ConsensusRegistry contract
+- Added `display_node_info()` to show node-info.yaml after key generation
+- Added `--address` flag to check-node.sh for on-chain validator status
+- Added Security Improvements section to README (systemd LoadCredential and HashiCorp Vault)
+- Added Validator Onboarding Flow section to README
+
+### v1.0.0
+- Initial release
+- Observer and validator node setup scripts
+- Health check script
+- Systemd service with BLS passphrase, listener multiaddrs
+- Build from source with full submodule support
 
 ---
 

@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.4"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -170,96 +170,32 @@ install_from_source() {
 }
 
 install_prebuilt_binary() {
-    print_step "Downloading pre-built binary..."
-
-    local api_url="https://api.github.com/repos/Telcoin-Association/telcoin-network/releases/latest"
-    local release_info
-    release_info=$(curl -s --max-time 30 "$api_url" 2>/dev/null || echo "")
-
-    local DOWNLOAD_URL=""
-    if [[ -n "$release_info" ]]; then
-        local arch
-        arch=$(uname -m)
-        DOWNLOAD_URL=$(echo "$release_info" | \
-            grep -o '"browser_download_url":"[^"]*linux[^"]*'"${arch}"'[^"]*"' | \
-            grep -v '.sha256' | head -1 | cut -d'"' -f4)
-    fi
-
-    if [[ -z "$DOWNLOAD_URL" ]]; then
-        print_warn "Could not detect download URL automatically."
-        echo "$release_info" | grep '"browser_download_url"' | \
-            grep -o '"[^"]*"$' | tr -d '"' 2>/dev/null || true
-        echo ""
-        read -r -p "  Paste the download URL: " DOWNLOAD_URL
-    fi
-
-    mkdir -p "$INSTALL_DIR"
-    curl -L --progress-bar -o "${INSTALL_DIR}/telcoin" "$DOWNLOAD_URL"
-    chmod +x "${INSTALL_DIR}/telcoin-network"
-    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
-
-    local checksum_url="${DOWNLOAD_URL}.sha256"
-    local checksum_file="${INSTALL_DIR}/telcoin.sha256"
-    if curl -s --max-time 10 -o "$checksum_file" "$checksum_url" 2>/dev/null && \
-       [[ -s "$checksum_file" ]]; then
-        if (cd "$INSTALL_DIR" && sha256sum -c "$checksum_file" &>/dev/null); then
-            print_ok "Checksum verified"
-        else
-            print_error "Checksum FAILED -- binary may be corrupted."
-            exit 1
-        fi
-    else
-        print_warn "No checksum available -- skipping integrity check."
-    fi
-
-    print_ok "Binary installed: ${BINARY_PATH}"
+    print_step "Pre-built binary..."
+    echo ""
+    print_warn "Pre-built binary downloads are coming soon."
+    print_info "Official releases will be available at:"
+    print_info "  https://github.com/Telcoin-Association/tn-node-deployment/releases"
+    echo ""
+    print_warn "This option is not yet available -- please choose another method."
+    echo ""
+    read -r -p "  Press Enter to return to the install method menu..."
+    echo ""
+    step_install_binary
 }
 
 setup_docker() {
-    print_step "Setting up Docker..."
-
-    if ! check_docker; then
-        case "$PKG_MANAGER" in
-            apt)
-                apt-get install -y ca-certificates curl gnupg
-                install -m 0755 -d /etc/apt/keyrings
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-                    gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-                chmod a+r /etc/apt/keyrings/docker.gpg
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-                    https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-                    tee /etc/apt/sources.list.d/docker.list > /dev/null
-                apt-get update -qq
-                apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-                systemctl start docker
-                systemctl enable docker
-                ;;
-            *)
-                print_error "Cannot auto-install Docker. See: https://docs.docker.com/engine/install/"
-                exit 1
-                ;;
-        esac
-    fi
-
-    local image_name="ghcr.io/telcoin-association/telcoin-network:latest"
-    docker pull "$image_name"
-
-    mkdir -p "$INSTALL_DIR"
-    cat > "${INSTALL_DIR}/telcoin" <<EOF
-#!/usr/bin/env bash
-exec docker run --rm \
-    -v "${DATA_DIR}:/data" \
-    -v "${CONFIG_DIR}:/config" \
-    -p "${P2P_PORT}:${P2P_PORT}" \
-    -p "${RPC_PORT}:${RPC_PORT}" \
-    -p "${METRICS_PORT}:${METRICS_PORT}" \
-    ${image_name} "\$@"
-EOF
-    chmod +x "${INSTALL_DIR}/telcoin-network"
-    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
-    print_ok "Docker wrapper written: ${BINARY_PATH}"
+    print_step "Docker..."
+    echo ""
+    print_warn "Official Docker Hub image is coming soon."
+    print_info "The public Docker Hub image will be available at:"
+    print_info "  docker pull telcoin/telcoin-network:latest  (coming soon)"
+    echo ""
+    print_warn "This option is not yet available -- please choose another method."
+    echo ""
+    read -r -p "  Press Enter to return to the install method menu..."
+    echo ""
+    step_install_binary
 }
-
 use_existing_binary() {
     print_step "Locating existing binary..."
 
@@ -456,19 +392,16 @@ step_create_service() {
     echo ""
     echo "  Network binding -- how the node listens for P2P connections:"
     echo ""
-    echo "  1) IPv6  -- recommended, NAT-free, no router port forward needed"
-    echo "              (/ip6/::/udp/49590/quic-v1)"
+    echo "  1) IPv6  -- listen on all IPv6 interfaces"
+    echo "              NAT-free, no router port forward needed"
     echo ""
-    echo "  2) IPv4  -- requires TCP/UDP port 30303 forwarded on your router"
-    echo "              (/ip4/0.0.0.0/udp/49590/quic-v1)"
-    echo ""
-    echo "  3) Both  -- listens on IPv4 and IPv6 simultaneously"
-    echo "              maximises peer connectivity"
+    echo "  2) IPv4  -- listen on a specific IPv4 address"
+    echo "              requires TCP/UDP port 30303 forwarded on your router"
     echo ""
 
     local bind_choice
     while true; do
-        read -r -p "  Enter choice [1/2/3]: " bind_choice
+        read -r -p "  Enter choice [1/2]: " bind_choice
         case "$bind_choice" in
             1)
                 local primary_multiaddr="/ip6/::/udp/49590/quic-v1"
@@ -477,26 +410,19 @@ step_create_service() {
                 break
                 ;;
             2)
-                local primary_multiaddr="/ip4/0.0.0.0/udp/49590/quic-v1"
-                local worker_multiaddr="/ip4/0.0.0.0/udp/49594/quic-v1"
-                print_ok "Binding: IPv4"
+                # Detect internal IP for IPv4 binding
+                select_listener_ip
+                local primary_multiaddr="/ip4/${LISTENER_IP}/udp/49590/quic-v1"
+                local worker_multiaddr="/ip4/${LISTENER_IP}/udp/49594/quic-v1"
+                print_ok "Binding: IPv4 (${LISTENER_IP})"
                 print_info "Ensure TCP/UDP port 30303 is forwarded to this server on your router."
-                break
-                ;;
-            3)
-                local primary_multiaddr="/ip4/0.0.0.0/udp/49590/quic-v1,/ip6/::/udp/49590/quic-v1"
-                local worker_multiaddr="/ip4/0.0.0.0/udp/49594/quic-v1,/ip6/::/udp/49594/quic-v1"
-                print_ok "Binding: IPv4 and IPv6"
-                print_info "Ensure TCP/UDP port 30303 is forwarded to this server on your router."
-                print_warn "Confirm with the Telcoin dev team that multiple listener addresses are supported."
                 break
                 ;;
             *)
-                print_warn "Please enter 1, 2, or 3."
+                print_warn "Please enter 1 or 2."
                 ;;
         esac
     done
-
     local metrics_addr="127.0.0.1:${METRICS_PORT}"
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
 

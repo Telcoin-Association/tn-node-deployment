@@ -360,7 +360,7 @@ select_network() {
     echo "  Which network do you want to connect to?"
     echo ""
     echo "  1) Adiri Testnet  (Chain ID: ${TESTNET_CHAIN_ID})  -- for testing"
-    echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production"
+    echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production (coming soon)"
     echo ""
 
     local choice
@@ -376,13 +376,13 @@ select_network() {
                 break
                 ;;
             2)
-                NETWORK="mainnet"
-                CHAIN_ID="$MAINNET_CHAIN_ID"
-                CHAIN_NAME="$MAINNET_CHAIN_NAME"
-                RPC_URL="$MAINNET_RPC_URL"
-                EXPLORER_URL="$MAINNET_EXPLORER"
-                print_warn "Mainnet selected. Ensure you have completed validator approval."
-                if confirm "Confirm mainnet selection?"; then break; fi
+                echo ""
+                print_warn "Mainnet has not launched yet."
+                print_info "Mainnet configuration will be available once the network goes live."
+                print_info "Please select Adiri Testnet for now."
+                echo ""
+                read -r -p "  Press Enter to return to network selection..."
+                echo ""
                 ;;
             *)
                 print_warn "Please enter 1 or 2."
@@ -501,6 +501,52 @@ EOF
     print_info "Start:        systemctl start ${service_name}"
     print_info "Enable boot:  systemctl enable ${service_name}"
     print_info "View logs:    journalctl -u ${service_name} -f"
+}
+
+
+# Detect the internal/private IP of this machine.
+# On cloud/data centre servers this is the VM's internal NIC address (e.g. 10.x.x.x)
+# which is different from the public IP that peers connect to externally.
+# On home/bare metal servers this is usually the LAN IP (e.g. 192.168.x.x).
+detect_internal_ip() {
+    local detected_ip
+    detected_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+
+    if [[ -z "$detected_ip" ]]; then
+        # Fallback: try to get IP from the default route interface
+        detected_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo "")
+    fi
+
+    echo "$detected_ip"
+}
+
+# Ask the operator to confirm or enter the listener IP address.
+# Sets the global variable: LISTENER_IP
+select_listener_ip() {
+    local detected_ip
+    detected_ip=$(detect_internal_ip)
+
+    echo ""
+    print_info "The node needs to know which IP address to bind its P2P listener to."
+    print_info "On cloud/data centre servers this is your VM internal IP (e.g. 10.x.x.x)."
+    print_info "On home/bare metal servers this is your LAN IP (e.g. 192.168.x.x)."
+    print_info "This is NOT the same as your public IP -- peers reach you via your"
+    print_info "public IP, but the node listens on the internal/private interface."
+    echo ""
+
+    if [[ -n "$detected_ip" ]]; then
+        print_info "Detected internal IP: ${detected_ip}"
+        if confirm "Use this IP address for the listener?"; then
+            LISTENER_IP="$detected_ip"
+        else
+            read -r -p "  Enter the correct internal IP address: " LISTENER_IP
+        fi
+    else
+        print_warn "Could not auto-detect internal IP."
+        read -r -p "  Enter your internal IP address: " LISTENER_IP
+    fi
+
+    print_ok "Listener IP: ${LISTENER_IP}"
 }
 
 # =============================================================================
