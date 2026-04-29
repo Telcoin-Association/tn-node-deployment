@@ -425,6 +425,11 @@ Store your BLS passphrase separately from the key files — in a password manage
 
 ## Changelog
 
+### v1.0.6
+- Fixed `edit-config.sh` RPC editing — service file no longer gets mangled when switching between private/public/disabled
+- Fixed grep compatibility issue with `--http` flags on Ubuntu systems
+- RPC edit now uses clean sed approach to rebuild ExecStart correctly every time
+
 ### v1.0.5
 - Added `edit-config.sh` — interactive configuration editor for running nodes
   - Auto-detects validator or observer installation
