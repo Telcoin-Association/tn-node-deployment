@@ -532,9 +532,12 @@ step_final_summary() {
     print_sep
     echo ""
     print_info "Next steps:"
-    echo "  1. Allow inbound TCP on port ${P2P_PORT} in your firewall"
-    echo "  2. Register your node-info.yaml with the Telcoin Association"
-    echo "  3. Run the health check: bash check-node.sh"
+    echo "  1. Allow inbound UDP on ports 49590 and 49594 in your firewall"
+    echo "  2. Submit your ECDSA validator address to the Telcoin Association for governance approval"
+    echo "  3. Once approved and NFT minted, stake your TEL via the ConsensusRegistry contract"
+    echo "  4. Wait for your node to sync, then call activate()"
+    echo "  5. Run the health check: bash check-node.sh --address ${VALIDATOR_ADDRESS}"
+    echo "  6. Full guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake"
     echo ""
 }
 
