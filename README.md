@@ -39,12 +39,13 @@ A validator node participates in Narwhal/Bullshark consensus, proposes and signs
 ## Requirements
 
 ### Hardware (minimum)
-- CPU: 4 cores
-- RAM: 8GB
-- Disk: 100GB free
-- OS: Linux (Ubuntu 22.04 or 24.04 recommended)
-- Static IP address
-- Internet connection with port 30303 open inbound (TCP/UDP)
+- CPU: 16 cores / 32 threads, x86-64 (recommended: 32 cores, higher clock speed)
+- RAM: 128GB DDR4/DDR5 ECC RDIMM
+- Disk: 4TB TLC NVMe SSD (recommended: 7.5TB)
+- OS: Ubuntu 24.04 LTS (x86-64) recommended
+- Static public IP address
+- Open UDP ports for P2P communication (default: 49590, 49594)
+- Reliable, low-latency internet connection
 
 ### Software
 The scripts will install or check for everything needed. You do not need to install anything manually beforehand.
@@ -266,42 +267,72 @@ The RPC port (8541/8545) should **not** be opened to the internet unless you are
 
 Setting up a validator involves both off-chain (node setup) and on-chain (contract interaction) steps. The setup script handles the off-chain steps and guides you through what is needed on-chain.
 
+Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake
+
 ### Full Process
 
-**Step 1 — Node setup (script handles this)**
+**Step 1 — Generate keys and set up node (script handles this)**
 Run `setup-validator.sh`. The script installs the binary, generates your BLS keys, copies chain configs, and starts the node service.
 
-**Step 2 — Share your node-info.yaml (operator action)**
-After key generation the script displays your `node-info.yaml` and its file path. Send this file to the Telcoin Association. It contains your BLS public key, proof of possession, and network addresses — nothing secret.
+**Step 2 — Request Governance Approval (operator action)**
+Submit your ECDSA validator address to the Telcoin Association for off-chain verification. You do NOT need to send your node-info.yaml — just your address. Upon approval, governance calls `mint(validatorAddress)` on the ConsensusRegistry contract.
 
-**Step 3 — Receive your ConsensusNFT (Telcoin Association action)**
-The Association calls `mint(yourAddress)` on the ConsensusRegistry contract. You cannot do this yourself — it is the whitelist/approval step.
+Verify you have received your ConsensusNFT:
+```bash
+cast call 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
+  "balanceOf(address)(uint256)" \
+  <VALIDATOR_ADDRESS> \
+  --rpc-url <RPC_URL>
+```
 
-**Step 4 — Stake your TEL (operator action)**
-Once your NFT is minted, call `stake()` on the ConsensusRegistry contract:
-- Contract address: `0x07e17e17e17e17e17e17e17e17e17e17e17e17e1`
-- Parameters: your BLS public key and proof of possession (both in node-info.yaml), plus the required TEL stake as msg.value
-- Use MetaMask, a hardware wallet, or any EVM-compatible tool
+**Step 3 — Stake your TEL (operator action)**
+Once whitelisted, submit the stake transaction using your BLS public key and proof of possession from `node-info.yaml`:
+
+```bash
+# Check required stake amount first
+cast call 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
+  "getCurrentStakeConfig()" \
+  --rpc-url <RPC_URL>
+
+# Submit stake
+cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
+  "stake(bytes,(bytes,bytes))" \
+  <BLS_PUBKEY_COMPRESSED> \
+  "(<UNCOMPRESSED_PUBKEY>,<UNCOMPRESSED_SIGNATURE>)" \
+  --value <STAKE_AMOUNT> \
+  --trezor \
+  --rpc-url <RPC_URL>
+```
+
+**Step 4 — Sync your node**
+Wait for the node to fully sync. Check sync status:
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"tn_syncing","params":[],"id":1}' \
+  http://localhost:8545
+```
 
 **Step 5 — Activate (operator action)**
-Call `activate()` on the same contract. This enters you into the activation queue.
+Once synced, call `activate()` to enter the activation queue:
+```bash
+cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
+  "activate()" \
+  --trezor \
+  --rpc-url <RPC_URL>
+```
 
 **Step 6 — Go active (automatic)**
-At the next epoch boundary the protocol activates your validator automatically. You will start participating in consensus and earning TEL rewards.
+At the next epoch boundary your status changes to Active and you begin participating in consensus.
 
 ### Checking Your Status
-
-The setup script checks your on-chain status automatically after the node starts. You can also check it at any time using the health check script:
 
 ```bash
 bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
 ```
 
-The script will show one of these statuses:
-
 | Status | Meaning | Next Action |
 |---|---|---|
-| No NFT found | Not yet whitelisted | Contact Telcoin Association |
+| No NFT found | Not yet whitelisted | Submit address to Telcoin Association |
 | Undefined | NFT minted, not staked | Call stake() on ConsensusRegistry |
 | Staked | Staked, not activated | Call activate() on ConsensusRegistry |
 | PendingActivation | Activation in progress | Wait for next epoch |
@@ -424,6 +455,14 @@ Store your BLS passphrase separately from the key files — in a password manage
 ---
 
 ## Changelog
+
+### v1.0.7
+- Updated hardware requirements to match official docs: 16 cores, 128GB RAM, 4TB NVMe SSD
+- Fixed validator onboarding instructions — operators submit their ECDSA address to governance (not node-info.yaml)
+- Added cast commands to post-key-generation display for staking and activation
+- Updated sync check to use `tn_syncing` RPC method (correct Telcoin Network method)
+- Updated Validator Onboarding Flow section in README with official staking guide steps and cast commands
+- Updated OS recommendation to Ubuntu 24.04 LTS
 
 ### v1.0.6
 - Fixed `edit-config.sh` RPC editing — service file no longer gets mangled when switching between private/public/disabled

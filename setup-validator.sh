@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.5"
+readonly SCRIPT_VERSION="1.0.7"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -321,7 +321,7 @@ step_generate_keys() {
     bls_passphrase_confirm=""
 
     # Display node-info.yaml so operator knows what to send to the Association
-    display_node_info "$DATA_DIR"
+    display_node_info "$DATA_DIR" "$VALIDATOR_ADDRESS"
 
     echo ""
     print_warn "BACK UP YOUR KEYS NOW."

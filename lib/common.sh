@@ -23,9 +23,9 @@ readonly DEFAULT_P2P_PORT="30303"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
 
-readonly MIN_RAM_GB=8
-readonly MIN_DISK_GB=100
-readonly MIN_CPU_CORES=4
+readonly MIN_RAM_GB=128
+readonly MIN_DISK_GB=4000
+readonly MIN_CPU_CORES=16
 
 readonly DEFAULT_INSTALL_DIR="/opt/telcoin"
 readonly DEFAULT_DATA_DIR="/var/lib/telcoin"
@@ -607,9 +607,9 @@ check_validator_onchain_status() {
         print_info "This means no ConsensusNFT has been minted for this address yet."
         echo ""
         print_info "Next step:"
-        echo "    Contact the Telcoin Association to have your ConsensusNFT minted."
-        echo "    Provide your validator address: ${validator_address}"
-        echo "    And your node-info.yaml file."
+        echo "    Submit your ECDSA validator address to the Telcoin Association"
+        echo "    for governance approval: ${validator_address}"
+        echo "    Once approved, governance will mint a ConsensusNFT to your address."
         return 0
     fi
 
@@ -709,6 +709,7 @@ check_validator_onchain_status() {
 # Display the contents of node-info.yaml after key generation
 display_node_info() {
     local data_dir="$1"
+    local validator_address="$2"
     local node_info_file="${data_dir}/node-info.yaml"
 
     echo ""
@@ -729,17 +730,45 @@ display_node_info() {
     cat "$node_info_file"
     print_sep
     echo ""
-    print_warn "IMPORTANT: Send this file to the Telcoin Association to complete"
-    print_warn "validator registration. Keep the private keys in node-keys/ backed up."
+    print_warn "BACK UP your node-info.yaml and node-keys/ directory now."
+    print_warn "Lost keys cannot be recovered without the passphrase."
     echo ""
-    print_info "Registration steps after sending node-info.yaml:"
-    echo "    1. Telcoin Association mints a ConsensusNFT to your address"
-    echo "    2. You call stake() on the ConsensusRegistry contract"
-    echo "       Contract address: ${CONSENSUS_REGISTRY}"
-    echo "       You will need: your BLS public key and proof of possession (in node-info.yaml)"
-    echo "       Plus the required TEL stake amount"
-    echo "    3. You call activate() to enter the activation queue"
-    echo "    4. You become Active at the next epoch boundary"
+    print_info "Next steps to become an active validator:"
+    echo ""
+    echo "  Step 1: Request Governance Approval"
+    echo "    Submit your ECDSA validator address to the Telcoin Association:"
+    echo "    Address: ${validator_address}"
+    echo "    Governance will verify off-chain and mint a ConsensusNFT to your address."
+    echo ""
+    echo "  Step 2: Verify you have received your ConsensusNFT"
+    echo "    cast call ${CONSENSUS_REGISTRY} \\"
+    echo "      \"balanceOf(address)(uint256)\" \\"
+    echo "      ${validator_address} \\"
+    echo "      --rpc-url <RPC_URL>"
+    echo "    (Returns 1 if whitelisted, 0 if not)"
+    echo ""
+    echo "  Step 3: Check required stake amount"
+    echo "    cast call ${CONSENSUS_REGISTRY} \\"
+    echo "      \"getCurrentStakeConfig()\" \\"
+    echo "      --rpc-url <RPC_URL>"
+    echo ""
+    echo "  Step 4: Submit stake transaction"
+    echo "    Read your BLS public key and proof of possession from node-info.yaml above"
+    echo "    cast send ${CONSENSUS_REGISTRY} \\"
+    echo "      \"stake(bytes,(bytes,bytes))\" \\"
+    echo "      <BLS_PUBKEY_COMPRESSED> \\"
+    echo "      \"(<UNCOMPRESSED_PUBKEY>,<UNCOMPRESSED_SIGNATURE>)\" \\"
+    echo "      --value <STAKE_AMOUNT> \\"
+    echo "      --trezor \\"
+    echo "      --rpc-url <RPC_URL>"
+    echo ""
+    echo "  Step 5: Wait for node to sync, then activate"
+    echo "    cast send ${CONSENSUS_REGISTRY} \\"
+    echo "      \"activate()\" \\"
+    echo "      --trezor \\"
+    echo "      --rpc-url <RPC_URL>"
+    echo ""
+    echo "  Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake"
     echo ""
 }
 
