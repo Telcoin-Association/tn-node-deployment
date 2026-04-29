@@ -420,12 +420,40 @@ These are two different addresses on cloud servers and the script handles both c
 
 ## Wiping and Starting Fresh
 
-To completely remove a node and start over:
-
+**Remove observer node completely:**
 ```bash
 sudo systemctl stop telcoin-observer
 sudo systemctl disable telcoin-observer
 sudo rm -f /etc/systemd/system/telcoin-observer.service
+sudo systemctl daemon-reload
+sudo rm -rf /var/lib/telcoin/observer
+sudo rm -rf /etc/telcoin/observer
+sudo rm -rf /var/log/telcoin
+sudo rm -rf /opt/telcoin
+sudo rm -rf /opt/telcoin-source
+sudo userdel telcoin 2>/dev/null
+```
+
+**Remove validator node completely:**
+```bash
+sudo systemctl stop telcoin-validator
+sudo systemctl disable telcoin-validator
+sudo rm -f /etc/systemd/system/telcoin-validator.service
+sudo systemctl daemon-reload
+sudo rm -rf /var/lib/telcoin/validator
+sudo rm -rf /etc/telcoin/validator
+sudo rm -rf /var/log/telcoin
+sudo rm -rf /opt/telcoin
+sudo rm -rf /opt/telcoin-source
+sudo userdel telcoin 2>/dev/null
+```
+
+**Remove both nodes completely:**
+```bash
+sudo systemctl stop telcoin-observer telcoin-validator 2>/dev/null
+sudo systemctl disable telcoin-observer telcoin-validator 2>/dev/null
+sudo rm -f /etc/systemd/system/telcoin-observer.service
+sudo rm -f /etc/systemd/system/telcoin-validator.service
 sudo systemctl daemon-reload
 sudo rm -rf /var/lib/telcoin
 sudo rm -rf /etc/telcoin
@@ -435,11 +463,18 @@ sudo rm -rf /opt/telcoin-source
 sudo userdel telcoin 2>/dev/null
 ```
 
-To wipe chain data only (keeps keys and config, forces resync):
+**Wipe chain data only — observer (keeps keys and config, forces resync):**
 ```bash
 sudo systemctl stop telcoin-observer
 sudo rm -rf /var/lib/telcoin/observer/db
 sudo systemctl start telcoin-observer
+```
+
+**Wipe chain data only — validator (keeps keys and config, forces resync):**
+```bash
+sudo systemctl stop telcoin-validator
+sudo rm -rf /var/lib/telcoin/validator/db
+sudo systemctl start telcoin-validator
 ```
 
 ---
