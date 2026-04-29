@@ -23,16 +23,18 @@ An observer node syncs the full chain state and serves JSON-RPC queries but does
 
 Best for: developers, exchanges, wallets, dApps, block explorers, or anyone needing a private RPC endpoint.
 
-- RPC port: **8541** (instance 5)
-- P2P port: **30303**
+- RPC port: **8541** (instance 5, default)
+- P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC
 - Metrics port: **9000**
+- No router port forwarding required
 
 ### Validator Node
-A validator node participates in Narwhal/Bullshark consensus, proposes and signs blocks, and earns TEL rewards. Validators on Telcoin Network must be GSMA-approved MNOs with prior approval from the Telcoin Association.
+A validator node participates in Narwhal/Bullshark consensus, proposes and signs blocks, and earns TEL rewards. Validators must be approved by the Telcoin Association governance.
 
-- RPC port: **8545** (instance 1)
-- P2P port: **30303**
+- RPC port: **8545** (instance 1, default)
+- P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC
 - Metrics port: **9000**
+- Requires inbound UDP access on ports 49590 and 49594
 
 ---
 
@@ -248,16 +250,20 @@ For most MNO operators running one or two nodes, `LoadCredential` is the right u
 
 ## Firewall / Router Configuration
 
-The node needs port **30303** open for inbound P2P connections.
+### Observer Nodes
+Observer nodes do **not** require port forwarding. The node makes outbound connections to peers using UDP/QUIC on ports 49590 and 49594.
+
+### Validator Nodes
+Validators need inbound UDP access on ports 49590 and 49594.
 
 **Linux firewall (ufw):**
 ```bash
-sudo ufw allow 30303/tcp
-sudo ufw allow 30303/udp
+sudo ufw allow 49590/udp
+sudo ufw allow 49594/udp
 ```
 
-**Router port forward:**
-Forward TCP/UDP port 30303 from WAN to your server's local IP address.
+**Router port forward (home/bare metal only):**
+Forward UDP ports 49590 and 49594 from WAN to your server's local IP address. Cloud servers handle this via their network configuration.
 
 The RPC port (8541/8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
 
@@ -408,7 +414,7 @@ During setup you will be asked how the node should listen for incoming P2P conne
 
 **IPv6** — recommended for cloud and data centre servers. Binds to all IPv6 interfaces (`::`) and is NAT-free, meaning no router port forward is required.
 
-**IPv4** — for home or bare metal servers. The script will auto-detect your server's internal IP address (e.g. `10.x.x.x` on cloud, `192.168.x.x` on home networks) and ask you to confirm it. You will also need to forward TCP/UDP port 30303 on your router to this server.
+**IPv4** — for home or bare metal servers. The script will auto-detect your server's internal IP address (e.g. `10.x.x.x` on cloud, `192.168.x.x` on home networks) and ask you to confirm it. Validators will also need to forward UDP ports 49590 and 49594 on their router to this server. Observers do not need port forwarding.
 
 **Important distinction for cloud/data centre operators:**
 - **Internal IP** (e.g. `10.70.70.2`) — what the node binds its listener to. Auto-detected by the script via `hostname -I`.
