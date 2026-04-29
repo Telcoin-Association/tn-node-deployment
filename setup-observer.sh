@@ -451,7 +451,7 @@ step_create_service() {
     echo "              NAT-free, no router port forward needed"
     echo ""
     echo "  2) IPv4  -- listen on a specific IPv4 address"
-    echo "              requires TCP/UDP port 30303 forwarded on your router"
+    echo "              requires UDP ports 49590 and 49594 forwarded on your router"
     echo ""
 
     local bind_choice
@@ -470,7 +470,7 @@ step_create_service() {
                 primary_multiaddr="/ip4/${LISTENER_IP}/udp/49590/quic-v1"
                 worker_multiaddr="/ip4/${LISTENER_IP}/udp/49594/quic-v1"
                 print_ok "Binding: IPv4 (${LISTENER_IP})"
-                print_info "Ensure TCP/UDP port 30303 is forwarded to this server on your router."
+                print_info "Ensure UDP ports 49590 and 49594 are forwarded to this server on your router."
                 break
                 ;;
             *)
