@@ -11,6 +11,7 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | `setup-observer.sh` | Full guided setup for an observer node |
 | `setup-validator.sh` | Full guided setup for a validator node |
 | `check-node.sh` | Health check for any running node |
+| `edit-config.sh` | Edit the configuration of a running node |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 
 ---
@@ -73,6 +74,7 @@ scp -r ./telcoin-node-scripts user@YOUR_SERVER_IP:~/
 chmod +x ~/telcoin-node-scripts/setup-observer.sh
 chmod +x ~/telcoin-node-scripts/setup-validator.sh
 chmod +x ~/telcoin-node-scripts/check-node.sh
+chmod +x ~/telcoin-node-scripts/edit-config.sh
 ```
 
 **3. Run the setup**
@@ -82,6 +84,11 @@ sudo bash ~/telcoin-node-scripts/setup-observer.sh
 
 # For a validator node
 sudo bash ~/telcoin-node-scripts/setup-validator.sh
+```
+
+**4. Edit configuration after setup (optional)**
+```bash
+sudo bash ~/telcoin-node-scripts/edit-config.sh
 ```
 
 The script will guide you through every step interactively.
@@ -417,6 +424,13 @@ Store your BLS passphrase separately from the key files — in a password manage
 ---
 
 ## Changelog
+
+### v1.0.5
+- Added `edit-config.sh` — interactive configuration editor for running nodes
+  - Auto-detects validator or observer installation
+  - Displays current config at startup
+  - Edit listener addresses, instance number, metrics, log verbosity, RPC access, BLS passphrase
+  - Reloads systemd and optionally restarts node after each change
 
 ### v1.0.4
 - IPv6/IPv4 binding descriptions updated to neutral wording — no longer implies one is better for a specific environment type
