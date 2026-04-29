@@ -456,6 +456,12 @@ Store your BLS passphrase separately from the key files — in a password manage
 
 ## Changelog
 
+### v1.0.8
+- Observer setup final summary now displays actual P2P listener addresses so operators can see what the node is really binding to
+- Clarified that 127.0.0.1 shown during observer key generation is internal only and not the real listener address
+- Removed port forwarding requirement from observer next steps — observers do not need inbound port forwarding
+- Fixed sync check command in observer summary to use `tn_syncing`
+
 ### v1.0.7
 - Updated hardware requirements to match official docs: 16 cores, 128GB RAM, 4TB NVMe SSD
 - Fixed validator onboarding instructions — operators submit their ECDSA address to governance (not node-info.yaml)

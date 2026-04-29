@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.7"
+readonly SCRIPT_VERSION="1.0.8"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -30,6 +30,8 @@ METRICS_PORT="$DEFAULT_METRICS_PORT"
 ENABLE_PUBLIC_RPC="false"
 TN_SOURCE_DIR="/opt/telcoin-source"
 OBSERVER_ADDRESS=""
+PRIMARY_MULTIADDR=""
+WORKER_MULTIADDR=""
 
 # =============================================================================
 # STEPS
@@ -457,16 +459,16 @@ step_create_service() {
         read -r -p "  Enter choice [1/2]: " bind_choice
         case "$bind_choice" in
             1)
-                local primary_multiaddr="/ip6/::/udp/49590/quic-v1"
-                local worker_multiaddr="/ip6/::/udp/49594/quic-v1"
+                primary_multiaddr="/ip6/::/udp/49590/quic-v1"
+                worker_multiaddr="/ip6/::/udp/49594/quic-v1"
                 print_ok "Binding: IPv6"
                 break
                 ;;
             2)
                 # Detect internal IP for IPv4 binding
                 select_listener_ip
-                local primary_multiaddr="/ip4/${LISTENER_IP}/udp/49590/quic-v1"
-                local worker_multiaddr="/ip4/${LISTENER_IP}/udp/49594/quic-v1"
+                primary_multiaddr="/ip4/${LISTENER_IP}/udp/49590/quic-v1"
+                worker_multiaddr="/ip4/${LISTENER_IP}/udp/49594/quic-v1"
                 print_ok "Binding: IPv4 (${LISTENER_IP})"
                 print_info "Ensure TCP/UDP port 30303 is forwarded to this server on your router."
                 break
@@ -566,6 +568,14 @@ step_final_summary() {
         "Systemd service=${SERVICE_NAME}" \
         "Explorer=${EXPLORER_URL}"
 
+    echo "  P2P Listener addresses (set in systemd service):"
+    echo "    Primary: ${primary_multiaddr}"
+    echo "    Worker:  ${worker_multiaddr}"
+    echo ""
+    print_info "Note: the 127.0.0.1 shown during key generation is internal only."
+    print_info "Your node actually listens on the addresses above."
+    print_info "No router port forwarding is required for observer nodes."
+    echo ""
     echo "  Useful commands:"
     echo ""
     echo "  View logs:"
@@ -573,7 +583,7 @@ step_final_summary() {
     echo ""
     echo "  Check sync status:"
     echo "    curl -s -X POST -H 'Content-Type: application/json' \\"
-    echo "      --data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_syncing\",\"params\":[],\"id\":1}' \\"
+    echo "      --data '{\"jsonrpc\":\"2.0\",\"method\":\"tn_syncing\",\"params\":[],\"id\":1}' \\"
     echo "      http://127.0.0.1:${RPC_PORT}"
     echo ""
     echo "  Stop / restart:"
@@ -583,9 +593,8 @@ step_final_summary() {
     print_sep
     echo ""
     print_info "Next steps:"
-    echo "  1. Allow inbound TCP on port ${P2P_PORT} in your firewall"
-    echo "  2. Wait for the node to finish syncing"
-    echo "  3. Run the health check: bash check-node.sh --observer"
+    echo "  1. Wait for the node to finish syncing"
+    echo "  2. Run the health check: bash check-node.sh --observer"
     echo ""
 }
 
