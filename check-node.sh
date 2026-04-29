@@ -87,7 +87,7 @@ fi
 print_step "Checking sync status..."
 SYNC_RESPONSE=$(curl -s --max-time 5 -X POST \
     -H "Content-Type: application/json" \
-    --data '{"jsonrpc":"2.0","method":"tn_syncing","params":[],"id":1}' \
+    --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
     "$RPC_URL" 2>/dev/null || echo "")
 
 if echo "$SYNC_RESPONSE" | grep -q '"result":false'; then

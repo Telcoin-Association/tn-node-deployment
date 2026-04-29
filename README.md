@@ -314,7 +314,7 @@ cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
 Wait for the node to fully sync. Check sync status:
 ```bash
 curl -X POST -H "Content-Type: application/json" \
-  --data '{"jsonrpc":"2.0","method":"tn_syncing","params":[],"id":1}' \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
   http://localhost:8545
 ```
 
@@ -501,13 +501,13 @@ Store your BLS passphrase separately from the key files — in a password manage
 - Observer setup final summary now displays actual P2P listener addresses so operators can see what the node is really binding to
 - Clarified that 127.0.0.1 shown during observer key generation is internal only and not the real listener address
 - Removed port forwarding requirement from observer next steps — observers do not need inbound port forwarding
-- Fixed sync check command in observer summary to use `tn_syncing`
+- Fixed sync check command in observer summary to use `eth_syncing`
 
 ### v1.0.7
 - Updated hardware requirements to match official docs: 16 cores, 128GB RAM, 4TB NVMe SSD
 - Fixed validator onboarding instructions — operators submit their ECDSA address to governance (not node-info.yaml)
 - Added cast commands to post-key-generation display for staking and activation
-- Updated sync check to use `tn_syncing` RPC method (correct Telcoin Network method)
+- Updated sync check to use `eth_syncing` RPC method (correct Telcoin Network method)
 - Updated Validator Onboarding Flow section in README with official staking guide steps and cast commands
 - Updated OS recommendation to Ubuntu 24.04 LTS
 

@@ -583,7 +583,7 @@ step_final_summary() {
     echo ""
     echo "  Check sync status:"
     echo "    curl -s -X POST -H 'Content-Type: application/json' \\"
-    echo "      --data '{\"jsonrpc\":\"2.0\",\"method\":\"tn_syncing\",\"params\":[],\"id\":1}' \\"
+    echo "      --data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_syncing\",\"params\":[],\"id\":1}' \\"
     echo "      http://127.0.0.1:${RPC_PORT}"
     echo ""
     echo "  Stop / restart:"
