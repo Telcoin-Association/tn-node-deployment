@@ -164,6 +164,7 @@ Each script walks through numbered steps:
 
 After setup, files are organised as follows:
 
+### Observer Node
 ```
 /opt/telcoin/
   telcoin-network              -- the node binary
@@ -188,6 +189,40 @@ After setup, files are organised as follows:
 
 /etc/systemd/system/
   telcoin-observer.service     -- systemd service definition
+
+/home/telcoin/
+  .cache/reth/logs/            -- reth internal log cache
+
+/opt/telcoin-source/           -- cloned GitHub repository
+  chain-configs/               -- official chain config files
+  target/release/              -- compiled binary location (if built from source)
+```
+
+### Validator Node
+```
+/opt/telcoin/
+  telcoin-network              -- the node binary
+
+/var/lib/telcoin/
+  validator/                   -- validator chain data
+    node-keys/                 -- BLS and P2P identity keys (keep backed up)
+    node-info.yaml             -- public node identity (contains BLS public key)
+    genesis/
+      genesis.yaml             -- chain genesis config
+      committee.yaml           -- validator committee config
+    parameters.yaml            -- consensus parameters
+    db/                        -- chain database (grows over time)
+
+/etc/telcoin/
+  validator/
+    bls-passphrase             -- BLS key passphrase (mode 600, root only)
+
+/var/log/telcoin/
+  telcoin-validator.log        -- node output logs
+  telcoin-validator-error.log  -- node error logs
+
+/etc/systemd/system/
+  telcoin-validator.service    -- systemd service definition
 
 /home/telcoin/
   .cache/reth/logs/            -- reth internal log cache
