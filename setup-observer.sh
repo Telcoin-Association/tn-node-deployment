@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.8"
+readonly SCRIPT_VERSION="1.0.9"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -45,7 +45,13 @@ step_welcome() {
     echo "     ██║   █████╗  ██║     ██║     ██║   ██║██║██╔██╗ ██║"
     echo "     ██║   ██╔══╝  ██║     ██║     ██║   ██║██║██║╚██╗██║"
     echo "     ██║   ███████╗███████╗╚██████╗╚██████╔╝██║██║ ╚████║"
-    echo "     ╚═╝   ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝${RESET}"
+    echo "     ╚═╝   ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝"
+    echo "  ███╗   ██╗███████╗████████╗██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗"
+    echo "  ████╗  ██║██╔════╝╚══██╔══╝██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝"
+    echo "  ██╔██╗ ██║█████╗     ██║   ██║ █╗ ██║██║   ██║██████╔╝█████╔╝ "
+    echo "  ██║╚██╗██║██╔══╝     ██║   ██║███╗██║██║   ██║██╔══██╗██╔═██╗ "
+    echo "  ██║ ╚████║███████╗   ██║   ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗"
+    echo "  ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝${RESET}"
     echo ""
     echo "  ${BOLD}Telcoin Network -- Observer Node Setup  v${SCRIPT_VERSION}${RESET}"
     echo ""
@@ -72,7 +78,7 @@ step_preflight() {
     print_header "Step 1 of 7: Pre-flight Checks"
     check_root
     detect_distro
-    check_hardware
+    check_hardware "observer"
     check_internet
     check_ports "$P2P_PORT" "$RPC_PORT" "$METRICS_PORT"
 

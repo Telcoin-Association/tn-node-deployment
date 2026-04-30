@@ -29,7 +29,7 @@ Best for: developers, exchanges, wallets, dApps, block explorers, or anyone need
 - No router port forwarding required
 
 ### Validator Node
-A validator node participates in Narwhal/Bullshark consensus, proposes and signs blocks, and earns TEL rewards. Validators must be approved by the Telcoin Association governance.
+A validator node participates in Narwhal/Bullshark consensus, proposes and signs blocks, and earns TEL rewards. Validator nodes may only be operated by GSMA-approved MNOs with prior approval from the Telcoin Association.
 
 - RPC port: **8545** (instance 1, default)
 - P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC
@@ -40,21 +40,45 @@ A validator node participates in Narwhal/Bullshark consensus, proposes and signs
 
 ## Requirements
 
-### Hardware (minimum)
-- CPU: 16 cores / 32 threads, x86-64 (recommended: 32 cores, higher clock speed)
-- RAM: 128GB DDR4/DDR5 ECC RDIMM
-- Disk: 4TB TLC NVMe SSD (recommended: 7.5TB)
-- OS: Ubuntu 24.04 LTS (x86-64) recommended
-- Static public IP address
-- Open UDP ports for P2P communication (default: 49590, 49594)
-- Reliable, low-latency internet connection
+### Validator Node Hardware
+
+> Validators must be GSMA-approved MNOs. Submit hardware specifications to grant@telcoin.org for approval **before** installation.
+
+| Component | Minimum | Recommended |
+|---|---|---|
+| CPU | 16 cores / 32 threads, x86-64 | 32 cores, higher clock speed |
+| CPU Benchmark | 4000+ PassMark Single Thread | — |
+| RAM | 128GB DDR4/DDR5 ECC RDIMM | 128GB+ highest MT/s |
+| Storage | 4TB TLC NVMe SSD | 7.5TB TLC NVMe SSD |
+| Network | 1Gbps sustained, 1GbE interface | 10GbE interface |
+
+### Observer Node Hardware
+
+| Component | Minimum | Recommended |
+|---|---|---|
+| CPU | 8 cores / 16 threads, x86/x64/ARM64 | Higher clock speed over core count |
+| RAM | 16GB DDR4 ECC | 32GB DDR4 ECC |
+| Storage | 500GB TLC NVMe SSD | 2TB TLC NVMe SSD (expandable) |
+| Network | 24Mbps+ stable | — |
+
+> Storage note: TLC NVMe drives are specifically required over QLC. TLC supports 1,000-3,000 P/E cycles vs 100-1,000 for QLC, making TLC significantly more durable for continuous blockchain write operations.
+
+### Supported Operating Systems
+
+- Ubuntu 20.04+ LTS
+- Debian 11+
+- Red Hat Enterprise Linux (RHEL) 8+
+- Kernel version 3.10+ minimum
+- macOS Sequoia 15+ (observer nodes only)
 
 ### Software
 The scripts will install or check for everything needed. You do not need to install anything manually beforehand.
 
 ### For Validators Only
-- Prior approval from the Telcoin Association
-- A registered Ethereum address that holds a ConsensusNFT
+- GSMA MNO status — only GSMA-approved MNOs may operate validator nodes
+- Hardware approval from the Telcoin Association — email grant@telcoin.org before purchasing equipment
+- Prior governance approval from the Telcoin Association
+- A registered Ethereum address for receiving TEL rewards
 
 ---
 
@@ -496,6 +520,18 @@ Store your BLS passphrase separately from the key files — in a password manage
 ---
 
 ## Changelog
+
+### v1.0.9
+- Split hardware requirements into separate validator and observer specs based on official Telcoin Association documentation
+- Observer requirements updated: 8 cores, 16GB RAM, 500GB SSD (much more modest than validator)
+- Validator requirements confirmed: 16 cores, 128GB RAM, 4TB NVMe SSD
+- Hardware check in scripts now uses node-type specific thresholds
+- Added GSMA MNO requirement back to validator node type description and welcome screen
+- Added pre-installation contact requirement: operators must email grant@telcoin.org before installing validator nodes
+- Broadened supported OS list: Ubuntu 20.04+, Debian 11+, RHEL 8+, macOS (observer only)
+- Added TLC vs QLC storage explanation to README
+- Added network requirements: 1Gbps for validators, 24Mbps for observers
+- Reverted tn_syncing to eth_syncing — tn_syncing not supported on current node binary
 
 ### v1.0.8
 - Observer setup final summary now displays actual P2P listener addresses so operators can see what the node is really binding to

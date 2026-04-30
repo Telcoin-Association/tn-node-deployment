@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.8"
+readonly SCRIPT_VERSION="1.0.9"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -44,7 +44,13 @@ step_welcome() {
     echo "     ██║   █████╗  ██║     ██║     ██║   ██║██║██╔██╗ ██║"
     echo "     ██║   ██╔══╝  ██║     ██║     ██║   ██║██║██║╚██╗██║"
     echo "     ██║   ███████╗███████╗╚██████╗╚██████╔╝██║██║ ╚████║"
-    echo "     ╚═╝   ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝${RESET}"
+    echo "     ╚═╝   ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝"
+    echo "  ███╗   ██╗███████╗████████╗██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗"
+    echo "  ████╗  ██║██╔════╝╚══██╔══╝██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝"
+    echo "  ██╔██╗ ██║█████╗     ██║   ██║ █╗ ██║██║   ██║██████╔╝█████╔╝ "
+    echo "  ██║╚██╗██║██╔══╝     ██║   ██║███╗██║██║   ██║██╔══██╗██╔═██╗ "
+    echo "  ██║ ╚████║███████╗   ██║   ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗"
+    echo "  ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝${RESET}"
     echo ""
     echo "  ${BOLD}Telcoin Network -- Validator Node Setup  v${SCRIPT_VERSION}${RESET}"
     echo ""
@@ -52,9 +58,14 @@ step_welcome() {
     echo ""
     print_info "This script will set up a VALIDATOR node on the Telcoin Network."
     print_info "Prerequisites:"
+    echo "    * GSMA MNO operators only -- validators must be GSMA-approved MNOs"
     echo "    * You have received validator approval from the Telcoin Association"
-    echo "    * You have a dedicated server with a static IP address"
+    echo "    * You have submitted hardware specs to grant@telcoin.org for approval"
+    echo "    * You have a dedicated server meeting the minimum hardware requirements"
     echo "    * You are running this script as root (sudo)"
+    echo ""
+    print_warn "If you have not yet submitted your hardware specifications for approval"
+    print_warn "please contact grant@telcoin.org before proceeding."
     echo ""
     print_sep
     echo ""
@@ -69,7 +80,7 @@ step_preflight() {
     print_header "Step 1 of 8: Pre-flight Checks"
     check_root
     detect_distro
-    check_hardware
+    check_hardware "validator"
     check_internet
     check_ports "$P2P_PORT" "$RPC_PORT" "$METRICS_PORT"
 

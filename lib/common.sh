@@ -23,9 +23,15 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
 
-readonly MIN_RAM_GB=128
-readonly MIN_DISK_GB=4000
-readonly MIN_CPU_CORES=16
+# Validator node hardware requirements (official Telcoin Association specs)
+readonly VALIDATOR_MIN_RAM_GB=128
+readonly VALIDATOR_MIN_DISK_GB=4000
+readonly VALIDATOR_MIN_CPU_CORES=16
+
+# Observer node hardware requirements (official Telcoin Association specs)
+readonly OBSERVER_MIN_RAM_GB=16
+readonly OBSERVER_MIN_DISK_GB=500
+readonly OBSERVER_MIN_CPU_CORES=8
 
 readonly DEFAULT_INSTALL_DIR="/opt/telcoin"
 readonly DEFAULT_DATA_DIR="/var/lib/telcoin"
@@ -163,29 +169,42 @@ command_exists() {
 }
 
 check_hardware() {
-    print_step "Checking hardware requirements..."
+    local node_type="${1:-validator}"
+    print_step "Checking hardware requirements for ${node_type} node..."
+
+    # Select thresholds based on node type
+    local min_ram min_disk min_cpu
+    if [[ "$node_type" == "observer" ]]; then
+        min_ram=$OBSERVER_MIN_RAM_GB
+        min_disk=$OBSERVER_MIN_DISK_GB
+        min_cpu=$OBSERVER_MIN_CPU_CORES
+    else
+        min_ram=$VALIDATOR_MIN_RAM_GB
+        min_disk=$VALIDATOR_MIN_DISK_GB
+        min_cpu=$VALIDATOR_MIN_CPU_CORES
+    fi
 
     local ram_kb ram_gb
     ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     ram_gb=$(( ram_kb / 1024 / 1024 ))
-    if [[ $ram_gb -lt $MIN_RAM_GB ]]; then
-        print_warn "RAM: ${ram_gb}GB detected, ${MIN_RAM_GB}GB recommended."
+    if [[ $ram_gb -lt $min_ram ]]; then
+        print_warn "RAM: ${ram_gb}GB detected, ${min_ram}GB recommended."
     else
         print_ok "RAM: ${ram_gb}GB"
     fi
 
     local cpu_cores
     cpu_cores=$(nproc)
-    if [[ $cpu_cores -lt $MIN_CPU_CORES ]]; then
-        print_warn "CPU cores: ${cpu_cores} detected, ${MIN_CPU_CORES} recommended."
+    if [[ $cpu_cores -lt $min_cpu ]]; then
+        print_warn "CPU cores: ${cpu_cores} detected, ${min_cpu} recommended."
     else
         print_ok "CPU cores: ${cpu_cores}"
     fi
 
     local disk_avail_gb
     disk_avail_gb=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
-    if [[ $disk_avail_gb -lt $MIN_DISK_GB ]]; then
-        print_warn "Disk: ${disk_avail_gb}GB available, ${MIN_DISK_GB}GB recommended."
+    if [[ $disk_avail_gb -lt $min_disk ]]; then
+        print_warn "Disk: ${disk_avail_gb}GB available, ${min_disk}GB recommended."
     else
         print_ok "Disk: ${disk_avail_gb}GB available"
     fi
