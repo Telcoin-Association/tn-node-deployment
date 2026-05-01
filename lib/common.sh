@@ -143,6 +143,45 @@ detect_distro() {
     print_ok "OS: ${DISTRO} ${DISTRO_VERSION} (package manager: ${PKG_MANAGER})"
 }
 
+check_cve_2026_31431() {
+    print_step "Checking CVE-2026-31431 (Copy Fail) mitigation..."
+
+    local is_loaded is_blocked
+
+    # Check if module is currently loaded
+    if grep -qE '^algif_aead ' /proc/modules 2>/dev/null; then
+        is_loaded="yes"
+    else
+        is_loaded="no"
+    fi
+
+    # Check if module is blocked in modprobe config
+    if modprobe --showconfig 2>/dev/null | grep -q "install algif_aead /bin/false"; then
+        is_blocked="yes"
+    else
+        is_blocked="no"
+    fi
+
+    if [[ "$is_loaded" == "yes" ]] || [[ "$is_blocked" == "no" ]]; then
+        echo ""
+        print_error "CVE-2026-31431 (Copy Fail) -- setup cannot continue"
+        print_error "The algif_aead kernel module is not mitigated on this system."
+        echo ""
+        print_info "This is a HIGH severity local privilege escalation vulnerability"
+        print_info "affecting all Linux kernels since 2017. Any local user can"
+        print_info "escalate to root privileges."
+        echo ""
+        print_info "Please review and apply the mitigation before proceeding:"
+        print_info "  https://copy.fail"
+        echo ""
+        print_info "Once mitigated, re-run this script."
+        echo ""
+        exit 1
+    fi
+
+    print_ok "CVE-2026-31431 mitigated -- algif_aead is blocked"
+}
+
 install_package() {
     local pkg="$1"
     print_info "Installing ${pkg}..."

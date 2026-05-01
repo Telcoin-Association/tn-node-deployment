@@ -243,6 +243,24 @@ The scripts follow Linux security best practices:
 - **Passphrase never logged** — the BLS passphrase is passed via environment variable, never on the command line where it would appear in process lists.
 - **Systemd hardening** — the service uses `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem=strict` to limit what the process can do.
 - **RPC localhost only** — the RPC port defaults to 127.0.0.1 (localhost only). It is never exposed to the internet by default.
+- **CVE-2026-31431 check** — the setup scripts check for the Copy Fail mitigation during preflight and will not proceed until it is applied.
+
+### CVE-2026-31431 (Copy Fail)
+
+A HIGH severity local privilege escalation vulnerability affecting all Linux kernels since 2017. A 732-byte Python script using only standard library modules can give any unprivileged local user a root shell — no race conditions, no kernel-specific offsets, 100% reliable.
+
+The setup scripts detect whether the `algif_aead` kernel module is loaded or unblocked. If the mitigation has not been applied, the script stops and directs the operator to apply it before proceeding.
+
+**Details and mitigation:** https://copy.fail
+
+To apply the mitigation manually:
+```bash
+# Check current state
+modprobe --showconfig | grep -q "install algif_aead /bin/false" && echo "BLOCKED" || echo "NOT BLOCKED"
+grep -qE '^algif_aead ' /proc/modules && echo "LOADED" || echo "NOT LOADED"
+```
+
+See https://copy.fail for the official mitigation steps.
 
 ---
 
@@ -569,6 +587,12 @@ Store your BLS passphrase separately from the key files — in a password manage
 ---
 
 ## Changelog
+
+### v1.1.1
+- Added CVE-2026-31431 (Copy Fail) security check to preflight in both setup scripts
+- Setup will not proceed if `algif_aead` kernel module is loaded or not blocked
+- Operators are directed to https://copy.fail to apply the mitigation before re-running
+- Added CVE-2026-31431 section to README Security Design with details and manual check commands
 
 ### v1.1.0
 - Added custom service user and group selection in Step 5 of both setup scripts — operators can name the service user and group (defaults: `telcoin`/`telcoin`)
