@@ -416,6 +416,9 @@ bash ~/telcoin-node-scripts/check-node.sh --observer
 # Check validator node
 bash ~/telcoin-node-scripts/check-node.sh
 
+# Check validator with on-chain status
+bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
+
 # Custom service or RPC endpoint
 bash ~/telcoin-node-scripts/check-node.sh --service telcoin-observer --rpc http://127.0.0.1:8541
 ```
@@ -423,11 +426,22 @@ bash ~/telcoin-node-scripts/check-node.sh --service telcoin-observer --rpc http:
 The health check verifies:
 - Systemd service is running
 - RPC endpoint is responding
-- Sync status
-- Latest block number
-- Peer count
+- Sync status and latest block number
+- Peer connectivity (see note below)
 - Disk space
 - Memory usage
+- Validator on-chain status (when `--address` flag is provided)
+
+### Peer Count Note
+
+Telcoin Network uses a libp2p-based P2P architecture (Narwhal/Bullshark) that differs from standard Ethereum peer counting. The `net_peerCount` RPC method returns **consensus peers only** — the number of committee validators the node is actively participating with. For observer nodes this will always be 0, which is correct and expected.
+
+The health check reads peer data directly from the node log file to provide more meaningful information:
+
+- **Consensus peers** — from `peer metrics heartbeat` log entries. Always 0 for observers (expected). Should be > 0 for active validators.
+- **P2P connections (last 5 min)** — count of `new connection established` log entries in the last 5 minutes. Indicates active network connectivity.
+
+Once the Prometheus metrics endpoint (port 9000) is functional in a future binary release, the health check will be updated to use it for more accurate real-time peer data.
 
 ---
 
@@ -555,6 +569,19 @@ Store your BLS passphrase separately from the key files — in a password manage
 ---
 
 ## Changelog
+
+### v1.1.0
+- Added custom service user and group selection in Step 5 of both setup scripts — operators can name the service user and group (defaults: `telcoin`/`telcoin`)
+- Group is created first if it doesn't exist, user is added to the group
+- All directory ownership and systemd service file updated to use `SERVICE_GROUP`
+- Improved peer count in health check — reads directly from node log file instead of unreliable `net_peerCount` RPC
+  - Shows consensus peers from `peer metrics heartbeat` log entries
+  - Shows P2P connections in last 5 minutes from `new connection established` log entries
+  - Observer nodes correctly show consensus peers = 0 (expected, not an error)
+  - Validator nodes warn if consensus peers = 0 when active
+- Improved sync status messaging — cross-references block number, warns if synced but at block 0
+- Added `--address` flag example to README health check section
+- Added Peer Count Note section to README explaining the current approach and future metrics endpoint plan
 
 ### v1.0.9
 - Split hardware requirements into separate validator and observer specs based on official Telcoin Association documentation

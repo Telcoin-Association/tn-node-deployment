@@ -90,8 +90,26 @@ SYNC_RESPONSE=$(curl -s --max-time 5 -X POST \
     --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
     "$RPC_URL" 2>/dev/null || echo "")
 
+# --- Block number ---
+print_step "Checking latest block..."
+BLOCK_RESPONSE=$(curl -s --max-time 5 -X POST \
+    -H "Content-Type: application/json" \
+    --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+    "$RPC_URL" 2>/dev/null || echo "")
+
+BLOCK_NUM=0
+if echo "$BLOCK_RESPONSE" | grep -q '"result"'; then
+    BLOCK_HEX=$(echo "$BLOCK_RESPONSE" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
+    BLOCK_NUM=$(( 16#${BLOCK_HEX#0x} ))
+fi
+
 if echo "$SYNC_RESPONSE" | grep -q '"result":false'; then
-    print_ok "Node is fully synced"
+    if [[ $BLOCK_NUM -eq 0 ]]; then
+        print_warn "Node reports synced but is at block 0 -- may still be catching up"
+        print_info "This is expected on Adiri testnet until state sync PRs are merged"
+    else
+        print_ok "Node is synced at block ${BLOCK_NUM}"
+    fi
 elif echo "$SYNC_RESPONSE" | grep -q '"currentBlock"'; then
     CURRENT_HEX=$(echo "$SYNC_RESPONSE" | grep -o '"currentBlock":"[^"]*"' | cut -d'"' -f4)
     HIGHEST_HEX=$(echo "$SYNC_RESPONSE" | grep -o '"highestBlock":"[^"]*"' | cut -d'"' -f4)
@@ -102,41 +120,56 @@ else
     print_warn "Could not determine sync status."
 fi
 
-# --- Block number ---
-print_step "Checking latest block..."
-BLOCK_RESPONSE=$(curl -s --max-time 5 -X POST \
-    -H "Content-Type: application/json" \
-    --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-    "$RPC_URL" 2>/dev/null || echo "")
-
-if echo "$BLOCK_RESPONSE" | grep -q '"result"'; then
-    BLOCK_HEX=$(echo "$BLOCK_RESPONSE" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
-    BLOCK_NUM=$(( 16#${BLOCK_HEX#0x} ))
+if [[ $BLOCK_NUM -gt 0 ]]; then
     print_ok "Latest block: ${BLOCK_NUM}"
 else
-    print_warn "Could not retrieve block number."
+    print_info "Latest block: 0"
 fi
 
 # --- Peer count ---
 print_step "Checking peers..."
-PEER_RESPONSE=$(curl -s --max-time 5 -X POST \
-    -H "Content-Type: application/json" \
-    --data '{"jsonrpc":"2.0","method":"net_peerCount","params":[],"id":1}' \
-    "$RPC_URL" 2>/dev/null || echo "")
 
-if echo "$PEER_RESPONSE" | grep -q '"result"'; then
-    PEER_HEX=$(echo "$PEER_RESPONSE" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
-    PEER_COUNT=$(( 16#${PEER_HEX#0x} ))
-    if [[ $PEER_COUNT -eq 0 ]]; then
-        print_warn "No peers connected. Check your firewall and P2P port."
-        (( HEALTH_ISSUES++ ))
-    elif [[ $PEER_COUNT -lt 3 ]]; then
-        print_warn "Only ${PEER_COUNT} peer(s) connected."
-    else
-        print_ok "Connected to ${PEER_COUNT} peers"
+# Determine log file based on service name
+LOG_FILE="/var/log/telcoin/${SERVICE_NAME}.log"
+
+# Get consensus peer count from log heartbeat
+CONSENSUS_PEERS=""
+if [[ -f "$LOG_FILE" ]]; then
+    CONSENSUS_PEERS=$(sudo grep "peer metrics heartbeat" "$LOG_FILE" 2>/dev/null | \
+        tail -1 | grep -o "connected_count=[0-9]*" | cut -d= -f2)
+fi
+
+# Get P2P connections in last 5 minutes from log file
+P2P_RECENT=0
+if [[ -f "$LOG_FILE" ]]; then
+    FIVE_MIN_AGO=$(date -u '+%Y-%m-%dT%H:%M' --date='5 minutes ago' 2>/dev/null | cut -c1-15)
+    if [[ -n "$FIVE_MIN_AGO" ]]; then
+        P2P_RECENT=$(sudo grep "new connection established" "$LOG_FILE" 2>/dev/null | \
+            grep -c "$FIVE_MIN_AGO" || echo "0")
     fi
+fi
+
+if [[ "$IS_OBSERVER" == "true" ]]; then
+    print_info "Consensus peers: ${CONSENSUS_PEERS:-0} (expected 0 for observer nodes)"
+    print_info "P2P connections (last 5 min): ${P2P_RECENT}"
+    if [[ ${P2P_RECENT} -gt 0 ]]; then
+        print_ok "P2P activity confirms network connectivity"
+    else
+        print_info "No new P2P connections in last 5 min -- node may be between connection cycles"
+    fi
+    print_info "Note: net_peerCount via RPC reflects consensus peers only."
+    print_info "      Peer data is read from log file: ${LOG_FILE}"
 else
-    print_warn "Could not retrieve peer count."
+    # Validator -- consensus peers should be > 0 when active
+    if [[ -n "$CONSENSUS_PEERS" ]] && [[ $CONSENSUS_PEERS -gt 0 ]]; then
+        print_ok "Consensus peers: ${CONSENSUS_PEERS}"
+    elif [[ -n "$CONSENSUS_PEERS" ]]; then
+        print_warn "Consensus peers: 0 -- validator may not yet be active in committee"
+    else
+        print_warn "Could not read peer count from log file"
+    fi
+    print_info "P2P connections (last 5 min): ${P2P_RECENT}"
+    print_info "Note: Peer data is read from log file: ${LOG_FILE}"
 fi
 
 # --- Disk space ---

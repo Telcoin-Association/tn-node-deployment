@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.9"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -260,13 +260,22 @@ _use_existing_binary() {
 
 step_create_infrastructure() {
     print_header "Step 5 of 7: Creating System Infrastructure"
+
+    echo "  The node runs as a dedicated system user for security."
+    echo "  Press Enter to accept defaults."
+    echo ""
+    local input
+    read -r -p "  Service user name  [${SERVICE_USER}]: "  input; SERVICE_USER="${input:-$SERVICE_USER}"
+    read -r -p "  Service group name [${SERVICE_GROUP}]: " input; SERVICE_GROUP="${input:-$SERVICE_GROUP}"
+    echo ""
+
     create_service_user
 
     # The telcoin-network binary (built on reth) writes internal logs to
     # ~/.cache/reth/logs/ — we need to create this for the service user
     print_step "Creating reth cache directory..."
     mkdir -p "/home/${SERVICE_USER}/.cache/reth/logs/telcoin-network-logs"
-    chown -R "${SERVICE_USER}:${SERVICE_USER}" "/home/${SERVICE_USER}"
+    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "/home/${SERVICE_USER}"
     print_ok "Reth cache directory created"
 
     create_directories "$INSTALL_DIR" "$DATA_DIR" "$LOG_DIR" "$CONFIG_DIR"

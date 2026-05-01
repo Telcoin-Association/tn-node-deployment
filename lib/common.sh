@@ -38,7 +38,8 @@ readonly DEFAULT_INSTALL_DIR="/opt/telcoin"
 readonly DEFAULT_DATA_DIR="/var/lib/telcoin"
 readonly DEFAULT_LOG_DIR="/var/log/telcoin"
 readonly DEFAULT_CONFIG_DIR="/etc/telcoin"
-readonly SERVICE_USER="telcoin"
+SERVICE_USER="telcoin"
+SERVICE_GROUP="telcoin"
 
 readonly TN_REPO="https://github.com/Telcoin-Association/telcoin-network.git"
 readonly MIN_RUST_VERSION="1.75.0"
@@ -348,13 +349,26 @@ check_peer_count() {
 # -----------------------------------------------------------------------------
 
 create_service_user() {
+    # Create group first if it doesn't exist
+    print_step "Creating service group: ${SERVICE_GROUP}..."
+    if getent group "$SERVICE_GROUP" &>/dev/null; then
+        print_ok "Group '${SERVICE_GROUP}' already exists"
+    else
+        groupadd --system "$SERVICE_GROUP"
+        print_ok "Created system group '${SERVICE_GROUP}'"
+    fi
+
+    # Create user if it doesn't exist
     print_step "Creating service user: ${SERVICE_USER}..."
     if id "$SERVICE_USER" &>/dev/null; then
         print_ok "User '${SERVICE_USER}' already exists"
+        # Ensure user is in the correct group
+        usermod -aG "$SERVICE_GROUP" "$SERVICE_USER" 2>/dev/null || true
     else
         useradd --system --no-create-home --shell /bin/false \
+                --gid "$SERVICE_GROUP" \
                 --comment "Telcoin Network node service account" "$SERVICE_USER"
-        print_ok "Created system user '${SERVICE_USER}'"
+        print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
     fi
 }
 
@@ -366,7 +380,7 @@ create_directories() {
     print_step "Creating directory structure..."
     for dir in "$install_dir" "$data_dir" "$log_dir" "$config_dir"; do
         mkdir -p "$dir"
-        chown -R "${SERVICE_USER}:${SERVICE_USER}" "$dir"
+        chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$dir"
         print_ok "Created: ${dir}"
     done
 }
@@ -500,7 +514,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=${SERVICE_USER}
-Group=${SERVICE_USER}
+Group=${SERVICE_GROUP}
 ExecStart=${exec_start}
 Restart=on-failure
 RestartSec=10
