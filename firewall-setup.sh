@@ -40,7 +40,8 @@ ufw_installed() {
 }
 
 get_current_ip() {
-    echo "${SSH_CLIENT%% *}" 2>/dev/null || echo ""
+    local ssh_client="${SSH_CLIENT:-}"
+    echo "${ssh_client%% *}"
 }
 
 detect_installed_nodes() {
