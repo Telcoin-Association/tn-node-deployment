@@ -12,6 +12,7 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | `setup-validator.sh` | Full guided setup for a validator node |
 | `check-node.sh` | Health check for any running node |
 | `edit-config.sh` | Edit the configuration of a running node |
+| `firewall-setup.sh` | Interactive firewall management and hardening |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 
 ---
@@ -102,6 +103,7 @@ chmod +x ~/telcoin-node-scripts/setup-observer.sh
 chmod +x ~/telcoin-node-scripts/setup-validator.sh
 chmod +x ~/telcoin-node-scripts/check-node.sh
 chmod +x ~/telcoin-node-scripts/edit-config.sh
+chmod +x ~/telcoin-node-scripts/firewall-setup.sh
 ```
 
 **3. Run the setup**
@@ -113,7 +115,12 @@ sudo bash ~/telcoin-node-scripts/setup-observer.sh
 sudo bash ~/telcoin-node-scripts/setup-validator.sh
 ```
 
-**4. Edit configuration after setup (optional)**
+**4. Harden your firewall (recommended)**
+```bash
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh
+```
+
+**5. Edit configuration after setup (optional)**
 ```bash
 sudo bash ~/telcoin-node-scripts/edit-config.sh
 ```
@@ -463,7 +470,40 @@ Once the Prometheus metrics endpoint (port 9000) is functional in a future binar
 
 ---
 
-## Common Commands
+## Firewall Setup
+
+After setting up your node, run the firewall setup script to harden your server. This script can be run at any time — both to apply changes and to view the current state of your firewall.
+
+```bash
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh
+```
+
+The script is menu-driven and interactive. It never makes changes without explicit confirmation.
+
+### What it covers
+
+**View current status** — run this at any time to get a full overview of your firewall state, SSH configuration, open ports, and any security warnings. No changes are made.
+
+**Enable firewall with recommended defaults** — sets default deny inbound, allow outbound, and keeps SSH accessible. Always do this before restricting SSH access.
+
+**Manage SSH access** — disable password authentication (keys only), disable root login, change SSH port. Each option shows the current state and warns clearly before making any changes.
+
+**Manage node ports** — automatically detects whether validator or observer is installed and applies the correct rules. Validators need UDP 49590/49594 open inbound. Observers need no inbound ports. Optionally opens port 443 for public RPC via nginx.
+
+**Manage trusted IP whitelist** — add or remove specific IP addresses or CIDR ranges that are allowed SSH access. Shows your current session IP so you don't accidentally lock yourself out.
+
+### Important warnings
+
+- **Test SSH in a new terminal** before closing your current session after making any changes
+- **Whitelist your IP first** before enabling default deny or restricting SSH
+- **Validators only** need inbound ports 49590/49594 — observer nodes need no inbound ports at all
+- Never open the RPC port (8541/8545) directly to the internet — use nginx on port 443 instead
+
+### When to run it
+
+Run `firewall-setup.sh` after completing node setup and before going live. For production validator nodes this is strongly recommended. For home/testing setups it is optional but good practice.
+
+---
 
 ```bash
 # Start / stop / restart
