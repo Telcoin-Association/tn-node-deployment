@@ -25,6 +25,7 @@ CONFIG_DIR="$DEFAULT_CONFIG_DIR/observer"
 LOG_DIR="$DEFAULT_LOG_DIR"
 INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 P2P_PORT="$DEFAULT_P2P_PORT"
+WORKER_PORT="$DEFAULT_WORKER_PORT"
 RPC_PORT="8541"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
 ENABLE_PUBLIC_RPC="false"
@@ -80,7 +81,7 @@ step_preflight() {
     detect_distro
     check_hardware "observer"
     check_internet
-    check_ports "$P2P_PORT" "$RPC_PORT" "$METRICS_PORT"
+    check_ports "$P2P_PORT" "$WORKER_PORT" "$RPC_PORT" "$METRICS_PORT"
 
     for tool in curl git; do
         if command_exists "$tool"; then

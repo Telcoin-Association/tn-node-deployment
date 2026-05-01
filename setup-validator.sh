@@ -28,6 +28,7 @@ VALIDATOR_ADDRESS=""
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
 P2P_PORT="$DEFAULT_P2P_PORT"
+WORKER_PORT="$DEFAULT_WORKER_PORT"
 RPC_PORT="$DEFAULT_RPC_PORT"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
 TN_SOURCE_DIR="/opt/telcoin-source"
@@ -82,7 +83,7 @@ step_preflight() {
     detect_distro
     check_hardware "validator"
     check_internet
-    check_ports "$P2P_PORT" "$RPC_PORT" "$METRICS_PORT"
+    check_ports "$P2P_PORT" "$WORKER_PORT" "$RPC_PORT" "$METRICS_PORT"
 
     for tool in curl git; do
         if command_exists "$tool"; then

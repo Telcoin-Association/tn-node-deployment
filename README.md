@@ -24,9 +24,9 @@ An observer node syncs the full chain state and serves JSON-RPC queries but does
 Best for: developers, exchanges, wallets, dApps, block explorers, or anyone needing a private RPC endpoint.
 
 - RPC port: **8541** (instance 5, default)
-- P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC
+- P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC, outbound only
 - Metrics port: **9000**
-- No router port forwarding required
+- No firewall or router port forwarding required
 
 ### Validator Node
 A validator node participates in Narwhal/Bullshark consensus, proposes and signs blocks, and earns TEL rewards. Validator nodes may only be operated by GSMA-approved MNOs with prior approval from the Telcoin Association.

@@ -20,6 +20,7 @@ readonly MAINNET_RPC_URL="https://rpc.telcoin.network"
 readonly MAINNET_EXPLORER="https://scan.telcoin.network"
 
 readonly DEFAULT_P2P_PORT="49590"
+readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
 
