@@ -473,7 +473,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=${SERVICE_USER}
-Group=${SERVICE_USER}
+Group=${SERVICE_GROUP}
 Environment="TN_BLS_PASSPHRASE=${bls_pass}"
 Environment="PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}"
 Environment="WORKER_LISTENER_MULTIADDR=${worker_multiaddr}"
