@@ -155,8 +155,11 @@ check_cve_2026_31431() {
         is_loaded="no"
     fi
 
-    # Check if module is blocked in modprobe config
-    if modprobe --showconfig 2>/dev/null | grep -q "install algif_aead /bin/false"; then
+    # Check if module is blocked -- search all modprobe config files directly
+    if grep -rq "install algif_aead /bin/false" \
+        /etc/modprobe.d/ \
+        /lib/modprobe.d/ \
+        /run/modprobe.d/ 2>/dev/null; then
         is_blocked="yes"
     else
         is_blocked="no"
