@@ -138,7 +138,7 @@ Each script walks through numbered steps:
 - Asks how to obtain the binary (build from source, pre-built, Docker, or existing)
 
 **Step 5: System Infrastructure**
-- Creates a dedicated `telcoin` system user (no login shell, for security)
+- Creates a dedicated system user and group for the node service (default: `telcoin`/`telcoin`, customisable during setup). The user has no login shell for security.
 - Creates all required directories under `/opt/telcoin`, `/var/lib/telcoin`, `/etc/telcoin`, `/var/log/telcoin`
 - Creates the reth internal log cache directory
 - Clones the Telcoin Network repository if not already present (for chain-config files)
@@ -238,7 +238,7 @@ After setup, files are organised as follows:
 
 The scripts follow Linux security best practices:
 
-- **Dedicated service user** — the node runs as a `telcoin` system user with no login shell and no sudo access. If the process is compromised it cannot access your other files or accounts.
+- **Dedicated service user** — the node runs as a dedicated system user (default: `telcoin`) with no login shell and no sudo access. The user and group name can be customised during setup. If the process is compromised it cannot access your other files or accounts.
 - **Strict file permissions** — key files are mode 600 (readable only by owner). The node-keys directory is mode 700.
 - **Passphrase never logged** — the BLS passphrase is passed via environment variable, never on the command line where it would appear in process lists.
 - **Systemd hardening** — the service uses `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem=strict` to limit what the process can do.
