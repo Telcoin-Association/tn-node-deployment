@@ -337,12 +337,12 @@ step_generate_keys() {
     unset TN_BLS_PASSPHRASE
 
     # Fix ownership so the telcoin service user can read the keys at runtime
-    chown -R "${SERVICE_USER}:${SERVICE_USER}" "$DATA_DIR"
+    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$DATA_DIR"
 
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
     echo "$bls_passphrase" > "$passphrase_file"
     chmod 600 "$passphrase_file"
-    chown "${SERVICE_USER}:${SERVICE_USER}" "$passphrase_file"
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "$passphrase_file"
     print_ok "Passphrase stored (mode 600): ${passphrase_file}"
 
     bls_passphrase=""
@@ -355,7 +355,7 @@ step_write_config() {
 
     local genesis_dir="${DATA_DIR}/genesis"
     mkdir -p "$genesis_dir"
-    chown -R "${SERVICE_USER}:${SERVICE_USER}" "$genesis_dir"
+    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$genesis_dir"
 
     local chain_subdir
     [[ "$NETWORK" == "testnet" ]] && chain_subdir="testnet" || chain_subdir="mainnet"
@@ -376,7 +376,7 @@ step_write_config() {
             cp "${search_path}/genesis.yaml"    "${genesis_dir}/genesis.yaml"
             cp "${search_path}/committee.yaml"  "${genesis_dir}/committee.yaml"
             cp "${search_path}/parameters.yaml" "${DATA_DIR}/parameters.yaml"
-            chown -R "${SERVICE_USER}:${SERVICE_USER}" "$genesis_dir" "${DATA_DIR}/parameters.yaml"
+            chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$genesis_dir" "${DATA_DIR}/parameters.yaml"
             print_ok "Chain config files copied to ${DATA_DIR}"
             chain_configs_found=true
             break
