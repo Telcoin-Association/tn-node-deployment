@@ -129,9 +129,10 @@ step_config() {
     echo ""
 
     local input
-    read -r -p "  P2P port        [${P2P_PORT}]: " input;     P2P_PORT="${input:-$P2P_PORT}"
-    read -r -p "  RPC port        [${RPC_PORT}]: " input;     RPC_PORT="${input:-$RPC_PORT}"
-    read -r -p "  Metrics port    [${METRICS_PORT}]: " input; METRICS_PORT="${input:-$METRICS_PORT}"
+    read -r -p "  P2P primary port [${P2P_PORT}]: "    input; P2P_PORT="${input:-$P2P_PORT}"
+    read -r -p "  P2P worker port  [${WORKER_PORT}]: " input; WORKER_PORT="${input:-$WORKER_PORT}"
+    read -r -p "  RPC port         [${RPC_PORT}]: "    input; RPC_PORT="${input:-$RPC_PORT}"
+    read -r -p "  Metrics port     [${METRICS_PORT}]: " input; METRICS_PORT="${input:-$METRICS_PORT}"
 
     echo ""
     echo "  Directory paths (press Enter to accept defaults):"
@@ -465,18 +466,18 @@ step_create_service() {
         read -r -p "  Enter choice [1/2]: " bind_choice
         case "$bind_choice" in
             1)
-                primary_multiaddr="/ip6/::/udp/49590/quic-v1"
-                worker_multiaddr="/ip6/::/udp/49594/quic-v1"
+                primary_multiaddr="/ip6/::/udp/${P2P_PORT}/quic-v1"
+                worker_multiaddr="/ip6/::/udp/${WORKER_PORT}/quic-v1"
                 print_ok "Binding: IPv6"
                 break
                 ;;
             2)
                 # Detect internal IP for IPv4 binding
                 select_listener_ip
-                primary_multiaddr="/ip4/${LISTENER_IP}/udp/49590/quic-v1"
-                worker_multiaddr="/ip4/${LISTENER_IP}/udp/49594/quic-v1"
+                primary_multiaddr="/ip4/${LISTENER_IP}/udp/${P2P_PORT}/quic-v1"
+                worker_multiaddr="/ip4/${LISTENER_IP}/udp/${WORKER_PORT}/quic-v1"
                 print_ok "Binding: IPv4 (${LISTENER_IP})"
-                print_info "Ensure UDP ports 49590 and 49594 are forwarded to this server on your router."
+                print_info "Ensure UDP ports ${P2P_PORT} and ${WORKER_PORT} are forwarded to this server on your router."
                 break
                 ;;
             *)
@@ -568,7 +569,8 @@ step_final_summary() {
         "Data directory=${DATA_DIR}" \
         "Config directory=${CONFIG_DIR}" \
         "Log directory=${LOG_DIR}" \
-        "P2P port=${P2P_PORT}" \
+        "P2P primary port=${P2P_PORT}" \
+        "P2P worker port=${WORKER_PORT}" \
         "RPC port=${RPC_PORT}" \
         "Metrics port=${METRICS_PORT}" \
         "Systemd service=${SERVICE_NAME}" \
