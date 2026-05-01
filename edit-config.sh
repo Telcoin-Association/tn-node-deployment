@@ -275,7 +275,7 @@ edit_listener_addresses() {
     echo "              NAT-free, no router port forward needed"
     echo ""
     echo "  2) IPv4  -- listen on a specific IPv4 address"
-    echo "              requires TCP/UDP port 30303 forwarded on your router"
+    echo "              requires UDP ports ${DEFAULT_P2P_PORT} and ${DEFAULT_WORKER_PORT} forwarded on your router"
     echo ""
     echo "  3) Custom -- enter multiaddrs manually"
     echo ""
@@ -285,14 +285,14 @@ edit_listener_addresses() {
         read -r -p "  Enter choice [1/2/3]: " choice
         case "$choice" in
             1)
-                local new_primary="/ip6/::/udp/49590/quic-v1"
-                local new_worker="/ip6/::/udp/49594/quic-v1"
+                local new_primary="/ip6/::/udp/${DEFAULT_P2P_PORT}/quic-v1"
+                local new_worker="/ip6/::/udp/${DEFAULT_WORKER_PORT}/quic-v1"
                 break
                 ;;
             2)
                 select_listener_ip
-                local new_primary="/ip4/${LISTENER_IP}/udp/49590/quic-v1"
-                local new_worker="/ip4/${LISTENER_IP}/udp/49594/quic-v1"
+                local new_primary="/ip4/${LISTENER_IP}/udp/${DEFAULT_P2P_PORT}/quic-v1"
+                local new_worker="/ip4/${LISTENER_IP}/udp/${DEFAULT_WORKER_PORT}/quic-v1"
                 break
                 ;;
             3)
