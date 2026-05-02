@@ -139,23 +139,25 @@ if [[ -f "$LOG_FILE" ]]; then
         tail -1 | grep -o "connected_count=[0-9]*" | cut -d= -f2)
 fi
 
-# Get P2P connections in last 5 minutes from log file
+# Get unique P2P peers in last 5 minutes from log file
 P2P_RECENT=0
 if [[ -f "$LOG_FILE" ]]; then
     FIVE_MIN_AGO=$(date -u '+%Y-%m-%dT%H:%M' --date='5 minutes ago' 2>/dev/null | cut -c1-15)
     if [[ -n "$FIVE_MIN_AGO" ]]; then
         P2P_RECENT=$(sudo grep "new connection established" "$LOG_FILE" 2>/dev/null | \
-            grep -c "$FIVE_MIN_AGO" || echo "0")
+            grep "$FIVE_MIN_AGO" | \
+            grep -oE 'send_back_addr: /ip[46]/[0-9a-f:.]+/' | \
+            sort -u | wc -l || echo "0")
     fi
 fi
 
 if [[ "$IS_OBSERVER" == "true" ]]; then
     print_info "Consensus peers: ${CONSENSUS_PEERS:-0} (expected 0 for observer nodes)"
-    print_info "P2P connections (last 5 min): ${P2P_RECENT}"
+    print_info "Unique P2P peers (last 5 min): ${P2P_RECENT}"
     if [[ ${P2P_RECENT} -gt 0 ]]; then
         print_ok "P2P activity confirms network connectivity"
     else
-        print_info "No new P2P connections in last 5 min -- node may be between connection cycles"
+        print_info "No unique P2P peers in last 5 min -- node may be between connection cycles"
     fi
     print_info "Note: net_peerCount via RPC reflects consensus peers only."
     print_info "      Peer data is read from log file: ${LOG_FILE}"
@@ -168,7 +170,7 @@ else
     else
         print_warn "Could not read peer count from log file"
     fi
-    print_info "P2P connections (last 5 min): ${P2P_RECENT}"
+    print_info "Unique P2P peers (last 5 min): ${P2P_RECENT}"
     print_info "Note: Peer data is read from log file: ${LOG_FILE}"
 fi
 

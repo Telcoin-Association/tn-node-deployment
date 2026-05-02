@@ -468,7 +468,7 @@ Telcoin Network uses a libp2p-based P2P architecture (Narwhal/Bullshark) that di
 The health check reads peer data directly from the node log file to provide more meaningful information:
 
 - **Consensus peers** — from `peer metrics heartbeat` log entries. Always 0 for observers (expected). Should be > 0 for active validators.
-- **P2P connections (last 5 min)** — count of `new connection established` log entries in the last 5 minutes. Indicates active network connectivity.
+- **Unique P2P peers (last 5 min)** — count of unique peer IPs seen in `new connection established` log entries in the last 5 minutes. Indicates active network connectivity. The same peer connecting multiple times is only counted once.
 
 Once the Prometheus metrics endpoint (port 9000) is functional in a future binary release, the health check will be updated to use it for more accurate real-time peer data.
 
