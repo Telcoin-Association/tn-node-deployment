@@ -14,6 +14,7 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | `edit-config.sh` | Edit the configuration of a running node |
 | `firewall-setup.sh` | Interactive firewall management and hardening |
 | `remove-node.sh` | Safely remove a node installation |
+| `update-scripts.sh` | Check for and download script updates from GitHub |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 
 ---
@@ -106,6 +107,7 @@ chmod +x ~/telcoin-node-scripts/check-node.sh
 chmod +x ~/telcoin-node-scripts/edit-config.sh
 chmod +x ~/telcoin-node-scripts/firewall-setup.sh
 chmod +x ~/telcoin-node-scripts/remove-node.sh
+chmod +x ~/telcoin-node-scripts/update-scripts.sh
 ```
 
 **3. Run the setup**
@@ -602,6 +604,32 @@ Store your BLS passphrase separately from the key files — in a password manage
 
 ---
 
+## Keeping Scripts Up to Date
+
+Run the update script at any time to check for and download newer versions:
+
+```bash
+bash ~/telcoin-node-scripts/update-scripts.sh
+```
+
+The script checks each file individually against the latest version on GitHub and shows a status table:
+
+```
+  Script                     Local      Remote     Status
+  ----------------------------------------------------------------
+  setup-observer.sh          1.1.2      1.1.3      UPDATE AVAILABLE
+  setup-validator.sh         1.1.2      1.1.3      UPDATE AVAILABLE
+  check-node.sh              1.1.2      1.1.2      Up to date
+  edit-config.sh             1.1.2      1.1.3      UPDATE AVAILABLE
+  lib/common.sh              1.1.2      1.1.3      UPDATE AVAILABLE
+```
+
+If updates are available it will ask for confirmation before downloading. `lib/common.sh` is always included in any update since all scripts depend on it.
+
+> Note: The GitHub repository must be public for the update script to work. Once the repository is made public this will work automatically.
+
+---
+
 ## Changelog
 
 ### v1.1.2
@@ -611,13 +639,19 @@ Store your BLS passphrase separately from the key files — in a password manage
   - Key deletion requires typing `DELETE` to confirm — cannot be undone
   - Wipe chain data only option (keeps keys and config, forces resync)
   - Docker-aware — stops/removes container and optionally removes image
+- Added `update-scripts.sh` — checks all scripts against latest GitHub versions and downloads updates
+  - Checks each script individually showing local vs remote version
+  - Always includes `lib/common.sh` in any update
+  - Requires confirmation before downloading
+- Added `COMMON_VERSION` to `lib/common.sh` so it can be version-tracked like other scripts
 - Implemented Docker install option in both setup scripts
   - Installs Docker if not present
-  - Prompts for image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri`)
+  - Prompts for image URL and tag
   - Creates host service user with UID 1101 to match container's `nonroot` user
   - Runs keytool via Docker image for key generation
   - Creates systemd service wrapping `docker run` with `--user` flag
-  - Operator can still choose any service user name and group
+- Added new options to `edit-config.sh`: P2P ports, Docker image update, chain config refresh, restart node
+- Fixed `edit-config.sh` `set -e` crash in `show_current_config`
 - Replaced manual wipe commands in README with reference to `remove-node.sh`
 - Updated Binary Installation Options in README — Docker now documented with image URL
 - All scripts bumped to v1.1.2
