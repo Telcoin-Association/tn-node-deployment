@@ -660,6 +660,19 @@ EOF
     systemctl daemon-reload
     print_ok "Service file written: ${service_file}"
 
+    # Write metadata file so remove-node.sh can find the host service user
+    # (needed for Docker installs where systemd User=root)
+    local meta_file="/etc/telcoin/observer/.node-meta"
+    mkdir -p "/etc/telcoin/observer"
+    cat > "$meta_file" <<EOF
+HOST_SERVICE_USER=${SERVICE_USER}
+HOST_SERVICE_GROUP=${SERVICE_GROUP}
+INSTALL_METHOD=${INSTALL_METHOD:-binary}
+DOCKER_IMAGE=${DOCKER_IMAGE:-}
+EOF
+    chmod 600 "$meta_file"
+    print_ok "Node metadata written: ${meta_file}"
+
     echo ""
     if confirm "Start the observer node now?"; then
         systemctl start "$SERVICE_NAME"

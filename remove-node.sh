@@ -33,20 +33,40 @@ detect_node_installs() {
     # Check observer
     if [[ -f /etc/systemd/system/telcoin-observer.service ]]; then
         OBSERVER_INSTALLED=true
-        OBSERVER_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
-        OBSERVER_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
-        if grep -q "docker" /etc/systemd/system/telcoin-observer.service 2>/dev/null; then
-            OBSERVER_DOCKER=true
+
+        # Read from metadata file first (most reliable, set during setup)
+        if [[ -f /etc/telcoin/observer/.node-meta ]]; then
+            OBSERVER_SERVICE_USER=$(grep "^HOST_SERVICE_USER=" /etc/telcoin/observer/.node-meta | cut -d= -f2 || echo "")
+            OBSERVER_SERVICE_GROUP=$(grep "^HOST_SERVICE_GROUP=" /etc/telcoin/observer/.node-meta | cut -d= -f2 || echo "")
+            local obs_method
+            obs_method=$(grep "^INSTALL_METHOD=" /etc/telcoin/observer/.node-meta | cut -d= -f2 || echo "")
+            [[ "$obs_method" == "docker" ]] && OBSERVER_DOCKER=true
+        else
+            # Fall back to reading service file
+            OBSERVER_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
+            OBSERVER_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
+            if grep -q "docker" /etc/systemd/system/telcoin-observer.service 2>/dev/null; then
+                OBSERVER_DOCKER=true
+            fi
         fi
     fi
 
     # Check validator
     if [[ -f /etc/systemd/system/telcoin-validator.service ]]; then
         VALIDATOR_INSTALLED=true
-        VALIDATOR_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
-        VALIDATOR_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
-        if grep -q "docker" /etc/systemd/system/telcoin-validator.service 2>/dev/null; then
-            VALIDATOR_DOCKER=true
+
+        if [[ -f /etc/telcoin/validator/.node-meta ]]; then
+            VALIDATOR_SERVICE_USER=$(grep "^HOST_SERVICE_USER=" /etc/telcoin/validator/.node-meta | cut -d= -f2 || echo "")
+            VALIDATOR_SERVICE_GROUP=$(grep "^HOST_SERVICE_GROUP=" /etc/telcoin/validator/.node-meta | cut -d= -f2 || echo "")
+            local val_method
+            val_method=$(grep "^INSTALL_METHOD=" /etc/telcoin/validator/.node-meta | cut -d= -f2 || echo "")
+            [[ "$val_method" == "docker" ]] && VALIDATOR_DOCKER=true
+        else
+            VALIDATOR_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
+            VALIDATOR_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
+            if grep -q "docker" /etc/systemd/system/telcoin-validator.service 2>/dev/null; then
+                VALIDATOR_DOCKER=true
+            fi
         fi
     fi
     set -e
@@ -176,6 +196,7 @@ remove_keys() {
         if [[ "$confirm_text" == "DELETE" ]]; then
             rm -rf "$keys_dir"
             rm -rf "$config_dir"
+            rm -f "/etc/telcoin/${node_type}/.node-meta" 2>/dev/null || true
             print_ok "Keys and passphrase removed"
         else
             print_info "Keys kept -- skipping key removal"
