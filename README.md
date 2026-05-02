@@ -536,8 +536,20 @@ When prompted during setup you can choose how to obtain the `telcoin-network` bi
 |---|---|---|
 | Build from source | Clones the GitHub repo and compiles with `cargo build --release` | Takes 20-40 min, requires ~4GB RAM during build |
 | Pre-built binary | Downloads a release binary | **Coming soon** — check [releases](https://github.com/Telcoin-Association/tn-node-deployment/releases) |
-| Docker | Pulls the official Docker Hub image | **Coming soon** — `docker pull telcoin/telcoin-network:latest` |
+| Docker | Pulls official image from Google Artifact Registry | `us-docker.pkg.dev/telcoin-network/tn-public/adiri:VERSION` |
 | Existing binary | Use a binary already on this machine | Useful if you have already compiled it |
+
+### Docker Install Notes
+
+When Docker is selected the script will:
+- Install Docker if not already present
+- Ask for the full image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri`)
+- Pull the image
+- Create the host service user with UID 1101 to match the container's internal `nonroot` user
+- Generate keys using the Docker image
+- Create a systemd service that runs `docker run` with `--user` flag for correct volume permissions
+
+The operator can still choose any service user name and group — UID 1101 is assigned transparently to ensure Docker volume permissions work correctly.
 
 ---
 
@@ -599,7 +611,15 @@ Store your BLS passphrase separately from the key files — in a password manage
   - Key deletion requires typing `DELETE` to confirm — cannot be undone
   - Wipe chain data only option (keeps keys and config, forces resync)
   - Docker-aware — stops/removes container and optionally removes image
+- Implemented Docker install option in both setup scripts
+  - Installs Docker if not present
+  - Prompts for image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri`)
+  - Creates host service user with UID 1101 to match container's `nonroot` user
+  - Runs keytool via Docker image for key generation
+  - Creates systemd service wrapping `docker run` with `--user` flag
+  - Operator can still choose any service user name and group
 - Replaced manual wipe commands in README with reference to `remove-node.sh`
+- Updated Binary Installation Options in README — Docker now documented with image URL
 - All scripts bumped to v1.1.2
 
 ### v1.1.1

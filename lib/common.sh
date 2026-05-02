@@ -316,6 +316,14 @@ check_docker() {
 
 verify_binary() {
     local binary_path="$1"
+
+    # Skip binary verification for Docker installs
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        print_step "Docker install -- skipping binary verification"
+        print_ok "Using Docker image: ${DOCKER_IMAGE:-unknown}"
+        return 0
+    fi
+
     print_step "Verifying binary at: ${binary_path}"
     if [[ ! -f "$binary_path" ]]; then
         print_error "Binary not found at: ${binary_path}"
@@ -401,16 +409,23 @@ create_service_user() {
     fi
 
     # Create user if it doesn't exist
+    # For Docker installs, force UID 1101 to match the container's nonroot user
     print_step "Creating service user: ${SERVICE_USER}..."
     if id "$SERVICE_USER" &>/dev/null; then
         print_ok "User '${SERVICE_USER}' already exists"
-        # Ensure user is in the correct group
         usermod -aG "$SERVICE_GROUP" "$SERVICE_USER" 2>/dev/null || true
     else
-        useradd --system --no-create-home --shell /bin/false \
-                --gid "$SERVICE_GROUP" \
-                --comment "Telcoin Network node service account" "$SERVICE_USER"
-        print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
+        if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+            useradd --uid "${DOCKER_UID:-1101}" --system --no-create-home --shell /bin/false \
+                    --gid "$SERVICE_GROUP" \
+                    --comment "Telcoin Network node service account" "$SERVICE_USER"
+            print_ok "Created system user '${SERVICE_USER}' (UID ${DOCKER_UID:-1101}) in group '${SERVICE_GROUP}'"
+        else
+            useradd --system --no-create-home --shell /bin/false \
+                    --gid "$SERVICE_GROUP" \
+                    --comment "Telcoin Network node service account" "$SERVICE_USER"
+            print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
+        fi
     fi
 }
 
@@ -473,8 +488,8 @@ select_install_method() {
     echo "  How would you like to obtain the telcoin binary?"
     echo ""
     echo "  1) Build from source  -- compiles from GitHub (~30 min, needs Rust)"
-    echo "  2) Pre-built binary   -- downloads a release binary"
-    echo "  3) Docker             -- pulls the official Docker image"
+    echo "  2) Pre-built binary   -- downloads a release binary (coming soon)"
+    echo "  3) Docker             -- pulls official image from Google Artifact Registry"
     echo "  4) I already have it  -- specify path to existing binary"
     echo ""
 

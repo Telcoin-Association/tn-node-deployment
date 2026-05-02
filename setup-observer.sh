@@ -221,17 +221,61 @@ _install_prebuilt_binary() {
 }
 
 _setup_docker() {
-    print_step "Docker..."
+    print_header "Step 4 of 7: Docker Setup"
+
+    # Check Docker is installed
+    if ! command -v docker &>/dev/null; then
+        print_step "Installing Docker..."
+        curl -fsSL https://get.docker.com | sh
+        if ! command -v docker &>/dev/null; then
+            print_error "Docker installation failed. Please install Docker manually."
+            exit 1
+        fi
+        print_ok "Docker installed"
+    else
+        print_ok "Docker is installed"
+    fi
+
     echo ""
-    print_warn "Official Docker Hub image is coming soon."
-    print_info "The public Docker Hub image will be available at:"
-    print_info "  docker pull telcoin/telcoin-network:latest  (coming soon)"
+    print_info "The official Telcoin Network Docker image is hosted at:"
+    print_info "  us-docker.pkg.dev/telcoin-network/tn-public/adiri"
     echo ""
-    print_warn "This option is not yet available -- please choose another method."
+    print_info "Enter the full image URL including tag."
+    print_info "Check for the latest tag at:"
+    print_info "  https://console.cloud.google.com/artifacts/docker/telcoin-network/us/tn-public/adiri"
     echo ""
-    read -r -p "  Press Enter to return to the install method menu..."
-    echo ""
-    step_install_binary
+
+    local input
+    read -r -p "  Docker image [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri]: " input
+    DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri}"
+
+    print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
+    if ! docker pull "$DOCKER_IMAGE"; then
+        print_error "Failed to pull Docker image: ${DOCKER_IMAGE}"
+        print_info "Check the image URL and tag and try again."
+        exit 1
+    fi
+    print_ok "Docker image pulled: ${DOCKER_IMAGE}"
+
+    # For Docker installs the host user must use UID 1101 to match
+    # the container's internal 'nonroot' user for correct volume permissions
+    DOCKER_UID=1101
+    print_info "Note: Docker install requires service user UID ${DOCKER_UID}"
+    print_info "      This matches the container's internal 'nonroot' user."
+
+    # Check if UID 1101 is already taken by a different user
+    local existing_user
+    existing_user=$(getent passwd "$DOCKER_UID" | cut -d: -f1 2>/dev/null || echo "")
+    if [[ -n "$existing_user" ]] && [[ "$existing_user" != "$SERVICE_USER" ]]; then
+        print_error "UID ${DOCKER_UID} is already in use by user '${existing_user}'"
+        print_info "Please free up UID ${DOCKER_UID} or choose a different install method."
+        exit 1
+    fi
+
+    INSTALL_METHOD="docker"
+    # Set binary path to docker for verification step compatibility
+    BINARY_PATH="docker"
+    print_ok "Docker setup complete"
 }
 _use_existing_binary() {
     print_step "Locating existing binary..."
@@ -324,15 +368,32 @@ step_generate_keys() {
     print_step "Generating observer keys..."
     export TN_BLS_PASSPHRASE="$bls_passphrase"
 
-    if "$BINARY_PATH" keytool generate observer \
-        --datadir "$DATA_DIR" \
-        --address "$OBSERVER_ADDRESS"; then
-        print_ok "Observer keys generated in: ${DATA_DIR}/node-keys/"
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        if docker run --rm \
+            -e TN_BLS_PASSPHRASE="$bls_passphrase" \
+            -v "${DATA_DIR}:/home/nonroot" \
+            "$DOCKER_IMAGE" \
+            telcoin keytool generate observer \
+            --datadir /home/nonroot \
+            --address "$OBSERVER_ADDRESS"; then
+            print_ok "Observer keys generated in: ${DATA_DIR}/node-keys/"
+        else
+            print_error "Key generation failed."
+            print_info "  Check Docker image: ${DOCKER_IMAGE}"
+            print_info "  Check ${DATA_DIR} exists"
+            exit 1
+        fi
     else
-        print_error "Key generation failed."
-        print_info "  Check binary path: ${BINARY_PATH}"
-        print_info "  Check ${DATA_DIR} exists"
-        exit 1
+        if "$BINARY_PATH" keytool generate observer \
+            --datadir "$DATA_DIR" \
+            --address "$OBSERVER_ADDRESS"; then
+            print_ok "Observer keys generated in: ${DATA_DIR}/node-keys/"
+        else
+            print_error "Key generation failed."
+            print_info "  Check binary path: ${BINARY_PATH}"
+            print_info "  Check ${DATA_DIR} exists"
+            exit 1
+        fi
     fi
 
     unset TN_BLS_PASSPHRASE
@@ -498,7 +559,35 @@ step_create_service() {
     local metrics_addr="127.0.0.1:${METRICS_PORT}"
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
 
-    local exec_cmd="${BINARY_PATH} node \
+    # Build ExecStart command -- different for Docker vs binary installs
+    local exec_cmd
+    local bls_pass
+    bls_pass=$(cat "${passphrase_file}" 2>/dev/null || echo '')
+
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        local docker_uid docker_gid
+        docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
+        docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
+        exec_cmd="docker run --rm \
+--name ${SERVICE_NAME} \
+--user ${docker_uid}:${docker_gid} \
+--network=host \
+-e TN_BLS_PASSPHRASE=${bls_pass} \
+-e PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr} \
+-e WORKER_LISTENER_MULTIADDR=${worker_multiaddr} \
+-v ${DATA_DIR}:/home/nonroot \
+-v ${CONFIG_DIR}:/etc/telcoin/observer:ro \
+${DOCKER_IMAGE} \
+telcoin node \
+--datadir /home/nonroot \
+--observer \
+--instance ${instance} \
+--metrics ${metrics_addr} \
+--log.stdout.format log-fmt \
+-vvv \
+--http"
+    else
+        exec_cmd="${BINARY_PATH} node \
 --datadir ${DATA_DIR} \
 --observer \
 --instance ${instance} \
@@ -506,15 +595,14 @@ step_create_service() {
 --log.stdout.format log-fmt \
 -vvv \
 --http"
+    fi
 
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
-    # Read the passphrase now so it gets embedded as a literal value in the
-    # service file — systemd does not execute subshells in Environment= lines
-    local bls_pass
-    bls_pass=$(cat "${passphrase_file}" 2>/dev/null || echo '')
-
-    cat > "$service_file" <<EOF
+    # For binary installs embed passphrase and multiaddrs as Environment= lines
+    # For Docker installs these are passed directly to docker run in ExecStart
+    if [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
+        cat > "$service_file" <<EOF
 [Unit]
 Description=Telcoin Network Observer Node (${CHAIN_NAME})
 After=network-online.target
@@ -543,6 +631,31 @@ StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
 [Install]
 WantedBy=multi-user.target
 EOF
+    else
+        # Docker service -- no Environment lines needed, all passed via docker run
+        cat > "$service_file" <<EOF
+[Unit]
+Description=Telcoin Network Observer Node (${CHAIN_NAME}) [Docker]
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+ExecStart=${exec_cmd}
+ExecStop=docker stop ${SERVICE_NAME}
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
+StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
 
     systemctl daemon-reload
     print_ok "Service file written: ${service_file}"
