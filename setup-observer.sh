@@ -246,7 +246,8 @@ _setup_docker() {
     echo ""
 
     local input
-    read -r -p "  Docker image [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri]: " input
+    read -r -p "  Docker image (press Enter to accept default)
+  [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri]: " input
     DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri}"
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
