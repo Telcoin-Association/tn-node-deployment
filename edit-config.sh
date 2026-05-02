@@ -205,12 +205,31 @@ show_current_config() {
     exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
 
     local primary_multiaddr worker_multiaddr instance metrics verbosity rpc_enabled bls_pass_set
+    local is_docker=false
+    local docker_image=""
+
+    # Detect if this is a Docker install
+    if echo "$exec_start" | grep -qF "docker run"; then
+        is_docker=true
+        docker_image=$(echo "$exec_start" | grep -o 'us-docker[^ ]*\|gcr\.io[^ ]*\|ghcr\.io[^ ]*' | head -1)
+        [[ -z "$docker_image" ]] && docker_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1)
+    fi
 
     primary_multiaddr=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
+    # For Docker, multiaddrs are in ExecStart not Environment lines
+    [[ -z "$primary_multiaddr" ]] && primary_multiaddr=$(echo "$exec_start" | grep -o 'PRIMARY_LISTENER_MULTIADDR=[^ ]*' | cut -d= -f2)
+
     worker_multiaddr=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
+    [[ -z "$worker_multiaddr" ]] && worker_multiaddr=$(echo "$exec_start" | grep -o 'WORKER_LISTENER_MULTIADDR=[^ ]*' | cut -d= -f2)
+
     instance=$(read_flag "--instance" "$exec_start")
     metrics=$(read_flag "--metrics" "$exec_start")
     bls_pass_set="(set)"
+
+    # Service user/group
+    local svc_user svc_group
+    svc_user=$(grep "^User=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2)
+    svc_group=$(grep "^Group=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2)
 
     # Detect verbosity
     if echo "$exec_start" | grep -q "\-vvvvv"; then      verbosity="TRACE (-vvvvv)"
@@ -245,6 +264,10 @@ show_current_config() {
     echo ""
     printf "  %-28s %s\n" "Service status:"        "$status"
     printf "  %-28s %s\n" "Node type:"             "$NODE_TYPE"
+    printf "  %-28s %s\n" "Install method:"        "$( [[ "$is_docker" == "true" ]] && echo "Docker" || echo "Binary")"
+    [[ "$is_docker" == "true" ]] && printf "  %-28s %s\n" "Docker image:" "${docker_image:-unknown}"
+    printf "  %-28s %s\n" "Service user:"          "${svc_user:-unknown}"
+    printf "  %-28s %s\n" "Service group:"         "${svc_group:-unknown}"
     printf "  %-28s %s\n" "Instance number:"       "${instance:-unknown}"
     printf "  %-28s %s\n" "Metrics address:"       "${metrics:-unknown}"
     printf "  %-28s %s\n" "Primary listener:"      "${primary_multiaddr:-unknown}"
@@ -515,6 +538,194 @@ edit_bls_passphrase() {
     apply_changes
 }
 
+edit_p2p_ports() {
+    print_header "Edit P2P Ports"
+
+    local exec_start
+    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+
+    local current_primary current_worker
+    current_primary=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
+    current_worker=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
+
+    print_info "Current primary listener: ${current_primary:-unknown}"
+    print_info "Current worker listener:  ${current_worker:-unknown}"
+    echo ""
+    print_info "Default ports are 49590 (primary) and 49594 (worker)."
+    print_info "Only change these if you have a port conflict."
+    echo ""
+
+    local new_primary_port new_worker_port
+    read -r -p "  Primary P2P port [49590]: " input
+    new_primary_port="${input:-49590}"
+    read -r -p "  Worker P2P port  [49594]: " input
+    new_worker_port="${input:-49594}"
+
+    # Rebuild multiaddrs with new ports keeping same IP/protocol
+    local new_primary new_worker
+    if [[ -n "$current_primary" ]]; then
+        new_primary=$(echo "$current_primary" | sed "s|/udp/[0-9]*/|/udp/${new_primary_port}/|")
+        new_worker=$(echo "$current_worker" | sed "s|/udp/[0-9]*/|/udp/${new_worker_port}/|")
+    else
+        new_primary="/ip4/0.0.0.0/udp/${new_primary_port}/quic-v1"
+        new_worker="/ip4/0.0.0.0/udp/${new_worker_port}/quic-v1"
+    fi
+
+    set_env_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" "$TARGET_SERVICE_FILE"
+    set_env_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"  "$TARGET_SERVICE_FILE"
+    print_ok "P2P ports updated"
+    print_info "Primary: ${new_primary}"
+    print_info "Worker:  ${new_worker}"
+    apply_changes
+}
+
+edit_docker_image() {
+    print_header "Update Docker Image"
+
+    local exec_start
+    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+
+    if ! echo "$exec_start" | grep -qF "docker run"; then
+        print_warn "This node is not running via Docker."
+        print_info "Docker image updates only apply to Docker installs."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    local current_image
+    current_image=$(echo "$exec_start" | grep -o 'us-docker[^ ]*\|gcr\.io[^ ]*\|ghcr\.io[^ ]*' | head -1)
+    [[ -z "$current_image" ]] && current_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1)
+
+    print_info "Current image: ${current_image:-unknown}"
+    echo ""
+    print_info "Enter the new image URL and tag."
+    print_info "Check for latest tags at:"
+    print_info "  https://console.cloud.google.com/artifacts/docker/telcoin-network/us/tn-public/adiri"
+    echo ""
+
+    local new_image
+    read -r -p "  New Docker image [${current_image}]: " input
+    new_image="${input:-$current_image}"
+
+    if [[ "$new_image" == "$current_image" ]]; then
+        print_info "Image unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    print_step "Pulling new image: ${new_image}..."
+    if ! docker pull "$new_image"; then
+        print_error "Failed to pull image: ${new_image}"
+        print_info "Check the image URL and tag and try again."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    print_ok "Image pulled successfully"
+
+    # Replace old image with new image in ExecStart
+    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_SERVICE_FILE"
+    print_ok "Service file updated to use: ${new_image}"
+    apply_changes
+}
+
+refresh_chain_configs() {
+    print_header "Refresh Chain Configs"
+
+    local source_dir="/opt/telcoin-source"
+    local node_data_dir
+
+    if [[ "$NODE_TYPE" == "observer" ]]; then
+        node_data_dir="/var/lib/telcoin/observer"
+    else
+        node_data_dir="/var/lib/telcoin/validator"
+    fi
+
+    print_info "This pulls the latest chain-configs from the repository and"
+    print_info "copies them to your node data directory."
+    print_info "Use this when the testnet restarts with new genesis/committee/parameters."
+    echo ""
+    print_warn "The node will be restarted to apply the new configs."
+    echo ""
+
+    if ! confirm "Refresh chain configs for ${NODE_TYPE}?"; then
+        print_info "Cancelled."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    # Pull latest from repo
+    if [[ -d "${source_dir}/.git" ]]; then
+        print_step "Pulling latest chain configs..."
+        git -C "$source_dir" pull
+        print_ok "Repository updated"
+    else
+        print_warn "Source directory not found at ${source_dir}"
+        print_info "Cannot refresh chain configs without the cloned repository."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    # Copy updated configs
+    local chain_config_src="${source_dir}/chain-configs/testnet"
+    if [[ ! -d "$chain_config_src" ]]; then
+        print_warn "Chain config directory not found at ${chain_config_src}"
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    print_step "Copying chain configs to ${node_data_dir}..."
+    mkdir -p "${node_data_dir}/genesis"
+    cp "${chain_config_src}/genesis.yaml"    "${node_data_dir}/genesis/" 2>/dev/null || true
+    cp "${chain_config_src}/committee.yaml"  "${node_data_dir}/genesis/" 2>/dev/null || true
+    cp "${chain_config_src}/parameters.yaml" "${node_data_dir}/" 2>/dev/null || true
+
+    local svc_user
+    svc_user=$(grep "^User=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "telcoin")
+    local svc_group
+    svc_group=$(grep "^Group=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "telcoin")
+    chown -R "${svc_user}:${svc_group}" "$node_data_dir"
+    print_ok "Chain configs updated"
+
+    apply_changes
+}
+
+restart_node() {
+    print_header "Restart Node"
+
+    local status
+    if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
+        status="running"
+    else
+        status="stopped"
+    fi
+
+    print_info "Service: ${TARGET_SERVICE} (${status})"
+    echo ""
+
+    if confirm "Restart ${TARGET_SERVICE} now?"; then
+        print_step "Restarting ${TARGET_SERVICE}..."
+        systemctl restart "$TARGET_SERVICE"
+        sleep 3
+        if systemctl is-active --quiet "$TARGET_SERVICE"; then
+            print_ok "Node restarted successfully"
+        else
+            print_error "Node failed to restart. Check logs:"
+            print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
+        fi
+    else
+        print_info "Cancelled."
+    fi
+
+    echo ""
+    read -r -p "  Press Enter to return to menu..."
+}
+
 # =============================================================================
 # MAIN MENU
 # =============================================================================
@@ -531,20 +742,28 @@ main_menu() {
         echo "  4) Log verbosity"
         echo "  5) RPC access           (private / public / disabled)"
         echo "  6) BLS passphrase"
-        echo "  7) Exit"
+        echo "  7) P2P ports            (49590/49594)"
+        echo "  8) Docker image         (Docker installs only)"
+        echo "  9) Refresh chain configs (pull latest genesis/committee/parameters)"
+        echo " 10) Restart node"
+        echo " 11) Exit"
         echo ""
 
         local choice
-        read -r -p "  Enter choice [1-7]: " choice
+        read -r -p "  Enter choice [1-11]: " choice
         case "$choice" in
-            1) edit_listener_addresses ;;
-            2) edit_instance_number    ;;
-            3) edit_metrics            ;;
-            4) edit_verbosity          ;;
-            5) edit_rpc                ;;
-            6) edit_bls_passphrase     ;;
-            7) echo ""; print_info "Exiting."; exit 0 ;;
-            *) print_warn "Please enter 1-7." ;;
+            1)  edit_listener_addresses ;;
+            2)  edit_instance_number    ;;
+            3)  edit_metrics            ;;
+            4)  edit_verbosity          ;;
+            5)  edit_rpc                ;;
+            6)  edit_bls_passphrase     ;;
+            7)  edit_p2p_ports          ;;
+            8)  edit_docker_image       ;;
+            9)  refresh_chain_configs   ;;
+            10) restart_node            ;;
+            11) echo ""; print_info "Exiting."; exit 0 ;;
+            *) print_warn "Please enter 1-11." ;;
         esac
     done
 }
