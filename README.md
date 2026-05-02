@@ -633,6 +633,13 @@ Store your BLS passphrase separately from the key files — in a password manage
 - Setup will not proceed if `algif_aead` kernel module is loaded or not blocked
 - Operators are directed to https://copy.fail to apply the mitigation before re-running
 - Added CVE-2026-31431 section to README Security Design with details and manual check commands
+- Added `firewall-setup.sh` — interactive menu-driven firewall management script
+  - View current firewall status, SSH configuration and node ports at any time
+  - Enable firewall with recommended defaults (default deny inbound)
+  - Manage SSH access (disable password auth, disable root login, change port)
+  - Manage node ports (auto-detects validator/observer, applies correct rules)
+  - Manage trusted IP whitelist for SSH access
+- Added Firewall Setup section to README with usage guide and warnings
 
 ### v1.1.0
 - Added custom service user and group selection in Step 5 of both setup scripts — operators can name the service user and group (defaults: `telcoin`/`telcoin`)
