@@ -199,6 +199,7 @@ detect_node() {
 # =============================================================================
 
 show_current_config() {
+    set +e  # Disable exit-on-error for config reading -- grep returning no match is fine
     print_header "Current Configuration -- ${NODE_TYPE}"
 
     local exec_start
@@ -211,16 +212,22 @@ show_current_config() {
     # Detect if this is a Docker install
     if echo "$exec_start" | grep -qF "docker run"; then
         is_docker=true
-        docker_image=$(echo "$exec_start" | grep -o 'us-docker[^ ]*\|gcr\.io[^ ]*\|ghcr\.io[^ ]*' | head -1)
-        [[ -z "$docker_image" ]] && docker_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1)
+        docker_image=$(echo "$exec_start" | grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' | head -1 || true)
+        if [[ -z "$docker_image" ]]; then
+            docker_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1 || true)
+        fi
     fi
 
-    primary_multiaddr=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
+    primary_multiaddr=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
     # For Docker, multiaddrs are in ExecStart not Environment lines
-    [[ -z "$primary_multiaddr" ]] && primary_multiaddr=$(echo "$exec_start" | grep -o 'PRIMARY_LISTENER_MULTIADDR=[^ ]*' | cut -d= -f2)
+    if [[ -z "$primary_multiaddr" ]]; then
+        primary_multiaddr=$(echo "$exec_start" | grep -oE 'PRIMARY_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+    fi
 
-    worker_multiaddr=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
-    [[ -z "$worker_multiaddr" ]] && worker_multiaddr=$(echo "$exec_start" | grep -o 'WORKER_LISTENER_MULTIADDR=[^ ]*' | cut -d= -f2)
+    worker_multiaddr=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
+    if [[ -z "$worker_multiaddr" ]]; then
+        worker_multiaddr=$(echo "$exec_start" | grep -oE 'WORKER_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+    fi
 
     instance=$(read_flag "--instance" "$exec_start")
     metrics=$(read_flag "--metrics" "$exec_start")
@@ -238,7 +245,7 @@ show_current_config() {
     elif echo "$exec_start" | grep -q "\-vv"; then       verbosity="WARN  (-vv)"
     elif echo "$exec_start" | grep -q "\-v[^v]"; then    verbosity="ERROR (-v)"
     else                                                  verbosity="unknown"
-    fi
+    fi || true
 
     # Detect RPC status
     if has_flag "--http" "$exec_start"; then
@@ -264,8 +271,10 @@ show_current_config() {
     echo ""
     printf "  %-28s %s\n" "Service status:"        "$status"
     printf "  %-28s %s\n" "Node type:"             "$NODE_TYPE"
-    printf "  %-28s %s\n" "Install method:"        "$( [[ "$is_docker" == "true" ]] && echo "Docker" || echo "Binary")"
-    [[ "$is_docker" == "true" ]] && printf "  %-28s %s\n" "Docker image:" "${docker_image:-unknown}"
+    local install_method_label="Binary"
+    [[ "$is_docker" == "true" ]] && install_method_label="Docker"
+    printf "  %-28s %s\n" "Install method:"        "$install_method_label"
+    [[ "$is_docker" == "true" ]] && printf "  %-28s %s\n" "Docker image:" "${docker_image:-unknown}" || true
     printf "  %-28s %s\n" "Service user:"          "${svc_user:-unknown}"
     printf "  %-28s %s\n" "Service group:"         "${svc_group:-unknown}"
     printf "  %-28s %s\n" "Instance number:"       "${instance:-unknown}"
@@ -276,6 +285,7 @@ show_current_config() {
     printf "  %-28s %s\n" "RPC:"                   "$rpc_enabled"
     printf "  %-28s %s\n" "BLS passphrase:"        "$bls_pass_set"
     echo ""
+    set -e  # Restore exit-on-error
 }
 
 # =============================================================================
@@ -594,7 +604,7 @@ edit_docker_image() {
     fi
 
     local current_image
-    current_image=$(echo "$exec_start" | grep -o 'us-docker[^ ]*\|gcr\.io[^ ]*\|ghcr\.io[^ ]*' | head -1)
+    current_image=$(echo "$exec_start" | grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' | head -1)
     [[ -z "$current_image" ]] && current_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1)
 
     print_info "Current image: ${current_image:-unknown}"
