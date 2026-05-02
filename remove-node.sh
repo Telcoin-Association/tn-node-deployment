@@ -20,6 +20,7 @@ readonly SCRIPT_VERSION="1.1.2"
 # =============================================================================
 
 detect_node_installs() {
+    set +e  # grep returning no match is fine here
     OBSERVER_INSTALLED=false
     VALIDATOR_INSTALLED=false
     OBSERVER_DOCKER=false
@@ -32,9 +33,8 @@ detect_node_installs() {
     # Check observer
     if [[ -f /etc/systemd/system/telcoin-observer.service ]]; then
         OBSERVER_INSTALLED=true
-        OBSERVER_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2)
-        OBSERVER_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2)
-        # Check if it's a Docker-based install
+        OBSERVER_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
+        OBSERVER_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
         if grep -q "docker" /etc/systemd/system/telcoin-observer.service 2>/dev/null; then
             OBSERVER_DOCKER=true
         fi
@@ -43,15 +43,17 @@ detect_node_installs() {
     # Check validator
     if [[ -f /etc/systemd/system/telcoin-validator.service ]]; then
         VALIDATOR_INSTALLED=true
-        VALIDATOR_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2)
-        VALIDATOR_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2)
+        VALIDATOR_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
+        VALIDATOR_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
         if grep -q "docker" /etc/systemd/system/telcoin-validator.service 2>/dev/null; then
             VALIDATOR_DOCKER=true
         fi
     fi
+    set -e
 }
 
 show_detected() {
+    set +e
     print_header "Detected Node Installations"
 
     if [[ "$OBSERVER_INSTALLED" == "false" ]] && [[ "$VALIDATOR_INSTALLED" == "false" ]]; then
