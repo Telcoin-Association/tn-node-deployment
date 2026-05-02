@@ -13,6 +13,7 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | `check-node.sh` | Health check for any running node |
 | `edit-config.sh` | Edit the configuration of a running node |
 | `firewall-setup.sh` | Interactive firewall management and hardening |
+| `remove-node.sh` | Safely remove a node installation |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 
 ---
@@ -104,6 +105,7 @@ chmod +x ~/telcoin-node-scripts/setup-validator.sh
 chmod +x ~/telcoin-node-scripts/check-node.sh
 chmod +x ~/telcoin-node-scripts/edit-config.sh
 chmod +x ~/telcoin-node-scripts/firewall-setup.sh
+chmod +x ~/telcoin-node-scripts/remove-node.sh
 ```
 
 **3. Run the setup**
@@ -555,64 +557,26 @@ These are two different addresses on cloud servers and the script handles both c
 
 ---
 
-## Wiping and Starting Fresh
+## Removing a Node
 
-**Remove observer node completely:**
+Use the dedicated removal script to safely remove a node installation:
+
 ```bash
-sudo systemctl stop telcoin-observer
-sudo systemctl disable telcoin-observer
-sudo rm -f /etc/systemd/system/telcoin-observer.service
-sudo systemctl daemon-reload
-sudo rm -rf /var/lib/telcoin/observer
-sudo rm -rf /etc/telcoin/observer
-sudo rm -rf /var/log/telcoin
-sudo rm -rf /opt/telcoin
-sudo rm -rf /opt/telcoin-source
-sudo userdel telcoin 2>/dev/null
+sudo bash ~/telcoin-node-scripts/remove-node.sh
 ```
 
-**Remove validator node completely:**
-```bash
-sudo systemctl stop telcoin-validator
-sudo systemctl disable telcoin-validator
-sudo rm -f /etc/systemd/system/telcoin-validator.service
-sudo systemctl daemon-reload
-sudo rm -rf /var/lib/telcoin/validator
-sudo rm -rf /etc/telcoin/validator
-sudo rm -rf /var/log/telcoin
-sudo rm -rf /opt/telcoin
-sudo rm -rf /opt/telcoin-source
-sudo userdel telcoin 2>/dev/null
-```
+The script automatically detects what is installed (observer, validator, or both) and the install method (binary/source or Docker). It guides you through removal step by step with individual confirmations for each component.
 
-**Remove both nodes completely:**
-```bash
-sudo systemctl stop telcoin-observer telcoin-validator 2>/dev/null
-sudo systemctl disable telcoin-observer telcoin-validator 2>/dev/null
-sudo rm -f /etc/systemd/system/telcoin-observer.service
-sudo rm -f /etc/systemd/system/telcoin-validator.service
-sudo systemctl daemon-reload
-sudo rm -rf /var/lib/telcoin
-sudo rm -rf /etc/telcoin
-sudo rm -rf /var/log/telcoin
-sudo rm -rf /opt/telcoin
-sudo rm -rf /opt/telcoin-source
-sudo userdel telcoin 2>/dev/null
-```
+**What it removes:**
+- Systemd service (stops, disables and removes the service file)
+- Docker container and optionally the image (if Docker install)
+- Chain database
+- Node keys and passphrase (requires typing `DELETE` to confirm -- cannot be undone)
+- Binary and source code
+- Log directory
+- Service user and group
 
-**Wipe chain data only — observer (keeps keys and config, forces resync):**
-```bash
-sudo systemctl stop telcoin-observer
-sudo rm -rf /var/lib/telcoin/observer/db
-sudo systemctl start telcoin-observer
-```
-
-**Wipe chain data only — validator (keeps keys and config, forces resync):**
-```bash
-sudo systemctl stop telcoin-validator
-sudo rm -rf /var/lib/telcoin/validator/db
-sudo systemctl start telcoin-validator
-```
+**Wipe chain data only** (keeps keys and config, forces resync) is also available as an option inside the removal script.
 
 ---
 
@@ -627,6 +591,16 @@ Store your BLS passphrase separately from the key files — in a password manage
 ---
 
 ## Changelog
+
+### v1.1.2
+- Added `remove-node.sh` — interactive node removal script
+  - Auto-detects installed nodes (observer, validator, or both) and install method (binary/source or Docker)
+  - Separate confirmations for chain data, keys, binary, source, user and group
+  - Key deletion requires typing `DELETE` to confirm — cannot be undone
+  - Wipe chain data only option (keeps keys and config, forces resync)
+  - Docker-aware — stops/removes container and optionally removes image
+- Replaced manual wipe commands in README with reference to `remove-node.sh`
+- All scripts bumped to v1.1.2
 
 ### v1.1.1
 - Added CVE-2026-31431 (Copy Fail) security check to preflight in both setup scripts
