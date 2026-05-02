@@ -68,8 +68,8 @@ show_detected() {
         [[ "$OBSERVER_DOCKER" == "true" ]] && install_type="Docker"
         print_ok "Observer node detected"
         print_info "  Install type:  ${install_type}"
-        print_info "  Service user:  ${OBSERVER_SERVICE_USER}"
-        print_info "  Service group: ${OBSERVER_SERVICE_GROUP}"
+        print_info "  Service user:  ${OBSERVER_SERVICE_USER:-unknown}"
+        print_info "  Service group: ${OBSERVER_SERVICE_GROUP:-(none)}"
         local obs_status
         obs_status=$(systemctl is-active telcoin-observer 2>/dev/null || echo "inactive")
         print_info "  Status:        ${obs_status}"
@@ -81,8 +81,8 @@ show_detected() {
         [[ "$VALIDATOR_DOCKER" == "true" ]] && install_type="Docker"
         print_ok "Validator node detected"
         print_info "  Install type:  ${install_type}"
-        print_info "  Service user:  ${VALIDATOR_SERVICE_USER}"
-        print_info "  Service group: ${VALIDATOR_SERVICE_GROUP}"
+        print_info "  Service user:  ${VALIDATOR_SERVICE_USER:-unknown}"
+        print_info "  Service group: ${VALIDATOR_SERVICE_GROUP:-(none)}"
         local val_status
         val_status=$(systemctl is-active telcoin-validator 2>/dev/null || echo "inactive")
         print_info "  Status:        ${val_status}"
