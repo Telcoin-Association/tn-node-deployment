@@ -626,8 +626,6 @@ The script checks each file individually against the latest version on GitHub an
 
 If updates are available it will ask for confirmation before downloading. `lib/common.sh` is always included in any update since all scripts depend on it.
 
-> Note: The GitHub repository must be public for the update script to work. Once the repository is made public this will work automatically.
-
 ---
 
 ## Changelog
