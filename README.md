@@ -643,6 +643,10 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.12
+- Fixed observer keytool key generation -- was missing `--external-primary-addr` and `--external-worker-addrs` flags, causing keys to be generated with `127.0.0.1` instead of `0.0.0.0`. This prevented the node from receiving consensus blocks.
+- All scripts bumped to v1.1.12
+
 ### v1.1.11
 - Fixed `check-node.sh` crash in P2P peer count -- removed multiline awk that caused issues on some systems, simplified to count all unique peers since startup
 - All scripts bumped to v1.1.11

@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.11"
+readonly SCRIPT_VERSION="1.1.12"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -376,7 +376,9 @@ step_generate_keys() {
             "$DOCKER_IMAGE" \
             telcoin keytool generate observer \
             --datadir /home/nonroot \
-            --address "$OBSERVER_ADDRESS"; then
+            --address "$OBSERVER_ADDRESS" \
+            --external-primary-addr "${primary_multiaddr}" \
+            --external-worker-addrs "${worker_multiaddr}"; then
             print_ok "Observer keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."
@@ -387,7 +389,9 @@ step_generate_keys() {
     else
         if "$BINARY_PATH" keytool generate observer \
             --datadir "$DATA_DIR" \
-            --address "$OBSERVER_ADDRESS"; then
+            --address "$OBSERVER_ADDRESS" \
+            --external-primary-addr "${primary_multiaddr}" \
+            --external-worker-addrs "${worker_multiaddr}"; then
             print_ok "Observer keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."

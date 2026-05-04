@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.11"
+readonly SCRIPT_VERSION="1.1.12"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
