@@ -643,6 +643,16 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.8
+- Fixed IPv4 binding to use `0.0.0.0` (all interfaces) instead of a specific IP address
+  - Matches official dev documentation recommendation
+  - Works correctly with home NAT, cloud VMs (GCP, AWS, etc), and dedicated servers
+  - No need to detect or configure external/public IP
+  - Removed unnecessary NAT detection logic added in v1.1.5
+- Updated `edit-config.sh` option 1 (Listener addresses) with same fix
+- Both observer and validator affected
+- All scripts bumped to v1.1.8
+
 ### v1.1.7
 - Fixed Docker service file -- added `ExecStartPre=-/usr/bin/docker rm -f` to remove stale containers before starting. Prevents exit code 125 error when container name already exists after crash or failed stop.
 - All scripts bumped to v1.1.7

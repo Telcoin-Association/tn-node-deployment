@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.7"
+readonly SCRIPT_VERSION="1.1.8"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
@@ -336,51 +336,10 @@ edit_listener_addresses() {
                 break
                 ;;
             2)
-                # Detect internal IP
-                local internal_ip
-                internal_ip=$(ip route get 8.8.8.8 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' || echo "")
-                [[ -z "$internal_ip" ]] && internal_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
-
-                echo ""
-                print_info "Internal IP detected: ${internal_ip:-unknown}"
-                echo ""
-                echo "  Is this server behind NAT or does it have a separate public/external IP?"
-                echo "  (e.g. home router, cloud VM with external IP)"
-                echo ""
-                echo "  1) Yes -- I am behind NAT or have a separate public IP"
-                echo "  2) No  -- my public IP is directly on this machine"
-                echo ""
-
-                local nat_choice
-                read -r -p "  Enter choice [1/2]: " nat_choice
-
-                local bind_ip advertise_ip
-                bind_ip="$internal_ip"
-
-                if [[ "$nat_choice" == "1" ]]; then
-                    # Behind NAT -- need public IP for advertising
-                    local detected_public
-                    detected_public=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
-                                     curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
-                                     echo "")
-                    echo ""
-                    if [[ -n "$detected_public" ]]; then
-                        print_info "Detected public IP: ${detected_public}"
-                        read -r -p "  Public IP to advertise to peers [${detected_public}]: " input
-                        advertise_ip="${input:-$detected_public}"
-                    else
-                        print_warn "Could not auto-detect public IP"
-                        read -r -p "  Enter your public IP address: " advertise_ip
-                    fi
-                    print_info "Note: Node will bind to ${bind_ip} but advertise ${advertise_ip} to peers"
-                    print_info "      Ensure UDP ${DEFAULT_P2P_PORT} and ${DEFAULT_WORKER_PORT} are forwarded to ${bind_ip} on your router"
-                else
-                    advertise_ip="$internal_ip"
-                fi
-
-                new_primary="/ip4/${advertise_ip}/udp/${DEFAULT_P2P_PORT}/quic-v1"
-                new_worker="/ip4/${advertise_ip}/udp/${DEFAULT_WORKER_PORT}/quic-v1"
-                print_ok "Binding: IPv4 (advertise: ${advertise_ip})"
+                new_primary="/ip4/0.0.0.0/udp/${DEFAULT_P2P_PORT}/quic-v1"
+                new_worker="/ip4/0.0.0.0/udp/${DEFAULT_WORKER_PORT}/quic-v1"
+                print_ok "Binding: IPv4 all interfaces (0.0.0.0)"
+                print_info "Node will accept connections on all IPv4 interfaces."
                 break
                 ;;
             3)
