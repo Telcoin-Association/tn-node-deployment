@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.13"
+readonly SCRIPT_VERSION="1.1.14"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -716,11 +716,9 @@ step_final_summary() {
         "Explorer=${EXPLORER_URL}"
 
     echo "  P2P Listener addresses (set in systemd service):"
-    echo "    Primary: ${primary_multiaddr}"
-    echo "    Worker:  ${worker_multiaddr}"
+    echo "    Primary: ${PRIMARY_MULTIADDR}"
+    echo "    Worker:  ${WORKER_MULTIADDR}"
     echo ""
-    print_info "Note: the 127.0.0.1 shown during key generation is internal only."
-    print_info "Your node actually listens on the addresses above."
     print_info "No router port forwarding is required for observer nodes."
     echo ""
     echo "  Useful commands:"

@@ -643,6 +643,10 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.14
+- Fixed final summary in setup-observer.sh -- `primary_multiaddr` unbound variable error at end of setup
+- All scripts bumped to v1.1.14
+
 ### v1.1.13
 - Fixed observer and validator setup scripts -- network binding (IPv4/IPv6) choice now happens in Step 3 so multiaddrs are set before keytool key generation. Previously keys were generated with `127.0.0.1` causing consensus failures.
 - All scripts bumped to v1.1.13
