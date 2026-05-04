@@ -643,6 +643,10 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.7
+- Fixed Docker service file -- added `ExecStartPre=-/usr/bin/docker rm -f` to remove stale containers before starting. Prevents exit code 125 error when container name already exists after crash or failed stop.
+- All scripts bumped to v1.1.7
+
 ### v1.1.6
 - Fixed `edit-config.sh` `apply_changes` crash -- added `set +e`, restart failure now shows error and returns to menu instead of exiting
 - Also shows node log file path in error message for easier debugging

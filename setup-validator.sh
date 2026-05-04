@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.6"
+readonly SCRIPT_VERSION="1.1.7"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -595,6 +595,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=root
+ExecStartPre=-/usr/bin/docker rm -f ${SERVICE_NAME}
 ExecStart=${exec_cmd}
 ExecStop=docker stop ${SERVICE_NAME}
 Restart=on-failure
