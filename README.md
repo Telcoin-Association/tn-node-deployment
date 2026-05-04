@@ -643,6 +643,11 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.6
+- Fixed `edit-config.sh` `apply_changes` crash -- added `set +e`, restart failure now shows error and returns to menu instead of exiting
+- Also shows node log file path in error message for easier debugging
+- All scripts bumped to v1.1.6
+
 ### v1.1.5
 - Added NAT/public IP awareness to IPv4 binding in both setup scripts
   - Asks whether server is behind NAT or has a separate public IP

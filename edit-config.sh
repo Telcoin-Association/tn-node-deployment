@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.5"
+readonly SCRIPT_VERSION="1.1.6"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
@@ -127,6 +127,7 @@ set_verbosity() {
 
 # Apply changes: reload systemd and optionally restart
 apply_changes() {
+    set +e  # Restart failure should not exit the script
     print_step "Applying changes..."
     systemctl daemon-reload
     print_ok "systemd reloaded"
@@ -134,18 +135,22 @@ apply_changes() {
     echo ""
     if confirm "Restart the node now to apply changes?"; then
         print_step "Restarting ${TARGET_SERVICE}..."
-        systemctl restart "$TARGET_SERVICE"
+        systemctl restart "$TARGET_SERVICE" || true
         sleep 3
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
         else
             print_error "Node failed to restart. Check logs:"
+            print_info "  sudo tail -30 /var/log/telcoin/${TARGET_SERVICE}.log"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
         fi
     else
         print_info "Changes saved. Restart the node when ready:"
         print_info "  sudo systemctl restart ${TARGET_SERVICE}"
     fi
+    echo ""
+    read -r -p "  Press Enter to return to menu..."
+    set -e
 }
 
 # =============================================================================
