@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.3"
+readonly SCRIPT_VERSION="1.1.4"
 
 RPC_URL="http://127.0.0.1:8545"
 SERVICE_NAME="telcoin-validator"
@@ -158,7 +158,12 @@ if [[ -f "$LOG_FILE" ]]; then
 fi
 
 if [[ "$IS_OBSERVER" == "true" ]]; then
-    print_info "Consensus peers: ${CONSENSUS_PEERS:-0} (expected 0 for observer nodes)"
+    if [[ -n "$CONSENSUS_PEERS" ]] && [[ "$CONSENSUS_PEERS" -gt 0 ]]; then
+        print_ok "Consensus peers: ${CONSENSUS_PEERS}"
+    else
+        print_info "Consensus peers: ${CONSENSUS_PEERS:-0}"
+        print_info "If this stays at 0 check UDP ports 49590/49594 are open inbound"
+    fi
     print_info "Unique P2P peers (last 5 min): ${P2P_RECENT}"
     if [[ ${P2P_RECENT} -gt 0 ]]; then
         print_ok "P2P activity confirms network connectivity"
@@ -168,13 +173,12 @@ if [[ "$IS_OBSERVER" == "true" ]]; then
     print_info "Note: net_peerCount via RPC reflects consensus peers only."
     print_info "      Peer data is read from log file: ${LOG_FILE}"
 else
-    # Validator -- consensus peers should be > 0 when active
+    # Validator
     if [[ -n "$CONSENSUS_PEERS" ]] && [[ $CONSENSUS_PEERS -gt 0 ]]; then
         print_ok "Consensus peers: ${CONSENSUS_PEERS}"
-    elif [[ -n "$CONSENSUS_PEERS" ]]; then
-        print_warn "Consensus peers: 0 -- validator may not yet be active in committee"
     else
-        print_warn "Could not read peer count from log file"
+        print_warn "Consensus peers: 0 -- validator may not yet be active in committee"
+        print_info "Also check UDP ports 49590/49594 are open inbound"
     fi
     print_info "Unique P2P peers (last 5 min): ${P2P_RECENT}"
     print_info "Note: Peer data is read from log file: ${LOG_FILE}"

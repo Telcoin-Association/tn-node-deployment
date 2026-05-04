@@ -480,7 +480,7 @@ Telcoin Network uses a libp2p-based P2P architecture (Narwhal/Bullshark) that di
 
 The health check reads peer data directly from the node log file to provide more meaningful information:
 
-- **Consensus peers** — from `peer metrics heartbeat` log entries. Always 0 for observers (expected). Should be > 0 for active validators.
+- **Consensus peers** — from `peer metrics heartbeat` log entries. Reflects active consensus connections. Will show 0 if UDP ports 49590/49594 are not open inbound on your firewall/router.
 - **Unique P2P peers (last 5 min)** — count of unique peer IPs seen in `new connection established` log entries in the last 5 minutes. Indicates active network connectivity. The same peer connecting multiple times is only counted once.
 
 Once the Prometheus metrics endpoint (port 9000) is functional in a future binary release, the health check will be updated to use it for more accurate real-time peer data.
@@ -642,6 +642,11 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 ---
 
 ## Changelog
+
+### v1.1.4
+- Fixed `check-node.sh` consensus peer messaging -- removed incorrect assumption that observer consensus peers are always 0. Consensus peers show correctly when UDP ports are open inbound. Shows helpful message if 0 suggesting to check firewall ports.
+- Updated README peer count note to reflect correct behaviour
+- All scripts bumped to v1.1.4
 
 ### v1.1.3
 - Fixed `check-node.sh` syntax error in P2P peer count -- strip whitespace from `wc -l` output and validate as number
