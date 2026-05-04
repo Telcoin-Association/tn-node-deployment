@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.8"
+readonly SCRIPT_VERSION="1.1.9"
 
 RPC_URL="http://127.0.0.1:8545"
 SERVICE_NAME="telcoin-validator"
@@ -145,14 +145,16 @@ fi
 P2P_RECENT=0
 if [[ -f "$LOG_FILE" ]]; then
     FIVE_MIN_AGO=$(date -u '+%Y-%m-%dT%H:%M' --date='5 minutes ago' 2>/dev/null | cut -c1-15)
+    NOW_MIN=$(date -u '+%Y-%m-%dT%H:%M' | cut -c1-15)
     if [[ -n "$FIVE_MIN_AGO" ]]; then
+        # Get connections from last 5 minutes using awk for reliable time range matching
         P2P_RECENT=$(sudo grep "new connection established" "$LOG_FILE" 2>/dev/null | \
-            grep "$FIVE_MIN_AGO" | \
+            awk -v from="$FIVE_MIN_AGO" -v to="$NOW_MIN" '
+                {ts=substr($1,4,15); if(ts>=from && ts<=to) print $0}
+            ' | \
             grep -oE 'send_back_addr: /ip[46]/[0-9a-f:.]+/' | \
-            sort -u | wc -l 2>/dev/null || echo "0")
-        # Strip whitespace from wc -l output
-        P2P_RECENT="${P2P_RECENT//[[:space:]]/}"
-        # Ensure it's a valid number
+            sort -u | wc -l 2>/dev/null)
+        P2P_RECENT=$(echo "$P2P_RECENT" | tr -d '[:space:]')
         [[ "$P2P_RECENT" =~ ^[0-9]+$ ]] || P2P_RECENT=0
     fi
 fi

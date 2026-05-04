@@ -643,6 +643,10 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.9
+- Fixed `check-node.sh` P2P peer count showing `00` instead of `0` on fresh nodes -- improved timestamp range matching using awk instead of grep pattern
+- All scripts bumped to v1.1.9
+
 ### v1.1.8
 - Fixed IPv4 binding to use `0.0.0.0` (all interfaces) instead of a specific IP address
   - Matches official dev documentation recommendation
