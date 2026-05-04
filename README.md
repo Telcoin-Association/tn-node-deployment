@@ -643,6 +643,16 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.3
+- Fixed `check-node.sh` syntax error in P2P peer count -- strip whitespace from `wc -l` output and validate as number
+- Fixed `remove-node.sh` crash on Docker installs -- added `set +e` to detection functions, show `(none)` for empty service group
+- Fixed `edit-config.sh` crash -- added `set +e` to `show_current_config`, fixed Docker image detection regex
+- Fixed `setup-observer.sh` and `setup-validator.sh` -- write `.node-meta` file so `remove-node.sh` can find host service user on Docker installs
+- Added `install.sh` -- one-command installer for fresh machines
+- Added `SCRIPT_VERSION` to `check-node.sh` and `COMMON_VERSION` to `lib/common.sh` for update tracking
+- Updated README quick start with both install methods (one-liner and manual)
+- All scripts bumped to v1.1.3
+
 ### v1.1.2
 - Added `install.sh` — one-command installer for fresh machines via `curl` or `wget`
 - Added `remove-node.sh` — interactive node removal script

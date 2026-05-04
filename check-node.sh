@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.2"
+readonly SCRIPT_VERSION="1.1.3"
 
 RPC_URL="http://127.0.0.1:8545"
 SERVICE_NAME="telcoin-validator"
@@ -149,7 +149,11 @@ if [[ -f "$LOG_FILE" ]]; then
         P2P_RECENT=$(sudo grep "new connection established" "$LOG_FILE" 2>/dev/null | \
             grep "$FIVE_MIN_AGO" | \
             grep -oE 'send_back_addr: /ip[46]/[0-9a-f:.]+/' | \
-            sort -u | wc -l || echo "0")
+            sort -u | wc -l 2>/dev/null || echo "0")
+        # Strip whitespace from wc -l output
+        P2P_RECENT="${P2P_RECENT//[[:space:]]/}"
+        # Ensure it's a valid number
+        [[ "$P2P_RECENT" =~ ^[0-9]+$ ]] || P2P_RECENT=0
     fi
 fi
 
