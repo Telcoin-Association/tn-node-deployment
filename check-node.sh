@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.10"
+readonly SCRIPT_VERSION="1.1.11"
 
 RPC_URL="http://127.0.0.1:8545"
 SERVICE_NAME="telcoin-validator"
@@ -141,22 +141,14 @@ if [[ -f "$LOG_FILE" ]]; then
         tail -1 | grep -o "connected_count=[0-9]*" | cut -d= -f2)
 fi
 
-# Get unique P2P peers in last 5 minutes from log file
+# Get unique P2P peers since node started from log file
 P2P_RECENT=0
 if [[ -f "$LOG_FILE" ]]; then
-    FIVE_MIN_AGO=$(date -u '+%Y-%m-%dT%H:%M' --date='5 minutes ago' 2>/dev/null | cut -c1-15)
-    NOW_MIN=$(date -u '+%Y-%m-%dT%H:%M' | cut -c1-15)
-    if [[ -n "$FIVE_MIN_AGO" ]]; then
-        # Get connections from last 5 minutes using awk for reliable time range matching
-        P2P_RECENT=$(grep "new connection established" "$LOG_FILE" 2>/dev/null | \
-            awk -v from="$FIVE_MIN_AGO" -v to="$NOW_MIN" '
-                {ts=substr($1,4,15); if(ts>=from && ts<=to) print $0}
-            ' | \
-            grep -oE 'send_back_addr: /ip[46]/[0-9a-f:.]+/' | \
-            sort -u | wc -l 2>/dev/null)
-        P2P_RECENT=$(echo "$P2P_RECENT" | tr -d '[:space:]')
-        [[ "$P2P_RECENT" =~ ^[0-9]+$ ]] || P2P_RECENT=0
-    fi
+    P2P_RECENT=$(grep "new connection established" "$LOG_FILE" 2>/dev/null | \
+        grep -oE 'send_back_addr: /ip[46]/[0-9a-f:.]+/' | \
+        sort -u | wc -l 2>/dev/null || echo "0")
+    P2P_RECENT=$(echo "$P2P_RECENT" | tr -d '[:space:]')
+    [[ "$P2P_RECENT" =~ ^[0-9]+$ ]] || P2P_RECENT=0
 fi
 
 if [[ "$IS_OBSERVER" == "true" ]]; then
@@ -166,7 +158,7 @@ if [[ "$IS_OBSERVER" == "true" ]]; then
         print_info "Consensus peers: ${CONSENSUS_PEERS:-0}"
         print_info "If this stays at 0 check UDP ports 49590/49594 are open inbound"
     fi
-    print_info "Unique P2P peers (last 5 min): ${P2P_RECENT}"
+    print_info "Unique P2P peers (since startup): ${P2P_RECENT}"
     if [[ ${P2P_RECENT} -gt 0 ]]; then
         print_ok "P2P activity confirms network connectivity"
     else
@@ -182,7 +174,7 @@ else
         print_warn "Consensus peers: 0 -- validator may not yet be active in committee"
         print_info "Also check UDP ports 49590/49594 are open inbound"
     fi
-    print_info "Unique P2P peers (last 5 min): ${P2P_RECENT}"
+    print_info "Unique P2P peers (since startup): ${P2P_RECENT}"
     print_info "Note: Peer data is read from log file: ${LOG_FILE}"
 fi
 
