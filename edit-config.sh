@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.4"
+readonly SCRIPT_VERSION="1.1.5"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
@@ -293,39 +293,89 @@ show_current_config() {
 # =============================================================================
 
 edit_listener_addresses() {
+    set +e
     print_header "Edit Listener Addresses"
 
-    local current_primary current_worker
-    current_primary=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
-    current_worker=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
+    local exec_start
+    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
 
-    print_info "Current primary: ${current_primary}"
-    print_info "Current worker:  ${current_worker}"
+    local current_primary current_worker
+    current_primary=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
+    if [[ -z "$current_primary" ]]; then
+        current_primary=$(echo "$exec_start" | grep -oE 'PRIMARY_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+    fi
+    current_worker=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
+    if [[ -z "$current_worker" ]]; then
+        current_worker=$(echo "$exec_start" | grep -oE 'WORKER_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+    fi
+
+    print_info "Current primary: ${current_primary:-unknown}"
+    print_info "Current worker:  ${current_worker:-unknown}"
     echo ""
     print_info "Choose new binding:"
     echo ""
-    echo "  1) IPv6  -- listen on all IPv6 interfaces"
-    echo "              NAT-free, no router port forward needed"
-    echo ""
-    echo "  2) IPv4  -- listen on a specific IPv4 address"
-    echo "              requires UDP ports ${DEFAULT_P2P_PORT} and ${DEFAULT_WORKER_PORT} forwarded on your router"
-    echo ""
+    echo "  1) IPv6   -- listen on all IPv6 interfaces (NAT-free, recommended for cloud)"
+    echo "  2) IPv4   -- listen on IPv4 (home/NAT or dedicated server)"
     echo "  3) Custom -- enter multiaddrs manually"
     echo ""
 
+    local new_primary new_worker
     local choice
     while true; do
         read -r -p "  Enter choice [1/2/3]: " choice
         case "$choice" in
             1)
-                local new_primary="/ip6/::/udp/${DEFAULT_P2P_PORT}/quic-v1"
-                local new_worker="/ip6/::/udp/${DEFAULT_WORKER_PORT}/quic-v1"
+                new_primary="/ip6/::/udp/${DEFAULT_P2P_PORT}/quic-v1"
+                new_worker="/ip6/::/udp/${DEFAULT_WORKER_PORT}/quic-v1"
+                print_ok "Binding: IPv6"
                 break
                 ;;
             2)
-                select_listener_ip
-                local new_primary="/ip4/${LISTENER_IP}/udp/${DEFAULT_P2P_PORT}/quic-v1"
-                local new_worker="/ip4/${LISTENER_IP}/udp/${DEFAULT_WORKER_PORT}/quic-v1"
+                # Detect internal IP
+                local internal_ip
+                internal_ip=$(ip route get 8.8.8.8 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' || echo "")
+                [[ -z "$internal_ip" ]] && internal_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+
+                echo ""
+                print_info "Internal IP detected: ${internal_ip:-unknown}"
+                echo ""
+                echo "  Is this server behind NAT or does it have a separate public/external IP?"
+                echo "  (e.g. home router, cloud VM with external IP)"
+                echo ""
+                echo "  1) Yes -- I am behind NAT or have a separate public IP"
+                echo "  2) No  -- my public IP is directly on this machine"
+                echo ""
+
+                local nat_choice
+                read -r -p "  Enter choice [1/2]: " nat_choice
+
+                local bind_ip advertise_ip
+                bind_ip="$internal_ip"
+
+                if [[ "$nat_choice" == "1" ]]; then
+                    # Behind NAT -- need public IP for advertising
+                    local detected_public
+                    detected_public=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+                                     curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
+                                     echo "")
+                    echo ""
+                    if [[ -n "$detected_public" ]]; then
+                        print_info "Detected public IP: ${detected_public}"
+                        read -r -p "  Public IP to advertise to peers [${detected_public}]: " input
+                        advertise_ip="${input:-$detected_public}"
+                    else
+                        print_warn "Could not auto-detect public IP"
+                        read -r -p "  Enter your public IP address: " advertise_ip
+                    fi
+                    print_info "Note: Node will bind to ${bind_ip} but advertise ${advertise_ip} to peers"
+                    print_info "      Ensure UDP ${DEFAULT_P2P_PORT} and ${DEFAULT_WORKER_PORT} are forwarded to ${bind_ip} on your router"
+                else
+                    advertise_ip="$internal_ip"
+                fi
+
+                new_primary="/ip4/${advertise_ip}/udp/${DEFAULT_P2P_PORT}/quic-v1"
+                new_worker="/ip4/${advertise_ip}/udp/${DEFAULT_WORKER_PORT}/quic-v1"
+                print_ok "Binding: IPv4 (advertise: ${advertise_ip})"
                 break
                 ;;
             3)
@@ -337,11 +387,20 @@ edit_listener_addresses() {
         esac
     done
 
-    set_env_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" "$TARGET_SERVICE_FILE"
-    set_env_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"  "$TARGET_SERVICE_FILE"
+    # Update service file -- handle both binary and Docker installs
+    if echo "$exec_start" | grep -qF "docker run"; then
+        # Docker -- update ExecStart directly using perl
+        perl -i -pe "s|PRIMARY_LISTENER_MULTIADDR=[^ ]+|PRIMARY_LISTENER_MULTIADDR=${new_primary}|g" "$TARGET_SERVICE_FILE"
+        perl -i -pe "s|WORKER_LISTENER_MULTIADDR=[^ ]+|WORKER_LISTENER_MULTIADDR=${new_worker}|g" "$TARGET_SERVICE_FILE"
+    else
+        set_env_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" "$TARGET_SERVICE_FILE"
+        set_env_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"  "$TARGET_SERVICE_FILE"
+    fi
+
     print_ok "Listener addresses updated"
     print_info "Primary: ${new_primary}"
     print_info "Worker:  ${new_worker}"
+    set -e
     apply_changes
 }
 

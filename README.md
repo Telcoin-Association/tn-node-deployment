@@ -643,6 +643,15 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.5
+- Added NAT/public IP awareness to IPv4 binding in both setup scripts
+  - Asks whether server is behind NAT or has a separate public IP
+  - Auto-detects public IP and uses it for advertising to peers
+  - Node binds to internal IP but advertises public IP so peers can connect
+  - Applies to both observer and validator setup
+- Fixed `edit-config.sh` option 1 (Listener addresses) crash -- added `set +e`, fixed Docker multiaddr reading/writing, added NAT awareness
+- All scripts bumped to v1.1.5
+
 ### v1.1.4
 - Fixed `check-node.sh` consensus peer messaging -- removed incorrect assumption that observer consensus peers are always 0. Consensus peers show correctly when UDP ports are open inbound. Shows helpful message if 0 suggesting to check firewall ports.
 - Updated README peer count note to reflect correct behaviour

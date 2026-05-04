@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.4"
+readonly SCRIPT_VERSION="1.1.5"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -544,12 +544,12 @@ step_create_service() {
                 break
                 ;;
             2)
-                # Detect internal IP for IPv4 binding
-                select_listener_ip
-                primary_multiaddr="/ip4/${LISTENER_IP}/udp/${P2P_PORT}/quic-v1"
-                worker_multiaddr="/ip4/${LISTENER_IP}/udp/${WORKER_PORT}/quic-v1"
-                print_ok "Binding: IPv4 (${LISTENER_IP})"
-                print_info "Ensure UDP ports ${P2P_PORT} and ${WORKER_PORT} are forwarded to this server on your router."
+                # Detect IP -- ask about NAT/public IP
+                select_ipv4_binding
+                primary_multiaddr="/ip4/${ADVERTISE_IP}/udp/${P2P_PORT}/quic-v1"
+                worker_multiaddr="/ip4/${ADVERTISE_IP}/udp/${WORKER_PORT}/quic-v1"
+                print_ok "Binding: IPv4 (${ADVERTISE_IP})"
+                print_info "Ensure UDP ports ${P2P_PORT} and ${WORKER_PORT} are forwarded to this server."
                 break
                 ;;
             *)

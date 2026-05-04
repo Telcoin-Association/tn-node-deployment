@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.4"
+readonly COMMON_VERSION="1.1.5"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -614,6 +614,61 @@ detect_internal_ip() {
 
 # Ask the operator to confirm or enter the listener IP address.
 # Sets the global variable: LISTENER_IP
+select_ipv4_binding() {
+    # Sets BIND_IP (for listening) and ADVERTISE_IP (for advertising to peers)
+    # These may differ when behind NAT or on a cloud VM
+
+    # Detect internal IP
+    local internal_ip
+    internal_ip=$(ip route get 8.8.8.8 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' || echo "")
+    [[ -z "$internal_ip" ]] && internal_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+
+    print_info "Detected internal IP: ${internal_ip:-unknown}"
+    echo ""
+    echo "  Is this server behind NAT or does it have a separate public/external IP?"
+    echo "  (e.g. home router, cloud VM with external IP assigned separately)"
+    echo ""
+    echo "  1) Yes -- I am behind NAT or have a separate public IP"
+    echo "  2) No  -- my public IP is directly on this machine"
+    echo ""
+
+    local nat_choice
+    while true; do
+        read -r -p "  Enter choice [1/2]: " nat_choice
+        case "$nat_choice" in
+            1|2) break ;;
+            *) print_warn "Please enter 1 or 2." ;;
+        esac
+    done
+
+    BIND_IP="$internal_ip"
+
+    if [[ "$nat_choice" == "1" ]]; then
+        # Behind NAT -- detect and ask for public IP
+        local detected_public
+        detected_public=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+                         curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
+                         echo "")
+        echo ""
+        if [[ -n "$detected_public" ]]; then
+            print_info "Detected public IP: ${detected_public}"
+            read -r -p "  Public IP to advertise to peers [${detected_public}]: " input
+            ADVERTISE_IP="${input:-$detected_public}"
+        else
+            print_warn "Could not auto-detect public IP"
+            read -r -p "  Enter your public IP address: " ADVERTISE_IP
+        fi
+        echo ""
+        print_info "Node will listen on ${BIND_IP} and advertise ${ADVERTISE_IP} to peers"
+        print_info "Ensure UDP ports are forwarded from your router/firewall to ${BIND_IP}"
+    else
+        ADVERTISE_IP="$internal_ip"
+        print_info "Using ${ADVERTISE_IP} for both binding and advertising"
+    fi
+
+    LISTENER_IP="$ADVERTISE_IP"
+}
+
 select_listener_ip() {
     local detected_ip
     detected_ip=$(detect_internal_ip)
