@@ -8,6 +8,7 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 
 | File | Purpose |
 |---|---|
+| `install.sh` | One-command installer for fresh machines |
 | `setup-observer.sh` | Full guided setup for an observer node |
 | `setup-validator.sh` | Full guided setup for a validator node |
 | `check-node.sh` | Health check for any running node |
@@ -87,30 +88,42 @@ The scripts will install or check for everything needed. You do not need to inst
 
 ## Quick Start
 
-**1. Copy the scripts to your server**
+### Installing the scripts
 
-From Windows Command Prompt:
+On a fresh Linux machine run this single command to download and install all scripts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main/install.sh | bash
+```
+
+Or with wget:
+```bash
+wget -qO- https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main/install.sh | bash
+```
+
+Or clone the repo directly:
+```bash
+git clone https://github.com/Telcoin-Association/tn-node-deployment.git ~/telcoin-node-scripts
+chmod +x ~/telcoin-node-scripts/*.sh
+```
+
+### Running the setup
+
+**1. Install the scripts**
+
+The quickest way on a fresh Linux machine is the one-liner above. Alternatively, copy scripts manually from Windows:
+
 ```
 scp -r "C:\path\to\telcoin-node-scripts" user@YOUR_SERVER_IP:~/
 ```
 
-From Linux/Mac terminal:
-```
-scp -r ./telcoin-node-scripts user@YOUR_SERVER_IP:~/
-```
-
-**2. Make the scripts executable**
+Or from Linux/Mac:
 ```bash
-chmod +x ~/telcoin-node-scripts/setup-observer.sh
-chmod +x ~/telcoin-node-scripts/setup-validator.sh
-chmod +x ~/telcoin-node-scripts/check-node.sh
-chmod +x ~/telcoin-node-scripts/edit-config.sh
-chmod +x ~/telcoin-node-scripts/firewall-setup.sh
-chmod +x ~/telcoin-node-scripts/remove-node.sh
-chmod +x ~/telcoin-node-scripts/update-scripts.sh
+scp -r ./telcoin-node-scripts user@YOUR_SERVER_IP:~/
+chmod +x ~/telcoin-node-scripts/*.sh
 ```
 
-**3. Run the setup**
+**2. Run the setup**
 ```bash
 # For an observer node
 sudo bash ~/telcoin-node-scripts/setup-observer.sh
@@ -119,12 +132,12 @@ sudo bash ~/telcoin-node-scripts/setup-observer.sh
 sudo bash ~/telcoin-node-scripts/setup-validator.sh
 ```
 
-**4. Harden your firewall (recommended)**
+**3. Harden your firewall (recommended)**
 ```bash
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ```
 
-**5. Edit configuration after setup (optional)**
+**4. Edit configuration after setup (optional)**
 ```bash
 sudo bash ~/telcoin-node-scripts/edit-config.sh
 ```
