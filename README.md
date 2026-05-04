@@ -644,6 +644,7 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 ## Changelog
 
 ### v1.1.2
+- Added `install.sh` — one-command installer for fresh machines via `curl` or `wget`
 - Added `remove-node.sh` — interactive node removal script
   - Auto-detects installed nodes (observer, validator, or both) and install method (binary/source or Docker)
   - Separate confirmations for chain data, keys, binary, source, user and group
