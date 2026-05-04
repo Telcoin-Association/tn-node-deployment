@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.12"
+readonly SCRIPT_VERSION="1.1.13"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -129,6 +129,33 @@ step_config() {
     fi
 
     print_ok "Configuration set"
+
+    # Set listener multiaddrs now so they're available for key generation
+    echo ""
+    echo "  Network binding:"
+    echo ""
+    echo "  1) IPv6  -- listen on all IPv6 interfaces (NAT-free, recommended for cloud)"
+    echo "  2) IPv4  -- listen on all IPv4 interfaces (0.0.0.0, works with NAT and cloud VMs)"
+    echo ""
+    local bind_choice
+    while true; do
+        read -r -p "  Enter choice [1/2]: " bind_choice
+        case "$bind_choice" in
+            1)
+                PRIMARY_MULTIADDR="/ip6/::/udp/${P2P_PORT}/quic-v1"
+                WORKER_MULTIADDR="/ip6/::/udp/${WORKER_PORT}/quic-v1"
+                print_ok "Binding: IPv6"
+                break
+                ;;
+            2)
+                PRIMARY_MULTIADDR="/ip4/0.0.0.0/udp/${P2P_PORT}/quic-v1"
+                WORKER_MULTIADDR="/ip4/0.0.0.0/udp/${WORKER_PORT}/quic-v1"
+                print_ok "Binding: IPv4 (0.0.0.0)"
+                break
+                ;;
+            *) print_warn "Please enter 1 or 2." ;;
+        esac
+    done
 }
 
 step_install_binary() {
@@ -476,39 +503,11 @@ step_create_service() {
     RPC_PORT=$(( 8545 - (instance - 1) ))
     print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}"
 
-    # --- Network binding selection ---
-    echo ""
-    echo "  Network binding -- how the node listens for P2P connections:"
-    echo ""
-    echo "  1) IPv6  -- listen on all IPv6 interfaces"
-    echo "              NAT-free, no router port forward needed"
-    echo ""
-    echo "  2) IPv4  -- listen on a specific IPv4 address"
-    echo "              requires UDP ports 49590 and 49594 forwarded on your router"
-    echo ""
+    # --- Network binding -- already selected during key generation ---
+    local primary_multiaddr="$PRIMARY_MULTIADDR"
+    local worker_multiaddr="$WORKER_MULTIADDR"
+    print_info "P2P binding: ${primary_multiaddr}"
 
-    local bind_choice
-    while true; do
-        read -r -p "  Enter choice [1/2]: " bind_choice
-        case "$bind_choice" in
-            1)
-                local primary_multiaddr="/ip6/::/udp/${P2P_PORT}/quic-v1"
-                local worker_multiaddr="/ip6/::/udp/${WORKER_PORT}/quic-v1"
-                print_ok "Binding: IPv6"
-                break
-                ;;
-            2)
-                local primary_multiaddr="/ip4/0.0.0.0/udp/${P2P_PORT}/quic-v1"
-                local worker_multiaddr="/ip4/0.0.0.0/udp/${WORKER_PORT}/quic-v1"
-                print_ok "Binding: IPv4 all interfaces (0.0.0.0)"
-                print_info "Node will accept connections on all IPv4 interfaces."
-                break
-                ;;
-            *)
-                print_warn "Please enter 1 or 2."
-                ;;
-        esac
-    done
     local metrics_addr="127.0.0.1:${METRICS_PORT}"
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
 

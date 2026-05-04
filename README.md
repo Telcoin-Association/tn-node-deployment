@@ -643,6 +643,10 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.13
+- Fixed observer and validator setup scripts -- network binding (IPv4/IPv6) choice now happens in Step 3 so multiaddrs are set before keytool key generation. Previously keys were generated with `127.0.0.1` causing consensus failures.
+- All scripts bumped to v1.1.13
+
 ### v1.1.12
 - Fixed observer keytool key generation -- was missing `--external-primary-addr` and `--external-worker-addrs` flags, causing keys to be generated with `127.0.0.1` instead of `0.0.0.0`. This prevented the node from receiving consensus blocks.
 - All scripts bumped to v1.1.12
