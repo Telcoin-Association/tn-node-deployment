@@ -643,6 +643,10 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ## Changelog
 
+### v1.1.10
+- Fixed `check-node.sh` crashing at peer check on machines where sudo requires a password -- log file is world-readable so sudo is not needed
+- All scripts bumped to v1.1.10
+
 ### v1.1.9
 - Fixed `check-node.sh` P2P peer count showing `00` instead of `0` on fresh nodes -- improved timestamp range matching using awk instead of grep pattern
 - All scripts bumped to v1.1.9

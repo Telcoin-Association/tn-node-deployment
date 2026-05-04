@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.9"
+readonly SCRIPT_VERSION="1.1.10"
 
 RPC_URL="http://127.0.0.1:8545"
 SERVICE_NAME="telcoin-validator"
@@ -137,7 +137,7 @@ LOG_FILE="/var/log/telcoin/${SERVICE_NAME}.log"
 # Get consensus peer count from log heartbeat
 CONSENSUS_PEERS=""
 if [[ -f "$LOG_FILE" ]]; then
-    CONSENSUS_PEERS=$(sudo grep "peer metrics heartbeat" "$LOG_FILE" 2>/dev/null | \
+    CONSENSUS_PEERS=$(grep "peer metrics heartbeat" "$LOG_FILE" 2>/dev/null | \
         tail -1 | grep -o "connected_count=[0-9]*" | cut -d= -f2)
 fi
 
@@ -148,7 +148,7 @@ if [[ -f "$LOG_FILE" ]]; then
     NOW_MIN=$(date -u '+%Y-%m-%dT%H:%M' | cut -c1-15)
     if [[ -n "$FIVE_MIN_AGO" ]]; then
         # Get connections from last 5 minutes using awk for reliable time range matching
-        P2P_RECENT=$(sudo grep "new connection established" "$LOG_FILE" 2>/dev/null | \
+        P2P_RECENT=$(grep "new connection established" "$LOG_FILE" 2>/dev/null | \
             awk -v from="$FIVE_MIN_AGO" -v to="$NOW_MIN" '
                 {ts=substr($1,4,15); if(ts>=from && ts<=to) print $0}
             ' | \
