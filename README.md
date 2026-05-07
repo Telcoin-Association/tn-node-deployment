@@ -641,6 +641,110 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 
 ---
 
+## Quick Reference — Common Commands
+
+### Observer Node
+
+```bash
+# Start / stop / restart
+sudo systemctl start telcoin-observer
+sudo systemctl stop telcoin-observer
+sudo systemctl restart telcoin-observer
+
+# Enable / disable auto-start on boot
+sudo systemctl enable telcoin-observer
+sudo systemctl disable telcoin-observer
+
+# Reset after too many failed restarts
+sudo systemctl reset-failed telcoin-observer
+
+# View live logs (file)
+sudo tail -f /var/log/telcoin/telcoin-observer.log
+
+# View live logs (journalctl)
+journalctl -u telcoin-observer -f
+
+# Check consensus blocks
+sudo docker logs telcoin-observer 2>&1 | grep "got new consensus" | tail -5
+
+# Check peer connections
+sudo docker logs telcoin-observer 2>&1 | grep "connected_count" | tail -5
+
+# Health check
+bash ~/telcoin-node-scripts/check-node.sh --observer
+
+# Edit config
+sudo bash ~/telcoin-node-scripts/edit-config.sh
+```
+
+### Validator Node
+
+```bash
+# Start / stop / restart
+sudo systemctl start telcoin-validator
+sudo systemctl stop telcoin-validator
+sudo systemctl restart telcoin-validator
+
+# Enable / disable auto-start on boot
+sudo systemctl enable telcoin-validator
+sudo systemctl disable telcoin-validator
+
+# Reset after too many failed restarts
+sudo systemctl reset-failed telcoin-validator
+
+# View live logs (file)
+sudo tail -f /var/log/telcoin/telcoin-validator.log
+
+# View live logs (journalctl)
+journalctl -u telcoin-validator -f
+
+# Check consensus blocks
+sudo docker logs telcoin-validator 2>&1 | grep "got new consensus" | tail -5
+
+# Check peer connections
+sudo docker logs telcoin-validator 2>&1 | grep "connected_count" | tail -5
+
+# Health check
+bash ~/telcoin-node-scripts/check-node.sh --validator
+
+# Edit config
+sudo bash ~/telcoin-node-scripts/edit-config.sh
+```
+
+### RPC Queries
+
+```bash
+# Check sync status
+curl -s -X POST -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  http://127.0.0.1:8541
+
+# Get latest block (observer)
+curl -s -X POST -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+  http://127.0.0.1:8541
+
+# Get chain ID
+curl -s -X POST -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+  http://127.0.0.1:8541
+```
+
+### Scripts
+
+```bash
+# Update scripts to latest version
+bash ~/telcoin-node-scripts/update-scripts.sh
+
+# Remove a node
+sudo bash ~/telcoin-node-scripts/remove-node.sh
+
+# Firewall management
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh
+```
+
+---
+
 ## Changelog
 
 ### v1.1.16
