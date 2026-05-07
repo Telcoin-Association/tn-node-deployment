@@ -558,7 +558,7 @@ When prompted during setup you can choose how to obtain the `telcoin-network` bi
 
 When Docker is selected the script will:
 - Install Docker if not already present
-- Ask for the full image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.8.1-adiri`)
+- Ask for the full image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.0-adiri`)
 - Pull the image
 - Create the host service user with UID 1101 to match the container's internal `nonroot` user
 - Generate keys using the Docker image
@@ -642,6 +642,10 @@ If updates are available it will ask for confirmation before downloading. `lib/c
 ---
 
 ## Changelog
+
+### v1.1.15
+- Updated default Docker image to `v0.9.0-adiri`
+- All scripts bumped to v1.1.15
 
 ### v1.1.14
 - Fixed final summary in setup-observer.sh -- `primary_multiaddr` unbound variable error at end of setup
