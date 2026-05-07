@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.15"
+readonly SCRIPT_VERSION="1.1.16"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -251,8 +251,8 @@ setup_docker() {
 
     local input
     read -r -p "  Docker image (press Enter to accept default)
-  [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.0-adiri]: " input
-    DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.0-adiri}"
+  [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.1-adiri]: " input
+    DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.1-adiri}"
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
     if ! docker pull "$DOCKER_IMAGE"; then
