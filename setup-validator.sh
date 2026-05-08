@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.17"
+readonly SCRIPT_VERSION="1.1.18"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -27,6 +27,8 @@ INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 VALIDATOR_ADDRESS=""
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
+PRIMARY_LISTENER_MULTIADDR=""
+WORKER_LISTENER_MULTIADDR=""
 P2P_PORT="$DEFAULT_P2P_PORT"
 WORKER_PORT="$DEFAULT_WORKER_PORT"
 RPC_PORT="$DEFAULT_RPC_PORT"
@@ -129,33 +131,6 @@ step_config() {
     fi
 
     print_ok "Configuration set"
-
-    # Set listener multiaddrs now so they're available for key generation
-    echo ""
-    echo "  Network binding:"
-    echo ""
-    echo "  1) IPv6  -- listen on all IPv6 interfaces (NAT-free, recommended for cloud)"
-    echo "  2) IPv4  -- listen on all IPv4 interfaces (0.0.0.0, works with NAT and cloud VMs)"
-    echo ""
-    local bind_choice
-    while true; do
-        read -r -p "  Enter choice [1/2]: " bind_choice
-        case "$bind_choice" in
-            1)
-                PRIMARY_MULTIADDR="/ip6/::/udp/${P2P_PORT}/quic-v1"
-                WORKER_MULTIADDR="/ip6/::/udp/${WORKER_PORT}/quic-v1"
-                print_ok "Binding: IPv6"
-                break
-                ;;
-            2)
-                PRIMARY_MULTIADDR="/ip4/0.0.0.0/udp/${P2P_PORT}/quic-v1"
-                WORKER_MULTIADDR="/ip4/0.0.0.0/udp/${WORKER_PORT}/quic-v1"
-                print_ok "Binding: IPv4 (0.0.0.0)"
-                break
-                ;;
-            *) print_warn "Please enter 1 or 2." ;;
-        esac
-    done
 }
 
 step_install_binary() {
@@ -192,6 +167,30 @@ install_from_source() {
         git clone --recurse-submodules "$TN_REPO" "$source_dir"
     fi
 
+
+    # Ensure C/C++ build dependencies are present before invoking cargo.
+    print_step "Checking source build dependencies..."
+    local build_deps=("build-essential" "cmake" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
+    local missing_deps=()
+    for _dep in "${build_deps[@]}"; do
+        if ! dpkg -l "$_dep" 2>/dev/null | grep -q "^ii"; then
+            missing_deps+=("$_dep")
+        fi
+    done
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        print_warn "Missing build dependencies: ${missing_deps[*]}"
+        if confirm "Install missing packages now?"; then
+            update_package_index
+            for _dep in "${missing_deps[@]}"; do
+                install_package "$_dep"
+            done
+        else
+            print_error "Required build dependencies not installed. Cannot build from source."
+            exit 1
+        fi
+    else
+        print_ok "Build dependencies present"
+    fi
 
     print_info "Building release binary (this takes 20-40 minutes)..."
     cd "$source_dir"
@@ -353,16 +352,48 @@ step_generate_keys() {
         print_warn "Address format looks unusual. Proceeding anyway."
     fi
 
+    # External (advertised) address -- what peers use to connect to this node.
+    # On GCP/cloud the public IP is NAT'd and not assigned to the NIC directly.
     local public_ip
-    public_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "0.0.0.0")
+    public_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
+    if [[ -z "$public_ip" ]]; then
+        print_warn "Could not auto-detect public IP."
+        read -r -p "  Enter your public/external IP address: " public_ip
+    else
+        print_info "Detected public IP: ${public_ip}"
+    fi
 
+    echo ""
+    echo "  External addresses (advertised to peers -- use your public/external IP):"
     local default_primary="/ip4/${public_ip}/udp/${P2P_PORT}/quic-v1"
-    read -r -p "  Primary listener multiaddr [${default_primary}]: " input
+    read -r -p "  External primary addr [${default_primary}]: " input
     PRIMARY_MULTIADDR="${input:-$default_primary}"
 
     local default_worker="/ip4/${public_ip}/udp/${WORKER_PORT}/quic-v1"
-    read -r -p "  Worker listener multiaddr  [${default_worker}]: " input
+    read -r -p "  External worker addr  [${default_worker}]: " input
     WORKER_MULTIADDR="${input:-$default_worker}"
+
+    # Listener (bind) address -- what libp2p binds to on this host.
+    # On GCP/cloud VMs the NIC only has the internal IP; binding to the public IP fails.
+    local internal_ip
+    internal_ip=$(detect_internal_ip)
+    if [[ -z "$internal_ip" ]]; then
+        print_warn "Could not auto-detect internal IP."
+        read -r -p "  Enter your internal/NIC IP address: " internal_ip
+        internal_ip="${internal_ip:-0.0.0.0}"
+    else
+        print_info "Detected internal IP: ${internal_ip}"
+    fi
+
+    echo ""
+    echo "  Listener addresses (what the node binds to -- use your internal/NIC IP):"
+    local default_listener_primary="/ip4/${internal_ip}/udp/${P2P_PORT}/quic-v1"
+    read -r -p "  Listener primary addr [${default_listener_primary}]: " input
+    PRIMARY_LISTENER_MULTIADDR="${input:-$default_listener_primary}"
+
+    local default_listener_worker="/ip4/${internal_ip}/udp/${WORKER_PORT}/quic-v1"
+    read -r -p "  Listener worker addr  [${default_listener_worker}]: " input
+    WORKER_LISTENER_MULTIADDR="${input:-$default_listener_worker}"
 
     echo ""
     print_warn "Set a passphrase to encrypt your BLS validator key."
@@ -504,9 +535,11 @@ step_create_service() {
     print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}"
 
     # --- Network binding -- already selected during key generation ---
-    local primary_multiaddr="$PRIMARY_MULTIADDR"
-    local worker_multiaddr="$WORKER_MULTIADDR"
-    print_info "P2P binding: ${primary_multiaddr}"
+    # PRIMARY_LISTENER_MULTIADDR / WORKER_LISTENER_MULTIADDR bind to the internal NIC IP.
+    # PRIMARY_MULTIADDR / WORKER_MULTIADDR are the external addrs embedded in the node keys.
+    local primary_multiaddr="$PRIMARY_LISTENER_MULTIADDR"
+    local worker_multiaddr="$WORKER_LISTENER_MULTIADDR"
+    print_info "P2P listener (internal): ${primary_multiaddr}"
 
     local metrics_addr="127.0.0.1:${METRICS_PORT}"
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
