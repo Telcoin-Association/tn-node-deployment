@@ -747,6 +747,10 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.17
+- Fixed `edit-config.sh` refresh chain configs -- `chown` error when service group doesn't exist on the system
+- All scripts bumped to v1.1.17
+
 ### v1.1.16
 - Updated default Docker image to `v0.9.1-adiri`
 - All scripts bumped to v1.1.16

@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.16"
+readonly SCRIPT_VERSION="1.1.17"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
@@ -719,10 +719,16 @@ refresh_chain_configs() {
     cp "${chain_config_src}/parameters.yaml" "${node_data_dir}/" 2>/dev/null || true
 
     local svc_user
-    svc_user=$(grep "^User=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "telcoin")
+    svc_user=$(grep "^User=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "root")
     local svc_group
-    svc_group=$(grep "^Group=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "telcoin")
-    chown -R "${svc_user}:${svc_group}" "$node_data_dir"
+    svc_group=$(grep "^Group=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+
+    if [[ -n "$svc_group" ]] && getent group "$svc_group" &>/dev/null; then
+        chown -R "${svc_user}:${svc_group}" "$node_data_dir" 2>/dev/null || \
+            chown -R "${svc_user}" "$node_data_dir" 2>/dev/null || true
+    else
+        chown -R "${svc_user}" "$node_data_dir" 2>/dev/null || true
+    fi
     print_ok "Chain configs updated"
 
     apply_changes
