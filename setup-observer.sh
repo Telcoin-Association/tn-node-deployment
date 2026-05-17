@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.18"
+readonly SCRIPT_VERSION="1.1.19"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -159,13 +159,11 @@ step_config() {
     # Two distinct address roles:
     #   PRIMARY_MULTIADDR / WORKER_MULTIADDR      -- external (advertised to peers, public IP)
     #   PRIMARY_LISTENER_MULTIADDR / WORKER_LISTENER_MULTIADDR -- listener (NIC bind, internal IP)
-    # On GCP/cloud the public IP is NAT'd and not assigned to the NIC, so libp2p must bind to
-    # the internal IP; peers still connect via the public IP stored in the node keys.
     echo ""
     echo "  Network addresses:"
     echo ""
 
-    # External (advertised) address -- what peers use to connect to this node.
+    # External (advertised) address
     local public_ip
     public_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
     if [[ -z "$public_ip" ]]; then
@@ -185,8 +183,7 @@ step_config() {
     read -r -p "  External worker addr  [${default_worker}]: " input
     WORKER_MULTIADDR="${input:-$default_worker}"
 
-    # Listener (bind) address -- what libp2p binds to on this host.
-    # On GCP/cloud VMs the NIC only has the internal IP; binding to the public IP fails.
+    # Listener (bind) address
     local internal_ip
     internal_ip=$(detect_internal_ip)
     if [[ -z "$internal_ip" ]]; then
@@ -238,14 +235,56 @@ _install_from_source() {
     local source_dir="/opt/telcoin-source"
     if [[ -d "$source_dir/.git" ]]; then
         print_info "Updating existing source clone..."
-        git -C "$source_dir" pull
+        git -C "$source_dir" fetch --all
     else
         print_info "Cloning repository..."
         git clone --recurse-submodules "$TN_REPO" "$source_dir"
     fi
 
+    # --- Branch / tag selection ---
+    echo ""
+    print_header "Source Branch / Tag Selection"
+    echo "  Which branch or tag would you like to build from?"
+    echo ""
+    echo "  1) main (recommended -- stable release)"
+    echo "  2) Custom branch or tag (for testing unreleased fixes)"
+    echo ""
+    local branch_choice
+    while true; do
+        read -r -p "  Enter choice [1/2]: " branch_choice
+        case "$branch_choice" in
+            1|2) break ;;
+            *) print_warn "Please enter 1 or 2." ;;
+        esac
+    done
 
-    # Ensure C/C++ build dependencies are present before invoking cargo.
+    local build_ref="main"
+    if [[ "$branch_choice" == "2" ]]; then
+        echo ""
+        read -r -p "  Enter branch or tag name: " build_ref
+        build_ref="${build_ref:-main}"
+        echo ""
+        print_warn "Building from '${build_ref}' -- this may be unstable or incomplete."
+        print_warn "Only use custom branches/tags if instructed by the Telcoin dev team."
+        echo ""
+    fi
+
+    # Validate and checkout the branch/tag
+    print_step "Checking out: ${build_ref}..."
+    if ! git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
+        # Try fetching it explicitly (handles remote branches not yet locally known)
+        if git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
+           git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
+            print_ok "Checked out: ${build_ref}"
+        else
+            print_error "Branch or tag '${build_ref}' not found in repository."
+            exit 1
+        fi
+    else
+        print_ok "Checked out: ${build_ref}"
+    fi
+
+    # Ensure C/C++ build dependencies are present
     print_step "Checking source build dependencies..."
     local build_deps=("build-essential" "cmake" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
     local missing_deps=()
@@ -269,9 +308,16 @@ _install_from_source() {
         print_ok "Build dependencies present"
     fi
 
+    # Build -- always include faucet feature for testnet
+    local cargo_features=""
+    if [[ "${NETWORK:-}" == "testnet" ]]; then
+        cargo_features="--features faucet"
+        print_info "Building with testnet features: faucet"
+    fi
+
     print_info "Building release binary (this takes 20-40 minutes)..."
     cd "$source_dir"
-    cargo build --release 2>&1 | tee /tmp/tn-build.log
+    cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log
 
     local built="${source_dir}/target/release/telcoin-network"
     if [[ ! -f "$built" ]]; then
@@ -303,7 +349,6 @@ _install_prebuilt_binary() {
 _setup_docker() {
     print_header "Step 4 of 7: Docker Setup"
 
-    # Check Docker is installed
     if ! command -v docker &>/dev/null; then
         print_step "Installing Docker..."
         curl -fsSL https://get.docker.com | sh
@@ -338,13 +383,10 @@ _setup_docker() {
     fi
     print_ok "Docker image pulled: ${DOCKER_IMAGE}"
 
-    # For Docker installs the host user must use UID 1101 to match
-    # the container's internal 'nonroot' user for correct volume permissions
     DOCKER_UID=1101
     print_info "Note: Docker install requires service user UID ${DOCKER_UID}"
     print_info "      This matches the container's internal 'nonroot' user."
 
-    # Check if UID 1101 is already taken by a different user
     local existing_user
     existing_user=$(getent passwd "$DOCKER_UID" | cut -d: -f1 2>/dev/null || echo "")
     if [[ -n "$existing_user" ]] && [[ "$existing_user" != "$SERVICE_USER" ]]; then
@@ -354,10 +396,10 @@ _setup_docker() {
     fi
 
     INSTALL_METHOD="docker"
-    # Set binary path to docker for verification step compatibility
     BINARY_PATH="docker"
     print_ok "Docker setup complete"
 }
+
 _use_existing_binary() {
     print_step "Locating existing binary..."
 
@@ -397,8 +439,6 @@ step_create_infrastructure() {
 
     create_service_user
 
-    # The telcoin-network binary (built on reth) writes internal logs to
-    # ~/.cache/reth/logs/ — we need to create this for the service user
     print_step "Creating reth cache directory..."
     mkdir -p "/home/${SERVICE_USER}/.cache/reth/logs/telcoin-network-logs"
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "/home/${SERVICE_USER}"
@@ -462,8 +502,6 @@ step_generate_keys() {
             print_ok "Observer keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."
-            print_info "  Check Docker image: ${DOCKER_IMAGE}"
-            print_info "  Check ${DATA_DIR} exists"
             exit 1
         fi
     else
@@ -475,15 +513,11 @@ step_generate_keys() {
             print_ok "Observer keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."
-            print_info "  Check binary path: ${BINARY_PATH}"
-            print_info "  Check ${DATA_DIR} exists"
             exit 1
         fi
     fi
 
     unset TN_BLS_PASSPHRASE
-
-    # Fix ownership so the telcoin service user can read the keys at runtime
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$DATA_DIR"
 
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
@@ -535,20 +569,8 @@ step_write_config() {
         echo ""
         print_info "Copy these files from the Telcoin Network repo:"
         print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
-        print_info ""
-        print_info "  genesis.yaml    -> ${genesis_dir}/genesis.yaml"
-        print_info "  committee.yaml  -> ${genesis_dir}/committee.yaml"
-        print_info "  parameters.yaml -> ${DATA_DIR}/parameters.yaml"
         echo ""
         read -r -p "  Press Enter once you have copied the chain config files: "
-
-        for f in "${genesis_dir}/genesis.yaml" "${genesis_dir}/committee.yaml" "${DATA_DIR}/parameters.yaml"; do
-            if [[ -f "$f" ]]; then
-                print_ok "Found: ${f}"
-            else
-                print_warn "Missing: ${f} -- node may not start without this file."
-            fi
-        done
     fi
 
     if [[ "$ENABLE_PUBLIC_RPC" == "true" ]]; then
@@ -563,9 +585,6 @@ _write_nginx_config() {
     print_info "Writing nginx reverse proxy example to: ${nginx_snippet}"
     cat > "$nginx_snippet" <<'EOF'
 # Example nginx reverse proxy for Telcoin Network observer RPC
-# Copy to /etc/nginx/sites-available/telcoin-rpc and adapt for your domain.
-# Prerequisites: sudo apt install nginx certbot python3-certbot-nginx
-
 limit_req_zone $binary_remote_addr zone=rpc_limit:10m rate=100r/s;
 
 server {
@@ -606,9 +625,6 @@ step_create_service() {
     RPC_PORT=$(( 8545 - (instance - 1) ))
     print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}"
 
-    # --- Network binding -- already selected in step_config ---
-    # PRIMARY_LISTENER_MULTIADDR / WORKER_LISTENER_MULTIADDR bind to the internal NIC IP.
-    # PRIMARY_MULTIADDR / WORKER_MULTIADDR are the external addrs embedded in the node keys.
     local primary_multiaddr="$PRIMARY_LISTENER_MULTIADDR"
     local worker_multiaddr="$WORKER_LISTENER_MULTIADDR"
     print_info "P2P listener (internal): ${primary_multiaddr}"
@@ -616,7 +632,6 @@ step_create_service() {
     local metrics_addr="127.0.0.1:${METRICS_PORT}"
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
 
-    # Build ExecStart command -- different for Docker vs binary installs
     local exec_cmd
     local bls_pass
     bls_pass=$(cat "${passphrase_file}" 2>/dev/null || echo '')
@@ -656,8 +671,6 @@ telcoin node \
 
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
-    # For binary installs embed passphrase and multiaddrs as Environment= lines
-    # For Docker installs these are passed directly to docker run in ExecStart
     if [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
         cat > "$service_file" <<EOF
 [Unit]
@@ -689,7 +702,6 @@ StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
 WantedBy=multi-user.target
 EOF
     else
-        # Docker service -- no Environment lines needed, all passed via docker run
         cat > "$service_file" <<EOF
 [Unit]
 Description=Telcoin Network Observer Node (${CHAIN_NAME}) [Docker]
@@ -718,8 +730,6 @@ EOF
     systemctl daemon-reload
     print_ok "Service file written: ${service_file}"
 
-    # Write metadata file so remove-node.sh can find the host service user
-    # (needed for Docker installs where systemd User=root)
     local meta_file="/etc/telcoin/observer/.node-meta"
     mkdir -p "/etc/telcoin/observer"
     cat > "$meta_file" <<EOF
