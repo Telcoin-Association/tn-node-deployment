@@ -747,6 +747,17 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.19
+- Added branch/tag selection for source builds -- choose `main` (default) or enter any branch or tag name (e.g. `issue-679`) to build unreleased fixes
+- Source builds on Adiri testnet now always include `--features faucet` (required for testnet operation)
+- Both changes apply to observer and validator setup scripts
+- All scripts bumped to v1.1.19
+
+### v1.1.18
+- Internal/external IP split for source builds -- node binds listener to internal NIC IP, advertises public IP to peers (fixes GCP/cloud deployments)
+- Added source build dependency checks -- auto-detects and installs missing packages (`build-essential`, `cmake`, `libclang-16-dev`, `pkg-config`, `libssl-dev`, `libapr1-dev`)
+- All scripts bumped to v1.1.18
+
 ### v1.1.17
 - Fixed `edit-config.sh` refresh chain configs -- `chown` error when service group doesn't exist on the system
 - All scripts bumped to v1.1.17
