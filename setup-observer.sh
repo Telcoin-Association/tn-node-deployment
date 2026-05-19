@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.19"
+readonly SCRIPT_VERSION="1.1.20"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -284,9 +284,25 @@ _install_from_source() {
         print_ok "Checked out: ${build_ref}"
     fi
 
+
+    # Ensure cargo is in PATH -- it may have just been installed as root
+    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${PATH}"
+    source "${HOME}/.cargo/env" 2>/dev/null || true
+
+    # Install the exact Rust toolchain version required by this repo
+    if [[ -f "${source_dir}/rust-toolchain.toml" ]]; then
+        local required_toolchain
+        required_toolchain=$(grep "channel" "${source_dir}/rust-toolchain.toml" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [[ -n "$required_toolchain" ]]; then
+            print_info "Installing required Rust toolchain: ${required_toolchain}..."
+            rustup toolchain install "$required_toolchain" 2>/dev/null || true
+            print_ok "Rust toolchain ready: ${required_toolchain}"
+        fi
+    fi
+
     # Ensure C/C++ build dependencies are present
     print_step "Checking source build dependencies..."
-    local build_deps=("build-essential" "cmake" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
+    local build_deps=("build-essential" "cmake" "clang" "libclang-dev" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
     local missing_deps=()
     for _dep in "${build_deps[@]}"; do
         if ! dpkg -l "$_dep" 2>/dev/null | grep -q "^ii"; then

@@ -747,6 +747,12 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.20
+- Added `clang` and `libclang-dev` to source build dependency checks -- fixes `stdarg.h` not found error when building from source on fresh machines
+- Fixed cargo PATH for source builds -- cargo env is sourced correctly after Rust installation, including root cargo path fallback
+- Added automatic Rust toolchain installation -- reads `rust-toolchain.toml` from the repo and installs the required toolchain version before building
+- All scripts bumped to v1.1.20
+
 ### v1.1.19
 - Added branch/tag selection for source builds -- choose `main` (default) or enter any branch or tag name (e.g. `issue-679`) to build unreleased fixes
 - Source builds on Adiri testnet now always include `--features faucet` (required for testnet operation)
