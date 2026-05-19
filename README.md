@@ -288,28 +288,15 @@ See https://copy.fail for the official mitigation steps.
 
 ---
 
-## Security Improvements (Optional)
+## Security
 
 Binary and source installs use systemd `LoadCredential` by default (requires Ubuntu 22.04+ / systemd 247+). The passphrase is stored in a mode 600 file and loaded securely at runtime -- it never appears in `systemctl show` output or process listings. Docker installs pass the passphrase via the `-e` flag as before. For operators requiring even higher security, the following options are available.
 
-### Option 1 — systemd LoadCredential (recommended upgrade)
+### Option 1 — systemd LoadCredential (default for binary/source installs)
 
 Built into systemd (version 247+, available on Ubuntu 22.04+). Instead of embedding the passphrase directly in the service file, systemd loads it from a file and injects it into a secure temporary directory that only the service process can access. The passphrase never appears in `systemctl show` output or process listings.
 
-To switch to this approach, modify the service file:
-
-```ini
-[Service]
-# Remove the Environment="TN_BLS_PASSPHRASE=..." line and replace with:
-LoadCredential=bls-passphrase:/etc/telcoin/observer/bls-passphrase
-
-# Update ExecStart to read from the credential directory:
-ExecStart=/bin/bash -c 'TN_BLS_PASSPHRASE=$(cat $CREDENTIALS_DIRECTORY/bls-passphrase) \
-    exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin/observer \
-    --observer --instance 5 --metrics 127.0.0.1:9000 \
-    --log.stdout.format log-fmt -vvv --http'
-```
-
+The setup scripts configure this automatically for binary and source installs.
 Advantages:
 - Passphrase never embedded in the service file
 - Systemd manages the secure credential directory automatically
