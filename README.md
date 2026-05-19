@@ -290,7 +290,7 @@ See https://copy.fail for the official mitigation steps.
 
 ## Security Improvements (Optional)
 
-The default setup stores the BLS passphrase in a mode 600 file on disk and embeds it in the systemd service file. This is standard practice for unattended server services and is reasonable for most operators. However there are two options for higher security if needed.
+Binary and source installs use systemd `LoadCredential` by default (requires Ubuntu 22.04+ / systemd 247+). The passphrase is stored in a mode 600 file and loaded securely at runtime -- it never appears in `systemctl show` output or process listings. Docker installs pass the passphrase via the `-e` flag as before. For operators requiring even higher security, the following options are available.
 
 ### Option 1 — systemd LoadCredential (recommended upgrade)
 
@@ -558,7 +558,7 @@ When prompted during setup you can choose how to obtain the `telcoin-network` bi
 
 When Docker is selected the script will:
 - Install Docker if not already present
-- Ask for the full image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.1-adiri`)
+- Ask for the full image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri`)
 - Pull the image
 - Create the host service user with UID 1101 to match the container's internal `nonroot` user
 - Generate keys using the Docker image
@@ -746,6 +746,15 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ---
 
 ## Changelog
+
+### v1.1.22
+- **Security**: Binary/source installs now use systemd `LoadCredential` for BLS passphrase -- passphrase never appears in `systemctl show` output or process listings
+- **Security**: Added hard systemd version check (247+ required, Ubuntu 22.04+) -- setup exits with clear error if not met
+- **UX**: Install method selection moved to Step 1 (preflight) -- all dependencies installed upfront before configuration begins, preventing mid-setup failures
+- Updated default Docker image to `v0.9.2-adiri`
+- Added `.gitignore` to prevent helper/patch scripts from being committed to the repository
+- `edit-config.sh` passphrase edit updated to handle both LoadCredential (binary) and Docker installs correctly
+- All scripts bumped to v1.1.22
 
 ### v1.1.21
 - Removed helper scripts (`apply-v1120.sh`, `fix-toolchain-line.sh`) from repository

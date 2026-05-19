@@ -1,0 +1,3 @@
+# Helper/patch scripts
+apply-v*.sh
+fix-*.sh

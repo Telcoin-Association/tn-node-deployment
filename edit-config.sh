@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.21"
+readonly SCRIPT_VERSION="1.1.22"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
@@ -556,14 +556,22 @@ edit_bls_passphrase() {
     # Update the passphrase file
     echo "$new_pass" > "$passphrase_file"
     chmod 600 "$passphrase_file"
-    chown "${SERVICE_USER}:${SERVICE_USER}" "$passphrase_file"
+    chown "${SERVICE_USER}:${SERVICE_USER}" "$passphrase_file" 2>/dev/null || true
     print_ok "Passphrase file updated"
 
-    # Update the service file with the new literal passphrase
-    local bls_pass
-    bls_pass=$(cat "$passphrase_file")
-    sed -i "s|Environment=\"TN_BLS_PASSPHRASE=.*\"|Environment=\"TN_BLS_PASSPHRASE=${bls_pass}\"|" "$TARGET_SERVICE_FILE"
-    print_ok "Service file updated"
+    # Binary/source installs use LoadCredential -- passphrase read from file at
+    # runtime, no service file change needed.
+    # Docker installs embed passphrase in ExecStart -- update it.
+    local exec_start
+    exec_start=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" 2>/dev/null || echo "")
+    if echo "$exec_start" | grep -qF "docker run"; then
+        local bls_pass
+        bls_pass=$(cat "$passphrase_file")
+        perl -i -pe "s|TN_BLS_PASSPHRASE=[^ ]+|TN_BLS_PASSPHRASE=${bls_pass}|g" "$TARGET_SERVICE_FILE"
+        print_ok "Docker service file updated with new passphrase"
+    else
+        print_ok "Binary install -- passphrase file updated (LoadCredential reads it at runtime)"
+    fi
 
     new_pass=""
     new_pass_confirm=""

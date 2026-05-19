@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.21"
+readonly SCRIPT_VERSION="1.1.22"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -34,6 +34,7 @@ WORKER_PORT="$DEFAULT_WORKER_PORT"
 RPC_PORT="$DEFAULT_RPC_PORT"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
 TN_SOURCE_DIR="/opt/telcoin-source"
+USE_LOAD_CREDENTIAL=false
 
 # =============================================================================
 # STEPS
@@ -96,7 +97,231 @@ step_preflight() {
         fi
     done
 
+    # Check systemd version -- LoadCredential requires 247+ (Ubuntu 22.04+)
+    print_step "Checking systemd version..."
+    local systemd_ver
+    systemd_ver=$(systemctl --version 2>/dev/null | head -1 | awk '{print $2}')
+    if [[ -z "$systemd_ver" ]] || [[ "$systemd_ver" -lt 247 ]]; then
+        print_error "systemd ${systemd_ver:-unknown} detected -- version 247+ required."
+        print_info "Please upgrade to Ubuntu 22.04 LTS or later and try again."
+        exit 1
+    fi
+    print_ok "systemd ${systemd_ver} detected (247+ required)"
+    USE_LOAD_CREDENTIAL=true
+
+    # Select install method here in preflight so dependencies can be
+    # installed upfront before any configuration steps begin
+    echo ""
+    print_step "Selecting install method..."
+    select_install_method
+
+    case "$INSTALL_METHOD" in
+        source)   _preflight_source ;;
+        docker)   _preflight_docker ;;
+        existing) _preflight_existing ;;
+    esac
+
     print_ok "Pre-flight checks complete"
+}
+
+# ---------------------------------------------------------------------------
+# Preflight dependency installation per install method
+# ---------------------------------------------------------------------------
+
+_preflight_source() {
+    print_step "Installing source build dependencies..."
+
+    if ! check_rust; then
+        print_info "Installing Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+        export PATH="${HOME}/.cargo/bin:${PATH}"
+        source "${HOME}/.cargo/env" 2>/dev/null || true
+        if ! check_rust; then
+            print_error "Rust installation failed. Cannot continue."
+            exit 1
+        fi
+    fi
+
+    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${PATH}"
+    source "${HOME}/.cargo/env" 2>/dev/null || true
+
+    local build_deps=("build-essential" "cmake" "clang" "libclang-dev" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
+    local missing_deps=()
+    for _dep in "${build_deps[@]}"; do
+        if ! dpkg -l "$_dep" 2>/dev/null | grep -q "^ii"; then
+            missing_deps+=("$_dep")
+        fi
+    done
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        print_warn "Missing build dependencies: ${missing_deps[*]}"
+        if confirm "Install missing packages now?"; then
+            update_package_index
+            for _dep in "${missing_deps[@]}"; do
+                install_package "$_dep"
+            done
+        else
+            print_error "Required build dependencies not installed. Cannot build from source."
+            exit 1
+        fi
+    else
+        print_ok "Build dependencies present"
+    fi
+
+    local source_dir="/opt/telcoin-source"
+    if [[ -d "$source_dir/.git" ]]; then
+        print_info "Updating existing source clone..."
+        git -C "$source_dir" fetch --all
+    else
+        print_info "Cloning Telcoin Network repository..."
+        git clone --recurse-submodules "$TN_REPO" "$source_dir"
+    fi
+
+    echo ""
+    print_header "Source Branch / Tag Selection"
+    echo "  Which branch or tag would you like to build from?"
+    echo ""
+    echo "  1) main (recommended -- stable release)"
+    echo "  2) Custom branch or tag (for testing unreleased fixes)"
+    echo ""
+    local branch_choice
+    while true; do
+        read -r -p "  Enter choice [1/2]: " branch_choice
+        case "$branch_choice" in
+            1|2) break ;;
+            *) print_warn "Please enter 1 or 2." ;;
+        esac
+    done
+
+    local build_ref="main"
+    if [[ "$branch_choice" == "2" ]]; then
+        echo ""
+        read -r -p "  Enter branch or tag name: " build_ref
+        build_ref="${build_ref:-main}"
+        echo ""
+        print_warn "Building from '${build_ref}' -- this may be unstable or incomplete."
+        print_warn "Only use custom branches/tags if instructed by the Telcoin dev team."
+        echo ""
+    fi
+
+    print_step "Checking out: ${build_ref}..."
+    if ! git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
+        if git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
+           git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
+            print_ok "Checked out: ${build_ref}"
+        else
+            print_error "Branch or tag '${build_ref}' not found in repository."
+            exit 1
+        fi
+    else
+        print_ok "Checked out: ${build_ref}"
+    fi
+
+    if [[ -f "${source_dir}/rust-toolchain.toml" ]]; then
+        local required_toolchain
+        required_toolchain=$(grep "channel" "${source_dir}/rust-toolchain.toml" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [[ -n "$required_toolchain" ]]; then
+            print_info "Installing required Rust toolchain: ${required_toolchain}..."
+            rustup toolchain install "$required_toolchain" 2>/dev/null || true
+            print_ok "Rust toolchain ready: ${required_toolchain}"
+        fi
+    fi
+
+    local cargo_features=""
+    if [[ "${NETWORK:-}" == "testnet" ]]; then
+        cargo_features="--features faucet"
+        print_info "Building with testnet features: faucet"
+    fi
+
+    print_info "Building release binary (this takes 20-40 minutes)..."
+    cd "$source_dir"
+    cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log
+
+    local built="${source_dir}/target/release/telcoin-network"
+    if [[ ! -f "$built" ]]; then
+        print_error "Build failed. See /tmp/tn-build.log"
+        exit 1
+    fi
+
+    mkdir -p "$INSTALL_DIR"
+    cp "$built" "${INSTALL_DIR}/telcoin-network"
+    chmod +x "${INSTALL_DIR}/telcoin-network"
+    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
+    print_ok "Binary installed: ${BINARY_PATH}"
+}
+
+_preflight_docker() {
+    print_step "Setting up Docker..."
+
+    if ! command -v docker &>/dev/null; then
+        print_info "Installing Docker..."
+        curl -fsSL https://get.docker.com | sh
+        if ! command -v docker &>/dev/null; then
+            print_error "Docker installation failed. Please install Docker manually."
+            exit 1
+        fi
+        print_ok "Docker installed"
+    else
+        print_ok "Docker is installed"
+    fi
+
+    echo ""
+    print_info "The official Telcoin Network Docker image is hosted at:"
+    print_info "  us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+    echo ""
+    print_info "Enter the full image URL including tag."
+    print_info "Check for the latest tag at:"
+    print_info "  https://console.cloud.google.com/artifacts/docker/telcoin-network/us/tn-public/adiri"
+    echo ""
+
+    local input
+    read -r -p "  Docker image (press Enter to accept default)
+  [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri]: " input
+    DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+
+    print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
+    if ! docker pull "$DOCKER_IMAGE"; then
+        print_error "Failed to pull Docker image: ${DOCKER_IMAGE}"
+        exit 1
+    fi
+    print_ok "Docker image pulled: ${DOCKER_IMAGE}"
+
+    DOCKER_UID=1101
+    print_info "Note: Docker install requires service user UID ${DOCKER_UID}"
+
+    local existing_user
+    existing_user=$(getent passwd "$DOCKER_UID" | cut -d: -f1 2>/dev/null || echo "")
+    if [[ -n "$existing_user" ]] && [[ "$existing_user" != "$SERVICE_USER" ]]; then
+        print_error "UID ${DOCKER_UID} is already in use by user '${existing_user}'"
+        exit 1
+    fi
+
+    BINARY_PATH="docker"
+}
+
+_preflight_existing() {
+    print_step "Locating existing binary..."
+
+    local found
+    found=$(command -v telcoin-network 2>/dev/null || \
+            find /usr/local/bin /opt /home -name "telcoin-network" -type f 2>/dev/null | head -1 || \
+            echo "")
+
+    if [[ -n "$found" ]]; then
+        print_info "Found: ${found}"
+        if confirm "Use this binary?"; then
+            BINARY_PATH="$found"
+        fi
+    fi
+
+    if [[ -z "${BINARY_PATH:-}" ]]; then
+        read -r -p "  Full path to telcoin binary: " input
+        BINARY_PATH="$input"
+    fi
+
+    if ! verify_binary "$BINARY_PATH"; then
+        print_error "Cannot verify binary at ${BINARY_PATH}."
+        exit 1
+    fi
 }
 
 step_network() {
@@ -133,242 +358,9 @@ step_config() {
     print_ok "Configuration set"
 }
 
-step_install_binary() {
-    print_header "Step 4 of 8: Installing Binary"
-    select_install_method
-
-    case "$INSTALL_METHOD" in
-        source)   install_from_source ;;
-        binary)   install_prebuilt_binary ;;
-        docker)   setup_docker ;;
-        existing) use_existing_binary ;;
-    esac
-}
-
-install_from_source() {
-    print_step "Building from source..."
-
-    if ! check_rust; then
-        print_info "Installing Rust..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-        export PATH="${HOME}/.cargo/bin:${PATH}"
-        if ! check_rust; then
-            print_error "Rust installation failed."
-            exit 1
-        fi
-    fi
-
-    local source_dir="/opt/telcoin-source"
-    if [[ -d "$source_dir/.git" ]]; then
-        print_info "Updating existing source clone..."
-        git -C "$source_dir" fetch --all
-    else
-        print_info "Cloning repository..."
-        git clone --recurse-submodules "$TN_REPO" "$source_dir"
-    fi
-
-    # --- Branch / tag selection ---
-    echo ""
-    print_header "Source Branch / Tag Selection"
-    echo "  Which branch or tag would you like to build from?"
-    echo ""
-    echo "  1) main (recommended -- stable release)"
-    echo "  2) Custom branch or tag (for testing unreleased fixes)"
-    echo ""
-    local branch_choice
-    while true; do
-        read -r -p "  Enter choice [1/2]: " branch_choice
-        case "$branch_choice" in
-            1|2) break ;;
-            *) print_warn "Please enter 1 or 2." ;;
-        esac
-    done
-
-    local build_ref="main"
-    if [[ "$branch_choice" == "2" ]]; then
-        echo ""
-        read -r -p "  Enter branch or tag name: " build_ref
-        build_ref="${build_ref:-main}"
-        echo ""
-        print_warn "Building from '${build_ref}' -- this may be unstable or incomplete."
-        print_warn "Only use custom branches/tags if instructed by the Telcoin dev team."
-        echo ""
-    fi
-
-    # Validate and checkout the branch/tag
-    print_step "Checking out: ${build_ref}..."
-    if ! git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
-        if git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
-           git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
-            print_ok "Checked out: ${build_ref}"
-        else
-            print_error "Branch or tag '${build_ref}' not found in repository."
-            exit 1
-        fi
-    else
-        print_ok "Checked out: ${build_ref}"
-    fi
-
-
-    # Ensure cargo is in PATH -- it may have just been installed as root
-    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${PATH}"
-    source "${HOME}/.cargo/env" 2>/dev/null || true
-
-    # Install the exact Rust toolchain version required by this repo
-    if [[ -f "${source_dir}/rust-toolchain.toml" ]]; then
-        local required_toolchain
-        required_toolchain=$(grep "channel" "${source_dir}/rust-toolchain.toml" 2>/dev/null | head -1 | cut -d'"' -f2)
-        if [[ -n "$required_toolchain" ]]; then
-            print_info "Installing required Rust toolchain: ${required_toolchain}..."
-            rustup toolchain install "$required_toolchain" 2>/dev/null || true
-            print_ok "Rust toolchain ready: ${required_toolchain}"
-        fi
-    fi
-
-    # Ensure C/C++ build dependencies are present
-    print_step "Checking source build dependencies..."
-    local build_deps=("build-essential" "cmake" "clang" "libclang-dev" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
-    local missing_deps=()
-    for _dep in "${build_deps[@]}"; do
-        if ! dpkg -l "$_dep" 2>/dev/null | grep -q "^ii"; then
-            missing_deps+=("$_dep")
-        fi
-    done
-    if [[ ${#missing_deps[@]} -gt 0 ]]; then
-        print_warn "Missing build dependencies: ${missing_deps[*]}"
-        if confirm "Install missing packages now?"; then
-            update_package_index
-            for _dep in "${missing_deps[@]}"; do
-                install_package "$_dep"
-            done
-        else
-            print_error "Required build dependencies not installed. Cannot build from source."
-            exit 1
-        fi
-    else
-        print_ok "Build dependencies present"
-    fi
-
-    # Build -- always include faucet feature for testnet
-    local cargo_features=""
-    if [[ "${NETWORK:-}" == "testnet" ]]; then
-        cargo_features="--features faucet"
-        print_info "Building with testnet features: faucet"
-    fi
-
-    print_info "Building release binary (this takes 20-40 minutes)..."
-    cd "$source_dir"
-    cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log
-
-    local built="${source_dir}/target/release/telcoin-network"
-    if [[ ! -f "$built" ]]; then
-        print_error "Build failed. See /tmp/tn-build.log"
-        exit 1
-    fi
-
-    mkdir -p "$INSTALL_DIR"
-    cp "$built" "${INSTALL_DIR}/telcoin-network"
-    chmod +x "${INSTALL_DIR}/telcoin-network"
-    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
-    print_ok "Binary installed: ${BINARY_PATH}"
-}
-
-install_prebuilt_binary() {
-    print_step "Pre-built binary..."
-    echo ""
-    print_warn "Pre-built binary downloads are coming soon."
-    print_info "Official releases will be available at:"
-    print_info "  https://github.com/Telcoin-Association/tn-node-deployment/releases"
-    echo ""
-    print_warn "This option is not yet available -- please choose another method."
-    echo ""
-    read -r -p "  Press Enter to return to the install method menu..."
-    echo ""
-    step_install_binary
-}
-
-setup_docker() {
-    print_header "Step 4 of 8: Docker Setup"
-
-    if ! command -v docker &>/dev/null; then
-        print_step "Installing Docker..."
-        curl -fsSL https://get.docker.com | sh
-        if ! command -v docker &>/dev/null; then
-            print_error "Docker installation failed. Please install Docker manually."
-            exit 1
-        fi
-        print_ok "Docker installed"
-    else
-        print_ok "Docker is installed"
-    fi
-
-    echo ""
-    print_info "The official Telcoin Network Docker image is hosted at:"
-    print_info "  us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-    echo ""
-    print_info "Enter the full image URL including tag."
-    print_info "Check for the latest tag at:"
-    print_info "  https://console.cloud.google.com/artifacts/docker/telcoin-network/us/tn-public/adiri"
-    echo ""
-
-    local input
-    read -r -p "  Docker image (press Enter to accept default)
-  [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.1-adiri]: " input
-    DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.1-adiri}"
-
-    print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
-    if ! docker pull "$DOCKER_IMAGE"; then
-        print_error "Failed to pull Docker image: ${DOCKER_IMAGE}"
-        exit 1
-    fi
-    print_ok "Docker image pulled: ${DOCKER_IMAGE}"
-
-    DOCKER_UID=1101
-    print_info "Note: Docker install requires service user UID ${DOCKER_UID}"
-
-    local existing_user
-    existing_user=$(getent passwd "$DOCKER_UID" | cut -d: -f1 2>/dev/null || echo "")
-    if [[ -n "$existing_user" ]] && [[ "$existing_user" != "$SERVICE_USER" ]]; then
-        print_error "UID ${DOCKER_UID} is already in use by user '${existing_user}'"
-        exit 1
-    fi
-
-    INSTALL_METHOD="docker"
-    BINARY_PATH="docker"
-    print_ok "Docker setup complete"
-}
-
-use_existing_binary() {
-    print_step "Locating existing binary..."
-
-    local found
-    found=$(command -v telcoin-network 2>/dev/null || \
-            find /usr/local/bin /opt /home -name "telcoin-network" -type f 2>/dev/null | head -1 || \
-            echo "")
-
-    if [[ -n "$found" ]]; then
-        print_info "Found: ${found}"
-        if confirm "Use this binary?"; then
-            BINARY_PATH="$found"
-        fi
-    fi
-
-    if [[ -z "$BINARY_PATH" ]]; then
-        read -r -p "  Full path to telcoin binary: " input
-        BINARY_PATH="$input"
-    fi
-
-    if ! verify_binary "$BINARY_PATH"; then
-        print_error "Cannot verify binary at ${BINARY_PATH}."
-        exit 1
-    fi
-}
-
-
 validate_service_name() {
     local name="$1"
     local label="$2"
-    # Must start with a letter, only contain letters/numbers/hyphens/underscores, max 32 chars
     if [[ ! "$name" =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]]; then
         print_error "${label} name '${name}' is invalid."
         print_info "Must start with a letter, contain only letters/numbers/hyphens/underscores, max 32 chars."
@@ -378,17 +370,16 @@ validate_service_name() {
 }
 
 step_create_infrastructure() {
-    print_header "Step 5 of 8: Creating System Infrastructure"
+    print_header "Step 4 of 8: Creating System Infrastructure"
 
     echo "  The node runs as a dedicated system user for security."
     echo "  Press Enter to accept defaults."
     echo ""
     local input
     while true; do
-        read -r -p "  Service user name  [${SERVICE_USER}]: "  input
+        read -r -p "  Service user name  [${SERVICE_USER}]: " input
         local proposed_user="${input:-$SERVICE_USER}"
         if validate_service_name "$proposed_user" "Service user"; then
-            # Check it is not already a regular (non-system) user
             if id "$proposed_user" &>/dev/null && [[ $(id -u "$proposed_user") -lt 1000 ]] || ! id "$proposed_user" &>/dev/null; then
                 SERVICE_USER="$proposed_user"
                 break
@@ -423,7 +414,7 @@ step_create_infrastructure() {
 }
 
 step_generate_keys() {
-    print_header "Step 6 of 8: Validator Key Management"
+    print_header "Step 5 of 8: Validator Key Management"
 
     print_info "Your validator needs a BLS key for consensus signing."
     echo ""
@@ -554,7 +545,7 @@ step_generate_keys() {
 }
 
 step_write_config() {
-    print_header "Step 7 of 8: Writing Configuration"
+    print_header "Step 6 of 8: Writing Configuration"
 
     local genesis_dir="${DATA_DIR}/genesis"
     mkdir -p "$genesis_dir"
@@ -597,7 +588,7 @@ step_write_config() {
 }
 
 step_create_service() {
-    print_header "Step 8 of 8: Creating Systemd Service"
+    print_header "Step 7 of 8: Creating Systemd Service"
 
     print_info "Instance number affects RPC port: 8545 - (instance - 1)"
     print_info "  Instance 1 -> RPC port 8545 (default for validators)"
@@ -614,16 +605,29 @@ step_create_service() {
 
     local metrics_addr="127.0.0.1:${METRICS_PORT}"
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
-
-    local exec_cmd
-    local bls_pass
-    bls_pass=$(cat "${passphrase_file}" 2>/dev/null || echo '')
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        local bls_pass
+        bls_pass=$(cat "${passphrase_file}" 2>/dev/null || echo '')
         local docker_uid docker_gid
         docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
         docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
-        exec_cmd="docker run --rm \
+
+        cat > "$service_file" <<EOF
+[Unit]
+Description=Telcoin Network Validator Node (${CHAIN_NAME}) [Docker]
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=-/usr/bin/docker rm -f ${SERVICE_NAME}
+ExecStart=docker run --rm \
 --name ${SERVICE_NAME} \
 --user ${docker_uid}:${docker_gid} \
 --network=host \
@@ -639,20 +643,39 @@ telcoin node \
 --metrics ${metrics_addr} \
 --log.stdout.format log-fmt \
 -vvv \
---http"
+--http
+ExecStop=docker stop ${SERVICE_NAME}
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
+StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     else
-        exec_cmd="${BINARY_PATH} node \
---datadir ${DATA_DIR} \
---instance ${instance} \
---metrics ${metrics_addr} \
---log.stdout.format log-fmt \
--vvv \
---http"
-    fi
+        # Binary/source install -- use LoadCredential
+        local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
+        cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+# Auto-generated by setup-validator.sh v${SCRIPT_VERSION}
+# Reads BLS passphrase from systemd credential directory and starts the node
+export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase")
+export PRIMARY_LISTENER_MULTIADDR="${primary_multiaddr}"
+export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
+exec ${BINARY_PATH} node \
+  --datadir ${DATA_DIR} \
+  --instance ${instance} \
+  --metrics ${metrics_addr} \
+  --log.stdout.format log-fmt \
+  -vvv \
+  --http
+EOF
+        chmod +x "$wrapper"
+        chown "${SERVICE_USER}:${SERVICE_GROUP}" "$wrapper"
+        print_ok "Wrapper script written: ${wrapper}"
 
-    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
-
-    if [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
         cat > "$service_file" <<EOF
 [Unit]
 Description=Telcoin Network Validator Node (${CHAIN_NAME})
@@ -665,10 +688,10 @@ StartLimitBurst=5
 Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
-Environment="TN_BLS_PASSPHRASE=${bls_pass}"
+LoadCredential=bls-passphrase:${passphrase_file}
 Environment="PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}"
 Environment="WORKER_LISTENER_MULTIADDR=${worker_multiaddr}"
-ExecStart=${exec_cmd}
+ExecStart=${wrapper}
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=yes
@@ -676,30 +699,6 @@ PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=${DATA_DIR} ${LOG_DIR}
 LimitNOFILE=65536
-StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
-StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    else
-        cat > "$service_file" <<EOF
-[Unit]
-Description=Telcoin Network Validator Node (${CHAIN_NAME}) [Docker]
-After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=root
-ExecStartPre=-/usr/bin/docker rm -f ${SERVICE_NAME}
-ExecStart=${exec_cmd}
-ExecStop=docker stop ${SERVICE_NAME}
-Restart=on-failure
-RestartSec=10
 StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
 StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
 
@@ -764,6 +763,10 @@ step_final_summary() {
         "Systemd service=${SERVICE_NAME}" \
         "Explorer=${EXPLORER_URL}"
 
+    if [[ "$USE_LOAD_CREDENTIAL" == "true" ]] && [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
+        print_info "BLS passphrase secured via systemd LoadCredential (not exposed in service file)."
+    fi
+    echo ""
     echo "  Useful commands:"
     echo ""
     echo "  View logs:"
@@ -798,7 +801,6 @@ main() {
     step_preflight
     step_network
     step_config
-    step_install_binary
     step_create_infrastructure
     step_generate_keys
     step_write_config
