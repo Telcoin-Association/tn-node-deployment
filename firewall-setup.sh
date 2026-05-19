@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.20"
+readonly SCRIPT_VERSION="1.1.21"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # =============================================================================
@@ -370,6 +370,17 @@ manage_node_ports() {
             ufw allow 443/tcp &>/dev/null
             print_ok "Port 443 opened"
             print_info "Configure nginx to proxy to your RPC port"
+        fi
+    fi
+
+    echo ""
+    print_info "Uptime Kuma health monitoring (TCP port 43174):"
+    if ufw status 2>/dev/null | grep -q "43174"; then
+        print_ok "Port 43174 is already open"
+    else
+        if confirm "Open TCP port 43174 for Uptime Kuma health monitoring?"; then
+            ufw allow 43174/tcp &>/dev/null
+            print_ok "Port 43174 opened"
         fi
     fi
 

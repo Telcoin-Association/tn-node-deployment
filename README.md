@@ -747,6 +747,13 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.21
+- Removed helper scripts (`apply-v1120.sh`, `fix-toolchain-line.sh`) from repository
+- Added TCP port 43174 (Uptime Kuma health monitoring) to firewall setup script
+- Added partial install detection to `remove-node.sh` -- detects and offers to clean up leftover directories from interrupted installs
+- Added service user/group name validation in both setup scripts -- prevents crashes when invalid names or existing regular users are entered
+- All scripts bumped to v1.1.21
+
 ### v1.1.20
 - Added `clang` and `libclang-dev` to source build dependency checks -- fixes `stdarg.h` not found error when building from source on fresh machines
 - Fixed cargo PATH for source builds -- cargo env is sourced correctly after Rust installation, including root cargo path fallback

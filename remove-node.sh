@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.20"
+readonly SCRIPT_VERSION="1.1.21"
 
 # =============================================================================
 # DETECTION
@@ -77,6 +77,33 @@ show_detected() {
     print_header "Detected Node Installations"
 
     if [[ "$OBSERVER_INSTALLED" == "false" ]] && [[ "$VALIDATOR_INSTALLED" == "false" ]]; then
+        # Check for partial installs (directories exist but no service file)
+        local partial=false
+        local partial_items=()
+        [[ -d /var/lib/telcoin ]]    && partial=true && partial_items+=("/var/lib/telcoin")
+        [[ -d /opt/telcoin ]]        && partial=true && partial_items+=("/opt/telcoin")
+        [[ -d /opt/telcoin-source ]] && partial=true && partial_items+=("/opt/telcoin-source")
+        [[ -d /etc/telcoin ]]        && partial=true && partial_items+=("/etc/telcoin")
+        [[ -d /var/log/telcoin ]]    && partial=true && partial_items+=("/var/log/telcoin")
+
+        if [[ "$partial" == "true" ]]; then
+            print_warn "No complete node installation found, but leftover files detected:"
+            for item in "${partial_items[@]}"; do
+                print_info "  ${item}"
+            done
+            echo ""
+            if confirm "Remove these leftover files and directories?"; then
+                for item in "${partial_items[@]}"; do
+                    rm -rf "$item"
+                    print_ok "Removed: ${item}"
+                done
+            else
+                print_info "Leftover files kept."
+            fi
+            echo ""
+            exit 0
+        fi
+
         print_warn "No Telcoin node installations detected on this server."
         print_info "Nothing to remove."
         echo ""

@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.20"
+readonly SCRIPT_VERSION="1.1.21"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -364,6 +364,19 @@ use_existing_binary() {
     fi
 }
 
+
+validate_service_name() {
+    local name="$1"
+    local label="$2"
+    # Must start with a letter, only contain letters/numbers/hyphens/underscores, max 32 chars
+    if [[ ! "$name" =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]]; then
+        print_error "${label} name '${name}' is invalid."
+        print_info "Must start with a letter, contain only letters/numbers/hyphens/underscores, max 32 chars."
+        return 1
+    fi
+    return 0
+}
+
 step_create_infrastructure() {
     print_header "Step 5 of 8: Creating System Infrastructure"
 
@@ -371,8 +384,29 @@ step_create_infrastructure() {
     echo "  Press Enter to accept defaults."
     echo ""
     local input
-    read -r -p "  Service user name  [${SERVICE_USER}]: "  input; SERVICE_USER="${input:-$SERVICE_USER}"
-    read -r -p "  Service group name [${SERVICE_GROUP}]: " input; SERVICE_GROUP="${input:-$SERVICE_GROUP}"
+    while true; do
+        read -r -p "  Service user name  [${SERVICE_USER}]: "  input
+        local proposed_user="${input:-$SERVICE_USER}"
+        if validate_service_name "$proposed_user" "Service user"; then
+            # Check it is not already a regular (non-system) user
+            if id "$proposed_user" &>/dev/null && [[ $(id -u "$proposed_user") -lt 1000 ]] || ! id "$proposed_user" &>/dev/null; then
+                SERVICE_USER="$proposed_user"
+                break
+            else
+                print_error "User '${proposed_user}' already exists as a regular user (UID $(id -u "$proposed_user"))."
+                print_info "Please choose a different name or press Enter to use the default."
+            fi
+        fi
+    done
+
+    while true; do
+        read -r -p "  Service group name [${SERVICE_GROUP}]: " input
+        local proposed_group="${input:-$SERVICE_GROUP}"
+        if validate_service_name "$proposed_group" "Service group"; then
+            SERVICE_GROUP="$proposed_group"
+            break
+        fi
+    done
     echo ""
 
     create_service_user
