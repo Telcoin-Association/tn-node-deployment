@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.25"
+readonly COMMON_VERSION="1.1.26"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -426,6 +426,15 @@ create_service_user() {
                     --gid "$SERVICE_GROUP" \
                     --comment "Telcoin Network node service account" "$SERVICE_USER"
             print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
+        fi
+    fi
+    # For TPM installs, add service user to tss group for TPM device access
+    if [[ "${PASSPHRASE_METHOD:-}" == "tpm" ]]; then
+        if getent group tss &>/dev/null; then
+            usermod -aG tss "$SERVICE_USER" 2>/dev/null || true
+            print_ok "Added '${SERVICE_USER}' to tss group (TPM device access)"
+        else
+            print_warn "tss group not found -- TPM device access may fail"
         fi
     fi
 }

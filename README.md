@@ -764,6 +764,10 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.26
+- **Fix**: Service user is now added to the `tss` group when TPM passphrase method is selected -- required for access to `/dev/tpmrm0` TPM device. Without this the node service would fail to start with `status=1/FAILURE` when running as a non-root service user.
+- All scripts bumped to v1.1.26
+
 ### v1.1.25
 - **Fix**: Corrected TPM unseal sequence in wrapper script and `lib/common.sh` -- now correctly uses `tpm2_load` to load the sealed object before `tpm2_unseal` (fixes `status=1/FAILURE` on node start when TPM passphrase method is used)
 - Added TPM seal verification step during setup -- verifies the sealed object can be unsealed before deleting the plaintext file
