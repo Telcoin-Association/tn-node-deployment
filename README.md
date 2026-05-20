@@ -355,6 +355,12 @@ Forward UDP ports 49590 and 49594 from WAN to your server's local IP address. Cl
 
 The RPC port (8541/8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
 
+### Health Monitoring (Uptime Kuma)
+If using Uptime Kuma for node health monitoring, open TCP port 43174:
+```bash
+sudo ufw allow 43174/tcp
+```
+
 ---
 
 ## Validator Onboarding Flow
