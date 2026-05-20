@@ -963,14 +963,28 @@ tpm_seal_passphrase() {
     fi
 
     # Create sealed data object from passphrase file
-    if ! tpm2_create -Q         -C /tmp/tn-tpm-primary.ctx         -i "$passphrase_file"         -u "${config_dir}/bls-tpm.pub"         -r "${config_dir}/bls-tpm.priv" 2>/dev/null; then
+    if ! tpm2_create -Q \
+        -C /tmp/tn-tpm-primary.ctx \
+        -i "$passphrase_file" \
+        -u "${config_dir}/bls-tpm.pub" \
+        -r "${config_dir}/bls-tpm.priv" 2>/dev/null; then
         print_error "TPM sealing failed."
         print_info "Falling back to LoadCredential file storage."
         rm -f /tmp/tn-tpm-primary.ctx "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
         return 1
     fi
 
-    rm -f /tmp/tn-tpm-primary.ctx
+    # Verify seal before removing primary context
+    tpm2_load -Q -C /tmp/tn-tpm-primary.ctx         -u "${config_dir}/bls-tpm.pub"         -r "${config_dir}/bls-tpm.priv"         -c /tmp/tn-tpm-verify.ctx 2>/dev/null
+    local verify_result
+    verify_result=$(tpm2_unseal -Q -c /tmp/tn-tpm-verify.ctx 2>/dev/null || echo "")
+    rm -f /tmp/tn-tpm-primary.ctx /tmp/tn-tpm-verify.ctx
+    if [[ -z "$verify_result" ]]; then
+        print_error "TPM seal verification failed."
+        rm -f "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+        return 1
+    fi
+    print_ok "TPM seal verified successfully"
     chmod 600 "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
     chown "${SERVICE_USER}:${SERVICE_GROUP}" "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv" 2>/dev/null || true
     print_ok "Passphrase sealed to TPM: ${config_dir}/bls-tpm.pub / bls-tpm.priv"
