@@ -110,6 +110,11 @@ step_preflight() {
     print_ok "systemd ${systemd_ver} detected (247+ required)"
     USE_LOAD_CREDENTIAL=true
 
+    # Select network first so NETWORK is set before source build (needed for --features faucet)
+    echo ""
+    print_step "Selecting network..."
+    select_network
+
     echo ""
     print_step "Selecting install method..."
     _select_install_method_with_guard
