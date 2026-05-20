@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.22"
+readonly SCRIPT_VERSION="1.1.23"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -36,6 +36,7 @@ WORKER_MULTIADDR=""
 PRIMARY_LISTENER_MULTIADDR=""
 WORKER_LISTENER_MULTIADDR=""
 USE_LOAD_CREDENTIAL=false
+PASSPHRASE_METHOD="loadcredential"  # loadcredential | tpm
 
 # =============================================================================
 # STEPS
@@ -107,11 +108,10 @@ step_preflight() {
     print_ok "systemd ${systemd_ver} detected (247+ required)"
     USE_LOAD_CREDENTIAL=true
 
-    # Select install method here in preflight so dependencies can be
-    # installed upfront before any configuration steps begin
+    # Select install method upfront so all dependencies are installed before configuration
     echo ""
     print_step "Selecting install method..."
-    select_install_method
+    _select_install_method_with_guard
 
     # Install all dependencies upfront based on chosen method
     case "$INSTALL_METHOD" in
@@ -120,7 +120,82 @@ step_preflight() {
         existing) _preflight_existing ;;
     esac
 
+    # For binary/source installs, offer TPM passphrase protection
+    if [[ "$INSTALL_METHOD" != "docker" ]]; then
+        _select_passphrase_method
+    fi
+
     print_ok "Pre-flight checks complete"
+}
+
+# ---------------------------------------------------------------------------
+# Install method selection -- blocks prebuilt binary (coming soon)
+# ---------------------------------------------------------------------------
+
+_select_install_method_with_guard() {
+    while true; do
+        select_install_method
+        case "$INSTALL_METHOD" in
+            binary)
+                echo ""
+                print_warn "Pre-built binary downloads are coming soon."
+                print_info "Official releases will be available at:"
+                print_info "  https://github.com/Telcoin-Association/tn-node-deployment/releases"
+                print_warn "This option is not yet available -- please choose another method."
+                echo ""
+                read -r -p "  Press Enter to return to the install method menu..."
+                echo ""
+                ;;
+            *) break ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Passphrase protection method selection (binary/source installs only)
+# ---------------------------------------------------------------------------
+
+_select_passphrase_method() {
+    echo ""
+    print_header "BLS Passphrase Protection"
+    echo "  How would you like to protect the BLS passphrase?"
+    echo ""
+    echo "  1) systemd LoadCredential (default -- recommended for most operators)"
+    echo "       Passphrase secured by systemd. Never appears in process listings."
+    echo "       Works on any Ubuntu 22.04+ server. Easy to recover."
+    echo ""
+    echo "  2) TPM/vTPM sealing (advanced -- maximum security)"
+    echo "       Passphrase sealed to this machine's TPM chip."
+    echo "       Cannot be decrypted on any other machine, even with root access."
+    echo "       Requires TPM2 chip (GCP Shielded VM, AWS Nitro, or bare metal TPM2)."
+    echo "       Recovery requires your offline backup passphrase."
+    echo ""
+
+    local choice
+    while true; do
+        read -r -p "  Enter choice [1/2]: " choice
+        case "$choice" in
+            1)
+                PASSPHRASE_METHOD="loadcredential"
+                print_ok "Passphrase method: systemd LoadCredential"
+                break
+                ;;
+            2)
+                if tpm_check_available; then
+                    PASSPHRASE_METHOD="tpm"
+                    print_ok "Passphrase method: TPM sealing"
+                    print_warn "You will need to store your passphrase securely offline."
+                else
+                    print_error "No TPM2 chip detected on this system."
+                    print_info "TPM sealing requires /dev/tpm0 or /dev/tpmrm0."
+                    print_info "Falling back to systemd LoadCredential."
+                    PASSPHRASE_METHOD="loadcredential"
+                fi
+                break
+                ;;
+            *) print_warn "Please enter 1 or 2." ;;
+        esac
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -130,7 +205,6 @@ step_preflight() {
 _preflight_source() {
     print_step "Installing source build dependencies..."
 
-    # Install Rust if needed
     if ! check_rust; then
         print_info "Installing Rust..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
@@ -142,11 +216,9 @@ _preflight_source() {
         fi
     fi
 
-    # Ensure cargo is in PATH
     export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${PATH}"
     source "${HOME}/.cargo/env" 2>/dev/null || true
 
-    # Install C/C++ build dependencies
     local build_deps=("build-essential" "cmake" "clang" "libclang-dev" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
     local missing_deps=()
     for _dep in "${build_deps[@]}"; do
@@ -169,7 +241,6 @@ _preflight_source() {
         print_ok "Build dependencies present"
     fi
 
-    # Clone or update source repo
     local source_dir="/opt/telcoin-source"
     if [[ -d "$source_dir/.git" ]]; then
         print_info "Updating existing source clone..."
@@ -179,7 +250,6 @@ _preflight_source() {
         git clone --recurse-submodules "$TN_REPO" "$source_dir"
     fi
 
-    # Branch / tag selection
     echo ""
     print_header "Source Branch / Tag Selection"
     echo "  Which branch or tag would you like to build from?"
@@ -220,7 +290,6 @@ _preflight_source() {
         print_ok "Checked out: ${build_ref}"
     fi
 
-    # Install required Rust toolchain from rust-toolchain.toml
     if [[ -f "${source_dir}/rust-toolchain.toml" ]]; then
         local required_toolchain
         required_toolchain=$(grep "channel" "${source_dir}/rust-toolchain.toml" 2>/dev/null | head -1 | cut -d'"' -f2)
@@ -231,7 +300,6 @@ _preflight_source() {
         fi
     fi
 
-    # Build
     local cargo_features=""
     if [[ "${NETWORK:-}" == "testnet" ]]; then
         cargo_features="--features faucet"
@@ -331,29 +399,6 @@ _preflight_existing() {
         print_error "Cannot verify binary at ${BINARY_PATH}."
         exit 1
     fi
-}
-
-# ---------------------------------------------------------------------------
-# Pre-built binary (coming soon)
-# ---------------------------------------------------------------------------
-_install_prebuilt_binary() {
-    print_step "Pre-built binary..."
-    echo ""
-    print_warn "Pre-built binary downloads are coming soon."
-    print_info "Official releases will be available at:"
-    print_info "  https://github.com/Telcoin-Association/tn-node-deployment/releases"
-    echo ""
-    print_warn "This option is not yet available -- please choose another method."
-    echo ""
-    read -r -p "  Press Enter to return to the install method menu..."
-    echo ""
-    # Re-run preflight install selection
-    select_install_method
-    case "$INSTALL_METHOD" in
-        source)   _preflight_source ;;
-        docker)   _preflight_docker ;;
-        existing) _preflight_existing ;;
-    esac
 }
 
 step_network() {
@@ -585,11 +630,17 @@ step_generate_keys() {
     unset TN_BLS_PASSPHRASE
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$DATA_DIR"
 
+    # Store passphrase according to chosen method
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
     echo "$bls_passphrase" > "$passphrase_file"
     chmod 600 "$passphrase_file"
     chown "${SERVICE_USER}:${SERVICE_GROUP}" "$passphrase_file"
-    print_ok "Passphrase stored (mode 600): ${passphrase_file}"
+
+    if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
+        tpm_seal_passphrase "$passphrase_file" "$CONFIG_DIR" "$bls_passphrase"
+    else
+        print_ok "Passphrase stored via LoadCredential (mode 600): ${passphrase_file}"
+    fi
 
     bls_passphrase=""
     bls_passphrase_confirm=""
@@ -699,7 +750,6 @@ step_create_service() {
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        # Docker install -- passphrase passed via -e flag, no LoadCredential
         local bls_pass
         bls_pass=$(cat "${passphrase_file}" 2>/dev/null || echo '')
         local docker_uid docker_gid
@@ -748,10 +798,37 @@ WantedBy=multi-user.target
 EOF
 
     else
-        # Binary/source install -- use LoadCredential for secure passphrase handling
-        # Write a wrapper script that reads the credential and launches the binary
+        # Binary/source install -- write wrapper script
         local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
-        cat > "$wrapper" <<EOF
+
+        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
+            # TPM wrapper -- unseal from TPM, fall back to LoadCredential file if TPM unavailable
+            cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+# Auto-generated by setup-observer.sh v${SCRIPT_VERSION}
+# Reads BLS passphrase from TPM (with LoadCredential fallback) and starts the node
+if command -v tpm2_unseal &>/dev/null && [[ -f ${CONFIG_DIR}/bls-tpm.priv ]]; then
+    export TN_BLS_PASSPHRASE=\$(tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null && \
+        tpm2_unseal -Q -c /tmp/tn-tpm-primary.ctx -p "${CONFIG_DIR}/bls-tpm.priv" 2>/dev/null && \
+        rm -f /tmp/tn-tpm-primary.ctx)
+fi
+if [[ -z "\${TN_BLS_PASSPHRASE:-}" ]]; then
+    export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase" 2>/dev/null || echo "")
+fi
+export PRIMARY_LISTENER_MULTIADDR="${primary_multiaddr}"
+export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
+exec ${BINARY_PATH} node \
+  --datadir ${DATA_DIR} \
+  --observer \
+  --instance ${instance} \
+  --metrics ${metrics_addr} \
+  --log.stdout.format log-fmt \
+  -vvv \
+  --http
+EOF
+        else
+            # LoadCredential wrapper
+            cat > "$wrapper" <<EOF
 #!/usr/bin/env bash
 # Auto-generated by setup-observer.sh v${SCRIPT_VERSION}
 # Reads BLS passphrase from systemd credential directory and starts the node
@@ -767,6 +844,8 @@ exec ${BINARY_PATH} node \
   -vvv \
   --http
 EOF
+        fi
+
         chmod +x "$wrapper"
         chown "${SERVICE_USER}:${SERVICE_GROUP}" "$wrapper"
         print_ok "Wrapper script written: ${wrapper}"
@@ -811,6 +890,7 @@ EOF
 HOST_SERVICE_USER=${SERVICE_USER}
 HOST_SERVICE_GROUP=${SERVICE_GROUP}
 INSTALL_METHOD=${INSTALL_METHOD:-binary}
+PASSPHRASE_METHOD=${PASSPHRASE_METHOD}
 DOCKER_IMAGE=${DOCKER_IMAGE:-}
 EOF
     chmod 600 "$meta_file"
@@ -860,8 +940,12 @@ step_final_summary() {
     echo "    Worker:  ${WORKER_MULTIADDR}"
     echo ""
     print_info "No router port forwarding is required for observer nodes."
-    if [[ "$USE_LOAD_CREDENTIAL" == "true" ]] && [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
-        print_info "BLS passphrase secured via systemd LoadCredential (not exposed in service file)."
+    if [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
+        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
+            print_info "BLS passphrase sealed to TPM chip."
+        else
+            print_info "BLS passphrase secured via systemd LoadCredential (not exposed in service file)."
+        fi
     fi
     echo ""
     echo "  Useful commands:"

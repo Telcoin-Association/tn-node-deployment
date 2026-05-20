@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.22"
+readonly SCRIPT_VERSION="1.1.23"
 
 # =============================================================================
 # DETECTION
@@ -224,6 +224,8 @@ remove_keys() {
             rm -rf "$keys_dir"
             rm -rf "$config_dir"
             rm -f "/etc/telcoin/${node_type}/.node-meta" 2>/dev/null || true
+            # Also remove TPM sealed files if present
+            tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
             print_ok "Keys and passphrase removed"
         else
             print_info "Keys kept -- skipping key removal"

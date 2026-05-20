@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.22"
+readonly SCRIPT_VERSION="1.1.23"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # =============================================================================

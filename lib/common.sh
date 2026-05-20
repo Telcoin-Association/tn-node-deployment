@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.22"
+readonly COMMON_VERSION="1.1.23"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -920,6 +920,100 @@ display_node_info() {
 }
 
 
+
+
+# =============================================================================
+# TPM / vTPM HELPER FUNCTIONS
+# =============================================================================
+
+# Check if a TPM2 chip is available on this system
+tpm_check_available() {
+    if [[ -e /dev/tpm0 ]] || [[ -e /dev/tpmrm0 ]]; then
+        print_ok "TPM2 chip detected"
+        # Install tpm2-tools if needed
+        if ! command -v tpm2_createprimary &>/dev/null; then
+            print_info "Installing tpm2-tools..."
+            install_package "tpm2-tools"
+        fi
+        print_ok "tpm2-tools available"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Seal the BLS passphrase to the TPM chip.
+# Stores sealed blob at ${config_dir}/bls-tpm.pub and bls-tpm.priv
+# Shows the passphrase once and offers to delete the plaintext file.
+#
+# Usage: tpm_seal_passphrase <passphrase_file> <config_dir> <passphrase>
+tpm_seal_passphrase() {
+    local passphrase_file="$1"
+    local config_dir="$2"
+    local passphrase="$3"
+
+    print_step "Sealing BLS passphrase to TPM..."
+
+    # Create TPM primary key context
+    if ! tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null; then
+        print_error "TPM primary key creation failed."
+        print_info "Falling back to LoadCredential file storage."
+        rm -f /tmp/tn-tpm-primary.ctx
+        return 1
+    fi
+
+    # Create sealed data object from passphrase file
+    if ! tpm2_create -Q         -C /tmp/tn-tpm-primary.ctx         -i "$passphrase_file"         -u "${config_dir}/bls-tpm.pub"         -r "${config_dir}/bls-tpm.priv" 2>/dev/null; then
+        print_error "TPM sealing failed."
+        print_info "Falling back to LoadCredential file storage."
+        rm -f /tmp/tn-tpm-primary.ctx "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+        return 1
+    fi
+
+    rm -f /tmp/tn-tpm-primary.ctx
+    chmod 600 "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv" 2>/dev/null || true
+    print_ok "Passphrase sealed to TPM: ${config_dir}/bls-tpm.pub / bls-tpm.priv"
+
+    # Show passphrase once and offer to delete plaintext file
+    echo ""
+    print_warn "================================================================"
+    print_warn "  IMPORTANT -- STORE YOUR PASSPHRASE OFFLINE NOW"
+    print_warn "================================================================"
+    print_warn "Your BLS passphrase has been sealed to this machine's TPM chip."
+    print_warn "If this machine is rebuilt or the TPM is reset, you will need"
+    print_warn "your passphrase to re-seal it."
+    echo ""
+    print_info "Your BLS passphrase is:"
+    echo ""
+    echo "    ${passphrase}"
+    echo ""
+    print_warn "Write this down and store it in a password manager or hardware"
+    print_warn "wallet. This is the ONLY time it will be shown."
+    print_warn "================================================================"
+    echo ""
+
+    local confirm_text
+    read -r -p "  Type CONFIRMED to delete the plaintext passphrase file, or Enter to keep it: " confirm_text
+    if [[ "$confirm_text" == "CONFIRMED" ]]; then
+        rm -f "$passphrase_file"
+        print_ok "Plaintext passphrase file deleted. TPM is the only copy on this machine."
+        print_warn "Ensure you have stored your passphrase offline before continuing."
+    else
+        print_info "Plaintext file kept at: ${passphrase_file}"
+        print_info "The node will use TPM first, falling back to the file if TPM is unavailable."
+    fi
+}
+
+# Remove TPM sealed files for a node type (called during node removal)
+tpm_remove_sealed_files() {
+    local config_dir="$1"
+    if [[ -f "${config_dir}/bls-tpm.pub" ]] || [[ -f "${config_dir}/bls-tpm.priv" ]]; then
+        print_step "Removing TPM sealed passphrase files..."
+        rm -f "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+        print_ok "TPM sealed files removed"
+    fi
+}
 
 print_summary() {
     local title="$1"

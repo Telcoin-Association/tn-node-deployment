@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.22"
+readonly SCRIPT_VERSION="1.1.23"
 
 RPC_URL="http://127.0.0.1:8545"
 SERVICE_NAME="telcoin-validator"
@@ -176,6 +176,66 @@ else
     fi
     print_info "Unique P2P peers (since startup): ${P2P_RECENT}"
     print_info "Note: Peer data is read from log file: ${LOG_FILE}"
+fi
+
+
+# --- Consensus status ---
+print_step "Checking consensus status..."
+
+if [[ -f "$LOG_FILE" ]]; then
+    # Last consensus block number and time
+    LAST_CONSENSUS_LINE=$(grep "got new consensus" "$LOG_FILE" 2>/dev/null | tail -1 || echo "")
+    if [[ -n "$LAST_CONSENSUS_LINE" ]]; then
+        CONSENSUS_BLOCK=$(echo "$LAST_CONSENSUS_LINE" | grep -oE 'block=[0-9]+' | cut -d= -f2 || echo "")
+        CONSENSUS_TIME=$(echo "$LAST_CONSENSUS_LINE" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z?' | head -1 || echo "")
+        if [[ -n "$CONSENSUS_BLOCK" ]]; then
+            # Calculate how long ago
+            if [[ -n "$CONSENSUS_TIME" ]]; then
+                CONSENSUS_EPOCH=$(date -d "$CONSENSUS_TIME" +%s 2>/dev/null || echo "0")
+                NOW_EPOCH=$(date +%s)
+                SECONDS_AGO=$(( NOW_EPOCH - CONSENSUS_EPOCH ))
+                if [[ $SECONDS_AGO -lt 60 ]]; then
+                    TIME_AGO="${SECONDS_AGO}s ago"
+                elif [[ $SECONDS_AGO -lt 3600 ]]; then
+                    TIME_AGO="$(( SECONDS_AGO / 60 ))m ago"
+                else
+                    TIME_AGO="$(( SECONDS_AGO / 3600 ))h ago"
+                fi
+                if [[ $SECONDS_AGO -gt 120 ]]; then
+                    print_warn "Last consensus block: ${CONSENSUS_BLOCK} (${TIME_AGO}) -- may be stuck"
+                    (( HEALTH_ISSUES++ ))
+                else
+                    print_ok "Last consensus block: ${CONSENSUS_BLOCK} (${TIME_AGO})"
+                fi
+            else
+                print_ok "Last consensus block: ${CONSENSUS_BLOCK}"
+            fi
+        fi
+    else
+        print_info "No consensus blocks seen yet -- node may still be syncing"
+    fi
+
+    # Current epoch from logs
+    CURRENT_EPOCH=$(grep -oE 'epoch=[0-9]+' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d= -f2 || echo "")
+    if [[ -n "$CURRENT_EPOCH" ]]; then
+        print_ok "Current epoch: ${CURRENT_EPOCH}"
+    fi
+
+    # Primary vs worker peer breakdown
+    PRIMARY_PEERS=$(grep "peer metrics heartbeat" "$LOG_FILE" 2>/dev/null | tail -1 |         grep -oE 'primary.*connected_count=[0-9]+' | grep -oE 'connected_count=[0-9]+' | cut -d= -f2 || echo "")
+    WORKER_PEERS=$(grep "peer metrics heartbeat" "$LOG_FILE" 2>/dev/null | tail -1 |         grep -oE 'worker.*connected_count=[0-9]+' | grep -oE 'connected_count=[0-9]+' | cut -d= -f2 || echo "")
+    if [[ -n "$PRIMARY_PEERS" ]] || [[ -n "$WORKER_PEERS" ]]; then
+        print_info "Peer breakdown -- Primary: ${PRIMARY_PEERS:-unknown}, Worker: ${WORKER_PEERS:-unknown}"
+    fi
+
+    # Epoch sync stuck detection -- same consensus block for >5 minutes
+    CONSENSUS_BLOCKS_RECENT=$(grep "got new consensus" "$LOG_FILE" 2>/dev/null |         tail -10 | grep -oE 'block=[0-9]+' | cut -d= -f2 | sort -u | wc -l || echo "0")
+    CONSENSUS_BLOCKS_RECENT=$(echo "$CONSENSUS_BLOCKS_RECENT" | tr -d '[:space:]')
+    if [[ "$CONSENSUS_BLOCKS_RECENT" =~ ^[0-9]+$ ]] && [[ "$CONSENSUS_BLOCKS_RECENT" -eq 1 ]] && [[ -n "$LAST_CONSENSUS_LINE" ]]; then
+        print_warn "Consensus block has not advanced in last 10 log entries -- may be epoch boundary or stuck"
+    fi
+else
+    print_info "Log file not found at ${LOG_FILE} -- cannot check consensus status"
 fi
 
 # --- Disk space ---

@@ -734,6 +734,13 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.23
+- **Security**: Added optional TPM/vTPM passphrase sealing for binary/source installs -- passphrase sealed to machine's TPM chip, unreadable on any other machine even with root access. Supported on GCP Shielded VMs, AWS Nitro, and bare metal TPM2. Falls back to LoadCredential if TPM unavailable.
+- **Fix**: Pre-built binary option (option 2) now correctly blocks with a warning and re-prompts instead of silently continuing
+- **Improvement**: `check-node.sh` now shows consensus information -- last consensus block number and age, current epoch, primary/worker peer breakdown, and epoch sync stuck detection
+- `remove-node.sh` now cleans up TPM sealed files on node removal
+- All scripts bumped to v1.1.23
+
 ### v1.1.22
 - **Security**: Binary/source installs now use systemd `LoadCredential` for BLS passphrase -- passphrase never appears in `systemctl show` output or process listings
 - **Security**: Added hard systemd version check (247+ required, Ubuntu 22.04+) -- setup exits with clear error if not met
