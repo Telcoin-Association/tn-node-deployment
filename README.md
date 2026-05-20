@@ -764,6 +764,10 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.27
+- **Fix**: Network selection (testnet/mainnet) now happens before install method selection in preflight -- ensures `--features faucet` is correctly applied for testnet source builds (previously `NETWORK` was empty during build, so faucet feature was never included)
+- All scripts bumped to v1.1.27
+
 ### v1.1.26
 - **Fix**: Service user is now added to the `tss` group when TPM passphrase method is selected -- required for access to `/dev/tpmrm0` TPM device. Without this the node service would fail to start with `status=1/FAILURE` when running as a non-root service user.
 - All scripts bumped to v1.1.26

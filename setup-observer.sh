@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.26"
+readonly SCRIPT_VERSION="1.1.27"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -107,6 +107,11 @@ step_preflight() {
     fi
     print_ok "systemd ${systemd_ver} detected (247+ required)"
     USE_LOAD_CREDENTIAL=true
+
+    # Select network first so NETWORK is set before source build (needed for --features faucet)
+    echo ""
+    print_step "Selecting network..."
+    select_network
 
     # Select install method upfront so all dependencies are installed before configuration
     echo ""
@@ -990,7 +995,6 @@ step_final_summary() {
 main() {
     step_welcome
     step_preflight
-    step_network
     step_config
     step_create_infrastructure
     step_generate_keys

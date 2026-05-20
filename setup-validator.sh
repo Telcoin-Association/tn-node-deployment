@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.26"
+readonly SCRIPT_VERSION="1.1.27"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -910,7 +910,6 @@ step_final_summary() {
 main() {
     step_welcome
     step_preflight
-    step_network
     step_config
     step_create_infrastructure
     step_generate_keys
