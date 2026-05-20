@@ -764,6 +764,11 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.25
+- **Fix**: Corrected TPM unseal sequence in wrapper script and `lib/common.sh` -- now correctly uses `tpm2_load` to load the sealed object before `tpm2_unseal` (fixes `status=1/FAILURE` on node start when TPM passphrase method is used)
+- Added TPM seal verification step during setup -- verifies the sealed object can be unsealed before deleting the plaintext file
+- All scripts bumped to v1.1.25
+
 ### v1.1.24
 - **Fix**: When TPM passphrase method is selected, `LoadCredential` is no longer written to the systemd service file -- previously caused `status=243/CREDENTIALS` startup failure when the plaintext passphrase file was deleted after TPM sealing
 - All scripts bumped to v1.1.24
