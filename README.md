@@ -764,6 +764,10 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.28
+- **Fix**: Applied network selection fix to `setup-validator.sh` -- was missed in v1.1.27 due to differing script structure
+- All scripts bumped to v1.1.28
+
 ### v1.1.27
 - **Fix**: Network selection (testnet/mainnet) now happens before install method selection in preflight -- ensures `--features faucet` is correctly applied for testnet source builds (previously `NETWORK` was empty during build, so faucet feature was never included)
 - All scripts bumped to v1.1.27
