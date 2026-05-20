@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.23"
+readonly SCRIPT_VERSION="1.1.24"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -768,7 +768,8 @@ EOF
         chown "${SERVICE_USER}:${SERVICE_GROUP}" "$wrapper"
         print_ok "Wrapper script written: ${wrapper}"
 
-        cat > "$service_file" <<EOF
+        {
+            cat <<EOF
 [Unit]
 Description=Telcoin Network Validator Node (${CHAIN_NAME})
 After=network-online.target
@@ -780,7 +781,13 @@ StartLimitBurst=5
 Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
-LoadCredential=bls-passphrase:${passphrase_file}
+EOF
+            # Only include LoadCredential for loadcredential method
+            # TPM method manages passphrase directly -- file may not exist
+            if [[ "$PASSPHRASE_METHOD" != "tpm" ]]; then
+                echo "LoadCredential=bls-passphrase:${passphrase_file}"
+            fi
+            cat <<EOF
 Environment="PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}"
 Environment="WORKER_LISTENER_MULTIADDR=${worker_multiaddr}"
 ExecStart=${wrapper}
@@ -797,6 +804,7 @@ StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
 [Install]
 WantedBy=multi-user.target
 EOF
+        } > "$service_file"
     fi
 
     systemctl daemon-reload

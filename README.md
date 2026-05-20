@@ -764,6 +764,10 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.24
+- **Fix**: When TPM passphrase method is selected, `LoadCredential` is no longer written to the systemd service file -- previously caused `status=243/CREDENTIALS` startup failure when the plaintext passphrase file was deleted after TPM sealing
+- All scripts bumped to v1.1.24
+
 ### v1.1.23
 - **Security**: Added optional TPM/vTPM passphrase sealing for binary/source installs -- passphrase sealed to machine's TPM chip, unreadable on any other machine even with root access. Supported on GCP Shielded VMs, AWS Nitro, and bare metal TPM2. Falls back to LoadCredential if TPM unavailable.
 - **Fix**: Pre-built binary option (option 2) now correctly blocks with a warning and re-prompts instead of silently continuing
