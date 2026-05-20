@@ -303,7 +303,23 @@ Advantages:
 - No extra software required
 - Credential is cleaned up when the service stops
 
-### Option 2 — HashiCorp Vault (enterprise grade)
+### Option 2 — TPM/vTPM sealing (advanced)
+
+Available as an option during setup for binary and source installs. The passphrase is sealed to the machine's TPM chip and can only be decrypted on that exact machine, even if someone obtains root access or copies the disk. Supported on GCP Shielded VMs (vTPM), AWS Nitro, and bare metal servers with a TPM2 chip.
+
+The setup scripts handle sealing automatically using `tpm2-tools`. During setup you will be shown the passphrase once and prompted to store it offline before the plaintext file is deleted.
+
+Advantages:
+- Passphrase cannot be read by root or copied off the machine
+- Works on GCP Shielded VMs, AWS Nitro, and bare metal TPM2
+- No extra infrastructure required
+- Falls back to LoadCredential file if TPM is unavailable
+
+Disadvantages:
+- Recovery requires your offline backup passphrase if the machine is rebuilt
+- Not available on VMs without vTPM support
+
+### Option 3 — HashiCorp Vault (enterprise grade)
 
 Vault is a dedicated secrets management server. The passphrase never touches disk on the node server at all — it is fetched from Vault via an authenticated API call at startup. Vault provides a full audit log of every access and supports secret rotation without touching the server.
 
@@ -329,10 +345,6 @@ Disadvantages:
 - Requires running and maintaining a separate Vault server
 - Significantly more infrastructure overhead
 - Overkill for a single node operator
-
-### Recommendation
-
-For most MNO operators running one or two nodes, `LoadCredential` is the right upgrade — meaningful security improvement with no new infrastructure. Vault makes sense for the Telcoin Association managing secrets centrally across many validators, or for large MNOs running multiple nodes at scale.
 
 ---
 
