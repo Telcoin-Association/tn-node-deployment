@@ -69,8 +69,8 @@ A validator node participates in Narwhal/Bullshark consensus, proposes and signs
 
 ### Supported Operating Systems
 
-- Ubuntu 20.04+ LTS
-- Debian 11+
+- Ubuntu 22.04+ LTS (minimum -- required for systemd 247+)
+- Debian 12+
 - Red Hat Enterprise Linux (RHEL) 8+
 - Kernel version 3.10+ minimum
 - macOS Sequoia 15+ (observer nodes only)
@@ -150,34 +150,44 @@ The script will guide you through every step interactively.
 
 Each script walks through numbered steps:
 
-**Steps 1-4: Preparation**
+**Step 1: Pre-flight Checks and Install Method**
 - Checks you are running as root
 - Detects your Linux distribution and package manager
 - Verifies hardware meets minimum requirements
-- Checks internet connectivity
-- Checks required ports are available
+- Checks internet connectivity and required ports
+- Checks systemd version (247+ required -- Ubuntu 22.04+)
 - Installs any missing tools (curl, git)
-- Asks which network to connect to (Adiri testnet or mainnet)
-- Asks for port and directory configuration
-- Asks how to obtain the binary (build from source, pre-built, Docker, or existing)
+- Asks how to obtain the binary (build from source, Docker, or existing)
+- Installs all dependencies upfront before configuration begins (Rust, build tools, Docker image pull, etc.)
+- For binary/source installs, asks which passphrase protection method to use (LoadCredential or TPM/vTPM)
 
-**Step 5: System Infrastructure**
-- Creates a dedicated system user and group for the node service (default: `telcoin`/`telcoin`, customisable during setup). The user has no login shell for security.
-- Creates all required directories under `/opt/telcoin`, `/var/lib/telcoin`, `/etc/telcoin`, `/var/log/telcoin`
+**Step 2: Network Selection**
+- Asks which network to connect to (Adiri testnet or mainnet)
+
+**Step 3: Node Configuration**
+- Asks for port and directory configuration
+- Asks for external and listener IP addresses for P2P
+
+**Step 4: System Infrastructure**
+- Creates a dedicated system user and group (default: telcoin/telcoin, customisable). The user has no login shell for security.
+- Creates all required directories under /opt/telcoin, /var/lib/telcoin, /etc/telcoin, /var/log/telcoin
 - Creates the reth internal log cache directory
-- Clones the Telcoin Network repository if not already present (for chain-config files)
 - Verifies the binary is valid and executable
 
-**Step 6: Key Generation**
+**Step 5: Key Generation**
 - Asks for your Ethereum address (and multiaddrs for validators)
 - Asks you to set a BLS key passphrase (entered twice to confirm, never shown on screen)
-- Runs `telcoin-network keytool generate observer/validator` to create cryptographic keys
-- Stores keys in `/var/lib/telcoin/[node-type]/node-keys/` with strict permissions
-- Stores the passphrase securely in `/etc/telcoin/[node-type]/bls-passphrase` (mode 600)
+- Runs telcoin-network keytool generate observer/validator to create cryptographic keys
+- Stores keys in /var/lib/telcoin/[node-type]/node-keys/ with strict permissions
+- Stores passphrase in /etc/telcoin/[node-type]/bls-passphrase (mode 600)
+- If TPM selected: seals passphrase to TPM chip, shows it once, prompts operator to store offline
 
-**Step 7/8: Configuration and Service**
+**Step 6: Configuration**
 - Copies the official chain-config files (genesis.yaml, committee.yaml, parameters.yaml) from the cloned repository
-- Writes a systemd service file to `/etc/systemd/system/telcoin-[type].service`
+
+**Step 7/8: Systemd Service**
+- Writes a wrapper script to /opt/telcoin/start-[type].sh that reads the passphrase securely at runtime
+- Writes a systemd service file to /etc/systemd/system/telcoin-[type].service using LoadCredential
 - Configures the correct network listener addresses for P2P connectivity
 - Optionally starts the node immediately
 - Optionally enables auto-start on server reboot
@@ -192,6 +202,7 @@ After setup, files are organised as follows:
 ```
 /opt/telcoin/
   telcoin-network              -- the node binary
+  start-telcoin-observer.sh     -- wrapper script (reads passphrase, starts node)
 
 /var/lib/telcoin/
   observer/                    -- observer chain data
@@ -226,6 +237,7 @@ After setup, files are organised as follows:
 ```
 /opt/telcoin/
   telcoin-network              -- the node binary
+  start-telcoin-validator.sh    -- wrapper script (reads passphrase, starts node)
 
 /var/lib/telcoin/
   validator/                   -- validator chain data
@@ -264,7 +276,7 @@ The scripts follow Linux security best practices:
 
 - **Dedicated service user** — the node runs as a dedicated system user (default: `telcoin`) with no login shell and no sudo access. The user and group name can be customised during setup. If the process is compromised it cannot access your other files or accounts.
 - **Strict file permissions** — key files are mode 600 (readable only by owner). The node-keys directory is mode 700.
-- **Passphrase never logged** — the BLS passphrase is passed via environment variable, never on the command line where it would appear in process lists.
+- **Passphrase never logged** — for binary/source installs the BLS passphrase is loaded via systemd `LoadCredential` into a secure temporary directory, never appearing in process listings or `systemctl show` output. For Docker installs it is passed via environment variable to the container.
 - **Systemd hardening** — the service uses `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem=strict` to limit what the process can do.
 - **RPC localhost only** — the RPC port defaults to 127.0.0.1 (localhost only). It is never exposed to the internet by default.
 - **CVE-2026-31431 check** — the setup scripts check for the Copy Fail mitigation during preflight and will not proceed until it is applied.
