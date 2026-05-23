@@ -26,22 +26,70 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.31"
+readonly SCRIPT_VERSION="1.1.32"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 
-RPC_URL="http://127.0.0.1:8545"
-SERVICE_NAME="telcoin-validator"
-NODE_TYPE="validator"
+# Defaults that get overridden by auto-detection or explicit flags.
+RPC_URL=""
+SERVICE_NAME=""
+NODE_TYPE=""
 VALIDATOR_ADDRESS=""
 AUTHORITY_ID=""
 NETWORK_RPC="$DEFAULT_NETWORK_RPC"
 QUERY_NETWORK=true
+NODE_TYPE_EXPLICITLY_SET=false
+
+# Apply node-type defaults. Called by --validator/--observer and by
+# detect_node_type() when running with no flag.
+set_node_type() {
+    case "$1" in
+        validator)
+            NODE_TYPE="validator"
+            SERVICE_NAME="telcoin-validator"
+            [[ -z "$RPC_URL" ]] && RPC_URL="http://127.0.0.1:8545"
+            ;;
+        observer)
+            NODE_TYPE="observer"
+            SERVICE_NAME="telcoin-observer"
+            [[ -z "$RPC_URL" ]] && RPC_URL="http://127.0.0.1:8541"
+            ;;
+    esac
+}
+
+# Pick a default node type from installed systemd units.
+# If both are installed, default to validator and tell the operator how to
+# switch. If neither, default to validator with a note. Honours explicit
+# flags via NODE_TYPE_EXPLICITLY_SET.
+detect_node_type() {
+    [[ "$NODE_TYPE_EXPLICITLY_SET" == "true" ]] && return 0
+    local val_unit="/etc/systemd/system/telcoin-validator.service"
+    local obs_unit="/etc/systemd/system/telcoin-observer.service"
+    local has_val=false has_obs=false
+    [[ -f "$val_unit" ]] && has_val=true
+    [[ -f "$obs_unit" ]] && has_obs=true
+
+    if   [[ "$has_val" == "true" ]] && [[ "$has_obs" == "true" ]]; then
+        set_node_type validator
+        print_info "Auto-detected: BOTH validator and observer installed -- checking validator."
+        print_info "Use --observer to check the observer instead."
+    elif [[ "$has_val" == "true" ]]; then
+        set_node_type validator
+        print_info "Auto-detected node type: validator"
+    elif [[ "$has_obs" == "true" ]]; then
+        set_node_type observer
+        print_info "Auto-detected node type: observer"
+    else
+        set_node_type validator
+        print_warn "No Telcoin node detected on this server -- defaulting to validator."
+        print_info "Pass --observer or --validator explicitly if needed."
+    fi
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --validator)    SERVICE_NAME="telcoin-validator"; RPC_URL="http://127.0.0.1:8545"; NODE_TYPE="validator"; shift ;;
-        --observer)     SERVICE_NAME="telcoin-observer";  RPC_URL="http://127.0.0.1:8541"; NODE_TYPE="observer";  shift ;;
+        --validator)    set_node_type validator; NODE_TYPE_EXPLICITLY_SET=true; shift ;;
+        --observer)     set_node_type observer;  NODE_TYPE_EXPLICITLY_SET=true; shift ;;
         --rpc)          RPC_URL="$2";           shift 2 ;;
         --service)      SERVICE_NAME="$2";      shift 2 ;;
         --address)      VALIDATOR_ADDRESS="$2"; shift 2 ;;
@@ -53,8 +101,9 @@ while [[ $# -gt 0 ]]; do
 
 Usage: $0 [OPTIONS]
 
-  --validator              Check validator node (default)
-  --observer               Check observer node
+  (no flag)                Auto-detect node type from installed systemd units
+  --validator              Force validator check
+  --observer               Force observer check
   --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:8545 / 8541)
   --network-rpc <URL>      Network RPC for ground truth (default: ${DEFAULT_NETWORK_RPC})
   --no-network             Skip the network RPC query (local-only mode)
@@ -68,6 +117,9 @@ EOF
         *) print_warn "Unknown argument: $1"; shift ;;
     esac
 done
+
+# Auto-detect node type if neither --validator nor --observer was passed.
+detect_node_type
 
 HEALTH_ISSUES=0
 

@@ -472,38 +472,39 @@ bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
 Run at any time after setup to verify your node is healthy:
 
 ```bash
-# Check observer node
-bash ~/telcoin-node-scripts/check-node.sh --observer
-
-# Check validator node
+# Auto-detects whether this server runs a validator or observer
 bash ~/telcoin-node-scripts/check-node.sh
 
-# Check validator with on-chain status
+# Force a specific node type (useful if both are installed on one server)
+bash ~/telcoin-node-scripts/check-node.sh --validator
+bash ~/telcoin-node-scripts/check-node.sh --observer
+
+# Include validator on-chain status (queries the ConsensusRegistry contract)
 bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
 
-# Custom service or RPC endpoint
-bash ~/telcoin-node-scripts/check-node.sh --service telcoin-observer --rpc http://127.0.0.1:8541
+# Skip the network RPC query (fully local / air-gapped diagnostics)
+bash ~/telcoin-node-scripts/check-node.sh --no-network
+
+# Custom local RPC endpoint or service name
+bash ~/telcoin-node-scripts/check-node.sh --rpc http://127.0.0.1:8541 --service telcoin-observer
 ```
 
 The health check verifies:
-- Systemd service is running
-- RPC endpoint is responding
-- Sync status and latest block number
-- Peer connectivity (see note below)
-- Disk space
-- Memory usage
-- Validator on-chain status (when `--address` flag is provided)
+- **Systemd service status** — running, with restart-loop detection (warns if the unit has restarted more than 5 times)
+- **Local RPC mode** — classified as `HEALTHY`, `SLOW` (responding but >6s), `DISABLED` (HTTP 200 but `-32601 method not found`), or `DOWN` (connection refused). Previously all four looked the same.
+- **Network consensus state** — queries `https://rpc.telcoin.network` for ground truth: current block, epoch, committee size, and how fresh the latest commit is.
+- **Local consensus state** — calls `tn_latestConsensusHeader` on the local node and applies the freshness contract: `block == 0` → ERROR (fully stalled), commit-timestamp age > 60s → WARN (stale), else OK. Also reports lag vs network in blocks.
+- **Author presence (validator-only)** — checks whether your authority ID appears in the network's recent consensus headers. Catches the failure mode where a validator is running (systemd green, RPC up) but silent (not authoring headers). Auto-detects your authority ID from `<data-dir>/node-info.yaml` (field `primary_network_key`) or accepts an explicit `--authority-id <BASE58>` override.
+- **Reputation score (validator-only)** — your own score from `sub_dag.reputation_score.scores_per_authority` alongside the committee average. Flags scores below half-average.
+- **Validator on-chain status** — when `--address` is provided, calls the ConsensusRegistry contract and reports your validator state (Undefined / Staked / PendingActivation / Active / etc.).
+- **Disk space** — uses the actual data directory from `/etc/telcoin/<type>/.node-meta` (falls back to `/var/lib/telcoin/<type>`), so the check reports usage on whichever mount actually holds chain data — not just the default.
+- **Memory** — total / available / percent used.
 
-### Peer Count Note
+### Why RPC instead of log files?
 
-Telcoin Network uses a libp2p-based P2P architecture (Narwhal/Bullshark) that differs from standard Ethereum peer counting. The `net_peerCount` RPC method returns **consensus peers only** — the number of committee validators the node is actively participating with. For observer nodes this will always be 0, which is correct and expected.
+Earlier versions of `check-node.sh` grepped the node log file for fixed string markers like `peer metrics heartbeat` and `got new consensus`. That approach was fragile (any change to the node binary's log format silently broke it) and gave misleading output — for example a "P2P peers since startup" metric whose label was wrong and whose count had no time window. As of v1.1.31 the script uses `tn_latestConsensusHeader` directly, which is stable, accurate, and works whether or not the node writes a parseable log file.
 
-The health check reads peer data directly from the node log file to provide more meaningful information:
-
-- **Consensus peers** — from `peer metrics heartbeat` log entries. Reflects active consensus connections. Will show 0 if UDP ports 49590/49594 are not open inbound on your firewall/router.
-- **Unique P2P peers (since startup)** — count of unique peer IPs seen in `new connection established` log entries in the last 5 minutes. Indicates active network connectivity. The same peer connecting multiple times is only counted once.
-
-Once the Prometheus metrics endpoint (port 9000) is functional in a future binary release, the health check will be updated to use it for more accurate real-time peer data.
+The author-presence check is the most useful signal — it answers the question *"is the network actually seeing my node participate?"* using the network's own consensus headers as the source of truth. This works even when the local RPC is closed off entirely.
 
 ---
 
@@ -766,6 +767,15 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ---
 
 ## Changelog
+
+### v1.1.32
+Small UX follow-up to v1.1.31. `check-node.sh` no longer requires `--observer`/`--validator` on the command line for the common case.
+
+- `check-node.sh` auto-detects node type from installed systemd units. Run `bash check-node.sh` with no flag on any node and it picks the right defaults. `--observer` and `--validator` remain as explicit overrides for non-standard setups or when both unit files exist on the same server.
+- README "Run at any time after setup" section updated to show the new auto-detect usage and lists the actual v1.1.31+ checks (the old list still referenced the retired log-grep peer count).
+- Retired the "Peer Count Note" section in the README -- the entire log-grep approach it described was removed in v1.1.31. Replaced with a short "Why RPC instead of log files?" note explaining the current design.
+
+All scripts bumped to v1.1.32.
 
 ### v1.1.31
 `check-node.sh` has been redesigned around the consensus RPC. Old version relied on grepping log files for fragile string markers, which produced misleading or stale output (notably a "P2P peers since startup" metric whose label was wrong, "consensus stuck" warnings that fired during normal testnet quiet periods, and a "synced at block 0" message that was a permanent false positive on Adiri). New version replaces all of that with direct RPC calls and the network's own view of your node.
