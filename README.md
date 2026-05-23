@@ -764,6 +764,46 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.29
+Audit-driven hardening pass. Focus: protecting live node state from typos, races, and bad input. No behavioural changes to the happy path; existing setups continue working unchanged.
+
+**`edit-config.sh` — the highest-risk script in the suite**
+- Every option that writes to a systemd unit file now creates a timestamped sibling backup first (`<unit>.bak.YYYYmmdd-HHMMSS`) so a bad edit can be rolled back by hand
+- Custom multiaddrs are validated against `/ip[46]/<addr>/udp/<port>/quic-v1` before any write -- bad input is rejected, not silently inserted
+- Instance number must be an integer 1-9 -- guards against typos that would silently change the RPC port
+- Metrics address must be `IPv4:PORT` -- catches `127.0.0.1` (missing port) and similar
+- P2P ports validated as 1-65535 and primary != worker
+- Docker image reference validated before pulling -- catches obvious typos before the pull failure
+- RPC mode change now strips orphan `--http.port`, `--http.api`, `--http.corsdomain`, `--http.vhosts` flags (previously only `--http.addr`/`--http` were removed, leaving stragglers)
+- BLS passphrase change now stops the service, polls until fully stopped, rewrites the passphrase file, then restarts -- closes the race where the running node could read a half-written file
+- Chain config refresh checks all three source YAMLs exist before any `cp`, so a missing source no longer silently leaves a node with stale configs
+
+**Setup scripts (observer + validator)**
+- `-e TN_BLS_PASSPHRASE=${bls_pass}` in the Docker `ExecStart` is now quoted -- a passphrase containing whitespace or shell metacharacters no longer breaks the unit file
+- Public IP and listener IP prompts validate input (IPv4 or IPv6) and re-prompt on bad input
+- Multiaddr prompts validate against the expected shape and re-prompt on bad input
+
+**`firewall-setup.sh`**
+- Atomic SSH port change. New sequence: back up `sshd_config`, add a second `Port` directive so sshd listens on both old and new during the transition, open the new port in ufw, require operator to type `CONFIRMED` after testing the new port from a second terminal, then remove the old port and old ufw rule. If anything goes wrong (sshd reload fails, operator does not confirm), rolls back to the original state.
+
+**`remove-node.sh`**
+- `wipe_chain_data_only` now polls until the unit is actually stopped before `rm -rf .../db` -- closes the race where deletion could run while the node process still held DB file handles
+- Docker image removal checks whether the sibling node's unit references the same image and keeps it if so
+- Service user/group removal checks whether the sibling node's unit uses the same user and keeps it if so
+
+**`update-scripts.sh`**
+- Now has `set -euo pipefail` (was the only script without it) -- failed curls in the middle of an update are no longer silent
+- Three-stage integrity check on every download: non-empty file, opportunistic SHA-256 verification against an upstream `<file>.sha256` sidecar (skipped silently when absent), and `bash -n` syntax check on `.sh` files before `mv` -- catches truncated or corrupted downloads even when no checksum is published
+
+**`check-node.sh`**
+- Now has `set -uo pipefail` -- catches unset-variable bugs and silent pipe failures without breaking the script's intentional `|| echo ""` fallback patterns
+- Fixed a pre-existing latent bug: `(( HEALTH_ISSUES++ ))` returns the pre-increment value 0 (exit code 1) the first time a health issue is detected, which under the inherited `set -e` from `lib/common.sh` caused the script to exit silently before reporting subsequent checks. Converted all post-increments across the suite (`check-node.sh`, `remove-node.sh`, `edit-config.sh`, `lib/common.sh`) to pre-increments which return the new value and avoid the trap.
+
+**`lib/common.sh`**
+- New input validation helpers used across the suite: `validate_ipv4`, `validate_ipv6`, `validate_public_ip`, `validate_port`, `validate_ip_port`, `validate_multiaddr`, `validate_docker_image`, `prompt_with_validation`
+
+- All scripts bumped to v1.1.29
+
 ### v1.1.28
 - **Fix**: Applied network selection fix to `setup-validator.sh` -- was missed in v1.1.27 due to differing script structure
 - All scripts bumped to v1.1.28

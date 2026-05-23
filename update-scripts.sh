@@ -9,9 +9,11 @@
 #   bash ~/telcoin-node-scripts/update-scripts.sh
 # =============================================================================
 
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.28"
+readonly SCRIPT_VERSION="1.1.29"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -120,7 +122,7 @@ check_versions() {
         if [[ "$local_ver" == "missing" ]]; then
             status="MISSING"
             status_colour="${YELLOW}"
-            (( updates_available++ ))
+            (( ++updates_available ))
             FILES_TO_UPDATE+=("$local_path:$remote_path")
         elif [[ "$remote_ver" == "unavailable" ]]; then
             status="Cannot check"
@@ -128,7 +130,7 @@ check_versions() {
         elif version_gt "$remote_ver" "$local_ver"; then
             status="UPDATE AVAILABLE"
             status_colour="${YELLOW}"
-            (( updates_available++ ))
+            (( ++updates_available ))
             FILES_TO_UPDATE+=("$local_path:$remote_path")
         else
             status="Up to date"
@@ -196,16 +198,57 @@ download_updates() {
         mkdir -p "$dest_dir"
 
         printf "  Downloading %-30s " "${local_path}..."
-        if curl -sf --max-time 30 "$url" -o "${dest}.tmp"; then
-            mv "${dest}.tmp" "$dest"
-            chmod +x "$dest" 2>/dev/null || true
-            echo -e "${GREEN}OK${RESET}"
-            (( success++ ))
-        else
+        if ! curl -sf --max-time 30 "$url" -o "${dest}.tmp"; then
             rm -f "${dest}.tmp"
-            echo -e "${RED}FAILED${RESET}"
-            (( failed++ ))
+            echo -e "${RED}FAILED${RESET}  (download error)"
+            (( ++failed ))
+            continue
         fi
+
+        # Integrity check 1: file is not empty
+        if [[ ! -s "${dest}.tmp" ]]; then
+            rm -f "${dest}.tmp"
+            echo -e "${RED}FAILED${RESET}  (empty download)"
+            (( ++failed ))
+            continue
+        fi
+
+        # Integrity check 2: opportunistic SHA-256 verification.
+        # The Telcoin repo does not currently publish .sha256 sidecars, but
+        # check anyway so verification kicks in automatically once they exist.
+        local sha_url="${url}.sha256"
+        local remote_sha
+        remote_sha=$(curl -sf --max-time 10 "$sha_url" 2>/dev/null | awk '{print $1}' || true)
+        if [[ -n "$remote_sha" ]]; then
+            local actual_sha
+            actual_sha=$(sha256sum "${dest}.tmp" | awk '{print $1}')
+            if [[ "$remote_sha" != "$actual_sha" ]]; then
+                rm -f "${dest}.tmp"
+                echo -e "${RED}FAILED${RESET}  (sha256 mismatch)"
+                (( ++failed ))
+                continue
+            fi
+        fi
+
+        # Integrity check 3: shell scripts must parse cleanly.
+        # Catches truncated downloads even when no sha256 is published.
+        if [[ "$local_path" == *.sh ]]; then
+            if ! bash -n "${dest}.tmp" 2>/dev/null; then
+                rm -f "${dest}.tmp"
+                echo -e "${RED}FAILED${RESET}  (syntax check)"
+                (( ++failed ))
+                continue
+            fi
+        fi
+
+        mv "${dest}.tmp" "$dest"
+        chmod +x "$dest" 2>/dev/null || true
+        if [[ -n "$remote_sha" ]]; then
+            echo -e "${GREEN}OK${RESET}      (verified)"
+        else
+            echo -e "${GREEN}OK${RESET}"
+        fi
+        (( ++success ))
     done
 
     echo ""

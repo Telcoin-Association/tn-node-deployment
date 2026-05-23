@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.28"
+readonly COMMON_VERSION="1.1.29"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -213,6 +213,114 @@ command_exists() {
     command -v "$1" &>/dev/null
 }
 
+# -----------------------------------------------------------------------------
+# INPUT VALIDATION HELPERS
+# -----------------------------------------------------------------------------
+
+# Validate IPv4 dotted-quad. Returns 0 if valid.
+validate_ipv4() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local IFS=.
+    local -a octets=($ip)
+    for octet in "${octets[@]}"; do
+        (( octet >= 0 && octet <= 255 )) || return 1
+    done
+    return 0
+}
+
+# Validate IPv6 (loose; accepts standard and compressed forms).
+validate_ipv6() {
+    local ip="$1"
+    [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    [[ "$ip" == *":"* ]] || return 1
+    return 0
+}
+
+# Validate a public-facing IP (IPv4 or IPv6).
+validate_public_ip() {
+    local ip="$1"
+    validate_ipv4 "$ip" || validate_ipv6 "$ip"
+}
+
+# Validate a TCP/UDP port (1-65535).
+validate_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    (( port >= 1 && port <= 65535 )) || return 1
+    return 0
+}
+
+# Validate an IP:PORT pair (used for metrics address).
+validate_ip_port() {
+    local val="$1"
+    local ip="${val%:*}"
+    local port="${val##*:}"
+    [[ "$ip" != "$val" ]] || return 1
+    validate_ipv4 "$ip" || return 1
+    validate_port "$port" || return 1
+    return 0
+}
+
+# Validate a libp2p multiaddr in the shapes this suite uses:
+#   /ip4/<ipv4>/udp/<port>/quic-v1
+#   /ip6/<ipv6>/udp/<port>/quic-v1
+validate_multiaddr() {
+    local addr="$1"
+    if [[ "$addr" =~ ^/ip4/([^/]+)/udp/([0-9]+)/quic-v1$ ]]; then
+        local ip="${BASH_REMATCH[1]}"
+        local port="${BASH_REMATCH[2]}"
+        # Accept 0.0.0.0 as a valid wildcard binding.
+        [[ "$ip" == "0.0.0.0" ]] || validate_ipv4 "$ip" || return 1
+        validate_port "$port" || return 1
+        return 0
+    fi
+    if [[ "$addr" =~ ^/ip6/([^/]+)/udp/([0-9]+)/quic-v1$ ]]; then
+        local ip="${BASH_REMATCH[1]}"
+        local port="${BASH_REMATCH[2]}"
+        [[ "$ip" == "::" ]] || validate_ipv6 "$ip" || return 1
+        validate_port "$port" || return 1
+        return 0
+    fi
+    return 1
+}
+
+# Validate a Docker image reference (registry/path:tag).
+# Accepts the registries this suite uses plus generic host/name:tag forms.
+validate_docker_image() {
+    local img="$1"
+    [[ -n "$img" ]] || return 1
+    [[ "$img" =~ [[:space:]] ]] && return 1
+    # Require at least one ":" for tag and "/" for registry/repo separation.
+    [[ "$img" == *:* ]] || return 1
+    [[ "$img" =~ ^[A-Za-z0-9._/:@-]+$ ]] || return 1
+    return 0
+}
+
+# Prompt for input, validate with a function, retry up to 3 times.
+# Usage: prompt_with_validation <prompt-text> <validator-fn> <out-var>
+# Returns 0 on success (out-var set), 1 if user exhausts retries.
+prompt_with_validation() {
+    local prompt_text="$1"
+    local validator_fn="$2"
+    local out_var="$3"
+    local attempts=0
+    local input
+    while (( attempts < 3 )); do
+        read -r -p "  ${prompt_text}: " input
+        if "$validator_fn" "$input"; then
+            printf -v "$out_var" '%s' "$input"
+            return 0
+        fi
+        (( ++attempts ))
+        if (( attempts < 3 )); then
+            print_warn "Invalid input. ($((3 - attempts)) attempt(s) remaining)"
+        fi
+    done
+    print_error "Too many invalid attempts. Aborting this step."
+    return 1
+}
+
 check_hardware() {
     local node_type="${1:-validator}"
     print_step "Checking hardware requirements for ${node_type} node..."
@@ -363,7 +471,7 @@ check_rpc_alive() {
         fi
         print_info "Attempt ${attempt}/${max_attempts} -- waiting ${wait_seconds}s..."
         sleep "$wait_seconds"
-        (( attempt++ ))
+        (( ++attempt ))
     done
     print_error "RPC did not respond after ${max_attempts} attempts."
     return 1

@@ -10,10 +10,18 @@
 #   bash check-node.sh --service <name>             # custom service name
 # =============================================================================
 
+set -uo pipefail
+# Note: `set -e` is inherited from lib/common.sh and is left active.
+# All `(( var++ ))` patterns below have been converted to `(( ++var ))`
+# to avoid the silent early-exit that bash applies when post-increment
+# returns the pre-increment value 0 under set -e.
+# -u additionally catches unset-variable bugs; pipefail catches silent
+# pipe failures without breaking the script's `|| echo ""` fallbacks.
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.28"
+readonly SCRIPT_VERSION="1.1.29"
 
 RPC_URL="http://127.0.0.1:8545"
 SERVICE_NAME="telcoin-validator"
@@ -66,7 +74,7 @@ else
     print_error "Service '${SERVICE_NAME}' is NOT running"
     print_info "Start it: systemctl start ${SERVICE_NAME}"
     print_info "Logs:     journalctl -u ${SERVICE_NAME} --no-pager -n 30"
-    (( HEALTH_ISSUES++ ))
+    (( ++HEALTH_ISSUES ))
 fi
 
 # --- RPC check ---
@@ -82,7 +90,7 @@ if echo "$RPC_RESPONSE" | grep -q '"result"'; then
     print_ok "RPC responding. Chain ID: ${CHAIN_ID_DEC}"
 else
     print_error "RPC not responding at ${RPC_URL}"
-    (( HEALTH_ISSUES++ ))
+    (( ++HEALTH_ISSUES ))
 fi
 
 # --- Sync status ---
@@ -203,7 +211,7 @@ if [[ -f "$LOG_FILE" ]]; then
                 fi
                 if [[ $SECONDS_AGO -gt 120 ]]; then
                     print_warn "Last consensus block: ${CONSENSUS_BLOCK} (${TIME_AGO}) -- may be stuck"
-                    (( HEALTH_ISSUES++ ))
+                    (( ++HEALTH_ISSUES ))
                 else
                     print_ok "Last consensus block: ${CONSENSUS_BLOCK} (${TIME_AGO})"
                 fi
@@ -247,7 +255,7 @@ for mount_path in "/" "/var/lib/telcoin"; do
         if [[ -n "$disk_info" ]]; then
             if [[ $usage_pct -ge 90 ]]; then
                 print_error "Disk at ${mount_path}: ${disk_info} -- CRITICAL"
-                (( HEALTH_ISSUES++ ))
+                (( ++HEALTH_ISSUES ))
             elif [[ $usage_pct -ge 75 ]]; then
                 print_warn "Disk at ${mount_path}: ${disk_info} -- getting full"
             else
@@ -268,7 +276,7 @@ MEM_TOTAL_GB=$(( MEM_TOTAL / 1024 / 1024 ))
 
 if [[ $MEM_PCT -ge 95 ]]; then
     print_error "Memory: ${MEM_USED_GB}GB / ${MEM_TOTAL_GB}GB (${MEM_PCT}%) -- CRITICAL"
-    (( HEALTH_ISSUES++ ))
+    (( ++HEALTH_ISSUES ))
 elif [[ $MEM_PCT -ge 85 ]]; then
     print_warn "Memory: ${MEM_USED_GB}GB / ${MEM_TOTAL_GB}GB (${MEM_PCT}%) -- high"
 else

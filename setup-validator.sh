@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.28"
+readonly SCRIPT_VERSION="1.1.29"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -500,9 +500,13 @@ step_generate_keys() {
 
     local public_ip
     public_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
+    if [[ -n "$public_ip" ]] && ! validate_public_ip "$public_ip"; then
+        print_warn "Auto-detected public IP looks invalid: ${public_ip} -- will prompt instead."
+        public_ip=""
+    fi
     if [[ -z "$public_ip" ]]; then
         print_warn "Could not auto-detect public IP."
-        read -r -p "  Enter your public/external IP address: " public_ip
+        prompt_with_validation "Enter your public/external IP address" validate_public_ip public_ip || exit 1
     else
         print_info "Detected public IP: ${public_ip}"
     fi
@@ -510,19 +514,35 @@ step_generate_keys() {
     echo ""
     echo "  External addresses (advertised to peers -- use your public/external IP):"
     local default_primary="/ip4/${public_ip}/udp/${P2P_PORT}/quic-v1"
-    read -r -p "  External primary addr [${default_primary}]: " input
-    PRIMARY_MULTIADDR="${input:-$default_primary}"
+    while true; do
+        read -r -p "  External primary addr [${default_primary}]: " input
+        PRIMARY_MULTIADDR="${input:-$default_primary}"
+        validate_multiaddr "$PRIMARY_MULTIADDR" && break
+        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+    done
 
     local default_worker="/ip4/${public_ip}/udp/${WORKER_PORT}/quic-v1"
-    read -r -p "  External worker addr  [${default_worker}]: " input
-    WORKER_MULTIADDR="${input:-$default_worker}"
+    while true; do
+        read -r -p "  External worker addr  [${default_worker}]: " input
+        WORKER_MULTIADDR="${input:-$default_worker}"
+        validate_multiaddr "$WORKER_MULTIADDR" && break
+        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+    done
 
     local internal_ip
     internal_ip=$(detect_internal_ip)
+    if [[ -n "$internal_ip" ]] && ! validate_ipv4 "$internal_ip" && ! validate_ipv6 "$internal_ip"; then
+        print_warn "Auto-detected internal IP looks invalid: ${internal_ip} -- will prompt instead."
+        internal_ip=""
+    fi
     if [[ -z "$internal_ip" ]]; then
         print_warn "Could not auto-detect internal IP."
-        read -r -p "  Enter your internal/NIC IP address: " internal_ip
+        read -r -p "  Enter your internal/NIC IP address [0.0.0.0]: " internal_ip
         internal_ip="${internal_ip:-0.0.0.0}"
+        if ! validate_ipv4 "$internal_ip" && ! validate_ipv6 "$internal_ip"; then
+            print_error "Invalid IP: ${internal_ip}"
+            exit 1
+        fi
     else
         print_info "Detected internal IP: ${internal_ip}"
     fi
@@ -530,12 +550,20 @@ step_generate_keys() {
     echo ""
     echo "  Listener addresses (what the node binds to -- use your internal/NIC IP):"
     local default_listener_primary="/ip4/${internal_ip}/udp/${P2P_PORT}/quic-v1"
-    read -r -p "  Listener primary addr [${default_listener_primary}]: " input
-    PRIMARY_LISTENER_MULTIADDR="${input:-$default_listener_primary}"
+    while true; do
+        read -r -p "  Listener primary addr [${default_listener_primary}]: " input
+        PRIMARY_LISTENER_MULTIADDR="${input:-$default_listener_primary}"
+        validate_multiaddr "$PRIMARY_LISTENER_MULTIADDR" && break
+        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+    done
 
     local default_listener_worker="/ip4/${internal_ip}/udp/${WORKER_PORT}/quic-v1"
-    read -r -p "  Listener worker addr  [${default_listener_worker}]: " input
-    WORKER_LISTENER_MULTIADDR="${input:-$default_listener_worker}"
+    while true; do
+        read -r -p "  Listener worker addr  [${default_listener_worker}]: " input
+        WORKER_LISTENER_MULTIADDR="${input:-$default_listener_worker}"
+        validate_multiaddr "$WORKER_LISTENER_MULTIADDR" && break
+        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+    done
 
     echo ""
     print_warn "Set a passphrase to encrypt your BLS validator key."
@@ -702,9 +730,9 @@ ExecStart=docker run --rm \
 --name ${SERVICE_NAME} \
 --user ${docker_uid}:${docker_gid} \
 --network=host \
--e TN_BLS_PASSPHRASE=${bls_pass} \
--e PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr} \
--e WORKER_LISTENER_MULTIADDR=${worker_multiaddr} \
+-e "TN_BLS_PASSPHRASE=${bls_pass}" \
+-e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
+-e "WORKER_LISTENER_MULTIADDR=${worker_multiaddr}" \
 -v ${DATA_DIR}:/home/nonroot \
 -v ${CONFIG_DIR}:/etc/telcoin/validator:ro \
 ${DOCKER_IMAGE} \

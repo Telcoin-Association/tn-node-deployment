@@ -13,7 +13,62 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.28"
+readonly SCRIPT_VERSION="1.1.29"
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+# Stop a unit and wait for it to actually finish exiting before returning.
+# systemctl stop normally blocks until the unit reaches inactive, but on some
+# configurations (Type=simple with no ExecStop, or container teardown) the
+# process can outlive the systemctl call by a few seconds. Poll explicitly
+# so the caller can safely delete the chain DB without racing the process.
+wait_for_service_stopped() {
+    local unit="$1"
+    local timeout="${2:-30}"
+    local waited=0
+    systemctl stop "$unit" 2>/dev/null || true
+    while systemctl is-active --quiet "$unit" 2>/dev/null; do
+        if (( waited >= timeout )); then
+            print_warn "${unit} did not stop within ${timeout}s -- forcing kill"
+            systemctl kill -s SIGKILL "$unit" 2>/dev/null || true
+            sleep 2
+            return
+        fi
+        sleep 1
+        (( ++waited ))
+    done
+}
+
+# True if the other node's service file references the given Docker image.
+image_used_by_other_node() {
+    local image="$1"
+    local self="$2"  # "observer" | "validator"
+    local other_unit
+    if [[ "$self" == "observer" ]]; then
+        other_unit="/etc/systemd/system/telcoin-validator.service"
+    else
+        other_unit="/etc/systemd/system/telcoin-observer.service"
+    fi
+    [[ -f "$other_unit" ]] || return 1
+    grep -qF "$image" "$other_unit"
+}
+
+# True if the other node's service file uses the given service user.
+user_used_by_other_node() {
+    local user="$1"
+    local self="$2"
+    local other_unit
+    if [[ "$self" == "observer" ]]; then
+        other_unit="/etc/systemd/system/telcoin-validator.service"
+    else
+        other_unit="/etc/systemd/system/telcoin-observer.service"
+    fi
+    [[ -f "$other_unit" ]] || return 1
+    grep -qE "^(User|--user)[ =]${user}([:[:space:]]|$)" "$other_unit" || \
+        grep -qE "^User=${user}$" "$other_unit"
+}
 
 # =============================================================================
 # DETECTION
@@ -153,24 +208,33 @@ stop_and_disable_service() {
 
 remove_docker_container() {
     local container_name="$1"
+    local self_type="${2:-}"  # observer | validator | "" (skip sibling check)
     print_step "Removing Docker container: ${container_name}..."
+
+    # Capture the image BEFORE removing the container, since docker inspect
+    # cannot read it after rm.
+    local image=""
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${container_name}$"; then
+        image=$(docker inspect --format='{{.Config.Image}}' "$container_name" 2>/dev/null || echo "")
         docker stop "$container_name" 2>/dev/null || true
         docker rm "$container_name" 2>/dev/null || true
         print_ok "Container ${container_name} removed"
-
-        # Offer to remove the image
-        local image
-        image=$(docker inspect --format='{{.Config.Image}}' "$container_name" 2>/dev/null || echo "")
-        if [[ -n "$image" ]]; then
-            echo ""
-            if confirm "Also remove Docker image '${image}'? (frees disk space)"; then
-                docker rmi "$image" 2>/dev/null || true
-                print_ok "Image removed"
-            fi
-        fi
     else
         print_info "Container ${container_name} not found -- may already be removed"
+    fi
+
+    if [[ -n "$image" ]]; then
+        # If the other node's unit references the same image, skip removal
+        # so we don't break the sibling node.
+        if [[ -n "$self_type" ]] && image_used_by_other_node "$image" "$self_type"; then
+            print_info "Image '${image}' is also used by the other Telcoin node -- keeping it."
+            return
+        fi
+        echo ""
+        if confirm "Also remove Docker image '${image}'? (frees disk space)"; then
+            docker rmi "$image" 2>/dev/null || true
+            print_ok "Image removed"
+        fi
     fi
 }
 
@@ -240,8 +304,8 @@ remove_shared_components() {
 
     # Only remove shared components if no other nodes remain
     local remaining_nodes=0
-    [[ "$OBSERVER_INSTALLED" == "true" ]] && (( remaining_nodes++ ))
-    [[ "$VALIDATOR_INSTALLED" == "true" ]] && (( remaining_nodes++ ))
+    [[ "$OBSERVER_INSTALLED" == "true" ]] && (( ++remaining_nodes ))
+    [[ "$VALIDATOR_INSTALLED" == "true" ]] && (( ++remaining_nodes ))
 
     # If we're removing all nodes, offer to clean shared components
     if [[ $remaining_nodes -le 1 ]]; then
@@ -276,8 +340,16 @@ remove_shared_components() {
 remove_service_user() {
     local service_user="$1"
     local service_group="$2"
+    local self_type="${3:-}"  # observer | validator | "" (skip sibling check)
 
     if [[ -z "$service_user" ]]; then
+        return
+    fi
+
+    # If the other node's unit still references this user, deleting would
+    # leave the sibling broken. Refuse and tell the operator.
+    if [[ -n "$self_type" ]] && user_used_by_other_node "$service_user" "$self_type"; then
+        print_info "User '${service_user}' is still in use by the other Telcoin node -- keeping it."
         return
     fi
 
@@ -323,7 +395,7 @@ remove_observer() {
 
     # Docker container if applicable
     if [[ "$OBSERVER_DOCKER" == "true" ]]; then
-        remove_docker_container "telcoin-observer"
+        remove_docker_container "telcoin-observer" "observer"
     fi
 
     # Chain data
@@ -336,7 +408,7 @@ remove_observer() {
     remove_shared_components
 
     # Service user
-    remove_service_user "$OBSERVER_SERVICE_USER" "$OBSERVER_SERVICE_GROUP"
+    remove_service_user "$OBSERVER_SERVICE_USER" "$OBSERVER_SERVICE_GROUP" "observer"
 
     echo ""
     print_ok "Observer node removal complete"
@@ -369,7 +441,7 @@ remove_validator() {
 
     # Docker container if applicable
     if [[ "$VALIDATOR_DOCKER" == "true" ]]; then
-        remove_docker_container "telcoin-validator"
+        remove_docker_container "telcoin-validator" "validator"
     fi
 
     # Chain data
@@ -382,7 +454,7 @@ remove_validator() {
     remove_shared_components
 
     # Service user
-    remove_service_user "$VALIDATOR_SERVICE_USER" "$VALIDATOR_SERVICE_GROUP"
+    remove_service_user "$VALIDATOR_SERVICE_USER" "$VALIDATOR_SERVICE_GROUP" "validator"
 
     echo ""
     print_ok "Validator node removal complete"
@@ -420,7 +492,7 @@ wipe_chain_data_only() {
         1)
             print_warn "This will wipe all observer chain data. The node will resync."
             if confirm "Wipe observer chain data?"; then
-                systemctl stop telcoin-observer 2>/dev/null || true
+                wait_for_service_stopped telcoin-observer
                 rm -rf /var/lib/telcoin/observer/db
                 systemctl start telcoin-observer 2>/dev/null || true
                 print_ok "Observer chain data wiped -- node restarted"
@@ -429,7 +501,7 @@ wipe_chain_data_only() {
         2)
             print_warn "This will wipe all validator chain data. The node will resync."
             if confirm "Wipe validator chain data?"; then
-                systemctl stop telcoin-validator 2>/dev/null || true
+                wait_for_service_stopped telcoin-validator
                 rm -rf /var/lib/telcoin/validator/db
                 systemctl start telcoin-validator 2>/dev/null || true
                 print_ok "Validator chain data wiped -- node restarted"
@@ -437,7 +509,8 @@ wipe_chain_data_only() {
             ;;
         3)
             if confirm "Wipe chain data for both observer and validator?"; then
-                systemctl stop telcoin-observer telcoin-validator 2>/dev/null || true
+                wait_for_service_stopped telcoin-observer
+                wait_for_service_stopped telcoin-validator
                 rm -rf /var/lib/telcoin/observer/db
                 rm -rf /var/lib/telcoin/validator/db
                 systemctl start telcoin-observer telcoin-validator 2>/dev/null || true

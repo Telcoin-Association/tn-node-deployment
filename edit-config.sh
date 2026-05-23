@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.28"
+readonly SCRIPT_VERSION="1.1.29"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
@@ -25,6 +25,32 @@ NODE_TYPE=""
 # =============================================================================
 # HELPERS
 # =============================================================================
+
+# Create a timestamped backup of the systemd unit file. Must succeed before any
+# in-place edit. Echoes the backup path so the caller can show or roll back.
+backup_service_file() {
+    local file="$1"
+    local ts backup
+    ts=$(date -u '+%Y%m%d-%H%M%S')
+    backup="${file}.bak.${ts}"
+    if ! cp -p "$file" "$backup"; then
+        print_error "Could not create backup of ${file}"
+        return 1
+    fi
+    print_info "Backup written: ${backup}"
+    echo "$backup"
+}
+
+# Restore from the most recent backup created above, used on rollback paths.
+restore_service_file() {
+    local file="$1"
+    local backup="$2"
+    if [[ -f "$backup" ]]; then
+        cp -p "$backup" "$file"
+        systemctl daemon-reload 2>/dev/null || true
+        print_warn "Rolled back to backup: ${backup}"
+    fi
+}
 
 # Read a value from the service file Environment= lines
 read_env_var() {
@@ -343,17 +369,22 @@ edit_listener_addresses() {
                 break
                 ;;
             3)
-                read -r -p "  Primary listener multiaddr: " new_primary
-                read -r -p "  Worker listener multiaddr:  " new_worker
+                print_info "Expected form: /ip4/<addr>/udp/<port>/quic-v1 or /ip6/<addr>/udp/<port>/quic-v1"
+                prompt_with_validation "Primary listener multiaddr" validate_multiaddr new_primary || { set -e; return; }
+                prompt_with_validation "Worker listener multiaddr " validate_multiaddr new_worker || { set -e; return; }
                 break
                 ;;
             *) print_warn "Please enter 1, 2, or 3." ;;
         esac
     done
 
+    local backup
+    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || { set -e; return; }
+
     # Update service file -- handle both binary and Docker installs
     if echo "$exec_start" | grep -qF "docker run"; then
-        # Docker -- update ExecStart directly using perl
+        # Docker -- update ExecStart directly using perl. The multiaddr is
+        # already validated above, so the substitution is safe.
         perl -i -pe "s|PRIMARY_LISTENER_MULTIADDR=[^ ]+|PRIMARY_LISTENER_MULTIADDR=${new_primary}|g" "$TARGET_SERVICE_FILE"
         perl -i -pe "s|WORKER_LISTENER_MULTIADDR=[^ ]+|WORKER_LISTENER_MULTIADDR=${new_worker}|g" "$TARGET_SERVICE_FILE"
     else
@@ -387,6 +418,16 @@ edit_instance_number() {
     read -r -p "  New instance number [${current_instance}]: " input
     new_instance="${input:-$current_instance}"
 
+    if ! [[ "$new_instance" =~ ^[0-9]+$ ]] || (( new_instance < 1 || new_instance > 9 )); then
+        print_error "Instance must be an integer between 1 and 9."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    local backup
+    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+
     local new_rpc=$(( 8545 - (new_instance - 1) ))
     set_flag_value "--instance" "$new_instance" "$TARGET_SERVICE_FILE"
     print_ok "Instance updated to ${new_instance} (RPC port: ${new_rpc})"
@@ -407,6 +448,17 @@ edit_metrics() {
     local new_metrics
     read -r -p "  New metrics address [${current_metrics}]: " input
     new_metrics="${input:-$current_metrics}"
+
+    if ! validate_ip_port "$new_metrics"; then
+        print_error "Invalid metrics address: ${new_metrics}"
+        print_info "Expected IPv4:PORT (e.g. 127.0.0.1:9000)."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    local backup
+    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
 
     set_flag_value "--metrics" "$new_metrics" "$TARGET_SERVICE_FILE"
     print_ok "Metrics address updated to: ${new_metrics}"
@@ -439,6 +491,9 @@ edit_verbosity() {
         esac
     done
 
+    local backup
+    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+
     set_verbosity "$new_verbosity" "$TARGET_SERVICE_FILE"
     print_ok "Log verbosity updated to: ${new_verbosity}"
     apply_changes
@@ -463,54 +518,49 @@ edit_rpc() {
     echo "  3) Disabled              -- RPC completely off"
     echo ""
 
+    # Strip every --http* flag (with or without a value) from an ExecStart line.
+    # Captures --http, --http.addr, --http.port, --http.api, --http.corsdomain,
+    # --http.vhosts, --http.maxconnections and any future --http.* variants.
+    _strip_http_flags() {
+        local exec="$1"
+        # Two-pass: first remove flags that take a value, then bare --http.
+        echo "$exec" | \
+            sed -E 's/ --http\.[a-zA-Z.]+( +[^ -][^ ]*)?//g' | \
+            sed -E 's/ --http( |$)/\1/g'
+    }
+
     local choice
     while true; do
         read -r -p "  Enter choice [1/2/3]: " choice
         case "$choice" in
-            1)
-                # Rebuild ExecStart without any --http flags, then add private config
-                # Read current ExecStart, strip all --http* flags and their values, append clean config
-                local current_exec
-                current_exec=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" | sed 's/^ExecStart=//')
-                # Remove --http, --http.addr and their values
-                local clean_exec
-                clean_exec=$(echo "$current_exec" | \
-                    sed 's/ --http\.addr [^ ]*//g' | \
-                    sed 's/ --http[^\.][^ ]*//g' | \
-                    sed 's/ --http$//g')
-                sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 127.0.0.1|" "$TARGET_SERVICE_FILE"
-                print_ok "RPC set to private (localhost only)"
-                break
-                ;;
-            2)
-                local current_exec
-                current_exec=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" | sed 's/^ExecStart=//')
-                local clean_exec
-                clean_exec=$(echo "$current_exec" | \
-                    sed 's/ --http\.addr [^ ]*//g' | \
-                    sed 's/ --http[^\.][^ ]*//g' | \
-                    sed 's/ --http$//g')
-                sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 0.0.0.0|" "$TARGET_SERVICE_FILE"
-                print_ok "RPC set to public (0.0.0.0)"
-                print_warn "Ensure you have an nginx reverse proxy configured before"
-                print_warn "opening this port on your firewall."
-                break
-                ;;
-            3)
-                local current_exec
-                current_exec=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" | sed 's/^ExecStart=//')
-                local clean_exec
-                clean_exec=$(echo "$current_exec" | \
-                    sed 's/ --http\.addr [^ ]*//g' | \
-                    sed 's/ --http[^\.][^ ]*//g' | \
-                    sed 's/ --http$//g')
-                sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec}|" "$TARGET_SERVICE_FILE"
-                print_ok "RPC disabled"
-                break
-                ;;
+            1|2|3) break ;;
             *) print_warn "Please enter 1, 2, or 3." ;;
         esac
     done
+
+    local backup
+    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+
+    local current_exec clean_exec
+    current_exec=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" | sed 's/^ExecStart=//')
+    clean_exec=$(_strip_http_flags "$current_exec")
+
+    case "$choice" in
+        1)
+            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 127.0.0.1|" "$TARGET_SERVICE_FILE"
+            print_ok "RPC set to private (localhost only)"
+            ;;
+        2)
+            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 0.0.0.0|" "$TARGET_SERVICE_FILE"
+            print_ok "RPC set to public (0.0.0.0)"
+            print_warn "Ensure you have an nginx reverse proxy configured before"
+            print_warn "opening this port on your firewall."
+            ;;
+        3)
+            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec}|" "$TARGET_SERVICE_FILE"
+            print_ok "RPC disabled"
+            ;;
+    esac
 
     apply_changes
 }
@@ -553,6 +603,40 @@ edit_bls_passphrase() {
         print_warn "Passphrases do not match -- try again."
     done
 
+    # Stop the service before rewriting the passphrase file so we never race
+    # against a node that may have the old file mapped in its credential dir.
+    local was_active="no"
+    if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
+        was_active="yes"
+        print_step "Stopping ${TARGET_SERVICE} before passphrase rewrite..."
+        systemctl stop "$TARGET_SERVICE"
+        local stop_attempts=0
+        while systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null && (( stop_attempts < 15 )); do
+            sleep 1
+            (( ++stop_attempts ))
+        done
+        if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
+            print_error "Service did not stop within 15s. Aborting passphrase rewrite."
+            new_pass=""
+            new_pass_confirm=""
+            echo ""
+            read -r -p "  Press Enter to return to menu..."
+            return 1
+        fi
+        print_ok "Service stopped"
+    fi
+
+    # For Docker installs the passphrase is also embedded in the unit file,
+    # so back up the unit before any write.
+    local exec_start backup=""
+    exec_start=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" 2>/dev/null || echo "")
+    if echo "$exec_start" | grep -qF "docker run"; then
+        backup=$(backup_service_file "$TARGET_SERVICE_FILE") || {
+            [[ "$was_active" == "yes" ]] && systemctl start "$TARGET_SERVICE"
+            return 1
+        }
+    fi
+
     # Update the passphrase file
     echo "$new_pass" > "$passphrase_file"
     chmod 600 "$passphrase_file"
@@ -562,8 +646,6 @@ edit_bls_passphrase() {
     # Binary/source installs use LoadCredential -- passphrase read from file at
     # runtime, no service file change needed.
     # Docker installs embed passphrase in ExecStart -- update it.
-    local exec_start
-    exec_start=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" 2>/dev/null || echo "")
     if echo "$exec_start" | grep -qF "docker run"; then
         local bls_pass
         bls_pass=$(cat "$passphrase_file")
@@ -576,7 +658,23 @@ edit_bls_passphrase() {
     new_pass=""
     new_pass_confirm=""
 
-    apply_changes
+    # Restart the service if it was running before
+    if [[ "$was_active" == "yes" ]]; then
+        print_step "Restarting ${TARGET_SERVICE}..."
+        systemctl daemon-reload
+        systemctl start "$TARGET_SERVICE"
+        sleep 3
+        if systemctl is-active --quiet "$TARGET_SERVICE"; then
+            print_ok "Service restarted successfully"
+        else
+            print_error "Service failed to restart. Check logs:"
+            print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
+        fi
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+    else
+        apply_changes
+    fi
 }
 
 edit_p2p_ports() {
@@ -601,6 +699,28 @@ edit_p2p_ports() {
     new_primary_port="${input:-49590}"
     read -r -p "  Worker P2P port  [49594]: " input
     new_worker_port="${input:-49594}"
+
+    if ! validate_port "$new_primary_port"; then
+        print_error "Invalid primary port: ${new_primary_port}. Must be 1-65535."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    if ! validate_port "$new_worker_port"; then
+        print_error "Invalid worker port: ${new_worker_port}. Must be 1-65535."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    if [[ "$new_primary_port" == "$new_worker_port" ]]; then
+        print_error "Primary and worker ports cannot be the same."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
+    local backup
+    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
 
     # Rebuild multiaddrs with new ports keeping same IP/protocol
     local new_primary new_worker
@@ -656,6 +776,14 @@ edit_docker_image() {
         return
     fi
 
+    if ! validate_docker_image "$new_image"; then
+        print_error "Image reference looks invalid: ${new_image}"
+        print_info "Expected format: registry/path:tag (e.g. us-docker.pkg.dev/.../adiri:v0.9.2)."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
     print_step "Pulling new image: ${new_image}..."
     if ! docker pull "$new_image"; then
         print_error "Failed to pull image: ${new_image}"
@@ -665,6 +793,9 @@ edit_docker_image() {
         return
     fi
     print_ok "Image pulled successfully"
+
+    local backup
+    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
 
     # Replace old image with new image in ExecStart
     perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_SERVICE_FILE"
@@ -720,11 +851,25 @@ refresh_chain_configs() {
         return
     fi
 
+    # Verify source files exist before any copy so we never wipe live state
+    # with empty/missing sources.
+    local missing=()
+    [[ -f "${chain_config_src}/genesis.yaml"    ]] || missing+=("genesis.yaml")
+    [[ -f "${chain_config_src}/committee.yaml"  ]] || missing+=("committee.yaml")
+    [[ -f "${chain_config_src}/parameters.yaml" ]] || missing+=("parameters.yaml")
+    if (( ${#missing[@]} > 0 )); then
+        print_error "Missing chain config files at ${chain_config_src}:"
+        for f in "${missing[@]}"; do print_info "  ${f}"; done
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+
     print_step "Copying chain configs to ${node_data_dir}..."
     mkdir -p "${node_data_dir}/genesis"
-    cp "${chain_config_src}/genesis.yaml"    "${node_data_dir}/genesis/" 2>/dev/null || true
-    cp "${chain_config_src}/committee.yaml"  "${node_data_dir}/genesis/" 2>/dev/null || true
-    cp "${chain_config_src}/parameters.yaml" "${node_data_dir}/" 2>/dev/null || true
+    cp "${chain_config_src}/genesis.yaml"    "${node_data_dir}/genesis/"
+    cp "${chain_config_src}/committee.yaml"  "${node_data_dir}/genesis/"
+    cp "${chain_config_src}/parameters.yaml" "${node_data_dir}/"
 
     local svc_user
     svc_user=$(grep "^User=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "root")

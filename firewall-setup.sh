@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.28"
+readonly SCRIPT_VERSION="1.1.29"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # =============================================================================
@@ -285,20 +285,108 @@ manage_ssh() {
             echo ""
             local new_port
             read -r -p "  New SSH port (current: ${ssh_port}): " new_port
-            if [[ "$new_port" =~ ^[0-9]+$ ]] && [[ $new_port -gt 0 ]] && [[ $new_port -lt 65536 ]]; then
-                if confirm "Change SSH port to ${new_port}?"; then
-                    sed -i "s/^#*Port.*/Port ${new_port}/" "$SSH_CONFIG"
-                    if ufw_active; then
-                        ufw allow "${new_port}/tcp" &>/dev/null
-                        ufw delete allow "${ssh_port}/tcp" &>/dev/null
-                    fi
-                    systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null
-                    print_ok "SSH port changed to ${new_port}"
-                    print_warn "Test access on port ${new_port} before closing this session"
-                fi
-            else
+            if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
                 print_warn "Invalid port number"
+                echo ""
+                read -r -p "  Press Enter to return to menu..."
+                return
             fi
+            if [[ "$new_port" == "$ssh_port" ]]; then
+                print_info "Already on port ${new_port}; nothing to do."
+                echo ""
+                read -r -p "  Press Enter to return to menu..."
+                return
+            fi
+            if ! confirm "Change SSH port to ${new_port}?"; then
+                print_info "Cancelled -- no changes made"
+                echo ""
+                read -r -p "  Press Enter to return to menu..."
+                return
+            fi
+
+            # Atomic transition:
+            #   1. Back up sshd_config.
+            #   2. Make sshd listen on BOTH old and new ports.
+            #   3. Open new port in ufw.
+            #   4. Operator confirms a new SSH session works on the new port.
+            #   5. Only then remove the old Port directive and old ufw rule.
+            # If the operator cannot confirm we roll back to the original state.
+            local ts backup
+            ts=$(date -u '+%Y%m%d-%H%M%S')
+            backup="${SSH_CONFIG}.bak.${ts}"
+            if ! cp -p "$SSH_CONFIG" "$backup"; then
+                print_error "Could not back up ${SSH_CONFIG}. Aborting."
+                echo ""
+                read -r -p "  Press Enter to return to menu..."
+                return
+            fi
+            print_info "Backup written: ${backup}"
+
+            # Add new Port directive (without removing the old one). Append
+            # rather than replace so both ports listen during the transition.
+            printf '\nPort %s\n' "$new_port" >> "$SSH_CONFIG"
+
+            if ufw_active; then
+                ufw allow "${new_port}/tcp" &>/dev/null
+                print_ok "ufw: allowed ${new_port}/tcp"
+            fi
+
+            if ! systemctl reload sshd 2>/dev/null && ! service ssh reload 2>/dev/null; then
+                print_error "sshd reload failed -- rolling back."
+                cp -p "$backup" "$SSH_CONFIG"
+                ufw_active && ufw delete allow "${new_port}/tcp" &>/dev/null
+                echo ""
+                read -r -p "  Press Enter to return to menu..."
+                return
+            fi
+            print_ok "sshd now listening on BOTH port ${ssh_port} and port ${new_port}"
+
+            echo ""
+            print_warn "================================================================"
+            print_warn "  ACTION REQUIRED -- TEST THE NEW PORT FROM A SECOND TERMINAL"
+            print_warn "================================================================"
+            print_info "Open a NEW terminal on your local machine and run:"
+            print_info "    ssh -p ${new_port} <user>@<this-server>"
+            print_info ""
+            print_info "Only confirm CONFIRMED once that NEW session is logged in."
+            print_info "If you cannot connect, type anything else to roll back."
+            print_warn "================================================================"
+            echo ""
+
+            local confirm_text
+            read -r -p "  Type CONFIRMED to finalise the port change: " confirm_text
+            if [[ "$confirm_text" != "CONFIRMED" ]]; then
+                print_warn "Rolling back to original sshd configuration..."
+                cp -p "$backup" "$SSH_CONFIG"
+                ufw_active && ufw delete allow "${new_port}/tcp" &>/dev/null
+                systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null
+                print_ok "Reverted. SSH still listening on port ${ssh_port} only."
+                echo ""
+                read -r -p "  Press Enter to return to menu..."
+                return
+            fi
+
+            # Finalise: remove old Port directive(s) and old ufw rule.
+            # Use a tmp file to safely remove the original Port lines while
+            # keeping the appended new one.
+            local tmp
+            tmp=$(mktemp)
+            awk -v keep="$new_port" '
+                /^[[:space:]]*Port[[:space:]]/ {
+                    n=$2
+                    if (n == keep) { print; next } else { next }
+                }
+                { print }
+            ' "$SSH_CONFIG" > "$tmp"
+            mv "$tmp" "$SSH_CONFIG"
+            chmod --reference="$backup" "$SSH_CONFIG" 2>/dev/null || chmod 644 "$SSH_CONFIG"
+
+            if ufw_active; then
+                ufw delete allow "${ssh_port}/tcp" &>/dev/null
+                print_ok "ufw: removed allow rule for old port ${ssh_port}/tcp"
+            fi
+            systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null
+            print_ok "SSH port changed to ${new_port} (old port ${ssh_port} closed)"
             ;;
         4) return ;;
         *) print_warn "Invalid choice" ;;
