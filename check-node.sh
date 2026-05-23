@@ -8,8 +8,9 @@
 # network's view of your node is still reported.
 #
 # USAGE:
-#   bash check-node.sh                              # validator (default)
-#   bash check-node.sh --observer                   # observer
+#   bash check-node.sh                              # auto-detect node type
+#   bash check-node.sh --validator                  # force validator
+#   bash check-node.sh --observer                   # force observer
 #   bash check-node.sh --address 0xYOUR_ADDRESS     # include on-chain status
 #   bash check-node.sh --authority-id <BASE58>      # override author/rep check
 #   bash check-node.sh --rpc <URL>                  # custom local RPC
@@ -26,7 +27,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.32"
+readonly SCRIPT_VERSION="1.1.33"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 
@@ -246,9 +247,17 @@ block = r.get('number', 0)
 ts = sd.get('commit_timestamp', 0)
 epoch = hdrs[0].get('epoch', 0) if hdrs else 0
 authors = sorted({h.get('author', '') for h in hdrs if h.get('author')})
+# Highest execution block referenced by any header in this commit -- gives
+# the network's view of the latest EVM block without a second RPC call.
+exec_blocks = [
+    (h.get('latest_execution_block') or {}).get('number', 0)
+    for h in hdrs
+]
+max_exec = max(exec_blocks) if exec_blocks else 0
 print('CH_BLOCK=' + str(block))
 print('CH_TS=' + str(ts))
 print('CH_EPOCH=' + str(epoch))
+print('CH_EXEC_BLOCK=' + str(max_exec))
 print('CH_AUTHORS="' + ' '.join(authors) + '"')
 print('CH_REPS="' + ' '.join(k + '=' + str(v) for k, v in sorted(reps.items())) + '"')
 PYEOF
@@ -271,6 +280,79 @@ fmt_age() {
     elif (( s < 3600 )); then echo "$(( s / 60 ))m ago"
     else                       echo "$(( s / 3600 ))h ago"
     fi
+}
+
+# Convert a JSON-RPC hex string ("0x1234") to decimal. Echoes 0 on error.
+hex_to_dec() {
+    local h="${1:-0x0}"
+    h="${h#0x}"
+    [[ -z "$h" ]] && { echo 0; return; }
+    [[ "$h" =~ ^[0-9a-fA-F]+$ ]] || { echo 0; return; }
+    printf '%d\n' "0x${h}" 2>/dev/null || echo 0
+}
+
+# Call eth_blockNumber locally. Echoes the decoded decimal block number on
+# success, or empty string on failure. Caller uses exit code:
+#   0 = ok (value echoed)
+#   1 = failure (empty)
+# Side-effect-free: returns the value via stdout so it works in command
+# substitution (a side-effect via global would not propagate out of $( )).
+fetch_local_exec_block() {
+    local url="$1"
+    local resp
+    resp=$(curl -sS --connect-timeout 3 --max-time 6 \
+        -X POST -H 'Content-Type: application/json' \
+        --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+        "$url" 2>/dev/null) || { echo ""; return 1; }
+    local hex
+    hex=$(echo "$resp" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    r = d.get("result")
+    print(r if isinstance(r, str) else "")
+except Exception:
+    print("")
+' 2>/dev/null)
+    if [[ -z "$hex" ]]; then
+        echo ""
+        return 1
+    fi
+    hex_to_dec "$hex"
+    return 0
+}
+
+# Call eth_syncing locally. Returns one of:
+#   "synced"
+#   "syncing <current>/<highest>"
+#   "err"
+fetch_local_sync_state() {
+    local url="$1"
+    local resp
+    resp=$(curl -sS --connect-timeout 3 --max-time 6 \
+        -X POST -H 'Content-Type: application/json' \
+        --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+        "$url" 2>/dev/null) || { echo "err"; return; }
+    echo "$resp" | python3 -c '
+import json, sys
+def to_int(x):
+    if not isinstance(x, str): return 0
+    try: return int(x, 16)
+    except Exception: return 0
+try:
+    d = json.load(sys.stdin)
+    r = d.get("result")
+    if r is False:
+        print("synced")
+    elif isinstance(r, dict):
+        cur = to_int(r.get("currentBlock", "0x0"))
+        hi  = to_int(r.get("highestBlock", "0x0"))
+        print(f"syncing {cur}/{hi}")
+    else:
+        print("err")
+except Exception:
+    print("err")
+'
 }
 
 # =============================================================================
@@ -413,7 +495,65 @@ else
 fi
 
 # =============================================================================
-# 5. AUTHORITY-SPECIFIC CHECKS (author presence + own reputation)
+# 5. EVM EXECUTION STATE (block + sync)
+# Local: eth_blockNumber + eth_syncing  (skipped if local RPC unreachable)
+# Network: highest latest_execution_block.number from the consensus headers
+#          we already fetched in section 3 -- no extra network RPC call.
+# =============================================================================
+LOCAL_EXEC_BLOCK=""
+NET_EXEC_BLOCK=""
+[[ "$NETWORK_OK" == "true" ]] && NET_EXEC_BLOCK="$CH_EXEC_BLOCK"
+
+if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; then
+    print_step "Querying EVM execution state..."
+    if LOCAL_EXEC_BLOCK=$(fetch_local_exec_block "$RPC_URL"); then
+        print_ok "Local EVM block:    ${LOCAL_EXEC_BLOCK}"
+    else
+        print_warn "Could not query local eth_blockNumber"
+        LOCAL_EXEC_BLOCK=""
+    fi
+
+    if [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
+        if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
+            evm_lag=$(( NET_EXEC_BLOCK - LOCAL_EXEC_BLOCK ))
+            if (( evm_lag > 100 )); then
+                print_warn "Network EVM block:  ${NET_EXEC_BLOCK}  (${evm_lag} blocks behind)"
+            elif (( evm_lag < -5 )); then
+                print_info "Network EVM block:  ${NET_EXEC_BLOCK}  (local ahead by $(( -evm_lag )))"
+            else
+                print_ok "Network EVM block:  ${NET_EXEC_BLOCK}  (lag ${evm_lag})"
+            fi
+        else
+            print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
+        fi
+    fi
+
+    sync_state=$(fetch_local_sync_state "$RPC_URL")
+    case "$sync_state" in
+        synced)
+            print_ok "eth_syncing:        false (synced)"
+            ;;
+        syncing*)
+            # syncing <current>/<highest>
+            cur_hi="${sync_state#syncing }"
+            cur="${cur_hi%/*}"
+            hi="${cur_hi#*/}"
+            behind=$(( hi - cur ))
+            print_warn "eth_syncing:        IN PROGRESS at ${cur} / ${hi}  (${behind} behind)"
+            (( ++HEALTH_ISSUES ))
+            ;;
+        err|*)
+            print_info "eth_syncing:        could not determine"
+            ;;
+    esac
+elif [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
+    print_step "EVM execution state (network only -- local RPC unreachable)..."
+    print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
+    print_info "Local EVM block:    N/A (RPC ${LOCAL_RPC_MODE})"
+fi
+
+# =============================================================================
+# 6. AUTHORITY-SPECIFIC CHECKS (author presence + own reputation)
 # Uses NETWORK response so it still works if local RPC is closed.
 # =============================================================================
 if [[ "$NETWORK_OK" == "true" ]]; then
@@ -469,7 +609,7 @@ if [[ "$NETWORK_OK" == "true" ]]; then
 fi
 
 # =============================================================================
-# 6. ON-CHAIN VALIDATOR STATUS
+# 7. ON-CHAIN VALIDATOR STATUS
 # =============================================================================
 if [[ "$NODE_TYPE" == "validator" ]] && [[ -n "$VALIDATOR_ADDRESS" ]]; then
     echo ""
@@ -481,7 +621,7 @@ elif [[ "$NODE_TYPE" == "validator" ]]; then
 fi
 
 # =============================================================================
-# 7. DISK
+# 8. DISK
 # =============================================================================
 print_step "Checking disk space..."
 DATA_DIR=$(detect_data_dir)
@@ -511,7 +651,7 @@ done
 print_info "Data dir checked: ${DATA_DIR}  (mount: ${DATA_MOUNT:-unknown})"
 
 # =============================================================================
-# 8. MEMORY
+# 9. MEMORY
 # =============================================================================
 print_step "Checking memory..."
 MEM_TOTAL=$(grep MemTotal /proc/meminfo | awk '{print $2}')
@@ -531,7 +671,7 @@ else
 fi
 
 # =============================================================================
-# 9. SUMMARY
+# 10. SUMMARY
 # =============================================================================
 echo ""
 print_sep
