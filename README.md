@@ -380,10 +380,13 @@ Forward UDP ports 49590 and 49594 from WAN to your server's local IP address. Cl
 The RPC port (8541/8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
 
 ### Health Monitoring (Uptime Kuma)
-If using Uptime Kuma for node health monitoring, open TCP port 43174:
+**Required for all nodes (observer and validator).** The Telcoin Association runs Uptime Kuma health monitoring against every deployed node — TCP port 43174 must be open inbound or your node will show as DOWN in monitoring.
+
 ```bash
 sudo ufw allow 43174/tcp
 ```
+
+`firewall-setup.sh` opens this port automatically when you run option 2 ("Enable firewall with recommended defaults").
 
 ---
 
@@ -763,6 +766,21 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ---
 
 ## Changelog
+
+### v1.1.30
+Firewall script now opens every port a Telcoin node actually needs — no more silent monitoring failures or unreachable validators after running "Enable firewall with recommended defaults".
+
+**`firewall-setup.sh` — node-aware recommended defaults**
+- Option 2 ("Enable firewall with recommended defaults") now opens the ports a node actually needs based on what's installed: SSH, TCP 43174 (Uptime Kuma) on every node, plus UDP 49590/49594 on validators. Previously only SSH was opened, so operators who didn't also navigate to option 4 ended up with closed P2P ports (silent validator consensus failure) or closed Uptime Kuma (silent monitoring failure).
+- New `UPTIME_KUMA_PORT` constant. Uptime Kuma is documented as required across all nodes (Telcoin Association health monitoring runs against every deployed node).
+- New `ufw_has_allow <port> <proto>` helper. Status checks now match the protocol explicitly, fixing the prior `grep "49590\|49594"` patterns that conflated TCP and UDP rules.
+- Option 1 ("View current firewall status") now flags `CLOSED -- validator will not reach consensus` and `CLOSED -- health monitoring will fail` as hard errors (not warnings) when required ports are shut on an installed node.
+- Option 4 ("Manage node ports") wording updated to reflect that Uptime Kuma is required (not optional) and Public RPC remains optional.
+
+**README**
+- "Health Monitoring (Uptime Kuma)" section updated to mark TCP 43174 as required for all nodes rather than optional.
+
+- All scripts bumped to v1.1.30
 
 ### v1.1.29
 Audit-driven hardening pass. Focus: protecting live node state from typos, races, and bad input. No behavioural changes to the happy path; existing setups continue working unchanged.

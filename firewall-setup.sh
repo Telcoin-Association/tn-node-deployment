@@ -12,8 +12,14 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.29"
+readonly SCRIPT_VERSION="1.1.30"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
+
+# Ports required for a fully working Telcoin node deployment.
+# 43174/tcp is the Uptime Kuma health-monitoring endpoint used by the
+# Telcoin Association across all nodes (observer AND validator).
+# UDP 49590/49594 are validator-only (P2P consensus).
+readonly UPTIME_KUMA_PORT="43174"
 
 # =============================================================================
 # HELPERS
@@ -33,6 +39,17 @@ get_ssh_root_login() {
 
 ufw_active() {
     ufw status 2>/dev/null | grep -q "Status: active"
+}
+
+# Return 0 if ufw has an ALLOW rule for the given port/proto. Matches the
+# protocol explicitly so a TCP rule on the same number doesn't get
+# misreported as a UDP rule open (and vice versa). Matches both regular
+# and (v6) entries.
+ufw_has_allow() {
+    local port="$1"
+    local proto="$2"  # tcp | udp
+    ufw status 2>/dev/null | \
+        grep -qE "^${port}/${proto}([[:space:]]+\(v6\))?[[:space:]]+ALLOW"
 }
 
 ufw_installed() {
@@ -132,23 +149,39 @@ view_status() {
         echo ""
 
         if echo "$nodes" | grep -q "observer"; then
-            print_info "Observer node -- no inbound ports required"
-            if ufw_active && ufw status 2>/dev/null | grep -q "49590\|49594"; then
-                print_warn "Ports 49590/49594 appear open inbound -- not required for observer"
-            else
+            print_info "Observer node -- no inbound P2P ports required"
+            if ufw_active && (ufw_has_allow 49590 udp || ufw_has_allow 49594 udp); then
+                print_warn "UDP 49590/49594 appear open inbound -- not required for observer"
+            elif ufw_active; then
                 print_ok "No unnecessary inbound P2P ports open for observer"
             fi
         fi
 
         if echo "$nodes" | grep -q "validator"; then
-            print_info "Validator node -- UDP 49590/49594 required inbound"
+            print_info "Validator node -- UDP 49590/49594 required inbound for P2P consensus"
             if ufw_active; then
-                ufw status 2>/dev/null | grep -q "49590" && \
-                    print_ok "Port 49590 is open" || \
-                    print_warn "Port 49590 not open -- validator P2P may not work"
-                ufw status 2>/dev/null | grep -q "49594" && \
-                    print_ok "Port 49594 is open" || \
-                    print_warn "Port 49594 not open -- validator P2P may not work"
+                if ufw_has_allow 49590 udp; then
+                    print_ok "UDP 49590 is open"
+                else
+                    print_error "UDP 49590 is CLOSED -- validator will not reach consensus"
+                fi
+                if ufw_has_allow 49594 udp; then
+                    print_ok "UDP 49594 is open"
+                else
+                    print_error "UDP 49594 is CLOSED -- validator will not reach consensus"
+                fi
+            fi
+        fi
+
+        # Uptime Kuma is required across all node types (Telcoin Association
+        # health monitoring runs against every deployed node).
+        echo ""
+        print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT} required for all nodes"
+        if ufw_active; then
+            if ufw_has_allow "$UPTIME_KUMA_PORT" tcp; then
+                print_ok "TCP ${UPTIME_KUMA_PORT} is open"
+            else
+                print_error "TCP ${UPTIME_KUMA_PORT} is CLOSED -- health monitoring will fail"
             fi
         fi
     fi
@@ -179,12 +212,25 @@ enable_firewall() {
         print_ok "ufw installed"
     fi
 
+    local ssh_port nodes
+    ssh_port=$(get_ssh_port)
+    nodes=$(detect_installed_nodes)
+
     echo ""
     print_info "This will apply the following settings:"
     echo "  - Default inbound policy: DENY"
     echo "  - Default outbound policy: ALLOW"
     echo "  - Allow established connections"
-    echo "  - Allow SSH on port $(get_ssh_port)"
+    echo "  - Allow SSH on port ${ssh_port}"
+    echo "  - Allow TCP ${UPTIME_KUMA_PORT} (Uptime Kuma -- required for all nodes)"
+    if echo "$nodes" | grep -q "validator"; then
+        echo "  - Allow UDP 49590 and 49594 (validator P2P -- required)"
+    fi
+    if [[ "$nodes" == "none" ]]; then
+        echo ""
+        print_info "No Telcoin node installed yet. Re-run this option after running"
+        print_info "setup-validator.sh to also open the validator P2P ports."
+    fi
     echo ""
     print_warn "Ensure your SSH access IP is whitelisted (option 5) before enabling"
     print_warn "or you may lose access to this server."
@@ -205,17 +251,23 @@ enable_firewall() {
         return
     fi
 
-    local ssh_port
-    ssh_port=$(get_ssh_port)
-
     ufw --force reset &>/dev/null
     ufw default deny incoming &>/dev/null
     ufw default allow outgoing &>/dev/null
     ufw allow "${ssh_port}/tcp" &>/dev/null
+    ufw allow "${UPTIME_KUMA_PORT}/tcp" &>/dev/null
+    if echo "$nodes" | grep -q "validator"; then
+        ufw allow 49590/udp &>/dev/null
+        ufw allow 49594/udp &>/dev/null
+    fi
     ufw --force enable &>/dev/null
 
     print_ok "Firewall enabled with recommended defaults"
-    print_ok "SSH port ${ssh_port} allowed"
+    print_ok "SSH port ${ssh_port}/tcp allowed"
+    print_ok "Uptime Kuma port ${UPTIME_KUMA_PORT}/tcp allowed"
+    if echo "$nodes" | grep -q "validator"; then
+        print_ok "Validator P2P UDP 49590 and 49594 allowed"
+    fi
     print_warn "Test your SSH connection in a new terminal before closing this one"
     echo ""
     read -r -p "  Press Enter to return to menu..."
@@ -436,39 +488,42 @@ manage_node_ports() {
     fi
 
     if echo "$nodes" | grep -q "observer"; then
-        print_info "Observer nodes do not require any inbound ports."
+        print_info "Observer nodes do not require inbound P2P ports."
         print_info "P2P connections are outbound only."
 
-        if ufw status 2>/dev/null | grep -q "49590\|49594"; then
+        if ufw_has_allow 49590 udp || ufw_has_allow 49594 udp; then
             echo ""
-            if confirm "Close inbound ports 49590/49594 (not needed for observer)?"; then
+            if confirm "Close inbound UDP 49590/49594 (not needed for observer)?"; then
                 ufw delete allow 49590/udp &>/dev/null
                 ufw delete allow 49594/udp &>/dev/null
-                print_ok "Inbound P2P ports closed"
+                print_ok "Inbound P2P UDP ports closed"
             fi
         fi
     fi
 
     echo ""
-    print_info "Public RPC (nginx on port 443):"
-    if ufw status 2>/dev/null | grep -q "443"; then
-        print_ok "Port 443 is already open"
+    print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT} is required for all nodes."
+    print_info "(Used by Telcoin Association monitoring against every deployed node.)"
+    if ufw_has_allow "$UPTIME_KUMA_PORT" tcp; then
+        print_ok "TCP ${UPTIME_KUMA_PORT} is already open"
     else
-        if confirm "Open port 443 for public RPC via nginx?"; then
-            ufw allow 443/tcp &>/dev/null
-            print_ok "Port 443 opened"
-            print_info "Configure nginx to proxy to your RPC port"
+        if confirm "Open TCP ${UPTIME_KUMA_PORT} for Uptime Kuma health monitoring?"; then
+            ufw allow "${UPTIME_KUMA_PORT}/tcp" &>/dev/null
+            print_ok "TCP ${UPTIME_KUMA_PORT} opened"
+        else
+            print_warn "TCP ${UPTIME_KUMA_PORT} left closed -- node will show as DOWN in monitoring."
         fi
     fi
 
     echo ""
-    print_info "Uptime Kuma health monitoring (TCP port 43174):"
-    if ufw status 2>/dev/null | grep -q "43174"; then
-        print_ok "Port 43174 is already open"
+    print_info "Public RPC (nginx on port 443) -- optional, only if you serve public RPC:"
+    if ufw_has_allow 443 tcp; then
+        print_ok "TCP 443 is already open"
     else
-        if confirm "Open TCP port 43174 for Uptime Kuma health monitoring?"; then
-            ufw allow 43174/tcp &>/dev/null
-            print_ok "Port 43174 opened"
+        if confirm "Open TCP 443 for public RPC via nginx?"; then
+            ufw allow 443/tcp &>/dev/null
+            print_ok "TCP 443 opened"
+            print_info "Configure nginx to proxy to your RPC port"
         fi
     fi
 
