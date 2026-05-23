@@ -767,6 +767,46 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.31
+`check-node.sh` has been redesigned around the consensus RPC. Old version relied on grepping log files for fragile string markers, which produced misleading or stale output (notably a "P2P peers since startup" metric whose label was wrong, "consensus stuck" warnings that fired during normal testnet quiet periods, and a "synced at block 0" message that was a permanent false positive on Adiri). New version replaces all of that with direct RPC calls and the network's own view of your node.
+
+**New source of truth: `tn_latestConsensusHeader`**
+- Reports network state (block, epoch, commit timestamp, committee) by querying `https://rpc.telcoin.network` directly.
+- Reports local state by querying the local node's RPC and comparing.
+- Health contract: `block == 0` → ERROR "fully stalled", `commit_timestamp age > 60s` → WARN "stale, behind by Xs", else OK.
+
+**New: author-presence check (the killer signal)**
+- Validators get a clear answer to "is my node actually participating?" by checking whether the operator's authority ID appears in `sub_dag.headers[].author` from the network's recent consensus headers. Catches the failure mode where a validator is "running" (systemd green, RPC up) but silent (not authoring headers).
+- Works even when the local RPC is closed off entirely -- the network's view of your node is enough.
+- Authority ID is auto-detected from `<data-dir>/node-info.yaml` (field `primary_network_key`) or passed explicitly via `--authority-id <BASE58>`.
+
+**New: own reputation score**
+- Reports the operator's reputation score from `sub_dag.reputation_score.scores_per_authority` alongside the committee average. Below half-average emits a `[WARN]`.
+
+**New: local RPC mode classification**
+- Distinguishes `HEALTHY` / `SLOW` (responding but >6s) / `DISABLED` (HTTP 200 with `-32601 method not found`) / `DOWN` (connection refused). Previously all four looked the same.
+
+**New: `--no-network` flag**
+- Skips the public-RPC query for fully air-gapped diagnostics. Local-only checks still run.
+
+**New: disk check uses the actual data directory**
+- Reads `DATA_DIR` from `/etc/telcoin/<type>/.node-meta` (falls back to `/var/lib/telcoin/<type>`) and reports the disk usage of whatever mount actually holds chain data. Previously hard-coded to `/var/lib/telcoin`, which missed operators with chain data on a separate mount.
+
+**Removed entirely**
+- Log file grepping for `peer metrics heartbeat`, `got new consensus`, `new connection established`
+- The "P2P peers since startup" metric (label was wrong; counted all-time unique entries with no time filter)
+- The 120s "consensus stuck" heuristic (false positives during testnet quiet periods)
+- The "same block in last 10 log entries" heuristic (correlated nothing meaningful)
+- Greedy regex for primary/worker peer breakdown
+
+**Dependency notes**
+- Adds `python3` as a runtime dependency for JSON parsing (already installed on every supported OS). No `jq` needed.
+
+**Implementation note**
+- All helper functions explicitly `return 0` even on miss, so the `set -e` inherited from `lib/common.sh` cannot fire silently when an optional file (like `node-info.yaml`) is absent.
+
+- All scripts bumped to v1.1.31
+
 ### v1.1.30
 Firewall script now opens every port a Telcoin node actually needs — no more silent monitoring failures or unreachable validators after running "Enable firewall with recommended defaults".
 
