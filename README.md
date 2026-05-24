@@ -88,15 +88,16 @@ The scripts will install or check for everything needed. You do not need to inst
 
 ## Quick Start
 
-### Installing the scripts
+All scripts are interactive and guide you through each step. Work through these in order on a fresh Linux machine:
 
-On a fresh Linux machine run this single command to download and install all scripts:
+**1. Install the scripts**
 
+One-liner with `curl`:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main/install.sh | bash
 ```
 
-Or with wget:
+Or with `wget`:
 ```bash
 wget -qO- https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main/install.sh | bash
 ```
@@ -107,42 +108,42 @@ git clone https://github.com/Telcoin-Association/tn-node-deployment.git ~/telcoi
 chmod +x ~/telcoin-node-scripts/*.sh
 ```
 
-### Running the setup
-
-**1. Install the scripts**
-
-The quickest way on a fresh Linux machine is the one-liner above. Alternatively, copy scripts manually from Windows:
-
-```
-scp -r "C:\path\to\telcoin-node-scripts" user@YOUR_SERVER_IP:~/
-```
-
-Or from Linux/Mac:
+**2. Run the setup for your node type**
 ```bash
-scp -r ./telcoin-node-scripts user@YOUR_SERVER_IP:~/
-chmod +x ~/telcoin-node-scripts/*.sh
-```
-
-**2. Run the setup**
-```bash
-# For an observer node
+# Observer node
 sudo bash ~/telcoin-node-scripts/setup-observer.sh
 
-# For a validator node
+# Validator node (GSMA-approved MNOs only)
 sudo bash ~/telcoin-node-scripts/setup-validator.sh
 ```
 
-**3. Harden your firewall (recommended)**
+**3. Harden the firewall (recommended)**
 ```bash
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ```
+Opens the right ports for the node type detected (SSH + Uptime Kuma on all, plus UDP 49590/49594 on validators).
 
-**4. Edit configuration after setup (optional)**
+**4. Check node health any time**
 ```bash
-sudo bash ~/telcoin-node-scripts/edit-config.sh
+# Auto-detects observer or validator
+bash ~/telcoin-node-scripts/check-node.sh
+
+# Include on-chain validator status
+bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_ADDRESS
 ```
 
-The script will guide you through every step interactively.
+### Day-to-day operations
+
+```bash
+# Edit a running node's configuration (multiaddrs, ports, RPC mode, etc.)
+sudo bash ~/telcoin-node-scripts/edit-config.sh
+
+# Update all scripts to the latest version from GitHub
+bash ~/telcoin-node-scripts/update-scripts.sh
+
+# Remove a node installation (interactive, with explicit confirmations)
+sudo bash ~/telcoin-node-scripts/remove-node.sh
+```
 
 ---
 
