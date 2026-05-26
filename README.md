@@ -723,6 +723,13 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.37
+Hotfix for v1.1.36.
+
+- `update-node.sh` was still declaring its own `readonly TN_SOURCE_DIR="/opt/telcoin-source"` after v1.1.36 moved that declaration into `lib/common.sh`. Under `set -e` the duplicate readonly assignment killed the script immediately on start with `update-node.sh: line 35: TN_SOURCE_DIR: readonly variable`. Removed the duplicate. (The same fix was applied to `setup-observer.sh` / `setup-validator.sh` in v1.1.36, but `update-node.sh` slipped through.)
+
+All scripts bumped to v1.1.37.
+
 ### v1.1.36
 Source-build picker now follows the official Telcoin guidance for which ref to build from.
 
