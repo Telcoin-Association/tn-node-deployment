@@ -723,6 +723,21 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.35
+UX improvement to `update-node.sh`: show available versions upfront instead of asking the operator to commit to "prepare" before seeing what's there.
+
+**New flow:**
+1. Auto-detect node type + install method (same as v1.1.34)
+2. **Probe the remote upfront** -- `git fetch` for source installs, GAR API for Docker installs -- so the operator can see what is available before picking anything.
+3. **Show a numbered menu of versions** with the current one marked `<-- current` and the newest one marked `<-- latest`. For source: up to 15 recent tags plus a `main` option and a custom-ref entry. For Docker: up to 15 recent tags plus a custom-tag entry. Both menus include a `Cancel` option.
+4. **Then** ask whether to prepare-only, prepare-and-apply, or cancel.
+
+For source builds the script also reports how many commits behind `origin/main` the current ref is, so operators can see at a glance whether anything has landed since their last build. If you are already on the latest release tag, the menu says `[OK] You are on the latest release tag` so you can cancel out without committing to a build.
+
+The `--discard` flag and the existing pending-state logic (apply / discard-and-prepare / leave-for-later) are preserved; "discard and prepare different" now flows through the same picker.
+
+All scripts bumped to v1.1.35.
+
 ### v1.1.34
 New `update-node.sh` -- a single script for safely moving a running node to a newer version. Replaces the operator's previous workflow of "stop service, rebuild manually, hope it works, restart manually."
 

@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.34"
+readonly SCRIPT_VERSION="1.1.35"
 readonly TN_SOURCE_DIR="/opt/telcoin-source"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 readonly VERIFY_TIMEOUT_SECONDS=45
@@ -243,6 +243,7 @@ compose_image_url() {
 }
 
 prepare_docker_update() {
+    local new_image="$1"
     print_header "Prepare Update -- Docker Install"
 
     local current_image
@@ -251,59 +252,14 @@ prepare_docker_update() {
         return 1
     }
     print_info "Current image: ${current_image}"
-    local current_tag="${current_image##*:}"
-    local registry_path="${current_image%:*}"
-
-    # Try the GAR API to suggest newer tags.
-    print_step "Querying registry for available tags..."
-    local available_tags
-    available_tags=$(fetch_docker_tags || true)
-
-    if [[ -n "$available_tags" ]]; then
-        echo ""
-        print_info "Recent tags published to the registry:"
-        local i=1
-        local -a tag_array
-        while IFS= read -r t; do
-            [[ -z "$t" ]] && continue
-            tag_array+=("$t")
-            local marker=""
-            [[ "$t" == "$current_tag" ]] && marker="  <-- current"
-            printf "  %2d) %s%s\n" "$i" "$t" "$marker"
-            (( ++i ))
-        done <<< "$available_tags"
-        echo ""
-    else
-        print_warn "Could not reach registry (or no parseable tags found)"
-        print_info "Falling back to manual entry."
-        echo ""
-    fi
-
-    local new_tag=""
-    read -r -p "  Enter new tag (e.g. ${current_tag}) or press Enter to cancel: " new_tag
-    if [[ -z "$new_tag" ]]; then
-        print_info "Cancelled."
-        return 1
-    fi
-    if [[ "$new_tag" == "$current_tag" ]]; then
-        print_info "That is the current tag. Nothing to update."
-        return 1
-    fi
-    # Sanity-check the tag against the basic format
-    if ! [[ "$new_tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        print_error "Tag contains unexpected characters: ${new_tag}"
-        return 1
-    fi
-
-    local new_image
-    new_image=$(compose_image_url "$current_image" "$new_tag")
-    print_info "Will pull: ${new_image}"
+    print_info "Target image:  ${new_image}"
     echo ""
     if ! confirm "Proceed with the pull?"; then
         print_info "Cancelled."
         return 1
     fi
 
+    local current_tag="${current_image##*:}"
     print_step "Pulling image: ${new_image}"
     if ! docker pull "$new_image"; then
         print_error "Image pull failed. Service untouched."
@@ -384,6 +340,7 @@ apply_docker_update() {
 # =============================================================================
 
 prepare_source_build() {
+    local new_ref="$1"
     print_header "Prepare Update -- Source Build"
 
     if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
@@ -395,22 +352,7 @@ prepare_source_build() {
     local current_ref
     current_ref=$(detect_current_source_ref || echo "unknown")
     print_info "Current source ref: ${current_ref}"
-
-    print_step "Fetching latest from origin..."
-    if ! git -C "$TN_SOURCE_DIR" fetch --tags --quiet; then
-        print_error "git fetch failed -- check internet connectivity."
-        return 1
-    fi
-    print_ok "Fetched"
-
-    echo ""
-    print_info "Recent tags:"
-    git -C "$TN_SOURCE_DIR" tag --sort=-creatordate 2>/dev/null | head -8 | sed 's/^/    /'
-    echo ""
-
-    local new_ref
-    read -r -p "  Enter branch or tag to build (default: main): " new_ref
-    new_ref="${new_ref:-main}"
+    print_info "Target ref:         ${new_ref}"
 
     print_step "Checking out: ${new_ref}"
     if ! git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
@@ -611,6 +553,227 @@ validator_downtime_warning_if_applicable() {
 }
 
 # =============================================================================
+# INTERACTIVE VERSION PICKERS
+# Print informational messages to stderr; print only the chosen ref/image
+# on stdout so the caller can capture it via $(...). Return 0 on selection,
+# 1 on cancel or error.
+# =============================================================================
+
+pick_source_version() {
+    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
+        print_error "Source directory not found at ${TN_SOURCE_DIR}" >&2
+        print_info "This script can only update installs that built from /opt/telcoin-source." >&2
+        return 1
+    fi
+
+    local current_ref
+    current_ref=$(detect_current_source_ref || echo "unknown")
+
+    print_step "Fetching latest refs from origin..." >&2
+    if ! git -C "$TN_SOURCE_DIR" fetch --tags --quiet 2>/dev/null; then
+        print_warn "git fetch failed -- showing cached refs only" >&2
+    fi
+
+    # Collect tags, newest by creator date first.
+    local -a tags
+    while IFS= read -r t; do
+        [[ -z "$t" ]] && continue
+        tags+=("$t")
+    done < <(git -C "$TN_SOURCE_DIR" tag --sort=-creatordate 2>/dev/null | head -15)
+
+    # Compute commits-behind/ahead vs origin/main for context.
+    local behind ahead
+    behind=$(git -C "$TN_SOURCE_DIR" rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+    ahead=$(git -C "$TN_SOURCE_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo "?")
+
+    echo "" >&2
+    print_info "Current source ref:   ${current_ref}" >&2
+    if [[ "$behind" != "?" ]]; then
+        print_info "vs origin/main:       ${behind} commits behind, ${ahead} ahead" >&2
+    fi
+    if [[ ${#tags[@]} -gt 0 ]]; then
+        local latest_tag="${tags[0]}"
+        if [[ "$current_ref" == "$latest_tag"* ]]; then
+            print_ok  "You are on the latest release tag (${latest_tag})." >&2
+        else
+            print_info "Latest release tag:   ${latest_tag}" >&2
+        fi
+    fi
+    echo "" >&2
+
+    # Build the menu.
+    print_info "Available versions to build:" >&2
+    local i=1
+    for tag in "${tags[@]}"; do
+        local marker=""
+        [[ "$current_ref" == "$tag"* ]] && marker="  <-- current"
+        [[ $i -eq 1 ]] && [[ -z "$marker" ]] && marker="  <-- latest"
+        printf "  %2d) %s%s\n" "$i" "$tag" "$marker" >&2
+        (( ++i ))
+    done
+    local tag_count=$(( i - 1 ))
+    local main_opt=$i;   printf "  %2d) main (latest commit on the main branch)\n" "$main_opt"   >&2; (( ++i ))
+    local custom_opt=$i; printf "  %2d) Custom branch / tag / commit hash\n"      "$custom_opt" >&2; (( ++i ))
+    local cancel_opt=$i; printf "  %2d) Cancel\n"                                  "$cancel_opt" >&2
+    echo "" >&2
+
+    local choice
+    read -r -p "  Select [1-${cancel_opt}]: " choice >&2
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        print_warn "Invalid selection." >&2
+        return 1
+    fi
+    if (( choice == cancel_opt )); then
+        print_info "Cancelled." >&2
+        return 1
+    fi
+    if (( choice == custom_opt )); then
+        local custom_ref
+        read -r -p "  Enter branch / tag / commit hash: " custom_ref >&2
+        [[ -z "$custom_ref" ]] && { print_info "Cancelled." >&2; return 1; }
+        echo "$custom_ref"
+        return 0
+    fi
+    if (( choice == main_opt )); then
+        echo "main"
+        return 0
+    fi
+    if (( choice >= 1 && choice <= tag_count )); then
+        echo "${tags[$((choice - 1))]}"
+        return 0
+    fi
+
+    print_warn "Invalid selection." >&2
+    return 1
+}
+
+pick_docker_version() {
+    local current_image
+    current_image=$(detect_current_docker_image) || {
+        print_error "Could not read current Docker image from ${SERVICE_NAME}.service" >&2
+        return 1
+    }
+    local current_tag="${current_image##*:}"
+    local registry_path="${current_image%:*}"
+
+    print_step "Querying registry for available tags..." >&2
+    local -a all_tags
+    while IFS= read -r t; do
+        [[ -z "$t" ]] && continue
+        all_tags+=("$t")
+    done < <(fetch_docker_tags)
+
+    echo "" >&2
+    print_info "Current image:        ${current_image}" >&2
+
+    # No tags = registry unreachable or returned nothing parseable.
+    if [[ ${#all_tags[@]} -eq 0 ]]; then
+        print_warn "Could not reach registry (or no parseable tags returned)." >&2
+        echo "" >&2
+        print_info "Falling back to manual entry." >&2
+        local custom_tag
+        read -r -p "  Enter target tag (e.g. ${current_tag}) or Enter to cancel: " custom_tag >&2
+        [[ -z "$custom_tag" ]] && { print_info "Cancelled." >&2; return 1; }
+        if ! [[ "$custom_tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            print_error "Tag contains unexpected characters: ${custom_tag}" >&2
+            return 1
+        fi
+        if [[ "$custom_tag" == "$current_tag" ]]; then
+            print_info "That is your current tag. Nothing to update." >&2
+            return 1
+        fi
+        echo "${registry_path}:${custom_tag}"
+        return 0
+    fi
+
+    # fetch_docker_tags returns oldest-first; reverse for newest-first menu.
+    local -a tags_desc
+    for ((i=${#all_tags[@]}-1; i>=0; i--)); do
+        tags_desc+=("${all_tags[i]}")
+    done
+    local latest_tag="${tags_desc[0]}"
+
+    if [[ "$current_tag" == "$latest_tag" ]]; then
+        print_ok "You are on the latest published tag (${latest_tag})." >&2
+    else
+        print_info "Latest published tag: ${latest_tag}" >&2
+    fi
+    echo "" >&2
+
+    print_info "Available image tags:" >&2
+    local i=1
+    for tag in "${tags_desc[@]}"; do
+        local marker=""
+        [[ "$tag" == "$current_tag" ]] && marker="  <-- current"
+        [[ $i -eq 1 ]] && [[ -z "$marker" ]] && marker="  <-- latest"
+        printf "  %2d) %s%s\n" "$i" "$tag" "$marker" >&2
+        (( ++i ))
+    done
+    local tag_count=$(( i - 1 ))
+    local custom_opt=$i; printf "  %2d) Custom tag\n" "$custom_opt" >&2; (( ++i ))
+    local cancel_opt=$i; printf "  %2d) Cancel\n"     "$cancel_opt" >&2
+    echo "" >&2
+
+    local choice
+    read -r -p "  Select [1-${cancel_opt}]: " choice >&2
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        print_warn "Invalid selection." >&2
+        return 1
+    fi
+    if (( choice == cancel_opt )); then
+        print_info "Cancelled." >&2
+        return 1
+    fi
+    if (( choice == custom_opt )); then
+        local custom_tag
+        read -r -p "  Enter target tag: " custom_tag >&2
+        [[ -z "$custom_tag" ]] && { print_info "Cancelled." >&2; return 1; }
+        if ! [[ "$custom_tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            print_error "Tag contains unexpected characters: ${custom_tag}" >&2
+            return 1
+        fi
+        if [[ "$custom_tag" == "$current_tag" ]]; then
+            print_info "That is your current tag. Nothing to update." >&2
+            return 1
+        fi
+        echo "${registry_path}:${custom_tag}"
+        return 0
+    fi
+    if (( choice >= 1 && choice <= tag_count )); then
+        local selected="${tags_desc[$((choice - 1))]}"
+        if [[ "$selected" == "$current_tag" ]]; then
+            print_info "That is your current tag. Nothing to update." >&2
+            return 1
+        fi
+        echo "${registry_path}:${selected}"
+        return 0
+    fi
+
+    print_warn "Invalid selection." >&2
+    return 1
+}
+
+# Ask the operator: prepare-only or prepare-and-apply or cancel.
+# Echoes "prepare" | "prepare_and_apply" | "cancel".
+pick_action() {
+    echo "" >&2
+    echo "  What would you like to do?" >&2
+    echo "    1) Prepare only (build/pull now, apply later)" >&2
+    echo "    2) Prepare AND apply (build/pull, then immediately apply)" >&2
+    echo "    3) Cancel" >&2
+    echo "" >&2
+    local choice
+    read -r -p "  Enter choice [1-3]: " choice >&2
+    case "$choice" in
+        1) echo "prepare" ;;
+        2) echo "prepare_and_apply" ;;
+        *) echo "cancel" ;;
+    esac
+}
+
+# =============================================================================
 # MAIN MENU
 # =============================================================================
 
@@ -704,39 +867,55 @@ main() {
         local choice
         read -r -p "  Enter choice [1-3]: " choice
         case "$choice" in
-            1) [[ "$install_method" == "source" ]] && apply_source_update || apply_docker_update ;;
+            1)
+                if [[ "$install_method" == "source" ]]; then
+                    apply_source_update
+                else
+                    apply_docker_update
+                fi
+                ;;
             2)
                 clear_pending_state
-                print_info "Pending state cleared. Preparing a new update."
+                print_info "Pending state cleared."
                 echo ""
-                [[ "$install_method" == "source" ]] && prepare_source_build || prepare_docker_update
+                # Fall through to the no-pending-state flow below
                 ;;
-            *) print_info "Exiting. Pending update remains; run this script again to apply." ;;
+            *) print_info "Exiting. Pending update remains; run this script again to apply."; exit 0 ;;
         esac
-        exit 0
+        # If choice was 2, continue to the picker flow
+        if [[ "$choice" != "2" ]]; then
+            exit 0
+        fi
     fi
 
-    # No pending state -> offer prepare or prepare+apply
-    echo ""
-    echo "  1) Prepare only (build/pull now, apply later)"
-    echo "  2) Prepare AND apply (build/pull, then immediately apply)"
-    echo "  3) Cancel"
-    echo ""
-    local choice
-    read -r -p "  Enter choice [1-3]: " choice
-    case "$choice" in
-        1)
-            [[ "$install_method" == "source" ]] && prepare_source_build || prepare_docker_update
+    # No pending state (or pending state was just discarded) -> show what is
+    # available, let the operator pick a version, then ask prepare vs apply.
+    local target=""
+    if [[ "$install_method" == "source" ]]; then
+        target=$(pick_source_version) || { print_info "No update prepared."; exit 0; }
+    else
+        target=$(pick_docker_version) || { print_info "No update prepared."; exit 0; }
+    fi
+
+    local action
+    action=$(pick_action)
+    case "$action" in
+        prepare)
+            if [[ "$install_method" == "source" ]]; then
+                prepare_source_build "$target"
+            else
+                prepare_docker_update "$target"
+            fi
             print_info "Run this script again when you are ready to apply."
             ;;
-        2)
+        prepare_and_apply)
             if [[ "$install_method" == "source" ]]; then
-                prepare_source_build && apply_source_update
+                prepare_source_build "$target" && apply_source_update
             else
-                prepare_docker_update && apply_docker_update
+                prepare_docker_update "$target" && apply_docker_update
             fi
             ;;
-        *) print_info "Cancelled." ;;
+        cancel) print_info "Cancelled." ;;
     esac
 }
 
