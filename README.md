@@ -723,6 +723,23 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.36
+Source-build picker now follows the official Telcoin guidance for which ref to build from.
+
+Per the Telcoin dev team: the general case for **testnet** is to build from the latest `-adiri` tag (which sits on a branch parallel to `main`). Using `main` works too but isn't the default. **Devnet** follows `main`. **Mainnet** will have its own tag set when it launches.
+
+**Changes**
+- New `pick_source_version <network>` in `lib/common.sh`. Filters tags by the network's suffix (`-adiri` for testnet, `-telcoin` for mainnet -- placeholder until mainnet exists). Lists newest first, marks the recommended (latest matching tag) and the operator's current ref. Default selection is option 1 (just press Enter).
+- `setup-observer.sh` and `setup-validator.sh` use the new picker for the source-build step. The previous "main (recommended -- stable release) / custom" prompt is gone -- it was misleading because `main` is a parallel branch from the testnet release tags, not the recommended testnet build. New operators on testnet now get the latest `-adiri` tag by default.
+- `update-node.sh` uses the same picker via `lib/common.sh`. The duplicate copy in `update-node.sh` was removed.
+- New constants in `lib/common.sh`: `TN_SOURCE_DIR`, `NETWORK_TAG_SUFFIX_TESTNET`, `NETWORK_TAG_SUFFIX_MAINNET`. The local `TN_SOURCE_DIR="/opt/telcoin-source"` declarations in `setup-observer.sh` and `setup-validator.sh` were removed (they shadowed the new readonly in `common.sh` and caused an early exit).
+- Wording cleanup: the setup scripts now explain upfront that testnet ops build from `-adiri` tags and `main` is for devnet -- so operators aren't confused about why they're being defaulted to a tag rather than `main`.
+
+**Migration note for existing operators**
+- Existing installs built from `main` will keep working -- no forced update. To switch to the latest `-adiri` tag, run `sudo update-node.sh` and pick option 1 from the new menu.
+
+All scripts bumped to v1.1.36.
+
 ### v1.1.35
 UX improvement to `update-node.sh`: show available versions upfront instead of asking the operator to commit to "prepare" before seeing what's there.
 

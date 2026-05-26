@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.35"
+readonly SCRIPT_VERSION="1.1.36"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -29,7 +29,6 @@ WORKER_PORT="$DEFAULT_WORKER_PORT"
 RPC_PORT="8541"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
 ENABLE_PUBLIC_RPC="false"
-TN_SOURCE_DIR="/opt/telcoin-source"
 OBSERVER_ADDRESS=""
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
@@ -257,30 +256,16 @@ _preflight_source() {
 
     echo ""
     print_header "Source Branch / Tag Selection"
-    echo "  Which branch or tag would you like to build from?"
+    print_info "Per the Telcoin dev team, the general case for testnet is to build"
+    print_info "from the latest -adiri tag. main works too and is the right default"
+    print_info "for devnet. mainnet will have its own tag set when it launches."
     echo ""
-    echo "  1) main (recommended -- stable release)"
-    echo "  2) Custom branch or tag (for testing unreleased fixes)"
-    echo ""
-    local branch_choice
-    while true; do
-        read -r -p "  Enter choice [1/2]: " branch_choice
-        case "$branch_choice" in
-            1|2) break ;;
-            *) print_warn "Please enter 1 or 2." ;;
-        esac
-    done
 
-    local build_ref="main"
-    if [[ "$branch_choice" == "2" ]]; then
-        echo ""
-        read -r -p "  Enter branch or tag name: " build_ref
-        build_ref="${build_ref:-main}"
-        echo ""
-        print_warn "Building from '${build_ref}' -- this may be unstable or incomplete."
-        print_warn "Only use custom branches/tags if instructed by the Telcoin dev team."
-        echo ""
-    fi
+    local build_ref
+    build_ref=$(pick_source_version "$NETWORK") || {
+        print_error "No source ref selected -- cannot continue setup."
+        exit 1
+    }
 
     print_step "Checking out: ${build_ref}..."
     if ! git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then

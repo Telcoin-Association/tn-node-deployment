@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.35"
+readonly COMMON_VERSION="1.1.36"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -43,7 +43,16 @@ SERVICE_USER="telcoin"
 SERVICE_GROUP="telcoin"
 
 readonly TN_REPO="https://github.com/Telcoin-Association/telcoin-network.git"
+readonly TN_SOURCE_DIR="/opt/telcoin-source"
 readonly MIN_RUST_VERSION="1.75.0"
+
+# Tag suffixes used by each Telcoin network. Used by source-build pickers to
+# default to the right release for the network the operator selected.
+#   testnet -> "-adiri"  (Adiri testnet)
+#   mainnet -> "-telcoin" (placeholder; will be confirmed when mainnet launches)
+#   devnet  -> follows main; no tag filter
+readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"
+readonly NETWORK_TAG_SUFFIX_MAINNET="-telcoin"
 
 # -----------------------------------------------------------------------------
 # COLOURS
@@ -1162,4 +1171,153 @@ print_summary() {
     echo ""
     echo "${GREEN}${BOLD}================================================================${RESET}"
     echo ""
+}
+
+# -----------------------------------------------------------------------------
+# SOURCE VERSION PICKER
+# Used by setup-{observer,validator}.sh and by update-node.sh.
+# Echoes the chosen ref on stdout; informational output goes to stderr so the
+# caller can capture the selection via $(...). Returns 0 on selection, 1 on
+# cancel or error.
+#
+# Telcoin's testnet release tags (-adiri) sit on a branch parallel to main and
+# are the recommended default for testnet operators (per the dev team).
+# Main is acceptable for testnet (and is the right default for devnet) but is
+# not the recommended default for testnet operators.
+#
+# Usage: pick_source_version <network>
+#   network = "testnet" | "mainnet" | "devnet" | ""  (empty -> show everything)
+# -----------------------------------------------------------------------------
+pick_source_version() {
+    local network="$1"
+    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
+        print_error "Source directory not found at ${TN_SOURCE_DIR}" >&2
+        return 1
+    fi
+
+    # Pick the suffix and label for the operator's network.
+    local suffix="" net_label=""
+    case "$network" in
+        testnet) suffix="$NETWORK_TAG_SUFFIX_TESTNET"; net_label="testnet (adiri)" ;;
+        mainnet) suffix="$NETWORK_TAG_SUFFIX_MAINNET"; net_label="mainnet" ;;
+        devnet)  suffix="";  net_label="devnet (follows main)" ;;
+        *)       suffix="";  net_label="unknown -- no tag filter" ;;
+    esac
+
+    print_step "Fetching latest refs from origin..." >&2
+    if ! git -C "$TN_SOURCE_DIR" fetch --tags --quiet 2>/dev/null; then
+        print_warn "git fetch failed -- showing cached refs only" >&2
+    fi
+
+    local current_ref
+    current_ref=$(git -C "$TN_SOURCE_DIR" describe --tags --always --dirty 2>/dev/null || echo "unknown")
+
+    # Collect tags, newest by creator date first.
+    local -a all_tags
+    while IFS= read -r t; do
+        [[ -z "$t" ]] && continue
+        all_tags+=("$t")
+    done < <(git -C "$TN_SOURCE_DIR" tag --sort=-creatordate 2>/dev/null | head -20)
+
+    # Filter by network suffix when applicable. testnet keeps only tags
+    # containing "-adiri", mainnet only "-telcoin". devnet/unknown keeps all.
+    local -a tags
+    if [[ -n "$suffix" ]]; then
+        local t
+        for t in "${all_tags[@]}"; do
+            [[ "$t" == *"$suffix"* ]] && tags+=("$t")
+        done
+        # If filtering left us with nothing, fall back to showing everything
+        # so the operator still has options.
+        if [[ ${#tags[@]} -eq 0 ]]; then
+            print_warn "No tags matched the ${network} pattern (${suffix}). Showing all tags." >&2
+            tags=("${all_tags[@]}")
+        fi
+    else
+        tags=("${all_tags[@]}")
+    fi
+
+    echo "" >&2
+    print_info "Network:              ${net_label}" >&2
+    print_info "Current source ref:   ${current_ref}" >&2
+    if [[ ${#tags[@]} -gt 0 ]]; then
+        local latest_tag="${tags[0]}"
+        if [[ "$current_ref" == *"$latest_tag"* ]]; then
+            print_ok  "You are on the latest ${network:-applicable} tag (${latest_tag})." >&2
+        else
+            print_info "Latest matching tag:  ${latest_tag}  (recommended for ${network:-this network})" >&2
+        fi
+    fi
+    echo "" >&2
+
+    print_info "Available versions to build:" >&2
+    local i=1
+    for tag in "${tags[@]}"; do
+        local marker=""
+        [[ "$current_ref" == *"$tag"* ]] && marker="  <-- current"
+        [[ $i -eq 1 ]] && [[ -z "$marker" ]] && marker="  <-- recommended (latest ${network:-tag})"
+        printf "  %2d) %s%s\n" "$i" "$tag" "$marker" >&2
+        (( ++i ))
+    done
+    local tag_count=$(( i - 1 ))
+
+    local main_label="main (bleeding-edge dev branch"
+    [[ "$network" == "devnet" ]] && main_label="main (recommended for devnet"
+    main_label="${main_label})"
+
+    local main_opt=$i;   printf "  %2d) %s\n"                                 "$main_opt" "$main_label" >&2; (( ++i ))
+    local custom_opt=$i; printf "  %2d) Custom branch / tag / commit hash\n"  "$custom_opt" >&2; (( ++i ))
+    local cancel_opt=$i; printf "  %2d) Cancel\n"                              "$cancel_opt" >&2
+    echo "" >&2
+
+    local choice
+    read -r -p "  Select [1-${cancel_opt}] (default 1): " choice >&2
+    # Empty input -> select the recommended (1)
+    [[ -z "$choice" ]] && choice=1
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        print_warn "Invalid selection." >&2
+        return 1
+    fi
+    if (( choice == cancel_opt )); then
+        print_info "Cancelled." >&2
+        return 1
+    fi
+    if (( choice == custom_opt )); then
+        local custom_ref
+        read -r -p "  Enter branch / tag / commit hash: " custom_ref >&2
+        [[ -z "$custom_ref" ]] && { print_info "Cancelled." >&2; return 1; }
+        echo "$custom_ref"
+        return 0
+    fi
+    if (( choice == main_opt )); then
+        echo "main"
+        return 0
+    fi
+    if (( choice >= 1 && choice <= tag_count )); then
+        echo "${tags[$((choice - 1))]}"
+        return 0
+    fi
+
+    print_warn "Invalid selection." >&2
+    return 1
+}
+
+# Ask the operator: prepare-only, prepare-and-apply, or cancel. Used by
+# update-node.sh; lives in common.sh so it can be reused by future tooling.
+# Echoes "prepare" | "prepare_and_apply" | "cancel".
+pick_action() {
+    echo "" >&2
+    echo "  What would you like to do?" >&2
+    echo "    1) Prepare only (build/pull now, apply later)" >&2
+    echo "    2) Prepare AND apply (build/pull, then immediately apply)" >&2
+    echo "    3) Cancel" >&2
+    echo "" >&2
+    local choice
+    read -r -p "  Enter choice [1-3]: " choice >&2
+    case "$choice" in
+        1) echo "prepare" ;;
+        2) echo "prepare_and_apply" ;;
+        *) echo "cancel" ;;
+    esac
 }
