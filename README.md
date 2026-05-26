@@ -15,6 +15,7 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | `edit-config.sh` | Edit the configuration of a running node |
 | `firewall-setup.sh` | Interactive firewall management and hardening |
 | `remove-node.sh` | Safely remove a node installation |
+| `update-node.sh` | Update a running node to a newer version (source build or Docker image), with a prepare/apply two-phase workflow and one-keystroke rollback |
 | `update-scripts.sh` | Check for and download script updates from GitHub |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 
@@ -138,12 +139,17 @@ bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_ADDRESS
 # Edit a running node's configuration (multiaddrs, ports, RPC mode, etc.)
 sudo bash ~/telcoin-node-scripts/edit-config.sh
 
-# Update all scripts to the latest version from GitHub
+# Update the node to a new version (rebuild from source OR pull a new Docker image)
+sudo bash ~/telcoin-node-scripts/update-node.sh
+
+# Update these scripts themselves to the latest version from GitHub
 bash ~/telcoin-node-scripts/update-scripts.sh
 
 # Remove a node installation (interactive, with explicit confirmations)
 sudo bash ~/telcoin-node-scripts/remove-node.sh
 ```
+
+> `update-node.sh` vs `update-scripts.sh`: the first updates *the node binary or Docker image* to a new release; the second updates *these helper scripts* themselves from GitHub. Different things.
 
 ---
 
@@ -716,6 +722,41 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ---
 
 ## Changelog
+
+### v1.1.34
+New `update-node.sh` -- a single script for safely moving a running node to a newer version. Replaces the operator's previous workflow of "stop service, rebuild manually, hope it works, restart manually."
+
+**Two-phase workflow (same for both source and Docker installs)**
+- Phase 1 (prepare): runs the slow/risky step with the service still running -- `cargo build --release` for source, `docker pull` for Docker. Zero downtime.
+- Phase 2 (apply): stops the service, swaps the artefact, restarts, and verifies. ~30s downtime for Docker; instant for source (just a `cp`).
+- The two phases can run back-to-back (one menu choice) or be split across days. Pending state is recorded in `/etc/telcoin/<type>/.pending-update` so re-running the script picks up where it left off.
+
+**Auto-detection**
+- Node type (validator vs observer): from installed systemd units.
+- Install method (source vs docker): from `INSTALL_METHOD=` in `.node-meta`. If `existing` (an externally-supplied binary), the script exits with a clear message rather than guessing.
+- Network (testnet vs mainnet): from `NETWORK=` in `.node-meta`, with fallback to inspecting the `chain_name` in `genesis.yaml` for older installs. Determines whether source builds get `--features faucet` (testnet) or not.
+
+**Docker tag discovery**
+- Queries the Google Artifact Registry's public Docker v2 API at `https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list`, parses tags matching `vX.Y.Z[-suffix]`, and shows the most recent 15 sorted by version. Marks the current tag. If the API call times out or returns unparseable data, falls back silently to manual tag entry.
+
+**Safety nets**
+- Source: the built binary is run through `--version` before being declared "prepare complete" -- catches the rare case where `cargo build` finishes but the resulting binary is broken. Hash recorded in pending state so apply can detect a swap.
+- Docker: the unit file is backed up as `<unit>.bak.<UTC-ts>` before any `perl -i` edit (same helper edit-config.sh uses).
+- Source: the current binary at `/opt/telcoin/telcoin-network` is backed up as `.bak.<UTC-ts>` before overwrite.
+- Both: post-restart health verification (`tn_latestConsensusHeader` RPC ping with a 45s timeout). If unhealthy after restart, the script offers a one-keystroke rollback that restores the backup, restarts, and re-verifies.
+- Validators get a hard-gate `CONFIRM` prompt before any downtime, with an explicit warning about lost block rewards.
+
+**What is never touched by an update**
+- BLS / P2P keys at `/var/lib/telcoin/<type>/node-keys/`
+- `node-info.yaml` (the operator's `primary_network_key`, multiaddrs, etc.)
+- BLS passphrase at `/etc/telcoin/<type>/bls-passphrase`
+- Chain config files (genesis/committee/parameters)
+- Listener multiaddrs and other `Environment=` lines in the unit file -- only the binary path (source) or image tag (Docker) changes; the rest of `ExecStart` is preserved by-construction.
+
+**Setup scripts**
+- `setup-observer.sh` and `setup-validator.sh` now write `NETWORK=` and `DATA_DIR=` lines into `/etc/telcoin/<type>/.node-meta`. This was previously missing -- `check-node.sh` already expected `DATA_DIR=` and `update-node.sh` needs both. Existing installs are not affected; the new script falls back to inspecting `genesis.yaml` (for `NETWORK`) and the default path `/var/lib/telcoin/<type>` (for `DATA_DIR`) when `.node-meta` doesn't have them.
+
+All scripts bumped to v1.1.34.
 
 ### v1.1.33
 - `check-node.sh` now shows EVM execution state alongside consensus state. New section reports your node's `eth_blockNumber`, the network's latest execution block (extracted from the consensus header response we were already fetching -- no extra RPC call), the lag in blocks, and `eth_syncing` status. If `eth_syncing` returns a syncing object, the script flags it with the current/highest block counts and counts it as a health issue. Catches "node is up but execution layer is stuck or catching up" -- a failure mode the consensus-only check could miss.

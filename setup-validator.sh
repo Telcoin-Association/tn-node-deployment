@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.33"
+readonly SCRIPT_VERSION="1.1.34"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -857,6 +857,8 @@ HOST_SERVICE_GROUP=${SERVICE_GROUP}
 INSTALL_METHOD=${INSTALL_METHOD:-binary}
 PASSPHRASE_METHOD=${PASSPHRASE_METHOD}
 DOCKER_IMAGE=${DOCKER_IMAGE:-}
+NETWORK=${NETWORK}
+DATA_DIR=${DATA_DIR}
 EOF
     chmod 600 "$meta_file"
     print_ok "Node metadata written: ${meta_file}"
