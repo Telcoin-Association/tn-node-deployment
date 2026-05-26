@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.37"
+readonly COMMON_VERSION="1.1.38"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -53,6 +53,13 @@ readonly MIN_RUST_VERSION="1.75.0"
 #   devnet  -> follows main; no tag filter
 readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"
 readonly NETWORK_TAG_SUFFIX_MAINNET="-telcoin"
+
+# Minimum source version offered by the source-build picker. Older tags exist
+# in the upstream repo but represent obsolete releases we don't want operators
+# installing by accident. main and custom-ref are still always available.
+# Bump this when the Telcoin team retires a baseline.
+readonly MIN_SOURCE_VERSION_TESTNET="0.9.1"
+readonly MIN_SOURCE_VERSION_MAINNET=""  # mainnet not launched; no minimum yet
 
 # -----------------------------------------------------------------------------
 # COLOURS
@@ -1195,13 +1202,13 @@ pick_source_version() {
         return 1
     fi
 
-    # Pick the suffix and label for the operator's network.
-    local suffix="" net_label=""
+    # Pick the suffix, minimum version, and label for the operator's network.
+    local suffix="" min_ver="" net_label=""
     case "$network" in
-        testnet) suffix="$NETWORK_TAG_SUFFIX_TESTNET"; net_label="testnet (adiri)" ;;
-        mainnet) suffix="$NETWORK_TAG_SUFFIX_MAINNET"; net_label="mainnet" ;;
-        devnet)  suffix="";  net_label="devnet (follows main)" ;;
-        *)       suffix="";  net_label="unknown -- no tag filter" ;;
+        testnet) suffix="$NETWORK_TAG_SUFFIX_TESTNET"; min_ver="$MIN_SOURCE_VERSION_TESTNET"; net_label="testnet (adiri)" ;;
+        mainnet) suffix="$NETWORK_TAG_SUFFIX_MAINNET"; min_ver="$MIN_SOURCE_VERSION_MAINNET"; net_label="mainnet" ;;
+        devnet)  suffix="";  min_ver=""; net_label="devnet (follows main)" ;;
+        *)       suffix="";  min_ver=""; net_label="unknown -- no tag filter" ;;
     esac
 
     print_step "Fetching latest refs from origin..." >&2
@@ -1209,8 +1216,27 @@ pick_source_version() {
         print_warn "git fetch failed -- showing cached refs only" >&2
     fi
 
-    local current_ref
-    current_ref=$(git -C "$TN_SOURCE_DIR" describe --tags --always --dirty 2>/dev/null || echo "unknown")
+    # Describe-style summary string (for display). Includes -N-gSHA suffix
+    # when HEAD is past a tag, so the operator sees how far past.
+    local current_describe
+    current_describe=$(git -C "$TN_SOURCE_DIR" describe --tags --always --dirty 2>/dev/null || echo "unknown")
+
+    # Accurate "where am I" detection:
+    #   - exact_tag: non-empty only when HEAD is EXACTLY at an annotated tag.
+    #     Empty when HEAD is N commits past a tag.
+    #   - on_main: true when HEAD's commit is exactly the tip of origin/main.
+    # We use these instead of substring-matching against `git describe` output,
+    # which previously falsely marked the closest ancestor tag as "current"
+    # even when the operator was actually on main or on a detached commit.
+    local exact_tag on_main head_sha main_sha
+    exact_tag=$(git -C "$TN_SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo "")
+    head_sha=$(git -C "$TN_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    main_sha=$(git -C "$TN_SOURCE_DIR" rev-parse origin/main 2>/dev/null || echo "")
+    if [[ -n "$head_sha" ]] && [[ "$head_sha" == "$main_sha" ]]; then
+        on_main=true
+    else
+        on_main=false
+    fi
 
     # Collect tags, newest by creator date first.
     local -a all_tags
@@ -1237,12 +1263,44 @@ pick_source_version() {
         tags=("${all_tags[@]}")
     fi
 
+    # Apply minimum-version filter: drop tags older than MIN_SOURCE_VERSION_*
+    # so operators are not shown obsolete releases. main and custom remain
+    # available below the list, so anyone who genuinely needs an older build
+    # can still type it. If the filter would leave the list empty, fall back
+    # to showing the unfiltered list rather than nothing.
+    if [[ -n "$min_ver" ]]; then
+        local -a recent_tags
+        local tag base_ver
+        for tag in "${tags[@]}"; do
+            # Strip leading "v" and trailing "-suffix" to get X.Y.Z
+            base_ver="${tag#v}"
+            base_ver="${base_ver%%-*}"
+            if [[ "$base_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+                && version_gte "$base_ver" "$min_ver"; then
+                recent_tags+=("$tag")
+            fi
+        done
+        if [[ ${#recent_tags[@]} -gt 0 ]]; then
+            tags=("${recent_tags[@]}")
+        else
+            print_warn "No tags >= v${min_ver} found. Showing unfiltered list." >&2
+        fi
+    fi
+
     echo "" >&2
     print_info "Network:              ${net_label}" >&2
-    print_info "Current source ref:   ${current_ref}" >&2
+    # Friendlier "current" description that names what the operator is
+    # actually on (tag exactly, main tip, or a detached commit).
+    if [[ -n "$exact_tag" ]]; then
+        print_info "Current source ref:   ${exact_tag} (exactly on this tag)" >&2
+    elif [[ "$on_main" == "true" ]]; then
+        print_info "Current source ref:   main @ ${head_sha:0:8}  (${current_describe})" >&2
+    else
+        print_info "Current source ref:   ${current_describe}  (detached / not on main or any tag)" >&2
+    fi
     if [[ ${#tags[@]} -gt 0 ]]; then
         local latest_tag="${tags[0]}"
-        if [[ "$current_ref" == *"$latest_tag"* ]]; then
+        if [[ "$exact_tag" == "$latest_tag" ]]; then
             print_ok  "You are on the latest ${network:-applicable} tag (${latest_tag})." >&2
         else
             print_info "Latest matching tag:  ${latest_tag}  (recommended for ${network:-this network})" >&2
@@ -1254,7 +1312,8 @@ pick_source_version() {
     local i=1
     for tag in "${tags[@]}"; do
         local marker=""
-        [[ "$current_ref" == *"$tag"* ]] && marker="  <-- current"
+        # Mark a tag as "current" only when HEAD is EXACTLY at that tag.
+        [[ "$exact_tag" == "$tag" ]] && marker="  <-- current"
         [[ $i -eq 1 ]] && [[ -z "$marker" ]] && marker="  <-- recommended (latest ${network:-tag})"
         printf "  %2d) %s%s\n" "$i" "$tag" "$marker" >&2
         (( ++i ))
@@ -1264,6 +1323,8 @@ pick_source_version() {
     local main_label="main (bleeding-edge dev branch"
     [[ "$network" == "devnet" ]] && main_label="main (recommended for devnet"
     main_label="${main_label})"
+    # Mark main as current when HEAD == origin/main tip.
+    [[ "$on_main" == "true" ]] && main_label="${main_label}  <-- current"
 
     local main_opt=$i;   printf "  %2d) %s\n"                                 "$main_opt" "$main_label" >&2; (( ++i ))
     local custom_opt=$i; printf "  %2d) Custom branch / tag / commit hash\n"  "$custom_opt" >&2; (( ++i ))

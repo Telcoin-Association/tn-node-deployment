@@ -723,6 +723,18 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.38
+Two corrections to `pick_source_version` based on operator feedback.
+
+**Fixed: wrong `<-- current` marker on tag lists**
+- The previous logic did a substring match between `git describe --tags --always` and each tag name. For an operator on `main` with the closest ancestor tag being `v0.6.0-adiri`, `git describe` produced `v0.6.0-adiri-84-gXXXXXXXX`, which *contained* `v0.6.0-adiri`, so the picker incorrectly marked that tag as "current" -- even though the operator's HEAD was at the tip of `main`, not on that tag at all.
+- Replaced with proper detection: `git describe --tags --exact-match HEAD` returns a non-empty value only when HEAD is exactly an annotated tag, and `git rev-parse HEAD vs origin/main` confirms whether HEAD is on main. The "current" marker now lands on `main` for operators built from main, on the exact tag for operators built from a tag, or on neither for detached commits. The header line also describes the operator's state in plain language: "main @ 34911812 (v0.6.0-adiri-84-g34911812)" rather than just the describe string.
+
+**New: hide obsolete source versions from the picker**
+- Per the Telcoin team, operators shouldn't be installing builds older than v0.9.1. The picker now applies a minimum-version filter (`MIN_SOURCE_VERSION_TESTNET="0.9.1"`, configurable in `lib/common.sh`) after the network-suffix filter, so the menu shows only the currently-supported tags. main and custom-ref remain available as separate options. With the current upstream state the testnet picker now shows just `v0.9.2-adiri` and `v0.9.1-adiri` plus `main` -- not 15 historic releases.
+
+All scripts bumped to v1.1.38.
+
 ### v1.1.37
 Hotfix for v1.1.36.
 
