@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.40"
+readonly SCRIPT_VERSION="1.1.41"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 readonly VERIFY_TIMEOUT_SECONDS=45
 
@@ -397,15 +397,53 @@ prepare_source_build() {
         return 1
     fi
 
-    print_step "Building release binary (${new_ref}, ${cargo_features:-no features})..."
-    # Run from the source dir; preserve original cwd
-    (
-        cd "$TN_SOURCE_DIR"
-        # shellcheck disable=SC2086
-        cargo build --release $cargo_features 2>&1 | tee /tmp/tn-update-build.log
-    )
+    # Make cargo findable. Sudo's PATH usually does not include
+    # ~/.cargo/bin, which is where rustup installs cargo. Mirror what
+    # setup-{observer,validator}.sh do at install time. Look at three
+    # plausible locations so this works whether rustup ran as root or as
+    # the invoking user.
+    local user_cargo_dir=""
+    [[ -n "${SUDO_USER:-}" ]] && [[ -d "/home/${SUDO_USER}/.cargo/bin" ]] \
+        && user_cargo_dir="/home/${SUDO_USER}/.cargo/bin"
+    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${user_cargo_dir}:${PATH}"
+    [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
+    [[ -n "$user_cargo_dir" ]] && [[ -f "/home/${SUDO_USER}/.cargo/env" ]] \
+        && source "/home/${SUDO_USER}/.cargo/env" 2>/dev/null || true
 
+    if ! command -v cargo >/dev/null 2>&1; then
+        print_error "cargo not found in PATH. Looked in:"
+        print_info "  \${HOME}/.cargo/bin"
+        print_info "  /root/.cargo/bin"
+        [[ -n "$user_cargo_dir" ]] && print_info "  ${user_cargo_dir}"
+        print_info "Install Rust:"
+        print_info "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+        return 1
+    fi
+    print_info "cargo: $(command -v cargo)"
+
+    # Capture the pre-build binary hash so we can detect "cargo did nothing"
+    # after the build runs.
     local built="${TN_SOURCE_DIR}/target/release/telcoin-network"
+    local pre_build_hash=""
+    [[ -f "$built" ]] && pre_build_hash=$(sha256sum "$built" | awk '{print $1}')
+
+    print_step "Building release binary (${new_ref}, ${cargo_features:-no features})..."
+    # Use pushd/popd instead of a subshell so PIPESTATUS is captured from
+    # the pipeline below. set -o pipefail (inherited from common.sh) makes
+    # the pipeline return non-zero if cargo itself fails -- v1.1.40 and
+    # earlier discarded that exit code by running the pipeline inside an
+    # unchecked subshell, which let a failed build go undetected.
+    pushd "$TN_SOURCE_DIR" >/dev/null
+    # shellcheck disable=SC2086
+    if ! cargo build --release $cargo_features 2>&1 | tee /tmp/tn-update-build.log; then
+        popd >/dev/null
+        print_error "cargo build failed. See /tmp/tn-update-build.log for the full output."
+        print_info "  Last few lines:"
+        tail -10 /tmp/tn-update-build.log 2>/dev/null | sed 's/^/    /'
+        return 1
+    fi
+    popd >/dev/null
+
     if [[ ! -f "$built" ]]; then
         print_error "Build did not produce ${built}. See /tmp/tn-update-build.log"
         return 1
@@ -419,12 +457,25 @@ prepare_source_build() {
     fi
     local new_version
     new_version=$("$built" --version 2>/dev/null | head -1)
-    print_ok "Build complete: ${new_version}"
 
-    # Stash a hash of the built binary so apply can sanity-check the file
-    # hasn't been swapped out between phases.
+    # Did cargo actually produce a new binary? If the hash hasn't changed,
+    # cargo decided no rebuild was needed (or did nothing). That used to
+    # silently install the unchanged old binary on top of itself.
     local binary_hash
     binary_hash=$(sha256sum "$built" | awk '{print $1}')
+    if [[ -n "$pre_build_hash" ]] && [[ "$pre_build_hash" == "$binary_hash" ]]; then
+        print_warn "Binary hash did not change after build."
+        print_info "  Pre-build:  ${pre_build_hash:0:16}..."
+        print_info "  Post-build: ${binary_hash:0:16}..."
+        print_info "  This usually means cargo decided no rebuild was needed,"
+        print_info "  even though the build command exited 0. Double-check your ref:"
+        print_info "    git -C ${TN_SOURCE_DIR} log -1 --format='%h %s'"
+        if ! confirm "Proceed anyway with the existing (unchanged) binary?"; then
+            print_info "Cancelled."
+            return 1
+        fi
+    fi
+    print_ok "Build complete: ${new_version}"
 
     write_pending_state <<EOF
 PHASE=build_complete
@@ -487,12 +538,30 @@ apply_source_update() {
     }
     print_info "Binary backup: ${backup}"
 
+    # Hash the installed binary before we copy over it. If the cp does not
+    # actually change anything (built and installed already identical), we
+    # want to surface that as a "nothing happened" warning rather than
+    # silently report success.
+    local pre_install_hash
+    pre_install_hash=$(sha256sum "$installed" | awk '{print $1}')
+
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
     print_step "Installing new binary..."
     cp -p "$built" "$installed"
     chmod +x "$installed"
+
+    local post_install_hash
+    post_install_hash=$(sha256sum "$installed" | awk '{print $1}')
+    if [[ "$pre_install_hash" == "$post_install_hash" ]]; then
+        print_warn "Installed binary is identical to what was already at ${installed}."
+        print_warn "The build did not produce different output -- you may still be"
+        print_warn "running the previous version after restart. Investigate before"
+        print_warn "treating this as a successful update."
+    else
+        print_ok "Binary swapped: ${pre_install_hash:0:12}... -> ${post_install_hash:0:12}..."
+    fi
 
     print_step "Starting ${SERVICE_NAME} on new binary..."
     systemctl start "$SERVICE_NAME"

@@ -723,6 +723,25 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.41
+Hotfix for a silent-failure bug in `update-node.sh` discovered on an operator's node: the script reported "build complete" + "update applied" even though the binary on disk was unchanged. Root cause was three separate gaps that compounded.
+
+**Fixed: cargo not found under sudo**
+- `update-node.sh`'s `prepare_source_build` invoked `cargo` directly, but sudo's PATH doesn't include `~/.cargo/bin` (where rustup installs cargo). The build immediately died with `cargo: command not found`. The setup scripts (`setup-{observer,validator}.sh`) already export the right PATH and source `~/.cargo/env` -- the update script now mirrors that, looking in `${HOME}/.cargo/bin`, `/root/.cargo/bin`, and `/home/${SUDO_USER}/.cargo/bin`, and sources the matching `.cargo/env` if present. Also adds an explicit `command -v cargo` check that fails loudly with installation instructions instead of pressing on.
+
+**Fixed: cargo exit code silently discarded**
+- The build was wrapped in `(cd ...; cargo build ... | tee ...)` -- a subshell whose exit status was never checked. With `set -o pipefail` *inside* the subshell, the pipeline did fail when cargo errored, but the subshell's failure propagated nowhere because we didn't check `$?`. Rewrote using `pushd` + a direct `if ! ... | tee ...` check, which actually catches a non-zero cargo exit and prints the last 10 lines of the build log.
+
+**Fixed: "build complete" reported when binary didn't change**
+- Previous logic only checked whether the binary *file existed* after the build, not whether anything changed. Since the old build from the original install is sitting on disk, `[[ -f $built ]]` always passed -- even when cargo did nothing at all. Now hashes the binary before and after the build; if the hashes are identical, prints a clear warning, names the hashes, and asks the operator to confirm before proceeding.
+
+**Fixed: "binary installed" reported when cp was a no-op**
+- Same defect on the apply side. `apply_source_update` ran `cp -p "$built" "$installed"` and declared success, even if both files were already identical. Now hashes the installed binary before and after `cp`. If unchanged, surfaces a `[WARN]` line so the operator knows the cp was a no-op and the running version after restart will be the same as before.
+
+**Net effect:** the same "I updated my node but nothing changed" scenario can no longer happen silently. The script will either succeed with a new binary or fail loudly with a specific reason. Operators on v1.1.40 or earlier should update before their next `update-node.sh` run.
+
+All scripts bumped to v1.1.41.
+
 ### v1.1.40
 Picker now correctly identifies feature branches instead of mislabelling them as "detached."
 
