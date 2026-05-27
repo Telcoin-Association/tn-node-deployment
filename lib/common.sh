@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.39"
+readonly COMMON_VERSION="1.1.40"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -1221,20 +1221,27 @@ pick_source_version() {
     local current_describe
     current_describe=$(git -C "$TN_SOURCE_DIR" describe --tags --always --dirty 2>/dev/null || echo "unknown")
 
-    # Accurate "where am I" detection:
-    #   - exact_tag: non-empty only when HEAD is EXACTLY at an annotated tag.
-    #     Empty when HEAD is N commits past a tag.
-    #   - on_main_state: "tip"    -- HEAD == origin/main exactly
-    #                    "behind" -- HEAD is an ancestor of origin/main and the
-    #                                tip has advanced since this build
-    #                    "none"   -- HEAD is detached / diverged from main
-    #   - behind_count: number of commits between HEAD and origin/main when
-    #                   on_main_state == "behind"
-    local exact_tag head_sha main_sha on_main_state="none" behind_count=0 main_tip_summary=""
+    # Accurate "where am I" detection. We compute three pieces of state and
+    # use them in the display + marker logic below.
+    #
+    #   exact_tag       non-empty only when HEAD is EXACTLY at an annotated tag
+    #   head_branch     name of the local branch HEAD is on (empty if detached)
+    #   on_main_state   "tip"     -- on main branch, HEAD == origin/main
+    #                   "behind"  -- on main branch, but origin/main has advanced
+    #                   "none"    -- not on main (could be feature branch or detached)
+    #   feature_branch  set to head_branch when on a NON-main local branch
+    #                   (e.g. log_db_name) so we can label that instead of
+    #                   misreporting the operator as "detached"
+    local exact_tag head_sha main_sha head_branch on_main_state="none"
+    local behind_count=0 main_tip_summary=""
+    local feature_branch="" feature_ahead_main=0 feature_summary=""
+
     exact_tag=$(git -C "$TN_SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo "")
     head_sha=$(git -C "$TN_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "")
     main_sha=$(git -C "$TN_SOURCE_DIR" rev-parse origin/main 2>/dev/null || echo "")
-    if [[ -n "$head_sha" ]] && [[ -n "$main_sha" ]]; then
+    head_branch=$(git -C "$TN_SOURCE_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+    if [[ "$head_branch" == "main" ]] && [[ -n "$head_sha" ]] && [[ -n "$main_sha" ]]; then
         if [[ "$head_sha" == "$main_sha" ]]; then
             on_main_state="tip"
         elif git -C "$TN_SOURCE_DIR" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
@@ -1242,6 +1249,11 @@ pick_source_version() {
             behind_count=$(git -C "$TN_SOURCE_DIR" rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
             main_tip_summary=$(git -C "$TN_SOURCE_DIR" log --max-count=1 --format='%h %ar -- %s' origin/main 2>/dev/null || echo "")
         fi
+    elif [[ -n "$head_branch" ]] && [[ "$head_branch" != "main" ]]; then
+        # Operator is on a named local branch other than main (e.g. log_db_name).
+        feature_branch="$head_branch"
+        feature_ahead_main=$(git -C "$TN_SOURCE_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo "0")
+        feature_summary=$(git -C "$TN_SOURCE_DIR" log -1 --format='%s' HEAD 2>/dev/null || echo "")
     fi
 
     # Collect tags, newest by creator date first.
@@ -1295,8 +1307,9 @@ pick_source_version() {
 
     echo "" >&2
     print_info "Network:              ${net_label}" >&2
-    # Friendlier "current" description that names what the operator is
-    # actually on (tag exactly, main tip, main behind, or detached).
+    # Friendlier "current" description naming what the operator is actually
+    # on: exact tag, main (at-tip or behind), a non-main feature branch, or
+    # a truly detached commit.
     if [[ -n "$exact_tag" ]]; then
         print_info "Current source ref:   ${exact_tag} (exactly on this tag)" >&2
     elif [[ "$on_main_state" == "tip" ]]; then
@@ -1308,8 +1321,16 @@ pick_source_version() {
         print_info "Current source ref:   built from main @ ${head_sha:0:8}  (${current_describe})" >&2
         print_warn "origin/main has moved: ${behind_count} ${commits_word} since your build" >&2
         [[ -n "$main_tip_summary" ]] && print_info "Latest on main:       ${main_tip_summary}" >&2
+    elif [[ -n "$feature_branch" ]]; then
+        local ahead_word="commits"
+        [[ "$feature_ahead_main" == "1" ]] && ahead_word="commit"
+        print_info "Current source ref:   branch '${feature_branch}' @ ${head_sha:0:8}" >&2
+        if [[ "$feature_ahead_main" -gt 0 ]]; then
+            print_info "Relative to main:     ${feature_ahead_main} ${ahead_word} ahead of main" >&2
+        fi
+        [[ -n "$feature_summary" ]] && print_info "Latest commit:        \"${feature_summary}\"" >&2
     else
-        print_info "Current source ref:   ${current_describe}  (detached / not on main or any tag)" >&2
+        print_info "Current source ref:   ${current_describe}  (detached / not on any branch or tag)" >&2
     fi
     if [[ ${#tags[@]} -gt 0 ]]; then
         local latest_tag="${tags[0]}"

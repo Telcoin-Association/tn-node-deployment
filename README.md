@@ -723,6 +723,26 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.40
+Picker now correctly identifies feature branches instead of mislabelling them as "detached."
+
+Previously `pick_source_version` only checked for two named states: exact tag and main tip/behind. Anything else fell through to "detached / not on main or any tag" -- even when the operator was sitting on a real, named local branch (e.g. `log_db_name`) tracking a remote branch. That made the header line factually wrong and uninformative.
+
+**What changed**
+- Added `git symbolic-ref --short HEAD` detection to distinguish "on a named branch" from "truly detached."
+- When the detected branch is `main`, the existing tip/behind logic applies.
+- When the detected branch is anything else (e.g. `log_db_name`), the picker now reports it as a feature branch:
+
+  ```
+  Current source ref:   branch 'log_db_name' @ cf4086bd
+  Relative to main:     1 commit ahead of main
+  Latest commit:        "Add names to some of the DB logs."
+  ```
+
+- Genuinely detached HEAD still gets the "detached / not on any branch or tag" label (and the wording is slightly more accurate now -- previously "not on main or any tag" implied other branches didn't exist).
+
+All scripts bumped to v1.1.40.
+
 ### v1.1.39
 Picker now distinguishes "at the tip of main" from "built from main but origin/main has moved since."
 
