@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.38"
+readonly COMMON_VERSION="1.1.39"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -1224,18 +1224,24 @@ pick_source_version() {
     # Accurate "where am I" detection:
     #   - exact_tag: non-empty only when HEAD is EXACTLY at an annotated tag.
     #     Empty when HEAD is N commits past a tag.
-    #   - on_main: true when HEAD's commit is exactly the tip of origin/main.
-    # We use these instead of substring-matching against `git describe` output,
-    # which previously falsely marked the closest ancestor tag as "current"
-    # even when the operator was actually on main or on a detached commit.
-    local exact_tag on_main head_sha main_sha
+    #   - on_main_state: "tip"    -- HEAD == origin/main exactly
+    #                    "behind" -- HEAD is an ancestor of origin/main and the
+    #                                tip has advanced since this build
+    #                    "none"   -- HEAD is detached / diverged from main
+    #   - behind_count: number of commits between HEAD and origin/main when
+    #                   on_main_state == "behind"
+    local exact_tag head_sha main_sha on_main_state="none" behind_count=0 main_tip_summary=""
     exact_tag=$(git -C "$TN_SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo "")
     head_sha=$(git -C "$TN_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "")
     main_sha=$(git -C "$TN_SOURCE_DIR" rev-parse origin/main 2>/dev/null || echo "")
-    if [[ -n "$head_sha" ]] && [[ "$head_sha" == "$main_sha" ]]; then
-        on_main=true
-    else
-        on_main=false
+    if [[ -n "$head_sha" ]] && [[ -n "$main_sha" ]]; then
+        if [[ "$head_sha" == "$main_sha" ]]; then
+            on_main_state="tip"
+        elif git -C "$TN_SOURCE_DIR" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+            on_main_state="behind"
+            behind_count=$(git -C "$TN_SOURCE_DIR" rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
+            main_tip_summary=$(git -C "$TN_SOURCE_DIR" log --max-count=1 --format='%h %ar -- %s' origin/main 2>/dev/null || echo "")
+        fi
     fi
 
     # Collect tags, newest by creator date first.
@@ -1290,11 +1296,18 @@ pick_source_version() {
     echo "" >&2
     print_info "Network:              ${net_label}" >&2
     # Friendlier "current" description that names what the operator is
-    # actually on (tag exactly, main tip, or a detached commit).
+    # actually on (tag exactly, main tip, main behind, or detached).
     if [[ -n "$exact_tag" ]]; then
         print_info "Current source ref:   ${exact_tag} (exactly on this tag)" >&2
-    elif [[ "$on_main" == "true" ]]; then
+    elif [[ "$on_main_state" == "tip" ]]; then
         print_info "Current source ref:   main @ ${head_sha:0:8}  (${current_describe})" >&2
+        print_info "origin/main:          up to date" >&2
+    elif [[ "$on_main_state" == "behind" ]]; then
+        local commits_word="commits"
+        [[ "$behind_count" == "1" ]] && commits_word="commit"
+        print_info "Current source ref:   built from main @ ${head_sha:0:8}  (${current_describe})" >&2
+        print_warn "origin/main has moved: ${behind_count} ${commits_word} since your build" >&2
+        [[ -n "$main_tip_summary" ]] && print_info "Latest on main:       ${main_tip_summary}" >&2
     else
         print_info "Current source ref:   ${current_describe}  (detached / not on main or any tag)" >&2
     fi
@@ -1323,8 +1336,17 @@ pick_source_version() {
     local main_label="main (bleeding-edge dev branch"
     [[ "$network" == "devnet" ]] && main_label="main (recommended for devnet"
     main_label="${main_label})"
-    # Mark main as current when HEAD == origin/main tip.
-    [[ "$on_main" == "true" ]] && main_label="${main_label}  <-- current"
+    # Mark main according to where HEAD sits relative to origin/main.
+    case "$on_main_state" in
+        tip)
+            main_label="${main_label}  <-- current"
+            ;;
+        behind)
+            local commits_word="commits"
+            [[ "$behind_count" == "1" ]] && commits_word="commit"
+            main_label="${main_label}  <-- ${behind_count} ${commits_word} newer than your build"
+            ;;
+    esac
 
     local main_opt=$i;   printf "  %2d) %s\n"                                 "$main_opt" "$main_label" >&2; (( ++i ))
     local custom_opt=$i; printf "  %2d) Custom branch / tag / commit hash\n"  "$custom_opt" >&2; (( ++i ))

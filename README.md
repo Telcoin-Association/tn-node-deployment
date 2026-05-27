@@ -723,6 +723,20 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.39
+Picker now distinguishes "at the tip of main" from "built from main but origin/main has moved since."
+
+Previously `pick_source_version` had a binary `on_main` check -- either HEAD == origin/main and the `main` option got a `<-- current` marker, or it didn't and got nothing. That hid a real signal: operators who built from main weeks ago but had since fallen behind saw no marker at all and had to guess whether new commits had landed.
+
+**New state machine** (replacing `on_main`):
+- `tip` -- HEAD is exactly at origin/main. Picker shows `main  <-- current` and the header reports `origin/main: up to date`.
+- `behind` -- HEAD is an ancestor of origin/main but the tip has advanced. Picker shows `main  <-- N commit(s) newer than your build` and the header reports `origin/main has moved: N commits since your build` plus a one-line summary of the latest main commit (e.g. `abc12345 2 days ago -- Add memory-pool improvements (#704)`).
+- `none` -- HEAD is detached or diverged from main. Header reports as before (`detached / not on main or any tag`).
+
+Detection uses `git merge-base --is-ancestor HEAD origin/main` (ancestry check) and `git rev-list --count HEAD..origin/main` (gap count). No substring matching.
+
+All scripts bumped to v1.1.39.
+
 ### v1.1.38
 Two corrections to `pick_source_version` based on operator feedback.
 
