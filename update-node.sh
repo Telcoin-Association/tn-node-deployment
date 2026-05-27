@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.41"
+readonly SCRIPT_VERSION="1.1.42"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 readonly VERIFY_TIMEOUT_SECONDS=45
 
@@ -296,6 +296,13 @@ apply_docker_update() {
     local backup
     backup=$(backup_unit_file "$unit") || return 1
 
+    # Hash the unit file before/after the substitution so we can detect
+    # "perl did nothing" -- symmetric with the source-binary hash check
+    # added in v1.1.41. Avoids reporting a successful update when the
+    # unit file was actually unchanged.
+    local pre_unit_hash post_unit_hash
+    pre_unit_hash=$(sha256sum "$unit" | awk '{print $1}')
+
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -303,12 +310,37 @@ apply_docker_update() {
     perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$unit"
     systemctl daemon-reload
 
+    post_unit_hash=$(sha256sum "$unit" | awk '{print $1}')
+    if [[ "$pre_unit_hash" == "$post_unit_hash" ]]; then
+        print_error "Unit file is unchanged after edit -- old image string not found."
+        print_info "  Expected to replace: ${old_image}"
+        print_info "  Unit file: ${unit}"
+        print_info "Restoring from backup and aborting."
+        cp -p "$backup" "$unit"
+        systemctl daemon-reload
+        systemctl start "$SERVICE_NAME" 2>/dev/null || true
+        return 1
+    fi
+    # Confirm the new image actually appears in the file (defends against a
+    # perl substitution that replaced the wrong text).
+    if ! grep -qF "$new_image" "$unit"; then
+        print_error "New image string not present in unit file after edit."
+        print_info "  Expected to find: ${new_image}"
+        print_info "Restoring from backup and aborting."
+        cp -p "$backup" "$unit"
+        systemctl daemon-reload
+        systemctl start "$SERVICE_NAME" 2>/dev/null || true
+        return 1
+    fi
+    print_ok "Unit file updated: ${pre_unit_hash:0:12}... -> ${post_unit_hash:0:12}..."
+
     print_step "Starting ${SERVICE_NAME} on new image..."
     systemctl start "$SERVICE_NAME"
 
     if verify_health_after_restart; then
         clear_pending_state
         print_ok "Update complete. Now running on: ${new_image}"
+        print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
     fi
 
@@ -387,6 +419,22 @@ prepare_source_build() {
             cargo_features="--features faucet"
             ;;
     esac
+
+    # Disk-space pre-flight. A clean cargo build can produce a target/
+    # directory of several GB. Refuse to start a build when we can already
+    # see disk is tight -- cleaner than failing mid-compile with cryptic
+    # "no space left on device" errors.
+    local avail_gb min_required_gb=5
+    avail_gb=$(df -BG --output=avail "$TN_SOURCE_DIR" 2>/dev/null | awk 'NR==2 {gsub("G",""); print $1}')
+    if [[ -n "$avail_gb" ]] && [[ "$avail_gb" -lt "$min_required_gb" ]]; then
+        print_error "Only ${avail_gb}G available on the mount holding ${TN_SOURCE_DIR}"
+        print_error "A source build typically needs ${min_required_gb}G+ for cargo artefacts."
+        print_info "Free up some space and try again:"
+        print_info "  du -sh ${TN_SOURCE_DIR}/target 2>/dev/null"
+        print_info "  cargo clean --manifest-path ${TN_SOURCE_DIR}/Cargo.toml"
+        return 1
+    fi
+    [[ -n "$avail_gb" ]] && print_info "Disk free on source mount: ${avail_gb}G (>= ${min_required_gb}G required)"
 
     echo ""
     print_warn "Source build typically takes 20-40 minutes."
@@ -549,8 +597,21 @@ apply_source_update() {
     wait_for_service_stopped "$SERVICE_NAME"
 
     print_step "Installing new binary..."
-    cp -p "$built" "$installed"
-    chmod +x "$installed"
+    # Check cp's exit code explicitly. A failed cp (disk full, permissions,
+    # I/O error) under set -uo pipefail would leave the installed binary
+    # in some indeterminate state; we want a loud failure with a restore
+    # attempt rather than silently proceeding to start the service.
+    if ! cp -p "$built" "$installed"; then
+        print_error "Failed to copy ${built} to ${installed}"
+        print_info "  Checking disk: $(df -h "$installed" | tail -1)"
+        print_info "Restoring backup and aborting."
+        cp -p "$backup" "$installed" 2>/dev/null || true
+        systemctl start "$SERVICE_NAME" 2>/dev/null || true
+        return 1
+    fi
+    if ! chmod +x "$installed"; then
+        print_warn "Could not chmod +x ${installed} -- service may fail to start."
+    fi
 
     local post_install_hash
     post_install_hash=$(sha256sum "$installed" | awk '{print $1}')
@@ -569,6 +630,7 @@ apply_source_update() {
     if verify_health_after_restart; then
         clear_pending_state
         print_ok "Update complete. Now running: ${new_version}"
+        print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
     fi
 

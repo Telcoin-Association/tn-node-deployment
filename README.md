@@ -723,6 +723,27 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.42
+Four small `update-node.sh` follow-ups that close the remaining silent-failure gaps I identified after the v1.1.41 hotfix.
+
+**Docker apply now has the same hash check that source got in v1.1.41**
+- Hashes the unit file before the `perl -i` substitution and again after. If the hash hasn't changed, that means the old image string wasn't actually found in the unit file -- the substitution was a no-op. Surfaces a hard error, restores the backup, and aborts rather than restarting on an unchanged unit.
+- Also greps for the new image string in the unit file after the edit. If it's not present (a weird perl mishap), same restore-and-abort path.
+
+**Source: disk-space pre-flight**
+- Before starting the build, checks the available space on the mount holding `/opt/telcoin-source` and refuses to start if less than 5 GB free. A clean cargo build can produce a `target/` directory several gigabytes large, and the previous behaviour was to fail mid-compile with a cryptic "no space left on device" -- now you get a clean refusal upfront with a hint to run `cargo clean`.
+
+**Source: cp exit-code check on install**
+- The `cp -p "$built" "$installed"` step now checks its exit status. A failed cp (permissions, I/O error, disk full) under `set -uo pipefail` previously left the system in an indeterminate state without a clear signal. Now the script restores the backup, attempts to start the service on the previous binary, and exits with a specific error pointing at `df -h` output for the install directory.
+
+**Hand off to `check-node.sh` after a successful update**
+- Both source and docker `apply_*_update` paths now print `Verify full health: bash ~/telcoin-node-scripts/check-node.sh` on success. The DB-map-size class of failure that one operator hit recently would have shown up immediately in `check-node.sh`'s output, and pointing them there closes the loop between "update completed" and "node is genuinely healthy."
+
+**Note on future "installed version" upstream change**
+- The Telcoin Network team is working on surfacing the installed version more directly in the binary's metadata. Once that lands, the `Build Features:` empty-field quirk and the various indirect detection paths (git describe, sha256, hash compare before/after) can be simplified to a direct version-read. Tracking but not changing anything here yet.
+
+All scripts bumped to v1.1.42.
+
 ### v1.1.41
 Hotfix for a silent-failure bug in `update-node.sh` discovered on an operator's node: the script reported "build complete" + "update applied" even though the binary on disk was unchanged. Root cause was three separate gaps that compounded.
 
