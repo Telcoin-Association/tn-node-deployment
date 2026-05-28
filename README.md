@@ -723,6 +723,25 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.43
+Fixes a real accuracy bug in `check-node.sh`: it would report a node as "healthy / synced / current" while the node was thousands of execution blocks behind the network.
+
+**Root cause**
+- The consensus section compared the local node's `tn_latestConsensusHeader.number` against the network's. But that number is the latest consensus tip the node has *tracked*, not the height it has actually *processed*. A node can track a fresh tip (so the comparison shows ~0 lag) while its execution layer is far behind. This was confirmed live: the script printed `Local consensus current: block 923057 / Lag vs network: 0 blocks / All checks passed -- healthy` on a node that was simultaneously 6,042 EVM execution blocks behind.
+- `eth_syncing` returns `false` on Telcoin even during consensus-layer backfill, so it reinforced the false "synced" reading rather than catching it.
+
+**What changed**
+- The **EVM execution lag** (network execution block − local execution block) is now the authoritative sync signal. If it exceeds `EVM_SYNC_THRESHOLD` (50 blocks), the node is reported as **CATCHING UP**, not healthy -- regardless of what the consensus-tip comparison or `eth_syncing` say.
+- The consensus section is **relabelled** from "Local consensus current / Lag vs network" to "Consensus tip tracked / Tip vs network: matched -- tracking the network tip", with an explicit note that this confirms *connectivity* to the tip, not that execution is caught up.
+- `eth_syncing: false` is now annotated: `(note: stays false during consensus backfill -- not a sync guarantee)` instead of `(synced)`.
+- The final summary has a new top-priority branch: when the node is catching up, it prints `Node is CATCHING UP -- N execution blocks behind the network`, explains this is expected after a restart/update/fresh install, and tells the operator to re-run -- shrinking lag means it's recovering normally, static/growing lag means it may be stuck.
+- When genuinely caught up, the summary now states the EVM lag explicitly: `node is healthy and caught up (EVM lag N)`.
+
+**Note for future simplification**
+- The cleanest long-term fix would be an RPC that returns the node's last-*processed* consensus height alongside the network target (the `last_consensus_height` / `max_consensus_height` pair currently only visible in the catch-up log lines). Worth requesting from the Telcoin team. Until then, the EVM execution lag is the best authoritative sync proxy available over RPC.
+
+All scripts bumped to v1.1.43.
+
 ### v1.1.42
 Four small `update-node.sh` follow-ups that close the remaining silent-failure gaps I identified after the v1.1.41 hotfix.
 

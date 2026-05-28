@@ -27,9 +27,15 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.42"
+readonly SCRIPT_VERSION="1.1.43"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
+# EVM execution lag (network block - local block) above which the node is
+# considered "catching up" rather than caught up. The execution-layer lag is
+# the authoritative sync signal on Telcoin -- the consensus "tip" comparison
+# only confirms the node sees the same tip, NOT that it has processed up to it,
+# and eth_syncing returns false even mid-catch-up. See v1.1.43 changelog.
+readonly EVM_SYNC_THRESHOLD=50
 
 # Defaults that get overridden by auto-detection or explicit flags.
 RPC_URL=""
@@ -123,6 +129,11 @@ done
 detect_node_type
 
 HEALTH_ISSUES=0
+# EVM execution lag (network - local) and catch-up flag. Set in section 5,
+# read by the summary in section 10. The execution lag -- not the consensus
+# tip match -- is the real "am I synced" signal.
+EVM_LAG=""
+CATCHING_UP=false
 
 # =============================================================================
 # HELPERS
@@ -457,27 +468,34 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
         NOW=$(date +%s)
         LOC_AGE=$(( NOW - LOC_TS ))
 
-        # Apply user's contract: block==0 -> stalled, age>60 -> stale
+        # block==0 -> fully stalled; stale commit timestamp -> not tracking tip.
+        # NOTE: this section confirms the node is TRACKING the latest consensus
+        # tip -- it does NOT prove the node has PROCESSED up to that tip. The
+        # node can track a fresh tip (so this looks "current") while its
+        # execution layer is thousands of blocks behind. The authoritative
+        # sync signal is the EVM execution lag in section 5, not this.
         if (( LOC_BLOCK == 0 )); then
             print_error "Local consensus block is 0 -- node is FULLY STALLED"
             (( ++HEALTH_ISSUES ))
         elif (( LOC_AGE > STALE_THRESHOLD_SECONDS )); then
-            print_warn "Local consensus is STALE: ${LOC_AGE}s behind (threshold ${STALE_THRESHOLD_SECONDS}s)"
+            print_warn "Consensus tip is STALE: ${LOC_AGE}s old (threshold ${STALE_THRESHOLD_SECONDS}s) -- node may not be tracking the network"
             (( ++HEALTH_ISSUES ))
         else
-            print_ok "Local consensus current: block ${LOC_BLOCK} ($(fmt_age "$LOC_AGE"))"
+            print_ok "Consensus tip tracked: block ${LOC_BLOCK} ($(fmt_age "$LOC_AGE"))"
         fi
         print_info "  Local epoch:     ${LOC_EPOCH}"
 
-        # Lag vs network (only if we have both)
+        # Tip match vs network. This only confirms the node sees the same tip
+        # as the network -- it is NOT a measure of catch-up progress.
         if [[ "$NETWORK_OK" == "true" ]]; then
             lag=$(( NET_BLOCK - LOC_BLOCK ))
             if (( lag > 100 )); then
-                print_warn "  Lag vs network:  ${lag} blocks behind"
+                print_warn "  Tip vs network:  ${lag} blocks behind on the tracked tip"
             elif (( lag < -5 )); then
-                print_info "  Lag vs network:  ${lag} blocks (local ahead -- clock or routing skew)"
+                print_info "  Tip vs network:  local tip ahead by $(( -lag )) (clock/routing skew)"
             else
-                print_ok "  Lag vs network:  ${lag} blocks"
+                print_ok "  Tip vs network:  matched (delta ${lag}) -- tracking the network tip"
+                print_info "  (this confirms connectivity, NOT that execution is caught up -- see EVM state below)"
             fi
             if [[ "$LOC_EPOCH" != "$NET_EPOCH" ]]; then
                 print_warn "  Epoch mismatch:  local=${LOC_EPOCH} network=${NET_EPOCH}"
@@ -513,15 +531,20 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
         LOCAL_EXEC_BLOCK=""
     fi
 
+    # The EVM execution lag is the AUTHORITATIVE sync signal. If the local
+    # execution block trails the network's by more than EVM_SYNC_THRESHOLD,
+    # the node is genuinely behind regardless of what the consensus tip
+    # comparison or eth_syncing say.
     if [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
         if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
-            evm_lag=$(( NET_EXEC_BLOCK - LOCAL_EXEC_BLOCK ))
-            if (( evm_lag > 100 )); then
-                print_warn "Network EVM block:  ${NET_EXEC_BLOCK}  (${evm_lag} blocks behind)"
-            elif (( evm_lag < -5 )); then
-                print_info "Network EVM block:  ${NET_EXEC_BLOCK}  (local ahead by $(( -evm_lag )))"
+            EVM_LAG=$(( NET_EXEC_BLOCK - LOCAL_EXEC_BLOCK ))
+            if (( EVM_LAG > EVM_SYNC_THRESHOLD )); then
+                CATCHING_UP=true
+                print_warn "Network EVM block:  ${NET_EXEC_BLOCK}  (${EVM_LAG} blocks behind -- NOT caught up)"
+            elif (( EVM_LAG < -5 )); then
+                print_info "Network EVM block:  ${NET_EXEC_BLOCK}  (local ahead by $(( -EVM_LAG )))"
             else
-                print_ok "Network EVM block:  ${NET_EXEC_BLOCK}  (lag ${evm_lag})"
+                print_ok "Network EVM block:  ${NET_EXEC_BLOCK}  (lag ${EVM_LAG} -- caught up)"
             fi
         else
             print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
@@ -531,7 +554,10 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
     sync_state=$(fetch_local_sync_state "$RPC_URL")
     case "$sync_state" in
         synced)
-            print_ok "eth_syncing:        false (synced)"
+            # eth_syncing=false does NOT mean caught up on Telcoin -- it stays
+            # false during consensus-layer backfill. Do not present it as
+            # "synced"; the EVM lag above is what actually decides.
+            print_info "eth_syncing:        false (note: stays false during consensus backfill -- not a sync guarantee)"
             ;;
         syncing*)
             # syncing <current>/<highest>
@@ -540,7 +566,7 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
             hi="${cur_hi#*/}"
             behind=$(( hi - cur ))
             print_warn "eth_syncing:        IN PROGRESS at ${cur} / ${hi}  (${behind} behind)"
-            (( ++HEALTH_ISSUES ))
+            CATCHING_UP=true
             ;;
         err|*)
             print_info "eth_syncing:        could not determine"
@@ -676,8 +702,32 @@ fi
 echo ""
 print_sep
 echo ""
-if (( HEALTH_ISSUES == 0 )); then
-    print_ok "All checks passed -- node appears healthy"
+
+# The verdict prioritises the EVM execution lag as the real sync signal.
+# A node can pass every other check (service up, RPC healthy, consensus tip
+# tracked, eth_syncing=false) while still being thousands of execution blocks
+# behind -- so "catching up" is reported distinctly from "healthy".
+if [[ "$CATCHING_UP" == "true" ]]; then
+    if [[ -n "$EVM_LAG" ]]; then
+        print_warn "Node is CATCHING UP -- ${EVM_LAG} execution blocks behind the network"
+    else
+        print_warn "Node is CATCHING UP -- execution layer is behind the network"
+    fi
+    print_info "This is expected after a restart, update, or fresh install."
+    print_info "Re-run this check in a minute:"
+    print_info "  - lag shrinking  -> catching up normally, let it run"
+    print_info "  - lag static/growing -> may be stuck; check logs and consult the dev team"
+    if (( HEALTH_ISSUES > 0 )); then
+        print_warn "Also: ${HEALTH_ISSUES} other issue(s) found -- review warnings/errors above"
+    fi
+elif (( HEALTH_ISSUES == 0 )); then
+    if [[ -n "$EVM_LAG" ]]; then
+        print_ok "All checks passed -- node is healthy and caught up (EVM lag ${EVM_LAG})"
+    else
+        print_ok "All checks passed -- node appears healthy"
+        [[ "$LOCAL_RPC_MODE" != "HEALTHY" ]] && [[ "$LOCAL_RPC_MODE" != "SLOW" ]] && \
+            print_info "Note: local RPC was ${LOCAL_RPC_MODE} -- execution sync could not be verified directly."
+    fi
 else
     print_warn "${HEALTH_ISSUES} issue(s) found -- review warnings/errors above"
 fi
