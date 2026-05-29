@@ -20,14 +20,23 @@
 # =============================================================================
 
 set -uo pipefail
-# `set -e` is inherited from lib/common.sh; left active intentionally.
-# Counters use ++var (pre-increment) to avoid the post-increment-returns-0
-# pitfall under set -e.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.44"
+# common.sh enables `set -euo pipefail`. check-node.sh is a read-only
+# diagnostic that MUST run to completion and print a full report even when
+# individual probes fail -- it uses graceful-degradation patterns throughout
+# (`... || echo ""`, and helpers that return non-zero to mean "not found").
+# Leaving `-e` active repeatedly caused silent early exits where a helper
+# returning non-zero inside a command substitution killed the script
+# mid-report (e.g. read_prev_block_state before the state file exists). So we
+# explicitly DISABLE -e here while keeping -u (unset-var detection) and
+# pipefail. The summary at the end is the authoritative pass/fail; nothing
+# else should abort the run.
+set +e
+
+readonly SCRIPT_VERSION="1.1.45"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -343,7 +352,12 @@ state_file_path() {
 read_prev_block_state() {
     local f
     f=$(state_file_path)
-    [[ -f "$f" ]] && cat "$f" 2>/dev/null
+    # Always return 0 -- "no state file yet" is normal, not an error. (Returning
+    # non-zero here previously tripped the inherited set -e and aborted the run.)
+    if [[ -f "$f" ]]; then
+        cat "$f" 2>/dev/null
+    fi
+    return 0
 }
 
 write_block_state() {

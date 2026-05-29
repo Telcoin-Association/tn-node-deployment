@@ -723,6 +723,19 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.45
+Hotfix for a regression introduced in v1.1.44.
+
+**Bug:** the block-advancement helper `read_prev_block_state` returned non-zero when no state file existed yet (the normal first-run case). Under the `set -e` inherited from `lib/common.sh`, `prev_state=$(read_prev_block_state)` then aborted the whole script mid-report -- so the advancement line, `eth_syncing`, disk, memory, AND the final summary all silently failed to print. The EVM section just stopped after "Network EVM block". The state file was never written, so it failed on every run, not just the first.
+
+**Fix:**
+- `read_prev_block_state` now always `return 0` ("no state file yet" is normal, not an error).
+- More importantly, this was the **third** silent early-exit caused by the inherited `set -e` (after the post-increment counters and `detect_authority_id`). check-node.sh is a read-only diagnostic that must always run to its summary, and it uses graceful-degradation patterns throughout. So `-e` is now explicitly **disabled** for this script (`set +e` right after sourcing common.sh), while `-u` (unset-var detection) and `pipefail` are kept. This eliminates the entire class of "helper returns non-zero in a command substitution → script silently dies" bugs.
+
+Verified end-to-end on a live node: full report now prints, and the advancement tracking correctly walks through all states across successive runs -- `No prior reading` → `unchanged … too soon to judge` → `[ERROR] Block NOT advancing … likely STUCK` once the block stays frozen past 60s while behind the network.
+
+All scripts bumped to v1.1.45.
+
 ### v1.1.44
 Completes the EVM-execution accuracy work from v1.1.43, per direct guidance from the Telcoin dev team.
 
