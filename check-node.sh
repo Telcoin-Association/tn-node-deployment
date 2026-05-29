@@ -27,7 +27,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.43"
+readonly SCRIPT_VERSION="1.1.44"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -302,13 +302,12 @@ hex_to_dec() {
     printf '%d\n' "0x${h}" 2>/dev/null || echo 0
 }
 
-# Call eth_blockNumber locally. Echoes the decoded decimal block number on
-# success, or empty string on failure. Caller uses exit code:
-#   0 = ok (value echoed)
-#   1 = failure (empty)
+# Call eth_blockNumber on the given RPC URL (local OR network). Echoes the
+# decoded decimal block number on success, or empty string on failure.
+# Caller uses exit code: 0 = ok (value echoed), 1 = failure (empty).
 # Side-effect-free: returns the value via stdout so it works in command
 # substitution (a side-effect via global would not propagate out of $( )).
-fetch_local_exec_block() {
+fetch_exec_block() {
     local url="$1"
     local resp
     resp=$(curl -sS --connect-timeout 3 --max-time 6 \
@@ -331,6 +330,26 @@ except Exception:
     fi
     hex_to_dec "$hex"
     return 0
+}
+
+# Cross-run state file for tracking whether the local execution block is
+# actually advancing between checks. Stored in a tmp path keyed by node type.
+# Format: "<block> <unix_ts>". Write failures are tolerated (advancement
+# tracking just degrades to "no previous reading").
+state_file_path() {
+    echo "${TMPDIR:-/tmp}/check-node-${NODE_TYPE}.state"
+}
+
+read_prev_block_state() {
+    local f
+    f=$(state_file_path)
+    [[ -f "$f" ]] && cat "$f" 2>/dev/null
+}
+
+write_block_state() {
+    local block="$1" ts="$2" f
+    f=$(state_file_path)
+    echo "${block} ${ts}" > "$f" 2>/dev/null || true
 }
 
 # Call eth_syncing locally. Returns one of:
@@ -513,28 +532,32 @@ else
 fi
 
 # =============================================================================
-# 5. EVM EXECUTION STATE (block + sync)
-# Local: eth_blockNumber + eth_syncing  (skipped if local RPC unreachable)
-# Network: highest latest_execution_block.number from the consensus headers
-#          we already fetched in section 3 -- no extra network RPC call.
+# 5. EVM EXECUTION STATE (block + advancement + sync)
+# The execution lag is the AUTHORITATIVE sync signal (per Telcoin dev guidance).
+# Network execution block is read by calling eth_blockNumber DIRECTLY on the
+# network RPC -- NOT derived from latest_execution_block in consensus headers,
+# which could differ from the network's real execution tip.
+# Also tracks whether the LOCAL block advanced since the previous run, to
+# distinguish "caught up" / "catching up" / "stuck".
 # =============================================================================
 LOCAL_EXEC_BLOCK=""
 NET_EXEC_BLOCK=""
-[[ "$NETWORK_OK" == "true" ]] && NET_EXEC_BLOCK="$CH_EXEC_BLOCK"
+
+# Network execution tip via direct eth_blockNumber on the network RPC.
+if [[ "$QUERY_NETWORK" == "true" ]]; then
+    NET_EXEC_BLOCK=$(fetch_exec_block "$NETWORK_RPC" || echo "")
+fi
 
 if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; then
     print_step "Querying EVM execution state..."
-    if LOCAL_EXEC_BLOCK=$(fetch_local_exec_block "$RPC_URL"); then
+    if LOCAL_EXEC_BLOCK=$(fetch_exec_block "$RPC_URL"); then
         print_ok "Local EVM block:    ${LOCAL_EXEC_BLOCK}"
     else
         print_warn "Could not query local eth_blockNumber"
         LOCAL_EXEC_BLOCK=""
     fi
 
-    # The EVM execution lag is the AUTHORITATIVE sync signal. If the local
-    # execution block trails the network's by more than EVM_SYNC_THRESHOLD,
-    # the node is genuinely behind regardless of what the consensus tip
-    # comparison or eth_syncing say.
+    # --- Lag vs network (direct eth_blockNumber on both sides) ---
     if [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
         if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
             EVM_LAG=$(( NET_EXEC_BLOCK - LOCAL_EXEC_BLOCK ))
@@ -548,6 +571,44 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
             fi
         else
             print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
+        fi
+    elif [[ "$QUERY_NETWORK" == "true" ]]; then
+        print_warn "Could not read network eth_blockNumber from ${NETWORK_RPC}"
+    fi
+
+    # --- Advancement since the previous run ---
+    # The single most reliable "is it actually keeping up" signal: is the
+    # local execution block higher than it was last time we checked?
+    if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
+        local_now_ts=$(date +%s)
+        prev_state=$(read_prev_block_state)
+        prev_block=""; prev_ts=""
+        if [[ -n "$prev_state" ]]; then
+            prev_block=$(echo "$prev_state" | awk '{print $1}')
+            prev_ts=$(echo "$prev_state" | awk '{print $2}')
+        fi
+        write_block_state "$LOCAL_EXEC_BLOCK" "$local_now_ts"
+
+        if [[ -n "$prev_block" ]] && [[ "$prev_block" =~ ^[0-9]+$ ]] && [[ "$prev_ts" =~ ^[0-9]+$ ]]; then
+            local_delta=$(( LOCAL_EXEC_BLOCK - prev_block ))
+            local_elapsed=$(( local_now_ts - prev_ts ))
+            if (( local_delta > 0 )); then
+                print_ok "Block advancing:    +${local_delta} blocks since last check ($(fmt_age "$local_elapsed"))"
+            elif (( local_delta < 0 )); then
+                print_warn "Block went backwards: ${local_delta} since last check -- unusual (reorg or DB reset?)"
+            elif (( local_elapsed >= 60 )); then
+                # No movement over a meaningful window.
+                if [[ "$CATCHING_UP" == "true" ]]; then
+                    print_error "Block NOT advancing: unchanged for ${local_elapsed}s AND behind the network -- likely STUCK"
+                    (( ++HEALTH_ISSUES ))
+                else
+                    print_info "Block unchanged for ${local_elapsed}s (at network tip -- fine if no new blocks were produced)"
+                fi
+            else
+                print_info "Block unchanged since last check (${local_elapsed}s ago -- too soon to judge; re-run later)"
+            fi
+        else
+            print_info "No prior reading -- run check-node.sh again to measure block advancement"
         fi
     fi
 

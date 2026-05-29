@@ -723,6 +723,28 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.44
+Completes the EVM-execution accuracy work from v1.1.43, per direct guidance from the Telcoin dev team.
+
+**Network execution block now comes from a direct `eth_blockNumber` call**
+- Previously the script derived the "network EVM block" from the `latest_execution_block.number` embedded in the consensus headers it fetched. That could differ from the network's actual execution tip. It now calls `eth_blockNumber` directly on the network RPC and compares local-vs-network like-for-like. (Confirmed on a live node: direct network `eth_blockNumber` = 50170, matching the manual check exactly, while local was stuck at 43727.)
+- The generic block-fetch helper was renamed `fetch_local_exec_block` → `fetch_exec_block` since it's now used for both the local and network RPC.
+
+**Block-advancement tracking between runs**
+- The script now records the local execution block + timestamp in `${TMPDIR:-/tmp}/check-node-<type>.state` on each run, and on the next run reports whether the block actually moved:
+  - advanced → `Block advancing: +N blocks since last check`
+  - unchanged for ≥60s **and** behind the network → `[ERROR] Block NOT advancing … likely STUCK` (counts as a health issue)
+  - unchanged at the network tip → benign note
+  - unchanged but <60s elapsed → "too soon to judge; re-run later"
+  - first ever run → "no prior reading -- run again to measure advancement"
+- This is the single most reliable "is it actually keeping up" signal, and directly answers the dev's request to "flag if the local block hasn't advanced."
+
+**`eth_syncing` remains de-emphasised** (from v1.1.43) — printed with a note that it stays `false` during consensus backfill and is not a sync guarantee.
+
+Net effect: the EVM section now measures real lag (direct block-number comparison) AND real progress (advancement between runs), rather than trusting a single local snapshot. A node whose execution is frozen — like an observer stuck behind an unclosed consensus backfill gap — is now correctly reported as catching-up/stuck instead of healthy.
+
+All scripts bumped to v1.1.44.
+
 ### v1.1.43
 Fixes a real accuracy bug in `check-node.sh`: it would report a node as "healthy / synced / current" while the node was thousands of execution blocks behind the network.
 
@@ -802,217 +824,8 @@ Previously `pick_source_version` only checked for two named states: exact tag an
 
 All scripts bumped to v1.1.40.
 
-### v1.1.39
-Picker now distinguishes "at the tip of main" from "built from main but origin/main has moved since."
+For older entries (v1.1.39 and earlier), see [CHANGELOG.md](./CHANGELOG.md).
 
-Previously `pick_source_version` had a binary `on_main` check -- either HEAD == origin/main and the `main` option got a `<-- current` marker, or it didn't and got nothing. That hid a real signal: operators who built from main weeks ago but had since fallen behind saw no marker at all and had to guess whether new commits had landed.
-
-**New state machine** (replacing `on_main`):
-- `tip` -- HEAD is exactly at origin/main. Picker shows `main  <-- current` and the header reports `origin/main: up to date`.
-- `behind` -- HEAD is an ancestor of origin/main but the tip has advanced. Picker shows `main  <-- N commit(s) newer than your build` and the header reports `origin/main has moved: N commits since your build` plus a one-line summary of the latest main commit (e.g. `abc12345 2 days ago -- Add memory-pool improvements (#704)`).
-- `none` -- HEAD is detached or diverged from main. Header reports as before (`detached / not on main or any tag`).
-
-Detection uses `git merge-base --is-ancestor HEAD origin/main` (ancestry check) and `git rev-list --count HEAD..origin/main` (gap count). No substring matching.
-
-All scripts bumped to v1.1.39.
-
-### v1.1.38
-Two corrections to `pick_source_version` based on operator feedback.
-
-**Fixed: wrong `<-- current` marker on tag lists**
-- The previous logic did a substring match between `git describe --tags --always` and each tag name. For an operator on `main` with the closest ancestor tag being `v0.6.0-adiri`, `git describe` produced `v0.6.0-adiri-84-gXXXXXXXX`, which *contained* `v0.6.0-adiri`, so the picker incorrectly marked that tag as "current" -- even though the operator's HEAD was at the tip of `main`, not on that tag at all.
-- Replaced with proper detection: `git describe --tags --exact-match HEAD` returns a non-empty value only when HEAD is exactly an annotated tag, and `git rev-parse HEAD vs origin/main` confirms whether HEAD is on main. The "current" marker now lands on `main` for operators built from main, on the exact tag for operators built from a tag, or on neither for detached commits. The header line also describes the operator's state in plain language: "main @ 34911812 (v0.6.0-adiri-84-g34911812)" rather than just the describe string.
-
-**New: hide obsolete source versions from the picker**
-- Per the Telcoin team, operators shouldn't be installing builds older than v0.9.1. The picker now applies a minimum-version filter (`MIN_SOURCE_VERSION_TESTNET="0.9.1"`, configurable in `lib/common.sh`) after the network-suffix filter, so the menu shows only the currently-supported tags. main and custom-ref remain available as separate options. With the current upstream state the testnet picker now shows just `v0.9.2-adiri` and `v0.9.1-adiri` plus `main` -- not 15 historic releases.
-
-All scripts bumped to v1.1.38.
-
-### v1.1.37
-Hotfix for v1.1.36.
-
-- `update-node.sh` was still declaring its own `readonly TN_SOURCE_DIR="/opt/telcoin-source"` after v1.1.36 moved that declaration into `lib/common.sh`. Under `set -e` the duplicate readonly assignment killed the script immediately on start with `update-node.sh: line 35: TN_SOURCE_DIR: readonly variable`. Removed the duplicate. (The same fix was applied to `setup-observer.sh` / `setup-validator.sh` in v1.1.36, but `update-node.sh` slipped through.)
-
-All scripts bumped to v1.1.37.
-
-### v1.1.36
-Source-build picker now follows the official Telcoin guidance for which ref to build from.
-
-Per the Telcoin dev team: the general case for **testnet** is to build from the latest `-adiri` tag (which sits on a branch parallel to `main`). Using `main` works too but isn't the default. **Devnet** follows `main`. **Mainnet** will have its own tag set when it launches.
-
-**Changes**
-- New `pick_source_version <network>` in `lib/common.sh`. Filters tags by the network's suffix (`-adiri` for testnet, `-telcoin` for mainnet -- placeholder until mainnet exists). Lists newest first, marks the recommended (latest matching tag) and the operator's current ref. Default selection is option 1 (just press Enter).
-- `setup-observer.sh` and `setup-validator.sh` use the new picker for the source-build step. The previous "main (recommended -- stable release) / custom" prompt is gone -- it was misleading because `main` is a parallel branch from the testnet release tags, not the recommended testnet build. New operators on testnet now get the latest `-adiri` tag by default.
-- `update-node.sh` uses the same picker via `lib/common.sh`. The duplicate copy in `update-node.sh` was removed.
-- New constants in `lib/common.sh`: `TN_SOURCE_DIR`, `NETWORK_TAG_SUFFIX_TESTNET`, `NETWORK_TAG_SUFFIX_MAINNET`. The local `TN_SOURCE_DIR="/opt/telcoin-source"` declarations in `setup-observer.sh` and `setup-validator.sh` were removed (they shadowed the new readonly in `common.sh` and caused an early exit).
-- Wording cleanup: the setup scripts now explain upfront that testnet ops build from `-adiri` tags and `main` is for devnet -- so operators aren't confused about why they're being defaulted to a tag rather than `main`.
-
-**Migration note for existing operators**
-- Existing installs built from `main` will keep working -- no forced update. To switch to the latest `-adiri` tag, run `sudo update-node.sh` and pick option 1 from the new menu.
-
-All scripts bumped to v1.1.36.
-
-### v1.1.35
-UX improvement to `update-node.sh`: show available versions upfront instead of asking the operator to commit to "prepare" before seeing what's there.
-
-**New flow:**
-1. Auto-detect node type + install method (same as v1.1.34)
-2. **Probe the remote upfront** -- `git fetch` for source installs, GAR API for Docker installs -- so the operator can see what is available before picking anything.
-3. **Show a numbered menu of versions** with the current one marked `<-- current` and the newest one marked `<-- latest`. For source: up to 15 recent tags plus a `main` option and a custom-ref entry. For Docker: up to 15 recent tags plus a custom-tag entry. Both menus include a `Cancel` option.
-4. **Then** ask whether to prepare-only, prepare-and-apply, or cancel.
-
-For source builds the script also reports how many commits behind `origin/main` the current ref is, so operators can see at a glance whether anything has landed since their last build. If you are already on the latest release tag, the menu says `[OK] You are on the latest release tag` so you can cancel out without committing to a build.
-
-The `--discard` flag and the existing pending-state logic (apply / discard-and-prepare / leave-for-later) are preserved; "discard and prepare different" now flows through the same picker.
-
-All scripts bumped to v1.1.35.
-
-### v1.1.34
-New `update-node.sh` -- a single script for safely moving a running node to a newer version. Replaces the operator's previous workflow of "stop service, rebuild manually, hope it works, restart manually."
-
-**Two-phase workflow (same for both source and Docker installs)**
-- Phase 1 (prepare): runs the slow/risky step with the service still running -- `cargo build --release` for source, `docker pull` for Docker. Zero downtime.
-- Phase 2 (apply): stops the service, swaps the artefact, restarts, and verifies. ~30s downtime for Docker; instant for source (just a `cp`).
-- The two phases can run back-to-back (one menu choice) or be split across days. Pending state is recorded in `/etc/telcoin/<type>/.pending-update` so re-running the script picks up where it left off.
-
-**Auto-detection**
-- Node type (validator vs observer): from installed systemd units.
-- Install method (source vs docker): from `INSTALL_METHOD=` in `.node-meta`. If `existing` (an externally-supplied binary), the script exits with a clear message rather than guessing.
-- Network (testnet vs mainnet): from `NETWORK=` in `.node-meta`, with fallback to inspecting the `chain_name` in `genesis.yaml` for older installs. Determines whether source builds get `--features faucet` (testnet) or not.
-
-**Docker tag discovery**
-- Queries the Google Artifact Registry's public Docker v2 API at `https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list`, parses tags matching `vX.Y.Z[-suffix]`, and shows the most recent 15 sorted by version. Marks the current tag. If the API call times out or returns unparseable data, falls back silently to manual tag entry.
-
-**Safety nets**
-- Source: the built binary is run through `--version` before being declared "prepare complete" -- catches the rare case where `cargo build` finishes but the resulting binary is broken. Hash recorded in pending state so apply can detect a swap.
-- Docker: the unit file is backed up as `<unit>.bak.<UTC-ts>` before any `perl -i` edit (same helper edit-config.sh uses).
-- Source: the current binary at `/opt/telcoin/telcoin-network` is backed up as `.bak.<UTC-ts>` before overwrite.
-- Both: post-restart health verification (`tn_latestConsensusHeader` RPC ping with a 45s timeout). If unhealthy after restart, the script offers a one-keystroke rollback that restores the backup, restarts, and re-verifies.
-- Validators get a hard-gate `CONFIRM` prompt before any downtime, with an explicit warning about lost block rewards.
-
-**What is never touched by an update**
-- BLS / P2P keys at `/var/lib/telcoin/<type>/node-keys/`
-- `node-info.yaml` (the operator's `primary_network_key`, multiaddrs, etc.)
-- BLS passphrase at `/etc/telcoin/<type>/bls-passphrase`
-- Chain config files (genesis/committee/parameters)
-- Listener multiaddrs and other `Environment=` lines in the unit file -- only the binary path (source) or image tag (Docker) changes; the rest of `ExecStart` is preserved by-construction.
-
-**Setup scripts**
-- `setup-observer.sh` and `setup-validator.sh` now write `NETWORK=` and `DATA_DIR=` lines into `/etc/telcoin/<type>/.node-meta`. This was previously missing -- `check-node.sh` already expected `DATA_DIR=` and `update-node.sh` needs both. Existing installs are not affected; the new script falls back to inspecting `genesis.yaml` (for `NETWORK`) and the default path `/var/lib/telcoin/<type>` (for `DATA_DIR`) when `.node-meta` doesn't have them.
-
-All scripts bumped to v1.1.34.
-
-### v1.1.33
-- `check-node.sh` now shows EVM execution state alongside consensus state. New section reports your node's `eth_blockNumber`, the network's latest execution block (extracted from the consensus header response we were already fetching -- no extra RPC call), the lag in blocks, and `eth_syncing` status. If `eth_syncing` returns a syncing object, the script flags it with the current/highest block counts and counts it as a health issue. Catches "node is up but execution layer is stuck or catching up" -- a failure mode the consensus-only check could miss.
-- README cleanup: older changelog entries (v1.1.28 and earlier) moved to a dedicated `CHANGELOG.md` file. The README itself is now ~250 lines shorter. The full history is preserved verbatim in `CHANGELOG.md`.
-
-All scripts bumped to v1.1.33.
-
-### v1.1.32
-Small UX follow-up to v1.1.31. `check-node.sh` no longer requires `--observer`/`--validator` on the command line for the common case.
-
-- `check-node.sh` auto-detects node type from installed systemd units. Run `bash check-node.sh` with no flag on any node and it picks the right defaults. `--observer` and `--validator` remain as explicit overrides for non-standard setups or when both unit files exist on the same server.
-- README "Run at any time after setup" section updated to show the new auto-detect usage and lists the actual v1.1.31+ checks (the old list still referenced the retired log-grep peer count).
-- Retired the "Peer Count Note" section in the README -- the entire log-grep approach it described was removed in v1.1.31. Replaced with a short "Why RPC instead of log files?" note explaining the current design.
-
-All scripts bumped to v1.1.32.
-
-### v1.1.31
-`check-node.sh` has been redesigned around the consensus RPC. Old version relied on grepping log files for fragile string markers, which produced misleading or stale output (notably a "P2P peers since startup" metric whose label was wrong, "consensus stuck" warnings that fired during normal testnet quiet periods, and a "synced at block 0" message that was a permanent false positive on Adiri). New version replaces all of that with direct RPC calls and the network's own view of your node.
-
-**New source of truth: `tn_latestConsensusHeader`**
-- Reports network state (block, epoch, commit timestamp, committee) by querying `https://rpc.telcoin.network` directly.
-- Reports local state by querying the local node's RPC and comparing.
-- Health contract: `block == 0` → ERROR "fully stalled", `commit_timestamp age > 60s` → WARN "stale, behind by Xs", else OK.
-
-**New: author-presence check (the killer signal)**
-- Validators get a clear answer to "is my node actually participating?" by checking whether the operator's authority ID appears in `sub_dag.headers[].author` from the network's recent consensus headers. Catches the failure mode where a validator is "running" (systemd green, RPC up) but silent (not authoring headers).
-- Works even when the local RPC is closed off entirely -- the network's view of your node is enough.
-- Authority ID is auto-detected from `<data-dir>/node-info.yaml` (field `primary_network_key`) or passed explicitly via `--authority-id <BASE58>`.
-
-**New: own reputation score**
-- Reports the operator's reputation score from `sub_dag.reputation_score.scores_per_authority` alongside the committee average. Below half-average emits a `[WARN]`.
-
-**New: local RPC mode classification**
-- Distinguishes `HEALTHY` / `SLOW` (responding but >6s) / `DISABLED` (HTTP 200 with `-32601 method not found`) / `DOWN` (connection refused). Previously all four looked the same.
-
-**New: `--no-network` flag**
-- Skips the public-RPC query for fully air-gapped diagnostics. Local-only checks still run.
-
-**New: disk check uses the actual data directory**
-- Reads `DATA_DIR` from `/etc/telcoin/<type>/.node-meta` (falls back to `/var/lib/telcoin/<type>`) and reports the disk usage of whatever mount actually holds chain data. Previously hard-coded to `/var/lib/telcoin`, which missed operators with chain data on a separate mount.
-
-**Removed entirely**
-- Log file grepping for `peer metrics heartbeat`, `got new consensus`, `new connection established`
-- The "P2P peers since startup" metric (label was wrong; counted all-time unique entries with no time filter)
-- The 120s "consensus stuck" heuristic (false positives during testnet quiet periods)
-- The "same block in last 10 log entries" heuristic (correlated nothing meaningful)
-- Greedy regex for primary/worker peer breakdown
-
-**Dependency notes**
-- Adds `python3` as a runtime dependency for JSON parsing (already installed on every supported OS). No `jq` needed.
-
-**Implementation note**
-- All helper functions explicitly `return 0` even on miss, so the `set -e` inherited from `lib/common.sh` cannot fire silently when an optional file (like `node-info.yaml`) is absent.
-
-- All scripts bumped to v1.1.31
-
-### v1.1.30
-Firewall script now opens every port a Telcoin node actually needs — no more silent monitoring failures or unreachable validators after running "Enable firewall with recommended defaults".
-
-**`firewall-setup.sh` — node-aware recommended defaults**
-- Option 2 ("Enable firewall with recommended defaults") now opens the ports a node actually needs based on what's installed: SSH, TCP 43174 (Uptime Kuma) on every node, plus UDP 49590/49594 on validators. Previously only SSH was opened, so operators who didn't also navigate to option 4 ended up with closed P2P ports (silent validator consensus failure) or closed Uptime Kuma (silent monitoring failure).
-- New `UPTIME_KUMA_PORT` constant. Uptime Kuma is documented as required across all nodes (Telcoin Association health monitoring runs against every deployed node).
-- New `ufw_has_allow <port> <proto>` helper. Status checks now match the protocol explicitly, fixing the prior `grep "49590\|49594"` patterns that conflated TCP and UDP rules.
-- Option 1 ("View current firewall status") now flags `CLOSED -- validator will not reach consensus` and `CLOSED -- health monitoring will fail` as hard errors (not warnings) when required ports are shut on an installed node.
-- Option 4 ("Manage node ports") wording updated to reflect that Uptime Kuma is required (not optional) and Public RPC remains optional.
-
-**README**
-- "Health Monitoring (Uptime Kuma)" section updated to mark TCP 43174 as required for all nodes rather than optional.
-
-- All scripts bumped to v1.1.30
-
-### v1.1.29
-Audit-driven hardening pass. Focus: protecting live node state from typos, races, and bad input. No behavioural changes to the happy path; existing setups continue working unchanged.
-
-**`edit-config.sh` — the highest-risk script in the suite**
-- Every option that writes to a systemd unit file now creates a timestamped sibling backup first (`<unit>.bak.YYYYmmdd-HHMMSS`) so a bad edit can be rolled back by hand
-- Custom multiaddrs are validated against `/ip[46]/<addr>/udp/<port>/quic-v1` before any write -- bad input is rejected, not silently inserted
-- Instance number must be an integer 1-9 -- guards against typos that would silently change the RPC port
-- Metrics address must be `IPv4:PORT` -- catches `127.0.0.1` (missing port) and similar
-- P2P ports validated as 1-65535 and primary != worker
-- Docker image reference validated before pulling -- catches obvious typos before the pull failure
-- RPC mode change now strips orphan `--http.port`, `--http.api`, `--http.corsdomain`, `--http.vhosts` flags (previously only `--http.addr`/`--http` were removed, leaving stragglers)
-- BLS passphrase change now stops the service, polls until fully stopped, rewrites the passphrase file, then restarts -- closes the race where the running node could read a half-written file
-- Chain config refresh checks all three source YAMLs exist before any `cp`, so a missing source no longer silently leaves a node with stale configs
-
-**Setup scripts (observer + validator)**
-- `-e TN_BLS_PASSPHRASE=${bls_pass}` in the Docker `ExecStart` is now quoted -- a passphrase containing whitespace or shell metacharacters no longer breaks the unit file
-- Public IP and listener IP prompts validate input (IPv4 or IPv6) and re-prompt on bad input
-- Multiaddr prompts validate against the expected shape and re-prompt on bad input
-
-**`firewall-setup.sh`**
-- Atomic SSH port change. New sequence: back up `sshd_config`, add a second `Port` directive so sshd listens on both old and new during the transition, open the new port in ufw, require operator to type `CONFIRMED` after testing the new port from a second terminal, then remove the old port and old ufw rule. If anything goes wrong (sshd reload fails, operator does not confirm), rolls back to the original state.
-
-**`remove-node.sh`**
-- `wipe_chain_data_only` now polls until the unit is actually stopped before `rm -rf .../db` -- closes the race where deletion could run while the node process still held DB file handles
-- Docker image removal checks whether the sibling node's unit references the same image and keeps it if so
-- Service user/group removal checks whether the sibling node's unit uses the same user and keeps it if so
-
-**`update-scripts.sh`**
-- Now has `set -euo pipefail` (was the only script without it) -- failed curls in the middle of an update are no longer silent
-- Three-stage integrity check on every download: non-empty file, opportunistic SHA-256 verification against an upstream `<file>.sha256` sidecar (skipped silently when absent), and `bash -n` syntax check on `.sh` files before `mv` -- catches truncated or corrupted downloads even when no checksum is published
-
-**`check-node.sh`**
-- Now has `set -uo pipefail` -- catches unset-variable bugs and silent pipe failures without breaking the script's intentional `|| echo ""` fallback patterns
-- Fixed a pre-existing latent bug: `(( HEALTH_ISSUES++ ))` returns the pre-increment value 0 (exit code 1) the first time a health issue is detected, which under the inherited `set -e` from `lib/common.sh` caused the script to exit silently before reporting subsequent checks. Converted all post-increments across the suite (`check-node.sh`, `remove-node.sh`, `edit-config.sh`, `lib/common.sh`) to pre-increments which return the new value and avoid the trap.
-
-**`lib/common.sh`**
-- New input validation helpers used across the suite: `validate_ipv4`, `validate_ipv6`, `validate_public_ip`, `validate_port`, `validate_ip_port`, `validate_multiaddr`, `validate_docker_image`, `prompt_with_validation`
-
-- All scripts bumped to v1.1.29
-
-For older entries (v1.1.28 and earlier), see [CHANGELOG.md](./CHANGELOG.md).
 ---
 
 ## Support
