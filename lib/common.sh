@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.45"
+readonly COMMON_VERSION="1.1.46"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -648,8 +648,7 @@ select_install_method() {
 ensure_chain_configs_available() {
     print_step "Ensuring chain-config files are available..."
 
-    local source_dir="/opt/telcoin-source"
-    TN_SOURCE_DIR="$source_dir"
+    local source_dir="$TN_SOURCE_DIR"
 
     if [[ -d "${source_dir}/.git" ]]; then
         print_info "Repository already present -- pulling latest..."

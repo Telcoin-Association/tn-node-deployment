@@ -723,6 +723,23 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.46
+Hotfix for `setup-observer.sh` / `setup-validator.sh` install failures during
+Step 4 ("Ensuring chain-config files are available...").
+
+`ensure_chain_configs_available()` in `lib/common.sh` reassigned `TN_SOURCE_DIR`
+to the same `/opt/telcoin-source` value already set as a `readonly` constant at
+the top of the file. Under `set -e` this aborted the script with:
+
+    common.sh: ...: TN_SOURCE_DIR: readonly variable
+
+Same family of bug as v1.1.37 (which removed a duplicate declaration in
+`update-node.sh`); this one was a redundant reassignment hidden inside a
+function. Replaced with `local source_dir="$TN_SOURCE_DIR"` so the rest of the
+function continues to work unchanged.
+
+All scripts bumped to v1.1.46.
+
 ### v1.1.45
 Hotfix for a regression introduced in v1.1.44.
 
