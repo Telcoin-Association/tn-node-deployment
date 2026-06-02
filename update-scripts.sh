@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.47"
+readonly SCRIPT_VERSION="1.1.48"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -94,9 +94,17 @@ check_versions() {
     print_info "Repository: ${GITHUB_RAW}"
     echo ""
 
-    # Check internet connectivity
-    if ! curl -sf --max-time 5 "https://github.com" &>/dev/null; then
-        print_error "No internet connection -- cannot check for updates"
+    # Connectivity probe.
+    # Earlier versions probed https://github.com directly. That's the full
+    # HTML homepage (~200KB) which often timed out at the 5s mark on
+    # residential links even when the actual updater endpoint
+    # (raw.githubusercontent.com) was responding in well under 1s -- because
+    # the homepage pulls JS bundles and assets, and the probe used `curl -sf`
+    # which considers an interrupted download a failure.
+    # Fix: HEAD-probe the real host the updater fetches from, with a small
+    # known file (README.md) and a slightly more generous timeout.
+    if ! curl -sfI --max-time 8 "${GITHUB_RAW}/README.md" &>/dev/null; then
+        print_error "Cannot reach ${GITHUB_RAW} -- check internet/DNS or GitHub status"
         exit 1
     fi
 

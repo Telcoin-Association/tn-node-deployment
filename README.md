@@ -732,6 +732,23 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 > workflow change is needed -- you'll just see per-file updates land instead
 > of a flat "all scripts bumped".
 
+### update-scripts v1.1.48
+Fixes a false-positive "No internet connection -- cannot check for updates"
+on machines that actually have working internet.
+
+The connectivity probe pinged `https://github.com` (GitHub's full marketing
+homepage -- ~200 KB of HTML + JS) with a 5-second timeout. On residential
+links the homepage routinely takes longer than that to pull in full, so
+`curl -sf` would abort partway through and the updater would bail with the
+misleading error. Meanwhile, the actual endpoint the updater fetches from
+(`raw.githubusercontent.com`) was responding in well under a second on the
+exact same machine.
+
+Replaced with a HEAD probe (`curl -sfI`) against `${GITHUB_RAW}/README.md`
+-- the real host, no body downloaded, 8-second timeout. The error message
+now names the exact endpoint that failed, so DNS or firewall issues are
+easier to diagnose.
+
 ### check-node v1.1.48
 Adds a dedicated diagnostic for the "stuck on a missing epoch pack" failure
 mode. Previously, when an observer or validator couldn't get the epoch pack
