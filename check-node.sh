@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.46"
+readonly SCRIPT_VERSION="1.1.47"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -143,6 +143,11 @@ HEALTH_ISSUES=0
 # tip match -- is the real "am I synced" signal.
 EVM_LAG=""
 CATCHING_UP=false
+# Set true if the §3 network RPC probe fails while --no-network was NOT passed.
+# When this is true, §4 / §6 / §7 are silently skipped, so the §10 summary
+# surfaces an explicit banner naming which sections did not run -- otherwise an
+# operator sees a half-empty report and may misread it as "everything passed".
+NETWORK_PROBE_FAILED=false
 
 # =============================================================================
 # HELPERS
@@ -193,8 +198,10 @@ detect_authority_id() {
 }
 
 # Probe local RPC and classify the mode.
-# Returns one of: HEALTHY | SLOW | DOWN | DISABLED | NO_RPC
-# Echoes the mode on stdout.
+# Echoes "<MODE> [<chain_id_hex>]" on stdout. MODE is one of HEALTHY | SLOW |
+# DOWN | DISABLED; the chain_id is present only on HEALTHY (parsed from the
+# eth_chainId result we already fetched), empty otherwise. Caller uses
+# `read -r MODE CHAIN_ID <<< "$(probe_local_rpc ...)"` to split.
 probe_local_rpc() {
     local url="$1"
     local body
@@ -216,7 +223,13 @@ probe_local_rpc() {
         000)         echo "DOWN" ;;          # connection refused / timeout
         200)
             if echo "$resp" | grep -q '"result"'; then
-                echo "HEALTHY"
+                # Parse the chain ID hex out of "result":"0x...". Empty string
+                # if anything goes wrong -- the caller treats absent chain ID
+                # as "skip the sanity check".
+                local chain_id
+                chain_id=$(echo "$resp" | grep -oE '"result"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+                    sed -E 's/.*"([^"]*)"$/\1/')
+                echo "HEALTHY ${chain_id}"
             elif echo "$resp" | grep -q '"-32601"'; then
                 echo "DISABLED"
             else
@@ -366,38 +379,12 @@ write_block_state() {
     echo "${block} ${ts}" > "$f" 2>/dev/null || true
 }
 
-# Call eth_syncing locally. Returns one of:
-#   "synced"
-#   "syncing <current>/<highest>"
-#   "err"
-fetch_local_sync_state() {
-    local url="$1"
-    local resp
-    resp=$(curl -sS --connect-timeout 3 --max-time 6 \
-        -X POST -H 'Content-Type: application/json' \
-        --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
-        "$url" 2>/dev/null) || { echo "err"; return; }
-    echo "$resp" | python3 -c '
-import json, sys
-def to_int(x):
-    if not isinstance(x, str): return 0
-    try: return int(x, 16)
-    except Exception: return 0
-try:
-    d = json.load(sys.stdin)
-    r = d.get("result")
-    if r is False:
-        print("synced")
-    elif isinstance(r, dict):
-        cur = to_int(r.get("currentBlock", "0x0"))
-        hi  = to_int(r.get("highestBlock", "0x0"))
-        print(f"syncing {cur}/{hi}")
-    else:
-        print("err")
-except Exception:
-    print("err")
-'
-}
+# Note: an earlier `fetch_local_sync_state` (eth_syncing) helper was removed
+# in v1.1.47. On Telcoin, eth_syncing stays `false` during consensus-layer
+# backfill, so it can't be trusted as a sync guarantee; and when it does
+# report "syncing" it added no signal beyond what EVM_LAG already shows
+# (and could spuriously flip the global CATCHING_UP flag with a small lag).
+# The EVM-lag + block-advancement signals together cover the same question.
 
 # =============================================================================
 # REPORT HEADER
@@ -435,10 +422,25 @@ fi
 # 2. LOCAL RPC PROBE
 # =============================================================================
 print_step "Probing local RPC..."
-LOCAL_RPC_MODE=$(probe_local_rpc "$RPC_URL")
+LOCAL_CHAIN_ID=""
+read -r LOCAL_RPC_MODE LOCAL_CHAIN_ID <<< "$(probe_local_rpc "$RPC_URL")"
 case "$LOCAL_RPC_MODE" in
     HEALTHY)
         print_ok "Local RPC responds to eth_chainId"
+        # Sanity-check the chain ID. A node accidentally configured for a
+        # different network (wrong --chain flag, copy-pasted config) would
+        # otherwise pass every downstream check while comparing against the
+        # wrong network. Adiri = 2017 (0x7e1); mainnet currently shares this.
+        if [[ -n "$LOCAL_CHAIN_ID" ]]; then
+            chain_dec=$(hex_to_dec "$LOCAL_CHAIN_ID")
+            if [[ "$chain_dec" == "2017" ]]; then
+                print_info "  Chain ID:        ${LOCAL_CHAIN_ID} (${chain_dec} -- Telcoin)"
+            else
+                print_error "Chain ID mismatch: ${LOCAL_CHAIN_ID} (${chain_dec}) -- expected 2017 (Telcoin)"
+                print_info "  Node may be configured for the wrong network."
+                (( ++HEALTH_ISSUES ))
+            fi
+        fi
         ;;
     SLOW)
         print_warn "Local RPC is responding but slow (>6s) -- node may be under load"
@@ -481,6 +483,11 @@ if [[ "$QUERY_NETWORK" == "true" ]]; then
     else
         print_warn "Could not reach network RPC: ${CH_ERROR:-no response}"
         print_info "Skipping network-comparison checks. Use --no-network to silence this."
+        # An unreachable network RPC is a real issue on a node that should be
+        # comparing itself to the network -- otherwise §4/§6/§7 silently skip
+        # and the §10 verdict no longer has the ground truth it needs.
+        NETWORK_PROBE_FAILED=true
+        (( ++HEALTH_ISSUES ))
     fi
 else
     print_info "Network query skipped (--no-network)"
@@ -522,10 +529,14 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
         # as the network -- it is NOT a measure of catch-up progress.
         if [[ "$NETWORK_OK" == "true" ]]; then
             lag=$(( NET_BLOCK - LOC_BLOCK ))
-            if (( lag > 100 )); then
-                print_warn "  Tip vs network:  ${lag} blocks behind on the tracked tip"
-            elif (( lag < -5 )); then
+            # This is the CONSENSUS tip delta only -- it doesn't reflect EVM
+            # catch-up progress (the authoritative signal is §5's EVM lag). So
+            # all branches are info-only; the §10 verdict reads HEALTH_ISSUES
+            # and CATCHING_UP, neither of which this section sets.
+            if (( lag < -5 )); then
                 print_info "  Tip vs network:  local tip ahead by $(( -lag )) (clock/routing skew)"
+            elif (( lag > 100 )); then
+                print_info "  Tip vs network:  ${lag} blocks behind on the tracked tip (see EVM state below for catch-up)"
             else
                 print_ok "  Tip vs network:  matched (delta ${lag}) -- tracking the network tip"
                 print_info "  (this confirms connectivity, NOT that execution is caught up -- see EVM state below)"
@@ -626,27 +637,6 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
         fi
     fi
 
-    sync_state=$(fetch_local_sync_state "$RPC_URL")
-    case "$sync_state" in
-        synced)
-            # eth_syncing=false does NOT mean caught up on Telcoin -- it stays
-            # false during consensus-layer backfill. Do not present it as
-            # "synced"; the EVM lag above is what actually decides.
-            print_info "eth_syncing:        false (note: stays false during consensus backfill -- not a sync guarantee)"
-            ;;
-        syncing*)
-            # syncing <current>/<highest>
-            cur_hi="${sync_state#syncing }"
-            cur="${cur_hi%/*}"
-            hi="${cur_hi#*/}"
-            behind=$(( hi - cur ))
-            print_warn "eth_syncing:        IN PROGRESS at ${cur} / ${hi}  (${behind} behind)"
-            CATCHING_UP=true
-            ;;
-        err|*)
-            print_info "eth_syncing:        could not determine"
-            ;;
-    esac
 elif [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
     print_step "EVM execution state (network only -- local RPC unreachable)..."
     print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
@@ -714,8 +704,15 @@ fi
 # =============================================================================
 if [[ "$NODE_TYPE" == "validator" ]] && [[ -n "$VALIDATOR_ADDRESS" ]]; then
     echo ""
-    # Use network RPC for the on-chain call since local may be closed
-    check_validator_onchain_status "$VALIDATOR_ADDRESS" "$NETWORK_RPC" || true
+    if [[ "$NETWORK_OK" == "true" ]]; then
+        # Use network RPC for the on-chain call since local may be closed
+        check_validator_onchain_status "$VALIDATOR_ADDRESS" "$NETWORK_RPC" || true
+    else
+        # check_validator_onchain_status would otherwise emit a misleading
+        # "No validator record found" message when the real cause is that
+        # the network RPC is unreachable. The §10 banner enumerates the skip.
+        print_info "Skipping on-chain validator status (network RPC unreachable)"
+    fi
 elif [[ "$NODE_TYPE" == "validator" ]]; then
     echo ""
     print_info "Tip: run with --address 0xYOUR_ADDRESS to check on-chain validator status."
@@ -738,18 +735,22 @@ for mount_path in "${mounts_to_check[@]}"; do
     [[ -d "$mount_path" ]] || continue
     disk_info=$(df -BG --output=used,size,pcent "$mount_path" 2>/dev/null | awk 'NR==2 {gsub("G","",$1); gsub("G","",$2); print $1"G used / "$2"G total ("$3" full)"}')
     usage_pct=$(df --output=pcent "$mount_path" 2>/dev/null | awk 'NR==2 {gsub("%",""); print $1}')
+    # Annotate the data-mount line with the resolved data dir so the operator
+    # can verify detect_data_dir landed on the right path -- replaces the old
+    # trailing "Data dir checked:" line.
+    label="$mount_path"
+    [[ "$mount_path" == "$DATA_MOUNT" ]] && label="${mount_path} (data: ${DATA_DIR})"
     if [[ -n "$disk_info" ]] && [[ -n "$usage_pct" ]]; then
         if (( usage_pct >= 90 )); then
-            print_error "Disk at ${mount_path}: ${disk_info} -- CRITICAL"
+            print_error "Disk at ${label}: ${disk_info} -- CRITICAL"
             (( ++HEALTH_ISSUES ))
         elif (( usage_pct >= 75 )); then
-            print_warn "Disk at ${mount_path}: ${disk_info} -- getting full"
+            print_warn "Disk at ${label}: ${disk_info} -- getting full"
         else
-            print_ok "Disk at ${mount_path}: ${disk_info}"
+            print_ok "Disk at ${label}: ${disk_info}"
         fi
     fi
 done
-print_info "Data dir checked: ${DATA_DIR}  (mount: ${DATA_MOUNT:-unknown})"
 
 # =============================================================================
 # 9. MEMORY
@@ -778,10 +779,22 @@ echo ""
 print_sep
 echo ""
 
+# Surface skipped sections explicitly. Without this, a network probe failure
+# in §3 buries a single yellow warning and the operator gets a report missing
+# §4/§6/§7 with no clear "you are missing data" signal.
+if [[ "$NETWORK_PROBE_FAILED" == "true" ]]; then
+    print_warn "Network probe failed -- the following sections were SKIPPED:"
+    print_info "  - Consensus tip comparison (§4 cross-network)"
+    print_info "  - Author presence and reputation (§6)"
+    print_info "  - On-chain validator status (§7)"
+    print_info "Re-run when network connectivity is restored, or pass --no-network to silence."
+    echo ""
+fi
+
 # The verdict prioritises the EVM execution lag as the real sync signal.
 # A node can pass every other check (service up, RPC healthy, consensus tip
-# tracked, eth_syncing=false) while still being thousands of execution blocks
-# behind -- so "catching up" is reported distinctly from "healthy".
+# tracked) while still being thousands of execution blocks behind -- so
+# "catching up" is reported distinctly from "healthy".
 if [[ "$CATCHING_UP" == "true" ]]; then
     if [[ -n "$EVM_LAG" ]]; then
         print_warn "Node is CATCHING UP -- ${EVM_LAG} execution blocks behind the network"

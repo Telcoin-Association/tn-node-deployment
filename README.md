@@ -723,6 +723,69 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+### v1.1.47
+`check-node.sh` correctness and noise-reduction pass. Five changes, all driven
+by a full audit of the script's signals against the official Telcoin docs and
+the script's own comments.
+
+**Network probe failure is now an explicit failure (P0).**
+Previously, when `--no-network` was NOT passed and the network RPC at
+`rpc.telcoin.network` timed out, §3 emitted a single yellow `[WARN]`, §4
+(consensus tip comparison), §6 (author presence + reputation), and §7
+(on-chain validator status) silently skipped, and the §10 verdict could still
+print `All checks passed -- node appears healthy` if `HEALTH_ISSUES` was zero.
+An operator looking at a half-empty report had no clear signal that ground
+truth was missing.
+
+Now: the §3 failure path sets `NETWORK_PROBE_FAILED=true` and increments
+`HEALTH_ISSUES`. §7's `check_validator_onchain_status` call is gated on
+`NETWORK_OK` (it would otherwise emit a misleading "No validator record
+found" message). §10 prints an explicit `Network probe failed -- the
+following sections were SKIPPED:` banner enumerating §4 / §6 / §7 before the
+verdict line. `All checks passed` can no longer fire when the network was
+unreachable.
+
+**Chain-ID sanity check.**
+`probe_local_rpc` already calls `eth_chainId` to test liveness but
+historically threw away the result. It now parses the chain ID out of the
+response and compares to `0x7e1` (2017 -- Telcoin) on the HEALTHY path. A
+mismatch logs a `[ERROR]` and increments `HEALTH_ISSUES`, catching the case
+of a node accidentally configured for a different network (wrong `--chain`
+flag, copy-pasted config) that would otherwise pass every downstream check
+while silently comparing against the wrong network.
+
+**`eth_syncing` block removed.**
+The §5 `fetch_local_sync_state` helper and the case-block that consumed it
+are gone. Two problems: the `synced` branch printed `eth_syncing: false`
+alongside a hedge ("not a sync guarantee") because on Telcoin
+`eth_syncing` stays `false` during consensus-layer backfill -- so the
+signal was unreliable in the "false" direction and just added noise. And
+the `syncing` branch flipped the global `CATCHING_UP` flag, which could
+override a benign EVM lag (e.g. 10 blocks behind, well under the
+50-block `EVM_SYNC_THRESHOLD`) and tip the §10 verdict into "CATCHING UP".
+The EVM-lag and block-advancement signals together cover the same
+question more reliably.
+
+**§4 cross-network tip-lag warning demoted to info.**
+The `Tip vs network: N blocks behind` line previously emitted as a yellow
+`[WARN]` for `lag > 100`, but the script's own comments at §4 state the
+consensus tip delta does NOT prove EVM catch-up (§5's EVM lag is the
+authoritative signal). The warn was never read by the §10 verdict --
+`HEALTH_ISSUES` was not incremented and `CATCHING_UP` was not flipped --
+so it functioned as a noisy distraction from the EVM-layer answer
+immediately below. Now info-only, with a pointer back to §5.
+
+**§8 disk section -- fold data dir into the data-mount line.**
+The trailing `Data dir checked: <path>  (mount: <mount>)` line at the end
+of §8 re-stated information already in the per-mount `Disk at <mount>:
+...` line above it. Removed. The data-mount iteration of the disk loop
+now annotates its line with `(data: <DATA_DIR>)`, preserving the only
+operator-visible signal of what `detect_data_dir` actually resolved to
+(useful for non-standard installs where chain data lives on a separate
+mount).
+
+All scripts bumped to v1.1.47.
+
 ### v1.1.46
 Hotfix for `setup-observer.sh` / `setup-validator.sh` install failures during
 Step 4 ("Ensuring chain-config files are available...").
