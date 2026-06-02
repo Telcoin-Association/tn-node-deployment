@@ -723,6 +723,46 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
+> **Versioning note (from v1.1.48 onwards):** each script in this repo bumps
+> its `SCRIPT_VERSION` independently. A change to `check-node.sh` no longer
+> drags every other script's version with it. Changelog entries below are
+> titled `<script-name> vX.Y.Z` so you can see exactly what changed and which
+> file's version moved. `update-scripts.sh` already compares each file's
+> individual `SCRIPT_VERSION` against the remote, so no operator-side
+> workflow change is needed -- you'll just see per-file updates land instead
+> of a flat "all scripts bumped".
+
+### check-node v1.1.48
+Adds a dedicated diagnostic for the "stuck on a missing epoch pack" failure
+mode. Previously, when an observer or validator couldn't get the epoch pack
+file for one specific epoch from any peer, the script reported only the
+symptoms ("CATCHING UP, N blocks behind", "Block NOT advancing -- likely
+STUCK") with no explanation -- an operator was easily misled into thinking
+the node was corrupted and reinstalling, only to hit the same wall.
+
+The new check reads the node log (`/var/log/telcoin/${SERVICE_NAME}.log`,
+or the path declared in the systemd unit if the operator chose a custom
+`LOG_DIR`) and looks for state-sync's recurring warning:
+
+    level=warn target=state-sync message="could not catch up to consensus
+    target after retries, waiting for next gossip update"
+    epoch=92 last_consensus_height=1034669 target=1139981
+
+If the most recent occurrence is within 120 seconds (two emit intervals
+plus slack), the report now prints a dedicated `Sync state diagnosis`
+section identifying:
+
+- the stuck epoch number (e.g. `epoch 92`)
+- the internal consensus block the node is sitting at
+- the state-sync target it's trying to reach
+- how long ago the last warning was emitted
+- an actionable restart suggestion plus a note that this is **not** a
+  corrupted node -- the data is just unavailable from the current peer set
+
+Cost: one ~200 KB `tail` of the log per run (state-sync emits every ~60s,
+so this is plenty of history without scanning the multi-hundred-MB file).
+Gracefully no-ops when the log isn't readable.
+
 ### v1.1.47
 `check-node.sh` correctness and noise-reduction pass. Five changes, all driven
 by a full audit of the script's signals against the official Telcoin docs and

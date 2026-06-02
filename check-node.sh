@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.47"
+readonly SCRIPT_VERSION="1.1.48"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -386,6 +386,74 @@ write_block_state() {
 # (and could spuriously flip the global CATCHING_UP flag with a small lag).
 # The EVM-lag + block-advancement signals together cover the same question.
 
+# Resolve the node's log file path. The setup scripts write the systemd unit
+# with `StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log`, where LOG_DIR
+# defaults to /var/log/telcoin but is operator-configurable. Try the default
+# first, then parse the unit. Echoes the path or empty string; always returns 0
+# (so use the echo to drive control flow, not the exit code).
+locate_node_log() {
+    local default="/var/log/telcoin/${SERVICE_NAME}.log"
+    if [[ -r "$default" ]]; then echo "$default"; return 0; fi
+    local unit="/etc/systemd/system/${SERVICE_NAME}.service"
+    if [[ -f "$unit" ]]; then
+        local path
+        path=$(grep -oE '^StandardOutput=append:[^[:space:]]+' "$unit" 2>/dev/null | head -1 | cut -d: -f2-)
+        if [[ -n "$path" ]] && [[ -r "$path" ]]; then echo "$path"; return 0; fi
+    fi
+    echo ""
+    return 0
+}
+
+# Detect the "stuck on missing epoch pack" failure mode.
+#
+# When the node has downloaded epoch packs for every epoch except one, the
+# state-sync subsystem cannot advance past the boundary of the missing epoch
+# and emits a recurring warning every ~60s naming the stuck epoch:
+#
+#   level=warn target=state-sync message="could not catch up to consensus
+#   target after retries, waiting for next gossip update"
+#   epoch=92 last_consensus_height=1034669 target=1139981
+#
+# This is distinct from generic "slow sync" -- a gap-stuck node will NOT
+# advance without that specific pack arriving from a peer. Surfacing it as
+# its own diagnostic prevents operators from reinstalling a node that's
+# actually fine, just waiting on peers to serve a missing piece of data.
+#
+# On hit, sets STUCK_EPOCH / STUCK_HEIGHT / STUCK_TARGET / STUCK_AGE_S and
+# returns 0. Only fires when the most recent warning is within 120 seconds
+# (two emit intervals + buffer), so a node that was stuck and has since
+# recovered won't trigger.
+detect_epoch_pack_gap() {
+    local log
+    log=$(locate_node_log)
+    [[ -z "$log" ]] && return 1
+    # Tail the last 200KB. State-sync emits the warning every ~60s, so this
+    # covers many minutes of history without scanning a multi-hundred-MB file.
+    local recent
+    recent=$(tail -c 200000 "$log" 2>/dev/null | \
+        grep -F "could not catch up to consensus target" | \
+        tail -1)
+    [[ -z "$recent" ]] && return 1
+    STUCK_EPOCH=$(echo "$recent" | grep -oE 'epoch=[0-9]+' | head -1 | cut -d= -f2)
+    STUCK_HEIGHT=$(echo "$recent" | grep -oE 'last_consensus_height=[0-9]+' | cut -d= -f2)
+    STUCK_TARGET=$(echo "$recent" | grep -oE 'target=[0-9]+' | cut -d= -f2)
+    [[ -z "$STUCK_EPOCH" ]] && return 1
+    local ts_iso
+    ts_iso=$(echo "$recent" | grep -oE '^ts=[^ ]+' | cut -d= -f2)
+    if [[ -n "$ts_iso" ]]; then
+        local ts_epoch now
+        ts_epoch=$(date -d "$ts_iso" +%s 2>/dev/null || echo 0)
+        now=$(date +%s)
+        STUCK_AGE_S=$(( now - ts_epoch ))
+        # 120s = two emit intervals + slack. If no fresh warning, the node
+        # is no longer actively stuck on this pack.
+        (( STUCK_AGE_S > 120 )) && return 1
+    else
+        STUCK_AGE_S="?"
+    fi
+    return 0
+}
+
 # =============================================================================
 # REPORT HEADER
 # =============================================================================
@@ -641,6 +709,27 @@ elif [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
     print_step "EVM execution state (network only -- local RPC unreachable)..."
     print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
     print_info "Local EVM block:    N/A (RPC ${LOCAL_RPC_MODE})"
+fi
+
+# Epoch-pack-gap diagnostic. Reads the node log directly (not RPC), so it
+# runs regardless of LOCAL_RPC_MODE. The signal is so specific -- "stuck on
+# epoch N because no peer is serving its pack" -- that it deserves its own
+# error path: without this, an operator sees "CATCHING UP, 3000 blocks
+# behind" with no explanation, and may reinstall a perfectly healthy node.
+if detect_epoch_pack_gap; then
+    echo ""
+    print_step "Sync state diagnosis..."
+    gap=$(( STUCK_TARGET - STUCK_HEIGHT ))
+    print_error "Stuck on missing epoch pack: epoch ${STUCK_EPOCH}"
+    print_info "  Internal consensus block:  ${STUCK_HEIGHT}"
+    print_info "  State-sync target:         ${STUCK_TARGET}  (${gap} consensus blocks behind)"
+    print_info "  Last 'could not catch up' warning: ${STUCK_AGE_S}s ago -- still active"
+    print_info "  No peer is currently serving the pack file for epoch ${STUCK_EPOCH}."
+    print_info ""
+    print_info "  This is NOT a corrupted node. Try:"
+    print_info "    sudo systemctl restart ${SERVICE_NAME}     (may pick different peers)"
+    print_info "  If unresolved after 30 min, flag the missing pack to the Telcoin team."
+    (( ++HEALTH_ISSUES ))
 fi
 
 # =============================================================================
