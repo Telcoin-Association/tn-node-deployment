@@ -723,265 +723,65 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ## Changelog
 
-> **Versioning note (from v1.1.48 onwards):** each script in this repo bumps
-> its `SCRIPT_VERSION` independently. A change to `check-node.sh` no longer
-> drags every other script's version with it. Changelog entries below are
-> titled `<script-name> vX.Y.Z` so you can see exactly what changed and which
-> file's version moved. `update-scripts.sh` already compares each file's
-> individual `SCRIPT_VERSION` against the remote, so no operator-side
-> workflow change is needed -- you'll just see per-file updates land instead
-> of a flat "all scripts bumped".
-
-### update-scripts v1.1.48
-Fixes a false-positive "No internet connection -- cannot check for updates"
-on machines that actually have working internet.
-
-The connectivity probe pinged `https://github.com` (GitHub's full marketing
-homepage -- ~200 KB of HTML + JS) with a 5-second timeout. On residential
-links the homepage routinely takes longer than that to pull in full, so
-`curl -sf` would abort partway through and the updater would bail with the
-misleading error. Meanwhile, the actual endpoint the updater fetches from
-(`raw.githubusercontent.com`) was responding in well under a second on the
-exact same machine.
-
-Replaced with a HEAD probe (`curl -sfI`) against `${GITHUB_RAW}/README.md`
--- the real host, no body downloaded, 8-second timeout. The error message
-now names the exact endpoint that failed, so DNS or firewall issues are
-easier to diagnose.
+> **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
+> independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
+> a flat "all scripts bumped to vX.Y.Z" convention.
 
 ### check-node v1.1.50
 Demotes "Consensus tip is STALE" from WARN+HEALTH_ISSUES to info -- it's a
 catching-up symptom, not a confirmed failure (completes the v1.1.49 audit).
 
 ### check-node v1.1.49
-Drops the "stuck on missing epoch pack" / "Block NOT advancing -- likely
-STUCK" verdicts; state-sync activity and unchanged-block windows are now
-reported as info, not errors. Consolidates §3/§5 output and trims §10 boilerplate.
+Drops the "stuck on missing epoch pack" / "Block NOT advancing -- likely STUCK"
+verdicts; state-sync activity and unchanged-block windows are now info, not
+errors. Consolidates §3/§5 output and trims §10 boilerplate.
 
 ### check-node v1.1.48
-Adds a dedicated diagnostic for the "stuck on a missing epoch pack" failure
-mode. Previously, when an observer or validator couldn't get the epoch pack
-file for one specific epoch from any peer, the script reported only the
-symptoms ("CATCHING UP, N blocks behind", "Block NOT advancing -- likely
-STUCK") with no explanation -- an operator was easily misled into thinking
-the node was corrupted and reinstalling, only to hit the same wall.
+Adds a diagnostic that reads the node log for the "stuck on missing epoch
+pack" state-sync warning and surfaces the stuck epoch + consensus height.
+(Superseded by v1.1.49.)
 
-The new check reads the node log (`/var/log/telcoin/${SERVICE_NAME}.log`,
-or the path declared in the systemd unit if the operator chose a custom
-`LOG_DIR`) and looks for state-sync's recurring warning:
-
-    level=warn target=state-sync message="could not catch up to consensus
-    target after retries, waiting for next gossip update"
-    epoch=92 last_consensus_height=1034669 target=1139981
-
-If the most recent occurrence is within 120 seconds (two emit intervals
-plus slack), the report now prints a dedicated `Sync state diagnosis`
-section identifying:
-
-- the stuck epoch number (e.g. `epoch 92`)
-- the internal consensus block the node is sitting at
-- the state-sync target it's trying to reach
-- how long ago the last warning was emitted
-- an actionable restart suggestion plus a note that this is **not** a
-  corrupted node -- the data is just unavailable from the current peer set
-
-Cost: one ~200 KB `tail` of the log per run (state-sync emits every ~60s,
-so this is plenty of history without scanning the multi-hundred-MB file).
-Gracefully no-ops when the log isn't readable.
+### update-scripts v1.1.48
+Replaces the `https://github.com` homepage probe with a HEAD on
+`${GITHUB_RAW}/README.md` to fix false-positive "No internet connection"
+errors on residential links.
 
 ### v1.1.47
-`check-node.sh` correctness and noise-reduction pass. Five changes, all driven
-by a full audit of the script's signals against the official Telcoin docs and
-the script's own comments.
-
-**Network probe failure is now an explicit failure (P0).**
-Previously, when `--no-network` was NOT passed and the network RPC at
-`rpc.telcoin.network` timed out, §3 emitted a single yellow `[WARN]`, §4
-(consensus tip comparison), §6 (author presence + reputation), and §7
-(on-chain validator status) silently skipped, and the §10 verdict could still
-print `All checks passed -- node appears healthy` if `HEALTH_ISSUES` was zero.
-An operator looking at a half-empty report had no clear signal that ground
-truth was missing.
-
-Now: the §3 failure path sets `NETWORK_PROBE_FAILED=true` and increments
-`HEALTH_ISSUES`. §7's `check_validator_onchain_status` call is gated on
-`NETWORK_OK` (it would otherwise emit a misleading "No validator record
-found" message). §10 prints an explicit `Network probe failed -- the
-following sections were SKIPPED:` banner enumerating §4 / §6 / §7 before the
-verdict line. `All checks passed` can no longer fire when the network was
-unreachable.
-
-**Chain-ID sanity check.**
-`probe_local_rpc` already calls `eth_chainId` to test liveness but
-historically threw away the result. It now parses the chain ID out of the
-response and compares to `0x7e1` (2017 -- Telcoin) on the HEALTHY path. A
-mismatch logs a `[ERROR]` and increments `HEALTH_ISSUES`, catching the case
-of a node accidentally configured for a different network (wrong `--chain`
-flag, copy-pasted config) that would otherwise pass every downstream check
-while silently comparing against the wrong network.
-
-**`eth_syncing` block removed.**
-The §5 `fetch_local_sync_state` helper and the case-block that consumed it
-are gone. Two problems: the `synced` branch printed `eth_syncing: false`
-alongside a hedge ("not a sync guarantee") because on Telcoin
-`eth_syncing` stays `false` during consensus-layer backfill -- so the
-signal was unreliable in the "false" direction and just added noise. And
-the `syncing` branch flipped the global `CATCHING_UP` flag, which could
-override a benign EVM lag (e.g. 10 blocks behind, well under the
-50-block `EVM_SYNC_THRESHOLD`) and tip the §10 verdict into "CATCHING UP".
-The EVM-lag and block-advancement signals together cover the same
-question more reliably.
-
-**§4 cross-network tip-lag warning demoted to info.**
-The `Tip vs network: N blocks behind` line previously emitted as a yellow
-`[WARN]` for `lag > 100`, but the script's own comments at §4 state the
-consensus tip delta does NOT prove EVM catch-up (§5's EVM lag is the
-authoritative signal). The warn was never read by the §10 verdict --
-`HEALTH_ISSUES` was not incremented and `CATCHING_UP` was not flipped --
-so it functioned as a noisy distraction from the EVM-layer answer
-immediately below. Now info-only, with a pointer back to §5.
-
-**§8 disk section -- fold data dir into the data-mount line.**
-The trailing `Data dir checked: <path>  (mount: <mount>)` line at the end
-of §8 re-stated information already in the per-mount `Disk at <mount>:
-...` line above it. Removed. The data-mount iteration of the disk loop
-now annotates its line with `(data: <DATA_DIR>)`, preserving the only
-operator-visible signal of what `detect_data_dir` actually resolved to
-(useful for non-standard installs where chain data lives on a separate
-mount).
-
-All scripts bumped to v1.1.47.
+check-node: network probe failure is now a hard error; adds chain-ID sanity
+check; removes the unreliable eth_syncing branch; demotes §4 tip-lag warn to
+info; folds data dir into the §8 disk line.
 
 ### v1.1.46
-Hotfix for `setup-observer.sh` / `setup-validator.sh` install failures during
-Step 4 ("Ensuring chain-config files are available...").
-
-`ensure_chain_configs_available()` in `lib/common.sh` reassigned `TN_SOURCE_DIR`
-to the same `/opt/telcoin-source` value already set as a `readonly` constant at
-the top of the file. Under `set -e` this aborted the script with:
-
-    common.sh: ...: TN_SOURCE_DIR: readonly variable
-
-Same family of bug as v1.1.37 (which removed a duplicate declaration in
-`update-node.sh`); this one was a redundant reassignment hidden inside a
-function. Replaced with `local source_dir="$TN_SOURCE_DIR"` so the rest of the
-function continues to work unchanged.
-
-All scripts bumped to v1.1.46.
+Hotfix: `ensure_chain_configs_available()` no longer reassigns the readonly
+`TN_SOURCE_DIR` constant (would otherwise abort setup under `set -e`).
 
 ### v1.1.45
-Hotfix for a regression introduced in v1.1.44.
-
-**Bug:** the block-advancement helper `read_prev_block_state` returned non-zero when no state file existed yet (the normal first-run case). Under the `set -e` inherited from `lib/common.sh`, `prev_state=$(read_prev_block_state)` then aborted the whole script mid-report -- so the advancement line, `eth_syncing`, disk, memory, AND the final summary all silently failed to print. The EVM section just stopped after "Network EVM block". The state file was never written, so it failed on every run, not just the first.
-
-**Fix:**
-- `read_prev_block_state` now always `return 0` ("no state file yet" is normal, not an error).
-- More importantly, this was the **third** silent early-exit caused by the inherited `set -e` (after the post-increment counters and `detect_authority_id`). check-node.sh is a read-only diagnostic that must always run to its summary, and it uses graceful-degradation patterns throughout. So `-e` is now explicitly **disabled** for this script (`set +e` right after sourcing common.sh), while `-u` (unset-var detection) and `pipefail` are kept. This eliminates the entire class of "helper returns non-zero in a command substitution → script silently dies" bugs.
-
-Verified end-to-end on a live node: full report now prints, and the advancement tracking correctly walks through all states across successive runs -- `No prior reading` → `unchanged … too soon to judge` → `[ERROR] Block NOT advancing … likely STUCK` once the block stays frozen past 60s while behind the network.
-
-All scripts bumped to v1.1.45.
+Hotfix: disables `set -e` in check-node.sh so helpers returning non-zero no
+longer abort the report mid-run; `read_prev_block_state` always returns 0.
 
 ### v1.1.44
-Completes the EVM-execution accuracy work from v1.1.43, per direct guidance from the Telcoin dev team.
-
-**Network execution block now comes from a direct `eth_blockNumber` call**
-- Previously the script derived the "network EVM block" from the `latest_execution_block.number` embedded in the consensus headers it fetched. That could differ from the network's actual execution tip. It now calls `eth_blockNumber` directly on the network RPC and compares local-vs-network like-for-like. (Confirmed on a live node: direct network `eth_blockNumber` = 50170, matching the manual check exactly, while local was stuck at 43727.)
-- The generic block-fetch helper was renamed `fetch_local_exec_block` → `fetch_exec_block` since it's now used for both the local and network RPC.
-
-**Block-advancement tracking between runs**
-- The script now records the local execution block + timestamp in `${TMPDIR:-/tmp}/check-node-<type>.state` on each run, and on the next run reports whether the block actually moved:
-  - advanced → `Block advancing: +N blocks since last check`
-  - unchanged for ≥60s **and** behind the network → `[ERROR] Block NOT advancing … likely STUCK` (counts as a health issue)
-  - unchanged at the network tip → benign note
-  - unchanged but <60s elapsed → "too soon to judge; re-run later"
-  - first ever run → "no prior reading -- run again to measure advancement"
-- This is the single most reliable "is it actually keeping up" signal, and directly answers the dev's request to "flag if the local block hasn't advanced."
-
-**`eth_syncing` remains de-emphasised** (from v1.1.43) — printed with a note that it stays `false` during consensus backfill and is not a sync guarantee.
-
-Net effect: the EVM section now measures real lag (direct block-number comparison) AND real progress (advancement between runs), rather than trusting a single local snapshot. A node whose execution is frozen — like an observer stuck behind an unclosed consensus backfill gap — is now correctly reported as catching-up/stuck instead of healthy.
-
-All scripts bumped to v1.1.44.
+check-node: network execution block now comes from a direct `eth_blockNumber`
+call; tracks local-block advancement between runs via a `/tmp` state file to
+detect frozen execution.
 
 ### v1.1.43
-Fixes a real accuracy bug in `check-node.sh`: it would report a node as "healthy / synced / current" while the node was thousands of execution blocks behind the network.
-
-**Root cause**
-- The consensus section compared the local node's `tn_latestConsensusHeader.number` against the network's. But that number is the latest consensus tip the node has *tracked*, not the height it has actually *processed*. A node can track a fresh tip (so the comparison shows ~0 lag) while its execution layer is far behind. This was confirmed live: the script printed `Local consensus current: block 923057 / Lag vs network: 0 blocks / All checks passed -- healthy` on a node that was simultaneously 6,042 EVM execution blocks behind.
-- `eth_syncing` returns `false` on Telcoin even during consensus-layer backfill, so it reinforced the false "synced" reading rather than catching it.
-
-**What changed**
-- The **EVM execution lag** (network execution block − local execution block) is now the authoritative sync signal. If it exceeds `EVM_SYNC_THRESHOLD` (50 blocks), the node is reported as **CATCHING UP**, not healthy -- regardless of what the consensus-tip comparison or `eth_syncing` say.
-- The consensus section is **relabelled** from "Local consensus current / Lag vs network" to "Consensus tip tracked / Tip vs network: matched -- tracking the network tip", with an explicit note that this confirms *connectivity* to the tip, not that execution is caught up.
-- `eth_syncing: false` is now annotated: `(note: stays false during consensus backfill -- not a sync guarantee)` instead of `(synced)`.
-- The final summary has a new top-priority branch: when the node is catching up, it prints `Node is CATCHING UP -- N execution blocks behind the network`, explains this is expected after a restart/update/fresh install, and tells the operator to re-run -- shrinking lag means it's recovering normally, static/growing lag means it may be stuck.
-- When genuinely caught up, the summary now states the EVM lag explicitly: `node is healthy and caught up (EVM lag N)`.
-
-**Note for future simplification**
-- The cleanest long-term fix would be an RPC that returns the node's last-*processed* consensus height alongside the network target (the `last_consensus_height` / `max_consensus_height` pair currently only visible in the catch-up log lines). Worth requesting from the Telcoin team. Until then, the EVM execution lag is the best authoritative sync proxy available over RPC.
-
-All scripts bumped to v1.1.43.
+check-node: EVM execution lag is now the authoritative sync signal --
+consensus-tip comparison only confirms connectivity, not catch-up. Fixes
+false "healthy" verdicts on nodes thousands of EVM blocks behind.
 
 ### v1.1.42
-Four small `update-node.sh` follow-ups that close the remaining silent-failure gaps I identified after the v1.1.41 hotfix.
-
-**Docker apply now has the same hash check that source got in v1.1.41**
-- Hashes the unit file before the `perl -i` substitution and again after. If the hash hasn't changed, that means the old image string wasn't actually found in the unit file -- the substitution was a no-op. Surfaces a hard error, restores the backup, and aborts rather than restarting on an unchanged unit.
-- Also greps for the new image string in the unit file after the edit. If it's not present (a weird perl mishap), same restore-and-abort path.
-
-**Source: disk-space pre-flight**
-- Before starting the build, checks the available space on the mount holding `/opt/telcoin-source` and refuses to start if less than 5 GB free. A clean cargo build can produce a `target/` directory several gigabytes large, and the previous behaviour was to fail mid-compile with a cryptic "no space left on device" -- now you get a clean refusal upfront with a hint to run `cargo clean`.
-
-**Source: cp exit-code check on install**
-- The `cp -p "$built" "$installed"` step now checks its exit status. A failed cp (permissions, I/O error, disk full) under `set -uo pipefail` previously left the system in an indeterminate state without a clear signal. Now the script restores the backup, attempts to start the service on the previous binary, and exits with a specific error pointing at `df -h` output for the install directory.
-
-**Hand off to `check-node.sh` after a successful update**
-- Both source and docker `apply_*_update` paths now print `Verify full health: bash ~/telcoin-node-scripts/check-node.sh` on success. The DB-map-size class of failure that one operator hit recently would have shown up immediately in `check-node.sh`'s output, and pointing them there closes the loop between "update completed" and "node is genuinely healthy."
-
-**Note on future "installed version" upstream change**
-- The Telcoin Network team is working on surfacing the installed version more directly in the binary's metadata. Once that lands, the `Build Features:` empty-field quirk and the various indirect detection paths (git describe, sha256, hash compare before/after) can be simplified to a direct version-read. Tracking but not changing anything here yet.
-
-All scripts bumped to v1.1.42.
+update-node.sh: Docker apply gets the hash-check parity that source got in
+v1.1.41; adds 5 GB pre-flight disk check, cp exit-code check, hand-off to
+check-node.sh on success.
 
 ### v1.1.41
-Hotfix for a silent-failure bug in `update-node.sh` discovered on an operator's node: the script reported "build complete" + "update applied" even though the binary on disk was unchanged. Root cause was three separate gaps that compounded.
-
-**Fixed: cargo not found under sudo**
-- `update-node.sh`'s `prepare_source_build` invoked `cargo` directly, but sudo's PATH doesn't include `~/.cargo/bin` (where rustup installs cargo). The build immediately died with `cargo: command not found`. The setup scripts (`setup-{observer,validator}.sh`) already export the right PATH and source `~/.cargo/env` -- the update script now mirrors that, looking in `${HOME}/.cargo/bin`, `/root/.cargo/bin`, and `/home/${SUDO_USER}/.cargo/bin`, and sources the matching `.cargo/env` if present. Also adds an explicit `command -v cargo` check that fails loudly with installation instructions instead of pressing on.
-
-**Fixed: cargo exit code silently discarded**
-- The build was wrapped in `(cd ...; cargo build ... | tee ...)` -- a subshell whose exit status was never checked. With `set -o pipefail` *inside* the subshell, the pipeline did fail when cargo errored, but the subshell's failure propagated nowhere because we didn't check `$?`. Rewrote using `pushd` + a direct `if ! ... | tee ...` check, which actually catches a non-zero cargo exit and prints the last 10 lines of the build log.
-
-**Fixed: "build complete" reported when binary didn't change**
-- Previous logic only checked whether the binary *file existed* after the build, not whether anything changed. Since the old build from the original install is sitting on disk, `[[ -f $built ]]` always passed -- even when cargo did nothing at all. Now hashes the binary before and after the build; if the hashes are identical, prints a clear warning, names the hashes, and asks the operator to confirm before proceeding.
-
-**Fixed: "binary installed" reported when cp was a no-op**
-- Same defect on the apply side. `apply_source_update` ran `cp -p "$built" "$installed"` and declared success, even if both files were already identical. Now hashes the installed binary before and after `cp`. If unchanged, surfaces a `[WARN]` line so the operator knows the cp was a no-op and the running version after restart will be the same as before.
-
-**Net effect:** the same "I updated my node but nothing changed" scenario can no longer happen silently. The script will either succeed with a new binary or fail loudly with a specific reason. Operators on v1.1.40 or earlier should update before their next `update-node.sh` run.
-
-All scripts bumped to v1.1.41.
+update-node.sh: fixes silent "build complete" when nothing actually changed
+-- cargo PATH under sudo, cargo exit-code check, binary hash compare before
+and after `cargo build` / `cp`.
 
 ### v1.1.40
-Picker now correctly identifies feature branches instead of mislabelling them as "detached."
-
-Previously `pick_source_version` only checked for two named states: exact tag and main tip/behind. Anything else fell through to "detached / not on main or any tag" -- even when the operator was sitting on a real, named local branch (e.g. `log_db_name`) tracking a remote branch. That made the header line factually wrong and uninformative.
-
-**What changed**
-- Added `git symbolic-ref --short HEAD` detection to distinguish "on a named branch" from "truly detached."
-- When the detected branch is `main`, the existing tip/behind logic applies.
-- When the detected branch is anything else (e.g. `log_db_name`), the picker now reports it as a feature branch:
-
-  ```
-  Current source ref:   branch 'log_db_name' @ cf4086bd
-  Relative to main:     1 commit ahead of main
-  Latest commit:        "Add names to some of the DB logs."
-  ```
-
-- Genuinely detached HEAD still gets the "detached / not on any branch or tag" label (and the wording is slightly more accurate now -- previously "not on main or any tag" implied other branches didn't exist).
-
-All scripts bumped to v1.1.40.
+`pick_source_version` correctly identifies named feature branches (e.g.
+`log_db_name`) instead of mislabelling them as "detached".
 
 For older entries (v1.1.39 and earlier), see [CHANGELOG.md](./CHANGELOG.md).
 
