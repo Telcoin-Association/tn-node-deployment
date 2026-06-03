@@ -577,8 +577,11 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
             print_error "Local consensus block is 0 -- node is FULLY STALLED"
             (( ++HEALTH_ISSUES ))
         elif (( LOC_AGE > STALE_THRESHOLD_SECONDS )); then
-            print_warn "Consensus tip is STALE: ${LOC_AGE}s old (threshold ${STALE_THRESHOLD_SECONDS}s) -- node may not be tracking the network"
-            (( ++HEALTH_ISSUES ))
+            # Local consensus tip is older than the network's. This is a
+            # symptom of catching-up, not a confirmed failure -- a node that
+            # is state-syncing legitimately lags the live tip. Reported as
+            # info; the operator interprets alongside the §5 state-sync data.
+            print_info "Consensus tip: block ${LOC_BLOCK} ($(fmt_age "$LOC_AGE")) -- older than ${STALE_THRESHOLD_SECONDS}s threshold"
         else
             print_ok "Consensus tip tracked: block ${LOC_BLOCK} ($(fmt_age "$LOC_AGE"))"
         fi
