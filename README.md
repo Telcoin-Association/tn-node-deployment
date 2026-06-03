@@ -749,6 +749,10 @@ Replaced with a HEAD probe (`curl -sfI`) against `${GITHUB_RAW}/README.md`
 now names the exact endpoint that failed, so DNS or firewall issues are
 easier to diagnose.
 
+### check-node v1.1.50
+Demotes "Consensus tip is STALE" from WARN+HEALTH_ISSUES to info -- it's a
+catching-up symptom, not a confirmed failure (completes the v1.1.49 audit).
+
 ### check-node v1.1.49
 Drops the "stuck on missing epoch pack" / "Block NOT advancing -- likely
 STUCK" verdicts; state-sync activity and unchanged-block windows are now
