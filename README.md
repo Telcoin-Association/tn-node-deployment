@@ -749,6 +749,11 @@ Replaced with a HEAD probe (`curl -sfI`) against `${GITHUB_RAW}/README.md`
 now names the exact endpoint that failed, so DNS or firewall issues are
 easier to diagnose.
 
+### check-node v1.1.49
+Drops the "stuck on missing epoch pack" / "Block NOT advancing -- likely
+STUCK" verdicts; state-sync activity and unchanged-block windows are now
+reported as info, not errors. Consolidates §3/§5 output and trims §10 boilerplate.
+
 ### check-node v1.1.48
 Adds a dedicated diagnostic for the "stuck on a missing epoch pack" failure
 mode. Previously, when an observer or validator couldn't get the epoch pack

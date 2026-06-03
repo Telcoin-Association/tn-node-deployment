@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.48"
+readonly SCRIPT_VERSION="1.1.49"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -356,8 +356,9 @@ except Exception:
 
 # Cross-run state file for tracking whether the local execution block is
 # actually advancing between checks. Stored in a tmp path keyed by node type.
-# Format: "<block> <unix_ts>". Write failures are tolerated (advancement
-# tracking just degrades to "no previous reading").
+# Format: "<local_evm> <unix_ts> <consensus_height> <network_evm>". Trailing
+# fields default to empty when absent (so an older two-field state file from
+# v1.1.48 still reads cleanly). Write failures are tolerated.
 state_file_path() {
     echo "${TMPDIR:-/tmp}/check-node-${NODE_TYPE}.state"
 }
@@ -374,9 +375,9 @@ read_prev_block_state() {
 }
 
 write_block_state() {
-    local block="$1" ts="$2" f
+    local block="$1" ts="$2" cons_height="${3:-}" net_evm="${4:-}" f
     f=$(state_file_path)
-    echo "${block} ${ts}" > "$f" 2>/dev/null || true
+    echo "${block} ${ts} ${cons_height} ${net_evm}" > "$f" 2>/dev/null || true
 }
 
 # Note: an earlier `fetch_local_sync_state` (eth_syncing) helper was removed
@@ -404,52 +405,45 @@ locate_node_log() {
     return 0
 }
 
-# Detect the "stuck on missing epoch pack" failure mode.
+# Read the most recent state-sync progress signal from the node log.
 #
-# When the node has downloaded epoch packs for every epoch except one, the
-# state-sync subsystem cannot advance past the boundary of the missing epoch
-# and emits a recurring warning every ~60s naming the stuck epoch:
+# State-sync emits a recurring warning every ~60s when the node is still
+# catching up to the consensus tip:
 #
 #   level=warn target=state-sync message="could not catch up to consensus
 #   target after retries, waiting for next gossip update"
-#   epoch=92 last_consensus_height=1034669 target=1139981
+#   epoch=N last_consensus_height=H target=T
 #
-# This is distinct from generic "slow sync" -- a gap-stuck node will NOT
-# advance without that specific pack arriving from a peer. Surfacing it as
-# its own diagnostic prevents operators from reinstalling a node that's
-# actually fine, just waiting on peers to serve a missing piece of data.
+# The `epoch=N` field is the *target's* epoch (it advances as the network
+# advances) -- it is NOT a "missing pack" indicator, despite an earlier
+# misreading. We deliberately do not surface it here; the height/target/age
+# fields are the actionable data and they speak for themselves.
 #
-# On hit, sets STUCK_EPOCH / STUCK_HEIGHT / STUCK_TARGET / STUCK_AGE_S and
-# returns 0. Only fires when the most recent warning is within 120 seconds
-# (two emit intervals + buffer), so a node that was stuck and has since
-# recovered won't trigger.
-detect_epoch_pack_gap() {
+# On hit, sets SS_HEIGHT / SS_TARGET / SS_AGE_S and returns 0. Only fires
+# when the most recent warning is within 120 seconds (two emit intervals +
+# slack), so a node that has since caught up won't trigger.
+read_sync_progress() {
     local log
     log=$(locate_node_log)
     [[ -z "$log" ]] && return 1
-    # Tail the last 200KB. State-sync emits the warning every ~60s, so this
-    # covers many minutes of history without scanning a multi-hundred-MB file.
     local recent
     recent=$(tail -c 200000 "$log" 2>/dev/null | \
         grep -F "could not catch up to consensus target" | \
         tail -1)
     [[ -z "$recent" ]] && return 1
-    STUCK_EPOCH=$(echo "$recent" | grep -oE 'epoch=[0-9]+' | head -1 | cut -d= -f2)
-    STUCK_HEIGHT=$(echo "$recent" | grep -oE 'last_consensus_height=[0-9]+' | cut -d= -f2)
-    STUCK_TARGET=$(echo "$recent" | grep -oE 'target=[0-9]+' | cut -d= -f2)
-    [[ -z "$STUCK_EPOCH" ]] && return 1
+    SS_HEIGHT=$(echo "$recent" | grep -oE 'last_consensus_height=[0-9]+' | cut -d= -f2)
+    SS_TARGET=$(echo "$recent" | grep -oE 'target=[0-9]+' | cut -d= -f2)
+    [[ -z "$SS_HEIGHT" ]] && return 1
     local ts_iso
     ts_iso=$(echo "$recent" | grep -oE '^ts=[^ ]+' | cut -d= -f2)
     if [[ -n "$ts_iso" ]]; then
         local ts_epoch now
         ts_epoch=$(date -d "$ts_iso" +%s 2>/dev/null || echo 0)
         now=$(date +%s)
-        STUCK_AGE_S=$(( now - ts_epoch ))
-        # 120s = two emit intervals + slack. If no fresh warning, the node
-        # is no longer actively stuck on this pack.
-        (( STUCK_AGE_S > 120 )) && return 1
+        SS_AGE_S=$(( now - ts_epoch ))
+        (( SS_AGE_S > 120 )) && return 1
     else
-        STUCK_AGE_S="?"
+        SS_AGE_S="?"
     fi
     return 0
 }
@@ -540,11 +534,8 @@ if [[ "$QUERY_NETWORK" == "true" ]]; then
         NOW=$(date +%s)
         NET_AGE=$(( NOW - NET_TS ))
         print_ok "Network consensus current"
-        print_info "  Block:           ${NET_BLOCK}"
-        print_info "  Epoch:           ${NET_EPOCH}"
         committee_size=$(echo "$NET_AUTHORS" | wc -w)
-        print_info "  Committee size:  ${committee_size}"
-        print_info "  Commit age:      $(fmt_age "$NET_AGE")"
+        print_info "Network: block ${NET_BLOCK} · epoch ${NET_EPOCH} · committee ${committee_size} · commit $(fmt_age "$NET_AGE")"
         if (( NET_AGE > STALE_THRESHOLD_SECONDS )); then
             print_warn "Network commit is older than ${STALE_THRESHOLD_SECONDS}s -- network may be quiet"
         fi
@@ -607,7 +598,6 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
                 print_info "  Tip vs network:  ${lag} blocks behind on the tracked tip (see EVM state below for catch-up)"
             else
                 print_ok "  Tip vs network:  matched (delta ${lag}) -- tracking the network tip"
-                print_info "  (this confirms connectivity, NOT that execution is caught up -- see EVM state below)"
             fi
             if [[ "$LOC_EPOCH" != "$NET_EPOCH" ]]; then
                 print_warn "  Epoch mismatch:  local=${LOC_EPOCH} network=${NET_EPOCH}"
@@ -643,62 +633,81 @@ fi
 
 if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; then
     print_step "Querying EVM execution state..."
-    if LOCAL_EXEC_BLOCK=$(fetch_exec_block "$RPC_URL"); then
-        print_ok "Local EVM block:    ${LOCAL_EXEC_BLOCK}"
-    else
+    if ! LOCAL_EXEC_BLOCK=$(fetch_exec_block "$RPC_URL"); then
         print_warn "Could not query local eth_blockNumber"
         LOCAL_EXEC_BLOCK=""
     fi
 
-    # --- Lag vs network (direct eth_blockNumber on both sides) ---
-    if [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
-        if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
-            EVM_LAG=$(( NET_EXEC_BLOCK - LOCAL_EXEC_BLOCK ))
-            if (( EVM_LAG > EVM_SYNC_THRESHOLD )); then
-                CATCHING_UP=true
-                print_warn "Network EVM block:  ${NET_EXEC_BLOCK}  (${EVM_LAG} blocks behind -- NOT caught up)"
-            elif (( EVM_LAG < -5 )); then
-                print_info "Network EVM block:  ${NET_EXEC_BLOCK}  (local ahead by $(( -EVM_LAG )))"
-            else
-                print_ok "Network EVM block:  ${NET_EXEC_BLOCK}  (lag ${EVM_LAG} -- caught up)"
-            fi
-        else
-            print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
-        fi
-    elif [[ "$QUERY_NETWORK" == "true" ]]; then
-        print_warn "Could not read network eth_blockNumber from ${NETWORK_RPC}"
+    # --- Advancement since the previous run ---
+    # Read prior state before writing the new one. State format:
+    #   "<local_evm> <unix_ts> <consensus_height> <network_evm>"
+    local_now_ts=$(date +%s)
+    prev_state=$(read_prev_block_state)
+    prev_block=""; prev_ts=""; prev_net_evm=""
+    if [[ -n "$prev_state" ]]; then
+        prev_block=$(echo "$prev_state" | awk '{print $1}')
+        prev_ts=$(echo "$prev_state" | awk '{print $2}')
+        prev_net_evm=$(echo "$prev_state" | awk '{print $4}')
+    fi
+    if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
+        write_block_state "$LOCAL_EXEC_BLOCK" "$local_now_ts" "${LOC_BLOCK:-}" "${NET_EXEC_BLOCK:-}"
     fi
 
-    # --- Advancement since the previous run ---
-    # The single most reliable "is it actually keeping up" signal: is the
-    # local execution block higher than it was last time we checked?
-    if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
-        local_now_ts=$(date +%s)
-        prev_state=$(read_prev_block_state)
-        prev_block=""; prev_ts=""
-        if [[ -n "$prev_state" ]]; then
-            prev_block=$(echo "$prev_state" | awk '{print $1}')
-            prev_ts=$(echo "$prev_state" | awk '{print $2}')
-        fi
-        write_block_state "$LOCAL_EXEC_BLOCK" "$local_now_ts"
+    # Compute local delta + elapsed for the consolidated EVM line.
+    local_delta=""
+    local_elapsed=""
+    if [[ -n "$LOCAL_EXEC_BLOCK" ]] \
+        && [[ -n "$prev_block" ]] && [[ "$prev_block" =~ ^[0-9]+$ ]] \
+        && [[ -n "$prev_ts" ]]    && [[ "$prev_ts" =~ ^[0-9]+$ ]]; then
+        local_delta=$(( LOCAL_EXEC_BLOCK - prev_block ))
+        local_elapsed=$(( local_now_ts - prev_ts ))
+    fi
 
-        if [[ -n "$prev_block" ]] && [[ "$prev_block" =~ ^[0-9]+$ ]] && [[ "$prev_ts" =~ ^[0-9]+$ ]]; then
-            local_delta=$(( LOCAL_EXEC_BLOCK - prev_block ))
-            local_elapsed=$(( local_now_ts - prev_ts ))
-            if (( local_delta > 0 )); then
-                print_ok "Block advancing:    +${local_delta} blocks since last check ($(fmt_age "$local_elapsed"))"
-            elif (( local_delta < 0 )); then
+    # --- Lag vs network (single consolidated line) ---
+    if [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]] && [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
+        EVM_LAG=$(( NET_EXEC_BLOCK - LOCAL_EXEC_BLOCK ))
+        advance_note=""
+        if [[ -n "$local_delta" ]]; then
+            advance_note=", advancing +${local_delta} since last check"
+        fi
+        if (( EVM_LAG > EVM_SYNC_THRESHOLD )); then
+            CATCHING_UP=true
+            print_warn "EVM: local ${LOCAL_EXEC_BLOCK} / network ${NET_EXEC_BLOCK} (lag ${EVM_LAG}${advance_note})"
+        elif (( EVM_LAG < -5 )); then
+            print_info "EVM: local ${LOCAL_EXEC_BLOCK} / network ${NET_EXEC_BLOCK} (local ahead by $(( -EVM_LAG ))${advance_note})"
+        else
+            print_ok "EVM: local ${LOCAL_EXEC_BLOCK} / network ${NET_EXEC_BLOCK} (lag ${EVM_LAG}${advance_note})"
+        fi
+    elif [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
+        print_info "EVM: local ${LOCAL_EXEC_BLOCK} (network EVM unavailable)"
+        [[ "$QUERY_NETWORK" == "true" ]] && [[ -z "$NET_EXEC_BLOCK" || "$NET_EXEC_BLOCK" == "0" ]] && \
+            print_warn "Could not read network eth_blockNumber from ${NETWORK_RPC}"
+    elif [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
+        print_info "EVM: network ${NET_EXEC_BLOCK} (local unavailable)"
+    fi
+
+    # --- Advancement narrative (info-only; never increments HEALTH_ISSUES) ---
+    if [[ -n "$LOCAL_EXEC_BLOCK" ]]; then
+        if [[ -n "$local_delta" ]]; then
+            if (( local_delta < 0 )); then
                 print_warn "Block went backwards: ${local_delta} since last check -- unusual (reorg or DB reset?)"
-            elif (( local_elapsed >= 60 )); then
-                # No movement over a meaningful window.
-                if [[ "$CATCHING_UP" == "true" ]]; then
-                    print_error "Block NOT advancing: unchanged for ${local_elapsed}s AND behind the network -- likely STUCK"
-                    (( ++HEALTH_ISSUES ))
-                else
-                    print_info "Block unchanged for ${local_elapsed}s (at network tip -- fine if no new blocks were produced)"
+            elif (( local_delta == 0 )) && (( local_elapsed >= 60 )); then
+                # Local EVM unchanged over a meaningful window. Cross-reference
+                # network EVM to distinguish "we're frozen, network's moving"
+                # from "everyone is quiet". Both branches are info-only -- the
+                # script reports facts; operators interpret.
+                net_delta=""
+                if [[ -n "$NET_EXEC_BLOCK" ]] && [[ -n "$prev_net_evm" ]] \
+                    && [[ "$NET_EXEC_BLOCK" =~ ^[0-9]+$ ]] && [[ "$prev_net_evm" =~ ^[0-9]+$ ]]; then
+                    net_delta=$(( NET_EXEC_BLOCK - prev_net_evm ))
                 fi
-            else
-                print_info "Block unchanged since last check (${local_elapsed}s ago -- too soon to judge; re-run later)"
+                if [[ -n "$net_delta" ]] && (( net_delta > 0 )); then
+                    print_info "Local EVM unchanged for ${local_elapsed}s -- network advanced +${net_delta} in same window"
+                elif [[ -n "$net_delta" ]]; then
+                    print_info "Local EVM unchanged for ${local_elapsed}s -- network also quiet (no new blocks)"
+                else
+                    print_info "Local EVM unchanged for ${local_elapsed}s (no prior network reading to compare)"
+                fi
             fi
         else
             print_info "No prior reading -- run check-node.sh again to measure block advancement"
@@ -707,29 +716,23 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
 
 elif [[ -n "$NET_EXEC_BLOCK" ]] && [[ "$NET_EXEC_BLOCK" != "0" ]]; then
     print_step "EVM execution state (network only -- local RPC unreachable)..."
-    print_info "Network EVM block:  ${NET_EXEC_BLOCK}"
-    print_info "Local EVM block:    N/A (RPC ${LOCAL_RPC_MODE})"
+    print_info "EVM: network ${NET_EXEC_BLOCK} (local unavailable, RPC ${LOCAL_RPC_MODE})"
 fi
 
-# Epoch-pack-gap diagnostic. Reads the node log directly (not RPC), so it
-# runs regardless of LOCAL_RPC_MODE. The signal is so specific -- "stuck on
-# epoch N because no peer is serving its pack" -- that it deserves its own
-# error path: without this, an operator sees "CATCHING UP, 3000 blocks
-# behind" with no explanation, and may reinstall a perfectly healthy node.
-if detect_epoch_pack_gap; then
-    echo ""
-    print_step "Sync state diagnosis..."
-    gap=$(( STUCK_TARGET - STUCK_HEIGHT ))
-    print_error "Stuck on missing epoch pack: epoch ${STUCK_EPOCH}"
-    print_info "  Internal consensus block:  ${STUCK_HEIGHT}"
-    print_info "  State-sync target:         ${STUCK_TARGET}  (${gap} consensus blocks behind)"
-    print_info "  Last 'could not catch up' warning: ${STUCK_AGE_S}s ago -- still active"
-    print_info "  No peer is currently serving the pack file for epoch ${STUCK_EPOCH}."
-    print_info ""
-    print_info "  This is NOT a corrupted node. Try:"
-    print_info "    sudo systemctl restart ${SERVICE_NAME}     (may pick different peers)"
-    print_info "  If unresolved after 30 min, flag the missing pack to the Telcoin team."
-    (( ++HEALTH_ISSUES ))
+# State-sync progress (info-only). Reads the node log directly, so it runs
+# regardless of LOCAL_RPC_MODE. Pure measurement -- no verdict, no
+# HEALTH_ISSUES++. The §10 "CATCHING UP" line plus the data here is what an
+# operator needs to decide if action is warranted.
+if read_sync_progress; then
+    ss_gap=$(( SS_TARGET - SS_HEIGHT ))
+    print_info "State-sync activity:  height ${SS_HEIGHT}, target ${SS_TARGET} (gap ${ss_gap}), last warning ${SS_AGE_S}s ago"
+    if [[ -n "${LOC_BLOCK:-}" ]] && [[ -n "${prev_state:-}" ]]; then
+        prev_cons=$(echo "$prev_state" | awk '{print $3}')
+        if [[ -n "$prev_cons" ]] && [[ "$prev_cons" =~ ^[0-9]+$ ]] && [[ "$LOC_BLOCK" =~ ^[0-9]+$ ]] && [[ -n "${local_elapsed:-}" ]]; then
+            cons_delta=$(( LOC_BLOCK - prev_cons ))
+            print_info "                      consensus height advanced +${cons_delta} since last check (${local_elapsed}s ago)"
+        fi
+    fi
 fi
 
 # =============================================================================
@@ -886,16 +889,9 @@ fi
 # "catching up" is reported distinctly from "healthy".
 if [[ "$CATCHING_UP" == "true" ]]; then
     if [[ -n "$EVM_LAG" ]]; then
-        print_warn "Node is CATCHING UP -- ${EVM_LAG} execution blocks behind the network"
+        print_warn "CATCHING UP: ${EVM_LAG} execution blocks behind"
     else
-        print_warn "Node is CATCHING UP -- execution layer is behind the network"
-    fi
-    print_info "This is expected after a restart, update, or fresh install."
-    print_info "Re-run this check in a minute:"
-    print_info "  - lag shrinking  -> catching up normally, let it run"
-    print_info "  - lag static/growing -> may be stuck; check logs and consult the dev team"
-    if (( HEALTH_ISSUES > 0 )); then
-        print_warn "Also: ${HEALTH_ISSUES} other issue(s) found -- review warnings/errors above"
+        print_warn "CATCHING UP: execution layer is behind the network"
     fi
 elif (( HEALTH_ISSUES == 0 )); then
     if [[ -n "$EVM_LAG" ]]; then
