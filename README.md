@@ -777,6 +777,14 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### telcoin-ui v1.0.2
+Tracing toggle now restarts the node with `systemctl restart --no-block`, so the
+API returns once the restart is queued instead of blocking on the node's stop
+window (fixes the "tracing change failed - timeout"). `install-ui.sh` gains a
+port-8080 preflight: if the service fails to come up because another process
+(e.g. a hand-run `python3 server.py`) is shadowing it, the installer names the
+holder and the remedy instead of leaving a silent crash-loop.
+
 ### telcoin-ui v1.0.0
 First release of the optional web UI: node health, live logs, configuration, and
 OpenTelemetry traces over an SSH tunnel. Binds `127.0.0.1` only; all privileged

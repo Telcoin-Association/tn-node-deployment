@@ -34,7 +34,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.0.1"
+UI_VERSION = "1.0.2"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -870,9 +870,10 @@ def api_jaeger_stop():
 def api_tracing_enable(node_type):
     if not valid_type(node_type):
         return bad_type()
-    # 120s: the helper's `systemctl restart` blocks until the node stops
-    # (TimeoutStopSec is 90s) and starts again.
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-enable", node_type], timeout=120)
+    # 30s: the helper edits the wrapper then restarts the node with --no-block,
+    # so it returns once the restart job is queued (no wait on the node's stop
+    # window) -- ample headroom for an enqueue-and-return.
+    rc, out, err = run(["sudo", "-n", HELPER, "tracing-enable", node_type], timeout=30)
     ok = rc == 0
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "enable failed")})
 
@@ -881,7 +882,7 @@ def api_tracing_enable(node_type):
 def api_tracing_disable(node_type):
     if not valid_type(node_type):
         return bad_type()
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-disable", node_type], timeout=120)
+    rc, out, err = run(["sudo", "-n", HELPER, "tracing-disable", node_type], timeout=30)
     ok = rc == 0
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "disable failed")})
 

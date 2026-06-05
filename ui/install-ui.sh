@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -31,6 +31,29 @@ ok()   { echo -e "${c_green}[OK]${c_off}   $*"; }
 info() { echo -e "${c_blue}[INFO]${c_off} $*"; }
 warn() { echo -e "${c_yellow}[WARN]${c_off} $*"; }
 err()  { echo -e "${c_red}[ERROR]${c_off} $*" >&2; }
+
+# After a start/restart, confirm the service actually came up. The most common
+# silent failure is a leftover hand-run `python3 server.py` already holding
+# 127.0.0.1:8080, which makes telcoin-ui crash-loop on "Address already in use".
+# Detect a FOREIGN holder of 8080 and surface an actionable error instead of
+# leaving a quiet crash-loop. Never auto-kill (unsafe -- could be unrelated).
+verify_started() {
+    if systemctl is-active --quiet telcoin-ui 2>/dev/null; then
+        return 0
+    fi
+    err "telcoin-ui did not become active after start/restart."
+    # Who owns 8080? ss -H = no header; pick the first holder.
+    local holder
+    holder="$(ss -ltnpH 'sport = :8080' 2>/dev/null | head -n1)"
+    if [[ -n "$holder" ]]; then
+        local who="${holder##*users:}"
+        warn "Port 8080 is held by another process: ${who:-$holder}"
+        warn "If this is a hand-run 'python3 server.py', stop it, then:"
+        warn "    systemctl restart telcoin-ui"
+    fi
+    warn "Recent telcoin-ui logs:"
+    journalctl -u telcoin-ui -n 5 --no-pager 2>/dev/null || true
+}
 
 # ---- 1. Root check ----------------------------------------------------------
 if [[ $EUID -ne 0 ]]; then
@@ -150,11 +173,13 @@ if [[ $UPDATE_MODE -eq 1 || $WAS_ACTIVE -eq 1 ]]; then
     # Update path (or a re-run over a live service): restart to load the new
     # code, and leave the enabled-on-boot state exactly as the operator set it.
     systemctl restart telcoin-ui && ok "telcoin-ui restarted (new code loaded)"
+    verify_started
 else
     # Fresh install: ask the operator what they want.
     read -r -p "Start the UI now? [Y/n] " start_now
     if [[ ! "${start_now,,}" =~ ^n ]]; then
         systemctl start telcoin-ui && ok "telcoin-ui started"
+        verify_started
     fi
     read -r -p "Enable the UI on boot? [Y/n] " enable_boot
     if [[ ! "${enable_boot,,}" =~ ^n ]]; then

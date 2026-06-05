@@ -111,7 +111,10 @@ cmd_tracing_enable() {
         grep -q -- '--tracing-url' "$wrapper" || die "tracing flags not inserted (no matching exec line?)"
     fi
 
-    systemctl restart "telcoin-${t}" || die "failed to restart telcoin-${t}"
+    # Non-blocking: the durable change is the wrapper edit above. --no-block
+    # returns as soon as the restart job is queued, so the caller never waits on
+    # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
+    systemctl restart --no-block "telcoin-${t}" || die "failed to restart telcoin-${t}"
     echo "ok"
 }
 
@@ -131,7 +134,10 @@ cmd_tracing_disable() {
         -e 's# --node-name[[:space:]]+[^[:space:]\\]+##g' \
         "$wrapper" || die "failed to edit wrapper"
 
-    systemctl restart "telcoin-${t}" || die "failed to restart telcoin-${t}"
+    # Non-blocking: the durable change is the wrapper edit above. --no-block
+    # returns as soon as the restart job is queued, so the caller never waits on
+    # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
+    systemctl restart --no-block "telcoin-${t}" || die "failed to restart telcoin-${t}"
     echo "ok"
 }
 
