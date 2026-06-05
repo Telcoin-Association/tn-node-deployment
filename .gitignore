@@ -1,3 +1,7 @@
 # Helper/patch scripts
 apply-v*.sh
 fix-*.sh
+
+# Python bytecode (web UI)
+__pycache__/
+*.pyc

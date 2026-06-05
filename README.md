@@ -634,6 +634,56 @@ The script checks each file individually against the latest version on GitHub an
 
 If updates are available it will ask for confirmation before downloading. `lib/common.sh` is always included in any update since all scripts depend on it.
 
+The updater also tracks the optional web UI (versioned independently, starting at `1.0.0`). When a newer UI is published it fetches the bundle into `ui/` and, if the UI is already installed, redeploys it via `ui/install-ui.sh --update` (refreshing the helper, sudoers, and restarting the service so the new code loads).
+
+---
+
+## Web UI (optional)
+
+A small, self-contained web UI for managing a node from your browser: health at a glance, live logs, configuration, and OpenTelemetry traces. It is **optional** — nodes run fine without it.
+
+### Install
+
+```bash
+sudo bash ~/telcoin-node-scripts/ui/install-ui.sh
+```
+
+The installer creates an unprivileged `telcoin-ui` system user, installs the app under `/opt/telcoin-ui`, and runs it as a systemd service. No further manual `sudo` setup is required.
+
+### Access
+
+The UI binds to `127.0.0.1:8080` only — it is **never** exposed to the network. Reach it over an SSH tunnel.
+
+From your local machine, the helper script opens the tunnel and your browser:
+
+```bash
+./open-ui.sh user@SERVER_IP
+```
+
+Or do it manually:
+
+```bash
+ssh -L 8080:localhost:8080 user@SERVER_IP
+# then open http://localhost:8080 in your browser
+```
+
+### Traces & Settings
+
+The **Settings** tab can start/stop a local Jaeger instance and toggle OpenTelemetry tracing on the node; the **Traces** tab browses the collected spans. Jaeger's own UI (`:16686`) and the OTLP endpoint (`:4317`) are likewise localhost-only and reached through the same tunnel.
+
+### Security model
+
+- Binds `127.0.0.1` only; never `0.0.0.0`. Reached exclusively via an SSH tunnel — no new firewall ports.
+- The UI runs as the unprivileged `telcoin-ui` user. Every privileged action goes through **one** root-owned, argument-validated helper at `/usr/local/sbin/telcoin-ui-helper`.
+- That user's `sudo` rights are pinned by an explicit, **no-wildcard** sudoers drop-in (`/etc/sudoers.d/telcoin-ui`): the six `systemctl start|stop|restart` lines for the two node services, plus the exact helper sub-commands. Nothing else.
+
+### Service management
+
+```bash
+systemctl status telcoin-ui
+journalctl -u telcoin-ui -f
+```
+
 ---
 
 ## Quick Reference — Common Commands
@@ -726,6 +776,17 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### telcoin-ui v1.0.0
+First release of the optional web UI: node health, live logs, configuration, and
+OpenTelemetry traces over an SSH tunnel. Binds `127.0.0.1` only; all privileged
+actions go through one root-owned, arg-validated helper pinned by a no-wildcard
+sudoers drop-in. Installed via `ui/install-ui.sh`.
+
+### update-scripts v1.1.49
+Tracks the web UI (gated on `ui/server.py`'s `UI_VERSION`): fetches the UI bundle
+when a newer version is published and redeploys it via `install-ui.sh --update`.
+Loosens the version grep to read Python constants alongside bash `readonly`.
 
 ### check-node v1.1.50
 Demotes "Consensus tip is STALE" from WARN+HEALTH_ISSUES to info -- it's a

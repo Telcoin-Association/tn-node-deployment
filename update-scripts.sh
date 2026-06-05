@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.48"
+readonly SCRIPT_VERSION="1.1.49"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -45,6 +45,19 @@ declare -a SCRIPTS=(
     "update-node.sh:update-node.sh:SCRIPT_VERSION"
     "update-scripts.sh:update-scripts.sh:SCRIPT_VERSION"
     "lib/common.sh:lib/common.sh:COMMON_VERSION"
+    "ui/server.py:ui/server.py:UI_VERSION"
+)
+
+# The web UI is shipped as a bundle gated on ui/server.py's UI_VERSION. When that
+# row needs updating we fetch these companion files alongside server.py and then
+# redeploy via install-ui.sh --update. (server.py itself is fetched by the main
+# loop because it is the SCRIPTS entry above.)
+declare -a UI_BUNDLE=(
+    "ui/static/index.html:ui/static/index.html"
+    "ui/telcoin-ui-helper.sh:ui/telcoin-ui-helper.sh"
+    "ui/telcoin-ui.service:ui/telcoin-ui.service"
+    "ui/requirements.txt:ui/requirements.txt"
+    "ui/install-ui.sh:ui/install-ui.sh"
 )
 
 # =============================================================================
@@ -59,7 +72,9 @@ get_local_version() {
         echo "missing"
         return
     fi
-    grep "readonly ${var}=" "$path" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown"
+    # Match both bash `readonly FOO="1.2.3"` and Python `FOO = "1.2.3"` so the
+    # same updater can version-gate the web UI (UI_VERSION in ui/server.py).
+    grep -E "(readonly[[:space:]]+)?${var}[[:space:]]*=" "$path" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown"
 }
 
 get_remote_version() {
@@ -67,7 +82,7 @@ get_remote_version() {
     local var="$2"
     local url="${GITHUB_RAW}/${remote_path}"
     curl -sf --max-time 10 "$url" 2>/dev/null | \
-        grep "readonly ${var}=" | \
+        grep -E "(readonly[[:space:]]+)?${var}[[:space:]]*=" | \
         grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | \
         head -1 || echo "unavailable"
 }
@@ -192,6 +207,16 @@ download_updates() {
         FILES_TO_UPDATE+=("lib/common.sh:lib/common.sh")
     fi
 
+    # If the UI version row triggered an update, pull the rest of its bundle
+    # alongside server.py so the redeploy below has a complete, fresh source.
+    local ui_update=false
+    for entry in "${FILES_TO_UPDATE[@]}"; do
+        [[ "$entry" == ui/server.py:* ]] && ui_update=true
+    done
+    if [[ "$ui_update" == "true" ]]; then
+        FILES_TO_UPDATE+=("${UI_BUNDLE[@]}")
+    fi
+
     local success=0
     local failed=0
 
@@ -275,6 +300,26 @@ download_updates() {
     fi
 
     echo ""
+
+    # Web UI: the source now sits under ${SCRIPT_DIR}/ui (user-owned, no sudo
+    # needed for the fetch). If the UI is installed, redeploy it so the new code
+    # actually loads; otherwise just point the operator at the installer. Only
+    # attempt this when every download succeeded.
+    if [[ "$ui_update" == "true" && $failed -eq 0 ]]; then
+        if [[ -d /opt/telcoin-ui ]]; then
+            print_info "Redeploying the web UI (requires sudo)..."
+            if sudo bash "${SCRIPT_DIR}/ui/install-ui.sh" --update; then
+                print_ok "Web UI redeployed and restarted"
+            else
+                print_warn "UI redeploy failed -- run it manually:"
+                print_info "  sudo bash ${SCRIPT_DIR}/ui/install-ui.sh --update"
+            fi
+        else
+            print_info "UI source updated -- run the installer to set it up:"
+            print_info "  sudo bash ${SCRIPT_DIR}/ui/install-ui.sh"
+        fi
+        echo ""
+    fi
 }
 
 # =============================================================================

@@ -1,0 +1,23 @@
+[Unit]
+Description=Telcoin Network Node Manager UI
+After=network.target
+
+[Service]
+Type=simple
+User=telcoin-ui
+WorkingDirectory=/opt/telcoin-ui
+ExecStart=/usr/bin/python3 /opt/telcoin-ui/server.py
+Restart=on-failure
+RestartSec=5
+
+# Hardening. NoNewPrivileges is intentionally NOT set: the service shells out
+# to `sudo systemctl ...` via the narrow /etc/sudoers.d/telcoin-ui whitelist,
+# and NoNewPrivileges would block sudo's setuid transition. The attack surface
+# is bounded instead by the localhost-only bind (server.py listens on
+# 127.0.0.1) plus the six whitelisted systemctl commands.
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

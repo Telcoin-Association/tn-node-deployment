@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telcoin Node Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#080c14; --bg2:#0d1420; --bg3:#111b2e;
+  --accent:#00b4ff; --accent2:#0066ff;
+  --green:#00e87a; --yellow:#ffd93d; --red:#ff4d6d;
+  --text:#e8f4ff; --text2:#7a9ab8; --text3:#3d5a73;
+  --border:1px solid rgba(0,180,255,0.12);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:'Syne',system-ui,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  font-size:14px;
+  line-height:1.5;
+  background-image:
+    linear-gradient(rgba(0,180,255,0.035) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,180,255,0.035) 1px,transparent 1px);
+  background-size:40px 40px;
+  min-height:100vh;
+}
+.mono{font-family:'JetBrains Mono',monospace}
+a{color:var(--accent);text-decoration:none}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+button:disabled{opacity:.5;cursor:not-allowed}
+
+/* ---- Layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+
+/* ---- Header ---- */
+header{
+  border-bottom:var(--border);
+  background:rgba(8,12,20,0.85);
+  backdrop-filter:blur(8px);
+  position:sticky;top:0;z-index:50;
+}
+.hdr{display:flex;align-items:center;gap:24px;height:62px}
+.brand{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.logo{
+  width:38px;height:38px;border-radius:9px;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  display:flex;align-items:center;justify-content:center;
+  font-weight:800;font-size:15px;color:#001;
+  box-shadow:0 0 18px rgba(0,180,255,0.45);
+}
+.brand h1{font-size:16px;font-weight:700;letter-spacing:.3px}
+.brand .sub{font-size:10px;color:var(--text2);letter-spacing:2px;text-transform:uppercase}
+nav{display:flex;gap:4px;margin:0 auto}
+.tab{
+  padding:8px 15px;border-radius:8px;font-weight:600;font-size:13px;
+  color:var(--text2);transition:.15s;
+}
+.tab:hover{color:var(--text);background:var(--bg2)}
+.tab.active{color:var(--accent);background:rgba(0,180,255,0.1)}
+.hdr-right{display:flex;align-items:center;gap:14px;flex-shrink:0}
+.clock{font-size:12px;color:var(--text2);letter-spacing:.5px}
+.btn-refresh{
+  padding:7px 13px;border-radius:8px;border:var(--border);
+  font-size:12px;font-weight:600;color:var(--text);transition:.15s;
+}
+.btn-refresh:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ---- Node selector ---- */
+.selector{display:flex;gap:14px;padding:20px 0 4px}
+.node-btn{
+  flex:1;display:flex;align-items:center;gap:14px;
+  padding:15px 18px;border-radius:12px;
+  background:var(--bg2);border:1px solid rgba(0,180,255,0.12);
+  transition:.18s;text-align:left;
+}
+.node-btn:hover{border-color:rgba(0,180,255,0.4)}
+.node-btn.active{
+  border-color:var(--accent);
+  box-shadow:0 0 0 1px var(--accent),0 0 24px rgba(0,180,255,0.25);
+  background:var(--bg3);
+}
+.node-btn .nicon{font-size:24px;line-height:1}
+.node-btn .nname{font-weight:700;font-size:15px;text-transform:capitalize}
+.node-btn .nstat{font-size:12px;display:flex;align-items:center;gap:6px;color:var(--text2)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0}
+.dot.green{background:var(--green);box-shadow:0 0 8px var(--green)}
+.dot.red{background:var(--red)}
+.dot.gray{background:var(--text3)}
+
+/* ---- Views / cards ---- */
+.view{padding:18px 0 60px;display:none}
+.view.active{display:block}
+.card{
+  background:var(--bg2);border:var(--border);border-radius:12px;padding:18px;
+}
+.card h3{font-size:12px;text-transform:uppercase;letter-spacing:1.4px;color:var(--text2);margin-bottom:14px;font-weight:600}
+.grid{display:grid;gap:14px}
+.stats{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:16px}
+.two-col{grid-template-columns:1fr 1fr;margin-top:14px}
+@media(max-width:720px){.two-col{grid-template-columns:1fr}}
+
+.stat .label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
+.stat .val{font-size:26px;font-weight:700;margin-top:6px;font-family:'JetBrains Mono',monospace}
+.stat .meta{font-size:12px;color:var(--text2);margin-top:4px}
+.val.green{color:var(--green)} .val.red{color:var(--red)} .val.yellow{color:var(--yellow)} .val.accent{color:var(--accent)}
+
+/* progress bar */
+.bar{height:7px;border-radius:5px;background:var(--bg);overflow:hidden;margin-top:12px}
+.bar > span{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,var(--accent),var(--accent2));width:0;transition:width .8s ease}
+.bar > span.warn{background:linear-gradient(90deg,var(--yellow),#ff9d3d)}
+.bar > span.crit{background:linear-gradient(90deg,var(--red),#ff7d8d)}
+
+/* ---- Service control row ---- */
+.svc-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.pill{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:8px 16px;border-radius:20px;font-weight:700;font-size:13px;
+  background:var(--bg);border:1px solid var(--text3);
+}
+.pill.green{color:var(--green);border-color:rgba(0,232,122,0.4)}
+.pill.red{color:var(--red);border-color:rgba(255,77,109,0.4)}
+.pill.busy{color:var(--yellow);border-color:rgba(255,217,61,0.4)}
+.btn{
+  padding:9px 18px;border-radius:9px;font-weight:700;font-size:13px;transition:.15s;
+  display:inline-flex;align-items:center;gap:8px;
+}
+.btn-green{background:var(--green);color:#002;}
+.btn-green:hover:not(:disabled){box-shadow:0 0 18px rgba(0,232,122,0.5)}
+.btn-red{border:1px solid var(--red);color:var(--red)}
+.btn-red:hover:not(:disabled){background:rgba(255,77,109,0.12)}
+.btn-out{border:var(--border);color:var(--text)}
+.btn-out:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.uptime{font-size:12px;color:var(--text2);margin-left:auto}
+.spinner{
+  width:13px;height:13px;border:2px solid rgba(255,255,255,0.3);
+  border-top-color:currentColor;border-radius:50%;display:inline-block;
+  animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---- key/value rows ---- */
+.kv{display:flex;justify-content:space-between;gap:14px;padding:9px 0;border-bottom:1px solid rgba(0,180,255,0.06);font-size:13px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--text2)}
+.kv .v{font-family:'JetBrains Mono',monospace;text-align:right;word-break:break-all}
+
+/* quick actions */
+.qa{display:flex;flex-direction:column;gap:10px}
+.qa .btn{justify-content:center}
+
+/* ---- Logs ---- */
+.log-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.log-body{
+  height:420px;overflow:auto;background:#020608;border-radius:9px;
+  padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;
+  border:1px solid rgba(0,180,255,0.08);
+}
+.log-line{white-space:pre-wrap;word-break:break-all;color:var(--text2)}
+.log-line.err{color:var(--red)} .log-line.warn{color:var(--yellow)}
+.log-line.ok{color:var(--green)} .log-line.info{color:var(--accent)}
+.live-dot{width:9px;height:9px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 1.2s infinite}
+@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(0,232,122,0.5)}50%{opacity:.5;box-shadow:0 0 0 6px rgba(0,232,122,0)}}
+select{
+  background:var(--bg);border:var(--border);color:var(--text);border-radius:8px;
+  padding:7px 10px;font-family:inherit;font-size:12px;
+}
+
+/* ---- Traces table ---- */
+.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px}
+.tbl th{
+  text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1px;
+  color:var(--text2);font-weight:600;padding:9px 10px;border-bottom:1px solid rgba(0,180,255,0.12);
+}
+.tbl td{padding:9px 10px;border-bottom:1px solid rgba(0,180,255,0.06);font-family:'JetBrains Mono',monospace}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tr.clickable{cursor:pointer;transition:.12s}
+.tbl tr.clickable:hover td{background:rgba(0,180,255,0.06)}
+.tbl .dur.green{color:var(--green)} .tbl .dur.yellow{color:var(--yellow)} .tbl .dur.red{color:var(--red)}
+.badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:700}
+.badge.ok{background:rgba(0,232,122,0.14);color:var(--green)}
+.badge.err{background:rgba(255,77,109,0.14);color:var(--red)}
+.toggle-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.jdot{width:9px;height:9px;border-radius:50%;background:var(--text3);display:inline-block;flex-shrink:0;vertical-align:middle;margin-right:6px}
+.jdot.green{background:var(--green);box-shadow:0 0 8px var(--green)}
+.jdot.gray{background:var(--text3)}
+
+/* ---- Setup wizard ---- */
+.steps{display:flex;gap:8px;margin-bottom:22px}
+.step{flex:1;text-align:center}
+.step .num{
+  width:30px;height:30px;border-radius:50%;margin:0 auto 6px;
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;
+  background:var(--bg);border:1px solid var(--text3);color:var(--text2);
+}
+.step.active .num{border-color:var(--accent);color:var(--accent);box-shadow:0 0 14px rgba(0,180,255,0.4)}
+.step.done .num{background:var(--green);border-color:var(--green);color:#002}
+.step .slbl{font-size:11px;color:var(--text2)}
+.step.active .slbl{color:var(--text)}
+.check{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid rgba(0,180,255,0.06)}
+.check .ci{width:22px;text-align:center;font-weight:700}
+.check .cl{flex:1}
+.check .cl .ct{font-weight:600}
+.check .cl .cd{font-size:12px;color:var(--text2)}
+.radio-cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}
+.rcard{
+  padding:15px;border-radius:11px;background:var(--bg);border:1px solid var(--text3);
+  transition:.15s;cursor:pointer;
+}
+.rcard:hover:not(.disabled){border-color:rgba(0,180,255,0.5)}
+.rcard.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.rcard.disabled{opacity:.45;cursor:not-allowed}
+.rcard .rt{font-weight:700;display:flex;align-items:center;gap:8px}
+.rcard .rd{font-size:12px;color:var(--text2);margin-top:5px}
+.tag{font-size:9px;padding:2px 7px;border-radius:10px;background:var(--bg3);color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.field{margin-top:14px}
+.field label{display:block;font-size:12px;color:var(--text2);margin-bottom:6px}
+.field input{
+  width:100%;background:var(--bg);border:var(--border);color:var(--text);
+  border-radius:9px;padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:13px;
+}
+.field input:focus{outline:none;border-color:var(--accent)}
+.wiz-nav{display:flex;justify-content:space-between;margin-top:22px;gap:10px}
+.note{
+  background:rgba(0,180,255,0.07);border:1px solid rgba(0,180,255,0.2);
+  border-radius:9px;padding:11px 13px;font-size:12px;color:var(--text2);margin-bottom:16px;
+}
+.cmd-box{
+  background:#020608;border:1px solid rgba(0,180,255,0.15);border-radius:9px;
+  padding:13px 15px;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);
+  margin-top:10px;word-break:break-all;
+}
+
+/* ---- empty state ---- */
+.empty{text-align:center;padding:70px 20px}
+.empty .ei{font-size:48px;margin-bottom:14px}
+.empty h2{font-size:20px;margin-bottom:8px}
+.empty p{color:var(--text2);margin-bottom:20px;max-width:380px;margin-left:auto;margin-right:auto}
+
+/* ---- toasts ---- */
+.toasts{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:10px;z-index:200}
+.toast{
+  min-width:240px;max-width:340px;padding:13px 16px;border-radius:10px;
+  background:var(--bg3);border-left:3px solid var(--accent);
+  box-shadow:0 8px 30px rgba(0,0,0,0.5);font-size:13px;font-weight:600;
+  animation:slidein .3s ease;
+}
+.toast.success{border-left-color:var(--green)}
+.toast.error{border-left-color:var(--red)}
+.toast.info{border-left-color:var(--accent)}
+.toast.out{animation:fadeout .3s ease forwards}
+@keyframes slidein{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes fadeout{to{transform:translateX(120%);opacity:0}}
+.muted{color:var(--text3)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap hdr">
+    <div class="brand">
+      <div class="logo">TN</div>
+      <div>
+        <h1>Telcoin Node Manager</h1>
+        <div class="sub">Network Operations</div>
+      </div>
+    </div>
+    <nav id="nav">
+      <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="logs">Logs</button>
+      <button class="tab" data-view="config">Config</button>
+      <button class="tab" data-view="traces">Traces</button>
+      <button class="tab" data-view="settings">Settings</button>
+      <button class="tab" data-view="setup">Setup</button>
+      <button class="tab" data-view="system">System</button>
+    </nav>
+    <div class="hdr-right">
+      <span class="clock mono" id="clock">--:--:-- UTC</span>
+      <button class="btn-refresh" id="refreshBtn">↻ Refresh</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <!-- node selector -->
+  <div class="selector" id="selector">
+    <button class="node-btn active" data-node="observer">
+      <span class="nicon">📡</span>
+      <div>
+        <div class="nname">Observer</div>
+        <div class="nstat"><span class="dot gray" id="dot-observer"></span><span id="stat-observer">checking…</span></div>
+      </div>
+    </button>
+    <button class="node-btn" data-node="validator">
+      <span class="nicon">🛡️</span>
+      <div>
+        <div class="nname">Validator</div>
+        <div class="nstat"><span class="dot gray" id="dot-validator"></span><span id="stat-validator">checking…</span></div>
+      </div>
+    </button>
+  </div>
+
+  <!-- DASHBOARD -->
+  <section class="view active" id="view-dashboard"></section>
+  <!-- LOGS -->
+  <section class="view" id="view-logs"></section>
+  <!-- CONFIG -->
+  <section class="view" id="view-config"></section>
+  <!-- TRACES -->
+  <section class="view" id="view-traces"></section>
+  <!-- SETTINGS -->
+  <section class="view" id="view-settings"></section>
+  <!-- SETUP -->
+  <section class="view" id="view-setup"></section>
+  <!-- SYSTEM -->
+  <section class="view" id="view-system"></section>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+// =============================================================================
+// State + helpers
+// =============================================================================
+const state = {
+  node: 'observer',
+  view: 'dashboard',
+  nodes: { observer:{installed:false,status:'not installed'}, validator:{installed:false,status:'not installed'} },
+  refreshTimer: null,
+  tracesTimer: null,   // 30s traces auto-refresh
+  es: null,        // log SSE
+  live: false,
+  setupStep: 1,
+  setup: { network:'adiri', method:'source', passphrase:'loadcredential' },
+  preflight: null,
+};
+
+const $ = (s,r=document)=>r.querySelector(s);
+const el = (tag,cls,html)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;};
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, opts){
+  try{
+    const r = await fetch(path, opts);
+    return await r.json();
+  }catch(e){ return {error:String(e)}; }
+}
+
+// =============================================================================
+// Toasts
+// =============================================================================
+function toast(msg, type='info'){
+  const t = el('div','toast '+type, esc(msg));
+  $('#toasts').appendChild(t);
+  setTimeout(()=>{ t.classList.add('out'); setTimeout(()=>t.remove(),300); }, 3000);
+}
+
+// =============================================================================
+// Clock
+// =============================================================================
+function tickClock(){
+  const d = new Date();
+  const p = n => String(n).padStart(2,'0');
+  $('#clock').textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+}
+setInterval(tickClock,1000); tickClock();
+
+// =============================================================================
+// Navigation
+// =============================================================================
+$('#nav').addEventListener('click', e=>{
+  const tab = e.target.closest('.tab'); if(!tab) return;
+  switchView(tab.dataset.view);
+});
+function switchView(v){
+  state.view = v;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.view===v));
+  document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active', s.id==='view-'+v));
+  stopAutoRefresh();
+  stopLive();
+  stopTracesRefresh();
+  if(v==='dashboard'){ renderDashboard(); startAutoRefresh(); }
+  if(v==='logs')   renderLogs();
+  if(v==='config') renderConfig();
+  if(v==='traces'){ renderTraces(); startTracesRefresh(); }
+  if(v==='settings') renderSettings();
+  if(v==='setup')  renderSetup();
+  if(v==='system') renderSystem();
+}
+
+$('#selector').addEventListener('click', e=>{
+  const b = e.target.closest('.node-btn'); if(!b) return;
+  state.node = b.dataset.node;
+  document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
+  rerenderActive();
+});
+
+$('#refreshBtn').addEventListener('click', ()=>{ loadNodes(); rerenderActive(); });
+
+function rerenderActive(){
+  if(state.view==='dashboard') renderDashboard();
+  if(state.view==='logs')   renderLogs();
+  if(state.view==='config') renderConfig();
+  if(state.view==='traces') renderTraces();
+  if(state.view==='settings') renderSettings();
+  if(state.view==='system') renderSystem();
+  if(state.view==='setup')  renderSetup();
+}
+
+// =============================================================================
+// Node selector status
+// =============================================================================
+async function loadNodes(){
+  const d = await api('/api/nodes');
+  if(d && !d.error) state.nodes = d;
+  for(const t of ['observer','validator']){
+    const n = state.nodes[t] || {installed:false,status:'not installed'};
+    const dot = $('#dot-'+t), st = $('#stat-'+t);
+    st.textContent = n.installed ? n.status : 'not installed';
+    dot.className = 'dot ' + (n.status==='active'?'green':(n.installed?'red':'gray'));
+  }
+}
+
+// =============================================================================
+// Empty state
+// =============================================================================
+function emptyState(container, what){
+  const e = el('div','empty', `
+    <div class="ei">📦</div>
+    <h2>${esc(what)} not installed</h2>
+    <p>This node type isn't set up on this server yet. Use the Setup wizard to review requirements and get the install command.</p>
+    <button class="btn btn-out" onclick="switchView('setup')">Go to Setup →</button>
+  `);
+  container.innerHTML=''; container.appendChild(e);
+}
+
+// =============================================================================
+// DASHBOARD
+// =============================================================================
+function statCard(label, val, valCls, meta, bar){
+  let barHtml='';
+  if(bar){
+    const cls = bar.pct>=90?'crit':(bar.pct>=75?'warn':'');
+    barHtml = `<div class="bar"><span class="${cls}" style="width:${Math.max(0,Math.min(100,bar.pct))}%"></span></div>`;
+  }
+  return `<div class="card stat">
+    <div class="label">${esc(label)}</div>
+    <div class="val ${valCls||''}">${val}</div>
+    ${meta?`<div class="meta">${meta}</div>`:''}
+    ${barHtml}
+  </div>`;
+}
+
+async function renderDashboard(){
+  const c = $('#view-dashboard');
+  if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
+  if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading ${esc(state.node)} status…</div>`;
+
+  const s = await api('/api/status/'+state.node);
+  if(s.error || s.installed===false){ emptyState(c, cap(state.node)); return; }
+  c.dataset.loaded='1';
+
+  const running = s.status==='active';
+  const peers = s.peers||{};
+  const cons = s.consensus||{};
+  const disk = s.disk||{};
+  const mem = s.memory||{};
+
+  c.innerHTML = `
+    <!-- service control -->
+    <div class="card">
+      <div class="svc-row" id="svcRow">
+        <span class="pill ${running?'green':'red'}" id="svcPill">● ${esc(s.status)}</span>
+        ${!running?`<button class="btn btn-green" data-act="start">▶ Start</button>`:''}
+        ${running?`<button class="btn btn-red" data-act="stop">■ Stop</button>`:''}
+        <button class="btn btn-out" data-act="restart">↻ Restart</button>
+        <span id="jaegerInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"><span class="jdot gray"></span>Jaeger</span>
+        <span class="uptime">${s.uptime?'Since '+esc(s.uptime):''}</span>
+      </div>
+    </div>
+
+    <!-- stats -->
+    <div class="grid stats">
+      ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
+      ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
+      ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
+      ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
+      ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
+      ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
+      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
+    </div>
+
+    <!-- details + quick actions -->
+    <div class="grid two-col">
+      <div class="card">
+        <h3>Node Details</h3>
+        <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
+        <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
+        <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
+        <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>
+      </div>
+      <div class="card">
+        <h3>Quick Actions</h3>
+        <div class="qa">
+          <button class="btn btn-out" onclick="switchView('logs')">📜 View Logs</button>
+          <button class="btn btn-out" onclick="switchView('config')">⚙ Edit Config</button>
+          <button class="btn btn-out" data-act="restart">↻ Restart Service</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  c.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click', ()=>serviceAction(b.dataset.act)));
+
+  augmentDashboardJaeger(s);
+}
+
+// Progressive enhancement: one lightweight /api/jaeger/status call drives the
+// Jaeger dot in the service row; if tracing is on and Jaeger is up, fold the
+// avg trace duration into the Consensus Block card meta.
+async function augmentDashboardJaeger(s){
+  const j = await api('/api/jaeger/status?node_type='+state.node);
+  if(state.view!=='dashboard' || j.error) return;
+  const ind = $('#jaegerInd');
+  if(ind){
+    ind.innerHTML = '<span class="jdot '+(j.container_running?'green':'gray')+'"></span>Jaeger '+(j.container_running?'up':'off');
+  }
+  if(s.tracing_enabled && j.container_running){
+    const stats = await api('/api/traces/'+state.node+'/stats');
+    const ct = $('#consTrace');
+    if(ct && stats && !stats.error && stats.total_traces_last_hour>0){
+      ct.innerHTML = ' · trace '+stats.avg_duration_ms+'ms avg';
+    }
+  }
+}
+
+async function serviceAction(action){
+  const pill = $('#svcPill');
+  const verbing = {start:'starting…',stop:'stopping…',restart:'restarting…'}[action];
+  document.querySelectorAll('#view-dashboard [data-act]').forEach(b=>{
+    b.disabled=true;
+    if(b.dataset.act===action) b.innerHTML='<span class="spinner"></span> '+cap(verbing);
+  });
+  if(pill){ pill.className='pill busy'; pill.textContent='● '+verbing; }
+
+  const r = await api('/api/service/'+state.node+'/'+action, {method:'POST'});
+  if(r.ok){
+    toast(`${cap(state.node)} ${action} succeeded`, 'success');
+  }else{
+    toast(`${cap(state.node)} ${action} failed: ${r.error||'unknown error'}`, 'error');
+  }
+  await loadNodes();
+  setTimeout(()=>{ if(state.view==='dashboard') renderDashboard(); }, 1500);
+}
+
+// =============================================================================
+// LOGS
+// =============================================================================
+function renderLogs(){
+  const c = $('#view-logs');
+  if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
+  c.innerHTML = `
+    <div class="card">
+      <h3>${esc(cap(state.node))} Logs · telcoin-${esc(state.node)}</h3>
+      <div class="log-controls">
+        <button class="btn btn-out" id="liveBtn">● Live</button>
+        <button class="btn btn-out" id="logRefresh">↻ Refresh</button>
+        <select id="logLines">
+          <option value="50">50 lines</option>
+          <option value="100" selected>100 lines</option>
+          <option value="200">200 lines</option>
+          <option value="500">500 lines</option>
+        </select>
+        <span id="liveStatus" style="margin-left:auto;font-size:12px;color:var(--text2)"></span>
+      </div>
+      <div class="log-body" id="logBody"><div class="muted">Loading…</div></div>
+    </div>`;
+  $('#logRefresh').addEventListener('click', loadLogLines);
+  $('#logLines').addEventListener('change', loadLogLines);
+  $('#liveBtn').addEventListener('click', toggleLive);
+  loadLogLines();
+}
+
+function colorize(line){
+  const l = line.toLowerCase();
+  let cls='';
+  if(/error/i.test(line)) cls='err';
+  else if(/warn/i.test(line)) cls='warn';
+  else if(/\[ok\]|success/i.test(line)) cls='ok';
+  else if(/info/i.test(line)) cls='info';
+  return `<div class="log-line ${cls}">${esc(line)}</div>`;
+}
+
+async function loadLogLines(){
+  const body = $('#logBody'); if(!body) return;
+  const n = $('#logLines').value;
+  const d = await api(`/api/logs/${state.node}?lines=${n}`);
+  const lines = (d && d.lines)||[];
+  body.innerHTML = lines.length ? lines.map(colorize).join('') : '<div class="muted">No log output.</div>';
+  body.scrollTop = body.scrollHeight;
+}
+
+function toggleLive(){ state.live ? stopLive() : startLive(); }
+
+function startLive(){
+  const body = $('#logBody'); if(!body) return;
+  state.live = true;
+  $('#liveBtn').innerHTML = '<span class="live-dot"></span> Stop';
+  $('#liveStatus').innerHTML = '<span class="live-dot"></span> LIVE';
+  body.innerHTML='';
+  state.es = new EventSource(`/api/logs/${state.node}/stream`);
+  state.es.onmessage = ev=>{
+    body.insertAdjacentHTML('beforeend', colorize(ev.data));
+    while(body.children.length>500) body.removeChild(body.firstChild);
+    body.scrollTop = body.scrollHeight;
+  };
+  state.es.onerror = ()=>{ /* keep open; browser auto-reconnects */ };
+}
+
+function stopLive(){
+  if(state.es){ state.es.close(); state.es=null; }
+  if(state.live){
+    state.live=false;
+    const b=$('#liveBtn'), st=$('#liveStatus');
+    if(b) b.innerHTML='● Live';
+    if(st) st.textContent='';
+  }
+}
+
+// =============================================================================
+// CONFIG
+// =============================================================================
+async function renderConfig(){
+  const c = $('#view-config');
+  if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
+  const d = await api('/api/config/'+state.node);
+  if(d.error || d.installed===false){ emptyState(c, cap(state.node)); return; }
+  const rows = [
+    ['Instance', d.instance],
+    ['RPC Port', d.rpc_port],
+    ['Metrics Address', d.metrics],
+    ['Primary Listener', d.primary_listener],
+    ['Worker Listener', d.worker_listener],
+    ['Install Method', d.install_method],
+    ['Passphrase Method', d.passphrase_method],
+  ];
+  if(d.docker_image) rows.push(['Docker Image', d.docker_image]);
+  c.innerHTML = `
+    <div class="note">To edit configuration, run <span class="mono">edit-config.sh</span> on the server over SSH. This view is read-only.</div>
+    <div class="card">
+      <h3>${esc(cap(state.node))} Configuration</h3>
+      ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v||'—')}</span></div>`).join('')}
+    </div>`;
+}
+
+// =============================================================================
+// OBSERVABILITY -- shared tracing/Jaeger actions
+// =============================================================================
+async function jaegerControl(action, btn){
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> '+(action==='start'?'Starting…':'Stopping…'); }
+  const r = await api('/api/jaeger/'+action, {method:'POST'});
+  if(r.ok) toast('Jaeger '+(action==='start'?'started':'stopped'),'success');
+  else toast('Jaeger '+action+' failed: '+(r.error||'unknown error'),'error');
+  rerenderActive();
+}
+
+async function setTracing(type, enable, btn){
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> '+(enable?'Enabling…':'Disabling…'); }
+  const r = await api('/api/tracing/'+(enable?'enable':'disable')+'/'+type, {method:'POST'});
+  if(r.ok) toast('Tracing '+(enable?'enabled':'disabled')+' for '+cap(type)+' — node restarted','success');
+  else toast('Tracing change failed: '+(r.error||'unknown error'),'error');
+  await loadNodes();
+  rerenderActive();
+}
+
+const TUNNEL_CMD = 'ssh -L 16686:localhost:16686 user@SERVER_IP';
+
+// =============================================================================
+// SETTINGS -- Jaeger setup / control
+// =============================================================================
+async function renderSettings(){
+  const c = $('#view-settings');
+  const t = state.node;
+  if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading settings…</div>`;
+  const j = await api('/api/jaeger/status?node_type='+t);
+  c.dataset.loaded='1';
+  const running = !!j.container_running;
+  const apiOk = !!j.api_reachable;
+  const tracing = !!(j.tracing && j.tracing[t]);
+
+  const prereq = (label, ok, note)=>`<div class="check">
+    <div class="ci">${ok?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'}</div>
+    <div class="cl"><div class="ct">${esc(label)}</div><div class="cd">${esc(note)}</div></div></div>`;
+
+  c.innerHTML = `
+    <div class="note">Jaeger collects the OpenTelemetry traces the node emits. Set it up here, then enable tracing per node. Enabling or disabling tracing <strong>restarts that node service</strong>.</div>
+    <div class="grid two-col">
+      <div class="card">
+        <h3>Jaeger Prerequisites</h3>
+        ${prereq('Jaeger container', running, running?'Running':'Not running')}
+        ${prereq('Query UI · port 16686', apiOk, apiOk?'Reachable':'Unreachable')}
+        ${prereq('OTLP endpoint · port 4317', running, running?'Mapped (container up)':'Unavailable')}
+        <div class="svc-row" style="margin-top:14px">
+          <button class="btn btn-out" id="jRerun">↻ Re-check</button>
+          ${running
+            ? '<button class="btn btn-red" id="jStop">■ Stop Jaeger</button>'
+            : '<button class="btn btn-green" id="jStart">▶ Start Jaeger</button>'}
+        </div>
+      </div>
+      <div class="card">
+        <h3>${esc(cap(t))} Tracing</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:14px">Node tracing is currently
+          <strong style="color:${tracing?'var(--green)':'var(--text2)'}">${tracing?'enabled':'disabled'}</strong>.
+          Toggling restarts <span class="mono">telcoin-${esc(t)}</span>.</p>
+        <div class="toggle-row">
+          ${tracing
+            ? '<button class="btn btn-red" id="trToggle">Disable Tracing</button>'
+            : '<button class="btn btn-green" id="trToggle">Enable Tracing</button>'}
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>Access Jaeger UI</h3>
+      <p style="color:var(--text2);font-size:13px">From your local machine, open an SSH tunnel to the Jaeger query UI:</p>
+      <div class="cmd-box mono">${esc(TUNNEL_CMD)}</div>
+      <p style="color:var(--text2);font-size:13px;margin-top:12px">Then open
+        <a href="http://localhost:16686" target="_blank" rel="noopener">http://localhost:16686</a></p>
+    </div>`;
+
+  const r=$('#jRerun'); if(r) r.addEventListener('click', renderSettings);
+  const a=$('#jStart'); if(a) a.addEventListener('click', ()=>jaegerControl('start', a));
+  const s=$('#jStop'); if(s) s.addEventListener('click', ()=>jaegerControl('stop', s));
+  const tr=$('#trToggle'); if(tr) tr.addEventListener('click', ()=>setTracing(t, !tracing, tr));
+}
+
+// =============================================================================
+// TRACES -- monitoring
+// =============================================================================
+async function renderTraces(){
+  const c = $('#view-traces');
+  const t = state.node;
+  if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading traces…</div>`;
+  const j = await api('/api/jaeger/status?node_type='+t);
+  c.dataset.loaded='1';
+  const running = !!j.container_running;
+  const apiOk = !!j.api_reachable;
+  const reg = !!j.service_registered;
+  const tracing = !!(j.tracing && j.tracing[t]);
+
+  let statusBody;
+  if(!running && !apiOk){
+    statusBody = `<p style="color:var(--text2);font-size:13px;margin-bottom:14px">Jaeger isn't set up yet on this host.</p>
+      <button class="btn btn-green" onclick="switchView('settings')">Set up Jaeger → Settings</button>`;
+  } else {
+    statusBody = `
+      <div class="kv"><span class="k">Container</span><span class="v">${running?'<span class="badge ok">running</span>':'<span class="badge err">stopped</span>'}</span></div>
+      <div class="kv"><span class="k">Query API · :16686</span><span class="v">${apiOk?'<span class="badge ok">reachable</span>':'<span class="badge err">unreachable</span>'}</span></div>
+      <div class="kv"><span class="k">Service registered</span><span class="v">${reg?'<span class="badge ok">telcoin-'+esc(t)+'</span>':'<span class="muted">not yet</span>'}</span></div>
+      <div class="svc-row" style="margin-top:14px">
+        ${running
+          ? '<button class="btn btn-red" id="jStop2">■ Stop Jaeger</button>'
+          : '<button class="btn btn-green" id="jStart2">▶ Start Jaeger</button>'}
+      </div>
+      <p style="color:var(--text2);font-size:12px;margin-top:12px">Tunnel: <span class="mono">${esc(TUNNEL_CMD)}</span> ·
+        <a href="http://localhost:16686" target="_blank" rel="noopener">open UI</a></p>`;
+  }
+
+  c.innerHTML = `
+    <div class="grid two-col">
+      <div class="card"><h3>Jaeger Status</h3>${statusBody}</div>
+      <div class="card">
+        <h3>${esc(cap(t))} Tracing</h3>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:14px">Currently
+          <strong style="color:${tracing?'var(--green)':'var(--text2)'}">${tracing?'enabled':'disabled'}</strong>.
+          Toggling restarts <span class="mono">telcoin-${esc(t)}</span>.</p>
+        ${tracing
+          ? '<button class="btn btn-red" id="trToggle2">Disable Tracing</button>'
+          : '<button class="btn btn-green" id="trToggle2">Enable Tracing</button>'}
+      </div>
+    </div>
+    <div id="tracesStats" class="grid stats"></div>
+    <div class="card" style="margin-top:16px">
+      <h3>Recent Traces · telcoin-${esc(t)}</h3>
+      <div id="tracesTable"><div class="muted">Loading traces…</div></div>
+    </div>`;
+
+  const s2=$('#jStop2'); if(s2) s2.addEventListener('click', ()=>jaegerControl('stop', s2));
+  const a2=$('#jStart2'); if(a2) a2.addEventListener('click', ()=>jaegerControl('start', a2));
+  const tr=$('#trToggle2'); if(tr) tr.addEventListener('click', ()=>setTracing(t, !tracing, tr));
+
+  refreshTracesData();
+}
+
+async function refreshTracesData(){
+  const t = state.node;
+  const statsEl=$('#tracesStats'), tableEl=$('#tracesTable');
+  if(!statsEl || !tableEl) return;
+  const [stats, td] = await Promise.all([
+    api('/api/traces/'+t+'/stats'),
+    api('/api/traces/'+t+'?limit=20'),
+  ]);
+
+  if(stats && !stats.error && stats.total_traces_last_hour>0){
+    statsEl.innerHTML =
+      statCard('Traces · last hour', fmtNum(stats.total_traces_last_hour), 'accent', '') +
+      statCard('Avg Duration', stats.avg_duration_ms+' ms', '', '') +
+      statCard('Slowest', stats.slowest_duration_ms+' ms', 'yellow', '') +
+      statCard('Error Rate', stats.error_rate_percent+'%', stats.error_count>0?'red':'green', stats.error_count+' errors');
+  } else {
+    statsEl.innerHTML='';
+  }
+
+  const traces = (td && td.traces) || [];
+  if(!traces.length){
+    tableEl.innerHTML = '<div class="muted">No traces yet. They appear once tracing is enabled and the node emits spans.</div>';
+    return;
+  }
+  const rows = traces.map(tr=>{
+    const durCls = tr.error ? 'red' : (tr.duration_ms>500 ? 'yellow' : 'green');
+    const when = tr.start_time ? fmtTime(tr.start_time) : '—';
+    const status = tr.error ? '<span class="badge err">error</span>' : '<span class="badge ok">ok</span>';
+    return `<tr class="clickable" data-tid="${esc(tr.trace_id)}">
+      <td>${esc(when)}</td>
+      <td>${esc(tr.operation||'—')}</td>
+      <td class="dur ${durCls}">${esc(String(tr.duration_ms))} ms</td>
+      <td>${status}</td></tr>`;
+  }).join('');
+  tableEl.innerHTML = `<table class="tbl"><thead><tr><th>Time</th><th>Operation</th><th>Duration</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+  tableEl.querySelectorAll('tr[data-tid]').forEach(row=>row.addEventListener('click', ()=>{
+    window.open('http://localhost:16686/trace/'+row.dataset.tid, '_blank', 'noopener');
+  }));
+}
+
+function fmtTime(ms){
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2,'0');
+  return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+
+// =============================================================================
+// SYSTEM
+// =============================================================================
+async function renderSystem(){
+  const c = $('#view-system');
+  c.innerHTML = `<div class="card">Loading system info…</div>`;
+  const d = await api('/api/system');
+  const disk = d.disk||{}, mem=d.memory||{};
+  c.innerHTML = `
+    <div class="card">
+      <h3>System Information</h3>
+      <div class="kv"><span class="k">Hostname</span><span class="v">${esc(d.hostname||'—')}</span></div>
+      <div class="kv"><span class="k">Operating System</span><span class="v">${esc(d.distro||'—')}</span></div>
+      <div class="kv"><span class="k">Kernel</span><span class="v">${esc(d.kernel||'—')}</span></div>
+      <div class="kv"><span class="k">CPU Cores</span><span class="v">${esc(d.cpu_cores||'—')}</span></div>
+      <div class="kv"><span class="k">Uptime</span><span class="v">${esc(d.uptime||'—')}</span></div>
+      <div class="kv"><span class="k">Disk</span><span class="v">${esc((disk.used||'?')+' / '+(disk.total||'?')+' ('+(disk.percent||'?')+'%)')}</span></div>
+      <div class="kv"><span class="k">Memory</span><span class="v">${esc(mem.used_gb!=null?(mem.used_gb+' / '+mem.total_gb+' GB ('+mem.percent+'%)'):'—')}</span></div>
+    </div>`;
+}
+
+// =============================================================================
+// SETUP WIZARD
+// =============================================================================
+const STEP_LABELS = ['Preflight','Network','Method','Configure','Review'];
+
+function renderSetup(){
+  const c = $('#view-setup');
+  const steps = STEP_LABELS.map((l,i)=>{
+    const n=i+1; const cls = n<state.setupStep?'done':(n===state.setupStep?'active':'');
+    return `<div class="step ${cls}"><div class="num">${n<state.setupStep?'✓':n}</div><div class="slbl">${l}</div></div>`;
+  }).join('');
+  c.innerHTML = `<div class="steps">${steps}</div><div class="card" id="stepBody"></div>`;
+  const body = $('#stepBody');
+  ({1:stepPreflight,2:stepNetwork,3:stepMethod,4:stepConfigure,5:stepReview}[state.setupStep])(body);
+}
+
+function goStep(n){ state.setupStep=n; renderSetup(); }
+
+async function stepPreflight(body){
+  body.innerHTML = `<h3>Step 1 · Preflight Checks</h3><div id="pfList"><div class="muted">Running checks…</div></div>
+    <div class="wiz-nav"><button class="btn btn-out" id="pfRerun">↻ Re-run Checks</button><button class="btn btn-green" id="pfNext" disabled>Continue →</button></div>`;
+  $('#pfRerun').addEventListener('click', ()=>stepPreflight(body));
+  const d = await api('/api/setup/preflight');
+  state.preflight = d;
+  const hard = [
+    ['systemd', d.systemd?.ok, `systemd ${d.systemd?.version??'?'} (need ≥ ${d.systemd?.required??247})`, true],
+    ['internet', d.internet?.ok, 'Outbound internet connectivity', true],
+    ['disk', d.disk?.ok, `Disk usage ${d.disk?.percent??'?'}% (need < 90%)`, true],
+  ];
+  const soft = [
+    ['docker', d.docker?.ok, 'Docker engine available (optional)', false],
+    ['rust', d.rust?.ok, 'Rust toolchain for source build (optional)', false],
+    ['tpm', d.tpm?.ok, 'TPM device for sealed passphrase (optional)', false],
+  ];
+  const row = ([name,ok,desc,hardReq])=>{
+    const icon = ok?'<span style="color:var(--green)">✓</span>':(hardReq?'<span style="color:var(--red)">✗</span>':'<span style="color:var(--yellow)">!</span>');
+    return `<div class="check"><div class="ci">${icon}</div><div class="cl"><div class="ct">${esc(cap(name))}</div><div class="cd">${esc(desc)}</div></div></div>`;
+  };
+  $('#pfList').innerHTML = hard.map(row).join('') + soft.map(row).join('');
+  const hardOk = hard.every(h=>h[1]);
+  const next = $('#pfNext'); next.disabled = !hardOk;
+  next.title = hardOk?'':'Hard requirements must pass';
+  next.addEventListener('click', ()=>{ if(hardOk) goStep(2); });
+  if(!hardOk) toast('Some hard requirements failed — resolve them before continuing','error');
+}
+
+function stepNetwork(body){
+  body.innerHTML = `<h3>Step 2 · Network</h3>
+    <div class="radio-cards">
+      <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
+        <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
+      <div class="rcard disabled"><div class="rt">Mainnet <span class="tag">coming soon</span></div><div class="rd">Production network — not yet available.</div></div>
+    </div>
+    <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(1)">← Back</button><button class="btn btn-green" onclick="goStep(3)">Continue →</button></div>`;
+  body.querySelectorAll('[data-net]').forEach(r=>r.addEventListener('click',()=>{state.setup.network=r.dataset.net;renderSetup();}));
+}
+
+function stepMethod(body){
+  const m = state.setup.method;
+  body.innerHTML = `<h3>Step 3 · Install Method</h3>
+    <div class="radio-cards" style="grid-template-columns:1fr 1fr 1fr">
+      <div class="rcard ${m==='source'?'sel':''}" data-m="source"><div class="rt">Build from Source</div><div class="rd">Compile the Rust binary on this host. Most flexible.</div></div>
+      <div class="rcard ${m==='docker'?'sel':''}" data-m="docker"><div class="rt">Docker</div><div class="rd">Run the official container image.</div></div>
+      <div class="rcard disabled"><div class="rt">Existing Binary <span class="tag">coming soon</span></div><div class="rd">Use a pre-built binary.</div></div>
+    </div>
+    <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(2)">← Back</button><button class="btn btn-green" onclick="goStep(4)">Continue →</button></div>`;
+  body.querySelectorAll('[data-m]').forEach(r=>r.addEventListener('click',()=>{state.setup.method=r.dataset.m;renderSetup();}));
+}
+
+function stepConfigure(body){
+  const p = state.setup.passphrase;
+  body.innerHTML = `<h3>Step 4 · Configure</h3>
+    <div class="field"><label>Ethereum Address (rewards)</label><input id="cfgEth" placeholder="0x…" value="${esc(state.setup.eth||'')}"></div>
+    <div class="field"><label>BLS Passphrase</label><input id="cfgBls" type="password" placeholder="••••••••" value="${esc(state.setup.bls||'')}"></div>
+    <div class="field"><label>Passphrase Protection</label>
+      <div class="radio-cards">
+        <div class="rcard ${p==='loadcredential'?'sel':''}" data-p="loadcredential"><div class="rt">LoadCredential</div><div class="rd">systemd-managed credential file. Simple, works everywhere.</div></div>
+        <div class="rcard ${p==='tpm'?'sel':''}" data-p="tpm"><div class="rt">TPM / vTPM</div><div class="rd">Seal the passphrase to hardware TPM. More secure.</div></div>
+      </div>
+    </div>
+    <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(3)">← Back</button><button class="btn btn-green" id="cfgNext">Continue →</button></div>`;
+  body.querySelectorAll('[data-p]').forEach(r=>r.addEventListener('click',()=>{state.setup.passphrase=r.dataset.p;renderSetup();}));
+  $('#cfgNext').addEventListener('click', ()=>{
+    state.setup.eth = $('#cfgEth').value.trim();
+    state.setup.bls = $('#cfgBls').value;
+    goStep(5);
+  });
+}
+
+function stepReview(body){
+  const s = state.setup;
+  const cmd = `sudo bash ~/telcoin-node-scripts/setup-${state.node}.sh`;
+  const rows = [
+    ['Node Type', cap(state.node)],
+    ['Network', s.network==='adiri'?'Adiri Testnet':s.network],
+    ['Install Method', s.method],
+    ['Ethereum Address', s.eth||'(not set)'],
+    ['BLS Passphrase', s.bls?'•••••••• (set)':'(not set)'],
+    ['Passphrase Protection', s.passphrase==='tpm'?'TPM / vTPM':'LoadCredential'],
+  ];
+  body.innerHTML = `<h3>Step 5 · Review</h3>
+    ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
+    <div class="note" style="margin-top:16px">Full automated installation via the UI is coming soon. For now, run the command below on the server over SSH:</div>
+    <div class="cmd-box mono">${esc(cmd)}</div>
+    <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(4)">← Back</button><button class="btn btn-out" id="reviewCopy">Copy Command</button><button class="btn btn-green" id="reviewClose">Close</button></div>`;
+  $('#reviewCopy').addEventListener('click', ()=>{
+    navigator.clipboard?.writeText(cmd).then(()=>toast('Command copied','success'),()=>toast('Copy failed','error'));
+  });
+  $('#reviewClose').addEventListener('click', ()=>{ state.setupStep=1; switchView('dashboard'); });
+}
+
+// =============================================================================
+// Auto-refresh + utils
+// =============================================================================
+function startAutoRefresh(){
+  stopAutoRefresh();
+  state.refreshTimer = setInterval(()=>{ loadNodes(); if(state.view==='dashboard') renderDashboard(); }, 15000);
+}
+function stopAutoRefresh(){ if(state.refreshTimer){ clearInterval(state.refreshTimer); state.refreshTimer=null; } }
+
+function startTracesRefresh(){
+  stopTracesRefresh();
+  state.tracesTimer = setInterval(()=>{ if(state.view==='traces') refreshTracesData(); }, 30000);
+}
+function stopTracesRefresh(){ if(state.tracesTimer){ clearInterval(state.tracesTimer); state.tracesTimer=null; } }
+
+function cap(s){ return String(s).charAt(0).toUpperCase()+String(s).slice(1); }
+function fmtNum(n){ return Number(n).toLocaleString('en-US'); }
+
+// =============================================================================
+// Boot
+// =============================================================================
+(async function init(){
+  await loadNodes();
+  // Default-select an installed node if the current default isn't installed.
+  if(!state.nodes[state.node]?.installed){
+    const other = state.node==='observer'?'validator':'observer';
+    if(state.nodes[other]?.installed){
+      state.node = other;
+      document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
+    }
+  }
+  renderDashboard();
+  startAutoRefresh();
+})();
+</script>
+</body>
+</html>
