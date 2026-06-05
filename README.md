@@ -777,6 +777,14 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### telcoin-ui v1.0.3
+Fixes the dashboard "Recent Traces / No traces yet" panel when spans are already
+visible in the Jaeger UI: the node registers its OTLP service name as
+`telcoin-<type>` plus a node-identity suffix (e.g. `telcoin-observer-QCZPqMY2zfp`),
+so the backend's exact-name Jaeger query never matched. Traces, trace stats, and
+the Jaeger `service_registered` flag now resolve the real service name by
+`telcoin-<type>` prefix.
+
 ### telcoin-ui v1.0.2
 Tracing toggle now restarts the node with `systemctl restart --no-block`, so the
 API returns once the restart is queued instead of blocking on the node's stop

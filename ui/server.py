@@ -34,7 +34,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.0.2"
+UI_VERSION = "1.0.3"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -768,6 +768,25 @@ def jaeger_services():
     return []
 
 
+def resolve_service(t, services=None):
+    """
+    The node registers its OTLP service name as `telcoin-<t>` plus a node-identity
+    suffix (e.g. telcoin-observer-QCZPqMY2zfp), so an exact-name query never
+    matches. Return the registered service that is `telcoin-<t>` exactly or a
+    `telcoin-<t>-...` prefix, else None when the node has not registered yet.
+    Pass an already-fetched `services` list to avoid a second /api/services call.
+    """
+    base = f"telcoin-{t}"
+    if services is None:
+        services = jaeger_services()
+    if base in services:
+        return base
+    for s in services:
+        if s.startswith(base + "-"):
+            return s
+    return None
+
+
 def _span_is_error(span):
     """Detect an error span from its tags (error / otel.status_code / http >=400)."""
     for tag in span.get("tags") or []:
@@ -833,10 +852,10 @@ def api_jaeger_status():
     else:
         container_running = api_reachable
 
-    obs_reg = "telcoin-observer" in services
-    val_reg = "telcoin-validator" in services
+    obs_reg = resolve_service("observer", services) is not None
+    val_reg = resolve_service("validator", services) is not None
     if selected in NODE_TYPES:
-        service_registered = ("telcoin-" + selected) in services
+        service_registered = resolve_service(selected, services) is not None
     else:
         service_registered = obs_reg or val_reg
 
@@ -904,8 +923,11 @@ def api_traces(node_type):
         limit = 20
     limit = max(1, min(limit, 100))
 
+    service = resolve_service(node_type)
+    if service is None:
+        return jsonify({"traces": []})
     data = jaeger_get(
-        f"/api/traces?service=telcoin-{node_type}&limit={limit}"
+        f"/api/traces?service={service}&limit={limit}"
     )
     traces = []
     if isinstance(data, dict) and isinstance(data.get("data"), list):
@@ -930,8 +952,11 @@ def api_traces_stats(node_type):
         "error_rate_percent": 0,
     }
 
+    service = resolve_service(node_type)
+    if service is None:
+        return jsonify(zero)
     data = jaeger_get(
-        f"/api/traces?service=telcoin-{node_type}&limit=100&lookback=1h"
+        f"/api/traces?service={service}&limit=100&lookback=1h"
     )
     if not (isinstance(data, dict) and isinstance(data.get("data"), list)):
         return jsonify(zero)
