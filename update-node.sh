@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.47"
+readonly SCRIPT_VERSION="1.1.48"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 readonly VERIFY_TIMEOUT_SECONDS=45
 
@@ -170,6 +170,17 @@ wait_for_service_stopped() {
         sleep 1
         (( ++waited ))
     done
+}
+
+# Start the service after clearing any leftover failed state and the
+# start-rate-limit counter. The unit sets StartLimitBurst=5 / 60s with
+# Restart=on-failure; a failed update + rollback can stop/start the service
+# enough times to trip that limit, after which `systemctl start` is refused
+# and the node stays down even with a good binary. reset-failed (a no-op when
+# nothing is wrong) prevents that.
+start_service() {
+    systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+    systemctl start "$SERVICE_NAME"
 }
 
 # Backup the systemd unit file with a timestamped sibling. Echoes backup path.
@@ -318,7 +329,7 @@ apply_docker_update() {
         print_info "Restoring from backup and aborting."
         cp -p "$backup" "$unit"
         systemctl daemon-reload
-        systemctl start "$SERVICE_NAME" 2>/dev/null || true
+        start_service 2>/dev/null || true
         return 1
     fi
     # Confirm the new image actually appears in the file (defends against a
@@ -329,16 +340,20 @@ apply_docker_update() {
         print_info "Restoring from backup and aborting."
         cp -p "$backup" "$unit"
         systemctl daemon-reload
-        systemctl start "$SERVICE_NAME" 2>/dev/null || true
+        start_service 2>/dev/null || true
         return 1
     fi
     print_ok "Unit file updated: ${pre_unit_hash:0:12}... -> ${post_unit_hash:0:12}..."
 
     print_step "Starting ${SERVICE_NAME} on new image..."
-    systemctl start "$SERVICE_NAME"
+    start_service
 
     if verify_health_after_restart; then
         clear_pending_state
+        if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+            print_warn "Service is not enabled for auto-start on reboot."
+            print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
+        fi
         print_ok "Update complete. Now running on: ${new_image}"
         print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
@@ -352,7 +367,7 @@ apply_docker_update() {
         wait_for_service_stopped "$SERVICE_NAME"
         cp -p "$backup" "$unit"
         systemctl daemon-reload
-        systemctl start "$SERVICE_NAME"
+        start_service
         if verify_health_after_restart; then
             clear_pending_state
             print_ok "Rolled back to ${old_image}"
@@ -606,7 +621,7 @@ apply_source_update() {
         print_info "  Checking disk: $(df -h "$installed" | tail -1)"
         print_info "Restoring backup and aborting."
         cp -p "$backup" "$installed" 2>/dev/null || true
-        systemctl start "$SERVICE_NAME" 2>/dev/null || true
+        start_service 2>/dev/null || true
         return 1
     fi
     if ! chmod +x "$installed"; then
@@ -625,10 +640,14 @@ apply_source_update() {
     fi
 
     print_step "Starting ${SERVICE_NAME} on new binary..."
-    systemctl start "$SERVICE_NAME"
+    start_service
 
     if verify_health_after_restart; then
         clear_pending_state
+        if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+            print_warn "Service is not enabled for auto-start on reboot."
+            print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
+        fi
         print_ok "Update complete. Now running: ${new_version}"
         print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
@@ -642,7 +661,7 @@ apply_source_update() {
         wait_for_service_stopped "$SERVICE_NAME"
         cp -p "$backup" "$installed"
         chmod +x "$installed"
-        systemctl start "$SERVICE_NAME"
+        start_service
         if verify_health_after_restart; then
             clear_pending_state
             print_ok "Rolled back to previous binary"
