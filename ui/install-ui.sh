@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -84,8 +84,12 @@ install -o root -g root -m 0755 "${SRC_DIR}/telcoin-ui-helper.sh" "${HELPER_DST}
 ok "Helper installed (root:root 0755)"
 
 # ---- 5. Install Flask -------------------------------------------------------
+# --ignore-installed blinker: on Ubuntu the apt package `python3-blinker` is a
+# distutils install pip cannot cleanly uninstall, so a plain `pip install flask`
+# aborts with "Cannot uninstall blinker". Skip touching it and let Flask use the
+# already-present version.
 info "Installing Flask..."
-pip3 install flask --break-system-packages >/dev/null 2>&1 \
+pip3 install flask --break-system-packages --ignore-installed blinker >/dev/null 2>&1 \
     || pip3 install flask >/dev/null 2>&1 \
     || { err "Failed to install Flask"; exit 1; }
 ok "Flask installed"
