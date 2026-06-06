@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.2.3"
+readonly SCRIPT_VERSION="1.2.4"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -297,7 +297,8 @@ echo -e "    ${c_blue}ssh -L 8080:localhost:8080 -L 16686:localhost:16686 ${USER
 echo ""
 echo "Then open in your browser:"
 echo ""
-echo -e "    ${c_blue}http://localhost:8080${c_off}"
+echo -e "    Node Manager UI:  ${c_blue}http://localhost:8080${c_off}"
+echo -e "    Jaeger tracing:   ${c_blue}http://localhost:16686${c_off}"
 echo ""
 echo "Service management:"
 echo "    systemctl status telcoin-ui"
