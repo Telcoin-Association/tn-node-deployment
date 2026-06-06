@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -136,6 +136,16 @@ else
     warn "update-node.sh / lib/common.sh not found beside install-ui.sh -- the UI Update tab will be unavailable until they are present."
 fi
 
+# edit-config.sh drives the UI's Config-edit feature via its --json mode (it
+# sources lib/common.sh from the same dir, installed just above). Root-owned and
+# outside the user-writable UI dir, like update-node.sh.
+if [[ -f "${REPO_DIR}/edit-config.sh" ]]; then
+    install -o root -g root -m 0755 "${REPO_DIR}/edit-config.sh" "${UPDATE_DIR}/edit-config.sh"
+    ok "Config editor installed to ${UPDATE_DIR} (root:root)"
+else
+    warn "edit-config.sh not found beside install-ui.sh -- the UI Config-edit feature will be unavailable until it is present."
+fi
+
 # ---- 5. Install Flask -------------------------------------------------------
 # --ignore-installed blinker: on Ubuntu the apt package `python3-blinker` is a
 # distutils install pip cannot cleanly uninstall, so a plain `pip install flask`
@@ -185,6 +195,11 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-apply o
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-apply validator
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard validator
+# Config helper -- config-set takes <type> <field> <value>. The field+value are
+# wildcarded here but the field is checked against a fixed allowlist and the
+# value against a per-field regex inside the helper before edit-config.sh runs.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set observer *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set validator *
 EOF
 chmod 440 "${SUDOERS_FILE}"
 if visudo -cf "${SUDOERS_FILE}" >/dev/null 2>&1; then

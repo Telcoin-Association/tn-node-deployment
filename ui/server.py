@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.2.0"
+UI_VERSION = "1.2.1"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -863,6 +863,50 @@ def api_config(node_type):
         "docker_image": docker_image_ref(node_type),
         "version": node_version(node_type).get("ref", ""),
     })
+
+
+# Editable config field allowlist + per-field value validation, mirroring
+# edit-config.sh's --json mode and the helper's config-set guard. We reject bad
+# input with a clean 400 before ever shelling out; the helper and the script
+# re-validate (defence in depth -- the server is the unprivileged caller).
+CONFIG_FIELDS = (
+    "primary_listener", "worker_listener", "instance",
+    "metrics", "verbosity", "docker_image",
+)
+_MULTIADDR_RE = re.compile(r"^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$")
+_METRICS_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$")
+_VERBOSITY_RE = re.compile(r"^-v{1,5}$")
+_IMAGE_CHARS_RE = re.compile(r"^[A-Za-z0-9._/:@-]+$")
+
+
+def config_value_ok(field, value):
+    if field in ("primary_listener", "worker_listener"):
+        return bool(_MULTIADDR_RE.match(value))
+    if field == "instance":
+        return value in ("1", "2", "3", "4", "5", "6", "7", "8", "9")
+    if field == "metrics":
+        return bool(_METRICS_RE.match(value))
+    if field == "verbosity":
+        return bool(_VERBOSITY_RE.match(value))
+    if field == "docker_image":
+        return bool(_IMAGE_CHARS_RE.match(value)) and ":" in value
+    return False
+
+
+@app.route("/api/config/<node_type>/set")
+def api_config_set(node_type):
+    # GET (not POST) so the browser can stream the restart+verify progress with
+    # EventSource. The field/value are query params, validated here and again in
+    # the helper + edit-config.sh. Reuses the same SSE plumbing as updates.
+    if not valid_type(node_type):
+        return bad_type()
+    field = (request.args.get("field") or "").strip()
+    value = (request.args.get("value") or "").strip()
+    if field not in CONFIG_FIELDS:
+        return jsonify({"error": "field not editable"}), 400
+    if not config_value_ok(field, value):
+        return jsonify({"error": "invalid value for field"}), 400
+    return _update_stream(["sudo", "-n", HELPER, "config-set", node_type, field, value])
 
 
 # =============================================================================

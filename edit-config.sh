@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.47"
+readonly SCRIPT_VERSION="1.2.0"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
@@ -961,10 +961,178 @@ main_menu() {
 }
 
 # =============================================================================
+# JSON / NON-INTERACTIVE MODE
+#
+# Reached only via `--json` (the interactive default is completely unaffected).
+# Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper,
+# which calls:  edit-config.sh --json --<type> --set <field>=<value>
+#
+# fd handling mirrors update-node.sh: json_setup_fds dups the real stdout to
+# fd 3 and points stdout at stderr, so every print_* line is harmless noise on
+# stderr while fd 3 carries newline-delimited JSON the caller streams + parses:
+#   {"event":"step|error","msg":"..."}
+#   {"event":"done","ok":true|false,"field":"...","value":"...","msg":"..."}
+#
+# Editable field allowlist (exactly what the interactive menu edits):
+#   primary_listener worker_listener instance metrics verbosity docker_image
+# Each value is re-validated here with the same validators the menu uses.
+# =============================================================================
+
+JSON_SET_PAIR=""
+
+json_setup_fds() {
+    exec 3>&1   # fd3 = original stdout: JSON is written here
+    exec 1>&2   # stdout now aliases stderr: print_*/build output is benign noise
+}
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/ }"
+    s="${s//$'\r'/ }"
+    s="${s//$'\t'/ }"
+    printf '%s' "$s"
+}
+
+json_emit() { printf '%s\n' "$1" >&3; }
+
+json_event() {
+    # json_event <event> <msg>
+    json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
+}
+
+# Set one listener multiaddr in place, handling docker (ExecStart -e VAR=...)
+# and source (Environment="VAR=...") installs the same way the menu does.
+json_set_listener() {
+    local varname="$1" value="$2"
+    local exec_start
+    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+    if echo "$exec_start" | grep -qF "docker run"; then
+        perl -i -pe "s|${varname}=[^ ]+|${varname}=${value}|g" "$TARGET_SERVICE_FILE"
+    else
+        set_env_var "$varname" "$value" "$TARGET_SERVICE_FILE"
+    fi
+}
+
+# Pull + swap the docker image (docker installs only). Mirrors edit_docker_image.
+json_set_docker_image() {
+    local new_image="$1"
+    validate_docker_image "$new_image" || { json_event error "invalid docker image reference: ${new_image}"; return 1; }
+    local exec_start
+    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+    echo "$exec_start" | grep -qF "docker run" || { json_event error "node is not a docker install"; return 1; }
+    local current_image
+    current_image=$(echo "$exec_start" | grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' | head -1)
+    [[ -z "$current_image" ]] && current_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1)
+    [[ -n "$current_image" ]] || { json_event error "could not determine current docker image"; return 1; }
+    json_event step "Pulling image ${new_image}"
+    docker pull "$new_image" >&2 || { json_event error "failed to pull image: ${new_image}"; return 1; }
+    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_SERVICE_FILE"
+}
+
+# Validate + apply a single field edit to the (already backed-up) unit file.
+json_set_field() {
+    local field="$1" value="$2"
+    case "$field" in
+        primary_listener)
+            validate_multiaddr "$value" || { json_event error "invalid multiaddr: ${value}"; return 1; }
+            json_set_listener "PRIMARY_LISTENER_MULTIADDR" "$value" ;;
+        worker_listener)
+            validate_multiaddr "$value" || { json_event error "invalid multiaddr: ${value}"; return 1; }
+            json_set_listener "WORKER_LISTENER_MULTIADDR" "$value" ;;
+        instance)
+            { [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 9 )); } \
+                || { json_event error "instance must be an integer 1-9"; return 1; }
+            set_flag_value "--instance" "$value" "$TARGET_SERVICE_FILE" ;;
+        metrics)
+            validate_ip_port "$value" || { json_event error "invalid metrics address (want IPv4:PORT): ${value}"; return 1; }
+            set_flag_value "--metrics" "$value" "$TARGET_SERVICE_FILE" ;;
+        verbosity)
+            [[ "$value" =~ ^-v{1,5}$ ]] || { json_event error "verbosity must be -v .. -vvvvv"; return 1; }
+            set_verbosity "$value" "$TARGET_SERVICE_FILE" ;;
+        docker_image)
+            json_set_docker_image "$value" || return 1 ;;
+        *)
+            json_event error "field not editable: ${field}"; return 1 ;;
+    esac
+}
+
+# Non-interactive apply: daemon-reload + restart + health verify (is-active).
+json_apply_changes() {
+    json_event step "Reloading systemd"
+    systemctl daemon-reload
+    json_event step "Restarting ${TARGET_SERVICE}"
+    systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
+    sleep 3
+    systemctl is-active --quiet "$TARGET_SERVICE"
+}
+
+run_json_set() {
+    json_setup_fds
+    check_root
+
+    [[ -n "$TARGET_SERVICE_FILE" ]] || { json_event error "no node type specified (need --observer or --validator)"; return 1; }
+    [[ -f "$TARGET_SERVICE_FILE" ]] || { json_event error "node not installed: ${TARGET_SERVICE}"; return 1; }
+    [[ -n "$JSON_SET_PAIR" && "$JSON_SET_PAIR" == *=* ]] || { json_event error "missing --set field=value"; return 1; }
+
+    local field="${JSON_SET_PAIR%%=*}"
+    local value="${JSON_SET_PAIR#*=}"
+
+    # Back up the unit before any in-place edit (own the path here so no print_*
+    # noise leaks into the captured value).
+    local ts backup
+    ts=$(date -u '+%Y%m%d-%H%M%S')
+    backup="${TARGET_SERVICE_FILE}.bak.${ts}"
+    cp -p "$TARGET_SERVICE_FILE" "$backup" || { json_event error "could not back up unit file"; return 1; }
+
+    json_event step "Setting ${field}=${value}"
+    if ! json_set_field "$field" "$value"; then
+        restore_service_file "$TARGET_SERVICE_FILE" "$backup"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"field\":\"$(json_escape "$field")\",\"msg\":\"edit rejected -- unit unchanged\"}"
+        return 1
+    fi
+
+    if json_apply_changes; then
+        json_emit "{\"event\":\"done\",\"ok\":true,\"field\":\"$(json_escape "$field")\",\"value\":\"$(json_escape "$value")\",\"msg\":\"applied and ${TARGET_SERVICE} healthy\"}"
+        return 0
+    fi
+
+    json_event step "Service did not come back healthy -- rolling back"
+    restore_service_file "$TARGET_SERVICE_FILE" "$backup"
+    systemctl daemon-reload
+    systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
+    sleep 3
+    if systemctl is-active --quiet "$TARGET_SERVICE"; then
+        json_emit "{\"event\":\"done\",\"ok\":false,\"rolled_back\":true,\"field\":\"$(json_escape "$field")\",\"msg\":\"restart failed; rolled back to previous unit\"}"
+    else
+        json_emit "{\"event\":\"done\",\"ok\":false,\"rolled_back\":false,\"field\":\"$(json_escape "$field")\",\"msg\":\"restart and rollback failed; inspect journalctl -u ${TARGET_SERVICE}\"}"
+    fi
+    return 1
+}
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
 main() {
+    # Parse flags first so --json short-circuits before any interactive output.
+    local json_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)      json_mode=true; shift ;;
+            --observer)  TARGET_SERVICE="$OBSERVER_SERVICE";  TARGET_SERVICE_FILE="$OBSERVER_SERVICE_FILE";  NODE_TYPE="observer";  shift ;;
+            --validator) TARGET_SERVICE="$VALIDATOR_SERVICE"; TARGET_SERVICE_FILE="$VALIDATOR_SERVICE_FILE"; NODE_TYPE="validator"; shift ;;
+            --set)       JSON_SET_PAIR="${2:-}"; shift 2 ;;
+            *)           shift ;;
+        esac
+    done
+
+    if [[ "$json_mode" == "true" ]]; then
+        run_json_set
+        exit $?
+    fi
+
     clear
     print_header "Telcoin Network Node Configuration Editor  v${SCRIPT_VERSION}"
     check_root

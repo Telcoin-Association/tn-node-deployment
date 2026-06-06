@@ -152,6 +152,11 @@ nav{display:flex;gap:4px;margin:0 auto}
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--text2)}
 .kv .v{font-family:'JetBrains Mono',monospace;text-align:right;word-break:break-all}
+.kv input{
+  background:var(--bg);border:var(--border);color:var(--text);border-radius:8px;
+  padding:7px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;min-width:220px;
+}
+.kv input:focus{outline:none;border-color:var(--accent)}
 
 /* quick actions */
 .qa{display:flex;flex-direction:column;gap:10px}
@@ -347,6 +352,8 @@ const state = {
   tracesTimer: null,   // 30s traces auto-refresh
   es: null,        // log SSE
   updateES: null,  // update progress SSE
+  configES: null,  // config-save progress SSE
+  configEditing: false,
   live: false,
   logBuffer: [],                          // client-side line buffer (static + live)
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
@@ -400,6 +407,8 @@ function switchView(v){
   stopLive();
   stopTracesRefresh();
   stopUpdateStream();
+  stopConfigStream();
+  if(v!=='config') state.configEditing=false;
   if(v==='dashboard'){ renderDashboard(); startAutoRefresh(); }
   if(v==='logs')   renderLogs();
   if(v==='config') renderConfig();
@@ -760,31 +769,127 @@ function stopLive(){
 // =============================================================================
 // CONFIG
 // =============================================================================
+// Editable field allowlist (mirrors edit-config.sh --json + server.py). Each
+// row carries a value validator so we reject bad input before streaming.
+function configValueOk(field, value){
+  if(field==='primary_listener'||field==='worker_listener') return /^\/(ip4|ip6)\/[^/]+\/udp\/[0-9]+\/quic-v1$/.test(value);
+  if(field==='instance') return /^[1-9]$/.test(value);
+  if(field==='metrics') return /^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$/.test(value);
+  if(field==='verbosity') return /^-v{1,5}$/.test(value);
+  if(field==='docker_image') return /^[A-Za-z0-9._/:@-]+$/.test(value) && value.includes(':');
+  return false;
+}
+
+// One editable row: label + input/select + per-field Save (each save is one
+// daemon-reload + restart + health verify, exactly like the CLI menu).
+function cfgEditRow(field, label, current, kind){
+  let control;
+  if(kind==='verbosity'){
+    const opts=[['','— choose level —'],['-v','ERROR (-v)'],['-vv','WARN (-vv)'],['-vvv','INFO (-vvv)'],['-vvvv','DEBUG (-vvvv)'],['-vvvvv','TRACE (-vvvvv)']];
+    control=`<select id="cfg_${field}">${opts.map(([v,l])=>`<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>`;
+  } else if(kind==='instance'){
+    control=`<select id="cfg_${field}">${['1','2','3','4','5','6','7','8','9'].map(v=>`<option value="${v}" ${v===String(current)?'selected':''}>${v}</option>`).join('')}</select>`;
+  } else {
+    control=`<input id="cfg_${field}" value="${esc(current||'')}" autocomplete="off">`;
+  }
+  return `<div class="kv" style="align-items:center">
+    <span class="k">${esc(label)}</span>
+    <span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+      ${control}
+      <button class="btn btn-green" data-cfg-save="${field}">Save</button>
+    </span></div>`;
+}
+
 async function renderConfig(){
   const c = $('#view-config');
-  if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
-  const d = await api('/api/config/'+state.node);
-  if(d.error || d.installed===false){ emptyState(c, cap(state.node)); return; }
-  const rows = [
-    ['Instance', d.instance],
+  const t = state.node;
+  if(!state.nodes[t]?.installed){ emptyState(c, cap(t)); return; }
+  const d = await api('/api/config/'+t);
+  if(d.error || d.installed===false){ emptyState(c, cap(t)); return; }
+  state.config = d;
+  const editing = !!state.configEditing;
+
+  // Editable fields (the exact set edit-config.sh's menu edits). docker_image
+  // only for docker installs.
+  const editable = [
+    ['instance','Instance', d.instance, 'instance'],
+    ['metrics','Metrics Address', d.metrics, 'text'],
+    ['primary_listener','Primary Listener (bind)', d.primary_listener, 'text'],
+    ['worker_listener','Worker Listener (bind)', d.worker_listener, 'text'],
+    ['verbosity','Log Verbosity', '', 'verbosity'],
+  ];
+  if(d.install_method==='docker') editable.push(['docker_image','Docker Image', d.docker_image, 'text']);
+
+  // Read-only context rows.
+  const roRows = [
     ['RPC Port', d.rpc_port],
-    ['Metrics Address', d.metrics],
-    ['Primary Listener (bind)', d.primary_listener],
-    ['Worker Listener (bind)', d.worker_listener],
     ['External Primary', d.external_primary],
     ['External Worker', d.external_worker],
     ['Version', d.version],
     ['Install Method', d.install_method],
     ['Passphrase Method', d.passphrase_method],
   ];
-  if(d.docker_image) rows.push(['Docker Image', d.docker_image]);
+
+  const editableHtml = editing
+    ? editable.map(([f,l,cur,kind])=>cfgEditRow(f,l,cur,kind)).join('')
+    : editable.map(([f,l,cur])=>`<div class="kv"><span class="k">${esc(l)}</span><span class="v">${esc((f==='verbosity'?'':cur)||'—')}</span></div>`).join('');
+
+  const note = editing
+    ? `<div class="note" style="border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
+        Each <strong>Save</strong> runs <span class="mono">edit-config.sh --json</span>, then reloads systemd, restarts
+        <span class="mono">telcoin-${esc(t)}</span> and verifies it comes back healthy${t==='validator'?' — <strong style="color:var(--yellow)">a validator restart drops consensus rounds during the brief downtime</strong>':''}. A timestamped unit backup is taken first and restored automatically if the restart fails.</div>`
+    : `<div class="note">Edit configuration here, or run <span class="mono">edit-config.sh</span> on the server over SSH. Editable fields take effect after a node restart.</div>`;
+
   c.innerHTML = `
-    <div class="note">To edit configuration, run <span class="mono">edit-config.sh</span> on the server over SSH. This view is read-only.</div>
+    ${note}
     <div class="card">
-      <h3>${esc(cap(state.node))} Configuration</h3>
-      ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v||'—')}</span></div>`).join('')}
+      <div class="svc-row" style="margin-bottom:6px">
+        <h3 style="margin:0">${esc(cap(t))} Configuration</h3>
+        <span style="margin-left:auto"></span>
+        ${editing
+          ? `<button class="btn btn-out" id="cfgDone">Done</button>`
+          : `<button class="btn btn-out" id="cfgEdit">⚙ Edit Configuration</button>`}
+      </div>
+      ${editableHtml}
+      ${roRows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v||'—')}</span></div>`).join('')}
+    </div>
+    <div class="card" id="cfgProgressCard" style="display:none;margin-top:14px">
+      <h3>Progress</h3>
+      <div class="log-body" id="cfgLog" style="height:240px"></div>
     </div>`;
+
+  const eb=$('#cfgEdit'); if(eb) eb.addEventListener('click', ()=>{ state.configEditing=true; renderConfig(); });
+  const db=$('#cfgDone'); if(db) db.addEventListener('click', ()=>{ stopConfigStream(); state.configEditing=false; renderConfig(); });
+  c.querySelectorAll('[data-cfg-save]').forEach(b=>b.addEventListener('click', ()=>{
+    const field=b.dataset.cfgSave;
+    const value=($('#cfg_'+field)?.value||'').trim();
+    saveConfigField(field, value, b);
+  }));
 }
+
+function saveConfigField(field, value, btn){
+  if(!configValueOk(field, value)){ toast('Invalid value for '+field, 'error'); return; }
+  if(state.node==='validator' &&
+     !confirm('Saving restarts the validator now — expect missed consensus rounds during the brief downtime. Continue?')) return;
+  stopConfigStream();
+  const card=$('#cfgProgressCard'); if(card) card.style.display='block';
+  const log=$('#cfgLog'); if(log) log.innerHTML='<div class="log-line info">» saving '+esc(field)+'…</div>';
+  if(btn) btn.disabled=true;
+  const url='/api/config/'+state.node+'/set?field='+encodeURIComponent(field)+'&value='+encodeURIComponent(value);
+  state.configES = new EventSource(url);
+  state.configES.onmessage = ev=>{
+    let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
+    if(d.event==='closed'){ stopConfigStream(); loadNodes(); renderConfig(); return; }
+    appendStream('#cfgLog', d);
+    if(d.event==='done'){
+      if(d.ok) toast('Saved '+field+' — node restarted','success');
+      else toast('Save failed'+(d.rolled_back?' — rolled back':''),'error');
+    }
+  };
+  state.configES.onerror = ()=>{ /* server closes the stream when the script exits */ };
+}
+
+function stopConfigStream(){ if(state.configES){ state.configES.close(); state.configES=null; } }
 
 // =============================================================================
 // UPDATE -- in-UI node updater (current vs latest, Prepare + Apply, live log)
@@ -860,19 +965,28 @@ async function fillUpdateStatus(){
   const r=$('#updRecheck'); if(r) r.addEventListener('click', fillUpdateStatus);
 }
 
-function appendUpdateLine(d){
-  const log=$('#updLog'); if(!log) return;
+// Shared SSE-line formatter for the Update + Config progress panes. Returns the
+// HTML for one {event:step|error|done} line, or null for anything else.
+function streamLineHtml(d){
   let cls='info', text='';
   if(d.event==='error'){ cls='err'; text='✗ '+(d.msg||''); }
   else if(d.event==='step'){ cls='info'; text='» '+(d.msg||''); }
   else if(d.event==='done'){
-    const detail = d.new_version || d.new_image || d.new_ref || '';
+    const detail = d.new_version || d.new_image || d.new_ref || d.value || '';
     cls = d.ok ? 'ok' : 'err';
-    text = (d.ok?'✓ ':'✗ ') + (d.msg || ((d.phase||'done')+(detail?': '+detail:'')));
-  } else return;
-  log.insertAdjacentHTML('beforeend', `<div class="log-line ${cls}">${esc(text)}</div>`);
+    text = (d.ok?'✓ ':'✗ ') + (d.msg || ((d.phase||d.field||'done')+(detail?': '+detail:'')));
+  } else return null;
+  return `<div class="log-line ${cls}">${esc(text)}</div>`;
+}
+
+function appendStream(sel, d){
+  const log=$(sel); if(!log) return;
+  const h=streamLineHtml(d); if(!h) return;
+  log.insertAdjacentHTML('beforeend', h);
   log.scrollTop = log.scrollHeight;
 }
+
+function appendUpdateLine(d){ appendStream('#updLog', d); }
 
 function startUpdateStream(kind, ref){
   stopUpdateStream();

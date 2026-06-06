@@ -19,6 +19,7 @@
 #   telcoin-ui-helper update-prepare  <observer|validator> <ref>
 #   telcoin-ui-helper update-apply    <observer|validator>
 #   telcoin-ui-helper update-discard  <observer|validator>
+#   telcoin-ui-helper config-set      <observer|validator> <field> <value>
 #
 set -euo pipefail
 
@@ -29,6 +30,9 @@ TRACING_URL="http://127.0.0.1:4317"
 # update-node.sh + its lib/ are shipped here (root-owned) by install-ui.sh so the
 # helper can drive updates without reaching into any user-writable location.
 UPDATE_SCRIPT="/opt/telcoin-ui-update/update-node.sh"
+# edit-config.sh is shipped to the same root-owned dir so config edits run the
+# CLI's own --json mode rather than re-implementing unit-file editing here.
+CONFIG_SCRIPT="/opt/telcoin-ui-update/edit-config.sh"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -185,6 +189,46 @@ cmd_update_discard() {
     exec bash "$UPDATE_SCRIPT" "--${t}" --json --discard
 }
 
+# =============================================================================
+# Config subcommand -- thin wrapper around edit-config.sh --json. The field is
+# checked against the editable allowlist and the value against a per-field regex
+# HERE before the script runs (edit-config.sh re-validates with its own
+# validators). The sudoers line wildcards only the value; field is fixed by this
+# allowlist, so a bad field never reaches the script.
+# =============================================================================
+
+config_script_ready() {
+    [[ -f "$CONFIG_SCRIPT" ]] || die "config script not found: $CONFIG_SCRIPT"
+}
+
+cmd_config_set() {
+    local t="$1" field="$2" value="$3"
+    require_type "$t"; config_script_ready
+    [[ -n "$field" ]] || die "missing field"
+    [[ -n "$value" ]] || die "missing value"
+
+    # Per-field value validation (first line of defence; edit-config.sh repeats it).
+    case "$field" in
+        primary_listener|worker_listener)
+            [[ "$value" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] \
+                || die "invalid multiaddr: $value" ;;
+        instance)
+            [[ "$value" =~ ^[1-9]$ ]] || die "invalid instance (1-9): $value" ;;
+        metrics)
+            [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$ ]] \
+                || die "invalid metrics address (IPv4:PORT): $value" ;;
+        verbosity)
+            [[ "$value" =~ ^-v{1,5}$ ]] || die "invalid verbosity: $value" ;;
+        docker_image)
+            [[ "$value" =~ ^[A-Za-z0-9._/:@-]+$ && "$value" == *:* ]] \
+                || die "invalid docker image: $value" ;;
+        *)
+            die "field not editable: $field" ;;
+    esac
+
+    exec bash "$CONFIG_SCRIPT" "--${t}" --json --set "${field}=${value}"
+}
+
 main() {
     local sub="${1:-}"
     case "$sub" in
@@ -197,6 +241,7 @@ main() {
         update-prepare)  shift; cmd_update_prepare "${1:-}" "${2:-}" ;;
         update-apply)    shift; cmd_update_apply   "${1:-}" ;;
         update-discard)  shift; cmd_update_discard "${1:-}" ;;
+        config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }
