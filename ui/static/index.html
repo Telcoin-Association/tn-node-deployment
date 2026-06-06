@@ -173,6 +173,11 @@ select{
   background:var(--bg);border:var(--border);color:var(--text);border-radius:8px;
   padding:7px 10px;font-family:inherit;font-size:12px;
 }
+.log-controls input{
+  background:var(--bg);border:var(--border);color:var(--text);border-radius:8px;
+  padding:7px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;min-width:160px;
+}
+.log-controls input:focus{outline:none;border-color:var(--accent)}
 
 /* ---- Traces table ---- */
 .tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px}
@@ -343,6 +348,8 @@ const state = {
   es: null,        // log SSE
   updateES: null,  // update progress SSE
   live: false,
+  logBuffer: [],                          // client-side line buffer (static + live)
+  logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
   setupStep: 1,
   setup: { network:'adiri', method:'source', passphrase:'loadcredential' },
   preflight: null,
@@ -609,6 +616,8 @@ async function serviceAction(action){
 function renderLogs(){
   const c = $('#view-logs');
   if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
+  state.logBuffer = [];
+  state.logFilter = { level:'all', search:'' };
   c.innerHTML = `
     <div class="card">
       <h3>${esc(cap(state.node))} Logs · telcoin-${esc(state.node)}</h3>
@@ -620,7 +629,17 @@ function renderLogs(){
           <option value="100" selected>100 lines</option>
           <option value="200">200 lines</option>
           <option value="500">500 lines</option>
+          <option value="1000">1000 lines</option>
         </select>
+        <select id="logLevel">
+          <option value="all">All levels</option>
+          <option value="error">Error</option>
+          <option value="warn">Warn</option>
+          <option value="info">Info</option>
+        </select>
+        <input id="logSearch" placeholder="search text…" autocomplete="off">
+        <button class="btn btn-out" id="logCopy">⧉ Copy</button>
+        <button class="btn btn-out" id="logDownload">⤓ Download</button>
         <span id="liveStatus" style="margin-left:auto;font-size:12px;color:var(--text2)"></span>
       </div>
       <div class="log-body" id="logBody"><div class="muted">Loading…</div></div>
@@ -628,6 +647,10 @@ function renderLogs(){
   $('#logRefresh').addEventListener('click', loadLogLines);
   $('#logLines').addEventListener('change', loadLogLines);
   $('#liveBtn').addEventListener('click', toggleLive);
+  $('#logLevel').addEventListener('change', e=>{ state.logFilter.level=e.target.value; renderLogBuffer(); });
+  $('#logSearch').addEventListener('input', e=>{ state.logFilter.search=e.target.value; renderLogBuffer(); });
+  $('#logCopy').addEventListener('click', copyLogs);
+  $('#logDownload').addEventListener('click', downloadLogs);
   loadLogLines();
 }
 
@@ -641,13 +664,63 @@ function colorize(line){
   return `<div class="log-line ${cls}">${esc(line)}</div>`;
 }
 
+// Coarse level for the filter dropdown -- mirrors colorize()'s precedence
+// (error > warn > everything-else) so the filter and the colours agree.
+function lineLevel(line){
+  if(/error/i.test(line)) return 'error';
+  if(/warn/i.test(line)) return 'warn';
+  return 'info';
+}
+
+function logMatches(line){
+  const f = state.logFilter;
+  if(f.level!=='all' && lineLevel(line)!==f.level) return false;
+  if(f.search && !line.toLowerCase().includes(f.search.toLowerCase())) return false;
+  return true;
+}
+
+function visibleLogLines(){ return state.logBuffer.filter(logMatches); }
+
+// Render the buffer through the active filter. Used by the static fetch and on
+// every filter change; live streaming appends incrementally (see startLive).
+function renderLogBuffer(){
+  const body = $('#logBody'); if(!body) return;
+  const lines = visibleLogLines();
+  if(!lines.length){
+    body.innerHTML = state.logBuffer.length ? '<div class="muted">No lines match the filter.</div>'
+                                            : '<div class="muted">No log output.</div>';
+    return;
+  }
+  body.innerHTML = lines.map(colorize).join('');
+  body.scrollTop = body.scrollHeight;
+}
+
 async function loadLogLines(){
   const body = $('#logBody'); if(!body) return;
   const n = $('#logLines').value;
   const d = await api(`/api/logs/${state.node}?lines=${n}`);
-  const lines = (d && d.lines)||[];
-  body.innerHTML = lines.length ? lines.map(colorize).join('') : '<div class="muted">No log output.</div>';
-  body.scrollTop = body.scrollHeight;
+  state.logBuffer = (d && d.lines) || [];
+  renderLogBuffer();
+}
+
+function copyLogs(){
+  const txt = visibleLogLines().join('\n');
+  if(!txt){ toast('No lines to copy','error'); return; }
+  navigator.clipboard?.writeText(txt).then(
+    ()=>toast('Logs copied to clipboard','success'),
+    ()=>toast('Copy failed','error'));
+}
+
+function downloadLogs(){
+  const txt = visibleLogLines().join('\n');
+  if(!txt){ toast('No lines to download','error'); return; }
+  const stamp = new Date().toISOString().replace(/:/g,'-').replace(/\.\d+Z$/,'Z');
+  const blob = new Blob([txt+'\n'], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `telcoin-${state.node}-${stamp}.log`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
 }
 
 function toggleLive(){ state.live ? stopLive() : startLive(); }
@@ -657,12 +730,19 @@ function startLive(){
   state.live = true;
   $('#liveBtn').innerHTML = '<span class="live-dot"></span> Stop';
   $('#liveStatus').innerHTML = '<span class="live-dot"></span> LIVE';
+  state.logBuffer = [];
   body.innerHTML='';
   state.es = new EventSource(`/api/logs/${state.node}/stream`);
   state.es.onmessage = ev=>{
-    body.insertAdjacentHTML('beforeend', colorize(ev.data));
-    while(body.children.length>500) body.removeChild(body.firstChild);
-    body.scrollTop = body.scrollHeight;
+    // Keep every line in the buffer (so filtering never loses lines), but only
+    // paint the ones that pass the active filter.
+    state.logBuffer.push(ev.data);
+    while(state.logBuffer.length>2000) state.logBuffer.shift();
+    if(logMatches(ev.data)){
+      body.insertAdjacentHTML('beforeend', colorize(ev.data));
+      while(body.children.length>1000) body.removeChild(body.firstChild);
+      body.scrollTop = body.scrollHeight;
+    }
   };
   state.es.onerror = ()=>{ /* keep open; browser auto-reconnects */ };
 }
