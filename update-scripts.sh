@@ -54,6 +54,7 @@ declare -a SCRIPTS=(
 # loop because it is the SCRIPTS entry above.)
 declare -a UI_BUNDLE=(
     "ui/static/index.html:ui/static/index.html"
+    "ui/static/telcoin-logo.png:ui/static/telcoin-logo.png"
     "ui/telcoin-ui-helper.sh:ui/telcoin-ui-helper.sh"
     "ui/telcoin-ui.service:ui/telcoin-ui.service"
     "ui/requirements.txt:ui/requirements.txt"

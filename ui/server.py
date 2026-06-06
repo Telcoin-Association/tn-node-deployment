@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.1.0"
+UI_VERSION = "1.1.1"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -331,6 +331,23 @@ def node_version(t):
 
     _version_cache[t] = (now, out)
     return out
+
+
+# Adiri testnet runs as EVM chain id 2017. Mainnet has not launched; new installs
+# always record NETWORK in .node-meta, so this chain-id fallback only ever needs
+# to cover legacy testnet nodes whose meta predates the NETWORK field.
+CHAIN_ID_NETWORK = {2017: "testnet"}
+
+
+def detect_network(t, chain_id=None):
+    """'testnet' / 'mainnet' / ''. meta NETWORK first; else map the live RPC
+    chain id (covers nodes set up before .node-meta carried NETWORK)."""
+    net = read_meta(t).get("NETWORK", "").strip()
+    if net:
+        return net
+    if chain_id is not None:
+        return CHAIN_ID_NETWORK.get(chain_id, "")
+    return ""
 
 
 def block_age(port):
@@ -690,7 +707,7 @@ def api_status(node_type):
         "block_number": block_number,
         "synced": synced,
         "chain_id": chain_id,
-        "network": meta.get("NETWORK", ""),
+        "network": detect_network(t, chain_id),
         "block_age": blk_age,
         "log_error_count_1h": log_error_count(cfg["log_path"]),
         "tracing_enabled": tracing_enabled(t),

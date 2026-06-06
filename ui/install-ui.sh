@@ -95,6 +95,11 @@ mkdir -p "${INSTALL_DIR}/static"
 cp "${SRC_DIR}/server.py"          "${INSTALL_DIR}/server.py"
 cp "${SRC_DIR}/requirements.txt"   "${INSTALL_DIR}/requirements.txt"
 cp "${SRC_DIR}/static/index.html"  "${INSTALL_DIR}/static/index.html"
+# Brand logo (optional). Flask serves /static/* from this dir; the UI falls back
+# to a built-in "TN" badge if the file is absent.
+if [[ -f "${SRC_DIR}/static/telcoin-logo.png" ]]; then
+    cp "${SRC_DIR}/static/telcoin-logo.png" "${INSTALL_DIR}/static/telcoin-logo.png"
+fi
 ok "UI files copied to ${INSTALL_DIR}"
 
 # ---- 4b. Privileged helper (root-owned, OUTSIDE /opt/telcoin-ui) ------------

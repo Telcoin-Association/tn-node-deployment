@@ -48,8 +48,12 @@ header{
 .brand{display:flex;align-items:center;gap:12px;flex-shrink:0}
 .logo{
   width:38px;height:38px;border-radius:9px;
+  display:flex;align-items:center;justify-content:center;overflow:hidden;
+}
+.logo img{width:100%;height:100%;object-fit:contain}
+/* Fallback badge shown only if telcoin-logo.png is missing (img onerror). */
+.logo.placeholder{
   background:linear-gradient(135deg,var(--accent),var(--accent2));
-  display:flex;align-items:center;justify-content:center;
   font-weight:800;font-size:15px;color:#001;
   box-shadow:0 0 18px rgba(0,180,255,0.45);
 }
@@ -263,7 +267,8 @@ select{
 <header>
   <div class="wrap hdr">
     <div class="brand">
-      <div class="logo">TN</div>
+      <div class="logo" id="brandLogo"><img src="/static/telcoin-logo.png" alt="Telcoin"
+        onerror="this.parentElement.classList.add('placeholder');this.parentElement.textContent='TN'"></div>
       <div>
         <h1>Telcoin Node Manager</h1>
         <div class="sub">Network Operations</div>
@@ -498,7 +503,7 @@ async function renderDashboard(){
       ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
       ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
       ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
-      ${statCard('Network', s.network?cap(s.network):'—', '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
+      ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
       ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
       ${statCard('Errors (1h)', s.log_error_count_1h!=null?esc(String(s.log_error_count_1h)):'—', (s.log_error_count_1h>0?'yellow':'green'), 'log ERROR / WARN')}
       ${statCard('Version', '<span id="verTile" style="font-size:16px;word-break:break-all">…</span>', 'accent', '<span id="verMeta"></span>')}
@@ -1140,6 +1145,7 @@ function stopTracesRefresh(){ if(state.tracesTimer){ clearInterval(state.tracesT
 
 function cap(s){ return String(s).charAt(0).toUpperCase()+String(s).slice(1); }
 function fmtNum(n){ return Number(n).toLocaleString('en-US'); }
+function netLabel(n){ return ({testnet:'Adiri Testnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
 // Boot
