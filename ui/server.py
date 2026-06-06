@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.2.1"
+UI_VERSION = "1.2.2"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -907,6 +907,73 @@ def api_config_set(node_type):
     if not config_value_ok(field, value):
         return jsonify({"error": "invalid value for field"}), 400
     return _update_stream(["sudo", "-n", HELPER, "config-set", node_type, field, value])
+
+
+# =============================================================================
+# ROUTES -- firewall (node ports only) + node removal
+#
+# Both go through the root-owned helper's --json subcommands. The firewall
+# surface is deliberately limited to the three node ports (the helper + script
+# refuse anything else); SSH/policy stay CLI-only so the UI can't lock anyone
+# out. Removal is destructive and requires a server-side typed "DELETE" confirm.
+# =============================================================================
+
+# Only these may be toggled (mirrors the helper + firewall-setup.sh allowlist).
+FIREWALL_PORTS = ("49590/udp", "49594/udp", "43174/tcp")
+
+
+@app.route("/api/firewall")
+def api_firewall():
+    rc, out, err = run(["sudo", "-n", HELPER, "firewall-status"], timeout=20)
+    if rc == 0 and out:
+        try:
+            return jsonify(json.loads(out.splitlines()[-1]))
+        except (ValueError, json.JSONDecodeError):
+            pass
+    # Helper/sudo/ufw unavailable -- degrade gracefully (no 500).
+    return jsonify({
+        "installed": False, "active": False, "default_incoming": "",
+        "ssh_port": "", "ports": {p: False for p in FIREWALL_PORTS},
+        "error": err or out or "firewall status unavailable",
+    })
+
+
+@app.route("/api/firewall/port", methods=["POST"])
+def api_firewall_port():
+    data = request.get_json(silent=True) or {}
+    port = str(data.get("port") or "").strip()
+    proto = str(data.get("proto") or "").strip()
+    state = str(data.get("state") or "").strip()
+    spec = f"{port}/{proto}"
+    if spec not in FIREWALL_PORTS:
+        return jsonify({"ok": False, "error": "port not permitted"}), 400
+    if state not in ("on", "off"):
+        return jsonify({"ok": False, "error": "state must be on|off"}), 400
+    rc, out, err = run(["sudo", "-n", HELPER, "firewall-port", spec, state], timeout=30)
+    if rc == 0 and out:
+        try:
+            d = json.loads(out.splitlines()[-1])
+            return jsonify({"ok": bool(d.get("ok")), "error": "" if d.get("ok") else d.get("msg", "")})
+        except (ValueError, json.JSONDecodeError):
+            pass
+    return jsonify({"ok": False, "error": err or out or "firewall update failed"})
+
+
+@app.route("/api/node/remove/<node_type>")
+def api_node_remove(node_type):
+    # Destructive, and SSE so the operator watches each teardown step -- which
+    # means GET (EventSource is GET-only), like the update/config streams. The
+    # browser must echo back confirm == "DELETE" (the same typed confirmation
+    # the CLI requires) before we will call the helper; the helper passes --yes.
+    if not valid_type(node_type):
+        return bad_type()
+    scope = (request.args.get("scope") or "").strip()
+    confirm = request.args.get("confirm") or ""
+    if scope not in ("service", "data", "keys"):
+        return jsonify({"error": "invalid scope"}), 400
+    if confirm != "DELETE":
+        return jsonify({"error": 'confirmation required (type "DELETE")'}), 400
+    return _update_stream(["sudo", "-n", HELPER, "node-remove", node_type, scope])
 
 
 # =============================================================================

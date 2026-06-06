@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -146,6 +146,17 @@ else
     warn "edit-config.sh not found beside install-ui.sh -- the UI Config-edit feature will be unavailable until it is present."
 fi
 
+# firewall-setup.sh + remove-node.sh drive the UI's Firewall + Danger Zone via
+# their --json modes. Same root-owned dir / pattern as edit-config.sh.
+for s in firewall-setup.sh remove-node.sh; do
+    if [[ -f "${REPO_DIR}/${s}" ]]; then
+        install -o root -g root -m 0755 "${REPO_DIR}/${s}" "${UPDATE_DIR}/${s}"
+        ok "${s} installed to ${UPDATE_DIR} (root:root)"
+    else
+        warn "${s} not found beside install-ui.sh -- the related UI feature will be unavailable until it is present."
+    fi
+done
+
 # ---- 5. Install Flask -------------------------------------------------------
 # --ignore-installed blinker: on Ubuntu the apt package `python3-blinker` is a
 # distutils install pip cannot cleanly uninstall, so a plain `pip install flask`
@@ -200,6 +211,24 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard
 # value against a per-field regex inside the helper before edit-config.sh runs.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set observer *
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set validator *
+# Firewall helper -- read-only status, plus open/close for ONLY the three node
+# ports. Enumerated fully (3 ports x on|off), so NO wildcard is needed. SSH /
+# default-policy / password-auth are intentionally never reachable from here.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-status
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49590/udp on
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49590/udp off
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49594/udp on
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49594/udp off
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 43174/tcp on
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 43174/tcp off
+# Node-remove helper -- destructive. Enumerated (2 types x 3 scopes), no
+# wildcard. The server requires a typed "DELETE" confirmation before calling.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer service
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer data
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer keys
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator service
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator data
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator keys
 EOF
 chmod 440 "${SUDOERS_FILE}"
 if visudo -cf "${SUDOERS_FILE}" >/dev/null 2>&1; then

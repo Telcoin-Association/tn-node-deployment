@@ -20,6 +20,9 @@
 #   telcoin-ui-helper update-apply    <observer|validator>
 #   telcoin-ui-helper update-discard  <observer|validator>
 #   telcoin-ui-helper config-set      <observer|validator> <field> <value>
+#   telcoin-ui-helper firewall-status
+#   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
+#   telcoin-ui-helper node-remove     <observer|validator> <service|data|keys>
 #
 set -euo pipefail
 
@@ -33,6 +36,9 @@ UPDATE_SCRIPT="/opt/telcoin-ui-update/update-node.sh"
 # edit-config.sh is shipped to the same root-owned dir so config edits run the
 # CLI's own --json mode rather than re-implementing unit-file editing here.
 CONFIG_SCRIPT="/opt/telcoin-ui-update/edit-config.sh"
+# firewall-setup.sh + remove-node.sh, same root-owned dir, same --json pattern.
+FIREWALL_SCRIPT="/opt/telcoin-ui-update/firewall-setup.sh"
+REMOVE_SCRIPT="/opt/telcoin-ui-update/remove-node.sh"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -229,6 +235,49 @@ cmd_config_set() {
     exec bash "$CONFIG_SCRIPT" "--${t}" --json --set "${field}=${value}"
 }
 
+# =============================================================================
+# Firewall subcommands -- thin wrappers around firewall-setup.sh --json. Only
+# the three node ports may be toggled; SSH/policy/etc are never reachable here.
+# =============================================================================
+
+firewall_script_ready() {
+    [[ -f "$FIREWALL_SCRIPT" ]] || die "firewall script not found: $FIREWALL_SCRIPT"
+}
+
+cmd_firewall_status() {
+    firewall_script_ready
+    exec bash "$FIREWALL_SCRIPT" --json --status
+}
+
+cmd_firewall_port() {
+    local spec="$1" pstate="$2"
+    firewall_script_ready
+    # Hard allowlist (the script re-checks). 49590/49594 udp = P2P, 43174/tcp = Kuma.
+    case "$spec" in
+        49590/udp|49594/udp|43174/tcp) ;;
+        *) die "port not permitted: $spec" ;;
+    esac
+    case "$pstate" in on|off) ;; *) die "state must be on|off" ;; esac
+    exec bash "$FIREWALL_SCRIPT" --json --port "$spec" "$pstate"
+}
+
+# =============================================================================
+# Node-remove subcommand -- thin wrapper around remove-node.sh --json. The
+# server gates this behind a typed "DELETE" confirmation; --yes is always passed
+# here because the helper is only reached after that gate.
+# =============================================================================
+
+remove_script_ready() {
+    [[ -f "$REMOVE_SCRIPT" ]] || die "remove script not found: $REMOVE_SCRIPT"
+}
+
+cmd_node_remove() {
+    local t="$1" scope="$2"
+    require_type "$t"; remove_script_ready
+    case "$scope" in service|data|keys) ;; *) die "invalid scope: $scope (expected service|data|keys)" ;; esac
+    exec bash "$REMOVE_SCRIPT" --json --remove "$t" --scope "$scope" --yes
+}
+
 main() {
     local sub="${1:-}"
     case "$sub" in
@@ -242,6 +291,9 @@ main() {
         update-apply)    shift; cmd_update_apply   "${1:-}" ;;
         update-discard)  shift; cmd_update_discard "${1:-}" ;;
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
+        firewall-status) cmd_firewall_status ;;
+        firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
+        node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }

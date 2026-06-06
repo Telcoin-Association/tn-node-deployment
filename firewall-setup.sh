@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.47"
+readonly SCRIPT_VERSION="1.2.0"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
@@ -673,7 +673,109 @@ main_menu() {
 # MAIN
 # =============================================================================
 
+# =============================================================================
+# JSON / NON-INTERACTIVE MODE
+#
+# Reached only via `--json` (the interactive default is completely unaffected).
+# Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper.
+#
+# Scope is deliberately narrow: read-only STATUS, and open/close for ONLY the
+# three node ports below -- never SSH, password auth, root login, or the default
+# policy (those stay CLI-only so the UI can never lock an operator out).
+#
+#   firewall-setup.sh --json --status
+#   firewall-setup.sh --json --port <port>/<proto> <on|off>   (node ports only)
+# =============================================================================
+
+# The only ports the UI is allowed to toggle. 49590/49594 udp = validator P2P,
+# 43174/tcp = Uptime Kuma health endpoint. Anything else is refused.
+readonly -a JSON_NODE_PORTS=( "49590/udp" "49594/udp" "${UPTIME_KUMA_PORT}/tcp" )
+
+json_setup_fds() {
+    exec 3>&1   # fd3 = original stdout: JSON is written here
+    exec 1>&2   # stdout now aliases stderr: print_*/ufw output is benign noise
+}
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/ }"; s="${s//$'\r'/ }"; s="${s//$'\t'/ }"
+    printf '%s' "$s"
+}
+
+json_emit() { printf '%s\n' "$1" >&3; }
+json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
+
+# Single-object status: installed/active, default inbound policy, ssh port (read
+# only -- shown for context, never changed) and the open/closed state of each
+# node port.
+json_fw_status() {
+    local installed=false active=false default_in="" ssh_port
+    if ufw_installed; then installed=true; fi
+    if ufw_active;    then active=true;    fi
+    if [[ "$active" == "true" ]]; then
+        # Real ufw verbose form: "Default: deny (incoming), allow (outgoing), ..."
+        default_in=$(ufw status verbose 2>/dev/null | grep -oE '(deny|allow|reject) \(incoming\)' | awk '{print $1}' | head -1)
+    fi
+    ssh_port=$(get_ssh_port)
+
+    local ports_json="" first=true pp port proto open
+    for pp in "${JSON_NODE_PORTS[@]}"; do
+        port="${pp%/*}"; proto="${pp#*/}"; open=false
+        if [[ "$active" == "true" ]] && ufw_has_allow "$port" "$proto"; then open=true; fi
+        [[ "$first" == "true" ]] || ports_json+=","
+        ports_json+="\"${pp}\":${open}"
+        first=false
+    done
+
+    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"ports\":{${ports_json}}}"
+}
+
+# Open/close ONE node port. Refuses any port not in JSON_NODE_PORTS.
+json_fw_port() {
+    local spec="$1" pstate="$2" allowed=false pp
+    for pp in "${JSON_NODE_PORTS[@]}"; do [[ "$pp" == "$spec" ]] && allowed=true; done
+    [[ "$allowed" == "true" ]] || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"port not permitted from UI: $(json_escape "$spec") (allowed: ${JSON_NODE_PORTS[*]})\"}"; return 1; }
+    case "$pstate" in on|off) ;; *) json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"state must be on|off\"}"; return 1 ;; esac
+    ufw_installed || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw not installed\"}"; return 1; }
+    ufw_active    || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw is not active -- enable it via firewall-setup.sh on the server first\"}"; return 1; }
+
+    if [[ "$pstate" == "on" ]]; then
+        json_event step "Opening ${spec}"
+        ufw allow "$spec" >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw allow failed for $(json_escape "$spec")\"}"; return 1; }
+    else
+        json_event step "Closing ${spec}"
+        ufw delete allow "$spec" >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw delete failed for $(json_escape "$spec")\"}"; return 1; }
+    fi
+    json_emit "{\"event\":\"done\",\"ok\":true,\"port\":\"$(json_escape "$spec")\",\"state\":\"$(json_escape "$pstate")\",\"msg\":\"firewall updated\"}"
+}
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
 main() {
+    local json_mode=false action="" fw_port="" fw_state=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)   json_mode=true; shift ;;
+            --status) action="status"; shift ;;
+            --port)   action="port"; fw_port="${2:-}"; fw_state="${3:-}"
+                      shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ "$json_mode" == "true" ]]; then
+        json_setup_fds
+        check_root
+        case "$action" in
+            status) json_fw_status ;;
+            port)   json_fw_port "$fw_port" "$fw_state" ;;
+            *)      json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"unknown or missing --json action\"}"; exit 1 ;;
+        esac
+        exit $?
+    fi
+
     check_root
     main_menu
 }

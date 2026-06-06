@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.47"
+readonly SCRIPT_VERSION="1.2.0"
 
 # =============================================================================
 # HELPERS
@@ -591,7 +591,117 @@ main_menu() {
 # MAIN
 # =============================================================================
 
+# =============================================================================
+# JSON / NON-INTERACTIVE MODE
+#
+# Reached only via `--json` (the interactive default is completely unaffected).
+# Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper.
+# DESTRUCTIVE: requires --yes, and the server gates it behind a typed "DELETE"
+# confirmation. Scope is cumulative:
+#   service -> stop+disable+rm unit (+ docker container)
+#   data    -> service + remove chain data
+#   keys    -> data + remove keys/config/.node-meta (+ TPM sealed files)
+#
+#   remove-node.sh --json --remove <observer|validator> --scope <service|data|keys> --yes
+# =============================================================================
+
+JSON_REMOVE_TYPE=""
+JSON_REMOVE_SCOPE=""
+JSON_YES=false
+
+json_setup_fds() {
+    exec 3>&1   # fd3 = original stdout: JSON is written here
+    exec 1>&2   # stdout now aliases stderr: print_* output is benign noise
+}
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/ }"; s="${s//$'\r'/ }"; s="${s//$'\t'/ }"
+    printf '%s' "$s"
+}
+
+json_emit() { printf '%s\n' "$1" >&3; }
+json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
+
+json_remove() {
+    local node_type="$1" scope="$2"
+    case "$node_type" in observer|validator) ;; *) json_event error "invalid node type: ${node_type}"; return 1 ;; esac
+    case "$scope" in service|data|keys) ;; *) json_event error "invalid scope: ${scope}"; return 1 ;; esac
+
+    local unit="/etc/systemd/system/telcoin-${node_type}.service"
+    if [[ ! -f "$unit" ]]; then
+        json_event error "node not installed: telcoin-${node_type}"
+        return 1
+    fi
+
+    # Detect docker BEFORE removing the unit (we read the install method from it).
+    local is_docker=false
+    grep -q "docker run" "$unit" 2>/dev/null && is_docker=true
+
+    json_event step "Stopping and disabling telcoin-${node_type}"
+    systemctl stop "telcoin-${node_type}" 2>/dev/null || true
+    systemctl disable "telcoin-${node_type}" 2>/dev/null || true
+    rm -f "$unit"
+    systemctl daemon-reload
+
+    if [[ "$is_docker" == "true" ]] && command -v docker >/dev/null 2>&1; then
+        json_event step "Removing docker container telcoin-${node_type}"
+        docker stop "telcoin-${node_type}" 2>/dev/null || true
+        docker rm "telcoin-${node_type}" 2>/dev/null || true
+    fi
+
+    if [[ "$scope" == "data" || "$scope" == "keys" ]]; then
+        local data_dir="/var/lib/telcoin/${node_type}"
+        if [[ -d "$data_dir" ]]; then
+            json_event step "Removing chain data ${data_dir}"
+            rm -rf "$data_dir"
+        fi
+    fi
+
+    if [[ "$scope" == "keys" ]]; then
+        local config_dir="/etc/telcoin/${node_type}"
+        json_event step "Removing keys and config ${config_dir}"
+        rm -rf "/var/lib/telcoin/${node_type}/node-keys" 2>/dev/null || true
+        rm -rf "$config_dir" 2>/dev/null || true
+        if declare -f tpm_remove_sealed_files >/dev/null 2>&1; then
+            tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
+        fi
+    fi
+
+    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$node_type")\",\"scope\":\"$(json_escape "$scope")\",\"msg\":\"telcoin-${node_type} removed (scope: ${scope})\"}"
+}
+
+run_json_mode() {
+    json_setup_fds
+    check_root
+    if [[ "$JSON_YES" != "true" ]]; then
+        json_event error "refusing destructive removal without --yes"
+        return 1
+    fi
+    json_remove "$JSON_REMOVE_TYPE" "$JSON_REMOVE_SCOPE"
+}
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
 main() {
+    local json_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)   json_mode=true; shift ;;
+            --remove) JSON_REMOVE_TYPE="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
+            --scope)  JSON_REMOVE_SCOPE="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
+            --yes)    JSON_YES=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ "$json_mode" == "true" ]]; then
+        run_json_mode
+        exit $?
+    fi
+
     check_root
     main_menu
 }

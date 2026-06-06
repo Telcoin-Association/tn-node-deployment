@@ -354,6 +354,7 @@ const state = {
   updateES: null,  // update progress SSE
   configES: null,  // config-save progress SSE
   configEditing: false,
+  removeES: null,  // node-removal progress SSE
   live: false,
   logBuffer: [],                          // client-side line buffer (static + live)
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
@@ -408,6 +409,7 @@ function switchView(v){
   stopTracesRefresh();
   stopUpdateStream();
   stopConfigStream();
+  stopRemoveStream();
   if(v!=='config') state.configEditing=false;
   if(v==='dashboard'){ renderDashboard(); startAutoRefresh(); }
   if(v==='logs')   renderLogs();
@@ -1207,8 +1209,121 @@ async function renderSystem(){
       <div class="kv"><span class="k">Uptime</span><span class="v">${esc(d.uptime||'—')}</span></div>
       <div class="kv"><span class="k">Disk</span><span class="v">${esc((disk.used||'?')+' / '+(disk.total||'?')+' ('+(disk.percent||'?')+'%)')}</span></div>
       <div class="kv"><span class="k">Memory</span><span class="v">${esc(mem.used_gb!=null?(mem.used_gb+' / '+mem.total_gb+' GB ('+mem.percent+'%)'):'—')}</span></div>
+    </div>
+    <div class="card" id="fwCard" style="margin-top:14px"><h3>Firewall</h3><div class="muted">Loading firewall status…</div></div>
+    ${dangerZoneHtml()}
+    <div class="card" id="rmProgressCard" style="display:none;margin-top:14px">
+      <h3>Removal Progress</h3>
+      <div class="log-body" id="rmLog" style="height:240px"></div>
     </div>`;
+  wireDangerZone();
+  loadFirewall();
 }
+
+// ---- Firewall (status + the three node ports only) -------------------------
+const FW_PORTS = [
+  ['49590/udp','Validator P2P (primary)'],
+  ['49594/udp','Validator P2P (worker)'],
+  ['43174/tcp','Uptime Kuma health'],
+];
+
+async function loadFirewall(){
+  const card=$('#fwCard'); if(!card) return;
+  const f = await api('/api/firewall');
+  if(f.error && !f.installed){
+    card.innerHTML = `<h3>Firewall</h3><p class="muted" style="font-size:13px">Firewall status unavailable${f.error?' ('+esc(f.error)+')':''}. Manage it with <span class="mono">firewall-setup.sh</span> on the server.</p>`;
+    return;
+  }
+  const ports = f.ports||{};
+  const portRows = FW_PORTS.map(([pp,label])=>{
+    const open=!!ports[pp];
+    return `<div class="kv" style="align-items:center">
+      <span class="k">${esc(label)} · <span class="mono">${esc(pp)}</span></span>
+      <span class="v" style="display:flex;gap:10px;align-items:center;justify-content:flex-end">
+        ${open?'<span class="badge ok">open</span>':'<span class="badge err">closed</span>'}
+        <button class="btn ${open?'btn-red':'btn-green'}" data-fw-port="${esc(pp)}" data-fw-state="${open?'off':'on'}" ${f.active?'':'disabled'}>${open?'Close':'Open'}</button>
+      </span></div>`;
+  }).join('');
+  card.innerHTML = `
+    <h3>Firewall</h3>
+    <div class="kv"><span class="k">ufw</span><span class="v">${f.installed?(f.active?'<span class="badge ok">active</span>':'<span class="badge err">inactive</span>'):'<span class="muted">not installed</span>'}</span></div>
+    <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
+    <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
+    ${portRows}
+    <div class="note" style="margin-top:14px">Only the three node ports can be toggled here.
+      <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong>${f.installed&&!f.active?' Enable ufw on the server first to manage ports.':''}</div>`;
+  card.querySelectorAll('[data-fw-port]').forEach(b=>b.addEventListener('click', ()=>toggleFirewallPort(b.dataset.fwPort, b.dataset.fwState, b)));
+}
+
+async function toggleFirewallPort(spec, pstate, btn){
+  const [port,proto]=spec.split('/');
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span>'; }
+  const r = await api('/api/firewall/port', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({port, proto, state:pstate}),
+  });
+  if(r.ok) toast('Firewall '+(pstate==='on'?'opened ':'closed ')+spec,'success');
+  else toast('Firewall change failed: '+(r.error||'unknown error'),'error');
+  loadFirewall();
+}
+
+// ---- Danger Zone (remove the selected node) --------------------------------
+function dangerZoneHtml(){
+  const t = state.node;
+  if(!state.nodes[t]?.installed){
+    return `<div class="card" id="dzCard" style="margin-top:14px">
+      <h3>Danger Zone</h3>
+      <p class="muted" style="font-size:13px">No <span class="mono">telcoin-${esc(t)}</span> node is installed, so there is nothing to remove. Select an installed node above to manage its removal.</p></div>`;
+  }
+  return `<div class="card" id="dzCard" style="margin-top:14px;border-color:rgba(255,77,109,0.35)">
+    <h3 style="color:var(--red)">Danger Zone · Remove ${esc(cap(t))}</h3>
+    <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Permanently removes the <span class="mono">telcoin-${esc(t)}</span> node. Choose how much to remove.
+      <strong style="color:var(--red)">Keys, once removed, are unrecoverable.</strong></p>
+    <div class="field"><label>Scope</label>
+      <select id="rmScope">
+        <option value="service">Service only — stop, disable &amp; remove the unit (keep data + keys)</option>
+        <option value="data">Service + chain data — also wipe the database (keep keys)</option>
+        <option value="keys">Everything — service, data, keys &amp; config (UNRECOVERABLE)</option>
+      </select></div>
+    <div class="field"><label>Type <span class="mono">DELETE</span> to confirm</label>
+      <input id="rmConfirm" placeholder="DELETE" autocomplete="off"></div>
+    <div class="svc-row" style="margin-top:6px">
+      <button class="btn btn-red" id="rmBtn" disabled>Remove ${esc(cap(t))} Node</button>
+    </div>
+  </div>`;
+}
+
+function wireDangerZone(){
+  const inp=$('#rmConfirm'), btn=$('#rmBtn');
+  if(!inp || !btn) return;
+  inp.addEventListener('input', ()=>{ btn.disabled = inp.value!=='DELETE'; });
+  btn.addEventListener('click', removeNode);
+}
+
+function removeNode(){
+  const scope=($('#rmScope')?.value)||'service';
+  if(($('#rmConfirm')?.value)!=='DELETE') return;
+  const t=state.node;
+  if(!window.confirm('Remove the '+t+' node (scope: '+scope+')? This cannot be undone.')) return;
+  stopRemoveStream();
+  const card=$('#rmProgressCard'); if(card) card.style.display='block';
+  const log=$('#rmLog'); if(log) log.innerHTML='<div class="log-line info">» removing '+esc(t)+' ('+esc(scope)+')…</div>';
+  const btn=$('#rmBtn'); if(btn) btn.disabled=true;
+  const url='/api/node/remove/'+t+'?scope='+encodeURIComponent(scope)+'&confirm=DELETE';
+  state.removeES = new EventSource(url);
+  state.removeES.onmessage = ev=>{
+    let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
+    if(d.event==='closed'){ stopRemoveStream(); loadNodes(); renderSystem(); return; }
+    appendStream('#rmLog', d);
+    if(d.event==='done'){
+      if(d.ok) toast(cap(t)+' node removed','success');
+      else toast('Removal failed: '+(d.msg||'unknown error'),'error');
+    }
+  };
+  state.removeES.onerror = ()=>{ /* server closes the stream when the script exits */ };
+}
+
+function stopRemoveStream(){ if(state.removeES){ state.removeES.close(); state.removeES=null; } }
 
 // =============================================================================
 // SETUP WIZARD
