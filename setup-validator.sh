@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.47"
+readonly SCRIPT_VERSION="1.1.48"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -25,6 +25,7 @@ CONFIG_DIR="$DEFAULT_CONFIG_DIR/validator"
 LOG_DIR="$DEFAULT_LOG_DIR"
 INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 VALIDATOR_ADDRESS=""
+PUBLIC_IP=""
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
 PRIMARY_LISTENER_MULTIADDR=""
@@ -495,6 +496,8 @@ step_generate_keys() {
     else
         print_info "Detected public IP: ${public_ip}"
     fi
+    # Persist for the .node-meta record (read back by the Node Manager UI).
+    PUBLIC_IP="$public_ip"
 
     echo ""
     echo "  External addresses (advertised to peers -- use your public/external IP):"
@@ -844,6 +847,9 @@ PASSPHRASE_METHOD=${PASSPHRASE_METHOD}
 DOCKER_IMAGE=${DOCKER_IMAGE:-}
 NETWORK=${NETWORK}
 DATA_DIR=${DATA_DIR}
+PUBLIC_IP=${PUBLIC_IP:-}
+EXTERNAL_PRIMARY_ADDR=${PRIMARY_MULTIADDR:-}
+EXTERNAL_WORKER_ADDR=${WORKER_MULTIADDR:-}
 EOF
     chmod 600 "$meta_file"
     print_ok "Node metadata written: ${meta_file}"

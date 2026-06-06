@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.0.2"
+readonly SCRIPT_VERSION="1.1.0"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -106,6 +106,22 @@ info "Installing privileged helper ${HELPER_DST}..."
 install -o root -g root -m 0755 "${SRC_DIR}/telcoin-ui-helper.sh" "${HELPER_DST}"
 ok "Helper installed (root:root 0755)"
 
+# ---- 4c. Update engine (root-owned, OUTSIDE /opt/telcoin-ui) ----------------
+# Ship update-node.sh + its lib/ so the helper can drive the non-interactive
+# --json updater. Root-owned and outside the user-writable UI dir, so the
+# `chown -R telcoin-ui` below can never make the update path user-writable.
+UPDATE_DIR="/opt/telcoin-ui-update"
+REPO_DIR="$(cd "${SRC_DIR}/.." && pwd)"
+if [[ -f "${REPO_DIR}/update-node.sh" && -f "${REPO_DIR}/lib/common.sh" ]]; then
+    info "Installing update engine to ${UPDATE_DIR}..."
+    install -o root -g root -m 0755 -d "${UPDATE_DIR}" "${UPDATE_DIR}/lib"
+    install -o root -g root -m 0755 "${REPO_DIR}/update-node.sh" "${UPDATE_DIR}/update-node.sh"
+    install -o root -g root -m 0644 "${REPO_DIR}/lib/common.sh"  "${UPDATE_DIR}/lib/common.sh"
+    ok "Update engine installed (root:root)"
+else
+    warn "update-node.sh / lib/common.sh not found beside install-ui.sh -- the UI Update tab will be unavailable until they are present."
+fi
+
 # ---- 5. Install Flask -------------------------------------------------------
 # --ignore-installed blinker: on Ubuntu the apt package `python3-blinker` is a
 # distutils install pip cannot cleanly uninstall, so a plain `pip install flask`
@@ -144,6 +160,17 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enable
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enable validator
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable validator
+# Update helper -- check/apply/discard take a fixed node-type arg. update-prepare
+# also takes a <ref>; the ref value is wildcarded here but strictly validated
+# (^[A-Za-z0-9._/-]+$) inside the helper before it is ever used.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-check observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-check validator
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-prepare observer *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-prepare validator *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-apply observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-apply validator
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard validator
 EOF
 chmod 440 "${SUDOERS_FILE}"
 if visudo -cf "${SUDOERS_FILE}" >/dev/null 2>&1; then

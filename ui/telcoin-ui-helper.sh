@@ -15,12 +15,20 @@
 #   telcoin-ui-helper jaeger-status
 #   telcoin-ui-helper tracing-enable  <observer|validator>
 #   telcoin-ui-helper tracing-disable <observer|validator>
+#   telcoin-ui-helper update-check    <observer|validator>
+#   telcoin-ui-helper update-prepare  <observer|validator> <ref>
+#   telcoin-ui-helper update-apply    <observer|validator>
+#   telcoin-ui-helper update-discard  <observer|validator>
 #
 set -euo pipefail
 
 JAEGER_NAME="jaeger"
 JAEGER_IMAGE="jaegertracing/all-in-one:latest"
 TRACING_URL="http://127.0.0.1:4317"
+
+# update-node.sh + its lib/ are shipped here (root-owned) by install-ui.sh so the
+# helper can drive updates without reaching into any user-writable location.
+UPDATE_SCRIPT="/opt/telcoin-ui-update/update-node.sh"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -141,6 +149,42 @@ cmd_tracing_disable() {
     echo "ok"
 }
 
+# =============================================================================
+# Update subcommands -- thin wrappers around update-node.sh --json. They never
+# embed update logic themselves; all the building/swapping/restarting lives in
+# update-node.sh. <ref> is validated against a strict tag/branch/commit pattern
+# (no wildcards reach the shell).
+# =============================================================================
+
+update_script_ready() {
+    [[ -f "$UPDATE_SCRIPT" ]] || die "update script not found: $UPDATE_SCRIPT"
+}
+
+cmd_update_check() {
+    local t="$1"; require_type "$t"; update_script_ready
+    exec bash "$UPDATE_SCRIPT" "--${t}" --json --check
+}
+
+cmd_update_prepare() {
+    local t="$1" ref="$2"
+    require_type "$t"; update_script_ready
+    [[ -n "$ref" ]] || die "missing ref"
+    [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || die "invalid ref: $ref"
+    exec bash "$UPDATE_SCRIPT" "--${t}" --json --prepare --ref "$ref"
+}
+
+cmd_update_apply() {
+    local t="$1"; require_type "$t"; update_script_ready
+    # --yes: in JSON mode this stands in for the interactive typed CONFIRM and is
+    # required for validators. The UI shows the downtime warning before calling.
+    exec bash "$UPDATE_SCRIPT" "--${t}" --json --apply --yes
+}
+
+cmd_update_discard() {
+    local t="$1"; require_type "$t"; update_script_ready
+    exec bash "$UPDATE_SCRIPT" "--${t}" --json --discard
+}
+
 main() {
     local sub="${1:-}"
     case "$sub" in
@@ -149,6 +193,10 @@ main() {
         jaeger-status)   cmd_jaeger_status ;;
         tracing-enable)  shift; cmd_tracing_enable "${1:-}" ;;
         tracing-disable) shift; cmd_tracing_disable "${1:-}" ;;
+        update-check)    shift; cmd_update_check   "${1:-}" ;;
+        update-prepare)  shift; cmd_update_prepare "${1:-}" "${2:-}" ;;
+        update-apply)    shift; cmd_update_apply   "${1:-}" ;;
+        update-discard)  shift; cmd_update_discard "${1:-}" ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }

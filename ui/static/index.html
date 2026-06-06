@@ -273,6 +273,7 @@ select{
       <button class="tab active" data-view="dashboard">Dashboard</button>
       <button class="tab" data-view="logs">Logs</button>
       <button class="tab" data-view="config">Config</button>
+      <button class="tab" data-view="update">Update</button>
       <button class="tab" data-view="traces">Traces</button>
       <button class="tab" data-view="settings">Settings</button>
       <button class="tab" data-view="setup">Setup</button>
@@ -310,6 +311,8 @@ select{
   <section class="view" id="view-logs"></section>
   <!-- CONFIG -->
   <section class="view" id="view-config"></section>
+  <!-- UPDATE -->
+  <section class="view" id="view-update"></section>
   <!-- TRACES -->
   <section class="view" id="view-traces"></section>
   <!-- SETTINGS -->
@@ -333,6 +336,7 @@ const state = {
   refreshTimer: null,
   tracesTimer: null,   // 30s traces auto-refresh
   es: null,        // log SSE
+  updateES: null,  // update progress SSE
   live: false,
   setupStep: 1,
   setup: { network:'adiri', method:'source', passphrase:'loadcredential' },
@@ -383,9 +387,11 @@ function switchView(v){
   stopAutoRefresh();
   stopLive();
   stopTracesRefresh();
+  stopUpdateStream();
   if(v==='dashboard'){ renderDashboard(); startAutoRefresh(); }
   if(v==='logs')   renderLogs();
   if(v==='config') renderConfig();
+  if(v==='update') renderUpdate();
   if(v==='traces'){ renderTraces(); startTracesRefresh(); }
   if(v==='settings') renderSettings();
   if(v==='setup')  renderSetup();
@@ -405,6 +411,7 @@ function rerenderActive(){
   if(state.view==='dashboard') renderDashboard();
   if(state.view==='logs')   renderLogs();
   if(state.view==='config') renderConfig();
+  if(state.view==='update') renderUpdate();
   if(state.view==='traces') renderTraces();
   if(state.view==='settings') renderSettings();
   if(state.view==='system') renderSystem();
@@ -479,6 +486,7 @@ async function renderDashboard(){
         ${running?`<button class="btn btn-red" data-act="stop">■ Stop</button>`:''}
         <button class="btn btn-out" data-act="restart">↻ Restart</button>
         <span id="jaegerInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"><span class="jdot gray"></span>Jaeger</span>
+        <span id="updInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"></span>
         <span class="uptime">${s.uptime?'Since '+esc(s.uptime):''}</span>
       </div>
     </div>
@@ -490,6 +498,10 @@ async function renderDashboard(){
       ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
       ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
       ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
+      ${statCard('Network', s.network?cap(s.network):'—', '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
+      ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
+      ${statCard('Errors (1h)', s.log_error_count_1h!=null?esc(String(s.log_error_count_1h)):'—', (s.log_error_count_1h>0?'yellow':'green'), 'log ERROR / WARN')}
+      ${statCard('Version', '<span id="verTile" style="font-size:16px;word-break:break-all">…</span>', 'accent', '<span id="verMeta"></span>')}
       ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
       ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
     </div>
@@ -499,6 +511,7 @@ async function renderDashboard(){
       <div class="card">
         <h3>Node Details</h3>
         <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
         <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
         <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
@@ -518,6 +531,33 @@ async function renderDashboard(){
   c.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click', ()=>serviceAction(b.dataset.act)));
 
   augmentDashboardJaeger(s);
+  augmentDashboardVersion();
+  augmentDashboardUpdate();
+}
+
+// Lazy: fill the Version tile + Node Details version row from /api/version.
+async function augmentDashboardVersion(){
+  const v = await api('/api/version/'+state.node);
+  if(state.view!=='dashboard' || !v || v.error) return;
+  const ref = v.ref || '—';
+  const tile=$('#verTile'); if(tile) tile.textContent = ref;
+  const meta=$('#verMeta'); if(meta) meta.textContent = v.kind || '';
+  const det=$('#verDetail'); if(det) det.textContent = v.kind ? (ref+' ('+v.kind+')') : ref;
+}
+
+// Lazy: an "update available / pending" badge that deep-links to the Update tab.
+// Skipped silently when the update check is unavailable (degraded response).
+async function augmentDashboardUpdate(){
+  const u = await api('/api/update/status/'+state.node);
+  if(state.view!=='dashboard' || !u || u.error) return;
+  const ind=$('#updInd'); if(!ind) return;
+  if(u.update_available){
+    ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--yellow)">⬆ update available</a>';
+  } else if(u.pending){
+    ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--accent)">● update pending</a>';
+  } else {
+    ind.innerHTML = '<span style="color:var(--text3)">up to date</span>';
+  }
 }
 
 // Progressive enhancement: one lightweight /api/jaeger/status call drives the
@@ -644,8 +684,11 @@ async function renderConfig(){
     ['Instance', d.instance],
     ['RPC Port', d.rpc_port],
     ['Metrics Address', d.metrics],
-    ['Primary Listener', d.primary_listener],
-    ['Worker Listener', d.worker_listener],
+    ['Primary Listener (bind)', d.primary_listener],
+    ['Worker Listener (bind)', d.worker_listener],
+    ['External Primary', d.external_primary],
+    ['External Worker', d.external_worker],
+    ['Version', d.version],
     ['Install Method', d.install_method],
     ['Passphrase Method', d.passphrase_method],
   ];
@@ -656,6 +699,123 @@ async function renderConfig(){
       <h3>${esc(cap(state.node))} Configuration</h3>
       ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v||'—')}</span></div>`).join('')}
     </div>`;
+}
+
+// =============================================================================
+// UPDATE -- in-UI node updater (current vs latest, Prepare + Apply, live log)
+// =============================================================================
+async function renderUpdate(){
+  const c = $('#view-update');
+  const t = state.node;
+  if(!state.nodes[t]?.installed){ emptyState(c, cap(t)); return; }
+  c.innerHTML = `
+    <div class="note">Updates run in two phases through the same <span class="mono">update-node.sh</span> the CLI uses:
+      <strong>Prepare</strong> (build or pull — no downtime) then <strong>Apply</strong> (swap + restart — brief downtime).</div>
+    <div id="updStatus"><div class="card">Loading update status…</div></div>
+    <div class="card" id="updProgressCard" style="display:none;margin-top:14px">
+      <h3>Progress</h3>
+      <div class="log-body" id="updLog" style="height:280px"></div>
+    </div>`;
+  fillUpdateStatus();
+}
+
+async function fillUpdateStatus(){
+  const t = state.node;
+  const box = $('#updStatus'); if(!box) return;
+  const u = await api('/api/update/status/'+t);
+  if(!u || u.error){
+    box.innerHTML = `<div class="card"><h3>Update · ${esc(cap(t))}</h3>
+      <p style="color:var(--text2);font-size:13px">Update checks aren't available on this host${u&&u.error?' ('+esc(u.error)+')':''}.
+      The privileged update helper must be installed (re-run <span class="mono">install-ui.sh</span>).</p></div>`;
+    return;
+  }
+  const method = u.install_method || 'unknown';
+  const canUpdate = (method==='source' || method==='docker');
+  const pending = u.pending;
+  const rows = [
+    ['Install method', method],
+    ['Current version', u.current_ref || '—'],
+    ['Latest available', (u.latest_ref || '—') + (u.update_available ? '  ⬆ newer' : '')],
+    ['Pending', pending ? String(pending) : 'none'],
+  ];
+
+  let actions = '';
+  if(!canUpdate){
+    actions = `<p style="color:var(--text2);font-size:13px;margin-top:12px">Install method
+      <strong>${esc(method)}</strong> can't be updated from here — only source builds and Docker installs are supported.</p>`;
+  } else {
+    actions = `
+      <div class="field"><label>Target ref / tag</label>
+        <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
+          placeholder="${method==='docker'?'image tag, e.g. v0.9.1-adiri':'tag / branch / commit'}"></div>
+      <div class="svc-row" style="margin-top:14px">
+        <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
+        ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
+        ${pending?'<button class="btn btn-red" id="updDiscard">Discard pending</button>':''}
+        <button class="btn btn-out" id="updRecheck">↻ Re-check</button>
+      </div>
+      ${t==='validator'?'<p style="color:var(--yellow);font-size:12px;margin-top:12px">⚠ Applying on a validator restarts the node — expect missed consensus rounds during the downtime.</p>':''}`;
+  }
+
+  box.innerHTML = `<div class="card"><h3>Update · ${esc(cap(t))}</h3>
+    ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
+    ${actions}</div>`;
+
+  const p=$('#updPrepare'); if(p) p.addEventListener('click', ()=>{
+    const ref = ($('#updRef').value||'').trim();
+    if(!ref){ toast('Enter a target ref','error'); return; }
+    if(!/^[A-Za-z0-9._/-]+$/.test(ref)){ toast('Invalid ref','error'); return; }
+    startUpdateStream('prepare', ref);
+  });
+  const a=$('#updApply'); if(a) a.addEventListener('click', ()=>{
+    if(t==='validator' && !confirm('Apply the pending update and restart the validator now? This causes brief downtime.')) return;
+    startUpdateStream('apply');
+  });
+  const d=$('#updDiscard'); if(d) d.addEventListener('click', discardUpdate);
+  const r=$('#updRecheck'); if(r) r.addEventListener('click', fillUpdateStatus);
+}
+
+function appendUpdateLine(d){
+  const log=$('#updLog'); if(!log) return;
+  let cls='info', text='';
+  if(d.event==='error'){ cls='err'; text='✗ '+(d.msg||''); }
+  else if(d.event==='step'){ cls='info'; text='» '+(d.msg||''); }
+  else if(d.event==='done'){
+    const detail = d.new_version || d.new_image || d.new_ref || '';
+    cls = d.ok ? 'ok' : 'err';
+    text = (d.ok?'✓ ':'✗ ') + (d.msg || ((d.phase||'done')+(detail?': '+detail:'')));
+  } else return;
+  log.insertAdjacentHTML('beforeend', `<div class="log-line ${cls}">${esc(text)}</div>`);
+  log.scrollTop = log.scrollHeight;
+}
+
+function startUpdateStream(kind, ref){
+  stopUpdateStream();
+  const card=$('#updProgressCard'); if(card) card.style.display='block';
+  const log=$('#updLog'); if(log) log.innerHTML='<div class="log-line info">» starting '+esc(kind)+'…</div>';
+  let url = '/api/update/'+kind+'/'+state.node;
+  if(kind==='prepare') url += '?ref='+encodeURIComponent(ref);
+  // EventSource is GET-only, so prepare/apply are exposed as GET SSE endpoints.
+  state.updateES = new EventSource(url);
+  state.updateES.onmessage = ev=>{
+    let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
+    if(d.event==='closed'){ stopUpdateStream(); fillUpdateStatus(); loadNodes(); return; }
+    appendUpdateLine(d);
+    if(d.event==='done'){
+      if(d.ok) toast('Update '+kind+' succeeded','success');
+      else toast('Update '+kind+(d.rolled_back?' failed — rolled back':' did not complete'),'error');
+    }
+  };
+  state.updateES.onerror = ()=>{ /* server closes the stream when the script exits */ };
+}
+
+function stopUpdateStream(){ if(state.updateES){ state.updateES.close(); state.updateES=null; } }
+
+async function discardUpdate(){
+  const r = await api('/api/update/discard/'+state.node, {method:'POST'});
+  if(r.ok) toast('Pending update discarded','success');
+  else toast('Discard failed: '+(r.error||'unknown error'),'error');
+  fillUpdateStatus();
 }
 
 // =============================================================================
@@ -750,7 +910,6 @@ async function renderTraces(){
   const running = !!j.container_running;
   const apiOk = !!j.api_reachable;
   const reg = !!j.service_registered;
-  const tracing = !!(j.tracing && j.tracing[t]);
 
   let statusBody;
   if(!running && !apiOk){
@@ -771,18 +930,8 @@ async function renderTraces(){
   }
 
   c.innerHTML = `
-    <div class="grid two-col">
-      <div class="card"><h3>Jaeger Status</h3>${statusBody}</div>
-      <div class="card">
-        <h3>${esc(cap(t))} Tracing</h3>
-        <p style="color:var(--text2);font-size:13px;margin-bottom:14px">Currently
-          <strong style="color:${tracing?'var(--green)':'var(--text2)'}">${tracing?'enabled':'disabled'}</strong>.
-          Toggling restarts <span class="mono">telcoin-${esc(t)}</span>.</p>
-        ${tracing
-          ? '<button class="btn btn-red" id="trToggle2">Disable Tracing</button>'
-          : '<button class="btn btn-green" id="trToggle2">Enable Tracing</button>'}
-      </div>
-    </div>
+    <div class="note">Traces is a read-only viewer. Turn tracing on or off under <strong>Settings → ${esc(cap(t))} Tracing</strong> (that restarts the node).</div>
+    <div class="card"><h3>Jaeger Status</h3>${statusBody}</div>
     <div id="tracesStats" class="grid stats"></div>
     <div class="card" style="margin-top:16px">
       <h3>Recent Traces · telcoin-${esc(t)}</h3>
@@ -791,7 +940,6 @@ async function renderTraces(){
 
   const s2=$('#jStop2'); if(s2) s2.addEventListener('click', ()=>jaegerControl('stop', s2));
   const a2=$('#jStart2'); if(a2) a2.addEventListener('click', ()=>jaegerControl('start', a2));
-  const tr=$('#trToggle2'); if(tr) tr.addEventListener('click', ()=>setTracing(t, !tracing, tr));
 
   refreshTracesData();
 }
@@ -874,7 +1022,8 @@ function renderSetup(){
     const n=i+1; const cls = n<state.setupStep?'done':(n===state.setupStep?'active':'');
     return `<div class="step ${cls}"><div class="num">${n<state.setupStep?'✓':n}</div><div class="slbl">${l}</div></div>`;
   }).join('');
-  c.innerHTML = `<div class="steps">${steps}</div><div class="card" id="stepBody"></div>`;
+  c.innerHTML = `<div class="note">This wizard guides first-time setup and prints the <span class="mono">setup-${esc(state.node)}.sh</span> command to run over SSH — it does not install the node itself.</div>
+    <div class="steps">${steps}</div><div class="card" id="stepBody"></div>`;
   const body = $('#stepBody');
   ({1:stepPreflight,2:stepNetwork,3:stepMethod,4:stepConfigure,5:stepReview}[state.setupStep])(body);
 }

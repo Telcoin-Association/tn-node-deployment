@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import time
 import urllib.request
+from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
@@ -34,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.0.3"
+UI_VERSION = "1.1.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -48,6 +49,8 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DEFAULT_LOG_DIR = "/var/log/telcoin"
 DEFAULT_CONFIG_DIR = "/etc/telcoin"
 DEFAULT_DATA_DIR = "/var/lib/telcoin"
+DEFAULT_INSTALL_DIR = "/opt/telcoin"
+TN_SOURCE_DIR = "/opt/telcoin-source"
 
 # Default instance number per node type (observer 5 -> 8541, validator 1 -> 8545).
 DEFAULT_INSTANCE = {"observer": 5, "validator": 1}
@@ -208,6 +211,171 @@ def parse_service_file(t):
 
     cfg["http"] = "--http" in searchable
     return cfg
+
+
+# =============================================================================
+# INSTALL / PASSPHRASE / VERSION DETECTION
+#
+# .node-meta is the source of truth when present, but it is missing/empty on
+# nodes set up before the meta feature. These helpers fall back to deriving the
+# answer from live system state (the unit file, on-disk key files, the source
+# checkout) so the UI is correct regardless of meta presence.
+# =============================================================================
+
+def docker_image_ref(t):
+    """Full docker image (registry/path:tag) from meta DOCKER_IMAGE, else grep
+    the unit file. '' if neither has one."""
+    meta = read_meta(t)
+    img = meta.get("DOCKER_IMAGE", "").strip()
+    if img:
+        return img
+    path = service_file(t)
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                unit = f.read()
+            m = re.search(r"(us-docker[^\s\"]+|gcr\.io[^\s\"]+|ghcr\.io[^\s\"]+)", unit)
+            if m:
+                return m.group(1)
+        except (OSError, IOError):
+            pass
+    return ""
+
+
+def detect_install_method(t):
+    """meta INSTALL_METHOD first; else infer from the unit ExecStart:
+    a docker image -> 'docker'; a wrapper '.sh' -> 'source'; a bare binary
+    -> 'existing'. '' when the node is not installed."""
+    meta = read_meta(t)
+    val = meta.get("INSTALL_METHOD", "").strip()
+    if val:
+        return val
+    path = service_file(t)
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r") as f:
+            unit = f.read()
+    except (OSError, IOError):
+        return ""
+    m = re.search(r"^ExecStart=(.*)$", unit, re.MULTILINE)
+    execline = m.group(1).strip() if m else ""
+    if re.search(r"(us-docker|gcr\.io|ghcr\.io|/docker\b|\bdocker\s+run)", execline):
+        return "docker"
+    mw = re.search(r"^ExecStart=(\S+\.sh)\s*$", unit, re.MULTILINE)
+    if mw and os.path.exists(mw.group(1)):
+        return "source"
+    if execline:
+        return "existing"
+    return ""
+
+
+def detect_passphrase_method(t):
+    """meta PASSPHRASE_METHOD first; else infer: a sealed TPM keypair
+    (bls-tpm.pub/.priv) under /etc/telcoin/<type>/ -> 'tpm'; a
+    LoadCredential=bls-passphrase line in the unit -> 'loadcredential'."""
+    meta = read_meta(t)
+    val = meta.get("PASSPHRASE_METHOD", "").strip()
+    if val:
+        return val
+    cdir = config_dir(t)
+    if (os.path.exists(os.path.join(cdir, "bls-tpm.pub")) or
+            os.path.exists(os.path.join(cdir, "bls-tpm.priv"))):
+        return "tpm"
+    path = service_file(t)
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                if "LoadCredential=bls-passphrase" in f.read():
+                    return "loadcredential"
+        except (OSError, IOError):
+            pass
+    return ""
+
+
+# Node version is not collected anywhere by the scripts; derive it on demand.
+# Briefly cached because the source path shells out to git on every call.
+_version_cache = {}  # t -> (timestamp, dict)
+
+
+def node_version(t):
+    """{'ref', 'kind'} for the node's running build. source -> git describe of
+    /opt/telcoin-source; docker -> the image tag; existing -> binary --version."""
+    now = time.time()
+    cached = _version_cache.get(t)
+    if cached and now - cached[0] < 30:
+        return cached[1]
+
+    method = detect_install_method(t)
+    out = {"ref": "", "kind": method or ""}
+    if method == "source":
+        # -c safe.directory: the source checkout is root-owned but we run as the
+        # unprivileged telcoin-ui user, so a bare git call refuses with "dubious
+        # ownership". Scope the exception to this one read-only describe.
+        rc, o, _ = run(
+            ["git", "-c", "safe.directory=" + TN_SOURCE_DIR,
+             "-C", TN_SOURCE_DIR, "describe", "--tags", "--always", "--dirty"]
+        )
+        if rc == 0 and o:
+            out["ref"] = o
+    elif method == "docker":
+        img = docker_image_ref(t)
+        if img:
+            out["ref"] = img.split(":")[-1]
+    else:
+        binpath = os.path.join(DEFAULT_INSTALL_DIR, "telcoin-network")
+        if os.path.exists(binpath):
+            rc, o, _ = run([binpath, "--version"])
+            if rc == 0 and o:
+                out["ref"] = o.splitlines()[0].strip()
+
+    _version_cache[t] = (now, out)
+    return out
+
+
+def block_age(port):
+    """Human 'X ago' for the latest execution block timestamp, or None."""
+    res = local_rpc(port, "eth_getBlockByNumber", ["latest", False])
+    if isinstance(res, dict):
+        ts = hex_to_dec(res.get("timestamp"))
+        if ts:
+            return fmt_age(int(time.time()) - ts)
+    return None
+
+
+def log_error_count(log_path, window=3600):
+    """Count ERROR/WARN log lines whose leading ISO-8601 timestamp falls within
+    the last `window` seconds. 0 when the file is missing or has no timestamped
+    error lines (lines without a parseable timestamp are skipped, not counted)."""
+    if not log_path or not os.path.exists(log_path):
+        return 0
+    try:
+        with open(log_path, "rb") as f:
+            try:
+                f.seek(-500000, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", "replace")
+    except (OSError, IOError):
+        return 0
+
+    cutoff = time.time() - window
+    count = 0
+    for line in tail.splitlines():
+        if "ERROR" not in line and "WARN" not in line:
+            continue
+        m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
+        if not m:
+            continue
+        try:
+            dt = datetime.strptime(
+                m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if dt.timestamp() >= cutoff:
+            count += 1
+    return count
 
 
 # =============================================================================
@@ -492,11 +660,16 @@ def api_status(node_type):
     port = int(cfg["rpc_port"])
     status = service_status(t)
 
-    # Local execution liveness + block.
-    rpc_ok = local_rpc(port, "eth_chainId") is not None
+    # Local execution liveness + block. eth_chainId doubles as the liveness
+    # probe and the source of the network's chain id (previously discarded).
+    chain_id_raw = local_rpc(port, "eth_chainId")
+    rpc_ok = chain_id_raw is not None
+    chain_id = hex_to_dec(chain_id_raw) if chain_id_raw else None
     block_number = None
+    blk_age = None
     if rpc_ok:
         block_number = hex_to_dec(local_rpc(port, "eth_blockNumber"))
+        blk_age = block_age(port)
 
     # Consensus header (block / epoch / age) + the network's exec tip for sync.
     consensus, cons_exec = consensus_info(port)
@@ -516,14 +689,18 @@ def api_status(node_type):
         "rpc_port": port,
         "block_number": block_number,
         "synced": synced,
+        "chain_id": chain_id,
+        "network": meta.get("NETWORK", ""),
+        "block_age": blk_age,
+        "log_error_count_1h": log_error_count(cfg["log_path"]),
         "tracing_enabled": tracing_enabled(t),
         "peers": peer_counts(t, cfg["log_path"]),
         "consensus": consensus,
         "disk": disk_for(data_dir(t)),
         "memory": mem_info(),
-        "install_method": meta.get("INSTALL_METHOD", ""),
-        "passphrase_method": meta.get("PASSPHRASE_METHOD", ""),
-        "docker_image": meta.get("DOCKER_IMAGE", ""),
+        "install_method": detect_install_method(t),
+        "passphrase_method": detect_passphrase_method(t),
+        "docker_image": docker_image_ref(t),
     })
 
 
@@ -614,6 +791,38 @@ def api_logs_stream(node_type):
 # ROUTES -- config
 # =============================================================================
 
+def external_addrs(t):
+    """(external_primary, external_worker) advertised to peers. From .node-meta
+    when present (EXTERNAL_PRIMARY_ADDR/EXTERNAL_WORKER_ADDR); otherwise grep the
+    advertised multiaddrs out of node-info.yaml for nodes built before meta
+    carried them. ('', '') when neither source has them."""
+    meta = read_meta(t)
+    primary = meta.get("EXTERNAL_PRIMARY_ADDR", "").strip()
+    worker = meta.get("EXTERNAL_WORKER_ADDR", "").strip()
+    if primary or worker:
+        return primary, worker
+
+    info = os.path.join(data_dir(t), "node-info.yaml")
+    if not os.path.exists(info):
+        return primary, worker
+    try:
+        with open(info, "r") as f:
+            text = f.read()
+    except (OSError, IOError):
+        return primary, worker
+
+    # node-info.yaml lists the advertised multiaddrs; primary appears before
+    # worker. Pick out non-loopback multiaddrs in document order and assign the
+    # first to primary, the second to worker.
+    addrs = re.findall(r'(/(?:ip4|ip6|dns\d?)/[^\s"\']+)', text)
+    addrs = [a for a in addrs if "/127.0.0.1/" not in a and "/0.0.0.0/" not in a]
+    if not primary and len(addrs) >= 1:
+        primary = addrs[0]
+    if not worker and len(addrs) >= 2:
+        worker = addrs[1]
+    return primary, worker
+
+
 @app.route("/api/config/<node_type>")
 def api_config(node_type):
     if not valid_type(node_type):
@@ -622,7 +831,7 @@ def api_config(node_type):
         return jsonify({"installed": False, "node_type": node_type})
 
     cfg = parse_service_file(node_type)
-    meta = read_meta(node_type)
+    ext_primary, ext_worker = external_addrs(node_type)
     return jsonify({
         "installed": True,
         "instance": cfg["instance"],
@@ -630,9 +839,12 @@ def api_config(node_type):
         "metrics": cfg["metrics"],
         "primary_listener": cfg["primary_listener"],
         "worker_listener": cfg["worker_listener"],
-        "install_method": meta.get("INSTALL_METHOD", ""),
-        "passphrase_method": meta.get("PASSPHRASE_METHOD", ""),
-        "docker_image": meta.get("DOCKER_IMAGE", ""),
+        "external_primary": ext_primary,
+        "external_worker": ext_worker,
+        "install_method": detect_install_method(node_type),
+        "passphrase_method": detect_passphrase_method(node_type),
+        "docker_image": docker_image_ref(node_type),
+        "version": node_version(node_type).get("ref", ""),
     })
 
 
@@ -643,6 +855,108 @@ def api_config(node_type):
 @app.route("/api/system")
 def api_system():
     return jsonify(system_info())
+
+
+# =============================================================================
+# ROUTES -- version & update
+#
+# The privileged work (registry/git queries, building, swapping the binary,
+# restarting the service) is done by update-node.sh in a non-interactive
+# --json mode, reached only through the root-owned telcoin-ui-helper (same
+# no-wildcard sudoers pattern as the Jaeger/tracing commands). The server never
+# runs update-node.sh or systemctl for updates directly.
+# =============================================================================
+
+# Allowed git ref / docker tag shape for the prepare endpoint. The helper
+# re-validates, but reject obviously bad input before we ever shell out.
+REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+@app.route("/api/version/<node_type>")
+def api_version(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    return jsonify(node_version(node_type))
+
+
+@app.route("/api/update/status/<node_type>")
+def api_update_status(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    rc, out, err = run(["sudo", "-n", HELPER, "update-check", node_type], timeout=30)
+    if rc == 0 and out:
+        try:
+            return jsonify(json.loads(out))
+        except (ValueError, json.JSONDecodeError):
+            pass
+    # Helper/sudo unavailable (e.g. dev box) -- degrade gracefully.
+    return jsonify({
+        "install_method": detect_install_method(node_type),
+        "current_ref": node_version(node_type).get("ref", ""),
+        "latest_ref": "",
+        "update_available": False,
+        "pending": None,
+        "error": err or out or "update check unavailable",
+    })
+
+
+def _update_stream(argv):
+    """SSE generator that streams an update-node.sh --json subprocess (via the
+    helper) line by line. Each JSON line the script emits becomes one SSE event.
+    Mirrors the /api/logs/<type>/stream teardown pattern."""
+    def generate():
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                line = line.rstrip()
+                if line:
+                    yield f"data: {line}\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:
+                    proc.kill()
+        yield 'data: {"event":"closed"}\n\n'
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/update/prepare/<node_type>")
+def api_update_prepare(node_type):
+    # GET (not POST) so the browser can consume it with EventSource; the ref is
+    # a query param, validated here and again in the helper.
+    if not valid_type(node_type):
+        return bad_type()
+    ref = (request.args.get("ref") or "").strip()
+    if not REF_RE.match(ref):
+        return jsonify({"error": "invalid ref"}), 400
+    return _update_stream(["sudo", "-n", HELPER, "update-prepare", node_type, ref])
+
+
+@app.route("/api/update/apply/<node_type>")
+def api_update_apply(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    return _update_stream(["sudo", "-n", HELPER, "update-apply", node_type])
+
+
+@app.route("/api/update/discard/<node_type>", methods=["POST"])
+def api_update_discard(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    rc, out, err = run(["sudo", "-n", HELPER, "update-discard", node_type], timeout=30)
+    ok = rc == 0
+    return jsonify({"ok": ok, "error": "" if ok else (err or out or "discard failed")})
 
 
 # =============================================================================
