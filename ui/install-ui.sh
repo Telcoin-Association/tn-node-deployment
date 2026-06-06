@@ -96,9 +96,18 @@ cp "${SRC_DIR}/server.py"          "${INSTALL_DIR}/server.py"
 cp "${SRC_DIR}/requirements.txt"   "${INSTALL_DIR}/requirements.txt"
 cp "${SRC_DIR}/static/index.html"  "${INSTALL_DIR}/static/index.html"
 # Brand logo (optional). Flask serves /static/* from this dir; the UI falls back
-# to a built-in "TN" badge if the file is absent.
+# to a built-in "TN" badge if the file is absent. Prefer the local copy; if it is
+# missing (e.g. update-scripts.sh shipped the bundle before it knew about the
+# logo), self-heal by fetching it straight from the repo so the deploy is not
+# coupled to the updater's bootstrap timing.
+LOGO_DST="${INSTALL_DIR}/static/telcoin-logo.png"
+LOGO_URL="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main/ui/static/telcoin-logo.png"
 if [[ -f "${SRC_DIR}/static/telcoin-logo.png" ]]; then
-    cp "${SRC_DIR}/static/telcoin-logo.png" "${INSTALL_DIR}/static/telcoin-logo.png"
+    cp "${SRC_DIR}/static/telcoin-logo.png" "${LOGO_DST}"
+elif [[ ! -f "${LOGO_DST}" ]]; then
+    curl -sf --max-time 20 "${LOGO_URL}" -o "${LOGO_DST}" \
+        && ok "Brand logo fetched from repo" \
+        || warn "Could not fetch brand logo -- UI will show the fallback badge"
 fi
 ok "UI files copied to ${INSTALL_DIR}"
 
