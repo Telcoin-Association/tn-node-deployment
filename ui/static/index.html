@@ -530,6 +530,9 @@ async function renderDashboard(){
       ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
     </div>
 
+    <!-- network status (Adiri Testnet status page) -->
+    <div class="card" id="netStatusCard" style="margin-top:14px"><h3>Network Status</h3><div class="muted">Loading network status…</div></div>
+
     <!-- details + quick actions -->
     <div class="grid two-col">
       <div class="card">
@@ -557,6 +560,67 @@ async function renderDashboard(){
   augmentDashboardJaeger(s);
   augmentDashboardVersion();
   augmentDashboardUpdate();
+  augmentDashboardNetwork();
+}
+
+// Lazy: fill the Network Status card from the public Adiri status page (cached
+// 60s server-side). Polls with the 15s dashboard refresh; degrades to a grey
+// "status unavailable" state, never an error.
+async function augmentDashboardNetwork(){
+  if(!$('#netStatusCard')) return;
+  const d = await api('/api/network/status');
+  const card = $('#netStatusCard');
+  if(state.view!=='dashboard' || !card) return;
+
+  if(!d || d.error || d.available===false){
+    card.innerHTML = `<h3>Network Status</h3>
+      <div class="kv"><span class="k">Adiri Testnet</span>
+        <span class="v"><span class="badge" style="background:rgba(122,154,184,0.15);color:var(--text2)">status unavailable</span></span></div>
+      <p class="muted" style="font-size:12px;margin-top:8px">Could not reach the public status page (status.telscan.xyz).</p>`;
+    return;
+  }
+
+  const ov = d.overall;
+  const pill = ov==='up'       ? '<span class="pill green">● All Systems Operational</span>'
+             : ov==='degraded' ? '<span class="pill busy">● Degraded</span>'
+             : ov==='down'     ? '<span class="pill red">● Outage</span>'
+             :                   '<span class="pill">● Unknown</span>';
+
+  const cb = d.consensus_block || {};
+  const cbUp = cb.status===1;
+  const cbMeta = [
+    cbUp ? 'up' : 'down',
+    cb.ping!=null ? esc(String(cb.ping))+' ms' : null,
+    cb.uptime!=null ? esc(String(cb.uptime))+'% up' : null,
+    cb.last_seen ? 'last seen '+esc(cb.last_seen) : null,
+  ].filter(Boolean).join(' · ');
+  const consensusRow = `<div class="kv" style="align-items:center">
+      <span class="k">${esc(cb.name||'Consensus Block Progress')}</span>
+      <span class="v"><span class="dot ${cbUp?'green':'red'}" style="display:inline-block;margin-right:8px;vertical-align:middle"></span>${cbMeta}</span>
+    </div>`;
+
+  const cells = (d.monitors||[]).map(m=>{
+    const up = m.status===1;
+    return `<div style="background:var(--bg);border:var(--border);border-radius:10px;padding:12px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="dot ${up?'green':'red'}"></span>
+        <span style="font-weight:700;font-size:13px">${esc(m.name)}</span>
+      </div>
+      <div class="mono" style="margin-top:7px;font-size:12px;color:var(--text2)">
+        ${m.ping!=null?esc(String(m.ping))+' ms':'—'} · ${m.uptime!=null?esc(String(m.uptime))+'%':'—'} up
+      </div>
+    </div>`;
+  }).join('');
+
+  card.innerHTML = `
+    <div class="svc-row" style="margin-bottom:10px">
+      <h3 style="margin:0">${esc(d.title||'Adiri Testnet Network Status')}</h3>
+      ${pill}
+      <a href="https://status.telscan.xyz/status/testnet" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>
+    </div>
+    ${consensusRow}
+    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));margin-top:12px">${cells}</div>
+    <p class="muted" style="font-size:12px;margin-top:12px">Last updated: ${esc(d.last_updated||'—')} · auto-refreshes every 60s</p>`;
 }
 
 // Lazy: fill the Version tile + Node Details version row from /api/version.

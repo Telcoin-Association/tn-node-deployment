@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.2.6"
+UI_VERSION = "1.3.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1523,6 +1523,172 @@ def api_traces_stats(node_type):
         "error_count": errors,
         "error_rate_percent": round(errors / total * 100, 1),
     })
+
+
+# =============================================================================
+# NETWORK STATUS  (public Adiri Testnet Uptime Kuma status page)
+#
+# Pulls the same data the public status page shows -- monitor config + live
+# heartbeats -- from two no-auth endpoints, and folds them into one response the
+# dashboard renders. Cached 60s so the dashboard's polling never hammers the
+# external API. Always degrades to available:false (never a 500) when the status
+# page is unreachable.
+# =============================================================================
+
+STATUS_PAGE_CONFIG = "https://status.telscan.xyz/api/status-page/testnet"
+STATUS_PAGE_HEARTBEAT = "https://status.telscan.xyz/api/status-page/heartbeat/testnet"
+
+# Validator monitors in display order (id -> fallback name if config omits it).
+NETWORK_MONITORS = [
+    (2, "V1 (Los Angeles)"),
+    (6, "V2 (Sydney)"),
+    (10, "V3 (Montreal)"),
+    (14, "V4 (Netherlands)"),
+    (18, "V5 (London)"),
+]
+CONSENSUS_MONITOR_ID = 48
+
+_network_cache = {"ts": 0.0, "data": None}  # 60s TTL
+
+
+def _http_get_json(url, timeout=6):
+    """GET JSON from a public URL. None on any failure. Stdlib only."""
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "telcoin-ui"}, method="GET"
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _monitor_names(cfg):
+    """Map monitor id -> name from the status-page config (publicGroupList)."""
+    names = {}
+    if not isinstance(cfg, dict):
+        return names
+    for group in cfg.get("publicGroupList") or []:
+        for m in group.get("monitorList") or []:
+            mid, nm = m.get("id"), m.get("name")
+            if isinstance(mid, int) and nm:
+                names[mid] = nm
+    return names
+
+
+def _build_network_status():
+    """Fetch config + heartbeats and fold them into the dashboard payload.
+    Returns None when the status page is unreachable (both fetches failed)."""
+    cfg = _http_get_json(STATUS_PAGE_CONFIG)
+    hb = _http_get_json(STATUS_PAGE_HEARTBEAT)
+    if cfg is None and hb is None:
+        return None
+
+    title = "Adiri Testnet Network Status"
+    if isinstance(cfg, dict):
+        c = cfg.get("config") or {}
+        if c.get("title"):
+            title = c["title"]
+
+    names = _monitor_names(cfg)
+    hb_list = (hb or {}).get("heartbeatList") or {}
+
+    def beats(mid):
+        b = hb_list.get(str(mid))
+        return b if isinstance(b, list) else []
+
+    def latest(mid):
+        b = beats(mid)
+        return b[-1] if b else None
+
+    def uptime_pct(mid):
+        b = beats(mid)[-50:]  # last 50 heartbeats, per the brief
+        if not b:
+            return None
+        up = sum(1 for x in b if x.get("status") == 1)
+        return round(up / len(b) * 100, 2)
+
+    statuses = []
+    monitors = []
+    for mid, fallback in NETWORK_MONITORS:
+        last = latest(mid)
+        st = last.get("status") if last else None
+        monitors.append({
+            "id": mid,
+            "name": names.get(mid, fallback),
+            "status": st if st is not None else 0,
+            "ping": (last or {}).get("ping"),
+            "uptime": uptime_pct(mid),
+        })
+        if st is not None:
+            statuses.append(st)
+
+    cons_last = latest(CONSENSUS_MONITOR_ID)
+    cons_status = cons_last.get("status") if cons_last else 0
+    consensus = {
+        "name": names.get(CONSENSUS_MONITOR_ID, "Consensus Block Progress"),
+        "status": cons_status if cons_status is not None else 0,
+        "last_seen": (cons_last or {}).get("time"),
+        "ping": (cons_last or {}).get("ping"),
+        "uptime": uptime_pct(CONSENSUS_MONITOR_ID),
+    }
+    if cons_last is not None and cons_last.get("status") is not None:
+        statuses.append(cons_last.get("status"))
+
+    if not statuses:
+        overall = "down"
+    elif all(s == 1 for s in statuses):
+        overall = "up"
+    elif all(s != 1 for s in statuses):
+        overall = "down"
+    else:
+        overall = "degraded"
+
+    # Most recent heartbeat time across all monitors, else now.
+    last_updated = consensus.get("last_seen")
+    for m in NETWORK_MONITORS:
+        lb = latest(m[0])
+        if lb and lb.get("time") and (not last_updated or lb["time"] > last_updated):
+            last_updated = lb["time"]
+    if not last_updated:
+        last_updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "title": title,
+        "overall": overall,
+        "monitors": monitors,
+        "consensus_block": consensus,
+        "last_updated": last_updated,
+    }
+
+
+@app.route("/api/network/status")
+def api_network_status():
+    now = time.time()
+    cached = _network_cache["data"]
+    if cached is not None and now - _network_cache["ts"] < 60:
+        return jsonify(cached)
+
+    data = _build_network_status()
+    if data is None:
+        # Unreachable -- degrade, never 500. Do not cache the failure (so we
+        # retry on the next poll), but serve a stale-but-recent cache if we have
+        # one within a short grace window.
+        if cached is not None and now - _network_cache["ts"] < 300:
+            return jsonify(cached)
+        return jsonify({
+            "title": "Adiri Testnet Network Status",
+            "overall": "unknown",
+            "available": False,
+            "monitors": [],
+            "consensus_block": None,
+            "last_updated": None,
+        })
+
+    data["available"] = True
+    _network_cache["ts"] = now
+    _network_cache["data"] = data
+    return jsonify(data)
 
 
 # =============================================================================
