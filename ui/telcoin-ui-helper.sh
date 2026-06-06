@@ -39,6 +39,11 @@ CONFIG_SCRIPT="/opt/telcoin-ui-update/edit-config.sh"
 # firewall-setup.sh + remove-node.sh, same root-owned dir, same --json pattern.
 FIREWALL_SCRIPT="/opt/telcoin-ui-update/firewall-setup.sh"
 REMOVE_SCRIPT="/opt/telcoin-ui-update/remove-node.sh"
+# setup-*.sh, same root-owned dir. Config arrives via TN_SETUP_* env vars (and
+# the BLS passphrase via TN_BLS_PASSPHRASE) which the server sets and sudoers
+# env_keeps -- so the sudoers lines stay fixed-arg and no secret touches argv.
+SETUP_OBSERVER_SCRIPT="/opt/telcoin-ui-update/setup-observer.sh"
+SETUP_VALIDATOR_SCRIPT="/opt/telcoin-ui-update/setup-validator.sh"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -278,6 +283,67 @@ cmd_node_remove() {
     exec bash "$REMOVE_SCRIPT" --json --remove "$t" --scope "$scope" --yes
 }
 
+# =============================================================================
+# Setup subcommands -- thin wrappers around setup-<type>.sh --json --phase=...
+# Config comes from TN_SETUP_* env (validated here); the BLS passphrase stays in
+# TN_BLS_PASSPHRASE (env only, never argv) and is inherited by the exec'd script.
+# =============================================================================
+
+cmd_setup() {
+    local phase="$1" t="$2"
+    require_type "$t"
+    local script
+    case "$t" in
+        observer)  script="$SETUP_OBSERVER_SCRIPT" ;;
+        validator) script="$SETUP_VALIDATOR_SCRIPT" ;;
+    esac
+    [[ -f "$script" ]] || die "setup script not found: $script"
+
+    local network="${TN_SETUP_NETWORK:-testnet}"
+    local method="${TN_SETUP_INSTALL_METHOD:-}"
+    local passm="${TN_SETUP_PASSPHRASE_METHOD:-loadcredential}"
+    local addr="${TN_SETUP_ADDRESS:-}"
+    local build_ref="${TN_SETUP_BUILD_REF:-}"
+    local image="${TN_SETUP_DOCKER_IMAGE:-}"
+    local instance="${TN_SETUP_INSTANCE:-}"
+    local ext_primary="${TN_SETUP_EXT_PRIMARY:-}"
+    local ext_worker="${TN_SETUP_EXT_WORKER:-}"
+    local lis_primary="${TN_SETUP_LIS_PRIMARY:-}"
+    local lis_worker="${TN_SETUP_LIS_WORKER:-}"
+    local public_ip="${TN_SETUP_PUBLIC_IP:-}"
+
+    # Validate every value before it reaches the setup script.
+    case "$network" in testnet|adiri) ;; *) die "invalid network: $network" ;; esac
+    case "$method" in source|docker|existing|"") ;; *) die "invalid install method: $method" ;; esac
+    case "$passm" in loadcredential|tpm) ;; *) die "invalid passphrase method: $passm" ;; esac
+    [[ -z "$addr"      || "$addr"      =~ ^0x[0-9a-fA-F]{40}$ ]]            || die "invalid address"
+    [[ -z "$build_ref" || "$build_ref" =~ ^[A-Za-z0-9._/-]+$ ]]            || die "invalid build ref"
+    [[ -z "$image"     || ( "$image"   =~ ^[A-Za-z0-9._/:@-]+$ && "$image" == *:* ) ]] || die "invalid docker image"
+    [[ -z "$instance"  || "$instance"  =~ ^[1-9]$ ]]                       || die "invalid instance"
+    local m
+    for m in "$ext_primary" "$ext_worker" "$lis_primary" "$lis_worker"; do
+        [[ -z "$m" || "$m" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] || die "invalid multiaddr: $m"
+    done
+    [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
+
+    local -a args=( --json "--phase=${phase}" --network "$network" --passphrase-method "$passm" )
+    [[ -n "$method" ]]      && args+=( --install-method "$method" )
+    [[ -n "$addr" ]]        && args+=( --address "$addr" )
+    [[ -n "$build_ref" ]]   && args+=( --build-ref "$build_ref" )
+    [[ -n "$image" ]]       && args+=( --docker-image "$image" )
+    [[ -n "$instance" ]]    && args+=( --instance "$instance" )
+    [[ -n "$ext_primary" ]] && args+=( --external-primary "$ext_primary" )
+    [[ -n "$ext_worker" ]]  && args+=( --external-worker "$ext_worker" )
+    [[ -n "$lis_primary" ]] && args+=( --listener-primary "$lis_primary" )
+    [[ -n "$lis_worker" ]]  && args+=( --listener-worker "$lis_worker" )
+    [[ -n "$public_ip" ]]   && args+=( --public-ip "$public_ip" )
+
+    exec bash "$script" "${args[@]}"
+}
+
+cmd_setup_keygen()   { cmd_setup keygen   "$1"; }
+cmd_setup_finalize() { cmd_setup finalize "$1"; }
+
 main() {
     local sub="${1:-}"
     case "$sub" in
@@ -294,6 +360,8 @@ main() {
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
         node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" ;;
+        setup-keygen)    shift; cmd_setup_keygen   "${1:-}" ;;
+        setup-finalize)  shift; cmd_setup_finalize "${1:-}" ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }

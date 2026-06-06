@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -146,9 +146,10 @@ else
     warn "edit-config.sh not found beside install-ui.sh -- the UI Config-edit feature will be unavailable until it is present."
 fi
 
-# firewall-setup.sh + remove-node.sh drive the UI's Firewall + Danger Zone via
-# their --json modes. Same root-owned dir / pattern as edit-config.sh.
-for s in firewall-setup.sh remove-node.sh; do
+# firewall-setup.sh + remove-node.sh + setup-*.sh drive the UI's Firewall,
+# Danger Zone and Setup features via their --json modes. Same root-owned dir /
+# pattern as edit-config.sh.
+for s in firewall-setup.sh remove-node.sh setup-observer.sh setup-validator.sh; do
     if [[ -f "${REPO_DIR}/${s}" ]]; then
         install -o root -g root -m 0755 "${REPO_DIR}/${s}" "${UPDATE_DIR}/${s}"
         ok "${s} installed to ${UPDATE_DIR} (root:root)"
@@ -229,6 +230,15 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove ob
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator service
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator data
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator keys
+# Setup helper -- fixed-arg (type only). All config travels in TN_SETUP_* env
+# vars and the BLS passphrase in TN_BLS_PASSPHRASE; env_keep preserves them
+# across sudo so NO config or secret is ever placed in argv. The helper
+# validates every value before invoking setup-<type>.sh --json.
+Defaults!/usr/local/sbin/telcoin-ui-helper env_keep += "TN_BLS_PASSPHRASE TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_PASSPHRASE_METHOD TN_SETUP_ADDRESS TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_INSTANCE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP"
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen validator
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize validator
 EOF
 chmod 440 "${SUDOERS_FILE}"
 if visudo -cf "${SUDOERS_FILE}" >/dev/null 2>&1; then

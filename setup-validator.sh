@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.48"
+readonly SCRIPT_VERSION="1.2.0"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -110,14 +110,15 @@ step_preflight() {
     print_ok "systemd ${systemd_ver} detected (247+ required)"
     USE_LOAD_CREDENTIAL=true
 
-    # Select network first so NETWORK is set before source build (needed for --features faucet)
+    # Select network first so NETWORK is set before source build (needed for --features faucet).
+    # In JSON mode network/method/passphrase are already set from flags by the orchestrator.
     echo ""
     print_step "Selecting network..."
-    select_network
+    json_mode || select_network
 
     echo ""
     print_step "Selecting install method..."
-    _select_install_method_with_guard
+    json_mode || _select_install_method_with_guard
 
     case "$INSTALL_METHOD" in
         source)   _preflight_source ;;
@@ -125,7 +126,7 @@ step_preflight() {
         existing) _preflight_existing ;;
     esac
 
-    if [[ "$INSTALL_METHOD" != "docker" ]]; then
+    if [[ "$INSTALL_METHOD" != "docker" ]] && ! json_mode; then
         _select_passphrase_method
     fi
 
@@ -220,7 +221,7 @@ _preflight_source() {
     done
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
         print_warn "Missing build dependencies: ${missing_deps[*]}"
-        if confirm "Install missing packages now?"; then
+        if json_mode || confirm "Install missing packages now?"; then
             update_package_index
             for _dep in "${missing_deps[@]}"; do
                 install_package "$_dep"
@@ -250,10 +251,15 @@ _preflight_source() {
     echo ""
 
     local build_ref
-    build_ref=$(pick_source_version "$NETWORK") || {
-        print_error "No source ref selected -- cannot continue setup."
-        exit 1
-    }
+    if json_mode; then
+        build_ref="$JSON_BUILD_REF"
+        [[ -n "$build_ref" ]] || { print_error "No --build-ref supplied for source build."; exit 1; }
+    else
+        build_ref=$(pick_source_version "$NETWORK") || {
+            print_error "No source ref selected -- cannot continue setup."
+            exit 1
+        }
+    fi
 
     print_step "Checking out: ${build_ref}..."
     if ! git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
@@ -326,9 +332,13 @@ _preflight_docker() {
     echo ""
 
     local input
-    read -r -p "  Docker image (press Enter to accept default)
+    if json_mode; then
+        DOCKER_IMAGE="${DOCKER_IMAGE:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+    else
+        read -r -p "  Docker image (press Enter to accept default)
   [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri]: " input
-    DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+        DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+    fi
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
     if ! docker pull "$DOCKER_IMAGE"; then
@@ -428,7 +438,8 @@ step_create_infrastructure() {
     echo "  Press Enter to accept defaults."
     echo ""
     local input
-    while true; do
+    # JSON mode keeps the default SERVICE_USER/SERVICE_GROUP (telcoin) -- no prompts.
+    while ! json_mode; do
         read -r -p "  Service user name  [${SERVICE_USER}]: " input
         local proposed_user="${input:-$SERVICE_USER}"
         if validate_service_name "$proposed_user" "Service user"; then
@@ -442,7 +453,7 @@ step_create_infrastructure() {
         fi
     done
 
-    while true; do
+    while ! json_mode; do
         read -r -p "  Service group name [${SERVICE_GROUP}]: " input
         local proposed_group="${input:-$SERVICE_GROUP}"
         if validate_service_name "$proposed_group" "Service group"; then
@@ -472,6 +483,10 @@ step_generate_keys() {
     echo ""
 
     if [[ -d "${DATA_DIR}/node-keys" ]]; then
+        if json_mode; then
+            print_error "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode"
+            exit 1
+        fi
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
             print_ok "Keeping existing keys"
@@ -479,100 +494,110 @@ step_generate_keys() {
         fi
     fi
 
-    read -r -p "  Validator execution address (0x...): " VALIDATOR_ADDRESS
-    if [[ ! "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-        print_warn "Address format looks unusual. Proceeding anyway."
-    fi
-
-    local public_ip
-    public_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
-    if [[ -n "$public_ip" ]] && ! validate_public_ip "$public_ip"; then
-        print_warn "Auto-detected public IP looks invalid: ${public_ip} -- will prompt instead."
-        public_ip=""
-    fi
-    if [[ -z "$public_ip" ]]; then
-        print_warn "Could not auto-detect public IP."
-        prompt_with_validation "Enter your public/external IP address" validate_public_ip public_ip || exit 1
+    local input bls_passphrase bls_passphrase_confirm
+    if json_mode; then
+        # Address + multiaddrs come from flags; passphrase from TN_BLS_PASSPHRASE (env only).
+        [[ "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || print_warn "Address format looks unusual. Proceeding anyway."
+        for v in PRIMARY_MULTIADDR WORKER_MULTIADDR PRIMARY_LISTENER_MULTIADDR WORKER_LISTENER_MULTIADDR; do
+            [[ -n "${!v}" ]] || { print_error "missing multiaddr: ${v}"; exit 1; }
+        done
+        bls_passphrase="${TN_BLS_PASSPHRASE:-}"
+        [[ -n "$bls_passphrase" ]] || { print_error "TN_BLS_PASSPHRASE not set -- cannot generate keys."; exit 1; }
     else
-        print_info "Detected public IP: ${public_ip}"
-    fi
-    # Persist for the .node-meta record (read back by the Node Manager UI).
-    PUBLIC_IP="$public_ip"
-
-    echo ""
-    echo "  External addresses (advertised to peers -- use your public/external IP):"
-    local default_primary="/ip4/${public_ip}/udp/${P2P_PORT}/quic-v1"
-    while true; do
-        read -r -p "  External primary addr [${default_primary}]: " input
-        PRIMARY_MULTIADDR="${input:-$default_primary}"
-        validate_multiaddr "$PRIMARY_MULTIADDR" && break
-        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
-    done
-
-    local default_worker="/ip4/${public_ip}/udp/${WORKER_PORT}/quic-v1"
-    while true; do
-        read -r -p "  External worker addr  [${default_worker}]: " input
-        WORKER_MULTIADDR="${input:-$default_worker}"
-        validate_multiaddr "$WORKER_MULTIADDR" && break
-        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
-    done
-
-    local internal_ip
-    internal_ip=$(detect_internal_ip)
-    if [[ -n "$internal_ip" ]] && ! validate_ipv4 "$internal_ip" && ! validate_ipv6 "$internal_ip"; then
-        print_warn "Auto-detected internal IP looks invalid: ${internal_ip} -- will prompt instead."
-        internal_ip=""
-    fi
-    if [[ -z "$internal_ip" ]]; then
-        print_warn "Could not auto-detect internal IP."
-        read -r -p "  Enter your internal/NIC IP address [0.0.0.0]: " internal_ip
-        internal_ip="${internal_ip:-0.0.0.0}"
-        if ! validate_ipv4 "$internal_ip" && ! validate_ipv6 "$internal_ip"; then
-            print_error "Invalid IP: ${internal_ip}"
-            exit 1
+        read -r -p "  Validator execution address (0x...): " VALIDATOR_ADDRESS
+        if [[ ! "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            print_warn "Address format looks unusual. Proceeding anyway."
         fi
-    else
-        print_info "Detected internal IP: ${internal_ip}"
-    fi
 
-    echo ""
-    echo "  Listener addresses (what the node binds to -- use your internal/NIC IP):"
-    local default_listener_primary="/ip4/${internal_ip}/udp/${P2P_PORT}/quic-v1"
-    while true; do
-        read -r -p "  Listener primary addr [${default_listener_primary}]: " input
-        PRIMARY_LISTENER_MULTIADDR="${input:-$default_listener_primary}"
-        validate_multiaddr "$PRIMARY_LISTENER_MULTIADDR" && break
-        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
-    done
+        local public_ip
+        public_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
+        if [[ -n "$public_ip" ]] && ! validate_public_ip "$public_ip"; then
+            print_warn "Auto-detected public IP looks invalid: ${public_ip} -- will prompt instead."
+            public_ip=""
+        fi
+        if [[ -z "$public_ip" ]]; then
+            print_warn "Could not auto-detect public IP."
+            prompt_with_validation "Enter your public/external IP address" validate_public_ip public_ip || exit 1
+        else
+            print_info "Detected public IP: ${public_ip}"
+        fi
+        # Persist for the .node-meta record (read back by the Node Manager UI).
+        PUBLIC_IP="$public_ip"
 
-    local default_listener_worker="/ip4/${internal_ip}/udp/${WORKER_PORT}/quic-v1"
-    while true; do
-        read -r -p "  Listener worker addr  [${default_listener_worker}]: " input
-        WORKER_LISTENER_MULTIADDR="${input:-$default_listener_worker}"
-        validate_multiaddr "$WORKER_LISTENER_MULTIADDR" && break
-        print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
-    done
-
-    echo ""
-    print_warn "Set a passphrase to encrypt your BLS validator key."
-    print_warn "Store this securely -- you need it every time the node starts."
-    echo ""
-
-    local bls_passphrase bls_passphrase_confirm
-    while true; do
-        read -r -s -p "  Enter BLS key passphrase: " bls_passphrase
         echo ""
-        read -r -s -p "  Confirm BLS key passphrase: " bls_passphrase_confirm
-        echo ""
-        if [[ "$bls_passphrase" == "$bls_passphrase_confirm" ]]; then
-            if [[ -z "$bls_passphrase" ]]; then
-                print_warn "Empty passphrase is not recommended."
-                if ! confirm "Continue with no passphrase?"; then continue; fi
+        echo "  External addresses (advertised to peers -- use your public/external IP):"
+        local default_primary="/ip4/${public_ip}/udp/${P2P_PORT}/quic-v1"
+        while true; do
+            read -r -p "  External primary addr [${default_primary}]: " input
+            PRIMARY_MULTIADDR="${input:-$default_primary}"
+            validate_multiaddr "$PRIMARY_MULTIADDR" && break
+            print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+        done
+
+        local default_worker="/ip4/${public_ip}/udp/${WORKER_PORT}/quic-v1"
+        while true; do
+            read -r -p "  External worker addr  [${default_worker}]: " input
+            WORKER_MULTIADDR="${input:-$default_worker}"
+            validate_multiaddr "$WORKER_MULTIADDR" && break
+            print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+        done
+
+        local internal_ip
+        internal_ip=$(detect_internal_ip)
+        if [[ -n "$internal_ip" ]] && ! validate_ipv4 "$internal_ip" && ! validate_ipv6 "$internal_ip"; then
+            print_warn "Auto-detected internal IP looks invalid: ${internal_ip} -- will prompt instead."
+            internal_ip=""
+        fi
+        if [[ -z "$internal_ip" ]]; then
+            print_warn "Could not auto-detect internal IP."
+            read -r -p "  Enter your internal/NIC IP address [0.0.0.0]: " internal_ip
+            internal_ip="${internal_ip:-0.0.0.0}"
+            if ! validate_ipv4 "$internal_ip" && ! validate_ipv6 "$internal_ip"; then
+                print_error "Invalid IP: ${internal_ip}"
+                exit 1
             fi
-            break
+        else
+            print_info "Detected internal IP: ${internal_ip}"
         fi
-        print_warn "Passphrases do not match -- try again."
-    done
+
+        echo ""
+        echo "  Listener addresses (what the node binds to -- use your internal/NIC IP):"
+        local default_listener_primary="/ip4/${internal_ip}/udp/${P2P_PORT}/quic-v1"
+        while true; do
+            read -r -p "  Listener primary addr [${default_listener_primary}]: " input
+            PRIMARY_LISTENER_MULTIADDR="${input:-$default_listener_primary}"
+            validate_multiaddr "$PRIMARY_LISTENER_MULTIADDR" && break
+            print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+        done
+
+        local default_listener_worker="/ip4/${internal_ip}/udp/${WORKER_PORT}/quic-v1"
+        while true; do
+            read -r -p "  Listener worker addr  [${default_listener_worker}]: " input
+            WORKER_LISTENER_MULTIADDR="${input:-$default_listener_worker}"
+            validate_multiaddr "$WORKER_LISTENER_MULTIADDR" && break
+            print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
+        done
+
+        echo ""
+        print_warn "Set a passphrase to encrypt your BLS validator key."
+        print_warn "Store this securely -- you need it every time the node starts."
+        echo ""
+
+        while true; do
+            read -r -s -p "  Enter BLS key passphrase: " bls_passphrase
+            echo ""
+            read -r -s -p "  Confirm BLS key passphrase: " bls_passphrase_confirm
+            echo ""
+            if [[ "$bls_passphrase" == "$bls_passphrase_confirm" ]]; then
+                if [[ -z "$bls_passphrase" ]]; then
+                    print_warn "Empty passphrase is not recommended."
+                    if ! confirm "Continue with no passphrase?"; then continue; fi
+                fi
+                break
+            fi
+            print_warn "Passphrases do not match -- try again."
+        done
+    fi
 
     print_step "Generating validator keys..."
     export TN_BLS_PASSPHRASE="$bls_passphrase"
@@ -628,7 +653,9 @@ step_generate_keys() {
     print_warn "BACK UP YOUR KEYS NOW."
     print_info "If ${DATA_DIR}/node-keys/ is lost, you must re-register with the Association."
     echo ""
-    read -r -p "  Press Enter to confirm you have backed up your keys: "
+    # JSON mode: the UI enforces the "BACKED UP" gate between keygen and finalize,
+    # so no blocking prompt here.
+    json_mode || read -r -p "  Press Enter to confirm you have backed up your keys: "
 }
 
 step_write_config() {
@@ -668,6 +695,10 @@ step_write_config() {
         print_warn "Chain config files not found automatically."
         print_info "Copy from: https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
         echo ""
+        if json_mode; then
+            print_error "Chain config files missing and cannot prompt in non-interactive mode."
+            exit 1
+        fi
         read -r -p "  Press Enter once you have copied the chain config files: "
     fi
 
@@ -680,9 +711,13 @@ step_create_service() {
     print_info "Instance number affects RPC port: 8545 - (instance - 1)"
     print_info "  Instance 1 -> RPC port 8545 (default for validators)"
     echo ""
-    local input
-    read -r -p "  Instance number [1]: " input
-    local instance="${input:-1}"
+    local input instance
+    if json_mode; then
+        instance="${JSON_INSTANCE:-1}"
+    else
+        read -r -p "  Instance number [1]: " input
+        instance="${input:-1}"
+    fi
     RPC_PORT=$(( 8545 - (instance - 1) ))
     print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}"
 
@@ -855,7 +890,7 @@ EOF
     print_ok "Node metadata written: ${meta_file}"
 
     echo ""
-    if confirm "Start the validator node now?"; then
+    if json_mode || confirm "Start the validator node now?"; then
         systemctl start "$SERVICE_NAME"
         sleep 3
 
@@ -874,7 +909,7 @@ EOF
         echo ""
         check_validator_onchain_status "$VALIDATOR_ADDRESS" "$local_rpc"
 
-        if confirm "Enable auto-start on server reboot?"; then
+        if json_mode || confirm "Enable auto-start on server reboot?"; then
             systemctl enable "$SERVICE_NAME"
             print_ok "Auto-start enabled"
         fi
@@ -931,9 +966,127 @@ step_final_summary() {
 }
 
 # =============================================================================
+# JSON / NON-INTERACTIVE MODE  (phased, driven by the Node Manager UI)
+#
+# Reached only via `--json` (the interactive default is completely unaffected).
+# Two phases, mirroring the UI's forced key-backup gate:
+#   --json --phase=keygen   -> preflight + infrastructure + key generation only;
+#                              writes NO unit and starts NOTHING. Emits the full
+#                              node-info.yaml so the operator can back it up.
+#   --json --phase=finalize -> write config + create service + start + verify.
+#
+# fd handling mirrors update-node.sh: stdout -> fd3 (newline-delimited JSON),
+# real stdout -> stderr. BLS passphrase arrives via TN_BLS_PASSPHRASE env ONLY.
+#
+# Note: on-chain validator registration (governance approval, staking,
+# activate()) is intentionally NOT performed here -- the UI surfaces the
+# next-step guidance the interactive summary prints.
+# =============================================================================
+
+JSON_MODE=false
+JSON_PHASE=""
+JSON_BUILD_REF=""
+JSON_INSTANCE="1"
+JSON_NETWORK_INPUT="testnet"
+JSON_DONE_EMITTED=false
+
+json_mode() { [[ "$JSON_MODE" == "true" ]]; }
+
+json_setup_fds() {
+    exec 3>&1   # fd3 = original stdout: JSON is written here
+    exec 1>&2   # stdout now aliases stderr: print_*/build output is benign noise
+}
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/ }"; s="${s//$'\t'/ }"
+    printf '%s' "$s"
+}
+
+json_emit() { printf '%s\n' "$1" >&3; }
+json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
+json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
+
+json_on_exit() {
+    local rc=$?
+    [[ "$JSON_DONE_EMITTED" == "true" ]] && return
+    json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"setup exited early (rc=${rc}) -- see server logs / journalctl\"}"
+}
+
+json_set_network() {
+    case "${1:-testnet}" in
+        testnet|adiri)
+            NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
+            RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
+        *) json_event error "unsupported network: ${1} (only testnet is available)"; exit 1 ;;
+    esac
+}
+
+json_phase_keygen() {
+    json_event step "Running preflight checks and installing dependencies"
+    step_preflight
+    json_event step "Creating system infrastructure"
+    step_create_infrastructure
+    json_event step "Generating ${NODE_TYPE} keys"
+    step_generate_keys
+
+    local info="${DATA_DIR}/node-info.yaml" info_content=""
+    [[ -f "$info" ]] && info_content="$(json_escape "$(cat "$info")")"
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"${NODE_TYPE}\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
+}
+
+json_phase_finalize() {
+    json_event step "Writing configuration"
+    step_write_config
+    json_event step "Creating service and starting node"
+    step_create_service
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"${NODE_TYPE}\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"msg\":\"${SERVICE_NAME} finalized and started -- on-chain registration still required (see docs)\"}"
+}
+
+run_json_mode() {
+    json_setup_fds
+    trap json_on_exit EXIT
+    check_root
+    json_set_network "$JSON_NETWORK_INPUT"
+    case "$JSON_PHASE" in
+        keygen)   json_phase_keygen ;;
+        finalize) json_phase_finalize ;;
+        *)        json_event error "unknown or missing --phase (expected keygen|finalize)"; exit 1 ;;
+    esac
+}
+
+# =============================================================================
 # MAIN
 # =============================================================================
 main() {
+    local json_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)                json_mode=true; shift ;;
+            --phase)               JSON_PHASE="${2:-}"; shift 2 ;;
+            --phase=*)             JSON_PHASE="${1#*=}"; shift ;;
+            --network)             JSON_NETWORK_INPUT="${2:-}"; shift 2 ;;
+            --install-method)      INSTALL_METHOD="${2:-}"; shift 2 ;;
+            --passphrase-method)   PASSPHRASE_METHOD="${2:-}"; shift 2 ;;
+            --address)             VALIDATOR_ADDRESS="${2:-}"; shift 2 ;;
+            --build-ref)           JSON_BUILD_REF="${2:-}"; shift 2 ;;
+            --docker-image)        DOCKER_IMAGE="${2:-}"; shift 2 ;;
+            --instance)            JSON_INSTANCE="${2:-}"; shift 2 ;;
+            --external-primary)    PRIMARY_MULTIADDR="${2:-}"; shift 2 ;;
+            --external-worker)     WORKER_MULTIADDR="${2:-}"; shift 2 ;;
+            --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
+            --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
+            --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ "$json_mode" == "true" ]]; then
+        JSON_MODE=true
+        run_json_mode
+        exit $?
+    fi
+
     step_welcome
     step_preflight
     step_config

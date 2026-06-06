@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.48"
+readonly SCRIPT_VERSION="1.2.0"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -108,15 +108,16 @@ step_preflight() {
     print_ok "systemd ${systemd_ver} detected (247+ required)"
     USE_LOAD_CREDENTIAL=true
 
-    # Select network first so NETWORK is set before source build (needed for --features faucet)
+    # Select network first so NETWORK is set before source build (needed for --features faucet).
+    # In JSON mode network/method/passphrase are already set from flags by the orchestrator.
     echo ""
     print_step "Selecting network..."
-    select_network
+    json_mode || select_network
 
     # Select install method upfront so all dependencies are installed before configuration
     echo ""
     print_step "Selecting install method..."
-    _select_install_method_with_guard
+    json_mode || _select_install_method_with_guard
 
     # Install all dependencies upfront based on chosen method
     case "$INSTALL_METHOD" in
@@ -126,7 +127,7 @@ step_preflight() {
     esac
 
     # For binary/source installs, offer TPM passphrase protection
-    if [[ "$INSTALL_METHOD" != "docker" ]]; then
+    if [[ "$INSTALL_METHOD" != "docker" ]] && ! json_mode; then
         _select_passphrase_method
     fi
 
@@ -233,7 +234,7 @@ _preflight_source() {
     done
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
         print_warn "Missing build dependencies: ${missing_deps[*]}"
-        if confirm "Install missing packages now?"; then
+        if json_mode || confirm "Install missing packages now?"; then
             update_package_index
             for _dep in "${missing_deps[@]}"; do
                 install_package "$_dep"
@@ -263,10 +264,15 @@ _preflight_source() {
     echo ""
 
     local build_ref
-    build_ref=$(pick_source_version "$NETWORK") || {
-        print_error "No source ref selected -- cannot continue setup."
-        exit 1
-    }
+    if json_mode; then
+        build_ref="$JSON_BUILD_REF"
+        [[ -n "$build_ref" ]] || { print_error "No --build-ref supplied for source build."; exit 1; }
+    else
+        build_ref=$(pick_source_version "$NETWORK") || {
+            print_error "No source ref selected -- cannot continue setup."
+            exit 1
+        }
+    fi
 
     print_step "Checking out: ${build_ref}..."
     if ! git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
@@ -339,9 +345,13 @@ _preflight_docker() {
     echo ""
 
     local input
-    read -r -p "  Docker image (press Enter to accept default)
+    if json_mode; then
+        DOCKER_IMAGE="${DOCKER_IMAGE:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+    else
+        read -r -p "  Docker image (press Enter to accept default)
   [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri]: " input
-    DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+        DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+    fi
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
     if ! docker pull "$DOCKER_IMAGE"; then
@@ -544,7 +554,8 @@ step_create_infrastructure() {
     echo "  Press Enter to accept defaults."
     echo ""
     local input
-    while true; do
+    # JSON mode keeps the default SERVICE_USER/SERVICE_GROUP (telcoin) -- no prompts.
+    while ! json_mode; do
         read -r -p "  Service user name  [${SERVICE_USER}]: " input
         local proposed_user="${input:-$SERVICE_USER}"
         if validate_service_name "$proposed_user" "Service user"; then
@@ -558,7 +569,7 @@ step_create_infrastructure() {
         fi
     done
 
-    while true; do
+    while ! json_mode; do
         read -r -p "  Service group name [${SERVICE_GROUP}]: " input
         local proposed_group="${input:-$SERVICE_GROUP}"
         if validate_service_name "$proposed_group" "Service group"; then
@@ -588,6 +599,10 @@ step_generate_keys() {
     echo ""
 
     if [[ -d "${DATA_DIR}/node-keys" ]]; then
+        if json_mode; then
+            print_error "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode"
+            exit 1
+        fi
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
             print_ok "Keeping existing keys"
@@ -595,27 +610,34 @@ step_generate_keys() {
         fi
     fi
 
-    read -r -p "  Observer Ethereum address (0x...): " OBSERVER_ADDRESS
-    if [[ ! "$OBSERVER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-        print_warn "Address format looks unusual. Proceeding anyway."
-    fi
-
-    echo ""
-    print_warn "Set a passphrase to encrypt this node's BLS key."
-    print_warn "You will need this every time the node starts."
-    echo ""
-
+    # JSON mode: address comes from --address, passphrase from TN_BLS_PASSPHRASE (env only).
     local bls_passphrase bls_passphrase_confirm
-    while true; do
-        read -r -s -p "  Enter BLS key passphrase: " bls_passphrase
-        echo ""
-        read -r -s -p "  Confirm BLS key passphrase: " bls_passphrase_confirm
-        echo ""
-        if [[ "$bls_passphrase" == "$bls_passphrase_confirm" ]]; then
-            break
+    if json_mode; then
+        [[ "$OBSERVER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || print_warn "Address format looks unusual. Proceeding anyway."
+        bls_passphrase="${TN_BLS_PASSPHRASE:-}"
+        [[ -n "$bls_passphrase" ]] || { print_error "TN_BLS_PASSPHRASE not set -- cannot generate keys."; exit 1; }
+    else
+        read -r -p "  Observer Ethereum address (0x...): " OBSERVER_ADDRESS
+        if [[ ! "$OBSERVER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            print_warn "Address format looks unusual. Proceeding anyway."
         fi
-        print_warn "Passphrases do not match -- try again."
-    done
+
+        echo ""
+        print_warn "Set a passphrase to encrypt this node's BLS key."
+        print_warn "You will need this every time the node starts."
+        echo ""
+
+        while true; do
+            read -r -s -p "  Enter BLS key passphrase: " bls_passphrase
+            echo ""
+            read -r -s -p "  Confirm BLS key passphrase: " bls_passphrase_confirm
+            echo ""
+            if [[ "$bls_passphrase" == "$bls_passphrase_confirm" ]]; then
+                break
+            fi
+            print_warn "Passphrases do not match -- try again."
+        done
+    fi
 
     print_step "Generating observer keys..."
     export TN_BLS_PASSPHRASE="$bls_passphrase"
@@ -707,6 +729,10 @@ step_write_config() {
         print_info "Copy these files from the Telcoin Network repo:"
         print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
         echo ""
+        if json_mode; then
+            print_error "Chain config files missing and cannot prompt in non-interactive mode."
+            exit 1
+        fi
         read -r -p "  Press Enter once you have copied the chain config files: "
     fi
 
@@ -756,9 +782,13 @@ step_create_service() {
     print_info "The --instance flag affects the RPC port: 8545 - (instance - 1)"
     print_info "  Instance 5 -> RPC port 8541 (default for observers)"
     echo ""
-    local input
-    read -r -p "  Instance number [5]: " input
-    local instance="${input:-5}"
+    local input instance
+    if json_mode; then
+        instance="${JSON_INSTANCE:-5}"
+    else
+        read -r -p "  Instance number [5]: " input
+        instance="${input:-5}"
+    fi
     RPC_PORT=$(( 8545 - (instance - 1) ))
     print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}"
 
@@ -937,7 +967,7 @@ EOF
     print_ok "Node metadata written: ${meta_file}"
 
     echo ""
-    if confirm "Start the observer node now?"; then
+    if json_mode || confirm "Start the observer node now?"; then
         systemctl start "$SERVICE_NAME"
         sleep 3
 
@@ -953,7 +983,7 @@ EOF
         local local_rpc="http://127.0.0.1:${RPC_PORT}"
         check_rpc_alive "$local_rpc" 15 6 || print_warn "RPC not yet responding -- normal during initial sync."
 
-        if confirm "Enable auto-start on server reboot?"; then
+        if json_mode || confirm "Enable auto-start on server reboot?"; then
             systemctl enable "$SERVICE_NAME"
             print_ok "Auto-start enabled"
         fi
@@ -1011,9 +1041,127 @@ step_final_summary() {
 }
 
 # =============================================================================
+# JSON / NON-INTERACTIVE MODE  (phased, driven by the Node Manager UI)
+#
+# Reached only via `--json` (the interactive default is completely unaffected).
+# Two phases, mirroring the UI's forced key-backup gate:
+#   --json --phase=keygen   -> preflight + infrastructure + key generation only;
+#                              writes NO unit and starts NOTHING. Emits the full
+#                              node-info.yaml so the operator can back it up.
+#   --json --phase=finalize -> write config + create service + start + verify.
+#
+# fd handling mirrors update-node.sh: stdout -> fd3 (newline-delimited JSON),
+# real stdout -> stderr (print_*/build noise). BLS passphrase arrives via the
+# TN_BLS_PASSPHRASE env var ONLY -- never argv, never logged.
+# =============================================================================
+
+JSON_MODE=false
+JSON_PHASE=""
+JSON_BUILD_REF=""
+JSON_INSTANCE="5"
+JSON_NETWORK_INPUT="testnet"
+JSON_DONE_EMITTED=false
+
+json_mode() { [[ "$JSON_MODE" == "true" ]]; }
+
+json_setup_fds() {
+    exec 3>&1   # fd3 = original stdout: JSON is written here
+    exec 1>&2   # stdout now aliases stderr: print_*/build output is benign noise
+}
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/ }"; s="${s//$'\t'/ }"
+    printf '%s' "$s"
+}
+
+json_emit() { printf '%s\n' "$1" >&3; }
+json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
+json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
+
+# Emitted on ANY exit if no terminal done was sent -- so an `exit 1` deep inside
+# a step (build failure, missing chain configs, ...) still yields a done:false.
+json_on_exit() {
+    local rc=$?
+    [[ "$JSON_DONE_EMITTED" == "true" ]] && return
+    json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"setup exited early (rc=${rc}) -- see server logs / journalctl\"}"
+}
+
+# Non-interactive network setter (mirrors select_network). testnet only.
+json_set_network() {
+    case "${1:-testnet}" in
+        testnet|adiri)
+            NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
+            RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
+        *) json_event error "unsupported network: ${1} (only testnet is available)"; exit 1 ;;
+    esac
+}
+
+json_phase_keygen() {
+    json_event step "Running preflight checks and installing dependencies"
+    step_preflight
+    json_event step "Creating system infrastructure"
+    step_create_infrastructure
+    json_event step "Generating ${NODE_TYPE} keys"
+    step_generate_keys
+
+    local info="${DATA_DIR}/node-info.yaml" info_content=""
+    [[ -f "$info" ]] && info_content="$(json_escape "$(cat "$info")")"
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"${NODE_TYPE}\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
+}
+
+json_phase_finalize() {
+    json_event step "Writing configuration"
+    step_write_config
+    json_event step "Creating service and starting node"
+    step_create_service
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"${NODE_TYPE}\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"msg\":\"${SERVICE_NAME} finalized and started\"}"
+}
+
+run_json_mode() {
+    json_setup_fds
+    trap json_on_exit EXIT
+    check_root
+    json_set_network "$JSON_NETWORK_INPUT"
+    case "$JSON_PHASE" in
+        keygen)   json_phase_keygen ;;
+        finalize) json_phase_finalize ;;
+        *)        json_event error "unknown or missing --phase (expected keygen|finalize)"; exit 1 ;;
+    esac
+}
+
+# =============================================================================
 # MAIN
 # =============================================================================
 main() {
+    local json_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)                json_mode=true; shift ;;
+            --phase)               JSON_PHASE="${2:-}"; shift 2 ;;
+            --phase=*)             JSON_PHASE="${1#*=}"; shift ;;
+            --network)             JSON_NETWORK_INPUT="${2:-}"; shift 2 ;;
+            --install-method)      INSTALL_METHOD="${2:-}"; shift 2 ;;
+            --passphrase-method)   PASSPHRASE_METHOD="${2:-}"; shift 2 ;;
+            --address)             OBSERVER_ADDRESS="${2:-}"; shift 2 ;;
+            --build-ref)           JSON_BUILD_REF="${2:-}"; shift 2 ;;
+            --docker-image)        DOCKER_IMAGE="${2:-}"; shift 2 ;;
+            --instance)            JSON_INSTANCE="${2:-}"; shift 2 ;;
+            --external-primary)    PRIMARY_MULTIADDR="${2:-}"; shift 2 ;;
+            --external-worker)     WORKER_MULTIADDR="${2:-}"; shift 2 ;;
+            --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
+            --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
+            --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ "$json_mode" == "true" ]]; then
+        JSON_MODE=true
+        run_json_mode
+        exit $?
+    fi
+
     step_welcome
     step_preflight
     step_config

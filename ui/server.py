@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.2.2"
+UI_VERSION = "1.2.3"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -977,6 +977,105 @@ def api_node_remove(node_type):
 
 
 # =============================================================================
+# ROUTES -- setup (phased, full install in the UI)
+#
+# Two phases via the helper's setup-keygen / setup-finalize, which run
+# setup-<type>.sh --json --phase=...  Config travels in TN_SETUP_* env vars and
+# the BLS passphrase in TN_BLS_PASSPHRASE (env only -- never argv, never the URL,
+# kept in-process here). These are POST + streamed (not EventSource) precisely so
+# the passphrase never lands in a query string or access log. The frontend reads
+# the streamed body with fetch().
+# =============================================================================
+
+_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_BUILD_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_PUBLIC_IP_RE = re.compile(r"^[0-9a-fA-F.:]+$")
+
+
+def _setup_env(data, want_passphrase):
+    """Validate a setup config dict and build the child env (TN_SETUP_* [+
+    TN_BLS_PASSPHRASE]). Returns (env, None) or (None, error_message)."""
+    network = str(data.get("network") or "testnet").strip()
+    method = str(data.get("install_method") or "").strip()
+    passm = str(data.get("passphrase_method") or "loadcredential").strip()
+    address = str(data.get("address") or "").strip()
+    build_ref = str(data.get("build_ref") or "").strip()
+    image = str(data.get("docker_image") or "").strip()
+    instance = str(data.get("instance") or "").strip()
+    ext_primary = str(data.get("external_primary") or "").strip()
+    ext_worker = str(data.get("external_worker") or "").strip()
+    lis_primary = str(data.get("listener_primary") or "").strip()
+    lis_worker = str(data.get("listener_worker") or "").strip()
+    public_ip = str(data.get("public_ip") or "").strip()
+
+    if network not in ("testnet", "adiri"):
+        return None, "invalid network"
+    if method not in ("source", "docker", "existing", ""):
+        return None, "invalid install method"
+    if passm not in ("loadcredential", "tpm"):
+        return None, "invalid passphrase method"
+    if address and not _ADDRESS_RE.match(address):
+        return None, "invalid address"
+    if build_ref and not _BUILD_REF_RE.match(build_ref):
+        return None, "invalid build ref"
+    if image and not (_IMAGE_CHARS_RE.match(image) and ":" in image):
+        return None, "invalid docker image"
+    if instance and instance not in tuple("123456789"):
+        return None, "invalid instance"
+    for m in (ext_primary, ext_worker, lis_primary, lis_worker):
+        if m and not _MULTIADDR_RE.match(m):
+            return None, "invalid multiaddr"
+    if public_ip and not _PUBLIC_IP_RE.match(public_ip):
+        return None, "invalid public ip"
+    if method == "source" and not build_ref:
+        return None, "build_ref required for source install"
+
+    env = os.environ.copy()
+    env["TN_SETUP_NETWORK"] = network
+    env["TN_SETUP_INSTALL_METHOD"] = method
+    env["TN_SETUP_PASSPHRASE_METHOD"] = passm
+    env["TN_SETUP_ADDRESS"] = address
+    env["TN_SETUP_BUILD_REF"] = build_ref
+    env["TN_SETUP_DOCKER_IMAGE"] = image
+    env["TN_SETUP_INSTANCE"] = instance
+    env["TN_SETUP_EXT_PRIMARY"] = ext_primary
+    env["TN_SETUP_EXT_WORKER"] = ext_worker
+    env["TN_SETUP_LIS_PRIMARY"] = lis_primary
+    env["TN_SETUP_LIS_WORKER"] = lis_worker
+    env["TN_SETUP_PUBLIC_IP"] = public_ip
+
+    if want_passphrase:
+        passphrase = data.get("passphrase")
+        if not passphrase:
+            return None, "passphrase required"
+        env["TN_BLS_PASSPHRASE"] = str(passphrase)
+
+    return env, None
+
+
+@app.route("/api/setup/<node_type>/keygen", methods=["POST"])
+def api_setup_keygen(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    data = request.get_json(silent=True) or {}
+    env, err = _setup_env(data, want_passphrase=True)
+    if err:
+        return jsonify({"error": err}), 400
+    return _update_stream(["sudo", "-n", HELPER, "setup-keygen", node_type], env=env)
+
+
+@app.route("/api/setup/<node_type>/finalize", methods=["POST"])
+def api_setup_finalize(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    data = request.get_json(silent=True) or {}
+    env, err = _setup_env(data, want_passphrase=False)
+    if err:
+        return jsonify({"error": err}), 400
+    return _update_stream(["sudo", "-n", HELPER, "setup-finalize", node_type], env=env)
+
+
+# =============================================================================
 # ROUTES -- system
 # =============================================================================
 
@@ -1028,13 +1127,15 @@ def api_update_status(node_type):
     })
 
 
-def _update_stream(argv):
-    """SSE generator that streams an update-node.sh --json subprocess (via the
-    helper) line by line. Each JSON line the script emits becomes one SSE event.
-    Mirrors the /api/logs/<type>/stream teardown pattern."""
+def _update_stream(argv, env=None):
+    """SSE generator that streams a --json subprocess (via the helper) line by
+    line. Each JSON line the script emits becomes one SSE event. Mirrors the
+    /api/logs/<type>/stream teardown pattern. `env`, when given, fully replaces
+    the child environment (used by Setup to pass TN_SETUP_*/TN_BLS_PASSPHRASE)."""
     def generate():
         proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            env=env,
         )
         try:
             for line in iter(proc.stdout.readline, ""):
