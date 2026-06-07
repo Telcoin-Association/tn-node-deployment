@@ -117,13 +117,20 @@ nav{display:flex;gap:4px;margin:0 auto}
 
 .group-label{font-size:10px;text-transform:uppercase;letter-spacing:1.8px;color:var(--text3);font-weight:600;margin:22px 0 0}
 .group-label:first-of-type{margin-top:8px}
-/* Centred 2-column dashboard */
-.dash{max-width:1400px;margin:0 auto}
-.dash-cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:14px;align-items:start}
-@media(max-width:900px){.dash-cols{grid-template-columns:1fr}}
-.dash-col{min-width:0}
-/* Per-section card grid: fills the column width, no empty trailing tracks */
-.dgrid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:8px}
+/* Full-width single-column dashboard (.wrap supplies consistent side padding) */
+.dash{max-width:none;margin:0}
+/* Per-section card grids: explicit column counts so each row fills edge-to-edge
+   with no empty trailing space. min-width:0 on items lets long content (e.g. the
+   version string) wrap instead of blowing the grid track out. */
+.dgrid{display:grid;gap:14px;margin-top:8px}
+.dgrid>*{min-width:0}
+.dgrid-4{grid-template-columns:repeat(4,1fr)}
+.dgrid-5{grid-template-columns:repeat(5,1fr)}
+.dgrid-3{grid-template-columns:repeat(3,1fr)}
+.dgrid-auto{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
+@media(max-width:820px){
+  .dgrid-3,.dgrid-4,.dgrid-5{grid-template-columns:repeat(2,1fr)}
+}
 .stat .label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
 .stat .val{font-size:26px;font-weight:700;margin-top:6px;font-family:'JetBrains Mono',monospace}
 .stat .meta{font-size:12px;color:var(--text2);margin-top:4px}
@@ -567,51 +574,45 @@ async function renderDashboard(){
       </div>
     </div>
 
-    <!-- two-column grid: left = Service Health + Sync State; right = Performance + Network + Monitoring -->
-    <div class="dash-cols">
-      <div class="dash-col">
-        <div class="group-label">Service Health</div>
-        <div class="dgrid">
-          ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
-          ${statCard('Uptime', s.uptime_human?esc(s.uptime_human):'—', '', running?'⏱ running time':'not running')}
-          ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since boot')}
-          ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
-        </div>
+    <!-- sections, full width single column; each grid fills the row edge-to-edge -->
+    <div class="group-label">Service Health</div>
+    <div class="dgrid dgrid-4">
+      ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
+      ${statCard('Uptime', s.uptime_human?esc(s.uptime_human):'—', '', running?'⏱ running time':'not running')}
+      ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since boot')}
+      ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
+    </div>
 
-        <div class="group-label">Sync State</div>
-        <div class="dgrid">
-          ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
-          ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
-          ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
-          ${statCard('Network Block', nbVal, nbCls, 'via status.telscan.xyz')}
-          ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
-        </div>
-      </div>
+    <div class="group-label">Sync State</div>
+    <div class="dgrid dgrid-5">
+      ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
+      ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
+      ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
+      ${statCard('Network Block', nbVal, nbCls, 'via status.telscan.xyz')}
+      ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
+    </div>
 
-      <div class="dash-col">
-        <div class="group-label">Performance</div>
-        <div class="dgrid">
-          ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
-          ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
-          ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
-        </div>
+    <div class="group-label">Performance</div>
+    <div class="dgrid dgrid-3">
+      ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
+      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
+      ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
+    </div>
 
-        <div class="group-label">Network</div>
-        <div class="dgrid">
-          ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
-          ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
-          ${statCard('Version', '<span id="verTile" style="font-size:16px;word-break:break-all">…</span>', 'accent', '<span id="verMeta"></span>')}
-        </div>
+    <div class="group-label">Network</div>
+    <div class="dgrid dgrid-3">
+      ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
+      ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
+      ${statCard('Version', '<span id="verTile" style="font-size:16px;overflow-wrap:anywhere;word-break:break-word;white-space:normal;line-height:1.35;display:inline-block">…</span>', 'accent', '<span id="verMeta"></span>')}
+    </div>
 
-        <div class="group-label">Monitoring</div>
-        <div class="dgrid">
-          ${statCard('Errors (1h)', errc!=null?esc(String(errc)):'—', errCls, 'log ERROR')}
-          ${statCard('Warnings (1h)', warnc!=null?esc(String(warnc)):'—', warnCls, 'log WARN')}
-          ${statCard('Last Error', leVal, '', leMeta)}
-          ${statCard('Last Restart', lrVal, '', 'service start')}
-          ${statCard('Log Size', logSize?esc(logSize):'—', '', 'on disk')}
-        </div>
-      </div>
+    <div class="group-label">Monitoring</div>
+    <div class="dgrid dgrid-auto">
+      ${statCard('Errors (1h)', errc!=null?esc(String(errc)):'—', errCls, 'log ERROR')}
+      ${statCard('Warnings (1h)', warnc!=null?esc(String(warnc)):'—', warnCls, 'log WARN')}
+      ${statCard('Last Error', leVal, '', leMeta)}
+      ${statCard('Last Restart', lrVal, '', 'service start')}
+      ${statCard('Log Size', logSize?esc(logSize):'—', '', 'on disk')}
     </div>
 
     <!-- network status (Adiri Testnet status page), full width -->
