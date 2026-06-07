@@ -631,6 +631,13 @@ async function renderDashboard(){
       ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
     </div>
 
+    <div class="group-label">Network</div>
+    <div class="dgrid dgrid-3">
+      ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
+      ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
+      ${statCard('Version', '<span id="verTile" style="font-size:16px;overflow-wrap:anywhere;word-break:break-word;white-space:normal;line-height:1.35;display:inline-block">…</span>', 'accent', '<span id="verMeta"></span>')}
+    </div>
+
     <div class="group-label">Performance</div>
     <div class="dgrid dgrid-5">
       ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
@@ -638,13 +645,6 @@ async function renderDashboard(){
       ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
       ${statCard('Jaeger', '<span id="jaegerTile">…</span>', '', 'tracing backend')}
       ${statCard('Network Traffic', '<span id="netTrafficTile" style="font-size:14px;line-height:1.5;display:block">…</span>', '', '<span id="netTrafficMeta"></span>')}
-    </div>
-
-    <div class="group-label">Network</div>
-    <div class="dgrid dgrid-3">
-      ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
-      ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
-      ${statCard('Version', '<span id="verTile" style="font-size:16px;overflow-wrap:anywhere;word-break:break-word;white-space:normal;line-height:1.35;display:inline-block">…</span>', 'accent', '<span id="verMeta"></span>')}
     </div>
 
     <div class="group-label">Monitoring</div>
