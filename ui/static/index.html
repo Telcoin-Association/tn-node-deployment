@@ -124,6 +124,10 @@ nav{display:flex;gap:4px;margin:0 auto}
    version string) wrap instead of blowing the grid track out. */
 .dgrid{display:grid;gap:14px;margin-top:8px}
 .dgrid>*{min-width:0}
+/* Centre dashboard metric cards (label / value / subtitle). The text-heavy
+   Last Error + Last Restart cards opt out via .tleft. */
+.dgrid .stat{text-align:center}
+.dgrid .stat.tleft{text-align:left}
 .dgrid-4{grid-template-columns:repeat(4,1fr)}
 .dgrid-5{grid-template-columns:repeat(5,1fr)}
 .dgrid-3{grid-template-columns:repeat(3,1fr)}
@@ -501,13 +505,13 @@ function emptyState(container, what){
 // =============================================================================
 // DASHBOARD
 // =============================================================================
-function statCard(label, val, valCls, meta, bar){
+function statCard(label, val, valCls, meta, bar, cardCls){
   let barHtml='';
   if(bar){
     const cls = bar.pct>=90?'crit':(bar.pct>=75?'warn':'');
     barHtml = `<div class="bar"><span class="${cls}" style="width:${Math.max(0,Math.min(100,bar.pct))}%"></span></div>`;
   }
-  return `<div class="card stat">
+  return `<div class="card stat ${cardCls||''}">
     <div class="label">${esc(label)}</div>
     <div class="val ${valCls||''}">${val}</div>
     ${meta?`<div class="meta">${meta}</div>`:''}
@@ -623,8 +627,8 @@ async function renderDashboard(){
     <div class="dgrid dgrid-5">
       ${statCard('Errors (1h)', errc!=null?esc(String(errc)):'—', errCls, 'log ERROR')}
       ${statCard('Warnings (1h)', warnc!=null?esc(String(warnc)):'—', warnCls, 'log WARN')}
-      ${statCard('Last Error', leVal, '', leMeta)}
-      ${statCard('Last Restart', lrVal, '', 'service start')}
+      ${statCard('Last Error', leVal, '', leMeta, null, 'tleft')}
+      ${statCard('Last Restart', lrVal, '', 'service start', null, 'tleft')}
       ${statCard('Log Size', logSize?esc(logSize):'—', logCls, 'on disk')}
     </div>
 
