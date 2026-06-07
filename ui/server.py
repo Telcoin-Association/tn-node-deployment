@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.7"
+UI_VERSION = "1.6.8"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -988,9 +988,9 @@ def api_status(node_type):
     if block_number is not None and cons_exec is not None:
         synced = block_number >= cons_exec - 2
 
-    # Network consensus block (public status page, monitor 48) + lag vs local.
-    netcons = network_consensus_block()
-    net_block = netcons.get("block") if netcons else None
+    # Network consensus block (public RPC tn_latestConsensusHeader) + lag.
+    # Lag is local - network: positive => local ahead, negative => local behind.
+    net_block = network_consensus_block()
     local_cons_block = None
     if consensus.get("block") is not None:
         try:
@@ -999,7 +999,7 @@ def api_status(node_type):
             local_cons_block = None
     consensus_lag = None
     if net_block is not None and local_cons_block is not None:
-        consensus_lag = net_block - local_cons_block
+        consensus_lag = local_cons_block - net_block
 
     up_secs = service_uptime_seconds(t)
     logs = log_stats(cfg["log_path"])
@@ -1032,7 +1032,7 @@ def api_status(node_type):
         "tracing_enabled": tracing_enabled(t),
         "peers": peer_counts(t, cfg["log_path"]),
         "consensus": consensus,
-        "network_consensus_block": netcons,
+        "network_consensus_block": net_block,
         "consensus_lag": consensus_lag,
         "disk": disk_for(data_dir(t)),
         "memory": mem_info(),
@@ -1921,52 +1921,65 @@ NETWORK_MONITORS = [
 ]
 CONSENSUS_MONITOR_ID = 48
 
+# Public RPC for the network's latest consensus block (tn_latestConsensusHeader).
+TN_PUBLIC_RPC = "https://rpc.telcoin.network"
+
 _network_cache = {"ts": 0.0, "data": None}  # 60s TTL
-_netcons_cache = {"ts": 0.0, "data": None}  # 60s TTL (consensus monitor, for /api/status)
+_netcons_cache = {"ts": 0.0, "data": None}  # 60s TTL (network consensus block #)
 
 
-def _extract_block(beat):
-    """Best-effort block height from a monitor-48 heartbeat: the longest digit
-    run in `msg`, else a block-sized `ping`. None when neither is present."""
-    if not beat:
+def _to_int_block(num):
+    """Coerce an RPC block 'number' (int, decimal str, or 0x-hex str) to int."""
+    if isinstance(num, bool):
         return None
-    msg = beat.get("msg") or ""
-    nums = re.findall(r"\d+", msg)
-    if nums:
-        try:
-            return int(max(nums, key=len))
-        except ValueError:
-            pass
-    ping = beat.get("ping")
-    if isinstance(ping, (int, float)) and int(ping) > 1000:
-        return int(ping)
+    if isinstance(num, int):
+        return num
+    if isinstance(num, str):
+        s = num.strip()
+        if s.startswith("0x"):
+            return hex_to_dec(s)
+        if s.isdigit():
+            return int(s)
     return None
 
 
 def network_consensus_block():
-    """Latest Consensus Block Progress (monitor 48) heartbeat from the public
-    status page, cached 60s. Returns {status,last_seen,block} when the API is
-    reachable (block may be None), or None when the API is unreachable."""
+    """Network consensus block number from the public RPC
+    (tn_latestConsensusHeader -> result.number), cached 60s. Returns the int
+    block, or None on failure/timeout (with a short stale-cache grace window)."""
     now = time.time()
     cached = _netcons_cache["data"]
     if cached is not None and now - _netcons_cache["ts"] < 60:
         return cached
-    hb = _http_get_json(STATUS_PAGE_HEARTBEAT)
-    if hb is None:
-        # Unreachable: serve a recent stale value within a grace window, else None.
+
+    block = None
+    payload = json.dumps({
+        "jsonrpc": "2.0", "method": "tn_latestConsensusHeader",
+        "params": [], "id": 1,
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            TN_PUBLIC_RPC, data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "telcoin-ui"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+        result = data.get("result") if isinstance(data, dict) else None
+        if isinstance(result, dict):
+            block = _to_int_block(result.get("number"))
+    except Exception:
+        block = None
+
+    if block is None:
+        # Failure/timeout: serve a recent stale value within a grace window, else None.
         if cached is not None and now - _netcons_cache["ts"] < 300:
             return cached
         return None
-    beats = (hb.get("heartbeatList") or {}).get(str(CONSENSUS_MONITOR_ID)) or []
-    last = beats[-1] if beats else None
-    data = {
-        "status": (last.get("status") if last else 0),
-        "last_seen": (last or {}).get("time"),
-        "block": _extract_block(last),
-    }
+
     _netcons_cache["ts"] = now
-    _netcons_cache["data"] = data
-    return data
+    _netcons_cache["data"] = block
+    return block
 
 
 def _http_get_json(url, timeout=6):

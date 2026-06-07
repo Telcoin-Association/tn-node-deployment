@@ -565,19 +565,25 @@ async function renderDashboard(){
   const cpu = s.cpu_percent;
   const cpuCls = cpu==null?'':(cpu>90?'red':(cpu>70?'yellow':''));
 
-  // Network consensus block (public status page, monitor 48). null -> API down.
-  const ncb = s.network_consensus_block;
-  let nbVal, nbCls='';
-  if(!ncb){ nbVal='<span class="muted">Unavailable</span>'; }
-  else if(ncb.block!=null){ nbVal=fmtNum(ncb.block); nbCls='accent'; }
-  else { nbVal = ncb.status===1?'up':'down'; nbCls = ncb.status===1?'green':'red'; }
+  // Network consensus block number (public RPC tn_latestConsensusHeader).
+  // int -> show with commas; null -> RPC unavailable.
+  const ncb = s.network_consensus_block;          // number or null
+  const nbAvail = ncb!=null;
+  const nbVal = nbAvail ? fmtNum(ncb) : '—';
+  const nbCls = nbAvail ? 'accent' : '';
+  const nbMeta = nbAvail ? 'via rpc.telcoin.network' : 'rpc unavailable';
 
-  // Consensus lag (network - local). 0 -> in sync; <100 green, 100-1000 yellow, >1000 red.
+  // Consensus lag = local - network. +N ahead, -N behind, 0 in sync.
   const lag = s.consensus_lag;
-  let lagVal, lagCls='', lagMeta;
-  if(lag==null){ lagVal='—'; lagMeta='network block n/a'; }
-  else if(lag===0){ lagVal='In sync'; lagCls='green'; lagMeta='caught up'; }
-  else { const a=Math.abs(lag); lagVal=fmtNum(a); lagCls=a<100?'green':(a<=1000?'yellow':'red'); lagMeta=lag>0?'blocks behind':'blocks ahead'; }
+  let lagVal='—', lagCls='', lagMeta;
+  if(!nbAvail){ lagVal='—'; lagMeta='rpc unavailable'; }
+  else if(lag==null){ lagVal='—'; lagMeta='network block '+fmtNum(ncb); }
+  else {
+    const a=Math.abs(lag);
+    if(lag===0){ lagVal='In sync'; lagCls='green'; }
+    else { lagVal=(lag>0?'+':'-')+fmtNum(a)+' blocks'; lagCls=a<100?'green':(a<=1000?'yellow':'red'); }
+    lagMeta='network block '+fmtNum(ncb);
+  }
 
   // Monitoring tiles.
   const errc = s.log_error_count_1h;
@@ -627,7 +633,7 @@ async function renderDashboard(){
       ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
       ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
       ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
-      ${statCard('Network Block', nbVal, nbCls, 'via status.telscan.xyz')}
+      ${statCard('Network Block', nbVal, nbCls, nbMeta)}
       ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
     </div>
 
