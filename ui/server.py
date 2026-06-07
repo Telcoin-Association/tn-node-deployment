@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.5.1"
+UI_VERSION = "1.5.2"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -938,6 +938,7 @@ def api_status(node_type):
         "log_error_count_1h": logs["error_count"],
         "log_warn_count_1h": logs["warn_count"],
         "last_error": logs["last_error"],
+        "log_size": logs["log_size"],
         "log_size_human": logs["log_size_human"],
         "tracing_enabled": tracing_enabled(t),
         "peers": peer_counts(t, cfg["log_path"]),

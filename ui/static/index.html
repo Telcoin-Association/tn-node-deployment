@@ -82,7 +82,7 @@ nav{display:flex;gap:4px;margin:0 auto}
 .btn-refresh:hover{border-color:var(--accent);color:var(--accent)}
 
 /* ---- Node selector ---- */
-.selector{display:flex;gap:14px;padding:20px 0 4px}
+.selector{display:flex;gap:14px;padding:20px 0 12px}
 .node-btn{
   flex:1;display:flex;align-items:center;gap:14px;
   padding:15px 18px;border-radius:12px;
@@ -192,6 +192,11 @@ nav{display:flex;gap:4px;margin:0 auto}
   padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.65;
   border:1px solid rgba(0,180,255,0.08);
 }
+/* Logs tab: the log box fills the remaining viewport height (X accounts for the
+   header navbar, node selector row, view/card padding, the card title and the
+   toolbar row). The trimmed bottom padding keeps it flush with no empty area. */
+#view-logs{padding-bottom:18px}
+#logBody{height:calc(100vh - 320px);min-height:280px}
 .log-line{white-space:pre-wrap;word-break:break-all;color:var(--text2)}
 .log-line.err{color:var(--red)} .log-line.warn{color:var(--yellow)}
 .log-line.ok{color:var(--green)} .log-line.info{color:var(--accent)}
@@ -553,11 +558,18 @@ async function renderDashboard(){
   const warnc = s.log_warn_count_1h;
   const warnCls = warnc==null?'':(warnc>10?'red':(warnc>0?'yellow':'green'));
   const le = s.last_error;            // {time,msg} or null
-  const leVal = (le && le.msg) ? `<span style="font-size:12px;font-weight:500;line-height:1.4;display:block;word-break:break-word">${esc(le.msg)}</span>` : '—';
-  const leMeta = (le && le.time) ? esc(le.time) : 'none in recent log';
+  // Single-line, ellipsis-truncated message; timestamp shortened to HH:MM:SS.
+  const leVal = (le && le.msg)
+    ? `<span style="font-size:12px;font-weight:500;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(le.msg)}</span>`
+    : '—';
+  let leMeta = 'none in recent log';
+  if(le && le.time){ const tm = String(le.time).match(/(\d{2}:\d{2}:\d{2})/); leMeta = tm?tm[1]:esc(le.time); }
   const lastRestart = s.last_restart;
   const lrVal = lastRestart ? `<span style="font-size:14px">${esc(lastRestart)}</span>` : '—';
   const logSize = s.log_size_human;
+  // Log size colour: <500MB normal/green, 500MB-1GB amber, >1GB red.
+  const logBytes = s.log_size;
+  const logCls = logBytes==null ? '' : (logBytes>1073741824 ? 'red' : (logBytes>=524288000 ? 'yellow' : 'green'));
 
   c.innerHTML = `
   <div class="dash">
@@ -593,10 +605,11 @@ async function renderDashboard(){
     </div>
 
     <div class="group-label">Performance</div>
-    <div class="dgrid dgrid-3">
+    <div class="dgrid dgrid-4">
       ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
       ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
       ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
+      ${statCard('Jaeger', '<span id="jaegerTile">…</span>', '', 'tracing backend')}
     </div>
 
     <div class="group-label">Network</div>
@@ -607,12 +620,12 @@ async function renderDashboard(){
     </div>
 
     <div class="group-label">Monitoring</div>
-    <div class="dgrid dgrid-auto">
+    <div class="dgrid dgrid-5">
       ${statCard('Errors (1h)', errc!=null?esc(String(errc)):'—', errCls, 'log ERROR')}
       ${statCard('Warnings (1h)', warnc!=null?esc(String(warnc)):'—', warnCls, 'log WARN')}
       ${statCard('Last Error', leVal, '', leMeta)}
       ${statCard('Last Restart', lrVal, '', 'service start')}
-      ${statCard('Log Size', logSize?esc(logSize):'—', '', 'on disk')}
+      ${statCard('Log Size', logSize?esc(logSize):'—', logCls, 'on disk')}
     </div>
 
     <!-- network status (Adiri Testnet status page), full width -->
@@ -740,6 +753,16 @@ async function augmentDashboardUpdate(){
 // avg trace duration into the Consensus Block card meta.
 async function augmentDashboardJaeger(s){
   const j = await api('/api/jaeger/status?node_type='+state.node);
+  // Performance > Jaeger tile (same data as the control-bar indicator).
+  const jt = $('#jaegerTile');
+  if(jt){
+    if(j && !j.error){
+      jt.textContent = j.container_running ? 'Up' : 'Down';
+      jt.style.color = j.container_running ? 'var(--green)' : 'var(--red)';
+    } else {
+      jt.textContent = '—';
+    }
+  }
   if(state.view!=='dashboard' || j.error) return;
   const ind = $('#jaegerInd');
   if(ind){
