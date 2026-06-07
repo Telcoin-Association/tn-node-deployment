@@ -217,6 +217,15 @@ select{
   background:var(--bg);border:var(--border);color:var(--text);border-radius:8px;
   padding:7px 10px;font-family:inherit;font-size:12px;
 }
+.dropdown{position:relative;display:inline-block}
+.dropdown-menu{
+  position:absolute;right:0;top:calc(100% + 4px);min-width:190px;z-index:60;
+  background:var(--bg2);border:var(--border);border-radius:9px;overflow:hidden;
+  box-shadow:0 8px 30px rgba(0,0,0,0.5);display:none;
+}
+.dropdown-menu.open{display:block}
+.dropdown-menu button{display:block;width:100%;text-align:left;padding:10px 13px;font-size:13px;color:var(--text)}
+.dropdown-menu button:hover{background:var(--bg3);color:var(--accent)}
 .log-controls input{
   background:var(--bg);border:var(--border);color:var(--text);border-radius:8px;
   padding:7px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;min-width:160px;
@@ -856,7 +865,14 @@ function renderLogs(){
         </select>
         <input id="logSearch" placeholder="search text…" autocomplete="off">
         <button class="btn btn-out" id="logCopy">⧉ Copy</button>
-        <button class="btn btn-out" id="logDownload">⤓ Download</button>
+        <div class="dropdown" id="dlDrop">
+          <button class="btn btn-out" id="dlBtn">⤓ Download ▾</button>
+          <div class="dropdown-menu" id="dlMenu">
+            <button id="dlVisible">Download visible</button>
+            <button id="dlFull">Download full log</button>
+          </div>
+        </div>
+        <button class="btn btn-red" id="logClear">🗑 Clear Log</button>
         <span id="liveStatus" style="margin-left:auto;font-size:12px;color:var(--text2)"></span>
       </div>
       <div class="log-body" id="logBody"><div class="muted">Loading…</div></div>
@@ -867,8 +883,29 @@ function renderLogs(){
   $('#logLevel').addEventListener('change', e=>{ state.logFilter.level=e.target.value; renderLogBuffer(); });
   $('#logSearch').addEventListener('input', e=>{ state.logFilter.search=e.target.value; renderLogBuffer(); });
   $('#logCopy').addEventListener('click', copyLogs);
-  $('#logDownload').addEventListener('click', downloadLogs);
+  $('#dlBtn').addEventListener('click', e=>{ e.stopPropagation(); $('#dlMenu').classList.toggle('open'); });
+  $('#dlVisible').addEventListener('click', ()=>{ $('#dlMenu').classList.remove('open'); downloadLogs(); });
+  $('#dlFull').addEventListener('click', ()=>{ $('#dlMenu').classList.remove('open'); downloadFullLog(); });
+  $('#logClear').addEventListener('click', clearLog);
   loadLogLines();
+}
+
+// Download the complete log file from disk (server streams it as an attachment
+// named telcoin-<type>.log), regardless of the current viewer filter.
+function downloadFullLog(){
+  window.location.href = '/api/logs/'+state.node+'/download';
+}
+
+async function clearLog(){
+  if(!window.confirm('This will permanently clear the log file. This cannot be undone. Are you sure?')) return;
+  const r = await api('/api/logs/'+state.node+'/clear', {method:'POST'});
+  if(r.ok){
+    toast(cap(state.node)+' log cleared','success');
+    state.logBuffer = [];
+    loadLogLines();
+  } else {
+    toast('Clear failed: '+(r.error||'unknown error'),'error');
+  }
 }
 
 function colorize(line){
@@ -1889,6 +1926,13 @@ async function pollNavNetPill(){
 // =============================================================================
 // Boot
 // =============================================================================
+// Close the Download dropdown on any outside click (queries #dlMenu live, so it
+// works across log re-renders; attached once).
+document.addEventListener('click', e=>{
+  const m = $('#dlMenu');
+  if(m && !e.target.closest('#dlDrop')) m.classList.remove('open');
+});
+
 (async function init(){
   await loadNodes();
   state.buildInfo = await api('/api/build-info');   // read once at page load

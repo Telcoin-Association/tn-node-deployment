@@ -25,7 +25,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 # =============================================================================
 # CONSTANTS & PATHS
@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.4"
+UI_VERSION = "1.6.5"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -949,7 +949,7 @@ def api_status(node_type):
     up_secs = service_uptime_seconds(t)
     logs = log_stats(cfg["log_path"])
 
-    return jsonify({
+    resp = jsonify({
         "installed": True,
         "node_type": t,
         "status": status,
@@ -985,6 +985,10 @@ def api_status(node_type):
         "passphrase_method": detect_passphrase_method(t),
         "docker_image": docker_image_ref(t),
     })
+    # Never cache status -- every dashboard refresh must re-read live values
+    # (log size, blocks, CPU, ...), not a value frozen at page load.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # =============================================================================
@@ -1068,6 +1072,29 @@ def api_logs_stream(node_type):
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache",
                              "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/logs/<node_type>/download")
+def api_logs_download(node_type):
+    """Download the complete log file from disk as telcoin-<type>.log."""
+    if not valid_type(node_type):
+        return bad_type()
+    path = parse_service_file(node_type)["log_path"]
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "log file not found"}), 404
+    return send_file(path, mimetype="text/plain", as_attachment=True,
+                     download_name=f"telcoin-{node_type}.log")
+
+
+@app.route("/api/logs/<node_type>/clear", methods=["POST"])
+def api_logs_clear(node_type):
+    """Truncate (not delete) the node's log file via the root helper, so the
+    running service keeps its open file handle."""
+    if not valid_type(node_type):
+        return bad_type()
+    rc, out, err = run(["sudo", "-n", HELPER, "log-clear", node_type], timeout=15)
+    ok = rc == 0 and out.strip() == "ok"
+    return jsonify({"ok": ok, "error": "" if ok else (err or out or "clear failed")})
 
 
 # =============================================================================

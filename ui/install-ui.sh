@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.2.6"
+readonly SCRIPT_VERSION="1.2.7"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -211,6 +211,9 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard
 # since the current install. Fixed-arg, no wildcard.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper restart-count observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper restart-count validator
+# Log-clear helper -- truncates the node log file (root-owned). Fixed-arg.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper log-clear observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper log-clear validator
 # Config helper -- config-set takes <type> <field> <value>. The field+value are
 # wildcarded here but the field is checked against a fixed allowlist and the
 # value against a per-field regex inside the helper before edit-config.sh runs.

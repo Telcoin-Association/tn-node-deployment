@@ -20,6 +20,7 @@
 #   telcoin-ui-helper update-apply    <observer|validator>
 #   telcoin-ui-helper update-discard  <observer|validator>
 #   telcoin-ui-helper restart-count   <observer|validator>
+#   telcoin-ui-helper log-clear       <observer|validator>
 #   telcoin-ui-helper config-set      <observer|validator> <field> <value>
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
@@ -71,6 +72,32 @@ require_type() {
         observer|validator) ;;
         *) die "invalid node type: ${1:-<empty>} (expected observer|validator)" ;;
     esac
+}
+
+# Resolve a node's main log file from its unit (StandardOutput=append:<path>),
+# falling back to the conventional path. Mirrors server.py parse_service_file.
+log_path_for() {
+    local t="$1" unit="/etc/systemd/system/telcoin-${t}.service" p=""
+    if [[ -f "$unit" ]]; then
+        p="$(grep -m1 '^StandardOutput=append:' "$unit" 2>/dev/null | sed 's/^StandardOutput=append://' || true)"
+    fi
+    [[ -n "$p" ]] || p="/var/log/telcoin/telcoin-${t}.log"
+    echo "$p"
+}
+
+# Truncate (NOT delete) the node's log file, preserving the inode so the running
+# service keeps writing to the same handle. Restricted to /var/log/telcoin/*.log.
+cmd_log_clear() {
+    local t="$1"; require_type "$t"
+    local logf
+    logf="$(log_path_for "$t")"
+    case "$logf" in
+        /var/log/telcoin/*.log) ;;
+        *) die "refusing to clear non-standard log path: $logf" ;;
+    esac
+    [[ -f "$logf" ]] || die "log file not found: $logf"
+    : > "$logf" 2>/dev/null || die "could not truncate $logf"
+    echo "ok"
 }
 
 jaeger_state() {
@@ -385,6 +412,7 @@ main() {
         update-apply)    shift; cmd_update_apply   "${1:-}" ;;
         update-discard)  shift; cmd_update_discard "${1:-}" ;;
         restart-count)   shift; cmd_restart_count "${1:-}" ;;
+        log-clear)       shift; cmd_log_clear "${1:-}" ;;
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
