@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.2.4"
+readonly SCRIPT_VERSION="1.2.5"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -283,17 +283,24 @@ else
 fi
 
 # ---- 12. Access instructions ------------------------------------------------
-SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo ""
 echo -e "${c_green}============================================================${c_off}"
 echo -e "${c_green} Telcoin Node Manager UI installed${c_off}"
 echo -e "${c_green}============================================================${c_off}"
 echo ""
 echo "The UI listens on 127.0.0.1:8080 (localhost only). Access it from your"
-echo "local machine over an SSH tunnel. This also forwards the Jaeger tracing UI"
-echo "(16686); add -p <port> if your server uses a non-default SSH port:"
+echo "local machine over an SSH tunnel."
 echo ""
-echo -e "    ${c_blue}ssh -L 8080:localhost:8080 -L 16686:localhost:16686 ${USER:-user}@${SERVER_IP:-YOUR_SERVER_IP}${c_off}"
+echo "Node Manager UI only:"
+echo -e "    ${c_blue}ssh -L 8080:localhost:8080 user@<server-ip>${c_off}"
+echo ""
+echo "Jaeger tracing only:"
+echo -e "    ${c_blue}ssh -L 16686:localhost:16686 user@<server-ip>${c_off}"
+echo ""
+echo "Both Node Manager UI and Jaeger tracing:"
+echo -e "    ${c_blue}ssh -L 8080:localhost:8080 -L 16686:localhost:16686 user@<server-ip>${c_off}"
+echo ""
+echo "Add -p <port> if your server uses a non-default SSH port."
 echo ""
 echo "Then open in your browser:"
 echo ""
