@@ -405,6 +405,7 @@ const state = {
   setup: { network:'adiri', method:'source', passphrase:'loadcredential',
            eth:'', bls:'', buildRef:'', dockerImage:'', publicIp:'', instance:'' },
   preflight: null,
+  buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
 };
 
 const $ = (s,r=document)=>r.querySelector(s);
@@ -757,7 +758,7 @@ async function augmentDashboardVersion(){
   const v = await api('/api/version/'+state.node);
   if(state.view!=='dashboard' || !v || v.error) return;
   const ref = v.ref || '—';
-  const tile=$('#verTile'); if(tile) tile.textContent = ref;
+  const tile=$('#verTile'); if(tile) tile.innerHTML = versionHtml(ref);
   const meta=$('#verMeta'); if(meta) meta.textContent = v.kind || '';
   const det=$('#verDetail'); if(det) det.textContent = v.kind ? (ref+' ('+v.kind+')') : ref;
 }
@@ -1072,7 +1073,10 @@ async function renderConfig(){
       ${editableHtml}
       ${roRows.map(([k,v])=>{
         const isMa = (k==='External Primary' || k==='External Worker');
-        const cell = isMa ? fmtMultiaddrCell(v) : esc(v||'—');
+        let cell;
+        if(isMa) cell = fmtMultiaddrCell(v);
+        else if(k==='Version') cell = versionHtml(v);
+        else cell = esc(v||'—');
         return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${cell}</span></div>`;
       }).join('')}
     </div>
@@ -1817,6 +1821,17 @@ function startTracesRefresh(){
 }
 function stopTracesRefresh(){ if(state.tracesTimer){ clearInterval(state.tracesTimer); state.tracesTimer=null; } }
 
+// Version value with an optional second line for a non-default build branch.
+// Only shows the branch when it's a real feature branch (not main/empty, and
+// not 'detached' -- a detached HEAD is the normal tag-build case).
+function versionHtml(ref){
+  const base = esc(ref || '—');
+  const br = state.buildInfo && state.buildInfo.exists ? (state.buildInfo.branch || '') : '';
+  if(br && br!=='main' && br!=='detached'){
+    return `${base}<br><span style="font-size:11px;color:var(--text3)">branch: ${esc(br)}</span>`;
+  }
+  return base;
+}
 function copyToClipboard(text, label){
   navigator.clipboard?.writeText(text).then(
     ()=>toast((label||'Value')+' copied','success'),
@@ -1854,6 +1869,7 @@ async function pollNavNetPill(){
 // =============================================================================
 (async function init(){
   await loadNodes();
+  state.buildInfo = await api('/api/build-info');   // read once at page load
   // Default-select an installed node if the current default isn't installed.
   if(!state.nodes[state.node]?.installed){
     const other = state.node==='observer'?'validator':'observer';

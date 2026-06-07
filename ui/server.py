@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.1"
+UI_VERSION = "1.6.2"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -97,6 +97,23 @@ def node_id(t):
         return m.group(1)
     m = re.search(r"\b(12D3KooW[1-9A-HJ-NP-Za-km-z]+)\b", text)
     return m.group(1) if m else ""
+
+
+def read_build_info():
+    """Parse /etc/telcoin/build-info (KEY=VALUE lines) written by the setup
+    scripts after a source build. None when the file is absent."""
+    out = {}
+    try:
+        with open("/etc/telcoin/build-info", "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                out[k.strip()] = v.strip()
+    except (OSError, IOError):
+        return None
+    return out
 
 
 # =============================================================================
@@ -1355,6 +1372,22 @@ def api_version(node_type):
     if not valid_type(node_type):
         return bad_type()
     return jsonify(node_version(node_type))
+
+
+@app.route("/api/build-info")
+def api_build_info():
+    """build_ref/branch/commit/built_at from /etc/telcoin/build-info (written by
+    the setup scripts on a source build). {exists:false} when not present."""
+    bi = read_build_info()
+    if not bi:
+        return jsonify({"exists": False})
+    return jsonify({
+        "exists": True,
+        "build_ref": bi.get("build_ref", ""),
+        "branch": bi.get("branch", ""),
+        "commit": bi.get("commit", ""),
+        "built_at": bi.get("built_at", ""),
+    })
 
 
 @app.route("/api/update/status/<node_type>")

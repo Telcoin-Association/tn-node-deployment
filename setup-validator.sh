@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -305,6 +305,16 @@ _preflight_source() {
     chmod +x "${INSTALL_DIR}/telcoin-network"
     BINARY_PATH="${INSTALL_DIR}/telcoin-network"
     print_ok "Binary installed: ${BINARY_PATH}"
+
+    # Write build info for Node Manager UI
+    mkdir -p /etc/telcoin
+    {
+        echo "build_ref=${build_ref}"
+        echo "commit=$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+        echo "branch=$(git -C "$source_dir" symbolic-ref --short HEAD 2>/dev/null || echo "detached")"
+        echo "built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    } > /etc/telcoin/build-info
+    print_ok "Build info written: /etc/telcoin/build-info"
 }
 
 _preflight_docker() {
