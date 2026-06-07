@@ -35,7 +35,12 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 button:disabled{opacity:.5;cursor:not-allowed}
 
 /* ---- Layout ---- */
-.wrap{max-width:none;margin:0 auto;padding:0 28px}
+/* Content area: centred, capped at 1600px, with consistent 32px side padding.
+   Applies to the node selector row and every view (dashboard sections, control
+   bar, Node Details, Quick Actions, etc.). */
+.wrap{max-width:1600px;margin:0 auto;padding:0 32px}
+/* The navbar stays full width (its own .wrap inside <header> keeps 28px gutters). */
+header .wrap{max-width:none;padding:0 28px}
 
 /* ---- Header ---- */
 header{
