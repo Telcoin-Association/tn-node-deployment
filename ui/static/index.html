@@ -108,6 +108,8 @@ nav{display:flex;gap:4px;margin:0 auto}
 .two-col{grid-template-columns:1fr 1fr;margin-top:14px}
 @media(max-width:720px){.two-col{grid-template-columns:1fr}}
 
+.group-label{font-size:10px;text-transform:uppercase;letter-spacing:1.8px;color:var(--text3);font-weight:600;margin:22px 0 0}
+.group-label:first-of-type{margin-top:8px}
 .stat .label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
 .stat .val{font-size:26px;font-weight:700;margin-top:6px;font-family:'JetBrains Mono',monospace}
 .stat .meta{font-size:12px;color:var(--text2);margin-top:4px}
@@ -501,6 +503,28 @@ async function renderDashboard(){
   const disk = s.disk||{};
   const mem = s.memory||{};
 
+  // Restart count tile colour: 0 green, 1-3 yellow, 4+ red.
+  const rc = s.restart_count;
+  const rcCls = rc==null?'':(rc>=4?'red':(rc>=1?'yellow':'green'));
+
+  // CPU tile (share of total capacity): >90 red, >70 yellow.
+  const cpu = s.cpu_percent;
+  const cpuCls = cpu==null?'':(cpu>90?'red':(cpu>70?'yellow':''));
+
+  // Network consensus block (public status page, monitor 48). null -> API down.
+  const ncb = s.network_consensus_block;
+  let nbVal, nbCls='';
+  if(!ncb){ nbVal='<span class="muted">Unavailable</span>'; }
+  else if(ncb.block!=null){ nbVal=fmtNum(ncb.block); nbCls='accent'; }
+  else { nbVal = ncb.status===1?'up':'down'; nbCls = ncb.status===1?'green':'red'; }
+
+  // Consensus lag (network - local). 0 -> in sync; <100 green, 100-1000 yellow, >1000 red.
+  const lag = s.consensus_lag;
+  let lagVal, lagCls='', lagMeta;
+  if(lag==null){ lagVal='—'; lagMeta='network block n/a'; }
+  else if(lag===0){ lagVal='In sync'; lagCls='green'; lagMeta='caught up'; }
+  else { const a=Math.abs(lag); lagVal=fmtNum(a); lagCls=a<100?'green':(a<=1000?'yellow':'red'); lagMeta=lag>0?'blocks behind':'blocks ahead'; }
+
   c.innerHTML = `
     <!-- service control -->
     <div class="card">
@@ -515,19 +539,41 @@ async function renderDashboard(){
       </div>
     </div>
 
-    <!-- stats -->
-    <div class="grid stats">
+    <!-- stats, grouped -->
+    <div class="group-label">Service Health</div>
+    <div class="grid stats" style="margin-top:8px">
       ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
+      ${statCard('Uptime', s.uptime_human?esc(s.uptime_human):'—', '', running?'⏱ running time':'not running')}
+      ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since boot')}
       ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
+    </div>
+
+    <div class="group-label">Sync State</div>
+    <div class="grid stats" style="margin-top:8px">
       ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
+      ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
       ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
+      ${statCard('Network Block', nbVal, nbCls, 'via status.telscan.xyz')}
+      ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
+    </div>
+
+    <div class="group-label">Network</div>
+    <div class="grid stats" style="margin-top:8px">
       ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
       ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
-      ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
-      ${statCard('Errors (1h)', s.log_error_count_1h!=null?esc(String(s.log_error_count_1h)):'—', (s.log_error_count_1h>0?'yellow':'green'), 'log ERROR / WARN')}
       ${statCard('Version', '<span id="verTile" style="font-size:16px;word-break:break-all">…</span>', 'accent', '<span id="verMeta"></span>')}
-      ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
+    </div>
+
+    <div class="group-label">Performance</div>
+    <div class="grid stats" style="margin-top:8px">
+      ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
       ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
+      ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
+    </div>
+
+    <div class="group-label">Monitoring</div>
+    <div class="grid stats" style="margin-top:8px">
+      ${statCard('Errors (1h)', s.log_error_count_1h!=null?esc(String(s.log_error_count_1h)):'—', (s.log_error_count_1h>10?'red':(s.log_error_count_1h>0?'yellow':'green')), 'log ERROR / WARN')}
     </div>
 
     <!-- network status (Adiri Testnet status page) -->

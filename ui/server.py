@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.3.0"
+UI_VERSION = "1.4.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -556,6 +556,129 @@ def service_uptime(t):
     return ""
 
 
+def service_uptime_seconds(t):
+    """Seconds the unit has been active. Derived from the monotonic enter
+    timestamp vs /proc/uptime, so it sidesteps wall-clock timezone parsing.
+    None when not running / unknown."""
+    rc, out, _ = run(
+        ["systemctl", "show", service_name(t),
+         "--property=ActiveEnterTimestampMonotonic"]
+    )
+    if not out or "=" not in out:
+        return None
+    try:
+        mono_us = int(out.split("=", 1)[1].strip())
+    except ValueError:
+        return None
+    if mono_us <= 0:
+        return None
+    try:
+        with open("/proc/uptime") as f:
+            boot_secs = float(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    secs = int(boot_secs - mono_us / 1_000_000)
+    return secs if secs >= 0 else 0
+
+
+def fmt_uptime(secs):
+    """Seconds -> 'Xd Yh Zm' (drops leading zero units; always shows minutes)."""
+    if secs is None:
+        return ""
+    d, r = divmod(int(secs), 86400)
+    h, r = divmod(r, 3600)
+    m, _ = divmod(r, 60)
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m or not parts:
+        parts.append(f"{m}m")
+    return " ".join(parts)
+
+
+def service_restart_count(t):
+    """systemd NRestarts for the unit (0 when never restarted / unknown)."""
+    rc, out, _ = run(
+        ["systemctl", "show", service_name(t), "--property=NRestarts"]
+    )
+    if out and "=" in out:
+        try:
+            return int(out.split("=", 1)[1].strip())
+        except ValueError:
+            pass
+    return 0
+
+
+def _node_pid(t):
+    """PID of the running node process. Prefer the actual telcoin-network
+    process (so docker installs measure the container's process, not the
+    `docker run` client), falling back to the unit's MainPID. None if down."""
+    rc, o, _ = run(["pgrep", "-x", "telcoin-network"])
+    if rc == 0 and o:
+        try:
+            return int(o.splitlines()[0].strip())
+        except (ValueError, IndexError):
+            pass
+    rc, out, _ = run(
+        ["systemctl", "show", service_name(t), "--property=MainPID"]
+    )
+    if out and "=" in out:
+        try:
+            pid = int(out.split("=", 1)[1].strip())
+            if pid > 0:
+                return pid
+        except ValueError:
+            pass
+    return None
+
+
+def _proc_cpu_ticks(pid):
+    """utime+stime (clock ticks) for a pid from /proc/<pid>/stat. The comm field
+    can contain spaces/parens, so slice after the last ')'. None on failure."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            data = f.read()
+    except (OSError, IOError):
+        return None
+    rp = data.rfind(")")
+    if rp < 0:
+        return None
+    fields = data[rp + 2:].split()
+    try:
+        # After ')', field[0]=state (stat field 3); utime=field 14 -> index 11,
+        # stime=field 15 -> index 12.
+        return int(fields[11]) + int(fields[12])
+    except (IndexError, ValueError):
+        return None
+
+
+def service_cpu_percent(t):
+    """Instantaneous CPU% of the node process as a share of total capacity
+    (100 == all cores saturated). Samples /proc/<pid>/stat twice. None if down."""
+    pid = _node_pid(t)
+    if pid is None:
+        return None
+    t0 = _proc_cpu_ticks(pid)
+    if t0 is None:
+        return None
+    interval = 0.2
+    time.sleep(interval)
+    t1 = _proc_cpu_ticks(pid)
+    if t1 is None:
+        return None
+    try:
+        clk = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError):
+        clk = 100
+    ncpu = os.cpu_count() or 1
+    pct = (t1 - t0) / clk / interval / ncpu * 100
+    if pct < 0:
+        pct = 0.0
+    return round(pct, 1)
+
+
 def disk_for(path):
     """df against the mount holding `path`. {used,total,percent}."""
     info = {"used": None, "total": None, "percent": None}
@@ -697,11 +820,30 @@ def api_status(node_type):
     if block_number is not None and cons_exec is not None:
         synced = block_number >= cons_exec - 2
 
+    # Network consensus block (public status page, monitor 48) + lag vs local.
+    netcons = network_consensus_block()
+    net_block = netcons.get("block") if netcons else None
+    local_cons_block = None
+    if consensus.get("block") is not None:
+        try:
+            local_cons_block = int(consensus["block"])
+        except (TypeError, ValueError):
+            local_cons_block = None
+    consensus_lag = None
+    if net_block is not None and local_cons_block is not None:
+        consensus_lag = net_block - local_cons_block
+
+    up_secs = service_uptime_seconds(t)
+
     return jsonify({
         "installed": True,
         "node_type": t,
         "status": status,
         "uptime": service_uptime(t),
+        "uptime_seconds": up_secs,
+        "uptime_human": fmt_uptime(up_secs),
+        "restart_count": service_restart_count(t),
+        "cpu_percent": service_cpu_percent(t),
         "rpc_ok": rpc_ok,
         "rpc_port": port,
         "block_number": block_number,
@@ -713,6 +855,8 @@ def api_status(node_type):
         "tracing_enabled": tracing_enabled(t),
         "peers": peer_counts(t, cfg["log_path"]),
         "consensus": consensus,
+        "network_consensus_block": netcons,
+        "consensus_lag": consensus_lag,
         "disk": disk_for(data_dir(t)),
         "memory": mem_info(),
         "install_method": detect_install_method(t),
@@ -1549,6 +1693,51 @@ NETWORK_MONITORS = [
 CONSENSUS_MONITOR_ID = 48
 
 _network_cache = {"ts": 0.0, "data": None}  # 60s TTL
+_netcons_cache = {"ts": 0.0, "data": None}  # 60s TTL (consensus monitor, for /api/status)
+
+
+def _extract_block(beat):
+    """Best-effort block height from a monitor-48 heartbeat: the longest digit
+    run in `msg`, else a block-sized `ping`. None when neither is present."""
+    if not beat:
+        return None
+    msg = beat.get("msg") or ""
+    nums = re.findall(r"\d+", msg)
+    if nums:
+        try:
+            return int(max(nums, key=len))
+        except ValueError:
+            pass
+    ping = beat.get("ping")
+    if isinstance(ping, (int, float)) and int(ping) > 1000:
+        return int(ping)
+    return None
+
+
+def network_consensus_block():
+    """Latest Consensus Block Progress (monitor 48) heartbeat from the public
+    status page, cached 60s. Returns {status,last_seen,block} when the API is
+    reachable (block may be None), or None when the API is unreachable."""
+    now = time.time()
+    cached = _netcons_cache["data"]
+    if cached is not None and now - _netcons_cache["ts"] < 60:
+        return cached
+    hb = _http_get_json(STATUS_PAGE_HEARTBEAT)
+    if hb is None:
+        # Unreachable: serve a recent stale value within a grace window, else None.
+        if cached is not None and now - _netcons_cache["ts"] < 300:
+            return cached
+        return None
+    beats = (hb.get("heartbeatList") or {}).get(str(CONSENSUS_MONITOR_ID)) or []
+    last = beats[-1] if beats else None
+    data = {
+        "status": (last.get("status") if last else 0),
+        "last_seen": (last or {}).get("time"),
+        "block": _extract_block(last),
+    }
+    _netcons_cache["ts"] = now
+    _netcons_cache["data"] = data
+    return data
 
 
 def _http_get_json(url, timeout=6):
