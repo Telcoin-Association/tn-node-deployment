@@ -67,6 +67,13 @@ nav{display:flex;gap:4px;margin:0 auto}
 .tab:hover{color:var(--text);background:var(--bg2)}
 .tab.active{color:var(--accent);background:rgba(0,180,255,0.1)}
 .hdr-right{display:flex;align-items:center;gap:14px;flex-shrink:0}
+.net-pill{
+  font-size:11px;font-weight:600;padding:5px 11px;border-radius:14px;
+  border:1px solid var(--text3);color:var(--text2);white-space:nowrap;
+}
+.net-pill.up{color:var(--green);border-color:rgba(0,232,122,0.4)}
+.net-pill.degraded{color:var(--yellow);border-color:rgba(255,217,61,0.4)}
+.net-pill.down{color:var(--red);border-color:rgba(255,77,109,0.4)}
 .clock{font-size:12px;color:var(--text2);letter-spacing:.5px}
 .btn-refresh{
   padding:7px 13px;border-radius:8px;border:var(--border);
@@ -110,6 +117,13 @@ nav{display:flex;gap:4px;margin:0 auto}
 
 .group-label{font-size:10px;text-transform:uppercase;letter-spacing:1.8px;color:var(--text3);font-weight:600;margin:22px 0 0}
 .group-label:first-of-type{margin-top:8px}
+/* Centred 2-column dashboard */
+.dash{max-width:1400px;margin:0 auto}
+.dash-cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:14px;align-items:start}
+@media(max-width:900px){.dash-cols{grid-template-columns:1fr}}
+.dash-col{min-width:0}
+/* Per-section card grid: fills the column width, no empty trailing tracks */
+.dgrid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:8px}
 .stat .label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
 .stat .val{font-size:26px;font-weight:700;margin-top:6px;font-family:'JetBrains Mono',monospace}
 .stat .meta{font-size:12px;color:var(--text2);margin-top:4px}
@@ -297,6 +311,7 @@ select{
       <button class="tab" data-view="system">System</button>
     </nav>
     <div class="hdr-right">
+      <span class="net-pill" id="navNetPill" title="Adiri Testnet network status">⚪ Network: …</span>
       <span class="clock mono" id="clock">--:--:-- UTC</span>
       <button class="btn-refresh" id="refreshBtn">↻ Refresh</button>
     </div>
@@ -525,8 +540,21 @@ async function renderDashboard(){
   else if(lag===0){ lagVal='In sync'; lagCls='green'; lagMeta='caught up'; }
   else { const a=Math.abs(lag); lagVal=fmtNum(a); lagCls=a<100?'green':(a<=1000?'yellow':'red'); lagMeta=lag>0?'blocks behind':'blocks ahead'; }
 
+  // Monitoring tiles.
+  const errc = s.log_error_count_1h;
+  const errCls = errc==null?'':(errc>10?'red':(errc>0?'yellow':'green'));
+  const warnc = s.log_warn_count_1h;
+  const warnCls = warnc==null?'':(warnc>10?'red':(warnc>0?'yellow':'green'));
+  const le = s.last_error;            // {time,msg} or null
+  const leVal = (le && le.msg) ? `<span style="font-size:12px;font-weight:500;line-height:1.4;display:block;word-break:break-word">${esc(le.msg)}</span>` : '—';
+  const leMeta = (le && le.time) ? esc(le.time) : 'none in recent log';
+  const lastRestart = s.last_restart;
+  const lrVal = lastRestart ? `<span style="font-size:14px">${esc(lastRestart)}</span>` : '—';
+  const logSize = s.log_size_human;
+
   c.innerHTML = `
-    <!-- service control -->
+  <div class="dash">
+    <!-- service control (full width) -->
     <div class="card">
       <div class="svc-row" id="svcRow">
         <span class="pill ${running?'green':'red'}" id="svcPill">● ${esc(s.status)}</span>
@@ -539,47 +567,57 @@ async function renderDashboard(){
       </div>
     </div>
 
-    <!-- stats, grouped -->
-    <div class="group-label">Service Health</div>
-    <div class="grid stats" style="margin-top:8px">
-      ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
-      ${statCard('Uptime', s.uptime_human?esc(s.uptime_human):'—', '', running?'⏱ running time':'not running')}
-      ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since boot')}
-      ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
+    <!-- two-column grid: left = Service Health + Sync State; right = Performance + Network + Monitoring -->
+    <div class="dash-cols">
+      <div class="dash-col">
+        <div class="group-label">Service Health</div>
+        <div class="dgrid">
+          ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
+          ${statCard('Uptime', s.uptime_human?esc(s.uptime_human):'—', '', running?'⏱ running time':'not running')}
+          ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since boot')}
+          ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
+        </div>
+
+        <div class="group-label">Sync State</div>
+        <div class="dgrid">
+          ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
+          ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
+          ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
+          ${statCard('Network Block', nbVal, nbCls, 'via status.telscan.xyz')}
+          ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
+        </div>
+      </div>
+
+      <div class="dash-col">
+        <div class="group-label">Performance</div>
+        <div class="dgrid">
+          ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
+          ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
+          ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
+        </div>
+
+        <div class="group-label">Network</div>
+        <div class="dgrid">
+          ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
+          ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
+          ${statCard('Version', '<span id="verTile" style="font-size:16px;word-break:break-all">…</span>', 'accent', '<span id="verMeta"></span>')}
+        </div>
+
+        <div class="group-label">Monitoring</div>
+        <div class="dgrid">
+          ${statCard('Errors (1h)', errc!=null?esc(String(errc)):'—', errCls, 'log ERROR')}
+          ${statCard('Warnings (1h)', warnc!=null?esc(String(warnc)):'—', warnCls, 'log WARN')}
+          ${statCard('Last Error', leVal, '', leMeta)}
+          ${statCard('Last Restart', lrVal, '', 'service start')}
+          ${statCard('Log Size', logSize?esc(logSize):'—', '', 'on disk')}
+        </div>
+      </div>
     </div>
 
-    <div class="group-label">Sync State</div>
-    <div class="grid stats" style="margin-top:8px">
-      ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
-      ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
-      ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
-      ${statCard('Network Block', nbVal, nbCls, 'via status.telscan.xyz')}
-      ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
-    </div>
+    <!-- network status (Adiri Testnet status page), full width -->
+    <div class="card" id="netStatusCard" style="margin-top:18px"><h3>Network Status</h3><div class="muted">Loading network status…</div></div>
 
-    <div class="group-label">Network</div>
-    <div class="grid stats" style="margin-top:8px">
-      ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
-      ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
-      ${statCard('Version', '<span id="verTile" style="font-size:16px;word-break:break-all">…</span>', 'accent', '<span id="verMeta"></span>')}
-    </div>
-
-    <div class="group-label">Performance</div>
-    <div class="grid stats" style="margin-top:8px">
-      ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
-      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
-      ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
-    </div>
-
-    <div class="group-label">Monitoring</div>
-    <div class="grid stats" style="margin-top:8px">
-      ${statCard('Errors (1h)', s.log_error_count_1h!=null?esc(String(s.log_error_count_1h)):'—', (s.log_error_count_1h>10?'red':(s.log_error_count_1h>0?'yellow':'green')), 'log ERROR / WARN')}
-    </div>
-
-    <!-- network status (Adiri Testnet status page) -->
-    <div class="card" id="netStatusCard" style="margin-top:14px"><h3>Network Status</h3><div class="muted">Loading network status…</div></div>
-
-    <!-- details + quick actions -->
+    <!-- node details + quick actions, full width below both columns -->
     <div class="grid two-col">
       <div class="card">
         <h3>Node Details</h3>
@@ -599,6 +637,7 @@ async function renderDashboard(){
         </div>
       </div>
     </div>
+  </div>
   `;
 
   c.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click', ()=>serviceAction(b.dataset.act)));
@@ -615,6 +654,7 @@ async function renderDashboard(){
 async function augmentDashboardNetwork(){
   if(!$('#netStatusCard')) return;
   const d = await api('/api/network/status');
+  setNavNetPill(d);   // keep the nav-bar pill in sync from the same fetch
   const card = $('#netStatusCard');
   if(state.view!=='dashboard' || !card) return;
 
@@ -1712,6 +1752,29 @@ function fmtNum(n){ return Number(n).toLocaleString('en-US'); }
 function netLabel(n){ return ({testnet:'Adiri Testnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
+// Nav-bar network status pill (Adiri Testnet, from /api/network/status)
+// =============================================================================
+function setNavNetPill(d){
+  const el = $('#navNetPill'); if(!el) return;
+  const overall = d && d.overall;
+  if(!d || d.error || d.available===false || !overall || overall==='unknown'){
+    el.className = 'net-pill'; el.textContent = '⚪ Network: —'; return;
+  }
+  const map = {
+    up:       ['up',       '🟢 Network: Healthy'],
+    degraded: ['degraded', '🟡 Network: Degraded'],
+    down:     ['down',     '🔴 Network: Down'],
+  };
+  const [cls, txt] = map[overall] || ['', '⚪ Network: —'];
+  el.className = 'net-pill ' + cls;
+  el.textContent = txt;
+}
+
+async function pollNavNetPill(){
+  setNavNetPill(await api('/api/network/status'));
+}
+
+// =============================================================================
 // Boot
 // =============================================================================
 (async function init(){
@@ -1726,6 +1789,10 @@ function netLabel(n){ return ({testnet:'Adiri Testnet', mainnet:'Mainnet'})[n] |
   }
   renderDashboard();
   startAutoRefresh();
+  // Nav-bar network pill: refresh independently of the active view (60s; the
+  // backend caches the external call anyway).
+  pollNavNetPill();
+  setInterval(pollNavNetPill, 60000);
 })();
 </script>
 </body>

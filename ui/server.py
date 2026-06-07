@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.4.0"
+UI_VERSION = "1.5.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -393,6 +393,88 @@ def log_error_count(log_path, window=3600):
         if dt.timestamp() >= cutoff:
             count += 1
     return count
+
+
+def fmt_bytes(n):
+    """Bytes -> human ('12.3 MB'). None/garbage -> None."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return None
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{int(n)} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return None
+
+
+def log_stats(log_path, window=3600):
+    """Single-pass log scan -> error/warn counts in the last `window` seconds,
+    the most recent ERROR line (time + truncated message), and the log file
+    size. Uses re.search (not match) so timestamps anywhere on the line parse --
+    the node format prefixes lines with `ts=<iso>`. Safe defaults when missing."""
+    out = {
+        "error_count": 0,
+        "warn_count": 0,
+        "last_error": None,
+        "log_size": None,
+        "log_size_human": None,
+    }
+    if not log_path or not os.path.exists(log_path):
+        return out
+    try:
+        out["log_size"] = os.path.getsize(log_path)
+        out["log_size_human"] = fmt_bytes(out["log_size"])
+    except OSError:
+        pass
+    try:
+        with open(log_path, "rb") as f:
+            try:
+                f.seek(-1000000, os.SEEK_END)
+            except OSError:
+                f.seek(0)
+            tail = f.read().decode("utf-8", "replace")
+    except (OSError, IOError):
+        return out
+
+    cutoff = time.time() - window
+    last_error_line = None
+    ts_re = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
+    for line in tail.splitlines():
+        is_err = "ERROR" in line or "level=error" in line
+        is_warn = "WARN" in line or "level=warn" in line
+        if not is_err and not is_warn:
+            continue
+        ts = None
+        m = ts_re.search(line)
+        if m:
+            try:
+                ts = datetime.strptime(
+                    m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc).timestamp()
+            except ValueError:
+                ts = None
+        in_window = ts is not None and ts >= cutoff
+        if is_err:
+            if in_window:
+                out["error_count"] += 1
+            last_error_line = line  # ends as the most recent ERROR in the tail
+        elif is_warn and in_window:
+            out["warn_count"] += 1
+
+    if last_error_line:
+        tm = re.search(r"ts=(\S+)", last_error_line)
+        time_str = tm.group(1) if tm else ""
+        if not time_str:
+            mm = ts_re.search(last_error_line)
+            time_str = (mm.group(1) + " " + mm.group(2)) if mm else ""
+        msgm = re.search(r'message="([^"]*)"', last_error_line)
+        msg = msgm.group(1) if msgm else last_error_line.strip()
+        if len(msg) > 140:
+            msg = msg[:140] + "…"
+        out["last_error"] = {"time": time_str, "msg": msg}
+
+    return out
 
 
 # =============================================================================
@@ -834,6 +916,7 @@ def api_status(node_type):
         consensus_lag = net_block - local_cons_block
 
     up_secs = service_uptime_seconds(t)
+    logs = log_stats(cfg["log_path"])
 
     return jsonify({
         "installed": True,
@@ -843,6 +926,7 @@ def api_status(node_type):
         "uptime_seconds": up_secs,
         "uptime_human": fmt_uptime(up_secs),
         "restart_count": service_restart_count(t),
+        "last_restart": service_uptime(t),
         "cpu_percent": service_cpu_percent(t),
         "rpc_ok": rpc_ok,
         "rpc_port": port,
@@ -851,7 +935,10 @@ def api_status(node_type):
         "chain_id": chain_id,
         "network": detect_network(t, chain_id),
         "block_age": blk_age,
-        "log_error_count_1h": log_error_count(cfg["log_path"]),
+        "log_error_count_1h": logs["error_count"],
+        "log_warn_count_1h": logs["warn_count"],
+        "last_error": logs["last_error"],
+        "log_size_human": logs["log_size_human"],
         "tracing_enabled": tracing_enabled(t),
         "peers": peer_counts(t, cfg["log_path"]),
         "consensus": consensus,
