@@ -632,11 +632,12 @@ async function renderDashboard(){
     </div>
 
     <div class="group-label">Performance</div>
-    <div class="dgrid dgrid-4">
+    <div class="dgrid dgrid-5">
       ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
       ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
       ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
       ${statCard('Jaeger', '<span id="jaegerTile">…</span>', '', 'tracing backend')}
+      ${statCard('Network Traffic', '<span id="netTrafficTile" style="font-size:14px;line-height:1.5;display:block">…</span>', '', '<span id="netTrafficMeta"></span>')}
     </div>
 
     <div class="group-label">Network</div>
@@ -691,6 +692,24 @@ async function renderDashboard(){
   augmentDashboardJaeger(s);
   augmentDashboardVersion();
   augmentDashboardUpdate();
+  augmentDashboardNetstat();
+}
+
+// Lazy: fill the Network Traffic tile from /api/netstat (its own 1s-sampled
+// endpoint). Runs on every dashboard render, so rates update each refresh cycle.
+async function augmentDashboardNetstat(){
+  if(!$('#netTrafficTile')) return;
+  const d = await api('/api/netstat');
+  if(state.view!=='dashboard') return;
+  const tile=$('#netTrafficTile'), meta=$('#netTrafficMeta');
+  if(!tile || !meta) return;
+  if(!d || d.error || !d.iface){
+    tile.textContent = '—';
+    meta.textContent = 'no interface';
+    return;
+  }
+  tile.innerHTML = `↓ ${esc(d.rx_rate||'—')}<br>↑ ${esc(d.tx_rate||'—')}`;
+  meta.innerHTML = `${esc(d.iface)} · total ↓ ${esc(d.rx_total||'—')} · ↑ ${esc(d.tx_total||'—')}`;
 }
 
 // =============================================================================

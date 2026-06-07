@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.5"
+UI_VERSION = "1.6.6"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -831,6 +831,61 @@ def mem_info():
     return info
 
 
+def primary_iface():
+    """Primary network interface from the default route (`ip route` -> dev <if>),
+    e.g. 'eno1'. '' when there's no default route."""
+    rc, out, _ = run(["ip", "route"])
+    if rc != 0 or not out:
+        return ""
+    for line in out.splitlines():
+        if line.startswith("default"):
+            m = re.search(r"\bdev\s+(\S+)", line)
+            if m:
+                return m.group(1)
+    return ""
+
+
+def _iface_bytes(iface):
+    """(rx_bytes, tx_bytes) for iface from /proc/net/dev. None on failure.
+    Columns after 'iface:': rx bytes=0 .. multicast=7, tx bytes=8."""
+    try:
+        with open("/proc/net/dev") as f:
+            for line in f:
+                name, sep, rest = line.partition(":")
+                if not sep or name.strip() != iface:
+                    continue
+                fields = rest.split()
+                return int(fields[0]), int(fields[8])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def network_traffic():
+    """Per-interface traffic for the primary NIC, using only /proc + ip. Samples
+    /proc/net/dev twice 1s apart for current rates, plus cumulative since-boot
+    totals. Built-in tools only -- no external deps. Human-formatted strings."""
+    iface = primary_iface()
+    out = {"iface": iface, "rx_rate": None, "tx_rate": None,
+           "rx_total": None, "tx_total": None}
+    if not iface:
+        return out
+    s0 = _iface_bytes(iface)
+    if s0 is None:
+        return out
+    time.sleep(1.0)
+    s1 = _iface_bytes(iface)
+    if s1 is None:
+        return out
+    rx_rate = max(0, s1[0] - s0[0])  # bytes over ~1s == bytes/s
+    tx_rate = max(0, s1[1] - s0[1])
+    out["rx_rate"] = (fmt_bytes(rx_rate) or "0 B") + "/s"
+    out["tx_rate"] = (fmt_bytes(tx_rate) or "0 B") + "/s"
+    out["rx_total"] = fmt_bytes(s1[0]) or "—"
+    out["tx_total"] = fmt_bytes(s1[1]) or "—"
+    return out
+
+
 def system_info():
     """Host facts for the System view."""
     hostname = ""
@@ -1375,6 +1430,15 @@ def api_setup_finalize(node_type):
 @app.route("/api/system")
 def api_system():
     return jsonify(system_info())
+
+
+@app.route("/api/netstat")
+def api_netstat():
+    """Primary-NIC traffic (rates + since-boot totals). Its own endpoint so the
+    1s sample doesn't delay /api/status; the dashboard fetches it each refresh."""
+    resp = jsonify(network_traffic())
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # =============================================================================
