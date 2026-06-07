@@ -19,6 +19,7 @@
 #   telcoin-ui-helper update-prepare  <observer|validator> <ref>
 #   telcoin-ui-helper update-apply    <observer|validator>
 #   telcoin-ui-helper update-discard  <observer|validator>
+#   telcoin-ui-helper restart-count   <observer|validator>
 #   telcoin-ui-helper config-set      <observer|validator> <field> <value>
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
@@ -200,6 +201,33 @@ cmd_update_discard() {
     exec bash "$UPDATE_SCRIPT" "--${t}" --json --discard
 }
 
+# Count service starts since the current install. The journal for a system unit
+# is not readable by the unprivileged telcoin-ui user, so this runs as root via
+# the helper. "Since current install" = build-info built_at if present, else the
+# node binary's mtime. Prints a single integer (0 on any uncertainty).
+cmd_restart_count() {
+    local t="$1"; require_type "$t"
+    local since=""
+    if [[ -f /etc/telcoin/build-info ]]; then
+        since="$(grep -E '^built_at=' /etc/telcoin/build-info 2>/dev/null | head -1 | cut -d= -f2- || true)"
+        since="${since//T/ }"; since="${since%Z}"
+    fi
+    if [[ -z "$since" ]]; then
+        local binp="/opt/telcoin/telcoin-network"
+        if [[ ! -f "$binp" ]]; then
+            binp="$(find /usr /opt -name telcoin-network -type f 2>/dev/null | head -1 || true)"
+        fi
+        if [[ -n "$binp" && -e "$binp" ]]; then
+            since="$(stat -c %y "$binp" 2>/dev/null || true)"
+        fi
+    fi
+    if [[ -z "$since" ]]; then
+        echo 0; return 0
+    fi
+    journalctl -u "telcoin-${t}" --since "$since" --no-pager 2>/dev/null \
+        | grep -c "Started telcoin-${t}.service" || true
+}
+
 # =============================================================================
 # Config subcommand -- thin wrapper around edit-config.sh --json. The field is
 # checked against the editable allowlist and the value against a per-field regex
@@ -356,6 +384,7 @@ main() {
         update-prepare)  shift; cmd_update_prepare "${1:-}" "${2:-}" ;;
         update-apply)    shift; cmd_update_apply   "${1:-}" ;;
         update-discard)  shift; cmd_update_discard "${1:-}" ;;
+        restart-count)   shift; cmd_restart_count "${1:-}" ;;
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;

@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.3"
+UI_VERSION = "1.6.4"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -714,16 +714,14 @@ def fmt_uptime(secs):
 
 
 def service_restart_count(t):
-    """systemd NRestarts for the unit (0 when never restarted / unknown)."""
-    rc, out, _ = run(
-        ["systemctl", "show", service_name(t), "--property=NRestarts"]
-    )
-    if out and "=" in out:
-        try:
-            return int(out.split("=", 1)[1].strip())
-        except ValueError:
-            pass
-    return 0
+    """Service starts since the current install (not since boot). Counts journal
+    'Started telcoin-<t>.service' lines since the build/install timestamp. The
+    unit journal is root-only, so this goes through the helper. None when the
+    helper/sudo is unavailable (UI then shows '—')."""
+    rc, out, _ = run(["sudo", "-n", HELPER, "restart-count", t], timeout=25)
+    if rc == 0 and out.strip().isdigit():
+        return int(out.strip())
+    return None
 
 
 def _node_pid(t):

@@ -237,6 +237,7 @@ select{
 .badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:700}
 .badge.ok{background:rgba(0,232,122,0.14);color:var(--green)}
 .badge.err{background:rgba(255,77,109,0.14);color:var(--red)}
+.badge.warn{background:rgba(255,217,61,0.16);color:var(--yellow)}
 .toggle-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .jdot{width:9px;height:9px;border-radius:50%;background:var(--text3);display:inline-block;flex-shrink:0;vertical-align:middle;margin-right:6px}
 .jdot.green{background:var(--green);box-shadow:0 0 8px var(--green)}
@@ -608,7 +609,7 @@ async function renderDashboard(){
     <div class="dgrid dgrid-4">
       ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
       ${statCard('Uptime', s.uptime_human?esc(s.uptime_human):'—', '', running?'⏱ running time':'not running')}
-      ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since boot')}
+      ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since current install')}
       ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
     </div>
 
@@ -1460,23 +1461,44 @@ async function loadFirewall(){
     return;
   }
   const ports = f.ports||{};
+  const active = !!f.active;
+
+  // Port rows: interactive when ufw is active; dimmed + button-less when not.
   const portRows = FW_PORTS.map(([pp,label])=>{
     const open=!!ports[pp];
+    if(!active){
+      return `<div class="kv" style="align-items:center;opacity:.45">
+        <span class="k">${esc(label)} · <span class="mono">${esc(pp)}</span></span>
+        <span class="v"><span class="badge" style="background:rgba(122,154,184,0.15);color:var(--text2)">disabled</span></span>
+      </div>`;
+    }
     return `<div class="kv" style="align-items:center">
       <span class="k">${esc(label)} · <span class="mono">${esc(pp)}</span></span>
       <span class="v" style="display:flex;gap:10px;align-items:center;justify-content:flex-end">
         ${open?'<span class="badge ok">open</span>':'<span class="badge err">closed</span>'}
-        <button class="btn ${open?'btn-red':'btn-green'}" data-fw-port="${esc(pp)}" data-fw-state="${open?'off':'on'}" ${f.active?'':'disabled'}>${open?'Close':'Open'}</button>
+        <button class="btn ${open?'btn-red':'btn-green'}" data-fw-port="${esc(pp)}" data-fw-state="${open?'off':'on'}">${open?'Close':'Open'}</button>
       </span></div>`;
   }).join('');
+
+  const ufwBadge = !f.installed
+    ? '<span class="muted">not installed</span>'
+    : (active ? '<span class="badge ok">active</span>' : '<span class="badge warn">inactive</span>');
+
+  const inactiveInfo = (f.installed && !active)
+    ? `<div class="note" style="margin-top:12px;border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
+        UFW is not active. Port management is disabled until the firewall is enabled. To enable, run
+        <span class="mono">sudo firewall-setup.sh</span> on the server and select option 2. Once enabled, you can manage node ports from this panel.</div>`
+    : '';
+
   card.innerHTML = `
     <h3>Firewall</h3>
-    <div class="kv"><span class="k">ufw</span><span class="v">${f.installed?(f.active?'<span class="badge ok">active</span>':'<span class="badge err">inactive</span>'):'<span class="muted">not installed</span>'}</span></div>
+    <div class="kv"><span class="k">ufw</span><span class="v">${ufwBadge}</span></div>
+    ${inactiveInfo}
     <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
     ${portRows}
     <div class="note" style="margin-top:14px">Only the three node ports can be toggled here.
-      <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong>${f.installed&&!f.active?' Enable ufw on the server first to manage ports.':''}</div>`;
+      <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong></div>`;
   card.querySelectorAll('[data-fw-port]').forEach(b=>b.addEventListener('click', ()=>toggleFirewallPort(b.dataset.fwPort, b.dataset.fwState, b)));
 }
 
