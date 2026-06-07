@@ -184,6 +184,8 @@ nav{display:flex;gap:4px;margin:0 auto}
   padding:7px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;min-width:220px;
 }
 .kv input:focus{outline:none;border-color:var(--accent)}
+.copy-btn{padding:1px 6px;border-radius:6px;border:var(--border);color:var(--text2);font-size:12px;line-height:1.4}
+.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
 
 /* quick actions */
 .qa{display:flex;flex-direction:column;gap:10px}
@@ -318,6 +320,7 @@ select{
     </div>
     <nav id="nav">
       <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="network">Network</button>
       <button class="tab" data-view="logs">Logs</button>
       <button class="tab" data-view="config">Config</button>
       <button class="tab" data-view="update">Update</button>
@@ -355,6 +358,8 @@ select{
 
   <!-- DASHBOARD -->
   <section class="view active" id="view-dashboard"></section>
+  <!-- NETWORK -->
+  <section class="view" id="view-network"></section>
   <!-- LOGS -->
   <section class="view" id="view-logs"></section>
   <!-- CONFIG -->
@@ -446,6 +451,7 @@ function switchView(v){
   stopRemoveStream();
   if(v!=='config') state.configEditing=false;
   if(v==='dashboard'){ renderDashboard(); startAutoRefresh(); }
+  if(v==='network'){ renderNetwork(); startAutoRefresh(); }
   if(v==='logs')   renderLogs();
   if(v==='config') renderConfig();
   if(v==='update') renderUpdate();
@@ -466,6 +472,7 @@ $('#refreshBtn').addEventListener('click', ()=>{ loadNodes(); rerenderActive(); 
 
 function rerenderActive(){
   if(state.view==='dashboard') renderDashboard();
+  if(state.view==='network') renderNetwork();
   if(state.view==='logs')   renderLogs();
   if(state.view==='config') renderConfig();
   if(state.view==='update') renderUpdate();
@@ -632,17 +639,20 @@ async function renderDashboard(){
       ${statCard('Log Size', logSize?esc(logSize):'—', logCls, 'on disk')}
     </div>
 
-    <!-- network status (Adiri Testnet status page), full width -->
-    <div class="card" id="netStatusCard" style="margin-top:18px"><h3>Network Status</h3><div class="muted">Loading network status…</div></div>
-
     <!-- node details + quick actions, full width below both columns -->
     <div class="grid two-col">
       <div class="card">
         <h3>Node Details</h3>
         <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
+          ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
+          : '—'}</span></div>
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
         <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
+        <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
+        <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
+        <div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
         <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
         <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>
       </div>
@@ -652,6 +662,8 @@ async function renderDashboard(){
           <button class="btn btn-out" onclick="switchView('logs')">📜 View Logs</button>
           <button class="btn btn-out" onclick="switchView('config')">⚙ Edit Config</button>
           <button class="btn btn-out" data-act="restart">↻ Restart Service</button>
+          <button class="btn btn-out" onclick="switchView('update')">⬆ Check for Update</button>
+          <button class="btn btn-out" onclick="switchView('network')">🌐 Network Status</button>
         </div>
       </div>
     </div>
@@ -663,24 +675,28 @@ async function renderDashboard(){
   augmentDashboardJaeger(s);
   augmentDashboardVersion();
   augmentDashboardUpdate();
-  augmentDashboardNetwork();
 }
 
-// Lazy: fill the Network Status card from the public Adiri status page (cached
-// 60s server-side). Polls with the 15s dashboard refresh; degrades to a grey
-// "status unavailable" state, never an error.
-async function augmentDashboardNetwork(){
-  if(!$('#netStatusCard')) return;
+// =============================================================================
+// NETWORK TAB -- Adiri Testnet status panel (moved off the Dashboard). Pulls
+// the public status page (cached 60s server-side); refreshes on the 15s tick;
+// degrades to a grey "status unavailable" state, never an error. Same page
+// layout style as the Dashboard (.dash container).
+// =============================================================================
+async function renderNetwork(){
+  const c = $('#view-network');
+  if(!c) return;
+  if(!c.dataset.loaded) c.innerHTML = '<div class="dash"><div class="card">Loading network status…</div></div>';
   const d = await api('/api/network/status');
   setNavNetPill(d);   // keep the nav-bar pill in sync from the same fetch
-  const card = $('#netStatusCard');
-  if(state.view!=='dashboard' || !card) return;
+  if(state.view!=='network') return;
+  c.dataset.loaded='1';
 
   if(!d || d.error || d.available===false){
-    card.innerHTML = `<h3>Network Status</h3>
+    c.innerHTML = `<div class="dash"><div class="card"><h3>Network Status</h3>
       <div class="kv"><span class="k">Adiri Testnet</span>
         <span class="v"><span class="badge" style="background:rgba(122,154,184,0.15);color:var(--text2)">status unavailable</span></span></div>
-      <p class="muted" style="font-size:12px;margin-top:8px">Could not reach the public status page (status.telscan.xyz).</p>`;
+      <p class="muted" style="font-size:12px;margin-top:8px">Could not reach the public status page (status.telscan.xyz).</p></div></div>`;
     return;
   }
 
@@ -716,15 +732,19 @@ async function augmentDashboardNetwork(){
     </div>`;
   }).join('');
 
-  card.innerHTML = `
-    <div class="svc-row" style="margin-bottom:10px">
-      <h3 style="margin:0">${esc(d.title||'Adiri Testnet Network Status')}</h3>
-      ${pill}
-      <a href="https://status.telscan.xyz/status/testnet" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>
+  c.innerHTML = `
+  <div class="dash">
+    <div class="card">
+      <div class="svc-row" style="margin-bottom:10px">
+        <h3 style="margin:0">${esc(d.title||'Adiri Testnet Network Status')}</h3>
+        ${pill}
+        <a href="https://status.telscan.xyz/status/testnet" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>
+      </div>
+      ${consensusRow}
+      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));margin-top:12px">${cells}</div>
+      <p class="muted" style="font-size:12px;margin-top:12px">Last updated: ${esc(d.last_updated||'—')} · auto-refreshes every 60s</p>
     </div>
-    ${consensusRow}
-    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));margin-top:12px">${cells}</div>
-    <p class="muted" style="font-size:12px;margin-top:12px">Last updated: ${esc(d.last_updated||'—')} · auto-refreshes every 60s</p>`;
+  </div>`;
 }
 
 // Lazy: fill the Version tile + Node Details version row from /api/version.
@@ -950,6 +970,19 @@ function stopLive(){
 // =============================================================================
 // CONFIG
 // =============================================================================
+// External multiaddr cell: base address on the main line, the /p2p/<peerID>
+// portion below it in a smaller dimmer font, truncated (~20 chars) with the
+// full peer ID on hover. Plain value (escaped) when there's no /p2p/ segment.
+function fmtMultiaddrCell(v){
+  if(!v) return '—';
+  const idx = v.indexOf('/p2p/');
+  if(idx < 0) return esc(v);
+  const base = v.slice(0, idx);
+  const pid = v.slice(idx + 1);                 // "p2p/12D3KooW..."
+  const short = pid.length > 20 ? pid.slice(0, 20) + '…' : pid;
+  return `${esc(base)}<br><span class="mono" style="font-size:11px;color:var(--text3)" title="${esc(pid)}">${esc(short)}</span>`;
+}
+
 // Editable field allowlist (mirrors edit-config.sh --json + server.py). Each
 // row carries a value validator so we reject bad input before streaming.
 function configValueOk(field, value){
@@ -1032,7 +1065,11 @@ async function renderConfig(){
           : `<button class="btn btn-out" id="cfgEdit">⚙ Edit Configuration</button>`}
       </div>
       ${editableHtml}
-      ${roRows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v||'—')}</span></div>`).join('')}
+      ${roRows.map(([k,v])=>{
+        const isMa = (k==='External Primary' || k==='External Worker');
+        const cell = isMa ? fmtMultiaddrCell(v) : esc(v||'—');
+        return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${cell}</span></div>`;
+      }).join('')}
     </div>
     <div class="card" id="cfgProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3>
@@ -1765,7 +1802,7 @@ async function runFinalize(){
 // =============================================================================
 function startAutoRefresh(){
   stopAutoRefresh();
-  state.refreshTimer = setInterval(()=>{ loadNodes(); if(state.view==='dashboard') renderDashboard(); }, 15000);
+  state.refreshTimer = setInterval(()=>{ loadNodes(); if(state.view==='dashboard') renderDashboard(); else if(state.view==='network') renderNetwork(); }, 15000);
 }
 function stopAutoRefresh(){ if(state.refreshTimer){ clearInterval(state.refreshTimer); state.refreshTimer=null; } }
 
@@ -1775,6 +1812,11 @@ function startTracesRefresh(){
 }
 function stopTracesRefresh(){ if(state.tracesTimer){ clearInterval(state.tracesTimer); state.tracesTimer=null; } }
 
+function copyToClipboard(text, label){
+  navigator.clipboard?.writeText(text).then(
+    ()=>toast((label||'Value')+' copied','success'),
+    ()=>toast('Copy failed','error'));
+}
 function cap(s){ return String(s).charAt(0).toUpperCase()+String(s).slice(1); }
 function fmtNum(n){ return Number(n).toLocaleString('en-US'); }
 function netLabel(n){ return ({testnet:'Adiri Testnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }

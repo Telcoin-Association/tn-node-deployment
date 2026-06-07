@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.5.3"
+UI_VERSION = "1.6.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -81,6 +81,22 @@ def data_dir(t):
     """Node data dir -- from .node-meta DATA_DIR if set, else the default."""
     meta = read_meta(t)
     return meta.get("DATA_DIR") or f"{DEFAULT_DATA_DIR}/{t}"
+
+
+def node_id(t):
+    """The node's libp2p peer ID (12D3KooW...) parsed from node-info.yaml.
+    '' when the file is missing or carries no peer ID."""
+    info = os.path.join(data_dir(t), "node-info.yaml")
+    try:
+        with open(info, "r") as f:
+            text = f.read()
+    except (OSError, IOError):
+        return ""
+    m = re.search(r"/p2p/(12D3KooW[1-9A-HJ-NP-Za-km-z]+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(12D3KooW[1-9A-HJ-NP-Za-km-z]+)\b", text)
+    return m.group(1) if m else ""
 
 
 # =============================================================================
@@ -930,6 +946,9 @@ def api_status(node_type):
         "cpu_percent": service_cpu_percent(t),
         "rpc_ok": rpc_ok,
         "rpc_port": port,
+        "node_id": node_id(t),
+        "data_dir": data_dir(t),
+        "config_file": service_file(t),
         "block_number": block_number,
         "synced": synced,
         "chain_id": chain_id,
