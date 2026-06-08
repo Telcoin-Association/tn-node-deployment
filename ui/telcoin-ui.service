@@ -11,12 +11,22 @@ Restart=on-failure
 RestartSec=5
 
 # Hardening. NoNewPrivileges is intentionally NOT set: the service shells out
-# to `sudo systemctl ...` via the narrow /etc/sudoers.d/telcoin-ui whitelist,
-# and NoNewPrivileges would block sudo's setuid transition. The attack surface
-# is bounded instead by the localhost-only bind (server.py listens on
-# 127.0.0.1) plus the six whitelisted systemctl commands.
+# to `sudo ...` via the narrow /etc/sudoers.d/telcoin-ui whitelist, and
+# NoNewPrivileges would block sudo's setuid transition. The attack surface is
+# bounded instead by the localhost-only bind (server.py listens on 127.0.0.1)
+# plus the whitelisted helper commands.
+#
+# ProtectSystem=full (/usr,/boot,/etc read-only) and ProtectHome=read-only apply
+# to the WHOLE service mount namespace -- including the root helpers we sudo to.
+# Those helpers legitimately write /etc (groupadd/useradd during setup, the
+# systemd unit, /etc/telcoin, ufw rules) and /home (the service user's reth
+# cache); a read-only /etc made groupadd fail with "cannot lock /etc/group" and
+# node removal fail to delete the unit. Carve those two trees back to writable
+# via ReadWritePaths -- the unprivileged Flask process still cannot write them
+# (Unix perms); only the root helper can, which is the intent.
 ProtectHome=read-only
 ProtectSystem=full
+ReadWritePaths=/etc /home
 PrivateTmp=yes
 
 [Install]
