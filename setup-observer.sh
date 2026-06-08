@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.5"
+readonly SCRIPT_VERSION="1.2.6"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -602,14 +602,14 @@ step_create_infrastructure() {
     done
     echo ""
 
-    # Non-interactive: a previous setup run killed mid-groupadd/useradd can leave
-    # shadow-utils lock files behind, making this fail with "cannot lock
-    # /etc/group; try again later". We are the only user-management actor in this
-    # flow, so clear stale locks before creating the service user.
-    if json_mode; then
-        rm -f /etc/group.lock /etc/gshadow.lock /etc/passwd.lock /etc/shadow.lock \
-              /etc/subuid.lock /etc/subgid.lock 2>/dev/null || true
-    fi
+    # Remove stale groupadd/useradd lock files if present. A crashed process can
+    # leave these behind (notably /etc/.pwd.lock, the lckpwdf() lock), making
+    # groupadd fail with "cannot lock /etc/group; try again later". This runs
+    # unconditionally before any user/group creation -- safe because setup runs
+    # as root in a controlled context and no legitimate concurrent process holds
+    # these locks during a node install.
+    rm -f /etc/.pwd.lock /etc/group.lock /etc/gshadow.lock /etc/passwd.lock /etc/shadow.lock
+    print_info "Cleared any stale user/group lock files"
 
     create_service_user
 
