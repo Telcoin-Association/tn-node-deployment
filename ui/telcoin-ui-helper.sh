@@ -332,10 +332,16 @@ remove_script_ready() {
 }
 
 cmd_node_remove() {
-    local t="$1" scope="$2"
+    local t="$1" scope="$2" ui="${3:-}"
     require_type "$t"; remove_script_ready
     case "$scope" in service|data|keys) ;; *) die "invalid scope: $scope (expected service|data|keys)" ;; esac
-    exec bash "$REMOVE_SCRIPT" --json --remove "$t" --scope "$scope" --yes
+    local -a args=( --json --remove "$t" --scope "$scope" --yes )
+    case "$ui" in
+        ui) args+=( --remove-ui ) ;;
+        "") ;;
+        *) die "invalid flag: $ui (expected 'ui' or none)" ;;
+    esac
+    exec bash "$REMOVE_SCRIPT" "${args[@]}"
 }
 
 # =============================================================================
@@ -416,7 +422,7 @@ main() {
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
-        node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" ;;
+        node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" "${3:-}" ;;
         setup-keygen)    shift; cmd_setup_keygen   "${1:-}" ;;
         setup-finalize)  shift; cmd_setup_finalize "${1:-}" ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;

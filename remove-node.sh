@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 
 # =============================================================================
 # HELPERS
@@ -372,6 +372,41 @@ remove_service_user() {
 }
 
 # =============================================================================
+# REMOVE NODE MANAGER UI
+# =============================================================================
+
+# Uninstall the Telcoin Node Manager UI (service, app, helper + update engine,
+# sudoers, and the service user). Safe to call when the UI is absent / partial.
+remove_ui_components() {
+    print_step "Removing Telcoin Node Manager UI..."
+    systemctl stop telcoin-ui 2>/dev/null || true
+    systemctl disable telcoin-ui 2>/dev/null || true
+    rm -f /etc/systemd/system/telcoin-ui.service
+    systemctl daemon-reload 2>/dev/null || true
+    rm -rf /opt/telcoin-ui /opt/telcoin-ui-update
+    rm -f /usr/local/sbin/telcoin-ui-helper
+    rm -f /etc/sudoers.d/telcoin-ui
+    if id telcoin-ui &>/dev/null; then
+        userdel telcoin-ui 2>/dev/null || true
+    fi
+    print_ok "Telcoin Node Manager UI removed"
+}
+
+# Interactive: offer to also remove the web UI. `other_unit` is the sibling
+# node's unit; if it still exists we warn (the UI manages it too).
+offer_ui_removal() {
+    local other_unit="$1"
+    [[ -d /opt/telcoin-ui || -f /etc/systemd/system/telcoin-ui.service ]] || return 0
+    echo ""
+    if [[ -f "$other_unit" ]]; then
+        print_warn "The Node Manager UI also manages the other Telcoin node still installed here."
+    fi
+    if confirm "Also remove the Telcoin Node Manager UI (web dashboard)?"; then
+        remove_ui_components
+    fi
+}
+
+# =============================================================================
 # REMOVE OBSERVER
 # =============================================================================
 
@@ -413,6 +448,10 @@ remove_observer() {
     echo ""
     print_ok "Observer node removal complete"
     OBSERVER_INSTALLED=false
+
+    # Offer to also remove the web UI (warn if the validator still uses it).
+    offer_ui_removal "/etc/systemd/system/telcoin-validator.service"
+
     echo ""
     read -r -p "  Press Enter to return to menu..."
 }
@@ -459,6 +498,10 @@ remove_validator() {
     echo ""
     print_ok "Validator node removal complete"
     VALIDATOR_INSTALLED=false
+
+    # Offer to also remove the web UI (warn if the observer still uses it).
+    offer_ui_removal "/etc/systemd/system/telcoin-observer.service"
+
     echo ""
     read -r -p "  Press Enter to return to menu..."
 }
@@ -608,6 +651,7 @@ main_menu() {
 JSON_REMOVE_TYPE=""
 JSON_REMOVE_SCOPE=""
 JSON_YES=false
+JSON_REMOVE_UI=false
 
 json_setup_fds() {
     exec 3>&1   # fd3 = original stdout: JSON is written here
@@ -668,7 +712,31 @@ json_remove() {
         fi
     fi
 
-    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$node_type")\",\"scope\":\"$(json_escape "$scope")\",\"msg\":\"telcoin-${node_type} removed (scope: ${scope})\"}"
+    # Optional: also remove the Node Manager UI. This is requested FROM the UI,
+    # so we must not uninstall it inline -- stopping telcoin-ui would kill this
+    # very process (same cgroup) mid-removal. Instead schedule a detached,
+    # transient systemd unit (its own cgroup, survives the stop). The short sleep
+    # lets the 'done' event below flush and the SSE close before the UI goes down.
+    local ui_scheduled=false
+    if [[ "$JSON_REMOVE_UI" == "true" ]]; then
+        if command -v systemd-run >/dev/null 2>&1; then
+            json_event step "Scheduling Node Manager UI removal -- this web interface will go offline shortly"
+            systemd-run --quiet --collect --unit="telcoin-ui-uninstall" bash -c '
+                sleep 2
+                systemctl stop telcoin-ui 2>/dev/null || true
+                systemctl disable telcoin-ui 2>/dev/null || true
+                rm -f /etc/systemd/system/telcoin-ui.service
+                systemctl daemon-reload 2>/dev/null || true
+                rm -rf /opt/telcoin-ui /opt/telcoin-ui-update
+                rm -f /usr/local/sbin/telcoin-ui-helper
+                rm -f /etc/sudoers.d/telcoin-ui
+                id telcoin-ui >/dev/null 2>&1 && userdel telcoin-ui 2>/dev/null || true
+            ' >/dev/null 2>&1 && ui_scheduled=true || true
+        fi
+        [[ "$ui_scheduled" == "true" ]] || json_event step "Could not schedule UI removal -- run remove-node.sh on the server to remove the UI"
+    fi
+
+    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$node_type")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"telcoin-${node_type} removed (scope: ${scope})\"}"
 }
 
 run_json_mode() {
@@ -693,6 +761,7 @@ main() {
             --remove) JSON_REMOVE_TYPE="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
             --scope)  JSON_REMOVE_SCOPE="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
             --yes)    JSON_YES=true; shift ;;
+            --remove-ui) JSON_REMOVE_UI=true; shift ;;
             *) shift ;;
         esac
     done

@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.2.7"
+readonly SCRIPT_VERSION="1.2.8"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -229,14 +229,21 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49594/udp off
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 43174/tcp on
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 43174/tcp off
-# Node-remove helper -- destructive. Enumerated (2 types x 3 scopes), no
-# wildcard. The server requires a typed "DELETE" confirmation before calling.
+# Node-remove helper -- destructive. Enumerated (2 types x 3 scopes, optionally
+# with a trailing 'ui' to also uninstall the web UI), no wildcard. The server
+# requires a typed "DELETE" confirmation before calling.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer service
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer data
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer keys
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator service
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator data
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator keys
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer service ui
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer data ui
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove observer keys ui
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator service ui
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator data ui
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove validator keys ui
 # Setup helper -- fixed-arg (type only). All config travels in TN_SETUP_* env
 # vars and the BLS passphrase in TN_BLS_PASSPHRASE; env_keep preserves them
 # across sudo so NO config or secret is ever placed in argv. The helper

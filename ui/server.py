@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.12"
+UI_VERSION = "1.7.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1354,11 +1354,15 @@ def api_node_remove(node_type):
         return bad_type()
     scope = (request.args.get("scope") or "").strip()
     confirm = request.args.get("confirm") or ""
+    remove_ui = (request.args.get("ui") == "true")
     if scope not in ("service", "data", "keys"):
         return jsonify({"error": "invalid scope"}), 400
     if confirm != "DELETE":
         return jsonify({"error": 'confirmation required (type "DELETE")'}), 400
-    return _update_stream(["sudo", "-n", HELPER, "node-remove", node_type, scope])
+    argv = ["sudo", "-n", HELPER, "node-remove", node_type, scope]
+    if remove_ui:
+        argv.append("ui")  # also uninstall the Node Manager UI (detached, root)
+    return _update_stream(argv)
 
 
 # =============================================================================

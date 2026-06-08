@@ -1631,6 +1631,11 @@ function dangerZoneHtml(){
       </select></div>
     <div class="field"><label>Type <span class="mono">DELETE</span> to confirm</label>
       <input id="rmConfirm" placeholder="DELETE" autocomplete="off"></div>
+    <label style="display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--text2);margin:4px 0 10px;cursor:pointer">
+      <input type="checkbox" id="rmUi" style="margin-top:3px">
+      <span>Also remove the Node Manager UI (this web dashboard).
+        <strong style="color:var(--yellow)">This interface will go offline once removal completes</strong> — reinstall later with <span class="mono">install-ui.sh</span>.</span>
+    </label>
     <div class="svc-row" style="margin-top:6px">
       <button class="btn btn-red" id="rmBtn" disabled>Remove ${esc(cap(t))} Node</button>
     </div>
@@ -1648,17 +1653,29 @@ function removeNode(){
   const scope=($('#rmScope')?.value)||'service';
   if(($('#rmConfirm')?.value)!=='DELETE') return;
   const t=state.node;
-  if(!window.confirm('Remove the '+t+' node (scope: '+scope+')? This cannot be undone.')) return;
+  const alsoUi = !!($('#rmUi')?.checked);
+  let prompt='Remove the '+t+' node (scope: '+scope+')? This cannot be undone.';
+  if(alsoUi) prompt+='\n\nThis will ALSO remove the Node Manager UI — this web dashboard will go offline once it completes.';
+  if(!window.confirm(prompt)) return;
   stopRemoveStream();
   const card=$('#rmProgressCard'); if(card) card.style.display='block';
-  const log=$('#rmLog'); if(log) log.innerHTML='<div class="log-line info">» removing '+esc(t)+' ('+esc(scope)+')…</div>';
+  const log=$('#rmLog'); if(log) log.innerHTML='<div class="log-line info">» removing '+esc(t)+' ('+esc(scope)+')'+(alsoUi?' + Node Manager UI':'')+'…</div>';
   const btn=$('#rmBtn'); if(btn) btn.disabled=true;
-  const url='/api/node/remove/'+t+'?scope='+encodeURIComponent(scope)+'&confirm=DELETE';
+  let url='/api/node/remove/'+t+'?scope='+encodeURIComponent(scope)+'&confirm=DELETE';
+  if(alsoUi) url+='&ui=true';
+  state.removeUi = alsoUi;
   state.removeES = new EventSource(url);
   state.removeES.onmessage = async ev=>{
     let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
     if(d.event==='closed'){
       stopRemoveStream();
+      if(state.removeUi){
+        // The UI is being uninstalled out-of-band; the server will stop shortly.
+        // Don't re-fetch (it'll fail) -- show a clear offline notice instead.
+        appendStream('#rmLog', {event:'step', msg:'Node Manager UI removal scheduled — this interface is going offline. Reinstall with install-ui.sh.'});
+        toast('Node Manager UI is being removed — this dashboard will go offline','info');
+        return;
+      }
       // Re-detect installed state from /api/nodes BEFORE re-rendering (await,
       // so the empty-state switch sees the fresh result), and drop any cached
       // dashboard render so the removed node's panel rebuilds as "not installed".
@@ -1669,7 +1686,7 @@ function removeNode(){
     }
     appendStream('#rmLog', d);
     if(d.event==='done'){
-      if(d.ok) toast(cap(t)+' node removed','success');
+      if(d.ok) toast(cap(t)+' node removed'+(d.ui_removed?' (UI removing…)':''),'success');
       else toast('Removal failed: '+(d.msg||'unknown error'),'error');
     }
   };
