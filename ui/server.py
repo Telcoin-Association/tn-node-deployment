@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.10"
+UI_VERSION = "1.6.11"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -441,6 +441,21 @@ def fmt_bytes(n):
     return None
 
 
+# Quoted log message value, allowing escaped quotes/backslashes inside
+# (message="... PeerId(\"...\") ..."). A [^"]* pattern would stop at the first
+# \" -- this consumes \\. escape pairs so the whole value is captured.
+_MSG_RE = re.compile(r'message="((?:\\.|[^"\\])*)"')
+
+
+def _extract_message(line):
+    r"""Full message= value from a log line, or None. Unescapes \" and \\ so the
+    displayed text reads naturally (other backslash sequences left as-is)."""
+    m = _MSG_RE.search(line)
+    if not m:
+        return None
+    return re.sub(r'\\(["\\])', r'\1', m.group(1))
+
+
 def log_stats(log_path, window=3600):
     """Single-pass log scan -> error/warn counts in the last `window` seconds,
     the most recent ERROR line (time + truncated message), and the log file
@@ -499,12 +514,12 @@ def log_stats(log_path, window=3600):
 
         # Recent-events row (regardless of window; we keep only the last few).
         tgt = re.search(r"\btarget=(\S+)", line)
-        emsg = re.search(r'message="([^"]*)"', line)
+        emsg = _extract_message(line)
         events.append({
             "time": m.group(2) if m else "",
             "level": "error" if is_err else "warn",
             "target": tgt.group(1) if tgt else "",
-            "msg": emsg.group(1) if emsg else line.strip(),
+            "msg": emsg if emsg is not None else line.strip(),
         })
 
     out["recent_events"] = list(reversed(events[-5:]))  # last 5, most recent first
@@ -515,8 +530,9 @@ def log_stats(log_path, window=3600):
         if not time_str:
             mm = ts_re.search(last_error_line)
             time_str = (mm.group(1) + " " + mm.group(2)) if mm else ""
-        msgm = re.search(r'message="([^"]*)"', last_error_line)
-        msg = msgm.group(1) if msgm else last_error_line.strip()
+        msg = _extract_message(last_error_line)
+        if msg is None:
+            msg = last_error_line.strip()
         if len(msg) > 140:
             msg = msg[:140] + "…"
         out["last_error"] = {"time": time_str, "msg": msg}
