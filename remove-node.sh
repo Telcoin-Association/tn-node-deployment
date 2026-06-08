@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 
 # =============================================================================
 # HELPERS
@@ -155,6 +155,7 @@ show_detected() {
             else
                 print_info "Leftover files kept."
             fi
+            report_orphaned_groups
             echo ""
             exit 0
         fi
@@ -342,7 +343,14 @@ remove_service_user() {
     local service_group="$2"
     local self_type="${3:-}"  # observer | validator | "" (skip sibling check)
 
-    if [[ -z "$service_user" ]]; then
+    # Fallback when .node-meta and the unit were both missing/unreadable (or the
+    # unit ran as root, e.g. docker): recover the service account from the
+    # configured/default service names so the group isn't silently orphaned.
+    [[ -z "$service_user"  || "$service_user" == "root" ]]  && service_user="${SERVICE_USER:-telcoin}"
+    [[ -z "$service_group" || "$service_group" == "root" ]] && service_group="${SERVICE_GROUP:-telcoin}"
+
+    # Never touch root / non-telcoin system accounts.
+    if [[ "$service_user" == "root" || "$service_group" == "root" ]]; then
         return
     fi
 
@@ -365,10 +373,30 @@ remove_service_user() {
 
     if [[ -n "$service_group" ]] && getent group "$service_group" &>/dev/null; then
         if confirm "Remove service group '${service_group}'?"; then
-            groupdel "$service_group" 2>/dev/null || true
-            print_ok "Group '${service_group}' removed"
+            if groupdel "$service_group" 2>/dev/null; then
+                print_ok "Group '${service_group}' removed"
+            else
+                print_warn "Could not remove group '${service_group}' (still in use?). Remove manually:"
+                print_info "  sudo groupdel ${service_group}"
+            fi
         fi
     fi
+}
+
+# Warn about Telcoin-related groups still present after removal (e.g. orphaned by
+# an earlier crash where .node-meta + the unit were both gone). Matches the
+# operator's quick check: getent group | grep -v telcoin-ui | grep telcoin.
+report_orphaned_groups() {
+    local orphans
+    orphans=$(getent group | grep -v "telcoin-ui" | grep "telcoin" | cut -d: -f1 || true)
+    [[ -z "$orphans" ]] && return 0
+    echo ""
+    print_warn "Possible orphaned Telcoin service group(s) still present:"
+    local g
+    while IFS= read -r g; do
+        [[ -z "$g" ]] && continue
+        print_info "  ${g}  ->  remove with:  sudo groupdel ${g}"
+    done <<< "$orphans"
 }
 
 # =============================================================================
@@ -449,6 +477,8 @@ remove_observer() {
     print_ok "Observer node removal complete"
     OBSERVER_INSTALLED=false
 
+    report_orphaned_groups
+
     # Offer to also remove the web UI (warn if the validator still uses it).
     offer_ui_removal "/etc/systemd/system/telcoin-validator.service"
 
@@ -498,6 +528,8 @@ remove_validator() {
     echo ""
     print_ok "Validator node removal complete"
     VALIDATOR_INSTALLED=false
+
+    report_orphaned_groups
 
     # Offer to also remove the web UI (warn if the observer still uses it).
     offer_ui_removal "/etc/systemd/system/telcoin-observer.service"
@@ -682,6 +714,20 @@ json_remove() {
     local is_docker=false
     grep -q "docker run" "$unit" 2>/dev/null && is_docker=true
 
+    # Resolve the service user/group BEFORE deleting the unit/.node-meta, so a
+    # 'keys' (full) removal can clean up the account instead of orphaning it.
+    # .node-meta is authoritative; the unit's User=/Group= is the fallback (but
+    # docker units run as root, so ignore root and use the default service name).
+    local svc_user="" svc_group="" meta="/etc/telcoin/${node_type}/.node-meta"
+    if [[ -f "$meta" ]]; then
+        svc_user=$(grep '^HOST_SERVICE_USER=' "$meta" 2>/dev/null | cut -d= -f2- || true)
+        svc_group=$(grep '^HOST_SERVICE_GROUP=' "$meta" 2>/dev/null | cut -d= -f2- || true)
+    fi
+    [[ -z "$svc_user" ]]  && svc_user=$(grep '^User=' "$unit" 2>/dev/null | cut -d= -f2- || true)
+    [[ -z "$svc_group" ]] && svc_group=$(grep '^Group=' "$unit" 2>/dev/null | cut -d= -f2- || true)
+    [[ -z "$svc_user"  || "$svc_user"  == "root" ]] && svc_user="${SERVICE_USER:-telcoin}"
+    [[ -z "$svc_group" || "$svc_group" == "root" ]] && svc_group="${SERVICE_GROUP:-telcoin}"
+
     json_event step "Stopping and disabling telcoin-${node_type}"
     systemctl stop "telcoin-${node_type}" 2>/dev/null || true
     systemctl disable "telcoin-${node_type}" 2>/dev/null || true
@@ -710,6 +756,28 @@ json_remove() {
         if declare -f tpm_remove_sealed_files >/dev/null 2>&1; then
             tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
         fi
+
+        # Full removal: also drop the service user/group (skip root; keep if the
+        # other node still uses the account).
+        if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null \
+           && ! user_used_by_other_node "$svc_user" "$node_type"; then
+            json_event step "Removing service user ${svc_user}"
+            rm -rf "/home/${svc_user}" 2>/dev/null || true
+            userdel "$svc_user" 2>/dev/null || true
+        fi
+        if [[ "$svc_group" != "root" ]] && getent group "$svc_group" &>/dev/null; then
+            json_event step "Removing service group ${svc_group}"
+            groupdel "$svc_group" 2>/dev/null \
+                || json_event step "Could not remove group ${svc_group} (still in use) -- run: groupdel ${svc_group}"
+        fi
+
+        # Warn about any Telcoin-related groups that remain orphaned.
+        local orphans og
+        orphans=$(getent group | grep -v "telcoin-ui" | grep "telcoin" | cut -d: -f1 || true)
+        while IFS= read -r og; do
+            [[ -z "$og" ]] && continue
+            json_event step "Orphaned group remains: ${og} -- remove with: groupdel ${og}"
+        done <<< "$orphans"
     fi
 
     # Optional: also remove the Node Manager UI. This is requested FROM the UI,

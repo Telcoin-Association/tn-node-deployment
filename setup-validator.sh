@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.6"
+readonly SCRIPT_VERSION="1.2.7"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -492,6 +492,18 @@ step_create_infrastructure() {
     print_info "Cleared any stale user/group lock files"
 
     create_service_user
+
+    # Record the service account in .node-meta NOW (not just at the end), so an
+    # install interrupted after this point still leaves remove-node.sh enough to
+    # clean up the user/group. step_create_service later overwrites with the
+    # full metadata.
+    mkdir -p "$CONFIG_DIR"
+    {
+        echo "HOST_SERVICE_USER=${SERVICE_USER}"
+        echo "HOST_SERVICE_GROUP=${SERVICE_GROUP}"
+    } > "${CONFIG_DIR}/.node-meta"
+    chmod 600 "${CONFIG_DIR}/.node-meta"
+    print_ok "Recorded service account in ${CONFIG_DIR}/.node-meta (${SERVICE_USER}:${SERVICE_GROUP})"
 
     print_step "Creating reth cache directory..."
     mkdir -p "/home/${SERVICE_USER}/.cache/reth/logs/telcoin-network-logs"
