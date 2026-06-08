@@ -422,7 +422,8 @@ const state = {
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
   setupStep: 1,
   setup: { network:'adiri', method:'source', passphrase:'loadcredential',
-           eth:'', bls:'', buildRef:'', dockerImage:'', publicIp:'', instance:'' },
+           eth:'', bls:'', blsConfirm:'', buildRef:'', dockerImage:'', publicIp:'', internalIp:'',
+           instance:'', rpcPublic:false, serviceUser:'', serviceGroup:'', defaultsLoaded:false },
   preflight: null,
   buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
 };
@@ -1710,6 +1711,24 @@ function renderSetup(){
     <div class="steps">${steps}</div><div class="card" id="stepBody"></div>`;
   const body = $('#stepBody');
   ({1:stepPreflight,2:stepNetwork,3:stepMethod,4:stepConfigure,5:stepReview}[state.setupStep])(body);
+  loadSetupDefaults();
+}
+
+// Prefill auto-detected fields (public/internal IP, latest docker image, service
+// user/group) once, mirroring what the CLI scripts auto-detect. Only fills empty
+// fields so it never clobbers operator edits.
+async function loadSetupDefaults(){
+  if(state.setup.defaultsLoaded) return;
+  state.setup.defaultsLoaded = true;   // guard re-entry (renderSetup re-call below)
+  const d = await api('/api/setup/defaults');
+  if(!d || d.error) return;
+  const s = state.setup;
+  if(!s.publicIp)     s.publicIp     = d.public_ip || '';
+  if(!s.internalIp)   s.internalIp   = d.internal_ip || '';
+  if(!s.dockerImage)  s.dockerImage  = d.docker_image || '';
+  if(!s.serviceUser)  s.serviceUser  = d.service_user || 'telcoin';
+  if(!s.serviceGroup) s.serviceGroup = d.service_group || 'telcoin';
+  if(state.view==='setup') renderSetup();   // refresh to show prefilled values
 }
 
 function goStep(n){ state.setupStep=n; renderSetup(); }
@@ -1758,7 +1777,7 @@ function stepMethod(body){
   const methodField = m==='source'
     ? `<div class="field"><label>Source ref to build (tag / branch / commit) — required</label>
         <input id="mBuildRef" placeholder="e.g. v0.9.2-adiri or main" value="${esc(state.setup.buildRef||'')}"></div>`
-    : `<div class="field"><label>Docker image (with tag)</label>
+    : `<div class="field"><label>Docker image (latest auto-filled — edit to pin a different tag)</label>
         <input id="mDockerImage" placeholder="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri" value="${esc(state.setup.dockerImage||'')}"></div>`;
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
     <div class="radio-cards" style="grid-template-columns:1fr 1fr 1fr">
@@ -1782,37 +1801,66 @@ function stepMethod(body){
   });
 }
 
+function setupValidIp(v){ return /^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(v) || /^[0-9a-fA-F:]+$/.test(v); }
+
+// Snapshot all Configure inputs into state before any re-render (radio clicks).
+function captureCfg(){
+  const s=state.setup;
+  if($('#cfgEth')) s.eth=$('#cfgEth').value.trim();
+  if($('#cfgPubIp')) s.publicIp=$('#cfgPubIp').value.trim();
+  if($('#cfgIntIp')) s.internalIp=$('#cfgIntIp').value.trim();
+  if($('#cfgInstance')) s.instance=$('#cfgInstance').value.trim();
+  if($('#cfgSvcUser')) s.serviceUser=$('#cfgSvcUser').value.trim();
+  if($('#cfgSvcGroup')) s.serviceGroup=$('#cfgSvcGroup').value.trim();
+  if($('#cfgBls')) s.bls=$('#cfgBls').value;
+  if($('#cfgBlsConfirm')) s.blsConfirm=$('#cfgBlsConfirm').value;
+}
+
 function stepConfigure(body){
-  const p = state.setup.passphrase;
-  const instDefault = state.node==='validator' ? '1' : '5';
+  const s = state.setup;
+  const p = s.passphrase;
+  const isVal = state.node==='validator';
+  const instDefault = isVal ? '1' : '5';
+  // RPC public/private is an observer-only choice (matches the CLI).
+  const rpcCards = isVal ? '' : `
+    <div class="field"><label>RPC access</label>
+      <div class="radio-cards">
+        <div class="rcard ${!s.rpcPublic?'sel':''}" data-rpc="private"><div class="rt">Private</div><div class="rd">RPC reachable from this server only. No firewall changes. Recommended.</div></div>
+        <div class="rcard ${s.rpcPublic?'sel':''}" data-rpc="public"><div class="rt">Public</div><div class="rd">Expose RPC via nginx (443); you open the firewall yourself.</div></div>
+      </div></div>`;
   body.innerHTML = `<h3>Step 4 · Configure</h3>
-    <div class="field"><label>${state.node==='validator'?'Validator execution address':'Observer Ethereum address'} (0x…)</label><input id="cfgEth" placeholder="0x…" value="${esc(state.setup.eth||'')}"></div>
-    <div class="field"><label>Public / external IP (advertised to peers)</label><input id="cfgPubIp" placeholder="e.g. 203.0.113.10" value="${esc(state.setup.publicIp||'')}"></div>
-    <div class="field"><label>Instance number (RPC port = 8545 − (instance − 1))</label><input id="cfgInstance" placeholder="${instDefault}" value="${esc(state.setup.instance||'')}"></div>
-    <div class="field"><label>BLS Passphrase (encrypts the node key — you'll need it on every start)</label><input id="cfgBls" type="password" placeholder="••••••••" value="${esc(state.setup.bls||'')}"></div>
+    <div class="field"><label>${isVal?'Validator execution address':'Observer Ethereum address'} (0x…)</label><input id="cfgEth" placeholder="0x…" value="${esc(s.eth||'')}"></div>
+    <div class="field"><label>Public / external IP (advertised to peers) — auto-detected</label><input id="cfgPubIp" placeholder="e.g. 203.0.113.10" value="${esc(s.publicIp||'')}"></div>
+    <div class="field"><label>Internal / NIC IP (listener bind) — auto-detected</label><input id="cfgIntIp" placeholder="e.g. 10.0.0.5 or 0.0.0.0" value="${esc(s.internalIp||'')}"></div>
+    ${rpcCards}
+    <div class="field"><label>Instance number (RPC port = 8545 − (instance − 1))</label><input id="cfgInstance" placeholder="${instDefault}" value="${esc(s.instance||'')}"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="field"><label>Service user name</label><input id="cfgSvcUser" placeholder="telcoin" value="${esc(s.serviceUser||'')}"></div>
+      <div class="field"><label>Service group name</label><input id="cfgSvcGroup" placeholder="telcoin" value="${esc(s.serviceGroup||'')}"></div>
+    </div>
+    <div class="field"><label>BLS passphrase (encrypts the node key — needed on every start)</label><input id="cfgBls" type="password" placeholder="••••••••" value="${esc(s.bls||'')}"></div>
+    <div class="field"><label>Confirm BLS passphrase</label><input id="cfgBlsConfirm" type="password" placeholder="••••••••" value="${esc(s.blsConfirm||'')}"></div>
     <div class="field"><label>Passphrase Protection</label>
       <div class="radio-cards">
         <div class="rcard ${p==='loadcredential'?'sel':''}" data-p="loadcredential"><div class="rt">LoadCredential</div><div class="rd">systemd-managed credential file. Simple, works everywhere.</div></div>
         <div class="rcard ${p==='tpm'?'sel':''}" data-p="tpm"><div class="rt">TPM / vTPM</div><div class="rd">Seal the passphrase to hardware TPM. More secure.</div></div>
       </div>
     </div>
-    <div class="note">Listener (bind) and external multiaddrs are derived for the standard P2P ports
-      (49590/49594): external uses your public IP, listener binds <span class="mono">0.0.0.0</span>.</div>
+    <div class="note">External multiaddrs use your public IP; listener multiaddrs bind your internal IP — both on the standard P2P ports (49590/49594).</div>
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(3)">← Back</button><button class="btn btn-green" id="cfgNext">Continue →</button></div>`;
-  body.querySelectorAll('[data-p]').forEach(r=>r.addEventListener('click',()=>{
-    state.setup.eth=$('#cfgEth').value.trim(); state.setup.publicIp=$('#cfgPubIp').value.trim();
-    state.setup.instance=$('#cfgInstance').value.trim(); state.setup.bls=$('#cfgBls').value;
-    state.setup.passphrase=r.dataset.p; renderSetup();
-  }));
+  body.querySelectorAll('[data-rpc]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.rpcPublic=(r.dataset.rpc==='public'); renderSetup(); }));
+  body.querySelectorAll('[data-p]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.passphrase=r.dataset.p; renderSetup(); }));
   $('#cfgNext').addEventListener('click', ()=>{
-    state.setup.eth = $('#cfgEth').value.trim();
-    state.setup.publicIp = $('#cfgPubIp').value.trim();
-    state.setup.instance = $('#cfgInstance').value.trim();
-    state.setup.bls = $('#cfgBls').value;
-    if(!/^0x[0-9a-fA-F]{40}$/.test(state.setup.eth)){ toast('Enter a valid 0x… address','error'); return; }
-    if(!/^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(state.setup.publicIp) && !/^[0-9a-fA-F:]+$/.test(state.setup.publicIp)){ toast('Enter a valid public IP','error'); return; }
-    if(state.setup.instance && !/^[1-9]$/.test(state.setup.instance)){ toast('Instance must be 1–9','error'); return; }
-    if(!state.setup.bls){ toast('Enter a BLS passphrase','error'); return; }
+    captureCfg();
+    const s=state.setup;
+    if(!/^0x[0-9a-fA-F]{40}$/.test(s.eth)){ toast('Enter a valid 0x… address','error'); return; }
+    if(!setupValidIp(s.publicIp)){ toast('Enter a valid public IP','error'); return; }
+    if(!setupValidIp(s.internalIp)){ toast('Enter a valid internal IP (or 0.0.0.0)','error'); return; }
+    if(s.instance && !/^[1-9]$/.test(s.instance)){ toast('Instance must be 1–9','error'); return; }
+    if(s.serviceUser && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceUser)){ toast('Invalid service user name','error'); return; }
+    if(s.serviceGroup && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceGroup)){ toast('Invalid service group name','error'); return; }
+    if(!s.bls){ toast('Enter a BLS passphrase','error'); return; }
+    if(s.bls!==s.blsConfirm){ toast('BLS passphrases do not match','error'); return; }
     goStep(5);
   });
 }
@@ -1827,10 +1875,15 @@ function stepReview(body){
     ['Install Method', s.method + (s.method==='source'?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
     ['Address', s.eth||'(not set)'],
     ['Public IP', s.publicIp||'(not set)'],
+    ['Internal IP (listener)', s.internalIp||'0.0.0.0'],
     ['Instance', s.instance || (state.node==='validator'?'1 (default)':'5 (default)')],
+  ];
+  if(state.node==='observer') rows.push(['RPC access', s.rpcPublic?'Public':'Private']);
+  rows.push(
+    ['Service user / group', (s.serviceUser||'telcoin')+' / '+(s.serviceGroup||'telcoin')],
     ['BLS Passphrase', s.bls?'•••••••• (set)':'(not set)'],
     ['Passphrase Protection', s.passphrase==='tpm'?'TPM / vTPM':'LoadCredential'],
-  ];
+  );
   body.innerHTML = `<h3>Step 5 · Install</h3>
     ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
     <div class="note" style="margin-top:14px">Phase 1 generates the node keys (no service is created or started yet). After you confirm a backup, phase 2 finalizes and starts the node.${state.node==='validator'?' <strong>Validator on-chain registration is a separate CLI step the node will guide you through afterward.</strong>':''}</div>
@@ -1846,7 +1899,8 @@ function stepReview(body){
 function buildSetupPayload(includePassphrase){
   const s = state.setup;
   const p2p=49590, worker=49594;
-  const ip = s.publicIp || '0.0.0.0';
+  const ip = s.publicIp || '0.0.0.0';      // external advertised addr
+  const lip = s.internalIp || '0.0.0.0';   // listener bind addr (internal NIC)
   const payload = {
     network: 'testnet',
     install_method: s.method,
@@ -1857,9 +1911,12 @@ function buildSetupPayload(includePassphrase){
     instance: s.instance,
     external_primary: `/ip4/${ip}/udp/${p2p}/quic-v1`,
     external_worker:  `/ip4/${ip}/udp/${worker}/quic-v1`,
-    listener_primary: `/ip4/0.0.0.0/udp/${p2p}/quic-v1`,
-    listener_worker:  `/ip4/0.0.0.0/udp/${worker}/quic-v1`,
+    listener_primary: `/ip4/${lip}/udp/${p2p}/quic-v1`,
+    listener_worker:  `/ip4/${lip}/udp/${worker}/quic-v1`,
     public_ip: s.publicIp,
+    rpc_public: (state.node==='observer') ? !!s.rpcPublic : false,
+    service_user: s.serviceUser,
+    service_group: s.serviceGroup,
   };
   if(includePassphrase) payload.passphrase = s.bls;
   return payload;

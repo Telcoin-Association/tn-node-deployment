@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.2"
+readonly SCRIPT_VERSION="1.2.3"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -1177,6 +1177,9 @@ main() {
             --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
+            --rpc-public)          [[ "${2:-}" == "true" ]] && ENABLE_PUBLIC_RPC="true" || ENABLE_PUBLIC_RPC="false"; shift 2 ;;
+            --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
+            --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             *) shift ;;
         esac
     done

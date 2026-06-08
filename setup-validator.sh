@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.2"
+readonly SCRIPT_VERSION="1.2.3"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -1098,6 +1098,9 @@ main() {
             --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
+            --rpc-public)          shift 2 ;;  # validators have no public-RPC option; ignored
+            --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
+            --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             *) shift ;;
         esac
     done

@@ -372,11 +372,15 @@ cmd_setup() {
     local lis_primary="${TN_SETUP_LIS_PRIMARY:-}"
     local lis_worker="${TN_SETUP_LIS_WORKER:-}"
     local public_ip="${TN_SETUP_PUBLIC_IP:-}"
+    local rpc_public="${TN_SETUP_RPC_PUBLIC:-false}"
+    local svc_user="${TN_SETUP_SERVICE_USER:-}"
+    local svc_group="${TN_SETUP_SERVICE_GROUP:-}"
 
     # Validate every value before it reaches the setup script.
     case "$network" in testnet|adiri) ;; *) die "invalid network: $network" ;; esac
     case "$method" in source|docker|existing|"") ;; *) die "invalid install method: $method" ;; esac
     case "$passm" in loadcredential|tpm) ;; *) die "invalid passphrase method: $passm" ;; esac
+    case "$rpc_public" in true|false) ;; *) die "invalid rpc_public: $rpc_public" ;; esac
     [[ -z "$addr"      || "$addr"      =~ ^0x[0-9a-fA-F]{40}$ ]]            || die "invalid address"
     [[ -z "$build_ref" || "$build_ref" =~ ^[A-Za-z0-9._/-]+$ ]]            || die "invalid build ref"
     [[ -z "$image"     || ( "$image"   =~ ^[A-Za-z0-9._/:@-]+$ && "$image" == *:* ) ]] || die "invalid docker image"
@@ -386,8 +390,10 @@ cmd_setup() {
         [[ -z "$m" || "$m" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] || die "invalid multiaddr: $m"
     done
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
+    [[ -z "$svc_user"  || "$svc_user"  =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service user"
+    [[ -z "$svc_group" || "$svc_group" =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service group"
 
-    local -a args=( --json "--phase=${phase}" --network "$network" --passphrase-method "$passm" )
+    local -a args=( --json "--phase=${phase}" --network "$network" --passphrase-method "$passm" --rpc-public "$rpc_public" )
     [[ -n "$method" ]]      && args+=( --install-method "$method" )
     [[ -n "$addr" ]]        && args+=( --address "$addr" )
     [[ -n "$build_ref" ]]   && args+=( --build-ref "$build_ref" )
@@ -398,6 +404,8 @@ cmd_setup() {
     [[ -n "$lis_primary" ]] && args+=( --listener-primary "$lis_primary" )
     [[ -n "$lis_worker" ]]  && args+=( --listener-worker "$lis_worker" )
     [[ -n "$public_ip" ]]   && args+=( --public-ip "$public_ip" )
+    [[ -n "$svc_user" ]]    && args+=( --service-user "$svc_user" )
+    [[ -n "$svc_group" ]]   && args+=( --service-group "$svc_group" )
 
     exec bash "$script" "${args[@]}"
 }

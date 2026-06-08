@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.1"
+UI_VERSION = "1.7.2"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -916,6 +916,60 @@ def network_traffic():
     return out
 
 
+# Public Artifact Registry tag list for the testnet docker image (same source
+# update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
+GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
+GAR_IMAGE_BASE = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.9.2-adiri"
+
+
+def detect_public_ip():
+    """Best-effort public IP via api.ipify.org (mirrors the setup scripts).
+    '' on failure."""
+    try:
+        with urllib.request.urlopen("https://api.ipify.org", timeout=6) as r:
+            ip = r.read().decode().strip()
+    except Exception:
+        return ""
+    return ip if re.match(r"^[0-9a-fA-F.:]+$", ip) else ""
+
+
+def detect_internal_ip():
+    """Primary internal/NIC IP -- mirrors common.sh detect_internal_ip
+    (hostname -I first field, else the default-route src). '' on failure."""
+    rc, out, _ = run(["hostname", "-I"])
+    if rc == 0 and out.split():
+        return out.split()[0]
+    rc, out, _ = run(["ip", "route", "get", "1.1.1.1"])
+    if rc == 0 and out:
+        m = re.search(r"\bsrc\s+(\S+)", out)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def latest_docker_image():
+    """Latest published testnet (-adiri) docker image ref from the public
+    Artifact Registry, e.g. us-docker.pkg.dev/.../adiri:v0.9.3-adiri. Falls back
+    to DEFAULT_DOCKER_IMAGE when the registry is unreachable."""
+    try:
+        req = urllib.request.Request(GAR_TAGS_URL, headers={"User-Agent": "telcoin-ui"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        return DEFAULT_DOCKER_IMAGE
+    parsed = []
+    tags = (data.get("tags") or []) if isinstance(data, dict) else []
+    for t in tags:
+        m = re.match(r"^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$", t)
+        if m and "adiri" in (m.group(4) or ""):
+            parsed.append(((int(m.group(1)), int(m.group(2)), int(m.group(3))), t))
+    if parsed:
+        parsed.sort()
+        return GAR_IMAGE_BASE + ":" + parsed[-1][1]
+    return DEFAULT_DOCKER_IMAGE
+
+
 def system_info():
     """Host facts for the System view."""
     hostname = ""
@@ -1379,6 +1433,7 @@ def api_node_remove(node_type):
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _BUILD_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _PUBLIC_IP_RE = re.compile(r"^[0-9a-fA-F.:]+$")
+_SVC_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")  # mirrors validate_service_name
 
 
 def _setup_env(data, want_passphrase):
@@ -1396,6 +1451,9 @@ def _setup_env(data, want_passphrase):
     lis_primary = str(data.get("listener_primary") or "").strip()
     lis_worker = str(data.get("listener_worker") or "").strip()
     public_ip = str(data.get("public_ip") or "").strip()
+    rpc_public = "true" if data.get("rpc_public") else "false"
+    service_user = str(data.get("service_user") or "").strip()
+    service_group = str(data.get("service_group") or "").strip()
 
     if network not in ("testnet", "adiri"):
         return None, "invalid network"
@@ -1416,6 +1474,10 @@ def _setup_env(data, want_passphrase):
             return None, "invalid multiaddr"
     if public_ip and not _PUBLIC_IP_RE.match(public_ip):
         return None, "invalid public ip"
+    if service_user and not _SVC_NAME_RE.match(service_user):
+        return None, "invalid service user"
+    if service_group and not _SVC_NAME_RE.match(service_group):
+        return None, "invalid service group"
     if method == "source" and not build_ref:
         return None, "build_ref required for source install"
 
@@ -1432,6 +1494,9 @@ def _setup_env(data, want_passphrase):
     env["TN_SETUP_LIS_PRIMARY"] = lis_primary
     env["TN_SETUP_LIS_WORKER"] = lis_worker
     env["TN_SETUP_PUBLIC_IP"] = public_ip
+    env["TN_SETUP_RPC_PUBLIC"] = rpc_public
+    env["TN_SETUP_SERVICE_USER"] = service_user
+    env["TN_SETUP_SERVICE_GROUP"] = service_group
 
     if want_passphrase:
         passphrase = data.get("passphrase")
@@ -1440,6 +1505,21 @@ def _setup_env(data, want_passphrase):
         env["TN_BLS_PASSPHRASE"] = str(passphrase)
 
     return env, None
+
+
+@app.route("/api/setup/defaults")
+def api_setup_defaults():
+    """Auto-detected defaults to prefill the setup wizard (matching what the CLI
+    detects/uses): public IP, internal IP, latest docker image, service user/group."""
+    resp = jsonify({
+        "public_ip": detect_public_ip(),
+        "internal_ip": detect_internal_ip(),
+        "docker_image": latest_docker_image(),
+        "service_user": "telcoin",
+        "service_group": "telcoin",
+    })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/setup/<node_type>/keygen", methods=["POST"])
