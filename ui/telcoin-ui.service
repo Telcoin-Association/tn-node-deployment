@@ -25,11 +25,13 @@ RestartSec=5
 # back, but on this kernel/systemd version ProtectSystem=full still bind-mounts
 # /etc read-only (ro,relatime) regardless of ReadWritePaths -- so groupadd failed
 # with "cannot lock /etc/group" and node removal could not delete the unit. Set
-# ProtectSystem=false so /etc is writable in the namespace. This does not reduce
-# security in practice: the unprivileged Flask process (User=telcoin-ui) still
-# cannot write /etc by ordinary Unix permissions; only the root helper invoked
-# via sudo can, which is exactly the intent.
-ProtectHome=read-only
+# ProtectSystem=false so /etc is writable in the namespace. Likewise
+# ProtectHome=read-only made /home read-only in the namespace, so the root helper
+# could not create /home/telcoin for the service user during setup -- set
+# ProtectHome=false too. Neither reduces security in practice: the unprivileged
+# Flask process (User=telcoin-ui) still cannot write /etc or /home by ordinary
+# Unix permissions; only the root helper invoked via sudo can, which is the intent.
+ProtectHome=false
 ProtectSystem=false
 PrivateTmp=yes
 
