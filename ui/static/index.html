@@ -240,6 +240,15 @@ select{
 }
 .tbl td{padding:9px 10px;border-bottom:1px solid rgba(0,180,255,0.06);font-family:'JetBrains Mono',monospace}
 .tbl tr:last-child td{border-bottom:none}
+/* Recent Log Events: fixed layout so Message takes the remaining width and
+   wraps fully (long unbreakable tokens included); rows grow to fit. */
+.logtbl{table-layout:fixed}
+.logtbl td{vertical-align:top}
+.logtbl th:nth-child(1),.logtbl td:nth-child(1){width:84px}
+.logtbl th:nth-child(2),.logtbl td:nth-child(2){width:74px}
+.logtbl th:nth-child(3),.logtbl td:nth-child(3){width:160px}
+.logtbl td:nth-child(3){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.logtbl td:nth-child(4){white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .tbl tr.clickable{cursor:pointer;transition:.12s}
 .tbl tr.clickable:hover td{background:rgba(0,180,255,0.06)}
 .tbl .dur.green{color:var(--green)} .tbl .dur.yellow{color:var(--yellow)} .tbl .dur.red{color:var(--red)}
@@ -547,7 +556,7 @@ function statCard(label, val, valCls, meta, bar, cardCls){
 function logEventsTable(events){
   const head = `<thead><tr><th>Time</th><th>Level</th><th>Target</th><th>Message</th></tr></thead>`;
   if(!events || !events.length){
-    return `<table class="tbl">${head}<tbody><tr>
+    return `<table class="tbl logtbl">${head}<tbody><tr>
       <td colspan="4"><span style="color:var(--green)">No recent errors or warnings</span></td></tr></tbody></table>`;
   }
   const rows = events.map(e=>{
@@ -555,13 +564,13 @@ function logEventsTable(events){
       ? '<span class="badge err">ERROR</span>'
       : '<span class="badge warn">WARN</span>';
     return `<tr>
-      <td style="white-space:nowrap">${esc(e.time||'—')}</td>
+      <td>${esc(e.time||'—')}</td>
       <td>${badge}</td>
-      <td style="white-space:nowrap">${esc(e.target||'—')}</td>
-      <td style="white-space:normal;word-break:break-word">${esc(e.msg||'')}</td>
+      <td title="${esc(e.target||'')}">${esc(e.target||'—')}</td>
+      <td>${esc(e.msg||'')}</td>
     </tr>`;
   }).join('');
-  return `<table class="tbl">${head}<tbody>${rows}</tbody></table>`;
+  return `<table class="tbl logtbl">${head}<tbody>${rows}</tbody></table>`;
 }
 
 async function renderDashboard(){
