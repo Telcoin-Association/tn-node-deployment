@@ -1971,7 +1971,10 @@ async function streamSetup(phase, includePassphrase){
 async function runKeygen(){
   const b=$('#genKeysBtn'); if(b) b.disabled=true;
   const card=$('#setupProgressCard'); if(card) card.style.display='block';
-  const log=$('#setupLog'); if(log) log.innerHTML='<div class="log-line info">» generating keys… (source builds take 20–40 min — keep this tab open)</div>';
+  const buildNote = state.setup.method==='source'
+    ? 'source builds take 20–40 min'
+    : 'pulling the docker image';
+  const log=$('#setupLog'); if(log) log.innerHTML='<div class="log-line info">» generating keys… ('+buildNote+' — keep this tab open)</div>';
   const d = await streamSetup('keygen', true);
   if(d && d.ok){ toast('Keys generated — back them up','success'); showBackupGate(d); }
   else { toast('Key generation failed'+(d&&d.msg?': '+d.msg:''),'error'); if(b) b.disabled=false; }
