@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.11"
+UI_VERSION = "1.6.12"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -981,7 +981,11 @@ def api_nodes():
             "installed": installed,
             "status": service_status(t) if installed else "not installed",
         }
-    return jsonify(out)
+    # Never cache node detection -- after a remove/install the UI must see the
+    # change immediately (the empty-state switch keys off this).
+    resp = jsonify(out)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/status/<node_type>")
@@ -991,7 +995,9 @@ def api_status(node_type):
     t = node_type
 
     if not os.path.exists(service_file(t)):
-        return jsonify({"installed": False, "node_type": t, "status": "not installed"})
+        r = jsonify({"installed": False, "node_type": t, "status": "not installed"})
+        r.headers["Cache-Control"] = "no-store"
+        return r
 
     meta = read_meta(t)
     cfg = parse_service_file(t)

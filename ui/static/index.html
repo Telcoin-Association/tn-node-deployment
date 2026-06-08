@@ -1655,9 +1655,18 @@ function removeNode(){
   const btn=$('#rmBtn'); if(btn) btn.disabled=true;
   const url='/api/node/remove/'+t+'?scope='+encodeURIComponent(scope)+'&confirm=DELETE';
   state.removeES = new EventSource(url);
-  state.removeES.onmessage = ev=>{
+  state.removeES.onmessage = async ev=>{
     let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
-    if(d.event==='closed'){ stopRemoveStream(); loadNodes(); renderSystem(); return; }
+    if(d.event==='closed'){
+      stopRemoveStream();
+      // Re-detect installed state from /api/nodes BEFORE re-rendering (await,
+      // so the empty-state switch sees the fresh result), and drop any cached
+      // dashboard render so the removed node's panel rebuilds as "not installed".
+      await loadNodes();
+      const dash = $('#view-dashboard'); if(dash) delete dash.dataset.loaded;
+      rerenderActive();
+      return;
+    }
     appendStream('#rmLog', d);
     if(d.event==='done'){
       if(d.ok) toast(cap(t)+' node removed','success');
