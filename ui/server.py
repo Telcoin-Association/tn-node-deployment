@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.6.8"
+UI_VERSION = "1.6.9"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -450,6 +450,7 @@ def log_stats(log_path, window=3600):
         "error_count": 0,
         "warn_count": 0,
         "last_error": None,
+        "recent_events": [],
         "log_size": None,
         "log_size_human": None,
     }
@@ -472,6 +473,7 @@ def log_stats(log_path, window=3600):
 
     cutoff = time.time() - window
     last_error_line = None
+    events = []  # all ERROR/WARN events in the tail (for the Recent Log Events table)
     ts_re = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
     for line in tail.splitlines():
         is_err = "ERROR" in line or "level=error" in line
@@ -494,6 +496,18 @@ def log_stats(log_path, window=3600):
             last_error_line = line  # ends as the most recent ERROR in the tail
         elif is_warn and in_window:
             out["warn_count"] += 1
+
+        # Recent-events row (regardless of window; we keep only the last few).
+        tgt = re.search(r"\btarget=(\S+)", line)
+        emsg = re.search(r'message="([^"]*)"', line)
+        events.append({
+            "time": m.group(2) if m else "",
+            "level": "error" if is_err else "warn",
+            "target": tgt.group(1) if tgt else "",
+            "msg": emsg.group(1) if emsg else line.strip(),
+        })
+
+    out["recent_events"] = list(reversed(events[-5:]))  # last 5, most recent first
 
     if last_error_line:
         tm = re.search(r"ts=(\S+)", last_error_line)
@@ -1027,6 +1041,7 @@ def api_status(node_type):
         "log_error_count_1h": logs["error_count"],
         "log_warn_count_1h": logs["warn_count"],
         "last_error": logs["last_error"],
+        "recent_log_events": logs["recent_events"],
         "log_size": logs["log_size"],
         "log_size_human": logs["log_size_human"],
         "tracing_enabled": tracing_enabled(t),
