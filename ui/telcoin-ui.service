@@ -16,17 +16,21 @@ RestartSec=5
 # bounded instead by the localhost-only bind (server.py listens on 127.0.0.1)
 # plus the whitelisted helper commands.
 #
-# ProtectSystem=full (/usr,/boot,/etc read-only) and ProtectHome=read-only apply
-# to the WHOLE service mount namespace -- including the root helpers we sudo to.
-# Those helpers legitimately write /etc (groupadd/useradd during setup, the
-# systemd unit, /etc/telcoin, ufw rules) and /home (the service user's reth
-# cache); a read-only /etc made groupadd fail with "cannot lock /etc/group" and
-# node removal fail to delete the unit. Carve those two trees back to writable
-# via ReadWritePaths -- the unprivileged Flask process still cannot write them
-# (Unix perms); only the root helper can, which is the intent.
+# ProtectSystem and ProtectHome apply to the WHOLE service mount namespace --
+# including the root helpers we sudo to. Those helpers legitimately write /etc
+# (groupadd/useradd during setup, the systemd unit, /etc/telcoin, ufw rules) and
+# /home (the service user's reth cache).
+#
+# ProtectSystem=full was tried with ReadWritePaths=/etc /home to carve those trees
+# back, but on this kernel/systemd version ProtectSystem=full still bind-mounts
+# /etc read-only (ro,relatime) regardless of ReadWritePaths -- so groupadd failed
+# with "cannot lock /etc/group" and node removal could not delete the unit. Set
+# ProtectSystem=false so /etc is writable in the namespace. This does not reduce
+# security in practice: the unprivileged Flask process (User=telcoin-ui) still
+# cannot write /etc by ordinary Unix permissions; only the root helper invoked
+# via sudo can, which is exactly the intent.
 ProtectHome=read-only
-ProtectSystem=full
-ReadWritePaths=/etc /home
+ProtectSystem=false
 PrivateTmp=yes
 
 [Install]

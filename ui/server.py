@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.10"
+UI_VERSION = "1.7.11"
 
 NODE_TYPES = ("observer", "validator")
 
