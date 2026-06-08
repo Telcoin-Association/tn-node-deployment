@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.4"
+readonly SCRIPT_VERSION="1.2.5"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -481,6 +481,15 @@ step_create_infrastructure() {
         fi
     done
     echo ""
+
+    # Non-interactive: a previous setup run killed mid-groupadd/useradd can leave
+    # shadow-utils lock files behind, making this fail with "cannot lock
+    # /etc/group; try again later". We are the only user-management actor in this
+    # flow, so clear stale locks before creating the service user.
+    if json_mode; then
+        rm -f /etc/group.lock /etc/gshadow.lock /etc/passwd.lock /etc/shadow.lock \
+              /etc/subuid.lock /etc/subgid.lock 2>/dev/null || true
+    fi
 
     create_service_user
 
