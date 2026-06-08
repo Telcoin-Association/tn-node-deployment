@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -35,7 +36,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.2"
+UI_VERSION = "1.7.3"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1530,7 +1531,7 @@ def api_setup_keygen(node_type):
     env, err = _setup_env(data, want_passphrase=True)
     if err:
         return jsonify({"error": err}), 400
-    return _update_stream(["sudo", "-n", HELPER, "setup-keygen", node_type], env=env)
+    return _update_stream(["sudo", "-n", HELPER, "setup-keygen", node_type], env=env, capture_stderr=True)
 
 
 @app.route("/api/setup/<node_type>/finalize", methods=["POST"])
@@ -1541,7 +1542,7 @@ def api_setup_finalize(node_type):
     env, err = _setup_env(data, want_passphrase=False)
     if err:
         return jsonify({"error": err}), 400
-    return _update_stream(["sudo", "-n", HELPER, "setup-finalize", node_type], env=env)
+    return _update_stream(["sudo", "-n", HELPER, "setup-finalize", node_type], env=env, capture_stderr=True)
 
 
 # =============================================================================
@@ -1621,16 +1622,26 @@ def api_update_status(node_type):
     })
 
 
-def _update_stream(argv, env=None):
+def _update_stream(argv, env=None, capture_stderr=False):
     """SSE generator that streams a --json subprocess (via the helper) line by
     line. Each JSON line the script emits becomes one SSE event. Mirrors the
     /api/logs/<type>/stream teardown pattern. `env`, when given, fully replaces
-    the child environment (used by Setup to pass TN_SETUP_*/TN_BLS_PASSPHRASE)."""
+    the child environment (used by Setup to pass TN_SETUP_*/TN_BLS_PASSPHRASE).
+    `capture_stderr` tees the script's human-readable stderr (print_*/build/
+    keytool noise) to a temp file and, on a non-zero exit, surfaces its tail as
+    a final error event -- so a failing step shows WHY instead of just a code."""
     def generate():
+        errfile = None
+        stderr_dest = subprocess.DEVNULL
+        if capture_stderr:
+            fd, errpath = tempfile.mkstemp(prefix="tn-stream-", suffix=".log")
+            errfile = errpath
+            stderr_dest = os.fdopen(fd, "w")
         proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            env=env,
+            argv, stdout=subprocess.PIPE, stderr=stderr_dest, text=True, env=env,
         )
+        if capture_stderr:
+            stderr_dest.close()  # parent's copy; child keeps writing to the fd
         try:
             for line in iter(proc.stdout.readline, ""):
                 line = line.rstrip()
@@ -1647,6 +1658,21 @@ def _update_stream(argv, env=None):
                     proc.wait(timeout=3)
                 except Exception:
                     proc.kill()
+        if errfile is not None:
+            if proc.returncode not in (0, None):
+                tail = ""
+                try:
+                    with open(errfile, "r", errors="replace") as f:
+                        lines = [ln.rstrip() for ln in f if ln.strip()]
+                    tail = " | ".join(lines[-12:])[:900]
+                except Exception:
+                    pass
+                if tail:
+                    yield "data: " + json.dumps({"event": "error", "msg": "output: " + tail}) + "\n\n"
+            try:
+                os.unlink(errfile)
+            except Exception:
+                pass
         yield 'data: {"event":"closed"}\n\n'
 
     return Response(generate(), mimetype="text/event-stream",

@@ -119,6 +119,12 @@ print_sep() {
 
 confirm() {
     local prompt="$1"
+    # Non-interactive callers (e.g. the UI's --json setup) set TN_ASSUME_YES so
+    # prompts auto-accept instead of blocking on a read with no stdin -- which,
+    # under `set -e`, would otherwise silently skip the action (or exit).
+    if [[ "${TN_ASSUME_YES:-false}" == "true" ]]; then
+        return 0
+    fi
     local response
     echo ""
     read -r -p "  ?  $prompt [y/N]: " response

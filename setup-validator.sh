@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.3"
+readonly SCRIPT_VERSION="1.2.4"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -1068,6 +1068,7 @@ run_json_mode() {
     json_setup_fds
     trap json_on_exit EXIT
     check_root
+    export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     json_set_network "$JSON_NETWORK_INPUT"
     case "$JSON_PHASE" in
         keygen)   json_phase_keygen ;;
