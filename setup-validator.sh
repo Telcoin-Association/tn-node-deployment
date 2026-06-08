@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -403,6 +403,15 @@ step_network() {
 
 step_config() {
     print_header "Step 3 of 8: Node Configuration"
+
+    # JSON mode: ports and directory paths come from flags/defaults set by the
+    # orchestrator (the validator's addresses + multiaddrs are handled in
+    # step_generate_keys). Run the same step, non-interactively.
+    if json_mode; then
+        print_ok "Configuration set (non-interactive)"
+        print_info "Ports: P2P ${P2P_PORT} / worker ${WORKER_PORT} / RPC ${RPC_PORT} / metrics ${METRICS_PORT}"
+        return 0
+    fi
 
     echo "  Port configuration (press Enter to accept defaults):"
     echo ""
@@ -1035,6 +1044,8 @@ json_set_network() {
 json_phase_keygen() {
     json_event step "Running preflight checks and installing dependencies"
     step_preflight
+    json_event step "Applying node configuration"
+    step_config
     json_event step "Creating system infrastructure"
     step_create_infrastructure
     json_event step "Generating ${NODE_TYPE} keys"

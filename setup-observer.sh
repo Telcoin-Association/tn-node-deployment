@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -419,6 +419,19 @@ step_network() {
 
 step_config() {
     print_header "Step 3 of 7: Node Configuration"
+
+    # JSON mode: RPC access, ports, directory paths, public IP and the external/
+    # listener multiaddrs are all supplied via flags (or sensible defaults) by
+    # the orchestrator, so there is nothing to prompt for. Run the same step in
+    # the same order as the interactive flow, just non-interactively.
+    if json_mode; then
+        print_ok "Configuration set (non-interactive)"
+        print_info "RPC access:  $([[ "$ENABLE_PUBLIC_RPC" == "true" ]] && echo public || echo private)"
+        print_info "Ports:       P2P ${P2P_PORT} / worker ${WORKER_PORT} / RPC ${RPC_PORT} / metrics ${METRICS_PORT}"
+        print_info "External:    ${PRIMARY_MULTIADDR} | ${WORKER_MULTIADDR}"
+        print_info "Listener:    ${PRIMARY_LISTENER_MULTIADDR} | ${WORKER_LISTENER_MULTIADDR}"
+        return 0
+    fi
 
     echo "  RPC access:"
     echo ""
@@ -1110,6 +1123,8 @@ json_set_network() {
 json_phase_keygen() {
     json_event step "Running preflight checks and installing dependencies"
     step_preflight
+    json_event step "Applying node configuration"
+    step_config
     json_event step "Creating system infrastructure"
     step_create_infrastructure
     json_event step "Generating ${NODE_TYPE} keys"
