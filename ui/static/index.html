@@ -698,7 +698,7 @@ async function renderDashboard(){
   const nbAvail = ncb!=null;
   const nbVal = nbAvail ? fmtNum(ncb) : '—';
   const nbCls = nbAvail ? 'accent' : '';
-  const nbMeta = nbAvail ? 'via rpc.telcoin.network' : 'rpc unavailable';
+  const nbMeta = nbAvail ? 'via public RPC' : 'rpc unavailable';
 
   // Consensus lag = local - network. +N ahead, -N behind, 0 in sync.
   const lag = s.consensus_lag;

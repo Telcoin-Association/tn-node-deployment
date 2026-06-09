@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.15"
+UI_VERSION = "1.7.16"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -288,6 +288,54 @@ def _docker_inspect(name):
     return data if isinstance(data, dict) else None
 
 
+# docker stats samples take ~1s, so cache the parsed sample per container for the
+# dashboard refresh cycle (mirrors the detect cache TTL).
+_docker_stats_cache = {}  # name -> (ts, dict)
+_DOCKER_STATS_TTL = 10
+
+
+def _docker_stats(name):
+    """Parsed `docker stats --no-stream` for a container, via the helper, cached
+    ~10s. {cpu_percent, mem_usage, net_io, block_io}; None on any failure."""
+    if not name:
+        return None
+    now = time.time()
+    cached = _docker_stats_cache.get(name)
+    if cached and now - cached[0] < _DOCKER_STATS_TTL:
+        return cached[1]
+    rc, out, _ = run(["sudo", "-n", HELPER, "docker-stats", name], timeout=15)
+    if rc != 0 or not out:
+        return None
+    parts = out.splitlines()[0].split("\t")
+    cpu = None
+    if parts and parts[0]:
+        m = re.search(r"([0-9.]+)", parts[0])
+        if m:
+            try:
+                cpu = round(float(m.group(1)), 1)
+            except ValueError:
+                cpu = None
+    data = {
+        "cpu_percent": cpu,
+        "mem_usage": parts[1].strip() if len(parts) > 1 else None,
+        "net_io": parts[2].strip() if len(parts) > 2 else None,
+        "block_io": parts[3].strip() if len(parts) > 3 else None,
+    }
+    _docker_stats_cache[name] = (now, data)
+    return data
+
+
+def _docker_log_size(name):
+    """Size in bytes of the container's json-file log, via the helper. None on
+    any failure."""
+    if not name:
+        return None
+    rc, out, _ = run(["sudo", "-n", HELPER, "docker-log-size", name], timeout=10)
+    if rc != 0 or not out.strip().isdigit():
+        return None
+    return int(out.strip())
+
+
 def _cmd_join(cmd):
     """A container's Config.Cmd (list or string) as one searchable string."""
     if isinstance(cmd, list):
@@ -497,6 +545,21 @@ def node_version(t):
     if cached and now - cached[0] < 30:
         return cached[1]
 
+    # External (docker) nodes: prefer the version reported by the node (tn_info /
+    # node-info.yaml); fall back to the container image tag.
+    det = detect_type(t)
+    if det.get("mode") == "external":
+        out = {"ref": "", "kind": ""}
+        ver = (node_identity(t, det) or {}).get("version")
+        if ver:
+            out["ref"], out["kind"] = ver, "node"
+        else:
+            img = det.get("image") or ""
+            if ":" in img:
+                out["ref"], out["kind"] = img.split(":")[-1], "docker image tag"
+        _version_cache[t] = (now, out)
+        return out
+
     method = detect_install_method(t)
     out = {"ref": "", "kind": method or ""}
     if method == "source":
@@ -533,10 +596,19 @@ NETWORKS = {
     32285: {"name": "Adiri Devnet", "slug": "devnet"},
 }
 
-# Public consensus-block RPC per network slug. A slug omitted here degrades the
-# "Network Block"/"Consensus Lag" compare cards to "—" (devnet has no public RPC).
+# Public consensus-block RPC endpoints per chain id, tried in order (first
+# success wins). Testnet has a load balancer (single endpoint); devnet has no LB
+# so all five node endpoints are listed as fallbacks. A chain id omitted here
+# degrades the "Network Block"/"Consensus Lag" compare cards to "—".
 NETWORK_PUBLIC_RPC = {
-    "testnet": "https://rpc.telcoin.network",
+    2017:  ["https://rpc.telcoin.network"],
+    32285: [
+        "https://node1.devnet.telcoin.network",
+        "https://node2.devnet.telcoin.network",
+        "https://node3.devnet.telcoin.network",
+        "https://node4.devnet.telcoin.network",
+        "https://node5.devnet.telcoin.network",
+    ],
 }
 
 
@@ -1469,7 +1541,7 @@ def api_status(node_type):
 
     # Network consensus block (public RPC tn_latestConsensusHeader) + lag.
     # Lag is local - network: positive => local ahead, negative => local behind.
-    net_block = network_consensus_block(slug)
+    net_block = network_consensus_block(chain_id)
     local_cons_block = None
     if consensus.get("block") is not None:
         try:
@@ -1496,6 +1568,11 @@ def api_status(node_type):
         docker_image = det.get("image") or ""
         config_file = ""
         tracing_on = False
+        # CPU from `docker stats` (cached this refresh cycle); host pgrep won't
+        # resolve a containerised process. Log size from the container LogPath.
+        stats = _docker_stats(det.get("container"))
+        cpu_percent = stats.get("cpu_percent") if stats else None
+        log_size_override = _docker_log_size(det.get("container"))
     else:
         status = service_status(t)
         up_secs = service_uptime_seconds(t)
@@ -1507,8 +1584,13 @@ def api_status(node_type):
         docker_image = docker_image_ref(t)
         config_file = service_file(t)
         tracing_on = tracing_enabled(t)
+        cpu_percent = service_cpu_percent(t)
+        log_size_override = None
 
     logs = log_stats(log_path)
+    if log_size_override is not None:
+        logs["log_size"] = log_size_override
+        logs["log_size_human"] = fmt_bytes(log_size_override)
 
     resp = jsonify({
         "installed": True,
@@ -1523,7 +1605,7 @@ def api_status(node_type):
         "uptime_human": fmt_uptime(up_secs),
         "restart_count": restart_count,
         "last_restart": uptime_str,
-        "cpu_percent": service_cpu_percent(t),
+        "cpu_percent": cpu_percent,
         "rpc_ok": rpc_ok,
         "rpc_port": port,
         "node_id": node_id_val,
@@ -2823,46 +2905,50 @@ def _to_int_block(num):
     return None
 
 
-def network_consensus_block(slug):
-    """Network consensus block number from the network's public RPC
-    (tn_latestConsensusHeader -> result.number), cached 60s per slug. None when
-    the slug has no public RPC (e.g. devnet) or on failure/timeout (with a short
-    stale-cache grace window)."""
-    rpc = NETWORK_PUBLIC_RPC.get(slug)
-    if not rpc:
+def network_consensus_block(chain_id):
+    """Network consensus block number from the network's public RPC endpoint(s)
+    (tn_latestConsensusHeader -> result.number), cached 60s per chain id. Tries
+    each endpoint in order with a short 3s timeout (so one down node never stalls
+    the dashboard) and returns the first success. None when the chain has no
+    public RPC, or when every endpoint fails (with a short stale-cache grace)."""
+    rpcs = NETWORK_PUBLIC_RPC.get(chain_id)
+    if not rpcs:
         return None
     now = time.time()
-    entry = _netcons_cache.get(slug)
+    entry = _netcons_cache.get(chain_id)
     cached = entry["data"] if entry else None
     if cached is not None and now - entry["ts"] < 60:
         return cached
 
-    block = None
     payload = json.dumps({
         "jsonrpc": "2.0", "method": "tn_latestConsensusHeader",
         "params": [], "id": 1,
     }).encode()
-    try:
-        req = urllib.request.Request(
-            rpc, data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "telcoin-ui"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode())
-        result = data.get("result") if isinstance(data, dict) else None
-        if isinstance(result, dict):
-            block = _to_int_block(result.get("number"))
-    except Exception:
-        block = None
+    block = None
+    for rpc in rpcs:
+        try:
+            req = urllib.request.Request(
+                rpc, data=payload,
+                headers={"Content-Type": "application/json", "User-Agent": "telcoin-ui"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+            result = data.get("result") if isinstance(data, dict) else None
+            if isinstance(result, dict):
+                block = _to_int_block(result.get("number"))
+            if block is not None:
+                break
+        except Exception:
+            continue
 
     if block is None:
-        # Failure/timeout: serve a recent stale value within a grace window, else None.
+        # Every endpoint failed: serve a recent stale value within a grace window.
         if cached is not None and now - entry["ts"] < 300:
             return cached
         return None
 
-    _netcons_cache[slug] = {"ts": now, "data": block}
+    _netcons_cache[chain_id] = {"ts": now, "data": block}
     return block
 
 

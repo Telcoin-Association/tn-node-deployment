@@ -30,6 +30,8 @@
 #   telcoin-ui-helper docker-logs      <container> [lines]
 #   telcoin-ui-helper docker-logs-full <container>
 #   telcoin-ui-helper docker-node-info <container>
+#   telcoin-ui-helper docker-stats     <container>
+#   telcoin-ui-helper docker-log-size  <container>
 #
 set -euo pipefail
 
@@ -489,6 +491,26 @@ cmd_docker_node_info() {
     die "node-info.yaml not found for container $name"
 }
 
+# One-shot resource sample (CPU / mem / net / block IO) for the container. Tab-
+# separated so the server can split cleanly. `--no-stream` takes ~1s to sample.
+cmd_docker_stats() {
+    local name="$1"; require_container "$name"
+    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    docker stats "$name" --no-stream \
+        --format '{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}' 2>/dev/null
+}
+
+# Size (bytes) of the container's json-file log on the host. The LogPath is
+# root-owned, so the stat() must run here. Prints 0 when the file is missing.
+cmd_docker_log_size() {
+    local name="$1"; require_container "$name"
+    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    local log_path
+    log_path="$(docker inspect "$name" --format='{{.LogPath}}' 2>/dev/null)"
+    [[ -n "$log_path" ]] || die "could not determine log path for $name"
+    stat -c%s "$log_path" 2>/dev/null || echo 0
+}
+
 main() {
     local sub="${1:-}"
     case "$sub" in
@@ -514,6 +536,8 @@ main() {
         docker-logs)      shift; cmd_docker_logs      "${1:-}" "${2:-}" ;;
         docker-logs-full) shift; cmd_docker_logs_full "${1:-}" ;;
         docker-node-info) shift; cmd_docker_node_info "${1:-}" ;;
+        docker-stats)     shift; cmd_docker_stats     "${1:-}" ;;
+        docker-log-size)  shift; cmd_docker_log_size  "${1:-}" ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }
