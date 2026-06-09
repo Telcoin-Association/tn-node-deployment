@@ -473,22 +473,38 @@ cmd_docker_logs_full() {
     docker logs "$name" 2>&1 || die "could not read logs for $name"
 }
 
-# Print the container's node-info.yaml. The file lives in a host bind-mount; we
-# resolve the first bind whose host path holds node-info.yaml and cat it.
+# Print the container's node-info.yaml, prefixed with a classifying
+# `node_type:` line. The file lives in a host bind-mount; we resolve the first
+# bind whose host path holds node-info.yaml.
+#
+# Node type comes from config, NOT command-line flags (team deployments don't
+# pass --validator): a non-empty proof_of_possession field means this node is a
+# validator, otherwise it's an observer.
 cmd_docker_node_info() {
     local name="$1"; require_container "$name"
     command -v docker >/dev/null 2>&1 || die "docker not installed"
-    local binds host b
+    local binds host b info=""
     binds="$(docker inspect -f '{{range .HostConfig.Binds}}{{println .}}{{end}}' "$name" 2>/dev/null || true)"
     while IFS= read -r b; do
         [[ -z "$b" ]] && continue
         host="${b%%:*}"
         if [[ -f "${host}/node-info.yaml" ]]; then
-            cat "${host}/node-info.yaml"
-            return 0
+            info="${host}/node-info.yaml"
+            break
         fi
     done <<< "$binds"
-    die "node-info.yaml not found for container $name"
+    [[ -n "$info" ]] || die "node-info.yaml not found for container $name"
+
+    local pop node_type="observer"
+    pop="$(grep -m1 -E '^[[:space:]]*proof_of_possession[[:space:]]*:' "$info" 2>/dev/null | cut -d: -f2- || true)"
+    pop="$(printf '%s' "$pop" | tr -d '[:space:]')"
+    case "$pop" in
+        ''|'""'|"''") node_type="observer" ;;
+        *)            node_type="validator" ;;
+    esac
+
+    echo "node_type: ${node_type}"
+    cat "$info"
 }
 
 # One-shot resource sample (CPU / mem / net / block IO) for the container. Tab-

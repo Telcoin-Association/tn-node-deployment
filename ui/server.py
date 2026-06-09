@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.16"
+UI_VERSION = "1.7.17"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -354,9 +354,19 @@ def _cmd_http_port(cmd):
     return 8545
 
 
-def _cmd_is_validator(cmd):
-    """True when the container Cmd carries the --validator flag."""
-    return re.search(r"(^|\s)--validator(\s|=|$)", _cmd_join(cmd)) is not None
+def _docker_node_type(name):
+    """Classify an external container as 'validator' or 'observer' from the
+    helper's docker-node-info output (a non-empty proof_of_possession in
+    node-info.yaml -> validator). None when it can't be determined; callers
+    default to observer. Node type is config-derived, not from --validator
+    flags (team deployments don't pass them)."""
+    if not name:
+        return None
+    rc, out, _ = run(["sudo", "-n", HELPER, "docker-node-info", name], timeout=10)
+    if rc != 0 or not out:
+        return None
+    m = re.search(r"(?m)^node_type:\s*(validator|observer)\s*$", out)
+    return m.group(1) if m else None
 
 
 def detect_nodes():
@@ -394,7 +404,9 @@ def detect_nodes():
                 continue
             config = insp.get("Config") or {}
             cmd = config.get("Cmd") or []
-            t = "validator" if _cmd_is_validator(cmd) else "observer"
+            # Type is decided by config (proof_of_possession in node-info.yaml),
+            # not the docker command line.
+            t = _docker_node_type(name) or "observer"
             if scripts.get(t) or out[t]["mode"] == "external":
                 continue  # never override a scripts node / first container wins
             st = insp.get("State") or {}

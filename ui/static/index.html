@@ -2525,14 +2525,16 @@ document.addEventListener('click', e=>{
 (async function init(){
   await loadNodes();
   state.buildInfo = await api('/api/build-info');   // read once at page load
-  // Default-select an installed node if the current default isn't installed.
-  if(!state.nodes[state.node]?.installed){
+  // Pick the node to show on first load. An externally-detected validator wins
+  // (a team deployment is a single external validator node); otherwise fall back
+  // to whichever node is installed if the default (observer) isn't.
+  if(state.nodes.validator?.mode === 'external'){
+    state.node = 'validator';
+  } else if(!state.nodes[state.node]?.installed){
     const other = state.node==='observer'?'validator':'observer';
-    if(state.nodes[other]?.installed){
-      state.node = other;
-      document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
-    }
+    if(state.nodes[other]?.installed) state.node = other;
   }
+  document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
   updateReadonlyBanner();
   syncReadonlyChrome();
   renderDashboard();
