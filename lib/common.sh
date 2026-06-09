@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.47"
+readonly COMMON_VERSION="1.1.48"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -907,34 +907,31 @@ check_validator_onchain_status() {
         return 1
     fi
 
-    # The ValidatorInfo struct is ABI-encoded in the response.
-    # The currentStatus field is at a fixed offset in the struct.
-    # Struct layout (each field is 32 bytes):
-    #   [0]   blsPubkey (dynamic, offset pointer)
-    #   [1]   validatorAddress
-    #   [2]   activationEpoch
-    #   [3]   exitEpoch
-    #   [4]   currentStatus  <-- this is what we want
-    #   [5]   isRetired
-    #   [6]   isDelegated
-    #   [7]   stakeVersion
+    # The ValidatorInfo struct is ABI-encoded INLINE in the response. It carries
+    # no dynamic fields (blsPubkey is not part of the returned struct), so there
+    # is NO leading offset pointer -- every field sits at a fixed word index.
+    # Struct layout (each field is 32 bytes / 64 hex chars):
+    #   word 0 = validatorAddress (offset 0)
+    #   word 1 = activationEpoch  (offset 64)
+    #   word 2 = exitEpoch        (offset 128)
+    #   word 3 = currentStatus    (offset 192)   <-- this is what we want
+    #   word 4 = isRetired        (offset 256)
+    #   word 5 = stakeVersion     (offset 320)
+    #   word 6 = region           (offset 384)
+    #
+    # (The previous decoder assumed a leading blsPubkey offset pointer + an
+    # 8-word struct, reading status from word 4 / offset 256; the live contract
+    # returns a 7-word struct, so every field shifted down one word.)
     #
     # Strip 0x prefix, then each 32-byte word is 64 hex chars
     local hex="${result#0x}"
 
-    # currentStatus is at word index 4 (0-indexed), so offset = 4 * 64 = 256 chars
-    # But first word is a dynamic type offset pointer, so we need to be careful.
-    # The first word is the offset to blsPubkey bytes data.
-    # Static fields start at word 1:
-    #   word 1 = validatorAddress (offset 64)
-    #   word 2 = activationEpoch  (offset 128)
-    #   word 3 = exitEpoch        (offset 192)
-    #   word 4 = currentStatus    (offset 256)
-    local status_hex="${hex:256:64}"
+    # currentStatus is at word index 3 (0-indexed), so offset = 3 * 64 = 192 chars
+    local status_hex="${hex:192:64}"
     local status_dec=$(( 16#${status_hex} ))
 
-    # Also extract activationEpoch for display (word 2, offset 128)
-    local activation_hex="${hex:128:64}"
+    # Also extract activationEpoch for display (word 1, offset 64)
+    local activation_hex="${hex:64:64}"
     local activation_epoch=$(( 16#${activation_hex} ))
 
     # Decode status to human readable
