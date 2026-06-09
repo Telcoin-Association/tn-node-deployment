@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.13"
+UI_VERSION = "1.7.14"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -633,6 +633,72 @@ def consensus_info(port):
 
 
 # =============================================================================
+# CONSENSUS REGISTRY  (validator-only on-chain reads via eth_call)
+#
+# The validator dashboard surfaces on-chain state (registration, committee,
+# stake, rewards, ConsensusNFT) that the JSON-RPC node API does not carry. The
+# browser reaches the UI over an SSH tunnel and cannot hit the node RPC, so each
+# eth_call is made here server-side and returned decoded. Every call is wrapped
+# independently: a single failure yields null for that one field, never a whole-
+# page error. Mirrors check_validator_onchain_status() in lib/common.sh.
+# =============================================================================
+
+# ConsensusRegistry precompile (lib/common.sh:855).
+CONSENSUS_REGISTRY = "0x07e17e17e17e17e17e17e17e17e17e17e17e17e1"
+
+# Function selectors (keccak256(signature)[:4]).
+REGISTRY_SELECTORS = {
+    "getCurrentEpoch": "0xb97dd9e2",
+    "getNextCommitteeSize": "0xeb8535c2",
+    "getValidator": "0x1904bb2e",
+    "getRewards": "0x79ee54f7",
+    "getBalanceBreakdown": "0x15b5709a",
+    "getCurrentStakeConfig": "0x7d06fdf8",
+    "balanceOf": "0x70a08231",
+}
+
+
+def eth_call_registry(port, selector, address=None):
+    """eth_call the ConsensusRegistry with `selector` (+ optional left-padded
+    address arg). Returns the result hex string, or None on any failure. The
+    address is right-aligned in a 32-byte word, left-padded with zeros (the
+    same ABI encoding lib/common.sh builds by hand)."""
+    data = selector
+    if address:
+        addr = address[2:] if address.startswith("0x") else address
+        data = selector + addr.rjust(64, "0")
+    res = local_rpc(port, "eth_call",
+                    [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"])
+    return res if isinstance(res, str) else None
+
+
+def _words(hexstr):
+    """Split an ABI-encoded hex result into a list of int words (one per 32-byte
+    slice). [] for None/garbage; a trailing partial word is ignored."""
+    if not isinstance(hexstr, str):
+        return []
+    h = hexstr[2:] if hexstr.startswith("0x") else hexstr
+    words = []
+    for i in range(0, len(h), 64):
+        chunk = h[i:i + 64]
+        if len(chunk) < 64:
+            break
+        try:
+            words.append(int(chunk, 16))
+        except ValueError:
+            break
+    return words
+
+
+def wei_to_tel(wei):
+    """Wei (int) -> float TEL (wei / 1e18). None on garbage."""
+    try:
+        return int(wei) / 10**18
+    except (TypeError, ValueError):
+        return None
+
+
+# =============================================================================
 # LOG-DERIVED METRICS  (peers -- no consensus-header RPC equivalent)
 # =============================================================================
 
@@ -1137,6 +1203,181 @@ def api_status(node_type):
     # (log size, blocks, CPU, ...), not a value frozen at page load.
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+# =============================================================================
+# ROUTES -- validator-only on-chain dashboard
+#
+# Shared metrics (CPU, mem, disk, logs, peers, traffic, jaeger, version) keep
+# coming from /api/status. This endpoint adds only the validator-specific
+# consensus/contract data. Every field defaults to None and is filled by an
+# independently-guarded probe, so any single RPC/contract failure degrades just
+# that card to "—" -- the response is always HTTP 200 with valid JSON.
+# =============================================================================
+
+@app.route("/api/validator/<node_type>")
+def api_validator(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    t = node_type
+
+    out = {
+        "installed": os.path.exists(service_file(t)),
+        "node_type": t,
+        # identity (tn_info)
+        "bls_public_key": None, "execution_address": None,
+        "primary_external_address": None, "worker_external_address": None,
+        "name": None, "version": None, "authority_id": None,
+        # consensus header (reused consensus_info)
+        "block": None, "epoch": None, "age": None,
+        # contract: epoch / committee sizing
+        "current_epoch": None, "next_committee_size": None,
+        # committee membership (tn_epochRecord)
+        "in_committee": None, "in_next_committee": None,
+        # validator record (getValidator)
+        "activation_epoch": None, "exit_epoch": None, "status": None,
+        "is_retired": None, "stake_version": None,
+        # stake / rewards
+        "rewards_tel": None, "balance_breakdown": None, "stake_config": None,
+        "nft_held": None,
+    }
+
+    if not out["installed"]:
+        r = jsonify(out)
+        r.headers["Cache-Control"] = "no-store"
+        return r
+
+    cfg = parse_service_file(t)
+    try:
+        port = int(cfg["rpc_port"])
+    except (TypeError, ValueError):
+        port = 8545
+
+    # --- tn_info: node identity (bls key, execution address, addresses, ...) ---
+    try:
+        info = local_rpc(port, "tn_info")
+        if isinstance(info, dict):
+            out["bls_public_key"] = info.get("bls_public_key")
+            out["execution_address"] = info.get("execution_address")
+            out["primary_external_address"] = info.get("primary_external_address")
+            out["worker_external_address"] = info.get("worker_external_address")
+            out["name"] = info.get("name")
+            out["version"] = info.get("version")
+            out["authority_id"] = info.get("authority_id")
+    except Exception:
+        pass
+
+    # --- consensus header: block / epoch / age (reused) ---
+    try:
+        consensus, _ = consensus_info(port)
+        out["block"] = consensus.get("block")
+        out["epoch"] = consensus.get("epoch")
+        out["age"] = consensus.get("age")
+    except Exception:
+        pass
+
+    # --- committee membership via tn_epochRecord(epoch) ---
+    # Returns [EpochRecord, EpochCertificate]; the record carries committee[] and
+    # next_committee[] (lists of BLS pubkeys, same serialised form as tn_info's).
+    try:
+        if out["epoch"] is not None and out["bls_public_key"] is not None:
+            rec = local_rpc(port, "tn_epochRecord", [int(out["epoch"])])
+            record = None
+            if isinstance(rec, list) and rec and isinstance(rec[0], dict):
+                record = rec[0]
+            elif isinstance(rec, dict):
+                record = rec
+            if record is not None:
+                committee = record.get("committee") or []
+                next_committee = record.get("next_committee") or []
+                bls = out["bls_public_key"]
+                out["in_committee"] = bls in committee
+                out["in_next_committee"] = bls in next_committee
+    except Exception:
+        pass
+
+    # --- getCurrentEpoch() ---
+    try:
+        w = _words(eth_call_registry(port, REGISTRY_SELECTORS["getCurrentEpoch"]))
+        if w:
+            out["current_epoch"] = w[0]
+    except Exception:
+        pass
+
+    # --- getNextCommitteeSize() ---
+    try:
+        w = _words(eth_call_registry(port, REGISTRY_SELECTORS["getNextCommitteeSize"]))
+        if w:
+            out["next_committee_size"] = w[0]
+    except Exception:
+        pass
+
+    addr = out["execution_address"]
+
+    # --- getValidator(address): word layout per lib/common.sh:910-938 ---
+    #   w0 blsPubkey offset, w1 validatorAddress, w2 activationEpoch,
+    #   w3 exitEpoch, w4 currentStatus, w5 isRetired, w6 isDelegated,
+    #   w7 stakeVersion
+    try:
+        if addr:
+            w = _words(eth_call_registry(port, REGISTRY_SELECTORS["getValidator"], addr))
+            if len(w) >= 8:
+                out["activation_epoch"] = w[2]
+                out["exit_epoch"] = w[3]
+                out["status"] = w[4]
+                out["is_retired"] = bool(w[5])
+                out["stake_version"] = w[7]
+    except Exception:
+        pass
+
+    # --- getRewards(address) -> claimable rewards (wei) ---
+    try:
+        if addr:
+            w = _words(eth_call_registry(port, REGISTRY_SELECTORS["getRewards"], addr))
+            if w:
+                out["rewards_tel"] = wei_to_tel(w[0])
+    except Exception:
+        pass
+
+    # --- getBalanceBreakdown(address) -> (total, stake, rewards) wei ---
+    try:
+        if addr:
+            w = _words(eth_call_registry(port, REGISTRY_SELECTORS["getBalanceBreakdown"], addr))
+            if len(w) >= 3:
+                out["balance_breakdown"] = {
+                    "total": wei_to_tel(w[0]),
+                    "stake": wei_to_tel(w[1]),
+                    "rewards": wei_to_tel(w[2]),
+                }
+    except Exception:
+        pass
+
+    # --- getCurrentStakeConfig() -> (stakeAmount, minWithdraw, epochIssuance,
+    #     epochDuration). Amounts are wei -> TEL; epochDuration is seconds. ---
+    try:
+        w = _words(eth_call_registry(port, REGISTRY_SELECTORS["getCurrentStakeConfig"]))
+        if len(w) >= 4:
+            out["stake_config"] = {
+                "stake_amount": wei_to_tel(w[0]),
+                "min_withdraw": wei_to_tel(w[1]),
+                "epoch_issuance": wei_to_tel(w[2]),
+                "epoch_duration": w[3],
+            }
+    except Exception:
+        pass
+
+    # --- balanceOf(address) -> ConsensusNFT held when > 0 ---
+    try:
+        if addr:
+            w = _words(eth_call_registry(port, REGISTRY_SELECTORS["balanceOf"], addr))
+            if w:
+                out["nft_held"] = w[0] > 0
+    except Exception:
+        pass
+
+    r = jsonify(out)
+    r.headers["Cache-Control"] = "no-store"
+    return r
 
 
 # =============================================================================

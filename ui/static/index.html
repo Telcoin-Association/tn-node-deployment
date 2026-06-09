@@ -256,6 +256,19 @@ select{
 .badge.ok{background:rgba(0,232,122,0.14);color:var(--green)}
 .badge.err{background:rgba(255,77,109,0.14);color:var(--red)}
 .badge.warn{background:rgba(255,217,61,0.16);color:var(--yellow)}
+/* Validator dashboard §1 status hero */
+.status-hero{margin-top:8px}
+.status-hero .hero-main{font-size:26px;font-weight:800;line-height:1.2}
+.status-hero .hero-sub{font-size:13px;color:var(--text2);margin-top:6px}
+.status-hero .hero-main.green{color:var(--green)}
+.status-hero .hero-main.amber{color:var(--yellow)}
+.status-hero .hero-main.red{color:var(--red)}
+.status-hero .hero-items{display:flex;flex-wrap:wrap;gap:28px;margin-top:16px}
+.status-hero .hero-item{min-width:120px}
+.status-hero .hero-item .hi-label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)}
+.status-hero .hero-item .hi-val{font-size:16px;font-weight:700;margin-top:3px}
+.status-hero .hero-item .hi-val.green{color:var(--green)}
+.status-hero .hero-item .hi-val.red{color:var(--red)}
 .ns-step{display:flex;gap:14px;padding:16px 0;border-top:1px solid rgba(0,180,255,0.10)}
 .ns-step:first-child{border-top:0}
 .ns-step.done{opacity:.85}
@@ -587,6 +600,8 @@ function logEventsTable(events){
 async function renderDashboard(){
   const c = $('#view-dashboard');
   if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
+  // Validator gets its own consensus/on-chain dashboard; observer view unchanged.
+  if(state.node==='validator'){ await renderValidatorDashboard(c); return; }
   if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading ${esc(state.node)} status…</div>`;
 
   const s = await api('/api/status/'+state.node);
@@ -705,6 +720,206 @@ async function renderDashboard(){
       <div class="card">
         <h3>Node Details</h3>
         <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
+          ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
+          : '—'}</span></div>
+        <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
+        <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
+        <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
+        <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
+        <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
+        <div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
+        <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
+        <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>
+      </div>
+      <div class="card">
+        <h3>Quick Actions</h3>
+        <div class="qa">
+          <button class="btn btn-out" onclick="switchView('logs')">📜 View Logs</button>
+          <button class="btn btn-out" onclick="switchView('config')">⚙ Edit Config</button>
+          <button class="btn btn-out" data-act="restart">↻ Restart Service</button>
+          <button class="btn btn-out" onclick="switchView('update')">⬆ Check for Update</button>
+          <button class="btn btn-out" onclick="switchView('network')">🌐 Network Status</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  `;
+
+  c.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click', ()=>serviceAction(b.dataset.act)));
+
+  augmentDashboardJaeger(s);
+  augmentDashboardVersion();
+  augmentDashboardUpdate();
+  augmentDashboardNetstat();
+}
+
+// =============================================================================
+// VALIDATOR DASHBOARD -- consensus/on-chain view (validator node only). Shared
+// metrics come from /api/status; validator-specific consensus + contract data
+// from /api/validator. Reuses the observer tile IDs (#netTrafficTile, #jaegerTile/
+// #jaegerInd, #updInd, #verDetail, #consTrace) so the same augment* helpers fill
+// them -- all null-guard their lookups, so the observer tiles we omit are safe.
+// =============================================================================
+
+// Decode the on-chain validator status into a hero {cls,main,sub}. Mirrors the
+// ValidatorStatus enum (lib/common.sh): 0 Undefined, 1 Staked, 2 PendingActivation,
+// 3 Active, 4 PendingExit, 5 Exited, 6 Any(retired).
+function valStatusHero(v){
+  const st = v.status;                          // int or null
+  const retired = v.is_retired===true || st===6;
+  const nft = v.nft_held;                        // true/false/null
+  if(retired)   return {cls:'red',  main:'Retired',           sub:'Exited and retired from the validator set'};
+  if(st===3)    return {cls:'green',main:'Active',            sub:'Participating in consensus'};
+  if(st===2)    return {cls:'amber',main:'Pending Activation',sub:'Activating at the next epoch boundary'};
+  if(st===1)    return {cls:'amber',main:'Staked',            sub:'Staked — call activate() to enter the activation queue'};
+  if(st===4)    return {cls:'amber',main:'Pending Exit',      sub:'Exiting at the next epoch boundary'};
+  if(st===5)    return {cls:'red',  main:'Exited',            sub:'No longer in the active validator set'};
+  if(st===0)    return {cls:'red',  main:'Not Staked',        sub:'ConsensusNFT present — stake your TEL to begin'};
+  if(nft===false) return {cls:'red',main:'Not Registered',    sub:'No ConsensusNFT — awaiting governance approval'};
+  return {cls:'red', main:'—', sub:'On-chain status unavailable'};
+}
+
+async function renderValidatorDashboard(c){
+  if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading validator status…</div>`;
+  const [s, v] = await Promise.all([
+    api('/api/status/'+state.node),
+    api('/api/validator/'+state.node),
+  ]);
+  if(s.error || s.installed===false){ emptyState(c, cap(state.node)); return; }
+  if(state.view!=='dashboard') return;
+  c.dataset.loaded='1';
+
+  const vv = (v && !v.error) ? v : {};
+  const running = s.status==='active';
+  const peers = s.peers||{};
+  const disk = s.disk||{};
+  const mem = s.memory||{};
+
+  // CPU tile colour (share of total capacity).
+  const cpu = s.cpu_percent;
+  const cpuCls = cpu==null?'':(cpu>90?'red':(cpu>70?'yellow':''));
+
+  // Monitoring tiles.
+  const errc = s.log_error_count_1h;
+  const errCls = errc==null?'':(errc>10?'red':(errc>0?'yellow':'green'));
+  const warnc = s.log_warn_count_1h;
+  const warnCls = warnc==null?'':(warnc>10?'red':(warnc>0?'yellow':'green'));
+  const lastRestart = s.last_restart;
+  const lrVal = lastRestart ? `<span style="font-size:14px">${esc(lastRestart)}</span>` : '—';
+  const logSize = s.log_size_human;
+  const logBytes = s.log_size;
+  const logCls = logBytes==null ? '' : (logBytes>1073741824 ? 'red' : (logBytes>=524288000 ? 'yellow' : 'green'));
+
+  // §1 hero + inline committee/NFT items.
+  const hero = valStatusHero(vv);
+  const tick = b => b===true ? '<span class="hi-val green">✓ Yes</span>'
+                  : b===false ? '<span class="hi-val red">✗ No</span>'
+                  : '<span class="hi-val">—</span>';
+  const nftItem = vv.nft_held===true ? '<span class="hi-val green">Held</span>'
+                : vv.nft_held===false ? '<span class="hi-val red">Not held</span>'
+                : '<span class="hi-val">—</span>';
+
+  // Per-card meta: dimmed "unavailable" when the source field is null.
+  const um = (x, normal) => x==null ? '<span style="color:var(--text3)">unavailable</span>' : (normal||'');
+  const stakeAmt = vv.balance_breakdown ? vv.balance_breakdown.stake
+                 : (vv.stake_config ? vv.stake_config.stake_amount : null);
+  const rewards  = vv.rewards_tel!=null ? vv.rewards_tel
+                 : (vv.balance_breakdown ? vv.balance_breakdown.rewards : null);
+
+  // Truncated identifier (full value on hover) + one Node Details row.
+  const trunc = (x,n=20) => { if(x==null||x==='') return null; const t=String(x); return t.length>n? t.slice(0,n)+'…' : t; };
+  const detailRow = (label, val, full) =>
+    `<div class="kv"><span class="k">${esc(label)}</span><span class="v"${full?` title="${esc(full)}"`:''}>${val}</span></div>`;
+
+  c.innerHTML = `
+  <div class="dash">
+    <!-- service control (full width) -->
+    <div class="card">
+      <div class="svc-row" id="svcRow">
+        <span class="pill ${running?'green':'red'}" id="svcPill">● ${esc(s.status)}</span>
+        ${!running?`<button class="btn btn-green" data-act="start">▶ Start</button>`:''}
+        ${running?`<button class="btn btn-red" data-act="stop">■ Stop</button>`:''}
+        <button class="btn btn-out" data-act="restart">↻ Restart</button>
+        <span id="jaegerInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"><span class="jdot gray"></span>Jaeger</span>
+        <span id="updInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"></span>
+        <span class="uptime">${s.uptime?'Since '+esc(s.uptime):''}</span>
+      </div>
+    </div>
+
+    <!-- §1 Validator Status hero -->
+    <div class="group-label">Validator Status</div>
+    <div class="card status-hero">
+      <div class="hero-main ${hero.cls}">${esc(hero.main)}</div>
+      <div class="hero-sub">${esc(hero.sub)}</div>
+      <div class="hero-items">
+        <div class="hero-item"><div class="hi-label">In Committee</div>${tick(vv.in_committee)}</div>
+        <div class="hero-item"><div class="hi-label">Next Epoch</div>${tick(vv.in_next_committee)}</div>
+        <div class="hero-item"><div class="hi-label">ConsensusNFT</div>${nftItem}</div>
+      </div>
+    </div>
+
+    <!-- §2 Consensus -->
+    <div class="group-label">Consensus</div>
+    <div class="dgrid dgrid-4">
+      ${statCard('Current Epoch', vv.current_epoch!=null?fmtNum(vv.current_epoch):'—', 'accent', um(vv.current_epoch, 'on-chain epoch'))}
+      ${statCard('Consensus Block', vv.block!=null?fmtNum(vv.block):'—', 'accent', um(vv.block, vv.epoch!=null?'epoch '+esc(vv.epoch):''))}
+      ${statCard('Last Block Time', vv.age?esc(vv.age):'—', '', um(vv.age, 'latest commit'))}
+      ${statCard('Next Committee Size', vv.next_committee_size!=null?esc(String(vv.next_committee_size)):'—', '', um(vv.next_committee_size, 'validators'))}
+    </div>
+
+    <!-- §3 Stake -->
+    <div class="group-label">Stake</div>
+    <div class="dgrid dgrid-4">
+      ${statCard('Stake Amount', fmtTel(stakeAmt)||'—', 'accent', um(stakeAmt, 'staked'))}
+      ${statCard('Claimable Rewards', fmtTel(rewards)||'—', '', um(rewards, 'rewards'))}
+      ${statCard('Activation Epoch', vv.activation_epoch!=null?fmtNum(vv.activation_epoch):'—', '', um(vv.activation_epoch, 'epoch'))}
+      ${statCard('Stake Version', vv.stake_version!=null?esc(String(vv.stake_version)):'—', '', um(vv.stake_version, 'version'))}
+    </div>
+
+    <!-- §4 Peer Health -->
+    <div class="group-label">Peer Health</div>
+    <div class="dgrid dgrid-4">
+      ${statCard('Primary Peers', (peers.primary!=null?esc(String(peers.primary)):'—'), 'accent', 'connected')}
+      ${statCard('Worker Peers', (peers.worker!=null?esc(String(peers.worker)):'—'), 'accent', 'connected')}
+      ${statCard('Primary Address', fmtMultiaddrCell(vv.primary_external_address), '', um(vv.primary_external_address, 'external'), null, 'tleft')}
+      ${statCard('Worker Address', fmtMultiaddrCell(vv.worker_external_address), '', um(vv.worker_external_address, 'external'), null, 'tleft')}
+    </div>
+
+    <!-- §5 Performance -->
+    <div class="group-label">Performance</div>
+    <div class="dgrid dgrid-5">
+      ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null)}
+      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
+      ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
+      ${statCard('Network Traffic', '<span id="netTrafficTile" style="font-size:14px;line-height:1.5;display:block">…</span>', '', '<span id="netTrafficMeta"></span>')}
+      ${statCard('Jaeger', '<span id="jaegerTile">…</span>', '', '<span id="jaegerTileMeta">tracing…</span>')}
+    </div>
+
+    <!-- §6 Monitoring -->
+    <div class="group-label">Monitoring</div>
+    <div class="dgrid dgrid-4">
+      ${statCard('Errors (1h)', errc!=null?esc(String(errc)):'—', errCls, 'log ERROR')}
+      ${statCard('Warnings (1h)', warnc!=null?esc(String(warnc)):'—', warnCls, 'log WARN')}
+      ${statCard('Last Restart', lrVal, '', 'service start', null, 'tleft')}
+      ${statCard('Log Size', logSize?esc(logSize):'—', logCls, 'on disk')}
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>Recent Log Events</h3>
+      ${logEventsTable(s.recent_log_events)}
+    </div>
+
+    <!-- §7 Node Details + Quick Actions -->
+    <div class="grid two-col">
+      <div class="card">
+        <h3>Node Details</h3>
+        <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Node Name</span><span class="v">${vv.name?esc(vv.name):'—'}</span></div>
+        <div class="kv"><span class="k">Execution Address</span><span class="v">${vv.execution_address
+          ? `${esc(vv.execution_address)} <button class="copy-btn" title="Copy Execution Address" onclick="copyToClipboard('${esc(vv.execution_address)}','Execution Address')">⧉</button>`
+          : '—'}</span></div>
+        ${detailRow('BLS Public Key', vv.bls_public_key?esc(trunc(vv.bls_public_key)):'—', vv.bls_public_key)}
+        ${detailRow('Authority ID', vv.authority_id?esc(trunc(vv.authority_id)):'—', vv.authority_id)}
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
           ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
           : '—'}</span></div>
@@ -2142,6 +2357,13 @@ function copyToClipboard(text, label){
 }
 function cap(s){ return String(s).charAt(0).toUpperCase()+String(s).slice(1); }
 function fmtNum(n){ return Number(n).toLocaleString('en-US'); }
+// TEL amount -> "12,345.67 TEL". null/garbage -> null (callers show "—").
+function fmtTel(x){
+  if(x==null) return null;
+  const n = Number(x);
+  if(!isFinite(n)) return null;
+  return n.toLocaleString('en-US', {maximumFractionDigits:4}) + ' TEL';
+}
 function netLabel(n){ return ({testnet:'Adiri Testnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
