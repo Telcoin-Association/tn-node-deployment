@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +29,20 @@ import urllib.request
 from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
+
+# Diagnostics. _log always writes to stderr (-> journald: `journalctl -u
+# telcoin-ui`); _dbg only when TN_UI_DEBUG is set (verbose request/response
+# dumps). Used to trace the external-node on-chain contract-call pipeline.
+TN_UI_DEBUG = os.environ.get("TN_UI_DEBUG", "").lower() in ("1", "true", "yes", "on")
+
+
+def _log(msg):
+    print(f"[tn-ui] {msg}", file=sys.stderr, flush=True)
+
+
+def _dbg(msg):
+    if TN_UI_DEBUG:
+        print(f"[tn-ui-debug] {msg}", file=sys.stderr, flush=True)
 
 # =============================================================================
 # CONSTANTS & PATHS
@@ -37,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.18"
+UI_VERSION = "1.7.19"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -344,7 +359,8 @@ def _cmd_join(cmd):
 
 
 def _cmd_http_port(cmd):
-    """--http.port N from a container Cmd. 8545 when absent/unparseable."""
+    """--http.port N from a container Cmd (the port INSIDE the container). 8545
+    when absent/unparseable."""
     m = re.search(r"--http\.port[=\s]+(\d+)", _cmd_join(cmd))
     if m:
         try:
@@ -352,6 +368,21 @@ def _cmd_http_port(cmd):
         except ValueError:
             pass
     return 8545
+
+
+def _resolve_rpc_port(insp, internal_port):
+    """The port the UI (a host process) must hit to reach the container's RPC.
+    With host networking the container shares the host stack, so the internal
+    --http.port is reachable directly. With bridge networking + a published port,
+    the UI must use the HOST port the internal one is mapped to (which can differ
+    from --http.port). Falls back to the internal port when there's no mapping."""
+    ports = (insp.get("NetworkSettings") or {}).get("Ports") or {}
+    binding = ports.get(f"{internal_port}/tcp")
+    if isinstance(binding, list) and binding:
+        hp = (binding[0] or {}).get("HostPort")
+        if hp and str(hp).isdigit():
+            return int(hp)
+    return internal_port
 
 
 def _docker_node_type(name):
@@ -412,12 +443,17 @@ def detect_nodes():
             st = insp.get("State") or {}
             binds = (insp.get("HostConfig") or {}).get("Binds") or []
             node_info_path = binds[0].split(":", 1)[0] if binds else None
+            internal_port = _cmd_http_port(cmd)
+            rpc_port = _resolve_rpc_port(insp, internal_port)
+            _dbg(f"detect_nodes: external {t} container={name!r} "
+                 f"internal_http_port={internal_port} rpc_port={rpc_port} "
+                 f"netmode={(insp.get('HostConfig') or {}).get('NetworkMode')!r}")
             out[t] = {
                 "mode": "external",
                 "status": "active" if st.get("Running") is True else "inactive",
                 "container": name,
                 "image": config.get("Image"),
-                "rpc_port": _cmd_http_port(cmd),
+                "rpc_port": rpc_port,
                 "node_info_path": node_info_path,
                 "inspect": insp,
             }
@@ -1059,13 +1095,31 @@ def eth_call_registry(port, selector, address=None):
     """eth_call the ConsensusRegistry with `selector` (+ optional left-padded
     address arg). Returns the result hex string, or None on any failure. The
     address is right-aligned in a 32-byte word, left-padded with zeros (the
-    same ABI encoding lib/common.sh builds by hand)."""
+    same ABI encoding lib/common.sh builds by hand).
+
+    The address is sanitised first: surrounding whitespace stripped, an optional
+    0x/0X prefix removed, then validated as exactly 40 hex chars and lowercased.
+    Without this a stray character (e.g. a trailing space invisible in the UI, or
+    a checksummed 0X) corrupts the 32-byte word and the call silently fails."""
     data = selector
     if address:
-        addr = address[2:] if address.startswith("0x") else address
-        data = selector + addr.rjust(64, "0")
-    res = local_rpc(port, "eth_call",
-                    [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"])
+        addr = str(address).strip()
+        if addr[:2].lower() == "0x":
+            addr = addr[2:].strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", addr):
+            _log(f"eth_call_registry: invalid address {address!r} for {selector} "
+                 f"-> skipping call")
+            return None
+        data = selector + addr.lower().rjust(64, "0")
+
+    resp = local_rpc_full(port, "eth_call",
+                          [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"])
+    _dbg(f"eth_call_registry port={port} sel={selector} data={data} resp={resp}")
+    if isinstance(resp, dict) and isinstance(resp.get("error"), dict):
+        _log(f"eth_call_registry {selector} port={port} returned error "
+             f"{resp['error']} (data={data})")
+        return None
+    res = resp.get("result") if isinstance(resp, dict) else None
     return res if isinstance(res, str) else None
 
 
@@ -1718,6 +1772,9 @@ def api_validator(node_type):
         except (TypeError, ValueError):
             port = 8545
 
+    _dbg(f"/api/validator {t}: mode={mode} container={det.get('container')!r} "
+         f"rpc_port={port}")
+
     # --- identity: tn_info, falling back to node-info.yaml (covers external
     #     nodes and older versions that lack tn_info -> -32601) ---
     try:
@@ -1777,6 +1834,8 @@ def api_validator(node_type):
         pass
 
     addr = out["execution_address"]
+    _dbg(f"/api/validator {t}: execution_address={addr!r} epoch={out['epoch']!r} "
+         f"bls={out['bls_public_key']!r}")
 
     # --- getValidator(address): word layout per lib/common.sh:910-938 ---
     #   w0 blsPubkey offset, w1 validatorAddress, w2 activationEpoch,
@@ -1784,15 +1843,25 @@ def api_validator(node_type):
     #   w7 stakeVersion
     try:
         if addr:
-            w = _words(eth_call_registry(port, REGISTRY_SELECTORS["getValidator"], addr))
+            raw = eth_call_registry(port, REGISTRY_SELECTORS["getValidator"], addr)
+            _dbg(f"/api/validator {t}: getValidator raw={raw!r}")
+            w = _words(raw)
             if len(w) >= 8:
                 out["activation_epoch"] = w[2]
                 out["exit_epoch"] = w[3]
                 out["status"] = w[4]
                 out["is_retired"] = bool(w[5])
                 out["stake_version"] = w[7]
-    except Exception:
-        pass
+            elif mode == "external":
+                # Visible without TN_UI_DEBUG so a still-failing external node
+                # surfaces the reason in the journal.
+                _log(f"/api/validator {t} (external): getValidator returned no "
+                     f"usable data (addr={addr!r} port={port} raw={raw!r})")
+        else:
+            _log(f"/api/validator {t}: no execution_address available -> on-chain "
+                 f"validator calls skipped (mode={mode})")
+    except Exception as e:
+        _log(f"/api/validator {t}: getValidator failed: {e}")
 
     # --- getRewards(address) -> claimable rewards (wei) ---
     try:
