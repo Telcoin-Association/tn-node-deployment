@@ -253,6 +253,15 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen o
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen validator
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize validator
+# Docker-detection helper -- READ-ONLY observation of an externally-deployed
+# (dev-team docker) node. docker-detect takes no args; the others take a
+# container name (wildcarded here, charset-validated inside the helper). None of
+# these can start/stop/mutate a container or the host.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-detect
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-status *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-logs *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-logs-full *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-node-info *
 EOF
 chmod 440 "${SUDOERS_FILE}"
 if visudo -cf "${SUDOERS_FILE}" >/dev/null 2>&1; then

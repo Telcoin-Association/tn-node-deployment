@@ -377,7 +377,7 @@ select{
       <button class="tab" data-view="system">System</button>
     </nav>
     <div class="hdr-right">
-      <span class="net-pill" id="navNetPill" title="Adiri Testnet network status">⚪ Network: …</span>
+      <span class="net-pill" id="navNetPill" title="Network status">⚪ Network: …</span>
       <span class="clock mono" id="clock">--:--:-- UTC</span>
       <button class="btn-refresh" id="refreshBtn">↻ Refresh</button>
     </div>
@@ -401,6 +401,14 @@ select{
         <div class="nstat"><span class="dot gray" id="dot-validator"></span><span id="stat-validator">checking…</span></div>
       </div>
     </button>
+  </div>
+
+  <!-- read-only (externally-deployed node) banner -->
+  <div id="roBanner" style="display:none;margin:0 0 16px;padding:12px 16px;border-radius:10px;
+    border:1px solid rgba(255,184,0,0.4);background:rgba(255,184,0,0.10);color:var(--text);font-size:13px">
+    <strong style="color:var(--yellow)">⚠ Monitoring only.</strong>
+    This node was not installed via Telcoin Node Scripts (externally-deployed docker container).
+    Management actions are disabled.
   </div>
 
   <!-- DASHBOARD -->
@@ -449,7 +457,17 @@ const state = {
            instance:'', rpcPublic:false, serviceUser:'', serviceGroup:'', defaultsLoaded:false },
   preflight: null,
   buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
+  network: { chainId:null, name:'', slug:'', configured:false },  // selected node's network
 };
+
+// Selected node's detection record + read-only (external docker) helpers. An
+// external node is monitored only -- every mutating control is hidden/disabled.
+function curNode(){ return state.nodes[state.node] || {}; }
+function isReadonly(){ return curNode().mode === 'external'; }
+function updateReadonlyBanner(){
+  const b = $('#roBanner'); if(!b) return;
+  b.style.display = isReadonly() ? 'block' : 'none';
+}
 
 const $ = (s,r=document)=>r.querySelector(s);
 const el = (tag,cls,html)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;};
@@ -520,6 +538,10 @@ $('#selector').addEventListener('click', e=>{
 $('#refreshBtn').addEventListener('click', ()=>{ loadNodes(); rerenderActive(); });
 
 function rerenderActive(){
+  updateReadonlyBanner();
+  syncReadonlyChrome();
+  // An external node has no Setup view; bounce to Dashboard if it's selected.
+  if(state.view==='setup' && isReadonly()){ switchView('dashboard'); return; }
   if(state.view==='dashboard') renderDashboard();
   if(state.view==='network') renderNetwork();
   if(state.view==='logs')   renderLogs();
@@ -543,6 +565,17 @@ async function loadNodes(){
     st.textContent = n.installed ? n.status : 'not installed';
     dot.className = 'dot ' + (n.status==='active'?'green':(n.installed?'red':'gray'));
   }
+  updateReadonlyBanner();
+  syncReadonlyChrome();
+}
+
+// Hide controls that have no meaning for an externally-deployed (read-only) node:
+// the Setup tab (you can't install over a node we don't manage). Other gating is
+// done inline where each view renders.
+function syncReadonlyChrome(){
+  const ro = isReadonly();
+  const setupTab = document.querySelector('.tab[data-view="setup"]');
+  if(setupTab) setupTab.style.display = ro ? 'none' : '';
 }
 
 // =============================================================================
@@ -597,6 +630,42 @@ function logEventsTable(events){
   return `<table class="tbl logtbl">${head}<tbody>${rows}</tbody></table>`;
 }
 
+// Record the selected node's network identity (chain id -> name/slug/configured)
+// from /api/status, so the nav pill, Network card and Network tab render it.
+function setNetworkFromStatus(s){
+  if(!s || s.installed===false) return;
+  state.network = { chainId: s.chain_id, name: s.network||'', slug: s.network_slug||'',
+                    configured: !!s.network_configured };
+}
+
+// Service-row controls. An external (read-only) node shows a "monitoring only"
+// badge in place of start/stop/restart.
+function svcControls(s, running){
+  if(isReadonly())
+    return '<span class="badge" style="background:rgba(122,154,184,0.15);color:var(--text2)">monitoring only</span>';
+  return `${!running?`<button class="btn btn-green" data-act="start">▶ Start</button>`:''}`
+       + `${running?`<button class="btn btn-red" data-act="stop">■ Stop</button>`:''}`
+       + `<button class="btn btn-out" data-act="restart">↻ Restart</button>`;
+}
+
+// Quick-actions block; the mutating entries (Edit Config, Restart, Update) drop
+// out for an external node.
+function quickActionsHtml(){
+  const ro = isReadonly();
+  return `<button class="btn btn-out" onclick="switchView('logs')">📜 View Logs</button>`
+    + (ro?'':`<button class="btn btn-out" onclick="switchView('config')">⚙ Edit Config</button>`)
+    + (ro?'':`<button class="btn btn-out" data-act="restart">↻ Restart Service</button>`)
+    + (ro?'':`<button class="btn btn-out" onclick="switchView('update')">⬆ Check for Update</button>`)
+    + `<button class="btn btn-out" onclick="switchView('network')">🌐 Network Status</button>`;
+}
+
+// Extra Node Details rows for an external (docker) node: container + image.
+function externalDetailRows(s){
+  if(!isReadonly()) return '';
+  return `<div class="kv"><span class="k">Container</span><span class="v">${esc(s.container||'—')}</span></div>`
+    + `<div class="kv"><span class="k">Image</span><span class="v" style="overflow-wrap:anywhere;word-break:break-word">${esc(s.image||'—')}</span></div>`;
+}
+
 async function renderDashboard(){
   const c = $('#view-dashboard');
   if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
@@ -607,6 +676,7 @@ async function renderDashboard(){
   const s = await api('/api/status/'+state.node);
   if(s.error || s.installed===false){ emptyState(c, cap(state.node)); return; }
   c.dataset.loaded='1';
+  setNetworkFromStatus(s);
 
   const running = s.status==='active';
   const peers = s.peers||{};
@@ -660,9 +730,7 @@ async function renderDashboard(){
     <div class="card">
       <div class="svc-row" id="svcRow">
         <span class="pill ${running?'green':'red'}" id="svcPill">● ${esc(s.status)}</span>
-        ${!running?`<button class="btn btn-green" data-act="start">▶ Start</button>`:''}
-        ${running?`<button class="btn btn-red" data-act="stop">■ Stop</button>`:''}
-        <button class="btn btn-out" data-act="restart">↻ Restart</button>
+        ${svcControls(s, running)}
         <span id="jaegerInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"><span class="jdot gray"></span>Jaeger</span>
         <span id="updInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"></span>
         <span class="uptime">${s.uptime?'Since '+esc(s.uptime):''}</span>
@@ -682,7 +750,7 @@ async function renderDashboard(){
     <div class="dgrid dgrid-5">
       ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
       ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
-      ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')+'<span id="consTrace"></span>')}
+      ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (s.consensus_unsupported&&cons.block==null?'unavailable on this version':((cons.epoch?'epoch '+esc(cons.epoch):'')+(cons.age?' · '+esc(cons.age):'')))+'<span id="consTrace"></span>')}
       ${statCard('Network Block', nbVal, nbCls, nbMeta)}
       ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
     </div>
@@ -690,7 +758,7 @@ async function renderDashboard(){
     <div class="group-label">Network</div>
     <div class="dgrid dgrid-3">
       ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
-      ${statCard('Network', netLabel(s.network), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
+      ${statCard('Network', esc(s.network||'—'), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
       ${statCard('Version', '<span id="verTile" style="font-size:16px;overflow-wrap:anywhere;word-break:break-word;white-space:normal;line-height:1.35;display:inline-block">…</span>', 'accent', '<span id="verMeta"></span>')}
     </div>
 
@@ -725,21 +793,18 @@ async function renderDashboard(){
           : '—'}</span></div>
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
+        ${externalDetailRows(s)}
         <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
-        <div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
+        ${isReadonly()?'':`<div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
         <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
-        <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>
+        <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>`}
       </div>
       <div class="card">
         <h3>Quick Actions</h3>
         <div class="qa">
-          <button class="btn btn-out" onclick="switchView('logs')">📜 View Logs</button>
-          <button class="btn btn-out" onclick="switchView('config')">⚙ Edit Config</button>
-          <button class="btn btn-out" data-act="restart">↻ Restart Service</button>
-          <button class="btn btn-out" onclick="switchView('update')">⬆ Check for Update</button>
-          <button class="btn btn-out" onclick="switchView('network')">🌐 Network Status</button>
+          ${quickActionsHtml()}
         </div>
       </div>
     </div>
@@ -750,7 +815,7 @@ async function renderDashboard(){
 
   augmentDashboardJaeger(s);
   augmentDashboardVersion();
-  augmentDashboardUpdate();
+  if(!isReadonly()) augmentDashboardUpdate();
   augmentDashboardNetstat();
 }
 
@@ -789,6 +854,7 @@ async function renderValidatorDashboard(c){
   if(s.error || s.installed===false){ emptyState(c, cap(state.node)); return; }
   if(state.view!=='dashboard') return;
   c.dataset.loaded='1';
+  setNetworkFromStatus(s);
 
   const vv = (v && !v.error) ? v : {};
   const running = s.status==='active';
@@ -838,9 +904,7 @@ async function renderValidatorDashboard(c){
     <div class="card">
       <div class="svc-row" id="svcRow">
         <span class="pill ${running?'green':'red'}" id="svcPill">● ${esc(s.status)}</span>
-        ${!running?`<button class="btn btn-green" data-act="start">▶ Start</button>`:''}
-        ${running?`<button class="btn btn-red" data-act="stop">■ Stop</button>`:''}
-        <button class="btn btn-out" data-act="restart">↻ Restart</button>
+        ${svcControls(s, running)}
         <span id="jaegerInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"><span class="jdot gray"></span>Jaeger</span>
         <span id="updInd" class="mono" style="font-size:12px;color:var(--text2);margin-left:14px"></span>
         <span class="uptime">${s.uptime?'Since '+esc(s.uptime):''}</span>
@@ -863,7 +927,7 @@ async function renderValidatorDashboard(c){
     <div class="group-label">Consensus</div>
     <div class="dgrid dgrid-4">
       ${statCard('Current Epoch', vv.current_epoch!=null?fmtNum(vv.current_epoch):'—', 'accent', um(vv.current_epoch, 'on-chain epoch'))}
-      ${statCard('Consensus Block', vv.block!=null?fmtNum(vv.block):'—', 'accent', um(vv.block, vv.epoch!=null?'epoch '+esc(vv.epoch):''))}
+      ${statCard('Consensus Block', vv.block!=null?fmtNum(vv.block):'—', 'accent', (vv.consensus_unsupported&&vv.block==null)?'<span style="color:var(--text3)">unavailable on this version</span>':um(vv.block, vv.epoch!=null?'epoch '+esc(vv.epoch):''))}
       ${statCard('Last Block Time', vv.age?esc(vv.age):'—', '', um(vv.age, 'latest commit'))}
       ${statCard('Next Committee Size', vv.next_committee_size!=null?esc(String(vv.next_committee_size)):'—', '', um(vv.next_committee_size, 'validators'))}
     </div>
@@ -925,21 +989,18 @@ async function renderValidatorDashboard(c){
           : '—'}</span></div>
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
+        ${externalDetailRows(s)}
         <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
-        <div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
+        ${isReadonly()?'':`<div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
         <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
-        <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>
+        <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>`}
       </div>
       <div class="card">
         <h3>Quick Actions</h3>
         <div class="qa">
-          <button class="btn btn-out" onclick="switchView('logs')">📜 View Logs</button>
-          <button class="btn btn-out" onclick="switchView('config')">⚙ Edit Config</button>
-          <button class="btn btn-out" data-act="restart">↻ Restart Service</button>
-          <button class="btn btn-out" onclick="switchView('update')">⬆ Check for Update</button>
-          <button class="btn btn-out" onclick="switchView('network')">🌐 Network Status</button>
+          ${quickActionsHtml()}
         </div>
       </div>
     </div>
@@ -950,7 +1011,7 @@ async function renderValidatorDashboard(c){
 
   augmentDashboardJaeger(s);
   augmentDashboardVersion();
-  augmentDashboardUpdate();
+  if(!isReadonly()) augmentDashboardUpdate();
   augmentDashboardNetstat();
 }
 
@@ -981,14 +1042,24 @@ async function renderNetwork(){
   const c = $('#view-network');
   if(!c) return;
   if(!c.dataset.loaded) c.innerHTML = '<div class="dash"><div class="card">Loading network status…</div></div>';
-  const d = await api('/api/network/status');
+  const slug = state.network.slug || '';
+  const d = await api('/api/network/status' + (slug?('?slug='+encodeURIComponent(slug)):''));
   setNavNetPill(d);   // keep the nav-bar pill in sync from the same fetch
   if(state.view!=='network') return;
   c.dataset.loaded='1';
 
+  const netName = state.network.name || d.title || 'Network';
+
+  // No status page is configured for this network (e.g. an unrecognised chain).
+  if(d && d.configured===false){
+    c.innerHTML = `<div class="dash"><div class="card"><h3>Network Status</h3>
+      <p class="muted" style="font-size:13px;margin-top:8px">Network status page not configured for this network${netName?(' (<strong>'+esc(netName)+'</strong>)'):''}.</p></div></div>`;
+    return;
+  }
+
   if(!d || d.error || d.available===false){
     c.innerHTML = `<div class="dash"><div class="card"><h3>Network Status</h3>
-      <div class="kv"><span class="k">Adiri Testnet</span>
+      <div class="kv"><span class="k">${esc(netName)}</span>
         <span class="v"><span class="badge" style="background:rgba(122,154,184,0.15);color:var(--text2)">status unavailable</span></span></div>
       <p class="muted" style="font-size:12px;margin-top:8px">Could not reach the public status page (status.telscan.xyz).</p></div></div>`;
     return;
@@ -1000,18 +1071,21 @@ async function renderNetwork(){
              : ov==='down'     ? '<span class="pill red">● Outage</span>'
              :                   '<span class="pill">● Unknown</span>';
 
-  const cb = d.consensus_block || {};
-  const cbUp = cb.status===1;
-  const cbMeta = [
-    cbUp ? 'up' : 'down',
-    cb.ping!=null ? esc(String(cb.ping))+' ms' : null,
-    cb.uptime!=null ? esc(String(cb.uptime))+'% up' : null,
-    cb.last_seen ? 'last seen '+esc(cb.last_seen) : null,
-  ].filter(Boolean).join(' · ');
-  const consensusRow = `<div class="kv" style="align-items:center">
+  const cb = d.consensus_block;
+  let consensusRow = '';
+  if(cb){
+    const cbUp = cb.status===1;
+    const cbMeta = [
+      cbUp ? 'up' : 'down',
+      cb.ping!=null ? esc(String(cb.ping))+' ms' : null,
+      cb.uptime!=null ? esc(String(cb.uptime))+'% up' : null,
+      cb.last_seen ? 'last seen '+esc(cb.last_seen) : null,
+    ].filter(Boolean).join(' · ');
+    consensusRow = `<div class="kv" style="align-items:center">
       <span class="k">${esc(cb.name||'Consensus Block Progress')}</span>
       <span class="v"><span class="dot ${cbUp?'green':'red'}" style="display:inline-block;margin-right:8px;vertical-align:middle"></span>${cbMeta}</span>
     </div>`;
+  }
 
   const cells = (d.monitors||[]).map(m=>{
     const up = m.status===1;
@@ -1030,9 +1104,9 @@ async function renderNetwork(){
   <div class="dash">
     <div class="card">
       <div class="svc-row" style="margin-bottom:10px">
-        <h3 style="margin:0">${esc(d.title||'Adiri Testnet Network Status')}</h3>
+        <h3 style="margin:0">${esc(d.title||(netName+' Network Status'))}</h3>
         ${pill}
-        <a href="https://status.telscan.xyz/status/testnet" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>
+        <a href="https://status.telscan.xyz/status/${esc((d.slug||slug)||'testnet')}" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>
       </div>
       ${consensusRow}
       <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));margin-top:12px">${cells}</div>
@@ -1130,11 +1204,15 @@ function renderLogs(){
   if(!state.nodes[state.node]?.installed){ emptyState(c, cap(state.node)); return; }
   state.logBuffer = [];
   state.logFilter = { level:'all', search:'' };
+  const ro = isReadonly();
+  const logTitle = ro ? `${esc(cap(state.node))} Logs · ${esc(curNode().container||'container')}`
+                      : `${esc(cap(state.node))} Logs · telcoin-${esc(state.node)}`;
   c.innerHTML = `
     <div class="card">
-      <h3>${esc(cap(state.node))} Logs · telcoin-${esc(state.node)}</h3>
+      <h3>${logTitle}</h3>
       <div class="log-controls">
-        <button class="btn btn-out" id="liveBtn">● Live</button>
+        ${ro?`<button class="btn btn-out" id="liveBtn" disabled title="Live tail is not available for externally-deployed nodes">● Live</button>`
+            :`<button class="btn btn-out" id="liveBtn">● Live</button>`}
         <button class="btn btn-out" id="logRefresh">↻ Refresh</button>
         <select id="logLines">
           <option value="50">50 lines</option>
@@ -1158,21 +1236,21 @@ function renderLogs(){
             <button id="dlFull">Download full log</button>
           </div>
         </div>
-        <button class="btn btn-red" id="logClear">🗑 Clear Log</button>
+        ${ro?'':`<button class="btn btn-red" id="logClear">🗑 Clear Log</button>`}
         <span id="liveStatus" style="margin-left:auto;font-size:12px;color:var(--text2)"></span>
       </div>
       <div class="log-body" id="logBody"><div class="muted">Loading…</div></div>
     </div>`;
   $('#logRefresh').addEventListener('click', loadLogLines);
   $('#logLines').addEventListener('change', loadLogLines);
-  $('#liveBtn').addEventListener('click', toggleLive);
+  if(!ro) $('#liveBtn').addEventListener('click', toggleLive);
   $('#logLevel').addEventListener('change', e=>{ state.logFilter.level=e.target.value; renderLogBuffer(); });
   $('#logSearch').addEventListener('input', e=>{ state.logFilter.search=e.target.value; renderLogBuffer(); });
   $('#logCopy').addEventListener('click', copyLogs);
   $('#dlBtn').addEventListener('click', e=>{ e.stopPropagation(); $('#dlMenu').classList.toggle('open'); });
   $('#dlVisible').addEventListener('click', ()=>{ $('#dlMenu').classList.remove('open'); downloadLogs(); });
   $('#dlFull').addEventListener('click', ()=>{ $('#dlMenu').classList.remove('open'); downloadFullLog(); });
-  $('#logClear').addEventListener('click', clearLog);
+  const lc=$('#logClear'); if(lc) lc.addEventListener('click', clearLog);
   loadLogLines();
 }
 
@@ -1351,6 +1429,35 @@ async function renderConfig(){
   const d = await api('/api/config/'+t);
   if(d.error || d.installed===false){ emptyState(c, cap(t)); return; }
   state.config = d;
+
+  // External (docker) node: configuration is read-only -- no edit controls.
+  if(d.readonly || isReadonly()){
+    const rows = [
+      ['Container', curNode().container],
+      ['Image', d.docker_image],
+      ['RPC Port', d.rpc_port],
+      ['External Primary', d.external_primary],
+      ['External Worker', d.external_worker],
+      ['Version', d.version],
+      ['Install Method', d.install_method],
+    ];
+    c.innerHTML = `
+      <div class="note" style="border-color:rgba(255,184,0,0.35);background:rgba(255,184,0,0.07)">
+        This node was not installed via Telcoin Node Scripts. Its configuration is
+        read-only here — values are read from the container and <span class="mono">node-info.yaml</span>.</div>
+      <div class="card">
+        <h3 style="margin:0 0 6px">${esc(cap(t))} Configuration</h3>
+        ${rows.map(([k,v])=>{
+          const isMa = (k==='External Primary' || k==='External Worker');
+          let cell;
+          if(isMa) cell = fmtMultiaddrCell(v);
+          else cell = esc(v||'—');
+          return `<div class="kv"><span class="k">${esc(k)}</span><span class="v" style="overflow-wrap:anywhere;word-break:break-word">${cell}</span></div>`;
+        }).join('')}
+      </div>`;
+    return;
+  }
+
   const editing = !!state.configEditing;
 
   // Editable fields (the exact set edit-config.sh's menu edits). docker_image
@@ -1449,6 +1556,13 @@ async function renderUpdate(){
   const c = $('#view-update');
   const t = state.node;
   if(!state.nodes[t]?.installed){ emptyState(c, cap(t)); return; }
+  if(isReadonly()){
+    c.innerHTML = `<div class="card"><h3>Update · ${esc(cap(t))}</h3>
+      <p class="muted" style="font-size:13px;margin-top:8px">Not available for externally deployed nodes.
+      This node runs as a docker container that the Node Manager does not manage; update it through
+      your own deployment tooling.</p></div>`;
+    return;
+  }
   c.innerHTML = `
     <div class="note">Updates run in two phases through the same <span class="mono">update-node.sh</span> the CLI uses:
       <strong>Prepare</strong> (build or pull — no downtime) then <strong>Apply</strong> (swap + restart — brief downtime).</div>
@@ -1624,14 +1738,16 @@ async function renderSettings(){
       </div>
       <div class="card">
         <h3>${esc(cap(t))} Tracing</h3>
-        <p style="color:var(--text2);font-size:13px;margin-bottom:14px">Node tracing is currently
+        ${isReadonly()
+          ? `<p style="color:var(--text2);font-size:13px">This node is externally deployed (docker). Tracing is configured by its own deployment, not from here.</p>`
+          : `<p style="color:var(--text2);font-size:13px;margin-bottom:14px">Node tracing is currently
           <strong style="color:${tracing?'var(--green)':'var(--text2)'}">${tracing?'enabled':'disabled'}</strong>.
           Toggling restarts <span class="mono">telcoin-${esc(t)}</span>.</p>
         <div class="toggle-row">
           ${tracing
             ? '<button class="btn btn-red" id="trToggle">Disable Tracing</button>'
             : '<button class="btn btn-green" id="trToggle">Enable Tracing</button>'}
-        </div>
+        </div>`}
       </div>
     </div>
     <div class="card" style="margin-top:14px">
@@ -1784,9 +1900,10 @@ async function loadFirewall(){
     return;
   }
   const ports = f.ports||{};
-  const active = !!f.active;
+  const active = !!f.active && !isReadonly();
 
-  // Port rows: interactive when ufw is active; dimmed + button-less when not.
+  // Port rows: interactive when ufw is active; dimmed + button-less when not
+  // (or when the selected node is external/read-only).
   const portRows = FW_PORTS.map(([pp,label])=>{
     const open=!!ports[pp];
     if(!active){
@@ -1844,6 +1961,11 @@ function dangerZoneHtml(){
     return `<div class="card" id="dzCard" style="margin-top:14px">
       <h3>Danger Zone</h3>
       <p class="muted" style="font-size:13px">No <span class="mono">telcoin-${esc(t)}</span> node is installed, so there is nothing to remove. Select an installed node above to manage its removal.</p></div>`;
+  }
+  if(isReadonly()){
+    return `<div class="card" id="dzCard" style="margin-top:14px">
+      <h3>Danger Zone</h3>
+      <p class="muted" style="font-size:13px">The <span class="mono">${esc(t)}</span> node is an externally-deployed docker container that the Node Manager does not manage, so it cannot be removed from here. Manage it with your own deployment tooling.</p></div>`;
   }
   return `<div class="card" id="dzCard" style="margin-top:14px;border-color:rgba(255,77,109,0.35)">
     <h3 style="color:var(--red)">Danger Zone · Remove ${esc(cap(t))}</h3>
@@ -2386,7 +2508,8 @@ function setNavNetPill(d){
 }
 
 async function pollNavNetPill(){
-  setNavNetPill(await api('/api/network/status'));
+  const slug = state.network.slug || '';
+  setNavNetPill(await api('/api/network/status' + (slug?('?slug='+encodeURIComponent(slug)):'')));
 }
 
 // =============================================================================
@@ -2410,6 +2533,8 @@ document.addEventListener('click', e=>{
       document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
     }
   }
+  updateReadonlyBanner();
+  syncReadonlyChrome();
   renderDashboard();
   startAutoRefresh();
   // Nav-bar network pill: refresh independently of the active view (60s; the

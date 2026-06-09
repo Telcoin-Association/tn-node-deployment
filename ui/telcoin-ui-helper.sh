@@ -25,6 +25,11 @@
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
 #   telcoin-ui-helper node-remove     <observer|validator> <service|data|keys>
+#   telcoin-ui-helper docker-detect
+#   telcoin-ui-helper docker-status    <container>
+#   telcoin-ui-helper docker-logs      <container> [lines]
+#   telcoin-ui-helper docker-logs-full <container>
+#   telcoin-ui-helper docker-node-info <container>
 #
 set -euo pipefail
 
@@ -72,6 +77,14 @@ require_type() {
         observer|validator) ;;
         *) die "invalid node type: ${1:-<empty>} (expected observer|validator)" ;;
     esac
+}
+
+# Validate a docker container name before it reaches `docker`. Docker's own name
+# charset is [A-Za-z0-9][A-Za-z0-9_.-]*; reject anything else so a bad arg dies
+# cleanly here rather than reaching the daemon.
+require_container() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+        || die "invalid container name: ${1:-<empty>}"
 }
 
 # Resolve a node's main log file from its unit (StandardOutput=append:<path>),
@@ -413,6 +426,69 @@ cmd_setup() {
 cmd_setup_keygen()   { cmd_setup keygen   "$1"; }
 cmd_setup_finalize() { cmd_setup finalize "$1"; }
 
+# =============================================================================
+# Docker detection subcommands -- READ-ONLY. These let the UI recognise and
+# monitor a Telcoin Network node deployed as a dev-team docker container (not
+# under systemd). Every one only inspects/reads (docker ps / inspect / logs /
+# cat node-info.yaml); none can start, stop, or otherwise mutate a container or
+# the host. The container name arg is charset-validated by require_container.
+# =============================================================================
+
+# Image substrings that identify a dev-team Telcoin Network container.
+DOCKER_TN_IMAGE_RE='us-docker\.pkg\.dev/telcoin-network/tn-public|telcoin-network/tn-public|/tn-public/'
+
+# Print the names of running Telcoin Network containers, one per line. Empty
+# output (rc 0) when docker is absent or no matching container runs.
+cmd_docker_detect() {
+    command -v docker >/dev/null 2>&1 || return 0
+    docker ps --no-trunc --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
+        | grep -E "$DOCKER_TN_IMAGE_RE" \
+        | cut -f1 || true
+}
+
+# Full `docker inspect` JSON for one container (a single-element array, as docker
+# emits). Used by the server to read State/Config/HostConfig.
+cmd_docker_status() {
+    local name="$1"; require_container "$name"
+    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    docker inspect "$name" 2>/dev/null || die "container not found: $name"
+}
+
+# Tail the container's stdout/stderr log (combined). Second arg = line count
+# (default 100), validated as a bare integer.
+cmd_docker_logs() {
+    local name="$1" lines="${2:-100}"
+    require_container "$name"
+    [[ "$lines" =~ ^[0-9]+$ ]] || die "invalid line count: $lines"
+    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    docker logs --tail "$lines" "$name" 2>&1 || die "could not read logs for $name"
+}
+
+# Full container log (no tail limit) -- backs the "Download full log" action.
+cmd_docker_logs_full() {
+    local name="$1"; require_container "$name"
+    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    docker logs "$name" 2>&1 || die "could not read logs for $name"
+}
+
+# Print the container's node-info.yaml. The file lives in a host bind-mount; we
+# resolve the first bind whose host path holds node-info.yaml and cat it.
+cmd_docker_node_info() {
+    local name="$1"; require_container "$name"
+    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    local binds host b
+    binds="$(docker inspect -f '{{range .HostConfig.Binds}}{{println .}}{{end}}' "$name" 2>/dev/null || true)"
+    while IFS= read -r b; do
+        [[ -z "$b" ]] && continue
+        host="${b%%:*}"
+        if [[ -f "${host}/node-info.yaml" ]]; then
+            cat "${host}/node-info.yaml"
+            return 0
+        fi
+    done <<< "$binds"
+    die "node-info.yaml not found for container $name"
+}
+
 main() {
     local sub="${1:-}"
     case "$sub" in
@@ -433,6 +509,11 @@ main() {
         node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" "${3:-}" ;;
         setup-keygen)    shift; cmd_setup_keygen   "${1:-}" ;;
         setup-finalize)  shift; cmd_setup_finalize "${1:-}" ;;
+        docker-detect)    cmd_docker_detect ;;
+        docker-status)    shift; cmd_docker_status    "${1:-}" ;;
+        docker-logs)      shift; cmd_docker_logs      "${1:-}" "${2:-}" ;;
+        docker-logs-full) shift; cmd_docker_logs_full "${1:-}" ;;
+        docker-node-info) shift; cmd_docker_node_info "${1:-}" ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }

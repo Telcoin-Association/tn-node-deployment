@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.14"
+UI_VERSION = "1.7.15"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -249,6 +249,162 @@ def parse_service_file(t):
 
 
 # =============================================================================
+# NODE DETECTION  (scripts-installed systemd unit  vs  external docker container)
+#
+# Every route decides "is this node installed, and may I manage it?" from this
+# one short-TTL-cached detector instead of bare os.path.exists(service_file).
+# A scripts node (systemd unit present) always wins and behaves exactly as
+# before (mode="scripts"). Only when NEITHER type has a unit do we ask the root
+# helper whether a dev-team docker container is running (mode="external"); such
+# nodes are read-only -- the UI monitors them but every management action is
+# refused. mode=None means not installed.
+# =============================================================================
+
+_detect_cache = {"ts": 0.0, "data": None}  # ~10s TTL
+_DETECT_TTL = 10
+
+
+def _docker_detect():
+    """Names of running Telcoin Network docker containers, via the root helper.
+    [] when none are found or the helper/sudo/docker is unavailable."""
+    rc, out, _ = run(["sudo", "-n", HELPER, "docker-detect"], timeout=10)
+    if rc != 0 or not out:
+        return []
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def _docker_inspect(name):
+    """Parsed `docker inspect` object (first array element) for a container, via
+    the helper. None on any failure / bad JSON."""
+    rc, out, _ = run(["sudo", "-n", HELPER, "docker-status", name], timeout=10)
+    if rc != 0 or not out:
+        return None
+    try:
+        data = json.loads(out)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(data, list):
+        return data[0] if (data and isinstance(data[0], dict)) else None
+    return data if isinstance(data, dict) else None
+
+
+def _cmd_join(cmd):
+    """A container's Config.Cmd (list or string) as one searchable string."""
+    if isinstance(cmd, list):
+        return " ".join(str(x) for x in cmd)
+    return str(cmd or "")
+
+
+def _cmd_http_port(cmd):
+    """--http.port N from a container Cmd. 8545 when absent/unparseable."""
+    m = re.search(r"--http\.port[=\s]+(\d+)", _cmd_join(cmd))
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return 8545
+
+
+def _cmd_is_validator(cmd):
+    """True when the container Cmd carries the --validator flag."""
+    return re.search(r"(^|\s)--validator(\s|=|$)", _cmd_join(cmd)) is not None
+
+
+def detect_nodes():
+    """{type: {mode, status, container, image, rpc_port, node_info_path,
+    inspect}} for both node types, short-TTL cached. mode is "scripts",
+    "external", or None. `inspect` is the cached docker inspect dict for an
+    external node (reused by status/identity within the TTL), absent otherwise."""
+    now = time.time()
+    cached = _detect_cache["data"]
+    if cached is not None and now - _detect_cache["ts"] < _DETECT_TTL:
+        return cached
+
+    out = {t: {"mode": None, "status": "not installed", "container": None,
+               "image": None, "rpc_port": None, "node_info_path": None}
+           for t in NODE_TYPES}
+
+    scripts = {}
+    for t in NODE_TYPES:
+        if os.path.exists(service_file(t)):
+            cfg = parse_service_file(t)
+            try:
+                port = int(cfg["rpc_port"])
+            except (TypeError, ValueError):
+                port = 8545
+            out[t] = {"mode": "scripts", "status": service_status(t),
+                      "container": None, "image": None, "rpc_port": port,
+                      "node_info_path": None}
+            scripts[t] = True
+
+    # Probe docker only for types that have NO systemd unit.
+    if not all(scripts.get(t) for t in NODE_TYPES):
+        for name in _docker_detect():
+            insp = _docker_inspect(name)
+            if not insp:
+                continue
+            config = insp.get("Config") or {}
+            cmd = config.get("Cmd") or []
+            t = "validator" if _cmd_is_validator(cmd) else "observer"
+            if scripts.get(t) or out[t]["mode"] == "external":
+                continue  # never override a scripts node / first container wins
+            st = insp.get("State") or {}
+            binds = (insp.get("HostConfig") or {}).get("Binds") or []
+            node_info_path = binds[0].split(":", 1)[0] if binds else None
+            out[t] = {
+                "mode": "external",
+                "status": "active" if st.get("Running") is True else "inactive",
+                "container": name,
+                "image": config.get("Image"),
+                "rpc_port": _cmd_http_port(cmd),
+                "node_info_path": node_info_path,
+                "inspect": insp,
+            }
+
+    _detect_cache["ts"] = now
+    _detect_cache["data"] = out
+    return out
+
+
+def detect_type(t):
+    """detect_nodes() entry for one type (never raises)."""
+    return detect_nodes().get(t, {"mode": None})
+
+
+def is_external(t):
+    return detect_type(t).get("mode") == "external"
+
+
+def _external_block(t):
+    """A 403 JSON response when t is an external (read-only) node, else None.
+    Mutation routes call this so a management action is refused server-side even
+    if the UI's read-only gating were bypassed."""
+    if is_external(t):
+        return jsonify({"ok": False, "error": "read-only (external node)"}), 403
+    return None
+
+
+def _iso_uptime_seconds(iso):
+    """Seconds since a docker RFC3339 StartedAt (e.g. 2024-05-01T12:00:00.123Z).
+    None for an unset/never-started timestamp (0001-01-01...) or a bad value."""
+    if not iso:
+        return None
+    m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", iso.strip())
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    if dt.year < 1971:  # docker's zero-value StartedAt
+        return None
+    secs = int(time.time() - dt.timestamp())
+    return secs if secs >= 0 else 0
+
+
+# =============================================================================
 # INSTALL / PASSPHRASE / VERSION DETECTION
 #
 # .node-meta is the source of truth when present, but it is missing/empty on
@@ -368,21 +524,37 @@ def node_version(t):
     return out
 
 
-# Adiri testnet runs as EVM chain id 2017. Mainnet has not launched; new installs
-# always record NETWORK in .node-meta, so this chain-id fallback only ever needs
-# to cover legacy testnet nodes whose meta predates the NETWORK field.
-CHAIN_ID_NETWORK = {2017: "testnet"}
+# Known networks keyed by EVM chain id. `slug` selects the public status page
+# (status-page/<slug>) and the public-RPC map below; `name` is the display label.
+# Adding a network here makes the whole UI (identity, network panel, status-page
+# link) work on it -- nothing else is hardcoded to testnet.
+NETWORKS = {
+    2017: {"name": "Adiri Testnet", "slug": "testnet"},
+    32285: {"name": "Adiri Devnet", "slug": "devnet"},
+}
+
+# Public consensus-block RPC per network slug. A slug omitted here degrades the
+# "Network Block"/"Consensus Lag" compare cards to "—" (devnet has no public RPC).
+NETWORK_PUBLIC_RPC = {
+    "testnet": "https://rpc.telcoin.network",
+}
 
 
-def detect_network(t, chain_id=None):
-    """'testnet' / 'mainnet' / ''. meta NETWORK first; else map the live RPC
-    chain id (covers nodes set up before .node-meta carried NETWORK)."""
-    net = read_meta(t).get("NETWORK", "").strip()
-    if net:
-        return net
-    if chain_id is not None:
-        return CHAIN_ID_NETWORK.get(chain_id, "")
-    return ""
+def resolve_network(chain_id, t=None):
+    """(slug, name, configured) for a live chain id. The chain id is
+    authoritative; an unknown id falls back to .node-meta NETWORK (legacy nodes)
+    with configured=False. configured=True means we have a known status page /
+    network identity for it."""
+    if chain_id is not None and chain_id in NETWORKS:
+        m = NETWORKS[chain_id]
+        return m["slug"], m["name"], True
+    slug = read_meta(t).get("NETWORK", "").strip() if t is not None else ""
+    if slug:
+        for m in NETWORKS.values():
+            if m["slug"] == slug:
+                return slug, m["name"], True
+        return slug, slug.capitalize(), False
+    return "", "", False
 
 
 def block_age(port):
@@ -574,6 +746,33 @@ def local_rpc(port, method, params=None, timeout=6):
         return None
 
 
+def local_rpc_full(port, method, params=None, timeout=6):
+    """Like local_rpc but returns the WHOLE parsed response dict (so callers can
+    read error.code -- notably -32601 "method not found" to flag a feature the
+    node's version doesn't support). None only on transport failure."""
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "method": method, "params": params or [], "id": 1}
+    ).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def rpc_unsupported(resp):
+    """True when an RPC response dict carries a -32601 (method not found) error."""
+    return (isinstance(resp, dict) and isinstance(resp.get("error"), dict)
+            and resp["error"].get("code") == -32601)
+
+
 def hex_to_dec(h):
     """'0x1234' -> int. None on garbage."""
     if not isinstance(h, str):
@@ -608,12 +807,15 @@ def consensus_info(port):
     """
     Query tn_latestConsensusHeader and extract block / epoch / age + the
     network's latest execution block (for the sync comparison). Returns
-    (consensus_dict, cons_exec_block) where cons_exec_block may be None.
+    (consensus_dict, cons_exec_block, unsupported) where cons_exec_block may be
+    None and `unsupported` is True only when the node returned -32601 (the method
+    is absent on this node's version).
     """
     out = {"block": None, "epoch": None, "age": None}
-    result = local_rpc(port, "tn_latestConsensusHeader")
+    resp = local_rpc_full(port, "tn_latestConsensusHeader")
+    result = resp.get("result") if isinstance(resp, dict) else None
     if not isinstance(result, dict):
-        return out, None
+        return out, None, rpc_unsupported(resp)
     sub = result.get("sub_dag") or {}
     headers = sub.get("headers") or []
     out["block"] = str(result.get("number")) if result.get("number") is not None else None
@@ -629,7 +831,110 @@ def consensus_info(port):
         (h.get("latest_execution_block") or {}).get("number", 0) for h in headers
     ]
     cons_exec = max(exec_blocks) if exec_blocks else None
-    return out, cons_exec
+    return out, cons_exec, False
+
+
+# =============================================================================
+# NODE IDENTITY  (tn_info, with a node-info.yaml fallback)
+#
+# The validator dashboard and Node Details rows want the node's identity (name,
+# BLS key, execution address, advertised addresses). tn_info is the live source,
+# but older node versions lack it (-32601) and external docker nodes may too --
+# so we fall back to node-info.yaml, parsed with stdlib regex (no PyYAML; the
+# install footprint stays at just Flask).
+# =============================================================================
+
+def node_id_from_text(text):
+    """libp2p peer id (12D3KooW...) from node-info.yaml text. '' when absent."""
+    if not text:
+        return ""
+    m = re.search(r"/p2p/(12D3KooW[1-9A-HJ-NP-Za-km-z]+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(12D3KooW[1-9A-HJ-NP-Za-km-z]+)\b", text)
+    return m.group(1) if m else ""
+
+
+def parse_node_info_yaml(text):
+    """Regex-parse node-info.yaml into the identity fields /api/validator
+    consumes. Top-level name / bls_public_key / execution_address; the two
+    nested network_address values are primary then worker (document order,
+    mirroring external_addrs)."""
+    out = {"name": None, "bls_public_key": None, "execution_address": None,
+           "primary_external_address": None, "worker_external_address": None}
+    if not text:
+        return out
+
+    def top(key):
+        m = re.search(r"(?m)^%s\s*:\s*[\"']?([^\"'\n]+?)[\"']?\s*$"
+                      % re.escape(key), text)
+        return m.group(1).strip() if m else None
+
+    out["name"] = top("name")
+    out["bls_public_key"] = top("bls_public_key")
+    out["execution_address"] = top("execution_address")
+    addrs = re.findall(r"(?m)network_address\s*:\s*[\"']?(\S+?)[\"']?\s*$", text)
+    if len(addrs) >= 1:
+        out["primary_external_address"] = addrs[0]
+    if len(addrs) >= 2:
+        out["worker_external_address"] = addrs[1]
+    return out
+
+
+def read_node_info_text(t, det=None):
+    """Raw node-info.yaml text for a node. External -> via the root helper (the
+    file lives in the container's host bind mount); scripts -> data_dir/node-
+    info.yaml. '' when unavailable."""
+    det = det or detect_type(t)
+    if det.get("mode") == "external":
+        name = det.get("container")
+        if not name:
+            return ""
+        rc, out, _ = run(["sudo", "-n", HELPER, "docker-node-info", name], timeout=10)
+        return out if rc == 0 else ""
+    info = os.path.join(data_dir(t), "node-info.yaml")
+    try:
+        with open(info, "r") as f:
+            return f.read()
+    except (OSError, IOError):
+        return ""
+
+
+def node_identity(t, det=None):
+    """Identity dict (bls key, execution address, advertised addresses, name,
+    version, authority id) for a node, plus `unsupported`. Tries tn_info; on
+    -32601 or any failure falls back to node-info.yaml. `unsupported` is True
+    only when tn_info itself returned -32601 (so the UI can say 'unavailable on
+    this version')."""
+    det = det or detect_type(t)
+    port = det.get("rpc_port") or 8545
+    out = {"bls_public_key": None, "execution_address": None,
+           "primary_external_address": None, "worker_external_address": None,
+           "name": None, "version": None, "authority_id": None,
+           "unsupported": False}
+
+    resp = local_rpc_full(port, "tn_info")
+    info = resp.get("result") if isinstance(resp, dict) else None
+    if isinstance(info, dict):
+        out.update({
+            "bls_public_key": info.get("bls_public_key"),
+            "execution_address": info.get("execution_address"),
+            "primary_external_address": info.get("primary_external_address"),
+            "worker_external_address": info.get("worker_external_address"),
+            "name": info.get("name"),
+            "version": info.get("version"),
+            "authority_id": info.get("authority_id"),
+        })
+        return out
+
+    if rpc_unsupported(resp):
+        out["unsupported"] = True
+
+    parsed = parse_node_info_yaml(read_node_info_text(t, det))
+    for k in ("name", "bls_public_key", "execution_address",
+              "primary_external_address", "worker_external_address"):
+        out[k] = parsed.get(k)
+    return out
 
 
 # =============================================================================
@@ -1096,12 +1401,17 @@ def index():
 
 @app.route("/api/nodes")
 def api_nodes():
+    det = detect_nodes()
     out = {}
     for t in NODE_TYPES:
-        installed = os.path.exists(service_file(t))
+        d = det.get(t, {})
+        mode = d.get("mode")
         out[t] = {
-            "installed": installed,
-            "status": service_status(t) if installed else "not installed",
+            "installed": mode is not None,
+            "status": d.get("status") if mode is not None else "not installed",
+            "mode": mode,                 # "scripts" | "external" | None
+            "container": d.get("container"),
+            "image": d.get("image"),
         }
     # Never cache node detection -- after a remove/install the UI must see the
     # change immediately (the empty-state switch keys off this).
@@ -1115,16 +1425,24 @@ def api_status(node_type):
     if not valid_type(node_type):
         return bad_type()
     t = node_type
+    det = detect_type(t)
+    mode = det.get("mode")
 
-    if not os.path.exists(service_file(t)):
+    if mode is None:
         r = jsonify({"installed": False, "node_type": t, "status": "not installed"})
         r.headers["Cache-Control"] = "no-store"
         return r
 
-    meta = read_meta(t)
-    cfg = parse_service_file(t)
-    port = int(cfg["rpc_port"])
-    status = service_status(t)
+    external = mode == "external"
+    if external:
+        port = det.get("rpc_port") or 8545
+        log_path = None  # external logs come from `docker logs`, not a file
+        data_path = det.get("node_info_path")
+    else:
+        cfg = parse_service_file(t)
+        port = int(cfg["rpc_port"])
+        log_path = cfg["log_path"]
+        data_path = data_dir(t)
 
     # Local execution liveness + block. eth_chainId doubles as the liveness
     # probe and the source of the network's chain id (previously discarded).
@@ -1138,7 +1456,7 @@ def api_status(node_type):
         blk_age = block_age(port)
 
     # Consensus header (block / epoch / age) + the network's exec tip for sync.
-    consensus, cons_exec = consensus_info(port)
+    consensus, cons_exec, cons_unsupported = consensus_info(port)
 
     # Synced when the local exec block has reached the network's exec tip
     # (small tolerance for the gap between commit and local execution).
@@ -1146,9 +1464,12 @@ def api_status(node_type):
     if block_number is not None and cons_exec is not None:
         synced = block_number >= cons_exec - 2
 
+    # Dynamic network identity from the live chain id.
+    slug, net_name, net_configured = resolve_network(chain_id, t)
+
     # Network consensus block (public RPC tn_latestConsensusHeader) + lag.
     # Lag is local - network: positive => local ahead, negative => local behind.
-    net_block = network_consensus_block()
+    net_block = network_consensus_block(slug)
     local_cons_block = None
     if consensus.get("block") is not None:
         try:
@@ -1159,28 +1480,62 @@ def api_status(node_type):
     if net_block is not None and local_cons_block is not None:
         consensus_lag = local_cons_block - net_block
 
-    up_secs = service_uptime_seconds(t)
-    logs = log_stats(cfg["log_path"])
+    # Uptime / restart count / status: from the docker inspect for external
+    # nodes (StartedAt, RestartCount, State.Running), from systemd otherwise.
+    if external:
+        insp = det.get("inspect") or {}
+        st = insp.get("State") or {}
+        started = st.get("StartedAt") or ""
+        up_secs = _iso_uptime_seconds(started)
+        restart_count = insp.get("RestartCount")
+        status = "active" if st.get("Running") is True else "inactive"
+        uptime_str = started
+        node_id_val = node_id_from_text(read_node_info_text(t, det))
+        install_method = "external (docker)"
+        passphrase_method = ""
+        docker_image = det.get("image") or ""
+        config_file = ""
+        tracing_on = False
+    else:
+        status = service_status(t)
+        up_secs = service_uptime_seconds(t)
+        restart_count = service_restart_count(t)
+        uptime_str = service_uptime(t)
+        node_id_val = node_id(t)
+        install_method = detect_install_method(t)
+        passphrase_method = detect_passphrase_method(t)
+        docker_image = docker_image_ref(t)
+        config_file = service_file(t)
+        tracing_on = tracing_enabled(t)
+
+    logs = log_stats(log_path)
 
     resp = jsonify({
         "installed": True,
         "node_type": t,
+        "mode": mode,
+        "container": det.get("container"),
+        "image": det.get("image"),
+        "readonly": external,
         "status": status,
-        "uptime": service_uptime(t),
+        "uptime": uptime_str,
         "uptime_seconds": up_secs,
         "uptime_human": fmt_uptime(up_secs),
-        "restart_count": service_restart_count(t),
-        "last_restart": service_uptime(t),
+        "restart_count": restart_count,
+        "last_restart": uptime_str,
         "cpu_percent": service_cpu_percent(t),
         "rpc_ok": rpc_ok,
         "rpc_port": port,
-        "node_id": node_id(t),
-        "data_dir": data_dir(t),
-        "config_file": service_file(t),
+        "node_id": node_id_val,
+        "data_dir": data_path,
+        "config_file": config_file,
         "block_number": block_number,
         "synced": synced,
         "chain_id": chain_id,
-        "network": detect_network(t, chain_id),
+        "network": net_name,
+        "network_slug": slug,
+        "network_configured": net_configured,
+        "consensus_unsupported": cons_unsupported,
         "block_age": blk_age,
         "log_error_count_1h": logs["error_count"],
         "log_warn_count_1h": logs["warn_count"],
@@ -1188,16 +1543,16 @@ def api_status(node_type):
         "recent_log_events": logs["recent_events"],
         "log_size": logs["log_size"],
         "log_size_human": logs["log_size_human"],
-        "tracing_enabled": tracing_enabled(t),
-        "peers": peer_counts(t, cfg["log_path"]),
+        "tracing_enabled": tracing_on,
+        "peers": peer_counts(t, log_path),
         "consensus": consensus,
         "network_consensus_block": net_block,
         "consensus_lag": consensus_lag,
-        "disk": disk_for(data_dir(t)),
+        "disk": disk_for(data_path or "/"),
         "memory": mem_info(),
-        "install_method": detect_install_method(t),
-        "passphrase_method": detect_passphrase_method(t),
-        "docker_image": docker_image_ref(t),
+        "install_method": install_method,
+        "passphrase_method": passphrase_method,
+        "docker_image": docker_image,
     })
     # Never cache status -- every dashboard refresh must re-read live values
     # (log size, blocks, CPU, ...), not a value frozen at page load.
@@ -1221,15 +1576,22 @@ def api_validator(node_type):
         return bad_type()
     t = node_type
 
+    det = detect_type(t)
+    mode = det.get("mode")
+
     out = {
-        "installed": os.path.exists(service_file(t)),
+        "installed": mode is not None,
         "node_type": t,
-        # identity (tn_info)
+        "mode": mode,
+        "readonly": mode == "external",
+        # identity (tn_info / node-info.yaml fallback)
         "bls_public_key": None, "execution_address": None,
         "primary_external_address": None, "worker_external_address": None,
         "name": None, "version": None, "authority_id": None,
+        "identity_unsupported": False,
         # consensus header (reused consensus_info)
         "block": None, "epoch": None, "age": None,
+        "consensus_unsupported": False,
         # contract: epoch / committee sizing
         "current_epoch": None, "next_committee_size": None,
         # committee membership (tn_epochRecord)
@@ -1247,32 +1609,32 @@ def api_validator(node_type):
         r.headers["Cache-Control"] = "no-store"
         return r
 
-    cfg = parse_service_file(t)
-    try:
-        port = int(cfg["rpc_port"])
-    except (TypeError, ValueError):
-        port = 8545
+    port = det.get("rpc_port") or 8545
+    if mode == "scripts":
+        try:
+            port = int(parse_service_file(t)["rpc_port"])
+        except (TypeError, ValueError):
+            port = 8545
 
-    # --- tn_info: node identity (bls key, execution address, addresses, ...) ---
+    # --- identity: tn_info, falling back to node-info.yaml (covers external
+    #     nodes and older versions that lack tn_info -> -32601) ---
     try:
-        info = local_rpc(port, "tn_info")
-        if isinstance(info, dict):
-            out["bls_public_key"] = info.get("bls_public_key")
-            out["execution_address"] = info.get("execution_address")
-            out["primary_external_address"] = info.get("primary_external_address")
-            out["worker_external_address"] = info.get("worker_external_address")
-            out["name"] = info.get("name")
-            out["version"] = info.get("version")
-            out["authority_id"] = info.get("authority_id")
+        ident = node_identity(t, det)
+        for k in ("bls_public_key", "execution_address",
+                  "primary_external_address", "worker_external_address",
+                  "name", "version", "authority_id"):
+            out[k] = ident.get(k)
+        out["identity_unsupported"] = ident.get("unsupported", False)
     except Exception:
         pass
 
     # --- consensus header: block / epoch / age (reused) ---
     try:
-        consensus, _ = consensus_info(port)
+        consensus, _, cons_unsupported = consensus_info(port)
         out["block"] = consensus.get("block")
         out["epoch"] = consensus.get("epoch")
         out["age"] = consensus.get("age")
+        out["consensus_unsupported"] = cons_unsupported
     except Exception:
         pass
 
@@ -1390,6 +1752,9 @@ def api_service(node_type, action):
         return bad_type()
     if action not in ("start", "stop", "restart"):
         return jsonify({"ok": False, "status": "", "error": "invalid action"}), 400
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     if not os.path.exists(service_file(node_type)):
         return jsonify({"ok": False, "status": "not installed",
                         "error": "service not installed"}), 404
@@ -1421,6 +1786,17 @@ def api_logs(node_type):
         lines = 100
     lines = max(1, min(lines, 1000))
 
+    det = detect_type(node_type)
+    if det.get("mode") == "external":
+        name = det.get("container")
+        if not name:
+            return jsonify({"lines": []})
+        rc, out, _ = run(["sudo", "-n", HELPER, "docker-logs", name, str(lines)],
+                         timeout=20)
+        if rc != 0:
+            return jsonify({"lines": []})
+        return jsonify({"lines": out.splitlines() if out else []})
+
     path = parse_service_file(node_type)["log_path"]
     if not path or not os.path.exists(path):
         return jsonify({"lines": []})
@@ -1435,6 +1811,16 @@ def api_logs(node_type):
 def api_logs_stream(node_type):
     if not valid_type(node_type):
         return bad_type()
+
+    # External (docker) nodes have no tailable log file; live streaming is not
+    # offered (the UI hides the Live button -- this is the matching notice).
+    if is_external(node_type):
+        def notice():
+            yield "data: (live tail not available for external nodes)\n\n"
+        return Response(notice(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache",
+                                 "X-Accel-Buffering": "no"})
+
     path = parse_service_file(node_type)["log_path"]
 
     def generate():
@@ -1465,9 +1851,23 @@ def api_logs_stream(node_type):
 
 @app.route("/api/logs/<node_type>/download")
 def api_logs_download(node_type):
-    """Download the complete log file from disk as telcoin-<type>.log."""
+    """Download the complete log as telcoin-<type>.log. External nodes stream the
+    full container log via the helper; scripts nodes send the on-disk file."""
     if not valid_type(node_type):
         return bad_type()
+    det = detect_type(node_type)
+    if det.get("mode") == "external":
+        name = det.get("container")
+        body = ""
+        if name:
+            rc, out, _ = run(["sudo", "-n", HELPER, "docker-logs-full", name],
+                             timeout=60)
+            if rc == 0:
+                body = out
+        return Response(
+            body, mimetype="text/plain",
+            headers={"Content-Disposition":
+                     f'attachment; filename="telcoin-{node_type}.log"'})
     path = parse_service_file(node_type)["log_path"]
     if not path or not os.path.exists(path):
         return jsonify({"error": "log file not found"}), 404
@@ -1481,6 +1881,9 @@ def api_logs_clear(node_type):
     running service keeps its open file handle."""
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     rc, out, err = run(["sudo", "-n", HELPER, "log-clear", node_type], timeout=15)
     ok = rc == 0 and out.strip() == "ok"
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "clear failed")})
@@ -1526,8 +1929,30 @@ def external_addrs(t):
 def api_config(node_type):
     if not valid_type(node_type):
         return bad_type()
-    if not os.path.exists(service_file(node_type)):
+    det = detect_type(node_type)
+    mode = det.get("mode")
+    if mode is None:
         return jsonify({"installed": False, "node_type": node_type})
+
+    # External (docker) nodes are read-only: values come from node-info.yaml +
+    # the docker inspect, and the UI renders them without editable controls.
+    if mode == "external":
+        ident = node_identity(node_type, det)
+        return jsonify({
+            "installed": True,
+            "readonly": True,
+            "instance": "",
+            "rpc_port": str(det.get("rpc_port") or ""),
+            "metrics": "",
+            "primary_listener": "",
+            "worker_listener": "",
+            "external_primary": ident.get("primary_external_address") or "",
+            "external_worker": ident.get("worker_external_address") or "",
+            "install_method": "external (docker)",
+            "passphrase_method": "",
+            "docker_image": det.get("image") or "",
+            "version": ident.get("version") or "",
+        })
 
     cfg = parse_service_file(node_type)
     ext_primary, ext_worker = external_addrs(node_type)
@@ -1582,6 +2007,9 @@ def api_config_set(node_type):
     # the helper + edit-config.sh. Reuses the same SSE plumbing as updates.
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     field = (request.args.get("field") or "").strip()
     value = (request.args.get("value") or "").strip()
     if field not in CONFIG_FIELDS:
@@ -1631,6 +2059,11 @@ def api_firewall_port():
         return jsonify({"ok": False, "error": "port not permitted"}), 400
     if state not in ("on", "off"):
         return jsonify({"ok": False, "error": "state must be on|off"}), 400
+    # Firewall management is for scripts-managed nodes. On a host whose only node
+    # is an externally-deployed (read-only) container, refuse port toggles.
+    det = detect_nodes()
+    if not any(det.get(t, {}).get("mode") == "scripts" for t in NODE_TYPES):
+        return jsonify({"ok": False, "error": "read-only (external node)"}), 403
     rc, out, err = run(["sudo", "-n", HELPER, "firewall-port", spec, state], timeout=30)
     if rc == 0 and out:
         try:
@@ -1649,6 +2082,9 @@ def api_node_remove(node_type):
     # the CLI requires) before we will call the helper; the helper passes --yes.
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     scope = (request.args.get("scope") or "").strip()
     confirm = request.args.get("confirm") or ""
     remove_ui = (request.args.get("ui") == "true")
@@ -1790,6 +2226,9 @@ def _end_setup():
 def api_setup_keygen(node_type):
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     data = request.get_json(silent=True) or {}
     env, err = _setup_env(data, want_passphrase=True)
     if err:
@@ -1804,6 +2243,9 @@ def api_setup_keygen(node_type):
 def api_setup_finalize(node_type):
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     data = request.get_json(silent=True) or {}
     env, err = _setup_env(data, want_passphrase=False)
     if err:
@@ -1962,6 +2404,9 @@ def api_update_prepare(node_type):
     # a query param, validated here and again in the helper.
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     ref = (request.args.get("ref") or "").strip()
     if not REF_RE.match(ref):
         return jsonify({"error": "invalid ref"}), 400
@@ -1972,6 +2417,9 @@ def api_update_prepare(node_type):
 def api_update_apply(node_type):
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     return _update_stream(["sudo", "-n", HELPER, "update-apply", node_type])
 
 
@@ -1979,6 +2427,9 @@ def api_update_apply(node_type):
 def api_update_discard(node_type):
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     rc, out, err = run(["sudo", "-n", HELPER, "update-discard", node_type], timeout=30)
     ok = rc == 0
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "discard failed")})
@@ -2228,6 +2679,9 @@ def api_jaeger_stop():
 def api_tracing_enable(node_type):
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     # 30s: the helper edits the wrapper then restarts the node with --no-block,
     # so it returns once the restart job is queued (no wait on the node's stop
     # window) -- ample headroom for an enqueue-and-return.
@@ -2240,6 +2694,9 @@ def api_tracing_enable(node_type):
 def api_tracing_disable(node_type):
     if not valid_type(node_type):
         return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
     rc, out, err = run(["sudo", "-n", HELPER, "tracing-disable", node_type], timeout=30)
     ok = rc == 0
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "disable failed")})
@@ -2322,33 +2779,33 @@ def api_traces_stats(node_type):
 
 
 # =============================================================================
-# NETWORK STATUS  (public Adiri Testnet Uptime Kuma status page)
+# NETWORK STATUS  (public Uptime Kuma status page, per network)
 #
 # Pulls the same data the public status page shows -- monitor config + live
-# heartbeats -- from two no-auth endpoints, and folds them into one response the
-# dashboard renders. Cached 60s so the dashboard's polling never hammers the
-# external API. Always degrades to available:false (never a 500) when the status
-# page is unreachable.
+# heartbeats -- from two no-auth endpoints (keyed by the active network slug),
+# and folds them into one response the dashboard renders. Monitors are rendered
+# DYNAMICALLY from the status page's publicGroupList (no fixed monitor ids), so
+# the same code works on testnet and devnet. Cached 60s per slug so polling never
+# hammers the external API. Degrades to available:false (never a 500) when the
+# status page is unreachable, and configured:false for an unknown network.
 # =============================================================================
 
-STATUS_PAGE_CONFIG = "https://status.telscan.xyz/api/status-page/testnet"
-STATUS_PAGE_HEARTBEAT = "https://status.telscan.xyz/api/status-page/heartbeat/testnet"
+# Network slugs we know a status page for (drawn from NETWORKS above).
+KNOWN_SLUGS = {m["slug"] for m in NETWORKS.values()}
 
-# Validator monitors in display order (id -> fallback name if config omits it).
-NETWORK_MONITORS = [
-    (2, "V1 (Los Angeles)"),
-    (6, "V2 (Sydney)"),
-    (10, "V3 (Montreal)"),
-    (14, "V4 (Netherlands)"),
-    (18, "V5 (London)"),
-]
-CONSENSUS_MONITOR_ID = 48
+STATUS_PAGE_BASE = "https://status.telscan.xyz"
 
-# Public RPC for the network's latest consensus block (tn_latestConsensusHeader).
-TN_PUBLIC_RPC = "https://rpc.telcoin.network"
 
-_network_cache = {"ts": 0.0, "data": None}  # 60s TTL
-_netcons_cache = {"ts": 0.0, "data": None}  # 60s TTL (network consensus block #)
+def status_page_config_url(slug):
+    return f"{STATUS_PAGE_BASE}/api/status-page/{slug}"
+
+
+def status_page_heartbeat_url(slug):
+    return f"{STATUS_PAGE_BASE}/api/status-page/heartbeat/{slug}"
+
+
+_network_cache = {}   # slug -> {"ts": float, "data": dict}
+_netcons_cache = {}   # slug -> {"ts": float, "data": int}
 
 
 def _to_int_block(num):
@@ -2366,13 +2823,18 @@ def _to_int_block(num):
     return None
 
 
-def network_consensus_block():
-    """Network consensus block number from the public RPC
-    (tn_latestConsensusHeader -> result.number), cached 60s. Returns the int
-    block, or None on failure/timeout (with a short stale-cache grace window)."""
+def network_consensus_block(slug):
+    """Network consensus block number from the network's public RPC
+    (tn_latestConsensusHeader -> result.number), cached 60s per slug. None when
+    the slug has no public RPC (e.g. devnet) or on failure/timeout (with a short
+    stale-cache grace window)."""
+    rpc = NETWORK_PUBLIC_RPC.get(slug)
+    if not rpc:
+        return None
     now = time.time()
-    cached = _netcons_cache["data"]
-    if cached is not None and now - _netcons_cache["ts"] < 60:
+    entry = _netcons_cache.get(slug)
+    cached = entry["data"] if entry else None
+    if cached is not None and now - entry["ts"] < 60:
         return cached
 
     block = None
@@ -2382,7 +2844,7 @@ def network_consensus_block():
     }).encode()
     try:
         req = urllib.request.Request(
-            TN_PUBLIC_RPC, data=payload,
+            rpc, data=payload,
             headers={"Content-Type": "application/json", "User-Agent": "telcoin-ui"},
             method="POST",
         )
@@ -2396,12 +2858,11 @@ def network_consensus_block():
 
     if block is None:
         # Failure/timeout: serve a recent stale value within a grace window, else None.
-        if cached is not None and now - _netcons_cache["ts"] < 300:
+        if cached is not None and now - entry["ts"] < 300:
             return cached
         return None
 
-    _netcons_cache["ts"] = now
-    _netcons_cache["data"] = block
+    _netcons_cache[slug] = {"ts": now, "data": block}
     return block
 
 
@@ -2417,34 +2878,36 @@ def _http_get_json(url, timeout=6):
         return None
 
 
-def _monitor_names(cfg):
-    """Map monitor id -> name from the status-page config (publicGroupList)."""
-    names = {}
+def _ordered_monitors(cfg):
+    """[(id, name), ...] in publicGroupList display order. [] when the config is
+    missing or carries no monitors."""
+    out = []
     if not isinstance(cfg, dict):
-        return names
+        return out
     for group in cfg.get("publicGroupList") or []:
         for m in group.get("monitorList") or []:
             mid, nm = m.get("id"), m.get("name")
-            if isinstance(mid, int) and nm:
-                names[mid] = nm
-    return names
+            if isinstance(mid, int):
+                out.append((mid, nm or f"Monitor {mid}"))
+    return out
 
 
-def _build_network_status():
-    """Fetch config + heartbeats and fold them into the dashboard payload.
-    Returns None when the status page is unreachable (both fetches failed)."""
-    cfg = _http_get_json(STATUS_PAGE_CONFIG)
-    hb = _http_get_json(STATUS_PAGE_HEARTBEAT)
+def _build_network_status(slug, title_default):
+    """Fetch config + heartbeats for `slug` and fold them into the dashboard
+    payload, rendering every monitor from the status page itself (no fixed ids).
+    The consensus-block row is whichever monitor's name mentions 'consensus';
+    the rest become tiles. Returns None when the status page is unreachable."""
+    cfg = _http_get_json(status_page_config_url(slug))
+    hb = _http_get_json(status_page_heartbeat_url(slug))
     if cfg is None and hb is None:
         return None
 
-    title = "Adiri Testnet Network Status"
+    title = title_default
     if isinstance(cfg, dict):
         c = cfg.get("config") or {}
         if c.get("title"):
             title = c["title"]
 
-    names = _monitor_names(cfg)
     hb_list = (hb or {}).get("heartbeatList") or {}
 
     def beats(mid):
@@ -2464,30 +2927,34 @@ def _build_network_status():
 
     statuses = []
     monitors = []
-    for mid, fallback in NETWORK_MONITORS:
+    consensus = None
+    last_updated = None
+    for mid, name in _ordered_monitors(cfg):
         last = latest(mid)
         st = last.get("status") if last else None
-        monitors.append({
-            "id": mid,
-            "name": names.get(mid, fallback),
-            "status": st if st is not None else 0,
-            "ping": (last or {}).get("ping"),
-            "uptime": uptime_pct(mid),
-        })
         if st is not None:
             statuses.append(st)
-
-    cons_last = latest(CONSENSUS_MONITOR_ID)
-    cons_status = cons_last.get("status") if cons_last else 0
-    consensus = {
-        "name": names.get(CONSENSUS_MONITOR_ID, "Consensus Block Progress"),
-        "status": cons_status if cons_status is not None else 0,
-        "last_seen": (cons_last or {}).get("time"),
-        "ping": (cons_last or {}).get("ping"),
-        "uptime": uptime_pct(CONSENSUS_MONITOR_ID),
-    }
-    if cons_last is not None and cons_last.get("status") is not None:
-        statuses.append(cons_last.get("status"))
+        lt = (last or {}).get("time")
+        if lt and (not last_updated or lt > last_updated):
+            last_updated = lt
+        # The first monitor whose name mentions "consensus" is the dedicated
+        # consensus-block progress row; everything else is a validator tile.
+        if consensus is None and "consensus" in name.lower():
+            consensus = {
+                "name": name,
+                "status": st if st is not None else 0,
+                "last_seen": lt,
+                "ping": (last or {}).get("ping"),
+                "uptime": uptime_pct(mid),
+            }
+        else:
+            monitors.append({
+                "id": mid,
+                "name": name,
+                "status": st if st is not None else 0,
+                "ping": (last or {}).get("ping"),
+                "uptime": uptime_pct(mid),
+            })
 
     if not statuses:
         overall = "down"
@@ -2498,17 +2965,12 @@ def _build_network_status():
     else:
         overall = "degraded"
 
-    # Most recent heartbeat time across all monitors, else now.
-    last_updated = consensus.get("last_seen")
-    for m in NETWORK_MONITORS:
-        lb = latest(m[0])
-        if lb and lb.get("time") and (not last_updated or lb["time"] > last_updated):
-            last_updated = lb["time"]
     if not last_updated:
         last_updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     return {
         "title": title,
+        "slug": slug,
         "overall": overall,
         "monitors": monitors,
         "consensus_block": consensus,
@@ -2518,30 +2980,50 @@ def _build_network_status():
 
 @app.route("/api/network/status")
 def api_network_status():
-    now = time.time()
-    cached = _network_cache["data"]
-    if cached is not None and now - _network_cache["ts"] < 60:
-        return jsonify(cached)
-
-    data = _build_network_status()
-    if data is None:
-        # Unreachable -- degrade, never 500. Do not cache the failure (so we
-        # retry on the next poll), but serve a stale-but-recent cache if we have
-        # one within a short grace window.
-        if cached is not None and now - _network_cache["ts"] < 300:
-            return jsonify(cached)
+    # The active network slug comes from the selected node's chain id; default to
+    # testnet for the boot-time nav pill before a node's chain id is known.
+    slug = (request.args.get("slug") or "testnet").strip()
+    if slug not in KNOWN_SLUGS:
         return jsonify({
-            "title": "Adiri Testnet Network Status",
-            "overall": "unknown",
+            "configured": False,
             "available": False,
+            "slug": slug,
+            "overall": "unknown",
             "monitors": [],
             "consensus_block": None,
             "last_updated": None,
         })
 
+    name = next((m["name"] for m in NETWORKS.values() if m["slug"] == slug), slug)
+    title_default = f"{name} Network Status"
+
+    now = time.time()
+    entry = _network_cache.get(slug)
+    cached = entry["data"] if entry else None
+    if cached is not None and now - entry["ts"] < 60:
+        return jsonify(cached)
+
+    data = _build_network_status(slug, title_default)
+    if data is None:
+        # Unreachable -- degrade, never 500. Do not cache the failure (so we
+        # retry on the next poll), but serve a stale-but-recent cache if we have
+        # one within a short grace window.
+        if cached is not None and now - entry["ts"] < 300:
+            return jsonify(cached)
+        return jsonify({
+            "configured": True,
+            "available": False,
+            "slug": slug,
+            "title": title_default,
+            "overall": "unknown",
+            "monitors": [],
+            "consensus_block": None,
+            "last_updated": None,
+        })
+
+    data["configured"] = True
     data["available"] = True
-    _network_cache["ts"] = now
-    _network_cache["data"] = data
+    _network_cache[slug] = {"ts": now, "data": data}
     return jsonify(data)
 
 
