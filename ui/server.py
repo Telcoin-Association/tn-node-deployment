@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.20"
+UI_VERSION = "1.7.21"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1799,23 +1799,42 @@ def api_validator(node_type):
 
     # --- committee membership via tn_epochRecord(epoch) ---
     # Returns [EpochRecord, EpochCertificate]; the record carries committee[] and
-    # next_committee[] (lists of BLS pubkeys, same serialised form as tn_info's).
+    # next_committee[] (lists of BLS pubkeys -- same serialised form as
+    # node-info.yaml / tn_info, so a direct string compare). The CURRENT epoch's
+    # record is still empty while that epoch is in progress, so when its
+    # committee[] is empty we fall back to the previous epoch's record
+    # (current_epoch - 1), which is finalised.
+    def _epoch_record(ep):
+        rec = local_rpc(port, "tn_epochRecord", [int(ep)])
+        if isinstance(rec, list) and rec and isinstance(rec[0], dict):
+            return rec[0]
+        if isinstance(rec, dict):
+            return rec
+        return None
+
     try:
         if out["epoch"] is not None and out["bls_public_key"] is not None:
-            rec = local_rpc(port, "tn_epochRecord", [int(out["epoch"])])
-            record = None
-            if isinstance(rec, list) and rec and isinstance(rec[0], dict):
-                record = rec[0]
-            elif isinstance(rec, dict):
-                record = rec
+            epoch = int(out["epoch"])
+            record = _epoch_record(epoch)
+            committee = (record or {}).get("committee") or []
+            # In-progress current epoch has an empty committee -> use the prior,
+            # finalised epoch's record instead.
+            if not committee and epoch > 0:
+                prev = _epoch_record(epoch - 1)
+                if prev is not None and (prev.get("committee") or []):
+                    record = prev
+                    committee = record.get("committee") or []
             if record is not None:
-                committee = record.get("committee") or []
                 next_committee = record.get("next_committee") or []
                 bls = out["bls_public_key"]
                 out["in_committee"] = bls in committee
                 out["in_next_committee"] = bls in next_committee
-    except Exception:
-        pass
+                _dbg(f"/api/validator {t}: committee epoch={epoch} "
+                     f"used_committee={len(committee)} next={len(next_committee)} "
+                     f"in_committee={out['in_committee']} "
+                     f"in_next={out['in_next_committee']}")
+    except Exception as e:
+        _log(f"/api/validator {t}: committee membership check failed: {e}")
 
     # --- getCurrentEpoch() ---
     try:
