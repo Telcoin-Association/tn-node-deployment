@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.19"
+UI_VERSION = "1.7.20"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1837,21 +1837,24 @@ def api_validator(node_type):
     _dbg(f"/api/validator {t}: execution_address={addr!r} epoch={out['epoch']!r} "
          f"bls={out['bls_public_key']!r}")
 
-    # --- getValidator(address): word layout per lib/common.sh:910-938 ---
-    #   w0 blsPubkey offset, w1 validatorAddress, w2 activationEpoch,
-    #   w3 exitEpoch, w4 currentStatus, w5 isRetired, w6 isDelegated,
-    #   w7 stakeVersion
+    # --- getValidator(address) -> ValidatorInfo struct (returned INLINE) ---
+    # The struct carries no dynamic fields (blsPubkey is not part of it), so
+    # there is NO leading offset word -- every field sits at a fixed word index:
+    #   w0 validatorAddress, w1 activationEpoch, w2 exitEpoch, w3 currentStatus,
+    #   w4 isRetired, w5 stakeVersion, w6 region
+    # (The older layout decoded in lib/common.sh assumed a leading blsPubkey
+    # offset pointer + an 8-word struct; the live contract returns 7 words.)
     try:
         if addr:
             raw = eth_call_registry(port, REGISTRY_SELECTORS["getValidator"], addr)
             _dbg(f"/api/validator {t}: getValidator raw={raw!r}")
             w = _words(raw)
-            if len(w) >= 8:
-                out["activation_epoch"] = w[2]
-                out["exit_epoch"] = w[3]
-                out["status"] = w[4]
-                out["is_retired"] = bool(w[5])
-                out["stake_version"] = w[7]
+            if len(w) >= 6:
+                out["activation_epoch"] = w[1]
+                out["exit_epoch"] = w[2]
+                out["status"] = w[3]
+                out["is_retired"] = bool(w[4])
+                out["stake_version"] = w[5]
             elif mode == "external":
                 # Visible without TN_UI_DEBUG so a still-failing external node
                 # surfaces the reason in the journal.
