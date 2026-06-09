@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.17"
+UI_VERSION = "1.7.18"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -950,7 +950,9 @@ def parse_node_info_yaml(text):
         return out
 
     def top(key):
-        m = re.search(r"(?m)^%s\s*:\s*[\"']?([^\"'\n]+?)[\"']?\s*$"
+        # Allow leading indentation: node-info.yaml may nest these keys (mirrors
+        # check-node.sh's `^[[:space:]]*<key>:` grep).
+        m = re.search(r"(?m)^[ \t]*%s\s*:\s*[\"']?([^\"'\n]+?)[\"']?\s*$"
                       % re.escape(key), text)
         return m.group(1).strip() if m else None
 
@@ -1009,15 +1011,21 @@ def node_identity(t, det=None):
             "version": info.get("version"),
             "authority_id": info.get("authority_id"),
         })
-        return out
-
-    if rpc_unsupported(resp):
+    elif rpc_unsupported(resp):
         out["unsupported"] = True
 
-    parsed = parse_node_info_yaml(read_node_info_text(t, det))
-    for k in ("name", "bls_public_key", "execution_address",
-              "primary_external_address", "worker_external_address"):
-        out[k] = parsed.get(k)
+    # Backfill any field tn_info did not provide from node-info.yaml. Critically
+    # this covers execution_address: tn_info on external/older nodes often omits
+    # it, and without it the on-chain getValidator/getRewards/balanceOf calls
+    # can't run (the Validator Status card would read "unavailable"). We do NOT
+    # return early on a successful-but-partial tn_info anymore.
+    needed = ("name", "bls_public_key", "execution_address",
+              "primary_external_address", "worker_external_address")
+    if any(not out.get(k) for k in needed):
+        parsed = parse_node_info_yaml(read_node_info_text(t, det))
+        for k in needed:
+            if not out.get(k):
+                out[k] = parsed.get(k)
     return out
 
 

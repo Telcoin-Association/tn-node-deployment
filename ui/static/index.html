@@ -946,8 +946,8 @@ async function renderValidatorDashboard(c){
     <div class="dgrid dgrid-4">
       ${statCard('Primary Peers', (peers.primary!=null?esc(String(peers.primary)):'—'), 'accent', 'connected')}
       ${statCard('Worker Peers', (peers.worker!=null?esc(String(peers.worker)):'—'), 'accent', 'connected')}
-      ${statCard('Primary Address', fmtMultiaddrCell(vv.primary_external_address), '', um(vv.primary_external_address, 'external'), null, 'tleft')}
-      ${statCard('Worker Address', fmtMultiaddrCell(vv.worker_external_address), '', um(vv.worker_external_address, 'external'), null, 'tleft')}
+      ${statCard('Primary Address', fmtMultiaddrTile(vv.primary_external_address), '', um(vv.primary_external_address, 'external'), null, 'tleft')}
+      ${statCard('Worker Address', fmtMultiaddrTile(vv.worker_external_address), '', um(vv.worker_external_address, 'external'), null, 'tleft')}
     </div>
 
     <!-- §5 Performance -->
@@ -1389,6 +1389,22 @@ function fmtMultiaddrCell(v){
   const pid = v.slice(idx + 1);                 // "p2p/12D3KooW..."
   const short = pid.length > 20 ? pid.slice(0, 20) + '…' : pid;
   return `${esc(base)}<br><span class="mono" style="font-size:11px;color:var(--text3)" title="${esc(pid)}">${esc(short)}</span>`;
+}
+
+// Same split display as fmtMultiaddrCell, but sized for a stat-card value (the
+// big .val font overflows the card with a full multiaddr). Base address wraps on
+// the main line; the /p2p/ peer id sits below in smaller, dimmer, truncated text.
+function fmtMultiaddrTile(v){
+  if(!v) return '—';
+  const idx = v.indexOf('/p2p/');
+  const base = idx < 0 ? v : v.slice(0, idx);
+  let pidHtml = '';
+  if(idx >= 0){
+    const pid = v.slice(idx + 1);
+    const short = pid.length > 20 ? pid.slice(0, 20) + '…' : pid;
+    pidHtml = `<br><span style="font-size:11px;color:var(--text3)" title="${esc(pid)}">${esc(short)}</span>`;
+  }
+  return `<span class="mono" style="font-size:12px;line-height:1.4;display:inline-block;overflow-wrap:anywhere;word-break:break-word;white-space:normal">${esc(base)}${pidHtml}</span>`;
 }
 
 // Editable field allowlist (mirrors edit-config.sh --json + server.py). Each
