@@ -608,6 +608,18 @@ function statCard(label, val, valCls, meta, bar, cardCls){
   </div>`;
 }
 
+// Peer-count tile. 0 peers -> amber value + "no peers" (it's a problem worth
+// flagging); >0 -> accent value + the positive meta ("connected" by default);
+// null/undefined (e.g. Worker Peers on an external node, which reports only a
+// total) -> "—" with a neutral meta.
+function peerCard(label, count, metaPositive, metaUnknown){
+  if(count==null) return statCard(label, '—', '', metaUnknown||'not reported');
+  const n = Number(count);
+  const zero = !(n > 0);
+  return statCard(label, esc(String(count)), zero?'yellow':'accent',
+                  zero?'no peers':(metaPositive||'connected'));
+}
+
 // Recent Log Events table (last 5 ERROR/WARN, most recent first). Styled like
 // the dashboard tables (.tbl): dark bg, row dividers, mono font. Message wraps.
 function logEventsTable(events){
@@ -757,7 +769,9 @@ async function renderDashboard(){
 
     <div class="group-label">Network</div>
     <div class="dgrid dgrid-3">
-      ${statCard('Peers', (peers.primary||'0'), 'accent', 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
+      ${peerCard('Peers', peers.primary!=null?peers.primary:'0',
+          peers.split===false ? 'total peers'
+            : 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'))}
       ${statCard('Network', esc(s.network||'—'), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
       ${statCard('Version', '<span id="verTile" style="font-size:16px;overflow-wrap:anywhere;word-break:break-word;white-space:normal;line-height:1.35;display:inline-block">…</span>', 'accent', '<span id="verMeta"></span>')}
     </div>
@@ -944,8 +958,10 @@ async function renderValidatorDashboard(c){
     <!-- §4 Peer Health -->
     <div class="group-label">Peer Health</div>
     <div class="dgrid dgrid-4">
-      ${statCard('Primary Peers', (peers.primary!=null?esc(String(peers.primary)):'—'), 'accent', 'connected')}
-      ${statCard('Worker Peers', (peers.worker!=null?esc(String(peers.worker)):'—'), 'accent', 'connected')}
+      ${peerCard('Primary Peers', peers.primary, peers.split===false?'total peers':'connected')}
+      ${peers.split===false
+          ? statCard('Worker Peers', '—', '', 'total only — see Primary')
+          : peerCard('Worker Peers', peers.worker, 'connected')}
       ${statCard('Primary Address', fmtMultiaddrTile(vv.primary_external_address), '', um(vv.primary_external_address, 'external'), null, 'tleft')}
       ${statCard('Worker Address', fmtMultiaddrTile(vv.worker_external_address), '', um(vv.worker_external_address, 'external'), null, 'tleft')}
     </div>

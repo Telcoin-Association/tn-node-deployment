@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.21"
+UI_VERSION = "1.7.22"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1198,6 +1198,21 @@ def peer_counts(t, log_path):
     return peers
 
 
+def peer_counts_rpc(port):
+    """Peer counts for nodes whose log file isn't accessible (external docker
+    nodes). net_peerCount returns a single TOTAL (not split by primary/worker),
+    so we surface it as the primary count with worker unknown. `split` is False
+    so the UI can show the total in Primary Peers and "—" for Worker Peers.
+    Returns the same shape as peer_counts() with primary=None on RPC failure."""
+    total = hex_to_dec(local_rpc(port, "net_peerCount"))
+    return {
+        "primary": str(total) if total is not None else None,
+        "worker": None,
+        "total": total,
+        "split": False,
+    }
+
+
 # =============================================================================
 # SYSTEM PROBES
 # =============================================================================
@@ -1666,6 +1681,10 @@ def api_status(node_type):
         logs["log_size"] = log_size_override
         logs["log_size_human"] = fmt_bytes(log_size_override)
 
+    # Peers: scripts nodes parse the log heartbeats (split primary/worker);
+    # external nodes have no log file, so use net_peerCount (a single total).
+    peers = peer_counts_rpc(port) if external else peer_counts(t, log_path)
+
     resp = jsonify({
         "installed": True,
         "node_type": t,
@@ -1700,7 +1719,7 @@ def api_status(node_type):
         "log_size": logs["log_size"],
         "log_size_human": logs["log_size_human"],
         "tracing_enabled": tracing_on,
-        "peers": peer_counts(t, log_path),
+        "peers": peers,
         "consensus": consensus,
         "network_consensus_block": net_block,
         "consensus_lag": consensus_lag,
