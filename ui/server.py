@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.23"
+UI_VERSION = "1.7.24"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -427,9 +427,18 @@ def detect_nodes():
                       "node_info_path": None}
             scripts[t] = True
 
+    # Container names already owned by a scripts-deployed systemd service. A
+    # scripts node can itself run as a docker container named telcoin-<type>;
+    # that container must NEVER be re-detected as a separate "external" node
+    # (regardless of how it would classify), since systemd already manages it.
+    managed_names = {f"telcoin-{t}" for t in NODE_TYPES if scripts.get(t)}
+
     # Probe docker only for types that have NO systemd unit.
     if not all(scripts.get(t) for t in NODE_TYPES):
         for name in _docker_detect():
+            if name in managed_names:
+                _dbg(f"detect_nodes: skipping {name!r} -- managed by systemd")
+                continue
             insp = _docker_inspect(name)
             if not insp:
                 continue
