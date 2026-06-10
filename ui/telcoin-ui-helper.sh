@@ -32,6 +32,7 @@
 #   telcoin-ui-helper docker-node-info <container>
 #   telcoin-ui-helper docker-stats     <container>
 #   telcoin-ui-helper docker-log-size  <container>
+#   telcoin-ui-helper internal-ip
 #
 set -euo pipefail
 
@@ -516,6 +517,12 @@ cmd_docker_stats() {
         --format '{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}' 2>/dev/null
 }
 
+# Primary internal/LAN IP of the host (first field of `hostname -I`). Shown in
+# Node Details for every node type.
+cmd_internal_ip() {
+    hostname -I | awk '{print $1}'
+}
+
 # Size (bytes) of the container's json-file log on the host. The LogPath is
 # root-owned, so the stat() must run here. Prints 0 when the file is missing.
 cmd_docker_log_size() {
@@ -554,6 +561,7 @@ main() {
         docker-node-info) shift; cmd_docker_node_info "${1:-}" ;;
         docker-stats)     shift; cmd_docker_stats     "${1:-}" ;;
         docker-log-size)  shift; cmd_docker_log_size  "${1:-}" ;;
+        internal-ip)      cmd_internal_ip ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }

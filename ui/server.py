@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.22"
+UI_VERSION = "1.7.23"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1482,6 +1482,15 @@ def detect_internal_ip():
     return ""
 
 
+def internal_ip():
+    """Primary internal IP for the Node Details panel, via the root helper
+    (`hostname -I | awk '{print $1}'`). Falls back to the in-process probe if the
+    helper/sudo is unavailable. '' when neither resolves one."""
+    rc, out, _ = run(["sudo", "-n", HELPER, "internal-ip"], timeout=10)
+    ip = out.strip() if rc == 0 else ""
+    return ip or detect_internal_ip()
+
+
 def latest_docker_image():
     """Latest published testnet (-adiri) docker image ref from the public
     Artifact Registry, e.g. us-docker.pkg.dev/.../adiri:v0.9.3-adiri. Falls back
@@ -1702,6 +1711,7 @@ def api_status(node_type):
         "rpc_ok": rpc_ok,
         "rpc_port": port,
         "node_id": node_id_val,
+        "internal_ip": internal_ip(),
         "data_dir": data_path,
         "config_file": config_file,
         "block_number": block_number,

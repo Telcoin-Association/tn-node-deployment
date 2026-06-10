@@ -269,6 +269,11 @@ select{
 .status-hero .hero-item .hi-val{font-size:16px;font-weight:700;margin-top:3px}
 .status-hero .hero-item .hi-val.green{color:var(--green)}
 .status-hero .hero-item .hi-val.red{color:var(--red)}
+/* Centred variant -- used only by the Validator Status card + its label. */
+.group-label.center{text-align:center}
+.status-hero.center{text-align:center}
+.status-hero.center .hero-items{justify-content:center}
+.status-hero.center .hero-item{text-align:center}
 .ns-step{display:flex;gap:14px;padding:16px 0;border-top:1px solid rgba(0,180,255,0.10)}
 .ns-step:first-child{border-top:0}
 .ns-step.done{opacity:.85}
@@ -810,6 +815,7 @@ async function renderDashboard(){
         ${externalDetailRows(s)}
         <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
+        <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
         ${isReadonly()?'':`<div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
         <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
@@ -926,8 +932,8 @@ async function renderValidatorDashboard(c){
     </div>
 
     <!-- §1 Validator Status hero -->
-    <div class="group-label">Validator Status</div>
-    <div class="card status-hero">
+    <div class="group-label center">Validator Status</div>
+    <div class="card status-hero center">
       <div class="hero-main ${hero.cls}">${esc(hero.main)}</div>
       <div class="hero-sub">${esc(hero.sub)}</div>
       <div class="hero-items">
@@ -1008,6 +1014,7 @@ async function renderValidatorDashboard(c){
         ${externalDetailRows(s)}
         <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
+        <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
         ${isReadonly()?'':`<div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
         <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
