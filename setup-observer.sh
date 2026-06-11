@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.9"
+readonly SCRIPT_VERSION="1.2.10"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -249,8 +249,13 @@ _preflight_source() {
 
     local source_dir="/opt/telcoin-source"
     if [[ -d "$source_dir/.git" ]]; then
-        print_info "Updating existing source clone..."
-        run_streamed git -C "$source_dir" fetch --all
+        # Refresh a reused clone THOROUGHLY so it is never stale across
+        # remove/reinstall cycles: all branches + ALL tags (incl. re-pointed
+        # ones), and prune deleted refs. A bare `fetch --all` does NOT reliably
+        # fetch tags -- that is how clones ended up missing newer -adiri release
+        # tags (e.g. showing v0.6.0-adiri-101 instead of v0.10.0-adiri).
+        print_info "Refreshing existing source clone (all branches + tags)..."
+        run_streamed git -C "$source_dir" fetch --all --tags --prune --force
     else
         print_info "Cloning Telcoin Network repository..."
         run_streamed git clone --recurse-submodules "$TN_REPO" "$source_dir"
@@ -275,17 +280,23 @@ _preflight_source() {
     fi
 
     print_step "Checking out: ${build_ref}..."
-    if ! git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
-        if git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
-           git -C "$source_dir" checkout "$build_ref" 2>/dev/null; then
-            print_ok "Checked out: ${build_ref}"
-        else
+    if ! git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; then
+        if ! { git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
+               git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; }; then
             print_error "Branch or tag '${build_ref}' not found in repository."
             exit 1
         fi
-    else
-        print_ok "Checked out: ${build_ref}"
     fi
+    # If build_ref is a branch (e.g. main), hard-reset to the remote tip so we
+    # never build a stale local branch. No-op for tags/commits (immutable).
+    if git -C "$source_dir" show-ref --verify --quiet "refs/remotes/origin/${build_ref}"; then
+        git -C "$source_dir" reset --hard "origin/${build_ref}" 2>/dev/null || true
+    fi
+    # Sync submodules to the checked-out ref so a reused clone never builds with
+    # stale submodule state.
+    run_streamed git -C "$source_dir" submodule update --init --recursive --force \
+        || print_warn "submodule sync reported an issue -- build may fail"
+    print_ok "Checked out: ${build_ref}"
 
     if [[ -f "${source_dir}/rust-toolchain.toml" ]]; then
         local required_toolchain
