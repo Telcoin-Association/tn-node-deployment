@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.10"
+readonly SCRIPT_VERSION="1.2.11"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -366,20 +366,22 @@ _preflight_docker() {
 
     echo ""
     print_info "The official Telcoin Network Docker image is hosted at:"
-    print_info "  us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+    print_info "  ${GAR_IMAGE_BASE}"
     echo ""
-    print_info "Enter the full image URL including tag."
-    print_info "Check for the latest tag at:"
-    print_info "  https://console.cloud.google.com/artifacts/docker/telcoin-network/us/tn-public/adiri"
+    print_info "Enter the full image URL including tag (default is the latest"
+    print_info "published -adiri tag, auto-detected from the registry)."
     echo ""
 
     local input
     if json_mode; then
-        DOCKER_IMAGE="${DOCKER_IMAGE:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+        # The UI passes --docker-image; only auto-detect when it didn't.
+        [[ -n "${DOCKER_IMAGE:-}" ]] || DOCKER_IMAGE="$(latest_docker_image)"
     else
+        local default_image
+        default_image="$(latest_docker_image)"
         read -r -p "  Docker image (press Enter to accept default)
-  [us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri]: " input
-        DOCKER_IMAGE="${input:-us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri}"
+  [${default_image}]: " input
+        DOCKER_IMAGE="${input:-$default_image}"
     fi
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."

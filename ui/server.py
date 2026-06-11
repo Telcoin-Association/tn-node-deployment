@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.28"
+UI_VERSION = "1.7.29"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1463,7 +1463,7 @@ def network_traffic():
 # update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
 GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 GAR_IMAGE_BASE = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.9.2-adiri"
+DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.10.1-adiri"  # fallback only when the registry is unreachable
 
 
 def detect_public_ip():

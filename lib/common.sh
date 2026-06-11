@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.50"
+readonly COMMON_VERSION="1.1.51"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -305,6 +305,33 @@ validate_multiaddr() {
         return 0
     fi
     return 1
+}
+
+# Public Artifact Registry for the testnet (-adiri) docker image.
+readonly GAR_IMAGE_BASE="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
+# Fallback only when the registry is unreachable.
+readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.10.1-adiri"
+
+# Echo the latest published -adiri docker image ref (registry/path:tag) by
+# querying the public Artifact Registry tag list and picking the highest version
+# (sort -V). Mirrors the UI's latest_docker_image() so the CLI and GUI offer the
+# same default. Falls back to DEFAULT_DOCKER_IMAGE when the registry is
+# unreachable, so a node default is never the long-stale hardcoded tag.
+latest_docker_image() {
+    local json best=""
+    json=$(curl -sf --max-time 10 "$GAR_TAGS_URL" 2>/dev/null || true)
+    if [[ -n "$json" ]]; then
+        best=$(printf '%s' "$json" \
+            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*' \
+            | grep -- '-adiri' \
+            | sort -V | tail -1 || true)
+    fi
+    if [[ -n "$best" ]]; then
+        echo "${GAR_IMAGE_BASE}:${best}"
+    else
+        echo "$DEFAULT_DOCKER_IMAGE"
+    fi
 }
 
 # Validate a Docker image reference (registry/path:tag).
