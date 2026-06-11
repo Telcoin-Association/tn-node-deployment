@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.50"
+readonly SCRIPT_VERSION="1.1.51"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -99,6 +99,33 @@ version_gt() {
         if ((10#${ver1[i]} < 10#${ver2[i]})); then return 1; fi
     done
     return 1
+}
+
+# Bootstrap the updater to the latest version of ITSELF before doing anything
+# else, then re-exec. Without this, a node running an older update-scripts.sh
+# uses that old copy's file list/logic for the whole run -- it updates itself in
+# place but the new logic only takes effect on the NEXT run, so newly-tracked
+# files are silently skipped ("ran it once, some updated, others didn't"). With
+# this, a single invocation always converges. TN_UPDATER_RELAUNCHED guards
+# against re-exec loops; failures here are non-fatal (we just continue).
+self_bootstrap() {
+    [[ "${TN_UPDATER_RELAUNCHED:-}" == "1" ]] && return 0
+    local local_ver remote_ver
+    local_ver=$(get_local_version "update-scripts.sh" "SCRIPT_VERSION")
+    remote_ver=$(get_remote_version "update-scripts.sh" "SCRIPT_VERSION")
+    [[ "$remote_ver" == "unavailable" || "$remote_ver" == "unknown" ]] && return 0
+    version_gt "$remote_ver" "$local_ver" || return 0
+
+    print_info "Updating the updater itself (${local_ver} -> ${remote_ver}) and relaunching..."
+    local dest="${SCRIPT_DIR}/update-scripts.sh"
+    if curl -sf --max-time 30 "${GITHUB_RAW}/update-scripts.sh" -o "${dest}.tmp" \
+        && [[ -s "${dest}.tmp" ]] && bash -n "${dest}.tmp" 2>/dev/null; then
+        mv "${dest}.tmp" "$dest"
+        chmod +x "$dest" 2>/dev/null || true
+        TN_UPDATER_RELAUNCHED=1 exec bash "$dest" "$@"
+    fi
+    rm -f "${dest}.tmp"
+    print_warn "Could not self-update the updater -- continuing with the current version."
 }
 
 # =============================================================================
@@ -335,6 +362,7 @@ main() {
     echo "================================================================"
     echo -e "${RESET}"
 
+    self_bootstrap "$@"   # ensure the latest updater logic runs (re-execs if stale)
     check_versions
     download_updates
 }
