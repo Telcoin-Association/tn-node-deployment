@@ -211,6 +211,7 @@ nav{display:flex;gap:4px;margin:0 auto}
 .log-line{white-space:pre-wrap;word-break:break-all;color:var(--text2)}
 .log-line.err{color:var(--red)} .log-line.warn{color:var(--yellow)}
 .log-line.ok{color:var(--green)} .log-line.info{color:var(--accent)}
+.log-line.muted{color:var(--text3)}
 .live-dot{width:9px;height:9px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 1.2s infinite}
 @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(0,232,122,0.5)}50%{opacity:.5;box-shadow:0 0 0 6px rgba(0,232,122,0)}}
 select{
@@ -1676,6 +1677,12 @@ function streamLineHtml(d){
   let cls='info', text='';
   if(d.event==='error'){ cls='err'; text='✗ '+(d.msg||''); }
   else if(d.event==='step'){ cls='info'; text='» '+(d.msg||''); }
+  else if(d.event==='log'){
+    // Raw command output (git clone / cargo build) streamed live so the build
+    // doesn't look frozen. Dim by default; tint compiler errors/warnings.
+    text = d.msg||''; if(!text) return null;
+    cls = /error(\[|:)/i.test(text) ? 'err' : (/warning:/i.test(text) ? 'warn' : 'muted');
+  }
   else if(d.event==='done'){
     const detail = d.new_version || d.new_image || d.new_ref || d.value || '';
     cls = d.ok ? 'ok' : 'err';
@@ -1688,6 +1695,8 @@ function appendStream(sel, d){
   const log=$(sel); if(!log) return;
   const h=streamLineHtml(d); if(!h) return;
   log.insertAdjacentHTML('beforeend', h);
+  // Cap the DOM -- a source build streams thousands of lines.
+  while(log.children.length>1500) log.removeChild(log.firstChild);
   log.scrollTop = log.scrollHeight;
 }
 

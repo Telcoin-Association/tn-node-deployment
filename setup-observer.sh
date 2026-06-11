@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.8"
+readonly SCRIPT_VERSION="1.2.9"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -250,10 +250,10 @@ _preflight_source() {
     local source_dir="/opt/telcoin-source"
     if [[ -d "$source_dir/.git" ]]; then
         print_info "Updating existing source clone..."
-        git -C "$source_dir" fetch --all
+        run_streamed git -C "$source_dir" fetch --all
     else
         print_info "Cloning Telcoin Network repository..."
-        git clone --recurse-submodules "$TN_REPO" "$source_dir"
+        run_streamed git clone --recurse-submodules "$TN_REPO" "$source_dir"
     fi
 
     echo ""
@@ -305,7 +305,15 @@ _preflight_source() {
 
     print_info "Building release binary (this takes 20-40 minutes)..."
     cd "$source_dir"
-    cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log
+    if json_mode; then
+        # Stream each build line to the UI (and keep the full log on disk) so the
+        # operator sees compile progress instead of a frozen screen.
+        cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log | while IFS= read -r _line; do
+            json_emit "{\"event\":\"log\",\"msg\":\"$(json_escape "$_line")\"}"
+        done
+    else
+        cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log
+    fi
 
     local built="${source_dir}/target/release/telcoin-network"
     if [[ ! -f "$built" ]]; then
@@ -1138,6 +1146,20 @@ json_escape() {
 json_emit() { printf '%s\n' "$1" >&3; }
 json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
 json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
+
+# Run a command, streaming each combined-output line to the UI as a JSON `log`
+# event (JSON mode only) so the long, otherwise-silent steps -- the git clone and
+# the 20-40 min cargo build -- show live progress instead of looking frozen. In
+# interactive mode the command just runs normally. Returns the command's status.
+run_streamed() {
+    if json_mode; then
+        "$@" 2>&1 | while IFS= read -r _line; do
+            json_emit "{\"event\":\"log\",\"msg\":\"$(json_escape "$_line")\"}"
+        done
+        return "${PIPESTATUS[0]}"
+    fi
+    "$@"
+}
 
 # Emitted on ANY exit if no terminal done was sent -- so an `exit 1` deep inside
 # a step (build failure, missing chain configs, ...) still yields a done:false.
