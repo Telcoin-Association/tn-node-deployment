@@ -563,8 +563,10 @@ function rerenderActive(){
 // =============================================================================
 // Node selector status
 // =============================================================================
-async function loadNodes(){
-  const d = await api('/api/nodes');
+async function loadNodes(fresh){
+  // fresh=true bypasses the server's ~10s detect cache (used right after a setup
+  // finalize so the new node is detected immediately).
+  const d = await api('/api/nodes' + (fresh ? '?fresh=1' : ''));
   if(d && !d.error) state.nodes = d;
   for(const t of ['observer','validator']){
     const n = state.nodes[t] || {installed:false,status:'not installed'};
@@ -2440,18 +2442,44 @@ async function runFinalize(){
   const d = await streamSetup('finalize', false);
   if(d && d.ok){
     toast('Node finalized and started','success');
-    await loadNodes();
+    await loadNodes(true);   // fresh detection so the dashboard won't say "not installed"
     if(state.node==='validator'){
       // Validators are not live until on-chain registration completes — show the
       // remaining steps instead of dropping straight to the dashboard.
       showValidatorNextSteps(state.setup.eth || (d && d.address) || '');
     } else {
-      setTimeout(()=>{ state.setupStep=1; switchView('dashboard'); }, 1800);
+      showSetupComplete();
     }
   } else {
     toast('Finalize failed'+(d&&d.msg?': '+d.msg:''),'error');
     if(fb) fb.disabled=false; if(inp) inp.disabled=false;
   }
+}
+
+// Observer finalize success: explicit completion card + button (no blind auto-
+// redirect). The button force-refreshes node detection and rebuilds the
+// dashboard so it never shows the stale "not installed" empty state.
+function showSetupComplete(){
+  const gate = $('#backupGate');
+  const html = `
+    <div class="card" style="margin-top:14px;border-color:rgba(0,232,122,0.35)">
+      <h3 style="color:var(--green)">✅ ${esc(cap(state.node))} installed and started</h3>
+      <p class="ns-instr" style="margin-top:-4px">Your node is running and beginning to sync. Open the dashboard to monitor it.</p>
+      <div class="svc-row" style="margin-top:14px">
+        <button class="btn btn-green" id="openDashBtn">Completed — Open Dashboard →</button>
+      </div>
+    </div>`;
+  if(gate) gate.innerHTML = html;
+  else { const log=$('#setupLog'); if(log) log.insertAdjacentHTML('beforeend', html); }
+  const b=$('#openDashBtn'); if(b) b.addEventListener('click', openDashboardFresh);
+}
+
+// Re-detect nodes (fresh) and hard-rebuild the dashboard, then switch to it.
+async function openDashboardFresh(){
+  await loadNodes(true);
+  const dash = $('#view-dashboard'); if(dash) delete dash.dataset.loaded;
+  state.setupStep = 1;
+  switchView('dashboard');
 }
 
 // Validator-only: on-chain registration steps that remain after the service is
@@ -2522,7 +2550,7 @@ function showValidatorNextSteps(addr){
         <button class="btn btn-green" id="nsGoDash">Go to Dashboard</button>
       </div>
     </div>`;
-  const go=$('#nsGoDash'); if(go) go.addEventListener('click', ()=>{ state.setupStep=1; switchView('dashboard'); });
+  const go=$('#nsGoDash'); if(go) go.addEventListener('click', openDashboardFresh);
 }
 
 // =============================================================================

@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.26"
+UI_VERSION = "1.7.27"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1589,6 +1589,11 @@ def index():
 
 @app.route("/api/nodes")
 def api_nodes():
+    # ?fresh=1 forces a re-detection (bypassing the ~10s detect cache) -- used
+    # right after a setup finalize so the just-installed node shows immediately
+    # instead of the operator having to wait out the cache / manually refresh.
+    if request.args.get("fresh"):
+        _detect_cache["data"] = None
     det = detect_nodes()
     out = {}
     for t in NODE_TYPES:
