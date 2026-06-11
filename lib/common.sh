@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.48"
+readonly COMMON_VERSION="1.1.49"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -1346,20 +1346,12 @@ pick_source_version() {
 
     print_info "Available versions to build:" >&2
     local i=1
-    for tag in "${tags[@]}"; do
-        local marker=""
-        # Mark a tag as "current" only when HEAD is EXACTLY at that tag.
-        [[ "$exact_tag" == "$tag" ]] && marker="  <-- current"
-        [[ $i -eq 1 ]] && [[ -z "$marker" ]] && marker="  <-- recommended (latest ${network:-tag})"
-        printf "  %2d) %s%s\n" "$i" "$tag" "$marker" >&2
-        (( ++i ))
-    done
-    local tag_count=$(( i - 1 ))
 
-    local main_label="main (bleeding-edge dev branch"
+    # 1) main -- the latest current version (default). Marked per where HEAD sits
+    #    relative to origin/main.
+    local main_label="main (latest current version"
     [[ "$network" == "devnet" ]] && main_label="main (recommended for devnet"
     main_label="${main_label})"
-    # Mark main according to where HEAD sits relative to origin/main.
     case "$on_main_state" in
         tip)
             main_label="${main_label}  <-- current"
@@ -1370,15 +1362,24 @@ pick_source_version() {
             main_label="${main_label}  <-- ${behind_count} ${commits_word} newer than your build"
             ;;
     esac
+    local main_opt=$i; printf "  %2d) %s\n" "$main_opt" "$main_label" >&2; (( ++i ))
 
-    local main_opt=$i;   printf "  %2d) %s\n"                                 "$main_opt" "$main_label" >&2; (( ++i ))
+    # 2) latest tagged release (most recent detected tag), if any exist.
+    local tag_opt=0 latest_tag=""
+    if [[ ${#tags[@]} -gt 0 ]]; then
+        latest_tag="${tags[0]}"
+        local tag_label="${latest_tag}  (latest ${network:-tagged} release)"
+        [[ "$exact_tag" == "$latest_tag" ]] && tag_label="${latest_tag}  <-- current"
+        tag_opt=$i; printf "  %2d) %s\n" "$tag_opt" "$tag_label" >&2; (( ++i ))
+    fi
+
     local custom_opt=$i; printf "  %2d) Custom branch / tag / commit hash\n"  "$custom_opt" >&2; (( ++i ))
     local cancel_opt=$i; printf "  %2d) Cancel\n"                              "$cancel_opt" >&2
     echo "" >&2
 
     local choice
     read -r -p "  Select [1-${cancel_opt}] (default 1): " choice >&2
-    # Empty input -> select the recommended (1)
+    # Empty input -> select main (1)
     [[ -z "$choice" ]] && choice=1
 
     if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
@@ -1400,8 +1401,8 @@ pick_source_version() {
         echo "main"
         return 0
     fi
-    if (( choice >= 1 && choice <= tag_count )); then
-        echo "${tags[$((choice - 1))]}"
+    if (( tag_opt > 0 && choice == tag_opt )); then
+        echo "$latest_tag"
         return 0
     fi
 
