@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.7"
+readonly SCRIPT_VERSION="1.2.8"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -769,6 +769,15 @@ step_create_service() {
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
+    # The UI runs setup as two separate processes (keygen, then finalize). The
+    # source build that sets BINARY_PATH happens in keygen, so in the finalize
+    # process BINARY_PATH is empty here -- which would make the wrapper run the
+    # system `node` (Node.js) instead of the Telcoin binary. Source builds always
+    # install to ${INSTALL_DIR}/telcoin-network, so re-derive it.
+    if [[ "${INSTALL_METHOD:-}" != "docker" && -z "${BINARY_PATH:-}" ]]; then
+        BINARY_PATH="${INSTALL_DIR}/telcoin-network"
+    fi
+
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
         local bls_pass
         bls_pass=$(cat "${passphrase_file}" 2>/dev/null || echo '')
@@ -817,6 +826,13 @@ WantedBy=multi-user.target
 EOF
 
     else
+        # Guard: never write a wrapper with an empty binary path (it would exec
+        # the system `node` and fail with "node: bad option: --datadir").
+        if [[ -z "${BINARY_PATH:-}" || ! -x "${BINARY_PATH}" ]]; then
+            print_error "Node binary not found at '${BINARY_PATH:-<unset>}' -- cannot write start wrapper."
+            print_info  "Expected the source build to install it at ${INSTALL_DIR}/telcoin-network."
+            exit 1
+        fi
         local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
 
         if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
