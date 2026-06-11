@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.24"
+UI_VERSION = "1.7.25"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1522,6 +1522,15 @@ def latest_docker_image():
     return DEFAULT_DOCKER_IMAGE
 
 
+def latest_source_tag():
+    """Latest source-build tag for the setup wizard's 'latest release' option,
+    mirroring the CLI menu. The published docker tags and the git tags share the
+    same vX.Y.Z-adiri naming (the CLI filters source tags by the same -adiri
+    suffix), so we reuse the registry's latest tag. '' when unavailable."""
+    img = latest_docker_image()
+    return img.split(":")[-1] if ":" in img else ""
+
+
 def system_info():
     """Host facts for the System view."""
     hostname = ""
@@ -2425,6 +2434,7 @@ def api_setup_defaults():
         "public_ip": detect_public_ip(),
         "internal_ip": detect_internal_ip(),
         "docker_image": latest_docker_image(),
+        "source_ref": latest_source_tag(),
         "service_user": "telcoin",
         "service_group": "telcoin",
     })
