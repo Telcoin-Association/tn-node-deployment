@@ -460,7 +460,7 @@ const state = {
   setupStep: 1,
   setup: { network:'adiri', method:'source', passphrase:'loadcredential',
            eth:'', bls:'', blsConfirm:'', buildRef:'main', dockerImage:'', publicIp:'', internalIp:'',
-           sourceMode:'main', customRef:'', sourceRef:'',   // source-version picker (mirrors CLI: main/latest tag/custom)
+           sourceMode:'main', customRef:'', sourceRef:'', sourceModeTouched:false,   // source-version picker (mirrors CLI: main/latest tag/custom)
            instance:'', rpcPublic:false, serviceUser:'', serviceGroup:'', defaultsLoaded:false },
   preflight: null,
   buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
@@ -2125,6 +2125,10 @@ async function loadSetupDefaults(){
   if(!s.internalIp)   s.internalIp   = d.internal_ip || '';
   if(!s.dockerImage)  s.dockerImage  = d.docker_image || '';
   if(!s.sourceRef)    s.sourceRef    = d.source_ref || '';
+  // Network-aware default (mirrors the CLI): testnet should default to the latest
+  // tagged release (main is bleeding-edge and not network-compatible). Only until
+  // the operator changes it. devnet keeps main.
+  if(!s.sourceModeTouched && s.sourceRef && isTestnetNetwork()) s.sourceMode='tag';
   if(!s.serviceUser)  s.serviceUser  = d.service_user || 'telcoin';
   if(!s.serviceGroup) s.serviceGroup = d.service_group || 'telcoin';
   if(state.view==='setup') renderSetup();   // refresh to show prefilled values
@@ -2189,6 +2193,8 @@ function stepSourceField(){
         : ''}</div>`;
 }
 
+function isTestnetNetwork(){ return ['adiri','testnet'].includes(state.setup.network); }
+
 // Snapshot the source picker into state and derive the effective build ref.
 function captureSource(){
   const s = state.setup;
@@ -2220,7 +2226,7 @@ function stepMethod(body){
     state.setup.method=r.dataset.m; renderSetup();
   }));
   // Re-render when the source-version mode changes (to show/hide the custom box).
-  const sm=$('#mSourceMode'); if(sm) sm.addEventListener('change', ()=>{ captureSource(); renderSetup(); });
+  const sm=$('#mSourceMode'); if(sm) sm.addEventListener('change', ()=>{ state.setup.sourceModeTouched=true; captureSource(); renderSetup(); });
   $('#methodNext').addEventListener('click', ()=>{
     if(state.setup.method==='source') captureSource();
     if($('#mDockerImage')) state.setup.dockerImage=$('#mDockerImage').value.trim();

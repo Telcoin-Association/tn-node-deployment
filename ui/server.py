@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.27"
+UI_VERSION = "1.7.28"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1522,13 +1522,36 @@ def latest_docker_image():
     return DEFAULT_DOCKER_IMAGE
 
 
+# Source-build refs are GIT tags (what `cargo build` checks out), which are a
+# DIFFERENT, more up-to-date set than the docker registry tags -- e.g. GitHub may
+# carry v0.10.0-adiri while the registry still lags on v0.9.x. So the wizard's
+# source "latest release" must come from git, not the registry.
+TN_SOURCE_REPO = "https://github.com/Telcoin-Association/telcoin-network.git"
+_source_tag_cache = {"ts": 0.0, "data": None}
+
+
 def latest_source_tag():
-    """Latest source-build tag for the setup wizard's 'latest release' option,
-    mirroring the CLI menu. The published docker tags and the git tags share the
-    same vX.Y.Z-adiri naming (the CLI filters source tags by the same -adiri
-    suffix), so we reuse the registry's latest tag. '' when unavailable."""
-    img = latest_docker_image()
-    return img.split(":")[-1] if ":" in img else ""
+    """Latest clean `vX.Y.Z-adiri` source-build git tag from GitHub (via
+    `git ls-remote --tags`, no clone needed) -- the source-of-truth for source
+    builds, matching the CLI menu. Highest semver wins; patch-suffixed tags
+    (…-adiri-foo) are ignored. Cached 5 min. '' on failure."""
+    now = time.time()
+    c = _source_tag_cache
+    if c["data"] is not None and now - c["ts"] < 300:
+        return c["data"]
+    rc, out, _ = run(["git", "ls-remote", "--tags", TN_SOURCE_REPO], timeout=20)
+    best_key, best_tag = None, ""
+    if rc == 0 and out:
+        for line in out.splitlines():
+            m = re.search(r"refs/tags/(v(\d+)\.(\d+)\.(\d+)-adiri)$", line)
+            if not m:
+                continue
+            key = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+            if best_key is None or key > best_key:
+                best_key, best_tag = key, m.group(1)
+    if best_tag:
+        c["ts"], c["data"] = now, best_tag
+    return best_tag
 
 
 def system_info():

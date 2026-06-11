@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.49"
+readonly COMMON_VERSION="1.1.50"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -1377,10 +1377,18 @@ pick_source_version() {
     local cancel_opt=$i; printf "  %2d) Cancel\n"                              "$cancel_opt" >&2
     echo "" >&2
 
+    # Network-aware default: testnet/mainnet operators should get the latest
+    # tagged release (main is bleeding-edge and not network-compatible); devnet
+    # follows main. main stays listed first either way.
+    local default_opt=$main_opt
+    if [[ "$network" != "devnet" && $tag_opt -gt 0 ]]; then
+        default_opt=$tag_opt
+    fi
+
     local choice
-    read -r -p "  Select [1-${cancel_opt}] (default 1): " choice >&2
-    # Empty input -> select main (1)
-    [[ -z "$choice" ]] && choice=1
+    read -r -p "  Select [1-${cancel_opt}] (default ${default_opt}): " choice >&2
+    # Empty input -> the network-aware default
+    [[ -z "$choice" ]] && choice=$default_opt
 
     if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
         print_warn "Invalid selection." >&2
