@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.51"
+readonly SCRIPT_VERSION="1.1.52"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -247,6 +247,12 @@ download_updates() {
 
     local success=0
     local failed=0
+    # Track the UI bundle separately so the UI redeploy is gated on the UI files
+    # themselves succeeding -- not on an unrelated script's download failing.
+    local ui_success=0 ui_total=0
+    for entry in "${FILES_TO_UPDATE[@]}"; do
+        [[ "${entry%%:*}" == ui/* ]] && (( ++ui_total )) || true
+    done
 
     for entry in "${FILES_TO_UPDATE[@]}"; do
         local local_path remote_path
@@ -311,6 +317,7 @@ download_updates() {
             echo -e "${GREEN}OK${RESET}"
         fi
         (( ++success ))
+        [[ "$local_path" == ui/* ]] && (( ++ui_success )) || true
     done
 
     echo ""
@@ -331,21 +338,28 @@ download_updates() {
 
     # Web UI: the source now sits under ${SCRIPT_DIR}/ui (user-owned, no sudo
     # needed for the fetch). If the UI is installed, redeploy it so the new code
-    # actually loads; otherwise just point the operator at the installer. Only
-    # attempt this when every download succeeded.
-    if [[ "$ui_update" == "true" && $failed -eq 0 ]]; then
+    # actually loads; otherwise just point the operator at the installer. Gated on
+    # the UI BUNDLE downloading cleanly (ui_success == ui_total) -- an unrelated
+    # script's download failure no longer blocks the UI redeploy.
+    if [[ "$ui_update" == "true" && $ui_total -gt 0 && $ui_success -eq $ui_total ]]; then
         if [[ -d /opt/telcoin-ui ]]; then
-            print_info "Redeploying the web UI (requires sudo)..."
+            echo ""
+            print_info "The web UI was updated. Redeploying it now -- ${BOLD}you may be"
+            print_info "prompted for your sudo password${RESET} (the redeploy needs root)."
             if sudo bash "${SCRIPT_DIR}/ui/install-ui.sh" --update; then
-                print_ok "Web UI redeployed and restarted"
+                print_ok "Web UI redeployed and restarted -- no manual step needed"
             else
-                print_warn "UI redeploy failed -- run it manually:"
+                print_warn "Automatic UI redeploy failed -- finish it manually:"
                 print_info "  sudo bash ${SCRIPT_DIR}/ui/install-ui.sh --update"
             fi
         else
             print_info "UI source updated -- run the installer to set it up:"
             print_info "  sudo bash ${SCRIPT_DIR}/ui/install-ui.sh"
         fi
+        echo ""
+    elif [[ "$ui_update" == "true" && $ui_total -gt 0 ]]; then
+        print_warn "Some UI files failed to download -- skipping the UI redeploy."
+        print_info "Re-run the updater, then if needed: sudo bash ${SCRIPT_DIR}/ui/install-ui.sh --update"
         echo ""
     fi
 }

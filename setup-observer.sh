@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.11"
+readonly SCRIPT_VERSION="1.2.12"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -1046,6 +1046,14 @@ EXTERNAL_WORKER_ADDR=${WORKER_MULTIADDR:-}
 EOF
     chmod 600 "$meta_file"
     print_ok "Node metadata written: ${meta_file}"
+
+    # Start each install with a clean log. The unit appends
+    # (StandardOutput=append:), so a re-install would otherwise concatenate its
+    # output onto the previous install's log -- mixing old + new runs in the file
+    # the UI's "download full log" serves. Truncate in place (preserves the
+    # service-user ownership); systemd recreates a fresh file for a new install.
+    [[ -f "${LOG_DIR}/${SERVICE_NAME}.log" ]] && : > "${LOG_DIR}/${SERVICE_NAME}.log" || true
+    [[ -f "${LOG_DIR}/${SERVICE_NAME}-error.log" ]] && : > "${LOG_DIR}/${SERVICE_NAME}-error.log" || true
 
     echo ""
     if json_mode || confirm "Start the observer node now?"; then

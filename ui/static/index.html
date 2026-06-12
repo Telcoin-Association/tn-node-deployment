@@ -925,6 +925,10 @@ async function renderValidatorDashboard(c){
   const trunc = (x,n=20) => { if(x==null||x==='') return null; const t=String(x); return t.length>n? t.slice(0,n)+'…' : t; };
   const detailRow = (label, val, full) =>
     `<div class="kv"><span class="k">${esc(label)}</span><span class="v"${full?` title="${esc(full)}"`:''}>${val}</span></div>`;
+  // Like detailRow but with a copy button (truncated value, full on hover/copy).
+  const detailRowCopy = (label, full) => full
+    ? `<div class="kv"><span class="k">${esc(label)}</span><span class="v" title="${esc(full)}">${esc(trunc(full))} <button class="copy-btn" title="Copy ${esc(label)}" onclick="copyToClipboard('${esc(full)}','${esc(label)}')">⧉</button></span></div>`
+    : `<div class="kv"><span class="k">${esc(label)}</span><span class="v">—</span></div>`;
 
   c.innerHTML = `
   <div class="dash">
@@ -1015,8 +1019,8 @@ async function renderValidatorDashboard(c){
         <div class="kv"><span class="k">Execution Address</span><span class="v">${vv.execution_address
           ? `${esc(vv.execution_address)} <button class="copy-btn" title="Copy Execution Address" onclick="copyToClipboard('${esc(vv.execution_address)}','Execution Address')">⧉</button>`
           : '—'}</span></div>
-        ${detailRow('BLS Public Key', vv.bls_public_key?esc(trunc(vv.bls_public_key)):'—', vv.bls_public_key)}
-        ${detailRow('Authority ID', vv.authority_id?esc(trunc(vv.authority_id)):'—', vv.authority_id)}
+        ${detailRowCopy('BLS Public Key', vv.bls_public_key)}
+        ${detailRowCopy('Authority ID', vv.authority_id)}
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
           ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
           : '—'}</span></div>
