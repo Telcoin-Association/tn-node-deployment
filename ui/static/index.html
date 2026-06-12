@@ -964,7 +964,7 @@ async function renderValidatorDashboard(c){
     <!-- §3 Stake -->
     <div class="group-label">Stake</div>
     <div class="dgrid dgrid-5">
-      ${statCard('Stake Amount', fmtTel(requiredStake)||'—', 'accent', um(requiredStake, 'required per validator'))}
+      ${statCard('Required Stake', fmtTel(requiredStake)||'—', 'accent', um(requiredStake, 'required per validator'))}
       ${statCard('Amount Staked', fmtTel(actualStaked)||'—', 'accent', um(actualStaked, 'staked on-chain'))}
       ${statCard('Claimable Rewards', fmtTel(rewards)||'—', '', um(rewards, 'rewards'))}
       ${statCard('Activation Epoch', vv.activation_epoch!=null?fmtNum(vv.activation_epoch):'—', '', um(vv.activation_epoch, 'epoch'))}
