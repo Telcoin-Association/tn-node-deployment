@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.33"
+UI_VERSION = "1.7.34"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1724,9 +1724,10 @@ def api_status(node_type):
     # Dynamic network identity from the live chain id.
     slug, net_name, net_configured = resolve_network(chain_id, t)
 
-    # Network consensus block (public RPC tn_latestConsensusHeader) + lag.
+    # Network consensus block + epoch (public RPC tn_latestConsensusHeader) + lag.
     # Lag is local - network: positive => local ahead, negative => local behind.
     net_block = network_consensus_block(chain_id)
+    net_epoch = network_consensus_epoch(chain_id)
     local_cons_block = None
     if consensus.get("block") is not None:
         try:
@@ -1820,6 +1821,7 @@ def api_status(node_type):
         "peers": peers,
         "consensus": consensus,
         "network_consensus_block": net_block,
+        "network_epoch": net_epoch,
         "consensus_lag": consensus_lag,
         "disk": disk_for(data_path or "/"),
         "memory": mem_info(),
@@ -3184,15 +3186,15 @@ def _to_int_block(num):
     return None
 
 
-def network_consensus_block(chain_id):
-    """Network consensus block number from the network's public RPC endpoint(s)
-    (tn_latestConsensusHeader -> result.number), cached 60s per chain id. Tries
-    each endpoint in order with a short 3s timeout (so one down node never stalls
-    the dashboard) and returns the first success. None when the chain has no
-    public RPC, or when every endpoint fails (with a short stale-cache grace)."""
+def _network_consensus(chain_id):
+    """{'block':int|None, 'epoch':int|None} from the network's public RPC
+    endpoint(s) (tn_latestConsensusHeader), cached 60s per chain id. Tries each
+    endpoint in order with a short 3s timeout (so one down node never stalls the
+    dashboard) and returns the first success. {} when the chain has no public RPC,
+    or when every endpoint fails (with a short stale-cache grace)."""
     rpcs = NETWORK_PUBLIC_RPC.get(chain_id)
     if not rpcs:
-        return None
+        return {}
     now = time.time()
     entry = _netcons_cache.get(chain_id)
     cached = entry["data"] if entry else None
@@ -3203,7 +3205,7 @@ def network_consensus_block(chain_id):
         "jsonrpc": "2.0", "method": "tn_latestConsensusHeader",
         "params": [], "id": 1,
     }).encode()
-    block = None
+    out = None
     for rpc in rpcs:
         try:
             req = urllib.request.Request(
@@ -3216,19 +3218,35 @@ def network_consensus_block(chain_id):
             result = data.get("result") if isinstance(data, dict) else None
             if isinstance(result, dict):
                 block = _to_int_block(result.get("number"))
-            if block is not None:
-                break
+                epoch = None
+                headers = (result.get("sub_dag") or {}).get("headers") or []
+                if headers and headers[0].get("epoch") is not None:
+                    epoch = headers[0].get("epoch")
+                if block is not None:
+                    out = {"block": block, "epoch": epoch}
+                    break
         except Exception:
             continue
 
-    if block is None:
+    if out is None:
         # Every endpoint failed: serve a recent stale value within a grace window.
         if cached is not None and now - entry["ts"] < 300:
             return cached
-        return None
+        return {}
 
-    _netcons_cache[chain_id] = {"ts": now, "data": block}
-    return block
+    _netcons_cache[chain_id] = {"ts": now, "data": out}
+    return out
+
+
+def network_consensus_block(chain_id):
+    """Network consensus block number (None when unavailable)."""
+    return _network_consensus(chain_id).get("block")
+
+
+def network_consensus_epoch(chain_id):
+    """Network's current consensus epoch (None when unavailable). Lets a syncing
+    node compare its local epoch against the network's."""
+    return _network_consensus(chain_id).get("epoch")
 
 
 def _http_get_json(url, timeout=6):

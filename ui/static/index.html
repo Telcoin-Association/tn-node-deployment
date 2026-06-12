@@ -734,6 +734,21 @@ async function renderDashboard(){
     lagMeta='network block '+fmtNum(ncb);
   }
 
+  // Epoch: the tile value is the LOCAL node's epoch; the subtitle compares it to
+  // the network's current epoch so a syncing node's progress is visible.
+  const localEpoch = cons.epoch!=null ? Number(cons.epoch) : null;
+  const netEpoch   = s.network_epoch!=null ? Number(s.network_epoch) : null;
+  let epochVal = localEpoch!=null ? fmtNum(localEpoch) : '—';
+  let epochCls = 'accent', epochMeta;
+  if(s.consensus_unsupported && localEpoch==null){ epochMeta='unavailable on this version'; }
+  else if(netEpoch==null){ epochMeta = localEpoch!=null ? 'local node epoch' : 'no data'; }
+  else if(localEpoch==null){ epochMeta='network epoch '+fmtNum(netEpoch); }
+  else {
+    const behind = netEpoch - localEpoch;
+    if(behind<=0){ epochMeta='network '+fmtNum(netEpoch)+' · in sync'; epochCls='green'; }
+    else { epochMeta='network '+fmtNum(netEpoch)+' · '+fmtNum(behind)+' behind'; epochCls='yellow'; }
+  }
+
   // Monitoring tiles.
   const errc = s.log_error_count_1h;
   const errCls = errc==null?'':(errc>10?'red':(errc>0?'yellow':'green'));
@@ -773,7 +788,7 @@ async function renderDashboard(){
       ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
       ${statCard('Last Block', s.block_age?esc(s.block_age):'—', '', 'execution tip')}
       ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (s.consensus_unsupported&&cons.block==null?'unavailable on this version':(cons.age?esc(cons.age):''))+'<span id="consTrace"></span>')}
-      ${statCard('Current Epoch', cons.epoch!=null?fmtNum(cons.epoch):'—', 'accent', s.consensus_unsupported&&cons.epoch==null?'unavailable on this version':'consensus epoch')}
+      ${statCard('Current Epoch', epochVal, epochCls, epochMeta)}
       ${statCard('Network Block', nbVal, nbCls, nbMeta)}
       ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
     </div>
