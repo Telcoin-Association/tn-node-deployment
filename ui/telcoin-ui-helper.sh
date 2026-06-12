@@ -23,6 +23,7 @@
 #   telcoin-ui-helper log-clear       <observer|validator>
 #   telcoin-ui-helper config-set      <observer|validator> <field> <value>
 #   telcoin-ui-helper set-hostname    <observer|validator> <name>
+#   telcoin-ui-helper set-logrotate   <size e.g. 1G>
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
 #   telcoin-ui-helper node-remove     <observer|validator> <service|data|keys>
@@ -368,6 +369,36 @@ cmd_set_hostname() {
     echo "ok"
 }
 
+# Node-log rotation. One config for both node types (the unit appends to
+# /var/log/telcoin/*.log). copytruncate is required: the node holds the log open
+# (StandardOutput=append:), so logrotate must copy-then-truncate in place rather
+# than rename, or the node keeps writing to the rotated-away inode.
+LOGROTATE_CONF="/etc/logrotate.d/telcoin"
+
+write_logrotate_conf() {
+    local size="$1"
+    cat > "$LOGROTATE_CONF" <<EOF
+# Managed by the Telcoin Node Manager. Node logs rotate when they reach 'size'.
+/var/log/telcoin/*.log {
+    size ${size}
+    rotate 3
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+    chmod 644 "$LOGROTATE_CONF"
+}
+
+cmd_set_logrotate() {
+    local size="$1"
+    [[ "$size" =~ ^[0-9]+[KMG]$ ]] || die "invalid size: ${size:-<empty>} (e.g. 500M, 1G)"
+    write_logrotate_conf "$size"
+    echo "ok"
+}
+
 # =============================================================================
 # Firewall subcommands -- thin wrappers around firewall-setup.sh --json. Only
 # the three node ports may be toggled; SSH/policy/etc are never reachable here.
@@ -607,6 +638,7 @@ main() {
         log-clear)       shift; cmd_log_clear "${1:-}" ;;
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         set-hostname)    shift; cmd_set_hostname "${1:-}" "${2:-}" ;;
+        set-logrotate)   shift; cmd_set_logrotate "${1:-}" ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
         node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" "${3:-}" ;;

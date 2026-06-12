@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.32"
+UI_VERSION = "1.7.33"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1055,6 +1055,21 @@ def advertised_node_name(t, det=None):
         return ""
     m = re.search(r'(?m)^hostname:\s*["\']?(.*?)["\']?\s*$', text)
     return m.group(1).strip() if m else ""
+
+
+LOGROTATE_CONF = "/etc/logrotate.d/telcoin"
+
+
+def logrotate_size():
+    """Current node-log rotation trigger size from the telcoin logrotate config
+    (e.g. '1G'). '' when not configured/readable."""
+    try:
+        with open(LOGROTATE_CONF, "r") as f:
+            text = f.read()
+    except (OSError, IOError):
+        return ""
+    m = re.search(r"(?m)^\s*size\s+(\S+)", text)
+    return m.group(1) if m else ""
 
 
 def node_identity(t, det=None):
@@ -2266,6 +2281,7 @@ def api_config(node_type):
         "docker_image": docker_image_ref(node_type),
         "version": node_version(node_type).get("ref", ""),
         "advertised_name": advertised_node_name(node_type),
+        "log_rotate_size": logrotate_size(),
     })
 
 
@@ -2339,6 +2355,26 @@ def api_set_hostname(node_type):
     # reads the new name.
     rc, out, err = run(["sudo", "-n", HELPER, "set-hostname", node_type, name],
                        timeout=30)
+    ok = rc == 0 and out.strip().splitlines()[-1:] == ["ok"]
+    return jsonify({"ok": ok, "error": "" if ok else (err or out or "set failed")})
+
+
+# Node-log rotation size (one global logrotate config for both node types).
+_LOGROTATE_SIZE_RE = re.compile(r"^[0-9]+[KMG]$")
+
+
+@app.route("/api/config/<node_type>/logrotate", methods=["POST"])
+def api_set_logrotate(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    blocked = _external_block(node_type)  # external docker logs aren't on disk here
+    if blocked:
+        return blocked
+    data = request.get_json(silent=True) or {}
+    size = str(data.get("size") or "").strip().upper()
+    if not _LOGROTATE_SIZE_RE.match(size):
+        return jsonify({"ok": False, "error": "invalid size -- use e.g. 500M or 1G"}), 400
+    rc, out, err = run(["sudo", "-n", HELPER, "set-logrotate", size], timeout=15)
     ok = rc == 0 and out.strip().splitlines()[-1:] == ["ok"]
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "set failed")})
 

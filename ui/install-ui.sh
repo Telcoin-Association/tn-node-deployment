@@ -224,6 +224,10 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set val
 # helper + server before use.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname observer *
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname validator *
+# Set-logrotate helper -- rewrites /etc/logrotate.d/telcoin with the node-log
+# rotation size (e.g. 1G). Value wildcarded, validated (^[0-9]+[KMG]$) in the
+# helper + server.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-logrotate *
 # Firewall helper -- read-only status, plus open/close for ONLY the three node
 # ports. Enumerated fully (3 ports x on|off), so NO wildcard is needed. SSH /
 # default-policy / password-auth are intentionally never reachable from here.
@@ -278,6 +282,31 @@ else
     err "Sudoers validation failed -- removing ${SUDOERS_FILE}"
     rm -f "${SUDOERS_FILE}"
     exit 1
+fi
+
+# ---- 7b. Node-log rotation --------------------------------------------------
+# Seed a logrotate config for the node logs so /var/log/telcoin doesn't grow
+# unbounded (the unit appends). Default 1G; PRESERVE an existing file so an
+# operator's custom size (set from the UI) survives UI updates. copytruncate is
+# required because the node holds the log open.
+LOGROTATE_CONF="/etc/logrotate.d/telcoin"
+if [[ -f "${LOGROTATE_CONF}" ]]; then
+    ok "Node-log rotation already configured (${LOGROTATE_CONF}) -- left as-is"
+else
+    cat > "${LOGROTATE_CONF}" <<'LREOF'
+# Managed by the Telcoin Node Manager. Node logs rotate when they reach 'size'.
+/var/log/telcoin/*.log {
+    size 1G
+    rotate 3
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+LREOF
+    chmod 644 "${LOGROTATE_CONF}"
+    ok "Node-log rotation configured: rotate at 1G (${LOGROTATE_CONF})"
 fi
 
 # ---- 8. Ownership -----------------------------------------------------------
