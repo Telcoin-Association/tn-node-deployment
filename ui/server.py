@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.29"
+UI_VERSION = "1.7.30"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1031,6 +1031,32 @@ def read_node_info_text(t, det=None):
         return ""
 
 
+def network_config_path(t, det=None):
+    """Path to the node's network-config (YAML) in its data dir. For external
+    nodes that's the container's host bind path; for scripts nodes the data dir."""
+    det = det or detect_type(t)
+    if det.get("mode") == "external":
+        base = det.get("node_info_path")
+    else:
+        base = data_dir(t)
+    return os.path.join(base, "network-config") if base else ""
+
+
+def advertised_node_name(t, det=None):
+    """The node's advertised name -- the `hostname` field in network-config (what
+    the UI calls 'Advertised Node Name'). '' when unset or unreadable."""
+    path = network_config_path(t, det)
+    if not path:
+        return ""
+    try:
+        with open(path, "r") as f:
+            text = f.read()
+    except (OSError, IOError):
+        return ""
+    m = re.search(r'(?m)^hostname:\s*["\']?(.*?)["\']?\s*$', text)
+    return m.group(1).strip() if m else ""
+
+
 def node_identity(t, det=None):
     """Identity dict (bls key, execution address, advertised addresses, name,
     version, authority id) for a node, plus `unsupported`. Tries tn_info; on
@@ -1757,6 +1783,7 @@ def api_status(node_type):
         "rpc_ok": rpc_ok,
         "rpc_port": port,
         "node_id": node_id_val,
+        "advertised_name": advertised_node_name(t, det),
         "internal_ip": internal_ip(),
         "data_dir": data_path,
         "config_file": config_file,
@@ -2220,6 +2247,7 @@ def api_config(node_type):
             "passphrase_method": "",
             "docker_image": det.get("image") or "",
             "version": ident.get("version") or "",
+            "advertised_name": advertised_node_name(node_type, det),
         })
 
     cfg = parse_service_file(node_type)
@@ -2237,6 +2265,7 @@ def api_config(node_type):
         "passphrase_method": detect_passphrase_method(node_type),
         "docker_image": docker_image_ref(node_type),
         "version": node_version(node_type).get("ref", ""),
+        "advertised_name": advertised_node_name(node_type),
     })
 
 
@@ -2285,6 +2314,33 @@ def api_config_set(node_type):
     if not config_value_ok(field, value):
         return jsonify({"error": "invalid value for field"}), 400
     return _update_stream(["sudo", "-n", HELPER, "config-set", node_type, field, value])
+
+
+# Advertised node name ("Advertised Node Name" in the UI) = the network-config
+# hostname. Lives in a different file than the unit/wrapper edit-config.sh edits,
+# so it has its own route + helper subcommand. Conservative charset.
+_NODE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+@app.route("/api/config/<node_type>/hostname", methods=["POST"])
+def api_set_hostname(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip()
+    if not _NODE_NAME_RE.match(name):
+        return jsonify({"ok": False,
+                        "error": "invalid name (letters, digits, . _ - ; start "
+                                 "alphanumeric; max 64 chars)"}), 400
+    # The helper writes network-config + .node-meta and restarts the node so it
+    # reads the new name.
+    rc, out, err = run(["sudo", "-n", HELPER, "set-hostname", node_type, name],
+                       timeout=30)
+    ok = rc == 0 and out.strip().splitlines()[-1:] == ["ok"]
+    return jsonify({"ok": ok, "error": "" if ok else (err or out or "set failed")})
 
 
 # =============================================================================

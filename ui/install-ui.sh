@@ -219,6 +219,11 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper log-clear vali
 # value against a per-field regex inside the helper before edit-config.sh runs.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set observer *
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set validator *
+# Set-hostname helper -- writes the network-config 'hostname' (Advertised Node
+# Name) and restarts the node. Value wildcarded here, charset-validated in the
+# helper + server before use.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname observer *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname validator *
 # Firewall helper -- read-only status, plus open/close for ONLY the three node
 # ports. Enumerated fully (3 ports x on|off), so NO wildcard is needed. SSH /
 # default-policy / password-auth are intentionally never reachable from here.

@@ -811,6 +811,7 @@ async function renderDashboard(){
       <div class="card">
         <h3>Node Details</h3>
         <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
           ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
           : '—'}</span></div>
@@ -912,8 +913,11 @@ async function renderValidatorDashboard(c){
 
   // Per-card meta: dimmed "unavailable" when the source field is null.
   const um = (x, normal) => x==null ? '<span style="color:var(--text3)">unavailable</span>' : (normal||'');
-  const stakeAmt = vv.balance_breakdown ? vv.balance_breakdown.stake
-                 : (vv.stake_config ? vv.stake_config.stake_amount : null);
+  // Required stake = the protocol's per-validator stake (getCurrentStakeConfig);
+  // amount staked = what THIS validator actually has staked on-chain
+  // (getBalanceBreakdown). They usually match, but the operator wants to see both.
+  const requiredStake = vv.stake_config ? vv.stake_config.stake_amount : null;
+  const actualStaked  = vv.balance_breakdown ? vv.balance_breakdown.stake : null;
   const rewards  = vv.rewards_tel!=null ? vv.rewards_tel
                  : (vv.balance_breakdown ? vv.balance_breakdown.rewards : null);
 
@@ -949,7 +953,8 @@ async function renderValidatorDashboard(c){
 
     <!-- §2 Consensus -->
     <div class="group-label">Consensus</div>
-    <div class="dgrid dgrid-4">
+    <div class="dgrid dgrid-5">
+      ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
       ${statCard('Current Epoch', vv.current_epoch!=null?fmtNum(vv.current_epoch):'—', 'accent', um(vv.current_epoch, 'on-chain epoch'))}
       ${statCard('Consensus Block', vv.block!=null?fmtNum(vv.block):'—', 'accent', (vv.consensus_unsupported&&vv.block==null)?'<span style="color:var(--text3)">unavailable on this version</span>':um(vv.block, vv.epoch!=null?'epoch '+esc(vv.epoch):''))}
       ${statCard('Last Block Time', vv.age?esc(vv.age):'—', '', um(vv.age, 'latest commit'))}
@@ -958,8 +963,9 @@ async function renderValidatorDashboard(c){
 
     <!-- §3 Stake -->
     <div class="group-label">Stake</div>
-    <div class="dgrid dgrid-4">
-      ${statCard('Stake Amount', fmtTel(stakeAmt)||'—', 'accent', um(stakeAmt, 'staked'))}
+    <div class="dgrid dgrid-5">
+      ${statCard('Stake Amount', fmtTel(requiredStake)||'—', 'accent', um(requiredStake, 'required per validator'))}
+      ${statCard('Amount Staked', fmtTel(actualStaked)||'—', 'accent', um(actualStaked, 'staked on-chain'))}
       ${statCard('Claimable Rewards', fmtTel(rewards)||'—', '', um(rewards, 'rewards'))}
       ${statCard('Activation Epoch', vv.activation_epoch!=null?fmtNum(vv.activation_epoch):'—', '', um(vv.activation_epoch, 'epoch'))}
       ${statCard('Stake Version', vv.stake_version!=null?esc(String(vv.stake_version)):'—', '', um(vv.stake_version, 'version'))}
@@ -1005,6 +1011,7 @@ async function renderValidatorDashboard(c){
         <h3>Node Details</h3>
         <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
         <div class="kv"><span class="k">Node Name</span><span class="v">${vv.name?esc(vv.name):'—'}</span></div>
+        <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Execution Address</span><span class="v">${vv.execution_address
           ? `${esc(vv.execution_address)} <button class="copy-btn" title="Copy Execution Address" onclick="copyToClipboard('${esc(vv.execution_address)}','Execution Address')">⧉</button>`
           : '—'}</span></div>
@@ -1478,6 +1485,7 @@ async function renderConfig(){
     const rows = [
       ['Container', curNode().container],
       ['Image', d.docker_image],
+      ['Advertised Node Name', d.advertised_name],
       ['RPC Port', d.rpc_port],
       ['External Primary', d.external_primary],
       ['External Worker', d.external_worker],
@@ -1554,6 +1562,17 @@ async function renderConfig(){
         return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${cell}</span></div>`;
       }).join('')}
     </div>
+    <div class="card" style="margin-top:14px">
+      <h3 style="margin:0 0 4px">Advertised Node Name</h3>
+      <p class="muted" style="font-size:13px;margin:0 0 12px">This is the public name of your ${esc(cap(t))}. Saving writes it to the node's <span class="mono">network-config</span> and restarts the node${t==='validator'?' <strong style="color:var(--yellow)">(a validator restart drops consensus rounds during the brief downtime)</strong>':''}.</p>
+      <div class="kv" style="align-items:center">
+        <span class="k">Advertised Node Name</span>
+        <span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+          <input id="advName" value="${esc(d.advertised_name||'')}" placeholder="e.g. my-validator" autocomplete="off">
+          <button class="btn btn-green" id="advNameSave">Save</button>
+        </span>
+      </div>
+    </div>
     <div class="card" id="cfgProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3>
       <div class="log-body" id="cfgLog" style="height:240px"></div>
@@ -1566,6 +1585,25 @@ async function renderConfig(){
     const value=($('#cfg_'+field)?.value||'').trim();
     saveConfigField(field, value, b);
   }));
+  const anb=$('#advNameSave'); if(anb) anb.addEventListener('click', ()=>saveAdvertisedName(anb));
+}
+
+// Save the Advertised Node Name (network-config hostname) via its own route --
+// it edits a different file than the rest of config, then restarts the node.
+async function saveAdvertisedName(btn){
+  const t = state.node;
+  const name = ($('#advName')?.value||'').trim();
+  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)){
+    toast('Invalid name — letters, digits, . _ - ; start alphanumeric; max 64','error'); return;
+  }
+  if(t==='validator' && !confirm('Set the advertised name and restart the validator now? This causes brief downtime.')) return;
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Saving…'; }
+  const r = await api('/api/config/'+t+'/hostname', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name}),
+  });
+  if(btn){ btn.disabled=false; btn.textContent='Save'; }
+  if(r && r.ok){ toast('Advertised name saved — node restarting','success'); }
+  else toast('Failed to set name: '+((r&&r.error)||'unknown error'),'error');
 }
 
 function saveConfigField(field, value, btn){

@@ -22,6 +22,7 @@
 #   telcoin-ui-helper restart-count   <observer|validator>
 #   telcoin-ui-helper log-clear       <observer|validator>
 #   telcoin-ui-helper config-set      <observer|validator> <field> <value>
+#   telcoin-ui-helper set-hostname    <observer|validator> <name>
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
 #   telcoin-ui-helper node-remove     <observer|validator> <service|data|keys>
@@ -311,6 +312,62 @@ cmd_config_set() {
     exec bash "$CONFIG_SCRIPT" "--${t}" --json --set "${field}=${value}"
 }
 
+# Resolve a node's data dir (where network-config + node-info.yaml live) from its
+# .node-meta DATA_DIR, falling back to the conventional path.
+data_dir_for() {
+    local t="$1" meta="/etc/telcoin/${t}/.node-meta" dd=""
+    if [[ -f "$meta" ]]; then
+        dd="$(grep -m1 '^DATA_DIR=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
+    fi
+    [[ -n "$dd" ]] || dd="/var/lib/telcoin/${t}"
+    echo "$dd"
+}
+
+# Set the "Advertised Node Name" -- the `hostname` field in the node's
+# network-config YAML -- and restart the node so it reads the new value. Name is
+# charset-validated here (the server validates too). Mirrors the network-config
+# created by the node itself; only the hostname line is touched.
+cmd_set_hostname() {
+    local t="$1" name="$2"
+    require_type "$t"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid name: ${name:-<empty>}"
+
+    local dd nc
+    dd="$(data_dir_for "$t")"
+    [[ -d "$dd" ]] || die "data dir not found: $dd"
+    nc="${dd}/network-config"
+
+    if [[ -f "$nc" ]]; then
+        if grep -qE '^hostname:' "$nc"; then
+            sed -i -E "s#^hostname:.*#hostname: \"${name}\"#" "$nc" || die "failed to edit $nc"
+        else
+            printf 'hostname: "%s"\n' "$name" >> "$nc" || die "failed to append to $nc"
+        fi
+    else
+        # No file yet (node hasn't created it): a minimal file is fine -- the node
+        # fills every other field from its serde defaults on read.
+        printf 'hostname: "%s"\n' "$name" > "$nc" || die "failed to create $nc"
+    fi
+
+    # Keep ownership matching the data dir so the (unprivileged) node can read it.
+    local owner
+    owner="$(stat -c '%U:%G' "$dd" 2>/dev/null || true)"
+    [[ -n "$owner" ]] && chown "$owner" "$nc" 2>/dev/null || true
+
+    # Record in .node-meta as the persistent source of truth (survives data reads
+    # and is available if a future version needs it re-applied on each start).
+    local meta="/etc/telcoin/${t}/.node-meta"
+    if [[ -f "$meta" ]]; then
+        sed -i '/^ADVERTISED_NODE_NAME=/d' "$meta" 2>/dev/null || true
+        printf 'ADVERTISED_NODE_NAME=%s\n' "$name" >> "$meta"
+    fi
+
+    # Restart so the node reads the new network-config. --no-block returns once
+    # the restart job is queued (validators have a long stop window).
+    systemctl restart --no-block "telcoin-${t}" || die "failed to restart telcoin-${t}"
+    echo "ok"
+}
+
 # =============================================================================
 # Firewall subcommands -- thin wrappers around firewall-setup.sh --json. Only
 # the three node ports may be toggled; SSH/policy/etc are never reachable here.
@@ -549,6 +606,7 @@ main() {
         restart-count)   shift; cmd_restart_count "${1:-}" ;;
         log-clear)       shift; cmd_log_clear "${1:-}" ;;
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
+        set-hostname)    shift; cmd_set_hostname "${1:-}" "${2:-}" ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
         node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" "${3:-}" ;;
