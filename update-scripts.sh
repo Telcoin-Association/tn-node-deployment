@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.52"
+readonly SCRIPT_VERSION="1.1.53"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -38,6 +38,7 @@ print_sep()  { echo "-----------------------------------------------------------
 declare -a SCRIPTS=(
     "setup-observer.sh:setup-observer.sh:SCRIPT_VERSION"
     "setup-validator.sh:setup-validator.sh:SCRIPT_VERSION"
+    "install-caddy.sh:install-caddy.sh:SCRIPT_VERSION"
     "check-node.sh:check-node.sh:SCRIPT_VERSION"
     "edit-config.sh:edit-config.sh:SCRIPT_VERSION"
     "firewall-setup.sh:firewall-setup.sh:SCRIPT_VERSION"

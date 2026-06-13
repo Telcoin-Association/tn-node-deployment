@@ -149,7 +149,7 @@ fi
 # firewall-setup.sh + remove-node.sh + setup-*.sh drive the UI's Firewall,
 # Danger Zone and Setup features via their --json modes. Same root-owned dir /
 # pattern as edit-config.sh.
-for s in firewall-setup.sh remove-node.sh setup-observer.sh setup-validator.sh; do
+for s in firewall-setup.sh remove-node.sh setup-observer.sh setup-validator.sh install-caddy.sh; do
     if [[ -f "${REPO_DIR}/${s}" ]]; then
         install -o root -g root -m 0755 "${REPO_DIR}/${s}" "${UPDATE_DIR}/${s}"
         ok "${s} installed to ${UPDATE_DIR} (root:root)"
@@ -228,6 +228,13 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname v
 # rotation size (e.g. 1G). Value wildcarded, validated (^[0-9]+[KMG]$) in the
 # helper + server.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-logrotate *
+# Caddy (external dashboard access) helper -- status/dns-check/enable/disable.
+# enable takes <domain> <username> (wildcarded, validated in the helper +
+# install-caddy.sh); the password travels in TN_CADDY_PASSWORD (env_keep below).
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-status
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-dns-check *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-enable *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-disable
 # Firewall helper -- read-only status, plus open/close for ONLY the three node
 # ports. Enumerated fully (3 ports x on|off), so NO wildcard is needed. SSH /
 # default-policy / password-auth are intentionally never reachable from here.
@@ -257,7 +264,7 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove va
 # vars and the BLS passphrase in TN_BLS_PASSPHRASE; env_keep preserves them
 # across sudo so NO config or secret is ever placed in argv. The helper
 # validates every value before invoking setup-<type>.sh --json.
-Defaults!/usr/local/sbin/telcoin-ui-helper env_keep += "TN_BLS_PASSPHRASE TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_PASSPHRASE_METHOD TN_SETUP_ADDRESS TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_INSTANCE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP TN_SETUP_RPC_PUBLIC TN_SETUP_SERVICE_USER TN_SETUP_SERVICE_GROUP"
+Defaults!/usr/local/sbin/telcoin-ui-helper env_keep += "TN_BLS_PASSPHRASE TN_CADDY_PASSWORD TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_PASSPHRASE_METHOD TN_SETUP_ADDRESS TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_INSTANCE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP TN_SETUP_RPC_PUBLIC TN_SETUP_SERVICE_USER TN_SETUP_SERVICE_GROUP"
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen validator
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize observer

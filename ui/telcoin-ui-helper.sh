@@ -24,6 +24,10 @@
 #   telcoin-ui-helper config-set      <observer|validator> <field> <value>
 #   telcoin-ui-helper set-hostname    <observer|validator> <name>
 #   telcoin-ui-helper set-logrotate   <size e.g. 1G>
+#   telcoin-ui-helper caddy-status
+#   telcoin-ui-helper caddy-dns-check <domain>
+#   telcoin-ui-helper caddy-enable    <domain> <username>   (password via TN_CADDY_PASSWORD)
+#   telcoin-ui-helper caddy-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
 #   telcoin-ui-helper node-remove     <observer|validator> <service|data|keys>
@@ -400,6 +404,33 @@ cmd_set_logrotate() {
 }
 
 # =============================================================================
+# External dashboard access (Caddy) -- thin wrappers around install-caddy.sh
+# --json phases. status/check-dns emit one JSON object; enable/disable stream
+# JSON events. The dashboard password arrives via TN_CADDY_PASSWORD (env only --
+# env_keep'd by sudoers, never argv/logs), like the BLS passphrase.
+# =============================================================================
+CADDY_SCRIPT="/opt/telcoin-ui-update/install-caddy.sh"
+
+caddy_script_ready() { [[ -f "$CADDY_SCRIPT" ]] || die "caddy script not found: $CADDY_SCRIPT"; }
+
+cmd_caddy_status() { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --phase=status; }
+cmd_caddy_disable() { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --phase=disable; }
+
+cmd_caddy_dns_check() {
+    local domain="$1"; caddy_script_ready
+    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    exec bash "$CADDY_SCRIPT" --json --phase=check-dns --domain "$domain"
+}
+
+cmd_caddy_enable() {
+    local domain="$1" username="$2"; caddy_script_ready
+    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    [[ -n "$username" && "$username" =~ ^[A-Za-z0-9._-]{2,32}$ ]] || die "invalid username"
+    [[ -n "${TN_CADDY_PASSWORD:-}" ]] || die "TN_CADDY_PASSWORD not set"
+    exec bash "$CADDY_SCRIPT" --json --phase=enable --domain "$domain" --username "$username"
+}
+
+# =============================================================================
 # Firewall subcommands -- thin wrappers around firewall-setup.sh --json. Only
 # the three node ports may be toggled; SSH/policy/etc are never reachable here.
 # =============================================================================
@@ -639,6 +670,10 @@ main() {
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         set-hostname)    shift; cmd_set_hostname "${1:-}" "${2:-}" ;;
         set-logrotate)   shift; cmd_set_logrotate "${1:-}" ;;
+        caddy-status)    cmd_caddy_status ;;
+        caddy-dns-check) shift; cmd_caddy_dns_check "${1:-}" ;;
+        caddy-enable)    shift; cmd_caddy_enable "${1:-}" "${2:-}" ;;
+        caddy-disable)   cmd_caddy_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
         node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" "${3:-}" ;;
