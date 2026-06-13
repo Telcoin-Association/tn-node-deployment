@@ -30,7 +30,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # so error paths exit cleanly (print_error goes to stderr, which the UI surfaces).
 die() { print_error "$*"; exit 1; }
 
-readonly SCRIPT_VERSION="1.1.1"
+readonly SCRIPT_VERSION="1.1.2"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly CADDYFILE_ORIG="/etc/caddy/Caddyfile.tn-orig"
 readonly UI_UPSTREAM="127.0.0.1:8080"
@@ -163,7 +163,11 @@ write_caddy_site() {
         printf '%s {\n' "$domain"
         printf '    encode zstd gzip\n'
         printf '    reverse_proxy %s {\n' "$UI_UPSTREAM"
-        printf '        header_up -%s\n' "$PUBLIC_HEADER"
+        # header_up is a Set, which REPLACES any client-supplied value -- so this
+        # alone is unforgeable (a public client cannot strip it; the SSH-tunnel
+        # path never carries it). Do NOT also delete it: Caddy applies header ops
+        # in Add->Set->Delete order, so a "header_up -<field>" would run AFTER the
+        # set and wipe it, leaving the public path with full write access.
         printf '        header_up %s "1"\n' "$PUBLIC_HEADER"
         printf '        flush_interval -1\n'
         printf '    }\n'
