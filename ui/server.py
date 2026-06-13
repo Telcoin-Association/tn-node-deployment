@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.34"
+UI_VERSION = "1.7.35"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -488,6 +488,46 @@ def _external_block(t):
     if is_external(t):
         return jsonify({"ok": False, "error": "read-only (external node)"}), 403
     return None
+
+
+# =============================================================================
+# PUBLIC (read-only) ACCESS GUARD
+#
+# The dashboard is reachable two ways: directly over the SSH tunnel
+# (127.0.0.1:8080 -- trusted, full management), and -- when install-caddy is
+# enabled -- publicly via the Caddy reverse proxy. Caddy stamps an unforgeable
+# X-TN-Dashboard-Public header on every proxied request (it deletes any
+# client-supplied value then sets its own), which the SSH path never carries.
+# Public requests are READ-ONLY: every write route is refused 403 here, server-
+# side, so management is impossible over the public path even if the UI's gating
+# were bypassed. Management requires the SSH tunnel.
+# =============================================================================
+
+def is_public_request():
+    return bool(request.headers.get("X-TN-Dashboard-Public"))
+
+
+def _is_write_request():
+    """True for requests that mutate node/host state. POST/PUT/DELETE/PATCH are
+    always writes; a few GET routes are SSE 'action' streams (config-set, update
+    prepare/apply, node remove) and count as writes too."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        p = request.path
+        return (p.endswith("/set")
+                or p.startswith("/api/update/prepare/")
+                or p.startswith("/api/update/apply/")
+                or p.startswith("/api/node/remove/"))
+    return True
+
+
+@app.before_request
+def _enforce_public_readonly():
+    if is_public_request() and _is_write_request():
+        return jsonify({
+            "ok": False,
+            "error": "read-only (public access) -- connect via the SSH tunnel "
+                     "for management",
+        }), 403
 
 
 def _iso_uptime_seconds(iso):
@@ -1670,6 +1710,9 @@ def api_nodes():
             "container": d.get("container"),
             "image": d.get("image"),
         }
+    # Read-only when reached over the public Caddy path (vs the SSH tunnel). The
+    # UI uses this to hide every management control and show a read-only banner.
+    out["public_readonly"] = is_public_request()
     # Never cache node detection -- after a remove/install the UI must see the
     # change immediately (the empty-state switch keys off this).
     resp = jsonify(out)

@@ -410,12 +410,10 @@ select{
     </button>
   </div>
 
-  <!-- read-only (externally-deployed node) banner -->
+  <!-- read-only banner (public access or externally-deployed node) -->
   <div id="roBanner" style="display:none;margin:0 0 16px;padding:12px 16px;border-radius:10px;
     border:1px solid rgba(255,184,0,0.4);background:rgba(255,184,0,0.10);color:var(--text);font-size:13px">
-    <strong style="color:var(--yellow)">⚠ Monitoring only.</strong>
-    This node was not installed via Telcoin Node Scripts (externally-deployed docker container).
-    Management actions are disabled.
+    <span id="roBannerMsg"></span>
   </div>
 
   <!-- DASHBOARD -->
@@ -466,15 +464,30 @@ const state = {
   preflight: null,
   buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
   network: { chainId:null, name:'', slug:'', configured:false },  // selected node's network
+  publicReadonly: false,   // true when reached over the public Caddy path (vs SSH tunnel)
 };
 
-// Selected node's detection record + read-only (external docker) helpers. An
-// external node is monitored only -- every mutating control is hidden/disabled.
+// Read-only helpers. Two sources of read-only:
+//  - publicReadonly: reached over the public Caddy reverse proxy -> ALL management
+//    is disabled (server-enforced too); management requires the SSH tunnel.
+//  - the selected node is an external docker container we don't manage.
 function curNode(){ return state.nodes[state.node] || {}; }
-function isReadonly(){ return curNode().mode === 'external'; }
+function isReadonly(){ return state.publicReadonly || curNode().mode === 'external'; }
 function updateReadonlyBanner(){
-  const b = $('#roBanner'); if(!b) return;
-  b.style.display = isReadonly() ? 'block' : 'none';
+  const b = $('#roBanner'), m = $('#roBannerMsg'); if(!b || !m) return;
+  if(state.publicReadonly){
+    m.innerHTML = '<strong style="color:var(--yellow)">🔒 Read-only (public access).</strong> '
+      + 'Management is disabled over the public dashboard. Connect via the SSH tunnel '
+      + '(localhost) to manage this node.';
+    b.style.display = 'block';
+  } else if(curNode().mode === 'external'){
+    m.innerHTML = '<strong style="color:var(--yellow)">⚠ Monitoring only.</strong> '
+      + 'This node was not installed via Telcoin Node Scripts (externally-deployed '
+      + 'docker container). Management actions are disabled.';
+    b.style.display = 'block';
+  } else {
+    b.style.display = 'none';
+  }
 }
 
 const $ = (s,r=document)=>r.querySelector(s);
@@ -568,7 +581,7 @@ async function loadNodes(fresh){
   // fresh=true bypasses the server's ~10s detect cache (used right after a setup
   // finalize so the new node is detected immediately).
   const d = await api('/api/nodes' + (fresh ? '?fresh=1' : ''));
-  if(d && !d.error) state.nodes = d;
+  if(d && !d.error){ state.nodes = d; state.publicReadonly = !!d.public_readonly; }
   for(const t of ['observer','validator']){
     const n = state.nodes[t] || {installed:false,status:'not installed'};
     const dot = $('#dot-'+t), st = $('#stat-'+t);
@@ -579,13 +592,15 @@ async function loadNodes(fresh){
   syncReadonlyChrome();
 }
 
-// Hide controls that have no meaning for an externally-deployed (read-only) node:
-// the Setup tab (you can't install over a node we don't manage). Other gating is
-// done inline where each view renders.
+// Hide controls/tabs with no meaning in read-only mode. Setup is hidden whenever
+// read-only (external node or public). Settings (Jaeger/tracing -- all writes) is
+// hidden on the public path; it stays available for an external-node-only case.
 function syncReadonlyChrome(){
   const ro = isReadonly();
   const setupTab = document.querySelector('.tab[data-view="setup"]');
   if(setupTab) setupTab.style.display = ro ? 'none' : '';
+  const settingsTab = document.querySelector('.tab[data-view="settings"]');
+  if(settingsTab) settingsTab.style.display = state.publicReadonly ? 'none' : '';
 }
 
 // =============================================================================
@@ -1685,10 +1700,11 @@ async function renderUpdate(){
   const t = state.node;
   if(!state.nodes[t]?.installed){ emptyState(c, cap(t)); return; }
   if(isReadonly()){
+    const msg = state.publicReadonly
+      ? 'Updates are managed over the SSH tunnel, not the public dashboard. Connect via the SSH tunnel (localhost) to update this node.'
+      : 'Not available for externally deployed nodes. This node runs as a docker container that the Node Manager does not manage; update it through your own deployment tooling.';
     c.innerHTML = `<div class="card"><h3>Update · ${esc(cap(t))}</h3>
-      <p class="muted" style="font-size:13px;margin-top:8px">Not available for externally deployed nodes.
-      This node runs as a docker container that the Node Manager does not manage; update it through
-      your own deployment tooling.</p></div>`;
+      <p class="muted" style="font-size:13px;margin-top:8px">${msg}</p></div>`;
     return;
   }
   c.innerHTML = `
