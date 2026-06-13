@@ -26,11 +26,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly CADDYFILE_ORIG="/etc/caddy/Caddyfile.tn-orig"
 readonly UI_UPSTREAM="127.0.0.1:8080"
 readonly PUBLIC_HEADER="X-TN-Dashboard-Public"
+# First line of every Caddyfile we generate -- lets us tell our own managed
+# config apart from one the operator (or another tool) set up by hand.
+readonly CADDY_MARKER="# Managed by the Telcoin Node Manager"
+
+# Set true (interactive only, after explicit confirmation) to allow overwriting a
+# Caddyfile we did not create. The JSON/UI path never sets it -- it refuses to
+# clobber a foreign config and tells the operator to resolve it on the CLI.
+CADDY_OVERWRITE_FOREIGN=false
 
 # =============================================================================
 # JSON / NON-INTERACTIVE MODE (mirrors setup-*.sh)
@@ -107,6 +115,18 @@ caddy_port_holder() {
     echo "${proc:-unknown}"
 }
 
+# 0 (true) when /etc/caddy/Caddyfile holds a REAL config we did not create -- so we
+# never silently clobber an operator's existing Caddy setup. Our own managed file
+# (CADDY_MARKER), the stock package default, and an empty/comment-only file are all
+# treated as safe to (re)write.
+caddy_foreign_config() {
+    [[ -f "$CADDYFILE" ]] || return 1
+    grep -q "$CADDY_MARKER" "$CADDYFILE" 2>/dev/null && return 1          # ours
+    grep -q "The Caddyfile is an easy way to configure" "$CADDYFILE" 2>/dev/null && return 1  # package default
+    grep -qE '^[[:space:]]*[^#[:space:]]' "$CADDYFILE" 2>/dev/null || return 1               # empty / comments only
+    return 0
+}
+
 caddy_validate_domain() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
 }
@@ -179,8 +199,13 @@ do_enable() {
 
     local h80 h443
     h80=$(caddy_port_holder 80); h443=$(caddy_port_holder 443)
-    [[ -n "$h80" ]]  && die "port 80 is already in use by '${h80}'. Free it (e.g. stop ${h80}) before enabling external access."
-    [[ -n "$h443" ]] && die "port 443 is already in use by '${h443}'. Free it (e.g. stop ${h443}) before enabling external access."
+    [[ -n "$h80" ]]  && die "port 80 is in use by '${h80}' -- Caddy needs it and cannot share with another web server. Stop/remove it first (Apache: 'sudo systemctl disable --now apache2'), or run 'sudo bash install-caddy.sh' on the server to be guided through removing it."
+    [[ -n "$h443" ]] && die "port 443 is in use by '${h443}' -- Caddy needs it and cannot share with another web server. Stop/remove it first (Apache: 'sudo systemctl disable --now apache2'), or run 'sudo bash install-caddy.sh' on the server to be guided through removing it."
+
+    # Never overwrite a Caddy config we did not create unless explicitly told to.
+    if caddy_foreign_config && [[ "$CADDY_OVERWRITE_FOREIGN" != "true" ]]; then
+        die "an existing Caddy configuration at ${CADDYFILE} was not created by the Node Manager -- refusing to overwrite it. Run 'sudo bash install-caddy.sh' on the server to review and confirm, or back up and remove the existing config first."
+    fi
 
     install_caddy_pkg
 
@@ -261,6 +286,65 @@ run_json_disable() {
 # =============================================================================
 # INTERACTIVE
 # =============================================================================
+
+# Map a listening process name to "service|friendly|purgable". Empty when it's
+# not a web server we know how to stop. On Ubuntu the package and systemd unit
+# names match (apache2/nginx/lighttpd), so one token serves both.
+caddy_known_webserver() {
+    case "$1" in
+        apache2)  echo "apache2|Apache|true" ;;
+        nginx)    echo "nginx|Nginx|false" ;;
+        lighttpd) echo "lighttpd|Lighttpd|false" ;;
+        *)        echo "" ;;
+    esac
+}
+
+# Interactive: if Apache (or another known web server) is holding 80/443, offer to
+# stop/disable it -- or remove it outright -- so Caddy can bind; else let the user
+# quit and handle it themselves. Caddy already running its OWN config is NOT a
+# conflict here (caddy_port_holder ignores caddy); a foreign Caddyfile is handled
+# separately by caddy_foreign_config.
+resolve_port_conflicts() {
+    local procs p info svc friendly purgable ans
+    procs=$( { caddy_port_holder 80; caddy_port_holder 443; } | grep -v '^$' | sort -u || true)
+    [[ -z "$procs" ]] && return 0
+
+    while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        info=$(caddy_known_webserver "$p")
+        if [[ -z "$info" ]]; then
+            die "ports 80/443 are in use by '${p}', which I do not know how to stop safely. Stop or reconfigure it manually, then re-run."
+        fi
+        IFS='|' read -r svc friendly purgable <<< "$info"
+        echo ""
+        print_warn "${friendly} (${svc}) is using a port Caddy needs (80/443) -- they cannot run together."
+        while true; do
+            if [[ "$purgable" == "true" ]]; then
+                read -r -p "  [s] stop & disable ${svc} / [p] stop, disable & remove (purge) / [q] quit: " ans
+            else
+                read -r -p "  [s] stop & disable ${svc} / [q] quit: " ans
+            fi
+            case "$ans" in
+                s|S) systemctl stop "$svc" 2>/dev/null || true
+                     systemctl disable "$svc" 2>/dev/null || true
+                     print_ok "Stopped and disabled ${svc}."; break ;;
+                p|P) [[ "$purgable" == "true" ]] || { print_warn "Choose s or q."; continue; }
+                     systemctl stop "$svc" 2>/dev/null || true
+                     systemctl disable "$svc" 2>/dev/null || true
+                     run_streamed apt-get purge -y "$svc"
+                     print_ok "Removed ${svc}."; break ;;
+                q|Q) print_info "Aborted. Free ports 80/443 (remove or reconfigure ${friendly}) and re-run."; exit 0 ;;
+                *)   ;;
+            esac
+        done
+    done <<< "$procs"
+
+    sleep 1
+    local h80 h443; h80=$(caddy_port_holder 80); h443=$(caddy_port_holder 443)
+    [[ -n "$h80" || -n "$h443" ]] && die "ports 80/443 are still in use (80:'${h80:-free}' 443:'${h443:-free}') -- cannot continue."
+    return 0
+}
+
 interactive_flow() {
     check_root
     print_header "External Dashboard Access (Caddy)  v${SCRIPT_VERSION}"
@@ -298,8 +382,9 @@ interactive_flow() {
     print_warn "BEFORE CONTINUING: create a DNS A record:"
     print_info "    ${domain}  ->  ${pub:-this servers public IP}"
     print_warn "If this host is behind NAT, point the record at your routers public IP"
-    print_warn "and forward ports 80 + 443 to this machine. Caddy needs them reachable"
-    print_warn "to obtain the TLS certificate (Lets Encrypt rate-limits failures)."
+    print_warn "and port-forward to this machine: 443/tcp is REQUIRED, 80/tcp recommended."
+    print_info "Caddy gets the certificate over 443 (TLS-ALPN). Forwarding 80 too adds the"
+    print_info "http->https redirect and a fallback path for certificate issuance/renewal."
     echo ""
     read -r -p "  Press Enter to check DNS propagation once the record is set..."
 
@@ -318,6 +403,21 @@ interactive_flow() {
             *) ;;
         esac
     done
+
+    # Free ports 80/443 (offer to stop/remove Apache et al.) before binding Caddy.
+    resolve_port_conflicts
+
+    # Don't silently clobber a Caddy config the operator already set up by hand.
+    if caddy_foreign_config; then
+        echo ""
+        print_warn "An existing Caddy configuration was found at ${CADDYFILE} (not created by the Node Manager)."
+        print_warn "Enabling external access will REPLACE it (the original is backed up to ${CADDYFILE_ORIG})."
+        read -r -p "  [o] back up and overwrite / [q] quit: " ans
+        case "$ans" in
+            o|O) CADDY_OVERWRITE_FOREIGN=true ;;
+            *)   print_info "Aborted. Re-run after migrating your Caddy config."; exit 0 ;;
+        esac
+    fi
 
     export TN_CADDY_PASSWORD="$pw"
     do_enable "$domain" "$username"
