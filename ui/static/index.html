@@ -561,8 +561,9 @@ $('#refreshBtn').addEventListener('click', ()=>{ loadNodes(); rerenderActive(); 
 function rerenderActive(){
   updateReadonlyBanner();
   syncReadonlyChrome();
-  // An external node has no Setup view; bounce to Dashboard if it's selected.
-  if(state.view==='setup' && isReadonly()){ switchView('dashboard'); return; }
+  // Setup has no meaning for an already-installed (or read-only) node; bounce to
+  // Dashboard if it's selected.
+  if(state.view==='setup' && setupHidden()){ switchView('dashboard'); return; }
   if(state.view==='dashboard') renderDashboard();
   if(state.view==='network') renderNetwork();
   if(state.view==='logs')   renderLogs();
@@ -592,13 +593,23 @@ async function loadNodes(fresh){
   syncReadonlyChrome();
 }
 
-// Hide controls/tabs with no meaning in read-only mode. Setup is hidden whenever
-// read-only (external node or public). Settings (Jaeger/tracing -- all writes) is
-// hidden on the public path; it stays available for an external-node-only case.
+// After any mutating action (config save, service control, settings toggle),
+// refresh node state AND re-render the active view so the change shows
+// immediately, not only on the next 15s auto-refresh tick.
+async function refreshAfterChange(){ await loadNodes(); rerenderActive(); }
+
+// Hide controls/tabs with no meaning in read-only mode. Settings (Jaeger/tracing
+// -- all writes) is hidden on the public path; it stays available for an
+// external-node-only case.
+// Setup is for INSTALLING a node, so it's hidden when the selected node is
+// already installed (manage it from Dashboard/Config) -- as well as in read-only
+// (external/public) mode. Per-node: a host with the observer installed but no
+// validator still shows Setup for the validator.
+function setupHidden(){ return isReadonly() || !!state.nodes[state.node]?.installed; }
+
 function syncReadonlyChrome(){
-  const ro = isReadonly();
   const setupTab = document.querySelector('.tab[data-view="setup"]');
-  if(setupTab) setupTab.style.display = ro ? 'none' : '';
+  if(setupTab) setupTab.style.display = setupHidden() ? 'none' : '';
   const settingsTab = document.querySelector('.tab[data-view="settings"]');
   if(settingsTab) settingsTab.style.display = state.publicReadonly ? 'none' : '';
 }
@@ -1262,8 +1273,8 @@ async function serviceAction(action){
   }else{
     toast(`${cap(state.node)} ${action} failed: ${r.error||'unknown error'}`, 'error');
   }
-  await loadNodes();
-  setTimeout(()=>{ if(state.view==='dashboard') renderDashboard(); }, 1500);
+  await refreshAfterChange();
+  setTimeout(refreshAfterChange, 1500);   // catch the post-(re)start settle
 }
 
 // =============================================================================
@@ -1646,7 +1657,7 @@ async function saveLogRotate(btn){
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({size}),
   });
   if(btn){ btn.disabled=false; btn.textContent='Save'; }
-  if(r && r.ok){ toast('Log rotation size set to '+size,'success'); renderConfig(); }
+  if(r && r.ok){ toast('Log rotation size set to '+size,'success'); refreshAfterChange(); }
   else toast('Failed to set log rotation: '+((r&&r.error)||'unknown error'),'error');
 }
 
@@ -1664,7 +1675,7 @@ async function saveAdvertisedName(btn){
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name}),
   });
   if(btn){ btn.disabled=false; btn.textContent='Save'; }
-  if(r && r.ok){ toast('Advertised name saved — node restarting','success'); }
+  if(r && r.ok){ toast('Advertised name saved — node restarting','success'); refreshAfterChange(); }
   else toast('Failed to set name: '+((r&&r.error)||'unknown error'),'error');
 }
 
@@ -1680,7 +1691,7 @@ function saveConfigField(field, value, btn){
   state.configES = new EventSource(url);
   state.configES.onmessage = ev=>{
     let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
-    if(d.event==='closed'){ stopConfigStream(); loadNodes(); renderConfig(); return; }
+    if(d.event==='closed'){ stopConfigStream(); refreshAfterChange(); return; }
     appendStream('#cfgLog', d);
     if(d.event==='done'){
       if(d.ok) toast('Saved '+field+' — node restarted','success');
@@ -2314,6 +2325,13 @@ const STEP_LABELS = ['Preflight','Network','Method','Configure','Review'];
 
 function renderSetup(){
   const c = $('#view-setup');
+  // Already installed -> the wizard would try to re-install; show a guard instead.
+  if(state.nodes[state.node]?.installed){
+    c.innerHTML = `<div class="card"><h3>${esc(cap(state.node))} is already installed</h3>
+      <p style="color:var(--text2);font-size:13px">This node is set up and managed by Telcoin Node Scripts. The Setup wizard only installs a node that isn't present yet — manage this one from the <strong>Dashboard</strong>, <strong>Config</strong>, or <strong>Update</strong> tabs.</p>
+      <button class="btn btn-out" onclick="switchView('dashboard')">Go to Dashboard →</button></div>`;
+    return;
+  }
   const steps = STEP_LABELS.map((l,i)=>{
     const n=i+1; const cls = n<state.setupStep?'done':(n===state.setupStep?'active':'');
     return `<div class="step ${cls}"><div class="num">${n<state.setupStep?'✓':n}</div><div class="slbl">${l}</div></div>`;
@@ -2812,7 +2830,7 @@ function fmtTel(x){
   if(!isFinite(n)) return null;
   return n.toLocaleString('en-US', {maximumFractionDigits:4}) + ' TEL';
 }
-function netLabel(n){ return ({testnet:'Adiri Testnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }
+function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
 // Nav-bar network status pill (Adiri Testnet, from /api/network/status)
@@ -2820,15 +2838,18 @@ function netLabel(n){ return ({testnet:'Adiri Testnet', mainnet:'Mainnet'})[n] |
 function setNavNetPill(d){
   const el = $('#navNetPill'); if(!el) return;
   const overall = d && d.overall;
+  // Name the network so the badge clearly reflects testnet vs devnet. Prefer the
+  // slug of the data actually fetched; fall back to the detected node's network.
+  const name = (d && d.slug && netLabel(d.slug)) || state.network.name || 'Network';
   if(!d || d.error || d.available===false || !overall || overall==='unknown'){
-    el.className = 'net-pill'; el.textContent = '⚪ Network: —'; return;
+    el.className = 'net-pill'; el.textContent = '⚪ ' + name + ': —'; return;
   }
   const map = {
-    up:       ['up',       '🟢 Network: Healthy'],
-    degraded: ['degraded', '🟡 Network: Degraded'],
-    down:     ['down',     '🔴 Network: Down'],
+    up:       ['up',       '🟢 ' + name + ': Healthy'],
+    degraded: ['degraded', '🟡 ' + name + ': Degraded'],
+    down:     ['down',     '🔴 ' + name + ': Down'],
   };
-  const [cls, txt] = map[overall] || ['', '⚪ Network: —'];
+  const [cls, txt] = map[overall] || ['', '⚪ ' + name + ': —'];
   el.className = 'net-pill ' + cls;
   el.textContent = txt;
 }
@@ -2863,7 +2884,10 @@ document.addEventListener('click', e=>{
   document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
   updateReadonlyBanner();
   syncReadonlyChrome();
-  renderDashboard();
+  // Await so state.network (chain id -> slug/name) is set before the first nav
+  // pill poll -- otherwise the pill would briefly show the testnet default on a
+  // devnet node until the next 60s tick.
+  await renderDashboard().catch(()=>{});
   startAutoRefresh();
   // Nav-bar network pill: refresh independently of the active view (60s; the
   // backend caches the external call anyway).
