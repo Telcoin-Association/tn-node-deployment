@@ -26,7 +26,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.0"
+# common.sh provides the print_*/check_root helpers but not die(); define our own
+# so error paths exit cleanly (print_error goes to stderr, which the UI surfaces).
+die() { print_error "$*"; exit 1; }
+
+readonly SCRIPT_VERSION="1.1.1"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly CADDYFILE_ORIG="/etc/caddy/Caddyfile.tn-orig"
 readonly UI_UPSTREAM="127.0.0.1:8080"
@@ -209,9 +213,13 @@ do_enable() {
 
     install_caddy_pkg
 
+    # caddy hash-password reads a newline-terminated line from stdin -- without the
+    # trailing \n it errors "EOF" and emits nothing. --algorithm bcrypt pins the
+    # output to a $2 hash (matching basic_auth's default; newer Caddy can default
+    # to argon2id). The password stays on stdin, never in argv/logs.
     local hash
-    hash=$(printf '%s' "$pw" | caddy hash-password 2>/dev/null || true)
-    [[ "$hash" == \$2* ]] || die "failed to hash the password"
+    hash=$(printf '%s\n' "$pw" | caddy hash-password --algorithm bcrypt 2>/dev/null || true)
+    [[ "$hash" == \$2* ]] || die "failed to hash the password (caddy hash-password produced no bcrypt hash)"
 
     [[ -f "$CADDYFILE" && ! -f "$CADDYFILE_ORIG" ]] && cp -p "$CADDYFILE" "$CADDYFILE_ORIG"
     write_caddy_site "$domain" "$username" "$hash"
