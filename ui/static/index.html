@@ -2490,8 +2490,8 @@ function stepConfigure(body){
   const rpcCards = isVal ? '' : `
     <div class="field"><label>RPC access</label>
       <div class="radio-cards">
-        <div class="rcard ${!s.rpcPublic?'sel':''}" data-rpc="private"><div class="rt">Private</div><div class="rd">RPC reachable from this server only. No firewall changes. Recommended.</div></div>
-        <div class="rcard ${s.rpcPublic?'sel':''}" data-rpc="public"><div class="rt">Public</div><div class="rd">Expose RPC via nginx (443); you open the firewall yourself.</div></div>
+        <div class="rcard sel" data-rpc="private"><div class="rt">Private</div><div class="rd">RPC reachable from this server only. No firewall changes. Recommended.</div></div>
+        <div class="rcard disabled"><div class="rt">Public <span style="font-size:11px;font-weight:600;color:var(--text2)">· coming soon</span></div><div class="rd">Public RPC isn't available yet — it'll be offered over Caddy (HTTPS) in a future update. Use Private for now.</div></div>
       </div></div>`;
   body.innerHTML = `<h3>Step 4 · Configure</h3>
     <div class="field"><label>${isVal?'Validator execution address':'Observer Ethereum address'} (0x…)</label><input id="cfgEth" placeholder="0x…" value="${esc(s.eth||'')}"></div>

@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.12"
+readonly SCRIPT_VERSION="1.2.13"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -460,19 +460,18 @@ step_config() {
     echo "              No firewall changes needed. Best for personal use,"
     echo "              development, and internal tooling."
     echo ""
-    echo "  2) Public                -- RPC endpoint accessible from the internet"
-    echo "              Requires nginx on port 443 (HTTPS)."
-    echo "              You will need to open port 443 on your firewall"
-    echo "              and router. An example nginx config will be"
-    echo "              generated for you to configure."
+    echo "  2) Public (coming soon)  -- not available yet. Public RPC will be"
+    echo "              offered over Caddy (HTTPS) in a future update so it"
+    echo "              can coexist with the dashboard on one server."
     echo ""
     local choice
     while true; do
-        read -r -p "  Enter choice [1/2]: " choice
+        read -r -p "  Enter choice [1]: " choice
+        choice="${choice:-1}"
         case "$choice" in
             1) ENABLE_PUBLIC_RPC="false"; break ;;
-            2) ENABLE_PUBLIC_RPC="true";  break ;;
-            *) print_warn "Please enter 1 or 2." ;;
+            2) print_warn "Public RPC isn't available yet (coming soon) -- using Private."; ENABLE_PUBLIC_RPC="false"; break ;;
+            *) print_warn "Please enter 1." ;;
         esac
     done
 
@@ -801,6 +800,10 @@ step_write_config() {
         read -r -p "  Press Enter once you have copied the chain config files: "
     fi
 
+    # Public RPC is "coming soon": ENABLE_PUBLIC_RPC is forced false everywhere
+    # (prompt + --rpc-public), so this never fires today. The real feature will be
+    # Caddy-based (so it can coexist with the dashboard on :443), not nginx; the
+    # nginx example writer below is retained only for reference until then.
     if [[ "$ENABLE_PUBLIC_RPC" == "true" ]]; then
         _write_nginx_config
     fi
@@ -1258,7 +1261,7 @@ main() {
             --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
-            --rpc-public)          [[ "${2:-}" == "true" ]] && ENABLE_PUBLIC_RPC="true" || ENABLE_PUBLIC_RPC="false"; shift 2 ;;
+            --rpc-public)          shift 2 ;;  # public RPC is coming soon (Caddy-based); always private for now
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             *) shift ;;
