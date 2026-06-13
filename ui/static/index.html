@@ -1932,7 +1932,9 @@ const CADDY_USER_RE = /^[A-Za-z0-9._-]{2,32}$/;
 async function renderCaddyCard(){
   const c = $('#caddyCard'); if(!c) return;
   const s = await api('/api/caddy/status');
-  const enabled = !!(s && (s.running || s.enabled));
+  // "enabled" means OUR managed reverse_proxy is in the Caddyfile -- NOT merely
+  // that the caddy service is up (it may be running an unrelated/default config).
+  const enabled = !!(s && s.enabled);
   if(enabled){
     c.innerHTML = `
       <h3>External Dashboard Access</h3>
