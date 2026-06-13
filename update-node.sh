@@ -31,8 +31,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.49"
-readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
+readonly SCRIPT_VERSION="1.1.50"
+# GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
+# readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
+# surfaced as "update checks aren't available on this host".
 readonly VERIFY_TIMEOUT_SECONDS=45
 
 NODE_TYPE=""
