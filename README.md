@@ -667,13 +667,33 @@ ssh -L 8080:localhost:8080 user@SERVER_IP
 # then open http://localhost:8080 in your browser
 ```
 
+### External dashboard access (optional, via Caddy)
+
+By default the UI is localhost-only (SSH tunnel). If you'd rather reach it at your own domain over HTTPS, `install-caddy` puts [Caddy](https://caddyserver.com) in front of it as a reverse proxy with automatic Let's Encrypt TLS and a login.
+
+Public access is **read-only** — Caddy stamps an unforgeable header that the UI server enforces, so every management action (start/stop, config edit, update, setup, remove) is refused over the public path. Full management stays on the **SSH tunnel** (localhost).
+
+Enable it from the UI under **Settings → External Dashboard Access**, or on the server:
+
+```bash
+sudo bash ~/telcoin-node-scripts/install-caddy.sh
+```
+
+You choose the domain, a login username (not forced to `admin`), and a password.
+
+- **Set the DNS A record first.** Point your domain at the server's public IP (the router's public IP if it's behind NAT) **before** enabling — Caddy requests the certificate on first start, so the record must already resolve or issuance fails and Let's Encrypt rate-limits retries. The wizard checks propagation before continuing.
+- **Ports:** forward **443/tcp (required)** to the node; **80/tcp is recommended** (it adds the http→https redirect and a fallback for certificate issuance/renewal) but not required — Caddy obtains the certificate over 443. The script opens 80/443 in `ufw` for you. (Inbound forwarding is off by default on most routers, so this is something you set up explicitly.)
+- **Conflicts:** Apache/Nginx and Caddy can't share ports 80/443. The interactive installer detects a conflicting web server and offers to stop, disable, or remove it (or quit), and it won't overwrite a Caddy config it didn't create.
+
+Disable any time from the same **Settings** panel.
+
 ### Traces & Settings
 
 The **Settings** tab can start/stop a local Jaeger instance and toggle OpenTelemetry tracing on the node; the **Traces** tab browses the collected spans. Jaeger's own UI (`:16686`) and the OTLP endpoint (`:4317`) are likewise localhost-only and reached through the same tunnel.
 
 ### Security model
 
-- Binds `127.0.0.1` only; never `0.0.0.0`. Reached exclusively via an SSH tunnel — no new firewall ports.
+- Binds `127.0.0.1` only; never `0.0.0.0`. Reached via an SSH tunnel — no new firewall ports — unless you opt into public access via Caddy (above), which is **read-only** and enforced server-side.
 - The UI runs as the unprivileged `telcoin-ui` user. Every privileged action goes through **one** root-owned, argument-validated helper at `/usr/local/sbin/telcoin-ui-helper`.
 - That user's `sudo` rights are pinned by an explicit, **no-wildcard** sudoers drop-in (`/etc/sudoers.d/telcoin-ui`): the six `systemctl start|stop|restart` lines for the two node services, plus the exact helper sub-commands. Nothing else.
 
