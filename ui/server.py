@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.36"
+UI_VERSION = "1.7.37"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -2660,6 +2660,80 @@ def api_setup_finalize(node_type):
         return jsonify({"error": "a node setup is already running -- wait for it to finish"}), 409
     return _update_stream(["sudo", "-n", HELPER, "setup-finalize", node_type],
                           env=env, capture_stderr=True, on_close=_end_setup)
+
+
+# =============================================================================
+# ROUTES -- external dashboard access (Caddy)
+#
+# Expose the Node Manager UI at https://<domain> behind Caddy (Let's Encrypt TLS
+# + basic_auth). dns-check/enable/disable are management actions: they run via
+# the root helper and -- being POSTs -- are refused on the public (read-only)
+# path by the before_request guard, so external access can only be configured
+# from the SSH tunnel. The password travels in TN_CADDY_PASSWORD (env only,
+# never argv/URL). status is a read (GET) and stays available either way.
+# =============================================================================
+
+_CADDY_DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+_CADDY_USER_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")
+
+
+@app.route("/api/caddy/status")
+def api_caddy_status():
+    rc, out, err = run(["sudo", "-n", HELPER, "caddy-status"], timeout=10)
+    try:
+        data = json.loads(out) if out else {}
+    except Exception:
+        data = {}
+    if not data:
+        data = {"installed": False, "running": False, "enabled": False,
+                "domain": "", "username": ""}
+        if rc != 0:
+            data["error"] = err or "status unavailable"
+    data["ok"] = True
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/caddy/dns-check", methods=["POST"])
+def api_caddy_dns_check():
+    data = request.get_json(silent=True) or {}
+    domain = (data.get("domain") or "").strip()
+    if not _CADDY_DOMAIN_RE.match(domain):
+        return jsonify({"ok": False, "error": "invalid domain"}), 400
+    rc, out, err = run(["sudo", "-n", HELPER, "caddy-dns-check", domain], timeout=20)
+    try:
+        res = json.loads(out) if out else {}
+    except Exception:
+        res = {}
+    if not res:
+        return jsonify({"ok": False, "error": err or "dns check failed"}), 200
+    res["ok"] = True
+    return jsonify(res)
+
+
+@app.route("/api/caddy/enable", methods=["POST"])
+def api_caddy_enable():
+    data = request.get_json(silent=True) or {}
+    domain = (data.get("domain") or "").strip()
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not _CADDY_DOMAIN_RE.match(domain):
+        return jsonify({"error": "invalid domain"}), 400
+    if not _CADDY_USER_RE.match(username):
+        return jsonify({"error": "invalid username (2-32 chars: letters, digits, . _ -)"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "password too short (min 8 chars)"}), 400
+    env = os.environ.copy()
+    env["TN_CADDY_PASSWORD"] = str(password)
+    return _update_stream(["sudo", "-n", HELPER, "caddy-enable", domain, username],
+                          env=env, capture_stderr=True)
+
+
+@app.route("/api/caddy/disable", methods=["POST"])
+def api_caddy_disable():
+    return _update_stream(["sudo", "-n", HELPER, "caddy-disable"],
+                          env=os.environ.copy(), capture_stderr=True)
 
 
 # =============================================================================

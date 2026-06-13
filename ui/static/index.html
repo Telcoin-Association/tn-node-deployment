@@ -1908,12 +1908,122 @@ async function renderSettings(){
       <div class="cmd-box mono">${esc(TUNNEL_CMD)}</div>
       <p style="color:var(--text2);font-size:13px;margin-top:12px">Then open
         <a href="http://localhost:16686" target="_blank" rel="noopener">http://localhost:16686</a></p>
-    </div>`;
+    </div>
+    <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>`;
 
   const r=$('#jRerun'); if(r) r.addEventListener('click', renderSettings);
   const a=$('#jStart'); if(a) a.addEventListener('click', ()=>jaegerControl('start', a));
   const s=$('#jStop'); if(s) s.addEventListener('click', ()=>jaegerControl('stop', s));
   const tr=$('#trToggle'); if(tr) tr.addEventListener('click', ()=>setTracing(t, !tracing, tr));
+  renderCaddyCard();
+}
+
+// =============================================================================
+// EXTERNAL DASHBOARD ACCESS (Caddy reverse proxy)
+//
+// Lives in Settings (host-wide, hidden on the public read-only path). Exposes the
+// dashboard at https://<domain> with Caddy's basic_auth + Let's Encrypt TLS.
+// DNS-first: the operator sets an A record, checks propagation here, then enables.
+// Public access is READ-ONLY (server-enforced); management stays on the SSH tunnel.
+// =============================================================================
+const CADDY_DOMAIN_RE = /^[A-Za-z0-9.-]+$/;
+const CADDY_USER_RE = /^[A-Za-z0-9._-]{2,32}$/;
+
+async function renderCaddyCard(){
+  const c = $('#caddyCard'); if(!c) return;
+  const s = await api('/api/caddy/status');
+  const enabled = !!(s && (s.running || s.enabled));
+  if(enabled){
+    c.innerHTML = `
+      <h3>External Dashboard Access</h3>
+      <p style="color:var(--text2);font-size:13px">This dashboard is reachable publicly via Caddy with a login. Public access is <strong>read-only</strong> — management actions stay on the SSH tunnel.</p>
+      <div class="kv"><span class="k">Status</span><span class="v">${s.running?'<span class="badge ok">running</span>':'<span class="badge warn">configured</span>'}</span></div>
+      <div class="kv"><span class="k">URL</span><span class="v">${s.domain?`<a href="https://${esc(s.domain)}" target="_blank" rel="noopener">https://${esc(s.domain)}</a>`:'—'}</span></div>
+      <div class="kv"><span class="k">Login user</span><span class="v">${esc(s.username||'—')}</span></div>
+      <div class="svc-row" style="margin-top:14px"><button class="btn btn-red" id="caddyDisable">Disable External Access</button></div>
+      <div class="log-body" id="caddyLog" style="display:none;height:160px;white-space:pre-wrap;margin-top:10px"></div>`;
+    const d=$('#caddyDisable'); if(d) d.addEventListener('click', caddyDisable);
+  } else {
+    c.innerHTML = `
+      <h3>External Dashboard Access</h3>
+      <p style="color:var(--text2);font-size:13px">Expose this dashboard at your own domain over HTTPS, behind Caddy with a login.
+        <strong>First set a DNS A record</strong> pointing your domain at this server's public IP, then check propagation below before enabling
+        (Caddy requests the TLS certificate on first start — if DNS isn't pointing here yet, issuance fails and Let's Encrypt rate-limits retries).
+        Public access is <strong>read-only</strong>; management stays on the SSH tunnel.</p>
+      <div class="field"><label>Dashboard domain</label><input id="caddyDomain" placeholder="dashboard.example.com" autocomplete="off"></div>
+      <div class="field"><label>Login username</label><input id="caddyUser" value="admin" autocomplete="off"></div>
+      <div class="grid two-col">
+        <div class="field"><label>Password (min 8 chars)</label><input id="caddyPw" type="password" autocomplete="new-password"></div>
+        <div class="field"><label>Confirm password</label><input id="caddyPw2" type="password" autocomplete="new-password"></div>
+      </div>
+      <div class="svc-row"><button class="btn btn-out" id="caddyDns">Check DNS</button><button class="btn btn-green" id="caddyEnable">Enable External Access</button></div>
+      <div id="caddyDnsResult" style="margin-top:10px;font-size:13px"></div>
+      <div class="log-body" id="caddyLog" style="display:none;height:200px;white-space:pre-wrap;margin-top:10px"></div>`;
+    const dn=$('#caddyDns'); if(dn) dn.addEventListener('click', caddyDnsCheck);
+    const en=$('#caddyEnable'); if(en) en.addEventListener('click', caddyEnable);
+  }
+}
+
+async function caddyDnsCheck(){
+  const domain=($('#caddyDomain').value||'').trim();
+  const out=$('#caddyDnsResult'); if(!out) return;
+  if(!CADDY_DOMAIN_RE.test(domain)){ out.innerHTML='<span style="color:var(--red)">Enter a valid domain first.</span>'; return; }
+  out.innerHTML='Checking DNS…';
+  const r = await api('/api/caddy/dns-check', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({domain})});
+  if(!r || !r.ok){ out.innerHTML='<span style="color:var(--red)">DNS check failed'+(r&&r.error?': '+esc(r.error):'')+'</span>'; return; }
+  if(r.propagated){
+    out.innerHTML='<span style="color:var(--green)">✓ '+esc(domain)+' → '+esc(r.resolved_ip)+' (matches this server). Ready to enable.</span>';
+  } else {
+    out.innerHTML='<span style="color:var(--red)">✗ '+esc(domain)+' resolves to '+esc(r.resolved_ip||'nothing')+', expected '+esc(r.public_ip||'this server')+'.</span> '
+      +'<span style="color:var(--text2)">Set the A record and wait for propagation (can take a few minutes). Enabling before it propagates may fail TLS issuance.</span>';
+  }
+}
+
+async function caddyEnable(){
+  const domain=($('#caddyDomain').value||'').trim();
+  const username=($('#caddyUser').value||'').trim();
+  const pw=$('#caddyPw').value||'', pw2=$('#caddyPw2').value||'';
+  if(!CADDY_DOMAIN_RE.test(domain)) return toast('Enter a valid domain','error');
+  if(!CADDY_USER_RE.test(username)) return toast('Username: 2–32 chars (letters, digits, . _ -)','error');
+  if(pw.length<8) return toast('Password must be at least 8 characters','error');
+  if(pw!==pw2) return toast('Passwords do not match','error');
+  const btn=$('#caddyEnable'); if(btn) btn.disabled=true;
+  const log=$('#caddyLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» enabling external access… (the TLS certificate is issued on the first request — keep this tab open)</div>'; }
+  const d = await streamCaddy('enable', {domain, username, password:pw});
+  if(d && d.ok){ toast('External access enabled','success'); renderCaddyCard(); }
+  else { toast('Enable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
+}
+
+async function caddyDisable(){
+  if(!confirm('Disable external dashboard access? The public URL will stop working.')) return;
+  const btn=$('#caddyDisable'); if(btn) btn.disabled=true;
+  const log=$('#caddyLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» disabling external access…</div>'; }
+  const d = await streamCaddy('disable', {});
+  if(d && d.ok){ toast('External access disabled','success'); renderCaddyCard(); }
+  else { toast('Disable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
+}
+
+// POST + stream the SSE body (mirrors streamSetup) so the password never rides a URL.
+async function streamCaddy(phase, payload){
+  let resp;
+  try{
+    resp = await fetch('/api/caddy/'+phase, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  }catch(e){ toast('Request failed: '+e,'error'); return null; }
+  if(!resp.ok){ let msg=''; try{ msg=(await resp.json()).error; }catch(_){ } toast('Rejected: '+(msg||resp.status),'error'); return null; }
+  const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='', result=null;
+  for(;;){
+    const {value,done}=await reader.read(); if(done) break;
+    buf+=dec.decode(value,{stream:true}); let i;
+    while((i=buf.indexOf('\n\n'))>=0){
+      const frame=buf.slice(0,i); buf=buf.slice(i+2);
+      const line=frame.split('\n').find(l=>l.startsWith('data: ')); if(!line) continue;
+      let d; try{ d=JSON.parse(line.slice(6)); }catch(_){ continue; }
+      if(d.event==='closed') continue;
+      appendStream('#caddyLog', d);
+      if(d.event==='done') result=d;
+    }
+  }
+  return result;
 }
 
 // =============================================================================
