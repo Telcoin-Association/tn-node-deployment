@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.40"
+UI_VERSION = "1.7.41"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1675,6 +1675,8 @@ def system_info():
         "kernel": kernel,
         "disk": disk_for("/"),
         "memory": mem_info(),
+        # Host-global node-log rotation size (shown/edited under the System tab).
+        "log_rotate_size": logrotate_size(),
     }
 
 

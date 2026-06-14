@@ -376,12 +376,11 @@ select{
       <button class="tab active" data-view="dashboard">Dashboard</button>
       <button class="tab" data-view="network">Network</button>
       <button class="tab" data-view="logs">Logs</button>
+      <button class="tab" data-view="traces">Tracing</button>
       <button class="tab" data-view="config">Config</button>
       <button class="tab" data-view="update">Update</button>
-      <button class="tab" data-view="traces">Traces</button>
-      <button class="tab" data-view="settings">Settings</button>
-      <button class="tab" data-view="setup">Setup</button>
       <button class="tab" data-view="system">System</button>
+      <button class="tab" data-view="setup">Setup</button>
     </nav>
     <div class="hdr-right">
       <span class="net-pill" id="navNetPill" title="Network status">⚪ Network: …</span>
@@ -429,7 +428,6 @@ select{
   <!-- TRACES -->
   <section class="view" id="view-traces"></section>
   <!-- SETTINGS -->
-  <section class="view" id="view-settings"></section>
   <!-- SETUP -->
   <section class="view" id="view-setup"></section>
   <!-- SYSTEM -->
@@ -544,7 +542,6 @@ function switchView(v){
   if(v==='config') renderConfig();
   if(v==='update') renderUpdate();
   if(v==='traces'){ renderTraces(); startTracesRefresh(); }
-  if(v==='settings') renderSettings();
   if(v==='setup')  renderSetup();
   if(v==='system') renderSystem();
 }
@@ -570,7 +567,6 @@ function rerenderActive(){
   if(state.view==='config') renderConfig();
   if(state.view==='update') renderUpdate();
   if(state.view==='traces') renderTraces();
-  if(state.view==='settings') renderSettings();
   if(state.view==='system') renderSystem();
   if(state.view==='setup')  renderSetup();
 }
@@ -598,9 +594,9 @@ async function loadNodes(fresh){
 // immediately, not only on the next 15s auto-refresh tick.
 async function refreshAfterChange(){ await loadNodes(); rerenderActive(); }
 
-// Hide controls/tabs with no meaning in read-only mode. Settings (Jaeger/tracing
-// -- all writes) is hidden on the public path; it stays available for an
-// external-node-only case.
+// Hide controls/tabs with no meaning in read-only mode. System (host admin:
+// firewall, log rotation, external access, remove) is hidden on the public path;
+// it stays available for an external-node-only case (host info is still useful).
 // Setup is for INSTALLING a node, so it's hidden when the selected node is
 // already installed (manage it from Dashboard/Config) -- as well as in read-only
 // (external/public) mode. Per-node: a host with the observer installed but no
@@ -610,8 +606,8 @@ function setupHidden(){ return isReadonly() || !!state.nodes[state.node]?.instal
 function syncReadonlyChrome(){
   const setupTab = document.querySelector('.tab[data-view="setup"]');
   if(setupTab) setupTab.style.display = setupHidden() ? 'none' : '';
-  const settingsTab = document.querySelector('.tab[data-view="settings"]');
-  if(settingsTab) settingsTab.style.display = state.publicReadonly ? 'none' : '';
+  const systemTab = document.querySelector('.tab[data-view="system"]');
+  if(systemTab) systemTab.style.display = state.publicReadonly ? 'none' : '';
 }
 
 // =============================================================================
@@ -698,13 +694,16 @@ function svcControls(s, running){
 
 // Quick-actions block; the mutating entries (Edit Config, Restart, Update) drop
 // out for an external node.
+// Quick Actions are shortcuts to common destinations -- NOT service control
+// (Start/Stop/Restart live in the service-control row just above this). Write-only
+// shortcuts drop out in read-only mode.
 function quickActionsHtml(){
   const ro = isReadonly();
   return `<button class="btn btn-out" onclick="switchView('logs')">📜 View Logs</button>`
+    + `<button class="btn btn-out" onclick="switchView('network')">🌐 Network Status</button>`
+    + `<button class="btn btn-out" onclick="switchView('traces')">🔍 Tracing</button>`
     + (ro?'':`<button class="btn btn-out" onclick="switchView('config')">⚙ Edit Config</button>`)
-    + (ro?'':`<button class="btn btn-out" data-act="restart">↻ Restart Service</button>`)
-    + (ro?'':`<button class="btn btn-out" onclick="switchView('update')">⬆ Check for Update</button>`)
-    + `<button class="btn btn-out" onclick="switchView('network')">🌐 Network Status</button>`;
+    + (ro?'':`<button class="btn btn-out" onclick="switchView('update')">⬆ Check for Update</button>`);
 }
 
 // Extra Node Details rows for an external (docker) node: container + image.
@@ -1620,17 +1619,6 @@ async function renderConfig(){
         </span>
       </div>
     </div>
-    <div class="card" style="margin-top:14px">
-      <h3 style="margin:0 0 4px">Log Rotation</h3>
-      <p class="muted" style="font-size:13px;margin:0 0 12px">Node logs in <span class="mono">/var/log/telcoin</span> rotate when a file reaches this size${d.log_rotate_size?` (currently <strong>${esc(d.log_rotate_size)}</strong>)`:' (not configured yet)'}. Older logs are compressed; 3 are kept. Use a size like <span class="mono">500M</span> or <span class="mono">1G</span>. Takes effect on the next rotation check.</p>
-      <div class="kv" style="align-items:center">
-        <span class="k">Rotate at size</span>
-        <span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-          <input id="logRotSize" value="${esc(d.log_rotate_size||'1G')}" placeholder="1G" autocomplete="off" style="max-width:120px">
-          <button class="btn btn-green" id="logRotSave">Save</button>
-        </span>
-      </div>
-    </div>
     <div class="card" id="cfgProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3>
       <div class="log-body" id="cfgLog" style="height:240px"></div>
@@ -1644,7 +1632,6 @@ async function renderConfig(){
     saveConfigField(field, value, b);
   }));
   const anb=$('#advNameSave'); if(anb) anb.addEventListener('click', ()=>saveAdvertisedName(anb));
-  const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
 }
 
 // Save the node-log rotation size (global logrotate config).
@@ -1870,69 +1857,10 @@ const TUNNEL_CMD = 'ssh -L 16686:localhost:16686 user@SERVER_IP';
 // =============================================================================
 // SETTINGS -- Jaeger setup / control
 // =============================================================================
-async function renderSettings(){
-  const c = $('#view-settings');
-  const t = state.node;
-  if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading settings…</div>`;
-  const j = await api('/api/jaeger/status?node_type='+t);
-  c.dataset.loaded='1';
-  const running = !!j.container_running;
-  const apiOk = !!j.api_reachable;
-  const tracing = !!(j.tracing && j.tracing[t]);
-
-  const prereq = (label, ok, note)=>`<div class="check">
-    <div class="ci">${ok?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'}</div>
-    <div class="cl"><div class="ct">${esc(label)}</div><div class="cd">${esc(note)}</div></div></div>`;
-
-  c.innerHTML = `
-    <div class="note">Jaeger collects the OpenTelemetry traces the node emits. Set it up here, then enable tracing per node. Enabling or disabling tracing <strong>restarts that node service</strong>.</div>
-    <div class="grid two-col">
-      <div class="card">
-        <h3>Jaeger Prerequisites</h3>
-        ${prereq('Jaeger container', running, running?'Running':'Not running')}
-        ${prereq('Query UI · port 16686', apiOk, apiOk?'Reachable':'Unreachable')}
-        ${prereq('OTLP endpoint · port 4317', running, running?'Mapped (container up)':'Unavailable')}
-        <div class="svc-row" style="margin-top:14px">
-          <button class="btn btn-out" id="jRerun">↻ Re-check</button>
-          ${running
-            ? '<button class="btn btn-red" id="jStop">■ Stop Jaeger</button>'
-            : '<button class="btn btn-green" id="jStart">▶ Start Jaeger</button>'}
-        </div>
-      </div>
-      <div class="card">
-        <h3>${esc(cap(t))} Tracing</h3>
-        ${isReadonly()
-          ? `<p style="color:var(--text2);font-size:13px">This node is externally deployed (docker). Tracing is configured by its own deployment, not from here.</p>`
-          : `<p style="color:var(--text2);font-size:13px;margin-bottom:14px">Node tracing is currently
-          <strong style="color:${tracing?'var(--green)':'var(--text2)'}">${tracing?'enabled':'disabled'}</strong>.
-          Toggling restarts <span class="mono">telcoin-${esc(t)}</span>.</p>
-        <div class="toggle-row">
-          ${tracing
-            ? '<button class="btn btn-red" id="trToggle">Disable Tracing</button>'
-            : '<button class="btn btn-green" id="trToggle">Enable Tracing</button>'}
-        </div>`}
-      </div>
-    </div>
-    <div class="card" style="margin-top:14px">
-      <h3>Access Jaeger UI</h3>
-      <p style="color:var(--text2);font-size:13px">From your local machine, open an SSH tunnel to the Jaeger query UI:</p>
-      <div class="cmd-box mono">${esc(TUNNEL_CMD)}</div>
-      <p style="color:var(--text2);font-size:13px;margin-top:12px">Then open
-        <a href="http://localhost:16686" target="_blank" rel="noopener">http://localhost:16686</a></p>
-    </div>
-    <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>`;
-
-  const r=$('#jRerun'); if(r) r.addEventListener('click', renderSettings);
-  const a=$('#jStart'); if(a) a.addEventListener('click', ()=>jaegerControl('start', a));
-  const s=$('#jStop'); if(s) s.addEventListener('click', ()=>jaegerControl('stop', s));
-  const tr=$('#trToggle'); if(tr) tr.addEventListener('click', ()=>setTracing(t, !tracing, tr));
-  renderCaddyCard();
-}
-
 // =============================================================================
 // EXTERNAL DASHBOARD ACCESS (Caddy reverse proxy)
 //
-// Lives in Settings (host-wide, hidden on the public read-only path). Exposes the
+// Lives in the System tab (host-wide, hidden on the public read-only path). Exposes the
 // dashboard at https://<domain> with Caddy's basic_auth + Let's Encrypt TLS.
 // DNS-first: the operator sets an A record, checks propagation here, then enables.
 // Public access is READ-ONLY (server-enforced); management stays on the SSH tunnel.
@@ -2042,45 +1970,69 @@ async function streamCaddy(phase, payload){
 // =============================================================================
 // TRACES -- monitoring
 // =============================================================================
+// The Tracing tab: Jaeger setup/control + per-node tracing toggle + the span
+// viewer, all in one place (previously split between Settings and Traces).
 async function renderTraces(){
   const c = $('#view-traces');
   const t = state.node;
-  if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading traces…</div>`;
+  if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading tracing…</div>`;
   const j = await api('/api/jaeger/status?node_type='+t);
   c.dataset.loaded='1';
   const running = !!j.container_running;
   const apiOk = !!j.api_reachable;
-  const reg = !!j.service_registered;
+  const tracing = !!(j.tracing && j.tracing[t]);
+  const roCtl = isReadonly();   // hide Jaeger start/stop + tracing toggle (writes)
 
-  let statusBody;
-  if(!running && !apiOk){
-    statusBody = `<p style="color:var(--text2);font-size:13px;margin-bottom:14px">Jaeger isn't set up yet on this host.</p>
-      <button class="btn btn-green" onclick="switchView('settings')">Set up Jaeger → Settings</button>`;
-  } else {
-    statusBody = `
-      <div class="kv"><span class="k">Container</span><span class="v">${running?'<span class="badge ok">running</span>':'<span class="badge err">stopped</span>'}</span></div>
-      <div class="kv"><span class="k">Query API · :16686</span><span class="v">${apiOk?'<span class="badge ok">reachable</span>':'<span class="badge err">unreachable</span>'}</span></div>
-      <div class="kv"><span class="k">Service registered</span><span class="v">${reg?'<span class="badge ok">telcoin-'+esc(t)+'</span>':'<span class="muted">not yet</span>'}</span></div>
-      <div class="svc-row" style="margin-top:14px">
-        ${running
-          ? '<button class="btn btn-red" id="jStop2">■ Stop Jaeger</button>'
-          : '<button class="btn btn-green" id="jStart2">▶ Start Jaeger</button>'}
-      </div>
-      <p style="color:var(--text2);font-size:12px;margin-top:12px">Tunnel: <span class="mono">${esc(TUNNEL_CMD)}</span> ·
-        <a href="http://localhost:16686" target="_blank" rel="noopener">open UI</a></p>`;
-  }
+  const prereq = (label, ok, note)=>`<div class="check">
+    <div class="ci">${ok?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'}</div>
+    <div class="cl"><div class="ct">${esc(label)}</div><div class="cd">${esc(note)}</div></div></div>`;
 
   c.innerHTML = `
-    <div class="note">Traces is a read-only viewer. Turn tracing on or off under <strong>Settings → ${esc(cap(t))} Tracing</strong> (that restarts the node).</div>
-    <div class="card"><h3>Jaeger Status</h3>${statusBody}</div>
-    <div id="tracesStats" class="grid stats"></div>
+    <div class="note">Jaeger collects the OpenTelemetry traces this node emits. Set it up here, enable tracing per node (that <strong>restarts the node</strong>), then browse spans below.</div>
+    <div class="grid two-col">
+      <div class="card">
+        <h3>Jaeger Prerequisites</h3>
+        ${prereq('Jaeger container', running, running?'Running':'Not running')}
+        ${prereq('Query UI · port 16686', apiOk, apiOk?'Reachable':'Unreachable')}
+        ${prereq('OTLP endpoint · port 4317', running, running?'Mapped (container up)':'Unavailable')}
+        <div class="svc-row" style="margin-top:14px">
+          <button class="btn btn-out" id="jRerun">↻ Re-check</button>
+          ${roCtl ? '' : (running
+            ? '<button class="btn btn-red" id="jStop">■ Stop Jaeger</button>'
+            : '<button class="btn btn-green" id="jStart">▶ Start Jaeger</button>')}
+        </div>
+      </div>
+      <div class="card">
+        <h3>${esc(cap(t))} Tracing</h3>
+        ${roCtl
+          ? `<p style="color:var(--text2);font-size:13px">This node is externally deployed (docker). Tracing is configured by its own deployment, not from here.</p>`
+          : `<p style="color:var(--text2);font-size:13px;margin-bottom:14px">Node tracing is currently
+          <strong style="color:${tracing?'var(--green)':'var(--text2)'}">${tracing?'enabled':'disabled'}</strong>.
+          Toggling restarts <span class="mono">telcoin-${esc(t)}</span>.</p>
+        <div class="toggle-row">
+          ${tracing
+            ? '<button class="btn btn-red" id="trToggle">Disable Tracing</button>'
+            : '<button class="btn btn-green" id="trToggle">Enable Tracing</button>'}
+        </div>`}
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>Access Jaeger UI</h3>
+      <p style="color:var(--text2);font-size:13px">From your local machine, open an SSH tunnel to the Jaeger query UI:</p>
+      <div class="cmd-box mono">${esc(TUNNEL_CMD)}</div>
+      <p style="color:var(--text2);font-size:13px;margin-top:12px">Then open
+        <a href="http://localhost:16686" target="_blank" rel="noopener">http://localhost:16686</a></p>
+    </div>
+    <div id="tracesStats" class="grid stats" style="margin-top:16px"></div>
     <div class="card" style="margin-top:16px">
       <h3>Recent Traces · telcoin-${esc(t)}</h3>
       <div id="tracesTable"><div class="muted">Loading traces…</div></div>
     </div>`;
 
-  const s2=$('#jStop2'); if(s2) s2.addEventListener('click', ()=>jaegerControl('stop', s2));
-  const a2=$('#jStart2'); if(a2) a2.addEventListener('click', ()=>jaegerControl('start', a2));
+  const r=$('#jRerun'); if(r) r.addEventListener('click', renderTraces);
+  const a=$('#jStart'); if(a) a.addEventListener('click', ()=>jaegerControl('start', a));
+  const s=$('#jStop'); if(s) s.addEventListener('click', ()=>jaegerControl('stop', s));
+  const tr=$('#trToggle'); if(tr) tr.addEventListener('click', ()=>setTracing(t, !tracing, tr));
 
   refreshTracesData();
 }
@@ -2139,6 +2091,20 @@ async function renderSystem(){
   c.innerHTML = `<div class="card">Loading system info…</div>`;
   const d = await api('/api/system');
   const disk = d.disk||{}, mem=d.memory||{};
+  const ro = isReadonly();
+  // Log rotation is one host-global logrotate config for both node types.
+  const logRotCard = `
+    <div class="card" style="margin-top:14px">
+      <h3 style="margin:0 0 4px">Log Rotation</h3>
+      <p class="muted" style="font-size:13px;margin:0 0 12px">Node logs in <span class="mono">/var/log/telcoin</span> rotate when a file reaches this size${d.log_rotate_size?` (currently <strong>${esc(d.log_rotate_size)}</strong>)`:' (not configured yet)'}. Older logs are compressed; 3 are kept. Use a size like <span class="mono">500M</span> or <span class="mono">1G</span>. Takes effect on the next rotation check.</p>
+      ${ro ? '' : `<div class="kv" style="align-items:center">
+        <span class="k">Rotate at size</span>
+        <span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+          <input id="logRotSize" value="${esc(d.log_rotate_size||'1G')}" placeholder="1G" autocomplete="off" style="max-width:120px">
+          <button class="btn btn-green" id="logRotSave">Save</button>
+        </span>
+      </div>`}
+    </div>`;
   c.innerHTML = `
     <div class="card">
       <h3>System Information</h3>
@@ -2151,6 +2117,8 @@ async function renderSystem(){
       <div class="kv"><span class="k">Memory</span><span class="v">${esc(mem.used_gb!=null?(mem.used_gb+' / '+mem.total_gb+' GB ('+mem.percent+'%)'):'—')}</span></div>
     </div>
     <div class="card" id="fwCard" style="margin-top:14px"><h3>Firewall</h3><div class="muted">Loading firewall status…</div></div>
+    ${logRotCard}
+    <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>
     ${dangerZoneHtml()}
     <div class="card" id="rmProgressCard" style="display:none;margin-top:14px">
       <h3>Removal Progress</h3>
@@ -2158,6 +2126,8 @@ async function renderSystem(){
     </div>`;
   wireDangerZone();
   loadFirewall();
+  const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
+  renderCaddyCard();
 }
 
 // ---- Firewall (status + the three node ports only) -------------------------
