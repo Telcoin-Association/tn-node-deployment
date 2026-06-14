@@ -1615,7 +1615,7 @@ async function renderConfig(){
         <span class="k">Advertised Node Name</span>
         <span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
           <input id="advName" value="${esc(d.advertised_name||'')}" placeholder="e.g. my-validator" autocomplete="off">
-          <button class="btn btn-green" id="advNameSave">Save</button>
+          <button class="btn btn-green" id="advNameSave" data-current="${esc(d.advertised_name||'')}">${d.advertised_name?'Change':'Save'}</button>
         </span>
       </div>
     </div>
@@ -1653,16 +1653,28 @@ async function saveLogRotate(btn){
 async function saveAdvertisedName(btn){
   const t = state.node;
   const name = ($('#advName')?.value||'').trim();
+  const current = btn?.dataset.current || '';
+  const label = current ? 'Change' : 'Save';
   if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)){
     toast('Invalid name — letters, digits, . _ - ; start alphanumeric; max 64','error'); return;
   }
-  if(t==='validator' && !confirm('Set the advertised name and restart the validator now? This causes brief downtime.')) return;
+  if(name === current){ toast('That is already the advertised name','info'); return; }
+  // Changing an existing name needs an explicit confirm; first-time set only
+  // confirms the validator restart.
+  if(current){
+    const msg = t==='validator'
+      ? `Are you sure you want to change the Advertised node name to "${name}"? This restarts the validator now — brief downtime, missed consensus rounds.`
+      : `Are you sure you want to change the Advertised node name to "${name}"? This restarts the node now.`;
+    if(!confirm(msg)) return;
+  } else if(t==='validator' && !confirm('Set the advertised name and restart the validator now? This causes brief downtime.')) {
+    return;
+  }
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Saving…'; }
   const r = await api('/api/config/'+t+'/hostname', {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name}),
   });
-  if(btn){ btn.disabled=false; btn.textContent='Save'; }
-  if(r && r.ok){ toast('Advertised name saved — node restarting','success'); refreshAfterChange(); }
+  if(btn){ btn.disabled=false; btn.textContent=label; }
+  if(r && r.ok){ toast('Advertised name '+(current?'changed':'saved')+' — node restarting','success'); refreshAfterChange(); }
   else toast('Failed to set name: '+((r&&r.error)||'unknown error'),'error');
 }
 
@@ -1874,6 +1886,17 @@ async function renderCaddyCard(){
   // "enabled" means OUR managed reverse_proxy is in the Caddyfile -- NOT merely
   // that the caddy service is up (it may be running an unrelated/default config).
   const enabled = !!(s && s.enabled);
+  // Monitoring-only (external/read-only) node: show status, never the controls --
+  // consistent with the firewall/log-rotation cards and the "management disabled"
+  // banner. (External access is a host action; manage it over the SSH tunnel.)
+  if(isReadonly()){
+    c.innerHTML = `
+      <h3>External Dashboard Access</h3>
+      <p style="color:var(--text2);font-size:13px">Management is disabled in monitoring-only mode. ${enabled
+        ? `Public access is <strong>enabled</strong>${s.domain?` at <span class="mono">${esc(s.domain)}</span>`:''} (managed by the Node Manager).`
+        : 'Public access is not configured via the Node Manager. To manage it, connect over the SSH tunnel from a node installed by Telcoin Node Scripts.'}</p>`;
+    return;
+  }
   if(enabled){
     c.innerHTML = `
       <h3>External Dashboard Access</h3>
