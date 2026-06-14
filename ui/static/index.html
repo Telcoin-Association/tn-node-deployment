@@ -458,7 +458,7 @@ const state = {
   setup: { network:'adiri', method:'source', passphrase:'loadcredential',
            eth:'', bls:'', blsConfirm:'', buildRef:'main', dockerImage:'', publicIp:'', internalIp:'',
            sourceMode:'main', customRef:'', sourceRef:'', sourceModeTouched:false,   // source-version picker (mirrors CLI: main/latest tag/custom)
-           instance:'', rpcPublic:false, serviceUser:'', serviceGroup:'', defaultsLoaded:false },
+           instance:'', rpcPublic:false, advName:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false },
   preflight: null,
   buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
   network: { chainId:null, name:'', slug:'', configured:false },  // selected node's network
@@ -2465,6 +2465,7 @@ function setupValidIp(v){ return /^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(v) || /^[0
 function captureCfg(){
   const s=state.setup;
   if($('#cfgEth')) s.eth=$('#cfgEth').value.trim();
+  if($('#cfgAdvName')) s.advName=$('#cfgAdvName').value.trim();
   if($('#cfgPubIp')) s.publicIp=$('#cfgPubIp').value.trim();
   if($('#cfgIntIp')) s.internalIp=$('#cfgIntIp').value.trim();
   if($('#cfgInstance')) s.instance=$('#cfgInstance').value.trim();
@@ -2490,6 +2491,7 @@ function stepConfigure(body){
     <div class="field"><label>${isVal?'Validator execution address':'Observer Ethereum address'} (0x…)</label><input id="cfgEth" placeholder="0x…" value="${esc(s.eth||'')}"></div>
     <div class="field"><label>Public / external IP (advertised to peers) — auto-detected</label><input id="cfgPubIp" placeholder="e.g. 203.0.113.10" value="${esc(s.publicIp||'')}"></div>
     <div class="field"><label>Internal / NIC IP (listener bind) — auto-detected</label><input id="cfgIntIp" placeholder="e.g. 10.0.0.5 or 0.0.0.0" value="${esc(s.internalIp||'')}"></div>
+    <div class="field"><label>Advertised node name <span style="color:var(--text2);font-weight:400">— optional, a public label; you can set or change it later</span></label><input id="cfgAdvName" placeholder="e.g. my-${esc(state.node)}" value="${esc(s.advName||'')}" autocomplete="off"></div>
     ${rpcCards}
     <div class="field"><label>Instance number — sets the RPC port</label>
       <input id="cfgInstance" placeholder="${instDefault}" value="${esc(s.instance||'')}">
@@ -2584,6 +2586,7 @@ function buildSetupPayload(includePassphrase){
     listener_worker:  `/ip4/${lip}/udp/${worker}/quic-v1`,
     public_ip: s.publicIp,
     rpc_public: (state.node==='observer') ? !!s.rpcPublic : false,
+    advertised_name: s.advName || '',
     service_user: s.serviceUser,
     service_group: s.serviceGroup,
   };

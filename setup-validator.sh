@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.12"
+readonly SCRIPT_VERSION="1.2.13"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -25,6 +25,7 @@ CONFIG_DIR="$DEFAULT_CONFIG_DIR/validator"
 LOG_DIR="$DEFAULT_LOG_DIR"
 INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 VALIDATOR_ADDRESS=""
+ADVERTISED_NAME=""
 PUBLIC_IP=""
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
@@ -457,6 +458,16 @@ step_config() {
         read -r -p "  Install directory [${INSTALL_DIR}]: " input; INSTALL_DIR="${input:-$INSTALL_DIR}"
     fi
 
+    echo ""
+    print_info "Advertised node name (optional) -- a public label for this validator."
+    print_info "Leave blank for none; you can set or change it later in the dashboard."
+    read -r -p "  Advertised node name [none]: " ADVERTISED_NAME
+    ADVERTISED_NAME="$(printf '%s' "$ADVERTISED_NAME" | tr -d '[:space:]')"
+    if [[ -n "$ADVERTISED_NAME" && ! "$ADVERTISED_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+        print_warn "Invalid name -- ignoring (set it later in the dashboard)."
+        ADVERTISED_NAME=""
+    fi
+
     print_ok "Configuration set"
 }
 
@@ -762,6 +773,9 @@ step_write_config() {
         fi
         read -r -p "  Press Enter once you have copied the chain config files: "
     fi
+
+    # Optional advertised node name -> data dir's network-config (no-op if blank).
+    write_advertised_name "$DATA_DIR" "$ADVERTISED_NAME" "${SERVICE_USER}:${SERVICE_GROUP}"
 
     print_ok "Configuration ready under: ${DATA_DIR}"
 }
@@ -1180,6 +1194,7 @@ main() {
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
             --rpc-public)          shift 2 ;;  # validators have no public-RPC option; ignored
+            --advertised-name)     ADVERTISED_NAME="${2:-}"; shift 2 ;;
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             *) shift ;;

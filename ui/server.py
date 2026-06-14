@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.42"
+UI_VERSION = "1.7.43"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -2540,6 +2540,7 @@ def _setup_env(data, want_passphrase):
     rpc_public = "true" if data.get("rpc_public") else "false"
     service_user = str(data.get("service_user") or "").strip()
     service_group = str(data.get("service_group") or "").strip()
+    advertised_name = str(data.get("advertised_name") or "").strip()
 
     if network not in ("testnet", "adiri"):
         return None, "invalid network"
@@ -2564,6 +2565,8 @@ def _setup_env(data, want_passphrase):
         return None, "invalid service user"
     if service_group and not _SVC_NAME_RE.match(service_group):
         return None, "invalid service group"
+    if advertised_name and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", advertised_name):
+        return None, "invalid advertised name"
     if method == "source" and not build_ref:
         return None, "build_ref required for source install"
 
@@ -2583,6 +2586,7 @@ def _setup_env(data, want_passphrase):
     env["TN_SETUP_RPC_PUBLIC"] = rpc_public
     env["TN_SETUP_SERVICE_USER"] = service_user
     env["TN_SETUP_SERVICE_GROUP"] = service_group
+    env["TN_SETUP_ADVERTISED_NAME"] = advertised_name
 
     if want_passphrase:
         passphrase = data.get("passphrase")

@@ -264,7 +264,7 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-remove va
 # vars and the BLS passphrase in TN_BLS_PASSPHRASE; env_keep preserves them
 # across sudo so NO config or secret is ever placed in argv. The helper
 # validates every value before invoking setup-<type>.sh --json.
-Defaults!/usr/local/sbin/telcoin-ui-helper env_keep += "TN_BLS_PASSPHRASE TN_CADDY_PASSWORD TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_PASSPHRASE_METHOD TN_SETUP_ADDRESS TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_INSTANCE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP TN_SETUP_RPC_PUBLIC TN_SETUP_SERVICE_USER TN_SETUP_SERVICE_GROUP"
+Defaults!/usr/local/sbin/telcoin-ui-helper env_keep += "TN_BLS_PASSPHRASE TN_CADDY_PASSWORD TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_PASSPHRASE_METHOD TN_SETUP_ADDRESS TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_INSTANCE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP TN_SETUP_RPC_PUBLIC TN_SETUP_SERVICE_USER TN_SETUP_SERVICE_GROUP TN_SETUP_ADVERTISED_NAME"
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen validator
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize observer

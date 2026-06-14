@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.51"
+readonly COMMON_VERSION="1.1.52"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -612,6 +612,30 @@ create_directories() {
 # -----------------------------------------------------------------------------
 # NETWORK AND INSTALL METHOD SELECTION
 # -----------------------------------------------------------------------------
+
+# Write the optional advertised node name (hostname) into the data dir's
+# network-config. Mirrors telcoin-ui-helper's set-hostname so a name chosen at
+# setup time matches what the UI Config tab writes later. No-op when empty; a
+# bad name warns and is skipped (the operator can set it later in the dashboard).
+# Args: <data_dir> <name> [<owner_user:owner_group>]
+write_advertised_name() {
+    local data_dir="$1" name="$2" owner="${3:-}"
+    [[ -z "$name" ]] && return 0
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+        print_warn "Invalid advertised name '${name}' -- skipping (set it later in the dashboard)."
+        return 0
+    fi
+    local nc="${data_dir}/network-config"
+    if [[ -f "$nc" ]] && grep -qE '^hostname:' "$nc"; then
+        sed -i -E "s#^hostname:.*#hostname: \"${name}\"#" "$nc"
+    elif [[ -f "$nc" ]]; then
+        printf 'hostname: "%s"\n' "$name" >> "$nc"
+    else
+        printf 'hostname: "%s"\n' "$name" > "$nc"
+    fi
+    [[ -n "$owner" ]] && chown "$owner" "$nc" 2>/dev/null || true
+    print_ok "Advertised node name set: ${name}"
+}
 
 select_network() {
     print_header "Network Selection"

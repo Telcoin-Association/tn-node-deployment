@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.13"
+readonly SCRIPT_VERSION="1.2.14"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -30,6 +30,7 @@ RPC_PORT="8541"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
 ENABLE_PUBLIC_RPC="false"
 OBSERVER_ADDRESS=""
+ADVERTISED_NAME=""
 PUBLIC_IP=""
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
@@ -576,6 +577,16 @@ step_config() {
         print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
     done
 
+    echo ""
+    print_info "Advertised node name (optional) -- a public label for this node."
+    print_info "Leave blank for none; you can set or change it later in the dashboard."
+    read -r -p "  Advertised node name [none]: " ADVERTISED_NAME
+    ADVERTISED_NAME="$(printf '%s' "$ADVERTISED_NAME" | tr -d '[:space:]')"
+    if [[ -n "$ADVERTISED_NAME" && ! "$ADVERTISED_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+        print_warn "Invalid name -- ignoring (set it later in the dashboard)."
+        ADVERTISED_NAME=""
+    fi
+
     print_ok "External: ${PRIMARY_MULTIADDR} | Listener: ${PRIMARY_LISTENER_MULTIADDR}"
 }
 
@@ -807,6 +818,9 @@ step_write_config() {
     if [[ "$ENABLE_PUBLIC_RPC" == "true" ]]; then
         _write_nginx_config
     fi
+
+    # Optional advertised node name -> data dir's network-config (no-op if blank).
+    write_advertised_name "$DATA_DIR" "$ADVERTISED_NAME" "${SERVICE_USER}:${SERVICE_GROUP}"
 
     print_ok "Configuration ready under: ${DATA_DIR}"
 }
@@ -1262,6 +1276,7 @@ main() {
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
             --rpc-public)          shift 2 ;;  # public RPC is coming soon (Caddy-based); always private for now
+            --advertised-name)     ADVERTISED_NAME="${2:-}"; shift 2 ;;
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             *) shift ;;
