@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.14"
+readonly SCRIPT_VERSION="1.2.15"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -92,12 +92,29 @@ step_preflight() {
     # right drive (a separate data mount, not the boot disk). Interactive only;
     # JSON/UI installs pre-set DATA_DIR via --data-dir (or use the default).
     if ! json_mode; then
-        print_step "Available storage..."
+        print_step "Available storage (mounted filesystems, largest first)..."
         echo ""
-        df -BG -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x vfat \
-            --output=target,avail,size 2>/dev/null \
-            | awk 'NR>1 {printf "    %-28s %s available / %s total\n", $1, $2, $3}'
+        # Filter on the real fstype column (not a path grep), drop pseudo/boot
+        # mounts and sub-GB noise, and sort by free space so the biggest data
+        # drive is listed first. Any real drive (ext4/xfs/zfs at /mnt, /data, ...)
+        # is shown -- only pseudo filesystems are hidden.
+        df -BG --output=fstype,target,avail,size 2>/dev/null \
+            | awk 'NR>1 && ($3+0) >= 1 \
+                   && $1 !~ /^(tmpfs|devtmpfs|udev|squashfs|overlay|efivarfs|vfat)$/ \
+                   && $2 !~ /^\/boot/ { print ($3+0), $2, ($4+0) }' \
+            | sort -rn \
+            | awk '{printf "    %-28s %dG available / %dG total\n", $2, $1, $3}'
         echo ""
+        # df only lists MOUNTED filesystems, so a data drive that hasn't been
+        # mounted yet is invisible above. Show physical disks too (incl. unmounted).
+        if command -v lsblk >/dev/null 2>&1; then
+            print_info "Physical disks (a disk with no MOUNTPOINT is not mounted yet):"
+            lsblk -e7 -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/    /'
+            echo ""
+            print_info "If your data drive shows no MOUNTPOINT, mount it (and add it to"
+            print_info "/etc/fstab) before pointing the node at it."
+            echo ""
+        fi
         print_step "Selecting data directory..."
         print_info "Where should node data be stored? If it's on a separate drive"
         print_info "(e.g. /mnt/data) enter the full path. Press Enter for the default."
