@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.4"
+readonly SCRIPT_VERSION="1.2.5"
 
 # =============================================================================
 # HELPERS
@@ -672,12 +672,19 @@ scan_custom_installs() {
     local found=false
 
     # --- Custom systemd services (offer removal) ---------------------------
+    # Collect first, THEN prompt. A `confirm` inside `while read < <(...)` reads
+    # from the process-substitution stream (not the terminal), so the prompt is
+    # skipped at EOF -- the matches go into an array and we iterate that instead.
     local svc svcname
+    local -a custom_svcs=()
     while IFS= read -r svc; do
         [[ -z "$svc" ]] && continue
         svcname=$(basename "$svc")
-        [[ "$svcname" == "telcoin-observer.service" || "$svcname" == "telcoin-validator.service" ]] && continue
-        [[ "$svcname" == "telcoin-ui.service" ]] && continue
+        case "$svcname" in telcoin-observer.service|telcoin-validator.service|telcoin-ui.service) continue ;; esac
+        custom_svcs+=("$svc")
+    done < <(grep -rlE 'telcoin-network|/tn-public' /etc/systemd/system/*.service 2>/dev/null || true)
+    for svc in "${custom_svcs[@]}"; do
+        svcname=$(basename "$svc")
         found=true
         print_warn "[CUSTOM] Service: ${svcname}  (${svc})"
         if confirm "  Stop, disable and remove ${svcname}?"; then
@@ -687,14 +694,21 @@ scan_custom_installs() {
             systemctl daemon-reload
             print_ok "  Removed ${svcname}"
         fi
-    done < <(grep -rlE 'telcoin-network|/tn-public' /etc/systemd/system/*.service 2>/dev/null || true)
+    done
 
     # --- Custom docker containers (offer removal) --------------------------
     if command -v docker >/dev/null 2>&1; then
-        local cname cimage cstatus
-        while IFS=$'\t' read -r cname cimage cstatus; do
-            [[ -z "$cname" ]] && continue
+        local cline cname cimage cstatus
+        local -a custom_ctrs=()
+        while IFS= read -r cline; do
+            [[ -z "$cline" ]] && continue
+            cname=${cline%%$'\t'*}
             [[ "$cname" == "telcoin-observer" || "$cname" == "telcoin-validator" ]] && continue
+            custom_ctrs+=("$cline")
+        done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
+                   | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)
+        for cline in "${custom_ctrs[@]}"; do
+            IFS=$'\t' read -r cname cimage cstatus <<< "$cline"
             found=true
             print_warn "[CUSTOM] Docker container: ${cname}  (image: ${cimage}; ${cstatus})"
             if confirm "  Stop and remove container ${cname}?"; then
@@ -702,8 +716,7 @@ scan_custom_installs() {
                 docker rm "$cname" >/dev/null 2>&1 || true
                 print_ok "  Removed container ${cname}"
             fi
-        done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
-                   | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)
+        done
     fi
 
     # --- Custom data directories (REPORT ONLY) -----------------------------
