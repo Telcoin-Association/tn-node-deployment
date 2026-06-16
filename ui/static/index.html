@@ -450,7 +450,6 @@ const state = {
   updateES: null,  // update progress SSE
   configES: null,  // config-save progress SSE
   configEditing: false,
-  removeES: null,  // node-removal progress SSE
   live: false,
   logBuffer: [],                          // client-side line buffer (static + live)
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
@@ -534,7 +533,6 @@ function switchView(v){
   stopTracesRefresh();
   stopUpdateStream();
   stopConfigStream();
-  stopRemoveStream();
   if(v!=='config') state.configEditing=false;
   if(v==='dashboard'){ renderDashboard(); startAutoRefresh(); }
   if(v==='network'){ renderNetwork(); startAutoRefresh(); }
@@ -2142,12 +2140,7 @@ async function renderSystem(){
     <div class="card" id="fwCard" style="margin-top:14px"><h3>Firewall</h3><div class="muted">Loading firewall status…</div></div>
     ${logRotCard}
     <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>
-    ${dangerZoneHtml()}
-    <div class="card" id="rmProgressCard" style="display:none;margin-top:14px">
-      <h3>Removal Progress</h3>
-      <div class="log-body" id="rmLog" style="height:240px"></div>
-    </div>`;
-  wireDangerZone();
+    ${dangerZoneHtml()}`;
   loadFirewall();
   const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
   renderCaddyCard();
@@ -2223,93 +2216,16 @@ async function toggleFirewallPort(spec, pstate, btn){
 }
 
 // ---- Danger Zone (remove the selected node) --------------------------------
+// Node removal is irreversible (validator keys are unrecoverable), so it is done
+// on the server via the CLI -- never from this dashboard. Show how, for all node
+// types (scripts and externally-deployed docker alike).
 function dangerZoneHtml(){
-  const t = state.node;
-  if(!state.nodes[t]?.installed){
-    return `<div class="card" id="dzCard" style="margin-top:14px">
-      <h3>Danger Zone</h3>
-      <p class="muted" style="font-size:13px">No <span class="mono">telcoin-${esc(t)}</span> node is installed, so there is nothing to remove. Select an installed node above to manage its removal.</p></div>`;
-  }
-  if(isReadonly()){
-    return `<div class="card" id="dzCard" style="margin-top:14px">
-      <h3>Danger Zone</h3>
-      <p class="muted" style="font-size:13px">The <span class="mono">${esc(t)}</span> node is an externally-deployed docker container that the Node Manager does not manage, so it cannot be removed from here. Manage it with your own deployment tooling.</p></div>`;
-  }
-  return `<div class="card" id="dzCard" style="margin-top:14px;border-color:rgba(255,77,109,0.35)">
-    <h3 style="color:var(--red)">Danger Zone · Remove ${esc(cap(t))}</h3>
-    <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Permanently removes the <span class="mono">telcoin-${esc(t)}</span> node. Choose how much to remove.
-      <strong style="color:var(--red)">Keys, once removed, are unrecoverable.</strong></p>
-    <div class="field"><label>Scope</label>
-      <select id="rmScope">
-        <option value="service">Service only — stop, disable &amp; remove the unit (keep data + keys)</option>
-        <option value="data">Service + chain data — also wipe the database (keep keys)</option>
-        <option value="keys">Everything — service, data, keys &amp; config (UNRECOVERABLE)</option>
-      </select></div>
-    <div class="field"><label>Type <span class="mono">DELETE</span> to confirm</label>
-      <input id="rmConfirm" placeholder="DELETE" autocomplete="off"></div>
-    <label style="display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--text2);margin:4px 0 10px;cursor:pointer">
-      <input type="checkbox" id="rmUi" style="margin-top:3px">
-      <span>Also remove the Node Manager UI (this web dashboard).
-        <strong style="color:var(--yellow)">This interface will go offline once removal completes</strong> — reinstall later with <span class="mono">install-ui.sh</span>.</span>
-    </label>
-    <div class="svc-row" style="margin-top:6px">
-      <button class="btn btn-red" id="rmBtn" disabled>Remove ${esc(cap(t))} Node</button>
-    </div>
+  return `<div class="card" id="dzCard" style="margin-top:14px">
+    <h3>Remove / Delete a Node</h3>
+    <p style="color:var(--text2);font-size:13px">Node removal is permanent — <strong style="color:var(--red)">validator keys cannot be recovered</strong> — so it runs on the server, not from this dashboard. SSH into the server and run the removal script. It's interactive: you choose how much to remove (service only · service + chain data · everything), it detects non-standard / custom installs, and it can also remove this dashboard.</p>
+    <div class="cmd-box mono">sudo bash ~/telcoin-node-scripts/remove-node.sh</div>
   </div>`;
 }
-
-function wireDangerZone(){
-  const inp=$('#rmConfirm'), btn=$('#rmBtn');
-  if(!inp || !btn) return;
-  inp.addEventListener('input', ()=>{ btn.disabled = inp.value!=='DELETE'; });
-  btn.addEventListener('click', removeNode);
-}
-
-function removeNode(){
-  const scope=($('#rmScope')?.value)||'service';
-  if(($('#rmConfirm')?.value)!=='DELETE') return;
-  const t=state.node;
-  const alsoUi = !!($('#rmUi')?.checked);
-  let prompt='Remove the '+t+' node (scope: '+scope+')? This cannot be undone.';
-  if(alsoUi) prompt+='\n\nThis will ALSO remove the Node Manager UI — this web dashboard will go offline once it completes.';
-  if(!window.confirm(prompt)) return;
-  stopRemoveStream();
-  const card=$('#rmProgressCard'); if(card) card.style.display='block';
-  const log=$('#rmLog'); if(log) log.innerHTML='<div class="log-line info">» removing '+esc(t)+' ('+esc(scope)+')'+(alsoUi?' + Node Manager UI':'')+'…</div>';
-  const btn=$('#rmBtn'); if(btn) btn.disabled=true;
-  let url='/api/node/remove/'+t+'?scope='+encodeURIComponent(scope)+'&confirm=DELETE';
-  if(alsoUi) url+='&ui=true';
-  state.removeUi = alsoUi;
-  state.removeES = new EventSource(url);
-  state.removeES.onmessage = async ev=>{
-    let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
-    if(d.event==='closed'){
-      stopRemoveStream();
-      if(state.removeUi){
-        // The UI is being uninstalled out-of-band; the server will stop shortly.
-        // Don't re-fetch (it'll fail) -- show a clear offline notice instead.
-        appendStream('#rmLog', {event:'step', msg:'Node Manager UI removal scheduled — this interface is going offline. Reinstall with install-ui.sh.'});
-        toast('Node Manager UI is being removed — this dashboard will go offline','info');
-        return;
-      }
-      // Re-detect installed state from /api/nodes BEFORE re-rendering (await,
-      // so the empty-state switch sees the fresh result), and drop any cached
-      // dashboard render so the removed node's panel rebuilds as "not installed".
-      await loadNodes();
-      const dash = $('#view-dashboard'); if(dash) delete dash.dataset.loaded;
-      rerenderActive();
-      return;
-    }
-    appendStream('#rmLog', d);
-    if(d.event==='done'){
-      if(d.ok) toast(cap(t)+' node removed'+(d.ui_removed?' (UI removing…)':''),'success');
-      else toast('Removal failed: '+(d.msg||'unknown error'),'error');
-    }
-  };
-  state.removeES.onerror = ()=>{ /* server closes the stream when the script exits */ };
-}
-
-function stopRemoveStream(){ if(state.removeES){ state.removeES.close(); state.removeES=null; } }
 
 // =============================================================================
 // SETUP WIZARD

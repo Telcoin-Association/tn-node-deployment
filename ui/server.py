@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.44"
+UI_VERSION = "1.7.45"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -510,13 +510,12 @@ def is_public_request():
 def _is_write_request():
     """True for requests that mutate node/host state. POST/PUT/DELETE/PATCH are
     always writes; a few GET routes are SSE 'action' streams (config-set, update
-    prepare/apply, node remove) and count as writes too."""
+    prepare/apply) and count as writes too."""
     if request.method in ("GET", "HEAD", "OPTIONS"):
         p = request.path
         return (p.endswith("/set")
                 or p.startswith("/api/update/prepare/")
-                or p.startswith("/api/update/apply/")
-                or p.startswith("/api/node/remove/"))
+                or p.startswith("/api/update/apply/"))
     return True
 
 
@@ -2481,28 +2480,9 @@ def api_firewall_port():
     return jsonify({"ok": False, "error": err or out or "firewall update failed"})
 
 
-@app.route("/api/node/remove/<node_type>")
-def api_node_remove(node_type):
-    # Destructive, and SSE so the operator watches each teardown step -- which
-    # means GET (EventSource is GET-only), like the update/config streams. The
-    # browser must echo back confirm == "DELETE" (the same typed confirmation
-    # the CLI requires) before we will call the helper; the helper passes --yes.
-    if not valid_type(node_type):
-        return bad_type()
-    blocked = _external_block(node_type)
-    if blocked:
-        return blocked
-    scope = (request.args.get("scope") or "").strip()
-    confirm = request.args.get("confirm") or ""
-    remove_ui = (request.args.get("ui") == "true")
-    if scope not in ("service", "data", "keys"):
-        return jsonify({"error": "invalid scope"}), 400
-    if confirm != "DELETE":
-        return jsonify({"error": 'confirmation required (type "DELETE")'}), 400
-    argv = ["sudo", "-n", HELPER, "node-remove", node_type, scope]
-    if remove_ui:
-        argv.append("ui")  # also uninstall the Node Manager UI (detached, root)
-    return _update_stream(argv)
+# Node removal is intentionally NOT exposed in the UI: it is irreversible
+# (validator keys), so it runs on the server via remove-node.sh (which also
+# removes the UI itself). The dashboard's System tab just points operators there.
 
 
 # =============================================================================

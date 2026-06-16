@@ -30,7 +30,6 @@
 #   telcoin-ui-helper caddy-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
-#   telcoin-ui-helper node-remove     <observer|validator> <service|data|keys>
 #   telcoin-ui-helper docker-detect
 #   telcoin-ui-helper docker-status    <container>
 #   telcoin-ui-helper docker-logs      <container> [lines]
@@ -54,7 +53,6 @@ UPDATE_SCRIPT="/opt/telcoin-ui-update/update-node.sh"
 CONFIG_SCRIPT="/opt/telcoin-ui-update/edit-config.sh"
 # firewall-setup.sh + remove-node.sh, same root-owned dir, same --json pattern.
 FIREWALL_SCRIPT="/opt/telcoin-ui-update/firewall-setup.sh"
-REMOVE_SCRIPT="/opt/telcoin-ui-update/remove-node.sh"
 # setup-*.sh, same root-owned dir. Config arrives via TN_SETUP_* env vars (and
 # the BLS passphrase via TN_BLS_PASSPHRASE) which the server sets and sudoers
 # env_keeps -- so the sudoers lines stay fixed-arg and no secret touches argv.
@@ -457,29 +455,6 @@ cmd_firewall_port() {
 }
 
 # =============================================================================
-# Node-remove subcommand -- thin wrapper around remove-node.sh --json. The
-# server gates this behind a typed "DELETE" confirmation; --yes is always passed
-# here because the helper is only reached after that gate.
-# =============================================================================
-
-remove_script_ready() {
-    [[ -f "$REMOVE_SCRIPT" ]] || die "remove script not found: $REMOVE_SCRIPT"
-}
-
-cmd_node_remove() {
-    local t="$1" scope="$2" ui="${3:-}"
-    require_type "$t"; remove_script_ready
-    case "$scope" in service|data|keys) ;; *) die "invalid scope: $scope (expected service|data|keys)" ;; esac
-    local -a args=( --json --remove "$t" --scope "$scope" --yes )
-    case "$ui" in
-        ui) args+=( --remove-ui ) ;;
-        "") ;;
-        *) die "invalid flag: $ui (expected 'ui' or none)" ;;
-    esac
-    exec bash "$REMOVE_SCRIPT" "${args[@]}"
-}
-
-# =============================================================================
 # Setup subcommands -- thin wrappers around setup-<type>.sh --json --phase=...
 # Config comes from TN_SETUP_* env (validated here); the BLS passphrase stays in
 # TN_BLS_PASSPHRASE (env only, never argv) and is inherited by the exec'd script.
@@ -682,7 +657,6 @@ main() {
         caddy-disable)   cmd_caddy_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
-        node-remove)     shift; cmd_node_remove "${1:-}" "${2:-}" "${3:-}" ;;
         setup-keygen)    shift; cmd_setup_keygen   "${1:-}" ;;
         setup-finalize)  shift; cmd_setup_finalize "${1:-}" ;;
         docker-detect)    cmd_docker_detect ;;
