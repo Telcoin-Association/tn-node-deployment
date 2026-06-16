@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.3"
+readonly SCRIPT_VERSION="1.2.4"
 
 # =============================================================================
 # HELPERS
@@ -176,13 +176,18 @@ show_detected() {
                 print_info "Leftover files kept."
             fi
             report_orphaned_groups
-            echo ""
-            exit 0
+        else
+            print_warn "No standard Telcoin node installation detected on this server."
         fi
 
-        print_warn "No Telcoin node installations detected on this server."
-        print_info "Nothing to remove."
+        # A node may still be present via a non-standard install (manual / dev /
+        # docker elsewhere) -- offer the scan before giving up.
         echo ""
+        if confirm "Scan for non-standard / custom Telcoin installs (manual / dev / docker)?"; then
+            scan_custom_installs
+        fi
+        echo ""
+        print_info "Nothing more to do."
         exit 0
     fi
 
@@ -625,6 +630,137 @@ wipe_chain_data_only() {
 # MAIN MENU
 # =============================================================================
 
+# =============================================================================
+# CUSTOM / NON-STANDARD INSTALL SCAN
+#
+# Finds Telcoin nodes NOT installed by these scripts (manual installs, dev
+# deployments, docker containers in other locations). Read-only by default;
+# offers removal ONLY for the well-identified, reversible items (custom systemd
+# services + docker containers). Data dirs / binaries / processes are REPORTED
+# with the exact manual command -- never auto-deleted, never killed -- because
+# name-matching is too loose to safely rm -rf and killing a node mid-write
+# corrupts the DB. Everything is timeout-guarded so it can't hang on a bad mount.
+# =============================================================================
+
+# 0 (true) if a path belongs to the standard install or the deployment tooling
+# itself (these scripts, the UI, the updater) -- i.e. NOT a custom item.
+custom_is_excluded_path() {
+    local p="$1"
+    case "$p" in
+        /opt/telcoin|/opt/telcoin/*|/opt/telcoin-source|/opt/telcoin-source/*) return 0 ;;
+        /var/lib/telcoin|/var/lib/telcoin/*) return 0 ;;
+        /etc/telcoin|/etc/telcoin/*) return 0 ;;
+        /var/log/telcoin|/var/log/telcoin/*) return 0 ;;
+        /opt/telcoin-ui|/opt/telcoin-ui/*|/opt/telcoin-ui-update|/opt/telcoin-ui-update/*) return 0 ;;
+        *telcoin-node-scripts*|*tn-node-deployment*) return 0 ;;   # the scripts themselves
+        "${SCRIPT_DIR}"|"${SCRIPT_DIR}"/*) return 0 ;;
+    esac
+    # Exclude the installed nodes' own data dirs (standard, even if on a custom drive).
+    local t dd
+    for t in observer validator; do
+        dd=$(detect_data_dir "$t")
+        [[ "$p" == "$dd" || "$p" == "$dd"/* ]] && return 0
+    done
+    return 1
+}
+
+scan_custom_installs() {
+    print_header "Scan for non-standard / custom installs"
+    print_info "Read-only scan for Telcoin nodes NOT installed by these scripts"
+    print_info "(manual installs, dev deployments, docker containers elsewhere)."
+    echo ""
+    local found=false
+
+    # --- Custom systemd services (offer removal) ---------------------------
+    local svc svcname
+    while IFS= read -r svc; do
+        [[ -z "$svc" ]] && continue
+        svcname=$(basename "$svc")
+        [[ "$svcname" == "telcoin-observer.service" || "$svcname" == "telcoin-validator.service" ]] && continue
+        [[ "$svcname" == "telcoin-ui.service" ]] && continue
+        found=true
+        print_warn "[CUSTOM] Service: ${svcname}  (${svc})"
+        if confirm "  Stop, disable and remove ${svcname}?"; then
+            systemctl stop "$svcname" 2>/dev/null || true
+            systemctl disable "$svcname" 2>/dev/null || true
+            rm -f "$svc"
+            systemctl daemon-reload
+            print_ok "  Removed ${svcname}"
+        fi
+    done < <(grep -rlE 'telcoin-network|/tn-public' /etc/systemd/system/*.service 2>/dev/null || true)
+
+    # --- Custom docker containers (offer removal) --------------------------
+    if command -v docker >/dev/null 2>&1; then
+        local cname cimage cstatus
+        while IFS=$'\t' read -r cname cimage cstatus; do
+            [[ -z "$cname" ]] && continue
+            [[ "$cname" == "telcoin-observer" || "$cname" == "telcoin-validator" ]] && continue
+            found=true
+            print_warn "[CUSTOM] Docker container: ${cname}  (image: ${cimage}; ${cstatus})"
+            if confirm "  Stop and remove container ${cname}?"; then
+                docker stop "$cname" >/dev/null 2>&1 || true
+                docker rm "$cname" >/dev/null 2>&1 || true
+                print_ok "  Removed container ${cname}"
+            fi
+        done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
+                   | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)
+    fi
+
+    # --- Custom data directories (REPORT ONLY) -----------------------------
+    # Name-match telcoin* dirs, but only flag ones that actually look like node
+    # data (a node-info.yaml / db / genesis / node-keys inside) -- so a service
+    # user's home dir (e.g. /home/telcoin1) isn't mis-reported as chain data.
+    local d
+    while IFS= read -r d; do
+        [[ -z "$d" ]] && continue
+        custom_is_excluded_path "$d" && continue
+        [[ -f "${d}/node-info.yaml" || -d "${d}/db" || -d "${d}/genesis" || -d "${d}/node-keys" ]] || continue
+        found=true
+        print_warn "[CUSTOM] Data directory: ${d}"
+        print_info  "  Remove manually if unwanted:  sudo rm -rf '${d}'"
+    done < <(timeout -k 2 8 find /mnt /opt /data /srv /home -maxdepth 4 \
+                  -type d -name 'telcoin*' -prune -print 2>/dev/null || true)
+
+    # --- Custom binaries (REPORT ONLY) -------------------------------------
+    local b
+    while IFS= read -r b; do
+        [[ -z "$b" ]] && continue
+        custom_is_excluded_path "$b" && continue
+        found=true
+        print_warn "[CUSTOM] Binary: ${b}"
+        print_info  "  Remove manually if unwanted:  sudo rm -f '${b}'"
+    done < <(timeout -k 2 8 find /usr/local/bin /usr/bin /opt /srv /home -maxdepth 5 \
+                  -type f -name 'telcoin-network' 2>/dev/null || true)
+
+    # --- Unmanaged processes (REPORT ONLY -- never killed) -----------------
+    local pid cmd cg
+    while read -r pid cmd; do
+        [[ -z "$pid" ]] && continue
+        # Skip anything owned by a known systemd unit or by docker/containerd
+        # (a managed docker node's process lives under docker's cgroup, and is
+        # already covered by the container scan above).
+        cg=$(cat "/proc/${pid}/cgroup" 2>/dev/null || true)
+        case "$cg" in
+            *telcoin-observer*|*telcoin-validator*|*docker*|*containerd*) continue ;;
+        esac
+        found=true
+        print_warn "[CUSTOM] Unmanaged process: PID ${pid}"
+        print_info  "  ${cmd}"
+        print_info  "  Stop it via its own service/container -- do not kill a node mid-write."
+    done < <(pgrep -a telcoin-network 2>/dev/null || true)
+
+    echo ""
+    if [[ "$found" == "false" ]]; then
+        print_ok "No non-standard / custom Telcoin installs found."
+    else
+        print_info "Services and containers above could be removed here; data dirs,"
+        print_info "binaries and processes were reported only -- act on them deliberately"
+        print_info "with the commands shown."
+    fi
+    echo ""
+    read -r -p "  Press Enter to continue..."
+}
+
 main_menu() {
     while true; do
         clear
@@ -640,43 +776,49 @@ main_menu() {
             echo "  2) Remove validator node"
             echo "  3) Remove both nodes"
             echo "  4) Wipe chain data only (keeps keys and config)"
+            echo "  s) Scan for non-standard / custom installs"
             echo "  5) Exit"
             echo ""
             local choice
-            read -r -p "  Enter choice [1-5]: " choice
+            read -r -p "  Enter choice [1-5 or s]: " choice
             case "$choice" in
                 1) remove_observer ;;
                 2) remove_validator ;;
                 3) remove_observer; remove_validator ;;
                 4) wipe_chain_data_only ;;
+                s|S) scan_custom_installs ;;
                 5) echo ""; print_info "Exiting."; exit 0 ;;
-                *) print_warn "Please enter 1-5." ;;
+                *) print_warn "Please enter 1-5 or s." ;;
             esac
         elif [[ "$OBSERVER_INSTALLED" == "true" ]]; then
             echo "  1) Remove observer node"
             echo "  2) Wipe chain data only (keeps keys and config)"
+            echo "  s) Scan for non-standard / custom installs"
             echo "  3) Exit"
             echo ""
             local choice
-            read -r -p "  Enter choice [1-3]: " choice
+            read -r -p "  Enter choice [1-3 or s]: " choice
             case "$choice" in
                 1) remove_observer ;;
                 2) wipe_chain_data_only ;;
+                s|S) scan_custom_installs ;;
                 3) echo ""; print_info "Exiting."; exit 0 ;;
-                *) print_warn "Please enter 1-3." ;;
+                *) print_warn "Please enter 1-3 or s." ;;
             esac
         elif [[ "$VALIDATOR_INSTALLED" == "true" ]]; then
             echo "  1) Remove validator node"
             echo "  2) Wipe chain data only (keeps keys and config)"
+            echo "  s) Scan for non-standard / custom installs"
             echo "  3) Exit"
             echo ""
             local choice
-            read -r -p "  Enter choice [1-3]: " choice
+            read -r -p "  Enter choice [1-3 or s]: " choice
             case "$choice" in
                 1) remove_validator ;;
                 2) wipe_chain_data_only ;;
+                s|S) scan_custom_installs ;;
                 3) echo ""; print_info "Exiting."; exit 0 ;;
-                *) print_warn "Please enter 1-3." ;;
+                *) print_warn "Please enter 1-3 or s." ;;
             esac
         else
             exit 0
