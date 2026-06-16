@@ -511,6 +511,7 @@ cmd_setup() {
     local svc_user="${TN_SETUP_SERVICE_USER:-}"
     local svc_group="${TN_SETUP_SERVICE_GROUP:-}"
     local adv_name="${TN_SETUP_ADVERTISED_NAME:-}"
+    local data_dir="${TN_SETUP_DATA_DIR:-}"
 
     # Validate every value before it reaches the setup script.
     case "$network" in testnet|adiri) ;; *) die "invalid network: $network" ;; esac
@@ -529,6 +530,7 @@ cmd_setup() {
     [[ -z "$svc_user"  || "$svc_user"  =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service user"
     [[ -z "$svc_group" || "$svc_group" =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service group"
     [[ -z "$adv_name"  || "$adv_name"  =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid advertised name"
+    [[ -z "$data_dir"  || ( "$data_dir" =~ ^/[A-Za-z0-9._/-]+$ && "$data_dir" != *".."* ) ]] || die "invalid data directory"
 
     local -a args=( --json "--phase=${phase}" --network "$network" --passphrase-method "$passm" --rpc-public "$rpc_public" )
     [[ -n "$method" ]]      && args+=( --install-method "$method" )
@@ -544,6 +546,7 @@ cmd_setup() {
     [[ -n "$svc_user" ]]    && args+=( --service-user "$svc_user" )
     [[ -n "$svc_group" ]]   && args+=( --service-group "$svc_group" )
     [[ -n "$adv_name" ]]    && args+=( --advertised-name "$adv_name" )
+    [[ -n "$data_dir" ]]    && args+=( --data-dir "$data_dir" )
 
     exec bash "$script" "${args[@]}"
 }

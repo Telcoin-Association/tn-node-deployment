@@ -13,11 +13,31 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.2"
+readonly SCRIPT_VERSION="1.2.3"
 
 # =============================================================================
 # HELPERS
 # =============================================================================
+
+# Resolve a node's data dir from its .node-meta (DATA_DIR=), falling back to the
+# legacy /var/lib/telcoin/<type> for nodes installed before DATA_DIR was recorded.
+# Mirrors check-node.sh's detect_data_dir so all scripts agree on the path. Always
+# echoes a path and returns 0 so set -e never trips.
+detect_data_dir() {
+    local node_type="$1"
+    local meta="/etc/telcoin/${node_type}/.node-meta"
+    local default="/var/lib/telcoin/${node_type}"
+    if [[ -f "$meta" ]]; then
+        local dd
+        dd=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
+        if [[ -n "$dd" ]] && [[ -d "$dd" ]]; then
+            echo "$dd"
+            return 0
+        fi
+    fi
+    echo "$default"
+    return 0
+}
 
 # Stop a unit and wait for it to actually finish exiting before returning.
 # systemctl stop normally blocks until the unit reaches inactive, but on some
@@ -241,7 +261,8 @@ remove_docker_container() {
 
 remove_chain_data() {
     local node_type="$1"
-    local data_dir="/var/lib/telcoin/${node_type}"
+    local data_dir
+    data_dir=$(detect_data_dir "$node_type")
 
     if [[ -d "$data_dir" ]]; then
         local size
@@ -258,8 +279,9 @@ remove_chain_data() {
 
 remove_keys() {
     local node_type="$1"
-    local keys_dir="/var/lib/telcoin/${node_type}/node-keys"
-    local config_dir="/etc/telcoin/${node_type}"
+    local keys_dir config_dir
+    keys_dir="$(detect_data_dir "$node_type")/node-keys"
+    config_dir="/etc/telcoin/${node_type}"
 
     if [[ -d "$keys_dir" ]] || [[ -d "$config_dir" ]]; then
         echo ""
@@ -568,7 +590,7 @@ wipe_chain_data_only() {
             print_warn "This will wipe all observer chain data. The node will resync."
             if confirm "Wipe observer chain data?"; then
                 wait_for_service_stopped telcoin-observer
-                rm -rf /var/lib/telcoin/observer/db
+                rm -rf "$(detect_data_dir observer)/db"
                 systemctl start telcoin-observer 2>/dev/null || true
                 print_ok "Observer chain data wiped -- node restarted"
             fi
@@ -577,7 +599,7 @@ wipe_chain_data_only() {
             print_warn "This will wipe all validator chain data. The node will resync."
             if confirm "Wipe validator chain data?"; then
                 wait_for_service_stopped telcoin-validator
-                rm -rf /var/lib/telcoin/validator/db
+                rm -rf "$(detect_data_dir validator)/db"
                 systemctl start telcoin-validator 2>/dev/null || true
                 print_ok "Validator chain data wiped -- node restarted"
             fi
@@ -586,8 +608,8 @@ wipe_chain_data_only() {
             if confirm "Wipe chain data for both observer and validator?"; then
                 wait_for_service_stopped telcoin-observer
                 wait_for_service_stopped telcoin-validator
-                rm -rf /var/lib/telcoin/observer/db
-                rm -rf /var/lib/telcoin/validator/db
+                rm -rf "$(detect_data_dir observer)/db"
+                rm -rf "$(detect_data_dir validator)/db"
                 systemctl start telcoin-observer telcoin-validator 2>/dev/null || true
                 print_ok "Chain data wiped for both nodes -- nodes restarted"
             fi
@@ -728,6 +750,11 @@ json_remove() {
     [[ -z "$svc_user"  || "$svc_user"  == "root" ]] && svc_user="${SERVICE_USER:-telcoin}"
     [[ -z "$svc_group" || "$svc_group" == "root" ]] && svc_group="${SERVICE_GROUP:-telcoin}"
 
+    # Resolve the data dir from .node-meta BEFORE it (and the meta) get removed,
+    # so a custom data drive is cleaned up instead of orphaned.
+    local data_dir
+    data_dir=$(detect_data_dir "$node_type")
+
     json_event step "Stopping and disabling telcoin-${node_type}"
     systemctl stop "telcoin-${node_type}" 2>/dev/null || true
     systemctl disable "telcoin-${node_type}" 2>/dev/null || true
@@ -741,7 +768,6 @@ json_remove() {
     fi
 
     if [[ "$scope" == "data" || "$scope" == "keys" ]]; then
-        local data_dir="/var/lib/telcoin/${node_type}"
         if [[ -d "$data_dir" ]]; then
             json_event step "Removing chain data ${data_dir}"
             rm -rf "$data_dir"
@@ -751,7 +777,7 @@ json_remove() {
     if [[ "$scope" == "keys" ]]; then
         local config_dir="/etc/telcoin/${node_type}"
         json_event step "Removing keys and config ${config_dir}"
-        rm -rf "/var/lib/telcoin/${node_type}/node-keys" 2>/dev/null || true
+        rm -rf "${data_dir}/node-keys" 2>/dev/null || true
         rm -rf "$config_dir" 2>/dev/null || true
         if declare -f tpm_remove_sealed_files >/dev/null 2>&1; then
             tpm_remove_sealed_files "$config_dir" 2>/dev/null || true

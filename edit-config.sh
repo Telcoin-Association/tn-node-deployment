@@ -12,11 +12,29 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly VALIDATOR_SERVICE="telcoin-validator"
 readonly OBSERVER_SERVICE="telcoin-observer"
 readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
 readonly OBSERVER_SERVICE_FILE="/etc/systemd/system/telcoin-observer.service"
+
+# Resolve the selected node's data dir from .node-meta (DATA_DIR=), falling back
+# to the legacy /var/lib/telcoin/<type> for older installs. Mirrors check-node.sh
+# so all scripts agree on the path. Needs NODE_TYPE set.
+detect_data_dir() {
+    local meta="/etc/telcoin/${NODE_TYPE}/.node-meta"
+    local default="/var/lib/telcoin/${NODE_TYPE}"
+    if [[ -f "$meta" ]]; then
+        local dd
+        dd=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
+        if [[ -n "$dd" ]] && [[ -d "$dd" ]]; then
+            echo "$dd"
+            return 0
+        fi
+    fi
+    echo "$default"
+    return 0
+}
 
 TARGET_SERVICE=""
 TARGET_SERVICE_FILE=""
@@ -808,12 +826,7 @@ refresh_chain_configs() {
 
     local source_dir="/opt/telcoin-source"
     local node_data_dir
-
-    if [[ "$NODE_TYPE" == "observer" ]]; then
-        node_data_dir="/var/lib/telcoin/observer"
-    else
-        node_data_dir="/var/lib/telcoin/validator"
-    fi
+    node_data_dir=$(detect_data_dir)
 
     print_info "This pulls the latest chain-configs from the repository and"
     print_info "copies them to your node data directory."

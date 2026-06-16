@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.14"
+readonly SCRIPT_VERSION="1.2.15"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -85,7 +85,28 @@ step_preflight() {
     check_root
     detect_distro
     check_cve_2026_31431
-    check_hardware "observer"
+
+    # Pick where node data lives BEFORE the disk check, so the check lands on the
+    # right drive (a separate data mount, not the boot disk). Interactive only;
+    # JSON/UI installs pre-set DATA_DIR via --data-dir (or use the default).
+    if ! json_mode; then
+        print_step "Available storage..."
+        echo ""
+        df -BG -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x vfat \
+            --output=target,avail,size 2>/dev/null \
+            | awk 'NR>1 {printf "    %-28s %s available / %s total\n", $1, $2, $3}'
+        echo ""
+        print_step "Selecting data directory..."
+        print_info "Where should node data be stored? If it's on a separate drive"
+        print_info "(e.g. /mnt/data) enter the full path. Press Enter for the default."
+        local input
+        read -r -p "  Data directory [${DATA_DIR}]: " input
+        DATA_DIR="${input:-$DATA_DIR}"
+        print_ok "Data directory: ${DATA_DIR}"
+    fi
+    mkdir -p "$DATA_DIR" 2>/dev/null || true
+
+    check_hardware "observer" "$DATA_DIR"
     check_internet
     check_ports "$P2P_PORT" "$WORKER_PORT" "$RPC_PORT" "$METRICS_PORT"
 
@@ -496,7 +517,6 @@ step_config() {
     echo ""
 
     if ! confirm "Use these default paths?"; then
-        read -r -p "  Data directory    [${DATA_DIR}]: " input;    DATA_DIR="${input:-$DATA_DIR}"
         read -r -p "  Config directory  [${CONFIG_DIR}]: " input;  CONFIG_DIR="${input:-$CONFIG_DIR}"
         read -r -p "  Log directory     [${LOG_DIR}]: " input;     LOG_DIR="${input:-$LOG_DIR}"
         read -r -p "  Install directory [${INSTALL_DIR}]: " input; INSTALL_DIR="${input:-$INSTALL_DIR}"
@@ -1277,6 +1297,7 @@ main() {
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
             --rpc-public)          shift 2 ;;  # public RPC is coming soon (Caddy-based); always private for now
             --advertised-name)     ADVERTISED_NAME="${2:-}"; shift 2 ;;
+            --data-dir)            DATA_DIR="${2:-$DATA_DIR}"; shift 2 ;;
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             *) shift ;;

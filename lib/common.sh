@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.52"
+readonly COMMON_VERSION="1.1.53"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -372,6 +372,7 @@ prompt_with_validation() {
 
 check_hardware() {
     local node_type="${1:-validator}"
+    local data_dir="${2:-/}"
     print_step "Checking hardware requirements for ${node_type} node..."
 
     # Select thresholds based on node type
@@ -403,12 +404,27 @@ check_hardware() {
         print_ok "CPU cores: ${cpu_cores}"
     fi
 
-    local disk_avail_gb
-    disk_avail_gb=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
-    if [[ $disk_avail_gb -lt $min_disk ]]; then
-        print_warn "Disk: ${disk_avail_gb}GB available, ${min_disk}GB recommended."
+    # Check free space on the drive that will actually hold node data. The chosen
+    # dir may not exist yet (created later in setup), so resolve to the nearest
+    # existing parent before calling df -- otherwise df errors and, under set -e,
+    # an empty value breaks the [[ -lt ]] comparison.
+    local check_path="$data_dir"
+    while [[ -n "$check_path" && ! -e "$check_path" && "$check_path" != "/" ]]; do
+        check_path="$(dirname "$check_path")"
+    done
+    [[ -e "$check_path" ]] || check_path="/"
+
+    local disk_avail_gb mount_point
+    disk_avail_gb=$(df -BG --output=avail "$check_path" 2>/dev/null | awk 'NR==2 {gsub("G","",$1); print $1+0}')
+    mount_point=$(df --output=target "$check_path" 2>/dev/null | awk 'NR==2 {print $1}')
+    [[ -z "$mount_point" ]] && mount_point="$check_path"
+
+    if [[ -z "$disk_avail_gb" ]]; then
+        print_warn "Disk: could not determine free space for ${data_dir}."
+    elif [[ "$disk_avail_gb" -lt "$min_disk" ]]; then
+        print_warn "Disk: ${disk_avail_gb}GB available on ${mount_point}, ${min_disk}GB recommended."
     else
-        print_ok "Disk: ${disk_avail_gb}GB available"
+        print_ok "Disk: ${disk_avail_gb}GB available on ${mount_point}"
     fi
 }
 
