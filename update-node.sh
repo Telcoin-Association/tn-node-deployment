@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.50"
+readonly SCRIPT_VERSION="1.1.51"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -425,22 +425,22 @@ prepare_source_build() {
     # Pull if this is a branch (not a tag) so we get the latest commit on it
     git -C "$TN_SOURCE_DIR" pull --ff-only 2>/dev/null || true
 
-    # Faucet feature flag is required for testnet builds; mainnet builds omit it.
+    # The adiri feature flag is required for testnet builds; mainnet builds omit it.
     local network cargo_features=""
     network=$(detect_network)
     case "$network" in
         testnet)
-            cargo_features="--features faucet"
-            print_info "Network: testnet -- enabling --features faucet"
+            cargo_features="--features adiri"
+            print_info "Network: testnet -- enabling --features adiri"
             ;;
         mainnet)
-            print_info "Network: mainnet -- building without faucet feature"
+            print_info "Network: mainnet -- building without the adiri feature"
             ;;
         *)
             print_warn "Could not determine network from .node-meta or genesis.yaml."
-            print_warn "Defaulting to testnet (--features faucet) since mainnet has not launched."
+            print_warn "Defaulting to testnet (--features adiri) since mainnet has not launched."
             print_warn "Pass NETWORK=mainnet in /etc/telcoin/${NODE_TYPE}/.node-meta to override."
-            cargo_features="--features faucet"
+            cargo_features="--features adiri"
             ;;
     esac
 
@@ -953,12 +953,12 @@ json_prepare_source() {
     fi
     git -C "$TN_SOURCE_DIR" pull --ff-only 2>/dev/null || true
 
-    # Faucet feature flag is required for testnet builds; mainnet omits it.
+    # The adiri feature flag is required for testnet builds; mainnet omits it.
     local network cargo_features=""
     network=$(detect_network)
     case "$network" in
         mainnet) ;;
-        *) cargo_features="--features faucet" ;;
+        *) cargo_features="--features adiri" ;;
     esac
 
     # Make cargo findable under sudo's PATH (mirrors prepare_source_build).
