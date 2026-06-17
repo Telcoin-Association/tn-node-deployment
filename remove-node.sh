@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.5"
+readonly SCRIPT_VERSION="1.2.6"
 
 # =============================================================================
 # HELPERS
@@ -462,6 +462,49 @@ offer_ui_removal() {
 }
 
 # =============================================================================
+# REMOVE TESTNET ADD-ONS (Alloy log shipper + WireGuard admin overlay)
+# =============================================================================
+
+# Idempotent host-wide teardown of the opt-in add-ons. Safe to call even if none
+# were enabled (each block guards on the component existing). Called from both the
+# observer and validator full-removal flows.
+remove_testnet_addons() {
+    # --- Alloy log shipper -----------------------------------------------------
+    if [[ -f /etc/systemd/system/telcoin-alloy.service ]] || systemctl list-unit-files 2>/dev/null | grep -q '^telcoin-alloy.service'; then
+        print_info "Removing Alloy log shipper (telcoin-alloy)..."
+        systemctl disable --now telcoin-alloy.service >/dev/null 2>&1 || true
+        docker rm -f telcoin-alloy >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/telcoin-alloy.service
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -rf /etc/telcoin/alloy /var/lib/telcoin-alloy
+
+    # --- WireGuard admin overlay ----------------------------------------------
+    if [[ -f /etc/wireguard/wg0.conf ]] || ip link show wg0 >/dev/null 2>&1; then
+        print_info "Removing WireGuard admin overlay (wg0 + tnadmin)..."
+        wg-quick down wg0 >/dev/null 2>&1 || true
+        systemctl disable wg-quick@wg0.service >/dev/null 2>&1 || true
+        rm -f /etc/wireguard/wg0.conf /etc/wireguard/wg0-private.key
+        rm -f /etc/ssh/sshd_config.d/15-tnadmin-overlay.conf
+        if sshd -t >/dev/null 2>&1; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; fi
+        systemctl disable --now tn-nftables.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/tn-nftables.service /etc/wgvpn/nftables-node.nft /usr/local/sbin/tn-node-ssh-lockdown
+        rmdir /etc/wgvpn 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+        # Remove the overlay-SSH ufw rule (mirrors setup-vpn.sh --disable).
+        if ufw_installed && ufw_active; then
+            local sp; sp="$(get_ssh_port)"; [[ -n "$sp" ]] || sp=22
+            ufw delete allow from "${TN_OVERLAY_CIDR}" to any port "${sp}" proto tcp &>/dev/null || true
+        fi
+        if id -u tnadmin >/dev/null 2>&1; then
+            userdel -r tnadmin >/dev/null 2>&1 || true
+            rm -f /etc/sudoers.d/90-tnadmin
+        fi
+        print_info "Note: ask the Telcoin Association to de-enroll this node's overlay peer."
+    fi
+}
+
+# =============================================================================
 # REMOVE OBSERVER
 # =============================================================================
 
@@ -493,6 +536,9 @@ remove_observer() {
 
     # Keys -- separate explicit confirmation
     remove_keys "observer"
+
+    # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
+    remove_testnet_addons
 
     # Shared components
     remove_shared_components
@@ -545,6 +591,9 @@ remove_validator() {
 
     # Keys -- separate explicit confirmation
     remove_keys "validator"
+
+    # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
+    remove_testnet_addons
 
     # Shared components
     remove_shared_components

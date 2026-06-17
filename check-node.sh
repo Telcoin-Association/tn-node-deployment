@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.50"
+readonly SCRIPT_VERSION="1.1.51"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -446,6 +446,50 @@ read_sync_progress() {
         SS_AGE_S="?"
     fi
     return 0
+}
+
+# report_testnet_addons -- supplementary status for the opt-in add-ons (only on a
+# testnet node). -e-safe: every probe is guarded.
+report_testnet_addons() {
+    local meta net
+    meta="$(node_meta_path 2>/dev/null || true)"
+    [[ -n "$meta" ]] || return 0
+    net="$(meta_get NETWORK "$meta" 2>/dev/null || true)"
+    [[ "$net" == "testnet" ]] || return 0
+
+    echo ""
+    print_step "Checking testnet add-ons..."
+
+    # Centralized logging (Alloy) -- reuse the shared status helper if present.
+    if declare -F obs_status >/dev/null 2>&1; then
+        obs_status || true
+    fi
+
+    # Health-monitor endpoint.
+    local hc
+    hc="$(meta_get ENABLE_HEALTHCHECK_MONITOR "$meta" 2>/dev/null || echo false)"
+    if [[ "$hc" == "true" ]]; then
+        if curl -fsS "http://127.0.0.1:${TN_KUMA_PORT}" >/dev/null 2>&1; then
+            print_ok "Health endpoint responds on 127.0.0.1:${TN_KUMA_PORT}"
+        else
+            print_warn "Health endpoint not responding on 127.0.0.1:${TN_KUMA_PORT} (node down, or flag not yet applied)"
+        fi
+    fi
+
+    # WireGuard admin overlay.
+    local vpn
+    vpn="$(meta_get ENABLE_VPN "$meta" 2>/dev/null || echo false)"
+    if [[ "$vpn" == "true" || "$vpn" == "pending" ]]; then
+        if ip link show wg0 >/dev/null 2>&1; then
+            if command -v wg >/dev/null 2>&1 && wg show wg0 2>/dev/null | grep -qE 'latest handshake'; then
+                print_ok "VPN overlay wg0 up, hub handshake present"
+            else
+                print_warn "VPN overlay wg0 up but no hub handshake yet (overlay enrollment pending?)"
+            fi
+        else
+            print_warn "VPN recorded as '${vpn}' in .node-meta but wg0 is not up -- run setup-vpn.sh"
+        fi
+    fi
 }
 
 # =============================================================================
@@ -866,6 +910,11 @@ elif (( MEM_PCT >= 85 )); then
 else
     print_ok "Memory: ${MEM_USED_GB}GB / ${MEM_TOTAL_GB}GB (${MEM_PCT}%)"
 fi
+
+# =============================================================================
+# 9.5 TESTNET ADD-ONS (Alloy / health endpoint / VPN overlay)
+# =============================================================================
+report_testnet_addons
 
 # =============================================================================
 # 10. SUMMARY

@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.16"
+readonly SCRIPT_VERSION="1.2.17"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -38,6 +38,15 @@ PRIMARY_LISTENER_MULTIADDR=""
 WORKER_LISTENER_MULTIADDR=""
 USE_LOAD_CREDENTIAL=false
 PASSPHRASE_METHOD="loadcredential"  # loadcredential | tpm
+
+# Testnet opt-in add-ons (see lib/common.sh / docs/testnet-addons.md). OFF by default;
+# set by prompt_testnet_addons (interactive testnet only) and persisted to .node-meta.
+ENABLE_HEALTHCHECK_MONITOR="false"
+ENABLE_OBSERVABILITY="false"
+ENABLE_VPN="false"          # true | pending | false
+VPN_OVERLAY_IP=""
+VPN_NODE_PUBKEY=""
+REGION=""
 
 # =============================================================================
 # STEPS
@@ -152,6 +161,11 @@ step_preflight() {
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
+
+    # Testnet opt-in add-ons: ask now ("ask early") so step_create_service can bake the
+    # right node-launch flags on the first pass. Side-effect installs run later in
+    # step_testnet_addons ("act late"). No-op off testnet / in JSON mode.
+    json_mode || prompt_testnet_addons
 
     # Select install method upfront so all dependencies are installed before configuration
     echo ""
@@ -935,6 +949,11 @@ step_create_service() {
         docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
         docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
 
+        # Testnet opt-in launch flags (healthcheck + JSON log shipping) as ONE line, so
+        # an empty tail can't leave a dangling backslash. Docker reth log dir is the
+        # container path /home/nonroot/logs (= host ${DATA_DIR}/logs).
+        local launch_flags; launch_flags="$(tn_node_launch_flags docker)"
+
         cat > "$service_file" <<EOF
 [Unit]
 Description=Telcoin Network Observer Node (${CHAIN_NAME}) [Docker]
@@ -965,7 +984,7 @@ telcoin node \
 --metrics ${metrics_addr} \
 --log.stdout.format log-fmt \
 -vvv \
---http
+--http ${launch_flags}
 ExecStop=docker stop ${SERVICE_NAME}
 Restart=on-failure
 RestartSec=10
@@ -986,6 +1005,11 @@ EOF
             exit 1
         fi
         local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
+
+        # Testnet opt-in launch flags (healthcheck + JSON log shipping) as ONE line, so
+        # an empty tail can't leave a dangling backslash. Binary reth log dir is the host
+        # path /var/log/telcoin (already in the unit's ReadWritePaths, owned telcoin:telcoin).
+        local launch_flags; launch_flags="$(tn_node_launch_flags binary)"
 
         if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
             # TPM wrapper -- unseal from TPM, fall back to LoadCredential file if TPM unavailable
@@ -1016,7 +1040,7 @@ exec ${BINARY_PATH} node \
   --metrics ${metrics_addr} \
   --log.stdout.format log-fmt \
   -vvv \
-  --http
+  --http ${launch_flags}
 EOF
         else
             # LoadCredential wrapper
@@ -1034,7 +1058,7 @@ exec ${BINARY_PATH} node \
   --metrics ${metrics_addr} \
   --log.stdout.format log-fmt \
   -vvv \
-  --http
+  --http ${launch_flags}
 EOF
         fi
 
@@ -1097,6 +1121,13 @@ DATA_DIR=${DATA_DIR}
 PUBLIC_IP=${PUBLIC_IP:-}
 EXTERNAL_PRIMARY_ADDR=${PRIMARY_MULTIADDR:-}
 EXTERNAL_WORKER_ADDR=${WORKER_MULTIADDR:-}
+VALIDATOR_ADDRESS=
+REGION=${REGION:-}
+ENABLE_HEALTHCHECK_MONITOR=${ENABLE_HEALTHCHECK_MONITOR:-false}
+ENABLE_OBSERVABILITY=${ENABLE_OBSERVABILITY:-false}
+ENABLE_VPN=${ENABLE_VPN:-false}
+VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}
+VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}
 EOF
     chmod 600 "$meta_file"
     print_ok "Node metadata written: ${meta_file}"
@@ -1334,6 +1365,7 @@ main() {
     step_generate_keys
     step_write_config
     step_create_service
+    step_testnet_addons
     step_final_summary
 }
 

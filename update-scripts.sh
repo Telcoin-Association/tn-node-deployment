@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.53"
+readonly SCRIPT_VERSION="1.1.54"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -46,6 +46,10 @@ declare -a SCRIPTS=(
     "update-node.sh:update-node.sh:SCRIPT_VERSION"
     "update-scripts.sh:update-scripts.sh:SCRIPT_VERSION"
     "lib/common.sh:lib/common.sh:COMMON_VERSION"
+    "lib/testnet-addons.env:lib/testnet-addons.env:TESTNET_ADDONS_VERSION"
+    "lib/observability.sh:lib/observability.sh:OBSERVABILITY_VERSION"
+    "setup-vpn.sh:setup-vpn.sh:SCRIPT_VERSION"
+    "setup-observability.sh:setup-observability.sh:SCRIPT_VERSION"
     "ui/server.py:ui/server.py:UI_VERSION"
 )
 
@@ -60,6 +64,19 @@ declare -a UI_BUNDLE=(
     "ui/telcoin-ui.service:ui/telcoin-ui.service"
     "ui/requirements.txt:ui/requirements.txt"
     "ui/install-ui.sh:ui/install-ui.sh"
+)
+
+# Testnet add-on companion files WITHOUT their own version var (the Alloy config +
+# the vendored wgvpn bundle). Fetched alongside whenever a versioned add-on file
+# (setup-vpn.sh / setup-observability.sh / lib/observability.sh / lib/testnet-addons.env)
+# updates -- mirrors how UI_BUNDLE rides along with ui/server.py.
+declare -a TESTNET_ADDONS_BUNDLE=(
+    "observability/config.alloy:observability/config.alloy"
+    "lib/wgvpn/wg-node-bootstrap.sh:lib/wgvpn/wg-node-bootstrap.sh"
+    "lib/wgvpn/hub-coordinates.env:lib/wgvpn/hub-coordinates.env"
+    "lib/wgvpn/peers/ssh/grant.pub:lib/wgvpn/peers/ssh/grant.pub"
+    "lib/wgvpn/peers/ssh/bluelights.pub:lib/wgvpn/peers/ssh/bluelights.pub"
+    "lib/wgvpn/peers/ssh/README:lib/wgvpn/peers/ssh/README"
 )
 
 # =============================================================================
@@ -244,6 +261,19 @@ download_updates() {
     done
     if [[ "$ui_update" == "true" ]]; then
         FILES_TO_UPDATE+=("${UI_BUNDLE[@]}")
+    fi
+
+    # Likewise, pull the testnet add-on companion bundle when any versioned add-on
+    # file is updating, so observability/config.alloy + the vendored wgvpn files stay
+    # in sync with the scripts that consume them.
+    local addons_update=false
+    for entry in "${FILES_TO_UPDATE[@]}"; do
+        case "$entry" in
+            setup-vpn.sh:*|setup-observability.sh:*|lib/observability.sh:*|lib/testnet-addons.env:*) addons_update=true ;;
+        esac
+    done
+    if [[ "$addons_update" == "true" ]]; then
+        FILES_TO_UPDATE+=("${TESTNET_ADDONS_BUNDLE[@]}")
     fi
 
     local success=0

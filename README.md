@@ -17,6 +17,8 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | `remove-node.sh` | Safely remove a node installation |
 | `update-node.sh` | Update a running node to a newer version (source build or Docker image), with a prepare/apply two-phase workflow and one-keystroke rollback |
 | `update-scripts.sh` | Check for and download script updates from GitHub |
+| `setup-observability.sh` | Opt-in centralized logging + health monitoring (testnet add-on) |
+| `setup-vpn.sh` | Opt-in WireGuard admin SSH for the Telcoin Association (testnet add-on) |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 
 ---
@@ -791,11 +793,52 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 ---
 
+## Testnet Add-ons
+
+Three optional, **testnet-only**, reversible capabilities that let the Telcoin
+Association help run the testnet. All are **off by default** and additive — a node that
+opts out is unaffected. Full details and trust model: **[docs/testnet-addons.md](docs/testnet-addons.md)**.
+
+- **Health monitoring** — exposes a health endpoint (port `43174`) probed only by the
+  Association's uptime monitor, so they can alert you when your node drops.
+- **Centralized logging** — ships your node's logs to the Association's Loki (a Grafana
+  Alloy sidecar) to help debug issues. Needs a per-operator ingest token.
+- **VPN admin SSH** — lets the Association SSH into your node over a private WireGuard
+  overlay (a sudo `tnadmin` user reachable only over the VPN) to help recover it.
+
+You're offered each one during `setup-validator.sh` / `setup-observer.sh` (right after
+network selection), or enable them later:
+
+```bash
+# Logging + health monitoring
+sudo bash ~/telcoin-node-scripts/setup-observability.sh
+
+# VPN admin SSH (or --disable to remove)
+sudo bash ~/telcoin-node-scripts/setup-vpn.sh
+```
+
+Enabling the VPN requires explicit consent (you type `I CONSENT`); it never touches your
+own SSH config, runs its host firewall dormant, and is undone by `setup-vpn.sh --disable`.
+
+---
+
 ## Changelog
 
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### Testnet add-ons — VPN admin SSH, centralized logging, health monitoring
+New opt-in, testnet-only, reversible add-ons for external operators (`lib/common.sh
+v1.2.0`; new `setup-vpn.sh`, `setup-observability.sh`, `lib/observability.sh`,
+`lib/testnet-addons.env`, `observability/config.alloy`, vendored `lib/wgvpn/`).
+Operators are offered each during node setup, or run the standalone scripts later.
+`firewall-setup.sh v1.3.0` source-restricts the health port to the Association monitor
+(`104.155.184.201/32`), adds a testnet add-on rules menu, and keeps the WireGuard
+overlay from being locked out by an SSH whitelist. `setup-validator.sh v1.2.16` /
+`setup-observer.sh v1.2.17` bake the healthcheck + JSON-log flags on the first pass and
+persist new `.node-meta` keys. `remove-node.sh v1.2.6` / `check-node.sh v1.1.51` tear
+down and report the add-ons. See [docs/testnet-addons.md](docs/testnet-addons.md).
 
 ### telcoin-ui v1.0.3
 Fixes the dashboard "Recent Traces / No traces yet" panel when spans are already
