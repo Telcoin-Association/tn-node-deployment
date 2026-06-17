@@ -474,7 +474,9 @@ remove_testnet_addons() {
         print_info "Removing Alloy log shipper (telcoin-alloy)..."
         systemctl disable --now telcoin-alloy.service >/dev/null 2>&1 || true
         docker rm -f telcoin-alloy >/dev/null 2>&1 || true
+        docker rmi "${TN_ALLOY_IMAGE:-grafana/alloy:v1.5.1}" >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/telcoin-alloy.service
+        rm -f /usr/local/bin/alloy   # native tarball install path (no-op for apt/docker installs)
         systemctl daemon-reload 2>/dev/null || true
     fi
     rm -rf /etc/telcoin/alloy /var/lib/telcoin-alloy
@@ -985,6 +987,15 @@ json_remove() {
         rm -rf "$config_dir" 2>/dev/null || true
         if declare -f tpm_remove_sealed_files >/dev/null 2>&1; then
             tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
+        fi
+
+        # Full removal: tear down the testnet add-ons too -- the Alloy log shipper holds
+        # the mode-600 ingest token, and the WireGuard overlay leaves a sudo tnadmin user
+        # + maintainer keys behind. Under --json, remove_testnet_addons' print_* output
+        # goes to stderr (benign); it never writes to the JSON fd.
+        if declare -f remove_testnet_addons >/dev/null 2>&1; then
+            json_event step "Removing testnet add-ons (Alloy log shipper, VPN admin overlay)"
+            remove_testnet_addons || true
         fi
 
         # Full removal: also drop the service user/group (skip root; keep if the

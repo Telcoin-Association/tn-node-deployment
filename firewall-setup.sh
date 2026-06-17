@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
@@ -43,6 +43,39 @@ kuma_rule_state() {
         echo "anywhere"
     else
         echo "restricted"
+    fi
+}
+
+# kuma_restricted_desc — human description of the "restricted" health-port state. Notes
+# any operator-chosen sources (kuma_extra_list) layered on top of the TA baseline so the
+# status line stays accurate once the operator adds their own monitors.
+kuma_restricted_desc() {
+    local extras
+    extras="$(kuma_extra_list)"
+    if [[ -n "$extras" ]]; then
+        local -a arr=($extras)
+        printf 'restricted to TA (%s) + %d additional: %s' "${TN_KUMA_SRC}" "${#arr[@]}" "$extras"
+    else
+        printf 'open to the Association monitor only (%s)' "${TN_KUMA_SRC}"
+    fi
+}
+
+# kuma_offer_anywhere_cleanup — if an open-to-Anywhere rule for the health port still
+# exists it shadows the source restriction (ufw evaluates the broadest allow), so list
+# the port's rules and offer to delete the offending one by number. No-op otherwise.
+kuma_offer_anywhere_cleanup() {
+    ufw status 2>/dev/null | grep -E "^${UPTIME_KUMA_PORT}/tcp[[:space:]]" | grep -qiE "ALLOW[[:space:]]+Anywhere" || return 0
+    echo ""
+    print_warn "An open-to-Anywhere rule for ${UPTIME_KUMA_PORT}/tcp still exists and overrides the restriction."
+    print_info "Current ${UPTIME_KUMA_PORT}/tcp rules:"
+    ufw status numbered 2>/dev/null | grep -E "${UPTIME_KUMA_PORT}/tcp" | while IFS= read -r line; do print_info "$line"; done
+    local rnum
+    read -r -p "  Enter the rule NUMBER of the Anywhere rule to delete (blank = skip): " rnum
+    if [[ "$rnum" =~ ^[0-9]+$ ]]; then
+        if confirm "Delete ufw rule ${rnum}?"; then
+            ufw --force delete "$rnum" &>/dev/null
+            print_ok "Rule ${rnum} removed (re-check numbers if there is also a (v6) duplicate)"
+        fi
     fi
 }
 
@@ -177,7 +210,7 @@ view_status() {
         print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}"
         if ufw_active; then
             case "$(kuma_rule_state)" in
-                restricted) print_ok    "TCP ${UPTIME_KUMA_PORT} open to the Association monitor only (${TN_KUMA_SRC})" ;;
+                restricted) print_ok    "TCP ${UPTIME_KUMA_PORT} $(kuma_restricted_desc)" ;;
                 anywhere)   print_warn  "TCP ${UPTIME_KUMA_PORT} open to Anywhere -- consider restricting to ${TN_KUMA_SRC} (menu: Manage node ports)" ;;
                 closed)     print_error "TCP ${UPTIME_KUMA_PORT} is CLOSED -- health monitoring will fail" ;;
             esac
@@ -509,41 +542,39 @@ manage_node_ports() {
     print_info "The Telcoin Association uptime monitor probes this port to confirm your node is up."
     local kstate; kstate="$(kuma_rule_state)"
     case "$kstate" in
-        restricted) print_ok   "TCP ${UPTIME_KUMA_PORT} is open to the Association monitor only (${TN_KUMA_SRC})" ;;
+        restricted) print_ok   "TCP ${UPTIME_KUMA_PORT} is $(kuma_restricted_desc)" ;;
         anywhere)   print_warn "TCP ${UPTIME_KUMA_PORT} is open to ANYWHERE (any host can probe it)" ;;
         closed)     print_info "TCP ${UPTIME_KUMA_PORT} is currently closed" ;;
     esac
     echo ""
     echo "  How should the health port be reachable?"
-    echo "    1) Association monitor only  -- from ${TN_KUMA_SRC}  [recommended]"
-    echo "    2) Open to anyone            -- any source IP"
-    echo "    3) Leave as-is"
+    echo "    1) Association monitor only        -- from ${TN_KUMA_SRC}  [recommended]"
+    echo "    2) Association monitor + your IPs  -- TA plus a list you manage"
+    echo "    3) Open to anyone                  -- any source IP"
+    echo "    4) Leave as-is"
     echo ""
     local kchoice
-    read -r -p "  Enter choice [1-3]: " kchoice
+    read -r -p "  Enter choice [1-4]: " kchoice
     case "$kchoice" in
         1)
             apply_kuma_rule &>/dev/null
             print_ok "TCP ${UPTIME_KUMA_PORT} restricted to ${TN_KUMA_SRC}"
             # An open-to-Anywhere rule, if present, shadows the restriction -- offer to delete it.
-            if ufw status 2>/dev/null | grep -E "^${UPTIME_KUMA_PORT}/tcp[[:space:]]" | grep -qiE "ALLOW[[:space:]]+Anywhere"; then
-                echo ""
-                print_warn "An open-to-Anywhere rule for ${UPTIME_KUMA_PORT}/tcp still exists and overrides the restriction."
-                print_info "Current ${UPTIME_KUMA_PORT}/tcp rules:"
-                ufw status numbered 2>/dev/null | grep -E "${UPTIME_KUMA_PORT}/tcp" | while IFS= read -r line; do print_info "$line"; done
-                local rnum
-                read -r -p "  Enter the rule NUMBER of the Anywhere rule to delete (blank = skip): " rnum
-                if [[ "$rnum" =~ ^[0-9]+$ ]]; then
-                    if confirm "Delete ufw rule ${rnum}?"; then
-                        ufw --force delete "$rnum" &>/dev/null
-                        print_ok "Rule ${rnum} removed (re-check numbers if there is also a (v6) duplicate)"
-                    fi
-                fi
-            fi
+            kuma_offer_anywhere_cleanup
             ;;
         2)
+            # TA stays the always-on baseline; operator-chosen sources layer on top and
+            # are persisted so they survive a `ufw --force reset` (see apply_kuma_rule).
+            apply_kuma_rule &>/dev/null
+            print_ok "TCP ${UPTIME_KUMA_PORT} restricted to ${TN_KUMA_SRC} (Association baseline)"
+            manage_health_extra_ips
+            # A lingering open-to-Anywhere rule would still override the restriction.
+            kuma_offer_anywhere_cleanup
+            ;;
+        3)
             ufw allow "${UPTIME_KUMA_PORT}/tcp" &>/dev/null
             print_ok "TCP ${UPTIME_KUMA_PORT} opened to anyone"
+            print_info "Any persisted operator sources become redundant (but stay harmless)."
             ;;
         *)
             print_info "Left ${UPTIME_KUMA_PORT}/tcp as-is."
@@ -564,6 +595,66 @@ manage_node_ports() {
 
     echo ""
     read -r -p "  Press Enter to return to menu..."
+}
+
+# manage_health_extra_ips -- add/remove operator-chosen sources for the health port.
+# The Association monitor stays the always-on baseline (apply_kuma_rule); these layer on
+# top and are persisted in .node-meta (KUMA_EXTRA_SRC), so they survive the ufw reset
+# that "Enable recommended defaults" performs. Modeled on manage_whitelist.
+manage_health_extra_ips() {
+    while true; do
+        echo ""
+        print_step "Additional health-port (${UPTIME_KUMA_PORT}/tcp) sources"
+        local extras; extras="$(kuma_extra_list)"
+        if [[ -n "$extras" ]]; then
+            print_info "Allowed in addition to the Association monitor (${TN_KUMA_SRC}):"
+            local s
+            for s in $extras; do print_info "  - ${s}"; done
+        else
+            print_info "No additional sources yet -- only the Association monitor (${TN_KUMA_SRC}) can probe."
+        fi
+        echo ""
+        echo "  1) Add an IP / CIDR"
+        echo "  2) Remove an IP / CIDR"
+        echo "  3) Done"
+        echo ""
+        local c; read -r -p "  Enter choice [1-3]: " c
+        case "$c" in
+            1)
+                echo ""
+                local current_ip; current_ip="$(get_current_ip)"
+                [[ -n "$current_ip" ]] && print_info "Your current session IP: ${current_ip}"
+                print_info "Accepts a single IPv4, IPv6, or CIDR (e.g. 203.0.113.5 or 203.0.113.0/24)."
+                local new_src
+                read -r -p "  Enter IP/CIDR to allow on ${UPTIME_KUMA_PORT}/tcp: " new_src
+                if [[ -z "$new_src" ]]; then
+                    print_warn "No input -- nothing added."
+                elif kuma_extra_add "$new_src"; then
+                    print_ok "Allowed ${new_src} -> ${UPTIME_KUMA_PORT}/tcp (persisted)"
+                else
+                    print_warn "Invalid IP/CIDR: ${new_src} -- not added."
+                fi
+                ;;
+            2)
+                local extras2; extras2="$(kuma_extra_list)"
+                if [[ -z "$extras2" ]]; then
+                    print_info "No additional sources to remove."
+                else
+                    echo ""
+                    local del_src
+                    read -r -p "  Enter the exact IP/CIDR to remove: " del_src
+                    if [[ -n "$del_src" ]] && printf '%s\n' $extras2 | grep -qxF "$del_src"; then
+                        kuma_extra_remove "$del_src"
+                        print_ok "Removed ${del_src} from ${UPTIME_KUMA_PORT}/tcp"
+                    else
+                        print_warn "Not in the list: ${del_src}"
+                    fi
+                fi
+                ;;
+            3) return ;;
+            *) print_warn "Invalid choice" ;;
+        esac
+    done
 }
 
 # =============================================================================
@@ -700,7 +791,7 @@ manage_addon_rules() {
 
     print_step "Current add-on rule status"
     case "$(kuma_rule_state)" in
-        restricted) print_ok   "Health ${UPTIME_KUMA_PORT}/tcp: Association monitor only (${TN_KUMA_SRC})" ;;
+        restricted) print_ok   "Health ${UPTIME_KUMA_PORT}/tcp: $(kuma_restricted_desc)" ;;
         anywhere)   print_warn "Health ${UPTIME_KUMA_PORT}/tcp: open to Anywhere" ;;
         closed)     print_info "Health ${UPTIME_KUMA_PORT}/tcp: closed" ;;
     esac
@@ -715,6 +806,8 @@ manage_addon_rules() {
     echo "  2) Restrict health port ${UPTIME_KUMA_PORT}/tcp to the Association monitor (${TN_KUMA_SRC})"
     echo "  3) Remove the overlay SSH allowance"
     echo "  4) Back"
+    echo ""
+    print_info "To allow your OWN monitoring hosts on ${UPTIME_KUMA_PORT}/tcp, use main menu -> Manage node ports."
     echo ""
     local c; read -r -p "  Enter choice [1-4]: " c
     case "$c" in
@@ -847,7 +940,15 @@ json_fw_status() {
     local kuma_state="closed"
     [[ "$active" == "true" ]] && kuma_state="$(kuma_rule_state)"
 
-    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"ports\":{${ports_json}}}"
+    # Operator-chosen health sources (layered on top of the TA baseline), as a JSON array.
+    local kuma_extra_json="" efirst=true esrc
+    for esrc in $(kuma_extra_list); do
+        [[ "$efirst" == "true" ]] || kuma_extra_json+=","
+        kuma_extra_json+="\"$(json_escape "$esrc")\""
+        efirst=false
+    done
+
+    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"ports\":{${ports_json}}}"
 }
 
 # Open/close ONE node port. Refuses any port not in JSON_NODE_PORTS.
@@ -861,10 +962,22 @@ json_fw_port() {
 
     if [[ "$pstate" == "on" ]]; then
         json_event step "Opening ${spec}"
-        ufw allow "$spec" >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw allow failed for $(json_escape "$spec")\"}"; return 1; }
+        if [[ "$spec" == "${UPTIME_KUMA_PORT}/tcp" ]]; then
+            # The health port must NEVER be open to the world: source-restrict it to the
+            # Association monitor (TN_KUMA_SRC) instead of `ufw allow 43174/tcp` (Anywhere).
+            apply_kuma_rule >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw allow failed for $(json_escape "$spec")\"}"; return 1; }
+        else
+            ufw allow "$spec" >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw allow failed for $(json_escape "$spec")\"}"; return 1; }
+        fi
     else
         json_event step "Closing ${spec}"
-        ufw delete allow "$spec" >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw delete failed for $(json_escape "$spec")\"}"; return 1; }
+        if [[ "$spec" == "${UPTIME_KUMA_PORT}/tcp" ]]; then
+            # Remove the source-restricted rule (and any stale Anywhere rule) for the health port.
+            ufw delete allow from "${TN_KUMA_SRC}" to any port "${UPTIME_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+            ufw delete allow "$spec" >/dev/null 2>&1 || true
+        else
+            ufw delete allow "$spec" >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw delete failed for $(json_escape "$spec")\"}"; return 1; }
+        fi
     fi
     json_emit "{\"event\":\"done\",\"ok\":true,\"port\":\"$(json_escape "$spec")\",\"state\":\"$(json_escape "$pstate")\",\"msg\":\"firewall updated\"}"
 }

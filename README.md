@@ -356,13 +356,13 @@ Forward UDP ports 49590 and 49594 from WAN to your server's local IP address. Cl
 The RPC port (8541/8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
 
 ### Health Monitoring (Uptime Kuma)
-**Required for all nodes (observer and validator).** The Telcoin Association runs Uptime Kuma health monitoring against every deployed node — TCP port 43174 must be open inbound or your node will show as DOWN in monitoring.
+**Required for all nodes (observer and validator).** The Telcoin Association runs Uptime Kuma health monitoring against every deployed node — TCP port 43174 must be reachable **by the Association monitor, plus any optional operator-chosen IPs**. Restrict it to those source IPs rather than opening it to the whole internet (the endpoint binds on all interfaces, so a firewall rule is its only protection):
 
 ```bash
-sudo ufw allow 43174/tcp
+sudo ufw allow from 104.155.184.201/32 to any port 43174 proto tcp
 ```
 
-`firewall-setup.sh` opens this port automatically when you run option 2 ("Enable firewall with recommended defaults").
+`firewall-setup.sh` does this automatically — source-restricted to the monitor — when you run option 2 ("Enable firewall with recommended defaults"). To also expose it to **your own monitoring host(s)**, run `firewall-setup.sh` → "Manage node ports" → choice 2 ("Association monitor + your IPs"); your additions are persisted and survive a firewall reset. **Avoid `sudo ufw allow 43174/tcp`**, which exposes the health endpoint to the entire internet.
 
 ---
 
@@ -799,8 +799,9 @@ Three optional, **testnet-only**, reversible capabilities that let the Telcoin
 Association help run the testnet. All are **off by default** and additive — a node that
 opts out is unaffected. Full details and trust model: **[docs/testnet-addons.md](docs/testnet-addons.md)**.
 
-- **Health monitoring** — exposes a health endpoint (port `43174`) probed only by the
-  Association's uptime monitor, so they can alert you when your node drops.
+- **Health monitoring** — exposes a health endpoint (port `43174`) probed by the
+  Association's uptime monitor (plus any IPs you choose to add), so they can alert you
+  when your node drops.
 - **Centralized logging** — ships your node's logs to the Association's Loki (a Grafana
   Alloy sidecar) to help debug issues. Needs a per-operator ingest token.
 - **VPN admin SSH** — lets the Association SSH into your node over a private WireGuard
@@ -827,6 +828,17 @@ own SSH config, runs its host firewall dormant, and is undone by `setup-vpn.sh -
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### Health endpoint — operator-chosen source IPs
+`firewall-setup.sh v1.4.0` lets operators expose the health port (`43174/tcp`) to the
+Association monitor **plus** their own monitoring host(s), not TA-only. Use "Manage node
+ports" → choice 2 ("Association monitor + your IPs") to add/remove single IPv4, IPv6, or
+CIDR sources. The set is persisted in `.node-meta` (`KUMA_EXTRA_SRC`) and reapplied
+wherever the TA rule is applied (`lib/common.sh v1.3.0` `apply_kuma_rule`), so it survives
+the `ufw --force reset` that "Enable recommended defaults" performs. `setup-observability.sh
+v1.1.0` restores the extras when health monitoring is re-enabled and removes their ufw
+rules (keeping the persisted set) when it is disabled. See
+[docs/testnet-addons.md](docs/testnet-addons.md).
 
 ### Testnet add-ons — VPN admin SSH, centralized logging, health monitoring
 New opt-in, testnet-only, reversible add-ons for external operators (`lib/common.sh

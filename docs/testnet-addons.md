@@ -6,7 +6,7 @@ nothing else about your node), and **reversible**. None of them apply on mainnet
 
 | Add-on | What the Association gets | What it touches on your box |
 |---|---|---|
-| **Health monitoring** | A TCP health probe to alert you when your node drops | Opens port `43174` to one monitor IP only |
+| **Health monitoring** | A TCP health probe to alert you when your node drops | Opens port `43174` to the Association monitor (plus any IPs you choose to add) |
 | **Centralized logging** | Your node's logs in their Loki, to help you debug | Runs a Grafana Alloy log shipper; node writes JSON logs |
 | **VPN admin SSH** | SSH into your node over a private overlay to recover it | Adds a `tnadmin` user reachable only over WireGuard |
 
@@ -22,8 +22,9 @@ would be without these scripts.
 Read this before enabling anything — especially the VPN.
 
 - **Health monitoring** is the lowest-stakes. It exposes a port that returns `OK`
-  over plain HTTP and carries no node data. The firewall rule restricts it to the
-  Association's single monitor IP (`104.155.184.201/32`), so nobody else can reach it.
+  over plain HTTP and carries no node data. By default the firewall rule restricts it
+  to the Association's monitor IP (`104.155.184.201/32`), so nobody else can reach it.
+  You may additionally allow your own monitoring hosts (see Health monitoring below).
 
 - **Centralized logging** ships your node's logs off the box. reth logs are
   operational (block numbers, peer counts, errors) — they do **not** contain key
@@ -84,12 +85,26 @@ to tail until reth writes JSON logs).
 
 The Association runs an uptime monitor that TCP-probes port `43174`. Enabling health
 monitoring adds `--healthcheck 43174` to the node and restricts the firewall rule to
-the monitor's IP. If you'd rather expose it more widely (your own monitoring), the
-firewall tool offers an "open to anyone" choice:
+the monitor's IP (`104.155.184.201/32`).
+
+You can expose the endpoint to **the Association monitor AND your own monitoring
+hosts** — the TA rule stays as the always-on baseline and your IPs layer on top:
 
 ```bash
 sudo bash firewall-setup.sh   # → "Manage node ports" → health port choice
 ```
+
+- **Choice 1 — Association monitor only** (recommended): just the TA monitor.
+- **Choice 2 — Association monitor + your IPs**: keeps the TA baseline and opens an
+  add/remove sub-menu for your own sources. Each accepts a single IPv4, IPv6, or CIDR
+  (e.g. `203.0.113.5` or `203.0.113.0/24`). Your list is persisted in `.node-meta`
+  (`KUMA_EXTRA_SRC`) and **reapplied automatically** — so it survives "Enable
+  recommended defaults", which resets the firewall.
+- **Choice 3 — Open to anyone**: any source IP (not recommended; your persisted
+  sources become redundant but stay harmless).
+
+Disabling health monitoring removes both the TA and your extra firewall rules (the
+port stops listening), but keeps `KUMA_EXTRA_SRC` so re-enabling restores your set.
 
 ### VPN admin SSH
 
@@ -204,7 +219,15 @@ These files are **vendored** from `adiri-genesis` and must stay in sync:
 
 **config.alloy** — the log-shipping blocks (`local.file_match` through `loki.write`)
 must be byte-identical to upstream so external logs land in the same Loki schema and
-dashboards. The dormant metrics block is a tn-node-deployment-only addition. Verify:
+dashboards. The dormant metrics block is a tn-node-deployment-only addition. The current
+vendored copy hashes to the value below (recompute with `sha256sum observability/config.alloy`
+and update this line whenever you re-vendor, so unexpected drift is detectable):
+
+```
+sha256(observability/config.alloy) = fe1b2d3779b36a6e500eec1cc1fdaed837e45eee44e2190834f6a9d8e208cdb9
+```
+
+Verify the functional blocks against upstream:
 
 ```bash
 diff <(sed -n '18,$p' <adiri>/common/observability/node-agent/config.alloy) \

@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.2.0"
+readonly COMMON_VERSION="1.3.0"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -1653,11 +1653,91 @@ get_ssh_port() {
     grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22"
 }
 
+# validate_health_src <ip|cidr> — accept a bare IPv4/IPv6 OR a CIDR (v4 or v6).
+# For a CIDR, split on '/', require a numeric mask, and dispatch by family: IPv4 with
+# mask 0..32, or IPv6 with mask 0..128. For a bare address: IPv4 or IPv6. Generalizes
+# the IPv4-only validate_cidr for the operator-chosen health sources. Returns 0 if valid.
+validate_health_src() {
+    local src="$1"
+    if [[ "$src" == */* ]]; then
+        local ip="${src%/*}" mask="${src#*/}"
+        [[ "$mask" =~ ^[0-9]+$ ]] || return 1
+        if validate_ipv4 "$ip"; then
+            (( mask >= 0 && mask <= 32 ))
+        elif validate_ipv6 "$ip"; then
+            (( mask >= 0 && mask <= 128 ))
+        else
+            return 1
+        fi
+    else
+        validate_ipv4 "$src" || validate_ipv6 "$src"
+    fi
+}
+
+# kuma_extra_list — echo the space-separated operator-chosen health sources persisted
+# in .node-meta (KUMA_EXTRA_SRC), or nothing. The single source of truth for the set.
+kuma_extra_list() {
+    meta_get KUMA_EXTRA_SRC 2>/dev/null || true
+}
+
+# apply_kuma_extra_rules — (re)apply an `allow from <src>` rule for every operator-
+# persisted health source so they survive a `ufw --force reset`. Idempotent (ufw
+# dedups) and quiet (the operator gets a dedicated confirmation elsewhere). No-op when
+# the list is empty.
+apply_kuma_extra_rules() {
+    local src
+    for src in $(kuma_extra_list); do
+        ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+    done
+}
+
+# kuma_extra_add <src> — validate, dedupe-append to KUMA_EXTRA_SRC, persist, then apply
+# the single ufw allow rule. Returns non-zero WITHOUT persisting on invalid input.
+kuma_extra_add() {
+    local src="$1" cur s
+    validate_health_src "$src" || return 1
+    cur="$(kuma_extra_list)"
+    for s in $cur; do
+        # Already persisted: just (re)apply the rule idempotently and report success.
+        if [[ "$s" == "$src" ]]; then
+            ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+            return 0
+        fi
+    done
+    meta_set KUMA_EXTRA_SRC "${cur:+$cur }$src"
+    ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+}
+
+# kuma_extra_remove <src> — drop <src> from KUMA_EXTRA_SRC, persist the trimmed list,
+# then delete its ufw allow rule. Removing an entry that isn't present is harmless.
+kuma_extra_remove() {
+    local src="$1" cur new="" s
+    cur="$(kuma_extra_list)"
+    for s in $cur; do
+        [[ "$s" == "$src" ]] && continue
+        new="${new:+$new }$s"
+    done
+    meta_set KUMA_EXTRA_SRC "$new"
+    ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+}
+
 # apply_kuma_rule — source-restrict the health probe (port TN_KUMA_PORT) to the
-# Association uptime monitor only (TN_KUMA_SRC). Replaces an open-to-anywhere rule.
-# Idempotent (ufw dedups identical rules).
+# Association uptime monitor (TN_KUMA_SRC) as the always-on baseline, PLUS any
+# operator-chosen sources persisted in KUMA_EXTRA_SRC (apply_kuma_extra_rules). First
+# removes any pre-existing open-to-anywhere rule for the port: ufw does NOT replace
+# rules, so a lingering "allow <port>/tcp" (Anywhere) would otherwise shadow the
+# restriction and keep the port open to the whole internet. Because every call site
+# routes through here, the operator's extras are restored automatically after a
+# `ufw --force reset`. Idempotent (ufw dedups identical rules).
 apply_kuma_rule() {
+    local rc
+    # Drop a stale open-to-Anywhere rule (and its v6 twin) for the health port, if any.
+    ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 || true
     ufw allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp
+    rc=$?
+    # Layer operator-chosen sources on top of the TA baseline.
+    apply_kuma_extra_rules
+    return "$rc"
 }
 
 # allow_overlay_ssh — admit SSH from the whole WireGuard overlay so the core team can
@@ -1742,8 +1822,9 @@ prompt_testnet_addons() {
 
     echo ""
     print_step "Health monitoring"
-    print_info "Exposes a TCP health endpoint (port ${TN_KUMA_PORT:-43174}) probed ONLY by the"
+    print_info "Exposes a TCP health endpoint (port ${TN_KUMA_PORT:-43174}) probed by the"
     print_info "Association uptime monitor (${TN_KUMA_SRC:-104.155.184.201/32}) so we can alert you if your node drops."
+    print_info "You can also allow your own monitoring hosts later: firewall-setup.sh -> Manage node ports."
     if confirm "Enable the health-monitor endpoint?"; then
         ENABLE_HEALTHCHECK_MONITOR="true"
     fi
@@ -1791,8 +1872,15 @@ step_testnet_addons() {
             else
                 print_warn "Could not add the ufw rule; open it via firewall-setup.sh."
             fi
+        elif ufw_installed; then
+            # ufw installed but INACTIVE: --healthcheck binds ${TN_KUMA_PORT} on all
+            # interfaces, so with no active firewall the port is reachable from the internet.
+            apply_kuma_rule >/dev/null 2>&1 || true   # stage the restricted rule for when ufw is enabled
+            print_warn "ufw is INACTIVE — once the node restarts, health port ${TN_KUMA_PORT} is reachable from the INTERNET."
+            print_warn "Enable the firewall: run firewall-setup.sh (a source-restricted rule is already staged)."
         else
-            print_info "ufw not active — run firewall-setup.sh -> 'Manage testnet add-on rules' to source-restrict ${TN_KUMA_PORT}/tcp."
+            print_warn "ufw is NOT installed — health port ${TN_KUMA_PORT} will be exposed to the internet once the node restarts."
+            print_warn "Install ufw + run firewall-setup.sh, or otherwise block ${TN_KUMA_PORT}/tcp."
         fi
         print_info "Verify once the node is up: curl -s http://127.0.0.1:${TN_KUMA_PORT}  (expect OK)"
     fi

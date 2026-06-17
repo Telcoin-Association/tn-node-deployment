@@ -14,7 +14,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 
 pause() { echo ""; read -r -p "  Press Enter to return to menu..."; }
 
@@ -92,8 +92,17 @@ enable_health() {
 
     if ufw_installed && ufw_active; then
         apply_kuma_rule && print_ok "ufw: ${TN_KUMA_SRC} -> ${TN_KUMA_PORT}/tcp (Association monitor only)"
+        local extras; extras="$(kuma_extra_list)"
+        [[ -n "$extras" ]] && print_ok "ufw: also restored your additional source(s): ${extras}"
+    elif ufw_installed; then
+        # ufw installed but INACTIVE: --healthcheck binds ${TN_KUMA_PORT} on all interfaces,
+        # so with no active firewall the port is reachable from the internet.
+        apply_kuma_rule >/dev/null 2>&1 || true   # stage the restricted rule for when ufw is enabled
+        print_warn "ufw is INACTIVE -- once the node restarts, health port ${TN_KUMA_PORT} is reachable from the INTERNET."
+        print_warn "Enable the firewall: run firewall-setup.sh (a source-restricted rule is already staged)."
     else
-        print_info "ufw not active -- run firewall-setup.sh to source-restrict ${TN_KUMA_PORT}/tcp."
+        print_warn "ufw is NOT installed -- health port ${TN_KUMA_PORT} will be exposed to the internet once the node restarts."
+        print_warn "Install ufw + run firewall-setup.sh, or otherwise block ${TN_KUMA_PORT}/tcp."
     fi
     local meta; meta="$(node_meta_path || true)"; [[ -n "$meta" ]] && meta_set ENABLE_HEALTHCHECK_MONITOR true "$meta"
     print_info "Verify once running: curl -s http://127.0.0.1:${TN_KUMA_PORT}  (expect OK)"
@@ -105,6 +114,14 @@ disable_health() {
     if ufw_installed && ufw_active; then
         ufw delete allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp &>/dev/null || true
         print_ok "Removed the ufw rule ${TN_KUMA_SRC} -> ${TN_KUMA_PORT}/tcp"
+        # The port stops listening once --healthcheck is removed, so any operator-chosen
+        # allow rules are pointless -- delete them. Keep the persisted KUMA_EXTRA_SRC meta
+        # so re-enabling restores the operator's set automatically (via apply_kuma_rule).
+        local esrc
+        for esrc in $(kuma_extra_list); do
+            ufw delete allow from "$esrc" to any port "${TN_KUMA_PORT}" proto tcp &>/dev/null || true
+            print_ok "Removed the ufw rule ${esrc} -> ${TN_KUMA_PORT}/tcp"
+        done
     fi
     local meta; meta="$(node_meta_path || true)"; [[ -n "$meta" ]] && meta_set ENABLE_HEALTHCHECK_MONITOR false "$meta"
     print_info "The --healthcheck flag stays in the node launch (harmless once the port is"
@@ -121,6 +138,8 @@ show_status() {
     meta="$(node_meta_path || true)"
     hc="$(meta_get ENABLE_HEALTHCHECK_MONITOR "$meta" 2>/dev/null || echo false)"
     print_info "Configured: ENABLE_HEALTHCHECK_MONITOR=${hc:-false}"
+    local extras; extras="$(kuma_extra_list)"
+    [[ -n "$extras" ]] && print_info "Additional health-port sources (besides ${TN_KUMA_SRC}): ${extras}"
     if curl -fsS "http://127.0.0.1:${TN_KUMA_PORT}" >/dev/null 2>&1; then
         print_ok "Health endpoint responds on 127.0.0.1:${TN_KUMA_PORT}"
     else

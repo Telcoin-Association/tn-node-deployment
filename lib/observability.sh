@@ -85,6 +85,10 @@ obs_label_sourcing() {
     TN_REGION="${REGION:-}"
     [[ -n "$TN_REGION" ]] || TN_REGION="$(meta_get REGION "$meta" 2>/dev/null || true)"
     [[ -n "$TN_REGION" ]] || TN_REGION="unknown"
+    # Sanitize operator-supplied labels to a safe Loki charset (avoid cardinality/
+    # injection issues on the shared Loki): keep [A-Za-z0-9_-], cap at 32 chars.
+    TN_NODE="$(printf '%s' "$TN_NODE" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"; [[ -n "$TN_NODE" ]] || TN_NODE="node"
+    TN_REGION="$(printf '%s' "$TN_REGION" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"; [[ -n "$TN_REGION" ]] || TN_REGION="unknown"
     TN_VALIDATOR_ADDRESS="$(meta_get VALIDATOR_ADDRESS "$meta" 2>/dev/null || true)"
     TN_CHAIN="adiri"
     TN_IMAGE_VERSION="$(obs_image_version)"
@@ -198,13 +202,17 @@ _obs_install_alloy_apt() {
     local key=/etc/apt/keyrings/grafana.gpg
     install -d -m 0755 /etc/apt/keyrings
     if [[ ! -f "$key" ]]; then
-        curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o "$key" 2>/dev/null || return 1
+        curl --proto '=https' --tlsv1.2 -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o "$key" 2>/dev/null || return 1
     fi
     echo "deb [signed-by=${key}] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
     apt-get update -y >/dev/null 2>&1 || return 1
-    # Pin the version; fall back to whatever the repo offers if the pin is unavailable.
-    apt-get install -y "alloy=${TN_ALLOY_NATIVE_VERSION}" >/dev/null 2>&1 \
-        || apt-get install -y alloy >/dev/null 2>&1 || return 1
+    # Install the pinned version only. If the pin is unavailable, fail here so the
+    # dispatcher falls back to the pinned release tarball — never silently install
+    # whatever unpinned version the repo happens to offer.
+    if ! apt-get install -y "alloy=${TN_ALLOY_NATIVE_VERSION}" >/dev/null 2>&1; then
+        print_warn "Pinned alloy=${TN_ALLOY_NATIVE_VERSION} unavailable via apt; will try the pinned release tarball."
+        return 1
+    fi
     return 0
 }
 
@@ -219,7 +227,23 @@ _obs_install_alloy_tarball() {
     url="https://github.com/grafana/alloy/releases/download/v${TN_ALLOY_NATIVE_VERSION}/alloy-linux-${arch}.zip"
     tmp="$(mktemp -d)"
     print_info "Downloading ${url}"
-    if curl -fsSL "$url" -o "${tmp}/alloy.zip" 2>/dev/null && ( cd "$tmp" && unzip -o -q alloy.zip ) 2>/dev/null; then
+    if curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "${tmp}/alloy.zip" 2>/dev/null; then
+        # Verify the download against the official checksum sidecar before installing.
+        local want got
+        want="$(curl --proto '=https' --tlsv1.2 -fsSL --max-time 15 "${url}.sha256" 2>/dev/null | awk '{print $1}')"
+        if [[ -n "$want" ]]; then
+            got="$(sha256sum "${tmp}/alloy.zip" 2>/dev/null | awk '{print $1}')"
+            if [[ "$want" != "$got" ]]; then
+                print_error "Alloy tarball checksum mismatch — refusing to install."
+                rm -rf "$tmp"
+                return 1
+            fi
+            print_ok "Alloy tarball checksum verified."
+        else
+            print_warn "Could not fetch Alloy checksum sidecar; installing unverified (TLS only)."
+        fi
+    fi
+    if [[ -f "${tmp}/alloy.zip" ]] && ( cd "$tmp" && unzip -o -q alloy.zip ) 2>/dev/null; then
         bin="$(find "$tmp" -maxdepth 1 -type f -name 'alloy-linux-*' ! -name '*.zip' | head -1)"
         [[ -n "$bin" ]] || bin="$(find "$tmp" -maxdepth 1 -type f -name 'alloy*' ! -name '*.zip' | head -1)"
         if [[ -n "$bin" ]]; then
@@ -264,6 +288,8 @@ obs_write_alloy_native_unit() {
 Description=Telcoin node log shipper (Grafana Alloy -> central Loki)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -273,6 +299,9 @@ EnvironmentFile=${envf}
 ExecStart=${bin} run --server.http.listen-addr=${OBS_HTTP_ADDR} --storage.path=${OBS_DATA_DIR} ${OBS_ETC_DIR}/config.alloy
 Restart=on-failure
 RestartSec=10
+MemoryMax=512M
+CPUQuota=50%
+TasksMax=256
 
 [Install]
 WantedBy=multi-user.target
@@ -295,12 +324,19 @@ Description=Telcoin node log shipper (Grafana Alloy sidecar -> central Loki)
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStartPre=-/usr/bin/docker rm -f telcoin-alloy
 ExecStart=/usr/bin/docker run --rm --name telcoin-alloy \
 --network=host \
+--memory=512m \
+--cpus=0.50 \
+--pids-limit=256 \
+--cap-drop=ALL \
+--security-opt=no-new-privileges \
 --env-file ${envf} \
 -v ${OBS_ETC_DIR}/config.alloy:/etc/alloy/config.alloy:ro \
 -v ${log_host_dir}:/var/log/telcoin:ro \
@@ -363,7 +399,15 @@ obs_ensure_reth_logs() {
 # method, ensure the node writes JSON logs, and record state. Idempotent.
 obs_enable() {
     local token="${1:-}"
+    # Trim leading/trailing whitespace (a stray paste newline otherwise yields silent 401s).
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
     [[ -n "$token" ]] || { print_error "obs_enable: empty ingest token."; return 1; }
+    if [[ "$token" =~ [[:space:]] ]]; then
+        print_warn "Ingest token contains internal whitespace — check you pasted it correctly."
+    elif (( ${#token} < 16 )); then
+        print_warn "Ingest token looks short (${#token} chars) — check you pasted the full token."
+    fi
     local meta method datadir
     meta="$(node_meta_path || true)"
     method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"

@@ -153,21 +153,44 @@ run_bootstrap() {
         exit 1
     fi
     print_ok "WireGuard peer configured. Node pubkey: ${WG_NODE_PUBKEY}"
+    # Belt-and-suspenders: ensure the tnadmin account is explicitly key-only (no usable
+    # password), independent of the distro's useradd defaults.
+    passwd -l tnadmin >/dev/null 2>&1 || true
 }
 
 write_scoped_sshd() {
     print_step "Adding scoped sshd drop-in (tnadmin only)"
     install -d -m 755 /etc/ssh/sshd_config.d
-    cat > "$SCOPED_SSHD_DROPIN" <<'EOF'
+    # The trust model (and the consent text) promise tnadmin is reachable ONLY over the
+    # overlay. Enforce that at the sshd layer so it holds regardless of the operator's
+    # firewall state (ufw inactive, nftables dormant, public :22 left open, etc.).
+    local overlay_cidr="${TN_OVERLAY_CIDR:-10.100.0.0/16}"
+    cat > "$SCOPED_SSHD_DROPIN" <<EOF
 # Telcoin VPN admin access (testnet add-on). SCOPED to the tnadmin user ONLY, so your
 # own SSH configuration is untouched. tnadmin may authenticate with the maintainer keys
-# in authorized_keys.tnvpn (written by wg-node-bootstrap.sh).
-Match User tnadmin
+# in authorized_keys.tnvpn (written by wg-node-bootstrap.sh) and ONLY over the WireGuard
+# overlay (${overlay_cidr}); from any other source address it has no usable auth method.
+#
+# sshd uses FIRST-MATCH-WINS, so the specific overlay-allow block MUST come BEFORE the
+# general deny block:
+#   1) from the overlay  -> publickey auth with the maintainer keys (this block wins);
+#   2) from anywhere else -> publickey-only but with NO keys (/dev/null) => cannot log in.
+# (AuthenticationMethods=publickey also forces pubkey-only, so password / keyboard-
+# interactive are off without version-specific keywords like KbdInteractiveAuthentication.)
+Match User tnadmin Address ${overlay_cidr}
+    AuthenticationMethods publickey
+    PubkeyAuthentication yes
+    PasswordAuthentication no
     AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys.tnvpn
+Match User tnadmin
+    AuthenticationMethods publickey
+    PubkeyAuthentication no
+    PasswordAuthentication no
+    AuthorizedKeysFile /dev/null
 EOF
     if sshd -t 2>/dev/null; then
         systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-        print_ok "Scoped sshd drop-in installed + validated."
+        print_ok "Scoped sshd drop-in installed + validated (tnadmin: overlay-only, key-only)."
     else
         rm -f "$SCOPED_SSHD_DROPIN"
         print_error "sshd -t failed; reverted the drop-in. Your SSH is unchanged; VPN not enabled."
