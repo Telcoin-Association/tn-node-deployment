@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.3.0"
+readonly COMMON_VERSION="1.3.1"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -311,7 +311,7 @@ validate_multiaddr() {
 readonly GAR_IMAGE_BASE="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 # Fallback only when the registry is unreachable.
-readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.10.1-adiri"
+readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.11.0-adiri"
 
 # Echo the latest published -adiri docker image ref (registry/path:tag) by
 # querying the public Artifact Registry tag list and picking the highest version

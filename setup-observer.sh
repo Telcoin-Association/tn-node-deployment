@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.17"
+readonly SCRIPT_VERSION="1.2.18"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -156,7 +156,7 @@ step_preflight() {
     print_ok "systemd ${systemd_ver} detected (247+ required)"
     USE_LOAD_CREDENTIAL=true
 
-    # Select network first so NETWORK is set before source build (needed for --features faucet).
+    # Select network first so NETWORK is set before source build (needed for --features adiri).
     # In JSON mode network/method/passphrase are already set from flags by the orchestrator.
     echo ""
     print_step "Selecting network..."
@@ -363,8 +363,8 @@ _preflight_source() {
 
     local cargo_features=""
     if [[ "${NETWORK:-}" == "testnet" ]]; then
-        cargo_features="--features faucet"
-        print_info "Building with testnet features: faucet"
+        cargo_features="--features adiri"
+        print_info "Building with testnet features: adiri"
     fi
 
     print_info "Building release binary (this takes 20-40 minutes)..."
