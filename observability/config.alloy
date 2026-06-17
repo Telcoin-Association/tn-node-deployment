@@ -1,0 +1,101 @@
+// =============================================================================
+// observability/config.alloy — Grafana Alloy node log shipper (testnet add-on).
+//
+// CANONICAL COPY. The log-shipping blocks below are kept BYTE-IDENTICAL to
+// adiri-genesis/common/observability/node-agent/config.alloy (the core team's node
+// agent) so external-operator logs land in the SAME Loki label schema + dashboards.
+// lib/observability.sh deploys this file verbatim (obs_write_config_alloy copies it).
+// If you edit the blocks, mirror the change in adiri-genesis and keep the diff clean
+// (the sync note in docs/testnet-addons.md explains how to verify).
+//
+// Node identity + push credentials come from the environment (the telcoin-alloy
+// systemd unit's EnvironmentFile for native installs, or the container --env-file for
+// docker), so one config serves both runtimes:
+//   TN_NODE TN_REGION TN_VALIDATOR_ADDRESS TN_CHAIN TN_IMAGE_VERSION
+//   OBS_PUSH_URL OBS_INGEST_TOKEN
+// =============================================================================
+
+// reth writes <log.file.directory>/telcoin-network-logs/reth.log, rotated to
+// reth.log.1 .. reth.log.5. The directory is bind-mounted RO at /var/log/telcoin.
+local.file_match "tn_logs" {
+	path_targets = [{
+		__path__ = "/var/log/telcoin/telcoin-network-logs/reth.log*",
+		job      = "telcoin-node",
+	}]
+}
+
+loki.source.file "tn" {
+	targets    = local.file_match.tn_logs.targets
+	forward_to = [loki.process.tn.receiver]
+}
+
+loki.process "tn" {
+	forward_to = [loki.write.central.receiver]
+
+	// Attach node identity as labels (all low-cardinality for 5 nodes).
+	stage.static_labels {
+		values = {
+			node              = sys.env("TN_NODE"),
+			region            = sys.env("TN_REGION"),
+			validator_address = sys.env("TN_VALIDATOR_ADDRESS"),
+			chain             = sys.env("TN_CHAIN"),
+			image_version     = sys.env("TN_IMAGE_VERSION"),
+		}
+	}
+
+	// Parse the reth JSON line: lift level (label) and timestamp (event time).
+	// `target` is left in the line body to avoid high label cardinality.
+	stage.json {
+		expressions = {
+			level     = "level",
+			timestamp = "timestamp",
+		}
+	}
+
+	stage.labels {
+		values = {
+			level = "",
+		}
+	}
+
+	stage.timestamp {
+		source = "timestamp"
+		format = "RFC3339Nano"
+		// On parse failure Alloy keeps the line and falls back to ingest time.
+	}
+}
+
+loki.write "central" {
+	endpoint {
+		url          = sys.env("OBS_PUSH_URL")
+		bearer_token = sys.env("OBS_INGEST_TOKEN")
+	}
+
+	// --- Forward-compat hook (Wave 4: external-operator self-host) -----------
+	// Uncomment to ALSO keep a copy in a locally-run Loki on this host.
+	// endpoint {
+	//   url = "http://127.0.0.1:3100/loki/api/v1/push"
+	// }
+}
+
+// =============================================================================
+// DORMANT metrics scrape — INERT today. reth currently hardcodes prometheus:None
+// (telcoin-network crates/tn-reth/src/lib.rs), so the node's --metrics flag exposes
+// nothing to scrape and these blocks ship commented out. When a Prometheus exporter
+// lands, turn on node metrics by:
+//   1. confirm the node exposes Prometheus metrics on 127.0.0.1:9000
+//   2. seed OBS_PROM_PUSH_URL in the telcoin-alloy env file (the obs VM remote-write URL)
+//   3. uncomment the two blocks below and: systemctl restart telcoin-alloy
+// =============================================================================
+// prometheus.scrape "tn_node" {
+//   targets         = [{ __address__ = "127.0.0.1:9000", job = "telcoin-node" }]
+//   forward_to      = [prometheus.remote_write.central.receiver]
+//   scrape_interval = "15s"
+// }
+//
+// prometheus.remote_write "central" {
+//   endpoint {
+//     url          = sys.env("OBS_PROM_PUSH_URL")
+//     bearer_token = sys.env("OBS_INGEST_TOKEN")
+//   }
+// }

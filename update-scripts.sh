@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.53"
+readonly SCRIPT_VERSION="1.1.54"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -46,6 +46,10 @@ declare -a SCRIPTS=(
     "update-node.sh:update-node.sh:SCRIPT_VERSION"
     "update-scripts.sh:update-scripts.sh:SCRIPT_VERSION"
     "lib/common.sh:lib/common.sh:COMMON_VERSION"
+    "lib/testnet-addons.env:lib/testnet-addons.env:TESTNET_ADDONS_VERSION"
+    "lib/observability.sh:lib/observability.sh:OBSERVABILITY_VERSION"
+    "setup-vpn.sh:setup-vpn.sh:SCRIPT_VERSION"
+    "setup-observability.sh:setup-observability.sh:SCRIPT_VERSION"
     "ui/server.py:ui/server.py:UI_VERSION"
 )
 
@@ -60,6 +64,19 @@ declare -a UI_BUNDLE=(
     "ui/telcoin-ui.service:ui/telcoin-ui.service"
     "ui/requirements.txt:ui/requirements.txt"
     "ui/install-ui.sh:ui/install-ui.sh"
+)
+
+# Testnet add-on companion files WITHOUT their own version var (the Alloy config +
+# the vendored wgvpn bundle). Fetched alongside whenever a versioned add-on file
+# (setup-vpn.sh / setup-observability.sh / lib/observability.sh / lib/testnet-addons.env)
+# updates -- mirrors how UI_BUNDLE rides along with ui/server.py.
+declare -a TESTNET_ADDONS_BUNDLE=(
+    "observability/config.alloy:observability/config.alloy"
+    "lib/wgvpn/wg-node-bootstrap.sh:lib/wgvpn/wg-node-bootstrap.sh"
+    "lib/wgvpn/hub-coordinates.env:lib/wgvpn/hub-coordinates.env"
+    "lib/wgvpn/peers/ssh/grant.pub:lib/wgvpn/peers/ssh/grant.pub"
+    "lib/wgvpn/peers/ssh/bluelights.pub:lib/wgvpn/peers/ssh/bluelights.pub"
+    "lib/wgvpn/peers/ssh/README:lib/wgvpn/peers/ssh/README"
 )
 
 # =============================================================================
@@ -83,7 +100,7 @@ get_remote_version() {
     local remote_path="$1"
     local var="$2"
     local url="${GITHUB_RAW}/${remote_path}"
-    curl -sf --max-time 10 "$url" 2>/dev/null | \
+    curl --proto '=https' --tlsv1.2 -sf --max-time 10 "$url" 2>/dev/null | \
         grep -E "(readonly[[:space:]]+)?${var}[[:space:]]*=" | \
         grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | \
         head -1 || echo "unavailable"
@@ -119,7 +136,7 @@ self_bootstrap() {
 
     print_info "Updating the updater itself (${local_ver} -> ${remote_ver}) and relaunching..."
     local dest="${SCRIPT_DIR}/update-scripts.sh"
-    if curl -sf --max-time 30 "${GITHUB_RAW}/update-scripts.sh" -o "${dest}.tmp" \
+    if curl --proto '=https' --tlsv1.2 -sf --max-time 30 "${GITHUB_RAW}/update-scripts.sh" -o "${dest}.tmp" \
         && [[ -s "${dest}.tmp" ]] && bash -n "${dest}.tmp" 2>/dev/null; then
         mv "${dest}.tmp" "$dest"
         chmod +x "$dest" 2>/dev/null || true
@@ -147,7 +164,7 @@ check_versions() {
     # which considers an interrupted download a failure.
     # Fix: HEAD-probe the real host the updater fetches from, with a small
     # known file (README.md) and a slightly more generous timeout.
-    if ! curl -sfI --max-time 8 "${GITHUB_RAW}/README.md" &>/dev/null; then
+    if ! curl --proto '=https' --tlsv1.2 -sfI --max-time 8 "${GITHUB_RAW}/README.md" &>/dev/null; then
         print_error "Cannot reach ${GITHUB_RAW} -- check internet/DNS or GitHub status"
         exit 1
     fi
@@ -246,6 +263,19 @@ download_updates() {
         FILES_TO_UPDATE+=("${UI_BUNDLE[@]}")
     fi
 
+    # Likewise, pull the testnet add-on companion bundle when any versioned add-on
+    # file is updating, so observability/config.alloy + the vendored wgvpn files stay
+    # in sync with the scripts that consume them.
+    local addons_update=false
+    for entry in "${FILES_TO_UPDATE[@]}"; do
+        case "$entry" in
+            setup-vpn.sh:*|setup-observability.sh:*|lib/observability.sh:*|lib/testnet-addons.env:*) addons_update=true ;;
+        esac
+    done
+    if [[ "$addons_update" == "true" ]]; then
+        FILES_TO_UPDATE+=("${TESTNET_ADDONS_BUNDLE[@]}")
+    fi
+
     local success=0
     local failed=0
     # Track the UI bundle separately so the UI redeploy is gated on the UI files
@@ -267,7 +297,7 @@ download_updates() {
         mkdir -p "$dest_dir"
 
         printf "  Downloading %-30s " "${local_path}..."
-        if ! curl -sf --max-time 30 "$url" -o "${dest}.tmp"; then
+        if ! curl --proto '=https' --tlsv1.2 -sf --max-time 30 "$url" -o "${dest}.tmp"; then
             rm -f "${dest}.tmp"
             echo -e "${RED}FAILED${RESET}  (download error)"
             (( ++failed ))
@@ -285,9 +315,10 @@ download_updates() {
         # Integrity check 2: opportunistic SHA-256 verification.
         # The Telcoin repo does not currently publish .sha256 sidecars, but
         # check anyway so verification kicks in automatically once they exist.
+        # NOTE: trust currently rests on TLS to a mutable branch ref; publish signed tags / pinned commits before mainnet.
         local sha_url="${url}.sha256"
         local remote_sha
-        remote_sha=$(curl -sf --max-time 10 "$sha_url" 2>/dev/null | awk '{print $1}' || true)
+        remote_sha=$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 "$sha_url" 2>/dev/null | awk '{print $1}' || true)
         if [[ -n "$remote_sha" ]]; then
             local actual_sha
             actual_sha=$(sha256sum "${dest}.tmp" | awk '{print $1}')

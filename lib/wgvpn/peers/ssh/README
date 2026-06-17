@@ -1,0 +1,3 @@
+# Maintainer SSH public keys (authorized_keys lines), one file per maintainer:
+#   peers/ssh/<name>.pub
+# Written by dev-setup.sh (prints) + add-peer.sh (commits). PUBLIC keys only.

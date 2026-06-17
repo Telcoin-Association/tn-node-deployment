@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.1.53"
+readonly COMMON_VERSION="1.3.0"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -1503,3 +1503,423 @@ pick_action() {
         *) echo "cancel" ;;
     esac
 }
+
+# =============================================================================
+# TESTNET OPT-IN ADD-ONS — shared scaffolding (COMMON_VERSION >= 1.2.0)
+#
+# Three additive, testnet-only, opt-in capabilities for external operators:
+#   * healthcheck monitoring   (--healthcheck + source-restricted ufw rule)
+#   * centralized logging       (Alloy -> central Loki)        [lib/observability.sh]
+#   * WireGuard admin SSH        (core-team overlay access)      [setup-vpn.sh]
+# All OFF by default. See docs/testnet-addons.md for the trust model.
+# =============================================================================
+
+# Public constants (hub coords, Kuma source, obs URL, Alloy image). Sourced here so
+# every script that sources common.sh gets them transitively. Guarded so an older
+# checkout without the file still works.
+__COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+if [[ -f "${__COMMON_DIR}/testnet-addons.env" ]]; then
+    source "${__COMMON_DIR}/testnet-addons.env"
+fi
+# Safety-net defaults. lib/testnet-addons.env is the AUTHORITATIVE, editable home for
+# these (edit there). This mirror only guarantees the constants are set so the helpers
+# below — and the always-run status views — don't trip the inherited `set -u` if the
+# env file is briefly missing mid-update. `:=` is a no-op when the var is already set.
+: "${TN_WG_HUB_ENDPOINT:=34.20.198.253:51820}"
+: "${TN_WG_HUB_PUBKEY:=hqIDskzaOS5t6DE91VX+V9Z4NJjKlNufl4kQr/KuF1k=}"
+: "${TN_OVERLAY_CIDR:=10.100.0.0/16}"
+: "${TN_OVERLAY_RESERVED_NETS:=0 1 2 9}"
+: "${TN_OVERLAY_EXTERNAL_BAND_HINT:=10.100.20.0/24}"
+: "${TN_KUMA_SRC:=104.155.184.201/32}"
+: "${TN_KUMA_PORT:=43174}"
+: "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
+: "${TN_ALLOY_IMAGE:=grafana/alloy:v1.5.1}"
+: "${TN_ALLOY_NATIVE_VERSION:=1.5.1}"
+
+# -----------------------------------------------------------------------------
+# Network gate
+# -----------------------------------------------------------------------------
+
+# is_testnet — soft check for use INSIDE the interactive setup flow (NETWORK is
+# already set there). Returns 0 on the Adiri testnet.
+is_testnet() { [[ "${NETWORK:-}" == "testnet" ]]; }
+
+# require_testnet — hard gate for STANDALONE scripts (setup-vpn.sh etc.). Exits if
+# the node is not on testnet. Callers must load NETWORK from .node-meta first.
+require_testnet() {
+    if ! is_testnet; then
+        print_error "Testnet-only feature. This node's NETWORK is '${NETWORK:-unset}'."
+        print_info  "The VPN / observability / healthcheck add-ons are offered only on the Adiri testnet."
+        exit 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# .node-meta persistence (single primitive for every opt-in's state)
+# -----------------------------------------------------------------------------
+
+# node_meta_path — echo the first existing /etc/telcoin/{validator,observer}/.node-meta
+# (mirrors remove-node.sh). Returns 1 if neither exists.
+node_meta_path() {
+    local t
+    for t in validator observer; do
+        if [[ -f "/etc/telcoin/${t}/.node-meta" ]]; then
+            echo "/etc/telcoin/${t}/.node-meta"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# meta_get <key> [file] — echo KEY's value (everything after the first '='). Returns
+# 1 (and echoes nothing) if the key/file is absent. Default file = node_meta_path.
+meta_get() {
+    local key="$1" file="${2:-}"
+    [[ -n "$file" ]] || file="$(node_meta_path)" || return 1
+    [[ -f "$file" ]] || return 1
+    local line
+    line="$(grep -E "^${key}=" "$file" 2>/dev/null | head -n1)" || return 1
+    [[ -n "$line" ]] || return 1
+    printf '%s\n' "${line#*=}"
+}
+
+# meta_set <key> <value> [file] — idempotent upsert into .node-meta (mode 600).
+# Rewrites via grep -v + append (no sed) so values containing / + = are safe.
+meta_set() {
+    local key="$1" val="$2" file="${3:-}"
+    [[ -n "$file" ]] || file="$(node_meta_path || true)"
+    if [[ -z "$file" ]]; then
+        print_warn "meta_set: no .node-meta found; cannot persist ${key}"
+        return 1
+    fi
+    mkdir -p "$(dirname "$file")"
+    [[ -f "$file" ]] || { : > "$file"; chmod 600 "$file"; }
+    local tmp; tmp="$(mktemp)"
+    grep -vE "^${key}=" "$file" > "$tmp" 2>/dev/null || true
+    printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+    chmod 600 "$file" 2>/dev/null || true
+}
+
+# -----------------------------------------------------------------------------
+# Overlay-IP / CIDR validation (WireGuard admin overlay)
+# -----------------------------------------------------------------------------
+
+# validate_cidr <a.b.c.d/N> — a syntactically valid IPv4 CIDR (mask 0..32).
+validate_cidr() {
+    local cidr="$1" ip mask
+    [[ "$cidr" == */* ]] || return 1
+    ip="${cidr%/*}"; mask="${cidr#*/}"
+    [[ "$mask" =~ ^[0-9]+$ ]] && (( mask >= 0 && mask <= 32 )) || return 1
+    validate_ipv4 "$ip"
+}
+
+# validate_overlay_ip <a.b.c.d> — an IPv4 inside 10.100.0.0/16, host octet 1..254,
+# NOT in a reserved /24 (hub/adiri/devnet/maintainers). The core team assigns one
+# from the external band (10.100.20.0/24+); see lib/testnet-addons.env.
+validate_overlay_ip() {
+    local ip="$1" net idx r
+    [[ "$ip" =~ ^10\.100\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    net="${BASH_REMATCH[1]}"; idx="${BASH_REMATCH[2]}"
+    (( net >= 0 && net <= 255 )) || return 1
+    (( idx >= 1 && idx <= 254 )) || return 1
+    for r in ${TN_OVERLAY_RESERVED_NETS:-0 1 2 9}; do
+        [[ "$net" == "$r" ]] && return 1
+    done
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# ufw helpers (shared by firewall-setup.sh, setup-vpn.sh, setup-observability.sh)
+# Historically defined in firewall-setup.sh; centralized here so the standalone
+# add-on scripts can reuse them. firewall-setup.sh no longer redefines these four.
+# -----------------------------------------------------------------------------
+
+ufw_installed() { command -v ufw &>/dev/null; }
+
+ufw_active() { ufw status 2>/dev/null | grep -q "Status: active"; }
+
+# ufw_has_allow <port> <tcp|udp> — 0 if an ALLOW rule for that port/proto exists.
+# Matches both regular and (v6) entries; protocol is matched explicitly.
+ufw_has_allow() {
+    local port="$1" proto="$2"
+    ufw status 2>/dev/null | \
+        grep -qE "^${port}/${proto}([[:space:]]+\(v6\))?[[:space:]]+ALLOW"
+}
+
+# get_ssh_port — the sshd listen port (defaults to 22 when unset).
+get_ssh_port() {
+    grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22"
+}
+
+# validate_health_src <ip|cidr> — accept a bare IPv4/IPv6 OR a CIDR (v4 or v6).
+# For a CIDR, split on '/', require a numeric mask, and dispatch by family: IPv4 with
+# mask 0..32, or IPv6 with mask 0..128. For a bare address: IPv4 or IPv6. Generalizes
+# the IPv4-only validate_cidr for the operator-chosen health sources. Returns 0 if valid.
+validate_health_src() {
+    local src="$1"
+    if [[ "$src" == */* ]]; then
+        local ip="${src%/*}" mask="${src#*/}"
+        [[ "$mask" =~ ^[0-9]+$ ]] || return 1
+        if validate_ipv4 "$ip"; then
+            (( mask >= 0 && mask <= 32 ))
+        elif validate_ipv6 "$ip"; then
+            (( mask >= 0 && mask <= 128 ))
+        else
+            return 1
+        fi
+    else
+        validate_ipv4 "$src" || validate_ipv6 "$src"
+    fi
+}
+
+# kuma_extra_list — echo the space-separated operator-chosen health sources persisted
+# in .node-meta (KUMA_EXTRA_SRC), or nothing. The single source of truth for the set.
+kuma_extra_list() {
+    meta_get KUMA_EXTRA_SRC 2>/dev/null || true
+}
+
+# apply_kuma_extra_rules — (re)apply an `allow from <src>` rule for every operator-
+# persisted health source so they survive a `ufw --force reset`. Idempotent (ufw
+# dedups) and quiet (the operator gets a dedicated confirmation elsewhere). No-op when
+# the list is empty.
+apply_kuma_extra_rules() {
+    local src
+    for src in $(kuma_extra_list); do
+        ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+    done
+}
+
+# kuma_extra_add <src> — validate, dedupe-append to KUMA_EXTRA_SRC, persist, then apply
+# the single ufw allow rule. Returns non-zero WITHOUT persisting on invalid input.
+kuma_extra_add() {
+    local src="$1" cur s
+    validate_health_src "$src" || return 1
+    cur="$(kuma_extra_list)"
+    for s in $cur; do
+        # Already persisted: just (re)apply the rule idempotently and report success.
+        if [[ "$s" == "$src" ]]; then
+            ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+            return 0
+        fi
+    done
+    meta_set KUMA_EXTRA_SRC "${cur:+$cur }$src"
+    ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+}
+
+# kuma_extra_remove <src> — drop <src> from KUMA_EXTRA_SRC, persist the trimmed list,
+# then delete its ufw allow rule. Removing an entry that isn't present is harmless.
+kuma_extra_remove() {
+    local src="$1" cur new="" s
+    cur="$(kuma_extra_list)"
+    for s in $cur; do
+        [[ "$s" == "$src" ]] && continue
+        new="${new:+$new }$s"
+    done
+    meta_set KUMA_EXTRA_SRC "$new"
+    ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+}
+
+# apply_kuma_rule — source-restrict the health probe (port TN_KUMA_PORT) to the
+# Association uptime monitor (TN_KUMA_SRC) as the always-on baseline, PLUS any
+# operator-chosen sources persisted in KUMA_EXTRA_SRC (apply_kuma_extra_rules). First
+# removes any pre-existing open-to-anywhere rule for the port: ufw does NOT replace
+# rules, so a lingering "allow <port>/tcp" (Anywhere) would otherwise shadow the
+# restriction and keep the port open to the whole internet. Because every call site
+# routes through here, the operator's extras are restored automatically after a
+# `ufw --force reset`. Idempotent (ufw dedups identical rules).
+apply_kuma_rule() {
+    local rc
+    # Drop a stale open-to-Anywhere rule (and its v6 twin) for the health port, if any.
+    ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 || true
+    ufw allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp
+    rc=$?
+    # Layer operator-chosen sources on top of the TA baseline.
+    apply_kuma_extra_rules
+    return "$rc"
+}
+
+# allow_overlay_ssh — admit SSH from the whole WireGuard overlay so the core team can
+# reach the node over the VPN even after public SSH is restricted. Idempotent.
+allow_overlay_ssh() {
+    local port; port="$(get_ssh_port)"
+    [[ -n "$port" ]] || port=22
+    ufw allow from "${TN_OVERLAY_CIDR}" to any port "${port}" proto tcp
+}
+
+# -----------------------------------------------------------------------------
+# Node-launch flag tail (healthcheck + JSON log shipping)
+# -----------------------------------------------------------------------------
+
+# tn_node_launch_flags <docker|binary> — the extra `telcoin node` flags implied by
+# the opt-ins enabled for THIS setup run, as one space-joined string (emit on a
+# single line to avoid dangling-backslash bugs when the tail is empty). Reads the
+# ENABLE_* globals set by prompt_testnet_addons. obs flags come from
+# obs_reth_log_flags (lib/observability.sh) and branch on install method because the
+# reth log dir differs (container /home/nonroot/logs vs host /var/log/telcoin).
+tn_node_launch_flags() {
+    local method="$1" flags=""
+    is_testnet || { printf '%s' ""; return 0; }
+    if [[ "${ENABLE_HEALTHCHECK_MONITOR:-false}" == "true" ]]; then
+        flags+=" --healthcheck ${TN_KUMA_PORT}"
+    fi
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]] && declare -F obs_reth_log_flags >/dev/null 2>&1; then
+        flags+=" $(obs_reth_log_flags "$method")"
+    fi
+    printf '%s' "${flags# }"
+}
+
+# tn_node_launch_target — echo "<svc> <method> <file>" for the installed node, where
+# file is the launch config to patch: the systemd unit (docker) or the start wrapper
+# (binary/source). Returns 1 if no node service is present.
+tn_node_launch_target() {
+    local svc method meta file
+    if   [[ -f /etc/systemd/system/telcoin-validator.service ]]; then svc=telcoin-validator
+    elif [[ -f /etc/systemd/system/telcoin-observer.service  ]]; then svc=telcoin-observer
+    else return 1; fi
+    meta="$(node_meta_path || true)"
+    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
+    if [[ "$method" == "docker" ]]; then file="/etc/systemd/system/${svc}.service"
+    else file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"; fi
+    printf '%s %s %s\n' "$svc" "$method" "$file"
+}
+
+# tn_node_inject_flags <file> <marker> <flags> — idempotently append <flags> onto the
+# node-launch --http line (matched as a whole word, so --http.addr etc. are untouched)
+# when <marker> is absent. awk avoids sed metachar pitfalls with the slashes in the
+# flag paths. Returns 0 if it changed the file, 1 if already present / line not found.
+# The caller is responsible for daemon-reload (docker) and restart.
+tn_node_inject_flags() {
+    local file="$1" marker="$2" flags="$3" tmp
+    [[ -f "$file" ]] || return 1
+    grep -q -- "$marker" "$file" 2>/dev/null && return 1
+    tmp="$(mktemp)"
+    awk -v flags="$flags" '
+        !done && $0 ~ /(^|[[:space:]])--http([[:space:]]|$)/ { print $0 " " flags; done=1; next }
+        { print }
+    ' "$file" > "$tmp"
+    if grep -q -- "$marker" "$tmp"; then cat "$tmp" > "$file"; rm -f "$tmp"; return 0; fi
+    rm -f "$tmp"; return 1
+}
+
+# -----------------------------------------------------------------------------
+# In-setup opt-in flow ("ask early, act late")
+# -----------------------------------------------------------------------------
+
+# prompt_testnet_addons — interactive opt-in prompts shown right after network
+# selection (testnet only). Sets ENABLE_* / REGION globals so step_create_service
+# can bake the right node-launch flags on the first pass. The side-effect installs
+# happen later in step_testnet_addons. No-op in JSON/non-interactive mode.
+prompt_testnet_addons() {
+    is_testnet || return 0
+    [[ "${TN_ASSUME_YES:-false}" == "true" ]] && return 0   # JSON/UI: leave defaults
+
+    print_header "Testnet add-ons (optional)"
+    print_info "These let the Telcoin Association help run the testnet. Every one is OFF"
+    print_info "by default and purely additive — opting out changes nothing about your node."
+    print_info "Full trust model: docs/testnet-addons.md"
+
+    echo ""
+    print_step "Health monitoring"
+    print_info "Exposes a TCP health endpoint (port ${TN_KUMA_PORT:-43174}) probed by the"
+    print_info "Association uptime monitor (${TN_KUMA_SRC:-104.155.184.201/32}) so we can alert you if your node drops."
+    print_info "You can also allow your own monitoring hosts later: firewall-setup.sh -> Manage node ports."
+    if confirm "Enable the health-monitor endpoint?"; then
+        ENABLE_HEALTHCHECK_MONITOR="true"
+    fi
+
+    echo ""
+    print_step "Centralized logging"
+    print_info "Ships your node's logs to the Association's Loki so we can help you debug."
+    print_info "Needs a per-operator ingest token (you'll paste it, hidden, at the end of setup)."
+    if confirm "Enable log shipping?"; then
+        ENABLE_OBSERVABILITY="true"
+        local input
+        read -r -p "  Region label for your node (e.g. us-east, eu-west) [${REGION:-unknown}]: " input
+        REGION="${input:-${REGION:-unknown}}"
+    fi
+
+    echo ""
+    print_step "VPN admin SSH"
+    print_info "Lets the Association SSH into your node over a private WireGuard overlay"
+    print_info "(e.g. to help recover a stuck node) via a sudo-capable 'tnadmin' user."
+    print_info "Reversible, and needs a core-team-assigned overlay IP — so it's completed"
+    print_info "in a separate step (setup-vpn.sh) after this setup finishes."
+    if confirm "Opt into VPN admin SSH (finish later via setup-vpn.sh)?"; then
+        ENABLE_VPN="pending"
+    fi
+}
+
+# step_testnet_addons — performs the side-effect installs for whatever was opted into
+# in prompt_testnet_addons (ufw health rule, Alloy log shipper) and prints next-step
+# guidance. Runs AFTER step_create_service (so launch flags are already baked) and
+# before step_final_summary. No-op in JSON mode and on non-testnet.
+step_testnet_addons() {
+    json_mode 2>/dev/null && return 0
+    is_testnet || return 0
+    [[ "${ENABLE_HEALTHCHECK_MONITOR:-false}" == "true" || \
+       "${ENABLE_OBSERVABILITY:-false}" == "true" || \
+       "${ENABLE_VPN:-false}" != "false" ]] || return 0
+
+    print_header "Testnet add-ons — applying"
+
+    if [[ "${ENABLE_HEALTHCHECK_MONITOR:-false}" == "true" ]]; then
+        print_step "Health monitor"
+        if ufw_installed && ufw_active; then
+            if apply_kuma_rule; then
+                print_ok "ufw: ${TN_KUMA_SRC} -> ${TN_KUMA_PORT}/tcp (Association monitor only)"
+            else
+                print_warn "Could not add the ufw rule; open it via firewall-setup.sh."
+            fi
+        elif ufw_installed; then
+            # ufw installed but INACTIVE: --healthcheck binds ${TN_KUMA_PORT} on all
+            # interfaces, so with no active firewall the port is reachable from the internet.
+            apply_kuma_rule >/dev/null 2>&1 || true   # stage the restricted rule for when ufw is enabled
+            print_warn "ufw is INACTIVE — once the node restarts, health port ${TN_KUMA_PORT} is reachable from the INTERNET."
+            print_warn "Enable the firewall: run firewall-setup.sh (a source-restricted rule is already staged)."
+        else
+            print_warn "ufw is NOT installed — health port ${TN_KUMA_PORT} will be exposed to the internet once the node restarts."
+            print_warn "Install ufw + run firewall-setup.sh, or otherwise block ${TN_KUMA_PORT}/tcp."
+        fi
+        print_info "Verify once the node is up: curl -s http://127.0.0.1:${TN_KUMA_PORT}  (expect OK)"
+    fi
+
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
+        print_step "Centralized logging (Alloy)"
+        if declare -F obs_enable >/dev/null 2>&1; then
+            local token=""
+            print_info "Paste the per-operator obs ingest token (hidden input; leave blank to skip)."
+            read -r -s -p "  Obs ingest token: " token; echo ""
+            if [[ -n "$token" ]]; then
+                if obs_enable "$token"; then
+                    print_ok "Alloy log shipper started."
+                else
+                    print_warn "Alloy setup did not complete; re-run setup-observability.sh."
+                fi
+            else
+                print_warn "No token entered — log shipping not started. Run setup-observability.sh when you have one."
+            fi
+        else
+            print_warn "lib/observability.sh missing — update scripts, then run setup-observability.sh."
+        fi
+    fi
+
+    if [[ "${ENABLE_VPN:-false}" == "pending" ]]; then
+        print_step "VPN admin SSH"
+        print_info "Recorded as PENDING. To finish: ask the Telcoin Association for an overlay"
+        print_info "IP, then run:  sudo bash setup-vpn.sh"
+    fi
+
+    echo ""
+}
+
+# Optional add-on libraries (function defs only; safe to source under set -e).
+# Sourced at the END so the helpers above are already defined. Guarded for older
+# checkouts that predate these files. MUST use if/fi (not `[[ ]] && source`): a
+# trailing && that evaluates false would make `source lib/common.sh` itself return
+# non-zero, which under the inherited `set -e` aborts every caller right here.
+if [[ -f "${__COMMON_DIR}/observability.sh" ]]; then
+    source "${__COMMON_DIR}/observability.sh"
+fi
+: # ensure common.sh always sources with status 0
