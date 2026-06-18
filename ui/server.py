@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.48"
+UI_VERSION = "1.7.49"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -2747,6 +2747,30 @@ def api_caddy_disable():
 @app.route("/api/system")
 def api_system():
     return jsonify(system_info())
+
+
+@app.route("/api/addons/status")
+def api_addons_status():
+    """Read-only status of the testnet opt-in add-ons (health monitor / logging /
+    VPN admin SSH) for the management-side System card. Management-only: refused on
+    the public Caddy path even though it's a read. All enabling/disabling lives on
+    the CLI (setup-observability.sh / setup-vpn.sh)."""
+    if is_public_request():
+        return jsonify({"ok": False, "error": "management only"}), 403
+    t = (request.args.get("node_type") or "").strip()
+    if not valid_type(t):
+        return bad_type()
+    rc, out, err = run(["sudo", "-n", HELPER, "addons-status", t], timeout=10)
+    try:
+        data = json.loads(out) if out else {}
+    except Exception:
+        data = {}
+    if not data:
+        return jsonify({"ok": False, "error": err or "unavailable"}), 200
+    data["ok"] = True
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/netstat")

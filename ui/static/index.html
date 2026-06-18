@@ -2140,10 +2140,46 @@ async function renderSystem(){
     <div class="card" id="fwCard" style="margin-top:14px"><h3>Firewall</h3><div class="muted">Loading firewall status…</div></div>
     ${logRotCard}
     <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>
+    <div class="card" id="addonsCard" style="margin-top:14px;display:none"></div>
     ${dangerZoneHtml()}`;
   loadFirewall();
   const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
   renderCaddyCard();
+  renderAddonsCard();
+}
+
+// Read-only status of the dev team's testnet opt-in add-ons (health monitor /
+// centralized logging / VPN admin SSH). Management-only (System tab is hidden on
+// the public path); shown only on a testnet scripts node. All enable/disable is
+// CLI-only -- the card just points the operator at the right script.
+async function renderAddonsCard(){
+  const c = $('#addonsCard'); if(!c) return;
+  if(isReadonly()){ c.style.display='none'; return; }   // external/public: not applicable
+  const s = await api('/api/addons/status?node_type='+state.node);
+  if(!s || !s.ok || s.network !== 'testnet'){ c.style.display='none'; return; }
+  c.style.display='';
+  const h = s.health||{}, lg = s.logging||{}, vp = s.vpn||{};
+  const stateBadge = (enabled, ok, okTxt, warnTxt) => !enabled
+    ? '<span class="muted">disabled</span>'
+    : (ok ? `<span class="badge ok">${okTxt}</span>` : `<span class="badge warn">enabled — ${warnTxt}</span>`);
+  const vpnBadge = vp.state==='true'
+      ? (vp.handshake ? '<span class="badge ok">connected</span>'
+         : vp.wg_up ? '<span class="badge warn">up — no hub handshake yet</span>'
+                    : '<span class="badge err">enabled — wg0 down</span>')
+    : vp.state==='pending' ? '<span class="badge warn">pending enrollment</span>'
+    : '<span class="muted">disabled</span>';
+  c.innerHTML = `
+    <h3>Testnet Add-ons</h3>
+    <p style="color:var(--text2);font-size:13px">Optional Telcoin Association integrations. <strong>Read-only here</strong> — manage them on the server over SSH.</p>
+    <div class="kv"><span class="k">Health monitoring · <span class="mono">:${h.port||43174}</span></span><span class="v">${stateBadge(h.enabled, h.responding, 'responding', 'not responding')}</span></div>
+    <div class="kv"><span class="k">Centralized logging (Alloy)</span><span class="v">${stateBadge(lg.enabled, lg.running, 'shipping', 'service not running')}</span></div>
+    <div class="kv"><span class="k">VPN admin SSH</span><span class="v">${vpnBadge}</span></div>
+    ${(vp.state!=='false' && vp.overlay_ip) ? `<div class="kv"><span class="k">VPN overlay IP</span><span class="v mono">${esc(vp.overlay_ip)}</span></div>` : ''}
+    ${(h.enabled && h.extra_src) ? `<div class="kv"><span class="k">Health extra sources</span><span class="v mono" style="overflow-wrap:anywhere">${esc(h.extra_src)}</span></div>` : ''}
+    <p style="color:var(--text2);font-size:12px;margin-top:12px">
+      Logging &amp; health monitoring: <span class="mono">sudo bash ~/telcoin-node-scripts/setup-observability.sh</span><br>
+      VPN admin SSH (enable/disable, needs <span class="mono">I CONSENT</span>): <span class="mono">sudo bash ~/telcoin-node-scripts/setup-vpn.sh</span>
+    </p>`;
 }
 
 // ---- Firewall (status + the three node ports only) -------------------------

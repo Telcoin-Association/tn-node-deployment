@@ -245,6 +245,10 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49594/udp off
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 43174/tcp on
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 43174/tcp off
+# Testnet add-ons status -- READ-ONLY (reads .node-meta + probes services). Fixed
+# node-type arg, no wildcard.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper addons-status observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper addons-status validator
 # (Node removal is intentionally NOT exposed in the UI -- it is irreversible and
 # runs on the server via remove-node.sh -- so the telcoin-ui user gets no
 # node-remove grant.)

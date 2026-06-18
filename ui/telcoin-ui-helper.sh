@@ -30,6 +30,7 @@
 #   telcoin-ui-helper caddy-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
+#   telcoin-ui-helper addons-status   <observer|validator>      (read-only)
 #   telcoin-ui-helper docker-detect
 #   telcoin-ui-helper docker-status    <container>
 #   telcoin-ui-helper docker-logs      <container> [lines]
@@ -455,6 +456,55 @@ cmd_firewall_port() {
 }
 
 # =============================================================================
+# Testnet add-ons status -- READ-ONLY. Surfaces the state of the dev team's opt-in
+# add-ons (health monitor / centralized logging / VPN admin SSH) for the UI's
+# management-side status card. Reads the .node-meta keys their setup scripts write
+# (root-only, mode 600) and probes the running services. Mutates nothing; all
+# enabling/disabling stays on the CLI (setup-observability.sh / setup-vpn.sh).
+# =============================================================================
+
+# Minimal JSON string escaper (this helper has no json lib; values here are simple).
+_addons_json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//$'\n'/ }"; }
+
+# Read KEY=value from the node's root-owned .node-meta. Empty when absent.
+_addons_meta() {
+    local meta="$1" key="$2"
+    [[ -f "$meta" ]] || return 0
+    grep -E "^${key}=" "$meta" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+cmd_addons_status() {
+    local t="$1"; require_type "$t"
+    local meta="/etc/telcoin/${t}/.node-meta"
+    local network region hc obs vpn overlay pubkey extra
+    network=$(_addons_meta "$meta" NETWORK)
+    region=$(_addons_meta "$meta" REGION)
+    hc=$(_addons_meta "$meta" ENABLE_HEALTHCHECK_MONITOR)
+    obs=$(_addons_meta "$meta" ENABLE_OBSERVABILITY)
+    vpn=$(_addons_meta "$meta" ENABLE_VPN)
+    overlay=$(_addons_meta "$meta" VPN_OVERLAY_IP)
+    pubkey=$(_addons_meta "$meta" VPN_NODE_PUBKEY)
+    extra=$(_addons_meta "$meta" KUMA_EXTRA_SRC)
+    [[ "$vpn" == "true" || "$vpn" == "pending" ]] || vpn="false"
+
+    # Read-only probes.
+    local hc_enabled=false hc_ok=false obs_enabled=false alloy=false wg_up=false wg_hs=false
+    [[ "$hc" == "true" ]] && { hc_enabled=true; curl -fsS --max-time 3 "http://127.0.0.1:43174" >/dev/null 2>&1 && hc_ok=true; }
+    [[ "$obs" == "true" ]] && { obs_enabled=true; systemctl is-active --quiet telcoin-alloy 2>/dev/null && alloy=true; }
+    if [[ "$vpn" == "true" || "$vpn" == "pending" ]]; then
+        ip link show wg0 >/dev/null 2>&1 && wg_up=true
+        [[ "$wg_up" == "true" ]] && command -v wg >/dev/null 2>&1 && wg show wg0 2>/dev/null | grep -qE 'latest handshake' && wg_hs=true
+    fi
+
+    printf '{"network":"%s","region":"%s","health":{"enabled":%s,"responding":%s,"port":43174,"extra_src":"%s"},"logging":{"enabled":%s,"running":%s},"vpn":{"state":"%s","wg_up":%s,"handshake":%s,"overlay_ip":"%s","pubkey":"%s"}}\n' \
+        "$(_addons_json_str "$network")" "$(_addons_json_str "$region")" \
+        "$hc_enabled" "$hc_ok" "$(_addons_json_str "$extra")" \
+        "$obs_enabled" "$alloy" \
+        "$(_addons_json_str "$vpn")" "$wg_up" "$wg_hs" \
+        "$(_addons_json_str "$overlay")" "$(_addons_json_str "$pubkey")"
+}
+
+# =============================================================================
 # Setup subcommands -- thin wrappers around setup-<type>.sh --json --phase=...
 # Config comes from TN_SETUP_* env (validated here); the BLS passphrase stays in
 # TN_BLS_PASSPHRASE (env only, never argv) and is inherited by the exec'd script.
@@ -657,6 +707,7 @@ main() {
         caddy-disable)   cmd_caddy_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
+        addons-status)   shift; cmd_addons_status "${1:-}" ;;
         setup-keygen)    shift; cmd_setup_keygen   "${1:-}" ;;
         setup-finalize)  shift; cmd_setup_finalize "${1:-}" ;;
         docker-detect)    cmd_docker_detect ;;
