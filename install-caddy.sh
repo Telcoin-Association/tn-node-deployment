@@ -8,15 +8,17 @@
 # header that the UI server enforces (every write -> 403). Management stays on the
 # SSH tunnel (localhost, no such header).
 #
-# IMPORTANT: set the DNS A record (<domain> -> this server's public IP) BEFORE
-# enabling. Caddy requests the cert on first start; if DNS isn't pointing here
-# (and ports 80/443 reachable), ACME fails and Let's Encrypt rate-limits you.
+# IMPORTANT: set the DNS A record (<domain> -> this server's INBOUND public IP)
+# BEFORE enabling. Caddy requests the cert on first start; if DNS isn't pointing here
+# (and ports 80/443 reachable), ACME fails and Let's Encrypt rate-limits you. On a
+# multi-IP host or behind 1:1 NAT the inbound IP differs from the egress (outbound)
+# IP ipify reports -- pass the inbound IP with --public-ip (or $TN_CADDY_PUBLIC_IP).
 #
 # USAGE (interactive):
 #   sudo bash install-caddy.sh
 # USAGE (JSON, driven by the Node Manager UI helper):
 #   install-caddy.sh --json --phase=status
-#   install-caddy.sh --json --phase=check-dns --domain <d>
+#   install-caddy.sh --json --phase=check-dns --domain <d> [--public-ip <inbound-ip>]
 #   install-caddy.sh --json --phase=enable --domain <d> --username <u>   (password: $TN_CADDY_PASSWORD)
 #   install-caddy.sh --json --phase=disable
 # =============================================================================
@@ -30,7 +32,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # so error paths exit cleanly (print_error goes to stderr, which the UI surfaces).
 die() { print_error "$*"; exit 1; }
 
-readonly SCRIPT_VERSION="1.1.3"
+readonly SCRIPT_VERSION="1.1.4"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly CADDYFILE_ORIG="/etc/caddy/Caddyfile.tn-orig"
 readonly UI_UPSTREAM="127.0.0.1:8080"
@@ -62,6 +64,12 @@ json_escape() {
     s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/ }"; s="${s//$'\t'/ }"
     printf '%s' "$s"
 }
+# Emit the args as a JSON array of strings:  a b -> ["a","b"];  (no args) -> [].
+json_str_array() {
+    local out="" s
+    for s in "$@"; do out+="${out:+,}\"$(json_escape "$s")\""; done
+    printf '[%s]' "$out"
+}
 json_emit()  { printf '%s\n' "$1" >&3; }
 json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
 json_done()  { JSON_DONE_EMITTED=true; json_emit "$1"; }
@@ -87,11 +95,58 @@ run_streamed() {
 # HELPERS
 # =============================================================================
 
-# Public IP of this host (best-effort, mirrors the setup scripts). '' on failure.
-caddy_public_ip() {
+# Egress (outbound) IP of this host as an external service sees it -- the address
+# used for connections OUT of the box. On a multi-IP host or behind 1:1 NAT this can
+# DIFFER from the inbound IP where ACME challenges on 80/443 arrive, so it is NOT
+# necessarily where the A record should point. '' on failure. (Best-effort, mirrors
+# the setup scripts.)
+caddy_egress_ip() {
     local ip
     ip=$(curl -s --max-time 8 https://api.ipify.org 2>/dev/null || true)
     [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]] && echo "$ip" || echo ""
+}
+
+# Effective public IP the A record should point at. Honours an operator-supplied
+# override (TN_CADDY_PUBLIC_IP, set via --public-ip or the interactive prompt) -- the
+# single lever for naming the real INBOUND IP when it differs from egress (multi-IP /
+# NAT hosts) -- else falls back to the detected egress IP. Mirrors how
+# lib/common.sh:select_ipv4_binding() lets the operator confirm/override the IP.
+caddy_public_ip() {
+    local override="${TN_CADDY_PUBLIC_IP:-}"
+    if [[ -n "$override" ]] && validate_public_ip "$override"; then
+        echo "$override"; return 0
+    fi
+    caddy_egress_ip
+}
+
+# This host's own bound IPv4 addresses, space-separated, via `hostname -I` (the idiom
+# lib/common.sh:detect_internal_ip/select_ipv4_binding use). Loopback is filtered out.
+# On a multi-IP host the inbound public IP appears here; behind 1:1 NAT only a private
+# IP shows -- which is exactly when the operator must supply --public-ip. '' if none.
+caddy_local_ips() {
+    local out="" ip
+    for ip in $(hostname -I 2>/dev/null || true); do
+        [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue   # IPv4 only
+        [[ "$ip" == 127.* ]] && continue                             # drop loopback
+        out+="${ip} "
+    done
+    echo "${out% }"
+}
+
+# 0 (true) when <resolved> (the A record) points at an address that actually reaches
+# THIS box inbound: either the effective public IP, or any of the host's own bound
+# local IPs. This is the propagation test -- it replaces the old "resolved == egress"
+# check, which misfired on multi-IP / NAT hosts where the (correct) inbound A record
+# never equals the egress IP. NOTE: a pass means DNS targets this host, NOT that
+# 80/443 are open -- external TLS verification remains the real proof.
+caddy_ip_reaches_host() {
+    local resolved="$1" pub="$2" local_ips="$3" ip
+    [[ -z "$resolved" ]] && return 1
+    [[ -n "$pub" && "$resolved" == "$pub" ]] && return 0
+    for ip in $local_ips; do
+        [[ "$resolved" == "$ip" ]] && return 0
+    done
+    return 1
 }
 
 # A record for <domain> as seen by PUBLIC resolvers (most representative of what
@@ -265,14 +320,26 @@ do_status() {
         "$installed" "$running" "$enabled" "$(json_escape "$domain")" "$(json_escape "$username")"
 }
 
-# DNS check as a single JSON object to stdout.
+# DNS check as a single JSON object to stdout. Backward compatible: keeps
+# public_ip/resolved_ip/propagated and ADDS egress_ip, local_ips, and a human note.
 do_check_dns_json() {
-    local domain="$1" pub resolved propagated=false
-    pub=$(caddy_public_ip)
+    local domain="$1" egress pub resolved local_ips propagated=false note=""
+    egress=$(caddy_egress_ip)
+    pub=$(caddy_public_ip)            # override-aware (TN_CADDY_PUBLIC_IP), else egress
     resolved=$(caddy_resolve_domain "$domain")
-    [[ -n "$resolved" && "$resolved" == "$pub" ]] && propagated=true
-    printf '{"domain":"%s","public_ip":"%s","resolved_ip":"%s","propagated":%s}\n' \
-        "$(json_escape "$domain")" "$(json_escape "$pub")" "$(json_escape "$resolved")" "$propagated"
+    local_ips=$(caddy_local_ips)
+    if caddy_ip_reaches_host "$resolved" "$pub" "$local_ips"; then
+        propagated=true
+        note="${domain} resolves to ${resolved}, an address that reaches this host. (A green check confirms DNS targets this box -- NOT that ports 80/443 are open; verify TLS from outside the network.)"
+    elif [[ -z "$resolved" ]]; then
+        note="${domain} does not resolve yet -- create the A record (-> ${pub:-the inbound public IP}) and re-check."
+    else
+        note="${domain} resolves to ${resolved}, which is neither this host's effective public IP (${pub:-unknown}) nor a bound local IP (${local_ips:-none}). Note that ${egress:-unknown} is this box's EGRESS (outbound) IP, which can differ from the INBOUND IP where ACME reaches you on a multi-IP or NAT host -- so the A record should not necessarily point there. If your inbound public IP differs from the detected egress IP, supply it with --public-ip <ip> (or set TN_CADDY_PUBLIC_IP) and re-check."
+    fi
+    # shellcheck disable=SC2086  # intentional: split local_ips into one arg per IP (all validated dotted-quads)
+    printf '{"domain":"%s","public_ip":"%s","resolved_ip":"%s","propagated":%s,"egress_ip":"%s","local_ips":%s,"note":"%s"}\n' \
+        "$(json_escape "$domain")" "$(json_escape "$pub")" "$(json_escape "$resolved")" "$propagated" \
+        "$(json_escape "$egress")" "$(json_str_array $local_ips)" "$(json_escape "$note")"
 }
 
 run_json_enable() {
@@ -366,8 +433,29 @@ interactive_flow() {
     print_info "stays on the SSH tunnel."
     echo ""
 
-    local pub; pub=$(caddy_public_ip)
-    print_info "This server's public IP: ${pub:-<unknown>}"
+    # The A record must point at this host's INBOUND public IP -- where ACME
+    # challenges on 80/443 arrive -- which on a multi-IP host or behind 1:1 NAT can
+    # differ from the egress (outbound) IP that ipify reports. Show both, explain the
+    # distinction, and let the operator confirm/override (mirrors select_ipv4_binding).
+    local egress local_ips pub
+    egress=$(caddy_egress_ip)
+    local_ips=$(caddy_local_ips)
+    print_info "This server's egress (outbound) IP: ${egress:-<unknown>}"
+    print_info "Bound local IP(s) on this host:     ${local_ips:-<none>}"
+    echo ""
+    print_info "The DNS A record must point at this server's INBOUND public IP -- the"
+    print_info "address where ACME challenges on ports 80/443 arrive. On a multi-IP host"
+    print_info "or behind 1:1 NAT this can DIFFER from the egress IP above (inbound traffic,"
+    print_info "like your SSH session, may reach a different address than outbound uses)."
+    echo ""
+    local pub_default="${TN_CADDY_PUBLIC_IP:-$egress}"
+    while true; do
+        read -r -p "  Server's inbound public IP [${pub_default:-enter manually}]: " pub
+        pub="${pub:-$pub_default}"
+        [[ -n "$pub" ]] && validate_public_ip "$pub" && break
+        print_warn "Enter a valid IP address (the public IP your A record points at)."
+    done
+    export TN_CADDY_PUBLIC_IP="$pub"   # single source of truth for the rest of the flow
     echo ""
 
     local domain username
@@ -403,11 +491,12 @@ interactive_flow() {
 
     while true; do
         local resolved; resolved=$(caddy_resolve_domain "$domain")
-        if [[ -n "$resolved" && "$resolved" == "$pub" ]]; then
-            print_ok "${domain} resolves to ${resolved} (this server). Proceeding."
+        if caddy_ip_reaches_host "$resolved" "$pub" "$local_ips"; then
+            print_ok "${domain} resolves to ${resolved}, which reaches this server. Proceeding."
             break
         fi
-        print_warn "${domain} resolves to '${resolved:-<nothing>}', expected '${pub}'."
+        print_warn "${domain} resolves to '${resolved:-<nothing>}', which is not this server's"
+        print_warn "inbound public IP (${pub}) or any bound local IP (${local_ips:-none})."
         local ans
         read -r -p "  [r]echeck / [c]ontinue anyway / [a]bort: " ans
         case "$ans" in
@@ -454,6 +543,11 @@ main() {
             --domain=*)    JSON_DOMAIN="${1#*=}"; shift ;;
             --username)    JSON_USERNAME="${2:-}"; shift 2 ;;
             --username=*)  JSON_USERNAME="${1#*=}"; shift ;;
+            # Operator-supplied INBOUND public IP -- the address the A record points at,
+            # which on multi-IP / NAT hosts differs from the detected egress IP. Exported
+            # so both JSON (check-dns) and interactive paths honour it via caddy_public_ip().
+            --public-ip)   export TN_CADDY_PUBLIC_IP="${2:-}"; shift 2 ;;
+            --public-ip=*) export TN_CADDY_PUBLIC_IP="${1#*=}"; shift ;;
             *) shift ;;
         esac
     done
