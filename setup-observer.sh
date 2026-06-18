@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.18"
+readonly SCRIPT_VERSION="1.2.19"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -389,6 +389,8 @@ _preflight_source() {
     cp "$built" "${INSTALL_DIR}/telcoin-network"
     chmod +x "${INSTALL_DIR}/telcoin-network"
     BINARY_PATH="${INSTALL_DIR}/telcoin-network"
+    # Record the installed ref so the UI reports the running binary's version.
+    write_source_version_marker "$INSTALL_DIR" "$source_dir" "$build_ref"
     print_ok "Binary installed: ${BINARY_PATH}"
 
     # Write build info for Node Manager UI

@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.51"
+readonly SCRIPT_VERSION="1.1.52"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -653,6 +653,9 @@ apply_source_update() {
 
     if verify_health_after_restart; then
         clear_pending_state
+        # Record the now-running ref so the UI reports the installed binary's
+        # version (not the source checkout, which has moved to new_ref).
+        write_source_version_marker "$DEFAULT_INSTALL_DIR" "$TN_SOURCE_DIR" "$new_ref"
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
@@ -1099,6 +1102,9 @@ json_apply_source() {
     json_event step "Verifying node health"
     if verify_health_after_restart; then
         clear_pending_state
+        # Record the now-running ref so the UI reports the installed binary's
+        # version (not the source checkout, which has moved to new_ref).
+        write_source_version_marker "$DEFAULT_INSTALL_DIR" "$TN_SOURCE_DIR" "$new_ref"
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"}"
         return 0
     fi

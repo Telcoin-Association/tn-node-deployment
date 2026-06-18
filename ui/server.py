@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.47"
+UI_VERSION = "1.7.48"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -659,15 +659,28 @@ def node_version(t):
     method = detect_install_method(t)
     out = {"ref": "", "kind": method or ""}
     if method == "source":
-        # -c safe.directory: the source checkout is root-owned but we run as the
-        # unprivileged telcoin-ui user, so a bare git call refuses with "dubious
-        # ownership". Scope the exception to this one read-only describe.
-        rc, o, _ = run(
-            ["git", "-c", "safe.directory=" + TN_SOURCE_DIR,
-             "-C", TN_SOURCE_DIR, "describe", "--tags", "--always", "--dirty"]
-        )
-        if rc == 0 and o:
-            out["ref"] = o
+        # Prefer the version marker written at install/apply time -- it names the
+        # RUNNING binary. `git describe` of the source checkout is only the
+        # fallback (older installs without a marker): it diverges from the running
+        # binary after a prepare or a rolled-back apply, since the checkout moves
+        # but the installed binary does not.
+        ref = ""
+        try:
+            with open(os.path.join(DEFAULT_INSTALL_DIR, "telcoin-network.version")) as f:
+                ref = f.read().strip()
+        except (OSError, IOError):
+            ref = ""
+        if not ref:
+            # -c safe.directory: the source checkout is root-owned but we run as
+            # the unprivileged telcoin-ui user, so a bare git call refuses with
+            # "dubious ownership". Scope it to this one read-only describe.
+            rc, o, _ = run(
+                ["git", "-c", "safe.directory=" + TN_SOURCE_DIR,
+                 "-C", TN_SOURCE_DIR, "describe", "--tags", "--always", "--dirty"]
+            )
+            if rc == 0 and o:
+                ref = o
+        out["ref"] = ref
     elif method == "docker":
         img = docker_image_ref(t)
         if img:

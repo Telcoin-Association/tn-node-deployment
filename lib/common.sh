@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.3.1"
+readonly COMMON_VERSION="1.3.2"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -651,6 +651,24 @@ write_advertised_name() {
     fi
     [[ -n "$owner" ]] && chown "$owner" "$nc" 2>/dev/null || true
     print_ok "Advertised node name set: ${name}"
+}
+
+# Record the ref of the source binary that was just installed, in a marker next
+# to the binary (<install_dir>/telcoin-network.version). The UI reads this to show
+# the version of the RUNNING binary instead of `git describe` of the source
+# checkout -- which diverges after a prepare or a rolled-back apply (the checkout
+# moves, the installed binary does not). Written only on a successful install /
+# verified apply, so after a rollback the marker still names the running binary.
+# Args: <install_dir> [<source_dir>] [<fallback_ref>]
+write_source_version_marker() {
+    local install_dir="$1" source_dir="${2:-$TN_SOURCE_DIR}" fallback="${3:-}"
+    local marker="${install_dir}/telcoin-network.version" desc=""
+    if [[ -d "${source_dir}/.git" ]]; then
+        desc=$(git -C "$source_dir" describe --tags --always --dirty 2>/dev/null || true)
+    fi
+    [[ -z "$desc" ]] && desc="$fallback"
+    [[ -z "$desc" ]] && return 0
+    printf '%s\n' "$desc" > "$marker" 2>/dev/null && chmod 0644 "$marker" 2>/dev/null || true
 }
 
 select_network() {
