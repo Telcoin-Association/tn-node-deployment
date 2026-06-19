@@ -128,7 +128,7 @@ obs_image_version() {
 
 # obs_label_sourcing — set the low-cardinality identity labels (globals) for the env
 # file. No GCP metadata: node from advertised name/hostname, region + validator address
-# from .node-meta (validator address blank for observers), chain fixed to adiri.
+# from .node-meta (validator address blank for observers), chain from the active network.
 obs_label_sourcing() {
     local meta; meta="$(node_meta_path || true)"
     TN_NODE="${ADVERTISED_NAME:-}"
@@ -141,7 +141,14 @@ obs_label_sourcing() {
     TN_NODE="$(printf '%s' "$TN_NODE" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"; [[ -n "$TN_NODE" ]] || TN_NODE="node"
     TN_REGION="$(printf '%s' "$TN_REGION" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"; [[ -n "$TN_REGION" ]] || TN_REGION="unknown"
     TN_VALIDATOR_ADDRESS="$(meta_get VALIDATOR_ADDRESS "$meta" 2>/dev/null || true)"
-    TN_CHAIN="adiri"
+    # chain label tracks the active network (config.alloy reads it via sys.env("TN_CHAIN")).
+    # testnet + the empty/unknown fallback stay "adiri" so existing testnet telemetry is
+    # byte-identical; devnet/mainnet map to their own chain names from lib/common.sh.
+    case "${NETWORK:-}" in
+        devnet)  TN_CHAIN="${DEVNET_CHAIN_NAME:-devnet}" ;;
+        mainnet) TN_CHAIN="${MAINNET_CHAIN_NAME:-telcoin}" ;;
+        *)       TN_CHAIN="${TESTNET_CHAIN_NAME:-adiri}" ;;
+    esac
     TN_IMAGE_VERSION="$(obs_image_version)"
 }
 
@@ -482,6 +489,14 @@ EOF
 # host network, RO config + logs), but supervised by systemd so it is greppable and
 # restarts with the host. The ExecStart uses backslash continuations that bash collapses
 # to one line on render (same as the node units) — valid for systemd.
+#
+# Storage dir is bind-mounted at the SAME absolute path inside the container
+# (${OBS_DATA_DIR}:${OBS_DATA_DIR}) and passed verbatim to --storage.path, matching the
+# native unit. Do NOT mount it under the image's /var/lib/alloy: that dir is owned by the
+# image's alloy user (473:473, mode 0770) and --cap-drop=ALL strips CAP_DAC_OVERRIDE, so
+# container-root cannot traverse it -> Alloy dies with "mkdir /var/lib/alloy/data:
+# permission denied". /var/lib (root:root) is traversable, so this placement keeps every
+# hardening flag intact.
 obs_run_alloy_docker() {
     local token="$1" log_host_dir="$2"
     local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
@@ -508,10 +523,10 @@ ExecStart=/usr/bin/docker run --rm --name telcoin-alloy \
 --env-file ${envf} \
 -v ${OBS_ETC_DIR}/config.alloy:/etc/alloy/config.alloy:ro \
 -v ${log_host_dir}:/var/log/telcoin:ro \
--v ${OBS_DATA_DIR}:/var/lib/alloy/data \
+-v ${OBS_DATA_DIR}:${OBS_DATA_DIR} \
 ${TN_ALLOY_IMAGE} run \
 --server.http.listen-addr=${OBS_HTTP_ADDR} \
---storage.path=/var/lib/alloy/data \
+--storage.path=${OBS_DATA_DIR} \
 /etc/alloy/config.alloy
 ExecStop=/usr/bin/docker stop telcoin-alloy
 Restart=on-failure
