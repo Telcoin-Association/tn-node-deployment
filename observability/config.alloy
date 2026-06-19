@@ -1,18 +1,24 @@
 // =============================================================================
-// observability/config.alloy — Grafana Alloy node log shipper (testnet add-on).
+// observability/config.alloy — Grafana Alloy node log + metrics shipper (testnet
+// add-on). Two INDEPENDENT pipelines: logs → central Loki, metrics → central
+// Prometheus, each behind the same Caddy edge + shared ingest token. (Metrics are LIVE
+// as of node v0.11.0 — the tn-metrics crate serves the --metrics endpoint, commit
+// d07d7706; an earlier copy of this file wrongly called the metrics blocks "dormant".)
 //
-// CANONICAL COPY. The log-shipping blocks below are kept BYTE-IDENTICAL to
-// adiri-genesis/common/observability/node-agent/config.alloy (the core team's node
-// agent) so external-operator logs land in the SAME Loki label schema + dashboards.
-// lib/observability.sh deploys this file verbatim (obs_write_config_alloy copies it).
-// If you edit the blocks, mirror the change in adiri-genesis and keep the diff clean
-// (the sync note in docs/testnet-addons.md explains how to verify).
+// CANONICAL COPY. The log-shipping AND metrics blocks below are kept BYTE-IDENTICAL
+// to adiri-genesis/common/observability/node-agent/config.alloy (the core team's node
+// agent) so external-operator telemetry lands in the SAME Loki/Prometheus label schema
+// + dashboards. lib/observability.sh renders only the pipeline(s) the operator opted
+// into (ENABLE_OBSERVABILITY = logs, ENABLE_METRICS = metrics); when both are on it
+// deploys this file verbatim. If you edit the blocks, mirror the change in adiri-genesis
+// and keep the diff clean (the sync note in docs/testnet-addons.md explains how to verify).
 //
 // Node identity + push credentials come from the environment (the telcoin-alloy
 // systemd unit's EnvironmentFile for native installs, or the container --env-file for
 // docker), so one config serves both runtimes:
 //   TN_NODE TN_REGION TN_VALIDATOR_ADDRESS TN_CHAIN TN_IMAGE_VERSION
-//   OBS_PUSH_URL OBS_INGEST_TOKEN
+//   OBS_PUSH_URL OBS_INGEST_TOKEN                       (logs)
+//   TN_METRICS_ADDR OBS_METRICS_PUSH_URL                (metrics; OBS_INGEST_TOKEN shared)
 // =============================================================================
 
 // reth writes <log.file.directory>/telcoin-network-logs/reth.log, rotated to
@@ -78,24 +84,59 @@ loki.write "central" {
 	// }
 }
 
-// =============================================================================
-// DORMANT metrics scrape — INERT today. reth currently hardcodes prometheus:None
-// (telcoin-network crates/tn-reth/src/lib.rs), so the node's --metrics flag exposes
-// nothing to scrape and these blocks ship commented out. When a Prometheus exporter
-// lands, turn on node metrics by:
-//   1. confirm the node exposes Prometheus metrics on 127.0.0.1:9000
-//   2. seed OBS_PROM_PUSH_URL in the telcoin-alloy env file (the obs VM remote-write URL)
-//   3. uncomment the two blocks below and: systemctl restart telcoin-alloy
-// =============================================================================
-// prometheus.scrape "tn_node" {
-//   targets         = [{ __address__ = "127.0.0.1:9000", job = "telcoin-node" }]
-//   forward_to      = [prometheus.remote_write.central.receiver]
-//   scrape_interval = "15s"
-// }
-//
-// prometheus.remote_write "central" {
-//   endpoint {
-//     url          = sys.env("OBS_PROM_PUSH_URL")
-//     bearer_token = sys.env("OBS_INGEST_TOKEN")
-//   }
-// }
+// --- Metrics pipeline (Wave 3) -----------------------------------------------
+// Scrape the node's loopback Prometheus endpoint, attach the same identity labels
+// as the log pipeline, then remote-write to the central Prometheus behind Caddy.
+prometheus.scrape "tn" {
+	// instance is set per-node; the scrape default would be the shared 127.0.0.1:9101.
+	targets = [{
+		__address__ = sys.env("TN_METRICS_ADDR"),
+		instance    = sys.env("TN_NODE"),
+	}]
+	job_name        = "telcoin-node"
+	scrape_interval = "15s"
+	forward_to      = [prometheus.relabel.tn.receiver]
+}
+
+prometheus.relabel "tn" {
+	forward_to = [prometheus.remote_write.central.receiver]
+
+	// Identity labels mirror loki.process's stage.static_labels above. `network` is
+	// added because node-metrics.json's $network template var = label_values(.., network).
+	rule {
+		target_label = "node"
+		replacement  = sys.env("TN_NODE")
+	}
+
+	rule {
+		target_label = "region"
+		replacement  = sys.env("TN_REGION")
+	}
+
+	rule {
+		target_label = "validator_address"
+		replacement  = sys.env("TN_VALIDATOR_ADDRESS")
+	}
+
+	rule {
+		target_label = "chain"
+		replacement  = sys.env("TN_CHAIN")
+	}
+
+	rule {
+		target_label = "network"
+		replacement  = sys.env("TN_CHAIN")
+	}
+
+	rule {
+		target_label = "image_version"
+		replacement  = sys.env("TN_IMAGE_VERSION")
+	}
+}
+
+prometheus.remote_write "central" {
+	endpoint {
+		url          = sys.env("OBS_METRICS_PUSH_URL")
+		bearer_token = sys.env("OBS_INGEST_TOKEN")
+	}
+}

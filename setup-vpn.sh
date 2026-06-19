@@ -233,8 +233,10 @@ persist_state() {
 }
 
 print_enrollment() {
-    local node_name; node_name="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
-    print_header "VPN enrollment -- send these 3 values to the Telcoin Association"
+    local node_name today
+    node_name="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
+    today="$(date +%Y-%m-%d 2>/dev/null || echo YYYY-MM-DD)"
+    print_header "VPN enrollment -- send these to the Telcoin Association"
     cat <<EOF
 
   node_name:  ${node_name}
@@ -245,6 +247,21 @@ EOF
     print_info "Email/Slack these to the Association (or your enrollment channel). They add"
     print_info "you to the overlay registry + redeploy the hub. Until then your tunnel is up"
     print_info "but the hub won't accept your peer yet."
+    echo ""
+    print_info "For the Association admin -- ONE command registers this node (run from the"
+    print_info "adiri-genesis checkout; it stamps the enrollment date and pushes the hub):"
+    cat <<EOF
+
+  ./common/wgvpn/add-node.sh ${node_name} ${OVERLAY_IP} ${WG_NODE_PUBKEY} "external <fill: e.g. Mobicom VPS>"
+
+EOF
+    print_info "Illustrative registry row (reference only -- the command above is authoritative"
+    print_info "and writes the row itself with the real run-date):"
+    cat <<EOF
+
+  node,${node_name},${OVERLAY_IP},${WG_NODE_PUBKEY},${today},external <fill>
+
+EOF
     print_info "After they confirm, verify the handshake:"
     print_info "  sudo wg show wg0        (peer ${TN_WG_HUB_ENDPOINT}, nonzero transfer)"
     print_info "Disable any time:  sudo bash setup-vpn.sh --disable"

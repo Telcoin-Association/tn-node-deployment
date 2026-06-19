@@ -41,7 +41,8 @@ PASSPHRASE_METHOD="loadcredential"  # loadcredential | tpm
 # Testnet opt-in add-ons (see lib/common.sh / docs/testnet-addons.md). OFF by default;
 # set by prompt_testnet_addons (interactive testnet only) and persisted to .node-meta.
 ENABLE_HEALTHCHECK_MONITOR="false"
-ENABLE_OBSERVABILITY="false"
+ENABLE_OBSERVABILITY="false"   # log shipping (Alloy -> Loki)
+ENABLE_METRICS="false"         # metrics shipping (Alloy -> Prometheus); independent of logs
 ENABLE_VPN="false"          # true | pending | false
 VPN_OVERLAY_IP=""
 VPN_NODE_PUBKEY=""
@@ -863,7 +864,6 @@ step_create_service() {
     local worker_multiaddr="$WORKER_LISTENER_MULTIADDR"
     print_info "P2P listener (internal): ${primary_multiaddr}"
 
-    local metrics_addr="127.0.0.1:${METRICS_PORT}"
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
@@ -914,7 +914,6 @@ ${DOCKER_IMAGE} \
 telcoin node \
 --datadir /home/nonroot \
 --instance ${instance} \
---metrics ${metrics_addr} \
 --log.stdout.format log-fmt \
 -vvv \
 --http ${launch_flags}
@@ -967,7 +966,6 @@ export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
 exec ${BINARY_PATH} node \
   --datadir ${DATA_DIR} \
   --instance ${instance} \
-  --metrics ${metrics_addr} \
   --log.stdout.format log-fmt \
   -vvv \
   --http ${launch_flags}
@@ -983,7 +981,6 @@ export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
 exec ${BINARY_PATH} node \
   --datadir ${DATA_DIR} \
   --instance ${instance} \
-  --metrics ${metrics_addr} \
   --log.stdout.format log-fmt \
   -vvv \
   --http ${launch_flags}
@@ -1053,6 +1050,8 @@ VALIDATOR_ADDRESS=${VALIDATOR_ADDRESS:-}
 REGION=${REGION:-}
 ENABLE_HEALTHCHECK_MONITOR=${ENABLE_HEALTHCHECK_MONITOR:-false}
 ENABLE_OBSERVABILITY=${ENABLE_OBSERVABILITY:-false}
+ENABLE_METRICS=${ENABLE_METRICS:-false}
+METRICS_PORT=${METRICS_PORT:-9101}
 ENABLE_VPN=${ENABLE_VPN:-false}
 VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}
 VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}

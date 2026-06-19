@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# setup-observability.sh -- Telcoin testnet add-on: centralized logging + health
+# setup-observability.sh -- Telcoin testnet add-on: logs + metrics + health
 #
-# Opt-in, testnet-only. Enable/disable shipping this node's logs to the Telcoin
-# Association's central Loki (via Grafana Alloy), and enable/disable the health-
-# monitor endpoint. Re-runnable at any time. The obs ingest token is pasted here
-# (hidden) and stored ONLY in the mode-600 Alloy env file -- never in git/.node-meta.
+# Opt-in, testnet-only. Independently enable/disable shipping this node's logs (Grafana
+# Alloy -> central Loki) and its Prometheus metrics (Alloy -> central Prometheus), plus
+# the health-monitor endpoint. Re-runnable at any time. Logs and metrics share ONE
+# per-operator ingest token, pasted here (hidden) and stored ONLY in the mode-600 Alloy
+# env file -- never in git/.node-meta.
 #
 # USAGE:
 #   sudo bash setup-observability.sh
@@ -14,7 +15,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 
 pause() { echo ""; read -r -p "  Press Enter to return to menu..."; }
 
@@ -32,34 +33,84 @@ load_node_context() {
     REGION="$(meta_get REGION "$meta" 2>/dev/null || true)"
 }
 
+# _obs_prompt_region — set REGION (shared identity label), defaulting to the current value.
+_obs_prompt_region() {
+    local region_in
+    read -r -p "  Region label for your node (e.g. us-east, eu-west) [${REGION:-unknown}]: " region_in
+    REGION="${region_in:-${REGION:-unknown}}"
+}
+
+# _obs_collect_token — populate _OBS_TOKEN: reuse the token already stored on this node
+# (so enabling a second pipeline needs no re-paste), else prompt hidden. Returns 1 if the
+# operator left it blank with no existing token.
+_obs_collect_token() {
+    _OBS_TOKEN="$(obs_existing_token)"
+    if [[ -n "$_OBS_TOKEN" ]]; then
+        print_info "Reusing the ingest token already stored on this node (one token covers logs + metrics)."
+        return 0
+    fi
+    print_info "Paste the per-operator obs ingest token from the Association (input hidden):"
+    read -r -s -p "  Token: " _OBS_TOKEN; echo ""
+    [[ -n "$_OBS_TOKEN" ]] || { print_warn "No token entered -- aborting."; return 1; }
+    return 0
+}
+
+# ENABLE_OBSERVABILITY / ENABLE_METRICS are set here as globals that obs_enable
+# (lib/observability.sh) reads; shellcheck can't see that cross-file use.
+# shellcheck disable=SC2034
 enable_logging() {
-    print_header "Enable centralized logging"
+    print_header "Enable log shipping"
     print_info "Ships this node's logs to the Telcoin Association's Loki:"
     print_info "  ${OBS_PUSH_URL_TESTNET}"
     print_info "You need a per-operator ingest token from the Association (docs/testnet-addons.md)."
     echo ""
-    local region_in
-    read -r -p "  Region label for your node (e.g. us-east, eu-west) [${REGION:-unknown}]: " region_in
-    REGION="${region_in:-${REGION:-unknown}}"
-    local token=""
-    print_info "Paste the obs ingest token (input hidden):"
-    read -r -s -p "  Token: " token; echo ""
-    if [[ -z "$token" ]]; then
-        print_warn "No token entered -- aborting."
-        pause; return
+    # Turn logs on; preserve any existing metrics opt-in so obs_enable renders both.
+    local meta; meta="$(node_meta_path || true)"
+    ENABLE_METRICS="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
+    ENABLE_OBSERVABILITY="true"
+    _obs_prompt_region
+    if _obs_collect_token; then
+        if obs_enable "$_OBS_TOKEN"; then print_ok "Log shipping enabled."; else print_error "Could not enable logging (see messages above)."; fi
     fi
-    if obs_enable "$token"; then
-        print_ok "Centralized logging enabled."
-    else
-        print_error "Could not enable logging (see messages above)."
+    _OBS_TOKEN=""
+    pause
+}
+
+# ENABLE_OBSERVABILITY / ENABLE_METRICS are set here as globals that obs_enable
+# (lib/observability.sh) reads; shellcheck can't see that cross-file use.
+# shellcheck disable=SC2034
+enable_metrics() {
+    print_header "Enable metrics shipping"
+    print_info "Ships this node's Prometheus metrics to the Association's central Prometheus:"
+    print_info "  ${OBS_METRICS_PUSH_URL_TESTNET}"
+    print_info "Reuses the SAME ingest token as logging (one token covers both)."
+    echo ""
+    # Turn metrics on; preserve any existing logs opt-in so obs_enable renders both.
+    local meta; meta="$(node_meta_path || true)"
+    ENABLE_OBSERVABILITY="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
+    ENABLE_METRICS="true"
+    _obs_prompt_region
+    if _obs_collect_token; then
+        if obs_enable "$_OBS_TOKEN"; then print_ok "Metrics shipping enabled."; else print_error "Could not enable metrics (see messages above)."; fi
     fi
+    _OBS_TOKEN=""
     pause
 }
 
 disable_logging() {
-    print_header "Disable centralized logging"
-    if confirm "Stop shipping logs and disable the Alloy unit?"; then
-        obs_disable
+    print_header "Disable log shipping"
+    if confirm "Stop shipping logs (metrics, if on, keeps running)?"; then
+        obs_disable_logs
+    else
+        print_info "Cancelled."
+    fi
+    pause
+}
+
+disable_metrics() {
+    print_header "Disable metrics shipping"
+    if confirm "Stop shipping metrics (logs, if on, keeps running)?"; then
+        obs_disable_metrics
     else
         print_info "Cancelled."
     fi
@@ -154,23 +205,27 @@ main_menu() {
         print_header "Telcoin Network -- Observability Add-on  v${SCRIPT_VERSION}"
         print_info "Network: ${NETWORK:-unknown}   Install method: ${INSTALL_METHOD:-unknown}"
         echo ""
-        echo "  1) Enable centralized logging (Alloy -> Loki)"
-        echo "  2) Disable centralized logging"
-        echo "  3) Enable health monitoring (--healthcheck + firewall rule)"
-        echo "  4) Disable health monitoring"
-        echo "  5) Show status"
-        echo "  6) Exit"
+        echo "  1) Enable log shipping (Alloy -> Loki)"
+        echo "  2) Disable log shipping"
+        echo "  3) Enable metrics shipping (Alloy -> Prometheus)"
+        echo "  4) Disable metrics shipping"
+        echo "  5) Enable health monitoring (--healthcheck + firewall rule)"
+        echo "  6) Disable health monitoring"
+        echo "  7) Show status"
+        echo "  8) Exit"
         echo ""
         local choice
-        read -r -p "  Enter choice [1-6]: " choice
+        read -r -p "  Enter choice [1-8]: " choice
         case "$choice" in
             1) enable_logging ;;
             2) disable_logging ;;
-            3) enable_health ;;
-            4) disable_health ;;
-            5) show_status ;;
-            6) echo ""; print_info "Exiting."; exit 0 ;;
-            *) print_warn "Please enter 1-6."; sleep 1 ;;
+            3) enable_metrics ;;
+            4) disable_metrics ;;
+            5) enable_health ;;
+            6) disable_health ;;
+            7) show_status ;;
+            8) echo ""; print_info "Exiting."; exit 0 ;;
+            *) print_warn "Please enter 1-8."; sleep 1 ;;
         esac
     done
 }

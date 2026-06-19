@@ -22,7 +22,7 @@ readonly MAINNET_EXPLORER="https://scan.telcoin.network"
 readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
-readonly DEFAULT_METRICS_PORT="9000"
+readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
 readonly COMMON_VERSION="1.3.3"
 
 # Validator node hardware requirements (official Telcoin Association specs)
@@ -1790,13 +1790,19 @@ allow_overlay_ssh() {
 # the opt-ins enabled for THIS setup run, as one space-joined string (emit on a
 # single line to avoid dangling-backslash bugs when the tail is empty). Reads the
 # ENABLE_* globals set by prompt_testnet_addons. obs flags come from
-# obs_reth_log_flags (lib/observability.sh) and branch on install method because the
-# reth log dir differs (container /home/nonroot/logs vs host /var/log/telcoin).
+# obs_reth_log_flags / obs_metrics_reth_flags (lib/observability.sh); the log flags
+# branch on install method because the reth log dir differs (container
+# /home/nonroot/logs vs host /var/log/telcoin), while --metrics is a loopback addr.
+# --metrics is gated here (not unconditional) so a metrics-off node runs reth's
+# zero-overhead noop recorder — byte-identical to a node installed without these scripts.
 tn_node_launch_flags() {
     local method="$1" flags=""
     is_testnet || { printf '%s' ""; return 0; }
     if [[ "${ENABLE_HEALTHCHECK_MONITOR:-false}" == "true" ]]; then
         flags+=" --healthcheck ${TN_KUMA_PORT}"
+    fi
+    if [[ "${ENABLE_METRICS:-false}" == "true" ]] && declare -F obs_metrics_reth_flags >/dev/null 2>&1; then
+        flags+=" $(obs_metrics_reth_flags)"
     fi
     if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]] && declare -F obs_reth_log_flags >/dev/null 2>&1; then
         flags+=" $(obs_reth_log_flags "$method")"
@@ -1869,6 +1875,19 @@ prompt_testnet_addons() {
     print_info "Needs a per-operator ingest token (you'll paste it, hidden, at the end of setup)."
     if confirm "Enable log shipping?"; then
         ENABLE_OBSERVABILITY="true"
+    fi
+
+    echo ""
+    print_step "Metrics shipping"
+    print_info "Ships your node's Prometheus metrics to the Association's central Prometheus"
+    print_info "(block height, peer counts, resource use) — powers the shared node dashboards."
+    print_info "Independent of logging, but reuses the SAME ingest token (one token covers both)."
+    if confirm "Enable metrics shipping?"; then
+        ENABLE_METRICS="true"
+    fi
+
+    # Region is a shared identity label for both telemetry pipelines — ask once if either on.
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" || "${ENABLE_METRICS:-false}" == "true" ]]; then
         local input
         read -r -p "  Region label for your node (e.g. us-east, eu-west) [${REGION:-unknown}]: " input
         REGION="${input:-${REGION:-unknown}}"
@@ -1894,6 +1913,7 @@ step_testnet_addons() {
     is_testnet || return 0
     [[ "${ENABLE_HEALTHCHECK_MONITOR:-false}" == "true" || \
        "${ENABLE_OBSERVABILITY:-false}" == "true" || \
+       "${ENABLE_METRICS:-false}" == "true" || \
        "${ENABLE_VPN:-false}" != "false" ]] || return 0
 
     print_header "Testnet add-ons — applying"
@@ -1919,20 +1939,24 @@ step_testnet_addons() {
         print_info "Verify once the node is up: curl -s http://127.0.0.1:${TN_KUMA_PORT}  (expect OK)"
     fi
 
-    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
-        print_step "Centralized logging (Alloy)"
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" || "${ENABLE_METRICS:-false}" == "true" ]]; then
+        local what="logs + metrics"
+        [[ "${ENABLE_METRICS:-false}" != "true" ]] && what="logs"
+        [[ "${ENABLE_OBSERVABILITY:-false}" != "true" ]] && what="metrics"
+        print_step "Centralized telemetry — ${what} (Alloy)"
         if declare -F obs_enable >/dev/null 2>&1; then
             local token=""
             print_info "Paste the per-operator obs ingest token (hidden input; leave blank to skip)."
+            print_info "One token covers both logs and metrics."
             read -r -s -p "  Obs ingest token: " token; echo ""
             if [[ -n "$token" ]]; then
                 if obs_enable "$token"; then
-                    print_ok "Alloy log shipper started."
+                    print_ok "Alloy telemetry shipper started (${what})."
                 else
                     print_warn "Alloy setup did not complete; re-run setup-observability.sh."
                 fi
             else
-                print_warn "No token entered — log shipping not started. Run setup-observability.sh when you have one."
+                print_warn "No token entered — telemetry not started. Run setup-observability.sh when you have one."
             fi
         else
             print_warn "lib/observability.sh missing — update scripts, then run setup-observability.sh."
