@@ -470,6 +470,20 @@ const state = {
 //  - the selected node is an external docker container we don't manage.
 function curNode(){ return state.nodes[state.node] || {}; }
 function isReadonly(){ return state.publicReadonly || curNode().mode === 'external'; }
+// A server runs a single Telcoin node (observer OR validator, never both), so the
+// first installed type is THE node on this host. Returns 'observer'/'validator',
+// or null on a fresh server with nothing installed.
+function installedType(){
+  for(const t of ['observer','validator']) if(state.nodes[t]?.installed) return t;
+  return null;
+}
+// Switch the active node tab programmatically (mirrors the #selector click handler).
+function selectNode(t){
+  if(!state.nodes[t]) return;
+  state.node = t;
+  document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
+  rerenderActive();
+}
 function updateReadonlyBanner(){
   const b = $('#roBanner'), m = $('#roBannerMsg'); if(!b || !m) return;
   if(state.publicReadonly){
@@ -546,9 +560,7 @@ function switchView(v){
 
 $('#selector').addEventListener('click', e=>{
   const b = e.target.closest('.node-btn'); if(!b) return;
-  state.node = b.dataset.node;
-  document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
-  rerenderActive();
+  selectNode(b.dataset.node);
 });
 
 $('#refreshBtn').addEventListener('click', ()=>{ loadNodes(); rerenderActive(); });
@@ -595,11 +607,11 @@ async function refreshAfterChange(){ await loadNodes(); rerenderActive(); }
 // Hide controls/tabs with no meaning in read-only mode. System (host admin:
 // firewall, log rotation, external access, remove) is hidden on the public path;
 // it stays available for an external-node-only case (host info is still useful).
-// Setup is for INSTALLING a node, so it's hidden when the selected node is
-// already installed (manage it from Dashboard/Config) -- as well as in read-only
-// (external/public) mode. Per-node: a host with the observer installed but no
-// validator still shows Setup for the validator.
-function setupHidden(){ return isReadonly() || !!state.nodes[state.node]?.installed; }
+// Setup INSTALLS a node, and a server runs exactly one node (observer OR
+// validator). So Setup is shown ONLY on a fresh server with nothing installed --
+// hidden once any node exists (the other tab shows "already configured") and in
+// read-only (external/public) mode.
+function setupHidden(){ return isReadonly() || installedType() !== null; }
 
 function syncReadonlyChrome(){
   const setupTab = document.querySelector('.tab[data-view="setup"]');
@@ -612,6 +624,21 @@ function syncReadonlyChrome(){
 // Empty state
 // =============================================================================
 function emptyState(container, what){
+  // A server runs a single node. If THIS type isn't installed but the OTHER one
+  // is, this server is already configured -- don't invite a second install; point
+  // the operator at the node that's actually running here.
+  const inst = installedType();
+  if(inst && inst !== state.node){
+    const e = el('div','empty', `
+      <div class="ei">✅</div>
+      <h2>This server is configured as a ${esc(cap(inst))} node</h2>
+      <p>Each server runs a single Telcoin node. There is no ${esc(String(what).toLowerCase())} here —
+         select the <strong>${esc(cap(inst))}</strong> tab to manage this node.</p>
+      <button class="btn btn-out" onclick="selectNode('${inst}')">Go to ${esc(cap(inst))} →</button>
+    `);
+    container.innerHTML=''; container.appendChild(e);
+    return;
+  }
   const e = el('div','empty', `
     <div class="ei">📦</div>
     <h2>${esc(what)} not installed</h2>
@@ -2823,15 +2850,12 @@ document.addEventListener('click', e=>{
 (async function init(){
   await loadNodes();
   state.buildInfo = await api('/api/build-info');   // read once at page load
-  // Pick the node to show on first load. An externally-detected validator wins
-  // (a team deployment is a single external validator node); otherwise fall back
-  // to whichever node is installed if the default (observer) isn't.
-  if(state.nodes.validator?.mode === 'external'){
-    state.node = 'validator';
-  } else if(!state.nodes[state.node]?.installed){
-    const other = state.node==='observer'?'validator':'observer';
-    if(state.nodes[other]?.installed) state.node = other;
-  }
+  // Pick the node to show on first load: default the view to whatever node is
+  // actually installed on this server (observer OR validator -- a host runs one).
+  // Covers external docker deployments too (they report installed). Falls back to
+  // the 'observer' default on a fresh server with nothing installed.
+  const firstInstalled = installedType();
+  if(firstInstalled) state.node = firstInstalled;
   document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
   updateReadonlyBanner();
   syncReadonlyChrome();
