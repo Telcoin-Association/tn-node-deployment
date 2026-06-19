@@ -739,7 +739,18 @@ step_generate_keys() {
     export TN_BLS_PASSPHRASE="$bls_passphrase"
 
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        # Run keygen as the host service account that OWNS DATA_DIR (bind-mounted as the
+        # container HOME /home/nonroot) -- NOT the image's default nonroot UID -- so reth
+        # can write the generated keys. Mirrors the runtime ExecStart's --user. A numeric
+        # --user has no passwd entry in the image, so $HOME would fall back to "/" and
+        # reth's default log dir ($HOME/.cache/reth/logs) would be unwritable; pin
+        # HOME=/home/nonroot (the writable bind-mounted datadir) so reth logs land there.
+        local docker_uid docker_gid
+        docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
+        docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
         if docker run --rm \
+            --user "${docker_uid}:${docker_gid}" \
+            -e HOME=/home/nonroot \
             -e TN_BLS_PASSPHRASE="$bls_passphrase" \
             -v "${DATA_DIR}:/home/nonroot" \
             "$DOCKER_IMAGE" \
@@ -896,6 +907,12 @@ step_create_service() {
         # container path /home/nonroot/logs (= host ${DATA_DIR}/logs).
         local launch_flags; launch_flags="$(tn_node_launch_flags docker)"
 
+        # Pin HOME=/home/nonroot in the unit's docker run: a numeric --user has no passwd
+        # entry in the image, so $HOME would default to "/" and reth's default log dir
+        # ($HOME/.cache/reth/logs) would be unwritable -> the node crash-loops on boot unless
+        # obs logging happens to add --log.file.directory. The datadir is bind-mounted at
+        # /home/nonroot and owned by --user, so logs/keys land writable. (Same root cause as
+        # the keygen docker run.)
         cat > "$service_file" <<EOF
 [Unit]
 Description=Telcoin Network Validator Node (${CHAIN_NAME}) [Docker]
@@ -912,6 +929,7 @@ ExecStartPre=-/usr/bin/docker rm -f ${SERVICE_NAME}
 ExecStart=docker run --rm \
 --name ${SERVICE_NAME} \
 --user ${docker_uid}:${docker_gid} \
+-e "HOME=/home/nonroot" \
 --network=host \
 -e "TN_BLS_PASSPHRASE=${bls_pass}" \
 -e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
