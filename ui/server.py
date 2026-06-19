@@ -50,9 +50,17 @@ def _dbg(msg):
 
 app = Flask(__name__)
 
+# Silence Werkzeug's per-request access log. The dashboard polls several endpoints
+# every ~15s while open, so an always-on dashboard writes ~1 access line/sec to the
+# journal (`journalctl -u telcoin-ui`) -- pure HTTP noise that dominated the journal
+# (~97% of its lines). WARNING keeps real warnings/errors; our own _log/_dbg
+# diagnostics and Flask exception tracebacks are unaffected. Behaviour is identical.
+import logging
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.50"
+UI_VERSION = "1.7.51"
 
 NODE_TYPES = ("observer", "validator")
 
