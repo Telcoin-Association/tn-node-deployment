@@ -252,7 +252,7 @@ The scripts follow Linux security best practices:
 
 - **Dedicated service user** — the node runs as a dedicated system user (default: `telcoin`) with no login shell and no sudo access. The user and group name can be customised during setup. If the process is compromised it cannot access your other files or accounts.
 - **Strict file permissions** — key files are mode 600 (readable only by owner). The node-keys directory is mode 700.
-- **Passphrase never logged** — for binary/source installs the BLS passphrase is loaded via systemd `LoadCredential` into a secure temporary directory, never appearing in process listings or `systemctl show` output. For Docker installs it is passed via environment variable to the container.
+- **Passphrase never embedded in the service file** — for **all** install methods the BLS passphrase is loaded via systemd `LoadCredential` into a secure temporary directory and never appears in the service file or `systemctl show`/`cat` output. Binary/source installs read it from `$CREDENTIALS_DIRECTORY` directly; Docker installs do the same in a small wrapper and pass it to the container with `-e TN_BLS_PASSPHRASE` (name only — the value is not on the command line). Note that, inherent to Docker, the value is still present in the container's environment (`docker inspect`); keeping it out of the persisted unit is the protection this provides.
 - **Systemd hardening** — the service uses `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem=strict` to limit what the process can do.
 - **RPC localhost only** — the RPC port defaults to 127.0.0.1 (localhost only). It is never exposed to the internet by default.
 - **CVE-2026-31431 check** — the setup scripts check for the Copy Fail mitigation during preflight and will not proceed until it is applied.
@@ -278,7 +278,7 @@ See https://copy.fail for the official mitigation steps.
 
 ## Security
 
-Binary and source installs use systemd `LoadCredential` by default (requires Ubuntu 22.04+ / systemd 247+). The passphrase is stored in a mode 600 file and loaded securely at runtime -- it never appears in `systemctl show` output or process listings. Docker installs pass the passphrase via the `-e` flag as before. For operators requiring even higher security, the following options are available.
+All install methods use systemd `LoadCredential` by default (requires Ubuntu 22.04+ / systemd 247+). The passphrase is stored in a mode 600 file and loaded securely at runtime -- it never appears in the service file or `systemctl show`/`cat` output. Docker installs load it the same way via a small root-owned wrapper and pass it to the container with `-e TN_BLS_PASSPHRASE` (name only); the value is still visible in the container's own environment (`docker inspect`), inherent to Docker, but no longer in the persisted unit. For operators requiring even higher security, the following options are available.
 
 ### Option 1 — systemd LoadCredential (default for binary/source installs)
 
