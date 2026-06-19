@@ -19,6 +19,11 @@ readonly MAINNET_CHAIN_NAME="telcoin"
 readonly MAINNET_RPC_URL="https://rpc.telcoin.network"
 readonly MAINNET_EXPLORER="https://scan.telcoin.network"
 
+readonly DEVNET_CHAIN_ID="32285"
+readonly DEVNET_CHAIN_NAME="devnet"
+readonly DEVNET_RPC_URL="${DEVNET_RPC_URL:-}"
+readonly DEVNET_EXPLORER="${DEVNET_EXPLORER:-}"
+
 readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
@@ -1578,10 +1583,16 @@ fi
 # already set there). Returns 0 on the Adiri testnet.
 is_testnet() { [[ "${NETWORK:-}" == "testnet" ]]; }
 
+# is_testnet_like — soft check for the hard gate below. Returns 0 on the Adiri
+# testnet OR on devnet. Devnet shares the same opt-in add-on surface as testnet
+# (observability/health), so require_testnet treats it as allowed. The interactive
+# add-on prompts keep using is_testnet (testnet-only) and are unaffected.
+is_testnet_like() { [[ "${NETWORK:-}" == "testnet" || "${NETWORK:-}" == "devnet" ]]; }
+
 # require_testnet — hard gate for STANDALONE scripts (setup-vpn.sh etc.). Exits if
-# the node is not on testnet. Callers must load NETWORK from .node-meta first.
+# the node is not on testnet (or devnet). Callers must load NETWORK from .node-meta first.
 require_testnet() {
-    if ! is_testnet; then
+    if ! is_testnet_like; then
         print_error "Testnet-only feature. This node's NETWORK is '${NETWORK:-unset}'."
         print_info  "The VPN / observability / healthcheck add-ons are offered only on the Adiri testnet."
         exit 1

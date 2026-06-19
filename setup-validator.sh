@@ -802,10 +802,18 @@ step_write_config() {
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$genesis_dir"
 
     local chain_subdir
-    [[ "$NETWORK" == "testnet" ]] && chain_subdir="testnet" || chain_subdir="mainnet"
+    case "$NETWORK" in
+        testnet) chain_subdir="testnet" ;;
+        devnet)  chain_subdir="devnet" ;;
+        *)       chain_subdir="mainnet" ;;
+    esac
 
     local chain_configs_found=false
+    # TN_GENESIS_DIR (optional) points DIRECTLY at the dir holding genesis.yaml/
+    # committee.yaml/parameters.yaml and is checked FIRST. Expands to nothing when
+    # unset, so the existing search order is unchanged.
     local search_paths=(
+        ${TN_GENESIS_DIR:+"$TN_GENESIS_DIR"}
         "${TN_SOURCE_DIR}/chain-configs/${chain_subdir}"
         "/opt/telcoin-source/chain-configs/${chain_subdir}"
         "./chain-configs/${chain_subdir}"
@@ -1167,6 +1175,10 @@ JSON_BUILD_REF=""
 JSON_INSTANCE="1"
 JSON_NETWORK_INPUT="testnet"
 JSON_DONE_EMITTED=false
+# Optional override: dir holding genesis.yaml/committee.yaml/parameters.yaml,
+# checked first by step_write_config. Preserve any env value; default empty so
+# `set -u` never trips and the ${TN_GENESIS_DIR:+...} expansion is a no-op.
+TN_GENESIS_DIR="${TN_GENESIS_DIR:-}"
 
 json_mode() { [[ "$JSON_MODE" == "true" ]]; }
 
@@ -1210,7 +1222,10 @@ json_set_network() {
         testnet|adiri)
             NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
             RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
-        *) json_event error "unsupported network: ${1} (only testnet is available)"; exit 1 ;;
+        devnet)
+            NETWORK="devnet"; CHAIN_ID="$DEVNET_CHAIN_ID"; CHAIN_NAME="$DEVNET_CHAIN_NAME"
+            RPC_URL="${DEVNET_RPC_URL:-}"; EXPLORER_URL="${DEVNET_EXPLORER:-}" ;;
+        *) json_event error "unsupported network: ${1} (expected testnet or devnet)"; exit 1 ;;
     esac
 }
 
@@ -1277,6 +1292,7 @@ main() {
             --data-dir)            DATA_DIR="${2:-$DATA_DIR}"; shift 2 ;;
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
+            --genesis-dir)         TN_GENESIS_DIR="${2:-}"; shift 2 ;;
             *) shift ;;
         esac
     done
