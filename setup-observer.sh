@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.20"
+readonly SCRIPT_VERSION="1.2.21"
 readonly SERVICE_NAME="telcoin-observer"
 readonly NODE_TYPE="observer"
 
@@ -141,7 +141,7 @@ step_preflight() {
         "${P2P_PORT}/udp:P2P primary" \
         "${WORKER_PORT}/udp:P2P worker" \
         "${RPC_PORT}/tcp:RPC" \
-        "${METRICS_PORT}/tcp:Metrics" \
+        "${METRICS_PORT}/tcp:Metrics (loopback, only if metrics enabled)" \
         "80/tcp:Caddy HTTP (optional dashboard)" \
         "443/tcp:Caddy HTTPS (optional dashboard)" \
         "51820/udp:WireGuard VPN (optional)" \
