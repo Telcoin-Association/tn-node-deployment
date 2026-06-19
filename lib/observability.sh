@@ -33,6 +33,11 @@ OBS_HTTP_ADDR="127.0.0.1:12345"           # Alloy's own metrics/UI (localhost on
 # Defaults mirror lib/testnet-addons.env for set -u safety if sourced standalone.
 : "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
 : "${OBS_METRICS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/api/v1/write}"
+# Devnet push endpoints fail closed: no public devnet hub is hardcoded. Empty
+# unless the operator sets them (env or setup-observability.sh --push-url /
+# --metrics-push-url). obs_enable refuses to write a broken config if still empty.
+: "${OBS_PUSH_URL_DEVNET:=}"
+: "${OBS_METRICS_PUSH_URL_DEVNET:=}"
 : "${DEFAULT_METRICS_PORT:=9101}"
 : "${TN_ALLOY_IMAGE:=grafana/alloy:v1.5.1}"
 : "${TN_ALLOY_NATIVE_VERSION:=1.5.1}"
@@ -41,6 +46,31 @@ OBS_HTTP_ADDR="127.0.0.1:12345"           # Alloy's own metrics/UI (localhost on
 : "${DEFAULT_INSTALL_DIR:=/opt/telcoin}"
 : "${SERVICE_USER:=telcoin}"
 : "${SERVICE_GROUP:=telcoin}"
+
+# -----------------------------------------------------------------------------
+# Effective push-URL selection (testnet vs devnet, with explicit override)
+# -----------------------------------------------------------------------------
+#
+# Precedence (same for logs + metrics):
+#   1. an explicit OBS_PUSH_URL / OBS_METRICS_PUSH_URL (set by env, or by
+#      setup-observability.sh --push-url / --metrics-push-url) — always wins
+#   2. else NETWORK=devnet  -> OBS_*_PUSH_URL_DEVNET  (empty unless configured)
+#   3. else (testnet)       -> OBS_*_PUSH_URL_TESTNET (the adiri hub)
+#
+# For testnet with no override this resolves to exactly $OBS_PUSH_URL_TESTNET /
+# $OBS_METRICS_PUSH_URL_TESTNET — i.e. the testnet render is byte-for-byte
+# unchanged. Devnet with nothing configured yields EMPTY; obs_enable guards on
+# that and refuses to write a config that ships nowhere.
+obs_effective_push_url() {
+    if [[ -n "${OBS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_PUSH_URL}"
+    elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_PUSH_URL_DEVNET:-}"
+    else printf '%s' "${OBS_PUSH_URL_TESTNET}"; fi
+}
+obs_effective_metrics_url() {
+    if [[ -n "${OBS_METRICS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL}"
+    elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL_DEVNET:-}"
+    else printf '%s' "${OBS_METRICS_PUSH_URL_TESTNET}"; fi
+}
 
 # -----------------------------------------------------------------------------
 # reth launch flags + identity labels
@@ -282,6 +312,11 @@ _obs_write_env_file() {
     local dest="$1" token="$2"
     obs_label_sourcing
     install -d -m 0750 "$(dirname "$dest")"
+    # Effective push URLs: explicit OBS_PUSH_URL/OBS_METRICS_PUSH_URL override wins,
+    # else _DEVNET when NETWORK=devnet, else _TESTNET (unchanged for testnet).
+    local push_url metrics_url
+    push_url="$(obs_effective_push_url)"
+    metrics_url="$(obs_effective_metrics_url)"
     ( umask 077
       {
         cat <<EOF
@@ -290,13 +325,13 @@ TN_REGION=${TN_REGION}
 TN_VALIDATOR_ADDRESS=${TN_VALIDATOR_ADDRESS}
 TN_CHAIN=${TN_CHAIN}
 TN_IMAGE_VERSION=${TN_IMAGE_VERSION}
-OBS_PUSH_URL=${OBS_PUSH_URL_TESTNET}
+OBS_PUSH_URL=${push_url}
 OBS_INGEST_TOKEN=${token}
 EOF
         if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
             cat <<EOF
 TN_METRICS_ADDR=$(obs_metrics_addr)
-OBS_METRICS_PUSH_URL=${OBS_METRICS_PUSH_URL_TESTNET}
+OBS_METRICS_PUSH_URL=${metrics_url}
 EOF
         fi
       } > "$dest"
@@ -553,6 +588,21 @@ obs_enable() {
         return 1
     fi
 
+    # Fail closed: refuse to write an Alloy config that ships nowhere. On devnet the
+    # push URLs default to empty (no public hub baked in) — the operator must set
+    # OBS_PUSH_URL/OBS_METRICS_PUSH_URL (env or --push-url/--metrics-push-url) first.
+    # On testnet the effective URLs resolve to the adiri hub, so this never trips.
+    if [[ "$logs_on" == "true" && -z "$(obs_effective_push_url)" ]]; then
+        print_error "obs_enable: no logs push URL configured for network '${NETWORK:-unset}'."
+        print_info  "Set OBS_PUSH_URL (or pass --push-url to setup-observability.sh) before enabling logs."
+        return 1
+    fi
+    if [[ "$metrics_on" == "true" && -z "$(obs_effective_metrics_url)" ]]; then
+        print_error "obs_enable: no metrics push URL configured for network '${NETWORK:-unset}'."
+        print_info  "Set OBS_METRICS_PUSH_URL (or pass --metrics-push-url to setup-observability.sh) before enabling metrics."
+        return 1
+    fi
+
     local meta method datadir
     meta="$(node_meta_path || true)"
     method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
@@ -598,8 +648,8 @@ obs_enable() {
     fi
 
     local what=""
-    [[ "$logs_on" == "true" ]] && what="logs → ${OBS_PUSH_URL_TESTNET}"
-    [[ "$metrics_on" == "true" ]] && what="${what:+$what, }metrics → ${OBS_METRICS_PUSH_URL_TESTNET}"
+    [[ "$logs_on" == "true" ]] && what="logs → $(obs_effective_push_url)"
+    [[ "$metrics_on" == "true" ]] && what="${what:+$what, }metrics → $(obs_effective_metrics_url)"
     print_ok "Observability enabled (${what})."
     [[ "$logs_on" == "true" ]] && print_info "Verify logs:    curl -s ${OBS_HTTP_ADDR}/metrics | grep loki_write_sent_bytes_total"
     [[ "$metrics_on" == "true" ]] && print_info "Verify metrics: curl -s ${OBS_HTTP_ADDR}/metrics | grep prometheus_remote_storage_samples_total"
@@ -645,7 +695,7 @@ obs_disable_logs() {
         obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
         systemctl restart "$OBS_ALLOY_UNIT" >/dev/null 2>&1 || true
         [[ -n "$meta" ]] && meta_set ENABLE_OBSERVABILITY false "$meta"
-        print_ok "Log shipping stopped; metrics still shipping → ${OBS_METRICS_PUSH_URL_TESTNET}."
+        print_ok "Log shipping stopped; metrics still shipping → $(obs_effective_metrics_url)."
         print_info "The node keeps writing JSON logs locally (harmless)."
     else
         obs_disable
@@ -666,7 +716,7 @@ obs_disable_metrics() {
         obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
         systemctl restart "$OBS_ALLOY_UNIT" >/dev/null 2>&1 || true
         [[ -n "$meta" ]] && meta_set ENABLE_METRICS false "$meta"
-        print_ok "Metrics shipping stopped; logs still shipping → ${OBS_PUSH_URL_TESTNET}."
+        print_ok "Metrics shipping stopped; logs still shipping → $(obs_effective_push_url)."
         print_info "The node keeps serving its loopback --metrics endpoint (harmless; nothing scrapes it now)."
     else
         obs_disable
