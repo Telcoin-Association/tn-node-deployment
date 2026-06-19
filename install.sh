@@ -29,6 +29,17 @@ print_error() { echo -e "  ${RED}[ERROR]${RESET} $*"; }
 print_info()  { echo -e "  ${BLUE}->${RESET}  $*"; }
 print_step()  { echo -e "  ${BOLD}>>>${RESET} $*"; }
 
+# Non-interactive overwrite: --yes/-y/--force (or a truthy TN_ASSUME_YES env) skip
+# the "Re-install and overwrite?" prompt and proceed as if the operator answered
+# yes. With no flag/env the prompt is shown exactly as before.
+ASSUME_YES=false
+case "${TN_ASSUME_YES:-}" in 1|true|yes|y|TRUE|YES|Y) ASSUME_YES=true ;; esac
+for arg in "$@"; do
+    case "$arg" in
+        --yes|-y|--force) ASSUME_YES=true ;;
+    esac
+done
+
 echo ""
 echo -e "${BLUE}${BOLD}"
 echo "================================================================"
@@ -67,12 +78,16 @@ if [[ -d "$INSTALL_DIR" ]]; then
     print_info "To update existing scripts run:"
     print_info "  bash ${INSTALL_DIR}/update-scripts.sh"
     echo ""
-    read -r -p "  Re-install and overwrite? [y/N]: " choice
-    choice="${choice:-N}"
-    if [[ ! "$choice" =~ ^[Yy]$ ]]; then
-        print_info "Installation cancelled."
-        echo ""
-        exit 0
+    if [[ "$ASSUME_YES" == "true" ]]; then
+        print_info "Overwrite confirmed non-interactively (--yes / TN_ASSUME_YES)."
+    else
+        read -r -p "  Re-install and overwrite? [y/N]: " choice
+        choice="${choice:-N}"
+        if [[ ! "$choice" =~ ^[Yy]$ ]]; then
+            print_info "Installation cancelled."
+            echo ""
+            exit 0
+        fi
     fi
     print_step "Removing existing installation..."
     rm -rf "$INSTALL_DIR"
