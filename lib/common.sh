@@ -23,7 +23,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9000"
-readonly COMMON_VERSION="1.3.2"
+readonly COMMON_VERSION="1.3.3"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -428,14 +428,30 @@ check_hardware() {
     fi
 }
 
+# Check whether ports are free, protocol-aware. Each arg is "port[/proto][:label]"
+# (proto defaults to tcp). UDP ports (e.g. the QUIC P2P ports) are checked against
+# the UDP socket table -- the old version used `ss -tln` for everything, so UDP
+# ports were never actually checked. Informational only (warns, never fails).
 check_ports() {
     print_step "Checking required ports are available..."
-    local ports=("$@")
-    for port in "${ports[@]}"; do
-        if ss -tlnp | grep -q ":${port} "; then
-            print_warn "Port ${port} is already in use."
+    local spec pp port proto label flag
+    for spec in "$@"; do
+        label="${spec#*:}"; [[ "$label" == "$spec" ]] && label=""   # text after ':' (if any)
+        pp="${spec%%:*}"                                             # port[/proto]
+        port="${pp%%/*}"
+        proto="${pp#*/}"; [[ "$proto" == "$pp" ]] && proto="tcp"    # no '/' -> tcp
+        case "$proto" in
+            udp) flag="-uln" ;;
+            *)   flag="-tln"; proto="tcp" ;;
+        esac
+        local desc="${port}/${proto}"
+        [[ -n "$label" ]] && desc="${desc} (${label})"
+        # ':<port>' anchored so e.g. :9000 doesn't match :49000; trailing space is
+        # the column boundary after the local address in ss output.
+        if ss "$flag" 2>/dev/null | grep -qE ":${port}[[:space:]]"; then
+            print_warn "Port ${desc} is already in use."
         else
-            print_ok "Port ${port} is available"
+            print_ok "Port ${desc} is available"
         fi
     done
 }

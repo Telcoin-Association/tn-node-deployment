@@ -9,7 +9,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.18"
+readonly SCRIPT_VERSION="1.2.19"
 readonly SERVICE_NAME="telcoin-validator"
 readonly NODE_TYPE="validator"
 
@@ -136,7 +136,17 @@ step_preflight() {
 
     check_hardware "validator" "$DATA_DIR"
     check_internet
-    check_ports "$P2P_PORT" "$WORKER_PORT" "$RPC_PORT" "$METRICS_PORT"
+    # Core node ports + the ports the optional features use (Caddy dashboard 80/443,
+    # WireGuard VPN 51820, health monitor 43174) so conflicts surface up front.
+    check_ports \
+        "${P2P_PORT}/udp:P2P primary" \
+        "${WORKER_PORT}/udp:P2P worker" \
+        "${RPC_PORT}/tcp:RPC" \
+        "${METRICS_PORT}/tcp:Metrics" \
+        "80/tcp:Caddy HTTP (optional dashboard)" \
+        "443/tcp:Caddy HTTPS (optional dashboard)" \
+        "51820/udp:WireGuard VPN (optional)" \
+        "43174/tcp:Health monitor (optional)"
 
     for tool in curl git; do
         if command_exists "$tool"; then
