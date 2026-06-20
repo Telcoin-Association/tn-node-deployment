@@ -1571,6 +1571,11 @@ fi
 : "${TN_OVERLAY_EXTERNAL_BAND_HINT:=10.100.20.0/24}"
 : "${TN_KUMA_SRC:=104.155.184.201/32}"
 : "${TN_KUMA_PORT:=43174}"
+# Optional, comma-separated extra CIDRs allowed to TCP-probe the health port (TN_KUMA_PORT)
+# at host-UFW enable time — e.g. the Google Cloud load-balancer health-check ranges when a
+# node sits behind a GCP LB. Empty by default, so generic operators see NO change; the devnet
+# deployment sets it (devnet-firewall.sh) to let LB backends pass. See apply_lb_hc_rule.
+: "${TN_LB_HC_RANGES:=}"
 : "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
 : "${TN_ALLOY_IMAGE:=grafana/alloy:v1.5.1}"
 : "${TN_ALLOY_NATIVE_VERSION:=1.5.1}"
@@ -1785,6 +1790,23 @@ apply_kuma_rule() {
     return "$rc"
 }
 
+# apply_lb_hc_rule — admit the load-balancer health-check source ranges (TN_LB_HC_RANGES,
+# comma-separated CIDRs) to the health port. No-op when TN_LB_HC_RANGES is empty (the
+# default), so non-LB nodes are unaffected. Idempotent (ufw dedups). Distinct from the
+# Kuma/operator sources so the LB ranges are obvious and not confused with monitor hosts.
+# Called from apply_recommended_firewall (every enable re-stages it after a ufw reset).
+apply_lb_hc_rule() {
+    [[ -n "${TN_LB_HC_RANGES:-}" ]] || return 0
+    local src
+    # Split on commas; ufw rejects a comma-joined list, so add one rule per CIDR.
+    IFS=',' read -ra _lb_hc_srcs <<< "${TN_LB_HC_RANGES}"
+    for src in "${_lb_hc_srcs[@]}"; do
+        src="${src//[[:space:]]/}"   # tolerate "a, b" spacing
+        [[ -n "$src" ]] || continue
+        ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+    done
+}
+
 # allow_overlay_ssh — admit SSH from the whole WireGuard overlay so the core team can
 # reach the node over the VPN even after public SSH is restricted. Idempotent.
 allow_overlay_ssh() {
@@ -1808,7 +1830,11 @@ allow_overlay_ssh() {
 # zero-overhead noop recorder — byte-identical to a node installed without these scripts.
 tn_node_launch_flags() {
     local method="$1" flags=""
-    is_testnet || { printf '%s' ""; return 0; }
+    # is_testnet_like (testnet OR devnet) — devnet shares the same opt-in add-on surface
+    # (see is_testnet_like at the top of this file). Each feature below stays individually
+    # gated by its own ENABLE_* (default off), so this only lets devnet REACH those gates;
+    # it emits nothing extra unless an opt-in is explicitly turned on.
+    is_testnet_like || { printf '%s' ""; return 0; }
     if [[ "${ENABLE_HEALTHCHECK_MONITOR:-false}" == "true" ]]; then
         flags+=" --healthcheck ${TN_KUMA_PORT}"
     fi

@@ -1390,6 +1390,10 @@ main() {
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             --genesis-dir)         TN_GENESIS_DIR="${2:-}"; shift 2 ;;
+            # Opt in to the healthcheck TCP listener (bakes --healthcheck into the launch
+            # command via tn_node_launch_flags). Overrides the line-43 default; needed in
+            # --json/finalize where prompt_testnet_addons is skipped.
+            --enable-healthcheck-monitor) ENABLE_HEALTHCHECK_MONITOR=true; shift ;;
             *) shift ;;
         esac
     done

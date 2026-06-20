@@ -250,6 +250,7 @@ apply_recommended_firewall() {
     ufw default allow outgoing &>/dev/null
     ufw allow "${ssh_port}/tcp" &>/dev/null
     apply_kuma_rule &>/dev/null
+    apply_lb_hc_rule &>/dev/null   # LB health-check ranges (no-op unless TN_LB_HC_RANGES set)
     if vpn_active; then allow_overlay_ssh &>/dev/null; fi
     if echo "$nodes" | grep -q "validator"; then
         ufw allow 49590/udp &>/dev/null
