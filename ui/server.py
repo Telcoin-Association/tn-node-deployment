@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.55"
+UI_VERSION = "1.7.56"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1570,6 +1570,10 @@ def network_traffic():
     tx_rate = max(0, s1[1] - s0[1])
     out["rx_rate"] = (fmt_bytes(rx_rate) or "0 B") + "/s"
     out["tx_rate"] = (fmt_bytes(tx_rate) or "0 B") + "/s"
+    # Raw bytes/s too, so the UI can plot a correctly-scaled sparkline instead of
+    # re-parsing the human strings (which mix KB/MB units onto one axis).
+    out["rx_rate_bytes"] = rx_rate
+    out["tx_rate_bytes"] = tx_rate
     out["rx_total"] = fmt_bytes(s1[0]) or "—"
     out["tx_total"] = fmt_bytes(s1[1]) or "—"
     return out
