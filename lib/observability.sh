@@ -18,7 +18,7 @@
 # Version (tracked by update-scripts.sh). Bump when observability/config.alloy or the
 # lib/wgvpn bundle changes too, so the updater pulls the testnet-addons bundle alongside.
 # Plain (not readonly) so re-sourcing common.sh can't trip on a readonly redefinition.
-OBSERVABILITY_VERSION="1.0.0"
+OBSERVABILITY_VERSION="1.0.1"
 
 # Resolve the checked-in canonical config relative to this lib dir.
 __OBS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -358,11 +358,21 @@ _obs_install_alloy_apt() {
     fi
     echo "deb [signed-by=${key}] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
     apt-get update -y >/dev/null 2>&1 || return 1
-    # Install the pinned version only. If the pin is unavailable, fail here so the
-    # dispatcher falls back to the pinned release tarball — never silently install
-    # whatever unpinned version the repo happens to offer.
-    if ! apt-get install -y "alloy=${TN_ALLOY_NATIVE_VERSION}" >/dev/null 2>&1; then
-        print_warn "Pinned alloy=${TN_ALLOY_NATIVE_VERSION} unavailable via apt; will try the pinned release tarball."
+    # Install the pinned version only. Grafana packages Alloy with a Debian
+    # revision (e.g. 1.5.1-1), so an exact "=1.5.1" pin never matches -- resolve
+    # the full candidate whose upstream version equals our pin and install that
+    # exact string. If none matches, fail here so the dispatcher falls back to
+    # the pinned release tarball -- never silently install whatever unpinned
+    # version the repo happens to offer.
+    local full
+    full="$(apt-cache madison alloy 2>/dev/null \
+        | awk -v v="${TN_ALLOY_NATIVE_VERSION}" '$3 ~ ("^" v "(-|$)") {print $3; exit}')"
+    if [[ -z "$full" ]]; then
+        print_warn "Pinned alloy ${TN_ALLOY_NATIVE_VERSION} unavailable via apt; will try the pinned release tarball."
+        return 1
+    fi
+    if ! apt-get install -y "alloy=${full}" >/dev/null 2>&1; then
+        print_warn "Pinned alloy=${full} install failed via apt; will try the pinned release tarball."
         return 1
     fi
     return 0
@@ -380,9 +390,15 @@ _obs_install_alloy_tarball() {
     tmp="$(mktemp -d)"
     print_info "Downloading ${url}"
     if curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "${tmp}/alloy.zip" 2>/dev/null; then
-        # Verify the download against the official checksum sidecar before installing.
-        local want got
-        want="$(curl --proto '=https' --tlsv1.2 -fsSL --max-time 15 "${url}.sha256" 2>/dev/null | awk '{print $1}')"
+        # Verify the download against the release SHA256SUMS before installing.
+        # Grafana ships a single SHA256SUMS per release (not a per-asset .sha256
+        # sidecar), so pull our asset's line out of it. Handles both the plain
+        # ("hash  asset") and binary ("hash *asset") sums formats.
+        local want got asset sums_url
+        asset="alloy-linux-${arch}.zip"
+        sums_url="https://github.com/grafana/alloy/releases/download/v${TN_ALLOY_NATIVE_VERSION}/SHA256SUMS"
+        want="$(curl --proto '=https' --tlsv1.2 -fsSL --max-time 15 "$sums_url" 2>/dev/null \
+            | awk -v a="$asset" '{f=$2; sub(/^\*/,"",f); if (f==a){print $1; exit}}')"
         if [[ -n "$want" ]]; then
             got="$(sha256sum "${tmp}/alloy.zip" 2>/dev/null | awk '{print $1}')"
             if [[ "$want" != "$got" ]]; then
@@ -392,7 +408,7 @@ _obs_install_alloy_tarball() {
             fi
             print_ok "Alloy tarball checksum verified."
         else
-            print_warn "Could not fetch Alloy checksum sidecar; installing unverified (TLS only)."
+            print_warn "Could not fetch Alloy checksum (SHA256SUMS); installing unverified (TLS only)."
         fi
     fi
     if [[ -f "${tmp}/alloy.zip" ]] && ( cd "$tmp" && unzip -o -q alloy.zip ) 2>/dev/null; then
