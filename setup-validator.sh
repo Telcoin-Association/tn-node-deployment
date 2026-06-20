@@ -877,7 +877,16 @@ step_create_service() {
         instance="${input:-1}"
     fi
     RPC_PORT=$(( 8545 - (instance - 1) ))
-    print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}"
+    # WS port: reth offsets it from --instance as ws_port += instance*2 - 2 (base 8546; see
+    # reth RpcServerArgs::adjust_instance_ports) -- the opposite direction from HTTP and at 2x
+    # step. instance 1 -> 8546, instance 5 -> 8554. The launch heredocs below enable --ws and
+    # pin both --http.addr/--ws.addr to 127.0.0.1 so RPC + WS are reachable ONLY via the Caddy
+    # TLS edge (reth already defaults to loopback; pinning makes the intent explicit + immune
+    # to a future default change). WS_PORT is persisted to .node-meta so config-caddy.sh proxies
+    # wss:// to the right port -- verify the real bind with `ss -tlnp` at rollout (do not trust
+    # the formula blindly: a fork could change the derivation).
+    WS_PORT=$(( 8546 + (instance * 2 - 2) ))
+    print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}, WS port: ${WS_PORT}"
 
     local primary_multiaddr="$PRIMARY_LISTENER_MULTIADDR"
     local worker_multiaddr="$WORKER_LISTENER_MULTIADDR"
@@ -955,7 +964,7 @@ telcoin node \
 --instance ${instance} \
 --log.stdout.format log-fmt \
 -vvv \
---http ${launch_flags}
+--http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
 EOF
         else
             cat > "$wrapper" <<EOF
@@ -979,7 +988,7 @@ telcoin node \
 --instance ${instance} \
 --log.stdout.format log-fmt \
 -vvv \
---http ${launch_flags}
+--http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
 EOF
         fi
         # Root-owned + non-writable by SERVICE_USER: the unit runs ExecStart as root, so a
@@ -1062,7 +1071,7 @@ exec ${BINARY_PATH} node \
   --instance ${instance} \
   --log.stdout.format log-fmt \
   -vvv \
-  --http ${launch_flags}
+  --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
 EOF
         else
             cat > "$wrapper" <<EOF
@@ -1077,7 +1086,7 @@ exec ${BINARY_PATH} node \
   --instance ${instance} \
   --log.stdout.format log-fmt \
   -vvv \
-  --http ${launch_flags}
+  --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
 EOF
         fi
 
@@ -1137,6 +1146,8 @@ PASSPHRASE_METHOD=${PASSPHRASE_METHOD}
 DOCKER_IMAGE=${DOCKER_IMAGE:-}
 NETWORK=${NETWORK}
 DATA_DIR=${DATA_DIR}
+RPC_PORT=${RPC_PORT}
+WS_PORT=${WS_PORT}
 PUBLIC_IP=${PUBLIC_IP:-}
 EXTERNAL_PRIMARY_ADDR=${PRIMARY_MULTIADDR:-}
 EXTERNAL_WORKER_ADDR=${WORKER_MULTIADDR:-}
