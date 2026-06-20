@@ -234,6 +234,30 @@ view_status() {
 # ENABLE FIREWALL WITH RECOMMENDED DEFAULTS
 # =============================================================================
 
+# apply_recommended_firewall — stage the lockout-safe ruleset and enable ufw, with NO prompt.
+# Shared by the interactive enable_firewall and the non-interactive `--json --enable`. Order is
+# load-bearing: SSH (operator + the IAP range via the blanket :22 allow) + the WireGuard overlay
+# (the Association recovery path, 10.100.0.0/16) + the source-restricted kuma monitor are ALL
+# allowed BEFORE `ufw --force enable`, so enabling can never lock out the IAP door or the overlay.
+# Opens validator P2P (49590/49594) when a validator is installed; 80/443 are NOT opened here
+# (config-caddy.sh adds them). Mirrors the interactive defaults exactly -- no extra behavior.
+apply_recommended_firewall() {
+    local ssh_port nodes
+    ssh_port=$(get_ssh_port)
+    nodes=$(detect_installed_nodes)
+    ufw --force reset &>/dev/null
+    ufw default deny incoming &>/dev/null
+    ufw default allow outgoing &>/dev/null
+    ufw allow "${ssh_port}/tcp" &>/dev/null
+    apply_kuma_rule &>/dev/null
+    if vpn_active; then allow_overlay_ssh &>/dev/null; fi
+    if echo "$nodes" | grep -q "validator"; then
+        ufw allow 49590/udp &>/dev/null
+        ufw allow 49594/udp &>/dev/null
+    fi
+    ufw --force enable &>/dev/null
+}
+
 enable_firewall() {
     print_header "Enable Firewall with Recommended Defaults"
 
@@ -282,21 +306,9 @@ enable_firewall() {
         return
     fi
 
-    ufw --force reset &>/dev/null
-    ufw default deny incoming &>/dev/null
-    ufw default allow outgoing &>/dev/null
-    ufw allow "${ssh_port}/tcp" &>/dev/null
-    # Source-restrict the health port to the Association uptime monitor (the only
-    # legitimate prober) rather than opening it to the whole internet.
-    apply_kuma_rule &>/dev/null
-    # Keep the VPN overlay reachable if admin SSH is active, so a firewall reset does not
-    # sever the Association's recovery path (the operator's own SSH stays open above).
-    if vpn_active; then allow_overlay_ssh &>/dev/null; fi
-    if echo "$nodes" | grep -q "validator"; then
-        ufw allow 49590/udp &>/dev/null
-        ufw allow 49594/udp &>/dev/null
-    fi
-    ufw --force enable &>/dev/null
+    # Stage the lockout-safe ruleset + enable (shared with --json --enable). SSH + overlay +
+    # kuma are allowed before enable, so this can't sever the IAP door or the overlay.
+    apply_recommended_firewall
 
     print_ok "Firewall enabled with recommended defaults"
     print_ok "SSH port ${ssh_port}/tcp allowed"
@@ -889,11 +901,14 @@ main_menu() {
 # Reached only via `--json` (the interactive default is completely unaffected).
 # Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper.
 #
-# Scope is deliberately narrow: read-only STATUS, and open/close for ONLY the
-# three node ports below -- never SSH, password auth, root login, or the default
-# policy (those stay CLI-only so the UI can never lock an operator out).
+# Scope is deliberately narrow: read-only STATUS, open/close for ONLY the three
+# node ports below, and a lockout-safe ENABLE that applies the FIXED recommended
+# defaults (it cannot set arbitrary rules, change SSH/password/root policy, or
+# disable the firewall -- SSH + overlay + kuma are pre-allowed before enable, so it
+# still can never lock an operator out).
 #
 #   firewall-setup.sh --json --status
+#   firewall-setup.sh --json --enable                         (recommended lockout-safe defaults)
 #   firewall-setup.sh --json --port <port>/<proto> <on|off>   (node ports only)
 # =============================================================================
 
@@ -982,6 +997,20 @@ json_fw_port() {
     json_emit "{\"event\":\"done\",\"ok\":true,\"port\":\"$(json_escape "$spec")\",\"state\":\"$(json_escape "$pstate")\",\"msg\":\"firewall updated\"}"
 }
 
+# Enable ufw non-interactively with the recommended lockout-safe defaults (automation /
+# scripted node bring-up). Applies the SAME fixed ruleset as the interactive enable -- it
+# cannot set arbitrary rules or disable SSH, and SSH + overlay + kuma are pre-allowed before
+# enable, so it preserves the "can never lock an operator out" guarantee. 80/443 are added
+# later by config-caddy.sh.
+json_fw_enable() {
+    if ! ufw_installed; then apt-get install -y ufw &>/dev/null; fi
+    apply_recommended_firewall
+    local ssh_port active=false
+    ssh_port=$(get_ssh_port)
+    ufw_active && active=true
+    json_emit "{\"event\":\"done\",\"ok\":${active},\"action\":\"enable\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"ufw enabled with recommended lockout-safe defaults (SSH + overlay + kuma pre-allowed)\"}"
+}
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -992,6 +1021,7 @@ main() {
         case "$1" in
             --json)   json_mode=true; shift ;;
             --status) action="status"; shift ;;
+            --enable) action="enable"; shift ;;
             --port)   action="port"; fw_port="${2:-}"; fw_state="${3:-}"
                       shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
             *) shift ;;
@@ -1003,6 +1033,7 @@ main() {
         check_root
         case "$action" in
             status) json_fw_status ;;
+            enable) json_fw_enable ;;
             port)   json_fw_port "$fw_port" "$fw_state" ;;
             *)      json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"unknown or missing --json action\"}"; exit 1 ;;
         esac
