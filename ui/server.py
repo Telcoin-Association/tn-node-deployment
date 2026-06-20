@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.53"
+UI_VERSION = "1.7.54"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -92,10 +92,6 @@ def service_file(t):
 def log_file(t):
     """Default node log path. parse_service_file() may override via StandardOutput."""
     return f"{DEFAULT_LOG_DIR}/telcoin-{t}.log"
-
-
-def meta_file(t):
-    return f"{DEFAULT_CONFIG_DIR}/{t}/.node-meta"
 
 
 def config_dir(t):
@@ -172,20 +168,39 @@ def bad_type():
     return jsonify({"error": "invalid node_type"}), 400
 
 
+# .node-meta is root-owned mode 0600; the unprivileged UI user cannot open it
+# directly (that silently yielded {} -> data_dir() etc. fell back to defaults,
+# so a custom data dir read the wrong disk). Read it through the root helper
+# instead -- the same privileged path addons-status already uses. Cached briefly
+# since the file only changes on install/remove/settings and read_meta() is
+# called several times per request; clear_meta_cache() drops it after a mutation.
+_meta_cache = {}          # t -> (expires_monotonic, dict)
+_META_TTL = 15.0
+
+
+def clear_meta_cache():
+    _meta_cache.clear()
+
+
 def read_meta(t):
-    """Parse /etc/telcoin/<type>/.node-meta (KEY=VALUE lines). {} if missing."""
+    """Parse /etc/telcoin/<type>/.node-meta (KEY=VALUE lines) via the root helper.
+    {} if missing/unreadable."""
+    if t not in NODE_TYPES:
+        return {}
+    now = time.monotonic()
+    cached = _meta_cache.get(t)
+    if cached and cached[0] > now:
+        return cached[1]
     out = {}
-    path = meta_file(t)
-    try:
-        with open(path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                out[k.strip()] = v.strip()
-    except (OSError, IOError):
-        pass
+    rc, text, _ = run(["sudo", "-n", HELPER, "meta-cat", t], timeout=10)
+    if rc == 0 and text:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip()
+    _meta_cache[t] = (now + _META_TTL, out)
     return out
 
 
@@ -1720,6 +1735,7 @@ def api_nodes():
     # instead of the operator having to wait out the cache / manually refresh.
     if request.args.get("fresh"):
         _detect_cache["data"] = None
+        clear_meta_cache()
     det = detect_nodes()
     out = {}
     for t in NODE_TYPES:

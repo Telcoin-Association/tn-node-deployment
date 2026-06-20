@@ -473,6 +473,17 @@ _addons_meta() {
     grep -E "^${key}=" "$meta" 2>/dev/null | head -1 | cut -d= -f2- || true
 }
 
+# Print the raw contents of the node's root-owned (mode 600) .node-meta so the
+# unprivileged UI can read it -- it cannot open the file directly. READ-ONLY:
+# this only cats an existing metadata file (KEY=VALUE operational data: data dir,
+# network, region, addresses -- no secrets; the BLS passphrase is never stored
+# here). Empty output (rc 0) when the file is absent.
+cmd_meta_cat() {
+    local t="$1"; require_type "$t"
+    local meta="/etc/telcoin/${t}/.node-meta"
+    [[ -f "$meta" ]] && cat "$meta" || true
+}
+
 cmd_addons_status() {
     local t="$1"; require_type "$t"
     local meta="/etc/telcoin/${t}/.node-meta"
@@ -708,6 +719,7 @@ main() {
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
         addons-status)   shift; cmd_addons_status "${1:-}" ;;
+        meta-cat)        shift; cmd_meta_cat "${1:-}" ;;
         setup-keygen)    shift; cmd_setup_keygen   "${1:-}" ;;
         setup-finalize)  shift; cmd_setup_finalize "${1:-}" ;;
         docker-detect)    cmd_docker_detect ;;

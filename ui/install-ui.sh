@@ -249,6 +249,11 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 
 # node-type arg, no wildcard.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper addons-status observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper addons-status validator
+# Node metadata -- READ-ONLY cat of the root-owned (mode 600) .node-meta so the
+# unprivileged UI can resolve the data dir, network, etc. (no secrets in it).
+# Fixed node-type arg, no wildcard.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper meta-cat observer
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper meta-cat validator
 # (Node removal is intentionally NOT exposed in the UI -- it is irreversible and
 # runs on the server via remove-node.sh -- so the telcoin-ui user gets no
 # node-remove grant.)
