@@ -1831,7 +1831,13 @@ tn_node_launch_target() {
     else return 1; fi
     meta="$(node_meta_path || true)"
     method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
-    if [[ "$method" == "docker" ]]; then file="/etc/systemd/system/${svc}.service"
+    # Docker installs now run via a start wrapper too (the BLS LoadCredential change moved
+    # the `docker run` out of the unit's ExecStart into ${INSTALL_DIR}/start-<svc>.sh). The
+    # --http line obs flags attach to therefore lives in the wrapper -- patch it when present.
+    # Fall back to the unit for legacy docker installs that still inline `docker run`.
+    if [[ "$method" == "docker" ]]; then
+        if [[ -f "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" ]]; then file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
+        else file="/etc/systemd/system/${svc}.service"; fi
     else file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"; fi
     printf '%s %s %s\n' "$svc" "$method" "$file"
 }
