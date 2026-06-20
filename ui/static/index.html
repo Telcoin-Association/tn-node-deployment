@@ -733,7 +733,10 @@ function quickActionsHtml(){
 
 // Extra Node Details rows for an external (docker) node: container + image.
 function externalDetailRows(s){
-  if(!isReadonly()) return '';
+  // Container + Image are docker concepts -- only meaningful for an externally
+  // deployed (docker) node. Don't show them on scripts-installed nodes, even
+  // when viewed read-only over the public dashboard (where isReadonly() is true).
+  if(s.mode !== 'external') return '';
   return `<div class="kv"><span class="k">Container</span><span class="v">${esc(s.container||'—')}</span></div>`
     + `<div class="kv"><span class="k">Image</span><span class="v" style="overflow-wrap:anywhere;word-break:break-word">${esc(s.image||'—')}</span></div>`;
 }
