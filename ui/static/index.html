@@ -697,25 +697,33 @@ function sparkDeltas(metric){
 // full-width 36px SVG. series = [{data:number[], color:'var(--accent)'}].
 // Returns '' until the longest drawn series has >=3 points.
 let _sparkSeq = 0;
-function sparkSVG(series){
+function sparkSVG(series, opts){
+  opts = opts || {};
   series = (series||[]).filter(s=>s && s.data && s.data.length>=2);
   const longest = Math.max(0, ...series.map(s=>s.data.length));
   if(longest < 3) return '';
   const w=300, h=36, pad=2;
   let lo=Infinity, hi=-Infinity;
   for(const s of series) for(const v of s.data){ if(v<lo) lo=v; if(v>hi) hi=v; }
+  // Optional reference value (e.g. 0 for consensus lag) is included in the scale
+  // so the baseline always sits within the drawn area.
+  if(opts.baseline!=null){ if(opts.baseline<lo) lo=opts.baseline; if(opts.baseline>hi) hi=opts.baseline; }
   if(!isFinite(lo)||!isFinite(hi)) return '';
   const range = (hi-lo) || 1;
   const gid = 'spk'+(++_sparkSeq);   // unique per call -> no duplicate DOM ids
+  const yOf = v => h - ((v-lo)/range)*(h-2*pad) - pad;
   const xy = data => data.map((v,i)=>{
     const x = data.length>1 ? (i/(data.length-1))*w : 0;
-    const y = h - ((v-lo)/range)*(h-2*pad) - pad;
-    return x.toFixed(1)+','+y.toFixed(1);
+    return x.toFixed(1)+','+yOf(v).toFixed(1);
   });
   const base = xy(series[0].data);
   const fillD = `M 0,${h} L ${base.join(' L ')} L ${w},${h} Z`;
   // CSS vars resolve in `style=` (not in presentation attributes), so colour via style.
   let paths = `<path d="${fillD}" fill="url(#${gid})"/>`;
+  if(opts.baseline!=null){
+    const by = yOf(opts.baseline).toFixed(1);
+    paths += `<line x1="0" y1="${by}" x2="${w}" y2="${by}" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke" style="stroke:var(--text3);opacity:.5"/>`;
+  }
   for(const s of series){
     const pts = xy(s.data);
     paths += `<path d="M ${pts.join(' L ')}" fill="none" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" style="stroke:${s.color}"/>`;
@@ -743,6 +751,14 @@ function peerCard(label, count, metaPositive, metaUnknown, spark){
 // Green when the node has peers, amber when it has none -- the line colour
 // reflects the CURRENT peer state, so a drop to zero recolours the trend.
 function peerSparkColor(count){ return (Number(count)>0) ? 'var(--green)' : 'var(--yellow)'; }
+
+// The node's advertised public endpoint as ip:port -- parsed from the external
+// primary multiaddr (/ip4/<ip>/udp/<port>/quic-v1), else the bare PUBLIC_IP, else ''.
+function publicEndpoint(s){
+  const m = (s.external_primary||'').match(/\/ip[46]\/([^/]+)\/udp\/(\d+)/);
+  if(m) return m[1]+':'+m[2];
+  return s.public_ip || '';
+}
 
 // Recent Log Events table (last 5 ERROR/WARN, most recent first). Styled like
 // the dashboard tables (.tbl): dark bg, row dividers, mono font. Message wraps.
@@ -883,8 +899,10 @@ async function renderDashboard(){
 
   // Sparkline samples for this refresh (per-node history; nulls skipped).
   sparkPush('cpu', cpu);
+  sparkPush('mem', mem.percent!=null ? Number(mem.percent) : null);
   sparkPush('consBlock', cons.block!=null ? Number(cons.block) : null);
   sparkPush('peers', peers.primary!=null ? Number(peers.primary) : null);
+  sparkPush('lag', s.consensus_lag!=null ? Number(s.consensus_lag) : null);
 
   c.innerHTML = `
   <div class="dash">
@@ -915,23 +933,23 @@ async function renderDashboard(){
       ${statCard('Consensus Block', cons.block?fmtNum(cons.block):'—', 'accent', (s.consensus_unsupported&&cons.block==null?'unavailable on this version':(cons.age?esc(cons.age):''))+'<span id="consTrace"></span>', null, '', sparkSVG([{data:sparkDeltas('consBlock'),color:'var(--accent)'}]))}
       ${statCard('Current Epoch', epochVal, epochCls, epochMeta)}
       ${statCard('Network Block', nbVal, nbCls, nbMeta)}
-      ${statCard('Consensus Lag', lagVal, lagCls, lagMeta)}
+      ${statCard('Consensus Lag', lagVal, lagCls, lagMeta, null, '', sparkSVG([{data:sparkGet('lag'),color:'var(--accent)'}], {baseline:0}))}
     </div>
 
-    <div class="group-label">Network</div>
+    <div class="group-label">Connectivity</div>
     <div class="dgrid dgrid-3">
       ${peerCard('Peers', peers.primary!=null?peers.primary:'0',
           peers.split===false ? 'total peers'
             : 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'),
           undefined, sparkSVG([{data:sparkGet('peers'),color:peerSparkColor(peers.primary)}]))}
-      ${statCard('Network', esc(s.network||'—'), '', 'chain id '+(s.chain_id!=null?esc(String(s.chain_id)):'—'))}
-      ${statCard('Version', '<span id="verTile" style="font-size:16px;overflow-wrap:anywhere;word-break:break-word;white-space:normal;line-height:1.35;display:inline-block">…</span>', 'accent', '<span id="verMeta"></span>')}
+      ${statCard('Public Endpoint', (function(){const e=publicEndpoint(s);return e?esc(e):'—';})(), '', 'advertised P2P', null, 'tleft')}
+      ${statCard('Region', s.region?esc(s.region):'—', '', 'declared')}
     </div>
 
     <div class="group-label">Performance</div>
     <div class="dgrid dgrid-5">
       ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null, '', sparkSVG([{data:sparkGet('cpu'),color:'var(--accent)'}]))}
-      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
+      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null, '', sparkSVG([{data:sparkGet('mem'),color:'var(--accent)'}]))}
       ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
       ${statCard('Network Traffic', '<span id="netTrafficTile" style="font-size:14px;line-height:1.5;display:block">…</span>', '', '<span id="netTrafficMeta"></span>', null, '', '<div id="netTrafficSpark"></div>')}
       ${statCard('Jaeger', '<span id="jaegerTile">…</span>', '', '<span id="jaegerTileMeta">tracing…</span>')}
@@ -1075,6 +1093,7 @@ async function renderValidatorDashboard(c){
 
   // Sparkline samples for this refresh (per-node history; nulls skipped).
   sparkPush('cpu', cpu);
+  sparkPush('mem', mem.percent!=null ? Number(mem.percent) : null);
   sparkPush('consBlock', vv.block!=null ? Number(vv.block) : null);
   sparkPush('peers', peers.primary!=null ? Number(peers.primary) : null);
 
@@ -1138,7 +1157,7 @@ async function renderValidatorDashboard(c){
     <div class="group-label">Performance</div>
     <div class="dgrid dgrid-5">
       ${statCard('CPU Usage', cpu!=null?cpu+'%':'—', cpuCls, 'node process', cpu!=null?{pct:cpu}:null, '', sparkSVG([{data:sparkGet('cpu'),color:'var(--accent)'}]))}
-      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null)}
+      ${statCard('Memory', mem.percent!=null?mem.percent+'%':'—', '', (mem.used_gb!=null?mem.used_gb+' / '+mem.total_gb+' GB':''), mem.percent!=null?{pct:+mem.percent}:null, '', sparkSVG([{data:sparkGet('mem'),color:'var(--accent)'}]))}
       ${statCard('Disk', disk.percent!=null?disk.percent+'%':'—', '', (disk.used||'?')+' / '+(disk.total||'?'), disk.percent!=null?{pct:+disk.percent}:null)}
       ${statCard('Network Traffic', '<span id="netTrafficTile" style="font-size:14px;line-height:1.5;display:block">…</span>', '', '<span id="netTrafficMeta"></span>', null, '', '<div id="netTrafficSpark"></div>')}
       ${statCard('Jaeger', '<span id="jaegerTile">…</span>', '', '<span id="jaegerTileMeta">tracing…</span>')}
@@ -2909,6 +2928,9 @@ function setNavNetPill(d){
   // Name the network so the badge clearly reflects testnet vs devnet. Prefer the
   // slug of the data actually fetched; fall back to the detected node's network.
   const name = (d && d.slug && netLabel(d.slug)) || state.network.name || 'Network';
+  // Tooltip carries the chain id (the dashboard "Network" tile that used to show
+  // it was retired in favour of this pill).
+  el.title = name + (state.network.chainId!=null ? ' · chain id ' + state.network.chainId : '') + ' — network status';
   if(!d || d.error || d.available===false || !overall || overall==='unknown'){
     el.className = 'net-pill'; el.textContent = '⚪ ' + name + ': —'; return;
   }

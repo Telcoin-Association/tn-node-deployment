@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.56"
+UI_VERSION = "1.7.57"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1886,6 +1886,12 @@ def api_status(node_type):
         "node_id": node_id_val,
         "advertised_name": advertised_node_name(t, det),
         "internal_ip": internal_ip(),
+        # Connectivity/identity for the dashboard: declared region + the
+        # advertised public endpoint (PUBLIC_IP from .node-meta, full multiaddr
+        # from external_addrs so the UI can show ip:port). Empty -> tile shows "—".
+        "region": read_meta(t).get("REGION", ""),
+        "public_ip": read_meta(t).get("PUBLIC_IP", ""),
+        "external_primary": external_addrs(t)[0],
         "data_dir": data_path,
         "config_file": config_file,
         "block_number": block_number,
