@@ -937,12 +937,13 @@ async function renderDashboard(){
     </div>
 
     <div class="group-label">Connectivity</div>
-    <div class="dgrid dgrid-3">
+    <div class="dgrid dgrid-4">
       ${peerCard('Peers', peers.primary!=null?peers.primary:'0',
           peers.split===false ? 'total peers'
             : 'primary '+esc(peers.primary||'0')+' · worker '+esc(peers.worker||'0'),
           undefined, sparkSVG([{data:sparkGet('peers'),color:peerSparkColor(peers.primary)}]))}
       ${statCard('Public Endpoint', (function(){const e=publicEndpoint(s);return e?esc(e):'—';})(), '', 'advertised P2P', null, 'tleft')}
+      ${statCard('Advertised Name', s.advertised_name?esc(s.advertised_name):'—', '', 'advertised to peers')}
       ${statCard('Region', s.region?esc(s.region):'—', '', 'declared')}
     </div>
 
@@ -1143,14 +1144,16 @@ async function renderValidatorDashboard(c){
     </div>
 
     <!-- §4 Peer Health -->
-    <div class="group-label">Peer Health</div>
-    <div class="dgrid dgrid-4">
+    <div class="group-label">Connectivity</div>
+    <div class="dgrid dgrid-3">
       ${peerCard('Primary Peers', peers.primary, peers.split===false?'total peers':'connected', undefined, sparkSVG([{data:sparkGet('peers'),color:peerSparkColor(peers.primary)}]))}
       ${peers.split===false
           ? statCard('Worker Peers', '—', '', 'total only — see Primary')
           : peerCard('Worker Peers', peers.worker, 'connected')}
+      ${statCard('Advertised Name', s.advertised_name?esc(s.advertised_name):'—', '', 'advertised to peers')}
       ${statCard('Primary Address', fmtMultiaddrTile(vv.primary_external_address), '', um(vv.primary_external_address, 'external'), null, 'tleft')}
       ${statCard('Worker Address', fmtMultiaddrTile(vv.worker_external_address), '', um(vv.worker_external_address, 'external'), null, 'tleft')}
+      ${statCard('Region', s.region?esc(s.region):'—', '', 'declared')}
     </div>
 
     <!-- §5 Performance -->
