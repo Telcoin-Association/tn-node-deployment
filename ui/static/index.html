@@ -1443,6 +1443,8 @@ function renderLogs(){
           <option value="error">Error</option>
           <option value="warn">Warn</option>
           <option value="info">Info</option>
+          <option value="debug">Debug</option>
+          <option value="trace">Trace</option>
         </select>
         <input id="logSearch" placeholder="search text…" autocomplete="off">
         <button class="btn btn-out" id="logCopy">⧉ Copy</button>
@@ -1500,10 +1502,14 @@ function colorize(line){
 }
 
 // Coarse level for the filter dropdown -- mirrors colorize()'s precedence
-// (error > warn > everything-else) so the filter and the colours agree.
+// (error > warn > ...) so the filter and the colours agree. DEBUG/TRACE are
+// matched on the level token (word-bounded / level=) to avoid bucketing an
+// INFO line that merely mentions "trace"; they only appear at -vvvv/-vvvvv.
 function lineLevel(line){
   if(/error/i.test(line)) return 'error';
   if(/warn/i.test(line)) return 'warn';
+  if(/\bTRACE\b|level=trace/i.test(line)) return 'trace';
+  if(/\bDEBUG\b|level=debug/i.test(line)) return 'debug';
   return 'info';
 }
 
