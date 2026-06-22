@@ -1458,6 +1458,7 @@ function renderLogs(){
         ${ro?'':`<button class="btn btn-red" id="logClear">🗑 Clear Log</button>`}
         <span id="liveStatus" style="margin-left:auto;font-size:12px;color:var(--text2)"></span>
       </div>
+      <div class="note" id="logVerbNote" style="font-size:12px;margin:10px 0 4px">Checking log level…</div>
       <div class="log-body" id="logBody"><div class="muted">Loading…</div></div>
     </div>`;
   $('#logRefresh').addEventListener('click', loadLogLines);
@@ -1471,6 +1472,23 @@ function renderLogs(){
   $('#dlFull').addEventListener('click', ()=>{ $('#dlMenu').classList.remove('open'); downloadFullLog(); });
   const lc=$('#logClear'); if(lc) lc.addEventListener('click', clearLog);
   loadLogLines();
+  fillLogVerbosityNote();
+}
+
+// Explain that the level filter can only surface what the node actually writes,
+// which is governed by its verbosity. Pulls the live level from /api/config so
+// the note names the current setting and links straight to where to change it.
+async function fillLogVerbosityNote(){
+  const el = $('#logVerbNote'); if(!el) return;
+  const d = await api('/api/config/'+state.node);
+  if(!d){ el.style.display='none'; return; }
+  const tip = `The level filter only shows what the node writes to its log. <strong>Debug</strong> and <strong>Trace</strong> lines exist only when verbosity is <span class="mono">-vvvv</span> or <span class="mono">-vvvvv</span> — otherwise those filters show nothing.`;
+  if(d.readonly){
+    el.innerHTML = `${tip} This is an externally-deployed node, so verbosity is set in its container config, not here.`;
+    return;
+  }
+  const lvl = verbosityLabel(d.verbosity);
+  el.innerHTML = `This node is logging at <strong>${esc(lvl)}</strong>. ${tip} Change it in <a href="#" onclick="switchView('config');return false;">Config → Log Verbosity</a> (a node restart applies it).`;
 }
 
 // Download the complete log file from disk (server streams it as an attachment
