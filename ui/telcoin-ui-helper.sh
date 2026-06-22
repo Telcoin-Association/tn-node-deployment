@@ -402,6 +402,21 @@ cmd_set_logrotate() {
     echo "ok"
 }
 
+# Delete rotated node logs only (telcoin-*.log.1, telcoin-*.log.2.gz, ...).
+# Never the live *.log: the node holds it open via StandardOutput=append:, so
+# removing it wouldn't free space until a restart and would break logging. The
+# fixed glob can't be steered to a non-standard path, so no path validation is
+# needed. Prints the count removed.
+cmd_clear_rotated() {
+    local n=0 f
+    shopt -s nullglob
+    for f in /var/log/telcoin/*.log.[0-9]*; do
+        [[ -f "$f" ]] && rm -f "$f" && n=$((n+1))
+    done
+    shopt -u nullglob
+    echo "removed ${n}"
+}
+
 # =============================================================================
 # External dashboard access (Caddy) -- thin wrappers around install-caddy.sh
 # --json phases. status/check-dns emit one JSON object; enable/disable stream
@@ -712,6 +727,7 @@ main() {
         config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         set-hostname)    shift; cmd_set_hostname "${1:-}" "${2:-}" ;;
         set-logrotate)   shift; cmd_set_logrotate "${1:-}" ;;
+        clear-rotated)   cmd_clear_rotated ;;
         caddy-status)    cmd_caddy_status ;;
         caddy-dns-check) shift; cmd_caddy_dns_check "${1:-}" ;;
         caddy-enable)    shift; cmd_caddy_enable "${1:-}" "${2:-}" ;;

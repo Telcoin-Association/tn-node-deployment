@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.58"
+UI_VERSION = "1.7.59"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -2470,6 +2470,24 @@ def api_set_logrotate(node_type):
     rc, out, err = run(["sudo", "-n", HELPER, "set-logrotate", size], timeout=15)
     ok = rc == 0 and out.strip().splitlines()[-1:] == ["ok"]
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "set failed")})
+
+
+# Delete rotated node logs (telcoin-*.log.N / .gz), never the live file. One
+# host-global action like logrotate itself. Public path is refused upstream by
+# _enforce_public_readonly (POST); external nodes have no on-disk logs here.
+@app.route("/api/config/<node_type>/clear-rotated", methods=["POST"])
+def api_clear_rotated(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
+    rc, out, err = run(["sudo", "-n", HELPER, "clear-rotated"], timeout=15)
+    last = out.strip().splitlines()[-1:] if out else []
+    ok = rc == 0 and bool(last) and last[0].startswith("removed ")
+    removed = int(last[0].split()[1]) if ok and last[0].split()[1:] else 0
+    return jsonify({"ok": ok, "removed": removed,
+                    "error": "" if ok else (err or out or "clear failed")})
 
 
 # =============================================================================

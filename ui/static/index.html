@@ -1640,7 +1640,9 @@ function configValueOk(field, value){
 function cfgEditRow(field, label, current, kind){
   let control;
   if(kind==='verbosity'){
-    const opts=[['','— choose level —'],['-v','ERROR (-v)'],['-vv','WARN (-vv)'],['-vvv','INFO (-vvv)'],['-vvvv','DEBUG (-vvvv)'],['-vvvvv','TRACE (-vvvvv)']];
+    // Levels are cumulative thresholds (each includes everything more severe),
+    // so the label spells out the full set captured at each level.
+    const opts=[['','— choose level —'],['-v','ERROR (-v)'],['-vv','ERROR/WARN (-vv)'],['-vvv','ERROR/WARN/INFO (-vvv)'],['-vvvv','ERROR/WARN/INFO/DEBUG (-vvvv)'],['-vvvvv','ERROR/WARN/INFO/DEBUG/TRACE (-vvvvv)']];
     control=`<select id="cfg_${field}">${opts.map(([v,l])=>`<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>`;
   } else if(kind==='instance'){
     control=`<select id="cfg_${field}">${['1','2','3','4','5','6','7','8','9'].map(v=>`<option value="${v}" ${v===String(current)?'selected':''}>${v}</option>`).join('')}</select>`;
@@ -1783,6 +1785,17 @@ async function saveLogRotate(btn){
   if(btn){ btn.disabled=false; btn.textContent='Save'; }
   if(r && r.ok){ toast('Log rotation size set to '+size,'success'); refreshAfterChange(); }
   else toast('Failed to set log rotation: '+((r&&r.error)||'unknown error'),'error');
+}
+
+// Delete rotated node logs (*.log.N/.gz) to reclaim disk now. Never the live log.
+async function clearRotatedLogs(btn){
+  const t = state.node;
+  if(!confirm('Delete all rotated node logs (compressed/older logs)? The current live log is kept. This frees disk space immediately.')) return;
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Clearing…'; }
+  const r = await api('/api/config/'+t+'/clear-rotated', {method:'POST'});
+  if(btn){ btn.disabled=false; btn.textContent='Clear rotated logs'; }
+  if(r && r.ok){ toast('Removed '+(r.removed||0)+' rotated log'+((r.removed===1)?'':'s'),'success'); refreshAfterChange(); }
+  else toast('Failed to clear rotated logs: '+((r&&r.error)||'unknown error'),'error');
 }
 
 // Save the Advertised Node Name (network-config hostname) via its own route --
@@ -2263,6 +2276,10 @@ async function renderSystem(){
           <input id="logRotSize" value="${esc(d.log_rotate_size||'1G')}" placeholder="1G" autocomplete="off" style="max-width:120px">
           <button class="btn btn-green" id="logRotSave">Save</button>
         </span>
+      </div>
+      <div class="kv" style="align-items:center">
+        <span class="k">Rotated logs<br><span class="muted" style="font-size:12px;font-weight:400">Delete older/compressed logs to reclaim disk now (keeps the live log)</span></span>
+        <span class="v"><button class="btn" id="logRotClear">Clear rotated logs</button></span>
       </div>`}
     </div>`;
   c.innerHTML = `
@@ -2283,6 +2300,7 @@ async function renderSystem(){
     ${dangerZoneHtml()}`;
   loadFirewall();
   const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
+  const lrc=$('#logRotClear'); if(lrc) lrc.addEventListener('click', ()=>clearRotatedLogs(lrc));
   renderCaddyCard();
   renderAddonsCard();
 }

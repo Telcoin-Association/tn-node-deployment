@@ -228,6 +228,9 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname v
 # rotation size (e.g. 1G). Value wildcarded, validated (^[0-9]+[KMG]$) in the
 # helper + server.
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-logrotate *
+# Clear-rotated helper -- deletes rotated node logs (*.log.N/.gz) only, never
+# the live *.log. No args (fixed glob, can't be steered to another path).
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper clear-rotated
 # Caddy (external dashboard access) helper -- status/dns-check/enable/disable.
 # enable takes <domain> <username> (wildcarded, validated in the helper +
 # install-caddy.sh); the password travels in TN_CADDY_PASSWORD (env_keep below).
