@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.59"
+UI_VERSION = "1.7.60"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -229,6 +229,7 @@ def parse_service_file(t):
         "metrics": "",
         "primary_listener": "",
         "worker_listener": "",
+        "verbosity": "",
         "http": False,
         "log_path": log_file(t),
     }
@@ -271,6 +272,12 @@ def parse_service_file(t):
     mm = re.search(r"--metrics\s+\"?([^\s\"\\]+)", searchable)
     if mm:
         cfg["metrics"] = mm.group(1)
+
+    # Verbosity flag: a standalone -v .. -vvvvv token (bounded so --validator and
+    # other --v* flags never match). Mirrors edit-config.sh's detection.
+    mvb = re.search(r"(?<!\S)(-v{1,5})(?!\S)", searchable)
+    if mvb:
+        cfg["verbosity"] = mvb.group(1)
 
     # Listeners appear as Environment="PRIMARY_LISTENER_MULTIADDR=..." (source)
     # or -e "PRIMARY_LISTENER_MULTIADDR=..." (docker). Match the value up to the
@@ -2367,6 +2374,7 @@ def api_config(node_type):
         "metrics": cfg["metrics"],
         "primary_listener": cfg["primary_listener"],
         "worker_listener": cfg["worker_listener"],
+        "verbosity": cfg["verbosity"],
         "external_primary": ext_primary,
         "external_worker": ext_worker,
         "install_method": detect_install_method(node_type),

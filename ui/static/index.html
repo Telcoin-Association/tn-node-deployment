@@ -1637,13 +1637,18 @@ function configValueOk(field, value){
 
 // One editable row: label + input/select + per-field Save (each save is one
 // daemon-reload + restart + health verify, exactly like the CLI menu).
+// Levels are cumulative thresholds (each includes everything more severe), so
+// the label spells out the full set captured at each level. Shared by the
+// editable dropdown and the read-only current-value display.
+const VERBOSITY_LEVELS=[['-v','ERROR (-v)'],['-vv','ERROR/WARN (-vv)'],['-vvv','ERROR/WARN/INFO (-vvv)'],['-vvvv','ERROR/WARN/INFO/DEBUG (-vvvv)'],['-vvvvv','ERROR/WARN/INFO/DEBUG/TRACE (-vvvvv)']];
+function verbosityLabel(v){ const m=VERBOSITY_LEVELS.find(([k])=>k===v); return m?m[1]:(v||'—'); }
+
 function cfgEditRow(field, label, current, kind){
   let control;
   if(kind==='verbosity'){
-    // Levels are cumulative thresholds (each includes everything more severe),
-    // so the label spells out the full set captured at each level.
-    const opts=[['','— choose level —'],['-v','ERROR (-v)'],['-vv','ERROR/WARN (-vv)'],['-vvv','ERROR/WARN/INFO (-vvv)'],['-vvvv','ERROR/WARN/INFO/DEBUG (-vvvv)'],['-vvvvv','ERROR/WARN/INFO/DEBUG/TRACE (-vvvvv)']];
-    control=`<select id="cfg_${field}">${opts.map(([v,l])=>`<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>`;
+    const cur=current||'';
+    const opts=[['','— choose level —'],...VERBOSITY_LEVELS];
+    control=`<select id="cfg_${field}">${opts.map(([v,l])=>`<option value="${esc(v)}" ${v===cur?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
   } else if(kind==='instance'){
     control=`<select id="cfg_${field}">${['1','2','3','4','5','6','7','8','9'].map(v=>`<option value="${v}" ${v===String(current)?'selected':''}>${v}</option>`).join('')}</select>`;
   } else {
@@ -1703,7 +1708,7 @@ async function renderConfig(){
     ['metrics','Metrics Address', d.metrics, 'text'],
     ['primary_listener','Primary Listener (bind)', d.primary_listener, 'text'],
     ['worker_listener','Worker Listener (bind)', d.worker_listener, 'text'],
-    ['verbosity','Log Verbosity', '', 'verbosity'],
+    ['verbosity','Log Verbosity', d.verbosity, 'verbosity'],
   ];
   if(d.install_method==='docker') editable.push(['docker_image','Docker Image', d.docker_image, 'text']);
 
@@ -1719,7 +1724,7 @@ async function renderConfig(){
 
   const editableHtml = editing
     ? editable.map(([f,l,cur,kind])=>cfgEditRow(f,l,cur,kind)).join('')
-    : editable.map(([f,l,cur])=>`<div class="kv"><span class="k">${esc(l)}</span><span class="v">${esc((f==='verbosity'?'':cur)||'—')}</span></div>`).join('');
+    : editable.map(([f,l,cur])=>`<div class="kv"><span class="k">${esc(l)}</span><span class="v">${esc(f==='verbosity'?verbosityLabel(cur):(cur||'—'))}</span></div>`).join('');
 
   const note = editing
     ? `<div class="note" style="border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
