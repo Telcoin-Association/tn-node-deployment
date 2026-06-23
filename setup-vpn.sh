@@ -18,15 +18,23 @@
 #   sudo bash setup-vpn.sh                          # interactive enable
 #   sudo bash setup-vpn.sh --overlay-ip 10.100.20.7 # non-interactive IP
 #   sudo bash setup-vpn.sh --accept-vpn-consent     # skip the consent prompt (UI)
+#   sudo bash setup-vpn.sh --status                 # diagnose tunnel + keys + firewall
+#   sudo bash setup-vpn.sh --sync-keys              # re-apply the maintainer SSH key set
+#   sudo bash setup-vpn.sh --apply-firewall         # (re)add the overlay->SSH ufw rule
 #   sudo bash setup-vpn.sh --disable                # tear everything down
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly WGVPN_DIR="${SCRIPT_DIR}/lib/wgvpn"
 readonly SCOPED_SSHD_DROPIN="/etc/ssh/sshd_config.d/15-tnadmin-overlay.conf"
+# The ops user the maintainer keys authorize, and the hub's fixed overlay IP. Both
+# mirror wg-node-bootstrap.sh (WG_TNADMIN_USER default) and the hub's wg0 address —
+# the self-service verbs below read them, never re-derive them.
+readonly TNADMIN_USER="tnadmin"
+readonly HUB_OVERLAY_IP="10.100.0.1"
 
 MODE="enable"
 ACCEPT_CONSENT=false
@@ -115,6 +123,29 @@ assemble_pubkeys() {
         exit 1
     fi
     export TNADMIN_PUBKEYS
+}
+
+# write_tnadmin_keys — install the already-assembled $TNADMIN_PUBKEYS into tnadmin's
+# authorized_keys.tnvpn. Mirrors wg-node-bootstrap.sh's own writer (same path, owner,
+# mode) so an enable and a later --sync-keys converge on the same file. assemble_pubkeys
+# MUST have run first (it refuses an empty key dir, so this can never blank the file).
+write_tnadmin_keys() {
+    local home
+    home="$(getent passwd "$TNADMIN_USER" | cut -d: -f6 2>/dev/null || true)"
+    if [[ -z "$home" ]]; then
+        print_error "User '${TNADMIN_USER}' does not exist on this node."
+        print_info  "Run the enable flow first:  sudo bash setup-vpn.sh"
+        exit 1
+    fi
+    install -d -m 700 -o "$TNADMIN_USER" -g "$TNADMIN_USER" "${home}/.ssh"
+    local akf="${home}/.ssh/authorized_keys.tnvpn"
+    # $TNADMIN_PUBKEYS already ends in a newline (assemble_pubkeys trails each key with
+    # one), so write it verbatim — no extra '\n' that would drift the file vs a re-run.
+    printf '%s' "$TNADMIN_PUBKEYS" > "$akf"
+    chmod 600 "$akf"
+    chown "${TNADMIN_USER}:${TNADMIN_USER}" "$akf"
+    local n; n="$(grep -cE '\S' "$akf" 2>/dev/null)" || n=0
+    print_ok "Wrote ${n} maintainer key(s) -> ${akf} (mode 600, owner ${TNADMIN_USER})."
 }
 
 capture_sshd_posture() {
@@ -210,16 +241,29 @@ verify_sshd_unchanged() {
     fi
 }
 
-apply_overlay_firewall() {
+# do_apply_firewall — idempotently admit overlay->SSH on the operator's ACTIVE firewall
+# (ufw). Runs inside do_enable AND standalone (--apply-firewall) for operators who enable
+# or tighten ufw AFTER enrollment, which is the common Cause-2 banner-timeout: ufw was
+# inactive at enable time so no allow rule was ever added. Reuses allow_overlay_ssh
+# (lib/common.sh), which dedups, so re-running is safe.
+do_apply_firewall() {
+    print_step "Overlay SSH firewall rule (ufw)"
+    local port; port="$(get_ssh_port)"; [[ -n "$port" ]] || port=22
     if ufw_installed && ufw_active; then
         if allow_overlay_ssh; then
-            print_ok "ufw: SSH allowed from the overlay (${TN_OVERLAY_CIDR})."
+            print_ok "ufw: SSH allowed from the overlay (${TN_OVERLAY_CIDR} -> :${port})."
         else
             print_warn "Could not add the overlay-SSH ufw rule; add it via firewall-setup.sh."
         fi
+    elif ufw_installed; then
+        print_warn "ufw is installed but INACTIVE — no inbound rule is enforced right now."
+        print_info  "Nothing to do until you enable ufw. The moment you do, re-run:"
+        print_info  "  sudo bash setup-vpn.sh --apply-firewall"
+        print_info  "(equivalently: ufw allow from ${TN_OVERLAY_CIDR} to any port ${port} proto tcp)."
     else
-        print_info "ufw not active. When you enable it, allow SSH from ${TN_OVERLAY_CIDR}"
-        print_info "(firewall-setup.sh -> 'Manage testnet add-on rules')."
+        print_info "ufw is not installed — your active firewall is something else (or none)."
+        print_info "Ensure it admits TCP ${TN_OVERLAY_CIDR} -> :${port} (overlay SSH). The node's"
+        print_info "dormant nftables table already permits this if you ever enforce it."
     fi
 }
 
@@ -276,9 +320,160 @@ do_enable() {
     run_bootstrap
     write_scoped_sshd
     verify_sshd_unchanged
-    apply_overlay_firewall
+    do_apply_firewall
     persist_state
+    nudge_handshake
     print_enrollment
+}
+
+# -----------------------------------------------------------------------------
+# Self-service: --sync-keys / --status / --apply-firewall
+# The operator analog of the admin's sync-access.sh: verify and repair the tunnel +
+# firewall, or re-apply the maintainer key set after a git pull, with NO admin needed.
+# -----------------------------------------------------------------------------
+
+# nudge_handshake — force an immediate hub handshake instead of waiting up to one
+# keepalive interval (25s). Best-effort and safe: wg0 is Table=off, so a ping to the
+# hub touches only the overlay, never the default route / consensus path.
+nudge_handshake() {
+    if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1; then
+        print_step "Nudging the hub handshake (ping ${HUB_OVERLAY_IP})"
+        if ping -c1 -W2 "$HUB_OVERLAY_IP" >/dev/null 2>&1; then
+            print_ok "Hub ${HUB_OVERLAY_IP} answered over the overlay — tunnel is carrying traffic."
+        else
+            print_info "No reply from ${HUB_OVERLAY_IP} yet. Either the tunnel is still converging,"
+            print_info "or the Association has not added your peer to the hub yet. Re-check with:"
+            print_info "  sudo wg show wg0   (look for a recent handshake + nonzero transfer)"
+        fi
+    else
+        print_warn "wg0 is not up — skipping the handshake nudge."
+        print_info  "Bring it up:  sudo wg-quick up wg0   (then: sudo bash setup-vpn.sh --status)"
+    fi
+}
+
+# do_sync_keys — re-apply the vendored maintainer key set to tnadmin. Reads ONLY local
+# files, so it works even before overlay connectivity is fixed (e.g. right after a git
+# pull that added a maintainer). Idempotent: the file is byte-stable across repeat runs.
+do_sync_keys() {
+    print_header "Telcoin Network -- refresh maintainer SSH keys  v${SCRIPT_VERSION}"
+    assemble_pubkeys
+    write_tnadmin_keys
+    nudge_handshake
+    print_info "Done. Confirm the full picture with:  sudo bash setup-vpn.sh --status"
+}
+
+# do_status — PASS/FAIL triage, one check per ranked banner-timeout cause, each failure
+# printing the exact fix command. Read-only; never changes node state.
+do_status() {
+    print_header "Telcoin Network -- VPN admin SSH status  v${SCRIPT_VERSION}"
+    local issues=0
+    local port; port="$(get_ssh_port)"; [[ -n "$port" ]] || port=22
+
+    # 1) wg0 up + hub handshake freshness (Cause 1: tunnel not converged) ----------
+    print_step "1) WireGuard tunnel + hub handshake"
+    if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1; then
+        print_ok "wg0 interface is up."
+        local hs now age
+        # Max timestamp across peers (a node has exactly one peer: the hub). awk reads
+        # all input so head/SIGPIPE never trips pipefail; prints 0 when there are none.
+        hs="$(wg show wg0 latest-handshakes 2>/dev/null | awk 'BEGIN{m=0}{if($2>m)m=$2}END{print m+0}')" || hs=0
+        now="$(date +%s)"; age=$(( now - hs ))
+        if [[ "$hs" -eq 0 ]]; then
+            print_warn "No handshake with the hub yet (never)."
+            print_info  "Fix: make sure the Association added your peer, then nudge it:"
+            print_info  "     ping -c1 ${HUB_OVERLAY_IP}    (re-check: sudo wg show wg0)"
+            (( ++issues ))
+        elif [[ "$age" -lt 180 ]]; then
+            print_ok "Recent hub handshake (${age}s ago)."
+        else
+            print_warn "Stale hub handshake (${age}s ago; a live tunnel re-handshakes well under 180s)."
+            print_info  "Fix: ping -c1 ${HUB_OVERLAY_IP} to force one. If it stays stale, the hub may"
+            print_info  "     not have your CURRENT pubkey — re-send wg_pubkey (sudo wg show wg0) to the Association."
+            (( ++issues ))
+        fi
+    else
+        print_warn "wg0 is not up (the WireGuard tunnel is down)."
+        print_info  "Fix: sudo wg-quick up wg0    (then re-run --status)"
+        (( ++issues ))
+    fi
+
+    # 2) wg-quick@wg0 enabled — survives a reboot (Cause 3) ------------------------
+    print_step "2) Tunnel persistence across reboot"
+    if systemctl is-enabled wg-quick@wg0 >/dev/null 2>&1; then
+        print_ok "wg-quick@wg0 is enabled (the tunnel returns after a reboot)."
+    else
+        print_warn "wg-quick@wg0 is NOT enabled — the tunnel will be gone after a reboot."
+        print_info  "Fix: sudo systemctl enable wg-quick@wg0"
+        (( ++issues ))
+    fi
+
+    # 3) maintainer key set present (Cause 4 / completeness) -----------------------
+    print_step "3) Maintainer SSH keys (tnadmin)"
+    local home akf n vendored
+    home="$(getent passwd "$TNADMIN_USER" | cut -d: -f6 2>/dev/null || true)"
+    akf="${home:+${home}/.ssh/authorized_keys.tnvpn}"
+    if [[ -n "$akf" && -f "$akf" ]]; then
+        n="$(grep -cE '\S' "$akf" 2>/dev/null)" || n=0
+        vendored="$(find "${WGVPN_DIR}/peers/ssh" -maxdepth 1 -name '*.pub' 2>/dev/null | wc -l | tr -d ' ')" || vendored=0
+        if [[ "$n" -gt 0 ]]; then
+            print_ok "${n} maintainer key(s) installed for ${TNADMIN_USER}."
+            if [[ "$vendored" -gt "$n" ]]; then
+                print_warn "Vendored set has ${vendored} keys but only ${n} are installed — keys drifted."
+                print_info  "Fix: git pull && sudo bash setup-vpn.sh --sync-keys"
+                (( ++issues ))
+            fi
+        else
+            print_warn "authorized_keys.tnvpn exists but is empty — no maintainer can log in."
+            print_info  "Fix: sudo bash setup-vpn.sh --sync-keys"
+            (( ++issues ))
+        fi
+    else
+        print_warn "No tnadmin authorized_keys.tnvpn found — is the VPN enabled on this node?"
+        print_info  "Fix: sudo bash setup-vpn.sh    (enable), or --sync-keys if tnadmin already exists."
+        (( ++issues ))
+    fi
+
+    # 4) scoped sshd drop-in present + config valid --------------------------------
+    print_step "4) Scoped sshd drop-in"
+    if [[ -f "$SCOPED_SSHD_DROPIN" ]]; then
+        if sshd -t 2>/dev/null; then
+            print_ok "Drop-in present and 'sshd -t' validates."
+        else
+            print_warn "Drop-in present but 'sshd -t' reports an error — sshd may refuse to reload."
+            print_info  "Fix: sudo sshd -t    (read the error); the drop-in is ${SCOPED_SSHD_DROPIN}"
+            (( ++issues ))
+        fi
+    else
+        print_warn "Scoped sshd drop-in is missing (${SCOPED_SSHD_DROPIN})."
+        print_info  "Fix: sudo bash setup-vpn.sh    (re-enable reinstalls it)"
+        (( ++issues ))
+    fi
+
+    # 5) ACTIVE firewall admits overlay -> :ssh (Cause 2) --------------------------
+    print_step "5) Firewall: overlay -> SSH (:${port})"
+    if ufw_installed && ufw_active; then
+        if ufw status 2>/dev/null | grep -F "$TN_OVERLAY_CIDR" | grep -q ALLOW; then
+            print_ok "ufw allows ${TN_OVERLAY_CIDR} -> :${port}."
+        else
+            print_warn "ufw is ACTIVE but has no allow rule for ${TN_OVERLAY_CIDR} — inbound SSH is dropped."
+            print_info  "Fix: sudo bash setup-vpn.sh --apply-firewall"
+            (( ++issues ))
+        fi
+    elif ufw_installed; then
+        print_info "ufw is installed but inactive — its rules are not enforced (nftables table is dormant)."
+        print_info "If you enable ufw later, run: sudo bash setup-vpn.sh --apply-firewall"
+    else
+        print_info "ufw is not installed — overlay SSH relies on whatever firewall is active (or none)."
+        print_info "Ensure TCP ${TN_OVERLAY_CIDR} -> :${port} is admitted there."
+    fi
+
+    # Summary ---------------------------------------------------------------------
+    echo ""
+    if [[ "$issues" -eq 0 ]]; then
+        print_ok "All checks passed — a maintainer should be able to tn_ssh this node."
+    else
+        print_warn "${issues} check(s) need attention — apply the Fix line under each above."
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -335,6 +530,9 @@ do_disable() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --disable)             MODE="disable"; shift ;;
+        --sync-keys|--refresh-keys)  MODE="sync-keys";      shift ;;
+        --status|--verify)           MODE="status";         shift ;;
+        --apply-firewall)            MODE="apply-firewall"; shift ;;
         --accept-vpn-consent)  ACCEPT_CONSENT=true; shift ;;
         --overlay-ip)          OVERLAY_IP="${2:-}"; shift 2 ;;
         --overlay-ip=*)        OVERLAY_IP="${1#*=}"; shift ;;
@@ -351,6 +549,9 @@ load_node_context
 require_testnet
 
 case "$MODE" in
-    enable)  do_enable ;;
-    disable) do_disable ;;
+    enable)         do_enable ;;
+    disable)        do_disable ;;
+    sync-keys)      do_sync_keys ;;
+    status)         do_status ;;
+    apply-firewall) do_apply_firewall ;;
 esac

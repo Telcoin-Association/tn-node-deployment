@@ -823,11 +823,48 @@ own SSH config, runs its host firewall dormant, and is undone by `setup-vpn.sh -
 
 ---
 
+## WireGuard admin SSH (testnet)
+
+`setup-vpn.sh` opts your node into the Telcoin Association's private WireGuard overlay and
+grants the core team SSH over that overlay only (a sudo `tnadmin` user), so they can help
+recover a stuck node. It is opt-in, testnet-only, additive, and reversible — your own SSH
+config is untouched and `setup-vpn.sh --disable` removes everything.
+
+```bash
+sudo bash setup-vpn.sh                  # enrol (interactive, consent-gated)
+sudo bash setup-vpn.sh --status         # diagnose tunnel + keys + firewall (read-only)
+sudo bash setup-vpn.sh --sync-keys      # re-apply the maintainer SSH keys after a git pull
+sudo bash setup-vpn.sh --apply-firewall # (re)add the overlay->SSH ufw rule if you run ufw
+sudo bash setup-vpn.sh --disable        # tear everything down
+```
+
+- **[WGVPN.md](WGVPN.md)** — full operator + maintainer guide (enrol, verify, re-key, rename,
+  the firewall model).
+- **[DEBUG.md](DEBUG.md)** — connectivity runbook: if `tn_ssh` times out, work both ends with
+  a symptom → cause → fix table.
+
+Run `--status` first whenever a maintainer can't reach the node — it pinpoints which of the
+five things (tunnel, reboot persistence, keys, sshd drop-in, firewall) needs attention and
+prints the exact fix command.
+
+---
+
 ## Changelog
 
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### VPN admin SSH — operator self-service verbs
+`setup-vpn.sh v1.1.0` adds three verbs so operators can verify and repair overlay SSH
+without an admin: `--status` (PASS/FAIL triage across tunnel, reboot persistence, the
+maintainer key set, the scoped sshd drop-in, and the active firewall, each with the exact
+fix command), `--sync-keys` (re-apply the vendored maintainer keys after a `git pull`;
+local-only, so it works before connectivity is fixed), and `--apply-firewall` (idempotently
+re-add the overlay→:22 ufw rule for operators who enable/tighten ufw after enrolling).
+Completes the vendored maintainer key set (`lib/wgvpn/peers/ssh/grant2.pub`), and
+`update-scripts.sh v1.1.55` now ships every maintainer key in `TESTNET_ADDONS_BUNDLE` (it
+previously delivered only two of them). New docs: [WGVPN.md](WGVPN.md) and [DEBUG.md](DEBUG.md).
 
 ### Health endpoint — operator-chosen source IPs
 `firewall-setup.sh v1.4.0` lets operators expose the health port (`43174/tcp`) to the

@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.54"
+readonly SCRIPT_VERSION="1.1.55"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -75,9 +75,18 @@ declare -a TESTNET_ADDONS_BUNDLE=(
     "lib/wgvpn/wg-node-bootstrap.sh:lib/wgvpn/wg-node-bootstrap.sh"
     "lib/wgvpn/hub-coordinates.env:lib/wgvpn/hub-coordinates.env"
     "lib/wgvpn/peers/ssh/grant.pub:lib/wgvpn/peers/ssh/grant.pub"
+    "lib/wgvpn/peers/ssh/grant2.pub:lib/wgvpn/peers/ssh/grant2.pub"
     "lib/wgvpn/peers/ssh/bluelights.pub:lib/wgvpn/peers/ssh/bluelights.pub"
+    "lib/wgvpn/peers/ssh/oobi.pub:lib/wgvpn/peers/ssh/oobi.pub"
+    "lib/wgvpn/peers/ssh/sstanf.pub:lib/wgvpn/peers/ssh/sstanf.pub"
+    "lib/wgvpn/peers/ssh/umair.pub:lib/wgvpn/peers/ssh/umair.pub"
     "lib/wgvpn/peers/ssh/README:lib/wgvpn/peers/ssh/README"
 )
+# NOTE: this list MUST name every maintainer key in lib/wgvpn/peers/ssh/*.pub. The
+# updater fetches files by explicit path (it cannot glob the remote), so a key omitted
+# here is silently NOT delivered to operators who update via update-scripts.sh — and
+# the next `setup-vpn.sh --sync-keys` would then bake an INCOMPLETE maintainer set.
+# When the admin add-peer.sh mirrors a new maintainer key into this repo, add a row here.
 
 # =============================================================================
 # HELPERS
