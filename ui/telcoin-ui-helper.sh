@@ -25,8 +25,8 @@
 #   telcoin-ui-helper set-hostname    <observer|validator> <name>
 #   telcoin-ui-helper set-logrotate   <size e.g. 1G>
 #   telcoin-ui-helper caddy-status
-#   telcoin-ui-helper caddy-dns-check <domain>
-#   telcoin-ui-helper caddy-enable    <domain> <username>   (password via TN_CADDY_PASSWORD)
+#   telcoin-ui-helper caddy-dns-check <domain> [inbound-public-ip]
+#   telcoin-ui-helper caddy-enable    <domain> <username> [inbound-public-ip]   (password via TN_CADDY_PASSWORD)
 #   telcoin-ui-helper caddy-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
@@ -430,18 +430,29 @@ caddy_script_ready() { [[ -f "$CADDY_SCRIPT" ]] || die "caddy script not found: 
 cmd_caddy_status() { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --phase=status; }
 cmd_caddy_disable() { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --phase=disable; }
 
+# The optional trailing public_ip is the node's INBOUND public IP (where ACME hits
+# 80/443), forwarded to install-caddy.sh as --public-ip for the multi-IP / 1:1-NAT
+# case where it differs from the auto-detected egress IP. Empty = exact no-op (the
+# script auto-detects egress, today's behavior). Loose char-class only -- the script
+# re-validates semantically via validate_public_ip and falls back to egress on failure.
 cmd_caddy_dns_check() {
-    local domain="$1"; caddy_script_ready
+    local domain="$1" public_ip="${2:-}"; caddy_script_ready
     [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
-    exec bash "$CADDY_SCRIPT" --json --phase=check-dns --domain "$domain"
+    [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
+    local -a args=( --json --phase=check-dns --domain "$domain" )
+    [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
+    exec bash "$CADDY_SCRIPT" "${args[@]}"
 }
 
 cmd_caddy_enable() {
-    local domain="$1" username="$2"; caddy_script_ready
+    local domain="$1" username="$2" public_ip="${3:-}"; caddy_script_ready
     [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
     [[ -n "$username" && "$username" =~ ^[A-Za-z0-9._-]{2,32}$ ]] || die "invalid username"
+    [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
     [[ -n "${TN_CADDY_PASSWORD:-}" ]] || die "TN_CADDY_PASSWORD not set"
-    exec bash "$CADDY_SCRIPT" --json --phase=enable --domain "$domain" --username "$username"
+    local -a args=( --json --phase=enable --domain "$domain" --username "$username" )
+    [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
+    exec bash "$CADDY_SCRIPT" "${args[@]}"
 }
 
 # =============================================================================
@@ -729,8 +740,8 @@ main() {
         set-logrotate)   shift; cmd_set_logrotate "${1:-}" ;;
         clear-rotated)   cmd_clear_rotated ;;
         caddy-status)    cmd_caddy_status ;;
-        caddy-dns-check) shift; cmd_caddy_dns_check "${1:-}" ;;
-        caddy-enable)    shift; cmd_caddy_enable "${1:-}" "${2:-}" ;;
+        caddy-dns-check) shift; cmd_caddy_dns_check "${1:-}" "${2:-}" ;;
+        caddy-enable)    shift; cmd_caddy_enable "${1:-}" "${2:-}" "${3:-}" ;;
         caddy-disable)   cmd_caddy_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;

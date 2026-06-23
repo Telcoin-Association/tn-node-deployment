@@ -2739,6 +2739,10 @@ def api_setup_finalize(node_type):
 
 _CADDY_DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 _CADDY_USER_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")
+# Optional inbound-public-IP override (multi-IP / 1:1-NAT nodes). Loose char-class --
+# mirrors the setup-path guard; install-caddy.sh re-validates semantically via
+# validate_public_ip and falls back to the egress IP on failure. Empty = no override.
+_CADDY_PUBLIC_IP_RE = re.compile(r"^[0-9a-fA-F.:]+$")
 
 
 @app.route("/api/caddy/status")
@@ -2765,7 +2769,13 @@ def api_caddy_dns_check():
     domain = (data.get("domain") or "").strip()
     if not _CADDY_DOMAIN_RE.match(domain):
         return jsonify({"ok": False, "error": "invalid domain"}), 400
-    rc, out, err = run(["sudo", "-n", HELPER, "caddy-dns-check", domain], timeout=20)
+    public_ip = (data.get("public_ip") or "").strip()
+    if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
+        return jsonify({"ok": False, "error": "invalid public IP"}), 400
+    cmd = ["sudo", "-n", HELPER, "caddy-dns-check", domain]
+    if public_ip:
+        cmd.append(public_ip)
+    rc, out, err = run(cmd, timeout=20)
     try:
         res = json.loads(out) if out else {}
     except Exception:
@@ -2782,16 +2792,21 @@ def api_caddy_enable():
     domain = (data.get("domain") or "").strip()
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
+    public_ip = (data.get("public_ip") or "").strip()
     if not _CADDY_DOMAIN_RE.match(domain):
         return jsonify({"error": "invalid domain"}), 400
     if not _CADDY_USER_RE.match(username):
         return jsonify({"error": "invalid username (2-32 chars: letters, digits, . _ -)"}), 400
     if len(password) < 8:
         return jsonify({"error": "password too short (min 8 chars)"}), 400
+    if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
+        return jsonify({"error": "invalid public IP"}), 400
     env = os.environ.copy()
     env["TN_CADDY_PASSWORD"] = str(password)
-    return _update_stream(["sudo", "-n", HELPER, "caddy-enable", domain, username],
-                          env=env, capture_stderr=True)
+    cmd = ["sudo", "-n", HELPER, "caddy-enable", domain, username]
+    if public_ip:
+        cmd.append(public_ip)
+    return _update_stream(cmd, env=env, capture_stderr=True)
 
 
 @app.route("/api/caddy/disable", methods=["POST"])
