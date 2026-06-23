@@ -5,6 +5,13 @@
 
 set -euo pipefail
 
+# Legacy-install compatibility resolvers. Sourced near the top so every script
+# that sources common.sh gets tn_resolve_service / tn_resolve_node_type /
+# tn_resolve_config_dir / ... for free. fallback.sh is the only module that
+# knows the old telcoin-{observer,validator} names + per-role dir layout.
+# shellcheck source=lib/fallback.sh
+source "${BASH_SOURCE[0]%/*}/fallback.sh"
+
 # -----------------------------------------------------------------------------
 # CONSTANTS
 # -----------------------------------------------------------------------------
@@ -1608,17 +1615,13 @@ require_testnet() {
 # .node-meta persistence (single primitive for every opt-in's state)
 # -----------------------------------------------------------------------------
 
-# node_meta_path — echo the first existing /etc/telcoin/{validator,observer}/.node-meta
-# (mirrors remove-node.sh). Returns 1 if neither exists.
+# node_meta_path — echo the active .node-meta path. The unified install
+# (/etc/telcoin/.node-meta) is checked first; legacy per-role installs are
+# resolved by fallback.sh. Returns 1 if no node is installed.
 node_meta_path() {
-    local t
-    for t in validator observer; do
-        if [[ -f "/etc/telcoin/${t}/.node-meta" ]]; then
-            echo "/etc/telcoin/${t}/.node-meta"
-            return 0
-        fi
-    done
-    return 1
+    local unified="${TN_ROOT_PREFIX:-}/etc/telcoin/.node-meta"
+    [[ -f "$unified" ]] && { printf '%s\n' "$unified"; return 0; }
+    tn_legacy_node_meta_path
 }
 
 # meta_get <key> [file] — echo KEY's value (everything after the first '='). Returns
@@ -1852,9 +1855,7 @@ tn_node_launch_flags() {
 # (binary/source). Returns 1 if no node service is present.
 tn_node_launch_target() {
     local svc method meta file
-    if   [[ -f /etc/systemd/system/telcoin-validator.service ]]; then svc=telcoin-validator
-    elif [[ -f /etc/systemd/system/telcoin-observer.service  ]]; then svc=telcoin-observer
-    else return 1; fi
+    svc="$(tn_resolve_service)" || return 1
     meta="$(node_meta_path || true)"
     method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
     # Docker installs now run via a start wrapper too (the BLS LoadCredential change moved

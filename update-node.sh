@@ -19,9 +19,9 @@
 #   sudo bash update-node.sh --discard      # drop any pending prepared update
 #
 # What is NEVER touched by this script:
-#   - BLS / P2P keys at /var/lib/telcoin/<type>/node-keys/
+#   - BLS / P2P keys in <data_dir>/node-keys/
 #   - node-info.yaml (primary_network_key, multiaddrs)
-#   - BLS passphrase at /etc/telcoin/<type>/bls-passphrase
+#   - BLS passphrase at <config_dir>/bls-passphrase
 #   - Chain config files (genesis/committee/parameters)
 #   - Listener multiaddrs and other Environment= lines in the unit file
 # =============================================================================
@@ -54,36 +54,33 @@ ASSUME_YES=false
 # DETECTION
 # =============================================================================
 
+# Set NODE_TYPE + the type-specific RPC_URL. The systemd unit BASE name lives in
+# SERVICE_NAME and is resolved separately (tn_resolve_service) so it is "telcoin"
+# on a unified install and the legacy unit name on a legacy install.
 set_node_type() {
     case "$1" in
-        validator) NODE_TYPE="validator"; SERVICE_NAME="telcoin-validator"; RPC_URL="http://127.0.0.1:8545" ;;
-        observer)  NODE_TYPE="observer";  SERVICE_NAME="telcoin-observer";  RPC_URL="http://127.0.0.1:8541" ;;
+        validator) NODE_TYPE="validator"; RPC_URL="http://127.0.0.1:8545" ;;
+        observer)  NODE_TYPE="observer";  RPC_URL="http://127.0.0.1:8541" ;;
     esac
 }
 
 detect_node_type() {
-    [[ "$NODE_TYPE_EXPLICITLY_SET" == "true" ]] && return 0
-    local val="/etc/systemd/system/telcoin-validator.service"
-    local obs="/etc/systemd/system/telcoin-observer.service"
-    if   [[ -f "$val" ]] && [[ -f "$obs" ]]; then
-        set_node_type validator
-        print_info "Both node types installed -- defaulting to validator. Use --observer to switch."
-    elif [[ -f "$val" ]]; then
-        set_node_type validator
-        print_info "Detected node type: validator"
-    elif [[ -f "$obs" ]]; then
-        set_node_type observer
-        print_info "Detected node type: observer"
-    else
+    # Resolve the unit base name first so SERVICE_NAME is correct regardless of
+    # whether the node type was forced via --validator/--observer.
+    SERVICE_NAME="$(tn_resolve_service)" || {
         print_error "No Telcoin node installation found on this server."
         print_info "Run setup-observer.sh or setup-validator.sh first."
         exit 1
-    fi
+    }
+    [[ "$NODE_TYPE_EXPLICITLY_SET" == "true" ]] && return 0
+    set_node_type "$(tn_resolve_node_type)"
+    print_info "Detected node type: ${NODE_TYPE}"
 }
 
 # Read INSTALL_METHOD from .node-meta. Returns "source" | "docker" | "existing" | "".
 detect_install_method() {
-    local meta="/etc/telcoin/${NODE_TYPE}/.node-meta"
+    local meta
+    meta="$(node_meta_path)" || return 0
     if [[ -f "$meta" ]]; then
         grep "^INSTALL_METHOD=" "$meta" 2>/dev/null | cut -d= -f2 || true
     fi
@@ -92,16 +89,18 @@ detect_install_method() {
 # Read NETWORK from .node-meta first, then fall back to inspecting the
 # chain config's chain_name. Returns "testnet" | "mainnet" | "" (unknown).
 detect_network() {
-    local meta="/etc/telcoin/${NODE_TYPE}/.node-meta"
+    local meta
+    meta="$(node_meta_path || true)"
     local net=""
-    if [[ -f "$meta" ]]; then
+    if [[ -n "$meta" && -f "$meta" ]]; then
         net=$(grep "^NETWORK=" "$meta" 2>/dev/null | cut -d= -f2 || true)
         [[ -n "$net" ]] && { echo "$net"; return 0; }
     fi
     # Fall back: read genesis.yaml. Older installs do not write NETWORK to
     # .node-meta. Match the well-known chain_name values from common.sh.
-    local data_dir="/var/lib/telcoin/${NODE_TYPE}"
-    [[ -f "$meta" ]] && {
+    local data_dir
+    data_dir="$(tn_resolve_data_dir)"
+    [[ -n "$meta" && -f "$meta" ]] && {
         local meta_dir
         meta_dir=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
         [[ -n "$meta_dir" ]] && [[ -d "$meta_dir" ]] && data_dir="$meta_dir"
@@ -133,11 +132,11 @@ detect_current_source_ref() {
 
 # =============================================================================
 # PENDING-STATE FILE
-# /etc/telcoin/<type>/.pending-update
+# <config_dir>/.pending-update
 # =============================================================================
 
 pending_state_path() {
-    echo "/etc/telcoin/${NODE_TYPE}/.pending-update"
+    echo "$(tn_resolve_config_dir)/.pending-update"
 }
 
 read_pending_state() {
@@ -439,7 +438,7 @@ prepare_source_build() {
         *)
             print_warn "Could not determine network from .node-meta or genesis.yaml."
             print_warn "Defaulting to testnet (--features adiri) since mainnet has not launched."
-            print_warn "Pass NETWORK=mainnet in /etc/telcoin/${NODE_TYPE}/.node-meta to override."
+            print_warn "Pass NETWORK=mainnet in $(node_meta_path || echo "$(tn_resolve_config_dir)/.node-meta") to override."
             cargo_features="--features adiri"
             ;;
     esac
@@ -1261,7 +1260,7 @@ main() {
         *)
             print_error "Install method is unknown -- cannot proceed safely."
             print_info "Re-run setup-${NODE_TYPE}.sh to rewrite .node-meta, or supply"
-            print_info "INSTALL_METHOD={source|docker} manually in /etc/telcoin/${NODE_TYPE}/.node-meta"
+            print_info "INSTALL_METHOD={source|docker} manually in $(node_meta_path || echo "$(tn_resolve_config_dir)/.node-meta")"
             exit 1
             ;;
     esac

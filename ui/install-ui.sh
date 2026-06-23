@@ -181,7 +181,12 @@ fi
 info "Writing sudoers whitelist ${SUDOERS_FILE}..."
 cat > "${SUDOERS_FILE}" <<EOF
 # Managed by install-ui.sh -- Telcoin Node Manager UI.
-# Grants ${SVC_USER} ONLY start/stop/restart on the two node services.
+# Grants ${SVC_USER} ONLY start/stop/restart on the node service.
+# Unified unit (post-unification installs: single `telcoin.service`).
+${SVC_USER} ALL=(ALL) NOPASSWD: /bin/systemctl start telcoin
+${SVC_USER} ALL=(ALL) NOPASSWD: /bin/systemctl stop telcoin
+${SVC_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart telcoin
+# legacy per-role units (pre-unification installs)
 ${SVC_USER} ALL=(ALL) NOPASSWD: /bin/systemctl start telcoin-observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /bin/systemctl stop telcoin-observer
 ${SVC_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart telcoin-observer

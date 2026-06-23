@@ -19,23 +19,30 @@ readonly SCRIPT_VERSION="1.2.6"
 # HELPERS
 # =============================================================================
 
+# Echo the config dir for a discovered unit. The resolvers (fallback.sh) already
+# pick /etc/telcoin for the unified install and /etc/telcoin/<role> for a legacy
+# install -- this thin wrapper just keeps the call sites readable. The unit name
+# is accepted for symmetry with the rest of the per-unit teardown; the resolver
+# keys off the on-disk .node-meta layout (there is one node per VM).
+config_dir_for_unit() {
+    tn_resolve_config_dir
+}
+
 # Resolve a node's data dir from its .node-meta (DATA_DIR=), falling back to the
-# legacy /var/lib/telcoin/<type> for nodes installed before DATA_DIR was recorded.
-# Mirrors check-node.sh's detect_data_dir so all scripts agree on the path. Always
-# echoes a path and returns 0 so set -e never trips.
+# resolver's path (/var/lib/telcoin for the unified install, /var/lib/telcoin/<role>
+# for a legacy install). Mirrors check-node.sh so all scripts agree on the path.
+# Always echoes a path and returns 0 so set -e never trips.
 detect_data_dir() {
-    local node_type="$1"
-    local meta="/etc/telcoin/${node_type}/.node-meta"
-    local default="/var/lib/telcoin/${node_type}"
+    local meta dd
+    meta="$(tn_resolve_config_dir)/.node-meta"
     if [[ -f "$meta" ]]; then
-        local dd
         dd=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
         if [[ -n "$dd" ]] && [[ -d "$dd" ]]; then
             echo "$dd"
             return 0
         fi
     fi
-    echo "$default"
+    tn_resolve_data_dir
     return 0
 }
 
@@ -61,89 +68,101 @@ wait_for_service_stopped() {
     done
 }
 
-# True if the other node's service file references the given Docker image.
-image_used_by_other_node() {
-    local image="$1"
-    local self="$2"  # "observer" | "validator"
-    local other_unit
-    if [[ "$self" == "observer" ]]; then
-        other_unit="/etc/systemd/system/telcoin-validator.service"
-    else
-        other_unit="/etc/systemd/system/telcoin-observer.service"
-    fi
-    [[ -f "$other_unit" ]] || return 1
-    grep -qF "$image" "$other_unit"
+# Echo every installed node unit file EXCEPT the one named by $1 (its base name).
+# The candidate base names come from tn_all_node_services (telcoin + legacy), so
+# a teardown of one node can check whether any sibling unit still present here
+# references a shared image/user before removing it. One line per unit file.
+other_node_unit_files() {
+    local self="$1" name unit
+    while IFS= read -r name; do
+        [[ -z "$name" || "$name" == "$self" ]] && continue
+        unit="/etc/systemd/system/${name}.service"
+        [[ -f "$unit" ]] && printf '%s\n' "$unit"
+    done < <(tn_all_node_services)
 }
 
-# True if the other node's service file uses the given service user.
+# True if a sibling node's service file references the given Docker image.
+image_used_by_other_node() {
+    local image="$1"
+    local self="$2"   # the unit base name being removed
+    local other_unit
+    while IFS= read -r other_unit; do
+        [[ -z "$other_unit" ]] && continue
+        grep -qF "$image" "$other_unit" && return 0
+    done < <(other_node_unit_files "$self")
+    return 1
+}
+
+# True if a sibling node's service file uses the given service user.
 user_used_by_other_node() {
     local user="$1"
-    local self="$2"
+    local self="$2"   # the unit base name being removed
     local other_unit
-    if [[ "$self" == "observer" ]]; then
-        other_unit="/etc/systemd/system/telcoin-validator.service"
-    else
-        other_unit="/etc/systemd/system/telcoin-observer.service"
-    fi
-    [[ -f "$other_unit" ]] || return 1
-    grep -qE "^(User|--user)[ =]${user}([:[:space:]]|$)" "$other_unit" || \
-        grep -qE "^User=${user}$" "$other_unit"
+    while IFS= read -r other_unit; do
+        [[ -z "$other_unit" ]] && continue
+        if grep -qE "^(User|--user)[ =]${user}([:[:space:]]|$)" "$other_unit" || \
+           grep -qE "^User=${user}$" "$other_unit"; then
+            return 0
+        fi
+    done < <(other_node_unit_files "$self")
+    return 1
 }
 
 # =============================================================================
 # DETECTION
 # =============================================================================
 
+# Per-unit detection state, keyed by the unit BASE name (the new "telcoin" unit or,
+# for a legacy install, one of the legacy unit names from tn_all_node_services).
+# INSTALLED_UNITS lists whatever was found present; the maps carry that unit's
+# install method/user/group. Operators run one node per VM, so this is normally a
+# single entry -- but a stray legacy unit alongside the new one is still torn down.
+declare -a INSTALLED_UNITS=()
+declare -A UNIT_DOCKER=()
+declare -A UNIT_USER=()
+declare -A UNIT_GROUP=()
+declare -A UNIT_TYPE=()
+
+# Populate the per-unit state above by enumerating every candidate unit name from
+# tn_all_node_services (telcoin + the legacy names) and inspecting the ones that
+# are actually installed. .node-meta is authoritative; the unit's User=/Group= is
+# the fallback. Node type / config dir come from the resolvers.
 detect_node_installs() {
     set +e  # grep returning no match is fine here
-    OBSERVER_INSTALLED=false
-    VALIDATOR_INSTALLED=false
-    OBSERVER_DOCKER=false
-    VALIDATOR_DOCKER=false
-    OBSERVER_SERVICE_USER=""
-    VALIDATOR_SERVICE_USER=""
-    OBSERVER_SERVICE_GROUP=""
-    VALIDATOR_SERVICE_GROUP=""
+    INSTALLED_UNITS=()
+    UNIT_DOCKER=(); UNIT_USER=(); UNIT_GROUP=(); UNIT_TYPE=()
 
-    # Check observer
-    if [[ -f /etc/systemd/system/telcoin-observer.service ]]; then
-        OBSERVER_INSTALLED=true
+    local unit_name unit_file meta method ntype
+    while IFS= read -r unit_name; do
+        [[ -z "$unit_name" ]] && continue
+        unit_file="/etc/systemd/system/${unit_name}.service"
+        [[ -f "$unit_file" ]] || continue
 
-        # Read from metadata file first (most reliable, set during setup)
-        if [[ -f /etc/telcoin/observer/.node-meta ]]; then
-            OBSERVER_SERVICE_USER=$(grep "^HOST_SERVICE_USER=" /etc/telcoin/observer/.node-meta | cut -d= -f2 || echo "")
-            OBSERVER_SERVICE_GROUP=$(grep "^HOST_SERVICE_GROUP=" /etc/telcoin/observer/.node-meta | cut -d= -f2 || echo "")
-            local obs_method
-            obs_method=$(grep "^INSTALL_METHOD=" /etc/telcoin/observer/.node-meta | cut -d= -f2 || echo "")
-            [[ "$obs_method" == "docker" ]] && OBSERVER_DOCKER=true
+        INSTALLED_UNITS+=("$unit_name")
+        UNIT_DOCKER["$unit_name"]=false
+        UNIT_USER["$unit_name"]=""
+        UNIT_GROUP["$unit_name"]=""
+
+        # Node type + config dir resolve from the on-disk layout (one node per VM).
+        ntype="$(tn_resolve_node_type 2>/dev/null || echo validator)"
+        UNIT_TYPE["$unit_name"]="$ntype"
+        meta="$(config_dir_for_unit "$unit_name")/.node-meta"
+
+        # Read from metadata file first (most reliable, set during setup).
+        if [[ -f "$meta" ]]; then
+            UNIT_USER["$unit_name"]=$(grep "^HOST_SERVICE_USER=" "$meta" | cut -d= -f2 || echo "")
+            UNIT_GROUP["$unit_name"]=$(grep "^HOST_SERVICE_GROUP=" "$meta" | cut -d= -f2 || echo "")
+            method=$(grep "^INSTALL_METHOD=" "$meta" | cut -d= -f2 || echo "")
+            [[ "$method" == "docker" ]] && UNIT_DOCKER["$unit_name"]=true
         else
-            # Fall back to reading service file
-            OBSERVER_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
-            OBSERVER_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-observer.service | cut -d= -f2 || echo "")
-            if grep -q "docker" /etc/systemd/system/telcoin-observer.service 2>/dev/null; then
-                OBSERVER_DOCKER=true
+            # Fall back to reading the service file.
+            UNIT_USER["$unit_name"]=$(grep "^User=" "$unit_file" | cut -d= -f2 || echo "")
+            UNIT_GROUP["$unit_name"]=$(grep "^Group=" "$unit_file" | cut -d= -f2 || echo "")
+            if grep -q "docker" "$unit_file" 2>/dev/null; then
+                UNIT_DOCKER["$unit_name"]=true
             fi
         fi
-    fi
-
-    # Check validator
-    if [[ -f /etc/systemd/system/telcoin-validator.service ]]; then
-        VALIDATOR_INSTALLED=true
-
-        if [[ -f /etc/telcoin/validator/.node-meta ]]; then
-            VALIDATOR_SERVICE_USER=$(grep "^HOST_SERVICE_USER=" /etc/telcoin/validator/.node-meta | cut -d= -f2 || echo "")
-            VALIDATOR_SERVICE_GROUP=$(grep "^HOST_SERVICE_GROUP=" /etc/telcoin/validator/.node-meta | cut -d= -f2 || echo "")
-            local val_method
-            val_method=$(grep "^INSTALL_METHOD=" /etc/telcoin/validator/.node-meta | cut -d= -f2 || echo "")
-            [[ "$val_method" == "docker" ]] && VALIDATOR_DOCKER=true
-        else
-            VALIDATOR_SERVICE_USER=$(grep "^User=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
-            VALIDATOR_SERVICE_GROUP=$(grep "^Group=" /etc/systemd/system/telcoin-validator.service | cut -d= -f2 || echo "")
-            if grep -q "docker" /etc/systemd/system/telcoin-validator.service 2>/dev/null; then
-                VALIDATOR_DOCKER=true
-            fi
-        fi
-    fi
+    done < <(tn_all_node_services)
     set -e
 }
 
@@ -151,8 +170,10 @@ show_detected() {
     set +e
     print_header "Detected Node Installations"
 
-    if [[ "$OBSERVER_INSTALLED" == "false" ]] && [[ "$VALIDATOR_INSTALLED" == "false" ]]; then
-        # Check for partial installs (directories exist but no service file)
+    if [[ ${#INSTALLED_UNITS[@]} -eq 0 ]]; then
+        # Check for partial installs (directories exist but no service file). The
+        # unified dirs (/etc/telcoin, /var/lib/telcoin) are the parents of any
+        # legacy role subdir, so removing them clears a half-removed legacy install.
         local partial=false
         local partial_items=()
         [[ -d /var/lib/telcoin ]]    && partial=true && partial_items+=("/var/lib/telcoin")
@@ -191,31 +212,18 @@ show_detected() {
         exit 0
     fi
 
-    if [[ "$OBSERVER_INSTALLED" == "true" ]]; then
-        local install_type="binary/source"
-        [[ "$OBSERVER_DOCKER" == "true" ]] && install_type="Docker"
-        print_ok "Observer node detected"
+    local unit install_type status
+    for unit in "${INSTALLED_UNITS[@]}"; do
+        install_type="binary/source"
+        [[ "${UNIT_DOCKER[$unit]}" == "true" ]] && install_type="Docker"
+        print_ok "${UNIT_TYPE[$unit]^} node detected (${unit})"
         print_info "  Install type:  ${install_type}"
-        print_info "  Service user:  ${OBSERVER_SERVICE_USER:-unknown}"
-        print_info "  Service group: ${OBSERVER_SERVICE_GROUP:-(none)}"
-        local obs_status
-        obs_status=$(systemctl is-active telcoin-observer 2>/dev/null || echo "inactive")
-        print_info "  Status:        ${obs_status}"
+        print_info "  Service user:  ${UNIT_USER[$unit]:-unknown}"
+        print_info "  Service group: ${UNIT_GROUP[$unit]:-(none)}"
+        status=$(systemctl is-active "$unit" 2>/dev/null || echo "inactive")
+        print_info "  Status:        ${status}"
         echo ""
-    fi
-
-    if [[ "$VALIDATOR_INSTALLED" == "true" ]]; then
-        local install_type="binary/source"
-        [[ "$VALIDATOR_DOCKER" == "true" ]] && install_type="Docker"
-        print_ok "Validator node detected"
-        print_info "  Install type:  ${install_type}"
-        print_info "  Service user:  ${VALIDATOR_SERVICE_USER:-unknown}"
-        print_info "  Service group: ${VALIDATOR_SERVICE_GROUP:-(none)}"
-        local val_status
-        val_status=$(systemctl is-active telcoin-validator 2>/dev/null || echo "inactive")
-        print_info "  Status:        ${val_status}"
-        echo ""
-    fi
+    done
 }
 
 # =============================================================================
@@ -234,7 +242,7 @@ stop_and_disable_service() {
 
 remove_docker_container() {
     local container_name="$1"
-    local self_type="${2:-}"  # observer | validator | "" (skip sibling check)
+    local self_unit="${2:-}"  # unit base name being removed ("" skips sibling check)
     print_step "Removing Docker container: ${container_name}..."
 
     # Capture the image BEFORE removing the container, since docker inspect
@@ -250,9 +258,9 @@ remove_docker_container() {
     fi
 
     if [[ -n "$image" ]]; then
-        # If the other node's unit references the same image, skip removal
-        # so we don't break the sibling node.
-        if [[ -n "$self_type" ]] && image_used_by_other_node "$image" "$self_type"; then
+        # If a sibling node's unit references the same image, skip removal
+        # so we don't break it.
+        if [[ -n "$self_unit" ]] && image_used_by_other_node "$image" "$self_unit"; then
             print_info "Image '${image}' is also used by the other Telcoin node -- keeping it."
             return
         fi
@@ -286,7 +294,7 @@ remove_keys() {
     local node_type="$1"
     local keys_dir config_dir
     keys_dir="$(detect_data_dir "$node_type")/node-keys"
-    config_dir="/etc/telcoin/${node_type}"
+    config_dir="$(tn_resolve_config_dir)"
 
     if [[ -d "$keys_dir" ]] || [[ -d "$config_dir" ]]; then
         echo ""
@@ -314,10 +322,9 @@ remove_keys() {
         read -r -p "  Type DELETE to confirm permanent key removal, or Enter to skip: " confirm_text
         if [[ "$confirm_text" == "DELETE" ]]; then
             rm -rf "$keys_dir"
-            rm -rf "$config_dir"
-            rm -f "/etc/telcoin/${node_type}/.node-meta" 2>/dev/null || true
-            # Also remove TPM sealed files if present
+            # Also remove TPM sealed files if present (before the dir itself).
             tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
+            rm -rf "$config_dir"
             print_ok "Keys and passphrase removed"
         else
             print_info "Keys kept -- skipping key removal"
@@ -330,10 +337,9 @@ remove_shared_components() {
     local remove_source=false
     local remove_user=false
 
-    # Only remove shared components if no other nodes remain
-    local remaining_nodes=0
-    [[ "$OBSERVER_INSTALLED" == "true" ]] && (( ++remaining_nodes ))
-    [[ "$VALIDATOR_INSTALLED" == "true" ]] && (( ++remaining_nodes ))
+    # Only remove shared components if no other nodes remain. INSTALLED_UNITS is
+    # refreshed by detect_node_installs and pruned as each unit is torn down.
+    local remaining_nodes=${#INSTALLED_UNITS[@]}
 
     # If we're removing all nodes, offer to clean shared components
     if [[ $remaining_nodes -le 1 ]]; then
@@ -368,7 +374,7 @@ remove_shared_components() {
 remove_service_user() {
     local service_user="$1"
     local service_group="$2"
-    local self_type="${3:-}"  # observer | validator | "" (skip sibling check)
+    local self_unit="${3:-}"  # unit base name being removed ("" skips sibling check)
 
     # Fallback when .node-meta and the unit were both missing/unreadable (or the
     # unit ran as root, e.g. docker): recover the service account from the
@@ -381,9 +387,9 @@ remove_service_user() {
         return
     fi
 
-    # If the other node's unit still references this user, deleting would
-    # leave the sibling broken. Refuse and tell the operator.
-    if [[ -n "$self_type" ]] && user_used_by_other_node "$service_user" "$self_type"; then
+    # If a sibling node's unit still references this user, deleting would
+    # leave it broken. Refuse and tell the operator.
+    if [[ -n "$self_unit" ]] && user_used_by_other_node "$service_user" "$self_unit"; then
         print_info "User '${service_user}' is still in use by the other Telcoin node -- keeping it."
         return
     fi
@@ -447,13 +453,14 @@ remove_ui_components() {
     print_ok "Telcoin Node Manager UI removed"
 }
 
-# Interactive: offer to also remove the web UI. `other_unit` is the sibling
-# node's unit; if it still exists we warn (the UI manages it too).
+# Interactive: offer to also remove the web UI. $1 is the unit base name just
+# removed; if any SIBLING node unit is still present we warn (the UI manages it
+# too). The sibling list comes from tn_all_node_services via other_node_unit_files.
 offer_ui_removal() {
-    local other_unit="$1"
+    local self_unit="$1"
     [[ -d /opt/telcoin-ui || -f /etc/systemd/system/telcoin-ui.service ]] || return 0
     echo ""
-    if [[ -f "$other_unit" ]]; then
+    if [[ -n "$(other_node_unit_files "$self_unit")" ]]; then
         print_warn "The Node Manager UI also manages the other Telcoin node still installed here."
     fi
     if confirm "Also remove the Telcoin Node Manager UI (web dashboard)?"; then
@@ -466,8 +473,8 @@ offer_ui_removal() {
 # =============================================================================
 
 # Idempotent host-wide teardown of the opt-in add-ons. Safe to call even if none
-# were enabled (each block guards on the component existing). Called from both the
-# observer and validator full-removal flows.
+# were enabled (each block guards on the component existing). Called from the
+# node full-removal flow.
 remove_testnet_addons() {
     # --- Alloy log shipper -----------------------------------------------------
     if [[ -f /etc/systemd/system/telcoin-alloy.service ]] || systemctl list-unit-files 2>/dev/null | grep -q '^telcoin-alloy.service'; then
@@ -507,37 +514,37 @@ remove_testnet_addons() {
 }
 
 # =============================================================================
-# REMOVE OBSERVER
+# REMOVE A NODE  (drives the unit/container/dir teardown from the resolvers)
 # =============================================================================
 
-remove_observer() {
-    print_header "Remove Observer Node"
-
-    print_warn "This will remove the observer node from this server."
-    echo ""
-
-    if ! confirm "Proceed with observer node removal?"; then
-        print_info "Cancelled -- no changes made."
-        echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
-    fi
-
-    echo ""
+# Tear down a SINGLE installed node unit and everything tied to it: the systemd
+# unit, the docker container (when the install method is docker), chain data,
+# keys/config, the host-wide testnet add-ons, shared components, and the service
+# user. $1 is the unit base name (the new "telcoin" unit or a legacy unit name)
+# discovered by detect_node_installs; its node type / dirs come from the resolvers.
+# Prunes the unit from INSTALLED_UNITS so a follow-on remove_shared_components
+# sees the correct remaining count.
+remove_node_unit() {
+    local unit="$1"
+    local ntype="${UNIT_TYPE[$unit]:-$(tn_resolve_node_type)}"
 
     # Stop service
-    stop_and_disable_service "telcoin-observer"
+    stop_and_disable_service "$unit"
 
-    # Docker container if applicable
-    if [[ "$OBSERVER_DOCKER" == "true" ]]; then
-        remove_docker_container "telcoin-observer" "observer"
+    # Docker container if applicable. The container shares the unit's base name
+    # (new install: telcoin; legacy: telcoin-<role>); confirm via the resolver,
+    # then attempt removal by that name and guard the shared image.
+    if [[ "${UNIT_DOCKER[$unit]:-false}" == "true" ]]; then
+        local ctr
+        ctr="$(tn_resolve_container 2>/dev/null || echo "$unit")"
+        remove_docker_container "$ctr" "$unit"
     fi
 
     # Chain data
-    remove_chain_data "observer"
+    remove_chain_data "$ntype"
 
     # Keys -- separate explicit confirmation
-    remove_keys "observer"
+    remove_keys "$ntype"
 
     # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
     remove_testnet_addons
@@ -546,32 +553,35 @@ remove_observer() {
     remove_shared_components
 
     # Service user
-    remove_service_user "$OBSERVER_SERVICE_USER" "$OBSERVER_SERVICE_GROUP" "observer"
+    remove_service_user "${UNIT_USER[$unit]:-}" "${UNIT_GROUP[$unit]:-}" "$unit"
 
     echo ""
-    print_ok "Observer node removal complete"
-    OBSERVER_INSTALLED=false
+    print_ok "${ntype^} node removal complete (${unit})"
+
+    # Prune from the installed set so remaining-node accounting stays correct.
+    local -a kept=()
+    local u
+    for u in "${INSTALLED_UNITS[@]}"; do
+        [[ "$u" == "$unit" ]] || kept+=("$u")
+    done
+    INSTALLED_UNITS=("${kept[@]}")
 
     report_orphaned_groups
 
-    # Offer to also remove the web UI (warn if the validator still uses it).
-    offer_ui_removal "/etc/systemd/system/telcoin-validator.service"
-
-    echo ""
-    read -r -p "  Press Enter to return to menu..."
+    # Offer to also remove the web UI (warn if a sibling node still uses it).
+    offer_ui_removal "$unit"
 }
 
-# =============================================================================
-# REMOVE VALIDATOR
-# =============================================================================
+# Interactive entry point: confirm, then tear down every installed node unit
+# (the new telcoin unit AND any legacy unit still present). Iterates a snapshot
+# of INSTALLED_UNITS so the prune inside remove_node_unit doesn't disturb the loop.
+remove_all_nodes() {
+    print_header "Remove Telcoin Node"
 
-remove_validator() {
-    print_header "Remove Validator Node"
-
-    print_warn "This will remove the validator node from this server."
+    print_warn "This will remove the Telcoin node(s) from this server."
     echo ""
 
-    if ! confirm "Proceed with validator node removal?"; then
+    if ! confirm "Proceed with node removal?"; then
         print_info "Cancelled -- no changes made."
         echo ""
         read -r -p "  Press Enter to return to menu..."
@@ -580,37 +590,11 @@ remove_validator() {
 
     echo ""
 
-    # Stop service
-    stop_and_disable_service "telcoin-validator"
-
-    # Docker container if applicable
-    if [[ "$VALIDATOR_DOCKER" == "true" ]]; then
-        remove_docker_container "telcoin-validator" "validator"
-    fi
-
-    # Chain data
-    remove_chain_data "validator"
-
-    # Keys -- separate explicit confirmation
-    remove_keys "validator"
-
-    # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
-    remove_testnet_addons
-
-    # Shared components
-    remove_shared_components
-
-    # Service user
-    remove_service_user "$VALIDATOR_SERVICE_USER" "$VALIDATOR_SERVICE_GROUP" "validator"
-
-    echo ""
-    print_ok "Validator node removal complete"
-    VALIDATOR_INSTALLED=false
-
-    report_orphaned_groups
-
-    # Offer to also remove the web UI (warn if the observer still uses it).
-    offer_ui_removal "/etc/systemd/system/telcoin-observer.service"
+    local -a targets=("${INSTALLED_UNITS[@]}")
+    local unit
+    for unit in "${targets[@]}"; do
+        remove_node_unit "$unit"
+    done
 
     echo ""
     read -r -p "  Press Enter to return to menu..."
@@ -627,53 +611,23 @@ wipe_chain_data_only() {
     print_info "The node will resync from scratch when restarted."
     echo ""
 
-    local choice
-    if [[ "$OBSERVER_INSTALLED" == "true" ]] && [[ "$VALIDATOR_INSTALLED" == "true" ]]; then
-        echo "  1) Wipe observer chain data"
-        echo "  2) Wipe validator chain data"
-        echo "  3) Wipe both"
-        echo "  4) Cancel"
+    # One node per VM is the norm, but a legacy unit may coexist -- offer each
+    # installed unit individually so the operator confirms per node. Units come
+    # from detect_node_installs (driven by tn_all_node_services).
+    local unit ntype ddir
+    for unit in "${INSTALLED_UNITS[@]}"; do
+        ntype="${UNIT_TYPE[$unit]:-node}"
+        print_warn "This will wipe all ${ntype} chain data (${unit}). The node will resync."
+        if confirm "Wipe ${ntype} chain data?"; then
+            ddir="$(detect_data_dir "$ntype")"
+            wait_for_service_stopped "$unit"
+            rm -rf "${ddir}/db"
+            systemctl start "$unit" 2>/dev/null || true
+            print_ok "${ntype^} chain data wiped -- node restarted (${unit})"
+        fi
         echo ""
-        read -r -p "  Enter choice [1-4]: " choice
-    elif [[ "$OBSERVER_INSTALLED" == "true" ]]; then
-        choice=1
-    elif [[ "$VALIDATOR_INSTALLED" == "true" ]]; then
-        choice=2
-    fi
+    done
 
-    case "$choice" in
-        1)
-            print_warn "This will wipe all observer chain data. The node will resync."
-            if confirm "Wipe observer chain data?"; then
-                wait_for_service_stopped telcoin-observer
-                rm -rf "$(detect_data_dir observer)/db"
-                systemctl start telcoin-observer 2>/dev/null || true
-                print_ok "Observer chain data wiped -- node restarted"
-            fi
-            ;;
-        2)
-            print_warn "This will wipe all validator chain data. The node will resync."
-            if confirm "Wipe validator chain data?"; then
-                wait_for_service_stopped telcoin-validator
-                rm -rf "$(detect_data_dir validator)/db"
-                systemctl start telcoin-validator 2>/dev/null || true
-                print_ok "Validator chain data wiped -- node restarted"
-            fi
-            ;;
-        3)
-            if confirm "Wipe chain data for both observer and validator?"; then
-                wait_for_service_stopped telcoin-observer
-                wait_for_service_stopped telcoin-validator
-                rm -rf "$(detect_data_dir observer)/db"
-                rm -rf "$(detect_data_dir validator)/db"
-                systemctl start telcoin-observer telcoin-validator 2>/dev/null || true
-                print_ok "Chain data wiped for both nodes -- nodes restarted"
-            fi
-            ;;
-        4|*) print_info "Cancelled" ;;
-    esac
-
-    echo ""
     read -r -p "  Press Enter to return to menu..."
 }
 
@@ -706,12 +660,25 @@ custom_is_excluded_path() {
         *telcoin-node-scripts*|*tn-node-deployment*) return 0 ;;   # the scripts themselves
         "${SCRIPT_DIR}"|"${SCRIPT_DIR}"/*) return 0 ;;
     esac
-    # Exclude the installed nodes' own data dirs (standard, even if on a custom drive).
-    local t dd
-    for t in observer validator; do
-        dd=$(detect_data_dir "$t")
-        [[ "$p" == "$dd" || "$p" == "$dd"/* ]] && return 0
-    done
+    # Exclude the installed node's own data dir (standard, even if on a custom
+    # drive). The resolver yields the single unified/legacy dir for this VM.
+    local dd
+    dd=$(detect_data_dir "$(tn_resolve_node_type 2>/dev/null || echo validator)")
+    [[ "$p" == "$dd" || "$p" == "$dd"/* ]] && return 0
+    return 1
+}
+
+# 0 (true) if a unit/container BASE name belongs to a node this tooling manages
+# (the new telcoin unit, either legacy unit, or the Node Manager UI) and so must
+# not be reported as a "custom" install. The node names come from
+# tn_all_node_services so no legacy literal is hardcoded here.
+custom_is_managed_name() {
+    local name="$1" n
+    [[ "$name" == "telcoin-ui" ]] && return 0
+    while IFS= read -r n; do
+        [[ -z "$n" ]] && continue
+        [[ "$name" == "$n" ]] && return 0
+    done < <(tn_all_node_services)
     return 1
 }
 
@@ -731,7 +698,8 @@ scan_custom_installs() {
     while IFS= read -r svc; do
         [[ -z "$svc" ]] && continue
         svcname=$(basename "$svc")
-        case "$svcname" in telcoin-observer.service|telcoin-validator.service|telcoin-ui.service) continue ;; esac
+        # Skip the units this tooling manages (telcoin / legacy / UI).
+        custom_is_managed_name "${svcname%.service}" && continue
         custom_svcs+=("$svc")
     done < <(grep -rlE 'telcoin-network|/tn-public' /etc/systemd/system/*.service 2>/dev/null || true)
     for svc in "${custom_svcs[@]}"; do
@@ -754,7 +722,8 @@ scan_custom_installs() {
         while IFS= read -r cline; do
             [[ -z "$cline" ]] && continue
             cname=${cline%%$'\t'*}
-            [[ "$cname" == "telcoin-observer" || "$cname" == "telcoin-validator" ]] && continue
+            # Skip the containers this tooling manages (telcoin / legacy names).
+            custom_is_managed_name "$cname" && continue
             custom_ctrs+=("$cline")
         done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
                    | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)
@@ -797,7 +766,7 @@ scan_custom_installs() {
                   -type f -name 'telcoin-network' 2>/dev/null || true)
 
     # --- Unmanaged processes (REPORT ONLY -- never killed) -----------------
-    local pid cmd cg
+    local pid cmd cg n managed
     while read -r pid cmd; do
         [[ -z "$pid" ]] && continue
         # Skip anything owned by a known systemd unit or by docker/containerd
@@ -805,8 +774,15 @@ scan_custom_installs() {
         # already covered by the container scan above).
         cg=$(cat "/proc/${pid}/cgroup" 2>/dev/null || true)
         case "$cg" in
-            *telcoin-observer*|*telcoin-validator*|*docker*|*containerd*) continue ;;
+            *docker*|*containerd*) continue ;;
         esac
+        # Skip cgroups owned by a unit this tooling manages (telcoin / legacy).
+        managed=false
+        while IFS= read -r n; do
+            [[ -z "$n" ]] && continue
+            [[ "$cg" == *"$n"* ]] && { managed=true; break; }
+        done < <(tn_all_node_services)
+        [[ "$managed" == "true" ]] && continue
         found=true
         print_warn "[CUSTOM] Unmanaged process: PID ${pid}"
         print_info  "  ${cmd}"
@@ -832,61 +808,33 @@ main_menu() {
         print_header "Telcoin Network -- Node Removal  v${SCRIPT_VERSION}"
         show_detected
 
-        echo "  What would you like to do?"
-        echo ""
-
-        if [[ "$OBSERVER_INSTALLED" == "true" ]] && [[ "$VALIDATOR_INSTALLED" == "true" ]]; then
-            echo "  1) Remove observer node"
-            echo "  2) Remove validator node"
-            echo "  3) Remove both nodes"
-            echo "  4) Wipe chain data only (keeps keys and config)"
-            echo "  s) Scan for non-standard / custom installs"
-            echo "  5) Exit"
-            echo ""
-            local choice
-            read -r -p "  Enter choice [1-5 or s]: " choice
-            case "$choice" in
-                1) remove_observer ;;
-                2) remove_validator ;;
-                3) remove_observer; remove_validator ;;
-                4) wipe_chain_data_only ;;
-                s|S) scan_custom_installs ;;
-                5) echo ""; print_info "Exiting."; exit 0 ;;
-                *) print_warn "Please enter 1-5 or s." ;;
-            esac
-        elif [[ "$OBSERVER_INSTALLED" == "true" ]]; then
-            echo "  1) Remove observer node"
-            echo "  2) Wipe chain data only (keeps keys and config)"
-            echo "  s) Scan for non-standard / custom installs"
-            echo "  3) Exit"
-            echo ""
-            local choice
-            read -r -p "  Enter choice [1-3 or s]: " choice
-            case "$choice" in
-                1) remove_observer ;;
-                2) wipe_chain_data_only ;;
-                s|S) scan_custom_installs ;;
-                3) echo ""; print_info "Exiting."; exit 0 ;;
-                *) print_warn "Please enter 1-3 or s." ;;
-            esac
-        elif [[ "$VALIDATOR_INSTALLED" == "true" ]]; then
-            echo "  1) Remove validator node"
-            echo "  2) Wipe chain data only (keeps keys and config)"
-            echo "  s) Scan for non-standard / custom installs"
-            echo "  3) Exit"
-            echo ""
-            local choice
-            read -r -p "  Enter choice [1-3 or s]: " choice
-            case "$choice" in
-                1) remove_validator ;;
-                2) wipe_chain_data_only ;;
-                s|S) scan_custom_installs ;;
-                3) echo ""; print_info "Exiting."; exit 0 ;;
-                *) print_warn "Please enter 1-3 or s." ;;
-            esac
-        else
+        # One node per VM is the norm, so a single set of actions covers it. If a
+        # legacy unit happens to coexist with the new one, "Remove node" tears down
+        # every installed unit (remove_all_nodes iterates them all).
+        if [[ ${#INSTALLED_UNITS[@]} -eq 0 ]]; then
             exit 0
         fi
+
+        echo "  What would you like to do?"
+        echo ""
+        if [[ ${#INSTALLED_UNITS[@]} -gt 1 ]]; then
+            echo "  1) Remove all detected Telcoin nodes"
+        else
+            echo "  1) Remove the Telcoin node"
+        fi
+        echo "  2) Wipe chain data only (keeps keys and config)"
+        echo "  s) Scan for non-standard / custom installs"
+        echo "  3) Exit"
+        echo ""
+        local choice
+        read -r -p "  Enter choice [1-3 or s]: " choice
+        case "$choice" in
+            1) remove_all_nodes ;;
+            2) wipe_chain_data_only ;;
+            s|S) scan_custom_installs ;;
+            3) echo ""; print_info "Exiting."; exit 0 ;;
+            *) print_warn "Please enter 1-3 or s." ;;
+        esac
     done
 }
 
@@ -932,21 +880,34 @@ json_remove() {
     case "$node_type" in observer|validator) ;; *) json_event error "invalid node type: ${node_type}"; return 1 ;; esac
     case "$scope" in service|data|keys) ;; *) json_event error "invalid scope: ${scope}"; return 1 ;; esac
 
-    local unit="/etc/systemd/system/telcoin-${node_type}.service"
-    if [[ ! -f "$unit" ]]; then
-        json_event error "node not installed: telcoin-${node_type}"
+    # Resolve the actually-installed node (unified telcoin unit, or a legacy unit)
+    # instead of assuming telcoin-<type>. The requested node_type must match what
+    # is installed -- one node per VM -- so a mismatched request still errors out
+    # exactly as before rather than silently removing the wrong node.
+    local svc unit installed_type
+    svc="$(tn_resolve_service)" || { json_event error "node not installed: ${node_type}"; return 1; }
+    installed_type="$(tn_resolve_node_type 2>/dev/null || echo "")"
+    if [[ -n "$installed_type" && "$installed_type" != "$node_type" ]]; then
+        json_event error "node not installed: ${node_type}"
         return 1
     fi
+    unit="/etc/systemd/system/${svc}.service"
 
-    # Detect docker BEFORE removing the unit (we read the install method from it).
+    # Detect docker BEFORE removing the unit (.node-meta is authoritative; fall
+    # back to the legacy inline `docker run` in the unit).
     local is_docker=false
-    grep -q "docker run" "$unit" 2>/dev/null && is_docker=true
+    local meta
+    meta="$(tn_resolve_config_dir)/.node-meta"
+    if [[ "$(grep '^INSTALL_METHOD=' "$meta" 2>/dev/null | cut -d= -f2- || true)" == "docker" ]] \
+       || grep -q "docker run" "$unit" 2>/dev/null; then
+        is_docker=true
+    fi
 
     # Resolve the service user/group BEFORE deleting the unit/.node-meta, so a
     # 'keys' (full) removal can clean up the account instead of orphaning it.
     # .node-meta is authoritative; the unit's User=/Group= is the fallback (but
     # docker units run as root, so ignore root and use the default service name).
-    local svc_user="" svc_group="" meta="/etc/telcoin/${node_type}/.node-meta"
+    local svc_user="" svc_group=""
     if [[ -f "$meta" ]]; then
         svc_user=$(grep '^HOST_SERVICE_USER=' "$meta" 2>/dev/null | cut -d= -f2- || true)
         svc_group=$(grep '^HOST_SERVICE_GROUP=' "$meta" 2>/dev/null | cut -d= -f2- || true)
@@ -961,16 +922,18 @@ json_remove() {
     local data_dir
     data_dir=$(detect_data_dir "$node_type")
 
-    json_event step "Stopping and disabling telcoin-${node_type}"
-    systemctl stop "telcoin-${node_type}" 2>/dev/null || true
-    systemctl disable "telcoin-${node_type}" 2>/dev/null || true
+    json_event step "Stopping and disabling ${svc}"
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
     rm -f "$unit"
     systemctl daemon-reload
 
     if [[ "$is_docker" == "true" ]] && command -v docker >/dev/null 2>&1; then
-        json_event step "Removing docker container telcoin-${node_type}"
-        docker stop "telcoin-${node_type}" 2>/dev/null || true
-        docker rm "telcoin-${node_type}" 2>/dev/null || true
+        local ctr
+        ctr="$(tn_resolve_container 2>/dev/null || echo "$svc")"
+        json_event step "Removing docker container ${ctr}"
+        docker stop "$ctr" 2>/dev/null || true
+        docker rm "$ctr" 2>/dev/null || true
     fi
 
     if [[ "$scope" == "data" || "$scope" == "keys" ]]; then
@@ -981,13 +944,14 @@ json_remove() {
     fi
 
     if [[ "$scope" == "keys" ]]; then
-        local config_dir="/etc/telcoin/${node_type}"
+        local config_dir
+        config_dir="$(tn_resolve_config_dir)"
         json_event step "Removing keys and config ${config_dir}"
         rm -rf "${data_dir}/node-keys" 2>/dev/null || true
-        rm -rf "$config_dir" 2>/dev/null || true
         if declare -f tpm_remove_sealed_files >/dev/null 2>&1; then
             tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
         fi
+        rm -rf "$config_dir" 2>/dev/null || true
 
         # Full removal: tear down the testnet add-ons too -- the Alloy log shipper holds
         # the mode-600 ingest token, and the WireGuard overlay leaves a sudo tnadmin user
@@ -998,10 +962,10 @@ json_remove() {
             remove_testnet_addons || true
         fi
 
-        # Full removal: also drop the service user/group (skip root; keep if the
-        # other node still uses the account).
+        # Full removal: also drop the service user/group (skip root; keep if a
+        # sibling node still uses the account).
         if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null \
-           && ! user_used_by_other_node "$svc_user" "$node_type"; then
+           && ! user_used_by_other_node "$svc_user" "$svc"; then
             json_event step "Removing service user ${svc_user}"
             rm -rf "/home/${svc_user}" 2>/dev/null || true
             userdel "$svc_user" 2>/dev/null || true
@@ -1045,7 +1009,7 @@ json_remove() {
         [[ "$ui_scheduled" == "true" ]] || json_event step "Could not schedule UI removal -- run remove-node.sh on the server to remove the UI"
     fi
 
-    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$node_type")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"telcoin-${node_type} removed (scope: ${scope})\"}"
+    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$node_type")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"${svc} removed (scope: ${scope})\"}"
 }
 
 run_json_mode() {

@@ -62,11 +62,44 @@ SETUP_VALIDATOR_SCRIPT="/opt/telcoin-ui-update/setup-validator.sh"
 
 die() { echo "$*" >&2; exit 1; }
 
+# Resolve the systemd unit BASE name for this node. New installs use the unified
+# `telcoin` unit (no role suffix; node type lives in /etc/telcoin/.node-meta);
+# legacy installs use the per-role telcoin-<role> unit. Prefer the unified unit
+# when present, then the legacy per-role unit, else default to the unified name
+# (the new-install happy path). Mirrors lib/fallback.sh's tn_resolve_service --
+# inlined as a probe here because fallback.sh is not shipped beside this
+# standalone helper (/usr/local/sbin/telcoin-ui-helper).
+service_for() {
+    local t="$1"
+    if [[ -f /etc/systemd/system/telcoin.service ]]; then
+        echo "telcoin"; return 0
+    fi
+    if [[ -f "/etc/systemd/system/telcoin-${t}.service" ]]; then
+        echo "telcoin-${t}"; return 0
+    fi
+    echo "telcoin"
+}
+
+# Resolve the active .node-meta path for type <t>: the unified install
+# (/etc/telcoin/.node-meta) is checked first, then the legacy per-role path. Both
+# setup scripts write the meta; new installs put it at /etc/telcoin, legacy installs
+# under /etc/telcoin/<type>. Inlined here (mirrors lib/fallback.sh) because this
+# standalone helper does not ship fallback.sh beside it.
+meta_path_for() {
+    local t="$1"
+    if [[ -f /etc/telcoin/.node-meta ]]; then
+        echo "/etc/telcoin/.node-meta"
+    else
+        echo "/etc/telcoin/${t}/.node-meta"
+    fi
+}
+
 # Resolve the wrapper script the node service ExecStart points at, falling back
 # to the conventional path. Mirrors server.py's wrapper_path().
 wrapper_for() {
-    local t="$1"
-    local unit="/etc/systemd/system/telcoin-${t}.service"
+    local t="$1" svc
+    svc="$(service_for "$t")"
+    local unit="/etc/systemd/system/${svc}.service"
     if [[ -f "$unit" ]]; then
         local exec_line
         exec_line="$(grep -m1 '^ExecStart=' "$unit" 2>/dev/null || true)"
@@ -77,7 +110,7 @@ wrapper_for() {
             return 0
         fi
     fi
-    echo "/opt/telcoin/start-telcoin-${t}.sh"
+    echo "/opt/telcoin/start-${svc}.sh"
 }
 
 require_type() {
@@ -98,11 +131,13 @@ require_container() {
 # Resolve a node's main log file from its unit (StandardOutput=append:<path>),
 # falling back to the conventional path. Mirrors server.py parse_service_file.
 log_path_for() {
-    local t="$1" unit="/etc/systemd/system/telcoin-${t}.service" p=""
+    local t="$1" svc p=""
+    svc="$(service_for "$t")"
+    local unit="/etc/systemd/system/${svc}.service"
     if [[ -f "$unit" ]]; then
         p="$(grep -m1 '^StandardOutput=append:' "$unit" 2>/dev/null | sed 's/^StandardOutput=append://' || true)"
     fi
-    [[ -n "$p" ]] || p="/var/log/telcoin/telcoin-${t}.log"
+    [[ -n "$p" ]] || p="/var/log/telcoin/${svc}.log"
     echo "$p"
 }
 
@@ -186,7 +221,8 @@ cmd_tracing_enable() {
     # Non-blocking: the durable change is the wrapper edit above. --no-block
     # returns as soon as the restart job is queued, so the caller never waits on
     # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
-    systemctl restart --no-block "telcoin-${t}" || die "failed to restart telcoin-${t}"
+    local svc; svc="$(service_for "$t")"
+    systemctl restart --no-block "$svc" || die "failed to restart $svc"
     echo "ok"
 }
 
@@ -209,7 +245,8 @@ cmd_tracing_disable() {
     # Non-blocking: the durable change is the wrapper edit above. --no-block
     # returns as soon as the restart job is queued, so the caller never waits on
     # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
-    systemctl restart --no-block "telcoin-${t}" || die "failed to restart telcoin-${t}"
+    local svc; svc="$(service_for "$t")"
+    systemctl restart --no-block "$svc" || die "failed to restart $svc"
     echo "ok"
 }
 
@@ -272,8 +309,9 @@ cmd_restart_count() {
     if [[ -z "$since" ]]; then
         echo 0; return 0
     fi
-    journalctl -u "telcoin-${t}" --since "$since" --no-pager 2>/dev/null \
-        | grep -c "Started telcoin-${t}.service" || true
+    local svc; svc="$(service_for "$t")"
+    journalctl -u "$svc" --since "$since" --no-pager 2>/dev/null \
+        | grep -c "Started ${svc}.service" || true
 }
 
 # =============================================================================
@@ -319,11 +357,14 @@ cmd_config_set() {
 # Resolve a node's data dir (where network-config + node-info.yaml live) from its
 # .node-meta DATA_DIR, falling back to the conventional path.
 data_dir_for() {
-    local t="$1" meta="/etc/telcoin/${t}/.node-meta" dd=""
+    local t="$1" meta dd=""
+    meta="$(meta_path_for "$t")"
     if [[ -f "$meta" ]]; then
         dd="$(grep -m1 '^DATA_DIR=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
     fi
-    [[ -n "$dd" ]] || dd="/var/lib/telcoin/${t}"
+    if [[ -z "$dd" ]]; then
+        [[ -f /etc/telcoin/.node-meta ]] && dd="/var/lib/telcoin" || dd="/var/lib/telcoin/${t}"
+    fi
     echo "$dd"
 }
 
@@ -360,7 +401,7 @@ cmd_set_hostname() {
 
     # Record in .node-meta as the persistent source of truth (survives data reads
     # and is available if a future version needs it re-applied on each start).
-    local meta="/etc/telcoin/${t}/.node-meta"
+    local meta; meta="$(meta_path_for "$t")"
     if [[ -f "$meta" ]]; then
         sed -i '/^ADVERTISED_NODE_NAME=/d' "$meta" 2>/dev/null || true
         printf 'ADVERTISED_NODE_NAME=%s\n' "$name" >> "$meta"
@@ -368,7 +409,8 @@ cmd_set_hostname() {
 
     # Restart so the node reads the new network-config. --no-block returns once
     # the restart job is queued (validators have a long stop window).
-    systemctl restart --no-block "telcoin-${t}" || die "failed to restart telcoin-${t}"
+    local svc; svc="$(service_for "$t")"
+    systemctl restart --no-block "$svc" || die "failed to restart $svc"
     echo "ok"
 }
 
@@ -506,13 +548,13 @@ _addons_meta() {
 # here). Empty output (rc 0) when the file is absent.
 cmd_meta_cat() {
     local t="$1"; require_type "$t"
-    local meta="/etc/telcoin/${t}/.node-meta"
+    local meta; meta="$(meta_path_for "$t")"
     [[ -f "$meta" ]] && cat "$meta" || true
 }
 
 cmd_addons_status() {
     local t="$1"; require_type "$t"
-    local meta="/etc/telcoin/${t}/.node-meta"
+    local meta; meta="$(meta_path_for "$t")"
     local network region hc obs vpn overlay pubkey extra
     network=$(_addons_meta "$meta" NETWORK)
     region=$(_addons_meta "$meta" REGION)
@@ -563,7 +605,6 @@ cmd_setup() {
     local addr="${TN_SETUP_ADDRESS:-}"
     local build_ref="${TN_SETUP_BUILD_REF:-}"
     local image="${TN_SETUP_DOCKER_IMAGE:-}"
-    local instance="${TN_SETUP_INSTANCE:-}"
     local ext_primary="${TN_SETUP_EXT_PRIMARY:-}"
     local ext_worker="${TN_SETUP_EXT_WORKER:-}"
     local lis_primary="${TN_SETUP_LIS_PRIMARY:-}"
@@ -583,7 +624,6 @@ cmd_setup() {
     [[ -z "$addr"      || "$addr"      =~ ^0x[0-9a-fA-F]{40}$ ]]            || die "invalid address"
     [[ -z "$build_ref" || "$build_ref" =~ ^[A-Za-z0-9._/-]+$ ]]            || die "invalid build ref"
     [[ -z "$image"     || ( "$image"   =~ ^[A-Za-z0-9._/:@-]+$ && "$image" == *:* ) ]] || die "invalid docker image"
-    [[ -z "$instance"  || "$instance"  =~ ^[1-9]$ ]]                       || die "invalid instance"
     local m
     for m in "$ext_primary" "$ext_worker" "$lis_primary" "$lis_worker"; do
         [[ -z "$m" || "$m" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] || die "invalid multiaddr: $m"
@@ -599,7 +639,6 @@ cmd_setup() {
     [[ -n "$addr" ]]        && args+=( --address "$addr" )
     [[ -n "$build_ref" ]]   && args+=( --build-ref "$build_ref" )
     [[ -n "$image" ]]       && args+=( --docker-image "$image" )
-    [[ -n "$instance" ]]    && args+=( --instance "$instance" )
     [[ -n "$ext_primary" ]] && args+=( --external-primary "$ext_primary" )
     [[ -n "$ext_worker" ]]  && args+=( --external-worker "$ext_worker" )
     [[ -n "$lis_primary" ]] && args+=( --listener-primary "$lis_primary" )

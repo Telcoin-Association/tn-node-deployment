@@ -13,6 +13,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Pull in the node-identity resolvers so the restart hint below can name the
+# actually-installed unit (the bare telcoin unit, or a legacy role-suffixed one).
+# This script does not source lib/common.sh, so source fallback.sh directly.
+# shellcheck source=lib/fallback.sh
+source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
+
 readonly SCRIPT_VERSION="1.1.55"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
@@ -368,8 +374,9 @@ download_updates() {
         echo ""
         print_info "All scripts are now up to date."
         print_info "If a node is running, restart it to apply any changes:"
-        print_info "  sudo systemctl restart telcoin-observer"
-        print_info "  sudo systemctl restart telcoin-validator"
+        local svc
+        svc="$(tn_resolve_service 2>/dev/null || echo telcoin)"
+        print_info "  sudo systemctl restart ${svc}"
     else
         print_warn "${success} updated, ${failed} failed"
         print_info "Check your internet connection and try again."
