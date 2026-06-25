@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/fallback.sh
 source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 
-readonly SCRIPT_VERSION="1.1.56"
+readonly SCRIPT_VERSION="1.1.57"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
