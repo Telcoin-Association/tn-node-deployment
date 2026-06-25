@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.63"
+UI_VERSION = "1.7.64"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -2602,6 +2602,7 @@ def api_firewall():
     return jsonify({
         "installed": False, "active": False, "default_incoming": "",
         "ssh_port": "", "ports": {p: False for p in FIREWALL_PORTS},
+        "caddy_managed": False, "desired": [], "unexpected": [],
         "error": err or out or "firewall status unavailable",
     })
 

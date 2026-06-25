@@ -2431,6 +2431,23 @@ async function loadFirewall(){
         <span class="mono">sudo firewall-setup.sh</span> on the server and select option 2. Once enabled, you can manage node ports from this panel.</div>`
     : '';
 
+  // Desired-state vs actual + drift (server-derived from node type / VPN / Caddy).
+  // Read-only/informational; reconciling stays a CLI action to preserve lockout safety.
+  const desired = Array.isArray(f.desired) ? f.desired : [];
+  const unexpected = Array.isArray(f.unexpected) ? f.unexpected : [];
+  const missing = desired.filter(d=>!d.ok);
+  const expectedRows = desired.map(d=>`
+      <div class="kv" style="align-items:center">
+        <span class="k">${esc(d.label)} · <span class="mono">${esc(d.spec)}</span>${(d.source&&d.source!=='anywhere')?` <span class="muted" style="font-size:11px">(${esc(d.source)})</span>`:''}</span>
+        <span class="v">${d.ok?'<span class="badge ok">ok</span>':'<span class="badge err">missing</span>'}</span>
+      </div>`).join('');
+  const driftNote = (missing.length||unexpected.length)
+    ? `<div class="note" style="margin-top:10px;border-color:rgba(255,77,109,0.35);background:rgba(255,77,109,0.07)"><strong>Firewall drift detected.</strong>${missing.length?`<div style="margin-top:4px">Missing: <span class="mono">${missing.map(d=>esc(d.spec)).join(', ')}</span> — on the server run <span class="mono">sudo firewall-setup.sh</span> and choose “Enable recommended defaults” to reconcile (it keeps your custom rules).</div>`:''}${unexpected.length?`<div style="margin-top:4px">Unexpected open: ${unexpected.map(u=>'<span class="mono">'+esc(u.spec)+'</span> ('+esc(u.reason)+')').join('; ')}.</div>`:''}</div>`
+    : `<div class="note" style="margin-top:10px">Matches the expected configuration for this node.</div>`;
+  const expectedBlock = (f.active && desired.length)
+    ? `<div class="kv" style="margin-top:14px"><span class="k" style="font-weight:600">Expected configuration</span><span class="v"></span></div>${expectedRows}${driftNote}`
+    : '';
+
   card.innerHTML = `
     <h3>Firewall</h3>
     <div class="kv"><span class="k">ufw</span><span class="v">${ufwBadge}</span></div>
@@ -2438,6 +2455,7 @@ async function loadFirewall(){
     <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
     ${portRows}
+    ${expectedBlock}
     <div class="note" style="margin-top:14px">Only the three node ports can be toggled here.
       <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong></div>`;
   card.querySelectorAll('[data-fw-port]').forEach(b=>b.addEventListener('click', ()=>toggleFirewallPort(b.dataset.fwPort, b.dataset.fwState, b)));

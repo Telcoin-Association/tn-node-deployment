@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.4.1"
+readonly SCRIPT_VERSION="1.5.0"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
@@ -219,6 +219,35 @@ view_status() {
         fi
     fi
 
+    # Expected configuration (desired-state) + drift -- only meaningful with ufw active.
+    if ufw_active; then
+        echo ""
+        print_step "Expected configuration for this node..."
+        local spec label source missing=0 unexpected=0
+        while IFS=$'\t' read -r spec label source; do
+            [[ -n "$spec" ]] || continue
+            if fw_rule_satisfied "$spec"; then
+                print_ok "${label} (${spec})"
+            else
+                print_warn "${label} (${spec}) -- MISSING (expected${source:+ from $source})"
+                missing=$((missing+1))
+            fi
+        done < <(desired_firewall_rules)
+
+        local ureason
+        while IFS=$'\t' read -r spec ureason; do
+            [[ -n "$spec" ]] || continue
+            print_warn "Unexpected: ${spec} -- ${ureason}"
+            unexpected=$((unexpected+1))
+        done < <(fw_unexpected_rules)
+
+        if (( missing == 0 && unexpected == 0 )); then
+            print_ok "Firewall matches the expected configuration"
+        else
+            print_info "Drift detected -- re-run 'Enable recommended defaults' to reconcile (it keeps your custom rules)."
+        fi
+    fi
+
     # Current session IP
     echo ""
     local current_ip
@@ -243,11 +272,20 @@ view_status() {
 # allowed BEFORE `ufw --force enable`, so enabling can never lock out the IAP door or the overlay.
 # Opens validator P2P (49590/49594) when a validator is installed; 80/443 are NOT opened here
 # (config-caddy.sh adds them). Mirrors the interactive defaults exactly -- no extra behavior.
+#
+# RECONCILE by default: it only ENSURES the managed rules + policies exist and never
+# removes anything, so a re-run can't silently drop an operator's custom rules (a manual
+# 443, a bespoke allow, etc.). Pass "--reset" to first `ufw --force reset` for a clean
+# slate -- destructive, removes ALL existing rules including unmanaged ones. Either way
+# the lockout-safe ordering holds: SSH + overlay + kuma are allowed BEFORE enable.
 apply_recommended_firewall() {
+    local do_reset="${1:-}"
     local ssh_port nodes
     ssh_port=$(get_ssh_port)
     nodes=$(detect_installed_nodes)
-    ufw --force reset &>/dev/null
+    if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
+        ufw --force reset &>/dev/null
+    fi
     ufw default deny incoming &>/dev/null
     ufw default allow outgoing &>/dev/null
     ufw allow "${ssh_port}/tcp" &>/dev/null
@@ -309,11 +347,21 @@ enable_firewall() {
         return
     fi
 
+    # Reconcile by default (keeps any custom rules). Offer a clean-slate reset as an
+    # explicit, gated choice -- it removes ALL existing rules, including ones you added
+    # by hand (e.g. a manual 443). Default is No.
+    local reset_arg=""
+    print_warn "Reset wipes ALL existing ufw rules (including custom ones you added)."
+    if confirm "Reset to a clean slate first? (No keeps existing custom rules)"; then
+        reset_arg="--reset"
+    fi
+
     # Stage the lockout-safe ruleset + enable (shared with --json --enable). SSH + overlay +
     # kuma are allowed before enable, so this can't sever the IAP door or the overlay.
-    apply_recommended_firewall
+    apply_recommended_firewall "$reset_arg"
 
     print_ok "Firewall enabled with recommended defaults"
+    [[ -n "$reset_arg" ]] && print_info "Existing rules were reset to a clean slate"
     print_ok "SSH port ${ssh_port}/tcp allowed"
     print_ok "Uptime Kuma port ${UPTIME_KUMA_PORT}/tcp allowed from ${TN_KUMA_SRC} (Association monitor)"
     if echo "$nodes" | grep -q "validator"; then
@@ -597,15 +645,19 @@ manage_node_ports() {
     esac
 
     echo ""
-    print_info "Public RPC (nginx on port 443) -- optional, only if you serve public RPC:"
-    if ufw_has_allow 443 tcp; then
-        print_ok "TCP 443 is already open"
+    print_info "Public dashboard (HTTP/HTTPS -- TCP 80/443):"
+    # 443 is owned by Caddy now (install-caddy.sh opens/closes 80+443 with the
+    # reverse proxy). The firewall only REFLECTS that state here -- no independent
+    # toggle, so the two can't drift.
+    if caddy_managed_active; then
+        print_ok "Caddy is active -- TCP 80/443 are managed by Caddy (install-caddy.sh)."
+    elif ufw_has_allow 443 tcp || ufw_has_allow 80 tcp; then
+        print_warn "TCP 80/443 are open but Caddy is not managing them."
+        print_info "80/443 are owned by Caddy now. Enable/disable external access with"
+        print_info "  sudo bash install-caddy.sh   (it opens/closes these ports)."
     else
-        if confirm "Open TCP 443 for public RPC via nginx?"; then
-            ufw allow 443/tcp &>/dev/null
-            print_ok "TCP 443 opened"
-            print_info "Configure nginx to proxy to your RPC port"
-        fi
+        print_info "Not enabled. Run install-caddy.sh to serve the dashboard over HTTPS;"
+        print_info "it opens 80/443 itself. The firewall no longer toggles them here."
     fi
 
     echo ""
@@ -795,6 +847,82 @@ fw_is_testnet() {
     [[ "$(meta_get NETWORK "$meta" 2>/dev/null || true)" == "testnet" ]]
 }
 
+# =============================================================================
+# DESIRED-STATE / DRIFT
+#
+# One source of truth for "what ports SHOULD be open on THIS node", derived from
+# the node type, VPN state and Caddy state. Shared by view_status (CLI) and the
+# JSON status the dashboard renders, so both report the same expected-vs-actual.
+# =============================================================================
+
+# caddy_managed_active -- 0 (true) when OUR Caddy reverse proxy is the active web
+# server and owns 80/443. Distinguishes a Telcoin-managed Caddyfile (carries our
+# marker) from a foreign one. 443 is owned by Caddy now, so the firewall treats
+# 80/443 as "expected open" only when this is true.
+caddy_managed_active() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl is-active --quiet caddy 2>/dev/null || return 1
+    [[ -f /etc/caddy/Caddyfile ]] || return 1
+    grep -q "Managed by the Telcoin Node Manager" /etc/caddy/Caddyfile 2>/dev/null
+}
+
+# desired_firewall_rules -- print the rule set THIS host should have, one per line:
+#   <spec>\t<label>\t<source>
+# <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
+# (anywhere|restricted|<cidr>). Validator P2P only for validators; overlay SSH
+# only when the VPN is active; 80/443 only when Caddy manages the dashboard.
+desired_firewall_rules() {
+    local ssh_port nodetype
+    ssh_port="$(get_ssh_port)"
+    if tn_resolve_service >/dev/null 2>&1; then nodetype="$(tn_resolve_node_type)"; else nodetype="none"; fi
+
+    printf '%s\t%s\t%s\n' "${ssh_port}/tcp"         "SSH"                "anywhere"
+    printf '%s\t%s\t%s\n' "${UPTIME_KUMA_PORT}/tcp" "Uptime Kuma health" "restricted"
+    if [[ "$nodetype" == "validator" ]]; then
+        printf '%s\t%s\t%s\n' "49590/udp" "Validator P2P (primary)" "anywhere"
+        printf '%s\t%s\t%s\n' "49594/udp" "Validator P2P (worker)"  "anywhere"
+    fi
+    if vpn_active; then
+        printf '%s\t%s\t%s\n' "overlay-ssh" "SSH from WireGuard overlay" "${TN_OVERLAY_CIDR}"
+    fi
+    if caddy_managed_active; then
+        printf '%s\t%s\t%s\n' "80/tcp"  "Caddy HTTP (ACME)"       "anywhere"
+        printf '%s\t%s\t%s\n' "443/tcp" "Caddy HTTPS (dashboard)" "anywhere"
+    fi
+}
+
+# fw_rule_satisfied <spec> -- 0 if the live ufw config already provides <spec>.
+# kuma counts as satisfied when restricted OR anywhere (just not closed); overlay
+# SSH is matched on the overlay CIDR.
+fw_rule_satisfied() {
+    local spec="$1"
+    case "$spec" in
+        overlay-ssh)
+            ufw status 2>/dev/null | grep -F "$TN_OVERLAY_CIDR" | grep -q ALLOW ;;
+        "${UPTIME_KUMA_PORT}/tcp")
+            [[ "$(kuma_rule_state)" != "closed" ]] ;;
+        */tcp|*/udp)
+            ufw_has_allow "${spec%/*}" "${spec#*/}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# fw_unexpected_rules -- print managed ports OPEN but NOT desired here, one per
+# line "<spec>\t<reason>": validator P2P left open on a non-validator, and 80/443
+# open without Caddy managing them (now that Caddy owns 443).
+fw_unexpected_rules() {
+    local nodetype
+    if tn_resolve_service >/dev/null 2>&1; then nodetype="$(tn_resolve_node_type)"; else nodetype="none"; fi
+    if [[ "$nodetype" != "validator" ]]; then
+        ufw_has_allow 49590 udp && printf '%s\t%s\n' "49590/udp" "validator P2P open but node type is ${nodetype}"
+        ufw_has_allow 49594 udp && printf '%s\t%s\n' "49594/udp" "validator P2P open but node type is ${nodetype}"
+    fi
+    if ! caddy_managed_active; then
+        ufw_has_allow 443 tcp && printf '%s\t%s\n' "443/tcp" "open but Caddy is not managing it"
+        ufw_has_allow 80  tcp && printf '%s\t%s\n' "80/tcp"  "open but Caddy is not managing it"
+    fi
+}
+
 # manage_addon_rules -- testnet add-on firewall rules: overlay SSH + Kuma health port.
 manage_addon_rules() {
     print_header "Manage testnet add-on firewall rules"
@@ -955,6 +1083,29 @@ json_fw_status() {
         first=false
     done
 
+    # Desired-state manifest + drift (single source of truth: desired_firewall_rules).
+    # Computed only when active; otherwise empty (nothing is enforced).
+    local desired_json="" unexpected_json="" caddy_managed=false
+    if [[ "$active" == "true" ]]; then
+        caddy_managed_active && caddy_managed=true
+        local dfirst=true dspec dlabel dsource dok
+        while IFS=$'\t' read -r dspec dlabel dsource; do
+            [[ -n "$dspec" ]] || continue
+            if fw_rule_satisfied "$dspec"; then dok=true; else dok=false; fi
+            [[ "$dfirst" == "true" ]] || desired_json+=","
+            desired_json+="{\"spec\":\"$(json_escape "$dspec")\",\"label\":\"$(json_escape "$dlabel")\",\"source\":\"$(json_escape "$dsource")\",\"ok\":${dok}}"
+            dfirst=false
+        done < <(desired_firewall_rules)
+
+        local ufirst=true uspec ureason
+        while IFS=$'\t' read -r uspec ureason; do
+            [[ -n "$uspec" ]] || continue
+            [[ "$ufirst" == "true" ]] || unexpected_json+=","
+            unexpected_json+="{\"spec\":\"$(json_escape "$uspec")\",\"reason\":\"$(json_escape "$ureason")\"}"
+            ufirst=false
+        done < <(fw_unexpected_rules)
+    fi
+
     local kuma_state="closed"
     [[ "$active" == "true" ]] && kuma_state="$(kuma_rule_state)"
 
@@ -966,7 +1117,7 @@ json_fw_status() {
         efirst=false
     done
 
-    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"ports\":{${ports_json}}}"
+    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}}}"
 }
 
 # Open/close ONE node port. Refuses any port not in JSON_NODE_PORTS.
@@ -1019,12 +1170,13 @@ json_fw_enable() {
 # =============================================================================
 
 main() {
-    local json_mode=false action="" fw_port="" fw_state=""
+    local json_mode=false action="" fw_port="" fw_state="" reset_mode=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json)   json_mode=true; shift ;;
             --status) action="status"; shift ;;
             --enable) action="enable"; shift ;;
+            --reset)  reset_mode=true; shift ;;
             --port)   action="port"; fw_port="${2:-}"; fw_state="${3:-}"
                       shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
             *) shift ;;
@@ -1041,6 +1193,16 @@ main() {
             *)      json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"unknown or missing --json action\"}"; exit 1 ;;
         esac
         exit $?
+    fi
+
+    # Non-interactive CLI clean-slate: gate the destructive reset behind --reset.
+    # Re-applies the lockout-safe recommended defaults after wiping all rules.
+    if [[ "$reset_mode" == "true" ]]; then
+        check_root
+        print_warn "Resetting ufw -- ALL existing rules (including custom ones) will be removed."
+        apply_recommended_firewall --reset
+        print_ok "Firewall reset to a clean slate and re-enabled with recommended defaults"
+        exit 0
     fi
 
     check_root
