@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/fallback.sh
 source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 
-readonly SCRIPT_VERSION="1.1.55"
+readonly SCRIPT_VERSION="1.1.56"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -52,6 +52,7 @@ declare -a SCRIPTS=(
     "update-node.sh:update-node.sh:SCRIPT_VERSION"
     "update-scripts.sh:update-scripts.sh:SCRIPT_VERSION"
     "lib/common.sh:lib/common.sh:COMMON_VERSION"
+    "lib/fallback.sh:lib/fallback.sh:FALLBACK_VERSION"
     "lib/testnet-addons.env:lib/testnet-addons.env:TESTNET_ADDONS_VERSION"
     "lib/observability.sh:lib/observability.sh:OBSERVABILITY_VERSION"
     "setup-vpn.sh:setup-vpn.sh:SCRIPT_VERSION"
@@ -266,6 +267,18 @@ download_updates() {
 
     if [[ "$has_common" == "false" ]] && [[ ${#FILES_TO_UPDATE[@]} -gt 0 ]]; then
         FILES_TO_UPDATE+=("lib/common.sh:lib/common.sh")
+        has_common=true
+    fi
+
+    # common.sh sources lib/fallback.sh unconditionally, so whenever common.sh is
+    # in the update set, fallback.sh must ride along or every script that sources
+    # common.sh breaks with a missing-file source error. Keep this pair atomic.
+    if [[ "$has_common" == "true" ]]; then
+        local has_fallback=false
+        for entry in "${FILES_TO_UPDATE[@]}"; do
+            [[ "$entry" == *"fallback.sh"* ]] && has_fallback=true
+        done
+        [[ "$has_fallback" == "false" ]] && FILES_TO_UPDATE+=("lib/fallback.sh:lib/fallback.sh")
     fi
 
     # If the UI version row triggered an update, pull the rest of its bundle
