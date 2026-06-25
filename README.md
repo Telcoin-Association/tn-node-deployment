@@ -711,6 +711,7 @@ You choose the domain, a login username (not forced to `admin`), and a password.
 - **Set the DNS A record first.** Point your domain at the server's public IP (the router's public IP if it's behind NAT) **before** enabling — Caddy requests the certificate on first start, so the record must already resolve or issuance fails and Let's Encrypt rate-limits retries. The wizard checks propagation before continuing.
 - **Ports:** forward **443/tcp (required)** to the node; **80/tcp is recommended** (it adds the http→https redirect and a fallback for certificate issuance/renewal) but not required — Caddy obtains the certificate over 443. The script opens 80/443 in `ufw` for you. (Inbound forwarding is off by default on most routers, so this is something you set up explicitly.)
 - **Conflicts:** Apache/Nginx and Caddy can't share ports 80/443. The interactive installer detects a conflicting web server and offers to stop, disable, or remove it (or quit), and it won't overwrite a Caddy config it didn't create.
+- **Treat the login as a read-only credential, and rotate it.** The username/password gate only the public **read-only** view (it's stored as a bcrypt hash in the Caddyfile); it grants no management access — that stays on the SSH tunnel. If the credential leaks, the blast radius is read-only, but rotate it anyway by re-running `install-caddy.sh` (re-prompts and rewrites the hash). Don't reuse a password you use elsewhere.
 
 Disable any time from the same **Settings** panel.
 

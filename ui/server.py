@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.64"
+UI_VERSION = "1.7.65"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -619,7 +619,12 @@ def is_public_request():
 def _is_write_request():
     """True for requests that mutate node/host state. POST/PUT/DELETE/PATCH are
     always writes; a few GET routes are SSE 'action' streams (config-set, update
-    prepare/apply) and count as writes too."""
+    prepare/apply) and count as writes too.
+
+    If you add a mutating GET route, add its path here AND classify it in
+    test_public_readonly.py -- that test walks app.url_map and fails until every
+    route is declared read or write, so a new write cannot silently leak onto
+    the public (read-only) path."""
     if request.method in ("GET", "HEAD", "OPTIONS"):
         p = request.path
         return (p.endswith("/set")
@@ -3715,6 +3720,27 @@ def api_network_status():
 # MAIN
 # =============================================================================
 
+# The bind address IS the trust boundary for the management path. This server
+# has NO authentication of its own: the SSH-tunnel / loopback path is trusted
+# purely because it is unreachable from off-host. Caddy (install-caddy.sh) is
+# the ONLY intended public entrypoint, and it forces every proxied request
+# read-only via the unforgeable X-TN-Dashboard-Public header. Exposing this
+# port by ANY other means -- binding 0.0.0.0, a second reverse proxy that does
+# not stamp that header, `docker -p 8080:8080`, or `ssh -g`/GatewayPorts --
+# hands unauthenticated, full node control to whoever can reach it. Keep this
+# on loopback; the guard below refuses to start otherwise.
+BIND_HOST = "127.0.0.1"
+BIND_PORT = 8080
+_LOOPBACK_HOSTS = ("127.0.0.1", "::1")
+
 if __name__ == "__main__":
-    # 127.0.0.1 only -- never 0.0.0.0. Access is via SSH tunnel.
-    app.run(host="127.0.0.1", port=8080, debug=False, threaded=True)
+    if BIND_HOST not in _LOOPBACK_HOSTS:
+        _log(
+            f"refusing to start: BIND_HOST={BIND_HOST!r} is not loopback "
+            f"({' / '.join(_LOOPBACK_HOSTS)}). This UI has no auth of its own; "
+            "binding off-loopback exposes unauthenticated full node management. "
+            "Put a header-stamping reverse proxy (install-caddy.sh) in front "
+            "instead -- see the comment above BIND_HOST."
+        )
+        sys.exit(1)
+    app.run(host=BIND_HOST, port=BIND_PORT, debug=False, threaded=True)
