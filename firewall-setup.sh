@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="1.4.1"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
@@ -93,10 +93,12 @@ get_current_ip() {
 }
 
 detect_installed_nodes() {
-    local nodes=""
-    [[ -f /etc/systemd/system/telcoin-observer.service ]]  && nodes="${nodes}observer "
-    [[ -f /etc/systemd/system/telcoin-validator.service ]] && nodes="${nodes}validator "
-    echo "${nodes:-none}"
+    # A VM runs exactly one node. Route through the shared resolvers so this
+    # works for both unified (telcoin.service) and legacy installs: presence is
+    # tn_resolve_service (returns non-zero when nothing is installed), and the
+    # node type comes from tn_resolve_node_type.
+    tn_resolve_service >/dev/null 2>&1 || { echo "none"; return 0; }
+    echo "$(tn_resolve_node_type) "
 }
 
 # =============================================================================

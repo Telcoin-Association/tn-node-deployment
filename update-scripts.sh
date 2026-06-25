@@ -13,7 +13,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-readonly SCRIPT_VERSION="1.1.55"
+# Pull in the node-identity resolvers so the restart hint below can name the
+# actually-installed unit (the bare telcoin unit, or a legacy role-suffixed one).
+# This script does not source lib/common.sh, so source fallback.sh directly.
+# shellcheck source=lib/fallback.sh
+source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
+
+readonly SCRIPT_VERSION="1.1.56"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -46,6 +52,7 @@ declare -a SCRIPTS=(
     "update-node.sh:update-node.sh:SCRIPT_VERSION"
     "update-scripts.sh:update-scripts.sh:SCRIPT_VERSION"
     "lib/common.sh:lib/common.sh:COMMON_VERSION"
+    "lib/fallback.sh:lib/fallback.sh:FALLBACK_VERSION"
     "lib/testnet-addons.env:lib/testnet-addons.env:TESTNET_ADDONS_VERSION"
     "lib/observability.sh:lib/observability.sh:OBSERVABILITY_VERSION"
     "setup-vpn.sh:setup-vpn.sh:SCRIPT_VERSION"
@@ -260,6 +267,18 @@ download_updates() {
 
     if [[ "$has_common" == "false" ]] && [[ ${#FILES_TO_UPDATE[@]} -gt 0 ]]; then
         FILES_TO_UPDATE+=("lib/common.sh:lib/common.sh")
+        has_common=true
+    fi
+
+    # common.sh sources lib/fallback.sh unconditionally, so whenever common.sh is
+    # in the update set, fallback.sh must ride along or every script that sources
+    # common.sh breaks with a missing-file source error. Keep this pair atomic.
+    if [[ "$has_common" == "true" ]]; then
+        local has_fallback=false
+        for entry in "${FILES_TO_UPDATE[@]}"; do
+            [[ "$entry" == *"fallback.sh"* ]] && has_fallback=true
+        done
+        [[ "$has_fallback" == "false" ]] && FILES_TO_UPDATE+=("lib/fallback.sh:lib/fallback.sh")
     fi
 
     # If the UI version row triggered an update, pull the rest of its bundle
@@ -368,8 +387,9 @@ download_updates() {
         echo ""
         print_info "All scripts are now up to date."
         print_info "If a node is running, restart it to apply any changes:"
-        print_info "  sudo systemctl restart telcoin-observer"
-        print_info "  sudo systemctl restart telcoin-validator"
+        local svc
+        svc="$(tn_resolve_service 2>/dev/null || echo telcoin)"
+        print_info "  sudo systemctl restart ${svc}"
     else
         print_warn "${success} updated, ${failed} failed"
         print_info "Check your internet connection and try again."

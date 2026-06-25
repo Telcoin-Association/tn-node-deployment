@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.62"
+UI_VERSION = "1.7.63"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -77,16 +77,70 @@ DEFAULT_DATA_DIR = "/var/lib/telcoin"
 DEFAULT_INSTALL_DIR = "/opt/telcoin"
 TN_SOURCE_DIR = "/opt/telcoin-source"
 
-# Default instance number per node type (observer 5 -> 8541, validator 1 -> 8545).
+# Legacy per-type instance number, retained only for the (now vestigial) "instance"
+# config field the UI still renders. The node no longer takes --instance and the RPC
+# port comes from .node-meta (reth default 8545), so this no longer maps to a port.
 DEFAULT_INSTANCE = {"observer": 5, "validator": 1}
 
 
-def service_name(t):
+def resolve_service_unit(t):
+    """Resolve the systemd unit BASE name for the installed node, mirroring
+    lib/fallback.sh's tn_resolve_service. New single-identity installs use one
+    unit (telcoin.service) regardless of node type; legacy installs keep their
+    per-role unit. Probe in priority order:
+        /etc/systemd/system/telcoin.service          -> "telcoin"   (new)
+        else telcoin-<validator|observer>.service    -> that base   (legacy)
+        else                                         -> "telcoin-<t>" (default
+            for the requested type, so existence probes on a not-installed node
+            still resolve to the conventional per-type path).
+    Validator is preferred over observer if a host improbably has both."""
+    sysd = "/etc/systemd/system"
+    if os.path.exists(f"{sysd}/telcoin.service"):
+        return "telcoin"
+    for role in ("validator", "observer"):
+        if os.path.exists(f"{sysd}/telcoin-{role}.service"):
+            return f"telcoin-{role}"
     return f"telcoin-{t}"
 
 
+def unified_install():
+    """True when a new single-identity install is present (the unified
+    telcoin.service exists). Such a host runs ONE node whose type lives in
+    /etc/telcoin/.node-meta, not in the unit name."""
+    return os.path.exists("/etc/systemd/system/telcoin.service")
+
+
+def resolve_node_type():
+    """observer|validator for a unified install, mirroring lib/fallback.sh's
+    tn_resolve_node_type. The unified telcoin.service carries no role in its
+    name, so the type is read from the unified /etc/telcoin/.node-meta NODE_TYPE
+    (via the root helper, which is the only channel to the mode-0600 file); on
+    older/legacy metadata the per-role .node-meta answers; last resort is an
+    --observer flag in the start wrapper, else validator (validator-preferred,
+    matching the resolver ordering). Returns 'validator' when nothing is
+    determinable so a unified node still surfaces as exactly one node."""
+    for t in NODE_TYPES:
+        nt = read_meta(t).get("NODE_TYPE", "").strip()
+        if nt in NODE_TYPES:
+            return nt
+    # Last resort: the start wrapper's --observer flag (best-effort; the wrapper
+    # may be unreadable to the unprivileged UI user, in which case we fall through).
+    for t in NODE_TYPES:
+        try:
+            with open(wrapper_path(t), "r") as f:
+                if "--observer" in f.read():
+                    return "observer"
+        except (OSError, IOError):
+            pass
+    return "validator"
+
+
+def service_name(t):
+    return resolve_service_unit(t)
+
+
 def service_file(t):
-    return f"/etc/systemd/system/telcoin-{t}.service"
+    return f"/etc/systemd/system/{resolve_service_unit(t)}.service"
 
 
 def log_file(t):
@@ -95,13 +149,22 @@ def log_file(t):
 
 
 def config_dir(t):
+    """Node config dir -- /etc/telcoin for a unified install (.node-meta lives
+    there), else the legacy per-type dir."""
+    if os.path.exists(f"{DEFAULT_CONFIG_DIR}/.node-meta"):
+        return DEFAULT_CONFIG_DIR
     return f"{DEFAULT_CONFIG_DIR}/{t}"
 
 
 def data_dir(t):
-    """Node data dir -- from .node-meta DATA_DIR if set, else the default."""
+    """Node data dir -- from .node-meta DATA_DIR if set, else the default
+    (unified /var/lib/telcoin, or the legacy per-type dir)."""
     meta = read_meta(t)
-    return meta.get("DATA_DIR") or f"{DEFAULT_DATA_DIR}/{t}"
+    if meta.get("DATA_DIR"):
+        return meta["DATA_DIR"]
+    if os.path.exists(f"{DEFAULT_CONFIG_DIR}/.node-meta"):
+        return DEFAULT_DATA_DIR
+    return f"{DEFAULT_DATA_DIR}/{t}"
 
 
 def node_id(t):
@@ -204,14 +267,6 @@ def read_meta(t):
     return out
 
 
-def rpc_port(instance):
-    """RPC port from instance number: 8545 - (instance - 1)."""
-    try:
-        return 8545 - (int(instance) - 1)
-    except (TypeError, ValueError):
-        return 8545
-
-
 def parse_service_file(t):
     """
     Parse the systemd unit (and, for source installs, the wrapper script the
@@ -225,7 +280,7 @@ def parse_service_file(t):
     cfg = {
         "installed": False,
         "instance": str(DEFAULT_INSTANCE.get(t, 1)),
-        "rpc_port": str(rpc_port(DEFAULT_INSTANCE.get(t, 1))),
+        "rpc_port": "8545",
         "metrics": "",
         "primary_listener": "",
         "worker_listener": "",
@@ -247,7 +302,7 @@ def parse_service_file(t):
 
     # For source installs the actual node flags live in a wrapper script that
     # ExecStart=... points to. Pull the wrapper contents in so the same regexes
-    # below find --instance / --metrics regardless of install method.
+    # below find --metrics regardless of install method.
     searchable = unit
     m = re.search(r"^ExecStart=(\S+\.sh)\s*$", unit, re.MULTILINE)
     if m and os.path.exists(m.group(1)):
@@ -262,11 +317,14 @@ def parse_service_file(t):
     if mlog:
         cfg["log_path"] = mlog.group(1)
 
-    # --instance N
-    mi = re.search(r"--instance\s+(\d+)", searchable)
-    if mi:
-        cfg["instance"] = mi.group(1)
-        cfg["rpc_port"] = str(rpc_port(mi.group(1)))
+    # RPC port: the node no longer takes an --instance flag, so the port is the
+    # authoritative RPC_PORT from .node-meta (both setup scripts persist it --
+    # unified installs serve 8545, legacy observer installs still serve 8541; the
+    # helper's meta-cat resolves whichever .node-meta is present). Falls back to
+    # the reth default 8545 set above.
+    meta = read_meta(t)
+    if meta.get("RPC_PORT"):
+        cfg["rpc_port"] = meta["RPC_PORT"]
 
     # --metrics host:port  (may be quoted)
     mm = re.search(r"--metrics\s+\"?([^\s\"\\]+)", searchable)
@@ -445,23 +503,44 @@ def detect_nodes():
            for t in NODE_TYPES}
 
     scripts = {}
-    for t in NODE_TYPES:
-        if os.path.exists(service_file(t)):
-            cfg = parse_service_file(t)
-            try:
-                port = int(cfg["rpc_port"])
-            except (TypeError, ValueError):
-                port = 8545
-            out[t] = {"mode": "scripts", "status": service_status(t),
-                      "container": None, "image": None, "rpc_port": port,
-                      "node_info_path": None}
-            scripts[t] = True
+    # A new single-identity install has ONE unit (telcoin.service) for whichever
+    # single node type the host runs; the historical loop over both types would
+    # otherwise mark BOTH as installed (service_file() resolves to the same unit
+    # for either type). Attribute the unified unit to exactly one type slot,
+    # resolved from .node-meta NODE_TYPE. Legacy installs keep their per-type
+    # unit and the original per-type detection below.
+    if unified_install():
+        t = resolve_node_type()
+        cfg = parse_service_file(t)
+        try:
+            port = int(cfg["rpc_port"])
+        except (TypeError, ValueError):
+            port = 8545
+        out[t] = {"mode": "scripts", "status": service_status(t),
+                  "container": None, "image": None, "rpc_port": port,
+                  "node_info_path": None}
+        scripts[t] = True
+    else:
+        for t in NODE_TYPES:
+            if os.path.exists(service_file(t)):
+                cfg = parse_service_file(t)
+                try:
+                    port = int(cfg["rpc_port"])
+                except (TypeError, ValueError):
+                    port = 8545
+                out[t] = {"mode": "scripts", "status": service_status(t),
+                          "container": None, "image": None, "rpc_port": port,
+                          "node_info_path": None}
+                scripts[t] = True
 
     # Container names already owned by a scripts-deployed systemd service. A
-    # scripts node can itself run as a docker container named telcoin-<type>;
-    # that container must NEVER be re-detected as a separate "external" node
-    # (regardless of how it would classify), since systemd already manages it.
+    # scripts node can itself run as a docker container; that container must
+    # NEVER be re-detected as a separate "external" node (regardless of how it
+    # would classify), since systemd already manages it. New installs name the
+    # container `telcoin`; legacy installs name it telcoin-<type>.
     managed_names = {f"telcoin-{t}" for t in NODE_TYPES if scripts.get(t)}
+    if unified_install():
+        managed_names.add("telcoin")
 
     # Probe docker only for types that have NO systemd unit.
     if not all(scripts.get(t) for t in NODE_TYPES):
@@ -3143,10 +3222,11 @@ def jaeger_services():
 
 def resolve_service(t, services=None):
     """
-    The node registers its OTLP service name as `telcoin-<t>` plus a node-identity
-    suffix (e.g. telcoin-observer-QCZPqMY2zfp), so an exact-name query never
-    matches. Return the registered service that is `telcoin-<t>` exactly or a
-    `telcoin-<t>-...` prefix, else None when the node has not registered yet.
+    The node registers its OTLP service name as `telcoin-<type>` plus a
+    node-identity suffix (e.g. `telcoin-<type>-QCZPqMY2zfp`), so an exact-name
+    query never matches. Return the registered service that is `telcoin-<t>`
+    exactly or a `telcoin-<t>-...` prefix, else None when the node has not
+    registered yet.
     Pass an already-fetched `services` list to avoid a second /api/services call.
     """
     base = f"telcoin-{t}"

@@ -12,20 +12,21 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.1"
-readonly VALIDATOR_SERVICE="telcoin-validator"
-readonly OBSERVER_SERVICE="telcoin-observer"
-readonly VALIDATOR_SERVICE_FILE="/etc/systemd/system/telcoin-validator.service"
-readonly OBSERVER_SERVICE_FILE="/etc/systemd/system/telcoin-observer.service"
+readonly SCRIPT_VERSION="1.2.2"
+
+# Build the systemd unit file path from a unit BASE name (e.g. "telcoin").
+service_file_for() {
+    printf '/etc/systemd/system/%s.service' "$1"
+}
 
 # Resolve the selected node's data dir from .node-meta (DATA_DIR=), falling back
-# to the legacy /var/lib/telcoin/<type> for older installs. Mirrors check-node.sh
-# so all scripts agree on the path. Needs NODE_TYPE set.
+# to the resolved data dir (unified /var/lib/telcoin, or legacy role dir) for
+# older installs. Mirrors check-node.sh so all scripts agree on the path.
 detect_data_dir() {
-    local meta="/etc/telcoin/${NODE_TYPE}/.node-meta"
-    local default="/var/lib/telcoin/${NODE_TYPE}"
-    if [[ -f "$meta" ]]; then
-        local dd
+    local meta default dd
+    meta="$(node_meta_path 2>/dev/null || true)"
+    default="$(tn_resolve_data_dir)"
+    if [[ -n "$meta" ]] && [[ -f "$meta" ]]; then
         dd=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
         if [[ -n "$dd" ]] && [[ -d "$dd" ]]; then
             echo "$dd"
@@ -202,45 +203,15 @@ apply_changes() {
 # =============================================================================
 
 detect_node() {
-    local validator_exists=false
-    local observer_exists=false
-
-    [[ -f "$VALIDATOR_SERVICE_FILE" ]] && validator_exists=true
-    [[ -f "$OBSERVER_SERVICE_FILE" ]]  && observer_exists=true
-
-    if [[ "$validator_exists" == "false" ]] && [[ "$observer_exists" == "false" ]]; then
+    # Operators run one node per VM; resolve the single installed unit.
+    if ! TARGET_SERVICE="$(tn_resolve_service)"; then
         print_error "No Telcoin node installation found."
         print_info "Run setup-validator.sh or setup-observer.sh first."
         exit 1
     fi
-
-    if [[ "$validator_exists" == "true" ]] && [[ "$observer_exists" == "true" ]]; then
-        echo ""
-        print_info "Both a validator and observer node are installed."
-        echo ""
-        echo "  1) Validator node"
-        echo "  2) Observer node"
-        echo ""
-        local choice
-        while true; do
-            read -r -p "  Which node do you want to configure? [1/2]: " choice
-            case "$choice" in
-                1) TARGET_SERVICE="$VALIDATOR_SERVICE"; TARGET_SERVICE_FILE="$VALIDATOR_SERVICE_FILE"; NODE_TYPE="validator"; break ;;
-                2) TARGET_SERVICE="$OBSERVER_SERVICE";  TARGET_SERVICE_FILE="$OBSERVER_SERVICE_FILE";  NODE_TYPE="observer";  break ;;
-                *) print_warn "Please enter 1 or 2." ;;
-            esac
-        done
-    elif [[ "$validator_exists" == "true" ]]; then
-        TARGET_SERVICE="$VALIDATOR_SERVICE"
-        TARGET_SERVICE_FILE="$VALIDATOR_SERVICE_FILE"
-        NODE_TYPE="validator"
-        print_ok "Detected: validator node"
-    else
-        TARGET_SERVICE="$OBSERVER_SERVICE"
-        TARGET_SERVICE_FILE="$OBSERVER_SERVICE_FILE"
-        NODE_TYPE="observer"
-        print_ok "Detected: observer node"
-    fi
+    TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
+    NODE_TYPE="$(tn_resolve_node_type)"
+    print_ok "Detected: ${NODE_TYPE} node"
 }
 
 # =============================================================================
@@ -254,7 +225,7 @@ show_current_config() {
     local exec_start
     exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
 
-    local primary_multiaddr worker_multiaddr instance metrics verbosity rpc_enabled bls_pass_set
+    local primary_multiaddr worker_multiaddr metrics verbosity rpc_enabled bls_pass_set
     local is_docker=false
     local docker_image=""
 
@@ -278,7 +249,6 @@ show_current_config() {
         worker_multiaddr=$(echo "$exec_start" | grep -oE 'WORKER_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
     fi
 
-    instance=$(read_flag "--instance" "$exec_start")
     metrics=$(read_flag "--metrics" "$exec_start")
     bls_pass_set="(set)"
 
@@ -326,7 +296,6 @@ show_current_config() {
     [[ "$is_docker" == "true" ]] && printf "  %-28s %s\n" "Docker image:" "${docker_image:-unknown}" || true
     printf "  %-28s %s\n" "Service user:"          "${svc_user:-unknown}"
     printf "  %-28s %s\n" "Service group:"         "${svc_group:-unknown}"
-    printf "  %-28s %s\n" "Instance number:"       "${instance:-unknown}"
     printf "  %-28s %s\n" "Metrics address:"       "${metrics:-unknown}"
     printf "  %-28s %s\n" "Primary listener:"      "${primary_multiaddr:-unknown}"
     printf "  %-28s %s\n" "Worker listener:"       "${worker_multiaddr:-unknown}"
@@ -414,41 +383,6 @@ edit_listener_addresses() {
     print_info "Primary: ${new_primary}"
     print_info "Worker:  ${new_worker}"
     set -e
-    apply_changes
-}
-
-edit_instance_number() {
-    print_header "Edit Instance Number"
-
-    local exec_start current_instance
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
-    current_instance=$(read_flag "--instance" "$exec_start")
-    local current_rpc=$(( 8545 - (current_instance - 1) ))
-
-    print_info "Current instance: ${current_instance} (RPC port: ${current_rpc})"
-    echo ""
-    print_info "Instance number affects the RPC port: 8545 - (instance - 1)"
-    print_info "  Instance 1 -> RPC port 8545  (default for validators)"
-    print_info "  Instance 5 -> RPC port 8541  (default for observers)"
-    echo ""
-
-    local new_instance
-    read -r -p "  New instance number [${current_instance}]: " input
-    new_instance="${input:-$current_instance}"
-
-    if ! [[ "$new_instance" =~ ^[0-9]+$ ]] || (( new_instance < 1 || new_instance > 9 )); then
-        print_error "Instance must be an integer between 1 and 9."
-        echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
-    fi
-
-    local backup
-    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
-
-    local new_rpc=$(( 8545 - (new_instance - 1) ))
-    set_flag_value "--instance" "$new_instance" "$TARGET_SERVICE_FILE"
-    print_ok "Instance updated to ${new_instance} (RPC port: ${new_rpc})"
     apply_changes
 }
 
@@ -587,11 +521,7 @@ edit_bls_passphrase() {
     print_header "Edit BLS Passphrase"
 
     local passphrase_file
-    if [[ "$NODE_TYPE" == "validator" ]]; then
-        passphrase_file="/etc/telcoin/validator/bls-passphrase"
-    else
-        passphrase_file="/etc/telcoin/observer/bls-passphrase"
-    fi
+    passphrase_file="$(tn_resolve_config_dir)/bls-passphrase"
 
     if [[ ! -f "$passphrase_file" ]]; then
         print_error "Passphrase file not found at: ${passphrase_file}"
@@ -942,33 +872,31 @@ main_menu() {
         echo "  What would you like to change?"
         echo ""
         echo "  1) Listener addresses   (PRIMARY/WORKER_LISTENER_MULTIADDR)"
-        echo "  2) Instance number      (affects RPC port)"
-        echo "  3) Metrics address"
-        echo "  4) Log verbosity"
-        echo "  5) RPC access           (private / public / disabled)"
-        echo "  6) BLS passphrase"
-        echo "  7) P2P ports            (49590/49594)"
-        echo "  8) Docker image         (Docker installs only)"
-        echo "  9) Refresh chain configs (pull latest genesis/committee/parameters)"
-        echo " 10) Restart node"
-        echo " 11) Exit"
+        echo "  2) Metrics address"
+        echo "  3) Log verbosity"
+        echo "  4) RPC access           (private / public / disabled)"
+        echo "  5) BLS passphrase"
+        echo "  6) P2P ports            (49590/49594)"
+        echo "  7) Docker image         (Docker installs only)"
+        echo "  8) Refresh chain configs (pull latest genesis/committee/parameters)"
+        echo "  9) Restart node"
+        echo " 10) Exit"
         echo ""
 
         local choice
-        read -r -p "  Enter choice [1-11]: " choice
+        read -r -p "  Enter choice [1-10]: " choice
         case "$choice" in
             1)  edit_listener_addresses ;;
-            2)  edit_instance_number    ;;
-            3)  edit_metrics            ;;
-            4)  edit_verbosity          ;;
-            5)  edit_rpc                ;;
-            6)  edit_bls_passphrase     ;;
-            7)  edit_p2p_ports          ;;
-            8)  edit_docker_image       ;;
-            9)  refresh_chain_configs   ;;
-            10) restart_node            ;;
-            11) echo ""; print_info "Exiting."; exit 0 ;;
-            *) print_warn "Please enter 1-11." ;;
+            2)  edit_metrics            ;;
+            3)  edit_verbosity          ;;
+            4)  edit_rpc                ;;
+            5)  edit_bls_passphrase     ;;
+            6)  edit_p2p_ports          ;;
+            7)  edit_docker_image       ;;
+            8)  refresh_chain_configs   ;;
+            9)  restart_node            ;;
+            10) echo ""; print_info "Exiting."; exit 0 ;;
+            *) print_warn "Please enter 1-10." ;;
         esac
     done
 }
@@ -987,7 +915,7 @@ main_menu() {
 #   {"event":"done","ok":true|false,"field":"...","value":"...","msg":"..."}
 #
 # Editable field allowlist (exactly what the interactive menu edits):
-#   primary_listener worker_listener instance metrics verbosity docker_image
+#   primary_listener worker_listener metrics verbosity docker_image
 # Each value is re-validated here with the same validators the menu uses.
 # =============================================================================
 
@@ -1054,10 +982,6 @@ json_set_field() {
         worker_listener)
             validate_multiaddr "$value" || { json_event error "invalid multiaddr: ${value}"; return 1; }
             json_set_listener "WORKER_LISTENER_MULTIADDR" "$value" ;;
-        instance)
-            { [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 9 )); } \
-                || { json_event error "instance must be an integer 1-9"; return 1; }
-            set_flag_value "--instance" "$value" "$TARGET_SERVICE_FILE" ;;
         metrics)
             validate_ip_port "$value" || { json_event error "invalid metrics address (want IPv4:PORT): ${value}"; return 1; }
             set_flag_value "--metrics" "$value" "$TARGET_SERVICE_FILE" ;;
@@ -1085,7 +1009,10 @@ run_json_set() {
     json_setup_fds
     check_root
 
-    [[ -n "$TARGET_SERVICE_FILE" ]] || { json_event error "no node type specified (need --observer or --validator)"; return 1; }
+    [[ -n "$NODE_TYPE" ]] || { json_event error "no node type specified (need --observer or --validator)"; return 1; }
+    # Operators run one node per VM; resolve the single installed unit.
+    TARGET_SERVICE="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
+    TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
     [[ -f "$TARGET_SERVICE_FILE" ]] || { json_event error "node not installed: ${TARGET_SERVICE}"; return 1; }
     [[ -n "$JSON_SET_PAIR" && "$JSON_SET_PAIR" == *=* ]] || { json_event error "missing --set field=value"; return 1; }
 
@@ -1134,8 +1061,8 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json)      json_mode=true; shift ;;
-            --observer)  TARGET_SERVICE="$OBSERVER_SERVICE";  TARGET_SERVICE_FILE="$OBSERVER_SERVICE_FILE";  NODE_TYPE="observer";  shift ;;
-            --validator) TARGET_SERVICE="$VALIDATOR_SERVICE"; TARGET_SERVICE_FILE="$VALIDATOR_SERVICE_FILE"; NODE_TYPE="validator"; shift ;;
+            --observer)  NODE_TYPE="observer";  shift ;;
+            --validator) NODE_TYPE="validator"; shift ;;
             --set)       JSON_SET_PAIR="${2:-}"; shift 2 ;;
             *)           shift ;;
         esac

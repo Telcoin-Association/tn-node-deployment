@@ -30,7 +30,7 @@ An observer node syncs the full chain state and serves JSON-RPC queries but does
 
 Best for: developers, exchanges, wallets, dApps, block explorers, or anyone needing a private RPC endpoint.
 
-- RPC port: **8541** (instance 5, default)
+- RPC port: **8545** (HTTP) / **8546** (WS) — the reth defaults
 - P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC, outbound only
 - Metrics port: **9000**
 - No firewall or router port forwarding required
@@ -38,10 +38,32 @@ Best for: developers, exchanges, wallets, dApps, block explorers, or anyone need
 ### Validator Node
 A validator node participates in Narwhal/Bullshark consensus, proposes and signs blocks, and earns TEL rewards. Validator nodes may only be operated by GSMA-approved MNOs with prior approval from the Telcoin Association.
 
-- RPC port: **8545** (instance 1, default)
+- RPC port: **8545** (HTTP) / **8546** (WS) — the reth defaults
 - P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC
 - Metrics port: **9000**
 - Requires inbound UDP access on ports 49590 and 49594
+
+### One node per VM
+
+Each machine runs exactly **one** node. Whether it is an observer or a validator, the node
+always installs under a single, consistent identity:
+
+- systemd unit: **`telcoin`** (`telcoin.service`)
+- Docker container name (Docker installs): **`telcoin`**
+- config directory: **`/etc/telcoin`**
+- data directory: **`/var/lib/telcoin`**
+
+The node type (observer or validator) is recorded in a `NODE_TYPE=` key inside
+`/etc/telcoin/.node-meta` rather than encoded into the unit name or directory paths. Because
+there is only ever one node on the box, the binary is launched with no node-instance flag and
+observers serve RPC on the reth default ports (`8545`/`8546`).
+
+> **Upgrading from an older install?** Earlier versions used a separate unit name and
+> per-role config/data directories for each node type. Those legacy per-role installs keep
+> working untouched — a compatibility shim (`lib/fallback.sh`) detects the old layout and
+> resolves the correct unit, container, and directories automatically. Nothing is renamed or
+> migrated; the helper scripts simply find whichever layout is present. Fresh installs always
+> use the unified `telcoin` identity described above.
 
 ---
 
@@ -187,16 +209,16 @@ Each script walks through numbered steps:
 - Asks for your Ethereum address (and multiaddrs for validators)
 - Asks you to set a BLS key passphrase (entered twice to confirm, never shown on screen)
 - Runs telcoin-network keytool generate observer/validator to create cryptographic keys
-- Stores keys in /var/lib/telcoin/[node-type]/node-keys/ with strict permissions
-- Stores passphrase in /etc/telcoin/[node-type]/bls-passphrase (mode 600)
+- Stores keys in /var/lib/telcoin/node-keys/ with strict permissions
+- Stores passphrase in /etc/telcoin/bls-passphrase (mode 600)
 - If TPM selected: seals passphrase to TPM chip, shows it once, prompts operator to store offline
 
 **Step 6: Configuration**
 - Copies the official chain-config files (genesis.yaml, committee.yaml, parameters.yaml) from the cloned repository
 
 **Step 7/8: Systemd Service**
-- Writes a wrapper script to /opt/telcoin/start-[type].sh that reads the passphrase securely at runtime
-- Writes a systemd service file to /etc/systemd/system/telcoin-[type].service using LoadCredential
+- Writes a wrapper script to /opt/telcoin/start-telcoin.sh that reads the passphrase securely at runtime
+- Writes a systemd service file to /etc/systemd/system/telcoin.service using LoadCredential
 - Configures the correct network listener addresses for P2P connectivity
 - Optionally starts the node immediately
 - Optionally enables auto-start on server reboot
@@ -205,34 +227,33 @@ Each script walks through numbered steps:
 
 ## System Layout
 
-After setup, files are organised as follows. Replace `<type>` with either `observer` or `validator` depending on which node you installed.
+After setup, files are organised as follows. The layout is identical for both node types — the
+node type is recorded in `/etc/telcoin/.node-meta` (`NODE_TYPE=`) rather than in the paths.
 
 ```
 /opt/telcoin/
   telcoin-network                   -- the node binary
-  start-telcoin-<type>.sh           -- wrapper script (reads passphrase, starts node)
+  start-telcoin.sh                  -- wrapper script (reads passphrase, starts node)
 
 /var/lib/telcoin/
-  <type>/                           -- chain data for this node
-    node-keys/                      -- P2P + BLS keys (keep backed up!)
-    node-info.yaml                  -- public node identity (BLS pubkey for validators)
-    genesis/
-      genesis.yaml                  -- chain genesis config
-      committee.yaml                -- validator committee config
-    parameters.yaml                 -- consensus parameters
-    db/                             -- chain database (grows over time)
+  node-keys/                        -- P2P + BLS keys (keep backed up!)
+  node-info.yaml                    -- public node identity (BLS pubkey for validators)
+  genesis/
+    genesis.yaml                    -- chain genesis config
+    committee.yaml                  -- validator committee config
+  parameters.yaml                   -- consensus parameters
+  db/                               -- chain database (grows over time)
 
 /etc/telcoin/
-  <type>/
-    bls-passphrase                  -- BLS key passphrase (mode 600, root only)
-    .node-meta                      -- internal metadata used by remove/edit scripts
+  bls-passphrase                    -- BLS key passphrase (mode 600, root only)
+  .node-meta                        -- internal metadata used by remove/edit scripts
 
 /var/log/telcoin/
-  telcoin-<type>.log                -- node output log
-  telcoin-<type>-error.log          -- node error log
+  telcoin.log                       -- node output log
+  telcoin-error.log                 -- node error log
 
 /etc/systemd/system/
-  telcoin-<type>.service            -- systemd unit definition
+  telcoin.service                   -- systemd unit definition
 
 /home/telcoin/
   .cache/reth/logs/                 -- reth internal log cache
@@ -242,7 +263,11 @@ After setup, files are organised as follows. Replace `<type>` with either `obser
   target/release/                   -- compiled binary location (source builds only)
 ```
 
-Both node types share the same layout. The only structural difference is which subdirectory and unit file exist (`observer` vs `validator`); a server running both will have both subtrees populated.
+One machine runs one node, so there is a single `telcoin.service` and a single set of
+directories regardless of node type. Installs created by older versions of these scripts used
+per-role unit names and per-role subdirectories under `/etc/telcoin` and `/var/lib/telcoin`;
+those keep working as-is and the helper scripts locate them automatically via the
+compatibility shim in `lib/fallback.sh`.
 
 ---
 
@@ -315,10 +340,10 @@ A wrapper script would replace the direct ExecStart:
 
 ```bash
 #!/usr/bin/env bash
-# /opt/telcoin/start-node.sh
-export TN_BLS_PASSPHRASE=$(vault kv get -field=passphrase secret/telcoin/observer)
-exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin/observer \
-    --observer --instance 5 --metrics 127.0.0.1:9000 \
+# /opt/telcoin/start-telcoin.sh
+export TN_BLS_PASSPHRASE=$(vault kv get -field=passphrase secret/telcoin/node)
+exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin \
+    --observer --metrics 127.0.0.1:9000 \
     --log.stdout.format log-fmt -vvv --http
 ```
 
@@ -353,7 +378,7 @@ sudo ufw allow 49594/udp
 **Router port forward (home/bare metal only):**
 Forward UDP ports 49590 and 49594 from WAN to your server's local IP address. Cloud servers handle this via their network configuration.
 
-The RPC port (8541/8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
+The RPC port (8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
 
 ### Health Monitoring (Uptime Kuma)
 **Required for all nodes (observer and validator).** The Telcoin Association runs Uptime Kuma health monitoring against every deployed node — TCP port 43174 must be reachable **by the Association monitor, plus any optional operator-chosen IPs**. Restrict it to those source IPs rather than opening it to the whole internet (the endpoint binds on all interfaces, so a firewall rule is its only protection):
@@ -451,7 +476,7 @@ Run at any time after setup to verify your node is healthy:
 # Auto-detects whether this server runs a validator or observer
 bash ~/telcoin-node-scripts/check-node.sh
 
-# Force a specific node type (useful if both are installed on one server)
+# Force a specific node type (overrides the type recorded in .node-meta)
 bash ~/telcoin-node-scripts/check-node.sh --validator
 bash ~/telcoin-node-scripts/check-node.sh --observer
 
@@ -462,7 +487,7 @@ bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
 bash ~/telcoin-node-scripts/check-node.sh --no-network
 
 # Custom local RPC endpoint or service name
-bash ~/telcoin-node-scripts/check-node.sh --rpc http://127.0.0.1:8541 --service telcoin-observer
+bash ~/telcoin-node-scripts/check-node.sh --rpc http://127.0.0.1:8545 --service telcoin
 ```
 
 The health check verifies:
@@ -473,7 +498,7 @@ The health check verifies:
 - **Author presence (validator-only)** — checks whether your authority ID appears in the network's recent consensus headers. Catches the failure mode where a validator is running (systemd green, RPC up) but silent (not authoring headers). Auto-detects your authority ID from `<data-dir>/node-info.yaml` (field `primary_network_key`) or accepts an explicit `--authority-id <BASE58>` override.
 - **Reputation score (validator-only)** — your own score from `sub_dag.reputation_score.scores_per_authority` alongside the committee average. Flags scores below half-average.
 - **Validator on-chain status** — when `--address` is provided, calls the ConsensusRegistry contract and reports your validator state (Undefined / Staked / PendingActivation / Active / etc.).
-- **Disk space** — uses the actual data directory from `/etc/telcoin/<type>/.node-meta` (falls back to `/var/lib/telcoin/<type>`), so the check reports usage on whichever mount actually holds chain data — not just the default.
+- **Disk space** — uses the actual data directory from `/etc/telcoin/.node-meta` (falls back to `/var/lib/telcoin`), so the check reports usage on whichever mount actually holds chain data — not just the default.
 - **Memory** — total / available / percent used.
 
 ### Why RPC instead of log files?
@@ -511,7 +536,7 @@ The script is menu-driven and interactive. It never makes changes without explic
 - **Test SSH in a new terminal** before closing your current session after making any changes
 - **Whitelist your IP first** before enabling default deny or restricting SSH
 - **Validators only** need inbound ports 49590/49594 — observer nodes need no inbound ports at all
-- Never open the RPC port (8541/8545) directly to the internet — use nginx on port 443 instead
+- Never open the RPC port (8545) directly to the internet — use nginx on port 443 instead
 
 ### When to run it
 
@@ -521,21 +546,21 @@ Run `firewall-setup.sh` after completing node setup and before going live. For p
 
 ```bash
 # Start / stop / restart
-sudo systemctl start telcoin-observer
-sudo systemctl stop telcoin-observer
-sudo systemctl restart telcoin-observer
+sudo systemctl start telcoin
+sudo systemctl stop telcoin
+sudo systemctl restart telcoin
 
 # View live logs
-sudo tail -f /var/log/telcoin/telcoin-observer.log
+sudo tail -f /var/log/telcoin/telcoin.log
 
 # View logs via journalctl
-journalctl -u telcoin-observer -f
+journalctl -u telcoin -f
 
 # Enable auto-start on boot
-sudo systemctl enable telcoin-observer
+sudo systemctl enable telcoin
 
 # Reset after too many failed restarts
-sudo systemctl reset-failed telcoin-observer
+sudo systemctl reset-failed telcoin
 ```
 
 ---
@@ -589,7 +614,7 @@ Use the dedicated removal script to safely remove a node installation:
 sudo bash ~/telcoin-node-scripts/remove-node.sh
 ```
 
-The script automatically detects what is installed (observer, validator, or both) and the install method (binary/source or Docker). It guides you through removal step by step with individual confirmations for each component.
+The script automatically detects what is installed (observer or validator, including legacy per-role layouts) and the install method (binary/source or Docker). It guides you through removal step by step with individual confirmations for each component.
 
 **What it removes:**
 - Systemd service (stops, disables and removes the service file)
@@ -606,7 +631,7 @@ The script automatically detects what is installed (observer, validator, or both
 
 ## Key Backup
 
-Your node keys are stored in `/var/lib/telcoin/observer/node-keys/`. Back these up immediately after setup.
+Your node keys are stored in `/var/lib/telcoin/node-keys/`. Back these up immediately after setup.
 
 If you lose your keys you will lose your node identity and will need to re-register with the Telcoin Association (validators) or regenerate keys and restart (observers).
 
@@ -710,32 +735,34 @@ journalctl -u telcoin-ui -f
 
 ## Quick Reference — Common Commands
 
-The systemd unit name is `telcoin-observer` or `telcoin-validator` depending on which you installed. Substitute `<type>` accordingly in the commands below.
+The systemd unit is `telcoin` for fresh installs. (Nodes installed under an older version may
+use a previous per-role unit name — see [One node per VM](#one-node-per-vm); the helper scripts
+detect it automatically, but with raw `systemctl` substitute that name below.)
 
 ### Service management
 
 ```bash
 # Start / stop / restart
-sudo systemctl start telcoin-<type>
-sudo systemctl stop telcoin-<type>
-sudo systemctl restart telcoin-<type>
+sudo systemctl start telcoin
+sudo systemctl stop telcoin
+sudo systemctl restart telcoin
 
 # Enable / disable auto-start on boot
-sudo systemctl enable telcoin-<type>
-sudo systemctl disable telcoin-<type>
+sudo systemctl enable telcoin
+sudo systemctl disable telcoin
 
 # Reset after too many failed restarts
-sudo systemctl reset-failed telcoin-<type>
+sudo systemctl reset-failed telcoin
 ```
 
 ### Logs
 
 ```bash
 # Tail the node's stdout/stderr log file
-sudo tail -f /var/log/telcoin/telcoin-<type>.log
+sudo tail -f /var/log/telcoin/telcoin.log
 
 # Or via journalctl
-journalctl -u telcoin-<type> -f
+journalctl -u telcoin -f
 ```
 
 ### Health and configuration
@@ -753,29 +780,29 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh
 
 ### RPC queries
 
-Replace `8541` with `8545` for a validator's default RPC port.
+The default RPC port is `8545` (the reth default) for both node types.
 
 ```bash
 # eth_chainId
 curl -s -X POST -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-  http://127.0.0.1:8541
+  http://127.0.0.1:8545
 
 # eth_blockNumber
 curl -s -X POST -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-  http://127.0.0.1:8541
+  http://127.0.0.1:8545
 
 # eth_syncing
 curl -s -X POST -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
-  http://127.0.0.1:8541
+  http://127.0.0.1:8545
 
 # tn_latestConsensusHeader -- the authoritative consensus state (use this
 # rather than log-grepping for "got new consensus" entries)
 curl -s -X POST -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","method":"tn_latestConsensusHeader","params":[],"id":1}' \
-  http://127.0.0.1:8541
+  http://127.0.0.1:8545
 ```
 
 ### Scripts
@@ -891,11 +918,11 @@ down and report the add-ons. See [docs/testnet-addons.md](docs/testnet-addons.md
 
 ### telcoin-ui v1.0.3
 Fixes the dashboard "Recent Traces / No traces yet" panel when spans are already
-visible in the Jaeger UI: the node registers its OTLP service name as
-`telcoin-<type>` plus a node-identity suffix (e.g. `telcoin-observer-QCZPqMY2zfp`),
+visible in the Jaeger UI: the node registers its OTLP service name as a
+`telcoin`-prefixed name plus a node-identity suffix (e.g. `telcoin-QCZPqMY2zfp`),
 so the backend's exact-name Jaeger query never matched. Traces, trace stats, and
 the Jaeger `service_registered` flag now resolve the real service name by
-`telcoin-<type>` prefix.
+`telcoin` prefix.
 
 ### telcoin-ui v1.0.2
 Tracing toggle now restarts the node with `systemctl restart --no-block`, so the

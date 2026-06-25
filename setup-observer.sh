@@ -9,8 +9,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.21"
-readonly SERVICE_NAME="telcoin-observer"
+readonly SCRIPT_VERSION="1.2.22"
+readonly SERVICE_NAME="telcoin"
 readonly NODE_TYPE="observer"
 
 NETWORK=""
@@ -20,13 +20,13 @@ RPC_URL=""
 EXPLORER_URL=""
 INSTALL_METHOD=""
 BINARY_PATH=""
-DATA_DIR="$DEFAULT_DATA_DIR/observer"
-CONFIG_DIR="$DEFAULT_CONFIG_DIR/observer"
+DATA_DIR="$DEFAULT_DATA_DIR"
+CONFIG_DIR="$DEFAULT_CONFIG_DIR"
 LOG_DIR="$DEFAULT_LOG_DIR"
 INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 P2P_PORT="$DEFAULT_P2P_PORT"
 WORKER_PORT="$DEFAULT_WORKER_PORT"
-RPC_PORT="8541"
+RPC_PORT="8545"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
 ENABLE_PUBLIC_RPC="false"
 OBSERVER_ADDRESS=""
@@ -944,27 +944,14 @@ EOF
 step_create_service() {
     print_header "Step 7 of 7: Creating Systemd Service"
 
-    print_info "The --instance flag affects the RPC port: 8545 - (instance - 1)"
-    print_info "  Instance 5 -> RPC port 8541 (default for observers)"
-    echo ""
-    local input instance
-    if json_mode; then
-        instance="${JSON_INSTANCE:-5}"
-    else
-        read -r -p "  Instance number [5]: " input
-        instance="${input:-5}"
-    fi
-    RPC_PORT=$(( 8545 - (instance - 1) ))
-    # WS port: reth offsets it from --instance as ws_port += instance*2 - 2 (base 8546; see
-    # reth RpcServerArgs::adjust_instance_ports) -- the opposite direction from HTTP and at 2x
-    # step. instance 1 -> 8546, instance 5 -> 8554 (the observer default). The launch heredocs
-    # below enable --ws and pin both --http.addr/--ws.addr to 127.0.0.1 so RPC + WS are reachable
+    # Observers use the reth RPC defaults: HTTP 8545, WS 8546. The launch heredocs below
+    # enable --ws and pin both --http.addr/--ws.addr to 127.0.0.1 so RPC + WS are reachable
     # ONLY via the Caddy TLS edge (reth already defaults to loopback; pinning makes the intent
     # explicit + immune to a future default change). WS_PORT is persisted to .node-meta so
-    # config-caddy.sh proxies wss:// to the right port -- verify the real bind with `ss -tlnp` at
-    # rollout (do not trust the formula blindly: a fork could change the derivation).
-    WS_PORT=$(( 8546 + (instance * 2 - 2) ))
-    print_ok "Instance: ${instance}, RPC port: ${RPC_PORT}, WS port: ${WS_PORT}"
+    # config-caddy.sh proxies wss:// to the right port -- verify the real bind with `ss -tlnp`
+    # at rollout (do not trust the default blindly: a fork could change the derivation).
+    WS_PORT=8546
+    print_ok "RPC port: ${RPC_PORT}, WS port: ${WS_PORT}"
 
     local primary_multiaddr="$PRIMARY_LISTENER_MULTIADDR"
     local worker_multiaddr="$WORKER_LISTENER_MULTIADDR"
@@ -1035,12 +1022,11 @@ exec docker run --rm \
 -e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
 -e "WORKER_LISTENER_MULTIADDR=${worker_multiaddr}" \
 -v ${DATA_DIR}:/home/nonroot \
--v ${CONFIG_DIR}:/etc/telcoin/observer:ro \
+-v ${CONFIG_DIR}:/etc/telcoin:ro \
 ${DOCKER_IMAGE} \
 telcoin node \
 --datadir /home/nonroot \
 --observer \
---instance ${instance} \
 --log.stdout.format log-fmt \
 -vvv \
 --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
@@ -1060,12 +1046,11 @@ exec docker run --rm \
 -e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
 -e "WORKER_LISTENER_MULTIADDR=${worker_multiaddr}" \
 -v ${DATA_DIR}:/home/nonroot \
--v ${CONFIG_DIR}:/etc/telcoin/observer:ro \
+-v ${CONFIG_DIR}:/etc/telcoin:ro \
 ${DOCKER_IMAGE} \
 telcoin node \
 --datadir /home/nonroot \
 --observer \
---instance ${instance} \
 --log.stdout.format log-fmt \
 -vvv \
 --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
@@ -1151,7 +1136,6 @@ export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
 exec ${BINARY_PATH} node \
   --datadir ${DATA_DIR} \
   --observer \
-  --instance ${instance} \
   --log.stdout.format log-fmt \
   -vvv \
   --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
@@ -1168,7 +1152,6 @@ export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
 exec ${BINARY_PATH} node \
   --datadir ${DATA_DIR} \
   --observer \
-  --instance ${instance} \
   --log.stdout.format log-fmt \
   -vvv \
   --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
@@ -1221,12 +1204,13 @@ EOF
     systemctl daemon-reload
     print_ok "Service file written: ${service_file}"
 
-    local meta_file="/etc/telcoin/observer/.node-meta"
-    mkdir -p "/etc/telcoin/observer"
+    local meta_file="${CONFIG_DIR}/.node-meta"
+    mkdir -p "$CONFIG_DIR"
     cat > "$meta_file" <<EOF
 HOST_SERVICE_USER=${SERVICE_USER}
 HOST_SERVICE_GROUP=${SERVICE_GROUP}
 INSTALL_METHOD=${INSTALL_METHOD:-binary}
+NODE_TYPE=${NODE_TYPE}
 PASSPHRASE_METHOD=${PASSPHRASE_METHOD}
 DOCKER_IMAGE=${DOCKER_IMAGE:-}
 NETWORK=${NETWORK}
@@ -1349,7 +1333,6 @@ step_final_summary() {
 JSON_MODE=false
 JSON_PHASE=""
 JSON_BUILD_REF=""
-JSON_INSTANCE="5"
 JSON_NETWORK_INPUT="testnet"
 JSON_DONE_EMITTED=false
 # Optional override: dir holding genesis.yaml/committee.yaml/parameters.yaml,
@@ -1461,7 +1444,6 @@ main() {
             --address)             OBSERVER_ADDRESS="${2:-}"; shift 2 ;;
             --build-ref)           JSON_BUILD_REF="${2:-}"; shift 2 ;;
             --docker-image)        DOCKER_IMAGE="${2:-}"; shift 2 ;;
-            --instance)            JSON_INSTANCE="${2:-}"; shift 2 ;;
             --external-primary)    PRIMARY_MULTIADDR="${2:-}"; shift 2 ;;
             --external-worker)     WORKER_MULTIADDR="${2:-}"; shift 2 ;;
             --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;

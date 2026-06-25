@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.51"
+readonly SCRIPT_VERSION="1.1.52"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -57,45 +57,37 @@ QUERY_NETWORK=true
 NODE_TYPE_EXPLICITLY_SET=false
 
 # Apply node-type defaults. Called by --validator/--observer and by
-# detect_node_type() when running with no flag.
+# detect_node_type() when running with no flag. NODE_TYPE is forced from the
+# flag; SERVICE_NAME is derived from tn_resolve_service (never a hardcoded
+# legacy name) and only when not already set by an explicit --service.
 set_node_type() {
     case "$1" in
         validator)
             NODE_TYPE="validator"
-            SERVICE_NAME="telcoin-validator"
             [[ -z "$RPC_URL" ]] && RPC_URL="http://127.0.0.1:8545"
             ;;
         observer)
             NODE_TYPE="observer"
-            SERVICE_NAME="telcoin-observer"
             [[ -z "$RPC_URL" ]] && RPC_URL="http://127.0.0.1:8541"
             ;;
     esac
+    [[ -z "$SERVICE_NAME" ]] && SERVICE_NAME="$(tn_resolve_service || true)"
 }
 
-# Pick a default node type from installed systemd units.
-# If both are installed, default to validator and tell the operator how to
-# switch. If neither, default to validator with a note. Honours explicit
-# flags via NODE_TYPE_EXPLICITLY_SET.
+# Pick a default node type from the installed node, via the resolvers.
+# tn_resolve_node_type reads NODE_TYPE= from .node-meta (unified install) or the
+# legacy role dir; tn_resolve_service returns the unit base name (or 1 if no node
+# is installed). Honours explicit flags via NODE_TYPE_EXPLICITLY_SET -- when set,
+# the flag already forced NODE_TYPE and SERVICE_NAME so we leave them alone.
 detect_node_type() {
     [[ "$NODE_TYPE_EXPLICITLY_SET" == "true" ]] && return 0
-    local val_unit="/etc/systemd/system/telcoin-validator.service"
-    local obs_unit="/etc/systemd/system/telcoin-observer.service"
-    local has_val=false has_obs=false
-    [[ -f "$val_unit" ]] && has_val=true
-    [[ -f "$obs_unit" ]] && has_obs=true
-
-    if   [[ "$has_val" == "true" ]] && [[ "$has_obs" == "true" ]]; then
-        set_node_type validator
-        print_info "Auto-detected: BOTH validator and observer installed -- checking validator."
-        print_info "Use --observer to check the observer instead."
-    elif [[ "$has_val" == "true" ]]; then
-        set_node_type validator
-        print_info "Auto-detected node type: validator"
-    elif [[ "$has_obs" == "true" ]]; then
-        set_node_type observer
-        print_info "Auto-detected node type: observer"
+    local svc
+    if svc="$(tn_resolve_service)"; then
+        [[ -z "$SERVICE_NAME" ]] && SERVICE_NAME="$svc"
+        set_node_type "$(tn_resolve_node_type)"
+        print_info "Auto-detected node type: ${NODE_TYPE}"
     else
+        # No node installed -- default to validator so the report still renders.
         set_node_type validator
         print_warn "No Telcoin node detected on this server -- defaulting to validator."
         print_info "Pass --observer or --validator explicitly if needed."
@@ -157,9 +149,9 @@ NETWORK_PROBE_FAILED=false
 # the actual chain-data mount, not just /var/lib/telcoin. Always returns 0
 # (echoes the default path if nothing else found) so set -e doesn't fire.
 detect_data_dir() {
-    local meta="/etc/telcoin/${NODE_TYPE}/.node-meta"
-    local default="/var/lib/telcoin/${NODE_TYPE}"
-    if [[ -f "$meta" ]]; then
+    local meta; meta="$(node_meta_path || true)"
+    local default; default="$(tn_resolve_data_dir)"
+    if [[ -n "$meta" ]] && [[ -f "$meta" ]]; then
         local data_dir
         data_dir=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
         if [[ -n "$data_dir" ]] && [[ -d "$data_dir" ]]; then

@@ -5,6 +5,20 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ---
 
+## Unreleased
+
+### Unified node naming -- single `telcoin` identity
+Collapses the historical dual observer/validator identity into one identity for
+NEW installs (operators run one node per VM). The systemd unit, docker `--name`,
+and log files are all named `telcoin` (`telcoin.service`); config and data live
+directly in `/etc/telcoin` and `/var/lib/telcoin` (no `/observer` or `/validator`
+suffix), with the node type recorded as `NODE_TYPE=` in `/etc/telcoin/.node-meta`.
+Drops the `--instance` flag, so observers now use the reth default RPC/WS ports
+8545/8546. Existing per-role installs (`telcoin-validator` / `telcoin-observer`
+units, `/etc/telcoin/<role>`, `/var/lib/telcoin/<role>`) keep working untouched
+via the new `lib/fallback.sh` compatibility shim -- the management scripts detect
+them and operate on them in place rather than renaming or migrating anything.
+
 ### v1.1.39
 `pick_source_version` distinguishes "at tip of main" from "behind main";
 replaces the binary `on_main` check with a tip/behind/none state machine.
