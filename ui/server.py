@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.65"
+UI_VERSION = "1.7.66"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -576,6 +576,32 @@ def detect_nodes():
                 "inspect": insp,
             }
 
+    # ---- On-chain role remap -------------------------------------------------
+    # A node deployed as an observer but later STAKED + activated on-chain is
+    # really a validator. Re-attribute it to the validator slot so the frontend
+    # auto-selects the validator tab and renders the validator dashboard (every
+    # resolver maps the single telcoin.service/.node-meta regardless of the type
+    # argument, so no other change is needed). Runs AFTER docker detection so
+    # managed_names already shielded the legacy container from external re-detect.
+    # Only probes the observer case (a node already typed validator needs no check).
+    # Post-migration nodes set NODE_TYPE=validator and never reach here; this is
+    # for the staked-but-not-yet-migrated observer install.
+    obs = out.get("observer") or {}
+    if obs.get("mode") == "scripts" and onchain_is_validator("observer", obs) is True:
+        val = out.get("validator") or {}
+        # Don't clobber a genuinely separate validator (shouldn't exist on a
+        # single-node host): only remap when the validator slot is empty or already
+        # points at this same single install (mode scripts/None).
+        if val.get("mode") in (None, "scripts"):
+            remapped = dict(obs)
+            remapped["staked"] = True
+            out["validator"] = remapped
+            out["observer"] = {"mode": None, "status": "not installed",
+                               "container": None, "image": None,
+                               "rpc_port": None, "node_info_path": None}
+            _log("detect_nodes: observer install confirmed on-chain validator "
+                 "(tn_isValidator) -> attributing to the validator tab")
+
     _detect_cache["ts"] = now
     _detect_cache["data"] = out
     return out
@@ -1083,6 +1109,54 @@ def hex_to_dec(h):
         return None
 
 
+# Bitcoin/IPFS base58 alphabet (no 0 O I l). node-info.yaml and tn_info report the
+# BLS public key in THIS encoding, but tn_isValidator(blsPubkey: bytes) on the
+# ConsensusRegistry wants the raw 96 bytes as 0x-hex and rejects anything whose
+# length != 96. So we base58-decode -> 96 bytes -> 0x-hex before the on-chain call.
+_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_B58_INDEX = {c: i for i, c in enumerate(_B58_ALPHABET)}
+
+
+def _b58decode(s):
+    """Decode a base58 string (Bitcoin alphabet) to bytes. None on any invalid
+    character. Leading '1's decode to leading zero bytes, per the standard. Pure
+    stdlib -- requirements.txt stays flask-only."""
+    if not isinstance(s, str) or s == "":
+        return None
+    num = 0
+    for ch in s:
+        v = _B58_INDEX.get(ch)
+        if v is None:
+            return None
+        num = num * 58 + v
+    body = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
+    pad = 0
+    for ch in s:
+        if ch == "1":
+            pad += 1
+        else:
+            break
+    return b"\x00" * pad + body
+
+
+def bls_pubkey_to_hex(b58):
+    """A base58-encoded BLS public key -> '0x'+hex of the raw 96 bytes, or None if
+    it does not decode to exactly 96 bytes (the length the ConsensusRegistry
+    enforces). Tolerant of an already-0x-hex 96-byte input (passes it through)."""
+    if not b58 or not isinstance(b58, str):
+        return None
+    s = b58.strip()
+    if s[:2].lower() == "0x":
+        h = s[2:]
+        return "0x" + h.lower() if re.fullmatch(r"[0-9a-fA-F]{192}", h) else None
+    raw = _b58decode(s)
+    if raw is None or len(raw) != 96:
+        if raw is not None:
+            _dbg(f"bls_pubkey_to_hex: decoded {len(raw)} bytes, expected 96")
+        return None
+    return "0x" + raw.hex()
+
+
 def fmt_age(seconds):
     """Seconds elapsed -> human 'X ago' string, matching check-node.sh fmt_age."""
     try:
@@ -1279,6 +1353,53 @@ def node_identity(t, det=None):
             if not out.get(k):
                 out[k] = parsed.get(k)
     return out
+
+
+# tn_isValidator(blsPubkey) result cache: t -> (expires_monotonic, bool|None).
+# detect_nodes() calls this once per detect cycle for an observer-typed node; the
+# 30s TTL keeps the extra RPC cheap and stops a flapping tip from toggling the tab.
+_isval_cache = {}
+_ISVAL_TTL = 30.0
+
+
+def onchain_is_validator(t, det=None):
+    """True only when the node is fully synced AND the ConsensusRegistry reports
+    its BLS key as a validator (tn_isValidator). False when synced-but-not-a-
+    validator. None when we cannot tell -- RPC down, not synced, no usable 96-byte
+    key, or the node's version lacks tn_isValidator. Gating on synced honors
+    'after the node is synced' and avoids a stale tip momentarily mis-typing the
+    node. Cached ~30s (its own TTL, independent of detect_nodes' cache)."""
+    now = time.monotonic()
+    cached = _isval_cache.get(t)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    result = None
+    try:
+        det = det or detect_type(t)
+        port = det.get("rpc_port") or 8545
+        # Synced? Reuse the status-page computation: local exec block within 2 of
+        # the network's consensus-referenced exec tip.
+        block_number = hex_to_dec(local_rpc(port, "eth_blockNumber"))
+        _consensus, cons_exec, _unsup = consensus_info(port)
+        synced = (block_number is not None and cons_exec is not None
+                  and block_number >= cons_exec - 2)
+        if synced:
+            hexkey = bls_pubkey_to_hex((node_identity(t, det) or {}).get("bls_public_key"))
+            if hexkey:
+                rpc = local_rpc(port, "tn_isValidator", [hexkey])
+                if rpc is True:
+                    result = True
+                elif rpc is False:
+                    result = False
+            else:
+                _dbg(f"onchain_is_validator: no usable BLS key for {t}")
+    except Exception as e:  # pragma: no cover - defensive
+        _log(f"onchain_is_validator({t}) error: {e}")
+        result = None
+
+    _isval_cache[t] = (now + _ISVAL_TTL, result)
+    return result
 
 
 # =============================================================================
@@ -1842,6 +1963,10 @@ def api_nodes():
             "mode": mode,                 # "scripts" | "external" | None
             "container": d.get("container"),
             "image": d.get("image"),
+            # True when an observer-deployed node was re-attributed here because it
+            # is a staked, on-chain validator (detect_nodes remap) -- drives an
+            # optional "staked" badge in the selector.
+            "staked": bool(d.get("staked")),
         }
     # Read-only when reached over the public Caddy path (vs the SSH tunnel). The
     # UI uses this to hide every management control and show a read-only banner.
@@ -1896,6 +2021,11 @@ def api_status(node_type):
     synced = False
     if block_number is not None and cons_exec is not None:
         synced = block_number >= cons_exec - 2
+
+    # On-chain validator role for display (cached ~30s). Computed only for the
+    # validator tab -- the detect_nodes() remap already decides which tab shows, so
+    # there is no need to probe an observer here. None when undeterminable.
+    is_validator_onchain = onchain_is_validator(t, det) if t == "validator" else None
 
     # Dynamic network identity from the live chain id.
     slug, net_name, net_configured = resolve_network(chain_id, t)
@@ -1987,6 +2117,7 @@ def api_status(node_type):
         "config_file": config_file,
         "block_number": block_number,
         "synced": synced,
+        "is_validator_onchain": is_validator_onchain,
         "chain_id": chain_id,
         "network": net_name,
         "network_slug": slug,

@@ -19,6 +19,27 @@ units, `/etc/telcoin/<role>`, `/var/lib/telcoin/<role>`) keep working untouched
 via the new `lib/fallback.sh` compatibility shim -- the management scripts detect
 them and operate on them in place rather than renaming or migrating anything.
 
+### Opt-in migration to unified naming -- `migrate-node-naming.sh`
+New on-node script that migrates a legacy `telcoin-{observer,validator}` install to
+the unified layout on demand (the fallback shim never migrates on its own). It
+stops the node, relocates `/etc/telcoin/<role>` and `/var/lib/telcoin/<role>` up to
+`/etc/telcoin` and `/var/lib/telcoin`, rewrites the unit + start wrapper to the
+unified paths / `--name telcoin`, sets `NODE_TYPE=` in `.node-meta`, then restarts
+as `telcoin.service`. For an observer it also converts to a validator -- it deletes
+the single `--observer` launch line (the only runtime difference between the two)
+and sets `NODE_TYPE=validator`, for an observer later staked + activated on-chain.
+The node keeps its existing BLS key; RPC/WS ports are preserved (the `--instance` in
+the launch flags is untouched). Idempotent, collision-guarded, and self-rolling-back
+(restores the legacy unit/wrapper, moves the dirs back, restarts the legacy service
+on any failure). Shipped via `update-scripts.sh`.
+
+### Node Manager UI -- detect a staked validator on-chain
+The dashboard now reads a node's TRUE role from the chain instead of only its
+`NODE_TYPE`: after the node is synced it calls `tn_isValidator` with the node's BLS
+key (base58 -> the 96-byte `0x` hex the contract requires) and, when true, shows the
+node on the validator tab and renders the validator dashboard. So an observer that
+was staked + activated is displayed correctly even before it is migrated. (UI 1.7.66.)
+
 ### v1.1.39
 `pick_source_version` distinguishes "at tip of main" from "behind main";
 replaces the binary `on_main` check with a tip/behind/none state machine.

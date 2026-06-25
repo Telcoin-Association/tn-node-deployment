@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/fallback.sh
 source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 
-readonly SCRIPT_VERSION="1.1.57"
+readonly SCRIPT_VERSION="1.1.58"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -50,6 +50,7 @@ declare -a SCRIPTS=(
     "firewall-setup.sh:firewall-setup.sh:SCRIPT_VERSION"
     "remove-node.sh:remove-node.sh:SCRIPT_VERSION"
     "update-node.sh:update-node.sh:SCRIPT_VERSION"
+    "migrate-node-naming.sh:migrate-node-naming.sh:SCRIPT_VERSION"
     "update-scripts.sh:update-scripts.sh:SCRIPT_VERSION"
     "lib/common.sh:lib/common.sh:COMMON_VERSION"
     "lib/fallback.sh:lib/fallback.sh:FALLBACK_VERSION"

@@ -592,8 +592,18 @@ async function loadNodes(fresh){
   for(const t of ['observer','validator']){
     const n = state.nodes[t] || {installed:false,status:'not installed'};
     const dot = $('#dot-'+t), st = $('#stat-'+t);
-    st.textContent = n.installed ? n.status : 'not installed';
+    // "staked" marks a node deployed as an observer that is now an on-chain
+    // validator (server remapped it to this slot) -- surface it as a small badge.
+    st.textContent = n.installed ? (n.status + (n.staked ? ' · staked' : '')) : 'not installed';
     dot.className = 'dot ' + (n.status==='active'?'green':(n.installed?'red':'gray'));
+  }
+  // Follow the host's single node if it changed slots since the last poll -- e.g. an
+  // observer that synced and got re-attributed to the validator tab on-chain
+  // (detect_nodes remap). Conservative: only switch when the CURRENT tab is now
+  // uninstalled, so a manual click on an installed tab is never yanked.
+  if(!state.nodes[state.node]?.installed){
+    const inst = installedType();
+    if(inst && inst !== state.node) selectNode(inst);
   }
   updateReadonlyBanner();
   syncReadonlyChrome();
