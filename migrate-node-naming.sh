@@ -66,11 +66,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 set -E
 
 # Version, gated by update-scripts.sh like every other tracked file.
-<<<<<<< HEAD
-readonly SCRIPT_VERSION="1.0.1"
-=======
 readonly SCRIPT_VERSION="1.0.2"
->>>>>>> 349f6b9 (Collapse observer/validator into one dynamic-role node identity)
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
@@ -422,15 +418,6 @@ rewrite_unit() {
 # =============================================================================
 # STEP 7 -- REWRITE THE WRAPPER (strip the removed --observer flag)
 # =============================================================================
-<<<<<<< HEAD
-# Same path substitutions as the unit, PLUS delete the lone `--observer` launch
-# line. That flag has been removed from the node binary, so a legacy wrapper still
-# passing it would fail to launch -- stripping it normalizes the wrapper. The
-# delete matches a line that is only `--observer`, with optional leading indent
-# (docker form is column-0 `--observer \`; binary form is 2-space `  --observer \`)
-# and an optional trailing backslash. Deleting the whole line preserves the
-# backslash-continuation chain (the previous line keeps its own trailing `\`).
-=======
 # Same path substitutions as the unit, PLUS strip the removed `--observer` flag.
 # It has been removed from the node binary, so a legacy wrapper still passing it
 # would fail to launch. Two wrapper shapes exist in the wild and BOTH are handled:
@@ -443,7 +430,6 @@ rewrite_unit() {
 #      flag plus one adjacent separator, leaving the rest of the command intact.
 # The post-condition guard below fails the migration (-> rollback) if any
 # `--observer` token survives either pass.
->>>>>>> 349f6b9 (Collapse observer/validator into one dynamic-role node identity)
 rewrite_wrapper() {
     print_step "Normalizing start wrapper -> ${UNIFIED_WRAPPER} (stripping the removed --observer flag)"
     # cp -a preserves the original (security-sensitive) owner + mode: docker
