@@ -66,7 +66,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 set -E
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly SCRIPT_VERSION="1.0.2"
+readonly SCRIPT_VERSION="1.0.4"
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
@@ -83,13 +83,18 @@ LEGACY_WRAPPER=""       # /opt/telcoin/start-telcoin-<role>.sh (read from ExecSt
 LEGACY_CONFIG_DIR=""    # /etc/telcoin/<role>
 LEGACY_DATA_DIR=""      # /var/lib/telcoin/<role> (or .node-meta DATA_DIR)
 LEGACY_CONTAINER=""     # telcoin-<role>
-RPC_PORT="8545"         # for the post-start verify (read from .node-meta; node5 = 8541)
+RPC_PORT="${DEFAULT_RPC_PORT:-8545}"  # post-start verify port; the unified node runs with NO
+                        # --instance, so it serves RPC on the protocol default (8545), not 8541.
+LEGACY_RPC_PORT=""      # informational only: the pre-migration RPC port (observer's --instance 5 -> 8541)
 
 # --- Rollback bookkeeping ----------------------------------------------------
 TS=""
 UNIT_BAK=""
 WRAPPER_BAK=""
 META_BAK=""
+DATA_OWNER=""           # owner:group of the data dir at snapshot; reapplied to the unified datadir
+                        # (relocate) and the recreated legacy datadir (rollback) so the non-root
+                        # container node can write/rotate its DB (a root-owned datadir -> exit 1).
 STOPPED_LEGACY=false
 MOVED_CONFIG=false
 MOVED_DATA=false
@@ -153,6 +158,10 @@ rollback() {
             [[ -e "${UNIFIED_DATA_DIR}/${base}" ]] && \
                 mv "${UNIFIED_DATA_DIR}/${base}" "${LEGACY_DATA_DIR}/${base}"
         done
+        # mkdir above (re)created the dir as root; restore the captured owner so the legacy
+        # node can write to its datadir. Without this a "rolled-back" node still can't rotate
+        # its DB LOG and exits 1 -- i.e. the rollback would leave the node broken.
+        [[ -n "$DATA_OWNER" ]] && chown "$DATA_OWNER" "$LEGACY_DATA_DIR" 2>/dev/null || true
     fi
     if [[ "$MOVED_CONFIG" == true ]]; then
         mkdir -p "$LEGACY_CONFIG_DIR"
@@ -267,10 +276,14 @@ detect_legacy() {
         LEGACY_WRAPPER="/opt/telcoin/start-telcoin-${ROLE}.sh"
     fi
 
-    # RPC port for the post-start verify (role-independent; tied to reth --instance).
-    local meta_rpc
-    meta_rpc="$(_tn_meta_get RPC_PORT "${LEGACY_CONFIG_DIR}/.node-meta" 2>/dev/null || true)"
-    [[ -n "$meta_rpc" ]] && RPC_PORT="$meta_rpc"
+    # The legacy RPC port (informational) was derived from reth `--instance` (the observer's
+    # `--instance 5` -> 8541). The migration STRIPS --instance, so the unified node serves RPC
+    # on the protocol default (DEFAULT_RPC_PORT=8545) -- that is what we verify and record in
+    # .node-meta. Verifying the legacy 8541 against a healthy unified node would time out and
+    # trigger a false rollback (the mismatch the sibling check-node/update-node tools warn of).
+    LEGACY_RPC_PORT="$(_tn_meta_get RPC_PORT "${LEGACY_CONFIG_DIR}/.node-meta" 2>/dev/null || true)"
+    LEGACY_RPC_PORT="${LEGACY_RPC_PORT:-unknown}"
+    RPC_PORT="${DEFAULT_RPC_PORT:-8545}"
 
     print_header "Telcoin Node Naming Migration v${SCRIPT_VERSION}"
     print_info "Detected LEGACY install:"
@@ -280,13 +293,14 @@ detect_legacy() {
     print_info "  config dir: ${LEGACY_CONFIG_DIR}"
     print_info "  data dir:   ${LEGACY_DATA_DIR}"
     print_info "  container:  ${LEGACY_CONTAINER} (docker installs only)"
-    print_info "  RPC port:   ${RPC_PORT}"
+    print_info "  RPC port:   ${LEGACY_RPC_PORT} (legacy; from --instance)"
     echo ""
     print_info "Will migrate to the UNIFIED layout:"
     print_info "  unit:       ${UNIFIED_UNIT}"
     print_info "  wrapper:    ${UNIFIED_WRAPPER}"
     print_info "  config dir: ${UNIFIED_CONFIG_DIR}"
     print_info "  data dir:   ${UNIFIED_DATA_DIR}"
+    print_info "  RPC port:   ${RPC_PORT} (default; --observer/--instance removed)"
     echo ""
 
     if [[ "$ASSUME_YES" != "true" ]]; then
@@ -325,6 +339,13 @@ snapshot() {
         META_BAK=""   # nothing to restore
         print_warn "  no ${LEGACY_CONFIG_DIR}/.node-meta to back up (continuing)"
     fi
+
+    # Capture the data dir's owner BEFORE we touch anything. relocate (-> unified dir) and
+    # rollback (-> recreated legacy dir) reapply it: the node runs as a non-root container
+    # user and must OWN its datadir to write/rotate its DB. mkdir/relocate run as root and
+    # would otherwise leave a root-owned datadir, which makes the node exit 1 on startup.
+    DATA_OWNER="$(stat -c '%U:%G' "$LEGACY_DATA_DIR" 2>/dev/null || true)"
+    [[ -n "$DATA_OWNER" ]] && print_ok "  data dir owner: ${DATA_OWNER} (preserved across migrate/rollback)"
 
     # From here on, any failure rolls back.
     arm_rollback
@@ -388,6 +409,16 @@ relocate_dir() {
     shopt -u dotglob nullglob
 
     rmdir "$src" 2>/dev/null || print_warn "Could not rmdir ${src} (not empty?) -- left in place."
+
+    # The DATA dir is bind-mounted read-WRITE and the node runs as a non-root container user,
+    # so it must OWN this dir to create/rotate its DB files. We just moved the contents into
+    # ${dst} (a root-owned parent), so reassert the captured owner on it; otherwise the node
+    # hits "Permission denied" rotating its LOG and exits 1. (CONFIG is mounted read-only, so
+    # its dir ownership is left untouched.)
+    if [[ "$label" == data && -n "$DATA_OWNER" ]]; then
+        chown "$DATA_OWNER" "$dst" 2>/dev/null \
+            || print_warn "Could not chown ${dst} to ${DATA_OWNER} -- node may fail to start."
+    fi
     print_ok "Relocated ${label} (${#moved_ref[@]} entries)."
 }
 
@@ -416,25 +447,26 @@ rewrite_unit() {
 }
 
 # =============================================================================
-# STEP 7 -- REWRITE THE WRAPPER (strip the removed --observer flag)
+# STEP 7 -- REWRITE THE WRAPPER (strip --observer and --instance)
 # =============================================================================
-# Same path substitutions as the unit, PLUS strip the removed `--observer` flag.
-# It has been removed from the node binary, so a legacy wrapper still passing it
-# would fail to launch. Two wrapper shapes exist in the wild and BOTH are handled:
-#   1. Multi-line heredoc wrappers (setup-*.sh >= v1.2.22): `--observer` sits on a
-#      line by itself (`--observer \`). The line-delete removes it whole, keeping
-#      the backslash-continuation chain intact (the previous line keeps its `\`).
-#   2. Single-line `exec docker run ... telcoin node ... --observer --instance N ...`
-#      wrappers (older setup-observer.sh, e.g. v1.2.21 -- the format deployed on the
-#      devnet observer): `--observer` is INLINE. The token-strip removes just the
-#      flag plus one adjacent separator, leaving the rest of the command intact.
-# The post-condition guard below fails the migration (-> rollback) if any
-# `--observer` token survives either pass.
+# Same path substitutions as the unit, PLUS strip BOTH `--observer` and `--instance N`.
+# The unified node auto-detects its role (so `--observer` must not be passed) and must run
+# on the protocol-default ports (so `--instance`, which offsets every port -- and is mutually
+# exclusive with the role flags -- must be removed). Neither may appear in any launch command.
+# Two wrapper shapes exist in the wild and BOTH are handled for each flag:
+#   1. Multi-line heredoc wrappers (setup-*.sh >= v1.2.22): the flag sits on a line by itself
+#      (`--observer \` / `--instance 5 \`). The line-delete removes it whole, keeping the
+#      backslash-continuation chain intact (the previous line keeps its `\`).
+#   2. Single-line `exec docker run ... telcoin node ... --observer --instance N ...` wrappers
+#      (older setup-observer.sh, e.g. v1.2.21 -- the format deployed on the devnet observer):
+#      the flags are INLINE. The token-strip removes the flag (and --instance's value) plus
+#      one adjacent separator, leaving the rest of the command intact.
+# The post-condition guard below fails the migration (-> rollback) if either token survives.
 rewrite_wrapper() {
-    print_step "Normalizing start wrapper -> ${UNIFIED_WRAPPER} (stripping the removed --observer flag)"
+    print_step "Normalizing start wrapper -> ${UNIFIED_WRAPPER} (stripping --observer and --instance)"
     # cp -a preserves the original (security-sensitive) owner + mode: docker
     # wrappers are root:root 0750 (run as root); binary wrappers telcoin:telcoin
-    # 0755. Then transform + strip --observer in place.
+    # 0755. Then transform + strip --observer/--instance in place.
     cp -a "$WRAPPER_BAK" "$UNIFIED_WRAPPER"
     sed -i -E \
         -e "s#/etc/telcoin/${ROLE}#/etc/telcoin#g" \
@@ -442,15 +474,17 @@ rewrite_wrapper() {
         -e "s#telcoin-${ROLE}#telcoin#g" \
         -e '/^[[:space:]]*--observer[[:space:]]*\\?[[:space:]]*$/d' \
         -e 's/(^|[[:space:]])--observer([[:space:]]|$)/\2/g' \
+        -e '/^[[:space:]]*--instance([[:space:]]+|=)[0-9]+[[:space:]]*\\?[[:space:]]*$/d' \
+        -e 's/(^|[[:space:]])--instance([[:space:]]+|=)[0-9]+([[:space:]]|$)/\3/g' \
         "$UNIFIED_WRAPPER"
     WROTE_WRAPPER=true
 
-    # Safety check: the normalized wrapper must NOT still pass --observer.
-    if grep -qE '(^|[[:space:]])--observer([[:space:]]|$)' "$UNIFIED_WRAPPER"; then
-        print_error "Normalized wrapper still contains --observer -- aborting."
+    # Safety check: the normalized wrapper must NOT still pass --observer or --instance.
+    if grep -qE '(^|[[:space:]])--(observer|instance)([[:space:]]|=|$)' "$UNIFIED_WRAPPER"; then
+        print_error "Normalized wrapper still contains --observer/--instance -- aborting."
         return 1
     fi
-    print_ok "Wrote ${UNIFIED_WRAPPER} (no --observer)"
+    print_ok "Wrote ${UNIFIED_WRAPPER} (no --observer/--instance)"
 }
 
 # =============================================================================
@@ -472,11 +506,19 @@ update_meta() {
         print_warn "No ${meta} after relocation -- writing a minimal one."
         : > "$meta"
     fi
-    print_step "Updating ${meta} (NODE_TYPE=observer, DATA_DIR=${UNIFIED_DATA_DIR})"
+    local ws_port=8546   # reth WS default with no --instance (legacy --instance 5 -> 8554)
+    print_step "Updating ${meta} (NODE_TYPE=observer, DATA_DIR=${UNIFIED_DATA_DIR}, RPC_PORT=${RPC_PORT}, WS_PORT=${ws_port})"
     # NODE_TYPE is only the default-view HINT; the UI promotes to the validator view
     # from on-chain tn_isValidator. Every migrated node is the same identity.
     meta_set NODE_TYPE observer "$meta"
     meta_set DATA_DIR "$UNIFIED_DATA_DIR" "$meta"
+    # RPC + WS revert to their protocol defaults now that --instance is stripped (the legacy
+    # observer's --instance 5 put them on 8541/8554). config-caddy.sh and the check/update-node
+    # tools read BOTH from .node-meta, so a stale value breaks the public RPC/WS proxy + health
+    # probes. (Matches setup-node.sh, which persists RPC_PORT=8545 / WS_PORT=8546 for fresh
+    # installs -- the migration is the only path that would otherwise leave them stale.)
+    meta_set RPC_PORT "$RPC_PORT" "$meta"
+    meta_set WS_PORT "$ws_port" "$meta"
 
     # Optional: record VALIDATOR_ADDRESS from node-info.yaml execution_address for
     # the UI's on-chain status card. NOT consumed at node launch (only by keygen /
@@ -581,6 +623,11 @@ report() {
     print_info "  data dir:   ${UNIFIED_DATA_DIR}"
     print_info "  NODE_TYPE:  observer (presentation hint; on-chain tn_isValidator is authoritative)"
     echo ""
+    print_warn "Node RPC/WS now on ${RPC_PORT}/8546 (was 8541/8554 under --instance). The front"
+    print_warn "reverse-proxy (Caddy) is a static snapshot this script does NOT touch -- regenerate"
+    print_warn "it (config-caddy.sh / your DNS+proxy tooling) to match, or the public node endpoint"
+    print_warn "will return 502."
+    echo ""
     print_info "Backups kept (delete once you've confirmed the node is healthy):"
     [[ -n "$UNIT_BAK"    ]] && print_info "  ${UNIT_BAK}"
     [[ -n "$WRAPPER_BAK" ]] && print_info "  ${WRAPPER_BAK}"
@@ -604,7 +651,7 @@ main() {
     relocate_dir "$LEGACY_CONFIG_DIR" "$UNIFIED_CONFIG_DIR" CONFIG_MOVED config   # step 4
     relocate_dir "$LEGACY_DATA_DIR"   "$UNIFIED_DATA_DIR"   DATA_MOVED   data     # step 5
     rewrite_unit         # step 6
-    rewrite_wrapper      # step 7 (strip the removed --observer flag)
+    rewrite_wrapper      # step 7 (strip --observer and --instance)
     update_meta          # step 8
     finalize_units       # step 9
     start_and_verify     # step 10 (failure -> rollback via ERR trap)
