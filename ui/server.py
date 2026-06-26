@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.66"
+UI_VERSION = "1.7.67"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -111,28 +111,20 @@ def unified_install():
 
 
 def resolve_node_type():
-    """observer|validator for a unified install, mirroring lib/fallback.sh's
-    tn_resolve_node_type. The unified telcoin.service carries no role in its
-    name, so the type is read from the unified /etc/telcoin/.node-meta NODE_TYPE
-    (via the root helper, which is the only channel to the mode-0600 file); on
-    older/legacy metadata the per-role .node-meta answers; last resort is an
-    --observer flag in the start wrapper, else validator (validator-preferred,
-    matching the resolver ordering). Returns 'validator' when nothing is
-    determinable so a unified node still surfaces as exactly one node."""
+    """The default-view HINT observer|validator for a unified install, mirroring
+    lib/fallback.sh's tn_resolve_node_type. NODE_TYPE is a non-authoritative
+    presentation hint, NOT a role: the protocol decides a node's role dynamically
+    from on-chain committee membership each epoch, and the UI promotes/demotes the
+    view from tn_isValidator (detect_nodes' on-chain remap). The hint is read from
+    the unified /etc/telcoin/.node-meta NODE_TYPE (via the root helper, the only
+    channel to the mode-0600 file); on older/legacy metadata the per-role
+    .node-meta answers; a missing hint resolves to the plain 'observer' full-node
+    view -- never validator, since on-chain status is what promotes a node."""
     for t in NODE_TYPES:
         nt = read_meta(t).get("NODE_TYPE", "").strip()
         if nt in NODE_TYPES:
             return nt
-    # Last resort: the start wrapper's --observer flag (best-effort; the wrapper
-    # may be unreadable to the unprivileged UI user, in which case we fall through).
-    for t in NODE_TYPES:
-        try:
-            with open(wrapper_path(t), "r") as f:
-                if "--observer" in f.read():
-                    return "observer"
-        except (OSError, IOError):
-            pass
-    return "validator"
+    return "observer"
 
 
 def service_name(t):
@@ -576,31 +568,44 @@ def detect_nodes():
                 "inspect": insp,
             }
 
-    # ---- On-chain role remap -------------------------------------------------
-    # A node deployed as an observer but later STAKED + activated on-chain is
-    # really a validator. Re-attribute it to the validator slot so the frontend
-    # auto-selects the validator tab and renders the validator dashboard (every
-    # resolver maps the single telcoin.service/.node-meta regardless of the type
-    # argument, so no other change is needed). Runs AFTER docker detection so
-    # managed_names already shielded the legacy container from external re-detect.
-    # Only probes the observer case (a node already typed validator needs no check).
-    # Post-migration nodes set NODE_TYPE=validator and never reach here; this is
-    # for the staked-but-not-yet-migrated observer install.
-    obs = out.get("observer") or {}
-    if obs.get("mode") == "scripts" and onchain_is_validator("observer", obs) is True:
-        val = out.get("validator") or {}
-        # Don't clobber a genuinely separate validator (shouldn't exist on a
-        # single-node host): only remap when the validator slot is empty or already
-        # points at this same single install (mode scripts/None).
-        if val.get("mode") in (None, "scripts"):
-            remapped = dict(obs)
-            remapped["staked"] = True
-            out["validator"] = remapped
-            out["observer"] = {"mode": None, "status": "not installed",
-                               "container": None, "image": None,
-                               "rpc_port": None, "node_info_path": None}
-            _log("detect_nodes: observer install confirmed on-chain validator "
-                 "(tn_isValidator) -> attributing to the validator tab")
+    # ---- On-chain role remap (bidirectional) --------------------------------
+    # telcoin-network decides a node's ROLE dynamically from on-chain committee
+    # membership each epoch, not from the static NODE_TYPE hint. So present the
+    # single installed (scripts-managed) node under the slot its on-chain status
+    # dictates, in EITHER direction:
+    #   tn_isValidator True  -> validator slot (the validator dashboard)
+    #   tn_isValidator False -> observer slot  (the plain full-node view) -- this
+    #     also demotes a legacy setup-validator install that never staked
+    #   None (RPC down / not synced) -> leave it in its NODE_TYPE hint slot and
+    #     never flap; a demotion requires a definitive synced False, not unknown.
+    # Runs AFTER docker detection so managed_names already shielded the legacy
+    # container from external re-detect. The single telcoin.service/.node-meta
+    # resolves to the same node for either type slot, so re-attributing is purely
+    # presentational (no other change needed). The clobber guard keeps a genuinely
+    # separate node in the OTHER slot (shouldn't exist on a single-node host) from
+    # being overwritten. External (read-only docker) nodes keep their config-
+    # derived slot and are not remapped.
+    src = next((t for t in NODE_TYPES
+                if (out.get(t) or {}).get("mode") == "scripts"), None)
+    if src is not None:
+        is_val = onchain_is_validator(src, out[src])
+        dst = ("validator" if is_val is True
+               else "observer" if is_val is False else None)
+        if dst is not None and dst != src:
+            other = out.get(dst) or {}
+            # Only remap into an empty slot or one already pointing at this same
+            # single install (mode None/scripts) -- never clobber a separate node.
+            if other.get("mode") in (None, "scripts"):
+                remapped = dict(out[src])
+                # "staked" badges the surprising observer-deployed-now-validator
+                # case (true only when promoting INTO the validator slot).
+                remapped["staked"] = (is_val is True)
+                out[dst] = remapped
+                out[src] = {"mode": None, "status": "not installed",
+                            "container": None, "image": None,
+                            "rpc_port": None, "node_info_path": None}
+                _log(f"detect_nodes: on-chain tn_isValidator={is_val} -> "
+                     f"presenting the {src} install under the {dst} slot")
 
     _detect_cache["ts"] = now
     _detect_cache["data"] = out
@@ -1968,6 +1973,27 @@ def api_nodes():
             # optional "staked" badge in the selector.
             "staked": bool(d.get("staked")),
         }
+    # ---- Derived single-node view (on-chain role is the authority) ----------
+    # telcoin-network derives a node's role dynamically from on-chain committee
+    # membership, so the UI presents ONE node whose role is the populated slot
+    # after detect_nodes' bidirectional remap: "validator" when tn_isValidator is
+    # true, else the plain "observer" (full-node) view. `role` is None only on a
+    # fresh host with nothing installed (the UI then keeps its own default). The
+    # `node` summary carries the same facts the per-type slots expose plus the
+    # actual resolved systemd unit name, so the frontend can drive the active node
+    # without a second call. The per-type slots above are kept unchanged for
+    # backward compatibility.
+    role = next((t for t in ("validator", "observer")
+                 if det.get(t, {}).get("mode") is not None), None)
+    out["role"] = role
+    if role is not None:
+        node = dict(out[role])
+        node["role"] = role
+        node["type"] = role                    # presentation slot (equals role here)
+        node["service"] = service_name(role)   # resolved unit (telcoin / telcoin-<t>)
+        out["node"] = node
+    else:
+        out["node"] = None
     # Read-only when reached over the public Caddy path (vs the SSH tunnel). The
     # UI uses this to hide every management control and show a read-only banner.
     out["public_readonly"] = is_public_request()
@@ -2091,6 +2117,10 @@ def api_status(node_type):
     resp = jsonify({
         "installed": True,
         "node_type": t,
+        # Actual resolved systemd unit base name (telcoin for a unified install,
+        # telcoin-<type> for a legacy one) -- the UI shows this verbatim instead
+        # of assuming telcoin-<type>.
+        "service": service_name(t),
         "mode": mode,
         "container": det.get("container"),
         "image": det.get("image"),

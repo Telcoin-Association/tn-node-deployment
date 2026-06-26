@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.52"
+readonly SCRIPT_VERSION="1.1.53"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -56,21 +56,30 @@ NETWORK_RPC="$DEFAULT_NETWORK_RPC"
 QUERY_NETWORK=true
 NODE_TYPE_EXPLICITLY_SET=false
 
+# On-chain validator status, derived at runtime from the ConsensusRegistry (NOT
+# from the NODE_TYPE hint). IS_ONCHAIN_VALIDATOR is true ONLY for a REGISTERED
+# validator (ValidatorStatus 1-4); it is the authority for whether absence from
+# the consensus headers is an error. ONCHAIN_STATUS_OUTPUT caches the §7 display.
+IS_ONCHAIN_VALIDATOR=false
+ONCHAIN_STATUS_OUTPUT=""
+
 # Apply node-type defaults. Called by --validator/--observer and by
 # detect_node_type() when running with no flag. NODE_TYPE is forced from the
 # flag; SERVICE_NAME is derived from tn_resolve_service (never a hardcoded
 # legacy name) and only when not already set by an explicit --service.
 set_node_type() {
     case "$1" in
-        validator)
-            NODE_TYPE="validator"
-            [[ -z "$RPC_URL" ]] && RPC_URL="http://127.0.0.1:8545"
-            ;;
-        observer)
-            NODE_TYPE="observer"
-            [[ -z "$RPC_URL" ]] && RPC_URL="http://127.0.0.1:8541"
-            ;;
+        validator) NODE_TYPE="validator" ;;
+        observer)  NODE_TYPE="observer"  ;;
     esac
+    # Local RPC endpoint for liveness probes: derive the port from .node-meta
+    # (RPC_PORT, default 8545) instead of guessing it from the node type. Every
+    # unified node serves RPC on 8545; the old observer=>8541 guess mis-probed a
+    # unified node. --rpc still overrides (it sets RPC_URL directly).
+    if [[ -z "$RPC_URL" ]]; then
+        local rpc_port; rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
+        RPC_URL="http://127.0.0.1:${rpc_port:-8545}"
+    fi
     [[ -z "$SERVICE_NAME" ]] && SERVICE_NAME="$(tn_resolve_service || true)"
 }
 
@@ -94,6 +103,27 @@ detect_node_type() {
     fi
 }
 
+# Probe the on-chain validator registry ONCE and cache the verdict + output. We
+# REUSE check_validator_onchain_status (the single on-chain probe in lib/common.sh)
+# rather than re-implementing the eth_call, capturing its rendered output so §7
+# can display it without a second network round-trip. From that output we set
+# IS_ONCHAIN_VALIDATOR true ONLY when the registry reports a REGISTERED validator
+# -- ValidatorStatus 1-4 (Staked / Pending Activation / Active / Pending Exit).
+# Statuses 0/5/6, a missing NFT, or an unreachable RPC all leave it false: such a
+# node is a plain full node, for which absence from the committee headers is
+# normal, not an error. No-op unless VALIDATOR_ADDRESS is set and the network RPC
+# is reachable (NETWORK_OK), so it is called after section 3 resolves NETWORK_OK.
+probe_onchain_validator_status() {
+    [[ -n "$VALIDATOR_ADDRESS" ]] || return 0
+    [[ "$NETWORK_OK" == "true" ]] || return 0
+    ONCHAIN_STATUS_OUTPUT="$(check_validator_onchain_status "$VALIDATOR_ADDRESS" "$NETWORK_RPC" 2>&1 || true)"
+    # The status labels are plain text (only the [OK]/[WARN] prefix is coloured),
+    # so we classify on them rather than re-decoding the ABI response ourselves.
+    if grep -qE 'Status: (Staked|Pending Activation|Active|Pending Exit)' <<<"$ONCHAIN_STATUS_OUTPUT"; then
+        IS_ONCHAIN_VALIDATOR=true
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --validator)    set_node_type validator; NODE_TYPE_EXPLICITLY_SET=true; shift ;;
@@ -112,7 +142,7 @@ Usage: $0 [OPTIONS]
   (no flag)                Auto-detect node type from installed systemd units
   --validator              Force validator check
   --observer               Force observer check
-  --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:8545 / 8541)
+  --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:<RPC_PORT from .node-meta, or 8545>)
   --network-rpc <URL>      Network RPC for ground truth (default: ${DEFAULT_NETWORK_RPC})
   --no-network             Skip the network RPC query (local-only mode)
   --service <name>         systemd service name override
@@ -128,6 +158,14 @@ done
 
 # Auto-detect node type if neither --validator nor --observer was passed.
 detect_node_type
+
+# VALIDATOR_ADDRESS is recorded in .node-meta for ALL nodes (every node is now
+# provisioned validator-capable; the on-chain registry, not NODE_TYPE, decides
+# the role). Load it from meta unless --address already supplied one, so the
+# on-chain status checks run automatically.
+if [[ -z "$VALIDATOR_ADDRESS" ]]; then
+    VALIDATOR_ADDRESS="$(meta_get VALIDATOR_ADDRESS 2>/dev/null || true)"
+fi
 
 HEALTH_ISSUES=0
 # EVM execution lag (network - local) and catch-up flag. Set in section 5,
@@ -774,6 +812,10 @@ if read_sync_progress; then
     fi
 fi
 
+# Resolve on-chain validator status before the authority checks below: it decides
+# whether "absent from headers" (§6) is an error and feeds the §7 display.
+probe_onchain_validator_status
+
 # =============================================================================
 # 6. AUTHORITY-SPECIFIC CHECKS (author presence + own reputation)
 # Uses NETWORK response so it still works if local RPC is closed.
@@ -781,7 +823,7 @@ fi
 if [[ "$NETWORK_OK" == "true" ]]; then
     AUTH_ID=$(detect_authority_id)
     if [[ -z "$AUTH_ID" ]]; then
-        if [[ "$NODE_TYPE" == "validator" ]]; then
+        if [[ "$IS_ONCHAIN_VALIDATOR" == "true" ]]; then
             echo ""
             print_info "Tip: pass --authority-id <BASE58> (or ensure node-info.yaml has primary_network_key)"
             print_info "to enable author-presence and reputation checks for this validator."
@@ -794,13 +836,15 @@ if [[ "$NETWORK_OK" == "true" ]]; then
         if echo " ${NET_AUTHORS} " | grep -qF " ${AUTH_ID} "; then
             print_ok "Your authority appears as an author in recent headers -- participating"
         else
-            if [[ "$NODE_TYPE" == "validator" ]]; then
-                # Observer nodes never author headers; only flag for validators.
+            if [[ "$IS_ONCHAIN_VALIDATOR" == "true" ]]; then
+                # Only a REGISTERED validator (on-chain ValidatorStatus 1-4) is
+                # expected in the committee headers; for any other node (plain
+                # full node, or not in the current committee) absence is normal.
                 print_error "Your authority is NOT in recent headers -- node may be running but silent"
                 print_info "  (committee was: ${NET_AUTHORS})"
                 (( ++HEALTH_ISSUES ))
             else
-                print_info "Your authority is not in recent headers (expected for observer node)"
+                print_info "Your authority is not in recent headers (expected for a non-committee node)"
             fi
         fi
 
@@ -824,7 +868,7 @@ if [[ "$NETWORK_OK" == "true" ]]; then
             else
                 print_ok "Your reputation score: ${own_rep} (committee avg: ${avg})"
             fi
-        elif [[ "$NODE_TYPE" == "validator" ]]; then
+        elif [[ "$IS_ONCHAIN_VALIDATOR" == "true" ]]; then
             print_info "Your authority not present in reputation map (may not be in current committee)"
         fi
     fi
@@ -832,19 +876,23 @@ fi
 
 # =============================================================================
 # 7. ON-CHAIN VALIDATOR STATUS
+# VALIDATOR_ADDRESS is populated for ALL nodes (--address or .node-meta), so we
+# always report on-chain status when we have an address -- the registry, not the
+# NODE_TYPE hint, is the authority for validator-ness. The chain was already
+# probed once above; reuse that cached output rather than calling out again.
 # =============================================================================
-if [[ "$NODE_TYPE" == "validator" ]] && [[ -n "$VALIDATOR_ADDRESS" ]]; then
+if [[ -n "$VALIDATOR_ADDRESS" ]]; then
     echo ""
     if [[ "$NETWORK_OK" == "true" ]]; then
-        # Use network RPC for the on-chain call since local may be closed
-        check_validator_onchain_status "$VALIDATOR_ADDRESS" "$NETWORK_RPC" || true
+        # Emit the cached probe output (single on-chain round-trip per run).
+        printf '%s\n' "$ONCHAIN_STATUS_OUTPUT"
     else
         # check_validator_onchain_status would otherwise emit a misleading
         # "No validator record found" message when the real cause is that
         # the network RPC is unreachable. The §10 banner enumerates the skip.
         print_info "Skipping on-chain validator status (network RPC unreachable)"
     fi
-elif [[ "$NODE_TYPE" == "validator" ]]; then
+else
     echo ""
     print_info "Tip: run with --address 0xYOUR_ADDRESS to check on-chain validator status."
 fi

@@ -1,6 +1,8 @@
 # Telcoin Network Node Setup Scripts
 
-Automated setup scripts for deploying **Validator** and **Observer** nodes on the Telcoin Network. Built for MNO operators — interactive, guided, and validated at every step.
+Automated setup scripts for running a node on the Telcoin Network. Built for MNO operators — interactive, guided, and validated at every step.
+
+There is one node identity. Every node installs validator-capable and follows consensus from day one; staking and on-chain activation are what let it validate. The protocol decides a node's role from on-chain committee membership each epoch, not from a setup flag.
 
 ---
 
@@ -9,8 +11,7 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | File | Purpose |
 |---|---|
 | `install.sh` | One-command installer for fresh machines |
-| `setup-observer.sh` | Full guided setup for an observer node |
-| `setup-validator.sh` | Full guided setup for a validator node |
+| `setup-node.sh` | Full guided setup for a node (canonical installer) |
 | `check-node.sh` | Health check for any running node |
 | `edit-config.sh` | Edit the configuration of a running node |
 | `firewall-setup.sh` | Interactive firewall management and hardening |
@@ -21,74 +22,67 @@ Automated setup scripts for deploying **Validator** and **Observer** nodes on th
 | `setup-vpn.sh` | Opt-in WireGuard admin SSH for the Telcoin Association (testnet add-on) |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
 
+> `setup-observer.sh` and `setup-validator.sh` still exist as thin deprecated shims that forward to `setup-node.sh`.
+
 ---
 
-## Node Types
+## Run a node
 
-### Observer Node
-An observer node syncs the full chain state and serves JSON-RPC queries but does **not** participate in block consensus. It requires no approval from the Telcoin Association.
+Anyone can run a full node — no approval required. Install the scripts, run `setup-node.sh`, and the node syncs the full chain state, serves JSON-RPC, and follows Narwhal/Bullshark consensus.
 
-Best for: developers, exchanges, wallets, dApps, block explorers, or anyone needing a private RPC endpoint.
+Every node is provisioned validator-capable from day one. "Just following consensus" and "validating" are not two install options — the difference is on-chain state (stake plus committee membership) that the protocol reads each epoch. Until you stake and activate, the node behaves like any full node.
 
-- RPC port: **8545** (HTTP) / **8546** (WS) — the reth defaults
-- P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC, outbound only
-- Metrics port: **9000**
-- No firewall or router port forwarding required
+The ports are the same on every node:
 
-### Validator Node
-A validator node participates in Narwhal/Bullshark consensus, proposes and signs blocks, and earns TEL rewards. Validator nodes may only be operated by GSMA-approved MNOs with prior approval from the Telcoin Association.
+- RPC: **8545** (HTTP) / **8546** (WS) — the reth defaults
+- P2P: **49590** (primary) and **49594** (worker) — UDP/QUIC
+- Metrics: **9000**
 
-- RPC port: **8545** (HTTP) / **8546** (WS) — the reth defaults
-- P2P ports: **49590** (primary) and **49594** (worker) — UDP/QUIC
-- Metrics port: **9000**
-- Requires inbound UDP access on ports 49590 and 49594
+### Become a validator (optional)
+
+To validate you additionally need, in order:
+
+1. **Approval** — Telcoin Association onboarding. Validators must be GSMA-approved MNOs; email grant@telcoin.org before purchasing hardware.
+2. **Stake** — submit the stake transaction with your BLS public key and proof of possession.
+3. **Activation** — call `activate()` on-chain and go active at the next epoch boundary.
+
+The node software does not change. Once `tn_isValidator(blsPubkey)` returns true on-chain, the web UI automatically shows that node on the validator tab and renders the validator dashboard — there is no node-type toggle to flip. The step-by-step (with `cast` commands) is in [Validator Onboarding Flow](#validator-onboarding-flow) below.
 
 ### One node per VM
 
-Each machine runs exactly **one** node. Whether it is an observer or a validator, the node
-always installs under a single, consistent identity:
+Each machine runs exactly **one** node, installed under a single, consistent identity:
 
 - systemd unit: **`telcoin`** (`telcoin.service`)
 - Docker container name (Docker installs): **`telcoin`**
 - config directory: **`/etc/telcoin`**
 - data directory: **`/var/lib/telcoin`**
 
-The node type (observer or validator) is recorded in a `NODE_TYPE=` key inside
-`/etc/telcoin/.node-meta` rather than encoded into the unit name or directory paths. Because
-there is only ever one node on the box, the binary is launched with no node-instance flag and
-observers serve RPC on the reth default ports (`8545`/`8546`).
+`/etc/telcoin/.node-meta` records a `NODE_TYPE=` key, but it is only a non-authoritative
+default-view hint (new installs write `NODE_TYPE=observer`) — the on-chain `tn_isValidator`
+status is authoritative. Because there is only ever one node on the box, the binary is
+launched with no node-instance flag and serves RPC on the reth default ports (`8545`/`8546`).
 
 > **Upgrading from an older install?** Earlier versions used a separate unit name and
 > per-role config/data directories for each node type. Those legacy per-role installs keep
 > working untouched — a compatibility shim (`lib/fallback.sh`) detects the old layout and
 > resolves the correct unit, container, and directories automatically. Nothing is renamed or
-> migrated; the helper scripts simply find whichever layout is present. Fresh installs always
-> use the unified `telcoin` identity described above.
+> migrated on its own; to move an existing install onto the unified layout, run
+> `migrate-node-naming.sh`. Fresh installs always use the unified `telcoin` identity above.
 
 ---
 
 ## Requirements
 
-### Validator Node Hardware
+### Hardware
 
-> Validators must be GSMA-approved MNOs. Submit hardware specifications to grant@telcoin.org for approval **before** installation.
+The baseline below runs a full node. The heavier "to validate" column is what you want **if** you intend to stake and validate — treat it as guidance, not a requirement to run a node. The hardware preflight checks against the baseline and prints the validate spec for reference.
 
-| Component | Minimum | Recommended |
+| Component | Run a node (baseline) | To validate |
 |---|---|---|
-| CPU | 16 cores / 32 threads, x86-64 | 32 cores, higher clock speed |
-| CPU Benchmark | 4000+ PassMark Single Thread | — |
-| RAM | 128GB DDR4/DDR5 ECC RDIMM | 128GB+ highest MT/s |
-| Storage | 4TB TLC NVMe SSD | 7.5TB TLC NVMe SSD |
-| Network | 1Gbps sustained, 1GbE interface | 10GbE interface |
-
-### Observer Node Hardware
-
-| Component | Minimum | Recommended |
-|---|---|---|
-| CPU | 8 cores / 16 threads, x86/x64/ARM64 | Higher clock speed over core count |
-| RAM | 16GB DDR4 ECC | 32GB DDR4 ECC |
-| Storage | 500GB TLC NVMe SSD | 2TB TLC NVMe SSD (expandable) |
-| Network | 24Mbps+ stable | — |
+| CPU | 8 cores / 16 threads, x86-64/ARM64 | 16+ cores / 32 threads, x86-64, 4000+ PassMark single-thread |
+| RAM | 16GB DDR4 ECC | 128GB DDR4/DDR5 ECC RDIMM |
+| Storage | 500GB TLC NVMe SSD | 4TB TLC NVMe SSD |
+| Network | 24Mbps+ stable | 1Gbps sustained, 1GbE+ |
 
 > Storage note: TLC NVMe drives are specifically required over QLC. TLC supports 1,000-3,000 P/E cycles vs 100-1,000 for QLC, making TLC significantly more durable for continuous blockchain write operations.
 
@@ -98,13 +92,13 @@ observers serve RPC on the reth default ports (`8545`/`8546`).
 - Debian 12+
 - Red Hat Enterprise Linux (RHEL) 8+
 - Kernel version 3.10+ minimum
-- macOS Sequoia 15+ (observer nodes only)
+- macOS Sequoia 15+ (full node only)
 
 ### Software
 The scripts will install or check for everything needed. You do not need to install anything manually beforehand.
 
-### For Validators Only
-- GSMA MNO status — only GSMA-approved MNOs may operate validator nodes
+### To validate
+- GSMA MNO status — only GSMA-approved MNOs may validate
 - Hardware approval from the Telcoin Association — email grant@telcoin.org before purchasing equipment
 - Prior governance approval from the Telcoin Association
 - A registered Ethereum address for receiving TEL rewards
@@ -133,24 +127,20 @@ git clone https://github.com/Telcoin-Association/tn-node-deployment.git ~/telcoi
 chmod +x ~/telcoin-node-scripts/*.sh
 ```
 
-**2. Run the setup for your node type**
+**2. Run the guided setup**
 ```bash
-# Observer node
-sudo bash ~/telcoin-node-scripts/setup-observer.sh
-
-# Validator node (GSMA-approved MNOs only)
-sudo bash ~/telcoin-node-scripts/setup-validator.sh
+sudo bash ~/telcoin-node-scripts/setup-node.sh
 ```
+This provisions a validator-capable node. Staking and on-chain activation (see [Become a validator](#become-a-validator-optional)) are what let it validate later; until then it follows consensus as a full node.
 
 **3. Harden the firewall (recommended)**
 ```bash
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ```
-Opens the right ports for the node type detected (SSH + Uptime Kuma on all, plus UDP 49590/49594 on validators).
+Opens the ports every node needs: SSH, Uptime Kuma, and the P2P consensus ports UDP 49590/49594.
 
 **4. Check node health any time**
 ```bash
-# Auto-detects observer or validator
 bash ~/telcoin-node-scripts/check-node.sh
 
 # Include on-chain validator status
@@ -206,9 +196,9 @@ Each script walks through numbered steps:
 - Verifies the binary is valid and executable
 
 **Step 5: Key Generation**
-- Asks for your Ethereum address (and multiaddrs for validators)
+- Asks for your Ethereum address and P2P multiaddrs
 - Asks you to set a BLS key passphrase (entered twice to confirm, never shown on screen)
-- Runs telcoin-network keytool generate observer/validator to create cryptographic keys
+- Runs the telcoin-network keytool to create the node's cryptographic keys (BLS + P2P)
 - Stores keys in /var/lib/telcoin/node-keys/ with strict permissions
 - Stores passphrase in /etc/telcoin/bls-passphrase (mode 600)
 - If TPM selected: seals passphrase to TPM chip, shows it once, prompts operator to store offline
@@ -227,8 +217,8 @@ Each script walks through numbered steps:
 
 ## System Layout
 
-After setup, files are organised as follows. The layout is identical for both node types — the
-node type is recorded in `/etc/telcoin/.node-meta` (`NODE_TYPE=`) rather than in the paths.
+After setup, files are organised as follows. There is one layout for every node — the
+default-view hint is recorded in `/etc/telcoin/.node-meta` (`NODE_TYPE=`) rather than in the paths.
 
 ```
 /opt/telcoin/
@@ -237,7 +227,7 @@ node type is recorded in `/etc/telcoin/.node-meta` (`NODE_TYPE=`) rather than in
 
 /var/lib/telcoin/
   node-keys/                        -- P2P + BLS keys (keep backed up!)
-  node-info.yaml                    -- public node identity (BLS pubkey for validators)
+  node-info.yaml                    -- public node identity (BLS pubkey + proof of possession)
   genesis/
     genesis.yaml                    -- chain genesis config
     committee.yaml                  -- validator committee config
@@ -343,7 +333,7 @@ A wrapper script would replace the direct ExecStart:
 # /opt/telcoin/start-telcoin.sh
 export TN_BLS_PASSPHRASE=$(vault kv get -field=passphrase secret/telcoin/node)
 exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin \
-    --observer --metrics 127.0.0.1:9000 \
+    --metrics 127.0.0.1:9000 \
     --log.stdout.format log-fmt -vvv --http
 ```
 
@@ -363,11 +353,8 @@ Disadvantages:
 
 ## Firewall / Router Configuration
 
-### Observer Nodes
-Observer nodes do **not** require port forwarding. The node makes outbound connections to peers using UDP/QUIC on ports 49590 and 49594.
-
-### Validator Nodes
-Validators need inbound UDP access on ports 49590 and 49594.
+### P2P consensus ports
+Open the P2P consensus ports — UDP/QUIC **49590** (primary) and **49594** (worker) — on **every** node, not just ones that validate today. A node that later stakes and joins the committee behind a closed firewall is unreachable to its peers and silently misses consensus, so the ports are opened up front while the node is still just following consensus.
 
 **Linux firewall (ufw):**
 ```bash
@@ -381,7 +368,7 @@ Forward UDP ports 49590 and 49594 from WAN to your server's local IP address. Cl
 The RPC port (8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
 
 ### Health Monitoring (Uptime Kuma)
-**Required for all nodes (observer and validator).** The Telcoin Association runs Uptime Kuma health monitoring against every deployed node — TCP port 43174 must be reachable **by the Association monitor, plus any optional operator-chosen IPs**. Restrict it to those source IPs rather than opening it to the whole internet (the endpoint binds on all interfaces, so a firewall rule is its only protection):
+**Required for all nodes.** The Telcoin Association runs Uptime Kuma health monitoring against every deployed node — TCP port 43174 must be reachable **by the Association monitor, plus any optional operator-chosen IPs**. Restrict it to those source IPs rather than opening it to the whole internet (the endpoint binds on all interfaces, so a firewall rule is its only protection):
 
 ```bash
 sudo ufw allow from 104.155.184.201/32 to any port 43174 proto tcp
@@ -400,7 +387,7 @@ Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-
 ### Full Process
 
 **Step 1 — Generate keys and set up node (script handles this)**
-Run `setup-validator.sh`. The script installs the binary, generates your BLS keys, copies chain configs, and starts the node service.
+Run `setup-node.sh`. The script installs the binary, generates your BLS keys, copies chain configs, and starts the node service.
 
 **Step 2 — Request Governance Approval (operator action)**
 Submit your ECDSA validator address to the Telcoin Association for off-chain verification. You do NOT need to send your node-info.yaml — just your address. Upon approval, governance calls `mint(validatorAddress)` on the ConsensusRegistry contract.
@@ -473,10 +460,10 @@ bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
 Run at any time after setup to verify your node is healthy:
 
 ```bash
-# Auto-detects whether this server runs a validator or observer
+# Health check for the local node
 bash ~/telcoin-node-scripts/check-node.sh
 
-# Force a specific node type (overrides the type recorded in .node-meta)
+# Force the validator or full-node view (overrides the .node-meta hint)
 bash ~/telcoin-node-scripts/check-node.sh --validator
 bash ~/telcoin-node-scripts/check-node.sh --observer
 
@@ -527,7 +514,7 @@ The script is menu-driven and interactive. It never makes changes without explic
 
 **Manage SSH access** — disable password authentication (keys only), disable root login, change SSH port. Each option shows the current state and warns clearly before making any changes.
 
-**Manage node ports** — automatically detects whether validator or observer is installed and applies the correct rules. Validators need UDP 49590/49594 open inbound. Observers need no inbound ports. Optionally opens port 443 for public RPC via nginx.
+**Manage node ports** — opens the P2P consensus ports (UDP 49590/49594) inbound on every node, and optionally opens port 443 for public RPC via nginx.
 
 **Manage trusted IP whitelist** — add or remove specific IP addresses or CIDR ranges that are allowed SSH access. Shows your current session IP so you don't accidentally lock yourself out.
 
@@ -535,7 +522,7 @@ The script is menu-driven and interactive. It never makes changes without explic
 
 - **Test SSH in a new terminal** before closing your current session after making any changes
 - **Whitelist your IP first** before enabling default deny or restricting SSH
-- **Validators only** need inbound ports 49590/49594 — observer nodes need no inbound ports at all
+- **Every node** opens inbound UDP 49590/49594 — a node that later stakes behind a closed firewall would otherwise miss consensus
 - Never open the RPC port (8545) directly to the internet — use nginx on port 443 instead
 
 ### When to run it
@@ -596,11 +583,11 @@ During setup you will be asked how the node should listen for incoming P2P conne
 
 **IPv6** — recommended for cloud and data centre servers. Binds to all IPv6 interfaces (`::`) and is NAT-free, meaning no router port forward is required.
 
-**IPv4** — for home or bare metal servers. The script will auto-detect your server's internal IP address (e.g. `10.x.x.x` on cloud, `192.168.x.x` on home networks) and ask you to confirm it. Validators will also need to forward UDP ports 49590 and 49594 on their router to this server. Observers do not need port forwarding.
+**IPv4** — for home or bare metal servers. The script will auto-detect your server's internal IP address (e.g. `10.x.x.x` on cloud, `192.168.x.x` on home networks) and ask you to confirm it. On home or bare-metal networks, forward UDP ports 49590 and 49594 on your router to this server so the node stays reachable to its peers (and to the committee if it later stakes).
 
 **Important distinction for cloud/data centre operators:**
 - **Internal IP** (e.g. `10.70.70.2`) — what the node binds its listener to. Auto-detected by the script via `hostname -I`.
-- **External/Public IP** — what peers use to reach your node. Fetched automatically via `api.ipify.org` and used for validator key registration in `node-info.yaml`.
+- **External/Public IP** — what peers use to reach your node. Fetched automatically via `api.ipify.org` and used for the node's key registration in `node-info.yaml`.
 
 These are two different addresses on cloud servers and the script handles both correctly.
 
@@ -614,7 +601,7 @@ Use the dedicated removal script to safely remove a node installation:
 sudo bash ~/telcoin-node-scripts/remove-node.sh
 ```
 
-The script automatically detects what is installed (observer or validator, including legacy per-role layouts) and the install method (binary/source or Docker). It guides you through removal step by step with individual confirmations for each component.
+The script automatically detects what is installed (including legacy per-role layouts) and the install method (binary/source or Docker). It guides you through removal step by step with individual confirmations for each component.
 
 **What it removes:**
 - Systemd service (stops, disables and removes the service file)
@@ -633,7 +620,7 @@ The script automatically detects what is installed (observer or validator, inclu
 
 Your node keys are stored in `/var/lib/telcoin/node-keys/`. Back these up immediately after setup.
 
-If you lose your keys you will lose your node identity and will need to re-register with the Telcoin Association (validators) or regenerate keys and restart (observers).
+If you lose your keys you lose your node identity. A node that has already staked must re-register its replacement keys with the Telcoin Association; a node that has not can simply regenerate keys and restart.
 
 Store your BLS passphrase separately from the key files — in a password manager or secure offline location. If you lose the passphrase the encrypted key files are unreadable.
 
@@ -652,8 +639,7 @@ The script checks each file individually against the latest version on GitHub an
 ```
   Script                     Local      Remote     Status
   ----------------------------------------------------------------
-  setup-observer.sh          1.1.2      1.1.3      UPDATE AVAILABLE
-  setup-validator.sh         1.1.2      1.1.3      UPDATE AVAILABLE
+  setup-node.sh              1.1.2      1.1.3      UPDATE AVAILABLE
   check-node.sh              1.1.2      1.1.2      Up to date
   edit-config.sh             1.1.2      1.1.3      UPDATE AVAILABLE
   lib/common.sh              1.1.2      1.1.3      UPDATE AVAILABLE
@@ -769,7 +755,7 @@ journalctl -u telcoin -f
 ### Health and configuration
 
 ```bash
-# Health check (auto-detects observer vs validator)
+# Health check for the local node
 bash ~/telcoin-node-scripts/check-node.sh
 
 # Health check including on-chain validator state
@@ -781,7 +767,7 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh
 
 ### RPC queries
 
-The default RPC port is `8545` (the reth default) for both node types.
+The default RPC port is `8545` (the reth default).
 
 ```bash
 # eth_chainId
@@ -835,7 +821,7 @@ opts out is unaffected. Full details and trust model: **[docs/testnet-addons.md]
 - **VPN admin SSH** — lets the Association SSH into your node over a private WireGuard
   overlay (a sudo `tnadmin` user reachable only over the VPN) to help recover it.
 
-You're offered each one during `setup-validator.sh` / `setup-observer.sh` (right after
+You're offered each one during `setup-node.sh` (right after
 network selection), or enable them later:
 
 ```bash

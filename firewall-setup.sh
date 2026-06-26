@@ -12,13 +12,15 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.5.0"
+readonly SCRIPT_VERSION="1.5.1"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
 # 43174/tcp is the Uptime Kuma health-monitoring endpoint used by the
-# Telcoin Association across all nodes (observer AND validator).
-# UDP 49590/49594 are validator-only (P2P consensus).
+# Telcoin Association across all nodes.
+# UDP 49590/49594 are the node P2P consensus ports, opened on every install: the
+# role is decided on-chain at each epoch, not by the firewall, and a node that
+# stakes/activates behind a closed firewall would be unreachable for consensus.
 readonly UPTIME_KUMA_PORT="43174"
 
 # =============================================================================
@@ -181,28 +183,21 @@ view_status() {
         print_info "Installed nodes: ${nodes}"
         echo ""
 
-        if echo "$nodes" | grep -q "observer"; then
-            print_info "Observer node -- no inbound P2P ports required"
-            if ufw_active && (ufw_has_allow 49590 udp || ufw_has_allow 49594 udp); then
-                print_warn "UDP 49590/49594 appear open inbound -- not required for observer"
-            elif ufw_active; then
-                print_ok "No unnecessary inbound P2P ports open for observer"
+        # Every node binds the same P2P listen ports at the initial epoch, and no
+        # new networking is provisioned when a node joins the committee -- so a node
+        # that stakes/activates behind a closed firewall is unreachable. The role is
+        # decided on-chain, not here, so we expect these open on every install.
+        print_info "Node P2P -- UDP 49590/49594 required inbound for consensus"
+        if ufw_active; then
+            if ufw_has_allow 49590 udp; then
+                print_ok "UDP 49590 is open"
+            else
+                print_error "UDP 49590 is CLOSED -- node will be unreachable for consensus P2P"
             fi
-        fi
-
-        if echo "$nodes" | grep -q "validator"; then
-            print_info "Validator node -- UDP 49590/49594 required inbound for P2P consensus"
-            if ufw_active; then
-                if ufw_has_allow 49590 udp; then
-                    print_ok "UDP 49590 is open"
-                else
-                    print_error "UDP 49590 is CLOSED -- validator will not reach consensus"
-                fi
-                if ufw_has_allow 49594 udp; then
-                    print_ok "UDP 49594 is open"
-                else
-                    print_error "UDP 49594 is CLOSED -- validator will not reach consensus"
-                fi
+            if ufw_has_allow 49594 udp; then
+                print_ok "UDP 49594 is open"
+            else
+                print_error "UDP 49594 is CLOSED -- node will be unreachable for consensus P2P"
             fi
         fi
 
@@ -292,7 +287,10 @@ apply_recommended_firewall() {
     apply_kuma_rule &>/dev/null
     apply_lb_hc_rule &>/dev/null   # LB health-check ranges (no-op unless TN_LB_HC_RANGES set)
     if vpn_active; then allow_overlay_ssh &>/dev/null; fi
-    if echo "$nodes" | grep -q "validator"; then
+    # Every installed node needs P2P open inbound: the role is decided on-chain at
+    # each epoch and no networking is provisioned when a node joins the committee,
+    # so a node that activates behind a closed firewall would be unreachable.
+    if [[ "$nodes" != "none" ]]; then
         ufw allow 49590/udp &>/dev/null
         ufw allow 49594/udp &>/dev/null
     fi
@@ -319,13 +317,13 @@ enable_firewall() {
     echo "  - Allow established connections"
     echo "  - Allow SSH on port ${ssh_port}"
     echo "  - Allow TCP ${UPTIME_KUMA_PORT} (Uptime Kuma) from the Association monitor only (${TN_KUMA_SRC})"
-    if echo "$nodes" | grep -q "validator"; then
-        echo "  - Allow UDP 49590 and 49594 (validator P2P -- required)"
+    if [[ "$nodes" != "none" ]]; then
+        echo "  - Allow UDP 49590 and 49594 (node P2P -- required for consensus)"
     fi
     if [[ "$nodes" == "none" ]]; then
         echo ""
         print_info "No Telcoin node installed yet. Re-run this option after running"
-        print_info "setup-validator.sh to also open the validator P2P ports."
+        print_info "setup-node.sh to also open the node P2P ports."
     fi
     echo ""
     print_warn "Ensure your SSH access IP is whitelisted (option 5) before enabling"
@@ -364,8 +362,8 @@ enable_firewall() {
     [[ -n "$reset_arg" ]] && print_info "Existing rules were reset to a clean slate"
     print_ok "SSH port ${ssh_port}/tcp allowed"
     print_ok "Uptime Kuma port ${UPTIME_KUMA_PORT}/tcp allowed from ${TN_KUMA_SRC} (Association monitor)"
-    if echo "$nodes" | grep -q "validator"; then
-        print_ok "Validator P2P UDP 49590 and 49594 allowed"
+    if [[ "$nodes" != "none" ]]; then
+        print_ok "Node P2P UDP 49590 and 49594 allowed"
     fi
     print_warn "Test your SSH connection in a new terminal before closing this one"
     echo ""
@@ -559,7 +557,7 @@ manage_node_ports() {
 
     if [[ "$nodes" == "none" ]]; then
         print_warn "No Telcoin nodes detected on this server"
-        print_info "Run setup-observer.sh or setup-validator.sh first"
+        print_info "Run setup-node.sh first"
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
@@ -575,30 +573,17 @@ manage_node_ports() {
     print_info "Detected nodes: ${nodes}"
     echo ""
 
-    if echo "$nodes" | grep -q "validator"; then
-        echo "  Validator node requires UDP ports 49590 and 49594 open inbound."
-        echo ""
-        if confirm "Open UDP ports 49590 and 49594 for validator P2P?"; then
-            ufw allow 49590/udp &>/dev/null
-            ufw allow 49594/udp &>/dev/null
-            print_ok "UDP ports 49590 and 49594 opened"
-        fi
-        echo ""
+    echo "  Every node needs UDP ports 49590 and 49594 open inbound for consensus P2P."
+    echo "  The role is decided on-chain -- a node that stakes must already be reachable."
+    echo ""
+    if ufw_has_allow 49590 udp && ufw_has_allow 49594 udp; then
+        print_ok "UDP ports 49590 and 49594 are already open"
+    elif confirm "Open UDP ports 49590 and 49594 for node P2P?"; then
+        ufw allow 49590/udp &>/dev/null
+        ufw allow 49594/udp &>/dev/null
+        print_ok "UDP ports 49590 and 49594 opened"
     fi
-
-    if echo "$nodes" | grep -q "observer"; then
-        print_info "Observer nodes do not require inbound P2P ports."
-        print_info "P2P connections are outbound only."
-
-        if ufw_has_allow 49590 udp || ufw_has_allow 49594 udp; then
-            echo ""
-            if confirm "Close inbound UDP 49590/49594 (not needed for observer)?"; then
-                ufw delete allow 49590/udp &>/dev/null
-                ufw delete allow 49594/udp &>/dev/null
-                print_ok "Inbound P2P UDP ports closed"
-            fi
-        fi
-    fi
+    echo ""
 
     echo ""
     print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}."
@@ -869,8 +854,8 @@ caddy_managed_active() {
 # desired_firewall_rules -- print the rule set THIS host should have, one per line:
 #   <spec>\t<label>\t<source>
 # <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
-# (anywhere|restricted|<cidr>). Validator P2P only for validators; overlay SSH
-# only when the VPN is active; 80/443 only when Caddy manages the dashboard.
+# (anywhere|restricted|<cidr>). Node P2P on every install; overlay SSH only when
+# the VPN is active; 80/443 only when Caddy manages the dashboard.
 desired_firewall_rules() {
     local ssh_port nodetype
     ssh_port="$(get_ssh_port)"
@@ -878,9 +863,9 @@ desired_firewall_rules() {
 
     printf '%s\t%s\t%s\n' "${ssh_port}/tcp"         "SSH"                "anywhere"
     printf '%s\t%s\t%s\n' "${UPTIME_KUMA_PORT}/tcp" "Uptime Kuma health" "restricted"
-    if [[ "$nodetype" == "validator" ]]; then
-        printf '%s\t%s\t%s\n' "49590/udp" "Validator P2P (primary)" "anywhere"
-        printf '%s\t%s\t%s\n' "49594/udp" "Validator P2P (worker)"  "anywhere"
+    if [[ "$nodetype" != "none" ]]; then
+        printf '%s\t%s\t%s\n' "49590/udp" "Node P2P (primary)" "anywhere"
+        printf '%s\t%s\t%s\n' "49594/udp" "Node P2P (worker)"  "anywhere"
     fi
     if vpn_active; then
         printf '%s\t%s\t%s\n' "overlay-ssh" "SSH from WireGuard overlay" "${TN_OVERLAY_CIDR}"
@@ -908,15 +893,10 @@ fw_rule_satisfied() {
 }
 
 # fw_unexpected_rules -- print managed ports OPEN but NOT desired here, one per
-# line "<spec>\t<reason>": validator P2P left open on a non-validator, and 80/443
-# open without Caddy managing them (now that Caddy owns 443).
+# line "<spec>\t<reason>": 80/443 open without Caddy managing them (now that Caddy
+# owns 443). Node P2P (49590/49594) is desired on every install, so it is never
+# flagged here.
 fw_unexpected_rules() {
-    local nodetype
-    if tn_resolve_service >/dev/null 2>&1; then nodetype="$(tn_resolve_node_type)"; else nodetype="none"; fi
-    if [[ "$nodetype" != "validator" ]]; then
-        ufw_has_allow 49590 udp && printf '%s\t%s\n' "49590/udp" "validator P2P open but node type is ${nodetype}"
-        ufw_has_allow 49594 udp && printf '%s\t%s\n' "49594/udp" "validator P2P open but node type is ${nodetype}"
-    fi
     if ! caddy_managed_active; then
         ufw_has_allow 443 tcp && printf '%s\t%s\n' "443/tcp" "open but Caddy is not managing it"
         ufw_has_allow 80  tcp && printf '%s\t%s\n' "80/tcp"  "open but Caddy is not managing it"
@@ -1043,7 +1023,7 @@ main_menu() {
 #   firewall-setup.sh --json --port <port>/<proto> <on|off>   (node ports only)
 # =============================================================================
 
-# The only ports the UI is allowed to toggle. 49590/49594 udp = validator P2P,
+# The only ports the UI is allowed to toggle. 49590/49594 udp = node P2P,
 # 43174/tcp = Uptime Kuma health endpoint. Anything else is refused.
 readonly -a JSON_NODE_PORTS=( "49590/udp" "49594/udp" "${UPTIME_KUMA_PORT}/tcp" )
 

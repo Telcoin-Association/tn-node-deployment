@@ -391,23 +391,8 @@ select{
 </header>
 
 <div class="wrap">
-  <!-- node selector -->
-  <div class="selector" id="selector">
-    <button class="node-btn active" data-node="observer">
-      <span class="nicon">📡</span>
-      <div>
-        <div class="nname">Observer</div>
-        <div class="nstat"><span class="dot gray" id="dot-observer"></span><span id="stat-observer">checking…</span></div>
-      </div>
-    </button>
-    <button class="node-btn" data-node="validator">
-      <span class="nicon">🛡️</span>
-      <div>
-        <div class="nname">Validator</div>
-        <div class="nstat"><span class="dot gray" id="dot-validator"></span><span id="stat-validator">checking…</span></div>
-      </div>
-    </button>
-  </div>
+  <!-- The node's role (validator vs plain full node) is auto-selected from its
+       on-chain status (tn_isValidator), so there is no manual node switcher. -->
 
   <!-- read-only banner (public access or externally-deployed node) -->
   <div id="roBanner" style="display:none;margin:0 0 16px;padding:12px 16px;border-radius:10px;
@@ -476,13 +461,6 @@ function isReadonly(){ return state.publicReadonly || curNode().mode === 'extern
 function installedType(){
   for(const t of ['observer','validator']) if(state.nodes[t]?.installed) return t;
   return null;
-}
-// Switch the active node tab programmatically (mirrors the #selector click handler).
-function selectNode(t){
-  if(!state.nodes[t]) return;
-  state.node = t;
-  document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
-  rerenderActive();
 }
 function updateReadonlyBanner(){
   const b = $('#roBanner'), m = $('#roBannerMsg'); if(!b || !m) return;
@@ -558,11 +536,6 @@ function switchView(v){
   if(v==='system') renderSystem();
 }
 
-$('#selector').addEventListener('click', e=>{
-  const b = e.target.closest('.node-btn'); if(!b) return;
-  selectNode(b.dataset.node);
-});
-
 $('#refreshBtn').addEventListener('click', ()=>{ loadNodes(); rerenderActive(); });
 
 function rerenderActive(){
@@ -589,22 +562,12 @@ async function loadNodes(fresh){
   // finalize so the new node is detected immediately).
   const d = await api('/api/nodes' + (fresh ? '?fresh=1' : ''));
   if(d && !d.error){ state.nodes = d; state.publicReadonly = !!d.public_readonly; }
-  for(const t of ['observer','validator']){
-    const n = state.nodes[t] || {installed:false,status:'not installed'};
-    const dot = $('#dot-'+t), st = $('#stat-'+t);
-    // "staked" marks a node deployed as an observer that is now an on-chain
-    // validator (server remapped it to this slot) -- surface it as a small badge.
-    st.textContent = n.installed ? (n.status + (n.staked ? ' · staked' : '')) : 'not installed';
-    dot.className = 'dot ' + (n.status==='active'?'green':(n.installed?'red':'gray'));
-  }
-  // Follow the host's single node if it changed slots since the last poll -- e.g. an
-  // observer that synced and got re-attributed to the validator tab on-chain
-  // (detect_nodes remap). Conservative: only switch when the CURRENT tab is now
-  // uninstalled, so a manual click on an installed tab is never yanked.
-  if(!state.nodes[state.node]?.installed){
-    const inst = installedType();
-    if(inst && inst !== state.node) selectNode(inst);
-  }
+  // The node's ROLE is decided on-chain (tn_isValidator) and surfaced by the server
+  // as d.role -- the single populated slot after its bidirectional remap (validator
+  // when on-chain true, else the plain observer/full-node view). Drive the one
+  // active view from it. Fall back to the first installed slot when role is
+  // absent/None (RPC down / not synced / fresh host) so the view never goes blank.
+  state.node = (d && d.role) || installedType() || state.node;
   updateReadonlyBanner();
   syncReadonlyChrome();
 }
@@ -634,21 +597,8 @@ function syncReadonlyChrome(){
 // Empty state
 // =============================================================================
 function emptyState(container, what){
-  // A server runs a single node. If THIS type isn't installed but the OTHER one
-  // is, this server is already configured -- don't invite a second install; point
-  // the operator at the node that's actually running here.
-  const inst = installedType();
-  if(inst && inst !== state.node){
-    const e = el('div','empty', `
-      <div class="ei">✅</div>
-      <h2>This server is configured as a ${esc(cap(inst))} node</h2>
-      <p>Each server runs a single Telcoin node. There is no ${esc(String(what).toLowerCase())} here —
-         select the <strong>${esc(cap(inst))}</strong> tab to manage this node.</p>
-      <button class="btn btn-out" onclick="selectNode('${inst}')">Go to ${esc(cap(inst))} →</button>
-    `);
-    container.innerHTML=''; container.appendChild(e);
-    return;
-  }
+  // A server runs a single node whose role is auto-selected on-chain, so there is
+  // no other tab to redirect to. Nothing installed here -> invite the Setup wizard.
   const e = el('div','empty', `
     <div class="ei">📦</div>
     <h2>${esc(what)} not installed</h2>
@@ -930,7 +880,7 @@ async function renderDashboard(){
     <!-- sections, full width single column; each grid fills the row edge-to-edge -->
     <div class="group-label">Service Health</div>
     <div class="dgrid dgrid-4">
-      ${statCard('Service', running?'Active':'Inactive', running?'green':'red', 'telcoin-'+esc(state.node))}
+      ${statCard('Service', running?'Active':'Inactive', running?'green':'red', esc(s.service||'telcoin-'+state.node))}
       ${statCard('Uptime', s.uptime_human?esc(s.uptime_human):'—', '', running?'⏱ running time':'not running')}
       ${statCard('Restart Count', rc!=null?esc(String(rc)):'—', rcCls, 'since current install')}
       ${statCard('Local RPC', s.rpc_ok?'Online':'Offline', s.rpc_ok?'green':'red', 'port '+esc(s.rpc_port))}
@@ -982,7 +932,7 @@ async function renderDashboard(){
     <div class="grid two-col">
       <div class="card">
         <h3>Node Details</h3>
-        <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Role (on-chain)</span><span class="v">${state.node==='validator'?'Validator':'Full node'}</span></div>
         <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
           ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
@@ -995,7 +945,7 @@ async function renderDashboard(){
         <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
         ${isReadonly()?'':`<div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
-        <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
+        <div class="kv"><span class="k">Service</span><span class="v">${esc(s.service||'telcoin-'+state.node)}</span></div>
         <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>`}
       </div>
       <div class="card">
@@ -1193,7 +1143,7 @@ async function renderValidatorDashboard(c){
     <div class="grid two-col">
       <div class="card">
         <h3>Node Details</h3>
-        <div class="kv"><span class="k">Node Type</span><span class="v">${esc(cap(state.node))}</span></div>
+        <div class="kv"><span class="k">Role (on-chain)</span><span class="v">${state.node==='validator'?'Validator':'Full node'}</span></div>
         <div class="kv"><span class="k">Node Name</span><span class="v">${vv.name?esc(vv.name):'—'}</span></div>
         <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Execution Address</span><span class="v">${vv.execution_address
@@ -1212,7 +1162,7 @@ async function renderValidatorDashboard(c){
         <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
         ${isReadonly()?'':`<div class="kv"><span class="k">Config File</span><span class="v">${esc(s.config_file||'—')}</span></div>
-        <div class="kv"><span class="k">Service</span><span class="v">telcoin-${esc(state.node)}</span></div>
+        <div class="kv"><span class="k">Service</span><span class="v">${esc(s.service||'telcoin-'+state.node)}</span></div>
         <div class="kv"><span class="k">Docker Image</span><span class="v">${esc(s.docker_image||'—')}</span></div>`}
       </div>
       <div class="card">
@@ -2513,7 +2463,7 @@ function renderSetup(){
     const n=i+1; const cls = n<state.setupStep?'done':(n===state.setupStep?'active':'');
     return `<div class="step ${cls}"><div class="num">${n<state.setupStep?'✓':n}</div><div class="slbl">${l}</div></div>`;
   }).join('');
-  c.innerHTML = `<div class="note">This wizard installs a <strong>${esc(cap(state.node))}</strong> node directly via <span class="mono">setup-${esc(state.node)}.sh --json</span>: generate keys, then (after you confirm a backup) finalize and start. Source builds take 20–40 minutes.</div>
+  c.innerHTML = `<div class="note">This wizard installs a <strong>Telcoin Network</strong> node via <span class="mono">setup-node.sh --json</span>: generate keys, then (after you confirm a backup) finalize and start. Validating is optional and decided on-chain — the dashboard switches to the validator view once you stake and activate. Source builds take 20–40 minutes.</div>
     <div class="steps">${steps}</div><div class="card" id="stepBody"></div>`;
   const body = $('#stepBody');
   ({1:stepPreflight,2:stepNetwork,3:stepMethod,4:stepConfigure,5:stepReview}[state.setupStep])(body);
@@ -2663,17 +2613,18 @@ function captureCfg(){
 function stepConfigure(body){
   const s = state.setup;
   const p = s.passphrase;
-  const isVal = state.node==='validator';
-  const instDefault = isVal ? '1' : '5';
-  // RPC public/private is an observer-only choice (matches the CLI).
-  const rpcCards = isVal ? '' : `
+  // Unified single-node setup: every node is provisioned validator-capable and the
+  // install always dispatches through the canonical observer flow, so there is no
+  // role branch here. The role is decided on-chain after the node syncs.
+  const instDefault = '5';
+  const rpcCards = `
     <div class="field"><label>RPC access</label>
       <div class="radio-cards">
         <div class="rcard sel" data-rpc="private"><div class="rt">Private</div><div class="rd">RPC reachable from this server only. No firewall changes. Recommended.</div></div>
         <div class="rcard disabled"><div class="rt">Public <span style="font-size:11px;font-weight:600;color:var(--text2)">· coming soon</span></div><div class="rd">Public RPC isn't available yet — it'll be offered over Caddy (HTTPS) in a future update. Use Private for now.</div></div>
       </div></div>`;
   body.innerHTML = `<h3>Step 4 · Configure</h3>
-    <div class="field"><label>${isVal?'Validator execution address':'Observer Ethereum address'} (0x…)</label><input id="cfgEth" placeholder="0x…" value="${esc(s.eth||'')}"></div>
+    <div class="field"><label>Node execution address (0x…)</label><input id="cfgEth" placeholder="0x…" value="${esc(s.eth||'')}"></div>
     <div class="field"><label>Public / external IP (advertised to peers) — auto-detected</label><input id="cfgPubIp" placeholder="e.g. 203.0.113.10" value="${esc(s.publicIp||'')}"></div>
     <div class="field"><label>Internal / NIC IP (listener bind) — auto-detected</label><input id="cfgIntIp" placeholder="e.g. 10.0.0.5 or 0.0.0.0" value="${esc(s.internalIp||'')}"></div>
     <div class="field"><label>Advertised node name <span style="color:var(--text2);font-weight:400">— optional, a public label; you can set or change it later</span></label><input id="cfgAdvName" placeholder="e.g. my-${esc(state.node)}" value="${esc(s.advName||'')}" autocomplete="off"></div>
@@ -2727,15 +2678,14 @@ function stepConfigure(body){
 function stepReview(body){
   const s = state.setup;
   const rows = [
-    ['Node Type', cap(state.node)],
     ['Network', s.network==='adiri'?'Adiri Testnet':s.network],
     ['Install Method', s.method + (s.method==='source'?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
     ['Address', s.eth||'(not set)'],
     ['Public IP', s.publicIp||'(not set)'],
     ['Internal IP (listener)', s.internalIp||'0.0.0.0'],
-    ['Instance', s.instance || (state.node==='validator'?'1 (default)':'5 (default)')],
+    ['Instance', s.instance || '5 (default)'],
+    ['RPC access', s.rpcPublic?'Public':'Private'],
   ];
-  if(state.node==='observer') rows.push(['RPC access', s.rpcPublic?'Public':'Private']);
   rows.push(
     ['Service user / group', (s.serviceUser||'telcoin')+' / '+(s.serviceGroup||'telcoin')],
     ['BLS Passphrase', s.bls?'•••••••• (set)':'(not set)'],
@@ -2743,7 +2693,7 @@ function stepReview(body){
   );
   body.innerHTML = `<h3>Step 5 · Install</h3>
     ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
-    <div class="note" style="margin-top:14px">Phase 1 generates the node keys (no service is created or started yet). After you confirm a backup, phase 2 finalizes and starts the node.${state.node==='validator'?' <strong>Validator on-chain registration is a separate CLI step the node will guide you through afterward.</strong>':''}</div>
+    <div class="note" style="margin-top:14px">Phase 1 generates the node keys (no service is created or started yet). After you confirm a backup, phase 2 finalizes and starts the node.</div>
     <div class="svc-row"><button class="btn btn-green" id="genKeysBtn">⚙ Generate Keys</button>
       <button class="btn btn-out" onclick="goStep(4)">← Back</button></div>
     <div class="card" id="setupProgressCard" style="display:none;margin-top:14px">
@@ -2771,7 +2721,7 @@ function buildSetupPayload(includePassphrase){
     listener_primary: `/ip4/${lip}/udp/${p2p}/quic-v1`,
     listener_worker:  `/ip4/${lip}/udp/${worker}/quic-v1`,
     public_ip: s.publicIp,
-    rpc_public: (state.node==='observer') ? !!s.rpcPublic : false,
+    rpc_public: !!s.rpcPublic,
     advertised_name: s.advName || '',
     data_dir: s.dataDir || '',
     service_user: s.serviceUser,
@@ -2786,7 +2736,9 @@ function buildSetupPayload(includePassphrase){
 async function streamSetup(phase, includePassphrase){
   let resp;
   try{
-    resp = await fetch('/api/setup/'+state.node+'/'+phase, {
+    // The observer route is the canonical unified setup dispatch: every node is
+    // provisioned validator-capable, so keygen/finalize always go through it.
+    resp = await fetch('/api/setup/observer/'+phase, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(buildSetupPayload(includePassphrase)),
     });
@@ -2863,28 +2815,26 @@ async function runFinalize(){
   if(d && d.ok){
     toast('Node finalized and started','success');
     await loadNodes(true);   // fresh detection so the dashboard won't say "not installed"
-    if(state.node==='validator'){
-      // Validators are not live until on-chain registration completes — show the
-      // remaining steps instead of dropping straight to the dashboard.
-      showValidatorNextSteps(state.setup.eth || (d && d.address) || '');
-    } else {
-      showSetupComplete();
-    }
+    // Single role-neutral completion: the node starts as a plain full node and is
+    // promoted to the validator view automatically once it is staked and admitted
+    // to the committee on-chain (tn_isValidator). No separate validator flow.
+    showSetupComplete();
   } else {
     toast('Finalize failed'+(d&&d.msg?': '+d.msg:''),'error');
     if(fb) fb.disabled=false; if(inp) inp.disabled=false;
   }
 }
 
-// Observer finalize success: explicit completion card + button (no blind auto-
-// redirect). The button force-refreshes node detection and rebuilds the
-// dashboard so it never shows the stale "not installed" empty state.
+// Finalize success: ONE role-neutral completion card + button (no blind auto-
+// redirect, no separate observer/validator card). The button force-refreshes node
+// detection and rebuilds the dashboard so it never shows the stale "not installed"
+// empty state. Role is decided on-chain afterward, so the copy is role-neutral.
 function showSetupComplete(){
   const gate = $('#backupGate');
   const html = `
     <div class="card" style="margin-top:14px;border-color:rgba(0,232,122,0.35)">
-      <h3 style="color:var(--green)">✅ ${esc(cap(state.node))} installed and started</h3>
-      <p class="ns-instr" style="margin-top:-4px">Your node is running and beginning to sync. Open the dashboard to monitor it.</p>
+      <h3 style="color:var(--green)">✅ Node installed and started</h3>
+      <p class="ns-instr" style="margin-top:-4px">Your node is running and beginning to sync as a full node. Once it is staked and admitted to the committee on-chain it is automatically promoted to a validator and the dashboard switches to the validator view. Open the dashboard to monitor it.</p>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="openDashBtn">Completed — Open Dashboard →</button>
       </div>
@@ -2900,77 +2850,6 @@ async function openDashboardFresh(){
   const dash = $('#view-dashboard'); if(dash) delete dash.dataset.loaded;
   state.setupStep = 1;
   switchView('dashboard');
-}
-
-// Validator-only: on-chain registration steps that remain after the service is
-// started. Steps 2–5 are pending (amber) until the operator completes them off
-// the node (governance approval, NFT mint, staking). Observer setup never calls
-// this and keeps the auto-redirect to the dashboard.
-function showValidatorNextSteps(addr){
-  const gate = $('#backupGate'); if(!gate) return;
-  const a = addr || '';
-  const checkCmd = `bash check-node.sh --address ${a||'<VALIDATOR_ADDRESS>'}`;
-  gate.innerHTML = `
-    <div class="card" style="margin-top:14px;border-color:rgba(0,232,122,0.35)">
-      <h3 style="color:var(--green)">✅ Validator installed — Next Steps</h3>
-      <p class="ns-instr" style="margin-top:-4px">Your validator service is running, but it is <strong>not live on the network</strong> until on-chain registration is complete. Work through the steps below.</p>
-
-      <div class="ns-step done">
-        <div class="ns-num">✓</div>
-        <div class="ns-body">
-          <div class="ns-title">Keys generated and backed up <span class="badge ok">Done</span></div>
-          <div class="ns-instr">No action needed.</div>
-        </div>
-      </div>
-
-      <div class="ns-step">
-        <div class="ns-num">2</div>
-        <div class="ns-body">
-          <div class="ns-title">Submit your validator address to the Telcoin Association <span class="badge warn">Action required</span></div>
-          <div class="field" style="margin-top:8px;margin-bottom:6px">
-            <label>Your validator address</label>
-            <div class="ns-codeblock">
-              <code>${esc(a||'—')}</code>
-              ${a?`<button class="copy-btn" title="Copy validator address" onclick="copyToClipboard('${esc(a)}','Validator address')">⧉ Copy</button>`:''}
-            </div>
-          </div>
-          <div class="ns-instr">Submit this address to the Telcoin Association for governance approval. You will be notified once approved and the validator NFT has been minted to your address.</div>
-        </div>
-      </div>
-
-      <div class="ns-step">
-        <div class="ns-num">3</div>
-        <div class="ns-body">
-          <div class="ns-title">Stake TEL via the ConsensusRegistry contract <span class="badge warn">Pending NFT</span></div>
-          <div class="ns-instr">Once your NFT has been minted, stake the required amount of TEL via the ConsensusRegistry contract. <a href="https://docs.telcoin.network/telcoin-network/staking/how-to-stake" target="_blank" rel="noopener">Staking guide</a></div>
-        </div>
-      </div>
-
-      <div class="ns-step">
-        <div class="ns-num">4</div>
-        <div class="ns-body">
-          <div class="ns-title">Run a health check <span class="badge warn">Pending</span></div>
-          <div class="ns-instr">Once staking is complete, verify your validator is visible on the network.</div>
-          <div class="ns-codeblock">
-            <code>${esc(checkCmd)}</code>
-            <button class="copy-btn" title="Copy command" onclick="copyToClipboard('${esc(checkCmd)}','Command')">⧉ Copy</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="ns-step">
-        <div class="ns-num">5</div>
-        <div class="ns-body">
-          <div class="ns-title">Monitor your validator <span class="badge warn">Pending</span></div>
-          <div class="ns-instr">Once live, your validator dashboard will show consensus participation, peer connectivity, and performance metrics.</div>
-        </div>
-      </div>
-
-      <div class="svc-row" style="margin-top:16px">
-        <button class="btn btn-green" id="nsGoDash">Go to Dashboard</button>
-      </div>
-    </div>`;
-  const go=$('#nsGoDash'); if(go) go.addEventListener('click', openDashboardFresh);
 }
 
 // =============================================================================
@@ -3058,13 +2937,9 @@ document.addEventListener('click', e=>{
 (async function init(){
   await loadNodes();
   state.buildInfo = await api('/api/build-info');   // read once at page load
-  // Pick the node to show on first load: default the view to whatever node is
-  // actually installed on this server (observer OR validator -- a host runs one).
-  // Covers external docker deployments too (they report installed). Falls back to
-  // the 'observer' default on a fresh server with nothing installed.
-  const firstInstalled = installedType();
-  if(firstInstalled) state.node = firstInstalled;
-  document.querySelectorAll('.node-btn').forEach(n=>n.classList.toggle('active', n.dataset.node===state.node));
+  // loadNodes() already set state.node from the on-chain role (d.role), falling
+  // back to the first installed slot on a fresh/unsynced host, so the first-load
+  // view is the single node's on-chain-derived role -- nothing more to pick here.
   updateReadonlyBanner();
   syncReadonlyChrome();
   // Await so state.network (chain id -> slug/name) is set before the first nav

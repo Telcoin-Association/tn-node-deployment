@@ -7,6 +7,23 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Dynamic node role -- `setup-node.sh` replaces the observer/validator split
+Telcoin Network decides a node's role from on-chain committee membership each epoch, not
+from a setup-time flag: a staked validator that is out of the committee behaves exactly like
+a never-staked full node, and both just follow consensus. Setup no longer splits into
+observer vs validator. `setup-node.sh` is the canonical installer; `setup-observer.sh` and
+`setup-validator.sh` stay as thin deprecated shims that forward to it. The `--observer`
+binary flag is removed and is no longer emitted anywhere, the Vault `start-telcoin.sh`
+example included. Because any node can later stake and join the committee, `firewall-setup.sh`
+now opens the P2P consensus ports (UDP 49590 primary, 49594 worker) on every node; one that
+staked behind a closed firewall would be unreachable and silently miss consensus. The
+hardware preflight checks against the 8 cores / 16 GB / 500 GB baseline to run a node and
+prints the 16 cores / 128 GB / 4 TB validator spec as informational, not a hard requirement.
+The web UI selects the validator dashboard from the on-chain `tn_isValidator` RPC rather than
+a manual toggle; `.node-meta` keeps `NODE_TYPE` only as a non-authoritative default-view hint
+(new installs write `observer`). Existing per-role installs keep working via `lib/fallback.sh`,
+and `migrate-node-naming.sh` is the safe, opt-in path onto the unified layout.
+
 ### Unified node naming -- single `telcoin` identity
 Collapses the historical dual observer/validator identity into one identity for
 NEW installs (operators run one node per VM). The systemd unit, docker `--name`,

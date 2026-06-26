@@ -35,7 +35,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.3.4"
+readonly COMMON_VERSION="1.3.5"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -383,21 +383,17 @@ prompt_with_validation() {
 }
 
 check_hardware() {
-    local node_type="${1:-validator}"
+    # $1 (legacy node_type) is accepted for call-site compatibility but no longer
+    # selects thresholds: every node is provisioned validator-capable, yet the role
+    # is decided on-chain at each epoch and a node that never joins the committee
+    # runs fine on the baseline spec. So we warn against the baseline and print the
+    # heavier validator spec as an informational target for operators who stake.
     local data_dir="${2:-/}"
-    print_step "Checking hardware requirements for ${node_type} node..."
+    print_step "Checking hardware requirements..."
 
-    # Select thresholds based on node type
-    local min_ram min_disk min_cpu
-    if [[ "$node_type" == "observer" ]]; then
-        min_ram=$OBSERVER_MIN_RAM_GB
-        min_disk=$OBSERVER_MIN_DISK_GB
-        min_cpu=$OBSERVER_MIN_CPU_CORES
-    else
-        min_ram=$VALIDATOR_MIN_RAM_GB
-        min_disk=$VALIDATOR_MIN_DISK_GB
-        min_cpu=$VALIDATOR_MIN_CPU_CORES
-    fi
+    local min_ram=$OBSERVER_MIN_RAM_GB
+    local min_disk=$OBSERVER_MIN_DISK_GB
+    local min_cpu=$OBSERVER_MIN_CPU_CORES
 
     local ram_kb ram_gb
     ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
@@ -438,6 +434,10 @@ check_hardware() {
     else
         print_ok "Disk: ${disk_avail_gb}GB available on ${mount_point}"
     fi
+
+    # Informational: the recommended spec to validate (stake + join the committee).
+    # The node runs as a full-node/follower on the baseline above without these.
+    print_info "To validate, the recommended spec is ${VALIDATOR_MIN_CPU_CORES} cores / ${VALIDATOR_MIN_RAM_GB}GB RAM / ${VALIDATOR_MIN_DISK_GB}GB disk."
 }
 
 # Check whether ports are free, protocol-aware. Each arg is "port[/proto][:label]"

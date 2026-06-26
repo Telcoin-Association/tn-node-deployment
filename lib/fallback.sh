@@ -33,7 +33,7 @@
 _TN_FALLBACK_SH=1
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly FALLBACK_VERSION="1.0.0"
+readonly FALLBACK_VERSION="1.0.1"
 
 # Root prepended to every absolute probe path. Empty in production; a temp dir
 # under test. `:=` leaves a caller-provided value (the test harness) untouched.
@@ -50,7 +50,6 @@ readonly TN_LEGACY_NAMES=("telcoin-validator" "telcoin-observer")
 _tn_unit_dir() { printf '%s/etc/systemd/system' "${TN_ROOT_PREFIX}"; }
 _tn_etc()      { printf '%s/etc/telcoin'        "${TN_ROOT_PREFIX}"; }
 _tn_var()      { printf '%s/var/lib/telcoin'    "${TN_ROOT_PREFIX}"; }
-_tn_install()  { printf '%s/opt/telcoin'        "${TN_ROOT_PREFIX}"; }
 
 # _tn_meta_get <key> <file> — echo KEY's value from a .node-meta file. Returns 1
 # if the file/key is absent. Self-contained (does not rely on common.sh's
@@ -142,21 +141,14 @@ tn_resolve_data_dir() {
     printf '%s\n' "$var"
 }
 
-# _tn_wrapper_has_observer — true if a start wrapper passes --observer (last-ditch
-# node-type signal for a legacy install with no role-dir .node-meta).
-_tn_wrapper_has_observer() {
-    local inst f
-    inst="$(_tn_install)"
-    for f in "${inst}/start-${TN_SERVICE_NEW}.sh" "${inst}/start-telcoin-validator.sh" "${inst}/start-telcoin-observer.sh"; do
-        [[ -f "$f" ]] && grep -q -- '--observer' "$f" 2>/dev/null && return 0
-    done
-    return 1
-}
-
-# tn_resolve_node_type — echo observer|validator.
+# tn_resolve_node_type — echo the default-view hint observer|validator.
+# NODE_TYPE is a non-authoritative presentation hint, NOT a role: the protocol
+# decides a node's role dynamically from on-chain committee membership at each
+# epoch, and the UI promotes/demotes the view from tn_isValidator. A missing hint
+# therefore resolves to the plain "observer" full-node view, never to validator.
 #   new install  -> NODE_TYPE= from the unified /etc/telcoin/.node-meta
 #   legacy       -> the role dir that has a .node-meta
-#   last resort  -> --observer in the start wrapper, else validator
+#   last resort  -> observer (plain full-node view; on-chain status promotes it)
 tn_resolve_node_type() {
     local etc nt t
     etc="$(_tn_etc)"
@@ -167,5 +159,5 @@ tn_resolve_node_type() {
     for t in validator observer; do
         [[ -f "${etc}/${t}/.node-meta" ]] && { printf '%s\n' "$t"; return 0; }
     done
-    if _tn_wrapper_has_observer; then printf 'observer\n'; else printf 'validator\n'; fi
+    printf 'observer\n'
 }

@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/fallback.sh
 source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 
-readonly SCRIPT_VERSION="1.1.58"
+readonly SCRIPT_VERSION="1.1.59"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -42,6 +42,7 @@ print_sep()  { echo "-----------------------------------------------------------
 
 # Format: "local_path:remote_path:version_var"
 declare -a SCRIPTS=(
+    "setup-node.sh:setup-node.sh:SCRIPT_VERSION"
     "setup-observer.sh:setup-observer.sh:SCRIPT_VERSION"
     "setup-validator.sh:setup-validator.sh:SCRIPT_VERSION"
     "install-caddy.sh:install-caddy.sh:SCRIPT_VERSION"

@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.2"
+readonly SCRIPT_VERSION="1.2.3"
 
 # Build the systemd unit file path from a unit BASE name (e.g. "telcoin").
 service_file_for() {
@@ -206,7 +206,7 @@ detect_node() {
     # Operators run one node per VM; resolve the single installed unit.
     if ! TARGET_SERVICE="$(tn_resolve_service)"; then
         print_error "No Telcoin node installation found."
-        print_info "Run setup-validator.sh or setup-observer.sh first."
+        print_info "Run setup-node.sh first."
         exit 1
     fi
     TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
@@ -1009,7 +1009,9 @@ run_json_set() {
     json_setup_fds
     check_root
 
-    [[ -n "$NODE_TYPE" ]] || { json_event error "no node type specified (need --observer or --validator)"; return 1; }
+    # NODE_TYPE is only a presentation hint and is NOT required here: this JSON
+    # path operates on the single resolved unit, so a missing/unspecified type is
+    # fine. (--observer/--validator are still accepted as optional hints in main().)
     # Operators run one node per VM; resolve the single installed unit.
     TARGET_SERVICE="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
     TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"

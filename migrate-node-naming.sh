@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # migrate-node-naming.sh -- Migrate a LEGACY telcoin-{observer,validator} install
-# to the unified `telcoin` layout, and (for an observer) convert it to a validator.
+# to the unified `telcoin` layout (one node identity, validator-capable).
 #
 # WHY THIS EXISTS
 # ---------------
@@ -18,19 +18,21 @@
 # (.node-meta carries NODE_TYPE=). lib/fallback.sh keeps legacy installs WORKING
 # but never migrates them. This script performs the one-time migration.
 #
-# SCOPE / CONVERSION
-# ------------------
-# An observer that was later STAKED + activated on-chain is a real validator, but
-# it still launches with `--observer`. So this migration ALSO converts an observer
-# to a validator: it deletes the single `--observer` launch line and sets
-# NODE_TYPE=validator. (Validator vs observer wrappers differ by EXACTLY that one
-# line -- confirmed against setup-observer.sh / setup-validator.sh.) The node keeps
-# its existing BLS keypair (the key it was staked with), so dropping --observer is
-# all that is needed for it to validate.
+# SCOPE
+# -----
+# A node's role is decided DYNAMICALLY from on-chain committee membership each
+# epoch, not from a static flag. A staked validator not currently in committee
+# behaves identically to a never-staked observer -- they are the SAME node. The
+# `--observer` flag has been removed from the node binary, so the legacy observer
+# and validator wrappers now differ only in that one defunct line. This migration
+# therefore collapses the per-role layout into ONE identity: it strips the removed
+# `--observer` flag from a legacy wrapper and provisions the node validator-capable
+# (including the P2P consensus UDP ports 49590 + 49594). NODE_TYPE is written as a
+# non-authoritative presentation HINT (observer); the real authority is on-chain
+# tn_isValidator, from which the dashboard auto-selects the validator view. The
+# node keeps its existing BLS keypair, so no key changes are needed.
 #
-# ONLY run this on an observer you intend to validate (i.e. one already staked +
-# activated). It does NOT verify on-chain registration -- that is the operator's
-# responsibility (the dashboard's tn_isValidator check shows the true role).
+# Safe to run on ANY legacy telcoin-{observer,validator} install -- staked or not.
 #
 # DESIGN
 # ------
@@ -42,8 +44,8 @@
 # self-rolling-back: on any failure it restores the legacy unit/wrapper, moves the
 # dirs back, restarts the legacy service, and exits non-zero with the backup paths.
 #
-# Downtime is expected and acceptable (stop -> migrate -> start). The validator
-# rejoins consensus at the next epoch boundary.
+# Downtime is expected and acceptable (stop -> migrate -> start). The node
+# rejoins consensus at the next epoch boundary when it is in committee.
 #
 # Node-side Linux bash. Run as root on the node:  sudo bash migrate-node-naming.sh
 # =============================================================================
@@ -64,7 +66,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 set -E
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
@@ -104,8 +106,9 @@ usage() {
 migrate-node-naming.sh v${SCRIPT_VERSION}
 
 Migrate a legacy telcoin-{observer,validator} install to the unified 'telcoin'
-layout, converting an observer to a validator (drops --observer, sets
-NODE_TYPE=validator). Idempotent and self-rolling-back.
+layout: strips the removed --observer flag, sets NODE_TYPE=observer (a non-
+authoritative hint), and opens the P2P consensus ports so the node is
+validator-capable. Idempotent and self-rolling-back.
 
 USAGE:
   sudo bash migrate-node-naming.sh [--yes]
@@ -284,11 +287,6 @@ detect_legacy() {
     print_info "  wrapper:    ${UNIFIED_WRAPPER}"
     print_info "  config dir: ${UNIFIED_CONFIG_DIR}"
     print_info "  data dir:   ${UNIFIED_DATA_DIR}"
-    if [[ "$ROLE" == "observer" ]]; then
-        echo ""
-        print_warn "CONVERSION: observer -> validator (drops --observer, NODE_TYPE=validator)."
-        print_warn "Only proceed if this node is already STAKED and activated on-chain."
-    fi
     echo ""
 
     if [[ "$ASSUME_YES" != "true" ]]; then
@@ -400,7 +398,7 @@ relocate_dir() {
 # first, then the role-suffixed name (catches --name, ExecStart/Stop, Description,
 # SyslogIdentifier, log paths, start-telcoin-<role>.sh). The container/host log dir
 # (/var/log/telcoin) is shared and stays put; only the telcoin-<role> filename part
-# is rewritten. Cosmetic: "Observer Node" -> "Validator Node".
+# is rewritten. Cosmetic: the role is dropped from Description (-> "Telcoin Network Node").
 rewrite_unit() {
     print_step "Rewriting systemd unit -> ${UNIFIED_UNIT}"
     # cp -a the pristine snapshot to the unified PATH first (carries the legacy
@@ -411,27 +409,27 @@ rewrite_unit() {
         -e "s#/etc/telcoin/${ROLE}#/etc/telcoin#g" \
         -e "s#/var/lib/telcoin/${ROLE}#/var/lib/telcoin#g" \
         -e "s#telcoin-${ROLE}#telcoin#g" \
-        -e 's#Observer Node#Validator Node#g' \
+        -e 's#Network (Observer|Validator) Node#Network Node#g' \
         "$UNIFIED_UNIT"
     WROTE_UNIT=true
     print_ok "Wrote ${UNIFIED_UNIT}"
 }
 
 # =============================================================================
-# STEP 7 -- REWRITE THE WRAPPER (+ observer->validator conversion)
+# STEP 7 -- REWRITE THE WRAPPER (strip the removed --observer flag)
 # =============================================================================
 # Same path substitutions as the unit, PLUS delete the lone `--observer` launch
-# line (the ONLY runtime difference between an observer and a validator wrapper --
-# confirmed byte-for-byte against setup-observer.sh / setup-validator.sh). The
+# line. That flag has been removed from the node binary, so a legacy wrapper still
+# passing it would fail to launch -- stripping it normalizes the wrapper. The
 # delete matches a line that is only `--observer`, with optional leading indent
 # (docker form is column-0 `--observer \`; binary form is 2-space `  --observer \`)
 # and an optional trailing backslash. Deleting the whole line preserves the
 # backslash-continuation chain (the previous line keeps its own trailing `\`).
 rewrite_wrapper() {
-    print_step "Rewriting start wrapper -> ${UNIFIED_WRAPPER} (dropping --observer)"
+    print_step "Normalizing start wrapper -> ${UNIFIED_WRAPPER} (stripping the removed --observer flag)"
     # cp -a preserves the original (security-sensitive) owner + mode: docker
     # wrappers are root:root 0750 (run as root); binary wrappers telcoin:telcoin
-    # 0755. Then transform + drop --observer in place.
+    # 0755. Then transform + strip --observer in place.
     cp -a "$WRAPPER_BAK" "$UNIFIED_WRAPPER"
     sed -i -E \
         -e "s#/etc/telcoin/${ROLE}#/etc/telcoin#g" \
@@ -441,9 +439,9 @@ rewrite_wrapper() {
         "$UNIFIED_WRAPPER"
     WROTE_WRAPPER=true
 
-    # Safety check: the converted wrapper must NOT still pass --observer.
+    # Safety check: the normalized wrapper must NOT still pass --observer.
     if grep -qE '(^|[[:space:]])--observer([[:space:]]|$)' "$UNIFIED_WRAPPER"; then
-        print_error "Converted wrapper still contains --observer -- aborting."
+        print_error "Normalized wrapper still contains --observer -- aborting."
         return 1
     fi
     print_ok "Wrote ${UNIFIED_WRAPPER} (no --observer)"
@@ -468,8 +466,10 @@ update_meta() {
         print_warn "No ${meta} after relocation -- writing a minimal one."
         : > "$meta"
     fi
-    print_step "Updating ${meta} (NODE_TYPE=validator, DATA_DIR=${UNIFIED_DATA_DIR})"
-    meta_set NODE_TYPE validator "$meta"
+    print_step "Updating ${meta} (NODE_TYPE=observer, DATA_DIR=${UNIFIED_DATA_DIR})"
+    # NODE_TYPE is only the default-view HINT; the UI promotes to the validator view
+    # from on-chain tn_isValidator. Every migrated node is the same identity.
+    meta_set NODE_TYPE observer "$meta"
     meta_set DATA_DIR "$UNIFIED_DATA_DIR" "$meta"
 
     # Optional: record VALIDATOR_ADDRESS from node-info.yaml execution_address for
@@ -540,7 +540,29 @@ start_and_verify() {
 }
 
 # =============================================================================
-# STEP 11 -- REPORT
+# STEP 11 -- OPEN P2P CONSENSUS PORTS (validator-capable)
+# =============================================================================
+# Every unified node is provisioned validator-capable, which includes the P2P
+# consensus UDP ports: 49590 (primary) and 49594 (worker). Open them via ufw if
+# present. NON-FATAL by design: the ERR trap is still armed here (report disarms
+# it), so every command is guarded and the step always returns 0 -- a firewall
+# hiccup must never roll back an otherwise-healthy migration. Idempotent (ufw
+# dedups identical rules; re-running the migration re-asserts the same two rules).
+open_consensus_ports() {
+    print_step "Opening P2P consensus UDP ports (49590 primary, 49594 worker)..."
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow 49590/udp >/dev/null 2>&1 || true
+        ufw allow 49594/udp >/dev/null 2>&1 || true
+        print_ok "ufw rules ensured for 49590/udp and 49594/udp."
+    else
+        print_warn "ufw not present -- open UDP 49590 and 49594 by other means so this"
+        print_warn "node can receive consensus traffic when it joins the committee."
+    fi
+    return 0
+}
+
+# =============================================================================
+# STEP 12 -- REPORT
 # =============================================================================
 report() {
     # Migration succeeded -- disarm the rollback trap.
@@ -551,18 +573,17 @@ report() {
     print_info "  wrapper:    ${UNIFIED_WRAPPER}"
     print_info "  config dir: ${UNIFIED_CONFIG_DIR}"
     print_info "  data dir:   ${UNIFIED_DATA_DIR}"
-    print_info "  NODE_TYPE:  validator"
+    print_info "  NODE_TYPE:  observer (presentation hint; on-chain tn_isValidator is authoritative)"
     echo ""
     print_info "Backups kept (delete once you've confirmed the node is healthy):"
     [[ -n "$UNIT_BAK"    ]] && print_info "  ${UNIT_BAK}"
     [[ -n "$WRAPPER_BAK" ]] && print_info "  ${WRAPPER_BAK}"
     [[ -n "$META_BAK"    ]] && print_info "  ${META_BAK}"
     echo ""
-    if [[ "$ROLE" == "observer" ]]; then
-        print_warn "This node now runs as a VALIDATOR. It rejoins consensus at the next epoch"
-        print_warn "boundary. Watch for committee membership / tn_latestConsensusHeader advancing,"
-        print_warn "or open the dashboard (the validator tab auto-selects once tn_isValidator=true)."
-    fi
+    print_info "Unified layout in place; this node is validator-capable. The dashboard"
+    print_info "auto-selects the validator view once tn_isValidator is true on-chain. When"
+    print_info "this node is in committee it participates in consensus at the next epoch"
+    print_info "boundary (watch tn_latestConsensusHeader advancing)."
     print_info "Logs:   journalctl -u ${UNIFIED_SERVICE} -f"
     print_info "Status: systemctl status ${UNIFIED_SERVICE}"
 }
@@ -577,11 +598,12 @@ main() {
     relocate_dir "$LEGACY_CONFIG_DIR" "$UNIFIED_CONFIG_DIR" CONFIG_MOVED config   # step 4
     relocate_dir "$LEGACY_DATA_DIR"   "$UNIFIED_DATA_DIR"   DATA_MOVED   data     # step 5
     rewrite_unit         # step 6
-    rewrite_wrapper      # step 7 (observer -> validator)
+    rewrite_wrapper      # step 7 (strip the removed --observer flag)
     update_meta          # step 8
     finalize_units       # step 9
     start_and_verify     # step 10 (failure -> rollback via ERR trap)
-    report               # step 11
+    open_consensus_ports # step 11 (non-fatal; validator-capable P2P ports)
+    report               # step 12
 }
 
 # Run only when executed directly; sourcing (e.g. for unit tests) just defines the

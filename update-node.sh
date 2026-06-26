@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.53"
+readonly SCRIPT_VERSION="1.1.54"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -54,14 +54,22 @@ ASSUME_YES=false
 # DETECTION
 # =============================================================================
 
-# Set NODE_TYPE + the type-specific RPC_URL. The systemd unit BASE name lives in
-# SERVICE_NAME and is resolved separately (tn_resolve_service) so it is "telcoin"
-# on a unified install and the legacy unit name on a legacy install.
+# Set NODE_TYPE (a presentation hint) + the LOCAL RPC_URL used for health probes.
+# A unified node serves RPC on RPC_PORT from .node-meta (default DEFAULT_RPC_PORT
+# = 8545); the old node-type->port guess (observer => 8541) mis-probed a unified
+# install, so derive the port from meta instead -- it no longer depends on the
+# type. The systemd unit BASE name lives in SERVICE_NAME and is resolved
+# separately (tn_resolve_service) so it is "telcoin" on a unified install and the
+# legacy unit name on a legacy install.
 set_node_type() {
     case "$1" in
-        validator) NODE_TYPE="validator"; RPC_URL="http://127.0.0.1:8545" ;;
-        observer)  NODE_TYPE="observer";  RPC_URL="http://127.0.0.1:8541" ;;
+        validator) NODE_TYPE="validator" ;;
+        observer)  NODE_TYPE="observer" ;;
     esac
+    local rpc_port
+    rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
+    [[ -n "$rpc_port" ]] || rpc_port="$DEFAULT_RPC_PORT"
+    RPC_URL="http://127.0.0.1:${rpc_port}"
 }
 
 detect_node_type() {
@@ -69,7 +77,7 @@ detect_node_type() {
     # whether the node type was forced via --validator/--observer.
     SERVICE_NAME="$(tn_resolve_service)" || {
         print_error "No Telcoin node installation found on this server."
-        print_info "Run setup-observer.sh or setup-validator.sh first."
+        print_info "Run setup-node.sh first."
         exit 1
     }
     [[ "$NODE_TYPE_EXPLICITLY_SET" == "true" ]] && return 0
@@ -690,8 +698,34 @@ apply_source_update() {
 # VALIDATOR GUARD
 # =============================================================================
 
+# Best-effort runtime check: is this node a validator the protocol currently
+# cares about? The protocol assigns a node's role per-epoch from on-chain
+# committee membership, so the static NODE_TYPE hint is NOT authoritative. We
+# REUSE the single on-chain probe check_validator_onchain_status (lib/common.sh)
+# -- there is no dedicated boolean helper -- capturing its rendered output and
+# classifying the ValidatorStatus. Returns 0 (treat as validator) when the
+# registry reports a REGISTERED validator (status 1-4) OR when the status cannot
+# be determined (no address on file, RPC unreachable, unexpected output);
+# returns 1 ONLY when the registry definitively reports a non-validator (status
+# 0/5/6 or no NFT record). Erring toward 0 keeps the downtime warning when in
+# doubt -- a missed warning on a live validator is worse than a needless prompt.
+node_is_onchain_validator_or_unknown() {
+    local addr out
+    addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null || true)"
+    # No address on file -> cannot confirm; treat as unknown -> warn.
+    [[ -n "$addr" ]] || return 0
+    out="$(check_validator_onchain_status "$addr" "$RPC_URL" 2>&1 || true)"
+    # Plain-text status labels (only the [OK]/[WARN] prefix is coloured).
+    if grep -qE 'Status: (Undefined|Exited|Retired)|No validator record found' <<<"$out"; then
+        return 1
+    fi
+    return 0
+}
+
 validator_downtime_warning_if_applicable() {
-    if [[ "$NODE_TYPE" != "validator" ]]; then
+    # Gate on RUNTIME on-chain status, not the static NODE_TYPE hint: only SKIP
+    # the warning when the registry confirms this node is NOT a validator.
+    if ! node_is_onchain_validator_or_unknown; then
         return 0
     fi
     echo ""
@@ -1052,9 +1086,12 @@ json_apply() {
         json_event error "pending update was prepared for '${pending_method}' but node is '${install_method}'"
         return 1
     fi
-    # In JSON mode a validator restart needs an explicit --yes (replaces the
-    # typed CONFIRM of interactive mode); never restart a validator implicitly.
-    if [[ "$NODE_TYPE" == "validator" && "$ASSUME_YES" != "true" ]]; then
+    # In JSON mode a validator restart needs an explicit --yes (replaces the typed
+    # CONFIRM of interactive mode); never restart a validator implicitly. Gate on
+    # RUNTIME on-chain status, not the static NODE_TYPE hint: require --yes when the
+    # registry reports a validator OR can't confirm otherwise (RPC down / unknown),
+    # and skip it only when this node is definitively NOT a validator.
+    if node_is_onchain_validator_or_unknown && [[ "$ASSUME_YES" != "true" ]]; then
         json_event error "validator apply requires explicit confirmation (--yes)"; return 1
     fi
     case "$install_method" in

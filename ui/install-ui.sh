@@ -149,7 +149,7 @@ fi
 # firewall-setup.sh + remove-node.sh + setup-*.sh drive the UI's Firewall,
 # Danger Zone and Setup features via their --json modes. Same root-owned dir /
 # pattern as edit-config.sh.
-for s in firewall-setup.sh remove-node.sh setup-observer.sh setup-validator.sh install-caddy.sh; do
+for s in firewall-setup.sh remove-node.sh setup-node.sh setup-observer.sh setup-validator.sh install-caddy.sh; do
     if [[ -f "${REPO_DIR}/${s}" ]]; then
         install -o root -g root -m 0755 "${REPO_DIR}/${s}" "${UPDATE_DIR}/${s}"
         ok "${s} installed to ${UPDATE_DIR} (root:root)"
