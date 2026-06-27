@@ -1,0 +1,79 @@
+name: CI
+
+# Operators install and update these scripts LIVE from main (curl | bash, then
+# update-scripts.sh fetches each file from raw.githubusercontent.com/.../main), so a
+# broken merge reaches them instantly. These gates protect that supply chain.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  parse-linux:
+    name: bash -n (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A parse error on main bricks `curl | bash`. This is the single most
+      # important check, and it is zero-false-positive.
+      - name: Parse-check every shell script
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if bash -n "$f"; then echo "ok   $f"; else echo "FAIL $f"; fail=1; fi
+          done < <(git ls-files '*.sh')
+          exit "$fail"
+
+  parse-macos:
+    name: bash -n (macOS bash 3.2)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # macOS ships bash 3.2 as /bin/bash. Observers run on macOS, so catch any
+      # bash-4+ syntax (declare -A, ${x,,}, etc.) that would fail there. Invoke
+      # /bin/bash explicitly so this tests 3.2 regardless of what is on PATH.
+      - name: Show system bash version
+        run: /bin/bash --version | head -1
+      - name: Parse-check every shell script under bash 3.2
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if /bin/bash -n "$f"; then echo "ok   $f"; else echo "FAIL $f"; fail=1; fi
+          done < <(git ls-files '*.sh')
+          exit "$fail"
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest  # shellcheck is preinstalled on ubuntu runners
+    steps:
+      - uses: actions/checkout@v4
+      # Blocking: real errors only. -x resolves sourced lib/*.sh.
+      - name: shellcheck (errors -- blocking)
+        run: shellcheck -x --severity=error $(git ls-files '*.sh')
+      # Advisory: style nits surfaced but not blocking on day one.
+      - name: shellcheck (warnings -- advisory)
+        continue-on-error: true
+        run: shellcheck -x --severity=warning $(git ls-files '*.sh')
+
+  checksums:
+    name: checksum freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Regenerate the .sha256 sidecars and fail if anything changed -- i.e. a
+      # tracked script was edited without refreshing (or committing) its sidecar.
+      # We check `git status --porcelain` (not `git diff`) so NEW untracked
+      # sidecars are caught too, not just modified ones.
+      - name: Regenerate sidecars and verify they are committed & fresh
+        run: |
+          bash tools/gen-checksums.sh
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::SHA-256 sidecars are stale or missing. Run 'bash tools/gen-checksums.sh' and commit the result."
+            git --no-pager status
+            git --no-pager diff
+            exit 1
+          fi
+          echo "All sidecars are fresh and committed."

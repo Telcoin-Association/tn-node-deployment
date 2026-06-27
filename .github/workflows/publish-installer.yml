@@ -1,0 +1,54 @@
+name: Publish installer
+
+# Republishes install.sh to GitHub Pages (custom domain: install.telcoin.network)
+# on every push to main that touches it. The site root returns the installer body
+# verbatim, so `curl -fsSL https://install.telcoin.network | bash` works -- the
+# content-type is irrelevant to `curl | bash`, exactly like foundry.paradigm.xyz.
+#
+# main remains the single source of truth. This only refreshes the human-facing
+# front door; the updater data plane still fetches each file from
+# raw.githubusercontent.com/.../main directly.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - '.github/workflows/publish-installer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent Pages deploy; never cancel an in-flight one (a cancelled
+# deploy can leave Pages in a half-updated state).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp install.sh _site/index.html           # root URL returns the installer
+          cp install.sh _site/install.sh            # /install.sh alias also works
+          echo 'install.telcoin.network' > _site/CNAME   # keep the custom-domain binding on deploy
+          touch _site/.nojekyll                      # skip Jekyll processing
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -101,6 +101,18 @@ declare -a TESTNET_ADDONS_BUNDLE=(
 # HELPERS
 # =============================================================================
 
+# Portable SHA-256 of a file's contents (hash only). Linux ships `sha256sum`;
+# macOS ships `shasum` instead. Observers can run on macOS, so route every
+# verification through this rather than calling `sha256sum` directly (which would
+# error on a Mac the moment .sha256 sidecars are published).
+_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1"
+    else
+        shasum -a 256 "$1"
+    fi | awk '{print $1}'
+}
+
 get_local_version() {
     local file="$1"
     local var="$2"
@@ -342,16 +354,18 @@ download_updates() {
             continue
         fi
 
-        # Integrity check 2: opportunistic SHA-256 verification.
-        # The Telcoin repo does not currently publish .sha256 sidecars, but
-        # check anyway so verification kicks in automatically once they exist.
+        # Integrity check 2: SHA-256 verification against a published sidecar.
+        # tools/gen-checksums.sh writes a <file>.sha256 next to every tracked file
+        # and CI enforces freshness, so this normally runs for every file. It stays
+        # opportunistic (skipped when no sidecar is returned) so an older mirror or a
+        # not-yet-published file degrades gracefully to the parse check below.
         # NOTE: trust currently rests on TLS to a mutable branch ref; publish signed tags / pinned commits before mainnet.
         local sha_url="${url}.sha256"
         local remote_sha
         remote_sha=$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 "$sha_url" 2>/dev/null | awk '{print $1}' || true)
         if [[ -n "$remote_sha" ]]; then
             local actual_sha
-            actual_sha=$(sha256sum "${dest}.tmp" | awk '{print $1}')
+            actual_sha=$(_sha256 "${dest}.tmp")
             if [[ "$remote_sha" != "$actual_sha" ]]; then
                 rm -f "${dest}.tmp"
                 echo -e "${RED}FAILED${RESET}  (sha256 mismatch)"

@@ -243,10 +243,14 @@ verify_health_after_restart() {
 # =============================================================================
 
 fetch_docker_tags() {
-    curl -sS --max-time 5 "$GAR_TAGS_URL" 2>/dev/null | python3 <<'PYEOF' 2>/dev/null
-import json, sys, re
+    # The heredoc below IS python3's stdin (its program source), so the tag JSON
+    # cannot also arrive on stdin -- the old `curl ... | python3 <<EOF` fed the
+    # script to itself and always returned nothing (SC2259). Pass the payload via
+    # the environment instead: keeps the readable heredoc and parses for real.
+    TN_TAGS_JSON="$(curl -sS --max-time 5 "$GAR_TAGS_URL" 2>/dev/null)" python3 <<'PYEOF' 2>/dev/null
+import json, os, re
 try:
-    d = json.load(sys.stdin)
+    d = json.loads(os.environ.get('TN_TAGS_JSON', ''))
     tags = d.get('tags', [])
     parsed = []
     for t in tags:
