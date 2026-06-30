@@ -876,6 +876,17 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### VPN admin SSH — fix tnadmin key-login lockout + confirm-and-reuse on re-run
+`setup-vpn.sh v1.4.0` fixes opted-in nodes going unreachable to maintainers. `tnadmin` was
+created with no password and then `passwd -l`'d, leaving the shadow field `!`-locked; Ubuntu
+sshd (`UsePAM yes`) runs PAM **account** management *after* the maintainer key matches, and a
+`!`-locked / aging-flagged account is refused there — so the correct key was denied login. It
+is now set password-less but login-enabled (shadow `*`, not `!`; aging/expiry cleared),
+re-asserted on `--selfheal`, and reported by a new `--status` check (3b). A re-run now also
+detects an existing install and offers to **reuse** the overlay IP already in `.node-meta` /
+`wg0.conf` instead of re-walking the full assignment prompt. `update-scripts.sh v1.1.61`
+re-cut with refreshed `.sha256` sidecars (`setup-vpn.sh`, `update-scripts.sh`).
+
 ### Branded install URL + portable checksums
 The installer now has a branded front door: `curl -fsSL https://install.telcoin.network | bash`
 (the raw GitHub URL still works as a fallback). `main` stays the single source of truth — a

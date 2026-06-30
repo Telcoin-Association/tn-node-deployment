@@ -28,7 +28,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 readonly WGVPN_DIR="${SCRIPT_DIR}/lib/wgvpn"
 readonly SCOPED_SSHD_DROPIN="/etc/ssh/sshd_config.d/15-tnadmin-overlay.conf"
 # Self-heal units (H3): a boot-time oneshot + an on-change path watcher that re-assert
@@ -100,10 +100,48 @@ consent_gate() {
     fi
 }
 
+# detect_existing_install — best-effort read of the overlay IP a prior run already
+# assigned this node, so a re-run can confirm-and-reuse instead of re-prompting for an
+# address that is already on the box. Sets DETECTED_OVERLAY_IP / DETECTED_OVERLAY_SRC;
+# returns non-zero when nothing is found. Reads .node-meta's VPN_OVERLAY_IP first (the
+# same key persist_state writes and the UI helper reads), then falls back to the wg0.conf
+# `Address =` line as the on-disk-of-record.
+detect_existing_install() {
+    DETECTED_OVERLAY_IP=""; DETECTED_OVERLAY_SRC=""
+    local meta ip=""
+    meta="$(node_meta_path || true)"
+    [[ -n "$meta" ]] && ip="$(meta_get VPN_OVERLAY_IP "$meta" 2>/dev/null || true)"
+    [[ -n "$ip" ]] && DETECTED_OVERLAY_SRC=".node-meta"
+    if [[ -z "$ip" && -r /etc/wireguard/wg0.conf ]]; then
+        # `|| ip=""` guards set -e: with pipefail, grep finding no Address line makes the
+        # pipeline non-zero, which would otherwise abort the whole script (a half-written
+        # wg0.conf is exactly the kind of node a re-run should still handle gracefully).
+        ip="$(grep -E '^[[:space:]]*Address[[:space:]]*=' /etc/wireguard/wg0.conf 2>/dev/null \
+              | head -1 | awk -F= '{print $2}' | tr -d ' ')" || ip=""
+        ip="${ip%%/*}"
+        [[ -n "$ip" ]] && DETECTED_OVERLAY_SRC="/etc/wireguard/wg0.conf"
+    fi
+    [[ -n "$ip" ]] || return 1
+    DETECTED_OVERLAY_IP="$ip"; return 0
+}
+
 prompt_overlay_ip() {
     if [[ -n "$OVERLAY_IP" ]]; then
         validate_overlay_ip "$OVERLAY_IP" || { print_error "Invalid overlay IP: ${OVERLAY_IP}"; exit 1; }
         return 0
+    fi
+    # Re-run on a node that already has WireGuard + an assigned IP: confirm reuse instead of
+    # walking the full assignment spiel for an address that is already on the box.
+    if detect_existing_install && validate_overlay_ip "$DETECTED_OVERLAY_IP"; then
+        print_header "Existing VPN install detected"
+        command -v wg >/dev/null 2>&1 && print_ok "WireGuard is installed (wg present)."
+        print_ok "This node is already assigned overlay IP ${DETECTED_OVERLAY_IP} (from ${DETECTED_OVERLAY_SRC})."
+        if wg show wg0 >/dev/null 2>&1; then print_info "Tunnel wg0 is currently up."; fi
+        if confirm "Reuse overlay IP ${DETECTED_OVERLAY_IP}?"; then
+            OVERLAY_IP="$DETECTED_OVERLAY_IP"
+            return 0
+        fi
+        print_info "OK — enter a different overlay IP below."
     fi
     print_header "Overlay IP assignment"
     print_info "The Telcoin Association assigns each external node a unique overlay IP in the"
@@ -164,6 +202,32 @@ write_tnadmin_keys() {
     print_ok "Wrote ${n} maintainer key(s) -> ${akf} (mode 600, owner ${TNADMIN_USER})."
 }
 
+ensure_tnadmin_passwordless_login() {
+    # Keep tnadmin PASSWORD-LESS (no hash) yet able to accept maintainer publickey SSH.
+    # Ubuntu sshd is UsePAM=yes, so AFTER the key matches it runs PAM *account* management;
+    # a '!'-locked / aging-flagged account is refused there, so key-only login silently fails
+    # even with the correct key. Give it NO usable password but a state PAM accepts:
+    #   * shadow field '*'  -> can never authenticate, but NOT the '!' lock that hardened
+    #                          PAM/sshd setups reject. ('*' is not a login vector.)
+    #   * aging/expiry off  -> never "must change" (lstchg=0) nor expired/inactive.
+    # The scoped sshd drop-in independently forces key-only for tnadmin, so '*' is
+    # belt-and-suspenders, never a way in.
+    if ! getent passwd "$TNADMIN_USER" >/dev/null 2>&1; then
+        print_warn "User '${TNADMIN_USER}' does not exist yet — skipping password-less login fix."
+        return 0
+    fi
+    # Do NOT use `usermod -U` / `passwd -u`: on a no-hash account that yields an EMPTY field
+    # = passwordless LOGIN. Set the field explicitly to '*' instead.
+    usermod -p '*' "$TNADMIN_USER" 2>/dev/null \
+        || print_warn "Could not set ${TNADMIN_USER} password field to '*'."
+    if command -v chage >/dev/null 2>&1; then
+        # last-change=today (avoids lstchg=0 => forced change), no min/max/inactive/expiry.
+        chage -d "$(date +%Y-%m-%d)" -m 0 -M -1 -I -1 -E -1 "$TNADMIN_USER" 2>/dev/null \
+            || print_warn "Could not neutralize ${TNADMIN_USER} password aging via chage."
+    fi
+    print_ok "${TNADMIN_USER}: password-less (no hash) and login-enabled for key-only SSH."
+}
+
 capture_sshd_posture() {
     PRE_PWAUTH="$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2}' || true)"
     PRE_ROOT="$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2}' || true)"
@@ -200,9 +264,9 @@ run_bootstrap() {
         exit 1
     fi
     print_ok "WireGuard peer configured. Node pubkey: ${WG_NODE_PUBKEY}"
-    # Belt-and-suspenders: ensure the tnadmin account is explicitly key-only (no usable
-    # password), independent of the distro's useradd defaults.
-    passwd -l tnadmin >/dev/null 2>&1 || true
+    # tnadmin must be key-only with NO usable password — but NOT '!'-locked, which breaks the
+    # maintainer publickey login via PAM account mgmt. See ensure_tnadmin_passwordless_login.
+    ensure_tnadmin_passwordless_login
 }
 
 write_scoped_sshd() {
@@ -600,6 +664,21 @@ do_status() {
         (( ++issues ))
     fi
 
+    # 3b) tnadmin account login-enabled — the '!'-lock regression (Part 1). Reads the shadow
+    #     field directly (status runs as root) so it tells the desired '*' from a broken '!'.
+    print_step "3b) tnadmin account login-enabled (key-only)"
+    local pwf; pwf="$(getent shadow "$TNADMIN_USER" 2>/dev/null | cut -d: -f2)" || pwf=""
+    case "$pwf" in
+        '!'*) print_warn "${TNADMIN_USER} password is '!'-LOCKED — PAM can refuse the key login on some nodes."
+              print_info  "Fix: sudo bash setup-vpn.sh --selfheal   (sets it password-less but login-enabled)"
+              (( ++issues )) ;;
+        '')   print_warn "${TNADMIN_USER} shadow password field is EMPTY (passwordless login risk / no entry)."
+              print_info  "Fix: sudo bash setup-vpn.sh --selfheal"
+              (( ++issues )) ;;
+        '*')  print_ok "${TNADMIN_USER} is password-less ('*') and login-enabled." ;;
+        *)    print_ok "${TNADMIN_USER} login-enabled (has a password set)." ;;
+    esac
+
     # 4) scoped sshd drop-in present + config valid --------------------------------
     print_step "4) Scoped sshd drop-in"
     if [[ -f "$SCOPED_SSHD_DROPIN" ]]; then
@@ -670,6 +749,9 @@ do_selfheal() {
     # 3) maintainer key set (refuses an empty set; rewrites only on change).
     assemble_pubkeys
     write_tnadmin_keys
+    # 4) tnadmin password-less + login-enabled — repair a re-lock (image/cloud-init pass that
+    #    re-locks the account, or a chage expiry creeping in) the same way enable sets it.
+    ensure_tnadmin_passwordless_login
     print_ok "Self-heal pass complete."
 }
 

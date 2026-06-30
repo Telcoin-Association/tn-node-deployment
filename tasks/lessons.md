@@ -48,3 +48,27 @@ and call the target function directly. Drive `read` prompts via piped stdin. Not
 prompt text — assert on resulting behavior/state instead. For network-dependent
 helpers (curl/dig/hostname), prefer PATH shims that echo env-var-controlled values so
 every branch is deterministic.
+
+## Release hygiene: editing a tracked file is not done until versions + .sha256 are refreshed
+
+**Symptom:** I edited `setup-vpn.sh` and bumped only its own `SCRIPT_VERSION`, then
+declared the task complete. The user had to remind me to bump `update-scripts.sh` and
+regenerate the `.sha256` sidecars.
+
+**Cause:** `update-scripts.sh` fetches every tracked file from GitHub and verifies it
+against a committed `<file>.sha256` sidecar; CI fails if any sidecar is stale. So a
+content change to a tracked file leaves its sidecar (and the operator-facing verification)
+out of sync until regenerated. The repo's release convention also bumps the updater itself
+and adds a README changelog entry on each release (see commit 03bfc07,
+`chore(release): refresh checksums...`).
+
+**Rule:** after editing ANY updater-tracked file (anything in the `SCRIPTS`,
+`UI_BUNDLE`, or `TESTNET_ADDONS_BUNDLE` arrays of `update-scripts.sh`), do ALL of:
+1. bump that file's own version var (`SCRIPT_VERSION` / `COMMON_VERSION` / `UI_VERSION` / …);
+2. bump `update-scripts.sh`'s `SCRIPT_VERSION` (release marker so updaters re-bootstrap);
+3. run `bash tools/gen-checksums.sh` and commit the changed sidecars (it regenerates all 34;
+   only the touched files' sidecars actually change — verify with `git status -- '*.sha256'`);
+4. add a `### <script> vX.Y.Z` entry to the README Changelog.
+
+**Rule of thumb:** "I changed a `.sh`/`.py`/`.env` that operators fetch" ⇒ versions +
+`gen-checksums.sh` + changelog, every time. Don't call it done before that.
