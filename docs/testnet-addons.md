@@ -286,6 +286,6 @@ diff <(sed -n '/^local\.file_match/,$p' <adiri>/common/observability/node-agent/
 present: the `WG_NODE_SSHD_HARDEN` guard (default `1` = upstream behavior).
 `setup-vpn.sh` calls it with `WG_NODE_SSHD_HARDEN=0`. The vendored file's header
 records the upstream `sha256`. To re-vendor after an upstream change, strip the
-14-line provenance header and diff the body against the new upstream, then update the
+16-line provenance header and diff the body against the new upstream, then update the
 sha. Bump `OBSERVABILITY_VERSION` (or another add-on version var) when you change any
 of these so `update-scripts.sh` pulls the companion bundle to operators.

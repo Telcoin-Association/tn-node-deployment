@@ -442,7 +442,7 @@ const state = {
   setup: { network:'adiri', method:'source', passphrase:'loadcredential',
            eth:'', bls:'', blsConfirm:'', buildRef:'main', dockerImage:'', publicIp:'', internalIp:'',
            sourceMode:'main', customRef:'', sourceRef:'', sourceModeTouched:false,   // source-version picker (mirrors CLI: main/latest tag/custom)
-           instance:'', rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false },
+           rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false },
   preflight: null,
   buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
   network: { chainId:null, name:'', slug:'', configured:false },  // selected node's network
@@ -1383,7 +1383,7 @@ function renderLogs(){
   state.logFilter = { level:'all', search:'' };
   const ro = isReadonly();
   const logTitle = ro ? `${esc(cap(state.node))} Logs · ${esc(curNode().container||'container')}`
-                      : `${esc(cap(state.node))} Logs · telcoin-${esc(state.node)}`;
+                      : `${esc(cap(state.node))} Logs · ${esc(curNode().service||('telcoin-'+state.node))}`;
   c.innerHTML = `
     <div class="card">
       <h3>${logTitle}</h3>
@@ -1537,7 +1537,7 @@ function downloadLogs(){
   const blob = new Blob([txt+'\n'], {type:'text/plain'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `telcoin-${state.node}-${stamp}.log`;
+  a.download = `${(curNode().service||('telcoin-'+state.node))}-${stamp}.log`;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(a.href);
 }
@@ -1612,7 +1612,6 @@ function fmtMultiaddrTile(v){
 // row carries a value validator so we reject bad input before streaming.
 function configValueOk(field, value){
   if(field==='primary_listener'||field==='worker_listener') return /^\/(ip4|ip6)\/[^/]+\/udp\/[0-9]+\/quic-v1$/.test(value);
-  if(field==='instance') return /^[1-9]$/.test(value);
   if(field==='metrics') return /^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$/.test(value);
   if(field==='verbosity') return /^-v{1,5}$/.test(value);
   if(field==='docker_image') return /^[A-Za-z0-9._/:@-]+$/.test(value) && value.includes(':');
@@ -1633,8 +1632,6 @@ function cfgEditRow(field, label, current, kind){
     const cur=current||'';
     const opts=[['','— choose level —'],...VERBOSITY_LEVELS];
     control=`<select id="cfg_${field}">${opts.map(([v,l])=>`<option value="${esc(v)}" ${v===cur?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
-  } else if(kind==='instance'){
-    control=`<select id="cfg_${field}">${['1','2','3','4','5','6','7','8','9'].map(v=>`<option value="${v}" ${v===String(current)?'selected':''}>${v}</option>`).join('')}</select>`;
   } else {
     control=`<input id="cfg_${field}" value="${esc(current||'')}" autocomplete="off">`;
   }
@@ -1688,7 +1685,6 @@ async function renderConfig(){
   // Editable fields (the exact set edit-config.sh's menu edits). docker_image
   // only for docker installs.
   const editable = [
-    ['instance','Instance', d.instance, 'instance'],
     ['metrics','Metrics Address', d.metrics, 'text'],
     ['primary_listener','Primary Listener (bind)', d.primary_listener, 'text'],
     ['worker_listener','Worker Listener (bind)', d.worker_listener, 'text'],
@@ -1713,7 +1709,7 @@ async function renderConfig(){
   const note = editing
     ? `<div class="note" style="border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
         Each <strong>Save</strong> runs <span class="mono">edit-config.sh --json</span>, then reloads systemd, restarts
-        <span class="mono">telcoin-${esc(t)}</span> and verifies it comes back healthy${t==='validator'?' — <strong style="color:var(--yellow)">a validator restart drops consensus rounds during the brief downtime</strong>':''}. A timestamped unit backup is taken first and restored automatically if the restart fails.</div>`
+        <span class="mono">${esc(curNode().service||('telcoin-'+t))}</span> and verifies it comes back healthy${t==='validator'?' — <strong style="color:var(--yellow)">a validator restart drops consensus rounds during the brief downtime</strong>':''}. A timestamped unit backup is taken first and restored automatically if the restart fails.</div>`
     : `<div class="note">Edit configuration here, or run <span class="mono">edit-config.sh</span> on the server over SSH. Editable fields take effect after a node restart.</div>`;
 
   c.innerHTML = `
@@ -2148,6 +2144,129 @@ async function streamCaddy(phase, payload){
 }
 
 // =============================================================================
+// PUBLIC RPC ENDPOINT -- expose this node's JSON-RPC at https://<domain> over the
+// SAME Caddy vhost manager, with Let's Encrypt TLS. DNS-first like the dashboard
+// card, but there is NO login (a public RPC endpoint is unauthenticated by design)
+// and enabling opens 80/443, advertises the endpoint to peers and restarts the
+// node -- so the enable button gates behind an explicit consent prompt. Configured
+// over the SSH tunnel only (the POSTs are server-refused on the public path).
+// =============================================================================
+async function renderRpcCard(){
+  const c = $('#rpcCard'); if(!c) return;
+  const s = await api('/api/rpc/status');
+  // "enabled" means OUR managed reverse_proxy for the RPC vhost is in the Caddyfile.
+  const enabled = !!(s && s.enabled);
+  // Monitoring-only (external/read-only) node: show status, never the controls.
+  if(isReadonly()){
+    c.innerHTML = `
+      <h3>Public RPC Endpoint</h3>
+      <p style="color:var(--text2);font-size:13px">Management is disabled in monitoring-only mode. ${enabled
+        ? `The JSON-RPC endpoint is <strong>enabled</strong>${s.domain?` at <span class="mono">https://${esc(s.domain)}</span>`:''} (managed by the Node Manager).`
+        : 'No public RPC endpoint is configured via the Node Manager. To manage it, connect over the SSH tunnel from a node installed by Telcoin Node Scripts.'}</p>`;
+    return;
+  }
+  if(enabled){
+    c.innerHTML = `
+      <h3>Public RPC Endpoint</h3>
+      <p style="color:var(--text2);font-size:13px">This node's JSON-RPC is reachable publicly via Caddy over HTTPS. There is <strong>no authentication</strong> — a public RPC endpoint is open by design.</p>
+      <div class="kv"><span class="k">Status</span><span class="v">${s.running?'<span class="badge ok">running</span>':'<span class="badge warn">configured</span>'}</span></div>
+      <div class="kv"><span class="k">URL</span><span class="v">${s.domain?`<a href="https://${esc(s.domain)}" target="_blank" rel="noopener">https://${esc(s.domain)}</a>`:'—'}</span></div>
+      <div class="svc-row" style="margin-top:14px"><button class="btn btn-red" id="rpcDisable">Disable Public RPC</button></div>
+      <div class="log-body" id="rpcLog" style="display:none;height:160px;white-space:pre-wrap;margin-top:10px"></div>`;
+    const d=$('#rpcDisable'); if(d) d.addEventListener('click', rpcDisable);
+  } else {
+    c.innerHTML = `
+      <h3>Public RPC Endpoint</h3>
+      <p style="color:var(--text2);font-size:13px">Expose this node's JSON-RPC at your own domain over HTTPS, behind Caddy.
+        <strong>First set a DNS A record</strong> pointing your domain at this server's public IP, then check propagation below before enabling
+        (Caddy requests the TLS certificate on first start — if DNS isn't pointing here yet, issuance fails and Let's Encrypt rate-limits retries).
+        This endpoint is <strong>unauthenticated</strong> and advertised to peers; enabling opens 80/443 and restarts the node.</p>
+      <div class="field"><label>RPC domain</label><input id="rpcDomain" placeholder="rpc.example.com" autocomplete="off"></div>
+      <div class="field"><label>Inbound public IP (optional)</label>
+        <input id="rpcPublicIp" placeholder="auto-detect — leave blank unless behind NAT" value="${esc(state.setup.publicIp||'')}" autocomplete="off">
+        <div style="color:var(--text2);font-size:12px;margin-top:4px">Only needed when this node's <strong>inbound</strong> IP — where Let's Encrypt reaches ports 80/443 — differs from the auto-detected egress (outbound) IP, i.e. multi-IP or 1:1-NAT hosts. Leave blank otherwise. The propagation check is IPv4 (A records) only.</div></div>
+      <div class="svc-row"><button class="btn btn-out" id="rpcDns">Check DNS</button><button class="btn btn-green" id="rpcEnable">Enable Public RPC</button></div>
+      <div id="rpcDnsResult" style="margin-top:10px;font-size:13px"></div>
+      <div class="log-body" id="rpcLog" style="display:none;height:200px;white-space:pre-wrap;margin-top:10px"></div>`;
+    const dn=$('#rpcDns'); if(dn) dn.addEventListener('click', rpcDnsCheck);
+    const en=$('#rpcEnable'); if(en) en.addEventListener('click', rpcEnable);
+  }
+}
+
+async function rpcDnsCheck(){
+  const domain=($('#rpcDomain').value||'').trim();
+  const publicIp=(($('#rpcPublicIp')||{}).value||'').trim();
+  const out=$('#rpcDnsResult'); if(!out) return;
+  if(!CADDY_DOMAIN_RE.test(domain)){ out.innerHTML='<span style="color:var(--red)">Enter a valid domain first.</span>'; return; }
+  if(publicIp && !setupValidIp(publicIp)){ out.innerHTML='<span style="color:var(--red)">Enter a valid inbound public IP, or leave it blank.</span>'; return; }
+  out.innerHTML='Checking DNS…';
+  const body={domain}; if(publicIp) body.public_ip=publicIp;   // omit when blank → no override (egress auto-detect)
+  const r = await api('/api/rpc/dns-check', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if(!r || !r.ok){ out.innerHTML='<span style="color:var(--red)">DNS check failed'+(r&&r.error?': '+esc(r.error):'')+'</span>'; return; }
+  if(r.propagated){
+    out.innerHTML='<span style="color:var(--green)">✓ '+esc(domain)+' → '+esc(r.resolved_ip)+' (matches this server). Ready to enable.</span>';
+  } else {
+    // Mismatch: surface the backend's rich egress-vs-inbound note + diagnostics, then point
+    // the operator at the new field as the UI remedy for "--public-ip". esc() every field.
+    let h='<span style="color:var(--red)">✗ '+esc(domain)+' resolves to '+esc(r.resolved_ip||'nothing')+', expected '+esc(r.public_ip||'this server')+'.</span> ';
+    if(r.note) h+='<div style="color:var(--text2);margin-top:6px">'+esc(r.note)+'</div>';
+    else h+='<span style="color:var(--text2)">Set the A record and wait for propagation (can take a few minutes). Enabling before it propagates may fail TLS issuance.</span>';
+    const diag=[];
+    if(r.egress_ip) diag.push('Egress (outbound) IP: '+esc(r.egress_ip));
+    if(r.local_ips && r.local_ips.length) diag.push('Bound local IP(s): '+esc(r.local_ips.join(', ')));
+    if(diag.length) h+='<div style="color:var(--text2);font-size:12px;margin-top:6px">'+diag.join(' · ')+'</div>';
+    h+='<div style="color:var(--text2);margin-top:6px">If this node is behind 1:1-NAT or has multiple IPs, enter its <strong>inbound</strong> public IP in the field above and re-check.</div>';
+    out.innerHTML=h;
+  }
+}
+
+async function rpcEnable(){
+  const domain=($('#rpcDomain').value||'').trim();
+  const publicIp=(($('#rpcPublicIp')||{}).value||'').trim();
+  if(!CADDY_DOMAIN_RE.test(domain)) return toast('Enter a valid domain','error');
+  if(publicIp && !setupValidIp(publicIp)) return toast('Enter a valid inbound public IP, or leave it blank','error');
+  if(!confirm(`Expose this node's JSON-RPC publicly at https://${domain}? This opens 80/443, advertises the endpoint to peers, and restarts the node.`)) return;
+  const btn=$('#rpcEnable'); if(btn) btn.disabled=true;
+  const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» enabling public RPC… (the TLS certificate is issued on the first request — keep this tab open)</div>'; }
+  const payload={domain}; if(publicIp) payload.public_ip=publicIp;   // omit when blank
+  const d = await streamRpc('enable', payload);
+  if(d && d.ok){ toast('Public RPC enabled','success'); renderRpcCard(); }
+  else { toast('Enable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
+}
+
+async function rpcDisable(){
+  if(!confirm('Disable the public RPC endpoint? The public URL will stop working and the node restarts.')) return;
+  const btn=$('#rpcDisable'); if(btn) btn.disabled=true;
+  const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» disabling public RPC…</div>'; }
+  const d = await streamRpc('disable', {});
+  if(d && d.ok){ toast('Public RPC disabled','success'); renderRpcCard(); }
+  else { toast('Disable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
+}
+
+// POST + stream the SSE body (mirrors streamCaddy) for the rpc-* phases.
+async function streamRpc(phase, payload){
+  let resp;
+  try{
+    resp = await fetch('/api/rpc/'+phase, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  }catch(e){ toast('Request failed: '+e,'error'); return null; }
+  if(!resp.ok){ let msg=''; try{ msg=(await resp.json()).error; }catch(_){ } toast('Rejected: '+(msg||resp.status),'error'); return null; }
+  const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='', result=null;
+  for(;;){
+    const {value,done}=await reader.read(); if(done) break;
+    buf+=dec.decode(value,{stream:true}); let i;
+    while((i=buf.indexOf('\n\n'))>=0){
+      const frame=buf.slice(0,i); buf=buf.slice(i+2);
+      const line=frame.split('\n').find(l=>l.startsWith('data: ')); if(!line) continue;
+      let d; try{ d=JSON.parse(line.slice(6)); }catch(_){ continue; }
+      if(d.event==='closed') continue;
+      appendStream('#rpcLog', d);
+      if(d.event==='done') result=d;
+    }
+  }
+  return result;
+}
+
+// =============================================================================
 // TRACES -- monitoring
 // =============================================================================
 // The Tracing tab: Jaeger setup/control + per-node tracing toggle + the span
@@ -2188,7 +2307,7 @@ async function renderTraces(){
           ? `<p style="color:var(--text2);font-size:13px">This node is externally deployed (docker). Tracing is configured by its own deployment, not from here.</p>`
           : `<p style="color:var(--text2);font-size:13px;margin-bottom:14px">Node tracing is currently
           <strong style="color:${tracing?'var(--green)':'var(--text2)'}">${tracing?'enabled':'disabled'}</strong>.
-          Toggling restarts <span class="mono">telcoin-${esc(t)}</span>.</p>
+          Toggling restarts <span class="mono">${esc(curNode().service||('telcoin-'+t))}</span>.</p>
         <div class="toggle-row">
           ${tracing
             ? '<button class="btn btn-red" id="trToggle">Disable Tracing</button>'
@@ -2205,7 +2324,7 @@ async function renderTraces(){
     </div>
     <div id="tracesStats" class="grid stats" style="margin-top:16px"></div>
     <div class="card" style="margin-top:16px">
-      <h3>Recent Traces · telcoin-${esc(t)}</h3>
+      <h3>Recent Traces · ${esc(curNode().service||('telcoin-'+t))}</h3>
       <div id="tracesTable"><div class="muted">Loading traces…</div></div>
     </div>`;
 
@@ -2303,12 +2422,14 @@ async function renderSystem(){
     <div class="card" id="fwCard" style="margin-top:14px"><h3>Firewall</h3><div class="muted">Loading firewall status…</div></div>
     ${logRotCard}
     <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>
+    <div class="card" id="rpcCard" style="margin-top:14px">Loading public RPC…</div>
     <div class="card" id="addonsCard" style="margin-top:14px;display:none"></div>
     ${dangerZoneHtml()}`;
   loadFirewall();
   const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
   const lrc=$('#logRotClear'); if(lrc) lrc.addEventListener('click', ()=>clearRotatedLogs(lrc));
   renderCaddyCard();
+  renderRpcCard();
   renderAddonsCard();
 }
 
@@ -2603,7 +2724,6 @@ function captureCfg(){
   if($('#cfgDataDir')) s.dataDir=$('#cfgDataDir').value.trim();
   if($('#cfgPubIp')) s.publicIp=$('#cfgPubIp').value.trim();
   if($('#cfgIntIp')) s.internalIp=$('#cfgIntIp').value.trim();
-  if($('#cfgInstance')) s.instance=$('#cfgInstance').value.trim();
   if($('#cfgSvcUser')) s.serviceUser=$('#cfgSvcUser').value.trim();
   if($('#cfgSvcGroup')) s.serviceGroup=$('#cfgSvcGroup').value.trim();
   if($('#cfgBls')) s.bls=$('#cfgBls').value;
@@ -2616,7 +2736,6 @@ function stepConfigure(body){
   // Unified single-node setup: every node is provisioned validator-capable and the
   // install always dispatches through the canonical observer flow, so there is no
   // role branch here. The role is decided on-chain after the node syncs.
-  const instDefault = '5';
   const rpcCards = `
     <div class="field"><label>RPC access</label>
       <div class="radio-cards">
@@ -2630,9 +2749,6 @@ function stepConfigure(body){
     <div class="field"><label>Advertised node name <span style="color:var(--text2);font-weight:400">— optional, a public label; you can set or change it later</span></label><input id="cfgAdvName" placeholder="e.g. my-${esc(state.node)}" value="${esc(s.advName||'')}" autocomplete="off"></div>
     <div class="field"><label>Data directory <span style="color:var(--text2);font-weight:400">— optional; if your node data is on a separate drive, enter the full path here</span></label><input id="cfgDataDir" placeholder="/var/lib/telcoin/${esc(state.node)}" value="${esc(s.dataDir||'')}" autocomplete="off"></div>
     ${rpcCards}
-    <div class="field"><label>Instance number — sets the RPC port</label>
-      <input id="cfgInstance" placeholder="${instDefault}" value="${esc(s.instance||'')}">
-      <div id="cfgPortHint" style="font-size:12px;color:var(--text2);margin-top:6px"></div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
       <div class="field"><label>Service user name</label><input id="cfgSvcUser" placeholder="telcoin" value="${esc(s.serviceUser||'')}"></div>
       <div class="field"><label>Service group name</label><input id="cfgSvcGroup" placeholder="telcoin" value="${esc(s.serviceGroup||'')}"></div>
@@ -2647,15 +2763,6 @@ function stepConfigure(body){
     </div>
     <div class="note">External multiaddrs use your public IP; listener multiaddrs bind your internal IP — both on the standard P2P ports (49590/49594).</div>
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(3)">← Back</button><button class="btn btn-green" id="cfgNext">Continue →</button></div>`;
-  // Live hint: instance -> RPC port, plus the other (fixed) ports a node opens.
-  const portHint = ()=>{
-    const raw = ($('#cfgInstance')?.value||'').trim();
-    const inst = /^[1-9]$/.test(raw) ? parseInt(raw,10) : parseInt(instDefault,10);
-    const rpc = 8545 - (inst-1);
-    const h = $('#cfgPortHint');
-    if(h) h.innerHTML = `Instance ${inst} → RPC port <strong>${rpc}</strong>. This node also uses: P2P 49590 (primary) · 49594 (worker) · metrics 9000.`;
-  };
-  $('#cfgInstance')?.addEventListener('input', portHint); portHint();
   body.querySelectorAll('[data-rpc]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.rpcPublic=(r.dataset.rpc==='public'); renderSetup(); }));
   body.querySelectorAll('[data-p]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.passphrase=r.dataset.p; renderSetup(); }));
   $('#cfgNext').addEventListener('click', ()=>{
@@ -2664,7 +2771,6 @@ function stepConfigure(body){
     if(!/^0x[0-9a-fA-F]{40}$/.test(s.eth)){ toast('Enter a valid 0x… address','error'); return; }
     if(!setupValidIp(s.publicIp)){ toast('Enter a valid public IP','error'); return; }
     if(!setupValidIp(s.internalIp)){ toast('Enter a valid internal IP (or 0.0.0.0)','error'); return; }
-    if(s.instance && !/^[1-9]$/.test(s.instance)){ toast('Instance must be 1–9','error'); return; }
     if(s.serviceUser && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceUser)){ toast('Invalid service user name','error'); return; }
     if(s.serviceGroup && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceGroup)){ toast('Invalid service group name','error'); return; }
     if(!s.bls){ toast('Enter a BLS passphrase','error'); return; }
@@ -2683,7 +2789,6 @@ function stepReview(body){
     ['Address', s.eth||'(not set)'],
     ['Public IP', s.publicIp||'(not set)'],
     ['Internal IP (listener)', s.internalIp||'0.0.0.0'],
-    ['Instance', s.instance || '5 (default)'],
     ['RPC access', s.rpcPublic?'Public':'Private'],
   ];
   rows.push(
@@ -2715,7 +2820,6 @@ function buildSetupPayload(includePassphrase){
     address: s.eth,
     build_ref: s.method==='source' ? s.buildRef : '',
     docker_image: s.method==='docker' ? s.dockerImage : '',
-    instance: s.instance,
     external_primary: `/ip4/${ip}/udp/${p2p}/quic-v1`,
     external_worker:  `/ip4/${ip}/udp/${worker}/quic-v1`,
     listener_primary: `/ip4/${lip}/udp/${p2p}/quic-v1`,

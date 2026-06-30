@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.7.67"
+UI_VERSION = "1.8.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -76,11 +76,6 @@ DEFAULT_CONFIG_DIR = "/etc/telcoin"
 DEFAULT_DATA_DIR = "/var/lib/telcoin"
 DEFAULT_INSTALL_DIR = "/opt/telcoin"
 TN_SOURCE_DIR = "/opt/telcoin-source"
-
-# Legacy per-type instance number, retained only for the (now vestigial) "instance"
-# config field the UI still renders. The node no longer takes --instance and the RPC
-# port comes from .node-meta (reth default 8545), so this no longer maps to a port.
-DEFAULT_INSTANCE = {"observer": 5, "validator": 1}
 
 
 def resolve_service_unit(t):
@@ -136,8 +131,9 @@ def service_file(t):
 
 
 def log_file(t):
-    """Default node log path. parse_service_file() may override via StandardOutput."""
-    return f"{DEFAULT_LOG_DIR}/telcoin-{t}.log"
+    """Default node log path. parse_service_file() may override via StandardOutput.
+    Unified installs write one log (telcoin.log); the per-role fallback is gone."""
+    return f"{DEFAULT_LOG_DIR}/telcoin.log"
 
 
 def config_dir(t):
@@ -266,12 +262,11 @@ def parse_service_file(t):
     form (flags + `-e "..."` on the ExecStart line) and the source form
     (Environment= lines in the unit, flags inside the wrapper .sh).
 
-    Returns a dict with: installed, instance, rpc_port, metrics, primary_listener,
+    Returns a dict with: installed, rpc_port, metrics, primary_listener,
     worker_listener, http, log_path.
     """
     cfg = {
         "installed": False,
-        "instance": str(DEFAULT_INSTANCE.get(t, 1)),
         "rpc_port": "8545",
         "metrics": "",
         "primary_listener": "",
@@ -2596,7 +2591,6 @@ def api_config(node_type):
         return jsonify({
             "installed": True,
             "readonly": True,
-            "instance": "",
             "rpc_port": str(det.get("rpc_port") or ""),
             "metrics": "",
             "primary_listener": "",
@@ -2614,7 +2608,6 @@ def api_config(node_type):
     ext_primary, ext_worker = external_addrs(node_type)
     return jsonify({
         "installed": True,
-        "instance": cfg["instance"],
         "rpc_port": cfg["rpc_port"],
         "metrics": cfg["metrics"],
         "primary_listener": cfg["primary_listener"],
@@ -2636,7 +2629,7 @@ def api_config(node_type):
 # input with a clean 400 before ever shelling out; the helper and the script
 # re-validate (defence in depth -- the server is the unprivileged caller).
 CONFIG_FIELDS = (
-    "primary_listener", "worker_listener", "instance",
+    "primary_listener", "worker_listener",
     "metrics", "verbosity", "docker_image",
 )
 _MULTIADDR_RE = re.compile(r"^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$")
@@ -2648,8 +2641,6 @@ _IMAGE_CHARS_RE = re.compile(r"^[A-Za-z0-9._/:@-]+$")
 def config_value_ok(field, value):
     if field in ("primary_listener", "worker_listener"):
         return bool(_MULTIADDR_RE.match(value))
-    if field == "instance":
-        return value in ("1", "2", "3", "4", "5", "6", "7", "8", "9")
     if field == "metrics":
         return bool(_METRICS_RE.match(value))
     if field == "verbosity":
@@ -3062,6 +3053,82 @@ def api_caddy_disable():
 
 
 # =============================================================================
+# ROUTES -- public RPC endpoint (Caddy)
+#
+# Expose this node's JSON-RPC publicly at https://<domain> behind Caddy (Let's
+# Encrypt TLS). Unlike the dashboard vhost there is NO basic_auth -- a public RPC
+# endpoint is unauthenticated by design, so there is no username/password here.
+# dns-check/enable/disable are management actions: they run via the root helper
+# and -- being POSTs -- are refused on the public (read-only) path by the
+# before_request guard, so the endpoint can only be configured from the SSH
+# tunnel. The node-info.yaml edit + node restart happen INSIDE install-caddy.sh.
+# status is a read (GET) and stays available either way. Domain/IP validation
+# reuses the dashboard-Caddy regexes above.
+# =============================================================================
+
+@app.route("/api/rpc/status")
+def api_rpc_status():
+    rc, out, err = run(["sudo", "-n", HELPER, "rpc-status"], timeout=10)
+    try:
+        data = json.loads(out) if out else {}
+    except Exception:
+        data = {}
+    if not data:
+        data = {"installed": False, "running": False, "enabled": False,
+                "domain": ""}
+        if rc != 0:
+            data["error"] = err or "status unavailable"
+    data["ok"] = True
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/rpc/dns-check", methods=["POST"])
+def api_rpc_dns_check():
+    data = request.get_json(silent=True) or {}
+    domain = (data.get("domain") or "").strip()
+    if not _CADDY_DOMAIN_RE.match(domain):
+        return jsonify({"ok": False, "error": "invalid domain"}), 400
+    public_ip = (data.get("public_ip") or "").strip()
+    if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
+        return jsonify({"ok": False, "error": "invalid public IP"}), 400
+    cmd = ["sudo", "-n", HELPER, "rpc-dns-check", domain]
+    if public_ip:
+        cmd.append(public_ip)
+    rc, out, err = run(cmd, timeout=20)
+    try:
+        res = json.loads(out) if out else {}
+    except Exception:
+        res = {}
+    if not res:
+        return jsonify({"ok": False, "error": err or "dns check failed"}), 200
+    res["ok"] = True
+    return jsonify(res)
+
+
+@app.route("/api/rpc/enable", methods=["POST"])
+def api_rpc_enable():
+    data = request.get_json(silent=True) or {}
+    domain = (data.get("domain") or "").strip()
+    public_ip = (data.get("public_ip") or "").strip()
+    if not _CADDY_DOMAIN_RE.match(domain):
+        return jsonify({"error": "invalid domain"}), 400
+    if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
+        return jsonify({"error": "invalid public IP"}), 400
+    cmd = ["sudo", "-n", HELPER, "rpc-enable", domain]
+    if public_ip:
+        cmd.append(public_ip)
+    return _update_stream(cmd, env=os.environ.copy(), capture_stderr=True)
+
+
+@app.route("/api/rpc/disable", methods=["POST"])
+def api_rpc_disable():
+    return _update_stream(["sudo", "-n", HELPER, "rpc-disable"],
+                          env=os.environ.copy(), capture_stderr=True)
+
+
+# =============================================================================
 # ROUTES -- system
 # =============================================================================
 
@@ -3341,7 +3408,7 @@ def wrapper_path(t):
     """
     Path to the node's wrapper script (the one ExecStart points at). Resolved
     from the unit's ExecStart=<...>.sh line, falling back to the conventional
-    /opt/telcoin/start-telcoin-<t>.sh.
+    unified /opt/telcoin/start-telcoin.sh (agrees with the helper's default).
     """
     path = service_file(t)
     if os.path.exists(path):
@@ -3353,7 +3420,7 @@ def wrapper_path(t):
                 return m.group(1)
         except (OSError, IOError):
             pass
-    return f"/opt/telcoin/start-telcoin-{t}.sh"
+    return "/opt/telcoin/start-telcoin.sh"
 
 
 def tracing_enabled(t):

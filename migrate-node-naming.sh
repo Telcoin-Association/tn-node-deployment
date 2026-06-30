@@ -66,7 +66,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 set -E
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly SCRIPT_VERSION="1.0.4"
+readonly SCRIPT_VERSION="1.1.0"
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
@@ -513,10 +513,12 @@ update_meta() {
     meta_set NODE_TYPE observer "$meta"
     meta_set DATA_DIR "$UNIFIED_DATA_DIR" "$meta"
     # RPC + WS revert to their protocol defaults now that --instance is stripped (the legacy
-    # observer's --instance 5 put them on 8541/8554). config-caddy.sh and the check/update-node
-    # tools read BOTH from .node-meta, so a stale value breaks the public RPC/WS proxy + health
-    # probes. (Matches setup-node.sh, which persists RPC_PORT=8545 / WS_PORT=8546 for fresh
-    # installs -- the migration is the only path that would otherwise leave them stale.)
+    # observer's --instance 5 put them on 8541/8554). RPC_PORT/WS_PORT in .node-meta are read by
+    # the local Node Manager UI, check-node.sh, and install-caddy.sh (operator-facing, this repo)
+    # -- and SEPARATELY by the maintainer fleet's common/config-caddy.sh (maintainer-only, never
+    # on an operator box) -- so a stale value breaks the public RPC/WS proxy + health probes.
+    # (Matches setup-node.sh, which persists RPC_PORT=8545 / WS_PORT=8546 for fresh installs --
+    # the migration is the only path that would otherwise leave them stale.)
     meta_set RPC_PORT "$RPC_PORT" "$meta"
     meta_set WS_PORT "$ws_port" "$meta"
 
@@ -610,6 +612,28 @@ open_consensus_ports() {
 }
 
 # =============================================================================
+# STEP 11.5 -- REFRESH THE LOCAL NODE MANAGER UI
+# =============================================================================
+# The migration rewrote .node-meta (new RPC_PORT/WS_PORT + unified role labels).
+# The local Node Manager UI (telcoin-ui) caches those at startup, so restart it --
+# when installed -- to force a re-read. NON-FATAL by design, exactly like
+# open_consensus_ports above: the ERR trap is still armed (report disarms it), so
+# every command is guarded and the step always returns 0 -- a UI hiccup must never
+# roll back an otherwise-healthy migration. A node with no UI installed is a no-op.
+restart_ui_if_present() {
+    print_step "Refreshing the local Node Manager UI (telcoin-ui)..."
+    if [[ -f /etc/systemd/system/telcoin-ui.service ]] \
+       || systemctl list-unit-files telcoin-ui.service 2>/dev/null | grep -q '^telcoin-ui\.service'; then
+        systemctl restart --no-block telcoin-ui 2>/dev/null || true
+        print_ok "telcoin-ui restarted -- it re-reads .node-meta (new RPC/WS ports + unified labels)."
+        print_info "If the dashboard still shows stale ports/role labels, refresh the UI bundle with update-scripts.sh (redeploys the UI)."
+    else
+        print_info "telcoin-ui not installed -- skipping UI refresh."
+    fi
+    return 0
+}
+
+# =============================================================================
 # STEP 12 -- REPORT
 # =============================================================================
 report() {
@@ -623,10 +647,11 @@ report() {
     print_info "  data dir:   ${UNIFIED_DATA_DIR}"
     print_info "  NODE_TYPE:  observer (presentation hint; on-chain tn_isValidator is authoritative)"
     echo ""
-    print_warn "Node RPC/WS now on ${RPC_PORT}/8546 (was 8541/8554 under --instance). The front"
-    print_warn "reverse-proxy (Caddy) is a static snapshot this script does NOT touch -- regenerate"
-    print_warn "it (config-caddy.sh / your DNS+proxy tooling) to match, or the public node endpoint"
-    print_warn "will return 502."
+    print_info "Node RPC/WS now on ${RPC_PORT}/8546 (was 8541/8554 under --instance). The local"
+    print_info "Node Manager UI reads both from .node-meta and was restarted just now (when"
+    print_info "installed), so its cached ports + unified role labels refresh automatically."
+    print_warn "ONLY if you expose a PUBLIC RPC endpoint: re-run install-caddy.sh (this repo) to"
+    print_warn "repoint the reverse-proxy at ${RPC_PORT}/8546, else that public endpoint will 502."
     echo ""
     print_info "Backups kept (delete once you've confirmed the node is healthy):"
     [[ -n "$UNIT_BAK"    ]] && print_info "  ${UNIT_BAK}"
@@ -654,9 +679,10 @@ main() {
     rewrite_wrapper      # step 7 (strip --observer and --instance)
     update_meta          # step 8
     finalize_units       # step 9
-    start_and_verify     # step 10 (failure -> rollback via ERR trap)
-    open_consensus_ports # step 11 (non-fatal; validator-capable P2P ports)
-    report               # step 12
+    start_and_verify      # step 10 (failure -> rollback via ERR trap)
+    open_consensus_ports  # step 11 (non-fatal; validator-capable P2P ports)
+    restart_ui_if_present # step 11.5 (non-fatal; refresh local Node Manager UI)
+    report                # step 12
 }
 
 # Run only when executed directly; sourcing (e.g. for unit tests) just defines the

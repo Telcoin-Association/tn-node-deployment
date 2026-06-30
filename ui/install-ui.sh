@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.2.9"
+readonly SCRIPT_VERSION="1.3.0"
 
 INSTALL_DIR="/opt/telcoin-ui"
 SVC_USER="telcoin-ui"
@@ -126,14 +126,18 @@ ok "Helper installed (root:root 0755)"
 # `chown -R telcoin-ui` below can never make the update path user-writable.
 UPDATE_DIR="/opt/telcoin-ui-update"
 REPO_DIR="$(cd "${SRC_DIR}/.." && pwd)"
-if [[ -f "${REPO_DIR}/update-node.sh" && -f "${REPO_DIR}/lib/common.sh" ]]; then
+if [[ -f "${REPO_DIR}/update-node.sh" && -f "${REPO_DIR}/lib/common.sh" && -f "${REPO_DIR}/lib/fallback.sh" ]]; then
     info "Installing update engine to ${UPDATE_DIR}..."
     install -o root -g root -m 0755 -d "${UPDATE_DIR}" "${UPDATE_DIR}/lib"
     install -o root -g root -m 0755 "${REPO_DIR}/update-node.sh" "${UPDATE_DIR}/update-node.sh"
     install -o root -g root -m 0644 "${REPO_DIR}/lib/common.sh"  "${UPDATE_DIR}/lib/common.sh"
+    # common.sh sources lib/fallback.sh under `set -e`, so any helper-driven script
+    # that sources it (e.g. install-caddy.sh) aborts at source time unless fallback.sh
+    # is shipped alongside. Ship it next to common.sh in the same engine lib dir.
+    install -o root -g root -m 0644 "${REPO_DIR}/lib/fallback.sh" "${UPDATE_DIR}/lib/fallback.sh"
     ok "Update engine installed (root:root)"
 else
-    warn "update-node.sh / lib/common.sh not found beside install-ui.sh -- the UI Update tab will be unavailable until they are present."
+    warn "update-node.sh / lib/common.sh / lib/fallback.sh not found beside install-ui.sh -- the UI Update tab will be unavailable until they are present."
 fi
 
 # edit-config.sh drives the UI's Config-edit feature via its --json mode (it
@@ -243,6 +247,13 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-status
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-dns-check *
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-enable *
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper caddy-disable
+# Public RPC endpoint (Caddy) helper -- status/dns-check/enable/disable. enable
+# takes <domain> [inbound-public-ip] (wildcarded, validated in the helper +
+# install-caddy.sh). NO password env_keep -- a public RPC endpoint has no auth.
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-status
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-dns-check *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-enable *
+${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-disable
 # Firewall helper -- read-only status, plus open/close for ONLY the three node
 # ports. Enumerated fully (3 ports x on|off), so NO wildcard is needed. SSH /
 # default-policy / password-auth are intentionally never reachable from here.

@@ -28,6 +28,10 @@
 #   telcoin-ui-helper caddy-dns-check <domain> [inbound-public-ip]
 #   telcoin-ui-helper caddy-enable    <domain> <username> [inbound-public-ip]   (password via TN_CADDY_PASSWORD)
 #   telcoin-ui-helper caddy-disable
+#   telcoin-ui-helper rpc-status
+#   telcoin-ui-helper rpc-dns-check   <domain> [inbound-public-ip]
+#   telcoin-ui-helper rpc-enable      <domain> [inbound-public-ip]              (public RPC -- no auth)
+#   telcoin-ui-helper rpc-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
 #   telcoin-ui-helper addons-status   <observer|validator>      (read-only)
@@ -337,8 +341,6 @@ cmd_config_set() {
         primary_listener|worker_listener)
             [[ "$value" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] \
                 || die "invalid multiaddr: $value" ;;
-        instance)
-            [[ "$value" =~ ^[1-9]$ ]] || die "invalid instance (1-9): $value" ;;
         metrics)
             [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$ ]] \
                 || die "invalid metrics address (IPv4:PORT): $value" ;;
@@ -493,6 +495,34 @@ cmd_caddy_enable() {
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
     [[ -n "${TN_CADDY_PASSWORD:-}" ]] || die "TN_CADDY_PASSWORD not set"
     local -a args=( --json --phase=enable --domain "$domain" --username "$username" )
+    [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
+    exec bash "$CADDY_SCRIPT" "${args[@]}"
+}
+
+# =============================================================================
+# Public RPC endpoint (Caddy) -- thin wrappers around the SAME install-caddy.sh,
+# its rpc-* --json phases. rpc-status/rpc-check-dns emit one JSON object;
+# rpc-enable/rpc-disable stream JSON events. Unlike the dashboard there is NO
+# password (a public RPC endpoint has no auth), and the flag is --rpc-domain (not
+# --domain). The node-info.yaml edit + node restart happen inside install-caddy.sh.
+# =============================================================================
+cmd_rpc_status()  { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --phase=rpc-status; }
+cmd_rpc_disable() { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --phase=rpc-disable; }
+
+cmd_rpc_dns_check() {
+    local domain="$1" public_ip="${2:-}"; caddy_script_ready
+    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
+    local -a args=( --json --phase=rpc-check-dns --rpc-domain "$domain" )
+    [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
+    exec bash "$CADDY_SCRIPT" "${args[@]}"
+}
+
+cmd_rpc_enable() {
+    local domain="$1" public_ip="${2:-}"; caddy_script_ready
+    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
+    local -a args=( --json --phase=rpc-enable --rpc-domain "$domain" )
     [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
     exec bash "$CADDY_SCRIPT" "${args[@]}"
 }
@@ -782,6 +812,10 @@ main() {
         caddy-dns-check) shift; cmd_caddy_dns_check "${1:-}" "${2:-}" ;;
         caddy-enable)    shift; cmd_caddy_enable "${1:-}" "${2:-}" "${3:-}" ;;
         caddy-disable)   cmd_caddy_disable ;;
+        rpc-status)      cmd_rpc_status ;;
+        rpc-dns-check)   shift; cmd_rpc_dns_check "${1:-}" "${2:-}" ;;
+        rpc-enable)      shift; cmd_rpc_enable "${1:-}" "${2:-}" ;;
+        rpc-disable)     cmd_rpc_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
         addons-status)   shift; cmd_addons_status "${1:-}" ;;

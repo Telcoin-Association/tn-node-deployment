@@ -2,8 +2,8 @@
 #
 # =============================================================================
 # VENDORED from adiri-genesis: common/wgvpn/node/wg-node-bootstrap.sh
-#   upstream sha256: fbbd17d293257816ae1d53e215efd7a5ac485621fb663bad25e1b1b9c8327b73
-#   vendored:        2026-06-16
+#   upstream sha256: b2928a23c0e2209b55a7cca19a3e240b0f3b612ce3635dc08e1c7c816cb20d0b
+#   vendored:        2026-06-30
 #
 # Verbatim copy of the core team's node bootstrap, carrying ONE upstream-pushed
 # change already present in the source: the WG_NODE_SSHD_HARDEN guard (default 1 =
@@ -44,8 +44,17 @@
 #   HEALTHCHECK_MONITOR_SRC  external uptime-monitor sources (nft set body) allowed to
 #                            TCP-probe the health port — mirrors the cloud rule
 #                            allow-validator-healthcheck-from-kuma; empty = no such rule
+#   WG_NODE_FIREWALL     1 = install the policy-drop host firewall machinery (the nft
+#                        table + tn-nftables service + lockdown helper) (DEFAULT; today's
+#                        behavior — adiri byte-identical, honors WG_NODE_ENFORCE below).
+#                        0 = overlay ONLY: bring wg0 up but lay down NO policy-drop table.
+#                        DEVNET uses 0 because UFW is the single authoritative host
+#                        firewall there; a second policy-drop table would create an
+#                        intersection trap. Mirrors tn-node-deployment's setup-vpn.sh
+#                        (overlay only, no enforcement). Gates the whole §5 block below.
 #   WG_NODE_ENFORCE      0 = install firewall but don't activate (default; additive)
 #                        1 = activate it now (lockdown / new node born locked)
+#                        (only meaningful when WG_NODE_FIREWALL=1)
 #   WG_NODE_PUBLIC_SSH   1 = keep public tcp:22 in the firewall (default) / 0 = drop it
 #   WG_NODE_SSHD_HARDEN  1 = install the GLOBAL sshd drop-in disabling password/root SSH
 #                        (default; upstream GCP behavior) / 0 = leave sshd untouched so
@@ -75,6 +84,10 @@ WG_OVERLAY="${WG_OVERLAY:-10.100.0.0/16}"   # /16: overlay spans 10.100.<net>.x 
 WG_MTU="${WG_MTU:-1380}"
 WG_IAP_RANGE="${WG_IAP_RANGE:-35.235.240.0/20}"
 WG_TNADMIN_USER="${WG_TNADMIN_USER:-tnadmin}"
+# WG_NODE_FIREWALL gates the whole §5 policy-drop host-firewall block. Default 1 keeps
+# today's behavior (adiri byte-identical). Read defensively (unset -> 1). Devnet sets 0:
+# overlay only, no policy-drop table (UFW is the single authoritative firewall there).
+WG_NODE_FIREWALL="${WG_NODE_FIREWALL:-1}"
 WG_NODE_ENFORCE="${WG_NODE_ENFORCE:-0}"
 WG_NODE_PUBLIC_SSH="${WG_NODE_PUBLIC_SSH:-1}"
 WG_NODE_SSHD_HARDEN="${WG_NODE_SSHD_HARDEN:-1}"
@@ -89,7 +102,7 @@ for v in WG_HUB_ENDPOINT WG_HUB_PUBKEY WG_OVERLAY_IP; do
 done
 [ -n "${TNADMIN_PUBKEYS}" ] || echo "wg-node-bootstrap: WARNING — TNADMIN_PUBKEYS empty; no overlay SSH until sync-access.sh runs." >&2
 
-echo "[wg-node] $(hostname) overlay=${WG_OVERLAY_IP} hub=${WG_HUB_ENDPOINT} enforce=${WG_NODE_ENFORCE} public_ssh=${WG_NODE_PUBLIC_SSH}"
+echo "[wg-node] $(hostname) overlay=${WG_OVERLAY_IP} hub=${WG_HUB_ENDPOINT} firewall=${WG_NODE_FIREWALL} enforce=${WG_NODE_ENFORCE} public_ssh=${WG_NODE_PUBLIC_SSH}"
 
 # --- 1. packages ---------------------------------------------------------------
 if ! command -v wg >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1; then
@@ -150,9 +163,24 @@ else
     echo "[wg-node] bringing wg0 up"
     $SUDO wg-quick up wg0
 fi
-$SUDO systemctl enable wg-quick@wg0.service >/dev/null 2>&1 || true
+# Enable-then-verify: a silently-swallowed enable failure means the tunnel never returns
+# after a reboot. Confirm with is-enabled and warn loudly so it's caught at bootstrap time
+# rather than discovered as a lockout after the next reboot.
+if $SUDO systemctl enable wg-quick@wg0.service >/dev/null 2>&1 && \
+   $SUDO systemctl is-enabled wg-quick@wg0.service >/dev/null 2>&1; then
+    echo "[wg-node] wg-quick@wg0 enabled (tunnel returns after a reboot)"
+else
+    echo "[wg-node] WARNING: could not enable wg-quick@wg0 — the WireGuard tunnel will NOT return after a reboot. Fix: systemctl enable wg-quick@wg0" >&2
+fi
 
 # --- 5. host firewall (dedicated table; install dormant unless enforcing) -------
+# Gated on WG_NODE_FIREWALL (default 1). When 0 (devnet), we install NO policy-drop
+# table at all: UFW is the single authoritative host firewall there, so a second
+# default-drop table would create an intersection trap. The overlay (§4) is already up
+# above this block unconditionally, and with no policy-drop table present overlay SSH
+# needs no explicit nft allow — it simply works (nothing drops it). This mirrors
+# tn-node-deployment's setup-vpn.sh: overlay only, no enforcement.
+if [ "${WG_NODE_FIREWALL}" = "1" ]; then
 echo "[wg-node] installing host firewall (inet tn_filter)"
 if [ "${WG_NODE_PUBLIC_SSH}" = "1" ]; then
     PUBLIC_SSH_LINE='        tcp dport 22 accept comment "TN-PUBLIC-SSH removed at lockdown"'
@@ -236,6 +264,12 @@ if [ "${WG_NODE_ENFORCE}" = "1" ]; then
     [ "${WG_NODE_PUBLIC_SSH}" = "1" ] || $SUDO /usr/local/sbin/tn-node-ssh-lockdown
 else
     echo "[wg-node] host firewall installed but DORMANT (additive migration mode)"
+fi
+else
+    # WG_NODE_FIREWALL=0: overlay only. No policy-drop table, no tn-nftables service, no
+    # lockdown helper. UFW (devnet) stays the single authoritative host firewall; overlay
+    # SSH works without an explicit allow because nothing drops it.
+    echo "[wg-node] WG_NODE_FIREWALL=0 — overlay only; NOT installing policy-drop nft table (UFW authoritative)"
 fi
 
 # --- 6. sshd hardening (additive; safe on a live node) --------------------------

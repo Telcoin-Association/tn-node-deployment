@@ -28,7 +28,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.3.0"
 readonly WGVPN_DIR="${SCRIPT_DIR}/lib/wgvpn"
 readonly SCOPED_SSHD_DROPIN="/etc/ssh/sshd_config.d/15-tnadmin-overlay.conf"
 # Self-heal units (H3): a boot-time oneshot + an on-change path watcher that re-assert

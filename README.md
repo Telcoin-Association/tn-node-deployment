@@ -4,6 +4,8 @@ Automated setup scripts for running a node on the Telcoin Network. Built for MNO
 
 There is one node identity. Every node installs validator-capable and follows consensus from day one; staking and on-chain activation are what let it validate. The protocol decides a node's role from on-chain committee membership each epoch, not from a setup flag.
 
+> **Maintainers / AI agents:** see [`AGENTS.md`](AGENTS.md) for the operator-vs-maintainer repo boundary — what ships to operators vs. the maintainer-only `common/` tooling that operators never have.
+
 ---
 
 ## What's Included
@@ -36,7 +38,7 @@ The ports are the same on every node:
 
 - RPC: **8545** (HTTP) / **8546** (WS) — the reth defaults
 - P2P: **49590** (primary) and **49594** (worker) — UDP/QUIC
-- Metrics: **9000**
+- Metrics: **9101** (loopback only)
 
 ### Become a validator (optional)
 
@@ -338,7 +340,7 @@ A wrapper script would replace the direct ExecStart:
 # /opt/telcoin/start-telcoin.sh
 export TN_BLS_PASSPHRASE=$(vault kv get -field=passphrase secret/telcoin/node)
 exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin \
-    --metrics 127.0.0.1:9000 \
+    --metrics 127.0.0.1:9101 \
     --log.stdout.format log-fmt -vvv --http
 ```
 
