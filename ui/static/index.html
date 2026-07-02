@@ -369,7 +369,7 @@ select{
         onerror="this.parentElement.classList.add('placeholder');this.parentElement.textContent='TN'"></div>
       <div>
         <h1>Telcoin Node Manager</h1>
-        <div class="sub">Network Operations</div>
+        <div class="sub" id="brandSub">Network Operations</div>
       </div>
     </div>
     <nav id="nav">
@@ -562,6 +562,9 @@ async function loadNodes(fresh){
   // finalize so the new node is detected immediately).
   const d = await api('/api/nodes' + (fresh ? '?fresh=1' : ''));
   if(d && !d.error){ state.nodes = d; state.publicReadonly = !!d.public_readonly; }
+  // Surface the dashboard (UI bundle) version in the header sub-title so operators
+  // can see which Node Manager version their node is running.
+  if(d && d.ui_version){ const bs=$('#brandSub'); if(bs) bs.textContent = 'Network Operations · v'+d.ui_version; }
   // The node's ROLE is decided on-chain (tn_isValidator) and surfaced by the server
   // as d.role -- the single populated slot after its bidirectional remap (validator
   // when on-chain true, else the plain observer/full-node view). Drive the one

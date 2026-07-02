@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.8.1"
+UI_VERSION = "1.8.2"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1992,6 +1992,9 @@ def api_nodes():
     # Read-only when reached over the public Caddy path (vs the SSH tunnel). The
     # UI uses this to hide every management control and show a read-only banner.
     out["public_readonly"] = is_public_request()
+    # Dashboard (UI bundle) version, so the header can show operators which
+    # Node Manager version their node is running.
+    out["ui_version"] = UI_VERSION
     # Never cache node detection -- after a remove/install the UI must see the
     # change immediately (the empty-state switch keys off this).
     resp = jsonify(out)
