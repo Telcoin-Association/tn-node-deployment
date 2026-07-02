@@ -181,7 +181,10 @@ cmd_jaeger_start() {
         running) echo "already running" ;;
         stopped) docker start "$JAEGER_NAME" >/dev/null || die "failed to start existing jaeger container" ;;
         absent)
-            docker run -d --name "$JAEGER_NAME" --restart unless-stopped \
+            # --restart no: Jaeger is an on-demand tracing tool, NOT a service. It
+            # must not auto-start on boot or linger -- it runs only while explicitly
+            # enabled from the Tracing tab, and stays down after a reboot.
+            docker run -d --name "$JAEGER_NAME" --restart no \
                 -p 16686:16686 -p 4317:4317 "$JAEGER_IMAGE" >/dev/null \
                 || die "failed to create jaeger container"
             ;;
@@ -191,8 +194,11 @@ cmd_jaeger_start() {
 
 cmd_jaeger_stop() {
     command -v docker >/dev/null 2>&1 || die "docker not installed"
-    if [[ "$(jaeger_state)" == "running" ]]; then
-        docker stop "$JAEGER_NAME" >/dev/null || die "failed to stop jaeger container"
+    # Remove (not just stop) so Jaeger never lingers as a stopped container -- a
+    # fresh Start recreates it with --restart no. This also transitions any legacy
+    # container that was created with --restart unless-stopped off that policy.
+    if [[ "$(jaeger_state)" != "absent" ]]; then
+        docker rm -f "$JAEGER_NAME" >/dev/null || die "failed to remove jaeger container"
     fi
     echo "ok"
 }
