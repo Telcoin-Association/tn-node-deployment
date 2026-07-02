@@ -932,7 +932,7 @@ async function renderDashboard(){
     <div class="grid two-col">
       <div class="card">
         <h3>Node Details</h3>
-        <div class="kv"><span class="k">Role (on-chain)</span><span class="v">${state.node==='validator'?'Validator':'Full node'}</span></div>
+        <div class="kv"><span class="k">Role (on-chain)</span><span class="v" id="roleDetail">Observer</span></div>
         <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
           ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
@@ -962,8 +962,36 @@ async function renderDashboard(){
 
   augmentDashboardJaeger(s);
   augmentDashboardVersion();
+  augmentObserverRole();
   if(!isReadonly()) augmentDashboardUpdate();
   augmentDashboardNetstat();
+}
+
+// Every node is validator-CAPABLE and starts as an observer; the protocol promotes
+// it to a validator on-chain (tn_isValidator) once staked + activated, at which point
+// the UI switches to the validator dashboard. Until then, show WHERE on that journey
+// this observer sits, from the on-chain validator record (/api/validator: status enum
+// + nft_held + is_retired). Mirrors valStatusHero()'s decoding, observer-framed.
+function observerRoleLabel(v){
+  const st = v.status;              // ValidatorStatus 0..6, or null
+  const nft = v.nft_held;           // true / false / null
+  let sub = null;
+  if(v.is_retired===true || st===6) sub='retired from the validator set';
+  else if(st===3)      sub='active validator';                         // (would normally show the validator view)
+  else if(st===2)      sub='staked — activating at the next epoch';
+  else if(st===1)      sub='staked — call activate() to enter the queue';
+  else if(st===4)      sub='exiting the validator set';
+  else if(st===5)      sub='exited the validator set';
+  else if(st===0)      sub='ConsensusNFT present — stake TEL to begin';
+  else if(nft===false) sub='eligible — awaiting validator approval (no ConsensusNFT)';
+  return 'Observer' + (sub ? ` <span style="color:var(--text3);font-size:12px">— ${esc(sub)}</span>` : '');
+}
+
+async function augmentObserverRole(){
+  const el = $('#roleDetail'); if(!el) return;
+  const v = await api('/api/validator/'+state.node);
+  if(!v || v.error || v.installed===false) return;   // leave the plain "Observer" default
+  el.innerHTML = observerRoleLabel(v);
 }
 
 // =============================================================================
@@ -1651,8 +1679,11 @@ async function renderConfig(){
   if(d.error || d.installed===false){ emptyState(c, cap(t)); return; }
   state.config = d;
 
-  // External (docker) node: configuration is read-only -- no edit controls.
-  if(d.readonly || isReadonly()){
+  // Read-only config views come in TWO distinct flavours; keep their copy separate.
+  // (a) EXTERNAL (docker) node: not installed via our scripts; values come from the
+  //     container + node-info.yaml.
+  const external = d.readonly || curNode().mode === 'external';
+  if(external){
     const rows = [
       ['Container', curNode().container],
       ['Image', d.docker_image],
@@ -1673,6 +1704,43 @@ async function renderConfig(){
           const isMa = (k==='External Primary' || k==='External Worker');
           let cell;
           if(isMa) cell = fmtMultiaddrCell(v);
+          else cell = esc(v||'—');
+          return `<div class="kv"><span class="k">${esc(k)}</span><span class="v" style="overflow-wrap:anywhere;word-break:break-word">${cell}</span></div>`;
+        }).join('')}
+      </div>`;
+    return;
+  }
+  // (b) PUBLIC dashboard (Caddy): a scripts-installed node whose config is simply
+  //     not editable over the public path. Show its REAL config, read-only -- NOT
+  //     the external/container copy. Management stays on the SSH tunnel.
+  if(isReadonly()){
+    const rows = [
+      ['Advertised Node Name', d.advertised_name],
+      ['Metrics Address', d.metrics],
+      ['Primary Listener (bind)', d.primary_listener],
+      ['Worker Listener (bind)', d.worker_listener],
+      ['Log Verbosity', d.verbosity ? verbosityLabel(d.verbosity) : ''],
+    ];
+    if(d.install_method==='docker') rows.push(['Docker Image', d.docker_image]);
+    rows.push(
+      ['RPC Port', d.rpc_port],
+      ['External Primary', d.external_primary],
+      ['External Worker', d.external_worker],
+      ['Version', d.version],
+      ['Install Method', d.install_method],
+      ['Passphrase Method', d.passphrase_method],
+    );
+    c.innerHTML = `
+      <div class="note" style="border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
+        🔒 <strong>Read-only (public access).</strong> Configuration is view-only over the public dashboard —
+        connect via the SSH tunnel to edit it.</div>
+      <div class="card">
+        <h3 style="margin:0 0 6px">${esc(cap(t))} Configuration</h3>
+        ${rows.map(([k,v])=>{
+          const isMa = (k==='External Primary' || k==='External Worker');
+          let cell;
+          if(isMa) cell = fmtMultiaddrCell(v);
+          else if(k==='Version') cell = versionHtml(v);
           else cell = esc(v||'—');
           return `<div class="kv"><span class="k">${esc(k)}</span><span class="v" style="overflow-wrap:anywhere;word-break:break-word">${cell}</span></div>`;
         }).join('')}
