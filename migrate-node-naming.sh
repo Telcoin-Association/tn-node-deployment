@@ -66,7 +66,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 set -E
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
@@ -82,6 +82,10 @@ LEGACY_UNIT=""          # /etc/systemd/system/telcoin-<role>.service
 LEGACY_WRAPPER=""       # /opt/telcoin/start-telcoin-<role>.sh (read from ExecStart)
 LEGACY_CONFIG_DIR=""    # /etc/telcoin/<role>
 LEGACY_DATA_DIR=""      # /var/lib/telcoin/<role> (or .node-meta DATA_DIR)
+EFFECTIVE_DATA_DIR=""   # where the data ENDS UP under the unified layout: /var/lib/telcoin for
+                        # a default role-suffixed install, or the operator's custom mount kept
+                        # AS-IS (a 2nd disk, e.g. /mnt/data) -- see detect_legacy.
+CUSTOM_DATA_DIR=false   # true when the node lives on a custom mount (data preserved in place)
 LEGACY_CONTAINER=""     # telcoin-<role>
 RPC_PORT="${DEFAULT_RPC_PORT:-8545}"  # post-start verify port; the unified node runs with NO
                         # --instance, so it serves RPC on the protocol default (8545), not 8541.
@@ -153,10 +157,14 @@ rollback() {
 
     local base
     if [[ "$MOVED_DATA" == true ]]; then
+        # Reverse from where the data was actually moved TO (EFFECTIVE_DATA_DIR). MOVED_DATA is
+        # only ever true for the default layout (a custom mount no-ops the relocate: src==dst),
+        # where EFFECTIVE_DATA_DIR == UNIFIED_DATA_DIR -- but key off EFFECTIVE so the reverse is
+        # correct by construction.
         mkdir -p "$LEGACY_DATA_DIR"
         for base in "${DATA_MOVED[@]}"; do
-            [[ -e "${UNIFIED_DATA_DIR}/${base}" ]] && \
-                mv "${UNIFIED_DATA_DIR}/${base}" "${LEGACY_DATA_DIR}/${base}"
+            [[ -e "${EFFECTIVE_DATA_DIR}/${base}" ]] && \
+                mv "${EFFECTIVE_DATA_DIR}/${base}" "${LEGACY_DATA_DIR}/${base}"
         done
         # mkdir above (re)created the dir as root; restore the captured owner so the legacy
         # node can write to its datadir. Without this a "rolled-back" node still can't rotate
@@ -255,16 +263,19 @@ detect_legacy() {
         LEGACY_DATA_DIR="${UNIFIED_DATA_DIR}/${ROLE}"
     fi
 
-    # Only the role-suffixed default (or an already-unified dir) is auto-relocated.
-    # A custom DATA_DIR (the setup wizard allows one) is NOT moved: it could be a
-    # slow, risky cross-filesystem copy of the multi-GB db, and the path subs only
-    # rewrite the default. Abort and let the operator handle it.
-    if [[ "$LEGACY_DATA_DIR" != "$UNIFIED_DATA_DIR" \
-       && "$LEGACY_DATA_DIR" != "${UNIFIED_DATA_DIR}/${ROLE}" ]]; then
-        print_error "Custom data dir detected: ${LEGACY_DATA_DIR}"
-        print_info  "This migration only relocates the default ${UNIFIED_DATA_DIR}/${ROLE} layout."
-        print_info  "Move the data to ${UNIFIED_DATA_DIR}/${ROLE} first, or migrate manually."
-        exit 1
+    # Where the data ENDS UP under the unified layout:
+    #  - Default role-suffixed (/var/lib/telcoin/<role>) or already-unified
+    #    (/var/lib/telcoin): collapse onto /var/lib/telcoin (the relocate below moves it).
+    #  - CUSTOM mount (a 2nd disk/SSD, e.g. /mnt/data -- setup-node.sh records the
+    #    operator's exact path as DATA_DIR, no role suffix): PRESERVE it in place. The
+    #    data never leaves its disk (no slow/risky cross-fs copy onto the boot disk),
+    #    and relocate_dir() no-ops it because src == dst. Only the NAMING is unified.
+    if [[ "$LEGACY_DATA_DIR" == "$UNIFIED_DATA_DIR" \
+       || "$LEGACY_DATA_DIR" == "${UNIFIED_DATA_DIR}/${ROLE}" ]]; then
+        EFFECTIVE_DATA_DIR="$UNIFIED_DATA_DIR"
+    else
+        EFFECTIVE_DATA_DIR="$LEGACY_DATA_DIR"
+        CUSTOM_DATA_DIR=true
     fi
 
     # Wrapper path: read the unit's ExecStart= (authoritative), else convention.
@@ -299,7 +310,11 @@ detect_legacy() {
     print_info "  unit:       ${UNIFIED_UNIT}"
     print_info "  wrapper:    ${UNIFIED_WRAPPER}"
     print_info "  config dir: ${UNIFIED_CONFIG_DIR}"
-    print_info "  data dir:   ${UNIFIED_DATA_DIR}"
+    if [[ "$CUSTOM_DATA_DIR" == true ]]; then
+        print_info "  data dir:   ${EFFECTIVE_DATA_DIR} (custom mount -- preserved in place, no data moved)"
+    else
+        print_info "  data dir:   ${EFFECTIVE_DATA_DIR}"
+    fi
     print_info "  RPC port:   ${RPC_PORT} (default; --observer/--instance removed)"
     echo ""
 
@@ -507,11 +522,13 @@ update_meta() {
         : > "$meta"
     fi
     local ws_port=8546   # reth WS default with no --instance (legacy --instance 5 -> 8554)
-    print_step "Updating ${meta} (NODE_TYPE=observer, DATA_DIR=${UNIFIED_DATA_DIR}, RPC_PORT=${RPC_PORT}, WS_PORT=${ws_port})"
+    print_step "Updating ${meta} (NODE_TYPE=observer, DATA_DIR=${EFFECTIVE_DATA_DIR}, RPC_PORT=${RPC_PORT}, WS_PORT=${ws_port})"
     # NODE_TYPE is only the default-view HINT; the UI promotes to the validator view
     # from on-chain tn_isValidator. Every migrated node is the same identity.
     meta_set NODE_TYPE observer "$meta"
-    meta_set DATA_DIR "$UNIFIED_DATA_DIR" "$meta"
+    # EFFECTIVE_DATA_DIR: /var/lib/telcoin for a default install, or the operator's
+    # preserved custom mount (2nd disk) -- so the node keeps finding its data.
+    meta_set DATA_DIR "$EFFECTIVE_DATA_DIR" "$meta"
     # RPC + WS revert to their protocol defaults now that --instance is stripped (the legacy
     # observer's --instance 5 put them on 8541/8554). RPC_PORT/WS_PORT in .node-meta are read by
     # the local Node Manager UI, check-node.sh, and install-caddy.sh (operator-facing, this repo)
@@ -525,7 +542,7 @@ update_meta() {
     # Optional: record VALIDATOR_ADDRESS from node-info.yaml execution_address for
     # the UI's on-chain status card. NOT consumed at node launch (only by keygen /
     # staking and the post-start status check), so it is purely informational here.
-    local ni="${UNIFIED_DATA_DIR}/node-info.yaml" exec_addr=""
+    local ni="${EFFECTIVE_DATA_DIR}/node-info.yaml" exec_addr=""
     if [[ -f "$ni" ]]; then
         exec_addr="$(grep -E '^[[:space:]]*execution_address[[:space:]]*:' "$ni" 2>/dev/null \
             | head -n1 | sed -E 's/.*:[[:space:]]*"?([0-9a-fA-Fx]+)"?.*/\1/' || true)"
@@ -644,7 +661,7 @@ report() {
     print_info "  unit:       ${UNIFIED_UNIT}"
     print_info "  wrapper:    ${UNIFIED_WRAPPER}"
     print_info "  config dir: ${UNIFIED_CONFIG_DIR}"
-    print_info "  data dir:   ${UNIFIED_DATA_DIR}"
+    print_info "  data dir:   ${EFFECTIVE_DATA_DIR}$([[ "$CUSTOM_DATA_DIR" == true ]] && echo ' (custom mount, preserved)')"
     print_info "  NODE_TYPE:  observer (presentation hint; on-chain tn_isValidator is authoritative)"
     echo ""
     print_info "Node RPC/WS now on ${RPC_PORT}/8546 (was 8541/8554 under --instance). The local"
@@ -674,7 +691,7 @@ main() {
     snapshot             # step 2 (arms rollback)
     stop_legacy          # step 3
     relocate_dir "$LEGACY_CONFIG_DIR" "$UNIFIED_CONFIG_DIR" CONFIG_MOVED config   # step 4
-    relocate_dir "$LEGACY_DATA_DIR"   "$UNIFIED_DATA_DIR"   DATA_MOVED   data     # step 5
+    relocate_dir "$LEGACY_DATA_DIR"   "$EFFECTIVE_DATA_DIR" DATA_MOVED   data     # step 5 (no-op for a custom mount: src==dst)
     rewrite_unit         # step 6
     rewrite_wrapper      # step 7 (strip --observer and --instance)
     update_meta          # step 8
