@@ -31,11 +31,22 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.55"
+readonly SCRIPT_VERSION="1.1.56"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
-readonly VERIFY_TIMEOUT_SECONDS=45
+#
+# Post-restart health-verify window (seconds). Overridable via
+# TN_UPDATE_VERIFY_TIMEOUT for fleet-orchestrated updates: when every peer
+# restarts at once (a wire-protocol-breaking upgrade), quorum takes longer to
+# re-form than a single-node restart, and the default window would trigger a
+# spurious auto-rollback. Non-numeric values fall back to 45 -- this feeds
+# arithmetic under set -u.
+if [[ "${TN_UPDATE_VERIFY_TIMEOUT:-}" =~ ^[0-9]+$ ]]; then
+    readonly VERIFY_TIMEOUT_SECONDS="${TN_UPDATE_VERIFY_TIMEOUT}"
+else
+    readonly VERIFY_TIMEOUT_SECONDS=45
+fi
 
 NODE_TYPE=""
 SERVICE_NAME=""
@@ -125,10 +136,24 @@ detect_network() {
     echo ""
 }
 
+# Resolve the file that carries the docker image reference on this install:
+# the start wrapper (${DEFAULT_INSTALL_DIR}/start-<svc>.sh) on current installs
+# (the BLS LoadCredential change moved `docker run` out of the unit's ExecStart),
+# or the systemd unit on legacy installs that still inline it. Delegates to
+# tn_node_launch_target (lib/common.sh). Echoes the path; returns 1 if no node
+# service is present or the file is missing.
+docker_launch_file() {
+    local line file
+    line="$(tn_node_launch_target)" || return 1
+    file="${line##* }"   # last field; install paths never contain spaces
+    [[ -f "$file" ]] || return 1
+    echo "$file"
+}
+
 detect_current_docker_image() {
-    local unit="/etc/systemd/system/${SERVICE_NAME}.service"
-    [[ -f "$unit" ]] || return 1
-    grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' "$unit" | head -1
+    local file
+    file="$(docker_launch_file)" || return 1
+    grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' "$file" | head -1
 }
 
 # git describe-style summary of the current source ref + commit
@@ -199,14 +224,16 @@ start_service() {
     systemctl start "$SERVICE_NAME"
 }
 
-# Backup the systemd unit file with a timestamped sibling. Echoes backup path.
+# Backup a launch config file (unit or wrapper) with a timestamped sibling.
+# Echoes ONLY the backup path on stdout -- callers capture it via $(...), so the
+# human-readable info line must go to stderr or it corrupts the captured path.
 backup_unit_file() {
     local file="$1"
     local ts backup
     ts=$(date -u '+%Y%m%d-%H%M%S')
     backup="${file}.bak.${ts}"
     cp -p "$file" "$backup" || return 1
-    print_info "Unit file backup: ${backup}"
+    print_info "Launch config backup: ${backup}" >&2
     echo "$backup"
 }
 
@@ -278,7 +305,7 @@ prepare_docker_update() {
 
     local current_image
     current_image=$(detect_current_docker_image) || {
-        print_error "Could not read current Docker image from ${SERVICE_NAME}.service"
+        print_error "Could not read current Docker image from the ${SERVICE_NAME} launch config (wrapper or unit)"
         return 1
     }
     print_info "Current image: ${current_image}"
@@ -323,47 +350,54 @@ apply_docker_update() {
     echo ""
     validator_downtime_warning_if_applicable || return 1
 
-    local unit="/etc/systemd/system/${SERVICE_NAME}.service"
+    # The image reference lives in the start wrapper on current installs and in
+    # the systemd unit only on legacy ones -- resolve whichever this node uses.
+    local launch_file
+    launch_file=$(docker_launch_file) || {
+        print_error "Could not resolve the docker launch config (wrapper or unit) for ${SERVICE_NAME}."
+        return 1
+    }
     local backup
-    backup=$(backup_unit_file "$unit") || return 1
+    backup=$(backup_unit_file "$launch_file") || return 1
 
-    # Hash the unit file before/after the substitution so we can detect
+    # Hash the launch config before/after the substitution so we can detect
     # "perl did nothing" -- symmetric with the source-binary hash check
     # added in v1.1.41. Avoids reporting a successful update when the
-    # unit file was actually unchanged.
+    # file was actually unchanged.
     local pre_unit_hash post_unit_hash
-    pre_unit_hash=$(sha256sum "$unit" | awk '{print $1}')
+    pre_unit_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
-    print_step "Updating unit file image reference..."
-    perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$unit"
+    print_step "Updating image reference in ${launch_file}..."
+    perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
+    # daemon-reload matters on legacy unit installs; harmless for the wrapper.
     systemctl daemon-reload
 
-    post_unit_hash=$(sha256sum "$unit" | awk '{print $1}')
+    post_unit_hash=$(sha256sum "$launch_file" | awk '{print $1}')
     if [[ "$pre_unit_hash" == "$post_unit_hash" ]]; then
-        print_error "Unit file is unchanged after edit -- old image string not found."
+        print_error "Launch config is unchanged after edit -- old image string not found."
         print_info "  Expected to replace: ${old_image}"
-        print_info "  Unit file: ${unit}"
+        print_info "  Launch config: ${launch_file}"
         print_info "Restoring from backup and aborting."
-        cp -p "$backup" "$unit"
+        cp -p "$backup" "$launch_file"
         systemctl daemon-reload
         start_service 2>/dev/null || true
         return 1
     fi
     # Confirm the new image actually appears in the file (defends against a
     # perl substitution that replaced the wrong text).
-    if ! grep -qF "$new_image" "$unit"; then
-        print_error "New image string not present in unit file after edit."
+    if ! grep -qF "$new_image" "$launch_file"; then
+        print_error "New image string not present in launch config after edit."
         print_info "  Expected to find: ${new_image}"
         print_info "Restoring from backup and aborting."
-        cp -p "$backup" "$unit"
+        cp -p "$backup" "$launch_file"
         systemctl daemon-reload
         start_service 2>/dev/null || true
         return 1
     fi
-    print_ok "Unit file updated: ${pre_unit_hash:0:12}... -> ${post_unit_hash:0:12}..."
+    print_ok "Launch config updated: ${pre_unit_hash:0:12}... -> ${post_unit_hash:0:12}..."
 
     print_step "Starting ${SERVICE_NAME} on new image..."
     start_service
@@ -385,7 +419,7 @@ apply_docker_update() {
     if confirm "Roll back to previous image (${old_image})?"; then
         print_step "Rolling back..."
         wait_for_service_stopped "$SERVICE_NAME"
-        cp -p "$backup" "$unit"
+        cp -p "$backup" "$launch_file"
         systemctl daemon-reload
         start_service
         if verify_health_after_restart; then
@@ -761,7 +795,7 @@ validator_downtime_warning_if_applicable() {
 pick_docker_version() {
     local current_image
     current_image=$(detect_current_docker_image) || {
-        print_error "Could not read current Docker image from ${SERVICE_NAME}.service" >&2
+        print_error "Could not read current Docker image from the ${SERVICE_NAME} launch config (wrapper or unit)" >&2
         return 1
     }
     local current_tag="${current_image##*:}"
@@ -1170,24 +1204,29 @@ json_apply_docker() {
     if [[ -z "$old_image" || -z "$new_image" ]]; then
         json_event error "pending state is incomplete -- cannot apply"; return 1
     fi
-    local unit="/etc/systemd/system/${SERVICE_NAME}.service"
+    # The image reference lives in the start wrapper on current installs and in
+    # the systemd unit only on legacy ones -- resolve whichever this node uses.
+    local launch_file
+    launch_file=$(docker_launch_file) || {
+        json_event error "could not resolve docker launch config (wrapper or unit)"; return 1; }
     local ts backup
     ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${unit}.bak.${ts}"
-    cp -p "$unit" "$backup" || { json_event error "could not back up unit file"; return 1; }
+    backup="${launch_file}.bak.${ts}"
+    cp -p "$launch_file" "$backup" || { json_event error "could not back up launch config"; return 1; }
     local pre_hash post_hash
-    pre_hash=$(sha256sum "$unit" | awk '{print $1}')
+    pre_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
     json_event step "Stopping ${SERVICE_NAME}"
     wait_for_service_stopped "$SERVICE_NAME"
 
-    json_event step "Updating unit file image reference"
-    perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$unit"
+    json_event step "Updating image reference in ${launch_file}"
+    perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
+    # daemon-reload matters on legacy unit installs; harmless for the wrapper.
     systemctl daemon-reload
-    post_hash=$(sha256sum "$unit" | awk '{print $1}')
-    if [[ "$pre_hash" == "$post_hash" ]] || ! grep -qF "$new_image" "$unit"; then
-        json_event error "unit file image not updated -- restoring backup"
-        cp -p "$backup" "$unit"; systemctl daemon-reload; start_service 2>/dev/null || true
+    post_hash=$(sha256sum "$launch_file" | awk '{print $1}')
+    if [[ "$pre_hash" == "$post_hash" ]] || ! grep -qF "$new_image" "$launch_file"; then
+        json_event error "launch config image not updated -- restoring backup"
+        cp -p "$backup" "$launch_file"; systemctl daemon-reload; start_service 2>/dev/null || true
         return 1
     fi
 
@@ -1203,7 +1242,7 @@ json_apply_docker() {
 
     json_event step "Health check failed -- rolling back to previous image"
     wait_for_service_stopped "$SERVICE_NAME"
-    cp -p "$backup" "$unit"; systemctl daemon-reload; start_service
+    cp -p "$backup" "$launch_file"; systemctl daemon-reload; start_service
     if verify_health_after_restart; then
         clear_pending_state
         json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":true,\"msg\":\"health check failed; rolled back to previous image\"}"

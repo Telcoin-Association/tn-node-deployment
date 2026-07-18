@@ -876,6 +876,21 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-node v1.1.56
+Docker updates now edit the file that actually launches the container. Current docker
+installs run `docker run` from the start wrapper (`/opt/telcoin/start-<svc>.sh`) rather
+than the unit's ExecStart, but the update path still read and rewrote the systemd unit —
+so `--check` reported no current image and prepare/apply failed on every wrapper-based
+install. Image detection and both apply paths now resolve the wrapper-vs-legacy-unit
+target via `tn_node_launch_target` and patch whichever file carries the image reference.
+Two more fixes ride along: `TN_UPDATE_VERIFY_TIMEOUT=<secs>` overrides the 45s
+post-restart health window (a fleet-wide simultaneous restart for a wire-protocol-breaking
+upgrade re-forms quorum slower than one node restarting, and the default window triggered
+a spurious auto-rollback), and the interactive docker apply no longer corrupts its restore
+path — `backup_unit_file` printed its info line to stdout inside the caller's `$(...)`
+capture, so a rollback would have copied from a garbage path. `update-scripts.sh v1.1.62`
+re-cut with refreshed `.sha256` sidecars.
+
 ### VPN admin SSH — fix tnadmin key-login lockout + confirm-and-reuse on re-run
 `setup-vpn.sh v1.4.0` fixes opted-in nodes going unreachable to maintainers. `tnadmin` was
 created with no password and then `passwd -l`'d, leaving the shadow field `!`-locked; Ubuntu
