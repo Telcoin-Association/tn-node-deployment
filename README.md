@@ -876,6 +876,30 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### testnet baseline → v0.12.0-adiri
+adiri testnet moved to `v0.12.0-adiri`, and this release points every default at it.
+`lib/common.sh v1.3.6` bumps `DEFAULT_DOCKER_IMAGE` (the fallback used only when the
+registry is unreachable) and raises `MIN_SOURCE_VERSION_TESTNET` from `0.9.1` to
+`0.12.0`; `ui/server.py v1.8.4` and the setup wizard's docker-image placeholder follow.
+
+**This upgrade is wire-protocol-breaking — a v0.11 node cannot peer with a v0.12
+node at all.** Every libp2p protocol string is now namespaced by chain id, including
+the gossipsub protocol id itself (`/meshsub/1.1.0` → `/tn-meshsub-{chain_id}/1.1.0`),
+all four gossip topics are renamed, and request-response moved to `/0.0.2`. Multistream
+negotiation fails before a subscribe frame is exchanged, so a node left on `v0.11.0-adiri`
+is not "behind" — it is partitioned, with no peers and no path back to consensus. Update.
+
+No data-dir wipe and no resync: genesis is unchanged, and v0.12 reads existing v0
+consensus packs in place. Note the reverse is NOT true — v0.11 cannot read the packs
+v0.12 writes, so a downgrade stops being clean once a new epoch's pack is created
+(adiri epochs are 6h).
+
+Source installs rebuild from the tag: `git checkout v0.12.0-adiri` and
+`cargo build --release --features adiri`, which `update-node.sh --prepare` does for you
+and which takes 20-40 minutes on typical operator hardware. It runs before any downtime.
+
+`update-scripts.sh v1.1.63` re-cut with refreshed `.sha256` sidecars.
+
 ### update-node v1.1.56
 Docker updates now edit the file that actually launches the container. Current docker
 installs run `docker run` from the start wrapper (`/opt/telcoin/start-<svc>.sh`) rather

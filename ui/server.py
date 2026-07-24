@@ -60,7 +60,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-UI_VERSION = "1.8.3"
+UI_VERSION = "1.8.4"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1795,7 +1795,7 @@ def network_traffic():
 # update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
 GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 GAR_IMAGE_BASE = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.11.0-adiri"  # fallback only when the registry is unreachable
+DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.12.0-adiri"  # fallback only when the registry is unreachable
 
 
 def detect_public_ip():
