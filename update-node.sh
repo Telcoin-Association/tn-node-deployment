@@ -30,8 +30,15 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+# common.sh enables errexit for the setup scripts, but this script is
+# deliberately `set -uo pipefail` ONLY (see above): every state-changing step
+# in the apply/rollback flows does its own error handling, and an errexit
+# abort between "service stopped" and "service restarted" would strand the
+# node down and skip the health-verify -> rollback recovery that is the whole
+# point of the two-phase design. Restore the intended semantics.
+set +e
 
-readonly SCRIPT_VERSION="1.1.57"
+readonly SCRIPT_VERSION="1.1.58"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -178,12 +185,15 @@ read_pending_state() {
     [[ -f "$path" ]] && cat "$path"
 }
 
+# Returns non-zero when the state file cannot be written (full/read-only
+# disk); callers must check -- reporting "pending update saved" on a write
+# failure would strand the operator with a prepare they cannot apply.
 write_pending_state() {
     local path
     path=$(pending_state_path)
-    mkdir -p "$(dirname "$path")"
-    cat > "$path"
-    chmod 600 "$path"
+    mkdir -p "$(dirname "$path")" || return 1
+    cat > "$path" || return 1
+    chmod 600 "$path" || return 1
 }
 
 clear_pending_state() {
@@ -324,13 +334,17 @@ prepare_docker_update() {
     fi
     print_ok "Image pulled. Service still running on ${current_tag}."
 
-    write_pending_state <<EOF
+    if ! write_pending_state <<EOF
 PHASE=pull_complete
 INSTALL_METHOD=docker
 OLD_IMAGE=${current_image}
 NEW_IMAGE=${new_image}
 PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
+    then
+        print_error "Could not write pending state at $(pending_state_path)"
+        return 1
+    fi
     print_ok "Pending update saved: $(pending_state_path)"
 }
 
@@ -371,9 +385,13 @@ apply_docker_update() {
     wait_for_service_stopped "$SERVICE_NAME"
 
     print_step "Updating image reference in ${launch_file}..."
+    # No guard on perl itself: a failure (not installed, ENOSPC) leaves the
+    # file unchanged or without the new image string, and both cases are
+    # caught by the hash + grep checks right below.
     perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
     # daemon-reload matters on legacy unit installs; harmless for the wrapper.
-    systemctl daemon-reload
+    systemctl daemon-reload || \
+        print_warn "systemctl daemon-reload failed -- a legacy unit install may restart on the old image"
 
     post_unit_hash=$(sha256sum "$launch_file" | awk '{print $1}')
     if [[ "$pre_unit_hash" == "$post_unit_hash" ]]; then
@@ -381,8 +399,9 @@ apply_docker_update() {
         print_info "  Expected to replace: ${old_image}"
         print_info "  Launch config: ${launch_file}"
         print_info "Restoring from backup and aborting."
-        cp -p "$backup" "$launch_file"
-        systemctl daemon-reload
+        # File is unchanged, so the restore is precautionary -- best-effort.
+        cp -p "$backup" "$launch_file" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
         start_service 2>/dev/null || true
         return 1
     fi
@@ -392,8 +411,12 @@ apply_docker_update() {
         print_error "New image string not present in launch config after edit."
         print_info "  Expected to find: ${new_image}"
         print_info "Restoring from backup and aborting."
-        cp -p "$backup" "$launch_file"
-        systemctl daemon-reload
+        if ! cp -p "$backup" "$launch_file"; then
+            print_error "Backup restore FAILED -- ${launch_file} is in an edited, unverified state."
+            print_info "  Restore manually: cp -p ${backup} ${launch_file} && systemctl daemon-reload && systemctl start ${SERVICE_NAME}"
+            return 1
+        fi
+        systemctl daemon-reload 2>/dev/null || true
         start_service 2>/dev/null || true
         return 1
     fi
@@ -419,8 +442,15 @@ apply_docker_update() {
     if confirm "Roll back to previous image (${old_image})?"; then
         print_step "Rolling back..."
         wait_for_service_stopped "$SERVICE_NAME"
-        cp -p "$backup" "$launch_file"
-        systemctl daemon-reload
+        # If the restore fails, do NOT start the service: it would come up on
+        # the new image and the next health pass could misreport "rolled back".
+        if ! cp -p "$backup" "$launch_file"; then
+            print_error "Backup restore failed -- launch config still references ${new_image}."
+            print_error "Node left STOPPED. Recover manually:"
+            print_info "  cp -p ${backup} ${launch_file} && systemctl daemon-reload && systemctl start ${SERVICE_NAME}"
+            return 1
+        fi
+        systemctl daemon-reload 2>/dev/null || true
         start_service
         if verify_health_after_restart; then
             clear_pending_state
@@ -608,7 +638,7 @@ prepare_source_build() {
     fi
     print_ok "Build complete: ${new_version}"
 
-    write_pending_state <<EOF
+    if ! write_pending_state <<EOF
 PHASE=build_complete
 INSTALL_METHOD=source
 OLD_REF=${current_ref}
@@ -618,6 +648,10 @@ BUILT_BINARY=${built}
 BUILT_HASH=${binary_hash}
 PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
+    then
+        print_error "Could not write pending state at $(pending_state_path)"
+        return 1
+    fi
     print_ok "Pending update saved: $(pending_state_path)"
 }
 
@@ -730,8 +764,15 @@ apply_source_update() {
     if confirm "Roll back to previous binary?"; then
         print_step "Rolling back..."
         wait_for_service_stopped "$SERVICE_NAME"
-        cp -p "$backup" "$installed"
-        chmod +x "$installed"
+        # If the restore fails, do NOT start the service: it would come up on
+        # the new binary and the next health pass could misreport "rolled back".
+        if ! cp -p "$backup" "$installed"; then
+            print_error "Backup restore failed -- ${installed} still holds the new binary."
+            print_error "Node left STOPPED. Recover manually:"
+            print_info "  cp -p ${backup} ${installed} && systemctl start ${SERVICE_NAME}"
+            return 1
+        fi
+        chmod +x "$installed" 2>/dev/null || true
         start_service
         if verify_health_after_restart; then
             clear_pending_state
@@ -1096,7 +1137,7 @@ json_prepare_source() {
         json_event step "Note: binary hash unchanged -- cargo decided no rebuild was needed for ${new_ref}"
     fi
 
-    write_pending_state <<EOF
+    if ! write_pending_state <<EOF
 PHASE=build_complete
 INSTALL_METHOD=source
 OLD_REF=${current_ref}
@@ -1106,6 +1147,10 @@ BUILT_BINARY=${built}
 BUILT_HASH=${binary_hash}
 PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
+    then
+        json_event error "could not write pending state at $(pending_state_path)"
+        return 1
+    fi
     json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"}"
 }
 
@@ -1127,13 +1172,17 @@ json_prepare_docker() {
         json_event error "image pull failed -- see /tmp/tn-update-build.log on the host"; return 1
     fi
 
-    write_pending_state <<EOF
+    if ! write_pending_state <<EOF
 PHASE=pull_complete
 INSTALL_METHOD=docker
 OLD_IMAGE=${current_image}
 NEW_IMAGE=${new_image}
 PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
+    then
+        json_event error "could not write pending state at $(pending_state_path)"
+        return 1
+    fi
     json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_image\":\"$(json_escape "$new_image")\"}"
 }
 
@@ -1209,7 +1258,12 @@ json_apply_source() {
 
     json_event step "Health check failed -- rolling back to previous binary"
     wait_for_service_stopped "$SERVICE_NAME"
-    cp -p "$backup" "$installed"
+    # If the restore fails, do NOT start the service: it would come up on the
+    # new binary and a passing re-verify would misreport "rolled back".
+    if ! cp -p "$backup" "$installed"; then
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed AND backup restore failed; service left stopped -- restore ${backup} to ${installed} manually\"}"
+        return 1
+    fi
     chmod +x "$installed" 2>/dev/null || true
     start_service
     if verify_health_after_restart; then
@@ -1244,13 +1298,18 @@ json_apply_docker() {
     wait_for_service_stopped "$SERVICE_NAME"
 
     json_event step "Updating image reference in ${launch_file}"
+    # No guard on perl itself: a failure leaves the file unchanged or without
+    # the new image string -- both caught by the hash/grep check below.
     perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
     # daemon-reload matters on legacy unit installs; harmless for the wrapper.
-    systemctl daemon-reload
+    systemctl daemon-reload || json_event step "warning: systemctl daemon-reload failed"
     post_hash=$(sha256sum "$launch_file" | awk '{print $1}')
     if [[ "$pre_hash" == "$post_hash" ]] || ! grep -qF "$new_image" "$launch_file"; then
         json_event error "launch config image not updated -- restoring backup"
-        cp -p "$backup" "$launch_file"; systemctl daemon-reload; start_service 2>/dev/null || true
+        cp -p "$backup" "$launch_file" 2>/dev/null || \
+            json_event error "backup restore also failed -- restore ${backup} to ${launch_file} manually"
+        systemctl daemon-reload 2>/dev/null || true
+        start_service 2>/dev/null || true
         return 1
     fi
 
@@ -1266,7 +1325,14 @@ json_apply_docker() {
 
     json_event step "Health check failed -- rolling back to previous image"
     wait_for_service_stopped "$SERVICE_NAME"
-    cp -p "$backup" "$launch_file"; systemctl daemon-reload; start_service
+    # If the restore fails, do NOT start the service: it would come up on the
+    # new image and a passing re-verify would misreport "rolled back".
+    if ! cp -p "$backup" "$launch_file"; then
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed AND backup restore failed; service left stopped -- restore ${backup} to ${launch_file} manually\"}"
+        return 1
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    start_service
     if verify_health_after_restart; then
         clear_pending_state
         json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":true,\"msg\":\"health check failed; rolled back to previous image\"}"
