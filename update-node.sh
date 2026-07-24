@@ -38,7 +38,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="1.1.59"
+readonly SCRIPT_VERSION="1.1.60"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -275,6 +275,69 @@ verify_health_after_restart() {
     return 1
 }
 
+# The plain health probe above passes even when the node came back on the OLD
+# artifact (no-op swap, stale unit definition after a failed daemon-reload,
+# ...). The two checks below pin the post-APPLY verify to the artifact that
+# prepare produced. Rollback verifies deliberately stay on the plain probe --
+# after a rollback the old artifact is exactly what should be running.
+# Both checks SKIP (warn, return 0) when the expected value is missing, so a
+# pending state written by an older script version still applies cleanly.
+
+# Source installs: the installed binary must hash to BUILT_HASH.
+verify_installed_binary_hash() {
+    local installed="$1" expected="$2"
+    if [[ -z "$expected" ]]; then
+        print_warn "No BUILT_HASH in pending state -- skipping binary identity check."
+        return 0
+    fi
+    local actual
+    actual=$(sha256sum "$installed" 2>/dev/null | awk '{print $1}')
+    if [[ "$actual" != "$expected" ]]; then
+        print_error "Installed binary does not match the prepared build."
+        print_info "  Expected: ${expected}"
+        print_info "  Actual:   ${actual:-unreadable}"
+        return 1
+    fi
+    print_ok "Installed binary matches the prepared build (${expected:0:12}...)"
+}
+
+# Docker installs: container name as launched (--name in the wrapper/unit;
+# setup writes --name ${SERVICE_NAME}, so that is also the fallback).
+docker_container_name() {
+    local file name=""
+    if file=$(docker_launch_file 2>/dev/null); then
+        name=$(grep -oE -- '--name[= ][^ \\]+' "$file" 2>/dev/null | head -1 | sed -E 's/^--name[= ]//')
+    fi
+    echo "${name:-$SERVICE_NAME}"
+}
+
+# Docker installs: the running container's image ID must match the ID recorded
+# at pull time (PULLED_IMAGE_ID). Catches "came back on the old image", e.g. a
+# legacy unit install whose daemon-reload failed and restarted the stale unit.
+verify_running_image_id() {
+    local expected_id="$1"
+    if [[ -z "$expected_id" ]]; then
+        print_warn "No PULLED_IMAGE_ID in pending state -- skipping image identity check."
+        return 0
+    fi
+    local cname running_id
+    cname=$(docker_container_name)
+    running_id=$(docker inspect --format '{{.Image}}' "$cname" 2>/dev/null || echo "")
+    if [[ -z "$running_id" ]]; then
+        # Health verify already passed, so the container is up; an empty read
+        # here is a docker CLI hiccup -- do not trigger a false rollback.
+        print_warn "Could not inspect container '${cname}' -- skipping image identity check."
+        return 0
+    fi
+    if [[ "$running_id" != "$expected_id" ]]; then
+        print_error "Running container image does not match the pulled update."
+        print_info "  Expected: ${expected_id}"
+        print_info "  Running:  ${running_id}"
+        return 1
+    fi
+    print_ok "Running container is on the pulled image (${expected_id:0:19}...)"
+}
+
 # =============================================================================
 # DOCKER PATH
 # =============================================================================
@@ -334,11 +397,17 @@ prepare_docker_update() {
     fi
     print_ok "Image pulled. Service still running on ${current_tag}."
 
+    # Image ID of what we just pulled -- apply verifies the restarted
+    # container is actually running THIS image, not merely "something healthy".
+    local pulled_image_id
+    pulled_image_id=$(docker image inspect --format '{{.Id}}' "$new_image" 2>/dev/null || echo "")
+
     if ! write_pending_state <<EOF
 PHASE=pull_complete
 INSTALL_METHOD=docker
 OLD_IMAGE=${current_image}
 NEW_IMAGE=${new_image}
+PULLED_IMAGE_ID=${pulled_image_id}
 PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
     then
@@ -350,9 +419,10 @@ EOF
 
 apply_docker_update() {
     # Read pending state
-    local old_image new_image
+    local old_image new_image pulled_image_id
     old_image=$(read_pending_state | grep ^OLD_IMAGE= | cut -d= -f2-)
     new_image=$(read_pending_state | grep ^NEW_IMAGE= | cut -d= -f2-)
+    pulled_image_id=$(read_pending_state | grep ^PULLED_IMAGE_ID= | cut -d= -f2-)
     if [[ -z "$old_image" ]] || [[ -z "$new_image" ]]; then
         print_error "Pending state is incomplete -- cannot apply."
         return 1
@@ -425,7 +495,7 @@ apply_docker_update() {
     print_step "Starting ${SERVICE_NAME} on new image..."
     start_service
 
-    if verify_health_after_restart; then
+    if verify_health_after_restart && verify_running_image_id "$pulled_image_id"; then
         clear_pending_state
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
@@ -436,8 +506,8 @@ apply_docker_update() {
         return 0
     fi
 
-    # Health verify failed -- offer rollback
-    print_error "Health check failed after restart."
+    # Health or image-identity verify failed -- offer rollback
+    print_error "Post-update verification failed."
     echo ""
     if confirm "Roll back to previous image (${old_image})?"; then
         print_step "Rolling back..."
@@ -683,6 +753,10 @@ apply_source_update() {
             print_info "Cancelled."
             return 1
         fi
+        # Operator approved installing the changed binary -- the post-restart
+        # identity check must verify against what is actually being installed,
+        # or it would force a rollback of an explicitly approved apply.
+        expected_hash="$actual_hash"
     fi
 
     validator_downtime_warning_if_applicable || return 1
@@ -744,7 +818,7 @@ apply_source_update() {
     print_step "Starting ${SERVICE_NAME} on new binary..."
     start_service
 
-    if verify_health_after_restart; then
+    if verify_health_after_restart && verify_installed_binary_hash "$installed" "$expected_hash"; then
         clear_pending_state
         # Record the now-running ref so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
@@ -758,8 +832,8 @@ apply_source_update() {
         return 0
     fi
 
-    # Health verify failed -- rollback
-    print_error "Health check failed after restart."
+    # Health or binary-identity verify failed -- rollback
+    print_error "Post-update verification failed."
     echo ""
     if confirm "Roll back to previous binary?"; then
         print_step "Rolling back..."
@@ -1172,11 +1246,17 @@ json_prepare_docker() {
         json_event error "image pull failed -- see /tmp/tn-update-build.log on the host"; return 1
     fi
 
+    # Image ID of what we just pulled -- apply verifies the restarted
+    # container is actually running THIS image, not merely "something healthy".
+    local pulled_image_id
+    pulled_image_id=$(docker image inspect --format '{{.Id}}' "$new_image" 2>/dev/null || echo "")
+
     if ! write_pending_state <<EOF
 PHASE=pull_complete
 INSTALL_METHOD=docker
 OLD_IMAGE=${current_image}
 NEW_IMAGE=${new_image}
+PULLED_IMAGE_ID=${pulled_image_id}
 PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
     then
@@ -1213,11 +1293,12 @@ json_apply() {
 }
 
 json_apply_source() {
-    local built old_ref new_ref new_version
+    local built old_ref new_ref new_version expected_hash
     built=$(read_pending_state | grep '^BUILT_BINARY=' | cut -d= -f2-)
     old_ref=$(read_pending_state | grep '^OLD_REF=' | cut -d= -f2-)
     new_ref=$(read_pending_state | grep '^NEW_REF=' | cut -d= -f2-)
     new_version=$(read_pending_state | grep '^NEW_VERSION=' | cut -d= -f2-)
+    expected_hash=$(read_pending_state | grep '^BUILT_HASH=' | cut -d= -f2-)
     if [[ -z "$built" || ! -f "$built" ]]; then
         json_event error "prepared binary not found at ${built:-?}"; return 1
     fi
@@ -1247,7 +1328,15 @@ json_apply_source() {
     start_service
 
     json_event step "Verifying node health"
+    local verify_ok=false
     if verify_health_after_restart; then
+        if verify_installed_binary_hash "$installed" "$expected_hash"; then
+            verify_ok=true
+        else
+            json_event step "installed binary does not match the prepared build -- failing verify"
+        fi
+    fi
+    if [[ "$verify_ok" == "true" ]]; then
         clear_pending_state
         # Record the now-running ref so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
@@ -1256,7 +1345,7 @@ json_apply_source() {
         return 0
     fi
 
-    json_event step "Health check failed -- rolling back to previous binary"
+    json_event step "Post-update verification failed -- rolling back to previous binary"
     wait_for_service_stopped "$SERVICE_NAME"
     # If the restore fails, do NOT start the service: it would come up on the
     # new binary and a passing re-verify would misreport "rolled back".
@@ -1276,9 +1365,10 @@ json_apply_source() {
 }
 
 json_apply_docker() {
-    local old_image new_image
+    local old_image new_image pulled_image_id
     old_image=$(read_pending_state | grep '^OLD_IMAGE=' | cut -d= -f2-)
     new_image=$(read_pending_state | grep '^NEW_IMAGE=' | cut -d= -f2-)
+    pulled_image_id=$(read_pending_state | grep '^PULLED_IMAGE_ID=' | cut -d= -f2-)
     if [[ -z "$old_image" || -z "$new_image" ]]; then
         json_event error "pending state is incomplete -- cannot apply"; return 1
     fi
@@ -1317,13 +1407,21 @@ json_apply_docker() {
     start_service
 
     json_event step "Verifying node health"
+    local verify_ok=false
     if verify_health_after_restart; then
+        if verify_running_image_id "$pulled_image_id"; then
+            verify_ok=true
+        else
+            json_event step "running container is not on the pulled image -- failing verify"
+        fi
+    fi
+    if [[ "$verify_ok" == "true" ]]; then
         clear_pending_state
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_image\":\"$(json_escape "$new_image")\"}"
         return 0
     fi
 
-    json_event step "Health check failed -- rolling back to previous image"
+    json_event step "Post-update verification failed -- rolling back to previous image"
     wait_for_service_stopped "$SERVICE_NAME"
     # If the restore fails, do NOT start the service: it would come up on the
     # new image and a passing re-verify would misreport "rolled back".
