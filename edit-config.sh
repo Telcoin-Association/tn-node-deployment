@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.3"
+readonly SCRIPT_VERSION="1.2.4"
 
 # Build the systemd unit file path from a unit BASE name (e.g. "telcoin").
 service_file_for() {
@@ -777,6 +777,10 @@ refresh_chain_configs() {
         print_step "Pulling latest chain configs..."
         git -C "$source_dir" pull
         print_ok "Repository updated"
+        # Warn-only: chain configs live in the superproject; keep submodules in
+        # step anyway so a later source build starts from a consistent tree.
+        tn_sync_submodules "$source_dir" || \
+            print_warn "submodule sync reported an issue -- chain configs are unaffected"
     else
         print_warn "Source directory not found at ${source_dir}"
         print_info "Cannot refresh chain configs without the cloned repository."
