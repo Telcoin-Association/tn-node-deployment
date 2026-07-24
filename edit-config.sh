@@ -711,11 +711,17 @@ edit_bls_passphrase() {
 edit_p2p_ports() {
     print_header "Edit P2P Ports"
 
+    # if/fi (not `[[ ]] &&`): this function runs under errexit, and the &&
+    # form returns 1 when the first read already found a value.
     local current_primary current_worker
     current_primary=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
-    [[ -z "$current_primary" ]] && current_primary=$(read_listener_from_launch "PRIMARY_LISTENER_MULTIADDR" || true)
+    if [[ -z "$current_primary" ]]; then
+        current_primary=$(read_listener_from_launch "PRIMARY_LISTENER_MULTIADDR" || true)
+    fi
     current_worker=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
-    [[ -z "$current_worker" ]] && current_worker=$(read_listener_from_launch "WORKER_LISTENER_MULTIADDR" || true)
+    if [[ -z "$current_worker" ]]; then
+        current_worker=$(read_listener_from_launch "WORKER_LISTENER_MULTIADDR" || true)
+    fi
 
     print_info "Current primary listener: ${current_primary:-unknown}"
     print_info "Current worker listener:  ${current_worker:-unknown}"
@@ -1112,9 +1118,14 @@ run_json_set() {
     fi
 
     # Restore whatever was backed up above (unit always, wrapper when distinct).
+    # if/fi + guarded cp: this runs under errexit, and a non-zero here would
+    # kill the script before the terminal done-event reaches the UI.
     _json_restore_backups() {
         restore_service_file "$TARGET_SERVICE_FILE" "$backup"
-        [[ -n "$launch_backup" ]] && cp -p "$launch_backup" "$TARGET_LAUNCH_FILE"
+        if [[ -n "$launch_backup" ]]; then
+            cp -p "$launch_backup" "$TARGET_LAUNCH_FILE" || \
+                json_event error "could not restore ${TARGET_LAUNCH_FILE} from ${launch_backup}"
+        fi
     }
 
     json_event step "Setting ${field}=${value}"
