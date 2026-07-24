@@ -38,7 +38,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="1.1.58"
+readonly SCRIPT_VERSION="1.1.59"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -1355,6 +1355,17 @@ run_json_mode() {
     json_setup_fds
     check_root
     detect_node_type
+    # Serialize mutating runs (a UI apply racing a CLI apply double-stops the
+    # service and races the pending-state/binary swap). Read-only check runs
+    # stay lock-free so the dashboard poll never blocks a real update.
+    case "$JSON_ACTION" in
+        prepare|apply|discard)
+            if ! tn_acquire_update_lock; then
+                json_event error "another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})} -- wait for it to finish"
+                return 1
+            fi
+            ;;
+    esac
     local install_method
     install_method=$(detect_install_method || true)
     case "$JSON_ACTION" in
@@ -1434,6 +1445,10 @@ main() {
             exit 1
             ;;
     esac
+
+    # Everything past this point can mutate node state (discard, prepare,
+    # apply) -- one update at a time. See tn_acquire_update_lock.
+    tn_acquire_update_lock || exit 1
 
     # Handle --discard flag
     if [[ "$DISCARD_PENDING" == "true" ]]; then

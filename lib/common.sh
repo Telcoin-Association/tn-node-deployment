@@ -35,7 +35,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.3.7"
+readonly COMMON_VERSION="1.3.8"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -154,6 +154,72 @@ check_root() {
         exit 1
     fi
     print_ok "Running as root"
+}
+
+# tn_acquire_update_lock -- one node-mutating update at a time.
+#
+# A UI-triggered `update-node.sh --json --apply` and a CLI run of the same
+# script used to be able to run concurrently: double service stop, racing
+# truncate-writes to .pending-update, and two binary/image swaps interleaving.
+# Callers acquire this lock before any mutating mode (prepare/apply/discard,
+# or the interactive menu) and simply exit on failure; read-only --check runs
+# never take it.
+#
+# Primary path is flock(1) on /var/lock (present on every systemd host): fd 9
+# is held open for the life of the process, so the kernel releases the lock on
+# ANY exit -- crash, SIGKILL, reboot -- and stale locks are impossible. Where
+# flock or /var/lock is missing (stock macOS), fall back to an atomic mkdir
+# lock (mkdir fails on anything that already exists, symlinks included) with a
+# PID-staleness takeover. On failure, TN_UPDATE_LOCK_HOLDER carries the
+# holder's PID ("" if unknown) so JSON-mode callers can report it.
+TN_UPDATE_LOCK_HOLDER=""
+tn_acquire_update_lock() {
+    TN_UPDATE_LOCK_HOLDER=""
+    # Overridable for tests only; production callers always use the default.
+    local lock_file="${TN_UPDATE_LOCK_FILE:-/var/lock/telcoin-update.lock}"
+    local lock_parent="${lock_file%/*}"
+
+    if command -v flock >/dev/null 2>&1 && [[ -d "$lock_parent" ]]; then
+        # Append-mode open: must not truncate the PID a current holder wrote.
+        if ! exec 9>>"$lock_file"; then
+            print_error "Cannot open lock file ${lock_file} (are you root?)"
+            return 1
+        fi
+        if ! flock -n 9; then
+            TN_UPDATE_LOCK_HOLDER="$(cat "$lock_file" 2>/dev/null || true)"
+            print_error "Another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}."
+            print_info "Wait for it to finish, or verify with: ps -fp ${TN_UPDATE_LOCK_HOLDER:-<pid>}"
+            return 1
+        fi
+        printf '%s\n' "$$" > "$lock_file" 2>/dev/null || true
+        return 0
+    fi
+
+    # mkdir fallback (no flock / no /var/lock). PID-staleness check replaces
+    # the kernel's automatic release; the dir is removed on normal exit.
+    local lock_dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
+    if mkdir "$lock_dir" 2>/dev/null; then
+        printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+        # Expand lock_dir now, not at exit time (intentional).
+        # shellcheck disable=SC2064
+        trap "rm -rf '${lock_dir}'" EXIT
+        return 0
+    fi
+    TN_UPDATE_LOCK_HOLDER="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+    if [[ -n "$TN_UPDATE_LOCK_HOLDER" ]] && ! kill -0 "$TN_UPDATE_LOCK_HOLDER" 2>/dev/null; then
+        rm -rf "$lock_dir" 2>/dev/null
+        if mkdir "$lock_dir" 2>/dev/null; then
+            TN_UPDATE_LOCK_HOLDER=""
+            printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+            # Expand lock_dir now, not at exit time (intentional).
+            # shellcheck disable=SC2064
+            trap "rm -rf '${lock_dir}'" EXIT
+            return 0
+        fi
+    fi
+    print_error "Another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}."
+    print_info "Wait for it to finish. Stale lock cleanup: rm -rf ${lock_dir}"
+    return 1
 }
 
 detect_distro() {
