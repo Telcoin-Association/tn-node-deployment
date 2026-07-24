@@ -60,9 +60,10 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # Web UI version -- its own independent line (starts at 1.0.0). This is the
 # single constant update-scripts.sh greps to decide whether the UI is stale.
-# 1.8.5: no UI change -- bumped solely to redeploy the update engine copies in
-# /opt/telcoin-ui-update/ (update-node.sh submodule-sync fix rides along).
-UI_VERSION = "1.8.5"
+# 1.8.6: no UI change -- bumped solely to redeploy the update engine copies in
+# /opt/telcoin-ui-update/ (update lock + identity verify + wrapper-aware
+# edit-config ride along; 1.8.5 carried the submodule-sync fix the same way).
+UI_VERSION = "1.8.6"
 
 NODE_TYPES = ("observer", "validator")
 

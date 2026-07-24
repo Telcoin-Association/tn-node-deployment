@@ -15,7 +15,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly SERVICE_NAME="telcoin"
 # NODE_TYPE is a non-authoritative default-view HINT, not a role. The node's role
 # is decided on-chain (tn_isValidator); the dashboard auto-promotes to the
@@ -771,6 +771,11 @@ step_generate_keys() {
     fi
 
     print_step "Generating validator keys..."
+    # Exported for BOTH branches below: the binary keytool reads it directly,
+    # and the docker branch pass-throughs it with `-e TN_BLS_PASSPHRASE` (NAME
+    # only, value taken from this environment -- same convention as the runtime
+    # wrapper). Never put the value in the docker argv: the full command line
+    # is world-readable in /proc/<pid>/cmdline for the life of the keygen.
     export TN_BLS_PASSPHRASE="$bls_passphrase"
 
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
@@ -786,7 +791,7 @@ step_generate_keys() {
         if docker run --rm \
             --user "${docker_uid}:${docker_gid}" \
             -e HOME=/home/nonroot \
-            -e TN_BLS_PASSPHRASE="$bls_passphrase" \
+            -e TN_BLS_PASSPHRASE \
             -v "${DATA_DIR}:/home/nonroot" \
             "$DOCKER_IMAGE" \
             telcoin keytool generate validator \
@@ -816,7 +821,11 @@ step_generate_keys() {
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$DATA_DIR"
 
     local passphrase_file="${CONFIG_DIR}/bls-passphrase"
-    echo "$bls_passphrase" > "$passphrase_file"
+    # Create 0600 from the first byte (umask in a subshell, like
+    # lib/observability.sh does for its token file): write-then-chmod left a
+    # window where the passphrase was readable under the default umask. The
+    # chmod stays for re-runs -- umask does not tighten a pre-existing file.
+    ( umask 077; printf '%s\n' "$bls_passphrase" > "$passphrase_file" )
     chmod 600 "$passphrase_file"
     chown "${SERVICE_USER}:${SERVICE_GROUP}" "$passphrase_file"
 

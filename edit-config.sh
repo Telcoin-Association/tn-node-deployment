@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.4"
+readonly SCRIPT_VERSION="1.2.5"
 
 # Build the systemd unit file path from a unit BASE name (e.g. "telcoin").
 service_file_for() {
@@ -39,6 +39,12 @@ detect_data_dir() {
 
 TARGET_SERVICE=""
 TARGET_SERVICE_FILE=""
+# The file that actually carries the node-launch line (image, flags, listener
+# values): the start wrapper on current installs, the unit only on legacy
+# installs that still inline the command in ExecStart. Same resolution as
+# update-node.sh (tn_node_launch_target, the 7b10e97 pattern) -- editing the
+# unit on a wrapper install silently changes nothing the service reads.
+TARGET_LAUNCH_FILE=""
 NODE_TYPE=""
 
 # =============================================================================
@@ -53,10 +59,12 @@ backup_service_file() {
     ts=$(date -u '+%Y%m%d-%H%M%S')
     backup="${file}.bak.${ts}"
     if ! cp -p "$file" "$backup"; then
-        print_error "Could not create backup of ${file}"
+        print_error "Could not create backup of ${file}" >&2
         return 1
     fi
-    print_info "Backup written: ${backup}"
+    # Info to stderr so callers capturing the path via $(...) still show it
+    # to the operator (same convention as update-node.sh backup_unit_file).
+    print_info "Backup written: ${backup}" >&2
     echo "$backup"
 }
 
@@ -83,6 +91,68 @@ read_env_var() {
 read_exec_start() {
     local service_file="$1"
     grep "^ExecStart=" "$service_file" 2>/dev/null | sed 's/^ExecStart=//'
+}
+
+# Resolve TARGET_LAUNCH_FILE for the detected service. Falls back to the unit
+# file when tn_node_launch_target cannot resolve (or names a missing wrapper,
+# e.g. a legacy install), which restores the old behaviour exactly.
+resolve_launch_file() {
+    local line
+    line="$(tn_node_launch_target 2>/dev/null || true)"
+    TARGET_LAUNCH_FILE="${line##* }"   # last field; install paths never contain spaces
+    [[ -n "$TARGET_LAUNCH_FILE" && -f "$TARGET_LAUNCH_FILE" ]] || TARGET_LAUNCH_FILE="$TARGET_SERVICE_FILE"
+}
+
+# Effective node-launch text for flag/image inspection. Wrapper files carry the
+# command across backslash-continued lines; join them so the flag helpers see
+# one logical line. Unit files keep the old ExecStart read.
+read_launch_line() {
+    local file="$1"
+    if [[ "$file" == *.service ]]; then
+        read_exec_start "$file"
+    else
+        sed -e 's/[[:space:]]*\\$//' "$file" 2>/dev/null | tr '\n' ' '
+    fi
+}
+
+# True when the resolved launch config runs the node via docker.
+is_docker_install() {
+    read_launch_line "$TARGET_LAUNCH_FILE" | grep -qF "docker run"
+}
+
+# Read VAR=value out of the launch text. Handles all three carrier forms:
+# docker -e "VAR=..." (wrapper), export VAR="..." (binary wrapper), and the
+# unquoted legacy inline-unit form. Strips the quotes the wrapper forms carry.
+read_listener_from_launch() {
+    local varname="$1"
+    read_launch_line "$TARGET_LAUNCH_FILE" | \
+        grep -oE "${varname}=\"?[^ \"]+" | head -1 | cut -d= -f2- | tr -d '"'
+}
+
+# Set one listener var everywhere the service can read it. Docker: the -e line
+# in the launch config (wrapper or legacy unit). Binary/source: the unit's
+# Environment= line AND the wrapper's export line -- the wrapper export is what
+# the process actually sees on current installs, the unit line is kept in sync
+# for legacy readers. The [^ \"] bound keeps the wrapper's closing quote.
+set_listener_var() {
+    local varname="$1" value="$2"
+    if is_docker_install; then
+        perl -i -pe "s|${varname}=[^ \"]+|${varname}=${value}|g" "$TARGET_LAUNCH_FILE"
+    else
+        set_env_var "$varname" "$value" "$TARGET_SERVICE_FILE"
+        if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
+            perl -i -pe "s|^(export ${varname}=).*\$|\${1}\"${value}\"|" "$TARGET_LAUNCH_FILE"
+        fi
+    fi
+}
+
+# Back up every file an edit can touch: the launch file, plus the unit when
+# they differ (listener edits keep both in sync). Must succeed before any edit.
+backup_edit_targets() {
+    backup_service_file "$TARGET_LAUNCH_FILE" >/dev/null || return 1
+    if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
+        backup_service_file "$TARGET_SERVICE_FILE" >/dev/null || return 1
+    fi
 }
 
 # Extract a specific flag value from the ExecStart line
@@ -163,11 +233,17 @@ remove_flag() {
     perl -i -pe "s| \Q${flag}\E||g" "$service_file"
 }
 
-# Replace verbosity flags (-vvv, -vvvv etc) in ExecStart
+# Replace the verbosity flag (-v .. -vvvvv) in a launch file. The old
+# `sed s| -v\+ |...|` matched the FIRST " -v " on the line -- on a docker
+# launch line that is the -v VOLUME flag, not verbosity, and on wrapper files
+# the verbosity token sits at line start where the leading-space pattern never
+# matched at all. Match -v{1,5} only when followed by a line continuation,
+# another --flag, or end of line: a volume -v is always followed by a path
+# (and `command -v tool` by a bare word), so neither can match.
 set_verbosity() {
     local new_verbosity="$1"
     local service_file="$2"
-    sed -i "s| -v\+ | ${new_verbosity} |" "$service_file"
+    perl -i -pe "s/(^|\s)-v{1,5}(?=\s+(?:\\\\|--)|\s*\$)/\${1}${new_verbosity}/" "$service_file"
 }
 
 # Apply changes: reload systemd and optionally restart
@@ -210,6 +286,7 @@ detect_node() {
         exit 1
     fi
     TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
+    resolve_launch_file
     NODE_TYPE="$(tn_resolve_node_type)"
     print_ok "Detected: ${NODE_TYPE} node"
 }
@@ -222,8 +299,11 @@ show_current_config() {
     set +e  # Disable exit-on-error for config reading -- grep returning no match is fine
     print_header "Current Configuration -- ${NODE_TYPE}"
 
+    # Inspect the file that actually launches the node (wrapper on current
+    # installs) -- the unit's ExecStart is just the wrapper path there and
+    # carries none of the flags below.
     local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+    exec_start=$(read_launch_line "$TARGET_LAUNCH_FILE")
 
     local primary_multiaddr worker_multiaddr metrics verbosity rpc_enabled bls_pass_set
     local is_docker=false
@@ -239,14 +319,14 @@ show_current_config() {
     fi
 
     primary_multiaddr=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
-    # For Docker, multiaddrs are in ExecStart not Environment lines
+    # No unit Environment= line (docker installs): value lives in the launch file
     if [[ -z "$primary_multiaddr" ]]; then
-        primary_multiaddr=$(echo "$exec_start" | grep -oE 'PRIMARY_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+        primary_multiaddr=$(read_listener_from_launch "PRIMARY_LISTENER_MULTIADDR" || true)
     fi
 
     worker_multiaddr=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
     if [[ -z "$worker_multiaddr" ]]; then
-        worker_multiaddr=$(echo "$exec_start" | grep -oE 'WORKER_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+        worker_multiaddr=$(read_listener_from_launch "WORKER_LISTENER_MULTIADDR" || true)
     fi
 
     metrics=$(read_flag "--metrics" "$exec_start")
@@ -314,17 +394,14 @@ edit_listener_addresses() {
     set +e
     print_header "Edit Listener Addresses"
 
-    local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
-
     local current_primary current_worker
     current_primary=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
     if [[ -z "$current_primary" ]]; then
-        current_primary=$(echo "$exec_start" | grep -oE 'PRIMARY_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+        current_primary=$(read_listener_from_launch "PRIMARY_LISTENER_MULTIADDR" || true)
     fi
     current_worker=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
     if [[ -z "$current_worker" ]]; then
-        current_worker=$(echo "$exec_start" | grep -oE 'WORKER_LISTENER_MULTIADDR=[^ ]+' | cut -d= -f2 || true)
+        current_worker=$(read_listener_from_launch "WORKER_LISTENER_MULTIADDR" || true)
     fi
 
     print_info "Current primary: ${current_primary:-unknown}"
@@ -365,19 +442,13 @@ edit_listener_addresses() {
         esac
     done
 
-    local backup
-    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || { set -e; return; }
+    backup_edit_targets || { set -e; return; }
 
-    # Update service file -- handle both binary and Docker installs
-    if echo "$exec_start" | grep -qF "docker run"; then
-        # Docker -- update ExecStart directly using perl. The multiaddr is
-        # already validated above, so the substitution is safe.
-        perl -i -pe "s|PRIMARY_LISTENER_MULTIADDR=[^ ]+|PRIMARY_LISTENER_MULTIADDR=${new_primary}|g" "$TARGET_SERVICE_FILE"
-        perl -i -pe "s|WORKER_LISTENER_MULTIADDR=[^ ]+|WORKER_LISTENER_MULTIADDR=${new_worker}|g" "$TARGET_SERVICE_FILE"
-    else
-        set_env_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" "$TARGET_SERVICE_FILE"
-        set_env_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"  "$TARGET_SERVICE_FILE"
-    fi
+    # Write wherever the service actually reads (launch file for docker,
+    # unit Environment= plus wrapper export for binary/source). Multiaddrs
+    # are already validated above, so the substitutions are safe.
+    set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary"
+    set_listener_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"
 
     print_ok "Listener addresses updated"
     print_info "Primary: ${new_primary}"
@@ -390,7 +461,7 @@ edit_metrics() {
     print_header "Edit Metrics Address"
 
     local exec_start current_metrics
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+    exec_start=$(read_launch_line "$TARGET_LAUNCH_FILE")
     current_metrics=$(read_flag "--metrics" "$exec_start")
 
     print_info "Current metrics address: ${current_metrics}"
@@ -409,10 +480,9 @@ edit_metrics() {
         return
     fi
 
-    local backup
-    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+    backup_edit_targets || return
 
-    set_flag_value "--metrics" "$new_metrics" "$TARGET_SERVICE_FILE"
+    set_flag_value "--metrics" "$new_metrics" "$TARGET_LAUNCH_FILE"
     print_ok "Metrics address updated to: ${new_metrics}"
     apply_changes
 }
@@ -443,16 +513,29 @@ edit_verbosity() {
         esac
     done
 
-    local backup
-    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+    backup_edit_targets || return
 
-    set_verbosity "$new_verbosity" "$TARGET_SERVICE_FILE"
+    set_verbosity "$new_verbosity" "$TARGET_LAUNCH_FILE"
     print_ok "Log verbosity updated to: ${new_verbosity}"
     apply_changes
 }
 
 edit_rpc() {
     print_header "Edit RPC Access"
+
+    # The --http flags live in the start wrapper on current installs, and the
+    # ExecStart rewrite below only works on legacy inline units. Refuse loudly
+    # instead of appending junk arguments to the unit's wrapper path.
+    if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
+        print_warn "This install launches via a start wrapper -- RPC editing here"
+        print_warn "is not supported yet for wrapper installs."
+        print_info "Edit the --http flags on the last line of:"
+        print_info "  ${TARGET_LAUNCH_FILE}"
+        print_info "then restart: sudo systemctl restart ${TARGET_SERVICE}"
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
 
     local exec_start
     exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
@@ -628,12 +711,17 @@ edit_bls_passphrase() {
 edit_p2p_ports() {
     print_header "Edit P2P Ports"
 
-    local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
-
+    # if/fi (not `[[ ]] &&`): this function runs under errexit, and the &&
+    # form returns 1 when the first read already found a value.
     local current_primary current_worker
-    current_primary=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
-    current_worker=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE")
+    current_primary=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
+    if [[ -z "$current_primary" ]]; then
+        current_primary=$(read_listener_from_launch "PRIMARY_LISTENER_MULTIADDR" || true)
+    fi
+    current_worker=$(read_env_var "WORKER_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
+    if [[ -z "$current_worker" ]]; then
+        current_worker=$(read_listener_from_launch "WORKER_LISTENER_MULTIADDR" || true)
+    fi
 
     print_info "Current primary listener: ${current_primary:-unknown}"
     print_info "Current worker listener:  ${current_worker:-unknown}"
@@ -667,8 +755,7 @@ edit_p2p_ports() {
         return
     fi
 
-    local backup
-    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+    backup_edit_targets || return
 
     # Rebuild multiaddrs with new ports keeping same IP/protocol
     local new_primary new_worker
@@ -680,8 +767,8 @@ edit_p2p_ports() {
         new_worker="/ip4/0.0.0.0/udp/${new_worker_port}/quic-v1"
     fi
 
-    set_env_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" "$TARGET_SERVICE_FILE"
-    set_env_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"  "$TARGET_SERVICE_FILE"
+    set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary"
+    set_listener_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"
     print_ok "P2P ports updated"
     print_info "Primary: ${new_primary}"
     print_info "Worker:  ${new_worker}"
@@ -692,7 +779,7 @@ edit_docker_image() {
     print_header "Update Docker Image"
 
     local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+    exec_start=$(read_launch_line "$TARGET_LAUNCH_FILE")
 
     if ! echo "$exec_start" | grep -qF "docker run"; then
         print_warn "This node is not running via Docker."
@@ -742,12 +829,11 @@ edit_docker_image() {
     fi
     print_ok "Image pulled successfully"
 
-    local backup
-    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+    backup_edit_targets || return
 
-    # Replace old image with new image in ExecStart
-    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_SERVICE_FILE"
-    print_ok "Service file updated to use: ${new_image}"
+    # Replace old image with new image in the launch file (wrapper or unit)
+    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_LAUNCH_FILE"
+    print_ok "Launch config updated to use: ${new_image}"
     apply_changes
 }
 
@@ -947,17 +1033,11 @@ json_event() {
     json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
 }
 
-# Set one listener multiaddr in place, handling docker (ExecStart -e VAR=...)
-# and source (Environment="VAR=...") installs the same way the menu does.
+# Set one listener multiaddr in place -- same wrapper-aware writer the menu
+# uses (docker launch file, or unit Environment= + wrapper export).
 json_set_listener() {
     local varname="$1" value="$2"
-    local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
-    if echo "$exec_start" | grep -qF "docker run"; then
-        perl -i -pe "s|${varname}=[^ ]+|${varname}=${value}|g" "$TARGET_SERVICE_FILE"
-    else
-        set_env_var "$varname" "$value" "$TARGET_SERVICE_FILE"
-    fi
+    set_listener_var "$varname" "$value"
 }
 
 # Pull + swap the docker image (docker installs only). Mirrors edit_docker_image.
@@ -965,7 +1045,7 @@ json_set_docker_image() {
     local new_image="$1"
     validate_docker_image "$new_image" || { json_event error "invalid docker image reference: ${new_image}"; return 1; }
     local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
+    exec_start=$(read_launch_line "$TARGET_LAUNCH_FILE")
     echo "$exec_start" | grep -qF "docker run" || { json_event error "node is not a docker install"; return 1; }
     local current_image
     current_image=$(echo "$exec_start" | grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' | head -1)
@@ -973,7 +1053,7 @@ json_set_docker_image() {
     [[ -n "$current_image" ]] || { json_event error "could not determine current docker image"; return 1; }
     json_event step "Pulling image ${new_image}"
     docker pull "$new_image" >&2 || { json_event error "failed to pull image: ${new_image}"; return 1; }
-    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_SERVICE_FILE"
+    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_LAUNCH_FILE"
 }
 
 # Validate + apply a single field edit to the (already backed-up) unit file.
@@ -988,10 +1068,10 @@ json_set_field() {
             json_set_listener "WORKER_LISTENER_MULTIADDR" "$value" ;;
         metrics)
             validate_ip_port "$value" || { json_event error "invalid metrics address (want IPv4:PORT): ${value}"; return 1; }
-            set_flag_value "--metrics" "$value" "$TARGET_SERVICE_FILE" ;;
+            set_flag_value "--metrics" "$value" "$TARGET_LAUNCH_FILE" ;;
         verbosity)
             [[ "$value" =~ ^-v{1,5}$ ]] || { json_event error "verbosity must be -v .. -vvvvv"; return 1; }
-            set_verbosity "$value" "$TARGET_SERVICE_FILE" ;;
+            set_verbosity "$value" "$TARGET_LAUNCH_FILE" ;;
         docker_image)
             json_set_docker_image "$value" || return 1 ;;
         *)
@@ -1020,22 +1100,38 @@ run_json_set() {
     TARGET_SERVICE="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
     TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
     [[ -f "$TARGET_SERVICE_FILE" ]] || { json_event error "node not installed: ${TARGET_SERVICE}"; return 1; }
+    resolve_launch_file
     [[ -n "$JSON_SET_PAIR" && "$JSON_SET_PAIR" == *=* ]] || { json_event error "missing --set field=value"; return 1; }
 
     local field="${JSON_SET_PAIR%%=*}"
     local value="${JSON_SET_PAIR#*=}"
 
-    # Back up the unit before any in-place edit (own the path here so no print_*
-    # noise leaks into the captured value).
-    local ts backup
+    # Back up BOTH files an edit can touch before any in-place write (own the
+    # paths here so no print_* noise leaks into the captured value).
+    local ts backup launch_backup=""
     ts=$(date -u '+%Y%m%d-%H%M%S')
     backup="${TARGET_SERVICE_FILE}.bak.${ts}"
     cp -p "$TARGET_SERVICE_FILE" "$backup" || { json_event error "could not back up unit file"; return 1; }
+    if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
+        launch_backup="${TARGET_LAUNCH_FILE}.bak.${ts}"
+        cp -p "$TARGET_LAUNCH_FILE" "$launch_backup" || { json_event error "could not back up launch file"; return 1; }
+    fi
+
+    # Restore whatever was backed up above (unit always, wrapper when distinct).
+    # if/fi + guarded cp: this runs under errexit, and a non-zero here would
+    # kill the script before the terminal done-event reaches the UI.
+    _json_restore_backups() {
+        restore_service_file "$TARGET_SERVICE_FILE" "$backup"
+        if [[ -n "$launch_backup" ]]; then
+            cp -p "$launch_backup" "$TARGET_LAUNCH_FILE" || \
+                json_event error "could not restore ${TARGET_LAUNCH_FILE} from ${launch_backup}"
+        fi
+    }
 
     json_event step "Setting ${field}=${value}"
     if ! json_set_field "$field" "$value"; then
-        restore_service_file "$TARGET_SERVICE_FILE" "$backup"
-        json_emit "{\"event\":\"done\",\"ok\":false,\"field\":\"$(json_escape "$field")\",\"msg\":\"edit rejected -- unit unchanged\"}"
+        _json_restore_backups
+        json_emit "{\"event\":\"done\",\"ok\":false,\"field\":\"$(json_escape "$field")\",\"msg\":\"edit rejected -- launch config unchanged\"}"
         return 1
     fi
 
@@ -1045,7 +1141,7 @@ run_json_set() {
     fi
 
     json_event step "Service did not come back healthy -- rolling back"
-    restore_service_file "$TARGET_SERVICE_FILE" "$backup"
+    _json_restore_backups
     systemctl daemon-reload
     systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
     sleep 3
