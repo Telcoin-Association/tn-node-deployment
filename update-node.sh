@@ -31,7 +31,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.56"
+readonly SCRIPT_VERSION="1.1.57"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -469,6 +469,20 @@ prepare_source_build() {
     fi
     # Pull if this is a branch (not a tag) so we get the latest commit on it
     git -C "$TN_SOURCE_DIR" pull --ff-only 2>/dev/null || true
+
+    # checkout/pull move the superproject only; sync submodules to the new ref
+    # or the build fails on files the stale submodule doesn't have (this is
+    # what broke v0.12.0-adiri source updates -- see tn_sync_submodules).
+    # Runs before the disk check and build confirmation so the operator never
+    # signs off on a 20-40 minute build against a broken tree.
+    print_step "Syncing git submodules..."
+    if ! tn_sync_submodules "$TN_SOURCE_DIR"; then
+        print_error "git submodule sync failed."
+        print_info "Manual fix, then re-run the update:"
+        print_info "  git -C ${TN_SOURCE_DIR} submodule update --init --recursive --force"
+        return 1
+    fi
+    print_ok "Submodules: $(git -C "$TN_SOURCE_DIR" submodule status 2>/dev/null | tr '\n' ' ')"
 
     # The adiri feature flag is required for testnet builds; mainnet builds omit it.
     local network cargo_features=""
@@ -1026,6 +1040,16 @@ json_prepare_source() {
         fi
     fi
     git -C "$TN_SOURCE_DIR" pull --ff-only 2>/dev/null || true
+
+    # checkout/pull move the superproject only; sync submodules to the new ref
+    # or the build fails on files the stale submodule doesn't have (this is
+    # what broke v0.12.0-adiri source updates -- see tn_sync_submodules).
+    json_event step "Syncing git submodules"
+    if ! tn_sync_submodules "$TN_SOURCE_DIR"; then
+        json_event error "git submodule sync failed -- run: git -C ${TN_SOURCE_DIR} submodule update --init --recursive --force"
+        return 1
+    fi
+    json_event step "Submodules: $(git -C "$TN_SOURCE_DIR" submodule status 2>/dev/null | tr '\n' ' ')"
 
     # The adiri feature flag is required for testnet builds; mainnet omits it.
     local network cargo_features=""

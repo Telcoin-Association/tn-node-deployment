@@ -876,6 +876,33 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-node v1.1.57 — sync submodules before source builds
+The v0.12.0-adiri release moved the `tn-contracts` submodule pointer, and the new
+code `include_str!`s files that only exist in the new submodule commit. Both source
+prepare paths in `update-node.sh` did `git checkout` + `git pull` but never
+`git submodule update`, so every source-build node hit a cargo error about a missing
+`deployments-*.json` mid-update. (Fresh installs were unaffected — `setup-node.sh`
+already syncs.)
+
+`lib/common.sh v1.3.7` adds `tn_sync_submodules`, which runs `git submodule sync`
+then `git submodule update --init --recursive --force` to pin submodules to the
+checked-out ref. Both `update-node.sh` prepare paths (interactive and UI/`--json`)
+now call it and hard-fail with a clear message before any build starts; the
+chain-config refresh paths (`ensure_chain_configs_available`, `edit-config.sh
+v1.2.4`) sync too but only warn on failure, since chain configs live in the
+superproject.
+
+**If your source update already failed on this:** just re-run the update — prepare
+now heals the submodule before building. Or fix it manually first:
+
+```bash
+sudo git -C /opt/telcoin-source submodule update --init --recursive --force
+```
+
+`update-scripts.sh v1.1.64` re-cut with refreshed `.sha256` sidecars. `ui/server.py
+v1.8.5` carries no UI change — the bump redeploys the root-owned update engine in
+`/opt/telcoin-ui-update/` so UI-driven updates pick up the fix.
+
 ### testnet baseline → v0.12.0-adiri
 adiri testnet moved to `v0.12.0-adiri`, and this release points every default at it.
 `lib/common.sh v1.3.6` bumps `DEFAULT_DOCKER_IMAGE` (the fallback used only when the

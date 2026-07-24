@@ -35,7 +35,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.3.6"
+readonly COMMON_VERSION="1.3.7"
 
 # Validator node hardware requirements (official Telcoin Association specs)
 readonly VALIDATOR_MIN_RAM_GB=128
@@ -764,6 +764,26 @@ select_install_method() {
 # CHAIN CONFIG FILES
 # -----------------------------------------------------------------------------
 
+# tn_sync_submodules <repo_dir> — pin submodules to the checked-out ref.
+#
+# `git checkout <tag>` + `git pull` move the superproject but NOT its
+# submodules, so a source tree can sit on a ref whose submodule pointer was
+# advanced while the working copy still holds the old submodule content. That
+# is exactly what broke v0.12.0-adiri source updates: tn-contracts gained
+# deployments/*.json that genesis.rs include_str!'s, and every node updated via
+# update-node.sh (which never synced submodules) died in cargo with a missing-
+# file error. `submodule sync` first, so URL changes in .gitmodules are honored
+# before fetching; then `update --init --recursive --force` to pin content to
+# the superproject's recorded shas. Returns non-zero when the update fails
+# (e.g. submodule remote unreachable); callers decide hard-fail vs warn.
+# No-op (returns 0) when the directory is not a git checkout.
+tn_sync_submodules() {
+    local repo_dir="$1"
+    [[ -d "${repo_dir}/.git" ]] || return 0
+    git -C "$repo_dir" submodule sync --recursive 2>/dev/null || true
+    git -C "$repo_dir" submodule update --init --recursive --force
+}
+
 ensure_chain_configs_available() {
     print_step "Ensuring chain-config files are available..."
 
@@ -774,6 +794,10 @@ ensure_chain_configs_available() {
         git -C "$source_dir" pull --ff-only 2>/dev/null && \
             print_ok "Repository up to date" || \
             print_warn "Could not pull latest. Using existing files."
+        # Warn-only: chain configs are plain files in the superproject, so a
+        # submodule failure must not block them; it only matters for builds.
+        tn_sync_submodules "$source_dir" || \
+            print_warn "submodule sync reported an issue -- chain configs are unaffected"
         return 0
     fi
 
