@@ -876,6 +876,50 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-node v1.1.60 — update lock, artifact-identity verify, apply-path hardening
+Three operational fixes to the update engine (`lib/common.sh v1.3.8`):
+
+- **One update at a time.** A UI-triggered update and a CLI run could previously run
+  concurrently — double service stop, racing writes to `.pending-update`, interleaved
+  binary/image swaps. Every mutating mode now takes `/var/lock/telcoin-update.lock`
+  (`flock`, kernel-released on any exit, holder PID reported on contention); read-only
+  `--check` polls never block a real update.
+- **Verify means the new version is live.** Post-apply verification used to pass on
+  "service active + RPC responds", which a no-op update also satisfies. Source applies
+  now require the installed binary to hash-match the prepared build; docker prepares
+  record the pulled image ID and applies require the running container to be on it.
+  Mismatch triggers the existing rollback. Pending states written by older versions
+  still apply (the identity check skips with a warning).
+- **No more mid-apply aborts.** Sourcing `lib/common.sh` had silently re-enabled
+  `set -e`, so an unguarded failure after "service stopped" aborted the script with the
+  node down and the designed verify→rollback flow never ran. Errexit is now off (as the
+  script's own header always intended), every state-changing step is explicitly
+  handled, pending-state write failures can no longer report "saved", and a failed
+  rollback restore stops loudly with manual recovery steps instead of restarting the
+  new artifact and misreporting "rolled back".
+
+### edit-config v1.2.5 — edits now hit the file the service actually reads
+Config detection grepped the unit's `ExecStart` for `docker run`, but current installs
+launch through the start wrapper (`/opt/telcoin/start-<svc>.sh`) — docker installs were
+misdetected as "binary", every field showed unknown, edits silently rewrote unit lines
+the service never reads, and the docker-image editor refused to run. Detection and all
+edits (listeners, p2p ports, metrics, verbosity, image — menu and `--json set`) now
+resolve the launch file the same way `update-node.sh` does and write there; listener
+edits on binary installs update the unit `Environment=` line and the wrapper `export`
+together. Also fixes a latent verbosity-edit bug where the first ` -v ` on a docker
+launch line — the volume flag — could be replaced instead of the verbosity flag. RPC
+editing on wrapper installs is refused with manual instructions for now.
+
+### setup-node v1.0.1 — keygen secrets hygiene
+The docker keygen passed the BLS passphrase as `-e TN_BLS_PASSPHRASE="<value>"` — visible
+in `ps`/`/proc/*/cmdline` for the life of the keygen. It now uses name-only env
+pass-through, the same convention as the runtime wrapper. The passphrase file is also
+created `0600` from the first byte (umask subshell) instead of write-then-chmod.
+
+`update-scripts.sh v1.1.65` re-cut with refreshed `.sha256` sidecars. `ui/server.py
+v1.8.6` carries no UI change — the bump redeploys the root-owned update engine in
+`/opt/telcoin-ui-update/` so UI-driven updates and config edits pick these up.
+
 ### update-node v1.1.57 — sync submodules before source builds
 The v0.12.0-adiri release moved the `tn-contracts` submodule pointer, and the new
 code `include_str!`s files that only exist in the new submodule commit. Both source
