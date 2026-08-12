@@ -876,6 +876,17 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-node v1.1.61 — force-fetch tags so a re-cut release tag can't resurrect an old build
+Release tags are occasionally re-cut at the same name (a bad `v0.13.0-adiri` build was
+retagged to a corrected commit). Both prepare flows checked the requested ref out
+local-first, so a node that already held the OLD tag silently rebuilt the retired
+commit — and the `git describe` version marker still read like the right release.
+Prepare (interactive and `--json`) now runs `git fetch origin --tags --force` before
+checkout, and the newest-tag probe (`latest_source_ref`) fetches with `--force` too,
+matching the thorough refresh `setup-node.sh` already does on reused clones. Offline
+prepares keep working: a failed fetch is tolerated and checkout proceeds against
+local refs.
+
 ### update-node v1.1.60 — update lock, artifact-identity verify, apply-path hardening
 Three operational fixes to the update engine (`lib/common.sh v1.3.8`):
 
