@@ -38,7 +38,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="1.1.60"
+readonly SCRIPT_VERSION="1.1.61"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -553,6 +553,16 @@ prepare_source_build() {
     current_ref=$(detect_current_source_ref || echo "unknown")
     print_info "Current source ref: ${current_ref}"
     print_info "Target ref:         ${new_ref}"
+
+    # Force-fetch tags BEFORE the checkout below: that flow prefers a local
+    # ref, and release tags are occasionally re-cut at the same name (e.g. a
+    # bad v0.13.0-adiri retagged to a corrected commit). Without --force the
+    # stale local tag wins and the node silently rebuilds the OLD commit while
+    # `git describe` still reports the right-looking version. Offline prepares
+    # are tolerated (checkout proceeds against local refs). setup-node.sh
+    # already refreshes reused clones with `fetch --all --tags --prune --force`
+    # for exactly this reason.
+    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 2>/dev/null || true
 
     print_step "Checking out: ${new_ref}"
     if ! git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
@@ -1077,7 +1087,9 @@ latest_source_ref() {
         testnet) suffix="$NETWORK_TAG_SUFFIX_TESTNET" ;;
         mainnet) suffix="$NETWORK_TAG_SUFFIX_MAINNET" ;;
     esac
-    git -C "$TN_SOURCE_DIR" fetch --tags --quiet 2>/dev/null || true
+    # --force so a re-cut tag (same name, new commit) updates the local ref;
+    # without it the newest-tag probe keeps reporting the stale commit's tag.
+    git -C "$TN_SOURCE_DIR" fetch --tags --force --quiet 2>/dev/null || true
     local t
     while IFS= read -r t; do
         [[ -z "$t" ]] && continue
@@ -1145,6 +1157,10 @@ json_prepare_source() {
     fi
     local current_ref
     current_ref=$(detect_current_source_ref || echo "unknown")
+
+    # Force-fetch tags before checkout -- same stale re-cut-tag hazard as the
+    # interactive path (see prepare_source_build); offline is tolerated.
+    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 2>/dev/null || true
 
     json_event step "Checking out ${new_ref}"
     if ! git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
