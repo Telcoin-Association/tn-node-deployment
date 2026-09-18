@@ -26,6 +26,11 @@ NETWORK=""
 CHAIN_ID=""
 CHAIN_NAME=""
 RPC_URL=""
+# Public, operator-facing endpoints this node serves through its Caddy edge.
+# Recorded in .node-meta so the UI, operators and tooling can read the node's own
+# externally reachable RPC/WS addresses instead of inferring them from a hostname.
+PUBLIC_RPC_URL=""
+PUBLIC_WS_URL=""
 EXPLORER_URL=""
 INSTALL_METHOD=""
 BINARY_PATH=""
@@ -1188,6 +1193,8 @@ METRICS_PORT=${METRICS_PORT:-9101}
 ENABLE_VPN=${ENABLE_VPN:-false}
 VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}
 VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}
+PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}
+PUBLIC_WS_URL=${PUBLIC_WS_URL:-}
 EOF
     chmod 600 "$meta_file"
     print_ok "Node metadata written: ${meta_file}"
@@ -1423,6 +1430,8 @@ main() {
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
             --rpc-public)          shift 2 ;;  # public RPC is coming soon (Caddy-based); always private for now
+            --public-rpc-url)      PUBLIC_RPC_URL="${2:-}"; shift 2 ;;
+            --public-ws-url)       PUBLIC_WS_URL="${2:-}"; shift 2 ;;
             --advertised-name)     ADVERTISED_NAME="${2:-}"; shift 2 ;;
             --data-dir)            DATA_DIR="${2:-$DATA_DIR}"; shift 2 ;;
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;

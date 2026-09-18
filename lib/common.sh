@@ -28,7 +28,10 @@ readonly MAINNET_EXPLORER="https://scan.telcoin.network"
 
 readonly DEVNET_CHAIN_ID="32285"
 readonly DEVNET_CHAIN_NAME="devnet"
-readonly DEVNET_RPC_URL="${DEVNET_RPC_URL:-}"
+# Devnet now has a global load balancer in front of all five nodes, so it has a
+# canonical RPC URL exactly like testnet. Previously empty, which left setup-node.sh
+# printing a blank "RPC" line to devnet operators. Still env-overridable.
+readonly DEVNET_RPC_URL="${DEVNET_RPC_URL:-https://rpc.devnet.telcoin.network}"
 readonly DEVNET_EXPLORER="${DEVNET_EXPLORER:-}"
 
 readonly DEFAULT_P2P_PORT="49590"
