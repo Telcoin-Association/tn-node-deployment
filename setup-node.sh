@@ -1218,7 +1218,15 @@ EOF
         check_rpc_alive "$local_rpc" 15 6 || print_warn "RPC not yet responding -- normal during startup."
 
         echo ""
-        check_validator_onchain_status "$VALIDATOR_ADDRESS" "$local_rpc"
+        # `|| true` is REQUIRED, not defensive. This is a purely informational probe, but
+        # it returns 1 whenever the address is missing or malformed ("Invalid validator
+        # address -- skipping on-chain check", lib/common.sh:1073-1076) and this file runs
+        # under `set -e`. Bare, it aborts finalize AFTER the service is already up but
+        # BEFORE the `systemctl enable` below -- leaving a node that runs now and never
+        # comes back from a reboot, while the caller sees only {"ok":false,"rc":1}.
+        # The repo's two other callers already guard it this way (check-node.sh:119,
+        # update-node.sh:894); this one was the outlier.
+        check_validator_onchain_status "$VALIDATOR_ADDRESS" "$local_rpc" || true
 
         if json_mode || confirm "Enable auto-start on server reboot?"; then
             systemctl enable "$SERVICE_NAME"
