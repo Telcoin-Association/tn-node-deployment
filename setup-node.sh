@@ -26,6 +26,19 @@ NETWORK=""
 CHAIN_ID=""
 CHAIN_NAME=""
 RPC_URL=""
+# Public, operator-facing endpoints this node serves through its Caddy edge.
+# Recorded in .node-meta so the UI, operators and tooling can read the node's own
+# externally reachable RPC/WS addresses instead of inferring them from a hostname.
+PUBLIC_RPC_URL=""
+PUBLIC_WS_URL=""
+# Advertised worker JSON-RPC endpoint, baked into node-info.yaml at KEYGEN time and carried
+# from there into committee.yaml by the genesis build. Distinct from PUBLIC_* above, which
+# are operator-facing .node-meta breadcrumbs only: THESE reach the network, published through
+# the kademlia node record so wallets and dapps can discover where to submit transactions.
+# telcoin-network attaches RpcInfo to the WORKER node only (primary stays null), and
+# --rpc-ws requires --rpc-http.
+ADVERTISE_RPC_HTTP=""
+ADVERTISE_RPC_WS=""
 EXPLORER_URL=""
 INSTALL_METHOD=""
 BINARY_PATH=""
@@ -788,6 +801,15 @@ step_generate_keys() {
         local docker_uid docker_gid
         docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
         docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
+        # Optional advertised-RPC args, emitted ONLY when set so a caller that passes
+        # neither produces a byte-identical keytool command line to before. --rpc-ws is
+        # gated behind --rpc-http because clap declares `requires = "rpc_http"` and would
+        # reject --rpc-ws on its own.
+        local rpc_args=()
+        if [[ -n "$ADVERTISE_RPC_HTTP" ]]; then
+            rpc_args+=(--rpc-http "$ADVERTISE_RPC_HTTP")
+            [[ -n "$ADVERTISE_RPC_WS" ]] && rpc_args+=(--rpc-ws "$ADVERTISE_RPC_WS")
+        fi
         if docker run --rm \
             --user "${docker_uid}:${docker_gid}" \
             -e HOME=/home/nonroot \
@@ -798,18 +820,25 @@ step_generate_keys() {
             --datadir /home/nonroot \
             --address "$VALIDATOR_ADDRESS" \
             --external-primary-addr "$PRIMARY_MULTIADDR" \
-            --external-worker-addrs "$WORKER_MULTIADDR"; then
+            --external-worker-addrs "$WORKER_MULTIADDR" \
+            "${rpc_args[@]}"; then
             print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."
             exit 1
         fi
     else
+        rpc_args=()
+        if [[ -n "$ADVERTISE_RPC_HTTP" ]]; then
+            rpc_args+=(--rpc-http "$ADVERTISE_RPC_HTTP")
+            [[ -n "$ADVERTISE_RPC_WS" ]] && rpc_args+=(--rpc-ws "$ADVERTISE_RPC_WS")
+        fi
         if "$BINARY_PATH" keytool generate validator \
             --datadir "$DATA_DIR" \
             --address "$VALIDATOR_ADDRESS" \
             --external-primary-addr "$PRIMARY_MULTIADDR" \
-            --external-worker-addrs "$WORKER_MULTIADDR"; then
+            --external-worker-addrs "$WORKER_MULTIADDR" \
+            "${rpc_args[@]}"; then
             print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."
@@ -1188,6 +1217,8 @@ METRICS_PORT=${METRICS_PORT:-9101}
 ENABLE_VPN=${ENABLE_VPN:-false}
 VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}
 VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}
+PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}
+PUBLIC_WS_URL=${PUBLIC_WS_URL:-}
 EOF
     chmod 600 "$meta_file"
     print_ok "Node metadata written: ${meta_file}"
@@ -1218,7 +1249,15 @@ EOF
         check_rpc_alive "$local_rpc" 15 6 || print_warn "RPC not yet responding -- normal during startup."
 
         echo ""
-        check_validator_onchain_status "$VALIDATOR_ADDRESS" "$local_rpc"
+        # `|| true` is REQUIRED, not defensive. This is a purely informational probe, but
+        # it returns 1 whenever the address is missing or malformed ("Invalid validator
+        # address -- skipping on-chain check", lib/common.sh:1073-1076) and this file runs
+        # under `set -e`. Bare, it aborts finalize AFTER the service is already up but
+        # BEFORE the `systemctl enable` below -- leaving a node that runs now and never
+        # comes back from a reboot, while the caller sees only {"ok":false,"rc":1}.
+        # The repo's two other callers already guard it this way (check-node.sh:119,
+        # update-node.sh:894); this one was the outlier.
+        check_validator_onchain_status "$VALIDATOR_ADDRESS" "$local_rpc" || true
 
         if json_mode || confirm "Enable auto-start on server reboot?"; then
             systemctl enable "$SERVICE_NAME"
@@ -1415,6 +1454,10 @@ main() {
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
             --rpc-public)          shift 2 ;;  # public RPC is coming soon (Caddy-based); always private for now
+            --public-rpc-url)      PUBLIC_RPC_URL="${2:-}"; shift 2 ;;
+            --public-ws-url)       PUBLIC_WS_URL="${2:-}"; shift 2 ;;
+            --rpc-http)            ADVERTISE_RPC_HTTP="${2:-}"; shift 2 ;;
+            --rpc-ws)              ADVERTISE_RPC_WS="${2:-}"; shift 2 ;;
             --advertised-name)     ADVERTISED_NAME="${2:-}"; shift 2 ;;
             --data-dir)            DATA_DIR="${2:-$DATA_DIR}"; shift 2 ;;
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
