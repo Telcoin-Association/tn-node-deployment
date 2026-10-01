@@ -7,6 +7,11 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Operator runbook -- `OPERATOR.md`
+A standalone runbook (deploy, sync, public RPC, stake, activate, day-2 operations) now lives
+at the repo root; README stays the reference and links to it. `followup.md` holds the
+operator-facing backlog.
+
 ### Dynamic node role -- `setup-node.sh` replaces the observer/validator split
 Telcoin Network decides a node's role from on-chain committee membership each epoch, not
 from a setup-time flag: a staked validator that is out of the committee behaves exactly like
@@ -23,6 +28,10 @@ The web UI selects the validator dashboard from the on-chain `tn_isValidator` RP
 a manual toggle; `.node-meta` keeps `NODE_TYPE` only as a non-authoritative default-view hint
 (new installs write `observer`). Existing per-role installs keep working via `lib/fallback.sh`,
 and `migrate-node-naming.sh` is the safe, opt-in path onto the unified layout.
+Superseded in part: hardware tiers now follow the per-role numbers in telcoin-network's
+hardware-requirements page (validator minimum 8 physical cores / 32 GB ECC / 2 TB NVMe) and
+the validator view follows the on-chain stake status (`getValidator`) rather than
+`tn_isValidator`; see the README changelog.
 
 ### Unified node naming -- single `telcoin` identity
 Collapses the historical dual observer/validator identity into one identity for

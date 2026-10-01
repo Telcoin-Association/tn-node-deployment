@@ -16,6 +16,10 @@ WireGuard hub, the observability backend, the GCP plumbing — is **maintainer-o
 and is **never shipped to operators**. None of it exists on an operator box. Assume
 any path under `common/` or `devnet-genesis/` is absent at runtime for a real operator.
 
+`OPERATOR.md` at the repo root is the operator runbook; `README.md` is the reference.
+When a change alters operator-visible behaviour (flags, prompts, paths, ports), update
+`OPERATOR.md` and the README together.
+
 ## The boundary rule
 
 Operator-facing scripts must **not** depend on any `common/` script at runtime. That
@@ -34,6 +38,17 @@ dependency on it.** On an operator box the public RPC proxy is repointed with
 `install-caddy.sh` (in this repo). The maintainer fleet path
 (`devnet-genesis/tasks/migrate-fleet-staggered.sh` → `common/config-caddy.sh`)
 already works and is out of scope for this repo. Leave those as provenance comments.
+
+## Node role
+
+The node binary has no `--observer` flag any more. It was removed upstream in
+telcoin-network: v0.15.0-adiri accepts it as a hidden no-op and later releases reject it.
+Role is derived each epoch from committee membership. Scripts decide the validator view
+from the on-chain stake status (`getValidator` status Staked / PendingActivation / Active /
+PendingExit) via `node_stake_status` / `node_is_staked_validator` in `lib/common.sh`.
+Never add `--observer` / `--validator` behaviour back, and never emit `--observer` to the
+binary. `update-node.sh` strips a leftover `--observer` from legacy launch files when
+updating to v0.15.0-adiri or later.
 
 ## Vendored files
 
@@ -72,3 +87,7 @@ So after you edit any tracked file:
 
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
+The same holds for the other docs: `OPERATOR.md`, `followup.md`, `CHANGELOG.md`,
+`README.md`, and `docs/` are documentation, carry no `.sha256` sidecar, and must never be
+added to the updater arrays. `README.md` must stay at the repo root, because
+`update-scripts.sh` HEAD-probes it as its connectivity check.
