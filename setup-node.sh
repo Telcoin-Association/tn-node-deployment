@@ -9,13 +9,33 @@
 # and setup-validator.sh are kept as deprecated shims that forward here.
 #
 # USAGE:
-#   sudo bash setup-node.sh
+#   sudo bash setup-node.sh [public RPC options]
+#
+# PUBLIC RPC (optional): serve https://<domain>/ + wss://<domain>/ through Caddy and
+# advertise both in node-info.yaml (worker.rpc), from the first install. reth stays on
+# 127.0.0.1; Caddy (install-caddy.sh, in this repo) is the only public edge.
+#   --rpc-domain <hostname>  Public RPC on this DNS name (implies public). Use the node's
+#                            own public name, e.g. node7.adiri.telcoin.network; the
+#                            dashboard, if enabled later, needs a different one
+#                            (dashboard.<your-node-domain>). Point its A record at this
+#                            server's INBOUND public IP, with TCP 80 + 443 open.
+#   --public-ip <ip>         Inbound public IP the A record points at (NAT / multi-IP
+#                            hosts); passed through to install-caddy.sh. In --json mode it
+#                            is also the P2P public IP, as before.
+#   --rpc-public [true]      Public RPC; needs --rpc-domain -- without one, RPC stays private
+#                            and a warning prints the command to enable it later (no error:
+#                            the Node Manager UI sends `--rpc-public true|false` and never a
+#                            domain). `--rpc-public false` changes nothing.
+#   --no-public-rpc          Private RPC (127.0.0.1 only), without the prompt.
+# With none of these, interactive setup asks (Enter = private) and --json stays private.
+# If DNS is not ready (or the enable fails), setup still completes, records the domain in
+# .node-meta (PUBLIC_RPC_DOMAIN) and prints the install-caddy.sh command to finish later.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SERVICE_NAME="telcoin"
 # NODE_TYPE is a non-authoritative default-view HINT, not a role. The node's role
 # is decided on-chain (tn_isValidator); the dashboard auto-promotes to the
@@ -36,7 +56,20 @@ INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 VALIDATOR_ADDRESS=""
 ADVERTISED_NAME=""
 PUBLIC_IP=""
-ENABLE_PUBLIC_RPC="false"   # public RPC is "coming soon" (Caddy-based); always private today
+# Public RPC (optional): a DNS name for this node that Caddy serves as https:// + wss://
+# (install-caddy.sh, in this repo) and that is advertised in node-info.yaml (worker.rpc).
+# Empty = private -- reth answers on 127.0.0.1 only, the default. Set by the step_config
+# prompt or --rpc-domain; persisted to .node-meta as PUBLIC_RPC_DOMAIN.
+ENABLE_PUBLIC_RPC="false"
+PUBLIC_RPC_DOMAIN=""
+RPC_INBOUND_IP=""           # inbound public IP the A record points at (--public-ip / prompt); '' = auto
+RPC_PUBLIC_REQUESTED=false  # --rpc-public [true]: public RPC, which then needs --rpc-domain
+NO_PUBLIC_RPC=false         # --no-public-rpc: private RPC, no prompt
+PUBLIC_RPC_STATE=""         # set by step_public_rpc: enabled | pending ('' = no domain)
+PUBLIC_RPC_REASON=""        # why public RPC is still pending (repeated in the summary)
+NODE_STARTED=false          # true once step_create_service starts the node in THIS run
+RPC_PRIVATE_NOTE=""         # why a public-RPC flag left RPC private (no usable hostname given)
+RPC_DOMAIN_GIVEN=false      # --rpc-domain was passed (even with an empty value)
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
 PRIMARY_LISTENER_MULTIADDR=""
@@ -508,31 +541,21 @@ step_config() {
     # step_generate_keys). Run the same step, non-interactively.
     if json_mode; then
         print_ok "Configuration set (non-interactive)"
-        print_info "RPC access:  $([[ "$ENABLE_PUBLIC_RPC" == "true" ]] && echo public || echo private)"
+        print_info "RPC access:  $([[ "$ENABLE_PUBLIC_RPC" == "true" ]] && echo "public (https://${PUBLIC_RPC_DOMAIN}/ + wss://${PUBLIC_RPC_DOMAIN}/)" || echo private)"
         print_info "Ports: P2P ${P2P_PORT} / worker ${WORKER_PORT} / RPC ${RPC_PORT} / metrics ${METRICS_PORT}"
         return 0
     fi
 
-    echo "  RPC access:"
-    echo ""
-    echo "  1) Private (recommended) -- RPC accessible from this server only"
-    echo "              No firewall changes needed. Best for personal use,"
-    echo "              development, and internal tooling."
-    echo ""
-    echo "  2) Public (coming soon)  -- not available yet. Public RPC will be"
-    echo "              offered over Caddy (HTTPS) in a future update so it"
-    echo "              can coexist with the dashboard on one server."
-    echo ""
-    local rpc_choice
-    while true; do
-        read -r -p "  Enter choice [1]: " rpc_choice
-        rpc_choice="${rpc_choice:-1}"
-        case "$rpc_choice" in
-            1) ENABLE_PUBLIC_RPC="false"; break ;;
-            2) print_warn "Public RPC isn't available yet (coming soon) -- using Private."; ENABLE_PUBLIC_RPC="false"; break ;;
-            *) print_warn "Please enter 1." ;;
-        esac
-    done
+    # RPC access: a flag decides it up front (no prompt); otherwise ask.
+    if [[ "$NO_PUBLIC_RPC" == "true" ]]; then
+        print_ok "RPC access: private (--no-public-rpc)"
+    elif [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
+        print_ok "RPC access: public -- https://${PUBLIC_RPC_DOMAIN}/ + wss://${PUBLIC_RPC_DOMAIN}/ (--rpc-domain)"
+    elif [[ -n "$RPC_PRIVATE_NOTE" ]]; then
+        public_rpc_no_domain_notice
+    else
+        prompt_public_rpc
+    fi
 
     echo ""
     echo "  Port configuration (press Enter to accept defaults):"
@@ -568,6 +591,139 @@ step_config() {
     fi
 
     print_ok "Configuration set"
+}
+
+# Interactive RPC-access choice (step_config). Public = a DNS name for this node that
+# Caddy serves as https:// + wss:// and that is advertised in node-info.yaml, so gateways
+# and wallets can discover it; reth itself stays on 127.0.0.1 either way. Sets
+# ENABLE_PUBLIC_RPC / PUBLIC_RPC_DOMAIN / RPC_INBOUND_IP. The enable runs at the end of
+# setup (step_public_rpc), once the node is up.
+prompt_public_rpc() {
+    echo "  RPC access:"
+    echo ""
+    echo "  1) Private (default) -- RPC reachable from this server only (127.0.0.1)."
+    echo "              No DNS or firewall changes needed. Best for personal use,"
+    echo "              development, and internal tooling."
+    echo ""
+    echo "  2) Public            -- https://<domain>/ and wss://<domain>/ served by"
+    echo "              Caddy (automatic TLS) and advertised to the network in"
+    echo "              node-info.yaml. reth itself stays on 127.0.0.1."
+    echo ""
+    local rpc_choice input
+    while true; do
+        read -r -p "  Enter choice [1]: " rpc_choice
+        rpc_choice="${rpc_choice:-1}"
+        case "$rpc_choice" in
+            1|2) break ;;
+            *) print_warn "Please enter 1 or 2." ;;
+        esac
+    done
+    if [[ "$rpc_choice" != "2" ]]; then
+        ENABLE_PUBLIC_RPC="false"
+        return 0
+    fi
+
+    echo ""
+    print_info "Public RPC needs a DNS name for THIS node. Use the node's own public name"
+    print_info "for the RPC endpoint, e.g. node7.adiri.telcoin.network."
+    print_info "The Node Manager dashboard, if you enable it later, needs a DIFFERENT hostname:"
+    print_info "dashboard.<your-node-domain> (e.g. dashboard.node7.adiri.telcoin.network) --"
+    print_info "one name cannot serve both."
+    print_info "Before setup finishes, point the name's DNS A record at this server's INBOUND"
+    print_info "public IP and allow inbound TCP 80 + 443 (Caddy gets its TLS certificate over"
+    print_info "them). If DNS is not ready in time, setup still completes and prints the one"
+    print_info "command that enables public RPC later. Leave blank to stay private."
+    echo ""
+    while true; do
+        read -r -p "  Public RPC domain [none = private]: " input
+        input="$(normalize_rpc_domain "$input")"
+        if [[ -z "$input" ]]; then
+            print_info "No domain entered -- RPC stays private."
+            ENABLE_PUBLIC_RPC="false"
+            PUBLIC_RPC_DOMAIN=""
+            return 0
+        fi
+        validate_rpc_domain "$input" && break
+        print_warn "Not a bare hostname: ${input}. Enter just the name, e.g. node7.adiri.telcoin.network (no https://, no path, no IP address)."
+    done
+    PUBLIC_RPC_DOMAIN="$input"
+    ENABLE_PUBLIC_RPC="true"
+
+    echo ""
+    print_info "Inbound public IP the A record points at. Only needed behind NAT or on a"
+    print_info "multi-IP server, where it can differ from the auto-detected (egress) IP."
+    while true; do
+        read -r -p "  Inbound public IP [${RPC_INBOUND_IP:-auto-detect}]: " input
+        input="$(printf '%s' "$input" | tr -d '[:space:]')"
+        if [[ -z "$input" ]]; then
+            break
+        elif validate_public_ip "$input"; then
+            RPC_INBOUND_IP="$input"
+            break
+        fi
+        print_warn "Not a valid IPv4/IPv6 address -- try again, or press Enter to auto-detect."
+    done
+    print_ok "RPC access: public -- https://${PUBLIC_RPC_DOMAIN}/ + wss://${PUBLIC_RPC_DOMAIN}/"
+}
+
+# Canonical form of an RPC domain: whitespace removed, lowercased, one trailing dot (FQDN
+# form) dropped. tr, not ${var,,}, to stay bash 3.2 safe.
+normalize_rpc_domain() {
+    local d
+    d="$(printf '%s' "${1:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    printf '%s' "${d%.}"
+}
+
+# 0 when <hostname> is a bare DNS name Caddy can get a certificate for: two or more
+# dot-separated labels of [A-Za-z0-9-] (no leading/trailing hyphen, at most 63 chars
+# each), at most 253 chars in all, no scheme, port or path, and not an IPv4 address.
+# The label regex is install-caddy.sh's caddy_validate_domain, so a name accepted here
+# is accepted there.
+validate_rpc_domain() {
+    local d="${1:-}"
+    [[ -n "$d" && "${#d}" -le 253 ]] || return 1
+    if [[ "$d" =~ ^[0-9.]+$ ]]; then
+        return 1
+    fi
+    if [[ "$d" =~ [^.]{64} ]]; then     # a DNS label is at most 63 characters
+        return 1
+    fi
+    [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+# Validate the public-RPC flags once, before any step touches the box, and derive
+# ENABLE_PUBLIC_RPC. A bad combination prints (interactive) or emits (--json) the reason
+# and exits 1. A public-RPC flag without a usable hostname is not an error: RPC stays
+# private and public_rpc_no_domain_notice says how to enable it later (--json: here;
+# interactive: in step_config, after the welcome screen clears). An invalid --public-ip is
+# only dropped for the Caddy pass-through (it still reaches PUBLIC_IP exactly as before).
+init_public_rpc_flags() {
+    local err=""
+    if [[ "$NO_PUBLIC_RPC" == "true" ]]; then
+        if [[ -n "$PUBLIC_RPC_DOMAIN" || "$RPC_PUBLIC_REQUESTED" == "true" ]]; then
+            err="--no-public-rpc conflicts with --rpc-domain / --rpc-public -- pick one."
+        fi
+    elif [[ -n "$PUBLIC_RPC_DOMAIN" ]] && ! validate_rpc_domain "$PUBLIC_RPC_DOMAIN"; then
+        err="invalid --rpc-domain ${PUBLIC_RPC_DOMAIN} -- give a bare hostname such as node7.adiri.telcoin.network (no https://, no path, no IP address)."
+    elif [[ "$RPC_DOMAIN_GIVEN" == "true" && -z "$PUBLIC_RPC_DOMAIN" ]]; then
+        RPC_PRIVATE_NOTE="no public RPC domain given (--rpc-domain was empty)"
+    elif [[ "$RPC_PUBLIC_REQUESTED" == "true" && -z "$PUBLIC_RPC_DOMAIN" ]]; then
+        RPC_PRIVATE_NOTE="no public RPC domain given (--rpc-public without --rpc-domain <hostname>)"
+    fi
+    if [[ -n "$err" ]]; then
+        if json_mode; then json_event error "$err"; else print_error "$err"; fi
+        exit 1
+    fi
+    if [[ -n "$RPC_INBOUND_IP" ]] && ! validate_public_ip "$RPC_INBOUND_IP"; then
+        RPC_INBOUND_IP=""
+    fi
+    if [[ -n "$RPC_PRIVATE_NOTE" ]] && json_mode; then
+        public_rpc_no_domain_notice
+    fi
+    if [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
+        ENABLE_PUBLIC_RPC="true"
+    fi
+    return 0
 }
 
 validate_service_name() {
@@ -914,8 +1070,10 @@ step_create_service() {
     # reth base 8546. The launch heredocs below enable --ws and pin both --http.addr/
     # --ws.addr to 127.0.0.1 so RPC + WS are reachable ONLY via the Caddy TLS edge (reth
     # already defaults to loopback; pinning makes the intent explicit + immune to a future
-    # default change). WS_PORT is persisted to .node-meta so config-caddy.sh proxies wss://
-    # to the right port -- verify the real bind with `ss -tlnp` at rollout.
+    # default change). WS_PORT is persisted to .node-meta so install-caddy.sh (this repo;
+    # write_rpc_block) proxies wss:// to the right port -- verify the real bind with
+    # `ss -tlnp` at rollout. (Provenance, maintainer-only: common/config-caddy.sh on the
+    # maintainer fleet reads the same key; it is not shipped to operators.)
     WS_PORT=8546
     print_ok "RPC port: ${RPC_PORT}, WS port: ${WS_PORT}"
 
@@ -1163,6 +1321,9 @@ EOF
     systemctl daemon-reload
     print_ok "Service file written: ${service_file}"
 
+    # PUBLIC_RPC_DOMAIN: the public RPC hostname ('' = private). Written even when the
+    # enable at the end of setup is still pending, so a later install-caddy.sh run and
+    # check-node.sh know which name this node is meant to serve.
     local meta_file="${CONFIG_DIR}/.node-meta"
     mkdir -p "$CONFIG_DIR"
     cat > "$meta_file" <<EOF
@@ -1176,6 +1337,7 @@ NETWORK=${NETWORK}
 DATA_DIR=${DATA_DIR}
 RPC_PORT=${RPC_PORT}
 WS_PORT=${WS_PORT}
+PUBLIC_RPC_DOMAIN=${PUBLIC_RPC_DOMAIN:-}
 PUBLIC_IP=${PUBLIC_IP:-}
 EXTERNAL_PRIMARY_ADDR=${PRIMARY_MULTIADDR:-}
 EXTERNAL_WORKER_ADDR=${WORKER_MULTIADDR:-}
@@ -1207,6 +1369,7 @@ EOF
 
         if systemctl is-active --quiet "$SERVICE_NAME"; then
             print_ok "Service is running"
+            NODE_STARTED=true
         else
             print_error "Service failed to start."
             print_info "Check logs: journalctl -u ${SERVICE_NAME} --no-pager -n 50"
@@ -1225,6 +1388,122 @@ EOF
             print_ok "Auto-start enabled"
         fi
     fi
+}
+
+# =============================================================================
+# PUBLIC RPC  (optional -- runs only when a domain was chosen)
+#
+# Serves https://<domain>/ + wss://<domain>/ through Caddy and advertises both in
+# node-info.yaml (worker.rpc) using install-caddy.sh from this repo. It never fails
+# setup: if the node is not running, DNS does not point here yet, or the enable does not
+# finish, PUBLIC_RPC_STATE=pending records why and the summary prints the exact command
+# to finish later. PUBLIC_RPC_DOMAIN is already in .node-meta (step_create_service).
+# =============================================================================
+
+# The install-caddy.sh command for <phase> (rpc-enable | rpc-check-dns) on [<domain>]
+# (default: this node's PUBLIC_RPC_DOMAIN), as the operator should run it by hand when
+# setup could not finish the enable.
+public_rpc_cmd() {
+    printf 'sudo bash %s/install-caddy.sh --phase=%s --rpc-domain %s%s' \
+        "$SCRIPT_DIR" "$1" "${2:-$PUBLIC_RPC_DOMAIN}" "${RPC_INBOUND_IP:+ --public-ip ${RPC_INBOUND_IP}}"
+}
+
+# A public-RPC flag came without a usable hostname (RPC_PRIVATE_NOTE says which). Not an
+# error -- the Node Manager UI sends `--rpc-public true` and never a domain -- so RPC stays
+# private and this says how to enable it later. --json: a `log` event, never `error`, so
+# the run still ends with done ok:true.
+public_rpc_no_domain_notice() {
+    local cmd
+    cmd="$(public_rpc_cmd rpc-enable '<hostname>')"
+    print_warn "Public RPC not enabled: ${RPC_PRIVATE_NOTE} -- RPC stays private (127.0.0.1 only)."
+    print_info "To serve public RPC later, point a DNS name at this server and run:"
+    echo "    ${cmd}"
+    if json_mode; then
+        json_event log "public RPC not enabled: ${RPC_PRIVATE_NOTE} -- RPC stays private (127.0.0.1 only). To enable it later, point a DNS name at this server and run: ${cmd}"
+    fi
+    return 0
+}
+
+# Record that public RPC is not enabled yet (and why), and say how to finish.
+public_rpc_pending() {
+    PUBLIC_RPC_STATE="pending"
+    PUBLIC_RPC_REASON="$1"
+    echo ""
+    print_warn "Public RPC not enabled yet: ${PUBLIC_RPC_REASON}"
+    print_info "When that is fixed, run:"
+    echo "    $(public_rpc_cmd rpc-enable)"
+    if json_mode; then
+        json_event log "public RPC not enabled yet: ${PUBLIC_RPC_REASON} -- to finish, run: $(public_rpc_cmd rpc-enable)"
+    fi
+    return 0
+}
+
+step_public_rpc() {
+    [[ -n "$PUBLIC_RPC_DOMAIN" ]] || return 0
+    local d="$PUBLIC_RPC_DOMAIN" caddy="${SCRIPT_DIR}/install-caddy.sh"
+    local dns_json="" note="" ni propagated_re='"propagated"[[:space:]]*:[[:space:]]*true'
+    # The node-info.yaml rpc-enable advertises in: install-caddy.sh resolves it through the
+    # lib (caddy_node_info_path -> tn_resolve_data_dir), not from --data-dir, so check that
+    # same file -- otherwise a custom --data-dir would read as permanently pending.
+    ni="$(tn_resolve_data_dir 2>/dev/null || echo /var/lib/telcoin)/node-info.yaml"
+
+    print_header "Public RPC -- https://${d}/ + wss://${d}/"
+
+    if [[ ! -f "$caddy" ]]; then
+        public_rpc_pending "install-caddy.sh is missing (${caddy}) -- restore it with update-scripts.sh."
+        return 0
+    fi
+    # rpc-enable restarts the node to apply the advertisement, so only enable a node this
+    # run started (--json, or a yes to "Start the node now?"). Gating on the operator's
+    # answer, not `systemctl is-active`, keeps a declined start declined on a re-run over
+    # an existing install, whose old unit is still running.
+    if [[ "$NODE_STARTED" != "true" ]]; then
+        public_rpc_pending "you chose not to start the node now, and enabling public RPC restarts it -- run the command below once the ${SERVICE_NAME} service may be (re)started."
+        return 0
+    fi
+
+    # DNS gate. The --json check-dns phase is the stable machine contract (the Node Manager
+    # UI uses it too): one JSON object whose "propagated" is true only when the A record
+    # reaches this host -- its public IP, the --public-ip override, or a bound local IP.
+    # Keying on that field (not an exit code or prose) keeps this robust to wording
+    # changes. A pass means DNS targets this box, not that 80/443 are open.
+    print_step "Checking that ${d} resolves to this server..."
+    dns_json="$(TN_ASSUME_YES=false bash "$caddy" --json --phase=rpc-check-dns --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-)" || true
+    note="$(printf '%s\n' "$dns_json" | sed -n 's/.*"note":"\(.*\)"}.*$/\1/p' | head -n1)" || true
+    if [[ ! "$dns_json" =~ $propagated_re ]]; then
+        public_rpc_pending "DNS for ${d} does not point at this server yet. ${note:-The DNS check returned no result.}"
+        return 0
+    fi
+    print_ok "${note:-${d} resolves to this server.}"
+
+    # Enable: installs Caddy, writes the tn-rpc vhost, checks reth's WebSocket listener,
+    # advertises https:// + wss:// in node-info.yaml and restarts the node under
+    # install-caddy's brick guard. Run as the human-readable, non-interactive phase (no
+    # --json) so its progress shows here. stdin is /dev/null and TN_ASSUME_YES is forced
+    # off, so nothing can block on a prompt or auto-accept one (e.g. replacing a Caddyfile
+    # this repo did not write); fd3 (the --json event stream) is closed for the child.
+    print_step "Enabling public RPC for ${d} (Caddy + node-info.yaml advertisement)..."
+    if ! TN_ASSUME_YES=false bash "$caddy" --phase=rpc-enable --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-; then
+        public_rpc_pending "install-caddy.sh did not finish enabling it (see the messages above)."
+        return 0
+    fi
+    # rpc-enable exits 0 even when it could only warn about advertising (no python3 / no
+    # node-info.yaml), so confirm the advertisement itself -- both URLs -- before calling
+    # it done.
+    local missing=""
+    if ! grep -qF "https://${d}/" "$ni" 2>/dev/null; then missing="https://${d}/"; fi
+    if ! grep -qF "wss://${d}/" "$ni" 2>/dev/null; then missing="${missing:+${missing} and }wss://${d}/"; fi
+    if [[ -n "$missing" ]]; then
+        public_rpc_pending "Caddy serves ${d}, but ${ni} does not advertise ${missing} yet (see the messages above)."
+        return 0
+    fi
+    PUBLIC_RPC_STATE="enabled"
+    print_ok "Public RPC enabled: https://${d}/ + wss://${d}/, advertised in node-info.yaml (worker.rpc)."
+    if json_mode; then
+        json_event log "public RPC enabled: https://${d}/ + wss://${d}/, advertised in node-info.yaml (worker.rpc)"
+    fi
+    print_info "Caddy obtains the TLS certificate for ${d} when it loads the config; issuance can take a minute."
+    return 0
 }
 
 step_final_summary() {
@@ -1248,6 +1527,29 @@ step_final_summary() {
         else
             print_info "BLS passphrase secured via systemd LoadCredential (not exposed in service file)."
         fi
+    fi
+
+    # Public RPC (only when a domain was chosen): the endpoints, and either the enabled +
+    # advertised state or the one command that finishes the job.
+    if [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
+        echo ""
+        echo "  Public RPC endpoints:"
+        echo "    https://${PUBLIC_RPC_DOMAIN}/"
+        echo "    wss://${PUBLIC_RPC_DOMAIN}/"
+        if [[ "$PUBLIC_RPC_STATE" == "enabled" ]]; then
+            print_ok "Enabled via Caddy and advertised in node-info.yaml (worker.rpc)."
+        else
+            print_warn "Not enabled yet: ${PUBLIC_RPC_REASON:-setup did not reach the public RPC step.}"
+            print_info "Once that is fixed (usually: the A record points at this server), run:"
+            echo "    $(public_rpc_cmd rpc-enable)"
+            print_info "To check DNS first (no changes made):"
+            echo "    $(public_rpc_cmd rpc-check-dns)"
+            if [[ -z "$RPC_INBOUND_IP" ]]; then
+                print_info "Behind NAT or on a multi-IP server? Add --public-ip <inbound-ip>."
+            fi
+        fi
+        print_info "Keep inbound TCP 80 + 443 open to this server (cloud firewall too): Caddy"
+        print_info "uses them to obtain and renew the TLS certificate."
     fi
     echo ""
     echo "  Useful commands:"
@@ -1377,12 +1679,17 @@ json_phase_finalize() {
     step_write_config
     json_event step "Creating service and starting node"
     step_create_service
+    if [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
+        json_event step "Enabling public RPC for ${PUBLIC_RPC_DOMAIN}"
+        step_public_rpc
+    fi
     json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"${NODE_TYPE}\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
 }
 
 run_json_mode() {
     json_setup_fds
     trap json_on_exit EXIT
+    init_public_rpc_flags       # bad public-RPC flags -> error event + exit, before any work
     check_root
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     json_set_network "$JSON_NETWORK_INPUT"
@@ -1396,9 +1703,35 @@ run_json_mode() {
 # =============================================================================
 # MAIN
 # =============================================================================
+
+# A value-taking option was the last argument, so it has no value. Say so and exit 1;
+# with --json, the same error event + done ok:false (json_on_exit) as any early failure.
+missing_option_value() {
+    local msg="$1 requires a value"
+    if [[ "$2" == "true" ]]; then
+        JSON_MODE=true
+        json_setup_fds
+        trap json_on_exit EXIT
+        json_event error "$msg"
+    else
+        print_error "$msg"
+    fi
+    exit 1
+}
+
 main() {
     local json_mode=false
     while [[ $# -gt 0 ]]; do
+        # Every option below that ends in `shift 2` needs a value. As the last argument it
+        # has none and `shift 2` fails (a silent exit under the inherited `set -e`), so
+        # stop here with a clear message instead. (--rpc-public may stand alone.)
+        case "$1" in
+            --phase|--network|--install-method|--passphrase-method|--address|--build-ref|\
+            --docker-image|--external-primary|--external-worker|--listener-primary|\
+            --listener-worker|--public-ip|--rpc-domain|--advertised-name|--data-dir|\
+            --service-user|--service-group|--genesis-dir)
+                [[ $# -ge 2 ]] || missing_option_value "$1" "$json_mode" ;;
+        esac
         case "$1" in
             --json)                json_mode=true; shift ;;
             --phase)               JSON_PHASE="${2:-}"; shift 2 ;;
@@ -1413,8 +1746,22 @@ main() {
             --external-worker)     WORKER_MULTIADDR="${2:-}"; shift 2 ;;
             --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
             --listener-worker)     WORKER_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
-            --public-ip)           PUBLIC_IP="${2:-}"; shift 2 ;;
-            --rpc-public)          shift 2 ;;  # public RPC is coming soon (Caddy-based); always private for now
+            # Public IP: the P2P multiaddr IP in --json mode (as before) and, for public RPC,
+            # the inbound IP the A record points at (passed to install-caddy.sh --public-ip).
+            --public-ip)           PUBLIC_IP="${2:-}"; RPC_INBOUND_IP="${2:-}"; shift 2 ;;
+            # Public RPC via Caddy (see the header). --rpc-public keeps the value form the UI
+            # sends (`--rpc-public true|false`, any case); a bare --rpc-public means true. Only
+            # true asks for public RPC, which needs --rpc-domain (without one: a warning, RPC
+            # stays private) -- false is a no-op, exactly as before.
+            --rpc-public)
+                case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')" in
+                    true|yes|1)  RPC_PUBLIC_REQUESTED=true; shift 2 ;;
+                    false|no|0)  shift 2 ;;
+                    *)           RPC_PUBLIC_REQUESTED=true; shift ;;
+                esac ;;
+            --rpc-domain)          PUBLIC_RPC_DOMAIN="$(normalize_rpc_domain "${2:-}")"; RPC_DOMAIN_GIVEN=true; shift 2 ;;
+            --rpc-domain=*)        PUBLIC_RPC_DOMAIN="$(normalize_rpc_domain "${1#*=}")"; RPC_DOMAIN_GIVEN=true; shift ;;
+            --no-public-rpc)       NO_PUBLIC_RPC=true; shift ;;
             --advertised-name)     ADVERTISED_NAME="${2:-}"; shift 2 ;;
             --data-dir)            DATA_DIR="${2:-$DATA_DIR}"; shift 2 ;;
             --service-user)        SERVICE_USER="${2:-}"; shift 2 ;;
@@ -1434,6 +1781,7 @@ main() {
         exit $?
     fi
 
+    init_public_rpc_flags
     step_welcome
     step_preflight
     step_config
@@ -1441,6 +1789,7 @@ main() {
     step_generate_keys
     step_write_config
     step_create_service
+    step_public_rpc
     step_testnet_addons
     step_final_summary
 }
