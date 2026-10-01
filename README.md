@@ -1037,6 +1037,18 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-scripts v1.1.68 — re-cut for update-node v1.1.63
+`update-scripts.sh v1.1.68` re-cut with refreshed `.sha256` sidecars; carries update-node
+v1.1.63 (entry below).
+
+### update-node v1.1.63 — strip decision reads the release ref, not the crate version
+The `--observer` strip on a source update decided from `"<ref> <binary --version>"`. The
+built binary reports its crate version (`telcoin-network-cli Version: 0.1.0`), not the
+release, so an update to a branch or commit (`--ref main`) read `0.1.0`, judged it older than
+v0.15.0 and left the flag in place; the node then failed its health check and rolled back.
+The decision now reads the ref alone: a tag carries the release version, and a branch or SHA
+counts as newest and is stripped. Docker updates were unaffected (they read the image tag).
+
 ### update-scripts v1.1.67 — re-cut for the observer-flag removal and public RPC consolidation
 `update-scripts.sh v1.1.67` re-cut with refreshed `.sha256` sidecars. It carries lib/common
 v1.4.0, setup-node v1.2.0, update-node v1.1.62, check-node v1.1.55, edit-config v1.2.6,

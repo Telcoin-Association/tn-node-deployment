@@ -124,12 +124,6 @@ work (October 2026). Each item says why an operator would care.
   and an unknown argument prints its warning before the JSON file-descriptor swap, so it lands
   on JSON stdout; `check_root` and `detect_node` failures exit without a `done` event.
   Why: the Node Manager UI reads update-node's JSON stream and a stray line breaks its parser.
-- update-node decides whether to strip `--observer` on a source build from the first `x.y.z` in
-  `"$new_ref $new_version"`; if the binary's `--version` prints a crate version that does not
-  track release tags, a `main` build that rejects the flag is not stripped (the health check then
-  rolls back safely, but the update does not land).
-  Why: operators building from a branch should not need to know this to get past the first
-  release that rejects the flag.
 - The on-chain status report (`print_validator_onchain_status`) tells an Exited validator "you
   can now call unstake()", but `unstake` is only eligible one epoch after the exit; say so.
   Why: an operator who follows the hint straight away gets an `IneligibleUnstake` revert.

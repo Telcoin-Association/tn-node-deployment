@@ -45,7 +45,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="1.1.62"
+readonly SCRIPT_VERSION="1.1.63"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -851,13 +851,17 @@ apply_source_update() {
     fi
 
     # Drop the retired --observer flag from the start wrapper when the new
-    # release rejects it. The wrapper is backed up first and the rollback below
-    # restores it with the old binary. No backup, no strip: a wrapper that keeps
-    # the flag fails the health check and rolls back cleanly.
+    # release rejects it. The decision reads the ref only (a tag carries the
+    # release version; a branch or SHA counts as newest). The built binary's
+    # --version reports the crate version (0.1.0), not the release, so it must
+    # not take part or a `main` build would never be stripped. The wrapper is
+    # backed up first and the rollback below restores it with the old binary.
+    # No backup, no strip: a wrapper that keeps the flag fails the health check
+    # and rolls back cleanly.
     local wrapper wrapper_backup=""
     wrapper="$(tn_node_launch_target 2>/dev/null || true)"
     wrapper="${wrapper##* }"
-    if observer_strip_needed "$wrapper" "$new_ref $new_version"; then
+    if observer_strip_needed "$wrapper" "$new_ref"; then
         if ! wrapper_backup=$(backup_unit_file "$wrapper"); then
             wrapper_backup=""
             print_warn "Could not back up ${wrapper} -- leaving the retired --observer flag in place."
@@ -1393,7 +1397,7 @@ json_apply_source() {
     local wrapper wrapper_backup=""
     wrapper="$(tn_node_launch_target 2>/dev/null || true)"
     wrapper="${wrapper##* }"
-    if observer_strip_needed "$wrapper" "$new_ref $new_version"; then
+    if observer_strip_needed "$wrapper" "$new_ref"; then
         if ! wrapper_backup=$(backup_unit_file "$wrapper"); then
             wrapper_backup=""
             json_event step "warning: could not back up ${wrapper} -- leaving the retired --observer flag in place"
