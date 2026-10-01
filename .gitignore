@@ -5,3 +5,6 @@ fix-*.sh
 # Python bytecode (web UI)
 __pycache__/
 *.pyc
+
+# Partner guide scratch output (tools/build-partner-pdf.sh)
+docs/partner/build/

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"$if(lang)$ lang="$lang$" xml:lang="$lang$"$endif$>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>$pagetitle$</title>
+$for(author-meta)$
+  <meta name="author" content="$author-meta$" />
+$endfor$
+$if(description-meta)$
+  <meta name="description" content="$description-meta$" />
+$endif$
+  <meta name="dcterms.created" content="$date-meta$" />
+  <meta name="dcterms.modified" content="$date-meta$" />
+$for(css)$
+  <link rel="stylesheet" href="$css$" />
+$endfor$
+$for(header-includes)$
+  $header-includes$
+$endfor$
+</head>
+<body>
+<section class="cover">
+<img class="cover-logo" src="$asset-dir$/logos/telcoin-network-light.svg" alt="Telcoin Network" />
+<div class="cover-rule"></div>
+<p class="cover-title">$title$</p>
+<p class="cover-subtitle">$subtitle$</p>
+<p class="cover-meta">Version $version$ · $date$</p>
+<p class="cover-contact"><a href="mailto:$contact$">$contact$</a></p>
+<p class="cover-repo"><a href="$repo-url$">$repo-url$</a></p>
+<img class="cover-logo-foot" src="$asset-dir$/logos/telcoin-association-white.svg" alt="Telcoin Association" />
+</section>
+$if(toc)$
+<nav id="TOC" role="doc-toc">
+<p class="toc-title">$toc-title$</p>
+$table-of-contents$
+</nav>
+$endif$
+<main>
+$body$
+</main>
+</body>
+</html>

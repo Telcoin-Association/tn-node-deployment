@@ -5,6 +5,8 @@ Automated setup scripts for running a node on the Telcoin Network. Built for MNO
 There is one node identity. Every node installs validator-capable and follows consensus from day one; staking and on-chain activation are what let it validate. The protocol decides a node's role from on-chain committee membership each epoch, not from a setup flag.
 
 > **New to running a node?** Follow [`OPERATOR.md`](OPERATOR.md), the step-by-step runbook: install, sync, public RPC, staking, activation and day-2 operations. This README is the reference behind it.
+>
+> **Mobile network operator evaluating a node?** The partner guide, [`docs/partner/mno-node-guide.pdf`](docs/partner/mno-node-guide.pdf), is the runbook rewritten for partners and branded for hand-off. Its source is [`docs/partner/mno-node-guide.md`](docs/partner/mno-node-guide.md).
 
 > **Maintainers / AI agents:** see [`AGENTS.md`](AGENTS.md) for the operator-vs-maintainer repo boundary — what ships to operators vs. the maintainer-only `common/` tooling that operators never have.
 
@@ -1593,9 +1595,12 @@ pull request and push to `main`:
 Docs move with the code. When a change alters what an operator sees or does (a flag, a
 prompt, a default, a status, a command), update [`OPERATOR.md`](OPERATOR.md) in the same pull
 request as this README: the runbook is the path operators follow, and the README is the
-reference it links into. Keep the README anchors that `OPERATOR.md` links to stable. In both
-files, refer to scripts, functions and flags by name, never by line number or `file:line`;
-line numbers go stale with the next edit.
+reference it links into. Carry the same change into the partner guide,
+[`docs/partner/mno-node-guide.md`](docs/partner/mno-node-guide.md), bump its version and date
+in `docs/partner/metadata.yaml`, and regenerate the PDF with `bash tools/build-partner-pdf.sh`
+(see "Partner guide (MNO PDF)" in [`AGENTS.md`](AGENTS.md)). Keep the README anchors that
+`OPERATOR.md` links to stable. In all three files, refer to scripts, functions and flags by
+name, never by line number or `file:line`; line numbers go stale with the next edit.
 
 ---
 

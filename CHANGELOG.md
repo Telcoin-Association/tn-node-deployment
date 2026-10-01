@@ -7,6 +7,13 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Partner guide for mobile network operators -- docs/partner/
+`docs/partner/mno-node-guide.md` is the runbook rewritten for a partner reader, with no
+legacy-install material and support@telcoin.org as the only contact. `tools/build-partner-pdf.sh`
+renders it through pandoc and WeasyPrint into the branded `docs/partner/mno-node-guide.pdf`
+(Telcoin colours, Geist fonts, cover, contents and running headers), which is committed next
+to its sources. AGENTS.md has the sync rule.
+
 ### One contact address -- support@telcoin.org
 The `setup-node.sh` welcome banner, `OPERATOR.md` and the README now give support@telcoin.org
 for everything, validator onboarding, approval and hardware included. Ships in setup-node

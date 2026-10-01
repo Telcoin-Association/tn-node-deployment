@@ -17,8 +17,10 @@ and is **never shipped to operators**. None of it exists on an operator box. Ass
 any path under `common/` or `devnet-genesis/` is absent at runtime for a real operator.
 
 `OPERATOR.md` at the repo root is the operator runbook; `README.md` is the reference.
-When a change alters operator-visible behaviour (flags, prompts, paths, ports), update
-`OPERATOR.md` and the README together.
+`docs/partner/mno-node-guide.md` is the partner guide for mobile network operators, the
+source of the branded PDF beside it. When a change alters operator-visible behaviour
+(flags, prompts, paths, ports), update `OPERATOR.md`, the README and the partner guide
+together, then rebuild the PDF (see "Partner guide (MNO PDF)" below).
 
 ## The boundary rule
 
@@ -49,6 +51,40 @@ PendingExit) via `node_stake_status` / `node_is_staked_validator` in `lib/common
 Never add `--observer` / `--validator` behaviour back, and never emit `--observer` to the
 binary. `update-node.sh` strips a leftover `--observer` from legacy launch files when
 updating to v0.15.0-adiri or later.
+
+## Partner guide (MNO PDF)
+
+`docs/partner/mno-node-guide.pdf` is the guide the Association hands to prospective mobile
+network operators. It is generated, never edited by hand. The source is
+`docs/partner/mno-node-guide.md`; the look comes from `docs/partner/template.html`,
+`docs/partner/theme.css` and the vendored logos and fonts under `docs/partner/assets/`;
+the version, date and subtitle live in `docs/partner/metadata.yaml`.
+
+- Rebuild with `bash tools/build-partner-pdf.sh` after changing the Markdown,
+  `metadata.yaml`, `template.html`, `theme.css` or anything under `assets/`. Preview the
+  HTML without WeasyPrint using `--html-only --open`.
+- Bump `version` and `date` in `metadata.yaml` with every content change. The build warns
+  when the Markdown changed and the metadata did not.
+- The document title is the single `#` heading in the Markdown. Do not add a `title:` key
+  to `metadata.yaml`, and keep no prose between the `#` heading and the first `##`.
+- Partner readers never see legacy installs. The guide carries no `--observer`,
+  `migrate-node-naming`, `setup-observer.sh` or `setup-validator.sh` material and no
+  "legacy" wording, and its only contact is `support@telcoin.org`. The build script refuses
+  the source otherwise.
+- Links to other files in this repo are absolute URLs under
+  `https://github.com/Telcoin-Association/tn-node-deployment/blob/main/`, because the PDF
+  has no repo around it. Cross-references inside the guide are heading links such as
+  `[Back up the keys now](#back-up-the-keys-now)`. Headings and prose carry no manual
+  numbers; pandoc numbers the chapters at build time.
+- Commit the PDF together with the sources that produced it. If only the toolchain changed
+  (a pandoc or WeasyPrint upgrade), the script keeps the committed PDF and says so; pass
+  `--force` to overwrite it deliberately.
+- Reference toolchain: pandoc 3.11 and WeasyPrint 70.0 from Homebrew (`brew install pandoc
+  weasyprint`). The script checks for pandoc 3.8+ and WeasyPrint 61+. Same inputs and same
+  toolchain give byte-identical output; a second run prints "PDF unchanged".
+- Nothing under `docs/partner/` or `tools/` is updater-tracked or carries a `.sha256`
+  sidecar. The fonts are Geist and Geist Mono under the SIL Open Font License 1.1; keep
+  `OFL.txt` beside them and record provenance in `docs/partner/assets/README.md`.
 
 ## Vendored files
 
@@ -88,6 +124,7 @@ So after you edit any tracked file:
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
 The same holds for the other docs: `OPERATOR.md`, `followup.md`, `CHANGELOG.md`,
-`README.md`, and `docs/` are documentation, carry no `.sha256` sidecar, and must never be
-added to the updater arrays. `README.md` must stay at the repo root, because
+`README.md`, `docs/` (the partner guide and its build inputs included) and `tools/` are
+documentation or maintainer tooling, carry no `.sha256` sidecar, and must never be added
+to the updater arrays. `README.md` must stay at the repo root, because
 `update-scripts.sh` HEAD-probes it as its connectivity check.
