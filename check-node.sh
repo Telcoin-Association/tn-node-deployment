@@ -3,14 +3,14 @@
 # check-node.sh -- Telcoin Network Node Health Check
 #
 # Queries the Telcoin Network consensus RPC for ground truth and compares
-# the local node state against it. Works for both validator and observer
-# nodes. Falls back gracefully if the local RPC is unreachable -- the
-# network's view of your node is still reported.
+# the local node state against it. Every node is checked the same way: the
+# role is decided on-chain each epoch, so there is no validator/observer
+# switch. The node's on-chain stake status (ConsensusRegistry) decides whether
+# the validator checks apply. Falls back gracefully if the local RPC is
+# unreachable -- the network's view of your node is still reported.
 #
 # USAGE:
-#   bash check-node.sh                              # auto-detect node type
-#   bash check-node.sh --validator                  # force validator
-#   bash check-node.sh --observer                   # force observer
+#   bash check-node.sh                              # check the installed node
 #   bash check-node.sh --address 0xYOUR_ADDRESS     # include on-chain status
 #   bash check-node.sh --authority-id <BASE58>      # override author/rep check
 #   bash check-node.sh --rpc <URL>                  # custom local RPC
@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.54"
+readonly SCRIPT_VERSION="1.1.55"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -49,85 +49,89 @@ readonly EVM_SYNC_THRESHOLD=50
 # Defaults that get overridden by auto-detection or explicit flags.
 RPC_URL=""
 SERVICE_NAME=""
-NODE_TYPE=""
 VALIDATOR_ADDRESS=""
 AUTHORITY_ID=""
 NETWORK_RPC="$DEFAULT_NETWORK_RPC"
 QUERY_NETWORK=true
-NODE_TYPE_EXPLICITLY_SET=false
 
-# On-chain validator status, derived at runtime from the ConsensusRegistry (NOT
-# from the NODE_TYPE hint). IS_ONCHAIN_VALIDATOR is true ONLY for a REGISTERED
-# validator (ValidatorStatus 1-4); it is the authority for whether absence from
-# the consensus headers is an error. ONCHAIN_STATUS_OUTPUT caches the §7 display.
+# On-chain stake status, read once per run from the ConsensusRegistry by
+# probe_onchain_validator_status. IS_ONCHAIN_VALIDATOR is true ONLY for a staked
+# validator (ValidatorStatus 1-4); it decides whether absence from the consensus
+# headers is an error. ONCHAIN_STAKE_LINE / ONCHAIN_STAKE_RC hold the raw
+# node_stake_status result that §7 renders, so the status is decided and printed
+# from one round trip.
 IS_ONCHAIN_VALIDATOR=false
-ONCHAIN_STATUS_OUTPUT=""
+ONCHAIN_STAKE_LINE=""
+ONCHAIN_STAKE_RC=""
 
-# Apply node-type defaults. Called by --validator/--observer and by
-# detect_node_type() when running with no flag. NODE_TYPE is forced from the
-# flag; SERVICE_NAME is derived from tn_resolve_service (never a hardcoded
-# legacy name) and only when not already set by an explicit --service.
-set_node_type() {
-    case "$1" in
-        validator) NODE_TYPE="validator" ;;
-        observer)  NODE_TYPE="observer"  ;;
-    esac
-    # Local RPC endpoint for liveness probes: derive the port from .node-meta
-    # (RPC_PORT, default 8545) instead of guessing it from the node type. Every
-    # unified node serves RPC on 8545; the old observer=>8541 guess mis-probed a
-    # unified node. --rpc still overrides (it sets RPC_URL directly).
+# Fill in what the flags left empty, from the installed node. RPC_URL comes from
+# RPC_PORT in .node-meta (default DEFAULT_RPC_PORT) and is set only when --rpc
+# did not set it. SERVICE_NAME comes from tn_resolve_service (the unified telcoin
+# unit, or a legacy role-suffixed unit) unless --service set it; with no node
+# installed it falls back to telcoin so the report still renders.
+detect_node() {
+    local rpc_port svc
     if [[ -z "$RPC_URL" ]]; then
-        local rpc_port; rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
-        RPC_URL="http://127.0.0.1:${rpc_port:-8545}"
+        rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
+        [[ "$rpc_port" =~ ^[0-9]+$ ]] || rpc_port="$DEFAULT_RPC_PORT"
+        RPC_URL="http://127.0.0.1:${rpc_port}"
     fi
-    [[ -z "$SERVICE_NAME" ]] && SERVICE_NAME="$(tn_resolve_service || true)"
-}
-
-# Pick a default node type from the installed node, via the resolvers.
-# tn_resolve_node_type reads NODE_TYPE= from .node-meta (unified install) or the
-# legacy role dir; tn_resolve_service returns the unit base name (or 1 if no node
-# is installed). Honours explicit flags via NODE_TYPE_EXPLICITLY_SET -- when set,
-# the flag already forced NODE_TYPE and SERVICE_NAME so we leave them alone.
-detect_node_type() {
-    [[ "$NODE_TYPE_EXPLICITLY_SET" == "true" ]] && return 0
-    local svc
-    if svc="$(tn_resolve_service)"; then
-        [[ -z "$SERVICE_NAME" ]] && SERVICE_NAME="$svc"
-        set_node_type "$(tn_resolve_node_type)"
-        print_info "Auto-detected node type: ${NODE_TYPE}"
+    [[ -z "$SERVICE_NAME" ]] || return 0
+    if svc="$(tn_resolve_service 2>/dev/null)" && [[ -n "$svc" ]]; then
+        SERVICE_NAME="$svc"
     else
-        # No node installed -- default to validator so the report still renders.
-        set_node_type validator
-        print_warn "No Telcoin node detected on this server -- defaulting to validator."
-        print_info "Pass --observer or --validator explicitly if needed."
+        SERVICE_NAME="telcoin"
+        print_warn "No Telcoin node detected on this server -- checking service '${SERVICE_NAME}'."
     fi
+    return 0
 }
 
-# Probe the on-chain validator registry ONCE and cache the verdict + output. We
-# REUSE check_validator_onchain_status (the single on-chain probe in lib/common.sh)
-# rather than re-implementing the eth_call, capturing its rendered output so §7
-# can display it without a second network round-trip. From that output we set
-# IS_ONCHAIN_VALIDATOR true ONLY when the registry reports a REGISTERED validator
-# -- ValidatorStatus 1-4 (Staked / Pending Activation / Active / Pending Exit).
-# Statuses 0/5/6, a missing NFT, or an unreachable RPC all leave it false: such a
-# node is a plain full node, for which absence from the committee headers is
-# normal, not an error. No-op unless VALIDATOR_ADDRESS is set and the network RPC
-# is reachable (NETWORK_OK), so it is called after section 3 resolves NETWORK_OK.
+# Read the on-chain stake status ONCE per run (node_stake_status in lib/common.sh,
+# a single eth_call against the network RPC) and cache the result line for §7.
+# IS_ONCHAIN_VALIDATOR is set true ONLY for a staked validator -- ValidatorStatus
+# 1-4 (Staked / Pending Activation / Active / Pending Exit). Statuses 0/5/6, no
+# ConsensusNFT ("none") and an unreadable status ("unknown") all leave it false:
+# such a node is a plain full node, for which absence from the committee headers
+# is normal, not an error. No-op unless VALIDATOR_ADDRESS is set and the network
+# RPC is reachable (NETWORK_OK), so it is called after section 3 resolves NETWORK_OK.
 probe_onchain_validator_status() {
+    local line rc
     [[ -n "$VALIDATOR_ADDRESS" ]] || return 0
     [[ "$NETWORK_OK" == "true" ]] || return 0
-    ONCHAIN_STATUS_OUTPUT="$(check_validator_onchain_status "$VALIDATOR_ADDRESS" "$NETWORK_RPC" 2>&1 || true)"
-    # The status labels are plain text (only the [OK]/[WARN] prefix is coloured),
-    # so we classify on them rather than re-decoding the ABI response ourselves.
-    if grep -qE 'Status: (Staked|Pending Activation|Active|Pending Exit)' <<<"$ONCHAIN_STATUS_OUTPUT"; then
-        IS_ONCHAIN_VALIDATOR=true
+    rc=0
+    line="$(node_stake_status "$VALIDATOR_ADDRESS" "$NETWORK_RPC" 2>/dev/null)" || rc=$?
+    ONCHAIN_STAKE_LINE="$line"
+    ONCHAIN_STAKE_RC="$rc"
+    if [[ "$rc" -eq 0 ]]; then
+        case "${line%% *}" in
+            1|2|3|4) IS_ONCHAIN_VALIDATOR=true ;;
+        esac
     fi
+    return 0
+}
+
+# Render the cached probe result (§7). print_validator_onchain_status owns the
+# status labels and the "Next step" text; an unreadable status is a warning only
+# and never a health issue.
+report_onchain_validator_status() {
+    print_step "Checking validator on-chain status..."
+    print_info "Address:  ${VALIDATOR_ADDRESS}"
+    print_info "Contract: ${CONSENSUS_REGISTRY}"
+    echo ""
+    case "$ONCHAIN_STAKE_RC" in
+        0) print_validator_onchain_status "$VALIDATOR_ADDRESS" "$ONCHAIN_STAKE_LINE" || true ;;
+        1) print_warn "Invalid validator address ${VALIDATOR_ADDRESS} -- skipping the on-chain check." ;;
+        *) print_warn "Could not read the on-chain stake status from ${NETWORK_RPC} -- validator-only checks are skipped this run." ;;
+    esac
+    return 0
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --validator)    set_node_type validator; NODE_TYPE_EXPLICITLY_SET=true; shift ;;
-        --observer)     set_node_type observer;  NODE_TYPE_EXPLICITLY_SET=true; shift ;;
+        --validator|--observer)
+            # Role flags are gone: the role is decided on-chain each epoch.
+            echo "note: $1 is ignored; the role is decided on-chain each epoch" >&2
+            shift ;;
         --rpc)          RPC_URL="$2";           shift 2 ;;
         --service)      SERVICE_NAME="$2";      shift 2 ;;
         --address)      VALIDATOR_ADDRESS="$2"; shift 2 ;;
@@ -139,10 +143,8 @@ while [[ $# -gt 0 ]]; do
 
 Usage: $0 [OPTIONS]
 
-  (no flag)                Auto-detect node type from installed systemd units
-  --validator              Force validator check
-  --observer               Force observer check
-  --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:<RPC_PORT from .node-meta, or 8545>)
+  (no flag)                Check the installed node (service and RPC port auto-detected)
+  --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:<RPC_PORT from .node-meta, or ${DEFAULT_RPC_PORT}>)
   --network-rpc <URL>      Network RPC for ground truth (default: ${DEFAULT_NETWORK_RPC})
   --no-network             Skip the network RPC query (local-only mode)
   --service <name>         systemd service name override
@@ -156,13 +158,13 @@ EOF
     esac
 done
 
-# Auto-detect node type if neither --validator nor --observer was passed.
-detect_node_type
+# Fill in the service name and local RPC URL from the installed node.
+detect_node
 
-# VALIDATOR_ADDRESS is recorded in .node-meta for ALL nodes (every node is now
-# provisioned validator-capable; the on-chain registry, not NODE_TYPE, decides
-# the role). Load it from meta unless --address already supplied one, so the
-# on-chain status checks run automatically.
+# VALIDATOR_ADDRESS is recorded in .node-meta for ALL nodes (every node is
+# provisioned validator-capable; the on-chain registry decides the role). Load
+# it from meta unless --address already supplied one, so the on-chain status
+# checks run automatically.
 if [[ -z "$VALIDATOR_ADDRESS" ]]; then
     VALIDATOR_ADDRESS="$(meta_get VALIDATOR_ADDRESS 2>/dev/null || true)"
 fi
@@ -384,13 +386,53 @@ except Exception:
     return 0
 }
 
+# fetch_node_mode <url> -- print the node's consensus role from tn_nodeMode:
+# CvvActive (voting in the current committee), CvvInactive (in the committee but
+# catching up) or Observer (following consensus, not in the committee). The role
+# is decided on-chain each epoch, so this is the live answer, not a setting.
+# Best-effort and informational only: a curl failure, a JSON-RPC error (older
+# binaries lack the method) or any other result prints nothing. Always returns 0.
+fetch_node_mode() {
+    local url="$1" resp mode re
+    re='"result"[[:space:]]*:[[:space:]]*"([A-Za-z]+)"'
+    resp=$(curl -s --max-time 5 -X POST -H 'Content-Type: application/json' \
+        --data '{"jsonrpc":"2.0","method":"tn_nodeMode","params":[],"id":1}' \
+        "$url" 2>/dev/null) || return 0
+    [[ "$resp" =~ $re ]] || return 0
+    mode="${BASH_REMATCH[1]}"
+    case "$mode" in
+        CvvActive)   print_info "Consensus role: CvvActive (voting in the current committee)" ;;
+        CvvInactive) print_info "Consensus role: CvvInactive (in the committee, catching up)" ;;
+        Observer)    print_info "Consensus role: Observer (following consensus; not in the current committee)" ;;
+    esac
+    return 0
+}
+
+# report_legacy_observer_flag -- warn when the node launch file (start wrapper, or
+# the unit of a legacy docker install) still passes --observer. v0.15.0-adiri
+# ignores the flag, but later releases reject it, so the node would not start
+# after a binary/image update. Warn-only: never touches HEALTH_ISSUES, and silent
+# when there is no node or the launch file is missing or unreadable (e.g. run
+# without sudo).
+report_legacy_observer_flag() {
+    local target svc file
+    target="$(tn_node_launch_target 2>/dev/null)" || return 0
+    read -r svc _ file <<<"$target"
+    [[ -n "$file" && -r "$file" ]] || return 0
+    tn_node_has_observer_flag "$file" || return 0
+    print_warn "Launch file ${file} still passes --observer; releases after v0.15.0-adiri reject it and the node will not start after an update."
+    print_info "Fix: bash ${SCRIPT_DIR}/update-scripts.sh && sudo bash ${SCRIPT_DIR}/update-node.sh (strips the flag),"
+    print_info "     or delete the --observer token from ${file} and restart ${svc}."
+    return 0
+}
+
 # Cross-run state file for tracking whether the local execution block is
-# actually advancing between checks. Stored in a tmp path keyed by node type.
+# actually advancing between checks. One file per host (check-node.state).
 # Format: "<local_evm> <unix_ts> <consensus_height> <network_evm>". Trailing
 # fields default to empty when absent (so an older two-field state file from
 # v1.1.48 still reads cleanly). Write failures are tolerated.
 state_file_path() {
-    echo "${TMPDIR:-/tmp}/check-node-${NODE_TYPE}.state"
+    echo "${TMPDIR:-/tmp}/check-node.state"
 }
 
 read_prev_block_state() {
@@ -727,7 +769,6 @@ report_public_rpc() {
 # =============================================================================
 
 print_header "Telcoin Network Node Health Check  v${SCRIPT_VERSION}"
-print_info "Node type:    ${NODE_TYPE}"
 print_info "Service:      ${SERVICE_NAME}"
 print_info "Local RPC:    ${RPC_URL}"
 [[ "$QUERY_NETWORK" == "true" ]] && print_info "Network RPC:  ${NETWORK_RPC}"
@@ -753,6 +794,7 @@ else
     print_info "  Logs:     journalctl -u ${SERVICE_NAME} --no-pager -n 30"
     (( ++HEALTH_ISSUES ))
 fi
+report_legacy_observer_flag
 
 # =============================================================================
 # 2. LOCAL RPC PROBE
@@ -787,7 +829,7 @@ case "$LOCAL_RPC_MODE" in
         ;;
     DOWN)
         print_info "Local RPC not reachable at ${RPC_URL}"
-        print_info "(This is expected on observers that don't expose RPC publicly)"
+        print_info "(Expected if the node runs without --http; pass --rpc <URL> if it listens elsewhere)"
         ;;
 esac
 
@@ -887,6 +929,8 @@ if [[ "$LOCAL_RPC_MODE" == "HEALTHY" ]] || [[ "$LOCAL_RPC_MODE" == "SLOW" ]]; th
             print_info "  -- this node may be running an older binary"
         fi
     fi
+    # Live consensus role (tn_nodeMode). Informational; never affects the verdict.
+    fetch_node_mode "$RPC_URL"
 else
     print_info "Skipping local consensus query (local RPC ${LOCAL_RPC_MODE})"
 fi
@@ -1077,19 +1121,19 @@ fi
 # =============================================================================
 # 7. ON-CHAIN VALIDATOR STATUS
 # VALIDATOR_ADDRESS is populated for ALL nodes (--address or .node-meta), so we
-# always report on-chain status when we have an address -- the registry, not the
-# NODE_TYPE hint, is the authority for validator-ness. The chain was already
-# probed once above; reuse that cached output rather than calling out again.
+# always report on-chain status when we have an address -- the registry is the
+# authority for validator-ness. The chain was already probed once above; render
+# that cached result line rather than calling out again.
 # =============================================================================
 if [[ -n "$VALIDATOR_ADDRESS" ]]; then
     echo ""
     if [[ "$NETWORK_OK" == "true" ]]; then
-        # Emit the cached probe output (single on-chain round-trip per run).
-        printf '%s\n' "$ONCHAIN_STATUS_OUTPUT"
+        # Render the cached probe result (single on-chain round-trip per run).
+        report_onchain_validator_status
     else
-        # check_validator_onchain_status would otherwise emit a misleading
-        # "No validator record found" message when the real cause is that
-        # the network RPC is unreachable. The §10 banner enumerates the skip.
+        # Without the network RPC there is no stake status to show, and a
+        # "No validator record found" here would mislead. The §10 banner
+        # enumerates the skip.
         print_info "Skipping on-chain validator status (network RPC unreachable)"
     fi
 else

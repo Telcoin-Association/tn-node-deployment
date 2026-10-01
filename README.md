@@ -969,6 +969,45 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### check-node v1.1.55 — stake status decides validator checks; consensus role; --observer warning
+check-node no longer has a validator or observer mode. The role is decided on-chain each
+epoch, so the script reads the node's stake status from the ConsensusRegistry once per run
+and uses that one answer twice: statuses Staked, Pending Activation, Active and Pending Exit
+turn on the validator checks (missing from the committee headers is then an error), and the
+same result is printed in the on-chain status section. v1.1.54 got the same answer by
+grepping its own rendered report. When the status can't be read, the script says so and
+treats the node as a full node for that run. `--validator` and `--observer` are accepted
+but ignored with a one-line note on stderr; the `Node type:` header line is gone, and the
+block-advancement state file is now a single `check-node.state` instead of one per role.
+
+When the local RPC answers, the consensus section adds a `Consensus role:` line from the
+node's `tn_nodeMode` method: `CvvActive` (voting in the current committee), `CvvInactive`
+(in the committee, catching up) or `Observer` (following consensus, not in the committee).
+Binaries without the method print nothing, and the line never changes the verdict.
+
+The service section now warns when the node's launch file (the start wrapper, or the unit
+of a legacy docker install) still passes `--observer`. v0.15.0-adiri ignores the flag, but
+later releases reject it, so the node would not start after an update. The warning names
+the file and the fix: run `update-scripts.sh` then `update-node.sh`, which strips the flag,
+or delete the token and restart the service. It is not counted as a health issue, and it
+stays quiet when the launch file can't be read (for example without sudo).
+
+### edit-config v1.2.6 / remove-node v1.2.8 — role flags no longer required
+The node binary no longer has an `--observer` flag: its role is decided on-chain each
+epoch. `edit-config.sh` stops tracking a node type. The interactive display, its header
+and the "Refresh chain configs" prompt now name the resolved service (`telcoin`, or the
+legacy unit name on older installs). Node Manager UI helpers that haven't been updated
+still pass `--observer` or `--validator` on every `--json --set` call. The flag is
+accepted and ignored, and stdout stays pure JSON.
+
+`remove-node.sh --json --remove <observer|validator>` now treats the token as the UI's
+slot name, not a role. v1.2.7 compared it with `NODE_TYPE` in `.node-meta` and refused
+with "node not installed" when they differed. Every new install records
+`NODE_TYPE=observer` as a view hint, so removing from the UI's validator view always
+failed. The check is gone, and either token removes the single installed node. The
+interactive menu no longer labels the node by role, and the key-deletion warning is the
+same for every node, since nothing on the server says whether its keys are staked.
+
 ### setup-node v1.2.0 — one domain, one advertisement; hardware gaps in the setup log
 `--rpc-domain <hostname>` now fills in the RPC URLs that were separate flags. With a domain
 and nothing else, keygen writes `https://<domain>/` and `wss://<domain>/` into

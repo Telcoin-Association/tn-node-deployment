@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.7"
+readonly SCRIPT_VERSION="1.2.8"
 
 # =============================================================================
 # HELPERS
@@ -121,18 +121,18 @@ declare -a INSTALLED_UNITS=()
 declare -A UNIT_DOCKER=()
 declare -A UNIT_USER=()
 declare -A UNIT_GROUP=()
-declare -A UNIT_TYPE=()
 
 # Populate the per-unit state above by enumerating every candidate unit name from
 # tn_all_node_services (telcoin + the legacy names) and inspecting the ones that
 # are actually installed. .node-meta is authoritative; the unit's User=/Group= is
-# the fallback. Node type / config dir come from the resolvers.
+# the fallback. The config dir comes from the resolvers. No role is recorded:
+# the role is decided on-chain each epoch, not by anything on this server.
 detect_node_installs() {
     set +e  # grep returning no match is fine here
     INSTALLED_UNITS=()
-    UNIT_DOCKER=(); UNIT_USER=(); UNIT_GROUP=(); UNIT_TYPE=()
+    UNIT_DOCKER=(); UNIT_USER=(); UNIT_GROUP=()
 
-    local unit_name unit_file meta method ntype
+    local unit_name unit_file meta method
     while IFS= read -r unit_name; do
         [[ -z "$unit_name" ]] && continue
         unit_file="/etc/systemd/system/${unit_name}.service"
@@ -143,9 +143,7 @@ detect_node_installs() {
         UNIT_USER["$unit_name"]=""
         UNIT_GROUP["$unit_name"]=""
 
-        # Node type + config dir resolve from the on-disk layout (one node per VM).
-        ntype="$(tn_resolve_node_type 2>/dev/null || echo validator)"
-        UNIT_TYPE["$unit_name"]="$ntype"
+        # Config dir resolves from the on-disk layout (one node per VM).
         meta="$(config_dir_for_unit "$unit_name")/.node-meta"
 
         # Read from metadata file first (most reliable, set during setup).
@@ -216,7 +214,7 @@ show_detected() {
     for unit in "${INSTALLED_UNITS[@]}"; do
         install_type="binary/source"
         [[ "${UNIT_DOCKER[$unit]}" == "true" ]] && install_type="Docker"
-        print_ok "${UNIT_TYPE[$unit]^} node detected (${unit})"
+        print_ok "Node detected (${unit})"
         print_info "  Install type:  ${install_type}"
         print_info "  Service user:  ${UNIT_USER[$unit]:-unknown}"
         print_info "  Service group: ${UNIT_GROUP[$unit]:-(none)}"
@@ -273,9 +271,8 @@ remove_docker_container() {
 }
 
 remove_chain_data() {
-    local node_type="$1"
     local data_dir
-    data_dir=$(detect_data_dir "$node_type")
+    data_dir=$(detect_data_dir)
 
     if [[ -d "$data_dir" ]]; then
         local size
@@ -290,10 +287,11 @@ remove_chain_data() {
     fi
 }
 
+# The warning is the same for every node: the role is decided on-chain, so
+# nothing on this server says whether these keys are staked to validate.
 remove_keys() {
-    local node_type="$1"
     local keys_dir config_dir
-    keys_dir="$(detect_data_dir "$node_type")/node-keys"
+    keys_dir="$(detect_data_dir)/node-keys"
     config_dir="$(tn_resolve_config_dir)"
 
     if [[ -d "$keys_dir" ]] || [[ -d "$config_dir" ]]; then
@@ -302,14 +300,10 @@ remove_keys() {
         print_warn "  KEY DELETION WARNING"
         print_warn "================================================================"
         print_warn "This will permanently delete your node keys and passphrase."
-        if [[ "$node_type" == "validator" ]]; then
-            print_warn "Validator keys CANNOT be recovered without the passphrase."
-            print_warn "You will need to re-register with the Telcoin Association"
-            print_warn "and generate new keys if you reinstall."
-        else
-            print_warn "Observer keys cannot be recovered without the passphrase."
-            print_warn "You will need to generate new keys if you reinstall."
-        fi
+        print_warn "Node keys CANNOT be recovered without the passphrase."
+        print_warn "If these keys are staked to validate, you will need to"
+        print_warn "re-register with the Telcoin Association and generate new"
+        print_warn "keys if you reinstall."
         print_warn "================================================================"
         echo ""
         print_info "Keys location:      ${keys_dir}"
@@ -521,12 +515,11 @@ remove_testnet_addons() {
 # unit, the docker container (when the install method is docker), chain data,
 # keys/config, the host-wide testnet add-ons, shared components, and the service
 # user. $1 is the unit base name (the new "telcoin" unit or a legacy unit name)
-# discovered by detect_node_installs; its node type / dirs come from the resolvers.
+# discovered by detect_node_installs; its dirs come from the resolvers.
 # Prunes the unit from INSTALLED_UNITS so a follow-on remove_shared_components
 # sees the correct remaining count.
 remove_node_unit() {
     local unit="$1"
-    local ntype="${UNIT_TYPE[$unit]:-$(tn_resolve_node_type)}"
 
     # Stop service
     stop_and_disable_service "$unit"
@@ -541,10 +534,10 @@ remove_node_unit() {
     fi
 
     # Chain data
-    remove_chain_data "$ntype"
+    remove_chain_data
 
     # Keys -- separate explicit confirmation
-    remove_keys "$ntype"
+    remove_keys
 
     # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
     remove_testnet_addons
@@ -556,7 +549,7 @@ remove_node_unit() {
     remove_service_user "${UNIT_USER[$unit]:-}" "${UNIT_GROUP[$unit]:-}" "$unit"
 
     echo ""
-    print_ok "${ntype^} node removal complete (${unit})"
+    print_ok "Node removal complete (${unit})"
 
     # Prune from the installed set so remaining-node accounting stays correct.
     local -a kept=()
@@ -614,16 +607,15 @@ wipe_chain_data_only() {
     # One node per VM is the norm, but a legacy unit may coexist -- offer each
     # installed unit individually so the operator confirms per node. Units come
     # from detect_node_installs (driven by tn_all_node_services).
-    local unit ntype ddir
+    local unit ddir
     for unit in "${INSTALLED_UNITS[@]}"; do
-        ntype="${UNIT_TYPE[$unit]:-node}"
-        print_warn "This will wipe all ${ntype} chain data (${unit}). The node will resync."
-        if confirm "Wipe ${ntype} chain data?"; then
-            ddir="$(detect_data_dir "$ntype")"
+        print_warn "This will wipe all chain data (${unit}). The node will resync."
+        if confirm "Wipe chain data for ${unit}?"; then
+            ddir="$(detect_data_dir)"
             wait_for_service_stopped "$unit"
             rm -rf "${ddir}/db"
             systemctl start "$unit" 2>/dev/null || true
-            print_ok "${ntype^} chain data wiped -- node restarted (${unit})"
+            print_ok "Chain data wiped -- node restarted (${unit})"
         fi
         echo ""
     done
@@ -663,7 +655,7 @@ custom_is_excluded_path() {
     # Exclude the installed node's own data dir (standard, even if on a custom
     # drive). The resolver yields the single unified/legacy dir for this VM.
     local dd
-    dd=$(detect_data_dir "$(tn_resolve_node_type 2>/dev/null || echo validator)")
+    dd=$(detect_data_dir)
     [[ "$p" == "$dd" || "$p" == "$dd"/* ]] && return 0
     return 1
 }
@@ -854,6 +846,9 @@ main_menu() {
 #   keys    -> data + remove keys/config/.node-meta (+ TPM sealed files)
 #
 #   remove-node.sh --json --remove <observer|validator> --scope <service|data|keys> --yes
+#
+# <observer|validator> is the Node Manager UI's slot name, not a role. Either
+# value removes the single installed node; the role is decided on-chain.
 # =============================================================================
 
 JSON_REMOVE_TYPE=""
@@ -876,21 +871,18 @@ json_emit() { printf '%s\n' "$1" >&3; }
 json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
 
 json_remove() {
-    local node_type="$1" scope="$2"
-    case "$node_type" in observer|validator) ;; *) json_event error "invalid node type: ${node_type}"; return 1 ;; esac
+    local slot="$1" scope="$2"
+    # The token is the UI slot name, not a role. It is still validated so a typo
+    # fails loudly, but it is never compared with the .node-meta NODE_TYPE: that
+    # value is only a default-view hint, and the role is decided on-chain.
+    case "$slot" in observer|validator) ;; *) json_event error "invalid node slot: ${slot}"; return 1 ;; esac
     case "$scope" in service|data|keys) ;; *) json_event error "invalid scope: ${scope}"; return 1 ;; esac
 
     # Resolve the actually-installed node (unified telcoin unit, or a legacy unit)
-    # instead of assuming telcoin-<type>. The requested node_type must match what
-    # is installed -- one node per VM -- so a mismatched request still errors out
-    # exactly as before rather than silently removing the wrong node.
-    local svc unit installed_type
-    svc="$(tn_resolve_service)" || { json_event error "node not installed: ${node_type}"; return 1; }
-    installed_type="$(tn_resolve_node_type 2>/dev/null || echo "")"
-    if [[ -n "$installed_type" && "$installed_type" != "$node_type" ]]; then
-        json_event error "node not installed: ${node_type}"
-        return 1
-    fi
+    # instead of assuming telcoin-<slot>. One node per VM, so whichever slot the
+    # UI sends, this is the node to remove.
+    local svc unit
+    svc="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
     unit="/etc/systemd/system/${svc}.service"
 
     # Detect docker BEFORE removing the unit (.node-meta is authoritative; fall
@@ -920,7 +912,7 @@ json_remove() {
     # Resolve the data dir from .node-meta BEFORE it (and the meta) get removed,
     # so a custom data drive is cleaned up instead of orphaned.
     local data_dir
-    data_dir=$(detect_data_dir "$node_type")
+    data_dir=$(detect_data_dir)
 
     json_event step "Stopping and disabling ${svc}"
     systemctl stop "$svc" 2>/dev/null || true
@@ -1009,7 +1001,8 @@ json_remove() {
         [[ "$ui_scheduled" == "true" ]] || json_event step "Could not schedule UI removal -- run remove-node.sh on the server to remove the UI"
     fi
 
-    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$node_type")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"${svc} removed (scope: ${scope})\"}"
+    # "node_type" echoes the UI slot name; the key is kept for existing UI clients.
+    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$slot")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"${svc} removed (scope: ${scope})\"}"
 }
 
 run_json_mode() {

@@ -2,8 +2,10 @@
 # =============================================================================
 # edit-config.sh -- Telcoin Network Node Configuration Editor
 #
-# Edit the configuration of a running validator or observer node without
-# manually editing systemd service files. Changes take effect on next restart.
+# Edit the configuration of the node installed on this server (the single
+# resolved systemd service) without manually editing systemd service files.
+# Changes take effect on next restart. There is no role to pick: the node's
+# role is decided on-chain each epoch, so every node is configured the same way.
 #
 # USAGE:
 #   sudo bash edit-config.sh
@@ -12,7 +14,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.5"
+readonly SCRIPT_VERSION="1.2.6"
 
 # Build the systemd unit file path from a unit BASE name (e.g. "telcoin").
 service_file_for() {
@@ -45,7 +47,6 @@ TARGET_SERVICE_FILE=""
 # update-node.sh (tn_node_launch_target, the 7b10e97 pattern) -- editing the
 # unit on a wrapper install silently changes nothing the service reads.
 TARGET_LAUNCH_FILE=""
-NODE_TYPE=""
 
 # =============================================================================
 # HELPERS
@@ -287,8 +288,7 @@ detect_node() {
     fi
     TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
     resolve_launch_file
-    NODE_TYPE="$(tn_resolve_node_type)"
-    print_ok "Detected: ${NODE_TYPE} node"
+    print_ok "Detected node service: ${TARGET_SERVICE}"
 }
 
 # =============================================================================
@@ -297,7 +297,7 @@ detect_node() {
 
 show_current_config() {
     set +e  # Disable exit-on-error for config reading -- grep returning no match is fine
-    print_header "Current Configuration -- ${NODE_TYPE}"
+    print_header "Current Configuration -- ${TARGET_SERVICE}"
 
     # Inspect the file that actually launches the node (wrapper on current
     # installs) -- the unit's ExecStart is just the wrapper path there and
@@ -369,7 +369,7 @@ show_current_config() {
 
     echo ""
     printf "  %-28s %s\n" "Service status:"        "$status"
-    printf "  %-28s %s\n" "Node type:"             "$NODE_TYPE"
+    printf "  %-28s %s\n" "Service name:"          "$TARGET_SERVICE"
     local install_method_label="Binary"
     [[ "$is_docker" == "true" ]] && install_method_label="Docker"
     printf "  %-28s %s\n" "Install method:"        "$install_method_label"
@@ -851,7 +851,7 @@ refresh_chain_configs() {
     print_warn "The node will be restarted to apply the new configs."
     echo ""
 
-    if ! confirm "Refresh chain configs for ${NODE_TYPE}?"; then
+    if ! confirm "Refresh chain configs for ${TARGET_SERVICE}?"; then
         print_info "Cancelled."
         echo ""
         read -r -p "  Press Enter to return to menu..."
@@ -1093,10 +1093,9 @@ run_json_set() {
     json_setup_fds
     check_root
 
-    # NODE_TYPE is only a presentation hint and is NOT required here: this JSON
-    # path operates on the single resolved unit, so a missing/unspecified type is
-    # fine. (--observer/--validator are still accepted as optional hints in main().)
-    # Operators run one node per VM; resolve the single installed unit.
+    # Operators run one node per VM; resolve the single installed unit. No role
+    # is involved: legacy Node Manager UI helpers still pass --observer or
+    # --validator, and main() drops that flag because the role is decided on-chain.
     TARGET_SERVICE="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
     TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
     [[ -f "$TARGET_SERVICE_FILE" ]] || { json_event error "node not installed: ${TARGET_SERVICE}"; return 1; }
@@ -1163,8 +1162,9 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json)      json_mode=true; shift ;;
-            --observer)  NODE_TYPE="observer";  shift ;;
-            --validator) NODE_TYPE="validator"; shift ;;
+            # Legacy Node Manager UI helpers pass a role flag on every call. The
+            # role is decided on-chain, so the flag is accepted and ignored.
+            --observer|--validator) shift ;;
             --set)       JSON_SET_PAIR="${2:-}"; shift 2 ;;
             *)           shift ;;
         esac
