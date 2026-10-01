@@ -63,7 +63,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # 1.8.6: no UI change -- bumped solely to redeploy the update engine copies in
 # /opt/telcoin-ui-update/ (update lock + identity verify + wrapper-aware
 # edit-config ride along; 1.8.5 carried the submodule-sync fix the same way).
-UI_VERSION = "1.8.6"
+UI_VERSION = "1.8.7"
 
 NODE_TYPES = ("observer", "validator")
 

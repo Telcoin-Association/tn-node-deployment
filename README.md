@@ -195,6 +195,7 @@ Each script walks through numbered steps:
 **Step 3: Node Configuration**
 - Asks for port and directory configuration
 - Asks for external and listener IP addresses for P2P
+- Asks whether RPC is private (default) or public; public asks for a DNS name for the node (see [Public RPC endpoint](#public-rpc-endpoint-https--wss))
 
 **Step 4: System Infrastructure**
 - Creates a dedicated system user and group (default: telcoin/telcoin, customisable). The user has no login shell for security.
@@ -219,6 +220,7 @@ Each script walks through numbered steps:
 - Configures the correct network listener addresses for P2P connectivity
 - Optionally starts the node immediately
 - Optionally enables auto-start on server reboot
+- With a public RPC domain and a started node: checks DNS, then enables the endpoint through Caddy
 
 ---
 
@@ -372,7 +374,7 @@ sudo ufw allow 49594/udp
 **Router port forward (home/bare metal only):**
 Forward UDP ports 49590 and 49594 from WAN to your server's local IP address. Cloud servers handle this via their network configuration.
 
-The RPC port (8545) should **not** be opened to the internet unless you are specifically running a public RPC endpoint with a reverse proxy in front of it.
+The RPC port (8545) should **not** be opened to the internet, even for a public endpoint. reth stays on `127.0.0.1` and Caddy serves it on 443 (see [Public RPC endpoint](#public-rpc-endpoint-https--wss)).
 
 ### Health Monitoring (Uptime Kuma)
 **Required for all nodes.** The Telcoin Association runs Uptime Kuma health monitoring against every deployed node — TCP port 43174 must be reachable **by the Association monitor, plus any optional operator-chosen IPs**. Restrict it to those source IPs rather than opening it to the whole internet (the endpoint binds on all interfaces, so a firewall rule is its only protection):
@@ -521,7 +523,7 @@ The script is menu-driven and interactive. It never makes changes without explic
 
 **Manage SSH access** — disable password authentication (keys only), disable root login, change SSH port. Each option shows the current state and warns clearly before making any changes.
 
-**Manage node ports** — opens the P2P consensus ports (UDP 49590/49594) inbound on every node, and optionally opens port 443 for public RPC via nginx.
+**Manage node ports** — opens the P2P consensus ports (UDP 49590/49594) inbound on every node and manages the health port. It doesn't toggle TCP 80/443: `install-caddy.sh` opens them when it enables the public RPC endpoint or the dashboard (both served by Caddy), and closes them when the last site is disabled.
 
 **Manage trusted IP whitelist** — add or remove specific IP addresses or CIDR ranges that are allowed SSH access. Shows your current session IP so you don't accidentally lock yourself out.
 
@@ -530,7 +532,8 @@ The script is menu-driven and interactive. It never makes changes without explic
 - **Test SSH in a new terminal** before closing your current session after making any changes
 - **Whitelist your IP first** before enabling default deny or restricting SSH
 - **Every node** opens inbound UDP 49590/49594 — a node that later stakes behind a closed firewall would otherwise miss consensus
-- Never open the RPC port (8545) directly to the internet — use nginx on port 443 instead
+- Never open the RPC port (8545) directly to the internet — serve it through Caddy on port 443 instead (see [Public RPC endpoint](#public-rpc-endpoint-https--wss))
+- A reset to a clean slate wipes every ufw rule, but keeps 80/443 while Caddy serves a Node Manager site (public RPC or dashboard). To close them, disable the site with `install-caddy.sh`
 
 ### When to run it
 
@@ -699,9 +702,10 @@ Enable it from the UI under **Settings → External Dashboard Access**, or on th
 sudo bash ~/telcoin-node-scripts/install-caddy.sh
 ```
 
-You choose the domain, a login username (not forced to `admin`), and a password.
+Choose **Dashboard** from the menu, then pick the domain, a login username (not forced to `admin`), and a password.
 
 - **Set the DNS A record first.** Point your domain at the server's public IP (the router's public IP if it's behind NAT) **before** enabling — Caddy requests the certificate on first start, so the record must already resolve or issuance fails and Let's Encrypt rate-limits retries. The wizard checks propagation before continuing.
+- **Give it its own hostname.** The dashboard can't share a name with the [public RPC endpoint](#public-rpc-endpoint-https--wss). If your node has a public name like `node7.adiri.telcoin.network`, keep that for RPC and put the dashboard on `dashboard.node7.adiri.telcoin.network`.
 - **Ports:** forward **443/tcp (required)** to the node; **80/tcp is recommended** (it adds the http→https redirect and a fallback for certificate issuance/renewal) but not required — Caddy obtains the certificate over 443. The script opens 80/443 in `ufw` for you. (Inbound forwarding is off by default on most routers, so this is something you set up explicitly.)
 - **Conflicts:** Apache/Nginx and Caddy can't share ports 80/443. The interactive installer detects a conflicting web server and offers to stop, disable, or remove it (or quit), and it won't overwrite a Caddy config it didn't create.
 - **Treat the login as a read-only credential, and rotate it.** The username/password gate only the public **read-only** view (it's stored as a bcrypt hash in the Caddyfile); it grants no management access — that stays on the SSH tunnel. If the credential leaks, the blast radius is read-only, but rotate it anyway by re-running `install-caddy.sh` (re-prompts and rewrites the hash). Don't reuse a password you use elsewhere.
@@ -724,6 +728,95 @@ The **Settings** tab can start/stop a local Jaeger instance and toggle OpenTelem
 systemctl status telcoin-ui
 journalctl -u telcoin-ui -f
 ```
+
+---
+
+## Public RPC endpoint (https + wss)
+
+Optional. Serves your node's JSON-RPC at `https://<domain>/` and its WebSocket at `wss://<domain>/`, and advertises both on-network so gateways and wallets can find the node. Without it (the default), RPC stays on `127.0.0.1`.
+
+reth never listens publicly. [Caddy](https://caddyserver.com) holds the TLS certificate (automatic Let's Encrypt) on port 443 and proxies to reth on loopback: JSON-RPC to `RPC_PORT` (8545), WebSocket upgrades to `WS_PORT` (8546). CORS preflight is answered at the edge. `install-caddy.sh` keeps this in the same Caddyfile as the optional [dashboard](#external-dashboard-access-optional-via-caddy); changing one site never touches the other.
+
+### DNS first
+
+The RPC endpoint and the dashboard need different hostnames:
+
+| Hostname | Serves |
+|---|---|
+| `nodeN.<suffix>`, e.g. `node7.adiri.telcoin.network` | public RPC (https + wss) |
+| `dashboard.nodeN.<suffix>`, e.g. `dashboard.node7.adiri.telcoin.network` | Node Manager dashboard (optional) |
+
+One name can't carry both. `install-caddy.sh` refuses the clash before it writes anything.
+
+Create each A record **before** you enable the site, pointing at the server's inbound public IP. Caddy asks Let's Encrypt for a certificate as soon as the site loads. If the name doesn't resolve to this server yet, issuance fails and retries get rate-limited. Allow inbound TCP 443 (required) and 80 (recommended), and forward both if the server sits behind a router. Behind NAT, or on a server with several addresses, the inbound IP isn't the one the scripts detect; pass it with `--public-ip <ip>`.
+
+### New install
+
+In step 3, `setup-node.sh` asks about RPC access. Choose `2) Public`, enter the domain, and give the inbound IP if you're behind NAT (Enter auto-detects). Flags skip the prompt:
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-node.sh --rpc-domain node7.adiri.telcoin.network
+sudo bash ~/telcoin-node-scripts/setup-node.sh --rpc-domain node7.adiri.telcoin.network --public-ip 203.0.113.10
+sudo bash ~/telcoin-node-scripts/setup-node.sh --no-public-rpc    # private, no prompt
+```
+
+`--rpc-public` on its own no longer makes RPC public. Without `--rpc-domain` it prints a warning and the node stays private.
+
+The domain is saved to `.node-meta` as `PUBLIC_RPC_DOMAIN`. After the node starts, setup checks DNS (`install-caddy.sh --phase=rpc-check-dns`) and then enables the endpoint (`--phase=rpc-enable`). If DNS doesn't point at the server yet, or you chose not to start the node, setup still completes and prints the exact `rpc-enable` command to run later.
+
+### Existing node
+
+Set up DNS, then:
+
+```bash
+sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-enable --rpc-domain node7.adiri.telcoin.network
+```
+
+Add `--public-ip <ip>` behind NAT. For a guided run, start `sudo bash ~/telcoin-node-scripts/install-caddy.sh` and pick `[2] Public RPC endpoint`; it checks DNS before it changes anything.
+
+**If the dashboard already sits on `nodeN`**, move it and enable RPC in one step. Create the A record for `dashboard.nodeN.<suffix>` first (Caddy needs a certificate for that name too), then:
+
+```bash
+sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-enable \
+  --rpc-domain node7.adiri.telcoin.network \
+  --move-dashboard-to dashboard.node7.adiri.telcoin.network
+```
+
+Only the dashboard's hostname changes; its login stays the same. The interactive menu offers the same move when it sees the clash.
+
+### What `rpc-enable` does
+
+1. Writes the `tn-rpc` site into `/etc/caddy/Caddyfile`, leaves any dashboard site as it was, reloads Caddy (or starts it), and opens 80/443 in ufw when ufw is active.
+2. Checks that reth serves WebSocket. If nothing listens on `WS_PORT` and the node was started without `--ws`, it adds `--ws --ws.addr 127.0.0.1 --ws.port <WS_PORT>` to the node's launch file. If it can't, it advertises https only and prints why.
+3. Sets `rpc` on every worker entry in `node-info.yaml`: `https://<domain>/`, plus `wss://<domain>/` when step 2 passed. The node publishes this in its signed kad record, which is where gateways and wallets look for it.
+4. Restarts the node once so the record and any new `--ws` flag take effect. If the node fails to start, the `node-info.yaml` and launch-file edits are rolled back, the node is restarted on its old config, and the script tells you whether it came back. A node that is still replaying its database is left to finish; the change applies once it's up.
+
+Every Caddyfile change runs through `caddy validate` first, with the output shown and password hashes redacted. A failed check leaves the live file alone. A running Caddy is reloaded, not restarted, and a rejected reload puts the previous file back. (One exception: if the Caddyfile being replaced turned off Caddy's admin API, which `reload` needs, Caddy is restarted once and the script says so.) Running `rpc-enable` again with the same domain is safe: the node isn't restarted when `node-info.yaml` and the launch file are already right.
+
+### Check it
+
+```bash
+sudo bash ~/telcoin-node-scripts/check-node.sh
+sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-status
+```
+
+`check-node.sh` has a public RPC block: the domain, Caddy's state, an https and a wss probe (sent through Caddy on loopback, so the real certificate is checked), the WS port, and the URLs `node-info.yaml` advertises. It ends with `public RPC: OK`, or with `public RPC: WARN -- <reasons>` and the command that fixes it. Run it with `sudo`: `.node-meta` is root-only, and without it the block reports `unknown`. A private node shows `public RPC: not configured (private node)`.
+
+`--phase=rpc-status` shows whether the site is enabled, what `node-info.yaml` advertises, and whether reth's WebSocket port is listening.
+
+### Backups
+
+Before every Caddyfile write, the live file is copied to `/etc/caddy/Caddyfile.bak.<YYYYmmdd_HHMMSS>` with its owner and mode. Nothing deletes these; remove old ones by hand.
+
+### Turn it off
+
+```bash
+sudo bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-disable
+```
+
+This clears `rpc` in `node-info.yaml`, restarts the node, and removes the `tn-rpc` site. The dashboard keeps running if it's enabled. Once no site remains, 80/443 are closed in ufw. The `--ws` flag stays in the launch file; reth's WebSocket only listens on `127.0.0.1`.
+
+While a Node Manager site is enabled, `firewall-setup.sh --reset` (and the clean-slate reset offered by "Enable firewall with recommended defaults") keeps 80/443 open. Close them by disabling the site in `install-caddy.sh`.
 
 ---
 
@@ -875,6 +968,94 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### install-caddy v1.3.0 — safe Caddyfile swaps, one hostname per site, WebSocket preflight
+Every Caddyfile write now takes one path: render to a temp file in `/etc/caddy`, run
+`caddy validate` with its output shown (bcrypt hashes redacted), copy the live file to
+`/etc/caddy/Caddyfile.bak.<YYYYmmdd_HHMMSS>` (never pruned), then rename the new file
+into place keeping owner and mode. v1.2.0 validated in `/tmp` with the output hidden,
+kept no backup of a managed file, and fell back from `reload` to `restart`, so one bad
+config could take every site down. A serving Caddy is now reloaded, not restarted (the
+one exception, announced, is replacing a file that set `admin off`, since reload needs
+the admin API). A rejected reload restores the backup and exits non-zero, and
+`rpc-enable` stops there: nothing is advertised and the node isn't restarted.
+
+The dashboard and the public RPC endpoint need different hostnames. Caddy rejects two
+sites on one name, and v1.2.0 surfaced that as a bare validation failure. The node's
+public name (e.g. `node7.adiri.telcoin.network`) carries JSON-RPC + WebSocket; the
+dashboard goes on `dashboard.<node-domain>`. A clash now dies before anything is written
+and prints the fix. `--phase=rpc-enable --move-dashboard-to <hostname>` moves a dashboard
+that sits on the RPC name, password hash kept, in the same swap; the interactive menu
+offers the same move.
+
+Before advertising `wss://`, `rpc-enable` checks that reth will serve WebSocket. When
+nothing listens on `WS_PORT` and the launch lacks `--ws`, it adds `--ws --ws.addr
+127.0.0.1 --ws.port <WS_PORT>` to the launch file (rolled back with `node-info.yaml` if
+the node then fails to start). When it can't, only `https://` is advertised, with a
+warning. Before this, a node started without `--ws` advertised a `wss://` URL that
+returned 502.
+
+The `node-info.yaml` editor handles both shapes: the legacy `p2p_info.worker:` map and
+the current `p2p_info.workers:` list, where every entry gets the rpc. After a failed node
+restart the brick guard runs `systemctl reset-failed` and reports the node's real state.
+Hostnames are held to the RFC length limits (63 characters per label, 253 in all).
+`--phase=<x>` now works without `--json`: one phase, no prompts, human-readable output
+(what `setup-node.sh` uses). `--json --phase=rpc-status` adds `advertised_http`,
+`advertised_ws` and `ws_listening`. See
+[Public RPC endpoint](#public-rpc-endpoint-https--wss).
+
+### setup-node v1.1.0 — public RPC at install time
+Choice 2 ("Public") in the RPC access menu said "coming soon" and fell back to private.
+It now asks for the public RPC domain, plus an optional inbound IP for NAT hosts. Flags
+do the same without the prompt: `--rpc-domain <hostname>`, `--public-ip <ip>` (passed
+through to `install-caddy.sh`), and `--no-public-rpc` to stay private. `--rpc-public`
+now needs a domain; without one it warns and RPC stays private. The domain is persisted
+in `.node-meta` as `PUBLIC_RPC_DOMAIN`.
+
+Once the service is running, setup runs `install-caddy.sh --phase=rpc-check-dns` and then
+`--phase=rpc-enable`: Caddy site, https + wss, the `worker.rpc` advertisement, and one
+brick-guarded node restart. If DNS doesn't point at the server yet (or the enable fails),
+setup still succeeds and prints the exact `rpc-enable` command to run later. Flags that
+take a value now error when the value is missing.
+
+### check-node v1.1.54 — public RPC block
+New section for the public RPC endpoint: the domain (from `.node-meta`, or from the
+Caddyfile when that's unset), Caddy's state, https and wss probes sent through Caddy on
+loopback with the real certificate, whether reth's WS port is listening, and the URLs
+advertised in `node-info.yaml` (both the `worker:` and `workers:` shapes). It ends with an
+OK/WARN verdict and, on WARN, the `install-caddy.sh --phase=rpc-enable` command that
+fixes it. A private node prints `not configured (private node)`. Without sudo
+`.node-meta` isn't readable, so the block says `unknown (.node-meta not readable — run
+with sudo)` instead of guessing. Warn-only: it never changes the health verdict or the
+exit code.
+
+### firewall-setup v1.5.2 — reset keeps the Caddy edge open
+`--reset` (and the clean-slate choice in the menu) wiped every ufw rule and never put
+80/443 back, which took a public RPC endpoint or dashboard offline. It now re-adds them
+before re-enabling ufw when Caddy is installed and the Caddyfile is managed by the Node
+Manager (the marker on its first line, or a `tn-rpc` / `tn-dashboard` fence). To close
+80/443, disable the sites in `install-caddy.sh`; it closes them once no site remains.
+
+### lib/fallback v1.0.2 — custom data directories
+`tn_resolve_data_dir` now honours `DATA_DIR` from `.node-meta`, so the scripts that find
+`node-info.yaml` through it (`install-caddy.sh`, and `setup-node.sh`'s check of the
+advertisement) work on nodes installed with a custom data directory instead of looking
+under `/var/lib/telcoin`.
+
+`update-scripts.sh v1.1.66` re-cut with refreshed `.sha256` sidecars. `ui/server.py
+v1.8.7` carries no UI change — the bump refreshes the root-owned copy in
+`/opt/telcoin-ui-update/`, so the UI's dashboard and RPC toggles run install-caddy
+v1.3.0.
+
+### install-caddy v1.2.0 — public RPC site (missed entry)
+Shipped 2026-06-30 without a changelog line. The managed Caddyfile gained a second site,
+fenced so either can be toggled without touching the other: `https://<rpc-domain>/`
+proxies JSON-RPC to reth on loopback (CORS and `OPTIONS` preflight answered at the edge),
+and WebSocket upgrades on the same name go to the WS port, so it serves `wss://` too.
+Enabling writes `worker.rpc` into `node-info.yaml` so the endpoint is advertised
+on-network, then restarts the node under a brick guard that rolls the edit back if the
+node fails to start. Adds the interactive menu (dashboard / public RPC / status) and the
+`rpc-status`, `rpc-check-dns`, `rpc-enable` and `rpc-disable` JSON phases.
 
 ### update-node v1.1.61 — force-fetch tags so a re-cut release tag can't resurrect an old build
 Release tags are occasionally re-cut at the same name (a bad `v0.13.0-adiri` build was
