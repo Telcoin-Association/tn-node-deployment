@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.5.1"
+readonly SCRIPT_VERSION="1.5.2"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
@@ -266,19 +266,26 @@ view_status() {
 # (the Association recovery path, 10.100.0.0/16) + the source-restricted kuma monitor are ALL
 # allowed BEFORE `ufw --force enable`, so enabling can never lock out the IAP door or the overlay.
 # Opens validator P2P (49590/49594) when a validator is installed; 80/443 are NOT opened here
-# (config-caddy.sh adds them). Mirrors the interactive defaults exactly -- no extra behavior.
+# (install-caddy.sh in this repo opens them when it enables the public RPC/dashboard; the
+# maintainer-only common/config-caddy.sh does the same on the maintainer fleet, provenance
+# only). Mirrors the interactive defaults exactly -- no extra behavior.
 #
 # RECONCILE by default: it only ENSURES the managed rules + policies exist and never
 # removes anything, so a re-run can't silently drop an operator's custom rules (a manual
 # 443, a bespoke allow, etc.). Pass "--reset" to first `ufw --force reset` for a clean
-# slate -- destructive, removes ALL existing rules including unmanaged ones. Either way
-# the lockout-safe ordering holds: SSH + overlay + kuma are allowed BEFORE enable.
+# slate -- destructive, removes ALL existing rules including unmanaged ones. The one
+# exception: when Caddy serves the public RPC/dashboard here (caddy_serves_public_edge),
+# --reset re-adds 80/443 so a clean slate can't take the public edge down. To close them,
+# disable that access with install-caddy.sh (--json --phase=rpc-disable / --phase=disable,
+# or its interactive menu); it closes 80/443 once no vhost remains. Either way the
+# lockout-safe ordering holds: SSH + overlay + kuma are allowed BEFORE enable.
 apply_recommended_firewall() {
     local do_reset="${1:-}"
-    local ssh_port nodes
+    local ssh_port nodes keep_web=false
     ssh_port=$(get_ssh_port)
     nodes=$(detect_installed_nodes)
     if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
+        caddy_serves_public_edge && keep_web=true
         ufw --force reset &>/dev/null
     fi
     ufw default deny incoming &>/dev/null
@@ -294,7 +301,17 @@ apply_recommended_firewall() {
         ufw allow 49590/udp &>/dev/null
         ufw allow 49594/udp &>/dev/null
     fi
+    # Re-add the public edge BEFORE enable so --reset never leaves 80/443 closed under Caddy.
+    if [[ "$keep_web" == "true" ]]; then
+        ufw allow 80/tcp &>/dev/null
+        ufw allow 443/tcp &>/dev/null
+    fi
     ufw --force enable &>/dev/null
+    if [[ "$keep_web" == "true" ]]; then
+        print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
+        print_info "To close them, disable that access: sudo bash ${SCRIPT_DIR}/install-caddy.sh"
+        print_info "  (or --json --phase=rpc-disable / --phase=disable; 80/443 close once no vhost remains)."
+    fi
 }
 
 enable_firewall() {
@@ -851,6 +868,24 @@ caddy_managed_active() {
     grep -q "Managed by the Telcoin Node Manager" /etc/caddy/Caddyfile 2>/dev/null
 }
 
+# caddy_serves_public_edge -- 0 (true) when Caddy fronts the public RPC and/or dashboard
+# here, so a --reset must keep 80/443. Detects the managed Caddyfile the way install-caddy.sh
+# writes it (our marker as the FIRST line, or a tn-rpc / tn-dashboard fence per vhost) with
+# Caddy installed. Unlike caddy_managed_active it additionally requires `caddy` on PATH and
+# does not look at the service state, so a reset while Caddy is briefly down/restarting
+# cannot close the edge. The marker only counts on line 1, so an operator's own Caddyfile
+# that merely mentions the phrase in a comment is not treated as ours. Deliberately NOT
+# "caddy is active" alone: after install-caddy.sh disables the last vhost Caddy keeps
+# running on a disabled stub (no marker), and a foreign Caddy config is a custom rule
+# that --reset is documented to wipe.
+caddy_serves_public_edge() {
+    command -v caddy >/dev/null 2>&1 || return 1
+    local first_line
+    first_line="$(head -n 1 /etc/caddy/Caddyfile 2>/dev/null || true)"
+    [[ "$first_line" == *"Managed by the Telcoin Node Manager"* ]] && return 0
+    grep -qF -e "# >>> tn-rpc >>>" -e "# >>> tn-dashboard >>>" /etc/caddy/Caddyfile 2>/dev/null
+}
+
 # desired_firewall_rules -- print the rule set THIS host should have, one per line:
 #   <spec>\t<label>\t<source>
 # <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
@@ -1135,7 +1170,7 @@ json_fw_port() {
 # scripted node bring-up). Applies the SAME fixed ruleset as the interactive enable -- it
 # cannot set arbitrary rules or disable SSH, and SSH + overlay + kuma are pre-allowed before
 # enable, so it preserves the "can never lock an operator out" guarantee. 80/443 are added
-# later by config-caddy.sh.
+# later by install-caddy.sh (this repo) when it enables the public RPC/dashboard.
 json_fw_enable() {
     if ! ufw_installed; then apt-get install -y ufw &>/dev/null; fi
     apply_recommended_firewall

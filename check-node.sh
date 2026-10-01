@@ -36,7 +36,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.1.53"
+readonly SCRIPT_VERSION="1.1.54"
 readonly DEFAULT_NETWORK_RPC="https://rpc.telcoin.network"
 readonly STALE_THRESHOLD_SECONDS=60
 # EVM execution lag (network block - local block) above which the node is
@@ -522,6 +522,206 @@ report_testnet_addons() {
     fi
 }
 
+# read_advertised_rpc <node-info.yaml> -- echo "<http> <ws>": the worker RPC
+# endpoint advertised in node-info.yaml (p2p_info -> worker 0 -> rpc -> http/ws),
+# "none" for a field that is absent or null. Text parsing like
+# detect_authority_id (no python3/PyYAML needed). Handles both on-disk shapes:
+# the current `workers:` list (first entry = worker 0) and the legacy single
+# `worker:` mapping; primary.rpc is never read. Always returns 0 ("none none"
+# when the file is missing or unparsable).
+read_advertised_rpc() {
+    local node_info="$1" parsed="" http="none" ws="none"
+    if [[ -r "$node_info" ]]; then
+        parsed=$(awk -v q="'" '
+            function ind(s) { match(s, /^ */); return RLENGTH }
+            function val(s,   c) {
+                sub(/^[^:]*:[ \t]*/, "", s); sub(/[ \t]+#.*$/, "", s); sub(/[ \t]+$/, "", s)
+                c = substr(s, 1, 1)
+                if ((c == "\"" || c == q) && length(s) >= 2 && substr(s, length(s), 1) == c)
+                    s = substr(s, 2, length(s) - 2)
+                if (s == "~" || s == "null" || s == "Null" || s == "NULL") s = ""
+                return s
+            }
+            BEGIN { st = 0; items = 0; h = ""; w = "" }
+            {
+                sub(/\r$/, "")
+                if ($0 ~ /^[ \t]*(#|$)/) next
+                i = ind($0); s = substr($0, i + 1)
+                if (st == 0) { if (i == 0 && s ~ /^p2p_info:/) st = 1; next }
+                if (st == 1) {
+                    if (i == 0) exit
+                    if (s ~ /^workers?:/) { wi = i; st = 2 }
+                    next
+                }
+                # Inside worker(s): stop at the next sibling of worker(s)/p2p_info.
+                if (i < wi || (i == wi && s !~ /^- /)) exit
+                if (s ~ /^- /) {                    # sequence item = one worker
+                    if (++items > 1) exit           # worker 0 only
+                    s = substr(s, 3); i += 2
+                    while (substr(s, 1, 1) == " ") { s = substr(s, 2); i++ }
+                }
+                if (st == 3 && i <= ri) st = 2      # left the rpc: mapping
+                if (st == 3) {
+                    if (s ~ /^http:/) h = val(s)
+                    else if (s ~ /^ws:/) w = val(s)
+                    next
+                }
+                if (s ~ /^rpc:/) {
+                    ri = i; v = val(s)
+                    if (v == "") { st = 3; next }
+                    if (v ~ /^[{]/) {               # flow style {http: X, ws: Y}
+                        gsub(/^[{][ \t]*|[ \t]*[}]$/, "", v)
+                        n = split(v, kv, /,[ \t]*/)
+                        for (k = 1; k <= n; k++) {
+                            if (kv[k] ~ /^http:/) h = val(kv[k])
+                            else if (kv[k] ~ /^ws:/) w = val(kv[k])
+                        }
+                    }
+                }
+            }
+            END { print (h == "" ? "none" : h) " " (w == "" ? "none" : w) }
+        ' "$node_info" 2>/dev/null || true)
+    fi
+    [[ -n "$parsed" ]] && read -r http ws <<<"$parsed"
+    echo "${http:-none} ${ws:-none}"
+    return 0
+}
+
+# report_public_rpc -- status of the operator's public RPC endpoint (Caddy vhost
+# "tn-rpc" written by install-caddy.sh, hostname persisted by setup-node.sh as
+# PUBLIC_RPC_DOMAIN in .node-meta). Probes https + wss through Caddy on loopback
+# (--resolve, real certificate) and compares worker.rpc in node-info.yaml with the
+# served hostname. Warn-only: never touches HEALTH_ISSUES and every probe is
+# guarded, so it cannot change the exit code or abort the report.
+report_public_rpc() {
+    local caddyfile="${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile"
+    local rpc_begin="# >>> tn-rpc >>>" rpc_end="# <<< tn-rpc <<<"
+    local meta domain="" caddy_domain="" have_block=false src=""
+    meta="$(node_meta_path 2>/dev/null || true)"
+    # .node-meta is root-owned 0600: without sudo it exists but cannot be read, so
+    # an empty PUBLIC_RPC_DOMAIN would be a false "private node". Say so instead.
+    if [[ -n "$meta" && -f "$meta" && ! -r "$meta" ]]; then
+        print_info "public RPC: unknown (.node-meta not readable — run with sudo)"
+        return 0
+    fi
+    domain="$(meta_get PUBLIC_RPC_DOMAIN "$meta" 2>/dev/null || true)"
+    if [[ -f "$caddyfile" ]] && grep -qF "$rpc_begin" "$caddyfile" 2>/dev/null; then
+        have_block=true
+        # Site address = first "<host> {" line inside the fenced block (same rule
+        # as install-caddy.sh do_rpc_status).
+        caddy_domain=$(awk -v b="$rpc_begin" -v e="$rpc_end" '
+            $0 == b { inb = 1; next }
+            $0 == e { inb = 0; next }
+            inb && /^[A-Za-z0-9].*[{][ \t]*$/ { sub(/[ \t]*[{].*$/, ""); gsub(/ /, ""); print; exit }
+        ' "$caddyfile" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$domain" && "$have_block" != "true" ]]; then
+        print_info "public RPC: not configured (private node)"
+        return 0
+    fi
+
+    print_step "Checking public RPC..."
+    local fix_cmd="sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-enable --rpc-domain"
+    if [[ -n "$domain" ]]; then
+        src=".node-meta"
+    else
+        domain="$caddy_domain"; src="Caddyfile tn-rpc block; PUBLIC_RPC_DOMAIN not set in .node-meta"
+    fi
+    if [[ -z "$domain" ]]; then
+        print_warn "public RPC: WARN -- tn-rpc block in ${caddyfile} has no parsable site address"
+        print_info "fix: ${fix_cmd} <your-rpc-hostname>"
+        return 0
+    fi
+    print_info "public RPC: ${domain} (from ${src})"
+
+    local issues=""
+    if [[ "$have_block" != "true" ]]; then
+        issues="${issues}; no tn-rpc vhost in ${caddyfile}"
+    elif [[ -n "$caddy_domain" && "$caddy_domain" != "$domain" ]]; then
+        issues="${issues}; Caddyfile tn-rpc vhost serves ${caddy_domain}, not ${domain}"
+    fi
+
+    # Caddy service.
+    local caddy_state="not installed"
+    if command -v caddy >/dev/null 2>&1; then
+        if systemctl is-active --quiet caddy 2>/dev/null; then caddy_state="active"; else caddy_state="inactive"; fi
+    fi
+    print_info "caddy: ${caddy_state}"
+    [[ "$caddy_state" == "active" ]] || issues="${issues}; caddy ${caddy_state}"
+
+    # HTTPS JSON-RPC through Caddy on loopback, real certificate (no -k).
+    local body="" https_ok=false
+    body=$(curl -s --max-time 8 --resolve "${domain}:443:127.0.0.1" \
+        -X POST -H 'Content-Type: application/json' \
+        --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+        "https://${domain}/" 2>/dev/null || true)
+    [[ "$body" == *'"result"'* ]] && https_ok=true
+    if [[ "$https_ok" == "true" ]]; then
+        print_info "https: ok"
+    else
+        print_info "https: FAIL"
+        issues="${issues}; https probe failed"
+    fi
+
+    # RFC-6455 WebSocket handshake through Caddy. A successful upgrade leaves the
+    # connection open, so curl only returns at --max-time; judge by the status line.
+    local ws_resp="" ws_status="" wss_ok=false
+    ws_resp=$(curl -is --http1.1 --max-time 8 --resolve "${domain}:443:127.0.0.1" \
+        -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+        -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+        "https://${domain}/" 2>/dev/null || true)
+    ws_status="${ws_resp%%$'\n'*}"; ws_status="${ws_status%$'\r'}"
+    [[ "$ws_status" =~ ^HTTP/[0-9.]+\ 101 ]] && wss_ok=true
+    if [[ "$wss_ok" == "true" ]]; then
+        print_info "wss: ok (101)"
+    else
+        print_info "wss: FAIL (${ws_status:-no response})"
+        issues="${issues}; wss handshake failed"
+    fi
+
+    # reth WebSocket listener behind the wss route.
+    local ws_port ws_listen="unknown (ss not found)"
+    ws_port="$(meta_get WS_PORT "$meta" 2>/dev/null || true)"
+    [[ "$ws_port" =~ ^[0-9]+$ ]] || ws_port=8546
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn 2>/dev/null | awk -v p=":${ws_port}" '
+            NR > 1 && length($4) >= length(p) && substr($4, length($4) - length(p) + 1) == p { f = 1 }
+            END { exit !f }'; then
+            ws_listen="listening"
+        else
+            ws_listen="not listening"
+            issues="${issues}; WS port ${ws_port} not listening (node started without --ws?)"
+        fi
+    fi
+    print_info "ws port: ${ws_port} ${ws_listen}"
+
+    # On-network advertisement (worker.rpc in node-info.yaml).
+    local node_info adv adv_http adv_ws want_http want_ws
+    node_info="$(detect_data_dir)/node-info.yaml"
+    adv="$(read_advertised_rpc "$node_info")"
+    read -r adv_http adv_ws <<<"$adv"
+    want_http="https://${domain}/"; want_ws="wss://${domain}/"
+    if [[ -f "$node_info" ]]; then
+        print_info "advertised: http=${adv_http} ws=${adv_ws}"
+    else
+        print_info "advertised: http=${adv_http} ws=${adv_ws} (${node_info} not found)"
+    fi
+    [[ "$adv_http" == "$want_http" ]] || issues="${issues}; advertised http=${adv_http}, want ${want_http}"
+    [[ "$adv_ws" == "$want_ws" ]]     || issues="${issues}; advertised ws=${adv_ws}, want ${want_ws}"
+
+    # Verdict: OK needs https + wss + both advertised URLs matching; the other
+    # findings above are listed to explain a WARN.
+    if [[ "$https_ok" == "true" && "$wss_ok" == "true" \
+          && "$adv_http" == "$want_http" && "$adv_ws" == "$want_ws" ]]; then
+        print_ok "public RPC: OK"
+    else
+        print_warn "public RPC: WARN -- ${issues#; }"
+        print_info "fix: ${fix_cmd} ${domain}"
+    fi
+    return 0
+}
+
 # =============================================================================
 # REPORT HEADER
 # =============================================================================
@@ -955,6 +1155,11 @@ fi
 # 9.5 TESTNET ADD-ONS (Alloy / health endpoint / VPN overlay)
 # =============================================================================
 report_testnet_addons
+
+# =============================================================================
+# 9.6 PUBLIC RPC (Caddy tn-rpc vhost / https + wss probes / worker.rpc advert)
+# =============================================================================
+report_public_rpc
 
 # =============================================================================
 # 10. SUMMARY
