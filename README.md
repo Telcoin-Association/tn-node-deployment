@@ -4,6 +4,8 @@ Automated setup scripts for running a node on the Telcoin Network. Built for MNO
 
 There is one node identity. Every node installs validator-capable and follows consensus from day one; staking and on-chain activation are what let it validate. The protocol decides a node's role from on-chain committee membership each epoch, not from a setup flag.
 
+> **New to running a node?** Follow [`OPERATOR.md`](OPERATOR.md), the step-by-step runbook: install, sync, public RPC, staking, activation and day-2 operations. This README is the reference behind it.
+
 > **Maintainers / AI agents:** see [`AGENTS.md`](AGENTS.md) for the operator-vs-maintainer repo boundary — what ships to operators vs. the maintainer-only `common/` tooling that operators never have.
 
 ---
@@ -34,6 +36,8 @@ Anyone can run a full node — no approval required. Install the scripts, run `s
 
 Every node is provisioned validator-capable from day one. "Just following consensus" and "validating" are not two install options — the difference is on-chain state (stake plus committee membership) that the protocol reads each epoch. Until you stake and activate, the node behaves like any full node.
 
+Any node that is not in the current committee is an **observer**, including a staked validator between committee seats. The protocol works this out each epoch, and the node reports it through the `tn_nodeMode` JSON-RPC method: `CvvActive` (voting in the committee), `CvvInactive` (in the committee, catching up) or `Observer`.
+
 The ports are the same on every node:
 
 - RPC: **8545** (HTTP) / **8546** (WS) — the reth defaults
@@ -48,7 +52,7 @@ To validate you additionally need, in order:
 2. **Stake** — submit the stake transaction with your BLS public key and proof of possession.
 3. **Activation** — call `activate()` on-chain and go active at the next epoch boundary.
 
-The node software does not change. Once `tn_isValidator(blsPubkey)` returns true on-chain, the web UI automatically shows that node on the validator tab and renders the validator dashboard — there is no node-type toggle to flip. The step-by-step (with `cast` commands) is in [Validator Onboarding Flow](#validator-onboarding-flow) below.
+The node software does not change. The validator view follows your execution address's stake status in the ConsensusRegistry contract (`getValidator`): Staked, PendingActivation, Active or PendingExit (statuses 1 to 4) count as a staked validator; everything else does not. `check-node.sh`, `update-node.sh` and the web UI all read that status, and the UI switches to the validator dashboard once the node is synced; there is no node-type toggle to flip. Staking makes the node eligible for a committee seat, and it votes only in epochs where it holds one. The step-by-step (with `cast` commands) is in [Validator Onboarding Flow](#validator-onboarding-flow) below.
 
 ### One node per VM
 
@@ -59,10 +63,10 @@ Each machine runs exactly **one** node, installed under a single, consistent ide
 - config directory: **`/etc/telcoin`**
 - data directory: **`/var/lib/telcoin`**
 
-`/etc/telcoin/.node-meta` records a `NODE_TYPE=` key, but it is only a non-authoritative
-default-view hint (new installs write `NODE_TYPE=observer`) — the on-chain `tn_isValidator`
-status is authoritative. Because there is only ever one node on the box, the binary is
-launched with no node-instance flag and serves RPC on the reth default ports (`8545`/`8546`).
+`/etc/telcoin/.node-meta` still records a `NODE_TYPE=` key (new installs write
+`NODE_TYPE=observer`), but it is not a role: only older UI bundles read it, as a default-view
+hint. The on-chain stake status decides the validator view. Because there is only ever one
+node on the box, the binary is launched with no node-instance flag and serves RPC on the reth default ports (`8545`/`8546`).
 
 > **Upgrading from an older install?** Earlier versions used a separate unit name and
 > per-role config/data directories for each node type. Those legacy per-role installs keep
@@ -77,24 +81,28 @@ launched with no node-instance flag and serves RPC on the reth default ports (`8
 
 ### Hardware
 
-The baseline below runs a full node. The heavier "to validate" column is what you want **if** you intend to stake and validate — treat it as guidance, not a requirement to run a node. The hardware preflight checks against the baseline and prints the validate spec for reference.
+Size the machine for the role you plan to run. The figures come from the telcoin-network hardware requirements and count physical cores: cloud vCPUs are usually hyperthreads, so an 8 vCPU instance has about 4 physical cores. The validator row only matters if you intend to stake and validate.
 
-| Component | Run a node (baseline) | To validate |
+| Role | Minimum | Recommended |
 |---|---|---|
-| CPU | 8 cores / 16 threads, x86-64/ARM64 | 16+ cores / 32 threads, x86-64, 4000+ PassMark single-thread |
-| RAM | 16GB DDR4 ECC | 128GB DDR4/DDR5 ECC RDIMM |
-| Storage | 500GB TLC NVMe SSD | 4TB TLC NVMe SSD |
-| Network | 24Mbps+ stable | 1Gbps sustained, 1GbE+ |
+| Observer, follower (RPC on localhost) | 2 cores, 8 GB RAM | 4 cores, 16 GB RAM |
+| Observer, public RPC | 4 cores, 16 GB RAM | 8 cores, 32 GB RAM |
+| Validator | 8 cores, 32 GB ECC RAM | 16 cores, 64 GB ECC RAM |
+| Storage, every role | 2 TB TLC NVMe SSD | 4 TB TLC NVMe SSD |
+
+Validators also need 200 Mbps symmetric bandwidth at minimum, 1 Gbps recommended.
+
+The hardware preflight in `setup-node.sh` prints one line per role and only warns; it never blocks setup. It counts logical CPUs (`nproc`), so halve a cloud instance's vCPU count before comparing it with the table, and it does not check for ECC memory or NVMe.
 
 > Storage note: TLC NVMe drives are specifically required over QLC. TLC supports 1,000-3,000 P/E cycles vs 100-1,000 for QLC, making TLC significantly more durable for continuous blockchain write operations.
 
 ### Supported Operating Systems
 
-- Ubuntu 22.04+ LTS (minimum -- required for systemd 247+)
+- Ubuntu 22.04+ LTS
 - Debian 12+
-- Red Hat Enterprise Linux (RHEL) 8+
-- Kernel version 3.10+ minimum
-- macOS Sequoia 15+ (full node only)
+- Red Hat Enterprise Linux (RHEL) 9+ and compatible distributions
+
+`setup-node.sh` needs systemd 247 or newer for `LoadCredential` and stops on anything older, so RHEL 8 (systemd 239) is not supported. macOS is not supported for running a node.
 
 ### Software
 The scripts will install or check for everything needed. You do not need to install anything manually beforehand.
@@ -148,10 +156,10 @@ Opens the ports every node needs: SSH, Uptime Kuma, and the P2P consensus ports 
 
 **4. Check node health any time**
 ```bash
-bash ~/telcoin-node-scripts/check-node.sh
+sudo bash ~/telcoin-node-scripts/check-node.sh
 
 # Include on-chain validator status
-bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_ADDRESS
+sudo bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_ADDRESS
 ```
 
 ### Day-to-day operations
@@ -181,9 +189,9 @@ Each script walks through numbered steps:
 **Step 1: Pre-flight Checks and Install Method**
 - Checks you are running as root
 - Detects your Linux distribution and package manager
-- Verifies hardware meets minimum requirements
+- Reports the hardware against each role's minimum (warns only, never blocks)
 - Checks internet connectivity and required ports
-- Checks systemd version (247+ required -- Ubuntu 22.04+)
+- Checks systemd version (247+ required: Ubuntu 22.04+, Debian 12+, RHEL 9+)
 - Installs any missing tools (curl, git)
 - Asks how to obtain the binary (build from source, Docker, or existing)
 - Installs all dependencies upfront before configuration begins (Rust, build tools, Docker image pull, etc.)
@@ -195,7 +203,7 @@ Each script walks through numbered steps:
 **Step 3: Node Configuration**
 - Asks for port and directory configuration
 - Asks for external and listener IP addresses for P2P
-- Asks whether RPC is private (default) or public; public asks for a DNS name for the node (see [Public RPC endpoint](#public-rpc-endpoint-https--wss))
+- Asks whether RPC is private (default) or public; public asks for a DNS name for the node (`--rpc-domain` answers this up front; see [Public RPC endpoint](#public-rpc-endpoint-https--wss))
 
 **Step 4: System Infrastructure**
 - Creates a dedicated system user and group (default: telcoin/telcoin, customisable). The user has no login shell for security.
@@ -207,6 +215,7 @@ Each script walks through numbered steps:
 - Asks for your Ethereum address and P2P multiaddrs
 - Asks you to set a BLS key passphrase (entered twice to confirm, never shown on screen)
 - Runs the telcoin-network keytool to create the node's cryptographic keys (BLS + P2P)
+- With a public RPC domain, has the keytool advertise `https://<domain>/` and `wss://<domain>/` in `node-info.yaml`
 - Stores keys in /var/lib/telcoin/node-keys/ with strict permissions
 - Stores passphrase in /etc/telcoin/bls-passphrase (mode 600)
 - If TPM selected: seals passphrase to TPM chip, shows it once, prompts operator to store offline
@@ -220,14 +229,14 @@ Each script walks through numbered steps:
 - Configures the correct network listener addresses for P2P connectivity
 - Optionally starts the node immediately
 - Optionally enables auto-start on server reboot
-- With a public RPC domain and a started node: checks DNS, then enables the endpoint through Caddy
+- With a public RPC domain and a started node: checks DNS, then enables the endpoint through Caddy (no extra node restart when `node-info.yaml` already advertises the URLs)
 
 ---
 
 ## System Layout
 
-After setup, files are organised as follows. There is one layout for every node — the
-default-view hint is recorded in `/etc/telcoin/.node-meta` (`NODE_TYPE=`) rather than in the paths.
+After setup, files are organised as follows. There is one layout for every node; nothing in
+the paths depends on whether the node validates.
 
 ```
 /opt/telcoin/
@@ -245,7 +254,7 @@ default-view hint is recorded in `/etc/telcoin/.node-meta` (`NODE_TYPE=`) rather
 
 /etc/telcoin/
   bls-passphrase                    -- BLS key passphrase (mode 600, root only)
-  .node-meta                        -- internal metadata used by remove/edit scripts
+  .node-meta                        -- install metadata read by the helper scripts and UI (mode 600)
 
 /var/log/telcoin/
   telcoin.log                       -- node output log
@@ -263,7 +272,7 @@ default-view hint is recorded in `/etc/telcoin/.node-meta` (`NODE_TYPE=`) rather
 ```
 
 One machine runs one node, so there is a single `telcoin.service` and a single set of
-directories regardless of node type. Installs created by older versions of these scripts used
+directories whatever the node's role. Installs created by older versions of these scripts used
 per-role unit names and per-role subdirectories under `/etc/telcoin` and `/var/lib/telcoin`;
 those keep working as-is and the helper scripts locate them automatically via the
 compatibility shim in `lib/fallback.sh`.
@@ -391,7 +400,7 @@ sudo ufw allow from 104.155.184.201/32 to any port 43174 proto tcp
 
 Setting up a validator involves both off-chain (node setup) and on-chain (contract interaction) steps. The setup script handles the off-chain steps and guides you through what is needed on-chain.
 
-Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake
+Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake (its `stake` and `unstake` signatures are out of date; use the commands below). The runbook walks through the same steps with shell variables and a calldata check: [OPERATOR.md, Validators: stake and activate](OPERATOR.md#6-validators-stake-and-activate).
 
 ### Full Process
 
@@ -410,30 +419,34 @@ cast call 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
 ```
 
 **Step 3 — Stake your TEL (operator action)**
-Once whitelisted, submit the stake transaction using your BLS public key and proof of possession from `node-info.yaml`:
+Once whitelisted, export the stake calldata on the node. The keytool reads only `node-info.yaml`; it needs neither the passphrase nor the private keys, and the BLS keys never leave the node:
 
 ```bash
-# Check required stake amount first
-cast call 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
-  "getCurrentStakeConfig()" \
-  --rpc-url <RPC_URL>
-
-# Submit stake
-cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
-  "stake(bytes,(bytes,bytes))" \
-  <BLS_PUBKEY_COMPRESSED> \
-  "(<UNCOMPRESSED_PUBKEY>,<UNCOMPRESSED_SIGNATURE>)" \
-  --value <STAKE_AMOUNT> \
-  --trezor \
-  --rpc-url <RPC_URL>
+sudo /opt/telcoin/telcoin-network keytool export-staking-args \
+  --node-info /var/lib/telcoin/node-info.yaml --calldata
 ```
 
-**Step 4 — Sync your node**
-Wait for the node to fully sync. Check sync status:
+Docker installs run the same keytool from the node's image ([command in the runbook](OPERATOR.md#64-export-the-stake-calldata-on-the-node)). Copy the `0x...` output to the machine that holds your wallet, read the stake amount, and send the calldata with exactly that value:
+
 ```bash
-curl -X POST -H "Content-Type: application/json" \
-  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
-  http://localhost:8545
+# Stake amount in wei: the first value returned
+cast call 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
+  "getCurrentStakeConfig()(uint256,uint256,uint256,uint32)" \
+  --rpc-url https://rpc.telcoin.network
+
+# Submit stake: the calldata encodes stake(bytes,(bytes))
+cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 <CALLDATA> \
+  --value <STAKE_AMOUNT> \
+  --from <VALIDATOR_ADDRESS> --ledger \
+  --rpc-url https://rpc.telcoin.network
+```
+
+Use `--trezor` for a Trezor. `--interactive` asks for a raw private key; avoid it for a funded validator address.
+
+**Step 4 — Sync your node**
+Wait for the node to catch up with the network. `eth_syncing` always returns `false` on Telcoin Network, so don't use it. Run the health check, which compares your node's block height with the public RPC, until it reports `All checks passed -- node is healthy and caught up`:
+```bash
+sudo bash ~/telcoin-node-scripts/check-node.sh
 ```
 
 **Step 5 — Activate (operator action)**
@@ -441,59 +454,83 @@ Once synced, call `activate()` to enter the activation queue:
 ```bash
 cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
   "activate()" \
-  --trezor \
-  --rpc-url <RPC_URL>
+  --from <VALIDATOR_ADDRESS> --ledger \
+  --rpc-url https://rpc.telcoin.network
 ```
 
 **Step 6 — Go active (automatic)**
-At the next epoch boundary your status changes to Active and you begin participating in consensus.
+At the next epoch boundary your status changes to Active, which makes the validator eligible for committee seats. It votes only in epochs where it holds a seat; between seats `tn_nodeMode` reports `Observer`, which is normal.
+
+**Leaving later (operator action)**
+Call `beginExit()` while Active. The status moves to PendingExit and the protocol exits you once no current or upcoming committee needs you. When the status reads Exited, wait one more epoch, then reclaim the stake with `unstake(address,bool)` and `false` as the second argument:
+```bash
+cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
+  "beginExit()" \
+  --from <VALIDATOR_ADDRESS> --ledger \
+  --rpc-url https://rpc.telcoin.network
+
+# once Exited, one epoch later
+cast send 0x07E17e17E17e17E17e17E17E17E17e17e17E17e1 \
+  "unstake(address,bool)" <VALIDATOR_ADDRESS> false \
+  --from <VALIDATOR_ADDRESS> --ledger \
+  --rpc-url https://rpc.telcoin.network
+```
+`unstake` retires the validator permanently and burns its ConsensusNFT. The address cannot stake again; validating again needs new keys and a new NFT.
 
 ### Checking Your Status
 
 ```bash
-bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
+sudo bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
 ```
 
 | Status | Meaning | Next Action |
 |---|---|---|
 | No NFT found | Not yet whitelisted | Submit address to Telcoin Association |
-| Undefined | NFT minted, not staked | Call stake() on ConsensusRegistry |
-| Staked | Staked, not activated | Call activate() on ConsensusRegistry |
-| PendingActivation | Activation in progress | Wait for next epoch |
-| Active | Fully active in consensus | No action needed |
-| PendingExit | Exiting the network | Wait for exit to complete |
-| Exited | Exited | Call unstake() to reclaim TEL |
+| 0 Undefined | NFT minted, not staked | Export the calldata and stake (Step 3) |
+| 1 Staked | Staked, not activated | Call `activate()` once synced |
+| 2 PendingActivation | Activation queued | Wait for the next epoch boundary |
+| 3 Active | Eligible for committee seats | No action needed; keep the node healthy |
+| 4 PendingExit | `beginExit()` called | Wait for the protocol to exit you |
+| 5 Exited | Out of the validator set | Wait one more epoch, then call `unstake(address,bool)` with `false` |
+| Retired (6 with `isRetired` set) | `unstake` ran: stake returned, NFT burned | None; this address cannot stake again |
+
+Statuses 1 to 4 count as a staked validator for `check-node.sh`, `update-node.sh` and the web UI; everything else is treated as not staked.
 
 ---
+
+## Health Check
 
 Run at any time after setup to verify your node is healthy:
 
 ```bash
 # Health check for the local node
-bash ~/telcoin-node-scripts/check-node.sh
-
-# Force the validator or full-node view (overrides the .node-meta hint)
-bash ~/telcoin-node-scripts/check-node.sh --validator
-bash ~/telcoin-node-scripts/check-node.sh --observer
+sudo bash ~/telcoin-node-scripts/check-node.sh
 
 # Include validator on-chain status (queries the ConsensusRegistry contract)
-bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
+sudo bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_VALIDATOR_ADDRESS
+
+# Compare against a different network RPC (default: https://rpc.telcoin.network)
+sudo bash ~/telcoin-node-scripts/check-node.sh --network-rpc https://rpc.example.org
 
 # Skip the network RPC query (fully local / air-gapped diagnostics)
-bash ~/telcoin-node-scripts/check-node.sh --no-network
+sudo bash ~/telcoin-node-scripts/check-node.sh --no-network
 
 # Custom local RPC endpoint or service name
-bash ~/telcoin-node-scripts/check-node.sh --rpc http://127.0.0.1:8545 --service telcoin
+sudo bash ~/telcoin-node-scripts/check-node.sh --rpc http://127.0.0.1:8545 --service telcoin
 ```
+
+Run it with `sudo`. `/etc/telcoin/.node-meta` is root-only (mode 600), and without root the script can't read the recorded execution address, data directory, RPC port or public RPC domain. There is no `--validator` or `--observer` switch any more: the script still accepts both, prints a note and ignores them. Whether the validator checks apply depends on the on-chain stake status of the address from `--address` or `.node-meta`.
 
 The health check verifies:
 - **Systemd service status** — running, with restart-loop detection (warns if the unit has restarted more than 5 times)
 - **Local RPC mode** — classified as `HEALTHY`, `SLOW` (responding but >6s), `DISABLED` (HTTP 200 but `-32601 method not found`), or `DOWN` (connection refused). Previously all four looked the same.
 - **Network consensus state** — queries `https://rpc.telcoin.network` for ground truth: current block, epoch, committee size, and how fresh the latest commit is.
 - **Local consensus state** — calls `tn_latestConsensusHeader` on the local node and applies the freshness contract: `block == 0` → ERROR (fully stalled), commit-timestamp age > 60s → WARN (stale), else OK. Also reports lag vs network in blocks.
-- **Author presence (validator-only)** — checks whether your authority ID appears in the network's recent consensus headers. Catches the failure mode where a validator is running (systemd green, RPC up) but silent (not authoring headers). Auto-detects your authority ID from `<data-dir>/node-info.yaml` (field `primary_network_key`) or accepts an explicit `--authority-id <BASE58>` override.
-- **Reputation score (validator-only)** — your own score from `sub_dag.reputation_score.scores_per_authority` alongside the committee average. Flags scores below half-average.
-- **Validator on-chain status** — when `--address` is provided, calls the ConsensusRegistry contract and reports your validator state (Undefined / Staked / PendingActivation / Active / etc.).
+- **Author presence** — checks whether your authority ID appears in the network's recent consensus headers. Catches the failure mode where a validator is running (systemd green, RPC up) but silent (not authoring headers). Absence is an error only for a staked validator (status 1 to 4); for any other node it is expected. Auto-detects your authority ID from `<data-dir>/node-info.yaml` (field `primary_network_key`) or accepts an explicit `--authority-id <BASE58>` override.
+- **Reputation score** — your own score from `sub_dag.reputation_score.scores_per_authority` alongside the committee average. Flags scores below half-average.
+- **Validator on-chain status** — uses the address from `--address`, or the execution address recorded in `.node-meta`, to call the ConsensusRegistry contract and report your validator state (Undefined / Staked / PendingActivation / Active / etc.) with the next step.
+- **Consensus role** — prints `Consensus role: CvvActive`, `CvvInactive` or `Observer` from `tn_nodeMode` when the node binary supports it. Informational; it never changes the verdict.
+- **Legacy `--observer` flag** — warns when the node's launch file still passes `--observer`, which releases after `v0.15.0-adiri` reject. `update-node.sh` strips it when it updates to `v0.15.0-adiri` or later.
 - **Disk space** — uses the actual data directory from `/etc/telcoin/.node-meta` (falls back to `/var/lib/telcoin`), so the check reports usage on whichever mount actually holds chain data — not just the default.
 - **Memory** — total / available / percent used.
 
@@ -577,7 +614,7 @@ When prompted during setup you can choose how to obtain the `telcoin-network` bi
 
 When Docker is selected the script will:
 - Install Docker if not already present
-- Ask for the full image URL and tag (default: `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.9.2-adiri`)
+- Ask for the full image URL and tag. The default is the highest-versioned `-adiri` tag in the Google Artifact Registry (`us-docker.pkg.dev/telcoin-network/tn-public/adiri`), or `v0.15.0-adiri` when the registry can't be reached
 - Pull the image
 - Create the host service user with UID 1101 to match the container's internal `nonroot` user
 - Generate keys using the Docker image
@@ -630,7 +667,9 @@ The script automatically detects what is installed (including legacy per-role la
 
 Your node keys are stored in `/var/lib/telcoin/node-keys/`. Back these up immediately after setup.
 
-If you lose your keys you lose your node identity. A node that has already staked must re-register its replacement keys with the Telcoin Association; a node that has not can simply regenerate keys and restart.
+If you lose your keys you lose your node identity. A node that has already staked must contact the Telcoin Association, because its BLS key is registered on-chain; a node that has not can simply regenerate keys and restart.
+
+Never overwrite or regenerate the keys once the identity has staked: the registered BLS key would no longer match the node. When you re-run `setup-node.sh` on a staked node, answer N to `Overwrite existing keys?`.
 
 Store your BLS passphrase separately from the key files — in a password manager or secure offline location. If you lose the passphrase the encrypted key files are unreadable.
 
@@ -719,8 +758,10 @@ The **Settings** tab can start/stop a local Jaeger instance and toggle OpenTelem
 ### Security model
 
 - Binds `127.0.0.1` only; never `0.0.0.0`. Reached via an SSH tunnel — no new firewall ports — unless you opt into public access via Caddy (above), which is **read-only** and enforced server-side.
-- The UI runs as the unprivileged `telcoin-ui` user. Every privileged action goes through **one** root-owned, argument-validated helper at `/usr/local/sbin/telcoin-ui-helper`.
-- That user's `sudo` rights are pinned by an explicit, **no-wildcard** sudoers drop-in (`/etc/sudoers.d/telcoin-ui`): the six `systemctl start|stop|restart` lines for the two node services, plus the exact helper sub-commands. Nothing else.
+- The UI runs as the unprivileged `telcoin-ui` user. Its `sudo` rights come from one sudoers drop-in, `/etc/sudoers.d/telcoin-ui` (mode 440; the installer removes it and stops if `visudo -c` rejects it). It grants nothing else:
+  - `systemctl start|stop|restart` for the unified `telcoin` unit and for the legacy `telcoin-observer` and `telcoin-validator` units.
+  - Named sub-commands of one root-owned helper, `/usr/local/sbin/telcoin-ui-helper`, which performs every other privileged action. Most are pinned to fixed arguments. The few that take a value (an update ref, a config field and value, a hostname, a log-rotation size, a domain, a container name) wildcard it in sudoers, and the helper validates it before use.
+  - `env_keep` for the BLS passphrase, the dashboard password and the `TN_SETUP_*` setup values, so they reach the helper through the environment and never appear on a command line.
 
 ### Service management
 
@@ -762,7 +803,9 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --no-public-rpc    # private, no 
 
 `--rpc-public` on its own no longer makes RPC public. Without `--rpc-domain` it prints a warning and the node stays private.
 
-The domain is saved to `.node-meta` as `PUBLIC_RPC_DOMAIN`. After the node starts, setup checks DNS (`install-caddy.sh --phase=rpc-check-dns`) and then enables the endpoint (`--phase=rpc-enable`). If DNS doesn't point at the server yet, or you chose not to start the node, setup still completes and prints the exact `rpc-enable` command to run later.
+With a domain, key generation already advertises `https://<domain>/` and `wss://<domain>/` in `node-info.yaml` (keytool `--rpc-http`/`--rpc-ws`, available since `v0.12.0-adiri`), and setup records `PUBLIC_RPC_DOMAIN`, `PUBLIC_RPC_URL` and `PUBLIC_WS_URL` in `.node-meta`. After the node starts, setup checks DNS (`install-caddy.sh --phase=rpc-check-dns`) and then enables the endpoint (`--phase=rpc-enable`). That run writes the Caddy site, finds `node-info.yaml` already advertising the URLs, and doesn't restart the node. If DNS doesn't point at the server yet, or you chose not to start the node, setup still completes and prints the exact `rpc-enable` command to run later.
+
+Automation can set the URLs one by one: `--rpc-http` and `--rpc-ws` override what goes into `node-info.yaml`, and `--public-rpc-url` and `--public-ws-url` override the `.node-meta` values. Any of the four left out is derived from `--rpc-domain`. An explicit URL that differs from the domain is replaced when `rpc-enable` runs, and setup warns about that up front. See [setup-node flags](#setup-node-flags).
 
 ### Existing node
 
@@ -856,14 +899,16 @@ journalctl -u telcoin -f
 
 ```bash
 # Health check for the local node
-bash ~/telcoin-node-scripts/check-node.sh
+sudo bash ~/telcoin-node-scripts/check-node.sh
 
 # Health check including on-chain validator state
-bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_ADDRESS
+sudo bash ~/telcoin-node-scripts/check-node.sh --address 0xYOUR_ADDRESS
 
 # Interactive config editor (backs up the unit file before any change)
 sudo bash ~/telcoin-node-scripts/edit-config.sh
 ```
+
+`check-node.sh`, `update-node.sh` and `edit-config.sh` no longer take role flags. Older UI helpers may still pass `--observer` or `--validator`; the scripts accept and ignore them.
 
 ### RPC queries
 
@@ -880,9 +925,9 @@ curl -s -X POST -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
   http://127.0.0.1:8545
 
-# eth_syncing
+# tn_nodeMode -- the node's consensus role: CvvActive, CvvInactive or Observer
 curl -s -X POST -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  --data '{"jsonrpc":"2.0","method":"tn_nodeMode","params":[],"id":1}' \
   http://127.0.0.1:8545
 
 # tn_latestConsensusHeader -- the authoritative consensus state (use this
@@ -891,6 +936,8 @@ curl -s -X POST -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","method":"tn_latestConsensusHeader","params":[],"id":1}' \
   http://127.0.0.1:8545
 ```
+
+There is no `eth_syncing` example because it always returns `false` on Telcoin Network, even while the node is catching up. Compare `eth_blockNumber` on the node with the same call against `https://rpc.telcoin.network` instead.
 
 ### Scripts
 
@@ -904,6 +951,27 @@ sudo bash ~/telcoin-node-scripts/remove-node.sh
 # Firewall management
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 ```
+
+### setup-node flags
+
+Interactive setup prompts for everything. The public RPC flags (`--rpc-domain` through `--public-ws-url`) also work there and skip the RPC prompt; the rest are for non-interactive `--json` runs. The full automation walkthrough is in [OPERATOR.md, Automation](OPERATOR.md#7-automation).
+
+| Flag | What it does |
+|---|---|
+| `--rpc-domain <name>` | Public RPC on this DNS name. Derives and advertises `https://<name>/` and `wss://<name>/` at key generation, then enables Caddy after the node starts |
+| `--public-ip <ip>` | Inbound public IP the A record points at (NAT or multi-IP hosts). In `--json` mode it is also the P2P public IP |
+| `--rpc-public` | Asks for public RPC. Needs `--rpc-domain`; without one, setup warns and RPC stays private |
+| `--no-public-rpc` | Private RPC (`127.0.0.1` only) without the prompt. Can't be combined with `--rpc-domain` or `--rpc-public` |
+| `--rpc-http <url>` | Overrides the HTTP RPC URL written to `node-info.yaml` |
+| `--rpc-ws <url>` | Overrides the WebSocket RPC URL written to `node-info.yaml`. Needs `--rpc-http` or `--rpc-domain` |
+| `--public-rpc-url <url>` | Overrides `PUBLIC_RPC_URL` in `.node-meta` (UI and tooling only, never sent to the network) |
+| `--public-ws-url <url>` | Overrides `PUBLIC_WS_URL` in `.node-meta` |
+| `--json --phase=keygen\|finalize` | Non-interactive setup in two phases: `keygen` generates the keys (back them up before the next phase), `finalize` writes the config and starts the node. Pass the same flags to both; the passphrase comes from `TN_BLS_PASSPHRASE` |
+| `--network <name>` | `testnet` (or `adiri`) or `devnet` |
+| `--install-method source\|docker\|existing` | How to get the binary. With `--json`, use `source` or `docker`; `existing` assumes the binary is already at `/opt/telcoin/telcoin-network` |
+| `--docker-image <ref>` | Image for a Docker install. Pass it to both `--json` phases |
+| `--address <0x...>` | Execution address that stakes and receives rewards |
+| `--data-dir <path>` | Data directory (default `/var/lib/telcoin`) |
 
 ---
 
@@ -1486,8 +1554,8 @@ immediately. Two CI gates (`.github/workflows/ci.yml`) protect that supply chain
 pull request and push to `main`:
 
 - **Shell parse + lint** — `bash -n` on every script under both modern bash and macOS's
-  bash 3.2 (observers run on macOS), plus `shellcheck`. A parse error on `main` would brick
-  `curl … | bash`, so these are blocking.
+  bash 3.2 (operators run some scripts, such as `open-ui.sh`, from a Mac), plus `shellcheck`.
+  A parse error on `main` would brick `curl … | bash`, so these are blocking.
 - **Checksum integrity** — every updater-tracked file has a committed `<file>.sha256` sidecar
   that `update-scripts.sh` verifies after download. **After editing any tracked script you
   must regenerate and commit its sidecar**, or CI fails:
@@ -1501,6 +1569,13 @@ pull request and push to `main`:
   `tools/gen-checksums.sh` derives its file list from the `SCRIPTS`, `UI_BUNDLE`, and
   `TESTNET_ADDONS_BUNDLE` arrays in `update-scripts.sh`, so it always matches exactly what the
   updater fetches.
+
+Docs move with the code. When a change alters what an operator sees or does (a flag, a
+prompt, a default, a status, a command), update [`OPERATOR.md`](OPERATOR.md) in the same pull
+request as this README: the runbook is the path operators follow, and the README is the
+reference it links into. Keep the README anchors that `OPERATOR.md` links to stable. In both
+files, refer to scripts, functions and flags by name, never by line number or `file:line`;
+line numbers go stale with the next edit.
 
 ---
 

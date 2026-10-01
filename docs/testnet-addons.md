@@ -12,8 +12,8 @@ nothing else about your node), and **reversible**. None of them apply on mainnet
 | **VPN admin SSH** | SSH into your node over a private overlay to recover it | Adds a `tnadmin` user reachable only over WireGuard |
 
 Logging and metrics are **independent** — pick either, both, or neither — and they
-share a single ingest token. You can opt in during `setup-validator.sh` /
-`setup-observer.sh` (you're asked right after picking the network), or any time afterward
+share a single ingest token. You can opt in during `setup-node.sh`
+(you're asked right after picking the network), or any time afterward
 with `setup-observability.sh` and `setup-vpn.sh`. Opting out, or never opting in, leaves
 your node byte-for-byte as it would be without these scripts.
 
@@ -70,7 +70,7 @@ Enabling the VPN requires typing `I CONSENT` — there is no silent or `-y` path
 
 ### During node setup
 
-Run `setup-validator.sh` or `setup-observer.sh` as usual. After you select the network
+Run `setup-node.sh` as usual. After you select the network
 you'll be asked, one at a time, whether to enable health monitoring, log shipping,
 metrics shipping, and VPN admin SSH. The node-launch flags are baked in on the first
 pass, so there's no restart later. If you enable logging and/or metrics you'll paste your
