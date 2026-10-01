@@ -849,17 +849,34 @@ NETWORKS = {
 }
 
 # Public consensus-block RPC endpoints per chain id, tried in order (first
-# success wins). Testnet has a load balancer (single endpoint); devnet has no LB
-# so all five node endpoints are listed as fallbacks. A chain id omitted here
-# degrades the "Network Block"/"Consensus Lag" compare cards to "—".
+# success wins). Both networks now front their nodes with a global load balancer, so
+# the LB goes first and the individual node endpoints remain as fallbacks for when it
+# is degraded. A chain id omitted here degrades the "Network Block"/"Consensus Lag"
+# compare cards to "—".
 NETWORK_PUBLIC_RPC = {
     2017:  ["https://rpc.telcoin.network"],
     32285: [
+        "https://rpc.devnet.telcoin.network",
         "https://node1.devnet.telcoin.network",
         "https://node2.devnet.telcoin.network",
         "https://node3.devnet.telcoin.network",
         "https://node4.devnet.telcoin.network",
         "https://node5.devnet.telcoin.network",
+    ],
+}
+
+# Public WebSocket endpoints, parallel to NETWORK_PUBLIC_RPC. Every node serves wss://
+# on the same hostname as its https:// RPC -- config-caddy.sh matches the Upgrade
+# handshake and forwards it to reth's WS port before the catch-all RPC handler, so one
+# hostname carries both. node5 is the observer and serves these exactly like a validator.
+NETWORK_PUBLIC_WS = {
+    2017:  ["wss://rpc.telcoin.network"],
+    32285: [
+        "wss://node1.devnet.telcoin.network",
+        "wss://node2.devnet.telcoin.network",
+        "wss://node3.devnet.telcoin.network",
+        "wss://node4.devnet.telcoin.network",
+        "wss://node5.devnet.telcoin.network",
     ],
 }
 
