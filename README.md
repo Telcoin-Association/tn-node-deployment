@@ -969,6 +969,18 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### lib/common v1.3.9 — devnet RPC load balancer URL
+`DEVNET_RPC_URL` now defaults to `https://rpc.devnet.telcoin.network`, the global load
+balancer in front of the devnet nodes, the same way testnet has a canonical URL. It is
+still overridable from the environment. `setup-node.sh` no longer prints a blank RPC line
+for devnet.
+
+### telcoin-ui v1.8.7 — devnet load balancer, public WebSocket endpoints
+The devnet load balancer is tried first for the network block and consensus lag cards,
+with the individual node endpoints kept as fallbacks. A matching list of public `wss://`
+endpoints sits alongside it. The bump also redeploys the update engine copies in
+`/opt/telcoin-ui-update/`, so the UI's dashboard and RPC toggles run install-caddy v1.3.0.
+
 ### install-caddy v1.3.0 — safe Caddyfile swaps, one hostname per site, WebSocket preflight
 Every Caddyfile write now takes one path: render to a temp file in `/etc/caddy`, run
 `caddy validate` with its output shown (bcrypt hashes redacted), copy the live file to
@@ -1018,6 +1030,13 @@ brick-guarded node restart. If DNS doesn't point at the server yet (or the enabl
 setup still succeeds and prints the exact `rpc-enable` command to run later. Flags that
 take a value now error when the value is missing.
 
+`--rpc-http <url>` and `--rpc-ws <url>` are passed to `keytool generate validator`, so
+the RPC endpoints are advertised in `node-info.yaml` from key generation (`--rpc-ws` is
+only sent together with `--rpc-http`). `--public-rpc-url` and `--public-ws-url` are
+recorded in `.node-meta` as `PUBLIC_RPC_URL` and `PUBLIC_WS_URL`. In `--phase=finalize`
+the on-chain validator status check is informational and can no longer abort the phase,
+which used to leave a running node that was never enabled for boot.
+
 ### check-node v1.1.54 — public RPC block
 New section for the public RPC endpoint: the domain (from `.node-meta`, or from the
 Caddyfile when that's unset), Caddy's state, https and wss probes sent through Caddy on
@@ -1043,9 +1062,8 @@ advertisement) work on nodes installed with a custom data directory instead of l
 under `/var/lib/telcoin`.
 
 `update-scripts.sh v1.1.66` re-cut with refreshed `.sha256` sidecars. `ui/server.py
-v1.8.7` carries no UI change — the bump refreshes the root-owned copy in
-`/opt/telcoin-ui-update/`, so the UI's dashboard and RPC toggles run install-caddy
-v1.3.0.
+v1.8.7` refreshes the root-owned copy in `/opt/telcoin-ui-update/`, so the UI's
+dashboard and RPC toggles run install-caddy v1.3.0 (see telcoin-ui v1.8.7 above).
 
 ### install-caddy v1.2.0 — public RPC site (missed entry)
 Shipped 2026-06-30 without a changelog line. The managed Caddyfile gained a second site,

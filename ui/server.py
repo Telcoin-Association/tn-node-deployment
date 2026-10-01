@@ -63,6 +63,9 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # 1.8.6: no UI change -- bumped solely to redeploy the update engine copies in
 # /opt/telcoin-ui-update/ (update lock + identity verify + wrapper-aware
 # edit-config ride along; 1.8.5 carried the submodule-sync fix the same way).
+# 1.8.7: devnet's RPC load balancer (rpc.devnet.telcoin.network) goes first in
+# NETWORK_PUBLIC_RPC, new NETWORK_PUBLIC_WS endpoints alongside it, and a redeploy
+# of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 UI_VERSION = "1.8.7"
 
 NODE_TYPES = ("observer", "validator")
