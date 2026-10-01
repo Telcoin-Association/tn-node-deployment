@@ -66,7 +66,9 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # 1.8.7: devnet's RPC load balancer (rpc.devnet.telcoin.network) goes first in
 # NETWORK_PUBLIC_RPC, new NETWORK_PUBLIC_WS endpoints alongside it, and a redeploy
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
-UI_VERSION = "1.8.7"
+# 1.8.8: on-chain stake status (getValidator) selects the validator view;
+# warn-only hardware preflight; refreshes the engine copies
+UI_VERSION = "1.8.8"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -116,7 +118,8 @@ def resolve_node_type():
     lib/fallback.sh's tn_resolve_node_type. NODE_TYPE is a non-authoritative
     presentation hint, NOT a role: the protocol decides a node's role dynamically
     from on-chain committee membership each epoch, and the UI promotes/demotes the
-    view from tn_isValidator (detect_nodes' on-chain remap). The hint is read from
+    view from the on-chain stake status (ConsensusRegistry getValidator; see
+    detect_nodes' on-chain remap). The hint is read from
     the unified /etc/telcoin/.node-meta NODE_TYPE (via the root helper, the only
     channel to the mode-0600 file); on older/legacy metadata the per-role
     .node-meta answers; a missing hint resolves to the plain 'observer' full-node
@@ -572,10 +575,13 @@ def detect_nodes():
     # ---- On-chain role remap (bidirectional) --------------------------------
     # telcoin-network decides a node's ROLE dynamically from on-chain committee
     # membership each epoch, not from the static NODE_TYPE hint. So present the
-    # single installed (scripts-managed) node under the slot its on-chain status
-    # dictates, in EITHER direction:
-    #   tn_isValidator True  -> validator slot (the validator dashboard)
-    #   tn_isValidator False -> observer slot  (the plain full-node view) -- this
+    # single installed (scripts-managed) node under the slot its on-chain STAKE
+    # status dictates (onchain_is_validator: getValidator(execution address)), in
+    # EITHER direction:
+    #   staked (Staked / PendingActivation / Active / PendingExit)
+    #                         -> validator slot (the validator dashboard)
+    #   not staked, exited, or not whitelisted (getValidator reverts)
+    #                         -> observer slot  (the plain full-node view) -- this
     #     also demotes a legacy setup-validator install that never staked
     #   None (RPC down / not synced) -> leave it in its NODE_TYPE hint slot and
     #     never flap; a demotion requires a definitive synced False, not unknown.
@@ -605,7 +611,7 @@ def detect_nodes():
                 out[src] = {"mode": None, "status": "not installed",
                             "container": None, "image": None,
                             "rpc_port": None, "node_info_path": None}
-                _log(f"detect_nodes: on-chain tn_isValidator={is_val} -> "
+                _log(f"detect_nodes: on-chain staked={is_val} -> "
                      f"presenting the {src} install under the {dst} slot")
 
     _detect_cache["ts"] = now
@@ -869,9 +875,10 @@ NETWORK_PUBLIC_RPC = {
 }
 
 # Public WebSocket endpoints, parallel to NETWORK_PUBLIC_RPC. Every node serves wss://
-# on the same hostname as its https:// RPC -- config-caddy.sh matches the Upgrade
-# handshake and forwards it to reth's WS port before the catch-all RPC handler, so one
-# hostname carries both. node5 is the observer and serves these exactly like a validator.
+# on the same hostname as its https:// RPC -- config-caddy.sh (maintainer-only fleet
+# script, not shipped to operators) matches the Upgrade handshake and forwards it to
+# reth's WS port before the catch-all RPC handler, so one hostname carries both.
+# node5 is the observer and serves these exactly like a validator.
 NETWORK_PUBLIC_WS = {
     2017:  ["wss://rpc.telcoin.network"],
     32285: [
@@ -1132,54 +1139,6 @@ def hex_to_dec(h):
         return None
 
 
-# Bitcoin/IPFS base58 alphabet (no 0 O I l). node-info.yaml and tn_info report the
-# BLS public key in THIS encoding, but tn_isValidator(blsPubkey: bytes) on the
-# ConsensusRegistry wants the raw 96 bytes as 0x-hex and rejects anything whose
-# length != 96. So we base58-decode -> 96 bytes -> 0x-hex before the on-chain call.
-_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-_B58_INDEX = {c: i for i, c in enumerate(_B58_ALPHABET)}
-
-
-def _b58decode(s):
-    """Decode a base58 string (Bitcoin alphabet) to bytes. None on any invalid
-    character. Leading '1's decode to leading zero bytes, per the standard. Pure
-    stdlib -- requirements.txt stays flask-only."""
-    if not isinstance(s, str) or s == "":
-        return None
-    num = 0
-    for ch in s:
-        v = _B58_INDEX.get(ch)
-        if v is None:
-            return None
-        num = num * 58 + v
-    body = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
-    pad = 0
-    for ch in s:
-        if ch == "1":
-            pad += 1
-        else:
-            break
-    return b"\x00" * pad + body
-
-
-def bls_pubkey_to_hex(b58):
-    """A base58-encoded BLS public key -> '0x'+hex of the raw 96 bytes, or None if
-    it does not decode to exactly 96 bytes (the length the ConsensusRegistry
-    enforces). Tolerant of an already-0x-hex 96-byte input (passes it through)."""
-    if not b58 or not isinstance(b58, str):
-        return None
-    s = b58.strip()
-    if s[:2].lower() == "0x":
-        h = s[2:]
-        return "0x" + h.lower() if re.fullmatch(r"[0-9a-fA-F]{192}", h) else None
-    raw = _b58decode(s)
-    if raw is None or len(raw) != 96:
-        if raw is not None:
-            _dbg(f"bls_pubkey_to_hex: decoded {len(raw)} bytes, expected 96")
-        return None
-    return "0x" + raw.hex()
-
-
 def fmt_age(seconds):
     """Seconds elapsed -> human 'X ago' string, matching check-node.sh fmt_age."""
     try:
@@ -1378,20 +1337,24 @@ def node_identity(t, det=None):
     return out
 
 
-# tn_isValidator(blsPubkey) result cache: t -> (expires_monotonic, bool|None).
-# detect_nodes() calls this once per detect cycle for an observer-typed node; the
-# 30s TTL keeps the extra RPC cheap and stops a flapping tip from toggling the tab.
+# onchain_is_validator result cache: t -> (expires_monotonic, bool|None).
+# detect_nodes() calls this once per detect cycle for the installed node; the 30s
+# TTL keeps the extra RPCs cheap and stops a flapping tip from toggling the tab.
 _isval_cache = {}
 _ISVAL_TTL = 30.0
 
 
 def onchain_is_validator(t, det=None):
-    """True only when the node is fully synced AND the ConsensusRegistry reports
-    its BLS key as a validator (tn_isValidator). False when synced-but-not-a-
-    validator. None when we cannot tell -- RPC down, not synced, no usable 96-byte
-    key, or the node's version lacks tn_isValidator. Gating on synced honors
-    'after the node is synced' and avoids a stale tip momentarily mis-typing the
-    node. Cached ~30s (its own TTL, independent of detect_nodes' cache)."""
+    """True only when the node is fully synced AND the ConsensusRegistry's
+    getValidator(execution address) reports a staked status (STAKED_STATUSES:
+    Staked, PendingActivation, Active, PendingExit). False when synced and the
+    address is unstaked, exited, or not whitelisted at all (getValidator reverts).
+    None when we cannot tell -- RPC down, not synced, no execution address, or an
+    unexpected reply. tn_isValidator is deliberately NOT consulted: it only means
+    "BLS key recorded and not retired", which is not a stake check. Gating on
+    synced honors 'after the node is synced' and avoids a stale tip momentarily
+    mis-typing the node. Cached ~30s (its own TTL, independent of detect_nodes'
+    cache)."""
     now = time.monotonic()
     cached = _isval_cache.get(t)
     if cached and cached[0] > now:
@@ -1408,15 +1371,15 @@ def onchain_is_validator(t, det=None):
         synced = (block_number is not None and cons_exec is not None
                   and block_number >= cons_exec - 2)
         if synced:
-            hexkey = bls_pubkey_to_hex((node_identity(t, det) or {}).get("bls_public_key"))
-            if hexkey:
-                rpc = local_rpc(port, "tn_isValidator", [hexkey])
-                if rpc is True:
+            addr = (node_identity(t, det) or {}).get("execution_address")
+            if addr:
+                status = registry_stake_status(port, addr)
+                if status in STAKED_STATUSES:
                     result = True
-                elif rpc is False:
+                elif status == "none" or isinstance(status, int):
                     result = False
             else:
-                _dbg(f"onchain_is_validator: no usable BLS key for {t}")
+                _dbg(f"onchain_is_validator: no execution address for {t}")
     except Exception as e:  # pragma: no cover - defensive
         _log(f"onchain_is_validator({t}) error: {e}")
         result = None
@@ -1451,26 +1414,35 @@ REGISTRY_SELECTORS = {
 }
 
 
-def eth_call_registry(port, selector, address=None):
-    """eth_call the ConsensusRegistry with `selector` (+ optional left-padded
-    address arg). Returns the result hex string, or None on any failure. The
-    address is right-aligned in a 32-byte word, left-padded with zeros (the
-    same ABI encoding lib/common.sh builds by hand).
+def _registry_calldata(selector, address=None):
+    """ABI calldata for a ConsensusRegistry call: the 4-byte selector, plus --
+    when `address` is given -- the address right-aligned in a 32-byte word
+    (24 zero hex chars + the 40-hex address; the same encoding lib/common.sh
+    builds by hand). None when the address is not a valid 20-byte hex address.
 
     The address is sanitised first: surrounding whitespace stripped, an optional
     0x/0X prefix removed, then validated as exactly 40 hex chars and lowercased.
     Without this a stray character (e.g. a trailing space invisible in the UI, or
     a checksummed 0X) corrupts the 32-byte word and the call silently fails."""
-    data = selector
-    if address:
-        addr = str(address).strip()
-        if addr[:2].lower() == "0x":
-            addr = addr[2:].strip()
-        if not re.fullmatch(r"[0-9a-fA-F]{40}", addr):
-            _log(f"eth_call_registry: invalid address {address!r} for {selector} "
-                 f"-> skipping call")
-            return None
-        data = selector + addr.lower().rjust(64, "0")
+    if not address:
+        return selector
+    addr = str(address).strip()
+    if addr[:2].lower() == "0x":
+        addr = addr[2:].strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", addr):
+        _log(f"_registry_calldata: invalid address {address!r} for {selector} "
+             f"-> skipping call")
+        return None
+    return selector + "0" * 24 + addr.lower()
+
+
+def eth_call_registry(port, selector, address=None):
+    """eth_call the ConsensusRegistry with `selector` (+ optional address arg,
+    encoded by _registry_calldata). Returns the result hex string, or None on any
+    failure, including an address that does not validate."""
+    data = _registry_calldata(selector, address)
+    if data is None:
+        return None
 
     resp = local_rpc_full(port, "eth_call",
                           [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"])
@@ -1481,6 +1453,41 @@ def eth_call_registry(port, selector, address=None):
         return None
     res = resp.get("result") if isinstance(resp, dict) else None
     return res if isinstance(res, str) else None
+
+
+# ValidatorStatus values that mean "has stake in the registry" and so select the
+# validator view: 1 Staked, 2 PendingActivation, 3 Active, 4 PendingExit. The rest
+# (0 Undefined, 5 Exited, 6 Any -- a query sentinel, never a stored status) do not.
+STAKED_STATUSES = (1, 2, 3, 4)
+
+
+def registry_stake_status(port, address):
+    """The ValidatorStatus (int, word 3 of the inline 7-word ValidatorInfo struct
+    getValidator returns) for `address`; "none" when getValidator reverts, which
+    is what the registry does for an address it has never whitelisted (reth: a
+    JSON-RPC error with code 3 / "execution reverted"); None when we cannot tell
+    -- RPC unreachable, any other error, or a malformed / short result. Unlike
+    eth_call_registry this keeps the error so a revert can be told apart from an
+    unreachable node."""
+    if not address:
+        return None
+    data = _registry_calldata(REGISTRY_SELECTORS["getValidator"], address)
+    if data is None:
+        return None
+    resp = local_rpc_full(port, "eth_call",
+                          [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"])
+    _dbg(f"registry_stake_status port={port} data={data} resp={resp}")
+    if not isinstance(resp, dict):
+        return None
+    err = resp.get("error")
+    if err is not None:
+        if isinstance(err, dict) and (
+                err.get("code") == 3
+                or "revert" in str(err.get("message") or "").lower()):
+            return "none"
+        return None
+    w = _words(resp.get("result"))
+    return w[3] if len(w) >= 4 else None
 
 
 def _words(hexstr):
@@ -1818,7 +1825,7 @@ def network_traffic():
 # update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
 GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 GAR_IMAGE_BASE = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.12.0-adiri"  # fallback only when the registry is unreachable
+DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.15.0-adiri"  # fallback only when the registry is unreachable
 
 
 def detect_public_ip():
@@ -1994,13 +2001,14 @@ def api_nodes():
     # ---- Derived single-node view (on-chain role is the authority) ----------
     # telcoin-network derives a node's role dynamically from on-chain committee
     # membership, so the UI presents ONE node whose role is the populated slot
-    # after detect_nodes' bidirectional remap: "validator" when tn_isValidator is
-    # true, else the plain "observer" (full-node) view. `role` is None only on a
-    # fresh host with nothing installed (the UI then keeps its own default). The
-    # `node` summary carries the same facts the per-type slots expose plus the
-    # actual resolved systemd unit name, so the frontend can drive the active node
-    # without a second call. The per-type slots above are kept unchanged for
-    # backward compatibility.
+    # after detect_nodes' bidirectional remap: "validator" when the node's
+    # execution address is staked on-chain (onchain_is_validator), else the plain
+    # "observer" (full-node) view. `role` is None only on a fresh host with
+    # nothing installed (the UI then keeps its own default). The `node` summary
+    # carries the same facts the per-type slots expose plus the actual resolved
+    # systemd unit name, so the frontend can drive the active node without a
+    # second call. The per-type slots above are kept unchanged for backward
+    # compatibility.
     role = next((t for t in ("validator", "observer")
                  if det.get(t, {}).get("mode") is not None), None)
     out["role"] = role
@@ -2069,9 +2077,10 @@ def api_status(node_type):
     if block_number is not None and cons_exec is not None:
         synced = block_number >= cons_exec - 2
 
-    # On-chain validator role for display (cached ~30s). Computed only for the
-    # validator tab -- the detect_nodes() remap already decides which tab shows, so
-    # there is no need to probe an observer here. None when undeterminable.
+    # On-chain stake status for display (onchain_is_validator, cached ~30s).
+    # Computed only for the validator tab -- the detect_nodes() remap already
+    # decides which tab shows, so there is no need to probe an observer here. None
+    # when undeterminable.
     is_validator_onchain = onchain_is_validator(t, det) if t == "validator" else None
 
     # Dynamic network identity from the live chain id.
@@ -3361,6 +3370,98 @@ def api_update_discard(node_type):
 # ROUTES -- setup preflight
 # =============================================================================
 
+# Hardware tiers, mirroring lib/common.sh (which follows telcoin-network's
+# hardware-requirements doc): (role, label, min cores, min RAM GB, min disk GB).
+# All advisory -- the role is decided on-chain, so a host below a tier only gets
+# a warning and the setup wizard never blocks on hardware.
+HW_TIERS = (
+    ("node", "Full node (follower)", 2, 8, 2000),
+    ("rpc", "Public RPC node", 4, 16, 2000),
+    ("validator", "Validator (minimum)", 8, 32, 2000),
+)
+HW_VALIDATOR_RECOMMENDED = {"cpu": 16, "ram_gb": 64, "disk_gb": 4000}
+# A measured value passes at >= 95% of the tier, so a "32 GB" machine whose
+# MemTotal reads a little under 32 GiB (kernel reservations) still counts.
+HW_PASS_PCT = 95
+
+
+def _hw_floor_kb(gb):
+    """The kB value that passes a tier's `gb` minimum (95%)."""
+    return gb * 1024 * 1024 * HW_PASS_PCT // 100
+
+
+def _mem_total_kb():
+    """MemTotal in kB from /proc/meminfo. None when unreadable (e.g. macOS)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                if k.strip() == "MemTotal":
+                    return int(v.split()[0])
+    except (OSError, IOError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _nearest_existing_dir(path):
+    """`path`, or its nearest existing parent (the node data dir does not exist
+    before setup). Mirrors check_hardware() in lib/common.sh. Falls back to /."""
+    p = path
+    while p and p != "/" and not os.path.exists(p):
+        p = os.path.dirname(p)
+    return p if p and os.path.exists(p) else "/"
+
+
+def _hw_disk(path):
+    """{path, total_kb, free_kb, used_pct} for the filesystem that will hold
+    `path`. free_kb is what an unprivileged writer can use; used_pct is rounded up
+    like df's Use%. Numbers are None when the filesystem can't be statted."""
+    p = _nearest_existing_dir(path)
+    out = {"path": p, "total_kb": None, "free_kb": None, "used_pct": None}
+    try:
+        du = shutil.disk_usage(p)
+    except OSError:
+        return out
+    out["total_kb"] = du.total // 1024
+    out["free_kb"] = du.free // 1024
+    if du.used + du.free > 0:
+        out["used_pct"] = -(-du.used * 100 // (du.used + du.free))
+    return out
+
+
+def hardware_profile():
+    """This host against HW_TIERS, for the setup preflight. Each tier is ok only
+    when every measurement is known and passes; `gaps` names the measured values
+    below the tier ("cpu", "ram", "disk"). A value we could not read is neither a
+    pass nor a gap, so such a tier reads ok:false with no gaps (the UI says it
+    could not be measured). Disk is judged on the filesystem's total size."""
+    cpu = os.cpu_count()
+    ram_kb = _mem_total_kb()
+    disk = _hw_disk(DEFAULT_DATA_DIR)
+    tiers = []
+    for role, label, min_cpu, min_ram_gb, min_disk_gb in HW_TIERS:
+        checks = (
+            ("cpu", cpu, None if cpu is None else cpu * 100 >= min_cpu * HW_PASS_PCT),
+            ("ram", ram_kb, None if ram_kb is None else ram_kb >= _hw_floor_kb(min_ram_gb)),
+            ("disk", disk["total_kb"], None if disk["total_kb"] is None
+             else disk["total_kb"] >= _hw_floor_kb(min_disk_gb)),
+        )
+        gaps = [name for name, _v, passed in checks if passed is False]
+        tiers.append({
+            "role": role, "label": label,
+            "min_cpu": min_cpu, "min_ram_gb": min_ram_gb, "min_disk_gb": min_disk_gb,
+            "ok": all(passed is True for _n, _v, passed in checks),
+            "gaps": gaps,
+        })
+    return {
+        "cpu": cpu,
+        "ram_kb": ram_kb,
+        "disk": disk,
+        "tiers": tiers,
+        "validator_recommended": dict(HW_VALIDATOR_RECOMMENDED),
+    }
+
+
 @app.route("/api/setup/preflight")
 def api_preflight():
     # systemd version (>= 247 required, mirrors the setup scripts).
@@ -3380,7 +3481,7 @@ def api_preflight():
     except Exception:
         internet["ok"] = False
 
-    # Disk headroom on root.
+    # Disk headroom on root. Advisory: the wizard shows >= 90% used as a warning.
     disk = {"ok": False, "percent": None}
     d = disk_for("/")
     if d.get("percent") is not None:
@@ -3410,6 +3511,8 @@ def api_preflight():
         "docker": docker,
         "rust": rust,
         "tpm": tpm,
+        # Advisory hardware tiers (see hardware_profile); never blocks setup.
+        "hardware": hardware_profile(),
     })
 
 

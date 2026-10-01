@@ -969,6 +969,22 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### telcoin-ui v1.8.8 — validator view follows the on-chain stake
+The dashboard now picks the validator view from the node's stake in the ConsensusRegistry.
+Once the node is synced, the UI calls `getValidator` for its execution address. A status of
+Staked, PendingActivation, Active or PendingExit shows the validator dashboard; an unstaked
+or exited address, or one the registry never whitelisted (the call reverts), shows the full
+node view. `tn_isValidator` is no longer consulted, because it only says a BLS key is
+recorded and not retired. While the RPC is down or the node is still syncing, the view
+stays where it was.
+
+The setup wizard's preflight no longer blocks on disk usage: 90% or more used is now a
+warning. It also checks the host against three hardware tiers (full node, public RPC node,
+validator minimum), names any shortfall, and shows the recommended validator spec. These
+rows are warnings only. "Observer" now reads "Full node", the validator details read
+"Staked validator", the fallback Docker image is `v0.15.0-adiri`, and the bump redeploys
+the update engine copies in `/opt/telcoin-ui-update/`.
+
 ### check-node v1.1.55 — stake status decides validator checks; consensus role; --observer warning
 check-node no longer has a validator or observer mode. The role is decided on-chain each
 epoch, so the script reads the node's stake status from the ConsensusRegistry once per run

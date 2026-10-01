@@ -392,7 +392,8 @@ select{
 
 <div class="wrap">
   <!-- The node's role (validator vs plain full node) is auto-selected from its
-       on-chain status (tn_isValidator), so there is no manual node switcher. -->
+       on-chain stake status (ConsensusRegistry getValidator), so there is no
+       manual node switcher. -->
 
   <!-- read-only banner (public access or externally-deployed node) -->
   <div id="roBanner" style="display:none;margin:0 0 16px;padding:12px 16px;border-radius:10px;
@@ -565,11 +566,12 @@ async function loadNodes(fresh){
   // Surface the dashboard (UI bundle) version in the header sub-title so operators
   // can see which Node Manager version their node is running.
   if(d && d.ui_version){ const bs=$('#brandSub'); if(bs) bs.textContent = 'Network Operations · v'+d.ui_version; }
-  // The node's ROLE is decided on-chain (tn_isValidator) and surfaced by the server
-  // as d.role -- the single populated slot after its bidirectional remap (validator
-  // when on-chain true, else the plain observer/full-node view). Drive the one
-  // active view from it. Fall back to the first installed slot when role is
-  // absent/None (RPC down / not synced / fresh host) so the view never goes blank.
+  // The node's ROLE is decided on-chain (the stake status getValidator reports for
+  // its execution address) and surfaced by the server as d.role -- the single
+  // populated slot after its bidirectional remap (validator when staked, else the
+  // plain observer/full-node view). Drive the one active view from it. Fall back
+  // to the first installed slot when role is absent/None (RPC down / not synced /
+  // fresh host) so the view never goes blank.
   state.node = (d && d.role) || installedType() || state.node;
   updateReadonlyBanner();
   syncReadonlyChrome();
@@ -935,7 +937,7 @@ async function renderDashboard(){
     <div class="grid two-col">
       <div class="card">
         <h3>Node Details</h3>
-        <div class="kv"><span class="k">Role (on-chain)</span><span class="v" id="roleDetail">Observer</span></div>
+        <div class="kv"><span class="k">Role (on-chain)</span><span class="v" id="roleDetail">Full node</span></div>
         <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
           ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
@@ -970,10 +972,10 @@ async function renderDashboard(){
   augmentDashboardNetstat();
 }
 
-// Every node is validator-CAPABLE and starts as an observer; the protocol promotes
-// it to a validator on-chain (tn_isValidator) once staked + activated, at which point
-// the UI switches to the validator dashboard. Until then, show WHERE on that journey
-// this observer sits, from the on-chain validator record (/api/validator: status enum
+// Every node is validator-CAPABLE and starts as a plain full node; once its
+// execution address is staked on-chain (getValidator status Staked..PendingExit) the
+// UI switches to the validator dashboard. Until then, show WHERE on that journey
+// this full node sits, from the on-chain validator record (/api/validator: status enum
 // + nft_held + is_retired). Mirrors valStatusHero()'s decoding, observer-framed.
 function observerRoleLabel(v){
   const st = v.status;              // ValidatorStatus 0..6, or null
@@ -987,13 +989,13 @@ function observerRoleLabel(v){
   else if(st===5)      sub='exited the validator set';
   else if(st===0)      sub='ConsensusNFT present — stake TEL to begin';
   else if(nft===false) sub='eligible — awaiting validator approval (no ConsensusNFT)';
-  return 'Observer' + (sub ? ` <span style="color:var(--text3);font-size:12px">— ${esc(sub)}</span>` : '');
+  return 'Full node' + (sub ? ` <span style="color:var(--text3);font-size:12px">— ${esc(sub)}</span>` : '');
 }
 
 async function augmentObserverRole(){
   const el = $('#roleDetail'); if(!el) return;
   const v = await api('/api/validator/'+state.node);
-  if(!v || v.error || v.installed===false) return;   // leave the plain "Observer" default
+  if(!v || v.error || v.installed===false) return;   // leave the plain "Full node" default
   el.innerHTML = observerRoleLabel(v);
 }
 
@@ -1174,7 +1176,7 @@ async function renderValidatorDashboard(c){
     <div class="grid two-col">
       <div class="card">
         <h3>Node Details</h3>
-        <div class="kv"><span class="k">Role (on-chain)</span><span class="v">${state.node==='validator'?'Validator':'Full node'}</span></div>
+        <div class="kv"><span class="k">Role (on-chain)</span><span class="v">${state.node==='validator'?'Staked validator':'Full node'}</span></div>
         <div class="kv"><span class="k">Node Name</span><span class="v">${vv.name?esc(vv.name):'—'}</span></div>
         <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Execution Address</span><span class="v">${vv.execution_address
@@ -1962,7 +1964,7 @@ async function fillUpdateStatus(){
     actions = `
       <div class="field"><label>Target ref / tag</label>
         <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
-          placeholder="${method==='docker'?'image tag, e.g. v0.9.1-adiri':'tag / branch / commit'}"></div>
+          placeholder="${method==='docker'?'image tag, e.g. v0.15.0-adiri':'tag / branch / commit'}"></div>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
         ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
@@ -2695,9 +2697,12 @@ async function stepPreflight(body){
   const hard = [
     ['systemd', d.systemd?.ok, `systemd ${d.systemd?.version??'?'} (need ≥ ${d.systemd?.required??247})`, true],
     ['internet', d.internet?.ok, 'Outbound internet connectivity', true],
-    ['disk', d.disk?.ok, `Disk usage ${d.disk?.percent??'?'}% (need < 90%)`, true],
   ];
+  // Disk usage and hardware are warnings only: the node's role is decided
+  // on-chain, so the wizard never blocks on them.
   const soft = [
+    ['disk', d.disk?.ok, `Disk usage ${d.disk?.percent??'?'}% (warn at ≥ 90%)`, false],
+    ...hwTierRows(d.hardware),
     ['docker', d.docker?.ok, 'Docker engine available (optional)', false],
     ['rust', d.rust?.ok, 'Rust toolchain for source build (optional)', false],
     ['tpm', d.tpm?.ok, 'TPM device for sealed passphrase (optional)', false],
@@ -2706,12 +2711,42 @@ async function stepPreflight(body){
     const icon = ok?'<span style="color:var(--green)">✓</span>':(hardReq?'<span style="color:var(--red)">✗</span>':'<span style="color:var(--yellow)">!</span>');
     return `<div class="check"><div class="ci">${icon}</div><div class="cl"><div class="ct">${esc(cap(name))}</div><div class="cd">${esc(desc)}</div></div></div>`;
   };
-  $('#pfList').innerHTML = hard.map(row).join('') + soft.map(row).join('');
+  $('#pfList').innerHTML = hard.map(row).join('') + soft.map(row).join('') + hwInfoRow(d.hardware);
   const hardOk = hard.every(h=>h[1]);
   const next = $('#pfNext'); next.disabled = !hardOk;
   next.title = hardOk?'':'Hard requirements must pass';
   next.addEventListener('click', ()=>{ if(hardOk) goStep(2); });
   if(!hardOk) toast('Some hard requirements failed — resolve them before continuing','error');
+}
+
+// Advisory hardware tiers (d.hardware.tiers from /api/setup/preflight) as soft
+// preflight rows: [name, ok, desc, hardReq]. A tier with ok:false and no gaps had
+// a value the server could not read (e.g. RAM off Linux).
+function hwTierRows(hw){
+  if(!hw || !Array.isArray(hw.tiers)) return [];
+  return hw.tiers.map(t=>{
+    const gaps = Array.isArray(t.gaps) ? t.gaps : [];
+    const verdict = t.ok ? 'meets minimum'
+      : gaps.length ? 'below minimum — '+gaps.join(', ')
+      : 'could not be measured';
+    return ['hardware', !!t.ok,
+      `${t.label}: ${verdict} (${t.min_cpu} cores / ${t.min_ram_gb} GB RAM / ${t.min_disk_gb} GB disk)`, false];
+  });
+}
+
+// Info line under the hardware rows: what was detected + the recommended spec to
+// validate (d.hardware.validator_recommended). '' when the server sent neither.
+function hwInfoRow(hw){
+  if(!hw) return '';
+  const gb = kb => kb==null ? '?' : String(Math.round(kb/1048576));
+  const parts = [];
+  if(hw.cpu!=null || hw.ram_kb!=null || hw.disk?.total_kb!=null)
+    parts.push(`Detected ${hw.cpu??'?'} cores / ${gb(hw.ram_kb)} GB RAM / ${gb(hw.disk?.total_kb)} GB disk`
+      + (hw.disk?.path ? ` (${hw.disk.path})` : '') + '.');
+  const r = hw.validator_recommended;
+  if(r) parts.push(`Recommended to validate: ${r.cpu} cores / ${r.ram_gb} GB RAM / ${r.disk_gb} GB disk.`);
+  if(!parts.length) return '';
+  return `<div class="check"><div class="ci"><span style="color:var(--text3)">i</span></div><div class="cl"><div class="ct">Hardware</div><div class="cd">${esc(parts.join(' '))}</div></div></div>`;
 }
 
 function stepNetwork(body){
@@ -2739,7 +2774,7 @@ function stepSourceField(){
   return `<div class="field"><label>Source version to build</label>
       <select id="mSourceMode">${opts}</select>
       ${smode==='custom'
-        ? `<input id="mBuildRef" style="margin-top:8px" placeholder="e.g. v0.9.2-adiri or main" value="${esc(s.customRef||'')}">`
+        ? `<input id="mBuildRef" style="margin-top:8px" placeholder="e.g. v0.15.0-adiri or main" value="${esc(s.customRef||'')}">`
         : ''}</div>`;
 }
 
@@ -2760,7 +2795,7 @@ function stepMethod(body){
   const methodField = m==='source'
     ? stepSourceField()
     : `<div class="field"><label>Docker image (latest auto-filled — edit to pin a different tag)</label>
-        <input id="mDockerImage" placeholder="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.12.0-adiri" value="${esc(state.setup.dockerImage||'')}"></div>`;
+        <input id="mDockerImage" placeholder="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri" value="${esc(state.setup.dockerImage||'')}"></div>`;
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
     <div class="radio-cards" style="grid-template-columns:1fr 1fr 1fr">
       <div class="rcard ${m==='source'?'sel':''}" data-m="source"><div class="rt">Build from Source</div><div class="rd">Compile the Rust binary on this host. Most flexible.</div></div>
@@ -2992,7 +3027,7 @@ async function runFinalize(){
     await loadNodes(true);   // fresh detection so the dashboard won't say "not installed"
     // Single role-neutral completion: the node starts as a plain full node and is
     // promoted to the validator view automatically once it is staked and admitted
-    // to the committee on-chain (tn_isValidator). No separate validator flow.
+    // to the committee on-chain (getValidator stake status). No separate validator flow.
     showSetupComplete();
   } else {
     toast('Finalize failed'+(d&&d.msg?': '+d.msg:''),'error');
