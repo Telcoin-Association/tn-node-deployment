@@ -969,6 +969,35 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### lib/common v1.4.0 — stake-status probe, --observer safety net, role-aware hardware check
+`node_stake_status` is now the one `getValidator` probe. It prints a single
+machine-readable line (`<status> <activation_epoch> <is_retired>`, `none` when the call
+reverts because the address holds no ConsensusNFT, or `unknown`), and
+`node_is_staked_validator` turns that into a yes / no / unknown exit code.
+`check_validator_onchain_status` prints the same report as before through
+`print_validator_onchain_status`, with two fixes: a rate limit or other non-revert RPC
+error no longer reads as "No validator record found", and status 6 is shown as the `Any`
+sentinel it is. A retired validator (the contract parks it at `Any` with `isRetired` set)
+still prints `Status: Retired`; any other status with `isRetired` set gets `(Retired)`.
+
+The staking steps printed after key generation now match the live `stake(bytes,(bytes))`
+signature: export the calldata on the node with `keytool export-staking-args --calldata`,
+send it with `cast send` from the machine that holds the validator wallet, then call
+`activate()`.
+
+Releases after v0.15.0-adiri reject `--observer`. `tn_node_strip_observer_flag` removes it
+from a start wrapper or legacy docker unit and leaves comments, `--instance` and every
+`--http` line alone. It writes the file back only after the edited copy passes those
+checks. `tn_target_drops_observer` says whether a target tag, image or version is new
+enough for the strip.
+
+`check_hardware` now reports against the per-role tiers from the telcoin-network hardware
+page (full node 2 cores / 8 GB, public RPC 4 / 16 GB, validator 8 / 32 GB, all on 2 TB)
+instead of one flat baseline. It measures total disk size rather than free space, allows
+5 % slack so a 16 GB box or a formatted 2 TB disk passes, warns at 90 % disk use, copes
+with a missing `nproc` or GNU-only `df` options, and never stops setup. The fallback
+docker image is now v0.15.0-adiri.
+
 ### lib/common v1.3.9 — devnet RPC load balancer URL
 `DEVNET_RPC_URL` now defaults to `https://rpc.devnet.telcoin.network`, the global load
 balancer in front of the devnet nodes, the same way testnet has a canonical URL. It is

@@ -38,17 +38,18 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.3.9"
+readonly COMMON_VERSION="1.4.0"
 
-# Validator node hardware requirements (official Telcoin Association specs)
-readonly VALIDATOR_MIN_RAM_GB=128
-readonly VALIDATOR_MIN_DISK_GB=4000
-readonly VALIDATOR_MIN_CPU_CORES=16
+# Per-role hardware tiers (telcoin-network docs/src/getting-started/hardware-requirements.md,
+# physical cores; cloud vCPUs are usually hyperthreads, so 8 vCPU ~ 4 physical cores).
+readonly HW_NODE_MIN_CPU=2;  readonly HW_NODE_MIN_RAM_GB=8;  readonly HW_NODE_MIN_DISK_GB=2000   # observer (follower)
+readonly HW_RPC_MIN_CPU=4;   readonly HW_RPC_MIN_RAM_GB=16; readonly HW_RPC_MIN_DISK_GB=2000    # observer serving public RPC
+readonly HW_VAL_MIN_CPU=8;   readonly HW_VAL_MIN_RAM_GB=32; readonly HW_VAL_MIN_DISK_GB=2000    # validator minimum (ECC, NVMe)
+readonly HW_VAL_REC_CPU=16;  readonly HW_VAL_REC_RAM_GB=64; readonly HW_VAL_REC_DISK_GB=4000    # validator recommended
 
-# Observer node hardware requirements (official Telcoin Association specs)
-readonly OBSERVER_MIN_RAM_GB=16
-readonly OBSERVER_MIN_DISK_GB=500
-readonly OBSERVER_MIN_CPU_CORES=8
+# Set by check_hardware for callers that embed them in JSON log lines (plain ASCII).
+TN_HW_SUMMARY=""
+TN_HW_GAPS=""
 
 readonly DEFAULT_INSTALL_DIR="/opt/telcoin"
 readonly DEFAULT_DATA_DIR="/var/lib/telcoin"
@@ -392,7 +393,7 @@ validate_multiaddr() {
 readonly GAR_IMAGE_BASE="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 # Fallback only when the registry is unreachable.
-readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.12.0-adiri"
+readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.15.0-adiri"
 
 # Echo the latest published -adiri docker image ref (registry/path:tag) by
 # querying the public Artifact Registry tag list and picking the highest version
@@ -451,62 +452,177 @@ prompt_with_validation() {
     return 1
 }
 
+# _tn_hw_disk_label <gb> — "2 TB" for whole thousands of GB, else "<gb> GB".
+_tn_hw_disk_label() {
+    local gb="${1:-0}"
+    if [[ "$gb" -ge 1000 ]] && [[ $(( gb % 1000 )) -eq 0 ]]; then
+        printf '%s TB' "$(( gb / 1000 ))"
+    else
+        printf '%s GB' "$gb"
+    fi
+}
+
+# _tn_hw_role <label> <min_cpu> <min_ram_gb> <min_disk_gb> <cpu> <ram_kb> <disk_kb>
+# — print one line for a role tier. Empty cpu/ram_kb/disk_kb mean "could not
+# measure" and never count as a shortfall. rc 1 when a measured value is below the
+# tier, else 0. RAM and disk get 5 % slack: a "16 GB" box reports ~15.6 GiB and a
+# formatted "2 TB" disk a little under 2000 GB.
+_tn_hw_role() {
+    local label="$1" min_cpu="$2" min_ram="$3" min_disk="$4" cpu="$5" ram_kb="$6" disk_kb="$7"
+    local spec need have unknown
+    spec="${min_cpu} cores / ${min_ram} GB / $(_tn_hw_disk_label "$min_disk")"
+    need=""
+    have=""
+    unknown=""
+    if [[ -z "$cpu" ]]; then
+        unknown="CPU"
+    elif [[ "$cpu" -lt "$min_cpu" ]]; then
+        need="${min_cpu} cores"
+        have="${cpu} CPUs"
+    fi
+    if [[ -z "$ram_kb" ]]; then
+        unknown="${unknown:+${unknown}, }RAM"
+    elif [[ "$ram_kb" -lt $(( min_ram * 1024 * 1024 * 95 / 100 )) ]]; then
+        need="${need:+${need}, }${min_ram} GB RAM"
+        have="${have:+${have}, }$(( (ram_kb + 524288) / 1048576 )) GB RAM"
+    fi
+    if [[ -z "$disk_kb" ]]; then
+        unknown="${unknown:+${unknown}, }disk"
+    elif [[ "$disk_kb" -lt $(( min_disk * 1000000000 * 95 / 100 / 1024 )) ]]; then
+        need="${need:+${need}, }$(_tn_hw_disk_label "$min_disk") disk"
+        have="${have:+${have}, }$(( (disk_kb * 1024 + 500000000) / 1000000000 )) GB disk"
+    fi
+    if [[ -n "$need" ]]; then
+        print_warn "${label}: below minimum — needs ≥ ${need} (have ${have})"
+        return 1
+    fi
+    if [[ -n "$unknown" ]]; then
+        print_info "${label}: could not check ${unknown}; minimum is ${spec}"
+    else
+        print_ok "${label}: meets minimum (${spec})"
+    fi
+    return 0
+}
+
+# check_hardware [legacy_arg] [data_dir] — informational hardware report against the
+# per-role tiers above. It never blocks setup and ALWAYS returns 0: every node is
+# provisioned validator-capable, but the role is decided on-chain each epoch and a
+# node below the validator tier still runs fine as a follower. $1 (the old
+# node_type) is accepted for call-site compatibility and ignored. data_dir (default
+# /) picks the filesystem to measure; it may not exist yet (created later in
+# setup), so the nearest existing parent is used.
+#   * CPU: nproc, then getconf _NPROCESSORS_ONLN. Both count LOGICAL CPUs while the
+#     tiers are physical cores, so a hyperthreaded box can look up to twice its
+#     real size. That risk is noted here, not corrected.
+#   * RAM: MemTotal from ${TN_PROC_MEMINFO:-/proc/meminfo} (a harness can point it
+#     at a fixture), shown rounded to whole GiB.
+#   * Disk: TOTAL size of that filesystem (not free space) from POSIX `df -Pk`, in
+#     decimal GB as disks are sold. Free space is reported too, with a warning at
+#     90 % used or more.
+# Sets TN_HW_SUMMARY (the "Detected" text) and TN_HW_GAPS (comma-separated roles
+# below minimum, from node, rpc, validator; empty when all pass), both plain ASCII.
 check_hardware() {
-    # $1 (legacy node_type) is accepted for call-site compatibility but no longer
-    # selects thresholds: every node is provisioned validator-capable, yet the role
-    # is decided on-chain at each epoch and a node that never joins the committee
-    # runs fine on the baseline spec. So we warn against the baseline and print the
-    # heavier validator spec as an informational target for operators who stake.
     local data_dir="${2:-/}"
-    print_step "Checking hardware requirements..."
+    local meminfo cpu ram_kb ram_gb check_path df_line disk_kb disk_avail_kb disk_pct
+    local mount_point disk_gb disk_free_gb cpu_txt ram_txt disk_txt gaps
+    TN_HW_SUMMARY=""
+    TN_HW_GAPS=""
+    print_step "Checking hardware..."
 
-    local min_ram=$OBSERVER_MIN_RAM_GB
-    local min_disk=$OBSERVER_MIN_DISK_GB
-    local min_cpu=$OBSERVER_MIN_CPU_CORES
+    cpu=""
+    if command -v nproc >/dev/null 2>&1; then
+        cpu="$(nproc 2>/dev/null || true)"
+    fi
+    if [[ ! "$cpu" =~ ^[1-9][0-9]*$ ]] && command -v getconf >/dev/null 2>&1; then
+        cpu="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    fi
+    [[ "$cpu" =~ ^[1-9][0-9]*$ ]] || cpu=""
 
-    local ram_kb ram_gb
-    ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    ram_gb=$(( ram_kb / 1024 / 1024 ))
-    if [[ $ram_gb -lt $min_ram ]]; then
-        print_warn "RAM: ${ram_gb}GB detected, ${min_ram}GB recommended."
-    else
-        print_ok "RAM: ${ram_gb}GB"
+    meminfo="${TN_PROC_MEMINFO:-/proc/meminfo}"
+    ram_kb=""
+    if [[ -r "$meminfo" ]]; then
+        ram_kb="$(awk '$1 == "MemTotal:" { print $2; exit }' "$meminfo" 2>/dev/null || true)"
+    fi
+    [[ "$ram_kb" =~ ^[1-9][0-9]*$ ]] || ram_kb=""
+    ram_gb=""
+    if [[ -n "$ram_kb" ]]; then
+        ram_gb=$(( (ram_kb + 524288) / 1048576 ))
     fi
 
-    local cpu_cores
-    cpu_cores=$(nproc)
-    if [[ $cpu_cores -lt $min_cpu ]]; then
-        print_warn "CPU cores: ${cpu_cores} detected, ${min_cpu} recommended."
-    else
-        print_ok "CPU cores: ${cpu_cores}"
-    fi
-
-    # Check free space on the drive that will actually hold node data. The chosen
-    # dir may not exist yet (created later in setup), so resolve to the nearest
-    # existing parent before calling df -- otherwise df errors and, under set -e,
-    # an empty value breaks the [[ -lt ]] comparison.
-    local check_path="$data_dir"
+    check_path="$data_dir"
     while [[ -n "$check_path" && ! -e "$check_path" && "$check_path" != "/" ]]; do
-        check_path="$(dirname "$check_path")"
+        check_path="$(dirname "$check_path" 2>/dev/null || echo /)"
     done
     [[ -e "$check_path" ]] || check_path="/"
 
-    local disk_avail_gb mount_point
-    disk_avail_gb=$(df -BG --output=avail "$check_path" 2>/dev/null | awk 'NR==2 {gsub("G","",$1); print $1+0}')
-    mount_point=$(df --output=target "$check_path" 2>/dev/null | awk 'NR==2 {print $1}')
-    [[ -z "$mount_point" ]] && mount_point="$check_path"
-
-    if [[ -z "$disk_avail_gb" ]]; then
-        print_warn "Disk: could not determine free space for ${data_dir}."
-    elif [[ "$disk_avail_gb" -lt "$min_disk" ]]; then
-        print_warn "Disk: ${disk_avail_gb}GB available on ${mount_point}, ${min_disk}GB recommended."
-    else
-        print_ok "Disk: ${disk_avail_gb}GB available on ${mount_point}"
+    # df -Pk line 2: filesystem, total kB, used, available kB, capacity%, mount point.
+    # Fields are located from the capacity column so spaces in the device or mount
+    # name cannot shift them.
+    df_line=""
+    if command -v df >/dev/null 2>&1; then
+        df_line="$(df -Pk "$check_path" 2>/dev/null | awk 'NR == 2 {
+            for (i = 5; i <= NF; i++) if ($i ~ /^[0-9]+%$/) break
+            if (i > NF) exit
+            m = $(i + 1)
+            for (j = i + 2; j <= NF; j++) m = m " " $j
+            print $(i - 3), $(i - 1), $i + 0, m
+        }' 2>/dev/null || true)"
+    fi
+    disk_kb=""
+    disk_avail_kb=""
+    disk_pct=""
+    mount_point=""
+    if [[ -n "$df_line" ]]; then
+        read -r disk_kb disk_avail_kb disk_pct mount_point <<<"$df_line" || true
+    fi
+    [[ "$disk_kb" =~ ^[1-9][0-9]*$ ]] || disk_kb=""
+    [[ "$disk_avail_kb" =~ ^[0-9]+$ ]] || disk_avail_kb=""
+    [[ "$disk_pct" =~ ^[0-9]+$ ]] || disk_pct=""
+    [[ -n "$mount_point" ]] || mount_point="$check_path"
+    # These strings end up inside JSON log lines: drop quotes, backslashes, controls.
+    mount_point="${mount_point//[\"\\[:cntrl:]]/}"
+    disk_gb=""
+    disk_free_gb=""
+    if [[ -n "$disk_kb" ]]; then
+        disk_gb=$(( (disk_kb * 1024 + 500000000) / 1000000000 ))
+    fi
+    if [[ -n "$disk_avail_kb" ]]; then
+        disk_free_gb=$(( (disk_avail_kb * 1024 + 500000000) / 1000000000 ))
     fi
 
-    # Informational: the recommended spec to validate (stake + join the committee).
-    # The node runs as a full-node/follower on the baseline above without these.
-    print_info "To validate, the recommended spec is ${VALIDATOR_MIN_CPU_CORES} cores / ${VALIDATOR_MIN_RAM_GB}GB RAM / ${VALIDATOR_MIN_DISK_GB}GB disk."
+    if [[ -n "$cpu" ]]; then cpu_txt="${cpu} CPUs"; else cpu_txt="unknown CPUs"; fi
+    if [[ -n "$ram_gb" ]]; then ram_txt="${ram_gb} GB RAM"; else ram_txt="unknown RAM"; fi
+    if [[ -n "$disk_gb" ]]; then
+        disk_txt="${disk_gb} GB disk on ${mount_point}"
+        if [[ -n "$disk_free_gb" ]]; then
+            disk_txt="${disk_txt} (${disk_free_gb} GB free)"
+        fi
+    else
+        disk_txt="unknown disk on ${mount_point}"
+    fi
+    TN_HW_SUMMARY="${cpu_txt}, ${ram_txt}, ${disk_txt}"
+    print_info "Detected: ${TN_HW_SUMMARY}"
+    if [[ -n "$disk_pct" ]] && [[ "$disk_pct" -ge 90 ]]; then
+        print_warn "Disk ${mount_point} is ${disk_pct}% used (${disk_free_gb:-?} GB free)."
+    fi
+
+    gaps=""
+    if ! _tn_hw_role "Full node (follower)" "$HW_NODE_MIN_CPU" "$HW_NODE_MIN_RAM_GB" "$HW_NODE_MIN_DISK_GB" \
+        "$cpu" "$ram_kb" "$disk_kb"; then
+        gaps="node"
+    fi
+    if ! _tn_hw_role "Public RPC node" "$HW_RPC_MIN_CPU" "$HW_RPC_MIN_RAM_GB" "$HW_RPC_MIN_DISK_GB" \
+        "$cpu" "$ram_kb" "$disk_kb"; then
+        gaps="${gaps:+${gaps},}rpc"
+    fi
+    if ! _tn_hw_role "Validator (minimum)" "$HW_VAL_MIN_CPU" "$HW_VAL_MIN_RAM_GB" "$HW_VAL_MIN_DISK_GB" \
+        "$cpu" "$ram_kb" "$disk_kb"; then
+        gaps="${gaps:+${gaps},}validator"
+    fi
+    TN_HW_GAPS="$gaps"
+    print_info "Validator (recommended): ${HW_VAL_REC_CPU} cores / ${HW_VAL_REC_RAM_GB} GB ECC / $(_tn_hw_disk_label "$HW_VAL_REC_DISK_GB") NVMe — ECC and NVMe are not checked here."
+    print_info "Hardware checks never block setup; the node role is decided on-chain each epoch."
+    return 0
 }
 
 # Check whether ports are free, protocol-aware. Each arg is "port[/proto][:label]"
@@ -1055,7 +1171,12 @@ select_listener_ip() {
 #   3 = Active     (fully active in consensus)
 #   4 = PendingExit
 #   5 = Exited
-#   6 = Any        (retired)
+#   6 = Any        (sentinel for status queries, not a lifecycle stage; the
+#                   contract parks a retired validator's record here)
+#
+# Retirement itself is the separate isRetired bool (struct word 4). A retired
+# record is a tombstone: getValidator still answers for it after the NFT is
+# burned, and the address can never stake again.
 #
 # ConsensusRegistry address (from tn-contracts/deployments/deployments.json):
 readonly CONSENSUS_REGISTRY="0x07e17e17e17e17e17e17e17e17e17e17e17e17e1"
@@ -1064,36 +1185,135 @@ readonly CONSENSUS_REGISTRY="0x07e17e17e17e17e17e17e17e17e17e17e17e17e1"
 # keccak256("getValidator(address)") = 0x1904bb2e
 readonly GET_VALIDATOR_SELECTOR="0x1904bb2e"
 
-check_validator_onchain_status() {
-    local validator_address="$1"
-    local rpc_url="${2:-http://127.0.0.1:8545}"
+# node_stake_status <address> [rpc_url] — the single getValidator(address) probe.
+# Prints exactly ONE line on stdout and nothing else (no print_* output):
+#   "<status> <activation_epoch> <is_retired>"   rc 0   e.g. "3 12 0"
+#   "none"                                        rc 0   the call reverted: no ConsensusNFT
+#   "unknown"                                     rc 1   address empty or malformed
+#   "unknown"                                     rc 2   curl failed, empty body, a non-revert
+#                                                        RPC error (rate limit, method not
+#                                                        found, ...), or a missing/short/
+#                                                        non-hex result
+# status is the ValidatorStatus enum above in decimal; is_retired is 0 or 1.
+# rpc_url defaults to the local node (http://127.0.0.1:8545).
+#
+# The ValidatorInfo struct is ABI-encoded INLINE in the response. It carries no
+# dynamic fields (blsPubkey is not part of the returned struct), so there is NO
+# leading offset pointer -- every field sits at a fixed word index. Each field
+# is 32 bytes / 64 hex chars, so word N starts at hex offset 64*N:
+#   word 0 = validatorAddress (offset 0)
+#   word 1 = activationEpoch  (offset 64)    uint32: low 8 hex chars at 120
+#   word 2 = exitEpoch        (offset 128)
+#   word 3 = currentStatus    (offset 192)   uint8 enum: decoded from 240..255
+#   word 4 = isRetired        (offset 256)   bool: low byte at 318..319
+#   word 5 = stakeVersion     (offset 320)
+#   word 6 = region           (offset 384)
+# Only the low bits of each word are decoded, so a 64-hex word can never
+# overflow bash arithmetic.
+node_stake_status() {
+    local address="${1:-}" rpc_url="${2:-http://127.0.0.1:8545}"
+    local call_data response result hex status_hex epoch_hex retired_hex
+    local status epoch retired error_re revert_msg_re revert_code_re result_re hex_re
+    error_re='"error"[[:space:]]*:[[:space:]]*[{]'
+    revert_msg_re='[Rr]evert'
+    revert_code_re='"code"[[:space:]]*:[[:space:]]*3([^0-9]|$)'
+    result_re='"result"[[:space:]]*:[[:space:]]*"(0x[0-9a-fA-F]*)"'
+    hex_re='^[0-9a-fA-F]+$'
 
-    print_step "Checking validator on-chain status..."
-    print_info "Address:  ${validator_address}"
-    print_info "Contract: ${CONSENSUS_REGISTRY}"
-    echo ""
-
-    if [[ -z "$validator_address" ]] || [[ ! "$validator_address" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-        print_warn "Invalid validator address -- skipping on-chain check."
+    if [[ -z "$address" ]] || [[ ! "$address" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        printf '%s\n' "unknown"
         return 1
     fi
 
-    # ABI-encode the call: selector + address padded to 32 bytes
-    # Address is right-aligned in a 32-byte word, left-padded with zeros
-    local padded_address
-    padded_address="000000000000000000000000${validator_address:2}"
-    local call_data="${GET_VALIDATOR_SELECTOR}${padded_address}"
-
-    # Make the eth_call
-    local response
-    response=$(curl -s --max-time 10 \
+    # ABI-encode the call: selector + address left-padded to a 32-byte word.
+    call_data="${GET_VALIDATOR_SELECTOR}000000000000000000000000${address:2}"
+    response="$(curl -s --max-time 10 \
         -X POST \
         -H "Content-Type: application/json" \
         --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"${CONSENSUS_REGISTRY}\",\"data\":\"${call_data}\"},\"latest\"],\"id\":1}" \
-        "$rpc_url" 2>/dev/null || echo "")
+        "$rpc_url" 2>/dev/null || true)"
 
-    # Check if the call returned an error (validator doesn't exist / no NFT)
-    if echo "$response" | grep -q '"error"'; then
+    if [[ -z "$response" ]]; then
+        printf '%s\n' "unknown"
+        return 2
+    fi
+
+    # getValidator reverts for an address that holds no ConsensusNFT. reth reports
+    # an execution revert as error code 3 ("execution reverted"). Any other error
+    # (rate limit, method not found, ...) says nothing about the address. Only an
+    # error OBJECT counts, so a proxy that adds "error":null to a result is fine.
+    if [[ "$response" =~ $error_re ]]; then
+        if [[ "$response" =~ $revert_msg_re ]] || [[ "$response" =~ $revert_code_re ]]; then
+            printf '%s\n' "none"
+            return 0
+        fi
+        printf '%s\n' "unknown"
+        return 2
+    fi
+
+    result=""
+    if [[ "$response" =~ $result_re ]]; then
+        result="${BASH_REMATCH[1]}"
+    fi
+    hex="${result#0x}"
+    if [[ ${#hex} -lt 448 ]]; then
+        printf '%s\n' "unknown"
+        return 2
+    fi
+
+    status_hex="${hex:240:16}"
+    epoch_hex="${hex:120:8}"
+    retired_hex="${hex:318:2}"
+    if [[ ! "$status_hex" =~ $hex_re ]] || [[ ! "$epoch_hex" =~ $hex_re ]] \
+        || [[ ! "$retired_hex" =~ $hex_re ]]; then
+        printf '%s\n' "unknown"
+        return 2
+    fi
+    status=$(( 16#${status_hex} ))
+    epoch=$(( 16#${epoch_hex} ))
+    retired=$(( 16#${retired_hex} ))
+    if [[ "$retired" -ne 0 ]]; then
+        retired=1
+    fi
+    printf '%s %s %s\n' "$status" "$epoch" "$retired"
+    return 0
+}
+
+# node_is_staked_validator <address> [rpc_url] — no output. rc 0 when the registry
+# reports a registered validator (status 1-4: Staked, PendingActivation, Active,
+# PendingExit); rc 1 for a definite non-validator (status 0, 5 or 6, or no NFT
+# record); rc 2 when the status could not be read (see node_stake_status).
+node_is_staked_validator() {
+    local out status rc
+    rc=0
+    out="$(node_stake_status "${1:-}" "${2:-}")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        return 2
+    fi
+    status="${out%% *}"
+    case "$status" in
+        1|2|3|4) return 0 ;;
+    esac
+    return 1
+}
+
+# print_validator_onchain_status <address> <result-line> [is_retired 0|1] — render
+# the operator-facing report for a node_stake_status result line ("<status>
+# <activation_epoch> <is_retired>" or "none"). This is the single copy of the
+# status label table and the "Next step" text. The optional third argument
+# overrides the is_retired field of the line. Callers (check-node.sh,
+# update-node.sh) grep the "Status: <label>" and "No validator record found"
+# strings, so keep those labels stable. Returns 1 (after a warning) when the
+# line is not a decoded result.
+print_validator_onchain_status() {
+    local validator_address="${1:-}" line="${2:-}" retired_arg="${3:-}"
+    local status epoch retired status_label next_step
+    status=""
+    epoch=""
+    retired=""
+    read -r status epoch retired _ <<<"$line" || true
+
+    if [[ "$status" == "none" ]]; then
         print_warn "No validator record found for ${validator_address}"
         print_info "This means no ConsensusNFT has been minted for this address yet."
         echo ""
@@ -1104,45 +1324,17 @@ check_validator_onchain_status() {
         return 0
     fi
 
-    # Extract the result hex string
-    local result
-    result=$(echo "$response" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
-
-    if [[ -z "$result" ]] || [[ "$result" == "0x" ]]; then
+    if [[ ! "$status" =~ ^[0-9]+$ ]]; then
         print_warn "Empty response from contract -- node may still be syncing or NFT not yet minted."
         return 1
     fi
+    [[ "$epoch" =~ ^[0-9]+$ ]] || epoch="?"
+    if [[ -n "$retired_arg" ]]; then
+        retired="$retired_arg"
+    fi
+    [[ "$retired" == "1" ]] || retired="0"
 
-    # The ValidatorInfo struct is ABI-encoded INLINE in the response. It carries
-    # no dynamic fields (blsPubkey is not part of the returned struct), so there
-    # is NO leading offset pointer -- every field sits at a fixed word index.
-    # Struct layout (each field is 32 bytes / 64 hex chars):
-    #   word 0 = validatorAddress (offset 0)
-    #   word 1 = activationEpoch  (offset 64)
-    #   word 2 = exitEpoch        (offset 128)
-    #   word 3 = currentStatus    (offset 192)   <-- this is what we want
-    #   word 4 = isRetired        (offset 256)
-    #   word 5 = stakeVersion     (offset 320)
-    #   word 6 = region           (offset 384)
-    #
-    # (The previous decoder assumed a leading blsPubkey offset pointer + an
-    # 8-word struct, reading status from word 4 / offset 256; the live contract
-    # returns a 7-word struct, so every field shifted down one word.)
-    #
-    # Strip 0x prefix, then each 32-byte word is 64 hex chars
-    local hex="${result#0x}"
-
-    # currentStatus is at word index 3 (0-indexed), so offset = 3 * 64 = 192 chars
-    local status_hex="${hex:192:64}"
-    local status_dec=$(( 16#${status_hex} ))
-
-    # Also extract activationEpoch for display (word 1, offset 64)
-    local activation_hex="${hex:64:64}"
-    local activation_epoch=$(( 16#${activation_hex} ))
-
-    # Decode status to human readable
-    local status_label status_colour next_step
-    case $status_dec in
+    case "$status" in
         0)
             status_label="Undefined (NFT minted, not yet staked)"
             next_step="You have a ConsensusNFT. Next: stake your TEL by calling stake() on the ConsensusRegistry contract with your BLS public key."
@@ -1153,7 +1345,7 @@ check_validator_onchain_status() {
             ;;
         2)
             status_label="Pending Activation (activating at next epoch)"
-            next_step="Activation is in progress. You will become Active at epoch ${activation_epoch}. No action needed."
+            next_step="Activation is in progress. You will become Active at epoch ${epoch}. No action needed."
             ;;
         3)
             status_label="Active (participating in consensus)"
@@ -1168,30 +1360,72 @@ check_validator_onchain_status() {
             next_step="Your validator has exited. You can now call unstake() to reclaim your TEL stake."
             ;;
         6)
-            status_label="Retired"
-            next_step="This validator has been permanently retired."
+            # Retiring moves the record to Any and sets isRetired, so Any + retired is
+            # the normal retired tombstone and keeps the plain "Retired" label.
+            if [[ "$retired" == "1" ]]; then
+                status_label="Retired"
+                next_step="This validator has been permanently retired."
+            else
+                status_label="Any (reserved status sentinel)"
+                next_step="Contact the Telcoin Association for assistance."
+            fi
             ;;
         *)
-            status_label="Unknown (status code: ${status_dec})"
+            status_label="Unknown (status code: ${status})"
             next_step="Contact the Telcoin Association for assistance."
             ;;
     esac
+    if [[ "$retired" == "1" ]] && [[ "$status" != "6" ]]; then
+        status_label="${status_label} (Retired)"
+    fi
 
     # Display results
-    if [[ $status_dec -eq 3 ]]; then
+    if [[ "$status" -eq 3 ]]; then
         print_ok "ConsensusNFT: Found"
         print_ok "Status: ${status_label}"
-    elif [[ $status_dec -eq 0 ]] || [[ $status_dec -eq 1 ]] || [[ $status_dec -eq 2 ]]; then
+    elif [[ "$status" -eq 0 ]] || [[ "$status" -eq 1 ]] || [[ "$status" -eq 2 ]]; then
         print_ok "ConsensusNFT: Found"
         print_warn "Status: ${status_label}"
     else
         print_warn "Status: ${status_label}"
+    fi
+    if [[ "$retired" == "1" ]]; then
+        print_info "This validator is retired (isRetired is set on-chain): the address can never rejoin."
+        print_info "Onboarding again needs new keys and a new ConsensusNFT."
     fi
 
     echo ""
     print_info "Next step:"
     echo "    ${next_step}"
     echo ""
+    return 0
+}
+
+# check_validator_onchain_status <address> [rpc_url] — print the on-chain status
+# report for an address. Returns 1 for a malformed address or an unreadable
+# status, 0 when a report (including "No validator record found") was printed.
+check_validator_onchain_status() {
+    local validator_address="${1:-}" rpc_url="${2:-http://127.0.0.1:8545}"
+    local out rc
+
+    print_step "Checking validator on-chain status..."
+    print_info "Address:  ${validator_address}"
+    print_info "Contract: ${CONSENSUS_REGISTRY}"
+    echo ""
+
+    if [[ -z "$validator_address" ]] || [[ ! "$validator_address" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        print_warn "Invalid validator address -- skipping on-chain check."
+        return 1
+    fi
+
+    rc=0
+    out="$(node_stake_status "$validator_address" "$rpc_url")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        print_warn "Empty response from contract -- node may still be syncing or NFT not yet minted."
+        return 1
+    fi
+    print_validator_onchain_status "$validator_address" "$out" || true
+    return 0
 }
 
 # Display the contents of node-info.yaml after key generation
@@ -1199,6 +1433,7 @@ display_node_info() {
     local data_dir="$1"
     local validator_address="$2"
     local node_info_file="${data_dir}/node-info.yaml"
+    local export_cmd node_info_arg
 
     echo ""
     print_step "Node Identity Information"
@@ -1240,21 +1475,24 @@ display_node_info() {
     echo "      \"getCurrentStakeConfig()\" \\"
     echo "      --rpc-url <RPC_URL>"
     echo ""
-    echo "  Step 4: Submit stake transaction"
-    echo "    Read your BLS public key and proof of possession from node-info.yaml above"
-    echo "    cast send ${CONSENSUS_REGISTRY} \\"
-    echo "      \"stake(bytes,(bytes,bytes))\" \\"
-    echo "      <BLS_PUBKEY_COMPRESSED> \\"
-    echo "      \"(<UNCOMPRESSED_PUBKEY>,<UNCOMPRESSED_SIGNATURE>)\" \\"
-    echo "      --value <STAKE_AMOUNT> \\"
-    echo "      --trezor \\"
-    echo "      --rpc-url <RPC_URL>"
+    echo "  Step 4: On this node, export the stake(bytes,(bytes)) calldata (reads only node-info.yaml)"
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        export_cmd="docker run --rm -v ${data_dir}:/home/nonroot/data:ro ${DOCKER_IMAGE:-<IMAGE>} telcoin keytool"; node_info_arg="/home/nonroot/data/node-info.yaml"
+    else
+        export_cmd="${BINARY_PATH:-telcoin-network} keytool"; node_info_arg="$node_info_file"
+    fi
+    echo "    ${export_cmd} export-staking-args \\"
+    echo "      --node-info ${node_info_arg} --calldata"
     echo ""
-    echo "  Step 5: Wait for node to sync, then activate"
-    echo "    cast send ${CONSENSUS_REGISTRY} \\"
-    echo "      \"activate()\" \\"
-    echo "      --trezor \\"
-    echo "      --rpc-url <RPC_URL>"
+    echo "  Step 5: From the machine holding your validator wallet, submit the stake"
+    echo "    cast send ${CONSENSUS_REGISTRY} <CALLDATA_FROM_STEP_4> \\"
+    echo "      --value <STAKE_AMOUNT_FROM_STEP_3> --from ${validator_address} \\"
+    echo "      --ledger --rpc-url <RPC_URL>"
+    echo "    (Use --trezor or --interactive instead of --ledger to match your wallet.)"
+    echo ""
+    echo "  Step 6: Wait for node to sync, then activate"
+    echo "    cast send ${CONSENSUS_REGISTRY} \"activate()\" \\"
+    echo "      --from ${validator_address} --ledger --rpc-url <RPC_URL>"
     echo ""
     echo "  Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake"
     echo ""
@@ -1978,6 +2216,100 @@ tn_node_inject_flags() {
     ' "$file" > "$tmp"
     if grep -q -- "$marker" "$tmp"; then cat "$tmp" > "$file"; rm -f "$tmp"; return 0; fi
     rm -f "$tmp"; return 1
+}
+
+# tn_node_has_observer_flag <file> — rc 0 when a NON-comment line of <file> carries
+# the `--observer` flag as a whole token: bounded by line start or whitespace on the
+# left and by whitespace, end of line or a trailing line-continuation backslash on
+# the right (so --observer-foo / --observer=x never match). Lines whose first
+# non-blank character is `#` are comments and are ignored. rc 1 otherwise, or when
+# <file> is missing or unreadable. No output.
+tn_node_has_observer_flag() {
+    local file="${1:-}"
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 1
+    awk '
+        /^[[:space:]]*#/ { next }
+        /(^|[[:space:]])--observer([[:space:]]|\\?$)/ { found = 1; exit }
+        END { exit(found ? 0 : 1) }
+    ' "$file" 2>/dev/null
+}
+
+# tn_node_strip_observer_flag <file> — idempotently remove the `--observer` flag
+# from a node launch file (start wrapper or legacy docker unit). Releases after
+# v0.15.0-adiri reject the flag outright, so an old wrapper must lose it before the
+# node is restarted on a new binary or image.
+#   * flag absent (per tn_node_has_observer_flag): rc 0, file untouched;
+#   * a line holding only the flag (plus optional `\`) is deleted. When that line
+#     ended the command (no `\`), the trailing `\` is dropped from the line before
+#     it so the continuation does not swallow the next command;
+#   * on any other non-comment line the token and one adjacent run of whitespace
+#     are removed; comment lines are never touched; --instance is never touched.
+# The edit is staged in a temp file and only written back (cat > file, which keeps
+# owner and mode) when the temp copy is non-empty, no longer has the flag, and has
+# the same number of whole-word --http lines. On any failed check the file is left
+# as it was and rc is 1. The caller owns the backup, daemon-reload (docker unit)
+# and restart, as with tn_node_inject_flags.
+tn_node_strip_observer_flag() {
+    local file="${1:-}" tmp http_before http_after http_re
+    http_re='(^|[[:space:]])--http([[:space:]]|\\?$)'
+    tn_node_has_observer_flag "$file" || return 0
+    [[ -w "$file" ]] || return 1
+    tmp="$(mktemp 2>/dev/null || true)"
+    [[ -n "$tmp" && -f "$tmp" ]] || return 1
+    if ! awk '
+        function flush() { if (have) print prev; have = 0 }
+        /^[[:space:]]*#/ { flush(); prev = $0; have = 1; prev_comment = 1; next }
+        /^[[:space:]]*--observer[[:space:]]*(\\[[:space:]]*)?$/ {
+            if ($0 !~ /\\[[:space:]]*$/ && have && !prev_comment) sub(/[[:space:]]*\\[[:space:]]*$/, "", prev)
+            next
+        }
+        {
+            line = $0
+            while (match(line, /(^|[[:space:]])--observer([[:space:]]|\\?$)/)) {
+                tstart = RSTART
+                if (substr(line, RSTART, 1) != "-") tstart = RSTART + 1
+                before = substr(line, 1, tstart - 1)
+                after = substr(line, tstart + 10)
+                if (before ~ /[^[:space:]]/) sub(/[[:space:]]+$/, "", before)
+                else sub(/^[[:space:]]+/, "", after)
+                line = before after
+            }
+            flush(); prev = line; have = 1; prev_comment = 0
+        }
+        END { flush() }
+    ' "$file" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp"; return 1
+    fi
+    http_before="$(grep -cE -- "$http_re" "$file" 2>/dev/null || true)"
+    http_after="$(grep -cE -- "$http_re" "$tmp" 2>/dev/null || true)"
+    if [[ -s "$tmp" ]] && ! tn_node_has_observer_flag "$tmp" \
+        && [[ -n "$http_before" && "$http_before" == "$http_after" ]]; then
+        if cat "$tmp" > "$file"; then
+            rm -f "$tmp"; return 0
+        fi
+    fi
+    rm -f "$tmp"; return 1
+}
+
+# tn_target_drops_observer <text...> — rc 0 when the release named by <text> no
+# longer needs `--observer` in the launch line, so stripping it is safe. <text> is
+# any tag / image / version string (all args joined with spaces), e.g.
+# `v0.15.0-adiri`, `us-docker.pkg.dev/...:v0.14.0-adiri` or `main telcoin-network
+# 0.16.0`. The FIRST x.y.z in it is compared against 0.15.0: v0.15.0-adiri still
+# accepts `--observer` as a hidden no-op and the first release after it rejects it
+# (`unexpected argument '--observer'`), so stripping from 0.15.0 upward is always
+# safe. With no x.y.z at all (branch name, bare SHA, digest) the target is assumed
+# to be the newest code and rc is 0.
+tn_target_drops_observer() {
+    local text found ver_re
+    ver_re='([0-9]+\.[0-9]+\.[0-9]+)'
+    text="$*"
+    found=""
+    if [[ "$text" =~ $ver_re ]]; then
+        found="${BASH_REMATCH[1]}"
+    fi
+    [[ -n "$found" ]] || return 0
+    version_gte "$found" "0.15.0"
 }
 
 # -----------------------------------------------------------------------------
