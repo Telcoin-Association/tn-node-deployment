@@ -33,7 +33,7 @@
 _TN_FALLBACK_SH=1
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly FALLBACK_VERSION="1.0.1"
+readonly FALLBACK_VERSION="1.0.2"
 
 # Root prepended to every absolute probe path. Empty in production; a temp dir
 # under test. `:=` leaves a caller-provided value (the test harness) untouched.
@@ -128,15 +128,37 @@ tn_resolve_config_dir() {
     printf '%s\n' "$etc"
 }
 
+# _tn_meta_data_dir <meta-file> — echo the DATA_DIR= a .node-meta records (the datadir
+# the operator chose, e.g. on a separate disk) when it is an absolute path to an
+# existing directory; the probe and the echoed path are rooted at ${TN_ROOT_PREFIX}.
+# Returns 1 when the file or key is absent, empty, relative, or not a directory.
+_tn_meta_data_dir() {
+    local dd
+    dd="$(_tn_meta_get DATA_DIR "$1")" || return 1
+    [[ "$dd" == /* && -d "${TN_ROOT_PREFIX}${dd}" ]] || return 1
+    printf '%s\n' "${TN_ROOT_PREFIX}${dd}"
+}
+
 # tn_resolve_data_dir — symmetric to tn_resolve_config_dir, for /var/lib/telcoin.
-# Keyed off the CONFIG .node-meta (the authoritative install marker).
+# Keyed off the CONFIG .node-meta (the authoritative install marker), and honours the
+# DATA_DIR= that .node-meta records (setup-node.sh --data-dir / prompt) whenever that
+# directory exists:
+#   unified .node-meta present  -> its DATA_DIR, else /var/lib/telcoin   (new install)
+#   else legacy role .node-meta -> its DATA_DIR, else /var/lib/telcoin/<role>
+#   else                        -> /var/lib/telcoin                     (new-install default)
 tn_resolve_data_dir() {
     local etc var t
     etc="$(_tn_etc)"
     var="$(_tn_var)"
-    [[ -f "${etc}/.node-meta" ]] && { printf '%s\n' "$var"; return 0; }
+    if [[ -f "${etc}/.node-meta" ]]; then
+        _tn_meta_data_dir "${etc}/.node-meta" || printf '%s\n' "$var"
+        return 0
+    fi
     for t in validator observer; do
-        [[ -f "${etc}/${t}/.node-meta" ]] && { printf '%s\n' "${var}/${t}"; return 0; }
+        if [[ -f "${etc}/${t}/.node-meta" ]]; then
+            _tn_meta_data_dir "${etc}/${t}/.node-meta" || printf '%s\n' "${var}/${t}"
+            return 0
+        fi
     done
     printf '%s\n' "$var"
 }
