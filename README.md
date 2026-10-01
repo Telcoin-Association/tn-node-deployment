@@ -969,6 +969,25 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-node v1.1.62 — drops the retired --observer flag during updates
+The node binary no longer has an `--observer` flag. v0.15.0-adiri still accepts it as a
+hidden no-op, but the next release rejects it (`unexpected argument '--observer'`), so a
+legacy start wrapper or docker unit that still passes it would leave the node down after an
+update. When the update target is v0.15.0 or newer (or a branch, SHA or digest with no
+version in it), the apply step now removes the flag from the launch file before restarting
+the node. Docker installs reuse the launch-file backup the image swap already takes;
+source installs back up the start wrapper first. Either way a failed health check rolls
+the file back with the old image or binary. If the strip itself fails, the update warns
+and carries on.
+
+`--observer` and `--validator` are still accepted, because older copies of the UI helper
+pass one on every `--json` call, but they do nothing. The node's role is decided on-chain.
+An interactive run prints one line on stderr saying the flag was ignored; `--json` output
+is unchanged. The "Detected node type" line is gone, and the validator downtime prompt now
+reads the on-chain stake status directly (`node_is_staked_validator`, lib/common v1.4.0)
+instead of parsing the human status report. It still errs toward prompting when the
+status can't be read. `--help` now prints only the header block.
+
 ### telcoin-ui v1.8.8 — validator view follows the on-chain stake
 The dashboard now picks the validator view from the node's stake in the ConsensusRegistry.
 Once the node is synced, the UI calls `getValidator` for its execution address. A status of

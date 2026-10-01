@@ -12,10 +12,13 @@
 # operator can pick a quiet maintenance window for the apply step. The
 # prepared state survives between invocations via a pending-state file.
 #
+# When the target is v0.15.0 or newer, APPLY also removes the retired
+# observer flag from the node's launch file (the start wrapper, or the unit
+# on a legacy docker install): later releases refuse to start with it. The
+# file is backed up first and restored if the update rolls back.
+#
 # USAGE:
 #   sudo bash update-node.sh
-#   sudo bash update-node.sh --validator    # force validator (rare; auto-detected)
-#   sudo bash update-node.sh --observer     # force observer
 #   sudo bash update-node.sh --discard      # drop any pending prepared update
 #
 # What is NEVER touched by this script:
@@ -25,6 +28,10 @@
 #   - Chain config files (genesis/committee/parameters)
 #   - Listener multiaddrs and other Environment= lines in the unit file
 # =============================================================================
+# --help prints the block above only. Not advertised there: --observer and
+# --validator are still accepted and ignored, because the node's role is
+# decided on-chain and older copies of the UI helper pass one of them on every
+# --json call.
 
 set -uo pipefail
 
@@ -38,7 +45,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="1.1.61"
+readonly SCRIPT_VERSION="1.1.62"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -55,11 +62,13 @@ else
     readonly VERIFY_TIMEOUT_SECONDS=45
 fi
 
-NODE_TYPE=""
 SERVICE_NAME=""
 RPC_URL=""
-NODE_TYPE_EXPLICITLY_SET=false
 DISCARD_PENDING=false
+# --observer / --validator as passed (the last one wins). Both are retired and
+# ignored: the node's role is decided on-chain. Older copies of the UI helper
+# still pass one on every --json call, so they must keep parsing cleanly.
+LEGACY_ROLE_FLAG=""
 
 # Non-interactive (--json) mode state. Drives the UI's Update feature via the
 # root-owned telcoin-ui-helper. Empty/false here means classic interactive mode.
@@ -72,35 +81,23 @@ ASSUME_YES=false
 # DETECTION
 # =============================================================================
 
-# Set NODE_TYPE (a presentation hint) + the LOCAL RPC_URL used for health probes.
-# A unified node serves RPC on RPC_PORT from .node-meta (default DEFAULT_RPC_PORT
-# = 8545); the old node-type->port guess (observer => 8541) mis-probed a unified
-# install, so derive the port from meta instead -- it no longer depends on the
-# type. The systemd unit BASE name lives in SERVICE_NAME and is resolved
-# separately (tn_resolve_service) so it is "telcoin" on a unified install and the
-# legacy unit name on a legacy install.
-set_node_type() {
-    case "$1" in
-        validator) NODE_TYPE="validator" ;;
-        observer)  NODE_TYPE="observer" ;;
-    esac
-    local rpc_port
-    rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
-    [[ -n "$rpc_port" ]] || rpc_port="$DEFAULT_RPC_PORT"
-    RPC_URL="http://127.0.0.1:${rpc_port}"
-}
-
-detect_node_type() {
-    # Resolve the unit base name first so SERVICE_NAME is correct regardless of
-    # whether the node type was forced via --validator/--observer.
+# Resolve the installed node: SERVICE_NAME is the systemd unit BASE name
+# (tn_resolve_service: "telcoin" on a unified install, the legacy unit name on a
+# legacy one), and RPC_URL is the LOCAL endpoint used for the health probes and
+# the on-chain status read. The node serves RPC on RPC_PORT from .node-meta
+# (default DEFAULT_RPC_PORT = 8545). Exits when no node is installed.
+detect_node() {
     SERVICE_NAME="$(tn_resolve_service)" || {
         print_error "No Telcoin node installation found on this server."
-        print_info "Run setup-node.sh first."
+        print_info "Re-run setup-node.sh"
         exit 1
     }
-    [[ "$NODE_TYPE_EXPLICITLY_SET" == "true" ]] && return 0
-    set_node_type "$(tn_resolve_node_type)"
-    print_info "Detected node type: ${NODE_TYPE}"
+    if [[ -z "$RPC_URL" ]]; then
+        local rpc_port
+        rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
+        [[ -n "$rpc_port" ]] || rpc_port="$DEFAULT_RPC_PORT"
+        RPC_URL="http://127.0.0.1:${rpc_port}"
+    fi
 }
 
 # Read INSTALL_METHOD from .node-meta. Returns "source" | "docker" | "existing" | "".
@@ -245,6 +242,19 @@ backup_unit_file() {
     cp -p "$file" "$backup" || return 1
     print_info "Launch config backup: ${backup}" >&2
     echo "$backup"
+}
+
+# observer_strip_needed <file> <target text...> -- rc 0 when the launch file
+# <file> still passes the retired --observer flag AND the update target (a tag,
+# image or version string; see tn_target_drops_observer) no longer accepts it.
+# v0.15.0-adiri takes the flag as a hidden no-op and later releases refuse to
+# start with it, so the apply paths strip it before restarting. No output.
+observer_strip_needed() {
+    local file="${1:-}"
+    shift
+    [[ -n "$file" ]] || return 1
+    tn_target_drops_observer "$@" || return 1
+    tn_node_has_observer_flag "$file"
 }
 
 # Returns 0 if service is active AND tn_latestConsensusHeader responds within
@@ -491,6 +501,21 @@ apply_docker_update() {
         return 1
     fi
     print_ok "Launch config updated: ${pre_unit_hash:0:12}... -> ${post_unit_hash:0:12}..."
+
+    # Drop the retired --observer flag when the new release rejects it. The
+    # version test reads the image name:tag only, so a registry host:port is
+    # never taken for a version. The backup above predates this edit, so the
+    # rollback below restores the flag together with the old image.
+    if observer_strip_needed "$launch_file" "${new_image##*/}"; then
+        if tn_node_strip_observer_flag "$launch_file"; then
+            print_info "Stripped the retired --observer flag from ${launch_file}"
+            systemctl daemon-reload || \
+                print_warn "systemctl daemon-reload failed -- a legacy unit install may restart with the retired --observer flag"
+        else
+            print_warn "Could not strip the retired --observer flag from ${launch_file} -- continuing."
+            print_info "  If ${SERVICE_NAME} fails to start, remove the flag from that file by hand."
+        fi
+    fi
 
     print_step "Starting ${SERVICE_NAME} on new image..."
     start_service
@@ -825,6 +850,25 @@ apply_source_update() {
         print_ok "Binary swapped: ${pre_install_hash:0:12}... -> ${post_install_hash:0:12}..."
     fi
 
+    # Drop the retired --observer flag from the start wrapper when the new
+    # release rejects it. The wrapper is backed up first and the rollback below
+    # restores it with the old binary. No backup, no strip: a wrapper that keeps
+    # the flag fails the health check and rolls back cleanly.
+    local wrapper wrapper_backup=""
+    wrapper="$(tn_node_launch_target 2>/dev/null || true)"
+    wrapper="${wrapper##* }"
+    if observer_strip_needed "$wrapper" "$new_ref $new_version"; then
+        if ! wrapper_backup=$(backup_unit_file "$wrapper"); then
+            wrapper_backup=""
+            print_warn "Could not back up ${wrapper} -- leaving the retired --observer flag in place."
+        elif tn_node_strip_observer_flag "$wrapper"; then
+            print_info "Stripped the retired --observer flag from ${wrapper}"
+        else
+            print_warn "Could not strip the retired --observer flag from ${wrapper} -- continuing."
+            print_info "  If ${SERVICE_NAME} fails to start, remove the flag from that file by hand."
+        fi
+    fi
+
     print_step "Starting ${SERVICE_NAME} on new binary..."
     start_service
 
@@ -853,10 +897,14 @@ apply_source_update() {
         if ! cp -p "$backup" "$installed"; then
             print_error "Backup restore failed -- ${installed} still holds the new binary."
             print_error "Node left STOPPED. Recover manually:"
-            print_info "  cp -p ${backup} ${installed} && systemctl start ${SERVICE_NAME}"
+            print_info "  cp -p ${backup} ${installed}${wrapper_backup:+ && cp -p ${wrapper_backup} ${wrapper}} && systemctl start ${SERVICE_NAME}"
             return 1
         fi
         chmod +x "$installed" 2>/dev/null || true
+        # The old binary goes back with the wrapper it ran under.
+        if [[ -n "$wrapper_backup" ]] && ! cp -p "$wrapper_backup" "$wrapper"; then
+            print_warn "Could not restore ${wrapper} from ${wrapper_backup} -- the previous binary starts without the --observer flag."
+        fi
         start_service
         if verify_health_after_restart; then
             clear_pending_state
@@ -877,30 +925,30 @@ apply_source_update() {
 
 # Best-effort runtime check: is this node a validator the protocol currently
 # cares about? The protocol assigns a node's role per-epoch from on-chain
-# committee membership, so the static NODE_TYPE hint is NOT authoritative. We
-# REUSE the single on-chain probe check_validator_onchain_status (lib/common.sh)
-# -- there is no dedicated boolean helper -- capturing its rendered output and
-# classifying the ValidatorStatus. Returns 0 (treat as validator) when the
-# registry reports a REGISTERED validator (status 1-4) OR when the status cannot
-# be determined (no address on file, RPC unreachable, unexpected output);
-# returns 1 ONLY when the registry definitively reports a non-validator (status
-# 0/5/6 or no NFT record). Erring toward 0 keeps the downtime warning when in
-# doubt -- a missed warning on a live validator is worse than a needless prompt.
+# committee membership, so the install-time role hint in .node-meta is NOT
+# authoritative. Asks node_is_staked_validator (lib/common.sh) and returns 0
+# (treat as validator) when the registry reports a REGISTERED validator (status
+# 1-4) OR when the status cannot be determined (no address on file, bad address,
+# RPC unreachable); returns 1 ONLY when the registry definitively reports a
+# non-validator (status 0/5/6 or no NFT record). Erring toward 0 keeps the
+# downtime warning when in doubt -- a missed warning on a live validator is
+# worse than a needless prompt.
 node_is_onchain_validator_or_unknown() {
-    local addr out
+    local addr rc
     addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null || true)"
     # No address on file -> cannot confirm; treat as unknown -> warn.
     [[ -n "$addr" ]] || return 0
-    out="$(check_validator_onchain_status "$addr" "$RPC_URL" 2>&1 || true)"
-    # Plain-text status labels (only the [OK]/[WARN] prefix is coloured).
-    if grep -qE 'Status: (Undefined|Exited|Retired)|No validator record found' <<<"$out"; then
+    rc=0
+    node_is_staked_validator "$addr" "$RPC_URL" || rc=$?
+    # rc 1 = definite non-validator. rc 0 (validator) and rc 2 (unknown) warn.
+    if [[ "$rc" -eq 1 ]]; then
         return 1
     fi
     return 0
 }
 
 validator_downtime_warning_if_applicable() {
-    # Gate on RUNTIME on-chain status, not the static NODE_TYPE hint: only SKIP
+    # Gate on RUNTIME on-chain status, not the install-time role hint: only SKIP
     # the warning when the registry confirms this node is NOT a validator.
     if ! node_is_onchain_validator_or_unknown; then
         return 0
@@ -1295,7 +1343,7 @@ json_apply() {
     fi
     # In JSON mode a validator restart needs an explicit --yes (replaces the typed
     # CONFIRM of interactive mode); never restart a validator implicitly. Gate on
-    # RUNTIME on-chain status, not the static NODE_TYPE hint: require --yes when the
+    # RUNTIME on-chain status, not the install-time role hint: require --yes when the
     # registry reports a validator OR can't confirm otherwise (RPC down / unknown),
     # and skip it only when this node is definitively NOT a validator.
     if node_is_onchain_validator_or_unknown && [[ "$ASSUME_YES" != "true" ]]; then
@@ -1340,6 +1388,22 @@ json_apply_source() {
     fi
     chmod +x "$installed" 2>/dev/null || true
 
+    # Drop the retired --observer flag from the start wrapper (see
+    # apply_source_update): back up, strip, and restore on rollback below.
+    local wrapper wrapper_backup=""
+    wrapper="$(tn_node_launch_target 2>/dev/null || true)"
+    wrapper="${wrapper##* }"
+    if observer_strip_needed "$wrapper" "$new_ref $new_version"; then
+        if ! wrapper_backup=$(backup_unit_file "$wrapper"); then
+            wrapper_backup=""
+            json_event step "warning: could not back up ${wrapper} -- leaving the retired --observer flag in place"
+        elif tn_node_strip_observer_flag "$wrapper"; then
+            json_event step "stripped retired --observer flag from ${wrapper}"
+        else
+            json_event step "warning: could not strip retired --observer flag from ${wrapper} -- continuing"
+        fi
+    fi
+
     json_event step "Starting ${SERVICE_NAME} on new binary"
     start_service
 
@@ -1366,10 +1430,14 @@ json_apply_source() {
     # If the restore fails, do NOT start the service: it would come up on the
     # new binary and a passing re-verify would misreport "rolled back".
     if ! cp -p "$backup" "$installed"; then
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed AND backup restore failed; service left stopped -- restore ${backup} to ${installed} manually\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed AND backup restore failed; service left stopped -- restore ${backup} to ${installed}${wrapper_backup:+ and ${wrapper_backup} to ${wrapper}} manually\"}"
         return 1
     fi
     chmod +x "$installed" 2>/dev/null || true
+    # The old binary goes back with the wrapper it ran under.
+    if [[ -n "$wrapper_backup" ]] && ! cp -p "$wrapper_backup" "$wrapper"; then
+        json_event step "warning: could not restore ${wrapper} from ${wrapper_backup}"
+    fi
     start_service
     if verify_health_after_restart; then
         clear_pending_state
@@ -1417,6 +1485,18 @@ json_apply_docker() {
         systemctl daemon-reload 2>/dev/null || true
         start_service 2>/dev/null || true
         return 1
+    fi
+
+    # Drop the retired --observer flag when the new release rejects it (see
+    # apply_docker_update). The backup above predates this edit, so the
+    # rollback below restores the flag together with the old image.
+    if observer_strip_needed "$launch_file" "${new_image##*/}"; then
+        if tn_node_strip_observer_flag "$launch_file"; then
+            json_event step "stripped retired --observer flag from ${launch_file}"
+            systemctl daemon-reload || json_event step "warning: systemctl daemon-reload failed"
+        else
+            json_event step "warning: could not strip retired --observer flag from ${launch_file} -- continuing"
+        fi
     fi
 
     json_event step "Starting ${SERVICE_NAME} on new image"
@@ -1468,7 +1548,7 @@ json_discard() {
 run_json_mode() {
     json_setup_fds
     check_root
-    detect_node_type
+    detect_node
     # Serialize mutating runs (a UI apply racing a CLI apply double-stops the
     # service and races the pending-state/binary swap). Read-only check runs
     # stay lock-free so the dashboard poll never blocks a real update.
@@ -1510,8 +1590,7 @@ show_pending_summary() {
 main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --validator) set_node_type validator; NODE_TYPE_EXPLICITLY_SET=true; shift ;;
-            --observer)  set_node_type observer;  NODE_TYPE_EXPLICITLY_SET=true; shift ;;
+            --validator|--observer) LEGACY_ROLE_FLAG="$1"; shift ;;
             --discard)   DISCARD_PENDING=true; JSON_ACTION="discard"; shift ;;
             --json)      JSON_MODE=true; shift ;;
             --check)     JSON_ACTION="check"; shift ;;
@@ -1520,12 +1599,19 @@ main() {
             --ref)       JSON_REF="${2:-}"; shift 2 ;;
             --yes)       ASSUME_YES=true; shift ;;
             -h|--help)
-                grep '^# ' "$0" | head -30 | sed 's/^# \?//'
+                # The header block only: everything up to its closing rule.
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
                 exit 0
                 ;;
             *) print_warn "Unknown argument: $1"; shift ;;
         esac
     done
+
+    # The role flags are accepted for old callers and ignored. One stderr line
+    # in human mode; nothing in --json mode, whose stdout stays pure JSON.
+    if [[ -n "$LEGACY_ROLE_FLAG" && "$JSON_MODE" != "true" ]]; then
+        print_info "Ignoring ${LEGACY_ROLE_FLAG}: the node's role is decided on-chain, not by a flag." >&2
+    fi
 
     # Non-interactive JSON mode short-circuits the whole interactive flow.
     if [[ "$JSON_MODE" == "true" ]]; then
@@ -1535,7 +1621,7 @@ main() {
 
     check_root
     print_header "Telcoin Network Node Update  v${SCRIPT_VERSION}"
-    detect_node_type
+    detect_node
     print_info "Service:       ${SERVICE_NAME}"
 
     local install_method
@@ -1554,7 +1640,7 @@ main() {
             ;;
         *)
             print_error "Install method is unknown -- cannot proceed safely."
-            print_info "Re-run setup-${NODE_TYPE}.sh to rewrite .node-meta, or supply"
+            print_info "Re-run setup-node.sh to rewrite .node-meta, or supply"
             print_info "INSTALL_METHOD={source|docker} manually in $(node_meta_path || echo "$(tn_resolve_config_dir)/.node-meta")"
             exit 1
             ;;
