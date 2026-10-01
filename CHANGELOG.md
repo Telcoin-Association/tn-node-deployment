@@ -7,6 +7,11 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### One contact address -- support@telcoin.org
+The `setup-node.sh` welcome banner, `OPERATOR.md` and the README now give support@telcoin.org
+for everything, validator onboarding, approval and hardware included. Ships in setup-node
+v1.2.1 and update-scripts v1.1.69.
+
 ### Operator runbook -- `OPERATOR.md`
 A standalone runbook (deploy, sync, public RPC, stake, activate, day-2 operations) now lives
 at the repo root; README stays the reference and links to it. `followup.md` holds the

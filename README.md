@@ -48,7 +48,7 @@ The ports are the same on every node:
 
 To validate you additionally need, in order:
 
-1. **Approval** — Telcoin Association onboarding. Validators must be GSMA-approved MNOs; email grant@telcoin.org before purchasing hardware.
+1. **Approval** — Telcoin Association onboarding. Validators must be GSMA-approved MNOs; email support@telcoin.org before purchasing hardware.
 2. **Stake** — submit the stake transaction with your BLS public key and proof of possession.
 3. **Activation** — call `activate()` on-chain and go active at the next epoch boundary.
 
@@ -109,7 +109,7 @@ The scripts will install or check for everything needed. You do not need to inst
 
 ### To validate
 - GSMA MNO status — only GSMA-approved MNOs may validate
-- Hardware approval from the Telcoin Association — email grant@telcoin.org before purchasing equipment
+- Hardware approval from the Telcoin Association — email support@telcoin.org before purchasing equipment
 - Prior governance approval from the Telcoin Association
 - A registered Ethereum address for receiving TEL rewards
 
@@ -1036,6 +1036,14 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### update-scripts v1.1.69 — re-cut for setup-node v1.2.1
+`update-scripts.sh v1.1.69` re-cut with refreshed `.sha256` sidecars; carries setup-node
+v1.2.1 (entry below), so updaters fetch the new banner.
+
+### setup-node v1.2.1 — contact address is support@telcoin.org
+The welcome banner now points at support@telcoin.org for Association approval. `OPERATOR.md`
+and the README use the one support address for everything, validator onboarding included.
 
 ### update-scripts v1.1.68 — re-cut for update-node v1.1.63
 `update-scripts.sh v1.1.68` re-cut with refreshed `.sha256` sidecars; carries update-node

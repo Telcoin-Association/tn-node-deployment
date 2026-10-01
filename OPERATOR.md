@@ -91,7 +91,7 @@ Validators have two network requirements on top of that:
 - 200 Mbps symmetric bandwidth at minimum, 1 Gbps recommended.
 - A p95 round-trip time well below 1 second to at least 7 of the 10 committee members.
 
-Email grant@telcoin.org with your planned hardware before you buy anything for a validator.
+Email support@telcoin.org with your planned hardware before you buy anything for a validator.
 
 The upstream page also recommends turning swap off and running time sync (chrony or systemd-timesyncd) on every node.
 A node rejects headers timestamped more than a second ahead of its own clock.
@@ -149,7 +149,7 @@ Open them in every layer that filters traffic: `ufw` on the host (section 2.6), 
 - A mounted data drive with an `/etc/fstab` entry, if the chain data will not live on the boot disk.
 - A DNS A record for the node's public name, if you want public RPC (section 5).
 - Somewhere off the server to keep a backup of the node keys (section 2.5).
-- For validators: an approval request with the Association in progress (grant@telcoin.org), and a machine with Foundry's `cast` and your wallet.
+- For validators: an approval request with the Association in progress (support@telcoin.org), and a machine with Foundry's `cast` and your wallet.
 
 ## 2. Install
 
@@ -546,7 +546,7 @@ The telcoin-network "how to stake" page shows outdated `stake` and `unstake` sig
 
 ### 6.1 Prerequisites
 
-- Association approval. Only GSMA-approved mobile network operators can validate; start with grant@telcoin.org.
+- Association approval. Only GSMA-approved mobile network operators can validate; start with support@telcoin.org.
 - Hardware at the validator tier (section 1.1).
 - UDP 49590 and 49594 reachable from the internet (section 1.3).
 - A synced node (section 3).
@@ -831,8 +831,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 
 ## 10. Getting help
 
-- Validator onboarding, approval and hardware: grant@telcoin.org.
-- Everything else: support@telcoin.org.
+Email support@telcoin.org for everything, validator onboarding, approval and hardware included.
 
 Include:
 
@@ -851,6 +850,6 @@ Never send the contents of `node-keys/` or your BLS passphrase.
 | Public RPC URL | `https://rpc.telcoin.network` (and `wss://`) | `https://rpc.adiri.tel`, without WebSocket | This repo. |
 | Operating systems | systemd 247+: Ubuntu 22.04+, Debian 12+, RHEL 9+ | Debian 11+, Ubuntu 20.04+, RHEL 8 | This repo for `setup-node.sh`; older systems fail its systemd check. |
 | `stake` / `unstake` | `stake(bytes,(bytes))`, `unstake(address,bool)` | `stake(bytes,(bytes,bytes))`, `unstake(address)` | The deployed contracts, which match this runbook. |
-| Contact | grant@telcoin.org for validators, support@telcoin.org for everyone | Both addresses, used for different things on different pages | Section 10. |
+| Contact | support@telcoin.org for everything | Two addresses, used for different things on different pages | Section 10. |
 | RPC exposure | Any node can serve public RPC through Caddy and advertise it, and the committee's advertised URLs are where other nodes forward transactions. | Keep validator RPC off the public internet; serve the public from observers. | Both hold: a validator must advertise a reachable URL to receive forwarded transactions, so choose deliberately and protect it (section 5). |
 | CPU counts | The preflight counts logical CPUs (`nproc`). | Physical cores. | The docs. Halve a cloud instance's vCPU count. |

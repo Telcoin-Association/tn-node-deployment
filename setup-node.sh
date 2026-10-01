@@ -53,7 +53,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly SERVICE_NAME="telcoin"
 # NODE_TYPE is a non-authoritative default-view HINT, not a role. The node's role
 # is decided on-chain. The dashboard's validator view follows the on-chain stake
@@ -159,7 +159,7 @@ step_welcome() {
     echo "    * You are running this script as root (sudo)"
     echo ""
     print_info "To validate later you must be a GSMA-approved MNO with Telcoin"
-    print_info "Association governance approval -- contact grant@telcoin.org and see"
+    print_info "Association governance approval -- contact support@telcoin.org and see"
     print_info "the staking guide in the docs."
     echo ""
     print_sep
