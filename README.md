@@ -969,6 +969,29 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### setup-node v1.2.0 — one domain, one advertisement; hardware gaps in the setup log
+`--rpc-domain <hostname>` now fills in the RPC URLs that were separate flags. With a domain
+and nothing else, keygen writes `https://<domain>/` and `wss://<domain>/` into
+`node-info.yaml`, and `.node-meta` records `PUBLIC_RPC_URL=https://<domain>` and
+`PUBLIC_WS_URL=wss://<domain>`. Explicit `--rpc-http`, `--rpc-ws`, `--public-rpc-url` and
+`--public-ws-url` still win and are used as given, so the devnet fleet's keygen command
+line is byte-for-byte the same as before. All four flags are now documented in the script
+header.
+
+When the URLs come from the domain, setup first asks the keytool whether it knows
+`--rpc-http`. An older release that doesn't gets a plain keygen and a warning; the
+advertisement then lands when `install-caddy.sh --phase=rpc-enable` runs after the node
+starts. When keygen already wrote the same URLs, `rpc-enable` finds them in place and does
+not restart the node. Setup warns when `--rpc-ws` comes without `--rpc-http` (it is
+ignored) and when an explicit URL differs from the domain (`rpc-enable` will replace it).
+If public RPC is left pending while `node-info.yaml` already advertises the URL, setup
+says so and prints the `--phase=rpc-disable` command to withdraw it.
+
+In `--json` mode the setup log now carries the hardware check: a `hardware:` line with the
+summary and, when the box is below the minimum for a role, a `WARNING:` line naming it.
+Setup still continues. Keygen no longer aborts on bash 3.2 when no advertised-RPC flags
+are passed (an empty argument array under `set -u`).
+
 ### lib/common v1.4.0 — stake-status probe, --observer safety net, role-aware hardware check
 `node_stake_status` is now the one `getValidator` probe. It prints a single
 machine-readable line (`<status> <activation_epoch> <is_retired>`, `none` when the call

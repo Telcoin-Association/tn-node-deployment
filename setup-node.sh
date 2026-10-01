@@ -30,16 +30,35 @@
 # With none of these, interactive setup asks (Enter = private) and --json stays private.
 # If DNS is not ready (or the enable fails), setup still completes, records the domain in
 # .node-meta (PUBLIC_RPC_DOMAIN) and prints the install-caddy.sh command to finish later.
+#
+# RPC URLS (optional; --rpc-domain implies all four, so most installs pass none of them):
+#   --rpc-http <url>         Worker HTTP RPC URL written to node-info.yaml at keygen
+#                            (keytool --rpc-http) and published to the network.
+#   --rpc-ws <url>           Worker WebSocket RPC URL for node-info.yaml (keytool --rpc-ws).
+#                            Needs --rpc-http or --rpc-domain; alone it is ignored, with a
+#                            warning.
+#   --public-rpc-url <url>   This node's public HTTP RPC address, recorded in .node-meta
+#                            (PUBLIC_RPC_URL) for the UI and tooling; never sent to the network.
+#   --public-ws-url <url>    The WebSocket counterpart, recorded in .node-meta (PUBLIC_WS_URL).
+# Precedence: an explicit --rpc-http / --rpc-ws is written to node-info.yaml as given, and an
+# explicit --public-rpc-url / --public-ws-url to .node-meta as given. Any of the four left
+# out is derived from --rpc-domain <d>: https://<d>/ + wss://<d>/ for node-info.yaml,
+# https://<d> + wss://<d> for .node-meta. Derived URLs reach keygen only when the keytool
+# knows --rpc-http (otherwise a warning says they follow at enable time). Enabling public
+# RPC after the node starts (install-caddy.sh --phase=rpc-enable) advertises the same
+# https://<d>/ + wss://<d>/ and does not restart the node when node-info.yaml already
+# holds them; an explicit URL that differs is replaced then (a warning says so up front).
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 readonly SERVICE_NAME="telcoin"
 # NODE_TYPE is a non-authoritative default-view HINT, not a role. The node's role
-# is decided on-chain (tn_isValidator); the dashboard auto-promotes to the
-# validator view once activation is on-chain. New installs write the plain hint.
+# is decided on-chain. The dashboard's validator view follows the on-chain stake
+# status (ConsensusRegistry getValidator), not tn_isValidator, and switches over
+# once activation is on-chain. New installs write the plain hint.
 readonly NODE_TYPE="observer"
 
 NETWORK=""
@@ -56,9 +75,11 @@ PUBLIC_WS_URL=""
 # are operator-facing .node-meta breadcrumbs only: THESE reach the network, published through
 # the kademlia node record so wallets and dapps can discover where to submit transactions.
 # telcoin-network attaches RpcInfo to the WORKER node only (primary stays null), and
-# --rpc-ws requires --rpc-http.
+# --rpc-ws requires --rpc-http. With --rpc-domain <d>, any of these two and PUBLIC_* above
+# left empty is derived from <d> (derive_public_rpc_urls).
 ADVERTISE_RPC_HTTP=""
 ADVERTISE_RPC_WS=""
+RPC_ADVERTISE_DERIVED=false # true: ADVERTISE_RPC_HTTP came from --rpc-domain, not --rpc-http
 EXPLORER_URL=""
 INSTALL_METHOD=""
 BINARY_PATH=""
@@ -194,6 +215,15 @@ step_preflight() {
     mkdir -p "$DATA_DIR" 2>/dev/null || true
 
     check_hardware "node" "$DATA_DIR"
+    # --json: put the hardware result in the setup log too. Below-minimum hardware is not
+    # an error (check_hardware warns and setup goes on), so the gaps go out as a `log`
+    # line starting WARNING:, which the Node Manager UI styles as a warning.
+    if json_mode; then
+        json_event log "hardware: ${TN_HW_SUMMARY:-unknown}"
+        if [[ -n "${TN_HW_GAPS:-}" ]]; then
+            json_event log "WARNING: hardware below the minimum for: ${TN_HW_GAPS} (setup continues)"
+        fi
+    fi
     check_internet
     # Core node ports + the ports the optional features use (Caddy dashboard 80/443,
     # WireGuard VPN 51820, health monitor 43174) so conflicts surface up front.
@@ -569,6 +599,7 @@ step_config() {
     else
         prompt_public_rpc
     fi
+    public_rpc_url_warnings
 
     echo ""
     echo "  Port configuration (press Enter to accept defaults):"
@@ -677,6 +708,7 @@ prompt_public_rpc() {
         print_warn "Not a valid IPv4/IPv6 address -- try again, or press Enter to auto-detect."
     done
     print_ok "RPC access: public -- https://${PUBLIC_RPC_DOMAIN}/ + wss://${PUBLIC_RPC_DOMAIN}/"
+    derive_public_rpc_urls
 }
 
 # Canonical form of an RPC domain: whitespace removed, lowercased, one trailing dot (FQDN
@@ -735,6 +767,64 @@ init_public_rpc_flags() {
     fi
     if [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
         ENABLE_PUBLIC_RPC="true"
+    fi
+    derive_public_rpc_urls
+    # --json: the flags are final here. Interactive: step_config warns, once the welcome
+    # screen has cleared and the prompt may have supplied a domain.
+    if json_mode; then
+        public_rpc_url_warnings
+    fi
+    return 0
+}
+
+# --rpc-domain <d> is the same information as --rpc-http https://<d>/ --rpc-ws wss://<d>/
+# --public-rpc-url https://<d> --public-ws-url wss://<d>, so fill whichever of those is
+# still EMPTY from PUBLIC_RPC_DOMAIN: an explicit flag always wins. The advertised pair
+# (node-info.yaml, keygen) keeps the trailing slash that install-caddy.sh rpc-enable writes;
+# the .node-meta pair has none, as the fleet records it. RPC_ADVERTISE_DERIVED marks an
+# --rpc-http supplied here, which step_generate_keys checks the keytool supports before
+# passing it. No domain: nothing changes. Safe to call more than once.
+derive_public_rpc_urls() {
+    local d="$PUBLIC_RPC_DOMAIN"
+    [[ -n "$d" ]] || return 0
+    if [[ -z "$ADVERTISE_RPC_HTTP" ]]; then
+        ADVERTISE_RPC_HTTP="https://${d}/"
+        RPC_ADVERTISE_DERIVED=true
+    fi
+    [[ -n "$ADVERTISE_RPC_WS" ]] || ADVERTISE_RPC_WS="wss://${d}/"
+    [[ -n "$PUBLIC_RPC_URL" ]] || PUBLIC_RPC_URL="https://${d}"
+    [[ -n "$PUBLIC_WS_URL" ]] || PUBLIC_WS_URL="wss://${d}"
+    return 0
+}
+
+# A warning for the operator: print_warn, plus (--json) a `log` event that starts with
+# "WARNING:", which the Node Manager UI styles as a warning.
+setup_warn() {
+    print_warn "$1"
+    if json_mode; then
+        json_event log "WARNING: $1"
+    fi
+    return 0
+}
+
+# Say when an advertised-RPC flag will not end up in node-info.yaml as given. Run after
+# derive_public_rpc_urls, once the domain is final.
+public_rpc_url_warnings() {
+    local d="$PUBLIC_RPC_DOMAIN" given=""
+    if [[ -z "$d" ]]; then
+        if [[ -n "$ADVERTISE_RPC_WS" && -z "$ADVERTISE_RPC_HTTP" ]]; then
+            setup_warn "--rpc-ws ${ADVERTISE_RPC_WS} is ignored: the keytool accepts --rpc-ws only together with --rpc-http (pass --rpc-http too, or --rpc-domain)."
+        fi
+        return 0
+    fi
+    if [[ "$ADVERTISE_RPC_HTTP" != "https://${d}/" ]]; then
+        given="--rpc-http ${ADVERTISE_RPC_HTTP}"
+    fi
+    if [[ "$ADVERTISE_RPC_WS" != "wss://${d}/" ]]; then
+        given="${given:+${given} and }--rpc-ws ${ADVERTISE_RPC_WS}"
+    fi
+    if [[ -n "$given" ]]; then
+        setup_warn "${given} differs from --rpc-domain ${d}: keygen writes it to node-info.yaml as given, but enabling public RPC (install-caddy.sh --phase=rpc-enable) replaces it with https://${d}/ + wss://${d}/ once the node starts."
     fi
     return 0
 }
@@ -814,6 +904,21 @@ step_create_infrastructure() {
     verify_binary "$BINARY_PATH"
     ensure_chain_configs_available
     print_ok "Infrastructure ready"
+}
+
+# 0 when this release's `keytool generate validator` takes --rpc-http (older releases do
+# not, and clap would reject the whole keygen over it). Asks the keytool keygen is about
+# to run: the docker image or the installed binary. Output is captured, not piped to
+# grep, so an early grep exit cannot fail the probe under pipefail. A probe that cannot
+# run reads as "no": keygen then goes ahead without the advertisement instead of failing.
+keytool_supports_rpc_args() {
+    local help_out=""
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        help_out="$(docker run --rm "$DOCKER_IMAGE" telcoin keytool generate validator --help 2>&1 </dev/null)" || true
+    else
+        help_out="$("$BINARY_PATH" keytool generate validator --help 2>&1 </dev/null)" || true
+    fi
+    [[ "$help_out" == *--rpc-http* ]]
 }
 
 step_generate_keys() {
@@ -939,6 +1044,27 @@ step_generate_keys() {
         done
     fi
 
+    # Advertised-RPC args, built once for both keytool calls below and emitted ONLY when
+    # set, so a caller that passes neither gets a byte-identical keytool command line to
+    # before. --rpc-ws is gated behind --rpc-http because clap declares
+    # `requires = "rpc_http"` and would reject --rpc-ws on its own. Explicit --rpc-http /
+    # --rpc-ws pass through as given (the fleet path); URLs derived from --rpc-domain are
+    # passed only when this release's keytool knows --rpc-http. Otherwise keygen goes
+    # ahead without them and rpc-enable advertises them after the node starts.
+    if [[ "$RPC_ADVERTISE_DERIVED" == "true" && -n "$ADVERTISE_RPC_HTTP" ]] && ! keytool_supports_rpc_args; then
+        setup_warn "This telcoin release's keytool cannot advertise RPC at keygen (it has no --rpc-http), so ${ADVERTISE_RPC_HTTP} + ${ADVERTISE_RPC_WS} reach node-info.yaml when public RPC is enabled after the node starts (install-caddy.sh --phase=rpc-enable)."
+        ADVERTISE_RPC_HTTP=""
+        ADVERTISE_RPC_WS=""
+        RPC_ADVERTISE_DERIVED=false
+    fi
+    local rpc_args=()
+    if [[ -n "$ADVERTISE_RPC_HTTP" ]]; then
+        rpc_args+=(--rpc-http "$ADVERTISE_RPC_HTTP")
+        if [[ -n "$ADVERTISE_RPC_WS" ]]; then
+            rpc_args+=(--rpc-ws "$ADVERTISE_RPC_WS")
+        fi
+    fi
+
     print_step "Generating validator keys..."
     # Exported for BOTH branches below: the binary keytool reads it directly,
     # and the docker branch pass-throughs it with `-e TN_BLS_PASSPHRASE` (NAME
@@ -957,15 +1083,6 @@ step_generate_keys() {
         local docker_uid docker_gid
         docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
         docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
-        # Optional advertised-RPC args, emitted ONLY when set so a caller that passes
-        # neither produces a byte-identical keytool command line to before. --rpc-ws is
-        # gated behind --rpc-http because clap declares `requires = "rpc_http"` and would
-        # reject --rpc-ws on its own.
-        local rpc_args=()
-        if [[ -n "$ADVERTISE_RPC_HTTP" ]]; then
-            rpc_args+=(--rpc-http "$ADVERTISE_RPC_HTTP")
-            [[ -n "$ADVERTISE_RPC_WS" ]] && rpc_args+=(--rpc-ws "$ADVERTISE_RPC_WS")
-        fi
         if docker run --rm \
             --user "${docker_uid}:${docker_gid}" \
             -e HOME=/home/nonroot \
@@ -977,24 +1094,19 @@ step_generate_keys() {
             --address "$VALIDATOR_ADDRESS" \
             --external-primary-addr "$PRIMARY_MULTIADDR" \
             --external-worker-addrs "$WORKER_MULTIADDR" \
-            "${rpc_args[@]}"; then
+            ${rpc_args[@]+"${rpc_args[@]}"}; then
             print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."
             exit 1
         fi
     else
-        rpc_args=()
-        if [[ -n "$ADVERTISE_RPC_HTTP" ]]; then
-            rpc_args+=(--rpc-http "$ADVERTISE_RPC_HTTP")
-            [[ -n "$ADVERTISE_RPC_WS" ]] && rpc_args+=(--rpc-ws "$ADVERTISE_RPC_WS")
-        fi
         if "$BINARY_PATH" keytool generate validator \
             --datadir "$DATA_DIR" \
             --address "$VALIDATOR_ADDRESS" \
             --external-primary-addr "$PRIMARY_MULTIADDR" \
             --external-worker-addrs "$WORKER_MULTIADDR" \
-            "${rpc_args[@]}"; then
+            ${rpc_args[@]+"${rpc_args[@]}"}; then
             print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
         else
             print_error "Key generation failed."
@@ -1414,12 +1526,11 @@ EOF
         echo ""
         # `|| true` is REQUIRED, not defensive. This is a purely informational probe, but
         # it returns 1 whenever the address is missing or malformed ("Invalid validator
-        # address -- skipping on-chain check", lib/common.sh:1073-1076) and this file runs
+        # address -- skipping on-chain check", in lib/common.sh) and this file runs
         # under `set -e`. Bare, it aborts finalize AFTER the service is already up but
         # BEFORE the `systemctl enable` below -- leaving a node that runs now and never
         # comes back from a reboot, while the caller sees only {"ok":false,"rc":1}.
-        # The repo's two other callers already guard it this way (check-node.sh:119,
-        # update-node.sh:894); this one was the outlier.
+        # The other callers already guard it with `|| true`; this one was the outlier.
         check_validator_onchain_status "$VALIDATOR_ADDRESS" "$local_rpc" || true
 
         if json_mode || confirm "Enable auto-start on server reboot?"; then
@@ -1467,24 +1578,39 @@ public_rpc_no_domain_notice() {
 public_rpc_pending() {
     PUBLIC_RPC_STATE="pending"
     PUBLIC_RPC_REASON="$1"
+    local d="$PUBLIC_RPC_DOMAIN" live=""
     echo ""
     print_warn "Public RPC not enabled yet: ${PUBLIC_RPC_REASON}"
     print_info "When that is fixed, run:"
     echo "    $(public_rpc_cmd rpc-enable)"
+    # Keygen may already have written the URL into node-info.yaml (--rpc-domain / --rpc-http),
+    # so the node record can advertise an endpoint Caddy does not serve yet. Say so, and how
+    # to withdraw it if the operator does not mean to finish.
+    if grep -qF "https://${d}/" "$(public_rpc_node_info)" 2>/dev/null; then
+        live="node-info.yaml already advertises https://${d}/: the advertisement is live in the node record and will serve once rpc-enable completes. To withdraw it instead, run: sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-disable"
+        print_info "$live"
+    fi
     if json_mode; then
         json_event log "public RPC not enabled yet: ${PUBLIC_RPC_REASON} -- to finish, run: $(public_rpc_cmd rpc-enable)"
+        if [[ -n "$live" ]]; then
+            json_event log "$live"
+        fi
     fi
     return 0
+}
+
+# The node-info.yaml rpc-enable advertises in. install-caddy.sh resolves it through the lib
+# (caddy_node_info_path -> tn_resolve_data_dir), not from --data-dir, so read that same
+# file -- otherwise a custom --data-dir would read as permanently pending.
+public_rpc_node_info() {
+    printf '%s/node-info.yaml' "$(tn_resolve_data_dir 2>/dev/null || echo /var/lib/telcoin)"
 }
 
 step_public_rpc() {
     [[ -n "$PUBLIC_RPC_DOMAIN" ]] || return 0
     local d="$PUBLIC_RPC_DOMAIN" caddy="${SCRIPT_DIR}/install-caddy.sh"
     local dns_json="" note="" ni propagated_re='"propagated"[[:space:]]*:[[:space:]]*true'
-    # The node-info.yaml rpc-enable advertises in: install-caddy.sh resolves it through the
-    # lib (caddy_node_info_path -> tn_resolve_data_dir), not from --data-dir, so check that
-    # same file -- otherwise a custom --data-dir would read as permanently pending.
-    ni="$(tn_resolve_data_dir 2>/dev/null || echo /var/lib/telcoin)/node-info.yaml"
+    ni="$(public_rpc_node_info)"
 
     print_header "Public RPC -- https://${d}/ + wss://${d}/"
 
@@ -1812,8 +1938,8 @@ main() {
             --service-group)       SERVICE_GROUP="${2:-}"; shift 2 ;;
             --genesis-dir)         TN_GENESIS_DIR="${2:-}"; shift 2 ;;
             # Opt in to the healthcheck TCP listener (bakes --healthcheck into the launch
-            # command via tn_node_launch_flags). Overrides the line-43 default; needed in
-            # --json/finalize where prompt_testnet_addons is skipped.
+            # command via tn_node_launch_flags). Overrides the ENABLE_HEALTHCHECK_MONITOR
+            # default; needed in --json/finalize where prompt_testnet_addons is skipped.
             --enable-healthcheck-monitor) ENABLE_HEALTHCHECK_MONITOR=true; shift ;;
             *) shift ;;
         esac
