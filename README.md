@@ -969,6 +969,12 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-scripts v1.1.67 — re-cut for the observer-flag removal and public RPC consolidation
+`update-scripts.sh v1.1.67` re-cut with refreshed `.sha256` sidecars. It carries lib/common
+v1.4.0, setup-node v1.2.0, update-node v1.1.62, check-node v1.1.55, edit-config v1.2.6,
+remove-node v1.2.8 and telcoin-ui v1.8.8 (entries below). On a node with the UI installed,
+`ui/install-ui.sh --update` refreshes the engine copies in `/opt/telcoin-ui-update/`.
+
 ### update-node v1.1.62 — drops the retired --observer flag during updates
 The node binary no longer has an `--observer` flag. v0.15.0-adiri still accepts it as a
 hidden no-op, but the next release rejects it (`unexpected argument '--observer'`), so a
