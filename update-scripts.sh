@@ -108,6 +108,28 @@ declare -a TESTNET_ADDONS_BUNDLE=(
 # `declare -g`.
 FILES_TO_UPDATE=()
 
+# Every .tmp file this run downloads into, recorded just before curl writes it.
+# The EXIT trap set in main removes whichever are still on disk, so an interrupted
+# run (Ctrl-C, a dropped SSH session) never leaves a downloaded file beside the
+# real one. A file reaches its real name only by a move from its .tmp, so the
+# cleanup never touches an installed file or one this run did not create.
+TMP_CREATED=()
+
+cleanup_tmp() {
+    local f removed=0
+    for f in ${TMP_CREATED[@]+"${TMP_CREATED[@]}"}; do
+        if [[ -e "$f" ]]; then
+            rm -f "$f"
+            removed=$((removed + 1))
+        fi
+    done
+    # Removal comes first: after a dropped session stdout may be gone, and a
+    # failed message must not stop the cleanup.
+    if [[ $removed -gt 0 ]]; then
+        print_warn "Stopped before finishing: removed ${removed} downloaded file(s) that were not installed." 2>/dev/null || true
+    fi
+}
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -209,6 +231,7 @@ self_bootstrap() {
     print_info "Updating the updater itself (${local_ver} -> ${remote_ver}) and relaunching..."
     local dest="${SCRIPT_DIR}/update-scripts.sh"
     local want sha_rc=0
+    TMP_CREATED+=("${dest}.tmp")
     if curl --proto '=https' --tlsv1.2 -sf --max-time 30 "${GITHUB_RAW}/update-scripts.sh" -o "${dest}.tmp" \
         && [[ -s "${dest}.tmp" ]] && bash -n "${dest}.tmp" 2>/dev/null; then
         want="$(fetch_published_sha "${GITHUB_RAW}/update-scripts.sh")" || sha_rc=$?
@@ -220,8 +243,10 @@ self_bootstrap() {
         rm -f "${dest}.tmp"
         if [[ $sha_rc -eq 0 ]]; then
             print_warn "The new updater does not match its published checksum -- not installed; continuing with the current version."
+        elif [[ $sha_rc -eq 2 ]]; then
+            print_warn "The new updater's checksum could not be downloaded (network error) -- not installed; continuing with the current version. Try again in a few minutes."
         else
-            print_warn "The new updater could not be verified (no checksum available) -- not installed; continuing with the current version."
+            print_warn "The new updater has no checksum published -- not installed; continuing with the current version."
         fi
         return 0
     fi
@@ -394,6 +419,7 @@ download_updates() {
         mkdir -p "$dest_dir"
 
         printf "  Downloading %-30s " "${local_path}..."
+        TMP_CREATED+=("${dest}.tmp")
         if ! curl --proto '=https' --tlsv1.2 -sf --max-time 30 "$url" -o "${dest}.tmp"; then
             rm -f "${dest}.tmp"
             echo -e "${RED}FAILED${RESET}  (download error)"
@@ -586,6 +612,14 @@ main() {
         usage >&2
         exit 2
     fi
+
+    # Unfinished downloads are removed however the run ends. The signal traps turn
+    # Ctrl-C, a hangup and SIGTERM into an exit, so the EXIT trap runs on every
+    # bash; the normal path has moved every verified file into place by then.
+    trap cleanup_tmp EXIT
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
 
     # Clearing the screen is cosmetic: with TERM unset or unusable `clear` fails,
     # and that must not end the run under set -e.
