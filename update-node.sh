@@ -17,9 +17,17 @@
 # on a legacy docker install): later releases refuse to start with it. The
 # file is backed up first and restored if the update rolls back.
 #
+# Before APPLY stops a node that is voting in the current committee, it waits
+# for the epoch to close and settle when the boundary is within five minutes,
+# so the node is not down for the epoch change. The wait is capped at 30
+# minutes. A rollback restart never waits.
+#
 # USAGE:
 #   sudo bash update-node.sh
-#   sudo bash update-node.sh --discard      # drop any pending prepared update
+#   sudo bash update-node.sh --discard        # drop any pending prepared update
+#   sudo bash update-node.sh --no-epoch-wait  # restart without the epoch wait
+#
+# TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
 #
 # What is NEVER touched by this script:
 #   - BLS / P2P keys in <data_dir>/node-keys/
@@ -45,7 +53,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="1.1.63"
+readonly SCRIPT_VERSION="1.2.0"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -70,12 +78,22 @@ DISCARD_PENDING=false
 # still pass one on every --json call, so they must keep parsing cleanly.
 LEGACY_ROLE_FLAG=""
 
+# --no-epoch-wait: restart without waiting for the epoch boundary.
+NO_EPOCH_WAIT=false
+
 # Non-interactive (--json) mode state. Drives the UI's Update feature via the
 # root-owned telcoin-ui-helper. Empty/false here means classic interactive mode.
 JSON_MODE=false
 JSON_ACTION=""
 JSON_REF=""
 ASSUME_YES=false
+# Set once the run has sent its final JSON answer (a done event, or the single
+# --check status object), so update_on_exit never adds a second one.
+JSON_DONE_SENT=false
+# The last error event's message; update_on_exit reuses it as the done message.
+JSON_LAST_ERROR=""
+# EXIT-trap command of a lib/common.sh older than 1.5.0, kept by update_lock.
+UPDATE_LOCK_CLEANUP=""
 
 # =============================================================================
 # DETECTION
@@ -349,6 +367,52 @@ verify_running_image_id() {
 }
 
 # =============================================================================
+# EPOCH WAIT
+# =============================================================================
+
+# update_wait_say <step|log|warn> <msg> -- progress printer for
+# tn_wait_restart_window: a JSON event of the same name in --json mode, a
+# print_* line otherwise.
+update_wait_say() {
+    if [[ "$JSON_MODE" == "true" ]]; then
+        case "${1:-}" in
+            step|warn) json_event "$1" "${2:-}" ;;
+            *)         json_event log "${2:-}" ;;
+        esac
+    else
+        case "${1:-}" in
+            step) print_step "${2:-}" ;;
+            warn) print_warn "${2:-}" ;;
+            *)    print_info "${2:-}" ;;
+        esac
+    fi
+    return 0
+}
+
+# update_epoch_wait -- called by each apply path just before it stops the node,
+# after the lock is held and the new binary or image is ready, and never before
+# a rollback restart. When the node votes in the current committee and the
+# epoch boundary is close, tn_wait_restart_window (lib/common.sh) holds the stop
+# until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds.
+# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips it. Always returns 0.
+update_epoch_wait() {
+    if [[ "$NO_EPOCH_WAIT" == "true" ]]; then
+        update_wait_say log "Not waiting for the epoch boundary (--no-epoch-wait)."
+        return 0
+    fi
+    if [[ "${TN_SKIP_EPOCH_WAIT:-}" == "1" ]]; then
+        update_wait_say log "Not waiting for the epoch boundary (TN_SKIP_EPOCH_WAIT=1)."
+        return 0
+    fi
+    declare -F tn_wait_restart_window >/dev/null 2>&1 || {
+        update_wait_say warn "lib/common.sh ${COMMON_VERSION:-unknown} cannot wait for the epoch boundary, so the node restarts now even if it is in the committee. Run update-scripts.sh to get the wait."
+        return 0
+    }
+    tn_wait_restart_window "$(tn_local_rpc_url)" update_wait_say
+    return 0
+}
+
+# =============================================================================
 # DOCKER PATH
 # =============================================================================
 
@@ -461,6 +525,7 @@ apply_docker_update() {
     local pre_unit_hash post_unit_hash
     pre_unit_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
+    update_epoch_wait
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -819,6 +884,7 @@ apply_source_update() {
     local pre_install_hash
     pre_install_hash=$(sha256sum "$installed" | awk '{print $1}')
 
+    update_epoch_wait
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -1102,10 +1168,14 @@ pick_docker_version() {
 # fd handling: json_setup_fds dups the real stdout to fd 3 and points stdout at
 # stderr, so every human-readable print_* / build line is harmless noise on
 # stderr while fd 3 carries newline-delimited JSON the caller can stream + parse.
+# main does this, and installs update_on_exit, before it parses the arguments,
+# so a run that stops early (a bad argument, not root, no node, the lock held)
+# still prints JSON only and ends with a done event.
 # Each emitted line is a self-contained JSON object: progress events
-#   {"event":"step|error","msg":"..."}
-# and a terminal result
+#   {"event":"step|log|warn|error","msg":"..."}
+# and exactly one terminal result
 #   {"event":"done","ok":true|false,"phase":"prepare|apply|discard",...}
+# --check prints one status object instead (see json_check) and nothing else.
 # =============================================================================
 
 json_setup_fds() {
@@ -1123,11 +1193,75 @@ json_escape() {
     printf '%s' "$s"
 }
 
-json_emit() { printf '%s\n' "$1" >&3; }
+# json_emit <json> -- write one JSON line to fd 3. A done event is recorded so
+# update_on_exit does not send a second one.
+json_emit() {
+    case "$1" in
+        '{"event":"done"'*) JSON_DONE_SENT=true ;;
+    esac
+    printf '%s\n' "$1" >&3
+}
 
 json_event() {
     # json_event <event> <msg>
+    if [[ "$1" == "error" ]]; then
+        JSON_LAST_ERROR="${2:-}"
+    fi
     json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
+}
+
+# update_on_exit -- the EXIT trap, installed by main before it parses anything.
+# Releases the update lock and, in --json mode, sends
+#   {"event":"done","ok":false,"phase":...,"msg":...}
+# when the run is ending without having sent its final answer, so every --json
+# run ends with exactly one done whichever way it stopped. The message is the
+# last error event's, or a pointer to stderr when there was none.
+update_on_exit() {
+    local rc=$?
+    local msg phase
+    phase=""
+    if [[ -n "$UPDATE_LOCK_CLEANUP" ]]; then
+        eval "$UPDATE_LOCK_CLEANUP" 2>/dev/null || true
+    fi
+    if declare -F tn_release_update_lock >/dev/null 2>&1; then
+        tn_release_update_lock
+    fi
+    if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
+        msg="${JSON_LAST_ERROR:-update-node.sh stopped before reporting a result; the reason is on its stderr}"
+        if [[ -n "$JSON_ACTION" ]]; then
+            phase=",\"phase\":\"$(json_escape "$JSON_ACTION")\""
+        fi
+        json_emit "{\"event\":\"done\",\"ok\":false${phase},\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
+    fi
+    return "$rc"
+}
+
+# update_lock -- take the update lock (tn_acquire_update_lock) with
+# update_on_exit in charge of releasing it. A lib/common.sh older than 1.5.0
+# ignores TN_EXIT_TRAP_OWNED and, where flock is missing, replaces the EXIT trap
+# with its own cleanup: that command is kept for update_on_exit to run, and the
+# trap is put back.
+update_lock() {
+    local cur
+    TN_EXIT_TRAP_OWNED=1
+    tn_acquire_update_lock || return 1
+    cur="$(trap -p EXIT)"
+    if [[ -n "$cur" && "$cur" != "trap -- 'update_on_exit' EXIT" ]]; then
+        eval "set -- ${cur}"
+        UPDATE_LOCK_CLEANUP="${3:-}"
+        trap update_on_exit EXIT
+    fi
+    return 0
+}
+
+# update_arg_error <msg> -- report a command-line error: an error event in
+# --json mode, an [ERROR] line on stderr otherwise. The caller exits.
+update_arg_error() {
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_event error "$1"
+    else
+        print_error "$1"
+    fi
 }
 
 # Newest tag for the operator's network (source installs). Echoes "" if none.
@@ -1188,6 +1322,9 @@ json_check() {
     esac
 
     json_emit "{\"install_method\":\"$(json_escape "$install_method")\",\"current_ref\":\"$(json_escape "$current")\",\"latest_ref\":\"$(json_escape "$latest")\",\"update_available\":${avail},\"pending\":${pending}}"
+    # This object is the whole answer: the UI reads the last JSON line of a
+    # check, so no done event may follow it.
+    JSON_DONE_SENT=true
 }
 
 json_prepare() {
@@ -1380,6 +1517,7 @@ json_apply_source() {
     backup="${installed}.bak.${ts}"
     cp -p "$installed" "$backup" || { json_event error "could not back up current binary"; return 1; }
 
+    update_epoch_wait
     json_event step "Stopping ${SERVICE_NAME}"
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -1472,6 +1610,7 @@ json_apply_docker() {
     local pre_hash post_hash
     pre_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
+    update_epoch_wait
     json_event step "Stopping ${SERVICE_NAME}"
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -1549,8 +1688,9 @@ json_discard() {
     fi
 }
 
+# The fds are already swapped (main), so check_root and detect_node print on
+# stderr; when they exit, update_on_exit sends the done event.
 run_json_mode() {
-    json_setup_fds
     check_root
     detect_node
     # Serialize mutating runs (a UI apply racing a CLI apply double-stops the
@@ -1558,7 +1698,7 @@ run_json_mode() {
     # stay lock-free so the dashboard poll never blocks a real update.
     case "$JSON_ACTION" in
         prepare|apply|discard)
-            if ! tn_acquire_update_lock; then
+            if ! update_lock; then
                 json_event error "another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})} -- wait for it to finish"
                 return 1
             fi
@@ -1592,6 +1732,20 @@ show_pending_summary() {
 }
 
 main() {
+    local arg
+    # --json is found before anything prints: from here on stdout carries JSON
+    # events only. The trap releases the update lock on every exit and closes a
+    # --json run with a done event when nothing else did.
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_MODE=true
+        fi
+    done
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_setup_fds
+    fi
+    trap update_on_exit EXIT
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --validator|--observer) LEGACY_ROLE_FLAG="$1"; shift ;;
@@ -1600,14 +1754,27 @@ main() {
             --check)     JSON_ACTION="check"; shift ;;
             --prepare)   JSON_ACTION="prepare"; shift ;;
             --apply)     JSON_ACTION="apply"; shift ;;
-            --ref)       JSON_REF="${2:-}"; shift 2 ;;
+            --ref)
+                # No version floor: an older ref is a legitimate rollback. A ref
+                # never starts with "-", so such a word is the next flag, not a
+                # value (and must not reach git or docker as an option).
+                if [[ $# -lt 2 || "$2" == -* ]]; then
+                    update_arg_error "--ref needs a value: a release tag, branch, commit or image tag."
+                    exit 1
+                fi
+                JSON_REF="$2"; shift 2
+                ;;
             --yes)       ASSUME_YES=true; shift ;;
+            --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule.
                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
+                if [[ "$JSON_MODE" == "true" ]]; then
+                    json_emit '{"event":"done","ok":true,"phase":"help","msg":"usage printed on stderr"}'
+                fi
                 exit 0
                 ;;
-            *) print_warn "Unknown argument: $1"; shift ;;
+            *) print_warn "Unknown argument: $1" >&2; shift ;;
         esac
     done
 
@@ -1652,7 +1819,7 @@ main() {
 
     # Everything past this point can mutate node state (discard, prepare,
     # apply) -- one update at a time. See tn_acquire_update_lock.
-    tn_acquire_update_lock || exit 1
+    update_lock || exit 1
 
     # Handle --discard flag
     if [[ "$DISCARD_PENDING" == "true" ]]; then
