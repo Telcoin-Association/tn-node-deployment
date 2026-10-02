@@ -455,15 +455,23 @@ if [[ $UPDATE_MODE -eq 1 || $WAS_ACTIVE -eq 1 ]]; then
     systemctl restart telcoin-ui && ok "telcoin-ui restarted (new code loaded)"
     verify_started
 else
-    # Fresh install: ask the operator what they want. The answers are lowercased
-    # with tr because bash 3.2 has no case-changing expansion.
-    read -r -p "Start the UI now? [Y/n] " start_now
+    # Fresh install: ask the operator what they want. Without a terminal on stdin
+    # (a scripted install) nothing is read and both answers default to yes, so a
+    # closed or empty stdin cannot stop the script under set -e this late. The
+    # answers are lowercased with tr because bash 3.2 has no case-changing expansion.
+    start_now="y"
+    if [ -t 0 ]; then
+        read -r -p "Start the UI now? [Y/n] " start_now || start_now="y"
+    fi
     start_now="$(printf '%s' "$start_now" | tr '[:upper:]' '[:lower:]')"
     if [[ ! "$start_now" =~ ^n ]]; then
         systemctl start telcoin-ui && ok "telcoin-ui started"
         verify_started
     fi
-    read -r -p "Enable the UI on boot? [Y/n] " enable_boot
+    enable_boot="y"
+    if [ -t 0 ]; then
+        read -r -p "Enable the UI on boot? [Y/n] " enable_boot || enable_boot="y"
+    fi
     enable_boot="$(printf '%s' "$enable_boot" | tr '[:upper:]' '[:lower:]')"
     if [[ ! "$enable_boot" =~ ^n ]]; then
         systemctl enable telcoin-ui >/dev/null 2>&1 && ok "telcoin-ui enabled on boot"

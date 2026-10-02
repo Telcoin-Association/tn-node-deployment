@@ -401,6 +401,11 @@ select{
     <span id="roBannerMsg"></span>
   </div>
 
+  <!-- notices from /api/nodes: an outdated privileged helper, or a role read from a
+       cached or unknown answer (filled by updateNoticeBanner) -->
+  <div id="noticeBanner" style="display:none;margin:0 0 16px;padding:12px 16px;border-radius:10px;
+    border:1px solid rgba(255,217,61,0.35);background:rgba(255,217,61,0.07);color:var(--text);font-size:13px"></div>
+
   <!-- DASHBOARD -->
   <section class="view active" id="view-dashboard"></section>
   <!-- NETWORK -->
@@ -433,8 +438,9 @@ const state = {
   refreshTimer: null,
   tracesTimer: null,   // 30s traces auto-refresh
   es: null,        // log SSE
-  updateES: null,  // update progress SSE
-  configES: null,  // config-save progress SSE
+  updateAbort: null,  // AbortController of the running update stream
+  configAbort: null,  // AbortController of the running config-save stream
+  access: { caddy:{}, rpc:{} },   // last /api/caddy/status + /api/rpc/status (System tab)
   configEditing: false,
   live: false,
   logBuffer: [],                          // client-side line buffer (static + live)
@@ -443,7 +449,11 @@ const state = {
   setup: { network:'adiri', method:'source', passphrase:'loadcredential',
            eth:'', bls:'', blsConfirm:'', buildRef:'main', dockerImage:'', publicIp:'', internalIp:'',
            sourceMode:'main', customRef:'', sourceRef:'', sourceModeTouched:false,   // source-version picker (mirrors CLI: main/latest tag/custom)
-           rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false },
+           rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
+           rpcDomain:'',          // public RPC hostname as typed (sent normalised as rpc_domain)
+           rpcDns:null,           // last wizard DNS check {host, html}, restored on re-render
+           accessLoaded:false },  // Caddy + RPC status fetched for the hostname placeholder
+  epochClock: null,  // validator view countdown {endsAt, offset}, from /api/validator
   preflight: null,
   buildInfo: null,   // /etc/telcoin/build-info (build_ref, branch, ...) read once at load
   network: { chainId:null, name:'', slug:'', configured:false },  // selected node's network
@@ -489,6 +499,70 @@ async function api(path, opts){
     const r = await fetch(path, opts);
     return await r.json();
   }catch(e){ return {error:String(e)}; }
+}
+
+// =============================================================================
+// Hostnames. The same strict rule runs in the helper and in server.py: at most
+// 253 characters, two or more labels of letters, digits and inner hyphens (63
+// characters at most each), and not only digits and dots, so an IPv4 address is
+// refused. Normalise first with normHost (trim, lowercase, drop one trailing dot),
+// then test with validHost and send the normalised value.
+// =============================================================================
+const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+const DEFAULT_RPC_HOST = 'node7.adiri.telcoin.network';   // placeholder of last resort
+function normHost(s){
+  let h = String(s==null?'':s).trim().toLowerCase();
+  if(h.endsWith('.')) h = h.slice(0,-1);
+  return h;
+}
+function validHost(s){
+  return typeof s==='string' && s.length<=253 && HOST_RE.test(s) && !/^[0-9.]+$/.test(s);
+}
+function sameHost(a, b){
+  const x = normHost(a);
+  return x!=='' && x===normHost(b);
+}
+// Host part of an advertised URL such as https://node7.adiri.telcoin.network/,
+// normalised; '' when there is none.
+function hostOfUrl(u){
+  const m = String(u==null?'':u).trim().match(/^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@\/?#]*@)?([^\/:?#]+)/i);
+  return m ? normHost(m[1]) : '';
+}
+// The hostname Caddy serves the dashboard on, or '' when the dashboard is not public.
+function dashHost(caddy){
+  return (caddy && caddy.enabled) ? normHost(caddy.domain) : '';
+}
+// Placeholder for the RPC hostname input: the name Caddy serves RPC on, then the
+// host node-info.yaml advertises, then the name saved in .node-meta, then the
+// dashboard host without a leading "dashboard.", else DEFAULT_RPC_HOST.
+function suggestRpcHost(rpc, caddy){
+  rpc = rpc || {};
+  const dash = dashHost(caddy);
+  const picks = [
+    normHost(rpc.domain),
+    hostOfUrl(rpc.advertised_http),
+    normHost(rpc.meta_domain),
+    dash.startsWith('dashboard.') ? dash.slice('dashboard.'.length) : dash,
+  ];
+  for(const h of picks) if(validHost(h)) return h;
+  return DEFAULT_RPC_HOST;
+}
+// The node's public RPC hostname as far as this host knows it (served by Caddy,
+// advertised in node-info.yaml, or saved in .node-meta), or ''. The dashboard
+// card warns when its own hostname is this one.
+function knownRpcHost(rpc){
+  rpc = rpc || {};
+  const picks = [rpc.enabled ? normHost(rpc.domain) : '', hostOfUrl(rpc.advertised_http), normHost(rpc.meta_domain)];
+  for(const h of picks) if(validHost(h)) return h;
+  return '';
+}
+// A status key read three ways: 'yes', 'no', or 'unknown' when the server did not
+// send it (an older helper or server). A missing key never reads as 'no'.
+function triState(v){
+  if(v==null) return 'unknown';
+  if(typeof v==='boolean') return v ? 'yes' : 'no';
+  const s = String(v).trim();
+  return (s==='' || s==='false') ? 'no' : 'yes';
 }
 
 // =============================================================================
@@ -574,7 +648,79 @@ async function loadNodes(fresh){
   // fresh host) so the view never goes blank.
   state.node = (d && d.role) || installedType() || state.node;
   updateReadonlyBanner();
+  updateNoticeBanner();
   syncReadonlyChrome();
+}
+
+// Notices from /api/nodes. `helper` ({ok, api, required, error}), `role_source`
+// (network|local|cached|default|null) and `role_address` come from UI 1.9.0
+// servers; an older server sends none of them, and a missing field never raises a
+// notice. The role notice is skipped on a host with no node, where there is no
+// role to decide.
+function noticeItems(n, hasNode){
+  const items = [];
+  const has = k => !!n && Object.prototype.hasOwnProperty.call(n, k);
+  const h = n && n.helper;
+  if(h && typeof h==='object'){
+    const api = (h.api==null || h.api==='') ? NaN : Number(h.api);
+    const req = (h.required==null || h.required==='') ? NaN : Number(h.required);
+    const known = isFinite(api) && isFinite(req);
+    if(known && api>req)
+      items.push({kind:'helper-newer', api, required:req});
+    else if(h.ok===false || (known && api<req))
+      items.push({kind:'helper', api: isFinite(api)?api:null, required: isFinite(req)?req:null, error: h.error||''});
+  }
+  if(hasNode && has('role_source')){
+    const rs = n.role_source;
+    if(rs==='cached')
+      items.push({kind:'role', source:'cached', checkedAt: n.role_checked_at});
+    else if(rs===null || rs==='default'){
+      // role_address null: the node has no execution address yet, so there was
+      // nothing to ask the chain. Set, or absent (an older server): the chain
+      // did not answer.
+      const noAddress = has('role_address') && (n.role_address==null || n.role_address==='');
+      items.push({kind:'role', source: noAddress ? 'no-address' : 'unreachable'});
+    }
+  }
+  return items;
+}
+
+// A server timestamp (epoch seconds or milliseconds, or an ISO string) as UTC text.
+function fmtWhen(v){
+  if(v==null || v==='') return '';
+  if(typeof v==='string' && /^\d+(\.\d+)?$/.test(v)) v = Number(v);
+  const ms = typeof v==='number' ? (v<1e12 ? v*1000 : v) : Date.parse(v);
+  if(!isFinite(ms)) return String(v);
+  return new Date(ms).toISOString().replace('T',' ').slice(0,16)+' UTC';
+}
+
+function noticeHtml(it){
+  if(it.kind==='helper-newer')
+    return `<div>The helper answers API ${esc(it.api)}; this dashboard was built for ${esc(it.required)} and may miss features.</div>`;
+  if(it.kind==='helper'){
+    const detail = (it.api!=null && it.required!=null)
+      ? ` It answers helper API ${esc(it.api)}; this dashboard needs ${esc(it.required)}.`
+      : (it.error ? ` (${esc(it.error)})` : '');
+    return `<div><strong style="color:var(--yellow)">The privileged helper is outdated.</strong>${detail}
+      Actions that go through it, such as updates, config saves and public access, will fail.
+      On the server, re-run <span class="mono">sudo bash ~/telcoin-node-scripts/ui/install-ui.sh</span>.</div>`;
+  }
+  if(it.source==='cached'){
+    const when = fmtWhen(it.checkedAt);
+    return `<div>The node's role is from a cached answer; the chain could not be reached${when?' (last answer '+esc(when)+')':''}.
+      It updates when the chain answers again.</div>`;
+  }
+  if(it.source==='no-address')
+    return `<div>The node's role is not known yet (no execution address); the view defaults to observer.</div>`;
+  return `<div>The node's role is not known; the chain could not be reached and no saved answer applies, so the view defaults to observer.
+    It updates when the chain answers again.</div>`;
+}
+
+function updateNoticeBanner(){
+  const b = $('#noticeBanner'); if(!b) return;
+  const items = noticeItems(state.nodes, installedType()!==null);
+  b.innerHTML = items.map(noticeHtml).join('<div style="height:6px"></div>');
+  b.style.display = items.length ? 'block' : 'none';
 }
 
 // After any mutating action (config save, service control, settings toggle),
@@ -940,7 +1086,7 @@ async function renderDashboard(){
         <div class="kv"><span class="k">Role (on-chain)</span><span class="v" id="roleDetail">Full node</span></div>
         <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
-          ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
+          ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" data-copy="${esc(s.node_id)}" data-copy-label="Node ID">⧉</button>`
           : '—'}</span></div>
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
@@ -1025,18 +1171,94 @@ function valStatusHero(v){
   return {cls:'red', main:'—', sub:'On-chain status unavailable'};
 }
 
+// =============================================================================
+// Epoch tile (validator view). UI 1.9.0 servers add to /api/validator:
+// epoch_started_at, epoch_duration, epoch_ends_at and now (Unix seconds, server
+// clock); earliest_seat_epoch (activation epoch + 2, the first committee the
+// validator can sit in); seat_epoch (the first of the current and next two epochs
+// whose committee includes it, else null). The countdown runs on the page between
+// polls, corrected by offset = browser clock - server clock at fetch time, so a
+// browser clock that is off does not skew it. An older server sends none of these
+// and the tile reads as before.
+// =============================================================================
+
+// A server timestamp as Unix seconds: a number or numeric string (milliseconds when
+// 1e12 or more) or an ISO string. NaN when missing or unreadable.
+function unixSeconds(v){
+  if(typeof v==='string' && /^\s*\d+(\.\d+)?\s*$/.test(v)) v = Number(v);
+  if(typeof v==='number') return isFinite(v) ? (v>=1e12 ? v/1000 : v) : NaN;
+  if(typeof v==='string' && v.trim()){ const ms = Date.parse(v); return isFinite(ms) ? ms/1000 : NaN; }
+  return NaN;
+}
+// {endsAt, offset} from an /api/validator reply that arrived at clientMs (browser
+// milliseconds), or null when the reply lacks epoch_ends_at or now.
+function epochClock(v, clientMs){
+  const ends = unixSeconds(v && v.epoch_ends_at), now = unixSeconds(v && v.now);
+  if(!isFinite(ends) || !isFinite(now) || !isFinite(clientMs)) return null;
+  return {endsAt: ends, offset: clientMs/1000 - now};
+}
+// "ends in 1h 05m 09s"; "ending now" once the boundary has passed (the epoch closes
+// at the first commit at or after it); '' without a clock.
+function epochEndsIn(clock, clientMs){
+  if(!clock) return '';
+  const left = Math.ceil(clock.endsAt - (clientMs/1000 - clock.offset));
+  if(!(left > 0)) return 'ending now';
+  const h = Math.floor(left/3600), m = Math.floor(left%3600/60), s = left%60, p = n => String(n).padStart(2,'0');
+  return 'ends in ' + (h ? `${h}h ${p(m)}m ${p(s)}s` : m ? `${m}m ${p(s)}s` : `${s}s`);
+}
+// Committee rows for the tile as [label, value], only from a server that sends the
+// seat fields. Activation and earliest seat need an activated validator
+// (PendingActivation, Active or PendingExit): a Staked one has no activation epoch yet.
+function epochSeatRows(v){
+  v = v || {};
+  const has = k => Object.prototype.hasOwnProperty.call(v, k);
+  if(!has('earliest_seat_epoch') && !has('seat_epoch')) return [];
+  const num = x => (x==null || x==='' || !isFinite(Number(x))) ? null : Number(x);
+  const activated = [2,3,4].includes(v.status);
+  const rows = [];
+  if(activated && num(v.activation_epoch)!=null) rows.push(['Activation', 'epoch '+fmtNum(num(v.activation_epoch))]);
+  if(activated && num(v.earliest_seat_epoch)!=null) rows.push(['Earliest seat', 'epoch '+fmtNum(num(v.earliest_seat_epoch))]);
+  if(has('seat_epoch')) rows.push(['Seated', num(v.seat_epoch)!=null ? 'epoch '+fmtNum(num(v.seat_epoch)) : 'not in the next three committees']);
+  return rows;
+}
+// Meta of the Current Epoch tile. base is today's line; a synced node whose server
+// sends the new fields also gets the countdown and the committee rows.
+function epochTileMeta(base, v, synced, clock, clientMs){
+  if(synced!==true) return base;
+  const ends = epochEndsIn(clock, clientMs), rows = epochSeatRows(v);
+  let h = base;
+  if(ends){
+    const at = fmtWhen(v && v.epoch_ends_at);
+    const tip = at ? ` title="Boundary at about ${esc(at)} on the server clock. The epoch closes at the first commit at or after it."` : '';
+    h += `<div style="color:var(--text);margin-top:3px"><span id="epochEndsIn"${tip}>${esc(ends)}</span></div>`;
+  }
+  if(rows.length)
+    h += `<div style="margin-top:6px;text-align:left">${rows.map(([k,x])=>
+      `<div class="kv" style="padding:3px 0;font-size:12px"><span class="k">${esc(k)}</span><span class="v" style="word-break:normal">${esc(x)}</span></div>`).join('')}</div>`;
+  return h;
+}
+// One ticker for the countdown; it only touches #epochEndsIn while the tile shows it.
+function tickEpochCountdown(){
+  const e = $('#epochEndsIn');
+  if(e && state.epochClock) e.textContent = epochEndsIn(state.epochClock, Date.now());
+}
+setInterval(tickEpochCountdown, 1000);
+
 async function renderValidatorDashboard(c){
   if(!c.dataset.loaded) c.innerHTML = `<div class="card">Loading validator status…</div>`;
   const [s, v] = await Promise.all([
     api('/api/status/'+state.node),
     api('/api/validator/'+state.node),
   ]);
+  const fetchedAt = Date.now();   // the server's `now` is compared with this
   if(s.error || s.installed===false){ emptyState(c, cap(state.node)); return; }
   if(state.view!=='dashboard') return;
   c.dataset.loaded='1';
   setNetworkFromStatus(s);
 
   const vv = (v && !v.error) ? v : {};
+  // Countdown only for a synced node: an unsynced node's epoch data is behind.
+  state.epochClock = s.synced===true ? epochClock(vv, fetchedAt) : null;
   const running = s.status==='active';
   const peers = s.peers||{};
   const disk = s.disk||{};
@@ -1082,7 +1304,7 @@ async function renderValidatorDashboard(c){
     `<div class="kv"><span class="k">${esc(label)}</span><span class="v"${full?` title="${esc(full)}"`:''}>${val}</span></div>`;
   // Like detailRow but with a copy button (truncated value, full on hover/copy).
   const detailRowCopy = (label, full) => full
-    ? `<div class="kv"><span class="k">${esc(label)}</span><span class="v" title="${esc(full)}">${esc(trunc(full))} <button class="copy-btn" title="Copy ${esc(label)}" onclick="copyToClipboard('${esc(full)}','${esc(label)}')">⧉</button></span></div>`
+    ? `<div class="kv"><span class="k">${esc(label)}</span><span class="v" title="${esc(full)}">${esc(trunc(full))} <button class="copy-btn" title="Copy ${esc(label)}" data-copy="${esc(full)}" data-copy-label="${esc(label)}">⧉</button></span></div>`
     : `<div class="kv"><span class="k">${esc(label)}</span><span class="v">—</span></div>`;
 
   // Sparkline samples for this refresh (per-node history; nulls skipped).
@@ -1120,7 +1342,7 @@ async function renderValidatorDashboard(c){
     <div class="group-label">Consensus</div>
     <div class="dgrid dgrid-5">
       ${statCard('EVM Block', s.block_number!=null?fmtNum(s.block_number):'—', 'accent', s.block_number!=null?(s.synced?'<span style="color:var(--green)">synced</span>':'<span style="color:var(--yellow)">syncing</span>'):'no data')}
-      ${statCard('Current Epoch', vv.current_epoch!=null?fmtNum(vv.current_epoch):'—', 'accent', um(vv.current_epoch, 'on-chain epoch'))}
+      ${statCard('Current Epoch', vv.current_epoch!=null?fmtNum(vv.current_epoch):'—', 'accent', epochTileMeta(um(vv.current_epoch, 'on-chain epoch'), vv, s.synced, state.epochClock, Date.now()))}
       ${statCard('Consensus Block', vv.block!=null?fmtNum(vv.block):'—', 'accent', (vv.consensus_unsupported&&vv.block==null)?'<span style="color:var(--text3)">unavailable on this version</span>':um(vv.block, vv.epoch!=null?'epoch '+esc(vv.epoch):''), null, '', sparkSVG([{data:sparkDeltas('consBlock'),color:'var(--accent)'}]))}
       ${statCard('Last Block Time', vv.age?esc(vv.age):'—', '', um(vv.age, 'latest commit'))}
       ${statCard('Next Committee Size', vv.next_committee_size!=null?esc(String(vv.next_committee_size)):'—', '', um(vv.next_committee_size, 'validators'))}
@@ -1180,12 +1402,12 @@ async function renderValidatorDashboard(c){
         <div class="kv"><span class="k">Node Name</span><span class="v">${vv.name?esc(vv.name):'—'}</span></div>
         <div class="kv"><span class="k">Advertised Node Name</span><span class="v">${s.advertised_name?esc(s.advertised_name):'<span style="color:var(--text3)">not set</span>'}</span></div>
         <div class="kv"><span class="k">Execution Address</span><span class="v">${vv.execution_address
-          ? `${esc(vv.execution_address)} <button class="copy-btn" title="Copy Execution Address" onclick="copyToClipboard('${esc(vv.execution_address)}','Execution Address')">⧉</button>`
+          ? `${esc(vv.execution_address)} <button class="copy-btn" title="Copy Execution Address" data-copy="${esc(vv.execution_address)}" data-copy-label="Execution Address">⧉</button>`
           : '—'}</span></div>
         ${detailRowCopy('BLS Public Key', vv.bls_public_key)}
         ${detailRowCopy('Authority ID', vv.authority_id)}
         <div class="kv"><span class="k">Node ID</span><span class="v">${s.node_id
-          ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" onclick="copyToClipboard('${esc(s.node_id)}','Node ID')">⧉</button>`
+          ? `${esc(s.node_id)} <button class="copy-btn" title="Copy Node ID" data-copy="${esc(s.node_id)}" data-copy-label="Node ID">⧉</button>`
           : '—'}</span></div>
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
@@ -1886,7 +2108,7 @@ async function saveAdvertisedName(btn){
   else toast('Failed to set name: '+((r&&r.error)||'unknown error'),'error');
 }
 
-function saveConfigField(field, value, btn){
+async function saveConfigField(field, value, btn){
   if(!configValueOk(field, value)){ toast('Invalid value for '+field, 'error'); return; }
   if(state.node==='validator' &&
      !confirm('Saving restarts the validator now — expect missed consensus rounds during the brief downtime. Continue?')) return;
@@ -1895,20 +2117,18 @@ function saveConfigField(field, value, btn){
   const log=$('#cfgLog'); if(log) log.innerHTML='<div class="log-line info">» saving '+esc(field)+'…</div>';
   if(btn) btn.disabled=true;
   const url='/api/config/'+state.node+'/set?field='+encodeURIComponent(field)+'&value='+encodeURIComponent(value);
-  state.configES = new EventSource(url);
-  state.configES.onmessage = ev=>{
-    let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
-    if(d.event==='closed'){ stopConfigStream(); refreshAfterChange(); return; }
-    appendStream('#cfgLog', d);
-    if(d.event==='done'){
-      if(d.ok) toast('Saved '+field+' — node restarted','success');
-      else toast('Save failed'+(d.rolled_back?' — rolled back':''),'error');
-    }
-  };
-  state.configES.onerror = ()=>{ /* server closes the stream when the script exits */ };
+  // A GET stream read with streamFetch (see Action streams); Done or leaving the
+  // tab aborts it, as closing the EventSource did before.
+  const ctl = new AbortController(); state.configAbort = ctl;
+  const d = await streamFetch(url, {method:'GET'}, {target:'#cfgLog', what:'Save', signal:ctl.signal});
+  if(ctl.signal.aborted) return;
+  if(state.configAbort===ctl) state.configAbort = null;
+  if(d && d.ok) toast('Saved '+field+' — node restarted','success');
+  else toast('Save failed'+(d&&d.rolled_back?' — rolled back':''),'error');
+  refreshAfterChange();
 }
 
-function stopConfigStream(){ if(state.configES){ state.configES.close(); state.configES=null; } }
+function stopConfigStream(){ if(state.configAbort){ state.configAbort.abort(); state.configAbort=null; } }
 
 // =============================================================================
 // UPDATE -- in-UI node updater (current vs latest, Prepare + Apply, live log)
@@ -1992,17 +2212,22 @@ async function fillUpdateStatus(){
   const r=$('#updRecheck'); if(r) r.addEventListener('click', fillUpdateStatus);
 }
 
-// Shared SSE-line formatter for the Update + Config progress panes. Returns the
-// HTML for one {event:step|error|done} line, or null for anything else.
+// Shared formatter for every progress pane (setup, update, config, Caddy, public
+// RPC). Returns the HTML for one {event:step|log|warn|error|done} line, or null
+// for anything else.
 function streamLineHtml(d){
   let cls='info', text='';
   if(d.event==='error'){ cls='err'; text='✗ '+(d.msg||''); }
+  else if(d.event==='warn'){ cls='warn'; text='⚠ '+(d.msg||''); }
   else if(d.event==='step'){ cls='info'; text='» '+(d.msg||''); }
   else if(d.event==='log'){
     // Raw command output (git clone / cargo build) streamed live so the build
-    // doesn't look frozen. Dim by default; tint compiler errors/warnings.
+    // doesn't look frozen. Dim by default; tint compiler errors/warnings. setup-node
+    // reports a node that stayed private ("public RPC not enabled: ...") as a log
+    // line, and the operator has to act on it, so it gets the warning colour.
     text = d.msg||''; if(!text) return null;
-    cls = /error(\[|:)/i.test(text) ? 'err' : (/warning:/i.test(text) ? 'warn' : 'muted');
+    cls = /public rpc not enabled/i.test(text) ? 'warn'
+        : /error(\[|:)/i.test(text) ? 'err' : (/warning:/i.test(text) ? 'warn' : 'muted');
   }
   else if(d.event==='done'){
     const detail = d.new_version || d.new_image || d.new_ref || d.value || '';
@@ -2021,29 +2246,103 @@ function appendStream(sel, d){
   log.scrollTop = log.scrollHeight;
 }
 
-function appendUpdateLine(d){ appendStream('#updLog', d); }
+// =============================================================================
+// Action streams. The server answers an action (setup, update, config save,
+// Caddy, public RPC) with SSE frames, "data: <json>" and a blank line; a bare
+// line without the "data:" prefix is read the same way. A payload that is not
+// a JSON event (stray script output) is shown as a log line. The server sends
+// exactly one `done` and then `closed`, which ends the stream. A second `done`
+// is ignored.
+//
+// fetch() rather than EventSource: EventSource re-sends its GET after a dropped
+// connection, which for an update or a config save would run the action again.
+//
+// handlers: {target: selector of the log pane, what: label for the error toasts
+// ("Setup" gives "Setup rejected: ..."), signal: AbortSignal, onEvent(d),
+// onReject(status, error): called instead of the toast when the server refuses the
+// request (an HTTP error such as a 400 with {"error": ...})}.
+// Resolves with the `done` event, or null when the request failed or was refused
+// (a toast, or onReject, says which), was aborted, or ended without a `done`.
+// =============================================================================
+function streamEvent(text){
+  let d = null;
+  try{ d = JSON.parse(text); }catch(_){ }
+  if(!d || typeof d!=='object' || Array.isArray(d) || typeof d.event!=='string') return {event:'log', msg:String(text)};
+  return d;
+}
 
-function startUpdateStream(kind, ref){
+async function streamFetch(url, init, handlers){
+  const h = handlers || {};
+  const aborted = () => !!(h.signal && h.signal.aborted);
+  let resp;
+  try{
+    resp = await fetch(url, Object.assign({}, init, h.signal ? {signal:h.signal} : {}));
+  }catch(e){
+    if(!aborted()) toast((h.what ? h.what+' request' : 'Request')+' failed: '+e, 'error');
+    return null;
+  }
+  if(!resp.ok){
+    let msg=''; try{ msg=(await resp.json()).error; }catch(_){ }
+    if(h.onReject) h.onReject(resp.status, msg ? String(msg) : '');
+    else toast((h.what ? h.what+' rejected' : 'Rejected')+': '+(msg||resp.status), 'error');
+    return null;
+  }
+  let result = null, closed = false, data = null, buf = '';
+  const emit = text => {
+    if(closed || text==='') return;
+    const d = streamEvent(text);
+    if(d.event==='closed'){ closed = true; return; }
+    if(d.event==='done'){ if(result) return; result = d; }
+    if(h.target) appendStream(h.target, d);
+    if(h.onEvent) h.onEvent(d);
+  };
+  const line = raw => {
+    const l = raw.endsWith('\r') ? raw.slice(0,-1) : raw;
+    if(l===''){ if(data!==null){ emit(data); data = null; } return; }   // end of an SSE frame
+    if(l.startsWith('data:')){ const v = l.slice(5).replace(/^ /,''); data = data===null ? v : data+'\n'+v; return; }
+    if(l.startsWith(':') || /^(event|id|retry):/.test(l)) return;      // SSE fields the page does not use
+    if(data!==null){ emit(data); data = null; }
+    emit(l);
+  };
+  const reader = resp.body.getReader(), dec = new TextDecoder();
+  try{
+    while(!closed){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      let i;
+      while(!closed && (i = buf.indexOf('\n')) >= 0){ const l = buf.slice(0,i); buf = buf.slice(i+1); line(l); }
+    }
+    if(!closed){ buf += dec.decode(); if(buf) line(buf); line(''); }
+  }catch(_){ /* aborted, or the connection dropped: handled below */ }
+  if(closed) reader.cancel().catch(()=>{});
+  else if(!aborted() && !result && h.target)
+    appendStream(h.target, {event:'error', msg:'The connection ended before the server reported the result. Check the status before you retry.'});
+  return result;
+}
+
+function streamPost(url, body, handlers){
+  return streamFetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})}, handlers);
+}
+
+async function startUpdateStream(kind, ref){
   stopUpdateStream();
   const card=$('#updProgressCard'); if(card) card.style.display='block';
   const log=$('#updLog'); if(log) log.innerHTML='<div class="log-line info">» starting '+esc(kind)+'…</div>';
   let url = '/api/update/'+kind+'/'+state.node;
   if(kind==='prepare') url += '?ref='+encodeURIComponent(ref);
-  // EventSource is GET-only, so prepare/apply are exposed as GET SSE endpoints.
-  state.updateES = new EventSource(url);
-  state.updateES.onmessage = ev=>{
-    let d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
-    if(d.event==='closed'){ stopUpdateStream(); fillUpdateStatus(); loadNodes(); return; }
-    appendUpdateLine(d);
-    if(d.event==='done'){
-      if(d.ok) toast('Update '+kind+' succeeded','success');
-      else toast('Update '+kind+(d.rolled_back?' failed — rolled back':' did not complete'),'error');
-    }
-  };
-  state.updateES.onerror = ()=>{ /* server closes the stream when the script exits */ };
+  // Prepare and apply are GET routes (older pages read them with EventSource).
+  // Leaving the tab aborts the request, as closing the EventSource did before.
+  const ctl = new AbortController(); state.updateAbort = ctl;
+  const d = await streamFetch(url, {method:'GET'}, {target:'#updLog', what:'Update', signal:ctl.signal});
+  if(ctl.signal.aborted) return;
+  if(state.updateAbort===ctl) state.updateAbort = null;
+  if(d && d.ok) toast('Update '+kind+' succeeded','success');
+  else toast('Update '+kind+(d&&d.rolled_back?' failed — rolled back':' did not complete'),'error');
+  fillUpdateStatus(); loadNodes();
 }
 
-function stopUpdateStream(){ if(state.updateES){ state.updateES.close(); state.updateES=null; } }
+function stopUpdateStream(){ if(state.updateAbort){ state.updateAbort.abort(); state.updateAbort=null; } }
 
 async function discardUpdate(){
   const r = await api('/api/update/discard/'+state.node, {method:'POST'});
@@ -2085,15 +2384,34 @@ const TUNNEL_CMD = 'ssh -L 16686:localhost:16686 user@SERVER_IP';
 // DNS-first: the operator sets an A record, checks propagation here, then enables.
 // Public access is READ-ONLY (server-enforced); management stays on the SSH tunnel.
 // =============================================================================
-const CADDY_DOMAIN_RE = /^[A-Za-z0-9.-]+$/;
 const CADDY_USER_RE = /^[A-Za-z0-9._-]{2,32}$/;
 
-async function renderCaddyCard(){
+// The dashboard and RPC cards share one fetch of /api/caddy/status and
+// /api/rpc/status, because each needs the other's hostname: the dashboard card
+// warns when its name is the RPC name, and the RPC card offers to move the
+// dashboard off the name RPC is about to take. Every enable or disable re-runs it.
+async function renderAccessCards(){
+  if(!$('#caddyCard') && !$('#rpcCard')) return;
+  const [caddy, rpc] = await Promise.all([api('/api/caddy/status'), api('/api/rpc/status')]);
+  state.access = { caddy: caddy||{}, rpc: rpc||{} };
+  renderCaddyCard();
+  renderRpcCard();
+}
+
+const NOTE_WARN = 'border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)';
+const NOTE_ERR = 'border-color:rgba(255,77,109,0.35);background:rgba(255,77,109,0.07)';
+const BADGE_GREY = 'background:rgba(122,154,184,0.15);color:var(--text2)';
+function warnNote(html){ return `<div class="note" style="margin:12px 0 0;${NOTE_WARN}">${html}</div>`; }
+function badHostHtml(){
+  return `<span style="color:var(--red)">Not a valid hostname. Use a full name such as ${esc(DEFAULT_RPC_HOST)}: two or more labels of letters, digits and hyphens, and not an IP address.</span>`;
+}
+
+function renderCaddyCard(){
   const c = $('#caddyCard'); if(!c) return;
-  const s = await api('/api/caddy/status');
+  const s = state.access.caddy || {};
   // "enabled" means OUR managed reverse_proxy is in the Caddyfile -- NOT merely
   // that the caddy service is up (it may be running an unrelated/default config).
-  const enabled = !!(s && s.enabled);
+  const enabled = !!s.enabled;
   // Monitoring-only (external/read-only) node: show status, never the controls --
   // consistent with the firewall/log-rotation cards and the "management disabled"
   // banner. (External access is a host action; manage it over the SSH tunnel.)
@@ -2105,24 +2423,34 @@ async function renderCaddyCard(){
         : 'Public access is not configured via the Node Manager. To manage it, connect over the SSH tunnel from a node installed by Telcoin Node Scripts.'}</p>`;
     return;
   }
+  const rpcHost = knownRpcHost(state.access.rpc);
   if(enabled){
+    const dom = normHost(s.domain);
+    // The dashboard sits on the node's RPC name (advertised or saved, not served:
+    // install-caddy refuses to serve both on one name).
+    const clash = (dom && rpcHost && sameHost(dom, rpcHost))
+      ? warnNote(`This dashboard uses <span class="mono">${esc(dom)}</span>, which is also this node's public RPC hostname. Caddy cannot serve two sites on one name, so the dashboard should move to <span class="mono">dashboard.${esc(dom)}</span>. Enabling public RPC on <span class="mono">${esc(dom)}</span> in the card below moves it in the same step.`)
+      : '';
     c.innerHTML = `
       <h3>External Dashboard Access</h3>
       <p style="color:var(--text2);font-size:13px">This dashboard is reachable publicly via Caddy with a login. Public access is <strong>read-only</strong> — management actions stay on the SSH tunnel.</p>
       <div class="kv"><span class="k">Status</span><span class="v">${s.running?'<span class="badge ok">running</span>':'<span class="badge warn">configured</span>'}</span></div>
       <div class="kv"><span class="k">URL</span><span class="v">${s.domain?`<a href="https://${esc(s.domain)}" target="_blank" rel="noopener">https://${esc(s.domain)}</a>`:'—'}</span></div>
       <div class="kv"><span class="k">Login user</span><span class="v">${esc(s.username||'—')}</span></div>
+      ${clash}
       <div class="svc-row" style="margin-top:14px"><button class="btn btn-red" id="caddyDisable">Disable External Access</button></div>
       <div class="log-body" id="caddyLog" style="display:none;height:160px;white-space:pre-wrap;margin-top:10px"></div>`;
     const d=$('#caddyDisable'); if(d) d.addEventListener('click', caddyDisable);
   } else {
+    const ph = 'dashboard.' + (rpcHost || suggestRpcHost(state.access.rpc, null));
     c.innerHTML = `
       <h3>External Dashboard Access</h3>
       <p style="color:var(--text2);font-size:13px">Expose this dashboard at your own domain over HTTPS, behind Caddy with a login.
         <strong>First set a DNS A record</strong> pointing your domain at this server's public IP, then check propagation below before enabling
         (Caddy requests the TLS certificate on first start — if DNS isn't pointing here yet, issuance fails and Let's Encrypt rate-limits retries).
-        Public access is <strong>read-only</strong>; management stays on the SSH tunnel.</p>
-      <div class="field"><label>Dashboard domain</label><input id="caddyDomain" placeholder="dashboard.example.com" autocomplete="off"></div>
+        Public access is <strong>read-only</strong>; management stays on the SSH tunnel. Use a different hostname from the public RPC endpoint.</p>
+      <div class="field"><label>Dashboard hostname</label><input id="caddyDomain" placeholder="${esc(ph)}" autocomplete="off">
+        <div id="caddyDomainHint" style="font-size:12px;margin-top:4px"></div></div>
       <div class="field"><label>Login username</label><input id="caddyUser" value="admin" autocomplete="off"></div>
       <div class="field"><label>Inbound public IP (optional)</label>
         <input id="caddyPublicIp" placeholder="auto-detect — leave blank unless behind NAT" value="${esc(state.setup.publicIp||'')}" autocomplete="off">
@@ -2134,53 +2462,82 @@ async function renderCaddyCard(){
       <div class="svc-row"><button class="btn btn-out" id="caddyDns">Check DNS</button><button class="btn btn-green" id="caddyEnable">Enable External Access</button></div>
       <div id="caddyDnsResult" style="margin-top:10px;font-size:13px"></div>
       <div class="log-body" id="caddyLog" style="display:none;height:200px;white-space:pre-wrap;margin-top:10px"></div>`;
+    const inp=$('#caddyDomain'); if(inp) inp.addEventListener('input', syncCaddyInput);
     const dn=$('#caddyDns'); if(dn) dn.addEventListener('click', caddyDnsCheck);
     const en=$('#caddyEnable'); if(en) en.addEventListener('click', caddyEnable);
   }
 }
 
-async function caddyDnsCheck(){
-  const domain=($('#caddyDomain').value||'').trim();
-  const publicIp=(($('#caddyPublicIp')||{}).value||'').trim();
-  const out=$('#caddyDnsResult'); if(!out) return;
-  if(!CADDY_DOMAIN_RE.test(domain)){ out.innerHTML='<span style="color:var(--red)">Enter a valid domain first.</span>'; return; }
-  if(publicIp && !setupValidIp(publicIp)){ out.innerHTML='<span style="color:var(--red)">Enter a valid inbound public IP, or leave it blank.</span>'; return; }
-  out.innerHTML='Checking DNS…';
-  const body={domain}; if(publicIp) body.public_ip=publicIp;   // omit when blank → no override (egress auto-detect)
-  const r = await api('/api/caddy/dns-check', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  if(!r || !r.ok){ out.innerHTML='<span style="color:var(--red)">DNS check failed'+(r&&r.error?': '+esc(r.error):'')+'</span>'; return; }
-  if(r.propagated){
-    out.innerHTML='<span style="color:var(--green)">✓ '+esc(domain)+' → '+esc(r.resolved_ip)+' (matches this server). Ready to enable.</span>';
-  } else {
-    // Mismatch: surface the backend's rich egress-vs-inbound note + diagnostics, then point
-    // the operator at the new field as the UI remedy for "--public-ip". esc() every field.
-    let h='<span style="color:var(--red)">✗ '+esc(domain)+' resolves to '+esc(r.resolved_ip||'nothing')+', expected '+esc(r.public_ip||'this server')+'.</span> ';
-    if(r.note) h+='<div style="color:var(--text2);margin-top:6px">'+esc(r.note)+'</div>';
-    else h+='<span style="color:var(--text2)">Set the A record and wait for propagation (can take a few minutes). Enabling before it propagates may fail TLS issuance.</span>';
-    const diag=[];
-    if(r.egress_ip) diag.push('Egress (outbound) IP: '+esc(r.egress_ip));
-    if(r.local_ips && r.local_ips.length) diag.push('Bound local IP(s): '+esc(r.local_ips.join(', ')));
-    if(diag.length) h+='<div style="color:var(--text2);font-size:12px;margin-top:6px">'+diag.join(' · ')+'</div>';
-    h+='<div style="color:var(--text2);margin-top:6px">If this node is behind 1:1-NAT or has multiple IPs, enter its <strong>inbound</strong> public IP in the field above and re-check.</div>';
-    out.innerHTML=h;
+// Live check of the dashboard hostname: a malformed name, or the node's public RPC
+// hostname (with dashboard.<rpc host> offered instead).
+function syncCaddyInput(){
+  const inp=$('#caddyDomain'), hint=$('#caddyDomainHint'); if(!inp || !hint) return;
+  const host = normHost(inp.value), rpcHost = knownRpcHost(state.access.rpc);
+  if(host && !validHost(host)){ hint.innerHTML = badHostHtml(); return; }
+  if(rpcHost && sameHost(host, rpcHost)){
+    const sug = 'dashboard.'+rpcHost;
+    hint.innerHTML = `<span style="color:var(--yellow)">${esc(rpcHost)} is this node's public RPC hostname, and Caddy cannot serve two sites on one name. Use <span class="mono">${esc(sug)}</span> instead.</span> <button class="copy-btn" id="caddyUseSug">use it</button>`;
+    const b=$('#caddyUseSug'); if(b) b.addEventListener('click', ()=>{ inp.value=sug; syncCaddyInput(); });
+    return;
   }
+  hint.innerHTML = '';
 }
 
+// DNS propagation check shared by both cards and the setup wizard: does <hostname>
+// resolve to this server (or to the inbound IP the operator typed)? With
+// opts.advisory (the wizard) a mismatch or a failed check is a yellow warning that
+// says setup can continue. Returns the HTML it rendered ('' without an output element).
+async function dnsCheck(route, inputSel, ipSel, outSel, opts){
+  const advisory = !!(opts && opts.advisory);
+  const domain = normHost(($(inputSel)||{}).value);
+  const publicIp = ((($(ipSel)||{}).value)||'').trim();
+  const out = $(outSel); if(!out) return '';
+  const show = h => { out.innerHTML = h; return h; };
+  const bad = advisory ? 'var(--yellow)' : 'var(--red)';
+  const goOn = advisory
+    ? '<div style="color:var(--text2);margin-top:6px">You can continue. Setup checks DNS again before it enables public RPC. If the name does not point here by then, the node starts with RPC private, and you can finish from the Public RPC card on the System tab.</div>'
+    : '';
+  if(!validHost(domain)) return show('<span style="color:var(--red)">Enter a valid hostname first.</span>');
+  if(publicIp && !setupValidIp(publicIp)) return show('<span style="color:var(--red)">Enter a valid inbound public IP, or leave it blank.</span>');
+  out.innerHTML='Checking DNS…';
+  const body={domain}; if(publicIp) body.public_ip=publicIp;   // omit when blank → no override (egress auto-detect)
+  const r = await api(route, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if(!r || !r.ok) return show('<span style="color:'+bad+'">DNS check failed'+(r&&r.error?': '+esc(r.error):'')+'</span>'+goOn);
+  if(r.propagated)
+    return show('<span style="color:var(--green)">✓ '+esc(domain)+' → '+esc(r.resolved_ip)+' (matches this server).'+(advisory?'':' Ready to enable.')+'</span>');
+  // Mismatch: surface the backend's rich egress-vs-inbound note + diagnostics, then point
+  // the operator at the new field as the UI remedy for "--public-ip". esc() every field.
+  let h='<span style="color:'+bad+'">'+(advisory?'⚠ ':'✗ ')+esc(domain)+' resolves to '+esc(r.resolved_ip||'nothing')+', expected '+esc(r.public_ip||'this server')+'.</span> ';
+  if(r.note) h+='<div style="color:var(--text2);margin-top:6px">'+esc(r.note)+'</div>';
+  else h+='<span style="color:var(--text2)">Set the A record and wait for propagation (can take a few minutes). Enabling before it propagates may fail TLS issuance.</span>';
+  const diag=[];
+  if(r.egress_ip) diag.push('Egress (outbound) IP: '+esc(r.egress_ip));
+  if(r.local_ips && r.local_ips.length) diag.push('Bound local IP(s): '+esc(r.local_ips.join(', ')));
+  if(diag.length) h+='<div style="color:var(--text2);font-size:12px;margin-top:6px">'+diag.join(' · ')+'</div>';
+  h+='<div style="color:var(--text2);margin-top:6px">If this node is behind 1:1-NAT or has multiple IPs, enter its <strong>inbound</strong> public IP in the '+(advisory?'public IP field':'field')+' above and re-check.</div>';
+  return show(h+goOn);
+}
+function caddyDnsCheck(){ return dnsCheck('/api/caddy/dns-check', '#caddyDomain', '#caddyPublicIp', '#caddyDnsResult'); }
+function rpcDnsCheck(){ return dnsCheck('/api/rpc/dns-check', '#rpcDomain', '#rpcPublicIp', '#rpcDnsResult'); }
+
 async function caddyEnable(){
-  const domain=($('#caddyDomain').value||'').trim();
+  const domain=normHost($('#caddyDomain').value);
   const username=($('#caddyUser').value||'').trim();
   const publicIp=(($('#caddyPublicIp')||{}).value||'').trim();
   const pw=$('#caddyPw').value||'', pw2=$('#caddyPw2').value||'';
-  if(!CADDY_DOMAIN_RE.test(domain)) return toast('Enter a valid domain','error');
+  const rpc = state.access.rpc || {};
+  if(!validHost(domain)) return toast('Enter a valid hostname','error');
+  if(rpc.enabled && sameHost(domain, rpc.domain)) return toast('That hostname serves the public RPC endpoint. Use dashboard.'+normHost(rpc.domain)+' instead.','error');
   if(!CADDY_USER_RE.test(username)) return toast('Username: 2–32 chars (letters, digits, . _ -)','error');
   if(publicIp && !setupValidIp(publicIp)) return toast('Enter a valid inbound public IP, or leave it blank','error');
   if(pw.length<8) return toast('Password must be at least 8 characters','error');
   if(pw!==pw2) return toast('Passwords do not match','error');
   const btn=$('#caddyEnable'); if(btn) btn.disabled=true;
   const log=$('#caddyLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» enabling external access… (the TLS certificate is issued on the first request — keep this tab open)</div>'; }
+  // POST, so the password never rides a URL.
   const payload={domain, username, password:pw}; if(publicIp) payload.public_ip=publicIp;   // omit when blank
-  const d = await streamCaddy('enable', payload);
-  if(d && d.ok){ toast('External access enabled','success'); renderCaddyCard(); }
+  const d = await streamPost('/api/caddy/enable', payload, {target:'#caddyLog'});
+  if(d && d.ok){ toast('External access enabled','success'); renderAccessCards(); }
   else { toast('Enable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
 }
 
@@ -2188,32 +2545,9 @@ async function caddyDisable(){
   if(!confirm('Disable external dashboard access? The public URL will stop working.')) return;
   const btn=$('#caddyDisable'); if(btn) btn.disabled=true;
   const log=$('#caddyLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» disabling external access…</div>'; }
-  const d = await streamCaddy('disable', {});
-  if(d && d.ok){ toast('External access disabled','success'); renderCaddyCard(); }
+  const d = await streamPost('/api/caddy/disable', {}, {target:'#caddyLog'});
+  if(d && d.ok){ toast('External access disabled','success'); renderAccessCards(); }
   else { toast('Disable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
-}
-
-// POST + stream the SSE body (mirrors streamSetup) so the password never rides a URL.
-async function streamCaddy(phase, payload){
-  let resp;
-  try{
-    resp = await fetch('/api/caddy/'+phase, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-  }catch(e){ toast('Request failed: '+e,'error'); return null; }
-  if(!resp.ok){ let msg=''; try{ msg=(await resp.json()).error; }catch(_){ } toast('Rejected: '+(msg||resp.status),'error'); return null; }
-  const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='', result=null;
-  for(;;){
-    const {value,done}=await reader.read(); if(done) break;
-    buf+=dec.decode(value,{stream:true}); let i;
-    while((i=buf.indexOf('\n\n'))>=0){
-      const frame=buf.slice(0,i); buf=buf.slice(i+2);
-      const line=frame.split('\n').find(l=>l.startsWith('data: ')); if(!line) continue;
-      let d; try{ d=JSON.parse(line.slice(6)); }catch(_){ continue; }
-      if(d.event==='closed') continue;
-      appendStream('#caddyLog', d);
-      if(d.event==='done') result=d;
-    }
-  }
-  return result;
 }
 
 // =============================================================================
@@ -2223,12 +2557,35 @@ async function streamCaddy(phase, payload){
 // and enabling opens 80/443, advertises the endpoint to peers and restarts the
 // node -- so the enable button gates behind an explicit consent prompt. Configured
 // over the SSH tunnel only (the POSTs are server-refused on the public path).
+//
+// What peers are told comes from node-info.yaml (rpc-status advertised_http and
+// advertised_ws, '' when not advertised) and whether reth's WebSocket port is
+// bound (ws_listening). Older helpers send none of these keys; the card then says
+// "unknown" and raises no warning.
 // =============================================================================
-async function renderRpcCard(){
+function advBadges(s, served){
+  const one = (label, v) => {
+    const st = triState(v);
+    const txt = st==='yes' ? label+' advertised' : st==='no' ? label+' not advertised' : label+' status unknown';
+    const cls = st==='yes' ? 'badge ok' : (st==='no' && served ? 'badge warn' : 'badge');
+    const grey = cls==='badge' ? ` style="${BADGE_GREY}"` : '';
+    const tip = st==='yes' ? ` title="${esc(v)}"` : '';
+    return `<span class="${cls}"${grey}${tip}>${esc(txt)}</span>`;
+  };
+  return one('HTTPS', s.advertised_http) + ' ' + one('WSS', s.advertised_ws);
+}
+function wsListenBadge(v){
+  const st = triState(v);
+  return st==='yes' ? '<span class="badge ok">listening</span>'
+       : st==='no' ? '<span class="badge warn">not listening</span>'
+       : `<span class="badge" style="${BADGE_GREY}">unknown</span>`;
+}
+
+function renderRpcCard(){
   const c = $('#rpcCard'); if(!c) return;
-  const s = await api('/api/rpc/status');
+  const s = state.access.rpc || {};
   // "enabled" means OUR managed reverse_proxy for the RPC vhost is in the Caddyfile.
-  const enabled = !!(s && s.enabled);
+  const enabled = !!s.enabled;
   // Monitoring-only (external/read-only) node: show status, never the controls.
   if(isReadonly()){
     c.innerHTML = `
@@ -2238,105 +2595,131 @@ async function renderRpcCard(){
         : 'No public RPC endpoint is configured via the Node Manager. To manage it, connect over the SSH tunnel from a node installed by Telcoin Node Scripts.'}</p>`;
     return;
   }
+  const http = triState(s.advertised_http), ws = triState(s.advertised_ws), wsl = triState(s.ws_listening);
   if(enabled){
+    const dom = normHost(s.domain);
+    const advHost = hostOfUrl(s.advertised_http);
+    const notes = [];
+    if(http==='yes' && dom && validHost(advHost) && !sameHost(advHost, dom))
+      notes.push(warnNote(`Peers are told <span class="mono">${esc(s.advertised_http)}</span>, but Caddy serves <span class="mono">https://${esc(dom)}</span>. Re-run RPC enable with ${esc(dom)} to advertise the name Caddy serves.`));
+    if(http==='yes' && ws==='no')
+      notes.push(warnNote(`HTTPS is advertised but WebSocket is not, so clients that need subscriptions (wss://) cannot use this endpoint. Once the node runs with <span class="mono">--ws</span>, re-run RPC enable with the same hostname to advertise wss:// too.`));
+    else if(http==='yes' && wsl==='no')
+      notes.push(warnNote(`Nothing listens on the node's WebSocket port, so wss://${esc(dom)}/ answers 502. If the node is still starting this clears on its own; otherwise check that its launch carries <span class="mono">--ws</span>.`));
+    if(s.block_stale===true)
+      notes.push(warnNote(`This endpoint's Caddy block was written by an older install-caddy.sh. Re-run RPC enable with the same hostname to refresh the Caddy block; this is a reload only.
+        <div style="margin-top:8px"><button class="btn btn-out" id="rpcRefresh">Refresh Caddy block</button></div>`));
     c.innerHTML = `
       <h3>Public RPC Endpoint</h3>
       <p style="color:var(--text2);font-size:13px">This node's JSON-RPC is reachable publicly via Caddy over HTTPS. There is <strong>no authentication</strong> — a public RPC endpoint is open by design.</p>
       <div class="kv"><span class="k">Status</span><span class="v">${s.running?'<span class="badge ok">running</span>':'<span class="badge warn">configured</span>'}</span></div>
       <div class="kv"><span class="k">URL</span><span class="v">${s.domain?`<a href="https://${esc(s.domain)}" target="_blank" rel="noopener">https://${esc(s.domain)}</a>`:'—'}</span></div>
+      <div class="kv"><span class="k">Advertised to peers</span><span class="v">${advBadges(s, true)}</span></div>
+      <div class="kv"><span class="k">WebSocket port</span><span class="v">${wsListenBadge(s.ws_listening)}</span></div>
+      ${notes.join('')}
       <div class="svc-row" style="margin-top:14px"><button class="btn btn-red" id="rpcDisable">Disable Public RPC</button></div>
       <div class="log-body" id="rpcLog" style="display:none;height:160px;white-space:pre-wrap;margin-top:10px"></div>`;
     const d=$('#rpcDisable'); if(d) d.addEventListener('click', rpcDisable);
-  } else {
-    c.innerHTML = `
-      <h3>Public RPC Endpoint</h3>
-      <p style="color:var(--text2);font-size:13px">Expose this node's JSON-RPC at your own domain over HTTPS, behind Caddy.
-        <strong>First set a DNS A record</strong> pointing your domain at this server's public IP, then check propagation below before enabling
-        (Caddy requests the TLS certificate on first start — if DNS isn't pointing here yet, issuance fails and Let's Encrypt rate-limits retries).
-        This endpoint is <strong>unauthenticated</strong> and advertised to peers; enabling opens 80/443 and restarts the node.</p>
-      <div class="field"><label>RPC domain</label><input id="rpcDomain" placeholder="rpc.example.com" autocomplete="off"></div>
-      <div class="field"><label>Inbound public IP (optional)</label>
-        <input id="rpcPublicIp" placeholder="auto-detect — leave blank unless behind NAT" value="${esc(state.setup.publicIp||'')}" autocomplete="off">
-        <div style="color:var(--text2);font-size:12px;margin-top:4px">Only needed when this node's <strong>inbound</strong> IP — where Let's Encrypt reaches ports 80/443 — differs from the auto-detected egress (outbound) IP, i.e. multi-IP or 1:1-NAT hosts. Leave blank otherwise. The propagation check is IPv4 (A records) only.</div></div>
-      <div class="svc-row"><button class="btn btn-out" id="rpcDns">Check DNS</button><button class="btn btn-green" id="rpcEnable">Enable Public RPC</button></div>
-      <div id="rpcDnsResult" style="margin-top:10px;font-size:13px"></div>
-      <div class="log-body" id="rpcLog" style="display:none;height:200px;white-space:pre-wrap;margin-top:10px"></div>`;
-    const dn=$('#rpcDns'); if(dn) dn.addEventListener('click', rpcDnsCheck);
-    const en=$('#rpcEnable'); if(en) en.addEventListener('click', rpcEnable);
+    const rf=$('#rpcRefresh'); if(rf) rf.addEventListener('click', ()=>rpcEnable(dom));
+    return;
   }
+  // Caddy serves no RPC site here. node-info.yaml may still advertise one (a manual
+  // edit, or a Caddyfile changed by hand): clients that discover it get no answer.
+  const advUrl = http==='yes' ? s.advertised_http : (ws==='yes' ? s.advertised_ws : '');
+  const unserved = advUrl
+    ? `<div class="note" style="${NOTE_ERR}"><strong>Advertised but not served.</strong> node-info.yaml tells peers this node serves RPC at
+        <span class="mono">${esc(advUrl)}</span>, but Caddy has no RPC site on this host, so clients that find it get no answer.
+        Withdraw the advertisement (this clears it from node-info.yaml and restarts the node), or enable public RPC below to serve it again.
+        <div class="svc-row" style="margin-top:10px"><button class="btn btn-red" id="rpcWithdraw">Withdraw advertisement</button></div></div>`
+    : '';
+  c.innerHTML = `
+    <h3>Public RPC Endpoint</h3>
+    ${unserved}
+    <p style="color:var(--text2);font-size:13px">Expose this node's JSON-RPC at your own domain over HTTPS, behind Caddy.
+      <strong>First set a DNS A record</strong> pointing your domain at this server's public IP, then check propagation below before enabling
+      (Caddy requests the TLS certificate on first start — if DNS isn't pointing here yet, issuance fails and Let's Encrypt rate-limits retries).
+      This endpoint is <strong>unauthenticated</strong> and advertised to peers; enabling opens 80/443 and restarts the node.</p>
+    <div class="field"><label>RPC hostname</label><input id="rpcDomain" placeholder="${esc(suggestRpcHost(s, state.access.caddy))}" autocomplete="off">
+      <div id="rpcDomainHint" style="font-size:12px;margin-top:4px"></div></div>
+    <div class="note" id="rpcMoveBox" style="display:none;margin:12px 0 0;${NOTE_WARN}">
+      This hostname serves the dashboard today, and Caddy cannot serve two sites on one name. Enabling public RPC on it moves the
+      dashboard to the hostname below, in the same step. Point a DNS A record for that name at this server first.
+      <div class="field" style="margin-top:10px"><label>New dashboard hostname</label><input id="rpcMoveDash" autocomplete="off"></div>
+    </div>
+    <div class="field"><label>Inbound public IP (optional)</label>
+      <input id="rpcPublicIp" placeholder="auto-detect — leave blank unless behind NAT" value="${esc(state.setup.publicIp||'')}" autocomplete="off">
+      <div style="color:var(--text2);font-size:12px;margin-top:4px">Only needed when this node's <strong>inbound</strong> IP — where Let's Encrypt reaches ports 80/443 — differs from the auto-detected egress (outbound) IP, i.e. multi-IP or 1:1-NAT hosts. Leave blank otherwise. The propagation check is IPv4 (A records) only.</div></div>
+    <div class="svc-row"><button class="btn btn-out" id="rpcDns">Check DNS</button><button class="btn btn-green" id="rpcEnable">Enable Public RPC</button></div>
+    <div id="rpcDnsResult" style="margin-top:10px;font-size:13px"></div>
+    <div class="log-body" id="rpcLog" style="display:none;height:200px;white-space:pre-wrap;margin-top:10px"></div>`;
+  const inp=$('#rpcDomain'); if(inp) inp.addEventListener('input', syncRpcInput);
+  const mv=$('#rpcMoveDash'); if(mv) mv.addEventListener('input', ()=>{ mv.dataset.touched='1'; });
+  const wd=$('#rpcWithdraw'); if(wd) wd.addEventListener('click', rpcWithdraw);
+  const dn=$('#rpcDns'); if(dn) dn.addEventListener('click', rpcDnsCheck);
+  const en=$('#rpcEnable'); if(en) en.addEventListener('click', ()=>rpcEnable());
 }
 
-async function rpcDnsCheck(){
-  const domain=($('#rpcDomain').value||'').trim();
-  const publicIp=(($('#rpcPublicIp')||{}).value||'').trim();
-  const out=$('#rpcDnsResult'); if(!out) return;
-  if(!CADDY_DOMAIN_RE.test(domain)){ out.innerHTML='<span style="color:var(--red)">Enter a valid domain first.</span>'; return; }
-  if(publicIp && !setupValidIp(publicIp)){ out.innerHTML='<span style="color:var(--red)">Enter a valid inbound public IP, or leave it blank.</span>'; return; }
-  out.innerHTML='Checking DNS…';
-  const body={domain}; if(publicIp) body.public_ip=publicIp;   // omit when blank → no override (egress auto-detect)
-  const r = await api('/api/rpc/dns-check', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  if(!r || !r.ok){ out.innerHTML='<span style="color:var(--red)">DNS check failed'+(r&&r.error?': '+esc(r.error):'')+'</span>'; return; }
-  if(r.propagated){
-    out.innerHTML='<span style="color:var(--green)">✓ '+esc(domain)+' → '+esc(r.resolved_ip)+' (matches this server). Ready to enable.</span>';
-  } else {
-    // Mismatch: surface the backend's rich egress-vs-inbound note + diagnostics, then point
-    // the operator at the new field as the UI remedy for "--public-ip". esc() every field.
-    let h='<span style="color:var(--red)">✗ '+esc(domain)+' resolves to '+esc(r.resolved_ip||'nothing')+', expected '+esc(r.public_ip||'this server')+'.</span> ';
-    if(r.note) h+='<div style="color:var(--text2);margin-top:6px">'+esc(r.note)+'</div>';
-    else h+='<span style="color:var(--text2)">Set the A record and wait for propagation (can take a few minutes). Enabling before it propagates may fail TLS issuance.</span>';
-    const diag=[];
-    if(r.egress_ip) diag.push('Egress (outbound) IP: '+esc(r.egress_ip));
-    if(r.local_ips && r.local_ips.length) diag.push('Bound local IP(s): '+esc(r.local_ips.join(', ')));
-    if(diag.length) h+='<div style="color:var(--text2);font-size:12px;margin-top:6px">'+diag.join(' · ')+'</div>';
-    h+='<div style="color:var(--text2);margin-top:6px">If this node is behind 1:1-NAT or has multiple IPs, enter its <strong>inbound</strong> public IP in the field above and re-check.</div>';
-    out.innerHTML=h;
-  }
+// Live check of the RPC hostname: a malformed name, or the dashboard's hostname
+// (shows the move-dashboard box, prefilled with dashboard.<rpc host>).
+function syncRpcInput(){
+  const inp=$('#rpcDomain'); if(!inp) return;
+  const host = normHost(inp.value);
+  const hint=$('#rpcDomainHint'); if(hint) hint.innerHTML = (host && !validHost(host)) ? badHostHtml() : '';
+  const box=$('#rpcMoveBox'), mv=$('#rpcMoveDash'); if(!box || !mv) return;
+  const clash = validHost(host) && sameHost(host, dashHost(state.access.caddy));
+  box.style.display = clash ? '' : 'none';
+  if(clash && !mv.dataset.touched) mv.value = 'dashboard.'+host;
 }
 
-async function rpcEnable(){
-  const domain=($('#rpcDomain').value||'').trim();
-  const publicIp=(($('#rpcPublicIp')||{}).value||'').trim();
-  if(!CADDY_DOMAIN_RE.test(domain)) return toast('Enter a valid domain','error');
+// Enable public RPC from the form, or, given a hostname, re-run enable for the
+// name Caddy already serves (the stale-block refresh).
+async function rpcEnable(refreshHost){
+  const refresh = typeof refreshHost==='string';
+  const domain = normHost(refresh ? refreshHost : ($('#rpcDomain')||{}).value);
+  const publicIp = refresh ? '' : ((($('#rpcPublicIp')||{}).value)||'').trim();
+  if(!validHost(domain)) return toast('Enter a valid hostname, such as '+DEFAULT_RPC_HOST,'error');
   if(publicIp && !setupValidIp(publicIp)) return toast('Enter a valid inbound public IP, or leave it blank','error');
-  if(!confirm(`Expose this node's JSON-RPC publicly at https://${domain}? This opens 80/443, advertises the endpoint to peers, and restarts the node.`)) return;
-  const btn=$('#rpcEnable'); if(btn) btn.disabled=true;
-  const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» enabling public RPC… (the TLS certificate is issued on the first request — keep this tab open)</div>'; }
-  const payload={domain}; if(publicIp) payload.public_ip=publicIp;   // omit when blank
-  const d = await streamRpc('enable', payload);
-  if(d && d.ok){ toast('Public RPC enabled','success'); renderRpcCard(); }
-  else { toast('Enable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
+  let move = '';
+  if(!refresh && sameHost(domain, dashHost(state.access.caddy))){
+    move = normHost(($('#rpcMoveDash')||{}).value);
+    if(!validHost(move)) return toast('Enter a valid new hostname for the dashboard','error');
+    if(sameHost(move, domain)) return toast('The new dashboard hostname must differ from the RPC hostname','error');
+  }
+  const prompt = refresh
+    ? `Re-run RPC enable for ${domain}? This rewrites its Caddy block and reloads Caddy.`
+    : `Expose this node's JSON-RPC publicly at https://${domain}? This opens 80/443, advertises the endpoint to peers, and restarts the node.`
+      + (move ? ` The dashboard moves to https://${move}.` : '');
+  if(!confirm(prompt)) return;
+  const btn=$(refresh?'#rpcRefresh':'#rpcEnable'); if(btn) btn.disabled=true;
+  const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» '+(refresh
+    ? 'refreshing the Caddy block…'
+    : 'enabling public RPC… (the TLS certificate is issued on the first request — keep this tab open)')+'</div>'; }
+  const payload={domain};
+  if(publicIp) payload.public_ip=publicIp;   // omit when blank
+  if(move) payload.move_dashboard_to=move;
+  const d = await streamPost('/api/rpc/enable', payload, {target:'#rpcLog'});
+  if(d && d.ok){ toast(refresh?'Caddy block refreshed':'Public RPC enabled','success'); renderAccessCards(); }
+  else { toast((refresh?'Refresh':'Enable')+' failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
 }
 
 async function rpcDisable(){
   if(!confirm('Disable the public RPC endpoint? The public URL will stop working and the node restarts.')) return;
   const btn=$('#rpcDisable'); if(btn) btn.disabled=true;
   const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» disabling public RPC…</div>'; }
-  const d = await streamRpc('disable', {});
-  if(d && d.ok){ toast('Public RPC disabled','success'); renderRpcCard(); }
+  const d = await streamPost('/api/rpc/disable', {}, {target:'#rpcLog'});
+  if(d && d.ok){ toast('Public RPC disabled','success'); renderAccessCards(); }
   else { toast('Disable failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
 }
 
-// POST + stream the SSE body (mirrors streamCaddy) for the rpc-* phases.
-async function streamRpc(phase, payload){
-  let resp;
-  try{
-    resp = await fetch('/api/rpc/'+phase, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-  }catch(e){ toast('Request failed: '+e,'error'); return null; }
-  if(!resp.ok){ let msg=''; try{ msg=(await resp.json()).error; }catch(_){ } toast('Rejected: '+(msg||resp.status),'error'); return null; }
-  const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='', result=null;
-  for(;;){
-    const {value,done}=await reader.read(); if(done) break;
-    buf+=dec.decode(value,{stream:true}); let i;
-    while((i=buf.indexOf('\n\n'))>=0){
-      const frame=buf.slice(0,i); buf=buf.slice(i+2);
-      const line=frame.split('\n').find(l=>l.startsWith('data: ')); if(!line) continue;
-      let d; try{ d=JSON.parse(line.slice(6)); }catch(_){ continue; }
-      if(d.event==='closed') continue;
-      appendStream('#rpcLog', d);
-      if(d.event==='done') result=d;
-    }
-  }
-  return result;
+// Advertised but not served: rpc-disable clears the advertisement from
+// node-info.yaml (and leaves the dashboard site alone).
+async function rpcWithdraw(){
+  if(!confirm('Withdraw the advertised RPC endpoint? This clears it from node-info.yaml and restarts the node.')) return;
+  const btn=$('#rpcWithdraw'); if(btn) btn.disabled=true;
+  const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» withdrawing the advertised RPC endpoint…</div>'; }
+  const d = await streamPost('/api/rpc/disable', {}, {target:'#rpcLog'});
+  if(d && d.ok){ toast('Advertisement withdrawn','success'); renderAccessCards(); }
+  else { toast('Withdraw failed'+(d&&d.msg?': '+d.msg:''),'error'); if(btn) btn.disabled=false; }
 }
 
 // =============================================================================
@@ -2458,6 +2841,13 @@ function fmtTime(ms){
 // =============================================================================
 // SYSTEM
 // =============================================================================
+// CPU count as "8 (16 threads)" when the server sends the thread count (UI 1.9.0
+// servers report physical cores plus cpu_threads), else the count alone.
+function cpuText(cores, threads){
+  if(cores==null || cores==='') return '—';
+  return (threads==null || threads==='') ? String(cores) : `${cores} (${threads} threads)`;
+}
+
 async function renderSystem(){
   const c = $('#view-system');
   c.innerHTML = `<div class="card">Loading system info…</div>`;
@@ -2487,7 +2877,7 @@ async function renderSystem(){
       <div class="kv"><span class="k">Hostname</span><span class="v">${esc(d.hostname||'—')}</span></div>
       <div class="kv"><span class="k">Operating System</span><span class="v">${esc(d.distro||'—')}</span></div>
       <div class="kv"><span class="k">Kernel</span><span class="v">${esc(d.kernel||'—')}</span></div>
-      <div class="kv"><span class="k">CPU Cores</span><span class="v">${esc(d.cpu_cores||'—')}</span></div>
+      <div class="kv"><span class="k">CPU Cores</span><span class="v">${esc(cpuText(d.cpu_cores, d.cpu_threads))}</span></div>
       <div class="kv"><span class="k">Uptime</span><span class="v">${esc(d.uptime||'—')}</span></div>
       <div class="kv"><span class="k">Disk</span><span class="v">${esc((disk.used||'?')+' / '+(disk.total||'?')+' ('+(disk.percent||'?')+'%)')}</span></div>
       <div class="kv"><span class="k">Memory</span><span class="v">${esc(mem.used_gb!=null?(mem.used_gb+' / '+mem.total_gb+' GB ('+mem.percent+'%)'):'—')}</span></div>
@@ -2501,8 +2891,7 @@ async function renderSystem(){
   loadFirewall();
   const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
   const lrc=$('#logRotClear'); if(lrc) lrc.addEventListener('click', ()=>clearRotatedLogs(lrc));
-  renderCaddyCard();
-  renderRpcCard();
+  renderAccessCards();
   renderAddonsCard();
 }
 
@@ -2547,6 +2936,42 @@ const FW_PORTS = [
   ['43174/tcp','Uptime Kuma health'],
 ];
 
+// Node ports firewall-setup.sh reports beyond the three toggles: any other key in
+// `ports`, and the `p2p_ports` list. firewall-setup 1.6.0 sends one object per P2P
+// port, {"port":49595,"proto":"udp","label":"worker-1","allowed":false}, where
+// allowed is true or false from the ufw rules and null when ufw cannot be read
+// (inactive or not installed). `open`/`ok` are read only when `allowed` is absent,
+// and a plain "49595/udp" or bare port (QUIC, so udp) is accepted too. Returns
+// [{spec, open: true|false|null, label}]; the card shows them read-only.
+function fwPortLabel(label){
+  const l = String(label==null ? '' : label).trim();
+  if(l==='primary') return 'Primary P2P';
+  const m = l.match(/^worker-(\d+)$/);
+  return m ? 'Worker '+m[1]+' P2P' : l;
+}
+function fwExtraPorts(f){
+  const known = new Set(FW_PORTS.map(p=>p[0]));
+  const ports = (f && f.ports && typeof f.ports==='object') ? f.ports : {};
+  const out = [], seen = new Set();
+  const udp = v => { const s = String(v==null ? '' : v).trim(); return /^\d+$/.test(s) ? s+'/udp' : s; };
+  const add = (spec, open, label) => {
+    if(!spec || known.has(spec) || seen.has(spec)) return;
+    seen.add(spec);
+    out.push({spec, open: typeof open==='boolean' ? open : null, label: fwPortLabel(label)});
+  };
+  Object.keys(ports).forEach(k=>add(udp(k), ports[k], ''));
+  (Array.isArray(f && f.p2p_ports) ? f.p2p_ports : []).forEach(p=>{
+    if(p && typeof p==='object'){
+      const spec = p.spec ? udp(p.spec) : (p.port!=null ? p.port+'/'+(p.proto||'udp') : '');
+      add(spec, ('allowed' in p) ? p.allowed : (p.open!=null ? p.open : p.ok), p.label);
+    } else {
+      const spec = udp(p);
+      add(spec, ports[spec], '');
+    }
+  });
+  return out;
+}
+
 async function loadFirewall(){
   const card=$('#fwCard'); if(!card) return;
   const f = await api('/api/firewall');
@@ -2574,6 +2999,20 @@ async function loadFirewall(){
         <button class="btn ${open?'btn-red':'btn-green'}" data-fw-port="${esc(pp)}" data-fw-state="${open?'off':'on'}">${open?'Close':'Open'}</button>
       </span></div>`;
   }).join('');
+
+  const extras = fwExtraPorts(f);
+  const extraRows = extras.length
+    ? `<div class="kv" style="margin-top:14px"><span class="k" style="font-weight:600">Other node ports (read-only)</span><span class="v"></span></div>`
+      + extras.map(x=>{
+          const badge = !active ? `<span class="badge" style="${BADGE_GREY}">disabled</span>`
+            : x.open===true ? '<span class="badge ok">open</span>'
+            : x.open===false ? '<span class="badge err">closed</span>'
+            : `<span class="badge" style="${BADGE_GREY}">reported</span>`;
+          return `<div class="kv" style="align-items:center${active?'':';opacity:.45'}">
+            <span class="k">${esc(x.label||'Node P2P')} · <span class="mono">${esc(x.spec)}</span></span>
+            <span class="v">${badge}</span></div>`;
+        }).join('')
+    : '';
 
   const ufwBadge = !f.installed
     ? '<span class="muted">not installed</span>'
@@ -2609,8 +3048,9 @@ async function loadFirewall(){
     <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
     ${portRows}
+    ${extraRows}
     ${expectedBlock}
-    <div class="note" style="margin-top:14px">Only the three node ports can be toggled here.
+    <div class="note" style="margin-top:14px">Only the three node ports can be toggled here.${extras.length?' Open or close the other node ports with <span class="mono">firewall-setup.sh</span>.':''}
       <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong></div>`;
   card.querySelectorAll('[data-fw-port]').forEach(b=>b.addEventListener('click', ()=>toggleFirewallPort(b.dataset.fwPort, b.dataset.fwState, b)));
 }
@@ -2711,7 +3151,7 @@ async function stepPreflight(body){
     const icon = ok?'<span style="color:var(--green)">✓</span>':(hardReq?'<span style="color:var(--red)">✗</span>':'<span style="color:var(--yellow)">!</span>');
     return `<div class="check"><div class="ci">${icon}</div><div class="cl"><div class="ct">${esc(cap(name))}</div><div class="cd">${esc(desc)}</div></div></div>`;
   };
-  $('#pfList').innerHTML = hard.map(row).join('') + soft.map(row).join('') + hwInfoRow(d.hardware);
+  $('#pfList').innerHTML = hard.map(row).join('') + soft.map(row).join('') + hwInfoRow(d.hardware, d);
   const hardOk = hard.every(h=>h[1]);
   const next = $('#pfNext'); next.disabled = !hardOk;
   next.title = hardOk?'':'Hard requirements must pass';
@@ -2736,12 +3176,17 @@ function hwTierRows(hw){
 
 // Info line under the hardware rows: what was detected + the recommended spec to
 // validate (d.hardware.validator_recommended). '' when the server sent neither.
-function hwInfoRow(hw){
+// UI 1.9.0 servers add cpu_physical and cpu_threads (in hardware, or at the top
+// level of the preflight reply: pf); the CPU then reads "8 cores (16 threads)".
+function hwInfoRow(hw, pf){
   if(!hw) return '';
   const gb = kb => kb==null ? '?' : String(Math.round(kb/1048576));
+  const pick = k => hw[k]!=null ? hw[k] : ((pf && pf[k]!=null) ? pf[k] : null);
+  const phys = pick('cpu_physical'), threads = pick('cpu_threads');
+  const cpu = phys!=null ? `${phys} cores${threads!=null ? ` (${threads} threads)` : ''}` : `${hw.cpu??'?'} cores`;
   const parts = [];
-  if(hw.cpu!=null || hw.ram_kb!=null || hw.disk?.total_kb!=null)
-    parts.push(`Detected ${hw.cpu??'?'} cores / ${gb(hw.ram_kb)} GB RAM / ${gb(hw.disk?.total_kb)} GB disk`
+  if(hw.cpu!=null || phys!=null || hw.ram_kb!=null || hw.disk?.total_kb!=null)
+    parts.push(`Detected ${cpu} / ${gb(hw.ram_kb)} GB RAM / ${gb(hw.disk?.total_kb)} GB disk`
       + (hw.disk?.path ? ` (${hw.disk.path})` : '') + '.');
   const r = hw.validator_recommended;
   if(r) parts.push(`Recommended to validate: ${r.cpu} cores / ${r.ram_gb} GB RAM / ${r.disk_gb} GB disk.`);
@@ -2834,6 +3279,62 @@ function captureCfg(){
   if($('#cfgSvcGroup')) s.serviceGroup=$('#cfgSvcGroup').value.trim();
   if($('#cfgBls')) s.bls=$('#cfgBls').value;
   if($('#cfgBlsConfirm')) s.blsConfirm=$('#cfgBlsConfirm').value;
+  if($('#cfgRpcDomain')) s.rpcDomain=$('#cfgRpcDomain').value.trim();
+}
+
+// Public RPC in the wizard. The hostname reaches setup-node.sh as --rpc-domain, and
+// the helper passes the public IP field as --public-ip, which setup-node uses as the
+// inbound IP for its own DNS check. So the wizard checks DNS against that field too.
+// The result only warns: the operator may not have created the record yet, and
+// setup-node checks DNS again before it enables public RPC.
+function setupRpcPublicFields(){
+  const s = state.setup;
+  return `<div class="field" style="margin-top:12px"><label>Public RPC hostname</label>
+      <input id="cfgRpcDomain" placeholder="${esc(suggestRpcHost(state.access.rpc, state.access.caddy))}" value="${esc(s.rpcDomain||'')}" autocomplete="off">
+      <div id="cfgRpcDomainHint" style="font-size:12px;margin-top:4px"></div>
+      <div style="color:var(--text2);font-size:12px;margin-top:4px">Required for public RPC: without a hostname, setup keeps the node private. Point a DNS A record for this name at the public IP above.</div></div>
+    <div class="svc-row"><button class="btn btn-out" id="cfgRpcDns">Check DNS</button></div>
+    <div id="cfgRpcDnsResult" style="margin-top:10px;font-size:13px"></div>`;
+}
+
+// The normalised public RPC hostname the wizard sends, or '' (Private, or no valid name).
+function setupRpcHost(){
+  const s = state.setup;
+  const h = s.rpcPublic ? normHost(s.rpcDomain) : '';
+  return validHost(h) ? h : '';
+}
+
+// Live check of the wizard's RPC hostname: a malformed name, or the name the dashboard
+// is served on (Caddy cannot serve two sites on one name, and setup cannot move the
+// dashboard; the System tab's Public RPC card can).
+function syncSetupRpcHost(){
+  const inp=$('#cfgRpcDomain'), hint=$('#cfgRpcDomainHint'); if(!inp || !hint) return;
+  const host = normHost(inp.value);
+  if(host && !validHost(host)){ hint.innerHTML = badHostHtml(); return; }
+  if(validHost(host) && sameHost(host, dashHost(state.access.caddy))){
+    hint.innerHTML = `<span style="color:var(--yellow)">${esc(host)} already serves this dashboard, and Caddy cannot serve two sites on one name, so setup would leave public RPC off. Use another name, or enable public RPC on this one later from the System tab, which can move the dashboard.</span>`;
+    return;
+  }
+  hint.innerHTML = '';
+}
+
+// Caddy and RPC status for the hostname placeholder and the dashboard check, read
+// once per page load (the System tab refreshes state.access whenever it renders).
+async function loadSetupAccess(){
+  if(state.setup.accessLoaded) return;
+  state.setup.accessLoaded = true;
+  const [caddy, rpc] = await Promise.all([api('/api/caddy/status'), api('/api/rpc/status')]);
+  state.access = { caddy: caddy||{}, rpc: rpc||{} };
+  const inp=$('#cfgRpcDomain'); if(inp) inp.placeholder = suggestRpcHost(state.access.rpc, state.access.caddy);
+  syncSetupRpcHost();
+}
+
+// Wizard DNS check: advisory, and remembered per hostname so a re-render of the step
+// shows the last result instead of running the check again.
+async function setupRpcDnsCheck(){
+  const host = normHost(($('#cfgRpcDomain')||{}).value);
+  const html = await dnsCheck('/api/rpc/dns-check', '#cfgRpcDomain', '#cfgPubIp', '#cfgRpcDnsResult', {advisory:true});
+  if(html && validHost(host)) state.setup.rpcDns = {host, html};
 }
 
 function stepConfigure(body){
@@ -2845,9 +3346,10 @@ function stepConfigure(body){
   const rpcCards = `
     <div class="field"><label>RPC access</label>
       <div class="radio-cards">
-        <div class="rcard sel" data-rpc="private"><div class="rt">Private</div><div class="rd">RPC reachable from this server only. No firewall changes. Recommended.</div></div>
-        <div class="rcard disabled"><div class="rt">Public <span style="font-size:11px;font-weight:600;color:var(--text2)">· coming soon</span></div><div class="rd">Public RPC isn't available yet — it'll be offered over Caddy (HTTPS) in a future update. Use Private for now.</div></div>
-      </div></div>`;
+        <div class="rcard ${s.rpcPublic?'':'sel'}" data-rpc="private"><div class="rt">Private</div><div class="rd">RPC reachable from this server only. No firewall changes. Recommended.</div></div>
+        <div class="rcard ${s.rpcPublic?'sel':''}" data-rpc="public"><div class="rt">Public</div><div class="rd">JSON-RPC at your own hostname over HTTPS and WebSocket, served by Caddy and advertised to peers. Opens ports 80 and 443, and anyone can query it.</div></div>
+      </div>
+      ${s.rpcPublic ? setupRpcPublicFields() : ''}</div>`;
   body.innerHTML = `<h3>Step 4 · Configure</h3>
     <div class="field"><label>Node execution address (0x…)</label><input id="cfgEth" placeholder="0x…" value="${esc(s.eth||'')}"></div>
     <div class="field"><label>Public / external IP (advertised to peers) — auto-detected</label><input id="cfgPubIp" placeholder="e.g. 203.0.113.10" value="${esc(s.publicIp||'')}"></div>
@@ -2871,12 +3373,33 @@ function stepConfigure(body){
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(3)">← Back</button><button class="btn btn-green" id="cfgNext">Continue →</button></div>`;
   body.querySelectorAll('[data-rpc]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.rpcPublic=(r.dataset.rpc==='public'); renderSetup(); }));
   body.querySelectorAll('[data-p]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.passphrase=r.dataset.p; renderSetup(); }));
+  const rpcIn=$('#cfgRpcDomain');
+  if(rpcIn){
+    // Typing clears the previous DNS result; leaving the field checks the new name.
+    rpcIn.addEventListener('input', ()=>{ syncSetupRpcHost(); const o=$('#cfgRpcDnsResult'); if(o) o.innerHTML=''; state.setup.rpcDns=null; });
+    rpcIn.addEventListener('change', ()=>{ if(validHost(normHost(rpcIn.value))) setupRpcDnsCheck(); });
+    $('#cfgRpcDns').addEventListener('click', setupRpcDnsCheck);
+    syncSetupRpcHost();
+    const last = state.setup.rpcDns, o = $('#cfgRpcDnsResult');
+    if(last && o && sameHost(last.host, rpcIn.value)) o.innerHTML = last.html;
+    loadSetupAccess();
+  }
   $('#cfgNext').addEventListener('click', ()=>{
     captureCfg();
     const s=state.setup;
     if(!/^0x[0-9a-fA-F]{40}$/.test(s.eth)){ toast('Enter a valid 0x… address','error'); return; }
     if(!setupValidIp(s.publicIp)){ toast('Enter a valid public IP','error'); return; }
     if(!setupValidIp(s.internalIp)){ toast('Enter a valid internal IP (or 0.0.0.0)','error'); return; }
+    if(s.rpcPublic){
+      const h = normHost(s.rpcDomain), hint = $('#cfgRpcDomainHint');
+      if(!validHost(h)){
+        const msg = h ? 'The public RPC hostname is not valid.'
+                      : 'Enter the public RPC hostname, or choose Private. Without a hostname, setup keeps the node private.';
+        if(hint) hint.innerHTML = h ? badHostHtml() : `<span style="color:var(--red)">${esc(msg)}</span>`;
+        toast(msg,'error'); if(rpcIn) rpcIn.focus(); return;
+      }
+      s.rpcDomain = h;   // the review step and the payload show and send the normalised name
+    }
     if(s.serviceUser && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceUser)){ toast('Invalid service user name','error'); return; }
     if(s.serviceGroup && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceGroup)){ toast('Invalid service group name','error'); return; }
     if(!s.bls){ toast('Enter a BLS passphrase','error'); return; }
@@ -2895,7 +3418,7 @@ function stepReview(body){
     ['Address', s.eth||'(not set)'],
     ['Public IP', s.publicIp||'(not set)'],
     ['Internal IP (listener)', s.internalIp||'0.0.0.0'],
-    ['RPC access', s.rpcPublic?'Public':'Private'],
+    ['RPC access', s.rpcPublic ? 'Public at '+(setupRpcHost()||'(no valid hostname)') : 'Private'],
   ];
   rows.push(
     ['Service user / group', (s.serviceUser||'telcoin')+' / '+(s.serviceGroup||'telcoin')],
@@ -2907,6 +3430,7 @@ function stepReview(body){
     <div class="note" style="margin-top:14px">Phase 1 generates the node keys (no service is created or started yet). After you confirm a backup, phase 2 finalizes and starts the node.</div>
     <div class="svc-row"><button class="btn btn-green" id="genKeysBtn">⚙ Generate Keys</button>
       <button class="btn btn-out" onclick="goStep(4)">← Back</button></div>
+    <div id="setupReject"></div>
     <div class="card" id="setupProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3><div class="log-body" id="setupLog" style="height:260px"></div>
     </div>
@@ -2931,62 +3455,66 @@ function buildSetupPayload(includePassphrase){
     listener_primary: `/ip4/${lip}/udp/${p2p}/quic-v1`,
     listener_worker:  `/ip4/${lip}/udp/${worker}/quic-v1`,
     public_ip: s.publicIp,
-    rpc_public: !!s.rpcPublic,
+    rpc_public: false,
     advertised_name: s.advName || '',
     data_dir: s.dataDir || '',
     service_user: s.serviceUser,
     service_group: s.serviceGroup,
   };
+  // Public RPC travels as rpc_domain (setup-node's --rpc-domain). rpc_public is true
+  // only together with a valid rpc_domain: the server refuses one without the other.
+  const rpcHost = setupRpcHost();
+  if(rpcHost){ payload.rpc_public = true; payload.rpc_domain = rpcHost; }
   if(includePassphrase) payload.passphrase = s.bls;
   return payload;
 }
 
-// POST a setup phase and stream the response body (NOT EventSource -- so the
-// passphrase never appears in a URL). Returns the terminal done event, or null.
-async function streamSetup(phase, includePassphrase){
-  let resp;
-  try{
-    // The observer route is the canonical unified setup dispatch: every node is
-    // provisioned validator-capable, so keygen/finalize always go through it.
-    resp = await fetch('/api/setup/observer/'+phase, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(buildSetupPayload(includePassphrase)),
-    });
-  }catch(e){ toast('Setup request failed: '+e,'error'); return null; }
-  if(!resp.ok){
-    let msg=''; try{ msg=(await resp.json()).error; }catch(_){}
-    toast('Setup rejected: '+(msg||resp.status),'error'); return null;
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf='', result=null;
-  for(;;){
-    const {value,done} = await reader.read();
-    if(done) break;
-    buf += dec.decode(value,{stream:true});
-    let i;
-    while((i=buf.indexOf('\n\n'))>=0){
-      const frame=buf.slice(0,i); buf=buf.slice(i+2);
-      const line=frame.split('\n').find(l=>l.startsWith('data: '));
-      if(!line) continue;
-      let d; try{ d=JSON.parse(line.slice(6)); }catch(_){ continue; }
-      if(d.event==='closed') continue;
-      appendStream('#setupLog', d);
-      if(d.event==='done') result=d;
-    }
-  }
-  return result;
+// POST a setup phase and stream the response body (POST, so the passphrase never
+// appears in a URL). Returns the terminal done event, or null. The observer route
+// is the canonical unified setup dispatch: every node is provisioned
+// validator-capable, so keygen/finalize always go through it. onReject(status,
+// error) receives a refusal (for example a 400 for the RPC hostname) instead of a toast.
+function streamSetup(phase, includePassphrase, onReject){
+  return streamPost('/api/setup/observer/'+phase, buildSetupPayload(includePassphrase),
+    {target:'#setupLog', what:'Setup', onReject});
+}
+
+// A refused setup request on the step itself: the server's own message, and what
+// happened as a result. sel: '#setupReject' (keygen) or '#finalizeReject' (finalize).
+function showSetupReject(sel, html){
+  const box=$(sel); if(!box) return;
+  box.innerHTML = html ? `<div class="note" style="margin:12px 0 0;${NOTE_ERR}">${html}</div>` : '';
+}
+// The server's reason as one sentence, escaped. UI 1.9.0 servers send sentences
+// that end in a full stop; one is added only when the text has none.
+function setupRejectText(status, msg){
+  const t = msg ? String(msg).trim() : 'HTTP '+status+', with no reason given';
+  return esc(/[.!?]$/.test(t) ? t : t+'.');
 }
 
 async function runKeygen(){
   const b=$('#genKeysBtn'); if(b) b.disabled=true;
+  showSetupReject('#setupReject', '');
+  if(state.setup.rpcPublic && !setupRpcHost()){
+    // Never reached through Configure, which requires the name; refuse rather than go private silently.
+    showSetupReject('#setupReject', 'Public RPC is selected without a valid hostname. Go back to Configure and enter one, or choose Private.');
+    if(b) b.disabled=false; return;
+  }
   const card=$('#setupProgressCard'); if(card) card.style.display='block';
   const buildNote = state.setup.method==='source'
     ? 'source builds take 20–40 min'
     : 'pulling the docker image';
   const log=$('#setupLog'); if(log) log.innerHTML='<div class="log-line info">» generating keys… ('+buildNote+' — keep this tab open)</div>';
-  const d = await streamSetup('keygen', true);
+  let refused = null;
+  const d = await streamSetup('keygen', true, (status, msg)=>{ refused = {status, msg}; });
   if(d && d.ok){ toast('Keys generated — back them up','success'); showBackupGate(d); }
+  else if(refused){
+    if(card) card.style.display='none';   // nothing ran, so there is no progress to show
+    showSetupReject('#setupReject', `<strong>The server refused the request:</strong> ${setupRejectText(refused.status, refused.msg)}
+      Nothing ran on this server. Go back to Configure, correct the setting, and generate the keys again.`);
+    toast('Key generation refused'+(refused.msg?': '+refused.msg:''),'error');
+    if(b) b.disabled=false;
+  }
   else { toast('Key generation failed'+(d&&d.msg?': '+d.msg:''),'error'); if(b) b.disabled=false; }
 }
 
@@ -3004,6 +3532,7 @@ function showBackupGate(d){
       </div>
       <div class="field"><label>Type <span class="mono">BACKED UP</span> to confirm you have saved these key files</label>
         <input id="backedUpInput" autocomplete="off" placeholder="BACKED UP"></div>
+      <div id="finalizeReject"></div>
       <div class="svc-row"><button class="btn btn-green" id="finalizeBtn" disabled>Continue → Finalize &amp; Start Node</button></div>
     </div>`;
   const dl=$('#dlNodeInfo'); if(dl) dl.addEventListener('click', ()=>{
@@ -3020,8 +3549,20 @@ async function runFinalize(){
   const fb=$('#finalizeBtn'), inp=$('#backedUpInput');
   if(inp && inp.value!=='BACKED UP') return;
   if(fb) fb.disabled=true; if(inp) inp.disabled=true;
+  showSetupReject('#finalizeReject', '');
   const log=$('#setupLog'); if(log) log.insertAdjacentHTML('beforeend','<div class="log-line info">» finalizing and starting the node…</div>');
-  const d = await streamSetup('finalize', false);
+  let refused = null;
+  const d = await streamSetup('finalize', false, (status, msg)=>{ refused = {status, msg}; });
+  if(!(d && d.ok) && refused){
+    // Keygen already wrote the keys and refuses to overwrite them, so the way forward is
+    // another finalize, not a second pass through the wizard.
+    appendStream('#setupLog', {event:'error', msg:'Finalize refused by the server: '+(refused.msg||'HTTP '+refused.status)});
+    showSetupReject('#finalizeReject', `<strong>The server refused to finalize:</strong> ${setupRejectText(refused.status, refused.msg)}
+      Nothing was started, and the keys from the first phase stay where they are. Press Finalize again once the cause is fixed.`);
+    toast('Finalize refused'+(refused.msg?': '+refused.msg:''),'error');
+    if(fb) fb.disabled=false; if(inp) inp.disabled=false;
+    return;
+  }
   if(d && d.ok){
     toast('Node finalized and started','success');
     await loadNodes(true);   // fresh detection so the dashboard won't say "not installed"
@@ -3045,6 +3586,7 @@ function showSetupComplete(){
     <div class="card" style="margin-top:14px;border-color:rgba(0,232,122,0.35)">
       <h3 style="color:var(--green)">✅ Node installed and started</h3>
       <p class="ns-instr" style="margin-top:-4px">Your node is running and beginning to sync as a full node. Once it is staked and admitted to the committee on-chain it is automatically promoted to a validator and the dashboard switches to the validator view. Open the dashboard to monitor it.</p>
+      <div id="setupRpcSummary" style="margin-top:12px"><div class="muted" style="font-size:13px">Reading the public RPC status…</div></div>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="openDashBtn">Completed — Open Dashboard →</button>
       </div>
@@ -3052,6 +3594,44 @@ function showSetupComplete(){
   if(gate) gate.innerHTML = html;
   else { const log=$('#setupLog'); if(log) log.insertAdjacentHTML('beforeend', html); }
   const b=$('#openDashBtn'); if(b) b.addEventListener('click', openDashboardFresh);
+  fillSetupRpcSummary();
+}
+
+// The completion card reads public RPC from /api/rpc/status after finalize rather
+// than echoing the wizard's choice: setup-node leaves RPC private when DNS or Caddy
+// was not ready, and says why in the progress log.
+async function fillSetupRpcSummary(){
+  const wanted = setupRpcHost();
+  const r = await api('/api/rpc/status');
+  const box=$('#setupRpcSummary'); if(box) box.innerHTML = rpcSummaryHtml(r, wanted);
+}
+
+// Read-only public RPC summary (the System tab's card has the controls). s is an
+// /api/rpc/status reply; wanted is the hostname the wizard asked for, '' for Private.
+// Keys an older server does not send read "unknown", as on the System tab.
+function rpcSummaryHtml(s, wanted){
+  s = s || {};
+  const row = (k, v) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
+  const head = '<div style="font-size:13px;font-weight:600;margin-bottom:2px">Public RPC</div>';
+  if(typeof s.enabled!=='boolean' || s.error)   // the server's fallback reply carries error
+    return head + warnNote(`The public RPC status could not be read${s.error?' ('+esc(s.error)+')':''}. The Public RPC card on the System tab shows it.`);
+  const dom = normHost(s.domain);
+  const rows = [row('Status', s.enabled
+    ? (s.running ? '<span class="badge ok">enabled</span>' : '<span class="badge warn">enabled, Caddy not running</span>')
+    : `<span class="badge" style="${BADGE_GREY}">private</span>`)];
+  if(s.enabled) rows.push(row('Hostname', dom ? `<a href="https://${esc(dom)}" target="_blank" rel="noopener">${esc(dom)}</a>` : '—'));
+  rows.push(row('Advertised to peers', advBadges(s, s.enabled)));
+  rows.push(row('WebSocket port', wsListenBadge(s.ws_listening)));
+  let note = '';
+  const advertised = triState(s.advertised_http)==='yes';
+  if(!s.enabled && (wanted || advertised)){
+    const parts = [];
+    if(wanted) parts.push(`Public RPC on <span class="mono">${esc(wanted)}</span> is not enabled yet; the progress log above says why.`);
+    if(advertised) parts.push(`node-info.yaml already tells peers this node serves RPC at <span class="mono">${esc(s.advertised_http)}</span>, which nothing serves yet.`);
+    parts.push('The Public RPC card on the System tab can enable it' + (advertised ? ' or withdraw the advertisement.' : '.'));
+    note = warnNote(parts.join(' '));
+  }
+  return head + rows.join('') + note;
 }
 
 // Re-detect nodes (fresh) and hard-rebuild the dashboard, then switch to it.
@@ -3142,6 +3722,13 @@ async function pollNavNetPill(){
 document.addEventListener('click', e=>{
   const m = $('#dlMenu');
   if(m && !e.target.closest('#dlDrop')) m.classList.remove('open');
+});
+// Copy buttons carry their value in a data-copy attribute (escaped like any other
+// attribute), not in an inline onclick, so a node-provided string cannot end the
+// script string it would sit in. One listener serves every view.
+document.addEventListener('click', e=>{
+  const b = e.target.closest('[data-copy]'); if(!b) return;
+  copyToClipboard(b.dataset.copy, b.dataset.copyLabel);
 });
 
 (async function init(){

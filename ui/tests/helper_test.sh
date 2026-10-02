@@ -489,6 +489,32 @@ refused "rpc-enable refuses an invalid dashboard host" rpc-enable node7.example.
 refused "rpc-enable refuses an invalid inbound IP" rpc-enable node7.example.org not-an-ip
 refused "rpc-enable refuses a fourth argument" rpc-enable node7.example.org - dash.example.org extra
 
+# ---- config-set fields (edit-config 1.3.0) ------------------------------------------
+# The same rows as ConfigSetTest in ui/test_server_contract.py. An accepted value
+# reaches edit-config.sh as field=value; a refused one runs nothing.
+fixture unified
+for fv in "primary_listener=/ip4/0.0.0.0/udp/49590/quic-v1" \
+          "worker_listener=/ip6/::/udp/49594/quic-v1" \
+          "metrics=127.0.0.1:9101" "metrics=off" "verbosity=-vvvvv" \
+          "docker_image=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri" \
+          "bootstrap_peers=none" "bootstrap_peers=/home/ubuntu/peers.yaml" \
+          "state_export=off" "state_export=unlimited" "state_export=1" "state_export=999999" \
+          "allow_private_forward_targets=true" "allow_private_forward_targets=false"; do
+    t="$(trace config-set "${fv%%=*}" "${fv#*=}")"
+    check_has "config-set accepts ${fv}" "edit-config [--json] [--set] [${fv}]" "$t"
+done
+for fv in "metrics=on" "metrics=OFF" "metrics=127.0.0.1" "verbosity=-vvvvvv" "docker_image=adiri" \
+          "bootstrap_peers=peers.yaml" "bootstrap_peers=None" "bootstrap_peers=/tmp/peers file.yaml" \
+          'bootstrap_peers=/tmp/$(id).yaml' "bootstrap_peers=" \
+          "state_export=0" "state_export=01" "state_export=1000000" "state_export=-1" \
+          "state_export=Unlimited" \
+          "allow_private_forward_targets=yes" "allow_private_forward_targets=1" \
+          "allow_private_forward_targets=TRUE" "not_a_field=1"; do
+    refused "config-set refuses ${fv}" config-set "${fv%%=*}" "${fv#*=}"
+done
+same_with_tokens unified config-set state_export 5
+check_has "config-set state_export 5 argv" "edit-config [--json] [--set] [state_export=5]" "$BASE"
+
 # ---- Other subcommands keep working -------------------------------------------------
 fixture unified
 t="$(trace firewall-port 49590/udp on)"

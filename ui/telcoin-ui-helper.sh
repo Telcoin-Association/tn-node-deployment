@@ -421,13 +421,29 @@ cmd_config_set() {
             [[ "$value" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] \
                 || die "invalid multiaddr: $value" ;;
         metrics)
-            [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$ ]] \
-                || die "invalid metrics address (IPv4:PORT): $value" ;;
+            # off removes --metrics.
+            [[ "$value" =~ ^(off|([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5})$ ]] \
+                || die "invalid metrics address (IPv4:PORT or off): $value" ;;
         verbosity)
             [[ "$value" =~ ^-v{1,5}$ ]] || die "invalid verbosity: $value" ;;
         docker_image)
             [[ "$value" =~ ^[A-Za-z0-9._/:@-]+$ && "$value" == *:* ]] \
                 || die "invalid docker image: $value" ;;
+        bootstrap_peers)
+            # An absolute path to a peers file already on the node (this helper
+            # cannot upload one), or none to remove the flag and the file.
+            # edit-config.sh has the node binary check the file before it installs
+            # it as /etc/telcoin/bootstrap-peers.yaml.
+            [[ "$value" =~ ^(none|/[A-Za-z0-9._/-]+)$ ]] \
+                || die "invalid bootstrap_peers (an absolute path or none): $value" ;;
+        state_export)
+            # off, unlimited, or how many epochs of exports to keep.
+            [[ "$value" =~ ^(off|unlimited|[1-9][0-9]{0,5})$ ]] \
+                || die "invalid state_export (off, unlimited or 1 to 999999): $value" ;;
+        allow_private_forward_targets)
+            # edit-config.sh refuses true on testnet and mainnet.
+            [[ "$value" =~ ^(true|false)$ ]] \
+                || die "invalid allow_private_forward_targets (true or false): $value" ;;
         *)
             die "field not editable: $field" ;;
     esac

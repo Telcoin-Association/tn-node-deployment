@@ -16,6 +16,7 @@ Every route returns JSON even on error: a missing log file yields an empty
 array, a missing service file yields installed:false -- never a 500.
 """
 
+import collections
 import json
 import os
 import re
@@ -86,49 +87,44 @@ DEFAULT_INSTALL_DIR = "/opt/telcoin"
 TN_SOURCE_DIR = "/opt/telcoin-source"
 
 
+# Where systemd unit files live; a constant so the tests can point it elsewhere.
+SYSTEMD_DIR = "/etc/systemd/system"
+
+
 def resolve_service_unit(t):
     """Resolve the systemd unit BASE name for the installed node, mirroring
     lib/fallback.sh's tn_resolve_service. New single-identity installs use one
     unit (telcoin.service) regardless of node type; legacy installs keep their
     per-role unit. Probe in priority order:
-        /etc/systemd/system/telcoin.service          -> "telcoin"   (new)
+        <SYSTEMD_DIR>/telcoin.service                -> "telcoin"   (new)
         else telcoin-<validator|observer>.service    -> that base   (legacy)
         else                                         -> "telcoin-<t>" (default
             for the requested type, so existence probes on a not-installed node
             still resolve to the conventional per-type path).
     Validator is preferred over observer if a host improbably has both."""
-    sysd = "/etc/systemd/system"
-    if os.path.exists(f"{sysd}/telcoin.service"):
+    if os.path.exists(f"{SYSTEMD_DIR}/telcoin.service"):
         return "telcoin"
     for role in ("validator", "observer"):
-        if os.path.exists(f"{sysd}/telcoin-{role}.service"):
+        if os.path.exists(f"{SYSTEMD_DIR}/telcoin-{role}.service"):
             return f"telcoin-{role}"
     return f"telcoin-{t}"
 
 
-def unified_install():
-    """True when a new single-identity install is present (the unified
-    telcoin.service exists). Such a host runs ONE node whose type lives in
-    /etc/telcoin/.node-meta, not in the unit name."""
-    return os.path.exists("/etc/systemd/system/telcoin.service")
-
-
-def resolve_node_type():
-    """The default-view HINT observer|validator for a unified install, mirroring
-    lib/fallback.sh's tn_resolve_node_type. NODE_TYPE is a non-authoritative
-    presentation hint, NOT a role: the protocol decides a node's role dynamically
-    from on-chain committee membership each epoch, and the UI promotes/demotes the
-    view from the on-chain stake status (ConsensusRegistry getValidator; see
-    detect_nodes' on-chain remap). The hint is read from
-    the unified /etc/telcoin/.node-meta NODE_TYPE (via the root helper, the only
-    channel to the mode-0600 file); on older/legacy metadata the per-role
-    .node-meta answers; a missing hint resolves to the plain 'observer' full-node
-    view -- never validator, since on-chain status is what promotes a node."""
-    for t in NODE_TYPES:
-        nt = read_meta(t).get("NODE_TYPE", "").strip()
-        if nt in NODE_TYPES:
-            return nt
-    return "observer"
+def _legacy_role():
+    """The role a legacy install is filed under on disk, for legacy path
+    fallbacks only: the per-role unit (telcoin-validator, then telcoin-observer,
+    the order lib/fallback.sh uses), else the per-role config dir that holds a
+    .node-meta. None when nothing legacy is on disk. It never decides the view:
+    the presentation slot comes from the chain (onchain_role), and paths must not
+    follow the slot, or a legacy observer install shown as a validator would read
+    /var/lib/telcoin/validator."""
+    for role in ("validator", "observer"):
+        if os.path.exists(f"{SYSTEMD_DIR}/telcoin-{role}.service"):
+            return role
+    for role in ("validator", "observer"):
+        if os.path.exists(f"{DEFAULT_CONFIG_DIR}/{role}/.node-meta"):
+            return role
+    return None
 
 
 def service_name(t):
@@ -136,7 +132,7 @@ def service_name(t):
 
 
 def service_file(t):
-    return f"/etc/systemd/system/{resolve_service_unit(t)}.service"
+    return f"{SYSTEMD_DIR}/{resolve_service_unit(t)}.service"
 
 
 def log_file(t):
@@ -146,22 +142,27 @@ def log_file(t):
 
 
 def config_dir(t):
-    """Node config dir -- /etc/telcoin for a unified install (.node-meta lives
-    there), else the legacy per-type dir."""
+    """Node config dir, as lib/fallback.sh's tn_resolve_config_dir finds it:
+    /etc/telcoin when the unified .node-meta is there, else the legacy role dir
+    (_legacy_role), else /etc/telcoin. `t` is the presentation slot and plays no
+    part."""
     if os.path.exists(f"{DEFAULT_CONFIG_DIR}/.node-meta"):
         return DEFAULT_CONFIG_DIR
-    return f"{DEFAULT_CONFIG_DIR}/{t}"
+    role = _legacy_role()
+    return f"{DEFAULT_CONFIG_DIR}/{role}" if role else DEFAULT_CONFIG_DIR
 
 
 def data_dir(t):
-    """Node data dir -- from .node-meta DATA_DIR if set, else the default
-    (unified /var/lib/telcoin, or the legacy per-type dir)."""
+    """Node data dir: .node-meta DATA_DIR when set, else as lib/fallback.sh's
+    tn_resolve_data_dir falls back (unified /var/lib/telcoin, or the legacy role
+    dir from _legacy_role). `t` is the presentation slot and plays no part."""
     meta = read_meta(t)
     if meta.get("DATA_DIR"):
         return meta["DATA_DIR"]
     if os.path.exists(f"{DEFAULT_CONFIG_DIR}/.node-meta"):
         return DEFAULT_DATA_DIR
-    return f"{DEFAULT_DATA_DIR}/{t}"
+    role = _legacy_role()
+    return f"{DEFAULT_DATA_DIR}/{role}" if role else DEFAULT_DATA_DIR
 
 
 def node_id(t):
@@ -220,6 +221,24 @@ def run(cmd, timeout=10):
         return 1, "", str(e)
 
 
+def _parse_json_tail(text):
+    """The last line of `text` that parses as a JSON object, or None. The helper's
+    status and DNS-check calls print one JSON object, but the script behind them
+    can print a warning line before it; reading from the end keeps such a line
+    from hiding the result."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def valid_type(t):
     return t in NODE_TYPES
 
@@ -228,13 +247,61 @@ def bad_type():
     return jsonify({"error": "invalid node_type"}), 400
 
 
+# Hostnames (dashboard, public RPC, the dashboard's new home on a move) follow
+# one strict rule, shared with the helper's valid_hostname and the page's HOST_RE:
+# at most 253 characters, two or more labels of letters, digits and inner
+# hyphens (1 to 63 characters each), and not only digits and dots, which would
+# be an IPv4 address. The server and the page normalise first (norm_host); the
+# helper checks the name exactly as it receives it.
+_HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_HOST_RE = re.compile(_HOST_LABEL + r"(?:\." + _HOST_LABEL + r")+")
+_IPV4_LIKE_RE = re.compile(r"[0-9.]+")
+
+
+def norm_host(value):
+    """A hostname as typed, trimmed, lowercased and without one trailing dot.
+    '' for None."""
+    h = str(value if value is not None else "").strip().lower()
+    return h[:-1] if h.endswith(".") else h
+
+
+def valid_hostname(h):
+    """True when `h` (already normalised) passes the strict hostname rule."""
+    return (isinstance(h, str) and len(h) <= 253
+            and _HOST_RE.fullmatch(h) is not None
+            and _IPV4_LIKE_RE.fullmatch(h) is None)
+
+
+def same_host(a, b):
+    """True when two hostnames name the same host after normalising."""
+    a, b = norm_host(a), norm_host(b)
+    return bool(a) and a == b
+
+
+def host_error(what, value, example="node7.example.com"):
+    """The 400 message for a hostname that is missing or fails the strict rule.
+    The page shows it to the operator as is, so it is a sentence and `what` names
+    the field in the operator's words ("public RPC hostname"), never the API key."""
+    if not value:
+        return f"Enter a {what}, such as {example}."
+    shown = value if len(value) <= 64 else value[:64] + "..."
+    return (f'That {what} is not valid: "{shown}". Use a DNS name such as {example}: '
+            "two or more labels of letters, digits and hyphens, not an IP address, "
+            "at most 253 characters.")
+
+
+# The setup 400 for rpc_public without rpc_domain, shown to the operator as is
+# (ui/dev/serve.py answers with the same text).
+RPC_PUBLIC_NEEDS_HOST = "Public RPC needs a hostname. Enter one or choose Private."
+
+
 # .node-meta is root-owned mode 0600; the unprivileged UI user cannot open it
 # directly (that silently yielded {} -> data_dir() etc. fell back to defaults,
 # so a custom data dir read the wrong disk). Read it through the root helper
 # instead -- the same privileged path addons-status already uses. Cached briefly
 # since the file only changes on install/remove/settings and read_meta() is
 # called several times per request; clear_meta_cache() drops it after a mutation.
-_meta_cache = {}          # t -> (expires_monotonic, dict)
+_meta_cache = {}          # "meta" -> (expires_monotonic, dict)
 _META_TTL = 15.0
 
 
@@ -242,17 +309,19 @@ def clear_meta_cache():
     _meta_cache.clear()
 
 
-def read_meta(t):
-    """Parse /etc/telcoin/<type>/.node-meta (KEY=VALUE lines) via the root helper.
-    {} if missing/unreadable."""
-    if t not in NODE_TYPES:
+def read_meta(t=None):
+    """Parse the node's .node-meta (KEY=VALUE lines) via the root helper. {} if
+    missing/unreadable. The helper finds the file itself (the unified
+    /etc/telcoin/.node-meta, else a legacy per-role one), so both presentation
+    slots read the same file; `t` is only checked, never sent."""
+    if t is not None and t not in NODE_TYPES:
         return {}
     now = time.monotonic()
-    cached = _meta_cache.get(t)
+    cached = _meta_cache.get("meta")
     if cached and cached[0] > now:
         return cached[1]
     out = {}
-    rc, text, _ = run(["sudo", "-n", HELPER, "meta-cat", t], timeout=10)
+    rc, text, _ = run(["sudo", "-n", HELPER, "meta-cat"], timeout=10)
     if rc == 0 and text:
         for line in text.splitlines():
             line = line.strip()
@@ -260,8 +329,46 @@ def read_meta(t):
                 continue
             k, _, v = line.partition("=")
             out[k.strip()] = v.strip()
-    _meta_cache[t] = (now + _META_TTL, out)
+    _meta_cache["meta"] = (now + _META_TTL, out)
     return out
+
+
+# The helper API this server speaks (HELPER_API in ui/telcoin-ui-helper.sh). An
+# older helper has no helper-version subcommand, and an older sudoers whitelist
+# has no line for it, so either one fails the call and the page asks the operator
+# to re-run install-ui.sh.
+HELPER_API_REQUIRED = 2
+_helper_cache = {"expires": 0.0, "data": None}
+_HELPER_TTL = 60.0
+
+
+def helper_status():
+    """{ok, api, required, error} for the privileged helper. ok is True when
+    `helper-version` prints an API number at or above the one this server needs
+    (a newer helper keeps the old subcommands); api is the number it printed, or
+    None. Every answer is cached for a minute, a failed one too: on a box whose
+    sudoers file predates helper-version each probe is a sudo denial in the auth
+    log, and the page polls every 15 s. Re-running install-ui.sh restarts this
+    server, which empties the cache."""
+    now = time.monotonic()
+    if _helper_cache["data"] is not None and _helper_cache["expires"] > now:
+        return dict(_helper_cache["data"])
+    rc, out, err = run(["sudo", "-n", HELPER, "helper-version"], timeout=10)
+    text = (out or "").strip()
+    api = int(text) if rc == 0 and re.fullmatch(r"[0-9]+", text) else None
+    ok = api is not None and api >= HELPER_API_REQUIRED
+    if ok:
+        error = ""
+    elif rc != 0:
+        error = err or text or f"helper-version failed (exit code {rc})"
+    elif api is None:
+        error = f"helper-version printed {text[:60]!r}, not an API number"
+    else:
+        error = f"the helper speaks API {api}; this server needs {HELPER_API_REQUIRED}"
+    data = {"ok": ok, "api": api, "required": HELPER_API_REQUIRED, "error": error}
+    _helper_cache["data"] = data
+    _helper_cache["expires"] = now + _HELPER_TTL
+    return dict(data)
 
 
 def parse_service_file(t):
@@ -469,150 +576,79 @@ def _resolve_rpc_port(insp, internal_port):
     return internal_port
 
 
-def _docker_node_type(name):
-    """Classify an external container as 'validator' or 'observer' from the
-    helper's docker-node-info output (a non-empty proof_of_possession in
-    node-info.yaml -> validator). None when it can't be determined; callers
-    default to observer. Node type is config-derived, not from --validator
-    flags (team deployments don't pass them)."""
-    if not name:
-        return None
-    rc, out, _ = run(["sudo", "-n", HELPER, "docker-node-info", name], timeout=10)
-    if rc != 0 or not out:
-        return None
-    m = re.search(r"(?m)^node_type:\s*(validator|observer)\s*$", out)
-    return m.group(1) if m else None
+def _empty_slot():
+    return {"mode": None, "status": "not installed", "container": None,
+            "image": None, "rpc_port": None, "node_info_path": None}
 
 
 def detect_nodes():
-    """{type: {mode, status, container, image, rpc_port, node_info_path,
-    inspect}} for both node types, short-TTL cached. mode is "scripts",
+    """{type: {mode, status, container, image, rpc_port, node_info_path, ...}}
+    for both presentation slots, short-TTL cached. mode is "scripts",
     "external", or None. `inspect` is the cached docker inspect dict for an
-    external node (reused by status/identity within the TTL), absent otherwise."""
+    external node (reused by status/identity within the TTL), absent otherwise.
+
+    One host runs one node, and it is always found in the observer slot first:
+    the scripts-managed unit when one is installed (unified telcoin.service or a
+    legacy per-role unit, which service_file resolves alike), else the first
+    running Telcoin Network container. The chain then decides the slot: when
+    onchain_role() says the node's execution address is staked (Staked,
+    PendingActivation, Active, PendingExit), the node moves to the validator slot
+    with staked=True; otherwise (not staked, exited, retired, no record, or no
+    answer at all) it stays in the observer slot, the plain full-node view.
+    NODE_TYPE in .node-meta, the legacy unit name and node-info.yaml play no
+    part. The installed slot carries role_source and role_checked_at (how and
+    when the role was decided) for /api/nodes."""
     now = time.time()
     cached = _detect_cache["data"]
     if cached is not None and now - _detect_cache["ts"] < _DETECT_TTL:
         return cached
 
-    out = {t: {"mode": None, "status": "not installed", "container": None,
-               "image": None, "rpc_port": None, "node_info_path": None}
-           for t in NODE_TYPES}
+    out = {t: _empty_slot() for t in NODE_TYPES}
+    slot = "observer"
 
-    scripts = {}
-    # A new single-identity install has ONE unit (telcoin.service) for whichever
-    # single node type the host runs; the historical loop over both types would
-    # otherwise mark BOTH as installed (service_file() resolves to the same unit
-    # for either type). Attribute the unified unit to exactly one type slot,
-    # resolved from .node-meta NODE_TYPE. Legacy installs keep their per-type
-    # unit and the original per-type detection below.
-    if unified_install():
-        t = resolve_node_type()
-        cfg = parse_service_file(t)
+    if os.path.exists(service_file(slot)):
+        cfg = parse_service_file(slot)
         try:
             port = int(cfg["rpc_port"])
         except (TypeError, ValueError):
             port = 8545
-        out[t] = {"mode": "scripts", "status": service_status(t),
-                  "container": None, "image": None, "rpc_port": port,
-                  "node_info_path": None}
-        scripts[t] = True
+        out[slot] = dict(_empty_slot(), mode="scripts",
+                         status=service_status(slot), rpc_port=port)
     else:
-        for t in NODE_TYPES:
-            if os.path.exists(service_file(t)):
-                cfg = parse_service_file(t)
-                try:
-                    port = int(cfg["rpc_port"])
-                except (TypeError, ValueError):
-                    port = 8545
-                out[t] = {"mode": "scripts", "status": service_status(t),
-                          "container": None, "image": None, "rpc_port": port,
-                          "node_info_path": None}
-                scripts[t] = True
-
-    # Container names already owned by a scripts-deployed systemd service. A
-    # scripts node can itself run as a docker container; that container must
-    # NEVER be re-detected as a separate "external" node (regardless of how it
-    # would classify), since systemd already manages it. New installs name the
-    # container `telcoin`; legacy installs name it telcoin-<type>.
-    managed_names = {f"telcoin-{t}" for t in NODE_TYPES if scripts.get(t)}
-    if unified_install():
-        managed_names.add("telcoin")
-
-    # Probe docker only for types that have NO systemd unit.
-    if not all(scripts.get(t) for t in NODE_TYPES):
+        # No unit: ask the root helper for a dev-team docker container. A scripts
+        # node that itself runs in docker has a unit, so it never gets here.
         for name in _docker_detect():
-            if name in managed_names:
-                _dbg(f"detect_nodes: skipping {name!r} -- managed by systemd")
-                continue
             insp = _docker_inspect(name)
             if not insp:
                 continue
             config = insp.get("Config") or {}
-            cmd = config.get("Cmd") or []
-            # Type is decided by config (proof_of_possession in node-info.yaml),
-            # not the docker command line.
-            t = _docker_node_type(name) or "observer"
-            if scripts.get(t) or out[t]["mode"] == "external":
-                continue  # never override a scripts node / first container wins
             st = insp.get("State") or {}
             binds = (insp.get("HostConfig") or {}).get("Binds") or []
-            node_info_path = binds[0].split(":", 1)[0] if binds else None
-            internal_port = _cmd_http_port(cmd)
+            internal_port = _cmd_http_port(config.get("Cmd") or [])
             rpc_port = _resolve_rpc_port(insp, internal_port)
-            _dbg(f"detect_nodes: external {t} container={name!r} "
+            _dbg(f"detect_nodes: external container={name!r} "
                  f"internal_http_port={internal_port} rpc_port={rpc_port} "
                  f"netmode={(insp.get('HostConfig') or {}).get('NetworkMode')!r}")
-            out[t] = {
+            out[slot] = {
                 "mode": "external",
                 "status": "active" if st.get("Running") is True else "inactive",
                 "container": name,
                 "image": config.get("Image"),
                 "rpc_port": rpc_port,
-                "node_info_path": node_info_path,
+                "node_info_path": binds[0].split(":", 1)[0] if binds else None,
                 "inspect": insp,
             }
+            break  # the first container wins
 
-    # ---- On-chain role remap (bidirectional) --------------------------------
-    # telcoin-network decides a node's ROLE dynamically from on-chain committee
-    # membership each epoch, not from the static NODE_TYPE hint. So present the
-    # single installed (scripts-managed) node under the slot its on-chain STAKE
-    # status dictates (onchain_is_validator: getValidator(execution address)), in
-    # EITHER direction:
-    #   staked (Staked / PendingActivation / Active / PendingExit)
-    #                         -> validator slot (the validator dashboard)
-    #   not staked, exited, or not whitelisted (getValidator reverts)
-    #                         -> observer slot  (the plain full-node view) -- this
-    #     also demotes a legacy setup-validator install that never staked
-    #   None (RPC down / not synced) -> leave it in its NODE_TYPE hint slot and
-    #     never flap; a demotion requires a definitive synced False, not unknown.
-    # Runs AFTER docker detection so managed_names already shielded the legacy
-    # container from external re-detect. The single telcoin.service/.node-meta
-    # resolves to the same node for either type slot, so re-attributing is purely
-    # presentational (no other change needed). The clobber guard keeps a genuinely
-    # separate node in the OTHER slot (shouldn't exist on a single-node host) from
-    # being overwritten. External (read-only docker) nodes keep their config-
-    # derived slot and are not remapped.
-    src = next((t for t in NODE_TYPES
-                if (out.get(t) or {}).get("mode") == "scripts"), None)
-    if src is not None:
-        is_val = onchain_is_validator(src, out[src])
-        dst = ("validator" if is_val is True
-               else "observer" if is_val is False else None)
-        if dst is not None and dst != src:
-            other = out.get(dst) or {}
-            # Only remap into an empty slot or one already pointing at this same
-            # single install (mode None/scripts) -- never clobber a separate node.
-            if other.get("mode") in (None, "scripts"):
-                remapped = dict(out[src])
-                # "staked" badges the surprising observer-deployed-now-validator
-                # case (true only when promoting INTO the validator slot).
-                remapped["staked"] = (is_val is True)
-                out[dst] = remapped
-                out[src] = {"mode": None, "status": "not installed",
-                            "container": None, "image": None,
-                            "rpc_port": None, "node_info_path": None}
-                _log(f"detect_nodes: on-chain staked={is_val} -> "
-                     f"presenting the {src} install under the {dst} slot")
+    node = out[slot]
+    if node["mode"] is not None:
+        role = onchain_role(slot, node)
+        node["role_source"] = role["source"]
+        node["role_checked_at"] = role["checked_at"]
+        node["role_address"] = role.get("address")
+        if role["validator"]:
+            out["validator"] = dict(node, staked=True)
+            out[slot] = _empty_slot()
 
     _detect_cache["ts"] = now
     _detect_cache["data"] = out
@@ -858,12 +894,14 @@ NETWORKS = {
 }
 
 # Public consensus-block RPC endpoints per chain id, tried in order (first
-# success wins). Both networks now front their nodes with a global load balancer, so
-# the LB goes first and the individual node endpoints remain as fallbacks for when it
-# is degraded. A chain id omitted here degrades the "Network Block"/"Consensus Lag"
-# compare cards to "—".
+# success wins). Both networks front their nodes with a global load balancer, so
+# the balanced hostname goes first; devnet keeps its individual nodes as
+# fallbacks for when the balancer is degraded. Testnet uses rpc.adiri.tel:
+# rpc.telcoin.network is reserved for mainnet, even though it answers for chain
+# 2017 until mainnet launches. A chain id omitted here degrades the "Network
+# Block"/"Consensus Lag" compare cards to "—".
 NETWORK_PUBLIC_RPC = {
-    2017:  ["https://rpc.telcoin.network"],
+    2017:  ["https://rpc.adiri.tel"],
     32285: [
         "https://rpc.devnet.telcoin.network",
         "https://node1.devnet.telcoin.network",
@@ -874,21 +912,9 @@ NETWORK_PUBLIC_RPC = {
     ],
 }
 
-# Public WebSocket endpoints, parallel to NETWORK_PUBLIC_RPC. Every node serves wss://
-# on the same hostname as its https:// RPC -- config-caddy.sh (maintainer-only fleet
-# script, not shipped to operators) matches the Upgrade handshake and forwards it to
-# reth's WS port before the catch-all RPC handler, so one hostname carries both.
-# node5 is the observer and serves these exactly like a validator.
-NETWORK_PUBLIC_WS = {
-    2017:  ["wss://rpc.telcoin.network"],
-    32285: [
-        "wss://node1.devnet.telcoin.network",
-        "wss://node2.devnet.telcoin.network",
-        "wss://node3.devnet.telcoin.network",
-        "wss://node4.devnet.telcoin.network",
-        "wss://node5.devnet.telcoin.network",
-    ],
-}
+# There is deliberately no list of public wss:// endpoints. The balanced
+# hostnames above answer 405 to a WebSocket upgrade; only per-node hostnames
+# (nodeN...) serve wss://, and nothing in this server uses one.
 
 
 def resolve_network(chain_id, t=None):
@@ -1337,55 +1363,169 @@ def node_identity(t, det=None):
     return out
 
 
-# onchain_is_validator result cache: t -> (expires_monotonic, bool|None).
-# detect_nodes() calls this once per detect cycle for the installed node; the 30s
-# TTL keeps the extra RPCs cheap and stops a flapping tip from toggling the tab.
-_isval_cache = {}
-_ISVAL_TTL = 30.0
+# =============================================================================
+# ON-CHAIN ROLE  (which slot the node is presented in)
+#
+# telcoin-network decides a node's role from on-chain committee membership each
+# epoch, so the UI asks the ConsensusRegistry, never NODE_TYPE in .node-meta or
+# a legacy unit name. tn_isValidator is not consulted: it only means "BLS key
+# recorded and not retired", which is not a stake check.
+# =============================================================================
+
+# onchain_role's answer, kept _ROLE_TTL seconds for the node it describes. One
+# host runs one node, so there is one entry. detect_nodes() asks once per detect
+# cycle; the TTL keeps the RPCs cheap and stops a flapping answer from toggling
+# the tab.
+_role_cache = {"key": None, "expires": 0.0, "data": None}
+_ROLE_TTL = 30.0
+_ROLE_DEFAULT = {"validator": None, "source": "default", "checked_at": None, "status": None,
+                 "address": None}
+
+# The last answer the network or the synced local node gave, kept across restarts
+# so that a node whose chain cannot be reached opens in the view it last had.
+# /opt/telcoin-ui belongs to the UI user: install-ui.sh creates it and
+# remove-node.sh deletes it. A constant so the tests can point it elsewhere.
+NODE_ROLE_FILE = "/opt/telcoin-ui/node-role.json"
+_role_save_logged = {"failed": False}
 
 
-def onchain_is_validator(t, det=None):
-    """True only when the node is fully synced AND the ConsensusRegistry's
-    getValidator(execution address) reports a staked status (STAKED_STATUSES:
-    Staked, PendingActivation, Active, PendingExit). False when synced and the
-    address is unstaked, exited, or not whitelisted at all (getValidator reverts).
-    None when we cannot tell -- RPC down, not synced, no execution address, or an
-    unexpected reply. tn_isValidator is deliberately NOT consulted: it only means
-    "BLS key recorded and not retired", which is not a stake check. Gating on
-    synced honors 'after the node is synced' and avoids a stale tip momentarily
-    mis-typing the node. Cached ~30s (its own TTL, independent of detect_nodes'
-    cache)."""
-    now = time.monotonic()
-    cached = _isval_cache.get(t)
-    if cached and cached[0] > now:
-        return cached[1]
+def _synced(block_number, cons_exec):
+    """The sync rule /api/status and check-node.sh use: the local execution block
+    is within 2 of the execution tip the latest consensus header references."""
+    return (block_number is not None and cons_exec is not None
+            and block_number >= cons_exec - 2)
 
-    result = None
+
+def _local_synced(port):
+    """True when the local node at `port` answers and is synced (see _synced)."""
+    block_number = hex_to_dec(local_rpc(port, "eth_blockNumber"))
+    _consensus, cons_exec, _unsup = consensus_info(port)
+    return _synced(block_number, cons_exec)
+
+
+def _node_chain_id(t, port):
+    """The chain the node is on: its own eth_chainId, else the NETWORK its
+    .node-meta records (for a stopped node). None when neither says."""
+    chain_id = hex_to_dec(local_rpc(port, "eth_chainId"))
+    if chain_id is not None:
+        return chain_id
+    slug = read_meta(t).get("NETWORK", "").strip()
+    return next((cid for cid, m in NETWORKS.items() if slug and m["slug"] == slug), None)
+
+
+def _read_saved_role():
+    """The answer saved in NODE_ROLE_FILE as a dict, or None when the file is
+    missing or unreadable."""
     try:
-        det = det or detect_type(t)
-        port = det.get("rpc_port") or 8545
-        # Synced? Reuse the status-page computation: local exec block within 2 of
-        # the network's consensus-referenced exec tip.
-        block_number = hex_to_dec(local_rpc(port, "eth_blockNumber"))
-        _consensus, cons_exec, _unsup = consensus_info(port)
-        synced = (block_number is not None and cons_exec is not None
-                  and block_number >= cons_exec - 2)
-        if synced:
-            addr = (node_identity(t, det) or {}).get("execution_address")
-            if addr:
-                status = registry_stake_status(port, addr)
-                if status in STAKED_STATUSES:
-                    result = True
-                elif status == "none" or isinstance(status, int):
-                    result = False
-            else:
-                _dbg(f"onchain_is_validator: no execution address for {t}")
-    except Exception as e:  # pragma: no cover - defensive
-        _log(f"onchain_is_validator({t}) error: {e}")
-        result = None
+        with open(NODE_ROLE_FILE, "r") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return saved if isinstance(saved, dict) else None
 
-    _isval_cache[t] = (now + _ISVAL_TTL, result)
-    return result
+
+def _save_role(record):
+    """Write `record` to NODE_ROLE_FILE through a temp file in the same directory
+    and os.replace, so a crash never leaves half a file. Never raises: a failure
+    (on a laptop the directory does not exist) is logged once."""
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".node-role.", suffix=".tmp",
+                                   dir=os.path.dirname(NODE_ROLE_FILE))
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f)
+        os.replace(tmp, NODE_ROLE_FILE)
+        tmp = None
+    except OSError as e:
+        if not _role_save_logged["failed"]:
+            _role_save_logged["failed"] = True
+            _log(f"onchain_role: cannot save {NODE_ROLE_FILE}: {e}")
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _saved_role_applies(saved, address, chain_id):
+    """True when the saved answer is about this execution address (and, when
+    both chain ids are known, this chain), with a usable validator flag."""
+    if saved.get("address") != address or not isinstance(saved.get("validator"), bool):
+        return False
+    saved_chain = saved.get("chain_id")
+    return chain_id is None or saved_chain is None or saved_chain == chain_id
+
+
+def _decide_role(t, det):
+    """onchain_role's work, uncached."""
+    port = det.get("rpc_port") or 8545
+    chain_id = _node_chain_id(t, port)
+    address = _norm_address((node_identity(t, det) or {}).get("execution_address"))
+    if address is None:
+        _dbg(f"onchain_role: no execution address for the {t} slot")
+        return dict(_ROLE_DEFAULT)
+    answer, source = network_stake_status(address, chain_id), "network"
+    if answer is None and _local_synced(port):
+        answer, source = registry_stake_status(port, address), "local"
+    if answer is not None:
+        status = answer["status"] if isinstance(answer, dict) else None
+        data = {"validator": status in STAKED_STATUSES, "source": source,
+                "checked_at": int(time.time()), "status": status, "address": address}
+        _save_role(dict(data, address=address, chain_id=chain_id))
+        return data
+    saved = _read_saved_role()
+    if saved is not None and _saved_role_applies(saved, address, chain_id):
+        checked_at = saved.get("checked_at")
+        status = saved.get("status")
+        return {"validator": saved["validator"], "source": "cached",
+                "checked_at": checked_at if isinstance(checked_at, int) else None,
+                "status": status if isinstance(status, int) else None, "address": address}
+    return dict(_ROLE_DEFAULT, address=address)
+
+
+def onchain_role(t, det=None):
+    """How the chain sees this host's node, which decides the slot it is shown
+    in. Returns {validator, source, checked_at, status}:
+
+      validator   True when getValidator(execution address) reports a staked
+                  status (STAKED_STATUSES), False for any other status or no
+                  record, None when nothing answered.
+      source      "network"  the network's public RPC answered (asked first, so
+                             the answer does not wait for this node to sync);
+                  "local"    this node answered while synced;
+                  "cached"   neither answered, and the saved answer is about
+                             this execution address;
+                  "default"  nothing applies, so the node shows as a full node.
+      checked_at  Unix seconds of the check behind the answer (for "cached",
+                  when the saved check ran); None for "default".
+      status      the ValidatorStatus behind the answer, None when there is none.
+      address     the execution address that was checked, None when the node has
+                  none yet (then source is "default").
+
+    Cached for _ROLE_TTL seconds per node. A network or local answer is saved to
+    NODE_ROLE_FILE for the "cached" case."""
+    det = det or detect_type(t)
+    key = (det.get("mode"), det.get("container"), det.get("rpc_port"))
+    now = time.monotonic()
+    if (_role_cache["data"] is not None and _role_cache["key"] == key
+            and _role_cache["expires"] > now):
+        return dict(_role_cache["data"])
+    try:
+        data = _decide_role(t, det)
+    except Exception as e:  # pragma: no cover - defensive
+        _log(f"onchain_role({t}) error: {e}")
+        data = dict(_ROLE_DEFAULT)
+    prev = _role_cache["data"]
+    if prev is None or (prev["validator"], prev["source"]) != (data["validator"], data["source"]):
+        _log(f"onchain_role: {data['source']} answer, validator={data['validator']} "
+             f"status={data['status']}")
+    _role_cache.update(key=key, expires=now + _ROLE_TTL, data=data)
+    return dict(data)
+
+
+def clear_role_cache():
+    _role_cache.update(key=None, expires=0.0, data=None)
 
 
 # =============================================================================
@@ -1399,7 +1539,7 @@ def onchain_is_validator(t, det=None):
 # page error. Mirrors check_validator_onchain_status() in lib/common.sh.
 # =============================================================================
 
-# ConsensusRegistry precompile (lib/common.sh:855).
+# ConsensusRegistry precompile (CONSENSUS_REGISTRY in lib/common.sh, used by node_stake_status).
 CONSENSUS_REGISTRY = "0x07e17e17e17e17e17e17e17e17e17e17e17e17e1"
 
 # Function selectors (keccak256(signature)[:4]).
@@ -1414,26 +1554,35 @@ REGISTRY_SELECTORS = {
 }
 
 
-def _registry_calldata(selector, address=None):
-    """ABI calldata for a ConsensusRegistry call: the 4-byte selector, plus --
-    when `address` is given -- the address right-aligned in a 32-byte word
-    (24 zero hex chars + the 40-hex address; the same encoding lib/common.sh
-    builds by hand). None when the address is not a valid 20-byte hex address.
-
-    The address is sanitised first: surrounding whitespace stripped, an optional
-    0x/0X prefix removed, then validated as exactly 40 hex chars and lowercased.
-    Without this a stray character (e.g. a trailing space invisible in the UI, or
-    a checksummed 0X) corrupts the 32-byte word and the call silently fails."""
+def _norm_address(address):
+    """`address` as "0x" plus 40 lowercase hex digits, or None when it is not a
+    20-byte hex address. Surrounding whitespace and a 0x/0X prefix are allowed:
+    a trailing space invisible in the UI, or a checksummed 0X, would otherwise
+    corrupt the 32-byte word an eth_call carries."""
     if not address:
-        return selector
+        return None
     addr = str(address).strip()
     if addr[:2].lower() == "0x":
         addr = addr[2:].strip()
     if not re.fullmatch(r"[0-9a-fA-F]{40}", addr):
+        return None
+    return "0x" + addr.lower()
+
+
+def _registry_calldata(selector, address=None):
+    """ABI calldata for a ConsensusRegistry call: the 4-byte selector, plus --
+    when `address` is given -- the address right-aligned in a 32-byte word
+    (24 zero hex chars + the 40-hex address; the same encoding lib/common.sh
+    builds by hand). None when the address is not a valid 20-byte hex address
+    (see _norm_address)."""
+    if not address:
+        return selector
+    addr = _norm_address(address)
+    if addr is None:
         _log(f"_registry_calldata: invalid address {address!r} for {selector} "
              f"-> skipping call")
         return None
-    return selector + "0" * 24 + addr.lower()
+    return selector + "0" * 24 + addr[2:]
 
 
 def eth_call_registry(port, selector, address=None):
@@ -1457,37 +1606,160 @@ def eth_call_registry(port, selector, address=None):
 
 # ValidatorStatus values that mean "has stake in the registry" and so select the
 # validator view: 1 Staked, 2 PendingActivation, 3 Active, 4 PendingExit. The rest
-# (0 Undefined, 5 Exited, 6 Any -- a query sentinel, never a stored status) do not.
+# (0 Undefined, 5 Exited, and 6 Any, which the registry stores for a retired
+# validator) do not.
 STAKED_STATUSES = (1, 2, 3, 4)
+
+# The ValidatorInfo struct getValidator returns, as (field, bits of its Solidity
+# type). Order and types follow IConsensusRegistry.sol at tn-contracts 10cc12b,
+# the commit telcoin-network v0.15.0-adiri pins, and the node's own binding in
+# crates/tn-reth/src/system_calls.rs. The struct has no dynamic fields, so the
+# eth_call result is these seven words inline, with no offset word. Contracts
+# before tn-contracts 0866c16 had `bool isDelegated` where stakeVersion now sits
+# and stakeVersion where region sits; both still fit the widths below.
+VALIDATOR_INFO_LAYOUT = (
+    ("validator_address", 160),   # address
+    ("activation_epoch", 32),     # uint32
+    ("exit_epoch", 32),           # uint32
+    ("status", 8),                # enum ValidatorStatus
+    ("is_retired", 1),            # bool
+    ("stake_version", 8),         # uint8
+    ("region", 8),                # uint8, set by governance
+)
+
+# getValidator reverts with InvalidTokenId(uint256), selector 0xed15e6cf, when the
+# address holds no ConsensusNFT: governance never whitelisted it, so the registry
+# has no record of it. registry_stake_status and network_stake_status return
+# NO_RECORD for that revert and None for any other error.
+NO_RECORD = "none"
+_NO_RECORD_REVERT = "0xed15e6cf"
+
+
+def decode_validator_info(result):
+    """The ValidatorInfo struct from a getValidator eth_call result, or None when
+    the result is not exactly that struct. Strict on purpose, so that a reply
+    from another contract, a shifted layout or a cut-off answer reads as "cannot
+    tell" instead of as a stake status: the result must be "0x" and seven 32-byte
+    words, every word must fit its type in VALIDATOR_INFO_LAYOUT (nothing above
+    bit 160 of the address, 32 of the epochs, 8 of the enum and the uint8 fields,
+    1 of the bool), and the status must be 0 to 5, or 6 (Any) together with
+    isRetired, the pair the registry writes when it retires a validator.
+
+    Returns {validator_address (lowercase 0x hex), activation_epoch, exit_epoch,
+    status, is_retired (bool), stake_version, region}."""
+    if not isinstance(result, str) or not result.startswith("0x"):
+        return None
+    body = result[2:]
+    if (len(body) != 64 * len(VALIDATOR_INFO_LAYOUT)
+            or not re.fullmatch(r"[0-9a-fA-F]+", body)):
+        return None
+    info = {}
+    for i, (field, bits) in enumerate(VALIDATOR_INFO_LAYOUT):
+        word = int(body[64 * i:64 * (i + 1)], 16)
+        if word >> bits:
+            return None
+        info[field] = word
+    if info["status"] > 6 or (info["status"] == 6 and not info["is_retired"]):
+        return None
+    info["validator_address"] = "0x%040x" % info["validator_address"]
+    info["is_retired"] = bool(info["is_retired"])
+    return info
+
+
+def _validator_reply(resp, address):
+    """Read a JSON-RPC response to getValidator(address): the decoded record,
+    NO_RECORD for the no-ConsensusNFT revert, or None when the response says
+    nothing usable. The record must name the address asked about, or the zero
+    address (whitelisted but never staked, so its storage slot is still empty)."""
+    if not isinstance(resp, dict):
+        return None
+    err = resp.get("error")
+    if err is not None:
+        data = err.get("data") if isinstance(err, dict) else None
+        if isinstance(data, str) and data.lower().startswith(_NO_RECORD_REVERT):
+            return NO_RECORD
+        return None
+    info = decode_validator_info(resp.get("result"))
+    if info is None:
+        return None
+    if info["validator_address"] not in ("0x" + "0" * 40, _norm_address(address)):
+        return None
+    return info
 
 
 def registry_stake_status(port, address):
-    """The ValidatorStatus (int, word 3 of the inline 7-word ValidatorInfo struct
-    getValidator returns) for `address`; "none" when getValidator reverts, which
-    is what the registry does for an address it has never whitelisted (reth: a
-    JSON-RPC error with code 3 / "execution reverted"); None when we cannot tell
-    -- RPC unreachable, any other error, or a malformed / short result. Unlike
-    eth_call_registry this keeps the error so a revert can be told apart from an
-    unreachable node."""
-    if not address:
-        return None
-    data = _registry_calldata(REGISTRY_SELECTORS["getValidator"], address)
+    """getValidator(address) asked of the local node at `port`: the decoded
+    record (decode_validator_info), NO_RECORD when the registry has no record of
+    the address, or None when the node gives no usable answer (unreachable,
+    another error, a malformed result). Unlike eth_call_registry this keeps the
+    error, so the no-record revert can be told apart from an unreachable node."""
+    data = _registry_calldata(REGISTRY_SELECTORS["getValidator"], address) if address else None
     if data is None:
         return None
     resp = local_rpc_full(port, "eth_call",
                           [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"])
     _dbg(f"registry_stake_status port={port} data={data} resp={resp}")
-    if not isinstance(resp, dict):
+    return _validator_reply(resp, address)
+
+
+# How many of a network's public endpoints network_stake_status asks, and how
+# long each one gets for both of its calls.
+_NETWORK_STAKE_ENDPOINTS = 2
+_NETWORK_STAKE_TIMEOUT = 3.0
+_chain_mismatch_logged = set()   # (url, chain id) pairs already in the journal
+
+
+def _public_rpc(url, method, params, timeout):
+    """One JSON-RPC call to a public endpoint: the whole response dict, or None
+    on any failure."""
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
+    ).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "telcoin-ui"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+        return data if isinstance(data, dict) else None
+    except Exception:
         return None
-    err = resp.get("error")
-    if err is not None:
-        if isinstance(err, dict) and (
-                err.get("code") == 3
-                or "revert" in str(err.get("message") or "").lower()):
-            return "none"
+
+
+def network_stake_status(address, chain_id):
+    """getValidator(address) asked of the network's public RPC
+    (NETWORK_PUBLIC_RPC[chain_id]), so the answer does not depend on this node
+    being synced. At most the first two endpoints are tried, and each gets three
+    seconds for its two calls. An endpoint is trusted only once its eth_chainId
+    equals `chain_id`: a hostname can serve another chain (rpc.telcoin.network
+    answers for testnet until mainnet launches), and its registry would describe
+    the wrong network. Returns what registry_stake_status returns: the decoded
+    record, NO_RECORD, or None when no endpoint gave a usable answer."""
+    data = _registry_calldata(REGISTRY_SELECTORS["getValidator"], address) if address else None
+    if data is None or chain_id is None:
         return None
-    w = _words(resp.get("result"))
-    return w[3] if len(w) >= 4 else None
+    for url in (NETWORK_PUBLIC_RPC.get(chain_id) or [])[:_NETWORK_STAKE_ENDPOINTS]:
+        deadline = time.monotonic() + _NETWORK_STAKE_TIMEOUT
+        resp = _public_rpc(url, "eth_chainId", [], _NETWORK_STAKE_TIMEOUT)
+        served = hex_to_dec(resp.get("result")) if isinstance(resp, dict) else None
+        if served != chain_id:
+            if served is not None and (url, served) not in _chain_mismatch_logged:
+                _chain_mismatch_logged.add((url, served))
+                _log(f"network_stake_status: {url} serves chain {served}, not "
+                     f"{chain_id}; its answers are not used")
+            continue
+        left = deadline - time.monotonic()
+        if left <= 0:
+            continue
+        resp = _public_rpc(url, "eth_call",
+                           [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"], left)
+        _dbg(f"network_stake_status {url} data={data} resp={resp}")
+        answer = _validator_reply(resp, address)
+        if answer is not None:
+            return answer
+    return None
 
 
 def _words(hexstr):
@@ -1514,6 +1786,105 @@ def wei_to_tel(wei):
         return int(wei) / 10**18
     except (TypeError, ValueError):
         return None
+
+
+# =============================================================================
+# EPOCH TIMING AND COMMITTEE SEATS  (validator view, from the node's tn_* RPC)
+#
+# tn_getCurrentEpochInfo gives the current epoch's id, its first block
+# (blockHeight), its length in seconds (epochDuration) and its committee. The
+# epoch started at the timestamp of the block before its first block, and it
+# closes at the first commit at or after start + epochDuration.
+# tn_getEpochInfo(epoch) gives the committees of the next two epochs, which are
+# fixed once the current epoch has started. Both lookups are cached until the
+# epoch changes.
+# =============================================================================
+
+_epoch_start_cache = {"key": None, "ts": None}       # (port, epoch, blockHeight)
+_committee_cache = {"key": None, "committees": {}}   # (port, current epoch)
+
+
+def _committee(info):
+    """The committee in a tn_getCurrentEpochInfo / tn_getEpochInfo result as
+    lowercase addresses, or None when the result carries no list."""
+    members = info.get("committee") if isinstance(info, dict) else None
+    if not isinstance(members, list):
+        return None
+    return [str(m).strip().lower() for m in members]
+
+
+def _epoch_start(port, epoch, block_height):
+    """Unix seconds at which `epoch` started: the timestamp of block
+    block_height - 1 (block 0 for an epoch that starts at genesis). Cached for
+    the epoch; None when the block cannot be read."""
+    key = (port, epoch, block_height)
+    if _epoch_start_cache["key"] == key:
+        return _epoch_start_cache["ts"]
+    block = local_rpc(port, "eth_getBlockByNumber", [hex(max(block_height - 1, 0)), False])
+    ts = hex_to_dec(block.get("timestamp")) if isinstance(block, dict) else None
+    if ts is not None:
+        _epoch_start_cache.update(key=key, ts=ts)
+    return ts
+
+
+def _later_committee(port, current, epoch):
+    """The committee of `epoch`, one of the two after `current`, through
+    tn_getEpochInfo, cached while `current` is the current epoch. None when the
+    lookup fails."""
+    if _committee_cache["key"] != (port, current):
+        _committee_cache.update(key=(port, current), committees={})
+    known = _committee_cache["committees"].get(epoch)
+    if known is not None:
+        return known
+    members = _committee(local_rpc(port, "tn_getEpochInfo", [epoch]))
+    if members is not None:
+        _committee_cache["committees"][epoch] = members
+    return members
+
+
+def epoch_fields(port, address, record):
+    """The epoch fields /api/validator adds for a synced node, from ONE
+    tn_getCurrentEpochInfo call. `record` is what registry_stake_status returned.
+
+      epoch_started_at, epoch_duration, epoch_ends_at, now
+                           Unix seconds on this server's clock (the duration in
+                           seconds), sent together, or not at all when the epoch
+                           info or the block before its first block cannot be
+                           read.
+      earliest_seat_epoch  activation epoch + 2, the first committee an
+                           activated validator can sit in; only for status 2, 3
+                           or 4 (PendingActivation, Active, PendingExit).
+      seat_epoch           the first of the current and next two epochs whose
+                           committee includes `address`; null when none of the
+                           three does; left out when a committee lookup failed,
+                           so a failure never reads as "not seated"."""
+    out = {}
+    info = local_rpc(port, "tn_getCurrentEpochInfo")
+    if not isinstance(info, dict):
+        info = {}
+    epoch = _to_int_block(info.get("epochId"))
+    height = _to_int_block(info.get("blockHeight"))
+    duration = _to_int_block(info.get("epochDuration"))
+    if epoch is not None and height is not None and duration is not None and duration > 0:
+        start = _epoch_start(port, epoch, height)
+        if start is not None:
+            out.update(epoch_started_at=start, epoch_duration=duration,
+                       epoch_ends_at=start + duration, now=int(time.time()))
+    if isinstance(record, dict) and record["status"] in (2, 3, 4):
+        out["earliest_seat_epoch"] = record["activation_epoch"] + 2
+    address = _norm_address(address)
+    current = _committee(info)
+    if address is not None and epoch is not None and current is not None:
+        for e in (epoch, epoch + 1, epoch + 2):
+            members = current if e == epoch else _later_committee(port, epoch, e)
+            if members is None:
+                break               # lookup failed: seat_epoch stays out
+            if address in members:
+                out["seat_epoch"] = e
+                break
+        else:
+            out["seat_epoch"] = None  # all three committees read, none has it
+    return out
 
 
 # =============================================================================
@@ -1646,10 +2017,10 @@ def fmt_uptime(secs):
 
 def service_restart_count(t):
     """Service starts since the current install (not since boot). Counts journal
-    'Started telcoin-<t>.service' lines since the build/install timestamp. The
-    unit journal is root-only, so this goes through the helper. None when the
-    helper/sudo is unavailable (UI then shows '—')."""
-    rc, out, _ = run(["sudo", "-n", HELPER, "restart-count", t], timeout=25)
+    'Started <unit>.service' lines since the build/install timestamp. The unit
+    journal is root-only, so this goes through the helper, which resolves the
+    unit itself. None when the helper/sudo is unavailable (UI then shows '—')."""
+    rc, out, _ = run(["sudo", "-n", HELPER, "restart-count"], timeout=25)
     if rc == 0 and out.strip().isdigit():
         return int(out.strip())
     return None
@@ -1916,8 +2287,72 @@ def latest_source_tag():
     return best_tag
 
 
+# /proc/cpuinfo, read by physical_cores() when lscpu is missing. A plain
+# assignment so a test can point it at a fixture.
+CPUINFO_PATH = "/proc/cpuinfo"
+
+
+def _positive_int(text):
+    """int(text) for a positive decimal string, else None."""
+    text = (text or "").strip()
+    return int(text) if re.fullmatch(r"[0-9]+", text) and int(text) > 0 else None
+
+
+def logical_cpus():
+    """Logical CPUs (hardware threads) as `nproc` counts them, else
+    os.cpu_count(). None when neither answers."""
+    rc, out, _ = run(["nproc"])
+    return (_positive_int(out) if rc == 0 else None) or os.cpu_count()
+
+
+def physical_cores():
+    """Physical CPU cores, found the way lib/common.sh's tn_physical_cores finds
+    them: unique (core, socket) pairs from `lscpu --parse=CORE,SOCKET`, else
+    unique (physical id, core id) pairs from /proc/cpuinfo, else `sysctl -n
+    hw.physicalcpu` (macOS), else the logical count. The hardware tiers are in
+    physical cores, and a cloud vCPU is usually a hyperthread, so a logical
+    count can read twice the real size. None when nothing answers."""
+    rc, out, _ = run(["lscpu", "--parse=CORE,SOCKET"])
+    if rc == 0:
+        pairs = set()
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            core, _, socket = line.partition(",")
+            if core.strip():
+                pairs.add((core.strip(), socket.strip()))
+        if pairs:
+            return len(pairs)
+
+    try:
+        with open(CPUINFO_PATH, "r") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        lines = []
+    pairs, phys, core = set(), None, None
+    # One block per logical CPU, each opened by a "processor" line.
+    for line in lines + [""]:
+        key, _, val = line.partition(":")
+        key = key.strip()
+        if not line.strip() or key == "processor":
+            if phys is not None and core is not None:
+                pairs.add((phys, core))
+            phys = core = None
+        elif key == "physical id":
+            phys = val.strip()
+        elif key == "core id":
+            core = val.strip()
+    if pairs:
+        return len(pairs)
+
+    rc, out, _ = run(["sysctl", "-n", "hw.physicalcpu"])
+    return (_positive_int(out) if rc == 0 else None) or logical_cpus()
+
+
 def system_info():
-    """Host facts for the System view."""
+    """Host facts for the System view. cpu_cores counts physical cores (a string,
+    '' when unknown, as before); cpu_threads counts logical CPUs."""
     hostname = ""
     rc, out, _ = run(["hostname"])
     if rc == 0:
@@ -1928,10 +2363,8 @@ def system_info():
     if rc == 0 and out:
         uptime = out
 
-    cpu_cores = ""
-    rc, out, _ = run(["nproc"])
-    if rc == 0 and out:
-        cpu_cores = out
+    cores = physical_cores()
+    cpu_cores = str(cores) if cores else ""
 
     distro = ""
     try:
@@ -1952,6 +2385,7 @@ def system_info():
         "hostname": hostname,
         "uptime": uptime,
         "cpu_cores": cpu_cores,
+        "cpu_threads": logical_cpus(),
         "distro": distro,
         "kernel": kernel,
         "disk": disk_for("/"),
@@ -1982,6 +2416,7 @@ def api_nodes():
     if request.args.get("fresh"):
         _detect_cache["data"] = None
         clear_meta_cache()
+        clear_role_cache()
     det = detect_nodes()
     out = {}
     for t in NODE_TYPES:
@@ -1993,18 +2428,17 @@ def api_nodes():
             "mode": mode,                 # "scripts" | "external" | None
             "container": d.get("container"),
             "image": d.get("image"),
-            # True when an observer-deployed node was re-attributed here because it
-            # is a staked, on-chain validator (detect_nodes remap) -- drives an
-            # optional "staked" badge in the selector.
+            # True when the node was moved to the validator slot because its
+            # execution address is staked on-chain (detect_nodes remap).
             "staked": bool(d.get("staked")),
         }
     # ---- Derived single-node view (on-chain role is the authority) ----------
     # telcoin-network derives a node's role dynamically from on-chain committee
     # membership, so the UI presents ONE node whose role is the populated slot
-    # after detect_nodes' bidirectional remap: "validator" when the node's
-    # execution address is staked on-chain (onchain_is_validator), else the plain
-    # "observer" (full-node) view. `role` is None only on a fresh host with
-    # nothing installed (the UI then keeps its own default). The `node` summary
+    # after detect_nodes' remap: "validator" when the node's execution address is
+    # staked on-chain (onchain_role), else the plain "observer" (full-node) view.
+    # `role` is None only on a fresh host with nothing installed (the UI then
+    # keeps its own default). The `node` summary
     # carries the same facts the per-type slots expose plus the actual resolved
     # systemd unit name, so the frontend can drive the active node without a
     # second call. The per-type slots above are kept unchanged for backward
@@ -2023,6 +2457,20 @@ def api_nodes():
     # Read-only when reached over the public Caddy path (vs the SSH tunnel). The
     # UI uses this to hide every management control and show a read-only banner.
     out["public_readonly"] = is_public_request()
+    # Operator facts, never sent on the public path: whether the privileged
+    # helper speaks the API this server needs, and how the role above was decided
+    # (onchain_role's source: network, local, cached or default; null with no
+    # node) with the Unix time of the check behind it and the execution address
+    # checked (null when the node has none yet, so the page can say why the role
+    # is unknown). A detector that does not report the decision, such as the
+    # fixture in ui/dev/serve.py, leaves the role fields out instead of sending null.
+    if not out["public_readonly"]:
+        out["helper"] = helper_status()
+        node_det = det.get(role, {}) if role is not None else {}
+        if role is None or "role_source" in node_det:
+            out["role_source"] = node_det.get("role_source")
+            out["role_checked_at"] = node_det.get("role_checked_at")
+            out["role_address"] = node_det.get("role_address")
     # Dashboard (UI bundle) version, so the header can show operators which
     # Node Manager version their node is running.
     out["ui_version"] = UI_VERSION
@@ -2077,11 +2525,11 @@ def api_status(node_type):
     if block_number is not None and cons_exec is not None:
         synced = block_number >= cons_exec - 2
 
-    # On-chain stake status for display (onchain_is_validator, cached ~30s).
-    # Computed only for the validator tab -- the detect_nodes() remap already
-    # decides which tab shows, so there is no need to probe an observer here. None
-    # when undeterminable.
-    is_validator_onchain = onchain_is_validator(t, det) if t == "validator" else None
+    # On-chain stake status for display (onchain_role, cached 30 s). Computed only
+    # for the validator tab -- the detect_nodes() remap already decides which tab
+    # shows, so there is no need to probe an observer here. None when
+    # undeterminable.
+    is_validator_onchain = onchain_role(t, det)["validator"] if t == "validator" else None
 
     # Dynamic network identity from the live chain id.
     slug, net_name, net_configured = resolve_network(chain_id, t)
@@ -2215,7 +2663,9 @@ def api_status(node_type):
 # coming from /api/status. This endpoint adds only the validator-specific
 # consensus/contract data. Every field defaults to None and is filled by an
 # independently-guarded probe, so any single RPC/contract failure degrades just
-# that card to "—" -- the response is always HTTP 200 with valid JSON.
+# that card to "—" -- the response is always HTTP 200 with valid JSON. The epoch
+# fields (epoch_fields) are the exception: they are left out, not null, when
+# unknown, because the page reads a null seat_epoch as "not seated".
 # =============================================================================
 
 @app.route("/api/validator/<node_type>")
@@ -2280,8 +2730,9 @@ def api_validator(node_type):
         pass
 
     # --- consensus header: block / epoch / age (reused) ---
+    cons_exec = None
     try:
-        consensus, _, cons_unsupported = consensus_info(port)
+        consensus, cons_exec, cons_unsupported = consensus_info(port)
         out["block"] = consensus.get("block")
         out["epoch"] = consensus.get("epoch")
         out["age"] = consensus.get("age")
@@ -2348,34 +2799,39 @@ def api_validator(node_type):
     _dbg(f"/api/validator {t}: execution_address={addr!r} epoch={out['epoch']!r} "
          f"bls={out['bls_public_key']!r}")
 
-    # --- getValidator(address) -> ValidatorInfo struct (returned INLINE) ---
-    # The struct carries no dynamic fields (blsPubkey is not part of it), so
-    # there is NO leading offset word -- every field sits at a fixed word index:
-    #   w0 validatorAddress, w1 activationEpoch, w2 exitEpoch, w3 currentStatus,
-    #   w4 isRetired, w5 stakeVersion, w6 region
-    # (The older layout decoded in lib/common.sh assumed a leading blsPubkey
-    # offset pointer + an 8-word struct; the live contract returns 7 words.)
+    # --- getValidator(address) -> ValidatorInfo, decoded strictly by
+    #     decode_validator_info (seven inline words; see VALIDATOR_INFO_LAYOUT).
+    #     No record (the address holds no ConsensusNFT) leaves these fields null,
+    #     which the page shows as "Not Registered" with nft_held false. ---
+    record = None
     try:
         if addr:
-            raw = eth_call_registry(port, REGISTRY_SELECTORS["getValidator"], addr)
-            _dbg(f"/api/validator {t}: getValidator raw={raw!r}")
-            w = _words(raw)
-            if len(w) >= 6:
-                out["activation_epoch"] = w[1]
-                out["exit_epoch"] = w[2]
-                out["status"] = w[3]
-                out["is_retired"] = bool(w[4])
-                out["stake_version"] = w[5]
-            elif mode == "external":
+            record = registry_stake_status(port, addr)
+            if isinstance(record, dict):
+                out["activation_epoch"] = record["activation_epoch"]
+                out["exit_epoch"] = record["exit_epoch"]
+                out["status"] = record["status"]
+                out["is_retired"] = record["is_retired"]
+                out["stake_version"] = record["stake_version"]
+            elif record is None and mode == "external":
                 # Visible without TN_UI_DEBUG so a still-failing external node
                 # surfaces the reason in the journal.
                 _log(f"/api/validator {t} (external): getValidator returned no "
-                     f"usable data (addr={addr!r} port={port} raw={raw!r})")
+                     f"usable data (addr={addr!r} port={port})")
         else:
             _log(f"/api/validator {t}: no execution_address available -> on-chain "
                  f"validator calls skipped (mode={mode})")
     except Exception as e:
         _log(f"/api/validator {t}: getValidator failed: {e}")
+
+    # --- epoch timing and committee seats (epoch_fields), only for a synced
+    #     node: a syncing node's epoch data lags the chain, so none of these
+    #     fields is sent until it catches up. ---
+    try:
+        if _synced(hex_to_dec(local_rpc(port, "eth_blockNumber")), cons_exec):
+            out.update(epoch_fields(port, addr, record))
+    except Exception as e:
+        _log(f"/api/validator {t}: epoch fields failed: {e}")
 
     # --- getRewards(address) -> claimable rewards (wei) ---
     try:
@@ -2569,7 +3025,7 @@ def api_logs_clear(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    rc, out, err = run(["sudo", "-n", HELPER, "log-clear", node_type], timeout=15)
+    rc, out, err = run(["sudo", "-n", HELPER, "log-clear"], timeout=15)
     ok = rc == 0 and out.strip() == "ok"
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "clear failed")})
 
@@ -2663,33 +3119,51 @@ def api_config(node_type):
 # edit-config.sh's --json mode and the helper's config-set guard. We reject bad
 # input with a clean 400 before ever shelling out; the helper and the script
 # re-validate (defence in depth -- the server is the unprivileged caller).
-CONFIG_FIELDS = (
-    "primary_listener", "worker_listener",
-    "metrics", "verbosity", "docker_image",
-)
+# Each pattern is the helper's, character for character (test_server_contract.py
+# compares them).
 _MULTIADDR_RE = re.compile(r"^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$")
-_METRICS_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$")
+# off removes --metrics.
+_METRICS_RE = re.compile(r"^(off|([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5})$")
 _VERBOSITY_RE = re.compile(r"^-v{1,5}$")
 _IMAGE_CHARS_RE = re.compile(r"^[A-Za-z0-9._/:@-]+$")
+# An absolute path to a peers file already on the node (the UI cannot upload
+# one), or none to remove the flag and the file.
+_BOOTSTRAP_PEERS_RE = re.compile(r"^(none|/[A-Za-z0-9._/-]+)$")
+# off, unlimited, or how many epochs of state exports to keep.
+_STATE_EXPORT_RE = re.compile(r"^(off|unlimited|[1-9][0-9]{0,5})$")
+_TRUE_FALSE_RE = re.compile(r"^(true|false)$")
+
+CONFIG_VALUE_RE = {
+    "primary_listener": _MULTIADDR_RE,
+    "worker_listener": _MULTIADDR_RE,
+    "metrics": _METRICS_RE,
+    "verbosity": _VERBOSITY_RE,
+    "docker_image": _IMAGE_CHARS_RE,
+    "bootstrap_peers": _BOOTSTRAP_PEERS_RE,
+    "state_export": _STATE_EXPORT_RE,
+    # edit-config.sh refuses true on testnet and mainnet.
+    "allow_private_forward_targets": _TRUE_FALSE_RE,
+}
+CONFIG_FIELDS = tuple(CONFIG_VALUE_RE)
 
 
 def config_value_ok(field, value):
-    if field in ("primary_listener", "worker_listener"):
-        return bool(_MULTIADDR_RE.match(value))
-    if field == "metrics":
-        return bool(_METRICS_RE.match(value))
-    if field == "verbosity":
-        return bool(_VERBOSITY_RE.match(value))
-    if field == "docker_image":
-        return bool(_IMAGE_CHARS_RE.match(value)) and ":" in value
-    return False
+    """True when the helper's config-set would accept `value` for `field`.
+    fullmatch, so a trailing newline fails here as it does in bash."""
+    rx = CONFIG_VALUE_RE.get(field)
+    if rx is None or not rx.fullmatch(value):
+        return False
+    # An image reference needs a tag or digest.
+    return field != "docker_image" or ":" in value
 
 
 @app.route("/api/config/<node_type>/set")
 def api_config_set(node_type):
-    # GET (not POST) so the browser can stream the restart+verify progress with
-    # EventSource. The field/value are query params, validated here and again in
-    # the helper + edit-config.sh. Reuses the same SSE plumbing as updates.
+    # GET, because older pages read the restart+verify progress with
+    # EventSource; the current page reads it with fetch, which never re-sends the
+    # request after a dropped connection. The field/value are query params,
+    # validated here and again in the helper + edit-config.sh. Reuses the same
+    # SSE plumbing as updates.
     if not valid_type(node_type):
         return bad_type()
     blocked = _external_block(node_type)
@@ -2701,7 +3175,7 @@ def api_config_set(node_type):
         return jsonify({"error": "field not editable"}), 400
     if not config_value_ok(field, value):
         return jsonify({"error": "invalid value for field"}), 400
-    return _update_stream(["sudo", "-n", HELPER, "config-set", node_type, field, value])
+    return _update_stream(["sudo", "-n", HELPER, "config-set", field, value])
 
 
 # Advertised node name ("Advertised Node Name" in the UI) = the network-config
@@ -2725,8 +3199,7 @@ def api_set_hostname(node_type):
                                  "alphanumeric; max 64 chars)"}), 400
     # The helper writes network-config + .node-meta and restarts the node so it
     # reads the new name.
-    rc, out, err = run(["sudo", "-n", HELPER, "set-hostname", node_type, name],
-                       timeout=30)
+    rc, out, err = run(["sudo", "-n", HELPER, "set-hostname", name], timeout=30)
     ok = rc == 0 and out.strip().splitlines()[-1:] == ["ok"]
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "set failed")})
 
@@ -2834,15 +3307,16 @@ def api_firewall_port():
 # ROUTES -- setup (phased, full install in the UI)
 #
 # Two phases via the helper's setup-keygen / setup-finalize, which run
-# setup-<type>.sh --json --phase=...  Config travels in TN_SETUP_* env vars and
+# setup-node.sh --json --phase=...  Config travels in TN_SETUP_* env vars and
 # the BLS passphrase in TN_BLS_PASSPHRASE (env only -- never argv, never the URL,
 # kept in-process here). These are POST + streamed (not EventSource) precisely so
 # the passphrase never lands in a query string or access log. The frontend reads
-# the streamed body with fetch().
+# the streamed body with fetch(). The <node_type> URL segment is the page's
+# presentation slot; the helper call carries no role.
 # =============================================================================
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_BUILD_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+_BUILD_REF_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")  # no leading "-", as REF_RE
 _PUBLIC_IP_RE = re.compile(r"^[0-9a-fA-F.:]+$")
 _SVC_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")  # mirrors validate_service_name
 _DATA_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")  # absolute path, safe charset
@@ -2850,20 +3324,27 @@ _DATA_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")  # absolute path, safe charset
 
 def _setup_env(data, want_passphrase):
     """Validate a setup config dict and build the child env (TN_SETUP_* [+
-    TN_BLS_PASSPHRASE]). Returns (env, None) or (None, error_message)."""
+    TN_BLS_PASSPHRASE]). Returns (env, None) or (None, error_message).
+
+    Public RPC is requested by a hostname: rpc_domain becomes TN_SETUP_RPC_DOMAIN,
+    which the helper passes to setup-node.sh as --rpc-domain. rpc_public: true
+    without a hostname is refused, and an explicit rpc_public: false drops a
+    hostname left over in the form, so choosing private RPC never publishes it."""
     network = str(data.get("network") or "testnet").strip()
     method = str(data.get("install_method") or "").strip()
     passm = str(data.get("passphrase_method") or "loadcredential").strip()
     address = str(data.get("address") or "").strip()
     build_ref = str(data.get("build_ref") or "").strip()
     image = str(data.get("docker_image") or "").strip()
-    instance = str(data.get("instance") or "").strip()
     ext_primary = str(data.get("external_primary") or "").strip()
     ext_worker = str(data.get("external_worker") or "").strip()
     lis_primary = str(data.get("listener_primary") or "").strip()
     lis_worker = str(data.get("listener_worker") or "").strip()
     public_ip = str(data.get("public_ip") or "").strip()
-    rpc_public = "true" if data.get("rpc_public") else "false"
+    rpc_public = data.get("rpc_public")
+    rpc_domain = norm_host(data.get("rpc_domain"))
+    if rpc_public is not None and not rpc_public:
+        rpc_domain = ""
     service_user = str(data.get("service_user") or "").strip()
     service_group = str(data.get("service_group") or "").strip()
     advertised_name = str(data.get("advertised_name") or "").strip()
@@ -2881,13 +3362,15 @@ def _setup_env(data, want_passphrase):
         return None, "invalid build ref"
     if image and not (_IMAGE_CHARS_RE.match(image) and ":" in image):
         return None, "invalid docker image"
-    if instance and instance not in tuple("123456789"):
-        return None, "invalid instance"
     for m in (ext_primary, ext_worker, lis_primary, lis_worker):
         if m and not _MULTIADDR_RE.match(m):
             return None, "invalid multiaddr"
     if public_ip and not _PUBLIC_IP_RE.match(public_ip):
         return None, "invalid public ip"
+    if rpc_domain and not valid_hostname(rpc_domain):
+        return None, host_error("public RPC hostname", rpc_domain)
+    if rpc_public and not rpc_domain:
+        return None, RPC_PUBLIC_NEEDS_HOST
     if service_user and not _SVC_NAME_RE.match(service_user):
         return None, "invalid service user"
     if service_group and not _SVC_NAME_RE.match(service_group):
@@ -2906,13 +3389,12 @@ def _setup_env(data, want_passphrase):
     env["TN_SETUP_ADDRESS"] = address
     env["TN_SETUP_BUILD_REF"] = build_ref
     env["TN_SETUP_DOCKER_IMAGE"] = image
-    env["TN_SETUP_INSTANCE"] = instance
     env["TN_SETUP_EXT_PRIMARY"] = ext_primary
     env["TN_SETUP_EXT_WORKER"] = ext_worker
     env["TN_SETUP_LIS_PRIMARY"] = lis_primary
     env["TN_SETUP_LIS_WORKER"] = lis_worker
     env["TN_SETUP_PUBLIC_IP"] = public_ip
-    env["TN_SETUP_RPC_PUBLIC"] = rpc_public
+    env["TN_SETUP_RPC_DOMAIN"] = rpc_domain
     env["TN_SETUP_SERVICE_USER"] = service_user
     env["TN_SETUP_SERVICE_GROUP"] = service_group
     env["TN_SETUP_ADVERTISED_NAME"] = advertised_name
@@ -2977,8 +3459,8 @@ def api_setup_keygen(node_type):
         return jsonify({"error": err}), 400
     if not _begin_setup():
         return jsonify({"error": "a node setup is already running -- wait for it to finish"}), 409
-    return _update_stream(["sudo", "-n", HELPER, "setup-keygen", node_type],
-                          env=env, capture_stderr=True, on_close=_end_setup)
+    return _update_stream(["sudo", "-n", HELPER, "setup-keygen"],
+                          env=env, on_close=_end_setup)
 
 
 @app.route("/api/setup/<node_type>/finalize", methods=["POST"])
@@ -2994,8 +3476,8 @@ def api_setup_finalize(node_type):
         return jsonify({"error": err}), 400
     if not _begin_setup():
         return jsonify({"error": "a node setup is already running -- wait for it to finish"}), 409
-    return _update_stream(["sudo", "-n", HELPER, "setup-finalize", node_type],
-                          env=env, capture_stderr=True, on_close=_end_setup)
+    return _update_stream(["sudo", "-n", HELPER, "setup-finalize"],
+                          env=env, on_close=_end_setup)
 
 
 # =============================================================================
@@ -3009,7 +3491,6 @@ def api_setup_finalize(node_type):
 # never argv/URL). status is a read (GET) and stays available either way.
 # =============================================================================
 
-_CADDY_DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 _CADDY_USER_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")
 # Optional inbound-public-IP override (multi-IP / 1:1-NAT nodes). Loose char-class --
 # mirrors the setup-path guard; install-caddy.sh re-validates semantically via
@@ -3020,10 +3501,7 @@ _CADDY_PUBLIC_IP_RE = re.compile(r"^[0-9a-fA-F.:]+$")
 @app.route("/api/caddy/status")
 def api_caddy_status():
     rc, out, err = run(["sudo", "-n", HELPER, "caddy-status"], timeout=10)
-    try:
-        data = json.loads(out) if out else {}
-    except Exception:
-        data = {}
+    data = _parse_json_tail(out) or {}
     if not data:
         data = {"installed": False, "running": False, "enabled": False,
                 "domain": "", "username": ""}
@@ -3038,9 +3516,10 @@ def api_caddy_status():
 @app.route("/api/caddy/dns-check", methods=["POST"])
 def api_caddy_dns_check():
     data = request.get_json(silent=True) or {}
-    domain = (data.get("domain") or "").strip()
-    if not _CADDY_DOMAIN_RE.match(domain):
-        return jsonify({"ok": False, "error": "invalid domain"}), 400
+    domain = norm_host(data.get("domain"))
+    if not valid_hostname(domain):
+        return jsonify({"ok": False, "error": host_error(
+            "dashboard hostname", domain, "dashboard.node7.example.com")}), 400
     public_ip = (data.get("public_ip") or "").strip()
     if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
         return jsonify({"ok": False, "error": "invalid public IP"}), 400
@@ -3048,10 +3527,7 @@ def api_caddy_dns_check():
     if public_ip:
         cmd.append(public_ip)
     rc, out, err = run(cmd, timeout=20)
-    try:
-        res = json.loads(out) if out else {}
-    except Exception:
-        res = {}
+    res = _parse_json_tail(out) or {}
     if not res:
         return jsonify({"ok": False, "error": err or "dns check failed"}), 200
     res["ok"] = True
@@ -3061,12 +3537,13 @@ def api_caddy_dns_check():
 @app.route("/api/caddy/enable", methods=["POST"])
 def api_caddy_enable():
     data = request.get_json(silent=True) or {}
-    domain = (data.get("domain") or "").strip()
+    domain = norm_host(data.get("domain"))
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     public_ip = (data.get("public_ip") or "").strip()
-    if not _CADDY_DOMAIN_RE.match(domain):
-        return jsonify({"error": "invalid domain"}), 400
+    if not valid_hostname(domain):
+        return jsonify({"error": host_error(
+            "dashboard hostname", domain, "dashboard.node7.example.com")}), 400
     if not _CADDY_USER_RE.match(username):
         return jsonify({"error": "invalid username (2-32 chars: letters, digits, . _ -)"}), 400
     if len(password) < 8:
@@ -3078,13 +3555,13 @@ def api_caddy_enable():
     cmd = ["sudo", "-n", HELPER, "caddy-enable", domain, username]
     if public_ip:
         cmd.append(public_ip)
-    return _update_stream(cmd, env=env, capture_stderr=True)
+    return _update_stream(cmd, env=env)
 
 
 @app.route("/api/caddy/disable", methods=["POST"])
 def api_caddy_disable():
     return _update_stream(["sudo", "-n", HELPER, "caddy-disable"],
-                          env=os.environ.copy(), capture_stderr=True)
+                          env=os.environ.copy())
 
 
 # =============================================================================
@@ -3097,22 +3574,25 @@ def api_caddy_disable():
 # and -- being POSTs -- are refused on the public (read-only) path by the
 # before_request guard, so the endpoint can only be configured from the SSH
 # tunnel. The node-info.yaml edit + node restart happen INSIDE install-caddy.sh.
-# status is a read (GET) and stays available either way. Domain/IP validation
-# reuses the dashboard-Caddy regexes above.
+# status is a read (GET) and stays available either way. Hostnames follow the
+# strict rule (valid_hostname); the inbound-IP check reuses the dashboard's regex.
 # =============================================================================
 
 @app.route("/api/rpc/status")
 def api_rpc_status():
+    # The script's object passes through as it is, so advertised_http,
+    # advertised_ws, ws_listening and block_stale appear only when the installed
+    # install-caddy.sh reports them; the page reads a missing key as unknown.
+    # meta_domain is the public RPC hostname saved in .node-meta at setup, which
+    # the page offers as the suggested hostname when Caddy serves none.
     rc, out, err = run(["sudo", "-n", HELPER, "rpc-status"], timeout=10)
-    try:
-        data = json.loads(out) if out else {}
-    except Exception:
-        data = {}
+    data = _parse_json_tail(out) or {}
     if not data:
         data = {"installed": False, "running": False, "enabled": False,
                 "domain": ""}
         if rc != 0:
             data["error"] = err or "status unavailable"
+    data["meta_domain"] = read_meta().get("PUBLIC_RPC_DOMAIN", "").strip()
     data["ok"] = True
     resp = jsonify(data)
     resp.headers["Cache-Control"] = "no-store"
@@ -3122,9 +3602,9 @@ def api_rpc_status():
 @app.route("/api/rpc/dns-check", methods=["POST"])
 def api_rpc_dns_check():
     data = request.get_json(silent=True) or {}
-    domain = (data.get("domain") or "").strip()
-    if not _CADDY_DOMAIN_RE.match(domain):
-        return jsonify({"ok": False, "error": "invalid domain"}), 400
+    domain = norm_host(data.get("domain"))
+    if not valid_hostname(domain):
+        return jsonify({"ok": False, "error": host_error("public RPC hostname", domain)}), 400
     public_ip = (data.get("public_ip") or "").strip()
     if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
         return jsonify({"ok": False, "error": "invalid public IP"}), 400
@@ -3132,10 +3612,7 @@ def api_rpc_dns_check():
     if public_ip:
         cmd.append(public_ip)
     rc, out, err = run(cmd, timeout=20)
-    try:
-        res = json.loads(out) if out else {}
-    except Exception:
-        res = {}
+    res = _parse_json_tail(out) or {}
     if not res:
         return jsonify({"ok": False, "error": err or "dns check failed"}), 200
     res["ok"] = True
@@ -3144,23 +3621,34 @@ def api_rpc_dns_check():
 
 @app.route("/api/rpc/enable", methods=["POST"])
 def api_rpc_enable():
+    # Optional move_dashboard_to: when the dashboard is served on the RPC
+    # hostname, install-caddy.sh moves it (same login) to this hostname first.
+    # The helper takes `rpc-enable <host> [<ip>|-] [<dashboard-host>]`, where "-"
+    # holds the inbound-IP place when only the dashboard host is given.
     data = request.get_json(silent=True) or {}
-    domain = (data.get("domain") or "").strip()
-    public_ip = (data.get("public_ip") or "").strip()
-    if not _CADDY_DOMAIN_RE.match(domain):
-        return jsonify({"error": "invalid domain"}), 400
+    domain = norm_host(data.get("domain"))
+    public_ip = str(data.get("public_ip") or "").strip()
+    move = norm_host(data.get("move_dashboard_to"))
+    if not valid_hostname(domain):
+        return jsonify({"error": host_error("public RPC hostname", domain)}), 400
     if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
         return jsonify({"error": "invalid public IP"}), 400
-    cmd = ["sudo", "-n", HELPER, "rpc-enable", domain]
-    if public_ip:
-        cmd.append(public_ip)
-    return _update_stream(cmd, env=os.environ.copy(), capture_stderr=True)
+    if move and not valid_hostname(move):
+        return jsonify({"error": host_error("new dashboard hostname", move,
+                                            "dashboard.node7.example.com")}), 400
+    if move and same_host(move, domain):
+        return jsonify({"error": f"The dashboard needs a hostname other than the "
+                                 f"RPC hostname ({domain}). Try dashboard.{domain}."}), 400
+    cmd = (["sudo", "-n", HELPER, "rpc-enable", domain]
+           + ([public_ip or "-"] if public_ip or move else [])
+           + ([move] if move else []))
+    return _update_stream(cmd, env=os.environ.copy())
 
 
 @app.route("/api/rpc/disable", methods=["POST"])
 def api_rpc_disable():
     return _update_stream(["sudo", "-n", HELPER, "rpc-disable"],
-                          env=os.environ.copy(), capture_stderr=True)
+                          env=os.environ.copy())
 
 
 # =============================================================================
@@ -3183,7 +3671,7 @@ def api_addons_status():
     t = (request.args.get("node_type") or "").strip()
     if not valid_type(t):
         return bad_type()
-    rc, out, err = run(["sudo", "-n", HELPER, "addons-status", t], timeout=10)
+    rc, out, err = run(["sudo", "-n", HELPER, "addons-status"], timeout=10)
     try:
         data = json.loads(out) if out else {}
     except Exception:
@@ -3217,7 +3705,9 @@ def api_netstat():
 
 # Allowed git ref / docker tag shape for the prepare endpoint. The helper
 # re-validates, but reject obviously bad input before we ever shell out.
-REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+# A git ref or image tag. It may not start with "-", so it can never reach git or
+# update-node.sh as an option (update-node 1.2.0 refuses such a value as well).
+REF_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
 
 
 @app.route("/api/version/<node_type>")
@@ -3247,12 +3737,10 @@ def api_build_info():
 def api_update_status(node_type):
     if not valid_type(node_type):
         return bad_type()
-    rc, out, err = run(["sudo", "-n", HELPER, "update-check", node_type], timeout=30)
-    if rc == 0 and out:
-        try:
-            return jsonify(json.loads(out))
-        except (ValueError, json.JSONDecodeError):
-            pass
+    rc, out, err = run(["sudo", "-n", HELPER, "update-check"], timeout=30)
+    res = _parse_json_tail(out) if rc == 0 else None
+    if res is not None:
+        return jsonify(res)
     # Helper/sudo unavailable (e.g. dev box) -- degrade gracefully.
     return jsonify({
         "install_method": detect_install_method(node_type),
@@ -3264,75 +3752,164 @@ def api_update_status(node_type):
     })
 
 
-def _update_stream(argv, env=None, capture_stderr=False, on_close=None):
-    """SSE generator that streams a --json subprocess (via the helper) line by
-    line. Each JSON line the script emits becomes one SSE event. Mirrors the
-    /api/logs/<type>/stream teardown pattern. `env`, when given, fully replaces
-    the child environment (used by Setup to pass TN_SETUP_*/TN_BLS_PASSPHRASE).
-    `capture_stderr` tees the script's human-readable stderr (print_*/build/
-    keytool noise) to a temp file and, on a non-zero exit, surfaces its tail as
-    a final error event -- so a failing step shows WHY instead of just a code.
-    `on_close` is always invoked once the subprocess ends (used to release the
-    single-flight setup guard)."""
-    def generate():
-        errfile = None
-        stderr_dest = subprocess.DEVNULL
-        if capture_stderr:
-            fd, errpath = tempfile.mkstemp(prefix="tn-stream-", suffix=".log")
-            errfile = errpath
-            stderr_dest = os.fdopen(fd, "w")
-        proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=stderr_dest, text=True, env=env,
-        )
-        if capture_stderr:
-            stderr_dest.close()  # parent's copy; child keeps writing to the fd
-        try:
-            for line in iter(proc.stdout.readline, ""):
-                line = line.rstrip()
-                if line:
-                    yield f"data: {line}\n\n"
-        except GeneratorExit:
-            pass
-        finally:
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=3)
-                except Exception:
-                    proc.kill()
-            if on_close:
-                try:
-                    on_close()
-                except Exception:
-                    pass
-        if errfile is not None:
-            if proc.returncode not in (0, None):
-                tail = ""
-                try:
-                    with open(errfile, "r", errors="replace") as f:
-                        lines = [ln.rstrip() for ln in f if ln.strip()]
-                    tail = " | ".join(lines[-12:])[:900]
-                except Exception:
-                    pass
-                if tail:
-                    yield "data: " + json.dumps({"event": "error", "msg": "output: " + tail}) + "\n\n"
-            try:
-                os.unlink(errfile)
-            except Exception:
-                pass
-        yield 'data: {"event":"closed"}\n\n'
+# Terminal escape sequences (colours, cursor moves, window titles) that stray
+# script output and print_* lines on stderr carry; removed so the progress pane
+# shows plain text.
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 
-    return Response(generate(), mimetype="text/event-stream",
+
+def _sse(event):
+    """One Server-Sent Events frame carrying a JSON event."""
+    return "data: " + json.dumps(event) + "\n\n"
+
+
+def _stream_frame(line):
+    """(frame, event name) for one stdout line of a --json script; (None, None)
+    when the line has nothing to show (blank, or only terminal escapes). A JSON
+    object with a string `event` passes through as the script wrote it. Anything
+    else is stray output (a docker pull status, a shell warning) and becomes a
+    `log` event with the terminal escapes removed."""
+    text = line.strip()
+    if not text:
+        return None, None
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        obj = None
+    if isinstance(obj, dict) and isinstance(obj.get("event"), str):
+        return "data: " + text + "\n\n", obj["event"]
+    msg = _ANSI_RE.sub("", text).strip()
+    if not msg:
+        return None, None
+    return _sse({"event": "log", "msg": msg}), "log"
+
+
+def _stderr_tail(path, lines=12, limit=900):
+    """The last non-blank lines of a stream's captured stderr, escapes removed,
+    joined with " | " and cut to `limit` characters. '' when there are none."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            kept = collections.deque(
+                (_ANSI_RE.sub("", ln).strip() for ln in f if ln.strip()),
+                maxlen=lines)
+    except OSError:
+        return ""
+    return " | ".join(ln for ln in kept if ln)[:limit]
+
+
+def _reap(proc, grace):
+    """Wait up to `grace` seconds for a streamed child, then terminate it, then
+    kill it. Returns its exit code, or None if it could not be stopped."""
+    for stop, wait in ((None, grace), (proc.terminate, 3), (proc.kill, 3)):
+        try:
+            if stop is not None:
+                stop()
+            return proc.wait(timeout=wait)
+        except Exception:
+            continue
+    return proc.returncode
+
+
+def _synthesized_done(rc):
+    """The `done` event a stream sends when the child exited without one."""
+    if rc == 0:
+        msg = "The script finished without reporting a result (exit code 0)."
+    elif rc is None:
+        msg = "The script did not finish and did not report a result."
+    elif rc < 0:
+        msg = f"The script was stopped by signal {-rc} before it reported a result."
+    else:
+        msg = f"The script failed with exit code {rc} before it reported a result."
+    return {"event": "done", "ok": rc == 0, "synthesized": True, "rc": rc, "msg": msg}
+
+
+def _update_stream(argv, env=None, on_close=None):
+    """Stream a --json helper call (an update, a config save, a setup phase, a
+    Caddy or public RPC change) as Server-Sent Events, one `data:` frame per
+    event. Every stream ends with exactly one `done` and then `closed`; the page
+    reads it with fetch, so nothing relies on EventSource reconnects.
+
+    The child's JSON events pass through; any other stdout line arrives as a
+    `log` event. Its stderr (print_* lines, build and keytool output) goes to a
+    temp file, and when it exits non-zero the last lines arrive as an `error`
+    event just before `done`, so a failed step says why. The child's own `done`
+    is held until it exits, and a second one is dropped. When it exits without
+    one, the server sends {"event":"done","ok":rc==0,"synthesized":true,
+    "rc":N,"msg":...}.
+
+    If the client goes away, the generator stops without yielding again; the
+    child gets 2 s to finish and is then terminated. `env`, when given, fully
+    replaces the child environment (Setup passes TN_SETUP_* and
+    TN_BLS_PASSPHRASE this way). `on_close` runs once when the response is
+    closed, after the child has exited or been stopped (Setup releases its
+    single-flight guard with it)."""
+    def generate():
+        proc, errpath = None, None
+        try:
+            try:
+                fd, errpath = tempfile.mkstemp(prefix="tn-stream-", suffix=".log")
+                # The child writes to its own copy of the descriptor; the parent's
+                # copy closes when Popen returns.
+                with os.fdopen(fd, "w") as errf:
+                    proc = subprocess.Popen(
+                        argv, stdout=subprocess.PIPE, stderr=errf, env=env,
+                        text=True, encoding="utf-8", errors="replace")
+            except OSError as e:
+                rc = 127 if isinstance(e, FileNotFoundError) else 1
+                yield _sse({"event": "error", "msg": f"could not start {argv[0]}: {e}"})
+                yield _sse(_synthesized_done(rc))
+                yield _sse({"event": "closed"})
+                return
+
+            done_frame, read_error = None, ""
+            try:
+                for raw in iter(proc.stdout.readline, ""):
+                    frame, event = _stream_frame(raw)
+                    if frame is None or event == "closed":
+                        continue   # `closed` ends the stream, and only the server sends it
+                    if event == "done":
+                        done_frame = done_frame or frame
+                        continue
+                    yield frame
+            except Exception as e:   # GeneratorExit is not an Exception
+                read_error = f"reading the script output failed: {e}"
+
+            rc = _reap(proc, grace=10)
+            tail = _stderr_tail(errpath) if rc != 0 else ""
+            detail = " | ".join(x for x in (read_error, tail) if x)
+            if detail:
+                yield _sse({"event": "error", "msg": "output: " + detail})
+            yield done_frame or _sse(_synthesized_done(rc))
+            yield _sse({"event": "closed"})
+        except GeneratorExit:
+            # The client disconnected. A closed generator must not yield again.
+            return
+        finally:
+            if proc is not None:
+                if proc.poll() is None:
+                    _reap(proc, grace=2)
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+            if errpath is not None:
+                try:
+                    os.unlink(errpath)
+                except OSError:
+                    pass
+
+    resp = Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache",
                              "X-Accel-Buffering": "no"})
+    if on_close is not None:
+        resp.call_on_close(on_close)
+    return resp
 
 
 @app.route("/api/update/prepare/<node_type>")
 def api_update_prepare(node_type):
-    # GET (not POST) so the browser can consume it with EventSource; the ref is
-    # a query param, validated here and again in the helper.
+    # GET, because older pages read it with EventSource (the current page uses
+    # fetch); the ref is a query param, validated here and again in the helper.
     if not valid_type(node_type):
         return bad_type()
     blocked = _external_block(node_type)
@@ -3341,7 +3918,7 @@ def api_update_prepare(node_type):
     ref = (request.args.get("ref") or "").strip()
     if not REF_RE.match(ref):
         return jsonify({"error": "invalid ref"}), 400
-    return _update_stream(["sudo", "-n", HELPER, "update-prepare", node_type, ref])
+    return _update_stream(["sudo", "-n", HELPER, "update-prepare", ref])
 
 
 @app.route("/api/update/apply/<node_type>")
@@ -3351,7 +3928,7 @@ def api_update_apply(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    return _update_stream(["sudo", "-n", HELPER, "update-apply", node_type])
+    return _update_stream(["sudo", "-n", HELPER, "update-apply"])
 
 
 @app.route("/api/update/discard/<node_type>", methods=["POST"])
@@ -3361,7 +3938,7 @@ def api_update_discard(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    rc, out, err = run(["sudo", "-n", HELPER, "update-discard", node_type], timeout=30)
+    rc, out, err = run(["sudo", "-n", HELPER, "update-discard"], timeout=30)
     ok = rc == 0
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "discard failed")})
 
@@ -3371,7 +3948,8 @@ def api_update_discard(node_type):
 # =============================================================================
 
 # Hardware tiers, mirroring lib/common.sh (which follows telcoin-network's
-# hardware-requirements doc): (role, label, min cores, min RAM GB, min disk GB).
+# hardware-requirements doc): (role, label, min physical cores, min RAM GB, min
+# disk GB).
 # All advisory -- the role is decided on-chain, so a host below a tier only gets
 # a warning and the setup wizard never blocks on hardware.
 HW_TIERS = (
@@ -3434,8 +4012,9 @@ def hardware_profile():
     when every measurement is known and passes; `gaps` names the measured values
     below the tier ("cpu", "ram", "disk"). A value we could not read is neither a
     pass nor a gap, so such a tier reads ok:false with no gaps (the UI says it
-    could not be measured). Disk is judged on the filesystem's total size."""
-    cpu = os.cpu_count()
+    could not be measured). CPU is judged on physical cores (physical_cores), as
+    the tiers are; disk on the filesystem's total size."""
+    cpu = physical_cores()
     ram_kb = _mem_total_kb()
     disk = _hw_disk(DEFAULT_DATA_DIR)
     tiers = []
@@ -3504,6 +4083,8 @@ def api_preflight():
     # TPM device (soft).
     tpm = {"ok": os.path.exists("/dev/tpm0") or os.path.exists("/dev/tpmrm0")}
 
+    # Advisory hardware tiers (see hardware_profile); never blocks setup.
+    hardware = hardware_profile()
     return jsonify({
         "systemd": systemd,
         "internet": internet,
@@ -3511,8 +4092,10 @@ def api_preflight():
         "docker": docker,
         "rust": rust,
         "tpm": tpm,
-        # Advisory hardware tiers (see hardware_profile); never blocks setup.
-        "hardware": hardware_profile(),
+        "hardware": hardware,
+        # The page shows the CPU as "8 cores (16 threads)".
+        "cpu_physical": hardware["cpu"],
+        "cpu_threads": logical_cpus(),
     })
 
 
@@ -3583,24 +4166,25 @@ def jaeger_services():
     return []
 
 
-def resolve_service(t, services=None):
+def resolve_service(services=None):
     """
-    The node registers its OTLP service name as `telcoin-<type>` plus a
-    node-identity suffix (e.g. `telcoin-<type>-QCZPqMY2zfp`), so an exact-name
-    query never matches. Return the registered service that is `telcoin-<t>`
-    exactly or a `telcoin-<t>-...` prefix, else None when the node has not
-    registered yet.
+    The Jaeger service name of this host's node, or None when it has not
+    registered yet. The helper starts tracing with `--node-name telcoin`, and the
+    node registers that name plus a node-identity suffix (e.g.
+    `telcoin-QCZPqMY2zfp`). Prefer `telcoin` itself, then any `telcoin-*`: a name
+    in today's form before a `telcoin-observer...` or `telcoin-validator...` one
+    left from before the switch, which Jaeger keeps listing until it restarts.
+    Sorted within each group, since Jaeger lists services in no fixed order.
     Pass an already-fetched `services` list to avoid a second /api/services call.
     """
-    base = f"telcoin-{t}"
     if services is None:
         services = jaeger_services()
-    if base in services:
-        return base
-    for s in services:
-        if s.startswith(base + "-"):
-            return s
-    return None
+    if "telcoin" in services:
+        return "telcoin"
+    named = sorted(s for s in services if s.startswith("telcoin-"))
+    current = [s for s in named
+               if not s.startswith(("telcoin-observer", "telcoin-validator"))]
+    return (current or named or [None])[0]
 
 
 def _span_is_error(span):
@@ -3656,7 +4240,8 @@ def simplify_trace(trace):
 
 @app.route("/api/jaeger/status")
 def api_jaeger_status():
-    selected = request.args.get("node_type")
+    # ?node_type= is still accepted from older pages and ignored: one host runs
+    # one node, registered under one service name.
     services = jaeger_services()
     api_reachable = jaeger_get("/api/services") is not None
 
@@ -3668,12 +4253,7 @@ def api_jaeger_status():
     else:
         container_running = api_reachable
 
-    obs_reg = resolve_service("observer", services) is not None
-    val_reg = resolve_service("validator", services) is not None
-    if selected in NODE_TYPES:
-        service_registered = resolve_service(selected, services) is not None
-    else:
-        service_registered = obs_reg or val_reg
+    service_registered = resolve_service(services) is not None
 
     return jsonify({
         "container_running": container_running,
@@ -3711,7 +4291,7 @@ def api_tracing_enable(node_type):
     # 30s: the helper edits the wrapper then restarts the node with --no-block,
     # so it returns once the restart job is queued (no wait on the node's stop
     # window) -- ample headroom for an enqueue-and-return.
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-enable", node_type], timeout=30)
+    rc, out, err = run(["sudo", "-n", HELPER, "tracing-enable"], timeout=30)
     ok = rc == 0
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "enable failed")})
 
@@ -3723,7 +4303,7 @@ def api_tracing_disable(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-disable", node_type], timeout=30)
+    rc, out, err = run(["sudo", "-n", HELPER, "tracing-disable"], timeout=30)
     ok = rc == 0
     return jsonify({"ok": ok, "error": "" if ok else (err or out or "disable failed")})
 
@@ -3745,7 +4325,7 @@ def api_traces(node_type):
         limit = 20
     limit = max(1, min(limit, 100))
 
-    service = resolve_service(node_type)
+    service = resolve_service()
     if service is None:
         return jsonify({"traces": []})
     data = jaeger_get(
@@ -3774,7 +4354,7 @@ def api_traces_stats(node_type):
         "error_rate_percent": 0,
     }
 
-    service = resolve_service(node_type)
+    service = resolve_service()
     if service is None:
         return jsonify(zero)
     data = jaeger_get(
