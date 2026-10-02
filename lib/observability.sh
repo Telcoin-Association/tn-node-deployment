@@ -18,7 +18,7 @@
 # Version (tracked by update-scripts.sh). Bump when observability/config.alloy or the
 # lib/wgvpn bundle changes too, so the updater pulls the testnet-addons bundle alongside.
 # Plain (not readonly) so re-sourcing common.sh can't trip on a readonly redefinition.
-OBSERVABILITY_VERSION="1.0.1"
+OBSERVABILITY_VERSION="1.0.2"
 
 # Resolve the checked-in canonical config relative to this lib dir.
 __OBS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -112,6 +112,18 @@ obs_metrics_reth_flags() {
     printf -- '--metrics %s' "$(obs_metrics_addr)"
 }
 
+# _obs_data_dir [meta-file] — the node data dir: DATA_DIR from .node-meta, else what
+# tn_resolve_data_dir (lib/fallback.sh, which knows the unified and the legacy layouts)
+# finds, else DEFAULT_DATA_DIR. Docker installs keep the reth logs under <data dir>/logs.
+_obs_data_dir() {
+    local dd
+    dd="$(meta_get DATA_DIR "${1:-}" 2>/dev/null || true)"
+    if [[ -z "$dd" ]] && declare -F tn_resolve_data_dir >/dev/null 2>&1; then
+        dd="$(tn_resolve_data_dir 2>/dev/null || true)"
+    fi
+    printf '%s\n' "${dd:-$DEFAULT_DATA_DIR}"
+}
+
 # obs_image_version — TN_IMAGE_VERSION label, derived locally (no GCP metadata):
 # the docker image tag, else /etc/telcoin/build-info, else "unknown".
 obs_image_version() {
@@ -128,7 +140,8 @@ obs_image_version() {
 
 # obs_label_sourcing — set the low-cardinality identity labels (globals) for the env
 # file. No GCP metadata: node from advertised name/hostname, region + validator address
-# from .node-meta (validator address blank for observers), chain from the active network.
+# from .node-meta (the address is blank when .node-meta records none), chain from the
+# active network.
 obs_label_sourcing() {
     local meta; meta="$(node_meta_path || true)"
     TN_NODE="${ADVERTISED_NAME:-}"
@@ -539,52 +552,229 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Launch-file edits and node restarts (lib/common.sh helpers, soft-guarded)
+# -----------------------------------------------------------------------------
+#
+# Helpers from a lib/common.sh newer than 1.4.0, used when present. On an older
+# library each one falls back to the behaviour of lib/observability.sh 1.0.1, with
+# one warning per run naming what is lost (a box half-way through update-scripts.sh
+# keeps working):
+#   tn_launch_flag_get (1.6.0)      reads one flag of the live node command, so a
+#                                   commented-out flag no longer counts as present.
+#                                   Its arrival also brings the return codes of
+#                                   tn_node_inject_flags that obs_inject_flags reports.
+#   tn_wait_restart_window (1.5.0)  holds the restart of a committee node until the
+#                                   current epoch has closed and settled.
+
+OBS_LIB_WARNED=""
+
+# OBS_FLAG_ERROR -- why the last obs_enable / obs_ensure_reth_flags / obs_inject_flags
+# call left a flag the node needs off its launch line, one reason per line; empty when
+# nothing is missing. setup-observability.sh --json reports it as error events.
+OBS_FLAG_ERROR=""
+
+# _obs_flag_error MSG -- warn MSG and add it to OBS_FLAG_ERROR.
+_obs_flag_error() {
+    print_warn "$1"
+    if [[ -n "$OBS_FLAG_ERROR" ]]; then
+        OBS_FLAG_ERROR="${OBS_FLAG_ERROR}"$'\n'"$1"
+    else
+        OBS_FLAG_ERROR="$1"
+    fi
+    return 0
+}
+
+# _obs_lib_has FN CONSEQUENCE -- rc 0 when lib/common.sh defines FN. Otherwise warn,
+# once per run for each FN, that CONSEQUENCE, and return 1.
+_obs_lib_has() {
+    local fn="$1" consequence="$2"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        return 0
+    fi
+    case " ${OBS_LIB_WARNED} " in
+        *" ${fn} "*) return 1 ;;
+    esac
+    OBS_LIB_WARNED="${OBS_LIB_WARNED} ${fn}"
+    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} has no ${fn}, so ${consequence}. Run update-scripts.sh to update the library."
+    return 1
+}
+
+_OBS_NO_FLAG_GET="a commented-out flag counts as present and a failed flag edit is not explained"
+_OBS_NO_WAIT="the node restarts without waiting for the epoch boundary, even when it is in the committee"
+
+# obs_lib_check -- warn now (once per run each) about the lib/common.sh helpers this
+# file is falling back without. For a status screen, and for the start of an enable,
+# so the operator hears it before anything changes. Always rc 0.
+obs_lib_check() {
+    _obs_lib_has tn_launch_flag_get "$_OBS_NO_FLAG_GET" || true
+    _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" || true
+    return 0
+}
+
+# obs_wait_say <step|log|warn> <msg> -- the default progress printer for the epoch
+# wait: print_* lines, like everything else this file prints.
+obs_wait_say() {
+    case "${1:-}" in
+        step) print_step "${2:-}" ;;
+        warn) print_warn "${2:-}" ;;
+        *)    print_info "${2:-}" ;;
+    esac
+    return 0
+}
+
+# obs_restart_window [progress-fn] -- call right before restarting the NODE (not the
+# Alloy shipper, which takes no part in consensus). When the node votes in the current
+# committee and the epoch boundary is close, tn_wait_restart_window (lib/common.sh)
+# holds the restart until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX
+# seconds; TN_SKIP_EPOCH_WAIT=1 skips it. progress-fn is called as
+# `fn step|log|warn MSG` (default obs_wait_say). Always rc 0.
+obs_restart_window() {
+    local fn="${1:-}"
+    if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
+        fn="obs_wait_say"
+    fi
+    _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" || return 0
+    tn_wait_restart_window "" "$fn" || true
+    return 0
+}
+
+# obs_inject_flags FILE MARKER_ERE FLAGS -- add FLAGS to the node command in launch
+# file FILE with tn_node_inject_flags (lib/common.sh) unless MARKER_ERE is already on
+# a live line, and say what happened; a failure message also goes to OBS_FLAG_ERROR.
+# Returns the helper's rc: 0 added (the caller reloads and restarts), 1 already there,
+# 2 no node launch line in FILE, 3 refused (the line ends in a comment, or the command
+# cannot be edited safely), 4 FILE could not be read or written. FILE is unchanged
+# unless rc is 0. A lib/common.sh older than 1.6.0 returns 1 both for "already there"
+# and for "no launch line", and the message says so; callers that must know check the
+# flag afterwards.
+obs_inject_flags() {
+    local file="$1" marker="$2" flags="$3" rc=0 err reason
+    err="$(tn_node_inject_flags "$file" "$marker" "$flags" 2>&1 >/dev/null)" || rc=$?
+    if [[ "$rc" -ne 0 ]] && ! declare -F tn_launch_flag_get >/dev/null 2>&1; then
+        _obs_flag_error "Did not add ${flags%% *} to ${file}: it is already there, or the file has no node launch line. If it is missing, add it to the node command by hand: ${flags}"
+        return "$rc"
+    fi
+    case "$rc" in
+        0) ;;
+        1) print_info "${flags%% *} is already on the node command in ${file}; nothing to add." ;;
+        2) _obs_flag_error "${file} has no live node command (an uncommented line that runs node with --http), so ${flags%% *} was not added. Add it by hand to the command that starts the node: ${flags}" ;;
+        3) reason="$(printf '%s\n' "$err" | sed -n '1s/^tn_node_inject_flags: //p')"
+           [[ -n "$reason" ]] || reason="the node command ends in a # comment, or is not one simple command that can be edited safely"
+           _obs_flag_error "Edit the launch file by hand: ${reason}. Add to the node command in ${file}: ${flags}" ;;
+        *) _obs_flag_error "Could not read or write ${file}; nothing was changed. Add to the node command by hand: ${flags}" ;;
+    esac
+    return "$rc"
+}
+
+# _obs_log_format FILE HAVE_GET -- print the --log.file.format value of the node
+# command in launch file FILE (empty for a bare flag); rc 1 when it has none. With
+# HAVE_GET false (lib/common.sh older than 1.6.0) it is the 1.0.1 test: the text
+# "--log.file.format json" anywhere in FILE, comment lines included, prints json.
+_obs_log_format() {
+    if [[ "${2:-false}" == "true" ]]; then
+        tn_launch_flag_get "$1" --log.file.format 2>/dev/null || return 1
+        return 0
+    fi
+    grep -q -- '--log.file.format json' "$1" 2>/dev/null || return 1
+    printf 'json\n'
+}
+
+# _obs_has_metrics FILE HAVE_GET -- rc 0 when the node command in launch file FILE
+# has --metrics; with HAVE_GET false, the 1.0.1 test (the text anywhere in FILE).
+_obs_has_metrics() {
+    if [[ "${2:-false}" == "true" ]]; then
+        tn_launch_flag_get "$1" --metrics >/dev/null 2>&1 || return 1
+        return 0
+    fi
+    grep -q -- '--metrics' "$1" 2>/dev/null || return 1
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Ensure the running node actually writes JSON logs (standalone-enable path)
 # -----------------------------------------------------------------------------
 
-# obs_ensure_reth_flags — when obs is enabled AFTER setup (setup-observability.sh) the
-# node may already be running WITHOUT the reth flags the enabled pipelines need: the
-# JSON-log flags (logs → Alloy has something to tail) and/or --metrics (metrics → a
-# registry to scrape). Idempotently inject whichever are missing into the correct launch
-# config (docker: systemd ExecStart; binary: the start wrapper) and offer ONE restart for
-# all of them. In the first-pass setup the flags are already baked (ask-early), so this is
-# a no-op there. Reads ENABLE_OBSERVABILITY / ENABLE_METRICS.
+# obs_ensure_reth_flags [progress-fn] — when obs is enabled AFTER setup
+# (setup-observability.sh) the node may already be running WITHOUT the reth flags the
+# enabled pipelines need: the JSON-log flags (logs → Alloy has something to tail) and/or
+# --metrics (metrics → a registry to scrape). Idempotently inject whichever are missing
+# into the node's launch file (tn_node_launch_target: the start wrapper, or the systemd
+# unit of an old docker install) and offer ONE restart for all of them, after the epoch
+# wait (obs_restart_window; progress-fn as there). Presence is read from the live node
+# command (tn_launch_flag_get), so a commented-out flag does not count. In the first-pass
+# setup the flags are already baked (ask-early), so this is a no-op there. Reads
+# ENABLE_OBSERVABILITY / ENABLE_METRICS.
+# rc 0 when every flag the enabled pipelines need is on the node command afterwards (or
+# no node service was found: nothing to check). rc 1 when one is still missing; each
+# reason is in OBS_FLAG_ERROR, and the node is not restarted, since the operator has to
+# edit the launch file and restart it anyway.
 obs_ensure_reth_flags() {
-    local target svc method file changed=0
+    local fn="${1:-}" target svc method file changed=0 failed=0 have_get=false rc val errs
+    OBS_FLAG_ERROR=""
     target="$(tn_node_launch_target)" || { print_warn "No telcoin node service detected; skipping reth flag check."; return 0; }
     read -r svc method file <<< "$target"
+    if _obs_lib_has tn_launch_flag_get "$_OBS_NO_FLAG_GET"; then
+        have_get=true
+    fi
 
     if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
-        if grep -q -- '--log.file.format json' "$file" 2>/dev/null; then
+        rc=0
+        val="$(_obs_log_format "$file" "$have_get")" || rc=$?
+        if [[ "$rc" -eq 0 && "$val" == "json" ]]; then
             print_ok "Node already writes JSON logs."
+        elif [[ "$rc" -eq 0 ]]; then
+            # Adding a second --log.file.format would leave the command with two.
+            _obs_flag_error "The node command in ${file} has --log.file.format ${val:-with no value}, and log shipping needs json. Change it to json by hand, then restart ${svc}."
+            failed=1
         else
             print_step "Enabling JSON node logs"
-            if tn_node_inject_flags "$file" '--log.file.format json' "$(obs_reth_log_flags "$method")"; then
+            errs="$OBS_FLAG_ERROR"
+            if obs_inject_flags "$file" '--log.file.format json' "$(obs_reth_log_flags "$method")"; then
                 changed=1
-            else
-                print_warn "Could not find the node launch line in ${file}; add manually: $(obs_reth_log_flags "$method")"
+            fi
+            rc=0
+            val="$(_obs_log_format "$file" "$have_get")" || rc=$?
+            if [[ "$rc" -ne 0 || "$val" != "json" ]]; then
+                if [[ "$OBS_FLAG_ERROR" == "$errs" ]]; then
+                    _obs_flag_error "--log.file.format json is not on the node command in ${file}. Add it by hand: $(obs_reth_log_flags "$method")"
+                fi
+                failed=1
             fi
         fi
     fi
 
     if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
-        if grep -q -- '--metrics' "$file" 2>/dev/null; then
+        if _obs_has_metrics "$file" "$have_get"; then
             print_ok "Node already serves a metrics endpoint (--metrics)."
         else
             print_step "Enabling node metrics endpoint"
-            if tn_node_inject_flags "$file" '--metrics' "$(obs_metrics_reth_flags)"; then
+            errs="$OBS_FLAG_ERROR"
+            if obs_inject_flags "$file" '--metrics' "$(obs_metrics_reth_flags)"; then
                 changed=1
-            else
-                print_warn "Could not find the node launch line in ${file}; add manually: $(obs_metrics_reth_flags)"
+            fi
+            if ! _obs_has_metrics "$file" "$have_get"; then
+                if [[ "$OBS_FLAG_ERROR" == "$errs" ]]; then
+                    _obs_flag_error "--metrics is not on the node command in ${file}. Add it by hand: $(obs_metrics_reth_flags)"
+                fi
+                failed=1
             fi
         fi
     fi
 
+    if [[ "$changed" -eq 1 && "$method" == "docker" ]]; then
+        systemctl daemon-reload
+    fi
+    if [[ "$failed" -eq 1 ]]; then
+        if [[ "$changed" -eq 1 ]]; then
+            print_info "Not restarting ${svc} yet: fix its launch file as described above, then restart it (sudo systemctl restart ${svc})."
+        fi
+        return 1
+    fi
     [[ "$changed" -eq 1 ]] || return 0
-    [[ "$method" == "docker" ]] && systemctl daemon-reload
 
     print_warn "The node must restart to pick up the new reth flags."
     if confirm "Restart ${svc} now?"; then
+        obs_restart_window "$fn"
         if systemctl restart "$svc"; then print_ok "${svc} restarted."; else print_warn "Restart failed; run: sudo systemctl restart ${svc}"; fi
     else
         print_info "Restart later: sudo systemctl restart ${svc}"
@@ -595,14 +785,19 @@ obs_ensure_reth_flags() {
 # enable / disable / status
 # -----------------------------------------------------------------------------
 
-# obs_enable <token> — set up + start the Alloy shipper for whichever pipelines the caller
-# has enabled (ENABLE_OBSERVABILITY = logs, ENABLE_METRICS = metrics; set them to the
-# desired FINAL state before calling), render config.alloy + the mode-600 env file to
-# match, ensure the node carries the matching reth flags, and record state. Idempotent —
-# safe to re-run to flip one pipeline on/off (it restarts Alloy to load the new config).
-# The single ingest token serves BOTH pipelines (one obs-hub gate).
+# obs_enable <token> [progress-fn] — set up + start the Alloy shipper for whichever
+# pipelines the caller has enabled (ENABLE_OBSERVABILITY = logs, ENABLE_METRICS = metrics;
+# set them to the desired FINAL state before calling), render config.alloy + the mode-600
+# env file to match, ensure the node carries the matching reth flags, and record state.
+# Idempotent — safe to re-run to flip one pipeline on/off (it restarts Alloy to load the
+# new config; Alloy restarts never wait for the epoch boundary). progress-fn reports the
+# epoch wait before a node restart (see obs_restart_window). The single ingest token
+# serves BOTH pipelines (one obs-hub gate). rc 1 on any failure; when the cause is a
+# node flag that could not be added, OBS_FLAG_ERROR says why and .node-meta is left
+# as it was.
 obs_enable() {
-    local token="${1:-}"
+    local token="${1:-}" progress="${2:-}"
+    OBS_FLAG_ERROR=""
     # Trim leading/trailing whitespace (a stray paste newline otherwise yields silent 401s).
     token="${token#"${token%%[![:space:]]*}"}"
     token="${token%"${token##*[![:space:]]}"}"
@@ -634,16 +829,16 @@ obs_enable() {
         return 1
     fi
 
-    local meta method datadir
+    local meta method
     meta="$(node_meta_path || true)"
     method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
-    datadir="$(meta_get DATA_DIR "$meta" 2>/dev/null || true)"
 
     install -d -m 0750 "$OBS_ETC_DIR"
     obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
 
     if [[ "$method" == "docker" ]]; then
-        local log_host_dir="${datadir:-${DEFAULT_DATA_DIR}/validator}/logs"
+        local log_host_dir
+        log_host_dir="$(_obs_data_dir "$meta")/logs"
         install -d -m 0755 "$log_host_dir"
         chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$log_host_dir" 2>/dev/null || true
         install -d -m 0750 "$OBS_DATA_DIR"
@@ -670,7 +865,14 @@ obs_enable() {
         return 1
     fi
 
-    obs_ensure_reth_flags
+    # A pipeline whose node flags are missing is not recorded as enabled, so status
+    # readers (the UI's add-ons card reads .node-meta) never show a half-applied enable.
+    # Alloy keeps the config rendered above; with the flags missing it ships nothing for
+    # that pipeline until the launch file is fixed and this enable is run again.
+    if ! obs_ensure_reth_flags "$progress"; then
+        print_info "Not recorded as enabled until the node launch file has the flags above; fix it, then run this enable again."
+        return 1
+    fi
 
     if [[ -n "$meta" ]]; then
         meta_set ENABLE_OBSERVABILITY "$logs_on" "$meta"
@@ -810,8 +1012,7 @@ obs_status() {
     if [[ "$logs_enabled" == "true" ]]; then
         local logdir logf
         if [[ "$method" == "docker" ]]; then
-            local dd; dd="$(meta_get DATA_DIR "$meta" 2>/dev/null || echo "${DEFAULT_DATA_DIR}/validator")"
-            logdir="${dd}/logs/telcoin-network-logs"
+            logdir="$(_obs_data_dir "$meta")/logs/telcoin-network-logs"
         else
             logdir="${DEFAULT_LOG_DIR}/telcoin-network-logs"
         fi

@@ -12,16 +12,21 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.5.2"
+readonly SCRIPT_VERSION="1.6.0"
 readonly SSH_CONFIG="/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
 # 43174/tcp is the Uptime Kuma health-monitoring endpoint used by the
 # Telcoin Association across all nodes.
-# UDP 49590/49594 are the node P2P consensus ports, opened on every install: the
+# The node P2P consensus ports (UDP; 49590 primary and 49594 worker unless the
+# node was set up with others, see fw_p2p_ports) are opened on every install: the
 # role is decided on-chain at each epoch, not by the firewall, and a node that
 # stakes/activates behind a closed firewall would be unreachable for consensus.
 readonly UPTIME_KUMA_PORT="43174"
+
+# The Caddyfile install-caddy.sh writes. Rooted at TN_ROOT_PREFIX (empty in
+# production, a temp tree under test), like the resolvers in lib/fallback.sh.
+readonly FW_CADDYFILE="${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile"
 
 # =============================================================================
 # HELPERS
@@ -95,12 +100,184 @@ get_current_ip() {
 }
 
 detect_installed_nodes() {
-    # A VM runs exactly one node. Route through the shared resolvers so this
-    # works for both unified (telcoin.service) and legacy installs: presence is
-    # tn_resolve_service (returns non-zero when nothing is installed), and the
-    # node type comes from tn_resolve_node_type.
-    tn_resolve_service >/dev/null 2>&1 || { echo "none"; return 0; }
-    echo "$(tn_resolve_node_type) "
+    # A VM runs exactly one node. Print its systemd service ("telcoin.service", or
+    # the unit of a legacy install), or "none". The shared resolver
+    # tn_resolve_service (lib/fallback.sh) covers unified and legacy installs. A
+    # node's role is decided on-chain each epoch, so there is no node type to show.
+    local svc
+    svc="$(tn_resolve_service 2>/dev/null)" || { echo "none"; return 0; }
+    echo "${svc}.service"
+}
+
+# =============================================================================
+# NODE P2P PORTS
+# =============================================================================
+
+# fw_listener_port VAR FILE... -- print the UDP port of the last VAR=<multiaddr>
+# assignment on a live line of the FILEs, read in order so a later file wins. The
+# forms setup-node.sh writes all match: `-e "VAR=..."` in a docker command,
+# `export VAR="..."` in a start wrapper, `Environment="VAR=..."` in a unit. A line
+# whose first non-blank character is # is a comment (; too in a .service file),
+# and in a wrapper so is the rest of a line from an unquoted # word. rc 1 when no
+# FILE gives VAR a multiaddr with a UDP port.
+fw_listener_port() {
+    local var="$1" f unit port="" p
+    shift
+    for f in "$@"; do
+        [[ -n "$f" && -f "$f" && -r "$f" ]] || continue
+        unit=0
+        if [[ "$f" == *.service ]]; then
+            unit=1
+        fi
+        p="$(awk -v var="$var" -v unit="$unit" '
+            # The line up to an unquoted # word: the shell ignores the rest.
+            function code(s,    i, c, q, n) {
+                q = ""; n = length(s)
+                for (i = 1; i <= n; i++) {
+                    c = substr(s, i, 1)
+                    if (q != "") { if (c == q) q = ""; continue }
+                    if (c == "\\") { i++; continue }
+                    if (c == DQ || c == SQ) { q = c; continue }
+                    if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[ \t]/)) return substr(s, 1, i - 1)
+                }
+                return s
+            }
+            BEGIN { SQ = sprintf("%c", 39); DQ = "\""; re = "[ \t" DQ SQ "=]" var "="; found = "" }
+            /^[ \t]*#/ { next }
+            unit == 1 && /^[ \t]*;/ { next }
+            {
+                s = " " (unit == 1 ? $0 : code($0))
+                while (match(s, re)) {
+                    s = substr(s, RSTART + RLENGTH)
+                    v = s
+                    if (substr(v, 1, 1) == DQ || substr(v, 1, 1) == SQ) v = substr(v, 2)
+                    if (match(v, /[ \t\\"]/)) v = substr(v, 1, RSTART - 1)
+                    i = index(v, SQ); if (i > 0) v = substr(v, 1, i - 1)
+                    if (match(v, /\/udp\/[0-9]+/)) {
+                        p = substr(v, RSTART + 5, RLENGTH - 5)
+                        rest = substr(v, RSTART + RLENGTH, 1)
+                        if ((rest == "" || rest == "/") && length(p) <= 5 && p + 0 >= 1 && p + 0 <= 65535) found = p + 0
+                    }
+                }
+            }
+            END { if (found != "") print found }
+        ' "$f" 2>/dev/null)" || p=""
+        if [[ -n "$p" ]]; then
+            port="$p"
+        fi
+    done
+    [[ -n "$port" ]] || return 1
+    printf '%s\n' "$port"
+}
+
+# fw_p2p_ports -- print the node's inbound P2P ports (UDP), one "<port> <label>"
+# line each: primary, worker-0, worker-1, ... in worker order. Primary and worker
+# 0 come from the listener addresses the node is started with
+# (PRIMARY_LISTENER_MULTIADDR, WORKER_LISTENER_MULTIADDR in the start wrapper, or
+# in the unit when the wrapper does not set them), because that is the port the
+# node binds; else from node-info.yaml; else 49590 and 49594. Workers 1 and up
+# come from node-info.yaml only (worker N is line N+1 of
+# tn_node_info_worker_ports). Always prints at least the primary and worker-0
+# lines, so a box with no node, or with a lib/common.sh older than 1.6.0 (see
+# fw_lib_check), gets the defaults.
+fw_p2p_ports() {
+    local target svc file unit ni primary="" w0="" workers="" p i
+    if target="$(tn_node_launch_target 2>/dev/null)"; then
+        read -r svc _ file <<< "$target"
+        unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service"
+        primary="$(fw_listener_port PRIMARY_LISTENER_MULTIADDR "$unit" "$file")" || primary=""
+        w0="$(fw_listener_port WORKER_LISTENER_MULTIADDR "$unit" "$file")" || w0=""
+    fi
+    ni="$(tn_resolve_data_dir 2>/dev/null || true)/node-info.yaml"
+    if [[ -z "$primary" ]] && declare -F tn_node_info_field >/dev/null 2>&1; then
+        primary="$(tn_node_info_field "$ni" primary_port 2>/dev/null)" || primary=""
+    fi
+    if declare -F tn_node_info_worker_ports >/dev/null 2>&1; then
+        workers="$(tn_node_info_worker_ports "$ni" 2>/dev/null)" || workers=""
+    fi
+    if [[ -z "$w0" ]]; then
+        w0="$(printf '%s\n' "$workers" | sed -n 1p)"
+    fi
+    printf '%s primary\n' "${primary:-$DEFAULT_P2P_PORT}"
+    printf '%s worker-0\n' "${w0:-$DEFAULT_WORKER_PORT}"
+    i=0
+    while IFS= read -r p; do
+        if (( i > 0 )) && [[ -n "$p" ]]; then
+            printf '%s worker-%s\n' "$p" "$i"
+        fi
+        i=$((i + 1))
+    done <<< "$workers"
+}
+
+# fw_p2p_what LABEL WORKERS -- the words for an fw_p2p_ports label in messages and
+# rule labels: "primary", "worker" when the node has one worker, else "worker N".
+fw_p2p_what() {
+    case "$1" in
+        primary)  printf 'primary' ;;
+        worker-*) if [[ "${2:-1}" -gt 1 ]]; then printf 'worker %s' "${1#worker-}"; else printf 'worker'; fi ;;
+        *)        printf '%s' "$1" ;;
+    esac
+}
+
+# fw_p2p_port_text [/] -- the P2P port numbers as one phrase: "49590 and 49594"
+# ("49590, 49594 and 49595" for three), or "49590/49594" with the / argument.
+fw_p2p_port_text() {
+    local style="${1:-and}" port label n i out=""
+    local -a ports=()
+    while read -r port label; do
+        if [[ -n "$port" ]]; then
+            ports+=("$port")
+        fi
+    done < <(fw_p2p_ports)
+    n=${#ports[@]}
+    i=0
+    while (( i < n )); do
+        if (( i > 0 )); then
+            if [[ "$style" == "/" ]]; then
+                out+="/"
+            elif (( i == n - 1 )); then
+                out+=" and "
+            else
+                out+=", "
+            fi
+        fi
+        out+="${ports[$i]}"
+        i=$((i + 1))
+    done
+    printf '%s' "$out"
+}
+
+# fw_p2p_all_open -- 0 when ufw has an ALLOW rule for every P2P port.
+fw_p2p_all_open() {
+    local port label
+    while read -r port label; do
+        [[ -n "$port" ]] || continue
+        ufw_has_allow "$port" udp || return 1
+    done < <(fw_p2p_ports)
+    return 0
+}
+
+# fw_p2p_allow -- add an ALLOW rule for every P2P port (ufw skips existing ones). A
+# failing `ufw allow` stops the script under set -e, as the fixed pair of rules did.
+fw_p2p_allow() {
+    local port label
+    while read -r port label; do
+        [[ -n "$port" ]] || continue
+        ufw allow "${port}/udp" &>/dev/null
+    done < <(fw_p2p_ports)
+    return 0
+}
+
+# fw_lib_check -- warn when lib/common.sh is older than 1.6.0: without its
+# node-info.yaml readers fw_p2p_ports finds the primary and worker 0 ports in the
+# launch files only (else 49590 and 49594) and cannot see workers 1 and up. Called
+# once per screen and once per --json run; prints nothing on a current library.
+fw_lib_check() {
+    if declare -F tn_node_info_field >/dev/null 2>&1 && declare -F tn_node_info_worker_ports >/dev/null 2>&1; then
+        return 0
+    fi
+    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} cannot read node-info.yaml, so only the primary and worker 0 P2P ports are checked (from the launch file, else ${DEFAULT_P2P_PORT} and ${DEFAULT_WORKER_PORT}). Run update-scripts.sh to update the library."
+    return 0
 }
 
 # =============================================================================
@@ -117,7 +294,9 @@ view_status() {
     elif ufw_active; then
         print_ok "Firewall is active"
         local default_in
-        default_in=$(ufw status verbose 2>/dev/null | grep "Default:" | grep -o "incoming: [a-z]*" | awk '{print $2}')
+        # Real ufw verbose form: "Default: deny (incoming), allow (outgoing), ...". A
+        # pattern that finds nothing must not end the script (set -e with pipefail).
+        default_in=$(ufw status verbose 2>/dev/null | grep -oE '(deny|allow|reject) \(incoming\)' | awk '{print $1}' | head -1 || true)
         if [[ "$default_in" == "deny" ]]; then
             print_ok "Default inbound policy: deny (recommended)"
         else
@@ -180,25 +359,28 @@ view_status() {
     if [[ "$nodes" == "none" ]]; then
         print_info "No Telcoin nodes detected on this server"
     else
-        print_info "Installed nodes: ${nodes}"
+        print_info "Installed node: ${nodes}"
+        fw_lib_check
         echo ""
 
-        # Every node binds the same P2P listen ports at the initial epoch, and no
-        # new networking is provisioned when a node joins the committee -- so a node
+        # Every node binds its P2P listen ports at the initial epoch, and no new
+        # networking is provisioned when a node joins the committee -- so a node
         # that stakes/activates behind a closed firewall is unreachable. The role is
         # decided on-chain, not here, so we expect these open on every install.
-        print_info "Node P2P -- UDP 49590/49594 required inbound for consensus"
+        local p2p port label what nworkers
+        p2p="$(fw_p2p_ports)"
+        nworkers="$(grep -c ' worker-' <<< "$p2p" || true)"
+        print_info "Node P2P -- UDP $(fw_p2p_port_text /) required inbound for consensus"
         if ufw_active; then
-            if ufw_has_allow 49590 udp; then
-                print_ok "UDP 49590 is open"
-            else
-                print_error "UDP 49590 is CLOSED -- node will be unreachable for consensus P2P"
-            fi
-            if ufw_has_allow 49594 udp; then
-                print_ok "UDP 49594 is open"
-            else
-                print_error "UDP 49594 is CLOSED -- node will be unreachable for consensus P2P"
-            fi
+            while read -r port label; do
+                [[ -n "$port" ]] || continue
+                what="$(fw_p2p_what "$label" "$nworkers")"
+                if ufw_has_allow "$port" udp; then
+                    print_ok "UDP ${port} is open (${what})"
+                else
+                    print_error "UDP ${port} (${what}) is CLOSED -- node will be unreachable for consensus P2P"
+                fi
+            done <<< "$p2p"
         fi
 
         # Uptime Kuma is required across all node types (Telcoin Association
@@ -265,27 +447,31 @@ view_status() {
 # load-bearing: SSH (operator + the IAP range via the blanket :22 allow) + the WireGuard overlay
 # (the Association recovery path, 10.100.0.0/16) + the source-restricted kuma monitor are ALL
 # allowed BEFORE `ufw --force enable`, so enabling can never lock out the IAP door or the overlay.
-# Opens validator P2P (49590/49594) when a validator is installed; 80/443 are NOT opened here
-# (install-caddy.sh in this repo opens them when it enables the public RPC/dashboard; the
-# maintainer-only common/config-caddy.sh does the same on the maintainer fleet, provenance
-# only). Mirrors the interactive defaults exactly -- no extra behavior.
+# Opens the node P2P ports (fw_p2p_ports: 49590/49594 unless the node uses others) when a node
+# is installed. 80/443 are opened here only when Caddy serves the public RPC/dashboard on this
+# box (caddy_serves_public_edge), checked on EVERY run and allowed before the enable, so turning
+# ufw on never takes a live site down; otherwise install-caddy.sh in this repo opens them when it
+# enables the public RPC/dashboard (the maintainer-only common/config-caddy.sh does the same on
+# the maintainer fleet, provenance only). Mirrors the interactive defaults exactly.
 #
 # RECONCILE by default: it only ENSURES the managed rules + policies exist and never
 # removes anything, so a re-run can't silently drop an operator's custom rules (a manual
 # 443, a bespoke allow, etc.). Pass "--reset" to first `ufw --force reset` for a clean
-# slate -- destructive, removes ALL existing rules including unmanaged ones. The one
-# exception: when Caddy serves the public RPC/dashboard here (caddy_serves_public_edge),
-# --reset re-adds 80/443 so a clean slate can't take the public edge down. To close them,
-# disable that access with install-caddy.sh (--json --phase=rpc-disable / --phase=disable,
-# or its interactive menu); it closes 80/443 once no vhost remains. Either way the
-# lockout-safe ordering holds: SSH + overlay + kuma are allowed BEFORE enable.
+# slate -- destructive, removes ALL existing rules including unmanaged ones, except that
+# 80/443 come back when Caddy serves the public edge here. To close them, disable that
+# access with install-caddy.sh (--json --phase=rpc-disable / --phase=disable, or its
+# interactive menu); it closes 80/443 once no vhost remains. Either way the lockout-safe
+# ordering holds: SSH + overlay + kuma are allowed BEFORE enable.
 apply_recommended_firewall() {
     local do_reset="${1:-}"
     local ssh_port nodes keep_web=false
     ssh_port=$(get_ssh_port)
     nodes=$(detect_installed_nodes)
+    # Before a reset wipes the rules: is Caddy serving the public edge on this box?
+    if caddy_serves_public_edge; then
+        keep_web=true
+    fi
     if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
-        caddy_serves_public_edge && keep_web=true
         ufw --force reset &>/dev/null
     fi
     ufw default deny incoming &>/dev/null
@@ -298,10 +484,10 @@ apply_recommended_firewall() {
     # each epoch and no networking is provisioned when a node joins the committee,
     # so a node that activates behind a closed firewall would be unreachable.
     if [[ "$nodes" != "none" ]]; then
-        ufw allow 49590/udp &>/dev/null
-        ufw allow 49594/udp &>/dev/null
+        fw_p2p_allow
     fi
-    # Re-add the public edge BEFORE enable so --reset never leaves 80/443 closed under Caddy.
+    # Allow the public edge BEFORE enable, so neither a plain enable (ufw off until now,
+    # with no 80/443 rules staged) nor --reset leaves a site Caddy serves unreachable.
     if [[ "$keep_web" == "true" ]]; then
         ufw allow 80/tcp &>/dev/null
         ufw allow 443/tcp &>/dev/null
@@ -323,9 +509,13 @@ enable_firewall() {
         print_ok "ufw installed"
     fi
 
-    local ssh_port nodes
+    local ssh_port nodes p2p_text=""
     ssh_port=$(get_ssh_port)
     nodes=$(detect_installed_nodes)
+    if [[ "$nodes" != "none" ]]; then
+        fw_lib_check
+        p2p_text="$(fw_p2p_port_text)"
+    fi
 
     echo ""
     print_info "This will apply the following settings:"
@@ -335,7 +525,10 @@ enable_firewall() {
     echo "  - Allow SSH on port ${ssh_port}"
     echo "  - Allow TCP ${UPTIME_KUMA_PORT} (Uptime Kuma) from the Association monitor only (${TN_KUMA_SRC})"
     if [[ "$nodes" != "none" ]]; then
-        echo "  - Allow UDP 49590 and 49594 (node P2P -- required for consensus)"
+        echo "  - Allow UDP ${p2p_text} (node P2P -- required for consensus)"
+    fi
+    if caddy_serves_public_edge; then
+        echo "  - Allow TCP 80 and 443 (Caddy serves the public RPC/dashboard on this server)"
     fi
     if [[ "$nodes" == "none" ]]; then
         echo ""
@@ -380,7 +573,7 @@ enable_firewall() {
     print_ok "SSH port ${ssh_port}/tcp allowed"
     print_ok "Uptime Kuma port ${UPTIME_KUMA_PORT}/tcp allowed from ${TN_KUMA_SRC} (Association monitor)"
     if [[ "$nodes" != "none" ]]; then
-        print_ok "Node P2P UDP 49590 and 49594 allowed"
+        print_ok "Node P2P UDP ${p2p_text} allowed"
     fi
     print_warn "Test your SSH connection in a new terminal before closing this one"
     echo ""
@@ -587,18 +780,20 @@ manage_node_ports() {
         return
     fi
 
-    print_info "Detected nodes: ${nodes}"
+    print_info "Detected node: ${nodes}"
+    fw_lib_check
     echo ""
 
-    echo "  Every node needs UDP ports 49590 and 49594 open inbound for consensus P2P."
+    local p2p_text
+    p2p_text="$(fw_p2p_port_text)"
+    echo "  Every node needs UDP ports ${p2p_text} open inbound for consensus P2P."
     echo "  The role is decided on-chain -- a node that stakes must already be reachable."
     echo ""
-    if ufw_has_allow 49590 udp && ufw_has_allow 49594 udp; then
-        print_ok "UDP ports 49590 and 49594 are already open"
-    elif confirm "Open UDP ports 49590 and 49594 for node P2P?"; then
-        ufw allow 49590/udp &>/dev/null
-        ufw allow 49594/udp &>/dev/null
-        print_ok "UDP ports 49590 and 49594 opened"
+    if fw_p2p_all_open; then
+        print_ok "UDP ports ${p2p_text} are already open"
+    elif confirm "Open UDP ports ${p2p_text} for node P2P?"; then
+        fw_p2p_allow
+        print_ok "UDP ports ${p2p_text} opened"
     fi
     echo ""
 
@@ -864,43 +1059,50 @@ fw_is_testnet() {
 caddy_managed_active() {
     command -v systemctl >/dev/null 2>&1 || return 1
     systemctl is-active --quiet caddy 2>/dev/null || return 1
-    [[ -f /etc/caddy/Caddyfile ]] || return 1
-    grep -q "Managed by the Telcoin Node Manager" /etc/caddy/Caddyfile 2>/dev/null
+    [[ -f "$FW_CADDYFILE" ]] || return 1
+    grep -q "Managed by the Telcoin Node Manager" "$FW_CADDYFILE" 2>/dev/null
 }
 
 # caddy_serves_public_edge -- 0 (true) when Caddy fronts the public RPC and/or dashboard
-# here, so a --reset must keep 80/443. Detects the managed Caddyfile the way install-caddy.sh
-# writes it (our marker as the FIRST line, or a tn-rpc / tn-dashboard fence per vhost) with
-# Caddy installed. Unlike caddy_managed_active it additionally requires `caddy` on PATH and
-# does not look at the service state, so a reset while Caddy is briefly down/restarting
-# cannot close the edge. The marker only counts on line 1, so an operator's own Caddyfile
-# that merely mentions the phrase in a comment is not treated as ours. Deliberately NOT
-# "caddy is active" alone: after install-caddy.sh disables the last vhost Caddy keeps
-# running on a disabled stub (no marker), and a foreign Caddy config is a custom rule
-# that --reset is documented to wipe.
+# here, so every enable (plain or --reset) must allow 80/443. Detects the managed Caddyfile
+# the way install-caddy.sh writes it (our marker as the FIRST line, or a tn-rpc /
+# tn-dashboard fence per vhost) with Caddy installed. Unlike caddy_managed_active it
+# additionally requires `caddy` on PATH and does not look at the service state, so an
+# enable while Caddy is briefly down/restarting cannot close the edge. The marker only
+# counts on line 1, so an operator's own Caddyfile that merely mentions the phrase in a
+# comment is not treated as ours. Deliberately NOT "caddy is active" alone: after
+# install-caddy.sh disables the last vhost Caddy keeps running on a disabled stub (no
+# marker), and a foreign Caddy config is a custom rule that --reset is documented to wipe.
 caddy_serves_public_edge() {
     command -v caddy >/dev/null 2>&1 || return 1
     local first_line
-    first_line="$(head -n 1 /etc/caddy/Caddyfile 2>/dev/null || true)"
+    first_line="$(head -n 1 "$FW_CADDYFILE" 2>/dev/null || true)"
     [[ "$first_line" == *"Managed by the Telcoin Node Manager"* ]] && return 0
-    grep -qF -e "# >>> tn-rpc >>>" -e "# >>> tn-dashboard >>>" /etc/caddy/Caddyfile 2>/dev/null
+    grep -qF -e "# >>> tn-rpc >>>" -e "# >>> tn-dashboard >>>" "$FW_CADDYFILE" 2>/dev/null
 }
 
 # desired_firewall_rules -- print the rule set THIS host should have, one per line:
 #   <spec>\t<label>\t<source>
 # <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
-# (anywhere|restricted|<cidr>). Node P2P on every install; overlay SSH only when
-# the VPN is active; 80/443 only when Caddy manages the dashboard.
+# (anywhere|restricted|<cidr>). Node P2P (one rule per fw_p2p_ports line) on every
+# install; overlay SSH only when the VPN is active; 80/443 only when Caddy manages
+# the dashboard.
 desired_firewall_rules() {
-    local ssh_port nodetype
+    local ssh_port has_node=false p2p port label nworkers
     ssh_port="$(get_ssh_port)"
-    if tn_resolve_service >/dev/null 2>&1; then nodetype="$(tn_resolve_node_type)"; else nodetype="none"; fi
+    if tn_resolve_service >/dev/null 2>&1; then
+        has_node=true
+    fi
 
     printf '%s\t%s\t%s\n' "${ssh_port}/tcp"         "SSH"                "anywhere"
     printf '%s\t%s\t%s\n' "${UPTIME_KUMA_PORT}/tcp" "Uptime Kuma health" "restricted"
-    if [[ "$nodetype" != "none" ]]; then
-        printf '%s\t%s\t%s\n' "49590/udp" "Node P2P (primary)" "anywhere"
-        printf '%s\t%s\t%s\n' "49594/udp" "Node P2P (worker)"  "anywhere"
+    if [[ "$has_node" == "true" ]]; then
+        p2p="$(fw_p2p_ports)"
+        nworkers="$(grep -c ' worker-' <<< "$p2p" || true)"
+        while read -r port label; do
+            [[ -n "$port" ]] || continue
+            printf '%s\t%s\t%s\n' "${port}/udp" "Node P2P ($(fw_p2p_what "$label" "$nworkers"))" "anywhere"
+        done <<< "$p2p"
     fi
     if vpn_active; then
         printf '%s\t%s\t%s\n' "overlay-ssh" "SSH from WireGuard overlay" "${TN_OVERLAY_CIDR}"
@@ -929,7 +1131,7 @@ fw_rule_satisfied() {
 
 # fw_unexpected_rules -- print managed ports OPEN but NOT desired here, one per
 # line "<spec>\t<reason>": 80/443 open without Caddy managing them (now that Caddy
-# owns 443). Node P2P (49590/49594) is desired on every install, so it is never
+# owns 443). Node P2P (fw_p2p_ports) is desired on every install, so it is never
 # flagged here.
 fw_unexpected_rules() {
     if ! caddy_managed_active; then
@@ -1059,7 +1261,10 @@ main_menu() {
 # =============================================================================
 
 # The only ports the UI is allowed to toggle. 49590/49594 udp = node P2P,
-# 43174/tcp = Uptime Kuma health endpoint. Anything else is refused.
+# 43174/tcp = Uptime Kuma health endpoint. Anything else is refused. These are
+# also the keys of the status "ports" object; the node's actual P2P ports, which
+# differ on a node set up with other ports or more workers, are reported in
+# "p2p_ports" (fw_p2p_ports) and opened by --enable.
 readonly -a JSON_NODE_PORTS=( "49590/udp" "49594/udp" "${UPTIME_KUMA_PORT}/tcp" )
 
 json_setup_fds() {
@@ -1077,8 +1282,11 @@ json_emit() { printf '%s\n' "$1" >&3; }
 json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
 
 # Single-object status: installed/active, default inbound policy, ssh port (read
-# only -- shown for context, never changed) and the open/closed state of each
-# node port.
+# only -- shown for context, never changed), the open/closed state of each
+# JSON_NODE_PORTS port, and "p2p_ports": one object per fw_p2p_ports line, in
+# order, {"port":49590,"proto":"udp","label":"primary","allowed":true}, where
+# allowed is true/false from the ufw rule table, or null when ufw is inactive or
+# not installed (the table cannot be read then).
 json_fw_status() {
     local installed=false active=false default_in="" ssh_port
     if ufw_installed; then installed=true; fi
@@ -1097,6 +1305,18 @@ json_fw_status() {
         ports_json+="\"${pp}\":${open}"
         first=false
     done
+
+    local p2p_json="" pfirst=true plabel allowed
+    while read -r port plabel; do
+        [[ -n "$port" ]] || continue
+        allowed=null
+        if [[ "$active" == "true" ]]; then
+            if ufw_has_allow "$port" udp; then allowed=true; else allowed=false; fi
+        fi
+        [[ "$pfirst" == "true" ]] || p2p_json+=","
+        p2p_json+="{\"port\":${port},\"proto\":\"udp\",\"label\":\"$(json_escape "$plabel")\",\"allowed\":${allowed}}"
+        pfirst=false
+    done < <(fw_p2p_ports)
 
     # Desired-state manifest + drift (single source of truth: desired_firewall_rules).
     # Computed only when active; otherwise empty (nothing is enforced).
@@ -1132,7 +1352,7 @@ json_fw_status() {
         efirst=false
     done
 
-    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}}}"
+    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}},\"p2p_ports\":[${p2p_json}]}"
 }
 
 # Open/close ONE node port. Refuses any port not in JSON_NODE_PORTS.
@@ -1169,8 +1389,9 @@ json_fw_port() {
 # Enable ufw non-interactively with the recommended lockout-safe defaults (automation /
 # scripted node bring-up). Applies the SAME fixed ruleset as the interactive enable -- it
 # cannot set arbitrary rules or disable SSH, and SSH + overlay + kuma are pre-allowed before
-# enable, so it preserves the "can never lock an operator out" guarantee. 80/443 are added
-# later by install-caddy.sh (this repo) when it enables the public RPC/dashboard.
+# enable, so it preserves the "can never lock an operator out" guarantee. 80/443 are allowed
+# here only when Caddy already serves the public RPC/dashboard (caddy_serves_public_edge);
+# otherwise install-caddy.sh (this repo) adds them when it enables that access.
 json_fw_enable() {
     if ! ufw_installed; then apt-get install -y ufw &>/dev/null; fi
     apply_recommended_firewall
@@ -1202,8 +1423,8 @@ main() {
         json_setup_fds
         check_root
         case "$action" in
-            status) json_fw_status ;;
-            enable) json_fw_enable ;;
+            status) fw_lib_check; json_fw_status ;;
+            enable) fw_lib_check; json_fw_enable ;;
             port)   json_fw_port "$fw_port" "$fw_state" ;;
             *)      json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"unknown or missing --json action\"}"; exit 1 ;;
         esac
@@ -1214,6 +1435,7 @@ main() {
     # Re-applies the lockout-safe recommended defaults after wiping all rules.
     if [[ "$reset_mode" == "true" ]]; then
         check_root
+        fw_lib_check
         print_warn "Resetting ufw -- ALL existing rules (including custom ones) will be removed."
         apply_recommended_firewall --reset
         print_ok "Firewall reset to a clean slate and re-enabled with recommended defaults"
