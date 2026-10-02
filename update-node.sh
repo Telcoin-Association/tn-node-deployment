@@ -106,6 +106,9 @@ UPDATE_LOCK_CLEANUP=""
 # (default DEFAULT_RPC_PORT = 8545). Exits when no node is installed.
 detect_node() {
     SERVICE_NAME="$(tn_resolve_service)" || {
+        if [[ "$JSON_MODE" == "true" ]]; then
+            json_event error "no Telcoin node installation found on this server -- run setup-node.sh"
+        fi
         print_error "No Telcoin node installation found on this server."
         print_info "Re-run setup-node.sh"
         exit 1
@@ -225,7 +228,8 @@ wait_for_service_stopped() {
     local unit="$1"
     local timeout="${2:-30}"
     local waited=0
-    systemctl stop "$unit" 2>/dev/null || true
+    # 9>&-: a stop can block for the unit's stop timeout (see update_lock).
+    systemctl stop "$unit" 9>&- 2>/dev/null || true
     while systemctl is-active --quiet "$unit" 2>/dev/null; do
         if (( waited >= timeout )); then
             print_warn "${unit} did not stop within ${timeout}s -- forcing kill"
@@ -465,7 +469,8 @@ prepare_docker_update() {
 
     local current_tag="${current_image##*:}"
     print_step "Pulling image: ${new_image}"
-    if ! docker pull "$new_image"; then
+    # 9>&-: the pull must not hold the update lock (see update_lock).
+    if ! docker pull "$new_image" 9>&-; then
         print_error "Image pull failed. Service untouched."
         return 1
     fi
@@ -630,8 +635,15 @@ apply_docker_update() {
 # =============================================================================
 
 prepare_source_build() {
-    local new_ref="$1"
+    local new_ref="$1" refusal
     print_header "Prepare Update -- Source Build"
+
+    # A ref typed at the custom prompt goes to git as an argument: refuse one
+    # that git would read as an option, before any git command runs.
+    if refusal="$(update_ref_refusal "$new_ref")"; then
+        print_error "$refusal"
+        return 1
+    fi
 
     if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
         print_error "Source directory not found at ${TN_SOURCE_DIR}"
@@ -651,13 +663,14 @@ prepare_source_build() {
     # `git describe` still reports the right-looking version. Offline prepares
     # are tolerated (checkout proceeds against local refs). setup-node.sh
     # already refreshes reused clones with `fetch --all --tags --prune --force`
-    # for exactly this reason.
-    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 2>/dev/null || true
+    # for exactly this reason. Network git and the build run with 9>&- (see
+    # update_lock).
+    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 9>&- 2>/dev/null || true
 
     print_step "Checking out: ${new_ref}"
     if ! git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
         # Try fetching the ref explicitly then checking out
-        if git -C "$TN_SOURCE_DIR" fetch origin "$new_ref" 2>/dev/null && \
+        if git -C "$TN_SOURCE_DIR" fetch origin "$new_ref" 9>&- 2>/dev/null && \
            git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
             print_ok "Checked out: ${new_ref}"
         else
@@ -668,7 +681,7 @@ prepare_source_build() {
         print_ok "Checked out: ${new_ref}"
     fi
     # Pull if this is a branch (not a tag) so we get the latest commit on it
-    git -C "$TN_SOURCE_DIR" pull --ff-only 2>/dev/null || true
+    git -C "$TN_SOURCE_DIR" pull --ff-only 9>&- 2>/dev/null || true
 
     # checkout/pull move the superproject only; sync submodules to the new ref
     # or the build fails on files the stale submodule doesn't have (this is
@@ -766,7 +779,7 @@ prepare_source_build() {
     # unchecked subshell, which let a failed build go undetected.
     pushd "$TN_SOURCE_DIR" >/dev/null
     # shellcheck disable=SC2086
-    if ! cargo build --release $cargo_features 2>&1 | tee /tmp/tn-update-build.log; then
+    if ! cargo build --release $cargo_features 9>&- 2>&1 | tee /tmp/tn-update-build.log 9>&-; then
         popd >/dev/null
         print_error "cargo build failed. See /tmp/tn-update-build.log for the full output."
         print_info "  Last few lines:"
@@ -1241,6 +1254,13 @@ update_on_exit() {
 # ignores TN_EXIT_TRAP_OWNED and, where flock is missing, replaces the EXIT trap
 # with its own cleanup: that command is kept for update_on_exit to run, and the
 # trap is put back.
+#
+# On the flock path the lock is held on fd 9, which every child inherits, and a
+# child that outlives this script (cargo still building after a SIGTERM, say)
+# would keep the lock until it exits. So the long-running commands this script
+# runs itself (git fetch and pull, cargo build and its tee, docker pull,
+# systemctl stop) get 9>&-. Children started inside library functions (the
+# epoch wait, the submodule sync) are the library's to close.
 update_lock() {
     local cur
     TN_EXIT_TRAP_OWNED=1
@@ -1262,6 +1282,17 @@ update_arg_error() {
     else
         print_error "$1"
     fi
+}
+
+# update_ref_refusal <ref> -- rc 0, with the reason on stdout, when ref starts
+# with "-": no tag, branch, commit or image tag does, and git or docker would
+# read it as an option. Used by the --ref parser and by the interactive source
+# prepare (the custom ref prompt), so both refuse with the same words.
+update_ref_refusal() {
+    case "${1:-}" in
+        -*) printf 'Invalid ref "%s": a ref cannot start with "-".\n' "$1"; return 0 ;;
+    esac
+    return 1
 }
 
 # Newest tag for the operator's network (source installs). Echoes "" if none.
@@ -1349,17 +1380,18 @@ json_prepare_source() {
 
     # Force-fetch tags before checkout -- same stale re-cut-tag hazard as the
     # interactive path (see prepare_source_build); offline is tolerated.
-    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 2>/dev/null || true
+    # Network git and the build run with 9>&- (see update_lock).
+    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 9>&- 2>/dev/null || true
 
     json_event step "Checking out ${new_ref}"
     if ! git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
-        if ! { git -C "$TN_SOURCE_DIR" fetch origin "$new_ref" 2>/dev/null && \
+        if ! { git -C "$TN_SOURCE_DIR" fetch origin "$new_ref" 9>&- 2>/dev/null && \
                git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; }; then
             json_event error "could not check out '${new_ref}' -- branch or tag not found"
             return 1
         fi
     fi
-    git -C "$TN_SOURCE_DIR" pull --ff-only 2>/dev/null || true
+    git -C "$TN_SOURCE_DIR" pull --ff-only 9>&- 2>/dev/null || true
 
     # checkout/pull move the superproject only; sync submodules to the new ref
     # or the build fails on files the stale submodule doesn't have (this is
@@ -1398,7 +1430,7 @@ json_prepare_source() {
     json_event step "Building ${new_ref} (${cargo_features:-no features}) -- this can take 20-40 minutes"
     pushd "$TN_SOURCE_DIR" >/dev/null
     # shellcheck disable=SC2086
-    if ! cargo build --release $cargo_features >/tmp/tn-update-build.log 2>&1; then
+    if ! cargo build --release $cargo_features 9>&- >/tmp/tn-update-build.log 2>&1; then
         popd >/dev/null
         json_event error "cargo build failed -- see /tmp/tn-update-build.log on the host"
         return 1
@@ -1447,7 +1479,8 @@ json_prepare_docker() {
     fi
 
     json_event step "Pulling ${new_image}"
-    if ! docker pull "$new_image" >/tmp/tn-update-build.log 2>&1; then
+    # 9>&-: the pull must not hold the update lock (see update_lock).
+    if ! docker pull "$new_image" 9>&- >/tmp/tn-update-build.log 2>&1; then
         json_event error "image pull failed -- see /tmp/tn-update-build.log on the host"; return 1
     fi
 
@@ -1538,11 +1571,11 @@ json_apply_source() {
     if observer_strip_needed "$wrapper" "$new_ref"; then
         if ! wrapper_backup=$(backup_unit_file "$wrapper"); then
             wrapper_backup=""
-            json_event step "warning: could not back up ${wrapper} -- leaving the retired --observer flag in place"
+            json_event warn "could not back up ${wrapper} -- leaving the retired --observer flag in place"
         elif tn_node_strip_observer_flag "$wrapper"; then
             json_event step "stripped retired --observer flag from ${wrapper}"
         else
-            json_event step "warning: could not strip retired --observer flag from ${wrapper} -- continuing"
+            json_event warn "could not strip the retired --observer flag from ${wrapper} -- continuing"
         fi
     fi
 
@@ -1578,7 +1611,7 @@ json_apply_source() {
     chmod +x "$installed" 2>/dev/null || true
     # The old binary goes back with the wrapper it ran under.
     if [[ -n "$wrapper_backup" ]] && ! cp -p "$wrapper_backup" "$wrapper"; then
-        json_event step "warning: could not restore ${wrapper} from ${wrapper_backup}"
+        json_event warn "could not restore ${wrapper} from ${wrapper_backup}"
     fi
     start_service
     if verify_health_after_restart; then
@@ -1619,7 +1652,7 @@ json_apply_docker() {
     # the new image string -- both caught by the hash/grep check below.
     perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
     # daemon-reload matters on legacy unit installs; harmless for the wrapper.
-    systemctl daemon-reload || json_event step "warning: systemctl daemon-reload failed"
+    systemctl daemon-reload || json_event warn "systemctl daemon-reload failed"
     post_hash=$(sha256sum "$launch_file" | awk '{print $1}')
     if [[ "$pre_hash" == "$post_hash" ]] || ! grep -qF "$new_image" "$launch_file"; then
         json_event error "launch config image not updated -- restoring backup"
@@ -1636,9 +1669,9 @@ json_apply_docker() {
     if observer_strip_needed "$launch_file" "${new_image##*/}"; then
         if tn_node_strip_observer_flag "$launch_file"; then
             json_event step "stripped retired --observer flag from ${launch_file}"
-            systemctl daemon-reload || json_event step "warning: systemctl daemon-reload failed"
+            systemctl daemon-reload || json_event warn "systemctl daemon-reload failed"
         else
-            json_event step "warning: could not strip retired --observer flag from ${launch_file} -- continuing"
+            json_event warn "could not strip the retired --observer flag from ${launch_file} -- continuing"
         fi
     fi
 
@@ -1688,10 +1721,24 @@ json_discard() {
     fi
 }
 
-# The fds are already swapped (main), so check_root and detect_node print on
-# stderr; when they exit, update_on_exit sends the done event.
-run_json_mode() {
+# check_root for a --json run, which must say why it stops: check_root exits 1
+# with only an [ERROR] line on stderr. Ask it in a subshell first and, when it
+# says no, send the reason as an error event, which update_on_exit repeats in
+# the done; then the real check_root. Same as setup-node's json_require_root.
+json_require_root() {
+    local rc=0
+    (check_root) >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -eq 1 ]]; then
+        json_event error "update-node.sh must run as root"
+    fi
     check_root
+}
+
+# The fds are already swapped (main), so check_root and detect_node print on
+# stderr; when they exit, they have sent an error event naming the cause and
+# update_on_exit sends the done event.
+run_json_mode() {
+    json_require_root
     detect_node
     # Serialize mutating runs (a UI apply racing a CLI apply double-stops the
     # service and races the pending-state/binary swap). Read-only check runs
@@ -1732,7 +1779,7 @@ show_pending_summary() {
 }
 
 main() {
-    local arg
+    local arg refusal
     # --json is found before anything prints: from here on stdout carries JSON
     # events only. The trap releases the update lock on every exit and closes a
     # --json run with a done event when nothing else did.
@@ -1755,11 +1802,15 @@ main() {
             --prepare)   JSON_ACTION="prepare"; shift ;;
             --apply)     JSON_ACTION="apply"; shift ;;
             --ref)
-                # No version floor: an older ref is a legitimate rollback. A ref
-                # never starts with "-", so such a word is the next flag, not a
-                # value (and must not reach git or docker as an option).
-                if [[ $# -lt 2 || "$2" == -* ]]; then
+                # No version floor: an older ref is a legitimate rollback. A word
+                # starting with "--" is the next flag, not a value; any other
+                # word starting with "-" is refused as a ref.
+                if [[ $# -lt 2 || "$2" == --* ]]; then
                     update_arg_error "--ref needs a value: a release tag, branch, commit or image tag."
+                    exit 1
+                fi
+                if refusal="$(update_ref_refusal "$2")"; then
+                    update_arg_error "$refusal"
                     exit 1
                 fi
                 JSON_REF="$2"; shift 2
