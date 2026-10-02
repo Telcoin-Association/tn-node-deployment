@@ -1439,7 +1439,9 @@ The updater used to ignore its arguments, so `update-scripts.sh --help` ran a re
 check and, on a terminal, offered to install everything with Enter meaning yes. `-h` and
 `--help` now print the usage (what it compares, where it fetches from, the sidecar and pair
 rules, the exit statuses) and exit 0 without contacting GitHub; any other argument is refused
-with exit status 2.
+with exit status 2. An interrupted run (Ctrl-C or a dropped SSH session) removes the files it
+had downloaded but not installed, and a checksum that cannot be downloaded for the updater
+itself is reported as a network error instead of a missing checksum.
 
 Not updater-tracked, but part of the same release: `install.sh` installs `prepare-stake.sh`,
 ends with a link to the operator runbook, and no longer stops when a script is missing from
@@ -1515,6 +1517,12 @@ source-build refs that start with `-` are refused. CPU counts are physical cores
 buttons use one delegated listener instead of inline handlers. Tests:
 `ui/test_server_contract.py`, `ui/test_server_chain.py`, `ui/tests/helper_test.sh`.
 
+The role check never waits on a public RPC endpoint inside a request. The network's answer is
+kept in memory and refreshed by one background thread, each endpoint's chain ID is remembered
+for an hour, and an endpoint that fails is backed off for 5 minutes, doubling to 30. A changed
+stake status therefore reaches the view about half a minute later than a blocking probe would
+show it, and the dashboard stays responsive when the public RPC is slow or unreachable.
+
 ### install-ui v1.4.0 — sudoers whitelist checked first and installed last
 The installer builds the new sudoers whitelist under a dotted name in `/etc/sudoers.d` (sudo
 ignores it), checks it with `visudo -c`, and renames it over `/etc/sudoers.d/telcoin-ui` only
@@ -1553,6 +1561,9 @@ rotation interrupted while signing waits for keytool and puts `node-info.yaml` b
 interrupted after the re-signed file passed its checks prints how to finish. The signing note
 names `--ledger`, `--trezor`, `--account <name>` and `--interactive`, and warns against
 `--private-key`. See [Prepare to stake](#prepare-to-stake).
+
+`--rotate-address` asks for the BLS passphrase before it takes the update lock, so a prompt
+nobody answers never holds up `update-node.sh`, `edit-config.sh` or `install-caddy.sh`.
 
 ### setup-node v1.3.0 — input checks before root, release floor, finalize reads keygen's choices, bootstrap peers and state export
 setup-node now needs lib/common v1.6.0 and says so when the library is older ("Run
@@ -1794,7 +1805,9 @@ whose failures say what went wrong (transport, http, rpc-error, malformed); and
 python3. `tn_wait_restart_window` holds a committee node's restart until the current epoch has
 closed and settled, never longer than `TN_EPOCH_WAIT_MAX` (0 turns it off); when the boundary
 passed more than `TN_EPOCH_MARGIN` seconds ago and the epoch is still open, it warns once and
-lets the restart go ahead. A caller that owns its EXIT trap sets `TN_EXIT_TRAP_OWNED` before
+lets the restart go ahead. Its sleeps run in the background, so a script stopped during the wait
+handles the signal at once instead of after the next poll. A caller that owns its EXIT trap sets
+`TN_EXIT_TRAP_OWNED` before
 `tn_acquire_update_lock` and releases the lock with `tn_release_update_lock`, which frees the
 lock even while an orphaned child process still holds its descriptor.
 

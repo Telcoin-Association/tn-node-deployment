@@ -16,7 +16,8 @@ section of README.md has one entry per script; this summary goes by area.
 `lib/common.sh` v1.6.0 (v1.5.0 was folded into it) holds the helpers the scripts below share:
 JSON-RPC calls that report why they failed, epoch and stake-amount reads, a keytool runner that
 uses the node's own release, `node-info.yaml` readers for both worker layouts, launch-file edits
-that touch only the live node command, and the epoch-boundary wait. Its constants name
+that touch only the live node command, and the epoch-boundary wait, which a signal interrupts
+at once instead of after the next poll. Its constants name
 `https://rpc.adiri.tel` as the testnet RPC, `https://telscan.io` as the explorer and 487 as the
 mainnet chain ID, and the oldest testnet release it accepts is v0.13.0-adiri. The hardware check
 counts physical cores, so an 8-vCPU VM with 4 physical cores reads as below the validator
@@ -89,8 +90,9 @@ the registry asks for now, the TEL balance, and the calldata from the node's own
 simulates `stake()`, names any revert with what to do, and prints the `cast send` commands for
 `stake()` and `activate()` with the epoch arithmetic. It sends nothing and never reads a private
 key. `--rotate-address 0xNEW` re-signs the proof of possession for another execution address and
-is refused once either address has staked. `install.sh` installs the script and the updater
-tracks it.
+is refused once either address has staked; it asks for the BLS passphrase before it takes the
+update lock, so an unanswered prompt never holds up another script. `install.sh` installs the
+script and the updater tracks it.
 
 #### Node Manager UI
 telcoin-ui v1.9.0 needs install-ui v1.4.0 (helper API 2); a UI updated without re-running the
@@ -102,7 +104,9 @@ newly staked validator opens in the validator view while it syncs, and `NODE_TYP
 picks the view. On a synced node that view counts down to the epoch boundary and shows the
 activation epoch and the earliest committee seat. Every action stream ends with one `done`, and
 updates and config saves no longer use EventSource, whose reconnect could run an action twice.
-Hostnames follow one strict rule in the page, the server and the helper.
+Hostnames follow one strict rule in the page, the server and the helper. The role check never
+waits on a public RPC endpoint inside a request: a background thread refreshes the network's
+answer, each endpoint's chain ID is remembered for an hour, and a failing endpoint is backed off.
 
 #### Updater and integrity
 `update-scripts.sh` v1.1.70 fails closed: a file whose `.sha256` sidecar is missing, empty or
@@ -110,7 +114,9 @@ unreadable is not installed, the updater checks its own replacement against its 
 relaunches, `lib/common.sh` and `lib/fallback.sh` are installed together or not at all, and the
 run exits 1 when any file failed. It now runs under macOS `/bin/bash` 3.2 (v1.1.69 stopped at
 `declare -g`) and fetches `prepare-stake.sh`. `--help` prints the usage without contacting
-GitHub, and an unknown argument is refused instead of ignored. `install.sh`, which is not
+GitHub, and an unknown argument is refused instead of ignored. An interrupted run removes the
+files it downloaded but did not install, and a checksum the updater cannot download for its own
+replacement is reported as a network error. `install.sh`, which is not
 updater-tracked, installs `prepare-stake.sh`, ends with a link to the operator runbook, and no
 longer stops when a script is missing from the download.
 

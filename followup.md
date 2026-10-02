@@ -144,6 +144,12 @@ package or verifier of that round that recorded it.
   test reads it as octal 65, while `09101` fails. `^[1-9][0-9]{0,4}$` would be stricter; nothing
   can be injected either way. (P4b)
   Why: a port typed with a leading zero passes a check that read it as a different number.
+- Five scripts each carry their own progress printer for `tn_wait_restart_window`
+  (`update_wait_say`, `edit_wait_say`, `caddy_wait_say`, `addons_say`, `obs_wait_say`), all
+  mapping `step`, `warn` and `log` to a JSON event or a `print_*` line with the same JSON-mode
+  branching. One shared `tn_wait_printer` in `lib/common.sh`, taking the JSON flag and the
+  script's event function, would replace them. (code review)
+  Why: a change to the wait's event vocabulary has to be copied into five files today.
 - `prompt_testnet_addons` in `lib/common.sh` takes the region label without checking it.
   setup-node cuts the answer to letters, digits, `_` and `-` (32 at most) afterwards, with a
   warning; the prompt itself could ask again. (P4b)
