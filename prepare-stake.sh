@@ -144,6 +144,13 @@ OLD_ADDR=""
 BACKUP=""
 RESTARTED=""
 PS_PASS=""
+# Where a rotation stands, for a run ended by a signal: "window" from the
+# node-info.yaml backup until the re-signed file has been checked, "rotated"
+# after that. PS_KT_PID is the keytool job while it runs; PS_SIGNAL names the
+# signal that ended the run.
+PS_PHASE=""
+PS_KT_PID=""
+PS_SIGNAL=""
 
 # =============================================================================
 # OUTPUT
@@ -239,14 +246,52 @@ ps_json_object() {
     printf '%s\n' "$w"
 }
 
-# EXIT trap: forget the passphrase, release the update lock a rotation took
-# (a no-op when none is held), then (--json) print the final object on the
-# saved stdout, whatever way the run ends.
+# ps_on_interrupt -- the run was ended by a signal (PS_SIGNAL). Inside the
+# rotation window, wait for the keytool job first (it ignores the signal, so it
+# never stops half way through writing node-info.yaml), then put node-info.yaml
+# back from the backup. The EXIT trap releases the update lock only after this,
+# so nothing edits node-info.yaml once the lock is gone.
+ps_on_interrupt() {
+    local why="Interrupted by SIG${PS_SIGNAL}"
+    if [[ -n "$PS_KT_PID" ]]; then
+        wait "$PS_KT_PID" 2>/dev/null
+        PS_KT_PID=""
+    fi
+    case "$PS_PHASE" in
+        window)
+            if cp -p "$BACKUP" "$NODE_INFO" 2>/dev/null; then
+                chown "${NI_UID}:${NI_GID}" "$NODE_INFO" 2>/dev/null || true
+                chmod "$NI_MODE" "$NODE_INFO" 2>/dev/null || true
+                PS_MSG="${why} while the proof of possession was being signed; node-info.yaml is back as it was (from ${BACKUP})."
+            else
+                PS_MSG="${why} while the proof of possession was being signed, and putting node-info.yaml back failed: copy ${BACKUP} over ${NODE_INFO} by hand."
+            fi
+            ;;
+        rotated)
+            PS_MSG="${why} after node-info.yaml was signed for ${NEW_CS}; .node-meta and the restart may not have caught up. To finish, run: sudo bash prepare-stake.sh --rotate-address ${NEW_CS} --yes"
+            ;;
+        *)
+            PS_MSG="${why}; nothing was changed."
+            ;;
+    esac
+    PS_PHASE=""
+    PS_STATE="interrupted"
+    print_error "$PS_MSG"
+}
+
+# EXIT trap: ignore further signals, forget the passphrase, finish an
+# interrupted rotation (ps_on_interrupt), release the update lock a rotation
+# took (a no-op when none is held), then (--json) print the final object on
+# the saved stdout, whatever way the run ends.
 ps_on_exit() {
     local code=$?
+    trap '' TERM INT HUP
     PS_PASS=""
     PS_ENV_PASS=""
     unset TN_BLS_PASSPHRASE
+    if [[ -n "$PS_SIGNAL" ]]; then
+        ps_on_interrupt
+    fi
     tn_release_update_lock
     if [[ "$PS_JSON" -eq 1 && "$PS_JSON_SENT" -eq 0 ]]; then
         PS_JSON_SENT=1
@@ -800,7 +845,14 @@ ps_read_address() {
     ADDR_CS="$(ps_checksum_address "$ADDR")"
     print_ok "${ADDR_CS} (execution_address in node-info.yaml)"
     if [[ -n "$META_ADDR" && "$(ps_lower "$META_ADDR")" != "$ADDR" ]]; then
-        if ps_is_addr "$META_ADDR"; then
+        # A rotation is the fix this warning would suggest, so say what it does.
+        if [[ -n "$PS_ROTATE" ]]; then
+            if [[ "$(ps_lower "$META_ADDR")" == "$NEW_ADDR" ]]; then
+                print_info ".node-meta already records ${META_ADDR}; this rotation brings node-info.yaml in line with it."
+            else
+                print_info ".node-meta records VALIDATOR_ADDRESS=${META_ADDR}; this rotation replaces it with ${NEW_CS}."
+            fi
+        elif ps_is_addr "$META_ADDR"; then
             ps_warn ".node-meta records VALIDATOR_ADDRESS=${META_ADDR}, not ${ADDR_CS}. The stake must come from ${ADDR_CS}, the address the proof of possession in node-info.yaml is signed for. To stake from ${META_ADDR} instead, first run: sudo bash prepare-stake.sh --rotate-address ${META_ADDR}"
         else
             ps_warn ".node-meta records VALIDATOR_ADDRESS=${META_ADDR}, which is not an address. The stake must come from ${ADDR_CS}."
@@ -956,6 +1008,25 @@ ps_check_balance() {
     NOT_READY="${NOT_READY:+${NOT_READY}; }${ADDR_CS} is short of TEL"
 }
 
+# ps_keytool_error FILE -- keytool's own message from its stderr in FILE: the
+# first paragraph (the "Error ..." line and any "hint:" line after it, joined
+# with "; "), without the "Location:" trailer or a final period, cut at a word
+# boundary when it is longer than 500 characters.
+ps_keytool_error() {
+    local msg
+    msg="$(awk '
+        /^[[:space:]]*$/ { if (out != "") exit; next }
+        /^Location:/ { exit }
+        { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); out = (out == "" ? $0 : out "; " $0) }
+        END { print out }' "$1" 2>/dev/null)"
+    msg="${msg%.}"
+    if [[ ${#msg} -gt 500 ]]; then
+        msg="${msg:0:500}"
+        msg="${msg% *} ..."
+    fi
+    printf '%s\n' "$msg"
+}
+
 # (g) The stake() calldata, exported by the node's own keytool from
 # node-info.yaml (the BLS public key and the proof of possession).
 ps_export_calldata() {
@@ -965,7 +1036,7 @@ ps_export_calldata() {
     errf="$(mktemp 2>/dev/null || true)"
     out="$(tn_keytool "$RUNNER" "$DATA_DIR" export-staking-args --node-info @DATADIR@/node-info.yaml --calldata 2>"${errf:-/dev/null}")" || rc=$?
     if [[ -n "$errf" ]]; then
-        err="$(tr '\n' ' ' <"$errf" | cut -c1-300)"
+        err="$(ps_keytool_error "$errf")"
         rm -f "$errf"
     fi
     if [[ "$rc" -eq 4 ]]; then
@@ -1190,10 +1261,11 @@ ps_print_activate_command() {
 }
 
 ps_print_key_note() {
-    echo "  --ledger signs on a Ledger. Use --trezor for a Trezor, --interactive to paste"
-    echo "  the key when cast asks for it, or --private-key \"\$VALIDATOR_KEY\" with the key"
-    echo "  in an environment variable of your own shell. Never write the key itself on"
-    echo "  the command line."
+    echo "  Signing: --ledger signs on a Ledger; use --trezor for a Trezor. For a key in"
+    echo "  software, use --account <name>, an encrypted keystore you create once with"
+    echo "  'cast wallet import <name> --interactive', or --interactive to paste the key"
+    echo "  when cast asks for it. Do not use --private-key: the key would be on the"
+    echo "  command line of cast, where any user of that machine can read it with ps."
 }
 
 # The epoch arithmetic for activate(): mined in epoch E, the validator is active
@@ -1350,6 +1422,7 @@ ps_rollback() {
     if cp -p "$BACKUP" "$NODE_INFO" 2>/dev/null; then
         chown "${NI_UID}:${NI_GID}" "$NODE_INFO" 2>/dev/null || true
         chmod "$NI_MODE" "$NODE_INFO" 2>/dev/null || true
+        PS_PHASE=""
         ps_done 4 "rolled-back" "${why} node-info.yaml is back as it was (from ${BACKUP})."
     fi
     ps_fail 1 "${why} Putting node-info.yaml back failed too: copy ${BACKUP} over ${NODE_INFO} by hand."
@@ -1463,22 +1536,32 @@ ps_rotate() {
     fi
     chown "${NI_UID}:${NI_GID}" "$BACKUP" 2>/dev/null || true
     chmod "$NI_MODE" "$BACKUP" 2>/dev/null || true
+    PS_PHASE="window"
     print_ok "Backed up node-info.yaml to ${BACKUP}"
 
     print_step "Signing the proof of possession for ${NEW_CS} (keytool generate pop)"
     errf="$(mktemp 2>/dev/null || true)"
     rc=0
-    # In this subshell the passphrase is a plain shell variable, not exported
-    # (ps_get_passphrase unset the environment copy), and tn_keytool passes it
-    # to the keytool process alone, so no other command sees it. keytool's own
-    # report (and its hint to run export-staking-args) is dropped; the checks
-    # below read node-info.yaml instead.
-    ( TN_BLS_PASSPHRASE="$PS_PASS"; tn_keytool "$RUNNER" "$DATA_DIR" generate pop --address "$NEW_ADDR" ) \
-        >/dev/null 2>"${errf:-/dev/null}" || rc=$?
+    # keytool runs as a background job that ignores TERM, INT and HUP, so a
+    # signal never stops it half way through writing node-info.yaml; `wait`
+    # returns at once on a signal and the EXIT trap waits for the job before it
+    # puts the backup back. In the job the passphrase is a plain shell variable,
+    # not exported (ps_get_passphrase unset the environment copy), and
+    # tn_keytool passes it to the keytool process alone. The job does not get
+    # descriptor 9 (the flock kind of the update lock). keytool's own report
+    # (and its hint to run export-staking-args) is dropped; the checks below
+    # read node-info.yaml instead.
+    ( trap '' TERM INT HUP
+      TN_BLS_PASSPHRASE="$PS_PASS"
+      tn_keytool "$RUNNER" "$DATA_DIR" generate pop --address "$NEW_ADDR" ) \
+        >/dev/null 2>"${errf:-/dev/null}" 9>&- &
+    PS_KT_PID=$!
+    wait "$PS_KT_PID" || rc=$?
+    PS_KT_PID=""
     PS_PASS=""
     unset TN_BLS_PASSPHRASE
     if [[ -n "$errf" ]]; then
-        err="$(tr '\n' ' ' <"$errf" | cut -c1-300)"
+        err="$(ps_keytool_error "$errf")"
         rm -f "$errf"
     fi
     if [[ "$rc" -ne 0 ]]; then
@@ -1498,6 +1581,7 @@ ps_rotate() {
     fi
     chown "${NI_UID}:${NI_GID}" "$NODE_INFO" 2>/dev/null || ps_warn "Could not set the owner of ${NODE_INFO} back to ${NI_UID}:${NI_GID}."
     chmod "$NI_MODE" "$NODE_INFO" 2>/dev/null || ps_warn "Could not set the mode of ${NODE_INFO} back to ${NI_MODE}."
+    PS_PHASE="rotated"
     print_ok "node-info.yaml names ${NEW_CS}; the BLS key and the node name are unchanged."
 
     if [[ -z "$META_FILE" ]]; then
@@ -1527,6 +1611,13 @@ main() {
             ;;
     esac
     trap ps_on_exit EXIT
+    # A signal ends the run through the EXIT trap with the usual status (128 +
+    # the signal number), so --json reports ok:false and an interrupted
+    # rotation is put back first. A trap runs once the command in progress
+    # returns; the keytool job is waited for with `wait`, which returns at once.
+    trap 'PS_SIGNAL=TERM; exit 143' TERM
+    trap 'PS_SIGNAL=INT; exit 130' INT
+    trap 'PS_SIGNAL=HUP; exit 129' HUP
     ps_parse_args "$@"
     print_header "Telcoin Network: prepare stake (v${SCRIPT_VERSION})"
     if ! ps_is_root; then
