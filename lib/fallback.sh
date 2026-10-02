@@ -12,8 +12,11 @@
 # needless. New installs use a single name everywhere:
 #     systemd unit   telcoin            (telcoin.service)
 #     docker --name  telcoin
-#     config dir     /etc/telcoin       (.node-meta carries NODE_TYPE=)
+#     config dir     /etc/telcoin       (holds .node-meta)
 #     data dir       /var/lib/telcoin
+# A node's role is not part of its identity: the validator view comes from the
+# on-chain stake status (ConsensusRegistry getValidator, read by
+# node_stake_status in lib/common.sh), never from a name or a directory.
 # Nodes deployed under the OLD names keep working untouched: these resolvers
 # short-circuit to the new values on the happy path and only fall through to
 # legacy detection when the new layout is absent ("fall back if there are
@@ -33,7 +36,7 @@
 _TN_FALLBACK_SH=1
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly FALLBACK_VERSION="1.0.2"
+readonly FALLBACK_VERSION="1.0.3"
 
 # Root prepended to every absolute probe path. Empty in production; a temp dir
 # under test. `:=` leaves a caller-provided value (the test harness) untouched.
@@ -163,14 +166,20 @@ tn_resolve_data_dir() {
     printf '%s\n' "$var"
 }
 
-# tn_resolve_node_type — echo the default-view hint observer|validator.
-# NODE_TYPE is a non-authoritative presentation hint, NOT a role: the protocol
-# decides a node's role dynamically from on-chain committee membership at each
-# epoch, and the UI promotes/demotes the view from tn_isValidator. A missing hint
-# therefore resolves to the plain "observer" full-node view, never to validator.
+# tn_resolve_node_type — DEPRECATED, no callers left in lib/. Delete it after the
+# next release. It stays for one release so a half-updated box, with this
+# library but older scripts that still call it, never hits "command not found".
+# New code must not call it.
+#
+# Echoes the old default-view hint observer|validator. NODE_TYPE was a
+# presentation hint, never a role: the protocol decides a node's role from
+# on-chain committee membership at each epoch, and the validator view comes
+# from the on-chain stake status (ConsensusRegistry getValidator, read by
+# node_stake_status in lib/common.sh). A missing hint resolves to the plain
+# "observer" full-node view, never to validator.
 #   new install  -> NODE_TYPE= from the unified /etc/telcoin/.node-meta
 #   legacy       -> the role dir that has a .node-meta
-#   last resort  -> observer (plain full-node view; on-chain status promotes it)
+#   last resort  -> observer (plain full-node view)
 tn_resolve_node_type() {
     local etc nt t
     etc="$(_tn_etc)"

@@ -6,8 +6,8 @@
 set -euo pipefail
 
 # Legacy-install compatibility resolvers. Sourced near the top so every script
-# that sources common.sh gets tn_resolve_service / tn_resolve_node_type /
-# tn_resolve_config_dir / ... for free. fallback.sh is the only module that
+# that sources common.sh gets tn_resolve_service / tn_resolve_config_dir /
+# tn_resolve_data_dir / ... for free. fallback.sh is the only module that
 # knows the old telcoin-{observer,validator} names + per-role dir layout.
 # shellcheck source=lib/fallback.sh
 source "${BASH_SOURCE[0]%/*}/fallback.sh"
@@ -18,13 +18,15 @@ source "${BASH_SOURCE[0]%/*}/fallback.sh"
 
 readonly TESTNET_CHAIN_ID="2017"
 readonly TESTNET_CHAIN_NAME="adiri"
-readonly TESTNET_RPC_URL="https://rpc.telcoin.network"
-readonly TESTNET_EXPLORER="https://scan.telcoin.network"
+readonly TESTNET_RPC_URL="https://rpc.adiri.tel"
+readonly TESTNET_EXPLORER="https://telscan.io"
 
-readonly MAINNET_CHAIN_ID="2017"
+# Mainnet has not launched. The chain id matches chain-configs/mainnet/genesis.yaml
+# in telcoin-network; the RPC URL is the planned public endpoint.
+readonly MAINNET_CHAIN_ID="487"
 readonly MAINNET_CHAIN_NAME="telcoin"
 readonly MAINNET_RPC_URL="https://rpc.telcoin.network"
-readonly MAINNET_EXPLORER="https://scan.telcoin.network"
+readonly MAINNET_EXPLORER="https://telscan.io"
 
 readonly DEVNET_CHAIN_ID="32285"
 readonly DEVNET_CHAIN_NAME="devnet"
@@ -38,7 +40,10 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.4.0"
+readonly COMMON_VERSION="1.5.0"
+
+# The operator runbook, for any message that should point operators at it.
+readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
 
 # Per-role hardware tiers (telcoin-network docs/src/getting-started/hardware-requirements.md,
 # physical cores; cloud vCPUs are usually hyperthreads, so 8 vCPU ~ 4 physical cores).
@@ -70,11 +75,13 @@ readonly MIN_RUST_VERSION="1.75.0"
 readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"
 readonly NETWORK_TAG_SUFFIX_MAINNET="-telcoin"
 
-# Minimum source version offered by the source-build picker. Older tags exist
-# in the upstream repo but represent obsolete releases we don't want operators
-# installing by accident. main and custom-ref are still always available.
+# Oldest release the source-build picker offers and tn_ref_min_check accepts.
+# Older tags exist upstream but lack features these scripts rely on:
+# `keytool set-rpc` and `keytool generate pop` arrived in v0.12.0-adiri and
+# `--enable-state-export` in v0.13.0-adiri, so 0.13.0 is the first release with
+# all three. main and custom refs stay available in the picker.
 # Bump this when the Telcoin team retires a baseline.
-readonly MIN_SOURCE_VERSION_TESTNET="0.12.0"
+readonly MIN_SOURCE_VERSION_TESTNET="0.13.0"
 readonly MIN_SOURCE_VERSION_MAINNET=""  # mainnet not launched; no minimum yet
 
 # -----------------------------------------------------------------------------
@@ -141,11 +148,13 @@ confirm() {
     if [[ "${TN_ASSUME_YES:-false}" == "true" ]]; then
         return 0
     fi
-    local response
+    local response=""
     echo ""
     read -r -p "  ?  $prompt [y/N]: " response
     echo ""
-    [[ "${response,,}" =~ ^y ]]
+    # Lowercase with tr: bash 4 case conversion breaks macOS /bin/bash 3.2.
+    response="$(printf '%s' "$response" | tr '[:upper:]' '[:lower:]')"
+    [[ "$response" =~ ^y ]]
 }
 
 # -----------------------------------------------------------------------------
@@ -176,9 +185,17 @@ check_root() {
 # lock (mkdir fails on anything that already exists, symlinks included) with a
 # PID-staleness takeover. On failure, TN_UPDATE_LOCK_HOLDER carries the
 # holder's PID ("" if unknown) so JSON-mode callers can report it.
+#
+# The mkdir lock is removed by an EXIT trap. A caller that owns its own EXIT trap
+# (one that emits the final JSON "done" event, say) sets TN_EXIT_TRAP_OWNED=1
+# before calling, so the lock never replaces that trap; it then calls
+# tn_release_update_lock from its own trap. TN_UPDATE_LOCK_DIR names the mkdir
+# lock while it is held ("" on the flock path, where the kernel releases it).
 TN_UPDATE_LOCK_HOLDER=""
+TN_UPDATE_LOCK_DIR=""
 tn_acquire_update_lock() {
     TN_UPDATE_LOCK_HOLDER=""
+    TN_UPDATE_LOCK_DIR=""
     # Overridable for tests only; production callers always use the default.
     local lock_file="${TN_UPDATE_LOCK_FILE:-/var/lock/telcoin-update.lock}"
     local lock_parent="${lock_file%/*}"
@@ -204,9 +221,12 @@ tn_acquire_update_lock() {
     local lock_dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
     if mkdir "$lock_dir" 2>/dev/null; then
         printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
-        # Expand lock_dir now, not at exit time (intentional).
-        # shellcheck disable=SC2064
-        trap "rm -rf '${lock_dir}'" EXIT
+        TN_UPDATE_LOCK_DIR="$lock_dir"
+        if [[ -z "${TN_EXIT_TRAP_OWNED:-}" ]]; then
+            # Expand lock_dir now, not at exit time (intentional).
+            # shellcheck disable=SC2064
+            trap "rm -rf '${lock_dir}'" EXIT
+        fi
         return 0
     fi
     TN_UPDATE_LOCK_HOLDER="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
@@ -215,15 +235,33 @@ tn_acquire_update_lock() {
         if mkdir "$lock_dir" 2>/dev/null; then
             TN_UPDATE_LOCK_HOLDER=""
             printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
-            # Expand lock_dir now, not at exit time (intentional).
-            # shellcheck disable=SC2064
-            trap "rm -rf '${lock_dir}'" EXIT
+            TN_UPDATE_LOCK_DIR="$lock_dir"
+            if [[ -z "${TN_EXIT_TRAP_OWNED:-}" ]]; then
+                # Expand lock_dir now, not at exit time (intentional).
+                # shellcheck disable=SC2064
+                trap "rm -rf '${lock_dir}'" EXIT
+            fi
             return 0
         fi
     fi
     print_error "Another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}."
     print_info "Wait for it to finish. Stale lock cleanup: rm -rf ${lock_dir}"
     return 1
+}
+
+# tn_release_update_lock — remove the mkdir lock this process holds (a no-op on
+# the flock path and when no lock is held). For callers that set
+# TN_EXIT_TRAP_OWNED and so must release the lock from their own EXIT trap.
+# Never fails.
+tn_release_update_lock() {
+    local dir="${TN_UPDATE_LOCK_DIR:-}" holder
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    holder="$(cat "${dir}/pid" 2>/dev/null || true)"
+    if [[ -z "$holder" || "$holder" == "$$" ]]; then
+        rm -rf "$dir" 2>/dev/null || true
+    fi
+    TN_UPDATE_LOCK_DIR=""
+    return 0
 }
 
 detect_distro() {
@@ -426,6 +464,268 @@ validate_docker_image() {
     [[ "$img" == *:* ]] || return 1
     [[ "$img" =~ ^[A-Za-z0-9._/:@-]+$ ]] || return 1
     return 0
+}
+
+# -----------------------------------------------------------------------------
+# RPC URL, RELEASE FLOOR AND CHAIN ID CHECKS
+# -----------------------------------------------------------------------------
+
+# _tn_ipv4_strict <a.b.c.d> — rc 0 for a dotted quad with every octet 0-255 and
+# no leading zeros (010.0.0.1 is ambiguous: some resolvers read it as octal).
+_tn_ipv4_strict() {
+    local ip="${1:-}" a="" b="" c="" d="" o
+    [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r a b c d <<<"$ip"
+    for o in "$a" "$b" "$c" "$d"; do
+        [[ "$o" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+        (( 10#$o <= 255 )) || return 1
+    done
+    return 0
+}
+
+# _tn_ipv6_strict <addr> — rc 0 for an IPv6 address in full or compressed form,
+# with an optional IPv4 tail (::ffff:10.0.0.1). Zone ids (%eth0) are refused.
+_tn_ipv6_strict() {
+    local ip="${1:-}" tail g n compressed
+    local -a groups=()
+    [[ -n "$ip" && "$ip" =~ ^[0-9A-Fa-f:.]+$ && "$ip" == *:* ]] || return 1
+    if [[ "$ip" == *.* ]]; then
+        # An IPv4 tail stands in for the last two groups.
+        tail="${ip##*:}"
+        _tn_ipv4_strict "$tail" || return 1
+        ip="${ip%"$tail"}0:0"
+    fi
+    [[ "$ip" != *:::* ]] || return 1
+    compressed=0
+    if [[ "$ip" == *::* ]]; then
+        [[ "${ip/::/}" != *::* ]] || return 1
+        compressed=1
+    else
+        # Without "::" the address can neither start nor end with a colon.
+        [[ "$ip" != :* && "$ip" != *: ]] || return 1
+    fi
+    IFS=: read -r -a groups <<<"$ip"
+    n=0
+    for g in ${groups[@]+"${groups[@]}"}; do
+        [[ -n "$g" ]] || continue
+        [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        n=$(( n + 1 ))
+    done
+    if [[ "$compressed" == "1" ]]; then
+        (( n <= 7 )) || return 1
+    else
+        (( n == 8 )) || return 1
+    fi
+    return 0
+}
+
+# _tn_url_split <url> — print "<scheme> <host> <port|->" for a URL of the shape
+# validate_rpc_url accepts: http, https, ws or wss (lowercase); no userinfo; a
+# path and query drawn from letters, digits and . _ ~ % / : @ + , ; = & ? -; no
+# fragment. An IPv6 host keeps its brackets. rc 1 when the shape is wrong; the
+# host and port values themselves are checked by the caller.
+_tn_url_split() {
+    local url="${1:-}" url_re v6_re name_re scheme auth host colon port
+    url_re='^(https?|wss?)://([^/?#@]+)(/[A-Za-z0-9._~%/:@+,;=&-]*)?([?][A-Za-z0-9._~%/:@+,;=&?-]*)?$'
+    v6_re='^(\[[0-9A-Fa-f:.]+\])(:([0-9]*))?$'
+    name_re='^([A-Za-z0-9.-]+)(:([0-9]*))?$'
+    [[ "$url" =~ $url_re ]] || return 1
+    scheme="${BASH_REMATCH[1]}"
+    auth="${BASH_REMATCH[2]}"
+    if [[ "$auth" =~ $v6_re ]] || [[ "$auth" =~ $name_re ]]; then
+        host="${BASH_REMATCH[1]}"
+        colon="${BASH_REMATCH[2]}"
+        port="${BASH_REMATCH[3]}"
+    else
+        return 1
+    fi
+    # "host:" with no port number is malformed.
+    [[ -z "$colon" || -n "$port" ]] || return 1
+    printf '%s %s %s\n' "$scheme" "$host" "${port:--}"
+}
+
+# _tn_host_ok <host> — rc 0 for "[IPv6]", a strict IPv4 dotted quad, or a DNS
+# name: dot-separated labels of up to 63 letters, digits and inner hyphens,
+# 253 characters at most, and a last label that is not all digits.
+_tn_host_ok() {
+    local host="${1:-}" label=""
+    local -a labels=()
+    if [[ "$host" == \[*\] ]]; then
+        host="${host#\[}"
+        host="${host%\]}"
+        if _tn_ipv6_strict "$host"; then return 0; fi
+        return 1
+    fi
+    [[ -n "$host" && ${#host} -le 253 ]] || return 1
+    if [[ "$host" =~ ^[0-9.]+$ ]]; then
+        if _tn_ipv4_strict "$host"; then return 0; fi
+        return 1
+    fi
+    [[ "$host" != .* && "$host" != *. && "$host" != *..* ]] || return 1
+    IFS=. read -r -a labels <<<"$host"
+    for label in ${labels[@]+"${labels[@]}"}; do
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+    done
+    [[ ! "$label" =~ ^[0-9]+$ ]] || return 1
+    return 0
+}
+
+# validate_rpc_url <url> [http|ws|any] — rc 0 when <url> is a usable RPC
+# endpoint: http:// or https:// (mode http), ws:// or wss:// (mode ws), or any
+# of the four (mode any, the default); a DNS name, IPv4 address or [IPv6] host;
+# an optional port 1-65535; an optional path and query. Refused: userinfo
+# (user@host), whitespace, quotes, backticks, control characters, a fragment,
+# an uppercase scheme, and anything over 512 characters. No output.
+validate_rpc_url() {
+    local url="${1:-}" mode="${2:-any}" parts scheme="" host="" port=""
+    [[ -n "$url" && ${#url} -le 512 ]] || return 1
+    case "$url" in
+        *[[:space:][:cntrl:]]*|*\"*|*\'*|*\`*) return 1 ;;
+    esac
+    parts="$(_tn_url_split "$url")" || return 1
+    read -r scheme host port <<<"$parts"
+    case "$mode" in
+        http) [[ "$scheme" == "http" || "$scheme" == "https" ]] || return 1 ;;
+        ws)   [[ "$scheme" == "ws" || "$scheme" == "wss" ]] || return 1 ;;
+        any)  ;;
+        *)    return 1 ;;
+    esac
+    if [[ "$port" != "-" ]]; then
+        [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+        (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
+    fi
+    if _tn_host_ok "$host"; then return 0; fi
+    return 1
+}
+
+# _tn_ipv4_is_private <a.b.c.d> — rc 0 for 0/8, 10/8, 100.64/10, 127/8,
+# 169.254/16, 172.16/12 and 192.168/16. The address must already be valid.
+_tn_ipv4_is_private() {
+    local a="" b=""
+    IFS=. read -r a b _ <<<"${1:-}"
+    [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || return 1
+    a=$(( 10#$a ))
+    b=$(( 10#$b ))
+    case "$a" in
+        0|10|127) return 0 ;;
+    esac
+    if (( a == 100 && b >= 64 && b <= 127 )); then return 0; fi
+    if (( a == 169 && b == 254 )); then return 0; fi
+    if (( a == 172 && b >= 16 && b <= 31 )); then return 0; fi
+    if (( a == 192 && b == 168 )); then return 0; fi
+    return 1
+}
+
+# _tn_ipv6_is_private <addr> — rc 0 for :: and ::1, link-local fe80::/10, unique
+# local fc00::/7, and an IPv4-mapped (::ffff:a.b.c.d) private address. Takes a
+# valid, lowercase address without brackets.
+_tn_ipv6_is_private() {
+    local h="${1:-}" first tail
+    if [[ "$h" == *.* ]]; then
+        tail="${h##*:}"
+        if [[ "${h%"$tail"}" =~ ^[0:]*ffff:$ ]] && _tn_ipv4_is_private "$tail"; then
+            return 0
+        fi
+        return 1
+    fi
+    # Unspecified (all zero) or loopback (all zero, last group 1).
+    if [[ "$h" =~ ^[0:]+$ ]]; then return 0; fi
+    if [[ "${h%:*}" =~ ^[0:]*$ && "${h##*:}" =~ ^0{0,3}1$ ]]; then return 0; fi
+    first="${h%%:*}"
+    [[ -n "$first" ]] || return 1
+    first="0000${first}"
+    first="${first:${#first}-4}"
+    case "$first" in
+        fc*|fd*|fe8*|fe9*|fea*|feb*) return 0 ;;
+    esac
+    return 1
+}
+
+# rpc_url_is_private <url> — rc 0 when the URL points somewhere only this host or
+# its private network can reach: loopback, RFC 1918, link-local, 100.64.0.0/10
+# (carrier-grade NAT), IPv6 unique-local, localhost, a single-label name, or a
+# name under .local, .localhost or .internal. rc 1 for a public host and for a
+# URL that validate_rpc_url refuses. No output.
+rpc_url_is_private() {
+    local url="${1:-}" parts scheme="" host="" port=""
+    validate_rpc_url "$url" any || return 1
+    parts="$(_tn_url_split "$url")" || return 1
+    read -r scheme host port <<<"$parts"
+    host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$host" == \[*\] ]]; then
+        host="${host#\[}"
+        host="${host%\]}"
+        if _tn_ipv6_is_private "$host"; then return 0; fi
+        return 1
+    fi
+    if [[ "$host" =~ ^[0-9.]+$ ]]; then
+        if _tn_ipv4_is_private "$host"; then return 0; fi
+        return 1
+    fi
+    case "$host" in
+        localhost|*.localhost|*.local|*.internal) return 0 ;;
+        *.*) return 1 ;;
+    esac
+    # A single-label name only resolves through a local search domain.
+    return 0
+}
+
+# tn_ref_min_check <ref> <network> — check a release ref against the network's
+# oldest supported release (MIN_SOURCE_VERSION_*). <ref> is a git ref
+# (v0.13.0-adiri, main, a commit) or a docker image reference, which is judged
+# on the part after its last ":" (…/adiri:v0.15.0-adiri). Prints one message on
+# stdout when rc is not 0:
+#   rc 0  allowed: a release tag at or above the floor, or no floor for <network>
+#   rc 1  refused: a release tag below the floor
+#   rc 2  allowed with a warning: not a release tag, so the version is unknown
+# <network> is testnet (or adiri), mainnet or devnet; devnet has no floor.
+tn_ref_min_check() {
+    local ref="${1:-}" network="${2:-}" floor tag ver tag_re
+    case "$network" in
+        testnet|adiri) floor="$MIN_SOURCE_VERSION_TESTNET" ;;
+        mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET" ;;
+        *)             floor="" ;;
+    esac
+    [[ -n "$floor" ]] || return 0
+    tag="$ref"
+    if [[ "$tag" == *:* ]]; then
+        tag="${tag##*:}"
+    fi
+    tag_re='^v?([0-9]+\.[0-9]+\.[0-9]+)(-[A-Za-z0-9][A-Za-z0-9.-]*)?$'
+    if [[ "$tag" =~ $tag_re ]]; then
+        ver="${BASH_REMATCH[1]}"
+        if version_gte "$ver" "$floor"; then
+            return 0
+        fi
+        printf '%s\n' "${ref} is older than v${floor}, the oldest ${network} release these scripts support (v${floor} is the first with keytool set-rpc, proof-of-possession signing and state export). Pick v${floor} or a newer release."
+        return 1
+    fi
+    printf '%s\n' "${ref:-(empty ref)} is not a release tag, so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is v${floor} or newer."
+    return 2
+}
+
+# tn_genesis_chain_id <genesis-file> — print the chain id a genesis file declares
+# (the first chainId or chain_id key, YAML or JSON, decimal or 0x-hex) as plain
+# decimal. rc 1 when the file is unreadable or holds no such key.
+tn_genesis_chain_id() {
+    local file="${1:-}" line id_re
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 1
+    line="$(grep -m1 -E '^[[:space:]]*"?(chainId|chain_id)"?[[:space:]]*:' "$file" 2>/dev/null || true)"
+    [[ -n "$line" ]] || return 1
+    id_re='^[[:space:]]*"?(chainId|chain_id)"?[[:space:]]*:[[:space:]]*"?(0[xX][0-9A-Fa-f]+|[0-9]+)"?[[:space:]]*,?[[:space:]]*(#.*)?$'
+    [[ "$line" =~ $id_re ]] || return 1
+    _tn_uint "${BASH_REMATCH[2]}"
+}
+
+# tn_is_public_chain_id <id> — rc 0 when <id> (decimal or 0x-hex) is one of the
+# Association's networks: testnet, devnet or mainnet. No output.
+tn_is_public_chain_id() {
+    local id
+    id="$(_tn_uint "${1:-}")" || return 1
+    case "$id" in
+        "$TESTNET_CHAIN_ID"|"$DEVNET_CHAIN_ID"|"$MAINNET_CHAIN_ID") return 0 ;;
+    esac
+    return 1
 }
 
 # Prompt for input, validate with a function, retry up to 3 times.
@@ -1157,6 +1457,551 @@ select_listener_ip() {
 }
 
 # =============================================================================
+# JSON-RPC, EPOCH AND RESTART-WINDOW HELPERS
+# =============================================================================
+#
+# Contract shared by the RPC helpers below: rc 0 puts the value on stdout. Any
+# other rc puts ONE line "<kind> <detail>" on stdout, where kind is
+#   transport   curl could not finish the request: dns, connect, timeout, tls, ...
+#   http        the server answered with a non-2xx status, e.g. "http 429"
+#   rpc-error   a JSON-RPC error object: "rpc-error <code> <message>"
+#   malformed   the answer (or an argument) is not the expected shape
+# Capture with: out="$(fn ...)" || rc=$?
+# They print nothing else and never call exit. Numbers that can exceed 64 bits
+# (wei amounts) are kept as strings; see tn_hex_to_dec and tn_wei_to_tel.
+
+# _tn_uint <value> — print a non-negative integer given in decimal or 0x-hex as
+# plain decimal. Only values bash arithmetic can hold are accepted (up to 18
+# decimal digits or 15 hex digits); rc 1 for anything else.
+_tn_uint() {
+    local v="${1:-}"
+    if [[ "$v" =~ ^[0-9]{1,18}$ ]]; then
+        printf '%s\n' "$(( 10#$v ))"
+        return 0
+    fi
+    if [[ "$v" =~ ^0[xX][0-9A-Fa-f]{1,15}$ ]]; then
+        printf '%s\n' "$(( 16#${v:2} ))"
+        return 0
+    fi
+    return 1
+}
+
+# _tn_now — the current Unix time in seconds, or 0 when date fails. A function so
+# tests can replace the clock.
+_tn_now() {
+    local t
+    t="$(date +%s 2>/dev/null || true)"
+    [[ "$t" =~ ^[0-9]+$ ]] || t=0
+    printf '%s\n' "$t"
+}
+
+# _tn_curl_reason <curl-exit-code> — a one-word transport failure reason.
+_tn_curl_reason() {
+    case "${1:-}" in
+        3)    printf 'bad-url' ;;
+        5|6)  printf 'dns' ;;
+        7)    printf 'connect' ;;
+        28)   printf 'timeout' ;;
+        35|51|53|54|58|59|60|64|66|77|80|82|83|90|91) printf 'tls' ;;
+        52)   printf 'empty-reply' ;;
+        55|56) printf 'connection-reset' ;;
+        127)  printf 'curl-missing' ;;
+        *)    printf 'curl-exit-%s' "${1:-unknown}" ;;
+    esac
+}
+
+# tn_rpc_call <url> <method> [params-json] [max-time] — one JSON-RPC POST.
+# params-json defaults to [] and is inserted verbatim; max-time (seconds, default
+# 10) bounds the whole request. rc 0 prints the response body on one line. On
+# failure (rc 1) the checks run in this order: transport, HTTP status not 2xx,
+# an "error" object (rpc-error <code> <message>), no "result" key (malformed).
+# A "result" of null counts as present; callers check the fields they need.
+tn_rpc_call() {
+    local url="${1:-}" method="${2:-}" params="${3:-[]}" max_time="${4:-10}"
+    local body raw rc code resp nl err_re code_re msg_re res_re rest ecode emsg
+    nl=$'\n'
+    if [[ ! "$max_time" =~ ^[0-9]{1,3}$ ]] || (( 10#$max_time == 0 )); then
+        max_time=10
+    fi
+    if [[ ! "$method" =~ ^[A-Za-z0-9_]+$ ]]; then
+        printf 'malformed bad-method\n'
+        return 1
+    fi
+    body="{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}"
+    rc=0
+    raw="$(curl -sS --max-time "$((10#$max_time))" -X POST \
+        -H 'Content-Type: application/json' \
+        --data "$body" -w '\n%{http_code}' "$url" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf 'transport %s\n' "$(_tn_curl_reason "$rc")"
+        return 1
+    fi
+    code="${raw##*"$nl"}"
+    resp=""
+    if [[ "$raw" == *"$nl"* ]]; then
+        resp="${raw%"$nl"*}"
+    fi
+    if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
+        code="$(printf '%s' "$code" | tr -cd '0-9')"
+        printf 'http %s\n' "${code:-000}"
+        return 1
+    fi
+    # JSON never holds a raw line break inside a string, so folding them is safe.
+    resp="$(printf '%s' "$resp" | tr '\r\n' '  ')"
+    resp="${resp#"${resp%%[![:space:]]*}"}"
+    if [[ -z "$resp" ]]; then
+        printf 'malformed empty-body\n'
+        return 1
+    fi
+    if [[ "$resp" != \{* ]]; then
+        printf 'malformed not-json\n'
+        return 1
+    fi
+    err_re='"error"[[:space:]]*:[[:space:]]*[{]'
+    if [[ "$resp" =~ $err_re ]]; then
+        rest="${resp#*\"error\"}"
+        code_re='"code"[[:space:]]*:[[:space:]]*(-?[0-9]+)'
+        msg_re='"message"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
+        ecode="?"
+        emsg=""
+        if [[ "$rest" =~ $code_re ]]; then
+            ecode="${BASH_REMATCH[1]}"
+        fi
+        if [[ "$rest" =~ $msg_re ]]; then
+            emsg="${BASH_REMATCH[1]}"
+        fi
+        emsg="$(printf '%s' "$emsg" | tr -d '\000-\037')"
+        printf 'rpc-error %s %s\n' "$ecode" "${emsg:0:200}"
+        return 1
+    fi
+    res_re='"result"[[:space:]]*:'
+    if [[ ! "$resp" =~ $res_re ]]; then
+        printf 'malformed no-result\n'
+        return 1
+    fi
+    printf '%s\n' "$resp"
+    return 0
+}
+
+# tn_json_field <json> <key> — print the value of the first "<key>": that holds a
+# scalar: a string (printed without its quotes; escaped quotes are not
+# unescaped), a number or a boolean. rc 1 when the key is missing or its value
+# is null, an object or an array. A plain text matcher, not a JSON parser: it is
+# meant for the flat JSON-RPC answers these scripts read.
+tn_json_field() {
+    local json="${1:-}" key="${2:-}" re val str
+    [[ "$key" =~ ^[A-Za-z0-9_]+$ ]] || return 1
+    re="\"${key}\"[[:space:]]*:[[:space:]]*(\"([^\"]*)\"|[-+.0-9A-Za-z]+|[[{])"
+    [[ "$json" =~ $re ]] || return 1
+    val="${BASH_REMATCH[1]}"
+    str="${BASH_REMATCH[2]}"
+    case "$val" in
+        \"*)
+            printf '%s\n' "$str"
+            return 0
+            ;;
+        "["|"{"|null)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$val"
+    return 0
+}
+
+# _tn_json_uint <json> <key> — tn_json_field, then _tn_uint (decimal or 0x-hex in,
+# decimal out). rc 1 when the field is missing or not such a number.
+_tn_json_uint() {
+    local v
+    v="$(tn_json_field "${1:-}" "${2:-}")" || return 1
+    _tn_uint "$v"
+}
+
+# tn_local_rpc_url — the local node's HTTP RPC: http://127.0.0.1:<port>, where the
+# port is RPC_PORT from .node-meta, else the RPC_PORT variable, else 8545.
+tn_local_rpc_url() {
+    local port=""
+    port="$(meta_get RPC_PORT 2>/dev/null || true)"
+    if ! validate_port "$port" 2>/dev/null; then
+        port="${RPC_PORT:-}"
+        if ! validate_port "$port" 2>/dev/null; then
+            port="$DEFAULT_RPC_PORT"
+        fi
+    fi
+    printf 'http://127.0.0.1:%s\n' "$((10#$port))"
+}
+
+# tn_node_mode [url] — the node's consensus mode from tn_nodeMode: CvvActive (in
+# the committee and voting), CvvInactive (in the committee, catching up) or
+# Observer. url defaults to tn_local_rpc_url. Any other answer is malformed.
+tn_node_mode() {
+    local url="${1:-}" out rc mode
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    rc=0
+    out="$(tn_rpc_call "$url" tn_nodeMode '[]')" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf '%s\n' "$out"
+        return 1
+    fi
+    mode="$(tn_json_field "$out" result || true)"
+    case "$mode" in
+        CvvActive|CvvInactive|Observer)
+            printf '%s\n' "$mode"
+            return 0
+            ;;
+    esac
+    mode="$(printf '%s' "$mode" | tr -cd 'A-Za-z0-9_-')"
+    mode="${mode:0:40}"
+    printf 'malformed node-mode %s\n' "${mode:-none}"
+    return 1
+}
+
+# tn_epoch_info [url] [epoch] — one line from tn_getCurrentEpochInfo, or from
+# tn_getEpochInfo when a decimal epoch is given (nodes answer for current-3 up
+# to current+2):
+#   <epoch_id> <block_height> <epoch_duration> <stake_version> <committee_csv|->
+# The committee is the comma-separated lowercase list of member addresses, or
+# "-" when empty. block_height is the first block of the epoch and
+# epoch_duration is in seconds. epochIssuance is never decoded.
+tn_epoch_info() {
+    local url="${1:-}" epoch="${2:-}" out rc id height dur ver inner addr list committee_re addr_re
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    rc=0
+    if [[ -n "$epoch" ]]; then
+        if [[ ! "$epoch" =~ ^[0-9]{1,10}$ ]]; then
+            printf 'malformed bad-epoch\n'
+            return 1
+        fi
+        out="$(tn_rpc_call "$url" tn_getEpochInfo "[$((10#$epoch))]")" || rc=$?
+    else
+        out="$(tn_rpc_call "$url" tn_getCurrentEpochInfo '[]')" || rc=$?
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        printf '%s\n' "$out"
+        return 1
+    fi
+    id="$(_tn_json_uint "$out" epochId)" || { printf 'malformed no-epochId\n'; return 1; }
+    height="$(_tn_json_uint "$out" blockHeight)" || { printf 'malformed no-blockHeight\n'; return 1; }
+    dur="$(_tn_json_uint "$out" epochDuration)" || { printf 'malformed no-epochDuration\n'; return 1; }
+    ver="$(_tn_json_uint "$out" stakeVersion)" || { printf 'malformed no-stakeVersion\n'; return 1; }
+    committee_re='"committee"[[:space:]]*:[[:space:]]*[[]([^]]*)[]]'
+    addr_re='(0x[0-9a-fA-F]{40})'
+    list=""
+    if [[ "$out" =~ $committee_re ]]; then
+        inner="${BASH_REMATCH[1]}"
+        while [[ "$inner" =~ $addr_re ]]; do
+            addr="${BASH_REMATCH[1]}"
+            list="${list:+${list},}${addr}"
+            inner="${inner#*"$addr"}"
+        done
+    fi
+    list="$(printf '%s' "$list" | tr '[:upper:]' '[:lower:]')"
+    printf '%s %s %s %s %s\n' "$id" "$height" "$dur" "$ver" "${list:--}"
+}
+
+# tn_epoch_secs_left [url] — time to the end of the current epoch:
+#   <secs_left> <epoch_id> <boundary_unix> <epoch_duration>
+# The boundary is timestamp(block[blockHeight-1]) + epochDuration, the block
+# being the last one of the previous epoch. secs_left is negative once the
+# boundary has passed: the epoch then closes at the first commit after it, and
+# the epoch votes go round for another 60 to 75 seconds.
+tn_epoch_secs_left() {
+    local url="${1:-}" info rc id height dur n blk ts now boundary
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    rc=0
+    info="$(tn_epoch_info "$url")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf '%s\n' "$info"
+        return 1
+    fi
+    id=""
+    height=""
+    dur=""
+    read -r id height dur _ <<<"$info"
+    n=0
+    if (( height > 0 )); then
+        n=$(( height - 1 ))
+    fi
+    rc=0
+    blk="$(tn_rpc_call "$url" eth_getBlockByNumber "[\"$(printf '0x%x' "$n")\",false]")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf '%s\n' "$blk"
+        return 1
+    fi
+    ts="$(_tn_json_uint "$blk" timestamp)" || { printf 'malformed no-block-timestamp\n'; return 1; }
+    now="$(_tn_now)"
+    if [[ "$now" == "0" ]]; then
+        printf 'malformed no-clock\n'
+        return 1
+    fi
+    boundary=$(( ts + dur ))
+    printf '%s %s %s %s\n' "$(( boundary - now ))" "$id" "$boundary" "$dur"
+}
+
+# _tn_env_uint <name> <default> — the environment variable <name> when it is a
+# plain non-negative integer (at most 9 digits), else <default>.
+_tn_env_uint() {
+    local v="${!1:-}"
+    if [[ "$v" =~ ^[0-9]{1,9}$ ]]; then
+        printf '%s\n' "$(( 10#$v ))"
+    else
+        printf '%s\n' "${2:-0}"
+    fi
+}
+
+# _tn_fmt_secs <n> — "1h 5m", "4m 10s" or "45s" for a non-negative count.
+_tn_fmt_secs() {
+    local s="${1:-0}" h m
+    [[ "$s" =~ ^[0-9]+$ ]] || s=0
+    s=$(( 10#$s ))
+    h=$(( s / 3600 ))
+    m=$(( (s % 3600) / 60 ))
+    s=$(( s % 60 ))
+    if (( h > 0 )); then
+        printf '%dh %dm' "$h" "$m"
+    elif (( m > 0 )); then
+        printf '%dm %ds' "$m" "$s"
+    else
+        printf '%ds' "$s"
+    fi
+}
+
+# _tn_due_text <secs-left> — "due in 4m 10s", "due now" or "passed 30s ago ...".
+_tn_due_text() {
+    local s="${1:-0}"
+    [[ "$s" =~ ^-?[0-9]+$ ]] || s=0
+    if (( s > 0 )); then
+        printf 'due in %s' "$(_tn_fmt_secs "$s")"
+    elif (( s == 0 )); then
+        printf 'due now'
+    else
+        printf 'passed %s ago (the epoch closes at the next commit)' "$(_tn_fmt_secs "$(( -s ))")"
+    fi
+}
+
+# _tn_wait_say <step|log|warn> <message> — the default progress printer for
+# tn_wait_restart_window. Writes to stderr, so a caller that prints JSON on
+# stdout keeps it clean even when it passes no printer of its own.
+_tn_wait_say() {
+    case "${1:-}" in
+        step) print_step "${2:-}" >&2 ;;
+        warn) print_warn "${2:-}" >&2 ;;
+        *)    print_info "${2:-}" >&2 ;;
+    esac
+    return 0
+}
+
+# tn_wait_restart_window [url] [progress-fn] — before a committee node is stopped,
+# wait for the current epoch to close so the restart does not land on the epoch
+# change, when the node's vote matters most. Always rc 0 and never exits: on any
+# doubt it reports and returns, so the caller carries on. progress-fn (default
+# _tn_wait_say, on stderr) is called as `fn step|log|warn MESSAGE`; JSON-mode
+# callers pass one that emits events. url defaults to tn_local_rpc_url.
+#
+# Environment: TN_SKIP_EPOCH_WAIT=1 skips the wait; TN_EPOCH_MARGIN (300) is how
+# close the boundary must be before waiting; TN_EPOCH_SETTLE (90) is the pause
+# after the epoch changes; TN_EPOCH_WAIT_MAX (1800) caps the whole wait, settle
+# included; TN_EPOCH_POLL (15, clamped to 5-30) is the poll and heartbeat interval.
+#
+# Policy:
+#   1. Skipped, node mode unreadable, or mode not CvvActive: log and return.
+#   2. Time to the boundary unreadable: warn and return. More than the margin
+#      away: log and return.
+#   3. Otherwise one step message, then poll until the epoch id rises, with a log
+#      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
+#   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap.
+# Callers wait before stopping or editing anything, and never before the restart
+# that rolls back a failed change.
+tn_wait_restart_window() {
+    local url="${1:-}" fn="${2:-}"
+    local margin settle cap poll mode out rc secs epoch boundary dur
+    local start now waited slept remaining nap due fails cur info note settle_left
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
+        fn="_tn_wait_say"
+    fi
+    margin="$(_tn_env_uint TN_EPOCH_MARGIN 300)"
+    settle="$(_tn_env_uint TN_EPOCH_SETTLE 90)"
+    cap="$(_tn_env_uint TN_EPOCH_WAIT_MAX 1800)"
+    poll="$(_tn_env_uint TN_EPOCH_POLL 15)"
+    if (( poll < 5 )); then poll=5; fi
+    if (( poll > 30 )); then poll=30; fi
+
+    if [[ "${TN_SKIP_EPOCH_WAIT:-}" == "1" ]]; then
+        "$fn" log "Not waiting for the epoch boundary (TN_SKIP_EPOCH_WAIT=1)." || true
+        return 0
+    fi
+    rc=0
+    mode="$(tn_node_mode "$url")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        "$fn" log "Could not read the node mode from ${url} (${mode}); not waiting for the epoch boundary." || true
+        return 0
+    fi
+    if [[ "$mode" != "CvvActive" ]]; then
+        "$fn" log "Node mode is ${mode}, so this node is not voting in the current committee; no need to wait for the epoch boundary." || true
+        return 0
+    fi
+    rc=0
+    out="$(tn_epoch_secs_left "$url")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${out}). Continuing without waiting." || true
+        return 0
+    fi
+    secs=0
+    epoch=""
+    boundary=0
+    dur=0
+    read -r secs epoch boundary dur <<<"$out"
+    if [[ ! "$secs" =~ ^-?[0-9]+$ || ! "$epoch" =~ ^[0-9]+$ || ! "$boundary" =~ ^[0-9]+$ ]]; then
+        "$fn" warn "This node is in the committee, but the epoch timing answer was not understood (${out}). Continuing without waiting." || true
+        return 0
+    fi
+    if (( secs > margin )); then
+        "$fn" log "Epoch ${epoch} ends in $(_tn_fmt_secs "$secs"), outside the ${margin}s margin; no need to wait." || true
+        return 0
+    fi
+
+    "$fn" step "Waiting for epoch ${epoch} to close before restarting: this node is in the committee and the boundary is $(_tn_due_text "$secs"). Waiting at most ${cap}s (TN_EPOCH_WAIT_MAX); set TN_SKIP_EPOCH_WAIT=1 to skip." || true
+    start="$(_tn_now)"
+    slept=0
+    fails=0
+    cur=""
+    info=""
+    note=""
+    while :; do
+        # Elapsed time is the clock or the sum of the naps, whichever is larger,
+        # so the cap holds even when the clock does not move.
+        now="$(_tn_now)"
+        waited=$(( now - start ))
+        if (( slept > waited )); then waited="$slept"; fi
+        remaining=$(( cap - waited ))
+        if (( remaining <= 0 )); then
+            "$fn" warn "Epoch ${epoch} has not closed after ${waited}s (limit ${cap}s, TN_EPOCH_WAIT_MAX). Continuing anyway." || true
+            return 0
+        fi
+        nap="$poll"
+        if (( nap > remaining )); then nap="$remaining"; fi
+        sleep "$nap" || true
+        slept=$(( slept + nap ))
+        now="$(_tn_now)"
+        waited=$(( now - start ))
+        if (( slept > waited )); then waited="$slept"; fi
+        due=$(( boundary - now ))
+        # Heartbeat before the read, so a slow read never stretches the gap.
+        "$fn" log "Still waiting for epoch ${epoch} to close: ${waited}s so far, boundary $(_tn_due_text "$due").${note}" || true
+        note=""
+        rc=0
+        info="$(tn_epoch_info "$url")" || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            fails=$(( fails + 1 ))
+            if (( fails >= 2 )); then
+                "$fn" warn "Could not read the epoch twice in a row (${info}). Continuing without waiting further." || true
+                return 0
+            fi
+            note=" The last epoch read failed (${info}); retrying."
+            continue
+        fi
+        fails=0
+        cur="${info%% *}"
+        if [[ "$cur" =~ ^[0-9]+$ ]] && (( 10#$cur > 10#$epoch )); then
+            break
+        fi
+    done
+
+    now="$(_tn_now)"
+    waited=$(( now - start ))
+    if (( slept > waited )); then waited="$slept"; fi
+    settle_left="$settle"
+    if (( settle_left > cap - waited )); then settle_left=$(( cap - waited )); fi
+    if (( settle_left <= 0 )); then
+        if (( settle > 0 )); then
+            "$fn" log "Epoch ${epoch} closed (now epoch ${cur}); the wait limit leaves no time to settle. Continuing." || true
+        else
+            "$fn" log "Epoch ${epoch} closed (now epoch ${cur}). Continuing." || true
+        fi
+        return 0
+    fi
+    "$fn" log "Epoch ${epoch} closed (now epoch ${cur}). Giving the new committee ${settle_left}s to settle." || true
+    while (( settle_left > 0 )); do
+        nap="$poll"
+        if (( nap > settle_left )); then nap="$settle_left"; fi
+        sleep "$nap" || true
+        settle_left=$(( settle_left - nap ))
+        if (( settle_left > 0 )); then
+            "$fn" log "Settling: ${settle_left}s left." || true
+        fi
+    done
+    "$fn" log "Epoch ${cur} is under way; continuing." || true
+    return 0
+}
+
+# tn_hex_to_dec <hex> — print an unsigned hex number of any length (0x optional,
+# up to 64 digits for a 256-bit word) in decimal. Long arithmetic in base-1e9
+# limbs, so a 256-bit wei amount never touches 64-bit bash arithmetic and no
+# python3 is needed. rc 1 when <hex> is empty or not hex.
+tn_hex_to_dec() {
+    local hex="${1:-}" i d j n v carry out
+    local -a limbs=()
+    hex="${hex#0x}"
+    hex="${hex#0X}"
+    [[ -n "$hex" && ${#hex} -le 64 && "$hex" =~ ^[0-9A-Fa-f]+$ ]] || return 1
+    limbs=(0)
+    i=0
+    while (( i < ${#hex} )); do
+        d=$(( 16#${hex:i:1} ))
+        carry="$d"
+        n=${#limbs[@]}
+        j=0
+        while (( j < n )); do
+            v=$(( limbs[j] * 16 + carry ))
+            limbs[j]=$(( v % 1000000000 ))
+            carry=$(( v / 1000000000 ))
+            j=$(( j + 1 ))
+        done
+        if (( carry > 0 )); then
+            limbs[n]="$carry"
+        fi
+        i=$(( i + 1 ))
+    done
+    n=${#limbs[@]}
+    out="${limbs[n-1]}"
+    j=$(( n - 2 ))
+    while (( j >= 0 )); do
+        out="${out}$(printf '%09d' "${limbs[j]}")"
+        j=$(( j - 1 ))
+    done
+    printf '%s\n' "$out"
+}
+
+# tn_wei_to_tel <wei-decimal> — format a wei amount (a decimal string of any
+# length) as TEL, 18 decimals: "1,000,000" or "0.5". String handling only.
+tn_wei_to_tel() {
+    local wei="${1:-}" int frac out
+    [[ "$wei" =~ ^[0-9]+$ ]] || return 1
+    wei="${wei#"${wei%%[!0]*}"}"
+    [[ -n "$wei" ]] || wei="0"
+    if (( ${#wei} > 18 )); then
+        int="${wei:0:${#wei}-18}"
+        frac="${wei:${#wei}-18}"
+    else
+        int="0"
+        frac="000000000000000000${wei}"
+        frac="${frac:${#frac}-18}"
+    fi
+    # Drop the trailing zeros of the fraction.
+    frac="${frac%"${frac##*[!0]}"}"
+    out=""
+    while (( ${#int} > 3 )); do
+        out=",${int:${#int}-3}${out}"
+        int="${int:0:${#int}-3}"
+    done
+    out="${int}${out}"
+    if [[ -n "$frac" ]]; then
+        out="${out}.${frac}"
+    fi
+    printf '%s\n' "$out"
+}
+
+# =============================================================================
 # VALIDATOR ON-CHAIN STATUS CHECK
 # =============================================================================
 #
@@ -1181,102 +2026,162 @@ select_listener_ip() {
 # ConsensusRegistry address (from tn-contracts/deployments/deployments.json):
 readonly CONSENSUS_REGISTRY="0x07e17e17e17e17e17e17e17e17e17e17e17e17e1"
 #
-# Function selector for getValidator(address):
-# keccak256("getValidator(address)") = 0x1904bb2e
+# Function selectors (first 4 bytes of keccak256 of the signature):
+#   getValidator(address)     0x1904bb2e
+#   getCurrentStakeVersion()  0x67398331
+#   stakeConfig(uint8)        0xa71954ec
 readonly GET_VALIDATOR_SELECTOR="0x1904bb2e"
+readonly GET_CURRENT_STAKE_VERSION_SELECTOR="0x67398331"
+readonly STAKE_CONFIG_SELECTOR="0xa71954ec"
+
+# _tn_word_fits <64-hex-word> <bits> — rc 0 when the word is 64 hex characters and
+# every bit above the low <bits> is zero: a valid ABI encoding of a uint<bits>
+# (160 for an address, 8 for a bool or an enum).
+_tn_word_fits() {
+    local word="${1:-}" bits="${2:-256}" lead
+    [[ ${#word} -eq 64 && "$word" =~ ^[0-9a-fA-F]+$ ]] || return 1
+    lead="${word:0:$(( 64 - bits / 4 ))}"
+    [[ "$lead" =~ ^0*$ ]]
+}
 
 # node_stake_status <address> [rpc_url] — the single getValidator(address) probe.
 # Prints exactly ONE line on stdout and nothing else (no print_* output):
-#   "<status> <activation_epoch> <is_retired>"   rc 0   e.g. "3 12 0"
-#   "none"                                        rc 0   the call reverted: no ConsensusNFT
-#   "unknown"                                     rc 1   address empty or malformed
-#   "unknown"                                     rc 2   curl failed, empty body, a non-revert
-#                                                        RPC error (rate limit, method not
-#                                                        found, ...), or a missing/short/
-#                                                        non-hex result
-# status is the ValidatorStatus enum above in decimal; is_retired is 0 or 1.
-# rpc_url defaults to the local node (http://127.0.0.1:8545).
+#   "<status> <activation_epoch> <is_retired> <exit_epoch>"  rc 0  e.g. "3 12 0 0"
+#   "none"                       rc 0  the call reverted: no ConsensusNFT
+#   "unknown bad-address"        rc 1  address empty or malformed
+#   "unknown <kind> <detail>"    rc 2  the status could not be read; kind and detail
+#                                      come from tn_rpc_call (transport ..., http 429,
+#                                      rpc-error ..., malformed ...)
+# status is the ValidatorStatus enum above in decimal; is_retired is 0 or 1;
+# exit_epoch is 0 until an exit starts and 4294967295 while it is pending. The
+# first three fields keep their old order, so a reader written for the older
+# three-field line keeps working as long as it reads a spare last variable
+# (read -r status epoch retired _). rpc_url defaults to tn_local_rpc_url.
 #
-# The ValidatorInfo struct is ABI-encoded INLINE in the response. It carries no
-# dynamic fields (blsPubkey is not part of the returned struct), so there is NO
-# leading offset pointer -- every field sits at a fixed word index. Each field
-# is 32 bytes / 64 hex chars, so word N starts at hex offset 64*N:
-#   word 0 = validatorAddress (offset 0)
-#   word 1 = activationEpoch  (offset 64)    uint32: low 8 hex chars at 120
-#   word 2 = exitEpoch        (offset 128)
-#   word 3 = currentStatus    (offset 192)   uint8 enum: decoded from 240..255
-#   word 4 = isRetired        (offset 256)   bool: low byte at 318..319
-#   word 5 = stakeVersion     (offset 320)
-#   word 6 = region           (offset 384)
-# Only the low bits of each word are decoded, so a 64-hex word can never
-# overflow bash arithmetic.
+# The ValidatorInfo struct is ABI-encoded INLINE in the response: seven 32-byte
+# words (64 hex characters each, word N at hex offset 64*N), no offset pointer:
+#   word 0 validatorAddress  address
+#   word 1 activationEpoch   uint32
+#   word 2 exitEpoch         uint32
+#   word 3 currentStatus     uint8 enum, 0-6
+#   word 4 isRetired         bool
+#   words 5-6                small fields: isDelegated and stakeVersion on the
+#                            deployed testnet registry, stakeVersion and region
+#                            in newer tn-contracts source
+# The decode is strict: exactly seven words, each zero above its type (words 5-6
+# as uint8), isRetired 0 or 1, status within the enum. Anything else is
+# "unknown malformed ...", never a guessed status. Only the low bits are
+# decoded, so bash arithmetic never sees a 256-bit value.
 node_stake_status() {
-    local address="${1:-}" rpc_url="${2:-http://127.0.0.1:8545}"
-    local call_data response result hex status_hex epoch_hex retired_hex
-    local status epoch retired error_re revert_msg_re revert_code_re result_re hex_re
-    error_re='"error"[[:space:]]*:[[:space:]]*[{]'
-    revert_msg_re='[Rr]evert'
-    revert_code_re='"code"[[:space:]]*:[[:space:]]*3([^0-9]|$)'
-    result_re='"result"[[:space:]]*:[[:space:]]*"(0x[0-9a-fA-F]*)"'
-    hex_re='^[0-9a-fA-F]+$'
-
+    local address="${1:-}" rpc_url="${2:-}"
+    local call_data out rc kind rest ecode emsg result_re hex bits i
+    local status activation exit_epoch retired
     if [[ -z "$address" ]] || [[ ! "$address" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-        printf '%s\n' "unknown"
+        printf '%s\n' "unknown bad-address"
         return 1
     fi
+    [[ -n "$rpc_url" ]] || rpc_url="$(tn_local_rpc_url)"
 
     # ABI-encode the call: selector + address left-padded to a 32-byte word.
     call_data="${GET_VALIDATOR_SELECTOR}000000000000000000000000${address:2}"
-    response="$(curl -s --max-time 10 \
-        -X POST \
-        -H "Content-Type: application/json" \
-        --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"${CONSENSUS_REGISTRY}\",\"data\":\"${call_data}\"},\"latest\"],\"id\":1}" \
-        "$rpc_url" 2>/dev/null || true)"
-
-    if [[ -z "$response" ]]; then
-        printf '%s\n' "unknown"
-        return 2
-    fi
-
-    # getValidator reverts for an address that holds no ConsensusNFT. reth reports
-    # an execution revert as error code 3 ("execution reverted"). Any other error
-    # (rate limit, method not found, ...) says nothing about the address. Only an
-    # error OBJECT counts, so a proxy that adds "error":null to a result is fine.
-    if [[ "$response" =~ $error_re ]]; then
-        if [[ "$response" =~ $revert_msg_re ]] || [[ "$response" =~ $revert_code_re ]]; then
-            printf '%s\n' "none"
-            return 0
+    rc=0
+    out="$(tn_rpc_call "$rpc_url" eth_call "[{\"to\":\"${CONSENSUS_REGISTRY}\",\"data\":\"${call_data}\"},\"latest\"]")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        # getValidator reverts with InvalidTokenId(uint256) (data 0xed15e6cf...) for
+        # an address that holds no ConsensusNFT, and reth reports a revert as error
+        # code 3 ("execution reverted"). Any other error (rate limit, method not
+        # found, ...) says nothing about the address.
+        kind="${out%% *}"
+        if [[ "$kind" == "rpc-error" ]]; then
+            rest="${out#rpc-error }"
+            ecode="${rest%% *}"
+            emsg="${rest#* }"
+            if [[ "$ecode" == "3" || "$emsg" =~ [Rr]evert ]]; then
+                printf '%s\n' "none"
+                return 0
+            fi
         fi
-        printf '%s\n' "unknown"
+        printf 'unknown %s\n' "$out"
         return 2
     fi
 
-    result=""
-    if [[ "$response" =~ $result_re ]]; then
-        result="${BASH_REMATCH[1]}"
-    fi
-    hex="${result#0x}"
-    if [[ ${#hex} -lt 448 ]]; then
-        printf '%s\n' "unknown"
+    result_re='"result"[[:space:]]*:[[:space:]]*"0x([0-9a-fA-F]*)"'
+    if [[ ! "$out" =~ $result_re ]]; then
+        printf '%s\n' "unknown malformed result-not-hex"
         return 2
     fi
-
-    status_hex="${hex:240:16}"
-    epoch_hex="${hex:120:8}"
-    retired_hex="${hex:318:2}"
-    if [[ ! "$status_hex" =~ $hex_re ]] || [[ ! "$epoch_hex" =~ $hex_re ]] \
-        || [[ ! "$retired_hex" =~ $hex_re ]]; then
-        printf '%s\n' "unknown"
+    hex="${BASH_REMATCH[1]}"
+    if [[ ${#hex} -ne 448 ]]; then
+        printf 'unknown malformed result-length %s\n' "${#hex}"
         return 2
     fi
-    status=$(( 16#${status_hex} ))
-    epoch=$(( 16#${epoch_hex} ))
-    retired=$(( 16#${retired_hex} ))
-    if [[ "$retired" -ne 0 ]]; then
-        retired=1
+    # Bits each word may use: address, uint32, uint32, uint8, bool, uint8, uint8.
+    i=0
+    for bits in 160 32 32 8 8 8 8; do
+        if ! _tn_word_fits "${hex:$(( i * 64 )):64}" "$bits"; then
+            printf 'unknown malformed word-%s\n' "$i"
+            return 2
+        fi
+        i=$(( i + 1 ))
+    done
+    activation=$(( 16#${hex:120:8} ))
+    exit_epoch=$(( 16#${hex:184:8} ))
+    status=$(( 16#${hex:254:2} ))
+    retired=$(( 16#${hex:318:2} ))
+    if (( status > 6 )); then
+        printf '%s\n' "unknown malformed word-3"
+        return 2
     fi
-    printf '%s %s %s\n' "$status" "$epoch" "$retired"
+    if (( retired > 1 )); then
+        printf '%s\n' "unknown malformed word-4"
+        return 2
+    fi
+    printf '%s %s %s %s\n' "$status" "$activation" "$retired" "$exit_epoch"
     return 0
+}
+
+# tn_stake_amount_wei [rpc_url] [max_time] — the stake the registry asks for now:
+#   "<wei> <stake_version>"  rc 0, wei as a decimal string (1e24, 1,000,000 TEL,
+#                            on testnet today)
+# Reads getCurrentStakeVersion(), then word 0 (stakeAmount) of the four-word
+# stakeConfig(version). Failures follow the RPC helper contract: rc 1 and one
+# "<kind> <detail>" line. rpc_url defaults to tn_local_rpc_url; max_time (per
+# call, seconds) to 10. Format the amount with tn_wei_to_tel.
+tn_stake_amount_wei() {
+    local rpc_url="${1:-}" max_time="${2:-10}" out rc result_re hex ver wei
+    [[ -n "$rpc_url" ]] || rpc_url="$(tn_local_rpc_url)"
+    result_re='"result"[[:space:]]*:[[:space:]]*"0x([0-9a-fA-F]*)"'
+    rc=0
+    out="$(tn_rpc_call "$rpc_url" eth_call "[{\"to\":\"${CONSENSUS_REGISTRY}\",\"data\":\"${GET_CURRENT_STAKE_VERSION_SELECTOR}\"},\"latest\"]" "$max_time")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf '%s\n' "$out"
+        return 1
+    fi
+    hex=""
+    if [[ "$out" =~ $result_re ]]; then
+        hex="${BASH_REMATCH[1]}"
+    fi
+    if ! _tn_word_fits "$hex" 8; then
+        printf '%s\n' "malformed stake-version"
+        return 1
+    fi
+    ver=$(( 16#${hex:62:2} ))
+    rc=0
+    out="$(tn_rpc_call "$rpc_url" eth_call "[{\"to\":\"${CONSENSUS_REGISTRY}\",\"data\":\"${STAKE_CONFIG_SELECTOR}$(printf '%064x' "$ver")\"},\"latest\"]" "$max_time")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf '%s\n' "$out"
+        return 1
+    fi
+    hex=""
+    if [[ "$out" =~ $result_re ]]; then
+        hex="${BASH_REMATCH[1]}"
+    fi
+    if [[ ${#hex} -ne 256 ]]; then
+        printf 'malformed stake-config-length %s\n' "${#hex}"
+        return 1
+    fi
+    wei="$(tn_hex_to_dec "${hex:0:64}")" || { printf '%s\n' "malformed stake-amount"; return 1; }
+    printf '%s %s\n' "$wei" "$ver"
 }
 
 # node_is_staked_validator <address> [rpc_url] — no output. rc 0 when the registry
@@ -1297,21 +2202,25 @@ node_is_staked_validator() {
     return 1
 }
 
-# print_validator_onchain_status <address> <result-line> [is_retired 0|1] — render
-# the operator-facing report for a node_stake_status result line ("<status>
-# <activation_epoch> <is_retired>" or "none"). This is the single copy of the
+# print_validator_onchain_status <address> <result-line> [is_retired 0|1]
+#   [current_epoch] — render the operator-facing report for a node_stake_status
+# result line ("<status> <activation_epoch> <is_retired> <exit_epoch>", the older
+# three-field form without exit_epoch, or "none"). This is the single copy of the
 # status label table and the "Next step" text. The optional third argument
-# overrides the is_retired field of the line. Callers (check-node.sh,
+# overrides the is_retired field of the line (pass "" to keep it). The optional
+# fourth argument is the network's current epoch; for an Exited validator it
+# says whether unstake() is eligible now. Callers (check-node.sh,
 # update-node.sh) grep the "Status: <label>" and "No validator record found"
 # strings, so keep those labels stable. Returns 1 (after a warning) when the
 # line is not a decoded result.
 print_validator_onchain_status() {
-    local validator_address="${1:-}" line="${2:-}" retired_arg="${3:-}"
-    local status epoch retired status_label next_step
+    local validator_address="${1:-}" line="${2:-}" retired_arg="${3:-}" cur_epoch="${4:-}"
+    local status epoch retired exit_epoch status_label next_step eligible
     status=""
     epoch=""
     retired=""
-    read -r status epoch retired _ <<<"$line" || true
+    exit_epoch=""
+    read -r status epoch retired exit_epoch _ <<<"$line" || true
 
     if [[ "$status" == "none" ]]; then
         print_warn "No validator record found for ${validator_address}"
@@ -1333,6 +2242,17 @@ print_validator_onchain_status() {
         retired="$retired_arg"
     fi
     [[ "$retired" == "1" ]] || retired="0"
+    # exitEpoch is 0 before an exit starts and type(uint32).max while it is pending;
+    # neither is an epoch the validator exited at.
+    if [[ "$exit_epoch" =~ ^[0-9]{1,10}$ ]]; then
+        exit_epoch=$(( 10#$exit_epoch ))
+        if [[ "$exit_epoch" == "0" || "$exit_epoch" == "4294967295" ]]; then
+            exit_epoch=""
+        fi
+    else
+        exit_epoch=""
+    fi
+    [[ "$cur_epoch" =~ ^[0-9]{1,10}$ ]] || cur_epoch=""
 
     case "$status" in
         0)
@@ -1357,7 +2277,20 @@ print_validator_onchain_status() {
             ;;
         5)
             status_label="Exited"
-            next_step="Your validator has exited. You can now call unstake() to reclaim your TEL stake."
+            # unstake() is eligible from the epoch after the exit epoch.
+            if [[ -n "$exit_epoch" ]]; then
+                eligible=$(( 10#$exit_epoch + 1 ))
+                next_step="Your validator exited at epoch ${exit_epoch}; unstake() becomes eligible at epoch ${eligible}."
+                if [[ -z "$cur_epoch" ]]; then
+                    next_step="${next_step} The current epoch was not read, so check it before calling unstake() to reclaim your TEL stake."
+                elif (( 10#$cur_epoch >= eligible )); then
+                    next_step="${next_step} That is now: the network is at epoch ${cur_epoch}, so you can call unstake() to reclaim your TEL stake."
+                else
+                    next_step="${next_step} That is not yet: the network is at epoch ${cur_epoch}, $(( eligible - 10#$cur_epoch )) epoch(s) to go."
+                fi
+            else
+                next_step="Your validator has exited. unstake() becomes eligible from the epoch after its exit epoch; call it then to reclaim your TEL stake."
+            fi
             ;;
         6)
             # Retiring moves the record to Any and sets isRetired, so Any + retired is
@@ -1402,12 +2335,18 @@ print_validator_onchain_status() {
 }
 
 # check_validator_onchain_status <address> [rpc_url] — print the on-chain status
-# report for an address. Returns 1 for a malformed address or an unreadable
-# status, 0 when a report (including "No validator record found") was printed.
+# report for an address. When the status cannot be read it says why, with one
+# hint for each kind of failure: no answer (transport), rate limiting (HTTP 429),
+# or an answer that did not decode (malformed). For an Exited validator it also
+# reads the current epoch so the report can say whether unstake() is eligible.
+# Returns 1 for a malformed address or an unreadable status, 0 when a report
+# (including "No validator record found") was printed. rpc_url defaults to
+# tn_local_rpc_url.
 check_validator_onchain_status() {
-    local validator_address="${1:-}" rpc_url="${2:-http://127.0.0.1:8545}"
-    local out rc
+    local validator_address="${1:-}" rpc_url="${2:-}"
+    local out rc detail info cur_epoch
 
+    [[ -n "$rpc_url" ]] || rpc_url="$(tn_local_rpc_url)"
     print_step "Checking validator on-chain status..."
     print_info "Address:  ${validator_address}"
     print_info "Contract: ${CONSENSUS_REGISTRY}"
@@ -1421,19 +2360,45 @@ check_validator_onchain_status() {
     rc=0
     out="$(node_stake_status "$validator_address" "$rpc_url")" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        print_warn "Empty response from contract -- node may still be syncing or NFT not yet minted."
+        detail="${out#unknown }"
+        print_warn "Could not read the on-chain stake status from ${rpc_url} (${detail})."
+        case "$detail" in
+            transport*)
+                print_info "Nothing answered. Check that the node is running and its RPC listens on that address, then run the check again."
+                ;;
+            "http 429"*)
+                print_info "The RPC is rate limiting requests (HTTP 429). Wait a minute and try again, or query your own node instead."
+                ;;
+            malformed*)
+                print_info "The RPC answered, but not with a getValidator result. The node may still be syncing, or the URL is not a Telcoin Network RPC."
+                ;;
+            *)
+                print_info "The RPC refused the call. Check the URL, then run the check again."
+                ;;
+        esac
         return 1
     fi
-    print_validator_onchain_status "$validator_address" "$out" || true
+    cur_epoch=""
+    if [[ "${out%% *}" == "5" ]]; then
+        info="$(tn_epoch_info "$rpc_url" || true)"
+        cur_epoch="${info%% *}"
+        [[ "$cur_epoch" =~ ^[0-9]+$ ]] || cur_epoch=""
+    fi
+    print_validator_onchain_status "$validator_address" "$out" "" "$cur_epoch" || true
     return 0
 }
 
-# Display the contents of node-info.yaml after key generation
+# display_node_info <data_dir> <validator_address> — show node-info.yaml after key
+# generation and the steps to become a validator. Step 3 reads the stake amount
+# live (getCurrentStakeVersion, then stakeConfig) from the network RPC in
+# RPC_URL, which select_network sets; with RPC_URL empty, or when the read
+# fails, it prints the cast commands instead. The steps end with a pointer to
+# prepare-stake.sh, which runs the checks once the node has synced.
 display_node_info() {
     local data_dir="$1"
     local validator_address="$2"
     local node_info_file="${data_dir}/node-info.yaml"
-    local export_cmd node_info_arg
+    local export_cmd node_info_arg stake_rpc stake_out stake_rc stake_wei stake_ver stake_tel value_arg
 
     echo ""
     print_step "Node Identity Information"
@@ -1471,9 +2436,33 @@ display_node_info() {
     echo "    (Returns 1 if whitelisted, 0 if not)"
     echo ""
     echo "  Step 3: Check required stake amount"
-    echo "    cast call ${CONSENSUS_REGISTRY} \\"
-    echo "      \"getCurrentStakeConfig()\" \\"
-    echo "      --rpc-url <RPC_URL>"
+    stake_rpc="${RPC_URL:-}"
+    value_arg="<STAKE_AMOUNT_FROM_STEP_3>"
+    stake_out="RPC_URL is not set"
+    stake_rc=1
+    if [[ -n "$stake_rpc" ]]; then
+        stake_rc=0
+        stake_out="$(tn_stake_amount_wei "$stake_rpc" 5)" || stake_rc=$?
+    fi
+    stake_wei=""
+    stake_ver=""
+    stake_tel=""
+    if [[ "$stake_rc" -eq 0 ]]; then
+        read -r stake_wei stake_ver _ <<<"$stake_out"
+        stake_tel="$(tn_wei_to_tel "$stake_wei" || true)"
+    fi
+    if [[ -n "$stake_tel" ]]; then
+        echo "    Required stake: ${stake_tel} TEL (${stake_wei} wei, stake version ${stake_ver}),"
+        echo "    read from ${stake_rpc}."
+        value_arg="$stake_wei"
+    else
+        echo "    Could not read the stake amount (${stake_out}). Read it with:"
+        echo "    cast call ${CONSENSUS_REGISTRY} \\"
+        echo "      \"getCurrentStakeVersion()(uint8)\" --rpc-url <RPC_URL>"
+        echo "    cast call ${CONSENSUS_REGISTRY} \\"
+        echo "      \"stakeConfig(uint8)(uint256,uint256,uint256,uint32)\" <VERSION> --rpc-url <RPC_URL>"
+        echo "    (The first value stakeConfig returns is the stake amount in wei.)"
+    fi
     echo ""
     echo "  Step 4: On this node, export the stake(bytes,(bytes)) calldata (reads only node-info.yaml)"
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
@@ -1486,13 +2475,18 @@ display_node_info() {
     echo ""
     echo "  Step 5: From the machine holding your validator wallet, submit the stake"
     echo "    cast send ${CONSENSUS_REGISTRY} <CALLDATA_FROM_STEP_4> \\"
-    echo "      --value <STAKE_AMOUNT_FROM_STEP_3> --from ${validator_address} \\"
+    echo "      --value ${value_arg} --from ${validator_address} \\"
     echo "      --ledger --rpc-url <RPC_URL>"
     echo "    (Use --trezor or --interactive instead of --ledger to match your wallet.)"
     echo ""
     echo "  Step 6: Wait for node to sync, then activate"
     echo "    cast send ${CONSENSUS_REGISTRY} \"activate()\" \\"
     echo "      --from ${validator_address} --ledger --rpc-url <RPC_URL>"
+    echo ""
+    echo "  Once the node has synced, prepare-stake.sh does Steps 2 to 4 for you: it checks"
+    echo "  the whitelist, the stake amount and your balance, simulates the stake, and prints"
+    echo "  the exact commands for Steps 5 and 6:"
+    echo "    sudo bash prepare-stake.sh"
     echo ""
     echo "  Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake"
     echo ""
@@ -1969,21 +2963,64 @@ meta_get() {
 
 # meta_set <key> <value> [file] — idempotent upsert into .node-meta (mode 600).
 # Rewrites via grep -v + append (no sed) so values containing / + = are safe.
+# Every other key in the file survives. Refuses (rc 1, file untouched) a key that
+# is not ^[A-Z][A-Z0-9_]*$ or a value holding a CR or LF, which would otherwise
+# smuggle a second KEY= line into the file. Warnings go to stderr so JSON-mode
+# callers keep a clean stdout.
 meta_set() {
-    local key="$1" val="$2" file="${3:-}"
-    [[ -n "$file" ]] || file="$(node_meta_path || true)"
-    if [[ -z "$file" ]]; then
-        print_warn "meta_set: no .node-meta found; cannot persist ${key}"
+    local key="${1:-}" val="${2:-}" file="${3:-}" tmp nl cr
+    nl=$'\n'
+    cr=$'\r'
+    if [[ ! "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+        print_warn "meta_set: refusing key '${key}' (expected A-Z, 0-9 and _ only, starting with a letter)" >&2
         return 1
     fi
-    mkdir -p "$(dirname "$file")"
-    [[ -f "$file" ]] || { : > "$file"; chmod 600 "$file"; }
-    local tmp; tmp="$(mktemp)"
+    if [[ "$val" == *"$nl"* || "$val" == *"$cr"* ]]; then
+        print_warn "meta_set: refusing a value for ${key} that contains a line break" >&2
+        return 1
+    fi
+    [[ -n "$file" ]] || file="$(node_meta_path || true)"
+    if [[ -z "$file" ]]; then
+        print_warn "meta_set: no .node-meta found; cannot persist ${key}" >&2
+        return 1
+    fi
+    mkdir -p "$(dirname "$file")" || return 1
+    [[ -f "$file" ]] || { ( umask 077; : > "$file" ) || return 1; }
+    tmp="$(mktemp 2>/dev/null || true)"
+    [[ -n "$tmp" && -f "$tmp" ]] || return 1
     grep -vE "^${key}=" "$file" > "$tmp" 2>/dev/null || true
     printf '%s=%s\n' "$key" "$val" >> "$tmp"
-    cat "$tmp" > "$file"
+    if ! cat "$tmp" > "$file"; then
+        rm -f "$tmp"
+        return 1
+    fi
     rm -f "$tmp"
     chmod 600 "$file" 2>/dev/null || true
+    return 0
+}
+
+# meta_unset <key> [file] — remove every KEY= line from .node-meta. rc 0 when the
+# key (or the file) is absent, and the file is then left untouched. Same key rule
+# as meta_set (rc 1 otherwise); other keys survive and the file stays mode 600.
+meta_unset() {
+    local key="${1:-}" file="${2:-}" tmp
+    if [[ ! "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+        print_warn "meta_unset: refusing key '${key}' (expected A-Z, 0-9 and _ only, starting with a letter)" >&2
+        return 1
+    fi
+    [[ -n "$file" ]] || file="$(node_meta_path || true)"
+    [[ -n "$file" && -f "$file" ]] || return 0
+    grep -qE "^${key}=" "$file" 2>/dev/null || return 0
+    tmp="$(mktemp 2>/dev/null || true)"
+    [[ -n "$tmp" && -f "$tmp" ]] || return 1
+    grep -vE "^${key}=" "$file" > "$tmp" 2>/dev/null || true
+    if ! cat "$tmp" > "$file"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+    chmod 600 "$file" 2>/dev/null || true
+    return 0
 }
 
 # -----------------------------------------------------------------------------
