@@ -200,6 +200,40 @@ read_launch_line() {
     fi
 }
 
+# launch_node_commands FILE -- the number of live commands in launch file FILE
+# that run `node` with --http, which is what lib/common.sh takes as the node
+# command. The file is read the same way: backslash-continued lines joined;
+# # lines, and ; lines in a unit, skipped; in a shell wrapper a comment line
+# ends a continued command. Words are split on blanks only, enough to count.
+launch_node_commands() {
+    local unit=0
+    if [[ "$1" == *.service ]]; then
+        unit=1
+    fi
+    awk -v u="$unit" '
+        function flush(    n, i, w, seen) {
+            n = split(cmd, w, /[ \t]+/)
+            seen = 0
+            for (i = 1; i <= n; i++) {
+                if (w[i] == "node") seen = 1
+                else if (seen && w[i] == "--http") { count++; break }
+            }
+            cmd = ""
+        }
+        /^[ \t]*#/ || (u == 1 && /^[ \t]*;/) {
+            if (u != 1) flush()
+            next
+        }
+        {
+            line = $0
+            more = sub(/\\$/, "", line)
+            cmd = cmd " " line
+            if (!more) flush()
+        }
+        END { flush(); print count + 0 }
+    ' "$1" 2>/dev/null
+}
+
 # True when the resolved launch config runs the node via docker.
 is_docker_install() {
     read_launch_line "$TARGET_LAUNCH_FILE" | grep -qF "docker run"
@@ -233,7 +267,15 @@ set_listener_var() {
 
 # Back up every file an edit can touch: the launch file, plus the unit when
 # they differ (listener edits keep both in sync). Must succeed before any edit.
+# Menu only: a launch file with more than one node command is refused here.
+# Callers return 0 when it fails: the menu runs under errexit, so a non-zero
+# return from an edit function would end the script instead of going back.
 backup_edit_targets() {
+    if ! edit_launch_unambiguous; then
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 1
+    fi
     backup_service_file "$TARGET_LAUNCH_FILE" >/dev/null || return 1
     if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
         backup_service_file "$TARGET_SERVICE_FILE" >/dev/null || return 1
@@ -592,12 +634,27 @@ edit_epoch_wait() {
 # lock is held and the restart is left to the caller.
 # =============================================================================
 
+# edit_launch_unambiguous -- rc 0 unless TARGET_LAUNCH_FILE holds more than one
+# node command with --http. Then it is not clear which one starts the node, and
+# the tn_launch_flag_* helpers would edit only the first and leave the other
+# stale, so every edit of the launch file is refused with the reason.
+edit_launch_unambiguous() {
+    local n
+    n="$(launch_node_commands "$TARGET_LAUNCH_FILE")"
+    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -gt 1 ]]; then
+        edit_error "${TARGET_LAUNCH_FILE} has ${n} node commands with --http, so it is not clear which one starts the node. edit-config changes a launch file only when it has exactly one; remove or comment out the others and try again."
+        return 1
+    fi
+    return 0
+}
+
 # edit_launch_spec -- set EDIT_SPEC to the runner spec (docker:<image> or
 # binary:<path>) of the node command in TARGET_LAUNCH_FILE (tn_launch_runner).
-# Every launch-flag edit starts here, so a launch file the parser cannot read
-# is never edited.
+# Every launch-flag edit starts here, so a launch file the parser cannot read,
+# or one with more than one node command, is never edited.
 edit_launch_spec() {
     local rc=0
+    edit_launch_unambiguous || return 1
     EDIT_SPEC="$(tn_launch_runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
     case "$rc" in
         0) return 0 ;;
@@ -662,6 +719,47 @@ set_metrics() {
     return 0
 }
 
+# peers_file_ok FILE -- rc 0 when FILE can be a bootstrap peers file: a
+# readable, non-empty regular file of at most 64 KiB that its group and other
+# users can read too. The read bits matter because the map does not stay
+# private anyway: the installed copy is 0644, and the check passes the map on
+# the command line of the node binary, where other local users can see it.
+# Otherwise rc 1, with the reason on stdout. Mirrors setup-node.sh.
+peers_file_ok() {
+    local f="$1" mode size
+    if [[ ! -f "$f" || ! -r "$f" ]]; then
+        printf '%s is not a readable regular file' "$f"
+        return 1
+    fi
+    # GNU stat, then BSD stat (macOS).
+    mode="$(stat -L -c '%a' "$f" 2>/dev/null || true)"
+    if [[ ! "$mode" =~ ^[0-7]+$ ]]; then
+        mode="$(stat -L -f '%Lp' "$f" 2>/dev/null || true)"
+    fi
+    if [[ ! "$mode" =~ ^[0-7]+$ ]]; then
+        printf 'could not read the permissions of %s' "$f"
+        return 1
+    fi
+    if (( (8#$mode & 8#044) != 8#044 )); then
+        printf '%s is mode %s: other users cannot read it. edit-config accepts only a peers file that others can already read, because the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it. Run chmod 644 %s first' "$f" "$mode" "$f"
+        return 1
+    fi
+    size="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+    if [[ ! "$size" =~ ^[0-9]+$ ]]; then
+        printf 'could not read the size of %s' "$f"
+        return 1
+    fi
+    if [[ "$size" -eq 0 ]]; then
+        printf '%s is empty' "$f"
+        return 1
+    fi
+    if [[ "$size" -gt "$PEERS_MAX_BYTES" ]]; then
+        printf '%s is %s bytes; a bootstrap peers file can be at most 64 KiB' "$f" "$size"
+        return 1
+    fi
+    return 0
+}
+
 # set_bootstrap_peers VALUE -- VALUE is an absolute path to a YAML or JSON map
 # of peers keyed by BLS public key, which the node dials at start instead of
 # the bootstrap servers in its genesis; or none. The installed release checks
@@ -669,9 +767,11 @@ set_metrics() {
 # <config dir>/bootstrap-peers.yaml (0644, root), and the node command gets
 # --bootstrap-peers "$(cat <that file>)", which the start wrapper expands at
 # each start. A systemd unit cannot run that $(cat ...), so a node started
-# straight from its unit is refused. none removes the flag and the file.
+# straight from its unit is refused. none removes the flag and the file. The
+# parse check is the only time a run hands the map to a node binary, and it
+# comes after every check on the file.
 set_bootstrap_peers() {
-    local value="$1" peers spec size tmp msg rc
+    local value="$1" peers spec tmp msg rc
     peers="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
     edit_launch_spec || return 1
     spec="$EDIT_SPEC"
@@ -695,36 +795,32 @@ set_bootstrap_peers() {
         edit_error "bootstrap_peers takes an absolute path or none, not ${value}"
         return 1
     fi
-    if [[ ! -f "$value" || ! -r "$value" ]]; then
-        edit_error "${value} is not a readable regular file"
-        return 1
-    fi
-    size="$(wc -c < "$value" 2>/dev/null | tr -d '[:space:]')"
-    if [[ ! "$size" =~ ^[0-9]+$ ]]; then
-        edit_error "could not read the size of ${value}"
-        return 1
-    fi
-    if [[ "$size" -eq 0 ]]; then
-        edit_error "${value} is empty"
-        return 1
-    fi
-    if [[ "$size" -gt "$PEERS_MAX_BYTES" ]]; then
-        edit_error "${value} is ${size} bytes; a bootstrap peers file can be at most 64 KiB"
+    if ! msg="$(peers_file_ok "$value")"; then
+        edit_error "${msg}."
         return 1
     fi
     edit_need_flag "$spec" --bootstrap-peers || return 1
 
     # Check the staged copy, so what gets installed is exactly what the node
-    # accepted. $(cat) drops trailing newlines here as it does in the wrapper.
+    # accepted. cp -p gives the copy the mode of the file it actually read, so
+    # a path swapped since the check above is caught before the map reaches a
+    # process list. $(cat) drops trailing newlines here as it does in the
+    # wrapper.
     tmp="${peers}.new.$$"
-    if ! cp "$value" "$tmp" 2>/dev/null; then
+    if ! cp -p "$value" "$tmp" 2>/dev/null; then
         rm -f "$tmp"
         edit_error "could not copy ${value} to ${tmp}"
+        return 1
+    fi
+    if ! peers_file_ok "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        edit_error "${value} changed while it was being copied. Check the file and try again."
         return 1
     fi
     edit_log "Checking ${value} with the node binary (${spec})"
     rc=0
     msg="$(tn_node_parse_check "$spec" --bootstrap-peers "$(cat "$tmp")")" || rc=$?
+    msg="${msg#error: }"
     if [[ "$rc" -ne 0 ]]; then
         rm -f "$tmp"
         if [[ "$rc" -eq 1 ]]; then
@@ -849,7 +945,7 @@ params_with_forward() {
 # Association's networks; devnet is one of them, but its chain id (32285) is
 # allowed here like any private chain.
 set_private_forward_targets() {
-    local value="$1" data_dir params genesis id name tmp
+    local value="$1" data_dir params genesis id name cur tmp
     case "$value" in
         true|false) ;;
         *)
@@ -878,7 +974,9 @@ set_private_forward_targets() {
             return 1
         fi
     fi
-    if [[ "$(params_forward_value "$params")" == "$value" ]]; then
+    # An absent key reads as false, the node's default, so false is then a no-op.
+    cur="$(params_forward_value "$params")"
+    if [[ "${cur:-false}" == "$value" ]]; then
         return 0
     fi
     edit_backup "$params" || return 1
@@ -925,6 +1023,7 @@ set_docker_image() {
     if [[ "$current_image" == "$new_image" ]]; then
         return 0
     fi
+    edit_launch_unambiguous || return 1
     edit_step "Pulling image ${new_image}"
     if ! docker pull "$new_image" >&2; then
         edit_error "failed to pull image: ${new_image}"
@@ -953,6 +1052,7 @@ set_field() {
                 edit_error "invalid multiaddr: ${value}"
                 return 1
             fi
+            edit_launch_unambiguous || return 1
             edit_backup "$TARGET_LAUNCH_FILE" || return 1
             edit_backup "$TARGET_SERVICE_FILE" || return 1
             if [[ "$field" == "primary_listener" ]]; then
@@ -968,6 +1068,7 @@ set_field() {
                 edit_error "verbosity must be -v .. -vvvvv"
                 return 1
             fi
+            edit_launch_unambiguous || return 1
             edit_backup "$TARGET_LAUNCH_FILE" || return 1
             set_verbosity "$value" "$TARGET_LAUNCH_FILE"
             ;;
@@ -1273,7 +1374,7 @@ edit_listener_addresses() {
     done
 
     menu_lock || { set -e; return; }
-    backup_edit_targets || { set -e; return; }
+    backup_edit_targets || { set -e; return 0; }
 
     # Write wherever the service actually reads (launch file for docker,
     # unit Environment= plus wrapper export for binary/source). Multiaddrs
@@ -1330,7 +1431,7 @@ edit_verbosity() {
     done
 
     menu_lock || return 0
-    backup_edit_targets || return
+    backup_edit_targets || return 0
 
     set_verbosity "$new_verbosity" "$TARGET_LAUNCH_FILE"
     print_ok "Log verbosity updated to: ${new_verbosity}"
@@ -1391,6 +1492,11 @@ edit_rpc() {
     done
 
     menu_lock || return 0
+    if ! edit_launch_unambiguous; then
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
     local backup
     backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
 
@@ -1585,7 +1691,7 @@ edit_p2p_ports() {
     fi
 
     menu_lock || return 0
-    backup_edit_targets || return
+    backup_edit_targets || return 0
 
     # Rebuild multiaddrs with new ports keeping same IP/protocol
     local new_primary new_worker
@@ -1659,7 +1765,7 @@ edit_docker_image() {
     print_ok "Image pulled successfully"
 
     menu_lock || return 0
-    backup_edit_targets || return
+    backup_edit_targets || return 0
 
     # Replace old image with new image in the launch file (wrapper or unit)
     swap_docker_image "$current_image" "$new_image" "$TARGET_LAUNCH_FILE"
@@ -2028,6 +2134,7 @@ run_set() {
     set_field "$field" "$value" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         err="${EDIT_LAST_ERROR:-edit rejected}"
+        err="${err%.}"
         if edit_restore_backups; then
             edit_done false "$field" "" "${err}; nothing was changed"
         else
@@ -2098,8 +2205,9 @@ main() {
                 ;;
             --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
             -h|--help)
-                # The header block only: everything up to its closing rule.
-                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
+                # The header block only: everything up to its closing rule. Read
+                # from this file, not "$0", which names the caller when sourced.
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
                 if [[ "$JSON_MODE" == "true" ]]; then
                     json_emit '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
                 fi
