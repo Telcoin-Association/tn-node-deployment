@@ -24,7 +24,7 @@ if [ -r "${SCRIPT_DIR}/lib/fallback.sh" ]; then
     source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 fi
 
-readonly SCRIPT_VERSION="1.1.69"
+readonly SCRIPT_VERSION="1.1.70"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
