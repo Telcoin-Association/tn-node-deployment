@@ -1378,6 +1378,10 @@ def node_identity(t, det=None):
 # the tab.
 _role_cache = {"key": None, "expires": 0.0, "data": None}
 _ROLE_TTL = 30.0
+
+# The clock behind the role cache and the network state (network_answer), as a
+# name the tests can replace to move time without sleeping.
+_clock = time.monotonic
 _ROLE_DEFAULT = {"validator": None, "source": "default", "checked_at": None, "status": None,
                  "address": None}
 
@@ -1465,13 +1469,17 @@ def _decide_role(t, det):
     if address is None:
         _dbg(f"onchain_role: no execution address for the {t} slot")
         return dict(_ROLE_DEFAULT)
-    answer, source = network_stake_status(address, chain_id), "network"
+    # The network's answer comes from memory (network_answer refreshes it in the
+    # background), so a request never waits on a public endpoint.
+    answer, checked_at = network_answer(address, chain_id)
+    source = "network"
     if answer is None and _local_synced(port):
         answer, source = registry_stake_status(port, address), "local"
+        checked_at = int(time.time())
     if answer is not None:
         status = answer["status"] if isinstance(answer, dict) else None
         data = {"validator": status in STAKED_STATUSES, "source": source,
-                "checked_at": int(time.time()), "status": status, "address": address}
+                "checked_at": checked_at, "status": status, "address": address}
         _save_role(dict(data, address=address, chain_id=chain_id))
         return data
     saved = _read_saved_role()
@@ -1491,8 +1499,11 @@ def onchain_role(t, det=None):
       validator   True when getValidator(execution address) reports a staked
                   status (STAKED_STATUSES), False for any other status or no
                   record, None when nothing answered.
-      source      "network"  the network's public RPC answered (asked first, so
-                             the answer does not wait for this node to sync);
+      source      "network"  the network's public RPC answered within the last
+                             _NETWORK_ANSWER_TTL seconds (asked first, so the
+                             answer does not wait for this node to sync, and
+                             asked in the background, so no request waits for
+                             it; see network_answer);
                   "local"    this node answered while synced;
                   "cached"   neither answered, and the saved answer is about
                              this execution address;
@@ -1503,13 +1514,19 @@ def onchain_role(t, det=None):
       address     the execution address that was checked, None when the node has
                   none yet (then source is "default").
 
-    Cached for _ROLE_TTL seconds per node. A network or local answer is saved to
+    Cached for _ROLE_TTL seconds per node; a new network answer expires it. On a
+    cold start the first answer is local, cached or default while the network
+    is asked in the background. A network or local answer is saved to
     NODE_ROLE_FILE for the "cached" case."""
     det = det or detect_type(t)
     key = (det.get("mode"), det.get("container"), det.get("rpc_port"))
-    now = time.monotonic()
+    now = _clock()
+    # Read before deciding: a network answer stored while this call runs bumps
+    # the generation, so the next call decides again instead of serving this one.
+    generation = _network_refresh["generation"]
     if (_role_cache["data"] is not None and _role_cache["key"] == key
-            and _role_cache["expires"] > now):
+            and _role_cache["expires"] > now
+            and _role_cache.get("generation") == generation):
         return dict(_role_cache["data"])
     try:
         data = _decide_role(t, det)
@@ -1520,7 +1537,7 @@ def onchain_role(t, det=None):
     if prev is None or (prev["validator"], prev["source"]) != (data["validator"], data["source"]):
         _log(f"onchain_role: {data['source']} answer, validator={data['validator']} "
              f"status={data['status']}")
-    _role_cache.update(key=key, expires=now + _ROLE_TTL, data=data)
+    _role_cache.update(key=key, expires=now + _ROLE_TTL, data=data, generation=generation)
     return dict(data)
 
 
@@ -1702,11 +1719,51 @@ def registry_stake_status(port, address):
     return _validator_reply(resp, address)
 
 
-# How many of a network's public endpoints network_stake_status asks, and how
-# long each one gets for both of its calls.
+# How many of a network's public endpoints network_stake_status asks per call,
+# and how long each one gets for its calls.
 _NETWORK_STAKE_ENDPOINTS = 2
 _NETWORK_STAKE_TIMEOUT = 3.0
+
+# What the server remembers per endpoint URL, so that a slow or dead endpoint
+# costs little: the chain id it serves, kept for _CHAIN_ID_TTL seconds; and,
+# after it failed, timed out or gave no usable answer, a back-off during which it
+# is not asked, 5 minutes at first and doubling up to 30. A usable answer clears
+# the back-off. _network_lock guards this and the network answers below.
+_CHAIN_ID_TTL = 3600.0
+_BACKOFF_FIRST = 300.0
+_BACKOFF_MAX = 1800.0
+_endpoints = {}                  # url -> {"chain_id", "chain_at", "down_until", "backoff"}
+_network_lock = threading.Lock()
 _chain_mismatch_logged = set()   # (url, chain id) pairs already in the journal
+
+
+def _endpoint(url):
+    """The remembered state of one endpoint. Call with _network_lock held."""
+    return _endpoints.setdefault(url, {"chain_id": None, "chain_at": None,
+                                       "down_until": 0.0, "backoff": 0.0})
+
+
+def _endpoint_plan(url, chain_id, now):
+    """What to do with an endpoint at clock `now`: "skip" while it is backed off
+    or known to serve another chain, "call" when its chain id is known to match,
+    "ask" when its eth_chainId must be asked first. Call with _network_lock held."""
+    ep = _endpoint(url)
+    if ep["down_until"] > now:
+        return "skip"
+    if ep["chain_at"] is not None and now - ep["chain_at"] < _CHAIN_ID_TTL:
+        return "call" if ep["chain_id"] == chain_id else "skip"
+    return "ask"
+
+
+def _endpoint_failed(url, why):
+    """Back an endpoint off: 5 minutes after its first failure, doubling after
+    each further one, never more than 30 minutes."""
+    with _network_lock:
+        ep = _endpoint(url)
+        ep["backoff"] = min(max(ep["backoff"] * 2, _BACKOFF_FIRST), _BACKOFF_MAX)
+        ep["down_until"] = _clock() + ep["backoff"]
+        minutes = int(ep["backoff"] // 60)
+    _log(f"network_stake_status: {url} {why}; not asking it for {minutes} min")
 
 
 def _public_rpc(url, method, params, timeout):
@@ -1731,35 +1788,120 @@ def _public_rpc(url, method, params, timeout):
 def network_stake_status(address, chain_id):
     """getValidator(address) asked of the network's public RPC
     (NETWORK_PUBLIC_RPC[chain_id]), so the answer does not depend on this node
-    being synced. At most the first two endpoints are tried, and each gets three
-    seconds for its two calls. An endpoint is trusted only once its eth_chainId
+    being synced. It blocks for up to three seconds per endpoint, so requests
+    never call it: the background refresh does (see network_answer).
+
+    Endpoints are tried in list order, skipping any that is backed off, and at
+    most two are asked per call. An endpoint is trusted only once its eth_chainId
     equals `chain_id`: a hostname can serve another chain (rpc.telcoin.network
     answers for testnet until mainnet launches), and its registry would describe
-    the wrong network. Returns what registry_stake_status returns: the decoded
-    record, NO_RECORD, or None when no endpoint gave a usable answer."""
+    the wrong network. That answer is kept for an hour, so a known endpoint only
+    gets the eth_call. An endpoint that fails, times out or gives no usable
+    answer is backed off (_endpoint_failed). Returns what registry_stake_status
+    returns: the decoded record, NO_RECORD, or None when no endpoint gave a
+    usable answer."""
     data = _registry_calldata(REGISTRY_SELECTORS["getValidator"], address) if address else None
     if data is None or chain_id is None:
         return None
-    for url in (NETWORK_PUBLIC_RPC.get(chain_id) or [])[:_NETWORK_STAKE_ENDPOINTS]:
+    asked = 0
+    for url in NETWORK_PUBLIC_RPC.get(chain_id) or []:
+        if asked == _NETWORK_STAKE_ENDPOINTS:
+            break
+        with _network_lock:
+            plan = _endpoint_plan(url, chain_id, _clock())
+        if plan == "skip":
+            continue
+        asked += 1
         deadline = time.monotonic() + _NETWORK_STAKE_TIMEOUT
-        resp = _public_rpc(url, "eth_chainId", [], _NETWORK_STAKE_TIMEOUT)
-        served = hex_to_dec(resp.get("result")) if isinstance(resp, dict) else None
-        if served != chain_id:
-            if served is not None and (url, served) not in _chain_mismatch_logged:
-                _chain_mismatch_logged.add((url, served))
-                _log(f"network_stake_status: {url} serves chain {served}, not "
-                     f"{chain_id}; its answers are not used")
-            continue
+        if plan == "ask":
+            resp = _public_rpc(url, "eth_chainId", [], _NETWORK_STAKE_TIMEOUT)
+            served = hex_to_dec(resp.get("result")) if isinstance(resp, dict) else None
+            if served is None:
+                _endpoint_failed(url, "did not answer eth_chainId")
+                continue
+            with _network_lock:
+                _endpoint(url).update(chain_id=served, chain_at=_clock())
+            if served != chain_id:
+                if (url, served) not in _chain_mismatch_logged:
+                    _chain_mismatch_logged.add((url, served))
+                    _log(f"network_stake_status: {url} serves chain {served}, not "
+                         f"{chain_id}; its answers are not used")
+                continue
         left = deadline - time.monotonic()
-        if left <= 0:
-            continue
         resp = _public_rpc(url, "eth_call",
-                           [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"], left)
+                           [{"to": CONSENSUS_REGISTRY, "data": data}, "latest"],
+                           left) if left > 0 else None
         _dbg(f"network_stake_status {url} data={data} resp={resp}")
         answer = _validator_reply(resp, address)
-        if answer is not None:
-            return answer
+        if answer is None:
+            _endpoint_failed(url, "gave no usable getValidator answer")
+            continue
+        with _network_lock:
+            _endpoint(url).update(down_until=0.0, backoff=0.0)
+        return answer
     return None
+
+
+# The network's last usable answer per (chain id, execution address). Requests
+# read it from memory and never wait for the network: once the answer is
+# _NETWORK_REFRESH seconds old, or missing, a request starts a background
+# refresh, and the answer counts as the network's until it is
+# _NETWORK_ANSWER_TTL seconds old. One refresh thread runs at a time.
+_NETWORK_REFRESH = 30.0
+_NETWORK_ANSWER_TTL = 300.0
+_network_answers = {}            # (chain id, address) -> {"answer", "at", "checked_at"}
+_network_tried = {}              # (chain id, address) -> clock when a refresh last started
+# The running refresh thread, and a count of stored answers that onchain_role
+# compares with its cache so a new answer is used on the next role check.
+_network_refresh = {"thread": None, "generation": 0}
+
+
+def _refresh_network_answer(key):
+    """Background thread body: ask the network and keep a usable answer."""
+    chain_id, address = key
+    try:
+        answer = network_stake_status(address, chain_id)
+        if answer is not None:
+            with _network_lock:
+                _network_answers[key] = {"answer": answer, "at": _clock(),
+                                         "checked_at": int(time.time())}
+                _network_refresh["generation"] += 1
+    except Exception as e:  # pragma: no cover - defensive
+        _log(f"network_answer: refresh failed: {e}")
+    finally:
+        with _network_lock:
+            _network_refresh["thread"] = None
+
+
+def network_answer(address, chain_id):
+    """(answer, checked_at) about `address` from memory: the network's last
+    usable answer (the decoded record or NO_RECORD) and the Unix time it came,
+    while it is younger than _NETWORK_ANSWER_TTL; else (None, None). Never waits
+    for the network. When the answer is missing or _NETWORK_REFRESH old, it
+    starts a daemon thread that asks again, unless a refresh is running, one
+    started for this address within _NETWORK_REFRESH, or every endpoint is backed
+    off or serves another chain. On a cold cache the caller therefore answers
+    from the local node, the saved answer or the default, and the network's
+    answer takes over once the thread has it."""
+    if address is None or chain_id is None:
+        return None, None
+    key = (chain_id, address)
+    with _network_lock:
+        now = _clock()
+        entry = _network_answers.get(key)
+        if ((entry is None or now - entry["at"] >= _NETWORK_REFRESH)
+                and now - _network_tried.get(key, float("-inf")) >= _NETWORK_REFRESH
+                and _network_refresh["thread"] is None
+                and any(_endpoint_plan(url, chain_id, now) != "skip"
+                        for url in NETWORK_PUBLIC_RPC.get(chain_id) or [])):
+            _network_tried[key] = now
+            thread = threading.Thread(target=_refresh_network_answer, args=(key,),
+                                      name="tn-ui-network-role", daemon=True)
+            _network_refresh["thread"] = thread
+            thread.start()
+        if entry is not None and now - entry["at"] < _NETWORK_ANSWER_TTL:
+            return entry["answer"], entry["checked_at"]
+    return None, None
 
 
 def _words(hexstr):

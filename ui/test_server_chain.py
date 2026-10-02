@@ -7,7 +7,11 @@ Covered:
   * decode_validator_info on the payload rpc.adiri.tel returned for a committee
     member, and on malformed variants; the 0xed15e6cf revert as "no record";
   * network_stake_status: an endpoint whose eth_chainId differs from the
-    node's chain is not trusted, and at most two endpoints are asked;
+    node's chain is not trusted, at most two endpoints are asked, the chain id
+    is asked once an hour, and a failed endpoint is backed off;
+  * network_answer: requests read the network's answer from memory and never
+    wait for it; one background thread refreshes it, and a cold start answers
+    from the node, the saved answer or the default first;
   * onchain_role through /api/nodes: network, local, cached and default
     sources, and the saved answer used only for the same execution address;
   * detect_nodes: the observer slot first and the chain's remap, external
@@ -31,6 +35,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -118,6 +123,19 @@ class FakeChain:
         return [u for u, _, _ in self.calls]
 
 
+class FakeClock:
+    """Stands in for server._clock: time moves only when a test moves it."""
+
+    def __init__(self):
+        self.now = 10000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 class ChainTestCase(unittest.TestCase):
     """A host with paths in a temp directory, a fake chain, and helper replies
     from fixtures. No unit is installed until a test installs one."""
@@ -148,6 +166,8 @@ class ChainTestCase(unittest.TestCase):
                             ("run", self.fake_run)):
             self.patch(server, name, value)
         self.patch(server.urllib.request, "urlopen", self.chain.urlopen)
+        self.clock = FakeClock()
+        self.patch(server, "_clock", self.clock)
 
         server._detect_cache.update({"ts": 0.0, "data": None})
         server.clear_meta_cache()
@@ -157,6 +177,10 @@ class ChainTestCase(unittest.TestCase):
         server._helper_cache.update({"expires": 0.0, "data": None})
         server._chain_mismatch_logged.clear()
         server._role_save_logged["failed"] = False
+        self.reset_network()
+        # Registered after the patches, so it runs before they are undone: no
+        # background refresh outlives the fake network or the fake clock.
+        self.addCleanup(self.settle)
         self.client = server.app.test_client()
 
     def patch(self, obj, name, value):
@@ -216,6 +240,28 @@ class ChainTestCase(unittest.TestCase):
         server._detect_cache["data"] = None
         headers = {"X-TN-Dashboard-Public": "1"} if public else {}
         return self.client.get("/api/nodes", headers=headers).get_json()
+
+    def settle(self):
+        """Wait for the background network refresh, if one is running."""
+        thread = server._network_refresh["thread"]
+        if thread is not None:
+            thread.join(10)
+            self.assertFalse(thread.is_alive(), "the network refresh did not finish")
+
+    def reset_network(self):
+        """Forget every endpoint and network answer, once any refresh has ended."""
+        self.settle()
+        server._endpoints.clear()
+        server._network_answers.clear()
+        server._network_tried.clear()
+        server.clear_role_cache()
+
+    def refreshed_nodes(self, public=False):
+        """/api/nodes once the network has answered: the first request starts the
+        background refresh and answers without it; the second sees its answer."""
+        self.nodes(public)
+        self.settle()
+        return self.nodes(public)
 
     def saved(self):
         with open(self.role_file) as f:
@@ -329,6 +375,8 @@ class NetworkStakeTest(ChainTestCase):
         self.assertEqual(self.chain.methods(), ["eth_chainId", "eth_call"])
         self.network(LIVE_DEAD_REVERT)
         self.assertEqual(server.network_stake_status(DEAD, 2017), server.NO_RECORD)
+        self.assertEqual(self.chain.methods(), ["eth_chainId", "eth_call", "eth_call"],
+                         "the chain id is remembered")
 
     def test_chain_id_mismatch_makes_an_endpoint_untrusted(self):
         devnet = server.NETWORK_PUBLIC_RPC[32285]
@@ -339,7 +387,9 @@ class NetworkStakeTest(ChainTestCase):
         self.assertEqual(answer["status"], 1)
         self.assertEqual(self.chain.methods(devnet[0]), ["eth_chainId"])
         self.assertEqual(self.chain.methods(devnet[1]), ["eth_chainId", "eth_call"])
-        server.network_stake_status(ADDR, 32285)
+        self.assertEqual(server.network_stake_status(ADDR, 32285)["status"], 1)
+        self.assertEqual(self.chain.methods(devnet[0]), ["eth_chainId"],
+                         "an endpoint known to serve another chain is not asked again")
         mismatch = [m for m in self.logs if "serves chain 2017, not 32285" in m]
         self.assertEqual(len(mismatch), 1, "the mismatch is logged once, not on every check")
 
@@ -360,6 +410,18 @@ class NetworkStakeTest(ChainTestCase):
         self.network(ok(record(7)), chain=hex(32285), url=devnet[0])     # malformed
         self.network(ok(record(4)), chain=hex(32285), url=devnet[1])
         self.assertEqual(server.network_stake_status(ADDR, 32285)["status"], 4)
+
+    def test_backed_off_endpoints_are_passed_over(self):
+        devnet = server.NETWORK_PUBLIC_RPC[32285]
+        self.network(ok(record(3)), chain=hex(32285), url=devnet[0])   # backed off below
+        self.network(ok(record(1)), chain=hex(32285), url=devnet[2])   # devnet[1] refuses
+        self.network(ok(record(4)), chain=hex(32285), url=devnet[3])
+        server._endpoints[devnet[0]] = {"chain_id": None, "chain_at": None,
+                                        "down_until": self.clock.now + 60, "backoff": 300.0}
+        self.assertEqual(server.network_stake_status(ADDR, 32285)["status"], 1)
+        self.assertEqual(self.chain.urls(), [devnet[1], devnet[2], devnet[2]],
+                         "the backed-off one is skipped and no more than two are asked")
+        self.assertEqual(server._endpoints[devnet[1]]["backoff"], 300.0)
 
     def test_nothing_to_ask(self):
         self.assertIsNone(server.network_stake_status(ADDR, None))
@@ -395,6 +457,10 @@ class RoleSourceTest(ChainTestCase):
         self.node_up()
         self.network(ok(LIVE_COMMITTEE_RESULT))
         before = int(time.time())
+        first = self.nodes()
+        self.assertEqual(first["role_source"], "default", "the first request does not wait")
+        self.settle()
+        self.chain.calls.clear()
         data = self.nodes()
         self.assertEqual((data["role"], data["role_source"]), ("validator", "network"))
         self.assertTrue(before <= data["role_checked_at"] <= int(time.time()))
@@ -402,6 +468,7 @@ class RoleSourceTest(ChainTestCase):
         self.assertTrue(data["validator"]["staked"])
         self.assertFalse(data["observer"]["installed"])
         self.assertNotIn("eth_call", self.chain.methods(LOCAL), "the network answered first")
+        self.assertNotIn(TESTNET_RPC, self.chain.urls(), "read from memory, not asked")
         saved = self.saved()
         self.assertEqual({k: saved[k] for k in ("address", "chain_id", "validator", "status", "source")},
                          {"address": ADDR, "chain_id": 2017, "validator": True, "status": 3,
@@ -413,7 +480,7 @@ class RoleSourceTest(ChainTestCase):
     def test_network_no_record(self):
         self.node_up()
         self.network(LIVE_DEAD_REVERT)
-        data = self.nodes()
+        data = self.refreshed_nodes()
         self.assertEqual((data["role"], data["role_source"]), ("observer", "network"))
         self.assertFalse(data["observer"]["staked"])
         self.assertEqual((self.saved()["validator"], self.saved()["status"]), (False, None))
@@ -421,7 +488,7 @@ class RoleSourceTest(ChainTestCase):
     def test_network_does_not_wait_for_sync(self):
         self.node_up(synced=False)
         self.network(ok(record(2, activation=581)))
-        data = self.nodes()
+        data = self.refreshed_nodes()
         self.assertEqual((data["role"], data["role_source"]), ("validator", "network"))
 
     def test_local_answer_when_the_network_is_down(self):
@@ -485,7 +552,7 @@ class RoleSourceTest(ChainTestCase):
         with open(os.path.join(self.var, "node-info.yaml"), "w") as f:
             f.write("name: node7\nexecution_address: %s\n" % ADDR)
         self.network(ok(LIVE_COMMITTEE_RESULT))
-        data = self.nodes()
+        data = self.refreshed_nodes()
         self.assertEqual((data["role"], data["role_source"]), ("validator", "network"))
         self.assertEqual(data["validator"]["status"], "active")
 
@@ -497,27 +564,33 @@ class RoleSourceTest(ChainTestCase):
     def test_answer_cached_for_thirty_seconds(self):
         self.node_up()
         self.network(ok(LIVE_COMMITTEE_RESULT))
-        self.nodes()
+        self.refreshed_nodes()
         asked = len(self.chain.calls)
         self.nodes()
+        self.clock.advance(29)
         self.nodes()
         self.assertEqual(len(self.chain.calls), asked, "within the TTL nothing is asked again")
         self.client.get("/api/nodes?fresh=1")
-        self.assertGreater(len(self.chain.calls), asked, "?fresh=1 asks again")
+        self.assertGreater(len(self.chain.calls), asked, "?fresh=1 checks the node again")
+        self.assertNotIn(TESTNET_RPC, self.chain.urls()[asked:],
+                         "the network answer is still fresh, so the network is not asked")
 
     def test_a_changed_answer_moves_the_node_back(self):
         self.node_up()
         self.network(ok(LIVE_COMMITTEE_RESULT))
-        self.assertEqual(self.nodes()["role"], "validator")
+        self.assertEqual(self.refreshed_nodes()["role"], "validator")
         self.network(ok(record(5, exit_epoch=600)))
-        server.clear_role_cache()
+        self.clock.advance(31)          # the role cache and the network answer are due
+        self.assertEqual(self.nodes()["role"], "validator",
+                         "the last answer serves while the refresh runs")
+        self.settle()
         data = self.nodes()
         self.assertEqual((data["role"], data["role_source"]), ("observer", "network"))
 
     def test_public_path_carries_no_role_fields(self):
         self.node_up()
         self.network(ok(LIVE_COMMITTEE_RESULT))
-        data = self.nodes(public=True)
+        data = self.refreshed_nodes(public=True)
         self.assertEqual(data["role"], "validator")
         for key in ("role_source", "role_checked_at", "helper"):
             self.assertNotIn(key, data)
@@ -526,7 +599,7 @@ class RoleSourceTest(ChainTestCase):
         self.patch(server, "NODE_ROLE_FILE", os.path.join(self.tmp.name, "missing", "r.json"))
         self.node_up()
         self.network(ok(LIVE_COMMITTEE_RESULT))
-        self.assertEqual(self.nodes()["role_source"], "network")
+        self.assertEqual(self.refreshed_nodes()["role_source"], "network")
 
 
 class NodeTypeMetaTest(ChainTestCase):
@@ -541,14 +614,14 @@ class NodeTypeMetaTest(ChainTestCase):
         for answer, role in ((ok(record(5)), "observer"), (LIVE_DEAD_REVERT, "observer"),
                              (None, "observer"), (ok(record(1)), "validator")):
             with self.subTest(answer=answer):
-                server.clear_role_cache()
+                self.reset_network()
                 self.network(answer) if answer else self.chain.drop(TESTNET_RPC)
-                self.assertEqual(self.nodes()["role"], role)
+                self.assertEqual(self.refreshed_nodes()["role"], role)
 
     def test_node_type_observer_has_no_effect(self):
         self.meta["NODE_TYPE"] = "observer"
         self.network(ok(record(4)))
-        self.assertEqual(self.nodes()["role"], "validator")
+        self.assertEqual(self.refreshed_nodes()["role"], "validator")
 
 
 class ExternalContainerTest(ChainTestCase):
@@ -564,7 +637,7 @@ class ExternalContainerTest(ChainTestCase):
 
     def test_staked_container_moves_to_the_validator_slot(self):
         self.network(ok(LIVE_COMMITTEE_RESULT))
-        data = self.nodes()
+        data = self.refreshed_nodes()
         self.assertEqual((data["role"], data["role_source"]), ("validator", "network"))
         self.assertEqual((data["node"]["mode"], data["node"]["container"]), ("external", "tn-ext"))
         self.assertTrue(data["node"]["staked"])
@@ -573,7 +646,7 @@ class ExternalContainerTest(ChainTestCase):
         # node-info.yaml with a proof of possession no longer makes it a validator.
         self.node_info = "node_type: validator\nproof_of_possession: abc\n"
         self.network(LIVE_DEAD_REVERT)
-        data = self.nodes()
+        data = self.refreshed_nodes()
         self.assertEqual((data["role"], data["node"]["mode"]), ("observer", "external"))
 
     def test_a_unit_wins_and_docker_is_not_asked(self):
@@ -591,7 +664,7 @@ class LegacyPathTest(ChainTestCase):
         self.meta = {"NODE_TYPE": "observer", "NETWORK": "testnet", "RPC_PORT": "8541"}
         self.node_up(url="http://127.0.0.1:8541")
         self.network(ok(LIVE_COMMITTEE_RESULT))
-        data = self.nodes()
+        data = self.refreshed_nodes()
         self.assertEqual((data["role"], data["node"]["service"]), ("validator", "telcoin-observer"))
         self.assertEqual(server.detect_type("validator")["rpc_port"], 8541)
         self.assertEqual(server._legacy_role(), "observer")
@@ -649,12 +722,17 @@ class EpochFieldsTest(ChainTestCase):
         self.status(3, activation=412)
 
     def status(self, status, activation=0):
-        rec = ok(record(status, activation=activation))
+        self.answer_with(ok(record(status, activation=activation)),
+                         "validator" if status in server.STAKED_STATUSES else "observer")
+
+    def answer_with(self, rec, slot):
+        """The network and the node both answer getValidator with `rec`, and the
+        network's answer is already in memory, so the node sits in `slot`."""
+        self.reset_network()
         self.network(rec)
         self.local_validator(rec)
-        server.clear_role_cache()
-        server._detect_cache["data"] = None
-        self.slot = "validator" if status in server.STAKED_STATUSES else "observer"
+        self.refreshed_nodes()
+        self.slot = slot
 
     def poll(self):
         resp = self.client.get("/api/validator/" + self.slot)
@@ -690,9 +768,7 @@ class EpochFieldsTest(ChainTestCase):
                 self.assertEqual(v["status"], status)
 
     def test_no_record_sends_no_earliest_seat(self):
-        self.network(LIVE_DEAD_REVERT)
-        self.local_validator(LIVE_DEAD_REVERT)
-        self.slot = "observer"
+        self.answer_with(LIVE_DEAD_REVERT, "observer")
         v = self.poll()
         self.assertIsNone(v["status"])
         self.assertNotIn("earliest_seat_epoch", v)
@@ -758,6 +834,135 @@ class EpochFieldsTest(ChainTestCase):
         self.assertEqual(calls.count("tn_getCurrentEpochInfo"), 3)
         self.assertEqual(calls.count("eth_getBlockByNumber"), 2)
         self.assertEqual(calls.count("tn_getEpochInfo"), 4)
+
+
+
+# ---------------------------------------------------------------------------
+# The network answer is refreshed off the request thread
+# ---------------------------------------------------------------------------
+
+class NetworkRefreshTest(ChainTestCase):
+    """network_answer with a fake clock: the synced node answers status 2, the
+    testnet endpoint answers status 3 when a test sets it up and refuses
+    otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        self.install_unit()
+        self.node_up()
+        self.local_validator(ok(record(2, activation=581)))
+
+    def timed_nodes(self):
+        start = time.monotonic()
+        data = self.nodes()
+        return data, time.monotonic() - start
+
+    def public_calls(self, method=None):
+        return [m for u, m, _ in self.chain.calls
+                if u == TESTNET_RPC and method in (None, m)]
+
+    def test_cold_start_answers_from_the_node_and_the_network_fills_in(self):
+        self.network(ok(LIVE_COMMITTEE_RESULT))
+        first = self.nodes()
+        self.assertEqual((first["role"], first["role_source"]), ("validator", "local"))
+        self.settle()
+        second = self.nodes()
+        self.assertEqual((second["role"], second["role_source"]), ("validator", "network"))
+        self.assertEqual(self.saved()["status"], 3)
+
+    def test_endpoint_down_is_not_asked_inside_its_backoff(self):
+        # TESTNET_RPC has no answer: the background refresh fails.
+        self.assertEqual(self.nodes()["role_source"], "local")
+        self.settle()
+        self.assertEqual(self.public_calls(), ["eth_chainId"])
+        failed_at = self.clock.now
+        endpoint = server._endpoints[TESTNET_RPC]
+        self.assertEqual((endpoint["backoff"], endpoint["down_until"]), (300.0, failed_at + 300))
+        for offset in (31, 150, 299):
+            with self.subTest(offset=offset):
+                self.clock.now = failed_at + offset
+                data, took = self.timed_nodes()
+                self.assertEqual(data["role_source"], "local")
+                self.assertLess(took, 1.0)
+                self.assertEqual(server._network_tried[(2017, ADDR)], failed_at,
+                                 "no refresh started, not even one with nothing to ask")
+                self.assertEqual(self.public_calls(), ["eth_chainId"], "not asked again")
+        # Each time the back-off has ended (and the 30 s role cache with it) it is
+        # asked, fails, and waits twice as long, never more than 30 minutes.
+        for expected in (600.0, 1200.0, 1800.0, 1800.0):
+            self.clock.now = server._endpoints[TESTNET_RPC]["down_until"] + 30
+            self.nodes()
+            self.settle()
+            self.assertEqual(server._endpoints[TESTNET_RPC]["backoff"], expected)
+        self.assertEqual(len(self.public_calls("eth_chainId")), 5)
+        # It comes back: a usable answer clears the back-off and serves.
+        self.network(ok(LIVE_COMMITTEE_RESULT))
+        self.clock.now = server._endpoints[TESTNET_RPC]["down_until"] + 30
+        self.nodes()
+        self.settle()
+        self.assertEqual(server._endpoints[TESTNET_RPC]["backoff"], 0.0)
+        self.assertEqual(self.nodes()["role_source"], "network")
+
+    def test_chain_id_asked_once_an_hour(self):
+        self.network(ok(LIVE_COMMITTEE_RESULT))
+        start = self.clock.now
+        refreshes = 0
+        while self.clock.now < start + 3600:
+            self.nodes()
+            self.settle()
+            refreshes += 1
+            self.clock.advance(299)
+        self.assertEqual(refreshes, 13)
+        self.assertEqual(len(self.public_calls("eth_chainId")), 1, "once in the hour")
+        self.assertEqual(len(self.public_calls("eth_call")), refreshes)
+        self.nodes()            # 3887 s after the first ask
+        self.settle()
+        self.assertEqual(len(self.public_calls("eth_chainId")), 2, "asked again after the hour")
+
+    def test_slow_endpoint_never_delays_a_request(self):
+        release = threading.Event()
+
+        def slow_chain_id(_params):
+            release.wait(3)     # an endpoint that takes up to the full 3 s
+            return ok("0x7e1")
+        self.chain.set(TESTNET_RPC, "eth_chainId", slow_chain_id)
+        self.chain.set(TESTNET_RPC, "eth_call", registry(ok(LIVE_COMMITTEE_RESULT)))
+        try:
+            for step in range(3):
+                data, took = self.timed_nodes()
+                self.assertLess(took, 0.5, "request %d waited for the endpoint" % step)
+                self.assertEqual(data["role_source"], "local")
+                self.clock.advance(31)
+            self.assertEqual(len(self.public_calls("eth_chainId")), 1, "one refresh at a time")
+        finally:
+            release.set()
+        self.settle()
+        self.assertEqual(self.nodes()["role_source"], "network")
+
+    def test_network_answer_ages_out(self):
+        self.network(ok(LIVE_COMMITTEE_RESULT))
+        self.assertEqual(self.refreshed_nodes()["role_source"], "network")
+        answered_at = self.clock.now
+        self.chain.drop(TESTNET_RPC)                  # the endpoint goes away
+        self.clock.advance(31)
+        self.assertEqual(self.nodes()["role_source"], "network", "the last answer still serves")
+        self.settle()                                 # that refresh failed
+        self.clock.now = answered_at + 300
+        data = self.nodes()
+        self.assertEqual((data["role"], data["role_source"]), ("validator", "local"))
+        # With the node out of sync too, the answer saved a moment ago serves.
+        self.node_up(synced=False)
+        self.clock.advance(31)
+        data = self.nodes()
+        self.assertEqual((data["role"], data["role_source"]), ("validator", "cached"))
+        self.assertEqual(data["role_checked_at"], self.saved()["checked_at"])
+
+    def test_no_refresh_without_an_endpoint_or_chain(self):
+        self.patch(server, "NETWORK_PUBLIC_RPC", {})
+        self.assertEqual(self.nodes()["role_source"], "local")
+        self.assertIsNone(server._network_refresh["thread"])
+        self.assertEqual(server.network_answer(ADDR, None), (None, None))
+        self.assertEqual(self.public_calls(), [])
 
 
 if __name__ == "__main__":
