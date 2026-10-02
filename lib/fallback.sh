@@ -55,13 +55,16 @@ _tn_etc()      { printf '%s/etc/telcoin'        "${TN_ROOT_PREFIX}"; }
 _tn_var()      { printf '%s/var/lib/telcoin'    "${TN_ROOT_PREFIX}"; }
 
 # _tn_meta_get <key> <file> — echo KEY's value from a .node-meta file. Returns 1
-# if the file/key is absent. Self-contained (does not rely on common.sh's
+# if the file/key is absent. One trailing CR is dropped (a file saved with CRLF
+# line endings), as meta_get does. Self-contained (does not rely on common.sh's
 # meta_get, which is defined later in common.sh than this file is sourced).
 _tn_meta_get() {
-    local key="$1" file="$2" line
+    local key="${1:-}" file="${2:-}" line cr
+    cr=$'\r'
     [[ -f "$file" ]] || return 1
-    line="$(grep -E "^${key}=" "$file" 2>/dev/null | head -n1)" || true
+    line="$(grep -m1 -E "^${key}=" "$file" 2>/dev/null)" || true
     [[ -n "$line" ]] || return 1
+    line="${line%"$cr"}"
     printf '%s\n' "${line#*=}"
 }
 

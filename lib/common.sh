@@ -3121,19 +3121,24 @@ node_meta_path() {
 
 # meta_get <key> [file] — echo KEY's value (everything after the first '='). Returns
 # 1 (and echoes nothing) if the key/file is absent. Default file = node_meta_path.
+# One trailing CR is dropped, so a .node-meta saved with CRLF line endings reads
+# NETWORK=testnet, not "testnet\r".
 meta_get() {
-    local key="$1" file="${2:-}"
+    local key="${1:-}" file="${2:-}" line cr
+    cr=$'\r'
     [[ -n "$file" ]] || file="$(node_meta_path)" || return 1
     [[ -f "$file" ]] || return 1
-    local line
-    line="$(grep -E "^${key}=" "$file" 2>/dev/null | head -n1)" || return 1
+    line="$(grep -m1 -E "^${key}=" "$file" 2>/dev/null)" || return 1
     [[ -n "$line" ]] || return 1
+    line="${line%"$cr"}"
     printf '%s\n' "${line#*=}"
 }
 
 # meta_set <key> <value> [file] — idempotent upsert into .node-meta (mode 600).
-# Rewrites via grep -v + append (no sed) so values containing / + = are safe.
-# Every other key in the file survives. Refuses (rc 1, file untouched) a key that
+# Rewrites via _tn_meta_rewrite + append (no sed) so values containing / + = are
+# safe. Every other key in the file survives; a KEY= line ending in CR (a file
+# saved with CRLF line endings) is replaced like any other, and the rewrite drops
+# the trailing CR of every line. Refuses (rc 1, file untouched) a key that
 # is not ^[A-Z][A-Z0-9_]*$ or a value holding a CR or LF, which would otherwise
 # smuggle a second KEY= line into the file. Warnings go to stderr so JSON-mode
 # callers keep a clean stdout.
@@ -3158,7 +3163,10 @@ meta_set() {
     [[ -f "$file" ]] || { ( umask 077; : > "$file" ) || return 1; }
     tmp="$(mktemp 2>/dev/null || true)"
     [[ -n "$tmp" && -f "$tmp" ]] || return 1
-    grep -vE "^${key}=" "$file" > "$tmp" 2>/dev/null || true
+    if ! _tn_meta_rewrite "$key" "$file" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
     printf '%s=%s\n' "$key" "$val" >> "$tmp"
     if ! cat "$tmp" > "$file"; then
         rm -f "$tmp"
@@ -3169,7 +3177,18 @@ meta_set() {
     return 0
 }
 
-# meta_unset <key> [file] — remove every KEY= line from .node-meta. rc 0 when the
+# _tn_meta_rewrite <key> <file> — print FILE without its KEY= lines (CRLF lines
+# included) and with one trailing CR dropped from every other line. The key is
+# matched as a literal prefix. rc 1 only when FILE cannot be read.
+_tn_meta_rewrite() {
+    TN_META_KEY="$1" awk '
+        { sub(/\r$/, "") }
+        index($0, ENVIRON["TN_META_KEY"] "=") != 1 { print }
+    ' "$2" 2>/dev/null
+}
+
+# meta_unset <key> [file] — remove every KEY= line from .node-meta (a line ending
+# in CR included; the rewrite drops the trailing CR of every line). rc 0 when the
 # key (or the file) is absent, and the file is then left untouched. Same key rule
 # as meta_set (rc 1 otherwise); other keys survive and the file stays mode 600.
 meta_unset() {
@@ -3183,7 +3202,10 @@ meta_unset() {
     grep -qE "^${key}=" "$file" 2>/dev/null || return 0
     tmp="$(mktemp 2>/dev/null || true)"
     [[ -n "$tmp" && -f "$tmp" ]] || return 1
-    grep -vE "^${key}=" "$file" > "$tmp" 2>/dev/null || true
+    if ! _tn_meta_rewrite "$key" "$file" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
     if ! cat "$tmp" > "$file"; then
         rm -f "$tmp"
         return 1
@@ -3229,14 +3251,22 @@ validate_overlay_ip() {
 
 ufw_installed() { command -v ufw &>/dev/null; }
 
-ufw_active() { ufw status 2>/dev/null | grep -q "Status: active"; }
+# ufw_active — 0 when ufw reports Status: active. The output is captured before it
+# is searched: piped into `grep -q`, grep could stop reading at the match, ufw
+# then dies of SIGPIPE, and under pipefail the check reads as false.
+ufw_active() {
+    local out
+    out="$(ufw status 2>/dev/null)" || return 1
+    grep -q "Status: active" <<<"$out"
+}
 
 # ufw_has_allow <port> <tcp|udp> — 0 if an ALLOW rule for that port/proto exists.
-# Matches both regular and (v6) entries; protocol is matched explicitly.
+# Matches both regular and (v6) entries; protocol is matched explicitly. Captures
+# the output first, as ufw_active does.
 ufw_has_allow() {
-    local port="$1" proto="$2"
-    ufw status 2>/dev/null | \
-        grep -qE "^${port}/${proto}([[:space:]]+\(v6\))?[[:space:]]+ALLOW"
+    local port="${1:-}" proto="${2:-}" out
+    out="$(ufw status 2>/dev/null)" || return 1
+    grep -qE "^${port}/${proto}([[:space:]]+\(v6\))?[[:space:]]+ALLOW" <<<"$out"
 }
 
 # get_ssh_port — the sshd listen port (defaults to 22 when unset).
