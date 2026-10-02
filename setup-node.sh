@@ -25,8 +25,10 @@
 #                            IPv4 or IPv6 address is ignored, with a warning.
 #   --rpc-public [true]      Public RPC; needs --rpc-domain -- without one, RPC stays private
 #                            and a warning prints the command to enable it later (no error:
-#                            the Node Manager UI sends `--rpc-public true|false` and never a
-#                            domain). `--rpc-public false` changes nothing.
+#                            Node Manager UI releases before 1.9.0 send `--rpc-public
+#                            true|false` and never a domain; 1.9.0 sends --rpc-domain when
+#                            the operator picks Public, and never --rpc-public).
+#                            `--rpc-public false` changes nothing.
 #   --no-public-rpc          Private RPC (127.0.0.1 only), without the prompt.
 # With none of these, interactive setup asks (Enter = private) and --json stays private.
 # If DNS is not ready (or the enable fails), setup still completes, records the domain in
@@ -59,9 +61,10 @@
 #                            bootstrap servers (v0.15.0-adiri and later). The file holds
 #                            a YAML or JSON map keyed by BLS public key; each entry is a
 #                            node's primary and workers, as under p2p_info in its
-#                            node-info.yaml. At most 64 KiB. Setup checks it with the
-#                            release's own parser and installs it as
-#                            /etc/telcoin/bootstrap-peers.yaml; the start wrapper passes
+#                            node-info.yaml. At most 64 KiB, and readable by other users
+#                            (chmod 644): the map does not stay private. Setup checks it
+#                            with the release's own parser and installs it, world-readable,
+#                            as /etc/telcoin/bootstrap-peers.yaml; the start wrapper passes
 #                            --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)",
 #                            so the file is read again at every start.
 #   --enable-state-export    Export each epoch's final execution state under
@@ -927,11 +930,14 @@ node_flag_warnings() {
     return 0
 }
 
-# 0 when FILE can hold a peers map: a readable regular file of at most 64 KiB. The map
-# reaches the node as one command-line argument, and Linux allows 128 KiB for one.
-# Otherwise 1, with the reason on stdout.
+# 0 when FILE can hold a peers map: a readable regular file of at most 64 KiB that its
+# group and other users can read too. The map reaches the node as one command-line
+# argument, and Linux allows 128 KiB for one. The read bits matter because the map does
+# not stay private anyway: the installed copy is 0644, and the parse check passes the map
+# on the command line of the node binary, where other local users can see it. Otherwise
+# 1, with the reason on stdout.
 peers_file_ok() {
-    local f="$1" size=""
+    local f="$1" size="" mode=""
     if [[ ! -e "$f" ]]; then
         printf '%s does not exist' "$f"
         return 1
@@ -942,6 +948,19 @@ peers_file_ok() {
     fi
     if [[ ! -r "$f" ]]; then
         printf '%s is not readable' "$f"
+        return 1
+    fi
+    # GNU stat, then BSD stat (macOS).
+    mode="$(stat -L -c '%a' "$f" 2>/dev/null || true)"
+    if [[ ! "$mode" =~ ^[0-7]+$ ]]; then
+        mode="$(stat -L -f '%Lp' "$f" 2>/dev/null || true)"
+    fi
+    if [[ ! "$mode" =~ ^[0-7]+$ ]]; then
+        printf 'could not read the permissions of %s' "$f"
+        return 1
+    fi
+    if (( (8#$mode & 8#044) != 8#044 )); then
+        printf '%s is mode %s: other users cannot read it. Setup accepts only a peers file that others can already read, because the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it. Run chmod 644 %s first' "$f" "$mode" "$f"
         return 1
     fi
     size="$(wc -c < "$f" 2>/dev/null)" || size=""
@@ -1491,9 +1510,10 @@ prepare_node_extra_flags() {
     fi
     node_flag_warnings
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
-        # The path lands in the wrapper unquoted, inside "$(cat ...)".
+        # The path lands in the wrapper unquoted, inside "$(cat ...)". Only a config
+        # directory chosen at the prompt can fail this; the default always passes.
         if [[ ! "$peers" =~ $path_re ]]; then
-            setup_fail "--bootstrap-peers needs a config directory path without spaces or shell characters, not ${CONFIG_DIR}."
+            setup_fail "The custom config directory ${CONFIG_DIR} cannot be used with --bootstrap-peers: the start wrapper reads the peers file through this path unquoted, so it may hold only letters, digits and . _ / + -. Choose another config directory, or leave --bootstrap-peers out."
         fi
         require_node_flag "$spec" --bootstrap-peers v0.15.0-adiri
         flags="--bootstrap-peers \"\$(cat ${peers})\""
@@ -1567,18 +1587,22 @@ require_node_flag() {
 
 # Install the peers map SRC as DEST, root-owned 0644, once the release of runner SPEC
 # accepts it: tn_node_parse_check has clap parse the value and print help, which starts
-# nothing. SRC is first copied to a temp file next to DEST, and that copy is what gets
-# checked and renamed into place, so the node reads exactly the bytes that were checked
-# and an existing DEST changes only after the check passes. A check that cannot run
-# warns, and the map is installed unchecked.
+# nothing. That check is the one time a run hands the map to a node binary. SRC is
+# checked again just before it is read (setup may have spent a long build since the
+# first check), then copied to a temp file next to DEST; that copy is what gets checked
+# and renamed into place, so the node reads exactly the bytes that were checked and an
+# existing DEST changes only after the check passes. A rejected map stops setup with the
+# library's one-line reason, in which the map itself is replaced by '…'. A check that
+# cannot run warns, and the map is installed unchecked.
 install_bootstrap_peers() {
-    local spec="$1" src="$2" dest="$3" tmp msg="" rc=0 reason
+    local spec="$1" src="$2" dest="$3" tmp msg="" rc=0
+    msg="$(peers_file_ok "$src")" || setup_fail "--bootstrap-peers: ${msg}."
     tmp="$(mktemp "${dest}.XXXXXX" 2>/dev/null)" || setup_fail "Could not create a temp file next to ${dest}."
-    if ! cat "$src" > "$tmp" 2>/dev/null; then
+    if ! { cat "$src" > "$tmp" && chmod 0644 "$tmp"; } 2>/dev/null; then
         rm -f "$tmp"
         setup_fail "Could not copy ${src} to ${tmp}."
     fi
-    # The size again, on the copy: the file may have changed since it was first checked.
+    # The copy as well: the file may have changed since it was checked.
     if ! msg="$(peers_file_ok "$tmp")"; then
         rm -f "$tmp"
         setup_fail "--bootstrap-peers: the copy of ${src} failed its check: ${msg}."
@@ -1587,41 +1611,19 @@ install_bootstrap_peers() {
     case "$rc" in
         0) ;;
         1)
-            reason="$(bootstrap_peers_reason "$spec" "$tmp")"
             rm -f "$tmp"
-            setup_fail "The bootstrap peers map in ${src} is not valid for $(node_release_label): ${reason:-$msg}"
+            setup_fail "The bootstrap peers map in ${src} is not valid for $(node_release_label) (${msg}). Each key must be a node's BLS public key and each value the primary and workers entries from that node's node-info.yaml."
             ;;
         *)
             setup_warn "Could not check the bootstrap peers map in ${src} with $(node_release_label) (${msg}); installing it unchecked."
             ;;
     esac
-    if ! { chmod 0644 "$tmp" && chown root:root "$tmp" && mv -f "$tmp" "$dest"; }; then
+    if ! { chown root:root "$tmp" && mv -f "$tmp" "$dest"; }; then
         rm -f "$tmp"
         setup_fail "Could not install ${dest}."
     fi
     print_ok "Bootstrap peers map installed: ${dest}"
     return 0
-}
-
-# clap's reason for rejecting the peers map in FILE, as the release of runner SPEC words
-# it (the YAML error and where in the map it is). tn_node_parse_check keeps only
-# the first error line, and clap quotes the whole map in its message, so for a map on
-# several lines that line is just the map's first line. Ask once more and print what
-# follows "' for '--bootstrap-peers <MAP>': " (nothing when that is not found).
-bootstrap_peers_reason() {
-    local spec="$1" file="$2" out=""
-    case "$spec" in
-        docker:?*) out="$(docker run --rm "${spec#docker:}" telcoin node --bootstrap-peers "$(cat "$file")" --help 2>&1 </dev/null)" || true ;;
-        binary:/?*) out="$("${spec#binary:}" node --bootstrap-peers "$(cat "$file")" --help 2>&1 </dev/null)" || true ;;
-    esac
-    awk -v m="' for '--bootstrap-peers " '
-        BEGIN { esc = sprintf("%c", 27) }
-        { gsub(esc "\\[[0-9;]*m", "") }
-        (i = index($0, m)) > 0 {
-            rest = substr($0, i + length(m))
-            j = index(rest, "'"'"': ")
-            if (j > 0) { print substr(rest, j + 3); exit }
-        }' <<<"$out" 2>/dev/null || true
 }
 
 # The flags appended to the node launch line for METHOD (docker | binary): the testnet
@@ -1997,9 +1999,9 @@ public_rpc_cmd() {
 }
 
 # A public-RPC flag came without a usable hostname (RPC_PRIVATE_NOTE says which). Not an
-# error -- the Node Manager UI sends `--rpc-public true` and never a domain -- so RPC stays
-# private and this says how to enable it later. --json: a `log` event, never `error`, so
-# the run still ends with done ok:true.
+# error -- Node Manager UI releases before 1.9.0 send `--rpc-public true` and never a
+# domain -- so RPC stays private and this says how to enable it later. --json: a `log`
+# event, never `error`, so the run still ends with done ok:true.
 public_rpc_no_domain_notice() {
     local cmd
     cmd="$(public_rpc_cmd rpc-enable '<hostname>')"
@@ -2123,6 +2125,10 @@ step_final_summary() {
     elif [[ "$workers" == *,* ]]; then
         worker_label="P2P worker ports"
     fi
+    # Every P2P port for the firewall reminder: "41000 and 41004", or with more workers
+    # "41000, 41004 and 41008".
+    local udp_all="${p2p_port}, ${workers}" udp_list
+    udp_list="${udp_all%, *} and ${udp_all##*, }"
     # The node flags, when any are in use.
     local node_flags=()
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
@@ -2197,7 +2203,7 @@ step_final_summary() {
     print_sep
     echo ""
     print_info "Your node is set up and will follow consensus as a full node."
-    print_info "Make sure inbound UDP ${p2p_port} and ${workers} are open (run firewall-setup.sh)."
+    print_info "Make sure inbound UDP ${udp_list} are open (run firewall-setup.sh)."
     echo ""
     print_info "Becoming a validator is optional. To validate:"
     echo "  1. Get governance approval from the Telcoin Association (GSMA-approved MNOs)"
@@ -2415,6 +2421,20 @@ json_check_install_flags() {
     return 0
 }
 
+# check_root for a --json run, which must say why it stops: check_root exits 1 with
+# only an [ERROR] line on stderr, which would leave the UI a bare "setup exited early".
+# So ask it in a subshell first, and when it says no (exit 1), send the reason as an
+# error event before the done, as edit-config's edit_require_root does. Then the real
+# check_root.
+json_require_root() {
+    local rc=0
+    (check_root) >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -eq 1 ]]; then
+        setup_fail "setup-node.sh must run as root"
+    fi
+    check_root
+}
+
 # Every input is checked before check_root, so a bad phase, network or release ref
 # stops the run before it touches the box.
 run_json_mode() {
@@ -2424,7 +2444,7 @@ run_json_mode() {
     esac
     json_set_network "$JSON_NETWORK_INPUT"
     json_check_install_flags
-    check_root
+    json_require_root
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     case "$JSON_PHASE" in
         keygen)   json_phase_keygen ;;
@@ -2493,10 +2513,11 @@ main() {
             # Public IP: the P2P multiaddr IP in --json mode (as before) and, for public RPC,
             # the inbound IP the A record points at (passed to install-caddy.sh --public-ip).
             --public-ip)           PUBLIC_IP="${2:-}"; RPC_INBOUND_IP="${2:-}"; shift 2 ;;
-            # Public RPC via Caddy (see the header). --rpc-public keeps the value form the UI
-            # sends (`--rpc-public true|false`, any case); a bare --rpc-public means true. Only
-            # true asks for public RPC, which needs --rpc-domain (without one: a warning, RPC
-            # stays private) -- false is a no-op, exactly as before.
+            # Public RPC via Caddy (see the header). --rpc-public keeps the value form that Node
+            # Manager UI releases before 1.9.0 send (`--rpc-public true|false`, any case); a
+            # bare --rpc-public means true. Only true asks for public RPC, which needs
+            # --rpc-domain (without one: a warning, RPC stays private) -- false is a no-op,
+            # exactly as before.
             --rpc-public)
                 case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')" in
                     true|yes|1)  RPC_PUBLIC_REQUESTED=true; shift 2 ;;
