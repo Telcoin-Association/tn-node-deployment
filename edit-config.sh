@@ -140,6 +140,20 @@ EDIT_LOCK_FLOCK=false
 EDIT_BK_FILES=()
 EDIT_BK_COPIES=()
 
+# True from the first edit_backup of an edit until the restart that applies it
+# is issued (or, in the menu, the operator chooses to restart later). A run that
+# ends in between puts the files back on its way out (edit_on_exit).
+EDIT_PENDING=false
+# True once a --set run has issued its restart.
+EDIT_RESTARTED=false
+# The signal that ended the run (TERM, INT or HUP), for the messages.
+EDIT_SIGNAL=""
+# A staged peers file or parameters.yaml not yet moved into place; edit_on_exit
+# removes it.
+EDIT_TMP=""
+# true or false once the run has tried to put an edit back on its way out.
+EDIT_ROLLED_BACK=""
+
 # Output of edit_launch_spec: the runner spec of the node command.
 EDIT_SPEC=""
 
@@ -267,19 +281,21 @@ set_listener_var() {
 
 # Back up every file an edit can touch: the launch file, plus the unit when
 # they differ (listener edits keep both in sync). Must succeed before any edit.
-# Menu only: a launch file with more than one node command is refused here.
-# Callers return 0 when it fails: the menu runs under errexit, so a non-zero
-# return from an edit function would end the script instead of going back.
+# The backups are recorded (edit_backup), so a run stopped before the restart
+# puts them back. Menu only: a launch file with more than one node command is
+# refused here. Callers return 0 when it fails: the menu runs under errexit, so
+# a non-zero return from an edit function would end the script.
 backup_edit_targets() {
     if ! edit_launch_unambiguous; then
         echo ""
         read -r -p "  Press Enter to return to menu..." || true
         return 1
     fi
-    backup_service_file "$TARGET_LAUNCH_FILE" >/dev/null || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
     if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
-        backup_service_file "$TARGET_SERVICE_FILE" >/dev/null || return 1
+        edit_backup "$TARGET_SERVICE_FILE" || return 1
     fi
+    edit_report_backups
 }
 
 # Replace or add an Environment= line in the service file
@@ -408,23 +424,69 @@ edit_done() {
 }
 
 # edit_on_exit -- the EXIT trap, installed by main before it parses anything.
-# Releases the update lock and, in --json mode, sends
-#   {"event":"done","ok":false,"field":...,"msg":...}
+# When an edit was written and the restart that applies it was not issued (the
+# run was stopped during the epoch wait, say), it first puts every changed file
+# back (edit_abort_pending): left on disk, the edit would load at the next
+# restart or reboot with no health check and no rollback. Then it removes a
+# staged file, releases the update lock and, in --json mode, sends
+#   {"event":"done","ok":false[,"rolled_back":...],"field":...,"msg":...}
 # when the run is ending without having sent its done event, so every --json
 # run ends with exactly one done whichever way it stopped. The message is the
-# last error's, or a pointer to stderr when there was none.
+# last error's, else the signal's, else a pointer to stderr.
 edit_on_exit() {
     local rc=$?
-    local msg field=""
+    local msg field="" rb=""
+    # The cleanup must finish: no errexit, no second signal, and a write to a
+    # closed pipe fails instead of ending the run.
+    set +e
+    trap '' TERM INT HUP PIPE
+    if [[ "$EDIT_PENDING" == "true" ]]; then
+        edit_abort_pending "$rc"
+    fi
+    if [[ -n "$EDIT_TMP" ]]; then
+        rm -f "$EDIT_TMP" 2>/dev/null
+        EDIT_TMP=""
+    fi
     tn_release_update_lock
     if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
-        msg="${EDIT_LAST_ERROR:-edit-config.sh stopped before reporting a result; the reason is on its stderr}"
+        msg="$EDIT_LAST_ERROR"
+        if [[ -z "$msg" && -n "$EDIT_SIGNAL" ]]; then
+            if [[ "$EDIT_RESTARTED" == "true" ]]; then
+                msg="stopped by SIG${EDIT_SIGNAL} after the restart was issued; the edit stays in place"
+            else
+                msg="stopped by SIG${EDIT_SIGNAL}; nothing was changed"
+            fi
+        fi
+        msg="${msg:-edit-config.sh stopped before reporting a result; the reason is on its stderr}"
+        if [[ -n "$EDIT_ROLLED_BACK" ]]; then
+            rb=",\"rolled_back\":${EDIT_ROLLED_BACK}"
+        fi
         if [[ -n "$EDIT_SET_FIELD" ]]; then
             field=",\"field\":\"$(json_escape "$EDIT_SET_FIELD")\""
         fi
-        json_emit "{\"event\":\"done\",\"ok\":false${field},\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
+        json_emit "{\"event\":\"done\",\"ok\":false${rb}${field},\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null
     fi
     return "$rc"
+}
+
+# edit_abort_pending RC -- the run is ending (status RC) after an edit was
+# written and before the restart that applies it was issued. Put every file the
+# edit changed back, and say so: an error event in --json mode, an [ERROR] line
+# otherwise.
+edit_abort_pending() {
+    local why
+    if [[ -n "$EDIT_SIGNAL" ]]; then
+        why="Stopped by SIG${EDIT_SIGNAL} before the restart"
+    else
+        why="Stopped (exit status ${1}) before the restart"
+    fi
+    if edit_restore_backups; then
+        EDIT_ROLLED_BACK=true
+        edit_error "${why}, so the edit was rolled back: every file it changed is as it was before this run."
+    else
+        EDIT_ROLLED_BACK=false
+        edit_error "${why}, and putting the files back failed (see the errors above): copy each .bak file over its original by hand."
+    fi
 }
 
 # edit_require_root -- check_root, except that a --json run reports the
@@ -494,12 +556,14 @@ menu_lock() {
 edit_reset_backups() {
     EDIT_BK_FILES=()
     EDIT_BK_COPIES=()
+    EDIT_PENDING=false
 }
 
 # edit_backup FILE -- before the first change to FILE in this edit, copy it to
 # FILE.bak.<UTC time> and record the pair for edit_restore_backups. A FILE that
-# does not exist yet is recorded as new, so the restore removes it. rc 1, with
-# an error reported, when the copy fails.
+# does not exist yet is recorded as new, so the restore removes it. From here
+# until the restart is issued the edit is pending (EDIT_PENDING). rc 1, with an
+# error reported, when the copy fails.
 edit_backup() {
     local file="$1" i copy
     i=0
@@ -522,6 +586,7 @@ edit_backup() {
     fi
     EDIT_BK_FILES+=("$file")
     EDIT_BK_COPIES+=("$copy")
+    EDIT_PENDING=true
     return 0
 }
 
@@ -550,6 +615,7 @@ edit_any_changed() {
 # Each file that cannot be restored is reported; rc 1 if there was one.
 edit_restore_backups() {
     local i file copy bad=0
+    EDIT_PENDING=false
     i=0
     while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
         file="${EDIT_BK_FILES[$i]}"
@@ -807,6 +873,7 @@ set_bootstrap_peers() {
     # process list. $(cat) drops trailing newlines here as it does in the
     # wrapper.
     tmp="${peers}.new.$$"
+    EDIT_TMP="$tmp"
     if ! cp -p "$value" "$tmp" 2>/dev/null; then
         rm -f "$tmp"
         edit_error "could not copy ${value} to ${tmp}"
@@ -848,6 +915,7 @@ set_bootstrap_peers() {
             return 1
         fi
     fi
+    EDIT_TMP=""
     edit_backup "$TARGET_LAUNCH_FILE" || return 1
     edit_flag_change set --bootstrap-peers "\"\$(cat ${peers})\"" || return 1
     return 0
@@ -981,6 +1049,7 @@ set_private_forward_targets() {
     fi
     edit_backup "$params" || return 1
     tmp="${params}.new.$$"
+    EDIT_TMP="$tmp"
     if ! params_with_forward "$params" "$value" > "$tmp" 2>/dev/null \
         || [[ ! -s "$tmp" ]] \
         || [[ "$(params_forward_value "$tmp")" != "$value" ]]; then
@@ -995,6 +1064,7 @@ set_private_forward_targets() {
         return 1
     fi
     rm -f "$tmp"
+    EDIT_TMP=""
     if [[ "$(params_forward_value "$params")" != "$value" ]]; then
         edit_error "${params} does not read back allow_private_forward_targets: ${value}"
         return 1
@@ -1093,6 +1163,9 @@ set_field() {
 
 # Apply changes from the menu: reload systemd and optionally restart. The epoch
 # wait runs only when the operator chose to restart. Releases the update lock.
+# The edit stops being pending (EDIT_PENDING) when the restart is issued or the
+# operator chooses to restart later; a run stopped before either, at the
+# prompt or during the wait, puts the files back (edit_on_exit).
 apply_changes() {
     set +e  # Restart failure should not exit the script
     print_step "Applying changes..."
@@ -1102,6 +1175,7 @@ apply_changes() {
     echo ""
     if confirm "Restart the node now to apply changes?"; then
         edit_epoch_wait
+        EDIT_PENDING=false
         print_step "Restarting ${TARGET_SERVICE}..."
         systemctl restart "$TARGET_SERVICE" || true
         sleep 3
@@ -1113,6 +1187,7 @@ apply_changes() {
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
         fi
     else
+        EDIT_PENDING=false
         print_info "Changes saved. Restart the node when ready:"
         print_info "  sudo systemctl restart ${TARGET_SERVICE}"
     fi
@@ -1153,12 +1228,17 @@ menu_apply() {
 
 # edit_restart -- the --set restart: reload systemd, wait for the epoch
 # boundary, restart, and report whether the service is active 3 seconds later.
+# The edit stops being pending just before the restart is issued: a run stopped
+# during the wait puts the files back, one stopped during a slow restart keeps
+# the edit the restart is already applying.
 edit_restart() {
     edit_step "Reloading systemd"
     if ! systemctl daemon-reload >&2 2>&1; then
         edit_warn "systemctl daemon-reload failed; restarting anyway"
     fi
     edit_epoch_wait
+    EDIT_PENDING=false
+    EDIT_RESTARTED=true
     edit_step "Restarting ${TARGET_SERVICE}"
     systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
     sleep 3
@@ -1497,8 +1577,8 @@ edit_rpc() {
         read -r -p "  Press Enter to return to menu..." || true
         return 0
     fi
-    local backup
-    backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
+    edit_backup "$TARGET_SERVICE_FILE" || return 0
+    edit_report_backups
 
     local current_exec clean_exec
     current_exec=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" | sed 's/^ExecStart=//')
@@ -2043,8 +2123,10 @@ restart_node() {
 
 main_menu() {
     while true; do
-        # Every edit releases the lock when it is done; this covers any early return.
+        # Every edit releases the lock when it is done; this covers any early
+        # return. A finished edit is no longer one to put back on exit.
         edit_unlock
+        edit_reset_backups
         show_current_config
 
         echo "  What would you like to change?"
@@ -2185,6 +2267,14 @@ main() {
         json_setup_fds
     fi
     trap edit_on_exit EXIT
+    # A signal ends the run through the EXIT trap with the usual status (128 +
+    # the signal number), so a pending edit is put back and --json still ends
+    # with a done. The UI sends TERM when its page goes away. A trap runs once
+    # the command in progress returns, so during the epoch wait that can take
+    # up to one poll interval.
+    trap 'EDIT_SIGNAL=TERM; exit 143' TERM
+    trap 'EDIT_SIGNAL=INT; exit 130' INT
+    trap 'EDIT_SIGNAL=HUP; exit 129' HUP
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
