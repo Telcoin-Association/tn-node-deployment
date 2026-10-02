@@ -9,7 +9,7 @@
 # and setup-validator.sh are kept as deprecated shims that forward here.
 #
 # USAGE:
-#   sudo bash setup-node.sh [public RPC options]
+#   sudo bash setup-node.sh [public RPC options] [node flags]
 #
 # PUBLIC RPC (optional): serve https://<domain>/ + wss://<domain>/ through Caddy and
 # advertise both in node-info.yaml (worker.rpc), from the first install. reth stays on
@@ -52,6 +52,30 @@
 # RPC after the node starts (install-caddy.sh --phase=rpc-enable) advertises the same
 # https://<d>/ + wss://<d>/ and does not restart the node when node-info.yaml already
 # holds them; an explicit URL that differs is replaced then (a warning says so up front).
+#
+# NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
+# given, and stops when it does not.
+#   --bootstrap-peers <file> The peers the node dials at start, replacing the genesis
+#                            bootstrap servers (v0.15.0-adiri and later). The file holds
+#                            a YAML or JSON map keyed by BLS public key; each entry is a
+#                            node's primary and workers, as under p2p_info in its
+#                            node-info.yaml. At most 64 KiB. Setup checks it with the
+#                            release's own parser and installs it as
+#                            /etc/telcoin/bootstrap-peers.yaml; the start wrapper passes
+#                            --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)",
+#                            so the file is read again at every start.
+#   --enable-state-export    Export each epoch's final execution state under
+#                            <datadir>/consensus-db/state_exports/epoch-N/ (v0.13.0-adiri
+#                            and later). Each export is a full copy of the state, and
+#                            without --state-export-keep none is ever deleted.
+#   --state-export-keep <n>  Keep only the newest n exports, 1 to 999999; 2 or more keeps
+#                            the previous export while the next one is written. Turns on
+#                            --enable-state-export as well (v0.15.0-adiri and later).
+# In a --json finalize run, a flag left out is read back from what keygen recorded in
+# .node-meta: BOOTSTRAP_PEERS_FILE for --bootstrap-peers, STATE_EXPORT for the two state
+# export flags.
+#
+#   -h, --help               Print this text and exit.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,8 +122,16 @@ INSTALL_METHOD=""
 # run without the flag reads it back from there.
 BINARY_PATH=""
 DOCKER_IMAGE=""
-# Optional node flags for the launch line, built by prepare_node_extra_flags.
+# Optional node flags (NODE FLAGS in the header). init_node_extra_flags checks the values
+# before check_root; prepare_node_extra_flags asks the release about each flag, installs
+# the peers file and builds NODE_EXTRA_FLAGS, the text for the launch line.
+BOOTSTRAP_PEERS_SRC=""      # --bootstrap-peers FILE: the peers map to install ('' = none)
+STATE_EXPORT_ENABLE=false   # --enable-state-export
+STATE_EXPORT_KEEP=""        # --state-export-keep N
+STATE_EXPORT=""             # off | unlimited | N (keep the newest N); '' = no flag given
 NODE_EXTRA_FLAGS=""
+NODE_EXTRA_FLAGS_SPEC=""    # the runner spec prepare_node_extra_flags last checked
+NODE_FLAG_WARNINGS=()       # notes on the node flags, printed by node_flag_warnings
 DATA_DIR="$DEFAULT_DATA_DIR"
 CONFIG_DIR="$DEFAULT_CONFIG_DIR"
 LOG_DIR="$DEFAULT_LOG_DIR"
@@ -856,8 +888,100 @@ init_install_flags() {
     return 0
 }
 
-# Validate the optional node flags. None yet: a later release adds them here.
+# Check the node flags before anything touches the box: --bootstrap-peers must name a
+# readable regular file of at most 64 KiB, --state-export-keep a whole number from 1 to
+# 999999. --state-export-keep turns state export on, and a warning says so. Whether the
+# release knows each flag, and whether it accepts the peers map, is asked later by
+# prepare_node_extra_flags, once the binary or image is known. Warnings wait in
+# NODE_FLAG_WARNINGS: --json prints them here, interactive setup after the welcome screen.
 init_node_extra_flags() {
+    local msg=""
+    if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
+        msg="$(peers_file_ok "$BOOTSTRAP_PEERS_SRC")" || setup_fail "--bootstrap-peers: ${msg}."
+    fi
+    if [[ -n "$STATE_EXPORT_KEEP" ]]; then
+        if [[ ! "$STATE_EXPORT_KEEP" =~ ^[1-9][0-9]{0,5}$ ]]; then
+            setup_fail "--state-export-keep needs a whole number from 1 to 999999, not ${STATE_EXPORT_KEEP}."
+        fi
+        if [[ "$STATE_EXPORT_ENABLE" != "true" ]]; then
+            NODE_FLAG_WARNINGS+=("--state-export-keep ${STATE_EXPORT_KEEP} turns state export on: the node also gets --enable-state-export.")
+        fi
+        STATE_EXPORT="$STATE_EXPORT_KEEP"
+    elif [[ "$STATE_EXPORT_ENABLE" == "true" ]]; then
+        STATE_EXPORT="unlimited"
+        NODE_FLAG_WARNINGS+=("--enable-state-export without --state-export-keep keeps every export, each a full copy of the execution state, until the data volume fills. Add --state-export-keep N to keep only the newest N.")
+    fi
+    if json_mode; then
+        node_flag_warnings
+    fi
+    return 0
+}
+
+# Print the notes init_node_extra_flags collected, once.
+node_flag_warnings() {
+    local note
+    for note in ${NODE_FLAG_WARNINGS[@]+"${NODE_FLAG_WARNINGS[@]}"}; do
+        setup_warn "$note"
+    done
+    NODE_FLAG_WARNINGS=()
+    return 0
+}
+
+# 0 when FILE can hold a peers map: a readable regular file of at most 64 KiB. The map
+# reaches the node as one command-line argument, and Linux allows 128 KiB for one.
+# Otherwise 1, with the reason on stdout.
+peers_file_ok() {
+    local f="$1" size=""
+    if [[ ! -e "$f" ]]; then
+        printf '%s does not exist' "$f"
+        return 1
+    fi
+    if [[ ! -f "$f" ]]; then
+        printf '%s is not a regular file' "$f"
+        return 1
+    fi
+    if [[ ! -r "$f" ]]; then
+        printf '%s is not readable' "$f"
+        return 1
+    fi
+    size="$(wc -c < "$f" 2>/dev/null)" || size=""
+    size="${size//[[:space:]]/}"
+    if [[ ! "$size" =~ ^[0-9]+$ ]]; then
+        printf 'could not read the size of %s' "$f"
+        return 1
+    fi
+    if [[ "$size" -gt 65536 ]]; then
+        printf '%s is %s bytes; a peers map may have at most 65536 (64 KiB)' "$f" "$size"
+        return 1
+    fi
+    return 0
+}
+
+# A --json finalize is a new process, so the node flags it is not given come from what
+# keygen recorded in .node-meta: BOOTSTRAP_PEERS_FILE names the installed peers map (empty
+# or absent: none) and STATE_EXPORT is off, unlimited or N (absent: off). A recorded value
+# that no longer holds stops the run before anything is written.
+finalize_node_extra_flags() {
+    local meta="${CONFIG_DIR}/.node-meta" v msg=""
+    if [[ -z "$BOOTSTRAP_PEERS_SRC" ]]; then
+        v="$(meta_get BOOTSTRAP_PEERS_FILE "$meta" 2>/dev/null || true)"
+        if [[ -n "$v" ]]; then
+            msg="$(peers_file_ok "$v")" || setup_fail "BOOTSTRAP_PEERS_FILE in ${meta}: ${msg}. Put the file back, or pass --bootstrap-peers FILE."
+            BOOTSTRAP_PEERS_SRC="$v"
+        fi
+    fi
+    if [[ -z "$STATE_EXPORT" ]]; then
+        v="$(meta_get STATE_EXPORT "$meta" 2>/dev/null || true)"
+        case "$v" in
+            ""|off|unlimited) ;;
+            *)
+                if [[ ! "$v" =~ ^[1-9][0-9]{0,5}$ ]]; then
+                    setup_fail "STATE_EXPORT=${v} in ${meta} is not off, unlimited or a number from 1 to 999999."
+                fi
+                ;;
+        esac
+        STATE_EXPORT="${v:-off}"
+    fi
     return 0
 }
 
@@ -1045,6 +1169,10 @@ step_create_infrastructure() {
 
     create_directories "$INSTALL_DIR" "$DATA_DIR" "$LOG_DIR" "$CONFIG_DIR"
     verify_binary "$BINARY_PATH"
+    # Node flags: asked of the release now, before any key exists, and recorded for a
+    # --json finalize. After create_directories, whose chown -R of CONFIG_DIR would hand
+    # the peers file to the service user.
+    prepare_node_extra_flags
     ensure_chain_configs_available
     print_ok "Infrastructure ready"
 }
@@ -1056,13 +1184,7 @@ step_create_infrastructure() {
 # a release without the flag: keygen then goes ahead without the advertisement instead
 # of failing.
 keytool_supports_rpc_args() {
-    local spec
-    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        spec="docker:${DOCKER_IMAGE}"
-    else
-        spec="binary:${BINARY_PATH}"
-    fi
-    tn_keytool_has "$spec" --rpc-http generate validator
+    tn_keytool_has "$(node_runner_spec)" --rpc-http generate validator
 }
 
 step_generate_keys() {
@@ -1351,10 +1473,155 @@ step_write_config() {
     print_ok "Configuration ready under: ${DATA_DIR}"
 }
 
-# Build NODE_EXTRA_FLAGS, the optional node flags for the launch line. None yet: a later
-# release adds them here. Runs before the start wrapper is written.
+# Build NODE_EXTRA_FLAGS, the node flags for the launch line, and record the choices in
+# .node-meta (BOOTSTRAP_PEERS_FILE, STATE_EXPORT). Each flag in use must be listed by the
+# `node --help` of the release this run installs: the flags are opt-in, and a node given
+# a flag its release does not know refuses to start, so a missing one stops setup. The
+# peers map is checked by the release's own parser and installed root-owned 0644 as
+# CONFIG_DIR/bootstrap-peers.yaml. The launch line gets --bootstrap-peers "$(cat <file>)"
+# as text: the host reads the file at each start, never during setup. Runs from
+# step_create_infrastructure, so keygen stops before it makes keys, and again before the
+# start wrapper is written (a --json finalize is a new process); a second run in one
+# process, for the same release, does nothing.
 prepare_node_extra_flags() {
+    local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$'
+    spec="$(node_runner_spec)"
+    if [[ "$NODE_EXTRA_FLAGS_SPEC" == "$spec" ]]; then
+        return 0
+    fi
+    node_flag_warnings
+    if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
+        # The path lands in the wrapper unquoted, inside "$(cat ...)".
+        if [[ ! "$peers" =~ $path_re ]]; then
+            setup_fail "--bootstrap-peers needs a config directory path without spaces or shell characters, not ${CONFIG_DIR}."
+        fi
+        require_node_flag "$spec" --bootstrap-peers v0.15.0-adiri
+        flags="--bootstrap-peers \"\$(cat ${peers})\""
+    fi
+    case "${STATE_EXPORT:-off}" in
+        off) ;;
+        unlimited)
+            require_node_flag "$spec" --enable-state-export v0.13.0-adiri
+            flags="${flags:+${flags} }--enable-state-export"
+            ;;
+        *)
+            require_node_flag "$spec" --enable-state-export v0.13.0-adiri
+            require_node_flag "$spec" --state-export-keep v0.15.0-adiri
+            flags="${flags:+${flags} }--enable-state-export --state-export-keep ${STATE_EXPORT}"
+            ;;
+    esac
+    # The release knows every flag in use; now the map itself.
+    if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
+        install_bootstrap_peers "$spec" "$BOOTSTRAP_PEERS_SRC" "$peers"
+        BOOTSTRAP_PEERS_SRC="$peers"
+    fi
+    NODE_EXTRA_FLAGS="$flags"
+    write_node_meta "BOOTSTRAP_PEERS_FILE=${BOOTSTRAP_PEERS_SRC:+${peers}}" "STATE_EXPORT=${STATE_EXPORT:-off}"
+    if [[ -n "$flags" ]]; then
+        print_ok "Node flags: ${flags}"
+        if json_mode; then
+            json_event log "node flags: ${flags}"
+        fi
+    fi
+    NODE_EXTRA_FLAGS_SPEC="$spec"
     return 0
+}
+
+# The runner spec (lib/common.sh) of the node this run installs: docker:<image> or
+# binary:<path>, the same thing the start wrapper runs.
+node_runner_spec() {
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        printf 'docker:%s\n' "${DOCKER_IMAGE:-}"
+    else
+        printf 'binary:%s\n' "${BINARY_PATH:-}"
+    fi
+}
+
+# The release this run installs, as messages name it: "the image <ref>", or "the node
+# binary at <path>" plus the source ref setup recorded beside it, when there is one.
+node_release_label() {
+    local ver=""
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        printf 'the image %s' "${DOCKER_IMAGE:-}"
+        return 0
+    fi
+    if [[ -f "${BINARY_PATH:-}.version" ]]; then
+        ver="$(head -n 1 "${BINARY_PATH}.version" 2>/dev/null || true)"
+    fi
+    printf 'the node binary at %s%s' "${BINARY_PATH:-}" "${ver:+ (${ver})}"
+}
+
+# Stop setup when the `node --help` of runner SPEC does not list FLAG; SINCE is the first
+# release that has it. When the release cannot be asked (its --help did not run), warn and
+# go on: a node that then rejects the flag fails the start check.
+require_node_flag() {
+    local spec="$1" flag="$2" since="$3" rc=0
+    tn_node_has_flag "$spec" "$flag" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) setup_fail "${flag} needs telcoin-network ${since} or later, and $(node_release_label) does not have it. Pick a newer release or leave ${flag} out." ;;
+        *) setup_warn "Could not ask $(node_release_label) whether it has ${flag} (its node --help did not run); adding the flag anyway." ;;
+    esac
+    return 0
+}
+
+# Install the peers map SRC as DEST, root-owned 0644, once the release of runner SPEC
+# accepts it: tn_node_parse_check has clap parse the value and print help, which starts
+# nothing. SRC is first copied to a temp file next to DEST, and that copy is what gets
+# checked and renamed into place, so the node reads exactly the bytes that were checked
+# and an existing DEST changes only after the check passes. A check that cannot run
+# warns, and the map is installed unchecked.
+install_bootstrap_peers() {
+    local spec="$1" src="$2" dest="$3" tmp msg="" rc=0 reason
+    tmp="$(mktemp "${dest}.XXXXXX" 2>/dev/null)" || setup_fail "Could not create a temp file next to ${dest}."
+    if ! cat "$src" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        setup_fail "Could not copy ${src} to ${tmp}."
+    fi
+    # The size again, on the copy: the file may have changed since it was first checked.
+    if ! msg="$(peers_file_ok "$tmp")"; then
+        rm -f "$tmp"
+        setup_fail "--bootstrap-peers: the copy of ${src} failed its check: ${msg}."
+    fi
+    msg="$(tn_node_parse_check "$spec" --bootstrap-peers "$(cat "$tmp")")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1)
+            reason="$(bootstrap_peers_reason "$spec" "$tmp")"
+            rm -f "$tmp"
+            setup_fail "The bootstrap peers map in ${src} is not valid for $(node_release_label): ${reason:-$msg}"
+            ;;
+        *)
+            setup_warn "Could not check the bootstrap peers map in ${src} with $(node_release_label) (${msg}); installing it unchecked."
+            ;;
+    esac
+    if ! { chmod 0644 "$tmp" && chown root:root "$tmp" && mv -f "$tmp" "$dest"; }; then
+        rm -f "$tmp"
+        setup_fail "Could not install ${dest}."
+    fi
+    print_ok "Bootstrap peers map installed: ${dest}"
+    return 0
+}
+
+# clap's reason for rejecting the peers map in FILE, as the release of runner SPEC words
+# it (the YAML error and where in the map it is). tn_node_parse_check keeps only
+# the first error line, and clap quotes the whole map in its message, so for a map on
+# several lines that line is just the map's first line. Ask once more and print what
+# follows "' for '--bootstrap-peers <MAP>': " (nothing when that is not found).
+bootstrap_peers_reason() {
+    local spec="$1" file="$2" out=""
+    case "$spec" in
+        docker:?*) out="$(docker run --rm "${spec#docker:}" telcoin node --bootstrap-peers "$(cat "$file")" --help 2>&1 </dev/null)" || true ;;
+        binary:/?*) out="$("${spec#binary:}" node --bootstrap-peers "$(cat "$file")" --help 2>&1 </dev/null)" || true ;;
+    esac
+    awk -v m="' for '--bootstrap-peers " '
+        BEGIN { esc = sprintf("%c", 27) }
+        { gsub(esc "\\[[0-9;]*m", "") }
+        (i = index($0, m)) > 0 {
+            rest = substr($0, i + length(m))
+            j = index(rest, "'"'"': ")
+            if (j > 0) { print substr(rest, j + 3); exit }
+        }' <<<"$out" 2>/dev/null || true
 }
 
 # The flags appended to the node launch line for METHOD (docker | binary): the testnet
@@ -1413,9 +1680,11 @@ step_create_service() {
         docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
         docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
 
-        # Testnet opt-in launch flags (healthcheck + JSON log shipping) as ONE line, so
-        # an empty tail can't leave a dangling backslash. Docker reth log dir is the
-        # container path /home/nonroot/logs (= host ${DATA_DIR}/logs).
+        # Testnet opt-in launch flags (healthcheck + JSON log shipping) and the node flags
+        # (bootstrap peers, state export) as ONE line, so an empty tail can't leave a
+        # dangling backslash. Docker reth log dir is the container path
+        # /home/nonroot/logs (= host ${DATA_DIR}/logs). The peers map is read on the host,
+        # where "$(cat ...)" runs, and reaches the container as one argument.
         local launch_flags; launch_flags="$(node_launch_flags docker)"
 
         # BLS passphrase is injected at RUNTIME, mirroring the source/binary path below: a
@@ -1540,9 +1809,10 @@ EOF
         fi
         local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
 
-        # Testnet opt-in launch flags (healthcheck + JSON log shipping) as ONE line, so
-        # an empty tail can't leave a dangling backslash. Binary reth log dir is the host
-        # path /var/log/telcoin (already in the unit's ReadWritePaths, owned telcoin:telcoin).
+        # Testnet opt-in launch flags (healthcheck + JSON log shipping) and the node flags
+        # (bootstrap peers, state export) as ONE line, so an empty tail can't leave a
+        # dangling backslash. Binary reth log dir is the host path /var/log/telcoin
+        # (already in the unit's ReadWritePaths, owned telcoin:telcoin).
         local launch_flags; launch_flags="$(node_launch_flags binary)"
 
         if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
@@ -1853,6 +2123,16 @@ step_final_summary() {
     elif [[ "$workers" == *,* ]]; then
         worker_label="P2P worker ports"
     fi
+    # The node flags, when any are in use.
+    local node_flags=()
+    if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
+        node_flags+=("Bootstrap peers=${BOOTSTRAP_PEERS_SRC}")
+    fi
+    case "${STATE_EXPORT:-off}" in
+        off) ;;
+        unlimited) node_flags+=("State export=every epoch, none deleted") ;;
+        *) node_flags+=("State export=every epoch, newest ${STATE_EXPORT} kept") ;;
+    esac
 
     print_summary "Node Setup Complete" \
         "Network=${NETWORK} (Chain ID: ${CHAIN_ID})" \
@@ -1866,7 +2146,8 @@ step_final_summary() {
         "RPC port=${RPC_PORT}" \
         "Metrics port=${METRICS_PORT}" \
         "Systemd service=${SERVICE_NAME}" \
-        "Explorer=${EXPLORER_URL}"
+        "Explorer=${EXPLORER_URL}" \
+        ${node_flags[@]+"${node_flags[@]}"}
 
     if [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
         if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
@@ -2080,6 +2361,7 @@ finalize_install_inputs() {
 
 json_phase_finalize() {
     finalize_install_inputs
+    finalize_node_extra_flags
     json_event step "Writing configuration"
     step_write_config
     json_event step "Creating service and starting node"
@@ -2184,6 +2466,12 @@ main() {
                     setup_fail "$1 requires a value"
                 fi
                 ;;
+            # An empty value is a mistake here too, not a way of saying "none".
+            --bootstrap-peers|--state-export-keep)
+                if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+                    setup_fail "$1 requires a value"
+                fi
+                ;;
         esac
         case "$1" in
             --json)                shift ;;   # found by the scan above
@@ -2231,6 +2519,18 @@ main() {
             # command via tn_node_launch_flags). Overrides the ENABLE_HEALTHCHECK_MONITOR
             # default; needed in --json/finalize where prompt_testnet_addons is skipped.
             --enable-healthcheck-monitor) ENABLE_HEALTHCHECK_MONITOR=true; shift ;;
+            # Optional node flags, checked by init_node_extra_flags (NODE FLAGS in the header).
+            --bootstrap-peers)     BOOTSTRAP_PEERS_SRC="${2:-}"; shift 2 ;;
+            --enable-state-export) STATE_EXPORT_ENABLE=true; shift ;;
+            --state-export-keep)   STATE_EXPORT_KEEP="${2:-}"; shift 2 ;;
+            -h|--help)
+                # The header block only: everything up to its closing rule.
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+                if json_mode; then
+                    json_done '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
+                fi
+                exit 0
+                ;;
             # Ignored, with a warning on stderr (so a --json stdout stays pure JSON).
             *) print_warn "Unknown argument: $1" >&2; shift ;;
         esac
