@@ -21,7 +21,8 @@
 #                            server's INBOUND public IP, with TCP 80 + 443 open.
 #   --public-ip <ip>         Inbound public IP the A record points at (NAT / multi-IP
 #                            hosts); passed through to install-caddy.sh. In --json mode it
-#                            is also the P2P public IP, as before.
+#                            is also the P2P public IP, as before. A value that is not an
+#                            IPv4 or IPv6 address is ignored, with a warning.
 #   --rpc-public [true]      Public RPC; needs --rpc-domain -- without one, RPC stays private
 #                            and a warning prints the command to enable it later (no error:
 #                            the Node Manager UI sends `--rpc-public true|false` and never a
@@ -40,6 +41,9 @@
 #   --public-rpc-url <url>   This node's public HTTP RPC address, recorded in .node-meta
 #                            (PUBLIC_RPC_URL) for the UI and tooling; never sent to the network.
 #   --public-ws-url <url>    The WebSocket counterpart, recorded in .node-meta (PUBLIC_WS_URL).
+# --rpc-http and --public-rpc-url take an http:// or https:// URL, --rpc-ws and --public-ws-url
+# a ws:// or wss:// one. Setup stops on a malformed URL and warns when one points at a
+# private address (loopback, RFC 1918, .local, .internal, ...) that wallets cannot reach.
 # Precedence: an explicit --rpc-http / --rpc-ws is written to node-info.yaml as given, and an
 # explicit --public-rpc-url / --public-ws-url to .node-meta as given. Any of the four left
 # out is derived from --rpc-domain <d>: https://<d>/ + wss://<d>/ for node-info.yaml,
@@ -52,14 +56,21 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+if ! version_gte "${COMMON_VERSION:-0}" "1.6.0"; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than 1.6.0. Run update-scripts.sh and try again."
+    case " $* " in
+        *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
+        *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
+    esac
+    exit 1
+fi
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.3.0"
 readonly SERVICE_NAME="telcoin"
-# NODE_TYPE is a non-authoritative default-view HINT, not a role. The node's role
-# is decided on-chain. The dashboard's validator view follows the on-chain stake
-# status (ConsensusRegistry getValidator), not tn_isValidator, and switches over
-# once activation is on-chain. New installs write the plain hint.
-readonly NODE_TYPE="observer"
+# The node's role is decided on-chain from committee membership, and the dashboard's
+# validator view follows the on-chain stake status (ConsensusRegistry getValidator).
+# Setup records no role: .node-meta carries no NODE_TYPE, and the "node_type":"observer"
+# in the --json done events is only the Node Manager UI's presentation slot.
 
 NETWORK=""
 CHAIN_ID=""
@@ -82,7 +93,13 @@ ADVERTISE_RPC_WS=""
 RPC_ADVERTISE_DERIVED=false # true: ADVERTISE_RPC_HTTP came from --rpc-domain, not --rpc-http
 EXPLORER_URL=""
 INSTALL_METHOD=""
+# The node binary (source and existing installs) or image (docker). --binary-path or
+# --docker-image set them; keygen records the one in use in .node-meta, and a finalize
+# run without the flag reads it back from there.
 BINARY_PATH=""
+DOCKER_IMAGE=""
+# Optional node flags for the launch line, built by prepare_node_extra_flags.
+NODE_EXTRA_FLAGS=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 CONFIG_DIR="$DEFAULT_CONFIG_DIR"
 LOG_DIR="$DEFAULT_LOG_DIR"
@@ -104,6 +121,7 @@ PUBLIC_RPC_REASON=""        # why public RPC is still pending (repeated in the s
 NODE_STARTED=false          # true once step_create_service starts the node in THIS run
 RPC_PRIVATE_NOTE=""         # why a public-RPC flag left RPC private (no usable hostname given)
 RPC_DOMAIN_GIVEN=false      # --rpc-domain was passed (even with an empty value)
+RPC_INPUT_WARNINGS=()       # notes on the RPC flags, printed by public_rpc_url_warnings
 PRIMARY_MULTIADDR=""
 WORKER_MULTIADDR=""
 PRIMARY_LISTENER_MULTIADDR=""
@@ -250,9 +268,7 @@ step_preflight() {
     local systemd_ver
     systemd_ver=$(systemctl --version 2>/dev/null | head -1 | awk '{print $2}')
     if [[ -z "$systemd_ver" ]] || [[ "$systemd_ver" -lt 247 ]]; then
-        print_error "systemd ${systemd_ver:-unknown} detected -- version 247+ required."
-        print_info "Please upgrade to Ubuntu 22.04 LTS or later and try again."
-        exit 1
+        setup_fail "systemd ${systemd_ver:-unknown} detected -- version 247+ required. Upgrade to Ubuntu 22.04 LTS or later and try again."
     fi
     print_ok "systemd ${systemd_ver} detected (247+ required)"
     USE_LOAD_CREDENTIAL=true
@@ -354,15 +370,16 @@ _preflight_source() {
         print_info "Installing Rust..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
         export PATH="${HOME}/.cargo/bin:${PATH}"
-        source "${HOME}/.cargo/env" 2>/dev/null || true
+        [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
         if ! check_rust; then
-            print_error "Rust installation failed. Cannot continue."
-            exit 1
+            setup_fail "Rust installation failed. Cannot continue."
         fi
     fi
 
+    # Test for the file first: under set -e, bash 3.2 exits on a `source` of a missing
+    # file even with `|| true` (bash 5 does not), as update-node.sh already guards.
     export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${PATH}"
-    source "${HOME}/.cargo/env" 2>/dev/null || true
+    [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
 
     local build_deps=("build-essential" "cmake" "clang" "libclang-dev" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
     local missing_deps=()
@@ -379,8 +396,7 @@ _preflight_source() {
                 install_package "$_dep"
             done
         else
-            print_error "Required build dependencies not installed. Cannot build from source."
-            exit 1
+            setup_fail "Required build dependencies not installed. Cannot build from source."
         fi
     else
         print_ok "Build dependencies present"
@@ -409,21 +425,20 @@ _preflight_source() {
 
     local build_ref
     if json_mode; then
+        # Already held to the release floor in run_json_mode, before check_root.
         build_ref="$JSON_BUILD_REF"
-        [[ -n "$build_ref" ]] || { print_error "No --build-ref supplied for source build."; exit 1; }
+        [[ -n "$build_ref" ]] || setup_fail "No --build-ref supplied for source build."
     else
-        build_ref=$(pick_source_version "$NETWORK") || {
-            print_error "No source ref selected -- cannot continue setup."
-            exit 1
-        }
+        build_ref=$(pick_source_version "$NETWORK") || setup_fail "No source ref selected -- cannot continue setup."
+        # The picker lists only supported tags, but main or a typed ref can be anything.
+        check_release_floor "$build_ref"
     fi
 
     print_step "Checking out: ${build_ref}..."
     if ! git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; then
         if ! { git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
                git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; }; then
-            print_error "Branch or tag '${build_ref}' not found in repository."
-            exit 1
+            setup_fail "Branch or tag '${build_ref}' not found in repository."
         fi
     fi
     # If build_ref is a branch (e.g. main), hard-reset to the remote tip so we
@@ -467,8 +482,7 @@ _preflight_source() {
 
     local built="${source_dir}/target/release/telcoin-network"
     if [[ ! -f "$built" ]]; then
-        print_error "Build failed. See /tmp/tn-build.log"
-        exit 1
+        setup_fail "Build failed. See /tmp/tn-build.log"
     fi
 
     mkdir -p "$INSTALL_DIR"
@@ -497,8 +511,7 @@ _preflight_docker() {
         print_info "Installing Docker..."
         curl -fsSL https://get.docker.com | sh
         if ! command -v docker &>/dev/null; then
-            print_error "Docker installation failed. Please install Docker manually."
-            exit 1
+            setup_fail "Docker installation failed. Please install Docker manually."
         fi
         print_ok "Docker installed"
     else
@@ -515,20 +528,24 @@ _preflight_docker() {
 
     local input
     if json_mode; then
-        # The UI passes --docker-image; only auto-detect when it didn't.
-        [[ -n "${DOCKER_IMAGE:-}" ]] || DOCKER_IMAGE="$(latest_docker_image)"
+        # The UI passes --docker-image, already checked in run_json_mode before
+        # check_root; only auto-detect, and check, when it didn't.
+        if [[ -z "${DOCKER_IMAGE:-}" ]]; then
+            DOCKER_IMAGE="$(latest_docker_image)"
+            check_release_floor "$DOCKER_IMAGE"
+        fi
     else
         local default_image
         default_image="$(latest_docker_image)"
         read -r -p "  Docker image (press Enter to accept default)
   [${default_image}]: " input
         DOCKER_IMAGE="${input:-$default_image}"
+        check_release_floor "$DOCKER_IMAGE"
     fi
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
     if ! docker pull "$DOCKER_IMAGE"; then
-        print_error "Failed to pull Docker image: ${DOCKER_IMAGE}"
-        exit 1
+        setup_fail "Failed to pull Docker image: ${DOCKER_IMAGE}"
     fi
     print_ok "Docker image pulled: ${DOCKER_IMAGE}"
 
@@ -538,8 +555,7 @@ _preflight_docker() {
     local existing_user
     existing_user=$(getent passwd "$DOCKER_UID" | cut -d: -f1 2>/dev/null || echo "")
     if [[ -n "$existing_user" ]] && [[ "$existing_user" != "$SERVICE_USER" ]]; then
-        print_error "UID ${DOCKER_UID} is already in use by user '${existing_user}'"
-        exit 1
+        setup_fail "UID ${DOCKER_UID} is already in use by user '${existing_user}'"
     fi
 
     BINARY_PATH="docker"
@@ -548,27 +564,47 @@ _preflight_docker() {
 _preflight_existing() {
     print_step "Locating existing binary..."
 
-    local found
-    found=$(command -v telcoin-network 2>/dev/null || \
-            find /usr/local/bin /opt /home -name "telcoin-network" -type f 2>/dev/null | head -1 || \
-            echo "")
+    local found input
+    # --binary-path names it. Otherwise look for one, then ask (interactive only: a
+    # --json run has no stdin to answer from).
+    if [[ -z "${BINARY_PATH:-}" ]]; then
+        found=$(command -v telcoin-network 2>/dev/null || \
+                find /usr/local/bin /opt /home -name "telcoin-network" -type f 2>/dev/null | head -1 || \
+                echo "")
 
-    if [[ -n "$found" ]]; then
-        print_info "Found: ${found}"
-        if confirm "Use this binary?"; then
-            BINARY_PATH="$found"
+        if [[ -n "$found" ]]; then
+            print_info "Found: ${found}"
+            if confirm "Use this binary?"; then
+                BINARY_PATH="$found"
+            fi
         fi
     fi
 
     if [[ -z "${BINARY_PATH:-}" ]]; then
+        if json_mode; then
+            setup_fail "--install-method existing needs --binary-path PATH: no telcoin-network binary was found on PATH or under /usr/local/bin, /opt or /home."
+        fi
         read -r -p "  Full path to telcoin binary: " input
         BINARY_PATH="$input"
     fi
 
+    check_binary_path
     if ! verify_binary "$BINARY_PATH"; then
-        print_error "Cannot verify binary at ${BINARY_PATH}."
-        exit 1
+        setup_fail "Cannot verify binary at ${BINARY_PATH}."
     fi
+}
+
+# BINARY_PATH must be an absolute path to an executable file: the start wrapper execs it
+# from systemd, where a relative path or a missing file only shows up as a crash loop.
+check_binary_path() {
+    case "${BINARY_PATH:-}" in
+        /*) ;;
+        *) setup_fail "The node binary path must be absolute: ${BINARY_PATH:-(empty)}" ;;
+    esac
+    if [[ ! -f "$BINARY_PATH" || ! -x "$BINARY_PATH" ]]; then
+        setup_fail "No executable node binary at ${BINARY_PATH}."
+    fi
+    return 0
 }
 
 step_network() {
@@ -737,13 +773,14 @@ validate_rpc_domain() {
 }
 
 # Validate the public-RPC flags once, before any step touches the box, and derive
-# ENABLE_PUBLIC_RPC. A bad combination prints (interactive) or emits (--json) the reason
-# and exits 1. A public-RPC flag without a usable hostname is not an error: RPC stays
-# private and public_rpc_no_domain_notice says how to enable it later (--json: here;
-# interactive: in step_config, after the welcome screen clears). An invalid --public-ip is
-# only dropped for the Caddy pass-through (it still reaches PUBLIC_IP exactly as before).
+# ENABLE_PUBLIC_RPC. A bad combination or a malformed URL stops setup (setup_fail). A
+# public-RPC flag without a usable hostname is not an error: RPC stays private and
+# public_rpc_no_domain_notice says how to enable it later (--json: here; interactive: in
+# step_config, after the welcome screen clears). A URL on a private address and an invalid
+# --public-ip (dropped from both PUBLIC_IP and the Caddy pass-through) only warn, through
+# public_rpc_url_warnings, at the same point.
 init_public_rpc_flags() {
-    local err=""
+    local err="" flag url kind
     if [[ "$NO_PUBLIC_RPC" == "true" ]]; then
         if [[ -n "$PUBLIC_RPC_DOMAIN" || "$RPC_PUBLIC_REQUESTED" == "true" ]]; then
             err="--no-public-rpc conflicts with --rpc-domain / --rpc-public -- pick one."
@@ -756,11 +793,29 @@ init_public_rpc_flags() {
         RPC_PRIVATE_NOTE="no public RPC domain given (--rpc-public without --rpc-domain <hostname>)"
     fi
     if [[ -n "$err" ]]; then
-        if json_mode; then json_event error "$err"; else print_error "$err"; fi
-        exit 1
+        setup_fail "$err"
     fi
+    # The four URL flags as given. derive_public_rpc_urls fills only the empty ones, from a
+    # domain validate_rpc_domain accepted, so it needs no second check.
+    for flag in --rpc-http --rpc-ws --public-rpc-url --public-ws-url; do
+        case "$flag" in
+            --rpc-http)       url="$ADVERTISE_RPC_HTTP"; kind=http ;;
+            --rpc-ws)         url="$ADVERTISE_RPC_WS"; kind=ws ;;
+            --public-rpc-url) url="$PUBLIC_RPC_URL"; kind=http ;;
+            *)                url="$PUBLIC_WS_URL"; kind=ws ;;
+        esac
+        [[ -n "$url" ]] || continue
+        if ! validate_rpc_url "$url" "$kind"; then
+            setup_fail "invalid ${flag} ${url} -- give a ${kind}:// or ${kind}s:// URL with a host name or IP address, such as ${kind}s://node7.adiri.telcoin.network/ (no spaces, quotes or user@ part)."
+        fi
+        if rpc_url_is_private "$url"; then
+            RPC_INPUT_WARNINGS+=("${flag} ${url} is on a private address or name: wallets on the internet cannot reach it.")
+        fi
+    done
     if [[ -n "$RPC_INBOUND_IP" ]] && ! validate_public_ip "$RPC_INBOUND_IP"; then
+        RPC_INPUT_WARNINGS+=("--public-ip ${RPC_INBOUND_IP} is not an IPv4 or IPv6 address; ignoring it.")
         RPC_INBOUND_IP=""
+        PUBLIC_IP=""
     fi
     if [[ -n "$RPC_PRIVATE_NOTE" ]] && json_mode; then
         public_rpc_no_domain_notice
@@ -774,6 +829,35 @@ init_public_rpc_flags() {
     if json_mode; then
         public_rpc_url_warnings
     fi
+    return 0
+}
+
+# --binary-path names the binary of an existing install, and in --json mode implies
+# --install-method existing. It must be absolute: the start wrapper runs it from
+# systemd. Source and docker installs bring their own binary, so there it is ignored,
+# with a warning. Whether the file runs is checked after check_root.
+init_install_flags() {
+    [[ -n "$BINARY_PATH" ]] || return 0
+    if [[ -z "$INSTALL_METHOD" ]] && json_mode; then
+        INSTALL_METHOD="existing"
+    fi
+    case "$INSTALL_METHOD" in
+        ""|existing) ;;
+        *)
+            setup_warn "--binary-path is used only with --install-method existing; ignoring it."
+            BINARY_PATH=""
+            return 0
+            ;;
+    esac
+    case "$BINARY_PATH" in
+        /*) ;;
+        *) setup_fail "--binary-path must be an absolute path: ${BINARY_PATH}" ;;
+    esac
+    return 0
+}
+
+# Validate the optional node flags. None yet: a later release adds them here.
+init_node_extra_flags() {
     return 0
 }
 
@@ -797,6 +881,18 @@ derive_public_rpc_urls() {
     return 0
 }
 
+# Stop setup with MSG: an [ERROR] line on stderr, plus (--json) an error event and the
+# run's done event, ok:false, with the same message. Once a done event has gone out,
+# stdout gets nothing more. Exits 1.
+setup_fail() {
+    print_error "$1"
+    if json_mode && [[ "$JSON_DONE_EMITTED" != "true" ]]; then
+        json_event error "$1"
+        json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "$1")\"}"
+    fi
+    exit 1
+}
+
 # A warning for the operator: print_warn, plus (--json) a `log` event that starts with
 # "WARNING:", which the Node Manager UI styles as a warning.
 setup_warn() {
@@ -807,10 +903,32 @@ setup_warn() {
     return 0
 }
 
-# Say when an advertised-RPC flag will not end up in node-info.yaml as given. Run after
+# Hold REF, a source ref or a docker image, to the oldest release these scripts support
+# on NETWORK (tn_ref_min_check). An older release tag stops setup. A ref that is not a
+# release tag (main, a commit, an image digest) cannot be checked, so it only warns.
+check_release_floor() {
+    local msg="" rc=0
+    msg="$(tn_ref_min_check "$1" "$NETWORK")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) setup_fail "$msg" ;;
+        *) setup_warn "$msg" ;;
+    esac
+    return 0
+}
+
+# Warn about the RPC inputs: each note init_public_rpc_flags collected (a URL on a private
+# address, a dropped --public-ip), a domain only a private network resolves, and an
+# advertised-RPC flag that will not end up in node-info.yaml as given. Run after
 # derive_public_rpc_urls, once the domain is final.
 public_rpc_url_warnings() {
-    local d="$PUBLIC_RPC_DOMAIN" given=""
+    local d="$PUBLIC_RPC_DOMAIN" given="" note
+    for note in ${RPC_INPUT_WARNINGS[@]+"${RPC_INPUT_WARNINGS[@]}"}; do
+        setup_warn "$note"
+    done
+    if [[ -n "$d" ]] && rpc_url_is_private "https://${d}/"; then
+        setup_warn "${d} is a private name (.local, .localhost or .internal): wallets on the internet cannot reach https://${d}/."
+    fi
     if [[ -z "$d" ]]; then
         if [[ -n "$ADVERTISE_RPC_WS" && -z "$ADVERTISE_RPC_HTTP" ]]; then
             setup_warn "--rpc-ws ${ADVERTISE_RPC_WS} is ignored: the keytool accepts --rpc-ws only together with --rpc-http (pass --rpc-http too, or --rpc-domain)."
@@ -836,6 +954,30 @@ validate_service_name() {
         print_error "${label} name '${name}' is invalid."
         print_info "Must start with a letter, contain only letters/numbers/hyphens/underscores, max 32 chars."
         return 1
+    fi
+    return 0
+}
+
+# Write KEY=VALUE pairs to ${CONFIG_DIR}/.node-meta with one meta_set per key, so the
+# keys other scripts keep there survive. NODE_TYPE, the role hint older releases wrote,
+# is removed: the role is decided on-chain. Stops setup when a key cannot be written.
+write_node_meta() {
+    local meta="${CONFIG_DIR}/.node-meta" kv
+    for kv in "$@"; do
+        meta_set "${kv%%=*}" "${kv#*=}" "$meta" || setup_fail "Could not write ${kv%%=*} to ${meta}."
+    done
+    meta_unset NODE_TYPE "$meta" || setup_fail "Could not remove NODE_TYPE from ${meta}."
+    return 0
+}
+
+# Record what runs the node: DOCKER_IMAGE for a docker install, removing any BINARY_PATH
+# an earlier install left; otherwise BINARY_PATH, with DOCKER_IMAGE written empty as before.
+write_node_meta_runner() {
+    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        write_node_meta "DOCKER_IMAGE=${DOCKER_IMAGE:-}"
+        meta_unset BINARY_PATH "${CONFIG_DIR}/.node-meta" || setup_fail "Could not remove BINARY_PATH from ${CONFIG_DIR}/.node-meta."
+    else
+        write_node_meta "DOCKER_IMAGE=" "BINARY_PATH=${BINARY_PATH:-}"
     fi
     return 0
 }
@@ -885,14 +1027,15 @@ step_create_infrastructure() {
 
     # Record the service account in .node-meta NOW (not just at the end), so an
     # install interrupted after this point still leaves remove-node.sh enough to
-    # clean up the user/group. step_create_service later overwrites with the
-    # full metadata.
+    # clean up the user/group. The install method and the image or binary go in too:
+    # a --json finalize is a new process and reads them back from here when its
+    # flags leave them out. step_create_service later adds the full metadata.
     mkdir -p "$CONFIG_DIR"
-    {
-        echo "HOST_SERVICE_USER=${SERVICE_USER}"
-        echo "HOST_SERVICE_GROUP=${SERVICE_GROUP}"
-    } > "${CONFIG_DIR}/.node-meta"
-    chmod 600 "${CONFIG_DIR}/.node-meta"
+    write_node_meta \
+        "HOST_SERVICE_USER=${SERVICE_USER}" \
+        "HOST_SERVICE_GROUP=${SERVICE_GROUP}" \
+        "INSTALL_METHOD=${INSTALL_METHOD:-binary}"
+    write_node_meta_runner
     print_ok "Recorded service account in ${CONFIG_DIR}/.node-meta (${SERVICE_USER}:${SERVICE_GROUP})"
 
     print_step "Creating reth cache directory..."
@@ -908,17 +1051,18 @@ step_create_infrastructure() {
 
 # 0 when this release's `keytool generate validator` takes --rpc-http (older releases do
 # not, and clap would reject the whole keygen over it). Asks the keytool keygen is about
-# to run: the docker image or the installed binary. Output is captured, not piped to
-# grep, so an early grep exit cannot fail the probe under pipefail. A probe that cannot
-# run reads as "no": keygen then goes ahead without the advertisement instead of failing.
+# to run, the docker image or the installed binary, through tn_keytool_has, which reads
+# only the option lines of the help. A probe that cannot run (rc 4) reads as "no", like
+# a release without the flag: keygen then goes ahead without the advertisement instead
+# of failing.
 keytool_supports_rpc_args() {
-    local help_out=""
+    local spec
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        help_out="$(docker run --rm "$DOCKER_IMAGE" telcoin keytool generate validator --help 2>&1 </dev/null)" || true
+        spec="docker:${DOCKER_IMAGE}"
     else
-        help_out="$("$BINARY_PATH" keytool generate validator --help 2>&1 </dev/null)" || true
+        spec="binary:${BINARY_PATH}"
     fi
-    [[ "$help_out" == *--rpc-http* ]]
+    tn_keytool_has "$spec" --rpc-http generate validator
 }
 
 step_generate_keys() {
@@ -929,8 +1073,7 @@ step_generate_keys() {
 
     if [[ -d "${DATA_DIR}/node-keys" ]]; then
         if json_mode; then
-            print_error "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode"
-            exit 1
+            setup_fail "node-keys already exist at ${DATA_DIR}/node-keys -- refusing to overwrite in non-interactive mode"
         fi
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
@@ -944,10 +1087,10 @@ step_generate_keys() {
         # Address + multiaddrs come from flags; passphrase from TN_BLS_PASSPHRASE (env only).
         [[ "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || print_warn "Address format looks unusual. Proceeding anyway."
         for v in PRIMARY_MULTIADDR WORKER_MULTIADDR PRIMARY_LISTENER_MULTIADDR WORKER_LISTENER_MULTIADDR; do
-            [[ -n "${!v}" ]] || { print_error "missing multiaddr: ${v}"; exit 1; }
+            [[ -n "${!v}" ]] || setup_fail "missing multiaddr: ${v}"
         done
         bls_passphrase="${TN_BLS_PASSPHRASE:-}"
-        [[ -n "$bls_passphrase" ]] || { print_error "TN_BLS_PASSPHRASE not set -- cannot generate keys."; exit 1; }
+        [[ -n "$bls_passphrase" ]] || setup_fail "TN_BLS_PASSPHRASE not set -- cannot generate keys."
     else
         read -r -p "  Node execution address (0x...): " VALIDATOR_ADDRESS
         if [[ ! "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
@@ -998,8 +1141,7 @@ step_generate_keys() {
             read -r -p "  Enter your internal/NIC IP address [0.0.0.0]: " internal_ip
             internal_ip="${internal_ip:-0.0.0.0}"
             if ! validate_ipv4 "$internal_ip" && ! validate_ipv6 "$internal_ip"; then
-                print_error "Invalid IP: ${internal_ip}"
-                exit 1
+                setup_fail "Invalid IP: ${internal_ip}"
             fi
         else
             print_info "Detected internal IP: ${internal_ip}"
@@ -1051,8 +1193,16 @@ step_generate_keys() {
     # --rpc-ws pass through as given (the fleet path); URLs derived from --rpc-domain are
     # passed only when this release's keytool knows --rpc-http. Otherwise keygen goes
     # ahead without them and rpc-enable advertises them after the node starts.
-    if [[ "$RPC_ADVERTISE_DERIVED" == "true" && -n "$ADVERTISE_RPC_HTTP" ]] && ! keytool_supports_rpc_args; then
-        setup_warn "This telcoin release's keytool cannot advertise RPC at keygen (it has no --rpc-http), so ${ADVERTISE_RPC_HTTP} + ${ADVERTISE_RPC_WS} reach node-info.yaml when public RPC is enabled after the node starts (install-caddy.sh --phase=rpc-enable)."
+    local probe_rc=0 probe_note
+    if [[ "$RPC_ADVERTISE_DERIVED" == "true" && -n "$ADVERTISE_RPC_HTTP" ]]; then
+        keytool_supports_rpc_args || probe_rc=$?
+    fi
+    if [[ "$probe_rc" -ne 0 ]]; then
+        probe_note="This telcoin release's keytool cannot advertise RPC at keygen (it has no --rpc-http)"
+        if [[ "$probe_rc" -eq 4 ]]; then
+            probe_note="Could not ask the keytool whether it can advertise RPC at keygen (its --help did not run)"
+        fi
+        setup_warn "${probe_note}, so ${ADVERTISE_RPC_HTTP} + ${ADVERTISE_RPC_WS} reach node-info.yaml when public RPC is enabled after the node starts (install-caddy.sh --phase=rpc-enable)."
         ADVERTISE_RPC_HTTP=""
         ADVERTISE_RPC_WS=""
         RPC_ADVERTISE_DERIVED=false
@@ -1097,8 +1247,7 @@ step_generate_keys() {
             ${rpc_args[@]+"${rpc_args[@]}"}; then
             print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
         else
-            print_error "Key generation failed."
-            exit 1
+            setup_fail "Key generation failed."
         fi
     else
         if "$BINARY_PATH" keytool generate validator \
@@ -1109,8 +1258,7 @@ step_generate_keys() {
             ${rpc_args[@]+"${rpc_args[@]}"}; then
             print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
         else
-            print_error "Key generation failed."
-            exit 1
+            setup_fail "Key generation failed."
         fi
     fi
 
@@ -1192,8 +1340,7 @@ step_write_config() {
         print_info "Copy from: https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
         echo ""
         if json_mode; then
-            print_error "Chain config files missing and cannot prompt in non-interactive mode."
-            exit 1
+            setup_fail "Chain config files missing and cannot prompt in non-interactive mode."
         fi
         read -r -p "  Press Enter once you have copied the chain config files: "
     fi
@@ -1202,6 +1349,25 @@ step_write_config() {
     write_advertised_name "$DATA_DIR" "$ADVERTISED_NAME" "${SERVICE_USER}:${SERVICE_GROUP}"
 
     print_ok "Configuration ready under: ${DATA_DIR}"
+}
+
+# Build NODE_EXTRA_FLAGS, the optional node flags for the launch line. None yet: a later
+# release adds them here. Runs before the start wrapper is written.
+prepare_node_extra_flags() {
+    return 0
+}
+
+# The flags appended to the node launch line for METHOD (docker | binary): the testnet
+# add-on flags (tn_node_launch_flags), then NODE_EXTRA_FLAGS. The wrapper heredocs expand
+# this text once, so a "$(cat FILE)" inside it lands in the wrapper as written and runs
+# at each start, not during setup. With no extra flags the line is exactly as before.
+node_launch_flags() {
+    local flags
+    flags="$(tn_node_launch_flags "$1")"
+    if [[ -n "$NODE_EXTRA_FLAGS" ]]; then
+        flags="${flags:+${flags} }${NODE_EXTRA_FLAGS}"
+    fi
+    printf '%s' "$flags"
 }
 
 step_create_service() {
@@ -1226,15 +1392,23 @@ step_create_service() {
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
     # The UI runs setup as two separate processes (keygen, then finalize). The
-    # source build that sets BINARY_PATH happens in keygen, so in the finalize
-    # process BINARY_PATH is empty here -- which would make the wrapper run the
+    # source build that sets BINARY_PATH happens in keygen; finalize reads it back
+    # from .node-meta (finalize_install_inputs). An install whose keygen predates
+    # that record has none, and an empty BINARY_PATH would make the wrapper run the
     # system `node` (Node.js) instead of the Telcoin binary. Source builds always
     # install to ${INSTALL_DIR}/telcoin-network, so re-derive it.
-    if [[ "${INSTALL_METHOD:-}" != "docker" && -z "${BINARY_PATH:-}" ]]; then
+    if [[ "${INSTALL_METHOD:-}" != "docker" && "${INSTALL_METHOD:-}" != "existing" && -z "${BINARY_PATH:-}" ]]; then
         BINARY_PATH="${INSTALL_DIR}/telcoin-network"
     fi
 
+    prepare_node_extra_flags
+
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        # Guard: never write a wrapper without an image (docker would take the next
+        # word, `telcoin`, for the image name).
+        if [[ -z "${DOCKER_IMAGE:-}" ]]; then
+            setup_fail "No docker image to run (--docker-image) -- cannot write start wrapper."
+        fi
         local docker_uid docker_gid
         docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
         docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
@@ -1242,7 +1416,7 @@ step_create_service() {
         # Testnet opt-in launch flags (healthcheck + JSON log shipping) as ONE line, so
         # an empty tail can't leave a dangling backslash. Docker reth log dir is the
         # container path /home/nonroot/logs (= host ${DATA_DIR}/logs).
-        local launch_flags; launch_flags="$(tn_node_launch_flags docker)"
+        local launch_flags; launch_flags="$(node_launch_flags docker)"
 
         # BLS passphrase is injected at RUNTIME, mirroring the source/binary path below: a
         # root-owned wrapper reads it (TPM, else the systemd LoadCredential dir) and
@@ -1362,16 +1536,14 @@ EOF
         # Guard: never write a wrapper with an empty binary path (it would exec
         # the system `node` and fail with "node: bad option: --datadir").
         if [[ -z "${BINARY_PATH:-}" || ! -x "${BINARY_PATH}" ]]; then
-            print_error "Node binary not found at '${BINARY_PATH:-<unset>}' -- cannot write start wrapper."
-            print_info  "Expected the source build to install it at ${INSTALL_DIR}/telcoin-network."
-            exit 1
+            setup_fail "Node binary not found at '${BINARY_PATH:-<unset>}' -- cannot write start wrapper. A source build installs it at ${INSTALL_DIR}/telcoin-network; an existing install needs --binary-path."
         fi
         local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
 
         # Testnet opt-in launch flags (healthcheck + JSON log shipping) as ONE line, so
         # an empty tail can't leave a dangling backslash. Binary reth log dir is the host
         # path /var/log/telcoin (already in the unit's ReadWritePaths, owned telcoin:telcoin).
-        local launch_flags; launch_flags="$(tn_node_launch_flags binary)"
+        local launch_flags; launch_flags="$(node_launch_flags binary)"
 
         if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
             cat > "$wrapper" <<EOF
@@ -1464,37 +1636,35 @@ EOF
 
     # PUBLIC_RPC_DOMAIN: the public RPC hostname ('' = private). Written even when the
     # enable at the end of setup is still pending, so a later install-caddy.sh run and
-    # check-node.sh know which name this node is meant to serve.
+    # check-node.sh know which name this node is meant to serve. Each key is set on its
+    # own (write_node_meta), so keys other scripts keep in the file survive a re-run.
     local meta_file="${CONFIG_DIR}/.node-meta"
     mkdir -p "$CONFIG_DIR"
-    cat > "$meta_file" <<EOF
-HOST_SERVICE_USER=${SERVICE_USER}
-HOST_SERVICE_GROUP=${SERVICE_GROUP}
-INSTALL_METHOD=${INSTALL_METHOD:-binary}
-NODE_TYPE=${NODE_TYPE}
-PASSPHRASE_METHOD=${PASSPHRASE_METHOD}
-DOCKER_IMAGE=${DOCKER_IMAGE:-}
-NETWORK=${NETWORK}
-DATA_DIR=${DATA_DIR}
-RPC_PORT=${RPC_PORT}
-WS_PORT=${WS_PORT}
-PUBLIC_RPC_DOMAIN=${PUBLIC_RPC_DOMAIN:-}
-PUBLIC_IP=${PUBLIC_IP:-}
-EXTERNAL_PRIMARY_ADDR=${PRIMARY_MULTIADDR:-}
-EXTERNAL_WORKER_ADDR=${WORKER_MULTIADDR:-}
-VALIDATOR_ADDRESS=${VALIDATOR_ADDRESS:-}
-REGION=${REGION:-}
-ENABLE_HEALTHCHECK_MONITOR=${ENABLE_HEALTHCHECK_MONITOR:-false}
-ENABLE_OBSERVABILITY=${ENABLE_OBSERVABILITY:-false}
-ENABLE_METRICS=${ENABLE_METRICS:-false}
-METRICS_PORT=${METRICS_PORT:-9101}
-ENABLE_VPN=${ENABLE_VPN:-false}
-VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}
-VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}
-PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}
-PUBLIC_WS_URL=${PUBLIC_WS_URL:-}
-EOF
-    chmod 600 "$meta_file"
+    write_node_meta \
+        "HOST_SERVICE_USER=${SERVICE_USER}" \
+        "HOST_SERVICE_GROUP=${SERVICE_GROUP}" \
+        "INSTALL_METHOD=${INSTALL_METHOD:-binary}" \
+        "PASSPHRASE_METHOD=${PASSPHRASE_METHOD}" \
+        "NETWORK=${NETWORK}" \
+        "DATA_DIR=${DATA_DIR}" \
+        "RPC_PORT=${RPC_PORT}" \
+        "WS_PORT=${WS_PORT}" \
+        "PUBLIC_RPC_DOMAIN=${PUBLIC_RPC_DOMAIN:-}" \
+        "PUBLIC_IP=${PUBLIC_IP:-}" \
+        "EXTERNAL_PRIMARY_ADDR=${PRIMARY_MULTIADDR:-}" \
+        "EXTERNAL_WORKER_ADDR=${WORKER_MULTIADDR:-}" \
+        "VALIDATOR_ADDRESS=${VALIDATOR_ADDRESS:-}" \
+        "REGION=${REGION:-}" \
+        "ENABLE_HEALTHCHECK_MONITOR=${ENABLE_HEALTHCHECK_MONITOR:-false}" \
+        "ENABLE_OBSERVABILITY=${ENABLE_OBSERVABILITY:-false}" \
+        "ENABLE_METRICS=${ENABLE_METRICS:-false}" \
+        "METRICS_PORT=${METRICS_PORT:-9101}" \
+        "ENABLE_VPN=${ENABLE_VPN:-false}" \
+        "VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}" \
+        "VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}" \
+        "PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}" \
+        "PUBLIC_WS_URL=${PUBLIC_WS_URL:-}"
+    write_node_meta_runner
     print_ok "Node metadata written: ${meta_file}"
 
     # Start each install with a clean log. The unit appends
@@ -1514,10 +1684,8 @@ EOF
             print_ok "Service is running"
             NODE_STARTED=true
         else
-            print_error "Service failed to start."
-            print_info "Check logs: journalctl -u ${SERVICE_NAME} --no-pager -n 50"
             systemctl status "$SERVICE_NAME" --no-pager || true
-            exit 1
+            setup_fail "Service failed to start. Check logs: journalctl -u ${SERVICE_NAME} --no-pager -n 50"
         fi
 
         local local_rpc="http://127.0.0.1:${RPC_PORT}"
@@ -1672,6 +1840,20 @@ step_public_rpc() {
 }
 
 step_final_summary() {
+    # The P2P ports node-info.yaml advertises (keytool wrote them at keygen, one per
+    # worker), or the configured ports when the file cannot be read.
+    local ni="${DATA_DIR}/node-info.yaml" p2p_port ports workers="" p worker_label="P2P worker port"
+    p2p_port="$(tn_node_info_field "$ni" primary_port 2>/dev/null)" || p2p_port="$P2P_PORT"
+    ports="$(tn_node_info_worker_ports "$ni" 2>/dev/null)" || ports=""
+    for p in $ports; do
+        workers="${workers:+${workers}, }${p}"
+    done
+    if [[ -z "$workers" ]]; then
+        workers="$WORKER_PORT"
+    elif [[ "$workers" == *,* ]]; then
+        worker_label="P2P worker ports"
+    fi
+
     print_summary "Node Setup Complete" \
         "Network=${NETWORK} (Chain ID: ${CHAIN_ID})" \
         "Role=decided on-chain (full node until you stake + activate)" \
@@ -1679,8 +1861,8 @@ step_final_summary() {
         "Data directory=${DATA_DIR}" \
         "Config directory=${CONFIG_DIR}" \
         "Log directory=${LOG_DIR}" \
-        "P2P primary port=${P2P_PORT}" \
-        "P2P worker port=${WORKER_PORT}" \
+        "P2P primary port=${p2p_port}" \
+        "${worker_label}=${workers}" \
         "RPC port=${RPC_PORT}" \
         "Metrics port=${METRICS_PORT}" \
         "Systemd service=${SERVICE_NAME}" \
@@ -1734,7 +1916,7 @@ step_final_summary() {
     print_sep
     echo ""
     print_info "Your node is set up and will follow consensus as a full node."
-    print_info "Make sure inbound UDP 49590 and 49594 are open (run firewall-setup.sh)."
+    print_info "Make sure inbound UDP ${p2p_port} and ${workers} are open (run firewall-setup.sh)."
     echo ""
     print_info "Becoming a validator is optional. To validate:"
     echo "  1. Get governance approval from the Telcoin Association (GSMA-approved MNOs)"
@@ -1742,8 +1924,9 @@ step_final_summary() {
     echo "  3. After your node syncs, call activate()"
     echo "  The dashboard switches to the validator view automatically once activation is on-chain."
     echo ""
-    print_info "Health check: bash check-node.sh --address ${VALIDATOR_ADDRESS}"
-    print_info "Full guide:   https://docs.telcoin.network/telcoin-network/staking/how-to-stake"
+    print_info "Health check:     bash check-node.sh --address ${VALIDATOR_ADDRESS}"
+    print_info "Operator runbook: ${TN_OPERATOR_GUIDE_URL}"
+    print_info "Staking guide:    https://docs.telcoin.network/telcoin-network/staking/how-to-stake"
     echo ""
 }
 
@@ -1756,9 +1939,15 @@ step_final_summary() {
 #                              writes NO unit and starts NOTHING. Emits the full
 #                              node-info.yaml so the operator can back it up.
 #   --json --phase=finalize -> write config + create service + start + verify.
+#                              The install method and the docker image or binary
+#                              path come from its flags or, when a flag is left
+#                              out, from what keygen recorded in .node-meta.
 #
 # fd handling mirrors update-node.sh: stdout -> fd3 (newline-delimited JSON),
-# real stdout -> stderr. BLS passphrase arrives via TN_BLS_PASSPHRASE env ONLY.
+# real stdout -> stderr. main finds --json and swaps the fds before it parses
+# anything, and installs json_on_exit, so every --json run prints only JSON on
+# stdout and ends with exactly one done event, however it stops. BLS passphrase
+# arrives via TN_BLS_PASSPHRASE env ONLY.
 #
 # Note: on-chain validator registration (governance approval, staking,
 # activate()) is intentionally NOT performed here -- the UI surfaces the
@@ -1770,6 +1959,7 @@ JSON_PHASE=""
 JSON_BUILD_REF=""
 JSON_NETWORK_INPUT="testnet"
 JSON_DONE_EMITTED=false
+JSON_LAST_ERROR=""   # the last error event's message; json_on_exit reuses it for done
 # Optional override: dir holding genesis.yaml/committee.yaml/parameters.yaml,
 # checked first by step_write_config. Preserve any env value; default empty so
 # `set -u` never trips and the ${TN_GENESIS_DIR:+...} expansion is a no-op.
@@ -1789,8 +1979,22 @@ json_escape() {
 }
 
 json_emit() { printf '%s\n' "$1" >&3; }
-json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
+json_event() {
+    if [[ "$1" == "error" ]]; then
+        JSON_LAST_ERROR="${2:-}"
+    fi
+    json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
+}
 json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
+
+# A JSON string for VALUE, or null when VALUE is empty.
+json_str_or_null() {
+    if [[ -n "${1:-}" ]]; then
+        printf '"%s"' "$(json_escape "$1")"
+    else
+        printf 'null'
+    fi
+}
 
 # Run a command, streaming each combined-output line to the UI as a JSON `log`
 # event (JSON mode only) so the long, otherwise-silent steps -- the git clone and
@@ -1806,10 +2010,16 @@ run_streamed() {
     "$@"
 }
 
+# The EXIT trap, installed by main before it parses anything. In --json mode it
+# sends {"event":"done","ok":false,...} when the run is ending without its done
+# event, with the last error event's message, or a pointer to stderr when there
+# was none. Human mode: nothing.
 json_on_exit() {
     local rc=$?
-    [[ "$JSON_DONE_EMITTED" == "true" ]] && return
-    json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"setup exited early (rc=${rc}) -- see server logs / journalctl\"}"
+    if json_mode && [[ "$JSON_DONE_EMITTED" != "true" ]]; then
+        json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "${JSON_LAST_ERROR:-setup exited early (rc=${rc}) -- see server logs / journalctl}")\"}" 2>/dev/null || true
+    fi
+    return "$rc"
 }
 
 json_set_network() {
@@ -1820,7 +2030,7 @@ json_set_network() {
         devnet)
             NETWORK="devnet"; CHAIN_ID="$DEVNET_CHAIN_ID"; CHAIN_NAME="$DEVNET_CHAIN_NAME"
             RPC_URL="${DEVNET_RPC_URL:-}"; EXPLORER_URL="${DEVNET_EXPLORER:-}" ;;
-        *) json_event error "unsupported network: ${1} (expected testnet or devnet)"; exit 1 ;;
+        *) setup_fail "unsupported network: ${1} (expected testnet or devnet)" ;;
     esac
 }
 
@@ -1836,10 +2046,40 @@ json_phase_keygen() {
 
     local info="${DATA_DIR}/node-info.yaml" info_content=""
     [[ -f "$info" ]] && info_content="$(json_escape "$(cat "$info")")"
-    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"${NODE_TYPE}\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
+}
+
+# Finalize is a new process. The install method and the docker image or binary come from
+# its flags or, for any the flags leave out, from what keygen recorded in .node-meta.
+# Stops when the node would have nothing to run, before anything is written.
+finalize_install_inputs() {
+    local meta="${CONFIG_DIR}/.node-meta"
+    if [[ -z "$INSTALL_METHOD" ]]; then
+        INSTALL_METHOD="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || true)"
+    fi
+    if [[ "$INSTALL_METHOD" == "docker" ]]; then
+        if [[ -z "$DOCKER_IMAGE" ]]; then
+            DOCKER_IMAGE="$(meta_get DOCKER_IMAGE "$meta" 2>/dev/null || true)"
+        fi
+        if [[ -z "$DOCKER_IMAGE" ]]; then
+            setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
+        fi
+        return 0
+    fi
+    if [[ -z "$BINARY_PATH" ]]; then
+        BINARY_PATH="$(meta_get BINARY_PATH "$meta" 2>/dev/null || true)"
+    fi
+    if [[ "$INSTALL_METHOD" == "existing" ]]; then
+        if [[ -z "$BINARY_PATH" ]]; then
+            setup_fail "No node binary to run: pass --binary-path PATH, or run --phase=keygen first (it records the binary in ${meta})."
+        fi
+        check_binary_path
+    fi
+    return 0
 }
 
 json_phase_finalize() {
+    finalize_install_inputs
     json_event step "Writing configuration"
     step_write_config
     json_event step "Creating service and starting node"
@@ -1848,20 +2088,65 @@ json_phase_finalize() {
         json_event step "Enabling public RPC for ${PUBLIC_RPC_DOMAIN}"
         step_public_rpc
     fi
-    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"${NODE_TYPE}\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"observer\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"operator_guide\":\"$(json_escape "$TN_OPERATOR_GUIDE_URL")\",\"public_rpc\":$(public_rpc_json),\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
 }
 
+# The public RPC this run set up, as finalize's done event carries it: "enabled" is
+# true only when step_public_rpc finished the enable (Caddy serves the domain and
+# node-info.yaml advertises it); domain, http and ws are the configured values
+# (.node-meta PUBLIC_RPC_DOMAIN, PUBLIC_RPC_URL, PUBLIC_WS_URL), null when unset.
+public_rpc_json() {
+    local enabled=false
+    if [[ "$PUBLIC_RPC_STATE" == "enabled" ]]; then
+        enabled=true
+    fi
+    printf '{"enabled":%s,"domain":%s,"http":%s,"ws":%s}' "$enabled" \
+        "$(json_str_or_null "$PUBLIC_RPC_DOMAIN")" \
+        "$(json_str_or_null "$PUBLIC_RPC_URL")" \
+        "$(json_str_or_null "$PUBLIC_WS_URL")"
+}
+
+# The install inputs, checked before check_root so a bad one stops the run before it
+# touches the box: the install method (keygen needs one; finalize can read keygen's
+# back from .node-meta), --build-ref (keygen of a source install needs one) and
+# --docker-image, both held to the network's oldest supported release.
+json_check_install_flags() {
+    case "$INSTALL_METHOD" in
+        ""|source|docker|existing) ;;
+        *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, docker or existing)" ;;
+    esac
+    if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
+        setup_fail "--install-method is missing (expected source, docker or existing)"
+    fi
+    if [[ "$INSTALL_METHOD" == "source" && "$JSON_PHASE" == "keygen" && -z "$JSON_BUILD_REF" ]]; then
+        setup_fail "No --build-ref supplied for source build."
+    fi
+    if [[ -n "$JSON_BUILD_REF" ]]; then
+        check_release_floor "$JSON_BUILD_REF"
+    fi
+    if [[ -n "$DOCKER_IMAGE" ]]; then
+        if ! validate_docker_image "$DOCKER_IMAGE"; then
+            setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give the full image reference with its tag, such as ${DEFAULT_DOCKER_IMAGE}"
+        fi
+        check_release_floor "$DOCKER_IMAGE"
+    fi
+    return 0
+}
+
+# Every input is checked before check_root, so a bad phase, network or release ref
+# stops the run before it touches the box.
 run_json_mode() {
-    json_setup_fds
-    trap json_on_exit EXIT
-    init_public_rpc_flags       # bad public-RPC flags -> error event + exit, before any work
+    case "$JSON_PHASE" in
+        keygen|finalize) ;;
+        *) setup_fail "unknown or missing --phase (expected keygen|finalize)" ;;
+    esac
+    json_set_network "$JSON_NETWORK_INPUT"
+    json_check_install_flags
     check_root
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
-    json_set_network "$JSON_NETWORK_INPUT"
     case "$JSON_PHASE" in
         keygen)   json_phase_keygen ;;
         finalize) json_phase_finalize ;;
-        *)        json_event error "unknown or missing --phase (expected keygen|finalize)"; exit 1 ;;
     esac
 }
 
@@ -1869,37 +2154,39 @@ run_json_mode() {
 # MAIN
 # =============================================================================
 
-# A value-taking option was the last argument, so it has no value. Say so and exit 1;
-# with --json, the same error event + done ok:false (json_on_exit) as any early failure.
-missing_option_value() {
-    local msg="$1 requires a value"
-    if [[ "$2" == "true" ]]; then
-        JSON_MODE=true
-        json_setup_fds
-        trap json_on_exit EXIT
-        json_event error "$msg"
-    else
-        print_error "$msg"
-    fi
-    exit 1
-}
-
 main() {
-    local json_mode=false
+    local arg
+    # --json is found before anything prints: from here on stdout carries JSON
+    # events only, and json_on_exit ends the run with a done event when nothing
+    # else did (a missing value, a bad flag, not root, a failed step).
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_MODE=true
+        fi
+    done
+    if json_mode; then
+        json_setup_fds
+    fi
+    trap json_on_exit EXIT
+
     while [[ $# -gt 0 ]]; do
         # Every option below that ends in `shift 2` needs a value. As the last argument it
         # has none and `shift 2` fails (a silent exit under the inherited `set -e`), so
-        # stop here with a clear message instead. (--rpc-public may stand alone.)
+        # stop here with a clear message instead. No value of these starts with "-", so
+        # such a word is the next option, not a value. (--rpc-public may stand alone.)
         case "$1" in
             --phase|--network|--install-method|--passphrase-method|--address|--build-ref|\
-            --docker-image|--external-primary|--external-worker|--listener-primary|\
-            --listener-worker|--public-ip|--public-rpc-url|--public-ws-url|--rpc-http|\
-            --rpc-ws|--rpc-domain|--advertised-name|--data-dir|\
+            --docker-image|--binary-path|--external-primary|--external-worker|\
+            --listener-primary|--listener-worker|--public-ip|--public-rpc-url|\
+            --public-ws-url|--rpc-http|--rpc-ws|--rpc-domain|--advertised-name|--data-dir|\
             --service-user|--service-group|--genesis-dir)
-                [[ $# -ge 2 ]] || missing_option_value "$1" "$json_mode" ;;
+                if [[ $# -lt 2 || "$2" == -* ]]; then
+                    setup_fail "$1 requires a value"
+                fi
+                ;;
         esac
         case "$1" in
-            --json)                json_mode=true; shift ;;
+            --json)                shift ;;   # found by the scan above
             --phase)               JSON_PHASE="${2:-}"; shift 2 ;;
             --phase=*)             JSON_PHASE="${1#*=}"; shift ;;
             --network)             JSON_NETWORK_INPUT="${2:-}"; shift 2 ;;
@@ -1908,6 +2195,9 @@ main() {
             --address)             VALIDATOR_ADDRESS="${2:-}"; shift 2 ;;
             --build-ref)           JSON_BUILD_REF="${2:-}"; shift 2 ;;
             --docker-image)        DOCKER_IMAGE="${2:-}"; shift 2 ;;
+            # The node binary for --install-method existing: an absolute path to an
+            # executable file. Skips the search and the prompt in _preflight_existing.
+            --binary-path)         BINARY_PATH="${2:-}"; shift 2 ;;
             --external-primary)    PRIMARY_MULTIADDR="${2:-}"; shift 2 ;;
             --external-worker)     WORKER_MULTIADDR="${2:-}"; shift 2 ;;
             --listener-primary)    PRIMARY_LISTENER_MULTIADDR="${2:-}"; shift 2 ;;
@@ -1941,17 +2231,20 @@ main() {
             # command via tn_node_launch_flags). Overrides the ENABLE_HEALTHCHECK_MONITOR
             # default; needed in --json/finalize where prompt_testnet_addons is skipped.
             --enable-healthcheck-monitor) ENABLE_HEALTHCHECK_MONITOR=true; shift ;;
-            *) shift ;;
+            # Ignored, with a warning on stderr (so a --json stdout stays pure JSON).
+            *) print_warn "Unknown argument: $1" >&2; shift ;;
         esac
     done
 
-    if [[ "$json_mode" == "true" ]]; then
-        JSON_MODE=true
+    init_public_rpc_flags       # bad public-RPC flags or URLs stop here, before any work
+    init_install_flags
+    init_node_extra_flags
+
+    if json_mode; then
         run_json_mode
         exit $?
     fi
 
-    init_public_rpc_flags
     step_welcome
     step_preflight
     step_config
