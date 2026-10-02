@@ -130,6 +130,52 @@ detect_install_method() {
     fi
 }
 
+# existing_binary_path -- the binary an `existing` install runs: the path in the
+# node command of its launch file (tn_launch_runner, lib/common.sh 1.6.0), else
+# BINARY_PATH from .node-meta (recorded by setup-node 1.3.0), else the source
+# build's path, which older installs used.
+existing_binary_path() {
+    local spec="" path=""
+    if declare -F tn_launch_runner >/dev/null 2>&1; then
+        spec="$(tn_launch_runner 2>/dev/null || true)"
+    fi
+    case "$spec" in
+        binary:/*) path="${spec#binary:}" ;;
+    esac
+    if [[ -z "$path" ]]; then
+        path="$(meta_get BINARY_PATH 2>/dev/null || true)"
+        [[ "$path" == /* ]] || path=""
+    fi
+    if [[ -z "$path" ]]; then
+        path="${DEFAULT_INSTALL_DIR}/telcoin-network"
+    fi
+    printf '%s\n' "$path"
+}
+
+# existing_update_refusal -- refuse an `existing` install, whose binary this
+# script does not replace, and say how to update it by hand: stop the node,
+# replace the file it runs, start it again; or replace the file while it runs
+# and restart through edit-config.sh, which waits for the epoch boundary. An
+# error event in --json mode, [ERROR] and info lines otherwise. The caller
+# exits or returns 1.
+existing_update_refusal() {
+    local path svc
+    path="$(existing_binary_path)"
+    svc="${SERVICE_NAME:-telcoin}"
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_event error "install method 'existing': this node runs ${path}, which update-node.sh does not replace. To update it, stop the node, replace that file with the new release binary and start the node again (systemctl stop ${svc}; install -m 0755 <new binary> ${path}; systemctl start ${svc}). On a committee node, run only the install step while the node runs, then restart with edit-config.sh, menu item 12 (Restart node), which waits for the epoch boundary."
+        return 0
+    fi
+    print_error "Install method is 'existing': this node runs ${path}, which update-node.sh does not replace."
+    print_info "To update it, stop the node, replace that file with the new release binary, and start it again:"
+    print_info "  sudo systemctl stop ${svc}"
+    print_info "  sudo install -m 0755 <new binary> ${path}"
+    print_info "  sudo systemctl start ${svc}"
+    print_info "On a committee node, run only the install line instead (it replaces the file while the"
+    print_info "node runs), then restart with edit-config.sh, menu item 12 (Restart node), which waits"
+    print_info "for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh"
+}
+
 # Read NETWORK from .node-meta first, then fall back to inspecting the
 # chain config's chain_name. Returns "testnet" | "mainnet" | "" (unknown).
 detect_network() {
@@ -1360,6 +1406,9 @@ json_check() {
 
 json_prepare() {
     local install_method="$1" ref="$2"
+    if [[ "$install_method" == "existing" ]]; then
+        existing_update_refusal; return 1
+    fi
     if [[ -z "$ref" ]]; then
         json_event error "no ref supplied"; return 1
     fi
@@ -1506,6 +1555,9 @@ EOF
 
 json_apply() {
     local install_method="$1"
+    if [[ "$install_method" == "existing" ]]; then
+        existing_update_refusal; return 1
+    fi
     if [[ ! -f "$(pending_state_path)" ]]; then
         json_event error "no pending update to apply"; return 1
     fi
@@ -1852,10 +1904,7 @@ main() {
 
     case "$install_method" in
         existing)
-            print_error "Install method is 'existing' (an externally-supplied binary)."
-            print_info "This script only updates source builds and Docker installs."
-            print_info "To update an existing-binary install, replace the file at"
-            print_info "  ${DEFAULT_INSTALL_DIR}/telcoin-network manually, then restart the service."
+            existing_update_refusal
             exit 1
             ;;
         source|docker)
