@@ -169,11 +169,10 @@ tn_resolve_data_dir() {
     printf '%s\n' "$var"
 }
 
-# tn_resolve_node_type — DEPRECATED. Nothing in lib/ calls it, but firewall-setup.sh
-# still does (its status header and the JSON nodetype field) until firewall-setup
-# 1.6.0 lands. Delete it only in a release after that one, so a box with this
-# library and an older firewall-setup.sh never hits "command not found". New
-# code must not call it.
+# tn_resolve_node_type — DEPRECATED. No callers remain. The stub is kept for one
+# release so a half-updated box, with this library and an older script that still
+# calls it, never hits "command not found"; delete it in the release after this
+# one. New code must not call it.
 #
 # Echoes the old default-view hint observer|validator. NODE_TYPE was a
 # presentation hint, never a role: the protocol decides a node's role from

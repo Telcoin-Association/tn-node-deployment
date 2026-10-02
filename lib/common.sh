@@ -1918,6 +1918,31 @@ _tn_due_text() {
     fi
 }
 
+# _tn_nap <seconds> — one sleep of tn_wait_restart_window that does not hold up
+# the caller's traps. bash runs a TERM, INT or HUP trap only after a foreground
+# command ends, so a plain `sleep 20` would delay it by up to 20 s; here the sleep
+# runs in the background and the shell waits for it, and a trapped signal ends the
+# wait at once. The sleep never gets fd 9, the update lock, so a sleep left behind
+# when a trap exits the script cannot keep the lock. rc 0 when the time ran out;
+# 128+N when signal N cut the wait short, and the sleep is then killed. A sleep
+# that is a shell function (a test's fake clock) runs in the foreground, since a
+# copy in the background could not move the caller's clock.
+_tn_nap() {
+    local pid rc=0
+    if declare -F sleep >/dev/null 2>&1; then
+        sleep "${1:-0}" 9>&- || true
+        return 0
+    fi
+    sleep "${1:-0}" 9>&- &
+    pid=$!
+    wait "$pid" || rc=$?
+    if (( rc > 128 )); then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    return "$rc"
+}
+
 # _tn_wait_say <step|log|warn> <message> — the default progress printer for
 # tn_wait_restart_window. Writes to stderr, so a caller that prints JSON on
 # stdout keeps it clean even when it passes no printer of its own.
@@ -1953,12 +1978,15 @@ _tn_wait_say() {
 #   3. Otherwise one step message, then poll until the epoch id rises, with a log
 #      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
 #   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap.
+# A signal the caller traps (TERM, INT, HUP) runs its trap at once, not after the
+# current sleep (_tn_nap); when that trap returns instead of exiting, the wait
+# stops there with a warning, still rc 0.
 # Callers wait before stopping or editing anything, and never before the restart
 # that rolls back a failed change.
 tn_wait_restart_window() {
     local url="${1:-}" fn="${2:-}"
     local margin settle cap poll mode out rc secs epoch boundary dur
-    local start now waited slept remaining nap due fails cur info note settle_left
+    local start now waited slept remaining nap nrc due fails cur info note settle_left
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="_tn_wait_say"
@@ -2034,9 +2062,12 @@ tn_wait_restart_window() {
         fi
         nap="$poll"
         if (( nap > remaining )); then nap="$remaining"; fi
-        # 9>&-: the sleep must not inherit the update lock's descriptor, or a
-        # sleep left running after the caller is killed would keep the lock.
-        sleep "$nap" 9>&- || true
+        nrc=0
+        _tn_nap "$nap" || nrc=$?
+        if (( nrc > 128 )); then
+            "$fn" warn "Stopped waiting for epoch ${epoch} to close: a signal interrupted the wait. Continuing." || true
+            return 0
+        fi
         slept=$(( slept + nap ))
         now="$(_tn_now)"
         waited=$(( now - start ))
@@ -2080,7 +2111,12 @@ tn_wait_restart_window() {
     while (( settle_left > 0 )); do
         nap="$poll"
         if (( nap > settle_left )); then nap="$settle_left"; fi
-        sleep "$nap" 9>&- || true
+        nrc=0
+        _tn_nap "$nap" || nrc=$?
+        if (( nrc > 128 )); then
+            "$fn" warn "Stopped the settle pause after epoch ${epoch} closed: a signal interrupted it. Continuing." || true
+            return 0
+        fi
         settle_left=$(( settle_left - nap ))
         if (( settle_left > 0 )); then
             "$fn" log "Settling: ${settle_left}s left." || true
