@@ -26,15 +26,22 @@ jobs:
             if bash -n "$f"; then echo "ok   $f"; else echo "FAIL $f"; fail=1; fi
           done < <(git ls-files '*.sh')
           exit "$fail"
+      # The lint runs here as well as on macOS because Ubuntu's awk is mawk and
+      # macOS's is BSD awk; the tool must give the same answer under both.
+      - name: bash-3.2 lint (mawk)
+        run: bash tools/check-bash32.sh $(git ls-files '*.sh')
 
   parse-macos:
-    name: bash -n (macOS bash 3.2)
+    name: bash -n and bash-3.2 lint (macOS bash 3.2)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      # macOS ships bash 3.2 as /bin/bash. Observers run on macOS, so catch any
-      # bash-4+ syntax (declare -A, ${x,,}, etc.) that would fail there. Invoke
-      # /bin/bash explicitly so this tests 3.2 regardless of what is on PATH.
+      # macOS ships bash 3.2 as /bin/bash and some operators run observers there.
+      # `bash -n` only catches syntax that 3.2 cannot parse (&>>, |&, ;;&, coproc).
+      # Constructs that parse but fail at run time (declare -A, local -n, ${x,,},
+      # mapfile, ...) are caught by tools/check-bash32.sh, run under /bin/bash so
+      # the lint itself is proven 3.2-clean. Invoke /bin/bash explicitly so this
+      # tests 3.2 regardless of what is on PATH.
       - name: Show system bash version
         run: /bin/bash --version | head -1
       - name: Parse-check every shell script under bash 3.2
@@ -44,6 +51,11 @@ jobs:
             if /bin/bash -n "$f"; then echo "ok   $f"; else echo "FAIL $f"; fail=1; fi
           done < <(git ls-files '*.sh')
           exit "$fail"
+      - name: bash-3.2 lint (BSD awk)
+        run: /bin/bash tools/check-bash32.sh $(git ls-files '*.sh')
+      # The UI helper's test suite is pure bash and must pass under 3.2 too.
+      - name: UI helper tests under bash 3.2
+        run: /bin/bash ui/tests/helper_test.sh
 
   shellcheck:
     name: shellcheck
@@ -57,6 +69,23 @@ jobs:
       - name: shellcheck (warnings -- advisory)
         continue-on-error: true
         run: shellcheck -x --severity=warning $(git ls-files '*.sh')
+
+  ui-tests:
+    name: Node Manager UI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Python 3.10 is the oldest interpreter the UI supports (Ubuntu 22.04).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install the UI's dependencies
+        run: python -m pip install -r ui/requirements.txt
+      # No network, no sudo: the tests stub the privileged helper and the node.
+      - name: Server contract, chain logic and public read-only tests
+        run: python -m unittest discover -s ui -p 'test_*.py' -v
+      - name: UI helper tests under bash 5
+        run: bash ui/tests/helper_test.sh
 
   checksums:
     name: checksum freshness
