@@ -4,37 +4,50 @@
 #
 # Installed to /usr/local/sbin/telcoin-ui-helper (root:root, 0755, NOT writable
 # by the telcoin-ui service user). This is the SINGLE privileged entry point the
-# UI is allowed to invoke via sudo. Every privileged observability operation
-# (managing the Jaeger container, editing the tel-owned node wrapper script,
-# restarting the node service) goes through here so the sudoers whitelist can
-# pin one binary with explicit, no-wildcard argument lines.
+# UI is allowed to invoke via sudo. Every privileged operation (Jaeger, the node
+# wrapper and service, updates, config edits, setup, Caddy, the firewall) goes
+# through here, so the sudoers whitelist written by install-ui.sh pins one binary
+# and lists the subcommands it may run. Arguments are validated here before
+# anything runs.
+#
+# Helper API 2 (printed by `helper-version`). The node subcommands take no
+# observer|validator argument: the helper resolves the installed node the way
+# lib/fallback.sh does (unit telcoin, then telcoin-validator, then
+# telcoin-observer). ui/server.py before 1.9.0 still sends the role as the first
+# argument; the helper drops a leading observer|validator when a call has one
+# argument more than the subcommand takes.
 #
 # Usage:
+#   telcoin-ui-helper helper-version
 #   telcoin-ui-helper jaeger-start
 #   telcoin-ui-helper jaeger-stop
 #   telcoin-ui-helper jaeger-status
-#   telcoin-ui-helper tracing-enable  <observer|validator>
-#   telcoin-ui-helper tracing-disable <observer|validator>
-#   telcoin-ui-helper update-check    <observer|validator>
-#   telcoin-ui-helper update-prepare  <observer|validator> <ref>
-#   telcoin-ui-helper update-apply    <observer|validator>
-#   telcoin-ui-helper update-discard  <observer|validator>
-#   telcoin-ui-helper restart-count   <observer|validator>
-#   telcoin-ui-helper log-clear       <observer|validator>
-#   telcoin-ui-helper config-set      <observer|validator> <field> <value>
-#   telcoin-ui-helper set-hostname    <observer|validator> <name>
+#   telcoin-ui-helper tracing-enable
+#   telcoin-ui-helper tracing-disable
+#   telcoin-ui-helper update-check
+#   telcoin-ui-helper update-prepare  <ref>
+#   telcoin-ui-helper update-apply
+#   telcoin-ui-helper update-discard
+#   telcoin-ui-helper restart-count
+#   telcoin-ui-helper log-clear
+#   telcoin-ui-helper config-set      <field> <value>
+#   telcoin-ui-helper set-hostname    <name>
 #   telcoin-ui-helper set-logrotate   <size e.g. 1G>
+#   telcoin-ui-helper clear-rotated
 #   telcoin-ui-helper caddy-status
 #   telcoin-ui-helper caddy-dns-check <domain> [inbound-public-ip]
 #   telcoin-ui-helper caddy-enable    <domain> <username> [inbound-public-ip]   (password via TN_CADDY_PASSWORD)
 #   telcoin-ui-helper caddy-disable
 #   telcoin-ui-helper rpc-status
 #   telcoin-ui-helper rpc-dns-check   <domain> [inbound-public-ip]
-#   telcoin-ui-helper rpc-enable      <domain> [inbound-public-ip]              (public RPC -- no auth)
+#   telcoin-ui-helper rpc-enable      <domain> [inbound-public-ip|-] [dashboard-domain]   (public RPC -- no auth)
 #   telcoin-ui-helper rpc-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
-#   telcoin-ui-helper addons-status   <observer|validator>      (read-only)
+#   telcoin-ui-helper addons-status                             (read-only)
+#   telcoin-ui-helper meta-cat                                  (read-only)
+#   telcoin-ui-helper setup-keygen                              (config via TN_SETUP_*)
+#   telcoin-ui-helper setup-finalize                            (config via TN_SETUP_*)
 #   telcoin-ui-helper docker-detect
 #   telcoin-ui-helper docker-status    <container>
 #   telcoin-ui-helper docker-logs      <container> [lines]
@@ -44,11 +57,30 @@
 #   telcoin-ui-helper docker-log-size  <container>
 #   telcoin-ui-helper internal-ip
 #
+# Every path below is a plain assignment, and main runs only when this file is
+# executed, so ui/tests/helper_test.sh can source it and point the paths at a
+# temp tree.
+#
 set -euo pipefail
+
+# Printed by `helper-version`. ui/server.py 1.9.0 and later need 2: node
+# subcommands without the role argument, rpc-enable with a dashboard move, and
+# setup reading TN_SETUP_RPC_DOMAIN.
+HELPER_API=2
 
 JAEGER_NAME="jaeger"
 JAEGER_IMAGE="jaegertracing/all-in-one:latest"
 TRACING_URL="http://127.0.0.1:4317"
+
+# The node's layout, as lib/fallback.sh resolves it: systemd unit files, the
+# config dir holding .node-meta (legacy installs keep one per role underneath),
+# the default data dir, the node logs, and the install dir with the wrapper
+# script and the binary.
+UNIT_DIR="/etc/systemd/system"
+ETC_DIR="/etc/telcoin"
+VAR_DIR="/var/lib/telcoin"
+LOG_DIR="/var/log/telcoin"
+OPT_DIR="/opt/telcoin"
 
 # update-node.sh + its lib/ are shipped here (root-owned) by install-ui.sh so the
 # helper can drive updates without reaching into any user-writable location.
@@ -56,72 +88,103 @@ UPDATE_SCRIPT="/opt/telcoin-ui-update/update-node.sh"
 # edit-config.sh is shipped to the same root-owned dir so config edits run the
 # CLI's own --json mode rather than re-implementing unit-file editing here.
 CONFIG_SCRIPT="/opt/telcoin-ui-update/edit-config.sh"
-# firewall-setup.sh + remove-node.sh, same root-owned dir, same --json pattern.
+# firewall-setup.sh, same root-owned dir, same --json pattern.
 FIREWALL_SCRIPT="/opt/telcoin-ui-update/firewall-setup.sh"
-# setup-*.sh, same root-owned dir. Config arrives via TN_SETUP_* env vars (and
+# setup-node.sh, same root-owned dir. Config arrives via TN_SETUP_* env vars (and
 # the BLS passphrase via TN_BLS_PASSPHRASE) which the server sets and sudoers
 # env_keeps -- so the sudoers lines stay fixed-arg and no secret touches argv.
-SETUP_OBSERVER_SCRIPT="/opt/telcoin-ui-update/setup-observer.sh"
-SETUP_VALIDATOR_SCRIPT="/opt/telcoin-ui-update/setup-validator.sh"
+SETUP_SCRIPT="/opt/telcoin-ui-update/setup-node.sh"
 
 die() { echo "$*" >&2; exit 1; }
 
-# Resolve the systemd unit BASE name for this node. New installs use the unified
-# `telcoin` unit (no role suffix; node type lives in /etc/telcoin/.node-meta);
-# legacy installs use the per-role telcoin-<role> unit. Prefer the unified unit
-# when present, then the legacy per-role unit, else default to the unified name
-# (the new-install happy path). Mirrors lib/fallback.sh's tn_resolve_service --
-# inlined as a probe here because fallback.sh is not shipped beside this
-# standalone helper (/usr/local/sbin/telcoin-ui-helper).
-service_for() {
-    local t="$1"
-    if [[ -f /etc/systemd/system/telcoin.service ]]; then
-        echo "telcoin"; return 0
-    fi
-    if [[ -f "/etc/systemd/system/telcoin-${t}.service" ]]; then
-        echo "telcoin-${t}"; return 0
-    fi
+# =============================================================================
+# Node resolution. lib/fallback.sh is not shipped beside this standalone helper,
+# so its order is repeated here. The helper never takes the node's role from its
+# caller: a box runs one node, and its role follows on-chain committee
+# membership.
+# =============================================================================
+
+# The node's systemd unit (base name), in tn_resolve_service order: the unified
+# `telcoin` unit, then the legacy telcoin-validator, then telcoin-observer. A box
+# with both legacy units gets telcoin-validator. With no unit installed the
+# answer is `telcoin`, the name a new install uses.
+node_service() {
+    local n
+    for n in telcoin telcoin-validator telcoin-observer; do
+        if [[ -f "${UNIT_DIR}/${n}.service" ]]; then
+            echo "$n"; return 0
+        fi
+    done
     echo "telcoin"
 }
 
-# Resolve the active .node-meta path for type <t>: the unified install
-# (/etc/telcoin/.node-meta) is checked first, then the legacy per-role path. Both
-# setup scripts write the meta; new installs put it at /etc/telcoin, legacy installs
-# under /etc/telcoin/<type>. Inlined here (mirrors lib/fallback.sh) because this
-# standalone helper does not ship fallback.sh beside it.
-meta_path_for() {
-    local t="$1"
-    if [[ -f /etc/telcoin/.node-meta ]]; then
-        echo "/etc/telcoin/.node-meta"
-    else
-        echo "/etc/telcoin/${t}/.node-meta"
+# The node's .node-meta, in common.sh node_meta_path order: the unified
+# /etc/telcoin/.node-meta, then the legacy role dirs (validator first). Prints the
+# unified path when none exists; callers check that the file is there.
+node_meta_path() {
+    local t
+    if [[ -f "${ETC_DIR}/.node-meta" ]]; then
+        echo "${ETC_DIR}/.node-meta"; return 0
     fi
+    for t in validator observer; do
+        if [[ -f "${ETC_DIR}/${t}/.node-meta" ]]; then
+            echo "${ETC_DIR}/${t}/.node-meta"; return 0
+        fi
+    done
+    echo "${ETC_DIR}/.node-meta"
 }
 
-# Resolve the wrapper script the node service ExecStart points at, falling back
-# to the conventional path. Mirrors server.py's wrapper_path().
-wrapper_for() {
-    local t="$1" svc
-    svc="$(service_for "$t")"
-    local unit="/etc/systemd/system/${svc}.service"
+# The node's data dir (where network-config + node-info.yaml live): the DATA_DIR=
+# its .node-meta records when that is an absolute path, else /var/lib/telcoin for
+# a unified meta (or none) and /var/lib/telcoin/<role> for a legacy role meta.
+# Unlike tn_resolve_data_dir, a recorded DATA_DIR that does not exist is still
+# returned, so set-hostname reports it instead of writing to a directory the node
+# does not read.
+node_data_dir() {
+    local meta dd=""
+    meta="$(node_meta_path)"
+    if [[ -f "$meta" ]]; then
+        dd="$(grep -m1 '^DATA_DIR=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
+    fi
+    if [[ "$dd" == /* ]]; then
+        echo "$dd"; return 0
+    fi
+    case "$meta" in
+        "${ETC_DIR}/validator/.node-meta") echo "${VAR_DIR}/validator" ;;
+        "${ETC_DIR}/observer/.node-meta")  echo "${VAR_DIR}/observer" ;;
+        *)                                 echo "${VAR_DIR}" ;;
+    esac
+}
+
+# The wrapper script the node unit's ExecStart points at, falling back to the
+# conventional path. Mirrors server.py's wrapper_path().
+node_wrapper() {
+    local svc unit exec_line path
+    svc="$(node_service)"
+    unit="${UNIT_DIR}/${svc}.service"
     if [[ -f "$unit" ]]; then
-        local exec_line
         exec_line="$(grep -m1 '^ExecStart=' "$unit" 2>/dev/null || true)"
-        local path="${exec_line#ExecStart=}"
+        path="${exec_line#ExecStart=}"
         path="${path%% *}"
         if [[ "$path" == *.sh && -f "$path" ]]; then
             echo "$path"
             return 0
         fi
     fi
-    echo "/opt/telcoin/start-${svc}.sh"
+    echo "${OPT_DIR}/start-${svc}.sh"
 }
 
-require_type() {
-    case "${1:-}" in
-        observer|validator) ;;
-        *) die "invalid node type: ${1:-<empty>} (expected observer|validator)" ;;
-    esac
+# The node's main log file, from its unit (StandardOutput=append:<path>), falling
+# back to the conventional path. Mirrors server.py parse_service_file.
+node_log_path() {
+    local svc unit p=""
+    svc="$(node_service)"
+    unit="${UNIT_DIR}/${svc}.service"
+    if [[ -f "$unit" ]]; then
+        p="$(grep -m1 '^StandardOutput=append:' "$unit" 2>/dev/null | sed 's/^StandardOutput=append://' || true)"
+    fi
+    [[ -n "$p" ]] || p="${LOG_DIR}/${svc}.log"
+    echo "$p"
 }
 
 # Validate a docker container name before it reaches `docker`. Docker's own name
@@ -132,27 +195,40 @@ require_container() {
         || die "invalid container name: ${1:-<empty>}"
 }
 
-# Resolve a node's main log file from its unit (StandardOutput=append:<path>),
-# falling back to the conventional path. Mirrors server.py parse_service_file.
-log_path_for() {
-    local t="$1" svc p=""
-    svc="$(service_for "$t")"
-    local unit="/etc/systemd/system/${svc}.service"
-    if [[ -f "$unit" ]]; then
-        p="$(grep -m1 '^StandardOutput=append:' "$unit" 2>/dev/null | sed 's/^StandardOutput=append://' || true)"
-    fi
-    [[ -n "$p" ]] || p="/var/log/telcoin/${svc}.log"
-    echo "$p"
+# Strict hostname rule, the same in ui/server.py and the browser: at most 253
+# characters, two or more dot-separated labels of letters, digits and inner
+# hyphens (1 to 63 characters each), and not only digits and dots (an IPv4
+# address). The server and the browser trim, lowercase and drop one trailing dot
+# before they check; the helper checks the name as given, so it refuses a
+# trailing dot.
+valid_hostname() {
+    local h="${1:-}" re
+    re='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
+    [[ ${#h} -le 253 && "$h" =~ $re ]] || return 1
+    [[ ! "$h" =~ ^[0-9.]+$ ]]
+}
+
+# 0 when two hostnames name the same host. DNS names are case-insensitive;
+# valid_hostname has already refused a trailing dot.
+same_host() {
+    local a b
+    a="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    b="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$a" && "$a" == "$b" ]]
+}
+
+cmd_helper_version() {
+    echo "$HELPER_API"
 }
 
 # Truncate (NOT delete) the node's log file, preserving the inode so the running
-# service keeps writing to the same handle. Restricted to /var/log/telcoin/*.log.
+# service keeps writing to the same handle. Restricted to /var/log/telcoin/*.log
+# (LOG_DIR).
 cmd_log_clear() {
-    local t="$1"; require_type "$t"
     local logf
-    logf="$(log_path_for "$t")"
+    logf="$(node_log_path)"
     case "$logf" in
-        /var/log/telcoin/*.log) ;;
+        "${LOG_DIR}"/*.log) ;;
         *) die "refusing to clear non-standard log path: $logf" ;;
     esac
     [[ -f "$logf" ]] || die "log file not found: $logf"
@@ -208,10 +284,8 @@ cmd_jaeger_status() {
 }
 
 cmd_tracing_enable() {
-    local t="$1"
-    require_type "$t"
-    local wrapper
-    wrapper="$(wrapper_for "$t")"
+    local wrapper svc
+    wrapper="$(node_wrapper)"
     [[ -f "$wrapper" ]] || die "wrapper script not found: $wrapper"
 
     cp -p "$wrapper" "${wrapper}.bak.$(date +%s)" || die "failed to back up wrapper"
@@ -221,9 +295,11 @@ cmd_tracing_enable() {
     else
         # Insert the tracing flags immediately after the `telcoin-network node`
         # token on the exec line. Anchored to the exec line so single-line and
-        # backslash-continued multi-line wrappers are both handled.
+        # backslash-continued multi-line wrappers are both handled. The node name
+        # is `telcoin` whatever the node's role, which changes with committee
+        # membership.
         sed -i -E \
-            "s#(^exec .*telcoin-network node)#\1 --tracing-url ${TRACING_URL} --node-name telcoin-${t}#" \
+            "s#(^exec .*telcoin-network node)#\1 --tracing-url ${TRACING_URL} --node-name telcoin#" \
             "$wrapper" || die "failed to edit wrapper"
         grep -q -- '--tracing-url' "$wrapper" || die "tracing flags not inserted (no matching exec line?)"
     fi
@@ -231,16 +307,14 @@ cmd_tracing_enable() {
     # Non-blocking: the durable change is the wrapper edit above. --no-block
     # returns as soon as the restart job is queued, so the caller never waits on
     # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
-    local svc; svc="$(service_for "$t")"
+    svc="$(node_service)"
     systemctl restart --no-block "$svc" || die "failed to restart $svc"
     echo "ok"
 }
 
 cmd_tracing_disable() {
-    local t="$1"
-    require_type "$t"
-    local wrapper
-    wrapper="$(wrapper_for "$t")"
+    local wrapper svc
+    wrapper="$(node_wrapper)"
     [[ -f "$wrapper" ]] || die "wrapper script not found: $wrapper"
 
     cp -p "$wrapper" "${wrapper}.bak.$(date +%s)" || die "failed to back up wrapper"
@@ -255,7 +329,7 @@ cmd_tracing_disable() {
     # Non-blocking: the durable change is the wrapper edit above. --no-block
     # returns as soon as the restart job is queued, so the caller never waits on
     # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
-    local svc; svc="$(service_for "$t")"
+    svc="$(node_service)"
     systemctl restart --no-block "$svc" || die "failed to restart $svc"
     echo "ok"
 }
@@ -263,8 +337,8 @@ cmd_tracing_disable() {
 # =============================================================================
 # Update subcommands -- thin wrappers around update-node.sh --json. They never
 # embed update logic themselves; all the building/swapping/restarting lives in
-# update-node.sh. <ref> is validated against a strict tag/branch/commit pattern
-# (no wildcards reach the shell).
+# update-node.sh, which finds the node itself. <ref> is validated against a
+# strict tag/branch/commit pattern (no wildcards reach the shell).
 # =============================================================================
 
 update_script_ready() {
@@ -272,28 +346,28 @@ update_script_ready() {
 }
 
 cmd_update_check() {
-    local t="$1"; require_type "$t"; update_script_ready
-    exec bash "$UPDATE_SCRIPT" "--${t}" --json --check
+    update_script_ready
+    exec bash "$UPDATE_SCRIPT" --json --check
 }
 
 cmd_update_prepare() {
-    local t="$1" ref="$2"
-    require_type "$t"; update_script_ready
+    local ref="$1"
+    update_script_ready
     [[ -n "$ref" ]] || die "missing ref"
     [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || die "invalid ref: $ref"
-    exec bash "$UPDATE_SCRIPT" "--${t}" --json --prepare --ref "$ref"
+    exec bash "$UPDATE_SCRIPT" --json --prepare --ref "$ref"
 }
 
 cmd_update_apply() {
-    local t="$1"; require_type "$t"; update_script_ready
+    update_script_ready
     # --yes: in JSON mode this stands in for the interactive typed CONFIRM and is
     # required for validators. The UI shows the downtime warning before calling.
-    exec bash "$UPDATE_SCRIPT" "--${t}" --json --apply --yes
+    exec bash "$UPDATE_SCRIPT" --json --apply --yes
 }
 
 cmd_update_discard() {
-    local t="$1"; require_type "$t"; update_script_ready
-    exec bash "$UPDATE_SCRIPT" "--${t}" --json --discard
+    update_script_ready
+    exec bash "$UPDATE_SCRIPT" --json --discard
 }
 
 # Count service starts since the current install. The journal for a system unit
@@ -301,14 +375,13 @@ cmd_update_discard() {
 # the helper. "Since current install" = build-info built_at if present, else the
 # node binary's mtime. Prints a single integer (0 on any uncertainty).
 cmd_restart_count() {
-    local t="$1"; require_type "$t"
-    local since=""
-    if [[ -f /etc/telcoin/build-info ]]; then
-        since="$(grep -E '^built_at=' /etc/telcoin/build-info 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    local since="" binp svc
+    if [[ -f "${ETC_DIR}/build-info" ]]; then
+        since="$(grep -E '^built_at=' "${ETC_DIR}/build-info" 2>/dev/null | head -1 | cut -d= -f2- || true)"
         since="${since//T/ }"; since="${since%Z}"
     fi
     if [[ -z "$since" ]]; then
-        local binp="/opt/telcoin/telcoin-network"
+        binp="${OPT_DIR}/telcoin-network"
         if [[ ! -f "$binp" ]]; then
             binp="$(find /usr /opt -name telcoin-network -type f 2>/dev/null | head -1 || true)"
         fi
@@ -319,7 +392,7 @@ cmd_restart_count() {
     if [[ -z "$since" ]]; then
         echo 0; return 0
     fi
-    local svc; svc="$(service_for "$t")"
+    svc="$(node_service)"
     journalctl -u "$svc" --since "$since" --no-pager 2>/dev/null \
         | grep -c "Started ${svc}.service" || true
 }
@@ -328,8 +401,8 @@ cmd_restart_count() {
 # Config subcommand -- thin wrapper around edit-config.sh --json. The field is
 # checked against the editable allowlist and the value against a per-field regex
 # HERE before the script runs (edit-config.sh re-validates with its own
-# validators). The sudoers line wildcards only the value; field is fixed by this
-# allowlist, so a bad field never reaches the script.
+# validators). The sudoers line wildcards the arguments; the field is fixed by
+# this allowlist, so a bad field never reaches the script.
 # =============================================================================
 
 config_script_ready() {
@@ -337,8 +410,8 @@ config_script_ready() {
 }
 
 cmd_config_set() {
-    local t="$1" field="$2" value="$3"
-    require_type "$t"; config_script_ready
+    local field="$1" value="$2"
+    config_script_ready
     [[ -n "$field" ]] || die "missing field"
     [[ -n "$value" ]] || die "missing value"
 
@@ -359,21 +432,7 @@ cmd_config_set() {
             die "field not editable: $field" ;;
     esac
 
-    exec bash "$CONFIG_SCRIPT" "--${t}" --json --set "${field}=${value}"
-}
-
-# Resolve a node's data dir (where network-config + node-info.yaml live) from its
-# .node-meta DATA_DIR, falling back to the conventional path.
-data_dir_for() {
-    local t="$1" meta dd=""
-    meta="$(meta_path_for "$t")"
-    if [[ -f "$meta" ]]; then
-        dd="$(grep -m1 '^DATA_DIR=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
-    fi
-    if [[ -z "$dd" ]]; then
-        [[ -f /etc/telcoin/.node-meta ]] && dd="/var/lib/telcoin" || dd="/var/lib/telcoin/${t}"
-    fi
-    echo "$dd"
+    exec bash "$CONFIG_SCRIPT" --json --set "${field}=${value}"
 }
 
 # Set the "Advertised Node Name" -- the `hostname` field in the node's
@@ -381,12 +440,10 @@ data_dir_for() {
 # charset-validated here (the server validates too). Mirrors the network-config
 # created by the node itself; only the hostname line is touched.
 cmd_set_hostname() {
-    local t="$1" name="$2"
-    require_type "$t"
+    local name="$1" dd nc owner meta svc
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid name: ${name:-<empty>}"
 
-    local dd nc
-    dd="$(data_dir_for "$t")"
+    dd="$(node_data_dir)"
     [[ -d "$dd" ]] || die "data dir not found: $dd"
     nc="${dd}/network-config"
 
@@ -403,13 +460,12 @@ cmd_set_hostname() {
     fi
 
     # Keep ownership matching the data dir so the (unprivileged) node can read it.
-    local owner
     owner="$(stat -c '%U:%G' "$dd" 2>/dev/null || true)"
     [[ -n "$owner" ]] && chown "$owner" "$nc" 2>/dev/null || true
 
     # Record in .node-meta as the persistent source of truth (survives data reads
     # and is available if a future version needs it re-applied on each start).
-    local meta; meta="$(meta_path_for "$t")"
+    meta="$(node_meta_path)"
     if [[ -f "$meta" ]]; then
         sed -i '/^ADVERTISED_NODE_NAME=/d' "$meta" 2>/dev/null || true
         printf 'ADVERTISED_NODE_NAME=%s\n' "$name" >> "$meta"
@@ -417,12 +473,12 @@ cmd_set_hostname() {
 
     # Restart so the node reads the new network-config. --no-block returns once
     # the restart job is queued (validators have a long stop window).
-    local svc; svc="$(service_for "$t")"
+    svc="$(node_service)"
     systemctl restart --no-block "$svc" || die "failed to restart $svc"
     echo "ok"
 }
 
-# Node-log rotation. One config for both node types (the unit appends to
+# Node-log rotation. One config for every node unit (the unit appends to
 # /var/log/telcoin/*.log). copytruncate is required: the node holds the log open
 # (StandardOutput=append:), so logrotate must copy-then-truncate in place rather
 # than rename, or the node keeps writing to the rotated-away inode.
@@ -460,7 +516,7 @@ cmd_set_logrotate() {
 cmd_clear_rotated() {
     local n=0 f
     shopt -s nullglob
-    for f in /var/log/telcoin/*.log.[0-9]*; do
+    for f in "${LOG_DIR}"/*.log.[0-9]*; do
         [[ -f "$f" ]] && rm -f "$f" && n=$((n+1))
     done
     shopt -u nullglob
@@ -487,7 +543,7 @@ cmd_caddy_disable() { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --pha
 # re-validates semantically via validate_public_ip and falls back to egress on failure.
 cmd_caddy_dns_check() {
     local domain="$1" public_ip="${2:-}"; caddy_script_ready
-    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    valid_hostname "$domain" || die "invalid domain: ${domain:-<empty>}"
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
     local -a args=( --json --phase=check-dns --domain "$domain" )
     [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
@@ -496,7 +552,7 @@ cmd_caddy_dns_check() {
 
 cmd_caddy_enable() {
     local domain="$1" username="$2" public_ip="${3:-}"; caddy_script_ready
-    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    valid_hostname "$domain" || die "invalid domain: ${domain:-<empty>}"
     [[ -n "$username" && "$username" =~ ^[A-Za-z0-9._-]{2,32}$ ]] || die "invalid username"
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
     [[ -n "${TN_CADDY_PASSWORD:-}" ]] || die "TN_CADDY_PASSWORD not set"
@@ -517,19 +573,33 @@ cmd_rpc_disable() { caddy_script_ready; exec bash "$CADDY_SCRIPT" --json --phase
 
 cmd_rpc_dns_check() {
     local domain="$1" public_ip="${2:-}"; caddy_script_ready
-    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    valid_hostname "$domain" || die "invalid domain: ${domain:-<empty>}"
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
     local -a args=( --json --phase=rpc-check-dns --rpc-domain "$domain" )
     [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
     exec bash "$CADDY_SCRIPT" "${args[@]}"
 }
 
+# rpc-enable <domain> [<inbound-public-ip>|-] [<dashboard-domain>]. "-" stands for
+# no inbound IP, so a dashboard domain can follow without one. When the dashboard
+# is served on <domain>, install-caddy.sh first moves it (same login) to
+# <dashboard-domain>, which must be a different host.
 cmd_rpc_enable() {
-    local domain="$1" public_ip="${2:-}"; caddy_script_ready
-    [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain: ${domain:-<empty>}"
+    local domain="$1" public_ip="${2:-}" move_to="${3:-}"; caddy_script_ready
+    valid_hostname "$domain" || die "invalid domain: ${domain:-<empty>}"
+    if [[ "$public_ip" == "-" ]]; then
+        public_ip=""
+    fi
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
+    if [[ -n "$move_to" ]]; then
+        valid_hostname "$move_to" || die "invalid dashboard domain: ${move_to}"
+        if same_host "$domain" "$move_to"; then
+            die "the dashboard domain must differ from the RPC domain (both are ${domain})"
+        fi
+    fi
     local -a args=( --json --phase=rpc-enable --rpc-domain "$domain" )
     [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
+    [[ -n "$move_to" ]] && args+=( --move-dashboard-to "$move_to" )
     exec bash "$CADDY_SCRIPT" "${args[@]}"
 }
 
@@ -583,14 +653,14 @@ _addons_meta() {
 # network, region, addresses -- no secrets; the BLS passphrase is never stored
 # here). Empty output (rc 0) when the file is absent.
 cmd_meta_cat() {
-    local t="$1"; require_type "$t"
-    local meta; meta="$(meta_path_for "$t")"
+    local meta
+    meta="$(node_meta_path)"
     [[ -f "$meta" ]] && cat "$meta" || true
 }
 
 cmd_addons_status() {
-    local t="$1"; require_type "$t"
-    local meta; meta="$(meta_path_for "$t")"
+    local meta
+    meta="$(node_meta_path)"
     local network region hc obs vpn overlay pubkey extra
     network=$(_addons_meta "$meta" NETWORK)
     region=$(_addons_meta "$meta" REGION)
@@ -620,20 +690,17 @@ cmd_addons_status() {
 }
 
 # =============================================================================
-# Setup subcommands -- thin wrappers around setup-<type>.sh --json --phase=...
+# Setup subcommands -- thin wrappers around setup-node.sh --json --phase=...
 # Config comes from TN_SETUP_* env (validated here); the BLS passphrase stays in
 # TN_BLS_PASSPHRASE (env only, never argv) and is inherited by the exec'd script.
+# Public RPC is requested by TN_SETUP_RPC_DOMAIN alone: a hostname becomes
+# --rpc-domain, and --rpc-public is never sent (without a domain it only printed
+# a notice).
 # =============================================================================
 
 cmd_setup() {
-    local phase="$1" t="$2"
-    require_type "$t"
-    local script
-    case "$t" in
-        observer)  script="$SETUP_OBSERVER_SCRIPT" ;;
-        validator) script="$SETUP_VALIDATOR_SCRIPT" ;;
-    esac
-    [[ -f "$script" ]] || die "setup script not found: $script"
+    local phase="$1"
+    [[ -f "$SETUP_SCRIPT" ]] || die "setup script not found: $SETUP_SCRIPT"
 
     local network="${TN_SETUP_NETWORK:-testnet}"
     local method="${TN_SETUP_INSTALL_METHOD:-}"
@@ -646,7 +713,7 @@ cmd_setup() {
     local lis_primary="${TN_SETUP_LIS_PRIMARY:-}"
     local lis_worker="${TN_SETUP_LIS_WORKER:-}"
     local public_ip="${TN_SETUP_PUBLIC_IP:-}"
-    local rpc_public="${TN_SETUP_RPC_PUBLIC:-false}"
+    local rpc_domain="${TN_SETUP_RPC_DOMAIN:-}"
     local svc_user="${TN_SETUP_SERVICE_USER:-}"
     local svc_group="${TN_SETUP_SERVICE_GROUP:-}"
     local adv_name="${TN_SETUP_ADVERTISED_NAME:-}"
@@ -656,7 +723,6 @@ cmd_setup() {
     case "$network" in testnet|adiri) ;; *) die "invalid network: $network" ;; esac
     case "$method" in source|docker|existing|"") ;; *) die "invalid install method: $method" ;; esac
     case "$passm" in loadcredential|tpm) ;; *) die "invalid passphrase method: $passm" ;; esac
-    case "$rpc_public" in true|false) ;; *) die "invalid rpc_public: $rpc_public" ;; esac
     [[ -z "$addr"      || "$addr"      =~ ^0x[0-9a-fA-F]{40}$ ]]            || die "invalid address"
     [[ -z "$build_ref" || "$build_ref" =~ ^[A-Za-z0-9._/-]+$ ]]            || die "invalid build ref"
     [[ -z "$image"     || ( "$image"   =~ ^[A-Za-z0-9._/:@-]+$ && "$image" == *:* ) ]] || die "invalid docker image"
@@ -665,12 +731,13 @@ cmd_setup() {
         [[ -z "$m" || "$m" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] || die "invalid multiaddr: $m"
     done
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
+    [[ -z "$rpc_domain" ]] || valid_hostname "$rpc_domain" || die "invalid rpc domain: $rpc_domain"
     [[ -z "$svc_user"  || "$svc_user"  =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service user"
     [[ -z "$svc_group" || "$svc_group" =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service group"
     [[ -z "$adv_name"  || "$adv_name"  =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid advertised name"
     [[ -z "$data_dir"  || ( "$data_dir" =~ ^/[A-Za-z0-9._/-]+$ && "$data_dir" != *".."* ) ]] || die "invalid data directory"
 
-    local -a args=( --json "--phase=${phase}" --network "$network" --passphrase-method "$passm" --rpc-public "$rpc_public" )
+    local -a args=( --json "--phase=${phase}" --network "$network" --passphrase-method "$passm" )
     [[ -n "$method" ]]      && args+=( --install-method "$method" )
     [[ -n "$addr" ]]        && args+=( --address "$addr" )
     [[ -n "$build_ref" ]]   && args+=( --build-ref "$build_ref" )
@@ -680,16 +747,17 @@ cmd_setup() {
     [[ -n "$lis_primary" ]] && args+=( --listener-primary "$lis_primary" )
     [[ -n "$lis_worker" ]]  && args+=( --listener-worker "$lis_worker" )
     [[ -n "$public_ip" ]]   && args+=( --public-ip "$public_ip" )
+    [[ -n "$rpc_domain" ]]  && args+=( --rpc-domain "$rpc_domain" )
     [[ -n "$svc_user" ]]    && args+=( --service-user "$svc_user" )
     [[ -n "$svc_group" ]]   && args+=( --service-group "$svc_group" )
     [[ -n "$adv_name" ]]    && args+=( --advertised-name "$adv_name" )
     [[ -n "$data_dir" ]]    && args+=( --data-dir "$data_dir" )
 
-    exec bash "$script" "${args[@]}"
+    exec bash "$SETUP_SCRIPT" "${args[@]}"
 }
 
-cmd_setup_keygen()   { cmd_setup keygen   "$1"; }
-cmd_setup_finalize() { cmd_setup finalize "$1"; }
+cmd_setup_keygen()   { cmd_setup keygen; }
+cmd_setup_finalize() { cmd_setup finalize; }
 
 # =============================================================================
 # Docker detection subcommands -- READ-ONLY. These let the UI recognise and
@@ -796,48 +864,82 @@ cmd_docker_log_size() {
     stat -c%s "$log_path" 2>/dev/null || echo 0
 }
 
+# How many arguments a node subcommand takes once the old role argument is gone.
+# Fails for every other subcommand, whose arguments are never touched.
+legacy_arity() {
+    case "${1:-}" in
+        tracing-enable|tracing-disable|update-check|update-apply|update-discard) echo 0 ;;
+        restart-count|log-clear|addons-status|meta-cat|setup-keygen|setup-finalize) echo 0 ;;
+        update-prepare|set-hostname) echo 1 ;;
+        config-set) echo 2 ;;
+        *) return 1 ;;
+    esac
+}
+
 main() {
-    local sub="${1:-}"
+    local sub="${1:-}" arity
+    if [[ $# -gt 0 ]]; then
+        shift
+    fi
+
+    # ui/server.py before 1.9.0 puts observer|validator in front of a node
+    # subcommand's arguments. Drop it only when the call has more arguments than
+    # the subcommand takes, so `set-hostname validator` still names the node
+    # "validator". Anything left over is an error.
+    if arity="$(legacy_arity "$sub")"; then
+        if [[ $# -gt $arity ]]; then
+            case "$1" in observer|validator) shift ;; esac
+        fi
+        [[ $# -le $arity ]] || die "too many arguments for ${sub}: $*"
+    fi
+
     case "$sub" in
+        helper-version)  cmd_helper_version ;;
         jaeger-start)    cmd_jaeger_start ;;
         jaeger-stop)     cmd_jaeger_stop ;;
         jaeger-status)   cmd_jaeger_status ;;
-        tracing-enable)  shift; cmd_tracing_enable "${1:-}" ;;
-        tracing-disable) shift; cmd_tracing_disable "${1:-}" ;;
-        update-check)    shift; cmd_update_check   "${1:-}" ;;
-        update-prepare)  shift; cmd_update_prepare "${1:-}" "${2:-}" ;;
-        update-apply)    shift; cmd_update_apply   "${1:-}" ;;
-        update-discard)  shift; cmd_update_discard "${1:-}" ;;
-        restart-count)   shift; cmd_restart_count "${1:-}" ;;
-        log-clear)       shift; cmd_log_clear "${1:-}" ;;
-        config-set)      shift; cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
-        set-hostname)    shift; cmd_set_hostname "${1:-}" "${2:-}" ;;
-        set-logrotate)   shift; cmd_set_logrotate "${1:-}" ;;
+        tracing-enable)  cmd_tracing_enable ;;
+        tracing-disable) cmd_tracing_disable ;;
+        update-check)    cmd_update_check ;;
+        update-prepare)  cmd_update_prepare "${1:-}" ;;
+        update-apply)    cmd_update_apply ;;
+        update-discard)  cmd_update_discard ;;
+        restart-count)   cmd_restart_count ;;
+        log-clear)       cmd_log_clear ;;
+        config-set)      cmd_config_set "${1:-}" "${2:-}" ;;
+        set-hostname)    cmd_set_hostname "${1:-}" ;;
+        set-logrotate)   cmd_set_logrotate "${1:-}" ;;
         clear-rotated)   cmd_clear_rotated ;;
         caddy-status)    cmd_caddy_status ;;
-        caddy-dns-check) shift; cmd_caddy_dns_check "${1:-}" "${2:-}" ;;
-        caddy-enable)    shift; cmd_caddy_enable "${1:-}" "${2:-}" "${3:-}" ;;
+        caddy-dns-check) cmd_caddy_dns_check "${1:-}" "${2:-}" ;;
+        caddy-enable)    cmd_caddy_enable "${1:-}" "${2:-}" "${3:-}" ;;
         caddy-disable)   cmd_caddy_disable ;;
         rpc-status)      cmd_rpc_status ;;
-        rpc-dns-check)   shift; cmd_rpc_dns_check "${1:-}" "${2:-}" ;;
-        rpc-enable)      shift; cmd_rpc_enable "${1:-}" "${2:-}" ;;
+        rpc-dns-check)   cmd_rpc_dns_check "${1:-}" "${2:-}" ;;
+        rpc-enable)
+            [[ $# -le 3 ]] || die "too many arguments for rpc-enable: $*"
+            cmd_rpc_enable "${1:-}" "${2:-}" "${3:-}" ;;
         rpc-disable)     cmd_rpc_disable ;;
         firewall-status) cmd_firewall_status ;;
-        firewall-port)   shift; cmd_firewall_port "${1:-}" "${2:-}" ;;
-        addons-status)   shift; cmd_addons_status "${1:-}" ;;
-        meta-cat)        shift; cmd_meta_cat "${1:-}" ;;
-        setup-keygen)    shift; cmd_setup_keygen   "${1:-}" ;;
-        setup-finalize)  shift; cmd_setup_finalize "${1:-}" ;;
+        firewall-port)   cmd_firewall_port "${1:-}" "${2:-}" ;;
+        addons-status)   cmd_addons_status ;;
+        meta-cat)        cmd_meta_cat ;;
+        setup-keygen)    cmd_setup_keygen ;;
+        setup-finalize)  cmd_setup_finalize ;;
         docker-detect)    cmd_docker_detect ;;
-        docker-status)    shift; cmd_docker_status    "${1:-}" ;;
-        docker-logs)      shift; cmd_docker_logs      "${1:-}" "${2:-}" ;;
-        docker-logs-full) shift; cmd_docker_logs_full "${1:-}" ;;
-        docker-node-info) shift; cmd_docker_node_info "${1:-}" ;;
-        docker-stats)     shift; cmd_docker_stats     "${1:-}" ;;
-        docker-log-size)  shift; cmd_docker_log_size  "${1:-}" ;;
+        docker-status)    cmd_docker_status    "${1:-}" ;;
+        docker-logs)      cmd_docker_logs      "${1:-}" "${2:-}" ;;
+        docker-logs-full) cmd_docker_logs_full "${1:-}" ;;
+        docker-node-info) cmd_docker_node_info "${1:-}" ;;
+        docker-stats)     cmd_docker_stats     "${1:-}" ;;
+        docker-log-size)  cmd_docker_log_size  "${1:-}" ;;
         internal-ip)      cmd_internal_ip ;;
         *) die "unknown subcommand: ${sub:-<empty>}" ;;
     esac
 }
 
-main "$@"
+# Run only when executed. ui/tests/helper_test.sh sources this file to test the
+# functions above, and sourcing must not run a subcommand.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
