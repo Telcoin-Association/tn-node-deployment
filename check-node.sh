@@ -70,11 +70,14 @@ EXPECTED_CHAIN_ID=""
 
 # The node's own identity, set by resolve_identity: the authority id that
 # consensus headers carry as author, and the execution address that committees
-# list. The _SRC variables say where each value came from.
+# list. The _SRC variables say where each value came from; AUTH_WHY says why
+# tn_info gave no authority id; DISK_EXEC_ADDR is node-info.yaml's address.
 AUTH_ID=""
 AUTH_SRC=""
+AUTH_WHY=""
 EXEC_ADDR=""
 EXEC_SRC=""
+DISK_EXEC_ADDR=""
 
 # Set by the epoch section (§5.5). IN_COMMITTEE is yes or no only when the
 # committee was read on-chain through the network RPC; otherwise it stays
@@ -342,17 +345,22 @@ resolve_network() {
 # resolve_identity -- the node's own identity, from tn_info on the local RPC:
 # authority_id (consensus headers carry it as author, in the same base58 form)
 # and execution_address (committees list it). --authority-id is the fallback
-# when the local node does not answer; the execution address falls back to
-# node-info.yaml, then to VALIDATOR_ADDRESS. Earlier versions read
-# primary_network_key from node-info.yaml, which is the libp2p key, not the
-# authority id, so the header check never matched. Always returns 0.
+# when the local node does not answer; AUTH_WHY says why tn_info gave no id. The
+# execution address falls back to node-info.yaml (DISK_EXEC_ADDR, read either
+# way), then to VALIDATOR_ADDRESS. Earlier versions read primary_network_key
+# from node-info.yaml, which is the libp2p key, not the authority id, so the
+# header check never matched. Always returns 0.
 resolve_identity() {
     local out rc v node_info
-    if [[ "$LOCAL_RPC_MODE" == "HEALTHY" || "$LOCAL_RPC_MODE" == "SLOW" ]] \
-        && have_fns tn_rpc_call tn_json_field; then
+    if ! have_fns tn_rpc_call tn_json_field; then
+        AUTH_WHY="tn_info not asked: lib/common.sh ${COMMON_VERSION:-unknown} is too old"
+    elif [[ "$LOCAL_RPC_MODE" != "HEALTHY" && "$LOCAL_RPC_MODE" != "SLOW" ]]; then
+        AUTH_WHY="tn_info not asked: the local RPC is ${LOCAL_RPC_MODE}"
+    else
         rc=0
         out="$(tn_rpc_call "$RPC_URL" tn_info '[]' 8)" || rc=$?
         if [[ "$rc" -eq 0 ]]; then
+            AUTH_WHY="tn_info has no authority_id"
             v="$(tn_json_field "$out" authority_id || true)"
             if [[ "$v" =~ ^[1-9A-HJ-NP-Za-km-z]{20,64}$ ]]; then
                 AUTH_ID="$v"
@@ -363,23 +371,51 @@ resolve_identity() {
                 EXEC_ADDR="$(lower "$v")"
                 EXEC_SRC="tn_info"
             fi
+        else
+            AUTH_WHY="no tn_info answer: ${out}"
         fi
     fi
     if [[ -z "$AUTH_ID" && -n "$AUTHORITY_ID" ]]; then
         AUTH_ID="$AUTHORITY_ID"
         AUTH_SRC="--authority-id"
     fi
-    if [[ -z "$EXEC_ADDR" ]] && have_fns tn_node_info_field; then
+    if have_fns tn_node_info_field; then
         node_info="$(detect_data_dir)/node-info.yaml"
         v="$(tn_node_info_field "$node_info" execution_address 2>/dev/null || true)"
-        if [[ "$v" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-            EXEC_ADDR="$(lower "$v")"
-            EXEC_SRC="node-info.yaml"
-        fi
+        [[ ! "$v" =~ ^0x[0-9a-fA-F]{40}$ ]] || DISK_EXEC_ADDR="$(lower "$v")"
+    fi
+    if [[ -z "$EXEC_ADDR" && -n "$DISK_EXEC_ADDR" ]]; then
+        EXEC_ADDR="$DISK_EXEC_ADDR"
+        EXEC_SRC="node-info.yaml"
     fi
     if [[ -z "$EXEC_ADDR" && "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
         EXEC_ADDR="$(lower "$VALIDATOR_ADDRESS")"
         EXEC_SRC="$VALIDATOR_ADDRESS_SRC"
+    fi
+    return 0
+}
+
+# report_address_mismatch -- warn when VALIDATOR_ADDRESS in .node-meta is not the
+# node's own execution address (tn_info, else node-info.yaml on disk). The stake
+# status in §5.5 and §7 is read for the .node-meta address; §6 judges the node by
+# its own address. Runs right after resolve_identity, so it also fires with
+# --no-network or the local RPC down. Silent for --address (the operator chose
+# that address) and when either address is unknown.
+report_address_mismatch() {
+    local meta_addr
+    [[ "$VALIDATOR_ADDRESS_SRC" == ".node-meta" ]] || return 0
+    [[ "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 0
+    case "$EXEC_SRC" in
+        tn_info|node-info.yaml) ;;
+        *) return 0 ;;
+    esac
+    meta_addr="$(lower "$VALIDATOR_ADDRESS")"
+    [[ "$meta_addr" != "$EXEC_ADDR" ]] || return 0
+    print_warn "VALIDATOR_ADDRESS in .node-meta (${VALIDATOR_ADDRESS}) is not the node's execution address (${EXEC_ADDR}, from ${EXEC_SRC}); the on-chain status report is for the .node-meta address"
+    if [[ "$EXEC_SRC" == "tn_info" && "$DISK_EXEC_ADDR" == "$meta_addr" ]]; then
+        print_info "  node-info.yaml already has the .node-meta address, so restart the node (sudo systemctl restart ${SERVICE_NAME}) to run with it, as after prepare-stake.sh --rotate-address --no-restart."
+    else
+        print_info "  If you rotated the address with --no-restart, restart the node; otherwise set VALIDATOR_ADDRESS in .node-meta to ${EXEC_ADDR}."
     fi
     return 0
 }
@@ -537,40 +573,51 @@ fetch_consensus_header() {
     # Errors go to stderr and are captured into CH_ERROR by the caller.
     # Response is passed via environment so the heredoc can be single-quoted
     # (no quote-escaping required inside the Python script).
+    # The assignments are eval'd, and the answer comes from an RPC (any URL
+    # --network-rpc names), so only plain integers and base58 ids get through:
+    # a header field holding $(...) must never reach the shell.
     local parsed
     parsed=$(RESP="$resp" python3 <<'PYEOF' 2>&1
-import os, json, sys
+import os, json, re, sys
 raw = os.environ.get('RESP', '')
 try:
     d = json.loads(raw)
 except Exception as e:
     sys.stderr.write('parse_error=' + str(e))
     sys.exit(2)
-if isinstance(d, dict) and 'error' in d:
-    msg = d.get('error', {}).get('message', 'unknown')
-    sys.stderr.write('rpc_error=' + msg)
+if isinstance(d, dict) and d.get('error'):
+    err = d.get('error')
+    msg = err.get('message', 'unknown') if isinstance(err, dict) else str(err)
+    sys.stderr.write('rpc_error=' + str(msg)[:200])
     sys.exit(3)
-r = (d.get('result') if isinstance(d, dict) else None) or {}
-sd = r.get('sub_dag') or {}
-hdrs = sd.get('headers') or []
-reps = (sd.get('reputation_score') or {}).get('scores_per_authority') or {}
-block = r.get('number', 0)
-ts = sd.get('commit_timestamp', 0)
-epoch = hdrs[0].get('epoch', 0) if hdrs else 0
-authors = sorted({h.get('author', '') for h in hdrs if h.get('author')})
+B58 = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{1,128}$')
+def num(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+def is_id(v):
+    return isinstance(v, str) and B58.match(v) is not None
+def obj(v):
+    return v if isinstance(v, dict) else {}
+r = obj(d.get('result') if isinstance(d, dict) else None)
+sd = obj(r.get('sub_dag'))
+hdrs = [h for h in (sd.get('headers') or []) if isinstance(h, dict)]
+# Nodes report sub_dag.reputation_scores {scores_per_authority, final_of_schedule};
+# the singular reputation_score is kept as a fallback.
+rs = obj(sd.get('reputation_scores') or sd.get('reputation_score'))
+reps = obj(rs.get('scores_per_authority'))
+block = num(r.get('number', 0))
+ts = num(sd.get('commit_timestamp', 0))
+epoch = num(hdrs[0].get('epoch', 0)) if hdrs else 0
+authors = sorted({h.get('author') for h in hdrs if is_id(h.get('author'))})
 # Highest execution block referenced by any header in this commit -- gives
 # the network's view of the latest EVM block without a second RPC call.
-exec_blocks = [
-    (h.get('latest_execution_block') or {}).get('number', 0)
-    for h in hdrs
-]
+exec_blocks = [num(obj(h.get('latest_execution_block')).get('number', 0)) for h in hdrs]
 max_exec = max(exec_blocks) if exec_blocks else 0
-print('CH_BLOCK=' + str(block))
-print('CH_TS=' + str(ts))
-print('CH_EPOCH=' + str(epoch))
-print('CH_EXEC_BLOCK=' + str(max_exec))
+print('CH_BLOCK=%d' % block)
+print('CH_TS=%d' % ts)
+print('CH_EPOCH=%d' % epoch)
+print('CH_EXEC_BLOCK=%d' % max_exec)
 print('CH_AUTHORS="' + ' '.join(authors) + '"')
-print('CH_REPS="' + ' '.join(k + '=' + str(v) for k, v in sorted(reps.items())) + '"')
+print('CH_REPS="' + ' '.join('%s=%d' % (k, num(v)) for k, v in sorted(reps.items()) if is_id(k)) + '"')
 PYEOF
 )
     local rc=$?
@@ -990,13 +1037,18 @@ rpc_block_check() {
 }
 
 # risky_api_modules <launch-file> <flag> -- print the namespaces among debug,
-# trace, admin and all that <flag> (--http.api or --ws.api) names on the node
+# trace and admin that <flag> (--http.api or --ws.api) enables on the node
 # command, comma-separated; rc 1 when there are none or the flag is absent.
+# `all` is not one of them: the node (v0.15.0 `node --help`) reads it as eth,
+# net, web3 and rpc, and reads a list starting with `all` as plain `all`, so a
+# module named after it is not enabled.
 risky_api_modules() {
     local v m out=""
     v="$(tn_launch_flag_get "$1" "$2" 2>/dev/null)" || return 1
-    v=",$(lower "$v" | tr ' ' ','),"
-    for m in debug trace admin all; do
+    v="$(lower "$v" | tr ' ' ',')"
+    [[ "${v%%,*}" != "all" ]] || return 1
+    v=",${v},"
+    for m in debug trace admin; do
         case "$v" in
             *",${m},"*) out="${out:+${out}, }${m}" ;;
         esac
@@ -1278,6 +1330,7 @@ report_worker_count() {
             if (( need > local_n )); then
                 print_error "Workers: the network requires ${need} per node (WorkerConfigs.numWorkers(), ${src}) but node-info.yaml lists ${local_n}"
                 print_info "  The node cannot join a committee that expects ${need} workers."
+                print_info "  Workers are fixed when the node keys are generated and no script here adds one, so email support@telcoin.org before this node is due for a committee seat."
                 (( ++HEALTH_ISSUES ))
             else
                 print_info "Workers: ${local_n} configured, ${need} required on-chain"
@@ -1352,6 +1405,10 @@ report_epoch_committee() {
     else
         print_info "Epoch ${e} (${src}): end time not available (${line})"
     fi
+    # The committee size from the chain (§3 counts only the latest commit's authors).
+    if [[ "$committee" != "-" ]]; then
+        print_info "Committee of epoch ${e}: $(printf '%s\n' "$committee" | tr ',' '\n' | grep -c '^0x') members (on-chain)"
+    fi
 
     # Membership of E, E+1 and E+2, by execution address (lists are lowercase).
     if [[ -z "$EXEC_ADDR" ]]; then
@@ -1386,16 +1443,11 @@ report_epoch_committee() {
         if [[ "$IN_COMMITTEE" == "yes" && "$LOCAL_NODE_MODE" == "Observer" ]]; then
             print_warn "In the committee for epoch ${e}, but the node reports Observer: it is not taking part in consensus"
             if [[ -n "${LOC_EPOCH:-}" && "${LOC_EPOCH:-}" != "$e" ]]; then
-                print_info "  The node is at epoch ${LOC_EPOCH}; it joins once it reaches epoch ${e}."
+                print_info "  The node is at epoch ${LOC_EPOCH}: let it catch up, and it joins once it reaches epoch ${e}."
+            else
+                print_info "  Look in the node log (journalctl -u ${SERVICE_NAME} -n 200) for why it does not join the committee."
             fi
         fi
-    fi
-
-    # The stake status is read for VALIDATOR_ADDRESS. Say so when .node-meta
-    # records an address other than the one the node itself runs with.
-    if [[ "$VALIDATOR_ADDRESS_SRC" == ".node-meta" && "$EXEC_SRC" != ".node-meta" && -n "$EXEC_ADDR" ]] \
-        && [[ "$(lower "$VALIDATOR_ADDRESS")" != "$EXEC_ADDR" ]]; then
-        print_warn "VALIDATOR_ADDRESS in .node-meta (${VALIDATOR_ADDRESS}) is not the node's execution address (${EXEC_ADDR}, from ${EXEC_SRC}); the stake status is read for the .node-meta address"
     fi
 
     # Activation epoch of a staked validator (status read in §3's probe).
@@ -1420,24 +1472,37 @@ report_epoch_committee() {
     return 0
 }
 
-# stake_status_for_rule -- the stake status (node_stake_status first field) that
-# §6 uses when committee membership is unknown: the network read when it worked,
-# else a read through the local node (its state lags while it catches up), else
-# an empty line.
+# stake_status_for_rule -- the stake status (node_stake_status first field) of
+# the node's own execution address, which §6 uses when committee membership is
+# unknown. Only an address from tn_info or node-info.yaml counts, never the
+# .node-meta one: when the two differ, the .node-meta address may be another
+# validator's. §3's network read is reused when it was for the same address;
+# otherwise one read through the network RPC, or through the local node (its
+# state lags while it catches up) when the network RPC is not in use. Prints an
+# empty line when the status cannot be read.
 stake_status_for_rule() {
-    local line rc addr
-    if [[ "$ONCHAIN_STAKE_RC" == "0" ]]; then
+    local line rc url
+    case "$EXEC_SRC" in
+        tn_info|node-info.yaml) ;;
+        *) echo ""; return 0 ;;
+    esac
+    if [[ "$ONCHAIN_STAKE_RC" == "0" && "$(lower "$VALIDATOR_ADDRESS")" == "$EXEC_ADDR" ]]; then
         echo "${ONCHAIN_STAKE_LINE%% *}"
         return 0
     fi
-    addr="${VALIDATOR_ADDRESS:-$EXEC_ADDR}"
-    if [[ -n "$addr" ]] && [[ "$LOCAL_RPC_MODE" == "HEALTHY" || "$LOCAL_RPC_MODE" == "SLOW" ]]; then
-        rc=0
-        line="$(node_stake_status "$addr" "$RPC_URL" 2>/dev/null)" || rc=$?
-        if [[ "$rc" -eq 0 ]]; then
-            echo "${line%% *}"
-            return 0
-        fi
+    if [[ "$NETWORK_OK" == "true" ]]; then
+        url="$NETWORK_RPC"
+    elif [[ "$LOCAL_RPC_MODE" == "HEALTHY" || "$LOCAL_RPC_MODE" == "SLOW" ]]; then
+        url="$RPC_URL"
+    else
+        echo ""
+        return 0
+    fi
+    rc=0
+    line="$(node_stake_status "$EXEC_ADDR" "$url" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+        echo "${line%% *}"
+        return 0
     fi
     echo ""
 }
@@ -1471,10 +1536,10 @@ report_participation() {
 
     if [[ -z "$AUTH_ID" ]]; then
         if [[ "$IN_COMMITTEE" == "yes" ]]; then
-            print_warn "In the committee for epoch ${EPOCH_E}, but the authority id is unknown (no tn_info answer), so header presence was not checked"
+            print_warn "In the committee for epoch ${EPOCH_E}, but the authority id is unknown (${AUTH_WHY:-not read}), so header presence was not checked"
             print_info "  Pass --authority-id <BASE58> to check it."
         else
-            print_info "Authority ID unknown (no tn_info answer). Pass --authority-id <BASE58> to check header presence."
+            print_info "Authority ID unknown (${AUTH_WHY:-not read}). Pass --authority-id <BASE58> to check header presence."
         fi
         return 0
     fi
@@ -1608,6 +1673,10 @@ else
 fi
 report_legacy_observer_flag
 report_node_config
+# The node's own authority id and execution address (tn_info, else node-info.yaml),
+# checked against VALIDATOR_ADDRESS in .node-meta before anything relies on either.
+resolve_identity
+report_address_mismatch
 
 # =============================================================================
 # 2. LOCAL RPC PROBE (probed before the report header; rendered here)
@@ -1677,8 +1746,10 @@ if [[ "$QUERY_NETWORK" == "true" ]]; then
         NOW=$(date +%s)
         NET_AGE=$(( NOW - NET_TS ))
         print_ok "Network consensus current"
-        committee_size=$(echo "$NET_AUTHORS" | wc -w | tr -d ' ')
-        print_info "Network: block ${NET_BLOCK} · epoch ${NET_EPOCH} · committee ${committee_size} · commit $(fmt_age "$NET_AGE")"
+        # Distinct authors of the latest commit's headers, not the committee size
+        # (§5.5 prints that from the chain).
+        commit_authors=$(echo "$NET_AUTHORS" | wc -w | tr -d ' ')
+        print_info "Network: block ${NET_BLOCK} · epoch ${NET_EPOCH} · ${commit_authors} authors in the latest commit · commit $(fmt_age "$NET_AGE")"
         if (( NET_AGE > STALE_THRESHOLD_SECONDS )); then
             print_warn "Network commit is older than ${STALE_THRESHOLD_SECONDS}s -- network may be quiet"
         fi
@@ -1892,11 +1963,9 @@ if read_sync_progress; then
     fi
 fi
 
-# The node's own authority id and execution address (tn_info), then the on-chain
-# stake status: §5.5 shows the activation epoch from it, §6 falls back on it when
-# committee membership is unknown, and §7 renders it. Without --address or a
-# readable .node-meta, the node's execution address is the one checked.
-resolve_identity
+# The on-chain stake status of VALIDATOR_ADDRESS: §5.5 shows the activation epoch
+# from it and §7 renders it. Without --address or a readable .node-meta, the
+# node's own execution address (resolved in §1) is the one checked.
 if [[ -z "$VALIDATOR_ADDRESS" && -n "$EXEC_ADDR" ]]; then
     VALIDATOR_ADDRESS="$EXEC_ADDR"
     VALIDATOR_ADDRESS_SRC="$EXEC_SRC"
@@ -1939,7 +2008,7 @@ if [[ -n "$VALIDATOR_ADDRESS" ]]; then
         # Without the network RPC there is no stake status to show, and a
         # "No validator record found" here would mislead. The §10 banner
         # enumerates the skip.
-        print_info "Skipping on-chain validator status (network RPC unreachable)"
+        print_info "Skipping on-chain validator status ($(network_gap_reason))"
     fi
 else
     echo ""
