@@ -676,15 +676,22 @@ rpc_url_is_private() {
 # on the part after its last ":" (…/adiri:v0.15.0-adiri). Prints one message on
 # stdout when rc is not 0:
 #   rc 0  allowed: a release tag at or above the floor, or no floor for <network>
-#   rc 1  refused: a release tag below the floor
-#   rc 2  allowed with a warning: not a release tag, so the version is unknown
-# <network> is testnet (or adiri), mainnet or devnet; devnet has no floor.
+#   rc 1  refused: an empty ref, or a version below the floor whatever its suffix
+#   rc 2  allowed with a warning: not a release tag (main, a commit, a digest, or
+#         a pre-release such as v0.13.0-rc1), so the version is unknown
+# A release tag is vX.Y.Z with no suffix or with the network's tag suffix
+# (-adiri on testnet). <network> is testnet (or adiri), mainnet or devnet;
+# devnet, and an empty or unknown network, have no floor.
 tn_ref_min_check() {
-    local ref="${1:-}" network="${2:-}" floor tag ver tag_re
+    local ref="${1:-}" network="${2:-}" floor suffix tag ver rest tag_re
+    if [[ -z "$ref" ]]; then
+        printf '%s\n' "empty ref: no source ref or docker image was given."
+        return 1
+    fi
     case "$network" in
-        testnet|adiri) floor="$MIN_SOURCE_VERSION_TESTNET" ;;
-        mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET" ;;
-        *)             floor="" ;;
+        testnet|adiri) floor="$MIN_SOURCE_VERSION_TESTNET"; suffix="$NETWORK_TAG_SUFFIX_TESTNET" ;;
+        mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET"; suffix="$NETWORK_TAG_SUFFIX_MAINNET" ;;
+        *)             floor=""; suffix="" ;;
     esac
     [[ -n "$floor" ]] || return 0
     tag="$ref"
@@ -694,27 +701,34 @@ tn_ref_min_check() {
     tag_re='^v?([0-9]+\.[0-9]+\.[0-9]+)(-[A-Za-z0-9][A-Za-z0-9.-]*)?$'
     if [[ "$tag" =~ $tag_re ]]; then
         ver="${BASH_REMATCH[1]}"
-        if version_gte "$ver" "$floor"; then
+        rest="${BASH_REMATCH[2]}"
+        if ! version_gte "$ver" "$floor"; then
+            printf '%s\n' "${ref} is older than v${floor}, the oldest ${network} release these scripts support (v${floor} is the first with keytool set-rpc, proof-of-possession signing and state export). Pick v${floor} or a newer release."
+            return 1
+        fi
+        if [[ -z "$rest" || "$rest" == "$suffix" ]]; then
             return 0
         fi
-        printf '%s\n' "${ref} is older than v${floor}, the oldest ${network} release these scripts support (v${floor} is the first with keytool set-rpc, proof-of-possession signing and state export). Pick v${floor} or a newer release."
-        return 1
+        printf '%s\n' "${ref} is not a release tag (release tags look like v${floor}${suffix}), so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is a release at v${floor} or newer."
+        return 2
     fi
-    printf '%s\n' "${ref:-(empty ref)} is not a release tag, so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is v${floor} or newer."
+    printf '%s\n' "${ref} is not a release tag, so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is v${floor} or newer."
     return 2
 }
 
 # tn_genesis_chain_id <genesis-file> — print the chain id a genesis file declares
-# (the first chainId or chain_id key, YAML or JSON, decimal or 0x-hex) as plain
-# decimal. rc 1 when the file is unreadable or holds no such key.
+# (the first chainId or chain_id key, decimal or 0x-hex, quoted or not) as plain
+# decimal. The key may sit anywhere on a line, so YAML, pretty JSON and one-line
+# JSON all work; YAML comment lines are skipped, and a longer key that merely ends
+# in chain_id does not count. rc 1 when the file is unreadable or holds no such key.
 tn_genesis_chain_id() {
-    local file="${1:-}" line id_re
+    local file="${1:-}" live line id_re
     [[ -n "$file" && -f "$file" && -r "$file" ]] || return 1
-    line="$(grep -m1 -E '^[[:space:]]*"?(chainId|chain_id)"?[[:space:]]*:' "$file" 2>/dev/null || true)"
-    [[ -n "$line" ]] || return 1
-    id_re='^[[:space:]]*"?(chainId|chain_id)"?[[:space:]]*:[[:space:]]*"?(0[xX][0-9A-Fa-f]+|[0-9]+)"?[[:space:]]*,?[[:space:]]*(#.*)?$'
-    [[ "$line" =~ $id_re ]] || return 1
-    _tn_uint "${BASH_REMATCH[2]}"
+    id_re='(^|[^A-Za-z0-9_])"?(chainId|chain_id)"?[[:space:]]*:[[:space:]]*"?(0[xX][0-9A-Fa-f]+|[0-9]+)"?([^A-Za-z0-9_.]|$)'
+    live="$(grep -v -E '^[[:space:]]*#' "$file" 2>/dev/null || true)"
+    line="$(grep -m1 -E -- "$id_re" <<<"$live" 2>/dev/null || true)"
+    [[ -n "$line" && "$line" =~ $id_re ]] || return 1
+    _tn_uint "${BASH_REMATCH[3]}"
 }
 
 # tn_is_public_chain_id <id> — rc 0 when <id> (decimal or 0x-hex) is one of the
@@ -872,6 +886,9 @@ _tn_hw_role() {
     fi
     if [[ -n "$need" ]]; then
         print_warn "${label}: below minimum — needs ≥ ${need} (have ${have})"
+        if [[ -n "$unknown" ]]; then
+            print_info "${label}: could not check ${unknown}; minimum is ${spec}"
+        fi
         return 1
     fi
     if [[ -n "$unknown" ]]; then
@@ -1610,9 +1627,10 @@ tn_rpc_call() {
     fi
     body="{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}"
     rc=0
+    # --url keeps a URL that starts with - from being read as a curl option.
     raw="$(curl -sS --max-time "$((10#$max_time))" -X POST \
         -H 'Content-Type: application/json' \
-        --data "$body" -w '\n%{http_code}' "$url" 2>/dev/null)" || rc=$?
+        --data "$body" -w '\n%{http_code}' --url "$url" 2>/dev/null)" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         printf 'transport %s\n' "$(_tn_curl_reason "$rc")"
         return 1
@@ -1652,7 +1670,11 @@ tn_rpc_call() {
             emsg="${BASH_REMATCH[1]}"
         fi
         emsg="$(printf '%s' "$emsg" | tr -d '\000-\037')"
-        printf 'rpc-error %s %s\n' "$ecode" "${emsg:0:200}"
+        if [[ -n "$emsg" ]]; then
+            printf 'rpc-error %s %s\n' "$ecode" "${emsg:0:200}"
+        else
+            printf 'rpc-error %s\n' "$ecode"
+        fi
         return 1
     fi
     res_re='"result"[[:space:]]*:'
@@ -1665,20 +1687,32 @@ tn_rpc_call() {
 }
 
 # tn_json_field <json> <key> — print the value of the first "<key>": that holds a
-# scalar: a string (printed without its quotes; escaped quotes are not
-# unescaped), a number or a boolean. rc 1 when the key is missing or its value
-# is null, an object or an array. A plain text matcher, not a JSON parser: it is
-# meant for the flat JSON-RPC answers these scripts read.
+# scalar: a string (printed without its quotes, with \" and \\ unescaped and any
+# other escape left as written), a number or a boolean. rc 1 when the key is
+# missing or its value is null, an object or an array. A plain text matcher, not
+# a JSON parser: it is meant for the flat JSON-RPC answers these scripts read.
 tn_json_field() {
-    local json="${1:-}" key="${2:-}" re val str
+    local json="${1:-}" key="${2:-}" re val str out c
     [[ "$key" =~ ^[A-Za-z0-9_]+$ ]] || return 1
-    re="\"${key}\"[[:space:]]*:[[:space:]]*(\"([^\"]*)\"|[-+.0-9A-Za-z]+|[[{])"
+    re='"'"${key}"'"[[:space:]]*:[[:space:]]*("(([^"\\]|\\.)*)"|[-+.0-9A-Za-z]+|[[{])'
     [[ "$json" =~ $re ]] || return 1
     val="${BASH_REMATCH[1]}"
     str="${BASH_REMATCH[2]}"
     case "$val" in
         \"*)
-            printf '%s\n' "$str"
+            out=""
+            while [[ "$str" == *\\* ]]; do
+                out="${out}${str%%\\*}"
+                str="${str#*\\}"
+                c="${str:0:1}"
+                if [[ "$c" == "\"" || "$c" == "\\" ]]; then
+                    out="${out}${c}"
+                    str="${str:1}"
+                else
+                    out="${out}\\"
+                fi
+            done
+            printf '%s\n' "${out}${str}"
             return 0
             ;;
         "["|"{"|null)
@@ -1736,15 +1770,16 @@ tn_node_mode() {
     return 1
 }
 
-# tn_epoch_info [url] [epoch] — one line from tn_getCurrentEpochInfo, or from
-# tn_getEpochInfo when a decimal epoch is given (nodes answer for current-3 up
-# to current+2):
+# tn_epoch_info [url] [epoch] [max_time] — one line from tn_getCurrentEpochInfo,
+# or from tn_getEpochInfo when a decimal epoch is given (nodes answer for
+# current-3 up to current+2):
 #   <epoch_id> <block_height> <epoch_duration> <stake_version> <committee_csv|->
 # The committee is the comma-separated lowercase list of member addresses, or
 # "-" when empty. block_height is the first block of the epoch and
-# epoch_duration is in seconds. epochIssuance is never decoded.
+# epoch_duration is in seconds. epochIssuance is never decoded. max_time bounds
+# the call in seconds (tn_rpc_call's default 10 when empty).
 tn_epoch_info() {
-    local url="${1:-}" epoch="${2:-}" out rc id height dur ver inner addr list committee_re addr_re
+    local url="${1:-}" epoch="${2:-}" max_time="${3:-10}" out rc id height dur ver inner addr list committee_re addr_re
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
     rc=0
     if [[ -n "$epoch" ]]; then
@@ -1752,9 +1787,9 @@ tn_epoch_info() {
             printf 'malformed bad-epoch\n'
             return 1
         fi
-        out="$(tn_rpc_call "$url" tn_getEpochInfo "[$((10#$epoch))]")" || rc=$?
+        out="$(tn_rpc_call "$url" tn_getEpochInfo "[$((10#$epoch))]" "$max_time")" || rc=$?
     else
-        out="$(tn_rpc_call "$url" tn_getCurrentEpochInfo '[]')" || rc=$?
+        out="$(tn_rpc_call "$url" tn_getCurrentEpochInfo '[]' "$max_time")" || rc=$?
     fi
     if [[ "$rc" -ne 0 ]]; then
         printf '%s\n' "$out"
@@ -1881,10 +1916,13 @@ _tn_wait_say() {
 # Environment: TN_SKIP_EPOCH_WAIT=1 skips the wait; TN_EPOCH_MARGIN (300) is how
 # close the boundary must be before waiting; TN_EPOCH_SETTLE (90) is the pause
 # after the epoch changes; TN_EPOCH_WAIT_MAX (1800) caps the whole wait, settle
-# included; TN_EPOCH_POLL (15, clamped to 5-30) is the poll and heartbeat interval.
+# included, and 0 turns the wait off; TN_EPOCH_POLL (15, clamped to 5-20) is the
+# poll and heartbeat interval. Each epoch read while waiting may take at most
+# 30 - poll seconds, so two heartbeats are never more than 30 s apart.
 #
 # Policy:
-#   1. Skipped, node mode unreadable, or mode not CvvActive: log and return.
+#   1. Skipped (TN_SKIP_EPOCH_WAIT=1 or TN_EPOCH_WAIT_MAX=0), node mode
+#      unreadable, or mode not CvvActive: log and return.
 #   2. Time to the boundary unreadable: warn and return. More than the margin
 #      away: log and return. Passed more than the margin ago with the epoch still
 #      open (stalled, or this node far behind): warn once and return.
@@ -1906,10 +1944,14 @@ tn_wait_restart_window() {
     cap="$(_tn_env_uint TN_EPOCH_WAIT_MAX 1800)"
     poll="$(_tn_env_uint TN_EPOCH_POLL 15)"
     if (( poll < 5 )); then poll=5; fi
-    if (( poll > 30 )); then poll=30; fi
+    if (( poll > 20 )); then poll=20; fi
 
     if [[ "${TN_SKIP_EPOCH_WAIT:-}" == "1" ]]; then
         "$fn" log "Not waiting for the epoch boundary (TN_SKIP_EPOCH_WAIT=1)." || true
+        return 0
+    fi
+    if (( cap == 0 )); then
+        "$fn" log "Not waiting for the epoch boundary: epoch wait disabled by TN_EPOCH_WAIT_MAX=0." || true
         return 0
     fi
     rc=0
@@ -1978,7 +2020,7 @@ tn_wait_restart_window() {
         "$fn" log "Still waiting for epoch ${epoch} to close: ${waited}s so far, boundary $(_tn_due_text "$due").${note}" || true
         note=""
         rc=0
-        info="$(tn_epoch_info "$url")" || rc=$?
+        info="$(tn_epoch_info "$url" "" "$(( 30 - poll ))")" || rc=$?
         if [[ "$rc" -ne 0 ]]; then
             fails=$(( fails + 1 ))
             if (( fails >= 2 )); then
@@ -2153,11 +2195,13 @@ _tn_word_fits() {
 #   word 2 exitEpoch         uint32
 #   word 3 currentStatus     uint8 enum, 0-6
 #   word 4 isRetired         bool
-#   words 5-6                small fields: isDelegated and stakeVersion on the
-#                            deployed testnet registry, stakeVersion and region
-#                            in newer tn-contracts source
-# The decode is strict: exactly seven words, each zero above its type (words 5-6
-# as uint8), isRetired 0 or 1, status within the enum. Anything else is
+#   word 5 stakeVersion      uint8
+#   word 6 region            uint8
+# (IConsensusRegistry.ValidatorInfo in tn-contracts 10cc12b7, the commit
+# v0.15.0-adiri pins.) The decode is strict: exactly seven words, each zero above
+# its type, isRetired 0 or 1, status within the enum, and status 6 (Any) only
+# with isRetired set: retiring a validator writes Any plus isRetired, the record
+# kept as a tombstone, and nothing writes Any alone. Anything else is
 # "unknown malformed ...", never a guessed status. Only the low bits are
 # decoded, so bash arithmetic never sees a 256-bit value.
 node_stake_status() {
@@ -2183,7 +2227,10 @@ node_stake_status() {
         if [[ "$kind" == "rpc-error" ]]; then
             rest="${out#rpc-error }"
             ecode="${rest%% *}"
-            emsg="${rest#* }"
+            emsg=""
+            if [[ "$rest" == *" "* ]]; then
+                emsg="${rest#* }"
+            fi
             if [[ "$ecode" == "3" || "$emsg" =~ [Rr]evert ]]; then
                 printf '%s\n' "none"
                 return 0
@@ -2222,6 +2269,10 @@ node_stake_status() {
     fi
     if (( retired > 1 )); then
         printf '%s\n' "unknown malformed word-4"
+        return 2
+    fi
+    if (( status == 6 && retired == 0 )); then
+        printf '%s\n' "unknown malformed status-6-not-retired"
         return 2
     fi
     printf '%s %s %s %s\n' "$status" "$activation" "$retired" "$exit_epoch"
@@ -2457,6 +2508,9 @@ check_validator_onchain_status() {
             "http 429"*)
                 print_info "The RPC is rate limiting requests (HTTP 429). Wait a minute and try again, or query your own node instead."
                 ;;
+            "http 502"*|"http 503"*|"http 504"*)
+                print_info "The RPC endpoint is unavailable (HTTP ${detail#http }); try again in a minute."
+                ;;
             malformed*)
                 print_info "The RPC answered, but not with a getValidator result. The node may still be syncing, or the URL is not a Telcoin Network RPC."
                 ;;
@@ -2553,10 +2607,12 @@ display_node_info() {
     fi
     echo ""
     echo "  Step 4: On this node, export the stake(bytes,(bytes)) calldata (reads only node-info.yaml)"
+    # keytool asks for a passphrase source even though this export never reads the
+    # key, and -q keeps its log line out of the output; both go before `keytool`.
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        export_cmd="docker run --rm -v ${data_dir}:/home/nonroot/data:ro ${DOCKER_IMAGE:-<IMAGE>} telcoin keytool"; node_info_arg="/home/nonroot/data/node-info.yaml"
+        export_cmd="docker run --rm -v ${data_dir}:/home/nonroot/data:ro ${DOCKER_IMAGE:-<IMAGE>} telcoin -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="/home/nonroot/data/node-info.yaml"
     else
-        export_cmd="${BINARY_PATH:-telcoin-network} keytool"; node_info_arg="$node_info_file"
+        export_cmd="${BINARY_PATH:-telcoin-network} -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="$node_info_file"
     fi
     echo "    ${export_cmd} export-staking-args \\"
     echo "      --node-info ${node_info_arg} --calldata"
@@ -3338,7 +3394,13 @@ tn_node_launch_target() {
 #     file). In a shell wrapper a comment line ends a continued command, as bash
 #     reads it; in a unit it is skipped and the command goes on (systemd.syntax).
 #   * words are split as the shell splits them, so "$(cat /etc/telcoin/x.yaml)" is
-#     one word, and a word starting with # begins a trailing comment.
+#     one word, and a word starting with # begins a trailing comment. In a
+#     wrapper an unquoted ; | & < > ( ) ends a word, and a node command holding
+#     one (a pipe, &&, 2>&1, a trailing &) is not one simple command, so it is
+#     neither read nor edited (rc 3). No shell reads a unit, so there those
+#     characters are part of a word, and only a ; standing alone as a word
+#     (systemd's separator between two commands) has that effect. New values
+#     and flags must be single shell words in both kinds of file.
 #   * the target line is the first non-comment line holding the word --http in a
 #     command that has the word `node` before it. New flags go there, before a
 #     trailing backslash, else at the end of the line.
@@ -3366,7 +3428,8 @@ _tn_launch_is_unit() {
 # 0) says how to read FILE; it defaults to the name of FILE, and a staged temp copy
 # passes the kind of the file it was made from. Inputs reach awk through the
 # environment, so nothing is escape-processed. Exit 10 done, 11 no change needed or
-# FLAG absent, 12 no target line, 13 refused; anything else is an awk failure.
+# FLAG absent, 12 no target line, 13 refused, 14 VALUE (set) or FLAGS (inject) is
+# not plain shell words; anything else is an awk failure.
 _tn_launch_awk() {
     local unit="${7:-}"
     if [[ "$unit" != "0" && "$unit" != "1" ]]; then
@@ -3419,24 +3482,32 @@ _tn_launch_awk() {
         # Split s into words as the shell does. ln > 0 records them in the file
         # table (TT text, TL line, TS and TE first and last column); ln 0 records
         # them in W. Sets tk_n (words), tk_cont (ends in a continuation
-        # backslash), tk_com (column of a trailing # comment, 0 for none) and
-        # tk_bad (a quote that does not close on this line).
-        function tok(s, ln,    n, i, c, st, j) {
-            tk_n = 0; tk_cont = 0; tk_com = 0; tk_bad = 0
+        # backslash), tk_com (column of a trailing # comment, 0 for none),
+        # tk_bad (a quote that does not close on this line), tk_meta (an
+        # unquoted ; | & < > ( ) or line break: it ends a word, and the line is
+        # more than one simple command or carries a redirection) and tk_glob
+        # (an unquoted * ? [, which the shell would expand). With lit set (a
+        # systemd unit line, which no shell reads) those characters are part of
+        # a word, and only a ; standing alone as a word, the separator between
+        # two commands in one ExecStart=, sets tk_meta.
+        function tok(s, ln, lit,    n, i, c, st, j) {
+            tk_n = 0; tk_cont = 0; tk_com = 0; tk_bad = 0; tk_meta = 0; tk_glob = 0
             n = length(s); i = 1
             while (i <= n) {
                 c = substr(s, i, 1)
                 if (c == " " || c == "\t") { i++; continue }
+                if (!lit && index(META, c)) { tk_meta = 1; i++; continue }
                 if (c == "#") { tk_com = i; return }
                 if (c == "\\" && substr(s, i + 1) ~ /^[ \t]*$/) { tk_cont = 1; return }
                 st = i
                 while (i <= n) {
                     c = substr(s, i, 1)
-                    if (c == " " || c == "\t") break
+                    if (c == " " || c == "\t" || (!lit && index(META, c))) break
                     if (c == "\\") {
                         if (substr(s, i + 1) ~ /^[ \t]*$/) { tk_cont = 1; break }
                         i += 2; continue
                     }
+                    if (index(GLOB, c)) tk_glob = 1
                     j = -1
                     if (c == SQ) j = q_sq(s, i + 1)
                     else if (c == "\"") j = q_dq(s, i + 1, n)
@@ -3448,6 +3519,7 @@ _tn_launch_awk() {
                     i = j + 1
                 }
                 tk_n++
+                if (lit && substr(s, st, i - st) == ";") tk_meta = 1
                 if (ln) { NT++; TT[NT] = substr(s, st, i - st); TL[NT] = ln; TS[NT] = st; TE[NT] = i - 1 }
                 else W[tk_n] = substr(s, st, i - st)
                 if (tk_cont) return
@@ -3517,20 +3589,22 @@ _tn_launch_awk() {
                 else print L[i]
             }
         }
-        BEGIN { SQ = sprintf("%c", 39) }
+        BEGIN { SQ = sprintf("%c", 39); META = ";|&<>()\n\r"; GLOB = "*?[" }
         { L[NR] = $0 }
         END {
             N = NR
             mode = ENVIRON["TN_LE_MODE"]; unit = (ENVIRON["TN_LE_UNIT"] == "1")
             flag = ENVIRON["TN_LE_FLAG"]; val = ENVIRON["TN_LE_VALUE"]
             hasval = (ENVIRON["TN_LE_HASVAL"] == "1"); ins = ENVIRON["TN_LE_FLAGS"]
+            # A new value must be one plain shell word and new flags plain
+            # words: nothing the shell would split, redirect, run or expand.
             if (mode == "set" && hasval) {
                 tok(val, 0)
-                if (tk_n != 1 || tk_com || tk_bad || tk_cont || W[1] != val) exit 13
+                if (tk_n != 1 || tk_com || tk_bad || tk_cont || tk_meta || tk_glob || W[1] != val) exit 14
             }
             if (mode == "inject") {
                 tok(ins, 0)
-                if (tk_n < 1 || tk_com || tk_bad || tk_cont) exit 13
+                if (tk_n < 1 || tk_com || tk_bad || tk_cont || tk_meta || tk_glob) exit 14
             }
             NT = 0; nc = 0; cont = 0
             for (i = 1; i <= N; i++) {
@@ -3542,8 +3616,8 @@ _tn_launch_awk() {
                 }
                 if (!cont) { nc++; CF[nc] = i; CT0[nc] = NT + 1 }
                 LT0[i] = NT + 1
-                tok(s, i)
-                LT1[i] = NT; LCONT[i] = tk_cont; LCOM[i] = tk_com; LBAD[i] = tk_bad
+                tok(s, i, unit)
+                LT1[i] = NT; LCONT[i] = tk_cont; LCOM[i] = tk_com; LBAD[i] = tk_bad; LMETA[i] = tk_meta
                 for (k = LT0[i]; k <= NT; k++) TC[k] = nc
                 CL[nc] = i; CT1[nc] = NT
                 cont = tk_cont && !tk_bad
@@ -3558,8 +3632,12 @@ _tn_launch_awk() {
             if (!tk) exit 12
             tl = TL[tk]
             # A quote the parser could not close makes the command unreliable;
-            # in a shell wrapper one anywhere before it does too.
+            # in a shell wrapper one anywhere before it does too. An operator or
+            # redirection inside the node command (a pipe, &&, 2>&1, a trailing
+            # &; in a unit a ; word between two commands) means it is not one
+            # simple command, so it is not read or edited.
             for (i = (unit ? CF[tc] : 1); i <= CL[tc]; i++) if (LBAD[i]) exit 13
+            for (i = CF[tc]; i <= CL[tc]; i++) if (LMETA[i]) exit 13
             if (mode == "target") { print tl; exit 10 }
             if (mode == "inject") {
                 if (LCOM[tl]) exit 13
@@ -3747,6 +3825,14 @@ _tn_launch_edit() {
         11) rc=1 ;;
         12) rc=2 ;;
         13) rc=3 ;;
+        14)
+            rc=3
+            if [[ "$op" == "set" ]]; then
+                printf 'tn_launch_flag_set: the value for %s is not a single shell word (a space, an unquoted ; | & < > ( ) * ? [, a line break or an open quote)\n' "$flag" >&2
+            else
+                printf 'tn_node_inject_flags: FLAGS are not single shell words (an unquoted ; | & < > ( ) * ? [, a line break, an open quote or a # word)\n' >&2
+            fi
+            ;;
         *)  rc=4 ;;
     esac
     if [[ "$rc" -eq 0 ]]; then
@@ -3766,18 +3852,16 @@ _tn_launch_edit() {
 # verbatim) to the target line of launch file FILE unless MARKER_ERE, an extended
 # regex, already matches a non-comment line. FLAGS must contain what MARKER_ERE
 # matches, so a second call changes nothing. rc per the family table: 1 when the
-# marker is already on a live line; 3 when FLAGS is empty, spans lines, has an
-# unbalanced quote or a # word, carries $, % or a backtick into a .service file, or
+# marker is already on a live line; 3 when FLAGS is empty or not single shell words
+# (an unquoted ; | & < > ( ) * ? [, a line break, an open quote or a # word; a
+# line on stderr says so), carries $, % or a backtick into a .service file, or
 # when MARKER_ERE is empty, invalid or still unmatched after the edit. Callers:
 # setup-observability.sh (--healthcheck), lib/observability.sh (log and metrics
-# flags), install-caddy.sh (--ws flags, anchored at the end of the line as marker).
+# flags), install-caddy.sh (--ws flags).
 tn_node_inject_flags() {
     local file="${1:-}" marker="${2:-}" flags="${3:-}" live rc
     [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
     [[ -n "$marker" && -n "$flags" ]] || return 3
-    case "$flags" in
-        *$'\n'*|*$'\r'*) return 3 ;;
-    esac
     if _tn_launch_is_unit "$file"; then
         case "$flags" in
             *'$'*|*'%'*|*'`'*) return 3 ;;
@@ -3814,12 +3898,14 @@ tn_launch_flag_get() {
 }
 
 # tn_launch_flag_set FILE FLAG [VALUE] — make the node command of launch file FILE
-# carry FLAG with VALUE (copied verbatim, quotes and all; one word) or, with no
-# VALUE, as a boolean. An existing FLAG is rewritten where it stands and any
-# repeat removed; a missing one is added to the target line. rc per the family
-# table: 1 when FLAG already reads VALUE exactly; 3 for an empty VALUE, one that is
-# not a single word or starts with - or #, and, in a .service file, a VALUE with
-# $, % or a backtick (systemd would expand them).
+# carry FLAG with VALUE (copied verbatim, quotes and all) or, with no VALUE, as a
+# boolean. An existing FLAG is rewritten where it stands and any repeat removed; a
+# missing one is added to the target line. rc per the family table: 1 when FLAG
+# already reads VALUE exactly; 3 for an empty VALUE, one starting with - or #, one
+# that is not a single shell word (a space, an unquoted ; | & < > ( ) * ? [, a line
+# break or an open quote; a line on stderr says so; quote it, as in
+# '"$(cat /etc/telcoin/x.yaml)"'), and, in a .service file, a VALUE with $, % or a
+# backtick (systemd would expand them).
 tn_launch_flag_set() {
     local file="${1:-}" flag="${2:-}" value="" hasval=0
     if [[ $# -ge 3 ]]; then
@@ -3831,7 +3917,7 @@ tn_launch_flag_set() {
     if [[ "$hasval" -eq 1 ]]; then
         [[ -n "$value" ]] || return 3
         case "$value" in
-            -*|'#'*|*$'\n'*|*$'\r'*) return 3 ;;
+            -*|'#'*) return 3 ;;
         esac
         if _tn_launch_is_unit "$file"; then
             case "$value" in
@@ -4029,29 +4115,31 @@ _tn_path_owner() {
 # argument becomes the data dir as keytool sees it: DATA_DIR for binary:, the mount
 # point /home/nonroot for docker:.
 #   * Global flags go before `keytool`: -q, so the tracing line keytool otherwise
-#     prints on stdout cannot spoil a $(...) capture, and --datadir, each unless
-#     ARGS already carries it. When ARGS starts with export-staking-args and
+#     prints on stdout cannot spoil a $(...) capture, unless ARGS already has it;
+#     and --datadir, the data dir as keytool sees it. A --datadir X (or
+#     --datadir=X) anywhere in ARGS is moved there, since keytool refuses it
+#     after some subcommands. When ARGS starts with export-staking-args and
 #     TN_BLS_PASSPHRASE is unset or empty, --bls-passphrase-source no-passphrase is
 #     added too: that command never reads the key yet refuses to run without a
 #     passphrase source. Never for generate ..., which would then write or read
 #     the key in the clear, nor for anything else.
-#   * TN_BLS_PASSPHRASE, when set, reaches keytool through the environment only;
-#     docker gets `-e TN_BLS_PASSPHRASE` by name, so the value is in no argv.
+#   * A non-empty TN_BLS_PASSPHRASE reaches keytool through the environment only;
+#     docker gets `-e TN_BLS_PASSPHRASE` by name, so the value is in no argv. An
+#     empty one is treated as unset: keytool runs without the variable.
 #   * docker runs as the owner of DATA_DIR, with HOME=/home/nonroot and DATA_DIR
 #     mounted there, the way setup-node.sh runs keygen. DATA_DIR must exist.
 # rc is keytool's own, or 4 when it cannot be started (bad SPEC, no executable
-# file, no DATA_DIR for docker, too few arguments); docker's own failures come
-# back as docker's rc (125 and up).
+# file, no DATA_DIR for docker, too few arguments, --datadir without a value);
+# docker's own failures come back as docker's rc (125 and up).
 tn_keytool() {
     local spec="${1:-}" data_dir="${2:-}" in_dir arg rest done_part first bin owner uid gid
-    local has_dd=0 has_q=0 has_src=0
+    local dd_val="" has_q=0 has_src=0 has_pass=0 is_dd
     local -a args=() glob=() drun=()
     if [[ $# -lt 3 || -z "$data_dir" ]]; then
         printf 'tn_keytool: usage: tn_keytool SPEC DATA_DIR KEYTOOL-ARGS...\n' >&2
         return 4
     fi
     shift 2
-    first="$1"
     case "$spec" in
         docker:?*) in_dir="/home/nonroot" ;;
         binary:/?*) in_dir="$data_dir" ;;
@@ -4060,9 +4148,25 @@ tn_keytool() {
             return 4
             ;;
     esac
-    for arg in "$@"; do
+    dd_val="$in_dir"
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
+        shift
+        is_dd=0
         case "$arg" in
-            --datadir|--datadir=*) has_dd=1 ;;
+            --datadir)
+                if [[ $# -eq 0 ]]; then
+                    printf 'tn_keytool: --datadir needs a value\n' >&2
+                    return 4
+                fi
+                arg="$1"
+                shift
+                is_dd=1
+                ;;
+            --datadir=*)
+                arg="${arg#--datadir=}"
+                is_dd=1
+                ;;
             -q|--quiet) has_q=1 ;;
             --bls-passphrase-source|--bls-passphrase-source=*) has_src=1 ;;
         esac
@@ -4072,15 +4176,21 @@ tn_keytool() {
             done_part="${done_part}${rest%%@DATADIR@*}${in_dir}"
             rest="${rest#*@DATADIR@}"
         done
-        args+=("${done_part}${rest}")
+        if [[ "$is_dd" -eq 1 ]]; then
+            dd_val="${done_part}${rest}"
+        else
+            args+=("${done_part}${rest}")
+        fi
     done
+    first="${args[0]:-}"
+    if [[ -n "${TN_BLS_PASSPHRASE:-}" ]]; then
+        has_pass=1
+    fi
     if [[ "$has_q" -eq 0 ]]; then
         glob+=(-q)
     fi
-    if [[ "$has_dd" -eq 0 ]]; then
-        glob+=(--datadir "$in_dir")
-    fi
-    if [[ "$has_src" -eq 0 && "$first" == "export-staking-args" && -z "${TN_BLS_PASSPHRASE:-}" ]]; then
+    glob+=(--datadir "$dd_val")
+    if [[ "$has_src" -eq 0 && "$first" == "export-staking-args" && "$has_pass" -eq 0 ]]; then
         glob+=(--bls-passphrase-source no-passphrase)
     fi
     case "$spec" in
@@ -4090,10 +4200,10 @@ tn_keytool() {
                 printf 'tn_keytool: %s is not an executable file\n' "$bin" >&2
                 return 4
             fi
-            if [[ -n "${TN_BLS_PASSPHRASE+x}" ]]; then
+            if [[ "$has_pass" -eq 1 ]]; then
                 TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
             else
-                "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+                ( unset TN_BLS_PASSPHRASE; "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
             fi
             ;;
         docker:*)
@@ -4108,14 +4218,14 @@ tn_keytool() {
             uid="${owner%% *}"
             gid="${owner##* }"
             drun=(run --rm --user "${uid}:${gid}" -e HOME=/home/nonroot)
-            if [[ -n "${TN_BLS_PASSPHRASE+x}" ]]; then
+            if [[ "$has_pass" -eq 1 ]]; then
                 drun+=(-e TN_BLS_PASSPHRASE)
             fi
             drun+=(-v "${data_dir}:/home/nonroot" "${spec#docker:}" telcoin)
-            if [[ -n "${TN_BLS_PASSPHRASE+x}" ]]; then
+            if [[ "$has_pass" -eq 1 ]]; then
                 TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
             else
-                docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+                ( unset TN_BLS_PASSPHRASE; docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
             fi
             ;;
     esac
