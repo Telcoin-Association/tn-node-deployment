@@ -260,9 +260,7 @@ step_preflight() {
         print_step "Selecting data directory..."
         print_info "Where should node data be stored? If it's on a separate drive"
         print_info "(e.g. /mnt/data) enter the full path. Press Enter for the default."
-        local input
-        read -r -p "  Data directory [${DATA_DIR}]: " input
-        DATA_DIR="${input:-$DATA_DIR}"
+        prompt_setup_path DATA_DIR "Data directory"
         print_ok "Data directory: ${DATA_DIR}"
     fi
     mkdir -p "$DATA_DIR" 2>/dev/null || true
@@ -318,6 +316,16 @@ step_preflight() {
     # right node-launch flags on the first pass. Side-effect installs run later in
     # step_testnet_addons ("act late"). No-op off testnet / in JSON mode.
     json_mode || prompt_testnet_addons
+    # Its region label is free text bound for .node-meta. Keep the part the telemetry
+    # pipelines use (letters, digits, _ and -, at most 32), as lib/observability.sh does.
+    if [[ -n "$REGION" ]]; then
+        local region
+        region="$(printf '%s' "$REGION" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"
+        if [[ "$region" != "$REGION" ]]; then
+            REGION="${region:-unknown}"
+            print_warn "Region label kept as ${REGION} (letters, digits, _ and - only)."
+        fi
+    fi
 
     echo ""
     print_step "Selecting install method..."
@@ -561,20 +569,29 @@ _preflight_docker() {
     print_info "published -adiri tag, auto-detected from the registry)."
     echo ""
 
+    # The image is written unquoted into the root-run start wrapper, so it must be a plain
+    # image reference (validate_docker_image), whether typed, auto-detected or passed.
     local input
     if json_mode; then
         # The UI passes --docker-image, already checked in run_json_mode before
         # check_root; only auto-detect, and check, when it didn't.
         if [[ -z "${DOCKER_IMAGE:-}" ]]; then
             DOCKER_IMAGE="$(latest_docker_image)"
+            if ! validate_docker_image "$DOCKER_IMAGE"; then
+                setup_fail "The registry gave an image reference setup cannot use: ${DOCKER_IMAGE}. Pass --docker-image with the full image and tag."
+            fi
             check_release_floor "$DOCKER_IMAGE"
         fi
     else
         local default_image
         default_image="$(latest_docker_image)"
-        read -r -p "  Docker image (press Enter to accept default)
+        while true; do
+            read -r -p "  Docker image (press Enter to accept default)
   [${default_image}]: " input
-        DOCKER_IMAGE="${input:-$default_image}"
+            DOCKER_IMAGE="${input:-$default_image}"
+            validate_docker_image "$DOCKER_IMAGE" && break
+            print_warn "Not an image reference: ${DOCKER_IMAGE}. Give the full image with its tag, such as ${DEFAULT_DOCKER_IMAGE}."
+        done
         check_release_floor "$DOCKER_IMAGE"
     fi
 
@@ -599,7 +616,7 @@ _preflight_docker() {
 _preflight_existing() {
     print_step "Locating existing binary..."
 
-    local found input
+    local found input msg
     # --binary-path names it. Otherwise look for one, then ask (interactive only: a
     # --json run has no stdin to answer from).
     if [[ -z "${BINARY_PATH:-}" ]]; then
@@ -619,8 +636,12 @@ _preflight_existing() {
         if json_mode; then
             setup_fail "--install-method existing needs --binary-path PATH: no telcoin-network binary was found on PATH or under /usr/local/bin, /opt or /home."
         fi
-        read -r -p "  Full path to telcoin binary: " input
-        BINARY_PATH="$input"
+        while true; do
+            read -r -p "  Full path to telcoin binary: " input
+            BINARY_PATH="$input"
+            msg="$(binary_path_ok)" && break
+            print_warn "$msg"
+        done
     fi
 
     check_binary_path
@@ -629,16 +650,30 @@ _preflight_existing() {
     fi
 }
 
-# BINARY_PATH must be an absolute path to an executable file: the start wrapper execs it
-# from systemd, where a relative path or a missing file only shows up as a crash loop.
-check_binary_path() {
+# 0 when BINARY_PATH can go into the start wrapper: an absolute path of letters, digits
+# and . _ / - (the wrapper holds it unquoted and runs as root) naming an executable file
+# (the wrapper execs it from systemd, where a relative path or a missing file only shows
+# up as a crash loop). Otherwise 1, with the reason on stdout.
+binary_path_ok() {
     case "${BINARY_PATH:-}" in
         /*) ;;
-        *) setup_fail "The node binary path must be absolute: ${BINARY_PATH:-(empty)}" ;;
+        *) printf 'The node binary path must be absolute: %s' "${BINARY_PATH:-(empty)}"; return 1 ;;
     esac
-    if [[ ! -f "$BINARY_PATH" || ! -x "$BINARY_PATH" ]]; then
-        setup_fail "No executable node binary at ${BINARY_PATH}."
+    if ! validate_setup_path "$BINARY_PATH"; then
+        printf 'The node binary path may hold only letters, digits and . _ / -, because the start wrapper runs it: %s' "$BINARY_PATH"
+        return 1
     fi
+    if [[ ! -f "$BINARY_PATH" || ! -x "$BINARY_PATH" ]]; then
+        printf 'No executable node binary at %s.' "$BINARY_PATH"
+        return 1
+    fi
+    return 0
+}
+
+# Stop setup unless binary_path_ok accepts BINARY_PATH.
+check_binary_path() {
+    local msg=""
+    msg="$(binary_path_ok)" || setup_fail "$msg"
     return 0
 }
 
@@ -676,11 +711,12 @@ step_config() {
     echo "  Port configuration (press Enter to accept defaults):"
     echo ""
 
-    local input
-    read -r -p "  P2P primary port [${P2P_PORT}]: "    input; P2P_PORT="${input:-$P2P_PORT}"
-    read -r -p "  P2P worker port  [${WORKER_PORT}]: " input; WORKER_PORT="${input:-$WORKER_PORT}"
-    read -r -p "  RPC port         [${RPC_PORT}]: "    input; RPC_PORT="${input:-$RPC_PORT}"
-    read -r -p "  Metrics port     [${METRICS_PORT}]: " input; METRICS_PORT="${input:-$METRICS_PORT}"
+    # Each answer is checked where it is read: the metrics port goes into the root-run
+    # start wrapper, the RPC port into .node-meta.
+    prompt_port P2P_PORT "P2P primary port"
+    prompt_port WORKER_PORT "P2P worker port "
+    prompt_port RPC_PORT "RPC port        "
+    prompt_port METRICS_PORT "Metrics port    "
 
     echo ""
     print_info "Data dir:    ${DATA_DIR}"
@@ -690,9 +726,9 @@ step_config() {
     echo ""
 
     if ! confirm "Use these default paths?"; then
-        read -r -p "  Config directory  [${CONFIG_DIR}]: " input;  CONFIG_DIR="${input:-$CONFIG_DIR}"
-        read -r -p "  Log directory     [${LOG_DIR}]: " input;     LOG_DIR="${input:-$LOG_DIR}"
-        read -r -p "  Install directory [${INSTALL_DIR}]: " input; INSTALL_DIR="${input:-$INSTALL_DIR}"
+        prompt_setup_path CONFIG_DIR "Config directory "
+        prompt_setup_path LOG_DIR "Log directory    "
+        prompt_setup_path INSTALL_DIR "Install directory"
     fi
 
     echo ""
@@ -1101,6 +1137,83 @@ validate_service_name() {
     return 0
 }
 
+# 0 when PATH is an absolute path of letters, digits and . _ / - with no ".." in it. The
+# data, config, log and install directories and the node binary are written unquoted into
+# the start wrapper and the unit, which run as root, so nothing else may get through.
+# Same rule as the Node Manager UI's data directory check.
+validate_setup_path() {
+    [[ "${1:-}" =~ ^/[A-Za-z0-9._/-]+$ && "${1:-}" != *..* ]]
+}
+
+# 0 when ADDR is an execution address: 0x and 40 hex digits.
+validate_exec_address() {
+    [[ "${1:-}" =~ ^0x[0-9a-fA-F]{40}$ ]]
+}
+
+# Ask for the port in variable VAR ("LABEL [current]: ", Enter keeps it) until the answer
+# is a port, 1 to 65535.
+prompt_port() {
+    local var="$1" label="$2" input
+    while true; do
+        read -r -p "  ${label} [${!var}]: " input
+        input="${input:-${!var}}"
+        if validate_port "$input"; then
+            printf -v "$var" '%s' "$input"
+            return 0
+        fi
+        print_warn "Not a port: ${input}. Enter a number from 1 to 65535."
+    done
+}
+
+# Ask for the directory in variable VAR the same way, until validate_setup_path accepts it.
+prompt_setup_path() {
+    local var="$1" label="$2" input
+    while true; do
+        read -r -p "  ${label} [${!var}]: " input
+        input="${input:-${!var}}"
+        if validate_setup_path "$input"; then
+            printf -v "$var" '%s' "$input"
+            return 0
+        fi
+        print_warn "Not a usable path: ${input}. Use an absolute path of letters, digits and . _ / - only."
+    done
+}
+
+# Check the values that reach the start wrapper, the unit or .node-meta, before anything
+# touches the box; the prompts check what they read the same way. The Node Manager UI
+# builds these flags from its TN_SETUP_* settings and checks them first; this holds a
+# hand-run --json call to the same rules. An empty multiaddr or address is left to the
+# step that needs it.
+init_node_inputs() {
+    local pair flag var val
+    if ! validate_setup_path "$DATA_DIR"; then
+        setup_fail "invalid --data-dir ${DATA_DIR} -- give an absolute path of letters, digits and . _ / - only."
+    fi
+    for pair in --external-primary:PRIMARY_MULTIADDR --external-worker:WORKER_MULTIADDR \
+                --listener-primary:PRIMARY_LISTENER_MULTIADDR --listener-worker:WORKER_LISTENER_MULTIADDR; do
+        flag="${pair%%:*}"
+        var="${pair#*:}"
+        val="${!var}"
+        if [[ -n "$val" ]] && ! validate_multiaddr "$val"; then
+            setup_fail "invalid ${flag} ${val} -- expected /ip4/<address>/udp/<port>/quic-v1 or /ip6/<address>/udp/<port>/quic-v1."
+        fi
+    done
+    if [[ -n "$VALIDATOR_ADDRESS" ]] && ! validate_exec_address "$VALIDATOR_ADDRESS"; then
+        setup_fail "invalid --address ${VALIDATOR_ADDRESS} -- expected 0x followed by 40 hex digits."
+    fi
+    case "$PASSPHRASE_METHOD" in
+        loadcredential|tpm) ;;
+        *) setup_fail "unknown --passphrase-method ${PASSPHRASE_METHOD} (expected loadcredential or tpm)" ;;
+    esac
+    if ! validate_service_name "$SERVICE_USER" "Service user" >/dev/null 2>&1; then
+        setup_fail "invalid --service-user ${SERVICE_USER} -- a letter, then up to 31 letters, digits, _ or -."
+    fi
+    if ! validate_service_name "$SERVICE_GROUP" "Service group" >/dev/null 2>&1; then
+        setup_fail "invalid --service-group ${SERVICE_GROUP} -- a letter, then up to 31 letters, digits, _ or -."
+    fi
+    return 0
+}
+
 # Write KEY=VALUE pairs to ${CONFIG_DIR}/.node-meta with one meta_set per key, so the
 # keys other scripts keep there survive. NODE_TYPE, the role hint older releases wrote,
 # is removed: the role is decided on-chain. Stops setup when a key cannot be written.
@@ -1225,18 +1338,21 @@ step_generate_keys() {
 
     local input bls_passphrase bls_passphrase_confirm
     if json_mode; then
-        # Address + multiaddrs come from flags; passphrase from TN_BLS_PASSPHRASE (env only).
-        [[ "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || print_warn "Address format looks unusual. Proceeding anyway."
+        # Address + multiaddrs come from flags (init_node_inputs checked their form);
+        # passphrase from TN_BLS_PASSPHRASE (env only).
+        [[ -n "$VALIDATOR_ADDRESS" ]] || setup_fail "--address is missing: keygen needs the node's execution address (0x followed by 40 hex digits)."
         for v in PRIMARY_MULTIADDR WORKER_MULTIADDR PRIMARY_LISTENER_MULTIADDR WORKER_LISTENER_MULTIADDR; do
             [[ -n "${!v}" ]] || setup_fail "missing multiaddr: ${v}"
         done
         bls_passphrase="${TN_BLS_PASSPHRASE:-}"
         [[ -n "$bls_passphrase" ]] || setup_fail "TN_BLS_PASSPHRASE not set -- cannot generate keys."
     else
-        read -r -p "  Node execution address (0x...): " VALIDATOR_ADDRESS
-        if [[ ! "$VALIDATOR_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-            print_warn "Address format looks unusual. Proceeding anyway."
-        fi
+        # The keytool refuses anything else, and the address goes into .node-meta.
+        while true; do
+            read -r -p "  Node execution address (0x...): " VALIDATOR_ADDRESS
+            validate_exec_address "$VALIDATOR_ADDRESS" && break
+            print_warn "Not an execution address: ${VALIDATOR_ADDRESS}. Enter 0x followed by 40 hex digits."
+        done
 
         local public_ip
         public_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
@@ -2344,6 +2460,12 @@ finalize_install_inputs() {
     if [[ -z "$INSTALL_METHOD" ]]; then
         INSTALL_METHOD="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || true)"
     fi
+    # Values read back from .node-meta get the checks the flags got: the image and the
+    # binary path go into the root-run start wrapper.
+    case "$INSTALL_METHOD" in
+        ""|source|docker|existing) ;;
+        *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, docker or existing." ;;
+    esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
         if [[ -z "$DOCKER_IMAGE" ]]; then
             DOCKER_IMAGE="$(meta_get DOCKER_IMAGE "$meta" 2>/dev/null || true)"
@@ -2351,10 +2473,16 @@ finalize_install_inputs() {
         if [[ -z "$DOCKER_IMAGE" ]]; then
             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
         fi
+        if ! validate_docker_image "$DOCKER_IMAGE"; then
+            setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as ${DEFAULT_DOCKER_IMAGE}; pass --docker-image."
+        fi
         return 0
     fi
     if [[ -z "$BINARY_PATH" ]]; then
         BINARY_PATH="$(meta_get BINARY_PATH "$meta" 2>/dev/null || true)"
+    fi
+    if [[ -n "$BINARY_PATH" ]] && ! validate_setup_path "$BINARY_PATH"; then
+        setup_fail "BINARY_PATH=${BINARY_PATH} in ${meta} may hold only letters, digits and . _ / -, because the start wrapper runs it; pass --binary-path."
     fi
     if [[ "$INSTALL_METHOD" == "existing" ]]; then
         if [[ -z "$BINARY_PATH" ]]; then
@@ -2559,6 +2687,7 @@ main() {
 
     init_public_rpc_flags       # bad public-RPC flags or URLs stop here, before any work
     init_install_flags
+    init_node_inputs
     init_node_extra_flags
 
     if json_mode; then
