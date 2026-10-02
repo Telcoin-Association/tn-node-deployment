@@ -55,8 +55,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Resolvers (tn_resolve_*) + print helpers + check_root + _tn_meta_get. common.sh
-# sources lib/fallback.sh, the only module that knows the legacy names/layout.
+# Resolvers (tn_resolve_*) + print helpers + check_root + _tn_meta_get, and the
+# .node-meta writers meta_set / meta_unset. common.sh sources lib/fallback.sh, the
+# only module that knows the legacy names/layout.
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
@@ -519,16 +520,10 @@ rewrite_wrapper() {
 # =============================================================================
 # STEP 8 -- UPDATE .node-meta
 # =============================================================================
-# meta_set KEY VALUE FILE -- replace an existing KEY= line or append it.
-meta_set() {
-    local key="$1" val="$2" file="$3"
-    if grep -qE "^${key}=" "$file" 2>/dev/null; then
-        sed -i -E "s#^${key}=.*#${key}=${val}#" "$file"
-    else
-        printf '%s=%s\n' "$key" "$val" >> "$file"
-    fi
-}
-
+# Keys are written with lib/common.sh's meta_set KEY VALUE FILE, which every
+# library has shipped since 1.3.0 (before this script existed). It rewrites the
+# file without sed, so a value holding #, &, = or spaces (a custom data mount, say)
+# is stored exactly as given, and every other key in the file is kept.
 update_meta() {
     local meta="${UNIFIED_CONFIG_DIR}/.node-meta"
     if [[ ! -f "$meta" ]]; then
