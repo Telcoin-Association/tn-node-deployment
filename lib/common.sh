@@ -40,7 +40,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.5.0"
+readonly COMMON_VERSION="1.6.0"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -762,14 +762,92 @@ _tn_hw_disk_label() {
     fi
 }
 
+# tn_physical_cores — print "<n> physical" with the number of physical CPU cores,
+# or "<n> logical" when only the logical CPU count (every hyperthread counted) can
+# be read. Sources, first answer wins:
+#   1. `lscpu --parse=CORE,SOCKET`, one line per online logical CPU: the unique
+#      (core, socket) pairs are the physical cores. A line without a core id is
+#      skipped; an empty socket id counts as one socket. ui/server.py
+#      (physical_cores) follows the same rules.
+#   2. ${TN_PROC_CPUINFO:-/proc/cpuinfo}: unique (physical id, core id) pairs. x86
+#      kernels print both; ARM kernels print neither and fall through.
+#   3. `sysctl -n hw.physicalcpu` (macOS).
+#   4. The logical count: nproc, then getconf _NPROCESSORS_ONLN.
+# rc 1 with no output when none of them answers.
+tn_physical_cores() {
+    local out n cpuinfo
+    if command -v lscpu >/dev/null 2>&1; then
+        out="$(lscpu --parse=CORE,SOCKET 2>/dev/null || true)"
+        n="$(awk -F, '
+            /^[ \t]*#/ || NF == 0 { next }
+            { core = $1; sock = $2; gsub(/[ \t]/, "", core); gsub(/[ \t]/, "", sock) }
+            core == "" { next }
+            !((core, sock) in seen) { seen[core, sock] = 1; c++ }
+            END { print c + 0 }
+        ' <<<"$out" 2>/dev/null || true)"
+        if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
+            printf '%s physical\n' "$n"
+            return 0
+        fi
+    fi
+    cpuinfo="${TN_PROC_CPUINFO:-/proc/cpuinfo}"
+    if [[ -r "$cpuinfo" ]]; then
+        n="$(awk '
+            function add_pair() {
+                if (p != "" && c != "" && !((p, c) in seen)) { seen[p, c] = 1; k++ }
+                p = ""; c = ""
+            }
+            /^processor[ \t]*:/ { add_pair() }
+            /^physical id[ \t]*:/ { p = $0; sub(/^[^:]*:[ \t]*/, "", p) }
+            /^core id[ \t]*:/ { c = $0; sub(/^[^:]*:[ \t]*/, "", c) }
+            END { add_pair(); print k + 0 }
+        ' "$cpuinfo" 2>/dev/null || true)"
+        if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
+            printf '%s physical\n' "$n"
+            return 0
+        fi
+    fi
+    if command -v sysctl >/dev/null 2>&1; then
+        n="$(sysctl -n hw.physicalcpu 2>/dev/null || true)"
+        if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
+            printf '%s physical\n' "$n"
+            return 0
+        fi
+    fi
+    n=""
+    if command -v nproc >/dev/null 2>&1; then
+        n="$(nproc 2>/dev/null || true)"
+    fi
+    if [[ ! "$n" =~ ^[1-9][0-9]*$ ]] && command -v getconf >/dev/null 2>&1; then
+        n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    fi
+    if [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s logical\n' "$n"
+        return 0
+    fi
+    return 1
+}
+
+# _tn_hw_cpu_text <n> <physical|logical> — "4 physical cores", "1 logical CPU".
+_tn_hw_cpu_text() {
+    local n="$1" what
+    if [[ "${2:-}" == "physical" ]]; then what="physical core"; else what="logical CPU"; fi
+    if [[ "$n" == "1" ]]; then
+        printf '%s %s' "$n" "$what"
+    else
+        printf '%s %ss' "$n" "$what"
+    fi
+}
+
 # _tn_hw_role <label> <min_cpu> <min_ram_gb> <min_disk_gb> <cpu> <ram_kb> <disk_kb>
-# — print one line for a role tier. Empty cpu/ram_kb/disk_kb mean "could not
-# measure" and never count as a shortfall. rc 1 when a measured value is below the
+# [cpu_kind] — print one line for a role tier. Empty cpu/ram_kb/disk_kb mean "could
+# not measure" and never count as a shortfall. cpu_kind (physical or logical, from
+# tn_physical_cores) only words the count. rc 1 when a measured value is below the
 # tier, else 0. RAM and disk get 5 % slack: a "16 GB" box reports ~15.6 GiB and a
 # formatted "2 TB" disk a little under 2000 GB.
 _tn_hw_role() {
     local label="$1" min_cpu="$2" min_ram="$3" min_disk="$4" cpu="$5" ram_kb="$6" disk_kb="$7"
-    local spec need have unknown
+    local cpu_kind="${8:-logical}" spec need have unknown
     spec="${min_cpu} cores / ${min_ram} GB / $(_tn_hw_disk_label "$min_disk")"
     need=""
     have=""
@@ -778,7 +856,7 @@ _tn_hw_role() {
         unknown="CPU"
     elif [[ "$cpu" -lt "$min_cpu" ]]; then
         need="${min_cpu} cores"
-        have="${cpu} CPUs"
+        have="$(_tn_hw_cpu_text "$cpu" "$cpu_kind")"
     fi
     if [[ -z "$ram_kb" ]]; then
         unknown="${unknown:+${unknown}, }RAM"
@@ -811,9 +889,9 @@ _tn_hw_role() {
 # node_type) is accepted for call-site compatibility and ignored. data_dir (default
 # /) picks the filesystem to measure; it may not exist yet (created later in
 # setup), so the nearest existing parent is used.
-#   * CPU: nproc, then getconf _NPROCESSORS_ONLN. Both count LOGICAL CPUs while the
-#     tiers are physical cores, so a hyperthreaded box can look up to twice its
-#     real size. That risk is noted here, not corrected.
+#   * CPU: tn_physical_cores. The tiers are physical cores; when only the logical
+#     count can be read (every hyperthread counted, so up to twice the cores), the
+#     tiers are compared with that and the report says so.
 #   * RAM: MemTotal from ${TN_PROC_MEMINFO:-/proc/meminfo} (a harness can point it
 #     at a fixture), shown rounded to whole GiB.
 #   * Disk: TOTAL size of that filesystem (not free space) from POSIX `df -Pk`, in
@@ -823,20 +901,20 @@ _tn_hw_role() {
 # below minimum, from node, rpc, validator; empty when all pass), both plain ASCII.
 check_hardware() {
     local data_dir="${2:-/}"
-    local meminfo cpu ram_kb ram_gb check_path df_line disk_kb disk_avail_kb disk_pct
+    local meminfo cpu cpu_kind cores ram_kb ram_gb check_path df_line disk_kb disk_avail_kb disk_pct
     local mount_point disk_gb disk_free_gb cpu_txt ram_txt disk_txt gaps
     TN_HW_SUMMARY=""
     TN_HW_GAPS=""
     print_step "Checking hardware..."
 
     cpu=""
-    if command -v nproc >/dev/null 2>&1; then
-        cpu="$(nproc 2>/dev/null || true)"
+    cpu_kind=""
+    cores="$(tn_physical_cores 2>/dev/null || true)"
+    read -r cpu cpu_kind _ <<<"$cores" || true
+    if [[ ! "$cpu" =~ ^[1-9][0-9]*$ ]] || [[ "$cpu_kind" != "physical" && "$cpu_kind" != "logical" ]]; then
+        cpu=""
+        cpu_kind=""
     fi
-    if [[ ! "$cpu" =~ ^[1-9][0-9]*$ ]] && command -v getconf >/dev/null 2>&1; then
-        cpu="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-    fi
-    [[ "$cpu" =~ ^[1-9][0-9]*$ ]] || cpu=""
 
     meminfo="${TN_PROC_MEMINFO:-/proc/meminfo}"
     ram_kb=""
@@ -890,7 +968,7 @@ check_hardware() {
         disk_free_gb=$(( (disk_avail_kb * 1024 + 500000000) / 1000000000 ))
     fi
 
-    if [[ -n "$cpu" ]]; then cpu_txt="${cpu} CPUs"; else cpu_txt="unknown CPUs"; fi
+    if [[ -n "$cpu" ]]; then cpu_txt="$(_tn_hw_cpu_text "$cpu" "$cpu_kind")"; else cpu_txt="unknown CPUs"; fi
     if [[ -n "$ram_gb" ]]; then ram_txt="${ram_gb} GB RAM"; else ram_txt="unknown RAM"; fi
     if [[ -n "$disk_gb" ]]; then
         disk_txt="${disk_gb} GB disk on ${mount_point}"
@@ -902,21 +980,24 @@ check_hardware() {
     fi
     TN_HW_SUMMARY="${cpu_txt}, ${ram_txt}, ${disk_txt}"
     print_info "Detected: ${TN_HW_SUMMARY}"
+    if [[ "$cpu_kind" == "logical" ]]; then
+        print_info "Physical cores could not be counted, so the tiers below are compared with logical CPUs; with hyperthreading that is up to twice the physical cores."
+    fi
     if [[ -n "$disk_pct" ]] && [[ "$disk_pct" -ge 90 ]]; then
         print_warn "Disk ${mount_point} is ${disk_pct}% used (${disk_free_gb:-?} GB free)."
     fi
 
     gaps=""
     if ! _tn_hw_role "Full node (follower)" "$HW_NODE_MIN_CPU" "$HW_NODE_MIN_RAM_GB" "$HW_NODE_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb"; then
+        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="node"
     fi
     if ! _tn_hw_role "Public RPC node" "$HW_RPC_MIN_CPU" "$HW_RPC_MIN_RAM_GB" "$HW_RPC_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb"; then
+        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="${gaps:+${gaps},}rpc"
     fi
     if ! _tn_hw_role "Validator (minimum)" "$HW_VAL_MIN_CPU" "$HW_VAL_MIN_RAM_GB" "$HW_VAL_MIN_DISK_GB" \
-        "$cpu" "$ram_kb" "$disk_kb"; then
+        "$cpu" "$ram_kb" "$disk_kb" "$cpu_kind"; then
         gaps="${gaps:+${gaps},}validator"
     fi
     TN_HW_GAPS="$gaps"
@@ -1805,7 +1886,8 @@ _tn_wait_say() {
 # Policy:
 #   1. Skipped, node mode unreadable, or mode not CvvActive: log and return.
 #   2. Time to the boundary unreadable: warn and return. More than the margin
-#      away: log and return.
+#      away: log and return. Passed more than the margin ago with the epoch still
+#      open (stalled, or this node far behind): warn once and return.
 #   3. Otherwise one step message, then poll until the epoch id rises, with a log
 #      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
 #   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap.
@@ -1857,6 +1939,12 @@ tn_wait_restart_window() {
     fi
     if (( secs > margin )); then
         "$fn" log "Epoch ${epoch} ends in $(_tn_fmt_secs "$secs"), outside the ${margin}s margin; no need to wait." || true
+        return 0
+    fi
+    # The boundary passed longer ago than the margin and the epoch is still open:
+    # it is stalled or this node is far behind, and waiting cannot help either.
+    if (( secs < -margin )); then
+        "$fn" warn "Epoch ${epoch} should have ended $(_tn_fmt_secs "$(( -secs ))") ago and has not; not waiting." || true
         return 0
     fi
 
@@ -3237,22 +3325,998 @@ tn_node_launch_target() {
     printf '%s %s %s\n' "$svc" "$method" "$file"
 }
 
-# tn_node_inject_flags <file> <marker> <flags> — idempotently append <flags> onto the
-# node-launch --http line (matched as a whole word, so --http.addr etc. are untouched)
-# when <marker> is absent. awk avoids sed metachar pitfalls with the slashes in the
-# flag paths. Returns 0 if it changed the file, 1 if already present / line not found.
-# The caller is responsible for daemon-reload (docker) and restart.
+# -----------------------------------------------------------------------------
+# Node launch file: target line and flag edits (COMMON_VERSION >= 1.6.0)
+# -----------------------------------------------------------------------------
+#
+# A launch file is the start wrapper setup-node.sh writes (its heredoc joins the
+# command onto one `exec docker run ... telcoin node ...` or `exec <binary> node
+# ...` line; hand edits may split it with trailing backslashes) or, on old docker
+# installs, the systemd unit that holds the whole command on one ExecStart= line.
+# Every helper below reads it the same way:
+#   * a line whose first non-blank character is # is a comment (; too in a .service
+#     file). In a shell wrapper a comment line ends a continued command, as bash
+#     reads it; in a unit it is skipped and the command goes on (systemd.syntax).
+#   * words are split as the shell splits them, so "$(cat /etc/telcoin/x.yaml)" is
+#     one word, and a word starting with # begins a trailing comment.
+#   * the target line is the first non-comment line holding the word --http in a
+#     command that has the word `node` before it. New flags go there, before a
+#     trailing backslash, else at the end of the line.
+#   * reads and edits of an existing flag look only at the words after `node` in
+#     that command; FLAG=VALUE counts too. A value is the next word unless that
+#     starts with -, so a flag followed by another flag is a boolean.
+# Return codes shared by the edits: 0 changed, 1 no change needed, 2 no live node
+# --http line, 3 refused (a trailing comment on a line that would change, a bad
+# flag or value, a quote the parser cannot balance, or a staged copy that fails the
+# checks), 4 I/O error. The file is untouched unless rc is 0. Edits are staged in a
+# temp file and written back with `cat >`, which keeps owner and mode, only when
+# the staged copy is non-empty, has as many --http lines as before, reads back as
+# intended and, for a shell wrapper that passed bash -n, still passes it. The
+# caller owns any backup, the daemon-reload of a unit and the restart.
+
+# _tn_launch_is_unit FILE — rc 0 when FILE is a systemd unit (name ends in .service).
+_tn_launch_is_unit() {
+    [[ "${1:-}" == *.service ]]
+}
+
+# _tn_launch_awk MODE FILE [FLAG [VALUE [HASVAL [FLAGS [UNIT]]]]] — the launch-file
+# parser. MODE is target (print the target line number), get, probe (print
+# "<count> <boolean 0|1> <raw value>" of FLAG), runner (print "docker <image>" or
+# "binary <path>"), set, unset or inject (print the whole edited file). UNIT (1 or
+# 0) says how to read FILE; it defaults to the name of FILE, and a staged temp copy
+# passes the kind of the file it was made from. Inputs reach awk through the
+# environment, so nothing is escape-processed. Exit 10 done, 11 no change needed or
+# FLAG absent, 12 no target line, 13 refused; anything else is an awk failure.
+_tn_launch_awk() {
+    local unit="${7:-}"
+    if [[ "$unit" != "0" && "$unit" != "1" ]]; then
+        unit=0
+        if _tn_launch_is_unit "$2"; then
+            unit=1
+        fi
+    fi
+    TN_LE_MODE="$1" TN_LE_FLAG="${3:-}" TN_LE_VALUE="${4:-}" TN_LE_HASVAL="${5:-0}" \
+    TN_LE_FLAGS="${6:-}" TN_LE_UNIT="$unit" awk '
+        function q_sq(s, i,    j) {
+            j = index(substr(s, i), SQ)
+            return j ? i + j - 1 : 0
+        }
+        function q_bq(s, i, n,    c) {
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == "\\") { i += 2; continue }
+                if (c == "`") return i
+                i++
+            }
+            return 0
+        }
+        function q_dq(s, i, n,    c) {
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == "\\") { i += 2; continue }
+                if (c == "\"") return i
+                if (c == "`") { i = q_bq(s, i + 1, n); if (!i) return 0; i++; continue }
+                if (c == "$" && substr(s, i + 1, 1) == "(") { i = q_nest(s, i + 2, n, "(", ")"); if (!i) return 0; i++; continue }
+                if (c == "$" && substr(s, i + 1, 1) == "{") { i = q_nest(s, i + 2, n, "{", "}"); if (!i) return 0; i++; continue }
+                i++
+            }
+            return 0
+        }
+        function q_nest(s, i, n, op, cl,    c, d) {
+            d = 1
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == "\\") { i += 2; continue }
+                if (c == SQ) { i = q_sq(s, i + 1); if (!i) return 0; i++; continue }
+                if (c == "\"") { i = q_dq(s, i + 1, n); if (!i) return 0; i++; continue }
+                if (c == "`") { i = q_bq(s, i + 1, n); if (!i) return 0; i++; continue }
+                if (c == op) d++
+                else if (c == cl) { d--; if (!d) return i }
+                i++
+            }
+            return 0
+        }
+        # Split s into words as the shell does. ln > 0 records them in the file
+        # table (TT text, TL line, TS and TE first and last column); ln 0 records
+        # them in W. Sets tk_n (words), tk_cont (ends in a continuation
+        # backslash), tk_com (column of a trailing # comment, 0 for none) and
+        # tk_bad (a quote that does not close on this line).
+        function tok(s, ln,    n, i, c, st, j) {
+            tk_n = 0; tk_cont = 0; tk_com = 0; tk_bad = 0
+            n = length(s); i = 1
+            while (i <= n) {
+                c = substr(s, i, 1)
+                if (c == " " || c == "\t") { i++; continue }
+                if (c == "#") { tk_com = i; return }
+                if (c == "\\" && substr(s, i + 1) ~ /^[ \t]*$/) { tk_cont = 1; return }
+                st = i
+                while (i <= n) {
+                    c = substr(s, i, 1)
+                    if (c == " " || c == "\t") break
+                    if (c == "\\") {
+                        if (substr(s, i + 1) ~ /^[ \t]*$/) { tk_cont = 1; break }
+                        i += 2; continue
+                    }
+                    j = -1
+                    if (c == SQ) j = q_sq(s, i + 1)
+                    else if (c == "\"") j = q_dq(s, i + 1, n)
+                    else if (c == "`") j = q_bq(s, i + 1, n)
+                    else if (c == "$" && substr(s, i + 1, 1) == "(") j = q_nest(s, i + 2, n, "(", ")")
+                    else if (c == "$" && substr(s, i + 1, 1) == "{") j = q_nest(s, i + 2, n, "{", "}")
+                    if (j < 0) { i++; continue }
+                    if (!j) { tk_bad = 1; return }
+                    i = j + 1
+                }
+                tk_n++
+                if (ln) { NT++; TT[NT] = substr(s, st, i - st); TL[NT] = ln; TS[NT] = st; TE[NT] = i - 1 }
+                else W[tk_n] = substr(s, st, i - st)
+                if (tk_cont) return
+            }
+        }
+        # A word without its outer quotes, when one pair encloses all of it.
+        function unq(t,    n, q) {
+            n = length(t)
+            if (n < 2) return t
+            q = substr(t, 1, 1)
+            if (q == SQ && q_sq(t, 2) == n) return substr(t, 2, n - 2)
+            if (q == "\"" && q_dq(t, 2, n) == n) return substr(t, 2, n - 2)
+            return t
+        }
+        # Line i rebuilt without the words in DEL and with the words in REP
+        # replaced, keeping its indentation, the gaps between kept words and its
+        # tail (a continuation backslash, say).
+        function relin(i,    s, o, k, kept, tx) {
+            s = L[i]; o = ""; kept = 0
+            for (k = LT0[i]; k <= LT1[i]; k++) {
+                if (k in DEL) continue
+                tx = (k in REP) ? REP[k] : TT[k]
+                if (kept) o = o substr(s, TE[k - 1] + 1, TS[k] - TE[k - 1] - 1) tx
+                else o = substr(s, 1, TS[LT0[i]] - 1) tx
+                kept = 1
+            }
+            if (!kept) o = substr(s, 1, TS[LT0[i]] - 1)
+            return o substr(s, TE[LT1[i]] + 1)
+        }
+        # Apply DEL and REP to the node command. A line left with nothing but
+        # blanks and a backslash is dropped; when that line ended the command,
+        # the line before it loses its backslash. Returns 1 when a line that
+        # would change has a trailing comment.
+        function edit_cmd(    i, k, hit, s, last) {
+            for (i = CF[tc]; i <= CL[tc]; i++) {
+                if ((i in COM) || LT1[i] < LT0[i]) continue
+                hit = 0
+                for (k = LT0[i]; k <= LT1[i]; k++) if ((k in DEL) || (k in REP)) hit = 1
+                if (!hit) continue
+                if (LCOM[i]) return 1
+                s = relin(i)
+                if (s ~ /^[ \t]*(\\[ \t]*)?$/) DROP[i] = 1
+                else NEWL[i] = s
+            }
+            last = CL[tc]
+            if ((last in DROP) && !LCONT[last]) {
+                for (i = last - 1; i >= CF[tc]; i--) {
+                    if ((i in COM) || (i in DROP)) continue
+                    s = (i in NEWL) ? NEWL[i] : L[i]
+                    sub(/[ \t]*\\[ \t]*$/, "", s)
+                    NEWL[i] = s
+                    break
+                }
+            }
+            return 0
+        }
+        # Line i with text added before a trailing backslash, else at the end.
+        function ins_line(i, text,    s) {
+            s = L[i]
+            if (LCONT[i]) { sub(/[ \t]*\\[ \t]*$/, "", s); return s " " text " \\" }
+            return s " " text
+        }
+        function emit(    i) {
+            for (i = 1; i <= N; i++) {
+                if (i in DROP) continue
+                if (i in NEWL) print NEWL[i]
+                else print L[i]
+            }
+        }
+        BEGIN { SQ = sprintf("%c", 39) }
+        { L[NR] = $0 }
+        END {
+            N = NR
+            mode = ENVIRON["TN_LE_MODE"]; unit = (ENVIRON["TN_LE_UNIT"] == "1")
+            flag = ENVIRON["TN_LE_FLAG"]; val = ENVIRON["TN_LE_VALUE"]
+            hasval = (ENVIRON["TN_LE_HASVAL"] == "1"); ins = ENVIRON["TN_LE_FLAGS"]
+            if (mode == "set" && hasval) {
+                tok(val, 0)
+                if (tk_n != 1 || tk_com || tk_bad || tk_cont || W[1] != val) exit 13
+            }
+            if (mode == "inject") {
+                tok(ins, 0)
+                if (tk_n < 1 || tk_com || tk_bad || tk_cont) exit 13
+            }
+            NT = 0; nc = 0; cont = 0
+            for (i = 1; i <= N; i++) {
+                s = L[i]
+                if (s ~ /^[ \t]*#/ || (unit && s ~ /^[ \t]*;/)) {
+                    COM[i] = 1
+                    if (!unit) cont = 0
+                    continue
+                }
+                if (!cont) { nc++; CF[nc] = i; CT0[nc] = NT + 1 }
+                LT0[i] = NT + 1
+                tok(s, i)
+                LT1[i] = NT; LCONT[i] = tk_cont; LCOM[i] = tk_com; LBAD[i] = tk_bad
+                for (k = LT0[i]; k <= NT; k++) TC[k] = nc
+                CL[nc] = i; CT1[nc] = NT
+                cont = tk_cont && !tk_bad
+            }
+            tk = 0
+            for (k = 1; k <= NT; k++) {
+                if (TT[k] != "--http") continue
+                c = TC[k]
+                for (j = CT0[c]; j < k; j++) if (TT[j] == "node") break
+                if (j < k) { tk = k; tn = j; tc = c; break }
+            }
+            if (!tk) exit 12
+            tl = TL[tk]
+            # A quote the parser could not close makes the command unreliable;
+            # in a shell wrapper one anywhere before it does too.
+            for (i = (unit ? CF[tc] : 1); i <= CL[tc]; i++) if (LBAD[i]) exit 13
+            if (mode == "target") { print tl; exit 10 }
+            if (mode == "inject") {
+                if (LCOM[tl]) exit 13
+                NEWL[tl] = ins_line(tl, ins)
+                emit(); exit 10
+            }
+            no = 0
+            for (k = tn + 1; k <= CT1[tc]; k++) {
+                t = TT[k]
+                if (t == flag) {
+                    no++; OF[no] = k; OV[no] = 0; OB[no] = 1; OR[no] = ""
+                    if (k < CT1[tc] && substr(TT[k + 1], 1, 1) != "-") { OV[no] = k + 1; OB[no] = 0; OR[no] = TT[k + 1]; k++ }
+                } else if (index(t, flag "=") == 1) {
+                    no++; OF[no] = k; OV[no] = 0; OB[no] = 0; OR[no] = substr(t, length(flag) + 2)
+                }
+            }
+            if (mode == "get") { if (!no) exit 11; print unq(OR[1]); exit 10 }
+            if (mode == "probe") { printf "%d %d %s\n", no, (no ? OB[1] : 0), (no ? OR[1] : ""); exit 10 }
+            if (mode == "runner") {
+                dk = 0; dr = 0
+                for (k = CT0[tc]; k < tn; k++) {
+                    t = unq(TT[k]); sub(/^ExecStart=[-@:+!]*/, "", t); b = t; sub(/^.*\//, "", b)
+                    if (b == "docker") dk = k
+                    else if (dk && TT[k] == "run") { dr = k; break }
+                }
+                if (dr) {
+                    b = unq(TT[tn - 1]); sub(/^.*\//, "", b)
+                    im = (b == "telcoin" || b == "telcoin-network") ? tn - 2 : tn - 1
+                    if (im <= dr) exit 11
+                    print "docker " unq(TT[im]); exit 10
+                }
+                if (tn <= CT0[tc]) exit 11
+                t = unq(TT[tn - 1]); sub(/^ExecStart=[-@:+!]*/, "", t)
+                print "binary " t; exit 10
+            }
+            if (mode == "unset") {
+                if (!no) exit 11
+                for (m = 1; m <= no; m++) { DEL[OF[m]] = 1; if (OV[m]) DEL[OV[m]] = 1 }
+                if (edit_cmd()) exit 13
+                emit(); exit 10
+            }
+            if (mode == "set") {
+                nt = hasval ? flag " " val : flag
+                if (no) {
+                    if (no == 1 && (hasval ? (!OB[1] && OR[1] == val) : OB[1])) exit 11
+                    REP[OF[1]] = nt; if (OV[1]) DEL[OV[1]] = 1
+                    for (m = 2; m <= no; m++) { DEL[OF[m]] = 1; if (OV[m]) DEL[OV[m]] = 1 }
+                    if (edit_cmd()) exit 13
+                } else {
+                    if (LCOM[tl]) exit 13
+                    NEWL[tl] = ins_line(tl, nt)
+                }
+                emit(); exit 10
+            }
+            exit 13
+        }
+    ' "$2"
+}
+
+# _tn_launch_flag_ok FLAG — rc 0 for a long option name such as --state-export-keep.
+_tn_launch_flag_ok() {
+    local re='^--[A-Za-z0-9][A-Za-z0-9._-]*$'
+    [[ "${1:-}" =~ $re ]]
+}
+
+# _tn_launch_http_count FILE — the number of lines holding the word --http, comment
+# lines included (the same count tn_node_strip_observer_flag compares).
+_tn_launch_http_count() {
+    grep -cE -- '(^|[[:space:]])--http([[:space:]]|\\?$)' "$1" 2>/dev/null || true
+}
+
+# _tn_launch_live_lines FILE [UNIT] — the non-comment lines of FILE, read as a unit
+# when UNIT is 1 (default: from the name of FILE).
+_tn_launch_live_lines() {
+    local unit="${2:-}"
+    if [[ "$unit" != "0" && "$unit" != "1" ]]; then
+        unit=0
+        if _tn_launch_is_unit "$1"; then
+            unit=1
+        fi
+    fi
+    awk -v u="$unit" '/^[ \t]*#/ { next } u == 1 && /^[ \t]*;/ { next } { print }' "$1" 2>/dev/null
+}
+
+# _tn_launch_same_but OLD NEW LINE TEXT — rc 0 when NEW has as many lines as OLD
+# and matches it everywhere except line LINE, which reads TEXT.
+_tn_launch_same_but() {
+    TN_LE_TEXT="$4" awk -v n="$3" '
+        NR == FNR { b[FNR] = $0; nb = FNR; next }
+        { nl = FNR
+          if (FNR == n + 0) { if ($0 != ENVIRON["TN_LE_TEXT"]) bad = 1 }
+          else if ($0 != b[FNR]) bad = 1 }
+        END { exit (bad || nl != nb || n + 0 < 1) }
+    ' "$1" "$2" 2>/dev/null
+}
+
+# _tn_launch_staged_ok OP FILE TMP FLAG VALUE HASVAL FLAGS MARKER — rc 0 when the
+# staged copy TMP of FILE may be written: non-empty, as many --http lines, and the
+# change reads back as intended (set: FLAG once, with VALUE or as a boolean; unset:
+# FLAG gone; inject: only the target line changed, to that line plus FLAGS, and
+# MARKER now on a live line). A shell wrapper that passed bash -n must still pass.
+_tn_launch_staged_ok() {
+    local op="$1" file="$2" tmp="$3" flag="$4" value="$5" hasval="$6" flags="$7" marker="$8"
+    local unit=0 before after rc probe n b raw tl old want re live
+    if _tn_launch_is_unit "$file"; then
+        unit=1
+    fi
+    [[ -s "$tmp" ]] || return 1
+    before="$(_tn_launch_http_count "$file")"
+    after="$(_tn_launch_http_count "$tmp")"
+    [[ -n "$before" && "$before" == "$after" ]] || return 1
+    case "$op" in
+        set|unset)
+            rc=0
+            probe="$(_tn_launch_awk probe "$tmp" "$flag" "" 0 "" "$unit")" || rc=$?
+            [[ "$rc" -eq 10 ]] || return 1
+            n=""
+            b=""
+            raw=""
+            read -r n b raw <<<"$probe" || true
+            if [[ "$op" == "unset" ]]; then
+                [[ "$n" == "0" ]] || return 1
+            elif [[ "$hasval" == "1" ]]; then
+                [[ "$n" == "1" && "$b" == "0" && "$raw" == "$value" ]] || return 1
+            else
+                [[ "$n" == "1" && "$b" == "1" ]] || return 1
+            fi
+            ;;
+        inject)
+            rc=0
+            tl="$(_tn_launch_awk target "$file")" || rc=$?
+            [[ "$rc" -eq 10 && "$tl" =~ ^[0-9]+$ ]] || return 1
+            old="$(sed -n "${tl}p" "$file")"
+            re='[[:space:]]*\\[[:space:]]*$'
+            if [[ "$old" =~ $re ]]; then
+                want="${old%"${BASH_REMATCH[0]}"} ${flags} \\"
+            else
+                want="${old} ${flags}"
+            fi
+            _tn_launch_same_but "$file" "$tmp" "$tl" "$want" || return 1
+            live="$(_tn_launch_live_lines "$tmp" "$unit")"
+            grep -qE -- "$marker" <<<"$live" 2>/dev/null || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [[ "$unit" -eq 0 ]] && "${BASH:-bash}" -n "$file" 2>/dev/null \
+        && ! "${BASH:-bash}" -n "$tmp" 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+# _tn_launch_write FILE TMP — copy TMP over FILE in place (cat >, so owner and mode
+# stay) and compare the bytes; on a failure the old content is put back. rc 0
+# written, 4 I/O error.
+_tn_launch_write() {
+    local file="$1" tmp="$2" keep
+    keep="$(mktemp 2>/dev/null || true)"
+    [[ -n "$keep" && -f "$keep" ]] || return 4
+    if ! { cat "$file" > "$keep"; } 2>/dev/null; then
+        rm -f "$keep"
+        return 4
+    fi
+    if { cat "$tmp" > "$file"; } 2>/dev/null && cmp -s "$tmp" "$file"; then
+        rm -f "$keep"
+        return 0
+    fi
+    { cat "$keep" > "$file"; } 2>/dev/null || true
+    rm -f "$keep"
+    return 4
+}
+
+# _tn_launch_edit OP FILE FLAG VALUE HASVAL FLAGS MARKER — stage one edit with the
+# parser, check the staged copy and write it back. rc per the family table.
+_tn_launch_edit() {
+    local op="$1" file="$2" flag="$3" value="$4" hasval="$5" flags="$6" marker="$7" tmp rc
+    tmp="$(mktemp 2>/dev/null || true)"
+    [[ -n "$tmp" && -f "$tmp" ]] || return 4
+    rc=0
+    _tn_launch_awk "$op" "$file" "$flag" "$value" "$hasval" "$flags" > "$tmp" 2>/dev/null || rc=$?
+    case "$rc" in
+        10) rc=0 ;;
+        11) rc=1 ;;
+        12) rc=2 ;;
+        13) rc=3 ;;
+        *)  rc=4 ;;
+    esac
+    if [[ "$rc" -eq 0 ]]; then
+        if ! _tn_launch_staged_ok "$op" "$file" "$tmp" "$flag" "$value" "$hasval" "$flags" "$marker"; then
+            rc=3
+        elif [[ ! -w "$file" ]]; then
+            rc=4
+        else
+            _tn_launch_write "$file" "$tmp" || rc=$?
+        fi
+    fi
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# tn_node_inject_flags FILE MARKER_ERE FLAGS — add FLAGS (one or more words, copied
+# verbatim) to the target line of launch file FILE unless MARKER_ERE, an extended
+# regex, already matches a non-comment line. FLAGS must contain what MARKER_ERE
+# matches, so a second call changes nothing. rc per the family table: 1 when the
+# marker is already on a live line; 3 when FLAGS is empty, spans lines, has an
+# unbalanced quote or a # word, carries $, % or a backtick into a .service file, or
+# when MARKER_ERE is empty, invalid or still unmatched after the edit. Callers:
+# setup-observability.sh (--healthcheck), lib/observability.sh (log and metrics
+# flags), install-caddy.sh (--ws flags, anchored at the end of the line as marker).
 tn_node_inject_flags() {
-    local file="$1" marker="$2" flags="$3" tmp
-    [[ -f "$file" ]] || return 1
-    grep -q -- "$marker" "$file" 2>/dev/null && return 1
-    tmp="$(mktemp)"
-    awk -v flags="$flags" '
-        !done && $0 ~ /(^|[[:space:]])--http([[:space:]]|$)/ { print $0 " " flags; done=1; next }
-        { print }
-    ' "$file" > "$tmp"
-    if grep -q -- "$marker" "$tmp"; then cat "$tmp" > "$file"; rm -f "$tmp"; return 0; fi
-    rm -f "$tmp"; return 1
+    local file="${1:-}" marker="${2:-}" flags="${3:-}" live rc
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    [[ -n "$marker" && -n "$flags" ]] || return 3
+    case "$flags" in
+        *$'\n'*|*$'\r'*) return 3 ;;
+    esac
+    if _tn_launch_is_unit "$file"; then
+        case "$flags" in
+            *'$'*|*'%'*|*'`'*) return 3 ;;
+        esac
+    fi
+    live="$(_tn_launch_live_lines "$file")"
+    rc=0
+    grep -qE -- "$marker" <<<"$live" 2>/dev/null || rc=$?
+    case "$rc" in
+        0) return 1 ;;
+        1) ;;
+        *) return 3 ;;
+    esac
+    _tn_launch_edit inject "$file" "" "" 0 "$flags" "$marker"
+}
+
+# tn_launch_flag_get FILE FLAG — print the value FLAG has in the node command of
+# launch file FILE, outer quotes removed (an empty line for a boolean flag). The
+# first occurrence wins. rc 0 found, 1 absent, 2 no live node --http line, 3 a bad
+# FLAG or a command the parser cannot read, 4 FILE missing or unreadable.
+tn_launch_flag_get() {
+    local file="${1:-}" flag="${2:-}" out rc
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    _tn_launch_flag_ok "$flag" || return 3
+    rc=0
+    out="$(_tn_launch_awk get "$file" "$flag" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        10) printf '%s\n' "$out"; return 0 ;;
+        11) return 1 ;;
+        12) return 2 ;;
+        13) return 3 ;;
+        *)  return 4 ;;
+    esac
+}
+
+# tn_launch_flag_set FILE FLAG [VALUE] — make the node command of launch file FILE
+# carry FLAG with VALUE (copied verbatim, quotes and all; one word) or, with no
+# VALUE, as a boolean. An existing FLAG is rewritten where it stands and any
+# repeat removed; a missing one is added to the target line. rc per the family
+# table: 1 when FLAG already reads VALUE exactly; 3 for an empty VALUE, one that is
+# not a single word or starts with - or #, and, in a .service file, a VALUE with
+# $, % or a backtick (systemd would expand them).
+tn_launch_flag_set() {
+    local file="${1:-}" flag="${2:-}" value="" hasval=0
+    if [[ $# -ge 3 ]]; then
+        value="$3"
+        hasval=1
+    fi
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    _tn_launch_flag_ok "$flag" || return 3
+    if [[ "$hasval" -eq 1 ]]; then
+        [[ -n "$value" ]] || return 3
+        case "$value" in
+            -*|'#'*|*$'\n'*|*$'\r'*) return 3 ;;
+        esac
+        if _tn_launch_is_unit "$file"; then
+            case "$value" in
+                *'$'*|*'%'*|*'`'*) return 3 ;;
+            esac
+        fi
+    fi
+    _tn_launch_edit set "$file" "$flag" "$value" "$hasval" "" ""
+}
+
+# tn_launch_flag_unset FILE FLAG — remove every occurrence of FLAG, with its value,
+# from the node command of launch file FILE. A line left empty is dropped. rc per
+# the family table (1 when FLAG is absent).
+tn_launch_flag_unset() {
+    local file="${1:-}" flag="${2:-}"
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    _tn_launch_flag_ok "$flag" || return 3
+    _tn_launch_edit unset "$file" "$flag" "" 0 "" ""
+}
+
+# tn_launch_runner [FILE] — print the runner spec of the node command in launch
+# file FILE (default: the file tn_node_launch_target names): "docker:<image>" when
+# the command is `docker run ... <image> telcoin node ...`, else "binary:<path>"
+# for `<path> node ...` (a bare name is looked up on PATH). Read from the launch
+# file, which is what actually starts the node, not from .node-meta. rc 0 printed,
+# 1 no runner recognised, 2 no live node --http line or no node service, 3 a
+# command the parser cannot read, 4 FILE missing or unreadable.
+tn_launch_runner() {
+    local file="${1:-}" target out rc kind val image_re
+    image_re='^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
+    if [[ -z "$file" ]]; then
+        target="$(tn_node_launch_target 2>/dev/null)" || return 2
+        read -r _ _ file <<<"$target" || true
+    fi
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    rc=0
+    out="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        10) ;;
+        11) return 1 ;;
+        12) return 2 ;;
+        13) return 3 ;;
+        *)  return 4 ;;
+    esac
+    kind="${out%% *}"
+    val="${out#* }"
+    case "$kind" in
+        docker)
+            [[ "$val" =~ $image_re ]] || return 1
+            printf 'docker:%s\n' "$val"
+            ;;
+        binary)
+            if [[ "$val" != /* ]]; then
+                val="$(command -v "$val" 2>/dev/null || true)"
+            fi
+            [[ "$val" == /* ]] || return 1
+            case "$val" in
+                *[[:space:]]*|*'$'*|*'`'*) return 1 ;;
+            esac
+            printf 'binary:%s\n' "$val"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
+# Node binary: keytool and probes (COMMON_VERSION >= 1.6.0)
+# -----------------------------------------------------------------------------
+#
+# SPEC is a runner spec from tn_launch_runner: docker:<image> runs `telcoin` in a
+# throwaway container of that image, binary:<abs-path> runs that file. Probes ask
+# the binary that actually starts the node, so a feature check follows the release
+# installed rather than a version number (every release reports crate 0.1.0).
+
+# _tn_runner_probe SPEC ARGS... — run the node binary of SPEC with ARGS for a help
+# or parse probe: no data dir mounted, stdin from /dev/null. rc is the binary's
+# own, or 127 when SPEC is malformed or names no executable file.
+_tn_runner_probe() {
+    local spec="${1:-}" bin
+    if [[ $# -gt 0 ]]; then
+        shift
+    fi
+    case "$spec" in
+        docker:?*)
+            docker run --rm "${spec#docker:}" telcoin "$@" </dev/null
+            ;;
+        binary:/?*)
+            bin="${spec#binary:}"
+            [[ -f "$bin" && -x "$bin" ]] || return 127
+            "$bin" "$@" </dev/null
+            ;;
+        *)
+            return 127
+            ;;
+    esac
+}
+
+# _tn_help_lists WORD TEXT — rc 0 when clap help TEXT defines WORD on an option
+# line ("  -h, --help", "      --http.addr <HTTP_ADDR>") or a subcommand line
+# ("  set-rpc  Set or clear ..."). Description lines are indented deeper and never
+# count, so a flag only mentioned in another flag's help is not taken as listed.
+_tn_help_lists() {
+    TN_HELP_WORD="$1" awk '
+        { line = $0
+          match(line, /^ */)
+          if (RLENGTH > 6) next
+          sub(/^ +/, "", line)
+          if (line ~ /^-[A-Za-z0-9], /) line = substr(line, 5)
+          sub(/[ ,=<].*$/, "", line)
+          sub(/\[.*$/, "", line)
+          sub(/\.\.\.$/, "", line)
+          if (line != "" && line == ENVIRON["TN_HELP_WORD"]) { found = 1; exit } }
+        END { exit(found ? 0 : 1) }
+    ' <<<"$2" 2>/dev/null
+}
+
+# tn_node_has_flag SPEC FLAG — rc 0 when `node --help` of SPEC lists FLAG (say
+# --bootstrap-peers, new in v0.15.0-adiri), 1 when it does not, 4 when the probe
+# could not run (no such binary, docker failed).
+tn_node_has_flag() {
+    local spec="${1:-}" flag="${2:-}" out rc
+    [[ -n "$flag" ]] || return 1
+    rc=0
+    out="$(_tn_runner_probe "$spec" node --help 2>&1)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1|2) return 1 ;;
+        *) return 4 ;;
+    esac
+    _tn_help_lists "$flag" "$out"
+}
+
+# tn_keytool_has SPEC WORD [SUBCMD...] — rc 0 when `keytool SUBCMD... --help` of
+# SPEC lists WORD, an option (--rpc-http) or a subcommand (set-rpc); 1 when it does
+# not or the subcommand is unknown to this release; 4 when the probe could not run.
+tn_keytool_has() {
+    local spec="${1:-}" word="${2:-}" out rc
+    [[ $# -ge 2 && -n "$word" ]] || return 1
+    shift 2
+    rc=0
+    out="$(_tn_runner_probe "$spec" keytool "$@" --help 2>&1)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1|2) return 1 ;;
+        *) return 4 ;;
+    esac
+    _tn_help_lists "$word" "$out"
+}
+
+# tn_node_parse_check SPEC ARGS... — rc 0 when the node binary of SPEC accepts
+# `node ARGS... --help`. clap parses every value before it prints the help, so this
+# checks a value such as a --bootstrap-peers map without starting anything. rc 1
+# when the arguments are rejected, with the first `error:` line on stdout; rc 4
+# when the probe could not run, with the reason on stdout.
+tn_node_parse_check() {
+    local spec="${1:-}" out rc line
+    if [[ $# -gt 0 ]]; then
+        shift
+    fi
+    rc=0
+    out="$(_tn_runner_probe "$spec" node "$@" --help 2>&1)" || rc=$?
+    case "$rc" in
+        0)
+            return 0
+            ;;
+        1|2)
+            line="$(awk 'BEGIN { esc = sprintf("%c", 27) }
+                { gsub(esc "\\[[0-9;]*m", "") }
+                /^error:/ { print; exit }' <<<"$out" 2>/dev/null || true)"
+            printf '%s\n' "${line:-rejected (exit ${rc})}"
+            return 1
+            ;;
+        *)
+            printf 'could not run the node binary of %s (exit %s)\n' "$spec" "$rc"
+            return 4
+            ;;
+    esac
+}
+
+# _tn_path_owner PATH — print "<uid> <gid>" of PATH (GNU stat, then BSD stat).
+_tn_path_owner() {
+    local out re='^[0-9]+ [0-9]+$'
+    out="$(stat -c '%u %g' "$1" 2>/dev/null || true)"
+    if [[ ! "$out" =~ $re ]]; then
+        out="$(stat -f '%u %g' "$1" 2>/dev/null || true)"
+    fi
+    [[ "$out" =~ $re ]] || return 1
+    printf '%s\n' "$out"
+}
+
+# tn_keytool SPEC DATA_DIR ARGS... — run `keytool ARGS...` of runner SPEC on node
+# data dir DATA_DIR; keytool's output passes through. Every @DATADIR@ inside an
+# argument becomes the data dir as keytool sees it: DATA_DIR for binary:, the mount
+# point /home/nonroot for docker:.
+#   * Global flags go before `keytool`: -q, so the tracing line keytool otherwise
+#     prints on stdout cannot spoil a $(...) capture, and --datadir, each unless
+#     ARGS already carries it. When ARGS starts with export-staking-args and
+#     TN_BLS_PASSPHRASE is unset or empty, --bls-passphrase-source no-passphrase is
+#     added too: that command never reads the key yet refuses to run without a
+#     passphrase source. Never for generate ..., which would then write or read
+#     the key in the clear, nor for anything else.
+#   * TN_BLS_PASSPHRASE, when set, reaches keytool through the environment only;
+#     docker gets `-e TN_BLS_PASSPHRASE` by name, so the value is in no argv.
+#   * docker runs as the owner of DATA_DIR, with HOME=/home/nonroot and DATA_DIR
+#     mounted there, the way setup-node.sh runs keygen. DATA_DIR must exist.
+# rc is keytool's own, or 4 when it cannot be started (bad SPEC, no executable
+# file, no DATA_DIR for docker, too few arguments); docker's own failures come
+# back as docker's rc (125 and up).
+tn_keytool() {
+    local spec="${1:-}" data_dir="${2:-}" in_dir arg rest done_part first bin owner uid gid
+    local has_dd=0 has_q=0 has_src=0
+    local -a args=() glob=() drun=()
+    if [[ $# -lt 3 || -z "$data_dir" ]]; then
+        printf 'tn_keytool: usage: tn_keytool SPEC DATA_DIR KEYTOOL-ARGS...\n' >&2
+        return 4
+    fi
+    shift 2
+    first="$1"
+    case "$spec" in
+        docker:?*) in_dir="/home/nonroot" ;;
+        binary:/?*) in_dir="$data_dir" ;;
+        *)
+            printf 'tn_keytool: unknown runner spec: %s\n' "$spec" >&2
+            return 4
+            ;;
+    esac
+    for arg in "$@"; do
+        case "$arg" in
+            --datadir|--datadir=*) has_dd=1 ;;
+            -q|--quiet) has_q=1 ;;
+            --bls-passphrase-source|--bls-passphrase-source=*) has_src=1 ;;
+        esac
+        rest="$arg"
+        done_part=""
+        while [[ "$rest" == *@DATADIR@* ]]; do
+            done_part="${done_part}${rest%%@DATADIR@*}${in_dir}"
+            rest="${rest#*@DATADIR@}"
+        done
+        args+=("${done_part}${rest}")
+    done
+    if [[ "$has_q" -eq 0 ]]; then
+        glob+=(-q)
+    fi
+    if [[ "$has_dd" -eq 0 ]]; then
+        glob+=(--datadir "$in_dir")
+    fi
+    if [[ "$has_src" -eq 0 && "$first" == "export-staking-args" && -z "${TN_BLS_PASSPHRASE:-}" ]]; then
+        glob+=(--bls-passphrase-source no-passphrase)
+    fi
+    case "$spec" in
+        binary:*)
+            bin="${spec#binary:}"
+            if [[ ! -f "$bin" || ! -x "$bin" ]]; then
+                printf 'tn_keytool: %s is not an executable file\n' "$bin" >&2
+                return 4
+            fi
+            if [[ -n "${TN_BLS_PASSPHRASE+x}" ]]; then
+                TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+            else
+                "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+            fi
+            ;;
+        docker:*)
+            if [[ ! -d "$data_dir" ]]; then
+                printf 'tn_keytool: data dir %s does not exist\n' "$data_dir" >&2
+                return 4
+            fi
+            owner="$(_tn_path_owner "$data_dir")" || {
+                printf 'tn_keytool: cannot read the owner of %s\n' "$data_dir" >&2
+                return 4
+            }
+            uid="${owner%% *}"
+            gid="${owner##* }"
+            drun=(run --rm --user "${uid}:${gid}" -e HOME=/home/nonroot)
+            if [[ -n "${TN_BLS_PASSPHRASE+x}" ]]; then
+                drun+=(-e TN_BLS_PASSPHRASE)
+            fi
+            drun+=(-v "${data_dir}:/home/nonroot" "${spec#docker:}" telcoin)
+            if [[ -n "${TN_BLS_PASSPHRASE+x}" ]]; then
+                TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+            else
+                docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+            fi
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
+# node-info.yaml readers (COMMON_VERSION >= 1.6.0)
+# -----------------------------------------------------------------------------
+#
+# keytool writes node-info.yaml beside the node keys. v0.15.0-adiri and later
+# write p2p_info.workers as a list with one entry per worker; v0.14.0 and older
+# write a single p2p_info.worker map. Both shapes are read, with awk only (no
+# python3 or yq on a node). The readers return rc 0 with the value, 1 when the
+# value is absent, null or unusable, and 4 when FILE is missing or unreadable.
+
+# _tn_node_info_flat FILE — every scalar of a block-style YAML file as one
+# "<dotted.path><TAB><value>" line, list items numbered from 0
+# (p2p_info.workers.0.rpc.http). Quotes and trailing comments are removed; ~, null
+# and an empty value come out empty. Any indent width works, and a list may sit at
+# its key's own indent. Flow style ({...}, [...]) comes out as raw text. rc 3 for
+# a tab in the indentation, which YAML forbids.
+_tn_node_info_flat() {
+    awk '
+        function lead(s) { match(s, /^ */); return RLENGTH }
+        function path(k,    i, p) { p = ""; for (i = 1; i <= D; i++) p = p FK[i] "."; return p k }
+        function put(k, v) { printf "%s\t%s\n", path(k), v }
+        # A scalar without its quotes or a trailing comment; nulls come out empty.
+        function scalar(v,    q, j, n) {
+            sub(/^[ \t]+/, "", v)
+            q = substr(v, 1, 1); n = length(v)
+            if (q == "\"") {
+                for (j = 2; j <= n; j++) {
+                    if (substr(v, j, 1) == "\\") { j++; continue }
+                    if (substr(v, j, 1) == "\"") return substr(v, 2, j - 2)
+                }
+                return v
+            }
+            if (q == SQ) {
+                for (j = 2; j <= n; j++) {
+                    if (substr(v, j, 1) != SQ) continue
+                    if (substr(v, j + 1, 1) == SQ) { j++; continue }
+                    return substr(v, 2, j - 2)
+                }
+                return v
+            }
+            if (match(v, /[ \t]#/)) v = substr(v, 1, RSTART - 1)
+            sub(/[ \t]+$/, "", v)
+            if (v == "~" || v == "null" || v == "Null" || v == "NULL") v = ""
+            return v
+        }
+        # A key with no value opens a block whose indent the next line sets.
+        function opener(k, n) { D++; FK[D] = k; FP[D] = 1; FO[D] = n; FI[D] = -1; FQ[D] = 0; FC[D] = 0 }
+        function frame(k, ind) { D++; FK[D] = k; FP[D] = 0; FO[D] = -1; FI[D] = ind; FQ[D] = 0; FC[D] = 0 }
+        function pair(n, c,    k, v, q) {
+            if (!match(c, /:([ \t]|$)/)) return
+            k = substr(c, 1, RSTART - 1); v = substr(c, RSTART + 1)
+            sub(/[ \t]+$/, "", k)
+            q = substr(k, 1, 1)
+            if ((q == "\"" || q == SQ) && length(k) >= 2 && substr(k, length(k), 1) == q) k = substr(k, 2, length(k) - 2)
+            sub(/^[ \t]+/, "", v)
+            if (v == "" || substr(v, 1, 1) == "#") { opener(k, n); return }
+            put(k, scalar(v))
+        }
+        BEGIN { SQ = sprintf("%c", 39); D = 0 }
+        {
+            s = $0
+            sub(/\r$/, "", s)
+            if (s ~ /^[ \t]*$/ || s ~ /^[ \t]*#/) next
+            if (s ~ /^(---|\.\.\.)([ \t]|$)/) next
+            if (s ~ /^ *\t/) { bad = 1; exit }
+            n = lead(s); c = substr(s, n + 1)
+            item = (c ~ /^-([ \t]|$)/)
+            if (D > 0 && FP[D]) {
+                if (n > FO[D] || (n == FO[D] && item)) { FP[D] = 0; FI[D] = n; FQ[D] = item; FC[D] = 0 }
+                else { D--; put(FK[D + 1], "") }
+            }
+            while (D > 0 && (FI[D] > n || (FI[D] == n && FQ[D] && !item))) D--
+            if (!item) { pair(n, c); next }
+            if (!(D > 0 && FQ[D] && FI[D] == n)) next
+            idx = FC[D]++
+            r = substr(c, 2); col = n + 1
+            while (r ~ /^[ \t]/) { r = substr(r, 2); col++ }
+            if (r == "" || substr(r, 1, 1) == "#") { opener(idx, n); next }
+            q = substr(r, 1, 1)
+            if (q != "\"" && q != SQ && match(r, /:([ \t]|$)/)) { frame(idx, col); pair(col, r); next }
+            put(idx, scalar(r))
+        }
+        END {
+            if (bad) exit 3
+            if (D > 0 && FP[D]) { D--; put(FK[D + 1], "") }
+        }
+    ' "$1" 2>/dev/null
+}
+
+# _tn_ni_pick FLAT PATH — print the value at PATH in FLAT; rc 1 when PATH is absent.
+_tn_ni_pick() {
+    TN_NI_PATH="$2" awk -F '\t' '
+        $1 == ENVIRON["TN_NI_PATH"] { sub(/^[^\t]*\t/, ""); print; found = 1; exit }
+        END { exit(found ? 0 : 1) }
+    ' <<<"$1" 2>/dev/null
+}
+
+# _tn_multiaddr_udp_port MULTIADDR — print the UDP port of a multiaddr such as
+# /ip4/203.0.113.7/udp/49590/quic-v1/p2p/12D3...; rc 1 when it has none.
+_tn_multiaddr_udp_port() {
+    local re='/udp/([0-9]{1,5})(/|$)' port
+    [[ "${1:-}" =~ $re ]] || return 1
+    port=$(( 10#${BASH_REMATCH[1]} ))
+    (( port >= 1 && port <= 65535 )) || return 1
+    printf '%s\n' "$port"
+}
+
+# tn_node_info_field FILE KEY — print one field of node-info.yaml. KEY is name,
+# bls_public_key, execution_address, proof_of_possession, primary_address (the
+# primary network_address multiaddr as written) or primary_port (its UDP port).
+# An unknown KEY is rc 1.
+tn_node_info_field() {
+    local file="${1:-}" key="${2:-}" flat path v rc
+    case "$key" in
+        name|bls_public_key|execution_address|proof_of_possession) path="$key" ;;
+        primary_address|primary_port) path="p2p_info.primary.network_address" ;;
+        *) return 1 ;;
+    esac
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    rc=0
+    flat="$(_tn_node_info_flat "$file")" || rc=$?
+    [[ "$rc" -eq 0 ]] || return 1
+    v="$(_tn_ni_pick "$flat" "$path")" || return 1
+    [[ -n "$v" ]] || return 1
+    if [[ "$key" == "primary_port" ]]; then
+        v="$(_tn_multiaddr_udp_port "$v")" || return 1
+    fi
+    printf '%s\n' "$v"
+}
+
+# tn_node_info_worker_ports FILE — print the UDP port of each worker in
+# node-info.yaml, one per line in worker order (p2p_info.workers), or the single
+# port of a legacy p2p_info.worker map. rc 1, with nothing printed, when there is
+# no worker or any worker address has no UDP port.
+tn_node_info_worker_ports() {
+    local file="${1:-}" flat rc count i v port out
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    rc=0
+    flat="$(_tn_node_info_flat "$file")" || rc=$?
+    [[ "$rc" -eq 0 ]] || return 1
+    count="$(awk -F '\t' '
+        index($1, "p2p_info.workers.") == 1 {
+            s = substr($1, 18); sub(/\..*$/, "", s)
+            if (s ~ /^[0-9]+$/ && s + 1 > m) m = s + 1
+        }
+        END { print m + 0 }
+    ' <<<"$flat" 2>/dev/null || true)"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    out=""
+    if (( count > 0 )); then
+        i=0
+        while (( i < count )); do
+            v="$(_tn_ni_pick "$flat" "p2p_info.workers.${i}.network_address")" || return 1
+            port="$(_tn_multiaddr_udp_port "$v")" || return 1
+            out="${out}${port}"$'\n'
+            i=$(( i + 1 ))
+        done
+    else
+        v="$(_tn_ni_pick "$flat" "p2p_info.worker.network_address")" || return 1
+        port="$(_tn_multiaddr_udp_port "$v")" || return 1
+        out="${port}"$'\n'
+    fi
+    printf '%s' "$out"
+}
+
+# tn_node_info_rpc FILE [IDX] — print "<http|none> <ws|none>", the JSON-RPC endpoints
+# worker IDX (default 0) advertises in node-info.yaml (keytool set-rpc edits worker
+# 0). A legacy p2p_info.worker map is worker 0. rc 1 when there is no such worker
+# or its rpc is not a block map (flow style is not read).
+tn_node_info_rpc() {
+    local file="${1:-}" idx="${2:-0}" flat rc base v http ws
+    [[ "$idx" =~ ^[0-9]+$ ]] || return 1
+    idx=$(( 10#$idx ))
+    [[ -n "$file" && -f "$file" && -r "$file" ]] || return 4
+    rc=0
+    flat="$(_tn_node_info_flat "$file")" || rc=$?
+    [[ "$rc" -eq 0 ]] || return 1
+    case "$flat" in
+        *"p2p_info.workers."*)
+            base="p2p_info.workers.${idx}"
+            ;;
+        *)
+            [[ "$idx" -eq 0 ]] || return 1
+            base="p2p_info.worker"
+            ;;
+    esac
+    case "$flat" in
+        *"${base}."*) ;;
+        *) return 1 ;;
+    esac
+    if v="$(_tn_ni_pick "$flat" "${base}.rpc")" && [[ -n "$v" ]]; then
+        return 1
+    fi
+    http="$(_tn_ni_pick "$flat" "${base}.rpc.http" || true)"
+    ws="$(_tn_ni_pick "$flat" "${base}.rpc.ws" || true)"
+    printf '%s %s\n' "${http:-none}" "${ws:-none}"
 }
 
 # tn_node_has_observer_flag <file> — rc 0 when a NON-comment line of <file> carries
