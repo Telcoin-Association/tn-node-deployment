@@ -270,41 +270,6 @@ ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-node-in
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-stats *
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper docker-log-size *
 ${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper internal-ip
-# TRANSITIONAL: removed once ui/server.py 1.9.0 ships.
-# ui/server.py before 1.9.0 puts observer|validator ahead of the arguments of
-# these 14 node subcommands, and the no-argument lines above match only the call
-# without it. The helper drops the role argument and resolves the node itself.
-# The six lines ending in * are also covered by the wildcard lines above; they
-# stay so this block is removed in one piece.
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enable observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enable validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-check observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-check validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-prepare observer *
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-prepare validator *
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-apply observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-apply validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-discard validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper restart-count observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper restart-count validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper log-clear observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper log-clear validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set observer *
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set validator *
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname observer *
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname validator *
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper addons-status observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper addons-status validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper meta-cat observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper meta-cat validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-keygen validator
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize observer
-${SVC_USER} ALL=(ALL) NOPASSWD: /usr/local/sbin/telcoin-ui-helper setup-finalize validator
-# END TRANSITIONAL
 EOF
 chmod 440 "${SUDOERS_TMP}"
 if visudo -cf "${SUDOERS_TMP}" >/dev/null 2>&1; then
@@ -436,9 +401,8 @@ ok "Unit installed, systemd reloaded"
 #   - Stopped after step 6: old sudoers, new helper. The running server keeps
 #     working. If a newer server.py on disk is started later, its helper-version
 #     call is refused and the UI banner says to re-run this installer.
-#   - Between this rename and the restart in step 12, a server.py that still sends
-#     observer|validator is refused once the TRANSITIONAL lines are gone, for
-#     under a second.
+#   - Between this rename and the restart in step 12, a server.py older than 1.9.0
+#     (one that still sends observer|validator) is refused, for under a second.
 # Open browser tabs keep working throughout: routes and payloads are unchanged.
 # Node resolution needs no sudoers change: a box with one legacy unit resolves to
 # it, and a box with both legacy units targets telcoin-validator, as

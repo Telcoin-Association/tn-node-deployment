@@ -69,7 +69,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "1.8.8"
+UI_VERSION = "1.9.0"
 
 NODE_TYPES = ("observer", "validator")
 
