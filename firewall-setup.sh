@@ -257,15 +257,40 @@ fw_p2p_all_open() {
     return 0
 }
 
-# fw_p2p_allow -- add an ALLOW rule for every P2P port (ufw skips existing ones). A
-# failing `ufw allow` stops the script under set -e, as the fixed pair of rules did.
+# fw_p2p_allow -- add an ALLOW rule for every P2P port (ufw skips existing ones). The
+# first `ufw allow` that fails is reported (fw_try) and ends it with rc 1, so the
+# caller stops there.
 fw_p2p_allow() {
     local port label
     while read -r port label; do
         [[ -n "$port" ]] || continue
-        ufw allow "${port}/udp" &>/dev/null
+        fw_try "ufw allow ${port}/udp" ufw allow "${port}/udp" || return 1
     done < <(fw_p2p_ports)
     return 0
+}
+
+# fw_error MSG -- report a failure: an error event in --json mode (fw_on_exit and the
+# done event repeat it), an [ERROR] line otherwise.
+fw_error() {
+    if [[ "${JSON_MODE:-false}" == "true" ]]; then
+        json_event error "$1"
+    else
+        print_error "$1"
+    fi
+}
+
+# fw_try DESC CMD... -- run CMD with its output dropped. When it fails, report "DESC
+# failed (exit N)." with fw_error and return N. apply_recommended_firewall runs every
+# rule through this, so a rule that cannot be added stops it before
+# `ufw --force enable`, whatever the errexit state of its caller.
+fw_try() {
+    local desc="$1" rc=0
+    shift
+    "$@" &>/dev/null || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        fw_error "${desc} failed (exit ${rc})."
+    fi
+    return "$rc"
 }
 
 # fw_lib_check -- warn when lib/common.sh is older than 1.6.0: without its
@@ -300,7 +325,7 @@ view_status() {
         if [[ "$default_in" == "deny" ]]; then
             print_ok "Default inbound policy: deny (recommended)"
         else
-            print_warn "Default inbound policy: ${default_in} (recommend: deny)"
+            print_warn "Default inbound policy: ${default_in:-unknown} (recommend: deny)"
         fi
     else
         print_warn "Firewall is installed but NOT active"
@@ -464,40 +489,54 @@ view_status() {
 # ordering holds: SSH + overlay + kuma are allowed BEFORE enable.
 apply_recommended_firewall() {
     local do_reset="${1:-}"
-    local ssh_port nodes keep_web=false
+    local ssh_port nodes keep_web=false web_was_open=false
     ssh_port=$(get_ssh_port)
     nodes=$(detect_installed_nodes)
-    # Before a reset wipes the rules: is Caddy serving the public edge on this box?
+    # Before a reset wipes the rules: is Caddy serving the public edge on this box, and
+    # does the running firewall already let it in?
     if caddy_serves_public_edge; then
         keep_web=true
+        if ufw_active && ufw_has_allow 80 tcp && ufw_has_allow 443 tcp; then
+            web_was_open=true
+        fi
     fi
+    # Every step is checked: the first rule that cannot be added is reported (fw_try)
+    # and ends this with rc 1, before `ufw --force enable`. Rules added before it stay.
     if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
-        ufw --force reset &>/dev/null
+        fw_try "ufw --force reset" ufw --force reset || return 1
     fi
-    ufw default deny incoming &>/dev/null
-    ufw default allow outgoing &>/dev/null
-    ufw allow "${ssh_port}/tcp" &>/dev/null
-    apply_kuma_rule &>/dev/null
-    apply_lb_hc_rule &>/dev/null   # LB health-check ranges (no-op unless TN_LB_HC_RANGES set)
-    if vpn_active; then allow_overlay_ssh &>/dev/null; fi
+    fw_try "ufw default deny incoming" ufw default deny incoming || return 1
+    fw_try "ufw default allow outgoing" ufw default allow outgoing || return 1
+    fw_try "ufw allow ${ssh_port}/tcp" ufw allow "${ssh_port}/tcp" || return 1
+    fw_try "The health-port rule (${UPTIME_KUMA_PORT}/tcp from ${TN_KUMA_SRC})" apply_kuma_rule || return 1
+    # LB health-check ranges (no-op unless TN_LB_HC_RANGES set)
+    fw_try "The load-balancer health-check rules" apply_lb_hc_rule || return 1
+    if vpn_active; then
+        fw_try "The overlay SSH rule (from ${TN_OVERLAY_CIDR})" allow_overlay_ssh || return 1
+    fi
     # Every installed node needs P2P open inbound: the role is decided on-chain at
     # each epoch and no networking is provisioned when a node joins the committee,
     # so a node that activates behind a closed firewall would be unreachable.
     if [[ "$nodes" != "none" ]]; then
-        fw_p2p_allow
+        fw_p2p_allow || return 1
     fi
     # Allow the public edge BEFORE enable, so neither a plain enable (ufw off until now,
     # with no 80/443 rules staged) nor --reset leaves a site Caddy serves unreachable.
     if [[ "$keep_web" == "true" ]]; then
-        ufw allow 80/tcp &>/dev/null
-        ufw allow 443/tcp &>/dev/null
+        fw_try "ufw allow 80/tcp" ufw allow 80/tcp || return 1
+        fw_try "ufw allow 443/tcp" ufw allow 443/tcp || return 1
     fi
-    ufw --force enable &>/dev/null
+    fw_try "ufw --force enable" ufw --force enable || return 1
     if [[ "$keep_web" == "true" ]]; then
-        print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
-        print_info "To close them, disable that access: sudo bash ${SCRIPT_DIR}/install-caddy.sh"
-        print_info "  (or --json --phase=rpc-disable / --phase=disable; 80/443 close once no vhost remains)."
+        if [[ "$web_was_open" == "true" ]]; then
+            print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
+        else
+            print_info "Allowed TCP 80/443 -- Caddy serves the public RPC/dashboard on this box."
+        fi
+        print_info "To close them, turn that access off with install-caddy.sh (sudo bash ${SCRIPT_DIR}/install-caddy.sh);"
+        print_info "  it closes 80/443 once no site remains."
     fi
+    return 0
 }
 
 enable_firewall() {
@@ -566,7 +605,12 @@ enable_firewall() {
 
     # Stage the lockout-safe ruleset + enable (shared with --json --enable). SSH + overlay +
     # kuma are allowed before enable, so this can't sever the IAP door or the overlay.
-    apply_recommended_firewall "$reset_arg"
+    if ! apply_recommended_firewall "$reset_arg"; then
+        print_warn "Stopped at that step: the rules added before it stay, and ufw --force enable was not run."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
 
     print_ok "Firewall enabled with recommended defaults"
     [[ -n "$reset_arg" ]] && print_info "Existing rules were reset to a clean slate"
@@ -792,8 +836,9 @@ manage_node_ports() {
     if fw_p2p_all_open; then
         print_ok "UDP ports ${p2p_text} are already open"
     elif confirm "Open UDP ports ${p2p_text} for node P2P?"; then
-        fw_p2p_allow
-        print_ok "UDP ports ${p2p_text} opened"
+        if fw_p2p_allow; then
+            print_ok "UDP ports ${p2p_text} opened"
+        fi
     fi
     echo ""
 
@@ -1267,6 +1312,13 @@ main_menu() {
 # "p2p_ports" (fw_p2p_ports) and opened by --enable.
 readonly -a JSON_NODE_PORTS=( "49590/udp" "49594/udp" "${UPTIME_KUMA_PORT}/tcp" )
 
+# Set by main for a --json run. JSON_DONE_SENT records that the final answer went out
+# (the status object, or a done event), so fw_on_exit never adds a second one;
+# JSON_LAST_ERROR is the last error event, which fw_on_exit repeats.
+JSON_MODE=false
+JSON_DONE_SENT=false
+JSON_LAST_ERROR=""
+
 json_setup_fds() {
     exec 3>&1   # fd3 = original stdout: JSON is written here
     exec 1>&2   # stdout now aliases stderr: print_*/ufw output is benign noise
@@ -1278,22 +1330,53 @@ json_escape() {
     printf '%s' "$s"
 }
 
-json_emit() { printf '%s\n' "$1" >&3; }
-json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
+json_emit() {
+    case "$1" in
+        '{"event":"done"'*) JSON_DONE_SENT=true ;;
+    esac
+    printf '%s\n' "$1" >&3
+}
+json_event() {
+    if [[ "$1" == "error" ]]; then
+        JSON_LAST_ERROR="${2:-}"
+    fi
+    json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
+}
+
+# fw_on_exit -- the EXIT trap of a --json run, installed by main right after the fd
+# swap. When the run ends without its final answer (a failing command under set -e,
+# not root), send {"event":"done","ok":false,"error":...,"msg":...} with the last
+# error event's message, so every --json run ends with one parseable answer; the
+# "error" key is what the UI's firewall card shows when status is unavailable.
+fw_on_exit() {
+    local rc=$? msg
+    if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
+        msg="$JSON_LAST_ERROR"
+        if [[ -z "$msg" ]]; then
+            msg="firewall-setup.sh stopped before reporting a result (exit ${rc}); the reason is on its stderr."
+        fi
+        json_emit "{\"event\":\"done\",\"ok\":false,\"error\":\"$(json_escape "$msg")\",\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
+    fi
+    return "$rc"
+}
 
 # Single-object status: installed/active, default inbound policy, ssh port (read
 # only -- shown for context, never changed), the open/closed state of each
 # JSON_NODE_PORTS port, and "p2p_ports": one object per fw_p2p_ports line, in
 # order, {"port":49590,"proto":"udp","label":"primary","allowed":true}, where
 # allowed is true/false from the ufw rule table, or null when ufw is inactive or
-# not installed (the table cannot be read then).
+# not installed (the table cannot be read then) or when no node is installed (the
+# default ports are listed; nothing is expected to be allowed yet). A default
+# policy that cannot be read is "unknown".
 json_fw_status() {
     local installed=false active=false default_in="" ssh_port
     if ufw_installed; then installed=true; fi
     if ufw_active;    then active=true;    fi
     if [[ "$active" == "true" ]]; then
-        # Real ufw verbose form: "Default: deny (incoming), allow (outgoing), ..."
-        default_in=$(ufw status verbose 2>/dev/null | grep -oE '(deny|allow|reject) \(incoming\)' | awk '{print $1}' | head -1)
+        # Real ufw verbose form: "Default: deny (incoming), allow (outgoing), ...". A
+        # pattern that finds nothing must not end the run (set -e with pipefail).
+        default_in=$(ufw status verbose 2>/dev/null | grep -oE '(deny|allow|reject) \(incoming\)' | awk '{print $1}' | head -1 || true)
+        [[ -n "$default_in" ]] || default_in="unknown"
     fi
     ssh_port=$(get_ssh_port)
 
@@ -1306,11 +1389,14 @@ json_fw_status() {
         first=false
     done
 
-    local p2p_json="" pfirst=true plabel allowed
+    local p2p_json="" pfirst=true plabel allowed has_node=false
+    if tn_resolve_service >/dev/null 2>&1; then
+        has_node=true
+    fi
     while read -r port plabel; do
         [[ -n "$port" ]] || continue
         allowed=null
-        if [[ "$active" == "true" ]]; then
+        if [[ "$active" == "true" && "$has_node" == "true" ]]; then
             if ufw_has_allow "$port" udp; then allowed=true; else allowed=false; fi
         fi
         [[ "$pfirst" == "true" ]] || p2p_json+=","
@@ -1353,6 +1439,7 @@ json_fw_status() {
     done
 
     json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}},\"p2p_ports\":[${p2p_json}]}"
+    JSON_DONE_SENT=true
 }
 
 # Open/close ONE node port. Refuses any port not in JSON_NODE_PORTS.
@@ -1393,10 +1480,18 @@ json_fw_port() {
 # here only when Caddy already serves the public RPC/dashboard (caddy_serves_public_edge);
 # otherwise install-caddy.sh (this repo) adds them when it enables that access.
 json_fw_enable() {
-    if ! ufw_installed; then apt-get install -y ufw &>/dev/null; fi
-    apply_recommended_firewall
     local ssh_port active=false
+    if ! ufw_installed; then
+        fw_try "apt-get install -y ufw" apt-get install -y ufw || return 1
+    fi
     ssh_port=$(get_ssh_port)
+    if ! apply_recommended_firewall; then
+        if ufw_active; then
+            active=true
+        fi
+        json_emit "{\"event\":\"done\",\"ok\":false,\"action\":\"enable\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"$(json_escape "${JSON_LAST_ERROR:-A firewall rule could not be added.} Stopped there: the rules added before it stay, and ufw --force enable was not run.")\"}"
+        return 1
+    fi
     ufw_active && active=true
     json_emit "{\"event\":\"done\",\"ok\":${active},\"action\":\"enable\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"ufw enabled with recommended lockout-safe defaults (SSH + overlay + kuma pre-allowed)\"}"
 }
@@ -1420,7 +1515,9 @@ main() {
     done
 
     if [[ "$json_mode" == "true" ]]; then
+        JSON_MODE=true
         json_setup_fds
+        trap fw_on_exit EXIT
         check_root
         case "$action" in
             status) fw_lib_check; json_fw_status ;;
@@ -1437,7 +1534,10 @@ main() {
         check_root
         fw_lib_check
         print_warn "Resetting ufw -- ALL existing rules (including custom ones) will be removed."
-        apply_recommended_firewall --reset
+        if ! apply_recommended_firewall --reset; then
+            print_warn "Stopped at that step: the rules added before it stay, and ufw --force enable was not run."
+            exit 1
+        fi
         print_ok "Firewall reset to a clean slate and re-enabled with recommended defaults"
         exit 0
     fi

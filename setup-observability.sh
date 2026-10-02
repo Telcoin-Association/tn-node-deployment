@@ -42,14 +42,15 @@ addons_say() {
 # older than this script expects. lib/observability.sh 1.0.2 brings obs_lib_check,
 # obs_inject_flags and obs_restart_window; without them the flag edits and restarts
 # behave as in 1.2.0 (no epoch wait). obs_lib_check then names what an older
-# lib/common.sh lacks. Each warning comes once per run.
+# lib/common.sh lacks. Each warning comes once per run, through addons_say, so a
+# --json run gets it as a warn event.
 ADDONS_LIB_WARNED=false
 addons_lib_check() {
     if declare -F obs_lib_check >/dev/null 2>&1; then
-        obs_lib_check
+        obs_lib_check addons_say
     elif [[ "$ADDONS_LIB_WARNED" != "true" ]]; then
         ADDONS_LIB_WARNED=true
-        print_warn "lib/observability.sh ${OBSERVABILITY_VERSION:-unknown} is older than 1.0.2, so a commented-out flag counts as present, a failed flag edit is not explained, and the node restarts without waiting for the epoch boundary. Run update-scripts.sh to update the library."
+        addons_say warn "lib/observability.sh ${OBSERVABILITY_VERSION:-unknown} is older than 1.0.2, so a commented-out flag counts as present, a failed flag edit is not explained, and the node restarts without waiting for the epoch boundary. Run update-scripts.sh to update the library."
     fi
     return 0
 }
@@ -78,6 +79,17 @@ health_flag_live() {
         return 0
     fi
     awk '/^[ \t]*[#;]/ { next } { s = " " $0 " "; if (s ~ /[ \t]--healthcheck[ \t=]/) f = 1 } END { exit !f }' "$1" 2>/dev/null
+}
+
+# health_restart_hint SVC -- how to restart the node later: obs_restart_hint
+# (lib/observability.sh 1.0.2: edit-config.sh's Restart node, which waits for the epoch
+# boundary first), else the plain command.
+health_restart_hint() {
+    if declare -F obs_restart_hint >/dev/null 2>&1; then
+        obs_restart_hint "$1"
+    else
+        printf 'Restart later: sudo systemctl restart %s' "$1"
+    fi
 }
 
 # health_restart_window -- right before the node restart that binds the health port:
@@ -196,7 +208,7 @@ enable_health() {
     print_info "ufw rule to the Association monitor only (${TN_KUMA_SRC})."
     addons_lib_check
     echo ""
-    local target svc method file live=true
+    local target svc method file live=true why=""
     if target="$(tn_node_launch_target)"; then
         read -r svc method file <<< "$target"
         if health_flag_add "$file"; then
@@ -205,16 +217,23 @@ enable_health() {
             print_warn "The node must restart for the health endpoint to bind."
             if confirm "Restart ${svc} now?"; then
                 health_restart_window
-                systemctl restart "$svc" && print_ok "${svc} restarted." || print_warn "Restart manually: sudo systemctl restart ${svc}"
+                if systemctl restart "$svc"; then
+                    print_ok "${svc} restarted."
+                else
+                    print_warn "Restart failed; check journalctl -u ${svc} -n 50. $(health_restart_hint "$svc")"
+                fi
             else
-                print_info "Restart later: sudo systemctl restart ${svc}"
+                print_info "$(health_restart_hint "$svc")"
             fi
         fi
         if ! health_flag_live "$file"; then
             live=false
+            why="--healthcheck is not on the node command. Add it as described above, then choose this option again."
         fi
     else
-        print_warn "No node service detected; setting the firewall rule + flag only."
+        print_warn "No node service detected; staging the firewall rule only."
+        live=false
+        why="no node service was found, so there is no node command to carry --healthcheck. Set up the node (setup-node.sh), then choose this option again."
     fi
 
     if ufw_installed && ufw_active; then
@@ -240,7 +259,7 @@ enable_health() {
         fi
         print_info "Verify once running: curl -s http://127.0.0.1:${TN_KUMA_PORT}  (expect OK)"
     else
-        print_warn "Health monitoring is not recorded as enabled: --healthcheck is not on the node command. Add it as described above, then choose this option again."
+        print_warn "Health monitoring is not recorded as enabled: ${why}"
     fi
     pause
 }
@@ -298,6 +317,7 @@ show_status() {
 
 JSON_MODE=false
 JSON_DONE_EMITTED=false
+JSON_LAST_ERROR=""
 
 json_mode() { [[ "$JSON_MODE" == "true" ]]; }
 
@@ -313,15 +333,25 @@ json_escape() {
 }
 
 json_emit() { printf '%s\n' "$1" >&3; }
-json_event() { json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"; }
+json_event() {
+    if [[ "$1" == "error" ]]; then
+        JSON_LAST_ERROR="${2:-}"
+    fi
+    json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
+}
 json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
 
 # Emitted on ANY exit if no terminal done was sent -- so an `exit 1` deep inside a
-# toggle (token missing, empty push URL, obs_enable failure) still yields done:false.
+# toggle (token missing, empty push URL, obs_enable failure, a bad argument) still
+# yields done:false, with the last error event's message when there was one.
 json_on_exit() {
-    local rc=$?
+    local rc=$? msg
     [[ "$JSON_DONE_EMITTED" == "true" ]] && return
-    json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"observability setup exited early (rc=${rc}) -- see server logs / journalctl\"}"
+    msg="$JSON_LAST_ERROR"
+    if [[ -z "$msg" ]]; then
+        msg="observability setup exited early (rc=${rc}) -- see server logs / journalctl"
+    fi
+    json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "$msg")\"}"
 }
 
 # json error + nonzero exit. Shorthand for the many failure paths below.
@@ -337,68 +367,90 @@ json_applied() {
 }
 
 # json_fail_flags WHAT -- an enable of WHAT stopped because a node flag it needs is not
-# on the node command: one error event per reason (OBS_FLAG_ERROR, which
-# lib/observability.sh 1.0.2 fills; a general reason otherwise), then done ok:false
-# with what this call applied before, and exit 1. WHAT is not recorded as enabled.
+# (and cannot be put) on the node command: one error event per reason (OBS_FLAG_ERROR,
+# which lib/observability.sh 1.0.2 fills; a general reason otherwise), then done ok:false
+# with what this call applied before, and exit 1. WHAT is not recorded as enabled. The
+# done message is "WHAT was not enabled:" and the first reason; it adds "Nothing was
+# changed." only when this call changed nothing (no earlier action in "applied", and
+# obs_enable did not reach Alloy).
 json_fail_flags() {
-    local what="$1" reasons="${OBS_FLAG_ERROR:-}" line
+    local what="$1" reasons="${OBS_FLAG_ERROR:-}" line first="" more=0 msg
     if [[ -z "$reasons" ]]; then
         reasons="A node flag needed for ${what} is not on the node command, and it could not be added (see the server log)."
     fi
     while IFS= read -r line; do
         if [[ -n "$line" ]]; then
             json_event error "$line"
+            if [[ -z "$first" ]]; then
+                first="$line"
+            else
+                more=$((more + 1))
+            fi
         fi
     done <<< "$reasons"
-    json_done "{\"event\":\"done\",\"ok\":false,\"applied\":[$(json_applied)],\"network\":\"$(json_escape "${NETWORK:-}")\",\"msg\":\"$(json_escape "${what} not enabled: the node launch file needs the change in the error event; run this again once it is made")\"}"
+    msg="${what} was not enabled: ${first}"
+    if [[ "$more" -eq 1 ]]; then
+        msg="${msg} One more reason is in the error events."
+    elif [[ "$more" -gt 1 ]]; then
+        msg="${msg} ${more} more reasons are in the error events."
+    fi
+    if [[ "${#JSON_DID[@]}" -eq 0 && "${OBS_ALLOY_TOUCHED:-false}" != "true" ]]; then
+        msg="${msg} Nothing was changed."
+    fi
+    json_done "{\"event\":\"done\",\"ok\":false,\"applied\":[$(json_applied)],\"network\":\"$(json_escape "${NETWORK:-}")\",\"msg\":\"$(json_escape "$msg")\"}"
     exit 1
 }
 
 # json_need_node WHAT -- an enable puts flags on the node command, so it needs the node
-# service's launch file. Without one: error + done ok:false before anything changes.
+# service's launch file. Without one: error + done ok:false before it changes anything.
 json_need_node() {
     tn_node_launch_target >/dev/null 2>&1 && return 0
-    OBS_FLAG_ERROR="No node service found, so the node flags for ${1} have no launch file to go into. Nothing was changed."
+    OBS_FLAG_ERROR="No node service was found, so the node flags for ${1} have no launch file to go into."
     json_fail_flags "$1"
 }
 
 # --- non-interactive toggle actions (mirror the interactive enable_*/disable_*) ---
 
-# json_enable_logs <token> — mirror enable_logging: logs on, preserve metrics opt-in.
-# A node flag that could not be added ends the run with error events and done
-# ok:false (json_fail_flags); logs are then not recorded as enabled.
-json_enable_logs() {
-    local token="$1"
-    json_need_node "log shipping"
-    local meta; meta="$(node_meta_path || true)"
-    ENABLE_METRICS="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
-    ENABLE_OBSERVABILITY="true"
+# json_enable_pipes <token> <logs:true|false> <metrics:true|false> — mirror
+# enable_logging / enable_metrics for the requested pipelines in ONE obs_enable call,
+# keeping the other pipeline's opt-in from .node-meta: one Alloy restart, and at most one
+# node restart (after one epoch wait) even when both are asked for. A node flag that
+# cannot be added ends the run with error events and done ok:false (json_fail_flags);
+# nothing is recorded as enabled then.
+json_enable_pipes() {
+    local token="$1" want_logs="$2" want_metrics="$3" what meta
+    if [[ "$want_logs" == "true" && "$want_metrics" == "true" ]]; then
+        what="log and metrics shipping"
+    elif [[ "$want_logs" == "true" ]]; then
+        what="log shipping"
+    else
+        what="metrics shipping"
+    fi
+    json_need_node "$what"
+    meta="$(node_meta_path || true)"
+    if [[ "$want_logs" == "true" ]]; then
+        ENABLE_OBSERVABILITY="true"
+    else
+        ENABLE_OBSERVABILITY="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
+    fi
+    if [[ "$want_metrics" == "true" ]]; then
+        ENABLE_METRICS="true"
+    else
+        ENABLE_METRICS="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
+    fi
     OBS_FLAG_ERROR=""
     if ! obs_enable "$token" addons_say; then
         if [[ -n "${OBS_FLAG_ERROR:-}" ]]; then
-            json_fail_flags "log shipping"
+            json_fail_flags "$what"
         fi
-        json_fail "could not enable log shipping (see server logs)"
+        json_fail "could not enable ${what} (see server logs)"
     fi
-    JSON_DID+=("logs:enabled")
-}
-
-# json_enable_metrics <token> — mirror enable_metrics: metrics on, preserve logs opt-in.
-# Same failure handling as json_enable_logs.
-json_enable_metrics() {
-    local token="$1"
-    json_need_node "metrics shipping"
-    local meta; meta="$(node_meta_path || true)"
-    ENABLE_OBSERVABILITY="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
-    ENABLE_METRICS="true"
-    OBS_FLAG_ERROR=""
-    if ! obs_enable "$token" addons_say; then
-        if [[ -n "${OBS_FLAG_ERROR:-}" ]]; then
-            json_fail_flags "metrics shipping"
-        fi
-        json_fail "could not enable metrics shipping (see server logs)"
+    if [[ "$want_logs" == "true" ]]; then
+        JSON_DID+=("logs:enabled")
     fi
-    JSON_DID+=("metrics:enabled")
+    if [[ "$want_metrics" == "true" ]]; then
+        JSON_DID+=("metrics:enabled")
+    fi
 }
 
 # json_enable_health — mirror enable_health (flag + firewall rule), no prompts. The
@@ -424,7 +476,7 @@ json_enable_health() {
             systemctl daemon-reload
         fi
         print_ok "Added --healthcheck ${TN_KUMA_PORT} to ${file} (restart ${svc} to bind it)."
-        json_event warn "Added --healthcheck ${TN_KUMA_PORT} to ${file}; the health port opens when ${svc} restarts (sudo systemctl restart ${svc})."
+        json_event warn "Added --healthcheck ${TN_KUMA_PORT} to ${file}; the health port opens when ${svc} restarts. $(health_restart_hint "$svc")"
     fi
     if ufw_installed && ufw_active; then
         apply_kuma_rule && print_ok "ufw: ${TN_KUMA_SRC} -> ${TN_KUMA_PORT}/tcp (Association monitor only)"
@@ -455,8 +507,6 @@ json_disable_health() {
 # run_json_mode — bootstrap (root/distro/context/gate) then apply requested toggles.
 # Enables need a token (--token or TN_OBS_TOKEN); a missing one is a clear json error.
 run_json_mode() {
-    json_setup_fds
-    trap json_on_exit EXIT
     check_root
     detect_distro
     load_node_context
@@ -487,8 +537,9 @@ run_json_mode() {
     [[ "${JSON_DISABLE_LOGS:-false}" == "true" ]]    && { obs_disable_logs;    JSON_DID+=("logs:disabled"); }
     [[ "${JSON_DISABLE_METRICS:-false}" == "true" ]] && { obs_disable_metrics; JSON_DID+=("metrics:disabled"); }
     [[ "${JSON_DISABLE_HEALTH:-false}" == "true" ]]  && json_disable_health
-    [[ "${JSON_ENABLE_LOGS:-false}" == "true" ]]     && json_enable_logs "$token"
-    [[ "${JSON_ENABLE_METRICS:-false}" == "true" ]]  && json_enable_metrics "$token"
+    if [[ "$enabling_pipe" == "true" ]]; then
+        json_enable_pipes "$token" "${JSON_ENABLE_LOGS:-false}" "${JSON_ENABLE_METRICS:-false}"
+    fi
     [[ "${JSON_ENABLE_HEALTH:-false}" == "true" ]]   && json_enable_health
 
     if [[ "${#JSON_DID[@]}" -eq 0 ]]; then
@@ -537,27 +588,55 @@ main_menu() {
 # parse the toggle flags and run the non-interactive path. --push-url/--metrics-push-url
 # set OBS_PUSH_URL/OBS_METRICS_PUSH_URL so obs ships there (PR1 effective-URL selection).
 # =============================================================================
+# arg_fail MSG -- a bad command line: in --json mode an error event (json_on_exit then
+# sends done ok:false), otherwise an [ERROR] line. Exits 1.
+arg_fail() {
+    if json_mode; then
+        json_fail "$1"
+    fi
+    print_error "$1"
+    exit 1
+}
+
 main() {
-    local json_mode=false
+    local arg
+    # --json is found before anything else runs: from here stdout carries JSON only, and
+    # json_on_exit closes the run with a done event whatever stops it, a bad argument too.
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_MODE=true
+        fi
+    done
+    if json_mode; then
+        json_setup_fds
+        trap json_on_exit EXIT
+    fi
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --json)              json_mode=true; shift ;;
+            --json)              shift ;;
             --enable-logs)       JSON_ENABLE_LOGS=true; shift ;;
             --enable-metrics)    JSON_ENABLE_METRICS=true; shift ;;
             --enable-health)     JSON_ENABLE_HEALTH=true; shift ;;
             --disable-logs)      JSON_DISABLE_LOGS=true; shift ;;
             --disable-metrics)   JSON_DISABLE_METRICS=true; shift ;;
             --disable-health)    JSON_DISABLE_HEALTH=true; shift ;;
-            --region)            JSON_REGION="${2:-}"; shift 2 ;;
-            --token)             JSON_TOKEN="${2:-}"; shift 2 ;;
-            --push-url)          OBS_PUSH_URL="${2:-}"; shift 2 ;;
-            --metrics-push-url)  OBS_METRICS_PUSH_URL="${2:-}"; shift 2 ;;
+            --region|--token|--push-url|--metrics-push-url)
+                # A value flag needs a value; the next option is not one.
+                if [[ $# -lt 2 || "$2" == --* ]]; then
+                    arg_fail "$1 needs a value."
+                fi
+                case "$1" in
+                    --region)           JSON_REGION="$2" ;;
+                    --token)            JSON_TOKEN="$2" ;;
+                    --push-url)         OBS_PUSH_URL="$2" ;;
+                    --metrics-push-url) OBS_METRICS_PUSH_URL="$2" ;;
+                esac
+                shift 2 ;;
             *) shift ;;
         esac
     done
 
-    if [[ "$json_mode" == "true" ]]; then
-        JSON_MODE=true
+    if json_mode; then
         run_json_mode
         exit $?
     fi

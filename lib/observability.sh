@@ -93,23 +93,43 @@ obs_reth_log_flags() {
     printf '%s' "--log.file.format json --log.file.directory ${dir} --log.file.max-size 100 --log.file.max-files 5"
 }
 
-# obs_metrics_addr — the loopback host:port the node serves Prometheus metrics on AND
-# the Alloy scrape target read into TN_METRICS_ADDR. One source of truth: the operator's
-# METRICS_PORT (global at install time, else read back from .node-meta, else the default
-# 9101 to match the adiri fleet). Loopback only → never firewalled, never public.
-obs_metrics_addr() {
+# obs_metrics_port — the node metrics port as configured: METRICS_PORT (global at install
+# time), else read back from .node-meta, else the default 9101 to match the adiri fleet.
+# Always printed; rc 1 when it is not a port number (digits, 1-65535), so a value such as
+# "9101;id" never reaches a launch file or the Alloy env file.
+obs_metrics_port() {
     local port="${METRICS_PORT:-}"
     [[ -n "$port" ]] || port="$(meta_get METRICS_PORT "$(node_meta_path 2>/dev/null || true)" 2>/dev/null || true)"
     [[ -n "$port" ]] || port="${DEFAULT_METRICS_PORT:-9101}"
-    printf '127.0.0.1:%s' "$port"
+    printf '%s' "$port"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+# obs_metrics_addr — the loopback host:port the node serves Prometheus metrics on AND
+# the Alloy scrape target read into TN_METRICS_ADDR (port from obs_metrics_port).
+# Loopback only → never firewalled, never public. rc 1, printing nothing, when the
+# configured port is not a port number.
+obs_metrics_addr() {
+    local port
+    port="$(obs_metrics_port)" || return 1
+    printf '127.0.0.1:%s' "$((10#$port))"
+}
+
+# _obs_bad_port_msg — what to tell the operator when obs_metrics_port refuses the value.
+_obs_bad_port_msg() {
+    printf "METRICS_PORT is '%s', which is not a port number (1-65535). Set METRICS_PORT in .node-meta to the port the node should serve metrics on, then run this again." "$(obs_metrics_port || true)"
 }
 
 # obs_metrics_reth_flags — the reth flag that makes the node serve a Prometheus endpoint
 # Alloy can scrape, as ONE string (parallel to obs_reth_log_flags; the addr is loopback so
 # it does not branch on install method). Gated by ENABLE_METRICS in tn_node_launch_flags;
 # absent → the node installs the zero-overhead noop recorder (telcoin-network-cli).
+# rc 1, printing nothing, when METRICS_PORT is not a port number.
 obs_metrics_reth_flags() {
-    printf -- '--metrics %s' "$(obs_metrics_addr)"
+    local addr
+    addr="$(obs_metrics_addr)" || return 1
+    printf -- '--metrics %s' "$addr"
 }
 
 # _obs_data_dir [meta-file] — the node data dir: DATA_DIR from .node-meta, else what
@@ -573,6 +593,11 @@ OBS_LIB_WARNED=""
 # nothing is missing. setup-observability.sh --json reports it as error events.
 OBS_FLAG_ERROR=""
 
+# OBS_ALLOY_TOUCHED -- obs_enable sets it to true once it starts rewriting Alloy's config;
+# false means a failed obs_enable changed nothing.
+OBS_ALLOY_TOUCHED=false
+_OBS_FLAGS_CHANGED=0
+
 # _obs_flag_error MSG -- warn MSG and add it to OBS_FLAG_ERROR.
 _obs_flag_error() {
     print_warn "$1"
@@ -584,10 +609,12 @@ _obs_flag_error() {
     return 0
 }
 
-# _obs_lib_has FN CONSEQUENCE -- rc 0 when lib/common.sh defines FN. Otherwise warn,
-# once per run for each FN, that CONSEQUENCE, and return 1.
+# _obs_lib_has FN CONSEQUENCE [SAY-FN] -- rc 0 when lib/common.sh defines FN. Otherwise
+# warn, once per run for each FN, that CONSEQUENCE, and return 1. The warning goes
+# through SAY-FN (`fn warn MSG`, so a --json caller turns it into a warn event) when
+# one is given, else print_warn.
 _obs_lib_has() {
-    local fn="$1" consequence="$2"
+    local fn="$1" consequence="$2" say="${3:-}" msg
     if declare -F "$fn" >/dev/null 2>&1; then
         return 0
     fi
@@ -595,19 +622,25 @@ _obs_lib_has() {
         *" ${fn} "*) return 1 ;;
     esac
     OBS_LIB_WARNED="${OBS_LIB_WARNED} ${fn}"
-    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} has no ${fn}, so ${consequence}. Run update-scripts.sh to update the library."
+    msg="lib/common.sh ${COMMON_VERSION:-unknown} has no ${fn}, so ${consequence}. Run update-scripts.sh to update the library."
+    if [[ -n "$say" ]] && declare -F "$say" >/dev/null 2>&1; then
+        "$say" warn "$msg" || true
+    else
+        print_warn "$msg"
+    fi
     return 1
 }
 
 _OBS_NO_FLAG_GET="a commented-out flag counts as present and a failed flag edit is not explained"
 _OBS_NO_WAIT="the node restarts without waiting for the epoch boundary, even when it is in the committee"
 
-# obs_lib_check -- warn now (once per run each) about the lib/common.sh helpers this
-# file is falling back without. For a status screen, and for the start of an enable,
-# so the operator hears it before anything changes. Always rc 0.
+# obs_lib_check [SAY-FN] -- warn now (once per run each) about the lib/common.sh helpers
+# this file is falling back without, through SAY-FN as in _obs_lib_has. For a status
+# screen, and for the start of an enable, so the operator hears it before anything
+# changes. Always rc 0.
 obs_lib_check() {
-    _obs_lib_has tn_launch_flag_get "$_OBS_NO_FLAG_GET" || true
-    _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" || true
+    _obs_lib_has tn_launch_flag_get "$_OBS_NO_FLAG_GET" "${1:-}" || true
+    _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" "${1:-}" || true
     return 0
 }
 
@@ -633,35 +666,47 @@ obs_restart_window() {
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="obs_wait_say"
     fi
-    _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" || return 0
+    _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" "$fn" || return 0
     tn_wait_restart_window "" "$fn" || true
     return 0
 }
 
-# obs_inject_flags FILE MARKER_ERE FLAGS -- add FLAGS to the node command in launch
-# file FILE with tn_node_inject_flags (lib/common.sh) unless MARKER_ERE is already on
-# a live line, and say what happened; a failure message also goes to OBS_FLAG_ERROR.
-# Returns the helper's rc: 0 added (the caller reloads and restarts), 1 already there,
-# 2 no node launch line in FILE, 3 refused (the line ends in a comment, or the command
-# cannot be edited safely), 4 FILE could not be read or written. FILE is unchanged
-# unless rc is 0. A lib/common.sh older than 1.6.0 returns 1 both for "already there"
-# and for "no launch line", and the message says so; callers that must know check the
-# flag afterwards.
+# obs_restart_hint SVC -- how to restart the node later without landing on an epoch
+# change: edit-config.sh's Restart node waits for the boundary first.
+obs_restart_hint() {
+    printf 'Restart %s with edit-config.sh, menu item 12 (Restart node): sudo bash %s/edit-config.sh. It waits for the epoch boundary first when the node is in the committee. A plain systemctl restart does not wait: use one (or TN_SKIP_EPOCH_WAIT=1) only if you accept restarting the node at an epoch change.' "${1:-telcoin}" "${SCRIPT_DIR:-.}"
+}
+
+# obs_inject_flags FILE MARKER_ERE FLAGS [SHOWN] -- add FLAGS to the node command in
+# launch file FILE with tn_node_inject_flags (lib/common.sh) unless MARKER_ERE is already
+# on a live line, and say what happened, naming the file SHOWN (default FILE; a dry run
+# edits a scratch copy). A failure message also goes to OBS_FLAG_ERROR. Returns the
+# helper's rc: 0 added (the caller reloads and restarts), 1 MARKER_ERE already on a live
+# line (reported as present only when the first flag of FLAGS is on the node command;
+# a match in a trailing comment or another command is reported as a failure), 2 no node
+# launch line in FILE, 3 refused (the line ends in a comment, or the command cannot be
+# edited safely), 4 FILE could not be read or written. FILE is unchanged unless rc is 0.
+# A lib/common.sh older than 1.6.0 returns 1 both for "already there" and for "no
+# launch line", and the message says so; callers that must know check the flag after.
 obs_inject_flags() {
-    local file="$1" marker="$2" flags="$3" rc=0 err reason
+    local file="$1" marker="$2" flags="$3" shown="${4:-$1}" rc=0 err reason
     err="$(tn_node_inject_flags "$file" "$marker" "$flags" 2>&1 >/dev/null)" || rc=$?
     if [[ "$rc" -ne 0 ]] && ! declare -F tn_launch_flag_get >/dev/null 2>&1; then
-        _obs_flag_error "Did not add ${flags%% *} to ${file}: it is already there, or the file has no node launch line. If it is missing, add it to the node command by hand: ${flags}"
+        _obs_flag_error "Did not add ${flags%% *} to ${shown}: it is already there, or the file has no node launch line. If it is missing, add it to the node command by hand: ${flags}"
         return "$rc"
     fi
     case "$rc" in
         0) ;;
-        1) print_info "${flags%% *} is already on the node command in ${file}; nothing to add." ;;
-        2) _obs_flag_error "${file} has no live node command (an uncommented line that runs node with --http), so ${flags%% *} was not added. Add it by hand to the command that starts the node: ${flags}" ;;
+        1) if tn_launch_flag_get "$file" "${flags%% *}" >/dev/null 2>&1; then
+               print_info "${flags%% *} is already on the node command in ${shown}; nothing to add."
+           else
+               _obs_flag_error "${flags%% *} appears in ${shown} only outside the node command (in a comment or on another line), so it was not added. Add it to the node command by hand: ${flags}"
+           fi ;;
+        2) _obs_flag_error "${shown} has no live node command (an uncommented line that runs node with --http), so ${flags%% *} was not added. Add it by hand to the command that starts the node: ${flags}" ;;
         3) reason="$(printf '%s\n' "$err" | sed -n '1s/^tn_node_inject_flags: //p')"
            [[ -n "$reason" ]] || reason="the node command ends in a # comment, or is not one simple command that can be edited safely"
-           _obs_flag_error "Edit the launch file by hand: ${reason}. Add to the node command in ${file}: ${flags}" ;;
-        *) _obs_flag_error "Could not read or write ${file}; nothing was changed. Add to the node command by hand: ${flags}" ;;
+           _obs_flag_error "Edit the launch file by hand: ${reason}. Add to the node command in ${shown}: ${flags}" ;;
+        *) _obs_flag_error "Could not read or write ${shown}; nothing was changed. Add to the node command by hand: ${flags}" ;;
     esac
     return "$rc"
 }
@@ -694,6 +739,108 @@ _obs_has_metrics() {
 # Ensure the running node actually writes JSON logs (standalone-enable path)
 # -----------------------------------------------------------------------------
 
+# _obs_flags_apply FILE SHOWN SVC METHOD HAVE_GET -- put the flags the enabled pipelines
+# need on the node command in launch file FILE, naming it SHOWN in messages (FILE is a
+# scratch copy during obs_check_reth_flags). Sets _OBS_FLAGS_CHANGED to 1 when FILE
+# changed. rc 1 when a needed flag is still missing afterwards, the reasons added to
+# OBS_FLAG_ERROR. HAVE_GET false means a lib/common.sh older than 1.6.0 (1.0.1 tests).
+_obs_flags_apply() {
+    local file="$1" shown="$2" svc="$3" method="$4" have_get="$5" rc val errs flags failed=0
+    _OBS_FLAGS_CHANGED=0
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
+        flags="$(obs_reth_log_flags "$method")"
+        rc=0
+        val="$(_obs_log_format "$file" "$have_get")" || rc=$?
+        if [[ "$rc" -eq 0 && "$val" == "json" ]]; then
+            print_ok "Node already writes JSON logs."
+        elif [[ "$rc" -eq 0 ]]; then
+            # Adding a second --log.file.format would leave the command with two.
+            _obs_flag_error "The node command in ${shown} has --log.file.format ${val:-with no value}, and log shipping needs json. Change it to json by hand, then run this enable again."
+            failed=1
+        else
+            print_step "Enabling JSON node logs"
+            errs="$OBS_FLAG_ERROR"
+            if obs_inject_flags "$file" '--log.file.format json' "$flags" "$shown"; then
+                _OBS_FLAGS_CHANGED=1
+            fi
+            rc=0
+            val="$(_obs_log_format "$file" "$have_get")" || rc=$?
+            if [[ "$rc" -ne 0 || "$val" != "json" ]]; then
+                if [[ "$OBS_FLAG_ERROR" == "$errs" ]]; then
+                    _obs_flag_error "--log.file.format json is not on the node command in ${shown}. Add it by hand: ${flags}"
+                fi
+                failed=1
+            fi
+        fi
+    fi
+
+    if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
+        if _obs_has_metrics "$file" "$have_get"; then
+            print_ok "Node already serves a metrics endpoint (--metrics)."
+        elif ! flags="$(obs_metrics_reth_flags)"; then
+            _obs_flag_error "$(_obs_bad_port_msg)"
+            failed=1
+        else
+            print_step "Enabling node metrics endpoint"
+            errs="$OBS_FLAG_ERROR"
+            if obs_inject_flags "$file" '--metrics' "$flags" "$shown"; then
+                _OBS_FLAGS_CHANGED=1
+            fi
+            if ! _obs_has_metrics "$file" "$have_get"; then
+                if [[ "$OBS_FLAG_ERROR" == "$errs" ]]; then
+                    _obs_flag_error "--metrics is not on the node command in ${shown}. Add it by hand: ${flags}"
+                fi
+                failed=1
+            fi
+        fi
+    fi
+    return "$failed"
+}
+
+# obs_check_reth_flags -- before obs_enable touches Alloy: would every flag the enabled
+# pipelines need end up on the node command? The same edits run on a scratch copy of the
+# launch file (same file name, so a unit is read as a unit; made read-only when the real
+# file cannot be written). Prints nothing when they would; otherwise warns with each
+# reason (naming the real file) and returns 1, the reasons in OBS_FLAG_ERROR. rc 0 when
+# no node service is found (obs_ensure_reth_flags says so later) or no scratch copy can
+# be made (the real edit then reports its own failure).
+obs_check_reth_flags() {
+    local target svc method file have_get=false tmpd="" copy failed=0 line
+    OBS_FLAG_ERROR=""
+    target="$(tn_node_launch_target 2>/dev/null)" || return 0
+    read -r svc method file <<< "$target"
+    if declare -F tn_launch_flag_get >/dev/null 2>&1; then
+        have_get=true
+    fi
+    copy="$file"     # a missing file: every read and edit fails the same way, nothing is written
+    if [[ -f "$file" ]]; then
+        tmpd="$(mktemp -d 2>/dev/null || true)"
+        [[ -n "$tmpd" && -d "$tmpd" ]] || return 0
+        copy="${tmpd}/${file##*/}"
+        if ! cp "$file" "$copy" 2>/dev/null; then
+            rm -rf "$tmpd"
+            return 0
+        fi
+        if [[ ! -w "$file" ]]; then
+            chmod a-w "$copy" 2>/dev/null || true
+        fi
+    fi
+    _obs_flags_apply "$copy" "$file" "$svc" "$method" "$have_get" >/dev/null 2>&1 || failed=1
+    if [[ -n "$tmpd" ]]; then
+        rm -rf "$tmpd"
+    fi
+    _OBS_FLAGS_CHANGED=0
+    if [[ "$failed" -eq 1 ]]; then
+        while IFS= read -r line; do
+            if [[ -n "$line" ]]; then
+                print_warn "$line"
+            fi
+        done <<< "$OBS_FLAG_ERROR"
+        return 1
+    fi
+    return 0
+}
+
 # obs_ensure_reth_flags [progress-fn] — when obs is enabled AFTER setup
 # (setup-observability.sh) the node may already be running WITHOUT the reth flags the
 # enabled pipelines need: the JSON-log flags (logs → Alloy has something to tail) and/or
@@ -709,75 +856,37 @@ _obs_has_metrics() {
 # reason is in OBS_FLAG_ERROR, and the node is not restarted, since the operator has to
 # edit the launch file and restart it anyway.
 obs_ensure_reth_flags() {
-    local fn="${1:-}" target svc method file changed=0 failed=0 have_get=false rc val errs
+    local fn="${1:-}" target svc method file have_get=false failed=0
     OBS_FLAG_ERROR=""
+    _OBS_FLAGS_CHANGED=0
     target="$(tn_node_launch_target)" || { print_warn "No telcoin node service detected; skipping reth flag check."; return 0; }
     read -r svc method file <<< "$target"
-    if _obs_lib_has tn_launch_flag_get "$_OBS_NO_FLAG_GET"; then
+    if _obs_lib_has tn_launch_flag_get "$_OBS_NO_FLAG_GET" "$fn"; then
         have_get=true
     fi
+    _obs_flags_apply "$file" "$file" "$svc" "$method" "$have_get" || failed=1
 
-    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
-        rc=0
-        val="$(_obs_log_format "$file" "$have_get")" || rc=$?
-        if [[ "$rc" -eq 0 && "$val" == "json" ]]; then
-            print_ok "Node already writes JSON logs."
-        elif [[ "$rc" -eq 0 ]]; then
-            # Adding a second --log.file.format would leave the command with two.
-            _obs_flag_error "The node command in ${file} has --log.file.format ${val:-with no value}, and log shipping needs json. Change it to json by hand, then restart ${svc}."
-            failed=1
-        else
-            print_step "Enabling JSON node logs"
-            errs="$OBS_FLAG_ERROR"
-            if obs_inject_flags "$file" '--log.file.format json' "$(obs_reth_log_flags "$method")"; then
-                changed=1
-            fi
-            rc=0
-            val="$(_obs_log_format "$file" "$have_get")" || rc=$?
-            if [[ "$rc" -ne 0 || "$val" != "json" ]]; then
-                if [[ "$OBS_FLAG_ERROR" == "$errs" ]]; then
-                    _obs_flag_error "--log.file.format json is not on the node command in ${file}. Add it by hand: $(obs_reth_log_flags "$method")"
-                fi
-                failed=1
-            fi
-        fi
-    fi
-
-    if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
-        if _obs_has_metrics "$file" "$have_get"; then
-            print_ok "Node already serves a metrics endpoint (--metrics)."
-        else
-            print_step "Enabling node metrics endpoint"
-            errs="$OBS_FLAG_ERROR"
-            if obs_inject_flags "$file" '--metrics' "$(obs_metrics_reth_flags)"; then
-                changed=1
-            fi
-            if ! _obs_has_metrics "$file" "$have_get"; then
-                if [[ "$OBS_FLAG_ERROR" == "$errs" ]]; then
-                    _obs_flag_error "--metrics is not on the node command in ${file}. Add it by hand: $(obs_metrics_reth_flags)"
-                fi
-                failed=1
-            fi
-        fi
-    fi
-
-    if [[ "$changed" -eq 1 && "$method" == "docker" ]]; then
+    if [[ "$_OBS_FLAGS_CHANGED" -eq 1 && "$method" == "docker" ]]; then
         systemctl daemon-reload
     fi
     if [[ "$failed" -eq 1 ]]; then
-        if [[ "$changed" -eq 1 ]]; then
-            print_info "Not restarting ${svc} yet: fix its launch file as described above, then restart it (sudo systemctl restart ${svc})."
+        if [[ "$_OBS_FLAGS_CHANGED" -eq 1 ]]; then
+            print_info "Not restarting ${svc} yet: fix its launch file as described above, then run this enable again."
         fi
         return 1
     fi
-    [[ "$changed" -eq 1 ]] || return 0
+    [[ "$_OBS_FLAGS_CHANGED" -eq 1 ]] || return 0
 
     print_warn "The node must restart to pick up the new reth flags."
     if confirm "Restart ${svc} now?"; then
         obs_restart_window "$fn"
-        if systemctl restart "$svc"; then print_ok "${svc} restarted."; else print_warn "Restart failed; run: sudo systemctl restart ${svc}"; fi
+        if systemctl restart "$svc"; then
+            print_ok "${svc} restarted."
+        else
+            print_warn "Restart failed; check journalctl -u ${svc} -n 50. $(obs_restart_hint "$svc")"
+        fi
     else
-        print_info "Restart later: sudo systemctl restart ${svc}"
+        print_info "Restart later. $(obs_restart_hint "$svc")"
     fi
 }
 
@@ -798,6 +907,7 @@ obs_ensure_reth_flags() {
 obs_enable() {
     local token="${1:-}" progress="${2:-}"
     OBS_FLAG_ERROR=""
+    OBS_ALLOY_TOUCHED=false
     # Trim leading/trailing whitespace (a stray paste newline otherwise yields silent 401s).
     token="${token#"${token%%[![:space:]]*}"}"
     token="${token%"${token##*[![:space:]]}"}"
@@ -828,11 +938,22 @@ obs_enable() {
         print_info  "Set OBS_METRICS_PUSH_URL (or pass --metrics-push-url to setup-observability.sh) before enabling metrics."
         return 1
     fi
+    if [[ "$metrics_on" == "true" ]] && ! obs_metrics_addr >/dev/null; then
+        _obs_flag_error "$(_obs_bad_port_msg)"
+        return 1
+    fi
+    # Before Alloy is touched: every flag the enabled pipelines need must be able to go
+    # on the node command, so a launch file that cannot take them changes nothing.
+    if ! obs_check_reth_flags; then
+        print_info "Nothing was changed. Fix the node launch file as described above, then run this enable again."
+        return 1
+    fi
 
     local meta method
     meta="$(node_meta_path || true)"
     method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
 
+    OBS_ALLOY_TOUCHED=true
     install -d -m 0750 "$OBS_ETC_DIR"
     obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
 
@@ -867,8 +988,9 @@ obs_enable() {
 
     # A pipeline whose node flags are missing is not recorded as enabled, so status
     # readers (the UI's add-ons card reads .node-meta) never show a half-applied enable.
-    # Alloy keeps the config rendered above; with the flags missing it ships nothing for
-    # that pipeline until the launch file is fixed and this enable is run again.
+    # obs_check_reth_flags made this rare (the launch file changed in between, or the
+    # real write failed); Alloy then keeps the config rendered above and ships nothing
+    # for that pipeline until the launch file is fixed and this enable is run again.
     if ! obs_ensure_reth_flags "$progress"; then
         print_info "Not recorded as enabled until the node launch file has the flags above; fix it, then run this enable again."
         return 1
@@ -969,7 +1091,11 @@ obs_status() {
     method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"
     print_info "Configured: ENABLE_OBSERVABILITY=${logs_enabled:-false} (logs), ENABLE_METRICS=${metrics_enabled:-false} (metrics)"
 
-    if ! systemctl list-unit-files 2>/dev/null | grep -q "^${OBS_ALLOY_UNIT}"; then
+    # Captured first and read from a here-string: `cmd | grep -q` under pipefail fails when
+    # grep stops early and the writer gets SIGPIPE, and set -e would end the status there.
+    local units
+    units="$(systemctl list-unit-files 2>/dev/null || true)"
+    if ! grep -q "^${OBS_ALLOY_UNIT}" <<< "$units"; then
         print_info "${OBS_ALLOY_UNIT} not installed (run setup-observability.sh to enable)."
         return 0
     fi
@@ -985,7 +1111,7 @@ obs_status() {
 
     if [[ "$logs_enabled" == "true" ]]; then
         local sent
-        sent="$(printf '%s\n' "$alloy_metrics" | grep -E '^loki_write_sent_bytes_total' | awk '{s+=$2} END{printf "%d", s+0}')"
+        sent="$(printf '%s\n' "$alloy_metrics" | awk '/^loki_write_sent_bytes_total/ { s += $2 } END { printf "%d", s + 0 }')"
         if [[ -n "$sent" && "$sent" != "0" ]]; then
             print_ok "Alloy has shipped ${sent} log bytes to Loki (loki_write_sent_bytes_total)"
         else
@@ -994,18 +1120,22 @@ obs_status() {
     fi
 
     if [[ "$metrics_enabled" == "true" ]]; then
-        local samples maddr
-        samples="$(printf '%s\n' "$alloy_metrics" | grep -E '^prometheus_remote_storage_samples_total' | awk '{s+=$2} END{printf "%d", s+0}')"
+        local samples maddr node_metrics
+        samples="$(printf '%s\n' "$alloy_metrics" | awk '/^prometheus_remote_storage_samples_total/ { s += $2 } END { printf "%d", s + 0 }')"
         if [[ -n "$samples" && "$samples" != "0" ]]; then
             print_ok "Alloy has remote-written ${samples} metric samples (prometheus_remote_storage_samples_total)"
         else
             print_warn "Alloy up but 0 metric samples shipped yet (node starting, or --metrics not serving yet)"
         fi
-        maddr="$(obs_metrics_addr)"
-        if curl -fsS "http://${maddr}/metrics" 2>/dev/null | grep -qE '^(tn_|reth_)'; then
-            print_ok "Node metrics endpoint serving tn_*/reth_* series on ${maddr}"
+        if maddr="$(obs_metrics_addr)"; then
+            node_metrics="$(curl -fsS "http://${maddr}/metrics" 2>/dev/null || true)"
+            if grep -qE '^(tn_|reth_)' <<< "$node_metrics"; then
+                print_ok "Node metrics endpoint serving tn_*/reth_* series on ${maddr}"
+            else
+                print_warn "Node metrics endpoint ${maddr} not serving yet (node down, or --metrics not enabled/restarted)"
+            fi
         else
-            print_warn "Node metrics endpoint ${maddr} not serving yet (node down, or --metrics not enabled/restarted)"
+            print_warn "$(_obs_bad_port_msg)"
         fi
     fi
 
