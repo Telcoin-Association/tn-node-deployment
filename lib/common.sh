@@ -4069,11 +4069,108 @@ tn_keytool_has() {
     _tn_help_lists "$word" "$out"
 }
 
+# _tn_parse_check_message — read clap's output on stdin and print its error as one
+# line. The probe's ARGS are this function's arguments. For
+# "invalid value '<value>' for '<arg>': <reason>" the value, which may span many
+# lines and is often a whole file, becomes '…'; inside the reason every
+# double-quoted string (serde quotes the input it rejects that way) becomes "…",
+# and so does a backquoted word that occurs in ARGS. Other errors pass through
+# as they are. Lines after the first are trimmed and joined with "; ", up to
+# clap's Usage: or "For more information" footer. rc 1, no output, when there
+# is no clap error line. Usage: _tn_parse_check_message ARGS... <clap-output. The
+# ARGS reach awk through its environment, not an argument list, so they do not
+# show in the process list.
+_tn_parse_check_message() {
+    (
+        i=0
+        for arg in "$@"; do
+            i=$(( i + 1 ))
+            export "TN_PC_A${i}=${arg}"
+        done
+        export TN_PC_N="$i"
+        awk '
+            function redact(s,    o, i, n, c, j, cc, inner, k, hit) {
+                o = ""; n = length(s); i = 1
+                while (i <= n) {
+                    c = substr(s, i, 1)
+                    if (c == "\"") {
+                        j = i + 1
+                        while (j <= n) {
+                            cc = substr(s, j, 1)
+                            if (cc == "\\") { j += 2; continue }
+                            if (cc == "\"") break
+                            j++
+                        }
+                        if (j > n) { o = o "\"" ELL; break }
+                        o = o "\"" ELL "\""; i = j + 1; continue
+                    }
+                    if (c == "`") {
+                        j = index(substr(s, i + 1), "`")
+                        if (j) {
+                            inner = substr(s, i + 1, j - 1); hit = 0
+                            for (k = 1; k <= NA; k++) if (inner != "" && index(A[k], inner)) hit = 1
+                            o = o "`" (hit ? ELL : inner) "`"; i += j + 1; continue
+                        }
+                    }
+                    o = o c; i++
+                }
+                return o
+            }
+            BEGIN {
+                SQ = sprintf("%c", 39); ESC = sprintf("%c", 27); ELL = "…"
+                IV = "invalid value " SQ; FQ = SQ " for " SQ
+                NA = ENVIRON["TN_PC_N"] + 0
+                for (k = 1; k <= NA; k++) A[k] = ENVIRON["TN_PC_A" k]
+            }
+            { gsub(ESC "\\[[0-9;]*m", ""); all = (NR == 1) ? $0 : all "\n" $0 }
+            END {
+                if (substr(all, 1, 6) == "error:") p = 1
+                else { p = index(all, "\nerror:"); if (p) p++ }
+                if (!p) exit 1
+                msg = substr(all, p)
+                iv = (substr(msg, 1, 7 + length(IV)) == "error: " IV)
+                if (iv) {
+                    # The value is one of ARGS, so cut exactly that (the longest
+                    # match, should one argument start another). When it cannot be
+                    # found as given, cut up to the last quote-for-quote-dash.
+                    best = 0; blen = -1
+                    for (k = 1; k <= NA; k++) {
+                        if (A[k] == "" || !index(msg, IV A[k] FQ)) continue
+                        if (length(A[k]) > blen) { best = k; blen = length(A[k]) }
+                    }
+                    q = 8 + length(IV)
+                    if (best) {
+                        nd = IV A[best] FQ; r = index(msg, nd)
+                        msg = substr(msg, 1, r - 1) IV ELL FQ substr(msg, r + length(nd))
+                    } else {
+                        r = 0; t = q
+                        while ((k = index(substr(msg, t), FQ "-")) > 0) { r = t + k - 1; t = r + 1 }
+                        if (r) msg = substr(msg, 1, q - 1) ELL substr(msg, r)
+                        else msg = substr(msg, 1, q - 1) ELL SQ
+                    }
+                }
+                m = split(msg, L, "\n"); line = ""
+                for (j = 1; j <= m; j++) {
+                    s = L[j]; sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
+                    if (s ~ /^(Usage:|For more information)/) break
+                    if (s != "") line = (line == "") ? s : line "; " s
+                }
+                if (iv) line = redact(line)
+                print line
+            }
+        ' 2>/dev/null
+    )
+}
+
 # tn_node_parse_check SPEC ARGS... — rc 0 when the node binary of SPEC accepts
 # `node ARGS... --help`. clap parses every value before it prints the help, so this
 # checks a value such as a --bootstrap-peers map without starting anything. rc 1
-# when the arguments are rejected, with the first `error:` line on stdout; rc 4
-# when the probe could not run, with the reason on stdout.
+# when the arguments are rejected, with clap's error on stdout as ONE line
+# (_tn_parse_check_message): the rejected value shows as '…' and input that the
+# reason quotes as "…", so the message can be shown to someone who may not read
+# the file the value came from. rc 4 when the probe could not run, with the reason
+# on stdout. The value still goes to the node binary as an argument, which other
+# local users can see in the process list while the probe runs.
 tn_node_parse_check() {
     local spec="${1:-}" out rc line
     if [[ $# -gt 0 ]]; then
@@ -4086,9 +4183,7 @@ tn_node_parse_check() {
             return 0
             ;;
         1|2)
-            line="$(awk 'BEGIN { esc = sprintf("%c", 27) }
-                { gsub(esc "\\[[0-9;]*m", "") }
-                /^error:/ { print; exit }' <<<"$out" 2>/dev/null || true)"
+            line="$(_tn_parse_check_message "$@" <<<"$out" || true)"
             printf '%s\n' "${line:-rejected (exit ${rc})}"
             return 1
             ;;
