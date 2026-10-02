@@ -4,21 +4,84 @@
 #
 # Edit the configuration of the node installed on this server (the single
 # resolved systemd service) without manually editing systemd service files.
-# Changes take effect on next restart. There is no role to pick: the node's
-# role is decided on-chain each epoch, so every node is configured the same way.
+# Changes take effect on the next restart. There is no role to pick: the
+# node's role is decided on-chain each epoch, so every node is configured the
+# same way.
+#
+# An edit is refused while update-node.sh is applying an update (the two share
+# the update lock). Before restarting a node that votes in the current
+# committee, the script waits for the epoch to close and settle when the
+# boundary is within five minutes, at most 30 minutes. A rollback restart
+# never waits.
 #
 # USAGE:
-#   sudo bash edit-config.sh
+#   sudo bash edit-config.sh                          # interactive menu
+#   sudo bash edit-config.sh --set <field>=<value>    # one edit, then restart
+#   sudo bash edit-config.sh --json --set <field>=<value>
+#                                                     # the same, as JSON events
+#   --no-epoch-wait                                   # restart without the epoch wait
+#
+# TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
+#
+# --set restarts the node after the edit and checks that it stays up. If it
+# does not, every file the edit changed is put back and the node restarted.
+# When the value is already in place nothing is written and the node is not
+# restarted.
+#
+# Fields for --set:
+#   primary_listener=<multiaddr>      /ip4/<addr>/udp/<port>/quic-v1 or /ip6/...
+#   worker_listener=<multiaddr>
+#   metrics=<IPv4:PORT>|off           add, change or remove --metrics
+#   verbosity=-v|-vv|-vvv|-vvvv|-vvvvv
+#   docker_image=<registry/path:tag>  Docker installs only; pulled first
+#   bootstrap_peers=<path>|none       peers the node dials at start instead of
+#                                     the bootstrap servers in its genesis: an
+#                                     absolute path to a YAML or JSON map keyed
+#                                     by BLS public key, at most 64 KiB. The
+#                                     node binary checks it, then it is
+#                                     installed as /etc/telcoin/bootstrap-peers.yaml.
+#                                     Needs v0.15.0-adiri or later and a start
+#                                     wrapper (a node started straight from its
+#                                     systemd unit is refused). none removes
+#                                     the flag and the file.
+#   state_export=off|unlimited|N      write the execution state at each epoch
+#                                     boundary (--enable-state-export,
+#                                     v0.13.0-adiri or later); N keeps only the
+#                                     last N epochs (1 to 999999,
+#                                     --state-export-keep, v0.15.0-adiri or later)
+#   allow_private_forward_targets=true|false
+#                                     parameters.yaml: whether the node may
+#                                     forward transactions to committee RPC
+#                                     endpoints on private addresses. true is
+#                                     refused on testnet and mainnet.
 # =============================================================================
+# --help prints the block above only. Not advertised there: --observer and
+# --validator are still accepted and ignored, because the node's role is
+# decided on-chain and older copies of the UI helper pass one of them on every
+# --json call.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+if ! version_gte "${COMMON_VERSION:-0}" "1.6.0"; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than 1.6.0. Run update-scripts.sh and try again."
+    case " $* " in
+        *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
+        *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
+    esac
+    exit 1
+fi
 
-readonly SCRIPT_VERSION="1.2.6"
+readonly SCRIPT_VERSION="1.3.0"
 
-# Build the systemd unit file path from a unit BASE name (e.g. "telcoin").
+# The largest bootstrap peers file accepted. A map of a few dozen peers is a
+# few KiB, and the whole map travels as one command-line argument.
+readonly PEERS_MAX_BYTES=65536
+
+# Build the systemd unit file path from a unit BASE name (e.g. "telcoin"). The
+# path is rooted at TN_ROOT_PREFIX like the lib/fallback.sh resolvers (empty
+# in production, a fixture tree under test).
 service_file_for() {
-    printf '/etc/systemd/system/%s.service' "$1"
+    printf '%s/etc/systemd/system/%s.service' "${TN_ROOT_PREFIX:-}" "$1"
 }
 
 # Resolve the selected node's data dir from .node-meta (DATA_DIR=), falling back
@@ -48,6 +111,38 @@ TARGET_SERVICE_FILE=""
 # unit on a wrapper install silently changes nothing the service reads.
 TARGET_LAUNCH_FILE=""
 
+# --no-epoch-wait: restart without waiting for the epoch boundary.
+NO_EPOCH_WAIT=false
+
+# --json: stdout carries JSON events only (see json_setup_fds). --set runs one
+# edit without the menu, in either mode.
+JSON_MODE=false
+EDIT_SET_GIVEN=false
+EDIT_SET_PAIR=""
+# The field of the --set pair, for the done event edit_on_exit may have to send.
+EDIT_SET_FIELD=""
+# --observer / --validator as passed (the last one wins). Both are retired and
+# ignored: the node's role is decided on-chain. Older copies of the UI helper
+# still pass one on every --json call, so they must keep parsing cleanly.
+LEGACY_ROLE_FLAG=""
+# Set once the run has sent its done event, so edit_on_exit never adds another.
+JSON_DONE_SENT=false
+# The last error reported; the done event repeats it.
+EDIT_LAST_ERROR=""
+
+# The update lock this run holds (edit_lock), and whether it is the flock kind,
+# which lives on file descriptor 9 until that is closed.
+EDIT_LOCK_HELD=false
+EDIT_LOCK_FLOCK=false
+
+# Files the current edit changed, each with its backup (edit_backup). An empty
+# backup means the file did not exist before, so a restore removes it.
+EDIT_BK_FILES=()
+EDIT_BK_COPIES=()
+
+# Output of edit_launch_spec: the runner spec of the node command.
+EDIT_SPEC=""
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -67,17 +162,6 @@ backup_service_file() {
     # to the operator (same convention as update-node.sh backup_unit_file).
     print_info "Backup written: ${backup}" >&2
     echo "$backup"
-}
-
-# Restore from the most recent backup created above, used on rollback paths.
-restore_service_file() {
-    local file="$1"
-    local backup="$2"
-    if [[ -f "$backup" ]]; then
-        cp -p "$backup" "$file"
-        systemctl daemon-reload 2>/dev/null || true
-        print_warn "Rolled back to backup: ${backup}"
-    fi
 }
 
 # Read a value from the service file Environment= lines
@@ -104,9 +188,9 @@ resolve_launch_file() {
     [[ -n "$TARGET_LAUNCH_FILE" && -f "$TARGET_LAUNCH_FILE" ]] || TARGET_LAUNCH_FILE="$TARGET_SERVICE_FILE"
 }
 
-# Effective node-launch text for flag/image inspection. Wrapper files carry the
-# command across backslash-continued lines; join them so the flag helpers see
-# one logical line. Unit files keep the old ExecStart read.
+# Effective node-launch text for image and listener inspection. Wrapper files
+# carry the command across backslash-continued lines; join them so the readers
+# see one logical line. Unit files keep the old ExecStart read.
 read_launch_line() {
     local file="$1"
     if [[ "$file" == *.service ]]; then
@@ -156,44 +240,6 @@ backup_edit_targets() {
     fi
 }
 
-# Extract a specific flag value from the ExecStart line
-read_flag() {
-    local flag="$1"
-    local exec_start="$2"
-    echo "$exec_start" | awk -v f="$flag" '{
-        for(i=1;i<=NF;i++) {
-            if($i==f && i+1<=NF) {
-                print $(i+1)
-                exit
-            }
-        }
-    }'
-}
-
-# Check if a flag exists in ExecStart
-has_flag() {
-    local flag="$1"
-    local exec_start="$2"
-    # Use awk to avoid grep treating --flags as grep options
-    echo "$exec_start" | awk -v f="$flag" '{
-        for(i=1;i<=NF;i++) {
-            if($i==f) exit 0
-        }
-        exit 1
-    }'
-}
-
-# Check if a flag exists in a file
-has_flag_in_file() {
-    local flag="$1"
-    local service_file="$2"
-    awk -v f="$flag" '{
-        for(i=1;i<=NF;i++) {
-            if($i==f) exit 0
-        }
-    } END{exit 1}' "$service_file"
-}
-
 # Replace or add an Environment= line in the service file
 set_env_var() {
     local var_name="$1"
@@ -209,31 +255,6 @@ set_env_var() {
     fi
 }
 
-# Replace a flag value in the ExecStart line
-set_flag_value() {
-    local flag="$1"
-    local new_value="$2"
-    local service_file="$3"
-    perl -i -pe "s|\Q${flag}\E [^ ]*|${flag} ${new_value}|" "$service_file"
-}
-
-# Add a flag to ExecStart if not present
-add_flag() {
-    local flag="$1"
-    local service_file="$2"
-    if ! has_flag_in_file "$flag" "$service_file"; then
-        sed -i "s|^ExecStart=\(.*\)$|ExecStart=\1 ${flag}|" "$service_file"
-    fi
-}
-
-# Remove a flag from ExecStart
-remove_flag() {
-    local flag="$1"
-    local service_file="$2"
-    # Use perl for literal string removal to avoid regex issues with --flags
-    perl -i -pe "s| \Q${flag}\E||g" "$service_file"
-}
-
 # Replace the verbosity flag (-v .. -vvvvv) in a launch file. The old
 # `sed s| -v\+ |...|` matched the FIRST " -v " on the line -- on a docker
 # launch line that is the -v VOLUME flag, not verbosity, and on wrapper files
@@ -247,7 +268,730 @@ set_verbosity() {
     perl -i -pe "s/(^|\s)-v{1,5}(?=\s+(?:\\\\|--)|\s*\$)/\${1}${new_verbosity}/" "$service_file"
 }
 
-# Apply changes: reload systemd and optionally restart
+# Swap docker image OLD for NEW in a launch file. The images reach perl through
+# the environment, so an image pinned by digest (name@sha256:...) is copied
+# literally instead of being read as a perl array.
+swap_docker_image() {
+    local old="$1" new="$2" file="$3"
+    TN_OLD_IMAGE="$old" TN_NEW_IMAGE="$new" \
+        perl -i -pe 's/\Q$ENV{TN_OLD_IMAGE}\E/$ENV{TN_NEW_IMAGE}/g' "$file"
+}
+
+# The image a docker launch line runs: the first registry-looking word, else
+# the last word with a tag. Empty when there is none.
+launch_docker_image() {
+    local exec_start="$1" image
+    image="$(grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' <<<"$exec_start" | head -1 || true)"
+    if [[ -z "$image" ]]; then
+        image="$(awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' <<<"$exec_start" | tail -1 || true)"
+    fi
+    printf '%s' "$image"
+}
+
+# =============================================================================
+# JSON OUTPUT AND REPORTING
+#
+# fd handling mirrors update-node.sh: json_setup_fds dups the real stdout to
+# fd 3 and points stdout at stderr, so every print_* line is harmless noise on
+# stderr while fd 3 carries newline-delimited JSON the caller streams and
+# parses. main does this, and installs edit_on_exit, before it parses the
+# arguments, so a --json run that stops early (a bad argument, not root, no
+# node, the lock held) still prints JSON only and ends with one done event.
+# =============================================================================
+
+json_setup_fds() {
+    exec 3>&1   # fd3 = original stdout: JSON is written here
+    exec 1>&2   # stdout now aliases stderr: print_*/build output is benign noise
+}
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/ }"
+    s="${s//$'\r'/ }"
+    s="${s//$'\t'/ }"
+    printf '%s' "$s"
+}
+
+# json_emit <json> -- write one JSON line to fd 3. A done event is recorded so
+# edit_on_exit does not send a second one.
+json_emit() {
+    case "$1" in
+        '{"event":"done"'*) JSON_DONE_SENT=true ;;
+    esac
+    printf '%s\n' "$1" >&3
+}
+
+json_event() {
+    # json_event <event> <msg>
+    json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
+}
+
+# Reporting for code the menu and --set share: a JSON event in --json mode, a
+# print_* line otherwise. edit_error also keeps the message for the done event.
+edit_step() {
+    if [[ "$JSON_MODE" == "true" ]]; then json_event step "$1"; else print_step "$1"; fi
+}
+edit_log() {
+    if [[ "$JSON_MODE" == "true" ]]; then json_event log "$1"; else print_info "$1"; fi
+}
+edit_ok() {
+    if [[ "$JSON_MODE" == "true" ]]; then json_event log "$1"; else print_ok "$1"; fi
+}
+edit_warn() {
+    if [[ "$JSON_MODE" == "true" ]]; then json_event warn "$1"; else print_warn "$1"; fi
+}
+edit_error() {
+    EDIT_LAST_ERROR="$1"
+    if [[ "$JSON_MODE" == "true" ]]; then json_event error "$1"; else print_error "$1"; fi
+}
+
+# edit_done <ok> <field> <value> <msg> [rolled_back] -- the result of a --set
+# run: the done event in --json mode (value only when ok), a final [OK] or
+# [ERROR] line otherwise.
+edit_done() {
+    local ok="$1" field="$2" value="$3" msg="$4" rb="${5:-}" rbpart="" valpart=""
+    if [[ "$JSON_MODE" != "true" ]]; then
+        if [[ "$ok" == "true" ]]; then print_ok "$msg"; else print_error "$msg"; fi
+        return 0
+    fi
+    if [[ -n "$rb" ]]; then
+        rbpart=",\"rolled_back\":${rb}"
+    fi
+    if [[ "$ok" == "true" ]]; then
+        valpart=",\"value\":\"$(json_escape "$value")\""
+    fi
+    json_emit "{\"event\":\"done\",\"ok\":${ok}${rbpart},\"field\":\"$(json_escape "$field")\"${valpart},\"msg\":\"$(json_escape "$msg")\"}"
+}
+
+# edit_on_exit -- the EXIT trap, installed by main before it parses anything.
+# Releases the update lock and, in --json mode, sends
+#   {"event":"done","ok":false,"field":...,"msg":...}
+# when the run is ending without having sent its done event, so every --json
+# run ends with exactly one done whichever way it stopped. The message is the
+# last error's, or a pointer to stderr when there was none.
+edit_on_exit() {
+    local rc=$?
+    local msg field=""
+    tn_release_update_lock
+    if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
+        msg="${EDIT_LAST_ERROR:-edit-config.sh stopped before reporting a result; the reason is on its stderr}"
+        if [[ -n "$EDIT_SET_FIELD" ]]; then
+            field=",\"field\":\"$(json_escape "$EDIT_SET_FIELD")\""
+        fi
+        json_emit "{\"event\":\"done\",\"ok\":false${field},\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
+    fi
+    return "$rc"
+}
+
+# edit_require_root -- check_root, except that a --json run reports the
+# refusal as an error event first (check_root itself only prints).
+edit_require_root() {
+    if [[ "$JSON_MODE" == "true" ]] && ! (check_root) >/dev/null 2>&1; then
+        edit_error "edit-config.sh must run as root"
+        exit 1
+    fi
+    check_root
+}
+
+# =============================================================================
+# UPDATE LOCK, BACKUPS AND EPOCH WAIT
+# =============================================================================
+
+# edit_lock -- take the update lock (tn_acquire_update_lock) before an apply
+# path changes anything. update-node.sh holds it while it applies an update: it
+# backs up the launch file before its epoch wait and puts that copy back on a
+# rollback, which would silently undo an edit saved in between. The lock is
+# released by edit_unlock between menu edits and by edit_on_exit at the end of
+# the run. Returns 0 at once when this run holds it already.
+edit_lock() {
+    if [[ "$EDIT_LOCK_HELD" == "true" ]]; then
+        return 0
+    fi
+    TN_EXIT_TRAP_OWNED=1
+    if ! tn_acquire_update_lock >/dev/null 2>&1; then
+        edit_error "an update is in progress${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; try again when it has finished"
+        return 1
+    fi
+    EDIT_LOCK_HELD=true
+    EDIT_LOCK_FLOCK=false
+    if [[ -z "${TN_UPDATE_LOCK_DIR:-}" ]]; then
+        EDIT_LOCK_FLOCK=true
+    fi
+    return 0
+}
+
+# edit_unlock -- release the update lock after a menu edit, so a menu left open
+# does not hold up update-node.sh. tn_release_update_lock removes the mkdir
+# lock; the flock lock goes when file descriptor 9 closes.
+edit_unlock() {
+    if [[ "$EDIT_LOCK_HELD" != "true" ]]; then
+        return 0
+    fi
+    tn_release_update_lock
+    if [[ "$EDIT_LOCK_FLOCK" == "true" ]]; then
+        exec 9>&-
+    fi
+    EDIT_LOCK_HELD=false
+    EDIT_LOCK_FLOCK=false
+    return 0
+}
+
+# menu_lock -- edit_lock for the menu: on refusal, hold the message on screen.
+menu_lock() {
+    if edit_lock; then
+        return 0
+    fi
+    echo ""
+    read -r -p "  Press Enter to return to menu..." || true
+    return 1
+}
+
+# edit_reset_backups -- start a new edit with no files recorded.
+edit_reset_backups() {
+    EDIT_BK_FILES=()
+    EDIT_BK_COPIES=()
+}
+
+# edit_backup FILE -- before the first change to FILE in this edit, copy it to
+# FILE.bak.<UTC time> and record the pair for edit_restore_backups. A FILE that
+# does not exist yet is recorded as new, so the restore removes it. rc 1, with
+# an error reported, when the copy fails.
+edit_backup() {
+    local file="$1" i copy
+    i=0
+    while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
+        if [[ "${EDIT_BK_FILES[$i]}" == "$file" ]]; then
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    copy=""
+    if [[ -e "$file" ]]; then
+        copy="${file}.bak.$(date -u '+%Y%m%d-%H%M%S')"
+        if [[ -e "$copy" ]]; then
+            copy="${copy}.$$"
+        fi
+        if ! cp -p "$file" "$copy" 2>/dev/null; then
+            edit_error "could not back up ${file}"
+            return 1
+        fi
+    fi
+    EDIT_BK_FILES+=("$file")
+    EDIT_BK_COPIES+=("$copy")
+    return 0
+}
+
+# edit_any_changed -- rc 0 when a file recorded by edit_backup now differs from
+# its backup, a new file now exists, or a recorded file is gone.
+edit_any_changed() {
+    local i file copy
+    i=0
+    while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
+        file="${EDIT_BK_FILES[$i]}"
+        copy="${EDIT_BK_COPIES[$i]}"
+        if [[ -z "$copy" ]]; then
+            if [[ -e "$file" ]]; then
+                return 0
+            fi
+        elif [[ ! -e "$file" ]] || ! cmp -s "$copy" "$file"; then
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# edit_restore_backups -- undo the current edit: put back every file
+# edit_backup recorded (a file that was new is removed), then reload systemd.
+# Each file that cannot be restored is reported; rc 1 if there was one.
+edit_restore_backups() {
+    local i file copy bad=0
+    i=0
+    while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
+        file="${EDIT_BK_FILES[$i]}"
+        copy="${EDIT_BK_COPIES[$i]}"
+        if [[ -z "$copy" ]]; then
+            if ! rm -f "$file" 2>/dev/null; then
+                edit_error "could not remove ${file}"
+                bad=1
+            fi
+        elif ! cp -p "$copy" "$file" 2>/dev/null; then
+            edit_error "could not restore ${file} from ${copy}"
+            bad=1
+        fi
+        i=$((i + 1))
+    done
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    return "$bad"
+}
+
+# edit_drop_backups -- delete the backups of an edit that changed nothing.
+edit_drop_backups() {
+    local c
+    for c in ${EDIT_BK_COPIES[@]+"${EDIT_BK_COPIES[@]}"}; do
+        if [[ -n "$c" ]]; then
+            rm -f "$c" 2>/dev/null || true
+        fi
+    done
+    edit_reset_backups
+    return 0
+}
+
+# edit_report_backups -- name the backups of an edit that changed something.
+edit_report_backups() {
+    local c
+    for c in ${EDIT_BK_COPIES[@]+"${EDIT_BK_COPIES[@]}"}; do
+        if [[ -n "$c" ]]; then
+            edit_log "Backup written: ${c}"
+        fi
+    done
+    return 0
+}
+
+# edit_wait_say <step|log|warn> <msg> -- progress printer for
+# tn_wait_restart_window: a JSON event of the same name in --json mode, a
+# print_* line otherwise.
+edit_wait_say() {
+    case "${1:-}" in
+        step) edit_step "${2:-}" ;;
+        warn) edit_warn "${2:-}" ;;
+        *)    edit_log "${2:-}" ;;
+    esac
+    return 0
+}
+
+# edit_epoch_wait -- called just before the node restarts (before it stops, for
+# the BLS passphrase), after the lock is held, and never before a rollback
+# restart. When the node votes in the current committee and the epoch boundary
+# is close, tn_wait_restart_window (lib/common.sh) holds the restart until the
+# epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds.
+# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips it. Always returns 0.
+edit_epoch_wait() {
+    if [[ "$NO_EPOCH_WAIT" == "true" ]]; then
+        edit_wait_say log "Not waiting for the epoch boundary (--no-epoch-wait)."
+        return 0
+    fi
+    if [[ "${TN_SKIP_EPOCH_WAIT:-}" == "1" ]]; then
+        edit_wait_say log "Not waiting for the epoch boundary (TN_SKIP_EPOCH_WAIT=1)."
+        return 0
+    fi
+    tn_wait_restart_window "$(tn_local_rpc_url)" edit_wait_say
+    return 0
+}
+
+# =============================================================================
+# FIELD SETTERS
+#
+# One function per field that edits a launch flag or parameters.yaml, shared by
+# the menu and --set. Each validates its value, records every file it is about
+# to change with edit_backup, and makes the change. rc 0 saved (possibly
+# nothing differed; the caller checks with edit_any_changed), rc 1 refused or
+# failed, with the reason reported and the caller restoring the backups. The
+# lock is held and the restart is left to the caller.
+# =============================================================================
+
+# edit_launch_spec -- set EDIT_SPEC to the runner spec (docker:<image> or
+# binary:<path>) of the node command in TARGET_LAUNCH_FILE (tn_launch_runner).
+# Every launch-flag edit starts here, so a launch file the parser cannot read
+# is never edited.
+edit_launch_spec() {
+    local rc=0
+    EDIT_SPEC="$(tn_launch_runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) edit_error "${TARGET_LAUNCH_FILE} starts the node with neither a docker image nor a node binary this script recognises; edit it by hand" ;;
+        2) edit_error "${TARGET_LAUNCH_FILE} has no node command with --http; edit it by hand" ;;
+        3) edit_error "the node command in ${TARGET_LAUNCH_FILE} cannot be parsed; edit it by hand" ;;
+        *) edit_error "cannot read ${TARGET_LAUNCH_FILE}" ;;
+    esac
+    return 1
+}
+
+# edit_need_flag SPEC FLAG -- rc 0 when `node --help` of the installed release
+# lists FLAG (tn_node_has_flag); otherwise report why and return 1.
+edit_need_flag() {
+    local rc=0
+    tn_node_has_flag "$1" "$2" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) edit_error "the installed release has no $2; update the node first" ;;
+        *) edit_error "could not run the node binary (${1}) to check for $2" ;;
+    esac
+    return 1
+}
+
+# edit_flag_change set|unset FLAG [VALUE] -- one tn_launch_flag_set or
+# tn_launch_flag_unset on TARGET_LAUNCH_FILE. rc 0 when the flag is now as
+# asked (the helper's "no change needed" included); 1, reported, when the
+# helper refused or failed, in which case it left the file untouched.
+edit_flag_change() {
+    local op="$1" flag="$2" rc=0
+    if [[ "$op" == "set" && $# -ge 3 ]]; then
+        tn_launch_flag_set "$TARGET_LAUNCH_FILE" "$flag" "$3" || rc=$?
+    elif [[ "$op" == "set" ]]; then
+        tn_launch_flag_set "$TARGET_LAUNCH_FILE" "$flag" || rc=$?
+    else
+        tn_launch_flag_unset "$TARGET_LAUNCH_FILE" "$flag" || rc=$?
+    fi
+    case "$rc" in
+        0|1) return 0 ;;
+        2) edit_error "${TARGET_LAUNCH_FILE} has no node command with --http, so ${flag} cannot be changed there; edit it by hand" ;;
+        3) edit_error "${TARGET_LAUNCH_FILE} cannot be edited automatically (the node command ends in a comment or cannot be parsed); change ${flag} by hand" ;;
+        *) edit_error "could not write ${TARGET_LAUNCH_FILE}" ;;
+    esac
+    return 1
+}
+
+# set_metrics VALUE -- IPv4:PORT adds --metrics to the node command or changes
+# it; off removes it.
+set_metrics() {
+    local value="$1"
+    if [[ "$value" != "off" ]] && ! validate_ip_port "$value"; then
+        edit_error "invalid metrics address (want IPv4:PORT or off): ${value}"
+        return 1
+    fi
+    edit_launch_spec || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    if [[ "$value" == "off" ]]; then
+        edit_flag_change unset --metrics || return 1
+    else
+        edit_flag_change set --metrics "$value" || return 1
+    fi
+    return 0
+}
+
+# set_bootstrap_peers VALUE -- VALUE is an absolute path to a YAML or JSON map
+# of peers keyed by BLS public key, which the node dials at start instead of
+# the bootstrap servers in its genesis; or none. The installed release checks
+# the map itself (tn_node_parse_check), the file is installed as
+# <config dir>/bootstrap-peers.yaml (0644, root), and the node command gets
+# --bootstrap-peers "$(cat <that file>)", which the start wrapper expands at
+# each start. A systemd unit cannot run that $(cat ...), so a node started
+# straight from its unit is refused. none removes the flag and the file.
+set_bootstrap_peers() {
+    local value="$1" peers spec size tmp msg rc
+    peers="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
+    edit_launch_spec || return 1
+    spec="$EDIT_SPEC"
+    if [[ "$value" == "none" ]]; then
+        edit_backup "$TARGET_LAUNCH_FILE" || return 1
+        edit_flag_change unset --bootstrap-peers || return 1
+        if [[ -e "$peers" ]]; then
+            edit_backup "$peers" || return 1
+            if ! rm -f "$peers"; then
+                edit_error "could not remove ${peers}"
+                return 1
+            fi
+        fi
+        return 0
+    fi
+    if [[ "$TARGET_LAUNCH_FILE" == *.service ]]; then
+        edit_error "bootstrap_peers needs a start wrapper: this node starts from the systemd unit ${TARGET_LAUNCH_FILE}, and systemd cannot run the \$(cat ...) that loads the peers file at each start. Convert the unit to a start wrapper first."
+        return 1
+    fi
+    if [[ "$value" != /* ]]; then
+        edit_error "bootstrap_peers takes an absolute path or none, not ${value}"
+        return 1
+    fi
+    if [[ ! -f "$value" || ! -r "$value" ]]; then
+        edit_error "${value} is not a readable regular file"
+        return 1
+    fi
+    size="$(wc -c < "$value" 2>/dev/null | tr -d '[:space:]')"
+    if [[ ! "$size" =~ ^[0-9]+$ ]]; then
+        edit_error "could not read the size of ${value}"
+        return 1
+    fi
+    if [[ "$size" -eq 0 ]]; then
+        edit_error "${value} is empty"
+        return 1
+    fi
+    if [[ "$size" -gt "$PEERS_MAX_BYTES" ]]; then
+        edit_error "${value} is ${size} bytes; a bootstrap peers file can be at most 64 KiB"
+        return 1
+    fi
+    edit_need_flag "$spec" --bootstrap-peers || return 1
+
+    # Check the staged copy, so what gets installed is exactly what the node
+    # accepted. $(cat) drops trailing newlines here as it does in the wrapper.
+    tmp="${peers}.new.$$"
+    if ! cp "$value" "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        edit_error "could not copy ${value} to ${tmp}"
+        return 1
+    fi
+    edit_log "Checking ${value} with the node binary (${spec})"
+    rc=0
+    msg="$(tn_node_parse_check "$spec" --bootstrap-peers "$(cat "$tmp")")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        rm -f "$tmp"
+        if [[ "$rc" -eq 1 ]]; then
+            edit_error "the node rejects ${value} as a --bootstrap-peers map (${msg}). Each key must be a node's BLS public key and each value the primary and workers entries from that node's node-info.yaml."
+        else
+            edit_error "could not check ${value} with the node binary: ${msg}"
+        fi
+        return 1
+    fi
+    if [[ -f "$peers" ]] && cmp -s "$tmp" "$peers"; then
+        rm -f "$tmp"
+    else
+        if ! chmod 0644 "$tmp" || ! chown 0:0 "$tmp"; then
+            rm -f "$tmp"
+            edit_error "could not give ${tmp} mode 0644 and owner root"
+            return 1
+        fi
+        if ! edit_backup "$peers"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        if ! mv -f "$tmp" "$peers"; then
+            rm -f "$tmp"
+            edit_error "could not install ${peers}"
+            return 1
+        fi
+    fi
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_flag_change set --bootstrap-peers "\"\$(cat ${peers})\"" || return 1
+    return 0
+}
+
+# set_state_export VALUE -- off removes --enable-state-export and
+# --state-export-keep; unlimited sets the first (the node writes the execution
+# state at every epoch boundary and keeps every export) and removes the second;
+# N sets both, so only the last N epochs are kept. The installed release must
+# list each flag it gets.
+set_state_export() {
+    local value="$1" spec
+    case "$value" in
+        off|unlimited) ;;
+        *)
+            if [[ ! "$value" =~ ^[1-9][0-9]{0,5}$ ]]; then
+                edit_error "state_export takes off, unlimited or a number of epochs from 1 to 999999, not ${value}"
+                return 1
+            fi
+            ;;
+    esac
+    edit_launch_spec || return 1
+    spec="$EDIT_SPEC"
+    if [[ "$value" != "off" ]]; then
+        edit_need_flag "$spec" --enable-state-export || return 1
+        if [[ "$value" != "unlimited" ]]; then
+            edit_need_flag "$spec" --state-export-keep || return 1
+        fi
+    fi
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    case "$value" in
+        off)
+            edit_flag_change unset --state-export-keep || return 1
+            edit_flag_change unset --enable-state-export || return 1
+            ;;
+        unlimited)
+            edit_flag_change set --enable-state-export || return 1
+            edit_flag_change unset --state-export-keep || return 1
+            ;;
+        *)
+            edit_flag_change set --enable-state-export || return 1
+            edit_flag_change set --state-export-keep "$value" || return 1
+            ;;
+    esac
+    return 0
+}
+
+# params_forward_value FILE -- the value of the top-level key
+# allow_private_forward_targets in parameters.yaml FILE, lowercased, with
+# quotes and any trailing comment removed. Nothing when the key is absent.
+params_forward_value() {
+    awk -v sq="'" '
+        /^"?allow_private_forward_targets"?[ \t]*:/ {
+            v = $0
+            sub(/^[^:]*:[ \t]*/, "", v)
+            sub(/[ \t]*#.*$/, "", v)
+            gsub(/"/, "", v)
+            gsub(sq, "", v)
+            sub(/[ \t]+$/, "", v)
+            print tolower(v)
+            exit
+        }' "$1" 2>/dev/null || true
+}
+
+# params_with_forward FILE VALUE -- print parameters.yaml FILE with the
+# top-level key allow_private_forward_targets set to VALUE. The first
+# occurrence is rewritten where it stands (with any indented lines under it),
+# a repeat is dropped, and a missing key is added at the end. Every other line
+# is copied unchanged.
+params_with_forward() {
+    awk -v val="$2" '
+        skip && /^[ \t]+[^ \t]/ { next }
+        { skip = 0 }
+        /^"?allow_private_forward_targets"?[ \t]*:/ {
+            if (!done) print "allow_private_forward_targets: " val
+            done = 1
+            skip = 1
+            next
+        }
+        { print }
+        END { if (!done) print "allow_private_forward_targets: " val }
+    ' "$1"
+}
+
+# set_private_forward_targets VALUE -- true or false for the top-level key
+# allow_private_forward_targets in <data dir>/parameters.yaml, which the node
+# reads at start (there is no flag for it). A node outside the committee
+# forwards the transactions it receives to the RPC endpoint a committee member
+# advertises. With false (the default) it refuses endpoints on loopback,
+# private and link-local addresses, so a committee member cannot aim this
+# node's HTTP requests at hosts inside its network. true suits only a network
+# where one operator runs every committee node, so it is refused unless the
+# node's genesis declares a chain id, and refused on testnet and mainnet, whose
+# committees have independent operators. tn_is_public_chain_id names the
+# Association's networks; devnet is one of them, but its chain id (32285) is
+# allowed here like any private chain.
+set_private_forward_targets() {
+    local value="$1" data_dir params genesis id name tmp
+    case "$value" in
+        true|false) ;;
+        *)
+            edit_error "allow_private_forward_targets takes true or false, not ${value}"
+            return 1
+            ;;
+    esac
+    data_dir="$(detect_data_dir)"
+    params="${data_dir}/parameters.yaml"
+    if [[ ! -f "$params" || ! -r "$params" ]]; then
+        edit_error "${params} is missing or unreadable; the setting lives there"
+        return 1
+    fi
+    if [[ "$value" == "true" ]]; then
+        genesis="${data_dir}/genesis/genesis.yaml"
+        if ! id="$(tn_genesis_chain_id "$genesis")"; then
+            edit_error "cannot read the chain id from ${genesis}; allow_private_forward_targets=true is only for a private network, so it stays off"
+            return 1
+        fi
+        if tn_is_public_chain_id "$id" && [[ "$id" != "$DEVNET_CHAIN_ID" ]]; then
+            name="mainnet"
+            if [[ "$id" == "$TESTNET_CHAIN_ID" ]]; then
+                name="testnet"
+            fi
+            edit_error "this node runs chain ${id} (${name}), a public network; allow_private_forward_targets=true is only for a network where one operator runs every committee node"
+            return 1
+        fi
+    fi
+    if [[ "$(params_forward_value "$params")" == "$value" ]]; then
+        return 0
+    fi
+    edit_backup "$params" || return 1
+    tmp="${params}.new.$$"
+    if ! params_with_forward "$params" "$value" > "$tmp" 2>/dev/null \
+        || [[ ! -s "$tmp" ]] \
+        || [[ "$(params_forward_value "$tmp")" != "$value" ]]; then
+        rm -f "$tmp"
+        edit_error "could not prepare the new ${params}"
+        return 1
+    fi
+    # cat > keeps the owner and mode of the file the node reads.
+    if ! cat "$tmp" > "$params"; then
+        rm -f "$tmp"
+        edit_error "could not write ${params}"
+        return 1
+    fi
+    rm -f "$tmp"
+    if [[ "$(params_forward_value "$params")" != "$value" ]]; then
+        edit_error "${params} does not read back allow_private_forward_targets: ${value}"
+        return 1
+    fi
+    return 0
+}
+
+# set_docker_image IMAGE -- pull IMAGE and swap it into the launch file (Docker
+# installs only). Mirrors edit_docker_image. The same image is a no-op.
+set_docker_image() {
+    local new_image="$1" exec_start current_image
+    if ! validate_docker_image "$new_image"; then
+        edit_error "invalid docker image reference: ${new_image}"
+        return 1
+    fi
+    exec_start="$(read_launch_line "$TARGET_LAUNCH_FILE")"
+    if ! grep -qF "docker run" <<<"$exec_start"; then
+        edit_error "node is not a docker install"
+        return 1
+    fi
+    current_image="$(launch_docker_image "$exec_start")"
+    if [[ -z "$current_image" ]]; then
+        edit_error "could not determine current docker image"
+        return 1
+    fi
+    if [[ "$current_image" == "$new_image" ]]; then
+        return 0
+    fi
+    edit_step "Pulling image ${new_image}"
+    if ! docker pull "$new_image" >&2; then
+        edit_error "failed to pull image: ${new_image}"
+        return 1
+    fi
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    swap_docker_image "$current_image" "$new_image" "$TARGET_LAUNCH_FILE"
+}
+
+# The fields --set accepts.
+edit_field_known() {
+    case "$1" in
+        primary_listener|worker_listener|metrics|verbosity|docker_image) return 0 ;;
+        bootstrap_peers|state_export|allow_private_forward_targets) return 0 ;;
+    esac
+    return 1
+}
+
+# set_field FIELD VALUE -- validate and save one --set field (rc as for the
+# setters above).
+set_field() {
+    local field="$1" value="$2"
+    case "$field" in
+        primary_listener|worker_listener)
+            if ! validate_multiaddr "$value"; then
+                edit_error "invalid multiaddr: ${value}"
+                return 1
+            fi
+            edit_backup "$TARGET_LAUNCH_FILE" || return 1
+            edit_backup "$TARGET_SERVICE_FILE" || return 1
+            if [[ "$field" == "primary_listener" ]]; then
+                set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$value"
+            else
+                set_listener_var "WORKER_LISTENER_MULTIADDR" "$value"
+            fi
+            ;;
+        metrics)
+            set_metrics "$value" ;;
+        verbosity)
+            if [[ ! "$value" =~ ^-v{1,5}$ ]]; then
+                edit_error "verbosity must be -v .. -vvvvv"
+                return 1
+            fi
+            edit_backup "$TARGET_LAUNCH_FILE" || return 1
+            set_verbosity "$value" "$TARGET_LAUNCH_FILE"
+            ;;
+        docker_image)
+            set_docker_image "$value" ;;
+        bootstrap_peers)
+            set_bootstrap_peers "$value" ;;
+        state_export)
+            set_state_export "$value" ;;
+        allow_private_forward_targets)
+            set_private_forward_targets "$value" ;;
+        *)
+            edit_error "field not editable: ${field}"
+            return 1
+            ;;
+    esac
+}
+
+# =============================================================================
+# APPLY CHANGES
+# =============================================================================
+
+# Apply changes from the menu: reload systemd and optionally restart. The epoch
+# wait runs only when the operator chose to restart. Releases the update lock.
 apply_changes() {
     set +e  # Restart failure should not exit the script
     print_step "Applying changes..."
@@ -256,6 +1000,7 @@ apply_changes() {
 
     echo ""
     if confirm "Restart the node now to apply changes?"; then
+        edit_epoch_wait
         print_step "Restarting ${TARGET_SERVICE}..."
         systemctl restart "$TARGET_SERVICE" || true
         sleep 3
@@ -270,9 +1015,53 @@ apply_changes() {
         print_info "Changes saved. Restart the node when ready:"
         print_info "  sudo systemctl restart ${TARGET_SERVICE}"
     fi
+    edit_unlock
     echo ""
     read -r -p "  Press Enter to return to menu..."
     set -e
+}
+
+# menu_apply FN VALUE LABEL -- save one edit from the menu with a field setter:
+# take the update lock, run FN VALUE, then offer the restart (apply_changes).
+# A failed setter has its partial changes put back; an edit that changed
+# nothing is not offered a restart.
+menu_apply() {
+    local fn="$1" value="$2" label="$3" rc=0
+    menu_lock || return 0
+    edit_reset_backups
+    "$fn" "$value" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        edit_restore_backups || true
+        edit_unlock
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+    if ! edit_any_changed; then
+        edit_drop_backups
+        edit_unlock
+        print_info "${label} is already set that way; nothing changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+    edit_report_backups
+    print_ok "${label} saved"
+    apply_changes
+}
+
+# edit_restart -- the --set restart: reload systemd, wait for the epoch
+# boundary, restart, and report whether the service is active 3 seconds later.
+edit_restart() {
+    edit_step "Reloading systemd"
+    if ! systemctl daemon-reload >&2 2>&1; then
+        edit_warn "systemctl daemon-reload failed; restarting anyway"
+    fi
+    edit_epoch_wait
+    edit_step "Restarting ${TARGET_SERVICE}"
+    systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
+    sleep 3
+    systemctl is-active --quiet "$TARGET_SERVICE"
 }
 
 # =============================================================================
@@ -289,6 +1078,21 @@ detect_node() {
     TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
     resolve_launch_file
     print_ok "Detected node service: ${TARGET_SERVICE}"
+}
+
+# resolve_target -- TARGET_SERVICE, TARGET_SERVICE_FILE and TARGET_LAUNCH_FILE
+# for --set. Reports and returns 1 when no node is installed.
+resolve_target() {
+    if ! TARGET_SERVICE="$(tn_resolve_service)"; then
+        edit_error "no node installed"
+        return 1
+    fi
+    TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
+    if [[ ! -f "$TARGET_SERVICE_FILE" ]]; then
+        edit_error "node not installed: ${TARGET_SERVICE}"
+        return 1
+    fi
+    resolve_launch_file
 }
 
 # =============================================================================
@@ -312,10 +1116,7 @@ show_current_config() {
     # Detect if this is a Docker install
     if echo "$exec_start" | grep -qF "docker run"; then
         is_docker=true
-        docker_image=$(echo "$exec_start" | grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' | head -1 || true)
-        if [[ -z "$docker_image" ]]; then
-            docker_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1 || true)
-        fi
+        docker_image="$(launch_docker_image "$exec_start")"
     fi
 
     primary_multiaddr=$(read_env_var "PRIMARY_LISTENER_MULTIADDR" "$TARGET_SERVICE_FILE" || true)
@@ -329,7 +1130,7 @@ show_current_config() {
         worker_multiaddr=$(read_listener_from_launch "WORKER_LISTENER_MULTIADDR" || true)
     fi
 
-    metrics=$(read_flag "--metrics" "$exec_start")
+    metrics="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --metrics 2>/dev/null)" || metrics="off"
     bls_pass_set="(set)"
 
     # Service user/group
@@ -346,17 +1147,43 @@ show_current_config() {
     else                                                  verbosity="unknown"
     fi || true
 
-    # Detect RPC status
-    if has_flag "--http" "$exec_start"; then
-        local rpc_addr
-        rpc_addr=$(read_flag "--http.addr" "$exec_start")
-        if [[ -z "$rpc_addr" ]] || [[ "$rpc_addr" == "127.0.0.1" ]]; then
-            rpc_enabled="Enabled (private -- localhost only)"
+    # RPC status: tn_launch_flag_get returns 2 when no live node line has --http.
+    local rpc_addr rpc_rc=0
+    rpc_addr="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --http.addr 2>/dev/null)" || rpc_rc=$?
+    case "$rpc_rc" in
+        0|1)
+            if [[ -z "$rpc_addr" ]] || [[ "$rpc_addr" == "127.0.0.1" ]]; then
+                rpc_enabled="Enabled (private -- localhost only)"
+            else
+                rpc_enabled="Enabled (public -- ${rpc_addr})"
+            fi
+            ;;
+        2) rpc_enabled="Disabled" ;;
+        *) rpc_enabled="unknown" ;;
+    esac
+
+    # Bootstrap peers, state export and private forward targets.
+    local peers_val peers_txt keep_val export_txt params fwd_txt
+    if peers_val="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --bootstrap-peers 2>/dev/null)"; then
+        peers_txt="set: ${peers_val}"
+    else
+        peers_txt="none (the genesis bootstrap servers)"
+    fi
+    if tn_launch_flag_get "$TARGET_LAUNCH_FILE" --enable-state-export >/dev/null 2>&1; then
+        if keep_val="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --state-export-keep 2>/dev/null)"; then
+            export_txt="on, keep the last ${keep_val} epochs"
         else
-            rpc_enabled="Enabled (public -- ${rpc_addr})"
+            export_txt="on, keep every epoch"
         fi
     else
-        rpc_enabled="Disabled"
+        export_txt="off"
+    fi
+    params="$(detect_data_dir)/parameters.yaml"
+    if [[ -r "$params" ]]; then
+        fwd_txt="$(params_forward_value "$params")"
+        fwd_txt="${fwd_txt:-false (default)}"
+    else
+        fwd_txt="unknown (no ${params})"
     fi
 
     # Service status
@@ -382,6 +1209,9 @@ show_current_config() {
     printf "  %-28s %s\n" "Log verbosity:"         "$verbosity"
     printf "  %-28s %s\n" "RPC:"                   "$rpc_enabled"
     printf "  %-28s %s\n" "BLS passphrase:"        "$bls_pass_set"
+    printf "  %-28s %s\n" "Bootstrap peers:"       "$peers_txt"
+    printf "  %-28s %s\n" "State export:"          "$export_txt"
+    printf "  %-28s %s\n" "Private forward targets:" "$fwd_txt"
     echo ""
     set -e  # Restore exit-on-error
 }
@@ -442,6 +1272,7 @@ edit_listener_addresses() {
         esac
     done
 
+    menu_lock || { set -e; return; }
     backup_edit_targets || { set -e; return; }
 
     # Write wherever the service actually reads (launch file for docker,
@@ -460,31 +1291,16 @@ edit_listener_addresses() {
 edit_metrics() {
     print_header "Edit Metrics Address"
 
-    local exec_start current_metrics
-    exec_start=$(read_launch_line "$TARGET_LAUNCH_FILE")
-    current_metrics=$(read_flag "--metrics" "$exec_start")
+    local current_metrics input new_metrics
+    current_metrics="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --metrics 2>/dev/null || true)"
 
-    print_info "Current metrics address: ${current_metrics}"
-    print_info "Format: IP:PORT (e.g. 127.0.0.1:9000)"
+    print_info "Current metrics address: ${current_metrics:-none (metrics off)}"
+    print_info "Format: IP:PORT (e.g. 127.0.0.1:${DEFAULT_METRICS_PORT}), or off to remove the flag"
     echo ""
 
-    local new_metrics
-    read -r -p "  New metrics address [${current_metrics}]: " input
-    new_metrics="${input:-$current_metrics}"
-
-    if ! validate_ip_port "$new_metrics"; then
-        print_error "Invalid metrics address: ${new_metrics}"
-        print_info "Expected IPv4:PORT (e.g. 127.0.0.1:9000)."
-        echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
-    fi
-
-    backup_edit_targets || return
-
-    set_flag_value "--metrics" "$new_metrics" "$TARGET_LAUNCH_FILE"
-    print_ok "Metrics address updated to: ${new_metrics}"
-    apply_changes
+    read -r -p "  New metrics address [${current_metrics:-off}]: " input || true
+    new_metrics="${input:-${current_metrics:-off}}"
+    menu_apply set_metrics "$new_metrics" "Metrics address"
 }
 
 edit_verbosity() {
@@ -513,6 +1329,7 @@ edit_verbosity() {
         esac
     done
 
+    menu_lock || return 0
     backup_edit_targets || return
 
     set_verbosity "$new_verbosity" "$TARGET_LAUNCH_FILE"
@@ -573,6 +1390,7 @@ edit_rpc() {
         esac
     done
 
+    menu_lock || return 0
     local backup
     backup=$(backup_service_file "$TARGET_SERVICE_FILE") || return
 
@@ -634,11 +1452,21 @@ edit_bls_passphrase() {
         print_warn "Passphrases do not match -- try again."
     done
 
+    # Nothing is stopped or written before the update lock is held.
+    if ! menu_lock; then
+        new_pass=""
+        new_pass_confirm=""
+        return 0
+    fi
+
     # Stop the service before rewriting the passphrase file so we never race
     # against a node that may have the old file mapped in its credential dir.
+    # A committee node waits for the epoch boundary first: this stop is the
+    # start of its restart.
     local was_active="no"
     if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
         was_active="yes"
+        edit_epoch_wait
         print_step "Stopping ${TARGET_SERVICE} before passphrase rewrite..."
         systemctl stop "$TARGET_SERVICE"
         local stop_attempts=0
@@ -701,6 +1529,7 @@ edit_bls_passphrase() {
             print_error "Service failed to restart. Check logs:"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
         fi
+        edit_unlock
         echo ""
         read -r -p "  Press Enter to return to menu..."
     else
@@ -755,6 +1584,7 @@ edit_p2p_ports() {
         return
     fi
 
+    menu_lock || return 0
     backup_edit_targets || return
 
     # Rebuild multiaddrs with new ports keeping same IP/protocol
@@ -790,8 +1620,7 @@ edit_docker_image() {
     fi
 
     local current_image
-    current_image=$(echo "$exec_start" | grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' | head -1)
-    [[ -z "$current_image" ]] && current_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1)
+    current_image="$(launch_docker_image "$exec_start")"
 
     print_info "Current image: ${current_image:-unknown}"
     echo ""
@@ -829,24 +1658,151 @@ edit_docker_image() {
     fi
     print_ok "Image pulled successfully"
 
+    menu_lock || return 0
     backup_edit_targets || return
 
     # Replace old image with new image in the launch file (wrapper or unit)
-    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_LAUNCH_FILE"
+    swap_docker_image "$current_image" "$new_image" "$TARGET_LAUNCH_FILE"
     print_ok "Launch config updated to use: ${new_image}"
     apply_changes
+}
+
+edit_bootstrap_peers() {
+    print_header "Edit Bootstrap Peers"
+
+    local peers current input
+    peers="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
+    if current="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --bootstrap-peers 2>/dev/null)"; then
+        print_info "Current: --bootstrap-peers ${current}"
+    else
+        print_info "Current: none (the node dials the bootstrap servers in its genesis)"
+    fi
+    echo ""
+    print_info "A bootstrap peers file is a YAML or JSON map of peers keyed by BLS public"
+    print_info "key, at most 64 KiB. The node dials them at start instead of the genesis"
+    print_info "bootstrap servers. The node binary checks the file, then it is installed"
+    print_info "as ${peers}. Needs v0.15.0-adiri or later."
+    echo ""
+
+    read -r -p "  Absolute path to the peers file, or none to remove (Enter to cancel): " input || true
+    if [[ -z "$input" ]]; then
+        print_info "Unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+    menu_apply set_bootstrap_peers "$input" "Bootstrap peers"
+}
+
+edit_state_export() {
+    print_header "Edit State Export"
+
+    local current="off" keep choice value input
+    if tn_launch_flag_get "$TARGET_LAUNCH_FILE" --enable-state-export >/dev/null 2>&1; then
+        current="on, keep every epoch"
+        if keep="$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --state-export-keep 2>/dev/null)"; then
+            current="on, keep the last ${keep} epochs"
+        fi
+    fi
+    print_info "Current: ${current}"
+    echo ""
+    print_info "With state export on, the node writes the execution state at each epoch"
+    print_info "boundary to <data dir>/consensus-db/state_exports/epoch-N/."
+    echo ""
+    echo "  1) Off"
+    echo "  2) On, keep every epoch's export     (v0.13.0-adiri or later)"
+    echo "  3) On, keep only the last N epochs   (v0.15.0-adiri or later)"
+    echo ""
+
+    while true; do
+        read -r -p "  Enter choice [1/2/3]: " choice || true
+        case "$choice" in
+            1) value="off"; break ;;
+            2) value="unlimited"; break ;;
+            3)
+                read -r -p "  Number of epochs to keep [1-999999]: " input || true
+                if [[ ! "$input" =~ ^[1-9][0-9]{0,5}$ ]]; then
+                    print_error "Enter a whole number from 1 to 999999."
+                    echo ""
+                    read -r -p "  Press Enter to return to menu..." || true
+                    return 0
+                fi
+                value="$input"
+                break
+                ;;
+            "") print_info "Unchanged."; return 0 ;;
+            *) print_warn "Please enter 1, 2, or 3." ;;
+        esac
+    done
+    menu_apply set_state_export "$value" "State export"
+}
+
+edit_private_forward_targets() {
+    print_header "Edit Private Forward Targets"
+
+    local params current choice value
+    params="$(detect_data_dir)/parameters.yaml"
+    current="$(params_forward_value "$params")"
+    print_info "Current: allow_private_forward_targets: ${current:-false (default)}"
+    echo ""
+    print_info "A node outside the committee forwards the transactions it receives to the"
+    print_info "RPC endpoint a committee member advertises. With false (the default) it"
+    print_info "refuses endpoints on loopback, private and link-local addresses. Set true"
+    print_info "only on a network where you run every committee node; it is refused on"
+    print_info "testnet and mainnet. The setting lives in ${params}."
+    echo ""
+    echo "  1) false  (default)"
+    echo "  2) true   (private networks only)"
+    echo ""
+
+    while true; do
+        read -r -p "  Enter choice [1/2]: " choice || true
+        case "$choice" in
+            1) value="false"; break ;;
+            2) value="true"; break ;;
+            "") print_info "Unchanged."; return 0 ;;
+            *) print_warn "Please enter 1 or 2." ;;
+        esac
+    done
+    menu_apply set_private_forward_targets "$value" "allow_private_forward_targets"
+}
+
+# Chain-config directory under the source checkout for a .node-meta NETWORK
+# value; nothing for an unknown value.
+chain_config_subdir() {
+    case "$1" in
+        testnet) printf 'testnet' ;;
+        mainnet) printf 'mainnet' ;;
+        devnet)  printf 'devnet' ;;
+    esac
 }
 
 refresh_chain_configs() {
     print_header "Refresh Chain Configs"
 
-    local source_dir="/opt/telcoin-source"
-    local node_data_dir
+    local source_dir="$TN_SOURCE_DIR"
+    local node_data_dir network subdir chain_config_src node_genesis node_id src_id
     node_data_dir=$(detect_data_dir)
 
-    print_info "This pulls the latest chain-configs from the repository and"
+    # The network comes from .node-meta. Copying another network's files would
+    # move the node to that chain, so an unknown network is refused.
+    network="$(meta_get NETWORK 2>/dev/null || true)"
+    subdir="$(chain_config_subdir "$network")"
+    if [[ -z "$subdir" ]]; then
+        if [[ -z "$network" ]]; then
+            print_error "Cannot tell which network this node runs: .node-meta has no NETWORK. Chain configs unchanged."
+        else
+            print_error "Cannot refresh chain configs for NETWORK=${network} (.node-meta); expected testnet, mainnet or devnet."
+        fi
+        print_info "Set NETWORK=testnet (or mainnet) in $(node_meta_path 2>/dev/null || echo .node-meta) and try again."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+
+    print_info "This pulls the latest ${network} chain configs from the repository and"
     print_info "copies them to your node data directory."
-    print_info "Use this when the testnet restarts with new genesis/committee/parameters."
+    print_info "Use this when the network restarts with new genesis/committee/parameters."
     echo ""
     print_warn "The node will be restarted to apply the new configs."
     echo ""
@@ -858,10 +1814,18 @@ refresh_chain_configs() {
         return
     fi
 
+    # update-node.sh builds from the same checkout, so the pull waits for it too.
+    menu_lock || return 0
+
     # Pull latest from repo
     if [[ -d "${source_dir}/.git" ]]; then
         print_step "Pulling latest chain configs..."
-        git -C "$source_dir" pull
+        if ! git -C "$source_dir" pull; then
+            print_error "git pull failed in ${source_dir}. Chain configs unchanged."
+            echo ""
+            read -r -p "  Press Enter to return to menu..." || true
+            return 0
+        fi
         print_ok "Repository updated"
         # Warn-only: chain configs live in the superproject; keep submodules in
         # step anyway so a later source build starts from a consistent tree.
@@ -876,7 +1840,7 @@ refresh_chain_configs() {
     fi
 
     # Copy updated configs
-    local chain_config_src="${source_dir}/chain-configs/testnet"
+    chain_config_src="${source_dir}/chain-configs/${subdir}"
     if [[ ! -d "$chain_config_src" ]]; then
         print_warn "Chain config directory not found at ${chain_config_src}"
         echo ""
@@ -897,6 +1861,19 @@ refresh_chain_configs() {
         read -r -p "  Press Enter to return to menu..."
         return
     fi
+
+    # Same chain or nothing: the node's current genesis and the new one must
+    # both declare a chain id, and the same one.
+    node_genesis="${node_data_dir}/genesis/genesis.yaml"
+    node_id="$(tn_genesis_chain_id "$node_genesis" 2>/dev/null || true)"
+    src_id="$(tn_genesis_chain_id "${chain_config_src}/genesis.yaml" 2>/dev/null || true)"
+    if [[ -z "$node_id" || -z "$src_id" || "$node_id" != "$src_id" ]]; then
+        print_error "Not refreshing: the node's genesis (${node_genesis}) is chain ${node_id:-unknown} and ${chain_config_src}/genesis.yaml is chain ${src_id:-unknown}. Both must be known and equal. Chain configs unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+    print_ok "Chain id ${src_id} matches the node's genesis"
 
     print_step "Copying chain configs to ${node_data_dir}..."
     mkdir -p "${node_data_dir}/genesis"
@@ -934,8 +1911,10 @@ restart_node() {
     echo ""
 
     if confirm "Restart ${TARGET_SERVICE} now?"; then
+        menu_lock || return 0
+        edit_epoch_wait
         print_step "Restarting ${TARGET_SERVICE}..."
-        systemctl restart "$TARGET_SERVICE"
+        systemctl restart "$TARGET_SERVICE" || true
         sleep 3
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
@@ -943,6 +1922,7 @@ restart_node() {
             print_error "Node failed to restart. Check logs:"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
         fi
+        edit_unlock
     else
         print_info "Cancelled."
     fi
@@ -957,197 +1937,125 @@ restart_node() {
 
 main_menu() {
     while true; do
+        # Every edit releases the lock when it is done; this covers any early return.
+        edit_unlock
         show_current_config
 
         echo "  What would you like to change?"
         echo ""
-        echo "  1) Listener addresses   (PRIMARY/WORKER_LISTENER_MULTIADDR)"
+        echo "  1) Listener addresses      (PRIMARY/WORKER_LISTENER_MULTIADDR)"
         echo "  2) Metrics address"
         echo "  3) Log verbosity"
-        echo "  4) RPC access           (private / public / disabled)"
+        echo "  4) RPC access              (private / public / disabled)"
         echo "  5) BLS passphrase"
-        echo "  6) P2P ports            (49590/49594)"
-        echo "  7) Docker image         (Docker installs only)"
-        echo "  8) Refresh chain configs (pull latest genesis/committee/parameters)"
-        echo "  9) Restart node"
-        echo " 10) Exit"
+        echo "  6) P2P ports               (49590/49594)"
+        echo "  7) Docker image            (Docker installs only)"
+        echo "  8) Bootstrap peers         (a peers file instead of the genesis list)"
+        echo "  9) State export            (off / every epoch / the last N epochs)"
+        echo " 10) Private forward targets (private networks only)"
+        echo " 11) Refresh chain configs   (pull latest genesis/committee/parameters)"
+        echo " 12) Restart node"
+        echo " 13) Exit"
         echo ""
 
         local choice
-        read -r -p "  Enter choice [1-10]: " choice
+        read -r -p "  Enter choice [1-13]: " choice
         case "$choice" in
-            1)  edit_listener_addresses ;;
-            2)  edit_metrics            ;;
-            3)  edit_verbosity          ;;
-            4)  edit_rpc                ;;
-            5)  edit_bls_passphrase     ;;
-            6)  edit_p2p_ports          ;;
-            7)  edit_docker_image       ;;
-            8)  refresh_chain_configs   ;;
-            9)  restart_node            ;;
-            10) echo ""; print_info "Exiting."; exit 0 ;;
-            *) print_warn "Please enter 1-10." ;;
+            1)  edit_listener_addresses      ;;
+            2)  edit_metrics                 ;;
+            3)  edit_verbosity               ;;
+            4)  edit_rpc                     ;;
+            5)  edit_bls_passphrase          ;;
+            6)  edit_p2p_ports               ;;
+            7)  edit_docker_image            ;;
+            8)  edit_bootstrap_peers         ;;
+            9)  edit_state_export            ;;
+            10) edit_private_forward_targets ;;
+            11) refresh_chain_configs        ;;
+            12) restart_node                 ;;
+            13) echo ""; print_info "Exiting."; exit 0 ;;
+            *) print_warn "Please enter 1-13." ;;
         esac
     done
 }
 
 # =============================================================================
-# JSON / NON-INTERACTIVE MODE
+# --set: ONE EDIT WITHOUT THE MENU
 #
-# Reached only via `--json` (the interactive default is completely unaffected).
 # Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper,
-# which calls:  edit-config.sh --json --<type> --set <field>=<value>
+# which calls:  edit-config.sh --json --set <field>=<value>
+# Without --json the same steps print human-readable lines.
 #
-# fd handling mirrors update-node.sh: json_setup_fds dups the real stdout to
-# fd 3 and points stdout at stderr, so every print_* line is harmless noise on
-# stderr while fd 3 carries newline-delimited JSON the caller streams + parses:
-#   {"event":"step|error","msg":"..."}
-#   {"event":"done","ok":true|false,"field":"...","value":"...","msg":"..."}
+# --json events on stdout:
+#   {"event":"step|log|warn|error","msg":"..."}
+#   {"event":"done","ok":true|false[,"rolled_back":true|false],"field":"..."[,"value":"..."],"msg":"..."}
 #
-# Editable field allowlist (exactly what the interactive menu edits):
-#   primary_listener worker_listener metrics verbosity docker_image
-# Each value is re-validated here with the same validators the menu uses.
+# Fields (the header lists their values): primary_listener worker_listener
+# metrics verbosity docker_image bootstrap_peers state_export
+# allow_private_forward_targets. Each value is validated here with the same
+# validators the menu uses.
 # =============================================================================
 
-JSON_SET_PAIR=""
-
-json_setup_fds() {
-    exec 3>&1   # fd3 = original stdout: JSON is written here
-    exec 1>&2   # stdout now aliases stderr: print_*/build output is benign noise
-}
-
-json_escape() {
-    local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\n'/ }"
-    s="${s//$'\r'/ }"
-    s="${s//$'\t'/ }"
-    printf '%s' "$s"
-}
-
-json_emit() { printf '%s\n' "$1" >&3; }
-
-json_event() {
-    # json_event <event> <msg>
-    json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
-}
-
-# Set one listener multiaddr in place -- same wrapper-aware writer the menu
-# uses (docker launch file, or unit Environment= + wrapper export).
-json_set_listener() {
-    local varname="$1" value="$2"
-    set_listener_var "$varname" "$value"
-}
-
-# Pull + swap the docker image (docker installs only). Mirrors edit_docker_image.
-json_set_docker_image() {
-    local new_image="$1"
-    validate_docker_image "$new_image" || { json_event error "invalid docker image reference: ${new_image}"; return 1; }
-    local exec_start
-    exec_start=$(read_launch_line "$TARGET_LAUNCH_FILE")
-    echo "$exec_start" | grep -qF "docker run" || { json_event error "node is not a docker install"; return 1; }
-    local current_image
-    current_image=$(echo "$exec_start" | grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' | head -1)
-    [[ -z "$current_image" ]] && current_image=$(echo "$exec_start" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[a-z0-9]/) print $i}' | tail -1)
-    [[ -n "$current_image" ]] || { json_event error "could not determine current docker image"; return 1; }
-    json_event step "Pulling image ${new_image}"
-    docker pull "$new_image" >&2 || { json_event error "failed to pull image: ${new_image}"; return 1; }
-    perl -i -pe "s|\Q${current_image}\E|${new_image}|g" "$TARGET_LAUNCH_FILE"
-}
-
-# Validate + apply a single field edit to the (already backed-up) unit file.
-json_set_field() {
-    local field="$1" value="$2"
-    case "$field" in
-        primary_listener)
-            validate_multiaddr "$value" || { json_event error "invalid multiaddr: ${value}"; return 1; }
-            json_set_listener "PRIMARY_LISTENER_MULTIADDR" "$value" ;;
-        worker_listener)
-            validate_multiaddr "$value" || { json_event error "invalid multiaddr: ${value}"; return 1; }
-            json_set_listener "WORKER_LISTENER_MULTIADDR" "$value" ;;
-        metrics)
-            validate_ip_port "$value" || { json_event error "invalid metrics address (want IPv4:PORT): ${value}"; return 1; }
-            set_flag_value "--metrics" "$value" "$TARGET_LAUNCH_FILE" ;;
-        verbosity)
-            [[ "$value" =~ ^-v{1,5}$ ]] || { json_event error "verbosity must be -v .. -vvvvv"; return 1; }
-            set_verbosity "$value" "$TARGET_LAUNCH_FILE" ;;
-        docker_image)
-            json_set_docker_image "$value" || return 1 ;;
-        *)
-            json_event error "field not editable: ${field}"; return 1 ;;
-    esac
-}
-
-# Non-interactive apply: daemon-reload + restart + health verify (is-active).
-json_apply_changes() {
-    json_event step "Reloading systemd"
-    systemctl daemon-reload
-    json_event step "Restarting ${TARGET_SERVICE}"
-    systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
-    sleep 3
-    systemctl is-active --quiet "$TARGET_SERVICE"
-}
-
-run_json_set() {
-    json_setup_fds
-    check_root
-
-    # Operators run one node per VM; resolve the single installed unit. No role
-    # is involved: legacy Node Manager UI helpers still pass --observer or
-    # --validator, and main() drops that flag because the role is decided on-chain.
-    TARGET_SERVICE="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
-    TARGET_SERVICE_FILE="$(service_file_for "$TARGET_SERVICE")"
-    [[ -f "$TARGET_SERVICE_FILE" ]] || { json_event error "node not installed: ${TARGET_SERVICE}"; return 1; }
-    resolve_launch_file
-    [[ -n "$JSON_SET_PAIR" && "$JSON_SET_PAIR" == *=* ]] || { json_event error "missing --set field=value"; return 1; }
-
-    local field="${JSON_SET_PAIR%%=*}"
-    local value="${JSON_SET_PAIR#*=}"
-
-    # Back up BOTH files an edit can touch before any in-place write (own the
-    # paths here so no print_* noise leaks into the captured value).
-    local ts backup launch_backup=""
-    ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${TARGET_SERVICE_FILE}.bak.${ts}"
-    cp -p "$TARGET_SERVICE_FILE" "$backup" || { json_event error "could not back up unit file"; return 1; }
-    if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
-        launch_backup="${TARGET_LAUNCH_FILE}.bak.${ts}"
-        cp -p "$TARGET_LAUNCH_FILE" "$launch_backup" || { json_event error "could not back up launch file"; return 1; }
-    fi
-
-    # Restore whatever was backed up above (unit always, wrapper when distinct).
-    # if/fi + guarded cp: this runs under errexit, and a non-zero here would
-    # kill the script before the terminal done-event reaches the UI.
-    _json_restore_backups() {
-        restore_service_file "$TARGET_SERVICE_FILE" "$backup"
-        if [[ -n "$launch_backup" ]]; then
-            cp -p "$launch_backup" "$TARGET_LAUNCH_FILE" || \
-                json_event error "could not restore ${TARGET_LAUNCH_FILE} from ${launch_backup}"
-        fi
-    }
-
-    json_event step "Setting ${field}=${value}"
-    if ! json_set_field "$field" "$value"; then
-        _json_restore_backups
-        json_emit "{\"event\":\"done\",\"ok\":false,\"field\":\"$(json_escape "$field")\",\"msg\":\"edit rejected -- launch config unchanged\"}"
+# run_set -- validate, take the update lock, save the edit, wait for the epoch
+# boundary when the node is in the committee, restart, and check that the
+# service stays up. A failed restart puts every changed file back and restarts
+# once more, without waiting. An edit that changes nothing ends there, with no
+# restart.
+run_set() {
+    local field value rc err
+    edit_require_root
+    if [[ "$EDIT_SET_PAIR" != *=* || -z "${EDIT_SET_PAIR%%=*}" ]]; then
+        edit_error "--set needs field=value, for example --set state_export=unlimited"
         return 1
     fi
+    field="${EDIT_SET_PAIR%%=*}"
+    value="${EDIT_SET_PAIR#*=}"
+    EDIT_SET_FIELD="$field"
+    if ! edit_field_known "$field"; then
+        edit_error "field not editable: ${field}"
+        return 1
+    fi
+    if [[ -z "$value" ]]; then
+        edit_error "--set ${field}= has no value"
+        return 1
+    fi
+    resolve_target || return 1
+    edit_lock || return 1
+    edit_reset_backups
 
-    if json_apply_changes; then
-        json_emit "{\"event\":\"done\",\"ok\":true,\"field\":\"$(json_escape "$field")\",\"value\":\"$(json_escape "$value")\",\"msg\":\"applied and ${TARGET_SERVICE} healthy\"}"
+    edit_step "Setting ${field}=${value}"
+    rc=0
+    set_field "$field" "$value" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        err="${EDIT_LAST_ERROR:-edit rejected}"
+        if edit_restore_backups; then
+            edit_done false "$field" "" "${err}; nothing was changed"
+        else
+            edit_done false "$field" "" "${err}; some files could not be restored, see the errors above"
+        fi
+        return 1
+    fi
+    if ! edit_any_changed; then
+        edit_drop_backups
+        edit_done true "$field" "$value" "${field} is already ${value}; nothing changed and ${TARGET_SERVICE} was not restarted"
+        return 0
+    fi
+    edit_report_backups
+
+    if edit_restart; then
+        edit_done true "$field" "$value" "applied and ${TARGET_SERVICE} healthy"
         return 0
     fi
 
-    json_event step "Service did not come back healthy -- rolling back"
-    _json_restore_backups
-    systemctl daemon-reload
+    # No epoch wait here: the node is already down or failing.
+    edit_step "Service did not come back healthy -- rolling back"
+    edit_restore_backups || true
     systemctl restart "$TARGET_SERVICE" >&2 2>&1 || true
     sleep 3
     if systemctl is-active --quiet "$TARGET_SERVICE"; then
-        json_emit "{\"event\":\"done\",\"ok\":false,\"rolled_back\":true,\"field\":\"$(json_escape "$field")\",\"msg\":\"restart failed; rolled back to previous unit\"}"
+        edit_done false "$field" "" "restart failed; rolled back to the previous configuration" true
     else
-        json_emit "{\"event\":\"done\",\"ok\":false,\"rolled_back\":false,\"field\":\"$(json_escape "$field")\",\"msg\":\"restart and rollback failed; inspect journalctl -u ${TARGET_SERVICE}\"}"
+        edit_done false "$field" "" "restart and rollback failed; inspect journalctl -u ${TARGET_SERVICE}" false
     fi
     return 1
 }
@@ -1157,25 +2065,62 @@ run_json_set() {
 # =============================================================================
 
 main() {
-    # Parse flags first so --json short-circuits before any interactive output.
-    local json_mode=false
+    local arg
+    # --json is found before anything prints: from here on stdout carries JSON
+    # events only. The trap releases the update lock on every exit and closes a
+    # --json run with a done event when nothing else did.
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_MODE=true
+        fi
+    done
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_setup_fds
+    fi
+    trap edit_on_exit EXIT
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --json)      json_mode=true; shift ;;
+            --json)      JSON_MODE=true; shift ;;
             # Legacy Node Manager UI helpers pass a role flag on every call. The
             # role is decided on-chain, so the flag is accepted and ignored.
-            --observer|--validator) shift ;;
-            --set)       JSON_SET_PAIR="${2:-}"; shift 2 ;;
-            *)           shift ;;
+            --observer|--validator) LEGACY_ROLE_FLAG="$1"; shift ;;
+            --set)
+                # A field=value pair starts with the field name, so a word
+                # starting with "-" is the next flag: --set has no value.
+                if [[ $# -lt 2 || "$2" == -* ]]; then
+                    edit_error "--set needs field=value, for example --set state_export=unlimited"
+                    exit 1
+                fi
+                EDIT_SET_GIVEN=true
+                EDIT_SET_PAIR="$2"
+                shift 2
+                ;;
+            --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
+            -h|--help)
+                # The header block only: everything up to its closing rule.
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
+                if [[ "$JSON_MODE" == "true" ]]; then
+                    json_emit '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
+                fi
+                exit 0
+                ;;
+            *) print_warn "Unknown argument: $1" >&2; shift ;;
         esac
     done
 
-    if [[ "$json_mode" == "true" ]]; then
-        run_json_set
+    # The role flags are accepted for old callers and ignored. One stderr line
+    # in human mode; nothing in --json mode, whose stdout stays pure JSON.
+    if [[ -n "$LEGACY_ROLE_FLAG" && "$JSON_MODE" != "true" ]]; then
+        print_info "Ignoring ${LEGACY_ROLE_FLAG}: the node's role is decided on-chain, not by a flag." >&2
+    fi
+
+    if [[ "$JSON_MODE" == "true" || "$EDIT_SET_GIVEN" == "true" ]]; then
+        run_set
         exit $?
     fi
 
-    clear
+    clear 2>/dev/null || true
     print_header "Telcoin Network Node Configuration Editor  v${SCRIPT_VERSION}"
     check_root
     detect_node
