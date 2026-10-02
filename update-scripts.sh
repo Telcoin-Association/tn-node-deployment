@@ -141,10 +141,39 @@ get_remote_version() {
     local remote_path="$1"
     local var="$2"
     local url="${GITHUB_RAW}/${remote_path}"
-    curl --proto '=https' --tlsv1.2 -sf --max-time 10 "$url" 2>/dev/null | \
-        grep -E "(readonly[[:space:]]+)?${var}[[:space:]]*=" | \
-        grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | \
-        head -1 || echo "unavailable"
+    local body ver
+    # Fetch the whole file and check curl's own status before parsing. Piping
+    # curl straight into grep let a download that broke off after the version
+    # line print both that version and "unavailable".
+    if ! body="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 "$url" 2>/dev/null)"; then
+        echo "unavailable"
+        return 0
+    fi
+    ver="$(printf '%s\n' "$body" | grep -E "(readonly[[:space:]]+)?${var}[[:space:]]*=" \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    if [[ -n "$ver" ]]; then
+        echo "$ver"
+    else
+        echo "unavailable"
+    fi
+}
+
+# fetch_published_sha URL -- print the SHA-256 that URL.sha256 publishes for URL.
+# rc 0: printed a 64-hex-digit hash. rc 1: no usable sidecar (HTTP error, or the
+# first field is not a 64-hex-digit hash). rc 2: the sidecar could not be fetched
+# (network). tools/gen-checksums.sh writes a sidecar for every tracked file and CI
+# keeps them fresh, so rc 1 means the file cannot be verified.
+fetch_published_sha() {
+    local body sha rc=0
+    body="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 "${1}.sha256" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 22 ]]; then
+        return 1
+    elif [[ $rc -ne 0 ]]; then
+        return 2
+    fi
+    sha="$(printf '%s\n' "$body" | awk 'NR == 1 {print $1}')"
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$sha"
 }
 
 version_gt() {
@@ -166,7 +195,9 @@ version_gt() {
 # place but the new logic only takes effect on the NEXT run, so newly-tracked
 # files are silently skipped ("ran it once, some updated, others didn't"). With
 # this, a single invocation always converges. TN_UPDATER_RELAUNCHED guards
-# against re-exec loops; failures here are non-fatal (we just continue).
+# against re-exec loops; failures here are non-fatal (we just continue). The new
+# copy must match its published sidecar before it replaces this one: after the
+# relaunch its own row reads "Up to date", so this is the only check it gets.
 self_bootstrap() {
     [[ "${TN_UPDATER_RELAUNCHED:-}" == "1" ]] && return 0
     local local_ver remote_ver
@@ -177,11 +208,22 @@ self_bootstrap() {
 
     print_info "Updating the updater itself (${local_ver} -> ${remote_ver}) and relaunching..."
     local dest="${SCRIPT_DIR}/update-scripts.sh"
+    local want sha_rc=0
     if curl --proto '=https' --tlsv1.2 -sf --max-time 30 "${GITHUB_RAW}/update-scripts.sh" -o "${dest}.tmp" \
         && [[ -s "${dest}.tmp" ]] && bash -n "${dest}.tmp" 2>/dev/null; then
-        mv "${dest}.tmp" "$dest"
-        chmod +x "$dest" 2>/dev/null || true
-        TN_UPDATER_RELAUNCHED=1 exec bash "$dest" "$@"
+        want="$(fetch_published_sha "${GITHUB_RAW}/update-scripts.sh")" || sha_rc=$?
+        if [[ $sha_rc -eq 0 && "$want" == "$(_sha256 "${dest}.tmp")" ]]; then
+            mv "${dest}.tmp" "$dest"
+            chmod +x "$dest" 2>/dev/null || true
+            TN_UPDATER_RELAUNCHED=1 exec bash "$dest" "$@"
+        fi
+        rm -f "${dest}.tmp"
+        if [[ $sha_rc -eq 0 ]]; then
+            print_warn "The new updater does not match its published checksum -- not installed; continuing with the current version."
+        else
+            print_warn "The new updater could not be verified (no checksum available) -- not installed; continuing with the current version."
+        fi
+        return 0
     fi
     rm -f "${dest}.tmp"
     print_warn "Could not self-update the updater -- continuing with the current version."
@@ -326,12 +368,19 @@ download_updates() {
 
     local success=0
     local failed=0
+    # Failures by kind, for the summary: could not be downloaded (network) versus
+    # downloaded but not verified (no checksum, checksum mismatch, syntax error).
+    local net_failed=0 unverified=0
     # Track the UI bundle separately so the UI redeploy is gated on the UI files
     # themselves succeeding -- not on an unrelated script's download failing.
     local ui_success=0 ui_total=0
     for entry in "${FILES_TO_UPDATE[@]}"; do
         [[ "${entry%%:*}" == ui/* ]] && (( ++ui_total )) || true
     done
+    # lib/common.sh and lib/fallback.sh only work as a matching pair. Each one that
+    # passes its checks is held as a .tmp file; after the loop both are installed
+    # together, or neither is.
+    local -a pair_held=()
 
     for entry in "${FILES_TO_UPDATE[@]}"; do
         local local_path remote_path
@@ -348,7 +397,7 @@ download_updates() {
         if ! curl --proto '=https' --tlsv1.2 -sf --max-time 30 "$url" -o "${dest}.tmp"; then
             rm -f "${dest}.tmp"
             echo -e "${RED}FAILED${RESET}  (download error)"
-            (( ++failed ))
+            (( ++failed )); (( ++net_failed ))
             continue
         fi
 
@@ -356,51 +405,80 @@ download_updates() {
         if [[ ! -s "${dest}.tmp" ]]; then
             rm -f "${dest}.tmp"
             echo -e "${RED}FAILED${RESET}  (empty download)"
-            (( ++failed ))
+            (( ++failed )); (( ++net_failed ))
             continue
         fi
 
-        # Integrity check 2: SHA-256 verification against a published sidecar.
-        # tools/gen-checksums.sh writes a <file>.sha256 next to every tracked file
-        # and CI enforces freshness, so this normally runs for every file. It stays
-        # opportunistic (skipped when no sidecar is returned) so an older mirror or a
-        # not-yet-published file degrades gracefully to the parse check below.
+        # Integrity check 2: SHA-256 against the published sidecar. Every tracked
+        # file has one (tools/gen-checksums.sh writes them and CI keeps them fresh),
+        # so a file whose sidecar is missing or malformed cannot be verified and is
+        # not installed: the check fails closed.
         # NOTE: trust currently rests on TLS to a mutable branch ref; publish signed tags / pinned commits before mainnet.
-        local sha_url="${url}.sha256"
-        local remote_sha
-        remote_sha=$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 "$sha_url" 2>/dev/null | awk '{print $1}' || true)
-        if [[ -n "$remote_sha" ]]; then
-            local actual_sha
-            actual_sha=$(_sha256 "${dest}.tmp")
-            if [[ "$remote_sha" != "$actual_sha" ]]; then
-                rm -f "${dest}.tmp"
-                echo -e "${RED}FAILED${RESET}  (sha256 mismatch)"
-                (( ++failed ))
-                continue
-            fi
+        local remote_sha sha_rc=0
+        remote_sha="$(fetch_published_sha "$url")" || sha_rc=$?
+        if [[ $sha_rc -eq 2 ]]; then
+            rm -f "${dest}.tmp"
+            echo -e "${RED}FAILED${RESET}  (checksum download error)"
+            (( ++failed )); (( ++net_failed ))
+            continue
+        fi
+        if [[ $sha_rc -ne 0 ]]; then
+            rm -f "${dest}.tmp"
+            echo -e "${RED}FAILED${RESET}  (no checksum published -- not installed)"
+            (( ++failed )); (( ++unverified ))
+            continue
+        fi
+        if [[ "$remote_sha" != "$(_sha256 "${dest}.tmp")" ]]; then
+            rm -f "${dest}.tmp"
+            echo -e "${RED}FAILED${RESET}  (sha256 mismatch)"
+            (( ++failed )); (( ++unverified ))
+            continue
         fi
 
         # Integrity check 3: shell scripts must parse cleanly.
-        # Catches truncated downloads even when no sha256 is published.
         if [[ "$local_path" == *.sh ]]; then
             if ! bash -n "${dest}.tmp" 2>/dev/null; then
                 rm -f "${dest}.tmp"
                 echo -e "${RED}FAILED${RESET}  (syntax check)"
-                (( ++failed ))
+                (( ++failed )); (( ++unverified ))
                 continue
             fi
         fi
 
+        case "$local_path" in
+            lib/common.sh|lib/fallback.sh)
+                pair_held+=("$local_path")
+                echo -e "${GREEN}verified${RESET} (waiting for its pair)"
+                continue
+                ;;
+        esac
+
         mv "${dest}.tmp" "$dest"
-        chmod +x "$dest" 2>/dev/null || true
-        if [[ -n "$remote_sha" ]]; then
-            echo -e "${GREEN}OK${RESET}      (verified)"
-        else
-            echo -e "${GREEN}OK${RESET}"
+        # Only scripts are made executable; data files keep their download mode.
+        if [[ "$local_path" == *.sh ]]; then
+            chmod +x "$dest" 2>/dev/null || true
         fi
+        echo -e "${GREEN}OK${RESET}      (verified)"
         (( ++success ))
         [[ "$local_path" == ui/* ]] && (( ++ui_success )) || true
     done
+
+    # Install lib/common.sh and lib/fallback.sh only when both passed.
+    local held other
+    if [[ ${#pair_held[@]} -eq 2 ]]; then
+        for held in "${pair_held[@]}"; do
+            mv "${SCRIPT_DIR}/${held}.tmp" "${SCRIPT_DIR}/${held}"
+            chmod +x "${SCRIPT_DIR}/${held}" 2>/dev/null || true
+            (( ++success ))
+        done
+        print_ok "Installed lib/common.sh and lib/fallback.sh together."
+    elif [[ ${#pair_held[@]} -eq 1 ]]; then
+        held="${pair_held[0]}"
+        if [[ "$held" == "lib/common.sh" ]]; then other="lib/fallback.sh"; else other="lib/common.sh"; fi
+        rm -f "${SCRIPT_DIR}/${held}.tmp"
+        (( ++failed ))
+        print_warn "${other} failed, so ${held} was not installed either: the two only work as a matching pair."
+    fi
 
     echo ""
 
@@ -414,7 +492,13 @@ download_updates() {
         print_info "  sudo systemctl restart ${svc}"
     else
         print_warn "${success} updated, ${failed} failed"
-        print_info "Check your internet connection and try again."
+        if [[ $unverified -gt 0 ]]; then
+            print_warn "${unverified} file(s) failed verification and were not installed."
+            print_info "Run the updater again in a few minutes; if they keep failing, contact support@telcoin.org."
+        fi
+        if [[ $net_failed -gt 0 ]]; then
+            print_info "${net_failed} file(s) could not be downloaded -- check your internet connection and try again."
+        fi
     fi
 
     echo ""
@@ -445,6 +529,12 @@ download_updates() {
         print_info "Re-run the updater, then if needed: sudo bash ${SCRIPT_DIR}/ui/install-ui.sh --update"
         echo ""
     fi
+
+    # Any file that was not installed leaves this copy partly updated; say so in
+    # the exit status too.
+    if [[ $failed -gt 0 ]]; then
+        exit 1
+    fi
 }
 
 # =============================================================================
@@ -452,7 +542,9 @@ download_updates() {
 # =============================================================================
 
 main() {
-    clear
+    # Clearing the screen is cosmetic: with TERM unset or unusable `clear` fails,
+    # and that must not end the run under set -e.
+    clear 2>/dev/null || true
     echo -e "${BLUE}${BOLD}"
     echo "================================================================"
     echo "  Telcoin Network -- Script Updater  v${SCRIPT_VERSION}"

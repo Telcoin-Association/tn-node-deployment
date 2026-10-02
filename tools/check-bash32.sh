@@ -11,35 +11,42 @@
 # Flagged, one report per construct per line:
 #   declare, typeset or local with -A, -g, -n, -l or -u (bundled clusters such
 #     as -gA count); readonly -A
-#   case modification: ${v,,} ${v,} ${v^^} ${v^}, on arrays too
+#   case modification: ${v,,} ${v,} ${v^^} ${v^} ${v~~} ${v~}, on arrays too
 #   mapfile, readarray and coproc in command position
 #   &>>   |&   [[ -v   [ -v and test -v   wait with any option (wait -n)
-#   negative subscripts: ${a[-1]} and a[-1]=
+#   negative subscripts: ${a[-1]}, a[-1]= and a[-1] inside (( )) or $(( ))
+#   negative substring lengths: ${v:0:-1} (bash 4.2)
+#   named file-descriptor redirections: exec {fd}>file (bash 4.1)
 #   ${v@Q} and the other @ transformations
 #   printf with a %(...)T time format
 #   the ;;& and ;& case terminators
 #
 # How a file is read (one awk pass per file):
 #   - Quotes are tracked the way bash tracks them, across lines. Command-style
-#     constructs count only outside quotes. Expansions count outside single
-#     quotes too, because "${v,,}" still expands. Text inside $( ) and backticks
-#     is code even within double quotes.
+#     constructs count only outside quotes and in command position (line start,
+#     after ; & | ( ) { ! or a backtick, so one-line case arms are covered).
+#     Expansions count outside single quotes too, because "${v,,}" still expands.
+#     Text inside $( ) and backticks is code even within double quotes.
+#   - Lines joined by a trailing backslash are checked as one line and reported
+#     at the first of them.
 #   - Comments are skipped: a # that starts a word begins one, which covers
 #     whole comment lines and trailing comments.
 #   - Heredoc bodies are skipped, with one exception: in an unquoted heredoc
 #     (<<EOF, not <<'EOF') the running shell expands ${...}, so the expansion
 #     checks still apply there. Escape the dollar sign (\${v,,}) when the text is
-#     meant for another program.
+#     meant for another program. Inside (( )) and $(( )), including for((...))
+#     written without a space, << is a shift, not a heredoc.
 #   - A line containing "# bash32-ok" is never reported. Put the reason after
 #     the marker.
 #
 # Blind spots: a construct inside a string that another shell evaluates
-# (bash -c '...', eval "..."), and arithmetic written outside (( )) and $(( )).
-# A file whose quotes or heredocs the lint cannot follow to the end is an error
-# (exit 2), so a lint bug never passes a file it did not read.
+# (bash -c '...', eval "..."), and the deprecated $[ ] arithmetic. A file whose
+# quotes or heredocs the lint cannot follow to the end is an error (exit 2), so a
+# lint bug never passes a file it did not read.
 #
 # Maintainer tool: update-scripts.sh does not track it and it has no .sha256
-# sidecar. It is bash 3.2 clean so it runs on stock macOS.
+# sidecar. It is bash 3.2 clean so it runs on stock macOS, and its awk program is
+# POSIX (tested with macOS awk and mawk).
 #
 # USAGE:
 #   tools/check-bash32.sh FILE...
@@ -66,9 +73,11 @@ EOF
 # The scanner. Context stack st[]: N top level, C inside $( ) or (( )), B inside
 # backticks, D double quotes, S single quotes, A $'...' strings. pd[] counts open
 # parentheses in a C frame and pa[] marks arithmetic frames, where << is a shift.
-# For each line it builds three views: code (all quoted text blanked), expn (only
-# single-quoted text blanked) and full (quotes kept, for the printf format check).
-# Pending heredocs queue in hq_*; their bodies start on the next line.
+# For each line it builds four views: code (all quoted text blanked), expn (only
+# single-quoted text blanked), full (quotes kept, for the printf format check) and
+# arith (text inside arithmetic frames). A line ending in a backslash outside a
+# comment sets cont, and its views are carried into the next line before checking.
+# Pending heredocs queue in hq_*; their bodies start after the logical line ends.
 # Exit status: 0 clean, 1 hits, 3 the file ended inside a quote, a substitution
 # or a heredoc, so the rest of it was not read as code.
 AWK_PROG='
@@ -76,25 +85,27 @@ function push(kind, depth) { sp++; st[sp] = kind; pd[sp] = depth; pa[sp] = 0 }
 function pop() { if (sp > 1) sp-- }
 function emit(c, cc, ce) { code = code cc; expn = expn ce; full = full c }
 function wordstart(i) { return (i <= 1) || (substr(raw, i - 1, 1) ~ /[ \t;&|(]/) }
+# (( straight after for, if, elif, while or until opens arithmetic too.
+function kwbefore(i) { return substr(raw, 1, i - 1) ~ /(^|[^A-Za-z0-9_])(for|if|elif|while|until)$/ }
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
 
-function report(label,    t) {
-    if (quiet || (label in seen)) return
+function report(label) {
+    if (rep_quiet || (label in seen)) return
     seen[label] = 1
-    t = raw
-    sub(/^[ \t]+/, "", t)
-    sub(/[ \t]+$/, "", t)
-    printf "%s:%d: %s -- %s\n", fname, NR, label, t
+    printf "%s:%d: %s -- %s\n", fname, rep_nr, label, rep_text
     hits++
 }
 
 # Expansion checks on text the running shell expands.
 function check_expansions(s, where) {
-    if (s ~ /[$][{]!?([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(\[[^]]*\])?[,^]/)
+    if (s ~ /[$][{]!?([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(\[[^]]*\])?[,^~]/)
         report("case-modification expansion" where)
     if (s ~ /[$][{]!?([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(\[[^]]*\])?@[A-Za-z][}]/)
         report("${var@X} transformation" where)
-    if (s ~ /[$][{][#!]?[A-Za-z_][A-Za-z0-9_]*\[[ \t]*-/)
+    if (s ~ /[$][{][#!]?[A-Za-z_][A-Za-z0-9_]*\[[ \t]*-[^-]/)
         report("negative array subscript" where)
+    if (s ~ /[$][{]([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(\[[^]]*\])?:([ \t]*[0-9A-Za-z_$(][^:}]*|[ \t]+-[^:}]*)?:[ \t]*-[ \t]*[0-9A-Za-z_$(]/)
+        report("negative substring length" where)
 }
 
 # Command and operator checks on code with every quoted string blanked.
@@ -130,10 +141,28 @@ function check_code(s,    rest, cmd, cl, m) {
         sub(/^.*wait[ \t]+/, "", m)
         report("wait " m)
     }
-    if (s ~ /(^|[^A-Za-z0-9_$])[A-Za-z_][A-Za-z0-9_]*\[[ \t]*-[^]]*\][+]?=/)
+    if (s ~ /(^|[^A-Za-z0-9_$])[A-Za-z_][A-Za-z0-9_]*\[[ \t]*-[^]-][^]]*\][+]?=/)
         report("negative array subscript")
+    if (s ~ /(^|[^$])[{][A-Za-z_][A-Za-z0-9_]*[}][<>]/)
+        report("named fd redirection {var}>")
     if (index(s, ";;&")) report(";;&")
     else if (s ~ /(^|[^;]);&/) report(";&")
+}
+
+# All checks for one logical line (the a_* views).
+function run_checks() {
+    split("", seen)
+    rep_quiet = a_quiet
+    rep_nr = a_nr
+    rep_text = a_text
+    check_code(a_code)
+    check_expansions(a_expn, "")
+    if (a_arith ~ /[A-Za-z_][A-Za-z0-9_]*\[[ \t]*-[^-]/)
+        report("negative array subscript")
+    # The format string is normally quoted, so the format is matched on full,
+    # while printf itself must be an unquoted command.
+    if (a_code ~ (CMDPOS "printf" CMDEND) && a_full ~ /%[-+ #0]*[0-9]*([.][0-9]*)?[(][^)]*[)]T/)
+        report("printf %(...)T")
 }
 
 # One line of a heredoc body: either its terminator or text to skip.
@@ -142,6 +171,10 @@ function body(    t) {
     if (hq_strip[hq_head]) sub(/^\t+/, "", t)
     if (t == hq_word[hq_head]) { hq_head++; return }
     if (hq_live[hq_head]) {
+        split("", seen)
+        rep_quiet = (index(raw, "# bash32-ok") > 0)
+        rep_nr = NR
+        rep_text = trim(raw)
         t = raw
         gsub(/\\\\/, "xx", t)
         gsub(/\\[$]/, "xx", t)
@@ -149,8 +182,8 @@ function body(    t) {
     }
 }
 
-function scan(    n, i, c, nx, top, j, k, d, t, word, quoted, strip) {
-    code = ""; expn = ""; full = ""
+function scan(    n, i, c, nx, top, inar, j, k, d, t, word, quoted, strip) {
+    code = ""; expn = ""; full = ""; arith = ""; cont = 0
     n = length(raw)
     i = 1
     while (i <= n) {
@@ -169,10 +202,12 @@ function scan(    n, i, c, nx, top, j, k, d, t, word, quoted, strip) {
             continue
         }
         if (top == "D") {
+            if (c == "\\" && i == n) { cont = 1; i++; continue }
             if (c == "\\") { emit(c nx, "xx", "xx"); i += 2; continue }
             if (c == "\"") { pop(); emit(c, c, c); i++; continue }
             if (c == "$" && nx == "(") {
                 push("C", 1); pa[sp] = (substr(raw, i + 2, 1) == "(")
+                if (pa[sp]) arith = arith " "
                 emit("$(", "$(", "$("); i += 2; continue
             }
             if (c == "`") { push("B", 0); emit(c, c, c); i++; continue }
@@ -181,6 +216,8 @@ function scan(    n, i, c, nx, top, j, k, d, t, word, quoted, strip) {
             continue
         }
         # Code: N, C or B.
+        inar = (top == "C" && pa[sp])
+        if (c == "\\" && i == n) { cont = 1; i++; continue }
         if (c == "\\") { emit(c nx, "xx", "xx"); i += 2; continue }
         if (c == "#" && wordstart(i)) break
         if (c == SQ) { push("S", 0); emit(c, c, c); i++; continue }
@@ -188,19 +225,21 @@ function scan(    n, i, c, nx, top, j, k, d, t, word, quoted, strip) {
         if (c == "$" && nx == SQ) { push("A", 0); emit(c nx, c nx, c nx); i += 2; continue }
         if (c == "$" && nx == "(") {
             push("C", 1); pa[sp] = (substr(raw, i + 2, 1) == "(")
+            if (pa[sp]) arith = arith " "
             emit("$(", "$(", "$("); i += 2; continue
         }
         if (c == "`") {
             if (top == "B") pop(); else push("B", 0)
             emit(c, c, c); i++; continue
         }
-        if (c == "(" && nx == "(" && top != "B" && wordstart(i)) {
+        if (c == "(" && nx == "(" && top != "B" && (wordstart(i) || kwbefore(i))) {
             push("C", 2); pa[sp] = 1
+            arith = arith " "
             emit("((", "((", "(("); i += 2; continue
         }
         if (top == "C" && c == "(") pd[sp]++
         if (top == "C" && c == ")") { pd[sp]--; if (pd[sp] <= 0) pop() }
-        if (c == "<" && nx == "<" && !(top == "C" && pa[sp])) {
+        if (c == "<" && nx == "<" && !inar) {
             if (substr(raw, i + 2, 1) == "<") { emit("<<<", "<<<", "<<<"); i += 3; continue }
             j = i + 2
             strip = 0
@@ -234,6 +273,7 @@ function scan(    n, i, c, nx, top, j, k, d, t, word, quoted, strip) {
             i = j
             continue
         }
+        if (inar) arith = arith c
         emit(c, c, c)
         i++
     }
@@ -243,30 +283,41 @@ BEGIN {
     sp = 1; st[1] = "N"; pd[1] = 0; pa[1] = 0
     hq_head = 1; hq_tail = 0
     hits = 0
+    acc = 0
     fname = ENVIRON["CB32_FILE"]
-    # Command position: line start or after ; & | ( { ! or a backtick, then any
+    # Command position: line start or after ; & | ( ) { ! or a backtick, then any
     # keywords (then, do, command, ...) and prefix assignments (IFS= ...).
-    # So "command -v mapfile" and "echo mapfile" are not calls.
-    CMDPOS = "(^|[;&|(!{`])[ \t]*((if|then|do|else|elif|while|until|time|command|builtin|exec|!)[ \t]+|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+)*"
+    # So "command -v mapfile" and "echo mapfile" are not calls, while the body of
+    # a one-line case arm "a) mapfile ..." is.
+    CMDPOS = "(^|[;&|()!{`])[ \t]*((if|then|do|else|elif|while|until|time|command|builtin|exec|!)[ \t]+|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+)*"
     CMDEND = "([ \t;&|)]|$)"
 }
 
 {
     raw = $0
     sub(/\r$/, "", raw)
-    quiet = (index(raw, "# bash32-ok") > 0)
-    split("", seen)
-    if (hq_head <= hq_tail) { body(); next }
+    if (!acc && hq_head <= hq_tail) { body(); next }
     scan()
-    check_code(code)
-    check_expansions(expn, "")
-    # The format string is normally quoted, so the format is matched on full,
-    # while printf itself must be an unquoted command.
-    if (code ~ (CMDPOS "printf" CMDEND) && full ~ /%[-+ #0]*[0-9]*([.][0-9]*)?[(][^)]*[)]T/)
-        report("printf %(...)T")
+    t = trim(raw)
+    if (cont) sub(/[ \t]*\\$/, "", t)
+    if (acc) {
+        a_code = a_code code; a_expn = a_expn expn; a_full = a_full full
+        a_arith = a_arith " " arith
+        a_text = a_text " " t
+        if (index(raw, "# bash32-ok") > 0) a_quiet = 1
+    } else {
+        a_code = code; a_expn = expn; a_full = full; a_arith = arith
+        a_text = t
+        a_nr = NR
+        a_quiet = (index(raw, "# bash32-ok") > 0)
+    }
+    if (cont) { acc = 1; next }
+    acc = 0
+    run_checks()
 }
 
 END {
+    if (acc) run_checks()
     broken = 0
     if (hq_head <= hq_tail) {
         printf "check-bash32: %s: heredoc %s is never closed\n", fname, hq_word[hq_head] > "/dev/stderr"

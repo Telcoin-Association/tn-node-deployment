@@ -160,22 +160,16 @@ fi
 # =============================================================================
 
 print_step "Setting permissions..."
-chmod +x "${INSTALL_DIR}/setup-node.sh"
-chmod +x "${INSTALL_DIR}/setup-observer.sh"
-chmod +x "${INSTALL_DIR}/setup-validator.sh"
-chmod +x "${INSTALL_DIR}/check-node.sh"
-chmod +x "${INSTALL_DIR}/prepare-stake.sh"
-chmod +x "${INSTALL_DIR}/edit-config.sh"
-chmod +x "${INSTALL_DIR}/firewall-setup.sh"
-chmod +x "${INSTALL_DIR}/remove-node.sh"
-chmod +x "${INSTALL_DIR}/update-node.sh"
-chmod +x "${INSTALL_DIR}/update-scripts.sh"
-chmod +x "${INSTALL_DIR}/install.sh"
-chmod +x "${INSTALL_DIR}/setup-vpn.sh"
-chmod +x "${INSTALL_DIR}/setup-observability.sh"
-chmod +x "${INSTALL_DIR}/lib/wgvpn/wg-node-bootstrap.sh"
-chmod +x "${INSTALL_DIR}/ui/install-ui.sh"
-chmod +x "${INSTALL_DIR}/ui/telcoin-ui-helper.sh"
+# A name missing from the clone is skipped, so the installer never fails on a
+# script that has not been published yet.
+for script in setup-node.sh setup-observer.sh setup-validator.sh check-node.sh \
+    prepare-stake.sh edit-config.sh firewall-setup.sh remove-node.sh update-node.sh \
+    update-scripts.sh install.sh setup-vpn.sh setup-observability.sh \
+    lib/wgvpn/wg-node-bootstrap.sh ui/install-ui.sh ui/telcoin-ui-helper.sh; do
+    if [ -f "${INSTALL_DIR}/${script}" ]; then
+        chmod +x "${INSTALL_DIR}/${script}"
+    fi
+done
 print_ok "Permissions set"
 
 # =============================================================================

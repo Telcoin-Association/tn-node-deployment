@@ -207,6 +207,10 @@ detect_node_installs() {
 }
 
 show_detected() {
+    # errexit is off while the report runs and restored to the caller's setting
+    # at the end, so it no longer leaks into the menu.
+    local errexit_was_on=false
+    [[ "$-" == *e* ]] && errexit_was_on=true
     set +e
     print_header "Detected Node Installations"
 
@@ -266,6 +270,9 @@ show_detected() {
         echo ""
         i=$((i + 1))
     done
+    if [[ "$errexit_was_on" == "true" ]]; then
+        set -e
+    fi
 }
 
 # =============================================================================
@@ -409,6 +416,11 @@ remove_shared_components() {
     fi
 }
 
+# Service groups left in place on purpose during this run: the operator declined
+# to remove them, or a sibling node still uses the account. report_orphaned_groups
+# lists these as kept rather than as possibly orphaned.
+declare -a KEPT_GROUPS=()
+
 remove_service_user() {
     local service_user="$1"
     local service_group="$2"
@@ -429,6 +441,7 @@ remove_service_user() {
     # leave it broken. Refuse and tell the operator.
     if [[ -n "$self_unit" ]] && user_used_by_other_node "$service_user" "$self_unit"; then
         print_info "User '${service_user}' is still in use by the other Telcoin node -- keeping it."
+        [[ -n "$service_group" ]] && KEPT_GROUPS+=("$service_group")
         return
     fi
 
@@ -450,24 +463,53 @@ remove_service_user() {
                 print_warn "Could not remove group '${service_group}' (still in use?). Remove manually:"
                 print_info "  sudo groupdel ${service_group}"
             fi
+        else
+            KEPT_GROUPS+=("$service_group")
         fi
     fi
 }
 
-# Warn about Telcoin-related groups still present after removal (e.g. orphaned by
-# an earlier crash where .node-meta + the unit were both gone). Matches the
-# operator's quick check: getent group | grep -v telcoin-ui | grep telcoin.
+# 0 when GROUP was kept on purpose during this run (see KEPT_GROUPS).
+group_was_kept() {
+    local want="$1" g
+    for g in ${KEPT_GROUPS[@]+"${KEPT_GROUPS[@]}"}; do
+        [[ "$g" == "$want" ]] && return 0
+    done
+    return 1
+}
+
+# Report Telcoin-related groups still present after removal. A group kept on
+# purpose (declined at the prompt, or still used by a sibling node) is listed as
+# kept; any other may be orphaned (e.g. by an earlier crash where .node-meta + the
+# unit were both gone). Matches the operator's quick check:
+# getent group | grep -v telcoin-ui | grep telcoin.
 report_orphaned_groups() {
-    local orphans
-    orphans=$(getent group | grep -v "telcoin-ui" | grep "telcoin" | cut -d: -f1 || true)
-    [[ -z "$orphans" ]] && return 0
-    echo ""
-    print_warn "Possible orphaned Telcoin service group(s) still present:"
-    local g
+    local groups g
+    local -a kept=() orphaned=()
+    groups=$(getent group | grep -v "telcoin-ui" | grep "telcoin" | cut -d: -f1 || true)
+    [[ -z "$groups" ]] && return 0
     while IFS= read -r g; do
         [[ -z "$g" ]] && continue
-        print_info "  ${g}  ->  remove with:  sudo groupdel ${g}"
-    done <<< "$orphans"
+        if group_was_kept "$g"; then
+            kept+=("$g")
+        else
+            orphaned+=("$g")
+        fi
+    done <<< "$groups"
+    if [[ ${#kept[@]} -gt 0 ]]; then
+        echo ""
+        print_info "Telcoin service group(s) kept:"
+        for g in "${kept[@]}"; do
+            print_info "  ${g}  ->  remove later with:  sudo groupdel ${g}"
+        done
+    fi
+    if [[ ${#orphaned[@]} -gt 0 ]]; then
+        echo ""
+        print_warn "Possible orphaned Telcoin service group(s) still present:"
+        for g in "${orphaned[@]}"; do
+            print_info "  ${g}  ->  remove with:  sudo groupdel ${g}"
+        done
+    fi
 }
 
 # =============================================================================
@@ -843,7 +885,9 @@ scan_custom_installs() {
 
 main_menu() {
     while true; do
-        clear
+        # Cosmetic: with TERM unset or unusable `clear` fails, which must not end
+        # the run under set -e.
+        clear 2>/dev/null || true
         detect_node_installs
         print_header "Telcoin Network -- Node Removal  v${SCRIPT_VERSION}"
         show_detected
@@ -867,11 +911,18 @@ main_menu() {
         echo "  3) Exit"
         echo ""
         local choice
-        read -r -p "  Enter choice [1-3 or s]: " choice
+        if ! read -r -p "  Enter choice [1-3 or s]: " choice; then
+            # stdin is closed: no answer can come, so leave instead of looping.
+            echo ""
+            exit 0
+        fi
+        # The actions are best effort: a step that fails is reported and the rest
+        # of the teardown still runs. errexit is off while an action runs and back
+        # on for the menu.
         case "$choice" in
-            1) remove_all_nodes ;;
-            2) wipe_chain_data_only ;;
-            s|S) scan_custom_installs ;;
+            1) set +e; remove_all_nodes; set -e ;;
+            2) set +e; wipe_chain_data_only; set -e ;;
+            s|S) set +e; scan_custom_installs; set -e ;;
             3) echo ""; print_info "Exiting."; exit 0 ;;
             *) print_warn "Please enter 1-3 or s." ;;
         esac
