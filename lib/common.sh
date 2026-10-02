@@ -727,7 +727,7 @@ tn_ref_min_check() {
         ver="${BASH_REMATCH[1]}"
         rest="${BASH_REMATCH[2]}"
         if ! version_gte "$ver" "$floor"; then
-            printf '%s\n' "${ref} is older than v${floor}, the oldest ${network} release these scripts support (v${floor} is the first with keytool set-rpc, proof-of-possession signing and state export). Pick v${floor} or a newer release."
+            printf '%s\n' "${ref} is older than v${floor}, the oldest ${network} release these scripts support (v${floor} is the first release that has all of keytool set-rpc, proof-of-possession signing and state export together). Pick v${floor} or a newer release."
             return 1
         fi
         if [[ -z "$rest" || "$rest" == "$suffix" ]]; then
@@ -2658,7 +2658,7 @@ display_node_info() {
     echo "  the exact commands for Steps 5 and 6:"
     echo "    sudo bash prepare-stake.sh"
     echo ""
-    echo "  Full staking guide: https://docs.telcoin.network/telcoin-network/staking/how-to-stake"
+    echo "  Full staking guide: https://docs.telcoin.network/ (Staking section)"
     echo ""
 }
 
