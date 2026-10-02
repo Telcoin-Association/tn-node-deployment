@@ -1339,7 +1339,8 @@ step_generate_keys() {
     local input bls_passphrase bls_passphrase_confirm
     if json_mode; then
         # Address + multiaddrs come from flags (init_node_inputs checked their form);
-        # passphrase from TN_BLS_PASSPHRASE (env only).
+        # passphrase from TN_BLS_PASSPHRASE (env only). json_check_keygen_inputs already
+        # refused a missing one before check_root; these checks stay as a safety net.
         [[ -n "$VALIDATOR_ADDRESS" ]] || setup_fail "--address is missing: keygen needs the node's execution address (0x followed by 40 hex digits)."
         for v in PRIMARY_MULTIADDR WORKER_MULTIADDR PRIMARY_LISTENER_MULTIADDR WORKER_LISTENER_MULTIADDR; do
             [[ -n "${!v}" ]] || setup_fail "missing multiaddr: ${v}"
@@ -2563,8 +2564,33 @@ json_require_root() {
     check_root
 }
 
-# Every input is checked before check_root, so a bad phase, network or release ref
-# stops the run before it touches the box.
+# What a keygen needs and would otherwise find missing only in step_generate_keys, after
+# the preflight (for a source install, a 20-40 minute build): the execution address, the
+# four multiaddrs and the BLS passphrase, which arrives in TN_BLS_PASSPHRASE only. Their
+# form is checked in init_node_inputs; step_generate_keys keeps its own checks as a safety
+# net. Finalize needs none of them.
+json_check_keygen_inputs() {
+    local pair flag var
+    [[ "$JSON_PHASE" == "keygen" ]] || return 0
+    if [[ -z "$VALIDATOR_ADDRESS" ]]; then
+        setup_fail "--address is missing: keygen needs the node's execution address (0x followed by 40 hex digits)."
+    fi
+    for pair in --external-primary:PRIMARY_MULTIADDR --external-worker:WORKER_MULTIADDR \
+                --listener-primary:PRIMARY_LISTENER_MULTIADDR --listener-worker:WORKER_LISTENER_MULTIADDR; do
+        flag="${pair%%:*}"
+        var="${pair#*:}"
+        if [[ -z "${!var}" ]]; then
+            setup_fail "${flag} is missing: keygen needs all four multiaddrs (--external-primary, --external-worker, --listener-primary, --listener-worker)."
+        fi
+    done
+    if [[ -z "${TN_BLS_PASSPHRASE:-}" ]]; then
+        setup_fail "TN_BLS_PASSPHRASE is not set: keygen takes the BLS key passphrase from that environment variable only."
+    fi
+    return 0
+}
+
+# Every input is checked before check_root, so a bad phase, network or release ref, or
+# a keygen input left out, stops the run before it touches the box.
 run_json_mode() {
     case "$JSON_PHASE" in
         keygen|finalize) ;;
@@ -2572,6 +2598,7 @@ run_json_mode() {
     esac
     json_set_network "$JSON_NETWORK_INPUT"
     json_check_install_flags
+    json_check_keygen_inputs
     json_require_root
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     case "$JSON_PHASE" in
