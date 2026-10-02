@@ -179,23 +179,33 @@ check_root() {
 # never take it.
 #
 # Primary path is flock(1) on /var/lock (present on every systemd host): fd 9
-# is held open for the life of the process, so the kernel releases the lock on
-# ANY exit -- crash, SIGKILL, reboot -- and stale locks are impossible. Where
+# is held open for the life of the process and the kernel drops the lock when
+# the last copy of that descriptor closes, so a crash, SIGKILL or reboot leaves
+# nothing to clean up (but see the next paragraph about children). Where
 # flock or /var/lock is missing (stock macOS), fall back to an atomic mkdir
 # lock (mkdir fails on anything that already exists, symlinks included) with a
 # PID-staleness takeover. On failure, TN_UPDATE_LOCK_HOLDER carries the
 # holder's PID ("" if unknown) so JSON-mode callers can report it.
 #
-# The mkdir lock is removed by an EXIT trap. A caller that owns its own EXIT trap
-# (one that emits the final JSON "done" event, say) sets TN_EXIT_TRAP_OWNED=1
-# before calling, so the lock never replaces that trap; it then calls
-# tn_release_update_lock from its own trap. TN_UPDATE_LOCK_DIR names the mkdir
-# lock while it is held ("" on the flock path, where the kernel releases it).
+# Every child the holder starts inherits fd 9, and the kernel frees a flock only
+# when the last descriptor of the open file goes. A child that outlives the holder
+# (a sleep after a SIGTERM during the epoch wait, an orphaned cargo build or
+# docker pull) would keep the lock, and the next run would be refused with the
+# dead holder's PID. tn_release_update_lock therefore unlocks explicitly.
+#
+# The lock is released by an EXIT trap set here (on either path). A caller that
+# owns its own EXIT trap (one that emits the final JSON "done" event, say) sets
+# TN_EXIT_TRAP_OWNED=1 before calling, so the lock never replaces that trap; it
+# then calls tn_release_update_lock from its own trap. TN_UPDATE_LOCK_KIND is
+# flock or mkdir while this process holds the lock ("" otherwise), and
+# TN_UPDATE_LOCK_DIR names the mkdir lock while it is held.
 TN_UPDATE_LOCK_HOLDER=""
 TN_UPDATE_LOCK_DIR=""
+TN_UPDATE_LOCK_KIND=""
 tn_acquire_update_lock() {
     TN_UPDATE_LOCK_HOLDER=""
     TN_UPDATE_LOCK_DIR=""
+    TN_UPDATE_LOCK_KIND=""
     # Overridable for tests only; production callers always use the default.
     local lock_file="${TN_UPDATE_LOCK_FILE:-/var/lock/telcoin-update.lock}"
     local lock_parent="${lock_file%/*}"
@@ -213,6 +223,10 @@ tn_acquire_update_lock() {
             return 1
         fi
         printf '%s\n' "$$" > "$lock_file" 2>/dev/null || true
+        TN_UPDATE_LOCK_KIND="flock"
+        if [[ -z "${TN_EXIT_TRAP_OWNED:-}" ]]; then
+            trap tn_release_update_lock EXIT
+        fi
         return 0
     fi
 
@@ -222,6 +236,7 @@ tn_acquire_update_lock() {
     if mkdir "$lock_dir" 2>/dev/null; then
         printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
         TN_UPDATE_LOCK_DIR="$lock_dir"
+        TN_UPDATE_LOCK_KIND="mkdir"
         if [[ -z "${TN_EXIT_TRAP_OWNED:-}" ]]; then
             # Expand lock_dir now, not at exit time (intentional).
             # shellcheck disable=SC2064
@@ -236,6 +251,7 @@ tn_acquire_update_lock() {
             TN_UPDATE_LOCK_HOLDER=""
             printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
             TN_UPDATE_LOCK_DIR="$lock_dir"
+            TN_UPDATE_LOCK_KIND="mkdir"
             if [[ -z "${TN_EXIT_TRAP_OWNED:-}" ]]; then
                 # Expand lock_dir now, not at exit time (intentional).
                 # shellcheck disable=SC2064
@@ -249,12 +265,20 @@ tn_acquire_update_lock() {
     return 1
 }
 
-# tn_release_update_lock — remove the mkdir lock this process holds (a no-op on
-# the flock path and when no lock is held). For callers that set
-# TN_EXIT_TRAP_OWNED and so must release the lock from their own EXIT trap.
-# Never fails.
+# tn_release_update_lock — release the lock this process holds: on the flock path
+# `flock -u 9`, which frees the lock even while children that inherited fd 9 still
+# run, then close fd 9; on the mkdir path remove the lock dir. A no-op when no
+# lock is held. Callers that set TN_EXIT_TRAP_OWNED call it from their own EXIT
+# trap. Never fails.
 tn_release_update_lock() {
     local dir="${TN_UPDATE_LOCK_DIR:-}" holder
+    if [[ "${TN_UPDATE_LOCK_KIND:-}" == "flock" ]]; then
+        flock -u 9 2>/dev/null || true
+        exec 9>&-
+        TN_UPDATE_LOCK_KIND=""
+        return 0
+    fi
+    TN_UPDATE_LOCK_KIND=""
     [[ -n "$dir" && -d "$dir" ]] || return 0
     holder="$(cat "${dir}/pid" 2>/dev/null || true)"
     if [[ -z "$holder" || "$holder" == "$$" ]]; then
@@ -2010,7 +2034,9 @@ tn_wait_restart_window() {
         fi
         nap="$poll"
         if (( nap > remaining )); then nap="$remaining"; fi
-        sleep "$nap" || true
+        # 9>&-: the sleep must not inherit the update lock's descriptor, or a
+        # sleep left running after the caller is killed would keep the lock.
+        sleep "$nap" 9>&- || true
         slept=$(( slept + nap ))
         now="$(_tn_now)"
         waited=$(( now - start ))
@@ -2054,7 +2080,7 @@ tn_wait_restart_window() {
     while (( settle_left > 0 )); do
         nap="$poll"
         if (( nap > settle_left )); then nap="$settle_left"; fi
-        sleep "$nap" || true
+        sleep "$nap" 9>&- || true
         settle_left=$(( settle_left - nap ))
         if (( settle_left > 0 )); then
             "$fn" log "Settling: ${settle_left}s left." || true
