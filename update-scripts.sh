@@ -16,8 +16,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Pull in the node-identity resolvers so the restart hint below can name the
 # actually-installed unit (the bare telcoin unit, or a legacy role-suffixed one).
 # This script does not source lib/common.sh, so source fallback.sh directly.
-# shellcheck source=lib/fallback.sh
-source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
+# A lone copy of the updater has no lib/ on its first run, so test the file before
+# sourcing it: under `set -e`, bash 3.2 exits on a failed `source` even with
+# `|| true`. Without the file the restart hint falls back to "telcoin".
+if [ -r "${SCRIPT_DIR}/lib/fallback.sh" ]; then
+    # shellcheck source=lib/fallback.sh
+    source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
+fi
 
 readonly SCRIPT_VERSION="1.1.69"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
@@ -47,6 +52,7 @@ declare -a SCRIPTS=(
     "setup-validator.sh:setup-validator.sh:SCRIPT_VERSION"
     "install-caddy.sh:install-caddy.sh:SCRIPT_VERSION"
     "check-node.sh:check-node.sh:SCRIPT_VERSION"
+    "prepare-stake.sh:prepare-stake.sh:SCRIPT_VERSION"
     "edit-config.sh:edit-config.sh:SCRIPT_VERSION"
     "firewall-setup.sh:firewall-setup.sh:SCRIPT_VERSION"
     "remove-node.sh:remove-node.sh:SCRIPT_VERSION"
