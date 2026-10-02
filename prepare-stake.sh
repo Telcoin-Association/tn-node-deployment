@@ -1509,15 +1509,17 @@ ps_rotate() {
     if [[ "$PS_YES" -ne 1 ]] && ! confirm "Sign the proof of possession for ${NEW_CS}?"; then
         ps_done 3 "cancelled" "Cancelled: nothing changed."
     fi
+    ps_runner
+    ps_get_passphrase
     # update-node.sh holds the update lock while it stops, swaps and restarts
-    # the node, so a rotation edits nothing while it runs. The EXIT trap
-    # releases the lock (the flock kind goes with the process).
+    # the node, so a rotation edits nothing while it runs. It is taken only
+    # after the passphrase, so a prompt nobody answers never holds up
+    # update-node.sh, edit-config.sh or install-caddy.sh. The EXIT trap releases
+    # it (the flock kind goes with the process).
     TN_EXIT_TRAP_OWNED=1
     if ! tn_acquire_update_lock >/dev/null 2>&1; then
         ps_done 3 "refused" "Refused: an update is in progress${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; try again when it has finished."
     fi
-    ps_runner
-    ps_get_passphrase
     old_bls="$(tn_node_info_field "$NODE_INFO" bls_public_key || true)"
     old_name="$(tn_node_info_field "$NODE_INFO" name || true)"
     if [[ -z "$old_bls" ]]; then
