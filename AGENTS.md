@@ -27,9 +27,11 @@ together, then rebuild the PDF (see "Partner guide (MNO PDF)" below).
 Operator-facing scripts must **not** depend on any `common/` script at runtime. That
 covers:
 
-`setup-node.sh`, `migrate-node-naming.sh`, `check-node.sh`, `update-node.sh`,
-`update-scripts.sh`, `firewall-setup.sh`, `setup-vpn.sh`, `setup-observability.sh`,
-`install-caddy.sh`, `remove-node.sh`, and everything under `lib/` and `ui/`.
+`setup-node.sh`, `edit-config.sh`, `prepare-stake.sh`, `migrate-node-naming.sh`,
+`check-node.sh`, `update-node.sh`, `update-scripts.sh`, `firewall-setup.sh`, `setup-vpn.sh`,
+`setup-observability.sh`, `install-caddy.sh`, `remove-node.sh`, `install.sh`, `open-ui.sh`
+(it runs on the operator's own computer), the deprecated `setup-observer.sh` and
+`setup-validator.sh` shims, and everything under `lib/` and `ui/`.
 
 A comment in one of these may *mention* a `common/` script for provenance, but only
 if it is clearly marked maintainer-only. A runtime call, a `source`, or a "now run X"
@@ -51,6 +53,41 @@ PendingExit) via `node_stake_status` / `node_is_staked_validator` in `lib/common
 Never add `--observer` / `--validator` behaviour back, and never emit `--observer` to the
 binary. `update-node.sh` strips a leftover `--observer` from legacy launch files when
 updating to v0.15.0-adiri or later.
+
+The Node Manager UI asks the network first: it reads the node's `getValidator` record from the
+network's public RPC (only from an endpoint whose `eth_chainId` matches the node's chain), then
+from the node itself once it is synced, then from its last saved answer, and shows a full node
+when none of them answers. `.node-meta` no longer carries `NODE_TYPE`: setup-node v1.3.0 and
+migrate-node-naming v1.2.1 remove the key (a node migrated by 1.2.0 may keep a stale line), and
+nothing reads it to choose a view. Do not write it back. `tn_resolve_node_type` in
+`lib/fallback.sh` has no callers and stays one more release only as a deprecated stub; do not
+add callers.
+
+## Restarts and the epoch boundary
+
+A committee node restarted just before an epoch boundary can miss the epoch transition.
+`tn_wait_restart_window` in `lib/common.sh` holds the restart of a node that votes in the
+current committee (`tn_nodeMode` `CvvActive`): when the boundary is within `TN_EPOCH_MARGIN`
+seconds (default 300), it waits for the epoch to close and then `TN_EPOCH_SETTLE` seconds (90),
+never longer than `TN_EPOCH_WAIT_MAX` (1800; 0 turns the wait off). `TN_SKIP_EPOCH_WAIT=1`, and
+`--no-epoch-wait` where a script offers it, skip the wait. update-node, edit-config,
+install-caddy and `prepare-stake.sh --rotate-address` call it once they hold the update lock,
+and the observability add-on calls it too. update-node waits just before it stops the node, and
+install-caddy before its first node edit. edit-config and the observability add-on write the
+launch file first and wait before the restart. Rollback restarts never wait. Any new code that
+stops or restarts the node calls it right before the stop: "wait first, then stop" is about the
+stop, not about every file edit. A script that owns its EXIT trap sets `TN_EXIT_TRAP_OWNED=1`
+before `tn_acquire_update_lock` and calls `tn_release_update_lock` from that trap.
+
+## Staking helper
+
+`prepare-stake.sh` checks a node before it stakes and prints the `cast send` commands for
+`stake()` and `activate()`; the operator signs and sends them with their own wallet. The script
+never sends a transaction and never reads, asks for or prints a private key, and its signing note
+tells operators not to use `cast --private-key`. The BLS passphrase reaches only the keytool call
+that re-signs the proof of possession for `--rotate-address`, through that process's
+environment, never a command line. Future agents must keep it that way: do not add a send, a
+signing step or a key prompt to it.
 
 ## Partner guide (MNO PDF)
 
@@ -102,16 +139,22 @@ stay byte-identical, and how to re-vendor without drifting.
 
 Operators stay current with `update-scripts.sh`, which fetches each tracked file from
 `raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main` and verifies it
-against a committed `<file>.sha256` sidecar before installing it.
+against a committed `<file>.sha256` sidecar before installing it. The updater fails closed:
+it installs nothing whose sidecar is missing, empty or unreadable, installs `lib/common.sh`
+and `lib/fallback.sh` together or not at all, and verifies its own replacement against
+`update-scripts.sh.sha256` before it relaunches. A tracked file committed without its sidecar
+never reaches an operator.
 
 - The set of tracked files is the `SCRIPTS`, `UI_BUNDLE`, and `TESTNET_ADDONS_BUNDLE`
   arrays in `update-scripts.sh`. That is the single source of truth for what operators
   receive.
 - `tools/gen-checksums.sh` regenerates every sidecar from those three arrays, so the
   sidecars can never name a different set than the updater downloads.
-- `.github/workflows/ci.yml` fails the build on any stale or missing sidecar, and on
-  any bash-4 syntax — it parse-checks every `*.sh` under macOS `/bin/bash`, which is
-  3.2, because operators can run on macOS.
+- `.github/workflows/ci.yml` fails the build on a stale or missing sidecar; on any `*.sh`
+  that does not parse with `bash -n` on Linux or under macOS `/bin/bash` (3.2, because
+  operators can run on macOS); on a shellcheck error (warnings are advisory); on any finding
+  of the bash 3.2 lint described below, which runs on both runners; and on a failing Node
+  Manager UI test (`ui/test_*.py`, and `ui/tests/helper_test.sh` under bash 3.2 and 5).
 
 So after you edit any tracked file:
 
@@ -119,12 +162,25 @@ So after you edit any tracked file:
    so `update-scripts.sh` offers the change to operators.
 2. Run `bash tools/gen-checksums.sh` and commit the refreshed `*.sha256` sidecars.
 3. Keep it bash 3.2 / Ubuntu safe: indexed arrays only — no `declare -A`, no
-   `${var,,}`, no `mapfile`/`readarray`, no `&>>`.
+   `${var,,}`, no `mapfile`/`readarray`, no `&>>`. Run
+   `/bin/bash tools/check-bash32.sh <file>` before you commit.
+
+The bash 3.2 lint, `tools/check-bash32.sh`, finds bash 4+ syntax that `bash -n` under 3.2
+accepts but 3.2 cannot run, because it fails only when the line executes. CI runs it on every
+`*.sh` under `/bin/bash` on the macOS runner and under bash on the Ubuntu runner. It flags
+`declare`, `typeset` or `local` with `-A`, `-g`, `-n`, `-l` or `-u`, case modification such as
+`${v,,}` and `${v^^}`, `mapfile`, `readarray` and `coproc`, `&>>`, `|&`, `[[ -v` and `wait -n`,
+negative subscripts and substring lengths, `exec {fd}>`, `${v@Q}` and the other `@`
+transformations, `printf` with `%(...)T`, and the `;;&` and `;&` case terminators, inside
+one-line `case` arms too. A line containing `# bash32-ok` is never reported; put the reason
+after the marker.
 
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
-The same holds for the other docs: `OPERATOR.md`, `followup.md`, `CHANGELOG.md`,
-`README.md`, `docs/` (the partner guide and its build inputs included) and `tools/` are
-documentation or maintainer tooling, carry no `.sha256` sidecar, and must never be added
-to the updater arrays. `README.md` must stay at the repo root, because
-`update-scripts.sh` HEAD-probes it as its connectivity check.
+The same holds for the other docs and the maintainer tooling: `OPERATOR.md`, `followup.md`,
+`CHANGELOG.md`, `README.md`, `docs/` (the partner guide and its build inputs included),
+`tools/` (`check-bash32.sh` included) and the Node Manager UI's tests and dev runner
+(`ui/tests/`, `ui/dev/`, `ui/test_*.py`) are documentation or maintainer tooling, are not
+updater-tracked, carry no `.sha256` sidecar, and must never be added to the updater arrays.
+`README.md` must stay at the repo root, because `update-scripts.sh` HEAD-probes it as its
+connectivity check.

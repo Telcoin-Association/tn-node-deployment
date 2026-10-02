@@ -7,6 +7,178 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Backlog round, October 2026 -- update-scripts v1.1.70
+This round worked through the `followup.md` backlog left by the public-RPC and observer-flag
+work. Operators receive every script below through `update-scripts.sh` v1.1.70. The Changelog
+section of README.md has one entry per script; this summary goes by area.
+
+#### Library
+`lib/common.sh` v1.6.0 (v1.5.0 was folded into it) holds the helpers the scripts below share:
+JSON-RPC calls that report why they failed, epoch and stake-amount reads, a keytool runner that
+uses the node's own release, `node-info.yaml` readers for both worker layouts, launch-file edits
+that touch only the live node command, and the epoch-boundary wait. Its constants name
+`https://rpc.adiri.tel` as the testnet RPC, `https://telscan.io` as the explorer and 487 as the
+mainnet chain ID, and the oldest testnet release it accepts is v0.13.0-adiri. The hardware check
+counts physical cores, so an 8-vCPU VM with 4 physical cores reads as below the validator
+minimum, and `getValidator` replies are decoded strictly. `lib/fallback.sh` v1.0.3 deprecates
+`tn_resolve_node_type`, which nothing calls any more.
+
+#### Setup and configuration
+`setup-node.sh` v1.3.0 checks every input before it asks for root, refuses testnet releases older
+than v0.13.0-adiri, and carries the install method and the image or binary chosen at keygen
+through to finalize, so a UI install whose image was picked automatically no longer fails while
+it writes the start wrapper. It adds `--bootstrap-peers FILE`, `--enable-state-export`,
+`--state-export-keep N` and `--help`; each node flag is checked against the installed release
+before any key is made. `.node-meta` is updated one key at a time and no longer carries
+`NODE_TYPE`. A `--json` keygen refuses up front, before root and before any build, when
+`--address`, one of the four multiaddrs or `TN_BLS_PASSPHRASE` is missing. `edit-config.sh`
+v1.3.0 adds bootstrap peers, state export and `allow_private_forward_targets` (devnet only) to
+its menu and to `--set`. It takes the update lock, refuses a chain-config refresh that would
+change the chain ID, and does not restart the node for an edit that changes nothing. An edit
+interrupted before its restart is rolled back. Both scripts need lib/common v1.6.0 and say so.
+
+#### Updates and restarts
+update-node v1.2.0, edit-config v1.3.0, install-caddy v1.4.0, setup-observability v1.2.1 and
+`prepare-stake.sh --rotate-address` (v1.0.0) hold the restart of a node that votes in the
+current committee when the epoch boundary is at most five minutes away, and restart once the
+epoch has closed and settled, waiting 30 minutes at most. `--no-epoch-wait` (update-node,
+edit-config) or `TN_SKIP_EPOCH_WAIT=1` skips the wait, a rollback never waits, and a node outside
+the committee is never held. update-node's `--json` runs end with exactly one `done` event, a ref
+that starts with `-` is refused, and a killed update no longer leaves the update lock held.
+remove-node v1.2.9 and migrate-node-naming v1.2.1 run under macOS `/bin/bash` 3.2, and a
+migration removes the old `NODE_TYPE` hint instead of writing it.
+
+#### Public RPC
+`install-caddy.sh` v1.4.0 writes RPC block v2. Its WebSocket match ignores case, so an upgrade
+that comes through Google's load balancer or nginx gets 101 instead of 405; a browser gets a 405
+page that says the hostname is a JSON-RPC endpoint; a request body over 2 MB gets 413.
+`rpc-status` reports a block written by an older version as stale, with the command that
+refreshes it (a Caddy reload, no node restart). The advertised RPC in `node-info.yaml` is written
+with the node's own `keytool set-rpc`, and the node is not restarted when the value already
+matches. rpc-enable and rpc-disable keep the public RPC keys in `.node-meta` current, and
+rpc-disable takes the Caddy site down before it withdraws the advertisement. Edits that restart
+the node take the update lock, hostnames follow a strict rule, Caddyfile backups are pruned to
+the newest five, and Caddy older than 2.8.0 is refused.
+
+#### Health check
+`check-node.sh` v1.2.0 compares the node with the network recorded in `.node-meta`, so a devnet
+node is no longer reported as a chain ID mismatch, and its testnet comparison endpoint is
+`https://rpc.adiri.tel`. When the comparison endpoint serves another chain, as
+`https://rpc.telcoin.network` does until mainnet launches, it warns and skips the comparison.
+Whether a node missing from the latest headers is an error now follows on-chain committee
+membership, the authority ID comes from the node's own `tn_info`, and reputation is read from the
+key the live RPC returns. A new epoch section shows the next boundary, committee membership for
+this epoch and the next two, a staked validator's activation epoch and earliest seat, and the
+worker count against `WorkerConfigs.numWorkers()`. The report runs to the end on macOS, and the
+wss probe returns as soon as the upgrade answers instead of waiting eight seconds.
+
+#### Firewall and add-ons
+`firewall-setup.sh` v1.6.0 opens the node's own P2P ports, read from its launch line and then
+`node-info.yaml` (every worker), instead of the fixed 49590 and 49594. Enabling the firewall
+allows 80 and 443 whenever Caddy serves a site on the box, so turning ufw on no longer takes the
+public RPC or the dashboard offline, and "View current firewall status" works again with ufw
+active (it had stopped early since v1.1.1). `setup-observability.sh` v1.2.1 with
+`lib/observability.sh` v1.0.2 ignores commented-out flags, says why a flag could not be added,
+records nothing and skips the restart when a flag is still missing, and waits for the epoch
+boundary before it restarts a committee node.
+
+#### Staking helper
+`prepare-stake.sh` v1.0.0 is new. It checks a node before it stakes: that the network RPC serves
+the node's chain, that the address holds the whitelist NFT, its stake status, the stake amount
+the registry asks for now, the TEL balance, and the calldata from the node's own keytool. It
+simulates `stake()`, names any revert with what to do, and prints the `cast send` commands for
+`stake()` and `activate()` with the epoch arithmetic. It sends nothing and never reads a private
+key. `--rotate-address 0xNEW` re-signs the proof of possession for another execution address and
+is refused once either address has staked. `install.sh` installs the script and the updater
+tracks it.
+
+#### Node Manager UI
+telcoin-ui v1.9.0 needs install-ui v1.4.0 (helper API 2); a UI updated without re-running the
+installer shows a "helper outdated" banner. The setup wizard offers public RPC with a hostname and
+a DNS check. The System tab's RPC card shows what the node advertises, offers to refresh a stale
+Caddy block, and can move the dashboard off the RPC hostname in the same step. The validator view
+is decided from the network first (the node's `getValidator` record on the public RPC), so a
+newly staked validator opens in the validator view while it syncs, and `NODE_TYPE` no longer
+picks the view. On a synced node that view counts down to the epoch boundary and shows the
+activation epoch and the earliest committee seat. Every action stream ends with one `done`, and
+updates and config saves no longer use EventSource, whose reconnect could run an action twice.
+Hostnames follow one strict rule in the page, the server and the helper.
+
+#### Updater and integrity
+`update-scripts.sh` v1.1.70 fails closed: a file whose `.sha256` sidecar is missing, empty or
+unreadable is not installed, the updater checks its own replacement against its sidecar before it
+relaunches, `lib/common.sh` and `lib/fallback.sh` are installed together or not at all, and the
+run exits 1 when any file failed. It now runs under macOS `/bin/bash` 3.2 (v1.1.69 stopped at
+`declare -g`) and fetches `prepare-stake.sh`. `--help` prints the usage without contacting
+GitHub, and an unknown argument is refused instead of ignored. `install.sh`, which is not
+updater-tracked, installs `prepare-stake.sh`, ends with a link to the operator runbook, and no
+longer stops when a script is missing from the download.
+
+#### Maintainer tooling and CI
+`tools/check-bash32.sh` flags bash 4+ syntax that macOS `/bin/bash` 3.2 parses but cannot run,
+such as `declare -A`, `${v,,}`, `mapfile`, `&>>` and negative subscripts, including inside
+one-line `case` arms. CI runs it on every `*.sh` under `/bin/bash` on macOS and under bash on
+Ubuntu, and runs the UI tests: `ui/test_*.py`, and `ui/tests/helper_test.sh` under bash 3.2 and 5.
+`ui/dev/serve.py` serves the page against canned scenarios for walk-throughs. None of this ships
+to operators.
+
+#### Docs
+README.md and OPERATOR.md describe every new flag, the epoch wait, `prepare-stake.sh`, bootstrap
+peers and the canonical endpoints: `https://rpc.adiri.tel` for testnet, and
+`https://rpc.telcoin.network`, which serves the testnet chain until mainnet launches. The partner
+guide is at version 1.1. The upstream fixes from the old "Docs upstream" list (the staking ABI,
+worker port 49594, the `p2p_info.workers` shape, endpoints and explorers, the support address,
+advertising an RPC endpoint) sit on a telcoin-network docs branch prepared locally, to be opened
+as a PR; a devnet-genesis commit corrects the `config.sh` comment.
+
+#### Security
+Hardening in this round:
+
+- Launch-file edits refuse a value with an unquoted shell metacharacter, and a systemd unit
+  refuses `$`, `%` and backticks, so an edited flag value cannot become a second command in the
+  start wrapper (lib/common v1.6.0).
+- Every interactive answer and `--json` flag that reaches the root-run start wrapper, the unit or
+  `.node-meta` is validated: ports, directories, the Docker image, the binary path, the execution
+  address and the listener addresses. A pasted value such as `9101;id` can no longer be written
+  there, and a prompt asks again until its answer is valid (setup-node v1.3.0).
+- An interrupted UI config save can no longer leave an unapplied edit on disk for the next
+  restart to pick up: edit-config rolls the edit back when the run ends before its restart
+  (edit-config v1.3.0).
+- A bootstrap-peers map is never echoed back: a rejected map is reported with the parser's reason
+  and the value replaced. setup-node and edit-config accept only a peers file that other users can
+  already read, because the installed copy is world-readable and the parse check puts the map on
+  a command line, so the UI cannot be used to read a line of a root-only file (setup-node v1.3.0,
+  edit-config v1.3.0, lib/common v1.6.0).
+- The UI helper no longer takes a role argument, which shrinks its sudoers whitelist. install-ui
+  v1.4.0 checks the new whitelist with `visudo -c` under a name sudo ignores and installs it last,
+  so a rejected whitelist never replaces the live one.
+- check-node no longer `eval`s strings taken from the consensus header the RPC returns. An answer
+  holding `$(...)` would have run under sudo (present since 1.1.x); only base58 IDs and plain
+  integers get through now (check-node v1.2.0).
+- The updater installs nothing whose sidecar is missing and verifies its own replacement before it
+  relaunches (update-scripts v1.1.70).
+- update-node refuses a ref that starts with `-`, in `--json` runs and at the interactive prompt
+  alike, so a ref can no longer pass an option to git or docker running as root (update-node
+  v1.2.0).
+- The observability add-on checks its input before it touches Alloy: `METRICS_PORT` must be a
+  port number, and the launch-file edits are rehearsed first (setup-observability v1.2.1,
+  lib/observability v1.0.2).
+- A public RPC block caps request bodies at 2 MB; a larger JSON-RPC request gets 413 and never
+  reaches reth in full (install-caddy v1.4.0).
+- prepare-stake never puts the BLS passphrase or a key on a command line. The passphrase reaches
+  only the keytool call that re-signs, through its environment; no private key is read or asked
+  for, and the printed signing note warns against `cast --private-key`, which `ps` shows to every
+  user of the machine (prepare-stake v1.0.0).
+- The update lock is released on SIGTERM even while an orphaned child still holds its descriptor,
+  and update-node's long-running children no longer inherit it, so a killed update does not block
+  the next one (lib/common v1.6.0, update-node v1.2.0).
+
+#### Known remaining
+`followup.md` lists what this round left open, each item with its reason: provisioning more than
+one worker, the fleet Caddy changes in the maintainer repo, the upstream docs PR, the ownership of
+`/opt/telcoin`, `/etc/telcoin` and `.node-meta` (a security item with a recommended fix), and
+smaller script and UI gaps.
+
 ### Partner guide for mobile network operators -- docs/partner/
 `docs/partner/mno-node-guide.md` is the runbook rewritten for a partner reader, with no
 legacy-install material and support@telcoin.org as the only contact. `tools/build-partner-pdf.sh`
@@ -43,7 +215,8 @@ and `migrate-node-naming.sh` is the safe, opt-in path onto the unified layout.
 Superseded in part: hardware tiers now follow the per-role numbers in telcoin-network's
 hardware-requirements page (validator minimum 8 physical cores / 32 GB ECC / 2 TB NVMe) and
 the validator view follows the on-chain stake status (`getValidator`) rather than
-`tn_isValidator`; see the README changelog.
+`tn_isValidator`; see the README changelog. setup-node v1.3.0 and migrate-node-naming v1.2.1
+remove `NODE_TYPE` from `.node-meta`, and the UI asks the network first.
 
 ### Unified node naming -- single `telcoin` identity
 Collapses the historical dual observer/validator identity into one identity for
