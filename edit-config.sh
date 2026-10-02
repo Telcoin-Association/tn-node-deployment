@@ -130,10 +130,9 @@ JSON_DONE_SENT=false
 # The last error reported; the done event repeats it.
 EDIT_LAST_ERROR=""
 
-# The update lock this run holds (edit_lock), and whether it is the flock kind,
-# which lives on file descriptor 9 until that is closed.
+# Whether this run holds the update lock (edit_lock). lib/common.sh tracks its
+# kind (TN_UPDATE_LOCK_KIND) and releases it (tn_release_update_lock).
 EDIT_LOCK_HELD=false
-EDIT_LOCK_FLOCK=false
 
 # Files the current edit changed, each with its backup (edit_backup). An empty
 # backup means the file did not exist before, so a restore removes it.
@@ -447,7 +446,8 @@ edit_on_exit() {
         rm -f "$EDIT_TMP" 2>/dev/null
         EDIT_TMP=""
     fi
-    tn_release_update_lock
+    edit_release_lock
+    EDIT_LOCK_HELD=false
     if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
         msg="$EDIT_LAST_ERROR"
         if [[ -z "$msg" && -n "$EDIT_SIGNAL" ]]; then
@@ -519,26 +519,37 @@ edit_lock() {
         return 1
     fi
     EDIT_LOCK_HELD=true
-    EDIT_LOCK_FLOCK=false
-    if [[ -z "${TN_UPDATE_LOCK_DIR:-}" ]]; then
-        EDIT_LOCK_FLOCK=true
+    return 0
+}
+
+# edit_release_lock -- release the update lock this process holds, of either
+# kind: tn_release_update_lock unlocks and closes file descriptor 9 (flock) or
+# removes the lock dir (mkdir), and is a no-op when nothing is held. The hard
+# guard keeps this script on lib/common.sh 1.6.0, so the fallback for a library
+# without that function is only a safety net: close fd 9, and remove the mkdir
+# lock dir when its pid file names this process.
+edit_release_lock() {
+    local dir
+    if declare -F tn_release_update_lock >/dev/null 2>&1; then
+        tn_release_update_lock
+        return 0
+    fi
+    exec 9>&-
+    dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
+    if [[ -d "$dir" && "$(cat "${dir}/pid" 2>/dev/null || true)" == "$$" ]]; then
+        rm -rf "$dir" 2>/dev/null || true
     fi
     return 0
 }
 
 # edit_unlock -- release the update lock after a menu edit, so a menu left open
-# does not hold up update-node.sh. tn_release_update_lock removes the mkdir
-# lock; the flock lock goes when file descriptor 9 closes.
+# does not hold up update-node.sh.
 edit_unlock() {
     if [[ "$EDIT_LOCK_HELD" != "true" ]]; then
         return 0
     fi
-    tn_release_update_lock
-    if [[ "$EDIT_LOCK_FLOCK" == "true" ]]; then
-        exec 9>&-
-    fi
+    edit_release_lock
     EDIT_LOCK_HELD=false
-    EDIT_LOCK_FLOCK=false
     return 0
 }
 
