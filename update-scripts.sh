@@ -541,7 +541,52 @@ download_updates() {
 # MAIN
 # =============================================================================
 
+usage() {
+    cat <<EOF
+update-scripts.sh v${SCRIPT_VERSION} -- update the Telcoin Network node scripts
+
+Usage: bash update-scripts.sh [-h | --help]
+
+Compares every tracked file in
+  ${SCRIPT_DIR}
+with the copy published at
+  ${GITHUB_RAW}
+and lists what is out of date. If a newer update-scripts.sh is published, that
+copy is checked and run first. It then asks "Download and install all updates?
+[Y/n]"; Enter means yes.
+
+Every download must match the SHA-256 in its published <file>.sha256 sidecar
+(and parse, for scripts) before it is installed. A file without a valid sidecar
+is not installed. lib/common.sh and lib/fallback.sh are installed together or not
+at all.
+
+The answer is read from standard input; there is no --yes option. To answer
+from a script: printf 'y\n' | bash update-scripts.sh
+
+Options:
+  -h, --help   Show this help and exit without contacting GitHub.
+
+Exit status: 0 when everything is current, updated, or the update is declined;
+1 when GitHub cannot be reached or a file could not be downloaded or verified;
+2 for an unknown argument.
+EOF
+}
+
 main() {
+    # Arguments are handled before anything touches the network. The updater
+    # takes none besides --help; anything else is refused rather than ignored.
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help) usage; exit 0 ;;
+        esac
+    done
+    if [[ $# -gt 0 ]]; then
+        printf 'update-scripts.sh: unknown argument: %s\n\n' "$1" >&2
+        usage >&2
+        exit 2
+    fi
+
     # Clearing the screen is cosmetic: with TERM unset or unusable `clear` fails,
     # and that must not end the run under set -e.
     clear 2>/dev/null || true
