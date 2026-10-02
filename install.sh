@@ -18,6 +18,9 @@ set -euo pipefail
 readonly REPO_URL="https://github.com/Telcoin-Association/tn-node-deployment.git"
 readonly TARBALL_URL="https://github.com/Telcoin-Association/tn-node-deployment/archive/refs/heads/main.tar.gz"
 readonly INSTALL_DIR="${HOME}/telcoin-node-scripts"
+# Mirrors TN_OPERATOR_GUIDE_URL in lib/common.sh. This installer runs before lib/
+# is on disk (it is what downloads it), so the URL is spelled out here.
+readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
 readonly BOLD='\033[1m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -197,5 +200,6 @@ echo ""
 echo "    # Optional - install the web UI (health/logs/config/traces over an SSH tunnel)"
 echo "    sudo bash ~/telcoin-node-scripts/ui/install-ui.sh"
 echo ""
+print_info "Operator runbook:   ${TN_OPERATOR_GUIDE_URL}"
 print_info "Full documentation: https://github.com/Telcoin-Association/tn-node-deployment"
 echo ""

@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.8"
+readonly SCRIPT_VERSION="1.2.9"
 
 # =============================================================================
 # HELPERS
@@ -112,15 +112,52 @@ user_used_by_other_node() {
 # DETECTION
 # =============================================================================
 
-# Per-unit detection state, keyed by the unit BASE name (the new "telcoin" unit or,
-# for a legacy install, one of the legacy unit names from tn_all_node_services).
-# INSTALLED_UNITS lists whatever was found present; the maps carry that unit's
-# install method/user/group. Operators run one node per VM, so this is normally a
-# single entry -- but a stray legacy unit alongside the new one is still torn down.
+# Per-unit detection state. INSTALLED_UNITS lists the unit BASE names found present
+# (the new "telcoin" unit or, for a legacy install, one of the legacy unit names
+# from tn_all_node_services). The three arrays beside it hold, at the same index,
+# that unit's install method (true for docker), service user and service group.
+# They are plain indexed arrays kept in step, not associative arrays, so the script
+# runs under macOS /bin/bash 3.2. Operators run one node per VM, so this is normally
+# a single entry -- but a stray legacy unit alongside the new one is still torn down.
 declare -a INSTALLED_UNITS=()
-declare -A UNIT_DOCKER=()
-declare -A UNIT_USER=()
-declare -A UNIT_GROUP=()
+declare -a UNIT_DOCKER=()
+declare -a UNIT_USER=()
+declare -a UNIT_GROUP=()
+
+# unit_index UNIT -- print UNIT's index in INSTALLED_UNITS (and so in UNIT_DOCKER,
+# UNIT_USER and UNIT_GROUP). Returns 1 and prints nothing when UNIT is not there.
+unit_index() {
+    local want="$1" i=0 u
+    for u in ${INSTALLED_UNITS[@]+"${INSTALLED_UNITS[@]}"}; do
+        if [[ "$u" == "$want" ]]; then
+            printf '%s\n' "$i"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# forget_unit UNIT -- drop UNIT from INSTALLED_UNITS and from the same index of the
+# three arrays beside it, so every remaining unit keeps its own method/user/group.
+forget_unit() {
+    local gone="$1" i=0 n
+    local -a units=() dockers=() users=() groups=()
+    n=${#INSTALLED_UNITS[@]}
+    while [[ $i -lt $n ]]; do
+        if [[ "${INSTALLED_UNITS[$i]}" != "$gone" ]]; then
+            units+=("${INSTALLED_UNITS[$i]}")
+            dockers+=("${UNIT_DOCKER[$i]:-false}")
+            users+=("${UNIT_USER[$i]:-}")
+            groups+=("${UNIT_GROUP[$i]:-}")
+        fi
+        i=$((i + 1))
+    done
+    INSTALLED_UNITS=(${units[@]+"${units[@]}"})
+    UNIT_DOCKER=(${dockers[@]+"${dockers[@]}"})
+    UNIT_USER=(${users[@]+"${users[@]}"})
+    UNIT_GROUP=(${groups[@]+"${groups[@]}"})
+}
 
 # Populate the per-unit state above by enumerating every candidate unit name from
 # tn_all_node_services (telcoin + the legacy names) and inspecting the ones that
@@ -132,34 +169,39 @@ detect_node_installs() {
     INSTALLED_UNITS=()
     UNIT_DOCKER=(); UNIT_USER=(); UNIT_GROUP=()
 
-    local unit_name unit_file meta method
+    local unit_name unit_file meta method is_docker svc_user svc_group
     while IFS= read -r unit_name; do
         [[ -z "$unit_name" ]] && continue
         unit_file="/etc/systemd/system/${unit_name}.service"
         [[ -f "$unit_file" ]] || continue
 
-        INSTALLED_UNITS+=("$unit_name")
-        UNIT_DOCKER["$unit_name"]=false
-        UNIT_USER["$unit_name"]=""
-        UNIT_GROUP["$unit_name"]=""
+        is_docker=false
+        svc_user=""
+        svc_group=""
 
         # Config dir resolves from the on-disk layout (one node per VM).
         meta="$(config_dir_for_unit "$unit_name")/.node-meta"
 
         # Read from metadata file first (most reliable, set during setup).
         if [[ -f "$meta" ]]; then
-            UNIT_USER["$unit_name"]=$(grep "^HOST_SERVICE_USER=" "$meta" | cut -d= -f2 || echo "")
-            UNIT_GROUP["$unit_name"]=$(grep "^HOST_SERVICE_GROUP=" "$meta" | cut -d= -f2 || echo "")
+            svc_user=$(grep "^HOST_SERVICE_USER=" "$meta" | cut -d= -f2 || echo "")
+            svc_group=$(grep "^HOST_SERVICE_GROUP=" "$meta" | cut -d= -f2 || echo "")
             method=$(grep "^INSTALL_METHOD=" "$meta" | cut -d= -f2 || echo "")
-            [[ "$method" == "docker" ]] && UNIT_DOCKER["$unit_name"]=true
+            [[ "$method" == "docker" ]] && is_docker=true
         else
             # Fall back to reading the service file.
-            UNIT_USER["$unit_name"]=$(grep "^User=" "$unit_file" | cut -d= -f2 || echo "")
-            UNIT_GROUP["$unit_name"]=$(grep "^Group=" "$unit_file" | cut -d= -f2 || echo "")
+            svc_user=$(grep "^User=" "$unit_file" | cut -d= -f2 || echo "")
+            svc_group=$(grep "^Group=" "$unit_file" | cut -d= -f2 || echo "")
             if grep -q "docker" "$unit_file" 2>/dev/null; then
-                UNIT_DOCKER["$unit_name"]=true
+                is_docker=true
             fi
         fi
+
+        # Append to all four together so the indexes stay aligned.
+        INSTALLED_UNITS+=("$unit_name")
+        UNIT_DOCKER+=("$is_docker")
+        UNIT_USER+=("$svc_user")
+        UNIT_GROUP+=("$svc_group")
     done < <(tn_all_node_services)
     set -e
 }
@@ -210,17 +252,19 @@ show_detected() {
         exit 0
     fi
 
-    local unit install_type status
-    for unit in "${INSTALLED_UNITS[@]}"; do
+    local i=0 unit install_type status
+    while [[ $i -lt ${#INSTALLED_UNITS[@]} ]]; do
+        unit="${INSTALLED_UNITS[$i]}"
         install_type="binary/source"
-        [[ "${UNIT_DOCKER[$unit]}" == "true" ]] && install_type="Docker"
+        [[ "${UNIT_DOCKER[$i]:-false}" == "true" ]] && install_type="Docker"
         print_ok "Node detected (${unit})"
         print_info "  Install type:  ${install_type}"
-        print_info "  Service user:  ${UNIT_USER[$unit]:-unknown}"
-        print_info "  Service group: ${UNIT_GROUP[$unit]:-(none)}"
+        print_info "  Service user:  ${UNIT_USER[$i]:-unknown}"
+        print_info "  Service group: ${UNIT_GROUP[$i]:-(none)}"
         status=$(systemctl is-active "$unit" 2>/dev/null || echo "inactive")
         print_info "  Status:        ${status}"
         echo ""
+        i=$((i + 1))
     done
 }
 
@@ -520,6 +564,15 @@ remove_testnet_addons() {
 # sees the correct remaining count.
 remove_node_unit() {
     local unit="$1"
+    local idx is_docker svc_user svc_group
+    is_docker=false
+    svc_user=""
+    svc_group=""
+    if idx="$(unit_index "$unit")"; then
+        is_docker="${UNIT_DOCKER[$idx]:-false}"
+        svc_user="${UNIT_USER[$idx]:-}"
+        svc_group="${UNIT_GROUP[$idx]:-}"
+    fi
 
     # Stop service
     stop_and_disable_service "$unit"
@@ -527,7 +580,7 @@ remove_node_unit() {
     # Docker container if applicable. The container shares the unit's base name
     # (new install: telcoin; legacy: telcoin-<role>); confirm via the resolver,
     # then attempt removal by that name and guard the shared image.
-    if [[ "${UNIT_DOCKER[$unit]:-false}" == "true" ]]; then
+    if [[ "$is_docker" == "true" ]]; then
         local ctr
         ctr="$(tn_resolve_container 2>/dev/null || echo "$unit")"
         remove_docker_container "$ctr" "$unit"
@@ -546,18 +599,13 @@ remove_node_unit() {
     remove_shared_components
 
     # Service user
-    remove_service_user "${UNIT_USER[$unit]:-}" "${UNIT_GROUP[$unit]:-}" "$unit"
+    remove_service_user "$svc_user" "$svc_group" "$unit"
 
     echo ""
     print_ok "Node removal complete (${unit})"
 
     # Prune from the installed set so remaining-node accounting stays correct.
-    local -a kept=()
-    local u
-    for u in "${INSTALLED_UNITS[@]}"; do
-        [[ "$u" == "$unit" ]] || kept+=("$u")
-    done
-    INSTALLED_UNITS=("${kept[@]}")
+    forget_unit "$unit"
 
     report_orphaned_groups
 
@@ -583,9 +631,9 @@ remove_all_nodes() {
 
     echo ""
 
-    local -a targets=("${INSTALLED_UNITS[@]}")
+    local -a targets=(${INSTALLED_UNITS[@]+"${INSTALLED_UNITS[@]}"})
     local unit
-    for unit in "${targets[@]}"; do
+    for unit in ${targets[@]+"${targets[@]}"}; do
         remove_node_unit "$unit"
     done
 
@@ -608,7 +656,7 @@ wipe_chain_data_only() {
     # installed unit individually so the operator confirms per node. Units come
     # from detect_node_installs (driven by tn_all_node_services).
     local unit ddir
-    for unit in "${INSTALLED_UNITS[@]}"; do
+    for unit in ${INSTALLED_UNITS[@]+"${INSTALLED_UNITS[@]}"}; do
         print_warn "This will wipe all chain data (${unit}). The node will resync."
         if confirm "Wipe chain data for ${unit}?"; then
             ddir="$(detect_data_dir)"
@@ -694,7 +742,7 @@ scan_custom_installs() {
         custom_is_managed_name "${svcname%.service}" && continue
         custom_svcs+=("$svc")
     done < <(grep -rlE 'telcoin-network|/tn-public' /etc/systemd/system/*.service 2>/dev/null || true)
-    for svc in "${custom_svcs[@]}"; do
+    for svc in ${custom_svcs[@]+"${custom_svcs[@]}"}; do
         svcname=$(basename "$svc")
         found=true
         print_warn "[CUSTOM] Service: ${svcname}  (${svc})"
@@ -719,7 +767,7 @@ scan_custom_installs() {
             custom_ctrs+=("$cline")
         done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
                    | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)
-        for cline in "${custom_ctrs[@]}"; do
+        for cline in ${custom_ctrs[@]+"${custom_ctrs[@]}"}; do
             IFS=$'\t' read -r cname cimage cstatus <<< "$cline"
             found=true
             print_warn "[CUSTOM] Docker container: ${cname}  (image: ${cimage}; ${cstatus})"

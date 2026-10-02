@@ -97,6 +97,11 @@ declare -a TESTNET_ADDONS_BUNDLE=(
 # the next `setup-vpn.sh --sync-keys` would then bake an INCOMPLETE maintainer set.
 # When the admin add-peer.sh mirrors a new maintainer key into this repo, add a row here.
 
+# Files to fetch: filled by check_versions, extended and read by download_updates.
+# Declared here at top level so it is a global on macOS /bin/bash 3.2, which has no
+# `declare -g`.
+FILES_TO_UPDATE=()
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -200,9 +205,7 @@ check_versions() {
     fi
 
     local updates_available=0
-    declare -ga FILES_TO_UPDATE=()
-    declare -gA LOCAL_VERSIONS=()
-    declare -gA REMOTE_VERSIONS=()
+    FILES_TO_UPDATE=()
 
     printf "  %-26s %-10s %-10s %s\n" "Script" "Local" "Remote" "Status"
     print_sep
@@ -215,9 +218,6 @@ check_versions() {
 
         local_ver=$(get_local_version "$local_path" "$version_var")
         remote_ver=$(get_remote_version "$remote_path" "$version_var")
-
-        LOCAL_VERSIONS["$local_path"]="$local_ver"
-        REMOTE_VERSIONS["$local_path"]="$remote_ver"
 
         if [[ "$local_ver" == "missing" ]]; then
             status="MISSING"

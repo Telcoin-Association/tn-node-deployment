@@ -15,7 +15,7 @@
 # Every NEW install (and every other script's happy path) now uses ONE name:
 #     telcoin.service / --name telcoin / /etc/telcoin / /var/lib/telcoin /
 #     /opt/telcoin/start-telcoin.sh / /var/log/telcoin/telcoin*.log
-# (.node-meta carries NODE_TYPE=). lib/fallback.sh keeps legacy installs WORKING
+# (.node-meta records no role). lib/fallback.sh keeps legacy installs WORKING
 # but never migrates them. This script performs the one-time migration.
 #
 # SCOPE
@@ -27,9 +27,10 @@
 # and validator wrappers now differ only in that one defunct line. This migration
 # therefore collapses the per-role layout into ONE identity: it strips the removed
 # `--observer` flag from a legacy wrapper and provisions the node validator-capable
-# (including the P2P consensus UDP ports 49590 + 49594). NODE_TYPE is written as a
-# non-authoritative presentation HINT (observer); the real authority is on-chain
-# tn_isValidator, from which the dashboard auto-selects the validator view. The
+# (including the P2P consensus UDP ports 49590 + 49594). It also removes the old
+# NODE_TYPE presentation hint from .node-meta: nothing on the server records a role.
+# The dashboard takes the validator view from the on-chain stake status
+# (ConsensusRegistry getValidator, read by node_stake_status in lib/common.sh). The
 # node keeps its existing BLS keypair, so no key changes are needed.
 #
 # Safe to run on ANY legacy telcoin-{observer,validator} install -- staked or not.
@@ -66,7 +67,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 set -E
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 
 # Unified (target) identity -- mirrors lib/fallback.sh's canonical new-install names.
 readonly SYSTEMD_DIR="/etc/systemd/system"
@@ -115,9 +116,10 @@ usage() {
 migrate-node-naming.sh v${SCRIPT_VERSION}
 
 Migrate a legacy telcoin-{observer,validator} install to the unified 'telcoin'
-layout: strips the removed --observer flag, sets NODE_TYPE=observer (a non-
-authoritative hint), and opens the P2P consensus ports so the node is
-validator-capable. Idempotent and self-rolling-back.
+layout: strips the removed --observer flag, removes the old NODE_TYPE hint from
+.node-meta (the validator view follows the on-chain stake status), and opens the
+P2P consensus ports so the node is validator-capable. Idempotent and
+self-rolling-back.
 
 USAGE:
   sudo bash migrate-node-naming.sh [--yes]
@@ -147,7 +149,8 @@ rollback() {
     [[ "$ROLLED_BACK" == true ]] && return 0
     ROLLED_BACK=true
     # Maximally defensive: no errexit (rollback must run to completion) and no
-    # nounset (expanding an empty *_MOVED array under `set -u` errors on bash 4.3).
+    # nounset. The *_MOVED loops below are also written to survive an empty array
+    # under `set -u`, which is an error before bash 4.4 (macOS /bin/bash 3.2 too).
     set +eu
     print_warn "Restoring the previous (legacy) layout..."
 
@@ -162,7 +165,7 @@ rollback() {
         # where EFFECTIVE_DATA_DIR == UNIFIED_DATA_DIR -- but key off EFFECTIVE so the reverse is
         # correct by construction.
         mkdir -p "$LEGACY_DATA_DIR"
-        for base in "${DATA_MOVED[@]}"; do
+        for base in ${DATA_MOVED[@]+"${DATA_MOVED[@]}"}; do
             [[ -e "${EFFECTIVE_DATA_DIR}/${base}" ]] && \
                 mv "${EFFECTIVE_DATA_DIR}/${base}" "${LEGACY_DATA_DIR}/${base}"
         done
@@ -173,13 +176,13 @@ rollback() {
     fi
     if [[ "$MOVED_CONFIG" == true ]]; then
         mkdir -p "$LEGACY_CONFIG_DIR"
-        for base in "${CONFIG_MOVED[@]}"; do
+        for base in ${CONFIG_MOVED[@]+"${CONFIG_MOVED[@]}"}; do
             [[ -e "${UNIFIED_CONFIG_DIR}/${base}" ]] && \
                 mv "${UNIFIED_CONFIG_DIR}/${base}" "${LEGACY_CONFIG_DIR}/${base}"
         done
     fi
 
-    # Restore the original .node-meta (we may have rewritten NODE_TYPE/DATA_DIR).
+    # Restore the original .node-meta (we may have removed NODE_TYPE and rewritten DATA_DIR).
     if [[ -n "$META_BAK" && -f "$META_BAK" && -d "$LEGACY_CONFIG_DIR" ]]; then
         cp -a "$META_BAK" "${LEGACY_CONFIG_DIR}/.node-meta"
     fi
@@ -233,9 +236,7 @@ detect_legacy() {
     # Idempotency: unified unit present and no legacy unit -> already migrated.
     if [[ -f "$UNIFIED_UNIT" && -z "$ROLE" ]]; then
         print_ok "Already migrated: ${UNIFIED_UNIT} present, no legacy telcoin-{observer,validator}.service."
-        local nt
-        nt="$(tn_resolve_node_type 2>/dev/null || echo '?')"
-        print_info "NODE_TYPE=${nt}. Nothing to do."
+        print_info "Nothing to do."
         exit 0
     fi
 
@@ -388,10 +389,19 @@ stop_legacy() {
 # Move every entry (incl. dotfiles) of <src role dir> up into its unified parent,
 # then rmdir the role dir. Collision-guarded: aborts (-> rollback) if a same-named
 # entry already exists in the destination, so nothing is ever clobbered. Records
-# moved basenames in the named array for precise rollback.
+# moved basenames in the named array (CONFIG_MOVED or DATA_MOVED) for precise
+# rollback.
 relocate_dir() {
     local src="$1" dst="$2" arr_name="$3" label="$4"
-    local -n moved_ref="$arr_name"   # nameref (bash 4.3+; node is Linux bash 4+)
+    local moved=0
+
+    # The moved list is one of two known globals, appended through a case below
+    # rather than a nameref so this runs on bash 3.2. Any other name is refused
+    # before anything moves.
+    case "$arr_name" in
+        CONFIG_MOVED|DATA_MOVED) ;;
+        *) print_error "relocate_dir: unknown moved-list name '${arr_name}'"; return 1 ;;
+    esac
 
     if [[ "$src" == "$dst" ]]; then
         print_info "${label} already unified (${dst}) -- skipping."
@@ -419,7 +429,11 @@ relocate_dir() {
     for item in "$src"/*; do
         base="$(basename "$item")"
         mv "$item" "${dst}/${base}"
-        moved_ref+=("$base")
+        case "$arr_name" in
+            CONFIG_MOVED) CONFIG_MOVED+=("$base") ;;
+            DATA_MOVED)   DATA_MOVED+=("$base") ;;
+        esac
+        moved=$((moved + 1))
     done
     shopt -u dotglob nullglob
 
@@ -434,7 +448,7 @@ relocate_dir() {
         chown "$DATA_OWNER" "$dst" 2>/dev/null \
             || print_warn "Could not chown ${dst} to ${DATA_OWNER} -- node may fail to start."
     fi
-    print_ok "Relocated ${label} (${#moved_ref[@]} entries)."
+    print_ok "Relocated ${label} (${moved} entries)."
 }
 
 # =============================================================================
@@ -522,10 +536,18 @@ update_meta() {
         : > "$meta"
     fi
     local ws_port=8546   # reth WS default with no --instance (legacy --instance 5 -> 8554)
-    print_step "Updating ${meta} (NODE_TYPE=observer, DATA_DIR=${EFFECTIVE_DATA_DIR}, RPC_PORT=${RPC_PORT}, WS_PORT=${ws_port})"
-    # NODE_TYPE is only the default-view HINT; the UI promotes to the validator view
-    # from on-chain tn_isValidator. Every migrated node is the same identity.
-    meta_set NODE_TYPE observer "$meta"
+    print_step "Updating ${meta} (NODE_TYPE removed, DATA_DIR=${EFFECTIVE_DATA_DIR}, RPC_PORT=${RPC_PORT}, WS_PORT=${ws_port})"
+    # No role is recorded on the server, so the old NODE_TYPE hint goes. The
+    # validator view comes from the on-chain stake status (node_stake_status in
+    # lib/common.sh); a .node-meta without NODE_TYPE reads as the plain full-node
+    # view everywhere. meta_unset arrived in lib/common.sh 1.5.0: when an older
+    # library is installed, delete the line directly instead of failing the step
+    # (which would roll the whole migration back).
+    if declare -F meta_unset >/dev/null 2>&1; then
+        meta_unset NODE_TYPE "$meta"
+    else
+        sed -i -E '/^NODE_TYPE=/d' "$meta"
+    fi
     # EFFECTIVE_DATA_DIR: /var/lib/telcoin for a default install, or the operator's
     # preserved custom mount (2nd disk) -- so the node keeps finding its data.
     meta_set DATA_DIR "$EFFECTIVE_DATA_DIR" "$meta"
@@ -662,7 +684,7 @@ report() {
     print_info "  wrapper:    ${UNIFIED_WRAPPER}"
     print_info "  config dir: ${UNIFIED_CONFIG_DIR}"
     print_info "  data dir:   ${EFFECTIVE_DATA_DIR}$([[ "$CUSTOM_DATA_DIR" == true ]] && echo ' (custom mount, preserved)')"
-    print_info "  NODE_TYPE:  observer (presentation hint; on-chain tn_isValidator is authoritative)"
+    print_info "  NODE_TYPE:  removed (the validator view follows the on-chain stake status)"
     echo ""
     print_info "Node RPC/WS now on ${RPC_PORT}/8546 (was 8541/8554 under --instance). The local"
     print_info "Node Manager UI reads both from .node-meta and was restarted just now (when"
@@ -676,9 +698,10 @@ report() {
     [[ -n "$META_BAK"    ]] && print_info "  ${META_BAK}"
     echo ""
     print_info "Unified layout in place; this node is validator-capable. The dashboard"
-    print_info "auto-selects the validator view once tn_isValidator is true on-chain. When"
-    print_info "this node is in committee it participates in consensus at the next epoch"
-    print_info "boundary (watch tn_latestConsensusHeader advancing)."
+    print_info "switches to the validator view once the on-chain stake status"
+    print_info "(ConsensusRegistry getValidator) shows this node staked. When this node is"
+    print_info "in committee it participates in consensus at the next epoch boundary"
+    print_info "(watch tn_latestConsensusHeader advancing)."
     print_info "Logs:   journalctl -u ${UNIFIED_SERVICE} -f"
     print_info "Status: systemctl status ${UNIFIED_SERVICE}"
 }
