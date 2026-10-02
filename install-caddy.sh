@@ -12,13 +12,19 @@
 #        the UI server enforces (every write -> 403). Management stays on the SSH
 #        tunnel (localhost, no such header).
 #
-#   2) Public RPC (# >>> tn-rpc >>> ... # <<< tn-rpc <<<)
-#        https://<rpc-domain>/  -> 127.0.0.1:${RPC_PORT}  (JSON-RPC; CORS + OPTIONS)
-#        wss://<rpc-domain>/    -> 127.0.0.1:${WS_PORT}   (WebSocket upgrade)
+#   2) Public RPC (# >>> tn-rpc >>> ... # <<< tn-rpc <<<), block v2:
+#        https://<rpc-domain>/  -> 127.0.0.1:${RPC_PORT}  (JSON-RPC; CORS + OPTIONS;
+#                                  request bodies capped at 2 MB)
+#        wss://<rpc-domain>/    -> 127.0.0.1:${WS_PORT}   (WebSocket upgrade; the
+#                                  Connection/Upgrade match ignores case)
+#        GET/HEAD from a browser -> 405 with a short page saying what the hostname is.
 #        reth stays loopback-only; the public reach is exclusively the Caddy TLS
-#        edge. Enabling also ADVERTISES the endpoint in node-info.yaml (the rpc of
-#        every `workers:` entry; legacy `worker:` map too) so gateways/wallets
-#        discover it, then restarts the node (with a brick guard).
+#        edge. Enabling also ADVERTISES the endpoint in node-info.yaml (worker 0's
+#        rpc, written by `keytool set-rpc`; legacy `worker:` map too) so
+#        gateways/wallets discover it, then restarts the node (with a brick guard).
+#        A block written by an older version (no `# tn-rpc block v2` stamp) is
+#        reported as stale; running rpc-enable again with the same hostname
+#        rewrites it.
 #
 # SAFETY RULES (every Caddyfile change, enable/disable/teardown alike):
 #   - The new file is rendered to a temp file inside /etc/caddy and checked with
@@ -50,6 +56,15 @@
 #     restarted on the previous config. A node still auto-restarting (RestartSec) or
 #     replaying its DB when the window ends is NOT rolled back -- the change is kept,
 #     with a warning.
+#   - Epoch boundary (rpc-enable, rpc-disable): when the node will be restarted and it
+#     votes in the current committee, the run first waits for the epoch to close
+#     (tn_wait_restart_window, lib/common.sh), before the first node edit. Nothing is
+#     edited and nothing restarts when node-info.yaml already holds the wanted URLs.
+#     TN_SKIP_EPOCH_WAIT=1 skips the wait. The restart that recovers from a rollback
+#     never waits.
+#   - Older lib/common.sh: nothing dies on it. rpc-disable always takes the endpoint
+#     down; rpc-enable warns about what it skips (epoch wait, adding --ws, keytool)
+#     and says to run update-scripts.sh.
 #
 # IMPORTANT: set the DNS A record (<domain> -> this server's INBOUND public IP)
 # BEFORE enabling. Caddy requests the cert on first start; if DNS isn't pointing here
@@ -81,9 +96,25 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 # common.sh provides the print_*/check_root helpers but not die(); define our own
 # so error paths exit cleanly (print_error goes to stderr, which the UI surfaces).
-die() { print_error "$*"; exit 1; }
+# In a --json event run (enable, disable, rpc-enable, rpc-disable) the reason also
+# goes out as an `error` event and the closing `done ok:false`, so the UI shows why.
+die() {
+    print_error "$*"
+    if [[ "${JSON_STREAM:-false}" == "true" ]]; then
+        json_event error "$*"
+        json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "$*")\"}"
+    fi
+    exit 1
+}
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
+# basic_auth (the dashboard block) and heredocs (the RPC block page) need Caddy 2.8.0.
+readonly CADDY_MIN_VERSION="2.8.0"
+# Timestamped Caddyfile backups kept by caddy_prune_backups.
+readonly CADDY_KEEP_BACKUPS=5
+# Stamp line of the RPC block write_rpc_block emits. A tn-rpc block without it was
+# written by install-caddy.sh 1.3.0 or older (caddy_rpc_block_stale).
+readonly RPC_BLOCK_STAMP="# tn-rpc block v2"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly CADDY_DIR="${CADDYFILE%/*}"
 readonly CADDYFILE_ORIG="/etc/caddy/Caddyfile.tn-orig"
@@ -127,6 +158,10 @@ CADDY_LAUNCH_METHOD=""
 # (false when caddy_ws_preflight fell back to http only) and where the dashboard moved.
 CADDY_WS_OK=true
 CADDY_DASH_MOVED_TO=""
+# caddy_restart_window has run in this process (the epoch wait happens once per run).
+CADDY_WINDOW_DONE=false
+# Library helpers already reported missing by caddy_lib_has (space-separated names).
+CADDY_LIB_WARNED=""
 
 # =============================================================================
 # JSON / NON-INTERACTIVE MODE (mirrors setup-*.sh)
@@ -138,10 +173,12 @@ JSON_USERNAME=""
 JSON_RPC_DOMAIN=""
 JSON_MOVE_DASH=""
 JSON_DONE_EMITTED=false
+# true once json_setup_fds has opened fd 3: from then on die() reports through events.
+JSON_STREAM=false
 
 json_mode() { [[ "$JSON_MODE" == "true" ]]; }
 
-json_setup_fds() { exec 3>&1; exec 1>&2; }   # fd3 = JSON; stdout -> stderr (noise)
+json_setup_fds() { exec 3>&1; exec 1>&2; JSON_STREAM=true; }   # fd3 = JSON; stdout -> stderr (noise)
 
 json_escape() {
     local s="$1"
@@ -210,21 +247,55 @@ caddy_emit_lines() {
     done
 }
 
-# caddy_say <ok|warn|info> <msg> -- print_* for the terminal; in --json mode ALSO a
-# `log` event, because there stdout is redirected to stderr (server logs only) and the
-# operator should still see backups, WebSocket changes and warnings in the UI.
+# caddy_say <ok|warn|step|info> <msg> -- print_* for the terminal; in a --json event
+# run ALSO an event, because there stdout is redirected to stderr (server logs only)
+# and the operator should still see backups, WebSocket changes, the epoch wait and
+# warnings in the UI: warn and step go out as events of that name, ok and info as
+# `log`. Never called by the status phases, whose stdout is one JSON object.
 caddy_say() {
-    local level="$1" msg
+    local level="$1" msg ev="log"
     shift
     msg="$*"
     case "$level" in
         ok)   print_ok "$msg" ;;
-        warn) print_warn "$msg"; msg="WARNING: ${msg}" ;;
+        warn) print_warn "$msg"; ev="warn" ;;
+        step) print_step "$msg"; ev="step" ;;
         *)    print_info "$msg" ;;
     esac
-    if json_mode; then
-        json_emit "{\"event\":\"log\",\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
+    if [[ "$JSON_STREAM" == "true" ]]; then
+        json_emit "{\"event\":\"${ev}\",\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
     fi
+}
+
+# caddy_wait_say <step|log|warn> <msg> -- progress printer handed to
+# tn_wait_restart_window (lib/common.sh), routed through caddy_say.
+caddy_wait_say() {
+    case "${1:-}" in
+        step) caddy_say step "${2:-}" ;;
+        warn) caddy_say warn "${2:-}" ;;
+        *)    caddy_say info "${2:-}" ;;
+    esac
+    return 0
+}
+
+# caddy_lib_has <what-happens-instead> <fn>... -- 0 when lib/common.sh defines every
+# <fn>. Otherwise warn once per first-named helper that this run falls back to the
+# older behaviour described by <what-happens-instead>, and return 1. The soft guard
+# for helpers that arrived in lib/common.sh 1.5.0 / 1.6.0: a box with an older
+# library keeps working (rpc-disable must always be able to take the endpoint down).
+caddy_lib_has() {
+    local instead="$1" fn missing=""
+    shift
+    for fn in "$@"; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
+    done
+    [[ -z "$missing" ]] && return 0
+    case " ${CADDY_LIB_WARNED} " in
+        *" ${1} "*) return 1 ;;
+    esac
+    CADDY_LIB_WARNED="${CADDY_LIB_WARNED} ${1}"
+    caddy_say warn "lib/common.sh ${COMMON_VERSION:-unknown} has no ${missing}, so ${instead}. Run update-scripts.sh to update the library."
+    return 1
 }
 
 # =============================================================================
@@ -359,10 +430,39 @@ caddy_validate_rpc_url() {
     return 0
 }
 
-# Install Caddy from the official (cloudsmith) apt repo if missing.
+# Version of the installed caddy as X.Y.Z ("v2.8.4 h1:..." -> 2.8.4); '' when it
+# cannot be read.
+caddy_installed_version() {
+    local v
+    v="$(caddy version 2>/dev/null | head -1 || true)"
+    v="${v%% *}"
+    v="${v#v}"
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo ""; return 0; }
+    echo "${BASH_REMATCH[0]}"
+}
+
+# Die unless the installed caddy is CADDY_MIN_VERSION or newer: the dashboard block
+# uses basic_auth (named basicauth before 2.8.0) and the RPC block's page is a
+# heredoc. Distribution packages lag (Ubuntu 24.04 ships 2.6.2); the official apt
+# repository has the current release. An unreadable version is a warning only --
+# `caddy validate` still checks the new file before it goes live.
+caddy_check_version() {
+    local v
+    v="$(caddy_installed_version)"
+    if [[ -z "$v" ]]; then
+        caddy_say warn "Could not read the Caddy version ($(caddy version 2>/dev/null | head -1 || true)). This script needs Caddy ${CADDY_MIN_VERSION} or newer; caddy validate checks the new config before it is used."
+        return 0
+    fi
+    version_gte "$v" "$CADDY_MIN_VERSION" && return 0
+    die "Caddy ${v} is installed, and this script needs ${CADDY_MIN_VERSION} or newer (basic_auth, heredocs). Install the current release from the official Caddy apt repository (https://caddyserver.com/docs/install#debian-ubuntu-raspbian): add the repository, then sudo apt-get update && sudo apt-get install caddy. Run this again afterwards. The Caddyfile was not changed."
+}
+
+# Install Caddy from the official (cloudsmith) apt repo if missing, then check the
+# version floor (an installed caddy may be an older distribution package).
 install_caddy_pkg() {
     if command -v caddy >/dev/null 2>&1; then
         print_ok "Caddy already installed: $(caddy version 2>/dev/null | head -1)"
+        caddy_check_version
         return 0
     fi
     print_info "Installing Caddy from the official repository..."
@@ -374,17 +474,19 @@ install_caddy_pkg() {
     run_streamed apt-get update
     run_streamed apt-get install -y caddy
     command -v caddy >/dev/null 2>&1 || die "Caddy installation failed"
+    caddy_check_version
 }
 
+# Allow / remove 80 and 443 in ufw. Done while ufw is inactive too: ufw keeps the
+# rules and applies them when it is enabled, so a later `ufw enable` neither blocks
+# a served site nor leaves the ports open after the last site is gone.
 caddy_open_ports() {
     command -v ufw >/dev/null 2>&1 || return 0
-    ufw status 2>/dev/null | grep -q "Status: active" || return 0
     ufw allow 80/tcp  >/dev/null 2>&1 || true
     ufw allow 443/tcp >/dev/null 2>&1 || true
 }
 caddy_close_ports() {
     command -v ufw >/dev/null 2>&1 || return 0
-    ufw status 2>/dev/null | grep -q "Status: active" || return 0
     ufw delete allow 80/tcp  >/dev/null 2>&1 || true
     ufw delete allow 443/tcp >/dev/null 2>&1 || true
 }
@@ -515,7 +617,8 @@ caddy_write_managed() {
 #   2. keep the true pre-Telcoin config once (Caddyfile.tn-orig, never our own file);
 #   3. back up the live file to Caddyfile.bak.<YYYYmmdd_HHMMSS> (cp -p; never clobbers
 #      an existing backup) and record it in CADDY_LAST_BACKUP for caddy_apply_live;
-#   4. give <tmp> the live file's owner+mode (root:root 0644 when none), then mv -f.
+#   4. give <tmp> the live file's owner+mode (root:root 0644 when none), then mv -f;
+#   5. prune the timestamped backups to the newest CADDY_KEEP_BACKUPS.
 # <validate>=novalidate skips step 1 (said so) -- only caddy_teardown passes it, when
 # the caddy binary is gone and there is nothing to validate with.
 caddy_swap_in() {
@@ -552,6 +655,37 @@ caddy_swap_in() {
     fi
     mv -f "$tmp" "$CADDYFILE"
     CADDY_SWAPPED=true
+    caddy_prune_backups
+}
+
+# Delete all but the newest CADDY_KEEP_BACKUPS timestamped backups
+# (Caddyfile.bak.<YYYYmmdd_HHMMSS>; the names sort in time order). Never deletes
+# CADDY_LAST_BACKUP (what this run restores if Caddy rejects the reload) or
+# Caddyfile.tn-orig, nor a file whose suffix is not exactly that timestamp. Best
+# effort: a file that cannot be removed is left.
+caddy_prune_backups() {
+    local f suffix n i
+    local -a found=() sorted=()
+    for f in "${CADDYFILE}".bak.[0-9]*_[0-9]*; do
+        [[ -f "$f" ]] || continue
+        suffix="${f#"${CADDYFILE}.bak."}"
+        [[ "$suffix" =~ ^[0-9]{8}_[0-9]{6}$ ]] || continue
+        found+=("$f")
+    done
+    n=${#found[@]}
+    [[ "$n" -gt "$CADDY_KEEP_BACKUPS" ]] || return 0
+    while IFS= read -r f; do
+        sorted+=("$f")
+    done < <(printf '%s\n' "${found[@]}" | LC_ALL=C sort)
+    i=0
+    while [[ "$i" -lt $(( n - CADDY_KEEP_BACKUPS )) ]]; do
+        f="${sorted[$i]}"
+        if [[ "$f" != "$CADDY_LAST_BACKUP" && "$f" != "$CADDYFILE_ORIG" ]]; then
+            rm -f "$f" 2>/dev/null || true
+        fi
+        i=$(( i + 1 ))
+    done
+    return 0
 }
 
 # Put CADDY_LAST_BACKUP back as the live Caddyfile (byte-identical, same owner+mode via
@@ -673,20 +807,65 @@ write_dashboard_block() {
     } > "$outfile"
 }
 
-# Write the RPC vhost block (content only, no fences) to <outfile>. Self-contained
-# (no `import`): OPTIONS preflight -> empty 200 + CORS; WebSocket Upgrade -> reth WS
-# port; everything else -> reth HTTP port + CORS. 127.0.0.1 (not localhost) matches
-# reth's IPv4 loopback bind (http_addr/ws_addr default to Ipv4Addr::LOCALHOST). Tabs
-# keep the file `caddy fmt`-clean. Ports come from .node-meta (meta_get), default
-# 8545/8546 -- so a node that pinned non-default ports is proxied correctly too.
+# Print the page a browser gets from the public RPC hostname <domain> (GET or HEAD
+# without an Upgrade header; the RPC block answers it with 405), each line prefixed
+# with <indent>. It is authored here and served inline from the Caddyfile, so
+# rpc-disable removes it with the block, `caddy validate` checks it and the backups
+# keep it. Rules that keep it safe inside a Caddy heredoc: no blank lines, no curly
+# braces anywhere (the curl example writes them as &#123; and &#125;, which browsers
+# decode) and inline style="" only. <domain> is a validated [A-Za-z0-9.-] name.
+caddy_rpc_page() {
+    local domain="$1" indent="$2" line
+    while IFS= read -r line; do
+        printf '%s%s\n' "$indent" "${line//@DOMAIN@/$domain}"
+    done <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@DOMAIN@ - Telcoin Network JSON-RPC</title>
+</head>
+<body style="margin:0;padding:24px 16px;background:#f4f5f7;color:#1c2330;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:16px;line-height:1.5">
+<main style="max-width:640px;margin:0 auto;padding:24px;background:#ffffff;border:1px solid #d5d9e0;border-radius:8px">
+<h1 style="margin:0 0 12px;font-size:20px;overflow-wrap:anywhere">@DOMAIN@</h1>
+<p style="margin:0 0 12px">This is the JSON-RPC endpoint of a Telcoin Network node, for wallets, dapps and scripts. Send JSON-RPC requests to https://@DOMAIN@/ with HTTP POST; WebSocket clients connect to wss://@DOMAIN@/. A browser visit only shows this page.</p>
+<p style="margin:0 0 8px">Check that it answers (the result is the chain id in hex):</p>
+<pre style="margin:0 0 12px;padding:12px;background:#f4f5f7;border:1px solid #d5d9e0;border-radius:6px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px">curl -s -X POST -H "Content-Type: application/json" --data '&#123;"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1&#125;' https://@DOMAIN@/</pre>
+<p style="margin:0">Network documentation: <a href="https://docs.telcoin.network/" style="color:#1554c0">docs.telcoin.network</a></p>
+</main>
+</body>
+</html>
+HTML
+}
+
+# Write the RPC vhost block (content only, no fences) to <outfile>: block v2, stamped
+# with RPC_BLOCK_STAMP on its first comment line. Self-contained (no `import`):
+#   - OPTIONS preflight -> empty 200 + CORS;
+#   - WebSocket upgrade -> reth WS port. The Connection / Upgrade match ignores case:
+#     Caddy's `header` matcher is case-sensitive, and Google's balancer and nginx send
+#     `Connection: upgrade`, which block v1 answered with 405;
+#   - GET / HEAD without an Upgrade header (a browser) -> 405 with Allow and the page
+#     from caddy_rpc_page, instead of reth's bare error;
+#   - everything else -> reth HTTP port + CORS, request bodies capped at 2 MB (the
+#     largest legitimate JSON-RPC request is about 256 KiB; reth's own cap is 15 MB).
+#     No server timeouts (they would cut WebSocket sessions and long eth_getLogs
+#     answers) and no per-IP limits (carrier NAT puts many users behind one address).
+# 127.0.0.1 (not localhost) matches reth's IPv4 loopback bind (http_addr/ws_addr
+# default to Ipv4Addr::LOCALHOST). Tabs keep the file `caddy fmt`-clean, heredoc
+# included. Ports come from .node-meta (meta_get), default 8545/8546 -- so a node that
+# pinned non-default ports is proxied correctly too.
 write_rpc_block() {
     local domain="$1" outfile="$2"
     local rpc_port ws_port
     rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"; [[ "$rpc_port" =~ ^[0-9]+$ ]] || rpc_port=8545
     ws_port="$(meta_get WS_PORT 2>/dev/null || true)";   [[ "$ws_port"  =~ ^[0-9]+$ ]] || ws_port=8546
     {
-        printf '# Public JSON-RPC + WebSocket endpoint. READ-ONLY reverse proxy to reth on\n'
-        printf '# loopback; CORS + OPTIONS preflight answered at the TLS edge.\n'
+        printf '%s: public JSON-RPC + WebSocket endpoint, written by\n' "$RPC_BLOCK_STAMP"
+        printf '# install-caddy.sh rpc-enable (run it again with the same hostname to rewrite\n'
+        printf '# this block). Reverse proxy to reth on loopback; CORS and the OPTIONS preflight\n'
+        printf '# are answered here, a browser GET gets a short page (405), and request bodies\n'
+        printf '# are capped at 2 MB.\n'
         printf '%s {\n' "$domain"
         printf '\tencode zstd gzip\n'
         printf '\t@preflight method OPTIONS\n'
@@ -697,20 +876,45 @@ write_rpc_block() {
         printf '\t\trespond 200\n'
         printf '\t}\n'
         printf '\t@websocket {\n'
-        printf '\t\theader Connection *Upgrade*\n'
-        printf '\t\theader Upgrade websocket\n'
+        printf '\t\theader_regexp wsconn Connection (?i)upgrade\n'
+        printf '\t\theader_regexp wsup Upgrade (?i)websocket\n'
         printf '\t}\n'
         printf '\thandle @websocket {\n'
         printf '\t\treverse_proxy 127.0.0.1:%s\n' "$ws_port"
+        printf '\t}\n'
+        printf '\t@browser {\n'
+        printf '\t\tmethod GET HEAD\n'
+        printf '\t\theader !Upgrade\n'
+        printf '\t}\n'
+        printf '\thandle @browser {\n'
+        printf '\t\theader Allow "POST, OPTIONS"\n'
+        printf '\t\theader Content-Type "text/html; charset=utf-8"\n'
+        printf '\t\trespond <<TNPAGE\n'
+        caddy_rpc_page "$domain" $'\t\t\t'
+        printf '\t\t\tTNPAGE 405\n'
         printf '\t}\n'
         printf '\thandle {\n'
         printf '\t\theader Access-Control-Allow-Origin "*"\n'
         printf '\t\theader Access-Control-Allow-Methods "POST, GET, OPTIONS"\n'
         printf '\t\theader Access-Control-Allow-Headers "X-Requested-With, Content-Type"\n'
+        printf '\t\trequest_body {\n'
+        printf '\t\t\tmax_size 2MB\n'
+        printf '\t\t}\n'
         printf '\t\treverse_proxy 127.0.0.1:%s\n' "$rpc_port"
         printf '\t}\n'
         printf '}\n'
     } > "$outfile"
+}
+
+# 0 (true) when the managed Caddyfile holds a tn-rpc block without RPC_BLOCK_STAMP:
+# written by install-caddy.sh 1.3.0 or older (case-sensitive WebSocket match, no body
+# cap, no browser page). rpc-enable with the same hostname rewrites it: a Caddy
+# reload, and no node restart when node-info.yaml and the launch file need no change.
+caddy_rpc_block_stale() {
+    local block
+    caddy_block_present "$RPC_BEGIN" || return 1
+    block="$(caddy_extract_block "$RPC_BEGIN" "$RPC_END")"
+    [[ "$block" != *"$RPC_BLOCK_STAMP"* ]]
 }
 
 # Shared preflight for any vhost enable: ports 80/443 free (caddy itself ignored) and
@@ -741,18 +945,20 @@ caddy_node_info_path() {
     printf '%s/node-info.yaml\n' "$dd"
 }
 
-# Read or edit ONLY the worker P2pNode(s)' `rpc:` in node-info.yaml via a python3 stdlib
-# line editor (PyYAML is not guaranteed on a node). Handles BOTH on-disk shapes:
+# Read or edit ONLY worker 0's `rpc:` in node-info.yaml via a python3 stdlib line editor
+# (PyYAML is not guaranteed on a node) -- the fallback for `keytool set-rpc`, which
+# caddy_node_info_write prefers, and the reader when lib/common.sh has no
+# tn_node_info_rpc. Handles BOTH on-disk shapes:
 #   current (telcoin-network >= v0.15 keytool):  p2p_info: {primary, workers: [ {..}, .. ]}
-#     -> set/clear `rpc` on EVERY workers entry (each worker's kad record advertises the
-#        same public endpoint);
+#     -> set/clear `rpc` on the FIRST workers entry, as `keytool set-rpc` does;
 #   legacy:                                       p2p_info: {primary, worker: {..}}
 #     -> set/clear worker.rpc.
 # mode=set writes http (+ ws when non-empty); mode=clear resets to `~`; mode=get prints
 # "<http>|<ws>" of the FIRST worker ('' parts when absent) and never writes. Idempotent:
 # a semantic no-op (same URLs, even if quoted differently) leaves the file byte-identical
-# and unwritten. Key order and every other line are kept; primary and execution_address
-# are never touched. Returns the python rc (0 ok, 2 read/write error, 3 unexpected shape).
+# and unwritten. Key order and every other line are kept; primary, execution_address
+# and the other workers are never touched. Returns the python rc (0 ok, 2 read/write
+# error, 3 unexpected shape).
 caddy_edit_node_info() {
     local ni="$1" mode="$2" http_url="${3:-}" ws_url="${4:-}"
     TN_NI_FILE="$ni" TN_NI_MODE="$mode" TN_NI_HTTP="$http_url" TN_NI_WS="$ws_url" python3 - <<'PYEOF'
@@ -918,7 +1124,7 @@ else:
     want = None
 
 edits = []                                 # (start, end, replacement lines)
-for t in targets:
+for t in targets[:1]:                      # worker 0 only, matching keytool set-rpc
     s0, e0, ki, dl = t
     rpc, r_end, last, cur = scan(t)
     if cur == want:
@@ -956,6 +1162,107 @@ sys.exit(0)
 PYEOF
 }
 
+# Echo "<http> <ws>" that worker 0 of <ni> advertises, "none" for an absent part:
+# tn_node_info_rpc (lib/common.sh 1.6.0), else the python3 reader. rc 1 when it
+# cannot be read (no reader, missing file, unexpected layout). Prints nothing else:
+# the status phases use it, and their stdout is one JSON object.
+caddy_node_info_rpc_get() {
+    local ni="$1" out h w
+    if declare -F tn_node_info_rpc >/dev/null 2>&1; then
+        out="$(tn_node_info_rpc "$ni" 0 2>/dev/null)" || return 1
+        [[ -n "$out" ]] || return 1
+        printf '%s\n' "$out"
+        return 0
+    fi
+    [[ -r "$ni" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    out="$(caddy_edit_node_info "$ni" get 2>/dev/null)" || return 1
+    [[ "$out" == *"|"* ]] || return 1
+    h="${out%%|*}"
+    w="${out#*|}"
+    printf '%s %s\n' "${h:-none}" "${w:-none}"
+}
+
+# 0 (true) when node-info.yaml can be edited on this host: python3 is present, or
+# lib/common.sh can run keytool through the runner named in the node launch file.
+caddy_node_info_can_edit() {
+    command -v python3 >/dev/null 2>&1 && return 0
+    declare -F tn_keytool >/dev/null 2>&1 || return 1
+    declare -F tn_launch_runner >/dev/null 2>&1 || return 1
+    tn_launch_runner >/dev/null 2>&1
+}
+
+# Give <ni> the owner and mode of <bak> again. keytool rewrites node-info.yaml in
+# place, so this is a safety net for an editor that replaced the file instead.
+caddy_node_info_keep_perms() {
+    chown --reference="$2" "$1" 2>/dev/null || true
+    chmod --reference="$2" "$1" 2>/dev/null || true
+}
+
+# Make worker 0 of <ni> advertise <http> (+ <ws> when non-empty) for mode=set, or
+# nothing for mode=clear, then read it back and compare. The caller has copied <ni>
+# to <ni>.tn-bak. Prefers `keytool set-rpc` run by the node's own release, through
+# tn_launch_runner + tn_keytool (lib/common.sh 1.6.0): the node that reads the file
+# writes it. When keytool cannot run or fails, or worker 0 does not read back as
+# wanted, the backup is restored and the python3 editor (caddy_edit_node_info) tries.
+# Owner and mode are restored from the backup after either editor.
+# rc 0 written and verified; 1 failed, <ni> restored from the backup; 2 no editor
+# could run (no keytool runner, no python3), <ni> untouched.
+caddy_node_info_write() {
+    local ni="$1" mode="$2" http_url="${3:-}" ws_url="${4:-}"
+    local bak="${1}.tn-bak" want spec="" out rc first cur tried=false
+    local -a args=()
+    if [[ "$mode" == "set" ]]; then
+        want="${http_url} ${ws_url:-none}"
+        args=(set-rpc --http "$http_url")
+        if [[ -n "$ws_url" ]]; then args+=(--ws "$ws_url"); fi
+    else
+        want="none none"
+        args=(set-rpc --clear)
+    fi
+    if caddy_lib_has "node-info.yaml is edited by the python3 fallback instead of keytool set-rpc" tn_keytool tn_launch_runner tn_node_info_rpc; then
+        rc=0
+        spec="$(tn_launch_runner 2>/dev/null)" || rc=$?
+        if [[ "$rc" -ne 0 || -z "$spec" ]]; then
+            caddy_say info "Could not read the node runner from its launch file (rc ${rc}); editing node-info.yaml with the python3 fallback."
+            spec=""
+        fi
+    fi
+    if [[ -n "$spec" ]]; then
+        tried=true
+        rc=0
+        out="$(tn_keytool "$spec" "${ni%/*}" "${args[@]}" 2>&1)" || rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+            caddy_node_info_keep_perms "$ni" "$bak"
+            cur="$(caddy_node_info_rpc_get "$ni" || echo unreadable)"
+            if [[ "$cur" == "$want" ]]; then
+                caddy_say info "node-info.yaml written by keytool set-rpc (${spec})."
+                return 0
+            fi
+            caddy_say warn "After keytool set-rpc, worker 0 of node-info.yaml reads '${cur}' instead of '${want}'. Restoring the file and trying the python3 editor."
+        else
+            first="$(printf '%s\n' "$out" | awk 'NF {print; exit}' || true)"
+            caddy_say info "keytool set-rpc failed (rc ${rc}${first:+: ${first}}). Restoring node-info.yaml and trying the python3 editor."
+        fi
+        cp -p "$bak" "$ni" 2>/dev/null || true
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        if [[ "$tried" == "true" ]]; then
+            caddy_say warn "python3 is not installed, so there is no fallback editor for node-info.yaml."
+            return 1
+        fi
+        return 2
+    fi
+    if caddy_edit_node_info "$ni" "$mode" "$http_url" "$ws_url"; then
+        caddy_node_info_keep_perms "$ni" "$bak"
+        cur="$(caddy_node_info_rpc_get "$ni" || echo unreadable)"
+        [[ "$cur" == "$want" ]] && return 0
+        caddy_say warn "After the python3 edit, worker 0 of node-info.yaml reads '${cur}' instead of '${want}'."
+    fi
+    cp -p "$bak" "$ni" 2>/dev/null || true
+    return 1
+}
+
 # Undo / keep a launch-file --ws edit made by caddy_ws_preflight (no-op when none).
 caddy_launch_rollback() {
     [[ -n "$CADDY_LAUNCH_BAK" && -f "$CADDY_LAUNCH_BAK" ]] || return 0
@@ -981,13 +1288,31 @@ caddy_node_stays_active() {
     systemctl is-active --quiet "$svc" 2>/dev/null
 }
 
+# Before the first node edit of this run (the --ws launch edit or the node-info.yaml
+# write), hold the run while the node votes in the current committee and the epoch
+# boundary is close: tn_wait_restart_window (lib/common.sh 1.5.0) waits for the epoch
+# to close and settle, at most TN_EPOCH_WAIT_MAX seconds; TN_SKIP_EPOCH_WAIT=1 skips
+# it. Waiting before the edit means an operator who stops the run during the wait
+# leaves nothing half applied. Runs once per run: caddy_restart_node_guarded calls it
+# again, a no-op by then. The restart that recovers from a rollback never calls it.
+# Progress goes through caddy_say (step / log / warn events in --json runs).
+caddy_restart_window() {
+    [[ "$CADDY_WINDOW_DONE" == "true" ]] && return 0
+    CADDY_WINDOW_DONE=true
+    caddy_lib_has "the node restarts without waiting for the epoch boundary, even when it is in the committee" tn_wait_restart_window tn_local_rpc_url || return 0
+    tn_wait_restart_window "$(tn_local_rpc_url)" caddy_wait_say || true
+    return 0
+}
+
 # Restart the node and verify RPC returns. FAST-FAIL if the unit enters `failed` (an
 # invalid worker.rpc crash-loops at startup: Restart=on-failure, StartLimitBurst=5):
 # restore node-info.yaml.tn-bak AND any launch-file --ws edit, restart to recover, and
 # die (the Caddy vhost is left up, harmlessly 502'ing until retried). A slow DB-replay
 # (neither up nor failed) is NON-fatal -- the change is kept and advertises once the
 # node finishes starting. <ni> is '' when only the launch file changed. Works for
-# binary AND docker installs (the host node-info.yaml is bind-mounted).
+# binary AND docker installs (the host node-info.yaml is bind-mounted). The epoch wait
+# (caddy_restart_window) has normally run before the edit; the call here only covers
+# a path that reached the restart without it. The recovery restart never waits.
 caddy_restart_node_guarded() {
     local ni="${1:-}"
     local svc rpc_port i rpc_up=false failed=false
@@ -1000,6 +1325,7 @@ caddy_restart_node_guarded() {
     fi
     rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"; [[ "$rpc_port" =~ ^[0-9]+$ ]] || rpc_port=8545
 
+    caddy_restart_window
     print_info "Restarting ${svc} to apply the change..."
     systemctl restart "$svc" 2>/dev/null || true
 
@@ -1052,24 +1378,24 @@ caddy_restart_for_launch() {
 # Advertise (mode=set) or un-advertise (mode=clear) the worker RPC endpoint in
 # node-info.yaml, then restart the node under the brick guard. <with_ws> (set only,
 # default true) also advertises wss://<domain>/; false writes http only (decided by
-# caddy_ws_preflight). Best-effort: a missing python3 / node-info.yaml is a non-fatal
-# warning (the proxy still works; it just won't be discovered on-network). A launch file
-# edited by caddy_ws_preflight gets its node restart on every path.
+# caddy_ws_preflight). Worker 0's current value is read first: when it already is what
+# is wanted, nothing is edited, there is no epoch wait and no restart (unless
+# caddy_ws_preflight edited the launch file). Otherwise caddy_restart_window runs the
+# epoch wait BEFORE the edit, then caddy_node_info_write edits and verifies.
+# Best-effort: a missing node-info.yaml, or no way to edit it (no keytool runner and no
+# python3), is a non-fatal warning (the proxy still works; it just won't be discovered
+# on-network). A launch file edited by caddy_ws_preflight gets its node restart on
+# every path.
 caddy_node_info_advertise() {
     local mode="$1" domain="${2:-}" with_ws="${3:-true}"
-    local ni; ni="$(caddy_node_info_path)"
-    if ! command -v python3 >/dev/null 2>&1; then
-        print_warn "python3 not found -- cannot edit node-info.yaml. The endpoint works but won't be advertised on-network; install python3 and re-run to advertise."
-        caddy_restart_for_launch
-        return 0
-    fi
+    local ni http_url="" ws_url="" want cur="" rc svc
+    ni="$(caddy_node_info_path)"
     if [[ ! -f "$ni" ]]; then
         print_warn "node-info.yaml not found (${ni}) -- skipping on-network advertisement."
         caddy_restart_for_launch
         return 0
     fi
 
-    local http_url="" ws_url=""
     if [[ "$mode" == "set" ]]; then
         http_url="https://${domain}/"
         if [[ "$with_ws" == "true" ]]; then ws_url="wss://${domain}/"; fi
@@ -1078,38 +1404,63 @@ caddy_node_info_advertise() {
         if [[ -n "$ws_url" ]]; then
             caddy_validate_rpc_url ws "$ws_url" || { caddy_launch_rollback; die "refusing to write an invalid ws URL into node-info.yaml: ${ws_url}"; }
         fi
+        want="${http_url} ${ws_url:-none}"
+    else
+        want="none none"
     fi
 
+    # Read before writing: keytool may reformat the file, so an unchanged value is
+    # detected here rather than by comparing bytes afterwards.
+    if cur="$(caddy_node_info_rpc_get "$ni")" && [[ "$cur" == "$want" ]]; then
+        if [[ "$mode" == "set" ]]; then
+            caddy_say ok "node-info.yaml already advertises ${http_url}${ws_url:+ and ${ws_url}}."
+        else
+            caddy_say ok "node-info.yaml worker rpc already cleared."
+        fi
+        if [[ -n "$CADDY_LAUNCH_BAK" ]]; then
+            caddy_restart_node_guarded ""
+        else
+            caddy_say ok "No node restart needed."
+        fi
+        return 0
+    fi
+
+    svc="$(tn_resolve_service 2>/dev/null || true)"
+    svc="${svc:-telcoin}"
+    if ! caddy_node_info_can_edit; then
+        if [[ "$mode" == "set" ]]; then
+            caddy_say warn "Cannot edit ${ni}: python3 is not installed and keytool cannot be run through the node launch file. The endpoint works but is not advertised on-network; install python3 (or run update-scripts.sh) and re-run rpc-enable to advertise it."
+        else
+            caddy_say warn "Cannot clear the worker rpc in ${ni}: python3 is not installed and keytool cannot be run through the node launch file. The file is unchanged and may still advertise the public endpoint. Clear it by hand (set 'rpc: ~' on the first entry under p2p_info.workers), then restart the node (sudo systemctl restart ${svc}). The public RPC vhost is removed anyway."
+        fi
+        caddy_restart_for_launch
+        return 0
+    fi
+
+    # A committee node waits for the epoch boundary before anything is edited.
+    caddy_restart_window
     cp -p "$ni" "${ni}.tn-bak"
-    if ! caddy_edit_node_info "$ni" "$mode" "$http_url" "$ws_url"; then
-        mv -f "${ni}.tn-bak" "$ni"
+    rc=0
+    caddy_node_info_write "$ni" "$mode" "$http_url" "$ws_url" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        # caddy_node_info_write restored the file from the backup (or never touched it).
+        rm -f "${ni}.tn-bak"
         if [[ "$mode" == "clear" ]]; then
             # rpc-disable must always be able to take the public endpoint down: a
-            # node-info.yaml this editor cannot parse is a warning, and do_rpc_disable
+            # node-info.yaml that cannot be edited is a warning, and do_rpc_disable
             # goes on to remove the RPC vhost.
-            caddy_say warn "Could not clear the worker rpc in ${ni} (unexpected layout or read/write error) -- the file is unchanged and may still advertise the public endpoint. Clear it by hand: set 'rpc: ~' on every entry under p2p_info.workers (legacy layout: p2p_info.worker.rpc), then restart the node (sudo systemctl restart $(tn_resolve_service 2>/dev/null || echo telcoin)). The public RPC vhost is removed anyway."
+            caddy_say warn "Could not clear the worker rpc in ${ni} (unexpected layout or read/write error) -- the file is unchanged and may still advertise the public endpoint. Clear it by hand: set 'rpc: ~' on the first entry under p2p_info.workers (legacy layout: p2p_info.worker.rpc), then restart the node (sudo systemctl restart ${svc}). The public RPC vhost is removed anyway."
             caddy_restart_for_launch
             return 0
         fi
         caddy_launch_rollback
         die "failed to edit node-info.yaml (worker rpc) -- node-info restored unchanged"
     fi
-
-    if cmp -s "${ni}.tn-bak" "$ni"; then
-        rm -f "${ni}.tn-bak"
-        if [[ "$mode" == "set" ]]; then
-            print_ok "node-info.yaml already advertises ${http_url}${ws_url:+ and ${ws_url}}."
-        else
-            print_ok "node-info.yaml worker rpc already cleared."
-        fi
-        if [[ -n "$CADDY_LAUNCH_BAK" ]]; then
-            caddy_restart_node_guarded ""
-        else
-            print_ok "No node restart needed."
-        fi
-        return 0
+    if [[ "$mode" == "set" ]]; then
+        caddy_say ok "node-info.yaml now advertises ${http_url}${ws_url:+ and ${ws_url}} (worker 0)."
+    else
+        caddy_say ok "Cleared the worker rpc in node-info.yaml (worker 0)."
     fi
-
     caddy_restart_node_guarded "$ni"
 }
 
@@ -1122,47 +1473,29 @@ caddy_ws_port() {
 
 # 0 (true) when <file> carries launch flag <flag-regex> as a whole word (`--f`, `--f v`,
 # `--f=v`, also quoted "--f" / '--f') on a non-comment line. `--ws` alone turns reth's WS
-# server on; --ws.addr / --ws.port without it do not.
+# server on; --ws.addr / --ws.port without it do not. The reader for a lib/common.sh
+# older than 1.6.0; caddy_launch_carries prefers tn_launch_flag_get.
 caddy_launch_has_flag() {
     awk -v f="$2" '/^[[:space:]]*#/ {next} $0 ~ ("(^|[[:space:]])[\"\047]?" f "([\"\047[:space:]=]|$)") {x=1} END {exit !x}' "$1" 2>/dev/null
 }
 
-# Echo "<line-no> <verdict>" for the line tn_node_inject_flags (lib/common.sh) appends
-# to -- its selection rule, replicated: the FIRST line holding a whole-word --http,
-# comment lines included. <verdict> is `ok` only for a real launch line: not a comment,
-# no trailing `#` comment, not continued onto the next line, and part of a command that
-# invokes the node -- a `node` word on that line or on the lines it continues, as in the
-# launch files setup-node.sh writes (`exec <binary> node \`, `<image> telcoin node \`).
-# Otherwise comment | trailing-comment | continued | no-node; "0 none" when no line
-# matches (the helper then changes nothing).
-caddy_launch_inject_target() {
-    awk '
-        { iscomment = ($0 ~ /^[[:space:]]*#/)
-          if (!cont) cmd = ""
-          if (!iscomment) cmd = cmd " " $0 }
-        $0 ~ /(^|[[:space:]])--http([[:space:]]|$)/ {
-            if (iscomment) v = "comment"
-            else if ($0 ~ /\\[[:space:]]*$/) v = "continued"
-            else if ($0 ~ /[[:space:]]#/) v = "trailing-comment"
-            else if (cmd !~ /(^|[[:space:]])node([[:space:]]|$)/) v = "no-node"
-            else v = "ok"
-            print NR, v; found = 1; exit
-        }
-        { cont = (!iscomment && $0 ~ /\\[[:space:]]*$/) }
-        END { if (!found) print 0, "none" }
-    ' "$1" 2>/dev/null
+# caddy_launch_carries <file> <flag> -- 0 (true) when the node command in launch file
+# <file> carries <flag> (a literal name such as --ws.addr): tn_launch_flag_get
+# (lib/common.sh 1.6.0), which reads only the node command and skips comments; else
+# the awk reader above.
+caddy_launch_carries() {
+    if declare -F tn_launch_flag_get >/dev/null 2>&1; then
+        tn_launch_flag_get "$1" "$2" >/dev/null 2>&1
+        return
+    fi
+    caddy_launch_has_flag "$1" "${2//./[.]}"
 }
 
-# 0 (true) when <file> differs from its pre-edit copy <bak> ONLY by " <flags>" appended
-# to line <n>, and that line is not a comment -- i.e. the flags reached the launch line.
-caddy_launch_verify_inject() {
-    awk -v n="$3" -v f="$4" '
-        NR == FNR { b[FNR] = $0; nb = FNR; next }
-        { nl = FNR
-          if (FNR == n + 0) { if ($0 != b[FNR] " " f || $0 ~ /^[[:space:]]*#/) bad = 1 }
-          else if ($0 != b[FNR]) bad = 1 }
-        END { exit (bad || nl != nb || n + 0 < 1) }
-    ' "$2" "$1" 2>/dev/null
+# 0 (true) when launch file <file> still parses: `bash -n` for a start wrapper. A
+# systemd unit is not a shell script and passes.
+caddy_launch_syntax_ok() {
+    [[ "$1" == *.service ]] && return 0
+    bash -n "$1" 2>/dev/null
 }
 
 # 0 (true) when process <proc> (as ss names it) listening on the reth WebSocket port is
@@ -1188,15 +1521,19 @@ caddy_ws_holder_is_node() {
 # only https:// is advertised), or (b) the node launch file -- resolved by
 # tn_node_launch_target (lib/common.sh), the resolver setup-observability.sh uses: the
 # start wrapper, or the unit for legacy inline-docker installs -- already carries --ws
-# (the node restart that follows picks it up). Otherwise inject the missing parts of
-# `--ws --ws.addr 127.0.0.1 --ws.port <ws_port>` onto the launch --http line with
-# tn_node_inject_flags -- only when the line that helper edits is the real launch line
-# (caddy_launch_inject_target), and the result is re-read to confirm the flags landed
-# there (else the backup is restored); the file is backed up first and the brick guard
-# restores it if the node then fails to start.
+# (the node restart that follows picks it up). Otherwise add the missing parts of
+# `--ws --ws.addr 127.0.0.1 --ws.port <ws_port>` to the node command with the shared
+# tn_node_inject_flags (lib/common.sh 1.6.0), which edits only the live node launch
+# line, before a trailing backslash, and refuses a line it cannot edit safely. The
+# edit is kept only when the helper returns 0, the node command then reads back
+# --ws (tn_launch_flag_get) and a start wrapper still passes `bash -n`; otherwise the
+# backup is restored. The epoch wait (caddy_restart_window) runs before the edit,
+# and the brick guard restores the file if the node then fails to start. With an
+# older lib/common.sh nothing is added (a warning says so).
 # 0 = advertise ws; 1 = advertise http only (the warning says why).
 caddy_ws_preflight() {
-    local ws_port="$1" target="" svc="" method="" file="" flags holder tline tstat why
+    local ws_port="$1" target="" svc="" method="" file="" flags holder rc why
+    local by_hand="add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the node launch by hand and re-run rpc-enable to advertise wss:// too"
     target="$(tn_node_launch_target 2>/dev/null || true)"
     [[ -n "$target" ]] && read -r svc method file <<< "$target"
     holder="$(caddy_port_proc "$ws_port")"
@@ -1216,40 +1553,29 @@ caddy_ws_preflight() {
         caddy_say warn "Nothing listens on the reth WebSocket port ${ws_port} and the node launch file (${file}) was not found, so --ws cannot be checked or enabled. Advertising https:// only (no wss://); add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the ${svc} launch and re-run rpc-enable to advertise wss:// too."
         return 1
     fi
-    if caddy_launch_has_flag "$file" '--ws'; then
+    if caddy_launch_carries "$file" --ws; then
         print_ok "The node launch (${file}) already enables --ws; the WebSocket binds on port ${ws_port} once ${svc} (re)starts."
         return 0
     fi
-    read -r tline tstat <<< "$(caddy_launch_inject_target "$file")"
-    case "$tstat" in
-        ok|none) ;;   # none: the helper finds no line; the warning below says so
-        continued)
-            caddy_say warn "The node launch (${file}) lacks --ws, but its --http line continues onto the next line, so it is not edited automatically. Advertising https:// only (no wss://); add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the launch by hand and re-run rpc-enable to advertise wss:// too."
-            return 1 ;;
-        *)
-            case "$tstat" in
-                comment)          why="it is a comment" ;;
-                trailing-comment) why="it ends in a # comment" ;;
-                *)                why="it is not part of the node command" ;;
-            esac
-            caddy_say warn "The node launch (${file}) lacks --ws, but the first line carrying --http (line ${tline}) is not the node launch line (${why}), so it is not edited automatically. Advertising https:// only (no wss://); add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the launch by hand and re-run rpc-enable to advertise wss:// too."
-            return 1 ;;
-    esac
+    if ! caddy_lib_has "--ws is not added to the node launch automatically" tn_launch_flag_get tn_node_inject_flags; then
+        caddy_say warn "The node launch (${file}) lacks --ws. Advertising https:// only (no wss://); run update-scripts.sh and then rpc-enable again, or ${by_hand}."
+        return 1
+    fi
     flags="--ws"
-    caddy_launch_has_flag "$file" '--ws[.]addr' || flags="${flags} --ws.addr 127.0.0.1"
-    caddy_launch_has_flag "$file" '--ws[.]port' || flags="${flags} --ws.port ${ws_port}"
+    caddy_launch_carries "$file" --ws.addr || flags="${flags} --ws.addr 127.0.0.1"
+    caddy_launch_carries "$file" --ws.port || flags="${flags} --ws.port ${ws_port}"
+    # A committee node waits for the epoch boundary before anything is edited; the
+    # backup is taken after the wait, so it holds the file as it is at the edit.
+    caddy_restart_window
     if ! cp -p "$file" "${file}.tn-bak"; then
         caddy_say warn "Could not back up the node launch (${file}), so --ws is not added. Advertising https:// only (no wss://)."
         return 1
     fi
-    # Marker = the flags anchored at end of line: absent before (no whole-word --ws), and
-    # exactly what the helper appends to the --http line.
-    if tn_node_inject_flags "$file" "${flags}\$" "$flags"; then
-        if ! caddy_launch_verify_inject "$file" "${file}.tn-bak" "$tline" "$flags"; then
-            mv -f "${file}.tn-bak" "$file"
-            caddy_say warn "Adding --ws to the node launch (${file}) did not land on its launch line ${tline}, so the edit was undone. Advertising https:// only (no wss://); add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the launch by hand and re-run rpc-enable to advertise wss:// too."
-            return 1
-        fi
+    # Marker: a whole-word --ws on a live line. rc per the launch-flag family: 0 added,
+    # 1 already there, 2 no node launch line, 3 refused, 4 could not write.
+    rc=0
+    tn_node_inject_flags "$file" '(^|[[:space:]])--ws([[:space:]]|$)' "$flags" || rc=$?
+    if [[ "$rc" -eq 0 ]] && tn_launch_flag_get "$file" --ws >/dev/null 2>&1 && caddy_launch_syntax_ok "$file"; then
         if [[ "$method" == "docker" ]]; then systemctl daemon-reload || print_warn "systemctl daemon-reload failed"; fi
         CADDY_LAUNCH_FILE="$file"
         CADDY_LAUNCH_BAK="${file}.tn-bak"
@@ -1257,8 +1583,24 @@ caddy_ws_preflight() {
         caddy_say ok "Enabled the reth WebSocket: added '${flags}' to the node launch (${file}); it takes effect on the ${svc} restart below."
         return 0
     fi
-    rm -f "${file}.tn-bak"
-    caddy_say warn "Could not add --ws to the node launch (${file}): no --http launch line found. Advertising https:// only (no wss://); add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the launch and re-run rpc-enable to advertise wss:// too."
+    # Anything else leaves the file as it was: the helper wrote nothing (rc 1-4), or
+    # the edit did not read back and the backup goes back.
+    if [[ "$rc" -eq 0 ]]; then
+        mv -f "${file}.tn-bak" "$file"
+    else
+        rm -f "${file}.tn-bak"
+    fi
+    case "$rc" in
+        0) why="the edited launch file did not read back --ws (or no longer parses), so the edit was undone" ;;
+        1)
+            print_ok "The node launch (${file}) already carries --ws on a live line; the WebSocket binds on port ${ws_port} once ${svc} (re)starts."
+            return 0
+            ;;
+        2) why="no node launch line (a live line with --http in the node command) was found" ;;
+        3) why="the launch line ends in a comment or cannot be parsed, so it is not edited automatically" ;;
+        *) why="the launch file could not be written" ;;
+    esac
+    caddy_say warn "Could not add --ws to the node launch (${file}): ${why}. Advertising https:// only (no wss://); ${by_hand}."
     return 1
 }
 
@@ -1401,6 +1743,42 @@ do_check_dns_human() {
 # PHASES -- PUBLIC RPC
 # =============================================================================
 
+# Record the public endpoint in .node-meta, the keys setup-node.sh writes:
+# PUBLIC_RPC_DOMAIN=<domain>, PUBLIC_RPC_URL=https://<domain> and PUBLIC_WS_URL=
+# wss://<domain>, or empty when <with_ws> is false (no trailing slash, as the fleet
+# records them; node-info.yaml keeps the slash). No <domain> removes all three. The
+# UI and check-node read them. Best effort: a failure is a warning, never fatal.
+caddy_meta_record() {
+    local domain="${1:-}" with_ws="${2:-true}" ws="" key failed=""
+    if [[ -z "$(node_meta_path 2>/dev/null || true)" ]]; then
+        if [[ -n "$domain" ]]; then
+            caddy_say info "No .node-meta found, so the public endpoint is not recorded there (PUBLIC_RPC_DOMAIN, PUBLIC_RPC_URL, PUBLIC_WS_URL)."
+        fi
+        return 0
+    fi
+    if [[ -n "$domain" ]]; then
+        caddy_lib_has "the public endpoint is not recorded in .node-meta" meta_set || return 0
+        if [[ "$with_ws" == "true" ]]; then ws="wss://${domain}"; fi
+        meta_set PUBLIC_RPC_DOMAIN "$domain" >/dev/null 2>&1 || failed="${failed} PUBLIC_RPC_DOMAIN"
+        meta_set PUBLIC_RPC_URL "https://${domain}" >/dev/null 2>&1 || failed="${failed} PUBLIC_RPC_URL"
+        meta_set PUBLIC_WS_URL "$ws" >/dev/null 2>&1 || failed="${failed} PUBLIC_WS_URL"
+    else
+        for key in PUBLIC_RPC_DOMAIN PUBLIC_RPC_URL PUBLIC_WS_URL; do
+            if caddy_lib_has "the PUBLIC_RPC_* keys in .node-meta are emptied instead of removed" meta_unset; then
+                meta_unset "$key" >/dev/null 2>&1 || failed="${failed} ${key}"
+            elif declare -F meta_set >/dev/null 2>&1; then
+                meta_set "$key" "" >/dev/null 2>&1 || failed="${failed} ${key}"
+            else
+                failed="${failed} ${key}"
+            fi
+        done
+    fi
+    if [[ -n "$failed" ]]; then
+        caddy_say warn "Could not update${failed} in $(node_meta_path 2>/dev/null || echo .node-meta). The UI and check-node may show the previous public endpoint until it is fixed by hand."
+    fi
+    return 0
+}
+
 # Rewrite ONLY the site address of the dashboard block in <file> (in place) to <host>.
 # Every other byte -- basic_auth user + hash, the X-TN-Dashboard-Public header_up,
 # encode, comments -- is kept: awk does no expansion, and <host> is a validated
@@ -1417,10 +1795,13 @@ caddy_retarget_dashboard() {
 
 # Enable the public RPC vhost (preserving any dashboard vhost), open 80/443, then run the
 # WebSocket preflight and advertise the endpoint in node-info.yaml, restarting the node
-# under the brick guard. <move_to> (--move-dashboard-to): when <domain> is the hostname
-# the dashboard is served on, the dashboard block moves to <move_to> -- only its site
-# address changes -- in the SAME swap + reload. Without it that clash dies before
-# anything is written (caddy_domain_clash).
+# under the brick guard, and record it in .node-meta. <move_to> (--move-dashboard-to):
+# when <domain> is the hostname the dashboard is served on, the dashboard block moves to
+# <move_to> -- only its site address changes -- in the SAME swap + reload. Without it
+# that clash dies before anything is written (caddy_domain_clash; in --json runs the
+# reason is an `error` event, then `done ok:false`). Run again with the same domain it
+# rewrites the block (a stale v1 block becomes v2) and reloads Caddy; the node is only
+# restarted when node-info.yaml or the launch file needs a change.
 do_rpc_enable() {
     local domain="$1" move_to="${2:-}"
     caddy_validate_domain "$domain" || die "invalid RPC domain: ${domain:-<empty>}"
@@ -1469,11 +1850,12 @@ do_rpc_enable() {
     # Advertise on-network (worker rpc) + restart the node. Brick-guarded.
     caddy_node_info_advertise set "$domain" "$CADDY_WS_OK"
     if [[ "$CADDY_WS_OK" == "true" ]]; then caddy_ws_verify "$ws_port" "$domain"; fi
+    caddy_meta_record "$domain" "$CADDY_WS_OK"
 }
 
 # Disable the public RPC vhost: un-advertise in node-info.yaml (best-effort, restart
-# guarded), then remove the RPC block (preserving any dashboard vhost). Full teardown
-# only when no managed vhost remains.
+# guarded), then remove the RPC block (preserving any dashboard vhost) and the
+# PUBLIC_RPC_* keys from .node-meta. Full teardown only when no managed vhost remains.
 do_rpc_disable() {
     caddy_node_info_advertise clear
 
@@ -1487,39 +1869,46 @@ do_rpc_disable() {
         caddy_teardown
     fi
     rm -f "$dash_tmp"
+    caddy_meta_record ""
 }
 
-# Echo "<http>|<ws>" that node-info.yaml advertises for the FIRST worker (current
-# `workers:` list or legacy `worker:` map); "|" when absent, unreadable or no python3.
+# Echo "<http>|<ws>" that node-info.yaml advertises for worker 0 (current `workers:`
+# list or legacy `worker:` map); '' parts when absent, "|" when unreadable.
 caddy_node_info_advertised() {
-    local ni out=""
+    local ni out h w
     ni="$(caddy_node_info_path)"
-    if [[ -r "$ni" ]] && command -v python3 >/dev/null 2>&1; then
-        out="$(caddy_edit_node_info "$ni" get 2>/dev/null || true)"
+    if ! out="$(caddy_node_info_rpc_get "$ni")"; then
+        printf '|\n'
+        return 0
     fi
-    [[ "$out" == *"|"* ]] || out="|"
-    printf '%s\n' "$out"
+    h="${out%% *}"
+    w="${out#* }"
+    if [[ "$h" == "none" ]]; then h=""; fi
+    if [[ "$w" == "none" ]]; then w=""; fi
+    printf '%s|%s\n' "$h" "$w"
 }
 
 # Print a single JSON status object for the RPC vhost (UI RPC card). The v1.2.0 keys
-# come first, unchanged; advertised_http / advertised_ws (node-info.yaml worker rpc, ''
-# when absent) and ws_listening (reth WS port bound) are appended.
+# come first, unchanged; advertised_http / advertised_ws (node-info.yaml worker 0 rpc,
+# '' when absent), ws_listening (reth WS port bound) and block_stale (an enabled block
+# written by install-caddy.sh 1.3.0 or older; caddy_rpc_block_stale) are appended.
 do_rpc_status() {
     local installed=false running=false enabled=false domain="" block=""
-    local adv adv_http adv_ws ws_listening=false
+    local adv adv_http adv_ws ws_listening=false block_stale=false
     command -v caddy >/dev/null 2>&1 && installed=true
     systemctl is-active --quiet caddy 2>/dev/null && running=true
     if caddy_block_present "$RPC_BEGIN"; then
         enabled=true
         block="$(caddy_extract_block "$RPC_BEGIN" "$RPC_END")"
         domain=$(printf '%s\n' "$block" | grep -m1 -E '^[A-Za-z0-9].*\{[[:space:]]*$' | sed -E 's/[[:space:]]*\{.*$//' | tr -d ' ' || true)
+        caddy_rpc_block_stale && block_stale=true
     fi
     adv="$(caddy_node_info_advertised)"
     adv_http="${adv%%|*}"; adv_ws="${adv#*|}"
     caddy_port_listening "$(caddy_ws_port)" && ws_listening=true
-    printf '{"installed":%s,"running":%s,"enabled":%s,"domain":"%s","advertised_http":"%s","advertised_ws":"%s","ws_listening":%s}\n' \
+    printf '{"installed":%s,"running":%s,"enabled":%s,"domain":"%s","advertised_http":"%s","advertised_ws":"%s","ws_listening":%s,"block_stale":%s}\n' \
         "$installed" "$running" "$enabled" "$(json_escape "$domain")" \
-        "$(json_escape "$adv_http")" "$(json_escape "$adv_ws")" "$ws_listening"
+        "$(json_escape "$adv_http")" "$(json_escape "$adv_ws")" "$ws_listening" "$block_stale"
 }
 
 # =============================================================================
@@ -1830,6 +2219,10 @@ print_rpc_status_human() {
     if caddy_block_present "$RPC_BEGIN"; then
         rdom="$(caddy_current_rpc_domain)"
         print_ok "Public RPC: ENABLED  ->  https://${rdom:-<unknown>}/  (wss://${rdom:-<unknown>}/)"
+        if caddy_rpc_block_stale; then
+            print_warn "The public RPC block in ${CADDYFILE} was written by an older install-caddy.sh: WebSocket upgrades sent with a lowercase 'Connection: upgrade' get 405, request bodies are not capped and browsers get no page. Refresh it by running rpc-enable again with the same hostname (a Caddy reload; the node restarts only if node-info.yaml or its WebSocket flags need a change):"
+            print_info "    sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-enable --rpc-domain ${rdom:-<rpc-domain>}"
+        fi
     else
         print_info "Public RPC: disabled"
     fi
