@@ -24,7 +24,7 @@ if [ -r "${SCRIPT_DIR}/lib/fallback.sh" ]; then
     source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 fi
 
-readonly SCRIPT_VERSION="1.1.70"
+readonly SCRIPT_VERSION="1.1.71"
 readonly GITHUB_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main"
 
 # Colours
@@ -95,6 +95,7 @@ declare -a TESTNET_ADDONS_BUNDLE=(
     "lib/wgvpn/peers/ssh/oobi.pub:lib/wgvpn/peers/ssh/oobi.pub"
     "lib/wgvpn/peers/ssh/sstanf.pub:lib/wgvpn/peers/ssh/sstanf.pub"
     "lib/wgvpn/peers/ssh/umair.pub:lib/wgvpn/peers/ssh/umair.pub"
+    "lib/wgvpn/peers/ssh/xerxes.pub:lib/wgvpn/peers/ssh/xerxes.pub"
     "lib/wgvpn/peers/ssh/README:lib/wgvpn/peers/ssh/README"
 )
 # NOTE: this list MUST name every maintainer key in lib/wgvpn/peers/ssh/*.pub. The
