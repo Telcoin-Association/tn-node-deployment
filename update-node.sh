@@ -22,12 +22,25 @@
 # so the node is not down for the epoch change. The wait is capped at 30
 # minutes. A rollback restart never waits.
 #
+# ONE-WAY UPDATES: when the node runs a release older than v0.16.0 and the
+# target is v0.16.0 or newer (or a branch or a commit), APPLY cannot be undone
+# by swapping the binary or image back. The new release migrates the consensus
+# store in the data dir on its first start, and older releases cannot open it
+# afterwards. Snapshot the data dir first. APPLY says so (and warns when free
+# disk is under twice the largest consensus-db/epochs/epoch-N), asks you to
+# confirm, and waits up to 600 seconds for the node to answer. If that check
+# fails, APPLY does not roll back: the node keeps running (it may still be
+# migrating) and the script prints how to restore the snapshot. A node whose
+# running release cannot be read counts as older.
+#
 # USAGE:
 #   sudo bash update-node.sh
 #   sudo bash update-node.sh --discard        # drop any pending prepared update
 #   sudo bash update-node.sh --no-epoch-wait  # restart without the epoch wait
 #
 # TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
+# TN_UPDATE_VERIFY_TIMEOUT=<seconds> sets the post-restart health window
+# (default 45, or 600 on a one-way update).
 #
 # What is NEVER touched by this script:
 #   - BLS / P2P keys in <data_dir>/node-keys/
@@ -53,7 +66,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -62,13 +75,31 @@ readonly SCRIPT_VERSION="1.2.0"
 # TN_UPDATE_VERIFY_TIMEOUT for fleet-orchestrated updates: when every peer
 # restarts at once (a wire-protocol-breaking upgrade), quorum takes longer to
 # re-form than a single-node restart, and the default window would trigger a
-# spurious auto-rollback. Non-numeric values fall back to 45 -- this feeds
-# arithmetic under set -u.
+# spurious auto-rollback. A numeric value always wins. Unset or non-numeric
+# means the default: 45, or STORAGE_MIGRATION_VERIFY_SECONDS on a one-way
+# update (see update_verify_window). The value feeds arithmetic under set -u.
+VERIFY_TIMEOUT_EXPLICIT=false
 if [[ "${TN_UPDATE_VERIFY_TIMEOUT:-}" =~ ^[0-9]+$ ]]; then
-    readonly VERIFY_TIMEOUT_SECONDS="${TN_UPDATE_VERIFY_TIMEOUT}"
+    # 10#: a leading zero (0900) would otherwise be read as octal by (( )).
+    readonly VERIFY_TIMEOUT_SECONDS="$(( 10#${TN_UPDATE_VERIFY_TIMEOUT} ))"
+    VERIFY_TIMEOUT_EXPLICIT=true
 else
     readonly VERIFY_TIMEOUT_SECONDS=45
 fi
+readonly VERIFY_TIMEOUT_EXPLICIT
+# The first release whose first start migrates the consensus store one way
+# (epoch packs v1 -> v2); older releases cannot open the migrated data dir.
+readonly STORAGE_MIGRATION_FLOOR="0.16.0"
+# Health window for such an update: the first start migrates before it answers.
+readonly STORAGE_MIGRATION_VERIFY_SECONDS=600
+# Set by storage_migration_begin on each apply: true when this update is one way.
+STORAGE_MIGRATION=false
+# Set right before the first start of the new release on a one-way update, so
+# the EXIT trap can tell a kill after that start (the data dir may be migrating)
+# from one before it (nothing migrated yet).
+STORAGE_MIGRATION_STARTED=false
+# Set by verify_health_after_restart: true when its last run saw a healthy node.
+UPDATE_HEALTH_OK=false
 
 SERVICE_NAME=""
 RPC_URL=""
@@ -325,12 +356,143 @@ observer_strip_needed() {
     tn_node_has_observer_flag "$file"
 }
 
+# =============================================================================
+# ONE-WAY STORAGE MIGRATION (v0.16.0 and later)
+#
+# The first start of v0.16.0 or later migrates the consensus store
+# (<data_dir>/consensus-db/epochs, epoch packs v1 -> v2) and older releases
+# cannot open it afterwards. Swapping the binary or image back is then no
+# rollback, so an update across that line warns first, waits longer for the
+# first start, and never rolls back on its own: only a data dir snapshot taken
+# before the update can undo it.
+# =============================================================================
+
+# installed_source_ref -- the ref of the source binary that runs now, from the
+# marker that setup and verified applies write (write_source_version_marker).
+# Empty when there is none: setup and verified applies have written it since
+# well before v0.16.0, so a node without one runs an older release. `git
+# describe` of the checkout is no use here: a prepare moves the checkout while
+# the old binary keeps running.
+installed_source_ref() {
+    head -n 1 "${DEFAULT_INSTALL_DIR}/telcoin-network.version" 2>/dev/null || true
+}
+
+# storage_migrating_upgrade <running> <target> -- rc 0 when going from <running>
+# to <target> crosses STORAGE_MIGRATION_FLOOR one way: the target is at or above
+# it (no x.y.z, such as a branch or a commit, counts as newest) and the running
+# release is below it (no x.y.z counts as unknown, and so as older). Each side is
+# judged on its first x.y.z, so pass docker images as name:tag (${image##*/}) or
+# a registry host:port would be read as a version.
+storage_migrating_upgrade() {
+    local ver_re run_v new_v
+    ver_re='([0-9]+\.[0-9]+\.[0-9]+)'
+    run_v=""
+    new_v=""
+    if [[ "${2:-}" =~ $ver_re ]]; then
+        new_v="${BASH_REMATCH[1]}"
+    fi
+    if [[ -n "$new_v" ]] && ! version_gte "$new_v" "$STORAGE_MIGRATION_FLOOR"; then
+        return 1
+    fi
+    if [[ "${1:-}" =~ $ver_re ]]; then
+        run_v="${BASH_REMATCH[1]}"
+    fi
+    [[ -n "$run_v" ]] || return 0
+    ! version_gte "$run_v" "$STORAGE_MIGRATION_FLOOR"
+}
+
+# update_verify_window -- the post-restart health window in seconds: an explicit
+# TN_UPDATE_VERIFY_TIMEOUT, else STORAGE_MIGRATION_VERIFY_SECONDS on a one-way
+# update, else 45.
+update_verify_window() {
+    if [[ "$STORAGE_MIGRATION" == "true" && "$VERIFY_TIMEOUT_EXPLICIT" != "true" ]]; then
+        printf '%s\n' "$STORAGE_MIGRATION_VERIFY_SECONDS"
+    else
+        printf '%s\n' "$VERIFY_TIMEOUT_SECONDS"
+    fi
+}
+
+# storage_migration_space_shortfall <data_dir> -- rc 0 with one line on stdout
+# when the free space under <data_dir>/consensus-db/epochs is less than twice
+# its largest epoch-N directory: the migration writes each pack again beside
+# the old one (epoch-N.migrating) before it swaps them. Leftover epoch-N.* dirs
+# are not counted. rc 1 when there is enough room or it cannot tell. A warning
+# only: du is an estimate, and past epochs migrate later, while the node runs.
+storage_migration_space_shortfall() {
+    local epochs largest_kb avail_kb
+    [[ -n "${1:-}" ]] || return 1
+    epochs="${1}/consensus-db/epochs"
+    [[ -d "$epochs" ]] || return 1
+    largest_kb="$(du -sk "$epochs"/epoch-* 2>/dev/null | awk -F '\t' '$2 ~ /\/epoch-[0-9]+$/ && $1 > m { m = $1 } END { print m + 0 }')"
+    avail_kb="$(df -Pk "$epochs" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+    [[ "$largest_kb" =~ ^[0-9]+$ && "$avail_kb" =~ ^[0-9]+$ ]] || return 1
+    (( largest_kb > 0 && avail_kb < 2 * largest_kb )) || return 1
+    printf 'Low disk: %s MiB free under %s; the migration needs at least %s MiB (twice the largest epoch-N).\n' \
+        "$(( avail_kb / 1024 ))" "$epochs" "$(( largest_kb * 2 / 1024 ))"
+}
+
+# storage_migration_begin <running> <target> -- called by every apply path
+# before it stops the node, and by the --json prepare paths before their done
+# event. Sets STORAGE_MIGRATION. On a one-way update it warns (and warns about
+# low disk); in interactive mode it then asks the operator to confirm they have
+# a snapshot. rc 1 only when the operator declines; the prepared update is kept.
+storage_migration_begin() {
+    local dd short
+    STORAGE_MIGRATION=false
+    storage_migrating_upgrade "${1:-}" "${2:-}" || return 0
+    STORAGE_MIGRATION=true
+    dd="$(tn_resolve_data_dir 2>/dev/null || true)"
+    update_wait_say warn "One-way update: ${2:-the new release} migrates the consensus store in ${dd:-the data dir} on its first start, and older releases cannot open it afterwards. Only a snapshot of the data dir taken before the update can undo it, so a failed health check will not roll back. The health check waits up to $(update_verify_window)s."
+    if short="$(storage_migration_space_shortfall "$dd")"; then
+        update_wait_say warn "$short"
+    fi
+    [[ "$JSON_MODE" == "true" ]] && return 0
+    if ! confirm "Do you have a snapshot of ${dd:-the data dir}, and do you want this one-way update?"; then
+        print_info "Cancelled. The prepared update is kept."
+        return 1
+    fi
+    return 0
+}
+
+# storage_migration_verify_failed <target> <undo-cmd> -- the end of a one-way
+# apply whose post-restart check failed. No rollback: the previous release
+# cannot open the migrated data dir. The node is left running (it may still be
+# migrating), the pending state is cleared, and the version marker keeps the
+# previous ref until a verified apply. Prints how to go back; in --json mode an
+# error event and then the done event. Always rc 1.
+storage_migration_verify_failed() {
+    local dd what state msg
+    dd="$(tn_resolve_data_dir 2>/dev/null || true)"
+    state="The node was left running and may still be migrating"
+    if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        state="The node is not running; it may have stopped before or during the migration"
+    fi
+    clear_pending_state
+    if [[ "$UPDATE_HEALTH_OK" == "true" ]]; then
+        what="${SERVICE_NAME} answered after starting ${1}, but it is not running the prepared update."
+    else
+        what="${SERVICE_NAME} did not answer within $(update_verify_window)s of starting ${1}."
+    fi
+    msg="${what} Not rolled back: the previous release cannot open the migrated data dir. ${state} (journalctl -u ${SERVICE_NAME} -f). To go back: systemctl stop ${SERVICE_NAME}; restore ${dd:-the data dir} from the pre-update snapshot; ${2}; systemctl start ${SERVICE_NAME}."
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_event error "$msg"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"storage_migration\":true,\"msg\":\"$(json_escape "$msg")\"}"
+    else
+        print_error "$msg"
+    fi
+    return 1
+}
+
 # Returns 0 if service is active AND tn_latestConsensusHeader responds within
-# VERIFY_TIMEOUT_SECONDS; non-zero otherwise.
+# update_verify_window seconds; non-zero otherwise. Records the answer in
+# UPDATE_HEALTH_OK. A rollback restart gets the normal window: STORAGE_MIGRATION
+# is never true when one runs.
 verify_health_after_restart() {
     print_step "Verifying node health..."
-    local waited=0
-    while (( waited < VERIFY_TIMEOUT_SECONDS )); do
+    local waited=0 limit
+    limit="$(update_verify_window)"
+    UPDATE_HEALTH_OK=false
+    while (( waited < limit )); do
         if ! systemctl is-active --quiet "$SERVICE_NAME"; then
             print_warn "  Service not active yet (${waited}s)..."
             sleep 3
@@ -344,12 +506,13 @@ verify_health_after_restart() {
             "$RPC_URL" 2>/dev/null || echo "")
         if echo "$resp" | grep -q '"result"'; then
             print_ok "Service active and consensus RPC responding (${waited}s)"
+            UPDATE_HEALTH_OK=true
             return 0
         fi
         sleep 3
         waited=$(( waited + 3 ))
     done
-    print_error "Service did not become healthy within ${VERIFY_TIMEOUT_SECONDS}s"
+    print_error "Service did not become healthy within ${limit}s"
     return 1
 }
 
@@ -557,6 +720,10 @@ apply_docker_update() {
     print_info "From: ${old_image}"
     print_info "To:   ${new_image}"
     echo ""
+    # name:tag only, so a registry host:port is never read as a version. The
+    # launch file names OLD_IMAGE (the substitution below fails otherwise), so
+    # it is the running release.
+    storage_migration_begin "${old_image##*/}" "${new_image##*/}" || return 1
     validator_downtime_warning_if_applicable || return 1
 
     # The image reference lives in the start wrapper on current installs and in
@@ -634,6 +801,7 @@ apply_docker_update() {
     fi
 
     print_step "Starting ${SERVICE_NAME} on new image..."
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
 
     if verify_health_after_restart && verify_running_image_id "$pulled_image_id"; then
@@ -645,6 +813,13 @@ apply_docker_update() {
         print_ok "Update complete. Now running on: ${new_image}"
         print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
+    fi
+
+    # A one-way update is never rolled back, and the rollback is not offered:
+    # the previous image cannot open the migrated data dir.
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then
+        storage_migration_verify_failed "$new_image" "cp -p ${backup} ${launch_file} && systemctl daemon-reload"
+        return 1
     fi
 
     # Health or image-identity verify failed -- offer rollback
@@ -918,6 +1093,10 @@ apply_source_update() {
         expected_hash="$actual_hash"
     fi
 
+    # The running release comes from the version marker, not from OLD_REF: that
+    # is `git describe` at prepare time and names the wrong release after a
+    # prepare, a discard and another prepare.
+    storage_migration_begin "$(installed_source_ref)" "$new_ref" || return 1
     validator_downtime_warning_if_applicable || return 1
 
     local installed="${DEFAULT_INSTALL_DIR}/telcoin-network"
@@ -999,6 +1178,7 @@ apply_source_update() {
     fi
 
     print_step "Starting ${SERVICE_NAME} on new binary..."
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
 
     if verify_health_after_restart && verify_installed_binary_hash "$installed" "$expected_hash"; then
@@ -1013,6 +1193,13 @@ apply_source_update() {
         print_ok "Update complete. Now running: ${new_version}"
         print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
+    fi
+
+    # A one-way update is never rolled back, and the rollback is not offered:
+    # the previous binary cannot open the migrated data dir.
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then
+        storage_migration_verify_failed "$new_ref" "cp -p ${backup} ${installed}${wrapper_backup:+ && cp -p ${wrapper_backup} ${wrapper}}"
+        return 1
     fi
 
     # Health or binary-identity verify failed -- rollback
@@ -1234,7 +1421,11 @@ pick_docker_version() {
 #   {"event":"step|log|warn|error","msg":"..."}
 # and exactly one terminal result
 #   {"event":"done","ok":true|false,"phase":"prepare|apply|discard",...}
-# --check prints one status object instead (see json_check) and nothing else.
+# A one-way apply (see storage_migrating_upgrade) whose check fails is not
+# rolled back and ends with
+#   {"event":"done","ok":false,"phase":"apply","rolled_back":false,"storage_migration":true,"msg":"..."}
+# --check prints one status object instead (see json_check) and nothing else;
+# its "storage_migration" says whether updating to latest_ref is one way.
 # =============================================================================
 
 json_setup_fds() {
@@ -1289,6 +1480,12 @@ update_on_exit() {
         msg="${JSON_LAST_ERROR:-update-node.sh stopped before reporting a result; the reason is on its stderr}"
         if [[ -n "$JSON_ACTION" ]]; then
             phase=",\"phase\":\"$(json_escape "$JSON_ACTION")\""
+        fi
+        # A one-way apply cut short after the new release started is never
+        # rolled back either (see storage_migration_verify_failed); say so, as
+        # its own done would. Before that start nothing has migrated.
+        if [[ "$JSON_ACTION" == "apply" && "$STORAGE_MIGRATION_STARTED" == "true" ]]; then
+            phase="${phase},\"rolled_back\":false,\"storage_migration\":true"
         fi
         json_emit "{\"event\":\"done\",\"ok\":false${phase},\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
     fi
@@ -1370,7 +1567,7 @@ latest_docker_ref() {
 
 json_check() {
     local install_method="$1"
-    local current="" latest="" pending="null" avail="false"
+    local current="" latest="" pending="null" avail="false" running="" mig="false"
 
     if [[ -f "$(pending_state_path)" ]]; then
         local phase
@@ -1385,6 +1582,7 @@ json_check() {
             local exact_tag
             exact_tag=$(git -C "$TN_SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo "")
             [[ -n "$latest" && "$exact_tag" != "$latest" ]] && avail="true"
+            running="$(installed_source_ref)"
             ;;
         docker)
             local img
@@ -1392,13 +1590,19 @@ json_check() {
             current="${img##*:}"
             latest=$(latest_docker_ref 2>/dev/null || echo "")
             [[ -n "$latest" && -n "$current" && "$current" != "$latest" ]] && avail="true"
+            running="${img##*/}"
             ;;
         *)
             current=$(detect_current_source_ref 2>/dev/null || echo "")
             ;;
     esac
+    # storage_migration: updating from the running release to latest_ref is one
+    # way (see storage_migrating_upgrade). False when there is no latest_ref.
+    if [[ -n "$latest" ]] && storage_migrating_upgrade "$running" "$latest"; then
+        mig="true"
+    fi
 
-    json_emit "{\"install_method\":\"$(json_escape "$install_method")\",\"current_ref\":\"$(json_escape "$current")\",\"latest_ref\":\"$(json_escape "$latest")\",\"update_available\":${avail},\"pending\":${pending}}"
+    json_emit "{\"install_method\":\"$(json_escape "$install_method")\",\"current_ref\":\"$(json_escape "$current")\",\"latest_ref\":\"$(json_escape "$latest")\",\"update_available\":${avail},\"pending\":${pending},\"storage_migration\":${mig}}"
     # This object is the whole answer: the UI reads the last JSON line of a
     # check, so no done event may follow it.
     JSON_DONE_SENT=true
@@ -1511,6 +1715,8 @@ EOF
         json_event error "could not write pending state at $(pending_state_path)"
         return 1
     fi
+    # The UI cannot ask at apply time, so a one-way target is announced here.
+    storage_migration_begin "$(installed_source_ref)" "$new_ref"
     json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"}"
 }
 
@@ -1550,6 +1756,8 @@ EOF
         json_event error "could not write pending state at $(pending_state_path)"
         return 1
     fi
+    # The UI cannot ask at apply time, so a one-way target is announced here.
+    storage_migration_begin "${current_image##*/}" "${new_image##*/}"
     json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_image\":\"$(json_escape "$new_image")\"}"
 }
 
@@ -1596,6 +1804,8 @@ json_apply_source() {
     if [[ ! -f "$installed" ]]; then
         json_event error "installed binary not found at ${installed}"; return 1
     fi
+    # Warn-only in --json mode (see apply_source_update for the running ref).
+    storage_migration_begin "$(installed_source_ref)" "$new_ref" || return 1
 
     local ts backup
     ts=$(date -u '+%Y%m%d-%H%M%S')
@@ -1632,6 +1842,7 @@ json_apply_source() {
     fi
 
     json_event step "Starting ${SERVICE_NAME} on new binary"
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
 
     json_event step "Verifying node health"
@@ -1650,6 +1861,12 @@ json_apply_source() {
         write_source_version_marker "$DEFAULT_INSTALL_DIR" "$TN_SOURCE_DIR" "$new_ref"
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"}"
         return 0
+    fi
+
+    # One-way update: no rollback (see apply_source_update).
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then
+        storage_migration_verify_failed "$new_ref" "cp -p ${backup} ${installed}${wrapper_backup:+ && cp -p ${wrapper_backup} ${wrapper}}"
+        return 1
     fi
 
     json_event step "Post-update verification failed -- rolling back to previous binary"
@@ -1688,6 +1905,8 @@ json_apply_docker() {
     local launch_file
     launch_file=$(docker_launch_file) || {
         json_event error "could not resolve docker launch config (wrapper or unit)"; return 1; }
+    # Warn-only in --json mode (see apply_docker_update).
+    storage_migration_begin "${old_image##*/}" "${new_image##*/}" || return 1
     local ts backup
     ts=$(date -u '+%Y%m%d-%H%M%S')
     backup="${launch_file}.bak.${ts}"
@@ -1728,6 +1947,7 @@ json_apply_docker() {
     fi
 
     json_event step "Starting ${SERVICE_NAME} on new image"
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
 
     json_event step "Verifying node health"
@@ -1743,6 +1963,12 @@ json_apply_docker() {
         clear_pending_state
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_image\":\"$(json_escape "$new_image")\"}"
         return 0
+    fi
+
+    # One-way update: no rollback (see apply_docker_update).
+    if [[ "$STORAGE_MIGRATION" == "true" ]]; then
+        storage_migration_verify_failed "$new_image" "cp -p ${backup} ${launch_file} && systemctl daemon-reload"
+        return 1
     fi
 
     json_event step "Post-update verification failed -- rolling back to previous image"
