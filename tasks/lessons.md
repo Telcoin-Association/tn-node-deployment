@@ -226,3 +226,7 @@ only in the orchestrator's head, so a dead agent took its context with it.
   synthesized `done` carry `storage_migration:true`; a kill during the epoch wait (node still on the
   old release) would then have told the fleet driver "applied". A flag set right before the four first
   starts (`STORAGE_MIGRATION_STARTED`) is four lines and makes the field truthful.
+- **No Claude attribution in commits or PRs (operator rule, 2026-10-09).** Every commit on the
+  v0.16.0-adiri branch had to be rewritten with `git filter-branch --msg-filter` and force-pushed to
+  drop the `Co-Authored-By: Claude …` trailer before the PR could be opened. Commit messages end after
+  the body; PR bodies carry no "Generated with" footer.

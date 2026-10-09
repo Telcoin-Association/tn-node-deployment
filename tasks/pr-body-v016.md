@@ -23,5 +23,3 @@ v0.16's first start migrates `consensus-db/epochs` one way (pack v1 → v2) and 
 ## Follow-ups recorded (followup.md)
 
 Interactive "Prepare only" gives no one-way warning; the UI status card does not show `storage_migration`; a one-way apply killed after its restart makes a second apply back up the new binary; `--http.api` lists without `tn` break the health check; `db migrate` could move the migration out of the health window.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
