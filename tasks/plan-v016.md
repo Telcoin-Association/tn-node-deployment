@@ -16,18 +16,18 @@ The approved plan is in the session transcript; this file tracks execution only.
 ## Wave 1 (opus agents)
 - [x] IMPL-A done; V-A: ship after LOW fixes F1-F4 (applied + refined F3), harnesses 174/174 and 334/342 green on bash 5 and 3.2; committed
 - [x] IMPL-C1 done (helpers verified live read-only)
-- [ ] IMPL-C2 (driver + restore helper + matrix) — running
+- [x] IMPL-C2 done (matrix 59/59 bash 5 + 3.2)
 
 ## Wave 2
 - [x] V-A verifier (verdict: ship after fixes; applied)
-- [ ] V-C reviewer
+- [x] V-C reviewer (ship after fixes; F-a,c,d,f,g,h,i,j applied; matrix 59/59 bash 5 + 3.2)
 - [x] DOC-A done (PDF rebuilt in container, 46 pages, metadata 1.2)
 
 ## Wave 3 (orchestrator)
 - [x] WP-B.4 image verified 2026-10-09T20:0xZ: index sha256:b905b098…, amd64 sha256:85024097…, --version d72cc2bc, --observer rc 2, --help OK
 - [x] WP-B.5 tag v0.16.0-adiri pushed on d72cc2bc (over SSH)
 - [ ] config.sh digest pinned
-- [x] gen-checksums, commits, push tn-node-deployment branch (adiri-genesis after C2)
+- [x] commits + pushes: tn-node-deployment v0.16.0-adiri (7ee0320), adiri-genesis v0.16.0-adiri (75bbf20)
 - [ ] tn-node-deployment PR: gh token cannot create PRs; operator opens it from the compare URL (body: tasks/pr-body-v016.md) — STOP for operator review
 - [ ] merged on approval; run record started
 
