@@ -8,3 +8,5 @@ __pycache__/
 
 # Partner guide scratch output (tools/build-partner-pdf.sh)
 docs/partner/build/
+
+**/.DS_Store
