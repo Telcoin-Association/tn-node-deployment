@@ -32,13 +32,13 @@ The approved plan is in the session transcript; this file tracks execution only.
 - [ ] merged on approval; run record started
 
 ## Wave 4 (live)
-- [ ] WP-D.0 host checks (done early: overlay OK)
-- [ ] WP-D.1 REARM (tag sha, forks.rs, digest)
-- [ ] WP-D.2 `--check` 10/10 READY
+- [x] WP-D.0 host checks (overlay OK, gcloud project set)
+- [x] WP-D.1 REARM: tag peels to d72cc2bc, forks.rs 407/383/574/570/567/u32::MAX/554, digest pinned
+- [x] WP-D.2 `--check` #1 (new driver, 21:23Z): rc 0, 10/10 READY, no blocker; #2 after the prepare pass
 - [x] WP-D.3 prewarm snapshots started 20:03Z (warm-…-20261009-2003 ×5); a second prewarm right before the roll if >12 h old
 - [ ] WP-D.4 prepare pass (rc 1 at CONFIRM), second `--check`
 - [ ] WP-D.5 hand-off: human runs the driver and types CONFIRM
 
 ## Wave 5
 - [ ] WP-E watch through the first epoch close on v0.16
-- [ ] run record; lessons in both repos
+- [x] run record open (adiri-genesis); lessons written in both repos (final pass after the roll)

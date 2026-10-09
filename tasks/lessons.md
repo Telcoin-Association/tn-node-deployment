@@ -199,3 +199,30 @@ only in the orchestrator's head, so a dead agent took its context with it.
    resumed from the first unfinished section with one message each. Budget guidance: plan for
    roughly 4–5M Opus tokens per window; when the running total nears it, let agents finish and
    hold new spawns until the reset rather than spawning into the wall.
+
+## v0.16 release round (2026-10-09): tokens, toolchains, and parallel docs
+
+- **Check `gh auth status` scopes before planning a push or a PR.** The PAT on xerxes reads the org but
+  cannot push to telcoin-network over https (403) or create a PR (`Resource not accessible by personal
+  access token`). SSH pushes work (`ssh -T git@github.com` says who you are). Plan the tag push and the
+  PR as operator steps, or run `gh auth refresh -s repo` first.
+- **Toolchains in containers, recorded as commands.** No pango here, so WeasyPrint cannot run natively:
+  `tn-pdf-tools` (debian:12 + static pandoc 3.8.3 + venv WeasyPrint 70.0) runs
+  `tools/build-partner-pdf.sh` with `-u $(id -u):$(id -g) -e HOME=/tmp`. UI unit tests need Flask:
+  `python:3.10-slim` with `ui/requirements.txt`. bash 3.2: `bash:3.2` for `bash -n` and for harness
+  runs (busybox tools, no perl: shim it). Record the exact invocations in the spec so verifiers reuse
+  them instead of rediscovering.
+- **The independent verifier earned its cost again.** After 174 implementer checks, V-A's own harness
+  (incl. the EXIT-trap kill path, the unit-never-starts path and a run against the previous lib for
+  skew) found five LOW defects: an octal timeout, a `du` field split on paths with spaces, a
+  synthesized `done` without the contract fields, a "left running" message for a node that never
+  started, and a re-apply that backs up the wrong binary. Write the harness before reading the
+  implementer's checkpoint; test the exit trap and old-lib skew every time.
+- **Docs in parallel with verification cost one follow-up.** DOC-A recorded the octal timeout as a
+  follow-up item while V-A's fix was landing; the orchestrator had to rewrite the item at commit time.
+  Either run docs after the fixes land, or hand the docs agent the verifier's findings list before it
+  writes follow-ups.
+- **Gate the exit-trap fields on the point of no return.** V-A's patch made every one-way apply's
+  synthesized `done` carry `storage_migration:true`; a kill during the epoch wait (node still on the
+  old release) would then have told the fleet driver "applied". A flag set right before the four first
+  starts (`STORAGE_MIGRATION_STARTED`) is four lines and makes the field truthful.
