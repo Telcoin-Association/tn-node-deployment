@@ -8,6 +8,8 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 ## Unreleased
 
 ### v0.16.0-adiri round, October 2026 -- update-scripts v1.1.72
+Full release note: [CHANGELOG/v0.16.0-adiri.md](CHANGELOG/v0.16.0-adiri.md).
+
 This round moves the adiri testnet to `v0.16.0-adiri` (telcoin-network `d72cc2bc`). Operators
 receive the scripts below through `update-scripts.sh` v1.1.72; the Changelog section of
 README.md has one entry per script and a "testnet baseline" entry for the release itself.

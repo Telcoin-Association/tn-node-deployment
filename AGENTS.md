@@ -195,7 +195,7 @@ after the marker.
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
 The same holds for the other docs and the maintainer tooling: `OPERATOR.md`, `followup.md`,
-`CHANGELOG.md`, `README.md`, `docs/` (the partner guide and its build inputs included),
+`CHANGELOG.md`, `CHANGELOG/`, `README.md`, `docs/` (the partner guide and its build inputs included),
 `tools/` (`check-bash32.sh` included) and the Node Manager UI's tests and dev runner
 (`ui/tests/`, `ui/dev/`, `ui/test_*.py`) are documentation or maintainer tooling, are not
 updater-tracked, carry no `.sha256` sidecar, and must never be added to the updater arrays.
