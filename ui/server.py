@@ -69,7 +69,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "1.9.0"
+UI_VERSION = "1.9.1"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -1629,11 +1629,12 @@ STAKED_STATUSES = (1, 2, 3, 4)
 
 # The ValidatorInfo struct getValidator returns, as (field, bits of its Solidity
 # type). Order and types follow IConsensusRegistry.sol at tn-contracts 10cc12b,
-# the commit telcoin-network v0.15.0-adiri pins, and the node's own binding in
-# crates/tn-reth/src/system_calls.rs. The struct has no dynamic fields, so the
-# eth_call result is these seven words inline, with no offset word. Contracts
-# before tn-contracts 0866c16 had `bool isDelegated` where stakeVersion now sits
-# and stakeVersion where region sits; both still fit the widths below.
+# the commit telcoin-network v0.16.0-adiri pins (as v0.15.0-adiri did), and the
+# node's own binding in crates/tn-reth/src/system_calls.rs. The struct has no
+# dynamic fields, so the eth_call result is these seven words inline, with no
+# offset word. Contracts before tn-contracts 0866c16 had `bool isDelegated` where
+# stakeVersion now sits and stakeVersion where region sits; both still fit the
+# widths below.
 VALIDATOR_INFO_LAYOUT = (
     ("validator_address", 160),   # address
     ("activation_epoch", 32),     # uint32
@@ -2338,7 +2339,7 @@ def network_traffic():
 # update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
 GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 GAR_IMAGE_BASE = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.15.0-adiri"  # fallback only when the registry is unreachable
+DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.16.0-adiri"  # fallback only when the registry is unreachable
 
 
 def detect_public_ip():

@@ -2184,7 +2184,7 @@ async function fillUpdateStatus(){
     actions = `
       <div class="field"><label>Target ref / tag</label>
         <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
-          placeholder="${method==='docker'?'image tag, e.g. v0.15.0-adiri':'tag / branch / commit'}"></div>
+          placeholder="${method==='docker'?'image tag, e.g. v0.16.0-adiri':'tag / branch / commit'}"></div>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
         ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
@@ -3219,7 +3219,7 @@ function stepSourceField(){
   return `<div class="field"><label>Source version to build</label>
       <select id="mSourceMode">${opts}</select>
       ${smode==='custom'
-        ? `<input id="mBuildRef" style="margin-top:8px" placeholder="e.g. v0.15.0-adiri or main" value="${esc(s.customRef||'')}">`
+        ? `<input id="mBuildRef" style="margin-top:8px" placeholder="e.g. v0.16.0-adiri or main" value="${esc(s.customRef||'')}">`
         : ''}</div>`;
 }
 
@@ -3240,7 +3240,7 @@ function stepMethod(body){
   const methodField = m==='source'
     ? stepSourceField()
     : `<div class="field"><label>Docker image (latest auto-filled — edit to pin a different tag)</label>
-        <input id="mDockerImage" placeholder="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri" value="${esc(state.setup.dockerImage||'')}"></div>`;
+        <input id="mDockerImage" placeholder="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri" value="${esc(state.setup.dockerImage||'')}"></div>`;
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
     <div class="radio-cards" style="grid-template-columns:1fr 1fr 1fr">
       <div class="rcard ${m==='source'?'sel':''}" data-m="source"><div class="rt">Build from Source</div><div class="rd">Compile the Rust binary on this host. Most flexible.</div></div>

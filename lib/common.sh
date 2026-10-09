@@ -40,7 +40,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.6.0"
+readonly COMMON_VERSION="1.6.1"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -455,7 +455,7 @@ validate_multiaddr() {
 readonly GAR_IMAGE_BASE="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 # Fallback only when the registry is unreachable.
-readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.15.0-adiri"
+readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.16.0-adiri"
 
 # Echo the latest published -adiri docker image ref (registry/path:tag) by
 # querying the public Artifact Registry tag list and picking the highest version
@@ -2260,12 +2260,12 @@ _tn_word_fits() {
 #   word 5 stakeVersion      uint8
 #   word 6 region            uint8
 # (IConsensusRegistry.ValidatorInfo in tn-contracts 10cc12b7, the commit
-# v0.15.0-adiri pins.) The decode is strict: exactly seven words, each zero above
-# its type, isRetired 0 or 1, status within the enum, and status 6 (Any) only
-# with isRetired set: retiring a validator writes Any plus isRetired, the record
-# kept as a tombstone, and nothing writes Any alone. Anything else is
-# "unknown malformed ...", never a guessed status. Only the low bits are
-# decoded, so bash arithmetic never sees a 256-bit value.
+# v0.16.0-adiri pins, as v0.15.0-adiri did.) The decode is strict: exactly
+# seven words, each zero above its type, isRetired 0 or 1, status within the
+# enum, and status 6 (Any) only with isRetired set: retiring a validator writes
+# Any plus isRetired, the record kept as a tombstone, and nothing writes Any
+# alone. Anything else is "unknown malformed ...", never a guessed status. Only
+# the low bits are decoded, so bash arithmetic never sees a 256-bit value.
 node_stake_status() {
     local address="${1:-}" rpc_url="${2:-}"
     local call_data out rc kind rest ecode emsg result_re hex bits i
@@ -4694,10 +4694,11 @@ tn_node_strip_observer_flag() {
 # any tag / image / version string (all args joined with spaces), e.g.
 # `v0.15.0-adiri`, `us-docker.pkg.dev/...:v0.14.0-adiri` or `main telcoin-network
 # 0.16.0`. The FIRST x.y.z in it is compared against 0.15.0: v0.15.0-adiri still
-# accepts `--observer` as a hidden no-op and the first release after it rejects it
-# (`unexpected argument '--observer'`), so stripping from 0.15.0 upward is always
-# safe. With no x.y.z at all (branch name, bare SHA, digest) the target is assumed
-# to be the newest code and rc is 0.
+# accepts `--observer` as a hidden no-op and the first release after it,
+# v0.16.0-adiri, rejects it when it parses its arguments (`unexpected argument
+# '--observer'`), so stripping from 0.15.0 upward is always safe. With no x.y.z
+# at all (branch name, bare SHA, digest) the target is assumed to be the newest
+# code and rc is 0.
 tn_target_drops_observer() {
     local text found ver_re
     ver_re='([0-9]+\.[0-9]+\.[0-9]+)'

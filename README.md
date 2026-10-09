@@ -627,7 +627,7 @@ The health check verifies:
 - **Reputation score** — your own score from `sub_dag.reputation_scores.scores_per_authority` (the singular `reputation_score` of older releases is read as a fallback) alongside the committee average. Flags scores below half-average.
 - **Validator on-chain status** — uses the address from `--address`, or the execution address recorded in `.node-meta`, to call the ConsensusRegistry contract and report your validator state (Undefined / Staked / PendingActivation / Active / etc.) with the next step. An Exited validator is told whether `unstake()` is eligible now. When the status cannot be read, the report gives the reason (for example `http 429`).
 - **Consensus role** — prints `Consensus role: CvvActive`, `CvvInactive` or `Observer` from `tn_nodeMode` when the node binary supports it. Informational; it never changes the verdict.
-- **Legacy `--observer` flag** — warns when the node's launch file still passes `--observer`, which releases after `v0.15.0-adiri` reject. `update-node.sh` strips it when it updates to `v0.15.0-adiri` or later.
+- **Legacy `--observer` flag** — warns when the node's launch file still passes `--observer`, which `v0.16.0-adiri` and later reject at startup (exit status 2). `update-node.sh` strips it when it updates to `v0.15.0-adiri` or later.
 - **Public RPC** — on a node with a public RPC domain, see [Check it](#check-it). It also warns when the Caddy site predates block v2 (with the command that refreshes it) and when `--http.api` or `--ws.api` names `debug`, `trace` or `admin`. A list that starts with `all` is not warned about: the node reads it as plain `all` and ignores the rest (see [Public node tuning](#public-node-tuning)).
 - **Disk space** — uses the actual data directory from `/etc/telcoin/.node-meta` (falls back to `/var/lib/telcoin`), so the check reports usage on whichever mount actually holds chain data — not just the default. On macOS it reads `df -Pk`.
 - **Memory** — total / available / percent used. On macOS, which has no `/proc/meminfo`, the memory check is skipped with a note and a CPU line shows the physical core count, so the report still runs to the end.
@@ -720,7 +720,7 @@ On testnet, setup accepts `v0.13.0-adiri` or later for a source build or a Docke
 
 When Docker is selected the script will:
 - Install Docker if not already present
-- Ask for the full image URL and tag. The default is the highest-versioned `-adiri` tag in the Google Artifact Registry (`us-docker.pkg.dev/telcoin-network/tn-public/adiri`), or `v0.15.0-adiri` when the registry can't be reached
+- Ask for the full image URL and tag. The default is the highest-versioned `-adiri` tag in the Google Artifact Registry (`us-docker.pkg.dev/telcoin-network/tn-public/adiri`), or `v0.16.0-adiri` when the registry can't be reached
 - Pull the image
 - Create the host service user with UID 1101 to match the container's internal `nonroot` user
 - Generate keys using the Docker image
@@ -870,7 +870,7 @@ The scripts find the wrapper by that name, so from then on edit-config, install-
 
 ## Updating the node
 
-`update-node.sh` moves the node to a newer release in two phases. Prepare builds the new binary or pulls the new image while the node keeps running; apply stops the node, swaps the binary or image, restarts it and checks it, and a failed check rolls back to the old binary or image. The phases can run together or apart, so apply can wait for a quiet window.
+`update-node.sh` moves the node to a newer release in two phases. Prepare builds the new binary or pulls the new image while the node keeps running; apply stops the node, swaps the binary or image, restarts it and checks it, and a failed check rolls back to the old binary or image, except after a one-way update (below). The phases can run together or apart, so apply can wait for a quiet window.
 
 ```bash
 sudo bash ~/telcoin-node-scripts/update-node.sh                  # interactive
@@ -880,6 +880,7 @@ sudo bash ~/telcoin-node-scripts/update-node.sh --discard        # drop a prepar
 
 - Apply waits for the epoch boundary before it stops a committee node, in all four apply paths (source and Docker, interactive and `--json`), once the update lock is held and the new binary or image is ready. `--no-epoch-wait` or `TN_SKIP_EPOCH_WAIT=1` skips the wait, and with a `lib/common.sh` older than 1.5.0 apply warns and restarts without it. See [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary).
 - When the target is `v0.15.0-adiri` or newer (or a branch, commit or digest), apply removes the retired `--observer` flag from the launch file before it restarts the node.
+- When the node runs a release older than `v0.16.0-adiri` and the target is `v0.16.0-adiri` or newer (or a branch, commit or digest), apply is one-way. The new release migrates the consensus store in the data dir on its first start, and older releases cannot open it afterwards, so snapshot the data dir while the node is stopped before you apply. Apply warns, and warns again when the free space under `consensus-db/epochs` is less than twice the largest `epoch-N` directory. An interactive run asks whether you have the snapshot. The health window is 600 seconds unless `TN_UPDATE_VERIFY_TIMEOUT` is set to a number, which always wins. A failed check never rolls back and does not stop the node, since it may still be migrating; the script prints how to restore the snapshot. A running release that cannot be read counts as older. In `--json` mode the failure ends with a `done` event carrying `"rolled_back":false` and `"storage_migration":true`, and `--check` reports `storage_migration` for the latest release.
 - A ref names a release tag, branch, commit or image tag. There is no release floor here, because an older ref is a legitimate rollback. A ref that starts with `-` is refused, whether it is typed at the custom-ref prompt or passed as `--ref` (the Node Manager UI's flag), so it never reaches git or docker as an option; `--ref` without a value is an error too.
 - In `--json` mode stdout carries JSON only, and every run ends with exactly one `done` event, including runs that stop because they are not root, find no node, find the lock held or are terminated. `--check` prints one status object and nothing else.
 - An `existing` install (a binary that setup did not build or pull) is not updated by the script. It names the binary the node runs (the one in the launch file, else `BINARY_PATH` in `.node-meta`) and prints the steps: `sudo systemctl stop telcoin`, `sudo install -m 0755 <new binary> <that path>`, `sudo systemctl start telcoin`. On a committee node, run only the install line while the node runs, then restart with `edit-config.sh` menu item 12 (Restart node), which waits for the epoch boundary.
@@ -1029,7 +1030,7 @@ On a synced node, the Current Epoch tile counts down to the epoch boundary, corr
 
 ### Long-running actions
 
-Progress panes read one stream per action. Stray script output appears as log lines, warnings are yellow, and a dropped connection adds a line asking you to check the status before you retry; updates and config saves no longer reconnect on their own, which could run the action a second time. An update or a config save on a committee node can wait up to 30 minutes for the epoch boundary (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)), with a progress line every 15 seconds. Keep the page open until the action finishes: leaving the tab stops the script. During an update's epoch wait nothing has changed yet, so stopping there leaves the node as it was. A config save writes its change before it waits, so a save stopped before its restart is rolled back: every file it changed is put back, and the result says so (`rolled_back: true`). Once the restart has been issued, the edit stays.
+Progress panes read one stream per action. Stray script output appears as log lines, warnings are yellow, and a dropped connection adds a line asking you to check the status before you retry; updates and config saves no longer reconnect on their own, which could run the action a second time. An update or a config save on a committee node can wait up to 30 minutes for the epoch boundary (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)), with a progress line every 15 seconds. Keep the page open until the action finishes: leaving the tab stops the script. A one-way update (see [Updating the node](#updating-the-node)) shows its warning in the pane when you prepare it, and after the restart its health check can take up to 10 minutes. During an update's epoch wait nothing has changed yet, so stopping there leaves the node as it was. A config save writes its change before it waits, so a save stopped before its restart is rolled back: every file it changed is put back, and the result says so (`rolled_back: true`). Once the restart has been issued, the edit stays.
 
 ### Security model
 
@@ -1161,7 +1162,7 @@ While a Node Manager site is enabled, `firewall-setup.sh --reset` (and the clean
 
 reth's request limits and caches are sized for a node that only its operator queries. A public endpoint answers anyone, so the limits that bound a single request matter more, and the caches decide how often a popular query reaches the database. None of the values below has been measured on Telcoin Network. They are unmeasured starting points: change one at a time, then watch the node's memory, CPU and lag behind the network (`check-node.sh` shows the lag) before you change the next.
 
-Request limits (defaults from `telcoin-network node --help` of `v0.15.0-adiri`):
+Request limits (defaults from `telcoin-network node --help` of `v0.16.0-adiri`, the same as in `v0.15.0-adiri`):
 
 | Flag | Default | Unmeasured starting point | Why |
 |---|---|---|---|
@@ -1195,7 +1196,7 @@ There are no per-IP limits, on purpose. Mobile carriers put many subscribers beh
 
 There are no server timeouts either. A read, write or idle timeout would cut long-lived WebSocket sessions, which hold subscriptions open for hours, and slow but legitimate `eth_getLogs` responses over a wide range. The block-range and log limits above bound those requests instead.
 
-Keep `--http.api` and `--ws.api` to the modules a public client needs; the scripts start the node without either flag, which gives reth's default set. Never include `debug`, `trace` or `admin` on a public node: `debug` and `trace` let anyone start CPU-heavy tracing, and `admin` exposes node control. `check-node.sh` warns when either flag names one of them. In `v0.15.0-adiri`, `all` enables only eth, net, web3 and rpc, and a list whose first entry is `all` is read as plain `all` with the rest ignored, so `all,debug` does not turn debug on; check-node does not warn about `all` for that reason.
+Keep `--http.api` and `--ws.api` to the modules a public client needs; the scripts start the node without either flag, which gives the default set. Never include `debug`, `trace` or `admin` on a public node: `debug` and `trace` let anyone start CPU-heavy tracing, and `admin` exposes node control. `check-node.sh` warns when either flag names one of them. In `v0.16.0-adiri`, no flag and `all` both enable eth, net, web3, rpc and tn, and a list whose first entry is `all` is read as plain `all` with the rest ignored, so `all,debug` does not turn debug on; check-node does not warn about `all` for that reason. Any other list serves only the modules it names: leave out `tn` and the node stops answering the `tn_*` calls that `check-node.sh`, `update-node.sh` and the Node Manager UI make.
 
 ---
 
@@ -1413,6 +1414,96 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### update-scripts v1.1.72 — ships update-node v1.2.1 for v0.16.0-adiri
+`update-scripts.sh v1.1.72` carries update-node v1.2.1, lib/common v1.6.1 and telcoin-ui
+v1.9.1 (entries below), with refreshed `.sha256` sidecars. Run it before you update a node to
+`v0.16.0-adiri`: update-node v1.2.0 and older do not know that this update is one-way, and
+they roll a slow first start back to a binary or image that can no longer open the data dir.
+On a node with the Node Manager UI, the updater redeploys the UI, which also refreshes the
+UI's copy of `update-node.sh` in `/opt/telcoin-ui-update/`. v1.1.71 added a maintainer SSH key
+to the testnet add-ons bundle (add-ons 1.0.1) and had no entry of its own.
+
+### update-node v1.2.1 — one-way storage migration for v0.16.0-adiri
+The first start of `v0.16.0-adiri` migrates the consensus store in
+`<data dir>/consensus-db/epochs` to a new format, and older releases cannot open it afterwards.
+Putting the old binary or image back is therefore no rollback, and that is what v1.2.0 did when
+the first start was slow. An apply from a release older than `v0.16.0-adiri` to `v0.16.0-adiri`
+or newer, or to a branch, commit or digest, is now one-way:
+
+- Before it stops the node, it warns that the update is one-way. When the free space under
+  `consensus-db/epochs` is less than twice the largest `epoch-N` directory, it warns about the
+  disk too; the disk check never blocks. An interactive run then asks whether you have a
+  snapshot of the data dir. Answering no cancels the apply and keeps the prepared update.
+- The health window is 600 seconds instead of 45, because the first start migrates before the
+  node answers. A numeric `TN_UPDATE_VERIFY_TIMEOUT` still wins; unset or non-numeric gives 600
+  on a one-way update and 45 otherwise.
+- A failed health or identity check never rolls back, and an interactive run does not offer to.
+  The node is left on the new release and is not stopped, because it may still be migrating.
+  The prepared update is cleared, and the version marker keeps the old release until a verified
+  apply. The error names the journal to watch and the way back: stop the node, restore the data
+  dir from the pre-update snapshot, copy back the binary, start wrapper or launch file from the
+  backup it names, and start the node.
+- In `--json` mode that failure ends with an `error` event and then one `done` event with
+  `"ok":false`, `"rolled_back":false` and `"storage_migration":true`. `--check` adds a
+  `storage_migration` boolean, true when updating from the running release to `latest_ref` is
+  one-way. `--json --prepare` sends the one-way warning as a `warn` event before its `done`, so
+  the Node Manager UI shows it before you press Apply.
+- The running release comes from the image tag on Docker installs and from
+  `/opt/telcoin/telcoin-network.version` on source installs, not from the source checkout,
+  which a prepare moves. A running release that cannot be read counts as older, so the update
+  is treated as one-way.
+
+An update that does not cross into `v0.16.0-adiri` (from `v0.16.0-adiri` to a later release,
+for example) keeps the 45-second window and the rollback, and its `done` event has no
+`storage_migration` field. `--help` describes one-way updates and `TN_UPDATE_VERIFY_TIMEOUT`.
+
+### lib/common v1.6.1 — default image v0.16.0-adiri
+`DEFAULT_DOCKER_IMAGE`, the image setup falls back to when the registry cannot be reached, is
+now `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri`. Comments that named the
+current release now name `v0.16.0-adiri`: it pins the same tn-contracts commit (10cc12b7) as
+`v0.15.0-adiri`, and it rejects `--observer`. Nothing else changes.
+
+### telcoin-ui v1.9.1 — fallback image v0.16.0-adiri
+The fallback image (used when the registry cannot be reached) and the image placeholders in
+the setup wizard and the Update tab name `v0.16.0-adiri`. The version bump makes
+`update-scripts.sh` redeploy the UI, which installs update-node v1.2.1 as the UI's update
+engine, so an update started from the UI gets the one-way handling. The one-way warning shows
+in the progress pane when you prepare; the status card does not show `storage_migration` yet.
+
+### testnet baseline → v0.16.0-adiri
+adiri testnet moves to `v0.16.0-adiri`, built from telcoin-network commit `d72cc2bc`. The image
+is `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri` (linux/amd64 only, index
+digest `sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea`). lib/common
+v1.6.1 and telcoin-ui v1.9.1 point the defaults at it. `MIN_SOURCE_VERSION_TESTNET` stays at
+0.13.0, and the system contracts are unchanged (tn-contracts 10cc12b7, as in `v0.15.0-adiri`).
+
+**The first start migrates the consensus store one way.** Each epoch pack the node opens is
+rewritten in the v2 format, with `migrated legacy pack to v2 on open` in the log once per
+epoch. Older epochs migrate later, while the node runs, each with a `pre-v2 (legacy) epoch
+pack; migrating it to v2` warning. `v0.15.0-adiri` cannot open a migrated data dir; it stops
+with `invalid version (should be 0)`. Snapshot the data dir while the node is stopped, before
+the first start of `v0.16.0-adiri`: going back means restoring that snapshot, not swapping the
+binary or image. Run `update-scripts.sh` first so update-node v1.2.1 handles the apply.
+
+No new fork is armed. The `fork schedule (adiri)` line at startup gains
+`subsecond_timestamp_fork_epoch=4294967295`, which never arrives, and the six existing fork
+epochs are unchanged. `telcoin --version` still prints 0.1.0; only its `Commit SHA:` line
+differs. Other changes an operator can see:
+
+- `--observer` is now an argument error: the node exits with status 2 and
+  `unexpected argument '--observer'`. update-node removes the flag when it updates to
+  `v0.15.0-adiri` or later, and check-node warns while a launch file still passes it.
+- The node locks `<data dir>/telcoin.pid`. A second node process on the same data dir stops
+  with `another telcoin process (pid N) holds the lock on this data directory`.
+- The advertised addresses in `node-info.yaml` must name a concrete IP with a nonzero UDP port
+  over QUIC v1. A wildcard address such as `0.0.0.0`, a multicast address or port 0 is refused.
+- The health port (`--healthcheck`, 43174 with the testnet health monitor) also answers
+  `GET /health/network`: 200 once the primary and every worker have peers, 503 before that.
+- With no `--http.api` or `--ws.api`, or with `all`, the node serves eth, net, web3, rpc and
+  tn. An explicit list now serves only what it names, so a list without `tn` drops the `tn_*`
+  methods that check-node, update-node's health check and the Node Manager UI call. The scripts
+  pass neither flag.
 
 ### update-scripts v1.1.70 — integrity check fails closed; runs under macOS bash 3.2
 `update-scripts.sh v1.1.70` carries the entries below, down to lib/observability v1.0.2,

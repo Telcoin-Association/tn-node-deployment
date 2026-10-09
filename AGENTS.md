@@ -46,7 +46,8 @@ already works and is out of scope for this repo. Leave those as provenance comme
 ## Node role
 
 The node binary has no `--observer` flag any more. It was removed upstream in
-telcoin-network: v0.15.0-adiri accepts it as a hidden no-op and later releases reject it.
+telcoin-network: v0.15.0-adiri accepts it as a hidden no-op, and v0.16.0-adiri rejects it
+when it parses its arguments (`unexpected argument '--observer'`, exit status 2).
 Role is derived each epoch from committee membership. Scripts decide the validator view
 from the on-chain stake status (`getValidator` status Staked / PendingActivation / Active /
 PendingExit) via `node_stake_status` / `node_is_staked_validator` in `lib/common.sh`.
@@ -78,6 +79,22 @@ launch file first and wait before the restart. Rollback restarts never wait. Any
 stops or restarts the node calls it right before the stop: "wait first, then stop" is about the
 stop, not about every file edit. A script that owns its EXIT trap sets `TN_EXIT_TRAP_OWNED=1`
 before `tn_acquire_update_lock` and calls `tn_release_update_lock` from that trap.
+
+## One-way storage migration (v0.16.0-adiri)
+
+The first start of v0.16.0-adiri migrates the consensus store (`<data dir>/consensus-db/epochs`,
+epoch packs v1 to v2), and older releases cannot open the data dir afterwards (`invalid
+version`). So update-node 1.2.1 never rolls back on its own across the 0.16.0 floor
+(`STORAGE_MIGRATION_FLOOR`). `storage_migrating_upgrade` judges the running release from the
+image tag on Docker installs and from `/opt/telcoin/telcoin-network.version` on source installs,
+never from `OLD_REF`, which is `git describe` at prepare time; an unreadable running release
+counts as older. A failed check does not stop the node or restore the old binary or image,
+clears the pending state, keeps the version marker and prints the snapshot-restore steps. In
+`--json` mode it ends with a `done` carrying `"rolled_back":false` and
+`"storage_migration":true`, and `--check` reports the same boolean. The maintainer fleet driver
+(adiri-genesis `adiri-update-all.sh`, maintainer-only) reads both fields and sets
+`TN_UPDATE_VERIFY_TIMEOUT`, so keep those names. Do not re-add an automatic binary or image
+rollback for that case: only a data dir snapshot taken before the update can undo it.
 
 ## Staking helper
 
@@ -178,7 +195,7 @@ after the marker.
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
 The same holds for the other docs and the maintainer tooling: `OPERATOR.md`, `followup.md`,
-`CHANGELOG.md`, `README.md`, `docs/` (the partner guide and its build inputs included),
+`CHANGELOG.md`, `CHANGELOG/`, `README.md`, `docs/` (the partner guide and its build inputs included),
 `tools/` (`check-bash32.sh` included) and the Node Manager UI's tests and dev runner
 (`ui/tests/`, `ui/dev/`, `ui/test_*.py`) are documentation or maintainer tooling, are not
 updater-tracked, carry no `.sha256` sidecar, and must never be added to the updater arrays.
