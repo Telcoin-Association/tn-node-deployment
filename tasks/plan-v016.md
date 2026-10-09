@@ -27,8 +27,8 @@ The approved plan is in the session transcript; this file tracks execution only.
 - [x] WP-B.4 image verified 2026-10-09T20:0xZ: index sha256:b905b098…, amd64 sha256:85024097…, --version d72cc2bc, --observer rc 2, --help OK
 - [x] WP-B.5 tag v0.16.0-adiri pushed on d72cc2bc (over SSH)
 - [ ] config.sh digest pinned
-- [ ] gen-checksums, commits, push both branches
-- [ ] tn-node-deployment PR opened — STOP for operator review
+- [x] gen-checksums, commits, push tn-node-deployment branch (adiri-genesis after C2)
+- [ ] tn-node-deployment PR: gh token cannot create PRs; operator opens it from the compare URL (body: tasks/pr-body-v016.md) — STOP for operator review
 - [ ] merged on approval; run record started
 
 ## Wave 4 (live)
