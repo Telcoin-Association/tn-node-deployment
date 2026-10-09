@@ -7,6 +7,35 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### v0.16.0-adiri round, October 2026 -- update-scripts v1.1.72
+This round moves the adiri testnet to `v0.16.0-adiri` (telcoin-network `d72cc2bc`). Operators
+receive the scripts below through `update-scripts.sh` v1.1.72; the Changelog section of
+README.md has one entry per script and a "testnet baseline" entry for the release itself.
+
+#### One-way updates
+The first start of `v0.16.0-adiri` migrates the consensus store in the data dir, and older
+releases cannot open it afterwards. update-node v1.2.1 treats an apply across that line as
+one-way: it warns before it stops the node, warns again when the disk has less than twice the
+largest `epoch-N` free, asks an interactive operator about a snapshot, and gives the first start
+600 seconds unless `TN_UPDATE_VERIFY_TIMEOUT` is a number. A failed check no longer rolls back;
+the node is not stopped, and the error says how to restore the pre-update snapshot. In `--json`
+mode the failed `done` carries `"rolled_back":false` and `"storage_migration":true`, `--check`
+reports `storage_migration`, and prepare sends the warning so the Node Manager UI shows it
+before Apply. A source install's running release comes from the version marker, not the
+checkout, and a running release that cannot be read counts as older.
+
+#### Defaults
+lib/common v1.6.1 and telcoin-ui v1.9.1 name `v0.16.0-adiri` as the fallback image and in the
+UI's placeholders. The UI bump also redeploys the UI's copy of update-node.
+
+#### Docs
+README.md, OPERATOR.md and the partner guide (version 1.2) describe one-way updates, how to
+snapshot the data dir before one and how to go back, and the release's other visible changes:
+`--observer` is now an argument error (exit status 2), the `telcoin.pid` lock, the refusal of
+wildcard and port-0 advertised addresses, `/health/network`, and an explicit `--http.api` list
+that no longer serves `tn_*` methods unless it names `tn`. No new fork is armed
+(`subsecond_timestamp_fork_epoch=4294967295`).
+
 ### Backlog round, October 2026 -- update-scripts v1.1.70
 This round worked through the `followup.md` backlog left by the public-RPC and observer-flag
 work. Operators receive every script below through `update-scripts.sh` v1.1.70. The Changelog

@@ -33,7 +33,7 @@ This guide is the path through them, in the order you need them:
 - [Before you start](#before-you-start): hardware, operating system, ports, networks and what to have ready.
 - [Install](#install): fetch the scripts, run setup, back up the keys, set up the firewall and choose the optional node flags.
 - [Confirm the node is syncing, then synced](#confirm-the-node-is-syncing-then-synced): how to tell a healthy node from a stuck one, how long sync takes, and what the health check says about epochs and the committee.
-- [Day-2 operations](#day-2-operations): script and node updates, restarts around the epoch boundary, configuration changes, service commands, the Node Manager UI, testnet add-ons and removal.
+- [Day-2 operations](#day-2-operations): script and node updates, one-way updates, restarts around the epoch boundary, configuration changes, service commands, the Node Manager UI, testnet add-ons and removal.
 - [Public RPC (https and wss)](#public-rpc-https-and-wss): serve JSON-RPC and WebSocket on your own DNS name.
 - [Validators: stake and activate](#validators-stake-and-activate): checking the node with `prepare-stake.sh`, staking, activation, committee seats, rewards and exit.
 - [Automation](#automation): run setup and the other scripts without prompts.
@@ -264,7 +264,7 @@ An argument setup does not recognise is reported on stderr as `Unknown argument:
 | Menu choice | `--install-method` | What it does | How it updates |
 |---|---|---|---|
 | `1) Build from source` | `source` | Installs Rust and the build dependencies, clones telcoin-network to `/opt/telcoin-source`, builds it (20 to 40 minutes; log in `/tmp/tn-build.log`) and installs `/opt/telcoin/telcoin-network`. | `update-node.sh` |
-| `3) Docker` | `docker` | Installs Docker if missing and pulls the image from `us-docker.pkg.dev/telcoin-network/tn-public/adiri`. The default tag is the newest `-adiri` tag in the registry, or `v0.15.0-adiri` if the registry cannot be reached. | `update-node.sh` |
+| `3) Docker` | `docker` | Installs Docker if missing and pulls the image from `us-docker.pkg.dev/telcoin-network/tn-public/adiri`. The default tag is the newest `-adiri` tag in the registry, or `v0.16.0-adiri` if the registry cannot be reached. | `update-node.sh` |
 | `4) I already have it` | `existing` | Uses a `telcoin-network` binary you supply. | By hand (see [Update the node](#update-the-node)). |
 | `2) Pre-built binary` | none | Not available yet; the menu sends you back. | |
 
@@ -482,8 +482,9 @@ What else to expect:
 
 - On a node registered on-chain as a validator (status 1 to 4), or one whose status cannot be read, the script shows a downtime warning and asks you to type `CONFIRM` before it stops the node.
 - When the node votes in the current committee and the epoch boundary is close, the apply waits before it stops the node (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)). `--no-epoch-wait` skips the wait.
-- After the restart it waits up to 45 seconds for the service to be active and for the node to answer `tn_latestConsensusHeader`. When many nodes restart at once, quorum takes longer to form. Raise the window with `TN_UPDATE_VERIFY_TIMEOUT`, in seconds, for example `sudo TN_UPDATE_VERIFY_TIMEOUT=120 bash ~/telcoin-node-scripts/update-node.sh`.
-- If that check fails, it offers to roll back to the previous binary or image.
+- After the restart it waits up to 45 seconds (600 on a one-way update) for the service to be active and for the node to answer `tn_latestConsensusHeader`. When many nodes restart at once, quorum takes longer to form. Raise the window with `TN_UPDATE_VERIFY_TIMEOUT`, in seconds, for example `sudo TN_UPDATE_VERIFY_TIMEOUT=120 bash ~/telcoin-node-scripts/update-node.sh`. A number you set always wins, on a one-way update too, so leave it unset there or give it 600 or more.
+- If that check fails, it offers to roll back to the previous binary or image, except after a one-way update (next item).
+- When the node runs a release older than `v0.16.0-adiri` and the target is `v0.16.0-adiri` or newer (or a branch, commit or digest), the update is one-way. The new release migrates the consensus store on its first start, and older releases cannot open the data directory afterwards. Snapshot the data directory before you apply (see [One-way updates](#one-way-updates)). The script says the update is one-way, warns when the free space under `consensus-db/epochs` is less than twice its largest `epoch-N` directory, asks whether you have a snapshot, and waits up to 600 seconds. If the check fails it does not roll back and does not stop the node, which may still be migrating. When the script cannot read which release the node runs, it treats the update as one-way.
 - Only one update runs at a time. A second run stops with `Another update is already running (PID N).`
 - It never touches the keys, `node-info.yaml`, the BLS passphrase, the chain configuration, or the listener addresses.
 - A ref you type at the version picker cannot start with `-`; the script refuses it with `Invalid ref "<ref>": a ref cannot start with "-".` before any git command runs.
@@ -499,6 +500,26 @@ sudo systemctl start telcoin
 
 On a committee node, run only the `install` line, which replaces the file while the node runs, then restart with `edit-config.sh` menu item `12) Restart node`, which waits for the epoch boundary.
 After any update, run `sudo bash ~/telcoin-node-scripts/check-node.sh`.
+
+### One-way updates
+
+An update from a release older than `v0.16.0-adiri` to `v0.16.0-adiri` or newer cannot be undone by putting the old binary or image back, because the new release migrates the consensus store on its first start.
+Before such an update, snapshot the data directory with the node stopped.
+Prepare first (`1) Prepare only`), so the node is down only for the copy:
+
+```bash
+sudo systemctl stop telcoin
+sudo cp -a /var/lib/telcoin /var/lib/telcoin.pre-v0.16   # or take a disk snapshot instead
+sudo systemctl start telcoin
+```
+
+The copy needs as much free space as the data directory; a disk snapshot from your cloud provider needs none on the server.
+On a committee node, stop it well away from an epoch boundary; `check-node.sh` shows the time to the next one.
+Then run `update-node.sh` again, choose `1) Apply now`, and answer yes when it asks about the snapshot.
+The first start can take minutes while the node migrates each epoch it opens; `journalctl -u telcoin -f` shows the progress.
+If the health check fails, the script leaves the node on the new release and does not stop it. A node that is still migrating comes up without help, and a node that stopped says why in the journal, so read the journal before you decide to go back.
+To go back, stop the node, move the migrated data directory aside and the snapshot back into its place (for the copy above, `/var/lib/telcoin.pre-v0.16` back to `/var/lib/telcoin`), run the copy command from the error message to put the old binary or launch file back, and start the node.
+An older release cannot start on the migrated data directory; it stops with `invalid version (should be 0)`.
 
 ### Restarts and the epoch boundary
 
@@ -636,6 +657,7 @@ What to expect from the UI:
 - The validator view follows the chain. The UI asks the network's public RPC for the node's `getValidator` record, then the synced node, then its last saved answer, so a newly staked validator gets the validator view while it is still syncing. A banner says when the view comes from a cached answer, or when the role is unknown and the view defaults to observer.
 - The Config tab has no fields for bootstrap peers, state export or private forward targets yet; set those with `edit-config.sh` (see [Change the configuration](#change-the-configuration)).
 - Updates and config saves run the same scripts, so they wait for the epoch boundary too (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)). A progress pane can show `Waiting for epoch N to close` for up to 30 minutes, with a line every 15 seconds. Keep the tab open until the result line appears, because leaving the tab stops the script. Leaving an update during the wait cancels it before the node is stopped, and the prepared update stays for a later apply; leaving it once the apply has started can cut the apply off part way. A config save that is stopped before it restarts the node is rolled back: every file it changed is put back as it was.
+- A one-way update (see [One-way updates](#one-way-updates)) shows its warning in the progress pane when you prepare it. Apply does not ask about a snapshot, so take it before you press Apply, and expect the health check to take up to 10 minutes after the restart.
 
 ### Testnet add-ons
 
@@ -1114,7 +1136,7 @@ Keygen records the install method, the Docker image or binary path and the node 
 
 ```bash
 read -rs TN_BLS_PASSPHRASE && export TN_BLS_PASSPHRASE
-IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri   # your tag
+IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri   # your tag
 ARGS=(--network testnet --install-method docker --docker-image "$IMAGE"
   --address 0xYOUR_EXECUTION_ADDRESS
   --external-primary /ip4/203.0.113.10/udp/49590/quic-v1
@@ -1167,7 +1189,7 @@ If an explicit URL differs from the domain, setup warns that `rpc-enable` will r
 | Script | Non-interactive forms |
 |---|---|
 | `install-caddy.sh` | `--phase=rpc-status`, `rpc-check-dns`, `rpc-enable`, `rpc-disable` and the dashboard phases `status`, `check-dns`, `enable`, `disable`, with or without `--json`. The dashboard password comes from `TN_CADDY_PASSWORD`. |
-| `update-node.sh` | `--json --check`, `--json --prepare --ref <ref>`, `--json --apply --yes [--no-epoch-wait]`, `--json --discard`. A `--ref` value cannot start with `-`. A failed apply rolls back; its `done` line carries `"ok":false` and a boolean `rolled_back` (`true` when the rollback succeeded). |
+| `update-node.sh` | `--json --check`, `--json --prepare --ref <ref>`, `--json --apply --yes [--no-epoch-wait]`, `--json --discard`. A `--ref` value cannot start with `-`. A failed apply rolls back; its `done` line carries `"ok":false` and a boolean `rolled_back` (`true` when the rollback succeeded). A one-way apply (see [One-way updates](#one-way-updates)) never rolls back: its failed `done` carries `"rolled_back":false` and `"storage_migration":true`, and `--json --check` adds the same boolean, `true` when updating to `latest_ref` is one-way. |
 | `firewall-setup.sh` | `--reset`, `--json --status`, `--json --enable`, `--json --port <49590/udp\|49594/udp\|43174/tcp> <on\|off>`. `--json --status` adds `p2p_ports`, one object per P2P port with `port`, `proto`, `label` and `allowed` (`null` while `ufw` is off). |
 | `edit-config.sh` | `--set <field>=<value>`, with or without `--json`, for the fields in [Change the configuration](#change-the-configuration); `--no-epoch-wait`. |
 | `prepare-stake.sh` | `--json`, `--network-rpc <URL>`, and `--rotate-address <0xNEW> --yes [--no-restart]`. With `--json` it prints one JSON object at the end; the exit codes are in [Check the node with prepare-stake.sh](#check-the-node-with-prepare-stakesh). |
@@ -1216,6 +1238,8 @@ The tables below group the common symptoms by area.
 | `update-scripts.sh` lists a file as not installed and exits 1 | Its published checksum was missing or did not match the download. | Run `update-scripts.sh` again later. |
 | `an update is in progress (PID <N>); try again when it has finished` (`edit-config.sh`), or `Refused: an update is in progress ...` (`prepare-stake.sh --rotate-address`) | `update-node.sh` holds the update lock. | Wait for the update to finish, then run it again. |
 | `Invalid ref "<ref>": a ref cannot start with "-".` | `update-node.sh` refuses a ref that git or docker would read as an option. | Use a release tag, branch, commit or image tag. |
+| `update-node.sh` ends `... Not rolled back: the previous release cannot open the migrated data dir.` | A one-way update to `v0.16.0-adiri` or later did not pass its health check, often because the first start is still migrating the consensus store. | Watch `journalctl -u telcoin -f`. A node that is still migrating comes up without help; a node that stopped says why in the journal. To go back, restore the pre-update snapshot (see [One-way updates](#one-way-updates)). |
+| Older release fails with `invalid version` (`invalid version (should be 0)` in the log) after a downgrade | `v0.16.0-adiri` or later has migrated the data directory, and older releases cannot read it. | Restore the data directory from the snapshot taken before the update (see [One-way updates](#one-way-updates)), or run `v0.16.0-adiri` or later again. |
 | `<launch file> has 2 node commands with --http, so it is not clear which one starts the node. ...` | A hand edit left a second node command in the launch file. | Remove or comment out the extra one, then run `edit-config.sh` again. |
 | `firewall-setup.sh` stops right after `Firewall is active` in `1) View current firewall status` | A bug in `firewall-setup.sh` before 1.6.0. | `bash ~/telcoin-node-scripts/update-scripts.sh`. |
 
@@ -1238,6 +1262,7 @@ The tables below group the common symptoms by area.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | The node cannot decrypt its BLS key at start | `/etc/telcoin/bls-passphrase` does not hold the passphrase the keys were generated with, or a TPM reset or rebuild stopped a TPM install from unsealing. | Restore the correct passphrase. `edit-config.sh` option 5 rewrites the file but never re-encrypts the keys. A TPM install needs the passphrase you stored offline ([TPM notes](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/README.md#option-2--tpmvtpm-sealing-advanced)). |
+| The node will not start; the log shows `another telcoin process (pid <N>) holds the lock on this data directory` | `v0.16.0-adiri` and later lock `<data directory>/telcoin.pid`, and another node process, such as one started by hand, runs on the same data directory. | Stop the other process, then start the service. Do not delete `telcoin.pid`: the lock is released when its holder exits. |
 | `systemctl status telcoin` shows `start-limit-hit` | Five failed starts within 60 seconds. | Fix the cause from the journal, then `sudo systemctl reset-failed telcoin && sudo systemctl start telcoin`. |
 
 ### Staking and exit

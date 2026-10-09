@@ -68,9 +68,9 @@ package or verifier of that round that recorded it.
   Why: a two-phase automated install that leaves those flags out at finalize gets a broken start
   wrapper.
 - Answering Yes to setup-node's "Overwrite existing keys?" always ends "Key generation failed.",
-  because the v0.15.0-adiri keytool refuses a non-empty `node-keys/` and setup-node passes no
-  `--force`. Candidate fix: move `node-keys/` and `node-info.yaml` aside into a timestamped
-  backup first, and never pass `--force`. (V-DOC)
+  because the keytool refuses a non-empty `node-keys/` (v0.15.0-adiri and v0.16.0-adiri alike)
+  and setup-node passes no `--force`. Candidate fix: move `node-keys/` and `node-info.yaml` aside
+  into a timestamped backup first, and never pass `--force`. (V-DOC)
   Why: the overwrite the prompt offers can never succeed, and the operator has to move the files
   by hand.
 - A `--json` finalize cannot undo the bootstrap-peers or state-export choices recorded at keygen:
@@ -131,6 +131,23 @@ package or verifier of that round that recorded it.
   1.2.1 again does not remove it and nothing else does; nothing reads the key either. (P3)
   Why: optional cleanup of a stale line that can mislead someone reading the file.
 
+- A one-way apply killed after its restart (a closed UI tab, a signal) leaves the pending
+  state in place and the version marker on the old release. A second apply then backs up the
+  binary that is installed now, which is already the new release, so the undo command a later
+  failure prints restores the new binary, not the old one; the old one is in the earlier
+  `.bak.<ts>`. Pick the newest `.bak` whose hash differs from the built binary, or say so in
+  the message. (V-A)
+  Why: an operator following the printed undo after a restore would start the wrong release.
+- An interactive `1) Prepare only` says nothing about a one-way update; the warning and the
+  snapshot question come only at apply. `--json --prepare` already warns. (DOC-A)
+  Why: an operator who prepares in the evening and applies later learns about the snapshot only
+  at the last step.
+- v0.16.0-adiri ships `telcoin-network db migrate` (dry run by default, `--force` to apply, node
+  stopped), which migrates the epoch packs offline. update-node could run it between the stop
+  and the first start, so the health window would no longer have to cover the migration. Not
+  tried. (DOC-A)
+  Why: a slow migration currently looks like a failed health check.
+
 ## Library
 
 - Delete the deprecated `tn_resolve_node_type` stub in `lib/fallback.sh`, and its comment saying
@@ -173,9 +190,9 @@ package or verifier of that round that recorded it.
   released anyway, so closing the descriptor there (`9>&-`) is for consistency. (P6)
   Why: an orphaned git process keeps the lock descriptor open.
 - `lib/common.sh` and the UI server decode `getValidator` words 5 and 6 as `stakeVersion` and
-  `region`, the tn-contracts layout at v0.15.0-adiri. Live testnet replies have zero in both
-  words, so the layout of the deployed registry is unconfirmed; check it against a validator
-  with a non-zero value. (UI-2b)
+  `region`, the layout of tn-contracts 10cc12b7, which v0.15.0-adiri and v0.16.0-adiri both
+  pin. Live testnet replies have zero in both words, so the layout of the deployed registry is
+  unconfirmed; check it against a validator with a non-zero value. (UI-2b)
   Why: if testnet runs the older layout, the UI shows the wrong stake version.
 
 ## Public RPC
@@ -204,10 +221,15 @@ package or verifier of that round that recorded it.
 ## Health check
 
 - check-node shows the bootstrap-peers file only as information. It should fail when the launch
-  line reads the map from a file that is missing or empty, since v0.15.0-adiri then refuses to
-  start, and, once edit-config keeps `.node-meta` current, flag a `STATE_EXPORT` that disagrees
-  with the launch line. (P4b)
+  line reads the map from a file that is missing or empty, since the node then refuses to start
+  (v0.15.0-adiri, and v0.16.0-adiri, whose parser is unchanged), and, once edit-config keeps
+  `.node-meta` current, flag a `STATE_EXPORT` that disagrees with the launch line. (P4b)
   Why: the node will not come back after its next restart, and check-node says nothing.
+- From v0.16.0-adiri an explicit `--http.api` or `--ws.api` list serves only the modules it
+  names, so a list without `tn` drops the `tn_*` methods. check-node warns about `debug`,
+  `trace` and `admin` in those flags but not about a missing `tn`. (DOC-A)
+  Why: without `tn`, update-node's health check (`tn_latestConsensusHeader`) fails after every
+  restart, and check-node and the UI lose their node readings.
 - The wss probe's limit for a silent server is 15 polls of `sleep 0.1`, about 1.7 seconds;
   `read -t 0.1` would be tighter but needs bash 4. (B)
   Why: a slightly longer run, accepted to stay bash 3.2 safe.
@@ -245,6 +267,13 @@ package or verifier of that round that recorded it.
   page), add the notice, and confirm that update-node leaves the node and its staging consistent
   when it is terminated mid-wait. (plan, UI-2a, UI-2b, UI-3a, P6, A, DOC-2)
   Why: operators abort long actions without meaning to.
+- The Update tab's status card does not show `storage_migration` from `update-node.sh --json
+  --check`, and Apply asks no snapshot question; the one-way warning appears only in the prepare
+  pane. A one-way apply's health check can also run for 10 minutes after the restart, which
+  widens the window in which leaving the tab cuts the apply off (item above); what a terminated
+  one-way apply leaves behind has not been checked. (DOC-A)
+  Why: a UI operator can apply a one-way update without having seen the warning, and has no way
+  back without a snapshot.
 - The UI cannot skip the epoch wait for an update or a config save: the helper's arguments are
   fixed and sudo resets the environment, so neither `--no-epoch-wait` nor `TN_SKIP_EPOCH_WAIT`
   gets through. (P6, P5)

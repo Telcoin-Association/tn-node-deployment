@@ -4,8 +4,8 @@
 # on the cover as written; pandoc also normalises it to YYYY-MM-DD for the PDF's
 # creation and modification dates, so keep a form it can parse ("1 October 2026").
 subtitle: Deploy, sync, stake and operate a node
-version: "1.1"
-date: 2 October 2026
+version: "1.2"
+date: 9 October 2026
 author: Telcoin Association
 description: >-
   Operator guide for mobile network operators running a Telcoin Network node:
