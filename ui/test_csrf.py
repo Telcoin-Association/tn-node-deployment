@@ -253,6 +253,57 @@ class SecretStreamTest(ServerTestCase):
         self.assertEqual(proc.stdin.data, pw + "\n")
         self.assertNotIn("TN_CADDY_PASSWORD", proc.env)
 
+    # A passphrase with a double quote, a backslash, an interior tab and
+    # non-ASCII text: each JSON writer spells it differently.
+    MIXED = 'p\u00e4ss"w\\rd in\tthe-middle 42!'
+
+    @staticmethod
+    def engine_json(sec):
+        """setup-node.sh json_escape: UTF-8 kept, backslash and quote escaped,
+        tab as a space."""
+        return sec.replace("\\", "\\\\").replace('"', '\\"').replace("\t", " ")
+
+    def keygen_output(self, **script):
+        self.popen_script = script
+        resp = self.client.post("/api/setup/observer/keygen", buffered=True,
+                                json=dict(FULL_SETUP, passphrase=self.MIXED))
+        self.assertEqual(resp.status_code, 200)
+        return resp.data.decode()
+
+    def assert_no_form_of(self, sec, text):
+        forms = {sec, json.dumps(sec)[1:-1], json.dumps(sec, ensure_ascii=False)[1:-1],
+                 self.engine_json(sec)}
+        for form in forms:
+            # no form, and no 8-character piece of one
+            for i in range(len(form) - 7):
+                self.assertNotIn(form[i:i + 8], text, form)
+
+    def test_every_json_form_of_the_passphrase_is_cut(self):
+        sec = self.MIXED
+        lines = [
+            json.dumps({"event": "log", "msg": "ascii " + sec}),
+            json.dumps({"event": "log", "msg": "utf8 " + sec}, ensure_ascii=False),
+            '{"event":"log","msg":"engine ' + self.engine_json(sec) + '"}',
+        ]
+        text = self.keygen_output(lines=lines, rc=0)
+        self.assert_no_form_of(sec, text)
+        self.assertEqual(text.count("***"), 3)
+
+    def test_a_secret_where_the_stderr_tail_is_cut_is_cut_first(self):
+        # The tail keeps 12 lines joined with " | " and cut to 900 characters;
+        # this puts the passphrase across character 900.
+        stderr = "".join("x" * 70 + "\n" for _ in range(11)) + "y" * 81 + " " + self.MIXED + "\n"
+        text = self.keygen_output(lines=[], rc=1, stderr_text=stderr)
+        self.assert_no_form_of(self.MIXED, text)
+        self.assertIn("y" * 81 + " ***", text)
+
+    def test_redact_forms(self):
+        sec = 'a"b\\c\td\u00e9'
+        out = server._redact("|".join([
+            sec, json.dumps(sec)[1:-1], json.dumps(sec, ensure_ascii=False)[1:-1],
+            self.engine_json(sec), 'a\\"b\\\\c\\u0009d\u00e9']), [sec])
+        self.assertEqual(out, "|".join(["***"] * 5))
+
     def test_short_caddy_password_is_refused(self):
         resp = self.client.post("/api/caddy/enable",
                                 json={"domain": "dashboard.example.com", "username": "admin",

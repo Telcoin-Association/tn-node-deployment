@@ -4487,13 +4487,15 @@ def _stream_frame(line):
     return _sse({"event": "log", "msg": msg}), "log"
 
 
-def _stderr_tail(path, lines=12, limit=900):
-    """The last non-blank lines of a stream's captured stderr, escapes removed,
-    joined with " | " and cut to `limit` characters. '' when there are none."""
+def _stderr_tail(path, lines=12, limit=900, redact=()):
+    """The last non-blank lines of a stream's captured stderr, each with the
+    `redact` values cut and escapes removed, joined with " | " and cut to
+    `limit` characters. '' when there are none. Each line is redacted before
+    the cut, so the cut can never leave part of a secret behind."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             kept = collections.deque(
-                (_ANSI_RE.sub("", ln).strip() for ln in f if ln.strip()),
+                (_ANSI_RE.sub("", _redact(ln, redact)).strip() for ln in f if ln.strip()),
                 maxlen=lines)
     except OSError:
         return ""
@@ -4526,13 +4528,31 @@ def _synthesized_done(rc):
     return {"event": "done", "ok": rc == 0, "synthesized": True, "rc": rc, "msg": msg}
 
 
+def _redact_forms(sec):
+    """Every way `sec` can appear in a child's output, longest first: as
+    written; in JSON from Python, with ASCII escapes or with UTF-8 kept
+    (ensure_ascii=False); and in JSON from the engine scripts' json_escape,
+    which keeps UTF-8, escapes backslash and double quote, and turns a tab or
+    CR into a space (install-caddy.sh writes control characters as \\u00XX
+    instead)."""
+    engine = sec.replace("\\", "\\\\").replace('"', '\\"')
+    forms = {
+        sec,
+        json.dumps(sec)[1:-1],
+        json.dumps(sec, ensure_ascii=False)[1:-1],
+        engine.replace("\t", " ").replace("\r", " "),
+        re.sub(r"[\x01-\x1f]", lambda m: "\\u%04x" % ord(m.group()), engine),
+    }
+    return sorted(forms, key=len, reverse=True)
+
+
 def _redact(text, secrets):
-    """`text` with every secret (as written, and as JSON would escape it)
-    replaced by ***."""
+    """`text` with every secret, in every form _redact_forms lists, replaced
+    by ***."""
     for sec in secrets:
         if not sec:
             continue
-        for form in {sec, json.dumps(sec)[1:-1]}:
+        for form in _redact_forms(sec):
             text = text.replace(form, "***")
     return text
 
@@ -4598,7 +4618,7 @@ def _update_stream(argv, env=None, on_close=None, stdin_data=None, redact=()):
                 read_error = f"reading the script output failed: {e}"
 
             rc = _reap(proc, grace=10)
-            tail = _stderr_tail(errpath) if rc != 0 else ""
+            tail = _stderr_tail(errpath, redact=redact) if rc != 0 else ""
             detail = _redact(" | ".join(x for x in (read_error, tail) if x), redact)
             if detail:
                 yield _sse({"event": "error", "msg": "output: " + detail})
