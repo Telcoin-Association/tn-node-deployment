@@ -1187,14 +1187,18 @@ cmd_setup() {
     local data_dir="${TN_SETUP_DATA_DIR:-}"
     local net_rule
 
-    # An installed node is never set up again from the UI: keygen stops when the
-    # unit or .node-meta exists, finalize when the unit exists (keygen wrote the
-    # .node-meta it reads).
-    if [[ -e "${UNIT_DIR}/telcoin.service" ]]; then
-        die "a node is already installed (${UNIT_DIR}/telcoin.service); use edit-config.sh, or remove-node.sh first"
-    fi
-    if [[ "$phase" == keygen && -e "${ETC_DIR}/.node-meta" ]]; then
-        die "a node install already started (${ETC_DIR}/.node-meta); finish it with setup-finalize, or remove-node.sh first"
+    # An installed node is never set up again from the UI: both phases stop when
+    # a node unit exists (unified or legacy), and keygen also when any
+    # .node-meta exists (finalize reads the one keygen wrote).
+    local unit meta
+    for unit in telcoin telcoin-validator telcoin-observer; do
+        if [[ -e "${UNIT_DIR}/${unit}.service" || -L "${UNIT_DIR}/${unit}.service" ]]; then
+            die "a node is already installed (${UNIT_DIR}/${unit}.service); use edit-config.sh, or remove-node.sh first"
+        fi
+    done
+    meta="$(node_meta_path)"
+    if [[ "$phase" == keygen && ( -e "$meta" || -L "$meta" ) ]]; then
+        die "a node install already started (${meta}); finish it with setup-finalize, or remove-node.sh first"
     fi
 
     # Validate every value before it reaches the setup script.

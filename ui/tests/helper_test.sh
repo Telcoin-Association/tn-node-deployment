@@ -475,6 +475,19 @@ refused_in "setup-keygen refused on an installed node" setup-keygen
 export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1
 refused "setup-finalize refused on an installed node" setup-finalize < /dev/null
 unset TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER
+for layout in validator observer; do
+    fixture "$layout"
+    refused_in "setup-keygen refused on a legacy ${layout} node" setup-keygen
+    export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1
+    refused "setup-finalize refused on a legacy ${layout} node" setup-finalize < /dev/null
+    unset TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER
+done
+fixture none
+add_unit telcoin-validator
+refused_in "setup-keygen refused on a legacy unit without .node-meta" setup-keygen
+fixture none
+add_meta validator
+refused_in "setup-keygen refused on a legacy .node-meta without a unit" setup-keygen
 fixture none
 add_meta -
 refused_in "setup-keygen refused once keygen wrote .node-meta" setup-keygen
