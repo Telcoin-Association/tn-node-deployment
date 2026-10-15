@@ -1702,6 +1702,39 @@ edit_rpc() {
     apply_changes
 }
 
+# _uc_unit_with_passphrase UNIT VALUE -- print UNIT with the word after every
+# TN_BLS_PASSPHRASE= (up to the next space) replaced by VALUE. Pure shell: the
+# value reaches no child process, argument list or environment. Legacy Docker
+# units only (see edit_bls_passphrase). rc 1 when UNIT cannot be read.
+_uc_unit_with_passphrase() {
+    local key="TN_BLS_PASSPHRASE=" line out rest text
+    text="$(cat -- "${1:-}")" || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        out=""
+        while [[ "$line" == *"$key"* ]]; do
+            rest="${line#*"$key"}"
+            out="${out}${line%%"$key"*}${key}${2-}"
+            if [[ "$rest" == *" "* ]]; then
+                line=" ${rest#* }"
+            else
+                line=""
+            fi
+        done
+        printf '%s\n' "${out}${line}"
+    done <<< "$text"
+}
+
+# edit_passphrase_restart WAS_ACTIVE -- start the service again after a
+# passphrase change that stopped it and then gave up; pause for the operator.
+edit_passphrase_restart() {
+    if [[ "${1:-}" == "yes" ]]; then
+        systemctl start "$TARGET_SERVICE" || true
+    fi
+    edit_unlock
+    echo ""
+    read -r -p "  Press Enter to return to menu..." || true
+}
+
 edit_bls_passphrase() {
     print_header "Edit BLS Passphrase"
 
@@ -1724,22 +1757,65 @@ edit_bls_passphrase() {
         return 0
     fi
 
-    local new_pass new_pass_confirm
+    # The rules depend on the network: mainnet needs at least 16 bytes. A
+    # network that cannot be told gets the mainnet rules.
+    local network
+    network="$(tn_detect_network 2>/dev/null)" || network="mainnet"
+
+    # A legacy Docker unit carries the passphrase on its ExecStart line, where
+    # a space, a quote, a backslash, $, % or ; would break the command.
+    local exec_start legacy_docker=false
+    exec_start=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" 2>/dev/null || echo "")
+    case "$exec_start" in
+        *"docker run"*) legacy_docker=true ;;
+    esac
+    exec_start=""
+
+    # IFS= keeps leading and trailing blanks, so they are refused rather than
+    # silently dropped; -s keeps the value off the screen. One trailing CR (a
+    # paste from a CRLF source) is dropped.
+    local new_pass new_pass_confirm cr
+    cr=$'\r'
     while true; do
-        read -r -s -p "  Enter new BLS passphrase: " new_pass
+        IFS= read -r -s -p "  Enter new BLS passphrase: " new_pass || new_pass=""
         echo ""
-        read -r -s -p "  Confirm new BLS passphrase: " new_pass_confirm
+        IFS= read -r -s -p "  Confirm new BLS passphrase: " new_pass_confirm || new_pass_confirm=""
         echo ""
+        new_pass="${new_pass%"$cr"}"
+        new_pass_confirm="${new_pass_confirm%"$cr"}"
         if [[ "$new_pass" == "$new_pass_confirm" ]]; then
             break
         fi
         print_warn "Passphrases do not match -- try again."
     done
+    new_pass_confirm=""
+
+    if ! tn_passphrase_ok "$new_pass" "$network"; then
+        new_pass=""
+        print_error "Passphrase refused: it must not be empty, must not start or end with a space or tab, and must not contain a line break."
+        if [[ "$network" == "mainnet" ]]; then
+            print_info "On mainnet it must also be at least 16 bytes long."
+        fi
+        print_info "Passphrase unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+    if [[ "$legacy_docker" == "true" ]]; then
+        case "$new_pass" in
+            *[[:space:]]*|*\"*|*\'*|*\\*|*\$*|*%*|*\;*)
+                new_pass=""
+                print_error "This node's unit carries the passphrase on its ExecStart line, which cannot hold spaces or the characters \" ' \\ \$ % ;. Passphrase unchanged."
+                echo ""
+                read -r -p "  Press Enter to return to menu..." || true
+                return 0
+                ;;
+        esac
+    fi
 
     # Nothing is stopped or written before the update lock is held.
     if ! menu_lock; then
         new_pass=""
-        new_pass_confirm=""
         return 0
     fi
 
@@ -1761,7 +1837,6 @@ edit_bls_passphrase() {
         if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
             print_error "Service did not stop within 15s. Aborting passphrase rewrite."
             new_pass=""
-            new_pass_confirm=""
             echo ""
             read -r -p "  Press Enter to return to menu..."
             return 1
@@ -1769,37 +1844,51 @@ edit_bls_passphrase() {
         print_ok "Service stopped"
     fi
 
-    # For Docker installs the passphrase is also embedded in the unit file,
-    # so back up the unit before any write.
-    local exec_start backup=""
-    exec_start=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" 2>/dev/null || echo "")
-    if echo "$exec_start" | grep -qF "docker run"; then
-        backup=$(backup_service_file "$TARGET_SERVICE_FILE") || {
-            [[ "$was_active" == "yes" ]] && systemctl start "$TARGET_SERVICE"
-            return 1
-        }
+    # CORE-3 replaces: a legacy Docker install embeds the passphrase in the
+    # unit's ExecStart. Back the unit up, rewrite that word in the shell
+    # (_uc_unit_with_passphrase: no child process sees the value) and write
+    # the unit back through tn_write_root_file, before the passphrase file, so
+    # a failure on either write leaves both as they were.
+    local unit_bk="" unit_mg="" unit_text=""
+    if [[ "$legacy_docker" == "true" ]]; then
+        unit_mg="$(stat -c '%a %G' -- "$TARGET_SERVICE_FILE" 2>/dev/null)" || unit_mg=""
+        if [[ -z "$unit_mg" ]] || ! unit_bk=$(backup_service_file "$TARGET_SERVICE_FILE"); then
+            new_pass=""
+            print_error "Could not back up ${TARGET_SERVICE_FILE}. Passphrase unchanged."
+            edit_passphrase_restart "$was_active"
+            return 0
+        fi
+        if ! unit_text="$(_uc_unit_with_passphrase "$TARGET_SERVICE_FILE" "$new_pass")" \
+            || ! printf '%s\n' "$unit_text" | tn_write_root_file "$TARGET_SERVICE_FILE" "${unit_mg%% *}" "${unit_mg##* }"; then
+            unit_text=""
+            new_pass=""
+            print_error "Could not update ${TARGET_SERVICE_FILE}; it is unchanged. Passphrase unchanged."
+            edit_passphrase_restart "$was_active"
+            return 0
+        fi
+        unit_text=""
+        print_ok "Docker service file updated with new passphrase"
     fi
 
-    # Update the passphrase file
-    echo "$new_pass" > "$passphrase_file"
-    chmod 600 "$passphrase_file"
-    chown "${SERVICE_USER}:${SERVICE_USER}" "$passphrase_file" 2>/dev/null || true
+    # The passphrase file: root 0600, written through a temp file and one
+    # rename (tn_write_root_file). printf is a shell builtin, so the value is
+    # never on a command line.
+    if ! printf '%s\n' "$new_pass" | tn_write_root_file "$passphrase_file" 0600; then
+        new_pass=""
+        print_error "Could not write ${passphrase_file}; it is unchanged."
+        if [[ -n "$unit_bk" ]] && ! tn_restore_backup "${unit_bk% *}" "${unit_bk##* }" "$TARGET_SERVICE_FILE" "${unit_mg%% *}" "${unit_mg##* }"; then
+            print_error "Could not put ${TARGET_SERVICE_FILE} back from ${unit_bk% *}; it holds the new passphrase while ${passphrase_file} holds the old one."
+        fi
+        edit_passphrase_restart "$was_active"
+        return 0
+    fi
+    new_pass=""
     print_ok "Passphrase file updated"
-
-    # Binary/source installs use LoadCredential -- passphrase read from file at
-    # runtime, no service file change needed.
-    # Docker installs embed passphrase in ExecStart -- update it.
-    if echo "$exec_start" | grep -qF "docker run"; then
-        local bls_pass
-        bls_pass=$(cat "$passphrase_file")
-        perl -i -pe "s|TN_BLS_PASSPHRASE=[^ ]+|TN_BLS_PASSPHRASE=${bls_pass}|g" "$TARGET_SERVICE_FILE"
-        print_ok "Docker service file updated with new passphrase"
-    else
+    if [[ "$legacy_docker" != "true" ]]; then
+        # Binary/source installs use LoadCredential -- passphrase read from
+        # file at runtime, no service file change needed.
         print_ok "Binary install -- passphrase file updated (LoadCredential reads it at runtime)"
     fi
-
-    new_pass=""
-    new_pass_confirm=""
 
     # Restart the service if it was running before
     if [[ "$was_active" == "yes" ]]; then
