@@ -335,6 +335,13 @@ printf 'NETWORK=testnet\n' > "$VPN_META"
 ( set -e; do_sync_keys ) >"$T/out" 2>&1; check_rc "do_sync_keys under set -e rc 0" 0 $?
 check_has "sync-keys installed the helper" "yes" "$([[ -f "$TNV_SELF" ]] && echo yes)"
 check_has "sync-keys narrowed sudo" "tnadmin ALL=(root) NOPASSWD: TN_RECOVERY" "$(cat "$RP/etc/sudoers.d/90-tnadmin")"
+# A grant writes .node-meta, so it first migrates an old ownership layout; here the
+# migration refuses (the fixture service user does not exist) and nothing is written.
+( set -e; ROOT_GRANT=grant; do_sync_keys ) >"$T/out" 2>&1; check_rc "grant on an old layout that cannot migrate rc 1" 1 $?
+check_lacks "old layout: grant not recorded" "VPN_MAINTAINER_ROOT" "$(cat "$VPN_META")"
+check_lacks "old layout: sudo not widened" "NOPASSWD:ALL" "$(cat "$RP/etc/sudoers.d/90-tnadmin")"
+check "old layout: migration refusal named" "yes" "$(grep -q 'ownership migration stopped' "$T/out" && echo yes)"
+printf 'OWNERSHIP_LAYOUT=2\n' >> "$VPN_META"
 ( set -e; ROOT_GRANT=grant; do_sync_keys ) >"$T/out" 2>&1; check_rc "sync-keys --grant-maintainer-root rc 0" 0 $?
 check_has "grant recorded in .node-meta" "VPN_MAINTAINER_ROOT=true" "$(cat "$VPN_META")"
 check_has "grant wrote full root" "tnadmin ALL=(ALL) NOPASSWD:ALL" "$(cat "$RP/etc/sudoers.d/90-tnadmin")"

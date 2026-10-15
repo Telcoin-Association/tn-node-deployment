@@ -4201,14 +4201,11 @@ addon_meta_write_begin() {
         print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished." >&2
         return 1
     fi
-    # CORE-1a: drop the declare -F guard once tn_migrate_ownership is in every lib/common.sh.
-    if declare -F tn_migrate_ownership >/dev/null; then
-        rc=0
-        tn_migrate_ownership >&2 || rc=$?
-        if [[ "$rc" -ne 0 ]]; then
-            print_error "The ownership migration stopped (rc ${rc}); .node-meta was not changed." >&2
-            return 1
-        fi
+    rc=0
+    tn_migrate_ownership >&2 || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        print_error "The ownership migration stopped (rc ${rc}); .node-meta was not changed." >&2
+        return 1
     fi
     _ADDON_META_READY=1
     return 0
