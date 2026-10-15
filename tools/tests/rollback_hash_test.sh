@@ -172,6 +172,31 @@ ln -s "$UNIT" "$RB/units/link"
 run backup_unit_file "$RB/units/link"
 check_rc "unit backup: a symlink is refused" 1 "$RC"
 
+# The image swap renders the unit and may write node.env: both come back with
+# the start script.
+SERVICE_NAME=telcoin
+CONFIG_DIR=/etc/telcoin
+mkdir -p "$RB/fx/etc/systemd/system"
+chmod 0755 "$RB/fx/etc/systemd" "$RB/fx/etc/systemd/system"
+SVC_UNIT="$RB/fx/etc/systemd/system/telcoin.service"
+printf '[Service]\nExecStart=/usr/local/libexec/telcoin/tn-start-docker\n# old\n' > "$SVC_UNIT"
+chmod 0644 "$SVC_UNIT"
+SVC_OLD="$(cat "$SVC_UNIT")"
+printf '%s\n' "$UNIT_OLD" > "$UNIT"
+backup_unit_file "$UNIT" 2>/dev/null
+RC=0; swap_backup_extras 2>/dev/null || RC=$?
+check_rc "swap: unit backed up" 0 "$RC"
+printf '%s\n' "$UNIT_NEW" > "$UNIT"
+printf '[Service]\n# new\n' > "$SVC_UNIT"
+printf 'PRIMARY_LISTENER_MULTIADDR=x\n' > "$RB/fx/etc/telcoin/node.env"
+run restore_unit_file "$UNIT"
+check_rc "swap rollback: rc 0" 0 "$RC"
+check "swap rollback: start script, unit and node.env as before" "yes yes no" \
+    "$([[ "$(cat "$UNIT")" == "$UNIT_OLD" ]] && echo yes) $([[ "$(cat "$SVC_UNIT")" == "$SVC_OLD" ]] && echo yes) $([[ -e "$RB/fx/etc/telcoin/node.env" ]] && echo yes || echo no)"
+check "swap rollback: unit root 0644" "0 0 644" "$(owner_mode "$SVC_UNIT")"
+backup_unit_file "$UNIT" 2>/dev/null
+check "backup_unit_file forgets the swap extras" "|" "${SWAP_UNIT_BK}|${SWAP_ENV_ADDED}"
+
 # -----------------------------------------------------------------------------
 # End to end: apply_source_update rolls back, and refuses a changed backup
 # -----------------------------------------------------------------------------

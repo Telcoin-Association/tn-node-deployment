@@ -591,6 +591,8 @@ backup_unit_file() {
     UNIT_BK_SHA256=""
     UNIT_BK_MODE=""
     UNIT_BK_GROUP=""
+    SWAP_UNIT_BK=""
+    SWAP_ENV_ADDED=""
     st="$(stat -c '%a %G' -- "$file" 2>/dev/null)" || st=""
     if [[ -z "$st" ]] || ! out="$(tn_backup_file "$file")"; then
         print_warn "Could not back up ${file}" >&2
@@ -609,11 +611,58 @@ backup_unit_file() {
     return 0
 }
 
+# The unit and node.env beside the docker start script. The image swap renders
+# the unit again and writes node.env when it is missing, so swap_backup_extras
+# records them before it writes: SWAP_UNIT_* the unit's backup, SWAP_ENV_ADDED a
+# node.env that did not exist. restore_unit_file puts them back too;
+# backup_unit_file clears them.
+SWAP_UNIT_BK=""
+SWAP_UNIT_SHA256=""
+SWAP_UNIT_MODE=""
+SWAP_UNIT_GROUP=""
+SWAP_ENV_ADDED=""
+
+# swap_unit_path / swap_env_path -- the unit and node.env the render writes.
+swap_unit_path() { printf '%s\n' "${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"; }
+swap_env_path() { printf '%s\n' "${TN_ROOT_PREFIX:-}${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/node.env"; }
+
+# swap_backup_extras -- back up the unit (tn_backup_file) and note whether
+# node.env exists, before the image swap renders them. rc 1 with a message when
+# the unit cannot be backed up.
+swap_backup_extras() {
+    local unit env st out
+    unit="$(swap_unit_path)"
+    env="$(swap_env_path)"
+    SWAP_UNIT_BK=""
+    SWAP_ENV_ADDED=""
+    st="$(stat -c '%a %G' -- "$unit" 2>/dev/null)" || st=""
+    if [[ -z "$st" ]] || ! out="$(tn_backup_file "$unit")"; then
+        print_warn "Could not back up ${unit}" >&2
+        return 1
+    fi
+    SWAP_UNIT_BK="${out% *}"
+    SWAP_UNIT_SHA256="${out##* }"
+    SWAP_UNIT_MODE="${st%% *}"
+    SWAP_UNIT_GROUP="${st##* }"
+    [[ -e "$env" || -L "$env" ]] || SWAP_ENV_ADDED="$env"
+    print_info "Unit backup: ${SWAP_UNIT_BK}" >&2
+    return 0
+}
+
 # restore_unit_file FILE -- put FILE back from the backup_unit_file copy, with
-# its old mode and group. Refused (rc 1, FILE unchanged) when the copy no
-# longer matches its sha256.
+# its old mode and group, and, after an image swap, the unit and node.env as
+# swap_backup_extras found them. rc 1 when a copy no longer matches its sha256
+# (that file is unchanged) or a restore failed.
 restore_unit_file() {
-    tn_restore_backup "$UNIT_BK_PATH" "$UNIT_BK_SHA256" "${1:-}" "$UNIT_BK_MODE" "$UNIT_BK_GROUP"
+    local rc=0
+    tn_restore_backup "$UNIT_BK_PATH" "$UNIT_BK_SHA256" "${1:-}" "$UNIT_BK_MODE" "$UNIT_BK_GROUP" || rc=1
+    if [[ -n "$SWAP_UNIT_BK" ]]; then
+        tn_restore_backup "$SWAP_UNIT_BK" "$SWAP_UNIT_SHA256" "$(swap_unit_path)" "$SWAP_UNIT_MODE" "$SWAP_UNIT_GROUP" || rc=1
+    fi
+    if [[ -n "$SWAP_ENV_ADDED" ]]; then
+        rm -f -- "$SWAP_ENV_ADDED" || rc=1
+    fi
+    return "$rc"
 }
 
 # backup_installed_binary FILE -- back up the installed binary before an apply
@@ -2300,10 +2349,13 @@ update_swap_precheck() {
 # docker start script FILE by rendering the start script and unit again
 # (tn_rerender_node_launch, which takes only this network's repository by digest or
 # release tag): no text substitution on the file. The retired --observer flag is
-# dropped first when the new release rejects it. rc 1 when the render refused or
-# failed, or FILE does not run NEW_IMAGE afterwards; the caller restores the backup.
+# dropped first when the new release rejects it. The unit and node.env are backed
+# up first (swap_backup_extras), so restore_unit_file puts back all three. rc 1
+# when that backup, the render or the check failed, or FILE does not run
+# NEW_IMAGE afterwards; the caller restores the backup.
 update_swap_image() {
     local new="${1:-}" file="${2:-}" rc=0 cur
+    swap_backup_extras || return 1
     if observer_strip_needed "$file" "${new##*/}"; then
         if tn_node_strip_observer_flag "$file"; then
             update_wait_say log "Stripped the retired --observer flag from ${file}."
