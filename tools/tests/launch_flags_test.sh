@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # tools/tests/launch_flags_test.sh -- launch-line flags. setup-node.sh adds the
 # public RPC limits (bounded log queries, subscriptions and request size, HTTP
-# limited to eth, net, web3 and tn) only when the node serves public RPC; the
-# library's flag rule and the start-script writer accept them, and the launch
-# editors read them back. A copy of setup-node.sh without its last line is
+# limited to eth, net, web3 and tn) only when the node serves public RPC, and
+# stops when the release's node --help lacks one of them; the library's flag
+# rule and the start-script writer accept them, and the launch editors read
+# them back. A copy of setup-node.sh without its last line is
 # sourced at the top level with the host-touching steps replaced. Maintainer
 # tooling (not updater-tracked). bash 3.2 safe.
 # shellcheck source=tools/tests/lib.sh
@@ -45,6 +46,26 @@ for w in $LIMITS; do
         --*) rc=0; _tn_launch_flag_ok "$w" || rc=$?; check_rc "flag rule accepts ${w}" 0 "$rc" ;;
     esac
 done
+
+# The release must list each limit flag in its node --help, as for the other
+# optional flags: the real require_node_flag, a --help stub without one flag.
+eval "$(sed -n '/^require_node_flag() {/,/^}/p' "$T/sn/setup-node.sh")"
+HELP_FLAGS="--rpc.max-blocks-per-filter --rpc.max-logs-per-response --rpc.max-subscriptions-per-connection --http.api"
+tn_node_has_flag() { case " ${HELP_FLAGS} " in *" $2 "*) return 0 ;; esac; return 1; }
+prep_sub() {  # prep_sub ENABLE_PUBLIC_RPC -> rc of prepare_node_extra_flags in a subshell, output in $T/prep.out
+    ( NODE_EXTRA_FLAGS="" NODE_EXTRA_FLAGS_SPEC="" ENABLE_PUBLIC_RPC="$1" STATE_EXPORT=off BOOTSTRAP_PEERS_SRC=""
+      prepare_node_extra_flags ) > "$T/prep.out" 2>&1
+}
+rc=0; prep_sub true || rc=$?
+check_rc "public RPC on a release without --rpc.max-request-size: setup stops" 1 "$rc"
+check "the stop names the missing flag" yes "$(grep -q -- '--rpc.max-request-size needs telcoin-network v0.13.0-adiri' "$T/prep.out" && echo yes || echo no)"
+rc=0; prep_sub false || rc=$?
+check_rc "private RPC on that release: the limits are not asked for" 0 "$rc"
+HELP_FLAGS="${HELP_FLAGS} --rpc.max-request-size"
+rc=0; prep_sub true || rc=$?
+check_rc "public RPC on a release with all five: goes on" 0 "$rc"
+require_node_flag() { return 0; }
+unset -f tn_node_has_flag
 
 # The start-script writer takes them, and the launch editors read them back.
 NETWORK=testnet DATA_DIR=/var/lib/telcoin PASSPHRASE_METHOD=stdin LOG_TARGET=file

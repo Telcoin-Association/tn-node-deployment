@@ -1959,7 +1959,7 @@ _setup_copied_configs_ok() {
 # start wrapper is written (a --json finalize is a new process); a second run in one
 # process, for the same release, does nothing.
 prepare_node_extra_flags() {
-    local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$'
+    local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$' w
     spec="$(node_runner_spec)"
     if [[ "$NODE_EXTRA_FLAGS_SPEC" == "$spec" ]]; then
         return 0
@@ -1987,8 +1987,13 @@ prepare_node_extra_flags() {
             ;;
     esac
     # A node that serves RPC to the internet gets conservative limits and only the
-    # namespaces wallets need.
+    # namespaces wallets need; its release must list each of those flags too.
     if [[ "${ENABLE_PUBLIC_RPC:-false}" == "true" ]]; then
+        for w in $(public_rpc_limit_flags); do
+            if [[ "$w" == --* ]]; then
+                require_node_flag "$spec" "$w" v0.13.0-adiri
+            fi
+        done
         flags="${flags:+${flags} }$(public_rpc_limit_flags)"
     fi
     # The release knows every flag in use; now the map itself.
