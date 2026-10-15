@@ -88,7 +88,7 @@ The node reports what it is doing through the `tn_nodeMode` JSON-RPC method:
 | `tn_nodeMode` | Meaning |
 |---|---|
 | `CvvActive` | Voting in the current committee. |
-| `CvvInactive` | A committee member that is catching up before it can vote. This should be brief. |
+| `CvvInactive` | A committee member that is catching up before it can vote, for example after a long restart. This should be brief. |
 | `Observer` | Not in the current committee. Every follower, every public-RPC observer, and every staked validator between seats reports this. |
 
 ## Before you start
@@ -117,7 +117,8 @@ Validators have two network requirements on top of that:
 > Email devs@telcoin.org with your planned hardware before you buy anything for a validator.
 
 The same documentation page recommends turning swap off and running time sync (chrony or systemd-timesyncd) on every node.
-A node rejects headers timestamped more than a second ahead of its own clock.
+A validator holds its vote on a header timestamped ahead of its own clock until that lead has passed, on testnet today for a lead of up to one second.
+It rejects a header more than five to six seconds ahead, its drift tolerance plus the five-second vote timeout; a header between the two gets no vote yet, and its proposer retries.
 The deployment scripts check neither, so set both up yourself.
 
 `setup-node.sh` runs a hardware check during preflight and prints one line per role, for example `[OK] Full node (follower): meets minimum` or `[WARN] Validator (minimum): below minimum`.
@@ -349,6 +350,7 @@ Both are optional, and `edit-config.sh` can add, change or remove them after the
 
 `--bootstrap-peers <file>` replaces the bootstrap servers in the genesis with your own list of peers to dial at start.
 It needs `v0.15.0-adiri` or later.
+The node treats these peers as discovery hints only: it does not keep them connected ahead of other peers or exempt them from load penalties.
 
 - The file is a YAML or JSON map keyed by BLS public key. Each value is that node's `primary` and `workers` entries, copied from under `p2p_info` in its `node-info.yaml`. The README's [bootstrap peers](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/README.md#bootstrap-peers) section shows the shape.
 - It must be a regular file of at most 64 KiB that other users can read (`chmod 644`). The map does not stay private: setup installs it world-readable as `/etc/telcoin/bootstrap-peers.yaml`, and its check passes the map on the node binary's command line. A file its group or other users cannot read is refused, with the `chmod` to run.
@@ -367,6 +369,11 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh \
 
 Setup asks the release it installs whether it has each flag you give, during System infrastructure ("Step 4 of 8"), and stops before any key is made when it does not.
 It records the choices in `.node-meta` as `BOOTSTRAP_PEERS_FILE` (the installed path, empty when none) and `STATE_EXPORT` (`off`, `unlimited` or a number).
+
+The node also reads `network-config`, a YAML file in the data directory; the scripts and the Node Manager UI write only its `hostname` line, the node name it advertises.
+Four of the keys it accepts are opt-in, `process_budget`, `source_admission`, `trusted_nodes` and `committee_peers`: they are unset by default (absent, `null` or `{}`), and no script sets them.
+Leave them unset unless devs@telcoin.org asks you to set one.
+The `source_admission` key can refuse committee peers once its limits fill, and a node that has it set logs a warning at start that begins `source admission is enabled`.
 
 ## Confirm the node is syncing, then synced
 
@@ -518,6 +525,8 @@ On a committee node, stop it well away from an epoch boundary; `check-node.sh` s
 Then run `update-node.sh` again, choose `1) Apply now`, and answer yes when it asks about the snapshot.
 The first start can take minutes while the node migrates each epoch it opens; `journalctl -u telcoin -f` shows the progress.
 If the health check fails, the script leaves the node on the new release and does not stop it. A node that is still migrating comes up without help, and a node that stopped says why in the journal, so read the journal before you decide to go back.
+A node whose epoch database fails its start-up check stops with `Cannot check database (epoch)` in the journal; the fix is in [Service and keys](#service-and-keys).
+That fix touches only `consensus-db/epoch`, which holds the epoch in progress, and never `consensus-db/epochs`, the epoch packs this update migrates.
 To go back, stop the node, move the migrated data directory aside and the snapshot back into its place (for the copy above, `/var/lib/telcoin.pre-v0.16` back to `/var/lib/telcoin`), run the copy command from the error message to put the old binary or launch file back, and start the node.
 An older release cannot start on the migrated data directory; it stops with `invalid version (should be 0)`.
 
@@ -533,6 +542,9 @@ Nodes outside the committee, staked validators between seats included, are not d
 
 To restart at once, pass `--no-epoch-wait` (`update-node.sh` and `edit-config.sh`) or set `TN_SKIP_EPOCH_WAIT=1` through `sudo`, for example `sudo TN_SKIP_EPOCH_WAIT=1 bash ~/telcoin-node-scripts/update-node.sh`.
 On a committee node, check the time to the next boundary with `check-node.sh` before a restart that does not wait (see [The epoch section](#the-epoch-section)), or restart with `edit-config.sh` menu item `12) Restart node`, which waits.
+
+If a committee node is stopped at the epoch boundary anyway, it repairs its epoch records when it starts again and logs warnings that need no action (see [Service and keys](#service-and-keys)).
+It still misses the epoch votes while it is down, so keep to the wait.
 
 These environment variables tune the wait:
 
@@ -986,7 +998,7 @@ Its epoch section (see [The epoch section](#the-epoch-section)) shows the curren
 Other signals:
 
 - The Node Manager UI shows the validator view as soon as the network reports status 1 to 4 for the node's address, even while the node is still syncing. On a synced node its Current Epoch tile counts down to the boundary and shows the activation epoch and the earliest seat.
-- `tn_nodeMode` (see [Checking by hand](#checking-by-hand)) changes from `Observer` to `CvvActive` while the node holds a committee seat.
+- `tn_nodeMode` (see [Checking by hand](#checking-by-hand)) changes from `Observer` to `CvvActive` while the node holds a committee seat. A seated node that falls behind, for example during a long restart, reports `CvvInactive` until it has caught up, then logs `attempting to rejoin consensus` and votes again.
 - The current epoch and its committee:
 
 ```bash
@@ -1210,12 +1222,13 @@ The tables below group the common symptoms by area.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `tn_nodeMode` returns `Observer` while `getValidator` shows Active | Not seated yet, or between seats. | Normal. See [When you get a committee seat](#when-you-get-a-committee-seat). |
-| `tn_nodeMode` stays at `CvvInactive` | A committee member that has not caught up. | Treat it like a lagging node (next row). |
+| `tn_nodeMode` stays at `CvvInactive` | A committee member that has not caught up. It votes again once it is within 20 rounds of the network's newest commit in the same open epoch, while the network is still committing; the log then shows `attempting to rejoin consensus`. | Treat it like a lagging node (next row). |
 | `CATCHING UP` and the lag does not shrink between runs | Peers cannot reach the node, the disk is full or slow, or the node keeps restarting. | Check the node's P2P ports (see [Ports](#ports)) in every firewall layer, check that the external multiaddrs in `node-info.yaml` carry the current public IP, check disk space, and look for restarts in the journal. |
 | `eth_syncing` returns `false` while the node is behind | Expected on Telcoin Network. | Compare `eth_blockNumber` instead (see [Checking by hand](#checking-by-hand)). |
 | `check-node.sh` warns `In the committee for epoch <E>, but the node reports Observer: it is not taking part in consensus` | The node holds a seat in this epoch's committee but is not voting, usually because it is behind or cut off from its peers. If the report adds `The node is at epoch <N>: let it catch up, and it joins once it reaches epoch <E>.`, it is still catching up. | Treat it like a lagging node (the `CATCHING UP` row). |
 | `check-node.sh` reports `In the committee for epoch <E> but NOT in recent headers -- node may be running but silent` | A committee member whose headers the network does not see. | Check that the node runs, that its P2P ports are open in every firewall layer, that its external multiaddrs carry the current public IP, and that time sync is on (see [Hardware per role](#hardware-per-role)). |
 | `check-node.sh` reports `Workers: the network requires <N> per node (...) but node-info.yaml lists <M>` | The node has fewer workers than `WorkerConfigs.numWorkers()` requires. | The scripts cannot add a worker. Email devs@telcoin.org with the `check-node.sh` output. |
+| `eth_sendRawTransaction` returns error `-32000` `worker is inactive` | The network's worker count per node went down while this node was running. The node keeps the dropped worker's RPC port open for reads but refuses transactions there. | Send transactions to the first worker's RPC, port 8545 on a default install (see [Ports](#ports)). |
 | `check-node.sh` warns `<rpc> serves chain <X> (...), not chain <Y> (...) -- skipping the network comparison` | The comparison RPC serves another chain than the node's. Today `https://rpc.telcoin.network` serves the testnet, because mainnet has not launched. | Not a node problem. Pass `--network-rpc <URL>` with an RPC for the node's chain (see [Networks and endpoints](#networks-and-endpoints)). |
 
 ### Setup and preflight
@@ -1263,7 +1276,10 @@ The tables below group the common symptoms by area.
 |---|---|---|
 | The node cannot decrypt its BLS key at start | `/etc/telcoin/bls-passphrase` does not hold the passphrase the keys were generated with, or a TPM reset or rebuild stopped a TPM install from unsealing. | Restore the correct passphrase. `edit-config.sh` option 5 rewrites the file but never re-encrypts the keys. A TPM install needs the passphrase you stored offline ([TPM notes](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/README.md#option-2--tpmvtpm-sealing-advanced)). |
 | The node will not start; the log shows `another telcoin process (pid <N>) holds the lock on this data directory` | `v0.16.0-adiri` and later lock `<data directory>/telcoin.pid`, and another node process, such as one started by hand, runs on the same data directory. | Stop the other process, then start the service. Do not delete `telcoin.pid`: the lock is released when its holder exits. |
-| `systemctl status telcoin` shows `start-limit-hit` | Five failed starts within 60 seconds. | Fix the cause from the journal, then `sudo systemctl reset-failed telcoin && sudo systemctl start telcoin`. |
+| The node stops at every start, and the journal shows `Cannot check database (epoch): epoch table <table> holds <n> row(s) this binary cannot decode, the first at key <key> with header epoch <N> ...` | Each start checks the epoch database, `consensus-db/epoch`, which holds only the epoch in progress. It holds a row this release cannot read and every retry finds the same row, so systemd restarts the node every 10 seconds and it can end in `start-limit-hit`. | Email devs@telcoin.org with the journal line first. Then stop the node (`sudo systemctl stop telcoin`) and move the epoch database out of the data directory, for example `sudo mv /var/lib/telcoin/consensus-db/epoch /var/lib/telcoin.epoch-<N>`, and keep `consensus-db/epochs` and `db` in place. That directory also held the node's guards against voting or proposing twice in epoch `<N>`, so start the node again only once the network has closed that epoch: compare `<N>` with the current epoch (see [The epoch section](#the-epoch-section)). A node with state export on can instead be restored into a fresh data directory with `db load-state`. |
+| `systemctl status telcoin` shows `start-limit-hit` | Five failed starts within 60 seconds. | Fix the cause from the journal (for `Cannot check database (epoch)`, see the row above), then `sudo systemctl reset-failed telcoin && sudo systemctl start telcoin`. |
+| After a restart near an epoch boundary, the log shows `previous epoch record missing on restart (killed at its boundary); re-deriving it locally`, `epoch record present but the consensus db tables still hold rows of an older epoch (...); clearing them` or `ignoring parent certificates from another epoch` | The node was stopped while the epoch changed, and it repairs its epoch records as it starts. | Normal, no action needed. For planned restarts, keep to the epoch wait (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)). |
+| An `ERROR` line ending `; initiating node shutdown: <error>` | The node could not write a vote or certificate durably to its epoch database, `consensus-db/epoch`, and stopped its consensus tasks rather than risk signing twice. It keeps running, but it cannot vote again until it is restarted. | Check the data drive: free space with `df -h /var/lib/telcoin` and I/O errors with `sudo dmesg`. Fix the cause, then restart the node at once with `sudo systemctl restart telcoin`; the epoch wait protects nothing while the node cannot vote. If the line comes back, email devs@telcoin.org with it. |
 
 ### Staking and exit
 

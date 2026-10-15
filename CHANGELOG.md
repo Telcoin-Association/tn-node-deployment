@@ -7,6 +7,25 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Partner guide 1.4, October 2026 -- the guide describes telcoin-network main
+The MNO node guide (`docs/partner/mno-node-guide/`, version 1.4) now describes telcoin-network
+`main` at 98849a221, three merges past `v0.16.0-adiri` (#1622, #1647 and #1572, the epoch
+restart recovery). Corrected: a validator holds its vote on a header timestamped ahead of its
+clock, up to one second on adiri, and rejects one more than five to six seconds ahead (its drift
+tolerance plus the five-second vote timeout); the old "rejects more than a second ahead" line was
+wrong. Added: a committee node stopped inside the
+epoch-boundary window repairs its epoch records on restart and logs warnings that need no
+action; a node whose epoch database fails its start-up check stops with `Cannot check database
+(epoch)` and the Service and keys row gives the remedy (move `consensus-db/epoch`, the epoch in
+progress, aside once the network has closed that epoch, never `consensus-db/epochs`); the
+`initiating node shutdown` line after which the node keeps running but cannot vote until it is
+restarted; a `CvvInactive` member rejoins within 20 rounds of the newest commit and logs
+`attempting to rejoin consensus`; a worker the network has dropped answers
+`eth_sendRawTransaction` with `-32000` `worker is inactive`; bootstrap peers are
+discovery hints only; and a short note on the opt-in `network-config` keys (`process_budget`,
+`source_admission`, `trusted_nodes`, `committee_peers`). OPERATOR.md and README.md carry the
+same facts in their own style. Nothing updater-tracked changed.
+
 ### Partner documents, October 2026 -- docs/partner/ reorganised, technical specification added
 `docs/partner/` now holds one directory per partner document plus a shared `assets/` tree.
 The MNO node guide moved unchanged into `docs/partner/mno-node-guide/` (version 1.3: the

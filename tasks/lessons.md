@@ -266,3 +266,24 @@ only in the orchestrator's head, so a dead agent took its context with it.
   (C1: title and chapters 1-5, C2: chapters 6-10, each with its own log) kept both under 220k
   tokens and let C1 start before the last reviewer finished. The join was one `sed` and a diff
   of the untouched half. Reuse the pattern for long documents.
+
+## Guide 1.4 refresh (2026-10-15): numbers in a facts preamble need the code line that computes them
+
+- **A figure derived from doc prose plus one code constant was wrong.** The plan computed the
+  header reject threshold as "1 s rounded tolerance + 5 s vote timeout = 6 s" from the upstream
+  hardware page and `vote_timeout`'s default. The code rounds the tolerance only for the hold
+  check and adds `vote_timeout` to the raw 250 ms for the reject check (handler.rs:775-788), so
+  the honest figure is 5.25 s on a current config and 6 s only on an older one. The verifier
+  caught it because its brief said "re-derive from the source FIRST, then read the facts file".
+  Rule: every number in a facts preamble cites the line that performs the arithmetic, not the
+  prose that describes it, and the verifier always reads the code before the writers' notes.
+- **A PR title is not a cause.** "#1543 worker RPC keeps its port bound" became "a node with
+  more workers than the network requires", but the code only deactivates a worker that was
+  active and then dropped by a lower on-chain count; an extra worker is never initialised.
+  Rule: for a troubleshooting row, read the code path that produces the symptom, not the
+  change description.
+- **"Shutdown" in a log line is not process exit.** `initiating node shutdown` fires a per-epoch
+  notifier; the process stays up with a sticky failure latch. Leaving the row's wording
+  deliberately neutral and giving the verifier the exact trace (task manager exit arms, the
+  epoch loop, the latch) settled it in one pass. Rule: when a plan says "the verifier settles
+  it", hand the verifier the file list and the question, and keep the writer's text neutral.

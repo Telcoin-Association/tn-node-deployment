@@ -246,3 +246,63 @@ HEAD = 7fb7c8d (not pushed). Two commits on main: e20500c (support address, setu
 - Chapter-per-page leaves short end-of-chapter pages (6, 9, 15, 25 are mostly blank).
 - "Menu choice" column of the Install methods table wraps `1) Build from source` to three lines.
 - Two em dashes remain, both inside code quoting check-node.sh's literal output.
+
+# Review: MNO guide 1.4 refresh to telcoin-network main (2026-10-15)
+
+## What changed
+- `docs/partner/mno-node-guide/mno-node-guide.md` 1.3 -> 1.4 (+16 lines net, 1313 lines) and
+  its PDF (48 pages, was 46), describing telcoin-network `main` 98849a221 (three merges past
+  `v0.16.0-adiri`: #1622, #1647, #1572) as current behaviour, no release qualifier.
+  Correction: the clock-drift sentence (a validator holds its vote up to 1 s on adiri; rejects
+  beyond its drift tolerance plus the 5 s vote timeout, "five to six seconds"). Additions:
+  bootstrap peers are discovery hints; the opt-in `network-config` keys (four lines);
+  the boundary-window repair note; the `Cannot check database (epoch)` pointer and remedy row
+  (`consensus-db/epoch` only, never `consensus-db/epochs`); the `initiating node shutdown`
+  row; the rejoin wording (20 rounds, `attempting to rejoin consensus`); the
+  `worker is inactive` row.
+- `OPERATOR.md` and `README.md` carry the same facts in their own style (`support@`,
+  "section N.N", "data dir"). `CHANGELOG.md` Unreleased clause, `followup.md` triage.
+- Nothing updater-tracked changed: no version bumps, `gen-checksums.sh` reports no drift.
+
+## Verifier catches applied (U3, all re-derived at 98849a221)
+- BLOCK: the reject threshold adds `vote_timeout` to the RAW tolerance (handler.rs:787), so
+  5.25 s on a current `network-config` and 6 s only where the old bare `1` remains; the facts
+  file's "1 s + 5 s" was wrong. Guide says "five to six seconds"; OPERATOR gives both figures.
+- `worker is inactive` happens only for a worker the network dropped while the node ran
+  (`deactivate_workers_above`); a worker above the count at start is never initialised.
+- `; initiating node shutdown` does not exit the process: the consensus notifier is per-epoch,
+  the task error is non-critical, `run_epochs` loops; the durability latch is sticky
+  (layered_db.rs:233-238), so the node cannot vote until restarted. Row says so and tells the
+  operator to restart at once (the wait protects nothing while it cannot vote).
+- `network-config` keys are "unset" (absent, `null` or `{}`), not "absent"; every key is
+  optional; the Node Manager UI writes `hostname` too.
+- A restarted seated node starts `CvvActive` (optimistic) and drops to `CvvInactive` only when
+  40+ rounds or an epoch behind; "falls behind, for example during a long restart".
+- OPERATOR/README recovery sentence: "stopped while the epoch changes", not "close to the
+  boundary". README's discovery-hints sentence moved after "It needs v0.15.0-adiri or later".
+
+## Verification
+- `bash tools/build-partner-pdf.sh mno-node-guide --html-only`: exit 0, no FAIL/WARN.
+- Full build: "Wrote ... (48 pages)", WeasyPrint log clean; second run "PDF unchanged".
+- `pdftotext | tr '\n' ' '` counts: every required string >= 1 (`Cannot check database
+  (epoch)`, `consensus-db/epoch`, `consensus-db/epochs`, `attempting to rejoin consensus`,
+  `discovery hints`, `five to six seconds`, `initiating node shutdown`, `previous epoch record
+  missing`, `source admission is enabled`, `worker is inactive`, `devs@telcoin.org`); every
+  forbidden string 0 (`legacy`, `--observer`, `migrate-node-naming`, `setup-observer.sh`,
+  `setup-validator.sh`, `grant@`, `support@`, `more than a second ahead`, `next release`,
+  `Invalid bytes`, `about six seconds`). Cover: "Version 1.4 · 15 October 2026".
+- `pdfinfo`: 48 pages, ModDate 2026-10-15, Author Telcoin Association.
+- Page renders viewed (80 dpi): cover, Hardware per role (7), Optional node flags (15), One-way
+  updates (19), Restarts and the epoch boundary (20), Watch your status (33), Sync and node
+  mode (41), Service and keys (45-46): long rows wrap cleanly, header row repeats across the
+  page break, running header and "Page X of 48" intact.
+- All 38 `(#slug)` links match heading ids; README's `OPERATOR.md#9-troubleshooting` resolves.
+- `git status --short`: M only for the guide .md, metadata.yaml, the PDF, OPERATOR.md,
+  README.md, CHANGELOG.md, followup.md, tasks/plan.md, tasks/todo.md; new task files
+  untracked until the commit; the specification PDF and the telcoin-network checkout unchanged.
+
+## Accepted as is (verifier NOTEs)
+- Row 10a: the message can print `header epoch unknown`; the row already says email first.
+- Row 10c leaves out the ERROR-level sibling line at close_epoch.rs:653-662 (also no action).
+- "which waits for the epoch boundary" for edit-config menu item 12 is the guide's existing
+  shorthand (waits only for a `CvvActive` node inside `TN_EPOCH_MARGIN`).

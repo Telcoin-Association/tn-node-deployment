@@ -1,65 +1,42 @@
-# Plan: Telcoin Network Technical Specification as a version-controlled partner document
+# Plan: refresh the MNO node guide to telcoin-network main 98849a221 and rebuild its PDF
 
-Approved 2026-10-15. Branch `docs/technical-specification` off `main` (037c810). No push.
-The full plan text (context, decisions, agent table) is in the session transcript; this file
-is the checklist the orchestrator ticks. Checkpoints: `tasks/ckpt-spec-<unit>.md`.
-
-Abbreviations: `P` = `docs/partner`, `TS` = `docs/partner/technical-specification`,
-`S` = scratchpad `spec/` (extracted text, page renders, images),
-`WT` = scratchpad worktree of telcoin-network at `v0.16.0-adiri` (d72cc2bc, tn-contracts 10cc12b7).
+Approved 2026-10-15. Branch `docs/technical-specification` (on top of 706a730). One commit,
+no attribution trailer, no push. Facts, rules, decisions and the full edit lists are in
+`tasks/spec-guide-refresh-facts.md`; checkpoints are `tasks/ckpt-guide-<unit>.md`.
 
 ## W0 Setup (orchestrator)
-- [x] branch `docs/technical-specification`
-- [x] `brew install pandoc weasyprint poppler` (pandoc 3.12.1, WeasyPrint 70.0, poppler 26.10.0)
-- [x] worktree `WT` at the tag, tn-contracts submodule initialised
-- [x] `.claude/project-context.md` written (untracked)
-- [x] baseline: current script on pandoc 3.12.1 reports toolchain drift on the guide PDF
-      (text differs only in line wraps; 46 pages); anti-churn keeps the committed PDF
-- [x] `tasks/plan.md` + checkpoint stubs
+- [x] line numbers in the guide, OPERATOR.md and README.md match the plan
+- [x] upstream citations re-read at 98849a221 (clock drift, recovery log lines, the
+      `Cannot check database (epoch)` text, certifier, rejoin, worker RPC, network-config keys)
+- [x] `tasks/spec-guide-refresh-facts.md`, `tasks/plan.md`, checkpoint stubs
+- [x] baseline `bash tools/build-partner-pdf.sh mno-node-guide --html-only` passes on the
+      untouched tree; `git status` clean apart from the known untracked files
 
-## Wave 1
-- [x] A1 guide `git mv` to `P/mno-node-guide/`, Geist to `P/assets/fonts/geist/`, new build
-      script (document name / `--all`), `.gitignore`, `.gitattributes`; commit 1 with the PDF at R100
-- [x] A3 assets: Inter v4.1 (6 faces + LICENSE), `telcoin-network-dark.svg`,
-      `telcoin-association-dark.svg`, cover PNG, README rows
-- [x] T1 transcription: title, chapters 1-5, spec `metadata.yaml`
-- [x] T2 transcription: chapters 6-10 fragment
-- [x] G1 gate: 10 `##`, 11 tables (4+7), snapshot `S/md/transcription.md`
+## W1 Writers (two opus agents in parallel, disjoint files)
+- [x] U1 guide-writer: items 1-11 on `mno-node-guide.md` and `metadata.yaml`, bottom-up;
+      `--html-only` lint and anchor check pass; checkpoint `tasks/ckpt-guide-U1.md`
+- [x] U2 ops-docs-writer: the OPERATOR.md and README.md list; `git diff --stat` touches only
+      those two files; checkpoint `tasks/ckpt-guide-U2.md`
 
-## Wave 2
-- [x] A2 README, AGENTS.md ("Partner documents"), followup.md; email -> devs@telcoin.org in the
-      guide, metadata 1.3 / 15 October 2026, script `CONTACT`; rebuilt guide PDF; commit 2
-- [x] V1a spec template + page chrome CSS (cover, header band, footer pill, confidentiality)
-- [x] R1 ch 2-3 findings
-- [x] R2a ch 4 (minus contracts) findings
-- [x] R2b ch 5 findings
-- [x] R3 ch 6 + ch 4 contracts findings
-- [x] R4 ch 7, 10 findings
-- [x] R5a ch 8 transport/discovery/topics findings
-- [x] R5b ch 8 request-response/peer scoring findings
-- [x] R5c ch 9 findings
+## W2 Verifier (one opus agent after W1)
+- [x] U3 verifier: every changed or added sentence re-derived from telcoin-network at
+      98849a221 (never from the writers' notes first); figures, log strings, key names, the
+      `initiating node shutdown` outcome; no "next release"; lint; anchors; net growth <= 40
+      lines; forbidden terms; the three files agree; findings in `tasks/ckpt-guide-U3.md`
+- [x] orchestrator applies the fixes or sends them back to U1/U2
 
-## Wave 3
-- [x] V1b body CSS (Inter 10.5pt, chapter numbering, lavender tables, 3-level TOC)
-- [x] C1 + C2 consolidators (ch 1-5, scratch copy refresh-a.md, log -a) / C2 (ch 6-10, refresh-b.md, log -b);
-      orchestrator joins, installs, bumps metadata 1.1 / 15 October 2026 / `protocol: v0.16.0-adiri`,
-      concatenates `tasks/ckpt-spec-refresh-log.md`
-- [x] G2 gate: spec PDF builds (38 pages, empty WeasyPrint log)
-
-## Wave 4 review
-- [x] Q1 fidelity (0 transcription defects, log complete, 68 scope additions triaged in tasks/spec-triage.md)
-- [x] Q2a/b/c technical disproof + stale sweep
-- [x] Q3 render review (0 must-fix, 7 should-fix, 18 nits)
-- [x] triage (tasks/spec-triage.md)
-
-## Wave 5-6
-- [x] F1 content fixes (Q1/Q2a/Q2b/Q2c applied; 738 lines)
-- [x] F2 render fixes (cover 41pt/16pt, bullets, footer geometry; stretched lines handed to F1)
-- [x] Q3r re-check (0 must-fix; the last runt page fixed by the orchestrator; 34 pages)
-
-## W7 Finish
-- [x] CHANGELOG.md Unreleased clause (drafted; page count not stated)
-- [x] commits: 1331145 move, 9a0f5d3 assets, 6010ed3 contact, 924fa0c spec, 10b666e staged stylesheet, then changelog + tasks; paths staged explicitly
-- [x] end-to-end verification (see tasks/todo.md review section)
-- [x] `tasks/todo.md` review section; `tasks/lessons.md` orchestration lessons
-- [x] `git worktree remove` of `WT`
+## W3 Close (orchestrator)
+- [x] CHANGELOG.md "Unreleased": "Partner guide 1.4, October 2026" clause
+- [x] followup.md: the triage list and the next-tag re-check
+- [x] tasks/todo.md review section
+- [x] `bash tools/build-partner-pdf.sh mno-node-guide` writes 46-48 pages, WeasyPrint log
+      clean; second run prints "PDF unchanged"
+- [x] pdftotext checks (required strings present, forbidden strings absent, cover shows 1.4)
+- [x] page renders viewed: cover, Hardware per role, Optional node flags, Restarts and the
+      epoch boundary, One-way updates, Watch your status, Sync and node mode, Service and keys
+- [x] `pdfinfo`: ModDate 2026-10-15, Author Telcoin Association
+- [x] `git status --short`: only the expected files; `gen-checksums.sh` reports no sidecar
+      drift; the specification PDF and the telcoin-network checkout unchanged
+- [x] commit `docs: guide 1.4 describes telcoin-network main: epoch restart recovery, clock
+      drift, opt-in network-config keys` (no trailer)
+- [x] memory `technical-specification-branch.md` updated

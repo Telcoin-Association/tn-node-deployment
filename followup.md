@@ -147,6 +147,12 @@ package or verifier of that round that recorded it.
   and the first start, so the health window would no longer have to cover the migration. Not
   tried. (DOC-A)
   Why: a slow migration currently looks like a failed health check.
+- `update-node.sh`'s one-way failure message (line 476, "Not rolled back: the previous release
+  cannot open the migrated data dir") sends the operator to the journal but does not say that a
+  `Cannot check database (epoch)` line there has its own remedy (move `consensus-db/epoch`, the
+  epoch in progress, aside once the network has closed that epoch), which the guide's Service and
+  keys table now carries. A script change, so a version bump and sidecar. (guide-1.4)
+  Why: the message's only remedy is the pre-update snapshot, which that case does not need.
 
 ## Library
 
@@ -322,6 +328,10 @@ package or verifier of that round that recorded it.
 - The wizard's Back button on step 5 stays usable after keygen and offers Generate Keys again,
   which setup-node refuses; a refused finalize offers only a retry. Pre-existing. (UI-3b)
   Why: the operator reaches a dead end after keygen.
+- A node that stops at every start (a `Cannot check database (epoch)` panic, for example) shows
+  as down in the dashboard, without the panic reason from the journal or the `start-limit-hit`
+  state from systemd. (guide-1.4)
+  Why: the operator sees a dead node and has to find the cause in the journal by hand.
 
 ## Updater
 
@@ -396,6 +406,24 @@ package or verifier of that round that recorded it.
 - OPERATOR.md keeps a hidden anchor, `64-export-the-stake-calldata-on-the-node`, for an old
   README link; remove it once README's link to "Stake by hand" has shipped. (DOC-2)
   Why: a leftover anchor that nothing links to.
+- Guide 1.4 describes telcoin-network `main` at 98849a221 (three merges past `v0.16.0-adiri`:
+  #1622, #1647, #1572) as current behaviour. When the next tag ships, re-check the guide against
+  it (the `Cannot check database (epoch)` text, the boundary-window repair lines, the rejoin
+  window, the `worker is inactive` error, the `network-config` keys) and refresh the
+  specification's `protocol:` in its `metadata.yaml`. Until then a partner on the
+  `v0.16.0-adiri` image sees the older panic text and no boundary-window repair. (guide-1.4)
+  Why: the guide is ahead of the shipped image by three merges.
+- The guide's "Where things land" table has no row for `<data dir>/consensus-db/epoch`, the
+  epoch database that holds only the epoch in progress; the Service and keys remedy names it
+  without that introduction. (guide-1.4)
+  Why: an operator told to move the directory aside has nowhere in the guide that says what it is.
+- Upstream changes between `v0.16.0-adiri` and 98849a221 that the guide leaves out on purpose:
+  Kademlia record retention; the new `tn_network_*` metric series and the `class` and `outcome`
+  labels on `peer_penalties_total`; the WARN `inbound connections keep being refused by
+  connection limits`; `kad_replication_interval` now a no-op; the `process_budget` start-up
+  errors; the late-upgrader discard path (dormant while the sub-second fork is unarmed). Add
+  any of them if operators ask, with the then-current citations. (guide-1.4)
+  Why: the guide names only what an operator acts on; these are maintainer or dashboard facts.
 
 ## Maintainer repos (devnet-genesis and the fleet)
 

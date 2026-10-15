@@ -762,6 +762,8 @@ Only a node that reports `CvvActive` from `tn_nodeMode` waits, and only when the
 
 Pass a variable through sudo on the command line, for example `sudo TN_SKIP_EPOCH_WAIT=1 bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-disable`. A script running against an older `lib/common.sh` that lacks the wait says so and restarts without it; run `update-scripts.sh`. A restart by hand (`sudo systemctl restart telcoin`) never waits, so on a committee node check the time to the next boundary with `check-node.sh` first.
 
+A committee node that is stopped while the epoch changes anyway (a crash, a restart by hand or a skipped wait) repairs its epoch records when it starts again, and the warnings it logs about them need no action; [OPERATOR.md, Troubleshooting](OPERATOR.md#9-troubleshooting) lists them. It still misses the epoch votes while it is down, so keep to the wait.
+
 ---
 
 ## Editing the configuration
@@ -821,7 +823,7 @@ How an edit runs:
 
 ### Bootstrap peers
 
-A bootstrap peers map replaces the bootstrap servers in the node's genesis with peers you choose; the node dials them at start. It needs `v0.15.0-adiri` or later. The map is YAML or JSON, keyed by each peer's BLS public key, and each value is the `p2p_info` block from that peer's `node-info.yaml` (its primary and its workers):
+A bootstrap peers map replaces the bootstrap servers in the node's genesis with peers you choose; the node dials them at start. It needs `v0.15.0-adiri` or later. The node treats them as discovery hints only: it does not keep them connected ahead of other peers or exempt them from load penalties. The map is YAML or JSON, keyed by each peer's BLS public key, and each value is the `p2p_info` block from that peer's `node-info.yaml` (its primary and its workers):
 
 ```yaml
 <peer BLS public key>:
