@@ -527,7 +527,43 @@ edit_lock() {
         return 1
     fi
     EDIT_LOCK_HELD=true
+    if ! edit_migrate_ownership; then
+        edit_release_lock
+        EDIT_LOCK_HELD=false
+        return 1
+    fi
     return 0
+}
+
+# Set once edit_migrate_ownership has brought the install to the root-owned
+# layout in this run.
+EDIT_OWNERSHIP_DONE=false
+
+# edit_migrate_ownership -- with the update lock held and before the first
+# write of the run, bring an existing install to the root-owned file layout
+# with tn_migrate_ownership (idempotent; it never restarts the node). Every
+# write path takes the lock through edit_lock, so this is the one call site;
+# it runs once per run. rc 1, with the reason reported, when the migration
+# refuses: a symlink or an unexpected owner under the install trees, or a
+# mainnet node that needs a fresh install.
+edit_migrate_ownership() {
+    local rc=0
+    if [[ "$EDIT_OWNERSHIP_DONE" == "true" ]]; then
+        return 0
+    fi
+    # MERGE: drop this declare -F guard once tn_migrate_ownership is in lib/common.sh.
+    if declare -F tn_migrate_ownership >/dev/null; then
+        tn_migrate_ownership edit_wait_say || rc=$?
+    fi
+    case "$rc" in
+        0)
+            EDIT_OWNERSHIP_DONE=true
+            return 0
+            ;;
+        3) edit_error "this mainnet node still has the old file ownership layout and must be installed fresh; it is not migrated in place. Nothing was changed." ;;
+        *) edit_error "the file ownership migration stopped (see the list above); review those paths, then try again. Nothing was changed." ;;
+    esac
+    return 1
 }
 
 # edit_release_lock -- release the update lock this process holds, the same
@@ -2150,19 +2186,73 @@ chain_config_subdir() {
     esac
 }
 
+# refresh_copy_configs SRC_DIR DATA_DIR -- copy genesis.yaml, committee.yaml
+# and parameters.yaml from SRC_DIR into DATA_DIR (the first two under
+# genesis/) as the service user: each is copied to a mktemp name beside its
+# destination and made 0644, and only when all three are staged are they
+# renamed into place. Every step runs through tn_as_service_user, so nothing
+# in the data dir is written or re-owned by root. rc 1 when staging failed
+# (nothing changed, the staged copies removed); rc 2 when a rename failed
+# after an earlier one succeeded.
+refresh_copy_configs() {
+    local src="$1" dd="$2" i tmp ok=true
+    local -a from to tmps
+    from=("${src}/genesis.yaml" "${src}/committee.yaml" "${src}/parameters.yaml")
+    to=("${dd}/genesis/genesis.yaml" "${dd}/genesis/committee.yaml" "${dd}/parameters.yaml")
+    tmps=()
+    tn_as_service_user mkdir -p -- "${dd}/genesis" || return 1
+    for i in 0 1 2; do
+        tmp="$(tn_as_service_user mktemp "${to[$i]%/*}/.tn.XXXXXX")" || tmp=""
+        if [[ -z "$tmp" ]]; then
+            ok=false
+            break
+        fi
+        tmps+=("$tmp")
+        if ! tn_as_service_user cp -- "${from[$i]}" "$tmp" \
+            || ! tn_as_service_user chmod -- 0644 "$tmp"; then
+            ok=false
+            break
+        fi
+    done
+    if [[ "$ok" != "true" ]]; then
+        for tmp in ${tmps[@]+"${tmps[@]}"}; do
+            tn_as_service_user rm -f -- "$tmp" 2>/dev/null || true
+        done
+        return 1
+    fi
+    for i in 0 1 2; do
+        if ! tn_as_service_user mv -f -T -- "${tmps[$i]}" "${to[$i]}"; then
+            for tmp in ${tmps[@]+"${tmps[@]}"}; do
+                tn_as_service_user rm -f -- "$tmp" 2>/dev/null || true
+            done
+            [[ "$i" -eq 0 ]] && return 1
+            return 2
+        fi
+    done
+    return 0
+}
+
 refresh_chain_configs() {
     print_header "Refresh Chain Configs"
 
     local source_dir="$TN_SOURCE_DIR"
-    local node_data_dir network subdir chain_config_src node_genesis node_id src_id
-    node_data_dir=$(detect_data_dir)
+    local node_data_dir network subdir chain_config_src node_genesis node_id src_id rc
+    if ! node_data_dir="$(detect_data_dir)"; then
+        print_error "Cannot tell the node's data dir: DATA_DIR is set more than once in .node-meta. Chain configs unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
 
     # The network comes from .node-meta. Copying another network's files would
     # move the node to that chain, so an unknown network is refused.
-    network="$(meta_get NETWORK 2>/dev/null || true)"
+    rc=0
+    network="$(meta_get NETWORK)" || rc=$?
     subdir="$(chain_config_subdir "$network")"
     if [[ -z "$subdir" ]]; then
-        if [[ -z "$network" ]]; then
+        if [[ "$rc" -eq 2 ]]; then
+            print_error "Cannot tell which network this node runs: NETWORK is set more than once in .node-meta. Chain configs unchanged."
+        elif [[ -z "$network" ]]; then
             print_error "Cannot tell which network this node runs: .node-meta has no NETWORK. Chain configs unchanged."
         else
             print_error "Cannot refresh chain configs for NETWORK=${network} (.node-meta); expected testnet, mainnet or devnet."
@@ -2248,22 +2338,20 @@ refresh_chain_configs() {
     fi
     print_ok "Chain id ${src_id} matches the node's genesis"
 
-    print_step "Copying chain configs to ${node_data_dir}..."
-    mkdir -p "${node_data_dir}/genesis"
-    cp "${chain_config_src}/genesis.yaml"    "${node_data_dir}/genesis/"
-    cp "${chain_config_src}/committee.yaml"  "${node_data_dir}/genesis/"
-    cp "${chain_config_src}/parameters.yaml" "${node_data_dir}/"
-
-    local svc_user
-    svc_user=$(grep "^User=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "root")
-    local svc_group
-    svc_group=$(grep "^Group=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "")
-
-    if [[ -n "$svc_group" ]] && getent group "$svc_group" &>/dev/null; then
-        chown -R "${svc_user}:${svc_group}" "$node_data_dir" 2>/dev/null || \
-            chown -R "${svc_user}" "$node_data_dir" 2>/dev/null || true
-    else
-        chown -R "${svc_user}" "$node_data_dir" 2>/dev/null || true
+    # The data dir belongs to the service user, so the copy runs as that user
+    # (no root cp, no chown -R of the data dir).
+    print_step "Copying chain configs to ${node_data_dir} as ${SERVICE_USER}..."
+    rc=0
+    refresh_copy_configs "$chain_config_src" "$node_data_dir" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        if [[ "$rc" -eq 1 ]]; then
+            print_error "Could not copy the chain configs into ${node_data_dir} as ${SERVICE_USER}. Chain configs unchanged."
+        else
+            print_error "Copying the chain configs into ${node_data_dir} stopped part way: some files are new and some are not. Run this again before restarting the node."
+        fi
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
     fi
     print_ok "Chain configs updated"
 
