@@ -19,10 +19,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+REAL_POPEN = subprocess.Popen
 
 import server  # noqa: E402
 from test_support import TEST_TOKEN, local_client  # noqa: E402
@@ -501,6 +504,20 @@ class LogLimitsTest(ServerTestCase):
             resp = self.client.head("/api/logs/observer/stream")
             self.assertEqual(resp.status_code, 200)
             resp.close()
+        self.assertEqual(self.free_stream_slots(), 8)
+
+    def test_a_quiet_stream_starts_at_once(self):
+        # No log line yet: the first frame is a keepalive comment, so the
+        # response and its status reach the page without waiting for the log.
+        path = os.path.join(self.tmp.name, "quiet.log")
+        open(path, "w").close()
+        self.patch(server, "parse_service_file", lambda t: {"log_path": path})
+        self.patch(server.subprocess, "Popen", REAL_POPEN)   # a real, quiet tail -F
+        started = time.monotonic()
+        resp = self.client.get("/api/logs/observer/stream", buffered=False)
+        self.assertEqual(next(iter(resp.response)), b": keepalive\n\n")
+        self.assertLess(time.monotonic() - started, server._STREAM_KEEPALIVE / 3)
+        resp.close()
         self.assertEqual(self.free_stream_slots(), 8)
 
     def test_a_closed_stream_gives_its_slot_back_once(self):

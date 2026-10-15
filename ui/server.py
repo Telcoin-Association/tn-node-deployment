@@ -3543,7 +3543,9 @@ def api_logs(node_type):
 
 def _follow(argv):
     """SSE frames for each line a follower process prints, with a keepalive
-    comment while it is quiet. The process is stopped when the client goes."""
+    comment while it is quiet, and one at once when there is no line yet, so
+    the response starts (headers and all) without waiting for the log. The
+    process is stopped when the client goes."""
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
                             errors="replace")
@@ -3559,7 +3561,7 @@ def _follow(argv):
 
     threading.Thread(target=pump, daemon=True).start()
     try:
-        last = time.monotonic()
+        last = time.monotonic() - _STREAM_KEEPALIVE
         while True:
             while lines:
                 yield f"data: {lines.popleft().rstrip()}\n\n"
