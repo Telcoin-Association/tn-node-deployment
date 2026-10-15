@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+$-- docs/partner/technical-specification/template.html -- pandoc HTML5 template for
+$-- the Telcoin Network Technical Specification.
+$--
+$-- Built by tools/build-partner-pdf.sh technical-specification: pandoc fills the
+$-- variables from metadata.yaml (the title comes from the Markdown's "# " heading)
+$-- and writes build/technical-specification.html, which WeasyPrint lays out with
+$-- theme.css. Asset paths are relative to that build/ directory (asset-dir).
+$--
+$-- .run-head and .run-foot are running elements: theme.css takes them out of the
+$-- flow and repeats them as the page header and footer from page 2 on. They sit
+$-- first in the cover so every later page can reuse them, and they carry no ids,
+$-- because WeasyPrint copies them onto each page.
+<html xmlns="http://www.w3.org/1999/xhtml"$if(lang)$ lang="$lang$" xml:lang="$lang$"$endif$>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>$pagetitle$</title>
+$for(author-meta)$
+  <meta name="author" content="$author-meta$" />
+$endfor$
+$if(description-meta)$
+  <meta name="description" content="$description-meta$" />
+$endif$
+$if(date-meta)$
+  <meta name="dcterms.created" content="$date-meta$" />
+  <meta name="dcterms.modified" content="$date-meta$" />
+$endif$
+$for(css)$
+  <link rel="stylesheet" href="$css$" />
+$endfor$
+$for(header-includes)$
+  $header-includes$
+$endfor$
+</head>
+<body>
+<section class="cover">
+<div class="run-head">
+<div class="run-title">$title$</div>
+<div class="run-tab"><img src="$asset-dir$/logos/telcoin-network-dark.svg" alt="Telcoin Network" /></div>
+</div>
+<div class="run-foot">
+<p class="run-conf">$confidentiality$ $date$.</p>
+<div class="run-pill">
+<div class="run-org"><img src="$asset-dir$/logos/telcoin-association-dark.svg" alt="Telcoin Association" /></div>
+<div class="run-site"><span class="run-rule"></span>telcoin.org</div>
+<div class="run-page"></div>
+</div>
+</div>
+<img class="cover-logo" src="$asset-dir$/logos/telcoin-network-dark.svg" alt="Telcoin Network" />
+<div class="cover-head">
+<p class="cover-title">$if(cover-title)$$cover-title$$else$$title$$endif$</p>
+<p class="cover-subtitle">$subtitle$</p>
+</div>
+<div class="cover-meta">
+<p>Version $version$ · $date$</p>
+<p>Protocol $protocol$</p>
+<p><a href="mailto:$contact$">$contact$</a></p>
+</div>
+</section>
+$if(toc)$
+<nav id="TOC" role="doc-toc">
+<p class="toc-title">$toc-title$</p>
+$table-of-contents$
+</nav>
+$endif$
+<main>
+$body$
+</main>
+</body>
+</html>
