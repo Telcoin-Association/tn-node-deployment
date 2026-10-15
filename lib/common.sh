@@ -2784,21 +2784,27 @@ _tn_gen_settings() {
 # _tn_node_args_ok ARGS -- rc 0 when ARGS, the words after `node` on the launch
 # line, are plain words: flags (-v..., --name, --name=value) and values made of
 # letters, digits and . _ , : / @ + = -, plus the one quoted form the scripts use
-# for the bootstrap peers map, "$(cat /abs/path)". ARGS must hold --http and never
-# --bls-passphrase-source (the start script sets it), --observer or --validator.
+# for the bootstrap peers map: --bootstrap-peers "$(cat <config dir>/bootstrap-peers.yaml)"
+# (CONFIG_DIR, default /etc/telcoin), accepted after that flag and for that file
+# only. ARGS must hold --http and never --bls-passphrase-source (the start script
+# sets it), --observer or --validator.
 _tn_node_args_ok() {
     local args="${1:-}" w prev="" http=0 IFS=' '
     local re_cs='^[A-Za-z0-9._,:/@+= "$()-]*$' re_word='^[A-Za-z0-9._,:/@+=-]+$'
-    local re_cat='^/[A-Za-z0-9._/+-]+\)"$' re_v='^-v+$'
+    local re_v='^-v+$' peers="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bootstrap-peers.yaml"
     [[ "$args" =~ $re_cs ]] || return 1
     for w in $args; do
         if [[ "$prev" == '"$(cat' ]]; then
-            [[ "$w" =~ $re_cat ]] || return 1
+            [[ "$w" == "${peers})\"" ]] || return 1
             prev="$w"
             continue
         fi
         case "$w" in
-            '"$(cat') prev="$w"; continue ;;
+            '"$(cat')
+                [[ "$prev" == "--bootstrap-peers" ]] || return 1
+                prev="$w"
+                continue
+                ;;
             --http) http=1 ;;
             --bls-passphrase-source|--bls-passphrase-source=*|--observer|--observer=*|--validator|--validator=*) return 1 ;;
         esac

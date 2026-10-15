@@ -166,10 +166,19 @@ check_has "credential script: reads the credential on stdin" \
 for bad in "--datadir /var/lib/telcoin" "--http --observer" "--http --validator" \
     "--http --bls-passphrase-source env" "--http; rm -rf /" '--http $(id)' '--http `id`' \
     "--http --x a|b" "--http --x a>b" '--http "$(cat relative)"' '--http "$(cat /a b)"' \
-    "--http --x *" "--http -x" "--http --x 'a'"; do
+    "--http --x *" "--http -x" "--http --x 'a'" \
+    '--http --metrics "$(cat /etc/telcoin/bootstrap-peers.yaml)"' \
+    '"$(cat /etc/telcoin/bootstrap-peers.yaml)" --http' \
+    '--http --bootstrap-peers "$(cat /etc/shadow)"' \
+    '--http --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml.x)"' \
+    '--http --bootstrap-peers "$(cat /etc/telcoin/node.env)"'; do
     render script source "$BIN" "$bad"
     check_rc "args refused: ${bad}" 1 "$RC"
 done
+render script source "$BIN" "--http ${PEERS}"
+check_rc "args: the peers map after --bootstrap-peers from the config dir" 0 "$RC"
+CONFIG_DIR=/srv/tn render script source "$BIN" "--http ${PEERS}"
+check_rc "args: the peers map from another dir than CONFIG_DIR refused" 1 "$RC"
 render script docker "evil.example/x:v0.16.0-adiri" "$ARGS_D"
 check_rc "docker: other repository refused" 1 "$RC"
 render script docker "$IMG" "$ARGS_D --x"
