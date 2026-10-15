@@ -7,6 +7,76 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Mainnet hardening round, October 2026 -- scripts-v2.0.0, update-scripts v2.0.0
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+This round prepares the scripts for mainnet and is the first tagged, signed script release,
+`scripts-v2.0.0`. Every operator script moves to 2.0.0, with lib/common 2.0.0, lib/fallback
+1.1.0, lib/observability 2.0.0, testnet add-ons 1.1.0, telcoin-ui 2.0.0 (`HELPER_API` 3) and
+install-ui 2.0.0. The Changelog section of README.md has one entry per script; this summary
+goes by area.
+
+#### Signed script updates
+update-scripts reads `RELEASE` on main and installs a `scripts-v*` tag only when its
+`MANIFEST.sig` verifies against `lib/allowed_signers`. It refuses a lower serial, or the same
+serial with different content, and stages and checks every changed file before it installs
+all of them or none. install.sh is pinned to one tag and carries the signer list; the copy on
+main refuses to run. The updater no longer redeploys the UI by itself: it prints
+`sudo bash ui/install-ui.sh --update`.
+
+#### Root-owned layout
+Root owns `/opt/telcoin`, `/etc/telcoin`, the start script (now
+`/usr/local/libexec/telcoin/tn-start`, or `tn-start-docker`) and the node binary; the service
+account owns only the data dir. Listener addresses move to `/etc/telcoin/node.env`, the log
+dir becomes root:telcoin-log, backups go to `/var/backups/telcoin` and the update lock to
+`/run/telcoin/update.lock`. The first root run of update-node, edit-config, install-caddy or
+`prepare-stake --rotate-address` migrates an existing testnet host in place; a mainnet host on
+the old layout is refused and installed fresh. The service account is no longer forced to UID
+1101.
+
+#### BLS passphrase
+The passphrase is an encrypted systemd credential, `/etc/telcoin/bls-passphrase.cred`
+(`host+tpm2` when the host has a TPM, else `host`), and the start script feeds it to the node
+on stdin. It is never on a command line or in a unit `Environment=`. setup-node takes it with
+`--passphrase-stdin`; `edit-config.sh --migrate-credential` moves an existing install, and
+`--reseal` re-encrypts it. Mainnet needs systemd 255 (Ubuntu 24.04). The old TPM-unseal method
+is gone.
+
+#### Node releases and images
+Releases are checked with `gpgv` against the keys in `lib/release-keys/`, and the tarball,
+`IMAGE_DIGEST` and chain-config hashes against `SHA256SUMS`. Updates take release tags only
+(testnet `vX.Y.Z-adiri`, mainnet `vX.Y.Z`), refuse downgrades and check afterwards that a
+voting node votes again. Source builds run as `tn-build`. Docker images run by digest, Docker
+comes from its own apt repository after a key check, and `live-restore` is on.
+
+#### Restarts and the committee
+Before setup-node, update-node, edit-config, migrate-node-naming or an add-on stops or
+restarts a committee node, it checks that the members already down plus this one would not
+halt consensus; `--allow-quorum-risk` overrides the check for a coordinated restart. The node
+unit and the Docker container run sandboxed, and mainnet logs to the journal by default.
+
+#### Firewall and add-ons
+firewall-setup takes `--ssh-from` and `--p2p-from` source lists (mainnet needs one for SSH),
+puts the old rules back on any failure, and hardens sshd through a drop-in. The VPN add-on
+reads revocable maintainer keys from a `KEYS` file and gives `tnadmin` a recovery command list
+instead of full root. Observability runs Alloy as its own account. Caddy pins its apt key,
+moves its admin API to a socket and needs a 16-character dashboard password.
+
+#### Node Manager UI
+The UI needs a per-install token on every call; `open-ui.sh` opens
+`http://127.0.0.1:8080/#t=<token>`. install-ui builds root-owned trees and a hashed venv.
+
+#### Before you update
+Run `update-scripts.sh` once, then let the next update-node or edit-config run migrate the
+layout, and run `sudo bash edit-config.sh --migrate-credential` when it suits you. UI hosts run
+the printed `install-ui.sh --update`. The release note has the full order and the new
+refusals.
+
+#### Still open
+The mainnet image repository and the mainnet genesis, committee and parameters hashes are not
+set yet, so mainnet installs are refused until they are. The mainnet public RPC is set at
+launch.
+
 ### v0.16.0-adiri round, October 2026 -- update-scripts v1.1.72
 Full release note: [CHANGELOG/v0.16.0-adiri.md](CHANGELOG/v0.16.0-adiri.md).
 
