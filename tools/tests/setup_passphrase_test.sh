@@ -24,7 +24,7 @@ mkdir -p "$T/sn" "$T/bin" "$REC" "$T/written" "$T/root"
 grep -v '^main "\$@"$' "$TN_TEST_REPO/setup-node.sh" > "$T/sn/setup-node.sh"
 # The block at the top of setup-node.sh that moves TN_BLS_PASSPHRASE into TN_SETUP_PASS
 # runs once at source time; run_main runs it again, in the subshell, before main.
-sed -n '/^unset TN_SETUP_PASS TN_KEYTOOL_PASS$/,/^unset TN_BLS_PASSPHRASE$/p' \
+sed -n '/^unset TN_SETUP_PASS TN_KEYTOOL_PASS/,/^unset TN_BLS_PASSPHRASE$/p' \
     "$TN_TEST_REPO/setup-node.sh" > "$T/sn/pre.sh"
 ln -s "$TN_TEST_REPO/lib" "$T/sn/lib"
 
@@ -251,6 +251,13 @@ step_create_service() { : > "$REC/wrote-service"; }
 json_refuse_installed() { :; }
 FZ=(--json --phase=finalize --network testnet --install-method docker
     --docker-image "$DEFAULT_DOCKER_IMAGE" --data-dir "$T/data")
+# What keygen leaves for finalize: the passphrase form in .node-meta and the stored
+# passphrase (finalize checks both before the listeners).
+CONFIG_DIR_SAVED="$CONFIG_DIR"
+CONFIG_DIR="$T/cfg"
+mkdir -p "$CONFIG_DIR"
+printf 'PASSPHRASE_METHOD=stdin\n' > "$CONFIG_DIR/.node-meta"
+: > "$CONFIG_DIR/bls-passphrase"
 for case_args in none empty; do
     reset
     if [[ "$case_args" == none ]]; then
@@ -264,6 +271,7 @@ for case_args in none empty; do
     check "finalize docker, listeners ${case_args}: no config, no start script or unit written" "no no" \
         "$([[ -e "$REC/wrote-config" ]] && echo yes || echo no) $([[ -e "$REC/wrote-service" ]] && echo yes || echo no)"
 done
+CONFIG_DIR="$CONFIG_DIR_SAVED"
 
 # ---- a signal ends the run: the done event names it, with the status ---------------------
 reset
@@ -304,7 +312,8 @@ for t in dirname basename sort head tail sed awk grep cat cut tr id uname date m
     printf '#!/bin/sh\n%s > "%s/pre/$$.%s.env"\nexec %s "$@"\n' "$ENV_BIN" "$REC" "$t" "$real" > "$T/pre-bin/$t"
     chmod 0755 "$T/pre-bin/$t"
 done
-( export TN_BLS_PASSPHRASE="pre-main-sentinel-41" TN_SETUP_PASS="pre-inherited-1" TN_KEYTOOL_PASS="pre-inherited-2"
+( export TN_BLS_PASSPHRASE="pre-main-sentinel-41" TN_SETUP_PASS="pre-inherited-1" TN_KEYTOOL_PASS="pre-inherited-2" \
+         TN_CRED_PASS="pre-inherited-3"
   PATH="$T/pre-bin:$PATH" "$BASH" "$TN_TEST_REPO/setup-node.sh" --help ) > /dev/null 2>&1
 pre_env="$(cat "$REC"/pre/*.env 2>/dev/null)"
 check "pre-main: dirname ran under the recording shim" "yes" \
@@ -313,5 +322,6 @@ check_lacks "pre-main: the passphrase in no child env" "pre-main-sentinel-41" "$
 check_lacks "pre-main: TN_BLS_PASSPHRASE in no child env" "TN_BLS_PASSPHRASE" "$pre_env"
 check_lacks "pre-main: an inherited TN_SETUP_PASS in no child env" "pre-inherited-1" "$pre_env"
 check_lacks "pre-main: an inherited TN_KEYTOOL_PASS in no child env" "pre-inherited-2" "$pre_env"
+check_lacks "pre-main: an inherited TN_CRED_PASS in no child env" "pre-inherited-3" "$pre_env"
 
 finish
