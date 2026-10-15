@@ -143,6 +143,22 @@ JSON_MODE=false
 ALLOW_DOWNGRADE=false
 unset -f installed_source_ref
 
+# tn_ref_min_check judges release tags by tn_release_tag_ok: mainnet tags have no
+# suffix, testnet ones end in -adiri; anything else only warns (rc 2).
+mc() {  # mc NAME REF NETWORK EXPECTED-RC
+    local rc=0
+    tn_ref_min_check "$2" "$3" > /dev/null || rc=$?
+    check_rc "$1" "$4" "$rc"
+}
+mc "floor: testnet release tag at the floor" v0.13.0-adiri testnet 0
+mc "floor: testnet release tag below the floor" v0.12.0-adiri testnet 1
+mc "floor: testnet hot-patch tag only warns" v0.16.0-adiri-hotfix testnet 2
+mc "floor: a mainnet-form tag on testnet only warns" v0.16.0 testnet 2
+mc "floor: a -telcoin tag on testnet only warns" v0.16.0-telcoin testnet 2
+mc "floor: an image by its release tag" "${GAR_IMAGE_BASE}:v0.16.0-adiri" testnet 0
+mc "floor: an image by digest only warns" "${GAR_IMAGE_BASE}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" testnet 2
+check "mainnet release tags carry no suffix" "" "$NETWORK_TAG_SUFFIX_MAINNET"
+
 # --- rustup-init pinned by sha256 ------------------------------------------------------
 : > "$T/setpriv.log"
 rc=0; tn_rustup_ensure >/dev/null 2>&1 || rc=$?
@@ -257,6 +273,30 @@ check "checkouts leave nothing in staging" yes "$(stg_empty)"
 # latest_source_ref: the newest release tag that did not move; a moved tag is flagged.
 latest_source_ref "$SRC" >/dev/null 2>&1
 check "latest_source_ref: newest unmoved tag, moved tag flagged" "v0.18.0-adiri true" "$LATEST_SOURCE_REF $SOURCE_TAG_MOVED"
+
+# --- the source picker offers release tags only ---------------------------------------
+P="$T/pick"
+G init -q "$P"
+printf 'p\n' > "$P/f"; G -C "$P" add f; G -C "$P" commit -qm p
+for t in v0.12.0-adiri v0.16.0-adiri v0.17.0-adiri v0.18.0-adiri-hotfix v1.0.0 v1.1.0-telcoin v2.0.0-rc1; do
+    G -C "$P" tag "$t"
+done
+G -C "$P" branch feature 2>/dev/null
+pick() {  # pick NETWORK INPUT -> "<rc> <answer>"
+    local rc=0 o
+    o="$(printf '%b' "$2" | pick_source_version "$1" "$P" 2>"$T/pick.err")" || rc=$?
+    printf '%s %s' "$rc" "$o"
+}
+check "picker, testnet default: the newest testnet release" "0 v0.17.0-adiri" "$(pick testnet '\n')"
+check_lacks "picker: main is not offered" "main (latest" "$(cat "$T/pick.err")"
+check_lacks "picker: no branch or commit option" "branch / tag / commit" "$(cat "$T/pick.err")"
+check "picker, mainnet default: the newest vX.Y.Z tag (no suffix)" "0 v1.0.0" "$(pick mainnet '\n')"
+check "picker, another release tag typed" "0 v0.16.0-adiri" "$(pick testnet '2\nv0.16.0-adiri\n')"
+check "picker, main typed: refused" "1 " "$(pick testnet '2\nmain\n')"
+check "picker, a branch typed: refused" "1 " "$(pick testnet '2\nfeature\n')"
+check "picker, a mainnet tag typed on testnet: refused" "1 " "$(pick testnet '2\nv1.0.0\n')"
+check "picker, cancel" "1 " "$(pick testnet '3\n')"
+check "picker, devnet: no source releases" "1 " "$(pick devnet '\n')"
 
 # --- signed tags (throwaway keys) ------------------------------------------------------
 if ! command -v gpg >/dev/null 2>&1; then

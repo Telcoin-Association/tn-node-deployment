@@ -103,11 +103,12 @@
 #   --passphrase-stdin       Read the passphrase from standard input: one line, read
 #                            once, without echo (a trailing CR is dropped).
 #
-# PASSPHRASE STORAGE. With systemd 250 or later (Ubuntu 24.04) the passphrase is kept
-# only as a systemd credential, /etc/telcoin/bls-passphrase.cred (root 0600), encrypted
-# by systemd-creds with the host key and, when the host has a usable TPM2, the TPM; the
+# PASSPHRASE STORAGE. With systemd 250 or later the passphrase is kept only as a
+# systemd credential, /etc/telcoin/bls-passphrase.cred (root 0600), encrypted by
+# systemd-creds with the host key and, when the host has a usable TPM2, the TPM; the
 # plaintext never lands on disk. Below systemd 250 (testnet and devnet only) it stays in
-# the root-only file /etc/telcoin/bls-passphrase. Mainnet needs systemd 250 or later.
+# the root-only file /etc/telcoin/bls-passphrase. Mainnet needs systemd 255 or later
+# (Ubuntu 24.04).
 #   --passphrase-method credential|stdin  Force one of the two (default: credential
 #                            wherever it works). Mainnet takes credential only.
 #   --allow-no-tpm           On mainnet, accept a credential encrypted with the host key
@@ -391,8 +392,9 @@ step_preflight() {
     print_step "Selecting network..."
     json_mode || select_network
 
-    # The systemd floor: 247 everywhere (LoadCredential=), 250 on mainnet (the encrypted
-    # credential; Ubuntu 24.04). Below 250 elsewhere it warns.
+    # The systemd floor: 247 everywhere (LoadCredential=), 255 on mainnet
+    # (TN_MAINNET_MIN_SYSTEMD: the encrypted credential; Ubuntu 24.04). Below 250
+    # elsewhere it warns: the passphrase then stays in a root-only file.
     print_step "Checking systemd version..."
     tn_os_floor_check "$NETWORK" setup_progress || setup_fail "This host's systemd is below the floor for ${NETWORK} (see above)."
     print_ok "systemd $(tn_systemd_version) detected"

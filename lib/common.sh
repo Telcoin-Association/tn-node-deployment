@@ -67,13 +67,11 @@ readonly TN_REPO="https://github.com/Telcoin-Association/telcoin-network.git"
 readonly TN_SOURCE_DIR="/opt/telcoin-source"
 readonly MIN_RUST_VERSION="1.75.0"
 
-# Tag suffixes used by each Telcoin network. Used by source-build pickers to
-# default to the right release for the network the operator selected.
-#   testnet -> "-adiri"  (Adiri testnet)
-#   mainnet -> "-telcoin" (placeholder; will be confirmed when mainnet launches)
-#   devnet  -> follows main; no tag filter
+# The suffix of each network's release tags: testnet vX.Y.Z-adiri, mainnet
+# vX.Y.Z with none. tn_release_tag_ok is the rule these scripts apply; these two
+# stay for scripts of an earlier release that read them.
 readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"
-readonly NETWORK_TAG_SUFFIX_MAINNET="-telcoin"
+readonly NETWORK_TAG_SUFFIX_MAINNET=""
 
 # Oldest release the source-build picker offers and tn_ref_min_check accepts.
 # Older tags exist upstream but lack features these scripts rely on:
@@ -1714,19 +1712,19 @@ rpc_url_is_private() {
 #   rc 1  refused: an empty ref, or a version below the floor whatever its suffix
 #   rc 2  allowed with a warning: not a release tag (main, a commit, a digest, or
 #         a pre-release such as v0.13.0-rc1), so the version is unknown
-# A release tag is vX.Y.Z with no suffix or with the network's tag suffix
-# (-adiri on testnet). <network> is testnet (or adiri), mainnet or devnet;
-# devnet, and an empty or unknown network, have no floor.
+# A release tag is one tn_release_tag_ok accepts for <network> (testnet
+# vX.Y.Z-adiri, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
+# devnet; devnet, and an empty or unknown network, have no floor.
 tn_ref_min_check() {
-    local ref="${1:-}" network="${2:-}" floor suffix tag ver rest tag_re
+    local ref="${1:-}" network="${2:-}" floor example tag ver tag_re
     if [[ -z "$ref" ]]; then
         printf '%s\n' "empty ref: no source ref or docker image was given."
         return 1
     fi
     case "$network" in
-        testnet|adiri) floor="$MIN_SOURCE_VERSION_TESTNET"; suffix="$NETWORK_TAG_SUFFIX_TESTNET" ;;
-        mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET"; suffix="$NETWORK_TAG_SUFFIX_MAINNET" ;;
-        *)             floor=""; suffix="" ;;
+        testnet|adiri) network=testnet; floor="$MIN_SOURCE_VERSION_TESTNET"; example="v${floor}-adiri" ;;
+        mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET"; example="v${floor}" ;;
+        *)             floor="" ;;
     esac
     [[ -n "$floor" ]] || return 0
     tag="$ref"
@@ -1736,15 +1734,14 @@ tn_ref_min_check() {
     tag_re='^v?([0-9]+\.[0-9]+\.[0-9]+)(-[A-Za-z0-9][A-Za-z0-9.-]*)?$'
     if [[ "$tag" =~ $tag_re ]]; then
         ver="${BASH_REMATCH[1]}"
-        rest="${BASH_REMATCH[2]}"
         if ! version_gte "$ver" "$floor"; then
             printf '%s\n' "${ref} is older than v${floor}, the oldest ${network} release these scripts support (v${floor} is the first release that has all of keytool set-rpc, proof-of-possession signing and state export together). Pick v${floor} or a newer release."
             return 1
         fi
-        if [[ -z "$rest" || "$rest" == "$suffix" ]]; then
+        if tn_release_tag_ok "$network" "$tag"; then
             return 0
         fi
-        printf '%s\n' "${ref} is not a release tag (release tags look like v${floor}${suffix}), so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is a release at v${floor} or newer."
+        printf '%s\n' "${ref} is not a release tag (release tags look like ${example}), so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is a release at v${floor} or newer."
         return 2
     fi
     printf '%s\n' "${ref} is not a release tag, so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is v${floor} or newer."
@@ -4790,7 +4787,11 @@ display_node_info() {
     # keytool asks for a passphrase source even though this export never reads the
     # key, and -q keeps its log line out of the output; both go before `keytool`.
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        export_cmd="docker run --rm -v ${data_dir}:/home/nonroot/data:ro ${DOCKER_IMAGE:-<IMAGE>} telcoin -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="/home/nonroot/data/node-info.yaml"
+        # As the node's container runs: the service account's uid:gid, never root.
+        local ids
+        ids="$(id -u "${SERVICE_USER:-telcoin}" 2>/dev/null):$(getent group "${SERVICE_GROUP:-telcoin}" 2>/dev/null | cut -d: -f3)"
+        [[ "$ids" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || ids="<UID>:<GID>"
+        export_cmd="docker run --rm --user ${ids} -v ${data_dir}:/home/nonroot/data:ro ${DOCKER_IMAGE:-<IMAGE>} telcoin -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="/home/nonroot/data/node-info.yaml"
     else
         export_cmd="${BINARY_PATH:-telcoin-network} -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="$node_info_file"
     fi
@@ -5737,199 +5738,69 @@ print_summary() {
 # Usage: pick_source_version <network>
 #   network = "testnet" | "mainnet" | "devnet" | ""  (empty -> show everything)
 # -----------------------------------------------------------------------------
+# pick_source_version NETWORK [DIR] -- ask which release tag to build (the menu
+# goes to stderr, the answer to stdout). Offers the newest release tag of NETWORK
+# (tn_release_tag_ok) in the checkout DIR (default TN_SOURCE_DIR), at or above the oldest
+# release these scripts support, or another release tag typed in. Never a
+# branch, main or a commit id: source builds take release tags only. rc 1 on
+# cancel, on a typed value that is not a release tag of NETWORK, and for a
+# network without release tags (devnet).
 pick_source_version() {
-    local network="$1"
-    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
-        print_error "Source directory not found at ${TN_SOURCE_DIR}" >&2
+    local network="${1:-}" dir="${2:-$TN_SOURCE_DIR}" min_ver="" latest="" exact current label choice custom
+    local i=1 tag_opt=0 custom_opt cancel_opt default_opt
+    case "$network" in
+        testnet) min_ver="$MIN_SOURCE_VERSION_TESTNET" ;;
+        mainnet) min_ver="$MIN_SOURCE_VERSION_MAINNET" ;;
+        *)
+            print_error "No release tags are built from source for network '${network}'." >&2
+            return 1
+            ;;
+    esac
+    if [[ ! -d "${dir}/.git" ]]; then
+        print_error "Source directory not found at ${dir}" >&2
         return 1
     fi
 
-    # Pick the suffix, minimum version, and label for the operator's network.
-    local suffix="" min_ver="" net_label=""
-    case "$network" in
-        testnet) suffix="$NETWORK_TAG_SUFFIX_TESTNET"; min_ver="$MIN_SOURCE_VERSION_TESTNET"; net_label="testnet (adiri)" ;;
-        mainnet) suffix="$NETWORK_TAG_SUFFIX_MAINNET"; min_ver="$MIN_SOURCE_VERSION_MAINNET"; net_label="mainnet" ;;
-        devnet)  suffix="";  min_ver=""; net_label="devnet (follows main)" ;;
-        *)       suffix="";  min_ver=""; net_label="unknown -- no tag filter" ;;
-    esac
-
-    print_step "Fetching latest refs from origin..." >&2
-    if ! git -C "$TN_SOURCE_DIR" fetch --tags --quiet 2>/dev/null; then
-        print_warn "git fetch failed -- showing cached refs only" >&2
+    print_step "Fetching release tags from origin..." >&2
+    if ! GIT_ALLOW_PROTOCOL=https git -C "$dir" fetch --tags --quiet 9>&- 2>/dev/null; then
+        print_warn "git fetch failed -- showing the tags this checkout already has" >&2
     fi
-
-    # Describe-style summary string (for display). Includes -N-gSHA suffix
-    # when HEAD is past a tag, so the operator sees how far past.
-    local current_describe
-    current_describe=$(git -C "$TN_SOURCE_DIR" describe --tags --always --dirty 2>/dev/null || echo "unknown")
-
-    # Accurate "where am I" detection. We compute three pieces of state and
-    # use them in the display + marker logic below.
-    #
-    #   exact_tag       non-empty only when HEAD is EXACTLY at an annotated tag
-    #   head_branch     name of the local branch HEAD is on (empty if detached)
-    #   on_main_state   "tip"     -- on main branch, HEAD == origin/main
-    #                   "behind"  -- on main branch, but origin/main has advanced
-    #                   "none"    -- not on main (could be feature branch or detached)
-    #   feature_branch  set to head_branch when on a NON-main local branch
-    #                   (e.g. log_db_name) so we can label that instead of
-    #                   misreporting the operator as "detached"
-    local exact_tag head_sha main_sha head_branch on_main_state="none"
-    local behind_count=0 main_tip_summary=""
-    local feature_branch="" feature_ahead_main=0 feature_summary=""
-
-    exact_tag=$(git -C "$TN_SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo "")
-    head_sha=$(git -C "$TN_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "")
-    main_sha=$(git -C "$TN_SOURCE_DIR" rev-parse origin/main 2>/dev/null || echo "")
-    head_branch=$(git -C "$TN_SOURCE_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "")
-
-    if [[ "$head_branch" == "main" ]] && [[ -n "$head_sha" ]] && [[ -n "$main_sha" ]]; then
-        if [[ "$head_sha" == "$main_sha" ]]; then
-            on_main_state="tip"
-        elif git -C "$TN_SOURCE_DIR" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
-            on_main_state="behind"
-            behind_count=$(git -C "$TN_SOURCE_DIR" rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
-            main_tip_summary=$(git -C "$TN_SOURCE_DIR" log --max-count=1 --format='%h %ar -- %s' origin/main 2>/dev/null || echo "")
-        fi
-    elif [[ -n "$head_branch" ]] && [[ "$head_branch" != "main" ]]; then
-        # Operator is on a named local branch other than main (e.g. log_db_name).
-        feature_branch="$head_branch"
-        feature_ahead_main=$(git -C "$TN_SOURCE_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo "0")
-        feature_summary=$(git -C "$TN_SOURCE_DIR" log -1 --format='%s' HEAD 2>/dev/null || echo "")
-    fi
-
-    # Collect tags, newest by creator date first.
-    local -a all_tags
-    while IFS= read -r t; do
-        [[ -z "$t" ]] && continue
-        all_tags+=("$t")
-    done < <(git -C "$TN_SOURCE_DIR" tag --sort=-creatordate 2>/dev/null | head -20)
-
-    # Filter by network suffix when applicable. testnet keeps only tags
-    # containing "-adiri", mainnet only "-telcoin". devnet/unknown keeps all.
-    local -a tags
-    if [[ -n "$suffix" ]]; then
-        local t
-        for t in "${all_tags[@]}"; do
-            [[ "$t" == *"$suffix"* ]] && tags+=("$t")
-        done
-        # If filtering left us with nothing, fall back to showing everything
-        # so the operator still has options.
-        if [[ ${#tags[@]} -eq 0 ]]; then
-            print_warn "No tags matched the ${network} pattern (${suffix}). Showing all tags." >&2
-            tags=("${all_tags[@]}")
-        fi
-    else
-        tags=("${all_tags[@]}")
-    fi
-
-    # Apply minimum-version filter: drop tags older than MIN_SOURCE_VERSION_*
-    # so operators are not shown obsolete releases. main and custom remain
-    # available below the list, so anyone who genuinely needs an older build
-    # can still type it. If the filter would leave the list empty, fall back
-    # to showing the unfiltered list rather than nothing.
-    if [[ -n "$min_ver" ]]; then
-        local -a recent_tags
-        local tag base_ver
-        for tag in "${tags[@]}"; do
-            # Strip leading "v" and trailing "-suffix" to get X.Y.Z
-            base_ver="${tag#v}"
-            base_ver="${base_ver%%-*}"
-            if [[ "$base_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-                && version_gte "$base_ver" "$min_ver"; then
-                recent_tags+=("$tag")
+    latest="$(git -C "$dir" tag --list 'v*' 2>/dev/null | while IFS= read -r t; do
+            tn_release_tag_ok "$network" "$t" || continue
+            v="${t#v}"
+            v="${v%%-*}"
+            if [[ -z "$min_ver" ]] || version_gte "$v" "$min_ver"; then
+                printf '%s\n' "$t"
             fi
-        done
-        if [[ ${#recent_tags[@]} -gt 0 ]]; then
-            tags=("${recent_tags[@]}")
-        else
-            print_warn "No tags >= v${min_ver} found. Showing unfiltered list." >&2
-        fi
-    fi
+        done | sort -V | tail -n 1)" || latest=""
+    exact="$(git -C "$dir" describe --tags --exact-match HEAD 2>/dev/null)" || exact=""
+    current="${exact:-$(git -C "$dir" describe --tags --always 2>/dev/null || echo unknown)}"
 
     echo "" >&2
-    print_info "Network:              ${net_label}" >&2
-    # Friendlier "current" description naming what the operator is actually
-    # on: exact tag, main (at-tip or behind), a non-main feature branch, or
-    # a truly detached commit.
-    if [[ -n "$exact_tag" ]]; then
-        print_info "Current source ref:   ${exact_tag} (exactly on this tag)" >&2
-    elif [[ "$on_main_state" == "tip" ]]; then
-        print_info "Current source ref:   main @ ${head_sha:0:8}  (${current_describe})" >&2
-        print_info "origin/main:          up to date" >&2
-    elif [[ "$on_main_state" == "behind" ]]; then
-        local commits_word="commits"
-        [[ "$behind_count" == "1" ]] && commits_word="commit"
-        print_info "Current source ref:   built from main @ ${head_sha:0:8}  (${current_describe})" >&2
-        print_warn "origin/main has moved: ${behind_count} ${commits_word} since your build" >&2
-        [[ -n "$main_tip_summary" ]] && print_info "Latest on main:       ${main_tip_summary}" >&2
-    elif [[ -n "$feature_branch" ]]; then
-        local ahead_word="commits"
-        [[ "$feature_ahead_main" == "1" ]] && ahead_word="commit"
-        print_info "Current source ref:   branch '${feature_branch}' @ ${head_sha:0:8}" >&2
-        if [[ "$feature_ahead_main" -gt 0 ]]; then
-            print_info "Relative to main:     ${feature_ahead_main} ${ahead_word} ahead of main" >&2
-        fi
-        [[ -n "$feature_summary" ]] && print_info "Latest commit:        \"${feature_summary}\"" >&2
+    print_info "Network:              ${network}" >&2
+    print_info "Current source ref:   ${current}" >&2
+    echo "" >&2
+    print_info "Release tags to build (branches, main and commit ids are not built):" >&2
+    if [[ -n "$latest" ]]; then
+        label="${latest}  (latest ${network} release)"
+        [[ "$exact" == "$latest" ]] && label="${latest}  <-- current"
+        tag_opt=$i
+        printf "  %2d) %s\n" "$tag_opt" "$label" >&2
+        i=$((i + 1))
     else
-        print_info "Current source ref:   ${current_describe}  (detached / not on any branch or tag)" >&2
+        print_warn "No ${network} release tag${min_ver:+ at or above v${min_ver}} in ${dir}." >&2
     fi
-    if [[ ${#tags[@]} -gt 0 ]]; then
-        local latest_tag="${tags[0]}"
-        if [[ "$exact_tag" == "$latest_tag" ]]; then
-            print_ok  "You are on the latest ${network:-applicable} tag (${latest_tag})." >&2
-        else
-            print_info "Latest matching tag:  ${latest_tag}  (recommended for ${network:-this network})" >&2
-        fi
-    fi
+    custom_opt=$i
+    printf "  %2d) Another %s release tag\n" "$custom_opt" "$network" >&2
+    i=$((i + 1))
+    cancel_opt=$i
+    printf "  %2d) Cancel\n" "$cancel_opt" >&2
     echo "" >&2
+    default_opt=$custom_opt
+    (( tag_opt > 0 )) && default_opt=$tag_opt
 
-    print_info "Available versions to build:" >&2
-    local i=1
-
-    # 1) main -- the latest current version (default). Marked per where HEAD sits
-    #    relative to origin/main.
-    local main_label="main (latest current version"
-    [[ "$network" == "devnet" ]] && main_label="main (recommended for devnet"
-    main_label="${main_label})"
-    case "$on_main_state" in
-        tip)
-            main_label="${main_label}  <-- current"
-            ;;
-        behind)
-            local commits_word="commits"
-            [[ "$behind_count" == "1" ]] && commits_word="commit"
-            main_label="${main_label}  <-- ${behind_count} ${commits_word} newer than your build"
-            ;;
-    esac
-    local main_opt=$i; printf "  %2d) %s\n" "$main_opt" "$main_label" >&2; (( ++i ))
-
-    # 2) latest tagged release (most recent detected tag), if any exist.
-    local tag_opt=0 latest_tag=""
-    if [[ ${#tags[@]} -gt 0 ]]; then
-        latest_tag="${tags[0]}"
-        local tag_label="${latest_tag}  (latest ${network:-tagged} release)"
-        [[ "$exact_tag" == "$latest_tag" ]] && tag_label="${latest_tag}  <-- current"
-        tag_opt=$i; printf "  %2d) %s\n" "$tag_opt" "$tag_label" >&2; (( ++i ))
-    fi
-
-    local custom_opt=$i; printf "  %2d) Custom branch / tag / commit hash\n"  "$custom_opt" >&2; (( ++i ))
-    local cancel_opt=$i; printf "  %2d) Cancel\n"                              "$cancel_opt" >&2
-    echo "" >&2
-
-    # Network-aware default: testnet/mainnet operators should get the latest
-    # tagged release (main is bleeding-edge and not network-compatible); devnet
-    # follows main. main stays listed first either way.
-    local default_opt=$main_opt
-    if [[ "$network" != "devnet" && $tag_opt -gt 0 ]]; then
-        default_opt=$tag_opt
-    fi
-
-    local choice
     read -r -p "  Select [1-${cancel_opt}] (default ${default_opt}): " choice >&2
-    # Empty input -> the network-aware default
     [[ -z "$choice" ]] && choice=$default_opt
-
     if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
         print_warn "Invalid selection." >&2
         return 1
@@ -5939,21 +5810,19 @@ pick_source_version() {
         return 1
     fi
     if (( choice == custom_opt )); then
-        local custom_ref
-        read -r -p "  Enter branch / tag / commit hash: " custom_ref >&2
-        [[ -z "$custom_ref" ]] && { print_info "Cancelled." >&2; return 1; }
-        echo "$custom_ref"
-        return 0
-    fi
-    if (( choice == main_opt )); then
-        echo "main"
+        read -r -p "  ${network} release tag: " custom >&2
+        [[ -z "$custom" ]] && { print_info "Cancelled." >&2; return 1; }
+        if ! tn_release_tag_ok "$network" "$custom"; then
+            print_warn "${custom} is not a ${network} release tag; branches, main and commit ids are not built." >&2
+            return 1
+        fi
+        printf '%s\n' "$custom"
         return 0
     fi
     if (( tag_opt > 0 && choice == tag_opt )); then
-        echo "$latest_tag"
+        printf '%s\n' "$latest"
         return 0
     fi
-
     print_warn "Invalid selection." >&2
     return 1
 }

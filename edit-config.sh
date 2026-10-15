@@ -52,7 +52,12 @@
 #   worker_listener=<multiaddr>
 #   metrics=<IPv4:PORT>|off           add, change or remove --metrics
 #   verbosity=-v|-vv|-vvv|-vvvv|-vvvvv
-#   docker_image=<registry/path:tag>  Docker installs only; pulled first
+#   docker_image=<release tag>|<repository>@sha256:<digest>
+#                                     Docker installs only: a release tag of the
+#                                     node's network (resolved to that release's
+#                                     image digest) or the image by digest; never
+#                                     a tag in the start script, never latest.
+#                                     Pulled and checked first
 #   bootstrap_peers=<path>|none       peers the node dials at start instead of
 #                                     the bootstrap servers in its genesis: an
 #                                     absolute path to a YAML or JSON map keyed
@@ -2745,7 +2750,7 @@ main_menu() {
         echo "  1) Listener addresses      (PRIMARY/WORKER_LISTENER_MULTIADDR)"
         echo "  2) Metrics address"
         echo "  3) Log verbosity"
-        echo "  4) RPC access              (private / public / disabled)"
+        echo "  4) RPC access              (private / public)"
         echo "  5) BLS passphrase"
         echo "  6) P2P ports               (49590/49594)"
         echo "  7) Docker image            (Docker installs only)"
