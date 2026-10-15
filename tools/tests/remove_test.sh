@@ -727,4 +727,27 @@ kept "json service: start script" "$LX/tn-start"
 kept "json service: backups" "$BK/bls-passphrase.Ef34Gh"
 check_lacks "json service: no groupdel" "groupdel" "$(calls)"
 
+# _rm_build_account: the build account's processes are stopped before userdel, and
+# OK is printed only when userdel succeeds.
+for urc in 1 0; do
+    : > "$T/order"
+    ( id() { case "$*" in "-u tn-build"|"-g tn-build") echo 990 ;; *) command id "$@" ;; esac; }
+      _tn_build_user_reap() { echo "REAP $*" >> "$T/order"; }
+      userdel() { echo "USERDEL $*" >> "$T/order"; return "$urc"; }
+      _rm_build_account ) > "$T/out" 2>&1
+    check "build account, userdel rc $urc: processes stopped, then userdel" "REAP 990 990|USERDEL tn-build" \
+        "$(tr '\n' '|' < "$T/order" | sed 's/|$//')"
+    if [[ $urc -ne 0 ]]; then
+        check_lacks "userdel failed: no OK" "Removed the tn-build account" "$(cat "$T/out")"
+        check "userdel failed: a warning with the manual step" yes "$(grep -q 'Could not remove the tn-build account.*sudo userdel tn-build' "$T/out" && echo yes || echo no)"
+    else
+        check "userdel succeeded: OK" yes "$(grep -q 'Removed the tn-build account' "$T/out" && echo yes || echo no)"
+    fi
+done
+( id() { case "$*" in *tn-build*) return 1 ;; *) command id "$@" ;; esac; }
+  userdel() { echo "USERDEL $*" >> "$T/order"; }
+  : > "$T/order"
+  _rm_build_account ) > "$T/out" 2>&1
+check "no build account: nothing done" "" "$(cat "$T/out" "$T/order")"
+
 finish

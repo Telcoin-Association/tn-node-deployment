@@ -637,6 +637,22 @@ remove_keys() {
     fi
 }
 
+# _rm_build_account -- remove the source-build account tn-build when it exists. Its
+# processes are stopped first (userdel refuses an account that runs one); OK is
+# printed only when userdel succeeds, a warning with the manual step otherwise.
+_rm_build_account() {
+    id -u tn-build >/dev/null 2>&1 || return 0
+    if declare -F _tn_build_user_reap >/dev/null 2>&1; then
+        _tn_build_user_reap "$(id -u tn-build)" "$(id -g tn-build)" || true
+    fi
+    if userdel tn-build >/dev/null 2>&1; then
+        print_ok "Removed the tn-build account"
+    else
+        print_warn "Could not remove the tn-build account (userdel failed; a process of it may still run). Remove it by hand: sudo userdel tn-build"
+    fi
+    return 0
+}
+
 # remove_node_host_files -- remove the host files every node install shares:
 # the start scripts in /usr/local/libexec/telcoin (and that directory when it is
 # empty; a symlink there is left alone with a warning, nothing is removed
@@ -645,8 +661,9 @@ remove_keys() {
 # launch-file and passphrase copies), the logrotate file (TN_LOGROTATE_FILE),
 # the journald drop-in 50-telcoin.conf, the needrestart rule 50-telcoin.conf,
 # the apt rule 52telcoin-no-reboot, the release staging directory
-# /var/lib/telcoin-staging, the source-build account tn-build with its home
-# /var/lib/tn-build, and the lock directory /run/telcoin. When the update lock
+# /var/lib/telcoin-staging, the source-build account tn-build (its processes
+# stopped first; a failed userdel is a warning) with its home /var/lib/tn-build,
+# and the lock directory /run/telcoin. When the update lock
 # this run holds lives in /run/telcoin, the directory is removed by rm_exit
 # after the lock is released. The caller runs it only when no other node
 # install remains. Every path is under TN_RM_ROOT (see the top of this file).
@@ -698,9 +715,8 @@ remove_node_host_files() {
         _rm_dir "${r}/var/lib/telcoin-staging"
         print_ok "Removed /var/lib/telcoin-staging"
     fi
-    if [[ -z "$r" ]] && id -u tn-build >/dev/null 2>&1; then
-        userdel tn-build >/dev/null 2>&1 || true
-        print_ok "Removed the tn-build account"
+    if [[ -z "$r" ]]; then
+        _rm_build_account
     fi
     if [[ -L "${r}/var/lib/tn-build" || -d "${r}/var/lib/tn-build" ]]; then
         _rm_dir "${r}/var/lib/tn-build"
