@@ -6,7 +6,7 @@ fix-*.sh
 __pycache__/
 *.pyc
 
-# Partner guide scratch output (tools/build-partner-pdf.sh)
-docs/partner/build/
+# Partner document scratch output (tools/build-partner-pdf.sh)
+docs/partner/*/build/
 
 **/.DS_Store

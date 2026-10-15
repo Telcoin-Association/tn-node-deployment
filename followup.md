@@ -366,7 +366,7 @@ package or verifier of that round that recorded it.
 - `tools/build-partner-pdf.sh` skips its check for forbidden text in the PDF when `pdftotext` is
   missing; `brew install poppler` on the maintainer's machine enables it. (DOC-3)
   Why: today the partner-guide rules are checked on the HTML only.
-- In `docs/partner/theme.css`, `td code { overflow-wrap: break-word }` lets inline code in a
+- In `docs/partner/mno-node-guide/theme.css`, `td code { overflow-wrap: break-word }` lets inline code in a
   table cell break after a leading `--`, as in `--network-rpc <URL>`. (DOC-3)
   Why: a cosmetic defect in the partner PDF.
 

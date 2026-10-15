@@ -1,4 +1,4 @@
-# Cover and PDF metadata for docs/partner/mno-node-guide.md.
+# Cover and PDF metadata for docs/partner/mno-node-guide/mno-node-guide.md.
 # The title is NOT set here: it comes from the guide's single "# " heading.
 # Bump `version` and `date` whenever the guide's content changes. `date` is printed
 # on the cover as written; pandoc also normalises it to YYYY-MM-DD for the PDF's
@@ -14,3 +14,5 @@ contact: support@telcoin.org
 repo-url: https://github.com/Telcoin-Association/tn-node-deployment
 lang: en-GB
 toc-title: Contents
+# Contents depth: headings shown in the table of contents (the spec uses 3).
+toc-depth: 2

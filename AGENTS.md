@@ -17,10 +17,10 @@ and is **never shipped to operators**. None of it exists on an operator box. Ass
 any path under `common/` or `devnet-genesis/` is absent at runtime for a real operator.
 
 `OPERATOR.md` at the repo root is the operator runbook; `README.md` is the reference.
-`docs/partner/mno-node-guide.md` is the partner guide for mobile network operators, the
-source of the branded PDF beside it. When a change alters operator-visible behaviour
-(flags, prompts, paths, ports), update `OPERATOR.md`, the README and the partner guide
-together, then rebuild the PDF (see "Partner guide (MNO PDF)" below).
+`docs/partner/mno-node-guide/mno-node-guide.md` is the partner guide for mobile network
+operators, the source of the branded PDF beside it. When a change alters operator-visible
+behaviour (flags, prompts, paths, ports), update `OPERATOR.md`, the README and the partner
+guide together, then rebuild the PDF (see "Partner guide (MNO PDF)" below).
 
 ## The boundary rule
 
@@ -108,13 +108,14 @@ signing step or a key prompt to it.
 
 ## Partner guide (MNO PDF)
 
-`docs/partner/mno-node-guide.pdf` is the guide the Association hands to prospective mobile
-network operators. It is generated, never edited by hand. The source is
-`docs/partner/mno-node-guide.md`; the look comes from `docs/partner/template.html`,
-`docs/partner/theme.css` and the vendored logos and fonts under `docs/partner/assets/`;
-the version, date and subtitle live in `docs/partner/metadata.yaml`.
+`docs/partner/mno-node-guide/mno-node-guide.pdf` is the guide the Association hands to
+prospective mobile network operators. It is generated, never edited by hand. The source is
+`docs/partner/mno-node-guide/mno-node-guide.md`; the look comes from
+`docs/partner/mno-node-guide/template.html`, `docs/partner/mno-node-guide/theme.css` and the
+vendored logos and fonts under `docs/partner/assets/`; the version, date and subtitle live in
+`docs/partner/mno-node-guide/metadata.yaml`.
 
-- Rebuild with `bash tools/build-partner-pdf.sh` after changing the Markdown,
+- Rebuild with `bash tools/build-partner-pdf.sh mno-node-guide` after changing the Markdown,
   `metadata.yaml`, `template.html`, `theme.css` or anything under `assets/`. Preview the
   HTML without WeasyPrint using `--html-only --open`.
 - Bump `version` and `date` in `metadata.yaml` with every content change. The build warns
