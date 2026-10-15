@@ -158,7 +158,7 @@ tn_root_dir_ok() { return 0; }
 printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 out="$(obs_prepare_node_log_dir 2>/dev/null)"; check_rc "node log dir created" 0 $?
 check "node log dir printed" "/var/log/telcoin/node" "$out"
-check "install -d as the service user, group telcoin-log, 0750" "-d -o telcoin -g telcoin-log -m 0750 -- /var/log/telcoin/node" "$(cat "$INSTALL_LOG")"
+check "install -d as the service user, group telcoin-log, 2750" "-d -o telcoin -g telcoin-log -m 2750 -- /var/log/telcoin/node" "$(cat "$INSTALL_LOG")"
 ( export HAS_LOG_GROUP=0; obs_prepare_node_log_dir ) >/dev/null 2>&1; check_rc "no telcoin-log group: refused" 1 $?
 printf 'NETWORK=testnet\nNODE_LOG_DIR=/a\nNODE_LOG_DIR=/b\n' > "$RP/etc/telcoin/.node-meta"
 ( obs_prepare_node_log_dir ) >/dev/null 2>&1; check_rc "duplicated NODE_LOG_DIR: refused" 1 $?
@@ -296,6 +296,37 @@ check_rc "--token-stdin with nothing on stdin refused" 1 "$RC"
 ( run_json_mode() { :; }; main_menu() { :; }; main --token-stdin <<< "tok" ) >"$T/out" 2>&1
 check_rc "--token-stdin without --json refused" 1 $?
 check "--token-stdin without --json: said" "yes" "$(grep -q 'goes with --json' "$T/out" && echo yes)"
+
+
+# --- obs_ensure_reth_flags: the unit is re-rendered for NODE_LOG_DIR before the restart ----------------
+mkdir -p "$RP/etc/systemd/system"
+U="$RP/etc/systemd/system/telcoin.service"
+(
+    tn_node_launch_target() { printf 'telcoin source %s\n' "$T/tn-start"; }
+    tn_rerender_node_launch() { echo rerender >> "$T/ensure.log"; printf 'SupplementaryGroups=telcoin-log\nReadWritePaths=/var/lib/telcoin /var/log/telcoin/node\n' > "$U"; }
+    _obs_flags_apply() { _OBS_FLAGS_CHANGED=0; return 0; }
+    systemctl() { echo "systemctl $*" >> "$T/ensure.log"; return 0; }
+    confirm() { return 0; }
+    obs_restart_window() { return 0; }
+    ENABLE_OBSERVABILITY=true NODE_LOG_DIR=/var/log/telcoin/node
+    printf 'ReadWritePaths=/var/lib/telcoin\n' > "$U"; : > "$T/ensure.log"
+    obs_ensure_reth_flags >/dev/null 2>&1; echo "rc=$?" >> "$T/ensure.log"
+    cp "$T/ensure.log" "$T/ensure1.log"
+    : > "$T/ensure.log"
+    obs_ensure_reth_flags >/dev/null 2>&1; echo "rc=$?" >> "$T/ensure.log"
+    cp "$T/ensure.log" "$T/ensure2.log"
+    tn_rerender_node_launch() { echo refused >> "$T/ensure.log"; return 1; }
+    printf 'ReadWritePaths=/var/lib/telcoin\n' > "$U"; : > "$T/ensure.log"
+    obs_ensure_reth_flags >/dev/null 2>&1; echo "rc=$?" >> "$T/ensure.log"
+    cp "$T/ensure.log" "$T/ensure3.log"
+)
+check "unit without the log dir: re-rendered, reloaded, restarted" \
+    "$(printf 'rerender\nsystemctl daemon-reload\nsystemctl restart telcoin\nrc=0')" "$(cat "$T/ensure1.log")"
+check "unit already carries the log dir: nothing to do" "rc=0" "$(cat "$T/ensure2.log")"
+check "re-render refused: no restart, rc 1" "$(printf 'refused\nrc=1')" "$(cat "$T/ensure3.log")"
+_obs_unit_has_log_dir telcoin /var/log/telcoin/node; check_rc "a unit without the group: not ready" 1 $?
+printf 'SupplementaryGroups=telcoin-log\nReadWritePaths=/var/lib/telcoin /var/log/telcoin/node2\n' > "$U"
+_obs_unit_has_log_dir telcoin /var/log/telcoin/node; check_rc "a different dir does not count" 1 $?
 
 
 finish

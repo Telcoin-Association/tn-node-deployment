@@ -49,7 +49,7 @@ for line in "User=telcoin" "Group=telcoin" "ExecStart=/usr/local/libexec/telcoin
     "ProtectKernelModules=yes" "ProtectKernelLogs=yes" "ProtectControlGroups=yes" "ProtectClock=yes" \
     "ProtectHostname=yes" "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK" "RestrictNamespaces=yes" \
     "LockPersonality=yes" "RestrictRealtime=yes" "RestrictSUIDSGID=yes" "ProtectProc=invisible" "LimitCORE=0" \
-    "UMask=0077" "CapabilityBoundingSet=" "AmbientCapabilities=" "SystemCallArchitectures=native" \
+    "UMask=0027" "CapabilityBoundingSet=" "AmbientCapabilities=" "SystemCallArchitectures=native" \
     "RemoveIPC=yes" "KeyringMode=private" "ReadWritePaths=/var/lib/telcoin" "SyslogIdentifier=telcoin" \
     "StandardOutput=append:/var/log/telcoin/telcoin.log" "StandardError=append:/var/log/telcoin/telcoin-error.log" \
     "MemoryDenyWriteExecute=yes" "SystemCallFilter=@system-service" "SystemCallFilter=~@privileged" \
@@ -88,6 +88,8 @@ check_has "testnet defaults to the files" "StandardOutput=append:/var/log/telcoi
 
 NODE_LOG_DIR=/var/log/telcoin/node render unit source
 check_has "NODE_LOG_DIR joins ReadWritePaths" "ReadWritePaths=/var/lib/telcoin /var/log/telcoin/node" "$OUT"
+check_has "NODE_LOG_DIR: the node joins the log group" "SupplementaryGroups=telcoin-log" "$OUT"
+check_lacks "no NODE_LOG_DIR: no log group" "SupplementaryGroups" "$UB"
 NODE_LOG_DIR="/var/log/x y" render unit source
 check_rc "NODE_LOG_DIR with a space refused" 1 "$RC"
 DATA_DIR=/home/telcoin/data render unit source

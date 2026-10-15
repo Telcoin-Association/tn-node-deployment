@@ -1783,7 +1783,8 @@ _cn_own() {
 # to), then the owners and modes of that layout: install, config and start
 # script paths root's, .node-meta and the passphrase file root 0600, backups
 # root 0700, the data dir the service account's 0700, the log dir
-# root:telcoin-log 0750, nothing under the install, config and start-script
+# root:telcoin-log 0750, the node log dir (NODE_LOG_DIR, when it exists) the
+# service account's with group telcoin-log 2750 (setgid), nothing under the install, config and start-script
 # trees owned by another account. The old layout warns (on mainnet it fails: a
 # mainnet host is installed fresh); a drifted layout 2 fails.
 check_ownership_layout() {
@@ -1867,6 +1868,10 @@ check_ownership_layout() {
         _cn_own "$dd" "$suser" "$sgroup" 0700
     fi
     [[ ! -e "$logd" && ! -L "$logd" ]] || _cn_own "$logd" root "${TN_LOG_GROUP:-telcoin-log}" 0750
+    v="$(meta_get NODE_LOG_DIR "$meta" 2>/dev/null || true)"
+    if [[ -n "$v" ]] && [[ -e "${pre}${v}" || -L "${pre}${v}" ]]; then
+        _cn_own "${pre}${v}" "$suser" "${TN_LOG_GROUP:-telcoin-log}" 2750
+    fi
     while IFS= read -r extra; do
         [[ -z "$extra" ]] || CN_OWN_BAD="${CN_OWN_BAD}  ${extra}: not owned by root"$'\n'
     done < <(find -P "$inst" "$etc" "$libexec" -xdev ! -user 0 -print 2>/dev/null | head -n 10)
@@ -1969,9 +1974,11 @@ check_unit_sandbox() {
     text="$(cat "$unit")"
     for d in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=yes \
         ProtectKernelTunables=yes ProtectKernelModules=yes ProtectControlGroups=yes RestrictSUIDSGID=yes \
-        LockPersonality=yes RestrictNamespaces=yes LimitCORE=0 UMask=0077 CapabilityBoundingSet=; do
+        LockPersonality=yes RestrictNamespaces=yes LimitCORE=0 CapabilityBoundingSet=; do
         printf '%s\n' "$text" | grep -qxF -- "$d" || missing="${missing} ${d}"
     done
+    # 0027 since the node's JSON logs are group-readable; an older render has 0077.
+    printf '%s\n' "$text" | grep -qxE -- 'UMask=00[27]7' || missing="${missing} UMask=0027"
     if [[ -n "$missing" ]]; then
         print_warn "The unit ${SERVICE_NAME}.service lacks sandbox settings:${missing} (update-node.sh rewrites it)."
     else

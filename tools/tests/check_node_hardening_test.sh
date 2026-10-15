@@ -245,6 +245,23 @@ if [[ -n "$RB" && -n "$SVC_GROUP" ]] && chmod 0700 "$RB" && tn_root_dir_ok "$RB"
     rm -f "$F/usr/local/libexec/telcoin/tn-start"
     run check_ownership_layout
     check "layout 2: a missing start script fails" "yes 1" "$(has "$OUT" "tn-start: missing") $ADDED"
+    install -o root -g root -m 0755 /dev/null "$F/usr/local/libexec/telcoin/tn-start"
+    if _tn_log_group_ensure 2>/dev/null; then
+        install -d -o root -g root -m 0755 "$F/var/log"
+        install -d -o root -g telcoin-log -m 0750 "$F/var/log/telcoin"
+        install -d -o nobody -g telcoin-log -m 2750 "$F/var/log/telcoin/node"
+        meta "NETWORK=testnet" "OWNERSHIP_LAYOUT=2" "INSTALL_METHOD=binary" "HOST_SERVICE_USER=nobody" \
+            "HOST_SERVICE_GROUP=${SVC_GROUP}" "DATA_DIR=${F}/var/lib/telcoin" "NODE_LOG_DIR=/var/log/telcoin/node"
+        chmod 0600 "$F/etc/telcoin/.node-meta"
+        run check_ownership_layout
+        check "layout 2: setgid node log dir holds" "yes 0" "$(has "$OUT" "Ownership layout 2: install") $ADDED"
+        chmod g-s "$F/var/log/telcoin/node"
+        run check_ownership_layout
+        check "layout 2: node log dir without setgid listed" yes \
+            "$(has "$OUT" "${F}/var/log/telcoin/node: nobody:telcoin-log 750, expected nobody:telcoin-log 2750")"
+    else
+        skip "layout 2: node log dir" "telcoin-log group cannot be created"
+    fi
 else
     skip "layout 2: path by path" "needs root and a root-only directory under /root"
 fi

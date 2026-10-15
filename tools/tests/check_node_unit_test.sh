@@ -45,6 +45,13 @@ check_has "current form: no issue" "issues=0" "$OUT"
 check_has "current form: stdin reported" "yes" "$(printf '%s' "$OUT" | grep -q 'on stdin' && echo yes)"
 runc check_unit_sandbox
 check_has "current unit: sandbox in place" "yes" "$(printf '%s' "$OUT" | grep -q 'sandbox in place' && echo yes)"
+sed 's/^UMask=0027$/UMask=0077/' "$UNIT" > "$T/u77" && cp "$T/u77" "$UNIT"
+runc check_unit_sandbox
+check_has "older UMask=0077 unit: sandbox in place" "yes" "$(printf '%s' "$OUT" | grep -q 'sandbox in place' && echo yes)"
+sed 's/^UMask=0077$/UMask=0022/' "$UNIT" > "$T/u77" && cp "$T/u77" "$UNIT"
+runc check_unit_sandbox
+check_has "UMask=0022: sandbox warning" "yes" "$(printf '%s' "$OUT" | grep -q 'lacks sandbox settings: UMask=0027' && echo yes)"
+current
 
 printf '#!/bin/bash\nexport TN_BLS_PASSPHRASE=$(cat "$CREDENTIALS_DIRECTORY/bls-passphrase")\nexec /opt/telcoin/telcoin-network node %s\n' "$ARGS" > "$SCRIPT"
 runc check_unit_environ

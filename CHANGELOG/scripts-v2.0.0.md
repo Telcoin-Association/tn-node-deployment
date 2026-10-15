@@ -43,7 +43,7 @@ has this layout:
 | node binary | root-owned, in root-owned directories |
 | `/var/lib/telcoin` (data dir) | service account, 0700 |
 | `/var/log/telcoin` | root:telcoin-log, 0750; log files 0640 |
-| `/var/log/telcoin/node` (`NODE_LOG_DIR`, logs the node writes itself) | service account:telcoin-log, 0750 |
+| `/var/log/telcoin/node` (`NODE_LOG_DIR`, logs the node writes itself) | service account:telcoin-log, 2750 (setgid) |
 | `/var/backups/telcoin` | root, 0700 |
 | `/var/lib/telcoin-staging` | root, 0700 |
 | `/run/telcoin/update.lock` | directory root 0755, file root 0600 |
@@ -370,8 +370,9 @@ skipped.
   files. `config.alloy` is root:telcoin-alloy 0640.
 - An Alloy tarball install needs a matching `SHA256SUMS` line. The Grafana apt key is pinned
   by fingerprint.
-- The node's JSON logs go to `/var/log/telcoin/node/telcoin-network-logs/` (`NODE_LOG_DIR`),
-  and enabling moves an older `--log.file.directory` there.
+- The node's JSON logs go to `/var/log/telcoin/node/telcoin-network-logs/` (`NODE_LOG_DIR`,
+  setgid group `telcoin-log`; the unit joins that group with `UMask=0027`), and enabling, the
+  ownership move and update-node move an older `--log.file.directory` there.
 - The health check is refused while ufw is missing or inactive.
 - New `--token-stdin` reads the ingest token from one line of stdin; `--token` still works
   and warns that the token shows on the command line.

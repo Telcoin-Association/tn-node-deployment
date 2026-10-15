@@ -177,7 +177,9 @@ only**, or **both**.
   under the node log directory, `/var/log/telcoin/node/telcoin-network-logs/`. That
   directory is recorded in `.node-meta` as `NODE_LOG_DIR` and created inside the
   root-owned `/var/log/telcoin`, owned by the node's service account with group
-  `telcoin-log`, mode 0750. Docker installs write to `<data dir>/logs/telcoin-network-logs/`
+  `telcoin-log`, mode 2750 (setgid: the files the node writes take the group, and its
+  unit's `UMask=0027` keeps them group-readable). The node's unit joins `telcoin-log` to
+  reach it and lists it in `ReadWritePaths=`; enabling rewrites the unit. Docker installs write to `<data dir>/logs/telcoin-network-logs/`
   from inside the container.
 - **Metrics**: reth serves a Prometheus registry on loopback `127.0.0.1:9101` (the
   `--metrics` flag); Alloy scrapes it and remote-writes to Prometheus (`/api/v1/write`).

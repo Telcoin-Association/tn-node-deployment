@@ -229,7 +229,7 @@ Each script walks through numbered steps:
 
 **Step 7/8: Systemd Service**
 - Writes the start script `/usr/local/libexec/telcoin/tn-start` (Docker installs: `tn-start-docker`), root-owned, mode 0755. It holds no secret: it reads the listener addresses from `/etc/telcoin/node.env` and hands the node the passphrase on its standard input (`--bls-passphrase-source stdin`) from the credential systemd provides
-- Writes the unit `/etc/systemd/system/telcoin.service` (root, mode 0644) with `LoadCredentialEncrypted=` for the credential (or `LoadCredential=` for the root-only file). A source, release or existing-binary install runs as the service user in a systemd sandbox (`ProtectSystem=strict`, `ProtectHome`, `PrivateDevices`, no capabilities, a system-call filter) that can write only the data directory, plus the node log directory when observability is on. A Docker install's container runs as the service user's uid:gid with every capability dropped, `no-new-privileges`, a read-only root filesystem and a memory cap
+- Writes the unit `/etc/systemd/system/telcoin.service` (root, mode 0644) with `LoadCredentialEncrypted=` for the credential (or `LoadCredential=` for the root-only file). A source, release or existing-binary install runs as the service user in a systemd sandbox (`ProtectSystem=strict`, `ProtectHome`, `PrivateDevices`, no capabilities, a system-call filter) that can write only the data directory, plus the node log directory when observability is on (the unit then adds the service user to `telcoin-log` so the node can reach it, and its `UMask=0027` leaves the JSON logs readable by that group). A Docker install's container runs as the service user's uid:gid with every capability dropped, `no-new-privileges`, a read-only root filesystem and a memory cap
 - Writes the P2P listener addresses to `/etc/telcoin/node.env` (root, mode 0644)
 - Sends the node's output to the journal (`--log-target journal`, the mainnet default, with a 4G journald cap) or to `/var/log/telcoin/telcoin.log` and `telcoin-error.log` (`--log-target file`, the default elsewhere, rotated by logrotate)
 - With a bootstrap peers map, the start script passes `--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"`, so the file is read at every start
@@ -271,7 +271,7 @@ table below and reports any path that differs.
 | `/etc/systemd/system/telcoin.service` | root | 0644 | The unit |
 | `/var/lib/telcoin/` | service user | 0700 | The data directory: `node-keys/` (P2P and BLS keys; keep them backed up), `node-info.yaml`, `genesis/`, `parameters.yaml`, `db/`, `consensus-db/` (with `state_exports/epoch-N/` when state export is on) |
 | `/var/log/telcoin/` | root:telcoin-log | 0750 | `telcoin.log` and `telcoin-error.log` (root:telcoin-log, 0640), which systemd writes for the node with `--log-target file` |
-| `/var/log/telcoin/node/` | service user:telcoin-log | 0750 | Logs the node writes itself, only with observability on (`NODE_LOG_DIR`) |
+| `/var/log/telcoin/node/` | service user:telcoin-log | 2750 (setgid) | Logs the node writes itself, only with observability on (`NODE_LOG_DIR`); new files take group `telcoin-log` |
 | `/var/backups/telcoin/` | root | 0700 | Copies of files the scripts are about to change (see [Backups and the update lock](#backups-and-the-update-lock)) |
 | `/var/lib/telcoin-staging/` | root | 0700 | Release downloads and build logs while they are checked |
 | `/run/telcoin/update.lock` | root | 0600 (directory 0755) | The update lock |
@@ -325,7 +325,7 @@ The scripts follow Linux security best practices:
 - **Root-owned install**: the binary, the start script, the unit and everything under `/etc/telcoin` belong to root, and the scripts write them only through a temporary file and a rename after checking that no directory on the way is a symlink or writable by another account. See [System Layout](#system-layout).
 - **Strict file permissions**: key files are mode 600 (readable only by the service user). The node-keys directory and the data directory are mode 700.
 - **Passphrase never on a command line, in the unit or in the start script**: systemd hands the node its BLS passphrase from an encrypted credential, and the node reads it from its standard input. See [Passphrase delivery](#passphrase-delivery).
-- **Systemd hardening**: a source, release or existing-binary install runs in a systemd sandbox: `NoNewPrivileges`, `ProtectSystem=strict` with the data directory the only writable path, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, an empty capability set, `RestrictAddressFamilies`, `MemoryDenyWriteExecute` and a system-call filter, among others. A Docker install's container drops every capability, runs with `no-new-privileges`, a read-only root filesystem, a process limit and a memory cap. `check-node.sh` reports the unit's `systemd-analyze security` score.
+- **Systemd hardening**: a source, release or existing-binary install runs in a systemd sandbox: `NoNewPrivileges`, `ProtectSystem=strict` with the data directory the only writable path (plus the node log directory with observability on), `ProtectHome`, `PrivateTmp`, `PrivateDevices`, an empty capability set, `RestrictAddressFamilies`, `MemoryDenyWriteExecute` and a system-call filter, among others. A Docker install's container drops every capability, runs with `no-new-privileges`, a read-only root filesystem, a process limit and a memory cap. `check-node.sh` reports the unit's `systemd-analyze security` score.
 - **Verified releases**: a script update installs only a release signed by a key in `lib/allowed_signers`, and a node release is installed or run only after its GPG signature and hashes check out. See [How updates are verified](#how-updates-are-verified).
 - **RPC localhost only**: the RPC port defaults to 127.0.0.1 (localhost only). It is never exposed to the internet by default, and on mainnet `edit-config.sh` refuses to bind it to `0.0.0.0`; serve a public endpoint through Caddy instead.
 - **CVE-2026-31431 check**: the setup scripts check for the Copy Fail mitigation during preflight and will not proceed until it is applied.
@@ -1688,8 +1688,9 @@ Run `sudo bash ui/install-ui.sh --update` after update-scripts prints it. Full r
 - An Alloy tarball install needs a matching `SHA256SUMS` line, and the Grafana apt key is
   pinned by fingerprint.
 - The node's JSON logs go to `/var/log/telcoin/node/telcoin-network-logs/` (`NODE_LOG_DIR`,
-  service account:telcoin-log 0750), because `/var/log/telcoin` is now root's. Enabling moves
-  an older `--log.file.directory`, and update-node 2.0.0 moves it at its next apply.
+  service account:telcoin-log 2750, setgid), because `/var/log/telcoin` is now root's. Enabling
+  moves an older `--log.file.directory` and rewrites the unit, and the ownership move (any 2.0.0
+  script's first run) and update-node 2.0.0 move it too.
 - The health check is refused while ufw is missing or inactive.
 - Each node restart runs the committee check, then the epoch wait; `TN_ALLOW_QUORUM_RISK=1`
   overrides the check.

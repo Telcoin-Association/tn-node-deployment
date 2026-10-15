@@ -1196,6 +1196,10 @@ _tn_own_move_start() {
 #   4. The log dir becomes root:telcoin-log 0750, its two log files are made
 #      root:telcoin-log 0640, a symlink there replaced (tn_precreate_log_files).
 #   5. The start script moves to /usr/local/libexec/telcoin (_tn_own_move_start).
+#      A binary node whose JSON logs (--log.file.directory) went into the log dir
+#      gets them moved to NODE_LOG_DIR (tn_move_node_log_dir), and its start script
+#      and unit are re-rendered (tn_rerender_node_launch) and systemd reloaded, so
+#      the next start can reach that directory.
 #   6. OWNERSHIP_LAYOUT=2 is recorded, and a warning says the node binary was
 #      writable by the service user and should be reinstalled from a release.
 # progress-fn is called as `fn step|log|warn MESSAGE` (default: stderr). Paths
@@ -1304,6 +1308,18 @@ tn_migrate_ownership() {
     rc=0
     _tn_own_move_start "$pre" "$svc" "${method:-binary}" "$fn" || rc=$?
     [[ $rc -eq 0 ]] || return "$rc"
+    rc=0
+    tn_move_node_log_dir "$fn" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        rc=0
+        tn_rerender_node_launch "" "$fn" || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            "$fn" warn "The unit was not rewritten for the node log dir ${NODE_LOG_DIR:-}; the node cannot write its JSON logs after its next restart until it is (run sudo ./update-node.sh or sudo ./edit-config.sh --migrate-credential)." || true
+        elif [[ -z "$pre" ]]; then
+            systemctl daemon-reload 9>&- || "$fn" warn "systemctl daemon-reload failed; run it before the next node restart." || true
+        fi
+    fi
+    rc=0
     # Re-check: nothing under the trees may be left service-user-owned or linked.
     list="$(_tn_own_scan "$inst" 0; _tn_own_scan "$etc" 0; _tn_own_scan "$libexec" 0)"
     if [[ -n "$list" ]]; then
@@ -1319,6 +1335,65 @@ tn_migrate_ownership() {
     if [[ "${method:-binary}" != "docker" ]]; then
         "$fn" warn "The node binary was writable by the service user before this migration. Reinstall it from a verified release to be sure it was not replaced." || true
     fi
+    return 0
+}
+
+# tn_node_log_dir_prepare DIR [USER] -- create the node's JSON log dir DIR (an
+# existing one gets the same owner and mode) USER:telcoin-log 2750 with install
+# -d, never recursively. The setgid bit gives what the node writes there the
+# group telcoin-log; with the unit's UMask=0027 the log shipper (a telcoin-log
+# member) can read it. USER defaults to SERVICE_USER. rc 0 done; 1 refused (a
+# path that is not absolute, holds .., or is a symlink, a parent that fails
+# tn_root_dir_ok, no telcoin-log group); 2 install failed.
+tn_node_log_dir_prepare() {
+    local d="${1:-}" user="${2:-${SERVICE_USER:-}}"
+    [[ "$d" == /?* && "$d" != *..* && ! -L "$d" && -n "$user" ]] || return 1
+    tn_root_dir_ok "${d%/*}" || return 1
+    getent group "$TN_LOG_GROUP" >/dev/null 2>&1 || return 1
+    install -d -o "$user" -g "$TN_LOG_GROUP" -m 2750 -- "$d" || return 2
+}
+
+# tn_move_node_log_dir [progress-fn] -- a binary node whose launch line writes
+# its JSON logs (--log.file.directory) into the log dir or below it, other than
+# into NODE_LOG_DIR, cannot reach that path in the root-owned layout (the log dir
+# is root:telcoin-log 0750). Prepare NODE_LOG_DIR (.node-meta, default <log
+# dir>/node; tn_node_log_dir_prepare as HOST_SERVICE_USER or SERVICE_USER), point
+# the flag there, record the key and set the global NODE_LOG_DIR. Never restarts:
+# the caller re-renders the unit (its ReadWritePaths= and log group follow
+# NODE_LOG_DIR) and reloads systemd. rc 0 moved; 1 nothing to move (no binary
+# launch line, no such flag, already in place); 2 failed (said; the flag is
+# unchanged).
+tn_move_node_log_dir() {
+    local fn="${1:-}" line file cur want user logd rc=0
+    if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
+        fn="_tn_wait_say"
+    fi
+    line="$(tn_node_launch_target 2>/dev/null)" || return 1
+    file="${line##* }"
+    [[ "$(_tn_launch_awk runner "$file" 2>/dev/null)" == binary\ * ]] || return 1
+    cur="$(tn_launch_flag_get "$file" --log.file.directory 2>/dev/null)" || return 1
+    cur="${cur%/}"
+    logd="${DEFAULT_LOG_DIR%/}"
+    [[ "$cur" == "$logd" || "$cur" == "$logd"/* ]] || return 1
+    want="$(meta_get NODE_LOG_DIR 2>/dev/null || true)"
+    [[ -n "$want" ]] || want="${logd}/node"
+    want="${want%/}"
+    [[ "$cur" != "$want" ]] || return 1
+    user="$(meta_get HOST_SERVICE_USER 2>/dev/null || true)"
+    user="${user:-$SERVICE_USER}"
+    if ! tn_node_log_dir_prepare "${TN_ROOT_PREFIX:-}${want}" "$user"; then
+        "$fn" warn "Could not prepare the node log dir ${want}; the node's JSON logs stay pointed at ${cur}, which it cannot reach in the root-owned layout. Turn log shipping off and on again (setup-observability.sh) to fix it." || true
+        return 2
+    fi
+    tn_launch_flag_set "$file" --log.file.directory "$want" >/dev/null 2>&1 || rc=$?
+    if [[ $rc -gt 1 ]]; then
+        "$fn" warn "Could not point --log.file.directory at ${want} in ${file}; set it by hand." || true
+        return 2
+    fi
+    NODE_LOG_DIR="$want"
+    meta_set NODE_LOG_DIR "$want" >/dev/null 2>&1 \
+        || "$fn" warn "Could not record NODE_LOG_DIR=${want} in .node-meta." || true
+    "$fn" log "The node's JSON logs now go to ${want}." || true
     return 0
 }
 
@@ -3067,6 +3142,10 @@ _tn_start_script_checked() {
 # (stdin), LoadCredentialEncrypted= of bls-passphrase.cred (credential). The log
 # target picks journal or append: to the two
 # pre-created files in the log dir (which the node never needs to write).
+# With NODE_LOG_DIR set (observability's JSON logs) the binary form joins the
+# log-reader group, which lets the node through the root:telcoin-log log dir
+# into its setgid node log dir; UMask=0027 then leaves the files it writes
+# there group-readable for the log shipper.
 _tn_node_unit_text() {
     local method="${1:-}" cred="" out err rw dbin
     _tn_gen_settings "$method" || return 1
@@ -3130,7 +3209,8 @@ StartLimitBurst=5
 Type=simple
 User=${TN_G_USER}
 Group=${TN_G_GROUP}
-${cred:+${cred}
+${TN_G_NODELOG:+SupplementaryGroups=${TN_LOG_GROUP}
+}${cred:+${cred}
 }EnvironmentFile=-${TN_G_CONF}/node.env
 UnsetEnvironment=TN_BLS_PASSPHRASE
 Environment=HOME=${TN_G_DATA}
@@ -3148,7 +3228,7 @@ ReadWritePaths=${rw}
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-UMask=0077
+UMask=0027
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

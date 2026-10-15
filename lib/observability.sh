@@ -1015,6 +1015,18 @@ obs_check_reth_flags() {
     return 0
 }
 
+# _obs_unit_has_log_dir SVC DIR -- rc 0 when the unit of SVC joins the telcoin-log
+# group and lists DIR in ReadWritePaths=.
+_obs_unit_has_log_dir() {
+    local unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${1}.service"
+    [[ -r "$unit" ]] || return 1
+    grep -qxF "SupplementaryGroups=telcoin-log" "$unit" || return 1
+    TN_OBS_D="${2%/}" awk 'index($0, "ReadWritePaths=") == 1 {
+        n = split(substr($0, 16), w, " ")
+        for (i = 1; i <= n; i++) if (w[i] == ENVIRON["TN_OBS_D"]) f = 1
+    } END { exit f ? 0 : 1 }' "$unit"
+}
+
 # obs_ensure_reth_flags [progress-fn] — when obs is enabled AFTER setup
 # (setup-observability.sh) the node may already be running WITHOUT the reth flags the
 # enabled pipelines need: the JSON-log flags (logs → Alloy has something to tail) and/or
@@ -1030,26 +1042,40 @@ obs_check_reth_flags() {
 # reason is in OBS_FLAG_ERROR, and the node is not restarted, since the operator has to
 # edit the launch file and restart it anyway.
 obs_ensure_reth_flags() {
-    local fn="${1:-}" target svc method file have_get=false failed=0
+    local fn="${1:-}" target svc method file have_get=false failed=0 unit_changed=0
     OBS_FLAG_ERROR=""
     _OBS_FLAGS_CHANGED=0
     target="$(tn_node_launch_target)" || { print_warn "No telcoin node service detected; skipping reth flag check."; return 0; }
     read -r svc method file <<< "$target"
+    # A binary node that writes JSON logs runs from a unit that lets it reach
+    # NODE_LOG_DIR (ReadWritePaths= and the telcoin-log group): re-render the
+    # start script and unit first (the node arguments are kept), or refuse with
+    # nothing changed.
+    if [[ "$method" != "docker" && "${ENABLE_OBSERVABILITY:-false}" == "true" && -n "${NODE_LOG_DIR:-}" ]] \
+        && ! _obs_unit_has_log_dir "$svc" "$NODE_LOG_DIR"; then
+        if ! declare -F tn_rerender_node_launch >/dev/null 2>&1 || ! tn_rerender_node_launch "" "$fn"; then
+            _obs_flag_error "Could not rewrite the ${svc} unit so the node can write its JSON logs to ${NODE_LOG_DIR} (see above; run update-scripts.sh, then update-node.sh or edit-config.sh --migrate-credential to move the unit to the current form), then run this enable again."
+            return 1
+        fi
+        unit_changed=1
+        target="$(tn_node_launch_target)" || { print_warn "No telcoin node service detected after the rewrite."; return 1; }
+        read -r svc method file <<< "$target"
+    fi
     if _obs_lib_has tn_launch_flag_get "$_OBS_NO_FLAG_GET" "$fn"; then
         have_get=true
     fi
     _obs_flags_apply "$file" "$file" "$svc" "$method" "$have_get" || failed=1
 
-    if [[ "$_OBS_FLAGS_CHANGED" -eq 1 && "$method" == "docker" ]]; then
+    if [[ "$unit_changed" -eq 1 ]] || [[ "$_OBS_FLAGS_CHANGED" -eq 1 && "$method" == "docker" ]]; then
         systemctl daemon-reload
     fi
     if [[ "$failed" -eq 1 ]]; then
-        if [[ "$_OBS_FLAGS_CHANGED" -eq 1 ]]; then
+        if [[ "$_OBS_FLAGS_CHANGED" -eq 1 || "$unit_changed" -eq 1 ]]; then
             print_info "Not restarting ${svc} yet: fix its launch file as described above, then run this enable again."
         fi
         return 1
     fi
-    [[ "$_OBS_FLAGS_CHANGED" -eq 1 ]] || return 0
+    [[ "$_OBS_FLAGS_CHANGED" -eq 1 || "$unit_changed" -eq 1 ]] || return 0
 
     print_warn "The node must restart to pick up the new reth flags."
     if confirm "Restart ${svc} now?"; then
@@ -1080,8 +1106,10 @@ obs_ensure_reth_flags() {
 # node flag that could not be added, OBS_FLAG_ERROR says why and .node-meta is left
 # as it was.
 # obs_prepare_node_log_dir — create the node log dir (NODE_LOG_DIR from .node-meta,
-# else /var/log/telcoin/node) as SERVICE_USER:telcoin-log 0750 with install -d (no
-# recursive chown) and print it. Refused (rc 1, said): a duplicated NODE_LOG_DIR, no
+# else /var/log/telcoin/node) as SERVICE_USER:telcoin-log 2750 with install -d (no
+# recursive chown; an existing dir gets that owner and mode) and print it. The
+# setgid bit gives what the node writes there group telcoin-log, readable by
+# Alloy under the unit's UMask=0027. Refused (rc 1, said): a duplicated NODE_LOG_DIR, no
 # telcoin-log group, a path that is not absolute or is a symlink, or a parent that is
 # not a root-owned directory closed to others.
 obs_prepare_node_log_dir() {
@@ -1097,7 +1125,7 @@ obs_prepare_node_log_dir() {
         print_error "Refusing the node log dir ${d}: it must be an absolute path that is not a symlink, inside a root-owned directory closed to others."
         return 1
     fi
-    if ! install -d -o "$SERVICE_USER" -g telcoin-log -m 0750 -- "$d"; then
+    if ! install -d -o "$SERVICE_USER" -g telcoin-log -m 2750 -- "$d"; then
         print_error "Could not create the node log dir ${d}."
         return 1
     fi
@@ -1159,6 +1187,8 @@ obs_enable() {
         if [[ "$logs_on" == "true" ]]; then
             nld="$(obs_prepare_node_log_dir)" || return 1
             NODE_LOG_DIR="$nld"
+            # Recorded before the node's unit is re-rendered for it (obs_ensure_reth_flags).
+            [[ -z "$meta" ]] || meta_set NODE_LOG_DIR "$nld" "$meta"
         fi
         obs_alloy_account || return 1
         if ! getent group telcoin-log >/dev/null 2>&1; then
@@ -1215,7 +1245,6 @@ obs_enable() {
         meta_set ENABLE_OBSERVABILITY "$logs_on" "$meta"
         meta_set ENABLE_METRICS "$metrics_on" "$meta"
         [[ -n "${REGION:-}" ]] && meta_set REGION "$REGION" "$meta"
-        [[ -n "$nld" ]] && meta_set NODE_LOG_DIR "$nld" "$meta"
     fi
 
     local what=""
