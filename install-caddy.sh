@@ -1275,11 +1275,16 @@ caddy_assert_not_foreign() {
 
 # Echo the running node's node-info.yaml path: <datadir>/node-info.yaml, with the
 # datadir resolved exactly like fallback.sh (unified -> /var/lib/telcoin; legacy ->
-# /var/lib/telcoin/<role>). May not exist; the caller checks -f.
+# /var/lib/telcoin/<role>). May not exist; the caller checks -f. rc 2 (nothing
+# printed) when DATA_DIR is set more than once in .node-meta.
 caddy_node_info_path() {
-    local dd
-    dd="$(tn_resolve_data_dir 2>/dev/null || echo /var/lib/telcoin)"
-    printf '%s/node-info.yaml\n' "$dd"
+    local dd rc=0
+    # A DATA_DIR on more than one line has no single value: stop (rc 2, said by
+    # addon_meta_get) instead of falling back to the default data dir.
+    addon_meta_get DATA_DIR >/dev/null || return 2
+    dd="$(tn_resolve_data_dir 2>/dev/null)" || rc=$?
+    [[ "$rc" -ne 2 ]] || return 2
+    printf '%s/node-info.yaml\n' "${dd:-/var/lib/telcoin}"
 }
 
 # Read or edit ONLY worker 0's `rpc:` in node-info.yaml via a python3 stdlib line editor
@@ -1824,7 +1829,7 @@ caddy_node_info_want() {
 # does not already read as wanted (or cannot be read). Changes nothing.
 caddy_node_info_needs_edit() {
     local ni cur want
-    ni="$(caddy_node_info_path)"
+    ni="$(caddy_node_info_path)" || return 1
     [[ -f "$ni" ]] || return 1
     caddy_node_info_can_edit || return 1
     want="$(caddy_node_info_want "$1" "${2:-}" "${3:-true}")"
@@ -1846,7 +1851,12 @@ caddy_node_info_needs_edit() {
 caddy_node_info_advertise() {
     local mode="$1" domain="${2:-}" with_ws="${3:-true}"
     local ni http_url="" ws_url="" want cur="" rc svc
-    ni="$(caddy_node_info_path)"
+    if ! ni="$(caddy_node_info_path 2>/dev/null)"; then
+        caddy_say warn "DATA_DIR is set more than once in .node-meta, so node-info.yaml cannot be located and was not changed; remove the extra lines and run this again."
+        caddy_note "node-info.yaml not changed (DATA_DIR set more than once)"
+        caddy_restart_for_launch
+        return 0
+    fi
     if [[ ! -f "$ni" ]]; then
         if [[ "$mode" == "set" ]]; then
             caddy_say warn "node-info.yaml not found (${ni}), so the endpoint is not advertised on-network: peers and wallets that discover endpoints through the node will not find it."
@@ -2487,6 +2497,8 @@ caddy_rpc_enable_precheck() {
     fi
     if [[ "$CADDY_DASH_MOVE" != "true" ]] && clash="$(caddy_domain_clash rpc "$domain")"; then die "$clash"; fi
     caddy_mainnet_gate
+    caddy_node_info_path >/dev/null 2>&1 \
+        || die "DATA_DIR is set more than once in .node-meta, so node-info.yaml cannot be located; remove the extra lines and run this again. Nothing was changed."
     rc=0
     CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || rc=$?
     [[ "$rc" -eq 0 ]] || die "no usable reth HTTP port for the public RPC site (see above). Nothing was changed."
@@ -2633,8 +2645,7 @@ do_rpc_disable() {
 # list or legacy `worker:` map); '' parts when absent, "|" when unreadable.
 caddy_node_info_advertised() {
     local ni out h w
-    ni="$(caddy_node_info_path)"
-    if ! out="$(caddy_node_info_rpc_get "$ni")"; then
+    if ! ni="$(caddy_node_info_path 2>/dev/null)" || ! out="$(caddy_node_info_rpc_get "$ni")"; then
         printf '|\n'
         return 0
     fi

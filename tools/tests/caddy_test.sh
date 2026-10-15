@@ -370,6 +370,19 @@ printf 'NETWORK=mainnet\nOWNERSHIP_LAYOUT=2\nVALIDATOR_ADDRESS=%s\n' "$ADDR" > "
 check_rc "dashboard precheck refuses a staked mainnet node" 1 $?
 ( NSV_RC=0; CADDY_GATE_DONE=false; caddy_rpc_enable_precheck rpc.example.org "" ) >"$T/out" 2>&1
 check_rc "rpc-enable precheck refuses a staked mainnet node" 1 $?
+
+# --- DATA_DIR on more than one line stops rpc-enable before any write ---------------------------
+mkdir -p "$RP/data"
+printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nDATA_DIR=/data\n' > "$RP/etc/telcoin/.node-meta"
+check "DATA_DIR once: node-info.yaml under it" "$RP/data/node-info.yaml" "$(caddy_node_info_path 2>/dev/null)"
+printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nDATA_DIR=/data\nDATA_DIR=/srv/other\n' > "$RP/etc/telcoin/.node-meta"
+caddy_node_info_path >/dev/null 2>&1; check_rc "DATA_DIR twice: node-info path rc 2" 2 $?
+: > "$WRITES"
+( CADDY_GATE_DONE=false; caddy_rpc_enable_precheck rpc.example.org "" ) >"$T/out" 2>&1
+check_rc "DATA_DIR twice: rpc-enable precheck stops" 1 $?
+check "DATA_DIR twice: said" "yes" "$(grep -q 'DATA_DIR is set more than once' "$T/out" && echo yes)"
+check "DATA_DIR twice: nothing written" "" "$(cat "$WRITES")"
+check "DATA_DIR twice: status reads no advertisement" "|" "$(caddy_node_info_advertised 2>/dev/null)"
 printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 
 # --- dashboard password ---------------------------------------------------------------------------
