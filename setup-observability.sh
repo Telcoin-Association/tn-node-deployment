@@ -652,6 +652,36 @@ arg_fail() {
     exit 1
 }
 
+# addons_require_lib -- exit 2 before anything else when lib/common.sh or
+# lib/observability.sh lacks a helper this script calls (scripts updated without
+# the libraries). One message names update-scripts.sh; a --json run also gets it
+# as its done event.
+addons_require_lib() {
+    local fn missing="" lib="" are="is" msg
+    for fn in addon_meta_get addon_meta_write_begin tn_write_root_file tn_root_dir_ok \
+              tn_as_service_user tn_acquire_update_lock tn_wait_restart_window \
+              tn_committee_down_guard apply_kuma_rule is_testnet_like require_testnet; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
+    done
+    [[ -n "$missing" ]] && lib="lib/common.sh"
+    for fn in obs_lib_check obs_inject_flags obs_restart_window obs_quorum_guard obs_node_log_dir; do
+        if ! declare -F "$fn" >/dev/null 2>&1; then
+            missing="${missing:+${missing}, }${fn}"
+            case "$lib" in
+                "") lib="lib/observability.sh" ;;
+                lib/common.sh) lib="lib/common.sh and lib/observability.sh"; are="are" ;;
+            esac
+        fi
+    done
+    [[ -z "$missing" ]] && return 0
+    msg="${lib} ${are} older than this script (it lacks ${missing}): run update-scripts.sh, then this again. Nothing was changed."
+    print_error "$msg"
+    if json_mode; then
+        printf '{"event":"done","ok":false,"error":"%s","msg":"%s"}\n' "$(json_escape "$msg")" "$(json_escape "$msg")"
+    fi
+    exit 2
+}
+
 main() {
     local arg
     # --json is found before anything else runs: from here stdout carries JSON only, and
@@ -661,6 +691,7 @@ main() {
             JSON_MODE=true
         fi
     done
+    addons_require_lib
     if json_mode; then
         json_setup_fds
         # json_on_exit releases the update lock too.

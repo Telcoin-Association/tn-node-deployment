@@ -2037,6 +2037,25 @@ json_fw_enable() {
 # MAIN
 # =============================================================================
 
+# fw_require_lib JSON -- exit 2 before anything else when lib/common.sh lacks a
+# helper this script calls (scripts updated without the library). One message
+# names update-scripts.sh; with JSON=true it also comes as the done event.
+fw_require_lib() {
+    local fn missing="" msg
+    for fn in addon_meta_get addon_meta_write_begin tn_write_root_file tn_root_dir_ok \
+              tn_acquire_update_lock tn_release_update_lock validate_health_src \
+              apply_kuma_rule allow_overlay_ssh is_testnet_like; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
+    done
+    [[ -z "$missing" ]] && return 0
+    msg="lib/common.sh is older than this script (it lacks ${missing}): run update-scripts.sh, then this again. Nothing was changed."
+    print_error "$msg"
+    if [[ "${1:-false}" == "true" ]]; then
+        printf '{"event":"done","ok":false,"error":"%s","msg":"%s"}\n' "$(json_escape "$msg")" "$(json_escape "$msg")"
+    fi
+    exit 2
+}
+
 # fw_load_network -- set NETWORK from .node-meta ("" when no node is installed).
 # rc 1 when the key is set more than once.
 fw_load_network() {
@@ -2067,6 +2086,7 @@ main() {
             *) shift ;;
         esac
     done
+    fw_require_lib "$json_mode"
     if [[ -n "$FW_SSH_FROM" && "$FW_SSH_ANYWHERE" == "true" ]] || [[ -n "$FW_P2P_FROM" && "$FW_P2P_ANYWHERE" == "true" ]]; then
         print_error "--ssh-from/--p2p-from and --ssh-anywhere/--p2p-anywhere cannot be combined."
         exit 1

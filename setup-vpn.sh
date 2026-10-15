@@ -1480,8 +1480,24 @@ parse_args() {
     fi
 }
 
+# vpn_require_lib -- exit 2 before anything else when lib/common.sh lacks a helper
+# this script calls (scripts updated without the library); the message names
+# update-scripts.sh.
+vpn_require_lib() {
+    local fn missing=""
+    for fn in addon_meta_get addon_meta_write_begin tn_write_root_file tn_root_dir_ok \
+              tn_acquire_update_lock validate_health_src allow_overlay_ssh is_testnet_like \
+              require_testnet; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
+    done
+    [[ -z "$missing" ]] && return 0
+    print_error "lib/common.sh is older than this script (it lacks ${missing}): run update-scripts.sh, then this again. Nothing was changed."
+    exit 2
+}
+
 main() {
     parse_args "$@"
+    vpn_require_lib
     check_root
     detect_distro
     require_apt
