@@ -2865,7 +2865,7 @@ StartLimitBurst=5
 Type=simple
 User=root
 ${cred:+${cred}
-}EnvironmentFile=${TN_G_CONF}/node.env
+}EnvironmentFile=-${TN_G_CONF}/node.env
 UnsetEnvironment=TN_BLS_PASSPHRASE
 ExecStartPre=-${dbin} stop -t 80 ${TN_G_SVC}
 ExecStartPre=-${dbin} rm -f ${TN_G_SVC}
@@ -2901,7 +2901,7 @@ Type=simple
 User=${TN_G_USER}
 Group=${TN_G_GROUP}
 ${cred:+${cred}
-}EnvironmentFile=${TN_G_CONF}/node.env
+}EnvironmentFile=-${TN_G_CONF}/node.env
 UnsetEnvironment=TN_BLS_PASSPHRASE
 Environment=HOME=${TN_G_DATA}
 ExecStart=${TN_G_SCRIPT}
@@ -2965,6 +2965,114 @@ tn_write_node_unit() {
     _tn_gen_settings "${1:-}" || return 1
     text="$(_tn_node_unit_text "${1:-}")" || return 1
     printf '%s\n' "$text" | tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${TN_G_SVC}.service" 0644
+}
+
+# _tn_launch_listener NAME FILE... -- the first NAME=<multiaddr> written in FILEs
+# (an older start script exports the listeners, an older Docker script passes
+# them with -e, an older unit sets them with Environment=). rc 1 when none passes
+# validate_multiaddr.
+_tn_launch_listener() {
+    local name="$1" v
+    shift
+    v="$(grep -hoE -- "${name}=[\"']?[^\"'[:space:]\\\\]*" "$@" 2>/dev/null | head -n 1)"
+    v="${v#*=}"
+    v="${v#[\"\']}"
+    validate_multiaddr "$v" || return 1
+    printf '%s\n' "$v"
+}
+
+# _tn_passfile_trim_safe FILE -- rc 0 when FILE (a stored passphrase, read by
+# root) is a regular file of one line that does not end in whitespace before its
+# newline, so the node's stdin source reads the same value. The value is never
+# printed or held in a shell variable.
+_tn_passfile_trim_safe() {
+    local f="${1:-}"
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    LC_ALL=C awk 'NR > 1 { bad = 1 } { last = $0 } END { if (NR != 1 || bad || last == "" || last ~ /[[:space:]]$/) exit 1 }' "$f" 2>/dev/null
+}
+
+# tn_rerender_node_launch [RUNNER] [progress-fn] -- rewrite the installed node's
+# start script and unit in the current form (tn_write_start_script,
+# tn_write_node_unit), keeping the node arguments of its launch line, and write
+# node.env from the listener addresses the old files carry when node.env is
+# missing. RUNNER replaces the binary or image the script runs (empty: keep it).
+# The caller holds the update lock, owns any backup, and reloads systemd and
+# restarts. rc 0 rewritten, 1 refused with nothing changed (an old Docker unit
+# with the command inline or a passphrase written in the unit: those are
+# migrated separately; arguments or listeners that cannot be read), 2 a write
+# failed (files written before it stay; each one is complete).
+tn_rerender_node_launch() {
+    local runner="${1:-}" fn="${2:-}" line svc method file cur kind args unit envf p w rc=0
+    line="$(tn_node_launch_target)" || return 1
+    read -r svc method file <<< "$line"
+    unit="/etc/systemd/system/${svc}.service"
+    if _tn_launch_is_unit "$file"; then
+        _tn_guard_say warn "${svc}: the node command is inline in ${file}; that unit is migrated on its own, not rewritten here." "$fn"
+        return 1
+    fi
+    if grep -q 'TN_BLS_PASSPHRASE=' "${TN_ROOT_PREFIX:-}${unit}" 2>/dev/null; then
+        _tn_guard_say warn "${svc}: a passphrase is written in the unit; it is migrated on its own, not rewritten here." "$fn"
+        return 1
+    fi
+    cur="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
+    if [[ $rc -ne 10 ]]; then
+        _tn_guard_say warn "${svc}: no node command to read in ${file}." "$fn"
+        return 1
+    fi
+    rc=0
+    args="$(_tn_launch_awk args "$file" 2>/dev/null)" || rc=$?
+    [[ $rc -eq 10 ]] || return 1
+    args="$(printf '%s\n' "$args" | awk '{ out = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i == "--bls-passphrase-source") { i++; continue }
+            if (index($i, "--bls-passphrase-source=") == 1) continue
+            out = out (out == "" ? "" : " ") $i
+        }
+        print out }')"
+    kind="${cur%% *}"
+    [[ -n "$runner" ]] || runner="${cur#* }"
+    if [[ "$kind" == "docker" ]]; then
+        method="docker"
+    else
+        case "$method" in
+            source|release|existing|binary) ;;
+            *) method="source" ;;
+        esac
+    fi
+    envf="${TN_ROOT_PREFIX:-}${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/node.env"
+    if [[ ! -f "$envf" ]]; then
+        p="$(_tn_launch_listener PRIMARY_LISTENER_MULTIADDR "$file" "${TN_ROOT_PREFIX:-}${unit}")" || p=""
+        w="$(_tn_launch_listener WORKER_LISTENER_MULTIADDR "$file" "${TN_ROOT_PREFIX:-}${unit}")" || w=""
+        if [[ -z "$p" || -z "$w" ]]; then
+            _tn_guard_say warn "${svc}: the listener addresses are not in ${file} or the unit; set them with edit-config.sh first." "$fn"
+            return 1
+        fi
+    fi
+    _tn_gen_settings "$method" || return 1
+    # The stdin source trims trailing whitespace, which the old environment delivery
+    # kept: a passphrase ending in whitespace stays on the old delivery until it is
+    # rotated. A TPM install moves with the credential migration instead.
+    case "$TN_G_PASS" in
+        tpm)
+            _tn_guard_say warn "${svc}: the passphrase is sealed to the TPM; that install moves with the credential migration, not here." "$fn"
+            return 1
+            ;;
+        stdin|loadcredential)
+            if ! _tn_passfile_trim_safe "${TN_ROOT_PREFIX:-}${TN_G_CONF}/bls-passphrase"; then
+                _tn_guard_say warn "${svc}: the stored passphrase is missing, has more than one line, or ends in whitespace, which the stdin delivery would cut; the old delivery stays until the passphrase is changed with edit-config.sh." "$fn"
+                return 1
+            fi
+            ;;
+    esac
+    # Everything is read and checked; now the writes, node.env first.
+    _tn_node_args_ok "$args" || { _tn_guard_say warn "${svc}: the node arguments in ${file} are not plain words; not rewritten." "$fn"; return 1; }
+    if [[ ! -f "$envf" ]]; then
+        tn_write_node_env "$p" "$w" || return $?
+    fi
+    tn_write_start_script "$method" "$runner" "$args" || return $?
+    tn_write_node_unit "$method" || return $?
+    _tn_guard_say log "${svc}: start script and unit rewritten in the current form." "$fn"
+    return 0
 }
 
 # tn_install_journald_dropin -- cap the journal for a node that logs to it:
@@ -3055,7 +3163,7 @@ _tn_guard_say() {
     if [[ -n "${3:-}" ]] && declare -F "$3" >/dev/null 2>&1; then
         "$3" "$1" "$2" || true
     else
-        printf 'quorum guard: %s\n' "$2" >&2
+        printf '%s\n' "$2" >&2
     fi
 }
 
@@ -5391,7 +5499,8 @@ _tn_launch_is_unit() {
 # _tn_launch_awk MODE FILE [FLAG [VALUE [HASVAL [FLAGS [UNIT]]]]] — the launch-file
 # parser. MODE is target (print the target line number), get, probe (print
 # "<count> <boolean 0|1> <raw value>" of FLAG), runner (print "docker <image>" or
-# "binary <path>"), set, unset or inject (print the whole edited file). UNIT (1 or
+# "binary <path>"), args (print the words after `node`, as written, on one line),
+# set, unset or inject (print the whole edited file). UNIT (1 or
 # 0) says how to read FILE; it defaults to the name of FILE, and a staged temp copy
 # passes the kind of the file it was made from. Inputs reach awk through the
 # environment, so nothing is escape-processed. Exit 10 done, 11 no change needed or
@@ -5623,6 +5732,7 @@ _tn_launch_awk() {
             }
             if (mode == "get") { if (!no) exit 11; print unq(OR[1]); exit 10 }
             if (mode == "probe") { printf "%d %d %s\n", no, (no ? OB[1] : 0), (no ? OR[1] : ""); exit 10 }
+            if (mode == "args") { s = ""; for (k = tn + 1; k <= CT1[tc]; k++) s = s (s == "" ? "" : " ") TT[k]; print s; exit 10 }
             if (mode == "runner") {
                 dk = 0; dr = 0
                 for (k = CT0[tc]; k < tn; k++) {

@@ -43,7 +43,7 @@ check_rc "binary unit renders" 0 "$RC"
 UB="$OUT"
 printf '%s\n' "$UB" > "$T/telcoin.service"
 for line in "User=telcoin" "Group=telcoin" "ExecStart=/usr/local/libexec/telcoin/tn-start" \
-    "LoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase" "EnvironmentFile=/etc/telcoin/node.env" \
+    "LoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase" "EnvironmentFile=-/etc/telcoin/node.env" \
     "UnsetEnvironment=TN_BLS_PASSPHRASE" "Environment=HOME=/var/lib/telcoin" "NoNewPrivileges=yes" \
     "ProtectSystem=strict" "ProtectHome=yes" "PrivateTmp=yes" "PrivateDevices=yes" "ProtectKernelTunables=yes" \
     "ProtectKernelModules=yes" "ProtectKernelLogs=yes" "ProtectControlGroups=yes" "ProtectClock=yes" \
@@ -294,6 +294,45 @@ before="$(cat "$R/usr/local/libexec/telcoin/tn-start")"
 rc=0; tn_write_start_script source "$BIN" "$ARGS_B --x" >/dev/null 2>&1 || rc=$?
 check_rc "root: world-writable binary refused" 1 "$rc"
 check "root: refused write left the script" "$before" "$(cat "$R/usr/local/libexec/telcoin/tn-start")"
+# tn_rerender_node_launch converts an older start script and unit in place.
+rm -f "$R/etc/telcoin/node.env"
+chmod 0755 "$R$BIN"
+cat > "$R/usr/local/libexec/telcoin/tn-start" <<OLD
+#!/usr/bin/env bash
+export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase")
+export PRIMARY_LISTENER_MULTIADDR="${P}"
+export WORKER_LISTENER_MULTIADDR="${W}"
+exec ${BIN} node \\
+  --datadir /var/lib/telcoin \\
+  -vvv \\
+  --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 --metrics 127.0.0.1:9101
+OLD
+printf '[Service]\nExecStart=/usr/local/libexec/telcoin/tn-start\nLoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase\n' \
+    > "$R/etc/systemd/system/telcoin.service"
+printf 'INSTALL_METHOD=source\nNETWORK=testnet\nDATA_DIR=/var/lib/telcoin\n' > "$R/etc/telcoin/.node-meta"
+chmod 0600 "$R/etc/telcoin/.node-meta"
+printf 'secret \n' > "$R/etc/telcoin/bls-passphrase"
+chmod 0600 "$R/etc/telcoin/bls-passphrase"
+rc=0; tn_rerender_node_launch "" >/dev/null 2>&1 || rc=$?
+check "root: a passphrase ending in a space keeps the old delivery" "1 yes" \
+    "${rc} $(grep -q 'export TN_BLS' "$R/usr/local/libexec/telcoin/tn-start" && echo yes)"
+printf 'secret\n' > "$R/etc/telcoin/bls-passphrase"
+rc=0; tn_rerender_node_launch "" >"$T/rr.log" 2>&1 || rc=$?
+check_rc "root: rerender of an older start script" 0 "$rc" || sed 's/^/      /' "$T/rr.log"
+NEW="$(cat "$R/usr/local/libexec/telcoin/tn-start")"
+check "root: rerender keeps the node arguments" \
+    "exec ${BIN} node --bls-passphrase-source stdin --datadir /var/lib/telcoin -vvv --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 --metrics 127.0.0.1:9101" \
+    "$(printf '%s\n' "$NEW" | tail -n 1)"
+check_lacks "root: rerender drops the export" "TN_BLS" "$NEW"
+check_has "root: rerender wrote node.env from the old exports" "PRIMARY_LISTENER_MULTIADDR=${P}" "$(cat "$R/etc/telcoin/node.env" 2>/dev/null)"
+check_has "root: rerender wrote the sandboxed unit" "ProtectSystem=strict" "$(cat "$R/etc/systemd/system/telcoin.service")"
+rc=0; tn_rerender_node_launch "" >/dev/null 2>&1 || rc=$?
+check "root: a second rerender changes nothing" "0 ${NEW}" "${rc} $(cat "$R/usr/local/libexec/telcoin/tn-start")"
+printf '[Service]\nEnvironment="TN_BLS_PASSPHRASE=x"\nExecStart=/usr/local/libexec/telcoin/tn-start\n' > "$R/etc/systemd/system/telcoin.service"
+before="$(cat "$R/usr/local/libexec/telcoin/tn-start")"
+rc=0; tn_rerender_node_launch "" >/dev/null 2>&1 || rc=$?
+check "root: a unit with a written passphrase is left to its own migration" "1 yes" \
+    "${rc} $([[ "$before" == "$(cat "$R/usr/local/libexec/telcoin/tn-start")" ]] && echo yes)"
 rc=0; tn_install_journald_dropin >/dev/null 2>&1 || rc=$?
 check_rc "root: journald drop-in written" 0 "$rc"
 check_has "root: journald cap" "SystemMaxUse=4G" "$(cat "$R/etc/systemd/journald.conf.d/50-telcoin.conf" 2>/dev/null)"

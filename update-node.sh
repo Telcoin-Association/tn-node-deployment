@@ -37,6 +37,8 @@
 #   sudo bash update-node.sh
 #   sudo bash update-node.sh --discard        # drop any pending prepared update
 #   sudo bash update-node.sh --no-epoch-wait  # restart without the epoch wait
+#   sudo bash update-node.sh --allow-quorum-risk  # stop even when the committee
+#                                             # check says too many members are down
 #
 # TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
 # TN_UPDATE_VERIFY_TIMEOUT=<seconds> sets the post-restart health window
@@ -145,8 +147,17 @@ detect_node() {
         exit 1
     }
     if [[ -z "$RPC_URL" ]]; then
-        local rpc_port
-        rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"
+        local rpc_port rc=0
+        rpc_port="$(meta_get RPC_PORT 2>/dev/null)" || rc=$?
+        if [[ $rc -eq 2 ]]; then
+            # Two RPC_PORT lines: guessing one could probe (and later restart against)
+            # the wrong port.
+            if [[ "$JSON_MODE" == "true" ]]; then
+                json_event error "RPC_PORT is set more than once in .node-meta; remove the extra lines and run again"
+            fi
+            print_error "RPC_PORT is set more than once in .node-meta; remove the extra lines and run again."
+            exit 1
+        fi
         [[ -n "$rpc_port" ]] || rpc_port="$DEFAULT_RPC_PORT"
         RPC_URL="http://127.0.0.1:${rpc_port}"
     fi
@@ -279,7 +290,10 @@ pending_key_check() {
             [[ "$v" == "pull_complete" || "$v" == "build_complete" ]] ;;
         INSTALL_METHOD)
             [[ "$v" == "source" || "$v" == "docker" ]] ;;
-        OLD_IMAGE|NEW_IMAGE)
+        OLD_IMAGE)
+            # The running image: its shape only (it may predate the release rule).
+            tn_docker_ref_ok "$v" ;;
+        NEW_IMAGE)
             [[ "$v" != -* ]] && validate_docker_image "$v" ;;
         PULLED_IMAGE_ID)
             re='^(sha256:[0-9a-f]{64})?$'
@@ -845,13 +859,49 @@ update_wait_say() {
     return 0
 }
 
+# update_quorum_guard -- the committee check before a stop (tn_committee_down_guard):
+# rc 1 (with the reason) when stopping this node now would leave the committee one
+# member short of a halt, or the count cannot be made on a staked mainnet node.
+# --allow-quorum-risk (TN_ALLOW_QUORUM_RISK=1) overrides for a coordinated restart.
+update_quorum_guard() {
+    local rc=0
+    if ! declare -F tn_committee_down_guard >/dev/null 2>&1; then
+        update_wait_say warn "lib/common.sh ${COMMON_VERSION:-unknown} has no committee quorum check; run update-scripts.sh to get it."
+        return 0
+    fi
+    tn_committee_down_guard "$(tn_local_rpc_url)" update_wait_say || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        update_wait_say warn "Not stopping ${SERVICE_NAME}: the committee check refused it. Nothing was changed on the running node; run again later, or with --allow-quorum-risk for a coordinated restart."
+        return 1
+    fi
+    return 0
+}
+
+# update_rerender_launch -- while the node is stopped, rewrite its start script and
+# unit in the current form (tn_rerender_node_launch: the passphrase on stdin from
+# the systemd credential, the unit sandbox) and reload systemd. A refusal or a
+# failed write warns and leaves the files the node ran with; the update goes on.
+update_rerender_launch() {
+    local rc=0
+    declare -F tn_rerender_node_launch >/dev/null 2>&1 || return 0
+    tn_rerender_node_launch "" update_wait_say || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        systemctl daemon-reload 9>&- || update_wait_say warn "systemctl daemon-reload failed; ${SERVICE_NAME} may start with its previous unit."
+    else
+        update_wait_say warn "The start script and unit of ${SERVICE_NAME} were not rewritten in the current form (see above); it starts with the files it ran with."
+    fi
+    return 0
+}
+
 # update_epoch_wait -- called by each apply path just before it stops the node,
 # after the lock is held and the new binary or image is ready, and never before
 # a rollback restart. When the node votes in the current committee and the
 # epoch boundary is close, tn_wait_restart_window (lib/common.sh) holds the stop
 # until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds.
-# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips it. Always returns 0.
+# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips the wait, never the committee
+# check before it (update_quorum_guard), which is the only way it returns 1.
 update_epoch_wait() {
+    update_quorum_guard || return 1
     if [[ "$NO_EPOCH_WAIT" == "true" ]]; then
         update_wait_say log "Not waiting for the epoch boundary (--no-epoch-wait)."
         return 0
@@ -907,6 +957,10 @@ prepare_docker_update() {
     print_header "Prepare Update -- Docker Install"
 
     local current_image
+    if ! validate_docker_image "$new_image"; then
+        print_error "Image refused: ${new_image} is not this network's repository by digest or by a release tag."
+        return 1
+    fi
     current_image=$(detect_current_docker_image) || {
         print_error "Could not read current Docker image from the ${SERVICE_NAME} launch config (wrapper or unit)"
         return 1
@@ -994,7 +1048,7 @@ apply_docker_update() {
     local pre_unit_hash post_unit_hash
     pre_unit_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
-    update_epoch_wait
+    update_epoch_wait || return 1
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -1051,6 +1105,7 @@ apply_docker_update() {
         fi
     fi
 
+    update_rerender_launch
     print_step "Starting ${SERVICE_NAME} on new image..."
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
@@ -1403,7 +1458,7 @@ apply_source_update() {
     local pre_install_hash
     pre_install_hash=$(sha256sum "$installed" | awk '{print $1}')
 
-    update_epoch_wait
+    update_epoch_wait || return 1
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -1467,6 +1522,7 @@ apply_source_update() {
         fi
     fi
 
+    update_rerender_launch
     print_step "Starting ${SERVICE_NAME} on new binary..."
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
@@ -2045,19 +2101,38 @@ json_prepare_docker() {
     local current_image
     current_image=$(detect_current_docker_image) || {
         json_event error "could not read current docker image from unit"; return 1; }
-    # Accept a bare tag (compose against the current registry path) or a full ref.
-    local new_image
-    if [[ "$arg" == *:* || "$arg" == */* ]]; then
+    # A bare release tag is composed against this network's repository; a full
+    # reference must already be that repository by digest or by a release tag
+    # (tn_docker_image_allowed). Nothing is pulled otherwise.
+    local new_image net repo="" pull_log
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if [[ "$arg" == *:* || "$arg" == */* || "$arg" == *@* ]]; then
         new_image="$arg"
     else
-        new_image=$(compose_image_url "$current_image" "$arg")
+        if declare -F tn_docker_repo_for >/dev/null 2>&1; then
+            repo="$(tn_docker_repo_for "$net" 2>/dev/null)" || repo=""
+        elif [[ "$net" == "testnet" ]]; then
+            repo="$GAR_IMAGE_BASE"
+        fi
+        if [[ -z "$repo" ]]; then
+            json_event error "no image repository is known for network '${net:-unknown}'; nothing pulled"; return 1
+        fi
+        new_image="${repo}:${arg}"
+    fi
+    if ! validate_docker_image "$new_image" "$net"; then
+        json_event error "image refused: ${new_image} is not this network's repository by digest or by a release tag; nothing pulled"; return 1
     fi
 
     json_event step "Pulling ${new_image}"
-    # 9>&-: the pull must not hold the update lock (see update_lock).
-    if ! docker pull "$new_image" 9>&- >/tmp/tn-update-build.log 2>&1; then
-        json_event error "image pull failed -- see /tmp/tn-update-build.log on the host"; return 1
+    # The pull log: a fresh root-only file, never a fixed name in /tmp.
+    if ! pull_log="$(build_log_file)"; then
+        json_event error "could not create a log file for the image pull"; return 1
     fi
+    # 9>&-: the pull must not hold the update lock (see update_lock).
+    if ! docker pull "$new_image" 9>&- >"$pull_log" 2>&1; then
+        json_event error "image pull failed -- see ${pull_log} on the host"; return 1
+    fi
+    rm -f -- "$pull_log"
 
     # Image ID of what we just pulled -- apply verifies the restarted
     # container is actually running THIS image, not merely "something healthy".
@@ -2138,7 +2213,7 @@ json_apply_source() {
     # Root-only backup; the rollback checks its sha256 before putting it back.
     backup_installed_binary "$installed" || { json_event error "could not back up current binary"; return 1; }
 
-    update_epoch_wait
+    update_epoch_wait || { json_event error "the committee quorum check refused the stop; nothing was changed on the running node"; return 1; }
     json_event step "Stopping ${SERVICE_NAME}"
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -2178,6 +2253,7 @@ json_apply_source() {
         fi
     fi
 
+    update_rerender_launch
     json_event step "Starting ${SERVICE_NAME} on new binary"
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
@@ -2259,7 +2335,7 @@ json_apply_docker() {
     local pre_hash post_hash
     pre_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
-    update_epoch_wait
+    update_epoch_wait || { json_event error "the committee quorum check refused the stop; nothing was changed on the running node"; return 1; }
     json_event step "Stopping ${SERVICE_NAME}"
     wait_for_service_stopped "$SERVICE_NAME"
 
@@ -2291,6 +2367,7 @@ json_apply_docker() {
         fi
     fi
 
+    update_rerender_launch
     json_event step "Starting ${SERVICE_NAME} on new image"
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
@@ -2444,6 +2521,7 @@ main() {
                 ;;
             --yes)       ASSUME_YES=true; shift ;;
             --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
+            --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule.
                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
