@@ -1959,14 +1959,14 @@ set_rpc_addr() {
 # edit_legacy_reason -- print why this node must move to the current unit, start
 # script and passphrase delivery before anything else is edited: its unit holds
 # the BLS passphrase, its passphrase is sealed with the old TPM method, or its
-# unit runs the docker command inline. Prints nothing (rc 1) when none applies.
+# unit runs the node command inline. Prints nothing (rc 1) when none applies.
 edit_legacy_reason() {
     if tn_has_embedded_passphrase "$TARGET_SERVICE_FILE"; then
         printf '%s\n' "${TARGET_SERVICE_FILE} holds the BLS passphrase"
     elif [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "tpm" ]]; then
         printf '%s\n' "the BLS passphrase is sealed with the old TPM method"
     elif [[ "${TARGET_LAUNCH_FILE:-}" == *.service ]]; then
-        printf '%s\n' "${TARGET_LAUNCH_FILE} runs the docker command inline"
+        printf '%s\n' "${TARGET_LAUNCH_FILE} runs the node command inline"
     else
         return 1
     fi

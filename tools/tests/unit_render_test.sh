@@ -373,6 +373,37 @@ before="$(cat "$R/usr/local/libexec/telcoin/tn-start")"
 rc=0; tn_rerender_node_launch "" >/dev/null 2>&1 || rc=$?
 check "root: a unit with a written passphrase is left to its own migration" "1 yes" \
     "${rc} $([[ "$before" == "$(cat "$R/usr/local/libexec/telcoin/tn-start")" ]] && echo yes)"
+# A unit from before the start scripts: the binary runs inline in ExecStart= and
+# Environment= lines carry the passphrase and the listeners. The credential
+# migration re-renders it in legacy mode.
+rm -f "$R/usr/local/libexec/telcoin/tn-start" "$R/etc/telcoin/node.env"
+cat > "$R/etc/systemd/system/telcoin.service" <<OLD
+[Service]
+User=telcoin
+Environment="TN_BLS_PASSPHRASE=secret"
+Environment="PRIMARY_LISTENER_MULTIADDR=${P}"
+Environment="WORKER_LISTENER_MULTIADDR=${W}"
+ExecStart=${BIN} node --datadir /var/lib/telcoin --observer --http
+OLD
+check "root: an inline binary unit is the launch file" "telcoin source $R/etc/systemd/system/telcoin.service" "$(tn_node_launch_target 2>/dev/null)"
+rc=0; tn_rerender_node_launch "" >/dev/null 2>&1 || rc=$?
+check_rc "root: outside legacy mode an inline binary unit is refused" 1 "$rc"
+rc=0; _TN_RERENDER_LEGACY=1 tn_rerender_node_launch "" >"$T/rr.log" 2>&1 || rc=$?
+check_rc "root: legacy rerender of an inline binary unit" 0 "$rc" || sed 's/^/      /' "$T/rr.log"
+check "root: inline binary: start script runs the node line" \
+    "exec ${BIN} node --bls-passphrase-source stdin --datadir /var/lib/telcoin --http" \
+    "$(tail -n 1 "$R/usr/local/libexec/telcoin/tn-start" 2>/dev/null)"
+check_has "root: inline binary: node.env from the Environment= lines" "WORKER_LISTENER_MULTIADDR=${W}" "$(cat "$R/etc/telcoin/node.env" 2>/dev/null)"
+check_lacks "root: inline binary: the unit no longer holds the passphrase" "TN_BLS_PASSPHRASE=" "$(cat "$R/etc/systemd/system/telcoin.service")"
+check_has "root: inline binary: the unit runs the start script" "ExecStart=/usr/local/libexec/telcoin/tn-start" "$(cat "$R/etc/systemd/system/telcoin.service")"
+# A node line the parser cannot read is refused with the manual steps, nothing changed.
+rm -f "$R/usr/local/libexec/telcoin/tn-start" "$R/etc/telcoin/node.env"
+printf '[Service]\nEnvironment="TN_BLS_PASSPHRASE=secret"\nExecStart=/bin/sh -c "exec %s node --http | cat"\n' "$BIN" > "$R/etc/systemd/system/telcoin.service"
+cp "$R/etc/systemd/system/telcoin.service" "$T/rr.unit"
+rc=0; _TN_RERENDER_LEGACY=1 tn_rerender_node_launch "" >"$T/rr.log" 2>&1 || rc=$?
+check "root: an unreadable inline node line is refused, nothing written" "1 no same" \
+    "${rc} $([[ -e "$R/usr/local/libexec/telcoin/tn-start" ]] && echo yes || echo no) $(cmp -s "$T/rr.unit" "$R/etc/systemd/system/telcoin.service" && echo same || echo changed)"
+check "root: the refusal names the manual steps" "yes" "$(grep -q 'edit-config.sh --migrate-credential again' "$T/rr.log" && echo yes)"
 rc=0; tn_install_journald_dropin >/dev/null 2>&1 || rc=$?
 check_rc "root: journald drop-in written" 0 "$rc"
 check_has "root: journald cap" "SystemMaxUse=4G" "$(cat "$R/etc/systemd/journald.conf.d/50-telcoin.conf" 2>/dev/null)"

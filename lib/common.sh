@@ -3193,12 +3193,15 @@ _tn_passfile_trim_safe() {
 # node.env from the listener addresses the old files carry when node.env is
 # missing. RUNNER replaces the binary or image the script runs (empty: keep it).
 # The caller holds the update lock, owns any backup, and reloads systemd and
-# restarts. rc 0 rewritten, 1 refused with nothing changed (an old Docker unit
-# with the command inline or a passphrase written in the unit: those move with
-# tn_migrate_embedded_passphrase / tn_migrate_credential, which set
-# _TN_RERENDER_LEGACY=1 to rewrite them here; arguments or listeners that cannot
-# be read), 2 a write failed (files written before it stay; each one is complete).
-# In that legacy mode --observer and --validator are dropped from the arguments.
+# restarts. rc 0 rewritten, 1 refused with nothing changed (an old unit with the
+# node command inline, `docker run ...` or `<binary> node ...`, or a passphrase
+# written in the unit: those move with tn_migrate_embedded_passphrase /
+# tn_migrate_credential, which set _TN_RERENDER_LEGACY=1 to rewrite them here,
+# node.env coming from the unit's Environment= or -e listener lines; arguments
+# or listeners that cannot be read, where legacy mode prints the steps to move the
+# unit by hand), 2 a write failed (files written before it stay; each one is
+# complete). In that legacy mode --observer and --validator are dropped from the
+# arguments.
 tn_rerender_node_launch() {
     local runner="${1:-}" fn="${2:-}" line svc method file cur kind args unit envf p w rc=0 legacy="${_TN_RERENDER_LEGACY:-0}"
     line="$(tn_node_launch_target)" || return 1
@@ -3213,13 +3216,15 @@ tn_rerender_node_launch() {
         return 1
     fi
     cur="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
+    [[ $rc -eq 10 ]] && { rc=0; args="$(_tn_launch_awk args "$file" 2>/dev/null)" || rc=$?; }
     if [[ $rc -ne 10 ]]; then
-        _tn_guard_say warn "${svc}: no node command to read in ${file}." "$fn"
+        if [[ "$legacy" == "1" ]] && _tn_launch_is_unit "$file"; then
+            _tn_guard_say warn "${svc}: the node command in ${file} cannot be read (one ExecStart= line of the form <binary> node ... --http, or docker run ... node ... --http, with no shell operators, is needed). Move it by hand: edit ${file} to that form, run sudo systemctl daemon-reload, then run sudo ./edit-config.sh --migrate-credential again. Nothing was changed." "$fn"
+        else
+            _tn_guard_say warn "${svc}: no node command to read in ${file}." "$fn"
+        fi
         return 1
     fi
-    rc=0
-    args="$(_tn_launch_awk args "$file" 2>/dev/null)" || rc=$?
-    [[ $rc -eq 10 ]] || return 1
     args="$(printf '%s\n' "$args" | TN_RR_LEGACY="$legacy" awk '{ out = ""
         for (i = 1; i <= NF; i++) {
             if ($i == "--bls-passphrase-source") { i++; continue }
@@ -7420,8 +7425,9 @@ tn_node_launch_flags() {
 # tn_node_launch_target — echo "<svc> <method> <file>" for the installed node, where
 # file is the launch config to patch: the start script under
 # /usr/local/libexec/telcoin (tn_start_script_path), else the start wrapper an older
-# release wrote as ${DEFAULT_INSTALL_DIR}/start-<svc>.sh, else (old docker installs
-# that inline `docker run`) the systemd unit. rc 1 no node service; 2 INSTALL_METHOD
+# release wrote as ${DEFAULT_INSTALL_DIR}/start-<svc>.sh, else the systemd unit
+# (old installs that run the node inline: `docker run ...` or
+# `<binary> node ...` on the ExecStart= line). rc 1 no node service; 2 INSTALL_METHOD
 # appears more than once in .node-meta; 3 refused: the file is a symlink, is not
 # owned by root, or its directory fails tn_root_dir_ok (an older layout: run
 # tn_migrate_ownership). A message on stderr explains rc 2 and 3.
@@ -7440,8 +7446,8 @@ tn_node_launch_target() {
     new="${TN_ROOT_PREFIX:-}$(tn_start_script_path "$smethod")"
     if [[ -e "$new" || -L "$new" ]]; then
         file="$new"
-    elif [[ "$method" == "docker" && ! -e "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" && ! -L "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" ]]; then
-        file="/etc/systemd/system/${svc}.service"
+    elif [[ ! -e "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" && ! -L "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" ]]; then
+        file="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service"
     else
         file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
     fi

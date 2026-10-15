@@ -2249,7 +2249,7 @@ update_migrate_ownership() {
 }
 
 # update_legacy_refusal -- rc 1 (with the one command that fixes it) when the node's
-# unit still holds the BLS passphrase, still carries the whole docker command inline,
+# unit still holds the BLS passphrase, still carries the whole node command inline,
 # or the passphrase is still sealed with the old TPM method. Those installs move to
 # the current unit, start script and encrypted credential with
 # edit-config.sh --migrate-credential before they can be updated. Reads only.
@@ -2263,8 +2263,11 @@ update_legacy_refusal() {
         method="$(meta_get INSTALL_METHOD 2>/dev/null || true)"
         if [[ "$method" == "docker" ]]; then
             file="$(docker_launch_file 2>/dev/null || true)"
-            [[ "$file" == *.service ]] && msg="${file} still runs the docker command inline."
+        else
+            file="$(tn_node_launch_target 2>/dev/null || true)"
+            file="${file##* }"
         fi
+        [[ "$file" == *.service ]] && msg="${file} still runs the node command inline."
     fi
     [[ -n "$msg" ]] || return 0
     msg="${msg} Move it to the current unit, start script and encrypted credential first: sudo ./edit-config.sh --migrate-credential (nothing was changed)"
