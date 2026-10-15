@@ -779,7 +779,7 @@ Install it on the node, from your own `~/telcoin-node-scripts`:
 sudo bash ~/telcoin-node-scripts/ui/install-ui.sh
 ```
 
-The installer refuses a checkout that anyone other than root or you can write to.
+The installer refuses a checkout that anyone other than root, you or another administrator (a member of `sudo` or `adm`) can write to.
 It validates the sudo whitelist for the UI's privileged helper with `visudo` before it changes anything that is running.
 If a Python package cannot be installed, a UI source file is missing, the helper does not parse or `visudo` rejects the whitelist, it stops there and the running UI stays as it was.
 

@@ -1053,7 +1053,7 @@ A small, self-contained web UI for managing a node from your browser: health at 
 sudo bash ~/telcoin-node-scripts/ui/install-ui.sh
 ```
 
-The installer creates an unprivileged `telcoin-ui` system user, installs the app under `/opt/telcoin-ui`, and runs it as a systemd service. No further manual `sudo` setup is required. Everything the UI runs is root-owned: the app, its Python venv in `/opt/telcoin-ui-venv` (Flask installed with `pip --require-hashes` from `ui/requirements.txt`), the engine scripts in `/opt/telcoin-ui-update` and the helper. The UI account writes only `/var/lib/telcoin-ui`. The installer takes its files only from a checkout that no account other than root or you can write.
+The installer creates an unprivileged `telcoin-ui` system user, installs the app under `/opt/telcoin-ui`, and runs it as a systemd service. No further manual `sudo` setup is required. Everything the UI runs is root-owned: the app, its Python venv in `/opt/telcoin-ui-venv` (Flask installed with `pip --require-hashes` from `ui/requirements.txt`), the engine scripts in `/opt/telcoin-ui-update` and the helper. The UI account writes only `/var/lib/telcoin-ui`. The installer takes its files only from a checkout that no account other than root, you or another administrator (`sudo` or `adm` member) can write.
 
 It checks everything before it changes anything that is running. If Flask cannot be installed, a UI source file is missing, the helper does not parse, or `visudo` rejects the new sudoers whitelist, it stops and the running UI, its helper and its sudoers file stay as they were. The whitelist is renamed into place at step 11, just before step 12 starts or restarts the UI service; a failure after the helper is installed leaves the new helper with the old whitelist, so run the installer again.
 
@@ -1670,8 +1670,9 @@ update-scripts no longer redeploys the UI: after it updates the UI files, run th
   every open session.
 - Checks the sudoers file with `visudo` before installing it.
 - Checks the checkout before it reads the library: no symlinks, nothing writable by other
-  users, owned by root or the operator who ran sudo. A `su -` root shell installs only from a
-  root-owned checkout.
+  users, owned by root, the operator who ran sudo or a member of the `sudo` or `adm` group,
+  never by `telcoin`, `telcoin-ui`, `tn-build` or `telcoin-alloy`. A `su -` root shell
+  installs from a checkout owned by root or a `sudo`/`adm` member.
 - The UI unit gets `TasksMax=256`, `MemoryMax=512M` and `CPUQuota=50%`; updates and setup
   started from the UI run in their own `systemd-run --scope`, outside those limits.
 

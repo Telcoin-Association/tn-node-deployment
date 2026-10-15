@@ -85,6 +85,40 @@ else
         SUDO_USER=op SUDO_UID=4242 SUDO_GID=4242
     run_case "non-numeric sudo ids: refused, library not read" 1 no plain \
         SUDO_USER=op 'SUDO_UID=0 -o -user 1' SUDO_GID=0
+
+    # Other administrators (sudo or adm members) and the service accounts. These
+    # create accounts and groups, so only in a throwaway container (busybox
+    # adduser/addgroup, as in bash:3.2).
+    if [[ -f /.dockerenv ]] && command -v adduser >/dev/null 2>&1 && command -v addgroup >/dev/null 2>&1; then
+        getent group sudo >/dev/null 2>&1 || addgroup -g 4600 sudo >/dev/null 2>&1
+        adduser -D -H -u 4500 admin2 >/dev/null 2>&1; addgroup admin2 sudo >/dev/null 2>&1
+        adduser -D -H -u 4510 logadm >/dev/null 2>&1; addgroup logadm adm >/dev/null 2>&1
+        for svc in telcoin tn-build telcoin-alloy telcoin-ui; do
+            adduser -D -H "$svc" >/dev/null 2>&1; addgroup "$svc" sudo >/dev/null 2>&1
+        done
+        checkout adm2; chown -R admin2:admin2 "$T/adm2"
+        run_case "a checkout owned by another sudo member is accepted" 42 yes adm2 \
+            SUDO_USER=op SUDO_UID=4242 SUDO_GID=4242
+        run_case "a root shell without sudo accepts a sudo member's checkout" 42 yes adm2
+        chmod g+w "$T/adm2/lib/common.sh"
+        run_case "group write for that member's own primary group is accepted" 42 yes adm2
+        chgrp sudo "$T/adm2/lib/common.sh"
+        run_case "group write for the sudo group itself: refused" 1 no adm2
+        checkout logadm; chown -R logadm "$T/logadm"
+        run_case "a checkout owned by an adm member is accepted" 42 yes logadm
+        for svc in telcoin tn-build telcoin-alloy telcoin-ui; do
+            checkout "svc-$svc"; chown -R "$svc" "$T/svc-$svc"
+            run_case "a checkout owned by ${svc} (even in sudo): refused" 1 no "svc-$svc" \
+                SUDO_USER=op SUDO_UID=4242 SUDO_GID=4242
+        done
+        checkout svcfile; chown telcoin "$T/svcfile/lib/common.sh"
+        run_case "one file owned by telcoin in a root checkout: refused" 1 no svcfile
+        checkout opw; chown -R 4242:4242 "$T/opw"; chmod o+w "$T/opw/ui"
+        run_case "an operator checkout with an other-writable directory: refused" 1 no opw \
+            SUDO_USER=op SUDO_UID=4242 SUDO_GID=4242
+    else
+        printf 'SKIP  other administrators and service accounts (need a throwaway container with adduser)\n'
+    fi
 fi
 
 printf '\n%s checks, %s failed (bash %s)\n' "$CHECKS" "$FAILS" "$BASH_VERSION"

@@ -204,13 +204,17 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 # The UI account must never drive its own installer or feed it files: refuse a
-# sudo from it, and a checkout anyone but root or the operator who ran sudo can
+# sudo from it, and a checkout that an account other than an administrator can
 # write. Every file and directory down to the depth this script reads from
 # (lib/release-keys/*.asc, ui/static/*) must be a real file or directory owned
-# by root or that operator, not writable by others, and writable by its group
-# only when the group is root's or the operator's own primary group (a umask
-# of 002 makes a checkout group-writable). Nothing from the checkout is read
-# before these checks pass.
+# by root, the operator who ran sudo, or a member of the sudo or adm group
+# (another administrator; a root shell without sudo accepts root and those
+# members), never by the node, UI, build or log-shipper account (telcoin,
+# the UI account, tn-build, telcoin-alloy) whatever its groups. It must not be
+# writable by others, and writable by its group only when the group is root's,
+# the operator's or an accepted owner's primary group, and none of those four
+# accounts is in it (a umask of 002 makes a checkout group-writable). Nothing
+# from the checkout is read before these checks pass.
 if [[ "${SUDO_USER:-}" == "$SVC_USER" ]]; then
     err "install-ui.sh refuses to run for the ${SVC_USER} account."
     exit 1
@@ -221,18 +225,65 @@ if [[ ! "$OP_UID" =~ ^[0-9]+$ || ! "$OP_GID" =~ ^[0-9]+$ ]]; then
     err "SUDO_UID/SUDO_GID are not numeric; run this with sudo or as root."
     exit 1
 fi
-# A group the UI account belongs to never counts as the operator's own.
-if id -G "$SVC_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$OP_GID"; then
-    OP_GID=0
+# The service accounts (and every group they are in) never count.
+DENY_UIDS=" "
+DENY_GIDS=" "
+for _u in telcoin "$SVC_USER" tn-build telcoin-alloy; do
+    _id="$(id -u "$_u" 2>/dev/null)" || continue
+    DENY_UIDS="${DENY_UIDS}${_id} "
+    read -r -a _gl <<< "$(id -G "$_u" 2>/dev/null)" || true
+    for _g in ${_gl[@]+"${_gl[@]}"}; do
+        DENY_GIDS="${DENY_GIDS}${_g} "
+    done
+done
+# The accepted owners (root first) and the groups that may hold group write
+# (root's, then each accepted owner's primary group).
+OWNER_UIDS=(0)
+GROUP_GIDS=(0)
+# add_owner UID [PRIMARY_GID] -- accept UID as an owner unless it is a service
+# account; its primary group (looked up when not given) may hold group write.
+add_owner() {
+    local uid="${1:-}" gid="${2:-}"
+    [[ "$uid" =~ ^[0-9]+$ ]] || return 0
+    case "$DENY_UIDS" in *" ${uid} "*) return 0 ;; esac
+    OWNER_UIDS+=("$uid")
+    if [[ -z "$gid" ]]; then
+        gid="$(getent passwd "$uid" 2>/dev/null | cut -d: -f4)" || gid=""
+    fi
+    if [[ "$gid" =~ ^[0-9]+$ ]]; then
+        case "$DENY_GIDS" in *" ${gid} "*) ;; *) GROUP_GIDS+=("$gid") ;; esac
+    fi
+    return 0
+}
+if [[ -n "${SUDO_UID:-}" ]]; then
+    add_owner "$OP_UID" "$OP_GID"
 fi
+for _grp in sudo adm; do
+    _line="$(getent group "$_grp" 2>/dev/null)" || continue
+    _gid="$(printf '%s\n' "$_line" | cut -d: -f3)"
+    IFS=, read -r -a _mem <<< "${_line##*:}" || true
+    for _m in ${_mem[@]+"${_mem[@]}"}; do
+        add_owner "$(id -u "$_m" 2>/dev/null)"
+    done
+    # Accounts whose primary group it is.
+    while IFS=: read -r _ _ _uid _pgid _; do
+        if [[ "$_pgid" == "$_gid" ]]; then
+            add_owner "$_uid" "$_pgid"
+        fi
+    done <<< "$(getent passwd 2>/dev/null)"
+done
+FIND_OWN=()
+for _u in "${OWNER_UIDS[@]}"; do FIND_OWN+=(! -user "$_u"); done
+FIND_GRP=()
+for _g in "${GROUP_GIDS[@]}"; do FIND_GRP+=(! -group "$_g"); done
 if ! CHECKOUT_BAD="$(find -H "$REPO_DIR" -maxdepth 3 \( -type l -o -perm -002 \
-        -o \( -perm -020 ! -group 0 ! -group "$OP_GID" \) \
-        -o \( ! -user 0 ! -user "$OP_UID" \) \) -print -quit)"; then
+        -o \( -perm -020 "${FIND_GRP[@]}" \) \
+        -o \( "${FIND_OWN[@]}" \) \) -print -quit)"; then
     err "could not check the files under ${REPO_DIR}."
     exit 1
 fi
 if [[ -n "$CHECKOUT_BAD" ]]; then
-    err "${CHECKOUT_BAD} is a symlink, or is owned or writable by an account other than root or the operator; install from a checkout only root or you can write."
+    err "${CHECKOUT_BAD} is a symlink, or is owned or writable by an account other than root, the operator who ran sudo or a member of the sudo or adm group (never telcoin, ${SVC_USER}, tn-build or telcoin-alloy); install from a checkout only an administrator can write."
     exit 1
 fi
 
