@@ -178,14 +178,20 @@ check_root() {
 # or the interactive menu) and simply exit on failure; read-only --check runs
 # never take it.
 #
-# Primary path is flock(1) on /var/lock (present on every systemd host): fd 9
-# is held open for the life of the process and the kernel drops the lock when
-# the last copy of that descriptor closes, so a crash, SIGKILL or reboot leaves
-# nothing to clean up (but see the next paragraph about children). Where
-# flock or /var/lock is missing (stock macOS), fall back to an atomic mkdir
-# lock (mkdir fails on anything that already exists, symlinks included) with a
-# PID-staleness takeover. On failure, TN_UPDATE_LOCK_HOLDER carries the
-# holder's PID ("" if unknown) so JSON-mode callers can report it.
+# Primary path is flock(1) on /run/telcoin/update.lock. /run/telcoin is created
+# root 0755 when absent and must pass tn_root_dir_ok; the lock file must be a
+# regular file owned by root (never a symlink). Only root can create, replace or
+# open the lock for writing, so no other account can hold it or point it
+# elsewhere. fd 9 is held open for the life of the process and the kernel drops
+# the lock when the last copy of that descriptor closes, so a crash, SIGKILL or
+# reboot leaves nothing to clean up (but see the next paragraph about
+# children). Where flock is missing, or /run does not exist (stock macOS), fall
+# back to an atomic mkdir lock (mkdir fails on anything that already exists,
+# symlinks included) with a PID-staleness takeover: <lock file>.d when the lock
+# directory is usable, else ${TMPDIR:-/tmp}/telcoin-update.lock.d. On failure,
+# TN_UPDATE_LOCK_HOLDER carries the holder's PID ("" if unknown) so JSON-mode
+# callers can report it. TN_UPDATE_LOCK_FILE overrides the path for tests; the
+# root-owner checks then do not apply (the symlink check still does).
 #
 # Every child the holder starts inherits fd 9, and the kernel frees a flock only
 # when the last descriptor of the open file goes. A child that outlives the holder
@@ -202,15 +208,70 @@ check_root() {
 TN_UPDATE_LOCK_HOLDER=""
 TN_UPDATE_LOCK_DIR=""
 TN_UPDATE_LOCK_KIND=""
+readonly TN_UPDATE_LOCK_DEFAULT="/run/telcoin/update.lock"
+
+# tn_update_lock_path -- print the lock file path (TN_UPDATE_LOCK_FILE or the
+# default). check-node reports on the same path.
+tn_update_lock_path() {
+    printf '%s\n' "${TN_UPDATE_LOCK_FILE:-$TN_UPDATE_LOCK_DEFAULT}"
+}
+
+# _tn_lock_parent_ready DIR STRICT -- rc 0 when DIR can hold the flock lock: it
+# exists (created root 0755 here when absent and STRICT is set) and, when STRICT
+# is set, passes tn_root_dir_ok. rc 1 refused (DIR is present but unsafe, or
+# cannot be created although its parent exists); rc 3 DIR's parent is absent
+# (no /run: the caller may use the mkdir fallback).
+_tn_lock_parent_ready() {
+    local dir="$1" strict="$2" up
+    if [[ -z "$strict" ]]; then
+        [[ -d "$dir" && ! -L "$dir" ]] && return 0
+        return 3
+    fi
+    if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+        up="${dir%/*}"
+        [[ -n "$up" ]] || up=/
+        [[ -d "$up" ]] || return 3
+        if ! install -d -o root -g root -m 0755 -- "$dir" 2>/dev/null; then
+            print_error "Cannot create the lock directory ${dir} (are you root?)"
+            return 1
+        fi
+    fi
+    if ! tn_root_dir_ok "$dir"; then
+        print_error "Refusing the lock directory ${dir}: it or a parent is a symlink, not owned by root, or writable by others."
+        return 1
+    fi
+    return 0
+}
+
 tn_acquire_update_lock() {
     TN_UPDATE_LOCK_HOLDER=""
     TN_UPDATE_LOCK_DIR=""
     TN_UPDATE_LOCK_KIND=""
-    # Overridable for tests only; production callers always use the default.
-    local lock_file="${TN_UPDATE_LOCK_FILE:-/var/lock/telcoin-update.lock}"
-    local lock_parent="${lock_file%/*}"
+    local lock_file lock_parent strict="" lock_dir prc=0 owner
+    lock_file="$(tn_update_lock_path)"
+    lock_parent="${lock_file%/*}"
+    [[ -n "$lock_parent" ]] || lock_parent=/
+    [[ -n "${TN_UPDATE_LOCK_FILE:-}" ]] || strict=1
 
-    if command -v flock >/dev/null 2>&1 && [[ -d "$lock_parent" ]]; then
+    _tn_lock_parent_ready "$lock_parent" "$strict" || prc=$?
+    if [[ $prc -eq 1 ]]; then
+        return 1
+    fi
+    if [[ $prc -eq 0 ]]; then
+        if [[ -L "$lock_file" ]] || { [[ -e "$lock_file" ]] && [[ ! -f "$lock_file" ]]; }; then
+            print_error "Refusing the lock file ${lock_file}: it is a symlink or not a regular file."
+            return 1
+        fi
+        if [[ -n "$strict" && -e "$lock_file" ]]; then
+            owner="$(stat -c %u -- "$lock_file" 2>/dev/null || true)"
+            if [[ "$owner" != 0 ]]; then
+                print_error "Refusing the lock file ${lock_file}: it is not owned by root."
+                return 1
+            fi
+        fi
+    fi
+
+    if [[ $prc -eq 0 ]] && command -v flock >/dev/null 2>&1; then
         # Append-mode open: must not truncate the PID a current holder wrote.
         if ! exec 9>>"$lock_file"; then
             print_error "Cannot open lock file ${lock_file} (are you root?)"
@@ -230,9 +291,13 @@ tn_acquire_update_lock() {
         return 0
     fi
 
-    # mkdir fallback (no flock / no /var/lock). PID-staleness check replaces
-    # the kernel's automatic release; the dir is removed on normal exit.
-    local lock_dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
+    # mkdir fallback (no flock, or no /run). PID-staleness check replaces the
+    # kernel's automatic release; the dir is removed on normal exit.
+    if [[ $prc -eq 0 ]]; then
+        lock_dir="${lock_file}.d"
+    else
+        lock_dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
+    fi
     if mkdir "$lock_dir" 2>/dev/null; then
         printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
         TN_UPDATE_LOCK_DIR="$lock_dir"
@@ -643,7 +708,210 @@ tn_as_service_user() {
 # -----------------------------------------------------------------------------
 # CORE-1a: OWNERSHIP MIGRATION AND LOGS
 # -----------------------------------------------------------------------------
-# (reserved; CORE-1a adds its helpers here)
+#
+# Layout (setup since COMMON_VERSION 2.0.0; older hosts via tn_migrate_ownership):
+# only the data dir belongs to the service user. Install and config trees and the
+# start scripts are root-owned; the log dir is root:telcoin-log 0750 with the two
+# node log files pre-created root:telcoin-log 0640 (systemd opens them for the
+# node, so the node needs no write access to the directory).
+
+readonly TN_LOG_GROUP="telcoin-log"
+
+# _tn_strip_gw MODE -- print octal MODE without the group and other write bits.
+_tn_strip_gw() {
+    printf '%04o\n' "$(( 8#${1:-0} & ~8#022 ))"
+}
+
+# _tn_parent_ready DIR -- rc 0 when DIR's parent passes tn_root_dir_ok, creating
+# a missing parent chain root 0755 first. rc 1 refused, 2 mkdir failed.
+_tn_parent_ready() {
+    local parent="${1%/*}"
+    [[ -n "$parent" ]] || parent=/
+    if [[ ! -e "$parent" && ! -L "$parent" ]]; then
+        ( umask 022; mkdir -p -- "$parent" ) || return 2
+    fi
+    if ! tn_root_dir_ok "$parent"; then
+        print_error "Refusing ${1}: ${parent} or a parent is not a root-owned, root-only-writable directory."
+        return 1
+    fi
+    return 0
+}
+
+# _tn_root_layout_dir DIR GROUP MODE -- make DIR a root:GROUP directory with MODE.
+# Absent: created with install -d. Present: must be a real directory (not a
+# symlink); only DIR itself gets the owner and mode, never its contents. rc 0, 1
+# refused (DIR a symlink or not a directory, its parent not root-owned), 2 failed.
+_tn_root_layout_dir() {
+    local dir="$1" group="$2" mode="$3" rc=0
+    while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
+    if [[ "$dir" != /* ]]; then
+        print_error "Refusing '${dir}': not an absolute path."
+        return 1
+    fi
+    _tn_parent_ready "$dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    if [[ -L "$dir" ]] || { [[ -e "$dir" ]] && [[ ! -d "$dir" ]]; }; then
+        print_error "Refusing ${dir}: it is a symlink or not a directory."
+        return 1
+    fi
+    if [[ ! -d "$dir" ]]; then
+        install -d -o root -g "$group" -m "$mode" -- "$dir" || return 2
+        return 0
+    fi
+    chown -h -- "root:${group}" "$dir" || return 2
+    chmod -- "$mode" "$dir" || return 2
+}
+
+# _tn_data_layout_dir DIR -- make DIR the service user's data dir,
+# SERVICE_USER:SERVICE_GROUP 0700. Absent: created with install -d. Present: it
+# must be a real directory owned by the service user (its mode is set to 0700),
+# or an empty root-owned directory (a fresh mount point; lost+found allowed),
+# which is handed to the service user. Contents are never re-owned. rc 0, 1
+# refused, 2 failed.
+_tn_data_layout_dir() {
+    local dir="$1" rc=0 suid owner entries
+    while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
+    if [[ "$dir" != /* || "$dir" == / ]]; then
+        print_error "Refusing data dir '${dir}': not an absolute path."
+        return 1
+    fi
+    suid="$(id -u "${SERVICE_USER:-}" 2>/dev/null)" || suid=""
+    if [[ ! "$suid" =~ ^[0-9]+$ || "$suid" =~ ^0+$ ]]; then
+        print_error "Refusing data dir ${dir}: service user '${SERVICE_USER:-}' is unknown or root."
+        return 1
+    fi
+    _tn_parent_ready "$dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    if [[ -L "$dir" ]] || { [[ -e "$dir" ]] && [[ ! -d "$dir" ]]; }; then
+        print_error "Refusing data dir ${dir}: it is a symlink or not a directory."
+        return 1
+    fi
+    if [[ ! -d "$dir" ]]; then
+        install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 -- "$dir" || return 2
+        return 0
+    fi
+    owner="$(stat -c %u -- "$dir" 2>/dev/null)" || owner=""
+    if [[ "$owner" == "$suid" ]]; then
+        chmod -- 0700 "$dir" || return 2
+        return 0
+    fi
+    entries="$(ls -A -- "$dir" 2>/dev/null)" || entries="?"
+    if [[ "$owner" == 0 ]] && [[ -z "$entries" || "$entries" == "lost+found" ]]; then
+        chown -h -- "${SERVICE_USER}:${SERVICE_GROUP}" "$dir" || return 2
+        chmod -- 0700 "$dir" || return 2
+        return 0
+    fi
+    print_error "Refusing data dir ${dir}: it exists, is not empty and is owned by uid ${owner:-?}, not ${SERVICE_USER}."
+    return 1
+}
+
+# tn_precreate_log_files LOG_DIR [SERVICE] -- make LOG_DIR/<SERVICE>.log and
+# LOG_DIR/<SERVICE>-error.log (SERVICE defaults to SERVICE_NAME, then telcoin)
+# root:telcoin-log 0640 regular files with one link. An existing such file
+# keeps its content. A symlink, a file with other hard links or any other
+# non-regular entry at either path is reported on stderr and replaced by an
+# empty file (a directory there is refused). LOG_DIR must already pass
+# tn_root_dir_ok. rc 0, 1 refused, 2 failed.
+tn_precreate_log_files() {
+    local dir="${1:-}" svc="${2:-${SERVICE_NAME:-telcoin}}" f path links
+    if ! tn_root_dir_ok "$dir"; then
+        print_error "Refusing to create log files in ${dir}: not a root-owned, root-only-writable directory."
+        return 1
+    fi
+    for f in "${svc}.log" "${svc}-error.log"; do
+        path="${dir}/${f}"
+        if [[ -d "$path" && ! -L "$path" ]]; then
+            print_error "Refusing ${path}: it is a directory."
+            return 1
+        fi
+        if [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -f "$path" ]]; }; then
+            print_warn "Replacing ${path}: it was a symlink or not a regular file." >&2
+            rm -f -- "$path" || return 2
+        elif [[ -f "$path" ]]; then
+            links="$(stat -c %h -- "$path" 2>/dev/null)" || links=""
+            if [[ "$links" != 1 ]]; then
+                print_warn "Replacing ${path}: it had other hard links." >&2
+                rm -f -- "$path" || return 2
+            fi
+        fi
+        if [[ -f "$path" ]]; then
+            chown -h -- "root:${TN_LOG_GROUP}" "$path" || return 2
+            chmod -- 0640 "$path" || return 2
+        else
+            install -m 0640 -o root -g "$TN_LOG_GROUP" /dev/null "$path" || return 2
+        fi
+    done
+    return 0
+}
+
+# _tn_logrotate_text SIZE -- the node-log logrotate config, rotating at SIZE.
+# copytruncate: the node holds the file open (systemd appends to it), so the log
+# is copied and truncated in place rather than renamed.
+_tn_logrotate_text() {
+    cat <<EOF
+# Managed by tn-node-deployment (tn_install_logrotate). Node logs rotate when they reach 'size'.
+${DEFAULT_LOG_DIR}/*.log {
+    su root ${TN_LOG_GROUP}
+    size ${1}
+    maxsize 1G
+    rotate 5
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+}
+
+# tn_install_logrotate [SIZE] -- write the node-log rotation config
+# (TN_LOGROTATE_FILE, default /etc/logrotate.d/telcoin) root 0644 through
+# tn_write_root_file. Without SIZE an existing regular file is kept, so a size set
+# from the UI survives, and a missing one gets the 100M template. With SIZE
+# (^[0-9]+[KMG]$) the file is rewritten at that size. rc 0 written or kept; 1
+# refused (bad SIZE, group telcoin-log missing, or the write refused); 2 the
+# write failed.
+tn_install_logrotate() {
+    local size="${1:-}" dest="${TN_LOGROTATE_FILE:-/etc/logrotate.d/telcoin}"
+    if [[ -n "$size" && ! "$size" =~ ^[0-9]+[KMG]$ ]]; then
+        print_warn "tn_install_logrotate: invalid size '${size}' (e.g. 100M, 1G)" >&2
+        return 1
+    fi
+    if ! getent group "$TN_LOG_GROUP" >/dev/null 2>&1; then
+        print_warn "tn_install_logrotate: group ${TN_LOG_GROUP} does not exist" >&2
+        return 1
+    fi
+    if [[ -z "$size" ]]; then
+        if [[ -f "$dest" && ! -L "$dest" ]]; then
+            return 0
+        fi
+        size="100M"
+    fi
+    _tn_logrotate_text "$size" | tn_write_root_file "$dest" 0644
+}
+
+# _tn_root_binary_ok PATH -- rc 0 when PATH (after resolving symlinks) is a
+# regular file owned by root and not group- or other-writable, and both the
+# directory holding PATH and the one holding the resolved file pass
+# tn_root_dir_ok. So root never runs a binary another account could have placed.
+_tn_root_binary_ok() {
+    local p="${1:-}" real st dir
+    [[ "$p" == /* ]] || return 1
+    dir="${p%/*}"
+    [[ -n "$dir" ]] || dir=/
+    tn_root_dir_ok "$dir" || return 1
+    real="$(readlink -f -- "$p" 2>/dev/null)" || return 1
+    [[ "$real" == /* && -f "$real" && ! -L "$real" ]] || return 1
+    dir="${real%/*}"
+    [[ -n "$dir" ]] || dir=/
+    tn_root_dir_ok "$dir" || return 1
+    st="$(stat -c '%u %a' -- "$real" 2>/dev/null)" || return 1
+    [[ "${st%% *}" == 0 ]] || return 1
+    case "${st##* }" in
+        *[2367]?|*[2367]) return 1 ;;
+    esac
+    return 0
+}
 
 # -----------------------------------------------------------------------------
 # INPUT VALIDATION HELPERS
@@ -1542,6 +1810,15 @@ create_service_user() {
             print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
         fi
     fi
+    # Log readers (the node's log files are root:telcoin-log 0640). The service
+    # user is not a member: systemd opens the log files and hands the node the
+    # descriptors.
+    if getent group "$TN_LOG_GROUP" &>/dev/null; then
+        print_ok "Group '${TN_LOG_GROUP}' already exists"
+    else
+        groupadd --system "$TN_LOG_GROUP"
+        print_ok "Created system group '${TN_LOG_GROUP}' (log readers)"
+    fi
     # For TPM installs, add service user to tss group for TPM device access
     if [[ "${PASSPHRASE_METHOD:-}" == "tpm" ]]; then
         if getent group tss &>/dev/null; then
@@ -1553,17 +1830,43 @@ create_service_user() {
     fi
 }
 
+# create_directories [INSTALL_DIR] [DATA_DIR] [LOG_DIR] [CONFIG_DIR] -- the
+# on-disk layout. Only the data dir belongs to the service user:
+#   INSTALL_DIR, CONFIG_DIR   root:root 0755
+#   LOG_DIR                   root:telcoin-log 0750, telcoin.log and
+#                             telcoin-error.log pre-created root:telcoin-log 0640
+#   DATA_DIR                  SERVICE_USER:SERVICE_GROUP 0700
+# A missing directory is created with `install -d`. An existing one is never
+# re-owned recursively: a root-owned one gets its own owner and mode set, a
+# symlink is refused, and an existing data dir must already belong to the
+# service user (or be an empty root-owned directory such as a fresh mount
+# point). rc 0 done; 1 refused (a message says which path and why; run
+# tn_migrate_ownership for a host laid out by an older release); 2 a command
+# failed.
 create_directories() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local data_dir="${2:-$DEFAULT_DATA_DIR}"
     local log_dir="${3:-$DEFAULT_LOG_DIR}"
     local config_dir="${4:-$DEFAULT_CONFIG_DIR}"
+    local dir rc
     print_step "Creating directory structure..."
-    for dir in "$install_dir" "$data_dir" "$log_dir" "$config_dir"; do
-        mkdir -p "$dir"
-        chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$dir"
-        print_ok "Created: ${dir}"
+    for dir in "$install_dir" "$config_dir"; do
+        rc=0
+        _tn_root_layout_dir "$dir" root 0755 || rc=$?
+        [[ $rc -eq 0 ]] || return "$rc"
+        print_ok "Directory: ${dir} (root:root 0755)"
     done
+    rc=0
+    _tn_root_layout_dir "$log_dir" "$TN_LOG_GROUP" 0750 || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    rc=0
+    tn_precreate_log_files "$log_dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    print_ok "Directory: ${log_dir} (root:${TN_LOG_GROUP} 0750)"
+    rc=0
+    _tn_data_layout_dir "$data_dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    print_ok "Directory: ${data_dir} (${SERVICE_USER}:${SERVICE_GROUP} 0700)"
 }
 
 # -----------------------------------------------------------------------------
@@ -1574,23 +1877,31 @@ create_directories() {
 # network-config. Mirrors telcoin-ui-helper's set-hostname so a name chosen at
 # setup time matches what the UI Config tab writes later. No-op when empty; a
 # bad name warns and is skipped (the operator can set it later in the dashboard).
-# Args: <data_dir> <name> [<owner_user:owner_group>]
+# The file is edited by the service user (tn_as_service_user), never by root,
+# because it lives in the service user's data dir. rc is the edit's own.
+# Args: <data_dir> <name> (a third argument, once the owner to chown to, is ignored)
 write_advertised_name() {
-    local data_dir="$1" name="$2" owner="${3:-}"
+    local data_dir="$1" name="$2"
     [[ -z "$name" ]] && return 0
     if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
         print_warn "Invalid advertised name '${name}' -- skipping (set it later in the dashboard)."
         return 0
     fi
     local nc="${data_dir}/network-config"
-    if [[ -f "$nc" ]] && grep -qE '^hostname:' "$nc"; then
-        sed -i -E "s#^hostname:.*#hostname: \"${name}\"#" "$nc"
-    elif [[ -f "$nc" ]]; then
-        printf 'hostname: "%s"\n' "$name" >> "$nc"
-    else
-        printf 'hostname: "%s"\n' "$name" > "$nc"
+    # The name passed the regex above, so it is safe inside the sed expression.
+    # shellcheck disable=SC2016
+    if ! tn_as_service_user sh -c '
+        nc="$1"; name="$2"
+        if [ -f "$nc" ] && grep -qE "^hostname:" "$nc"; then
+            sed -i -E "s#^hostname:.*#hostname: \"${name}\"#" "$nc"
+        elif [ -f "$nc" ]; then
+            printf "hostname: \"%s\"\n" "$name" >> "$nc"
+        else
+            printf "hostname: \"%s\"\n" "$name" > "$nc"
+        fi' sh "$nc" "$name"; then
+        print_warn "Could not write the advertised name into ${nc}."
+        return 1
     fi
-    [[ -n "$owner" ]] && chown "$owner" "$nc" 2>/dev/null || true
     print_ok "Advertised node name set: ${name}"
 }
 
@@ -1609,7 +1920,13 @@ write_source_version_marker() {
     fi
     [[ -z "$desc" ]] && desc="$fallback"
     [[ -z "$desc" ]] && return 0
-    printf '%s\n' "$desc" > "$marker" 2>/dev/null && chmod 0644 "$marker" 2>/dev/null || true
+    # Root-owned 0644 through a temp file and a rename. A refusal (the install
+    # dir not yet root-owned) only costs the UI its version label, so warn and
+    # go on rather than fail the install or apply that called this.
+    if ! printf '%s\n' "$desc" | tn_write_root_file "$marker" 0644; then
+        print_warn "Could not record the installed version in ${marker}." >&2
+    fi
+    return 0
 }
 
 select_network() {
@@ -2134,10 +2451,17 @@ _tn_json_uint() {
 }
 
 # tn_local_rpc_url — the local node's HTTP RPC: http://127.0.0.1:<port>, where the
-# port is RPC_PORT from .node-meta, else the RPC_PORT variable, else 8545.
+# port is RPC_PORT from .node-meta, else the RPC_PORT variable, else 8545. When
+# .node-meta sets RPC_PORT more than once there is no single port: nothing is
+# printed, a warning goes to stderr and rc is 2 (no guess at the default).
 tn_local_rpc_url() {
-    local port=""
-    port="$(meta_get RPC_PORT 2>/dev/null || true)"
+    local port="" rc=0 meta
+    meta="$(node_meta_path 2>/dev/null || true)"
+    port="$(meta_get RPC_PORT "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "RPC_PORT is set more than once in ${meta}; remove the extra lines (no RPC port assumed)" >&2
+        return 2
+    fi
     if ! validate_port "$port" 2>/dev/null; then
         port="${RPC_PORT:-}"
         if ! validate_port "$port" 2>/dev/null; then
@@ -2348,8 +2672,12 @@ _tn_wait_say() {
 # 30 - poll seconds, so two heartbeats are never more than 30 s apart.
 #
 # Policy:
-#   1. Skipped (TN_SKIP_EPOCH_WAIT=1 or TN_EPOCH_WAIT_MAX=0), node mode
-#      unreadable, or mode not CvvActive: log and return.
+#   1. Skipped (TN_SKIP_EPOCH_WAIT=1 or TN_EPOCH_WAIT_MAX=0), or mode not
+#      CvvActive: log and return. Node mode unreadable: when this node is a
+#      staked validator (or, on mainnet or an unknown network, its stake cannot
+#      be read either), go on as for CvvActive with the epoch timing read from
+#      the network's public RPC (_tn_mode_unknown_wait_url); otherwise log and
+#      return.
 #   2. Time to the boundary unreadable: warn and return. More than the margin
 #      away: log and return. Passed more than the margin ago with the epoch still
 #      open (stalled, or this node far behind): warn once and return.
@@ -2361,11 +2689,47 @@ _tn_wait_say() {
 # stops there with a warning, still rc 0.
 # Callers wait before stopping or editing anything, and never before the restart
 # that rolls back a failed change.
+# _tn_mode_unknown_wait_url FN URL — the node mode could not be read from URL.
+# rc 0 and print the RPC URL to read the epoch timing from when the wait must go
+# on: VALIDATOR_ADDRESS (.node-meta) is a staked validator on the network's
+# public RPC, or its stake status cannot be read (duplicated key, RPC down) and
+# the network is mainnet or cannot be told (rc 3 then). The URL printed is the
+# public RPC of the network, or URL when the network is unknown. rc 1: no wait
+# (no validator address, a definite non-validator, or testnet with an unreadable
+# stake). Prints nothing else, so the caller's progress function stays in charge.
+_tn_mode_unknown_wait_url() {
+    local url="$1" net pub="" addr rc=0 src=0
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    case "$net" in
+        mainnet) pub="$MAINNET_RPC_URL" ;;
+        testnet) pub="$TESTNET_RPC_URL" ;;
+    esac
+    addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 1 || ( $rc -eq 0 && -z "$addr" ) ]]; then
+        return 1
+    fi
+    if [[ $rc -ne 0 || -z "$pub" ]]; then
+        src=2
+    else
+        node_is_staked_validator "$addr" "$pub" || src=$?
+    fi
+    case "$src" in
+        0) rc=0 ;;
+        2)
+            [[ "$net" == "testnet" ]] && return 1
+            rc=3
+            ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "${pub:-$url}"
+    return "$rc"
+}
+
 tn_wait_restart_window() {
     local url="${1:-}" fn="${2:-}"
     local margin settle cap poll mode out rc secs epoch boundary dur
     local start now waited slept remaining nap nrc due fails cur info note settle_left
-    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)" || url="http://127.0.0.1:0"
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="_tn_wait_say"
     fi
@@ -2387,8 +2751,19 @@ tn_wait_restart_window() {
     rc=0
     mode="$(tn_node_mode "$url")" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        "$fn" log "Could not read the node mode from ${url} (${mode}); not waiting for the epoch boundary." || true
-        return 0
+        rc=0
+        out="$(_tn_mode_unknown_wait_url "$url")" || rc=$?
+        if [[ "$rc" -ne 0 && "$rc" -ne 3 ]]; then
+            "$fn" log "Could not read the node mode from ${url} (${mode}); not waiting for the epoch boundary." || true
+            return 0
+        fi
+        if [[ "$rc" -eq 3 ]]; then
+            "$fn" warn "Could not read the node mode from ${url} (${mode}) nor this node's stake status; waiting as for a committee member, with the epoch timing from ${out}." || true
+        else
+            "$fn" log "Could not read the node mode from ${url} (${mode}); this node is a staked validator, so the epoch timing is read from ${out} instead." || true
+        fi
+        url="$out"
+        mode="CvvActive"
     fi
     if [[ "$mode" != "CvvActive" ]]; then
         "$fn" log "Node mode is ${mode}, so this node is not voting in the current committee; no need to wait for the epoch boundary." || true
@@ -3575,16 +3950,20 @@ meta_get() {
     printf '%s\n' "${line#*=}"
 }
 
-# meta_set <key> <value> [file] — idempotent upsert into .node-meta (mode 600).
-# Rewrites via _tn_meta_rewrite + append (no sed) so values containing / + = are
-# safe. Every other key in the file survives; a KEY= line ending in CR (a file
-# saved with CRLF line endings) is replaced like any other, and the rewrite drops
-# the trailing CR of every line. Refuses (rc 1, file untouched) a key that
-# is not ^[A-Z][A-Z0-9_]*$ or a value holding a CR or LF, which would otherwise
-# smuggle a second KEY= line into the file. Warnings go to stderr so JSON-mode
-# callers keep a clean stdout.
+# meta_set <key> <value> [file] — idempotent upsert into .node-meta. The file
+# is rewritten root:root 0600 through tn_write_root_file (a temp file in the same
+# directory, then one rename), so its directory must pass tn_root_dir_ok and the
+# file must not be a symlink. Values containing / + = are safe (no sed). Every
+# other key in the file survives; a KEY= line ending in CR (a file saved with
+# CRLF line endings) is replaced like any other, and the rewrite drops the
+# trailing CR of every line. Refuses (rc 1, file untouched) a key that is not
+# ^[A-Z][A-Z0-9_]*$, a value holding a CR or LF (which would otherwise smuggle a
+# second KEY= line into the file), no .node-meta to write, or a write that
+# tn_write_root_file refuses (a host laid out by an older release: run
+# tn_migrate_ownership). rc 2 when the write failed. Warnings go to stderr so
+# JSON-mode callers keep a clean stdout.
 meta_set() {
-    local key="${1:-}" val="${2:-}" file="${3:-}" tmp nl cr
+    local key="${1:-}" val="${2:-}" file="${3:-}" nl cr body="" dir
     nl=$'\n'
     cr=$'\r'
     if [[ ! "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
@@ -3600,22 +3979,23 @@ meta_set() {
         print_warn "meta_set: no .node-meta found; cannot persist ${key}" >&2
         return 1
     fi
-    mkdir -p "$(dirname "$file")" || return 1
-    [[ -f "$file" ]] || { ( umask 077; : > "$file" ) || return 1; }
-    tmp="$(mktemp 2>/dev/null || true)"
-    [[ -n "$tmp" && -f "$tmp" ]] || return 1
-    if ! _tn_meta_rewrite "$key" "$file" > "$tmp"; then
-        rm -f "$tmp"
-        return 1
+    dir="${file%/*}"
+    if [[ -n "$dir" && ! -e "$dir" ]]; then
+        install -d -o root -g root -m 0755 -- "$dir" || return 2
     fi
-    printf '%s=%s\n' "$key" "$val" >> "$tmp"
-    if ! cat "$tmp" > "$file"; then
-        rm -f "$tmp"
-        return 1
+    if [[ -f "$file" && ! -L "$file" ]]; then
+        body="$(_tn_meta_rewrite "$key" "$file")" || return 2
     fi
-    rm -f "$tmp"
-    chmod 600 "$file" 2>/dev/null || true
-    return 0
+    _tn_meta_write "$file" "$body" "${key}=${val}"
+}
+
+# _tn_meta_write FILE BODY [LINE] — write BODY (and LINE, when given) to FILE
+# root:root 0600 via tn_write_root_file; its return code.
+_tn_meta_write() {
+    {
+        if [[ -n "$2" ]]; then printf '%s\n' "$2"; fi
+        if [[ -n "${3:-}" ]]; then printf '%s\n' "$3"; fi
+    } | tn_write_root_file "$1" 0600
 }
 
 # _tn_meta_rewrite <key> <file> — print FILE without its KEY= lines (CRLF lines
@@ -3631,9 +4011,10 @@ _tn_meta_rewrite() {
 # meta_unset <key> [file] — remove every KEY= line from .node-meta (a line ending
 # in CR included; the rewrite drops the trailing CR of every line). rc 0 when the
 # key (or the file) is absent, and the file is then left untouched. Same key rule
-# as meta_set (rc 1 otherwise); other keys survive and the file stays mode 600.
+# and the same root-owned 0600 write as meta_set (rc 1 refused, 2 failed); other
+# keys survive.
 meta_unset() {
-    local key="${1:-}" file="${2:-}" tmp
+    local key="${1:-}" file="${2:-}" body
     if [[ ! "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
         print_warn "meta_unset: refusing key '${key}' (expected A-Z, 0-9 and _ only, starting with a letter)" >&2
         return 1
@@ -3641,19 +4022,12 @@ meta_unset() {
     [[ -n "$file" ]] || file="$(node_meta_path || true)"
     [[ -n "$file" && -f "$file" ]] || return 0
     grep -qE "^${key}=" "$file" 2>/dev/null || return 0
-    tmp="$(mktemp 2>/dev/null || true)"
-    [[ -n "$tmp" && -f "$tmp" ]] || return 1
-    if ! _tn_meta_rewrite "$key" "$file" > "$tmp"; then
-        rm -f "$tmp"
+    if [[ -L "$file" ]]; then
+        print_warn "meta_unset: refusing ${file}: it is a symlink" >&2
         return 1
     fi
-    if ! cat "$tmp" > "$file"; then
-        rm -f "$tmp"
-        return 1
-    fi
-    rm -f "$tmp"
-    chmod 600 "$file" 2>/dev/null || true
-    return 0
+    body="$(_tn_meta_rewrite "$key" "$file")" || return 2
+    _tn_meta_write "$file" "$body"
 }
 
 # -----------------------------------------------------------------------------
@@ -3860,22 +4234,52 @@ tn_node_launch_flags() {
 }
 
 # tn_node_launch_target — echo "<svc> <method> <file>" for the installed node, where
-# file is the launch config to patch: the systemd unit (docker) or the start wrapper
-# (binary/source). Returns 1 if no node service is present.
+# file is the launch config to patch: the start script under
+# /usr/local/libexec/telcoin (tn_start_script_path), else the start wrapper an older
+# release wrote as ${DEFAULT_INSTALL_DIR}/start-<svc>.sh, else (old docker installs
+# that inline `docker run`) the systemd unit. rc 1 no node service; 2 INSTALL_METHOD
+# appears more than once in .node-meta; 3 refused: the file is a symlink, is not
+# owned by root, or its directory fails tn_root_dir_ok (an older layout: run
+# tn_migrate_ownership). A message on stderr explains rc 2 and 3.
 tn_node_launch_target() {
-    local svc method meta file
+    local svc method meta file rc=0 smethod new
     svc="$(tn_resolve_service)" || return 1
     meta="$(node_meta_path || true)"
-    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
-    # Docker installs now run via a start wrapper too (the BLS LoadCredential change moved
-    # the `docker run` out of the unit's ExecStart into ${INSTALL_DIR}/start-<svc>.sh). The
-    # --http line obs flags attach to therefore lives in the wrapper -- patch it when present.
-    # Fall back to the unit for legacy docker installs that still inline `docker run`.
-    if [[ "$method" == "docker" ]]; then
-        if [[ -f "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" ]]; then file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
-        else file="/etc/systemd/system/${svc}.service"; fi
-    else file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"; fi
+    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "tn_node_launch_target: INSTALL_METHOD is set more than once in ${meta}; remove the extra lines first" >&2
+        return 2
+    fi
+    [[ -n "$method" ]] || method="binary"
+    smethod="source"
+    [[ "$method" == "docker" ]] && smethod="docker"
+    new="${TN_ROOT_PREFIX:-}$(tn_start_script_path "$smethod")"
+    if [[ -e "$new" || -L "$new" ]]; then
+        file="$new"
+    elif [[ "$method" == "docker" && ! -e "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" && ! -L "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" ]]; then
+        file="/etc/systemd/system/${svc}.service"
+    else
+        file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
+    fi
+    if ! _tn_root_file_ok "$file"; then
+        print_warn "tn_node_launch_target: refusing ${file}: it is a symlink, not owned by root, or in a directory that is not root-owned (run the ownership migration)" >&2
+        return 3
+    fi
     printf '%s %s %s\n' "$svc" "$method" "$file"
+}
+
+# _tn_root_file_ok PATH — rc 0 when PATH does not exist or is a regular,
+# root-owned file that is not a symlink, and its directory passes tn_root_dir_ok.
+_tn_root_file_ok() {
+    local p="${1:-}" dir owner
+    [[ "$p" == /* && ! -L "$p" ]] || return 1
+    dir="${p%/*}"
+    [[ -n "$dir" ]] || dir=/
+    tn_root_dir_ok "$dir" || return 1
+    [[ -e "$p" ]] || return 0
+    [[ -f "$p" ]] || return 1
+    owner="$(stat -c %u -- "$p" 2>/dev/null)" || return 1
+    [[ "$owner" == 0 ]]
 }
 
 # -----------------------------------------------------------------------------
@@ -3908,7 +4312,8 @@ tn_node_launch_target() {
 # --http line, 3 refused (a trailing comment on a line that would change, a bad
 # flag or value, a quote the parser cannot balance, or a staged copy that fails the
 # checks), 4 I/O error. The file is untouched unless rc is 0. Edits are staged in a
-# temp file and written back with `cat >`, which keeps owner and mode, only when
+# temp file and written back through tn_write_root_file (_tn_launch_write: owner
+# root, group and mode kept, one rename; a refusal there is rc 3) only when
 # the staged copy is non-empty, has as many --http lines as before, reads back as
 # intended and, for a shell wrapper that passed bash -n, still passes it. The
 # caller owns any backup, the daemon-reload of a unit and the restart.
@@ -4289,24 +4694,22 @@ _tn_launch_staged_ok() {
     return 0
 }
 
-# _tn_launch_write FILE TMP — copy TMP over FILE in place (cat >, so owner and mode
-# stay) and compare the bytes; on a failure the old content is put back. rc 0
-# written, 4 I/O error.
+# _tn_launch_write FILE TMP — replace FILE with the content of TMP through
+# tn_write_root_file: owner root, FILE's group and mode kept (group and other
+# write dropped), one rename, so FILE is never half-written. rc 0 written, 3
+# refused (FILE a symlink, or its directory not root-owned), 4 I/O error.
 _tn_launch_write() {
-    local file="$1" tmp="$2" keep
-    keep="$(mktemp 2>/dev/null || true)"
-    [[ -n "$keep" && -f "$keep" ]] || return 4
-    if ! { cat "$file" > "$keep"; } 2>/dev/null; then
-        rm -f "$keep"
-        return 4
-    fi
-    if { cat "$tmp" > "$file"; } 2>/dev/null && cmp -s "$tmp" "$file"; then
-        rm -f "$keep"
-        return 0
-    fi
-    { cat "$keep" > "$file"; } 2>/dev/null || true
-    rm -f "$keep"
-    return 4
+    local file="$1" tmp="$2" st mode group rc=0
+    st="$(stat -c '%a %g' -- "$file" 2>/dev/null)" || return 4
+    mode="$(_tn_strip_gw "${st%% *}")"
+    group="${st##* }"
+    tn_write_root_file "$file" "$mode" "$group" < "$tmp" || rc=$?
+    case "$rc" in
+        0) cmp -s "$tmp" "$file" || return 4 ;;
+        1) return 3 ;;
+        *) return 4 ;;
+    esac
+    return 0
 }
 
 # _tn_launch_edit OP FILE FLAG VALUE HASVAL FLAGS MARKER — stage one edit with the
@@ -4441,7 +4844,9 @@ tn_launch_flag_unset() {
 # for `<path> node ...` (a bare name is looked up on PATH). Read from the launch
 # file, which is what actually starts the node, not from .node-meta. rc 0 printed,
 # 1 no runner recognised, 2 no live node --http line or no node service, 3 a
-# command the parser cannot read, 4 FILE missing or unreadable.
+# command the parser cannot read, 4 FILE missing or unreadable, 5 the binary is
+# refused: it, or a directory holding it, is not root-owned or is writable by
+# others (_tn_root_binary_ok), so root will not run it (a message says so).
 tn_launch_runner() {
     local file="${1:-}" target out rc kind val image_re
     image_re='^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
@@ -4474,6 +4879,10 @@ tn_launch_runner() {
             case "$val" in
                 *[[:space:]]*|*'$'*|*'`'*) return 1 ;;
             esac
+            if ! _tn_root_binary_ok "$val"; then
+                printf 'tn_launch_runner: refusing %s: the binary or a directory holding it is not root-owned or is writable by others\n' "$val" >&2
+                return 5
+            fi
             printf 'binary:%s\n' "$val"
             ;;
         *)
@@ -4492,8 +4901,10 @@ tn_launch_runner() {
 # installed rather than a version number (every release reports crate 0.1.0).
 
 # _tn_runner_probe SPEC ARGS... — run the node binary of SPEC with ARGS for a help
-# or parse probe: no data dir mounted, stdin from /dev/null. rc is the binary's
-# own, or 127 when SPEC is malformed or names no executable file.
+# or parse probe: no data dir mounted, stdin from /dev/null. A binary runs as the
+# service user (tn_as_service_user) and only when it passes _tn_root_binary_ok.
+# rc is the binary's own, 126 when it cannot be run as the service user, or 127
+# when SPEC is malformed, names no executable file or a binary that is refused.
 _tn_runner_probe() {
     local spec="${1:-}" bin
     if [[ $# -gt 0 ]]; then
@@ -4506,7 +4917,8 @@ _tn_runner_probe() {
         binary:/?*)
             bin="${spec#binary:}"
             [[ -f "$bin" && -x "$bin" ]] || return 127
-            "$bin" "$@" </dev/null
+            _tn_root_binary_ok "$bin" || return 127
+            tn_as_service_user "$bin" "$@" </dev/null
             ;;
         *)
             return 127
@@ -4710,25 +5122,46 @@ _tn_path_owner() {
 #     prints on stdout cannot spoil a $(...) capture, unless ARGS already has it;
 #     and --datadir, the data dir as keytool sees it. A --datadir X (or
 #     --datadir=X) anywhere in ARGS is moved there, since keytool refuses it
-#     after some subcommands. When ARGS starts with export-staking-args and
-#     TN_BLS_PASSPHRASE is unset or empty, --bls-passphrase-source no-passphrase is
-#     added too: that command never reads the key yet refuses to run without a
-#     passphrase source. Never for generate ..., which would then write or read
-#     the key in the clear, nor for anything else.
-#   * A non-empty TN_BLS_PASSPHRASE reaches keytool through the environment only;
-#     docker gets `-e TN_BLS_PASSPHRASE` by name, so the value is in no argv. An
-#     empty one is treated as unset: keytool runs without the variable.
-#   * docker runs as the owner of DATA_DIR, with HOME=/home/nonroot and DATA_DIR
-#     mounted there, the way setup-node.sh runs keygen. DATA_DIR must exist.
-# rc is keytool's own, or 4 when it cannot be started (bad SPEC, no executable
-# file, no DATA_DIR for docker, too few arguments, --datadir without a value);
-# docker's own failures come back as docker's rc (125 and up).
+#     after some subcommands.
+#   * The passphrase comes from the shell variable TN_KEYTOOL_PASS, which must NOT
+#     be exported (rc 4 when it is: it would be in every child's environment, so
+#     set it with a plain assignment, not as a prefix of this call). A non-empty
+#     value is written to keytool's standard input (printf, a builtin, so it is
+#     in no argv) and keytool gets --bls-passphrase-source stdin; docker runs with
+#     -i. TN_BLS_PASSPHRASE is never read and never reaches keytool. Without a
+#     passphrase keytool's stdin is /dev/null, and when ARGS starts with
+#     export-staking-args --bls-passphrase-source no-passphrase is added: that
+#     command never reads the key yet refuses to run without a passphrase source.
+#     Never for generate ..., which would then write or read the key in the clear.
+#     A --bls-passphrase-source in ARGS together with TN_KEYTOOL_PASS is rc 4.
+#   * keytool runs as the service user (SERVICE_USER, SERVICE_GROUP), never as
+#     root: a binary through tn_as_service_user, docker with --user <uid>:<gid>,
+#     HOME=/home/nonroot and DATA_DIR mounted there. DATA_DIR must exist and be
+#     owned by the service user.
+# rc is keytool's own, 126 when it cannot be run as the service user, or 4 when it
+# cannot be started (bad SPEC, no executable file, DATA_DIR missing or not the
+# service user's, too few arguments, --datadir without a value, the passphrase
+# rules above); docker's own failures come back as docker's rc (125 and up).
+# _tn_feed_pass — write TN_KEYTOOL_PASS and a newline to stdout with the printf
+# builtin (no argv). rc 0 even when the reader has already gone (SIGPIPE ignored),
+# so under pipefail a keytool pipeline's status is keytool's own.
+_tn_feed_pass() {
+    ( trap '' PIPE; printf '%s\n' "$TN_KEYTOOL_PASS" ) 2>/dev/null || true
+}
+
 tn_keytool() {
-    local spec="${1:-}" data_dir="${2:-}" in_dir arg rest done_part first bin owner uid gid
+    local spec="${1:-}" data_dir="${2:-}" in_dir arg rest done_part first bin owner uid gid decl
     local dd_val="" has_q=0 has_src=0 has_pass=0 is_dd
     local -a args=() glob=() drun=()
     if [[ $# -lt 3 || -z "$data_dir" ]]; then
         printf 'tn_keytool: usage: tn_keytool SPEC DATA_DIR KEYTOOL-ARGS...\n' >&2
+        return 4
+    fi
+    decl="$(declare -p TN_KEYTOOL_PASS 2>/dev/null)" || decl=""
+    decl="${decl#declare -}"
+    decl="${decl%% *}"
+    if [[ "$decl" == *x* ]]; then
+        printf 'tn_keytool: TN_KEYTOOL_PASS is exported; set it as a plain shell variable instead\n' >&2
         return 4
     fi
     shift 2
@@ -4775,15 +5208,40 @@ tn_keytool() {
         fi
     done
     first="${args[0]:-}"
-    if [[ -n "${TN_BLS_PASSPHRASE:-}" ]]; then
+    if [[ -n "${TN_KEYTOOL_PASS:-}" ]]; then
         has_pass=1
+    fi
+    if [[ "$has_pass" -eq 1 && "$has_src" -eq 1 ]]; then
+        printf 'tn_keytool: a --bls-passphrase-source argument cannot be combined with TN_KEYTOOL_PASS\n' >&2
+        return 4
     fi
     if [[ "$has_q" -eq 0 ]]; then
         glob+=(-q)
     fi
     glob+=(--datadir "$dd_val")
-    if [[ "$has_src" -eq 0 && "$first" == "export-staking-args" && "$has_pass" -eq 0 ]]; then
+    if [[ "$has_pass" -eq 1 ]]; then
+        glob+=(--bls-passphrase-source stdin)
+    elif [[ "$has_src" -eq 0 && "$first" == "export-staking-args" ]]; then
         glob+=(--bls-passphrase-source no-passphrase)
+    fi
+    if [[ ! -d "$data_dir" || -L "$data_dir" ]]; then
+        printf 'tn_keytool: data dir %s does not exist\n' "$data_dir" >&2
+        return 4
+    fi
+    owner="$(_tn_path_owner "$data_dir")" || {
+        printf 'tn_keytool: cannot read the owner of %s\n' "$data_dir" >&2
+        return 4
+    }
+    uid="$(id -u "${SERVICE_USER:-}" 2>/dev/null)" || uid=""
+    gid="$(getent group "${SERVICE_GROUP:-}" 2>/dev/null | cut -d: -f3)" || gid=""
+    [[ -n "$gid" ]] || gid="$(id -g "${SERVICE_USER:-}" 2>/dev/null)" || gid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ || ! "$gid" =~ ^[0-9]+$ || "$gid" =~ ^0+$ ]]; then
+        printf 'tn_keytool: service user %s:%s is unknown or root\n' "${SERVICE_USER:-}" "${SERVICE_GROUP:-}" >&2
+        return 4
+    fi
+    if [[ "${owner%% *}" != "$uid" ]]; then
+        printf 'tn_keytool: %s is not owned by the service user %s\n' "$data_dir" "${SERVICE_USER:-}" >&2
+        return 4
     fi
     case "$spec" in
         binary:*)
@@ -4793,31 +5251,21 @@ tn_keytool() {
                 return 4
             fi
             if [[ "$has_pass" -eq 1 ]]; then
-                TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+                _tn_feed_pass | tn_as_service_user "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
             else
-                ( unset TN_BLS_PASSPHRASE; "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
+                tn_as_service_user "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} </dev/null
             fi
             ;;
         docker:*)
-            if [[ ! -d "$data_dir" ]]; then
-                printf 'tn_keytool: data dir %s does not exist\n' "$data_dir" >&2
-                return 4
-            fi
-            owner="$(_tn_path_owner "$data_dir")" || {
-                printf 'tn_keytool: cannot read the owner of %s\n' "$data_dir" >&2
-                return 4
-            }
-            uid="${owner%% *}"
-            gid="${owner##* }"
-            drun=(run --rm --user "${uid}:${gid}" -e HOME=/home/nonroot)
+            drun=(run --rm)
             if [[ "$has_pass" -eq 1 ]]; then
-                drun+=(-e TN_BLS_PASSPHRASE)
+                drun+=(-i)
             fi
-            drun+=(-v "${data_dir}:/home/nonroot" "${spec#docker:}" telcoin)
+            drun+=(--user "${uid}:${gid}" -e HOME=/home/nonroot -v "${data_dir}:/home/nonroot" "${spec#docker:}" telcoin)
             if [[ "$has_pass" -eq 1 ]]; then
-                TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+                _tn_feed_pass | ( unset TN_BLS_PASSPHRASE; docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
             else
-                ( unset TN_BLS_PASSPHRASE; docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
+                ( unset TN_BLS_PASSPHRASE; docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} </dev/null )
             fi
             ;;
     esac
@@ -5047,8 +5495,8 @@ tn_node_has_observer_flag() {
 #     it so the continuation does not swallow the next command;
 #   * on any other non-comment line the token and one adjacent run of whitespace
 #     are removed; comment lines are never touched; --instance is never touched.
-# The edit is staged in a temp file and only written back (cat > file, which keeps
-# owner and mode) when the temp copy is non-empty, no longer has the flag, and has
+# The edit is staged in a temp file and only written back (_tn_launch_write: root
+# owner, group and mode kept) when the temp copy is non-empty, no longer has the flag, and has
 # the same number of whole-word --http lines. On any failed check the file is left
 # as it was and rc is 1. The caller owns the backup, daemon-reload (docker unit)
 # and restart, as with tn_node_inject_flags.
@@ -5087,7 +5535,7 @@ tn_node_strip_observer_flag() {
     http_after="$(grep -cE -- "$http_re" "$tmp" 2>/dev/null || true)"
     if [[ -s "$tmp" ]] && ! tn_node_has_observer_flag "$tmp" \
         && [[ -n "$http_before" && "$http_before" == "$http_after" ]]; then
-        if cat "$tmp" > "$file"; then
+        if _tn_launch_write "$file" "$tmp"; then
             rm -f "$tmp"; return 0
         fi
     fi

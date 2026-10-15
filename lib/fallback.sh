@@ -148,10 +148,16 @@ tn_resolve_config_dir() {
 # _tn_meta_data_dir <meta-file> — echo the DATA_DIR= a .node-meta records (the datadir
 # the operator chose, e.g. on a separate disk) when it is an absolute path to an
 # existing directory; the probe and the echoed path are rooted at ${TN_ROOT_PREFIX}.
-# Returns 1 when the file or key is absent, empty, relative, or not a directory.
+# Returns 1 when the file or key is absent, empty, relative, or not a directory, and
+# 2 (nothing printed, an error on stderr) when the key is set more than once.
 _tn_meta_data_dir() {
-    local dd
-    dd="$(_tn_meta_get DATA_DIR "$1")" || return 1
+    local dd rc=0
+    dd="$(_tn_meta_get DATA_DIR "$1")" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        printf '  [ERROR] DATA_DIR is set more than once in %s; remove the extra lines (no data dir assumed)\n' "$1" >&2
+        return 2
+    fi
+    [[ $rc -eq 0 ]] || return 1
     [[ "$dd" == /* && -d "${TN_ROOT_PREFIX}${dd}" ]] || return 1
     printf '%s\n' "${TN_ROOT_PREFIX}${dd}"
 }
@@ -163,17 +169,25 @@ _tn_meta_data_dir() {
 #   unified .node-meta present  -> its DATA_DIR, else /var/lib/telcoin   (new install)
 #   else legacy role .node-meta -> its DATA_DIR, else /var/lib/telcoin/<role>
 #   else                        -> /var/lib/telcoin                     (new-install default)
+# A DATA_DIR set more than once in that .node-meta prints nothing and returns 2, so
+# a caller never acts on a guessed data dir.
 tn_resolve_data_dir() {
-    local etc var t
+    local etc var t rc
     etc="$(_tn_etc)"
     var="$(_tn_var)"
     if [[ -f "${etc}/.node-meta" ]]; then
-        _tn_meta_data_dir "${etc}/.node-meta" || printf '%s\n' "$var"
+        rc=0
+        _tn_meta_data_dir "${etc}/.node-meta" || rc=$?
+        [[ $rc -ne 2 ]] || return 2
+        [[ $rc -eq 0 ]] || printf '%s\n' "$var"
         return 0
     fi
     for t in validator observer; do
         if [[ -f "${etc}/${t}/.node-meta" ]]; then
-            _tn_meta_data_dir "${etc}/${t}/.node-meta" || printf '%s\n' "${var}/${t}"
+            rc=0
+            _tn_meta_data_dir "${etc}/${t}/.node-meta" || rc=$?
+            [[ $rc -ne 2 ]] || return 2
+            [[ $rc -eq 0 ]] || printf '%s\n' "${var}/${t}"
             return 0
         fi
     done
