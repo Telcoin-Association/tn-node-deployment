@@ -2498,7 +2498,8 @@ async function startUpdateStream(kind, ref){
   if(ctl.signal.aborted) return;
   if(state.updateAbort===ctl) state.updateAbort = null;
   if(out) out.innerHTML = updateOutcomeHtml(d);
-  if(d && d.ok) toast('Update '+kind+' succeeded','success');
+  if(d && d.ok && d.voting===false) toast('Update '+kind+' applied, but the node is not voting yet','info');
+  else if(d && d.ok) toast('Update '+kind+' succeeded','success');
   else if(d && d.downgrade) toast('Downgrade refused','error');
   else if(d && d.voting===false) toast('The node is not voting after the update'+(d.rolled_back?' — rolled back':''),'error');
   else if(d) toast('Update '+kind+(d.rolled_back?' failed — rolled back':' did not complete'),'error');
@@ -2507,7 +2508,8 @@ async function startUpdateStream(kind, ref){
 
 // What update-node's done event says beyond ok and msg: a refused downgrade
 // ("downgrade", "storage_downgrade") and, after an apply, a node that came back
-// without voting ("voting": false; rolled back unless the update was one-way).
+// without voting ("voting": false; with ok true it kept the new release while the
+// node catches up, otherwise rolled back unless the update was one-way).
 function updateOutcomeHtml(d){
   if(!d) return '';
   const notes = [];
@@ -2515,7 +2517,9 @@ function updateOutcomeHtml(d){
     + (d.storage_downgrade===true ? ' It also cannot open the data directory the running release has migrated.' : '')
     + ' Nothing was changed.');
   if(d.voting===false) notes.push('The node came back but is not voting in consensus'
-    + (d.rolled_back===true ? '; the update was rolled back.' : '. Check it with check-node.sh on the server.'));
+    + (d.rolled_back===true ? '; the update was rolled back.'
+       : d.ok===true ? ' yet (it may still be catching up). The new release stays; check it again with check-node.sh on the server.'
+       : '. Check it with check-node.sh on the server.'));
   return notes.map(n=>`<div class="note" style="margin-top:10px;border-color:rgba(255,77,109,0.35);background:rgba(255,77,109,0.07)">${esc(n)}</div>`).join('');
 }
 

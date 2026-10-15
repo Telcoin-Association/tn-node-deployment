@@ -1087,9 +1087,13 @@ _uc_vote_setting() {
 # between reads TN_UPDATE_VOTE_POLL seconds apart (default 10); and a node that was
 # CvvActive before the stop (UPDATE_MODE_BEFORE, recorded by update_epoch_wait)
 # reads CvvActive again from tn_nodeMode. Both wait at most TN_UPDATE_VOTE_TIMEOUT
-# seconds together (default 600). Sets UPDATE_PARTICIPATION (ok|failed) and
+# seconds together (default 600). Sets UPDATE_PARTICIPATION (ok|late|failed) and
 # UPDATE_VOTING (true when tn_nodeMode last read CvvActive). rc 0 passed, 1 failed
-# with the reason reported.
+# with the reason reported. When the window runs out (header or vote), the apply is
+# not failed while the unit is active and the RPC still answers: catching up after
+# the downtime can take longer than the window. That is "late" (rc 0, a warning,
+# "voting":false in the --json done); the new release keeps running.
+# TN_UPDATE_VOTE_ROLLBACK=1 fails it instead (rc 1), so the apply rolls back.
 verify_consensus_participation() {
     local url="${RPC_URL:-}" net want out hex got n1 n2="" mode="" waited=0 limit poll
     UPDATE_PARTICIPATION=failed
@@ -1130,8 +1134,8 @@ verify_consensus_participation() {
         fi
     done
     if [[ -z "$n2" ]] || (( 10#$n2 <= 10#$n1 )); then
-        update_fail "The consensus header of ${SERVICE_NAME} did not advance within ${limit}s (it stayed at ${n1}): the node is not following consensus."
-        return 1
+        _uc_vote_late "The consensus header of ${SERVICE_NAME} did not advance within ${limit}s (it stayed at ${n1}): the node is not following consensus yet." "$url"
+        return
     fi
     update_wait_say log "Consensus header advanced: ${n1} -> ${n2} (${waited}s)."
     mode="$(tn_node_mode "$url" 5 2>/dev/null)" || mode=""
@@ -1142,8 +1146,8 @@ verify_consensus_participation() {
             mode="$(tn_node_mode "$url" 5 2>/dev/null)" || mode=""
         done
         if [[ "$mode" != "CvvActive" ]]; then
-            update_fail "${SERVICE_NAME} was voting (CvvActive) before the update and reads ${mode:-no mode} ${waited}s after it (TN_UPDATE_VOTE_TIMEOUT=${limit}): it is not voting."
-            return 1
+            _uc_vote_late "${SERVICE_NAME} was voting (CvvActive) before the update and reads ${mode:-no mode} ${waited}s after it (TN_UPDATE_VOTE_TIMEOUT=${limit}): it is not voting yet." "$url"
+            return
         fi
         update_wait_say log "${SERVICE_NAME} votes again (CvvActive, ${waited}s)."
     fi
@@ -1152,12 +1156,48 @@ verify_consensus_participation() {
     return 0
 }
 
-# update_vote_field -- ',"voting":false' for a --json done event after the
-# consensus participation check failed; nothing otherwise.
-update_vote_field() {
-    if [[ "${UPDATE_PARTICIPATION:-}" == "failed" ]]; then
-        printf ',"voting":false'
+# _uc_vote_late MSG URL -- verify_consensus_participation's answer when its window
+# ran out. rc 1 (failed, the apply rolls back) with TN_UPDATE_VOTE_ROLLBACK=1, when
+# the unit is not active, or when the RPC no longer answers eth_chainId; else rc 0
+# with UPDATE_PARTICIPATION=late and a warning that the new release stays running.
+_uc_vote_late() {
+    local msg="$1" url="$2" out hex
+    UPDATE_VOTING=false
+    if [[ "${TN_UPDATE_VOTE_ROLLBACK:-}" == "1" ]]; then
+        update_fail "${msg} (TN_UPDATE_VOTE_ROLLBACK=1: failing the update.)"
+        return 1
     fi
+    if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        update_fail "${msg} The unit ${SERVICE_NAME} is not active."
+        return 1
+    fi
+    out="$(tn_rpc_call "$url" eth_chainId '[]' 5 2>/dev/null)" || out=""
+    hex="$(tn_json_field "$out" result 2>/dev/null)" || hex=""
+    if [[ ! "$hex" =~ ^0x[0-9a-fA-F]{1,15}$ ]]; then
+        update_fail "${msg} Its RPC no longer answers eth_chainId."
+        return 1
+    fi
+    UPDATE_PARTICIPATION=late
+    update_wait_say warn "${msg} Not rolled back: the unit is active and its RPC answers, so the new release keeps running while it catches up. Watch it with check-node.sh or journalctl -u ${SERVICE_NAME} -f (TN_UPDATE_VOTE_ROLLBACK=1 rolls back on this instead)."
+    return 0
+}
+
+# update_vote_field -- ',"voting":false' for a --json done event after the
+# consensus participation check failed or ran out of time; nothing otherwise.
+update_vote_field() {
+    case "${UPDATE_PARTICIPATION:-}" in
+        failed|late) printf ',"voting":false' ;;
+    esac
+}
+
+# update_vote_note -- the interactive line after a successful apply whose node is
+# not voting yet (UPDATE_PARTICIPATION=late); nothing otherwise.
+update_vote_note() {
+    if [[ "${UPDATE_PARTICIPATION:-}" == "late" ]]; then
+        print_warn "${SERVICE_NAME} runs the new release but is not following consensus or voting yet; it was not rolled back."
+        print_info "  Check it again in a few minutes: bash ~/telcoin-node-scripts/check-node.sh"
+    fi
+    return 0
 }
 
 # update_record_mode -- the node's consensus mode right before the stop
@@ -1575,6 +1615,7 @@ apply_docker_update() {
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
         fi
         print_ok "Update complete. Now running on: ${new_image}"
+        update_vote_note
         print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
     fi
@@ -2061,6 +2102,7 @@ apply_source_update() {
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
         fi
         print_ok "Update complete. Now running: ${new_version}"
+        update_vote_note
         print_info "Verify full health: bash ~/telcoin-node-scripts/check-node.sh"
         return 0
     fi
@@ -2886,7 +2928,7 @@ json_apply_source() {
         # Record the now-running release so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
         record_installed_ref "$new_ref"
-        json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"}"
+        json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"$(update_vote_field)}"
         return 0
     fi
 
@@ -2986,7 +3028,7 @@ json_apply_docker() {
     if [[ "$verify_ok" == "true" ]]; then
         clear_pending_state
         docker_record_meta "$new_image" "$new_ref"
-        json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_image\":\"$(json_escape "$new_image")\"}"
+        json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_image\":\"$(json_escape "$new_image")\"$(update_vote_field)}"
         return 0
     fi
 

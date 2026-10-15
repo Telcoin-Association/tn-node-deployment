@@ -5,6 +5,8 @@
 # read CvvActive again within TN_UPDATE_VOTE_TIMEOUT. update_epoch_wait records the
 # mode before the stop (UPDATE_MODE_BEFORE, MODE_BEFORE in the pending state), also
 # with --no-epoch-wait. A failed check puts "voting":false in the --json done event.
+# When the window runs out while the unit is active and the RPC answers, the check
+# passes as "late" (no rollback, "voting":false) unless TN_UPDATE_VOTE_ROLLBACK=1.
 #
 # A curl shim on PATH answers each JSON-RPC method from a sequence file (one answer
 # per call, the last one repeated); sleep is a function that only counts. A copy of
@@ -47,6 +49,8 @@ chmod 0755 "$T/bin/curl"
 PATH="$T/bin:$PATH"
 SLEPT=0
 sleep() { SLEPT=$(( SLEPT + ${1:-0} )); }
+UNIT_ACTIVE=yes
+systemctl() { [ "$UNIT_ACTIVE" = yes ]; }
 
 # rpc_seq METHOD ANSWER... -- the answers (JSON-RPC results) METHOD gives, in order.
 rpc_seq() {
@@ -76,21 +80,49 @@ check "was active: one poll" 10 "$SLEPT"
 
 rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 100)"
 rpc_seq tn_nodeMode '"CvvActive"'
-cpv "was active: active but the header does not advance" CvvActive 1 false
+cpv "was active: header does not advance, unit active, RPC answers: late, kept" CvvActive 0 false
 check "no progress: the window was used up" 60 "$SLEPT"
 check "no progress: says so" yes "$(grep -q 'did not advance within 60s' "$T/out" && echo yes || echo no)"
+check "no progress: says it is not rolled back" yes "$(grep -q 'Not rolled back: the unit is active' "$T/out" && echo yes || echo no)"
+check "no progress: participation late" late "$UPDATE_PARTICIPATION"
 check "no progress: --json done carries voting false" ',"voting":false' "$(update_vote_field)"
+check "late: the interactive note says so" yes "$(update_vote_note 2>&1 | grep -q 'not rolled back' && echo yes || echo no)"
+
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 100)"
+TN_UPDATE_VOTE_ROLLBACK=1
+cpv "no progress with TN_UPDATE_VOTE_ROLLBACK=1: failed" CvvActive 1 false
+check "rollback opt-in: participation failed" failed "$UPDATE_PARTICIPATION"
+check "rollback opt-in: says so" yes "$(grep -q 'TN_UPDATE_VOTE_ROLLBACK=1: failing' "$T/out" && echo yes || echo no)"
+unset TN_UPDATE_VOTE_ROLLBACK
+
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 100)"
+UNIT_ACTIVE=no
+cpv "no progress and the unit is not active: failed" CvvActive 1 false
+check "unit down: says so" yes "$(grep -q 'is not active' "$T/out" && echo yes || echo no)"
+UNIT_ACTIVE=yes
+
+rpc_seq eth_chainId '"0x7e1"' 'null'
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 100)"
+cpv "no progress and the RPC stopped answering: failed" CvvActive 1 false
+check "RPC dead: says so" yes "$(grep -q 'no longer answers eth_chainId' "$T/out" && echo yes || echo no)"
+rpc_seq eth_chainId '"0x7e1"'
 
 rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 102)"
 rpc_seq tn_nodeMode '"CvvInactive"'
-cpv "was active: not active again within the timeout" CvvActive 1 false
+cpv "was active: not voting again within the timeout: late, kept" CvvActive 0 false
 check "not active: says so" yes "$(grep -q 'was voting (CvvActive) before the update and reads CvvInactive' "$T/out" && echo yes || echo no)"
+check "not voting: --json done carries voting false" ',"voting":false' "$(update_vote_field)"
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 102)"
+TN_UPDATE_VOTE_ROLLBACK=1
+cpv "not voting with TN_UPDATE_VOTE_ROLLBACK=1: failed" CvvActive 1 false
+unset TN_UPDATE_VOTE_ROLLBACK
 
 rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 105)"
 rpc_seq tn_nodeMode '"CvvInactive"' '"CvvInactive"' '"CvvActive"'
 cpv "was active: votes again after two polls" CvvActive 0 true
 check "votes again: header poll plus two mode polls" 30 "$SLEPT"
 check "passed: no voting field" "" "$(update_vote_field)"
+check "passed: no interactive note" "" "$(update_vote_note 2>&1)"
 
 rpc_seq tn_latestConsensusHeader "$(hdr 7)" "$(hdr 7)" "$(hdr 7)" "$(hdr 8)"
 rpc_seq tn_nodeMode '"Observer"'
@@ -137,4 +169,8 @@ check "unreadable mode: recorded as unknown" "0 x" "$rc ${UPDATE_MODE_BEFORE}x"
 # Every apply path runs the check before it reports success.
 check "four apply paths run verify_consensus_participation" 4 \
     "$(grep -c 'verify_consensus_participation; then' "$TN_TEST_REPO/update-node.sh")"
+check "both --json success done events carry the voting field" 2 \
+    "$(grep -c '"ok\\":true,\\"phase\\":\\"apply.*update_vote_field' "$TN_TEST_REPO/update-node.sh")"
+check "both interactive success paths print the late note" 2 \
+    "$(grep -c '^        update_vote_note$' "$TN_TEST_REPO/update-node.sh")"
 finish
