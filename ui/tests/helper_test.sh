@@ -98,6 +98,12 @@ set +e +o pipefail
     CADDY_SCRIPT="$T/engine/install-caddy.sh"
     FIREWALL_SCRIPT="$T/engine/firewall-setup.sh"
     LOGROTATE_CONF="$T/root/etc/logrotate.d/telcoin"
+    LIBEXEC_DIR="$T/root/usr/local/libexec/telcoin"
+    # No shared library: every guarded library call takes its fallback. The
+    # library cases below point HELPER_LIB at the checkout's lib/common.sh.
+    HELPER_LIB="$T/nolib/common.sh"
+    AUDIT_LOG="$T/audit/audit.log"
+    AUDIT_LOGGER=""
 }
 mkdir -p "$T/bin" "$T/engine"
 : > "$T/all-calls.log"
@@ -119,7 +125,10 @@ make_fake "$T/engine/setup-node.sh"     setup-node
 make_fake "$T/engine/install-caddy.sh"  install-caddy
 make_fake "$T/engine/firewall-setup.sh" firewall-setup
 make_fake "$T/bin/systemctl" systemctl
-make_fake "$T/bin/docker" docker
+# docker ps lists two Telcoin Network containers, tn-node and observer.
+# shellcheck disable=SC2016
+make_fake "$T/bin/docker" docker \
+    '[ "$1" = ps ] && printf "tn-node\tus-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri\nobserver\tus-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri\nother\tbusybox:latest\n"; exit 0'
 # The journal reports two starts of whatever unit it is asked about.
 # shellcheck disable=SC2016
 make_fake "$T/bin/journalctl" journalctl \
@@ -135,6 +144,17 @@ if ! "$REAL_SED" --version >/dev/null 2>&1; then
     chmod +x "$T/bin/sed"
 fi
 PATH="$T/bin:$PATH"
+
+# The fake data and log dirs belong to the test user; the helper takes them for
+# the node's service account "svc". Running a command as that account is
+# recorded as "run_as [svc] [cmd] ..." and then runs as the test user.
+path_owner() { echo "svc:svc"; }
+_run_as() {
+    local u="$1"
+    shift 2
+    { printf 'run_as [%s]' "$u"; for a in "$@"; do printf ' [%s]' "$a"; done; echo; } >> "$T/calls.log"
+    "$@"
+}
 
 unset TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_PASSPHRASE_METHOD TN_SETUP_ADDRESS \
       TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER \
@@ -303,13 +323,6 @@ check_has "addons-status reads the resolved meta" \
 same_with_tokens unified meta-cat
 check_has "meta-cat prints the resolved meta" "REGION=us-east1" "$BASE"
 
-same_with_tokens unified setup-keygen
-check_has "setup-keygen calls setup-node.sh directly" \
-    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--passphrase-method] [loadcredential]" "$BASE"
-
-same_with_tokens unified setup-finalize
-check_has "setup-finalize calls setup-node.sh directly" \
-    "setup-node [--json] [--phase=finalize] [--network] [testnet] [--passphrase-method] [loadcredential]" "$BASE"
 
 # The token never steers resolution on a legacy box either.
 same_with_tokens observer tracing-enable
@@ -328,11 +341,12 @@ check_has "set-hostname validator keeps its argument" 'hostname: "validator"' "$
 check_has "set-hostname validator succeeds" "rc=0" "$t"
 fixture unified
 t="$(trace update-prepare observer)"
-check_has "update-prepare with one argument takes it as the ref" \
-    "update-node [--json] [--prepare] [--ref] [observer]" "$t"
+check_has "update-prepare with one argument takes it as the ref (and refuses it)" \
+    "ref must be a release tag of testnet (vX.Y.Z-adiri); branches and commit ids are refused: observer" "$t"
 fixture unified
 t="$(trace docker-status observer)"
-check_has "docker-status observer keeps its argument" "docker [inspect] [observer]" "$t"
+check_has "docker-status observer keeps its argument" \
+    "docker [inspect] [--format] [${DOCKER_STATUS_FORMAT}] [observer]" "$t"
 fixture unified
 t="$(trace tracing-enable observer extra)"
 check_has "a surplus argument after the token is refused" "too many arguments for tracing-enable: extra" "$t"
@@ -388,24 +402,85 @@ t="$(trace set-hostname node-x)"
 check_has "a recorded DATA_DIR that does not exist is reported, not replaced" \
     "data dir not found: $T/root/data/missing" "$t"
 
-# ---- Setup: TN_SETUP_RPC_DOMAIN, never --rpc-public -----------------------------
-# Each export below lasts only for its own $(...) subshell.
-fixture unified
-t="$(export TN_SETUP_RPC_DOMAIN=x.example.org; trace setup-keygen)"
+# ---- Setup: refusals, settings and the passphrase on stdin ------------------------
+# Each export below lasts only for its own $(...) subshell. A fresh box (no unit,
+# no .node-meta) unless a case says otherwise. The fake setup-node.sh has no
+# --passphrase-stdin, so it gets the transitional environment form; the second
+# fake has the flag and records the line it reads on stdin.
+make_fake "$T/engine/setup-node-stdin.sh" setup-node-stdin \
+    '# --passphrase-stdin
+IFS= read -r p; printf "stdin [%s]\n" "$p" >> "'"$T"'/calls.log"; exit 0'
+export TN_SETUP_NETWORK=testnet
+FIN_ARGS="[--listener-primary] [/ip4/10.0.0.5/udp/49590/quic-v1] [--listener-worker] [/ip4/10.0.0.5/udp/49594/quic-v1]"
+fixture none
+t="$(printf 'a good passphrase\n' | trace setup-keygen)"
+check_has "setup-keygen calls setup-node.sh directly" \
+    "setup-node [--json] [--phase=keygen] [--network] [testnet]" "$t"
+check_lacks "setup-keygen never puts the passphrase in an argument" "a good passphrase" "$t"
+t="$(printf 'a good passphrase\n' | trace setup-keygen validator)"
+check_has "setup-keygen token form" "setup-node [--json] [--phase=keygen] [--network] [testnet]" "$t"
+t="$(SETUP_SCRIPT="$T/engine/setup-node-stdin.sh"; printf 'a good passphrase\n' | trace setup-keygen)"
+check_has "setup-keygen sends --passphrase-stdin when the engine has it" \
+    "setup-node-stdin [--json] [--phase=keygen] [--network] [testnet] [--passphrase-stdin]" "$t"
+check_has "the engine reads the passphrase on its stdin" "stdin [a good passphrase]" "$t"
+t="$(export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize </dev/null)"
+check_has "setup-finalize calls setup-node.sh directly" \
+    "setup-node [--json] [--phase=finalize] [--network] [testnet] ${FIN_ARGS}" "$t"
+t="$(export TN_SETUP_RPC_DOMAIN=x.example.org; printf 'a good passphrase\n' | trace setup-keygen)"
 check_has "TN_SETUP_RPC_DOMAIN becomes --rpc-domain" \
-    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--passphrase-method] [loadcredential] [--rpc-domain] [x.example.org]" "$t"
-t="$(export TN_SETUP_RPC_DOMAIN=x.example.org TN_SETUP_RPC_PUBLIC=true; trace setup-finalize validator)"
+    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--rpc-domain] [x.example.org]" "$t"
+t="$(export TN_SETUP_RPC_DOMAIN=x.example.org TN_SETUP_RPC_PUBLIC=true TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize validator </dev/null)"
 check_has "token form with TN_SETUP_RPC_DOMAIN" \
-    "setup-node [--json] [--phase=finalize] [--network] [testnet] [--passphrase-method] [loadcredential] [--rpc-domain] [x.example.org]" "$t"
-t="$(export TN_SETUP_RPC_PUBLIC=true TN_SETUP_INSTANCE=3; trace setup-finalize)"
-check_has "TN_SETUP_RPC_PUBLIC and TN_SETUP_INSTANCE from an old server are ignored" \
-    "setup-node [--json] [--phase=finalize] [--network] [testnet] [--passphrase-method] [loadcredential]" "$t"
-t="$(export TN_SETUP_RPC_DOMAIN=localhost; trace setup-keygen)"
+    "setup-node [--json] [--phase=finalize] [--network] [testnet] ${FIN_ARGS} [--rpc-domain] [x.example.org]" "$t"
+t="$(export TN_SETUP_RPC_PUBLIC=true TN_SETUP_INSTANCE=3 TN_SETUP_PASSPHRASE_METHOD=tpm TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize </dev/null)"
+check_has "TN_SETUP_RPC_PUBLIC, TN_SETUP_INSTANCE, TN_SETUP_PASSPHRASE_METHOD from an old server are ignored" \
+    "setup-node [--json] [--phase=finalize] [--network] [testnet] ${FIN_ARGS}" "$t"
+t="$(export TN_SETUP_RPC_DOMAIN=localhost; printf 'a good passphrase\n' | trace setup-keygen)"
 check_has "an invalid TN_SETUP_RPC_DOMAIN is refused" "invalid rpc domain: localhost" "$t"
 setup_calls="$(grep '^setup-node' "$T/all-calls.log")"
-# 3 + 3 from the two token comparisons above, then the three accepted calls here.
-check "setup-node.sh ran for every accepted setup call" "9" "$(printf '%s\n' "$setup_calls" | grep -c .)"
+check "setup-node.sh ran for every accepted setup call" "7" "$(printf '%s\n' "$setup_calls" | grep -c .)"
 check_lacks "--rpc-public never appears in a setup argv" "--rpc-public" "$setup_calls"
+check_lacks "--passphrase-method never appears in a setup argv" "--passphrase-method" "$setup_calls"
+
+# Refusals, each before setup-node.sh runs.
+refused_in() { local name="$1"; shift; refused "$name" "$@" < "$T/pass-in"; }
+printf 'a good passphrase\n' > "$T/pass-in"
+fixture none
+unset TN_SETUP_NETWORK; refused_in "setup-keygen without a network" setup-keygen; export TN_SETUP_NETWORK=testnet
+export TN_SETUP_NETWORK=devnet; refused_in "setup-keygen on devnet" setup-keygen; export TN_SETUP_NETWORK=testnet
+export TN_SETUP_SERVICE_USER=root; refused_in "setup-keygen as root" setup-keygen; unset TN_SETUP_SERVICE_USER
+export TN_SETUP_SERVICE_USER=telcoin-ui; refused_in "setup-keygen as telcoin-ui" setup-keygen; unset TN_SETUP_SERVICE_USER
+export TN_SETUP_SERVICE_GROUP=root; refused_in "setup-keygen with group root" setup-keygen; unset TN_SETUP_SERVICE_GROUP
+export TN_SETUP_SERVICE_USER=Bad; refused_in "setup-keygen with an upper-case user" setup-keygen; unset TN_SETUP_SERVICE_USER
+export TN_SETUP_DATA_DIR=/usr/local/sbin; refused_in "setup-keygen data dir /usr/local/sbin" setup-keygen; unset TN_SETUP_DATA_DIR
+export TN_SETUP_DATA_DIR=/etc/telcoin; refused_in "setup-keygen data dir /etc/telcoin" setup-keygen; unset TN_SETUP_DATA_DIR
+export TN_SETUP_DATA_DIR=/var/lib/telcoin/../x; refused_in "setup-keygen data dir with .." setup-keygen; unset TN_SETUP_DATA_DIR
+export TN_SETUP_INSTALL_METHOD=source TN_SETUP_BUILD_REF=main; refused_in "setup-keygen build ref main" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_BUILD_REF
+export TN_SETUP_INSTALL_METHOD=source TN_SETUP_BUILD_REF=v0.16.0; refused_in "setup-keygen mainnet tag on testnet" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_BUILD_REF
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=docker.io/library/busybox:latest; refused_in "setup-keygen foreign image" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:latest; refused_in "setup-keygen image tag latest" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-devnet; refused_in "setup-keygen devnet image tag" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
+refused "setup-keygen without a passphrase on stdin" setup-keygen < /dev/null
+printf ' padded \n' > "$T/pass-bad"
+refused "setup-keygen with a padded passphrase" setup-keygen < "$T/pass-bad"
+export TN_SETUP_NETWORK=mainnet; printf 'short-pass\n' > "$T/pass-short"
+refused "mainnet setup-keygen with a 10-byte passphrase" setup-keygen < "$T/pass-short"
+export TN_SETUP_NETWORK=testnet
+refused "setup-finalize without listener multiaddrs (NC-2)" setup-finalize < /dev/null
+DIGEST="$(printf '%064d' 0 | tr 0 a)"
+t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
+check_has "setup-keygen accepts the testnet image by digest" "rc=0" "$t"
+fixture unified
+refused_in "setup-keygen refused on an installed node" setup-keygen
+export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1
+refused "setup-finalize refused on an installed node" setup-finalize < /dev/null
+unset TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER
+fixture none
+add_meta -
+refused_in "setup-keygen refused once keygen wrote .node-meta" setup-keygen
+t="$(export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize </dev/null)"
+check_has "setup-finalize runs after keygen wrote .node-meta" "rc=0" "$t"
+unset TN_SETUP_NETWORK
 
 # ---- Strict hostname rule ---------------------------------------------------------
 l61="$(printf '%061d' 0 | tr 0 a)"
@@ -443,12 +518,12 @@ for h in "${good_hosts[@]}"; do
     check "valid_hostname accepts $(label "$h")" accepted "$r"
 done
 
-export TN_CADDY_PASSWORD=secret-pass
+printf 'a-dashboard-password-1\n' > "$T/caddy-pass"
 fixture none
 for h in localhost 1.2.3.4 a..b -x.example "$h254" "${l64}.example.org"; do
     refused "caddy-dns-check refuses $(label "$h")" caddy-dns-check "$h"
     refused "rpc-dns-check refuses $(label "$h")" rpc-dns-check "$h"
-    refused "caddy-enable refuses $(label "$h")" caddy-enable "$h" admin
+    refused "caddy-enable refuses $(label "$h")" caddy-enable "$h" admin < "$T/caddy-pass"
     refused "rpc-enable refuses $(label "$h")" rpc-enable "$h"
 done
 for h in node7.adiri.telcoin.network "$h253"; do
@@ -458,11 +533,14 @@ for h in node7.adiri.telcoin.network "$h253"; do
     t="$(trace rpc-dns-check "$h" 203.0.113.7)"
     check_has "rpc-dns-check accepts $(label "$h")" \
         "install-caddy [--json] [--phase=rpc-check-dns] [--rpc-domain] [$h] [--public-ip] [203.0.113.7]" "$t"
-    t="$(trace caddy-enable "$h" admin)"
+    t="$(trace caddy-enable "$h" admin < "$T/caddy-pass")"
     check_has "caddy-enable accepts $(label "$h")" \
         "install-caddy [--json] [--phase=enable] [--domain] [$h] [--username] [admin]" "$t"
 done
-unset TN_CADDY_PASSWORD
+check_lacks "the dashboard password never reaches an argument" "a-dashboard-password-1" "$(cat "$T/all-calls.log")"
+refused "caddy-enable without a password on stdin" caddy-enable node7.example.org admin < /dev/null
+printf 'short-pass\n' > "$T/caddy-short"
+refused "caddy-enable with a password under 16 characters" caddy-enable node7.example.org admin < "$T/caddy-short"
 
 # ---- rpc-enable argv shapes ---------------------------------------------------------
 fixture none
@@ -495,8 +573,7 @@ refused "rpc-enable refuses a fourth argument" rpc-enable node7.example.org - da
 fixture unified
 for fv in "primary_listener=/ip4/0.0.0.0/udp/49590/quic-v1" \
           "worker_listener=/ip6/::/udp/49594/quic-v1" \
-          "metrics=127.0.0.1:9101" "metrics=off" "verbosity=-vvvvv" \
-          "docker_image=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri" \
+          "metrics=127.0.0.1:9101" "metrics=off" "verbosity=-v" "verbosity=-vvv" \
           "bootstrap_peers=none" "bootstrap_peers=/home/ubuntu/peers.yaml" \
           "state_export=off" "state_export=unlimited" "state_export=1" "state_export=999999" \
           "allow_private_forward_targets=true" "allow_private_forward_targets=false"; do
@@ -504,6 +581,8 @@ for fv in "primary_listener=/ip4/0.0.0.0/udp/49590/quic-v1" \
     check_has "config-set accepts ${fv}" "edit-config [--json] [--set] [${fv}]" "$t"
 done
 for fv in "metrics=on" "metrics=OFF" "metrics=127.0.0.1" "verbosity=-vvvvvv" "docker_image=adiri" \
+          "metrics=0.0.0.0:9101" "metrics=10.0.0.5:9101" "verbosity=-vvvv" "verbosity=-vvvvv" \
+          "docker_image=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri" \
           "bootstrap_peers=peers.yaml" "bootstrap_peers=None" "bootstrap_peers=/tmp/peers file.yaml" \
           'bootstrap_peers=/tmp/$(id).yaml' "bootstrap_peers=" \
           "state_export=0" "state_export=01" "state_export=1000000" "state_export=-1" \
@@ -534,6 +613,188 @@ printf 'old\n' > "${LOG_DIR}/telcoin.log.1"
 t="$(trace clear-rotated)"
 check_has "clear-rotated removes rotated logs only" "removed 1" "$t"
 check_has "clear-rotated leaves the live log" "/var/log/telcoin/telcoin.log:" "$t"
+
+# ---- Generic argument check ----------------------------------------------------------
+fixture unified
+refused "an argument with a space is refused" set-hostname "a b"
+refused "an argument with a newline is refused" set-hostname "$(printf 'a\nb')"
+refused "an argument with a tab is refused" config-set state_export "$(printf '5\t')"
+refused "a leading dash is refused" update-prepare --force
+refused "a leading dash is refused (set-hostname)" set-hostname -x
+refused "a surplus argument is refused (journal-tail)" journal-tail 5 6
+refused "an argument to a no-argument subcommand is refused" quorum-check extra
+long="$(printf '%0600d' 0)"
+refused "an argument over 512 bytes is refused" set-hostname "$long"
+
+# ---- update-prepare takes only a release tag of the node's network -------------------
+fixture unified
+t="$(trace update-prepare v0.16.0-adiri)"
+check_has "update-prepare accepts a testnet release tag" \
+    "update-node [--json] [--prepare] [--ref] [v0.16.0-adiri]" "$t"
+for r in main feature/x v0.16.0 v0.16.0-adiri-hotfix v0.16-adiri 5535ef1f0425973bd81ef3162f3d07219c3456d0 \
+         V0.16.0-adiri "v0.16.0-adiri/../x"; do
+    refused "update-prepare refuses $r on testnet" update-prepare "$r"
+done
+printf 'NETWORK=mainnet\n' > "${ETC_DIR}/.node-meta"
+t="$(trace update-prepare v1.0.0)"
+check_has "update-prepare accepts a mainnet release tag" "update-node [--json] [--prepare] [--ref] [v1.0.0]" "$t"
+refused "update-prepare refuses a testnet tag on mainnet" update-prepare v1.0.0-adiri
+printf 'NETWORK=devnet\n' > "${ETC_DIR}/.node-meta"
+refused "update-prepare refuses on devnet" update-prepare v1.0.0
+printf 'NETWORK=testnet\nNETWORK=mainnet\n' > "${ETC_DIR}/.node-meta"
+refused "update-prepare refuses a duplicated NETWORK" update-prepare v1.0.0
+
+# ---- Audit trail ---------------------------------------------------------------------
+rm -rf "$T/audit"
+fixture unified
+trace config-set state_export 7 >/dev/null
+trace config-set metrics 0.0.0.0:9101 >/dev/null
+trace meta-cat >/dev/null
+audit="$(cat "$T/audit/audit.log" 2>/dev/null)"
+check "audit: one start line per mutating call, one refused line per refusal" "3" "$(printf '%s\n' "$audit" | grep -c .)"
+check_has "audit: the accepted call" \
+    "$(printf '%s\n' "$audit" | grep '"args":"state_export 7","phase":"start"')" "$audit"
+check "audit: the refusal names its reason" "1" \
+    "$(printf '%s\n' "$audit" | grep -c '"phase":"refused","sudo_uid":"[^"]*","detail":"invalid metrics address')"
+check_lacks "audit: read-only calls are not logged" '"sub":"meta-cat"' "$audit"
+check "audit: the log is not group or world readable" "600" "$(stat -c %a "$T/audit/audit.log" 2>/dev/null)"
+
+# ---- Read-only views --------------------------------------------------------------------
+fixture unified
+printf 'PRIMARY_LISTENER_MULTIADDR=/ip4/10.0.0.5/udp/49590/quic-v1\nWORKER_LISTENER_MULTIADDR=/ip4/10.0.0.5/udp/49594/quic-v1\nTN_RPC_ADDR=127.0.0.1\nOTHER=x\n' > "${ETC_DIR}/node.env"
+t="$(trace node-env-cat)"
+check_has "node-env-cat prints the primary listener" "PRIMARY_LISTENER_MULTIADDR=/ip4/10.0.0.5/udp/49590/quic-v1" "$t"
+check_has "node-env-cat prints TN_RPC_ADDR" "TN_RPC_ADDR=127.0.0.1" "$t"
+check "node-env-cat prints only the three keys" "3" "$( (set -euo pipefail; main node-env-cat) | grep -c .)"
+t="$(trace journal-tail 50)"
+check_has "journal-tail argv" "journalctl [-u] [telcoin] [-o] [cat] [-n] [50] [--no-pager]" "$t"
+t="$(trace journal-follow)"
+check_has "journal-follow argv" "journalctl [-u] [telcoin] [-o] [cat] [-n] [0] [-f] [--no-pager]" "$t"
+for n in 0 abc 200001 01; do
+    refused "journal-tail refuses $n" journal-tail "$n"
+done
+t="$(trace quorum-check)"
+check_has "quorum-check without the library check says so" '{"available":false}' "$t"
+
+# ---- Start-script resolution (current layout) ---------------------------------------
+fixture none
+mkdir -p "$UNIT_DIR" "$LIBEXEC_DIR"
+printf '[Service]\nExecStart=%s\n' "${LIBEXEC_DIR}/tn-start" > "${UNIT_DIR}/telcoin.service"
+printf '#!/bin/bash\nexec /usr/local/bin/telcoin-network node --http\n' > "${LIBEXEC_DIR}/tn-start"
+check "node_wrapper resolves the libexec start script" "${LIBEXEC_DIR}/tn-start" "$(node_wrapper)"
+printf '[Service]\nExecStart=%s\n' "${LIBEXEC_DIR}/tn-start-docker" > "${UNIT_DIR}/telcoin.service"
+printf '#!/bin/bash\nexec docker run x\n' > "${LIBEXEC_DIR}/tn-start-docker"
+check "node_wrapper resolves the Docker start script" "${LIBEXEC_DIR}/tn-start-docker" "$(node_wrapper)"
+printf '[Service]\nExecStart=/usr/bin/evil\n' > "${UNIT_DIR}/telcoin.service"
+check "node_wrapper ignores another ExecStart" "${OPT_DIR}/start-telcoin.sh" "$(node_wrapper)"
+
+# ---- Logs: clear, rotation ---------------------------------------------------------------
+fixture unified
+mv "${LOG_DIR}/telcoin.log" "${LOG_DIR}/real.log"
+ln -s "${LOG_DIR}/real.log" "${LOG_DIR}/telcoin.log"
+refused "log-clear refuses a symlinked log file" log-clear
+check "log-clear left the symlink target alone" "a log line" "$(cat "${LOG_DIR}/real.log")"
+fixture unified
+t="$(trace log-clear)"
+check_has "log-clear in a dir the root check refuses runs as its owner" \
+    "run_as [svc] [truncate] [-s] [0] [--] [${LOG_DIR}/telcoin.log]" "$t"
+refused "set-logrotate refuses 10X" set-logrotate 10X
+refused "set-logrotate refuses 1g" set-logrotate 1g
+refused "set-logrotate refuses an empty size" set-logrotate ""
+fixture unified
+t="$(trace logrotate-seed)"
+check_has "logrotate-seed writes the default size" "    size 100M" "$t"
+check_has "logrotate-seed keeps copytruncate" "    copytruncate" "$t"
+trace set-logrotate 3G >/dev/null
+t="$(trace logrotate-seed)"
+check_has "logrotate-seed keeps an existing size" "    size 3G" "$t"
+ln -s /etc/passwd "$T/root/etc/logrotate.d/evil"
+LOGROTATE_CONF="$T/root/etc/logrotate.d/evil" refused "set-logrotate refuses a symlinked config" set-logrotate 1G
+check_lacks "the symlink target was not written" "size 1G" "$(cat /etc/passwd)"
+
+# ---- set-hostname writes as the service account ------------------------------------------
+fixture unified
+printf 'listen: x\nhostname: "old"\nother: y\n' > "${VAR_DIR}/network-config"
+t="$(trace set-hostname newname)"
+check_has "set-hostname reads network-config as the service account" \
+    "run_as [svc] [cat] [--] [${VAR_DIR}/network-config]" "$t"
+check_has "set-hostname writes network-config as the service account" \
+    "run_as [svc] [mv] [-f] [--] [${VAR_DIR}/network-config.tn-new] [${VAR_DIR}/network-config]" "$t"
+check "set-hostname replaces only the hostname line" \
+    "$(printf 'listen: x\nhostname: "newname"\nother: y')" "$(cat "${VAR_DIR}/network-config")"
+path_owner() { echo "root:root"; }
+refused "set-hostname refuses a root-owned data dir" set-hostname other
+path_owner() { echo "svc:svc"; }
+
+# ---- Docker views: only a detected Telcoin Network container ----------------------------
+fixture unified
+# refused_after_ps <name> <args...> -- refused, with docker ps the only call.
+refused_after_ps() {
+    local name="$1" t
+    shift
+    t="$(trace "$@")"
+    CHECKS=$((CHECKS + 1))
+    if [[ "$(printf '%s\n' "$t" | head -1)" != "rc=0" ]] && ! grep -v '^docker \[ps\]' "$T/calls.log" | grep -q .; then
+        printf 'ok    %s\n' "$name"
+        return 0
+    fi
+    FAILS=$((FAILS + 1))
+    printf 'FAIL  %s\n' "$name"
+    printf '%s\n' "$t" | sed 's/^/        /'
+    return 1
+}
+refused_after_ps "docker-status refuses a container docker-detect does not list" docker-status other
+refused_after_ps "docker-logs refuses an unknown container" docker-logs nope 10
+refused_after_ps "docker-logs refuses a zero line count" docker-logs tn-node 0
+t="$(trace docker-status tn-node)"
+check_lacks "docker-status never asks for Config.Env" "Env" "$t"
+t="$(trace docker-logs-full tn-node)"
+check_has "docker-logs-full is capped" "docker [logs] [--tail] [200000] [tn-node]" "$t"
+
+# ---- Jaeger publishes on loopback only ---------------------------------------------------
+fixture none
+t="$(trace jaeger-start)"
+check_has "jaeger-start binds loopback ports, drops capabilities" \
+    "docker [run] [-d] [--name] [jaeger] [--restart] [no] [-p] [127.0.0.1:16686:16686] [-p] [127.0.0.1:4317:4317] [--memory] [512m] [--pids-limit] [256] [--cap-drop] [ALL] [--security-opt] [no-new-privileges] [${JAEGER_IMAGE}]" "$t"
+
+# ---- The shared library, when it is there --------------------------------------------------
+LIB_SAVE="$HELPER_LIB"
+HELPER_LIB="${TEST_DIR}/../../lib/common.sh"
+check "a library not owned by root is not used" "unusable" "$(_lib_usable && echo usable || echo unusable)"
+LIB_REQUIRE_ROOT=0
+check "_lib_call reports a missing function as 127" "127" "$(_lib_call tn_no_such_function; echo $?)"
+# shellcheck source=/dev/null
+if (source "$HELPER_LIB" >/dev/null 2>&1 && declare -F tn_release_tag_ok >/dev/null); then
+    fixture unified
+    t="$(trace update-prepare v0.16.0-adiri)"
+    check_has "with the library: update-prepare accepts a testnet tag" \
+        "update-node [--json] [--prepare] [--ref] [v0.16.0-adiri]" "$t"
+    refused "with the library: update-prepare refuses main" update-prepare main
+    check "with the library: passphrase_ok refuses a 15-byte mainnet value" "1" \
+        "$(passphrase_ok abcdefghijklmno mainnet; echo $?)"
+else
+    printf 'SKIP  library cases (lib/common.sh does not source here)\n'
+fi
+# One writer for the rotation config: once the library has tn_install_logrotate,
+# set-logrotate must produce exactly what a direct call writes. The library writes
+# /etc/logrotate.d/telcoin itself, so this runs only as root in a throwaway
+# container (TN_UI_TEST_ROOT=1).
+# shellcheck source=/dev/null
+if (source "$HELPER_LIB" >/dev/null 2>&1 && declare -F tn_install_logrotate >/dev/null) \
+    && [[ $EUID -eq 0 && "${TN_UI_TEST_ROOT:-}" == 1 ]]; then
+    LOGROTATE_CONF=/etc/logrotate.d/telcoin
+    (set -euo pipefail; main set-logrotate 2G) >/dev/null 2>&1
+    via_helper="$(cat /etc/logrotate.d/telcoin 2>/dev/null)"
+    rm -f /etc/logrotate.d/telcoin
+    # shellcheck source=/dev/null
+    (source "$HELPER_LIB" >/dev/null 2>&1; tn_install_logrotate 2G) >/dev/null 2>&1
+    check "set-logrotate writes what tn_install_logrotate writes" "$(cat /etc/logrotate.d/telcoin 2>/dev/null)" "$via_helper"
+    LOGROTATE_CONF="$T/root/etc/logrotate.d/telcoin"
+else
+    printf 'SKIP  set-logrotate vs tn_install_logrotate (needs the library function and TN_UI_TEST_ROOT=1 as root)\n'
+fi
+HELPER_LIB="$LIB_SAVE"
+LIB_REQUIRE_ROOT=1
 
 # ---- No engine call carries a role flag ---------------------------------------------
 all_calls="$(cat "$T/all-calls.log")"
