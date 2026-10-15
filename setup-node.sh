@@ -86,13 +86,21 @@
 #   --passphrase-stdin       Read the passphrase from standard input: one line, read
 #                            once, without echo (a trailing CR is dropped).
 #
+# LOGS AND RESTARTS
+#   --log-target journal|file  Where the node logs: the systemd journal (default on
+#                            mainnet; capped at 4G by a journald drop-in) or the two files
+#                            in /var/log/telcoin (default elsewhere; rotated by logrotate).
+#   --allow-quorum-risk      Restart a running committee node even when the members that
+#                            are already down plus this one would halt consensus (for a
+#                            coordinated restart only).
+#
 #   -h, --help               Print this text and exit.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
-if ! version_gte "${COMMON_VERSION:-0}" "1.6.0"; then
-    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than 1.6.0. Run update-scripts.sh and try again."
+if ! version_gte "${COMMON_VERSION:-0}" "1.6.0" || ! declare -F tn_write_node_unit >/dev/null 2>&1; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh. Run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
         *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
@@ -175,6 +183,7 @@ RPC_PORT="$DEFAULT_RPC_PORT"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
 USE_LOAD_CREDENTIAL=false
 PASSPHRASE_METHOD="loadcredential"  # loadcredential | tpm
+LOG_TARGET=""                        # journal | file (--log-target; empty: by network)
 # The BLS key passphrase lives in TN_SETUP_PASS, a plain shell variable: main fills it
 # from TN_BLS_PASSPHRASE (then unset) or --passphrase-stdin, step_generate_keys from the
 # prompt. It is never exported, so no child process inherits it; keytool gets it on its
@@ -389,7 +398,9 @@ _select_passphrase_method() {
     echo "  How would you like to protect the BLS passphrase?"
     echo ""
     echo "  1) systemd LoadCredential (default -- recommended for most operators)"
-    echo "       Passphrase secured by systemd. Never appears in process listings."
+    echo "       Passphrase kept in a root-only file; systemd hands it to the node,"
+    echo "       which reads it on standard input. It is never in the unit, on a"
+    echo "       command line or in the node's environment."
     echo "       Works on any Ubuntu 22.04+ server. Easy to recover."
     echo ""
     echo "  2) TPM/vTPM sealing (advanced -- maximum security)"
@@ -1474,25 +1485,38 @@ step_create_infrastructure() {
         read -r -p "  Service user name  [${SERVICE_USER}]: " input
         local proposed_user="${input:-$SERVICE_USER}"
         if validate_service_name "$proposed_user" "Service user"; then
-            if id "$proposed_user" &>/dev/null && [[ $(id -u "$proposed_user") -lt 1000 ]] || ! id "$proposed_user" &>/dev/null; then
+            # tn_service_user_ok says why on stderr: root, telcoin-ui, a regular
+            # account (UID 1000 or above) or a member of sudo, adm, docker or wheel.
+            if tn_service_user_ok "$proposed_user"; then
                 SERVICE_USER="$proposed_user"
                 break
-            else
-                print_error "User '${proposed_user}' already exists as a regular user (UID $(id -u "$proposed_user"))."
-                print_info "Please choose a different name or press Enter to use the default."
             fi
+            print_info "Please choose a different name or press Enter to use the default."
         fi
     done
 
     while ! json_mode; do
         read -r -p "  Service group name [${SERVICE_GROUP}]: " input
         local proposed_group="${input:-$SERVICE_GROUP}"
-        if validate_service_name "$proposed_group" "Service group"; then
+        if validate_service_name "$proposed_group" "Service group" \
+            && tn_service_user_ok "$SERVICE_USER" "$proposed_group"; then
             SERVICE_GROUP="$proposed_group"
             break
         fi
     done
     echo ""
+    # The same rule for --json and for the values the prompts accepted.
+    if ! tn_service_user_ok "$SERVICE_USER" "$SERVICE_GROUP"; then
+        setup_fail "The node cannot run as ${SERVICE_USER}:${SERVICE_GROUP} (see the message above)."
+    fi
+    # A mainnet node is installed without the testnet add-ons (VPN, observability,
+    # Caddy): the operator removes them first.
+    if [[ "$NETWORK" == "mainnet" ]] && declare -F tn_testnet_addons_present >/dev/null 2>&1; then
+        local addons=""
+        if addons="$(tn_testnet_addons_present 2>/dev/null)"; then
+            setup_fail "Testnet add-ons are present on this host (${addons:-unknown}); a mainnet node is not installed beside them. Remove them first (remove-node.sh)."
+        fi
+    fi
 
     # Remove stale groupadd/useradd lock files if present. A crashed process can
     # leave these behind (notably /etc/.pwd.lock, the lckpwdf() lock), making
@@ -1534,19 +1558,8 @@ step_create_infrastructure() {
     write_node_meta_runner
     print_ok "Recorded service account in ${CONFIG_DIR}/.node-meta (${SERVICE_USER}:${SERVICE_GROUP})"
 
-    # The reth cache under the service user's home, made by the service user itself; a
-    # missing home is created for it (never a recursive chown of one that exists).
-    print_step "Creating reth cache directory..."
-    local svc_home="/home/${SERVICE_USER}"
-    if [[ ! -e "$svc_home" && ! -L "$svc_home" ]]; then
-        install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 -- "$svc_home" \
-            || setup_fail "Could not create ${svc_home}."
-    fi
-    if tn_as_service_user mkdir -p -- "${svc_home}/.cache/reth/logs/telcoin-network-logs"; then
-        print_ok "Reth cache directory created"
-    else
-        setup_warn "Could not create the reth cache directory under ${svc_home} as ${SERVICE_USER} (the directory must belong to that user)."
-    fi
+    # No home directory for the service account: the unit hides /home and sets HOME to
+    # the data dir, where the node's own cache and log files go.
 
     verify_binary "$BINARY_PATH"
     # Node flags: asked of the release now, before any key exists, and recorded for a
@@ -1875,6 +1888,17 @@ prepare_node_extra_flags() {
     return 0
 }
 
+# setup_quorum_guard URL -- stop setup before a restart that would leave the committee
+# one member short of a halt (tn_committee_down_guard); --allow-quorum-risk overrides.
+setup_quorum_guard() {
+    local rc=0
+    tn_committee_down_guard "$1" setup_progress || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        setup_fail "Not restarting ${SERVICE_NAME}: the committee check refused it (see above). The new files are in place and take effect at the next restart; for a coordinated restart run again with --allow-quorum-risk."
+    fi
+    return 0
+}
+
 # The launch flags of a node that serves public RPC: bounded log queries,
 # subscriptions and request size, and HTTP limited to eth, net, web3 and tn.
 public_rpc_limit_flags() {
@@ -2006,7 +2030,6 @@ step_create_service() {
     local worker_multiaddr="$WORKER_LISTENER_MULTIADDR"
     print_info "P2P listener (internal): ${primary_multiaddr}"
 
-    local passphrase_file="${CONFIG_DIR}/bls-passphrase"
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
     # The UI runs setup as two separate processes (keygen, then finalize). The
@@ -2021,246 +2044,62 @@ step_create_service() {
 
     prepare_node_extra_flags
 
+    # Where the node logs: the journal (default on mainnet) or the two files in the
+    # root-owned log dir. Recorded in .node-meta below, so every later rewrite of the
+    # unit keeps it.
+    if [[ -z "${LOG_TARGET:-}" ]]; then
+        LOG_TARGET="file"
+        [[ "$NETWORK" == "mainnet" ]] && LOG_TARGET="journal"
+    fi
+
+    # node.env, the start script and the unit come from the library writers
+    # (tn_write_node_env, tn_write_start_script, tn_write_node_unit), the same ones
+    # update-node.sh, edit-config.sh and migrate-node-naming.sh use. The listener
+    # addresses live in node.env; the flags stay on the start script's node line; the
+    # passphrase reaches the node on stdin from the systemd credential and is never in
+    # any of these files.
+    if ! tn_write_node_env "$primary_multiaddr" "$worker_multiaddr"; then
+        setup_fail "Could not write ${CONFIG_DIR}/node.env (both listener addresses must be set and valid: ${primary_multiaddr:-<empty>}, ${worker_multiaddr:-<empty>})."
+    fi
+    print_ok "Listener addresses written: ${CONFIG_DIR}/node.env"
+
+    local wrapper runner node_args launch_flags method
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        # Guard: never write a wrapper without an image (docker would take the next
-        # word, `telcoin`, for the image name).
+        # Never a script without an image (docker would take the next word for it).
         if [[ -z "${DOCKER_IMAGE:-}" ]]; then
-            setup_fail "No docker image to run (--docker-image) -- cannot write start wrapper."
+            setup_fail "No docker image to run (--docker-image) -- cannot write the start script."
         fi
-        local docker_uid docker_gid
-        docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
-        docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
-
-        # Testnet opt-in launch flags (healthcheck + JSON log shipping) and the node flags
-        # (bootstrap peers, state export) as ONE line, so an empty tail can't leave a
-        # dangling backslash. Docker reth log dir is the container path
-        # /home/nonroot/logs (= host ${DATA_DIR}/logs). The peers map is read on the host,
-        # where "$(cat ...)" runs, and reaches the container as one argument.
-        local launch_flags; launch_flags="$(node_launch_flags docker)"
-
-        # BLS passphrase is injected at RUNTIME, mirroring the source/binary path below: a
-        # root-owned wrapper reads it (TPM, else the systemd LoadCredential dir) and
-        # pass-throughs it to the container with `-e TN_BLS_PASSPHRASE` (NAME only -- the
-        # value is NEVER written into the unit, so `systemctl cat`/`show` stay clean). The
-        # value still lives in the container's env (inherent to Docker; see the README
-        # security note) -- keeping it out of the persisted unit is the meaningful win.
-        #
-        # Pin HOME=/home/nonroot in the docker run: a numeric --user has no passwd entry in
-        # the image, so $HOME would default to "/" and reth's default log dir
-        # ($HOME/.cache/reth/logs) would be unwritable -> the node crash-loops on boot unless
-        # obs logging happens to add --log.file.directory. The datadir is bind-mounted at
-        # /home/nonroot and owned by --user, so logs/keys land writable. (Same root cause as
-        # the keygen docker run.)
-        # The start script lives in the root-owned /usr/local/libexec/telcoin
-        # (tn_start_script_path) and is written through a temp file and a rename.
-        local wrapper
-        wrapper="$(tn_start_script_path docker)"
-        setup_start_script_dir "$wrapper"
-        {
-        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-            cat <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from TPM (with LoadCredential fallback) and starts the node container.
-if command -v tpm2_unseal &>/dev/null && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.pub ]] && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.priv ]]; then
-    tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null
-    tpm2_load -Q -C /tmp/tn-tpm-primary.ctx \
-        -u ${CONFIG_DIR}/bls-tpm.pub \
-        -r ${CONFIG_DIR}/bls-tpm.priv \
-        -c /tmp/tn-tpm-sealed.ctx 2>/dev/null
-    export TN_BLS_PASSPHRASE=\$(tpm2_unseal -Q -c /tmp/tn-tpm-sealed.ctx 2>/dev/null)
-    rm -f /tmp/tn-tpm-primary.ctx /tmp/tn-tpm-sealed.ctx
-fi
-if [[ -z "\${TN_BLS_PASSPHRASE:-}" ]]; then
-    export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase" 2>/dev/null || echo "")
-fi
-exec docker run --rm \
---name ${SERVICE_NAME} \
---user ${docker_uid}:${docker_gid} \
--e "HOME=/home/nonroot" \
---network=host \
--e TN_BLS_PASSPHRASE \
--e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
--e "WORKER_LISTENER_MULTIADDR=${worker_multiaddr}" \
--v ${DATA_DIR}:/home/nonroot \
--v ${CONFIG_DIR}:/etc/telcoin:ro \
-${DOCKER_IMAGE} \
-telcoin node \
---datadir /home/nonroot \
---log.stdout.format log-fmt \
--vvv \
---http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
-        else
-            cat <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from the systemd credential directory and starts the node container.
-export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase")
-exec docker run --rm \
---name ${SERVICE_NAME} \
---user ${docker_uid}:${docker_gid} \
--e "HOME=/home/nonroot" \
---network=host \
--e TN_BLS_PASSPHRASE \
--e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
--e "WORKER_LISTENER_MULTIADDR=${worker_multiaddr}" \
--v ${DATA_DIR}:/home/nonroot \
--v ${CONFIG_DIR}:/etc/telcoin:ro \
-${DOCKER_IMAGE} \
-telcoin node \
---datadir /home/nonroot \
---log.stdout.format log-fmt \
--vvv \
---http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
-        fi
-        } | tn_write_root_file "$wrapper" 0750 "$SERVICE_GROUP" \
-            || setup_fail "Could not write the start script ${wrapper}."
-        # Root-owned, root:SERVICE_GROUP 0750: the unit runs ExecStart as root, so the
-        # service user must not be able to change it.
-        print_ok "Wrapper script written: ${wrapper}"
-
-        {
-            cat <<EOF
-[Unit]
-Description=Telcoin Network Node (${CHAIN_NAME}) [Docker]
-After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=root
-EOF
-            # Only include LoadCredential for the loadcredential method (TPM manages the
-            # passphrase itself -- the credential file may not exist).
-            if [[ "$PASSPHRASE_METHOD" != "tpm" ]]; then
-                echo "LoadCredential=bls-passphrase:${passphrase_file}"
-            fi
-            cat <<EOF
-ExecStartPre=-/usr/bin/docker rm -f ${SERVICE_NAME}
-ExecStart=${wrapper}
-ExecStop=docker stop ${SERVICE_NAME}
-Restart=on-failure
-RestartSec=10
-StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
-StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        } | tn_write_root_file "$service_file" 0644 \
-            || setup_fail "Could not write ${service_file}."
-
+        method="docker"
+        runner="$DOCKER_IMAGE"
+        # Inside the container the data dir is /home/nonroot (HOME is pinned there too,
+        # so the reth logs land in the bind-mounted data dir).
+        launch_flags="$(node_launch_flags docker)"
+        node_args="--datadir /home/nonroot --log.stdout.format log-fmt -vvv --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1${launch_flags:+ ${launch_flags}}"
     else
-        # Guard: never write a wrapper with an empty binary path (it would exec
-        # the system `node` and fail with "node: bad option: --datadir").
+        # Never a script with an empty binary path (it would exec the system `node`).
         if [[ -z "${BINARY_PATH:-}" || ! -x "${BINARY_PATH}" ]]; then
-            setup_fail "Node binary not found at '${BINARY_PATH:-<unset>}' -- cannot write start wrapper. A source build installs it at ${INSTALL_DIR}/telcoin-network; an existing install needs --binary-path."
+            setup_fail "Node binary not found at '${BINARY_PATH:-<unset>}' -- cannot write the start script. A source build installs it at ${INSTALL_DIR}/telcoin-network; an existing install needs --binary-path."
         fi
-        # The start script lives in the root-owned /usr/local/libexec/telcoin
-        # (tn_start_script_path; source and existing installs share the binary form) and
-        # is written through a temp file and a rename.
-        local wrapper
-        wrapper="$(tn_start_script_path source)"
-        setup_start_script_dir "$wrapper"
-
-        # Testnet opt-in launch flags (healthcheck + JSON log shipping) and the node flags
-        # (bootstrap peers, state export) as ONE line, so an empty tail can't leave a
-        # dangling backslash. Binary reth log dir is the host path /var/log/telcoin
-        # (listed in the unit's ReadWritePaths; the directory itself is root:telcoin-log).
-        local launch_flags; launch_flags="$(node_launch_flags binary)"
-
-        {
-        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-            cat <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from TPM (with LoadCredential fallback) and starts the node
-if command -v tpm2_unseal &>/dev/null && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.pub ]] && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.priv ]]; then
-    tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null
-    tpm2_load -Q -C /tmp/tn-tpm-primary.ctx \
-        -u ${CONFIG_DIR}/bls-tpm.pub \
-        -r ${CONFIG_DIR}/bls-tpm.priv \
-        -c /tmp/tn-tpm-sealed.ctx 2>/dev/null
-    export TN_BLS_PASSPHRASE=\$(tpm2_unseal -Q -c /tmp/tn-tpm-sealed.ctx 2>/dev/null)
-    rm -f /tmp/tn-tpm-primary.ctx /tmp/tn-tpm-sealed.ctx
-fi
-if [[ -z "\${TN_BLS_PASSPHRASE:-}" ]]; then
-    export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase" 2>/dev/null || echo "")
-fi
-export PRIMARY_LISTENER_MULTIADDR="${primary_multiaddr}"
-export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
-exec ${BINARY_PATH} node \
-  --datadir ${DATA_DIR} \
-  --log.stdout.format log-fmt \
-  -vvv \
-  --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
+        method="${INSTALL_METHOD:-source}"
+        runner="$BINARY_PATH"
+        launch_flags="$(node_launch_flags binary)"
+        node_args="--datadir ${DATA_DIR} --log.stdout.format log-fmt -vvv --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1${launch_flags:+ ${launch_flags}}"
+    fi
+    wrapper="$(tn_start_script_path "$([[ "$method" == docker ]] && echo docker || echo source)")"
+    setup_start_script_dir "$wrapper"
+    if ! tn_write_start_script "$method" "$runner" "$node_args"; then
+        setup_fail "Could not write the start script ${wrapper} (see the message above)."
+    fi
+    print_ok "Start script written: ${wrapper}"
+    if ! tn_write_node_unit "$method"; then
+        setup_fail "Could not write ${service_file} (see the message above)."
+    fi
+    if [[ "$LOG_TARGET" == "journal" ]]; then
+        if tn_install_journald_dropin; then
+            systemctl restart systemd-journald 2>/dev/null || true
         else
-            cat <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from systemd credential directory and starts the node
-export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase")
-export PRIMARY_LISTENER_MULTIADDR="${primary_multiaddr}"
-export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
-exec ${BINARY_PATH} node \
-  --datadir ${DATA_DIR} \
-  --log.stdout.format log-fmt \
-  -vvv \
-  --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
+            setup_warn "Could not write the journal size cap (/etc/systemd/journald.conf.d/50-telcoin.conf); journald keeps its own defaults."
         fi
-        } | tn_write_root_file "$wrapper" 0755 \
-            || setup_fail "Could not write the start script ${wrapper}."
-        print_ok "Wrapper script written: ${wrapper}"
-
-        {
-            cat <<EOF
-[Unit]
-Description=Telcoin Network Node (${CHAIN_NAME})
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_GROUP}
-EOF
-            # Only include LoadCredential for loadcredential method
-            # TPM method manages passphrase directly -- file may not exist
-            if [[ "$PASSPHRASE_METHOD" != "tpm" ]]; then
-                echo "LoadCredential=bls-passphrase:${passphrase_file}"
-            fi
-            cat <<EOF
-Environment="PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}"
-Environment="WORKER_LISTENER_MULTIADDR=${worker_multiaddr}"
-ExecStart=${wrapper}
-Restart=on-failure
-RestartSec=10
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ReadWritePaths=${DATA_DIR} ${LOG_DIR}
-LimitNOFILE=65536
-StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
-StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        } | tn_write_root_file "$service_file" 0644 \
-            || setup_fail "Could not write ${service_file}."
     fi
 
     systemctl daemon-reload
@@ -2296,6 +2135,7 @@ EOF
         "VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}" \
         "PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}" \
         "PUBLIC_WS_URL=${PUBLIC_WS_URL:-}" \
+        "LOG_TARGET=${LOG_TARGET}" \
         "OWNERSHIP_LAYOUT=2"
     write_node_meta_runner
     print_ok "Node metadata written: ${meta_file}"
@@ -2310,7 +2150,9 @@ EOF
     if json_mode || confirm "Start the node now?"; then
         if systemctl is-active --quiet "$SERVICE_NAME"; then
             # A re-run over a running node: restart it so the new unit and start script
-            # take effect, after the current epoch closes when the node votes in it.
+            # take effect, unless that would leave the committee one member short of a
+            # halt, and after the current epoch closes when the node votes in it.
+            setup_quorum_guard "http://127.0.0.1:${RPC_PORT}"
             tn_wait_restart_window "http://127.0.0.1:${RPC_PORT}" setup_progress
             systemctl restart "$SERVICE_NAME"
         else
@@ -2689,7 +2531,18 @@ json_set_network() {
     esac
 }
 
+# json_refuse_installed PHASE -- a --json keygen or finalize never runs over an
+# installed node (its unit exists): nothing is written, the run stops.
+json_refuse_installed() {
+    local unit="/etc/systemd/system/${SERVICE_NAME}.service"
+    if [[ -e "$unit" || -L "$unit" ]]; then
+        setup_fail "A node is already installed (${unit} exists), so --phase=${1} does not run. Use edit-config.sh to change it, or remove-node.sh first."
+    fi
+    return 0
+}
+
 json_phase_keygen() {
+    json_refuse_installed keygen
     json_event step "Running preflight checks and installing dependencies"
     step_preflight
     json_event step "Applying node configuration"
@@ -2746,7 +2599,15 @@ finalize_install_inputs() {
 }
 
 json_phase_finalize() {
+    local v
+    json_refuse_installed finalize
     finalize_install_inputs
+    # The node binds to these; an empty one would start a node with no listener.
+    for v in "$PRIMARY_LISTENER_MULTIADDR" "$WORKER_LISTENER_MULTIADDR"; do
+        if [[ -z "$v" ]] || ! validate_multiaddr "$v"; then
+            setup_fail "finalize needs --listener-primary and --listener-worker, each a /ip4/<addr>/udp/<port>/quic-v1 (or /ip6/...) multiaddr; got '${v}'."
+        fi
+    done
     finalize_node_extra_flags
     json_event step "Writing configuration"
     step_write_config
@@ -2902,7 +2763,7 @@ main() {
             --docker-image|--binary-path|--external-primary|--external-worker|\
             --listener-primary|--listener-worker|--public-ip|--public-rpc-url|\
             --public-ws-url|--rpc-http|--rpc-ws|--rpc-domain|--advertised-name|--data-dir|\
-            --service-user|--service-group|--genesis-dir)
+            --service-user|--service-group|--genesis-dir|--log-target)
                 if [[ $# -lt 2 || "$2" == -* ]]; then
                     setup_fail "$1 requires a value"
                 fi
@@ -2966,6 +2827,8 @@ main() {
             --enable-state-export) STATE_EXPORT_ENABLE=true; shift ;;
             --state-export-keep)   STATE_EXPORT_KEEP="${2:-}"; shift 2 ;;
             --passphrase-stdin)    PASSPHRASE_STDIN=true; shift ;;
+            --log-target)          LOG_TARGET="${2:-}"; shift 2 ;;
+            --allow-quorum-risk)   TN_ALLOW_QUORUM_RISK=1; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule.
                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
@@ -2979,6 +2842,10 @@ main() {
         esac
     done
 
+    case "${LOG_TARGET:-}" in
+        ""|journal|file) ;;
+        *) setup_fail "--log-target takes journal or file, not ${LOG_TARGET}." ;;
+    esac
     setup_read_passphrase       # --passphrase-stdin is read here, once
     init_public_rpc_flags       # bad public-RPC flags or URLs stop here, before any work
     init_install_flags
