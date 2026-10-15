@@ -331,21 +331,49 @@ show_detected() {
 
 _RM_SHRED_NOTED=false
 
+# _rm_shred_note -- print, once per run, that the overwrite is best effort.
+_rm_shred_note() {
+    if [[ "$_RM_SHRED_NOTED" != "true" ]]; then
+        _RM_SHRED_NOTED=true
+        print_info "Overwriting files with shred before deleting them is best effort on SSDs, copy-on-write and cloud disks."
+    fi
+}
+
+# _rm_private DIR [all] -- rc 0 when no other account can change what DIR holds
+# while this script works in it: DIR and its parent (with "all", also every
+# directory below DIR on the same file system) are owned by the account running
+# this script, writable by no other account, and group-writable only for this
+# account's own primary group. Only then is a file in there overwritten by path
+# as this account. Reads only.
+_rm_private() {
+    local d="$1" up me mygid bad
+    me="$(id -u)"
+    mygid="$(id -g)"
+    up="${d%/*}"
+    [[ -n "$up" ]] || up=/
+    bad="$(find "$up" -maxdepth 0 \( ! -user "$me" -o -perm -0002 -o \( -perm -0020 ! -group "$mygid" \) \) -print 2>/dev/null)"
+    [[ -z "$bad" ]] || return 1
+    if [[ "${2:-}" == "all" ]]; then
+        bad="$(find "$d" -xdev -type d \( ! -user "$me" -o -perm -0002 -o \( -perm -0020 ! -group "$mygid" \) \) -print 2>/dev/null)"
+    else
+        bad="$(find "$d" -maxdepth 0 \( ! -user "$me" -o -perm -0002 -o \( -perm -0020 ! -group "$mygid" \) \) -print 2>/dev/null)"
+    fi
+    [[ -z "$bad" ]]
+}
+
 # _rm_shred FILE... -- delete each FILE. A regular file is overwritten first with
-# `shred -u` when shred is installed; `rm -f` always follows, so a missing or
-# failing shred still deletes it. A symlink is unlinked itself and never
-# followed; a directory or an absent path is left alone. Always returns 0.
+# `shred -u` when shred is installed and its directory is private to this
+# account (_rm_private); `rm -f` always follows, so a missing or failing shred
+# still deletes it. A symlink is unlinked itself and never followed; a directory
+# or an absent path is left alone. Always returns 0.
 _rm_shred() {
     local f
     for f in "$@"; do
         if [[ -L "$f" ]]; then
             rm -f -- "$f" 2>/dev/null || true
         elif [[ -f "$f" ]]; then
-            if [[ "$_RM_SHRED_NOTED" != "true" ]]; then
-                _RM_SHRED_NOTED=true
-                print_info "Overwriting files with shred before deleting them is best effort on SSDs, copy-on-write and cloud disks."
-            fi
-            if command -v shred >/dev/null 2>&1; then
+            if command -v shred >/dev/null 2>&1 && _rm_private "${f%/*}"; then
+                _rm_shred_note
                 shred -u -- "$f" >/dev/null 2>&1 || true
             fi
             rm -f -- "$f" 2>/dev/null || true
@@ -354,17 +382,45 @@ _rm_shred() {
     return 0
 }
 
-# _rm_shred_tree DIR -- _rm_shred every regular file under DIR. Nothing is done
-# when DIR is a symlink; symlinks inside DIR are not followed. DIR itself is
-# left for the caller to remove.
+# _rm_shred_tree DIR [USER GROUP [FIND_TEST...]] -- overwrite and delete, with
+# `shred -u`, every regular file under DIR (only those that also match the find
+# tests FIND_TEST..., such as -path '*/node-keys/*'). find hands each file to
+# shred itself, so no name is ever split or re-read, and it never follows a
+# symlink or leaves DIR's file system. Who runs it:
+#   - DIR is private to this account (_rm_private DIR all): this account (root
+#     in production; /etc/telcoin and /var/backups/telcoin are root's);
+#   - otherwise USER, an existing account other than root: find and shred run as
+#     USER:GROUP (tn_as_service_user), so they can only touch what USER can
+#     already write (the data dir and its node-keys belong to the service user);
+#   - otherwise (no USER, the account is gone, or no setpriv/runuser) nothing is
+#     overwritten and a note says so.
+# Nothing is done when DIR is a symlink or not a directory, and nothing is
+# overwritten when shred is not installed. DIR and the files left are for the
+# caller to remove (rm -rf as root never follows a symlink). Always returns 0.
 _rm_shred_tree() {
-    local f
-    local -a files=()
-    [[ -d "$1" && ! -L "$1" ]] || return 0
-    while IFS= read -r f; do
-        [[ -n "$f" ]] && files+=("$f")
-    done < <(find "$1" -type f 2>/dev/null)
-    _rm_shred ${files[@]+"${files[@]}"}
+    local dir="${1:-}" user="${2:-}" group="${3:-}" uid rc=0
+    if [[ $# -ge 3 ]]; then shift 3; else set --; fi
+    [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    command -v shred >/dev/null 2>&1 || return 0
+    _rm_shred_note
+    if _rm_private "$dir" all; then
+        find "$dir" -xdev -type f ${1+"$@"} -exec shred -u -- {} \; >/dev/null 2>&1 || true
+        return 0
+    fi
+    uid=""
+    if [[ -n "$user" ]]; then
+        uid="$(id -u "$user" 2>/dev/null)" || uid=""
+    fi
+    if [[ "$uid" =~ ^[0-9]+$ && ! "$uid" =~ ^0+$ ]]; then
+        if [[ -n "$group" ]] && ! getent group "$group" >/dev/null 2>&1; then
+            group=""
+        fi
+        ( SERVICE_USER="$user"; SERVICE_GROUP="$group"
+          tn_as_service_user find "$dir" -xdev -type f ${1+"$@"} -exec shred -u -- {} \; ) >/dev/null 2>&1 || rc=$?
+        [[ $rc -eq 126 ]] || return 0
+    fi
+    print_info "The files under ${dir#"$TN_RM_ROOT"} are deleted without being overwritten first: the directory belongs to an account that is gone or cannot be switched to."
+    return 0
 }
 
 # _rm_dir DIR -- rm -rf the real directory DIR; a symlink named DIR is unlinked
@@ -433,7 +489,11 @@ remove_docker_container() {
     fi
 }
 
+# remove_chain_data [USER GROUP] -- ask, then remove the data dir; the node keys
+# in it are shredded first as USER:GROUP (the service account, which owns the
+# data dir; default SERVICE_USER and SERVICE_GROUP), see _rm_shred_tree.
 remove_chain_data() {
+    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}"
     local data_dir
     if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
         print_error "Chain data not removed: the data directory is unknown."
@@ -447,7 +507,7 @@ remove_chain_data() {
         if confirm "Remove chain data? (node will need to resync if reinstalled)"; then
             # The node keys under the data dir go with it: shred them first.
             if [[ ! -L "$data_dir" ]]; then
-                _rm_shred_tree "${data_dir}/node-keys"
+                _rm_shred_tree "${data_dir}/node-keys" "$user" "$group"
             fi
             rm -rf "$data_dir"
             print_ok "Chain data removed"
@@ -457,14 +517,16 @@ remove_chain_data() {
     fi
 }
 
-# shred_key_files KEYS_DIR CONFIG_DIR -- shred every file under KEYS_DIR and
-# remove it, then shred the passphrase files in CONFIG_DIR and in /etc/telcoin:
-# the encrypted credential bls-passphrase.cred, the plaintext bls-passphrase and
-# the TPM-sealed bls-tpm.pub / bls-tpm.priv of very old installs. The caller
-# removes CONFIG_DIR.
+# shred_key_files KEYS_DIR CONFIG_DIR [USER GROUP] -- shred every file under
+# KEYS_DIR (as USER:GROUP, the service account that owns the data dir; see
+# _rm_shred_tree) and remove it, then shred the passphrase files in CONFIG_DIR
+# and in /etc/telcoin: the encrypted credential bls-passphrase.cred, the
+# plaintext bls-passphrase and the TPM-sealed bls-tpm.pub / bls-tpm.priv of very
+# old installs. The caller removes CONFIG_DIR.
 shred_key_files() {
     local keys_dir="$1" config_dir="$2" d
-    _rm_shred_tree "$keys_dir"
+    local user="${3:-${SERVICE_USER:-telcoin}}" group="${4:-${SERVICE_GROUP:-telcoin}}"
+    _rm_shred_tree "$keys_dir" "$user" "$group"
     _rm_dir "$keys_dir"
     for d in "$config_dir" "${TN_RM_ROOT}/etc/telcoin"; do
         _rm_shred "${d}/bls-passphrase.cred" "${d}/bls-passphrase" \
@@ -472,9 +534,12 @@ shred_key_files() {
     done
 }
 
-# The warning is the same for every node: the role is decided on-chain, so
-# nothing on this server says whether these keys are staked to validate.
+# remove_keys [USER GROUP] -- ask (typed DELETE), then shred and remove the node
+# keys (as USER:GROUP, see shred_key_files) and the config dir. The warning is
+# the same for every node: the role is decided on-chain, so nothing on this
+# server says whether these keys are staked to validate.
 remove_keys() {
+    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}"
     local data_dir keys_dir config_dir
     if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
         print_error "Keys not removed: the data directory is unknown."
@@ -504,7 +569,7 @@ remove_keys() {
         local confirm_text
         read -r -p "  Type DELETE to confirm permanent key removal, or Enter to skip: " confirm_text
         if [[ "$confirm_text" == "DELETE" ]]; then
-            shred_key_files "$keys_dir" "$config_dir"
+            shred_key_files "$keys_dir" "$config_dir" "$user" "$group"
             rm -rf "$config_dir"
             print_ok "Keys and passphrase removed"
         else
@@ -918,6 +983,11 @@ remove_node_unit() {
         svc_user="${UNIT_USER[$idx]:-}"
         svc_group="${UNIT_GROUP[$idx]:-}"
     fi
+    # The account the node keys are shredded as: the unit's service account, or
+    # the configured default when none is recorded or the unit runs as root.
+    local key_user="$svc_user" key_group="$svc_group"
+    [[ -n "$key_user" && "$key_user" != "root" ]] || key_user="${SERVICE_USER:-telcoin}"
+    [[ -n "$key_group" && "$key_group" != "root" ]] || key_group="${SERVICE_GROUP:-telcoin}"
 
     # Stop service
     stop_and_disable_service "$unit"
@@ -931,11 +1001,10 @@ remove_node_unit() {
         remove_docker_container "$ctr" "$unit"
     fi
 
-    # Chain data
-    remove_chain_data
-
-    # Keys -- separate explicit confirmation
-    remove_keys
+    # Chain data, then the keys (separate explicit confirmation). Both run before
+    # the service account is removed: the node keys are shredded as that account.
+    remove_chain_data "$key_user" "$key_group"
+    remove_keys "$key_user" "$key_group"
 
     # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
     remove_testnet_addons
@@ -1351,9 +1420,10 @@ json_remove() {
     if [[ "$scope" == "data" || "$scope" == "keys" ]]; then
         if [[ -d "$data_dir" ]]; then
             json_event step "Removing chain data ${data_dir}"
-            # The node keys under the data dir go with it: shred them first.
+            # The node keys under the data dir go with it: shred them first, as
+            # the service account (before that account is removed below).
             if [[ ! -L "$data_dir" ]]; then
-                _rm_shred_tree "${data_dir}/node-keys"
+                _rm_shred_tree "${data_dir}/node-keys" "$svc_user" "$svc_group"
             fi
             rm -rf "$data_dir"
         fi
@@ -1363,7 +1433,7 @@ json_remove() {
         local config_dir
         config_dir="$(tn_resolve_config_dir)"
         json_event step "Removing keys and config ${config_dir} (key and passphrase files are shredded)"
-        shred_key_files "${data_dir}/node-keys" "$config_dir"
+        shred_key_files "${data_dir}/node-keys" "$config_dir" "$svc_user" "$svc_group"
         rm -rf "$config_dir" 2>/dev/null || true
 
         # Full removal: tear down the testnet add-ons too -- the Alloy log shipper holds

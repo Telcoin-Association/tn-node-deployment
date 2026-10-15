@@ -12,8 +12,11 @@
 #   docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash tools/tests/remove_test.sh
 #
 # Every path lives under a fixture root (TN_ROOT_PREFIX). shred, systemctl,
-# userdel, groupdel, gpasswd, getent and docker are PATH stubs that log their
-# arguments; nothing touches the host's units, groups or accounts.
+# userdel, groupdel, gpasswd, getent, docker, id, setpriv and runuser are PATH
+# stubs that log their arguments; nothing touches the host's units, groups or
+# accounts. The shred stub overwrites what it opens (following a symlink, as
+# shred does) and then unlinks it; id knows one account, KNOWN_USER (none when
+# empty); setpriv and runuser run the command as the current user.
 # =============================================================================
 
 set -u
@@ -27,7 +30,9 @@ OUT="$T/outside"    # decoys outside the fixture root
 CALLS="$T/calls.log"
 GROUP_FILE="$T/group"
 SHRED_RC=0
-export CALLS GROUP_FILE SHRED_RC
+KNOWN_USER=""
+ORIG_PATH="$PATH"
+export CALLS GROUP_FILE SHRED_RC KNOWN_USER ORIG_PATH
 mkdir -p "$T/h" "$T/bin" "$R" "$OUT"
 
 # --- PATH stubs (bash only: no wrapped tool is looked up through PATH) -------
@@ -42,8 +47,38 @@ done
 cat > "$T/bin/shred" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "shred $*" >> "$CALLS"
-exit "${SHRED_RC:-0}"
+[ "${SHRED_RC:-0}" = 0 ] || exit "$SHRED_RC"
+unlink=""
+for a in "$@"; do
+    case "$a" in
+        -u) unlink=1 ;;
+        --) ;;
+        *) [ -f "$a" ] && printf 'SHREDDED\n' > "$a"
+           [ -n "$unlink" ] && rm -f -- "$a" ;;
+    esac
+done
+exit 0
 STUB
+cat > "$T/bin/id" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${KNOWN_USER:-}" ]; then
+    case "$*" in
+        "-u $KNOWN_USER") echo 991; exit 0 ;;
+        "-gn $KNOWN_USER") echo "$KNOWN_USER"; exit 0 ;;
+        "$KNOWN_USER") echo "uid=991($KNOWN_USER) gid=991($KNOWN_USER)"; exit 0 ;;
+    esac
+fi
+PATH="$ORIG_PATH" exec id "$@"
+STUB
+for tool in setpriv runuser; do
+    cat > "$T/bin/$tool" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "$tool \$*" >> "\$CALLS"
+while [ \$# -gt 0 ] && [ "\$1" != -- ]; do shift; done
+shift
+exec "\$@"
+STUB
+done
 cat > "$T/bin/getent" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "getent $*" >> "$CALLS"
@@ -221,6 +256,81 @@ CONFIRM_ANSWER=no
 gone "data dir" "$DATA"
 check_has "chain-data removal shreds node keys" "shred -u -- $DATA/node-keys/bls.key" "$(calls)"
 check_lacks "chain-data removal does not shred the db" "$DATA/db/data" "$(calls)"
+
+# --- node keys: odd names, symlinks, and the account that shreds them ---------
+# mkkeys -- the fixture plus, inside node-keys, a file whose path carries a
+# newline followed by the absolute path of a decoy outside the tree, and a
+# symlink to a second decoy. Neither decoy may be overwritten or removed.
+NL=$'\n'
+mkkeys() {
+    mkfixture
+    printf 'decoy\n' > "$OUT/decoy-nl"
+    printf 'decoy\n' > "$OUT/decoy-link"
+    mkdir -p "$DATA/node-keys/k${NL}${OUT}"
+    printf 'k\n' > "$DATA/node-keys/k${NL}${OUT}/decoy-nl"
+    ln -s "$OUT/decoy-link" "$DATA/node-keys/link.key"
+}
+decoys_intact() {
+    check "$1: decoy behind the newline name intact" "decoy" "$(cat "$OUT/decoy-nl" 2>/dev/null)"
+    check "$1: symlink target intact" "decoy" "$(cat "$OUT/decoy-link" 2>/dev/null)"
+}
+
+# A data dir only this account can change: shredded here, by find.
+mkkeys
+if [[ -f "$DATA/node-keys/k${NL}${OUT}/decoy-nl" ]]; then
+    CONFIRM_ANSWER=yes
+    remove_chain_data tnrmtest tnrmtest > "$T/out" 2>&1
+    CONFIRM_ANSWER=no
+    decoys_intact "private tree"
+    gone "private tree: data dir" "$DATA"
+    check_has "private tree: key shredded" "shred -u -- $DATA/node-keys/bls.key" "$(calls)"
+    check_has "private tree: nested key shredded" "shred -u -- $DATA/node-keys/sub/worker.key" "$(calls)"
+    check_lacks "private tree: no account switch" "setpriv" "$(calls)"
+    check_lacks "private tree: the symlink is never handed to shred" "link.key" "$(calls)"
+else
+    skip "private tree: newline file name" "this file system refuses a newline in a name"
+fi
+
+# A data dir another account can change (writable by others here; in production
+# it belongs to the service account): find and shred run as that account.
+mkkeys
+chmod o+w "$DATA"
+KNOWN_USER=tnrmtest
+CONFIRM_ANSWER=yes
+remove_chain_data tnrmtest tnrmtest > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+KNOWN_USER=""
+check_has "service-owned tree: find runs as the service account" \
+    "setpriv --reuid 991 --regid 991 --clear-groups --no-new-privs -- find $DATA/node-keys -xdev -type f -exec shred -u -- {} ;" "$(calls)"
+check_has "service-owned tree: key shredded" "shred -u -- $DATA/node-keys/bls.key" "$(calls)"
+decoys_intact "service-owned tree"
+gone "service-owned tree: data dir" "$DATA"
+
+# The account is gone: nothing is overwritten as root in a tree it owned; the
+# files are still deleted and a note says so.
+mkkeys
+chmod o+w "$DATA"
+CONFIRM_ANSWER=yes
+remove_chain_data tnrmtest tnrmtest > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_lacks "account gone: nothing shredded" "shred" "$(calls)"
+check_lacks "account gone: no account switch" "setpriv" "$(calls)"
+check_has "account gone: note printed" "yes" "$(grep -q 'deleted without being overwritten first' "$T/out" && echo yes)"
+decoys_intact "account gone"
+gone "account gone: data dir" "$DATA"
+
+# --json --scope keys: the keys are shredded as the account before it is removed.
+mkkeys
+chmod o+w "$DATA"
+KNOWN_USER=tnrmtest
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+KNOWN_USER=""
+check_rc "json keys (service-owned tree) rc 0" 0 "$rc"
+decoys_intact "json service-owned tree"
+n_shred="$(grep -n "^setpriv .* find $DATA/node-keys " "$CALLS" | head -n 1 | cut -d: -f1)"
+n_userdel="$(grep -n '^userdel tnrmtest' "$CALLS" | head -n 1 | cut -d: -f1)"
+check "json: keys shredded before the account is removed" "yes" \
+    "$([[ -n "$n_shred" && -n "$n_userdel" && $n_shred -lt $n_userdel ]] && echo yes)"
 
 # --- remove_node_host_files ---------------------------------------------------
 mkfixture
