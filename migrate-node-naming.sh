@@ -78,7 +78,8 @@ set -E
 # This script writes through the root-write helpers of the current library.
 for _tn_fn in tn_backup_file tn_restore_backup tn_write_root_file tn_start_script_path \
               tn_wait_restart_window tn_update_lock_path _tn_root_layout_dir _tn_strip_gw \
-              tn_write_node_unit tn_rerender_node_launch tn_precreate_log_files; do
+              tn_write_node_unit tn_rerender_node_launch tn_precreate_log_files \
+              tn_committee_down_guard; do
     if ! declare -F "$_tn_fn" >/dev/null 2>&1; then
         print_error "lib/common.sh ${COMMON_VERSION:-unknown} has no ${_tn_fn}. Run update-scripts.sh and try again."
         exit 1
@@ -156,17 +157,20 @@ P2P consensus ports so the node is validator-capable. Idempotent and
 self-rolling-back.
 
 USAGE:
-  sudo bash migrate-node-naming.sh [--yes]
+  sudo bash migrate-node-naming.sh [--yes] [--allow-quorum-risk]
 
 OPTIONS:
-  -y, --yes    Do not prompt for confirmation (also honored via TN_ASSUME_YES=true).
-  -h, --help   Show this help.
+  -y, --yes            Do not prompt for confirmation (also honored via TN_ASSUME_YES=true).
+  --allow-quorum-risk  Stop the legacy node although the committee check refuses
+                       it (a coordinated restart; also TN_ALLOW_QUORUM_RISK=1).
+  -h, --help           Show this help.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes) ASSUME_YES=true; shift ;;
+        --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) print_error "Unknown argument: $1"; usage; exit 2 ;;
     esac
@@ -583,6 +587,22 @@ migrate_backup_ok() {
     fi
 }
 
+# migrate_drop_snapshot -- remove the step 2 copies when the run stops before the
+# legacy service was touched (a unit copy that holds the passphrase is shredded).
+migrate_drop_snapshot() {
+    if [[ "$EMBEDDED_PASS" == true && -n "$UNIT_BAK" ]]; then
+        _tn_shred "$UNIT_BAK"
+    elif [[ -n "$UNIT_BAK" ]]; then
+        rm -f -- "$UNIT_BAK"
+    fi
+    [[ -n "$WRAPPER_BAK" ]] && rm -f -- "$WRAPPER_BAK"
+    [[ -n "$META_BAK" ]] && rm -f -- "$META_BAK"
+    UNIT_BAK=""
+    WRAPPER_BAK=""
+    META_BAK=""
+    return 0
+}
+
 # migrate_backup_failed PATH -- stop before anything changed (rollback not armed).
 migrate_backup_failed() {
     print_error "Could not back up ${1} (see above). Nothing was changed."
@@ -593,6 +613,18 @@ migrate_backup_failed() {
 # STEP 3 -- STOP THE LEGACY SERVICE
 # =============================================================================
 stop_legacy() {
+    local rc=0
+    # The committee check comes first: when stopping this node now would leave the
+    # committee one member short of a halt, or the count cannot be made on a staked
+    # mainnet node, the run stops here with the legacy service untouched and the
+    # snapshot dropped. --allow-quorum-risk overrides for a coordinated restart.
+    tn_committee_down_guard "$STOP_RPC_URL" _tn_wait_say || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        trap - ERR
+        migrate_drop_snapshot
+        print_error "Not stopping telcoin-${ROLE}: the committee check refused it (see above). Nothing was changed. Run the migration again later, or with --allow-quorum-risk for a coordinated restart."
+        exit 1
+    fi
     # A committee node is not stopped just before the epoch boundary: wait for the
     # restart window first (it returns at once for any other node, never fails).
     tn_wait_restart_window "$STOP_RPC_URL"

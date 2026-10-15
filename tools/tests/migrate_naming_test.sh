@@ -5,7 +5,8 @@
 # stop, root-only backups, the root-owned unified start script, and a rollback
 # that stops the new unit, ignores a link planted at the role dir's name and
 # puts the legacy layout back. Also the stops before any change: a duplicated
-# DATA_DIR or RPC_PORT in the legacy .node-meta, and a held update lock.
+# DATA_DIR or RPC_PORT in the legacy .node-meta, a held update lock, and the
+# committee check refusing the stop (with --allow-quorum-risk overriding it).
 #
 #   docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash tools/tests/migrate_naming_test.sh
 #
@@ -102,8 +103,17 @@ while [[ \$# -gt 0 ]]; do
 done
 m="\$(printf '%s' "\$data" | sed -n 's/.*"method":"\([A-Za-z0-9_]*\)".*/\1/p')"
 printf 'curl %s %s\n' "\$m" "\$url" >> "$EV"
+# With $T/voting the node is a committee member of 4 and the latest commit has
+# two authors: two members down, so one more stop halts consensus.
 case "\$m" in
-    tn_nodeMode) r='"Observer"' ;;
+    tn_nodeMode)
+        if [[ -e "$T/voting" ]]; then r='"CvvActive"'; else r='"Observer"'; fi ;;
+    tn_getCurrentEpochInfo)
+        [[ -e "$T/voting" ]] || exit 7
+        r='{"epochId":7,"blockHeight":100,"epochDuration":86400,"stakeVersion":0,"committee":["0x0000000000000000000000000000000000000001","0x0000000000000000000000000000000000000002","0x0000000000000000000000000000000000000003","0x0000000000000000000000000000000000000004"]}' ;;
+    tn_latestConsensusHeader)
+        [[ -e "$T/voting" ]] || exit 7
+        r="{\"number\":5,\"sub_dag\":{\"headers\":[{\"author\":\"Auth1x\",\"epoch\":7},{\"author\":\"Auth2x\",\"epoch\":7}],\"commit_timestamp\":\$(date +%s)}}" ;;
     eth_chainId) [[ -e "$T/rpc-fail" ]] && exit 7; r='"0x7e1"' ;;
     *) exit 7 ;;
 esac
@@ -139,7 +149,7 @@ legacy() {
     for p in $PATHS; do
         rm -rf -- "$p"
     done
-    rm -f "$T/plant" "$T/rpc-fail"
+    rm -f "$T/plant" "$T/rpc-fail" "$T/voting"
     rm -rf "$T/canary"
     mkdir -p "$T/canary" /etc/systemd/system
     printf '%s\n' "$UNIT_TEXT" > /etc/systemd/system/telcoin-observer.service
@@ -161,10 +171,10 @@ legacy() {
     : > "$EV"
 }
 
-# migrate -- run the script; RC, OUT.
+# migrate [ARG...] -- run the script with --yes and ARGs; RC, OUT.
 migrate() {
     OUT="$(PATH="$T/bin:$PATH" TN_UPDATE_LOCK_FILE="$T/update.lock" TN_EPOCH_POLL=5 \
-        bash "$REPO/migrate-node-naming.sh" --yes 2>&1)"
+        bash "$REPO/migrate-node-naming.sh" --yes "$@" 2>&1)"
     RC=$?
 }
 has() {
@@ -248,7 +258,7 @@ s_new="$(line_of "systemctl stop telcoin")"
 s_old="$(line_of "systemctl start telcoin-observer")"
 check "rollback: new unit stopped before the legacy one starts" yes \
     "$([[ $s_new -gt 0 && $s_old -gt $s_new ]] && echo yes || echo no)"
-check "rollback: restart did not wait (one mode read, before the stop)" 1 "$(grep -c 'curl tn_nodeMode' "$EV")"
+check "rollback: restart did not wait (mode read only by the check and the window before the stop)" 2 "$(grep -c 'curl tn_nodeMode' "$EV")"
 check "rollback: nothing moved through the planted link" "" "$(ls -A "$T/canary")"
 check "rollback: data role dir a real dir, the account's, 0750" "no telcoin:telcoin 750" \
     "$([[ -L /var/lib/telcoin/observer ]] && echo yes || echo no) $(om /var/lib/telcoin/observer)"
@@ -282,6 +292,31 @@ migrate
 check_rc "duplicate RPC_PORT: rc" 1 "$RC"
 check "duplicate RPC_PORT: says why" yes "$(has "$OUT" "RPC_PORT is set more than once")"
 check "duplicate RPC_PORT: nothing stopped" no "$(has "$(cat "$EV")" "systemctl stop")"
+
+# The committee check refuses the stop: nothing stopped, nothing left behind, and
+# the snapshot copy of a unit that holds the passphrase is gone too.
+legacy
+: > "$T/voting"
+printf '%s\n' "[Service]" 'Environment="TN_BLS_PASSPHRASE=embedded-Pass-1"' "User=telcoin" \
+    "ExecStart=/opt/telcoin/start-telcoin-observer.sh" > /etc/systemd/system/telcoin-observer.service
+migrate
+check_rc "quorum refused: rc" 1 "$RC"
+check "quorum refused: says why and names the override" "yes yes" \
+    "$(has "$OUT" "committee check refused it") $(has "$OUT" "--allow-quorum-risk")"
+check "quorum refused: guard read the committee, no stop, no restart-window wait" "yes no" \
+    "$([[ $(line_of "curl tn_latestConsensusHeader http://127.0.0.1:8541") -gt 0 ]] && echo yes || echo no) $(has "$(cat "$EV")" "systemctl stop")"
+check "quorum refused: no backup left (passphrase copy included)" "0" \
+    "$(find /var/backups/telcoin -type f 2>/dev/null | wc -l | tr -d ' ')"
+check "quorum refused: legacy layout untouched" "yes yes yes no" \
+    "$([[ -d /etc/telcoin/observer ]] && echo yes || echo no) $([[ -d /var/lib/telcoin/observer ]] && echo yes || echo no) $(has "$(cat /etc/systemd/system/telcoin-observer.service)" "embedded-Pass-1") $([[ -e /etc/systemd/system/telcoin.service ]] && echo yes || echo no)"
+check "quorum refused: lock released" yes "$(lock_free)"
+
+legacy
+: > "$T/voting"
+TN_SKIP_EPOCH_WAIT=1 migrate --allow-quorum-risk
+check_rc "quorum override: rc" 0 "$RC"
+check "quorum override: warned, then stopped" "yes yes" \
+    "$(has "$OUT" "quorum-risk override is set") $(has "$(cat "$EV")" "systemctl stop telcoin-observer")"
 
 legacy
 exec 8>>"$T/update.lock"
