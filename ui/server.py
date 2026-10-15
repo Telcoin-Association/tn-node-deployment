@@ -3973,8 +3973,9 @@ def api_firewall_port():
 #
 # Two phases via the helper's setup-keygen / setup-finalize, which run
 # setup-node.sh --json --phase=...  Config travels in TN_SETUP_* env vars and
-# the BLS passphrase in TN_BLS_PASSPHRASE (env only -- never argv, never the URL,
-# kept in-process here). These are POST + streamed (not EventSource) precisely so
+# the BLS passphrase on the helper's stdin (never argv, never the URL, never an
+# environment variable; the helper hands it on with --passphrase-stdin). These
+# are POST + streamed (not EventSource) precisely so
 # the passphrase never lands in a query string or access log. The frontend reads
 # the streamed body with fetch(). The <node_type> URL segment is the page's
 # presentation slot; the helper call carries no role.
@@ -4175,8 +4176,9 @@ def api_setup_finalize(node_type):
 # + basic_auth). dns-check/enable/disable are management actions: they run via
 # the root helper and -- being POSTs -- are refused on the public (read-only)
 # path by the before_request guard, so external access can only be configured
-# from the SSH tunnel. The password travels in TN_CADDY_PASSWORD (env only,
-# never argv/URL). status is a read (GET) and stays available either way.
+# from the SSH tunnel. The password travels on the helper's stdin (never argv,
+# URL or environment; --password-stdin to install-caddy.sh). status is a read
+# (GET) and stays available either way.
 # =============================================================================
 
 _CADDY_USER_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")

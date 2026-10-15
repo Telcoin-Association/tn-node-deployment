@@ -26,8 +26,12 @@
 #
 # Library: helpers from the root-owned engine copy of lib/common.sh
 # (/opt/telcoin-ui-update/lib) are called in a subshell, so the library never
-# replaces a function of this file. When the library or a function is missing
-# the helper uses its own fallback.
+# replaces a function of this file. The checks the engine owns (release tags,
+# Docker images, the service account, the passphrase rule, log rotation, the
+# committee guard) come only from the library: when it or the function is
+# missing the call is refused with "run update-scripts.sh". The file-handling
+# primitives keep a local copy of the same steps. An engine script without the
+# stdin flags (--passphrase-stdin, --password-stdin) is refused the same way.
 #
 # Helper API 2 (printed by `helper-version`). The node subcommands take no
 # observer|validator argument: the helper resolves the installed node the way
@@ -239,7 +243,7 @@ _lib_usable() {
 
 # _lib_call <function> [args...] -- run a library function in a subshell and
 # return its status; 127 when the library or the function is not there, so the
-# caller uses its fallback. SERVICE_USER/SERVICE_GROUP set by the caller (for
+# caller uses its local copy, or refuses (_lib_req). SERVICE_USER/SERVICE_GROUP set by the caller (for
 # tn_as_service_user) survive the library's own defaults.
 _lib_call() {
     local fn="$1"
@@ -255,6 +259,29 @@ _lib_call() {
         declare -F "$fn" >/dev/null || exit 127
         "$fn" "$@"
     )
+}
+
+# lib_missing <function> -- refuse the running call: the engine library is
+# missing, not root-owned, or older than this helper.
+lib_missing() {
+    die "the engine library (${HELPER_LIB}) is missing or has no ${1}: run update-scripts.sh, then try again"
+}
+
+# _lib_req <function> [args...] -- _lib_call for a check only the library holds:
+# its status, or the call refused (lib_missing) when the function is not there.
+# The refusal goes to stderr, so a caller may silence the function's stdout.
+_lib_req() {
+    local rc=0
+    _lib_call "$@" || rc=$?
+    [[ $rc -ne 127 ]] || lib_missing "$1"
+    return $rc
+}
+
+# engine_has <script> <flag> -- refuse the running call when the engine copy of
+# <script> does not know <flag> (it is older than this helper).
+engine_has() {
+    grep -q -- "$2" "$1" 2>/dev/null \
+        || die "${1##*/} in the engine copy has no ${2} (it is older than this helper): run update-scripts.sh, then try again"
 }
 
 # _run_as <user> <group> <command...> -- run a command as an unprivileged account
@@ -300,22 +327,6 @@ _root_dir_ok() {
         d="${d%/*}"
         [[ -n "$d" ]] || d=/
     done
-}
-
-# _write_root <dest> <mode> -- stdin to DEST (root-owned, MODE) through a temp
-# file in its directory and one rename. Library tn_write_root_file, else the
-# same steps here.
-_write_root() {
-    local dest="$1" mode="$2" tmp rc=0 data
-    data="$(cat)"
-    printf '%s\n' "$data" | _lib_call tn_write_root_file "$dest" "$mode" || rc=$?
-    [[ $rc -eq 127 ]] || return $rc
-    [[ -L "$dest" || -d "$dest" ]] && return 1
-    tmp="$(mktemp "${dest%/*}/.tn.XXXXXX")" || return 2
-    if ! printf '%s\n' "$data" > "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f -- "$tmp" "$dest"; then
-        rm -f -- "$tmp"
-        return 2
-    fi
 }
 
 # Run a long engine job (update, setup) in its own transient systemd scope, so
@@ -497,17 +508,10 @@ node_network() {
     esac
 }
 
-# release_tag_ok <network> <tag> -- the library's tn_release_tag_ok; the fallback
-# holds the same two patterns: testnet vX.Y.Z-adiri, mainnet vX.Y.Z.
+# release_tag_ok <network> <tag> -- the library's tn_release_tag_ok (testnet
+# vX.Y.Z-adiri, mainnet vX.Y.Z).
 release_tag_ok() {
-    local rc=0
-    _lib_call tn_release_tag_ok "$1" "$2" || rc=$?
-    [[ $rc -eq 127 ]] || return $rc
-    case "$1" in
-        testnet) [[ "$2" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-adiri$ ]] ;;
-        mainnet) [[ "$2" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ;;
-        *) return 1 ;;
-    esac
+    _lib_req tn_release_tag_ok "$1" "$2"
 }
 
 cmd_helper_version() {
@@ -735,19 +739,16 @@ cmd_restart_count() {
 
 # Committee quorum check behind the UI's restart badge: the library's
 # tn_committee_down_guard against the node's local RPC. Prints one JSON line,
-# {"available":false} when the library has no such check yet, else
 # {"available":true,"rc":N,"detail":"..."}: rc 0 a restart is safe, 1 it would
-# put the committee at risk, 2 the committee could not be read. Read-only.
+# put the committee at risk, 2 the committee could not be read. Refused when the
+# library has no such check. Read-only.
 cmd_quorum_check() {
     local port url rc=0 detail
     port="$(meta_value RPC_PORT 2>/dev/null || true)"
     [[ "$port" =~ ^[0-9]{1,5}$ ]] || port=8545
     url="http://127.0.0.1:${port}"
     detail="$(TN_ALLOW_QUORUM_RISK=0 _lib_call tn_committee_down_guard "$url" 2>&1 >/dev/null)" || rc=$?
-    if [[ $rc -eq 127 ]]; then
-        echo '{"available":false}'
-        return 0
-    fi
+    [[ $rc -ne 127 ]] || lib_missing tn_committee_down_guard
     detail="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/\x1b\[[0-9;]*m//g')"
     printf '{"available":true,"rc":%d,"detail":"%s"}\n' "$rc" "$(_json_str "${detail:0:300}")"
 }
@@ -858,23 +859,9 @@ cmd_set_hostname() {
     echo "ok"
 }
 
-# Node-log rotation. One config for every node unit. copytruncate is required:
-# the node holds the log open (StandardOutput=append:), so logrotate must
-# copy-then-truncate in place rather than rename. The library's
-# tn_install_logrotate is the writer; logrotate_template is the same template
-# for libraries that do not have it yet.
-logrotate_template() {
-    local size="$1" su_line=""
-    if getent group "$LOG_GROUP" >/dev/null 2>&1; then
-        su_line="    su root ${LOG_GROUP}"$'\n'
-    fi
-    printf '# Managed by the Telcoin Node Manager. Node logs rotate when they reach size.\n'
-    printf '/var/log/telcoin/*.log {\n'
-    printf '%s' "$su_line"
-    printf '    size %s\n' "$size"
-    [[ "$size" == 100M ]] && printf '    maxsize 1G\n'
-    printf '    rotate 5\n    missingok\n    notifempty\n    compress\n    delaycompress\n    copytruncate\n}\n'
-}
+# Node-log rotation. One config for every node unit (copytruncate: the node
+# holds the log open). The library's tn_install_logrotate is the only writer; it
+# writes LOGROTATE_CONF (passed as TN_LOGROTATE_FILE).
 
 # logrotate_refused RC -- stop a logrotate write that failed with RC. The
 # library refuses (rc 1) while the log group does not exist yet, which means the
@@ -892,24 +879,14 @@ logrotate_refused() {
 cmd_set_logrotate() {
     local size="$1" rc=0
     [[ "$size" =~ ^[0-9]+[KMG]$ ]] || die "invalid size: ${size:-<empty>} (e.g. 500M, 1G)"
-    _lib_call tn_install_logrotate "$size" >/dev/null || rc=$?
-    if [[ $rc -eq 127 ]]; then
-        rc=0
-        logrotate_template "$size" | _write_root "$LOGROTATE_CONF" 0644 || rc=$?
-    fi
+    TN_LOGROTATE_FILE="$LOGROTATE_CONF" _lib_req tn_install_logrotate "$size" >/dev/null || rc=$?
     [[ $rc -eq 0 ]] || logrotate_refused "$rc"
     echo "ok"
 }
 
 cmd_logrotate_seed() {
     local rc=0
-    _lib_call tn_install_logrotate >/dev/null || rc=$?
-    if [[ $rc -eq 127 ]]; then
-        rc=0
-        if [[ ! -e "$LOGROTATE_CONF" ]]; then
-            logrotate_template 100M | _write_root "$LOGROTATE_CONF" 0644 || rc=$?
-        fi
-    fi
+    TN_LOGROTATE_FILE="$LOGROTATE_CONF" _lib_req tn_install_logrotate >/dev/null || rc=$?
     [[ $rc -eq 0 ]] || logrotate_refused "$rc"
     echo "ok"
 }
@@ -982,12 +959,8 @@ cmd_caddy_enable() {
     esac
     local -a args=( --json --phase=enable --domain "$domain" --username "$username" )
     [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
-    if grep -q -- '--password-stdin' "$CADDY_SCRIPT" 2>/dev/null; then
-        exec bash "$CADDY_SCRIPT" "${args[@]}" --password-stdin <<< "$SECRET"
-    fi
-    # Transitional: an engine copy without --password-stdin reads the password
-    # from its own environment (never sudo's). Remove with the old engine.
-    TN_CADDY_PASSWORD="$SECRET" exec bash "$CADDY_SCRIPT" "${args[@]}" </dev/null
+    engine_has "$CADDY_SCRIPT" --password-stdin
+    exec bash "$CADDY_SCRIPT" "${args[@]}" --password-stdin <<< "$SECRET"
 }
 
 # =============================================================================
@@ -1128,61 +1101,23 @@ cmd_addons_status() {
 # hostname becomes --rpc-domain, and --rpc-public is never sent.
 # =============================================================================
 
-# service_account_ok <user> <group> -- the library's tn_service_user_ok; the
-# fallback applies the same rule: a plain lowercase name; never root or
-# telcoin-ui; an existing account must have a UID from 1 to 999 and belong to
-# none of sudo, adm, docker; the group is never root or telcoin-ui. An account
-# that does not exist yet passes (setup creates it as a system account).
+# service_account_ok <user> <group> -- the library's tn_service_user_ok: a plain
+# lowercase name, never root or telcoin-ui, an existing account a system account
+# without admin groups (its reason goes to stderr).
 service_account_ok() {
-    local u="$1" g="$2" rc=0 uid grp
-    _lib_call tn_service_user_ok "$u" "$g" >/dev/null 2>&1 || rc=$?
-    [[ $rc -eq 127 ]] || return $rc
-    [[ "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || return 1
-    case "$u" in root|telcoin-ui) return 1 ;; esac
-    case "$g" in root|telcoin-ui) return 1 ;; esac
-    [[ -z "$g" || "$g" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || return 1
-    if uid="$(id -u "$u" 2>/dev/null)"; then
-        [[ "$uid" =~ ^[0-9]+$ ]] || return 1
-        (( uid > 0 && uid < 1000 )) || return 1
-        for grp in $(id -nG "$u" 2>/dev/null); do
-            case "$grp" in sudo|adm|docker|wheel) return 1 ;; esac
-        done
-    fi
-    return 0
+    _lib_req tn_service_user_ok "$1" "$2" >/dev/null
 }
 
-# docker_image_ok <image> <network> -- the library's tn_docker_image_allowed;
-# the fallback accepts only the testnet repository by digest or by a testnet
-# release tag, and no image at all on mainnet.
+# docker_image_ok <image> <network> -- the library's tn_docker_image_allowed:
+# the network's repository by digest.
 docker_image_ok() {
-    local img="$1" net="$2" rc=0 repo="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-    _lib_call tn_docker_image_allowed "$img" "$net" >/dev/null 2>&1 || rc=$?
-    [[ $rc -eq 127 ]] || return $rc
-    [[ "$net" == testnet ]] || return 1
-    case "$img" in
-        "${repo}@sha256:"*) [[ "${img#"${repo}"@sha256:}" =~ ^[0-9a-f]{64}$ ]] ;;
-        "${repo}:"*) release_tag_ok testnet "${img#"${repo}":}" ;;
-        *) return 1 ;;
-    esac
+    _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null
 }
 
 # passphrase_ok <value> <network> -- the library's tn_passphrase_ok (no CR/LF,
-# no whitespace at either end, 16 bytes or more on mainnet); same rule here.
+# no whitespace at either end, 16 bytes or more on mainnet).
 passphrase_ok() {
-    local v="$1" net="$2" rc=0 n ws
-    _lib_call tn_passphrase_ok "$v" "$net" || rc=$?
-    [[ $rc -eq 127 ]] || return $rc
-    ws=$' \t\n\v\f\r'
-    [[ -n "$v" ]] || return 1
-    case "$v" in
-        *$'\n'*|*$'\r'*) return 1 ;;
-        ["$ws"]*|*["$ws"]) return 1 ;;
-    esac
-    if [[ "$net" == mainnet ]]; then
-        n="$(printf '%s' "$v" | LC_ALL=C wc -c | tr -d ' ')"
-        [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 16 )) || return 1
-    fi
-    return 0
+    _lib_req tn_passphrase_ok "$1" "$2"
 }
 
 cmd_setup() {
@@ -1275,12 +1210,8 @@ cmd_setup() {
     read_secret || die "the BLS passphrase must arrive on stdin"
     passphrase_ok "$SECRET" "$net_rule" \
         || die "the BLS passphrase is not usable (no line breaks, no spaces or tabs at either end$([[ "$net_rule" == mainnet ]] && echo ', 16 bytes or more on mainnet'))"
-    if grep -q -- '--passphrase-stdin' "$SETUP_SCRIPT" 2>/dev/null; then
-        exec_job bash "$SETUP_SCRIPT" "${args[@]}" --passphrase-stdin <<< "$SECRET"
-    fi
-    # Transitional: an engine copy without --passphrase-stdin reads the passphrase
-    # from its own environment (never sudo's). Remove with the old engine.
-    TN_BLS_PASSPHRASE="$SECRET" exec_job bash "$SETUP_SCRIPT" "${args[@]}" </dev/null
+    engine_has "$SETUP_SCRIPT" --passphrase-stdin
+    exec_job bash "$SETUP_SCRIPT" "${args[@]}" --passphrase-stdin <<< "$SECRET"
 }
 
 cmd_setup_keygen()   { cmd_setup keygen; }

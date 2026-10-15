@@ -99,14 +99,41 @@ set +e +o pipefail
     FIREWALL_SCRIPT="$T/engine/firewall-setup.sh"
     LOGROTATE_CONF="$T/root/etc/logrotate.d/telcoin"
     LIBEXEC_DIR="$T/root/usr/local/libexec/telcoin"
-    # No shared library: every guarded library call takes its fallback. The
-    # library cases below point HELPER_LIB at the checkout's lib/common.sh.
-    HELPER_LIB="$T/nolib/common.sh"
+    # The engine library: the checkout's lib/common.sh behind a wrapper (below)
+    # that records the two calls needing root or a live node. The tests own the
+    # copy, so the root-ownership check is off; the library cases at the end
+    # turn it back on and take the library away.
+    HELPER_LIB="$T/lib/common.sh"
+    LIB_REQUIRE_ROOT=0
     AUDIT_LOG="$T/audit/audit.log"
     AUDIT_LOGGER=""
 }
-mkdir -p "$T/bin" "$T/engine"
+mkdir -p "$T/bin" "$T/engine" "$T/lib"
 : > "$T/all-calls.log"
+# shellcheck disable=SC2034  # read by the wrapper library below
+HT_CALLS="$T/calls.log"
+# The wrapper library: tn_install_logrotate (writes /etc as root) and
+# tn_committee_down_guard (asks the node's RPC) record their call in calls.log
+# and return TN_TEST_LIB_RC (default 0); the guard says so on stderr. meta_set
+# (a root write) records its call and edits the fake .node-meta in place.
+printf 'source "%s"\n' "${TEST_DIR}/../../lib/common.sh" > "$T/lib/common.sh"
+# shellcheck disable=SC2016
+cat >> "$T/lib/common.sh" <<'EOF'
+tn_install_logrotate() {
+    { printf 'lib tn_install_logrotate'; for a in "$@"; do printf ' [%s]' "$a"; done
+      printf ' file=[%s]\n' "${TN_LOGROTATE_FILE:-}"; } >> "$HT_CALLS"
+    return "${TN_TEST_LIB_RC:-0}"
+}
+meta_set() {
+    printf 'lib meta_set [%s] [%s]\n' "$1" "$2" >> "$HT_CALLS"
+    sed -i "/^$1=/d" "$3" && printf '%s=%s\n' "$1" "$2" >> "$3"
+}
+tn_committee_down_guard() {
+    printf 'lib tn_committee_down_guard [%s] allow=[%s]\n' "$1" "${TN_ALLOW_QUORUM_RISK:-}" >> "$HT_CALLS"
+    echo "guard says ${TN_TEST_LIB_RC:-0}" >&2
+    return "${TN_TEST_LIB_RC:-0}"
+}
+EOF
 
 # make_fake <path> <label> [shell line] -- a command that appends
 # "<label> [arg] [arg] ..." to calls.log, then runs the optional line.
@@ -121,8 +148,9 @@ make_fake() {
 }
 make_fake "$T/engine/update-node.sh"    update-node
 make_fake "$T/engine/edit-config.sh"    edit-config
-make_fake "$T/engine/setup-node.sh"     setup-node
-make_fake "$T/engine/install-caddy.sh"  install-caddy
+# The engine scripts know the stdin flags (the helper greps for them).
+make_fake "$T/engine/setup-node.sh"     setup-node    '# --passphrase-stdin'
+make_fake "$T/engine/install-caddy.sh"  install-caddy '# --password-stdin'
 make_fake "$T/engine/firewall-setup.sh" firewall-setup
 make_fake "$T/bin/systemctl" systemctl
 # docker ps lists two Telcoin Network containers, tn-node and observer.
@@ -314,6 +342,7 @@ check_has "config-set argv" "edit-config [--json] [--set] [verbosity=-vvv]" "$BA
 same_with_tokens unified set-hostname mynode
 check_has "set-hostname writes network-config" 'hostname: "mynode"' "$BASE"
 check_has "set-hostname records the name in .node-meta" "ADVERTISED_NODE_NAME=mynode" "$BASE"
+check_has "set-hostname records it through the library's meta_set" "lib meta_set [ADVERTISED_NODE_NAME] [mynode]" "$BASE"
 check_has "set-hostname restarts the resolved unit" "systemctl [restart] [--no-block] [telcoin]" "$BASE"
 
 same_with_tokens unified addons-status
@@ -404,9 +433,9 @@ check_has "a recorded DATA_DIR that does not exist is reported, not replaced" \
 
 # ---- Setup: refusals, settings and the passphrase on stdin ------------------------
 # Each export below lasts only for its own $(...) subshell. A fresh box (no unit,
-# no .node-meta) unless a case says otherwise. The fake setup-node.sh has no
-# --passphrase-stdin, so it gets the transitional environment form; the second
-# fake has the flag and records the line it reads on stdin.
+# no .node-meta) unless a case says otherwise. The second fake setup-node.sh
+# records the line it reads on stdin; a third one, from before --passphrase-stdin,
+# is refused.
 make_fake "$T/engine/setup-node-stdin.sh" setup-node-stdin \
     '# --passphrase-stdin
 IFS= read -r p; printf "stdin [%s]\n" "$p" >> "'"$T"'/calls.log"; exit 0'
@@ -415,20 +444,26 @@ FIN_ARGS="[--listener-primary] [/ip4/10.0.0.5/udp/49590/quic-v1] [--listener-wor
 fixture none
 t="$(printf 'a good passphrase\n' | trace setup-keygen)"
 check_has "setup-keygen calls setup-node.sh directly" \
-    "setup-node [--json] [--phase=keygen] [--network] [testnet]" "$t"
+    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--passphrase-stdin]" "$t"
 check_lacks "setup-keygen never puts the passphrase in an argument" "a good passphrase" "$t"
 t="$(printf 'a good passphrase\n' | trace setup-keygen validator)"
-check_has "setup-keygen token form" "setup-node [--json] [--phase=keygen] [--network] [testnet]" "$t"
+check_has "setup-keygen token form" "setup-node [--json] [--phase=keygen] [--network] [testnet] [--passphrase-stdin]" "$t"
 t="$(SETUP_SCRIPT="$T/engine/setup-node-stdin.sh"; printf 'a good passphrase\n' | trace setup-keygen)"
 check_has "setup-keygen sends --passphrase-stdin when the engine has it" \
     "setup-node-stdin [--json] [--phase=keygen] [--network] [testnet] [--passphrase-stdin]" "$t"
 check_has "the engine reads the passphrase on its stdin" "stdin [a good passphrase]" "$t"
+make_fake "$T/engine/setup-node-old.sh" setup-node-old
+t="$(SETUP_SCRIPT="$T/engine/setup-node-old.sh"; printf 'a good passphrase\n' | trace setup-keygen)"
+check_has "setup-keygen refuses an engine without --passphrase-stdin" \
+    "setup-node-old.sh in the engine copy has no --passphrase-stdin (it is older than this helper): run update-scripts.sh, then try again" "$t"
+check_lacks "an old setup engine is never run" "setup-node-old [" "$t"
+check_lacks "the passphrase never goes to the environment" "TN_BLS_PASSPHRASE" "$(sed -n '/^main()/,$p' "$HELPER_SRC")"
 t="$(export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize </dev/null)"
 check_has "setup-finalize calls setup-node.sh directly" \
     "setup-node [--json] [--phase=finalize] [--network] [testnet] ${FIN_ARGS}" "$t"
 t="$(export TN_SETUP_RPC_DOMAIN=x.example.org; printf 'a good passphrase\n' | trace setup-keygen)"
 check_has "TN_SETUP_RPC_DOMAIN becomes --rpc-domain" \
-    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--rpc-domain] [x.example.org]" "$t"
+    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--rpc-domain] [x.example.org] [--passphrase-stdin]" "$t"
 t="$(export TN_SETUP_RPC_DOMAIN=x.example.org TN_SETUP_RPC_PUBLIC=true TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize validator </dev/null)"
 check_has "token form with TN_SETUP_RPC_DOMAIN" \
     "setup-node [--json] [--phase=finalize] [--network] [testnet] ${FIN_ARGS} [--rpc-domain] [x.example.org]" "$t"
@@ -439,7 +474,7 @@ t="$(export TN_SETUP_RPC_DOMAIN=localhost; printf 'a good passphrase\n' | trace 
 check_has "an invalid TN_SETUP_RPC_DOMAIN is refused" "invalid rpc domain: localhost" "$t"
 t="$(export TN_SETUP_DATA_DIR=/var/lib/telcoin/node-1; printf 'a good passphrase\n' | trace setup-keygen)"
 check_has "a data dir under /var/lib/telcoin is accepted" \
-    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--data-dir] [/var/lib/telcoin/node-1]" "$t"
+    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--data-dir] [/var/lib/telcoin/node-1] [--passphrase-stdin]" "$t"
 setup_calls="$(grep '^setup-node' "$T/all-calls.log")"
 check "setup-node.sh ran for every accepted setup call" "8" "$(printf '%s\n' "$setup_calls" | grep -c .)"
 check_lacks "--rpc-public never appears in a setup argv" "--rpc-public" "$setup_calls"
@@ -558,7 +593,7 @@ for h in node7.adiri.telcoin.network "$h253"; do
         "install-caddy [--json] [--phase=rpc-check-dns] [--rpc-domain] [$h] [--public-ip] [203.0.113.7]" "$t"
     t="$(trace caddy-enable "$h" admin < "$T/caddy-pass")"
     check_has "caddy-enable accepts $(label "$h")" \
-        "install-caddy [--json] [--phase=enable] [--domain] [$h] [--username] [admin]" "$t"
+        "install-caddy [--json] [--phase=enable] [--domain] [$h] [--username] [admin] [--password-stdin]" "$t"
 done
 check_lacks "the dashboard password never reaches an argument" "a-dashboard-password-1" "$(cat "$T/all-calls.log")"
 refused "caddy-enable without a password on stdin" caddy-enable node7.example.org admin < /dev/null
@@ -571,7 +606,12 @@ refused "caddy-enable with a tab in the password" caddy-enable node7.example.org
 printf 'sixteen-chars-ok\n' > "$T/caddy-16"
 t="$(trace caddy-enable node7.example.org admin < "$T/caddy-16")"
 check_has "caddy-enable accepts a 16-character password" \
-    "install-caddy [--json] [--phase=enable] [--domain] [node7.example.org] [--username] [admin]" "$t"
+    "install-caddy [--json] [--phase=enable] [--domain] [node7.example.org] [--username] [admin] [--password-stdin]" "$t"
+make_fake "$T/engine/install-caddy-old.sh" install-caddy-old
+t="$(CADDY_SCRIPT="$T/engine/install-caddy-old.sh"; trace caddy-enable node7.example.org admin < "$T/caddy-16")"
+check_has "caddy-enable refuses an engine without --password-stdin" \
+    "install-caddy-old.sh in the engine copy has no --password-stdin (it is older than this helper): run update-scripts.sh, then try again" "$t"
+check_lacks "an old caddy engine is never run" "install-caddy-old [" "$t"
 
 # ---- rpc-enable argv shapes ---------------------------------------------------------
 fixture none
@@ -639,7 +679,9 @@ check_has "rpc-disable argv" "install-caddy [--json] [--phase=rpc-disable]" "$t"
 t="$(trace docker-logs tn-node 50)"
 check_has "docker-logs argv" "docker [logs] [--tail] [50] [tn-node]" "$t"
 t="$(trace set-logrotate 2G)"
-check_has "set-logrotate writes the size" "    size 2G" "$t"
+check_has "set-logrotate hands the size and the config path to tn_install_logrotate" \
+    "lib tn_install_logrotate [2G] file=[${LOGROTATE_CONF}]" "$t"
+check_has "set-logrotate prints ok" "ok" "$t"
 printf 'old\n' > "${LOG_DIR}/telcoin.log.1"
 t="$(trace clear-rotated)"
 check_has "clear-rotated removes rotated logs only" "removed 1" "$t"
@@ -717,7 +759,11 @@ for n in 0 abc 200001 01; do
     refused "journal-tail refuses $n" journal-tail "$n"
 done
 t="$(trace quorum-check)"
-check_has "quorum-check without the library check says so" '{"available":false}' "$t"
+check_has "quorum-check asks the library guard about the local RPC, never overriding it" \
+    "lib tn_committee_down_guard [http://127.0.0.1:8545] allow=[0]" "$t"
+check_has "quorum-check reports the guard's answer" '{"available":true,"rc":0,"detail":"guard says 0"}' "$t"
+t="$(export TN_TEST_LIB_RC=1; trace quorum-check)"
+check_has "quorum-check reports a refusal" '{"available":true,"rc":1,"detail":"guard says 1"}' "$t"
 
 # ---- Start-script resolution (current layout) ---------------------------------------
 fixture none
@@ -746,11 +792,8 @@ refused "set-logrotate refuses 1g" set-logrotate 1g
 refused "set-logrotate refuses an empty size" set-logrotate ""
 fixture unified
 t="$(trace logrotate-seed)"
-check_has "logrotate-seed writes the default size" "    size 100M" "$t"
-check_has "logrotate-seed keeps copytruncate" "    copytruncate" "$t"
-trace set-logrotate 3G >/dev/null
-t="$(trace logrotate-seed)"
-check_has "logrotate-seed keeps an existing size" "    size 3G" "$t"
+check_has "logrotate-seed calls tn_install_logrotate without a size (keep or default)" \
+    "lib tn_install_logrotate file=[${LOGROTATE_CONF}]" "$t"
 # The library refuses (rc 1) while the telcoin-log group is missing: the call
 # still fails, and says to run the ownership migration.
 t="$(_lib_call() { return 1; }; getent() { return 2; }; trace set-logrotate 1G)"
@@ -762,9 +805,6 @@ check_has "logrotate-seed without the log group says how to migrate" \
     "could not write ${LOGROTATE_CONF}: the telcoin-log group does not exist yet. Run update-node.sh or edit-config.sh once (as root) to migrate the node's file ownership, then try again." "$t"
 t="$(_lib_call() { return 1; }; getent() { return 0; }; trace set-logrotate 1G)"
 check_has "another library failure keeps the plain message" "could not write ${LOGROTATE_CONF} (rc 1)" "$t"
-ln -s /etc/passwd "$T/root/etc/logrotate.d/evil"
-LOGROTATE_CONF="$T/root/etc/logrotate.d/evil" refused "set-logrotate refuses a symlinked config" set-logrotate 1G
-check_lacks "the symlink target was not written" "size 1G" "$(cat /etc/passwd)"
 
 # ---- set-hostname writes as the service account ------------------------------------------
 fixture unified
@@ -811,8 +851,9 @@ t="$(trace jaeger-start)"
 check_has "jaeger-start binds loopback ports, drops capabilities" \
     "docker [run] [-d] [--name] [jaeger] [--restart] [no] [-p] [127.0.0.1:16686:16686] [-p] [127.0.0.1:4317:4317] [--memory] [512m] [--pids-limit] [256] [--cap-drop] [ALL] [--security-opt] [no-new-privileges] [${JAEGER_IMAGE}]" "$t"
 
-# ---- The shared library, when it is there --------------------------------------------------
+# ---- The shared library: required, root-owned ----------------------------------------------
 LIB_SAVE="$HELPER_LIB"
+LIB_REQUIRE_ROOT=1
 # A copy of the library owned by someone other than root, whoever runs the test
 # (as root, the copy is handed to uid 65534; the checkout itself may be root's).
 mkdir -p "$T/lib-not-root"
@@ -822,41 +863,70 @@ if [[ $EUID -eq 0 ]]; then
 fi
 HELPER_LIB="$T/lib-not-root/common.sh"
 check "a library not owned by root is not used" "unusable" "$(_lib_usable && echo usable || echo unusable)"
-HELPER_LIB="${TEST_DIR}/../../lib/common.sh"
 LIB_REQUIRE_ROOT=0
+HELPER_LIB="${TEST_DIR}/../../lib/common.sh"
 check "_lib_call reports a missing function as 127" "127" "$(_lib_call tn_no_such_function; echo $?)"
-# shellcheck source=/dev/null
-if (source "$HELPER_LIB" >/dev/null 2>&1 && declare -F tn_release_tag_ok >/dev/null); then
-    fixture unified
-    t="$(trace update-prepare v0.16.0-adiri)"
-    check_has "with the library: update-prepare accepts a testnet tag" \
-        "update-node [--json] [--prepare] [--ref] [v0.16.0-adiri]" "$t"
-    refused "with the library: update-prepare refuses main" update-prepare main
-    check "with the library: passphrase_ok refuses a 15-byte mainnet value" "1" \
-        "$(passphrase_ok abcdefghijklmno mainnet; echo $?)"
-else
-    printf 'SKIP  library cases (lib/common.sh does not source here)\n'
-fi
-# One writer for the rotation config: once the library has tn_install_logrotate,
-# set-logrotate must produce exactly what a direct call writes. The library writes
-# /etc/logrotate.d/telcoin itself, so this runs only as root in a throwaway
-# container (TN_UI_TEST_ROOT=1).
-# shellcheck source=/dev/null
-if (source "$HELPER_LIB" >/dev/null 2>&1 && declare -F tn_install_logrotate >/dev/null) \
-    && [[ $EUID -eq 0 && "${TN_UI_TEST_ROOT:-}" == 1 ]]; then
-    LOGROTATE_CONF=/etc/logrotate.d/telcoin
-    (set -euo pipefail; main set-logrotate 2G) >/dev/null 2>&1
-    via_helper="$(cat /etc/logrotate.d/telcoin 2>/dev/null)"
-    rm -f /etc/logrotate.d/telcoin
+# Without the library (or with one lacking the function) each check the engine
+# owns refuses the call and names the fix; nothing runs.
+LIB_MSG="is missing or has no"
+for c in "update-prepare|v0.16.0-adiri|tn_release_tag_ok" "set-logrotate|1G|tn_install_logrotate" \
+         "logrotate-seed||tn_install_logrotate" "quorum-check||tn_committee_down_guard"; do
+    sub="${c%%|*}"; rest="${c#*|}"; arg="${rest%%|*}"; fn="${rest#*|}"
+    for lib in "$T/nolib/common.sh" "$T/lib-not-root/common.sh"; do
+        HELPER_LIB="$lib"
+        [[ "$lib" == "$T/nolib/common.sh" ]] || LIB_REQUIRE_ROOT=1
+        fixture unified
+        if [[ -n "$arg" ]]; then t="$(trace "$sub" "$arg")"; else t="$(trace "$sub")"; fi
+        check_has "$sub without a usable library refuses ($(basename "${lib%/*}"))" \
+            "the engine library (${lib}) ${LIB_MSG} ${fn}: run update-scripts.sh, then try again" "$t"
+        check_lacks "$sub without a usable library runs nothing ($(basename "${lib%/*}"))" "[" \
+            "$(printf '%s\n' "$t" | sed -n '/^--- calls$/,/^--- files$/p' | sed '1d;$d')"
+        LIB_REQUIRE_ROOT=0
+    done
+done
+HELPER_LIB="$T/nolib/common.sh"
+fixture none
+t="$(export TN_SETUP_NETWORK=testnet; trace setup-keygen < "$T/pass-in")"
+check_has "setup-keygen without the library refuses" \
+    "the engine library (${HELPER_LIB}) ${LIB_MSG} tn_service_user_ok: run update-scripts.sh, then try again" "$t"
+t="$(export TN_SETUP_NETWORK=testnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
+check_lacks "setup-keygen without the library never reaches setup-node" "setup-node [" "$t"
+HELPER_LIB="${TEST_DIR}/../../lib/common.sh"
+check "with the library: passphrase_ok refuses a 15-byte mainnet value" "1" \
+    "$(passphrase_ok abcdefghijklmno mainnet; echo $?)"
+check "with the library: passphrase_ok takes a 16-byte mainnet value" "0" \
+    "$(passphrase_ok abcdefghijklmnop mainnet; echo $?)"
+# One writer for the rotation config: set-logrotate and logrotate-seed write
+# exactly what a direct tn_install_logrotate call writes. The library writes as
+# root into a root-owned directory and needs the telcoin-log group, so this runs
+# only as root in a throwaway container (TN_UI_TEST_ROOT=1, group present); it
+# writes under /var/lib and removes what it made.
+if [[ $EUID -eq 0 && "${TN_UI_TEST_ROOT:-}" == 1 ]] && getent group telcoin-log >/dev/null 2>&1; then
+    RD="$(mktemp -d /var/lib/tn-ui-logrotate.XXXXXX)"
+    LOGROTATE_CONF="${RD}/via-helper"
+    t="$(trace set-logrotate 2G)"
+    check_has "set-logrotate with the real library succeeds" "rc=0" "$t"
     # shellcheck source=/dev/null
-    (source "$HELPER_LIB" >/dev/null 2>&1; tn_install_logrotate 2G) >/dev/null 2>&1
-    check "set-logrotate writes what tn_install_logrotate writes" "$(cat /etc/logrotate.d/telcoin 2>/dev/null)" "$via_helper"
+    (source "$HELPER_LIB" >/dev/null 2>&1; TN_LOGROTATE_FILE="${RD}/via-lib" tn_install_logrotate 2G) >/dev/null 2>&1
+    check "set-logrotate writes what tn_install_logrotate writes" "$(cat "${RD}/via-lib" 2>/dev/null)" "$(cat "${RD}/via-helper" 2>/dev/null)"
+    check_has "the rotation config carries the size" "    size 2G" "$(cat "${RD}/via-helper" 2>/dev/null)"
+    rm -f "${RD}/via-helper" "${RD}/via-lib"
+    trace logrotate-seed >/dev/null
+    # shellcheck source=/dev/null
+    (source "$HELPER_LIB" >/dev/null 2>&1; TN_LOGROTATE_FILE="${RD}/via-lib" tn_install_logrotate) >/dev/null 2>&1
+    check "logrotate-seed writes what tn_install_logrotate writes" "$(cat "${RD}/via-lib" 2>/dev/null)" "$(cat "${RD}/via-helper" 2>/dev/null)"
+    trace set-logrotate 3G >/dev/null
+    trace logrotate-seed >/dev/null
+    check_has "logrotate-seed keeps a size set before" "    size 3G" "$(cat "${RD}/via-helper" 2>/dev/null)"
+    ln -s /etc/passwd "${RD}/evil"
+    LOGROTATE_CONF="${RD}/evil" refused "set-logrotate refuses a symlinked config" set-logrotate 1G
+    check_lacks "the symlink target was not written" "size 1G" "$(cat /etc/passwd)"
+    rm -rf "$RD"
     LOGROTATE_CONF="$T/root/etc/logrotate.d/telcoin"
 else
-    printf 'SKIP  set-logrotate vs tn_install_logrotate (needs the library function and TN_UI_TEST_ROOT=1 as root)\n'
+    printf 'SKIP  set-logrotate vs tn_install_logrotate (needs root, TN_UI_TEST_ROOT=1 and the telcoin-log group)\n'
 fi
 HELPER_LIB="$LIB_SAVE"
-LIB_REQUIRE_ROOT=1
 
 # ---- No engine call carries a role flag ---------------------------------------------
 all_calls="$(cat "$T/all-calls.log")"
