@@ -1,3 +1,68 @@
+## Review: mainnet hardening round (2026-10-15)
+
+Branch `mainnet-hardening`, forked from `main` at 037c810: 155 commits up to 417fbe2, then the
+docs and release prep. The packages, merge order and per-package gates are in `tasks/plan.md`;
+what remains is in `followup.md`.
+
+### What landed
+
+- [x] Root-owned install tree: `/etc/telcoin`, `.node-meta`, the start scripts and the binary
+      belong to root, the data directory is the only tree the service account owns, and
+      `tn_migrate_ownership` converts an existing host under the lock (`OWNERSHIP_LAYOUT=2`).
+- [x] One update lock at `/run/telcoin/update.lock` for every root script that writes the
+      install. Every restart waits for the epoch window, and one that would cost the committee
+      its quorum is refused unless `--allow-quorum-risk` is given.
+- [x] The BLS passphrase is a `systemd-creds` credential (`host+tpm2` or `host`) or, in the
+      interim, a root-only file; the root-owned start script feeds it to the node on stdin. It
+      is never on a command line or in a unit `Environment=` line. The TPM unseal method is
+      gone; `edit-config.sh --migrate-credential` and `--reseal` convert and reseal.
+- [x] Generated `node.env`, start script under `/usr/local/libexec/telcoin/` and a sandboxed
+      unit; the listeners moved out of the launch line.
+- [x] Script updates install only from a signed `MANIFEST` under a `scripts-v*` tag;
+      `install.sh` is pinned to a release tag; `tools/release-scripts.sh` and the CI jobs that
+      check them.
+- [x] Node releases are checked with `gpgv` against `lib/release-keys/`; release tags only;
+      source builds run as `tn-build` with a pinned rustup; Docker comes from Docker's apt
+      repository and images run by digest; downgrades are refused; update-node checks after an
+      update that the node votes again.
+- [x] Testnet genesis, committee and parameters files pinned by hash; mainnet needs systemd 255.
+- [x] Add-ons: a fail-safe firewall with SSH and P2P source lists and an sshd drop-in, a `KEYS`
+      file and self-heal for the testnet VPN, the Caddy admin API on a unix socket, Alloy under
+      its own account.
+- [x] Node Manager UI: per-install token, Host and Origin checks, a JSON-only API, checked helper
+      arguments, a hashed venv, and `http://127.0.0.1:8080` as the address.
+- [x] remove-node takes the lock, shreds secrets and can finish an interrupted removal.
+- [x] telcoin-network: the credential passphrase source, the chain 487 guard and the release
+      pipeline, each attested and pushed.
+
+### Gates at the final merge (417fbe2)
+
+- [x] `tools/tests/run.sh`: 51 test files green under bash 5 (2800 checks, 0 failures, 40
+      skipped because they need root), under `bash:3.2`, and as root in `ubuntu:24.04`.
+- [x] `ui/tests/helper_test.sh` 327 checks, 0 failures. UI pytest 189, `install_ui_test.sh` 13
+      and `open_ui_test.sh` 9 at the UI fix pass.
+- [x] `tools/check-perl-interp.sh`, the passphrase-print lint, `tools/check-bash32.sh` and
+      `shellcheck -x --severity=error` clean.
+- [x] VM assertions in an `ubuntu:24.04` container as root, at the updater fix pass: five
+      passed; the perl-lint one skipped because the lint had not merged yet. Its skip guard is
+      satisfied on 417fbe2, but it has not run since.
+- [x] No co-author trailer in `037c810..417fbe2`.
+- [x] telcoin-network: 238 tests on the credential branch; 523 and 122 on the chain 487 guard,
+      clippy clean with both feature sets; all three branches attested.
+
+### What remains
+
+- [ ] Release prep: versions, the new tracked files in the updater arrays,
+      `tools/gen-checksums.sh`, the signed `MANIFEST` and the `scripts-v2.0.0` tag.
+- [ ] User steps: a GPG key in `lib/release-keys/`, an SSH signing key in `lib/allowed_signers`,
+      the `github-pages` environment allowing `scripts-v*` tags, a second CODEOWNERS owner, the
+      rulesets.
+- [ ] Post the drafted issues; open this repo's PR and the two telcoin-network draft PRs; update
+      PR #694.
+- [ ] Merge the pending UI follow-up pass and the release-install fix pass.
+- [ ] Review the whole range.
+- [ ] Mainnet constants, the host soak, the upstream items and the rest: `followup.md`.
+
 # Review — followup.md backlog round (2026-10-01 19:20 → 2026-10-02, three repos)
 
 Nothing is pushed. `main` is 42 commits ahead of `origin/main` (`7fb7c8d..6622d1e`; the release
