@@ -181,10 +181,37 @@ done
 # =============================================================================
 # The run holds the update lock from the confirmation to the end, so no other
 # script changes the unit, the start script or .node-meta meanwhile. This script
-# owns its EXIT trap (TN_EXIT_TRAP_OWNED=1): migrate_on_exit releases the lock on
-# every exit, a rollback included.
+# owns its EXIT trap (TN_EXIT_TRAP_OWNED=1): migrate_on_exit removes a root
+# write or credential left half done (tn_remove_inflight_tmp) and releases the
+# lock on every exit, a rollback included.
 migrate_on_exit() {
+    tn_remove_inflight_tmp 2>/dev/null || true
     tn_release_update_lock 2>/dev/null || true
+}
+
+# Set once the snapshot exists (rollback armed) and once the new unit started and
+# verified; migrate_on_signal reads them.
+ROLLBACK_ARMED=false
+MIGRATE_VERIFIED=false
+
+# migrate_on_signal STATUS -- TERM, INT and HUP once the lock is held. Before the
+# snapshot nothing has changed; after it and before the new unit is verified the
+# run rolls back to the legacy layout; after the verified start it keeps the new
+# layout and shreds the passphrase copies first. Then it exits with STATUS (the
+# EXIT trap releases the lock).
+migrate_on_signal() {
+    local rc="$1"
+    trap '' TERM INT HUP
+    trap - ERR
+    if [[ "$ROLLBACK_ARMED" == true && "$MIGRATE_VERIFIED" != true ]]; then
+        print_error "Stopped by a signal during the migration. Rolling back..."
+        rollback
+    elif [[ "$MIGRATE_VERIFIED" == true ]]; then
+        set +e
+        shred_passphrase_copies
+        print_warn "Stopped by a signal after ${UNIFIED_SERVICE} started on the unified layout: it stays. Remove ${LEGACY_UNIT} and ${LEGACY_WRAPPER} by hand if they remain, then run sudo systemctl daemon-reload."
+    fi
+    exit "$rc"
 }
 
 # migrate_detect_sum -- one SHA-256 over the legacy unit and .node-meta.
@@ -199,6 +226,9 @@ migrate_take_lock() {
     local now
     TN_EXIT_TRAP_OWNED=1
     trap migrate_on_exit EXIT
+    trap 'migrate_on_signal 143' TERM
+    trap 'migrate_on_signal 130' INT
+    trap 'migrate_on_signal 129' HUP
     if ! tn_acquire_update_lock; then
         print_error "Another setup, update or edit holds the update lock ($(tn_update_lock_path))${TN_UPDATE_LOCK_HOLDER:+, PID ${TN_UPDATE_LOCK_HOLDER}}. Wait for it to finish, then run the migration again. Nothing was changed."
         exit 1
@@ -347,7 +377,7 @@ on_error() {
     rollback
     exit 1
 }
-arm_rollback() { trap on_error ERR; }
+arm_rollback() { ROLLBACK_ARMED=true; trap on_error ERR; }
 
 # =============================================================================
 # STEP 1 -- DETECT & GUARD
@@ -463,7 +493,8 @@ detect_legacy() {
     # asks for the passphrase); a unit that holds it has it read now, by awk from the
     # unit (never a command line), and stored after the config dir moves.
     migrate_meta_read PASSPHRASE_METHOD
-    if [[ "$META_VAL" == "tpm" ]]; then
+    if [[ "$META_VAL" == "tpm" || -e "${LEGACY_CONFIG_DIR}/bls-tpm.pub" || -e "${LEGACY_CONFIG_DIR}/bls-tpm.priv" \
+        || -e "${UNIFIED_CONFIG_DIR}/bls-tpm.pub" || -e "${UNIFIED_CONFIG_DIR}/bls-tpm.priv" ]]; then
         print_error "The BLS passphrase is sealed with the old TPM method, which these scripts no longer use."
         print_info "Move it first: sudo ./edit-config.sh --migrate-credential, then run this again. Nothing was changed."
         exit 1
@@ -938,7 +969,7 @@ start_and_verify() {
 # .node-meta, so rewrite_unit renders the matching credential line. A rollback
 # removes the file and puts .node-meta back from its backup.
 store_passphrase() {
-    local meta="${UNIFIED_CONFIG_DIR}/.node-meta"
+    local meta="${UNIFIED_CONFIG_DIR}/.node-meta" rc=0
     [[ "$EMBEDDED_PASS" == true ]] || return 0
     print_step "Storing the BLS passphrase the legacy unit held..."
     WROTE_META=true
@@ -948,7 +979,11 @@ store_passphrase() {
         meta_set PASSPHRASE_METHOD credential "$meta" && meta_set CREDENTIAL_KEY "$PASS_KEY" "$meta" || { TN_CRED_PASS=""; return 1; }
     else
         STORED_PASS_FILE="${UNIFIED_CONFIG_DIR}/bls-passphrase"
-        printf '%s\n' "$TN_CRED_PASS" | tn_write_root_file "$STORED_PASS_FILE" 0600 || { TN_CRED_PASS=""; return 1; }  # passphrase-stdin-ok stdout is the root-write pipe
+        tn_write_root_file "$STORED_PASS_FILE" 0600 < <(trap - ERR; printf '%s\n' "$TN_CRED_PASS") || rc=$?  # passphrase-stdin-ok stdin of the root writer, a pipe
+        if [[ $rc -ne 0 ]]; then
+            TN_CRED_PASS=""
+            return 1
+        fi
         meta_set PASSPHRASE_METHOD stdin "$meta" || { TN_CRED_PASS=""; return 1; }
     fi
     TN_CRED_PASS=""
@@ -956,14 +991,21 @@ store_passphrase() {
 }
 
 # STEP 10.4 -- after a verified start, shred what still holds a passphrase the legacy
-# unit carried: the legacy unit itself, its backups beside it and the snapshot copy.
+# unit carried: the legacy unit itself, its backups beside it, the snapshot copy,
+# and what _tn_cred_old_copies lists for the unified node: the plaintext file when
+# the passphrase moved to the credential, unit backups holding it beside the unit
+# or in /var/backups/telcoin, and passphrase-file backups there.
 shred_passphrase_copies() {
-    local f
+    local f keep=0
     [[ "$EMBEDDED_PASS" == true ]] || return 0
+    [[ "$PASS_TARGET" == credential ]] || keep=1
     _tn_shred "$LEGACY_UNIT" "$UNIT_BAK"
     for f in "${LEGACY_UNIT}".*bak* "${LEGACY_UNIT%.service}".bak.*; do
         [[ -f "$f" ]] && grep -q 'TN_BLS_PASSPHRASE=' "$f" 2>/dev/null && _tn_shred "$f"
     done
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && _tn_shred "$f"
+    done < <(_tn_cred_old_copies "$UNIFIED_SERVICE" "$UNIFIED_CONFIG_DIR" "$keep")
     print_ok "Shredded the copies of the passphrase the legacy unit held (best effort on SSDs, copy-on-write and cloud disks)."
     return 0
 }
@@ -973,6 +1015,11 @@ remove_legacy_units() {
     rm -f -- "$LEGACY_UNIT" 2>/dev/null || print_warn "Could not remove ${LEGACY_UNIT}; remove it by hand."
     if [[ -e "$LEGACY_WRAPPER" || -L "$LEGACY_WRAPPER" ]]; then
         rm -f -- "$LEGACY_WRAPPER" 2>/dev/null || print_warn "Could not remove ${LEGACY_WRAPPER}; remove it by hand."
+    fi
+    # The start wrapper an older unified release ran: nothing runs it any more.
+    local old="${DEFAULT_INSTALL_DIR}/start-${UNIFIED_SERVICE}.sh"
+    if [[ -e "$old" || -L "$old" ]] && ! grep -qF -- "start-${UNIFIED_SERVICE}.sh" "$UNIFIED_UNIT" 2>/dev/null; then
+        rm -f -- "$old" 2>/dev/null || print_warn "Could not remove ${old}; remove it by hand."
     fi
     systemctl daemon-reload 2>/dev/null || true
     print_ok "Legacy unit and wrapper removed."
@@ -1074,6 +1121,7 @@ main() {
     convert_launch       # step 8b (start script in the current form; a refusal keeps it)
     finalize_units       # step 9
     start_and_verify      # step 10 (failure -> rollback via ERR trap)
+    MIGRATE_VERIFIED=true # a signal from here on keeps the new layout
     shred_passphrase_copies # step 10.4 (only when the legacy unit held the passphrase)
     remove_legacy_units   # step 10.5 (non-fatal; only after a verified start)
     open_consensus_ports  # step 11 (non-fatal; validator-capable P2P ports)

@@ -79,12 +79,35 @@ cat > "$T/bin/systemctl" <<EOF
 #!/bin/bash
 printf 'systemctl %s\n' "\$*" >> "$EV"
 case "\$1" in
+    --version) [[ -e "$T/sd255" ]] && printf 'systemd 255 (255.4-1ubuntu8)\n' ;;
     is-active) exit 0 ;;
     list-unit-files) exit 0 ;;
     start)
         if [[ "\$2" == telcoin && -e "$T/plant" ]]; then
             ln -s "$T/canary" /var/lib/telcoin/observer
         fi
+        # With $T/term the run gets a TERM while the new unit starts.
+        if [[ "\$2" == telcoin && -e "$T/term" ]]; then
+            kill -TERM "\$PPID"
+        fi
+        ;;
+esac
+exit 0
+EOF
+# systemd-creds "encrypts" by rot13 behind a CRED: prefix (used with $T/sd255).
+cat > "$T/bin/systemd-creds" <<'EOF'
+#!/bin/sh
+cmd="$1"
+shift
+case "$cmd" in
+    has-tpm2) exit 1 ;;
+    encrypt) tr 'A-Za-z' 'N-ZA-Mn-za-m' | sed 's/^/CRED:/' ;;
+    decrypt)
+        in=""
+        for a in "$@"; do
+            case "$a" in --*) ;; *) [ -n "$in" ] || in="$a" ;; esac
+        done
+        sed 's/^CRED://' "$in" | tr 'A-Za-z' 'N-ZA-Mn-za-m'
         ;;
 esac
 exit 0
@@ -122,7 +145,7 @@ printf '{"jsonrpc":"2.0","id":1,"result":%s}' "\$r"
 exit 0
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/sleep"
-chmod 0755 "$T/bin/systemctl" "$T/bin/curl" "$T/bin/sleep"
+chmod 0755 "$T/bin/systemctl" "$T/bin/curl" "$T/bin/sleep" "$T/bin/systemd-creds"
 
 UNIT_TEXT='[Unit]
 Description=Telcoin Network Observer Node
@@ -149,7 +172,7 @@ legacy() {
     for p in $PATHS; do
         rm -rf -- "$p"
     done
-    rm -f "$T/plant" "$T/rpc-fail" "$T/voting"
+    rm -f "$T/plant" "$T/rpc-fail" "$T/voting" "$T/sd255" "$T/term"
     rm -rf "$T/canary"
     mkdir -p "$T/canary" /etc/systemd/system
     printf '%s\n' "$UNIT_TEXT" > /etc/systemd/system/telcoin-observer.service
@@ -244,6 +267,57 @@ check "embedded: new unit loads the file, holds no passphrase" "yes no" \
     "$(has "$(cat /etc/systemd/system/telcoin.service)" "LoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase") $(has "$(cat /etc/systemd/system/telcoin.service)" "TN_BLS_PASSPHRASE=")"
 check "embedded: no backup holds the passphrase" "" "$(grep -rl 'embedded-Pass-1' /var/backups/telcoin /etc/systemd/system 2>/dev/null)"
 check "embedded: lock released" yes "$(lock_free)"
+
+# The same with systemd-creds: the passphrase moves to the credential, and the
+# plaintext file, an older unit copy in /var/backups/telcoin and the start
+# wrapper of an older release go after the verified start; an unrelated backup
+# stays.
+legacy
+touch "$T/sd255"
+printf '%s\n' "[Service]" 'Environment="TN_BLS_PASSPHRASE=embedded-Pass-2"' "User=telcoin" \
+    "ExecStart=/opt/telcoin/start-telcoin-observer.sh" > /etc/systemd/system/telcoin-observer.service
+printf 'embedded-Pass-2\n' > /etc/telcoin/observer/bls-passphrase
+chmod 0600 /etc/telcoin/observer/bls-passphrase
+install -d -o root -g root -m 0700 /var/backups/telcoin
+printf '[Service]\nEnvironment="TN_BLS_PASSPHRASE=embedded-Pass-2"\n' > /var/backups/telcoin/telcoin-observer.service.QwErTy
+printf 'unrelated\n' > /var/backups/telcoin/caddy-launch.AbCdEf
+chmod 0600 /var/backups/telcoin/*
+printf '#!/bin/sh\n' > /opt/telcoin/start-telcoin.sh
+migrate
+check_rc "embedded, credential: rc" 0 "$RC" || printf "%s\n" "$OUT" | grep -i "error\|warn\|fail" | head -8
+check "embedded, credential: stored and recorded" "yes PASSPHRASE_METHOD=credential" \
+    "$([[ -s /etc/telcoin/bls-passphrase.cred ]] && echo yes || echo no) $(grep '^PASSPHRASE_METHOD=' /etc/telcoin/.node-meta)"
+check "embedded, credential: plaintext file shredded" "no" "$([[ -e /etc/telcoin/bls-passphrase ]] && echo yes || echo no)"
+check "embedded, credential: no file holds the passphrase" "" \
+    "$(grep -rl 'embedded-Pass-2' /etc/telcoin /var/backups/telcoin /etc/systemd/system /opt/telcoin 2>/dev/null)"
+check "embedded, credential: unrelated backup kept" "yes" "$([[ -e /var/backups/telcoin/caddy-launch.AbCdEf ]] && echo yes || echo no)"
+check "embedded, credential: older start wrapper removed" "no" "$([[ -e /opt/telcoin/start-telcoin.sh ]] && echo yes || echo no)"
+
+# systemd-creds failing inside the encrypt step: one rollback, by the run itself.
+legacy
+touch "$T/sd255"
+printf '%s\n' "[Service]" 'Environment="TN_BLS_PASSPHRASE=embedded-Pass-3"' "User=telcoin" \
+    "ExecStart=/opt/telcoin/start-telcoin-observer.sh" > /etc/systemd/system/telcoin-observer.service
+chmod 0644 "$T/bin/systemd-creds"
+migrate
+chmod 0755 "$T/bin/systemd-creds"
+check "encrypt fails: rolled back once, legacy layout back, no credential" "1 yes no" \
+    "$(printf '%s\n' "$OUT" | grep -c 'Rolled back to the legacy layout') $([[ -e /etc/telcoin/observer/.node-meta ]] && echo yes || echo no) $([[ -e /etc/telcoin/bls-passphrase.cred ]] && echo yes || echo no)"
+
+# Sealed TPM blobs refuse the migration whatever .node-meta records.
+legacy
+printf 'x\n' > /etc/telcoin/observer/bls-tpm.pub
+migrate
+check "tpm blobs: refused, nothing moved" "1 yes yes" \
+    "${RC} $([[ -e /etc/telcoin/observer/.node-meta ]] && echo yes || echo no) $(has "$OUT" "--migrate-credential")"
+
+# A TERM while the new unit starts rolls the run back to the legacy layout.
+legacy
+touch "$T/term"
+migrate
+check "signal: exit 143 and rolled back to the legacy layout" "143 yes yes yes" \
+    "${RC} $([[ -e /etc/systemd/system/telcoin-observer.service ]] && echo yes || echo no) $([[ -e /etc/telcoin/observer/.node-meta ]] && echo yes || echo no) $(has "$OUT" "Rolled back")"
+check "signal: lock released" yes "$(lock_free)"
 
 # -----------------------------------------------------------------------------
 # Rollback: the new node never answers; a link is planted at the role dir's name

@@ -4950,7 +4950,9 @@ tn_store_credential() {
     [[ -n "$pcrs" ]] && opt+=("--tpm2-pcrs=${pcrs}")
     want="$(_tn_cred_digest)" || return 2
     TN_INFLIGHT_CRED="$new"
-    tn_write_root_file "$new" 0600 < <(printf '%s\n' "$TN_CRED_PASS" | systemd-creds encrypt "${opt[@]}" - - 2>/dev/null) || rc=$?  # passphrase-stdin-ok stdin of systemd-creds, a pipe
+    # The substitution drops an inherited ERR trap: a caller running with errtrace
+    # must not run its error handler in that subshell.
+    tn_write_root_file "$new" 0600 < <(trap - ERR; printf '%s\n' "$TN_CRED_PASS" | systemd-creds encrypt "${opt[@]}" - - 2>/dev/null) || rc=$?  # passphrase-stdin-ok stdin of systemd-creds, a pipe
     if [[ $rc -ne 0 || ! -s "$new" ]]; then
         rm -f -- "$new" 2>/dev/null || true
         TN_INFLIGHT_CRED=""
@@ -5326,7 +5328,7 @@ _tn_cred_switch() {
         tn_store_credential "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase.cred" "$key" "$pcrs" || rc=$?
     else
         plain="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
-        tn_write_root_file "$plain" 0600 < <(printf '%s\n' "$TN_CRED_PASS") || rc=$?  # passphrase-stdin-ok stdin of the root writer, a pipe
+        tn_write_root_file "$plain" 0600 < <(trap - ERR; printf '%s\n' "$TN_CRED_PASS") || rc=$?  # passphrase-stdin-ok stdin of the root writer, a pipe
     fi
     if [[ $rc -ne 0 ]]; then
         _tn_cred_restore || true
