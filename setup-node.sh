@@ -122,14 +122,23 @@ unset TN_BLS_PASSPHRASE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
-if ! version_gte "${COMMON_VERSION:-0}" "1.6.0" || ! declare -F tn_write_node_unit >/dev/null 2>&1; then
-    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh. Run update-scripts.sh and try again."
+# The library must be the one shipped with this script: an older one (a partial
+# update) lacks helpers this script calls. Refuse up front with one message.
+_tn_old=""
+version_gte "${COMMON_VERSION:-0}" "1.6.0" || _tn_old=1
+for _tn_fn in tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write_root_file \
+              tn_detect_network tn_write_node_unit tn_remove_inflight_tmp; do
+    declare -F "$_tn_fn" >/dev/null 2>&1 || _tn_old=1
+done
+if [[ -n "$_tn_old" ]]; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
         *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
     esac
     exit 1
 fi
+unset _tn_fn _tn_old
 
 readonly SCRIPT_VERSION="1.3.0"
 readonly SERVICE_NAME="telcoin"
