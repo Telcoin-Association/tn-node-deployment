@@ -3378,6 +3378,11 @@ async function loadSetupDefaults(){
 
 function goStep(n){ state.setupStep=n; renderSetup(); }
 
+// Mainnet in the setup wizard: off until the mainnet release. Everything behind
+// it (signed-release default, journal log target, --allow-no-tpm) is in place,
+// so enabling it is this one line.
+const SETUP_MAINNET_ENABLED = false;
+
 // The wizard's network as the server names it.
 function setupNetwork(){ return state.setup.network==='mainnet' ? 'mainnet' : 'testnet'; }
 
@@ -3473,8 +3478,10 @@ function stepNetwork(body){
     <div class="radio-cards">
       <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
         <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
-      <div class="rcard ${state.setup.network==='mainnet'?'sel':''}" data-net="mainnet">
-        <div class="rt">Mainnet</div><div class="rd">Production network. Installs a signed release and logs to the systemd journal by default; setup stops with the engine's reason while a release is not published.</div></div>
+      ${SETUP_MAINNET_ENABLED
+        ? `<div class="rcard ${state.setup.network==='mainnet'?'sel':''}" data-net="mainnet">
+        <div class="rt">Mainnet</div><div class="rd">Production network. Installs a signed release and logs to the systemd journal by default.</div></div>`
+        : `<div class="rcard disabled"><div class="rt">Mainnet <span class="tag">coming soon</span></div><div class="rd">Production network — enabled with the mainnet release.</div></div>`}
     </div>
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(1)">← Back</button><button class="btn btn-green" onclick="goStep(3)">Continue →</button></div>`;
   body.querySelectorAll('[data-net]').forEach(r=>r.addEventListener('click',()=>setSetupNetwork(r.dataset.net)));

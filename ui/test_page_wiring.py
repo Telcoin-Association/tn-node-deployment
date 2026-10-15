@@ -88,6 +88,13 @@ class HostAuditCardTest(unittest.TestCase):
 
 class SetupWizardTest(unittest.TestCase):
 
+    def test_mainnet_selection_stays_off_until_the_mainnet_release(self):
+        self.assertIn("const SETUP_MAINNET_ENABLED = false;", page())
+        body = function_body("stepNetwork")
+        self.assertIn("${SETUP_MAINNET_ENABLED", body)
+        self.assertIn('<div class="rcard disabled"><div class="rt">Mainnet', body)
+        self.assertIn("enabled with the mainnet release", body)
+
     def test_mainnet_defaults_to_a_signed_release(self):
         body = function_body("setSetupNetwork")
         self.assertIn("s.method = net==='mainnet' ? 'release' : 'source';", body)
