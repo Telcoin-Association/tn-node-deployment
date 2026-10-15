@@ -272,19 +272,11 @@ def bad_type():
 
 
 # =============================================================================
-# Rules shared with the helper and lib/common.sh. Each one asks the library
-# first (through bash, as this unprivileged user) and falls back to the same
-# rule here when the library or the function is missing.
+# Rules shared with the helper and lib/common.sh. Each is a twin of the
+# library's rule, kept equal by the tests, and answers here without running
+# bash. The library is asked only for what a twin cannot answer: the newest
+# release image's registry digest (latest_docker_image).
 # =============================================================================
-
-def _lib_rule(fn, *args):
-    """True/False from a lib/common.sh predicate, None when it cannot answer."""
-    script = ('source "$1" >/dev/null 2>&1 || exit 127; shift; '
-              'declare -F "$1" >/dev/null || exit 127; "$@"')
-    rc, _out, _err = run(["bash", "-c", script, "_", LIB_COMMON, fn] + [str(a) for a in args],
-                         timeout=10)
-    return {0: True, 1: False}.get(rc)
-
 
 # Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri, mainnet
 # vX.Y.Z. Branch names, commit ids and anything else are refused.
@@ -295,11 +287,10 @@ RELEASE_TAG_RE = {
 
 
 def release_tag_ok(network, tag):
+    """The twin of tn_release_tag_ok; any other network (devnet included) is
+    refused, as the library refuses it."""
     if not isinstance(tag, str) or network not in RELEASE_TAG_RE:
         return False
-    answer = _lib_rule("tn_release_tag_ok", network, tag)
-    if answer is not None:
-        return answer
     return RELEASE_TAG_RE[network].fullmatch(tag) is not None
 
 
@@ -2801,6 +2792,16 @@ _MANIFEST_ACCEPT = ", ".join((
 ))
 
 
+# Each registry or library probe of latest_docker_image gives up after this
+# many seconds; its answer is cached per network (DOCKER_IMAGE_TTL seconds, a
+# failed lookup DOCKER_IMAGE_FAIL_TTL), so a page load waits for it at most
+# once in that window.
+DOCKER_PROBE_TIMEOUT = 3
+DOCKER_IMAGE_TTL = 600
+DOCKER_IMAGE_FAIL_TTL = 60
+_docker_image_cache = {}     # network -> {"expires", "data"}
+
+
 def _image_digest(tag):
     """The registry's digest for a testnet image tag (Docker-Content-Digest of
     its manifest), or None."""
@@ -2808,7 +2809,7 @@ def _image_digest(tag):
         req = urllib.request.Request(GAR_MANIFEST_URL + tag, method="HEAD",
                                      headers={"User-Agent": "telcoin-ui",
                                               "Accept": _MANIFEST_ACCEPT})
-        with urllib.request.urlopen(req, timeout=6) as r:
+        with urllib.request.urlopen(req, timeout=DOCKER_PROBE_TIMEOUT) as r:
             digest = r.headers.get("Docker-Content-Digest", "")
     except Exception:
         return None
@@ -2822,19 +2823,33 @@ def latest_docker_image(network="testnet"):
     digest). Only tags passing the testnet release rule count, so hot-patch,
     devnet and `latest` tags are never offered. The library's latest_docker_image is
     asked first when it answers with an image this server accepts. Mainnet has
-    no published repository yet: ''."""
+    no published repository yet: ''. Cached per network (see
+    DOCKER_IMAGE_TTL); every probe times out after DOCKER_PROBE_TIMEOUT s."""
     if network != "testnet":
         return ""
+    now = time.time()
+    c = _docker_image_cache.get(network)
+    if c and now < c["expires"]:
+        return c["data"]
+    image, found = _latest_docker_image_probe(network)
+    _docker_image_cache[network] = {
+        "expires": now + (DOCKER_IMAGE_TTL if found else DOCKER_IMAGE_FAIL_TTL), "data": image}
+    return image
+
+
+def _latest_docker_image_probe(network):
+    """(image, True) from the library or the registry; (DEFAULT_DOCKER_IMAGE,
+    False) when neither answers."""
     rc, out, _ = run(["bash", "-c", 'source "$1" >/dev/null 2>&1 && declare -F latest_docker_image >/dev/null '
-                      '&& latest_docker_image', "_", LIB_COMMON], timeout=15)
+                      '&& latest_docker_image', "_", LIB_COMMON], timeout=DOCKER_PROBE_TIMEOUT)
     if rc == 0 and image_allowed(out.strip(), network):
-        return out.strip()
+        return out.strip(), True
     try:
         req = urllib.request.Request(GAR_TAGS_URL, headers={"User-Agent": "telcoin-ui"})
-        with urllib.request.urlopen(req, timeout=6) as r:
+        with urllib.request.urlopen(req, timeout=DOCKER_PROBE_TIMEOUT) as r:
             data = json.loads(r.read().decode())
     except Exception:
-        return DEFAULT_DOCKER_IMAGE
+        return DEFAULT_DOCKER_IMAGE, False
     parsed = []
     tags = (data.get("tags") or []) if isinstance(data, dict) else []
     for t in tags:
@@ -2842,11 +2857,11 @@ def latest_docker_image(network="testnet"):
         if m:
             parsed.append(((int(m.group(1)), int(m.group(2)), int(m.group(3))), t))
     if not parsed:
-        return DEFAULT_DOCKER_IMAGE
+        return DEFAULT_DOCKER_IMAGE, False
     parsed.sort()
     tag = parsed[-1][1]
     digest = _image_digest(tag)
-    return f"{GAR_IMAGE_BASE}@{digest}" if digest else f"{GAR_IMAGE_BASE}:{tag}"
+    return (f"{GAR_IMAGE_BASE}@{digest}" if digest else f"{GAR_IMAGE_BASE}:{tag}"), True
 
 
 # Source-build refs are GIT tags (what `cargo build` checks out), which are a

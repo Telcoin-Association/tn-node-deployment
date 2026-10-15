@@ -16,6 +16,7 @@ refuses a cross-site form POST before any helper call.
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -455,6 +456,75 @@ class MainnetAndImagesTest(ServerTestCase):
         self.assertEqual(img, server.GAR_IMAGE_BASE + "@sha256:" + "c" * 64)
         self.assertTrue(server.image_allowed(img, "testnet"))
         self.assertEqual(server.latest_docker_image("mainnet"), "")
+
+    def test_latest_docker_image_is_cached_with_short_probes(self):
+        timeouts = []
+        lib_image = server.GAR_IMAGE_BASE + "@sha256:" + "d" * 64
+
+        def run(cmd, timeout=10):
+            timeouts.append(("run", timeout))
+            return 0, lib_image + "\n", ""
+
+        clock = [1000.0]
+        self.patch(server, "run", run)
+        self.patch(server.time, "time", lambda: clock[0])
+        self.assertEqual(server.latest_docker_image("testnet"), lib_image)
+        self.assertEqual(timeouts, [("run", server.DOCKER_PROBE_TIMEOUT)])
+        self.assertEqual(server.DOCKER_PROBE_TIMEOUT, 3)
+        clock[0] += server.DOCKER_IMAGE_TTL - 1
+        self.assertEqual(server.latest_docker_image("testnet"), lib_image)
+        self.assertEqual(len(timeouts), 1, "a second call within the TTL probes nothing")
+        self.assertEqual(server.DOCKER_IMAGE_TTL, 600)
+        clock[0] += 2
+        server.latest_docker_image("testnet")
+        self.assertEqual(len(timeouts), 2, "after the TTL it probes again")
+
+    def test_a_failed_image_lookup_is_retried_sooner(self):
+        calls = []
+
+        def run(cmd, timeout=10):
+            calls.append(timeout)
+            return 1, "", ""
+
+        def urlopen(req, timeout=None):
+            calls.append(timeout)
+            raise OSError("down")
+
+        clock = [5000.0]
+        self.patch(server, "run", run)
+        self.patch(server.urllib.request, "urlopen", urlopen)
+        self.patch(server.time, "time", lambda: clock[0])
+        self.assertEqual(server.latest_docker_image("testnet"), server.DEFAULT_DOCKER_IMAGE)
+        self.assertEqual(calls, [3, 3])
+        clock[0] += server.DOCKER_IMAGE_FAIL_TTL - 1
+        server.latest_docker_image("testnet")
+        self.assertEqual(len(calls), 2)
+        clock[0] += 2
+        server.latest_docker_image("testnet")
+        self.assertEqual(len(calls), 4)
+
+    def test_release_tags_are_checked_without_the_library(self):
+        ran = []
+        self.patch(server, "run", lambda *a, **k: ran.append(a) or (0, "", ""))
+        self.assertTrue(server.release_tag_ok("testnet", "v0.16.0-adiri"))
+        self.assertFalse(server.release_tag_ok("testnet", "v0.16.0"))
+        self.assertTrue(server.release_tag_ok("mainnet", "v1.0.0"))
+        self.assertFalse(server.release_tag_ok("mainnet", "v1.0.0-adiri"))
+        self.assertFalse(server.release_tag_ok("devnet", "v1.0.0"))
+        self.assertEqual(ran, [])
+
+    @unittest.skipUnless(shutil.which("bash"), "bash not installed")
+    def test_release_tag_twin_matches_the_library(self):
+        lib = os.path.join(os.path.dirname(os.path.abspath(server.__file__)), "..", "lib", "common.sh")
+        vectors = [(n, t) for n in ("testnet", "mainnet", "devnet")
+                   for t in ("v0.16.0-adiri", "v1.0.0", "v1.2.3-adiri-hotfix", "latest", "v1.0",
+                             "v01.0.0", "main", "v1.0.0 ", "0.16.0-adiri", "v10.20.30")]
+        script = 'source "$1" >/dev/null 2>&1; set +e; tn_release_tag_ok "$2" "$3"; echo $?'
+        for net, tag in vectors:
+            with self.subTest(net=net, tag=tag):
+                out = subprocess.run(["bash", "-c", script, "_", lib, net, tag],
+                                     capture_output=True, text=True, timeout=20).stdout.strip()
+                self.assertEqual(server.release_tag_ok(net, tag), out == "0")
 
     def test_image_rule(self):
         base = server.GAR_IMAGE_BASE

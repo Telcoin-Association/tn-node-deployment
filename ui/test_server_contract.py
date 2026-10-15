@@ -317,6 +317,7 @@ class ServerTestCase(unittest.TestCase):
         self.patch(server, "DEFAULT_CONFIG_DIR", os.path.join(self.tmp.name, "etc-telcoin"))
         server.clear_meta_cache()
         server._docker_stats_cache.clear()
+        server._docker_image_cache.clear()
         server._setup_running["active"] = False
         self.client = server.app.test_client()
 
