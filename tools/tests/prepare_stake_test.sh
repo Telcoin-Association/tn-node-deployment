@@ -219,4 +219,20 @@ check_rc "node-info.yaml not the service account's: refused" 1 "$RC"
 check "node-info.yaml not the service account's: says why" yes "$(has "$OUT" "is not owned by the service account")"
 check "node-info.yaml not the service account's: keytool never ran" no "$([[ -e "$T/kt.decl" ]] && echo yes || echo no)"
 
+# ps_restart_node: the committee check, the epoch wait, the check again, then the
+# restart; a refusal at either check leaves the node running (RESTARTED=false).
+psr() {  # psr AFTER-RC -- "<order>|<RESTARTED>" for one ps_restart_node
+    (
+        ORDER=""
+        PS_NO_RESTART=0 SERVICE=telcoin LOCAL_RPC=http://127.0.0.1:8545 NEW_CS=0xabc RESTARTED=""
+        eval "tn_committee_down_guard() { ORDER=\"\${ORDER} guard\"; case \"\$ORDER\" in *wait*) return $1 ;; esac; return 0; }"
+        tn_wait_restart_window() { ORDER="${ORDER} wait"; }
+        systemctl() { case "$1" in restart) ORDER="${ORDER} restart" ;; esac; return 0; }
+        sleep() { :; }
+        ps_restart_node >/dev/null 2>&1
+        printf '%s|%s\n' "${ORDER# }" "$RESTARTED"
+    )
+}
+check "rotate restart: guard, wait, guard, restart" "guard wait guard restart|true" "$(psr 0)"
+check "rotate restart: refused after the wait, not restarted" "guard wait guard|false" "$(psr 1)"
 finish

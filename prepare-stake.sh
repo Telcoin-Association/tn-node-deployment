@@ -1493,6 +1493,16 @@ ps_rollback() {
 
 # Restart the node so it starts with the new address, after the epoch wait a
 # committee node gets. Exit 1 when it does not come back up.
+# ps_quorum_guard -- tn_committee_down_guard before ps_restart_node restarts the
+# node. rc 1 (said, RESTARTED=false) when it refuses; TN_ALLOW_QUORUM_RISK=1
+# overrides it for a coordinated restart.
+ps_quorum_guard() {
+    tn_committee_down_guard "$LOCAL_RPC" && return 0
+    RESTARTED="false"
+    ps_warn "Not restarting ${SERVICE}: the committee check refused it (see above). node-info.yaml names ${NEW_CS}; the node uses it after its next restart. Restart it later (sudo systemctl restart ${SERVICE}), or run again with TN_ALLOW_QUORUM_RISK=1 for a coordinated restart."
+    return 1
+}
+
 ps_restart_node() {
     if [[ "$PS_NO_RESTART" -eq 1 ]]; then
         RESTARTED="false"
@@ -1505,7 +1515,12 @@ ps_restart_node() {
         return 0
     fi
     print_step "Restarting ${SERVICE}"
+    # The committee check, the epoch wait, and the check again right before the
+    # restart (the wait can last up to TN_EPOCH_WAIT_MAX). A refusal leaves the
+    # node running on its old address until its next restart.
+    ps_quorum_guard || return 0
     tn_wait_restart_window "$LOCAL_RPC"
+    ps_quorum_guard || return 0
     systemctl restart "$SERVICE" 2>&1 || true
     sleep 3
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
