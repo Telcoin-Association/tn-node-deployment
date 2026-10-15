@@ -1591,7 +1591,7 @@ step_create_infrastructure() {
     fi
     # A mainnet node is installed without the testnet add-ons (VPN, observability,
     # Caddy): the operator removes them first.
-    if [[ "$NETWORK" == "mainnet" ]] && declare -F tn_testnet_addons_present >/dev/null 2>&1; then
+    if [[ "$NETWORK" == "mainnet" ]]; then
         local addons=""
         if addons="$(tn_testnet_addons_present 2>/dev/null)"; then
             setup_fail "Testnet add-ons are present on this host (${addons:-unknown}); a mainnet node is not installed beside them. Remove them first (remove-node.sh)."
