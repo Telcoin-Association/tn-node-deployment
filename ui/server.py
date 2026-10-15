@@ -370,8 +370,8 @@ def service_account_error(user, group):
     return None
 
 
-# Data dirs setup may create: under /var/lib/telcoin*, /srv/telcoin* or /data/telcoin*.
-_DATA_DIR_ALLOWED_RE = re.compile(r"/(var/lib|srv|data)/telcoin[A-Za-z0-9._-]*(/[A-Za-z0-9._-]+)*")
+# Data dirs setup may create: /var/lib/telcoin or a path under it.
+_DATA_DIR_ALLOWED_RE = re.compile(r"/var/lib/telcoin(/[A-Za-z0-9._-]+)*")
 
 
 # Hostnames (dashboard, public RPC, the dashboard's new home on a move) follow
@@ -3768,6 +3768,10 @@ def api_config(node_type):
 # Each pattern is the helper's, character for character (test_server_contract.py
 # compares them).
 _MULTIADDR_RE = re.compile(r"^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$")
+# Setup passes its multiaddrs in TN_SETUP_* variables, which skip the helper's
+# generic argument check, so the address part also refuses whitespace and
+# control characters here (the helper's setup pattern does the same).
+_SETUP_MULTIADDR_RE = re.compile(r"/(ip4|ip6)/[^/\s\x00-\x1f\x7f-\x9f]+/udp/[0-9]+/quic-v1")
 # off removes --metrics. The UI keeps the endpoint on loopback; a public bind
 # needs a root operator at the console (edit-config.sh --allow-public-metrics).
 _METRICS_RE = re.compile(r"^(off|127\.0\.0\.1:[0-9]{1,5})$")
@@ -4016,7 +4020,7 @@ def _setup_env(data, want_passphrase):
     if image and not image_allowed(image, net):
         return None, "docker image must be the network's image, by digest or release tag"
     for m in (ext_primary, ext_worker, lis_primary, lis_worker):
-        if m and not _MULTIADDR_RE.match(m):
+        if m and not _SETUP_MULTIADDR_RE.fullmatch(m):
             return None, "invalid multiaddr"
     if public_ip and not _PUBLIC_IP_RE.match(public_ip):
         return None, "invalid public ip"
@@ -4034,8 +4038,7 @@ def _setup_env(data, want_passphrase):
     if advertised_name and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", advertised_name):
         return None, "invalid advertised name"
     if data_dir and (not _DATA_DIR_ALLOWED_RE.fullmatch(data_dir) or ".." in data_dir):
-        return None, ("invalid data directory (an absolute path under /var/lib/telcoin*, "
-                      "/srv/telcoin* or /data/telcoin*)")
+        return None, "invalid data directory (/var/lib/telcoin or a path under it)"
     if method == "source" and not build_ref:
         return None, "build_ref required for source install"
     if want_passphrase and not passphrase_ok(data.get("passphrase"), net):

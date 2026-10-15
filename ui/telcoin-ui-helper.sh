@@ -1214,9 +1214,11 @@ cmd_setup() {
         || die "invalid build ref (a ${net_rule} release tag): $build_ref"
     [[ -z "$image" ]] || docker_image_ok "$image" "$net_rule" \
         || die "invalid docker image for ${net_rule}: $image"
-    local m
+    # These values skip _arg_ok (they arrive in TN_SETUP_*), so the address
+    # part refuses whitespace and control characters itself.
+    local m ma_re='^/(ip4|ip6)/[^/[:space:][:cntrl:]]+/udp/[0-9]+/quic-v1$'
     for m in "$ext_primary" "$ext_worker" "$lis_primary" "$lis_worker"; do
-        [[ -z "$m" || "$m" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] || die "invalid multiaddr: $m"
+        [[ -z "$m" || "$m" =~ $ma_re ]] || die "invalid multiaddr: $m"
     done
     if [[ "$phase" == finalize ]]; then
         [[ -n "$lis_primary" && -n "$lis_worker" ]] \
@@ -1228,9 +1230,8 @@ cmd_setup() {
         || die "invalid service account: ${svc_user:-telcoin}:${svc_group:-} (not root or telcoin-ui, no login account, not in sudo, adm or docker)"
     [[ -z "$adv_name"  || "$adv_name"  =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid advertised name"
     if [[ -n "$data_dir" ]]; then
-        [[ "$data_dir" =~ ^/(var/lib|srv|data)/telcoin[A-Za-z0-9._-]*(/[A-Za-z0-9._-]+)*$ \
-            && "$data_dir" != *".."* ]] \
-            || die "invalid data directory (under /var/lib/telcoin*, /srv/telcoin* or /data/telcoin*): $data_dir"
+        [[ "$data_dir" =~ ^/var/lib/telcoin(/[A-Za-z0-9._-]+)*$ && "$data_dir" != *".."* ]] \
+            || die "invalid data directory (/var/lib/telcoin or a path under it): $data_dir"
     fi
 
     local -a args=( --json "--phase=${phase}" --network "$network" )

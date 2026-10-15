@@ -437,8 +437,11 @@ check_has "TN_SETUP_RPC_PUBLIC, TN_SETUP_INSTANCE, TN_SETUP_PASSPHRASE_METHOD fr
     "setup-node [--json] [--phase=finalize] [--network] [testnet] ${FIN_ARGS}" "$t"
 t="$(export TN_SETUP_RPC_DOMAIN=localhost; printf 'a good passphrase\n' | trace setup-keygen)"
 check_has "an invalid TN_SETUP_RPC_DOMAIN is refused" "invalid rpc domain: localhost" "$t"
+t="$(export TN_SETUP_DATA_DIR=/var/lib/telcoin/node-1; printf 'a good passphrase\n' | trace setup-keygen)"
+check_has "a data dir under /var/lib/telcoin is accepted" \
+    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--data-dir] [/var/lib/telcoin/node-1]" "$t"
 setup_calls="$(grep '^setup-node' "$T/all-calls.log")"
-check "setup-node.sh ran for every accepted setup call" "7" "$(printf '%s\n' "$setup_calls" | grep -c .)"
+check "setup-node.sh ran for every accepted setup call" "8" "$(printf '%s\n' "$setup_calls" | grep -c .)"
 check_lacks "--rpc-public never appears in a setup argv" "--rpc-public" "$setup_calls"
 check_lacks "--passphrase-method never appears in a setup argv" "--passphrase-method" "$setup_calls"
 
@@ -455,6 +458,13 @@ export TN_SETUP_SERVICE_USER=Bad; refused_in "setup-keygen with an upper-case us
 export TN_SETUP_DATA_DIR=/usr/local/sbin; refused_in "setup-keygen data dir /usr/local/sbin" setup-keygen; unset TN_SETUP_DATA_DIR
 export TN_SETUP_DATA_DIR=/etc/telcoin; refused_in "setup-keygen data dir /etc/telcoin" setup-keygen; unset TN_SETUP_DATA_DIR
 export TN_SETUP_DATA_DIR=/var/lib/telcoin/../x; refused_in "setup-keygen data dir with .." setup-keygen; unset TN_SETUP_DATA_DIR
+for d in /var/lib/telcoin-ui /var/lib/telcoin-staging/x /srv/telcoin /data/telcoin; do
+    export TN_SETUP_DATA_DIR="$d"; refused_in "setup-keygen data dir $d" setup-keygen; unset TN_SETUP_DATA_DIR
+done
+export TN_SETUP_LIS_PRIMARY="/ip4/10.0.0.5
+PASSPHRASE_METHOD=env/udp/49590/quic-v1"; refused_in "setup-keygen multiaddr with a newline" setup-keygen; unset TN_SETUP_LIS_PRIMARY
+export TN_SETUP_EXT_PRIMARY="/ip4/10.0.0.5 --x/udp/49590/quic-v1"; refused_in "setup-keygen multiaddr with a space" setup-keygen; unset TN_SETUP_EXT_PRIMARY
+export TN_SETUP_EXT_WORKER="$(printf '/ip4/10.0.0.5\t/udp/49594/quic-v1')"; refused_in "setup-keygen multiaddr with a tab" setup-keygen; unset TN_SETUP_EXT_WORKER
 export TN_SETUP_INSTALL_METHOD=source TN_SETUP_BUILD_REF=main; refused_in "setup-keygen build ref main" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_BUILD_REF
 export TN_SETUP_INSTALL_METHOD=source TN_SETUP_BUILD_REF=v0.16.0; refused_in "setup-keygen mainnet tag on testnet" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_BUILD_REF
 export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=docker.io/library/busybox:latest; refused_in "setup-keygen foreign image" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE

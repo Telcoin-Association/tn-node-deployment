@@ -348,6 +348,13 @@ class SetupRefusalTest(ServerTestCase):
             ({"service_group": "root"}, "invalid service group"),
             ({"data_dir": "/usr/local/sbin"}, "invalid data directory"),
             ({"data_dir": "/var/lib/telcoin/../../etc"}, "invalid data directory"),
+            ({"data_dir": "/var/lib/telcoin-ui"}, "invalid data directory"),
+            ({"data_dir": "/var/lib/telcoin-staging/x"}, "invalid data directory"),
+            ({"data_dir": "/srv/telcoin"}, "invalid data directory"),
+            ({"listener_primary": "/ip4/10.0.0.5\nPASSPHRASE_METHOD=env/udp/1/quic-v1"},
+             "invalid multiaddr"),
+            ({"listener_worker": "/ip4/10.0.0.5 --x/udp/2/quic-v1"}, "invalid multiaddr"),
+            ({"external_primary": "/ip4/203.0.113.10\t/udp/1/quic-v1"}, "invalid multiaddr"),
             ({"passphrase_method": "tpm"}, "TPM sealing was removed"),
             ({"docker_image": "docker.io/library/busybox:latest"}, "docker image"),
             ({"docker_image": "us-docker.pkg.dev/telcoin-network/tn-public/adiri:latest"}, "docker image"),
@@ -359,6 +366,10 @@ class SetupRefusalTest(ServerTestCase):
                 self.assertEqual(resp.status_code, 400)
                 self.assertIn(message, resp.get_json()["error"])
         self.assertEqual(self.helper_calls(), [])
+
+    def test_data_dir_under_var_lib_telcoin_is_accepted(self):
+        resp = self.keygen(data_dir="/var/lib/telcoin/node-1")
+        self.assertEqual(resp.status_code, 200)
 
     def test_installed_node_is_409(self):
         os.makedirs(server.SYSTEMD_DIR)
