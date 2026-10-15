@@ -805,8 +805,16 @@ check_has "jaeger-start binds loopback ports, drops capabilities" \
 
 # ---- The shared library, when it is there --------------------------------------------------
 LIB_SAVE="$HELPER_LIB"
-HELPER_LIB="${TEST_DIR}/../../lib/common.sh"
+# A copy of the library owned by someone other than root, whoever runs the test
+# (as root, the copy is handed to uid 65534; the checkout itself may be root's).
+mkdir -p "$T/lib-not-root"
+cp "${TEST_DIR}/../../lib/common.sh" "$T/lib-not-root/common.sh"
+if [[ $EUID -eq 0 ]]; then
+    chown 65534 "$T/lib-not-root" "$T/lib-not-root/common.sh"
+fi
+HELPER_LIB="$T/lib-not-root/common.sh"
 check "a library not owned by root is not used" "unusable" "$(_lib_usable && echo usable || echo unusable)"
+HELPER_LIB="${TEST_DIR}/../../lib/common.sh"
 LIB_REQUIRE_ROOT=0
 check "_lib_call reports a missing function as 127" "127" "$(_lib_call tn_no_such_function; echo $?)"
 # shellcheck source=/dev/null
