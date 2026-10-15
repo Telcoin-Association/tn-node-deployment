@@ -318,6 +318,14 @@ rc=0; tn_rerender_node_launch "" >/dev/null 2>&1 || rc=$?
 check "root: a passphrase ending in a space keeps the old delivery" "1 yes" \
     "${rc} $(grep -q 'export TN_BLS' "$R/usr/local/libexec/telcoin/tn-start" && echo yes)"
 printf 'secret\n' > "$R/etc/telcoin/bls-passphrase"
+# A runner the start script would refuse: refused before any write.
+chmod 0777 "$R$BIN"
+cp "$R/usr/local/libexec/telcoin/tn-start" "$T/rr.script"
+cp "$R/etc/systemd/system/telcoin.service" "$T/rr.unit"
+rc=0; tn_rerender_node_launch "" >/dev/null 2>&1 || rc=$?
+check "root: a refused runner changes nothing (rc, node.env, script, unit)" "1 no same same" \
+    "${rc} $([[ -e "$R/etc/telcoin/node.env" ]] && echo yes || echo no) $(cmp -s "$T/rr.script" "$R/usr/local/libexec/telcoin/tn-start" && echo same || echo changed) $(cmp -s "$T/rr.unit" "$R/etc/systemd/system/telcoin.service" && echo same || echo changed)"
+chmod 0755 "$R$BIN"
 rc=0; tn_rerender_node_launch "" >"$T/rr.log" 2>&1 || rc=$?
 check_rc "root: rerender of an older start script" 0 "$rc" || sed 's/^/      /' "$T/rr.log"
 NEW="$(cat "$R/usr/local/libexec/telcoin/tn-start")"

@@ -2944,8 +2944,21 @@ EOS
 # so both forms are world-readable (the UI reads the launch line). rc 0 written,
 # 1 refused (nothing changed), 2 write failed.
 tn_write_start_script() {
-    local method="${1:-}" runner="${2:-}" args="${3:-}" text dest rc=0
+    local method="${1:-}" runner="${2:-}" args="${3:-}" text dest
     # Settings in this shell too: the text is rendered in a subshell.
+    _tn_gen_settings "$method" || return 1
+    text="$(_tn_start_script_checked "$method" "$runner" "$args")" || return 1
+    dest="${TN_ROOT_PREFIX:-}${TN_G_SCRIPT}"
+    _tn_root_layout_dir "${dest%/*}" root 0755 || return $?
+    tn_write_root_file "$dest" 0755 <<< "$text"
+}
+
+# _tn_start_script_checked METHOD RUNNER NODE_ARGS -- print the start script
+# text after every check tn_write_start_script makes: a binary RUNNER must pass
+# _tn_root_binary_ok, the text must pass bash -n and hold a node line the launch
+# editors can read. rc 1 refused (reported on stderr), nothing printed.
+_tn_start_script_checked() {
+    local method="${1:-}" runner="${2:-}" args="${3:-}" text rc=0
     _tn_gen_settings "$method" || return 1
     text="$(_tn_start_script_text "$method" "$runner" "$args")" || return 1
     if [[ "$TN_G_FORM" == "binary" ]] && ! _tn_root_binary_ok "${TN_ROOT_PREFIX:-}${runner}"; then
@@ -2961,9 +2974,7 @@ tn_write_start_script() {
         print_warn "the rendered start script has no node line the launch editors can read; nothing written" >&2
         return 1
     fi
-    dest="${TN_ROOT_PREFIX:-}${TN_G_SCRIPT}"
-    _tn_root_layout_dir "${dest%/*}" root 0755 || return $?
-    tn_write_root_file "$dest" 0755 <<< "$text"
+    printf '%s\n' "$text"
 }
 
 # _tn_node_unit_text METHOD -- the systemd unit for METHOD (globals as in
@@ -3194,8 +3205,15 @@ tn_rerender_node_launch() {
             fi
             ;;
     esac
-    # Everything is read and checked; now the writes, node.env first.
     _tn_node_args_ok "$args" || { _tn_guard_say warn "${svc}: the node arguments in ${file} are not plain words; not rewritten." "$fn"; return 1; }
+    # The three texts render and pass their checks (the runner or image included)
+    # before the first write, so a refusal (rc 1) changes nothing.
+    if [[ ! -f "$envf" ]]; then
+        _tn_node_env_text "$p" "$w" >/dev/null || return 1
+    fi
+    _tn_start_script_checked "$method" "$runner" "$args" >/dev/null || return 1
+    _tn_node_unit_text "$method" >/dev/null || return 1
+    # Now the writes, node.env first.
     if [[ ! -f "$envf" ]]; then
         tn_write_node_env "$p" "$w" || return $?
     fi
