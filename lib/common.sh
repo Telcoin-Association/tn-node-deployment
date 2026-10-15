@@ -5389,9 +5389,11 @@ _tn_path_owner() {
 #     Never for generate ..., which would then write or read the key in the clear.
 #     A --bls-passphrase-source in ARGS together with TN_KEYTOOL_PASS is rc 4.
 #   * keytool runs as the service user (SERVICE_USER, SERVICE_GROUP), never as
-#     root: a binary through tn_as_service_user, docker with --user <uid>:<gid>,
-#     HOME=/home/nonroot and DATA_DIR mounted there. DATA_DIR must exist and be
-#     owned by the service user.
+#     root: a binary through tn_as_service_user with HOME=DATA_DIR, docker with
+#     --user <uid>:<gid>, HOME=/home/nonroot and DATA_DIR mounted there. keytool
+#     opens its log file under $HOME/.cache, so HOME must be writable by the
+#     service user (root's HOME is not). DATA_DIR must exist and be owned by the
+#     service user.
 # rc is keytool's own, 126 when it cannot be run as the service user, or 4 when it
 # cannot be started (bad SPEC, no executable file, DATA_DIR missing or not the
 # service user's, too few arguments, --datadir without a value, the passphrase
@@ -5505,9 +5507,9 @@ tn_keytool() {
                 return 4
             fi
             if [[ "$has_pass" -eq 1 ]]; then
-                _tn_feed_pass | tn_as_service_user "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+                _tn_feed_pass | tn_as_service_user env HOME="$data_dir" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
             else
-                tn_as_service_user "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} </dev/null
+                tn_as_service_user env HOME="$data_dir" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} </dev/null
             fi
             ;;
         docker:*)

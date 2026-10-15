@@ -46,6 +46,7 @@ check "keytool: passphrase on stdin" "pass phrase-yy" "$(cat "$REC.stdin")"
 check_lacks "keytool: passphrase not in argv" "phrase-yy" "$(cat "$REC.argv")"
 check_lacks "keytool: passphrase not in env" "phrase-yy" "$(cat "$REC.env")"
 check_lacks "keytool: TN_BLS_PASSPHRASE not passed on" "env-secret-zz" "$(cat "$REC.env")"
+check_has "keytool: binary HOME is the data dir (log dir writable)" "HOME=$T/data" "$(cat "$REC.env")"
 check "keytool: global flags first" "-q --datadir $T/data --bls-passphrase-source stdin keytool generate" \
     "$(head -7 "$REC.argv" | tr '\n' ' ' | sed 's/ $//')"
 
