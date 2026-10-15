@@ -2,14 +2,18 @@
 # =============================================================================
 # tools/tests/lib_skew_test.sh -- the scripts against an older lib/common.sh:
 # setup-node, update-node, edit-config and prepare-stake refuse up front with one
-# message (and a --json error plus done event), and check-node warns once about
-# the hardening checks the older library turns off.
+# message (and a --json error plus done event), before they stop a node or pull
+# an image, and check-node warns once about the hardening checks the older
+# library turns off.
 #
 #   bash tools/tests/lib_skew_test.sh
+#   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/lib_skew_test.sh
 #
-# The older library is lib/ at 037c810 (COMMON_VERSION 1.6.1, the release
-# before the hardening round), read with git. Without git or that commit (a
-# container, a shallow clone) the test prints SKIP. bash 3.2 safe.
+# First, each required helper on its own: a copy of the current library without
+# it makes every one of the four scripts refuse. Then the library at 037c810
+# (COMMON_VERSION 1.6.1, the release before the hardening round), read with
+# git; without git or that commit (a container, a shallow clone) that part
+# prints SKIP. bash 3.2 safe.
 # =============================================================================
 
 set -u
@@ -20,6 +24,34 @@ set -u
 T="$TN_TEST_TMP"
 REPO="$TN_TEST_REPO"
 OLD=037c810
+SCRIPTS=(setup-node update-node edit-config prepare-stake)
+REQUIRED=(tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write_root_file
+          tn_detect_network tn_write_node_unit tn_remove_inflight_tmp tn_committee_down_guard
+          tn_docker_image_allowed tn_rerender_node_launch)
+
+# ---- each required helper: without it, every script refuses ---------------------------
+mkdir -p "$T/cur"
+cp -R "$REPO/lib" "$T/cur/lib"
+for s in "${SCRIPTS[@]}"; do
+    cp "$REPO/${s}.sh" "$T/cur/${s}.sh"
+done
+for fn in "${REQUIRED[@]}"; do
+    sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
+    if ! grep -q "^${fn}_absent_here() {" "$T/cur/lib/common.sh"; then
+        check "${fn}: defined in lib/common.sh" "yes" "no"
+        continue
+    fi
+    got=""
+    for s in "${SCRIPTS[@]}"; do
+        rc=0
+        "$BASH" "$T/cur/${s}.sh" --help > /dev/null 2> "$T/err" < /dev/null || rc=$?
+        if [[ $rc -eq 1 ]] && grep -q "is older than this ${s}.sh: run update-scripts.sh" "$T/err"; then
+            got="${got} ${s}"
+        fi
+    done
+    check "without ${fn}: every script refuses" " ${SCRIPTS[*]}" "$got"
+done
+cp "$REPO/lib/common.sh" "$T/cur/lib/common.sh"
 
 if ! command -v git >/dev/null 2>&1 \
     || ! git -C "$REPO" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
@@ -33,7 +65,7 @@ for s in setup-node update-node edit-config prepare-stake check-node; do
 done
 check "old library is 1.6.1" "1.6.1" "$(sed -n 's/^readonly COMMON_VERSION="\(.*\)"$/\1/p' "$T/old/lib/common.sh")"
 
-for s in setup-node update-node edit-config prepare-stake; do
+for s in "${SCRIPTS[@]}"; do
     msg="lib/common.sh 1.6.1 is older than this ${s}.sh: run update-scripts.sh and try again."
     rc=0
     "$BASH" "$T/old/${s}.sh" --help > "$T/out" 2> "$T/err" < /dev/null || rc=$?
@@ -47,6 +79,24 @@ for s in setup-node update-node edit-config prepare-stake; do
         "$(printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}' "$msg" "$msg")" \
         "$(cat "$T/out")"
 done
+
+# The node-changing paths refuse before anything runs: no systemctl, docker or curl.
+mkdir -p "$T/bin" "$T/rec"
+for t in systemctl docker curl; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/rec/calls"\n' "$t" "$T" > "$T/bin/$t"
+    chmod 0755 "$T/bin/$t"
+done
+skew_run() {
+    local rc=0
+    : > "$T/rec/calls"
+    PATH="$T/bin:$PATH" "$BASH" "$@" > "$T/out" 2> "$T/err" < /dev/null || rc=$?
+    printf '%s %s\n' "$rc" "$(wc -l < "$T/rec/calls" | tr -d ' ')"
+}
+check "update-node --json --apply: refused, nothing run" "1 0" "$(skew_run "$T/old/update-node.sh" --json --apply)"
+check "edit-config --json --set docker_image: refused, nothing run" "1 0" \
+    "$(skew_run "$T/old/edit-config.sh" --json --set docker_image=example.org/other/image:latest)"
+check "edit-config --json --set verbosity: refused, nothing run" "1 0" \
+    "$(skew_run "$T/old/edit-config.sh" --json --set verbosity=-vv)"
 
 # check-node: the hardening checks, cut out as check_node_hardening_test does,
 # run over the old library; the ones it turns off are named in one warning.
