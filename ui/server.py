@@ -4491,6 +4491,32 @@ def api_rpc_dns_check():
     return jsonify(res)
 
 
+# The exposure summary install-caddy.sh states before it enables public RPC (its
+# caddy_rpc_exposure_summary, sent as a `warn` event in --json mode, where the UI
+# action is the consent). The page shows it in the confirmation before it calls
+# rpc-enable; test_server_contract.py runs the engine's function and compares.
+RPC_EXPOSURE_SUMMARY = (
+    "Public RPC on https://{domain}/ answers anyone on the internet, for every JSON-RPC "
+    "namespace the node serves, with CORS open to every origin.",
+    "This edge has no rate limit, per-IP limit or method filter: only the node's own "
+    "launch limits bound the load.",
+    "For production traffic put a rate-limited gateway in front of it, and never enable "
+    "it on a staked validator.",
+)
+
+
+def rpc_exposure_summary(domain):
+    return " ".join(line.format(domain=domain) for line in RPC_EXPOSURE_SUMMARY)
+
+
+@app.route("/api/rpc/exposure")
+def api_rpc_exposure():
+    domain = norm_host(request.args.get("domain"))
+    if not valid_hostname(domain):
+        return jsonify({"ok": False, "error": host_error("public RPC hostname", domain)}), 400
+    return jsonify({"ok": True, "domain": domain, "summary": rpc_exposure_summary(domain)})
+
+
 @app.route("/api/rpc/enable", methods=["POST"])
 def api_rpc_enable():
     # Optional move_dashboard_to: when the dashboard is served on the RPC

@@ -143,6 +143,20 @@ class UpdatePanelTest(unittest.TestCase):
         self.assertIn("onReject})", run)
 
 
+class RpcExposureConsentTest(unittest.TestCase):
+
+    def test_the_exposure_text_is_shown_before_the_engine_runs(self):
+        body = function_body("rpcEnable")
+        ask = body.index("api('/api/rpc/exposure?domain='")
+        confirm = body.index("if(!confirm(prompt)) return;")
+        call = body.index("streamPost('/api/rpc/enable'")
+        self.assertLess(ask, confirm)
+        self.assertLess(confirm, call)
+        self.assertIn("+ ex.summary +", body)
+        # No summary, no call.
+        self.assertIn("if(!ex || !ex.ok || !ex.summary) return toast(", body)
+
+
 class StaleTextTest(unittest.TestCase):
     """open-ui.sh opens http://127.0.0.1:8080; no operator-facing text in the UI
     files says otherwise, and the server's start refusal names the token."""

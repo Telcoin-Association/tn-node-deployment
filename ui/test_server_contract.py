@@ -43,6 +43,7 @@ from test_support import local_client  # noqa: E402
 
 local_client(server)
 
+REPO = os.path.dirname(HERE)
 SERVER_PY = os.path.join(HERE, "server.py")
 INSTALLER = os.path.join(HERE, "install-ui.sh")
 HELPER_SH = os.path.join(HERE, "telcoin-ui-helper.sh")
@@ -985,6 +986,32 @@ class FirewallEnableTest(ServerTestCase):
         rules = helper_rules(split_transitional(sudoers_text())[0])
         self.assertIn("firewall-enable", rules)
         self.assertIn("firewall-enable *", rules)
+
+
+class RpcExposureTest(ServerTestCase):
+
+    def engine_summary(self, domain):
+        """install-caddy.sh's caddy_rpc_exposure_summary, run, joined as its
+        --json warn event joins it (newlines to spaces)."""
+        script = read(os.path.join(REPO, "install-caddy.sh"))
+        m = re.search(r"^caddy_rpc_exposure_summary\(\) \{\n.*?^\}\n", script, re.S | re.M)
+        self.assertIsNotNone(m, "caddy_rpc_exposure_summary not found in install-caddy.sh")
+        out = subprocess.run(["bash", "-c", m.group(0) + 'caddy_rpc_exposure_summary "$1" | tr "\\n" " "',
+                              "_", domain], capture_output=True, text=True, check=True).stdout
+        return out.strip()
+
+    def test_the_page_text_is_the_engine_text(self):
+        for domain in ("node7.example.com", "rpc.adiri.telcoin.network"):
+            with self.subTest(domain=domain):
+                self.assertEqual(server.rpc_exposure_summary(domain), self.engine_summary(domain))
+
+    def test_route(self):
+        body = self.client.get("/api/rpc/exposure?domain=Node7.Example.com.").get_json()
+        self.assertEqual(body, {"ok": True, "domain": "node7.example.com",
+                                "summary": server.rpc_exposure_summary("node7.example.com")})
+        self.assertEqual(self.client.get("/api/rpc/exposure?domain=localhost").status_code, 400)
+        self.assertEqual(self.helper_calls(), [])
+        self.assertNotIn("api_rpc_exposure", server.PUBLIC_ENDPOINTS)
 
 
 class DockerLaunchLineTest(ServerTestCase):

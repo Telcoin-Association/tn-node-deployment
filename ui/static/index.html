@@ -2864,10 +2864,15 @@ async function rpcEnable(refreshHost){
     if(!validHost(move)) return toast('Enter a valid new hostname for the dashboard','error');
     if(sameHost(move, domain)) return toast('The new dashboard hostname must differ from the RPC hostname','error');
   }
-  const prompt = refresh
+  // install-caddy.sh states the exposure (its `warn` event) and takes this click
+  // as the consent, so the page shows the same text before asking.
+  const ex = await api('/api/rpc/exposure?domain='+encodeURIComponent(domain));
+  if(!ex || !ex.ok || !ex.summary) return toast('Could not read the exposure summary'+(ex&&ex.error?': '+ex.error:'')+'; nothing was changed','error');
+  const prompt = (refresh
     ? `Re-run RPC enable for ${domain}? This rewrites its Caddy block and reloads Caddy.`
     : `Expose this node's JSON-RPC publicly at https://${domain}? This opens 80/443, advertises the endpoint to peers, and restarts the node.`
-      + (move ? ` The dashboard moves to https://${move}.` : '');
+      + (move ? ` The dashboard moves to https://${move}.` : ''))
+    + '\n\n' + ex.summary + '\n\nOK is your consent to this exposure.';
   if(!confirm(prompt)) return;
   const btn=$(refresh?'#rpcRefresh':'#rpcEnable'); if(btn) btn.disabled=true;
   const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» '+(refresh
