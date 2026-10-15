@@ -867,6 +867,34 @@ class ConfigSetTest(ServerTestCase):
                 self.assertEqual(resp.get_json(), {"error": "field not editable"})
                 self.assertEqual(self.helper_calls(), [])
 
+    def test_allow_port_mismatch_adds_the_helper_option_for_a_listener(self):
+        addr = "/ip4/0.0.0.0/udp/49600/quic-v1"
+        for field in ("primary_listener", "worker_listener"):
+            with self.subTest(field=field):
+                self.calls.clear()
+                resp = self.client.post("/api/config/observer/set", buffered=True, json={
+                    "field": field, "value": addr, "allow_port_mismatch": True})
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(self.helper_calls(), [[
+                    "sudo", "-n", HELPER_PATH, "config-set", field, addr, "allow-port-mismatch"]])
+        self.calls.clear()
+        resp = self.client.post("/api/config/observer/set", buffered=True, json={
+            "field": "primary_listener", "value": addr, "allow_port_mismatch": False})
+        self.assertEqual(self.helper_calls(), [[
+            "sudo", "-n", HELPER_PATH, "config-set", "primary_listener", addr]])
+
+    def test_allow_port_mismatch_refused_elsewhere_or_not_a_bool(self):
+        for body in ({"field": "verbosity", "value": "-vv", "allow_port_mismatch": True},
+                     {"field": "primary_listener", "value": "/ip4/0.0.0.0/udp/49600/quic-v1",
+                      "allow_port_mismatch": "yes"},
+                     {"field": "primary_listener", "value": "/ip4/0.0.0.0/udp/49600/quic-v1",
+                      "allow_port_mismatch": 1}):
+            with self.subTest(body=body):
+                self.calls.clear()
+                resp = self.client.post("/api/config/observer/set", json=body, buffered=True)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(self.helper_calls(), [])
+
     def test_a_trailing_newline_fails_as_in_bash(self):
         # The route strips its input; config_value_ok itself must still refuse
         # what the helper's [[ =~ ]] refuses.

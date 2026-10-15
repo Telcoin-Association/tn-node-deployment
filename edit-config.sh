@@ -22,6 +22,9 @@
 #   --no-epoch-wait                                   # restart without the epoch wait
 #   --allow-quorum-risk                               # restart even when the committee
 #                                                     # check says too many are down
+#   --allow-port-mismatch                             # a listener port other than the
+#                                                     # advertised external port (NAT
+#                                                     # or port forward maps it)
 #   --allow-public-metrics                            # metrics on an address other
 #                                                     # than 127.0.0.1 (root only)
 #   sudo bash edit-config.sh --migrate-credential     # move the BLS passphrase to an
@@ -1445,7 +1448,10 @@ edit_field_known() {
 # of the external address .node-meta records for that listener
 # (EXTERNAL_PRIMARY_ADDR or EXTERNAL_WORKER_ADDR: the address peers dial), or when
 # none is recorded (an older install). rc 1 with the reason reported otherwise,
-# a recorded address without a UDP port or set more than once included.
+# a recorded address without a UDP port or set more than once included. A
+# different port is accepted, with a warning, under --allow-port-mismatch
+# (TN_ALLOW_PORT_MISMATCH=1): a NAT or port forward may map the advertised
+# external port to another local port.
 listener_port_advertised() {
     local field="$1" value="$2" key label ext rc=0 want got
     case "$field" in
@@ -1464,7 +1470,11 @@ listener_port_advertised() {
     fi
     got="$(_tn_multiaddr_udp_port "$value")" || got=""
     if [[ "$got" != "$want" ]]; then
-        edit_error "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial"
+        if [[ -n "$got" && "${TN_ALLOW_PORT_MISMATCH:-}" == "1" ]]; then
+            edit_warn "the ${label} listener port ${got} differs from the advertised external port ${want} (${key} in .node-meta), which is the port peers dial; kept because the mismatch was allowed: the NAT or port forward must map external UDP ${want} to this host's UDP ${got}"
+            return 0
+        fi
+        edit_error "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial. If a NAT or port forward maps external UDP ${want} to local UDP ${got:-?}, allow the mismatch: edit-config.sh --allow-port-mismatch (TN_ALLOW_PORT_MISMATCH=1), or confirm it in the Node Manager"
         return 1
     fi
     return 0
@@ -2922,6 +2932,7 @@ main() {
                 ;;
             --no-epoch-wait) NO_EPOCH_WAIT=true; TN_SKIP_EPOCH_WAIT=1; shift ;;
             --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
+            --allow-port-mismatch) TN_ALLOW_PORT_MISMATCH=1; shift ;;
             --allow-public-metrics) ALLOW_PUBLIC_METRICS=true; shift ;;
             --migrate-credential) EDIT_ACTION=migrate; shift ;;
             --reseal) EDIT_ACTION=reseal; shift ;;

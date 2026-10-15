@@ -185,5 +185,19 @@ class StaleTextTest(unittest.TestCase):
         self.assertIn("per-install token", text[text.index('if __name__ == "__main__":'):])
 
 
+class PortMismatchTest(unittest.TestCase):
+
+    def test_a_listener_port_mismatch_is_confirmed_and_sent(self):
+        body = function_body("saveConfigField")
+        self.assertIn("udpPort(ext)", body)
+        self.assertIn("NAT or port forward", body)
+        self.assertIn("if(!confirm(", body)
+        self.assertIn("body.allow_port_mismatch = true", body)
+
+    def test_the_external_addresses_are_kept_for_the_check(self):
+        self.assertIn("state.cfgExternal = {primary_listener: d.external_primary||'', "
+                      "worker_listener: d.external_worker||''}", page())
+
+
 if __name__ == "__main__":
     unittest.main()

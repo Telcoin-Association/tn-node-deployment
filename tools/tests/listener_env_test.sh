@@ -100,10 +100,18 @@ field_case "set_field: primary on the advertised port" primary_listener /ip4/10.
 field_case "set_field: primary on another port refused" primary_listener /ip4/10.0.0.9/udp/40000/quic-v1 1
 check "set_field: the refusal names the advertised port" yes \
     "$([[ "$EDIT_LAST_ERROR" == *"advertised external port 49590"* ]] && echo yes || echo no)"
+check "set_field: the refusal explains a NAT port mapping and the override" yes \
+    "$([[ "$EDIT_LAST_ERROR" == *"maps external UDP 49590 to local UDP 40000"*"--allow-port-mismatch"* ]] && echo yes || echo no)"
 field_case "set_field: worker on the advertised port" worker_listener /ip6/::/udp/49594/quic-v1 0
 field_case "set_field: worker on the primary's port refused" worker_listener /ip4/10.0.0.9/udp/49590/quic-v1 1
 printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.8/udp/49590/quic-v1\n' >> "$META_F"
 field_case "set_field: a duplicated external address refused" primary_listener /ip4/10.0.0.9/udp/49590/quic-v1 1
+cp "$T/meta.saved" "$META_F"
+printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.7/udp/49590/quic-v1\n' >> "$META_F"
+TN_ALLOW_PORT_MISMATCH=1
+field_case "set_field: another port with the mismatch allowed (NAT mapping)" primary_listener /ip4/10.0.0.9/udp/40000/quic-v1 0
+field_case "set_field: allowed mismatch still needs a UDP port" primary_listener /ip4/10.0.0.9/udp/400000/quic-v1 1
+unset TN_ALLOW_PORT_MISMATCH
 cp "$T/meta.saved" "$META_F"
 field_case "set_field: no external address recorded (older install) accepted" primary_listener /ip4/10.0.0.9/udp/40000/quic-v1 0
 

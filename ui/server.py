@@ -3857,9 +3857,12 @@ def config_value_ok(field, value):
 
 @app.route("/api/config/<node_type>/set", methods=["POST"])
 def api_config_set(node_type):
-    # POST {"field": ..., "value": ...}; the page reads the restart+verify
-    # progress with fetch. Validated here and again in the helper +
-    # edit-config.sh. Reuses the same SSE plumbing as updates.
+    # POST {"field": ..., "value": ..., "allow_port_mismatch": true|false};
+    # the page reads the restart+verify progress with fetch. Validated here and
+    # again in the helper + edit-config.sh. Reuses the same SSE plumbing as
+    # updates. allow_port_mismatch (a listener only, sent after the operator
+    # confirmed that a NAT or port forward maps the advertised external port to
+    # the new one) adds the helper's allow-port-mismatch argument.
     if not valid_type(node_type):
         return bad_type()
     blocked = _external_block(node_type)
@@ -3874,7 +3877,15 @@ def api_config_set(node_type):
         return jsonify({"error": "field not editable"}), 400
     if not config_value_ok(field, value):
         return jsonify({"error": "invalid value for field"}), 400
-    return _update_stream(["sudo", "-n", HELPER, "config-set", field, value])
+    allow = data.get("allow_port_mismatch", False)
+    if not isinstance(allow, bool):
+        return jsonify({"error": "allow_port_mismatch must be true or false"}), 400
+    cmd = ["sudo", "-n", HELPER, "config-set", field, value]
+    if allow:
+        if field not in ("primary_listener", "worker_listener"):
+            return jsonify({"error": "allow_port_mismatch applies to the listeners only"}), 400
+        cmd.append("allow-port-mismatch")
+    return _update_stream(cmd)
 
 
 # The BLS passphrase credential: migrate (into the encrypted systemd credential)

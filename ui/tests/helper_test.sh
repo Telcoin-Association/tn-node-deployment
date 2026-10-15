@@ -704,11 +704,11 @@ check_has "config-set takes a worker listener on the advertised port" \
     "edit-config [--json] [--set] [worker_listener=/ip6/::/udp/49594/quic-v1]" "$t"
 t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49600/quic-v1)"
 check_has "config-set refuses a primary listener on another port, with edit-config's message" \
-    "the primary listener port 49600 must match the advertised external port 49590 (EXTERNAL_PRIMARY_ADDR in .node-meta), which is the port peers dial" "$t"
+    "the primary listener port 49600 must match the advertised external port 49590 (EXTERNAL_PRIMARY_ADDR in .node-meta), which is the port peers dial. If a NAT or port forward maps external UDP 49590 to local UDP 49600, allow the mismatch: edit-config.sh --allow-port-mismatch (TN_ALLOW_PORT_MISMATCH=1), or confirm it in the Node Manager" "$t"
 refused "a listener on another port runs nothing" config-set worker_listener /ip4/0.0.0.0/udp/49590/quic-v1
 t="$(trace config-set worker_listener /ip4/0.0.0.0/udp/049594/quic-v1)"
 check_has "a port of more than five digits has no port to compare, as in edit-config" \
-    "the worker listener port ? must match the advertised external port 49594 (EXTERNAL_WORKER_ADDR in .node-meta), which is the port peers dial" "$t"
+    "the worker listener port ? must match the advertised external port 49594 (EXTERNAL_WORKER_ADDR in .node-meta), which is the port peers dial. If a NAT or port forward maps external UDP 49594 to local UDP ?, allow the mismatch: edit-config.sh --allow-port-mismatch (TN_ALLOW_PORT_MISMATCH=1), or confirm it in the Node Manager" "$t"
 fixture unified
 printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.7/tcp/49590\n' >> "${ETC_DIR}/.node-meta"
 t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49590/quic-v1)"
@@ -724,6 +724,25 @@ check_has "the other listener is checked on its own key" \
     "edit-config [--json] [--set] [primary_listener=/ip4/0.0.0.0/udp/49600/quic-v1]" "$t"
 same_with_tokens unified config-set state_export 5
 check_has "config-set state_export 5 argv" "edit-config [--json] [--set] [state_export=5]" "$BASE"
+# allow-port-mismatch (the operator confirmed a NAT or port forward): a listener
+# on another port goes to edit-config.sh with --allow-port-mismatch.
+make_fake "$T/engine/edit-config.sh" edit-config '# --allow-port-mismatch'
+fixture unified
+printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.7/udp/49590/quic-v1\nEXTERNAL_WORKER_ADDR=/ip4/203.0.113.7/udp/49594/quic-v1\n' >> "${ETC_DIR}/.node-meta"
+t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49600/quic-v1 allow-port-mismatch)"
+check_has "allow-port-mismatch: the mismatch reaches edit-config with the flag" \
+    "edit-config [--json] [--allow-port-mismatch] [--set] [primary_listener=/ip4/0.0.0.0/udp/49600/quic-v1]" "$t"
+t="$(trace config-set worker_listener /ip4/0.0.0.0/udp/49594/quic-v1 allow-port-mismatch)"
+check_has "allow-port-mismatch on a matching port still passes the flag" \
+    "edit-config [--json] [--allow-port-mismatch] [--set] [worker_listener=/ip4/0.0.0.0/udp/49594/quic-v1]" "$t"
+refused "allow-port-mismatch still needs a UDP port" config-set worker_listener /ip4/0.0.0.0/udp/049594/quic-v1 allow-port-mismatch
+refused "allow-port-mismatch is for the listeners only" config-set metrics off allow-port-mismatch
+refused "config-set takes no other option" config-set primary_listener /ip4/0.0.0.0/udp/49600/quic-v1 allow
+refused "config-set takes at most three arguments" config-set primary_listener /ip4/0.0.0.0/udp/49600/quic-v1 allow-port-mismatch x
+make_fake "$T/engine/edit-config.sh" edit-config
+t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49600/quic-v1 allow-port-mismatch)"
+check_has "allow-port-mismatch refuses an engine without the flag" \
+    "edit-config.sh in the engine copy has no --allow-port-mismatch (it is older than this helper): run update-scripts.sh, then try again" "$t"
 
 # ---- credential: migrate or reseal, nothing else ---------------------------------------
 # shellcheck disable=SC2016
@@ -852,7 +871,7 @@ check_lacks "audit: read-only calls are not logged" '"sub":"meta-cat"' "$audit"
 check "audit: the log is not group or world readable" "600" "$(stat -c %a "$T/audit/audit.log" 2>/dev/null)"
 rm -rf "$T/audit"
 trace update-prepare "$(printf 'a b\tc')" >/dev/null
-trace config-set verbosity -vvv "$(printf 'ex\ttra')" >/dev/null
+trace config-set verbosity -vvv "$(printf 'ex\ttra')" x >/dev/null
 trace meta-cat "$(printf 'x\ty')" >/dev/null
 audit="$(cat "$T/audit/audit.log" 2>/dev/null)"
 check "audit: a call refused by the generic checks leaves one refused line each" "2" \
@@ -860,7 +879,7 @@ check "audit: a call refused by the generic checks leaves one refused line each"
 check_has "audit: the generic refusal names the subcommand, not the arguments" \
     "$(printf '%s\n' "$audit" | grep '"sub":"update-prepare","args":"","phase":"refused"')" "$audit"
 check "audit: a control character in a refused call is written as a space" "1" \
-    "$(printf '%s\n' "$audit" | grep -c '"detail":"too many arguments for config-set: verbosity -vvv ex tra"')"
+    "$(printf '%s\n' "$audit" | grep -c '"detail":"too many arguments for config-set: verbosity -vvv ex tra x"')"
 check_lacks "audit: a refused read-only call is not logged" '"sub":"meta-cat"' "$audit"
 
 # ---- Read-only views --------------------------------------------------------------------

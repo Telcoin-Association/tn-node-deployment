@@ -56,7 +56,7 @@
 #   telcoin-ui-helper log-clear
 #   telcoin-ui-helper journal-tail    <lines>                   (read-only)
 #   telcoin-ui-helper journal-follow                            (read-only)
-#   telcoin-ui-helper config-set      <field> <value>
+#   telcoin-ui-helper config-set      <field> <value> [allow-port-mismatch]
 #   telcoin-ui-helper credential      <migrate|reseal>
 #   telcoin-ui-helper set-hostname    <name>
 #   telcoin-ui-helper set-logrotate   <size e.g. 1G>
@@ -786,9 +786,11 @@ udp_port() {
 # messages: a listener's UDP port must be the port of the external address
 # .node-meta records for it (EXTERNAL_PRIMARY_ADDR or EXTERNAL_WORKER_ADDR, the
 # port peers dial). No recorded address (an older install) passes; a recorded
-# one without a UDP port, or set more than once, refuses the call.
+# one without a UDP port, or set more than once, refuses the call. A third
+# argument "allow" accepts a different port (a NAT or port forward maps it);
+# edit-config.sh then gets --allow-port-mismatch and warns.
 listener_port_advertised() {
-    local key label ext rc=0 want got
+    local key label ext rc=0 want got allow="${3:-}"
     case "$1" in
         primary_listener) key=EXTERNAL_PRIMARY_ADDR; label="primary" ;;
         *) key=EXTERNAL_WORKER_ADDR; label="worker" ;;
@@ -799,22 +801,35 @@ listener_port_advertised() {
     want="$(udp_port "$ext")" \
         || die "${key} in .node-meta (${ext}) has no UDP port to compare the ${label} listener with"
     got="$(udp_port "$2")" || got=""
+    [[ "$got" != "$want" && -n "$got" && "$allow" == "allow" ]] && return 0
     [[ "$got" == "$want" ]] \
-        || die "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial"
+        || die "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial. If a NAT or port forward maps external UDP ${want} to local UDP ${got:-?}, allow the mismatch: edit-config.sh --allow-port-mismatch (TN_ALLOW_PORT_MISMATCH=1), or confirm it in the Node Manager"
 }
 
 cmd_config_set() {
-    local field="$1" value="$2"
+    local field="$1" value="$2" opt="${3:-}" allow="" extra=()
     config_script_ready
     [[ -n "$field" ]] || die "missing field"
     [[ -n "$value" ]] || die "missing value"
+    # The one option: allow-port-mismatch, for a listener only (the operator
+    # confirmed that a NAT or port forward maps the advertised port to it).
+    if [[ -n "$opt" ]]; then
+        [[ "$opt" == "allow-port-mismatch" ]] || die "config-set takes allow-port-mismatch as its only option, not: ${opt}"
+        case "$field" in
+            primary_listener|worker_listener) ;;
+            *) die "allow-port-mismatch applies to primary_listener and worker_listener only" ;;
+        esac
+        engine_has "$CONFIG_SCRIPT" --allow-port-mismatch
+        allow=allow
+        extra=(--allow-port-mismatch)
+    fi
 
     # Per-field value validation (first line of defence; edit-config.sh repeats it).
     case "$field" in
         primary_listener|worker_listener)
             [[ "$value" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] \
                 || die "invalid multiaddr: $value"
-            listener_port_advertised "$field" "$value" ;;
+            listener_port_advertised "$field" "$value" "$allow" ;;
         metrics)
             # off removes --metrics. The endpoint stays on loopback; a public
             # bind needs a root operator (edit-config.sh --allow-public-metrics).
@@ -841,7 +856,7 @@ cmd_config_set() {
             die "field not editable: $field" ;;
     esac
 
-    exec bash "$CONFIG_SCRIPT" --json --set "${field}=${value}"
+    exec bash "$CONFIG_SCRIPT" --json ${extra[@]+"${extra[@]}"} --set "${field}=${value}"
 }
 
 # The BLS passphrase credential: edit-config.sh --json --migrate-credential
@@ -1463,8 +1478,8 @@ max_args() {
         update-prepare|journal-tail|set-hostname|set-logrotate|credential) echo 1 ;;
         firewall-enable) echo 1 ;;
         docker-status|docker-logs-full|docker-node-info|docker-stats|docker-log-size) echo 1 ;;
-        config-set|caddy-dns-check|rpc-dns-check|firewall-port|docker-logs) echo 2 ;;
-        caddy-enable|rpc-enable) echo 3 ;;
+        caddy-dns-check|rpc-dns-check|firewall-port|docker-logs) echo 2 ;;
+        config-set|caddy-enable|rpc-enable) echo 3 ;;
         *) return 1 ;;
     esac
 }
@@ -1516,7 +1531,7 @@ main() {
         log-clear)       cmd_log_clear ;;
         journal-tail)    cmd_journal_tail "${1:-}" ;;
         journal-follow)  cmd_journal_follow ;;
-        config-set)      cmd_config_set "${1:-}" "${2:-}" ;;
+        config-set)      cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
         credential)      cmd_credential "${1:-}" ;;
         set-hostname)    cmd_set_hostname "${1:-}" ;;
         set-logrotate)   cmd_set_logrotate "${1:-}" ;;

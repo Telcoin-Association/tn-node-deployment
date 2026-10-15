@@ -2072,6 +2072,8 @@ async function renderConfig(){
 
   const editing = !!state.configEditing;
 
+  // The advertised external addresses, for the listener port check on Save.
+  state.cfgExternal = {primary_listener: d.external_primary||'', worker_listener: d.external_worker||''};
   // Editable fields (the exact set edit-config.sh's menu edits). docker_image
   // only for docker installs.
   const editable = [
@@ -2205,8 +2207,26 @@ async function saveAdvertisedName(btn){
   else toast('Failed to set name: '+((r&&r.error)||'unknown error'),'error');
 }
 
+// The UDP port of a multiaddr (/ip4/../udp/<port>/..), or '' when it has none.
+function udpPort(addr){
+  const m = /\/udp\/(\d{1,5})(\/|$)/.exec(addr||'');
+  return m ? String(parseInt(m[1],10)) : '';
+}
+
 async function saveConfigField(field, value, btn){
   if(!configValueOk(field, value)){ toast('Invalid value for '+field, 'error'); return; }
+  // A listener on another port than the advertised external one: edit-config
+  // refuses it unless the operator confirms a NAT or port forward maps it.
+  let allowPortMismatch = false;
+  if(field==='primary_listener'||field==='worker_listener'){
+    const ext = (state.cfgExternal||{})[field]||'';
+    const want = udpPort(ext), got = udpPort(value);
+    if(want && got && want!==got){
+      if(!confirm('This listener port ('+got+') differs from the advertised external port ('+want+') that peers dial ('+ext+').\n\n'
+        +'That is right only when a NAT or port forward maps external UDP '+want+' to UDP '+got+' on this host. Otherwise peers cannot reach the node.\n\nSave with the mismatch?')) return;
+      allowPortMismatch = true;
+    }
+  }
   if(state.node==='validator' &&
      !confirm('Saving restarts the validator now — expect missed consensus rounds during the brief downtime. Continue?')) return;
   stopConfigStream();
@@ -2217,7 +2237,9 @@ async function saveConfigField(field, value, btn){
   // A POST stream read with streamFetch (see Action streams); Done or leaving
   // the tab aborts it.
   const ctl = new AbortController(); state.configAbort = ctl;
-  const d = await streamPost(url, {field:field, value:value}, {target:'#cfgLog', what:'Save', signal:ctl.signal});
+  const body = {field:field, value:value};
+  if(allowPortMismatch) body.allow_port_mismatch = true;
+  const d = await streamPost(url, body, {target:'#cfgLog', what:'Save', signal:ctl.signal});
   if(ctl.signal.aborted) return;
   if(state.configAbort===ctl) state.configAbort = null;
   if(d && d.ok) toast('Saved '+field+' — node restarted','success');
