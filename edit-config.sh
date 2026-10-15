@@ -20,6 +20,10 @@
 #   sudo bash edit-config.sh --json --set <field>=<value>
 #                                                     # the same, as JSON events
 #   --no-epoch-wait                                   # restart without the epoch wait
+#   --allow-quorum-risk                               # restart even when the committee
+#                                                     # check says too many are down
+#   --allow-public-metrics                            # metrics on an address other
+#                                                     # than 127.0.0.1 (root only)
 #
 # TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
 #
@@ -118,6 +122,8 @@ TARGET_LAUNCH_FILE=""
 
 # --no-epoch-wait: restart without waiting for the epoch boundary.
 NO_EPOCH_WAIT=false
+# --allow-public-metrics: a metrics address other than 127.0.0.1 (never in --json).
+ALLOW_PUBLIC_METRICS=false
 
 # --json: stdout carries JSON events only (see json_setup_fds). --set runs one
 # edit without the menu, in either mode.
@@ -264,26 +270,68 @@ is_docker_install() {
 # docker -e "VAR=..." (wrapper), export VAR="..." (binary wrapper), and the
 # unquoted legacy inline-unit form. Strips the quotes the wrapper forms carry.
 read_listener_from_launch() {
-    local varname="$1"
+    local varname="$1" envf
+    envf="$(node_env_file)"
+    if [[ -f "$envf" ]]; then
+        grep -E "^${varname}=" "$envf" 2>/dev/null | head -1 | cut -d= -f2-
+        return 0
+    fi
     read_launch_line "$TARGET_LAUNCH_FILE" | \
         grep -oE "${varname}=\"?[^ \"]+" | head -1 | cut -d= -f2- | tr -d '"'
 }
 
-# Set one listener var everywhere the service can read it. Docker: the -e line
-# in the launch config (wrapper or legacy unit). Binary/source: the unit's
-# Environment= line AND the wrapper's export line -- the wrapper export is what
-# the process actually sees on current installs, the unit line is kept in sync
-# for legacy readers. The [^ \"] bound keeps the wrapper's closing quote.
-set_listener_var() {
-    local varname="$1" value="$2"
-    if is_docker_install; then
-        perl -i -pe "s|${varname}=[^ \"]+|${varname}=${value}|g" "$TARGET_LAUNCH_FILE"
-    else
-        set_env_var "$varname" "$value" "$TARGET_SERVICE_FILE"
-        if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
-            perl -i -pe "s|^(export ${varname}=).*\$|\${1}\"${value}\"|" "$TARGET_LAUNCH_FILE"
-        fi
+# node_env_file -- this install's node.env (listener addresses, root 0644).
+node_env_file() {
+    printf '%s%s/node.env\n' "${TN_ROOT_PREFIX:-}" "$DEFAULT_CONFIG_DIR"
+}
+
+# launch_current_form -- make sure the node runs from a current start script
+# (passphrase on stdin, listeners in node.env): an install from before is moved
+# first with tn_rerender_node_launch, which rewrites the start script and unit
+# and writes node.env from the addresses its old files carry. The launch file,
+# the unit and node.env are backed up first (edit_backup), so a failed or
+# abandoned edit puts all three back. rc 1 when the move is refused (reported).
+launch_current_form() {
+    if [[ -f "$(node_env_file)" ]] \
+        && [[ "$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --bls-passphrase-source 2>/dev/null)" == "stdin" ]]; then
+        return 0
     fi
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_backup "$TARGET_SERVICE_FILE" || return 1
+    edit_backup "$(node_env_file)" || return 1
+    if ! tn_rerender_node_launch "" edit_wait_say; then
+        edit_error "${TARGET_LAUNCH_FILE} could not be moved to the current start script (see above); nothing was changed by this edit"
+        return 1
+    fi
+    resolve_launch_file
+    return 0
+}
+
+# set_listener_var VAR VALUE -- set one listener address. The addresses live in
+# node.env, which is rewritten whole through tn_write_node_env (no sed or perl
+# ever sees the value); node.env is backed up first. rc 1 refused or failed.
+set_listener_var() {
+    local varname="$1" value="$2" envf p w a
+    if ! validate_multiaddr "$value"; then
+        edit_error "invalid multiaddr: ${value}"
+        return 1
+    fi
+    envf="$(node_env_file)"
+    edit_backup "$envf" || return 1
+    launch_current_form || return 1
+    p="$(grep -E '^PRIMARY_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    w="$(grep -E '^WORKER_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    a="$(grep -E '^TN_RPC_ADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    case "$varname" in
+        PRIMARY_LISTENER_MULTIADDR) p="$value" ;;
+        WORKER_LISTENER_MULTIADDR)  w="$value" ;;
+        *) edit_error "unknown listener ${varname}"; return 1 ;;
+    esac
+    if ! CONFIG_DIR="$DEFAULT_CONFIG_DIR" tn_write_node_env "$p" "$w" "${a:-127.0.0.1}"; then
+        edit_error "could not write ${envf}"
+        return 1
+    fi
+    return 0
 }
 
 # Back up every file an edit can touch: the launch file, plus the unit when
@@ -305,32 +353,43 @@ backup_edit_targets() {
     edit_report_backups
 }
 
-# Replace or add an Environment= line in the service file
-set_env_var() {
-    local var_name="$1"
-    local new_value="$2"
-    local service_file="$3"
-
-    if grep -q "Environment=\"${var_name}=" "$service_file"; then
-        # Replace existing
-        sed -i "s|Environment=\"${var_name}=.*\"|Environment=\"${var_name}=${new_value}\"|" "$service_file"
-    else
-        # Add after the last Environment= line
-        sed -i "/^Environment=/a Environment=\"${var_name}=${new_value}\"" "$service_file"
-    fi
-}
-
-# Replace the verbosity flag (-v .. -vvvvv) in a launch file. The old
-# `sed s| -v\+ |...|` matched the FIRST " -v " on the line -- on a docker
-# launch line that is the -v VOLUME flag, not verbosity, and on wrapper files
-# the verbosity token sits at line start where the leading-space pattern never
-# matched at all. Match -v{1,5} only when followed by a line continuation,
-# another --flag, or end of line: a volume -v is always followed by a path
-# (and `command -v tool` by a bare word), so neither can match.
+# set_verbosity NEW [FILE] -- set the node's verbosity word (-v .. -vvvvv). The
+# start script is rewritten whole by tn_write_start_script with the same runner
+# and arguments and only that word changed (added when there was none); an
+# older launch file is moved to the current form first. No value reaches sed or
+# perl. rc 1 refused or failed.
 set_verbosity() {
-    local new_verbosity="$1"
-    local service_file="$2"
-    perl -i -pe "s/(^|\s)-v{1,5}(?=\s+(?:\\\\|--)|\s*\$)/\${1}${new_verbosity}/" "$service_file"
+    local new="$1" runner args method kind rc=0
+    if [[ ! "$new" =~ ^-v{1,5}$ ]]; then
+        edit_error "verbosity must be -v .. -vvvvv"
+        return 1
+    fi
+    launch_current_form || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    runner="$(_tn_launch_awk runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
+    [[ $rc -eq 10 ]] || { edit_error "cannot read the node command in ${TARGET_LAUNCH_FILE}"; return 1; }
+    rc=0
+    args="$(_tn_launch_awk args "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
+    [[ $rc -eq 10 ]] || { edit_error "cannot read the node arguments in ${TARGET_LAUNCH_FILE}"; return 1; }
+    args="$(printf '%s\n' "$args" | TN_V="$new" awk '{ out = ""; found = 0
+        for (i = 1; i <= NF; i++) {
+            if ($i == "--bls-passphrase-source") { i++; continue }
+            if ($i ~ /^-v+$/ && !found) { $i = ENVIRON["TN_V"]; found = 1 }
+            out = out (out == "" ? "" : " ") $i
+        }
+        if (!found) out = out " " ENVIRON["TN_V"]
+        print out }')"
+    kind="${runner%% *}"
+    method="docker"
+    if [[ "$kind" != "docker" ]]; then
+        method="$(meta_get INSTALL_METHOD 2>/dev/null || true)"
+        case "$method" in source|release|existing|binary) ;; *) method="source" ;; esac
+    fi
+    if ! tn_write_start_script "$method" "${runner#* }" "$args"; then
+        edit_error "could not rewrite ${TARGET_LAUNCH_FILE} (see above)"
+        return 1
+    fi
+    return 0
 }
 
 # Swap docker image OLD for NEW in a launch file. The images reach perl through
@@ -806,8 +865,15 @@ edit_wait_say() {
 # restart. When the node votes in the current committee and the epoch boundary
 # is close, tn_wait_restart_window (lib/common.sh) holds the restart until the
 # epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds.
-# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips it. Always returns 0.
+# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips the wait, never the committee
+# quorum check before it (tn_committee_down_guard; --allow-quorum-risk
+# overrides), whose refusal is the only way it returns 1: nothing is stopped.
 edit_epoch_wait() {
+    if declare -F tn_committee_down_guard >/dev/null 2>&1 \
+        && ! tn_committee_down_guard "$(tn_local_rpc_url)" edit_wait_say; then
+        edit_wait_say warn "Not restarting ${TARGET_SERVICE}: the committee check refused it. Run again later, or with --allow-quorum-risk for a coordinated restart."
+        return 1
+    fi
     if [[ "$NO_EPOCH_WAIT" == "true" ]]; then
         edit_wait_say log "Not waiting for the epoch boundary (--no-epoch-wait)."
         return 0
@@ -904,6 +970,13 @@ set_metrics() {
     local value="$1"
     if [[ "$value" != "off" ]] && ! validate_ip_port "$value"; then
         edit_error "invalid metrics address (want IPv4:PORT or off): ${value}"
+        return 1
+    fi
+    # Metrics stay on loopback unless a root operator says otherwise at the
+    # console; the UI (--json) never can.
+    if [[ "$value" != "off" && "$value" != 127.0.0.1:* ]] \
+        && { [[ "$ALLOW_PUBLIC_METRICS" != "true" ]] || [[ "$JSON_MODE" == "true" ]]; }; then
+        edit_error "metrics bind to 127.0.0.1 only (got ${value}); a root operator can pass --allow-public-metrics outside --json mode"
         return 1
     fi
     edit_launch_spec || return 1
@@ -1269,6 +1342,10 @@ set_field() {
                 edit_error "verbosity must be -v .. -vvvvv"
                 return 1
             fi
+            if [[ "$JSON_MODE" == "true" && ! "$value" =~ ^-v{1,3}$ ]]; then
+                edit_error "verbosity from --json is at most -vvv"
+                return 1
+            fi
             edit_launch_unambiguous || return 1
             edit_backup "$TARGET_LAUNCH_FILE" || return 1
             set_verbosity "$value" "$TARGET_LAUNCH_FILE"
@@ -1304,8 +1381,16 @@ apply_changes() {
     print_ok "systemd reloaded"
 
     echo ""
-    if confirm "Restart the node now to apply changes?"; then
-        edit_epoch_wait
+    if ! confirm "Restart the node now to apply changes?"; then
+        EDIT_PENDING=false
+        print_info "Changes saved. Restart the node when ready:"
+        print_info "  sudo systemctl restart ${TARGET_SERVICE}"
+    elif ! edit_epoch_wait; then
+        # The committee check refused the restart: the edit stays saved.
+        EDIT_PENDING=false
+        print_info "Changes saved, not applied. Restart the node once the committee check allows it"
+        print_info "(edit-config.sh menu: Restart node)."
+    else
         EDIT_PENDING=false
         print_step "Restarting ${TARGET_SERVICE}..."
         systemctl restart "$TARGET_SERVICE" || true
@@ -1317,10 +1402,6 @@ apply_changes() {
             print_info "  sudo tail -30 /var/log/telcoin/${TARGET_SERVICE}.log"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
         fi
-    else
-        EDIT_PENDING=false
-        print_info "Changes saved. Restart the node when ready:"
-        print_info "  sudo systemctl restart ${TARGET_SERVICE}"
     fi
     edit_unlock
     echo ""
@@ -1367,7 +1448,7 @@ edit_restart() {
     if ! systemctl daemon-reload >&2 2>&1; then
         edit_warn "systemctl daemon-reload failed; restarting anyway"
     fi
-    edit_epoch_wait
+    edit_epoch_wait || return 2
     EDIT_PENDING=false
     EDIT_RESTARTED=true
     edit_step "Restarting ${TARGET_SERVICE}"
@@ -1587,11 +1668,15 @@ edit_listener_addresses() {
     menu_lock || { set -e; return; }
     backup_edit_targets || { set -e; return 0; }
 
-    # Write wherever the service actually reads (launch file for docker,
-    # unit Environment= plus wrapper export for binary/source). Multiaddrs
-    # are already validated above, so the substitutions are safe.
-    set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary"
-    set_listener_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"
+    # The addresses go to node.env (an older install is moved to it first).
+    if ! { set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" \
+        && set_listener_var "WORKER_LISTENER_MULTIADDR" "$new_worker"; }; then
+        edit_restore_backups || true
+        edit_unlock
+        set -e
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
 
     print_ok "Listener addresses updated"
     print_info "Primary: ${new_primary}"
@@ -1644,7 +1729,12 @@ edit_verbosity() {
     menu_lock || return 0
     backup_edit_targets || return 0
 
-    set_verbosity "$new_verbosity" "$TARGET_LAUNCH_FILE"
+    if ! set_verbosity "$new_verbosity" "$TARGET_LAUNCH_FILE"; then
+        edit_restore_backups || true
+        edit_unlock
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
     print_ok "Log verbosity updated to: ${new_verbosity}"
     apply_changes
 }
@@ -1652,87 +1742,74 @@ edit_verbosity() {
 edit_rpc() {
     print_header "Edit RPC Access"
 
-    # The --http flags live in the start wrapper on current installs, and the
-    # ExecStart rewrite below only works on legacy inline units. Refuse loudly
-    # instead of appending junk arguments to the unit's wrapper path.
-    if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
-        print_warn "This install launches via a start wrapper -- RPC editing here"
-        print_warn "is not supported yet for wrapper installs."
-        print_info "Edit the --http flags on the last line of:"
-        print_info "  ${TARGET_LAUNCH_FILE}"
-        print_info "then restart: sudo systemctl restart ${TARGET_SERVICE}"
-        echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
-    fi
-
-    local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
-
-    echo "  1) Private (recommended) -- RPC accessible from this server only"
-    echo "              No firewall changes needed. Best for personal use,"
-    echo "              development, and internal tooling."
+    echo "  1) Private (recommended) -- RPC on 127.0.0.1, reachable from this server"
+    echo "              only (and through Caddy when public RPC is enabled with"
+    echo "              install-caddy.sh). No firewall changes needed."
     echo ""
-    echo "  2) Public                -- RPC endpoint accessible from the internet"
-    echo "              Requires nginx on port 443 (HTTPS)."
-    echo "              You will need to open port 443 on your firewall"
-    echo "              and router. An example nginx config will be"
-    echo "              generated for you to configure."
+    echo "  2) Public                -- RPC bound to 0.0.0.0. Put a TLS proxy with rate"
+    echo "              limits in front of it; the node gets the public RPC limits."
+    echo "              Not offered on mainnet."
     echo ""
-    echo "  3) Disabled              -- RPC completely off"
+    echo "  The local RPC stays on in every case: the deployment scripts read it."
     echo ""
-
-    # Strip every --http* flag (with or without a value) from an ExecStart line.
-    # Captures --http, --http.addr, --http.port, --http.api, --http.corsdomain,
-    # --http.vhosts, --http.maxconnections and any future --http.* variants.
-    _strip_http_flags() {
-        local exec="$1"
-        # Two-pass: first remove flags that take a value, then bare --http.
-        echo "$exec" | \
-            sed -E 's/ --http\.[a-zA-Z.]+( +[^ -][^ ]*)?//g' | \
-            sed -E 's/ --http( |$)/\1/g'
-    }
 
     local choice
     while true; do
-        read -r -p "  Enter choice [1/2/3]: " choice
+        read -r -p "  Enter choice [1/2]: " choice
         case "$choice" in
-            1|2|3) break ;;
-            *) print_warn "Please enter 1, 2, or 3." ;;
+            1|2) break ;;
+            *) print_warn "Please enter 1 or 2." ;;
         esac
     done
-
-    menu_lock || return 0
-    if ! edit_launch_unambiguous; then
-        echo ""
-        read -r -p "  Press Enter to return to menu..." || true
-        return 0
+    if [[ "$choice" == "1" ]]; then
+        menu_apply set_rpc_addr 127.0.0.1 "RPC bind address"
+    else
+        menu_apply set_rpc_addr 0.0.0.0 "RPC bind address"
     fi
-    edit_backup "$TARGET_SERVICE_FILE" || return 0
-    edit_report_backups
+}
 
-    local current_exec clean_exec
-    current_exec=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" | sed 's/^ExecStart=//')
-    clean_exec=$(_strip_http_flags "$current_exec")
-
-    case "$choice" in
-        1)
-            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 127.0.0.1|" "$TARGET_SERVICE_FILE"
-            print_ok "RPC set to private (localhost only)"
+# set_rpc_addr ADDR -- the node's RPC bind address: --http.addr and --ws.addr on
+# the launch line through the launch editor (edit_flag_change), and TN_RPC_ADDR
+# in node.env when there is one. ADDR is 127.0.0.1, or 0.0.0.0 off mainnet, which
+# also sets the public RPC limits. Anything else is refused before a file
+# changes; no value reaches sed or perl. rc as for the other setters.
+set_rpc_addr() {
+    local addr="$1" envf p w pair
+    case "$addr" in
+        127.0.0.1) ;;
+        0.0.0.0)
+            if [[ "$(meta_get NETWORK 2>/dev/null || true)" == "mainnet" ]]; then
+                edit_error "a mainnet node keeps its RPC on 127.0.0.1; public RPC goes through install-caddy.sh"
+                return 1
+            fi
             ;;
-        2)
-            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 0.0.0.0|" "$TARGET_SERVICE_FILE"
-            print_ok "RPC set to public (0.0.0.0)"
-            print_warn "Ensure you have an nginx reverse proxy configured before"
-            print_warn "opening this port on your firewall."
-            ;;
-        3)
-            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec}|" "$TARGET_SERVICE_FILE"
-            print_ok "RPC disabled"
+        *)
+            edit_error "the RPC bind address is 127.0.0.1 or 0.0.0.0, not ${addr}"
+            return 1
             ;;
     esac
-
-    apply_changes
+    edit_launch_spec || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_flag_change set --http.addr "$addr" || return 1
+    edit_flag_change set --ws.addr "$addr" || return 1
+    if [[ "$addr" == "0.0.0.0" ]]; then
+        for pair in "--rpc.max-blocks-per-filter 10000" "--rpc.max-logs-per-response 10000" \
+            "--rpc.max-subscriptions-per-connection 100" "--rpc.max-request-size 2" \
+            "--http.api eth,net,web3,tn"; do
+            edit_flag_change set "${pair%% *}" "${pair#* }" || return 1
+        done
+    fi
+    envf="$(node_env_file)"
+    if [[ -f "$envf" ]]; then
+        edit_backup "$envf" || return 1
+        p="$(grep -E '^PRIMARY_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+        w="$(grep -E '^WORKER_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+        if ! CONFIG_DIR="$DEFAULT_CONFIG_DIR" tn_write_node_env "$p" "$w" "$addr"; then
+            edit_error "could not write ${envf}"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 # _uc_unit_with_passphrase UNIT VALUE -- print UNIT with the word after every
@@ -1859,7 +1936,10 @@ edit_bls_passphrase() {
     local was_active="no"
     if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
         was_active="yes"
-        edit_epoch_wait
+        if ! edit_epoch_wait; then
+            print_error "The passphrase was not changed: the committee check refused the stop."
+            return 0
+        fi
         print_step "Stopping ${TARGET_SERVICE} before passphrase rewrite..."
         systemctl stop "$TARGET_SERVICE"
         local stop_attempts=0
@@ -2003,8 +2083,13 @@ edit_p2p_ports() {
         new_worker="/ip4/0.0.0.0/udp/${new_worker_port}/quic-v1"
     fi
 
-    set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary"
-    set_listener_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"
+    if ! { set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" \
+        && set_listener_var "WORKER_LISTENER_MULTIADDR" "$new_worker"; }; then
+        edit_restore_backups || true
+        edit_unlock
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
     print_ok "P2P ports updated"
     print_info "Primary: ${new_primary}"
     print_info "Worker:  ${new_worker}"
@@ -2370,7 +2455,12 @@ restart_node() {
 
     if confirm "Restart ${TARGET_SERVICE} now?"; then
         menu_lock || return 0
-        edit_epoch_wait
+        if ! edit_epoch_wait; then
+            edit_unlock
+            echo ""
+            read -r -p "  Press Enter to return to menu..." || true
+            return 0
+        fi
         print_step "Restarting ${TARGET_SERVICE}..."
         systemctl restart "$TARGET_SERVICE" || true
         sleep 3
@@ -2503,9 +2593,20 @@ run_set() {
     fi
     edit_report_backups
 
-    if edit_restart; then
+    rc=0
+    edit_restart || rc=$?
+    if [[ $rc -eq 0 ]]; then
         edit_done true "$field" "$value" "applied and ${TARGET_SERVICE} healthy"
         return 0
+    fi
+    if [[ $rc -eq 2 ]]; then
+        # The committee check refused the restart: the node never stopped.
+        if edit_restore_backups; then
+            edit_done false "$field" "" "the committee quorum check refused the restart; nothing was changed (--allow-quorum-risk overrides for a coordinated restart)" true
+        else
+            edit_done false "$field" "" "the committee quorum check refused the restart, and some files could not be restored; see the errors above"
+        fi
+        return 1
     fi
 
     # No epoch wait here: the node is already down or failing.
@@ -2566,6 +2667,8 @@ main() {
                 shift 2
                 ;;
             --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
+            --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
+            --allow-public-metrics) ALLOW_PUBLIC_METRICS=true; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule. Read
                 # from this file, not "$0", which names the caller when sourced.
