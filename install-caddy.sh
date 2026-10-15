@@ -1709,19 +1709,16 @@ caddy_restart_window() {
     caddy_node_lock
     caddy_lib_has "the node restarts without waiting for the epoch boundary, even when it is in the committee" tn_wait_restart_window tn_local_rpc_url || return 0
     tn_wait_restart_window "$(tn_local_rpc_url)" caddy_wait_say || true
-    # CORE-2: drop the declare -F guard once tn_committee_down_guard is in lib/common.sh.
-    if declare -F tn_committee_down_guard >/dev/null 2>&1; then
-        rc=0
-        tn_committee_down_guard "$(tn_local_rpc_url)" caddy_wait_say || rc=$?
-        case "$rc" in
-            0) ;;
-            2) caddy_say warn "The committee could not be read, so this run cannot tell how many committee members are down; going on." ;;
-            *)
-                [[ "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]] \
-                    || die "restarting this node now could leave the committee without a quorum (see above); nothing on the node was changed. Run this again later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
-                ;;
-        esac
-    fi
+    rc=0
+    tn_committee_down_guard "$(tn_local_rpc_url)" caddy_wait_say || rc=$?
+    case "$rc" in
+        0) ;;
+        2) caddy_say warn "The committee could not be read, so this run cannot tell how many committee members are down; going on." ;;
+        *)
+            [[ "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]] \
+                || die "restarting this node now could leave the committee without a quorum (see above); nothing on the node was changed. Run this again later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
+            ;;
+    esac
     return 0
 }
 

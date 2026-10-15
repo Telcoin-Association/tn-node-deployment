@@ -802,8 +802,6 @@ obs_restart_window() {
 obs_quorum_guard() {
     local fn="${1:-obs_wait_say}" rc=0
     declare -F "$fn" >/dev/null 2>&1 || fn="obs_wait_say"
-    # CORE-2: drop the declare -F guard once tn_committee_down_guard is in lib/common.sh.
-    declare -F tn_committee_down_guard >/dev/null 2>&1 || return 0
     tn_committee_down_guard "" "$fn" || rc=$?
     case "$rc" in
         0) return 0 ;;
