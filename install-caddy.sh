@@ -1077,6 +1077,8 @@ caddy_teardown() {
 # no shell re-expansion. header_up is a Set, which REPLACES any client-supplied value
 # -- unforgeable (a public client cannot strip it; the SSH-tunnel path never carries
 # it). Do NOT also delete it: Caddy applies header ops in Add->Set->Delete order.
+# The response headers: HSTS, no MIME sniffing, no framing, no referrer, and no
+# Server header; request bodies are capped at 64KB (the public dashboard is read-only).
 write_dashboard_block() {
     local domain="$1" username="$2" hash="$3" outfile="$4"
     {
@@ -1084,6 +1086,16 @@ write_dashboard_block() {
         printf '# management stays on the SSH tunnel.\n'
         printf '%s {\n' "$domain"
         printf '\tencode zstd gzip\n'
+        printf '\theader {\n'
+        printf '\t\tStrict-Transport-Security "max-age=31536000"\n'
+        printf '\t\tX-Content-Type-Options "nosniff"\n'
+        printf '\t\tX-Frame-Options "DENY"\n'
+        printf '\t\tReferrer-Policy "no-referrer"\n'
+        printf '\t\t-Server\n'
+        printf '\t}\n'
+        printf '\trequest_body {\n'
+        printf '\t\tmax_size 64KB\n'
+        printf '\t}\n'
         printf '\treverse_proxy %s {\n' "$UI_UPSTREAM"
         printf '\t\theader_up %s "1"\n' "$PUBLIC_HEADER"
         printf '\t\tflush_interval -1\n'

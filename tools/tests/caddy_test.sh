@@ -255,6 +255,20 @@ caddy_node_port --http.port RPC_PORT 8545 >/dev/null 2>&1; check_rc "duplicated 
 printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 check "nothing set: default 8546" "8546" "$(caddy_node_port --ws.port WS_PORT 8546 2>/dev/null)"
 
+# --- dashboard block: security headers and a request body cap ----------------------------------
+# (The rendered file was checked with `caddy validate` 2.8.4 when this was written.)
+write_dashboard_block dash.example.org admin '$2a$14$abcdefghijklmnopqrstuv' "$T/dash"
+DB="$(cat "$T/dash")"
+for want in 'Strict-Transport-Security "max-age=31536000"' 'X-Content-Type-Options "nosniff"' \
+            'X-Frame-Options "DENY"' 'Referrer-Policy "no-referrer"' '-Server' 'max_size 64KB'; do
+    check "dashboard block: ${want}" "yes" "$(grep -qxF "$(printf '\t\t%s' "$want")" "$T/dash" && echo yes)"
+done
+check "dashboard block: headers inside the site, before the proxy" "yes" \
+    "$(awk '/^\theader \{/{h=NR} /^\treverse_proxy /{p=NR} END{if (h && p && h < p) print "yes"}' "$T/dash")"
+check "dashboard block: braces balance" "0" \
+    "$(printf '%s\n' "$DB" | grep -v '^#' | awk '{n += gsub(/\{/, "{"); n -= gsub(/\}/, "}")} END{print n}')"
+check_has "dashboard block: public marker still set" "$(printf '\t\theader_up %s "1"' "$PUBLIC_HEADER")" "$DB"
+
 # --- node-info.yaml backup and restore as the service user -----------------------------------
 NI="$T/data/node-info.yaml"
 printf 'p2p_info:\n  workers:\n    - rpc: ~\n' > "$NI"
