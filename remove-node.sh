@@ -24,6 +24,51 @@ readonly SCRIPT_VERSION="1.2.9"
 # remove_shared_components and the scan use them as they are.
 TN_RM_ROOT="${TN_ROOT_PREFIX:-}"
 
+# True once remove_node_host_files has left /run/telcoin for rm_exit: the update
+# lock this run holds lives there, so the directory goes after its release.
+RM_RUN_DIR_PENDING=false
+
+# rm_take_lock -- take the update lock (tn_acquire_update_lock) right before the
+# first change, once per run, so no update or other node operation runs while
+# this removal changes the host. rm_exit, the EXIT trap set here, releases it.
+# Under a fixture root (TN_RM_ROOT) the lock file lives in that root too, as
+# every other path here does. rc 0 held; 1 another run holds it (said on stderr).
+rm_take_lock() {
+    [[ -z "${TN_UPDATE_LOCK_KIND:-}" ]] || return 0
+    if [[ -n "$TN_RM_ROOT" && -z "${TN_UPDATE_LOCK_FILE:-}" ]]; then
+        TN_UPDATE_LOCK_FILE="${TN_RM_ROOT}/run/telcoin/update.lock"
+    fi
+    TN_EXIT_TRAP_OWNED=1
+    if ! tn_acquire_update_lock >/dev/null 2>&1; then
+        print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished. Nothing was removed."
+        return 1
+    fi
+    trap rm_exit EXIT
+    return 0
+}
+
+# rm_exit -- the EXIT trap rm_take_lock sets: release the update lock, then
+# remove /run/telcoin when remove_node_host_files left it for last.
+rm_exit() {
+    tn_release_update_lock
+    if [[ "$RM_RUN_DIR_PENDING" == "true" ]]; then
+        RM_RUN_DIR_PENDING=false
+        _rm_dir "${TN_RM_ROOT}/run/telcoin"
+    fi
+}
+
+# _rm_lock_lives_in DIR -- rc 0 when this run holds the update lock and its lock
+# file (or mkdir lock directory) is directly inside DIR.
+_rm_lock_lives_in() {
+    local held
+    case "${TN_UPDATE_LOCK_KIND:-}" in
+        flock) held="$(tn_update_lock_path)" ;;
+        mkdir) held="${TN_UPDATE_LOCK_DIR:-}" ;;
+        *) return 1 ;;
+    esac
+    [[ -n "$held" && "${held%/*}" == "$1" ]]
+}
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -411,10 +456,11 @@ _rm_dir() {
 # remove_unit_leftovers UNIT [check] -- remove what older releases and an
 # interrupted removal leave beside the node unit files, for UNIT and for every
 # other node unit name (tn_all_node_services) whose unit file is gone: the
-# NAME.bak.* and NAME.service.bak.* copies (shredded: they can hold the
-# passphrase) and the drop-in directory NAME.service.d. A node unit still
-# installed keeps its own. UNIT may be empty (no unit file is left). With
-# "check", nothing is removed: rc 0 when there is something to remove, else 1.
+# NAME.bak, NAME.bak.*, NAME.service.bak and NAME.service.bak.* copies
+# (shredded: they can hold the passphrase) and the drop-in directory
+# NAME.service.d. A node unit still installed keeps its own. UNIT may be empty
+# (no unit file is left). With "check", nothing is removed: rc 0 when there is
+# something to remove, else 1.
 remove_unit_leftovers() {
     local unit="${1:-}" check="${2:-}" sd n f
     sd="${TN_RM_ROOT}/etc/systemd/system"
@@ -423,7 +469,8 @@ remove_unit_leftovers() {
         if [[ "$n" != "$unit" && -f "${sd}/${n}.service" ]]; then
             continue
         fi
-        for f in "${sd}/${n}.bak."* "${sd}/${n}.service.bak."* "${sd}/${n}.service.d"; do
+        for f in "${sd}/${n}.bak" "${sd}/${n}.bak."* "${sd}/${n}.service.bak" "${sd}/${n}.service.bak."* \
+                 "${sd}/${n}.service.d"; do
             if [[ ! -e "$f" && ! -L "$f" ]]; then
                 continue
             fi
@@ -529,19 +576,21 @@ remove_chain_data() {
 
 # shred_key_files KEYS_DIR CONFIG_DIR [USER GROUP] -- shred every file under
 # KEYS_DIR (as USER:GROUP, the service account that owns the data dir; see
-# _rm_shred_tree) and remove it, then shred the passphrase files in CONFIG_DIR
-# and in /etc/telcoin: the encrypted credential bls-passphrase.cred, the
-# plaintext bls-passphrase and the TPM-sealed bls-tpm.pub / bls-tpm.priv of very
-# old installs. The caller removes CONFIG_DIR.
+# _rm_shred_tree) and remove it, then shred every file under CONFIG_DIR (the
+# passphrase files, .node-meta and any temp copy beside them), and in
+# /etc/telcoin the encrypted credential bls-passphrase.cred, the plaintext
+# bls-passphrase and the TPM-sealed bls-tpm.pub / bls-tpm.priv of very old
+# installs. The caller removes CONFIG_DIR.
 shred_key_files() {
     local keys_dir="$1" config_dir="$2" d
     local user="${3:-${SERVICE_USER:-telcoin}}" group="${4:-${SERVICE_GROUP:-telcoin}}"
     _rm_shred_tree "$keys_dir" "$user" "$group"
     _rm_dir "$keys_dir"
-    for d in "$config_dir" "${TN_RM_ROOT}/etc/telcoin"; do
-        _rm_shred "${d}/bls-passphrase.cred" "${d}/bls-passphrase" \
-                  "${d}/bls-tpm.pub" "${d}/bls-tpm.priv"
-    done
+    if [[ ! -L "$config_dir" ]]; then
+        _rm_shred_tree "$config_dir" "$user" "$group"
+    fi
+    d="${TN_RM_ROOT}/etc/telcoin"
+    _rm_shred "${d}/bls-passphrase.cred" "${d}/bls-passphrase" "${d}/bls-tpm.pub" "${d}/bls-tpm.priv"
 }
 
 # remove_keys [USER GROUP] -- ask (typed DELETE), then shred and remove the node
@@ -590,38 +639,57 @@ remove_keys() {
 
 # remove_node_host_files -- remove the host files every node install shares:
 # the start scripts in /usr/local/libexec/telcoin (and that directory when it is
-# empty), /etc/telcoin/node.env, the backups in /var/backups/telcoin (shredded:
-# they can hold unit, launch-file and passphrase copies), the logrotate file
-# (TN_LOGROTATE_FILE), the journald drop-in 50-telcoin.conf and the lock
-# directory /run/telcoin, the release staging directory /var/lib/telcoin-staging,
-# and the source-build account tn-build with its home /var/lib/tn-build. The
-# caller runs it only when no other node install
-# remains. Every path is under TN_RM_ROOT (see the top of this file).
+# empty; a symlink there is left alone with a warning, nothing is removed
+# through it), /etc/telcoin/node.env (and /etc/telcoin when that leaves it
+# empty), the backups in /var/backups/telcoin (shredded: they can hold unit,
+# launch-file and passphrase copies), the logrotate file (TN_LOGROTATE_FILE),
+# the journald drop-in 50-telcoin.conf, the needrestart rule 50-telcoin.conf,
+# the apt rule 52telcoin-no-reboot, the release staging directory
+# /var/lib/telcoin-staging, the source-build account tn-build with its home
+# /var/lib/tn-build, and the lock directory /run/telcoin. When the update lock
+# this run holds lives in /run/telcoin, the directory is removed by rm_exit
+# after the lock is released. The caller runs it only when no other node
+# install remains. Every path is under TN_RM_ROOT (see the top of this file).
 remove_node_host_files() {
-    local r="$TN_RM_ROOT" m f
+    local r="$TN_RM_ROOT" lx m f
     local -a files=()
-    for m in source docker; do
-        f="$(tn_start_script_path "$m")" || continue
-        files+=("${r}${f}")
-    done
+    lx="${r}/usr/local/libexec/telcoin"
+    if [[ -L "$lx" ]]; then
+        print_warn "/usr/local/libexec/telcoin is a symlink: the start scripts behind it are left in place. Check where it points and remove it by hand."
+    else
+        for m in source docker; do
+            f="$(tn_start_script_path "$m")" || continue
+            files+=("${r}${f}")
+        done
+    fi
     files+=("${r}/etc/telcoin/node.env"
             "${TN_LOGROTATE_FILE:-${r}/etc/logrotate.d/telcoin}"
-            "${r}/etc/systemd/journald.conf.d/50-telcoin.conf")
+            "${r}/etc/systemd/journald.conf.d/50-telcoin.conf"
+            "${r}/etc/needrestart/conf.d/50-telcoin.conf"
+            "${r}/etc/apt/apt.conf.d/52telcoin-no-reboot")
     for f in "${files[@]}"; do
         if [[ -L "$f" || -f "$f" ]]; then
             rm -f -- "$f" 2>/dev/null || true
             print_ok "Removed ${f#"$r"}"
         fi
     done
-    rmdir "${r}/usr/local/libexec/telcoin" 2>/dev/null || true
+    if [[ ! -L "$lx" ]]; then
+        rmdir "$lx" 2>/dev/null || true
+    fi
+    rmdir "${r}/etc/telcoin" 2>/dev/null || true
     if [[ -L "${r}/var/backups/telcoin" || -d "${r}/var/backups/telcoin" ]]; then
         _rm_shred_tree "${r}/var/backups/telcoin"
         _rm_dir "${r}/var/backups/telcoin"
         print_ok "Removed /var/backups/telcoin"
     fi
     if [[ -L "${r}/run/telcoin" || -d "${r}/run/telcoin" ]]; then
-        _rm_dir "${r}/run/telcoin"
-        print_ok "Removed /run/telcoin"
+        if [[ ! -L "${r}/run/telcoin" ]] && _rm_lock_lives_in "${r}/run/telcoin"; then
+            RM_RUN_DIR_PENDING=true
+            print_info "/run/telcoin holds the update lock of this run: it is removed when the run ends."
+        else
+            _rm_dir "${r}/run/telcoin"
+            print_ok "Removed /run/telcoin"
+        fi
     fi
     # Release staging (downloads and build logs) and the source-build account with
     # its home (toolchain, cargo cache, build output). lib/release-keys stays: it is
@@ -672,7 +740,7 @@ rm_leftovers_present() {
 # go through remove_node_host_files. A DATA_DIR that .node-meta records outside
 # /var/lib/telcoin is listed and removed too. rc 0 done or kept at the
 # operator's word; 1 refused before any change (a key set more than once in
-# .node-meta); 3 nothing found.
+# .node-meta, or another run holds the update lock); 3 nothing found.
 remove_leftovers() {
     local r="$TN_RM_ROOT" meta dd="" user="" group="" item m f
     local -a dirs=() shown=()
@@ -725,6 +793,7 @@ remove_leftovers() {
         print_info "Leftover files kept."
         return 0
     fi
+    rm_take_lock || return 1
 
     # The keys first: every file under a node-keys dir in the data dirs (as the
     # service account that owns them), then the whole config tree.
@@ -836,6 +905,16 @@ remove_service_user() {
         fi
     fi
 
+    # The service account is kept (declined, or its removal failed) and may
+    # still need the log-reader group: ask before removing that group.
+    local log_group="${TN_LOG_GROUP:-telcoin-log}"
+    if id "$service_user" &>/dev/null && getent group "$log_group" &>/dev/null; then
+        if ! confirm "Also remove the log-reader group '${log_group}'? The service user '${service_user}' is kept and may still need it to read the node logs."; then
+            print_info "Group '${log_group}' kept."
+            KEPT_GROUPS+=("$log_group")
+            return 0
+        fi
+    fi
     remove_log_group "$service_user" "$self_unit"
 }
 
@@ -1153,6 +1232,10 @@ remove_all_nodes() {
         read -r -p "  Press Enter to return to menu..."
         return
     fi
+    if ! rm_take_lock; then
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
 
     echo ""
 
@@ -1188,6 +1271,7 @@ wipe_chain_data_only() {
                 print_error "Chain data for ${unit} not wiped: the data directory is unknown."
                 continue
             fi
+            rm_take_lock || break
             wait_for_service_stopped "$unit"
             rm -rf "${ddir}/db"
             systemctl start "$unit" 2>/dev/null || true
@@ -1527,6 +1611,12 @@ json_remove() {
     local data_dir
     if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
         json_event error "the data directory is unknown (nothing was removed)"
+        return 1
+    fi
+
+    # No update or other node operation may run while this one changes the host.
+    if ! rm_take_lock 2>/dev/null; then
+        json_event error "another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished (nothing was removed)"
         return 1
     fi
 

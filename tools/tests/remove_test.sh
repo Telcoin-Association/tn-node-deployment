@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
 # tools/tests/remove_test.sh -- remove-node.sh's teardown of the files beside a
-# node: the unit's old backups and drop-in directory, the key and passphrase
-# files (shredded), the shared host files (start scripts, node.env, backups,
-# logrotate and journald files, the lock directory), the log-reader group, the
-# JSON path, and the refusal to remove anything when .node-meta sets a key more
-# than once.
+# node: the unit's old backups and drop-in directory (also under older and
+# legacy names), the key, passphrase and config files (shredded by find, as the
+# service account where the tree is not this account's own, never through a
+# symlink or a split name), the shared host files (start scripts, node.env,
+# backups, logrotate, journald, needrestart and apt files, the lock directory,
+# a symlinked libexec dir left alone), the log-reader group, the JSON path,
+# finishing a removal that stopped part way (JSON and the menu's leftover
+# path), the update lock, and the refusal to remove anything when .node-meta
+# sets a key more than once.
 #
 #   bash tools/tests/remove_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/remove_test.sh
@@ -134,7 +138,8 @@ BK="$R/var/backups/telcoin"
 mkfixture() {
     rm -rf "$R" "$OUT"
     mkdir -p "$SD/telcoin.service.d" "$ETC" "$DATA/node-keys/sub" "$DATA/db" "$LX" \
-             "$BK" "$R/etc/logrotate.d" "$R/etc/systemd/journald.conf.d" "$R/run/telcoin" "$OUT"
+             "$BK" "$R/etc/logrotate.d" "$R/etc/systemd/journald.conf.d" "$R/run/telcoin" "$OUT" \
+             "$R/etc/needrestart/conf.d" "$R/etc/apt/apt.conf.d"
     printf '[Service]\nUser=tnrmtest\n' > "$SD/telcoin.service"
     printf 'Environment=TN_BLS_PASSPHRASE=x\n' > "$SD/telcoin.service.bak.20240101"
     printf 'old\n' > "$SD/telcoin.bak.1"
@@ -160,6 +165,11 @@ mkfixture() {
     printf 'rotate\n' > "$R/etc/logrotate.d/telcoin"
     printf 'decoy\n' > "$R/etc/logrotate.d/other"
     printf '[Journal]\n' > "$R/etc/systemd/journald.conf.d/50-telcoin.conf"
+    printf 'x\n' > "$R/etc/needrestart/conf.d/50-telcoin.conf"
+    printf 'decoy\n' > "$R/etc/needrestart/conf.d/10-other.conf"
+    printf 'x\n' > "$R/etc/apt/apt.conf.d/52telcoin-no-reboot"
+    printf 'decoy\n' > "$R/etc/apt/apt.conf.d/50unattended-upgrades"
+    printf 'temp\n' > "$ETC/.tn.AbCdEf"
     printf 'decoy\n' > "$R/etc/systemd/journald.conf.d/10-other.conf"
     : > "$R/run/telcoin/update.lock"
     mkdir -p "$R/var/lib/telcoin-staging/rel.Ab12Cd" "$R/var/lib/tn-build/target"
@@ -172,6 +182,8 @@ mkfixture() {
 }
 
 exists() { if [[ -e "$1" || -L "$1" ]]; then echo yes; else echo no; fi; }
+# snapshot -- every path under the fixture root and the outside decoys.
+snapshot() { find "$R" "$OUT" 2>/dev/null | sort; }
 gone() { check "$1: gone" no "$(exists "$2")"; }
 kept() { check "$1: kept" yes "$(exists "$2")"; }
 calls() { cat "$CALLS"; }
@@ -224,6 +236,8 @@ for f in bls-passphrase.cred bls-passphrase bls-tpm.pub bls-tpm.priv; do
 done
 check_has "node key shredded" "shred -u -- $DATA/node-keys/bls.key" "$(calls)"
 check_has "nested node key shredded" "shred -u -- $DATA/node-keys/sub/worker.key" "$(calls)"
+check_has "temp copy in the config dir shredded" "shred -u -- $ETC/.tn.AbCdEf" "$(calls)"
+check_has ".node-meta shredded" "shred -u -- $ETC/.node-meta" "$(calls)"
 gone "config dir" "$ETC"
 gone "node-keys dir" "$DATA/node-keys"
 kept "chain data (not the keys prompt's business)" "$DATA/db/data"
@@ -346,6 +360,10 @@ gone "lock dir" "$R/run/telcoin"
 gone "release staging dir" "$R/var/lib/telcoin-staging"
 gone "build account home" "$R/var/lib/tn-build"
 check_lacks "no userdel under a fixture root" "userdel" "$(calls)"
+gone "needrestart rule" "$R/etc/needrestart/conf.d/50-telcoin.conf"
+gone "apt rule" "$R/etc/apt/apt.conf.d/52telcoin-no-reboot"
+kept "other needrestart rule" "$R/etc/needrestart/conf.d/10-other.conf"
+kept "other apt rule" "$R/etc/apt/apt.conf.d/50unattended-upgrades"
 kept "/etc/telcoin/other.txt" "$ETC/other.txt"
 kept "passphrase (not a host file)" "$ETC/bls-passphrase.cred"
 kept "other logrotate file" "$R/etc/logrotate.d/other"
@@ -373,11 +391,142 @@ gone "host files removed with the last node" "$LX/tn-start"
 gone "backups removed with the last node" "$BK"
 INSTALLED_UNITS=()
 
+# The empty /etc/telcoin a legacy layout leaves once its role dir is gone.
+mkfixture
+find "$ETC" -mindepth 1 ! -name node.env -exec rm -rf {} + 2>/dev/null
+remove_node_host_files > /dev/null 2>&1
+gone "/etc/telcoin left empty" "$ETC"
+
+# A symlinked /usr/local/libexec/telcoin: nothing is removed through it.
+mkfixture
+rm -rf "$LX"
+mkdir -p "$OUT/lx"
+printf 'keep\n' > "$OUT/lx/tn-start"
+ln -s "$OUT/lx" "$LX"
+remove_node_host_files > "$T/out" 2>&1
+kept "symlinked libexec: file behind it" "$OUT/lx/tn-start"
+kept "symlinked libexec: the link" "$LX"
+check_has "symlinked libexec: warned" "yes" "$(grep -q 'libexec/telcoin is a symlink' "$T/out" && echo yes)"
+mkfixture
+rm -rf "$LX" "$ETC" "$DATA" "$BK" "$SD/telcoin.service" "$SD/telcoin.service.bak.20240101" "$SD/telcoin.bak.1" \
+       "$SD/telcoin.service.d" "$SD/telcoin.service.bak.link"
+mkdir -p "$OUT/lx"
+printf 'keep\n' > "$OUT/lx/tn-start"
+ln -s "$OUT/lx" "$LX"
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "only a symlinked libexec left: rc 1" 1 "$rc"
+check_has "only a symlinked libexec left: no node installed" "yes" "$(grep -q 'no node installed' "$T/json" && echo yes)"
+
+# Backups under the names older releases used, with or without a suffix, and
+# those of the legacy unit names when that unit is not installed.
+mkfixture
+for f in telcoin.service.bak telcoin.bak telcoin-validator.service.bak.1 telcoin-observer.bak.2 \
+         telcoin-observer.service.bak; do
+    printf 'Environment=TN_BLS_PASSPHRASE=x\n' > "$SD/$f"
+done
+mkdir -p "$SD/telcoin-observer.service.d"
+stop_and_disable_service telcoin > /dev/null 2>&1
+for f in telcoin.service.bak telcoin.bak telcoin-validator.service.bak.1 telcoin-observer.bak.2 \
+         telcoin-observer.service.bak; do
+    gone "old backup $f" "$SD/$f"
+    check_has "old backup $f shredded" "shred -u -- $SD/$f" "$(calls)"
+done
+gone "drop-in dir of a legacy name with no unit" "$SD/telcoin-observer.service.d"
+
+mkfixture
+printf '[Service]\n' > "$SD/telcoin-validator.service"
+printf 'x\n' > "$SD/telcoin-validator.service.bak.1"
+mkdir -p "$SD/telcoin-validator.service.d"
+stop_and_disable_service telcoin > /dev/null 2>&1
+kept "an installed unit's backup" "$SD/telcoin-validator.service.bak.1"
+kept "an installed unit's drop-in dir" "$SD/telcoin-validator.service.d"
+kept "the installed unit" "$SD/telcoin-validator.service"
+
+# --- the update lock ------------------------------------------------------------
+# hold_lock -- hold the fixture's update lock from a background shell until
+# release_lock.
+hold_lock() {
+    rm -f "$T/held" "$T/release"
+    # shellcheck disable=SC2034  # both are read by tn_acquire_update_lock
+    ( TN_UPDATE_LOCK_FILE="$R/run/telcoin/update.lock"; TN_EXIT_TRAP_OWNED=1
+      tn_acquire_update_lock > /dev/null 2>&1 || exit 1
+      : > "$T/held"
+      while [ ! -f "$T/release" ]; do sleep 1 9>&-; done
+      tn_release_update_lock ) &
+    HOLDER=$!
+    local i=0
+    while [[ ! -f "$T/held" && $i -lt 20 ]]; do sleep 1; i=$((i + 1)); done
+}
+release_lock() {
+    : > "$T/release"
+    wait "$HOLDER" 2>/dev/null
+}
+
+mkfixture
+hold_lock
+check "lock holder ready" "yes" "$([[ -f "$T/held" ]] && echo yes)"
+before="$(snapshot)"
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "json while another run holds the lock: rc 1" 1 "$rc"
+check_has "json names the lock" "yes" "$(grep -q '"event":"error".*holds the update lock' "$T/json" && echo yes)"
+check "json while locked: nothing removed" "$before" "$(snapshot)"
+check_lacks "json while locked: no call" "systemctl" "$(calls)"
+
+detect_node_installs 2> /dev/null
+set +e
+( CONFIRM_ANSWER=yes; remove_all_nodes ) < /dev/null > "$T/out" 2>&1
+check "menu while locked: nothing removed" "$before" "$(snapshot)"
+check_has "menu while locked: said why" "yes" "$(grep -q 'holds the update lock' "$T/out" && echo yes)"
+INSTALLED_UNITS=()
+
+rm -f "$SD/telcoin.service"
+before="$(snapshot)"
+( CONFIRM_ANSWER=yes; remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+check_has "leftovers while locked: rc 1" "rc=1" "$(cat "$T/out")"
+check "leftovers while locked: nothing removed" "$before" "$(snapshot)"
+release_lock
+
+# The lock lives in /run/telcoin: that directory goes last, after the release.
+mkfixture
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "json keys with the lock in /run/telcoin: rc 0" 0 "$rc"
+check_has "json: /run/telcoin left for the end" "yes" "$(grep -q 'removed when the run ends' "$T/out" && echo yes)"
+gone "json: /run/telcoin removed at the end" "$R/run/telcoin"
+check_has "json: config temp copy shredded" "shred -u -- $ETC/.tn.AbCdEf" "$(calls)"
+
 # --- remove_log_group / remove_service_user -----------------------------------
 mkfixture
 remove_service_user tnrmtest tnrmtest telcoin > "$T/out" 2>&1
 check_has "telcoin-log removed" "groupdel telcoin-log" "$(calls)"
 check_lacks "declined service group kept" "groupdel tnrmtest" "$(calls)"
+
+# The service user is kept: removing telcoin-log is asked, not done silently.
+# confirm answers from ANSWERS (one word each) and logs the prompts.
+answer_confirm() {
+    local a="${ANSWERS%% *}"
+    ANSWERS="${ANSWERS#* }"
+    printf '%s\n' "$1" >> "$T/prompts"
+    [[ "$a" == "yes" ]]
+}
+mkfixture
+: > "$T/prompts"
+( KNOWN_USER=tnrmtest; ANSWERS="no no no "; confirm() { answer_confirm "$@"; }
+  remove_service_user tnrmtest tnrmtest telcoin ) > "$T/out" 2>&1
+check_has "kept user: telcoin-log question asked" "yes" "$(grep -q 'log-reader group .telcoin-log.' "$T/prompts" && echo yes)"
+check_lacks "kept user, declined: telcoin-log kept" "groupdel telcoin-log" "$(calls)"
+check_lacks "kept user: no userdel" "userdel" "$(calls)"
+mkfixture
+: > "$T/prompts"
+( KNOWN_USER=tnrmtest; ANSWERS="no no yes "; confirm() { answer_confirm "$@"; }
+  remove_service_user tnrmtest tnrmtest telcoin ) > "$T/out" 2>&1
+check_has "kept user, accepted: telcoin-log removed" "groupdel telcoin-log" "$(calls)"
+mkfixture
+: > "$T/prompts"
+( KNOWN_USER=tnrmtest; ANSWERS="yes yes "; confirm() { answer_confirm "$@"; }
+  id() { if [[ "$*" == tnrmtest ]] && grep -q '^userdel tnrmtest' "$CALLS"; then return 1; fi; command id "$@"; }
+  remove_service_user tnrmtest tnrmtest telcoin ) > "$T/out" 2>&1
+check_lacks "user removed: no telcoin-log question" "log-reader group" "$(cat "$T/prompts")"
+check_has "user removed: telcoin-log removed" "groupdel telcoin-log" "$(calls)"
 
 mkfixture
 printf 'telcoin-log:x:990:tnrmtest,alice\n' > "$GROUP_FILE"
@@ -399,8 +548,6 @@ check_rc "absent telcoin-log rc 0" 0 "$rc"
 check_lacks "absent telcoin-log: no groupdel" "groupdel" "$(calls)"
 
 # --- duplicated .node-meta keys stop the removal -------------------------------
-# snapshot -- every path under the fixture root and the outside decoys.
-snapshot() { find "$R" "$OUT" 2>/dev/null | sort; }
 
 for key in HOST_SERVICE_USER HOST_SERVICE_GROUP INSTALL_METHOD DATA_DIR; do
     mkfixture
