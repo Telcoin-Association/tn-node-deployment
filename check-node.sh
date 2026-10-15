@@ -1634,25 +1634,15 @@ report_participation() {
 # 2.0.0: with an older library the checks that need them are skipped, and
 # cn_report_skipped says so once.
 
-# cn_needs CHECK FN... -- rc 0 when lib/common.sh defines every FN; otherwise
-# CHECK is added to CN_SKIPPED_CHECKS and rc 1 (the check returns without a line).
+# A check whose helpers the library lacks adds its name to CN_SKIPPED_CHECKS and
+# returns without a line; cn_report_skipped then prints one warning for all.
 CN_SKIPPED_CHECKS=""
-cn_needs() {
-    local check="$1"
-    shift
-    have_fns "$@" && return 0
-    case " ${CN_SKIPPED_CHECKS} " in
-        *" ${check} "*) ;;
-        *) CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:+${CN_SKIPPED_CHECKS} }${check}" ;;
-    esac
-    return 1
-}
 
 # cn_report_skipped -- one warning naming the checks an older lib/common.sh
 # turned off, when there are any.
 cn_report_skipped() {
-    [[ -n "$CN_SKIPPED_CHECKS" ]] || return 0
-    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than this check-node.sh, so these checks were skipped: ${CN_SKIPPED_CHECKS}. Run update-scripts.sh."
+    [[ -n "${CN_SKIPPED_CHECKS:-}" ]] || return 0
+    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than this check-node.sh, so these checks were skipped:${CN_SKIPPED_CHECKS}. Run update-scripts.sh."
     return 0
 }
 
@@ -1695,7 +1685,10 @@ check_bls_cleartext() {
 # file in /proc/locks, or the mkdir fallback's <lock>.d.
 check_update_lock() {
     local path dir owner mode="" ino held="" holder="" cmd="" note=""
-    cn_needs check_update_lock tn_update_lock_path tn_root_dir_ok || return 0
+    if ! have_fns tn_update_lock_path tn_root_dir_ok; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_update_lock"
+        return 0
+    fi
     path="$(tn_update_lock_path)"
     dir="${path%/*}"
     [[ -n "$dir" ]] || dir=/
@@ -1782,7 +1775,10 @@ _cn_own() {
 check_ownership_layout() {
     local pre="${TN_ROOT_PREFIX:-}" meta layout rc=0 net v suser sgroup method
     local inst etc libexec start dd logd d extra
-    cn_needs check_ownership_layout tn_root_dir_ok tn_start_script_path tn_detect_network || return 0
+    if ! have_fns tn_root_dir_ok tn_start_script_path tn_detect_network; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_ownership_layout"
+        return 0
+    fi
     meta="$(node_meta_path 2>/dev/null || true)"
     [[ -n "$meta" && -f "$meta" ]] || return 0
     if [[ "$meta" != "${pre}${DEFAULT_CONFIG_DIR}/.node-meta" ]]; then
@@ -1887,7 +1883,10 @@ _cn_launch_file() {
 # a systemd credential.
 check_unit_environ() {
     local unit envs="" files="" f launch src="" bad=0
-    cn_needs check_unit_environ tn_node_launch_target tn_launch_flag_get || return 0
+    if ! have_fns tn_node_launch_target tn_launch_flag_get; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_unit_environ"
+        return 0
+    fi
     unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
     [[ -f "$unit" ]] || return 0
     if [[ -z "${TN_ROOT_PREFIX:-}" ]] && command -v systemctl >/dev/null 2>&1; then
@@ -1993,7 +1992,10 @@ check_health_score() {
 # has ENABLE_HEALTHCHECK_MONITOR=true there.
 check_healthcheck_on_mainnet() {
     local launch v="" flag=""
-    cn_needs check_healthcheck_on_mainnet tn_detect_network tn_launch_flag_get || return 0
+    if ! have_fns tn_detect_network tn_launch_flag_get; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_healthcheck_on_mainnet"
+        return 0
+    fi
     [[ "$(tn_detect_network 2>/dev/null || true)" == "mainnet" ]] || return 0
     launch="$(_cn_launch_file 2>/dev/null)" || launch=""
     if [[ -n "$launch" && -r "$launch" ]] && tn_launch_flag_get "$launch" --healthcheck >/dev/null 2>&1; then
