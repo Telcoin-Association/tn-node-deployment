@@ -134,6 +134,12 @@ WROTE_UNIT=false
 WROTE_WRAPPER=false
 WROTE_META=false
 ROLLED_BACK=false
+EMBEDDED_PASS=false     # the legacy unit holds the BLS passphrase (moved out by store_passphrase)
+PASS_TARGET=""          # credential | stdin: where store_passphrase puts it
+PASS_KEY=""             # the credential's systemd-creds key (credential only)
+PASS_NETWORK=""         # the legacy .node-meta NETWORK
+STORED_PASS_FILE=""     # the file store_passphrase wrote (removed again by a rollback)
+TN_CRED_PASS=""         # the passphrase while it moves: a plain shell variable, never exported
 declare -a CONFIG_MOVED=()   # basenames moved out of LEGACY_CONFIG_DIR
 declare -a DATA_MOVED=()     # basenames moved out of LEGACY_DATA_DIR
 
@@ -244,6 +250,7 @@ rollback() {
         rm -f -- "$UNIFIED_UNIT"
     fi
     [[ "$WROTE_WRAPPER" == true ]] && rm -f -- "$UNIFIED_WRAPPER"
+    [[ -n "$STORED_PASS_FILE" ]] && _tn_shred "$STORED_PASS_FILE"
 
     if [[ "$MOVED_DATA" == true ]]; then
         # Root takes the data dir (EFFECTIVE_DATA_DIR, where the entries went) back
@@ -448,6 +455,41 @@ detect_legacy() {
         SERVICE_GROUP="$META_VAL"
     fi
 
+    # The passphrase: an old TPM install moves to the credential first (edit-config
+    # asks for the passphrase); a unit that holds it has it read now, by awk from the
+    # unit (never a command line), and stored after the config dir moves.
+    migrate_meta_read PASSPHRASE_METHOD
+    if [[ "$META_VAL" == "tpm" ]]; then
+        print_error "The BLS passphrase is sealed with the old TPM method, which these scripts no longer use."
+        print_info "Move it first: sudo ./edit-config.sh --migrate-credential, then run this again. Nothing was changed."
+        exit 1
+    fi
+    migrate_meta_read NETWORK
+    PASS_NETWORK="$META_VAL"
+    if tn_has_embedded_passphrase "$LEGACY_UNIT"; then
+        EMBEDDED_PASS=true
+        if ! _tn_unit_pass_read "$LEGACY_UNIT" || ! tn_passphrase_ok "$TN_CRED_PASS"; then
+            TN_CRED_PASS=""
+            print_error "${LEGACY_UNIT} holds the BLS passphrase in a form that cannot be read back as one plain value."
+            print_info "Move it first: sudo ./edit-config.sh --migrate-credential (it asks for the passphrase), then run this again. Nothing was changed."
+            exit 1
+        fi
+        if tn_creds_supported; then
+            PASS_TARGET=credential
+            if ! PASS_KEY="$(tn_credential_key "$PASS_NETWORK")"; then
+                TN_CRED_PASS=""
+                print_info "Nothing was changed."
+                exit 1
+            fi
+        elif [[ "$PASS_NETWORK" == "testnet" || "$PASS_NETWORK" == "devnet" ]]; then
+            PASS_TARGET=stdin
+        else
+            TN_CRED_PASS=""
+            print_error "${LEGACY_UNIT} holds the BLS passphrase, and off testnet it can only move to an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later). Nothing was changed."
+            exit 1
+        fi
+    fi
+
     print_header "Telcoin Node Naming Migration v${SCRIPT_VERSION}"
     print_info "Detected LEGACY install:"
     print_info "  role:       ${ROLE}"
@@ -468,6 +510,13 @@ detect_legacy() {
         print_info "  data dir:   ${EFFECTIVE_DATA_DIR}"
     fi
     print_info "  RPC port:   ${RPC_PORT} (default; --observer/--instance removed)"
+    if [[ "$EMBEDDED_PASS" == true ]]; then
+        if [[ "$PASS_TARGET" == credential ]]; then
+            print_info "  passphrase: moves out of the unit into ${UNIFIED_CONFIG_DIR}/bls-passphrase.cred (encrypted, ${PASS_KEY})"
+        else
+            print_info "  passphrase: moves out of the unit into ${UNIFIED_CONFIG_DIR}/bls-passphrase (root only)"
+        fi
+    fi
     echo ""
 
     DETECT_SUM="$(migrate_detect_sum)"
@@ -515,6 +564,9 @@ snapshot() {
     # would otherwise leave a root-owned datadir, which makes the node exit 1 on startup.
     DATA_OWNER="$(stat -c '%U:%G' "$LEGACY_DATA_DIR" 2>/dev/null || true)"
     [[ -n "$DATA_OWNER" ]] && print_ok "  data dir owner: ${DATA_OWNER} (preserved across migrate/rollback)"
+    if [[ "$EMBEDDED_PASS" == true ]]; then
+        print_info "  The unit backup holds the BLS passphrase (root only); it is shredded once the node runs on the new layout."
+    fi
 
     # From here on, any failure rolls back.
     arm_rollback
@@ -843,6 +895,45 @@ start_and_verify() {
 # Only after the new unit runs and answers. NON-FATAL by design, like the steps
 # after it: the ERR trap is still armed, so every command is guarded and the step
 # returns 0 (a leftover legacy file must never roll back a healthy node).
+# =============================================================================
+# STEP 6a -- STORE A PASSPHRASE THE LEGACY UNIT HELD
+# =============================================================================
+# Only when detect_legacy found the passphrase in the legacy unit: store it as the
+# encrypted credential (tn_store_credential) or, below systemd 250 on testnet, the
+# root-only file, and record PASSPHRASE_METHOD (and CREDENTIAL_KEY) in the moved
+# .node-meta, so rewrite_unit renders the matching credential line. A rollback
+# removes the file and puts .node-meta back from its backup.
+store_passphrase() {
+    local meta="${UNIFIED_CONFIG_DIR}/.node-meta"
+    [[ "$EMBEDDED_PASS" == true ]] || return 0
+    print_step "Storing the BLS passphrase the legacy unit held..."
+    WROTE_META=true
+    if [[ "$PASS_TARGET" == credential ]]; then
+        STORED_PASS_FILE="${UNIFIED_CONFIG_DIR}/bls-passphrase.cred"
+        tn_store_credential "$STORED_PASS_FILE" "$PASS_KEY" "" || { TN_CRED_PASS=""; return 1; }
+        meta_set PASSPHRASE_METHOD credential "$meta" && meta_set CREDENTIAL_KEY "$PASS_KEY" "$meta" || { TN_CRED_PASS=""; return 1; }
+    else
+        STORED_PASS_FILE="${UNIFIED_CONFIG_DIR}/bls-passphrase"
+        printf '%s\n' "$TN_CRED_PASS" | tn_write_root_file "$STORED_PASS_FILE" 0600 || { TN_CRED_PASS=""; return 1; }  # passphrase-stdin-ok stdout is the root-write pipe
+        meta_set PASSPHRASE_METHOD stdin "$meta" || { TN_CRED_PASS=""; return 1; }
+    fi
+    TN_CRED_PASS=""
+    print_ok "Stored in ${STORED_PASS_FILE}"
+}
+
+# STEP 10.4 -- after a verified start, shred what still holds a passphrase the legacy
+# unit carried: the legacy unit itself, its backups beside it and the snapshot copy.
+shred_passphrase_copies() {
+    local f
+    [[ "$EMBEDDED_PASS" == true ]] || return 0
+    _tn_shred "$LEGACY_UNIT" "$UNIT_BAK"
+    for f in "${LEGACY_UNIT}".*bak* "${LEGACY_UNIT%.service}".bak.*; do
+        [[ -f "$f" ]] && grep -q 'TN_BLS_PASSPHRASE=' "$f" 2>/dev/null && _tn_shred "$f"
+    done
+    print_ok "Shredded the copies of the passphrase the legacy unit held (best effort on SSDs, copy-on-write and cloud disks)."
+    return 0
+}
+
 remove_legacy_units() {
     print_step "Removing the legacy unit and wrapper..."
     rm -f -- "$LEGACY_UNIT" 2>/dev/null || print_warn "Could not remove ${LEGACY_UNIT}; remove it by hand."
@@ -942,12 +1033,14 @@ main() {
     stop_legacy          # step 3 (waits for the restart window first)
     relocate_dir "$LEGACY_CONFIG_DIR" "$UNIFIED_CONFIG_DIR" CONFIG_MOVED config   # step 4
     relocate_dir "$LEGACY_DATA_DIR"   "$EFFECTIVE_DATA_DIR" DATA_MOVED   data     # step 5 (no-op for a custom mount: src==dst)
+    store_passphrase     # step 6a (only when the legacy unit held the passphrase)
     rewrite_unit         # step 6
     rewrite_wrapper      # step 7 (strip --observer and --instance)
     update_meta          # step 8
     convert_launch       # step 8b (start script in the current form; a refusal keeps it)
     finalize_units       # step 9
     start_and_verify      # step 10 (failure -> rollback via ERR trap)
+    shred_passphrase_copies # step 10.4 (only when the legacy unit held the passphrase)
     remove_legacy_units   # step 10.5 (non-fatal; only after a verified start)
     open_consensus_ports  # step 11 (non-fatal; validator-capable P2P ports)
     restart_ui_if_present # step 11.5 (non-fatal; refresh local Node Manager UI)

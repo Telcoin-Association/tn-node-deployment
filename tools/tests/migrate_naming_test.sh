@@ -219,6 +219,23 @@ check "migrate: no .bak beside live files" "" "$(find /etc /opt -name '*.bak.*' 
 check "migrate: lock released" yes "$(lock_free)"
 
 # -----------------------------------------------------------------------------
+# A legacy unit that holds the passphrase: it moves out of the unit (no
+# systemd-creds here, testnet: the root-only file), and every copy is shredded
+# -----------------------------------------------------------------------------
+legacy
+printf '%s\n' "[Service]" 'Environment="TN_BLS_PASSPHRASE=embedded-Pass-1"' "User=telcoin" \
+    "ExecStart=/opt/telcoin/start-telcoin-observer.sh" > /etc/systemd/system/telcoin-observer.service
+migrate
+check_rc "embedded: rc" 0 "$RC"
+check "embedded: passphrase file holds the unit's value" "embedded-Pass-1" "$(cat /etc/telcoin/bls-passphrase 2>/dev/null)"
+check "embedded: passphrase file root 0600" "root:root 600" "$(om /etc/telcoin/bls-passphrase)"
+check "embedded: method recorded" "PASSPHRASE_METHOD=stdin" "$(grep '^PASSPHRASE_METHOD=' /etc/telcoin/.node-meta)"
+check "embedded: new unit loads the file, holds no passphrase" "yes no" \
+    "$(has "$(cat /etc/systemd/system/telcoin.service)" "LoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase") $(has "$(cat /etc/systemd/system/telcoin.service)" "TN_BLS_PASSPHRASE=")"
+check "embedded: no backup holds the passphrase" "" "$(grep -rl 'embedded-Pass-1' /var/backups/telcoin /etc/systemd/system 2>/dev/null)"
+check "embedded: lock released" yes "$(lock_free)"
+
+# -----------------------------------------------------------------------------
 # Rollback: the new node never answers; a link is planted at the role dir's name
 # -----------------------------------------------------------------------------
 legacy
