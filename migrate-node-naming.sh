@@ -14,7 +14,8 @@
 #     logs           /var/log/telcoin/telcoin-observer*.log
 # Every NEW install (and every other script's happy path) now uses ONE name:
 #     telcoin.service / --name telcoin / /etc/telcoin / /var/lib/telcoin /
-#     /opt/telcoin/start-telcoin.sh / /var/log/telcoin/telcoin*.log
+#     /usr/local/libexec/telcoin/tn-start (tn-start-docker for Docker) /
+#     /var/log/telcoin/telcoin*.log
 # (.node-meta records no role). lib/fallback.sh keeps legacy installs WORKING
 # but never migrates them. This script performs the one-time migration.
 #
@@ -42,8 +43,15 @@
 # surprised us with benign rc=1 / no-op starts). Instead it relocates the dirs and
 # rewrites the unit + wrapper IN PLACE with targeted substitutions -- predictable
 # and minimal. Idempotent (re-running on an already-migrated node is a no-op) and
-# self-rolling-back: on any failure it restores the legacy unit/wrapper, moves the
-# dirs back, restarts the legacy service, and exits non-zero with the backup paths.
+# self-rolling-back: on any failure it stops the new unit, moves the dirs back,
+# restores .node-meta from its backup, restarts the legacy service (without
+# waiting), and exits non-zero with the backup paths. The legacy unit and wrapper
+# are removed only once the new unit runs and answers on RPC, so a rollback never
+# has to put them back. Backups are root-only copies in /var/backups/telcoin.
+#
+# The run holds the update lock (the one update-node.sh, edit-config.sh and
+# setup-node.sh take) from the confirmation to the end, and waits for the restart
+# window (tn_wait_restart_window) right before it stops the legacy node.
 #
 # Downtime is expected and acceptable (stop -> migrate -> start). The node
 # rejoins consensus at the next epoch boundary when it is in committee.
@@ -67,6 +75,16 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # runs. (common.sh's own `set -euo pipefail` does not clear -E.)
 set -E
 
+# This script writes through the root-write helpers of the current library.
+for _tn_fn in tn_backup_file tn_restore_backup tn_write_root_file tn_start_script_path \
+              tn_wait_restart_window tn_update_lock_path _tn_root_layout_dir _tn_strip_gw; do
+    if ! declare -F "$_tn_fn" >/dev/null 2>&1; then
+        print_error "lib/common.sh ${COMMON_VERSION:-unknown} has no ${_tn_fn}. Run update-scripts.sh and try again."
+        exit 1
+    fi
+done
+unset _tn_fn
+
 # Version, gated by update-scripts.sh like every other tracked file.
 readonly SCRIPT_VERSION="1.2.1"
 
@@ -76,7 +94,7 @@ readonly UNIFIED_SERVICE="telcoin"
 readonly UNIFIED_UNIT="${SYSTEMD_DIR}/telcoin.service"
 readonly UNIFIED_CONFIG_DIR="/etc/telcoin"
 readonly UNIFIED_DATA_DIR="/var/lib/telcoin"
-readonly UNIFIED_WRAPPER="/opt/telcoin/start-telcoin.sh"
+UNIFIED_WRAPPER=""      # tn_start_script_path for the install method (set by detect_legacy)
 
 # --- Detection results (filled by detect_legacy) -----------------------------
 ROLE=""                 # observer | validator (the legacy role being migrated)
@@ -92,12 +110,19 @@ LEGACY_CONTAINER=""     # telcoin-<role>
 RPC_PORT="${DEFAULT_RPC_PORT:-8545}"  # post-start verify port; the unified node runs with NO
                         # --instance, so it serves RPC on the protocol default (8545), not 8541.
 LEGACY_RPC_PORT=""      # informational only: the pre-migration RPC port (observer's --instance 5 -> 8541)
+STOP_RPC_URL=""         # the legacy node's RPC, read for the restart window before the stop
+INSTALL_METHOD_L=""     # the legacy .node-meta INSTALL_METHOD (docker, or a binary form)
+DETECT_SUM=""           # hash of the legacy unit + .node-meta at detection (re-checked under the lock)
+META_VAL=""             # migrate_meta_read's result
 
 # --- Rollback bookkeeping ----------------------------------------------------
-TS=""
-UNIT_BAK=""
+UNIT_BAK=""             # root-only copies made by tn_backup_file, and their SHA-256
+UNIT_SHA=""
 WRAPPER_BAK=""
+WRAPPER_SHA=""
 META_BAK=""
+META_SHA=""
+UNIT_MODE=""            # the legacy unit's mode, kept for the unified unit
 DATA_OWNER=""           # owner:group of the data dir at snapshot; reapplied to the unified datadir
                         # (relocate) and the recreated legacy datadir (rollback) so the non-root
                         # container node can write/rotate its DB (a root-owned datadir -> exit 1).
@@ -106,6 +131,7 @@ MOVED_CONFIG=false
 MOVED_DATA=false
 WROTE_UNIT=false
 WROTE_WRAPPER=false
+WROTE_META=false
 ROLLED_BACK=false
 declare -a CONFIG_MOVED=()   # basenames moved out of LEGACY_CONFIG_DIR
 declare -a DATA_MOVED=()     # basenames moved out of LEGACY_DATA_DIR
@@ -140,12 +166,62 @@ while [[ $# -gt 0 ]]; do
 done
 
 # =============================================================================
+# UPDATE LOCK
+# =============================================================================
+# The run holds the update lock from the confirmation to the end, so no other
+# script changes the unit, the start script or .node-meta meanwhile. This script
+# owns its EXIT trap (TN_EXIT_TRAP_OWNED=1): migrate_on_exit releases the lock on
+# every exit, a rollback included.
+migrate_on_exit() {
+    tn_release_update_lock 2>/dev/null || true
+}
+
+# migrate_detect_sum -- one SHA-256 over the legacy unit and .node-meta.
+migrate_detect_sum() {
+    { cat -- "$LEGACY_UNIT" "${LEGACY_CONFIG_DIR}/.node-meta" 2>/dev/null || true; } | sha256sum
+}
+
+# migrate_take_lock -- take the update lock or stop (nothing changed yet). The
+# detection ran before it, so the confirmation prompt never holds the lock up;
+# the run stops when the legacy unit or .node-meta changed in between.
+migrate_take_lock() {
+    local now
+    TN_EXIT_TRAP_OWNED=1
+    trap migrate_on_exit EXIT
+    if ! tn_acquire_update_lock; then
+        print_error "Another setup, update or edit holds the update lock ($(tn_update_lock_path))${TN_UPDATE_LOCK_HOLDER:+, PID ${TN_UPDATE_LOCK_HOLDER}}. Wait for it to finish, then run the migration again. Nothing was changed."
+        exit 1
+    fi
+    now="$(migrate_detect_sum)"
+    if [[ "$now" != "$DETECT_SUM" ]]; then
+        print_error "The legacy unit or .node-meta changed while this run waited for the lock. Run the migration again. Nothing was changed."
+        exit 1
+    fi
+}
+
+# migrate_meta_read KEY -- KEY's value from the legacy .node-meta in META_VAL
+# ("" when absent). A key set more than once has no single value: the run stops
+# before anything is changed.
+migrate_meta_read() {
+    local rc=0
+    META_VAL="$(_tn_meta_get "$1" "${LEGACY_CONFIG_DIR}/.node-meta")" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_error "${1} is set more than once in ${LEGACY_CONFIG_DIR}/.node-meta. Remove the extra lines, then run the migration again. Nothing was changed."
+        exit 1
+    fi
+    [[ $rc -eq 0 ]] || META_VAL=""
+    return 0
+}
+
+# =============================================================================
 # ROLLBACK
 # =============================================================================
 # Reverse the mutations that completed, based on the *_MOVED / WROTE_* flags, so a
-# partial migration leaves the node exactly as it was found. Dir moves are `mv`
-# (rename on the same filesystem) so they reverse instantly; the big db/ is never
-# copied. Never raises (runs with set +e).
+# partial migration leaves the node as it was found. Dir moves are renames on the
+# same filesystem, so they reverse instantly; the big db/ is never copied. The
+# legacy unit and wrapper are removed only after the new unit is verified, so
+# they are still in place here. Never raises (runs with set +e). The restart of
+# the legacy service at the end never waits for the epoch boundary.
 rollback() {
     [[ "$ROLLED_BACK" == true ]] && return 0
     ROLLED_BACK=true
@@ -154,43 +230,85 @@ rollback() {
     # under `set -u`, which is an error before bash 4.4 (macOS /bin/bash 3.2 too).
     set +eu
     print_warn "Restoring the previous (legacy) layout..."
+    local base created problems=""
 
-    # Undo, newest mutation first.
-    [[ "$WROTE_UNIT" == true ]]    && rm -f "$UNIFIED_UNIT"
-    [[ "$WROTE_WRAPPER" == true ]] && rm -f "$UNIFIED_WRAPPER"
+    # The new unit is stopped before anything moves back, so no node writes the
+    # data dir meanwhile; then it and the new start script go.
+    if [[ "$WROTE_UNIT" == true ]]; then
+        systemctl stop "$UNIFIED_SERVICE" 2>/dev/null
+        systemctl disable "$UNIFIED_SERVICE" 2>/dev/null
+        if [[ "$INSTALL_METHOD_L" == docker ]] && command -v docker >/dev/null 2>&1; then
+            docker rm -f "$UNIFIED_SERVICE" >/dev/null 2>&1
+        fi
+        rm -f -- "$UNIFIED_UNIT"
+    fi
+    [[ "$WROTE_WRAPPER" == true ]] && rm -f -- "$UNIFIED_WRAPPER"
 
-    local base
     if [[ "$MOVED_DATA" == true ]]; then
-        # Reverse from where the data was actually moved TO (EFFECTIVE_DATA_DIR). MOVED_DATA is
-        # only ever true for the default layout (a custom mount no-ops the relocate: src==dst),
-        # where EFFECTIVE_DATA_DIR == UNIFIED_DATA_DIR -- but key off EFFECTIVE so the reverse is
-        # correct by construction.
-        mkdir -p "$LEGACY_DATA_DIR"
-        for base in ${DATA_MOVED[@]+"${DATA_MOVED[@]}"}; do
-            [[ -e "${EFFECTIVE_DATA_DIR}/${base}" ]] && \
-                mv "${EFFECTIVE_DATA_DIR}/${base}" "${LEGACY_DATA_DIR}/${base}"
-        done
-        # mkdir above (re)created the dir as root; restore the captured owner so the legacy
-        # node can write to its datadir. Without this a "rolled-back" node still can't rotate
-        # its DB LOG and exits 1 -- i.e. the rollback would leave the node broken.
-        [[ -n "$DATA_OWNER" ]] && chown "$DATA_OWNER" "$LEGACY_DATA_DIR" 2>/dev/null || true
+        # Root takes the data dir (EFFECTIVE_DATA_DIR, where the entries went) back
+        # before moving anything out of it. A link planted at the role dir's name is
+        # removed, never followed; the role dir is made afresh (0750) and each entry
+        # renamed into it with mv -T, which never moves into a directory or a link.
+        if _tn_root_layout_dir "$EFFECTIVE_DATA_DIR" root 0700; then
+            created=false
+            if [[ -L "$LEGACY_DATA_DIR" ]]; then
+                rm -f -- "$LEGACY_DATA_DIR"
+            fi
+            if [[ ! -e "$LEGACY_DATA_DIR" ]] && mkdir -m 0750 -- "$LEGACY_DATA_DIR"; then
+                created=true
+            fi
+            if [[ -d "$LEGACY_DATA_DIR" && ! -L "$LEGACY_DATA_DIR" ]]; then
+                for base in ${DATA_MOVED[@]+"${DATA_MOVED[@]}"}; do
+                    if [[ -e "${EFFECTIVE_DATA_DIR}/${base}" || -L "${EFFECTIVE_DATA_DIR}/${base}" ]]; then
+                        mv -T -- "${EFFECTIVE_DATA_DIR}/${base}" "${LEGACY_DATA_DIR}/${base}" \
+                            || problems="${problems} ${LEGACY_DATA_DIR}/${base}"
+                    fi
+                done
+                # The node runs as the service account and must own its data dir:
+                # only the directory made here gets that owner back (chown -h, never
+                # recursive, never a directory that already existed).
+                if [[ "$created" == true && -n "$DATA_OWNER" ]]; then
+                    chown -h -- "$DATA_OWNER" "$LEGACY_DATA_DIR" || problems="${problems} ${LEGACY_DATA_DIR}"
+                fi
+            else
+                problems="${problems} ${LEGACY_DATA_DIR}"
+            fi
+            # A root directory again that the service account can pass through.
+            chmod 0755 -- "$EFFECTIVE_DATA_DIR" || problems="${problems} ${EFFECTIVE_DATA_DIR}"
+        else
+            problems="${problems} ${EFFECTIVE_DATA_DIR}"
+        fi
     fi
     if [[ "$MOVED_CONFIG" == true ]]; then
-        mkdir -p "$LEGACY_CONFIG_DIR"
-        for base in ${CONFIG_MOVED[@]+"${CONFIG_MOVED[@]}"}; do
-            [[ -e "${UNIFIED_CONFIG_DIR}/${base}" ]] && \
-                mv "${UNIFIED_CONFIG_DIR}/${base}" "${LEGACY_CONFIG_DIR}/${base}"
-        done
+        # The same for the config entries; the role dir is made root 0755 (the node
+        # only reads it), so .node-meta can be put back from its backup below.
+        if _tn_root_layout_dir "$UNIFIED_CONFIG_DIR" root 0755; then
+            if [[ -L "$LEGACY_CONFIG_DIR" ]]; then
+                rm -f -- "$LEGACY_CONFIG_DIR"
+            fi
+            if [[ ! -e "$LEGACY_CONFIG_DIR" ]]; then
+                install -d -o root -g root -m 0755 -- "$LEGACY_CONFIG_DIR"
+            fi
+            if [[ -d "$LEGACY_CONFIG_DIR" && ! -L "$LEGACY_CONFIG_DIR" ]]; then
+                for base in ${CONFIG_MOVED[@]+"${CONFIG_MOVED[@]}"}; do
+                    if [[ -e "${UNIFIED_CONFIG_DIR}/${base}" || -L "${UNIFIED_CONFIG_DIR}/${base}" ]]; then
+                        mv -T -- "${UNIFIED_CONFIG_DIR}/${base}" "${LEGACY_CONFIG_DIR}/${base}" \
+                            || problems="${problems} ${LEGACY_CONFIG_DIR}/${base}"
+                    fi
+                done
+                # The original .node-meta (NODE_TYPE, DATA_DIR and the ports may have
+                # been rewritten), from the root-only backup when its hash matches.
+                if [[ "$WROTE_META" == true && -n "$META_BAK" ]]; then
+                    tn_restore_backup "$META_BAK" "$META_SHA" "${LEGACY_CONFIG_DIR}/.node-meta" 0600 \
+                        || problems="${problems} ${LEGACY_CONFIG_DIR}/.node-meta"
+                fi
+            else
+                problems="${problems} ${LEGACY_CONFIG_DIR}"
+            fi
+        else
+            problems="${problems} ${UNIFIED_CONFIG_DIR}"
+        fi
     fi
-
-    # Restore the original .node-meta (we may have removed NODE_TYPE and rewritten DATA_DIR).
-    if [[ -n "$META_BAK" && -f "$META_BAK" && -d "$LEGACY_CONFIG_DIR" ]]; then
-        cp -a "$META_BAK" "${LEGACY_CONFIG_DIR}/.node-meta"
-    fi
-
-    # Restore the legacy unit + wrapper from their backups (we may have rm'd them).
-    [[ -n "$UNIT_BAK"    && -f "$UNIT_BAK"    ]] && cp -a "$UNIT_BAK"    "$LEGACY_UNIT"
-    [[ -n "$WRAPPER_BAK" && -f "$WRAPPER_BAK" ]] && cp -a "$WRAPPER_BAK" "$LEGACY_WRAPPER"
 
     systemctl daemon-reload 2>/dev/null || true
     if [[ "$STOPPED_LEGACY" == true && -n "$ROLE" ]]; then
@@ -198,10 +316,13 @@ rollback() {
         systemctl start  "telcoin-${ROLE}" 2>/dev/null || true
     fi
 
-    print_error "Rolled back to the legacy layout. Backups kept (safe to delete once verified):"
+    print_error "Rolled back to the legacy layout. Backups kept (root-only; safe to delete once verified):"
     [[ -n "$UNIT_BAK"    ]] && print_info "  unit:    ${UNIT_BAK}"
     [[ -n "$WRAPPER_BAK" ]] && print_info "  wrapper: ${WRAPPER_BAK}"
     [[ -n "$META_BAK"    ]] && print_info "  meta:    ${META_BAK}"
+    if [[ -n "$problems" ]]; then
+        print_warn "These paths could not be put back; check them by hand:${problems}"
+    fi
 }
 
 # ERR trap: any unguarded non-zero command after arm_rollback() triggers a full
@@ -258,7 +379,8 @@ detect_legacy() {
 
     # Data dir: trust the legacy .node-meta DATA_DIR if present, else convention.
     local meta_data
-    meta_data="$(_tn_meta_get DATA_DIR "${LEGACY_CONFIG_DIR}/.node-meta" 2>/dev/null || true)"
+    migrate_meta_read DATA_DIR
+    meta_data="$META_VAL"
     if [[ -n "$meta_data" ]]; then
         LEGACY_DATA_DIR="$meta_data"
     else
@@ -294,9 +416,36 @@ detect_legacy() {
     # on the protocol default (DEFAULT_RPC_PORT=8545) -- that is what we verify and record in
     # .node-meta. Verifying the legacy 8541 against a healthy unified node would time out and
     # trigger a false rollback (the mismatch the sibling check-node/update-node tools warn of).
-    LEGACY_RPC_PORT="$(_tn_meta_get RPC_PORT "${LEGACY_CONFIG_DIR}/.node-meta" 2>/dev/null || true)"
-    LEGACY_RPC_PORT="${LEGACY_RPC_PORT:-unknown}"
+    migrate_meta_read RPC_PORT
+    LEGACY_RPC_PORT="${META_VAL:-unknown}"
     RPC_PORT="${DEFAULT_RPC_PORT:-8545}"
+    # The restart window before the stop is read from the legacy node itself, on
+    # its own port while it still runs (tn_local_rpc_url reads the same file when
+    # the port is not recorded).
+    if validate_port "$LEGACY_RPC_PORT"; then
+        STOP_RPC_URL="http://127.0.0.1:$((10#$LEGACY_RPC_PORT))"
+    elif ! STOP_RPC_URL="$(tn_local_rpc_url)"; then
+        print_error "Cannot tell the legacy node's RPC port. Nothing was changed."
+        exit 1
+    fi
+
+    # The unified start script lives in the root-owned /usr/local/libexec/telcoin:
+    # tn-start-docker for a Docker install, tn-start otherwise. A .node-meta
+    # without INSTALL_METHOD is told by the wrapper (a docker run line).
+    migrate_meta_read INSTALL_METHOD
+    INSTALL_METHOD_L="$META_VAL"
+    if [[ -z "$INSTALL_METHOD_L" ]] && grep -q 'docker run' "$LEGACY_WRAPPER" 2>/dev/null; then
+        INSTALL_METHOD_L="docker"
+    fi
+    if [[ "$INSTALL_METHOD_L" == "docker" ]]; then
+        UNIFIED_WRAPPER="$(tn_start_script_path docker)"
+    else
+        UNIFIED_WRAPPER="$(tn_start_script_path source)"
+    fi
+    migrate_meta_read HOST_SERVICE_GROUP
+    if [[ -n "$META_VAL" ]]; then
+        SERVICE_GROUP="$META_VAL"
+    fi
 
     print_header "Telcoin Node Naming Migration v${SCRIPT_VERSION}"
     print_info "Detected LEGACY install:"
@@ -320,6 +469,7 @@ detect_legacy() {
     print_info "  RPC port:   ${RPC_PORT} (default; --observer/--instance removed)"
     echo ""
 
+    DETECT_SUM="$(migrate_detect_sum)"
     if [[ "$ASSUME_YES" != "true" ]]; then
         confirm "Stop the node, migrate, and restart? (downtime expected)" || {
             print_info "Aborted by operator -- no changes made."
@@ -331,31 +481,32 @@ detect_legacy() {
 # =============================================================================
 # STEP 2 -- SNAPSHOT FOR ROLLBACK
 # =============================================================================
+# Root-only copies (tn_backup_file: /var/backups/telcoin, 0600, SHA-256 kept);
+# nothing is written beside the live files. The rewrites below read these
+# copies, and a rollback puts .node-meta back only when its hash still matches.
 snapshot() {
-    TS="$(date +%Y%m%d-%H%M%S)"
-    UNIT_BAK="${LEGACY_UNIT}.bak.${TS}"
-    WRAPPER_BAK="${LEGACY_WRAPPER}.bak.${TS}"
-    META_BAK="${LEGACY_CONFIG_DIR}/.node-meta.bak.${TS}"
-
-    print_step "Backing up legacy unit, wrapper, and .node-meta..."
-    cp -a "$LEGACY_UNIT" "$UNIT_BAK"
-    print_ok "  ${UNIT_BAK}"
-    if [[ -f "$LEGACY_WRAPPER" ]]; then
-        cp -a "$LEGACY_WRAPPER" "$WRAPPER_BAK"
-        print_ok "  ${WRAPPER_BAK}"
-    else
+    local out
+    print_step "Backing up the legacy unit, wrapper and .node-meta..."
+    if [[ -L "$LEGACY_WRAPPER" || ! -f "$LEGACY_WRAPPER" ]]; then
         # No wrapper (unexpected): a bare ExecStart unit. Abort -- we cannot
         # safely rewrite a launch we cannot see.
-        print_error "Legacy wrapper not found at ${LEGACY_WRAPPER} -- cannot migrate safely."
+        print_error "Legacy wrapper not found at ${LEGACY_WRAPPER} (or it is a symlink) -- cannot migrate safely. Nothing was changed."
         exit 1
     fi
-    if [[ -f "${LEGACY_CONFIG_DIR}/.node-meta" ]]; then
-        cp -a "${LEGACY_CONFIG_DIR}/.node-meta" "$META_BAK"
-        print_ok "  ${META_BAK}"
-    else
-        META_BAK=""   # nothing to restore
-        print_warn "  no ${LEGACY_CONFIG_DIR}/.node-meta to back up (continuing)"
-    fi
+    out="$(tn_backup_file "$LEGACY_UNIT" "telcoin-${ROLE}.service")" || migrate_backup_failed "$LEGACY_UNIT"
+    UNIT_BAK="${out% *}"
+    UNIT_SHA="${out##* }"
+    UNIT_MODE="$(stat -c '%a' -- "$LEGACY_UNIT")"
+    print_ok "  ${UNIT_BAK}"
+    out="$(tn_backup_file "$LEGACY_WRAPPER" "start-telcoin-${ROLE}.sh")" || migrate_backup_failed "$LEGACY_WRAPPER"
+    WRAPPER_BAK="${out% *}"
+    WRAPPER_SHA="${out##* }"
+    print_ok "  ${WRAPPER_BAK}"
+    out="$(tn_backup_file "${LEGACY_CONFIG_DIR}/.node-meta" "node-meta-${ROLE}")" \
+        || migrate_backup_failed "${LEGACY_CONFIG_DIR}/.node-meta"
+    META_BAK="${out% *}"
+    META_SHA="${out##* }"
+    print_ok "  ${META_BAK}"
 
     # Capture the data dir's owner BEFORE we touch anything. relocate (-> unified dir) and
     # rollback (-> recreated legacy dir) reapply it: the node runs as a non-root container
@@ -368,10 +519,30 @@ snapshot() {
     arm_rollback
 }
 
+# migrate_backup_ok FILE SHA256 -- rc 0 when the backup still hashes to SHA256
+# (the rewrites below read the copies, not the live files).
+migrate_backup_ok() {
+    local got
+    got="$(sha256sum < "$1")" || return 1
+    if [[ "${got%% *}" != "$2" ]]; then
+        print_error "The backup ${1} changed since it was made -- aborting."
+        return 1
+    fi
+}
+
+# migrate_backup_failed PATH -- stop before anything changed (rollback not armed).
+migrate_backup_failed() {
+    print_error "Could not back up ${1} (see above). Nothing was changed."
+    exit 1
+}
+
 # =============================================================================
 # STEP 3 -- STOP THE LEGACY SERVICE
 # =============================================================================
 stop_legacy() {
+    # A committee node is not stopped just before the epoch boundary: wait for the
+    # restart window first (it returns at once for any other node, never fails).
+    tn_wait_restart_window "$STOP_RPC_URL"
     print_step "Stopping the legacy service (telcoin-${ROLE})..."
     systemctl stop "telcoin-${ROLE}" 2>/dev/null || true
     systemctl disable "telcoin-${ROLE}" 2>/dev/null || true
@@ -388,10 +559,13 @@ stop_legacy() {
 # STEPS 4 & 5 -- RELOCATE DIRECTORIES (config then data)
 # =============================================================================
 # Move every entry (incl. dotfiles) of <src role dir> up into its unified parent,
-# then rmdir the role dir. Collision-guarded: aborts (-> rollback) if a same-named
-# entry already exists in the destination, so nothing is ever clobbered. Records
-# moved basenames in the named array (CONFIG_MOVED or DATA_MOVED) for precise
-# rollback.
+# then rmdir the role dir. The destination is made root's first (config: root
+# 0755 for good; data: root 0700 while entries move, then the data owner), so the
+# service account cannot add or swap names in it meanwhile, and each entry moves
+# with mv -T, never into a directory or a link. Collision-guarded: aborts
+# (-> rollback) if a same-named entry already exists in the destination, so
+# nothing is ever clobbered. Records moved basenames in the named array
+# (CONFIG_MOVED or DATA_MOVED) for precise rollback.
 relocate_dir() {
     local src="$1" dst="$2" arr_name="$3" label="$4"
     local moved=0
@@ -414,6 +588,14 @@ relocate_dir() {
     fi
 
     print_step "Relocating ${label}: ${src}/* -> ${dst}/"
+    # Flag first: a rollback then also hands a data destination back to the
+    # service account's reach, even when nothing moved.
+    case "$label" in config) MOVED_CONFIG=true ;; data) MOVED_DATA=true ;; esac
+    if [[ "$label" == data ]]; then
+        _tn_root_layout_dir "$dst" root 0700 || return 1
+    else
+        _tn_root_layout_dir "$dst" root 0755 || return 1
+    fi
     shopt -s dotglob nullglob
     local item base
     # Pass 1: collision check (before moving anything).
@@ -425,11 +607,10 @@ relocate_dir() {
             return 1
         fi
     done
-    # Pass 2: move. Mark the flag BEFORE the loop so even a partial move rolls back.
-    case "$label" in config) MOVED_CONFIG=true ;; data) MOVED_DATA=true ;; esac
+    # Pass 2: move.
     for item in "$src"/*; do
         base="$(basename "$item")"
-        mv "$item" "${dst}/${base}"
+        mv -T -- "$item" "${dst}/${base}"
         case "$arr_name" in
             CONFIG_MOVED) CONFIG_MOVED+=("$base") ;;
             DATA_MOVED)   DATA_MOVED+=("$base") ;;
@@ -446,7 +627,7 @@ relocate_dir() {
     # hits "Permission denied" rotating its LOG and exits 1. (CONFIG is mounted read-only, so
     # its dir ownership is left untouched.)
     if [[ "$label" == data && -n "$DATA_OWNER" ]]; then
-        chown "$DATA_OWNER" "$dst" 2>/dev/null \
+        chown -h -- "$DATA_OWNER" "$dst" 2>/dev/null \
             || print_warn "Could not chown ${dst} to ${DATA_OWNER} -- node may fail to start."
     fi
     print_ok "Relocated ${label} (${moved} entries)."
@@ -457,22 +638,34 @@ relocate_dir() {
 # =============================================================================
 # Targeted substitutions on the .bak copy (order matters): role-suffixed paths
 # first, then the role-suffixed name (catches --name, ExecStart/Stop, Description,
-# SyslogIdentifier, log paths, start-telcoin-<role>.sh). The container/host log dir
-# (/var/log/telcoin) is shared and stays put; only the telcoin-<role> filename part
-# is rewritten. Cosmetic: the role is dropped from Description (-> "Telcoin Network Node").
+# SyslogIdentifier, log paths). The container/host log dir (/var/log/telcoin) is
+# shared and stays put; only the telcoin-<role> filename part is rewritten.
+# Cosmetic: the role is dropped from Description (-> "Telcoin Network Node"). The
+# legacy wrapper path is replaced first, literally, by the unified start script.
+# The unit is written root-owned, with the legacy unit's mode minus group/other
+# write, through tn_write_root_file; it must then start the unified script.
 rewrite_unit() {
+    local mode body
     print_step "Rewriting systemd unit -> ${UNIFIED_UNIT}"
-    # cp -a the pristine snapshot to the unified PATH first (carries the legacy
-    # unit's owner + mode), then transform in place -- so we never have to
-    # reconstruct permissions by hand.
-    cp -a "$UNIT_BAK" "$UNIFIED_UNIT"
-    sed -i -E \
+    migrate_backup_ok "$UNIT_BAK" "$UNIT_SHA"
+    mode="$(_tn_strip_gw "${UNIT_MODE:-644}")"
+    body="$(TN_OLD="$LEGACY_WRAPPER" TN_NEW="$UNIFIED_WRAPPER" awk '
+        { out = ""; line = $0
+          while ((i = index(line, ENVIRON["TN_OLD"])) > 0) {
+              out = out substr(line, 1, i - 1) ENVIRON["TN_NEW"]
+              line = substr(line, i + length(ENVIRON["TN_OLD"]))
+          }
+          print out line }' "$UNIT_BAK" | sed -E \
         -e "s#/etc/telcoin/${ROLE}#/etc/telcoin#g" \
         -e "s#/var/lib/telcoin/${ROLE}#/var/lib/telcoin#g" \
         -e "s#telcoin-${ROLE}#telcoin#g" \
-        -e 's#Network (Observer|Validator) Node#Network Node#g' \
-        "$UNIFIED_UNIT"
+        -e 's#Network (Observer|Validator) Node#Network Node#g')"
+    printf '%s\n' "$body" | tn_write_root_file "$UNIFIED_UNIT" "$mode"
     WROTE_UNIT=true
+    if ! grep -E '^ExecStart=' "$UNIFIED_UNIT" | grep -qF -- "$UNIFIED_WRAPPER"; then
+        print_error "The rewritten unit does not start ${UNIFIED_WRAPPER} -- aborting."
+        return 1
+    fi
     print_ok "Wrote ${UNIFIED_UNIT}"
 }
 
@@ -493,12 +686,19 @@ rewrite_unit() {
 #      one adjacent separator, leaving the rest of the command intact.
 # The post-condition guard below fails the migration (-> rollback) if either token survives.
 rewrite_wrapper() {
+    local mode=0755 group=root
     print_step "Normalizing start wrapper -> ${UNIFIED_WRAPPER} (stripping --observer and --instance)"
-    # cp -a preserves the original (security-sensitive) owner + mode: docker
-    # wrappers are root:root 0750 (run as root); binary wrappers telcoin:telcoin
-    # 0755. Then transform + strip --observer/--instance in place.
-    cp -a "$WRAPPER_BAK" "$UNIFIED_WRAPPER"
-    sed -i -E \
+    # Written root-owned in the root-owned /usr/local/libexec/telcoin through
+    # tn_write_root_file: root 0755 for a binary install, root:<service group>
+    # 0750 for Docker, as setup-node.sh writes them.
+    if [[ "$INSTALL_METHOD_L" == "docker" ]]; then
+        mode=0750
+        group="${SERVICE_GROUP:-root}"
+        getent group "$group" >/dev/null 2>&1 || group=root
+    fi
+    migrate_backup_ok "$WRAPPER_BAK" "$WRAPPER_SHA"
+    _tn_root_layout_dir "${UNIFIED_WRAPPER%/*}" root 0755
+    sed -E \
         -e "s#/etc/telcoin/${ROLE}#/etc/telcoin#g" \
         -e "s#/var/lib/telcoin/${ROLE}#/var/lib/telcoin#g" \
         -e "s#telcoin-${ROLE}#telcoin#g" \
@@ -506,7 +706,7 @@ rewrite_wrapper() {
         -e 's/(^|[[:space:]])--observer([[:space:]]|$)/\2/g' \
         -e '/^[[:space:]]*--instance([[:space:]]+|=)[0-9]+[[:space:]]*\\?[[:space:]]*$/d' \
         -e 's/(^|[[:space:]])--instance([[:space:]]+|=)[0-9]+([[:space:]]|$)/\3/g' \
-        "$UNIFIED_WRAPPER"
+        "$WRAPPER_BAK" | tn_write_root_file "$UNIFIED_WRAPPER" "$mode" "$group"
     WROTE_WRAPPER=true
 
     # Safety check: the normalized wrapper must NOT still pass --observer or --instance.
@@ -520,29 +720,24 @@ rewrite_wrapper() {
 # =============================================================================
 # STEP 8 -- UPDATE .node-meta
 # =============================================================================
-# Keys are written with lib/common.sh's meta_set KEY VALUE FILE, which every
-# library has shipped since 1.3.0 (before this script existed). It rewrites the
+# Keys are written with lib/common.sh's meta_set KEY VALUE FILE. It rewrites the
 # file without sed, so a value holding #, &, = or spaces (a custom data mount, say)
-# is stored exactly as given, and every other key in the file is kept.
+# is stored exactly as given, and every other key in the file is kept; the file is
+# written root:root 0600 through tn_write_root_file (meta_set creates it when
+# absent).
 update_meta() {
     local meta="${UNIFIED_CONFIG_DIR}/.node-meta"
+    WROTE_META=true
     if [[ ! -f "$meta" ]]; then
         print_warn "No ${meta} after relocation -- writing a minimal one."
-        : > "$meta"
     fi
     local ws_port=8546   # reth WS default with no --instance (legacy --instance 5 -> 8554)
     print_step "Updating ${meta} (NODE_TYPE removed, DATA_DIR=${EFFECTIVE_DATA_DIR}, RPC_PORT=${RPC_PORT}, WS_PORT=${ws_port})"
     # No role is recorded on the server, so the old NODE_TYPE hint goes. The
     # validator view comes from the on-chain stake status (node_stake_status in
     # lib/common.sh); a .node-meta without NODE_TYPE reads as the plain full-node
-    # view everywhere. meta_unset arrived in lib/common.sh 1.5.0: when an older
-    # library is installed, delete the line directly instead of failing the step
-    # (which would roll the whole migration back).
-    if declare -F meta_unset >/dev/null 2>&1; then
-        meta_unset NODE_TYPE "$meta"
-    else
-        sed -i -E '/^NODE_TYPE=/d' "$meta"
-    fi
+    # view everywhere.
+    meta_unset NODE_TYPE "$meta"
     # EFFECTIVE_DATA_DIR: /var/lib/telcoin for a default install, or the operator's
     # preserved custom mount (2nd disk) -- so the node keeps finding its data.
     meta_set DATA_DIR "$EFFECTIVE_DATA_DIR" "$meta"
@@ -569,22 +764,19 @@ update_meta() {
         print_ok "Recorded VALIDATOR_ADDRESS=${exec_addr}"
     fi
 
-    # .node-meta is root-owned mode 0600 (the UI reads it via a privileged helper).
-    chown root:root "$meta" 2>/dev/null || true
-    chmod 600 "$meta" 2>/dev/null || true
-    print_ok "Updated .node-meta."
+    print_ok "Updated .node-meta (root 0600; the UI reads it through its privileged helper)."
 }
 
 # =============================================================================
-# STEP 9 -- REMOVE LEGACY ARTIFACTS + RELOAD/ENABLE
+# STEP 9 -- RELOAD/ENABLE
 # =============================================================================
+# The legacy unit (stopped and disabled) and wrapper stay until the new unit is
+# verified (remove_legacy_units), so a rollback finds them in place.
 finalize_units() {
-    print_step "Removing legacy unit + wrapper; enabling ${UNIFIED_SERVICE}..."
-    rm -f "$LEGACY_UNIT"
-    [[ -f "$LEGACY_WRAPPER" ]] && rm -f "$LEGACY_WRAPPER"
+    print_step "Enabling ${UNIFIED_SERVICE}..."
     systemctl daemon-reload
     systemctl enable "$UNIFIED_SERVICE" 2>/dev/null || true
-    print_ok "Legacy artifacts removed; ${UNIFIED_SERVICE}.service enabled."
+    print_ok "${UNIFIED_SERVICE}.service enabled."
 }
 
 # =============================================================================
@@ -621,6 +813,23 @@ start_and_verify() {
         print_error "RPC did not respond on 127.0.0.1:${RPC_PORT} after ~60s."
         return 1
     fi
+}
+
+# =============================================================================
+# STEP 10.5 -- REMOVE THE LEGACY UNIT AND WRAPPER
+# =============================================================================
+# Only after the new unit runs and answers. NON-FATAL by design, like the steps
+# after it: the ERR trap is still armed, so every command is guarded and the step
+# returns 0 (a leftover legacy file must never roll back a healthy node).
+remove_legacy_units() {
+    print_step "Removing the legacy unit and wrapper..."
+    rm -f -- "$LEGACY_UNIT" 2>/dev/null || print_warn "Could not remove ${LEGACY_UNIT}; remove it by hand."
+    if [[ -e "$LEGACY_WRAPPER" || -L "$LEGACY_WRAPPER" ]]; then
+        rm -f -- "$LEGACY_WRAPPER" 2>/dev/null || print_warn "Could not remove ${LEGACY_WRAPPER}; remove it by hand."
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    print_ok "Legacy unit and wrapper removed."
+    return 0
 }
 
 # =============================================================================
@@ -706,8 +915,9 @@ report() {
 # =============================================================================
 main() {
     detect_legacy        # step 1 (may exit 0 if already migrated / declined)
+    migrate_take_lock    # held to the end; the EXIT trap releases it
     snapshot             # step 2 (arms rollback)
-    stop_legacy          # step 3
+    stop_legacy          # step 3 (waits for the restart window first)
     relocate_dir "$LEGACY_CONFIG_DIR" "$UNIFIED_CONFIG_DIR" CONFIG_MOVED config   # step 4
     relocate_dir "$LEGACY_DATA_DIR"   "$EFFECTIVE_DATA_DIR" DATA_MOVED   data     # step 5 (no-op for a custom mount: src==dst)
     rewrite_unit         # step 6
@@ -715,6 +925,7 @@ main() {
     update_meta          # step 8
     finalize_units       # step 9
     start_and_verify      # step 10 (failure -> rollback via ERR trap)
+    remove_legacy_units   # step 10.5 (non-fatal; only after a verified start)
     open_consensus_ports  # step 11 (non-fatal; validator-capable P2P ports)
     restart_ui_if_present # step 11.5 (non-fatal; refresh local Node Manager UI)
     report                # step 12
