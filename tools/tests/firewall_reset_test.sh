@@ -189,6 +189,25 @@ for start in yes no; do
 done
 check "no snapshot left after restores" "" "$(ls "$TN_FW_SNAP_PARENT")"
 
+# Mainnet: a failed delete of a health-port rule stops the run and restores (rc 2).
+printf 'NETWORK=mainnet\nKUMA_EXTRA_SRC=198.51.100.7\n' > "$META"
+NETWORK=mainnet
+fresh_flags; FW_SSH_FROM="203.0.113.0/24"; reset_state yes
+run_apply --reset
+check_rc "mainnet health deletes: clean run rc 0" 0 "$RC"
+kuma_calls="$(grep -n "^delete allow .*${TN_KUMA_PORT}" "$UFW_LOG" | cut -d: -f1 | paste -sd' ' -)"
+check "mainnet run deletes three health rules" "3" "$(printf '%s\n' $kuma_calls | grep -c .)"
+for n in $kuma_calls; do
+    fresh_flags; FW_SSH_FROM="203.0.113.0/24"; reset_state yes
+    initial="$(state)"
+    UFW_FAIL_AT="$n" run_apply --reset
+    check_rc "mainnet health delete fails at call ${n}: rc 2" 2 "$RC"
+    check "mainnet health delete fails at call ${n}: old rules back" "$initial" "$(state)"
+    check_has "mainnet health delete fails at call ${n}: named" "yes" "$(grep -q "health-port ${TN_KUMA_PORT}/tcp rules failed" "$T/out" && echo yes)"
+done
+printf 'NETWORK=testnet\n' > "$META"
+NETWORK=testnet
+
 # A restore that fails too: rc 3 and the DISABLED message.
 fresh_flags; reset_state yes
 UFW_FAIL_FROM=4 run_apply --reset

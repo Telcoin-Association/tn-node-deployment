@@ -27,6 +27,8 @@ printf '%s\n' "$*" >> "$UFW_LOG"
 case "$1" in
     status) printf 'Status: active\n' ;;
 esac
+# UFW_FAIL_MATCH: a call whose arguments equal it fails.
+[ -n "${UFW_FAIL_MATCH:-}" ] && [ "$*" = "$UFW_FAIL_MATCH" ] && exit 1
 exit 0
 STUB
 chmod +x "$T/bin/ufw"
@@ -101,6 +103,16 @@ check_rc "mainnet kuma rc 1" 1 "$rc"
 check_lacks "mainnet never adds a health allow" "allow from ${TN_KUMA_SRC}" "$(grep -v '^delete' "$UFW_LOG")"
 check_has "mainnet deletes the monitor rule" "delete allow from ${TN_KUMA_SRC} to any port ${TN_KUMA_PORT} proto tcp" "$(cat "$UFW_LOG")"
 check_has "mainnet deletes the extra rule" "delete allow from 198.51.100.7 to any port ${TN_KUMA_PORT} proto tcp" "$(cat "$UFW_LOG")"
+check_has "mainnet deletes the open rule" "delete allow ${TN_KUMA_PORT}/tcp" "$(cat "$UFW_LOG")"
+# A delete that fails on mainnet is an error (rc 2), never ignored.
+for bad in "delete allow ${TN_KUMA_PORT}/tcp" \
+           "delete allow from ${TN_KUMA_SRC} to any port ${TN_KUMA_PORT} proto tcp" \
+           "delete allow from 198.51.100.7 to any port ${TN_KUMA_PORT} proto tcp"; do
+    : > "$UFW_LOG"
+    UFW_FAIL_MATCH="$bad" apply_kuma_rule 2>"$T/err"; rc=$?
+    check_rc "mainnet failed '${bad}' rc 2" 2 "$rc"
+    check_has "mainnet failed delete says the port may be open" "yes" "$(grep -q 'may still be open' "$T/err" && echo yes)"
+done
 : > "$UFW_LOG"
 NETWORK=""
 apply_kuma_rule 2>/dev/null; rc=$?

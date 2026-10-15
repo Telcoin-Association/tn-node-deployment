@@ -6225,24 +6225,31 @@ kuma_extra_remove() {
 # `ufw --force reset`. Idempotent (ufw dedups identical rules).
 # Testnet and devnet only (is_testnet_like reads NETWORK, which the caller loads from
 # .node-meta). On any other network, NETWORK unset included, the health port is
-# never opened: the monitor rule and the operator extras are deleted instead, and
-# the function returns 1 with a warning on stderr.
+# never opened: the open rule, the monitor rule and the operator extras are deleted
+# instead, and the function returns 1 with a warning on stderr; rc 2 (an error on
+# stderr) when one of those deletes fails, so the caller stops instead of leaving
+# the port open (ufw returns 0 for a rule that is not there).
 apply_kuma_rule() {
     local rc src list
     local -a srcs
     rc=0
-    # Drop a stale open-to-Anywhere rule (and its v6 twin) for the health port, if any.
-    ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 || true
     if ! is_testnet_like; then
-        ufw delete allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
         list="$(meta_get KUMA_EXTRA_SRC 2>/dev/null)" || list=""
         read -r -a srcs <<< "$list" || true
-        for src in ${srcs[@]+"${srcs[@]}"}; do
-            ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+        for src in "" "${TN_KUMA_SRC}" ${srcs[@]+"${srcs[@]}"}; do
+            if [[ -z "$src" ]]; then
+                ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 && continue
+            else
+                ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 && continue
+            fi
+            print_error "Could not delete the health-port rule ${TN_KUMA_PORT}/tcp${src:+ from ${src}}; the port may still be open. Check: sudo ufw status numbered" >&2
+            return 2
         done
         print_warn "Health port ${TN_KUMA_PORT}/tcp stays closed: health monitoring is a testnet-only add-on (NETWORK=${NETWORK:-unset})." >&2
         return 1
     fi
+    # Drop a stale open-to-Anywhere rule (and its v6 twin) for the health port, if any.
+    ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 || true
     ufw allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp || rc=$?
     # Layer operator-chosen sources on top of the TA baseline.
     apply_kuma_extra_rules || rc=1

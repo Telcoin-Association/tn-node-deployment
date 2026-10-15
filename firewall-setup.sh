@@ -885,7 +885,7 @@ apply_recommended_firewall() {
 # apply_recommended_firewall (see there for the order). Needs fw_preflight first.
 # rc 1 at the first step that fails (reported by fw_try).
 fw_apply_rules() {
-    local do_reset="$1" nodes="$2" keep_web="$3" p s
+    local do_reset="$1" nodes="$2" keep_web="$3" p s krc
     local -a fixed=()
     if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
         fw_try "ufw --force reset" ufw --force reset || return 1
@@ -915,8 +915,14 @@ fw_apply_rules() {
             fw_try "The overlay SSH rule (from ${TN_OVERLAY_ADMIN_CIDR})" allow_overlay_ssh || return 1
         fi
     else
-        # Not a testnet: the health port stays closed; delete a monitor rule left from before.
-        apply_kuma_rule >/dev/null 2>&1 || true
+        # Not a testnet: the health port stays closed; delete a monitor rule left from
+        # before. rc 1 is that normal outcome; rc 2 is a delete that failed.
+        krc=0
+        apply_kuma_rule >/dev/null 2>&1 || krc=$?
+        if [[ "$krc" -eq 2 ]]; then
+            fw_error "Deleting the health-port ${UPTIME_KUMA_PORT}/tcp rules failed."
+            return 1
+        fi
     fi
     # Every installed node needs P2P open inbound: the role is decided on-chain at
     # each epoch and no networking is provisioned when a node joins the committee,
@@ -1322,7 +1328,11 @@ manage_node_ports() {
     print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}."
     if ! is_testnet_like; then
         # Mainnet (or no node yet): the health port is never opened.
-        apply_kuma_rule >/dev/null 2>&1 || true
+        local krc=0
+        apply_kuma_rule >/dev/null 2>&1 || krc=$?
+        if [[ "$krc" -eq 2 ]]; then
+            print_error "A health-port ${UPTIME_KUMA_PORT}/tcp rule could not be deleted; check: sudo ufw status numbered"
+        fi
         print_info "Health monitoring is a testnet-only add-on; TCP ${UPTIME_KUMA_PORT} stays closed here."
         manage_node_ports_web
         return
