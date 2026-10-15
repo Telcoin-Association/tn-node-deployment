@@ -446,7 +446,7 @@ const state = {
   logBuffer: [],                          // client-side line buffer (static + live)
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
   setupStep: 1,
-  setup: { network:'adiri', method:'source', passphrase:'loadcredential',
+  setup: { network:'adiri', method:'source',
            eth:'', bls:'', blsConfirm:'', buildRef:'main', dockerImage:'', publicIp:'', internalIp:'',
            sourceMode:'main', customRef:'', sourceRef:'', sourceModeTouched:false,   // source-version picker (mirrors CLI: main/latest tag/custom)
            rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
@@ -494,9 +494,60 @@ const $ = (s,r=document)=>r.querySelector(s);
 const el = (tag,cls,html)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;};
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+// =============================================================================
+// UI token. open-ui.sh opens http://localhost:8080/#t=<token>; the page keeps
+// the token in sessionStorage, removes it from the address bar, and sends it in
+// the X-TN-UI-Token header on every API call. A URL fragment never reaches the
+// server, a proxy or a log. Without it every /api/ call answers 401.
+// =============================================================================
+const TN_TOKEN = (()=>{
+  let tok = '';
+  const m = (location.hash||'').match(/(?:^#|&)t=([0-9a-f]{64})(?:&|$)/);
+  try{
+    if(m){ sessionStorage.setItem('tn-ui-token', m[1]); }
+    tok = (m && m[1]) || sessionStorage.getItem('tn-ui-token') || '';
+  }catch(_){ tok = (m && m[1]) || ''; }
+  if(m) history.replaceState(null, '', location.pathname + location.search);
+  return tok;
+})();
+
+// fetch() with the token header. A POST always sends JSON ({} when there is no
+// body): the server refuses any other content type.
+function tnFetch(url, init){
+  const o = Object.assign({}, init||{});
+  const h = new Headers(o.headers||{});
+  if(TN_TOKEN) h.set('X-TN-UI-Token', TN_TOKEN);
+  if((o.method||'GET').toUpperCase()==='POST'){
+    h.set('Content-Type', 'application/json');
+    if(o.body==null) o.body = '{}';
+  }
+  o.headers = h;
+  o.credentials = 'same-origin';
+  return fetch(url, o).then(r=>{ if(r.status===401) showTokenBanner(); return r; });
+}
+
+function showTokenBanner(){
+  const b = $('#roBanner'), m = $('#roBannerMsg'); if(!b || !m) return;
+  m.innerHTML = '<strong style="color:var(--yellow)">🔒 Not signed in.</strong> '
+    + 'Open the UI with <span class="mono">./open-ui.sh user@server</span>, which hands this page its access token.';
+  b.style.display = 'block';
+}
+
+// How the node gets its BLS passphrase (/api/status passphrase_method), with
+// the CLI step that changes it. Read-only: the UI never migrates or re-seals.
+function passphraseLabel(s){
+  const m = s && s.passphrase_method;
+  if(m==='credential') return 'Encrypted credential' + (s.credential_key ? ' ('+esc(s.credential_key)+')' : '')
+    + ' <span style="color:var(--text2)">· re-seal: sudo bash edit-config.sh --reseal</span>';
+  if(m==='stdin') return 'Root-only credential file, read on stdin';
+  if(m==='env') return '<span style="color:var(--yellow)">Environment (legacy)</span>'
+    + ' <span style="color:var(--text2)">· migrate: sudo bash edit-config.sh --migrate-credential</span>';
+  return esc(m||'—');
+}
+
 async function api(path, opts){
   try{
-    const r = await fetch(path, opts);
+    const r = await tnFetch(path, opts);
     return await r.json();
   }catch(e){ return {error:String(e)}; }
 }
@@ -1091,7 +1142,7 @@ async function renderDashboard(){
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
         ${externalDetailRows(s)}
-        <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
+        <div class="kv"><span class="k">Passphrase</span><span class="v">${passphraseLabel(s)}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
         <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
@@ -1412,7 +1463,7 @@ async function renderValidatorDashboard(c){
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
         ${externalDetailRows(s)}
-        <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
+        <div class="kv"><span class="k">Passphrase</span><span class="v">${passphraseLabel(s)}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
         <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
@@ -1564,7 +1615,8 @@ async function augmentDashboardUpdate(){
   if(state.view!=='dashboard' || !u || u.error) return;
   const ind=$('#updInd'); if(!ind) return;
   if(u.update_available){
-    ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--yellow)">⬆ update available</a>';
+    const fleet = state.node==='validator' ? ' · coordinate with the fleet before applying' : '';
+    ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--yellow)">⬆ update available'+fleet+'</a>';
   } else if(u.pending){
     ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--accent)">● update pending</a>';
   } else {
@@ -1708,8 +1760,17 @@ async function fillLogVerbosityNote(){
 
 // Download the complete log file from disk (server streams it as an attachment
 // named telcoin-<type>.log), regardless of the current viewer filter.
-function downloadFullLog(){
-  window.location.href = '/api/logs/'+state.node+'/download';
+async function downloadFullLog(){
+  // fetch with the token header, then save the blob (a plain link cannot send it).
+  try{
+    const r = await tnFetch('/api/logs/'+state.node+'/download');
+    if(!r.ok){ toast('Download failed ('+r.status+')','error'); return; }
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = 'telcoin-'+state.node+'.log';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+  }catch(e){ toast('Download failed: '+e,'error'); }
 }
 
 async function clearLog(){
@@ -1806,19 +1867,42 @@ function startLive(){
   $('#liveStatus').innerHTML = '<span class="live-dot"></span> LIVE';
   state.logBuffer = [];
   body.innerHTML='';
-  state.es = new EventSource(`/api/logs/${state.node}/stream`);
-  state.es.onmessage = ev=>{
+  // fetch rather than EventSource, which cannot send the token header. Each
+  // "data:" line is one log line; ":" lines are keepalives.
+  const ctl = new AbortController();
+  state.es = {close: ()=>ctl.abort()};
+  const onLine = text=>{
     // Keep every line in the buffer (so filtering never loses lines), but only
     // paint the ones that pass the active filter.
-    state.logBuffer.push(ev.data);
+    state.logBuffer.push(text);
     while(state.logBuffer.length>2000) state.logBuffer.shift();
-    if(logMatches(ev.data)){
-      body.insertAdjacentHTML('beforeend', colorize(ev.data));
+    if(logMatches(text)){
+      body.insertAdjacentHTML('beforeend', colorize(text));
       while(body.children.length>1000) body.removeChild(body.firstChild);
       body.scrollTop = body.scrollHeight;
     }
   };
-  state.es.onerror = ()=>{ /* keep open; browser auto-reconnects */ };
+  (async ()=>{
+    try{
+      const r = await tnFetch(`/api/logs/${state.node}/stream`, {signal:ctl.signal});
+      if(!r.ok){
+        let msg=''; try{ msg=(await r.json()).error; }catch(_){ }
+        toast('Live log: '+(msg||r.status),'error'); stopLive(); return;
+      }
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      for(;;){
+        const {value, done} = await reader.read();
+        if(done) break;
+        buf += dec.decode(value, {stream:true});
+        let i;
+        while((i = buf.indexOf('\n')) >= 0){
+          const l = buf.slice(0,i); buf = buf.slice(i+1);
+          if(l.startsWith('data: ')) onLine(l.slice(6));
+        }
+      }
+    }catch(_){ /* aborted by Stop or a dropped connection */ }
+  })();
 }
 
 function stopLive(){
@@ -2116,11 +2200,11 @@ async function saveConfigField(field, value, btn){
   const card=$('#cfgProgressCard'); if(card) card.style.display='block';
   const log=$('#cfgLog'); if(log) log.innerHTML='<div class="log-line info">» saving '+esc(field)+'…</div>';
   if(btn) btn.disabled=true;
-  const url='/api/config/'+state.node+'/set?field='+encodeURIComponent(field)+'&value='+encodeURIComponent(value);
-  // A GET stream read with streamFetch (see Action streams); Done or leaving the
-  // tab aborts it, as closing the EventSource did before.
+  const url='/api/config/'+state.node+'/set';
+  // A POST stream read with streamFetch (see Action streams); Done or leaving
+  // the tab aborts it.
   const ctl = new AbortController(); state.configAbort = ctl;
-  const d = await streamFetch(url, {method:'GET'}, {target:'#cfgLog', what:'Save', signal:ctl.signal});
+  const d = await streamPost(url, {field:field, value:value}, {target:'#cfgLog', what:'Save', signal:ctl.signal});
   if(ctl.signal.aborted) return;
   if(state.configAbort===ctl) state.configAbort = null;
   if(d && d.ok) toast('Saved '+field+' — node restarted','success');
@@ -2156,6 +2240,15 @@ async function renderUpdate(){
   fillUpdateStatus();
 }
 
+// The committee check behind a restart (display only): what the helper's
+// quorum-check said, or nothing when the library has no such check yet.
+function quorumNote(q){
+  if(!q || !q.available) return '';
+  if(q.rc===0) return '<p style="color:var(--green);font-size:12px;margin-top:8px">✓ Committee check: a restart now keeps the committee above quorum.</p>';
+  if(q.rc===1) return '<p style="color:var(--red);font-size:12px;margin-top:8px">✗ Committee check: other committee members are down; restarting this node now risks quorum. '+esc(q.detail||'')+'</p>';
+  return '<p style="color:var(--yellow);font-size:12px;margin-top:8px">! Committee check: the committee could not be read. '+esc(q.detail||'')+'</p>';
+}
+
 async function fillUpdateStatus(){
   const t = state.node;
   const box = $('#updStatus'); if(!box) return;
@@ -2182,16 +2275,17 @@ async function fillUpdateStatus(){
       <strong>${esc(method)}</strong> can't be updated from here — only source builds and Docker installs are supported.</p>`;
   } else {
     actions = `
-      <div class="field"><label>Target ref / tag</label>
+      <div class="field"><label>Target release tag</label>
         <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
-          placeholder="${method==='docker'?'image tag, e.g. v0.16.0-adiri':'tag / branch / commit'}"></div>
+          placeholder="release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)"></div>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
         ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
         ${pending?'<button class="btn btn-red" id="updDiscard">Discard pending</button>':''}
         <button class="btn btn-out" id="updRecheck">↻ Re-check</button>
       </div>
-      ${t==='validator'?'<p style="color:var(--yellow);font-size:12px;margin-top:12px">⚠ Applying on a validator restarts the node — expect missed consensus rounds during the downtime.</p>':''}`;
+      ${t==='validator'?'<p style="color:var(--yellow);font-size:12px;margin-top:12px">⚠ Applying on a validator restarts the node — expect missed consensus rounds during the downtime. Coordinate with the fleet before applying: one validator down at a time.</p>':''}
+      ${quorumNote(u.quorum)}`;
   }
 
   box.innerHTML = `<div class="card"><h3>Update · ${esc(cap(t))}</h3>
@@ -2276,7 +2370,7 @@ async function streamFetch(url, init, handlers){
   const aborted = () => !!(h.signal && h.signal.aborted);
   let resp;
   try{
-    resp = await fetch(url, Object.assign({}, init, h.signal ? {signal:h.signal} : {}));
+    resp = await tnFetch(url, Object.assign({}, init, h.signal ? {signal:h.signal} : {}));
   }catch(e){
     if(!aborted()) toast((h.what ? h.what+' request' : 'Request')+' failed: '+e, 'error');
     return null;
@@ -2322,19 +2416,17 @@ async function streamFetch(url, init, handlers){
 }
 
 function streamPost(url, body, handlers){
-  return streamFetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})}, handlers);
+  return streamFetch(url, {method:'POST', body:JSON.stringify(body||{})}, handlers);
 }
 
 async function startUpdateStream(kind, ref){
   stopUpdateStream();
   const card=$('#updProgressCard'); if(card) card.style.display='block';
   const log=$('#updLog'); if(log) log.innerHTML='<div class="log-line info">» starting '+esc(kind)+'…</div>';
-  let url = '/api/update/'+kind+'/'+state.node;
-  if(kind==='prepare') url += '?ref='+encodeURIComponent(ref);
-  // Prepare and apply are GET routes (older pages read them with EventSource).
-  // Leaving the tab aborts the request, as closing the EventSource did before.
+  const url = '/api/update/'+kind+'/'+state.node;
+  // Prepare and apply are POST streams. Leaving the tab aborts the request.
   const ctl = new AbortController(); state.updateAbort = ctl;
-  const d = await streamFetch(url, {method:'GET'}, {target:'#updLog', what:'Update', signal:ctl.signal});
+  const d = await streamPost(url, kind==='prepare' ? {ref:ref} : {}, {target:'#updLog', what:'Update', signal:ctl.signal});
   if(ctl.signal.aborted) return;
   if(state.updateAbort===ctl) state.updateAbort = null;
   if(d && d.ok) toast('Update '+kind+' succeeded','success');
@@ -2456,7 +2548,7 @@ function renderCaddyCard(){
         <input id="caddyPublicIp" placeholder="auto-detect — leave blank unless behind NAT" value="${esc(state.setup.publicIp||'')}" autocomplete="off">
         <div style="color:var(--text2);font-size:12px;margin-top:4px">Only needed when this node's <strong>inbound</strong> IP — where Let's Encrypt reaches ports 80/443 — differs from the auto-detected egress (outbound) IP, i.e. multi-IP or 1:1-NAT hosts. Leave blank otherwise. The propagation check is IPv4 (A records) only.</div></div>
       <div class="grid two-col">
-        <div class="field"><label>Password (min 8 chars)</label><input id="caddyPw" type="password" autocomplete="new-password"></div>
+        <div class="field"><label>Password (min 16 chars)</label><input id="caddyPw" type="password" autocomplete="new-password"></div>
         <div class="field"><label>Confirm password</label><input id="caddyPw2" type="password" autocomplete="new-password"></div>
       </div>
       <div class="svc-row"><button class="btn btn-out" id="caddyDns">Check DNS</button><button class="btn btn-green" id="caddyEnable">Enable External Access</button></div>
@@ -2530,7 +2622,7 @@ async function caddyEnable(){
   if(rpc.enabled && sameHost(domain, rpc.domain)) return toast('That hostname serves the public RPC endpoint. Use dashboard.'+normHost(rpc.domain)+' instead.','error');
   if(!CADDY_USER_RE.test(username)) return toast('Username: 2–32 chars (letters, digits, . _ -)','error');
   if(publicIp && !setupValidIp(publicIp)) return toast('Enter a valid inbound public IP, or leave it blank','error');
-  if(pw.length<8) return toast('Password must be at least 8 characters','error');
+  if(pw.length<16) return toast('Password must be at least 16 characters','error');
   if(pw!==pw2) return toast('Passwords do not match','error');
   const btn=$('#caddyEnable'); if(btn) btn.disabled=true;
   const log=$('#caddyLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» enabling external access… (the TLS certificate is issued on the first request — keep this tab open)</div>'; }
@@ -3145,7 +3237,6 @@ async function stepPreflight(body){
     ...hwTierRows(d.hardware),
     ['docker', d.docker?.ok, 'Docker engine available (optional)', false],
     ['rust', d.rust?.ok, 'Rust toolchain for source build (optional)', false],
-    ['tpm', d.tpm?.ok, 'TPM device for sealed passphrase (optional)', false],
   ];
   const row = ([name,ok,desc,hardReq])=>{
     const icon = ok?'<span style="color:var(--green)">✓</span>':(hardReq?'<span style="color:var(--red)">✗</span>':'<span style="color:var(--yellow)">!</span>');
@@ -3339,7 +3430,6 @@ async function setupRpcDnsCheck(){
 
 function stepConfigure(body){
   const s = state.setup;
-  const p = s.passphrase;
   // Unified single-node setup: every node is provisioned validator-capable and the
   // install always dispatches through the canonical observer flow, so there is no
   // role branch here. The role is decided on-chain after the node syncs.
@@ -3363,16 +3453,10 @@ function stepConfigure(body){
     </div>
     <div class="field"><label>BLS passphrase (encrypts the node key — needed on every start)</label><input id="cfgBls" type="password" placeholder="••••••••" value="${esc(s.bls||'')}"></div>
     <div class="field"><label>Confirm BLS passphrase</label><input id="cfgBlsConfirm" type="password" placeholder="••••••••" value="${esc(s.blsConfirm||'')}"></div>
-    <div class="field"><label>Passphrase Protection</label>
-      <div class="radio-cards">
-        <div class="rcard ${p==='loadcredential'?'sel':''}" data-p="loadcredential"><div class="rt">LoadCredential</div><div class="rd">systemd-managed credential file. Simple, works everywhere.</div></div>
-        <div class="rcard ${p==='tpm'?'sel':''}" data-p="tpm"><div class="rt">TPM / vTPM</div><div class="rd">Seal the passphrase to hardware TPM. More secure.</div></div>
-      </div>
-    </div>
+    <div class="note">The passphrase is stored as a systemd encrypted credential that only root can read, and reaches the node on its standard input. It may not start or end with a space or tab.</div>
     <div class="note">External multiaddrs use your public IP; listener multiaddrs bind your internal IP — both on the standard P2P ports (49590/49594).</div>
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(3)">← Back</button><button class="btn btn-green" id="cfgNext">Continue →</button></div>`;
   body.querySelectorAll('[data-rpc]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.rpcPublic=(r.dataset.rpc==='public'); renderSetup(); }));
-  body.querySelectorAll('[data-p]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.passphrase=r.dataset.p; renderSetup(); }));
   const rpcIn=$('#cfgRpcDomain');
   if(rpcIn){
     // Typing clears the previous DNS result; leaving the field checks the new name.
@@ -3403,6 +3487,9 @@ function stepConfigure(body){
     if(s.serviceUser && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceUser)){ toast('Invalid service user name','error'); return; }
     if(s.serviceGroup && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceGroup)){ toast('Invalid service group name','error'); return; }
     if(!s.bls){ toast('Enter a BLS passphrase','error'); return; }
+    if(/^[ \t\n\v\f\r]|[ \t\n\v\f\r]$|[\r\n]/.test(s.bls)){ toast('The BLS passphrase may not start or end with a space or tab','error'); return; }
+    if(s.serviceUser && !/^[a-z_][a-z0-9_-]{0,31}$/.test(s.serviceUser)){ toast('Service user: lowercase letters, digits, _ and - only','error'); return; }
+    if(s.dataDir && !/^\/(var\/lib|srv|data)\/telcoin[A-Za-z0-9._-]*(\/[A-Za-z0-9._-]+)*$/.test(s.dataDir)){ toast('Data directory must be under /var/lib/telcoin*, /srv/telcoin* or /data/telcoin*','error'); return; }
     if(s.bls!==s.blsConfirm){ toast('BLS passphrases do not match','error'); return; }
     goStep(5);
   });
@@ -3423,7 +3510,7 @@ function stepReview(body){
   rows.push(
     ['Service user / group', (s.serviceUser||'telcoin')+' / '+(s.serviceGroup||'telcoin')],
     ['BLS Passphrase', s.bls?'•••••••• (set)':'(not set)'],
-    ['Passphrase Protection', s.passphrase==='tpm'?'TPM / vTPM':'LoadCredential'],
+    ['Passphrase Protection', 'Encrypted systemd credential'],
   );
   body.innerHTML = `<h3>Step 5 · Install</h3>
     ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
@@ -3446,7 +3533,6 @@ function buildSetupPayload(includePassphrase){
   const payload = {
     network: 'testnet',
     install_method: s.method,
-    passphrase_method: s.passphrase,
     address: s.eth,
     build_ref: s.method==='source' ? s.buildRef : '',
     docker_image: s.method==='docker' ? s.dockerImage : '',
@@ -3682,7 +3768,7 @@ function fmtTel(x){
   if(!isFinite(n)) return null;
   return n.toLocaleString('en-US', {maximumFractionDigits:4}) + ' TEL';
 }
-function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }
+function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Telcoin Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
 // Nav-bar network status pill (Adiri Testnet, from /api/network/status)

@@ -45,6 +45,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import server  # noqa: E402
+from test_support import local_client  # noqa: E402
+
+local_client(server)
 
 LOCAL = "http://127.0.0.1:8545"
 TESTNET_RPC = "https://rpc.adiri.tel"

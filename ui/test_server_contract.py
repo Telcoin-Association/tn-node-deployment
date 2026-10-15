@@ -39,6 +39,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import server  # noqa: E402
+from test_support import local_client  # noqa: E402
+
+local_client(server)
 
 SERVER_PY = os.path.join(HERE, "server.py")
 INSTALLER = os.path.join(HERE, "install-ui.sh")
@@ -55,6 +58,10 @@ NODE_SUBCOMMAND_ARITY = {
 }
 
 DONE_OK = json.dumps({"event": "done", "ok": True, "msg": "finished"})
+
+# The real run(), before any test replaces it (test_public_readonly.py uses it
+# to prove a public request never reaches sudo).
+REAL_RUN = server.run
 
 
 def read(path):
@@ -85,20 +92,29 @@ def split_transitional(text):
 
 
 _HELPER_LINE_RE = re.compile(
-    r"^\$\{SVC_USER\} ALL=\(ALL\) NOPASSWD: " + re.escape(HELPER_PATH) + r" (.+)$", re.M)
+    r"^\$\{SVC_USER\} ALL=\(root\) NOPASSWD: " + re.escape(HELPER_PATH) + r" (.+)$", re.M)
 
 
 def helper_rules(text):
     """The argument patterns of the helper lines in a sudoers text, such as
-    'update-check' or 'config-set *'."""
-    return [r.rstrip() for r in _HELPER_LINE_RE.findall(text)]
+    'update-check' or 'config-set *', including the commands of the TN_SETUP
+    alias when the text grants it."""
+    rules = [r.rstrip() for r in _HELPER_LINE_RE.findall(text)]
+    if re.search(r"^\$\{SVC_USER\} ALL=\(root\) NOPASSWD: TN_SETUP$", text, re.M):
+        m = re.search(r"^Cmnd_Alias TN_SETUP = (.+)$", text, re.M)
+        if not m:
+            raise AssertionError("TN_SETUP is granted but not defined")
+        for cmd in m.group(1).split(","):
+            cmd = cmd.strip()
+            assert cmd.startswith(HELPER_PATH + " "), cmd
+            rules.append(cmd[len(HELPER_PATH) + 1:])
+    return rules
 
 
 def env_keep_vars():
-    m = re.search(r'^Defaults!' + re.escape(HELPER_PATH) + r' env_keep \+= "([^"]*)"$',
-                  sudoers_text(), re.M)
+    m = re.search(r'^Defaults!TN_SETUP env_keep \+= "([^"]*)"$', sudoers_text(), re.M)
     if not m:
-        raise AssertionError("env_keep line for the helper not found")
+        raise AssertionError("env_keep line for TN_SETUP not found")
     return set(m.group(1).split())
 
 
@@ -143,6 +159,21 @@ class FakeStdout:
 
     def readline(self):
         return self._lines.pop(0) if self._lines else ""
+
+    def close(self):
+        self.closed = True
+
+
+class FakeStdin:
+    """Records what the server writes to a child's stdin."""
+
+    def __init__(self):
+        self.data = ""
+        self.closed = False
+
+    def write(self, text):
+        self.data += text
+        return len(text)
 
     def close(self):
         self.closed = True
@@ -239,6 +270,9 @@ HELPER_REPLIES = {
     "jaeger-stop": (0, "", ""),
     "tracing-enable": (0, "", ""),
     "tracing-disable": (0, "", ""),
+    "node-env-cat": (0, "PRIMARY_LISTENER_MULTIADDR=/ip4/10.0.0.5/udp/49590/quic-v1\n", ""),
+    "journal-tail": (0, "journal one\njournal two", ""),
+    "quorum-check": (0, json.dumps({"available": True, "rc": 0, "detail": ""}), ""),
 }
 
 
@@ -268,6 +302,10 @@ class ServerTestCase(unittest.TestCase):
         self.patch(server, "CPUINFO_PATH", os.path.join(self.tmp.name, "no-cpuinfo"))
 
         server._helper_cache.update({"expires": 0.0, "data": None})
+        server._quorum_cache.update({"expires": 0.0, "data": None})
+        server._write_times.clear()
+        self.patch(server, "SYSTEMD_DIR", os.path.join(self.tmp.name, "systemd"))
+        self.patch(server, "DEFAULT_CONFIG_DIR", os.path.join(self.tmp.name, "etc-telcoin"))
         server.clear_meta_cache()
         server._docker_stats_cache.clear()
         server._setup_running["active"] = False
@@ -292,6 +330,7 @@ class ServerTestCase(unittest.TestCase):
     def popen(self, argv, stdout=None, stderr=None, env=None, **kwargs):
         self.calls.append([str(a) for a in argv])
         proc = FakePopen(argv, stderr, env, kwargs, **self.popen_script)
+        proc.stdin = FakeStdin()
         self.procs.append(proc)
         return proc
 
@@ -352,16 +391,30 @@ class CrossFileContractTest(ServerTestCase):
         # execution address the role check asks the chain about).
         server.read_node_info_text("observer", external_nodes()["observer"])
 
+        server.read_node_env()
+        server.quorum_status()
+
         self.nodes = external_nodes()
         c.get("/api/logs/observer?lines=50")
         c.get("/api/logs/observer/download")
         self.nodes = scripts_nodes()
 
-        c.post("/api/logs/observer/clear")
-        c.get("/api/config/observer/set?field=verbosity&value=-vv", buffered=True)
+        # A node that logs to the journal: tail and follow go through the helper.
+        self.helper_replies["meta-cat"] = (0, "LOG_TARGET=journal\n", "")
+        server.clear_meta_cache()
+        c.get("/api/logs/observer?lines=50")
+        resp = c.get("/api/logs/observer/stream")
+        next(iter(resp.response), None)
+        resp.close()
+        self.helper_replies["meta-cat"] = HELPER_REPLIES["meta-cat"]
+        server.clear_meta_cache()
+
+        c.post("/api/logs/observer/clear", json={})
+        c.post("/api/config/observer/set", json={"field": "verbosity", "value": "-vv"},
+               buffered=True)
         c.post("/api/config/observer/hostname", json={"name": "node7"})
         c.post("/api/config/observer/logrotate", json={"size": "1G"})
-        c.post("/api/config/observer/clear-rotated")
+        c.post("/api/config/observer/clear-rotated", json={})
         c.get("/api/firewall")
         for spec in server.FIREWALL_PORTS:
             port, proto = spec.split("/")
@@ -375,9 +428,9 @@ class CrossFileContractTest(ServerTestCase):
         c.post("/api/caddy/dns-check", json={"domain": "dashboard.example.com",
                                              "public_ip": "203.0.113.10"})
         c.post("/api/caddy/enable", json={"domain": "dashboard.example.com",
-                                          "username": "admin", "password": "long enough",
+                                          "username": "admin", "password": "long enough password",
                                           "public_ip": "203.0.113.10"}, buffered=True)
-        c.post("/api/caddy/disable", buffered=True)
+        c.post("/api/caddy/disable", json={}, buffered=True)
         c.get("/api/rpc/status")
         c.post("/api/rpc/dns-check", json={"domain": "node7.example.com",
                                            "public_ip": "203.0.113.10"})
@@ -388,17 +441,21 @@ class CrossFileContractTest(ServerTestCase):
                      {"domain": "node7.example.com", "public_ip": "203.0.113.10",
                       "move_dashboard_to": "dashboard.node7.example.com"}):
             c.post("/api/rpc/enable", json=body, buffered=True)
-        c.post("/api/rpc/disable", buffered=True)
+        c.post("/api/rpc/disable", json={}, buffered=True)
         c.get("/api/addons/status?node_type=observer")
         c.get("/api/update/status/observer")
-        c.get("/api/update/prepare/observer?ref=v0.15.0-adiri", buffered=True)
-        c.get("/api/update/apply/observer", buffered=True)
-        c.post("/api/update/discard/observer")
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
+        server.clear_meta_cache()
+        c.post("/api/update/prepare/observer", json={"ref": "v0.15.0-adiri"}, buffered=True)
+        self.helper_replies["meta-cat"] = HELPER_REPLIES["meta-cat"]
+        server.clear_meta_cache()
+        c.post("/api/update/apply/observer", json={}, buffered=True)
+        c.post("/api/update/discard/observer", json={})
         c.get("/api/jaeger/status")
-        c.post("/api/jaeger/start")
-        c.post("/api/jaeger/stop")
-        c.post("/api/tracing/enable/observer")
-        c.post("/api/tracing/disable/observer")
+        c.post("/api/jaeger/start", json={})
+        c.post("/api/jaeger/stop", json={})
+        c.post("/api/tracing/enable/observer", json={})
+        c.post("/api/tracing/disable/observer", json={})
 
     def test_helper_path_matches_sudoers(self):
         self.assertEqual(server.HELPER, HELPER_PATH)
@@ -464,9 +521,12 @@ class CrossFileContractTest(ServerTestCase):
         set_vars = {k for k in env if k.startswith("TN_")}
         self.assertIn("TN_SETUP_RPC_DOMAIN", set_vars)
         self.assertEqual(set_vars - keep, set())
-        # Every TN_* the source assigns (TN_CADDY_PASSWORD included).
+        # Every TN_* the source assigns.
         assigned = set(re.findall(r'env\["(TN_[A-Z_]+)"\]', read(SERVER_PY)))
         self.assertEqual(assigned - keep, set())
+        # No secret is kept across sudo, and no secret is put in the environment.
+        for secret in ("TN_BLS_PASSPHRASE", "TN_CADDY_PASSWORD", "TN_SETUP_PASSPHRASE_METHOD"):
+            self.assertNotIn(secret, keep | assigned | set_vars)
         for gone in ("TN_SETUP_RPC_PUBLIC", "TN_SETUP_INSTANCE"):
             self.assertNotIn(gone, set_vars | assigned | keep)
 
@@ -486,16 +546,17 @@ class CrossFileContractTest(ServerTestCase):
         bounds = [pos for _, pos in marks] + [len(text)]
         steps = {n: text[bounds[i]:bounds[i + 1]] for i, (n, _) in enumerate(marks)}
         anchors = {
-            1: ["$EUID -ne 0", "WAS_ACTIVE="],
-            2: ["pip3 install flask"],
+            1: ["$EUID -ne 0", "WAS_ACTIVE=", '"${SUDO_USER:-}" == "$SVC_USER"'],
+            2: ["--require-hashes", "--only-binary=:all:", 'swap_tree "$VENV_NEW" "$VENV_DIR"'],
             3: ["useradd --system"],
             4: ['bash -n "${SRC_DIR}/telcoin-ui-helper.sh"'],
             5: ['mktemp "${SUDOERS_TMP_TEMPLATE}"', 'visudo -cf "${SUDOERS_TMP}"'],
             6: ['"${HELPER_DST}.new"', 'mv -f "${HELPER_DST}.new" "${HELPER_DST}"'],
-            7: ['"${UPDATE_DIR}/update-node.sh"'],
-            8: ['cp "${SRC_DIR}/server.py"', "chown -R"],
-            9: ["LOGROTATE_CONF="],
-            10: ["systemctl daemon-reload"],
+            7: ['"${ENGINE_NEW}/update-node.sh"', 'swap_tree "$ENGINE_NEW" "$UPDATE_DIR"',
+                'lib/release-keys/*.asc'],
+            8: ['cp "${SRC_DIR}/server.py"', 'swap_tree "$UI_NEW" "$INSTALL_DIR"'],
+            9: ["LOGROTATE_CONF=", "logrotate-seed"],
+            10: ["ensure_token 0", "systemctl daemon-reload"],
             11: ['mv -f "${SUDOERS_TMP}" "${SUDOERS_FILE}"'],
             12: ["systemctl restart telcoin-ui"],
         }
@@ -506,6 +567,10 @@ class CrossFileContractTest(ServerTestCase):
         self.assertEqual(text.count('mv -f "${SUDOERS_TMP}" "${SUDOERS_FILE}"'), 1,
                          "the whitelist is swapped in once, at step 11")
         self.assertEqual(text.count("visudo -cf"), 1)
+        # Retired: an unpinned pip install into the system Python, and a chown of
+        # the app tree to the UI account.
+        for gone in ("pip3 install", "--break-system-packages", "chown -R \"${SVC_USER}"):
+            self.assertNotIn(gone, text)
 
 
 # ---------------------------------------------------------------------------
@@ -568,10 +633,13 @@ class SetupEnvTest(ServerTestCase):
         data = dict(FULL_SETUP)
         data.pop("passphrase")
         env, err = server._setup_env(data, want_passphrase=True)
-        self.assertEqual(err, "passphrase required")
+        self.assertTrue(err.startswith("passphrase required"), err)
         env, err = server._setup_env(data, want_passphrase=False)
         self.assertIsNone(err)
         self.assertNotIn("TN_BLS_PASSPHRASE", env)
+        env, err = server._setup_env(FULL_SETUP, want_passphrase=True)
+        self.assertIsNone(err)
+        self.assertNotIn("TN_BLS_PASSPHRASE", env, "the passphrase never enters the environment")
 
     def test_routes_refuse_before_any_helper_call(self):
         for phase in ("keygen", "finalize"):
@@ -596,8 +664,11 @@ class SetupEnvTest(ServerTestCase):
                 proc = self.procs[-1]
                 self.assertEqual(proc.args, ["sudo", "-n", HELPER_PATH, "setup-" + phase])
                 self.assertEqual(proc.env["TN_SETUP_RPC_DOMAIN"], "node7.example.com")
-                self.assertEqual(proc.env.get("TN_BLS_PASSPHRASE") is not None,
-                                 phase == "keygen")
+                self.assertNotIn("TN_BLS_PASSPHRASE", proc.env)
+                self.assertEqual(proc.stdin.data,
+                                 FULL_SETUP["passphrase"] + "\n" if phase == "keygen" else "")
+                self.assertEqual(proc.kwargs.get("stdin"),
+                                 subprocess.PIPE if phase == "keygen" else subprocess.DEVNULL)
                 self.assertFalse(server._setup_running["active"],
                                  "the setup guard is released when the stream closes")
 
@@ -675,7 +746,7 @@ class RpcEnableTest(ServerTestCase):
                 self.assertEqual(self.helper_calls()[-1][4], self.D)
 
     def test_caddy_enable_uses_the_strict_rule(self):
-        body = {"domain": "1.2.3.4", "username": "admin", "password": "long enough"}
+        body = {"domain": "1.2.3.4", "username": "admin", "password": "long enough password"}
         resp = self.client.post("/api/caddy/enable", json=body)
         self.assertEqual(resp.status_code, 400)
         self.assertIn('That dashboard hostname is not valid: "1.2.3.4".', resp.get_json()["error"])
@@ -706,8 +777,8 @@ CONFIG_GOOD = [
     ("worker_listener", "/ip6/::/udp/49594/quic-v1"),
     ("metrics", "127.0.0.1:9101"),
     ("metrics", "off"),
-    ("verbosity", "-vvvvv"),
-    ("docker_image", "us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri"),
+    ("verbosity", "-v"),
+    ("verbosity", "-vvv"),
     ("bootstrap_peers", "none"),
     ("bootstrap_peers", "/home/ubuntu/peers.yaml"),
     ("state_export", "off"),
@@ -722,7 +793,10 @@ CONFIG_BAD = [
     ("metrics", "OFF"),
     ("metrics", "127.0.0.1"),
     ("verbosity", "-vvvvvv"),
-    ("docker_image", "adiri"),
+    ("verbosity", "-vvvv"),
+    ("verbosity", "-vvvvv"),
+    ("metrics", "0.0.0.0:9101"),
+    ("metrics", "10.0.0.5:9101"),
     ("bootstrap_peers", "peers.yaml"),
     ("bootstrap_peers", "None"),
     ("bootstrap_peers", "/tmp/peers file.yaml"),
@@ -743,8 +817,8 @@ class ConfigSetTest(ServerTestCase):
 
     def set_field(self, field, value):
         self.calls.clear()
-        return self.client.get("/api/config/observer/set",
-                               query_string={"field": field, "value": value}, buffered=True)
+        return self.client.post("/api/config/observer/set",
+                                json={"field": field, "value": value}, buffered=True)
 
     def test_fields_and_patterns_match_the_helper(self):
         helper = helper_config_patterns()
@@ -770,7 +844,7 @@ class ConfigSetTest(ServerTestCase):
                 self.assertEqual(self.helper_calls(), [])
 
     def test_unknown_fields_are_refused(self):
-        for field in ("not_a_field", "Metrics", "hostname", ""):
+        for field in ("not_a_field", "Metrics", "hostname", "", "docker_image"):
             with self.subTest(field=field):
                 resp = self.set_field(field, "off")
                 self.assertEqual(resp.status_code, 400)
@@ -918,17 +992,19 @@ class StreamTest(ServerTestCase):
 
     def test_routes_keep_their_method_and_framing(self):
         cases = [
-            ("get", "/api/update/prepare/observer?ref=v0.15.0-adiri", None),
-            ("get", "/api/update/apply/observer", None),
-            ("get", "/api/config/observer/set?field=verbosity&value=-vv", None),
+            ("post", "/api/update/prepare/observer", {"ref": "v0.15.0-adiri"}),
+            ("post", "/api/update/apply/observer", {}),
+            ("post", "/api/config/observer/set", {"field": "verbosity", "value": "-vv"}),
             ("post", "/api/setup/observer/keygen", FULL_SETUP),
             ("post", "/api/setup/observer/finalize", FULL_SETUP),
             ("post", "/api/caddy/enable", {"domain": "dashboard.example.com",
-                                           "username": "admin", "password": "long enough"}),
-            ("post", "/api/caddy/disable", None),
+                                           "username": "admin",
+                                           "password": "long enough password"}),
+            ("post", "/api/caddy/disable", {}),
             ("post", "/api/rpc/enable", {"domain": "node7.example.com"}),
-            ("post", "/api/rpc/disable", None),
+            ("post", "/api/rpc/disable", {}),
         ]
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
         self.popen_script = {"lines": ["stray"], "rc": 3, "stderr_text": "why\n"}
         for method, url, body in cases:
             with self.subTest(url=url):
@@ -1216,8 +1292,9 @@ class NodesAndStatusTest(ServerTestCase):
         self.helper_replies["caddy-status"] = (0, 'note\n{"installed": true, "domain": "d.e"}', "")
         self.assertEqual(self.client.get("/api/caddy/status").get_json()["domain"], "d.e")
         self.helper_replies["update-check"] = (0, 'log line\n{"latest_ref": "v9"}', "")
-        self.assertEqual(self.client.get("/api/update/status/observer").get_json(),
-                         {"latest_ref": "v9"})
+        body = self.client.get("/api/update/status/observer").get_json()
+        self.assertEqual(body["latest_ref"], "v9")
+        self.assertEqual(body["quorum"], {"available": True, "rc": 0, "detail": ""})
 
     def test_endpoint_constants(self):
         self.assertEqual(server.NETWORK_PUBLIC_RPC[2017], ["https://rpc.adiri.tel"])
@@ -1241,31 +1318,56 @@ class NodesAndStatusTest(ServerTestCase):
 # ---------------------------------------------------------------------------
 
 class RefValidationTest(ServerTestCase):
+    """An update ref, and a source setup's build ref, is a release tag of the
+    node's network: vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet."""
 
-    def test_update_prepare_refuses_a_leading_dash(self):
-        for ref in ("-v0.15.0", "--help", "-", "", "v0.15.0 adiri", "v0.15.0;id"):
+    def prepare(self, ref, network="testnet"):
+        self.helper_replies["meta-cat"] = (0, f"NETWORK={network}\n", "")
+        server.clear_meta_cache()
+        self.calls.clear()
+        return self.client.post("/api/update/prepare/observer", json={"ref": ref}, buffered=True)
+
+    def action_calls(self):
+        """Helper calls other than the meta-cat read that finds the network."""
+        return [c for c in self.helper_calls() if c[3] != "meta-cat"]
+
+    def test_update_prepare_refuses_anything_but_a_release_tag(self):
+        for ref in ("-v0.15.0", "--help", "-", "", "v0.15.0 adiri", "v0.15.0;id", "main",
+                    "feature/epoch-wait", "0.15.0", "v1.2-", "v0.15.0",
+                    "5535ef1f0425973bd81ef3162f3d07219c3456d0", "v0.15.0-adiri-hotfix"):
             with self.subTest(ref=ref):
-                resp = self.client.get("/api/update/prepare/observer", query_string={"ref": ref})
+                resp = self.prepare(ref)
                 self.assertEqual(resp.status_code, 400)
-                self.assertEqual(resp.get_json(), {"error": "invalid ref"})
-        self.assertEqual(self.helper_calls(), [], "a refused ref never reaches the helper")
+                self.assertIn("release tag", resp.get_json()["error"])
+                self.assertEqual(self.action_calls(), [], "a refused ref never reaches the helper")
 
-    def test_update_prepare_accepts_ordinary_refs(self):
-        for ref in ("v0.15.0-adiri", "main", "feature/epoch-wait", "0.15.0", "_x", "v1.2-"):
+    def test_update_prepare_accepts_release_tags(self):
+        for ref, net in (("v0.15.0-adiri", "testnet"), ("v0.16.1-adiri", "adiri"),
+                         ("v1.0.0", "mainnet")):
             with self.subTest(ref=ref):
-                self.calls.clear()
-                resp = self.client.get("/api/update/prepare/observer", query_string={"ref": ref},
-                                       buffered=True)
+                resp = self.prepare(ref, net)
                 self.assertEqual(resp.status_code, 200)
-                self.assertEqual(self.helper_calls(),
+                self.assertEqual(self.action_calls(),
                                  [["sudo", "-n", HELPER_PATH, "update-prepare", ref]])
 
-    def test_setup_build_ref_refuses_a_leading_dash(self):
+    def test_update_prepare_follows_the_network(self):
+        self.assertEqual(self.prepare("v1.0.0-adiri", "mainnet").status_code, 400)
+        self.assertEqual(self.prepare("v1.0.0", "testnet").status_code, 400)
+        self.assertEqual(self.prepare("v1.0.0", "devnet").status_code, 400)
+
+    def test_update_prepare_and_apply_refuse_get(self):
+        self.assertEqual(self.client.get("/api/update/prepare/observer?ref=v0.15.0-adiri").status_code, 405)
+        self.assertEqual(self.client.get("/api/update/apply/observer").status_code, 405)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_setup_build_ref_is_a_release_tag(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            env, err = server._setup_env(dict(FULL_SETUP, install_method="source",
-                                              build_ref="-v0.15.0"), want_passphrase=True)
-            self.assertIsNone(env)
-            self.assertEqual(err, "invalid build ref")
+            for bad in ("-v0.15.0", "main", "v1.0.0"):
+                with self.subTest(ref=bad):
+                    env, err = server._setup_env(dict(FULL_SETUP, install_method="source",
+                                                      build_ref=bad), want_passphrase=True)
+                    self.assertIsNone(env)
+                    self.assertEqual(err, "build ref must be a testnet release tag")
             env, err = server._setup_env(dict(FULL_SETUP, install_method="source",
                                               build_ref="v0.15.0-adiri"), want_passphrase=True)
             self.assertIsNone(err)
