@@ -913,6 +913,260 @@ _tn_root_binary_ok() {
     return 0
 }
 
+# _tn_own_scan TREE SUID -- print "<reason>: <path>" for every entry under TREE
+# (not TREE itself) that is a symlink, neither a regular file nor a directory, a
+# regular file with more than one hard link, or owned by neither root nor uid
+# SUID. Symlinks are never followed. rc 1 when anything was printed.
+_tn_own_scan() {
+    local tree="$1" suid="$2" p st found=0
+    [[ -d "$tree" ]] || return 0
+    while IFS= read -r -d '' p; do
+        if [[ -L "$p" ]]; then
+            printf 'symlink: %s\n' "$p"; found=1; continue
+        fi
+        if [[ ! -f "$p" && ! -d "$p" ]]; then
+            printf 'not a file or directory: %s\n' "$p"; found=1; continue
+        fi
+        st="$(stat -c '%u %h' -- "$p" 2>/dev/null)" || st="? ?"
+        if [[ "${st%% *}" != 0 && "${st%% *}" != "$suid" ]]; then
+            printf 'owned by uid %s: %s\n' "${st%% *}" "$p"; found=1; continue
+        fi
+        if [[ -f "$p" && "${st##* }" != 1 ]]; then
+            printf 'more than one hard link: %s\n' "$p"; found=1
+        fi
+    done < <(find -P "$tree" -mindepth 1 -print0 2>/dev/null)
+    return "$found"
+}
+
+# _tn_own_mode PATH CUR -- "<group> <mode>" for an entry being re-owned by
+# tn_migrate_ownership: the layout table for the files it names, else root and
+# CUR without group and other write. bls-tpm.* stays readable by the service
+# group, because the start script that unseals it runs as the service user.
+_tn_own_mode() {
+    local name="${1##*/}" cur="$2"
+    case "$name" in
+        .node-meta|.pending-update|bls-passphrase) printf 'root 0600\n' ;;
+        node.env|bootstrap-peers.yaml|telcoin-network.version) printf 'root 0644\n' ;;
+        telcoin-network|start-*.sh) printf 'root 0755\n' ;;
+        bls-tpm.pub|bls-tpm.priv) printf '%s 0640\n' "${SERVICE_GROUP:-root}" ;;
+        *) printf 'root %s\n' "$(_tn_strip_gw "$cur")" ;;
+    esac
+}
+
+# _tn_own_apply TREE -- re-own every entry under TREE root (chown -h) with the
+# mode from _tn_own_mode, parents before children. Each entry is checked again
+# right before it is changed, when its directory is already root-owned. Prints
+# "<reason>: <path>" and returns 1 for an entry that is now a symlink or not a
+# file or directory; 2 when chown or chmod failed.
+_tn_own_apply() {
+    local tree="$1" p cur gm rc=0
+    [[ -d "$tree" ]] || return 0
+    while IFS= read -r -d '' p; do
+        if [[ -L "$p" ]] || [[ ! -f "$p" && ! -d "$p" ]]; then
+            printf 'symlink or special file: %s\n' "$p"
+            rc=1
+            continue
+        fi
+        cur="$(stat -c '%a' -- "$p" 2>/dev/null)" || { rc=2; continue; }
+        if [[ -d "$p" ]]; then
+            gm="root $(_tn_strip_gw "$cur")"
+        else
+            gm="$(_tn_own_mode "$p" "$cur")"
+        fi
+        if ! chown -h -- "root:${gm%% *}" "$p" || ! chmod -- "${gm##* }" "$p"; then
+            rc=2
+        fi
+    done < <(find -P "$tree" -mindepth 1 -print0 2>/dev/null)
+    return "$rc"
+}
+
+# _tn_own_move_start PRE SVC METHOD FN -- move the start wrapper an older release
+# kept at <install>/start-<svc>.sh to tn_start_script_path METHOD (root 0755;
+# docker root:SERVICE_GROUP 0750), point the unit's references at the new path,
+# reload systemd and remove the old file. Without a reload (no systemctl, or a
+# TN_ROOT_PREFIX fixture tree) the old file is removed only under a fixture tree.
+# rc 0 moved or nothing to move, 1 refused, 2 failed (the old file stays in use).
+_tn_own_move_start() {
+    local pre="$1" svc="$2" method="$3" fn="$4" old_real old new_real new unit body mode group rc=0
+    old_real="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
+    old="${pre}${old_real}"
+    [[ -f "$old" && ! -L "$old" ]] || return 0
+    if [[ "$method" == "docker" ]]; then
+        new_real="$(tn_start_script_path docker)" || return 1
+        mode=0750
+        group="${SERVICE_GROUP:-root}"
+    else
+        new_real="$(tn_start_script_path source)" || return 1
+        mode=0755
+        group=root
+    fi
+    new="${pre}${new_real}"
+    _tn_root_layout_dir "${new%/*}" root 0755 || return $?
+    tn_write_root_file "$new" "$mode" "$group" < "$old" || return $?
+    unit="${pre}/etc/systemd/system/${svc}.service"
+    if [[ ! -f "$unit" || -L "$unit" ]] || ! grep -qF -- "$old_real" "$unit"; then
+        "$fn" warn "The unit ${unit} does not name ${old_real}; the new start script ${new_real} is in place but unused until the unit is rewritten." || true
+        return 0
+    fi
+    body="$(TN_OLD="$old_real" TN_NEW="$new_real" awk '
+        { out = ""; line = $0
+          while ((i = index(line, ENVIRON["TN_OLD"])) > 0) {
+              out = out substr(line, 1, i - 1) ENVIRON["TN_NEW"]
+              line = substr(line, i + length(ENVIRON["TN_OLD"]))
+          }
+          print out line }' "$unit")" || return 2
+    printf '%s\n' "$body" | tn_write_root_file "$unit" 0644 || return $?
+    if [[ -n "$pre" ]]; then
+        rm -f -- "$old"
+    elif command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload; then
+        rm -f -- "$old"
+    else
+        "$fn" warn "systemd was not reloaded; ${old_real} stays until the next daemon-reload." || true
+        rc=0
+    fi
+    "$fn" log "Start script moved to ${new_real}; the unit uses it from the next restart." || true
+    return "$rc"
+}
+
+# tn_migrate_ownership [progress-fn] -- move a host set up by an older release
+# (the service user owning the install, config and log trees) to the root-owned
+# layout. The caller holds the update lock. Never stops or restarts the node; a
+# moved start script takes effect at the caller's next restart.
+#   0. OWNERSHIP_LAYOUT=2 already in .node-meta (or no .node-meta): rc 0 at once.
+#      Mainnet: rc 3 and nothing changed (a mainnet host is installed fresh).
+#      Network not known (and not devnet): rc 1.
+#   1. The install and config dirs themselves become root:root 0755, so the
+#      service user can no longer add or rename entries in them.
+#   2. Both trees (and /usr/local/libexec/telcoin) are scanned: a symlink, a
+#      special file, a file with other hard links or an entry owned by neither
+#      root nor the service user stops the migration with the list on stderr,
+#      rc 1, nothing changed beyond step 1.
+#   3. Every entry becomes root-owned (chown -h, never recursive, parents first)
+#      with the layout table's mode (others keep theirs minus group and other
+#      write); bls-tpm.* root:SERVICE_GROUP 0640.
+#   4. The log dir becomes root:telcoin-log 0750, its two log files are made
+#      root:telcoin-log 0640, a symlink there replaced (tn_precreate_log_files).
+#   5. The start script moves to /usr/local/libexec/telcoin (_tn_own_move_start).
+#   6. OWNERSHIP_LAYOUT=2 is recorded, and a warning says the node binary was
+#      writable by the service user and should be reinstalled from a release.
+# progress-fn is called as `fn step|log|warn MESSAGE` (default: stderr). Paths
+# honour TN_ROOT_PREFIX. SERVICE_USER/SERVICE_GROUP default to .node-meta's
+# HOST_SERVICE_USER/HOST_SERVICE_GROUP. rc 0 done or already, 1 refused (list
+# printed), 2 a step failed (entries already re-owned stay root-owned), 3 mainnet.
+tn_migrate_ownership() {
+    local fn="${1:-}" pre="${TN_ROOT_PREFIX:-}" meta layout rc=0 net raw suid svc method
+    local inst etc logd libexec list d nl
+    nl=$'\n'
+    if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
+        fn="_tn_wait_say"
+    fi
+    meta="${pre}${DEFAULT_CONFIG_DIR}/.node-meta"
+    if [[ ! -e "$meta" && ! -L "$meta" ]]; then
+        "$fn" log "No ${meta}; no installed node layout to migrate." || true
+        return 0
+    fi
+    layout="$(meta_get OWNERSHIP_LAYOUT "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        "$fn" warn "OWNERSHIP_LAYOUT is set more than once in ${meta}; fix the file first." || true
+        return 1
+    fi
+    if [[ "$layout" == "2" ]]; then
+        return 0
+    fi
+    rc=0
+    net="$(tn_detect_network "$meta" 2>/dev/null)" || net=""
+    if [[ -z "$net" ]]; then
+        raw="$(meta_get NETWORK "$meta" 2>/dev/null)" || raw=""
+        [[ "$raw" == "devnet" ]] && net="devnet"
+    fi
+    if [[ "$net" == "mainnet" ]]; then
+        "$fn" warn "This mainnet host was set up with service-user-owned install and config directories. It is not migrated in place: install it fresh with this release." || true
+        return 3
+    fi
+    if [[ -z "$net" ]]; then
+        "$fn" warn "Cannot tell this node's network from ${meta}; not migrating the ownership layout." || true
+        return 1
+    fi
+    raw="$(meta_get HOST_SERVICE_USER "$meta" 2>/dev/null)" || raw=""
+    [[ -n "$raw" ]] && SERVICE_USER="$raw"
+    raw="$(meta_get HOST_SERVICE_GROUP "$meta" 2>/dev/null)" || raw=""
+    [[ -n "$raw" ]] && SERVICE_GROUP="$raw"
+    suid="$(id -u "${SERVICE_USER:-}" 2>/dev/null)" || suid=""
+    if [[ ! "$suid" =~ ^[0-9]+$ || "$suid" =~ ^0+$ ]]; then
+        "$fn" warn "The service user '${SERVICE_USER:-}' is unknown or root; not migrating." || true
+        return 1
+    fi
+    rc=0
+    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        "$fn" warn "INSTALL_METHOD is set more than once in ${meta}; fix the file first." || true
+        return 1
+    fi
+    svc="$(tn_resolve_service 2>/dev/null)" || svc="${SERVICE_NAME:-telcoin}"
+    inst="${pre}${DEFAULT_INSTALL_DIR}"
+    etc="${pre}${DEFAULT_CONFIG_DIR}"
+    logd="${pre}${DEFAULT_LOG_DIR}"
+    libexec="${pre}$(tn_start_script_path source)"
+    libexec="${libexec%/*}"
+
+    "$fn" step "Moving the install and config directories to root ownership..." || true
+    # Step 1: the two top directories only.
+    for d in "$inst" "$etc"; do
+        [[ -e "$d" || -L "$d" ]] || continue
+        rc=0
+        _tn_root_layout_dir "$d" root 0755 || rc=$?
+        [[ $rc -eq 0 ]] || return "$rc"
+    done
+    # Step 2: nothing is changed below the top directories if anything is off.
+    list="$(_tn_own_scan "$inst" "$suid"; _tn_own_scan "$etc" "$suid"; _tn_own_scan "$libexec" "$suid")"
+    if [[ -d "$libexec" ]] && ! tn_root_dir_ok "$libexec"; then
+        [[ -z "$list" ]] || list="${list}${nl}"
+        list="${list}not a root-owned directory: ${libexec}"
+    fi
+    if [[ -n "$list" ]]; then
+        "$fn" warn "Found entries that need a review before the ownership migration (nothing below the top directories was changed):" || true
+        printf '%s\n' "$list" >&2
+        return 1
+    fi
+    # Step 3.
+    for d in "$inst" "$etc"; do
+        rc=0
+        list="$(_tn_own_apply "$d")" || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            [[ -z "$list" ]] || printf '%s\n' "$list" >&2
+            "$fn" warn "Re-owning ${d} did not finish (rc ${rc}); entries already changed stay root-owned." || true
+            return "$rc"
+        fi
+    done
+    # Step 4: the log dir (P0-9) and its two files.
+    if [[ -e "$logd" || -L "$logd" ]]; then
+        rc=0
+        _tn_root_layout_dir "$logd" "$TN_LOG_GROUP" 0750 || rc=$?
+        [[ $rc -eq 0 ]] || return "$rc"
+        tn_precreate_log_files "$logd" "$svc" || return $?
+    fi
+    # Step 5.
+    rc=0
+    _tn_own_move_start "$pre" "$svc" "${method:-binary}" "$fn" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    # Re-check: nothing under the trees may be left service-user-owned or linked.
+    list="$(_tn_own_scan "$inst" 0; _tn_own_scan "$etc" 0; _tn_own_scan "$libexec" 0)"
+    if [[ -n "$list" ]]; then
+        "$fn" warn "Entries appeared or changed during the migration; review them and run it again:" || true
+        printf '%s\n' "$list" >&2
+        return 1
+    fi
+    # Step 6.
+    rc=0
+    meta_set OWNERSHIP_LAYOUT 2 "$meta" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    "$fn" log "Install, config and log directories are root-owned (OWNERSHIP_LAYOUT=2)." || true
+    if [[ "${method:-binary}" != "docker" ]]; then
+        "$fn" warn "The node binary was writable by the service user before this migration. Reinstall it from a verified release to be sure it was not replaced." || true
+    fi
+    return 0
+}
+
 # -----------------------------------------------------------------------------
 # INPUT VALIDATION HELPERS
 # -----------------------------------------------------------------------------
