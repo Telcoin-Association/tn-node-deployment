@@ -982,7 +982,7 @@ _tn_own_apply() {
 
 # _tn_own_move_start PRE SVC METHOD FN -- move the start wrapper an older release
 # kept at <install>/start-<svc>.sh to tn_start_script_path METHOD (root 0755;
-# docker root:SERVICE_GROUP 0750), point the unit's references at the new path,
+# docker alike), point the unit's references at the new path,
 # reload systemd and remove the old file. Without a reload (no systemctl, or a
 # TN_ROOT_PREFIX fixture tree) the old file is removed only under a fixture tree.
 # rc 0 moved or nothing to move, 1 refused, 2 failed (the old file stays in use).
@@ -991,14 +991,13 @@ _tn_own_move_start() {
     old_real="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
     old="${pre}${old_real}"
     [[ -f "$old" && ! -L "$old" ]] || return 0
+    # Both forms root 0755: neither holds a secret, and the UI reads the launch line.
+    mode=0755
+    group=root
     if [[ "$method" == "docker" ]]; then
         new_real="$(tn_start_script_path docker)" || return 1
-        mode=0750
-        group="${SERVICE_GROUP:-root}"
     else
         new_real="$(tn_start_script_path source)" || return 1
-        mode=0755
-        group=root
     fi
     new="${pre}${new_real}"
     _tn_root_layout_dir "${new%/*}" root 0755 || return $?

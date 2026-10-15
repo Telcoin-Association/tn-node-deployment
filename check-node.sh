@@ -262,6 +262,19 @@ detect_data_dir() {
     return 0
 }
 
+# meta_flag KEY META -- an ENABLE_* value from .node-meta, false when absent. A key
+# set more than once warns and reads as unknown, so neither copy is trusted.
+meta_flag() {
+    local v rc=0
+    v="$(meta_get "$1" "$2" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "$1 is set more than once in $2; not checked until the extra lines are removed" >&2
+        printf 'unknown\n'
+        return 0
+    fi
+    printf '%s\n' "${v:-false}"
+}
+
 # have_fns <name>... -- rc 0 when lib/common.sh defines every named function.
 # The checks added in v1.2.0 call helpers from lib/common.sh 1.6.0; with an older
 # library (check-node.sh updated, lib/ not) they are skipped instead of dying on
@@ -893,7 +906,7 @@ report_testnet_addons() {
 
     # Health-monitor endpoint.
     local hc
-    hc="$(meta_get ENABLE_HEALTHCHECK_MONITOR "$meta" 2>/dev/null || echo false)"
+    hc="$(meta_flag ENABLE_HEALTHCHECK_MONITOR "$meta")"
     if [[ "$hc" == "true" ]]; then
         if curl -fsS "http://127.0.0.1:${TN_KUMA_PORT}" >/dev/null 2>&1; then
             print_ok "Health endpoint responds on 127.0.0.1:${TN_KUMA_PORT}"
@@ -904,7 +917,7 @@ report_testnet_addons() {
 
     # WireGuard admin overlay.
     local vpn
-    vpn="$(meta_get ENABLE_VPN "$meta" 2>/dev/null || echo false)"
+    vpn="$(meta_flag ENABLE_VPN "$meta")"
     if [[ "$vpn" == "true" || "$vpn" == "pending" ]]; then
         if ip link show wg0 >/dev/null 2>&1; then
             if command -v wg >/dev/null 2>&1 && wg show wg0 2>/dev/null | grep -qE 'latest handshake'; then
@@ -1790,11 +1803,8 @@ check_ownership_layout() {
     [[ ! -e "$etc" ]] || _cn_own "$etc" root root 0755
     [[ ! -e "$libexec" ]] || _cn_own "$libexec" root root 0755
     if [[ -e "$start" || -L "$start" ]]; then
-        if [[ "$method" == "docker" ]]; then
-            _cn_own "$start" root "$sgroup" 0750
-        else
-            _cn_own "$start" root root 0755
-        fi
+        # Both forms are root 0755: neither holds a secret.
+        _cn_own "$start" root root 0755
     else
         CN_OWN_BAD="${CN_OWN_BAD}  ${start}: missing (the unit starts the node through it)"$'\n'
     fi
@@ -1825,6 +1835,144 @@ check_ownership_layout() {
     printf '%s' "$CN_OWN_BAD"
     print_info "  update-node.sh, edit-config.sh and setup-node.sh refuse root writes into paths like these."
     (( ++HEALTH_ISSUES ))
+    return 0
+}
+
+# _cn_launch_file -- the installed node's launch file (tn_node_launch_target), or
+# nothing.
+_cn_launch_file() {
+    local line
+    line="$(tn_node_launch_target 2>/dev/null)" || return 1
+    printf '%s\n' "${line##* }"
+}
+
+# check_unit_environ -- how the BLS passphrase reaches the node, read from the
+# unit and the start script (never from /proc/<pid>/environ: the node's own scrub
+# leaves the variable's name there). A failure when the unit's environment or an
+# EnvironmentFile= carries TN_BLS_PASSPHRASE, or when the start script exports
+# it or hands it to docker with -e; OK when the node line reads it from stdin or
+# a systemd credential.
+check_unit_environ() {
+    local unit envs="" files="" f launch src="" bad=0
+    have_fns tn_node_launch_target tn_launch_flag_get || return 0
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
+    [[ -f "$unit" ]] || return 0
+    if [[ -z "${TN_ROOT_PREFIX:-}" ]] && command -v systemctl >/dev/null 2>&1; then
+        envs="$(systemctl show -p Environment --value "$SERVICE_NAME" 2>/dev/null || true)"
+        files="$(systemctl show -p EnvironmentFiles --value "$SERVICE_NAME" 2>/dev/null | awk '{print $1}' || true)"
+    else
+        envs="$(grep -E '^Environment=' "$unit" 2>/dev/null || true)"
+        files="$(sed -n 's/^EnvironmentFile=-\{0,1\}//p' "$unit" 2>/dev/null)"
+    fi
+    if printf '%s\n' "$envs" | grep -q 'TN_BLS_PASSPHRASE='; then
+        print_error "The unit ${SERVICE_NAME}.service sets TN_BLS_PASSPHRASE in its environment: the passphrase is readable with systemctl show."
+        print_info "  Run update-node.sh or edit-config.sh to move it to a systemd credential."
+        bad=1
+    fi
+    for f in $files; do
+        f="${TN_ROOT_PREFIX:-}${f}"
+        if [[ -r "$f" ]] && grep -q 'TN_BLS_PASSPHRASE=' "$f" 2>/dev/null; then
+            print_error "${f} (an EnvironmentFile= of the unit) holds TN_BLS_PASSPHRASE."
+            bad=1
+        fi
+    done
+    launch="$(_cn_launch_file)" || launch=""
+    if [[ -n "$launch" && -r "$launch" ]]; then
+        if grep -qE '(^|[[:space:]])(export[[:space:]]+TN_BLS_PASSPHRASE|-e[[:space:]]+"?TN_BLS_PASSPHRASE)' "$launch"; then
+            print_error "The start script ${launch} passes the passphrase through the environment (it stays in the node's process environment)."
+            print_info "  update-node.sh and edit-config.sh rewrite it to hand the passphrase to the node on stdin."
+            bad=1
+        fi
+        src="$(tn_launch_flag_get "$launch" --bls-passphrase-source 2>/dev/null || true)"
+    fi
+    if [[ $bad -ne 0 ]]; then
+        (( ++HEALTH_ISSUES ))
+    elif [[ "$src" == "stdin" || "$src" == "credential" ]]; then
+        print_ok "BLS passphrase reaches the node on ${src}, not through its environment"
+    else
+        print_info "BLS passphrase delivery not confirmed (no --bls-passphrase-source on the node line of ${launch:-the launch file})."
+    fi
+    return 0
+}
+
+# check_unit_sandbox -- the confinement of the node. A binary install's unit
+# must carry the sandbox directives tn_write_node_unit writes; a Docker install's
+# start script the container hardening flags. Missing ones are warnings (the
+# node runs, with a larger blast radius).
+check_unit_sandbox() {
+    local unit text d missing="" launch method
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
+    [[ -r "$unit" ]] || return 0
+    method="$(meta_get INSTALL_METHOD 2>/dev/null || true)"
+    if [[ "$method" == "docker" ]]; then
+        launch="$(_cn_launch_file 2>/dev/null)" || launch=""
+        [[ -n "$launch" && -r "$launch" ]] || return 0
+        text="$(tr '\n' ' ' < "$launch")"
+        for d in "--cap-drop ALL" "--security-opt no-new-privileges" "--read-only" "--pids-limit" \
+            "--log-opt max-size=" "--pull=never"; do
+            [[ "$text" == *" ${d}"* ]] || missing="${missing} ${d}"
+        done
+        if [[ -n "$missing" ]]; then
+            print_warn "The Docker start script lacks container hardening:${missing} (update-node.sh rewrites it)."
+        else
+            print_ok "Docker container runs with dropped capabilities, no-new-privileges and a read-only root"
+        fi
+        return 0
+    fi
+    text="$(cat "$unit")"
+    for d in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=yes \
+        ProtectKernelTunables=yes ProtectKernelModules=yes ProtectControlGroups=yes RestrictSUIDSGID=yes \
+        LockPersonality=yes RestrictNamespaces=yes LimitCORE=0 UMask=0077 CapabilityBoundingSet=; do
+        printf '%s\n' "$text" | grep -qxF -- "$d" || missing="${missing} ${d}"
+    done
+    if [[ -n "$missing" ]]; then
+        print_warn "The unit ${SERVICE_NAME}.service lacks sandbox settings:${missing} (update-node.sh rewrites it)."
+    else
+        print_ok "Node unit sandbox in place (ProtectSystem=strict, no capabilities, no core dumps)"
+    fi
+    return 0
+}
+
+# check_health_score -- systemd's exposure score of a binary install's unit
+# (systemd-analyze security): a warning above 3.0. Docker units run the docker
+# client as root and are not scored.
+check_health_score() {
+    local unit score
+    [[ -z "${TN_ROOT_PREFIX:-}" ]] || return 0
+    command -v systemd-analyze >/dev/null 2>&1 || return 0
+    [[ "$(meta_get INSTALL_METHOD 2>/dev/null || true)" != "docker" ]] || return 0
+    unit="/etc/systemd/system/${SERVICE_NAME}.service"
+    [[ -r "$unit" ]] || return 0
+    score="$(systemd-analyze security --no-pager "${SERVICE_NAME}.service" 2>/dev/null \
+        | grep -o 'Overall exposure level for [^:]*: [0-9.]*' | awk '{print $NF}')"
+    if [[ ! "$score" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        print_info "Unit exposure score not available (systemd-analyze security gave none)."
+    elif awk -v s="$score" 'BEGIN { exit !(s + 0 <= 3.0) }'; then
+        print_ok "Unit exposure score ${score} (3.0 or lower)"
+    else
+        print_warn "Unit exposure score ${score} is above 3.0: the node's sandbox is weaker than the deployment scripts write (update-node.sh rewrites the unit)."
+    fi
+    return 0
+}
+
+# check_healthcheck_on_mainnet -- the testnet health monitor never runs on a
+# mainnet node: a failure when the node line has --healthcheck or .node-meta
+# has ENABLE_HEALTHCHECK_MONITOR=true there.
+check_healthcheck_on_mainnet() {
+    local launch v="" flag=""
+    have_fns tn_detect_network tn_launch_flag_get || return 0
+    [[ "$(tn_detect_network 2>/dev/null || true)" == "mainnet" ]] || return 0
+    launch="$(_cn_launch_file 2>/dev/null)" || launch=""
+    if [[ -n "$launch" && -r "$launch" ]] && tn_launch_flag_get "$launch" --healthcheck >/dev/null 2>&1; then
+        flag="yes"
+    fi
+    v="$(meta_get ENABLE_HEALTHCHECK_MONITOR 2>/dev/null || true)"
+    if [[ -n "$flag" || "$v" == "true" ]]; then
+        print_error "The testnet health monitor is on for this mainnet node (--healthcheck on the node line or ENABLE_HEALTHCHECK_MONITOR=true); remove it."
+        (( ++HEALTH_ISSUES ))
+    else
+        print_ok "No testnet health monitor on this mainnet node"
+    fi
     return 0
 }
 
