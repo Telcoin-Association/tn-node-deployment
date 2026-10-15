@@ -2913,7 +2913,7 @@ finalize_install_inputs() {
     # Values read back from .node-meta get the checks the flags got: the image and the
     # binary path go into the root-run start wrapper.
     case "$INSTALL_METHOD" in
-        ""|source|docker|existing) ;;
+        ""|source|docker|existing|release) ;;
         *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, docker or existing." ;;
     esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
