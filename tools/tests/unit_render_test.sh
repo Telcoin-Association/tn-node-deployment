@@ -179,6 +179,26 @@ check_rc "binary: relative runner refused" 1 "$RC"
 TN_DOCKER_IDS=0:0 render script docker "$IMG" "$ARGS_D"
 check_rc "docker: uid 0 refused" 1 "$RC"
 
+# --- the container memory cap (TN_DOCKER_MEMORY, else 90% of the host's RAM) -----------
+mem_case() {  # mem_case NAME TN_DOCKER_MEMORY EXPECTED-RC EXPECTED-MEMORY-WORDS
+    TN_DOCKER_MEMORY="$2" render script docker "$IMG" "$ARGS_D"
+    check "$1" "$3 $4" "$RC $(printf '%s\n' "$OUT" | grep -oE -- '--memory [^ ]+' || echo none)"
+}
+mem_case "memory 4G (upper case) is written in lower case" 4G 0 "--memory 4g"
+mem_case "memory 4096M" 4096M 0 "--memory 4096m"
+mem_case "memory 512m" 512m 0 "--memory 512m"
+mem_case "memory 4x refused" 4x 1 none
+mem_case "memory 4gb refused" 4gb 1 none
+mem_case "memory 1k (under docker's 6m floor) refused" 1k 1 none
+mem_case "memory 0g refused" 0g 1 none
+TN_DOCKER_MEMORY=4x render script docker "$IMG" "$ARGS_D"
+check "memory refusal names the variable" yes "$(grep -q 'TN_DOCKER_MEMORY=4x' "$T/err" && echo yes || echo no)"
+printf 'MemTotal:       16384000 kB\n' > "$T/meminfo"
+TN_MEMINFO="$T/meminfo" mem_case "no TN_DOCKER_MEMORY: 90% of a 16 GB host" "" 0 "--memory 14400m"
+printf 'MemTotal:         524288 kB\n' > "$T/meminfo"
+TN_MEMINFO="$T/meminfo" mem_case "no TN_DOCKER_MEMORY, 512 MB host: no cap" "" 0 none
+check "a host with no cap is warned about" yes "$(grep -q 'no container memory cap' "$T/err" && echo yes || echo no)"
+
 # --- tn_docker_image_allowed / validate_docker_image ----------------------------------
 REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 D64="$(printf '0123456789abcdef%.0s' 1 2 3 4)"

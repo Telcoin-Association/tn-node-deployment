@@ -2828,17 +2828,40 @@ _tn_docker_ids() {
 }
 
 # _tn_docker_memory -- the container memory cap for --memory: TN_DOCKER_MEMORY
-# when it is set (digits with an optional b, k, m or g), else 90% of the host's
-# RAM in MiB. Prints nothing when neither is known.
+# when it is set (1 to 9 digits with an optional unit b, k, m or g in either
+# case, printed in lower case; at least 6m, docker's floor), else 90% of the
+# host's RAM in MiB (MemTotal from TN_MEMINFO, a fixture override, default
+# /proc/meminfo). rc 1 with a message for a TN_DOCKER_MEMORY docker cannot use.
+# When the host's RAM cannot be read or is under 1 GiB it prints nothing (no
+# cap is written) and warns on stderr.
 _tn_docker_memory() {
-    local kb
+    local kb v n u bytes
     if [[ -n "${TN_DOCKER_MEMORY:-}" ]]; then
-        [[ "$TN_DOCKER_MEMORY" =~ ^[1-9][0-9]*[bkmg]?$ ]] && printf '%s\n' "$TN_DOCKER_MEMORY"
+        v="$(printf '%s' "$TN_DOCKER_MEMORY" | tr 'BKMG' 'bkmg')"
+        if [[ ! "$v" =~ ^([1-9][0-9]{0,8})([bkmg]?)$ ]]; then
+            print_warn "TN_DOCKER_MEMORY=${TN_DOCKER_MEMORY} is not a memory size such as 8g or 8192m (digits and one of b, k, m, g)" >&2
+            return 1
+        fi
+        n="${BASH_REMATCH[1]}"
+        u="${BASH_REMATCH[2]}"
+        case "$u" in
+            k) bytes=$(( n * 1024 )) ;;
+            m) bytes=$(( n * 1048576 )) ;;
+            g) bytes=$(( n * 1073741824 )) ;;
+            *) bytes="$n" ;;
+        esac
+        if (( bytes < 6291456 )); then
+            print_warn "TN_DOCKER_MEMORY=${TN_DOCKER_MEMORY} is below docker's 6m floor for --memory" >&2
+            return 1
+        fi
+        printf '%s\n' "$v"
         return 0
     fi
-    kb="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
-    [[ "$kb" =~ ^[0-9]+$ ]] || return 0
-    (( kb >= 1048576 )) || return 0
+    kb="$(awk '$1 == "MemTotal:" { print $2; exit }' "${TN_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)"
+    if [[ ! "$kb" =~ ^[0-9]{1,15}$ ]] || (( kb < 1048576 )); then
+        print_warn "no container memory cap written: the host's memory is under 1 GiB or could not be read; set TN_DOCKER_MEMORY (such as 768m) to cap it" >&2
+        return 0
+    fi
     printf '%sm\n' "$(( kb * 9 / 10 / 1024 ))"
 }
 
@@ -2907,7 +2930,7 @@ _tn_start_script_text() {
             return 1
         fi
         ids="$(_tn_docker_ids)" || { print_warn "no uid:gid for ${TN_G_USER}:${TN_G_GROUP} (the account must exist and not be root)" >&2; return 1; }
-        mem="$(_tn_docker_memory)"
+        mem="$(_tn_docker_memory)" || return 1
         dbin="$(_tn_docker_bin)"
     else
         _tn_safe_path "$runner" || { print_warn "node binary path refused: ${runner}" >&2; return 1; }
