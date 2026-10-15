@@ -4186,6 +4186,34 @@ addon_meta_get() {
     printf '%s\n' "$v"
 }
 
+# addon_meta_write_begin — run once before an add-on script's first .node-meta
+# write on an existing install: take the update lock (tn_acquire_update_lock; a
+# caller with its own EXIT trap sets TN_EXIT_TRAP_OWNED=1 first and releases the
+# lock from that trap) and migrate an old ownership layout so meta_set can write.
+# rc 0 ready (also on a repeat call in the same run); 1 the lock is held by another
+# run or the migration refused or failed (message on stderr; nothing was written).
+addon_meta_write_begin() {
+    local rc
+    if [[ "${_ADDON_META_READY:-0}" == "1" && -n "${TN_UPDATE_LOCK_KIND:-}" ]]; then
+        return 0
+    fi
+    if [[ -z "${TN_UPDATE_LOCK_KIND:-}" ]] && ! tn_acquire_update_lock >/dev/null 2>&1; then
+        print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished." >&2
+        return 1
+    fi
+    # CORE-1a: drop the declare -F guard once tn_migrate_ownership is in every lib/common.sh.
+    if declare -F tn_migrate_ownership >/dev/null; then
+        rc=0
+        tn_migrate_ownership >&2 || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            print_error "The ownership migration stopped (rc ${rc}); .node-meta was not changed." >&2
+            return 1
+        fi
+    fi
+    _ADDON_META_READY=1
+    return 0
+}
+
 # tn_testnet_addons_present — rc 0 when a testnet add-on or the Caddy edge is
 # installed on this host, printing a comma list of what was found (vpn,
 # observability, caddy); rc 1 and no output when none is. Reads files only, so it
