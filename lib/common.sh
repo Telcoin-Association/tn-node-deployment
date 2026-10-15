@@ -3049,6 +3049,168 @@ tn_docker_image_allowed() {
     esac
 }
 
+# _tn_guard_say KIND MESSAGE [progress-fn] -- hand MESSAGE to progress-fn, or
+# print it on stderr.
+_tn_guard_say() {
+    if [[ -n "${3:-}" ]] && declare -F "$3" >/dev/null 2>&1; then
+        "$3" "$1" "$2" || true
+    else
+        printf 'quorum guard: %s\n' "$2" >&2
+    fi
+}
+
+# _tn_guard_network -- testnet, mainnet or devnet for this host (tn_detect_network,
+# or NETWORK=devnet in .node-meta); an empty line when not known.
+_tn_guard_network() {
+    local net=""
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if [[ -z "$net" && "$(meta_get NETWORK 2>/dev/null || true)" == "devnet" ]]; then
+        net="devnet"
+    fi
+    printf '%s\n' "$net"
+}
+
+# _tn_commit_authors JSON -- from a tn_latestConsensusHeader answer print
+# "<distinct authors> <commit timestamp> <epoch|->". rc 1 when the answer has no
+# commit timestamp or no author.
+_tn_commit_authors() {
+    local json="$1" rest a list="" n ts ep="-"
+    local a_re='"author"[[:space:]]*:[[:space:]]*"([1-9A-HJ-NP-Za-km-z]{1,128})"'
+    local ts_re='"commit_timestamp"[[:space:]]*:[[:space:]]*([0-9]{1,15})'
+    local ep_re='"epoch"[[:space:]]*:[[:space:]]*([0-9]{1,10})'
+    [[ "$json" =~ $ts_re ]] || return 1
+    ts="${BASH_REMATCH[1]}"
+    [[ "$json" =~ $ep_re ]] && ep="${BASH_REMATCH[1]}"
+    rest="$json"
+    while [[ "$rest" =~ $a_re ]]; do
+        a="${BASH_REMATCH[1]}"
+        list="${list}${a}"$'\n'
+        rest="${rest#*"${BASH_REMATCH[0]}"}"
+    done
+    n="$(printf '%s' "$list" | sort -u | grep -c . || true)"
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) || return 1
+    printf '%s %s %s\n' "$n" "$((10#$ts))" "$ep"
+}
+
+# _tn_guard_unreadable WHY MODE [progress-fn] -- the committee could not be
+# counted. rc 0 (a warning) on testnet and devnet and on a mainnet node that is
+# not staked; rc 2 on a staked or voting mainnet node, or when the network or
+# the stake is unknown. TN_ALLOW_QUORUM_RISK=1 turns rc 2 into a warning.
+_tn_guard_unreadable() {
+    local why="$1" mode="$2" fn="${3:-}" net="" addr="" pub="" rc=0 st=0
+    net="$(_tn_guard_network)"
+    case "$net" in
+        testnet|devnet)
+            _tn_guard_say warn "could not count the committee members that are down (${why}); going ahead on ${net}." "$fn"
+            return 0
+            ;;
+        mainnet) pub="$MAINNET_RPC_URL" ;;
+        *) net="" ;;
+    esac
+    if [[ "$net" == "mainnet" && "$mode" != "CvvActive" ]]; then
+        addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null)" || rc=$?
+        if [[ $rc -eq 0 && -n "$addr" && -n "$pub" ]]; then
+            node_is_staked_validator "$addr" "$pub" >/dev/null 2>&1 || st=$?
+        elif [[ $rc -eq 1 || -z "$addr" ]]; then
+            st=1
+        else
+            st=2
+        fi
+        if [[ $st -eq 1 ]]; then
+            _tn_guard_say warn "could not count the committee members that are down (${why}); this node is not staked, going ahead." "$fn"
+            return 0
+        fi
+    fi
+    if [[ "${TN_ALLOW_QUORUM_RISK:-0}" == "1" ]]; then
+        _tn_guard_say warn "could not count the committee members that are down (${why}); going ahead because the quorum-risk override is set." "$fn"
+        return 0
+    fi
+    _tn_guard_say warn "could not count the committee members that are down (${why}). Stopping a ${net:-node of an unknown network} committee member blind is refused; once the fleet coordinator confirms the other members are up, run again with --allow-quorum-risk." "$fn"
+    return 2
+}
+
+# tn_committee_down_guard [URL] [progress-fn] -- may this node stop now without
+# putting the committee at risk? Reads the node's mode (tn_node_mode), the
+# current committee (tn_epoch_info) and the authors of the latest consensus
+# commit (tn_latestConsensusHeader) from URL (default tn_local_rpc_url); the
+# committee and the commit come from the network's public RPC when URL cannot
+# give them. n is the committee size, f = floor((n-1)/3), and down counts the
+# members that authored no header in that commit (an estimate until the node
+# reports peer liveness: a slow member counts as down). rc 0 when the node is
+# readable and not CvvActive, or when down + 1 < f + 1; rc 1 when stopping it
+# would leave f + 1 members down; rc 2 when the count cannot be made (no
+# committee, no commit, a commit more than 120 s old or from another epoch) on a
+# staked or voting mainnet node or an unknown network (testnet, devnet and an
+# unstaked node warn and get rc 0). TN_ALLOW_QUORUM_RISK=1 turns rc 1 and rc 2
+# into a warning and rc 0 (coordinated restarts). Never sleeps; messages go to
+# progress-fn (`fn log|warn MSG`) or stderr.
+tn_committee_down_guard() {
+    local url="${1:-}" fn="${2:-}" mode="" rc=0 net pub="" src info committee n hdr counted live ts ep age f down now
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url 2>/dev/null || true)"
+    mode="$(tn_node_mode "$url" 2>/dev/null)" || mode=""
+    case "$mode" in
+        CvvInactive|Observer)
+            _tn_guard_say log "this node is ${mode}: stopping it does not change the committee's quorum." "$fn"
+            return 0
+            ;;
+        CvvActive) ;;
+        *) mode="" ;;
+    esac
+    net="$(_tn_guard_network)"
+    case "$net" in
+        mainnet) pub="$MAINNET_RPC_URL" ;;
+        testnet) pub="$TESTNET_RPC_URL" ;;
+        devnet)  pub="$DEVNET_RPC_URL" ;;
+    esac
+    info=""
+    for src in "$url" "$pub"; do
+        [[ -n "$src" ]] || continue
+        info="$(tn_epoch_info "$src" "" 5 2>/dev/null)" && break
+        info=""
+    done
+    committee="$(printf '%s' "$info" | awk '{print $5}')"
+    if [[ -z "$info" || -z "$committee" || "$committee" == "-" ]]; then
+        _tn_guard_unreadable "the committee could not be read" "$mode" "$fn" || return $?
+        return 0
+    fi
+    n="$(printf '%s\n' "$committee" | tr ',' '\n' | grep -c .)"
+    counted=""
+    for src in "$url" "$pub"; do
+        [[ -n "$src" ]] || continue
+        hdr="$(tn_rpc_call "$src" tn_latestConsensusHeader '[]' 5 2>/dev/null)" || continue
+        counted="$(_tn_commit_authors "$hdr")" && break
+        counted=""
+    done
+    if [[ -z "$counted" ]]; then
+        _tn_guard_unreadable "the latest consensus commit could not be read" "$mode" "$fn" || return $?
+        return 0
+    fi
+    read -r live ts ep <<< "$counted"
+    now="$(_tn_now)"
+    age=$(( now - ts ))
+    if (( age > 120 )); then
+        _tn_guard_unreadable "the latest consensus commit is ${age} s old" "$mode" "$fn" || return $?
+        return 0
+    fi
+    if [[ "$ep" != "-" && "$ep" != "${info%% *}" ]]; then
+        _tn_guard_unreadable "the latest commit is from epoch ${ep}, the committee from epoch ${info%% *}" "$mode" "$fn" || return $?
+        return 0
+    fi
+    (( live <= n )) || live="$n"
+    f=$(( (n - 1) / 3 ))
+    down=$(( n - live ))
+    if (( down + 1 < f + 1 )); then
+        _tn_guard_say log "committee of ${n}: ${down} member(s) down; stopping this node leaves $((down + 1)), below the $((f + 1)) that halts consensus." "$fn"
+        return 0
+    fi
+    if [[ "${TN_ALLOW_QUORUM_RISK:-0}" == "1" ]]; then
+        _tn_guard_say warn "committee of ${n}: ${down} member(s) down; stopping this node makes $((down + 1)) of the $((f + 1)) that halt consensus. Going ahead because the quorum-risk override is set." "$fn"
+        return 0
+    fi
+    _tn_guard_say warn "committee of ${n}: ${down} member(s) down; stopping this node makes $((down + 1)) of the $((f + 1)) that halt consensus. Refused: wait until the others are back, or, for a coordinated restart, run again with --allow-quorum-risk." "$fn"
+    return 1
+}
+
 # =============================================================================
 # JSON-RPC, EPOCH AND RESTART-WINDOW HELPERS
 # =============================================================================
