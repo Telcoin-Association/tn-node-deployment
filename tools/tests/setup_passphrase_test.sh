@@ -19,6 +19,10 @@ REC="$T/rec"
 export REC
 mkdir -p "$T/sn" "$T/bin" "$REC" "$T/written" "$T/root"
 grep -v '^main "\$@"$' "$TN_TEST_REPO/setup-node.sh" > "$T/sn/setup-node.sh"
+# The block at the top of setup-node.sh that moves TN_BLS_PASSPHRASE into TN_SETUP_PASS
+# runs once at source time; run_main runs it again, in the subshell, before main.
+sed -n '/^unset TN_SETUP_PASS TN_KEYTOOL_PASS$/,/^unset TN_BLS_PASSPHRASE$/p' \
+    "$TN_TEST_REPO/setup-node.sh" > "$T/sn/pre.sh"
 ln -s "$TN_TEST_REPO/lib" "$T/sn/lib"
 
 # Recording stubs: the node binary (keytool) and two package tools.
@@ -96,7 +100,8 @@ reset() {
 run_main() {
     local in="$1" rc=0
     shift
-    ( main "$@" ) < "$in" > "$T/out" 2> "$T/err" || rc=$?
+    # shellcheck source=/dev/null
+    ( . "$T/sn/pre.sh"; main "$@" ) < "$in" > "$T/out" 2> "$T/err" || rc=$?
     printf '%s\n' "$rc"
 }
 # all_child_env -- every environment a child recorded.
@@ -219,5 +224,27 @@ printf 'short-pass\nshort-pass\nlong-enough-pass-16\nlong-enough-pass-16\n' > "$
 check_rc "prompt mainnet: rc" 0 "$(prompt "$T/in" mainnet)"
 check "prompt mainnet: short one asked again" "long-enough-pass-16" "$(cat "$REC/prompt")"
 check_rc "prompt: end of input stops" 1 "$(prompt /dev/null testnet)"
+
+# ---- nothing before main sees the passphrase ---------------------------------------------
+# The real setup-node.sh (--help: it parses, prints the header and exits) under PATH shims
+# that record the environment of every command it starts, from its first line on (dirname,
+# the library's own commands, the version check).
+check "pre-main: the capture block is three lines" "3" "$(wc -l < "$T/sn/pre.sh" | tr -d ' ')"
+mkdir -p "$T/pre-bin" "$REC/pre"
+ENV_BIN="$(type -P env)"
+for t in dirname basename sort head tail sed awk grep cat cut tr id uname date mktemp stat readlink ls wc; do
+    real="$(type -P "$t")" || continue
+    printf '#!/bin/sh\n%s > "%s/pre/$$.%s.env"\nexec %s "$@"\n' "$ENV_BIN" "$REC" "$t" "$real" > "$T/pre-bin/$t"
+    chmod 0755 "$T/pre-bin/$t"
+done
+( export TN_BLS_PASSPHRASE="pre-main-sentinel-41" TN_SETUP_PASS="pre-inherited-1" TN_KEYTOOL_PASS="pre-inherited-2"
+  PATH="$T/pre-bin:$PATH" "$BASH" "$TN_TEST_REPO/setup-node.sh" --help ) > /dev/null 2>&1
+pre_env="$(cat "$REC"/pre/*.env 2>/dev/null)"
+check "pre-main: dirname ran under the recording shim" "yes" \
+    "$(ls "$REC"/pre/*.dirname.env > /dev/null 2>&1 && echo yes || echo no)"
+check_lacks "pre-main: the passphrase in no child env" "pre-main-sentinel-41" "$pre_env"
+check_lacks "pre-main: TN_BLS_PASSPHRASE in no child env" "TN_BLS_PASSPHRASE" "$pre_env"
+check_lacks "pre-main: an inherited TN_SETUP_PASS in no child env" "pre-inherited-1" "$pre_env"
+check_lacks "pre-main: an inherited TN_KEYTOOL_PASS in no child env" "pre-inherited-2" "$pre_env"
 
 finish

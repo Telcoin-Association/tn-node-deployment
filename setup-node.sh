@@ -112,6 +112,14 @@
 #   -h, --help               Print this text and exit.
 # =============================================================================
 
+# The BLS key passphrase leaves the environment before any command runs, so no
+# child of setup (dirname, the library's own commands, installers, apt, cargo,
+# docker) inherits it. An inherited TN_SETUP_PASS or TN_KEYTOOL_PASS is dropped
+# first, or the assignment below would stay exported. main reads TN_SETUP_PASS.
+unset TN_SETUP_PASS TN_KEYTOOL_PASS TN_CRED_PASS
+TN_SETUP_PASS="${TN_BLS_PASSPHRASE:-}"
+unset TN_BLS_PASSPHRASE
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 if ! version_gte "${COMMON_VERSION:-0}" "1.6.0" || ! declare -F tn_write_node_unit >/dev/null 2>&1; then
@@ -202,9 +210,9 @@ ALLOW_NO_TPM=false          # --allow-no-tpm
 BIND_PCRS=""                # --bind-pcrs
 AUDIT_ONLY=false            # --audit
 LOG_TARGET=""                        # journal | file (--log-target; empty: by network)
-# The BLS key passphrase lives in TN_SETUP_PASS, a plain shell variable: main fills it
-# from TN_BLS_PASSPHRASE (then unset) or --passphrase-stdin, step_generate_keys from the
-# prompt. It is never exported, so no child process inherits it; keytool gets it on its
+# The BLS key passphrase lives in TN_SETUP_PASS, a plain shell variable: the top of
+# this file fills it from TN_BLS_PASSPHRASE (then unset), main from --passphrase-stdin,
+# step_generate_keys from the prompt. It is never exported, so no child process inherits it; keytool gets it on its
 # standard input (tn_keytool, TN_KEYTOOL_PASS).
 PASSPHRASE_STDIN=false      # --passphrase-stdin
 TN_SETUP_PASS_SRC=""        # env | stdin: where TN_SETUP_PASS came from ('' = not yet given)
@@ -1239,8 +1247,8 @@ setup_passphrase_rule() {
 
 # --passphrase-stdin: read the BLS key passphrase from standard input into TN_SETUP_PASS,
 # once: one line, without echo, one trailing CR dropped. TN_BLS_PASSPHRASE as well
-# (main moved it into TN_SETUP_PASS) is refused, as is an empty or malformed value;
-# the mainnet length rule follows once the network is known (json_check_keygen_inputs,
+# (moved into TN_SETUP_PASS at the top of this file) is refused, as is an empty or
+# malformed value; the mainnet length rule follows once the network is known (json_check_keygen_inputs,
 # step_generate_keys). Without the flag, records where an inherited value came from.
 setup_read_passphrase() {
     local line="" cr=$'\r'
@@ -2536,8 +2544,8 @@ step_final_summary() {
 # real stdout -> stderr. main finds --json and swaps the fds before it parses
 # anything, and installs json_on_exit, so every --json run prints only JSON on
 # stdout and ends with exactly one done event, however it stops. The BLS passphrase
-# arrives on standard input (--passphrase-stdin) or in TN_BLS_PASSPHRASE, and main moves
-# it into TN_SETUP_PASS, a shell variable that is never exported.
+# arrives on standard input (--passphrase-stdin) or in TN_BLS_PASSPHRASE, which the
+# top of this file moves into TN_SETUP_PASS, a shell variable that is never exported.
 #
 # Note: on-chain validator registration (governance approval, staking,
 # activate()) is intentionally NOT performed here -- the UI surfaces the
@@ -2838,12 +2846,8 @@ run_json_mode() {
 # =============================================================================
 
 main() {
-    # The passphrase leaves the environment before anything runs, so no child of setup
-    # (installers, apt, cargo, docker) inherits it. An inherited TN_SETUP_PASS or
-    # TN_KEYTOOL_PASS is dropped first, or the assignments below would stay exported.
-    unset TN_SETUP_PASS TN_KEYTOOL_PASS TN_CRED_PASS
-    TN_SETUP_PASS="${TN_BLS_PASSPHRASE:-}"
-    unset TN_BLS_PASSPHRASE
+    # TN_SETUP_PASS holds TN_BLS_PASSPHRASE's value, moved out of the environment
+    # at the top of this file before any command ran.
     local arg
     # --json is found before anything prints: from here on stdout carries JSON
     # events only, and json_on_exit ends the run with a done event when nothing
