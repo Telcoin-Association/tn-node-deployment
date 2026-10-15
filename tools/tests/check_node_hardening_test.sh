@@ -237,6 +237,11 @@ if [[ -n "$RB" && -n "$SVC_GROUP" ]] && chmod 0700 "$RB" && tn_root_dir_ok "$RB"
     chown root "$F/opt/telcoin/telcoin-network"
     chmod 0600 "$F/etc/telcoin/bls-passphrase"
     rm -f "$F/etc/telcoin/planted"
+    install -o root -g root -m 0644 /dev/null "$F/etc/telcoin/bls-passphrase.cred"
+    run check_ownership_layout
+    check "layout 2: a loose credential file listed" yes \
+        "$(has "$OUT" "${F}/etc/telcoin/bls-passphrase.cred: root:root 644, expected root:root 600")"
+    chmod 0600 "$F/etc/telcoin/bls-passphrase.cred"
     rm -f "$F/usr/local/libexec/telcoin/tn-start"
     run check_ownership_layout
     check "layout 2: a missing start script fails" "yes 1" "$(has "$OUT" "tn-start: missing") $ADDED"
@@ -244,4 +249,9 @@ else
     skip "layout 2: path by path" "needs root and a root-only directory under /root"
 fi
 
+# --audit runs tn_host_audit alone and exits with its rc (0 clean, 1 a warning).
+rc=0; out="$(bash "$TN_TEST_REPO/check-node.sh" --audit 2>&1)" || rc=$?
+check "--audit exits 0 or 1" yes "$( [[ $rc -eq 0 || $rc -eq 1 ]] && echo yes || echo "no ($rc)")"
+check "--audit prints the systemd line" yes "$(printf '%s\n' "$out" | grep -q 'systemd' && echo yes || echo no)"
+check "--help lists --audit" yes "$(bash "$TN_TEST_REPO/check-node.sh" --help 2>&1 | grep -q -- '--audit' && echo yes || echo no)"
 finish

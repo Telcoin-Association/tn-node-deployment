@@ -59,6 +59,7 @@ VALIDATOR_ADDRESS_SRC="--address"
 AUTHORITY_ID=""
 NETWORK_RPC=""
 QUERY_NETWORK=true
+RUN_AUDIT=false
 
 # The network this node belongs to, set by resolve_network: NODE_NETWORK is
 # testnet, mainnet or devnet ("" when unknown), NETWORK_SRC says where that came
@@ -181,6 +182,7 @@ while [[ $# -gt 0 ]]; do
         --authority-id) AUTHORITY_ID="$2";      shift 2 ;;
         --network-rpc)  NETWORK_RPC="$2";       shift 2 ;;
         --no-network)   QUERY_NETWORK=false;    shift ;;
+        --audit)        RUN_AUDIT=true;         shift ;;
         -h|--help)
             cat <<EOF
 
@@ -192,6 +194,8 @@ Usage: $0 [OPTIONS]
                            .node-meta: testnet ${TESTNET_RPC_URL}, devnet ${DEVNET_RPC_URL},
                            mainnet ${MAINNET_RPC_URL})
   --no-network             Skip the network RPC query (local-only mode)
+  --audit                  Only audit this host's node security settings (systemd floor,
+                           passphrase delivery, credential, unit) and exit 1 on any warning
   --service <name>         systemd service name override
   --address <0x...>        Validator address for on-chain status check
   --authority-id <BASE58>  Authority ID to look for in the consensus headers when the local
@@ -286,6 +290,16 @@ have_fns() {
     done
     return 0
 }
+
+# --audit: the host audit alone (tn_host_audit), its rc as the exit status.
+if [[ "$RUN_AUDIT" == "true" ]]; then
+    if have_fns tn_host_audit; then
+        tn_host_audit
+        exit $?
+    fi
+    echo "error: --audit needs a newer lib/common.sh (no tn_host_audit); run update-scripts.sh" >&2
+    exit 2
+fi
 
 # lower <text> -- the text in lower case (bash 3.2 has no ${v,,}).
 lower() {
@@ -1847,6 +1861,7 @@ check_ownership_layout() {
     [[ ! -e "${etc}/.pending-update" && ! -L "${etc}/.pending-update" ]] || _cn_own "${etc}/.pending-update" root root 0600
     [[ ! -e "${etc}/node.env" && ! -L "${etc}/node.env" ]] || _cn_own "${etc}/node.env" root root 0644
     [[ ! -e "${etc}/bls-passphrase" && ! -L "${etc}/bls-passphrase" ]] || _cn_own "${etc}/bls-passphrase" root root 0600
+    [[ ! -e "${etc}/bls-passphrase.cred" && ! -L "${etc}/bls-passphrase.cred" ]] || _cn_own "${etc}/bls-passphrase.cred" root root 0600
     [[ ! -e "${pre}/var/backups/telcoin" ]] || _cn_own "${pre}/var/backups/telcoin" root root 0700
     if dd="$(detect_data_dir)" && [[ -e "$dd" || -L "$dd" ]]; then
         _cn_own "$dd" "$suser" "$sgroup" 0700

@@ -518,7 +518,9 @@ remove_keys() {
 # empty), /etc/telcoin/node.env, the backups in /var/backups/telcoin (shredded:
 # they can hold unit, launch-file and passphrase copies), the logrotate file
 # (TN_LOGROTATE_FILE), the journald drop-in 50-telcoin.conf and the lock
-# directory /run/telcoin. The caller runs it only when no other node install
+# directory /run/telcoin, the release staging directory /var/lib/telcoin-staging,
+# and the source-build account tn-build with its home /var/lib/tn-build. The
+# caller runs it only when no other node install
 # remains. Every path is under TN_RM_ROOT (see the top of this file).
 remove_node_host_files() {
     local r="$TN_RM_ROOT" m f
@@ -546,7 +548,21 @@ remove_node_host_files() {
         _rm_dir "${r}/run/telcoin"
         print_ok "Removed /run/telcoin"
     fi
-    # CORE-4: the build user tn-build, /var/lib/telcoin-staging and lib/release-keys removal go here.
+    # Release staging (downloads and build logs) and the source-build account with
+    # its home (toolchain, cargo cache, build output). lib/release-keys stays: it is
+    # part of the operator's scripts tree.
+    if [[ -L "${r}/var/lib/telcoin-staging" || -d "${r}/var/lib/telcoin-staging" ]]; then
+        _rm_dir "${r}/var/lib/telcoin-staging"
+        print_ok "Removed /var/lib/telcoin-staging"
+    fi
+    if [[ -z "$r" ]] && id -u tn-build >/dev/null 2>&1; then
+        userdel tn-build >/dev/null 2>&1 || true
+        print_ok "Removed the tn-build account"
+    fi
+    if [[ -L "${r}/var/lib/tn-build" || -d "${r}/var/lib/tn-build" ]]; then
+        _rm_dir "${r}/var/lib/tn-build"
+        print_ok "Removed /var/lib/tn-build"
+    fi
     return 0
 }
 
