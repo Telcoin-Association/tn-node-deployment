@@ -6,7 +6,7 @@ There is one node identity. Every node installs validator-capable and follows co
 
 > **New to running a node?** Follow [`OPERATOR.md`](OPERATOR.md), the step-by-step runbook: install, sync, public RPC, staking, activation and day-2 operations. This README is the reference behind it.
 >
-> **Mobile network operator evaluating a node?** The partner guide, [`docs/partner/mno-node-guide/mno-node-guide.pdf`](docs/partner/mno-node-guide/mno-node-guide.pdf), is the runbook rewritten for partners and branded for hand-off. Its source is [`docs/partner/mno-node-guide/mno-node-guide.md`](docs/partner/mno-node-guide/mno-node-guide.md).
+> **Mobile network operator evaluating a node?** The partner guide, [`docs/partner/mno-node-guide/mno-node-guide.pdf`](docs/partner/mno-node-guide/mno-node-guide.pdf), is the runbook rewritten for partners and branded for hand-off. Its source is [`docs/partner/mno-node-guide/mno-node-guide.md`](docs/partner/mno-node-guide/mno-node-guide.md). For the protocol itself, partners get the Telcoin Network Technical Specification, [`docs/partner/technical-specification/technical-specification.pdf`](docs/partner/technical-specification/technical-specification.pdf).
 
 > **Maintainers / AI agents:** see [`AGENTS.md`](AGENTS.md) for the operator-vs-maintainer repo boundary — what ships to operators vs. the maintainer-only `common/` tooling that operators never have.
 
@@ -2547,7 +2547,11 @@ request as this README: the runbook is the path operators follow, and the README
 reference it links into. Carry the same change into the partner guide,
 [`docs/partner/mno-node-guide/mno-node-guide.md`](docs/partner/mno-node-guide/mno-node-guide.md),
 bump its version and date in `docs/partner/mno-node-guide/metadata.yaml`, and regenerate the PDF
-with `bash tools/build-partner-pdf.sh mno-node-guide` (see "Partner guide (MNO PDF)" in
+with `bash tools/build-partner-pdf.sh mno-node-guide`. The technical specification,
+[`docs/partner/technical-specification/technical-specification.md`](docs/partner/technical-specification/technical-specification.md),
+follows the protocol instead: refresh it with every telcoin-network release, name that release
+in `protocol:` in its `metadata.yaml`, and rebuild it with
+`bash tools/build-partner-pdf.sh technical-specification` (see "Partner documents" in
 [`AGENTS.md`](AGENTS.md)). Keep the README anchors that `OPERATOR.md` links to stable. In all
 three files, refer to scripts, functions and flags by name, never by line number or
 `file:line`; line numbers go stale with the next edit.

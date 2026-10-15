@@ -45,7 +45,7 @@ The validator chapter applies once the Association has approved you.
 
 ### Contact
 
-Email support@telcoin.org with any question about running a node.
+Email devs@telcoin.org with any question about running a node.
 The same address handles validator onboarding, approval and hardware.
 If you plan to validate, write before you buy hardware.
 
@@ -114,7 +114,7 @@ Validators have two network requirements on top of that:
 - A p95 round-trip time well below 1 second to at least 7 of the 10 committee members.
 
 > [!IMPORTANT]
-> Email support@telcoin.org with your planned hardware before you buy anything for a validator.
+> Email devs@telcoin.org with your planned hardware before you buy anything for a validator.
 
 The same documentation page recommends turning swap off and running time sync (chrony or systemd-timesyncd) on every node.
 A node rejects headers timestamped more than a second ahead of its own clock.
@@ -175,7 +175,7 @@ Open them in every layer that filters traffic: `ufw` on the host (see [Firewall]
 - A mounted data drive with an `/etc/fstab` entry, if the chain data will not live on the boot disk.
 - A DNS A record for the node's public name, if you want public RPC (see [Public RPC (https and wss)](#public-rpc-https-and-wss)).
 - Somewhere off the server to keep a backup of the node keys (see [Back up the keys now](#back-up-the-keys-now)).
-- For validators: an approval request with the Association in progress (support@telcoin.org), and a machine with Foundry's `cast` and your wallet.
+- For validators: an approval request with the Association in progress (devs@telcoin.org), and a machine with Foundry's `cast` and your wallet.
 
 ### Networks and endpoints
 
@@ -833,7 +833,7 @@ ADDR=0xYOUR_EXECUTION_ADDRESS
 
 ### Prerequisites
 
-- Association approval. Only GSMA-approved mobile network operators can validate; start with support@telcoin.org.
+- Association approval. Only GSMA-approved mobile network operators can validate; start with devs@telcoin.org.
 - Hardware at the validator tier (see [Hardware per role](#hardware-per-role)).
 - The node's P2P ports reachable from the internet (see [Ports](#ports)).
 - A synced node (see [Confirm the node is syncing, then synced](#confirm-the-node-is-syncing-then-synced)).
@@ -919,15 +919,15 @@ When a `cast send` reverts, `cast` prints the error selector, and the error's na
 |---|---|---|
 | `InvalidProofOfPossession` | The proof of possession in `node-info.yaml` was signed for a different address than the one you stake from. The keys are fine. | Re-sign it for the staking address with `prepare-stake.sh --rotate-address` (see [Change the execution address before you stake](#change-the-execution-address-before-you-stake)). |
 | `InvalidTokenId` | The address holds no ConsensusNFT, so it is not whitelisted. | Ask the Association for approval, then run the script again. |
-| `RequiresConsensusNFT` | The ConsensusNFT for the address is not held by that address. | Email support@telcoin.org. |
+| `RequiresConsensusNFT` | The ConsensusNFT for the address is not held by that address. | Email devs@telcoin.org. |
 | `InvalidStakeAmount` | The stake configuration changed after the script read it. | Run the script again for the current amount. |
 | `InvalidStatus` | The registry already holds a validator record for the address (the status number is shown), so it cannot stake again. | Check it with `sudo bash ~/telcoin-node-scripts/check-node.sh`. |
 | `DuplicateBLSPubkey` | This BLS key is already registered. A BLS key can be staked only once. | If you staked it from another address, that address is this node's validator: check it with `check-node.sh --address <that address>`. Do not generate new keys. |
 | `InvalidBLSPubkey` | The BLS public key in `node-info.yaml` is not a valid key, so the file was edited or damaged. | Restore `node-info.yaml` from your backup (see [Back up the keys now](#back-up-the-keys-now)). |
 | `EnforcedPause` | The registry is paused, so staking is closed for now. | Try again later. |
-| `LowLevelCallFailure` | The registry could not run its BLS signature check. | Try again later. If it keeps failing, email support@telcoin.org. |
+| `LowLevelCallFailure` | The registry could not run its BLS signature check. | Try again later. If it keeps failing, email devs@telcoin.org. |
 | `Error` with a message | The registry rejected the call with that message. | Act on the message. |
-| `Panic`, or an error the script does not know | An internal error in the registry, or error data the script cannot name. | Email support@telcoin.org with the data the script prints. |
+| `Panic`, or an error the script does not know | An internal error in the registry, or error data the script cannot name. | Email devs@telcoin.org with the data the script prints. |
 
 ### Change the execution address before you stake
 
@@ -1024,7 +1024,7 @@ Between seats an Active validator reports `Observer`, which is normal.
 | 3 | Active | Eligible for committee seats. | Keep the node healthy. |
 | 4 | PendingExit | `beginExit()` called. | Wait until the protocol exits you. |
 | 5 | Exited | Out of the validator set. | `unstake` from the epoch after the exit epoch; `check-node.sh` says when (see [Rewards and exit](#rewards-and-exit)). |
-| 6 | Any | A reserved sentinel. On its own you should never see it. | Email support@telcoin.org. |
+| 6 | Any | A reserved sentinel. On its own you should never see it. | Email devs@telcoin.org. |
 | 6 with `isRetired` true | Retired | `unstake` ran: NFT burned, stake returned. | None. This identity cannot stake again. |
 
 `check-node.sh` prints `Status: Retired` for the last row and appends ` (Retired)` to any other status that has `isRetired` set.
@@ -1215,7 +1215,7 @@ The tables below group the common symptoms by area.
 | `eth_syncing` returns `false` while the node is behind | Expected on Telcoin Network. | Compare `eth_blockNumber` instead (see [Checking by hand](#checking-by-hand)). |
 | `check-node.sh` warns `In the committee for epoch <E>, but the node reports Observer: it is not taking part in consensus` | The node holds a seat in this epoch's committee but is not voting, usually because it is behind or cut off from its peers. If the report adds `The node is at epoch <N>: let it catch up, and it joins once it reaches epoch <E>.`, it is still catching up. | Treat it like a lagging node (the `CATCHING UP` row). |
 | `check-node.sh` reports `In the committee for epoch <E> but NOT in recent headers -- node may be running but silent` | A committee member whose headers the network does not see. | Check that the node runs, that its P2P ports are open in every firewall layer, that its external multiaddrs carry the current public IP, and that time sync is on (see [Hardware per role](#hardware-per-role)). |
-| `check-node.sh` reports `Workers: the network requires <N> per node (...) but node-info.yaml lists <M>` | The node has fewer workers than `WorkerConfigs.numWorkers()` requires. | The scripts cannot add a worker. Email support@telcoin.org with the `check-node.sh` output. |
+| `check-node.sh` reports `Workers: the network requires <N> per node (...) but node-info.yaml lists <M>` | The node has fewer workers than `WorkerConfigs.numWorkers()` requires. | The scripts cannot add a worker. Email devs@telcoin.org with the `check-node.sh` output. |
 | `check-node.sh` warns `<rpc> serves chain <X> (...), not chain <Y> (...) -- skipping the network comparison` | The comparison RPC serves another chain than the node's. Today `https://rpc.telcoin.network` serves the testnet, because mainnet has not launched. | Not a node problem. Pass `--network-rpc <URL>` with an RPC for the node's chain (see [Networks and endpoints](#networks-and-endpoints)). |
 
 ### Setup and preflight
@@ -1269,7 +1269,7 @@ The tables below group the common symptoms by area.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `prepare-stake.sh` ends `Not ready: 0x... is not whitelisted.` | The address holds no ConsensusNFT yet. | Send the address to the Association (support@telcoin.org) and run the script again once the NFT is minted. |
+| `prepare-stake.sh` ends `Not ready: 0x... is not whitelisted.` | The address holds no ConsensusNFT yet. | Send the address to the Association (devs@telcoin.org) and run the script again once the NFT is minted. |
 | `prepare-stake.sh` ends `Not ready: 0x... is short of TEL.` | The balance is below the stake plus gas. | Send at least the amount the line above it names, then run it again. |
 | `prepare-stake.sh` stops with `<rpc> serves chain <X> (...), not chain <Y> (...)` | The network RPC serves another chain than the node's. | Pass `--network-rpc <URL>` with an RPC for the node's chain (see [Networks and endpoints](#networks-and-endpoints)). |
 | `stake` reverts, or `prepare-stake.sh` ends `Not ready: stake() would revert with <Error>` | The registry would refuse the stake. | Look the error up in [If prepare-stake.sh predicts a revert](#if-prepare-stakesh-predicts-a-revert). |
@@ -1283,7 +1283,7 @@ The tables below group the common symptoms by area.
 
 ## Getting help
 
-Email support@telcoin.org for everything, including validator onboarding, approval and hardware.
+Email devs@telcoin.org for everything, including validator onboarding, approval and hardware.
 
 Include:
 
