@@ -329,6 +329,19 @@ edit_unlock
 unset -f systemctl tn_committee_down_guard
 
 # -----------------------------------------------------------------------------
+# A signal during a passphrase move: the --json done says where it stopped
+# -----------------------------------------------------------------------------
+( JSON_MODE=true JSON_DONE_SENT=false EDIT_SIGNAL=TERM EDIT_PENDING=false EDIT_LAST_ERROR=""
+  _TN_CS_STATE=restarting _TN_CS_SVC=telcoin _TN_CS_BAK=("$T/bak.1")
+  edit_on_exit ) 3> "$T/json.done" 2>/dev/null
+check "signal after the restart was issued: done names the state, not 'nothing was changed'" "yes no" \
+    "$(has "$(cat "$T/json.done")" "restarted on the new passphrase delivery") $(has "$(cat "$T/json.done")" "nothing was changed")"
+( JSON_MODE=true JSON_DONE_SENT=false EDIT_SIGNAL=TERM EDIT_PENDING=false EDIT_LAST_ERROR=""
+  _TN_CS_STATE=saving
+  edit_on_exit ) 3> "$T/json.done" 2>/dev/null
+check "signal while backing up: done says nothing was changed" "yes" "$(has "$(cat "$T/json.done")" "SIGTERM: stopped before the passphrase move changed anything")"
+
+# -----------------------------------------------------------------------------
 # The value never reached a child's argv or environment
 # -----------------------------------------------------------------------------
 check "wrappers recorded commands (control)" yes "$(has "$(cat "$ARGV_LOG")" "grep ")"

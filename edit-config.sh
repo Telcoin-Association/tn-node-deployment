@@ -145,7 +145,9 @@ TARGET_SERVICE_FILE=""
 # unit on a wrapper install silently changes nothing the service reads.
 TARGET_LAUNCH_FILE=""
 
-# --no-epoch-wait: restart without waiting for the epoch boundary.
+# --no-epoch-wait: restart without waiting for the epoch boundary. It also sets
+# TN_SKIP_EPOCH_WAIT=1 (not exported), which the library's passphrase moves
+# (_tn_cred_switch) read.
 NO_EPOCH_WAIT=false
 # --allow-public-metrics: a metrics address other than 127.0.0.1 (never in --json).
 ALLOW_PUBLIC_METRICS=false
@@ -573,11 +575,18 @@ edit_on_exit() {
         rm -f "$EDIT_TMP" 2>/dev/null
         EDIT_TMP=""
     fi
+    # This also finishes or undoes a passphrase move the run was stopped in, and
+    # TN_CRED_EXIT_MSG then says which.
+    TN_CRED_EXIT_MSG=""
     tn_remove_inflight_tmp
+    if [[ -n "${TN_CRED_EXIT_MSG:-}" ]]; then
+        TN_CRED_EXIT_MSG="${EDIT_SIGNAL:+SIG${EDIT_SIGNAL}: }${TN_CRED_EXIT_MSG}"
+        [[ "$JSON_MODE" == "true" ]] || print_warn "$TN_CRED_EXIT_MSG" >&2
+    fi
     edit_release_lock
     EDIT_LOCK_HELD=false
     if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
-        msg="$EDIT_LAST_ERROR"
+        msg="${TN_CRED_EXIT_MSG:-$EDIT_LAST_ERROR}"
         if [[ -z "$msg" && -n "$EDIT_SIGNAL" ]]; then
             if [[ "$EDIT_RESTARTED" == "true" ]]; then
                 msg="stopped by SIG${EDIT_SIGNAL} after the restart was issued; the edit stays in place"
@@ -2890,7 +2899,7 @@ main() {
                 EDIT_SET_PAIR="$2"
                 shift 2
                 ;;
-            --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
+            --no-epoch-wait) NO_EPOCH_WAIT=true; TN_SKIP_EPOCH_WAIT=1; shift ;;
             --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
             --allow-public-metrics) ALLOW_PUBLIC_METRICS=true; shift ;;
             --migrate-credential) EDIT_ACTION=migrate; shift ;;
