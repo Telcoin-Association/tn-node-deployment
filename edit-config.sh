@@ -84,21 +84,26 @@ service_file_for() {
     printf '%s/etc/systemd/system/%s.service' "${TN_ROOT_PREFIX:-}" "$1"
 }
 
-# Resolve the selected node's data dir from .node-meta (DATA_DIR=), falling back
-# to the resolved data dir (unified /var/lib/telcoin, or legacy role dir) for
-# older installs. Mirrors check-node.sh so all scripts agree on the path.
+# Resolve the selected node's data dir from .node-meta (DATA_DIR=, read with
+# meta_get: CRLF-safe), falling back to the resolved data dir (unified
+# /var/lib/telcoin, or legacy role dir) for older installs. Mirrors check-node.sh
+# so all scripts agree on the path. A DATA_DIR listed more than once prints
+# nothing and returns 2 (meta_get names the key on stderr): neither line is
+# trusted and the default is not guessed.
 detect_data_dir() {
-    local meta default dd
-    meta="$(node_meta_path 2>/dev/null || true)"
-    default="$(tn_resolve_data_dir)"
-    if [[ -n "$meta" ]] && [[ -f "$meta" ]]; then
-        dd=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
-        if [[ -n "$dd" ]] && [[ -d "$dd" ]]; then
-            echo "$dd"
+    local meta dd rc=0
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" ]]; then
+        dd="$(meta_get DATA_DIR "$meta")" || rc=$?
+        if [[ "$rc" -eq 2 ]]; then
+            return 2
+        fi
+        if [[ "$rc" -eq 0 && -n "$dd" && -d "$dd" ]]; then
+            printf '%s\n' "$dd"
             return 0
         fi
     fi
-    echo "$default"
+    tn_resolve_data_dir
     return 0
 }
 
@@ -134,10 +139,14 @@ EDIT_LAST_ERROR=""
 # kind (TN_UPDATE_LOCK_KIND) and releases it (tn_release_update_lock).
 EDIT_LOCK_HELD=false
 
-# Files the current edit changed, each with its backup (edit_backup). An empty
-# backup means the file did not exist before, so a restore removes it.
+# Files the current edit changed, each with its backup (edit_backup) in the
+# root-only backup directory, the backup's sha256, and the file's mode and
+# group ("<mode> <group>"). An empty backup means the file did not exist
+# before, so a restore removes it.
 EDIT_BK_FILES=()
 EDIT_BK_COPIES=()
+EDIT_BK_SUMS=()
+EDIT_BK_MODES=()
 
 # True from the first edit_backup of an edit until the restart that applies it
 # is issued (or, in the menu, the operator chooses to restart later). A run that
@@ -160,21 +169,20 @@ EDIT_SPEC=""
 # HELPERS
 # =============================================================================
 
-# Create a timestamped backup of the systemd unit file. Must succeed before any
-# in-place edit. Echoes the backup path so the caller can show or roll back.
+# Back up the systemd unit file into the root-only backup directory
+# (tn_backup_file: /var/backups/telcoin, never beside the live file). Must
+# succeed before any in-place edit. Echoes "<backup path> <sha256>" so the
+# caller can show it or restore it with tn_restore_backup.
 backup_service_file() {
-    local file="$1"
-    local ts backup
-    ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${file}.bak.${ts}"
-    if ! cp -p "$file" "$backup"; then
+    local file="$1" out
+    if ! out="$(tn_backup_file "$file")"; then
         print_error "Could not create backup of ${file}" >&2
         return 1
     fi
-    # Info to stderr so callers capturing the path via $(...) still show it
-    # to the operator (same convention as update-node.sh backup_unit_file).
-    print_info "Backup written: ${backup}" >&2
-    echo "$backup"
+    # Info to stderr so callers capturing the record via $(...) still show it
+    # to the operator.
+    print_info "Backup written: ${out% *}" >&2
+    printf '%s\n' "$out"
 }
 
 # Read a value from the service file Environment= lines
@@ -485,7 +493,7 @@ edit_abort_pending() {
         edit_error "${why}, so the edit was rolled back: every file it changed is as it was before this run."
     else
         EDIT_ROLLED_BACK=false
-        edit_error "${why}, and putting the files back failed (see the errors above): copy each .bak file over its original by hand."
+        edit_error "${why}, and putting the files back failed (see the errors above): put each backup named above back over its file by hand, after checking its sha256."
     fi
 }
 
@@ -522,23 +530,13 @@ edit_lock() {
     return 0
 }
 
-# edit_release_lock -- release the update lock this process holds, of either
-# kind: tn_release_update_lock unlocks and closes file descriptor 9 (flock) or
-# removes the lock dir (mkdir), and is a no-op when nothing is held. The hard
-# guard keeps this script on lib/common.sh 1.6.0, so the fallback for a library
-# without that function is only a safety net: close fd 9, and remove the mkdir
-# lock dir when its pid file names this process.
+# edit_release_lock -- release the update lock this process holds, the same
+# shared lock update-node.sh takes: tn_release_update_lock (lib/common.sh,
+# present since 1.5.0; the guard at the top requires 1.6.0) unlocks it and is
+# a no-op when nothing is held. This script never builds a lock path of its
+# own.
 edit_release_lock() {
-    local dir
-    if declare -F tn_release_update_lock >/dev/null 2>&1; then
-        tn_release_update_lock
-        return 0
-    fi
-    exec 9>&-
-    dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
-    if [[ -d "$dir" && "$(cat "${dir}/pid" 2>/dev/null || true)" == "$$" ]]; then
-        rm -rf "$dir" 2>/dev/null || true
-    fi
+    tn_release_update_lock
     return 0
 }
 
@@ -567,16 +565,92 @@ menu_lock() {
 edit_reset_backups() {
     EDIT_BK_FILES=()
     EDIT_BK_COPIES=()
+    EDIT_BK_SUMS=()
+    EDIT_BK_MODES=()
     EDIT_PENDING=false
 }
 
-# edit_backup FILE -- before the first change to FILE in this edit, copy it to
-# FILE.bak.<UTC time> and record the pair for edit_restore_backups. A FILE that
-# does not exist yet is recorded as new, so the restore removes it. From here
-# until the restart is issued the edit is pending (EDIT_PENDING). rc 1, with an
-# error reported, when the copy fails.
+# edit_in_data_dir FILE -- rc 0 when FILE lies inside the node's data dir,
+# which belongs to the service user: such a file is read and written by a
+# process running as that user (tn_as_service_user), never by root.
+edit_in_data_dir() {
+    local dd
+    dd="$(detect_data_dir)" || return 1
+    [[ -n "$dd" && "${1:-}" == "${dd%/}/"* ]]
+}
+
+# _uc_service_user_write DEST MODE -- write stdin to DEST as the service user:
+# a mktemp file beside DEST, chmod MODE, then one rename over DEST (mv -fT),
+# each step run through tn_as_service_user, so a link planted in the data dir
+# gains nothing beyond that user's own rights. rc 2 on any failure, the temp
+# file removed and DEST untouched.
+_uc_service_user_write() {
+    local dest="${1:-}" mode="${2:-}" tmp
+    if [[ "$dest" != /* || ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+        return 2
+    fi
+    tmp="$(tn_as_service_user mktemp "${dest%/*}/.tn.XXXXXX")" || tmp=""
+    [[ -n "$tmp" ]] || return 2
+    # shellcheck disable=SC2016  # $1 expands in the child shell
+    if ! tn_as_service_user sh -c 'cat > "$1"' sh "$tmp" \
+        || ! tn_as_service_user chmod -- "$mode" "$tmp" \
+        || ! tn_as_service_user mv -f -T -- "$tmp" "$dest"; then
+        tn_as_service_user rm -f -- "$tmp" 2>/dev/null || true
+        return 2
+    fi
+    return 0
+}
+
+# edit_backup_copy FILE -- print "<backup path> <sha256>" for a new backup of
+# FILE in the root-only backup directory (tn_backup_file). A file in the data
+# dir is read by the service user into a root-only temp file first, so root
+# never opens a path that user controls.
+edit_backup_copy() {
+    local file="$1" tmp rc=0 out
+    if ! edit_in_data_dir "$file"; then
+        tn_backup_file "$file"
+        return
+    fi
+    tmp="$(mktemp "${TMPDIR:-/tmp}/tn-edit.XXXXXX")" || return 2
+    if tn_as_service_user cat -- "$file" > "$tmp"; then
+        out="$(tn_backup_file "$tmp" "${file##*/}")" || rc=$?
+    else
+        rc=2
+    fi
+    rm -f -- "$tmp"
+    [[ "$rc" -eq 0 ]] || return "$rc"
+    printf '%s\n' "$out"
+}
+
+# edit_restore_one FILE BACKUP SHA256 "MODE GROUP" -- put FILE back from its
+# backup, refusing (rc 1, FILE unchanged) a backup whose sha256 changed. A file
+# outside the data dir goes through tn_restore_backup (root-owned, temp file
+# and rename); one inside it is written by the service user.
+edit_restore_one() {
+    local file="$1" copy="$2" sum="$3" mg="$4" got
+    if ! edit_in_data_dir "$file"; then
+        tn_restore_backup "$copy" "$sum" "$file" "${mg%% *}" "${mg##* }"
+        return
+    fi
+    if [[ -L "$copy" || ! -f "$copy" ]]; then
+        return 1
+    fi
+    got="$(sha256sum < "$copy" 2>/dev/null)" || got=""
+    if [[ "${got%% *}" != "$sum" ]]; then
+        print_warn "Refusing ${copy}: its sha256 does not match; ${file} is unchanged" >&2
+        return 1
+    fi
+    _uc_service_user_write "$file" "${mg%% *}" < "$copy"
+}
+
+# edit_backup FILE -- before the first change to FILE in this edit, copy it
+# into the root-only backup directory (edit_backup_copy) and record the file,
+# the copy, its sha256 and FILE's mode and group for edit_restore_backups. A
+# FILE that does not exist yet is recorded as new, so the restore removes it.
+# A symlink is refused. From here until the restart is issued the edit is
+# pending (EDIT_PENDING). rc 1, with an error reported, when the copy fails.
 edit_backup() {
-    local file="$1" i copy
+    local file="$1" i copy sum mg out
     i=0
     while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
         if [[ "${EDIT_BK_FILES[$i]}" == "$file" ]]; then
@@ -585,18 +659,21 @@ edit_backup() {
         i=$((i + 1))
     done
     copy=""
-    if [[ -e "$file" ]]; then
-        copy="${file}.bak.$(date -u '+%Y%m%d-%H%M%S')"
-        if [[ -e "$copy" ]]; then
-            copy="${copy}.$$"
-        fi
-        if ! cp -p "$file" "$copy" 2>/dev/null; then
+    sum=""
+    mg=""
+    if [[ -e "$file" || -L "$file" ]]; then
+        mg="$(stat -c '%a %G' -- "$file" 2>/dev/null)" || mg=""
+        if [[ -L "$file" || -z "$mg" ]] || ! out="$(edit_backup_copy "$file")"; then
             edit_error "could not back up ${file}"
             return 1
         fi
+        copy="${out% *}"
+        sum="${out##* }"
     fi
     EDIT_BK_FILES+=("$file")
     EDIT_BK_COPIES+=("$copy")
+    EDIT_BK_SUMS+=("$sum")
+    EDIT_BK_MODES+=("$mg")
     EDIT_PENDING=true
     return 0
 }
@@ -623,20 +700,27 @@ edit_any_changed() {
 
 # edit_restore_backups -- undo the current edit: put back every file
 # edit_backup recorded (a file that was new is removed), then reload systemd.
-# Each file that cannot be restored is reported; rc 1 if there was one.
+# A backup whose sha256 no longer matches is not used. Each file that cannot
+# be restored is reported; rc 1 if there was one.
 edit_restore_backups() {
-    local i file copy bad=0
+    local i file copy bad=0 rc
     EDIT_PENDING=false
     i=0
     while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
         file="${EDIT_BK_FILES[$i]}"
         copy="${EDIT_BK_COPIES[$i]}"
         if [[ -z "$copy" ]]; then
-            if ! rm -f "$file" 2>/dev/null; then
+            rc=0
+            if edit_in_data_dir "$file"; then
+                tn_as_service_user rm -f -- "$file" 2>/dev/null || rc=$?
+            else
+                rm -f -- "$file" 2>/dev/null || rc=$?
+            fi
+            if [[ "$rc" -ne 0 ]]; then
                 edit_error "could not remove ${file}"
                 bad=1
             fi
-        elif ! cp -p "$copy" "$file" 2>/dev/null; then
+        elif ! edit_restore_one "$file" "$copy" "${EDIT_BK_SUMS[$i]}" "${EDIT_BK_MODES[$i]}"; then
             edit_error "could not restore ${file} from ${copy}"
             bad=1
         fi
@@ -658,13 +742,16 @@ edit_drop_backups() {
     return 0
 }
 
-# edit_report_backups -- name the backups of an edit that changed something.
+# edit_report_backups -- name the backups of an edit that changed something,
+# each with the file it belongs to and its sha256.
 edit_report_backups() {
-    local c
-    for c in ${EDIT_BK_COPIES[@]+"${EDIT_BK_COPIES[@]}"}; do
-        if [[ -n "$c" ]]; then
-            edit_log "Backup written: ${c}"
+    local i
+    i=0
+    while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
+        if [[ -n "${EDIT_BK_COPIES[$i]}" ]]; then
+            edit_log "Backup of ${EDIT_BK_FILES[$i]} written: ${EDIT_BK_COPIES[$i]} (sha256 ${EDIT_BK_SUMS[$i]})"
         fi
+        i=$((i + 1))
     done
     return 0
 }
