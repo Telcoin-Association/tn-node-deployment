@@ -524,6 +524,9 @@ report_orphaned_groups() {
 remove_ui_components() {
     print_step "Removing Telcoin Node Manager UI..."
     rm -f /etc/sudoers.d/telcoin-ui
+    # An interrupted install-ui.sh run can leave its sudoers candidate (inert:
+    # sudo skips names with a dot).
+    rm -f /etc/sudoers.d/.telcoin-ui.*
     systemctl stop telcoin-ui 2>/dev/null || true
     systemctl disable telcoin-ui 2>/dev/null || true
     rm -f /etc/systemd/system/telcoin-ui.service
