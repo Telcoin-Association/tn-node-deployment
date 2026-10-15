@@ -1440,7 +1440,8 @@ set_field() {
 # wait runs only when the operator chose to restart. Releases the update lock.
 # The edit stops being pending (EDIT_PENDING) when the restart is issued or the
 # operator chooses to restart later; a run stopped before either, at the
-# prompt or during the wait, puts the files back (edit_on_exit).
+# prompt or during the wait, puts the files back (edit_on_exit), and so does a
+# refusal by the committee check.
 apply_changes() {
     set +e  # Restart failure should not exit the script
     print_step "Applying changes..."
@@ -1453,10 +1454,20 @@ apply_changes() {
         print_info "Changes saved. Restart the node when ready:"
         print_info "  sudo systemctl restart ${TARGET_SERVICE}"
     elif ! edit_epoch_wait; then
-        # The committee check refused the restart: the edit stays saved.
-        EDIT_PENDING=false
-        print_info "Changes saved, not applied. Restart the node once the committee check allows it"
-        print_info "(edit-config.sh menu: Restart node)."
+        # The committee check refused the restart. An edit with recorded backups
+        # is put back (as --set does), so it cannot load at a later restart with
+        # no health check; one without (a chain-config refresh) stays saved.
+        if [[ ${#EDIT_BK_FILES[@]} -eq 0 ]]; then
+            EDIT_PENDING=false
+            print_info "Changes saved, not applied. Restart the node once the committee check allows it"
+            print_info "(edit-config.sh menu: Restart node)."
+        elif edit_restore_backups; then
+            print_info "The edit was put back; nothing was changed. Make it again once the committee"
+            print_info "check allows the restart (or start edit-config.sh with --allow-quorum-risk for"
+            print_info "a coordinated restart)."
+        else
+            print_error "The committee check refused the restart, and some files could not be put back (see the errors above)."
+        fi
     else
         EDIT_PENDING=false
         print_step "Restarting ${TARGET_SERVICE}..."

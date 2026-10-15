@@ -240,6 +240,22 @@ check "old form, stopped by TERM: no stray tn-start, node.env gone, unit and lau
     "no-tn-start no-node.env unit-back old-launch" "$(old_form_back)"
 unset -f tn_rerender_node_launch resolve_launch_file
 
+# A menu edit whose restart the committee check refuses is put back.
+old_form
+edit_backup "$UNITF"
+printf '[Service]\nExecStart=/edited\n' > "$UNITF"
+EV=""
+systemctl() { EV="${EV}${EV:+ }$1"; return 0; }
+confirm() { return 0; }
+tn_committee_down_guard() { EV="${EV}${EV:+ }guard"; return 1; }
+apply_changes < /dev/null > "$T/apply.out" 2>&1
+set +e  # apply_changes ends with set -e
+check "menu edit, guard refusal: no restart, unit put back" "no unit-back" \
+    "$(has "$EV" restart) $([[ "$(cat "$UNITF")" == "$OLD_UNIT" ]] && echo unit-back || echo unit-changed)"
+check "menu edit, guard refusal: says nothing was changed" yes "$(has "$(cat "$T/apply.out")" "nothing was changed")"
+check "menu edit, guard refusal: no longer pending" false "$EDIT_PENDING"
+unset -f systemctl confirm tn_committee_down_guard
+
 if [[ $SU_OK != 1 ]]; then
     skip "data-dir restore as the service user" "no nobody account usable with setpriv or runuser"
     skip "chain-config copy as the service user" "no nobody account usable with setpriv or runuser"
