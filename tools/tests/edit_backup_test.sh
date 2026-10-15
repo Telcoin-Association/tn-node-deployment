@@ -235,9 +235,11 @@ old_form
     launch_current_form >/dev/null 2>&1
     EDIT_SIGNAL=TERM
     exit 143
-) >/dev/null 2>&1
+) > "$T/term.out" 2>&1
 check "old form, stopped by TERM: no stray tn-start, node.env gone, unit and launch file back" \
     "no-tn-start no-node.env unit-back old-launch" "$(old_form_back)"
+check "old form, stopped by TERM: the rollback is reported as done" "yes no" \
+    "$(has "$(cat "$T/term.out")" "the edit was rolled back") $(has "$(cat "$T/term.out")" "putting the files back failed")"
 unset -f tn_rerender_node_launch resolve_launch_file
 
 # A menu edit whose restart the committee check refuses is put back.

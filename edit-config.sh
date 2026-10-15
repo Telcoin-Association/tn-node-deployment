@@ -786,7 +786,9 @@ edit_restore_one() {
     local file="$1" copy="$2" sum="$3" mg="$4" got
     if ! edit_in_data_dir "$file"; then
         tn_restore_backup "$copy" "$sum" "$file" "${mg%% *}" "${mg##* }"
-        return
+        # The status explicitly: a bare return run from the EXIT trap would give
+        # the status from before the trap (143 after a TERM), not the restore's.
+        return $?
     fi
     if [[ -L "$copy" || ! -f "$copy" ]]; then
         return 1
