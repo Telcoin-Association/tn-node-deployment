@@ -6504,15 +6504,84 @@ tn_release_version_ok() {
     return 0
 }
 
+# _tn_exec_closed CMD [ARG...] -- exec CMD with every file descriptor above 2
+# closed: the update lock (fd 9), the --json event channel (fd 3) and anything
+# else this script holds open. Run it in a subshell; it replaces that shell.
+_tn_exec_closed() {
+    local p n fds=""
+    for p in /proc/self/fd/*; do
+        n="${p##*/}"
+        if [[ "$n" =~ ^[0-9]+$ ]]; then
+            fds="${fds} ${n}"
+        fi
+    done
+    [[ -n "$fds" ]] || fds="3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20"
+    for n in $fds; do
+        if (( n > 2 )); then
+            eval "exec ${n}>&-"
+        fi
+    done
+    exec "$@"
+}
+
+# _tn_uid_procs_alive UID -- rc 0 when a process whose real uid is UID is alive
+# (zombies, which can no longer run or fork, do not count).
+_tn_uid_procs_alive() {
+    local s k v rest state ruid
+    for s in /proc/[0-9]*/status; do
+        state=""
+        ruid=""
+        while read -r k v rest; do
+            case "$k" in
+                State:) state="$v" ;;
+                Uid:) ruid="$v"; break ;;
+            esac
+        done 2>/dev/null < "$s"
+        if [[ "$ruid" == "$1" && "$state" != "Z" && "$state" != "X" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# _tn_build_user_reap UID GID -- stop every process of the build account (UID): a
+# kill -KILL -1 run as that account, a single kill(2) that reaches all of its
+# processes at once, so none can fork away from it; repeated until /proc shows
+# none left, for 5 s at most. Nothing is done when UID is the caller's own uid
+# (a test run as the build account). rc 1 when a process is still alive.
+_tn_build_user_reap() {
+    local uid="$1" gid="$2" i=0
+    [[ "$uid" =~ ^[0-9]+$ && ! "$uid" =~ ^0+$ && "$uid" != "$(id -u)" ]] || return 0
+    while _tn_uid_procs_alive "$uid"; do
+        if (( i >= 50 )); then
+            return 1
+        fi
+        if (( i % 10 == 0 )); then
+            # The shell checks it runs as UID before kill -1, so a setpriv that did
+            # not switch accounts kills nothing.
+            ( _tn_exec_closed setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- \
+                env -i PATH=/usr/bin:/bin sh -c '[ "$(id -u)" = "$1" ] && kill -KILL -1' sh "$uid" ) \
+                >/dev/null 2>&1 || true
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 0
+}
+
 # tn_as_build_user CMD [ARG...] -- run CMD as TN_BUILD_USER with no
 # supplementary groups and no_new_privs set (setpriv), in an environment that
 # holds only HOME, USER, LOGNAME, PATH (the account's cargo bin, then
 # /usr/local/bin:/usr/bin:/bin), CARGO_HOME, RUSTUP_HOME, CARGO_TARGET_DIR (all
-# under TN_BUILD_HOME), LANG and TERM: nothing of the caller's environment. fd 9
-# (the update lock) is closed for it. rc 126 without running anything when the
-# account is unknown, malformed or uid/gid 0, or setpriv is missing.
+# under TN_BUILD_HOME), LANG and TERM: nothing of the caller's environment, and
+# no file descriptor above 2 (not the update lock, not the --json channel). When
+# CMD returns, every process the account still runs is killed
+# (_tn_build_user_reap), so nothing it started outlives the call. rc is CMD's;
+# 125 when a process of the account could not be stopped; 126 without running
+# anything when the account is unknown, malformed or uid/gid 0, or setpriv is
+# missing.
 tn_as_build_user() {
-    local u="$TN_BUILD_USER" h="$TN_BUILD_HOME" uid gid
+    local u="$TN_BUILD_USER" h="$TN_BUILD_HOME" uid gid rc=0
     if [[ $# -eq 0 ]]; then
         print_warn "tn_as_build_user: no command given" >&2
         return 126
@@ -6531,11 +6600,16 @@ tn_as_build_user() {
         print_warn "tn_as_build_user: setpriv is not installed" >&2
         return 126
     fi
-    setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- \
+    ( _tn_exec_closed setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- \
         env -i HOME="$h" USER="$u" LOGNAME="$u" \
         PATH="${h}/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
         CARGO_HOME="${h}/.cargo" RUSTUP_HOME="${h}/.rustup" CARGO_TARGET_DIR="${h}/target" \
-        LANG=C.UTF-8 TERM=dumb "$@" 9>&-
+        LANG=C.UTF-8 TERM=dumb "$@" ) || rc=$?
+    if ! _tn_build_user_reap "$uid" "$gid"; then
+        print_warn "tn_as_build_user: a process of ${u} is still running after its command and could not be stopped" >&2
+        [[ $rc -ne 0 ]] || rc=125
+    fi
+    return $rc
 }
 
 # tn_build_user_ensure [progress-fn] -- make the build account ready: create it
@@ -6642,18 +6716,15 @@ tn_rustup_ensure() {
 }
 
 # tn_build_version BIN -- print BIN --version, run as the build account (30 s at
-# most). A file of another owner (a root copy from a release) is first copied
-# into a fresh directory in the build account's home and run from there.
+# most) on a copy in a fresh directory of the build account's home. BIN must be
+# a regular file of the caller (root's staged copy, tn_stage_binary); anything
+# else is refused (rc 1) and never run.
 tn_build_version() {
-    local bin="${1:-}" uid owner d out rc=0
+    local bin="${1:-}" d out rc=0
     [[ -f "$bin" && ! -L "$bin" ]] || return 1
-    uid="$(id -u "$TN_BUILD_USER" 2>/dev/null)" || return 1
-    owner="$(stat -c '%u' -- "$bin" 2>/dev/null)" || return 1
-    if [[ "$owner" == "$uid" ]]; then
-        tn_as_build_user timeout 30 "$bin" --version
-        return
-    fi
+    [[ "$(stat -c '%u' -- "$bin" 2>/dev/null)" == "$(id -u)" ]] || return 1
     d="$(tn_as_build_user mktemp -d "${TN_BUILD_HOME}/probe.XXXXXX")" || return 2
+    [[ "$d" == "${TN_BUILD_HOME}/probe."* && "$d" != *[[:space:]]* ]] || return 2
     if tn_as_build_user sh -c 'cat > "$1" && chmod 0700 "$1"' sh "${d}/telcoin-network" < "$bin"; then
         out="$(tn_as_build_user timeout 30 "${d}/telcoin-network" --version)" || rc=$?
     else
@@ -6957,19 +7028,30 @@ tn_source_build() {
 # --version as the build account (tn_build_version) and check it with
 # tn_release_version_ok for NETWORK (and REF's version when REF is given; a
 # source build leaves REF empty, since releases before the signed ones report
-# the crate version). Prints the copy's path; its --version text is beside it
-# in "version". The caller removes that directory when done. rc 1 refused, 2
-# failed; nothing is left behind on failure.
+# the crate version). SRC outside the staging directory (the build output, in
+# the build account's tree) is read as the build account, so root opens nothing
+# there; the copy is written by this shell and is root's. SRC inside the staging
+# directory (a release binary) is read directly. Prints the copy's path; its
+# --version text is beside it in "version". The caller removes that directory
+# when done. rc 1 refused, 2 failed; nothing is left behind on failure.
 tn_stage_binary() {
-    local src="${1:-}" net="${2:-}" ref="${3:-}" fn="${4:-}" parent stg ver
+    local src="${1:-}" net="${2:-}" ref="${3:-}" fn="${4:-}" parent stg ver ok=true
     [[ -f "$src" && ! -L "$src" ]] || return 1
     parent="$(tn_staging_dir)" || {
         _tn_c4_say warn "The staging directory is not a root-owned 0700 directory." "$fn"
         return 1
     }
     stg="$(mktemp -d "${parent}/bin.XXXXXX")" || return 2
-    if ! ( umask 077; cat -- "$src" > "${stg}/telcoin-network" ) 2>/dev/null \
-        || ! chmod 0755 -- "${stg}/telcoin-network"; then
+    case "$src" in
+        "${parent}/"*)
+            ( umask 077; cat -- "$src" > "${stg}/telcoin-network" ) 2>/dev/null || ok=false
+            ;;
+        *)
+            ( umask 077; tn_as_build_user cat -- "$src" > "${stg}/telcoin-network" ) 2>/dev/null || ok=false
+            ;;
+    esac
+    if [[ "$ok" != "true" ]] || ! chmod 0755 -- "${stg}/telcoin-network"; then
+        _tn_c4_say warn "Could not copy ${src} into the staging directory (read as ${TN_BUILD_USER} unless it is already there)." "$fn"
         rm -rf -- "$stg"
         return 2
     fi
