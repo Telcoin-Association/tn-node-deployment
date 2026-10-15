@@ -1397,8 +1397,10 @@ do_disable() {
         print_info "Cancelled -- no changes made."
         exit 0
     fi
+    # The lock only: a teardown never runs the ownership migration, so it works on a
+    # host laid out by an older release (where the migration may refuse).
     if [[ -n "$VPN_META" ]]; then
-        addon_meta_write_begin || exit 1
+        addon_meta_lock || exit 1
     fi
 
     # Remove the self-heal units FIRST, so the path watcher can't re-assert the drop-in /
@@ -1442,8 +1444,8 @@ do_disable() {
         print_info "Left the tnadmin user in place (its overlay reachability is already gone)."
     fi
 
-    if [[ -n "$VPN_META" ]]; then
-        meta_set ENABLE_VPN false "$VPN_META"
+    if [[ -n "$VPN_META" ]] && ! meta_set ENABLE_VPN false "$VPN_META"; then
+        print_warn "ENABLE_VPN=false could not be written to ${VPN_META} (a host laid out by an older release refuses the write until its ownership is migrated); the VPN itself is torn down."
     fi
     print_ok "VPN admin SSH disabled. Your own SSH is unchanged."
     print_info "Ask the Telcoin Association to remove your peer from the overlay registry."
@@ -1485,9 +1487,9 @@ parse_args() {
 # update-scripts.sh.
 vpn_require_lib() {
     local fn missing=""
-    for fn in addon_meta_get addon_meta_write_begin tn_write_root_file tn_root_dir_ok \
-              tn_acquire_update_lock validate_health_src allow_overlay_ssh is_testnet_like \
-              require_testnet; do
+    for fn in addon_meta_get addon_meta_lock addon_meta_write_begin tn_write_root_file \
+              tn_root_dir_ok tn_acquire_update_lock validate_health_src allow_overlay_ssh \
+              is_testnet_like require_testnet; do
         declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
     done
     [[ -z "$missing" ]] && return 0

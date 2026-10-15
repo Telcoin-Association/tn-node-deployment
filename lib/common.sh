@@ -5878,6 +5878,20 @@ addon_meta_get() {
     printf '%s\n' "$v"
 }
 
+# addon_meta_lock — take the update lock unless this run holds it already, and
+# nothing more: for a teardown or a read that must also work on a host laid out
+# by an older release (no ownership migration; a .node-meta write there is then
+# refused by meta_set, rc 1, and the caller warns). The caller's EXIT trap rules
+# are those of addon_meta_write_begin. rc 0 held; 1 another run holds it (said).
+addon_meta_lock() {
+    [[ -n "${TN_UPDATE_LOCK_KIND:-}" ]] && return 0
+    if ! tn_acquire_update_lock >/dev/null 2>&1; then
+        print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished." >&2
+        return 1
+    fi
+    return 0
+}
+
 # addon_meta_write_begin — run once before an add-on script's first .node-meta
 # write on an existing install: take the update lock (tn_acquire_update_lock; a
 # caller with its own EXIT trap sets TN_EXIT_TRAP_OWNED=1 first and releases the
@@ -5889,10 +5903,7 @@ addon_meta_write_begin() {
     if [[ "${_ADDON_META_READY:-0}" == "1" && -n "${TN_UPDATE_LOCK_KIND:-}" ]]; then
         return 0
     fi
-    if [[ -z "${TN_UPDATE_LOCK_KIND:-}" ]] && ! tn_acquire_update_lock >/dev/null 2>&1; then
-        print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished." >&2
-        return 1
-    fi
+    addon_meta_lock || return 1
     rc=0
     tn_migrate_ownership >&2 || rc=$?
     if [[ "$rc" -ne 0 ]]; then

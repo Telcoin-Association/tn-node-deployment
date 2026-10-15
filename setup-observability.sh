@@ -152,6 +152,14 @@ load_node_context() {
     REGION="$(so_meta REGION "")"; so_meta_check REGION "$REGION"
 }
 
+# so_lock_begin -- the menu session's update lock, without the ownership migration
+# (a status screen changes nothing); each menu action that changes something runs
+# addon_meta_write_begin first. Stops the run when the lock is held elsewhere.
+so_lock_begin() {
+    addon_meta_lock && return 0
+    exit 1
+}
+
 # so_write_begin -- before the first change: the update lock and, on a host set up
 # by an older release, the ownership migration (addon_meta_write_begin). Stops the
 # run when either refuses.
@@ -192,6 +200,7 @@ _obs_collect_token() {
 # shellcheck disable=SC2034
 enable_logging() {
     print_header "Enable log shipping"
+    addon_meta_write_begin || { pause; return 0; }
     print_info "Ships this node's logs to the Telcoin Association's Loki:"
     print_info "  ${OBS_PUSH_URL_TESTNET}"
     print_info "You need a per-operator ingest token from the Association (docs/testnet-addons.md)."
@@ -214,6 +223,7 @@ enable_logging() {
 # shellcheck disable=SC2034
 enable_metrics() {
     print_header "Enable metrics shipping"
+    addon_meta_write_begin || { pause; return 0; }
     print_info "Ships this node's Prometheus metrics to the Association's central Prometheus:"
     print_info "  ${OBS_METRICS_PUSH_URL_TESTNET}"
     print_info "Reuses the SAME ingest token as logging (one token covers both)."
@@ -234,6 +244,7 @@ enable_metrics() {
 disable_logging() {
     print_header "Disable log shipping"
     if confirm "Stop shipping logs (metrics, if on, keeps running)?"; then
+        addon_meta_write_begin || { pause; return 0; }
         obs_disable_logs
     else
         print_info "Cancelled."
@@ -244,6 +255,7 @@ disable_logging() {
 disable_metrics() {
     print_header "Disable metrics shipping"
     if confirm "Stop shipping metrics (logs, if on, keeps running)?"; then
+        addon_meta_write_begin || { pause; return 0; }
         obs_disable_metrics
     else
         print_info "Cancelled."
@@ -253,6 +265,7 @@ disable_metrics() {
 
 enable_health() {
     print_header "Enable health monitoring"
+    addon_meta_write_begin || { pause; return 0; }
     print_info "Adds --healthcheck ${TN_KUMA_PORT} to the node launch and source-restricts the"
     print_info "ufw rule to the Association monitor only (${TN_KUMA_SRC})."
     addons_lib_check
@@ -317,6 +330,7 @@ enable_health() {
 
 disable_health() {
     print_header "Disable health monitoring"
+    addon_meta_write_begin || { pause; return 0; }
     if ufw_installed && ufw_active; then
         ufw delete allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp &>/dev/null || true
         print_ok "Removed the ufw rule ${TN_KUMA_SRC} -> ${TN_KUMA_PORT}/tcp"
@@ -658,8 +672,8 @@ arg_fail() {
 # as its done event.
 addons_require_lib() {
     local fn missing="" lib="" are="is" msg
-    for fn in addon_meta_get addon_meta_write_begin tn_write_root_file tn_root_dir_ok \
-              tn_as_service_user tn_acquire_update_lock tn_wait_restart_window \
+    for fn in addon_meta_get addon_meta_lock addon_meta_write_begin tn_write_root_file \
+              tn_root_dir_ok tn_as_service_user tn_acquire_update_lock tn_wait_restart_window \
               tn_committee_down_guard apply_kuma_rule is_testnet_like require_testnet; do
         declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
     done
@@ -732,7 +746,7 @@ main() {
     detect_distro
     load_node_context
     require_testnet
-    so_write_begin
+    so_lock_begin
     main_menu
 }
 

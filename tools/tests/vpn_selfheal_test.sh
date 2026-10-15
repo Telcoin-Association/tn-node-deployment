@@ -354,6 +354,36 @@ check_lacks "revoke dropped full root" "NOPASSWD:ALL" "$(cat "$RP/etc/sudoers.d/
 check_has "status reports the helper" "yes" "$(grep -q 'Self-heal runs the root-owned' "$T/out" && echo yes)"
 ( set -e; NETWORK=mainnet; do_selfheal ) >"$T/out" 2>&1; check_rc "do_selfheal off testnet under set -e" 0 $?
 
+# --- --disable and --status never run the ownership migration --------------------------------
+# A mainnet host laid out by an older release (no OWNERSHIP_LAYOUT=2): the migration
+# would refuse, so --disable takes the lock only, tears down, and warns that the
+# .node-meta write was refused; --status changes nothing.
+MIG_LOG="$T/mig.log"
+: > "$MIG_LOG"
+cp "$VPN_META" "$T/meta.keep"
+printf 'NETWORK=mainnet\nRPC_PORT=8545\n' > "$VPN_META"
+echo x > "$RP/etc/ssh/sshd_config.d/15-tnadmin-overlay.conf"
+echo x > "$RP/etc/wgvpn/tnadmin.keys"
+(
+    set -e
+    NETWORK=mainnet
+    TN_ASSUME_YES=true
+    tn_migrate_ownership() { echo migrate >> "$MIG_LOG"; return 3; }
+    userdel() { printf 'userdel %s\n' "$*" >> "$ACCT_LOG"; }
+    # meta_set on the old layout: the root-write primitive refuses its directory.
+    tn_write_root_file() { [[ "$1" == "$VPN_META" ]] && return 1; cat > "$1"; }
+    do_disable
+) >"$T/out" 2>&1
+check_rc "old-layout mainnet --disable rc 0" 0 $?
+check "old-layout --disable: no ownership migration" "" "$(cat "$MIG_LOG")"
+check "old-layout --disable: drop-in removed" "no" "$([[ -e "$RP/etc/ssh/sshd_config.d/15-tnadmin-overlay.conf" ]] && echo yes || echo no)"
+check "old-layout --disable: key file removed" "no" "$([[ -e "$RP/etc/wgvpn/tnadmin.keys" ]] && echo yes || echo no)"
+check "old-layout --disable: the refused .node-meta write is said" "yes" "$(grep -q 'ENABLE_VPN=false could not be written' "$T/out" && echo yes)"
+( set -e; NETWORK=mainnet; tn_migrate_ownership() { echo migrate >> "$MIG_LOG"; return 3; }; do_status ) >"$T/out" 2>&1
+check_rc "old-layout mainnet --status rc 0" 0 $?
+check "old-layout --status: no ownership migration" "" "$(cat "$MIG_LOG")"
+cp "$T/meta.keep" "$VPN_META"
+
 # remove-node.sh's teardown of the self-heal, keys and rules: tools/tests/remove_addons_test.sh.
 
 # --- verb gating --------------------------------------------------------------------------------

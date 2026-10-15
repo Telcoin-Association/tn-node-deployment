@@ -236,10 +236,26 @@ ufw_active() { return "${UFW_ACT_RC:-0}"; }
 check "ufw inactive: said" "yes" "$(grep -q 'ufw is inactive' "$T/out" && echo yes)"
 ( UFW_INST_RC=1; health_firewall_ready ) >"$T/out" 2>&1; check_rc "ufw missing: health check refused" 1 $?
 ( health_firewall_ready ) >"$T/out" 2>&1; check_rc "ufw active: health check allowed" 0 $?
+MIG_LOG="$T/mig.log"
+: > "$MIG_LOG"
+tn_migrate_ownership() { echo migrate >> "$MIG_LOG"; return 0; }
+pause() { :; }
 health_flag_add() { printf 'called\n' > "$T/flag"; return 0; }
 rm -f "$T/flag"
 ( UFW_ACT_RC=1; enable_health ) >"$T/out" 2>&1
 check "ufw inactive: --healthcheck not added" "no" "$([[ -e "$T/flag" ]] && echo yes || echo no)"
+check "ufw inactive: refused by the firewall check" "yes" "$(grep -q 'ufw is inactive' "$T/out" && echo yes)"
+# The menu session takes the lock without the ownership migration; an action that
+# changes something migrates first.
+: > "$MIG_LOG"
+( so_lock_begin ) >"$T/out" 2>&1; check_rc "menu session lock rc 0" 0 $?
+check "menu session lock: no ownership migration" "" "$(cat "$MIG_LOG")"
+( TN_ASSUME_YES=true; obs_disable_logs() { :; }; disable_logging ) >"$T/out" 2>&1
+check "menu disable: ownership migration first" "migrate" "$(cat "$MIG_LOG")"
+: > "$MIG_LOG"
+( tn_migrate_ownership() { echo migrate >> "$MIG_LOG"; return 3; }; TN_ASSUME_YES=true
+  obs_disable_logs() { echo disabled >> "$MIG_LOG"; }; disable_logging ) >"$T/out" 2>&1
+check "menu disable: a refused migration changes nothing" "migrate" "$(cat "$MIG_LOG")"
 printf 'NETWORK=testnet\nINSTALL_METHOD=binary\nINSTALL_METHOD=docker\n' > "$RP/etc/telcoin/.node-meta"
 ( load_node_context ) >"$T/out" 2>&1; check_rc "duplicated INSTALL_METHOD stops setup-observability" 1 $?
 
