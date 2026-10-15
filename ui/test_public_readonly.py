@@ -52,7 +52,7 @@ WRITE_ENDPOINTS = {
     "api_logs_clear", "api_service", "api_setup_finalize", "api_setup_keygen",
     "api_tracing_disable", "api_tracing_enable", "api_update_discard",
     "api_config_set", "api_update_apply", "api_update_prepare",
-    "api_config_credential",
+    "api_config_credential", "api_firewall_enable",
 }
 
 READ_ENDPOINTS = {

@@ -19,6 +19,7 @@ array, a missing service file yields installed:false -- never a 500.
 import collections
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -3988,6 +3989,77 @@ def api_firewall_port():
         except (ValueError, json.JSONDecodeError):
             pass
     return jsonify({"ok": False, "error": err or out or "firewall update failed"})
+
+
+# SSH sources for firewall-setup.sh --ssh-from, as lib/common.sh
+# validate_health_src takes them: an address, or a CIDR with a mask of /8 or
+# narrower (no leading zeros); never the unspecified address or /0. At most 16;
+# the page may separate them with commas, spaces or new lines.
+FW_SSH_SOURCES_MAX = 16
+_FW_SRC_CHARS_RE = re.compile(r"[0-9A-Fa-f.:]+(?:/[0-9]{1,3})?")
+_FW_MASK_RE = re.compile(r"[1-9][0-9]{0,2}")
+
+
+def ssh_source_ok(src):
+    if not isinstance(src, str) or not _FW_SRC_CHARS_RE.fullmatch(src):
+        return False
+    ip, sep, mask = src.partition("/")
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.is_unspecified:
+        return False
+    if sep:
+        if not _FW_MASK_RE.fullmatch(mask):
+            return False
+        if not 8 <= int(mask) <= (32 if addr.version == 4 else 128):
+            return False
+    return True
+
+
+def ssh_source_list(text):
+    """(comma list, None) for the operator's SSH sources ("" when none were
+    given), or (None, error)."""
+    if not isinstance(text, str):
+        return None, "ssh_from must be text"
+    items = [x for x in re.split(r"[\s,]+", text) if x]
+    if len(items) > FW_SSH_SOURCES_MAX:
+        return None, "at most %d SSH sources" % FW_SSH_SOURCES_MAX
+    for item in items:
+        if not ssh_source_ok(item):
+            return None, ("not an address or a CIDR of /8 or narrower: %s" % item)[:200]
+    return ",".join(items), None
+
+
+@app.route("/api/firewall/enable", methods=["POST"])
+def api_firewall_enable():
+    """Enable ufw with firewall-setup.sh's lockout-safe defaults. POST
+    {"ssh_from": "<sources>"}: the sources become --ssh-from, so SSH is allowed
+    from them only; without them the engine uses the list .node-meta keeps, and
+    on mainnet refuses when there is none. The engine's message comes back as
+    is in `error`."""
+    data, err = _json_body()
+    if err:
+        return err
+    det = detect_nodes()
+    if not any(det.get(t, {}).get("mode") == "scripts" for t in NODE_TYPES):
+        return jsonify({"ok": False, "error": "read-only (external node)"}), 403
+    ssh_from, error = ssh_source_list(data.get("ssh_from") or "")
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    argv = ["sudo", "-n", HELPER, "firewall-enable"]
+    if ssh_from:
+        argv.append(ssh_from)
+    rc, out, err = run(argv, timeout=180)
+    done = _parse_json_tail(out)
+    if isinstance(done, dict) and "ok" in done:
+        ok = done.get("ok") is True
+        return jsonify({"ok": ok, "active": done.get("active") is True,
+                        "error": "" if ok else str(done.get("msg") or done.get("error") or
+                                                   "firewall enable failed")})
+    return jsonify({"ok": False, "active": False,
+                    "error": (err or out or "firewall enable failed").strip()[-600:]})
 
 
 # Node removal is intentionally NOT exposed in the UI: it is irreversible

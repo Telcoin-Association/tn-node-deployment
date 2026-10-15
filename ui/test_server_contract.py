@@ -247,6 +247,8 @@ HELPER_REPLIES = {
     "rpc-dns-check": (0, json.dumps({"propagated": True}), ""),
     "firewall-status": (0, json.dumps({"installed": True, "active": True}), ""),
     "firewall-port": (0, json.dumps({"ok": True}), ""),
+    "firewall-enable": (0, json.dumps({"event": "done", "ok": True, "action": "enable",
+                                       "active": True, "msg": "ufw enabled"}), ""),
     "update-check": (0, json.dumps({"current_ref": "v0.14.0-adiri",
                                     "latest_ref": "v0.15.0-adiri"}), ""),
     "update-discard": (0, "", ""),
@@ -424,6 +426,9 @@ class CrossFileContractTest(ServerTestCase):
             for state in ("on", "off"):
                 c.post("/api/firewall/port", json={"port": port, "proto": proto,
                                                    "state": state})
+        c.post("/api/firewall/enable", json={})
+        c.post("/api/firewall/enable", json={"ssh_from": "203.0.113.7/32, 2001:db8::/48"})
+        server._write_times.clear()     # the write rate limit would refuse the rest
         c.post("/api/setup/observer/keygen", json=FULL_SETUP, buffered=True)
         c.post("/api/setup/observer/finalize", json=FULL_SETUP, buffered=True)
         c.get("/api/caddy/status")
@@ -911,6 +916,68 @@ class CredentialTest(ServerTestCase):
         rules = helper_rules(split_transitional(sudoers_text())[0])
         self.assertEqual(sorted(r for r in rules if r.startswith("credential")),
                          ["credential migrate", "credential reseal"])
+
+
+class FirewallEnableTest(ServerTestCase):
+
+    def post(self, body):
+        self.calls.clear()
+        server._write_times.clear()
+        return self.client.post("/api/firewall/enable", json=body)
+
+    def test_sources_become_one_comma_list(self):
+        for raw, want in (("203.0.113.7", "203.0.113.7"),
+                          ("203.0.113.0/24, 198.51.100.7/32\n2001:db8::/32",
+                           "203.0.113.0/24,198.51.100.7/32,2001:db8::/32"),
+                          (",10.0.0.1,,10.0.0.0/8,", "10.0.0.1,10.0.0.0/8")):
+            with self.subTest(raw=raw):
+                body = self.post({"ssh_from": raw}).get_json()
+                self.assertTrue(body["ok"])
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "firewall-enable", want]])
+
+    def test_no_sources_sends_none(self):
+        for body in ({}, {"ssh_from": ""}, {"ssh_from": "  "}):
+            with self.subTest(body=body):
+                self.post(body)
+                self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "firewall-enable"]])
+
+    def test_bad_sources_never_reach_the_helper(self):
+        bad = ["0.0.0.0/0", "0.0.0.0", "::/0", "::", "10.0.0.0/7", "010.0.0.1", "10.0.0.256",
+               "10.0.0.1/33", "10.0.0.1/08", "2001:db8::/129", "/etc/passwd", "fe80::1%eth0",
+               "10.0.0.1;id", "node.example.org", ",".join("10.0.0.%d" % i for i in range(1, 18))]
+        for raw in bad + [["10.0.0.1"], 7]:
+            with self.subTest(raw=raw):
+                resp = self.post({"ssh_from": raw})
+                self.assertEqual(resp.status_code, 400)
+                self.assertFalse(resp.get_json()["ok"])
+                self.assertEqual(self.helper_calls(), [])
+        self.assertEqual(server.ssh_source_list(",".join("10.0.0.%d" % i for i in range(1, 17)))[1], None)
+
+    def test_the_engine_refusal_comes_back_verbatim(self):
+        msg = ("Mainnet: give the SSH sources with --ssh-from CIDR[,CIDR] (or --ssh-anywhere to "
+               "keep SSH open to every address); nothing was changed.")
+        self.helper_replies["firewall-enable"] = (1, "\n".join([
+            json.dumps({"event": "error", "msg": msg}),
+            json.dumps({"event": "done", "ok": False, "action": "enable", "rc": 1,
+                        "ssh_port": "22", "active": False, "msg": msg})]), "")
+        body = self.post({}).get_json()
+        self.assertEqual(body, {"ok": False, "active": False, "error": msg})
+
+    def test_a_helper_refusal_comes_back(self):
+        self.helper_replies["firewall-enable"] = (1, "", "invalid SSH source: x")
+        self.assertEqual(self.post({"ssh_from": "10.0.0.1"}).get_json()["error"], "invalid SSH source: x")
+
+    def test_external_nodes_are_read_only(self):
+        self.nodes = external_nodes()
+        resp = self.post({"ssh_from": "10.0.0.1"})
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_sudoers_allows_the_call_with_and_without_sources(self):
+        rules = helper_rules(split_transitional(sudoers_text())[0])
+        self.assertIn("firewall-enable", rules)
+        self.assertIn("firewall-enable *", rules)
 
 
 # ---------------------------------------------------------------------------

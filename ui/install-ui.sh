@@ -422,9 +422,13 @@ ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-status
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-dns-check *
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-enable *
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper rpc-disable
-# Firewall: read-only status, plus open/close for ONLY the three node ports,
-# enumerated (3 ports x on|off). SSH and the default policy are never reachable.
+# Firewall: read-only status, open/close for ONLY the three node ports,
+# enumerated (3 ports x on|off), and enable with firewall-setup.sh's lockout-safe
+# defaults, optionally with an SSH source list (addresses or CIDRs, checked by
+# the helper). No other SSH or default-policy setting is reachable.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-status
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-enable
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-enable *
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49590/udp on
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49590/udp off
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port 49594/udp on

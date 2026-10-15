@@ -743,6 +743,39 @@ t="$(trace clear-rotated)"
 check_has "clear-rotated removes rotated logs only" "removed 1" "$t"
 check_has "clear-rotated leaves the live log" "/var/log/telcoin/telcoin.log:" "$t"
 
+# ---- firewall-enable: the engine's defaults, with a checked SSH source list -------------
+# shellcheck disable=SC2016
+make_fake "$T/engine/firewall-setup.sh" firewall-setup '# --ssh-from
+echo "cwd [$(pwd)]" >> "'"$T"'/calls.log"'
+fixture unified
+t="$(trace firewall-enable)"
+check_has "firewall-enable without sources" "firewall-setup [--json] [--enable]" "$t"
+check_has "firewall-enable runs the engine from /" "cwd [/]" "$t"
+t="$(trace firewall-enable 203.0.113.7)"
+check_has "firewall-enable with one address" "firewall-setup [--json] [--enable] [--ssh-from] [203.0.113.7]" "$t"
+t="$(trace firewall-enable 203.0.113.0/24,198.51.100.7/32,2001:db8::/32)"
+check_has "firewall-enable with three sources" \
+    "firewall-setup [--json] [--enable] [--ssh-from] [203.0.113.0/24,198.51.100.7/32,2001:db8::/32]" "$t"
+sixteen="$(printf '10.0.0.%s,' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)"
+t="$(trace firewall-enable "${sixteen%,}")"
+check_has "firewall-enable takes 16 sources" "rc=0" "$t"
+seventeen="${sixteen}10.0.0.17"
+for bad in 0.0.0.0/0 0.0.0.0 ::/0 :: 10.0.0.0/7 10.0.0.0/0 010.0.0.1 10.0.0.256 10.0.0.1/33 \
+           10.0.0.1/08 2001:db8::/129 /etc/passwd etc/passwd 10.0.0.1,,10.0.0.2 ,10.0.0.1 10.0.0.1, \
+           "10.0.0.1;id" 'a$(id)' "$seventeen" "10.0.0.1/8/8"; do
+    refused "firewall-enable refuses '$(label "$bad")'" firewall-enable "$bad"
+done
+refused "firewall-enable refuses a second argument" firewall-enable 10.0.0.1 10.0.0.2
+refused "firewall-enable refuses --ssh-anywhere" firewall-enable --ssh-anywhere
+make_fake "$T/engine/firewall-old.sh" firewall-old
+t="$(FIREWALL_SCRIPT="$T/engine/firewall-old.sh"; trace firewall-enable 10.0.0.1)"
+check_has "firewall-enable with sources refuses an engine without --ssh-from" \
+    "firewall-old.sh in the engine copy has no --ssh-from (it is older than this helper): run update-scripts.sh, then try again" "$t"
+t="$(HELPER_LIB="$T/nolib/common.sh"; trace firewall-enable 10.0.0.1)"
+check_has "firewall-enable with sources needs the library check" \
+    "the engine library ($T/nolib/common.sh) is missing or has no validate_health_src: run update-scripts.sh, then try again" "$t"
+make_fake "$T/engine/firewall-setup.sh" firewall-setup
+
 # ---- Generic argument check ----------------------------------------------------------
 fixture unified
 refused "an argument with a space is refused" set-hostname "a b"

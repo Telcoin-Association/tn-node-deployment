@@ -3162,10 +3162,23 @@ async function loadFirewall(){
     ? '<span class="muted">not installed</span>'
     : (active ? '<span class="badge ok">active</span>' : '<span class="badge warn">inactive</span>');
 
-  const inactiveInfo = (f.installed && !active)
+  // ufw off: enable it here with firewall-setup.sh's lockout-safe defaults. The
+  // SSH sources the operator enters go to the engine as --ssh-from; a mainnet
+  // node without them (and without a stored list) is refused by the engine, and
+  // its message is shown as is.
+  const enableForm = (!f.active && !isReadonly())
     ? `<div class="note" style="margin-top:12px;border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
-        UFW is not active. Port management is disabled until the firewall is enabled. To enable, run
-        <span class="mono">sudo firewall-setup.sh</span> on the server and select option 2. Once enabled, you can manage node ports from this panel.</div>`
+        UFW is ${f.installed?'not active':'not installed'}. Port management is disabled until the firewall is enabled.
+        <strong>Enable firewall</strong> applies the recommended lockout-safe defaults of <span class="mono">firewall-setup.sh</span>
+        (SSH, the node ports, then deny everything else).
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="fwSshFrom" style="flex:1;min-width:220px" placeholder="SSH sources, e.g. 203.0.113.7/32, 198.51.100.0/24" autocomplete="off">
+          <button class="btn btn-green" id="fwEnable">Enable firewall</button>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:6px">SSH sources: addresses or CIDRs (/8 or narrower), separated by commas.
+          When given, SSH is allowed from these only. Required on mainnet unless the node already has a stored list.</div>
+        <div id="fwEnableErr" style="display:none;margin-top:8px;color:var(--red);font-size:13px"></div>
+      </div>`
     : '';
 
   // Desired-state vs actual + drift (server-derived from node type / VPN / Caddy).
@@ -3188,7 +3201,7 @@ async function loadFirewall(){
   card.innerHTML = `
     <h3>Firewall</h3>
     <div class="kv"><span class="k">ufw</span><span class="v">${ufwBadge}</span></div>
-    ${inactiveInfo}
+    ${enableForm}
     <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
     ${portRows}
@@ -3197,6 +3210,44 @@ async function loadFirewall(){
     <div class="note" style="margin-top:14px">Only the three node ports can be toggled here.${extras.length?' Open or close the other node ports with <span class="mono">firewall-setup.sh</span>.':''}
       <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong></div>`;
   card.querySelectorAll('[data-fw-port]').forEach(b=>b.addEventListener('click', ()=>toggleFirewallPort(b.dataset.fwPort, b.dataset.fwState, b)));
+  const fe=$('#fwEnable'); if(fe) fe.addEventListener('click', ()=>enableFirewall(fe));
+}
+
+// The SSH sources as the server checks them: addresses or CIDRs (/8 or
+// narrower), split on commas, spaces or new lines, at most 16. The server and
+// the helper check them again; the engine has the last word.
+function fwSshSources(text){
+  const items = String(text||'').split(/[\s,]+/).filter(Boolean);
+  if(items.length > 16) return {error:'at most 16 SSH sources'};
+  for(const it of items){
+    const m = /^([0-9A-Fa-f.:]+)(?:\/([1-9][0-9]{0,2}))?$/.exec(it);
+    const v4 = m && /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/.test(m[1]);
+    const v6 = m && !v4 && m[1].includes(':');
+    const mask = m && m[2] ? Number(m[2]) : null;
+    const bad = !m || (!v4 && !v6) || m[1]==='0.0.0.0' || m[1]==='::'
+      || (mask!==null && (mask<8 || mask>(v4?32:128)));
+    if(bad) return {error:'not an address or a CIDR of /8 or narrower: '+it};
+  }
+  return {list: items.join(',')};
+}
+
+async function enableFirewall(btn){
+  const errBox=$('#fwEnableErr');
+  const show = msg => { if(errBox){ errBox.textContent=msg; errBox.style.display=msg?'block':'none'; } };
+  const src = fwSshSources(($('#fwSshFrom')||{}).value);
+  if(src.error){ show(src.error); return; }
+  show('');
+  const who = src.list ? 'SSH will be allowed only from '+src.list.split(',').join(', ')+'.' : 'SSH stays open (or limited to the list this node already keeps).';
+  if(!confirm('Enable the firewall with the recommended defaults? '+who+' Everything else inbound is denied.')) return;
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span>'; }
+  const r = await api('/api/firewall/enable', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ssh_from: src.list}),
+  });
+  if(r.ok){ toast('Firewall enabled','success'); loadFirewall(); return; }
+  if(btn){ btn.disabled=false; btn.textContent='Enable firewall'; }
+  show(r.error||'firewall enable failed');
+  toast('Firewall not enabled','error');
 }
 
 async function toggleFirewallPort(spec, pstate, btn){

@@ -53,5 +53,27 @@ class CredentialPanelTest(unittest.TestCase):
         self.assertNotIn("tpm", body)
 
 
+class FirewallEnableTest(unittest.TestCase):
+
+    def test_the_form_posts_the_sources_and_shows_the_engine_message(self):
+        body = function_body("enableFirewall")
+        self.assertIn("'/api/firewall/enable'", body)
+        self.assertIn("JSON.stringify({ssh_from: src.list})", body)
+        # The engine's refusal (r.error) is shown as text, not as markup.
+        self.assertIn("show(r.error||'firewall enable failed')", body)
+        self.assertIn("errBox.textContent=msg", body)
+
+    def test_the_form_appears_only_while_ufw_is_off_and_management_is_allowed(self):
+        body = function_body("loadFirewall")
+        self.assertIn("(!f.active && !isReadonly())", body)
+        self.assertIn('id="fwSshFrom"', body)
+        self.assertNotIn("select option 2", body)
+
+    def test_the_page_rule_matches_the_server_limits(self):
+        body = function_body("fwSshSources")
+        self.assertIn("items.length > 16", body)
+        self.assertIn("mask<8", body)
+
+
 if __name__ == "__main__":
     unittest.main()
