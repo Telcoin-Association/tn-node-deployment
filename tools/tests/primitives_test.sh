@@ -208,6 +208,8 @@ run tn_backup_file "$T/src.conf"
 check_rc "backup_file: backup dir under the test temp dir (not root-only) rc 1" 1 "$RC"
 check "backup_file: refusal prints nothing on stdout" "" "$OUT"
 check "backup_file: no backup file left on refusal" "0" "$(count "$T/bk" '*')"
+check "backup_file: a refused backup dir is not created" "absent" \
+    "$([[ -e "$T/bk" ]] && echo present || echo absent)"
 
 # Restore: refusals that need no root.
 printf 'restore-me\n' > "$T/bk-file"
@@ -256,6 +258,20 @@ else
         run tn_backup_file "$RB/src.conf"
         check_rc "backup_file: backup dir owned by nobody rc 1" 1 "$RC"
         chown 0 "$RB/bk"
+        # A missing backup dir under a directory another account owns: refused
+        # before anything is created.
+        mkdir -m 0755 "$RB/n"
+        chown "${NOBODY_UID:-65534}" "$RB/n"
+        TN_BACKUP_DIR="$RB/n/x/bk"
+        run tn_backup_file "$RB/src.conf"
+        check_rc "backup_file: missing dir under an account's directory rc 1" 1 "$RC"
+        check "backup_file: nothing created under that directory" "0" "$(count "$RB/n" '*')"
+        TN_BACKUP_DIR="$RB/deep/er/bk"
+        run tn_backup_file "$RB/src.conf"
+        check_rc "backup_file: missing parents under a root-only dir rc 0" 0 "$RC"
+        check "backup_file: parents and dir created root 0700" "0 0 700 0 0 700" \
+            "$(owner_mode "$RB/deep") $(owner_mode "$RB/deep/er/bk")"
+        TN_BACKUP_DIR="$RB/bk"
     fi
 
     # Restore from a backup in a root-only dir (made by hand, so busybox runs it too).

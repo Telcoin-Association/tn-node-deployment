@@ -583,7 +583,7 @@ tn_write_root_file() {
 # tn_root_dir_ok. rc 2: creating the directory, the copy or the hash failed
 # (no partial backup is left).
 tn_backup_file() {
-    local src="${1:-}" name="${2:-}" bdir="${TN_BACKUP_DIR:-/var/backups/telcoin}" st tmp sum
+    local src="${1:-}" name="${2:-}" bdir="${TN_BACKUP_DIR:-/var/backups/telcoin}" st tmp sum up d made=""
     if [[ -L "$src" || ! -f "$src" ]]; then
         print_warn "tn_backup_file: refusing '${src}': not a regular file (or a symlink)" >&2
         return 1
@@ -598,15 +598,33 @@ tn_backup_file() {
         return 1
     fi
     if [[ ! -e "$bdir" ]]; then
+        # Decide before creating anything: the nearest existing parent must pass
+        # tn_root_dir_ok, so a refusal leaves no directory behind.
+        up="${bdir%/*}"
+        while [[ -n "$up" && ! -e "$up" && ! -L "$up" ]]; do
+            up="${up%/*}"
+        done
+        [[ -n "$up" ]] || up=/
+        if ! tn_root_dir_ok "$up"; then
+            print_warn "tn_backup_file: refusing backup directory ${bdir}: ${up} or a parent is not a root-owned, root-only-writable directory" >&2
+            return 1
+        fi
         # umask 077 covers the parents -p creates; -m sets the leaf.
         # shellcheck disable=SC2174
         if ! ( umask 077; mkdir -p -m 0700 -- "$bdir" ); then
             print_warn "tn_backup_file: cannot create ${bdir}" >&2
             return 2
         fi
+        made="$up"
     fi
     st="$(stat -c '%u %a' -- "$bdir" 2>/dev/null)" || st=""
     if [[ "$st" != "0 700" ]] || ! tn_root_dir_ok "$bdir"; then
+        # Remove the (empty) directories this call just made, leaf first.
+        d="$bdir"
+        while [[ -n "$made" && "$d" != "$made" && "$d" == "${made%/}"/* ]]; do
+            rmdir -- "$d" 2>/dev/null || break
+            d="${d%/*}"
+        done
         print_warn "tn_backup_file: refusing backup directory ${bdir}: it must be a root-owned 0700 directory under root-owned parents" >&2
         return 1
     fi
