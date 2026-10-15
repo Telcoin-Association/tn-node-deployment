@@ -810,13 +810,14 @@ _setup_docker_apt() {
 # a JSON object, a symlink, or a host with neither tool stops setup with the manual
 # step. dockerd then reloads its configuration (live-restore needs no engine restart).
 _setup_docker_live_restore() {
-    local f="/etc/docker/daemon.json" merged="" rc=0
+    local d="${TN_ROOT_PREFIX:-}/etc/docker" f merged="" rc=0
+    f="${d}/daemon.json"
     local manual="add \"live-restore\": true to ${f} by hand (it must stay one JSON object), then run: systemctl reload docker"
     if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
         setup_fail "${f} is not a regular file; ${manual}"
     fi
-    if [[ ! -e /etc/docker && ! -L /etc/docker ]]; then
-        install -d -o root -g root -m 0755 -- /etc/docker || setup_fail "Could not create /etc/docker."
+    if [[ ! -e "$d" && ! -L "$d" ]]; then
+        install -d -o root -g root -m 0755 -- "$d" || setup_fail "Could not create ${d}."
     fi
     if [[ ! -e "$f" ]]; then
         merged="$(printf '{\n  "live-restore": true\n}')"

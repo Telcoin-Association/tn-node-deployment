@@ -6,7 +6,10 @@
 # network (mainnet and devnet refused while their repositories are unnamed);
 # latest_docker_image and tn_registry_digest against a curl shim (release tags
 # only, resolved to a digest, the pinned default when the registry is down,
-# nothing on mainnet); tn_docker_local_digest against a docker shim.
+# nothing on mainnet); tn_docker_local_digest against a docker shim;
+# tn_docker_image_for_tag (signed digest first, the registry's on testnet only
+# when no signed release exists, never after a failed verification),
+# tn_docker_resolve_ref and tn_docker_holds_digest.
 #
 #   bash tools/tests/docker_image_test.sh
 #
@@ -143,5 +146,57 @@ rc=0; out="$(tn_docker_local_digest "${R}@sha256:${D64}")" || rc=$?
 check "local digest: digest passes through" "${R}@sha256:${D64}" "$out"
 rc=0; out="$(tn_docker_local_digest "-x:y")" || rc=$?
 check_rc "local digest: leading dash refused" 1 "$rc"
+
+
+# --- tn_docker_image_for_tag / tn_docker_resolve_ref / tn_docker_holds_digest ----------
+# The registry digest of v0.17.0-adiri; the signed-release path is shimmed below.
+printf 'sha256:%s\n' "$D64" > "$REC/digest.v0.17.0-adiri"
+mkdir -p "$T/keys"
+export TN_RELEASE_KEYS_DIR="$T/keys"
+rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>"$T/err")" || rc=$?
+check "for_tag, no release key, testnet: the registry digest" "0 ${R}@sha256:${D64}" "$rc $out"
+check_has "for_tag, no release key: warns that no signed release confirms it" "1" "$(grep -c 'no signed release confirms' "$T/err")"
+rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri-hotfix 2>/dev/null)" || rc=$?
+check "for_tag: a non-release tag is rc 3" "3 " "$rc $out"
+rc=0; out="$(tn_docker_image_for_tag mainnet v1.0.0 2>/dev/null)" || rc=$?
+check_rc "for_tag: mainnet (no repository yet) refused" 1 "$rc"
+: > "$T/keys/k.asc"
+FETCH_RC=0
+tn_fetch_release_image() { [[ "$FETCH_RC" -eq 0 ]] || return "$FETCH_RC"; printf '%s@sha256:%s\n' "$R" "$D64" | tr 0 f; }
+rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "for_tag, release key: the signed release's digest wins" "0 $(printf '%s@sha256:%s' "$R" "$D64" | tr 0 f)" "$rc $out"
+FETCH_RC=2
+rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "for_tag: no signed release published (rc 2), testnet: registry digest" "0 ${R}@sha256:${D64}" "$rc $out"
+FETCH_RC=1
+rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "for_tag: a release that fails verification is never replaced" "1 " "$rc $out"
+FETCH_RC=0
+rm -f "$T/keys/k.asc"
+unset -f tn_fetch_release_image
+
+res() {  # res NAME ARG EXPECTED-RC EXPECTED-OUT
+    local rc=0 o
+    o="$(tn_docker_resolve_ref testnet "$2" 2>/dev/null)" || rc=$?
+    check "$1" "$3 $4" "$rc $o"
+}
+res "resolve: bare release tag" v0.17.0-adiri 0 "${R}@sha256:${D64} v0.17.0-adiri"
+res "resolve: release tag on the network repository" "${R}:v0.17.0-adiri" 0 "${R}@sha256:${D64} v0.17.0-adiri"
+res "resolve: digest taken as given, no tag" "${R}@sha256:${D64}" 0 "${R}@sha256:${D64} "
+res "resolve: latest refused" "${R}:latest" 1 ""
+res "resolve: bare latest refused" latest 1 ""
+res "resolve: hot-patch tag refused" v0.17.1-adiri-hotfix 1 ""
+res "resolve: other repository by digest refused" "docker.io/library/busybox@sha256:${D64}" 1 ""
+res "resolve: other repository by tag refused" "docker.io/library/busybox:v0.17.0-adiri" 1 ""
+res "resolve: leading dash refused" "-v0.17.0-adiri" 1 ""
+res "resolve: short digest refused" "${R}@sha256:abc" 1 ""
+printf '%s@sha256:%s\n' "$R" "$D64" > "$REC/local.$(printf '%s' "${R}@sha256:${D64}" | tr '/:@' '___')"
+printf '%s@sha256:%s\n' "$R" "$D64" > "$REC/local.$(printf '%s' "${R}@sha256:$(printf '%s' "$D64" | tr 0 e)" | tr '/:@' '___')"
+rc=0; tn_docker_holds_digest "${R}@sha256:${D64}" || rc=$?
+check_rc "holds digest: listed in RepoDigests" 0 "$rc"
+rc=0; tn_docker_holds_digest "${R}@sha256:$(printf '%s' "$D64" | tr 0 e)" || rc=$?
+check_rc "holds digest: another digest refused" 1 "$rc"
+rc=0; tn_docker_holds_digest "${R}:v0.16.0-adiri" || rc=$?
+check_rc "holds digest: a tag is not a digest" 1 "$rc"
 
 finish

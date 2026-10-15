@@ -1211,38 +1211,17 @@ docker_current_tag() {
 # repository, resolves to that release's digest (tn_docker_image_for_tag: the
 # signed release's IMAGE_DIGEST, else on testnet the registry's); a
 # <repo>@sha256:<digest> reference is taken as given. Sets DOCKER_TARGET_IMAGE and
-# DOCKER_TARGET_TAG (empty for a digest given alone). rc 1, with the reason on
-# stderr, for anything else: another repository, a tag that is not a release tag
-# of NETWORK, latest, a leading "-". Nothing is pulled here.
+# DOCKER_TARGET_TAG (empty for a digest given alone), through
+# tn_docker_resolve_ref. rc 1, with the reason on stderr, for anything else:
+# another repository, a tag that is not a release tag of NETWORK, latest, a
+# leading "-". Nothing is pulled here.
 docker_resolve_target() {
-    local arg="${1:-}" net="${2:-}" repo tag=""
+    local out
     DOCKER_TARGET_IMAGE=""
     DOCKER_TARGET_TAG=""
-    repo="$(tn_docker_repo_for "$net")" || return 1
-    case "$arg" in
-        ""|-*) ;;
-        *@sha256:*) DOCKER_TARGET_IMAGE="$arg" ;;
-        "${repo}:"*) tag="${arg#"${repo}:"}" ;;
-        */*|*:*|*@*) ;;
-        *) tag="$arg" ;;
-    esac
-    if [[ -n "$tag" ]]; then
-        if ! tn_release_tag_ok "$net" "$tag"; then
-            print_warn "${tag} is not a ${net} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z); nothing pulled." >&2
-            return 1
-        fi
-        DOCKER_TARGET_IMAGE="$(tn_docker_image_for_tag "$net" "$tag" update_wait_say)" || {
-            DOCKER_TARGET_IMAGE=""
-            return 1
-        }
-        DOCKER_TARGET_TAG="$tag"
-    fi
-    if [[ -z "$DOCKER_TARGET_IMAGE" ]] || ! validate_docker_image "$DOCKER_TARGET_IMAGE" "$net"; then
-        print_warn "Image refused: ${arg:-(empty)}. An update runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest; nothing pulled." >&2
-        DOCKER_TARGET_IMAGE=""
-        DOCKER_TARGET_TAG=""
-        return 1
-    fi
+    out="$(tn_docker_resolve_ref "${2:-}" "${1:-}" update_wait_say)" || return 1
+    DOCKER_TARGET_IMAGE="${out%% *}"
+    DOCKER_TARGET_TAG="${out#* }"
     return 0
 }
 
@@ -1264,7 +1243,7 @@ docker_pull_target() {
         return 1
     fi
     rm -f -- "$pull_log"
-    if ! docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null | grep -qxF -- "$img"; then
+    if ! tn_docker_holds_digest "$img"; then
         update_wait_say warn "Docker does not hold ${img} under that digest after the pull (digest mismatch); nothing was prepared."
         return 1
     fi

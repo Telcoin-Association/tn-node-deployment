@@ -6572,6 +6572,44 @@ tn_docker_image_for_tag() {
     printf '%s@%s\n' "$repo" "$d"
 }
 
+# tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names, by
+# digest: a release tag of NETWORK, alone or as <repo>:<tag> of NETWORK's
+# repository, resolved with tn_docker_image_for_tag; or <repo>@sha256:<digest>,
+# taken as given. Prints "<repo>@sha256:<digest> <tag>" (the tag empty for a
+# digest given alone). rc 1, with the reason on stderr, for anything else:
+# another repository, a tag that is not a release tag of NETWORK, latest, a
+# leading "-". Nothing is pulled.
+tn_docker_resolve_ref() {
+    local net="${1:-}" arg="${2:-}" fn="${3:-}" repo tag="" img=""
+    repo="$(tn_docker_repo_for "$net")" || return 1
+    case "$arg" in
+        ""|-*) ;;
+        *@sha256:*) img="$arg" ;;
+        "${repo}:"*) tag="${arg#"${repo}:"}" ;;
+        */*|*:*|*@*) ;;
+        *) tag="$arg" ;;
+    esac
+    if [[ -n "$tag" ]]; then
+        if ! tn_release_tag_ok "$net" "$tag"; then
+            print_warn "${tag} is not a ${net} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z)." >&2
+            return 1
+        fi
+        img="$(tn_docker_image_for_tag "$net" "$tag" "$fn")" || return 1
+    fi
+    if [[ -z "$img" ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$img" "$net"; then
+        print_warn "Image refused: ${arg:-(empty)}. A node runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest." >&2
+        return 1
+    fi
+    printf '%s %s\n' "$img" "$tag"
+}
+
+# tn_docker_holds_digest IMAGE -- rc 0 when Docker holds an image whose
+# RepoDigests list IMAGE (<repo>@sha256:<digest>): what a pull by digest must leave.
+tn_docker_holds_digest() {
+    [[ "${1:-}" == *@sha256:* ]] || return 1
+    docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null | grep -qxF -- "$1"
+}
+
 # _tn_tag_sig_check DIR TAG -- check the signature on release tag TAG in the git
 # checkout DIR against the keys in lib/release-keys (git verify-tag with gpg, in
 # a throwaway GNUPGHOME). rc 0: a good signature by a listed primary key; 1: a

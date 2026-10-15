@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# tools/tests/setup_release_test.sh -- setup-node.sh's install inputs and Docker host
+# setup: --release-tag/--build-ref take release tags of the network only and must
+# agree, --docker-image takes a digest reference only (never with --release-tag),
+# --install-method release is known, --allow-dirty is refused in --json; the
+# live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
+# already-set file alone and stops on a file that is not a JSON object; and
+# edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
+# a digest, and records the image in .node-meta.
+#
+# Copies of setup-node.sh and edit-config.sh without their last line are sourced in
+# subshells (both source lib/common.sh, whose readonly constants cannot be set
+# twice in one shell). Maintainer tooling (not updater-tracked). bash 3.2 safe.
+# shellcheck source=tools/tests/lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+T="$TN_TEST_TMP"
+mkdir -p "$T/sn" "$T/ec" "$T/root/etc/telcoin"
+grep -v '^main "\$@"$' "$TN_TEST_REPO/setup-node.sh" > "$T/sn/setup-node.sh"
+grep -v '^main "\$@"$' "$TN_TEST_REPO/edit-config.sh" > "$T/ec/edit-config.sh"
+ln -s "$TN_TEST_REPO/lib" "$T/sn/lib"
+ln -s "$TN_TEST_REPO/lib" "$T/ec/lib"
+export TN_ROOT_PREFIX="$T/root" T
+R="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+D64="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+export R D64
+
+# sn CODE -- run CODE in a subshell that sourced setup-node.sh (setup_fail exits 1
+# with its message on stderr); prints "<rc>".
+sn() {
+    ( set +e
+      # shellcheck source=/dev/null
+      source "$T/sn/setup-node.sh" >/dev/null 2>&1
+      set +e
+      setup_fail() { printf '%s\n' "$*" >&2; exit 1; }
+      setup_warn() { :; }
+      eval "$1" ) >"$T/sn.out" 2>"$T/sn.err"
+    printf '%s' "$?"
+}
+flags() {  # flags NAME EXPECTED-RC NETWORK METHOD TAG BUILD_REF IMAGE [PHASE]
+    local rc
+    rc="$(sn "JSON_MODE=true NETWORK=$3 INSTALL_METHOD='$4' RELEASE_TAG='$5' JSON_BUILD_REF='$6' DOCKER_IMAGE='$7' JSON_PHASE='${8:-keygen}'; init_install_flags; json_check_install_flags")"
+    check_rc "$1" "$2" "$rc"
+}
+flags "release install with a testnet tag" 0 testnet release v0.16.0-adiri "" ""
+flags "--build-ref alone names the release" 0 testnet release "" v0.16.0-adiri ""
+flags "release install without a tag refused" 1 testnet release "" "" ""
+flags "source build of main refused" 1 testnet source "" main ""
+flags "source build of a commit id refused" 1 testnet source 5535ef1f0425973bd81ef3162f3d07219c3456d0 "" ""
+flags "testnet tag on mainnet refused" 1 mainnet release v0.16.0-adiri "" ""
+flags "--release-tag and --build-ref disagree" 1 testnet source v0.16.0-adiri v0.17.0-adiri ""
+flags "docker by digest" 0 testnet docker "" "" "${R}@sha256:${D64}"
+flags "docker by tag refused" 1 testnet docker "" "" "${R}:v0.16.0-adiri"
+flags "docker image and release tag together refused" 1 testnet docker v0.16.0-adiri "" "${R}@sha256:${D64}"
+flags "unknown install method refused" 1 testnet binary "" "" ""
+rc="$(sn "JSON_MODE=true ALLOW_DIRTY=true INSTALL_METHOD=source; init_install_flags")"
+check_rc "--allow-dirty in --json refused" 1 "$rc"
+
+# live-restore merge (tn_write_root_file and systemctl stubbed).
+LR='tn_write_root_file() { cat > "$1"; }; systemctl() { printf "%s\n" "$*" >> "$T/systemctl.log"; }; _setup_docker_live_restore'
+DJ="$T/root/etc/docker/daemon.json"
+mkdir -p "$T/root/etc/docker"   # install -d -o root needs root
+rc="$(sn "$LR")"
+check "absent daemon.json: written with live-restore" "0 true" "$rc $(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["live-restore"]).lower())' "$DJ" 2>/dev/null)"
+printf '{"log-driver": "json-file", "live-restore": false}\n' > "$DJ"
+rc="$(sn "$LR")"
+check "existing daemon.json: merged, other settings kept" "0 true json-file" \
+    "$rc $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(str(d["live-restore"]).lower(), d["log-driver"])' "$DJ" 2>/dev/null)"
+check_has "docker reloaded, not restarted" "reload docker" "$(cat "$T/systemctl.log" 2>/dev/null)"
+cp "$DJ" "$T/before"
+: > "$T/systemctl.log"
+rc="$(sn "$LR")"
+check "already on: file untouched, no reload" "0 same none" "$rc $(cmp -s "$DJ" "$T/before" && echo same || echo changed) $(cat "$T/systemctl.log")none"
+printf '[1, 2]\n' > "$DJ"
+rc="$(sn "$LR")"
+check "not a JSON object: stops with the manual step" "1 yes [1, 2]" "$rc $(grep -q 'by hand' "$T/sn.err" && echo yes || echo no) $(cat "$DJ")"
+
+# edit-config set_docker_image.
+ec() {
+    ( set +e
+      # shellcheck source=/dev/null
+      source "$T/ec/edit-config.sh" >/dev/null 2>&1
+      set +e
+      TARGET_LAUNCH_FILE="$T/tn-start-docker"
+      tn_detect_network() { printf 'testnet\n'; }
+      read_launch_line() { printf 'exec docker run --rm %s telcoin node --http\n' "${R}:v0.16.0-adiri"; }
+      edit_launch_unambiguous() { return 0; }
+      tn_docker_image_for_tag() { printf '%s@sha256:%s\n' "$R" "$D64"; }
+      tn_docker_holds_digest() { return 0; }
+      docker() { printf '%s\n' "$*" >> "$T/docker.log"; }
+      swap_docker_image() { printf '%s\n' "$1" > "$T/swapped"; }
+      meta_set() { printf '%s=%s\n' "$1" "$2" >> "$T/meta.log"; }
+      meta_unset() { printf 'unset %s\n' "$1" >> "$T/meta.log"; }
+      edit_error() { printf '%s\n' "$*" >&2; }
+      edit_step() { :; }
+      set_docker_image "$1" ) >/dev/null 2>"$T/ec.err"
+    printf '%s' "$?"
+}
+rm -f "$T/swapped" "$T/meta.log"
+rc="$(ec v0.17.0-adiri)"
+check "edit: a release tag runs its digest" "0 ${R}@sha256:${D64}" "$rc $(cat "$T/swapped" 2>/dev/null)"
+check "edit: .node-meta records image, digest and tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+rm -f "$T/swapped" "$T/meta.log"
+rc="$(ec "${R}:latest")"
+check "edit: latest refused, nothing swapped" "1 no" "$rc $([[ -e "$T/swapped" ]] && echo yes || echo no)"
+rc="$(ec "docker.io/library/busybox@sha256:${D64}")"
+check "edit: another repository refused" "1 no" "$rc $([[ -e "$T/swapped" ]] && echo yes || echo no)"
+rm -f "$T/meta.log"
+rc="$(ec "${R}@sha256:$(printf '%s' "$D64" | tr 0 a)")"
+check "edit: a digest alone runs as given, tag removed from .node-meta" "0 yes" "$rc $(grep -qx 'unset RELEASE_TAG' "$T/meta.log" && echo yes || echo no)"
+rc="$( ( set +e; source "$T/ec/edit-config.sh" >/dev/null 2>&1; set +e; edit_error() { :; }; launch_current_form() { echo called > "$T/lcf"; }; swap_docker_image "${R}:v0.16.0-adiri" ) >/dev/null 2>&1; printf '%s' "$?")"
+check "edit: swap_docker_image refuses a tag before touching anything" "1 no" "$rc $([[ -e "$T/lcf" ]] && echo yes || echo no)"
+finish

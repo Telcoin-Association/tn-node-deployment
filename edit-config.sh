@@ -433,14 +433,18 @@ set_verbosity() {
     return 0
 }
 
-# swap_docker_image NEW -- run NEW in the docker start script by rendering the start
-# script and unit again (tn_rerender_node_launch, which takes only this network's
-# repository by digest or release tag); no text substitution on either file. An
-# older launch file moves to the current form first (launch_current_form). The
-# start script, unit and node.env are backed up (edit_backup) before the first
-# write. rc 1 refused or failed (reported).
+# swap_docker_image NEW -- run NEW, an image by digest (<repo>@sha256:<digest> of
+# this network's repository), in the docker start script by rendering the start
+# script and unit again (tn_rerender_node_launch); no text substitution on either
+# file, and never a tag. An older launch file moves to the current form first
+# (launch_current_form). The start script, unit and node.env are backed up
+# (edit_backup) before the first write. rc 1 refused or failed (reported).
 swap_docker_image() {
     local new="${1:-}" cur rc=0
+    if [[ "$new" != *@sha256:* ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$new"; then
+        edit_error "refusing ${new:-an empty image}: the start script runs this network's image by digest only"
+        return 1
+    fi
     launch_current_form || return 1
     edit_backup "$TARGET_LAUNCH_FILE" || return 1
     edit_backup "$TARGET_SERVICE_FILE" || return 1
@@ -1345,15 +1349,19 @@ set_private_forward_targets() {
 # set_docker_image IMAGE -- pull IMAGE and swap it into the launch file (Docker
 # installs only). Mirrors edit_docker_image. The same image is a no-op.
 set_docker_image() {
-    local new_image="$1" exec_start current_image
-    if ! validate_docker_image "$new_image"; then
-        edit_error "invalid docker image reference: ${new_image}"
+    local value="$1" net out new_image new_tag exec_start current_image
+    if ! net="$(tn_detect_network 2>/dev/null)"; then
+        edit_error "cannot tell which network this node runs, so its image repository is unknown"
         return 1
     fi
-    if ! tn_docker_image_allowed "$new_image"; then
-        edit_error "image refused: ${new_image} (it must be this network's repository by digest or by a release tag)"
+    # A release tag resolves to the release's digest; a digest reference must be
+    # this network's repository. Tags are never written into the start script.
+    if ! out="$(tn_docker_resolve_ref "$net" "$value" edit_wait_say)"; then
+        edit_error "image refused: ${value} (give a ${net} release tag, or this network's image by digest: <repository>@sha256:<digest>)"
         return 1
     fi
+    new_image="${out%% *}"
+    new_tag="${out#* }"
     exec_start="$(read_launch_line "$TARGET_LAUNCH_FILE")"
     if ! grep -qF "docker run" <<<"$exec_start"; then
         edit_error "node is not a docker install"
@@ -1373,7 +1381,32 @@ set_docker_image() {
         edit_error "failed to pull image: ${new_image}"
         return 1
     fi
-    swap_docker_image "$new_image"
+    if ! tn_docker_holds_digest "$new_image"; then
+        edit_error "Docker does not hold ${new_image} under that digest after the pull (digest mismatch)"
+        return 1
+    fi
+    swap_docker_image "$new_image" || return 1
+    edit_record_image "$new_image" "$new_tag"
+}
+
+# edit_record_image IMAGE TAG -- after the start script runs IMAGE: .node-meta
+# DOCKER_IMAGE and DOCKER_IMAGE_DIGEST name it, RELEASE_TAG names TAG (removed when
+# TAG is empty: an image given by digest alone). A failed write warns. Only
+# informational: the start script stays what runs, and readers of RELEASE_TAG
+# check DOCKER_IMAGE_DIGEST against it first.
+edit_record_image() {
+    local ok=true
+    meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 || ok=false
+    meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 || ok=false
+    if [[ -n "${2:-}" ]]; then
+        meta_set RELEASE_TAG "$2" >/dev/null 2>&1 || ok=false
+    else
+        meta_unset RELEASE_TAG >/dev/null 2>&1 || ok=false
+    fi
+    if [[ "$ok" != "true" ]]; then
+        edit_wait_say warn "Could not record the image in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)."
+    fi
+    return 0
 }
 
 # The fields --set accepts.
@@ -2273,36 +2306,47 @@ edit_docker_image() {
     local current_image
     current_image="$(launch_docker_image "$exec_start")"
 
+    local net repo
+    if ! net="$(tn_detect_network 2>/dev/null)" || ! repo="$(tn_docker_repo_for "$net" 2>/dev/null)"; then
+        print_error "Cannot tell this node's network or its image repository; the image is not changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
     print_info "Current image: ${current_image:-unknown}"
     echo ""
-    print_info "Enter the new image URL and tag."
-    print_info "Check for latest tags at:"
-    print_info "  https://console.cloud.google.com/artifacts/docker/telcoin-network/us/tn-public/adiri"
+    print_info "Enter a ${net} release tag (such as ${DEFAULT_DOCKER_TAG}) to run that release's"
+    print_info "image by digest, or the image itself as ${repo}@sha256:<digest>."
+    print_info "The node never runs an image by tag. Enter keeps the current image."
     echo ""
 
-    local new_image
-    read -r -p "  New Docker image [${current_image}]: " input
-    new_image="${input:-$current_image}"
-
-    if [[ "$new_image" == "$current_image" ]]; then
+    local input out new_image new_tag
+    read -r -p "  Release tag or image: " input
+    if [[ -z "$input" || "$input" == "$current_image" ]]; then
         print_info "Image unchanged."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
     fi
-
-    if ! validate_docker_image "$new_image" || ! tn_docker_image_allowed "$new_image"; then
-        print_error "Image refused: ${new_image}"
-        print_info "It must be this network's repository by digest (@sha256:...) or by a release tag (e.g. us-docker.pkg.dev/.../adiri:v0.16.0-adiri)."
+    if ! out="$(tn_docker_resolve_ref "$net" "$input")"; then
+        print_error "Image refused: ${input}"
+        print_info "Give a ${net} release tag, or ${repo}@sha256:<digest>."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    new_image="${out%% *}"
+    new_tag="${out#* }"
+    if [[ "$new_image" == "$current_image" ]]; then
+        print_info "The node already runs ${new_image}."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
     fi
 
     print_step "Pulling new image: ${new_image}..."
-    if ! docker pull "$new_image"; then
-        print_error "Failed to pull image: ${new_image}"
-        print_info "Check the image URL and tag and try again."
+    if ! docker pull "$new_image" || ! tn_docker_holds_digest "$new_image"; then
+        print_error "Failed to pull ${new_image}, or Docker does not hold it under that digest."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
@@ -2319,7 +2363,8 @@ edit_docker_image() {
         read -r -p "  Press Enter to return to menu..." || true
         return 0
     fi
-    print_ok "Launch config updated to use: ${new_image}"
+    edit_record_image "$new_image" "$new_tag"
+    print_ok "Launch config updated to use: ${new_image}${new_tag:+ (${new_tag})}"
     apply_changes
 
 }
