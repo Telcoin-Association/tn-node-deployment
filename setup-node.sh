@@ -1285,6 +1285,10 @@ init_install_flags() {
     fi
     RELEASE_TAG="${RELEASE_TAG:-$JSON_BUILD_REF}"
     JSON_BUILD_REF="$RELEASE_TAG"
+    # Both name the image to run; neither is dropped in favour of the other.
+    if [[ -n "$DOCKER_IMAGE" && -n "$RELEASE_TAG" ]]; then
+        setup_fail "Give --docker-image or --release-tag, not both."
+    fi
     if [[ "$ALLOW_DIRTY" == "true" ]] && json_mode; then
         setup_fail "--allow-dirty is taken in an interactive run only."
     fi
@@ -2970,7 +2974,7 @@ finalize_install_inputs() {
     # binary path go into the root-run start wrapper.
     case "$INSTALL_METHOD" in
         ""|source|docker|existing|release) ;;
-        *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, docker or existing." ;;
+        *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, release, docker or existing." ;;
     esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
         setup_meta_read rec DOCKER_IMAGE "$meta"

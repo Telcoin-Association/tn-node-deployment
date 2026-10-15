@@ -149,6 +149,11 @@ rc=0; tn_rustup_ensure >/dev/null 2>&1 || rc=$?
 check_rc "rustup-init with the wrong sha256: refused" 1 "$rc"
 check "rustup-init with the wrong sha256: never run" no "$(has "$(cat "$T/setpriv.log")" 'rustup-init')"
 check "rustup-init download: nothing left in staging" yes "$(stg_empty)"
+mkdir -p "$T/stg-open"
+chmod 0755 "$T/stg-open"
+rc=0; TN_RELEASE_STAGING_DIR="$T/stg-open" tn_rustup_ensure > /dev/null 2> "$T/err" || rc=$?
+check "rustup-init: an unusable staging directory is refused with the reason" "1 yes" \
+    "$rc $(grep -q 'staging directory.*not a root-owned 0700 directory' "$T/err" && echo yes || echo no)"
 
 # --- the build runs as the build account with an empty environment ---------------------
 if id -u "$TN_BUILD_USER" >/dev/null 2>&1 && [[ "$(id -u "$TN_BUILD_USER")" != "0" ]]; then

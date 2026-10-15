@@ -2325,8 +2325,15 @@ edit_docker_image() {
     current_image="$(launch_docker_image "$exec_start")"
 
     local net repo
-    if ! net="$(tn_detect_network 2>/dev/null)" || ! repo="$(tn_docker_repo_for "$net" 2>/dev/null)"; then
-        print_error "Cannot tell this node's network or its image repository; the image is not changed."
+    if ! net="$(tn_detect_network 2>/dev/null)"; then
+        print_error "Cannot tell this node's network, so its image repository is unknown; the image is not changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    # tn_docker_repo_for says why a network has no repository (an open decision).
+    if ! repo="$(tn_docker_repo_for "$net")"; then
+        print_error "No ${net} image repository; the image is not changed."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return

@@ -62,6 +62,8 @@ for net in mainnet devnet; do
     check "_preflight_docker on $net: refused before apt and daemon.json" "1 no no" \
         "$rc $(grep -q APT_RAN "$T/sn.out" && echo yes || echo no) $(grep -q LIVE_RESTORE_RAN "$T/sn.out" && echo yes || echo no)"
 done
+rc="$(sn "JSON_MODE=false NETWORK=testnet INSTALL_METHOD=docker RELEASE_TAG=v0.16.0-adiri DOCKER_IMAGE='${R}@sha256:${D64}'; init_install_flags")"
+check "interactive: --docker-image and --release-tag together refused" "1 yes" "$rc $(grep -q 'not both' "$T/sn.err" && echo yes || echo no)"
 rc="$(sn "JSON_MODE=true ALLOW_DIRTY=true INSTALL_METHOD=source; init_install_flags")"
 check_rc "--allow-dirty in --json refused" 1 "$rc"
 
@@ -145,6 +147,17 @@ for tool in python3 jq; do
     check "$tool: a write that does not hold the key is not reported on" "1 no" \
         "$rc $(grep -q 'live-restore on' "$T/sn.out" && echo yes || echo no)"
 done
+
+# edit-config's Docker image menu on a network without a repository names why.
+( set +e
+         # shellcheck source=/dev/null
+         source "$T/ec/edit-config.sh" >/dev/null 2>&1
+         set +e
+         read_launch_line() { printf 'exec docker run --rm %s@sha256:%s telcoin node --http\n' "$R" "$D64"; }
+         tn_detect_network() { printf 'mainnet\n'; }
+         edit_docker_image ) < /dev/null > "$T/ec.out" 2>&1
+check "edit menu, mainnet: the open decision is named, nothing asked" "yes no" \
+    "$(grep -q 'open decision' "$T/ec.out" && echo yes || echo no) $(grep -q 'Release tag or image' "$T/ec.out" && echo yes || echo no)"
 
 # edit-config set_docker_image.
 ec() {

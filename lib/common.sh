@@ -6710,8 +6710,14 @@ tn_rustup_ensure() {
             return 1
             ;;
     esac
-    parent="$(tn_staging_dir)" || return 1
-    stg="$(mktemp -d "${parent}/rustup.$$.XXXXXX")" || return 2
+    if ! parent="$(tn_staging_dir)"; then
+        _tn_c4_say warn "The staging directory /var/lib/telcoin-staging is not a root-owned 0700 directory (or cannot be created); rustup-init was not downloaded." "$fn"
+        return 1
+    fi
+    if ! stg="$(mktemp -d "${parent}/rustup.$$.XXXXXX")"; then
+        _tn_c4_say warn "Could not create a directory in ${parent} for rustup-init." "$fn"
+        return 2
+    fi
     if ! _tn_release_get "https://static.rust-lang.org/rustup/archive/${TN_RUSTUP_INIT_VERSION}/${triple}/rustup-init" \
         "${stg}/rustup-init" 134217728 600; then
         _tn_c4_say warn "Could not download rustup-init ${TN_RUSTUP_INIT_VERSION} (${triple})." "$fn"
