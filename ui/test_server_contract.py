@@ -1103,10 +1103,10 @@ class SetupDefaultsTest(ServerTestCase):
 
     def test_preflight_reports_the_tpm_from_the_audit(self):
         self.patch(server, "hardware_profile", lambda: {"cpu": 8})
-        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm"], False)
+        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm2"], False)
         server._audit_cache.update({"expires": 0.0, "data": None})
         self.helper_replies["host-audit"] = (0, "ok    TPM2 usable by systemd-creds\n", "")
-        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm"], True)
+        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm2"], True)
 
 
 class HostAuditTest(ServerTestCase):

@@ -353,7 +353,7 @@ def docker_image_choice(value, network):
     v = str(value or "").strip()
     if not v:
         return "", "", None
-    if v == "latest" or v.endswith(":latest"):
+    if v.rsplit(":", 1)[-1] == "latest":
         return None, None, "docker image latest is refused: give a release tag or the image by digest"
     if release_tag_ok(network, v):
         return v, "", None
@@ -5111,12 +5111,12 @@ def api_preflight():
     # TPM2, as check-node.sh --audit reports it (true / false / null when the
     # audit is not available). The wizard offers --allow-no-tpm on mainnet only
     # when this is false.
-    tpm = host_has_tpm()
+    tpm2 = host_has_tpm()
 
     # Advisory hardware tiers (see hardware_profile); never blocks setup.
     hardware = hardware_profile()
     return jsonify({
-        "tpm": tpm,
+        "tpm2": tpm2,
         "systemd": systemd,
         "internet": internet,
         "disk": disk,

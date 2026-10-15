@@ -451,7 +451,7 @@ const state = {
            sourceRef:'',          // latest release tag for this network (/api/setup/defaults); the only source build offered
            rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
            allowNoTpm:false,      // mainnet without a usable TPM2: --allow-no-tpm (offered only then)
-           tpmRefused:false,      // the engine refused keygen for want of a TPM2
+           noTpmRefused:false,    // the engine refused keygen for want of a TPM2
            rpcDomain:'',          // public RPC hostname as typed (sent normalised as rpc_domain)
            rpcDns:null,           // last wizard DNS check {host, html}, restored on re-render
            accessLoaded:false },  // Caddy + RPC status fetched for the hostname placeholder
@@ -2236,7 +2236,7 @@ function credentialCard(d, t){
   const restart = t==='validator'
     ? ' <strong style="color:var(--yellow)">(a validator restart drops consensus rounds during the brief downtime)</strong>' : '';
   const what = act==='reseal'
-    ? 'Encrypts the credential again with this host’s key as it is now (the TPM when the host has one), for example after a TPM or firmware change.'
+    ? 'Encrypts the credential again with this host’s key as it is now (the TPM2 when the host has one), for example after a TPM2 or firmware change.'
     : act==='migrate'
       ? 'Moves the passphrase into an encrypted systemd credential and shreds the old copy.'
       : 'No passphrase action applies to this node.';
@@ -3389,7 +3389,7 @@ function setSetupNetwork(net){
   s.network = net;
   s.method = net==='mainnet' ? 'release' : 'source';
   s.sourceRef = ''; s.buildRef = ''; s.dockerImage = '';
-  s.allowNoTpm = false; s.tpmRefused = false;
+  s.allowNoTpm = false; s.noTpmRefused = false;
   s.defaultsLoaded = false;
   renderSetup();
 }
@@ -3397,7 +3397,7 @@ function setSetupNetwork(net){
 // --allow-no-tpm is offered only on mainnet and only when the engine reported
 // no usable TPM2: check-node.sh --audit at preflight, or a refused keygen.
 function noTpmReported(){
-  return setupNetwork()==='mainnet' && (state.preflight?.tpm===false || state.setup.tpmRefused);
+  return setupNetwork()==='mainnet' && (state.preflight?.tpm2===false || state.setup.noTpmRefused);
 }
 
 async function stepPreflight(body){
@@ -3417,8 +3417,8 @@ async function stepPreflight(body){
     ...hwTierRows(d.hardware),
     ['docker', d.docker?.ok, 'Docker engine available (optional)', false],
     ['rust', d.rust?.ok, 'Rust toolchain for source build (optional)', false],
-    ['TPM2', d.tpm===true, d.tpm===true ? 'TPM2 usable: the passphrase credential is sealed with it'
-      : d.tpm===false ? 'No usable TPM2: on mainnet the passphrase credential then rests on the host key alone (you will be asked to accept that)'
+    ['TPM2', d.tpm2===true, d.tpm2===true ? 'TPM2 usable: the passphrase credential is sealed with it'
+      : d.tpm2===false ? 'No usable TPM2: on mainnet the passphrase credential then rests on the host key alone (you will be asked to accept that)'
       : 'TPM2 unknown (check-node.sh --audit unavailable)', false],
   ];
   const row = ([name,ok,desc,hardReq])=>{
@@ -3499,7 +3499,7 @@ function stepSourceField(){
 function dockerImageError(v){
   const x = String(v||'').trim();
   if(!x) return 'Enter a release tag or the image by digest';
-  if(x==='latest' || /:latest$/.test(x)) return 'latest is refused: give a release tag or the image by digest';
+  if(x.split(':').pop()==='latest') return 'latest is refused: give a release tag or the image by digest';
   const tag = setupNetwork()==='mainnet' ? /^v[0-9]+\.[0-9]+\.[0-9]+$/ : /^v[0-9]+\.[0-9]+\.[0-9]+-adiri$/;
   const t = x.includes('@') ? '' : x.replace(/^.*:/, '');
   if(tag.test(t)) return '';
@@ -3802,8 +3802,8 @@ async function runKeygen(){
   else {
     // The engine stops a mainnet keygen on a host without a usable TPM2 and
     // names --allow-no-tpm: offer that choice and let the operator retry.
-    if(d && /--allow-no-tpm/.test(String(d.msg||'')+String(d.error||'')) && setupNetwork()==='mainnet' && !state.setup.tpmRefused){
-      state.setup.tpmRefused = true;
+    if(d && /--allow-no-tpm/.test(String(d.msg||'')+String(d.error||'')) && setupNetwork()==='mainnet' && !state.setup.noTpmRefused){
+      state.setup.noTpmRefused = true;
       toast('No usable TPM2 on this host: accept the host key below to continue','error');
       renderSetup();
       return;

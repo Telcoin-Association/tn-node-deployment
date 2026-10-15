@@ -106,7 +106,7 @@ class SetupWizardTest(unittest.TestCase):
     def test_allow_no_tpm_is_offered_only_when_the_engine_reports_no_tpm(self):
         body = function_body("noTpmReported")
         self.assertIn("setupNetwork()==='mainnet'", body)
-        self.assertIn("state.preflight?.tpm===false || state.setup.tpmRefused", body)
+        self.assertIn("state.preflight?.tpm2===false || state.setup.noTpmRefused", body)
         self.assertIn("${noTpmReported() ?", function_body("stepReview"))
         self.assertIn("/--allow-no-tpm/.test(", function_body("runKeygen"))
 
