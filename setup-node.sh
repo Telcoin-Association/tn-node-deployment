@@ -934,6 +934,9 @@ _preflight_docker() {
     if ! docker pull "$DOCKER_IMAGE" 9>&-; then
         setup_fail "Failed to pull Docker image: ${DOCKER_IMAGE}"
     fi
+    if ! tn_docker_holds_digest "$DOCKER_IMAGE"; then
+        setup_fail "Docker does not hold ${DOCKER_IMAGE} under that digest after the pull (digest mismatch); the image was not used."
+    fi
     print_ok "Docker image pulled: ${DOCKER_IMAGE}"
 
     BINARY_PATH="docker"

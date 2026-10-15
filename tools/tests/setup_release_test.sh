@@ -65,6 +65,15 @@ done
 rc="$(sn "JSON_MODE=true ALLOW_DIRTY=true INSTALL_METHOD=source; init_install_flags")"
 check_rc "--allow-dirty in --json refused" 1 "$rc"
 
+# _preflight_docker: the pulled image must be held under the digest asked for.
+PD='command() { [ "$2" = docker ]; }; _setup_docker_live_restore() { :; }; docker() { printf "%s\n" "$*" >> "$T/docker.log"; }; NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE="${R}@sha256:${D64}"'
+: > "$T/docker.log"
+rc="$(sn "$PD; tn_docker_holds_digest() { return 1; }; _preflight_docker")"
+check "pulled image not held under its digest: setup stops" "1 yes" "$rc $(grep -q 'digest mismatch' "$T/sn.err" && echo yes || echo no)"
+check_has "the image was pulled by digest" "pull ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
+rc="$(sn "$PD; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s' \"\$BINARY_PATH\" > \"\$T/bp\"")"
+check "pulled image held under its digest: setup goes on" "0 docker" "$rc $(cat "$T/bp" 2>/dev/null)"
+
 # live-restore merge (tn_write_root_file and systemctl stubbed).
 LR='tn_write_root_file() { cat > "$1"; }; systemctl() { printf "%s\n" "$*" >> "$T/systemctl.log"; }; _setup_docker_live_restore'
 DJ="$T/root/etc/docker/daemon.json"
