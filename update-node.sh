@@ -267,27 +267,177 @@ pending_state_path() {
     echo "$(tn_resolve_config_dir)/.pending-update"
 }
 
+# pending_key_check KEY VALUE -- rc 0 when KEY is a key this script writes into
+# the pending state and VALUE has that key's shape; rc 1 when VALUE does not;
+# rc 3 when KEY is not one of them. Image references must pass
+# validate_docker_image, refs and paths are plain words, hashes are 64 hex
+# digits. Prints nothing.
+pending_key_check() {
+    local k="${1:-}" v="${2-}" re
+    case "$k" in
+        PHASE)
+            [[ "$v" == "pull_complete" || "$v" == "build_complete" ]] ;;
+        INSTALL_METHOD)
+            [[ "$v" == "source" || "$v" == "docker" ]] ;;
+        OLD_IMAGE|NEW_IMAGE)
+            [[ "$v" != -* ]] && validate_docker_image "$v" ;;
+        PULLED_IMAGE_ID)
+            re='^(sha256:[0-9a-f]{64})?$'
+            [[ "$v" =~ $re ]] ;;
+        OLD_REF)
+            re='^[A-Za-z0-9._/+=@~^-]*$'
+            [[ "$v" =~ $re ]] ;;
+        NEW_REF)
+            re='^[A-Za-z0-9._/+=@~^-]+$'
+            [[ "$v" != -* && "$v" =~ $re ]] ;;
+        NEW_VERSION)
+            # Shown to the operator only; no control characters.
+            [[ "$v" != *[[:cntrl:]]* ]] ;;
+        BUILT_BINARY|BIN_BACKUP|UNIT_BACKUP|UNIT_FILE)
+            re='^/[A-Za-z0-9._/+=-]+$'
+            [[ "$v" =~ $re ]] ;;
+        BUILT_HASH|BIN_BACKUP_SHA256|UNIT_BACKUP_SHA256)
+            re='^[0-9a-f]{64}$'
+            [[ "$v" =~ $re ]] ;;
+        PREPARED_AT)
+            re='^[0-9TZ:-]+$'
+            [[ "$v" =~ $re ]] ;;
+        *)
+            return 3 ;;
+    esac
+}
+
+# pending_parse -- read pending-state text on stdin and print its checked
+# KEY=value lines. Data only: nothing is sourced or evaluated. One trailing CR
+# per line is dropped and blank lines are skipped. A line that is not
+# KEY=value with KEY matching ^[A-Z][A-Z0-9_]*$, or whose key this script
+# does not write, is skipped with a warning. A known key with a malformed
+# value, or a key on more than one line, refuses the whole state (rc 1,
+# nothing printed). Values are never echoed in the messages.
+pending_parse() {
+    local line key val seen=" " out="" cr nl re
+    cr=$'\r'
+    nl=$'\n'
+    re='^[A-Z][A-Z0-9_]*='
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%"$cr"}"
+        [[ -n "$line" ]] || continue
+        if [[ ! "$line" =~ $re ]]; then
+            print_warn "pending state: skipping a line that is not KEY=value" >&2
+            continue
+        fi
+        key="${line%%=*}"
+        val="${line#*=}"
+        pending_key_check "$key" "$val"
+        case "$?" in
+            0) ;;
+            3)
+                print_warn "pending state: ignoring unknown key ${key}" >&2
+                continue
+                ;;
+            *)
+                print_warn "pending state: ${key} has a malformed value; refusing the pending update" >&2
+                return 1
+                ;;
+        esac
+        case "$seen" in
+            *" ${key} "*)
+                print_warn "pending state: ${key} is listed more than once; refusing the pending update" >&2
+                return 1
+                ;;
+        esac
+        seen="${seen}${key} "
+        out="${out}${key}=${val}${nl}"
+    done
+    printf '%s' "$out"
+}
+
+# read_pending_state -- print the pending state's checked KEY=value lines (see
+# pending_parse). The file must be a regular file, not a symlink, owned by root
+# and writable by root only, in a directory that passes tn_root_dir_ok;
+# anything else is refused with the reason on stderr (rc 1). rc 1 and no
+# message when there is no pending state.
 read_pending_state() {
-    local path
-    path=$(pending_state_path)
-    [[ -f "$path" ]] && cat "$path"
+    local path st mode
+    path="$(pending_state_path)"
+    if [[ ! -e "$path" && ! -L "$path" ]]; then
+        return 1
+    fi
+    if [[ -L "$path" || ! -f "$path" ]]; then
+        print_warn "Refusing the pending update ${path}: it is a symlink or not a regular file. Discard it (--discard) and prepare again." >&2
+        return 1
+    fi
+    st="$(stat -c '%u %a' -- "$path" 2>/dev/null)" || st=""
+    mode="${st##* }"
+    case "$mode" in
+        ""|*[!0-7]*|*[2367]?|*[2367]) mode="" ;;
+    esac
+    if [[ "${st%% *}" != "0" || -z "$mode" ]] || ! tn_root_dir_ok "${path%/*}"; then
+        print_warn "Refusing the pending update ${path}: it must be owned by root, writable by root only, in a root-owned directory. Discard it (--discard) and prepare again." >&2
+        return 1
+    fi
+    pending_parse < "$path"
 }
 
-# Returns non-zero when the state file cannot be written (full/read-only
-# disk); callers must check -- reporting "pending update saved" on a write
-# failure would strand the operator with a prepare they cannot apply.
+# pending_field STATE KEY -- print KEY's value from STATE (read_pending_state
+# output). rc 1 when KEY is absent.
+pending_field() {
+    local line
+    while IFS= read -r line; do
+        if [[ "${line%%=*}" == "${2:-}" ]]; then
+            printf '%s\n' "${line#*=}"
+            return 0
+        fi
+    done <<< "${1:-}"
+    return 1
+}
+
+# write_pending_state -- replace the pending state with the KEY=value lines on
+# stdin, root 0600, through tn_write_root_file (temp file and rename; a symlink
+# in its place is refused, not followed). The lines pass pending_parse first,
+# so the file never holds what read_pending_state would refuse. Returns
+# non-zero when the state cannot be written (a refused directory, a full or
+# read-only disk); callers must check -- reporting "pending update saved" on a
+# write failure would strand the operator with a prepare they cannot apply.
 write_pending_state() {
-    local path
-    path=$(pending_state_path)
-    mkdir -p "$(dirname "$path")" || return 1
-    cat > "$path" || return 1
-    chmod 600 "$path" || return 1
+    local state
+    state="$(pending_parse)" || return 1
+    printf '%s' "$state" | tn_write_root_file "$(pending_state_path)" 0600
 }
 
+# pending_state_add KEY=VALUE... -- set these keys in the pending state (an
+# earlier value of the same key is replaced) and write it back. rc 1 when the
+# state cannot be read or written.
+pending_state_add() {
+    local state line kv keep out="" nl
+    nl=$'\n'
+    state="$(read_pending_state)" || return 1
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        keep=true
+        for kv in "$@"; do
+            if [[ "${line%%=*}" == "${kv%%=*}" ]]; then
+                keep=false
+            fi
+        done
+        if [[ "$keep" == "true" ]]; then
+            out="${out}${line}${nl}"
+        fi
+    done <<< "$state"
+    for kv in "$@"; do
+        out="${out}${kv}${nl}"
+    done
+    printf '%s' "$out" | write_pending_state
+}
+
+# clear_pending_state -- remove the pending state (a symlink in its place too;
+# rm removes the link, never its target).
 clear_pending_state() {
     local path
     path=$(pending_state_path)
-    [[ -f "$path" ]] && rm -f "$path"
+    if [[ -e "$path" || -L "$path" ]]; then
+        rm -f -- "$path"
+    fi
 }
 
 # =============================================================================
@@ -700,10 +850,14 @@ EOF
 
 apply_docker_update() {
     # Read pending state
-    local old_image new_image pulled_image_id
-    old_image=$(read_pending_state | grep ^OLD_IMAGE= | cut -d= -f2-)
-    new_image=$(read_pending_state | grep ^NEW_IMAGE= | cut -d= -f2-)
-    pulled_image_id=$(read_pending_state | grep ^PULLED_IMAGE_ID= | cut -d= -f2-)
+    local state old_image new_image pulled_image_id
+    if ! state="$(read_pending_state)"; then
+        print_error "The pending update cannot be read (see above) -- cannot apply."
+        return 1
+    fi
+    old_image="$(pending_field "$state" OLD_IMAGE)"
+    new_image="$(pending_field "$state" NEW_IMAGE)"
+    pulled_image_id="$(pending_field "$state" PULLED_IMAGE_ID)"
     if [[ -z "$old_image" ]] || [[ -z "$new_image" ]]; then
         print_error "Pending state is incomplete -- cannot apply."
         return 1
@@ -1053,12 +1207,16 @@ EOF
 }
 
 apply_source_update() {
-    local built old_ref new_ref new_version expected_hash
-    built=$(read_pending_state | grep ^BUILT_BINARY= | cut -d= -f2-)
-    old_ref=$(read_pending_state | grep ^OLD_REF= | cut -d= -f2-)
-    new_ref=$(read_pending_state | grep ^NEW_REF= | cut -d= -f2-)
-    new_version=$(read_pending_state | grep ^NEW_VERSION= | cut -d= -f2-)
-    expected_hash=$(read_pending_state | grep ^BUILT_HASH= | cut -d= -f2-)
+    local state built old_ref new_ref new_version expected_hash
+    if ! state="$(read_pending_state)"; then
+        print_error "The pending update cannot be read (see above) -- cannot apply."
+        return 1
+    fi
+    built="$(pending_field "$state" BUILT_BINARY)"
+    old_ref="$(pending_field "$state" OLD_REF)"
+    new_ref="$(pending_field "$state" NEW_REF)"
+    new_version="$(pending_field "$state" NEW_VERSION)"
+    expected_hash="$(pending_field "$state" BUILT_HASH)"
     if [[ -z "$built" ]] || [[ ! -f "$built" ]]; then
         print_error "Pending built binary not found at ${built:-?}"
         return 1
@@ -1784,12 +1942,16 @@ json_apply() {
 }
 
 json_apply_source() {
-    local built old_ref new_ref new_version expected_hash
-    built=$(read_pending_state | grep '^BUILT_BINARY=' | cut -d= -f2-)
-    old_ref=$(read_pending_state | grep '^OLD_REF=' | cut -d= -f2-)
-    new_ref=$(read_pending_state | grep '^NEW_REF=' | cut -d= -f2-)
-    new_version=$(read_pending_state | grep '^NEW_VERSION=' | cut -d= -f2-)
-    expected_hash=$(read_pending_state | grep '^BUILT_HASH=' | cut -d= -f2-)
+    local state built old_ref new_ref new_version expected_hash
+    if ! state="$(read_pending_state)"; then
+        json_event error "the pending update cannot be read (see stderr) -- discard it and prepare again"
+        return 1
+    fi
+    built="$(pending_field "$state" BUILT_BINARY)"
+    old_ref="$(pending_field "$state" OLD_REF)"
+    new_ref="$(pending_field "$state" NEW_REF)"
+    new_version="$(pending_field "$state" NEW_VERSION)"
+    expected_hash="$(pending_field "$state" BUILT_HASH)"
     if [[ -z "$built" || ! -f "$built" ]]; then
         json_event error "prepared binary not found at ${built:-?}"; return 1
     fi
@@ -1886,10 +2048,14 @@ json_apply_source() {
 }
 
 json_apply_docker() {
-    local old_image new_image pulled_image_id
-    old_image=$(read_pending_state | grep '^OLD_IMAGE=' | cut -d= -f2-)
-    new_image=$(read_pending_state | grep '^NEW_IMAGE=' | cut -d= -f2-)
-    pulled_image_id=$(read_pending_state | grep '^PULLED_IMAGE_ID=' | cut -d= -f2-)
+    local state old_image new_image pulled_image_id
+    if ! state="$(read_pending_state)"; then
+        json_event error "the pending update cannot be read (see stderr) -- discard it and prepare again"
+        return 1
+    fi
+    old_image="$(pending_field "$state" OLD_IMAGE)"
+    new_image="$(pending_field "$state" NEW_IMAGE)"
+    pulled_image_id="$(pending_field "$state" PULLED_IMAGE_ID)"
     if [[ -z "$old_image" || -z "$new_image" ]]; then
         json_event error "pending state is incomplete -- cannot apply"; return 1
     fi
@@ -2040,13 +2206,13 @@ run_json_mode() {
 # MAIN MENU
 # =============================================================================
 
+# show_pending_summary STATE -- show a pending state read by read_pending_state.
 show_pending_summary() {
-    local state phase prepared_at
-    state=$(read_pending_state)
-    phase=$(echo "$state" | grep ^PHASE= | cut -d= -f2)
-    prepared_at=$(echo "$state" | grep ^PREPARED_AT= | cut -d= -f2)
+    local state="${1:-}" phase prepared_at
+    phase="$(pending_field "$state" PHASE)"
+    prepared_at="$(pending_field "$state" PREPARED_AT)"
     print_header "Pending update detected"
-    echo "$state" | sed 's/^/    /'
+    printf '%s\n' "$state" | sed 's/^/    /'
     echo ""
     print_info "Prepared at: ${prepared_at}  (phase: ${phase})"
     echo ""
@@ -2146,10 +2312,13 @@ main() {
     # apply) -- one update at a time. See tn_acquire_update_lock.
     update_lock || exit 1
 
-    # Handle --discard flag
+    # Handle --discard flag. A pending state that cannot be read (a symlink, a
+    # wrong owner, a malformed value) can still be discarded.
+    local pstate=""
     if [[ "$DISCARD_PENDING" == "true" ]]; then
-        if [[ -f "$(pending_state_path)" ]]; then
-            show_pending_summary
+        if [[ -e "$(pending_state_path)" || -L "$(pending_state_path)" ]]; then
+            pstate="$(read_pending_state)" || pstate="(cannot be read; see above)"
+            show_pending_summary "$pstate"
             if confirm "Discard this pending update?"; then
                 clear_pending_state
                 print_ok "Pending state cleared."
@@ -2163,12 +2332,17 @@ main() {
     fi
 
     # Pending state present -> offer apply/discard
-    if [[ -f "$(pending_state_path)" ]]; then
-        show_pending_summary
+    if [[ -e "$(pending_state_path)" || -L "$(pending_state_path)" ]]; then
+        if ! pstate="$(read_pending_state)"; then
+            print_error "The pending update in $(pending_state_path) cannot be used (see above)."
+            print_info "Use --discard to clear it, then prepare again."
+            exit 1
+        fi
+        show_pending_summary "$pstate"
 
         # Sanity check: install method in pending state must match current
         local pending_method
-        pending_method=$(read_pending_state | grep ^INSTALL_METHOD= | cut -d= -f2)
+        pending_method="$(pending_field "$pstate" INSTALL_METHOD)"
         if [[ "$pending_method" != "$install_method" ]]; then
             print_warn "Pending state was prepared for install method '${pending_method}',"
             print_warn "but this node is now '${install_method}'. Refusing to apply."
