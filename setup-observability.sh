@@ -93,9 +93,9 @@ health_restart_hint() {
 }
 
 # health_restart_window -- right before the node restart that binds the health port:
-# the epoch-boundary wait (obs_restart_window), reported through addons_say. Without
-# lib/observability.sh 1.0.2 the restart does not wait (addons_lib_check said so).
-# rc 1 when the committee guard refuses the restart now (said); the caller skips it.
+# the committee guard, then the epoch-boundary wait (obs_restart_window), reported
+# through addons_say. rc 1 when the guard refuses the restart now or the wait failed
+# (said); the caller skips it.
 health_restart_window() {
     if declare -F obs_restart_window >/dev/null 2>&1; then
         obs_restart_window addons_say || return 1

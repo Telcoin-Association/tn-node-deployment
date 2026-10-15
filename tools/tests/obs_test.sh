@@ -172,12 +172,56 @@ printf 'NETWORK=testnet\nENABLE_METRICS=true\nENABLE_METRICS=false\n' > "$RP/etc
 printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 
 # --- committee guard ------------------------------------------------------------------------------------
+REAL_CDG="$(declare -f tn_committee_down_guard)"
+REAL_WAIT="$(declare -f tn_wait_restart_window)"
 tn_committee_down_guard() { return "${CDG_RC:-0}"; }
 ( CDG_RC=1; obs_quorum_guard ) >/dev/null 2>&1; check_rc "quorum risk: no restart" 1 $?
-( CDG_RC=1; TN_ALLOW_QUORUM_RISK=1; obs_quorum_guard ) >/dev/null 2>&1; check_rc "TN_ALLOW_QUORUM_RISK=1: restart" 0 $?
-( CDG_RC=2; obs_quorum_guard ) >/dev/null 2>&1; check_rc "committee unreadable: restart with a warning" 0 $?
+( CDG_RC=2; obs_quorum_guard ) >/dev/null 2>&1; check_rc "guard rc 2 (unreadable where it counts): no restart" 1 $?
 ( CDG_RC=0; obs_quorum_guard ) >/dev/null 2>&1; check_rc "guard passes" 0 $?
-unset -f tn_committee_down_guard
+eval "$REAL_CDG"
+
+# The real guard with the committee unreadable: the node votes (CvvActive) and no RPC
+# answers. Testnet warns and restarts; mainnet and an unknown network refuse unless
+# TN_ALLOW_QUORUM_RISK=1; a mainnet node whose mode cannot be read refuses when it is
+# staked and restarts when it is not.
+tn_node_mode() { [[ -n "${GUARD_MODE:-}" ]] && printf '%s\n' "$GUARD_MODE"; [[ -n "${GUARD_MODE:-}" ]]; }
+tn_epoch_info() { return 1; }
+tn_rpc_call() { return 1; }
+tn_genesis_chain_id() { return 1; }
+node_is_staked_validator() { return "${NSV_RC:-0}"; }
+guard_case() { # guard_case NAME EXPECTED-RC META-LINES [ENV=VAL...]
+    local name="$1" want="$2" meta="$3"
+    shift 3
+    printf '%b\n' "$meta" > "$RP/etc/telcoin/.node-meta"
+    ( for kv in "$@"; do export "${kv?}"; done; obs_quorum_guard ) >"$T/guard.out" 2>&1
+    check_rc "real guard: ${name}" "$want" $? || sed "s/^/      /" "$T/guard.out"
+}
+guard_case "testnet, committee unreadable: restart" 0 'NETWORK=testnet' GUARD_MODE=CvvActive
+guard_case "mainnet voting node, committee unreadable: refused" 1 'NETWORK=mainnet' GUARD_MODE=CvvActive
+check "real guard: the refusal is said" "yes" "$(grep -q 'Not restarting: the committee could not be read' "$T/guard.out" && echo yes)"
+guard_case "mainnet with TN_ALLOW_QUORUM_RISK=1: restart" 0 'NETWORK=mainnet' GUARD_MODE=CvvActive TN_ALLOW_QUORUM_RISK=1
+guard_case "unknown network, committee unreadable: refused" 1 'OWNERSHIP_LAYOUT=2' GUARD_MODE=CvvActive
+guard_case "mainnet, mode unreadable, staked: refused" 1 'NETWORK=mainnet\nVALIDATOR_ADDRESS=0x1111111111111111111111111111111111111111' NSV_RC=0
+guard_case "mainnet, mode unreadable, not staked: restart" 0 'NETWORK=mainnet\nVALIDATOR_ADDRESS=0x1111111111111111111111111111111111111111' NSV_RC=1
+unset -f tn_node_mode tn_epoch_info tn_rpc_call tn_genesis_chain_id node_is_staked_validator
+printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
+
+# obs_restart_window: the guard first, then the epoch wait, right before the restart; the
+# guard runs even when the wait helper is missing.
+ORDER="$T/order"
+tn_committee_down_guard() { echo guard >> "$ORDER"; return "${CDG_RC:-0}"; }
+tn_wait_restart_window() { echo wait >> "$ORDER"; return "${WAIT_RC:-0}"; }
+: > "$ORDER"; ( obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: rc 0" 0 $?
+check "restart window: guard then wait" "guard wait" "$(paste -sd' ' "$ORDER")"
+: > "$ORDER"; ( CDG_RC=1; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: guard refuses, rc 1" 1 $?
+check "restart window: no wait after a refusal" "guard" "$(paste -sd' ' "$ORDER")"
+: > "$ORDER"; ( CDG_RC=2; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: guard rc 2, rc 1" 1 $?
+: > "$ORDER"; ( WAIT_RC=3; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: a failed wait, rc 1" 1 $?
+unset -f tn_wait_restart_window
+: > "$ORDER"; ( obs_restart_window ) >/dev/null 2>&1; check_rc "restart window without the wait helper: no restart" 1 $?
+check "restart window without the wait helper: the guard still ran" "guard" "$(paste -sd' ' "$ORDER")"
+eval "$REAL_CDG"
+eval "$REAL_WAIT"
 
 # --- setup-observability: health check needs an active ufw ------------------------------------------
 # The copy does not source lib/common.sh again (its readonly constants are set).

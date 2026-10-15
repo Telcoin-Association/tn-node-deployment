@@ -756,7 +756,7 @@ _obs_lib_has() {
 }
 
 _OBS_NO_FLAG_GET="a commented-out flag counts as present and a failed flag edit is not explained"
-_OBS_NO_WAIT="the node restarts without waiting for the epoch boundary, even when it is in the committee"
+_OBS_NO_WAIT="the node is not restarted by this run (no epoch-boundary wait)"
 
 # obs_lib_check [SAY-FN] -- warn now (once per run each) about the lib/common.sh helpers
 # this file is falling back without, through SAY-FN as in _obs_lib_has. For a status
@@ -780,39 +780,42 @@ obs_wait_say() {
 }
 
 # obs_restart_window [progress-fn] -- call right before restarting the NODE (not the
-# Alloy shipper, which takes no part in consensus). When the node votes in the current
-# committee and the epoch boundary is close, tn_wait_restart_window (lib/common.sh)
-# holds the restart until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX
-# seconds; TN_SKIP_EPOCH_WAIT=1 skips it. progress-fn is called as
-# `fn step|log|warn MSG` (default obs_wait_say). Always rc 0.
+# Alloy shipper, which takes no part in consensus). First the committee guard
+# (obs_quorum_guard), then, when the node votes in the current committee and the
+# epoch boundary is close, tn_wait_restart_window (lib/common.sh) holds the restart
+# until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds;
+# TN_SKIP_EPOCH_WAIT=1 skips it. progress-fn is called as `fn step|log|warn MSG`
+# (default obs_wait_say). rc 0 restart now; rc 1 the guard refused or the wait
+# failed (said; the caller does not restart).
 obs_restart_window() {
-    local fn="${1:-}"
+    local fn="${1:-}" rc=0
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="obs_wait_say"
     fi
-    _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" "$fn" || return 0
-    tn_wait_restart_window "" "$fn" || true
-    obs_quorum_guard "$fn"
+    obs_quorum_guard "$fn" || return 1
+    tn_wait_restart_window "" "$fn" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        "$fn" warn "Not restarting: the epoch-boundary wait failed (rc ${rc})." || true
+        return 1
+    fi
+    return 0
 }
 
 # obs_quorum_guard [progress-fn] — rc 0 when a node restart may go ahead now: the
-# committee guard (tn_committee_down_guard) passes, cannot read the committee (warned),
-# or TN_ALLOW_QUORUM_RISK=1 overrides it. rc 1 when the restart would leave the
-# committee without a quorum (said; the caller does not restart).
+# committee guard (tn_committee_down_guard) passes. It warns and passes on testnet,
+# on devnet and for a node that is not staked when the committee cannot be read, and
+# passes with TN_ALLOW_QUORUM_RISK=1. rc 1 (said; the caller does not restart) when
+# the restart would leave the committee without a quorum (guard rc 1), or the
+# committee cannot be read on a staked mainnet node or an unknown network (rc 2).
 obs_quorum_guard() {
     local fn="${1:-obs_wait_say}" rc=0
     declare -F "$fn" >/dev/null 2>&1 || fn="obs_wait_say"
     tn_committee_down_guard "" "$fn" || rc=$?
     case "$rc" in
         0) return 0 ;;
-        2) "$fn" warn "The committee could not be read, so the restart goes ahead without the quorum check." || true
-           return 0 ;;
+        2) "$fn" warn "Not restarting: the committee could not be read on a node whose vote counts (see above). Restart later, or set TN_ALLOW_QUORUM_RISK=1 once the other members are confirmed up." || true ;;
+        *) "$fn" warn "Not restarting: the committee could lose its quorum (see above). Restart later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart." || true ;;
     esac
-    if [[ "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]]; then
-        "$fn" warn "TN_ALLOW_QUORUM_RISK=1: restarting although the committee may lose its quorum." || true
-        return 0
-    fi
-    "$fn" warn "Not restarting: the committee could lose its quorum (see above). Restart later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart." || true
     return 1
 }
 
