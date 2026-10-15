@@ -4835,7 +4835,7 @@ _tn_cred_drop_saved() {
     _TN_CS_PATH=(); _TN_CS_BAK=(); _TN_CS_SUM=(); _TN_CS_MODE=(); _TN_CS_GRP=()
 }
 
-# _tn_cred_switch TARGET KEY PCRS [progress-fn] -- move the installed node to the
+# _tn_cred_switch TARGET KEY PCRS [progress-fn] [RESTART] -- move the installed node to the
 # passphrase in TN_CRED_PASS: TARGET credential (encrypted with KEY, bound to PCRS
 # when given) or stdin (a root 0600 file, for hosts below systemd 250). Backs up
 # the unit, start script, node.env and both passphrase files; stores the
@@ -4845,16 +4845,23 @@ _tn_cred_drop_saved() {
 # and the restart window; restarts and confirms the node unlocked its key; then
 # shreds every old copy of the passphrase and the backups. When the restart does
 # not come up, every file and .node-meta key goes back and the node restarts on
-# them (no window wait). The caller holds the update lock. rc 0 done, 1 refused
-# (nothing changed), 2 failed and rolled back, 3 the rollback restart failed too
-# (the backups stay; their paths are printed).
+# them (no window wait). RESTART no skips the guard, the wait and the restart: the
+# new files take effect at the next start; the default (auto) is no for a node that
+# is not running and yes otherwise. The caller holds the
+# update lock. rc 0 done, 1 refused (nothing changed), 2 failed and rolled back, 3
+# the rollback restart failed too (the backups stay; their paths are printed).
 _tn_cred_switch() {
-    local target="$1" key="$2" pcrs="$3" fn="${4:-}" svc conf form p="" rc=0 f keep=0
+    local target="$1" key="$2" pcrs="$3" fn="${4:-}" restart="${5:-auto}" svc conf form p="" rc=0 f keep=0
     # shellcheck disable=SC2034 # read by tn_rerender_node_launch (dynamic scope)
     local m_method m_key m_pcrs PASSPHRASE_METHOD="$1" _TN_RERENDER_LEGACY=1
     svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }
     conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
-    if [[ "$target" != "credential" && "$(tn_detect_network 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
+    if [[ "$restart" == "auto" ]]; then
+        restart=no
+        systemctl is-active --quiet "$svc" 2>/dev/null && restart=yes
+    fi
+    if [[ "$target" != "credential" && "$(tn_detect_network
+ 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
         _tn_guard_say warn "Off testnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04); nothing changed." "$fn"
         return 1
     fi
@@ -4899,7 +4906,17 @@ _tn_cred_switch() {
     [[ $rc -eq 0 ]] && { tn_rerender_node_launch "" "$fn" || rc=$?; }
     [[ $rc -eq 0 ]] && { systemctl daemon-reload >/dev/null 2>&1 || rc=2; }
     # 3. The committee guard and the restart window, then the restart.
+    if [[ $rc -eq 0 && "$restart" == "no" ]]; then
+        [[ "$target" == "stdin" ]] && keep=1
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && _tn_shred "$f"
+        done < <(_tn_cred_old_copies "$svc" "$conf" "$keep")
+        _tn_cred_drop_saved
+        _tn_guard_say log "${svc} is stopped: the new passphrase delivery takes effect when it starts." "$fn"
+        return 0
+    fi
     if [[ $rc -eq 0 ]] && ! tn_committee_down_guard "" "$fn"; then
+
         _tn_guard_say warn "Restarting ${svc} now would put the committee's quorum at risk; nothing was restarted (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
         rc=1
     fi

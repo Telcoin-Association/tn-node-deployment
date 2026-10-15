@@ -2,9 +2,10 @@
 # =============================================================================
 # tools/tests/edit_passphrase_test.sh -- edit-config.sh's BLS passphrase edit:
 # the tn_passphrase_ok refusals (blanks at either end, short on mainnet, an
-# unknown network read as mainnet), the root 0600 write, the legacy Docker
-# unit that embeds the value, and that the value never reaches a child
-# process's argument list or environment.
+# unknown network read as mainnet), the root 0600 write (a host without
+# systemd-creds keeps the root-only file), the move of a legacy Docker unit
+# that embeds the value, the refusal of every other edit on such a unit, and
+# that the value never reaches a child process's argument list or environment.
 #
 #   bash tools/tests/edit_passphrase_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/edit_passphrase_test.sh
@@ -12,9 +13,11 @@
 #
 # Every external command the edit can run is a wrapper on PATH that appends
 # its argv and its environment to logs, then runs the real tool (systemctl,
-# perl, docker and telcoin-network are stubs). As a normal user a valid value
-# is refused by tn_write_root_file (the fixture is not root-owned), which the
-# test checks; as root (under /root) the write itself is checked.
+# perl, docker and telcoin-network are stubs; systemctl reports the node
+# stopped, so nothing restarts). The start script and unit re-render is a stub
+# (it has its own tests). As a normal user a valid value is refused by the
+# root-only backup or write (the fixture is not root-owned), which the test
+# checks; as root (under /root) the write itself is checked.
 # =============================================================================
 
 set -u
@@ -64,6 +67,14 @@ if [[ $IS_ROOT == 1 && -n "$RB" && $HAVE_MV_T == 1 ]]; then
 elif [[ $IS_ROOT == 1 ]]; then
     ROOT_WHY="no mv -T, or no root-only temp dir under /root"
 fi
+# A passphrase write backs up the files it changes first (tn_backup_file needs
+# cp --no-preserve, which busybox lacks).
+WRITE_OK=0
+if [[ $ROOT_OK == 1 && $HAVE_CP_NP == 1 ]]; then
+    WRITE_OK=1
+elif [[ $ROOT_OK == 1 ]]; then
+    ROOT_WHY="cp --no-preserve absent"
+fi
 
 # Wrappers: log argv and environment, then run the real tool.
 ARGV_LOG="$T/argv.log"
@@ -97,6 +108,12 @@ PATH="$T/bin:$PATH"
 confirm() { return 0; }
 apply_changes() { :; }
 edit_epoch_wait() { :; }
+edit_pause() { edit_unlock; }
+# The re-render writes a unit for the method it is given (legacy units included).
+tn_rerender_node_launch() {
+    printf '[Service]\nLoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase\nExecStart=/usr/local/libexec/telcoin/tn-start\n' \
+        | tn_write_root_file "$TARGET_SERVICE_FILE" 0644
+}
 TN_UPDATE_LOCK_FILE="$T/update.lock"
 TARGET_SERVICE="telcoin"
 
@@ -137,9 +154,9 @@ USED=()
 edit() {
     USED+=("$1")
     if [[ $# -ge 2 ]]; then
-        printf '%s\n%s\n%s\n%s\n' "$1" "$2" "$1" "$1" > "$T/in"
+        printf '1\n%s\n%s\n%s\n%s\n' "$1" "$2" "$1" "$1" > "$T/in"
     else
-        printf '%s\n%s\n' "$1" "$1" > "$T/in"
+        printf '1\n%s\n%s\n' "$1" "$1" > "$T/in"
     fi
     edit_bls_passphrase < "$T/in" > "$T/out" 2>&1
     RC=$?
@@ -196,74 +213,83 @@ check "old layout on mainnet: .node-meta unchanged" "NETWORK=mainnet" "$(cat "$F
 # -----------------------------------------------------------------------------
 # Accepted values: root 0600 write (as root), refused directory (otherwise)
 # -----------------------------------------------------------------------------
+# Mainnet keeps the passphrase only as an encrypted credential: without
+# systemd-creds the accepted value is refused before anything is written.
 set_network mainnet
 edit "abcdefghijklmnop"
-if [[ $ROOT_OK == 1 ]]; then
-    check "16 bytes on mainnet: written" "abcdefghijklmnop" "$(cat "$PASSFILE")"
+check "16 bytes on mainnet, no systemd-creds: refused" yes "$(has "$OUT" "only as an encrypted credential")"
+check "16 bytes on mainnet, no systemd-creds: file unchanged" "old-passphrase-value" "$(cat "$PASSFILE")"
+set_network testnet
+edit "abcdefghijklmnop"
+if [[ $WRITE_OK == 1 ]]; then
+    check "testnet: written" "abcdefghijklmnop" "$(cat "$PASSFILE")"
     check "written file is root 0600" "0 0 600" "$(owner_mode "$PASSFILE")"
     check "no temp file left in the config dir" "" "$(find "$FXB/etc/telcoin" -name '.tn.*' 2>/dev/null)"
+    check "method recorded as stdin" "stdin" "$(meta_get PASSPHRASE_METHOD "$FXB/etc/telcoin/.node-meta" 2>/dev/null)"
+    check "backups shredded afterwards" "0" "$(find "$TN_BACKUP_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
 else
-    check "16 bytes on mainnet: passes the check, write refused here" yes "$(has "$OUT" "Could not write")"
-    check "16 bytes on mainnet: file unchanged when refused" "old-passphrase-value" "$(cat "$PASSFILE")"
+    check "testnet: passes the check, backup or write refused here" yes "$(has "$OUT" "nothing was changed")"
+    check "testnet: file unchanged when refused" "old-passphrase-value" "$(cat "$PASSFILE")"
 fi
 
 edit "mismatch-one-value-xx" "mismatch-two-value-yy"
 check "mismatch: asked again" yes "$(has "$OUT" "do not match")"
-if [[ $ROOT_OK == 1 ]]; then
+if [[ $WRITE_OK == 1 ]]; then
     check "mismatch then match: the matched value is written" "mismatch-one-value-xx" "$(cat "$PASSFILE")"
 fi
 
 edit $'crlf-pasted-value-1\r'
 USED+=("crlf-pasted-value-1")
-if [[ $ROOT_OK == 1 ]]; then
+if [[ $WRITE_OK == 1 ]]; then
     check "one trailing CR dropped" "crlf-pasted-value-1" "$(cat "$PASSFILE")"
 fi
 
 set_network testnet
 edit "a b c interior spaces ok"
-if [[ $ROOT_OK == 1 ]]; then
+if [[ $WRITE_OK == 1 ]]; then
     check "interior blanks accepted for a credential unit" "a b c interior spaces ok" "$(cat "$PASSFILE")"
 else
     skip "root 0600 write of accepted values" "$ROOT_WHY"
 fi
 
 # -----------------------------------------------------------------------------
-# Legacy Docker unit with the value on ExecStart (CORE-3 replaces it)
+# Legacy Docker unit with the value on ExecStart: every other edit is refused;
+# the passphrase menu moves it (the value read from the unit by awk)
 # -----------------------------------------------------------------------------
 fixture "$BASE"
 set_network testnet
 UNIT_BEFORE="[Service]
 User=root
-ExecStart=/usr/bin/docker run --rm -e TN_BLS_PASSPHRASE=old-passphrase-value -e X=1 img:v1 telcoin node
+ExecStart=/usr/bin/docker run --rm -e TN_BLS_PASSPHRASE=old-docker-value-1 -e X=1 img:v1 telcoin node
 Environment=\"OTHER=1\""
 printf '%s\n' "$UNIT_BEFORE" > "$TARGET_SERVICE_FILE"
-chmod 0640 "$TARGET_SERVICE_FILE"
+chmod 0644 "$TARGET_SERVICE_FILE"
+USED+=("old-docker-value-1")
 
-edit "a b c d e f g h i j"
-check "docker unit: blanks refused for the ExecStart line" yes "$(has "$OUT" "cannot hold spaces")"
-check "docker unit: unit unchanged after refusal" "$UNIT_BEFORE" "$(cat "$TARGET_SERVICE_FILE")"
-edit 'dollar$sign-value'
-check "docker unit: \$ refused" yes "$(has "$OUT" "cannot hold spaces")"
+rc=0; edit_lock > "$T/out" 2>&1 || rc=$?
+edit_unlock
+check_rc "legacy unit: any other edit refused under the lock" 1 "$rc"
+check "legacy unit: the refusal names --migrate-credential" yes "$(has "$(cat "$T/out")" "--migrate-credential")"
 
 : > "$ARGV_LOG"
-edit "docker-new-value-01"
-check "docker unit: perl never runs" no "$(has "$(cat "$ARGV_LOG")" "perl ")"
+printf 'y\n' > "$T/in"
+edit_bls_passphrase < "$T/in" > "$T/out" 2>&1
+OUT="$(cat "$T/out")"
+edit_unlock
+check "legacy unit: the menu offers the move" yes "$(has "$OUT" "must move to the current unit")"
+check "legacy unit: perl never runs" no "$(has "$(cat "$ARGV_LOG")" "perl ")"
 if [[ $ROOT_OK == 1 && $HAVE_CP_NP == 1 ]]; then
-    check "docker unit: ExecStart carries the new value" "[Service]
-User=root
-ExecStart=/usr/bin/docker run --rm -e TN_BLS_PASSPHRASE=docker-new-value-01 -e X=1 img:v1 telcoin node
-Environment=\"OTHER=1\"" "$(cat "$TARGET_SERVICE_FILE")"
-    check "docker unit: mode and owner kept" "0 0 640" "$(owner_mode "$TARGET_SERVICE_FILE")"
-    check "docker unit: passphrase file written" "docker-new-value-01" "$(cat "$PASSFILE")"
-    check "docker unit: backup in the backup dir" "1" "$(find "$TN_BACKUP_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
-    check "docker unit: no .bak beside the unit" "" "$(find "$FXB/etc/systemd/system" -name '*.bak*' 2>/dev/null)"
+    check "legacy unit: the unit no longer holds the value" no "$(has "$(cat "$TARGET_SERVICE_FILE")" "TN_BLS_PASSPHRASE=")"
+    check "legacy unit: passphrase file holds the unit's value" "old-docker-value-1" "$(cat "$PASSFILE")"
+    check "legacy unit: method recorded as stdin" "stdin" "$(meta_get PASSPHRASE_METHOD "$FXB/etc/telcoin/.node-meta" 2>/dev/null)"
+    check "legacy unit: backups shredded" "0" "$(find "$TN_BACKUP_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
 else
-    check "docker unit: unit unchanged when the backup or write is refused" "$UNIT_BEFORE" "$(cat "$TARGET_SERVICE_FILE")"
-    check "docker unit: passphrase file unchanged too" "old-passphrase-value" "$(cat "$PASSFILE")"
+    check "legacy unit: unit unchanged when the backup or write is refused" "$UNIT_BEFORE" "$(cat "$TARGET_SERVICE_FILE")"
+    check "legacy unit: passphrase file unchanged too" "old-passphrase-value" "$(cat "$PASSFILE")"
     if [[ $ROOT_OK == 1 ]]; then
-        skip "docker unit: root rewrite" "cp --no-preserve absent"
+        skip "legacy unit: root move" "cp --no-preserve absent"
     else
-        skip "docker unit: root rewrite" "$ROOT_WHY"
+        skip "legacy unit: root move" "$ROOT_WHY"
     fi
 fi
 
@@ -283,16 +309,6 @@ for v in "${USED[@]}"; do
     check "argv never holds '${v}'" no "$(has "$(cat "$ALL_ARGV")" "$v")"
     check "environment never holds '${v}'" no "$(has "$(cat "$ENV_LOG")" "$v")"
 done
-
-# -----------------------------------------------------------------------------
-# _uc_unit_with_passphrase on its own
-# -----------------------------------------------------------------------------
-printf 'a TN_BLS_PASSPHRASE=x1 b TN_BLS_PASSPHRASE=x2\nTN_BLS_PASSPHRASE=end\nplain line\n' > "$T/u"
-check "unit rewrite: every word replaced, the rest kept" "a TN_BLS_PASSPHRASE=N b TN_BLS_PASSPHRASE=N
-TN_BLS_PASSPHRASE=N
-plain line" "$(_uc_unit_with_passphrase "$T/u" N)"
-check "unit rewrite: a value holding the key is not re-read" "x TN_BLS_PASSPHRASE=TN_BLS_PASSPHRASE=q y" \
-    "$(printf 'x TN_BLS_PASSPHRASE=old y\n' > "$T/u2"; _uc_unit_with_passphrase "$T/u2" "TN_BLS_PASSPHRASE=q")"
 
 PATH="$ORIG_PATH"
 finish

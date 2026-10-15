@@ -24,6 +24,21 @@
 #                                                     # check says too many are down
 #   --allow-public-metrics                            # metrics on an address other
 #                                                     # than 127.0.0.1 (root only)
+#   sudo bash edit-config.sh --migrate-credential     # move the BLS passphrase to an
+#                                                     # encrypted systemd credential
+#                                                     # (also moves a unit that holds
+#                                                     # it, or runs docker inline, to
+#                                                     # the current start script)
+#   sudo bash edit-config.sh --reseal                 # encrypt the credential again
+#                                                     # with this host's TPM/PCR state
+#   --allow-no-tpm                                    # with the two above, on mainnet:
+#                                                     # accept the host key alone
+#   --bind-pcrs <list>|none                           # with the two above: bind to
+#                                                     # these TPM PCRs (e.g. 7)
+#
+# A node whose unit still holds the BLS passphrase (or runs the docker command
+# inline, or used the old TPM method) refuses every other edit until
+# --migrate-credential has run.
 #
 # TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
 #
@@ -124,6 +139,16 @@ TARGET_LAUNCH_FILE=""
 NO_EPOCH_WAIT=false
 # --allow-public-metrics: a metrics address other than 127.0.0.1 (never in --json).
 ALLOW_PUBLIC_METRICS=false
+# --migrate-credential / --reseal: the one passphrase action to run without the menu.
+EDIT_ACTION=""
+# --allow-no-tpm: on mainnet, a credential on the host key alone. --bind-pcrs LIST|none.
+EDIT_ALLOW_NO_TPM=false
+EDIT_BIND_PCRS=""
+# True while a passphrase move runs: edit_lock then lets a node through whose unit
+# still holds the passphrase (every other edit is refused on such a node).
+EDIT_LEGACY_OK=false
+# The passphrase during a move: a plain shell variable, never exported.
+TN_CRED_PASS=""
 
 # --json: stdout carries JSON events only (see json_setup_fds). --set runs one
 # edit without the menu, in either mode.
@@ -392,13 +417,28 @@ set_verbosity() {
     return 0
 }
 
-# Swap docker image OLD for NEW in a launch file. The images reach perl through
-# the environment, so an image pinned by digest (name@sha256:...) is copied
-# literally instead of being read as a perl array.
+# swap_docker_image NEW -- run NEW in the docker start script by rendering the start
+# script and unit again (tn_rerender_node_launch, which takes only this network's
+# repository by digest or release tag); no text substitution on either file. An
+# older launch file moves to the current form first (launch_current_form). The
+# start script, unit and node.env are backed up (edit_backup) before the first
+# write. rc 1 refused or failed (reported).
 swap_docker_image() {
-    local old="$1" new="$2" file="$3"
-    TN_OLD_IMAGE="$old" TN_NEW_IMAGE="$new" \
-        perl -i -pe 's/\Q$ENV{TN_OLD_IMAGE}\E/$ENV{TN_NEW_IMAGE}/g' "$file"
+    local new="${1:-}" cur rc=0
+    launch_current_form || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_backup "$TARGET_SERVICE_FILE" || return 1
+    if ! tn_rerender_node_launch "$new" edit_wait_say; then
+        edit_error "the start script could not be written for ${new} (see above)"
+        return 1
+    fi
+    resolve_launch_file
+    cur="$(_tn_launch_awk runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
+    if [[ $rc -ne 10 || "$cur" != "docker ${new}" ]]; then
+        edit_error "${TARGET_LAUNCH_FILE} does not run ${new} after the rewrite"
+        return 1
+    fi
+    return 0
 }
 
 # The image a docker launch line runs: the first registry-looking word, else
@@ -587,6 +627,13 @@ edit_lock() {
     fi
     EDIT_LOCK_HELD=true
     if ! edit_migrate_ownership; then
+        edit_release_lock
+        EDIT_LOCK_HELD=false
+        return 1
+    fi
+    local reason
+    if [[ "$EDIT_LEGACY_OK" != "true" ]] && reason="$(edit_legacy_reason)"; then
+        edit_error "${reason}; move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)"
         edit_release_lock
         EDIT_LOCK_HELD=false
         return 1
@@ -1284,6 +1331,10 @@ set_docker_image() {
         edit_error "invalid docker image reference: ${new_image}"
         return 1
     fi
+    if ! tn_docker_image_allowed "$new_image"; then
+        edit_error "image refused: ${new_image} (it must be this network's repository by digest or by a release tag)"
+        return 1
+    fi
     exec_start="$(read_launch_line "$TARGET_LAUNCH_FILE")"
     if ! grep -qF "docker run" <<<"$exec_start"; then
         edit_error "node is not a docker install"
@@ -1303,8 +1354,7 @@ set_docker_image() {
         edit_error "failed to pull image: ${new_image}"
         return 1
     fi
-    edit_backup "$TARGET_LAUNCH_FILE" || return 1
-    swap_docker_image "$current_image" "$new_image" "$TARGET_LAUNCH_FILE"
+    swap_docker_image "$new_image"
 }
 
 # The fields --set accepts.
@@ -1812,94 +1862,231 @@ set_rpc_addr() {
     return 0
 }
 
-# _uc_unit_with_passphrase UNIT VALUE -- print UNIT with the word after every
-# TN_BLS_PASSPHRASE= (up to the next space) replaced by VALUE. Pure shell: the
-# value reaches no child process, argument list or environment. Legacy Docker
-# units only (see edit_bls_passphrase). rc 1 when UNIT cannot be read.
-_uc_unit_with_passphrase() {
-    local key="TN_BLS_PASSPHRASE=" line out rest text
-    text="$(cat -- "${1:-}")" || return 1
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        out=""
-        while [[ "$line" == *"$key"* ]]; do
-            rest="${line#*"$key"}"
-            out="${out}${line%%"$key"*}${key}${2-}"
-            if [[ "$rest" == *" "* ]]; then
-                line=" ${rest#* }"
-            else
-                line=""
-            fi
-        done
-        printf '%s\n' "${out}${line}"
-    done <<< "$text"
+# edit_legacy_reason -- print why this node must move to the current unit, start
+# script and passphrase delivery before anything else is edited: its unit holds
+# the BLS passphrase, its passphrase is sealed with the old TPM method, or its
+# unit runs the docker command inline. Prints nothing (rc 1) when none applies.
+edit_legacy_reason() {
+    if tn_has_embedded_passphrase "$TARGET_SERVICE_FILE"; then
+        printf '%s\n' "${TARGET_SERVICE_FILE} holds the BLS passphrase"
+    elif [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "tpm" ]]; then
+        printf '%s\n' "the BLS passphrase is sealed with the old TPM method"
+    elif [[ "${TARGET_LAUNCH_FILE:-}" == *.service ]]; then
+        printf '%s\n' "${TARGET_LAUNCH_FILE} runs the docker command inline"
+    else
+        return 1
+    fi
 }
 
-# edit_passphrase_restart WAS_ACTIVE -- start the service again after a
-# passphrase change that stopped it and then gave up; pause for the operator.
-edit_passphrase_restart() {
-    if [[ "${1:-}" == "yes" ]]; then
-        systemctl start "$TARGET_SERVICE" || true
+# edit_cred_type_pass -- ask for the node's current BLS passphrase twice, without
+# echo, into TN_CRED_PASS (a plain shell variable, never exported), for a move whose
+# stored value cannot be read: an old TPM install, or a unit value systemd would
+# have changed on the way. Without a terminal one line is read from stdin. rc 1
+# when the two differ or the value is empty, holds a line break, or starts or ends
+# with whitespace.
+edit_cred_type_pass() {
+    local again="" cr=$'\r'
+    TN_CRED_PASS=""
+    if [[ -t 0 ]]; then
+        IFS= read -r -s -p "  Enter the node's current BLS passphrase: " TN_CRED_PASS || TN_CRED_PASS=""
+        echo "" >&2
+        IFS= read -r -s -p "  Confirm it: " again || again=""
+        echo "" >&2
+    else
+        IFS= read -r TN_CRED_PASS || true
+        again="$TN_CRED_PASS"
     fi
+    TN_CRED_PASS="${TN_CRED_PASS%"$cr"}"
+    again="${again%"$cr"}"
+    if [[ "$TN_CRED_PASS" != "$again" ]] || ! tn_passphrase_ok "$TN_CRED_PASS"; then
+        again=""
+        TN_CRED_PASS=""
+        edit_error "the two entries differ, or the passphrase is empty, holds a line break, or starts or ends with whitespace; nothing was changed"
+        return 1
+    fi
+    again=""
+    return 0
+}
+
+# edit_cred_report RC WHAT -- report how a passphrase move (_tn_cred_switch and the
+# migrations) ended.
+edit_cred_report() {
+    case "${1:-}" in
+        0) edit_ok "${2:-done}" ;;
+        1) edit_error "nothing was changed (see above)" ;;
+        2) edit_error "${TARGET_SERVICE} did not come back with the new passphrase delivery; its previous files are back and it runs on them" ;;
+        *) edit_error "${TARGET_SERVICE} did not come back on its previous files either; see the backups named above and journalctl -u ${TARGET_SERVICE}" ;;
+    esac
+}
+
+# edit_cred_pcrs KEY -- the PCR list for a new credential: --bind-pcrs when given
+# (none clears it), else the one .node-meta records, kept only with a TPM.
+edit_cred_pcrs() {
+    local key="${1:-}" pcrs
+    if [[ -n "$EDIT_BIND_PCRS" ]]; then
+        [[ "$EDIT_BIND_PCRS" == "none" ]] || printf '%s\n' "$EDIT_BIND_PCRS"
+        return 0
+    fi
+    pcrs="$(meta_get CREDENTIAL_PCRS 2>/dev/null || true)"
+    if [[ -n "$pcrs" && "$key" == "host+tpm2" ]] && tn_pcrs_ok "$pcrs"; then
+        printf '%s\n' "$pcrs"
+    fi
+    return 0
+}
+
+# edit_migrate_credential -- --migrate-credential and the menu: move the node to the
+# current unit and start script with its passphrase in the encrypted credential
+# (tn_migrate_credential), read from the root-only file or from a unit that holds
+# it (tn_migrate_embedded_passphrase); the passphrase is asked for when neither can
+# be read. Below systemd 250 a unit that holds it moves to the root-only file
+# (testnet only). Old copies are shredded once the node is back. rc as the helpers.
+edit_migrate_credential() {
+    local conf rc=0
+    conf="$(tn_resolve_config_dir)"
+    EDIT_LEGACY_OK=true
+    edit_lock || return 1
+    TN_CRED_PASS=""
+    if tn_has_embedded_passphrase "$TARGET_SERVICE_FILE"; then
+        if ! _tn_unit_pass_read "$TARGET_SERVICE_FILE"; then
+            edit_warn "the passphrase in ${TARGET_SERVICE_FILE} cannot be read back as one plain value; type it instead"
+            edit_cred_type_pass || return 1
+        fi
+        tn_migrate_embedded_passphrase "$TARGET_SERVICE_FILE" edit_wait_say || rc=$?
+    else
+        if [[ ! -f "${conf}/bls-passphrase" ]] \
+            && ! [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "credential" && -f "${conf}/bls-passphrase.cred" ]]; then
+            edit_warn "no stored passphrase to move (${conf}/bls-passphrase is missing); type it instead"
+            edit_cred_type_pass || return 1
+        fi
+        tn_migrate_credential edit_wait_say || rc=$?
+    fi
+    TN_CRED_PASS=""
+    resolve_launch_file 2>/dev/null || true
+    edit_cred_report "$rc" "${TARGET_SERVICE} now runs from the current unit and start script with its passphrase stored as $(meta_get PASSPHRASE_METHOD 2>/dev/null || echo unknown)"
+    return "$rc"
+}
+
+# edit_reseal -- --reseal and the menu: encrypt the credential again with this host's
+# key as it is now (the TPM when there is a usable one) and the PCR choice
+# (--bind-pcrs LIST, --bind-pcrs none, else the recorded one): after a TPM change, a
+# PCR policy change, or a move between host and host+tpm2. The value is decrypted
+# into a pipe, never a file; when it no longer decrypts here it is asked for. Then
+# the restart steps of a migration, with the old credential put back if the node
+# does not come up. rc as _tn_cred_switch.
+edit_reseal() {
+    local cred net key pcrs rc=0 restart=yes
+    cred="$(tn_resolve_config_dir)/bls-passphrase.cred"
+    if [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" != "credential" || ! -f "$cred" ]]; then
+        edit_error "this node does not keep its passphrase as an encrypted credential; run sudo ./edit-config.sh --migrate-credential first"
+        return 1
+    fi
+    if ! tn_creds_supported; then
+        edit_error "systemd-creds is not available on this host"
+        return 1
+    fi
+    edit_lock || return 1
+    TN_CRED_PASS="$(systemd-creds decrypt "--name=${TN_CRED_NAME}" "$cred" - 2>/dev/null)" || TN_CRED_PASS=""
+    if [[ -z "$TN_CRED_PASS" ]]; then
+        edit_warn "${cred} does not decrypt on this host any more; type the passphrase to seal it again"
+        edit_cred_type_pass || return 1
+    fi
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if [[ "$EDIT_ALLOW_NO_TPM" == "true" ]]; then
+        TN_ALLOW_NO_TPM=1
+    fi
+    if ! key="$(tn_credential_key "$net")"; then
+        TN_CRED_PASS=""
+        edit_error "no usable TPM2 here; pass --allow-no-tpm to seal it with the host key alone"
+        return 1
+    fi
+    pcrs="$(edit_cred_pcrs "$key")"
+    systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
+    _tn_cred_switch credential "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
+    TN_CRED_PASS=""
+    edit_cred_report "$rc" "the credential is sealed again (${key}${pcrs:+, PCRs ${pcrs}})"
+    return "$rc"
+}
+
+# edit_pause -- hold the result on screen in the menu.
+edit_pause() {
     edit_unlock
     echo ""
     read -r -p "  Press Enter to return to menu..." || true
 }
 
+# edit_bls_passphrase -- menu 5: change the stored passphrase, seal the credential
+# again, or move the node to the encrypted credential. A node whose unit still
+# holds the passphrase (or runs docker inline, or used the old TPM method) is
+# offered the move only.
 edit_bls_passphrase() {
     print_header "Edit BLS Passphrase"
-
-    local passphrase_file
-    passphrase_file="$(tn_resolve_config_dir)/bls-passphrase"
-
-    if [[ ! -f "$passphrase_file" ]]; then
-        print_error "Passphrase file not found at: ${passphrase_file}"
-        return 1
+    local reason method choice
+    if reason="$(edit_legacy_reason)"; then
+        print_warn "This node must move to the current unit and start script first: ${reason}."
+        print_info "The move stores the passphrase as an encrypted credential (or, below systemd ${TN_CRED_MIN_SYSTEMD}, in a root-only file) and shreds the old copies."
+        if confirm "Move it now?"; then
+            edit_migrate_credential || true
+        fi
+        edit_pause
+        return 0
     fi
+    method="$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)"
+    case "$method" in
+        credential) print_info "Stored as an encrypted credential ($(meta_get CREDENTIAL_KEY 2>/dev/null || echo host))." ;;
+        *) print_info "Stored in the root-only file $(tn_resolve_config_dir)/bls-passphrase." ;;
+    esac
+    echo ""
+    echo "  1) Change the stored passphrase"
+    if [[ "$method" == "credential" ]]; then
+        echo "  2) Seal the credential again (TPM or PCR change)"
+    elif tn_creds_supported; then
+        echo "  2) Move it to an encrypted credential"
+    fi
+    echo "  3) Back"
+    read -r -p "  Enter choice [1-3]: " choice || choice=3
+    case "$choice" in
+        1) edit_change_passphrase ;;
+        2)
+            if [[ "$method" == "credential" ]]; then
+                edit_reseal || true
+            elif tn_creds_supported; then
+                edit_migrate_credential || true
+            fi
+            edit_pause
+            ;;
+        *) return 0 ;;
+    esac
+}
 
+# edit_change_passphrase -- store a new passphrase (asked twice, no echo; the rules of
+# tn_passphrase_ok for this network, mainnet rules when it cannot be told) as the
+# encrypted credential where systemd-creds works, else in the root-only file, then
+# restart through the committee guard and the epoch wait; the old files come back if
+# the node does not unlock its key. Keys are not re-encrypted: they must already be
+# wrapped with the new passphrase.
+edit_change_passphrase() {
     print_warn "Changing the BLS passphrase updates the stored passphrase used"
     print_warn "to decrypt your keys at startup. This does NOT re-encrypt your"
     print_warn "key files -- your keys must have been generated with this passphrase."
     print_warn "Only use this if you know your keys match the new passphrase."
     echo ""
-
     if ! confirm "Are you sure you want to change the stored passphrase?"; then
         print_info "Passphrase unchanged."
         return 0
     fi
-
-    # The rules depend on the network: mainnet needs at least 16 bytes. A
-    # network that cannot be told gets the mainnet rules.
-    local network
+    local network new_pass="" new_confirm="" cr=$'\r' target=stdin key="" pcrs="" restart=yes rc=0
     network="$(tn_detect_network 2>/dev/null)" || network="mainnet"
-
-    # A legacy Docker unit carries the passphrase on its ExecStart line, where
-    # a space, a quote, a backslash, $, % or ; would break the command.
-    local exec_start legacy_docker=false
-    exec_start=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" 2>/dev/null || echo "")
-    case "$exec_start" in
-        *"docker run"*) legacy_docker=true ;;
-    esac
-    exec_start=""
-
-    # IFS= keeps leading and trailing blanks, so they are refused rather than
-    # silently dropped; -s keeps the value off the screen. One trailing CR (a
-    # paste from a CRLF source) is dropped.
-    local new_pass new_pass_confirm cr
-    cr=$'\r'
     while true; do
         IFS= read -r -s -p "  Enter new BLS passphrase: " new_pass || new_pass=""
         echo ""
-        IFS= read -r -s -p "  Confirm new BLS passphrase: " new_pass_confirm || new_pass_confirm=""
+        IFS= read -r -s -p "  Confirm new BLS passphrase: " new_confirm || new_confirm=""
         echo ""
         new_pass="${new_pass%"$cr"}"
-        new_pass_confirm="${new_pass_confirm%"$cr"}"
-        if [[ "$new_pass" == "$new_pass_confirm" ]]; then
-            break
-        fi
+        new_confirm="${new_confirm%"$cr"}"
+        [[ "$new_pass" == "$new_confirm" ]] && break
         print_warn "Passphrases do not match -- try again."
     done
-    new_pass_confirm=""
-
+    new_confirm=""
     if ! tn_passphrase_ok "$new_pass" "$network"; then
         new_pass=""
         print_error "Passphrase refused: it must not be empty, must not start or end with a space or tab, and must not contain a line break."
@@ -1907,120 +2094,32 @@ edit_bls_passphrase() {
             print_info "On mainnet it must also be at least 16 bytes long."
         fi
         print_info "Passphrase unchanged."
-        echo ""
-        read -r -p "  Press Enter to return to menu..." || true
+        edit_pause
         return 0
     fi
-    if [[ "$legacy_docker" == "true" ]]; then
-        case "$new_pass" in
-            *[[:space:]]*|*\"*|*\'*|*\\*|*\$*|*%*|*\;*)
-                new_pass=""
-                print_error "This node's unit carries the passphrase on its ExecStart line, which cannot hold spaces or the characters \" ' \\ \$ % ;. Passphrase unchanged."
-                echo ""
-                read -r -p "  Press Enter to return to menu..." || true
-                return 0
-                ;;
-        esac
-    fi
-
-    # Nothing is stopped or written before the update lock is held.
     if ! menu_lock; then
         new_pass=""
         return 0
     fi
-
-    # Stop the service before rewriting the passphrase file so we never race
-    # against a node that may have the old file mapped in its credential dir.
-    # A committee node waits for the epoch boundary first: this stop is the
-    # start of its restart.
-    local was_active="no"
-    if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
-        was_active="yes"
-        if ! edit_epoch_wait; then
-            print_error "The passphrase was not changed: the committee check refused the stop."
-            return 0
-        fi
-        print_step "Stopping ${TARGET_SERVICE} before passphrase rewrite..."
-        systemctl stop "$TARGET_SERVICE"
-        local stop_attempts=0
-        while systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null && (( stop_attempts < 15 )); do
-            sleep 1
-            (( ++stop_attempts ))
-        done
-        if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
-            print_error "Service did not stop within 15s. Aborting passphrase rewrite."
-            new_pass=""
-            echo ""
-            read -r -p "  Press Enter to return to menu..."
-            return 1
-        fi
-        print_ok "Service stopped"
-    fi
-
-    # CORE-3 replaces: a legacy Docker install embeds the passphrase in the
-    # unit's ExecStart. Back the unit up, rewrite that word in the shell
-    # (_uc_unit_with_passphrase: no child process sees the value) and write
-    # the unit back through tn_write_root_file, before the passphrase file, so
-    # a failure on either write leaves both as they were.
-    local unit_bk="" unit_mg="" unit_text=""
-    if [[ "$legacy_docker" == "true" ]]; then
-        unit_mg="$(stat -c '%a %G' -- "$TARGET_SERVICE_FILE" 2>/dev/null)" || unit_mg=""
-        if [[ -z "$unit_mg" ]] || ! unit_bk=$(backup_service_file "$TARGET_SERVICE_FILE"); then
-            new_pass=""
-            print_error "Could not back up ${TARGET_SERVICE_FILE}. Passphrase unchanged."
-            edit_passphrase_restart "$was_active"
-            return 0
-        fi
-        if ! unit_text="$(_uc_unit_with_passphrase "$TARGET_SERVICE_FILE" "$new_pass")" \
-            || ! printf '%s\n' "$unit_text" | tn_write_root_file "$TARGET_SERVICE_FILE" "${unit_mg%% *}" "${unit_mg##* }"; then
-            unit_text=""
-            new_pass=""
-            print_error "Could not update ${TARGET_SERVICE_FILE}; it is unchanged. Passphrase unchanged."
-            edit_passphrase_restart "$was_active"
-            return 0
-        fi
-        unit_text=""
-        print_ok "Docker service file updated with new passphrase"
-    fi
-
-    # The passphrase file: root 0600, written through a temp file and one
-    # rename (tn_write_root_file). printf is a shell builtin, so the value is
-    # never on a command line.
-    if ! printf '%s\n' "$new_pass" | tn_write_root_file "$passphrase_file" 0600; then
-        new_pass=""
-        print_error "Could not write ${passphrase_file}; it is unchanged."
-        if [[ -n "$unit_bk" ]] && ! tn_restore_backup "${unit_bk% *}" "${unit_bk##* }" "$TARGET_SERVICE_FILE" "${unit_mg%% *}" "${unit_mg##* }"; then
-            print_error "Could not put ${TARGET_SERVICE_FILE} back from ${unit_bk% *}; it holds the new passphrase while ${passphrase_file} holds the old one."
-        fi
-        edit_passphrase_restart "$was_active"
-        return 0
-    fi
+    TN_CRED_PASS="$new_pass"
     new_pass=""
-    print_ok "Passphrase file updated"
-    if [[ "$legacy_docker" != "true" ]]; then
-        # Binary/source installs use LoadCredential -- passphrase read from
-        # file at runtime, no service file change needed.
-        print_ok "Binary install -- passphrase file updated (LoadCredential reads it at runtime)"
-    fi
-
-    # Restart the service if it was running before
-    if [[ "$was_active" == "yes" ]]; then
-        print_step "Restarting ${TARGET_SERVICE}..."
-        systemctl daemon-reload
-        systemctl start "$TARGET_SERVICE"
-        sleep 3
-        if systemctl is-active --quiet "$TARGET_SERVICE"; then
-            print_ok "Service restarted successfully"
-        else
-            print_error "Service failed to restart. Check logs:"
-            print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
+    if tn_creds_supported; then
+        target=credential
+        [[ "$EDIT_ALLOW_NO_TPM" == "true" ]] && TN_ALLOW_NO_TPM=1
+        if ! key="$(tn_credential_key "$network")"; then
+            TN_CRED_PASS=""
+            print_error "No usable TPM2 here: pass --allow-no-tpm to keep the passphrase encrypted with the host key alone. Passphrase unchanged."
+            edit_pause
+            return 0
         fi
-        edit_unlock
-        echo ""
-        read -r -p "  Press Enter to return to menu..."
-    else
-        apply_changes
+        pcrs="$(edit_cred_pcrs "$key")"
     fi
+    systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
+    _tn_cred_switch "$target" "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
+    TN_CRED_PASS=""
+    edit_cred_report "$rc" "the new passphrase is stored ($( [[ "$target" == credential ]] && echo "encrypted credential, ${key}" || echo "root-only file" ))"
+    edit_pause
+    return 0
 }
 
 edit_p2p_ports() {
@@ -2131,9 +2230,9 @@ edit_docker_image() {
         return
     fi
 
-    if ! validate_docker_image "$new_image"; then
-        print_error "Image reference looks invalid: ${new_image}"
-        print_info "Expected format: registry/path:tag (e.g. us-docker.pkg.dev/.../adiri:v0.9.2)."
+    if ! validate_docker_image "$new_image" || ! tn_docker_image_allowed "$new_image"; then
+        print_error "Image refused: ${new_image}"
+        print_info "It must be this network's repository by digest (@sha256:...) or by a release tag (e.g. us-docker.pkg.dev/.../adiri:v0.16.0-adiri)."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
@@ -2152,10 +2251,16 @@ edit_docker_image() {
     menu_lock || return 0
     backup_edit_targets || return 0
 
-    # Replace old image with new image in the launch file (wrapper or unit)
-    swap_docker_image "$current_image" "$new_image" "$TARGET_LAUNCH_FILE"
+    # The start script and unit are rendered again with the new image.
+    if ! swap_docker_image "$new_image"; then
+        edit_restore_backups || true
+        edit_unlock
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
     print_ok "Launch config updated to use: ${new_image}"
     apply_changes
+
 }
 
 edit_bootstrap_peers() {
@@ -2669,6 +2774,17 @@ main() {
             --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
             --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
             --allow-public-metrics) ALLOW_PUBLIC_METRICS=true; shift ;;
+            --migrate-credential) EDIT_ACTION=migrate; shift ;;
+            --reseal) EDIT_ACTION=reseal; shift ;;
+            --allow-no-tpm) EDIT_ALLOW_NO_TPM=true; TN_ALLOW_NO_TPM=1; shift ;;
+            --bind-pcrs)
+                if [[ $# -lt 2 || "$2" == -* ]]; then
+                    edit_error "--bind-pcrs needs a PCR list (for example 7 or 0+7) or none"
+                    exit 1
+                fi
+                EDIT_BIND_PCRS="$2"
+                shift 2
+                ;;
             -h|--help)
                 # The header block only: everything up to its closing rule. Read
                 # from this file, not "$0", which names the caller when sourced.
@@ -2688,10 +2804,34 @@ main() {
         print_info "Ignoring ${LEGACY_ROLE_FLAG}: the node's role is decided on-chain, not by a flag." >&2
     fi
 
+    if [[ -n "$EDIT_BIND_PCRS" && "$EDIT_BIND_PCRS" != "none" ]] && ! tn_pcrs_ok "$EDIT_BIND_PCRS"; then
+        edit_error "--bind-pcrs takes TPM PCR indexes 0-23 joined by + (for example 7 or 0+7), or none"
+        exit 1
+    fi
+    if [[ -n "$EDIT_ACTION" ]]; then
+        edit_require_root
+        resolve_target || exit 1
+        local action_rc=0
+        if [[ "$EDIT_ACTION" == "migrate" ]]; then
+            edit_migrate_credential || action_rc=$?
+        else
+            edit_reseal || action_rc=$?
+        fi
+        if [[ "$JSON_MODE" == "true" ]]; then
+            if [[ $action_rc -eq 0 ]]; then
+                edit_done true passphrase "$EDIT_ACTION" "passphrase ${EDIT_ACTION} done"
+            else
+                edit_done false passphrase "$EDIT_ACTION" "passphrase ${EDIT_ACTION} failed (rc ${action_rc})" "$([[ $action_rc -eq 2 ]] && echo true || echo false)"
+            fi
+
+        fi
+        exit "$action_rc"
+    fi
     if [[ "$JSON_MODE" == "true" || "$EDIT_SET_GIVEN" == "true" ]]; then
         run_set
         exit $?
     fi
+
 
     clear 2>/dev/null || true
     print_header "Telcoin Network Node Configuration Editor  v${SCRIPT_VERSION}"
