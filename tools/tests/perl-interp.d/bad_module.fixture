@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: a module or @INC directory
+# taken from a shell expansion. Expected findings: lines 8 to 13.
+
+mod="$1"
+dir="$2"
+file="$3"
+perl -M"$mod" -e 'print 1'
+perl -M$mod -ne 'print' "$file"
+perl -wm"$mod" -e 'print 1'
+perl -d:"$mod" -e 'print 1'
+perl -I"$dir" -e 'print 1'
+perl -I "$dir" -e 'print 1'

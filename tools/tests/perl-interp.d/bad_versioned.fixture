@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: a versioned interpreter name.
+# Expected findings: lines 7, 8, 9 and 10.
+
+v="$1"
+file="$2"
+perl5.36 -pe "s/x/$v/" "$file"
+/usr/bin/perl5.36.0 -e "print '$v'"
+printf '%s\n' "$v" | perl5.40
+perl5.36 /dev/stdin <<< "print q($v)"

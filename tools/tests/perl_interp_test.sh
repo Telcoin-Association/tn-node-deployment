@@ -27,10 +27,12 @@ LINT="$TN_TEST_REPO/tools/check-perl-interp.sh"
 FX="$TN_TEST_REPO/tools/tests/perl-interp.d"
 T="$TN_TEST_TMP"
 MSG='perl program expands a shell variable'
+MSG_O='perl program comes from stdin or <( ), which the lint cannot read'
 
-# finding_lines OUTPUT -- the FILE:LINE part of each finding line.
+# finding_lines OUTPUT -- the FILE:LINE part of each finding line, either kind.
 finding_lines() {
-    printf '%s\n' "$1" | sed -n "s/^\(.*:[0-9][0-9]*\): $MSG: .*/\1/p"
+    printf '%s\n' "$1" | sed -n -e "s/^\(.*:[0-9][0-9]*\): $MSG: .*/\1/p" \
+        -e "s/^\(.*:[0-9][0-9]*\): $MSG_O: .*/\1/p"
 }
 
 # bad FIXTURE LINE... -- the lint exits 1 and reports exactly these lines.
@@ -57,6 +59,11 @@ bad bad_switches.fixture 7 8 9 10 11 12
 bad bad_continued.fixture 7 11 15
 bad bad_heredoc.fixture 8 13 14 17
 bad bad_subst.fixture 7 8 9 10 11
+bad bad_stdin_pipe.fixture 7 8 9 10 12 13 14 15 17
+bad bad_dev_stdin.fixture 8 10 12 14 15
+bad bad_procsub.fixture 7 8 9 10
+bad bad_module.fixture 8 9 10 11 12 13
+bad bad_versioned.fixture 7 8 9 10
 
 unlisted=""
 for f in "$FX"/bad_*; do
@@ -79,6 +86,14 @@ check_has "a continued command prints as one line at the line of perl" \
 out="$("$SH" "$LINT" "$FX/bad_heredoc.fixture" 2>/dev/null)"
 check_has "a heredoc program prints the body line" \
     "$FX/bad_heredoc.fixture:8: $MSG: s/old/\$new/;" "$out"
+out="$("$SH" "$LINT" "$FX/bad_stdin_pipe.fixture" 2>/dev/null)"
+check_has "a piped program prints the second message" \
+    "$FX/bad_stdin_pipe.fixture:7: $MSG_O: printf '%s\n' \"\$prog\" | perl" "$out"
+check_has "a pipe on the line before prints at the line of perl" \
+    "$FX/bad_stdin_pipe.fixture:12: $MSG_O: perl -w" "$out"
+out="$("$SH" "$LINT" "$FX/bad_module.fixture" 2>/dev/null)"
+check_has "a module from the shell prints the first message" \
+    "$FX/bad_module.fixture:8: $MSG: perl -M\"\$mod\" -e 'print 1'" "$out"
 
 # --- good fixtures -------------------------------------------------------------
 
@@ -91,7 +106,7 @@ for f in "$FX"/good_*; do
     check_rc "${f##*/}: exit 0" 0 "$rc"
     check "${f##*/}: no findings" "" "$out"
 done
-check "good fixtures found" yes "$([[ $goods -ge 7 ]] && echo yes || echo no)"
+check "good fixtures found" yes "$([[ $goods -ge 8 ]] && echo yes || echo no)"
 
 # --- several files, arguments and errors ---------------------------------------
 

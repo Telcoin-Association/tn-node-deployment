@@ -21,19 +21,32 @@
 #     "s/$x/y/", "s|${a}|b|", "$prog" and $prog are findings; "s/\$x/y/" and
 #     "s/foo$/bar/" are not. Every -e of the command is checked.
 #   - a program read from an unquoted heredoc (perl <<EOF, perl - ARGS <<EOF,
-#     with no -e): each body line holding such an expansion. <<'EOF' is fine.
-#     Likewise a here-string program (perl <<< "$prog").
+#     perl /dev/stdin <<EOF, with no -e): each body line holding such an
+#     expansion. <<'EOF' is fine. Likewise a here-string program
+#     (perl <<< "$prog").
+#   - a module or @INC directory from a shell expansion: -M"$m", -M$m, -m"$m",
+#     -d:"$m", -I"$dir", -I "$dir".
+#   - a program the lint cannot see: perl as the command word with no -e and
+#     no script file (only switches, -- or a - or /dev/stdin script), whose
+#     stdin is a pipe (... | perl, ... | perl -w --), a <( ) (perl < <(...)) or
+#     whatever the caller passed (a bare perl); and a <( ) as the script
+#     (perl <(...)). These print a second message (below).
+# A versioned name (perl5.36, /usr/bin/perl5.36.0) counts as perl everywhere.
 # Not flagged: single-quoted programs ('...$ENV{X}...' reads the value at run
 # time), $'...' strings, data passed as arguments (@ARGV, -s switches after --,
 # the FILE operand "$file"; without the --, perl reads -new="$v" as its own
 # -n -e switches, which is flagged), heredocs and here-strings given to a perl
 # that has an -e program (they are data), and the word perl where no program
-# follows (echo "perl missing", command -v perl, for c in perl docker).
+# follows (echo "perl missing", command -v perl, for c in perl docker, a case
+# pattern perl|python), perl -v/-V/-h, and a stdin program given as a file
+# (perl < prog.pl).
 #
 # How a file is read (one awk pass per file): quotes, $( ), backticks and
-# arithmetic are tracked across lines; any word that is exactly perl, or a path
-# ending in /perl (with no expansion in it), starts a perl command, which ends
-# at ; & | ( ) or a newline. Lines joined by a trailing backslash are one
+# arithmetic are tracked across lines; any word that is exactly perl or
+# perlN.N[.N], or a path ending in one (with no expansion in it), starts a perl
+# command, which ends at ; & | ( ) or a newline. It is the command word when
+# only assignments, keywords ({ ! then do ...) or the bare wrappers command,
+# exec, env, sudo, nohup, nice and time come before it in its command. Lines joined by a trailing backslash are one
 # command. Comments (a # that starts a word, so whole comment lines and
 # trailing comments) and heredoc bodies are skipped, except the body of a
 # heredoc that feeds a perl program.
@@ -42,12 +55,16 @@
 # heredoc body line carrying it) is not reported. Put the reason after it:
 #     perl -e "print $$" # perl-interp-ok prints the shell pid on purpose
 #
-# Blind spots: perl inside a string another shell runs (bash -c '...', eval,
-# ssh host "..."), perl written into a generated script through a heredoc, a
-# program held in a variable and then passed through "$@", and a perl reached
-# through a variable ("$PERL" -e ...). A file whose quotes or heredocs the lint
-# cannot follow to the end is an error (exit 2), so a lint bug never passes a
-# file it did not read.
+# Blind spots, which it does not detect:
+#   - perl in a string run by bash -c "...", or by sh -c "..."
+#   - perl in a string run by eval, or by ssh host "..."
+#   - an argv array built in a variable: cmd=(perl -e "$p"); "${cmd[@]}"
+#   - a program held in a variable and then passed through "$@"
+#   - perl reached through a variable ("$PERL" -e ...)
+#   - a stdin program behind a wrapper given options (sudo -u u perl, env -i perl)
+#   - perl written into a generated script through a heredoc
+# A file whose quotes or heredocs the lint cannot follow to the end is an
+# error (exit 2), so a lint bug never passes a file it did not read.
 #
 # Maintainer tool: update-scripts.sh does not track it and it has no .sha256
 # sidecar. It is bash 3.2 clean so it runs on stock macOS; its awk program is
@@ -61,6 +78,8 @@
 #
 # Each finding prints on standard output as
 #   FILE:LINE: perl program expands a shell variable: <the trimmed line>
+# or, for a program it cannot see,
+#   FILE:LINE: perl program comes from stdin or <( ), which the lint cannot read: <line>
 # and a summary line goes to standard error.
 #
 # Exit status: 0 clean, 1 findings, 2 usage error (a missing, unreadable or
@@ -74,10 +93,13 @@ usage() {
     cat <<'EOF'
 usage: tools/check-perl-interp.sh [FILE...]
 
-Report perl programs (-e/-E arguments or an unquoted heredoc program) whose text
-expands a shell variable. With no FILE, check every tracked *.sh file from the
-repository root. Each finding prints as
+Report perl programs (-e/-E arguments, an unquoted heredoc program, -M/-m/-I
+values) whose text expands a shell variable, and perl commands whose program
+comes from stdin or a <( ) the lint cannot read (... | perl, perl /dev/stdin,
+perl <(...)). With no FILE, check every tracked *.sh file from the repository
+root. Each finding prints as
   FILE:LINE: perl program expands a shell variable: <the line>
+  FILE:LINE: perl program comes from stdin or <( ), which the lint cannot read: <the line>
 Add "# perl-interp-ok <reason>" to a line of the command to accept it.
 
 Exit status: 0 clean, 1 findings, 2 usage error or unreadable file.
@@ -90,12 +112,16 @@ EOF
 # context, which owns the word being built (wa/wv/wx/wl: active, value with
 # quotes removed, holds an expansion, start line) and the perl command state:
 #   ps 0 no perl command, 1 reading perl switches, 2 the next word is an -e
-#   program, 3 past the switches (script name, @ARGV data)
+#   program or an -I directory, 3 past the switches (script name, @ARGV data)
 # with pl (line of the word perl), pe (an -e was seen), pstd (the program could
-# come from stdin), pdd (a -- ended the switches) and pf (a finding is
-# pending; it is reported when the command ends, so a marker anywhere on the
-# command's lines counts). rt marks that the next word is a redirection target
-# (2: a here-string, which phs records when it expands).
+# come from stdin), pnp (-v, -V or -h: no program is read), pcp (perl is the
+# command word), psc (the script is a <( )), pdd (a -- ended the switches) and
+# pf (a finding is pending; it is reported when the command ends, so a marker
+# anywhere on the command's lines counts). Per command: cp (the next word is in
+# command position), pin (stdin is redirected), psub (stdin is a <( )). rt
+# marks that the next word is a redirection target (2: a here-string, which phs
+# records when it expands; 3: a file read on stdin). ck tracks a case
+# statement: 1 waiting for in, 2 reading patterns, 3 in an item's commands.
 # Heredocs queue in hq_*; their bodies start after the next newline that ends a
 # command line. Exit status: 0 clean, 1 findings, 3 the file ended inside a
 # quote, a substitution or a heredoc.
@@ -105,6 +131,7 @@ function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
 function ctx_init(f) {
     wa[f] = 0; wv[f] = ""; wx[f] = 0; wl[f] = 0
     ps[f] = 0; pf[f] = 0; rt[f] = 0; phs[f] = 0
+    cp[f] = 1; pin[f] = 0; psub[f] = 0; ck[f] = 0
 }
 function push(kind, depth) {
     sp++; st[sp] = kind; pd[sp] = depth; pa[sp] = 0
@@ -123,6 +150,7 @@ function endword(f) {
     if (rt[f]) {
         # A here-string feeds stdin, which is the program when there is no -e.
         if (rt[f] == 2 && wx[f] && ps[f] > 0) phs[f] = 1
+        if (rt[f] == 3 && wv[f] ~ /^<[(]/) psub[f] = 1
         rt[f] = 0
         return
     }
@@ -131,9 +159,21 @@ function endword(f) {
 
 function perl_word(f, v, x, line,    n, i, c) {
     if (ps[f] == 0) {
-        if (!x && (v == "perl" || v ~ /\/perl$/)) {
+        # case WORD in PATTERN) ...;; esac: the patterns are not commands.
+        if (ck[f] == 2) { if (v == "esac") ck[f] = 0; return }
+        if (ck[f] == 1) { if (v == "in") ck[f] = 2; return }
+        if (!x && v ~ /^(.*\/)?perl(5[.][0-9]+([.][0-9]+)?)?$/) {
             ps[f] = 1; pid++; pi[f] = pid; pl[f] = line
             pe[f] = 0; pstd[f] = 1; pdd[f] = 0; pf[f] = 0; phs[f] = 0
+            pnp[f] = 0; psc[f] = 0; pcp[f] = cp[f]; cp[f] = 0
+            return
+        }
+        if (cp[f]) {
+            if (v == "case") ck[f] = 1
+            else if (v == "esac") ck[f] = 0
+            # Assignments, keywords and bare wrappers keep the next word in
+            # command position.
+            if (v !~ /^[A-Za-z_][A-Za-z0-9_]*=/ && v !~ /^(!|[{]|then|do|else|elif|if|while|until|time|command|exec|env|sudo|nohup|nice)$/) cp[f] = 0
         }
         return
     }
@@ -146,7 +186,10 @@ function perl_word(f, v, x, line,    n, i, c) {
     # ps 1: a switch cluster, --, or the first argument that is not a switch.
     if (!pdd[f] && v == "--") { pdd[f] = 1; return }
     if (pdd[f] || v !~ /^-./) {
-        if (!pe[f]) pstd[f] = (v == "-")
+        if (!pe[f]) {
+            pstd[f] = (v == "-" || v == "/dev/stdin" || v == "/dev/fd/0" || v == "/proc/self/fd/0")
+            if (x && v ~ /^<[(]/) psc[f] = 1
+        }
         ps[f] = 3
         return
     }
@@ -160,8 +203,15 @@ function perl_word(f, v, x, line,    n, i, c) {
             else ps[f] = 2
             return
         }
-        # These switches take the rest of the cluster as their value.
-        if (c ~ /[ixFIMmdDCV]/) return
+        # -v and -h print and exit, -V too (-V:name), without reading a program.
+        if (c == "v" || c == "h" || c == "V") pnp[f] = 1
+        # These switches take the rest of the cluster as their value. A module
+        # (-M, -m, -d:) or an @INC directory (-I, attached or the next word)
+        # changes what the program runs, so it must not come from the shell.
+        if (c ~ /[ixFIMmdDCV]/) {
+            if (c ~ /[MmdI]/) { if (x) pf[f] = 1; else if (c == "I" && i == n) ps[f] = 2 }
+            return
+        }
         i++
         if (c == "0") {
             if (substr(v, i, 1) == "x") { i++; while (i <= n && substr(v, i, 1) ~ /[0-9A-Fa-f]/) i++ }
@@ -173,7 +223,7 @@ function perl_word(f, v, x, line,    n, i, c) {
 }
 
 # The command in context f ends (operator, newline, closing parenthesis).
-function endcmd(f,    k, q, txt, t, id) {
+function endcmd(f,    k, q, txt, t, id, msg) {
     endword(f)
     if (ps[f] > 0) {
         id = pi[f]
@@ -185,16 +235,22 @@ function endcmd(f,    k, q, txt, t, id) {
             if (k < NR) sub(/[ \t]*\\$/, "", t)
             txt = (txt == "") ? t : txt " " t
         }
-        cmd_std[id] = (!pe[f] && pstd[f])
+        cmd_std[id] = (!pe[f] && pstd[f] && !pnp[f])
         cmd_q[id] = q
         if (phs[f] && cmd_std[id]) pf[f] = 1
-        if (pf[f] && !q) {
+        msg = ""
+        if (pf[f]) msg = MSG_X
+        # A program the lint never sees: a <( ) script, or perl as the command
+        # with no -e and its stdin a pipe, a <( ) or inherited from the caller.
+        else if (psc[f] || (cmd_std[id] && (psub[f] || (pcp[f] && !pin[f])))) msg = MSG_O
+        if (msg != "" && !q) {
             if (length(txt) > 240) txt = substr(txt, 1, 237) "..."
-            printf "%s:%d: perl program expands a shell variable: %s\n", fname, pl[f], txt
+            printf "%s:%d: %s: %s\n", fname, pl[f], msg, txt
             hits++
         }
     }
     ps[f] = 0; pf[f] = 0; rt[f] = 0; phs[f] = 0
+    cp[f] = 1; pin[f] = 0; psub[f] = 0
 }
 
 # One line of a heredoc body: its terminator, a perl program line, or data.
@@ -209,12 +265,12 @@ function body(    t, id) {
     gsub(/\\\\/, "xx", t)
     gsub(/\\[$`]/, "xx", t)
     if (t ~ /[$][A-Za-z0-9_{(@*#?!$-]/ || index(t, "`")) {
-        printf "%s:%d: perl program expands a shell variable: %s\n", fname, NR, trim(raw)
+        printf "%s:%d: %s: %s\n", fname, NR, MSG_X, trim(raw)
         hits++
     }
 }
 
-function scan(    n, i, c, nx, top, f, inar, j, k, d, word, quoted, strip) {
+function scan(    n, i, c, nx, top, f, inar, j, k, d, word, quoted, strip, fd) {
     cont = 0
     n = length(raw)
     i = 1
@@ -273,6 +329,15 @@ function scan(    n, i, c, nx, top, f, inar, j, k, d, word, quoted, strip) {
             push("C", 1)
             i += 2; continue
         }
+        # A case pattern: an optional ( before it, ) after it.
+        # (esac) is not a pattern: the word ends first, then the ) is code.
+        if (ck[f] == 2 && (c == "(" || c == ")")) {
+            endword(f)
+            if (ck[f] == 2) {
+                if (c == ")") { ck[f] = 3; cp[f] = 1 }
+                i++; continue
+            }
+        }
         if (c == "(" && nx == "(" && !wa[f] && top != "B") {
             endcmd(f)
             push("C", 2); pa[sp] = 1
@@ -288,9 +353,13 @@ function scan(    n, i, c, nx, top, f, inar, j, k, d, word, quoted, strip) {
         }
         if (c == "<" || c == ">" || (c == "&" && nx == ">")) {
             # 2>file: the digits are a descriptor, not a word.
-            if (wa[f] && !wx[f] && wv[f] ~ /^[0-9]+$/) wa[f] = 0
+            fd = ""
+            if (wa[f] && !wx[f] && wv[f] ~ /^[0-9]+$/) { fd = wv[f]; wa[f] = 0 }
             else endword(f)
             if (inar) { i++; continue }
+            # A file, heredoc or here-string on descriptor 0 replaces the stdin
+            # a program could otherwise come from.
+            if (c == "<" && (fd == "" || fd == "0")) pin[f] = 1
             if (c == "<" && nx == "<" && substr(raw, i + 2, 1) == "<") { rt[f] = 2; i += 3; continue }
             if (c == "<" && nx == "<") {
                 j = i + 2
@@ -326,11 +395,19 @@ function scan(    n, i, c, nx, top, f, inar, j, k, d, word, quoted, strip) {
             }
             j = i + 1
             while (j <= n && substr(raw, j, 1) ~ /[<>&|]/) j++
-            rt[f] = 1
+            rt[f] = (c == "<" && (fd == "" || fd == "0")) ? 3 : 1
             i = j
             continue
         }
         if (c == " " || c == "\t") { endword(f); i++; continue }
+        # ;; ;& ;;& end a case item; the next words are patterns again.
+        if (c == ";" && (nx == ";" || nx == "&")) {
+            endcmd(f)
+            if (ck[f] == 3) ck[f] = 2
+            i += 2
+            if (nx == ";" && substr(raw, i, 1) == "&") i++
+            continue
+        }
         if (c == ";" || c == "&" || c == "|") { endcmd(f); i++; continue }
         wadd(f, c)
         i++
@@ -351,6 +428,8 @@ BEGIN {
     bodies = 0
     fname = ENVIRON["CPI_FILE"]
     MARK = "# perl-interp-ok"
+    MSG_X = "perl program expands a shell variable"
+    MSG_O = "perl program comes from stdin or <( ), which the lint cannot read"
 }
 
 {
