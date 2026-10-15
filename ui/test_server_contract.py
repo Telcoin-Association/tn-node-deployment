@@ -49,14 +49,18 @@ INSTALLER = os.path.join(HERE, "install-ui.sh")
 HELPER_SH = os.path.join(HERE, "telcoin-ui-helper.sh")
 HELPER_PATH = "/usr/local/sbin/telcoin-ui-helper"
 
-# The 14 node subcommands and the arguments each takes once the role is gone
-# (A.1). The server must send exactly this many.
+# The node subcommands and the arguments each takes once the role is gone
+# (A.1). The server must send exactly this many, not counting the trailing
+# allow-quorum-risk of the calls that stop or restart the node (OVERRIDABLE).
 NODE_SUBCOMMAND_ARITY = {
+    "service": 1,
     "tracing-enable": 0, "tracing-disable": 0, "update-check": 0,
     "update-prepare": 1, "update-apply": 0, "update-discard": 0,
     "restart-count": 0, "log-clear": 0, "config-set": 2, "set-hostname": 1,
     "addons-status": 0, "meta-cat": 0, "setup-keygen": 0, "setup-finalize": 0,
 }
+
+OVERRIDABLE = {"service", "tracing-enable", "tracing-disable", "set-hostname"}
 
 DONE_OK = json.dumps({"event": "done", "ok": True, "msg": "finished"})
 
@@ -426,7 +430,7 @@ class CrossFileContractTest(ServerTestCase):
         for action in server.CREDENTIAL_ACTIONS:
             c.post("/api/config/observer/credential", json={"action": action}, buffered=True)
         server._write_times.clear()     # the write rate limit would refuse the rest
-        c.post("/api/config/observer/hostname", json={"name": "node7"})
+        c.post("/api/config/observer/hostname", json={"name": "node7"}, buffered=True)
         c.post("/api/config/observer/logrotate", json={"size": "1G"})
         c.post("/api/config/observer/clear-rotated", json={})
         c.get("/api/firewall")
@@ -471,8 +475,21 @@ class CrossFileContractTest(ServerTestCase):
         c.get("/api/jaeger/status")
         c.post("/api/jaeger/start", json={})
         c.post("/api/jaeger/stop", json={})
-        c.post("/api/tracing/enable/observer", json={})
-        c.post("/api/tracing/disable/observer", json={})
+        server._write_times.clear()
+        c.post("/api/tracing/enable/observer", json={}, buffered=True)
+        c.post("/api/tracing/disable/observer", json={}, buffered=True)
+        c.post("/api/tracing/enable/observer", json={"allow_quorum_risk": True}, buffered=True)
+        c.post("/api/tracing/disable/observer", json={"allow_quorum_risk": True}, buffered=True)
+        c.post("/api/config/observer/hostname", json={"name": "node7", "allow_quorum_risk": True},
+               buffered=True)
+        # Stop and restart go through the helper; start stays a systemctl call.
+        server._write_times.clear()
+        os.makedirs(server.SYSTEMD_DIR, exist_ok=True)
+        open(server.service_file("observer"), "w").close()
+        for action in ("stop", "restart"):
+            c.post("/api/service/observer/" + action, json={}, buffered=True)
+            c.post("/api/service/observer/" + action, json={"allow_quorum_risk": True},
+                   buffered=True)
 
     def test_helper_path_matches_sudoers(self):
         self.assertEqual(server.HELPER, HELPER_PATH)
@@ -514,8 +531,11 @@ class CrossFileContractTest(ServerTestCase):
             sub = argv[3]
             if sub in NODE_SUBCOMMAND_ARITY:
                 seen.add(sub)
+                n = len(argv) - 4
+                if sub in OVERRIDABLE and argv[-1] == "allow-quorum-risk":
+                    n -= 1
                 with self.subTest(argv=argv):
-                    self.assertEqual(len(argv) - 4, NODE_SUBCOMMAND_ARITY[sub])
+                    self.assertEqual(n, NODE_SUBCOMMAND_ARITY[sub])
         self.assertEqual(seen, set(NODE_SUBCOMMAND_ARITY))
 
     def test_every_sudoers_subcommand_is_dispatched_by_the_helper(self):
@@ -953,6 +973,75 @@ class CredentialTest(ServerTestCase):
         rules = helper_rules(split_transitional(sudoers_text())[0])
         self.assertEqual(sorted(r for r in rules if r.startswith("credential")),
                          ["credential migrate", "credential reseal"])
+
+
+class RestartRoutesTest(ServerTestCase):
+    """Stop, restart and the edits that restart the node stream a helper call
+    that takes the update lock and checks the committee first; start stays a
+    direct systemctl call."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(server.SYSTEMD_DIR, exist_ok=True)
+        open(server.service_file("observer"), "w").close()
+
+    def post(self, url, body):
+        self.calls.clear()
+        server._write_times.clear()
+        return self.client.post(url, json=body, buffered=True)
+
+    def test_stop_and_restart_stream_the_helper(self):
+        refused = json.dumps({"event": "done", "ok": False, "quorum": True,
+                              "msg": "Not restarted: the committee check refused it"})
+        self.popen_script = {"lines": [json.dumps({"event": "step", "msg": "Checking the committee"}),
+                                       refused], "rc": 1}
+        for action in ("stop", "restart"):
+            with self.subTest(action=action):
+                resp = self.post("/api/service/observer/" + action, {})
+                self.assertEqual(resp.mimetype, "text/event-stream")
+                self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "service", action]])
+                self.assertFalse([c for c in self.calls if "/bin/systemctl" in c])
+                done = [e for e in self.stream_events(resp.data) if e.get("event") == "done"]
+                self.assertEqual(len(done), 1)
+                self.assertIs(done[0]["quorum"], True)
+
+    def test_the_override_is_sent_only_when_asked_for_exactly(self):
+        for body, extra in (({"allow_quorum_risk": True}, ["allow-quorum-risk"]),
+                            ({"allow_quorum_risk": "true"}, []), ({"allow_quorum_risk": 1}, []),
+                            ({"allow_quorum_risk": False}, []), ({}, [])):
+            with self.subTest(body=body):
+                self.post("/api/service/observer/restart", body)
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "service", "restart"] + extra])
+                self.post("/api/tracing/enable/observer", body)
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "tracing-enable"] + extra])
+                self.post("/api/config/observer/hostname", dict(body, name="node7"))
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "set-hostname", "node7"] + extra])
+
+    def test_start_stays_a_systemctl_call(self):
+        self.helper_replies = dict(HELPER_REPLIES)
+        self.host_replies["sudo"] = (0, "", "")
+        self.calls.clear()
+        server._write_times.clear()
+        with mock.patch.object(server.time, "sleep", lambda *_: None):
+            resp = self.client.post("/api/service/observer/start", json={})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(["sudo", "/bin/systemctl", "start", server.service_name("observer")], self.calls)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_sudoers_has_no_raw_stop_or_restart(self):
+        text = sudoers_text()
+        self.assertNotRegex(text, r"/bin/systemctl (stop|restart) telcoin")
+        self.assertRegex(text, r"(?m)^\$\{SVC_USER\} ALL=\(root\) NOPASSWD: /bin/systemctl start telcoin$")
+        rules = helper_rules(split_transitional(text)[0])
+        self.assertEqual(sorted(r for r in rules if r.startswith("service")),
+                         ["service restart", "service restart allow-quorum-risk",
+                          "service stop", "service stop allow-quorum-risk"])
+        for sub in ("tracing-enable", "tracing-disable"):
+            self.assertEqual(sorted(r for r in rules if r.split()[0] == sub),
+                             [sub, sub + " allow-quorum-risk"])
 
 
 class FirewallEnableTest(ServerTestCase):

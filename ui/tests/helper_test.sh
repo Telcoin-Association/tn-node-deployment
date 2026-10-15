@@ -129,9 +129,26 @@ meta_set() {
     sed -i "/^$1=/d" "$3" && printf '%s=%s\n' "$1" "$2" >> "$3"
 }
 tn_committee_down_guard() {
+    local rc="${TN_TEST_LIB_RC:-0}"
+    if [[ -n "${TN_TEST_GUARD2_RC:-}" ]] && grep -q '^lib tn_committee_down_guard' "$HT_CALLS"; then
+        rc="$TN_TEST_GUARD2_RC"
+    fi
     printf 'lib tn_committee_down_guard [%s] allow=[%s]\n' "$1" "${TN_ALLOW_QUORUM_RISK:-}" >> "$HT_CALLS"
-    echo "guard says ${TN_TEST_LIB_RC:-0}" >&2
-    return "${TN_TEST_LIB_RC:-0}"
+    echo "guard says ${rc}" >&2
+    return "$rc"
+}
+tn_wait_restart_window() {
+    printf 'lib tn_wait_restart_window [%s]\n' "$1" >> "$HT_CALLS"
+    if [[ -n "${TN_TEST_WAIT_SLEEP:-}" ]]; then
+        sleep "$TN_TEST_WAIT_SLEEP" &
+        wait $!
+    fi
+    "${2:-true}" log "waited for the epoch boundary"
+    return 0
+}
+tn_write_root_file() {
+    printf 'lib tn_write_root_file [%s] [%s] [%s]\n' "$1" "$2" "${3:-root}" >> "$HT_CALLS"
+    cat > "$1.ht-tmp" && mv -f "$1.ht-tmp" "$1"
 }
 EOF
 
@@ -152,7 +169,23 @@ make_fake "$T/engine/edit-config.sh"    edit-config
 make_fake "$T/engine/setup-node.sh"     setup-node    '# --passphrase-stdin --release-tag --log-target'
 make_fake "$T/engine/install-caddy.sh"  install-caddy '# --password-stdin'
 make_fake "$T/engine/firewall-setup.sh" firewall-setup
-make_fake "$T/bin/systemctl" systemctl
+# systemctl also records whether the update lock is held while it runs.
+make_fake "$T/bin/systemctl" systemctl \
+    "if command -v flock >/dev/null 2>&1; then if flock -n \"\$TN_UPDATE_LOCK_FILE\" true 2>/dev/null; then s=free; else s=held; fi; elif [ -d \"\$TN_UPDATE_LOCK_FILE.d\" ]; then s=held; else s=free; fi; echo \"lock [\$s]\" >> \"$T/calls.log\"; exit 0"
+# The update lock the helper takes for a stop or restart (the library's
+# tn_acquire_update_lock, pointed at the temp tree).
+mkdir -p "$T/run"
+export TN_UPDATE_LOCK_FILE="$T/run/update.lock"
+# lock_state -- held or free, the way the systemctl shim tells.
+lock_state() {
+    if command -v flock >/dev/null 2>&1; then
+        if flock -n "$TN_UPDATE_LOCK_FILE" true 2>/dev/null; then echo free; else echo held; fi
+    elif [[ -d "${TN_UPDATE_LOCK_FILE}.d" ]]; then
+        echo held
+    else
+        echo free
+    fi
+}
 # docker ps lists two Telcoin Network containers, tn-node and observer.
 # shellcheck disable=SC2016
 make_fake "$T/bin/docker" docker \
@@ -201,7 +234,7 @@ add_unit() {
     mkdir -p "$UNIT_DIR" "$OPT_DIR" "$LOG_DIR"
     printf '[Service]\nExecStart=%s\nStandardOutput=append:%s\n' \
         "${OPT_DIR}/start-${u}.sh" "${LOG_DIR}/${u}.log" > "${UNIT_DIR}/${u}.service"
-    printf '#!/bin/bash\nexec /opt/telcoin/telcoin-network node%s --datadir /var/lib/telcoin\n' \
+    printf '#!/bin/bash\nexec /opt/telcoin/telcoin-network node%s --datadir /var/lib/telcoin --http\n' \
         "$flags" > "${OPT_DIR}/start-${u}.sh"
     printf 'a log line\n' > "${LOG_DIR}/${u}.log"
 }
@@ -307,14 +340,14 @@ refused "an unknown subcommand is refused" bogus-subcommand
 
 # ---- The 14 node subcommands: the old role argument changes nothing ------------
 same_with_tokens unified tracing-enable
-check_has "tracing-enable restarts the resolved unit" "systemctl [restart] [--no-block] [telcoin]" "$BASE"
+check_has "tracing-enable restarts the resolved unit" "systemctl [restart] [telcoin]" "$BASE"
 check_has "tracing-enable writes --node-name telcoin" \
-    "exec /opt/telcoin/telcoin-network node --tracing-url http://127.0.0.1:4317 --node-name telcoin --datadir /var/lib/telcoin" "$BASE"
+    "exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin --http --tracing-url http://127.0.0.1:4317 --node-name telcoin" "$BASE"
 
 same_with_tokens unified-traced tracing-disable
 check_has "tracing-disable strips the tracing flags" \
-    "exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin" "$BASE"
-check_has "tracing-disable restarts the resolved unit" "systemctl [restart] [--no-block] [telcoin]" "$BASE"
+    "exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin --http" "$BASE"
+check_has "tracing-disable restarts the resolved unit" "systemctl [restart] [telcoin]" "$BASE"
 
 same_with_tokens unified update-check
 check_has "update-check argv" "update-node [--json] [--check]" "$BASE"
@@ -344,7 +377,7 @@ same_with_tokens unified set-hostname mynode
 check_has "set-hostname writes network-config" 'hostname: "mynode"' "$BASE"
 check_has "set-hostname records the name in .node-meta" "ADVERTISED_NODE_NAME=mynode" "$BASE"
 check_has "set-hostname records it through the library's meta_set" "lib meta_set [ADVERTISED_NODE_NAME] [mynode]" "$BASE"
-check_has "set-hostname restarts the resolved unit" "systemctl [restart] [--no-block] [telcoin]" "$BASE"
+check_has "set-hostname restarts the resolved unit" "systemctl [restart] [telcoin]" "$BASE"
 
 same_with_tokens unified addons-status
 check_has "addons-status reads the resolved meta" \
@@ -357,10 +390,10 @@ check_has "meta-cat prints the resolved meta" "REGION=us-east1" "$BASE"
 # The token never steers resolution on a legacy box either.
 same_with_tokens observer tracing-enable
 check_has "observer-only box: tracing-enable restarts telcoin-observer" \
-    "systemctl [restart] [--no-block] [telcoin-observer]" "$BASE"
+    "systemctl [restart] [telcoin-observer]" "$BASE"
 same_with_tokens both set-hostname node-b
 check_has "both legacy units: set-hostname restarts telcoin-validator" \
-    "systemctl [restart] [--no-block] [telcoin-validator]" "$BASE"
+    "systemctl [restart] [telcoin-validator]" "$BASE"
 check_has "both legacy units: the name lands in the validator data dir" \
     "/var/lib/telcoin/validator/network-config:" "$BASE"
 
@@ -414,9 +447,9 @@ for c in "unified telcoin" "observer telcoin-observer" "validator telcoin-valida
     unit="${c#* }"
     fixture "$layout"
     t="$(trace tracing-enable)"
-    check_has "tracing-enable on '$layout' restarts $unit" "systemctl [restart] [--no-block] [$unit]" "$t"
+    check_has "tracing-enable on '$layout' restarts $unit" "systemctl [restart] [$unit]" "$t"
     check_has "tracing-enable on '$layout' edits the $unit wrapper" \
-        "exec /opt/telcoin/telcoin-network node --tracing-url http://127.0.0.1:4317 --node-name telcoin --datadir /var/lib/telcoin" \
+        "exec /opt/telcoin/telcoin-network node --datadir /var/lib/telcoin --http --tracing-url http://127.0.0.1:4317 --node-name telcoin" \
         "$(cat "${OPT_DIR}/start-${unit}.sh")"
 done
 fixture both
@@ -431,6 +464,206 @@ printf 'DATA_DIR=%s\n' "$T/root/data/missing" >> "${ETC_DIR}/.node-meta"
 t="$(trace set-hostname node-x)"
 check_has "a recorded DATA_DIR that does not exist is reported, not replaced" \
     "data dir not found: $T/root/data/missing" "$t"
+
+# ---- Stops and restarts: lock, committee check, epoch wait, check again -----------
+# service, tracing-* and set-hostname take the update lock, run the committee
+# check, the epoch wait and the check again, and only then call systemctl, with
+# the lock still held. A refusal leaves the node and its files as they were and
+# releases the lock.
+REFUSED_DONE='{"event":"done","ok":false,"msg":"Not restarted: the committee check refused it (other committee members look down, or the committee could not be read). Try again later, or override the check for a restart the fleet has coordinated.","quorum":true}'
+ORDER="lib tn_committee_down_guard [http://127.0.0.1:8545] allow=[0]
+lib tn_wait_restart_window [http://127.0.0.1:8545]
+lib tn_committee_down_guard [http://127.0.0.1:8545] allow=[0]"
+for act in stop restart; do
+    fixture unified
+    t="$(trace service "$act")"
+    check_has "service $act succeeds" "rc=0" "$t"
+    check "service $act: check, wait, check, then systemctl $act with the lock held" \
+        "${ORDER}
+systemctl [${act}] [telcoin]
+lock [held]" "$(sed -n '/^--- calls$/,/^--- files$/p' <<<"$t" | sed '1d;$d')"
+    past=restarted
+    [[ "$act" == stop ]] && past=stopped
+    check_has "service $act ends with a done event" "{\"event\":\"done\",\"ok\":true,\"msg\":\"telcoin ${past}\"}" "$t"
+    check "service $act releases the lock" "free" "$(lock_state)"
+done
+fixture validator
+t="$(trace service stop)"
+check_has "service stop acts on the resolved unit" "systemctl [stop] [telcoin-validator]" "$t"
+fixture unified
+t="$(trace service restart allow-quorum-risk)"
+check_has "allow-quorum-risk reaches the committee check" \
+    "lib tn_committee_down_guard [http://127.0.0.1:8545] allow=[1]" "$t"
+check_lacks "allow-quorum-risk is not passed on as an argument" "[allow-quorum-risk]" "$t"
+check "the override is in the audit log" "yes" \
+    "$(grep -q '"sub":"service","args":"restart allow-quorum-risk","phase":"start"' "$AUDIT_LOG" && echo yes)"
+fixture unified
+printf 'RPC_PORT=9545\n' >> "${ETC_DIR}/.node-meta"
+t="$(trace service restart)"
+check_has "the checks ask the node's own RPC port" "lib tn_wait_restart_window [http://127.0.0.1:9545]" "$t"
+fixture none
+refused "service with nothing installed is refused" service stop
+fixture unified
+refused "service start is not a helper call" service start
+refused "service with no action is refused" service
+refused "service with a bad action is refused" service reload
+refused "service with two actions is refused" service stop restart
+refused "allow-quorum-risk alone is not an action" service allow-quorum-risk
+
+# The first check refuses: no wait, no systemctl, a done event the page can offer
+# to override, the lock released.
+fixture unified
+export TN_TEST_LIB_RC=1
+t="$(trace service restart)"
+unset TN_TEST_LIB_RC
+check_has "a committee refusal fails the call" "rc=1" "$t"
+check "a committee refusal stops after the first check" \
+    "lib tn_committee_down_guard [http://127.0.0.1:8545] allow=[0]" \
+    "$(sed -n '/^--- calls$/,/^--- files$/p' <<<"$t" | sed '1d;$d')"
+check_has "a committee refusal ends in a done event marked quorum" "$REFUSED_DONE" "$t"
+check "a committee refusal releases the lock" "free" "$(lock_state)"
+
+# The check after the wait refuses: the tracing edit is put back.
+fixture unified
+before="$(cat "${OPT_DIR}/start-telcoin.sh")"
+export TN_TEST_GUARD2_RC=2
+t="$(trace tracing-enable)"
+unset TN_TEST_GUARD2_RC
+check "a refusal after the wait: check, wait, check, no systemctl" \
+    "$(printf 'lib tn_write_root_file [%s] [0644] [%s]\nlib tn_write_root_file [%s] [0644] [%s]\n' \
+        "${OPT_DIR}/start-telcoin.sh" "$(id -g)" "${OPT_DIR}/start-telcoin.sh" "$(id -g)")
+${ORDER}
+lib tn_write_root_file [${OPT_DIR}/start-telcoin.sh] [0644] [$(id -g)]" \
+    "$(sed -n '/^--- calls$/,/^--- files$/p' <<<"$t" | sed '1d;$d')"
+check "a refusal after the wait puts the start script back" "$before" "$(cat "${OPT_DIR}/start-telcoin.sh")"
+check_has "a refusal after the wait says so" "$REFUSED_DONE" "$t"
+check "a refusal after the wait releases the lock" "free" "$(lock_state)"
+
+# set-hostname refused after the wait: network-config back as it was, .node-meta
+# untouched, no restart.
+fixture unified
+printf 'hostname: "old-name"\nother: 1\n' > "${VAR_DIR}/network-config"
+export TN_TEST_GUARD2_RC=1
+t="$(trace set-hostname new-name)"
+unset TN_TEST_GUARD2_RC
+check "a refused set-hostname puts network-config back" 'hostname: "old-name"
+other: 1' "$(cat "${VAR_DIR}/network-config")"
+check_lacks "a refused set-hostname records no name" "ADVERTISED_NODE_NAME" "$(cat "${ETC_DIR}/.node-meta")"
+check_lacks "a refused set-hostname restarts nothing" "systemctl [" "$t"
+fixture unified
+export TN_TEST_LIB_RC=1
+t="$(trace set-hostname first-name)"
+unset TN_TEST_LIB_RC
+check "a refused first set-hostname leaves no network-config" "absent" \
+    "$([[ -e "${VAR_DIR}/network-config" ]] && echo present || echo absent)"
+
+# The call is stopped during the epoch wait (the page went away): the edit is put
+# back, nothing is restarted, the lock is released.
+fixture unified
+before="$(cat "${OPT_DIR}/start-telcoin.sh")"
+: > "$T/calls.log"
+export TN_TEST_WAIT_SLEEP=10
+( set -euo pipefail; main tracing-enable ) > "$T/cancel.out" 2>&1 &
+job=$!
+unset TN_TEST_WAIT_SLEEP
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    grep -q '^lib tn_wait_restart_window' "$T/calls.log" && break
+    sleep 0.2
+done
+kill -TERM "$job"
+wait "$job"
+check "a cancelled call fails" "1" "$?"
+check "a cancelled call puts the start script back" "$before" "$(cat "${OPT_DIR}/start-telcoin.sh")"
+check_lacks "a cancelled call restarts nothing" "systemctl [" "$(cat "$T/calls.log")"
+check_has "a cancelled call says so" \
+    '{"event":"done","ok":false,"msg":"Cancelled before the node was touched; nothing was stopped or restarted."}' \
+    "$(cat "$T/cancel.out")"
+check "a cancelled call releases the lock" "free" "$(lock_state)"
+
+# Another holder of the update lock: refused before any edit or check.
+hold_lock() {
+    if command -v flock >/dev/null 2>&1; then
+        exec 8>>"$TN_UPDATE_LOCK_FILE"
+        flock -n 8
+    else
+        mkdir "${TN_UPDATE_LOCK_FILE}.d" && echo "$$" > "${TN_UPDATE_LOCK_FILE}.d/pid"
+    fi
+}
+drop_lock() {
+    if command -v flock >/dev/null 2>&1; then
+        flock -u 8
+        exec 8>&-
+    else
+        rm -rf "${TN_UPDATE_LOCK_FILE}.d"
+    fi
+}
+fixture unified
+before="$(cat "${OPT_DIR}/start-telcoin.sh")"
+hold_lock
+t1="$(trace service restart)"
+c1="$(cat "$T/calls.log")"
+t2="$(trace tracing-enable)"
+c2="$(cat "$T/calls.log")"
+drop_lock
+check_has "service restart is refused while the update lock is held" "rc=1" "$t1"
+check "a held lock: nothing checked or restarted" "" "$c1"
+check_has "a held lock: the page is told why" \
+    '{"event":"done","ok":false,"msg":"An update or another node change is running (it holds the update lock); try again when it has finished."}' "$t1"
+check_has "tracing-enable is refused while the update lock is held" "rc=1" "$t2"
+check "a held lock: the start script is not edited" "" "$c2"
+check "a held lock: the start script is unchanged" "$before" "$(cat "${OPT_DIR}/start-telcoin.sh")"
+
+# ---- Tracing edits: the library's launch editor, any start-script form ------------
+# The generated Docker start script, and an existing install whose binary has
+# another name; the edit goes through tn_write_root_file and leaves no copy.
+add_launch() {
+    local file="$1" body="$2"
+    mkdir -p "$UNIT_DIR" "$LIBEXEC_DIR" "$LOG_DIR"
+    printf '[Service]\nExecStart=%s\nStandardOutput=append:%s\n' "$file" "${LOG_DIR}/telcoin.log" \
+        > "${UNIT_DIR}/telcoin.service"
+    printf '#!/bin/bash\nset -euo pipefail\n%s\n' "$body" > "$file"
+}
+DOCKER_LINE='exec docker run --rm --name telcoin-node --network host -v /var/lib/telcoin:/home/nonroot/data us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:0123 telcoin node --datadir /home/nonroot/data --http --http.port 8545'
+fixture none
+add_meta -
+add_launch "${LIBEXEC_DIR}/tn-start-docker" "$DOCKER_LINE"
+t="$(trace tracing-enable)"
+check_has "Docker start script: tracing-enable succeeds" "rc=0" "$t"
+check_has "Docker start script: the flags join the node command" \
+    "${DOCKER_LINE} --tracing-url http://127.0.0.1:4317 --node-name telcoin" "$(cat "${LIBEXEC_DIR}/tn-start-docker")"
+check_has "Docker start script: written through tn_write_root_file" \
+    "lib tn_write_root_file [${LIBEXEC_DIR}/tn-start-docker] [0644] [$(id -g)]" "$t"
+t="$(trace tracing-disable)"
+check "Docker start script: tracing-disable gives the line back" \
+    "$(printf '#!/bin/bash\nset -euo pipefail\n%s' "$DOCKER_LINE")" "$(cat "${LIBEXEC_DIR}/tn-start-docker")"
+check "Docker start script: no copy is left beside it" "" "$(find "$LIBEXEC_DIR" -name '*.bak*' -o -name '.tn.*')"
+
+BIN_LINE='exec /usr/local/bin/tn-mainnet-node node --datadir /var/lib/telcoin \
+    --http --http.port 8545'
+fixture none
+add_meta -
+add_launch "${LIBEXEC_DIR}/tn-start" "$BIN_LINE"
+t="$(trace tracing-enable)"
+check_has "renamed binary: tracing-enable succeeds" "rc=0" "$t"
+check "renamed binary: the flags go on the --http line, before nothing else" \
+    "$(printf '#!/bin/bash\nset -euo pipefail\nexec /usr/local/bin/tn-mainnet-node node --datadir /var/lib/telcoin \\\n    --http --http.port 8545 --tracing-url http://127.0.0.1:4317 --node-name telcoin')" \
+    "$(cat "${LIBEXEC_DIR}/tn-start")"
+t="$(trace tracing-enable)"
+check_has "tracing already on: nothing to do" '{"event":"done","ok":true,"msg":"Tracing is already on; the node was not restarted."}' "$t"
+check_lacks "tracing already on: no restart" "systemctl [" "$t"
+check_lacks "tracing already on: no committee check" "tn_committee_down_guard" "$t"
+check "renamed binary: no copy is left beside it" "" "$(find "$LIBEXEC_DIR" -name '*.bak*' -o -name '.tn.*')"
+
+# A start script the editor cannot read is refused untouched.
+fixture none
+add_meta -
+add_launch "${LIBEXEC_DIR}/tn-start" 'exec /usr/local/bin/tn node --datadir /d 2>&1 | tee /tmp/x'
+before="$(cat "${LIBEXEC_DIR}/tn-start")"
+t="$(trace tracing-enable)"
+check_has "an unreadable node command fails the call" "rc=1" "$t"
+check_lacks "an unreadable node command restarts nothing" "systemctl [" "$t"
+check "an unreadable node command leaves the script alone" "$before" "$(cat "${LIBEXEC_DIR}/tn-start")"
+check "a failed edit releases the lock" "free" "$(lock_state)"
 
 # ---- Setup: refusals, settings and the passphrase on stdin ------------------------
 # Each export below lasts only for its own $(...) subshell. A fresh box (no unit,

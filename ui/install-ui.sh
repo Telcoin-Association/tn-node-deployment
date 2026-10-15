@@ -26,8 +26,9 @@
 #
 # Root access the UI gets, all through the sudoers drop-in /etc/sudoers.d/telcoin-ui
 # written below:
-#   - `systemctl start|stop|restart` on the node unit: the unified `telcoin`, or the
-#     legacy `telcoin-observer` / `telcoin-validator`. No other systemctl command.
+#   - `systemctl start` on the node unit: the unified `telcoin`, or the legacy
+#     `telcoin-observer` / `telcoin-validator`. No other systemctl command: a stop
+#     or restart goes through the helper's `service` subcommand.
 #   - A fixed list of subcommands of one root-owned helper,
 #     /usr/local/sbin/telcoin-ui-helper. Most lines allow one exact call; lines
 #     ending in * allow arguments, which the helper checks against a pattern per
@@ -412,27 +413,31 @@ info "Building sudoers whitelist for ${SUDOERS_FILE}..."
 SUDOERS_TMP="$(mktemp "${SUDOERS_TMP_TEMPLATE}")"
 cat > "${SUDOERS_TMP}" <<EOF
 # Managed by install-ui.sh -- Telcoin Node Manager UI. Rewritten on every run.
-# Grants ${SVC_USER} start/stop/restart on the node unit and the subcommands of
-# the root-owned helper listed below, nothing else.
+# Grants ${SVC_USER} a start of the node unit and the subcommands of the
+# root-owned helper listed below, nothing else. A stop or restart goes through
+# the helper (service), which takes the update lock and checks the committee.
 # Unified unit (post-unification installs: single \`telcoin.service\`).
 ${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl start telcoin
-${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl stop telcoin
-${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl restart telcoin
 # legacy per-role units (pre-unification installs)
 ${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl start telcoin-observer
-${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl stop telcoin-observer
-${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl restart telcoin-observer
 ${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl start telcoin-validator
-${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl stop telcoin-validator
-${SVC_USER} ALL=(root) NOPASSWD: /bin/systemctl restart telcoin-validator
 # Helper API version, so the UI can tell when the helper is older than it needs.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper helper-version
-# Jaeger container and the node's tracing flags. No arguments.
+# Node stop and restart: update lock, committee check, epoch wait, check again.
+# allow-quorum-risk is the operator's override of the committee check.
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper service stop
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper service stop allow-quorum-risk
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper service restart
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper service restart allow-quorum-risk
+# Jaeger container (no arguments) and the node's tracing flags, which restart
+# the node the same way as service restart.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper jaeger-start
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper jaeger-stop
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper jaeger-status
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enable
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enable allow-quorum-risk
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable allow-quorum-risk
 # Updates. update-prepare takes one release tag of the node's network
 # (vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet); the helper refuses anything else.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-check
@@ -455,8 +460,8 @@ ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set *
 # (edit-config.sh --migrate-credential / --reseal). Exactly these two calls.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper credential migrate
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper credential reseal
-# Advertised node name (network-config hostname); written as the node's service
-# user, then the node restarts.
+# Advertised node name (network-config hostname) [allow-quorum-risk]; written as
+# the node's service user, then the node restarts the same way as service restart.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname *
 # Node-log rotation size (^[0-9]+[KMG]$), and removal of rotated logs only.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-logrotate *

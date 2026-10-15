@@ -45,8 +45,9 @@
 #   telcoin-ui-helper jaeger-start
 #   telcoin-ui-helper jaeger-stop
 #   telcoin-ui-helper jaeger-status
-#   telcoin-ui-helper tracing-enable
-#   telcoin-ui-helper tracing-disable
+#   telcoin-ui-helper service         <stop|restart> [allow-quorum-risk]
+#   telcoin-ui-helper tracing-enable  [allow-quorum-risk]
+#   telcoin-ui-helper tracing-disable [allow-quorum-risk]
 #   telcoin-ui-helper update-check
 #   telcoin-ui-helper update-prepare  <release tag>
 #   telcoin-ui-helper update-apply
@@ -58,7 +59,7 @@
 #   telcoin-ui-helper journal-follow                            (read-only)
 #   telcoin-ui-helper config-set      <field> <value> [allow-port-mismatch]
 #   telcoin-ui-helper credential      <migrate|reseal>
-#   telcoin-ui-helper set-hostname    <name>
+#   telcoin-ui-helper set-hostname    <name> [allow-quorum-risk]
 #   telcoin-ui-helper set-logrotate   <size e.g. 1G>
 #   telcoin-ui-helper logrotate-seed                            (root only; install-ui.sh)
 #   telcoin-ui-helper clear-rotated
@@ -184,7 +185,7 @@ _json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//[[:c
 # The subcommands that change state; each is audited.
 is_mutating() {
     case "${1:-}" in
-        jaeger-start|jaeger-stop|tracing-enable|tracing-disable) return 0 ;;
+        jaeger-start|jaeger-stop|tracing-enable|tracing-disable|service) return 0 ;;
         update-prepare|update-apply|update-discard|log-clear|config-set) return 0 ;;
         credential) return 0 ;;
         set-hostname|set-logrotate|logrotate-seed|clear-rotated) return 0 ;;
@@ -253,19 +254,23 @@ _lib_usable() {
 # caller uses its local copy, or refuses (_lib_req). SERVICE_USER/SERVICE_GROUP set by the caller (for
 # tn_as_service_user) survive the library's own defaults.
 _lib_call() {
-    local fn="$1"
-    shift
     _lib_usable || return 127
-    (
-        su_keep="${SERVICE_USER:-}"; sg_keep="${SERVICE_GROUP:-}"
-        # shellcheck source=/dev/null
-        source "$HELPER_LIB" >/dev/null 2>&1 || exit 127
-        [[ -n "$su_keep" ]] && SERVICE_USER="$su_keep"
-        [[ -n "$sg_keep" ]] && SERVICE_GROUP="$sg_keep"
-        set +e
-        declare -F "$fn" >/dev/null || exit 127
-        "$fn" "$@"
-    )
+    ( _lib_run "$@" )
+}
+
+# _lib_run <function> [args...] -- the body of _lib_call: source the library
+# into this shell and run the function. Only ever run in a subshell, after
+# _lib_usable.
+_lib_run() {
+    local fn="$1" su_keep="${SERVICE_USER:-}" sg_keep="${SERVICE_GROUP:-}"
+    shift
+    # shellcheck source=/dev/null
+    source "$HELPER_LIB" >/dev/null 2>&1 || exit 127
+    [[ -n "$su_keep" ]] && SERVICE_USER="$su_keep"
+    [[ -n "$sg_keep" ]] && SERVICE_GROUP="$sg_keep"
+    set +e
+    declare -F "$fn" >/dev/null || exit 127
+    "$fn" "$@"
 }
 
 # lib_missing <function> -- refuse the running call: the engine library is
@@ -627,55 +632,257 @@ cmd_jaeger_status() {
     jaeger_state
 }
 
-cmd_tracing_enable() {
-    local wrapper svc
-    wrapper="$(node_wrapper)"
-    [[ -f "$wrapper" ]] || die "wrapper script not found: $wrapper"
+# =============================================================================
+# Node stops and restarts. A stop or restart from the UI, and the edits that
+# need one (the tracing flags, the advertised name), run the way the engine
+# scripts restart the node, in one subshell with the engine library loaded
+# (_lib_call): take the update lock (refused while an update or another change
+# holds it), make the edit, run the committee check (tn_committee_down_guard),
+# the epoch wait (tn_wait_restart_window) and the committee check again, then
+# stop or restart the unit. A refusal, or a cancelled request (the page went
+# away), puts the edit back and leaves the node as it was. The lock is released
+# when the subshell exits. Progress goes to stdout as JSON events ending with one
+# done event, which the server streams to the page. The committee check is
+# overridden (TN_ALLOW_QUORUM_RISK=1) only by a trailing allow-quorum-risk
+# argument, which the server sends when the operator chose a coordinated restart.
+# =============================================================================
 
-    cp -p "$wrapper" "${wrapper}.bak.$(date +%s)" || die "failed to back up wrapper"
+# 1 when the call ended in allow-quorum-risk (main takes it off the arguments).
+QUORUM_OVERRIDE=""
 
-    if grep -q -- '--tracing-url' "$wrapper"; then
-        echo "already enabled"
-    else
-        # Insert the tracing flags immediately after the `telcoin-network node`
-        # token on the exec line. Anchored to the exec line so single-line and
-        # backslash-continued multi-line wrappers are both handled. The node name
-        # is `telcoin` whatever the node's role, which changes with committee
-        # membership.
-        sed -i -E \
-            "s#(^exec .*telcoin-network node)#\1 --tracing-url ${TRACING_URL} --node-name telcoin#" \
-            "$wrapper" || die "failed to edit wrapper"
-        grep -q -- '--tracing-url' "$wrapper" || die "tracing flags not inserted (no matching exec line?)"
+# The pending edit, read by the edit functions in the subshell. EDIT_SAVED is a
+# root-only temp copy of the launch file taken before a tracing edit.
+EDIT_FILE=""
+EDIT_SAVED=""
+EDIT_MODE=""
+EDIT_DONE_MSG=""
+TRACING_ON=""
+HN_NAME=""
+HN_USER=""
+HN_GROUP=""
+HN_META=""
+HN_HAD=0
+HN_OLD=""
+
+# ui_event <event> <msg> -- one JSON event on stdout.
+ui_event() {
+    printf '{"event":"%s","msg":"%s"}\n' "$1" "$(_json_str "$2")"
+}
+
+# ui_done <true|false> <msg> [quorum] -- the closing event. "quorum":true marks a
+# refusal by the committee check, which the page offers to override.
+ui_done() {
+    local qmark=""
+    [[ -z "${3:-}" ]] || qmark=',"quorum":true'
+    printf '{"event":"done","ok":%s,"msg":"%s"%s}\n' "$1" "$(_json_str "$2")" "$qmark"
+}
+
+# ui_say <step|log|warn> <msg> -- progress printer for the library's committee
+# check and epoch wait.
+ui_say() {
+    case "${1:-}" in
+        step|warn) ui_event "$1" "${2:-}" ;;
+        *)         ui_event log "${2:-}" ;;
+    esac
+    return 0
+}
+
+# node_rpc_url -- the node's local RPC (RPC_PORT in .node-meta, default 8545).
+node_rpc_url() {
+    local port
+    port="$(meta_value RPC_PORT 2>/dev/null || true)"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || port=8545
+    echo "http://127.0.0.1:${port}"
+}
+
+# _ui_cleanup -- EXIT trap of the locked subshell: drop the saved copy, release
+# the lock.
+_ui_cleanup() {
+    [[ -z "$EDIT_SAVED" ]] || rm -f -- "$EDIT_SAVED"
+    tn_release_update_lock
+}
+
+# _ui_cancel <edit-fn> -- TERM/INT/HUP before the stop or restart: put the edit
+# back and end the subshell.
+_ui_cancel() {
+    trap '' TERM INT HUP
+    [[ -z "${1:-}" ]] || "$1" undo
+    ui_done false "Cancelled before the node was touched; nothing was stopped or restarted."
+    exit 1
+}
+
+# _ui_locked <stop|restart> <unit> <rpc-url> [edit-fn] -- the body of every UI
+# stop and restart; runs inside _lib_call, so the library is loaded. EDIT-FN
+# takes apply (rc 0 changed, 1 nothing to change: a done event says so and the
+# node is left alone, 2 failed: a done event says why), undo and commit (run
+# after the checks pass, right before the restart). rc 0 done, 1 refused or
+# failed, 127 the library lacks a step.
+_ui_locked() {
+    local action="$1" svc="$2" url="$3" edit="${4:-}" rc=0 f past="restarted" verb="Restarting"
+    for f in tn_acquire_update_lock tn_release_update_lock tn_committee_down_guard tn_wait_restart_window; do
+        declare -F "$f" >/dev/null || return 127
+    done
+    if [[ "$action" == stop ]]; then
+        past="stopped"
+        verb="Stopping"
     fi
+    TN_ALLOW_QUORUM_RISK=0
+    [[ "$QUORUM_OVERRIDE" == 1 ]] && TN_ALLOW_QUORUM_RISK=1
+    export TN_ALLOW_QUORUM_RISK
+    # shellcheck disable=SC2034  # read by tn_acquire_update_lock: this EXIT trap releases the lock
+    TN_EXIT_TRAP_OWNED=1
+    trap _ui_cleanup EXIT
+    # A stream the page has closed must not end this shell between an edit and
+    # its undo.
+    trap '' PIPE
+    if ! tn_acquire_update_lock >&2; then
+        ui_done false "An update or another node change is running (it holds the update lock); try again when it has finished."
+        return 1
+    fi
+    # shellcheck disable=SC2064  # the edit function is fixed now
+    trap "_ui_cancel '${edit}'" TERM INT HUP
+    if [[ -n "$edit" ]]; then
+        "$edit" apply || rc=$?
+        case "$rc" in
+            0) ;;
+            1) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    ui_event step "Checking the committee before the node is ${past}"
+    tn_committee_down_guard "$url" ui_say || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        tn_wait_restart_window "$url" ui_say || true
+        tn_committee_down_guard "$url" ui_say || rc=$?
+    fi
+    if [[ $rc -ne 0 ]]; then
+        trap '' TERM INT HUP
+        [[ -z "$edit" ]] || "$edit" undo
+        ui_done false "Not ${past}: the committee check refused it (other committee members look down, or the committee could not be read). Try again later, or override the check for a restart the fleet has coordinated." quorum
+        return 1
+    fi
+    trap '' TERM INT HUP
+    [[ -z "$edit" ]] || "$edit" commit
+    ui_event step "${verb} ${svc}"
+    if ! systemctl "$action" "$svc" >&2; then
+        ui_done false "systemctl ${action} ${svc} failed; see journalctl -u ${svc}"
+        return 1
+    fi
+    ui_done true "${EDIT_DONE_MSG:-${svc} ${past}}"
+    return 0
+}
 
-    # Non-blocking: the durable change is the wrapper edit above. --no-block
-    # returns as soon as the restart job is queued, so the caller never waits on
-    # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
+# ui_restart <stop|restart> [edit-fn] -- run _ui_locked for the node's unit in
+# the library's subshell and end the call: exit 0 when done, 1 (audited) when
+# refused or failed. Refused outright when the library lacks a step. The
+# subshell runs in the background so that a TERM, INT or HUP this call gets (the
+# server stops it when the page goes away) is passed on to it: it puts the edit
+# back and ends without touching the node, unless the stop or restart has begun.
+UI_JOB=""
+ui_restart() {
+    local rc=0 svc url
     svc="$(node_service)"
-    systemctl restart --no-block "$svc" || die "failed to restart $svc"
-    echo "ok"
+    url="$(node_rpc_url)"
+    _lib_usable || lib_missing "tn_wait_restart_window"
+    _lib_run _ui_locked "$1" "$svc" "$url" "${2:-}" &
+    UI_JOB=$!
+    trap 'kill -TERM "$UI_JOB" 2>/dev/null || true' TERM INT HUP
+    wait "$UI_JOB" || rc=$?
+    while kill -0 "$UI_JOB" 2>/dev/null; do
+        rc=0
+        wait "$UI_JOB" || rc=$?
+    done
+    trap - TERM INT HUP
+    [[ $rc -ne 127 ]] || lib_missing "tn_wait_restart_window"
+    if [[ $rc -ne 0 ]]; then
+        audit_line refused "service ${1} not done (rc ${rc})"
+        exit 1
+    fi
+    exit 0
+}
+
+# service <stop|restart> -- stop or restart the node through the checks above.
+# Starting needs no check and stays a direct systemctl call of the server.
+cmd_service() {
+    case "${1:-}" in
+        stop|restart) ;;
+        *) die "service takes stop or restart: ${1:-<empty>}" ;;
+    esac
+    [[ -f "${UNIT_DIR}/$(node_service).service" ]] || die "no node service is installed"
+    ui_restart "$1"
+}
+
+# tracing_edit <apply|undo|commit> -- add (TRACING_ON=1) or remove (0) the
+# tracing flags, --tracing-url and --node-name telcoin (the name stays telcoin
+# whatever the node's role), in the node command of EDIT_FILE, the start script.
+# The library's launch-file editor finds the node command in the Docker start
+# script and in a script running the binary under any name, and writes through
+# tn_write_root_file: owner, group and mode kept, one rename, no copy left
+# beside the script. apply keeps a root-only temp copy for undo.
+tracing_edit() {
+    local rc=0 rc2=0 st what
+    case "$1" in
+        apply)
+            # Owner group and mode to put back, group and other write dropped.
+            st="$(stat -c '%a %g' -- "$EDIT_FILE" 2>/dev/null)" || st=""
+            EDIT_SAVED="$(mktemp 2>/dev/null)" || EDIT_SAVED=""
+            if [[ -z "$st" || -z "$EDIT_SAVED" ]] || ! cat -- "$EDIT_FILE" > "$EDIT_SAVED"; then
+                ui_done false "could not keep a copy of ${EDIT_FILE}; nothing was changed"
+                return 2
+            fi
+            EDIT_MODE="$(printf '%04o' "$(( 8#${st%% *} & ~8#022 ))") ${st##* }"
+            if [[ "$TRACING_ON" == 1 ]]; then
+                what="on"
+                tn_launch_flag_set "$EDIT_FILE" --tracing-url "$TRACING_URL" || rc=$?
+                [[ $rc -gt 1 ]] || tn_launch_flag_set "$EDIT_FILE" --node-name telcoin || rc2=$?
+            else
+                what="off"
+                tn_launch_flag_unset "$EDIT_FILE" --tracing-url || rc=$?
+                [[ $rc -gt 1 ]] || tn_launch_flag_unset "$EDIT_FILE" --node-name || rc2=$?
+            fi
+            if [[ $rc -le 1 && $rc2 -le 1 ]]; then
+                if [[ $rc -eq 1 && $rc2 -eq 1 ]]; then
+                    ui_done true "Tracing is already ${what}; the node was not restarted."
+                    return 1
+                fi
+                EDIT_DONE_MSG="Tracing ${what}; the node restarted."
+                return 0
+            fi
+            [[ $rc -gt 1 ]] || rc=$rc2
+            tracing_edit undo
+            case "$rc" in
+                2) ui_done false "no node command with --http in ${EDIT_FILE}; nothing was changed" ;;
+                3) ui_done false "the node command in ${EDIT_FILE} cannot be edited safely (a trailing comment, an unbalanced quote, or a staged copy that failed its checks); nothing was changed" ;;
+                *) ui_done false "could not read or write ${EDIT_FILE}; nothing was changed" ;;
+            esac
+            return 2
+            ;;
+        undo)
+            [[ -n "$EDIT_SAVED" && -f "$EDIT_SAVED" ]] || return 0
+            cmp -s -- "$EDIT_SAVED" "$EDIT_FILE" && return 0
+            if ! tn_write_root_file "$EDIT_FILE" "${EDIT_MODE%% *}" "${EDIT_MODE##* }" < "$EDIT_SAVED"; then
+                ui_event error "could not put ${EDIT_FILE} back; its earlier content is in ${EDIT_SAVED}"
+                EDIT_SAVED=""
+                return 1
+            fi
+            ui_event log "Put ${EDIT_FILE} back as it was."
+            ;;
+    esac
+    return 0
+}
+
+cmd_tracing_enable() {
+    EDIT_FILE="$(node_wrapper)"
+    [[ -f "$EDIT_FILE" ]] || die "start script not found: $EDIT_FILE"
+    TRACING_ON=1
+    ui_restart restart tracing_edit
 }
 
 cmd_tracing_disable() {
-    local wrapper svc
-    wrapper="$(node_wrapper)"
-    [[ -f "$wrapper" ]] || die "wrapper script not found: $wrapper"
-
-    cp -p "$wrapper" "${wrapper}.bak.$(date +%s)" || die "failed to back up wrapper"
-
-    # Strip ` --tracing-url <nonspace>` and ` --node-name <nonspace>` wherever
-    # they appear on the exec line. No-op if already absent.
-    sed -i -E \
-        -e 's# --tracing-url[[:space:]]+[^[:space:]\\]+##g' \
-        -e 's# --node-name[[:space:]]+[^[:space:]\\]+##g' \
-        "$wrapper" || die "failed to edit wrapper"
-
-    # Non-blocking: the durable change is the wrapper edit above. --no-block
-    # returns as soon as the restart job is queued, so the caller never waits on
-    # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
-    svc="$(node_service)"
-    systemctl restart --no-block "$svc" || die "failed to restart $svc"
-    echo "ok"
+    EDIT_FILE="$(node_wrapper)"
+    [[ -f "$EDIT_FILE" ]] || die "start script not found: $EDIT_FILE"
+    TRACING_ON=0
+    ui_restart restart tracing_edit
 }
 
 
@@ -750,10 +957,8 @@ cmd_restart_count() {
 # put the committee at risk, 2 the committee could not be read. Refused when the
 # library has no such check. Read-only.
 cmd_quorum_check() {
-    local port url rc=0 detail
-    port="$(meta_value RPC_PORT 2>/dev/null || true)"
-    [[ "$port" =~ ^[0-9]{1,5}$ ]] || port=8545
-    url="http://127.0.0.1:${port}"
+    local url rc=0 detail
+    url="$(node_rpc_url)"
     detail="$(TN_ALLOW_QUORUM_RISK=0 _lib_call tn_committee_down_guard "$url" 2>&1 >/dev/null)" || rc=$?
     [[ $rc -ne 127 ]] || lib_missing tn_committee_down_guard
     detail="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/\x1b\[[0-9;]*m//g')"
@@ -878,57 +1083,90 @@ cmd_credential() {
 }
 
 # Set the "Advertised Node Name" -- the `hostname` field in the node's
-# network-config YAML -- and restart the node so it reads the new value. The data
-# dir belongs to the node's service account, so every read and write of
-# network-config runs as that account (never root); .node-meta, root-owned in
-# /etc/telcoin, is updated by root through the library's meta_set.
+# network-config YAML -- and restart the node so it reads the new value, through
+# the locked, checked restart above. The data dir belongs to the node's service
+# account, so every read and write of network-config runs as that account (never
+# root); .node-meta, root-owned in /etc/telcoin, is updated by root through the
+# library's meta_set once the checks have passed.
 cmd_set_hostname() {
-    local name="$1" dd nc owner u g old="" new="" line done_line=0 svc rc=0 meta
+    local name="$1" dd owner
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid name: ${name:-<empty>}"
 
     dd="$(node_data_dir)"
     [[ -d "$dd" && ! -L "$dd" ]] || die "data dir not found: $dd"
-    nc="${dd}/network-config"
     owner="$(path_owner "$dd")"
-    u="${owner%%:*}"; g="${owner#*:}"
-    [[ -n "$owner" && "$u" != root && "$u" != "UNKNOWN" ]] \
+    HN_USER="${owner%%:*}"; HN_GROUP="${owner#*:}"
+    [[ -n "$owner" && "$HN_USER" != root && "$HN_USER" != "UNKNOWN" ]] \
         || die "refusing: ${dd} is not owned by the node's service account"
+    HN_NAME="$name"
+    EDIT_FILE="${dd}/network-config"
+    HN_META="$(node_meta_path)"
+    ui_restart restart hostname_edit
+}
 
-    if _run_as "$u" "$g" test -e "$nc"; then
-        old="$(_run_as "$u" "$g" cat -- "$nc")" || die "could not read $nc as $u"
-    fi
-    # The first hostname: line is replaced, or one is added at the end.
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ "$line" == hostname:* ]]; then
-            [[ $done_line -eq 0 ]] && new="${new}hostname: \"${name}\""$'\n'
-            done_line=1
-            continue
-        fi
-        new="${new}${line}"$'\n'
-    done <<< "$old"
-    [[ -z "$old" ]] && new=""
-    [[ $done_line -eq 1 ]] || new="${new}hostname: \"${name}\""$'\n'
-    printf '%s' "$new" | _run_as "$u" "$g" tee -- "${nc}.tn-new" >/dev/null \
-        || die "could not write ${nc}.tn-new as $u"
-    _run_as "$u" "$g" mv -f -- "${nc}.tn-new" "$nc" || die "could not replace $nc as $u"
+# _hn_write <content> -- replace EDIT_FILE with CONTENT as the service account
+# (a temp file beside it, then a rename).
+_hn_write() {
+    printf '%s' "$1" | _run_as "$HN_USER" "$HN_GROUP" tee -- "${EDIT_FILE}.tn-new" >/dev/null \
+        && _run_as "$HN_USER" "$HN_GROUP" mv -f -- "${EDIT_FILE}.tn-new" "$EDIT_FILE"
+}
 
-    # Record in .node-meta as the persistent source of truth.
-    meta="$(node_meta_path)"
-    if [[ -f "$meta" && ! -L "$meta" ]]; then
-        _lib_call meta_set ADVERTISED_NODE_NAME "$name" "$meta" >/dev/null 2>&1 || rc=$?
-        if [[ $rc -eq 127 ]]; then
-            sed -i '/^ADVERTISED_NODE_NAME=/d' "$meta" 2>/dev/null || true
-            printf 'ADVERTISED_NODE_NAME=%s\n' "$name" >> "$meta"
-        elif [[ $rc -ne 0 ]]; then
-            echo "warning: could not record ADVERTISED_NODE_NAME in $meta" >&2
-        fi
-    fi
-
-    # Restart so the node reads the new network-config. --no-block returns once
-    # the restart job is queued (validators have a long stop window).
-    svc="$(node_service)"
-    systemctl restart --no-block "$svc" || die "failed to restart $svc"
-    echo "ok"
+# hostname_edit <apply|undo|commit> -- the set-hostname edit of EDIT_FILE
+# (network-config): the first hostname: line is replaced, or one is added at the
+# end. undo writes the earlier content back (or removes a file apply created);
+# commit records ADVERTISED_NODE_NAME in .node-meta.
+hostname_edit() {
+    local line new="" done_line=0
+    case "$1" in
+        apply)
+            HN_HAD=0
+            HN_OLD=""
+            if _run_as "$HN_USER" "$HN_GROUP" test -e "$EDIT_FILE"; then
+                HN_HAD=1
+                if ! HN_OLD="$(_run_as "$HN_USER" "$HN_GROUP" cat -- "$EDIT_FILE")"; then
+                    ui_done false "could not read ${EDIT_FILE} as ${HN_USER}; nothing was changed"
+                    return 2
+                fi
+            fi
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                if [[ "$line" == hostname:* ]]; then
+                    [[ $done_line -eq 0 ]] && new="${new}hostname: \"${HN_NAME}\""$'\n'
+                    done_line=1
+                    continue
+                fi
+                new="${new}${line}"$'\n'
+            done <<< "$HN_OLD"
+            [[ -z "$HN_OLD" ]] && new=""
+            [[ $done_line -eq 1 ]] || new="${new}hostname: \"${HN_NAME}\""$'\n'
+            if ! _hn_write "$new"; then
+                hostname_edit undo
+                ui_done false "could not write ${EDIT_FILE} as ${HN_USER}; nothing was changed"
+                return 2
+            fi
+            EDIT_DONE_MSG="Advertised name set to ${HN_NAME}; the node restarted."
+            ;;
+        undo)
+            if [[ $HN_HAD -eq 1 ]]; then
+                new=""
+                [[ -z "$HN_OLD" ]] || new="${HN_OLD}"$'\n'
+                _hn_write "$new" || { ui_event error "could not put ${EDIT_FILE} back"; return 1; }
+            else
+                _run_as "$HN_USER" "$HN_GROUP" rm -f -- "$EDIT_FILE" "${EDIT_FILE}.tn-new" || true
+            fi
+            ui_event log "Put ${EDIT_FILE} back as it was."
+            ;;
+        commit)
+            [[ -f "$HN_META" && ! -L "$HN_META" ]] || return 0
+            if declare -F meta_set >/dev/null; then
+                meta_set ADVERTISED_NODE_NAME "$HN_NAME" "$HN_META" >/dev/null 2>&1 \
+                    || ui_event warn "could not record ADVERTISED_NODE_NAME in ${HN_META}"
+            else
+                sed -i '/^ADVERTISED_NODE_NAME=/d' "$HN_META" 2>/dev/null || true
+                printf 'ADVERTISED_NODE_NAME=%s\n' "$HN_NAME" >> "$HN_META"
+            fi
+            ;;
+    esac
+    return 0
 }
 
 # Node-log rotation. One config for every node unit (copytruncate: the node
@@ -1454,6 +1692,15 @@ cmd_docker_log_size() {
     stat -c%s "$log_path" 2>/dev/null || echo 0
 }
 
+# takes_override <subcommand> -- rc 0 for the subcommands that stop or restart
+# the node through the committee check, which take a trailing allow-quorum-risk.
+takes_override() {
+    case "${1:-}" in
+        service|tracing-enable|tracing-disable|set-hostname) return 0 ;;
+    esac
+    return 1
+}
+
 # How many arguments a node subcommand takes once the old role argument is gone.
 # Fails for every other subcommand, whose arguments are never touched.
 legacy_arity() {
@@ -1476,7 +1723,7 @@ max_args() {
         firewall-status|addons-status|meta-cat|node-env-cat|host-audit) echo 0 ;;
         setup-keygen|setup-finalize|docker-detect|internal-ip) echo 0 ;;
         update-prepare|journal-tail|set-hostname|set-logrotate|credential) echo 1 ;;
-        firewall-enable) echo 1 ;;
+        firewall-enable|service) echo 1 ;;
         docker-status|docker-logs-full|docker-node-info|docker-stats|docker-log-size) echo 1 ;;
         caddy-dns-check|rpc-dns-check|firewall-port|docker-logs) echo 2 ;;
         config-set|caddy-enable|rpc-enable) echo 3 ;;
@@ -1485,7 +1732,7 @@ max_args() {
 }
 
 main() {
-    local sub="${1:-}" arity max a
+    local sub="${1:-}" arity max a last=""
     if [[ $# -gt 0 ]]; then
         shift
     fi
@@ -1495,6 +1742,15 @@ main() {
     # have passed those checks.
     if is_mutating "$sub"; then
         AUDIT_SUB="$sub"
+    fi
+    # A trailing allow-quorum-risk overrides the committee check of a restart
+    # (QUORUM_OVERRIDE); it is not one of the subcommand's arguments.
+    if takes_override "$sub"; then
+        for a in "$@"; do last="$a"; done
+        if [[ "$last" == allow-quorum-risk ]]; then
+            QUORUM_OVERRIDE=1
+            set -- "${@:1:$(($# - 1))}"
+        fi
     fi
 
     # ui/server.py before 1.9.0 puts observer|validator in front of a node
@@ -1511,7 +1767,7 @@ main() {
         _arg_ok "$a" || die "invalid argument for ${sub}"
     done
     if [[ -n "$AUDIT_SUB" ]]; then
-        AUDIT_ARGS="$*"
+        AUDIT_ARGS="$*${QUORUM_OVERRIDE:+ allow-quorum-risk}"
         audit_line start
     fi
 
@@ -1522,6 +1778,7 @@ main() {
         jaeger-status)   cmd_jaeger_status ;;
         tracing-enable)  cmd_tracing_enable ;;
         tracing-disable) cmd_tracing_disable ;;
+        service)         cmd_service "${1:-}" ;;
         update-check)    cmd_update_check ;;
         update-prepare)  cmd_update_prepare "${1:-}" ;;
         update-apply)    cmd_update_apply ;;

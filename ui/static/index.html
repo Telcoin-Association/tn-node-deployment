@@ -1673,6 +1673,9 @@ async function augmentDashboardJaeger(s){
 }
 
 async function serviceAction(action){
+  if(action!=='start' && !confirm(restartConfirmText(action==='stop'
+      ? 'Stop the '+state.node+' node? It stays down until you start it again.'
+      : 'Restart the '+state.node+' node?'))) return;
   const pill = $('#svcPill');
   const verbing = {start:'starting…',stop:'stopping…',restart:'restarting…'}[action];
   document.querySelectorAll('#view-dashboard [data-act]').forEach(b=>{
@@ -1681,14 +1684,52 @@ async function serviceAction(action){
   });
   if(pill){ pill.className='pill busy'; pill.textContent='● '+verbing; }
 
-  const r = await api('/api/service/'+state.node+'/'+action, {method:'POST'});
-  if(r.ok){
-    toast(`${cap(state.node)} ${action} succeeded`, 'success');
+  if(action==='start'){
+    const r = await api('/api/service/'+state.node+'/'+action, {method:'POST'});
+    if(r.ok) toast(`${cap(state.node)} ${action} succeeded`, 'success');
+    else toast(`${cap(state.node)} ${action} failed: ${r.error||'unknown error'}`, 'error');
   }else{
-    toast(`${cap(state.node)} ${action} failed: ${r.error||'unknown error'}`, 'error');
+    const d = await nodeRestartStream('/api/service/'+state.node+'/'+action, {}, cap(action));
+    if(d && d.ok) toast(`${cap(state.node)} ${action} succeeded`, 'success');
+    else toast(`${cap(state.node)} ${action} not done`+(d && d.msg ? ': '+d.msg : ''), 'error');
   }
   await refreshAfterChange();
   setTimeout(refreshAfterChange, 1500);   // catch the post-(re)start settle
+}
+
+// What the operator confirms before the node stops or restarts: QUESTION, then
+// how the Node Manager does it.
+function restartConfirmText(question){
+  return question+'\n\nThe Node Manager waits for any running update to finish first, checks that the committee keeps its quorum without this node, and, when this node is in the committee and an epoch boundary is close, waits for the boundary (up to 30 minutes) before it acts.';
+}
+
+// Calls that stop or restart the node (stop, restart, the tracing toggle, the
+// advertised name) stream the helper's progress into a panel: the update lock,
+// the committee check, the epoch wait, the check again, then the stop or
+// restart. When the committee check refuses ({"quorum":true} on the done event),
+// the operator may override it once, for a restart the fleet has coordinated.
+// Resolves with the done event, or null.
+async function nodeRestartStream(url, body, what){
+  let panel = $('#restartPanel');
+  if(!panel){
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="card" id="restartPanel" style="position:fixed;right:16px;bottom:16px;width:min(560px,calc(100vw - 32px));z-index:60;max-height:50vh;display:flex;flex-direction:column">'
+      +'<div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0" id="restartTitle"></h3>'
+      +'<button class="btn btn-out" id="restartClose" style="padding:2px 10px">✕</button></div>'
+      +'<div class="log-body" id="restartLog" style="height:200px;margin-top:8px"></div></div>');
+    panel = $('#restartPanel');
+    $('#restartClose').addEventListener('click', ()=>{ panel.style.display='none'; });
+  }
+  panel.style.display='flex';
+  $('#restartTitle').textContent = what+' · '+cap(state.node);
+  $('#restartLog').innerHTML = '';
+  let d = await streamPost(url, body, {target:'#restartLog', what:what});
+  if(d && !d.ok && d.quorum === true && confirm('The committee check refused this: '+(d.msg||'')
+      +'\n\nOverride it? Only for a restart the fleet has coordinated: stopping a committee member while others are down can stall the network.')){
+    appendStream('#restartLog', {event:'warn', msg:'Committee check overridden by the operator.'});
+    d = await streamPost(url, Object.assign({}, body, {allow_quorum_risk:true}), {target:'#restartLog', what:what});
+  }
+  return d;
 }
 
 // =============================================================================
@@ -2194,17 +2235,15 @@ async function saveAdvertisedName(btn){
     const msg = t==='validator'
       ? `Are you sure you want to change the Advertised node name to "${name}"? This restarts the validator now — brief downtime, missed consensus rounds.`
       : `Are you sure you want to change the Advertised node name to "${name}"? This restarts the node now.`;
-    if(!confirm(msg)) return;
-  } else if(t==='validator' && !confirm('Set the advertised name and restart the validator now? This causes brief downtime.')) {
+    if(!confirm(restartConfirmText(msg))) return;
+  } else if(t==='validator' && !confirm(restartConfirmText('Set the advertised name and restart the validator now? This causes brief downtime.'))) {
     return;
   }
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Saving…'; }
-  const r = await api('/api/config/'+t+'/hostname', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name}),
-  });
+  const d = await nodeRestartStream('/api/config/'+t+'/hostname', {name}, 'Advertised name');
   if(btn){ btn.disabled=false; btn.textContent=label; }
-  if(r && r.ok){ toast('Advertised name '+(current?'changed':'saved')+' — node restarting','success'); refreshAfterChange(); }
-  else toast('Failed to set name: '+((r&&r.error)||'unknown error'),'error');
+  if(d && d.ok){ toast('Advertised name '+(current?'changed':'saved')+' — node restarted','success'); refreshAfterChange(); }
+  else toast('Name not set'+(d && d.msg ? ': '+d.msg : ''),'error');
 }
 
 // The UDP port of a multiaddr (/ip4/../udp/<port>/..), or '' when it has none.
@@ -2566,10 +2605,11 @@ async function jaegerControl(action, btn){
 }
 
 async function setTracing(type, enable, btn){
+  if(!confirm(restartConfirmText((enable?'Turn tracing on':'Turn tracing off')+' for the '+type+' node? The node restarts.'))) return;
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> '+(enable?'Enabling…':'Disabling…'); }
-  const r = await api('/api/tracing/'+(enable?'enable':'disable')+'/'+type, {method:'POST'});
-  if(r.ok) toast('Tracing '+(enable?'enabled':'disabled')+' for '+cap(type)+' — node restarted','success');
-  else toast('Tracing change failed: '+(r.error||'unknown error'),'error');
+  const d = await nodeRestartStream('/api/tracing/'+(enable?'enable':'disable')+'/'+type, {}, 'Tracing');
+  if(d && d.ok) toast(d.msg || ('Tracing '+(enable?'enabled':'disabled')+' for '+cap(type)),'success');
+  else toast('Tracing change not done'+(d && d.msg ? ': '+d.msg : ''),'error');
   await loadNodes();
   rerenderActive();
 }

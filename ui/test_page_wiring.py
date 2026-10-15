@@ -201,3 +201,37 @@ class PortMismatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NodeRestartTest(unittest.TestCase):
+    """Stop, restart, the tracing toggle and the advertised name are confirmed,
+    then stream the helper's progress; a committee refusal offers the override
+    once."""
+
+    def test_stop_and_restart_are_confirmed_and_streamed(self):
+        body = function_body("serviceAction")
+        self.assertIn("action!=='start' && !confirm(restartConfirmText(", body)
+        self.assertIn("nodeRestartStream('/api/service/'+state.node+'/'+action, {}", body)
+        # Start stays a plain call.
+        self.assertIn("if(action==='start'){", body)
+        self.assertIn("api('/api/service/'+state.node+'/'+action, {method:'POST'})", body)
+
+    def test_the_confirmation_says_what_happens_first(self):
+        body = function_body("restartConfirmText")
+        self.assertIn("checks that the committee keeps its quorum", body)
+        self.assertIn("waits for the boundary (up to 30 minutes)", body)
+
+    def test_the_override_is_offered_only_after_a_committee_refusal(self):
+        body = function_body("nodeRestartStream")
+        self.assertIn("!d.ok && d.quorum === true && confirm(", body)
+        self.assertIn("Object.assign({}, body, {allow_quorum_risk:true})", body)
+        self.assertEqual(body.count("allow_quorum_risk"), 1)
+        self.assertIn("target:'#restartLog'", body)
+
+    def test_tracing_and_the_name_restart_through_the_stream(self):
+        tracing = function_body("setTracing")
+        self.assertIn("confirm(restartConfirmText(", tracing)
+        self.assertIn("nodeRestartStream('/api/tracing/'+(enable?'enable':'disable')+'/'+type, {}", tracing)
+        name = function_body("saveAdvertisedName")
+        self.assertIn("nodeRestartStream('/api/config/'+t+'/hostname', {name}", name)
+        self.assertIn("confirm(restartConfirmText(msg))", name)

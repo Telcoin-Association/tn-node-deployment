@@ -3515,6 +3515,16 @@ def api_validator(node_type):
 # ROUTES -- service control
 # =============================================================================
 
+def _with_override(argv, data):
+    """argv of a helper call that stops or restarts the node (service,
+    tracing-*, set-hostname), with allow-quorum-risk added only when the request
+    sets allow_quorum_risk to true: the operator's override of the committee
+    check for a restart the fleet has coordinated."""
+    if data.get("allow_quorum_risk") is True:
+        return argv + ["allow-quorum-risk"]
+    return argv
+
+
 @app.route("/api/service/<node_type>/<action>", methods=["POST"])
 def api_service(node_type, action):
     if not valid_type(node_type):
@@ -3527,6 +3537,15 @@ def api_service(node_type, action):
     if not os.path.exists(service_file(node_type)):
         return jsonify({"ok": False, "status": "not installed",
                         "error": "service not installed"}), 404
+
+    if action != "start":
+        # Stop and restart go through the helper, which takes the update lock and
+        # runs the committee check, the epoch wait (up to TN_EPOCH_WAIT_MAX) and
+        # the check again first, so the progress streams.
+        data, err = _json_body()
+        if err:
+            return err
+        return _update_stream(_with_override(["sudo", "-n", HELPER, "service", action], data))
 
     # Use the exact binary path the sudoers whitelist grants (/bin/systemctl).
     # Bare `sudo systemctl` would resolve via secure_path to /usr/bin/systemctl
@@ -3948,10 +3967,9 @@ def api_set_hostname(node_type):
                         "error": "invalid name (letters, digits, . _ - ; start "
                                  "alphanumeric; max 64 chars)"}), 400
     # The helper writes network-config + .node-meta and restarts the node so it
-    # reads the new name.
-    rc, out, err = run(["sudo", "-n", HELPER, "set-hostname", name], timeout=30)
-    ok = rc == 0 and out.strip().splitlines()[-1:] == ["ok"]
-    return jsonify({"ok": ok, "error": "" if ok else (err or out or "set failed")})
+    # reads the new name, under the update lock and after the committee check and
+    # the epoch wait, so the progress streams.
+    return _update_stream(_with_override(["sudo", "-n", HELPER, "set-hostname", name], data))
 
 
 # Node-log rotation size (one global logrotate config for both node types).
@@ -5344,12 +5362,12 @@ def api_tracing_enable(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    # 30s: the helper edits the wrapper then restarts the node with --no-block,
-    # so it returns once the restart job is queued (no wait on the node's stop
-    # window) -- ample headroom for an enqueue-and-return.
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-enable"], timeout=30)
-    ok = rc == 0
-    return jsonify({"ok": ok, "error": "" if ok else (err or out or "enable failed")})
+    data, err = _json_body()
+    if err:
+        return err
+    # The helper edits the start script and restarts the node under the update
+    # lock, after the committee check and the epoch wait: the progress streams.
+    return _update_stream(_with_override(["sudo", "-n", HELPER, "tracing-enable"], data))
 
 
 @app.route("/api/tracing/disable/<node_type>", methods=["POST"])
@@ -5359,9 +5377,10 @@ def api_tracing_disable(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-disable"], timeout=30)
-    ok = rc == 0
-    return jsonify({"ok": ok, "error": "" if ok else (err or out or "disable failed")})
+    data, err = _json_body()
+    if err:
+        return err
+    return _update_stream(_with_override(["sudo", "-n", HELPER, "tracing-disable"], data))
 
 
 @app.route("/api/tracing/status/<node_type>")
