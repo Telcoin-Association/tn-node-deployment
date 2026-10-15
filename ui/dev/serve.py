@@ -7,8 +7,9 @@ a node. Nothing on disk is read for node state and nothing is written.
 
     <venv>/bin/python ui/dev/serve.py [--port 8099] [--scenario public] [--role validator]
 
-then open http://127.0.0.1:8099/ (the SSH-tunnel view: management enabled). Send the
-header `X-TN-Dashboard-Public: 1` to see the public read-only view.
+then open the http://127.0.0.1:8099/#t=<token> URL it prints (the SSH-tunnel view:
+management enabled). Send the header `X-TN-Dashboard-Public: 1` to see the public
+read-only view.
 
 Scenarios:
   public    RPC served on node7.adiri.telcoin.network and advertised (https and wss),
@@ -667,8 +668,13 @@ def main(argv=None):
                    help="slot the node is shown in (default: the scenario's)")
     args = p.parse_args(argv)
     install(args.scenario, args.role)
+    # The server answers /api/ only on its own port and with the per-install
+    # token: use the dev port and a throwaway token, handed over in the fragment
+    # exactly as open-ui.sh does.
+    server.BIND_PORT = args.port
+    server.UI_TOKEN = os.urandom(32).hex()
     print(f"ui/dev/serve.py: scenario {args.scenario}, role {SC['role']}, "
-          f"http://127.0.0.1:{args.port}/", flush=True)
+          f"http://127.0.0.1:{args.port}/#t={server.UI_TOKEN}", flush=True)
     server.app.run(host="127.0.0.1", port=args.port, threaded=True, debug=False, use_reloader=False)
 
 
