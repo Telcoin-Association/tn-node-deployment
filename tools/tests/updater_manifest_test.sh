@@ -80,62 +80,11 @@ EOF
 chmod +x "$BIN/curl" "$BIN/sudo"
 
 # --- signing: real ssh-keygen, else a fake with the same interface ------------
-
-REAL_SSH=0
-if command -v ssh-keygen >/dev/null 2>&1; then
-    ssh-keygen -q -t ed25519 -N '' -C probe -f "$T/probe" >/dev/null 2>&1 \
-        && printf 'x\n' > "$T/probe.txt" \
-        && ssh-keygen -Y sign -f "$T/probe" -n tn-node-scripts "$T/probe.txt" >/dev/null 2>&1 \
-        && REAL_SSH=1
-fi
-if [[ $REAL_SSH -eq 0 ]]; then
-    cat > "$BIN/ssh-keygen" <<'EOF'
-#!/usr/bin/env bash
-# Fake ssh-keygen for hosts without OpenSSH. A "key" is a random token; a
-# signature names the namespace, the token and the SHA-256 of the data.
-h() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | awk '{print $1}'; }
-mode="" key="" ns="" princ="" sig="" file=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -Y) mode="$2"; shift ;;
-        -f) key="$2"; shift ;;
-        -n) ns="$2"; shift ;;
-        -I) princ="$2"; shift ;;
-        -s) sig="$2"; shift ;;
-        -t|-N|-C) shift ;;
-        -q) ;;
-        *) file="$1" ;;
-    esac
-    shift
-done
-case "$mode" in
-    "")
-        tok="k${RANDOM}${RANDOM}${RANDOM}$$"
-        echo "FAKEKEY $tok" > "$key"
-        echo "fake-ed25519 $tok" > "$key.pub" ;;
-    sign)
-        tok="$(awk '{print $2}' "$key")"
-        printf 'FAKESIG %s %s %s\n' "$ns" "$tok" "$(h < "$file")" > "$file.sig" ;;
-    verify)
-        read -r magic sns stok shash < "$sig" || { echo "bad signature" >&2; exit 255; }
-        [ "$magic" = FAKESIG ] && [ "$sns" = "$ns" ] || { echo "bad signature" >&2; exit 255; }
-        grep -v '^[[:space:]]*#' "$key" | grep -F "$princ namespaces=\"$ns\" fake-ed25519 $stok" >/dev/null \
-            || { echo "no principal matched" >&2; exit 255; }
-        [ "$(h)" = "$shash" ] || { echo "signature verification failed" >&2; exit 255; }
-        echo "Good \"$ns\" signature for $princ with FAKE key $stok" ;;
-esac
-EOF
-    chmod +x "$BIN/ssh-keygen"
-fi
+# shellcheck source=tools/tests/signing.sh
+. "$TN_TEST_DIR/signing.sh"
 export PATH="$BIN:$PATH"
-
-# newkey NAME -- make a key; print its allowed-signers line.
-newkey() {
-    ssh-keygen -q -t ed25519 -N '' -C "$1" -f "$T/$1" >/dev/null 2>&1
-    printf 'release@telcoin.org namespaces="tn-node-scripts" %s\n' "$(awk '{print $1, $2}' "$T/$1.pub")"
-}
 KEY1_LINE="$(newkey key1)"
-KEY2_LINE="$(newkey key2)"
+newkey key2 >/dev/null   # a valid key the signer list does not name
 
 # --- release fixtures ----------------------------------------------------------
 
@@ -169,8 +118,7 @@ write_manifest() {
 }
 
 sign() {   # sign DIR KEYNAME
-    rm -f "$1/MANIFEST.sig"
-    ssh-keygen -Y sign -f "$T/$2" -n tn-node-scripts "$1/MANIFEST" >/dev/null 2>&1
+    sign_file "$1/MANIFEST" "$2"
 }
 
 sidecars() {   # sidecars DIR -- a .sha256 beside every listed file
