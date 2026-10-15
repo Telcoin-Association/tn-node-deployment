@@ -1815,6 +1815,9 @@ update_on_exit() {
     local rc=$?
     local msg phase
     phase=""
+    if declare -F tn_remove_inflight_tmp >/dev/null 2>&1; then
+        tn_remove_inflight_tmp
+    fi
     if [[ -n "$UPDATE_LOCK_CLEANUP" ]]; then
         eval "$UPDATE_LOCK_CLEANUP" 2>/dev/null || true
     fi

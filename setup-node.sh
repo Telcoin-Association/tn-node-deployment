@@ -2620,6 +2620,7 @@ run_streamed() {
 # the last error event's message, or a pointer to stderr when there was none.
 json_on_exit() {
     local rc=$?
+    tn_remove_inflight_tmp
     setup_release_lock
     if json_mode && [[ "$JSON_DONE_EMITTED" != "true" ]]; then
         json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "${JSON_LAST_ERROR:-setup exited early (rc=${rc}) -- see server logs / journalctl}")\"}" 2>/dev/null || true

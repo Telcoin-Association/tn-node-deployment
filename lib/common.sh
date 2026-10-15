@@ -501,6 +501,21 @@ tn_root_dir_ok() {
     done
 }
 
+# TN_INFLIGHT_TMP -- the temp file tn_write_root_file or tn_install_root_binary
+# is filling right now ("" otherwise). The EXIT traps of setup-node, update-node
+# and edit-config call tn_remove_inflight_tmp, so a signal that ends the run
+# between the temp file and its rename leaves no root-owned temp file behind.
+TN_INFLIGHT_TMP=""
+
+# tn_remove_inflight_tmp -- remove TN_INFLIGHT_TMP when it is set. Never fails.
+tn_remove_inflight_tmp() {
+    if [[ -n "${TN_INFLIGHT_TMP:-}" ]]; then
+        rm -f -- "$TN_INFLIGHT_TMP" 2>/dev/null || true
+        TN_INFLIGHT_TMP=""
+    fi
+    return 0
+}
+
 # tn_write_root_file DEST MODE [GROUP] -- write stdin to DEST, owned
 # root:GROUP (default root) with MODE. The content goes to a temp file in
 # DEST's directory (mktemp: 0600 root while it is written), which gets its owner
@@ -509,7 +524,10 @@ tn_root_dir_ok() {
 # without following it. Refused (rc 1): DEST not an absolute file path, DEST a
 # directory or a symlink, MODE not 3 or 4 octal digits, GROUP not a plain group
 # name, DEST's directory failing tn_root_dir_ok. rc 2: mktemp, the write, chown,
-# chmod or the rename failed; DEST is untouched and the temp file removed.
+# chmod or the rename failed; DEST is untouched and the temp file removed. The
+# temp file's path is in TN_INFLIGHT_TMP until the rename. Feed stdin from a
+# here-string, a here-document or a file, not a pipe: the right-hand side of a
+# pipe runs in a subshell that can outlive the caller.
 tn_write_root_file() {
     local dest="${1:-}" mode="${2:-}" group="${3:-root}" dir tmp
     if [[ "$dest" != /* || "$dest" == */ ]]; then
@@ -539,14 +557,17 @@ tn_write_root_file() {
         print_warn "tn_write_root_file: cannot create a temp file in ${dir}" >&2
         return 2
     fi
+    TN_INFLIGHT_TMP="$tmp"
     if ! cat > "$tmp" \
         || ! chown -- "root:${group}" "$tmp" \
         || ! chmod -- "$mode" "$tmp" \
         || ! mv -f -T -- "$tmp" "$dest"; then
         rm -f -- "$tmp"
+        TN_INFLIGHT_TMP=""
         print_warn "tn_write_root_file: writing ${dest} failed; it is unchanged" >&2
         return 2
     fi
+    TN_INFLIGHT_TMP=""
     return 0
 }
 
@@ -645,9 +666,11 @@ tn_restore_backup() {
 # (mv -fT). Refused (rc 1): SRC a symlink or not a regular file, DEST not an
 # absolute file path, DEST a symlink or a directory, or DEST's directory failing
 # tn_root_dir_ok. rc 2: install or the rename failed; DEST is untouched and the
-# .new file removed.
+# .new file removed. The .new file's path is in TN_INFLIGHT_TMP until the
+# rename, and a DEST.new.<pid> an earlier run left (killed mid-install) is
+# removed first: only root can create it in that directory.
 tn_install_root_binary() {
-    local src="${1:-}" dest="${2:-}" dir new
+    local src="${1:-}" dest="${2:-}" dir new stale
     if [[ -L "$src" || ! -f "$src" ]]; then
         print_warn "tn_install_root_binary: refusing '${src}': not a regular file (or a symlink)" >&2
         return 1
@@ -662,14 +685,22 @@ tn_install_root_binary() {
         print_warn "tn_install_root_binary: refusing ${dest}: ${dir} or a parent is not a root-owned, root-only-writable directory" >&2
         return 1
     fi
+    for stale in "${dest}".new.[0-9]*; do
+        if [[ -f "$stale" || -L "$stale" ]]; then
+            rm -f -- "$stale"
+        fi
+    done
     new="${dest}.new.$$"
     rm -f -- "$new"
+    TN_INFLIGHT_TMP="$new"
     if ! install -o root -g root -m 0755 -- "$src" "$new" \
         || ! mv -f -T -- "$new" "$dest"; then
         rm -f -- "$new"
+        TN_INFLIGHT_TMP=""
         print_warn "tn_install_root_binary: installing ${dest} failed; it is unchanged" >&2
         return 2
     fi
+    TN_INFLIGHT_TMP=""
     return 0
 }
 

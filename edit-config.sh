@@ -553,6 +553,7 @@ edit_on_exit() {
         rm -f "$EDIT_TMP" 2>/dev/null
         EDIT_TMP=""
     fi
+    tn_remove_inflight_tmp
     edit_release_lock
     EDIT_LOCK_HELD=false
     if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
