@@ -1134,12 +1134,6 @@ prepare_source_build() {
         return 1
     fi
 
-    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
-        print_error "Source directory not found at ${TN_SOURCE_DIR}"
-        print_info "This script can only update installs that built from /opt/telcoin-source."
-        return 1
-    fi
-
     # The network decides the build features (adiri on testnet, none on
     # mainnet). It must be known before the checkout moves or cargo runs: a
     # build for the wrong network refuses to start on this node's chain.
@@ -1153,6 +1147,12 @@ prepare_source_build() {
         print_info "Network: ${network} -- building with ${cargo_features}"
     else
         print_info "Network: ${network} -- building without the adiri feature"
+    fi
+
+    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
+        print_error "Source directory not found at ${TN_SOURCE_DIR}"
+        print_info "This script can only update installs that built from /opt/telcoin-source."
+        return 1
     fi
 
     local current_ref
@@ -1942,15 +1942,15 @@ json_prepare() {
 
 json_prepare_source() {
     local new_ref="$1"
-    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
-        json_event error "source directory not found at ${TN_SOURCE_DIR}"; return 1
-    fi
     # Network and build features first: nothing is checked out or built for
     # a network that cannot be told (see prepare_source_build).
     local network cargo_features
     if ! network="$(detect_network)" || ! cargo_features="$(tn_cargo_features_for "$network")"; then
         json_event error "cannot tell which network this node runs, so the build features are unknown; set NETWORK=testnet or NETWORK=mainnet on one line in .node-meta. Nothing was changed."
         return 1
+    fi
+    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
+        json_event error "source directory not found at ${TN_SOURCE_DIR}"; return 1
     fi
     local current_ref
     current_ref=$(detect_current_source_ref || echo "unknown")
