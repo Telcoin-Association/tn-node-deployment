@@ -1543,6 +1543,351 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-scripts v2.0.0 — signed script releases, all-or-nothing install
+`update-scripts.sh v2.0.0` installs the first signed script release, `scripts-v2.0.0`, which
+moves every operator script to 2.0.0 (entries below). From this release on the updater reads
+`RELEASE` on main (tag and date), fetches `MANIFEST` and `MANIFEST.sig` from that `scripts-v*`
+tag and verifies them with
+`ssh-keygen -Y verify -f lib/allowed_signers -I release@telcoin.org -n tn-node-scripts`.
+
+- It refuses a malformed manifest, a serial lower than the installed one, and the same serial
+  with different content. When the manifest's `min_updater` is newer than the running
+  updater, it prints the installer one-liner and changes nothing.
+- It stages every changed file and checks it (the manifest hash, the `.sha256` sidecar when
+  one is published, `bash -n`) before it installs any, then installs all of them or none and
+  removes files the release no longer ships. A release that ships a new updater runs that
+  verified copy from the staging directory, and it installs everything in one pass.
+- The installed release is recorded in `MANIFEST` and `MANIFEST.sig` in the scripts
+  directory.
+- It no longer redeploys the Node Manager UI. When UI files changed it prints
+  `sudo bash ui/install-ui.sh --update` for you to run.
+- It takes no option besides `--help`; any other argument exits 2.
+
+A host on update-scripts 1.1.72 or older runs its old updater once: that run takes
+update-scripts 2.0.0 through the old sidecar channel (hashes from main, unsigned) and
+relaunches it, and the new updater fetches `lib/allowed_signers` once through its sidecar,
+then installs the rest from the signed manifest. install.sh is now pinned to one tag and
+carries the signer list; the copy on main refuses to run ("names no release"). Install with
+`curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash`. The steps that
+follow the update on an existing testnet node are in
+[Before you update](CHANGELOG/scripts-v2.0.0.md#before-you-update); the full release note is
+[CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### lib/common v2.0.0 — root-owned layout, credential passphrase, signed releases, committee check
+The library every script sources. Scripts 2.0.0 refuse to run on an older copy and say
+"run update-scripts.sh".
+
+- Root-write primitives: root-owned files are written through a temp file and a rename, backed
+  up to `/var/backups/telcoin` (root 0700) with a recorded sha256, and restored only when the
+  hash matches. The node binary is installed root-owned in root-owned directories, and its
+  path is resolved one link at a time.
+- `tn_migrate_ownership` moves a host set up by an older release to the root-owned layout:
+  install and config trees root's, the log dir root:telcoin-log, the start script to
+  `/usr/local/libexec/telcoin/tn-start` (`tn-start-docker` for Docker). It prints what it
+  changed, stops on a symlink, a special file or an unexpected owner, never restarts the node,
+  and refuses a mainnet host ("must be installed fresh").
+- Writers render `/etc/telcoin/node.env` (root 0644: the two listener multiaddrs and
+  `TN_RPC_ADDR`), the start script and the unit from `.node-meta`. The unit is sandboxed and
+  loads the BLS passphrase as a systemd credential, which the start script feeds to the node
+  on stdin.
+- The passphrase is kept as `/etc/telcoin/bls-passphrase.cred`, encrypted with
+  `systemd-creds` (`host+tpm2` with a TPM, else `host`; systemd 250 or later). Below systemd
+  250, on testnet and devnet only, it stays in the root-only `/etc/telcoin/bls-passphrase`. Mainnet needs
+  systemd 255 (Ubuntu 24.04). The old TPM-unseal method is gone.
+- The committee check (`tn_committee_down_guard`) refuses a stop when the members already down
+  plus this node would halt consensus. When it cannot count them it refuses on a mainnet node
+  that may be staked, and warns and goes ahead on testnet.
+- Releases are verified with `gpgv` against `lib/release-keys/*.asc` (refused on BADSIG,
+  EXPKEYSIG, REVKEYSIG, NO_PUBKEY or ERRSIG; with no key file every release download is
+  refused). Release tags are `vX.Y.Z-adiri` on testnet and `vX.Y.Z` on mainnet.
+- Docker images run by digest: `DEFAULT_DOCKER_IMAGE` is
+  `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea`.
+- Chain configs are checked against pinned sha256 values (`TESTNET_CHAIN_CONFIGS_TAG`
+  `v0.16.0-adiri`); the mainnet pins and the mainnet image repository are not set yet, so
+  mainnet installs are refused until they are.
+- A `.node-meta` key set more than once is refused instead of read from its first line.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### lib/fallback v1.1.0 — a duplicated DATA_DIR is refused
+`_tn_meta_get` refuses a `.node-meta` key set more than once (a warning on stderr, rc 2)
+instead of reading its first line, and `tn_resolve_data_dir` prints nothing and returns 2
+when `DATA_DIR` is duplicated, so no script acts on a guessed data dir. Remove the extra line
+and run the script again.
+
+### telcoin-ui v2.0.0 — per-install token, local-only API, helper API 3
+The Node Manager UI now needs a per-install token on every API call. The token lives in
+`/etc/telcoin-ui/token` (root:telcoin-ui 0640); `open-ui.sh` reads it over SSH and opens
+`http://127.0.0.1:8080/#t=<token>`, so use the new `open-ui.sh` from this release.
+
+- The server answers only on a local Host (421 otherwise) and same-origin requests (403).
+  Writes are POST with JSON only, 401 without the token; bodies are capped at 64 KiB, changes
+  at 30 a minute, and live log streams at 8. Responses carry security headers.
+- Secrets reach the scripts on stdin only, and log streams cut every spelling of a secret.
+- The helper checks every argument against a pattern and records each call, refused ones
+  included, in the root-only `/var/log/telcoin-ui/audit.log`. `HELPER_API` and
+  `HELPER_API_REQUIRED` are 3: the server needs the helper's new subcommands for `node.env`,
+  the journal, the committee check and the logrotate seed.
+- The setup wizard refuses when a node unit or `.node-meta` already exists, offers only the
+  detected release tag for a source build, and holds the dashboard password to 16 bytes.
+  Public `/api/nodes` and `/api/system` no longer return operator-only fields.
+- Updates take release tags only.
+
+update-scripts no longer redeploys the UI: after it updates the UI files, run the
+`sudo bash ui/install-ui.sh --update` it prints. Full release note:
+[CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### install-ui v2.0.0 — root-owned app and hashed venv, token rotation
+- Installs the app in `/opt/telcoin-ui` and its Python packages in the venv
+  `/opt/telcoin-ui-venv`, both root-owned, from the hashed `ui/requirements.txt`
+  (`--require-hashes`; flask 3.1.3, werkzeug 3.1.9). The service account cannot change
+  either.
+- Creates the per-install token on first install; `--rotate-token` replaces it and closes
+  every open session.
+- Checks the sudoers file with `visudo` before installing it.
+- Checks the checkout before it reads the library: no symlinks, nothing writable by other
+  users, owned by root or the operator who ran sudo. A `su -` root shell installs only from a
+  root-owned checkout.
+- The UI unit gets `TasksMax=256`, `MemoryMax=512M` and `CPUQuota=50%`; updates and setup
+  started from the UI run in their own `systemd-run --scope`, outside those limits.
+
+Run `sudo bash ui/install-ui.sh --update` after update-scripts prints it. Full release note:
+[CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### observability v2.0.0 — Alloy under its own account, node logs in their own dir
+`lib/observability.sh` (testnet add-on, used by setup-observability.sh):
+
+- Push URLs are empty off testnet and devnet, even with an override.
+- Native Alloy runs as the `telcoin-alloy` account (log access through the `telcoin-log`
+  group) in a sandbox that cannot see `/var/lib/telcoin`, the data dir or the passphrase
+  files; `config.alloy` is root:telcoin-alloy 0640.
+- An Alloy tarball install needs a matching `SHA256SUMS` line, and the Grafana apt key is
+  pinned by fingerprint.
+- The node's JSON logs go to `/var/log/telcoin/node/telcoin-network-logs/` (`NODE_LOG_DIR`,
+  service account:telcoin-log 0750), because `/var/log/telcoin` is now root's. Enabling moves
+  an older `--log.file.directory`, and update-node 2.0.0 moves it at its next apply.
+- The health check is refused while ufw is missing or inactive.
+- Each node restart runs the committee check, then the epoch wait; `TN_ALLOW_QUORUM_RISK=1`
+  overrides the check.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### testnet add-ons v1.1.0 — maintainer overlay range and the KEYS file
+`lib/testnet-addons.env` adds `TN_OVERLAY_ADMIN_CIDR`, the maintainer overlay range: the only
+overlay source the firewall's overlay SSH rule and the VPN sshd drop-in admit. The bundle
+gains `lib/wgvpn/peers/ssh/KEYS`, the list of maintainer key fingerprints setup-vpn.sh reads
+(see setup-vpn v2.0.0).
+
+### setup-node v2.0.0 — root-owned install, credential passphrase, signed releases, Docker by digest
+- Lays the host out root-owned and records `OWNERSHIP_LAYOUT=2`: `/opt/telcoin` and
+  `/etc/telcoin` root 0755, `.node-meta` root 0600, `node.env` root 0644, the start script
+  `/usr/local/libexec/telcoin/tn-start` (or `tn-start-docker`) root 0755, the data dir the
+  service account's 0700, `/var/log/telcoin` root:telcoin-log 0750.
+- No longer forces the service account to UID 1101; an existing 1101 account is accepted only
+  with a nologin or false shell and no admin group.
+- BLS passphrase: `--passphrase-stdin` reads it from standard input (one line, no echo), and
+  `TN_BLS_PASSPHRASE` leaves setup's environment on its first line. Empty, multi-line or
+  whitespace-padded passphrases are refused on every network; mainnet needs 16 bytes. It is
+  stored as the encrypted credential `/etc/telcoin/bls-passphrase.cred` (systemd 250 or
+  later; below that, on testnet and devnet only, in the root-only `/etc/telcoin/bls-passphrase`)
+  and fed to the node on stdin. Mainnet takes the credential only, needs systemd 255
+  (Ubuntu 24.04), and needs `--allow-no-tpm` on a host without a TPM2. `--bind-pcrs` binds it
+  to TPM PCRs; `--passphrase-method tpm` is refused.
+- New `--install-method release` installs a signed release (`SHA256SUMS` checked with `gpgv`
+  against `lib/release-keys/`, then the tarball, `IMAGE_DIGEST` and chain-config hashes;
+  x86_64 only). New `--release-tag` (`--build-ref` is the older name) takes `vX.Y.Z-adiri` on
+  testnet or `vX.Y.Z` on mainnet; branches, commits and `latest` are refused.
+- Source builds run as the `tn-build` account with a pinned rustup and Rust 1.94; root only
+  installs the result. A tag with a bad signature is refused; on mainnet the tag must be signed
+  by a release key, and on testnet an unsigned tag builds with a warning. `--allow-dirty` (testnet, interactive) discards local changes in
+  `/opt/telcoin-source`.
+- Docker comes from Docker's apt repository after a key fingerprint check (no
+  `get.docker.com`), with `live-restore` merged into `/etc/docker/daemon.json`. The image runs
+  by digest; `--docker-image` must be `<repository>@sha256:<digest>`.
+- Chain configs must match their pinned sha256 before they are copied, and must be readable
+  by the service account.
+- New `--log-target journal|file` (journal by default on mainnet, capped at 4G); new
+  `--allow-quorum-risk`; new `--audit` prints the host's hardening summary.
+- A node with public RPC gets RPC limit flags and `--http.api eth,net,web3,tn`.
+- A re-run over a running node restarts it after the epoch wait and the committee check. A
+  mainnet install is refused while the VPN, observability or Caddy add-ons are present.
+- `--json`: accepts `--network mainnet`; keygen and finalize refuse an existing node unit;
+  finalize refuses flags that differ from what keygen recorded and an empty listener
+  multiaddr; TERM, INT and HUP end the run with 143, 130 and 129.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### update-node v2.0.0 — release tags only, verified releases, vote check after apply
+- Takes release tags only (`vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet). A source tag with
+  a bad signature, or one that moved on origin, is refused (on mainnet it must be signed by a
+  release key), and the build runs as `tn-build`. Release installs download and verify the
+  signed release; Docker installs pull the release image by digest and check the digest after
+  the pull.
+- Refuses downgrades (`--allow-downgrade` on testnet, interactive only) and a binary that
+  changed between prepare and apply. `--check` adds `"tag_moved"`.
+- After the restart it checks that the node follows its chain and that a node that voted
+  before the update votes again within `TN_UPDATE_VOTE_TIMEOUT` seconds (600); a failure rolls
+  back unless the update was one-way, and the `--json` done carries `"voting":false`.
+- Apply renders the start script, `node.env` and the unit again from `.node-meta`, so Docker
+  hosts take the new start script and unit here; hand edits outside the node line are not
+  kept. On an observability host it moves `--log.file.directory` to `/var/log/telcoin/node`.
+- The committee check runs before the stop; `--allow-quorum-risk` overrides it.
+- The pending update and backups are root 0600, and every rollback checks the backup's hash.
+- The first root run on an older host moves it to the root-owned layout under the update
+  lock. A mainnet host on the old layout is refused ("must be installed fresh").
+- A unit that still holds the BLS passphrase, runs the node command inline or uses the old
+  TPM method is refused until `sudo bash edit-config.sh --migrate-credential` has run.
+- When a run ends with the node stopped, it says so and how to start it.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### edit-config v2.0.0 — passphrase to an encrypted credential, edits without perl or sed
+- New `--migrate-credential` moves the BLS passphrase into the encrypted credential
+  `/etc/telcoin/bls-passphrase.cred` and shreds the old copies; it also moves a unit that holds
+  the passphrase, runs the node or docker command inline, or uses the old TPM method. Run it
+  at a time you choose (systemd 250 or later); the restart waits for the epoch window, and
+  `--no-epoch-wait` skips it. Until it has run, such a node refuses every other edit.
+- New `--reseal` encrypts the credential again for the host's current TPM and PCR state, with
+  `--allow-no-tpm` and `--bind-pcrs <list>|none`.
+- Listener addresses live in `/etc/telcoin/node.env`; an older install is moved to the current
+  start script, unit and `node.env`, with backups, before an edit that needs them. A `--set`
+  listener must keep its advertised UDP port.
+- No value reaches perl or sed: verbosity renders the start script again, and RPC bind and
+  metrics go through the launch-line editor. A rewrite of the whole start script drops hand
+  edits outside the node line.
+- Public RPC bind (0.0.0.0) adds the public RPC limits and is refused on mainnet; the
+  "disabled" option is gone. Metrics bind to 127.0.0.1 unless a root operator passes
+  `--allow-public-metrics` outside `--json`. `--json` caps verbosity at `-vvv`.
+- The Docker image is a release tag (resolved to its digest) or
+  `<repository>@sha256:<digest>`; `latest` is refused, and the digest is checked after the pull.
+- Every restart and stop runs the committee check (`--allow-quorum-risk` overrides it), and a
+  refused restart puts the menu edit back.
+- The first root run on an older host moves it to the root-owned layout; a mainnet host on the
+  old layout is refused ("must be installed fresh").
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### install-caddy v2.0.0 — pinned apt key, admin socket, 16-character dashboard password
+- Caddy's apt key is pinned by fingerprint. The admin API listens on
+  `/run/caddy/admin.sock` (0600) through the drop-in
+  `/etc/systemd/system/caddy.service.d/tn-admin.conf`; the first apply after the switch
+  restarts Caddy.
+- `/etc/caddy/Caddyfile` is root:caddy 0640; `Caddyfile.bak.<ts>` (5 kept) and
+  `Caddyfile.tn-orig` are root 0600.
+- The dashboard password needs at least 16 characters; `--password-stdin` reads it from
+  stdin, and `TN_CADDY_PASSWORD` is still read and unset at once. The dashboard site sends
+  security headers and caps request bodies at 64 KB (an older dashboard gets them when it is
+  enabled again).
+- The dashboard and public RPC are refused on a mainnet node that is a staked validator, whose
+  stake cannot be read, or that has no `VALIDATOR_ADDRESS`; Caddy is refused when the network
+  cannot be told.
+- rpc-enable shows what it exposes and asks; `--json` sends it as a `warn` event, and a run
+  without a terminal needs `--yes`.
+- Each node restart runs the committee check, then the epoch wait, and a refusal puts
+  `node-info.yaml` and the `--ws` edit back. Node edits run as the service account.
+- The first root run on an older host moves it to the root-owned layout.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### check-node v2.0.0 — key, lock, ownership, passphrase delivery and sandbox checks; --audit
+New checks: a cleartext `bls.key` without `bls.kw` (a failure) or beside it (a warning); the
+update lock's directory, owner, mode 0600 and holder; the ownership layout (the old layout
+warns on testnet and fails on mainnet, layout 2 is checked against its owner and mode table);
+how the passphrase reaches the node, read from the unit and the start script; the unit
+sandbox, the Docker container hardening and the unit's exposure score; and, on mainnet, the
+testnet health monitor. New `--audit` audits only the host's node security settings and exits
+1 on any warning. With an older library, check-node says once which checks it skipped. Full
+release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### firewall-setup v2.0.0 — SSH and P2P source lists, rules restored on any failure
+- New `--ssh-from CIDR[,CIDR]|FILE` and `--p2p-from CIDR[,CIDR]|FILE` (stored as
+  `SSH_ALLOW_FROM` and `P2P_ALLOW_FROM`); `--ssh-anywhere` and `--p2p-anywhere` drop a stored
+  list. On mainnet, enabling needs an SSH source list or `--ssh-anywhere`. On a Google Cloud
+  VM the IAP range is kept in the SSH sources.
+- Every input is checked before a rule changes; the ufw rule files are saved first, allows go
+  in before the default deny, and the firewall is enabled last. A failed step or a TERM, INT or
+  HUP puts the saved rules back. Exit status 0 done, 1 refused, 2 failed and restored, 3
+  restore failed.
+- Sources with leading-zero octets or masks shorter than /8 are refused, and a replaced list
+  removes the old sources' rules.
+- The health-port and overlay-SSH rules are testnet and devnet only and are deleted elsewhere;
+  the health port is never open to everyone.
+- SSH hardening goes into `/etc/ssh/sshd_config.d/00-telcoin-hardening.conf`.
+- P2P ports are also read from `/etc/telcoin/node.env`.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### setup-vpn v2.0.0 — revocable maintainer keys, recovery commands instead of full root
+- Maintainer keys come from `lib/wgvpn/peers/ssh/KEYS` (one `<name> SHA256:<fingerprint>`
+  line each). A `# revoked:` line removes a key at the next `--sync-keys` or self-heal after
+  update-scripts; `/etc/wgvpn/tnadmin.revoked` is a local deny list.
+- Keys live in `/etc/wgvpn/tnadmin.keys` and `/etc/wgvpn/tnadmin.authorized_keys`, and the
+  sshd drop-in admits `tnadmin` only from the maintainer overlay range.
+- `tnadmin` gets a fixed list of recovery commands through sudo (checked with `visudo`). Full
+  root needs `--grant-maintainer-root`; `--revoke-maintainer-root` takes it back. Existing
+  hosts lose `NOPASSWD:ALL` at the next sync or self-heal.
+- Self-heal runs from the root-owned `/usr/local/sbin/tn-vpn-selfheal`.
+- `--status` and `--disable` work on any network; enable, `--sync-keys` and `--apply-firewall`
+  are testnet only. Enable refuses a symlinked `~tnadmin` or `.ssh`.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### remove-node v2.0.0 — takes the update lock, shreds secrets, finishes an interrupted removal
+- Takes the update lock, and a second run finishes a removal that stopped part way.
+- Shreds the passphrase credential and file, unit and passphrase backups, and the node keys
+  when the chain data goes (as the service account, before that account is removed). Shred is
+  best effort on SSDs and copy-on-write disks, and the run says so.
+- Removes the files 2.0.0 adds: the libexec start scripts, `node.env`, `/var/backups/telcoin`,
+  logrotate and drop-in files, `/var/lib/telcoin-staging`, the `tn-build` account and
+  `/var/lib/tn-build`, and `/run/telcoin`. Asks before removing the `telcoin-log` group when
+  the service account is kept.
+- Also removes the VPN self-heal units and key files, the overlay SSH rules and the
+  `telcoin-alloy` account with the testnet add-ons, and the UI venv, token and state with the
+  UI; the UI audit log in `/var/log/telcoin-ui` stays.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### migrate-node-naming v2.0.0 — update lock, committee check, new start script path
+- Holds the update lock from the confirmation to the end; runs the committee check, then waits
+  for the restart window, right before it stops the legacy node. New `--allow-quorum-risk`
+  overrides the check.
+- Writes the start script `/usr/local/libexec/telcoin/tn-start` (`tn-start-docker` for
+  Docker) and the unit through the library writers; backups go to `/var/backups/telcoin`.
+- Moves a passphrase the legacy unit holds into the credential and shreds the old copies, and
+  migrates units that run the node binary inline. A TPM-sealed install is refused until
+  `edit-config.sh --migrate-credential` has run.
+- Removes the legacy unit and wrapper only after the new unit is verified; a signal before
+  that rolls back. A duplicated `DATA_DIR`, `RPC_PORT`, `INSTALL_METHOD` or
+  `HOST_SERVICE_GROUP` stops the run.
+- Moved files keep their owners until the next update-node.sh or edit-config.sh run moves
+  the host to the root-owned layout.
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### prepare-stake v2.0.0 — passphrase on stdin, root-owned layout
+`--rotate-address` hands the BLS passphrase to the keytool on stdin instead of its
+environment. It takes the update lock after the passphrase and moves an older host to the
+root-owned layout before it changes anything (a mainnet host on the old layout exits 3, "must
+be installed fresh"). It requires `node-info.yaml` to be a regular file owned by the service
+account, and edits and backs it up as that account. A duplicated `NETWORK`,
+`VALIDATOR_ADDRESS`, `HOST_SERVICE_*`, `DATA_DIR` or `RPC_PORT` exits 1. It still never sends
+a transaction and never reads, asks for or prints a private key. Full release note:
+[CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+### setup-observability v2.0.0 — token on stdin, update lock, committee check
+- New `--token-stdin` reads the ingest token from one line of stdin; `--token` still works and
+  warns that the token shows on the command line.
+- The menu session holds the update lock, and a write first moves an older host to the
+  root-owned layout.
+- Each node restart runs the committee check, then the epoch wait (`TN_ALLOW_QUORUM_RISK=1`
+  overrides the check).
+- A duplicated `.node-meta` key stops the run, and an older library stops it before any
+  change.
+- Alloy runs as its own `telcoin-alloy` account, the node's JSON logs move to
+  `/var/log/telcoin/node/`, and the health check needs ufw active (observability v2.0.0).
+
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
 ### update-scripts v1.1.72 — ships update-node v1.2.1 for v0.16.0-adiri
 `update-scripts.sh v1.1.72` carries update-node v1.2.1, lib/common v1.6.1 and telcoin-ui
 v1.9.1 (entries below), with refreshed `.sha256` sidecars. Run it before you update a node to
