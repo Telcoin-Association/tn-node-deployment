@@ -71,6 +71,10 @@ step_create_infrastructure() {
 }
 tn_as_service_user() { "$@"; }
 tn_write_root_file() { cat > "$T/written/${1##*/}"; }
+# .node-meta writes are recorded, not made (the stdin form: PASSPHRASE_METHOD=stdin).
+write_node_meta() { printf '%s\n' "$@" >> "$REC/meta.log"; }
+meta_unset() { printf 'unset %s\n' "$1" >> "$REC/meta.log"; }
+
 display_node_info() { :; }
 
 KG=(--json --phase=keygen --network testnet --install-method existing
@@ -113,6 +117,8 @@ check_lacks "stdin: passphrase in no argv" "$PASS" "$(cat "$REC/keytool.argv")"
 check_lacks "stdin: passphrase in no child env" "$PASS" "$(all_child_env)"
 check "stdin: three children recorded an env" "3" "$(ls "$REC"/*.env | wc -l | tr -d ' ')"
 check "stdin: passphrase file content" "$PASS" "$(cat "$T/written/bls-passphrase")"
+check_has "stdin: PASSPHRASE_METHOD=stdin recorded" "PASSPHRASE_METHOD=stdin" "$(cat "$REC/meta.log" 2>/dev/null)"
+
 check "stdin: wrapped key kept" "yes no" \
     "$([[ -f "$T/data/node-keys/bls.kw" ]] && echo yes || echo no) $([[ -e "$T/data/node-keys/bls.key" ]] && echo yes || echo no)"
 

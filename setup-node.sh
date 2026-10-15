@@ -86,6 +86,21 @@
 #   --passphrase-stdin       Read the passphrase from standard input: one line, read
 #                            once, without echo (a trailing CR is dropped).
 #
+# PASSPHRASE STORAGE. With systemd 250 or later (Ubuntu 24.04) the passphrase is kept
+# only as a systemd credential, /etc/telcoin/bls-passphrase.cred (root 0600), encrypted
+# by systemd-creds with the host key and, when the host has a usable TPM2, the TPM; the
+# plaintext never lands on disk. Below systemd 250 (testnet and devnet only) it stays in
+# the root-only file /etc/telcoin/bls-passphrase. Mainnet needs systemd 250 or later.
+#   --passphrase-method credential|stdin  Force one of the two (default: credential
+#                            wherever it works). Mainnet takes credential only.
+#   --allow-no-tpm           On mainnet, accept a credential encrypted with the host key
+#                            alone when the host has no usable TPM2.
+#   --bind-pcrs <list>       Also bind the credential to these TPM PCRs (indexes joined
+#                            by +, e.g. 7). A firmware or Secure Boot change to them stops
+#                            the node from starting until edit-config.sh --reseal runs.
+#   --audit                  Print a summary of the host's hardening (disk encryption,
+#                            core dumps, ptrace scope, passphrase storage) and exit.
+#
 # LOGS AND RESTARTS
 #   --log-target journal|file  Where the node logs: the systemd journal (default on
 #                            mainnet; capped at 4G by a journald drop-in) or the two files
@@ -181,8 +196,11 @@ P2P_PORT="$DEFAULT_P2P_PORT"
 WORKER_PORT="$DEFAULT_WORKER_PORT"
 RPC_PORT="$DEFAULT_RPC_PORT"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
-USE_LOAD_CREDENTIAL=false
-PASSPHRASE_METHOD="loadcredential"  # loadcredential | tpm
+PASSPHRASE_METHOD=""        # credential | stdin ('' = chosen by setup_passphrase_method)
+CREDENTIAL_KEY=""           # host+tpm2 | host (the credential's systemd-creds key)
+ALLOW_NO_TPM=false          # --allow-no-tpm
+BIND_PCRS=""                # --bind-pcrs
+AUDIT_ONLY=false            # --audit
 LOG_TARGET=""                        # journal | file (--log-target; empty: by network)
 # The BLS key passphrase lives in TN_SETUP_PASS, a plain shell variable: main fills it
 # from TN_BLS_PASSPHRASE (then unset) or --passphrase-stdin, step_generate_keys from the
@@ -325,21 +343,17 @@ step_preflight() {
         fi
     done
 
-    # Check systemd version -- LoadCredential requires 247+ (Ubuntu 22.04+)
-    print_step "Checking systemd version..."
-    local systemd_ver
-    systemd_ver=$(systemctl --version 2>/dev/null | head -1 | awk '{print $2}')
-    if [[ -z "$systemd_ver" ]] || [[ "$systemd_ver" -lt 247 ]]; then
-        setup_fail "systemd ${systemd_ver:-unknown} detected -- version 247+ required. Upgrade to Ubuntu 22.04 LTS or later and try again."
-    fi
-    print_ok "systemd ${systemd_ver} detected (247+ required)"
-    USE_LOAD_CREDENTIAL=true
-
     # Select network first so NETWORK is set before source build (needed for --features adiri).
     # In JSON mode network/method/passphrase are already set from flags by the orchestrator.
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
+
+    # The systemd floor: 247 everywhere (LoadCredential=), 250 on mainnet (the encrypted
+    # credential; Ubuntu 24.04). Below 250 elsewhere it warns.
+    print_step "Checking systemd version..."
+    tn_os_floor_check "$NETWORK" setup_progress || setup_fail "This host's systemd is below the floor for ${NETWORK} (see above)."
+    print_ok "systemd $(tn_systemd_version) detected"
 
     # Testnet opt-in add-ons: ask now ("ask early") so step_create_service can bake the
     # right node-launch flags on the first pass. Side-effect installs run later in
@@ -366,9 +380,7 @@ step_preflight() {
         existing) _preflight_existing ;;
     esac
 
-    if [[ "$INSTALL_METHOD" != "docker" ]] && ! json_mode; then
-        _select_passphrase_method
-    fi
+    setup_passphrase_method
 
     print_ok "Pre-flight checks complete"
 }
@@ -392,49 +404,112 @@ _select_install_method_with_guard() {
     done
 }
 
-_select_passphrase_method() {
-    echo ""
-    print_header "BLS Passphrase Protection"
-    echo "  How would you like to protect the BLS passphrase?"
-    echo ""
-    echo "  1) systemd LoadCredential (default -- recommended for most operators)"
-    echo "       Passphrase kept in a root-only file; systemd hands it to the node,"
-    echo "       which reads it on standard input. It is never in the unit, on a"
-    echo "       command line or in the node's environment."
-    echo "       Works on any Ubuntu 22.04+ server. Easy to recover."
-    echo ""
-    echo "  2) TPM/vTPM sealing (advanced -- maximum security)"
-    echo "       Passphrase sealed to this machine's TPM chip."
-    echo "       Cannot be decrypted on any other machine, even with root access."
-    echo "       Requires TPM2 chip (GCP Shielded VM, AWS Nitro, or bare metal TPM2)."
-    echo "       Recovery requires your offline backup passphrase."
-    echo ""
+# How the BLS passphrase is kept (PASSPHRASE_METHOD) and, for the encrypted credential,
+# its systemd-creds key (CREDENTIAL_KEY): credential wherever systemd-creds works, else
+# stdin (the root-only file), which only testnet and devnet take. An explicit
+# --passphrase-method is checked, not changed. The key is host+tpm2 when the host has a
+# usable TPM2, else host, which mainnet takes only with --allow-no-tpm. Every install
+# method uses it (the Docker start script reads the credential as root).
+setup_passphrase_method() {
+    local supported=false
+    if tn_creds_supported; then
+        supported=true
+    fi
+    case "$PASSPHRASE_METHOD" in
+        "")
+            PASSPHRASE_METHOD=stdin
+            [[ "$supported" == "true" ]] && PASSPHRASE_METHOD=credential
+            ;;
+        credential)
+            [[ "$supported" == "true" ]] || setup_fail "--passphrase-method credential needs systemd ${TN_CRED_MIN_SYSTEMD} or later with systemd-creds (Ubuntu 24.04)."
+            ;;
+    esac
+    if [[ "$PASSPHRASE_METHOD" == "stdin" ]]; then
+        if [[ "$NETWORK" != "testnet" && "$NETWORK" != "devnet" ]]; then
+            setup_fail "On ${NETWORK} the BLS passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04)."
+        fi
+        if [[ -n "$BIND_PCRS" ]]; then
+            setup_fail "--bind-pcrs needs the encrypted credential, which this host cannot make (systemd ${TN_CRED_MIN_SYSTEMD} or later)."
+        fi
+        CREDENTIAL_KEY=""
+        setup_warn "The BLS passphrase will be kept in the root-only file ${CONFIG_DIR}/bls-passphrase. Once the host runs systemd ${TN_CRED_MIN_SYSTEMD} or later, encrypt it with: sudo ./edit-config.sh --migrate-credential"
+        return 0
+    fi
+    if [[ "$ALLOW_NO_TPM" == "true" ]]; then
+        TN_ALLOW_NO_TPM=1
+    fi
+    CREDENTIAL_KEY="$(tn_credential_key "$NETWORK")" \
+        || setup_fail "No usable TPM2 on this host: on ${NETWORK} pass --allow-no-tpm to keep the passphrase encrypted with the host key alone."
+    if [[ -n "$BIND_PCRS" && "$CREDENTIAL_KEY" != "host+tpm2" ]]; then
+        setup_fail "--bind-pcrs needs a usable TPM2, and this host has none."
+    fi
+    if [[ "$CREDENTIAL_KEY" == "host" ]]; then
+        setup_warn "No usable TPM2: the passphrase credential is encrypted with this host's key (/var/lib/systemd/credential.secret) alone."
+    fi
+    print_ok "BLS passphrase: encrypted systemd credential (${CREDENTIAL_KEY}${BIND_PCRS:+, PCRs ${BIND_PCRS}})"
+    return 0
+}
 
-    local choice
-    while true; do
-        read -r -p "  Enter choice [1/2]: " choice
-        case "$choice" in
-            1)
-                PASSPHRASE_METHOD="loadcredential"
-                print_ok "Passphrase method: systemd LoadCredential"
-                break
-                ;;
-            2)
-                if tpm_check_available; then
-                    PASSPHRASE_METHOD="tpm"
-                    print_ok "Passphrase method: TPM sealing"
-                    print_warn "You will need to store your passphrase securely offline."
-                else
-                    print_error "No TPM2 chip detected on this system."
-                    print_info "TPM sealing requires /dev/tpm0 or /dev/tpmrm0."
-                    print_info "Falling back to systemd LoadCredential."
-                    PASSPHRASE_METHOD="loadcredential"
-                fi
-                break
-                ;;
-            *) print_warn "Please enter 1 or 2." ;;
-        esac
-    done
+# Store TN_SETUP_PASS the way PASSPHRASE_METHOD says, and record it in .node-meta: the
+# encrypted credential (tn_store_credential: encrypted from a pipe, round-trip checked;
+# no plaintext file is written and an older one is shredded) or the root 0600 file
+# (tn_write_root_file).
+setup_store_passphrase() {
+    local cred="${CONFIG_DIR}/bls-passphrase.cred" plain="${CONFIG_DIR}/bls-passphrase" meta="${CONFIG_DIR}/.node-meta" rc=0
+    if [[ "$PASSPHRASE_METHOD" == "credential" ]]; then
+        TN_CRED_PASS="$TN_SETUP_PASS"
+        tn_store_credential "$cred" "$CREDENTIAL_KEY" "$BIND_PCRS" || rc=$?
+        TN_CRED_PASS=""
+        if [[ $rc -ne 0 ]]; then
+            setup_fail "Could not store the passphrase as an encrypted credential (${cred}); see above."
+        fi
+        _tn_shred "$plain"
+        write_node_meta "PASSPHRASE_METHOD=credential" "CREDENTIAL_KEY=${CREDENTIAL_KEY}"
+        if [[ -n "$BIND_PCRS" ]]; then
+            write_node_meta "CREDENTIAL_PCRS=${BIND_PCRS}"
+        else
+            meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
+        fi
+        print_ok "Passphrase stored as an encrypted credential (root, mode 600): ${cred}"
+        return 0
+    fi
+    if ! printf '%s\n' "$TN_SETUP_PASS" | tn_write_root_file "$plain" 0600; then
+        setup_fail "Could not write ${plain}."
+    fi
+    _tn_shred "$cred"
+    write_node_meta "PASSPHRASE_METHOD=stdin"
+    meta_unset CREDENTIAL_KEY "$meta" || setup_fail "Could not remove CREDENTIAL_KEY from ${meta}."
+    meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
+    print_ok "Passphrase stored for LoadCredential (root, mode 600): ${plain}"
+    return 0
+}
+
+# Kept keys keep their stored passphrase: an encrypted credential stays as it is; a
+# root-only file moves into the credential when PASSPHRASE_METHOD is credential (read
+# with the read builtin, shredded after), else stays. Stops when neither exists.
+setup_keep_stored_passphrase() {
+    local cred="${CONFIG_DIR}/bls-passphrase.cred" plain="${CONFIG_DIR}/bls-passphrase" cr=$'\r' v=""
+    if [[ -f "$cred" && ! -L "$cred" ]]; then
+        PASSPHRASE_METHOD=credential
+        setup_meta_read v CREDENTIAL_KEY "${CONFIG_DIR}/.node-meta"
+        CREDENTIAL_KEY="${v:-$CREDENTIAL_KEY}"
+        _tn_shred "$plain"
+        print_ok "Keeping the stored passphrase credential: ${cred}"
+        return 0
+    fi
+    if [[ -L "$plain" || ! -f "$plain" ]] || ! _tn_passfile_trim_safe "$plain"; then
+        setup_fail "The kept keys have no usable stored passphrase (${cred} or ${plain}); remove ${DATA_DIR}/node-keys and run setup again to make new keys."
+    fi
+    if [[ "$PASSPHRASE_METHOD" == "credential" ]]; then
+        IFS= read -r TN_SETUP_PASS < "$plain" || true
+        TN_SETUP_PASS="${TN_SETUP_PASS%"$cr"}"
+        setup_store_passphrase
+        TN_SETUP_PASS=""
+        return 0
+    fi
+    write_node_meta "PASSPHRASE_METHOD=stdin"
+    print_ok "Keeping the stored passphrase: ${plain}"
+    return 0
 }
 
 _preflight_source() {
@@ -1437,9 +1512,14 @@ init_node_inputs() {
         setup_fail "invalid --address ${VALIDATOR_ADDRESS} -- expected 0x followed by 40 hex digits."
     fi
     case "$PASSPHRASE_METHOD" in
-        loadcredential|tpm) ;;
-        *) setup_fail "unknown --passphrase-method ${PASSPHRASE_METHOD} (expected loadcredential or tpm)" ;;
+        ""|credential|stdin) ;;
+        loadcredential) PASSPHRASE_METHOD=stdin ;;
+        tpm) setup_fail "--passphrase-method tpm is no longer offered: the passphrase is kept as an encrypted systemd credential (credential) or, below systemd ${TN_CRED_MIN_SYSTEMD} on testnet, in a root-only file (stdin)." ;;
+        *) setup_fail "unknown --passphrase-method ${PASSPHRASE_METHOD} (expected credential or stdin)" ;;
     esac
+    if [[ -n "$BIND_PCRS" ]] && ! tn_pcrs_ok "$BIND_PCRS"; then
+        setup_fail "--bind-pcrs takes TPM PCR indexes 0-23 joined by + (for example 7 or 0+7), not ${BIND_PCRS}."
+    fi
     if ! validate_service_name "$SERVICE_USER" "Service user" >/dev/null 2>&1; then
         setup_fail "invalid --service-user ${SERVICE_USER} -- a letter, then up to 31 letters, digits, _ or -."
     fi
@@ -1592,6 +1672,7 @@ step_generate_keys() {
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
             print_ok "Keeping existing keys"
+            setup_keep_stored_passphrase
             return 0
         fi
     fi
@@ -1740,18 +1821,9 @@ step_generate_keys() {
     fi
     print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
 
-    # The passphrase file the unit loads (LoadCredential): root 0600, written through a
-    # temp file and a rename (tn_write_root_file), so it is never readable in between.
-    local passphrase_file="${CONFIG_DIR}/bls-passphrase"
-    if ! printf '%s\n' "$TN_SETUP_PASS" | tn_write_root_file "$passphrase_file" 0600; then
-        setup_fail "Could not write ${passphrase_file}."
-    fi
-
-    if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-        tpm_seal_passphrase "$passphrase_file" "$CONFIG_DIR" "$TN_SETUP_PASS"
-    else
-        print_ok "Passphrase stored via LoadCredential (root, mode 600): ${passphrase_file}"
-    fi
+    # The passphrase the unit loads: the encrypted credential (encrypted from a pipe, no
+    # plaintext file) or the root 0600 file (setup_store_passphrase).
+    setup_store_passphrase
 
     TN_SETUP_PASS=""
 
@@ -2365,12 +2437,10 @@ step_final_summary() {
         "Explorer=${EXPLORER_URL}" \
         ${node_flags[@]+"${node_flags[@]}"}
 
-    if [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
-        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-            print_info "BLS passphrase sealed to TPM chip."
-        else
-            print_info "BLS passphrase secured via systemd LoadCredential (not exposed in service file)."
-        fi
+    if [[ "$PASSPHRASE_METHOD" == "credential" ]]; then
+        print_info "BLS passphrase kept as an encrypted systemd credential (${CONFIG_DIR}/bls-passphrase.cred, ${CREDENTIAL_KEY:-host})."
+    else
+        print_info "BLS passphrase kept in the root-only file ${CONFIG_DIR}/bls-passphrase (systemd LoadCredential)."
     fi
 
     # Public RPC (only when a domain was chosen): the endpoints, and either the enabled +
@@ -2564,6 +2634,16 @@ json_phase_keygen() {
 # Stops when the node would have nothing to run, before anything is written.
 finalize_install_inputs() {
     local meta="${CONFIG_DIR}/.node-meta"
+    # The passphrase form keygen recorded wins over a flag: the stored file is that one.
+    local pm=""
+    setup_meta_read pm PASSPHRASE_METHOD "$meta"
+    [[ "$pm" == "loadcredential" ]] && pm=stdin
+    PASSPHRASE_METHOD="${pm:-$PASSPHRASE_METHOD}"
+    case "$PASSPHRASE_METHOD" in
+        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] || setup_fail "PASSPHRASE_METHOD=credential but ${CONFIG_DIR}/bls-passphrase.cred is missing: run --phase=keygen first." ;;
+        stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || setup_fail "PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing: run --phase=keygen first." ;;
+        *) setup_fail "No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD): run --phase=keygen first." ;;
+    esac
     if [[ -z "$INSTALL_METHOD" ]]; then
         setup_meta_read INSTALL_METHOD INSTALL_METHOD "$meta"
     fi
@@ -2706,6 +2786,9 @@ json_check_keygen_inputs() {
     if ! tn_passphrase_ok "$TN_SETUP_PASS" "$NETWORK"; then
         setup_fail "$(setup_passphrase_rule "$NETWORK")"
     fi
+    if [[ "$PASSPHRASE_METHOD" == "stdin" && "$NETWORK" != "testnet" && "$NETWORK" != "devnet" ]]; then
+        setup_fail "--passphrase-method stdin is not taken on ${NETWORK}: the passphrase is kept only as an encrypted credential there."
+    fi
     return 0
 }
 
@@ -2736,7 +2819,7 @@ main() {
     # The passphrase leaves the environment before anything runs, so no child of setup
     # (installers, apt, cargo, docker) inherits it. An inherited TN_SETUP_PASS or
     # TN_KEYTOOL_PASS is dropped first, or the assignments below would stay exported.
-    unset TN_SETUP_PASS TN_KEYTOOL_PASS
+    unset TN_SETUP_PASS TN_KEYTOOL_PASS TN_CRED_PASS
     TN_SETUP_PASS="${TN_BLS_PASSPHRASE:-}"
     unset TN_BLS_PASSPHRASE
     local arg
@@ -2765,7 +2848,7 @@ main() {
             --docker-image|--binary-path|--external-primary|--external-worker|\
             --listener-primary|--listener-worker|--public-ip|--public-rpc-url|\
             --public-ws-url|--rpc-http|--rpc-ws|--rpc-domain|--advertised-name|--data-dir|\
-            --service-user|--service-group|--genesis-dir|--log-target)
+            --service-user|--service-group|--genesis-dir|--log-target|--bind-pcrs)
                 if [[ $# -lt 2 || "$2" == -* ]]; then
                     setup_fail "$1 requires a value"
                 fi
@@ -2831,6 +2914,9 @@ main() {
             --passphrase-stdin)    PASSPHRASE_STDIN=true; shift ;;
             --log-target)          LOG_TARGET="${2:-}"; shift 2 ;;
             --allow-quorum-risk)   TN_ALLOW_QUORUM_RISK=1; shift ;;
+            --allow-no-tpm)        ALLOW_NO_TPM=true; shift ;;
+            --bind-pcrs)           BIND_PCRS="${2:-}"; shift 2 ;;
+            --audit)               AUDIT_ONLY=true; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule.
                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
@@ -2844,10 +2930,16 @@ main() {
         esac
     done
 
+    if [[ "$AUDIT_ONLY" == "true" ]]; then
+        TN_SETUP_PASS=""
+        tn_host_audit
+        exit $?
+    fi
     case "${LOG_TARGET:-}" in
         ""|journal|file) ;;
         *) setup_fail "--log-target takes journal or file, not ${LOG_TARGET}." ;;
     esac
+
     setup_read_passphrase       # --passphrase-stdin is read here, once
     init_public_rpc_flags       # bad public-RPC flags or URLs stop here, before any work
     init_install_flags

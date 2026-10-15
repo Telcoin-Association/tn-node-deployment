@@ -67,10 +67,10 @@ check_has "credential: LoadCredentialEncrypted line" \
 check_lacks "credential: no plain LoadCredential" "LoadCredential=" "$OUT"
 PASSPHRASE_METHOD=loadcredential render unit source
 check_has "loadcredential (old name): LoadCredential line" "LoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase" "$OUT"
+check_has "loadcredential (old name): PrivateDevices" "PrivateDevices=yes" "$OUT"
 PASSPHRASE_METHOD=tpm render unit source
-check_lacks "tpm: no credential line" "LoadCredential" "$OUT"
-check_has "tpm: TPM device allowed" "DeviceAllow=/dev/tpmrm0 rw" "$OUT"
-check_lacks "tpm: no PrivateDevices" "PrivateDevices=yes" "$OUT"
+check_rc "tpm (no longer rendered): refused" 1 "$RC"
+check_lacks "tpm: no TPM device line" "DeviceAllow=" "$OUT"
 PASSPHRASE_METHOD=env render unit source
 check_rc "unknown passphrase method refused" 1 "$RC"
 
@@ -155,11 +155,12 @@ check_lacks "docker script: config dir not mounted" "/etc/telcoin:" "$SD"
 check_lacks "docker script: no -e of a passphrase" "-e TN_BLS" "$SD"
 
 PASSPHRASE_METHOD=tpm render script source "$BIN" "$ARGS_B"
-check_has "tpm script: unseal into stdin" "exec < <(tn_unseal)" "$OUT"
-check_lacks "tpm script: no TN_BLS" "TN_BLS" "$OUT"
-printf '%s\n' "$OUT" > "$T/tn-start-tpm"
-rc=0; bash -n "$T/tn-start-tpm" 2>/dev/null || rc=$?
-check_rc "tpm script parses" 0 "$rc"
+check_rc "tpm script: refused (the TPM path is gone)" 1 "$RC"
+check_lacks "tpm script: nothing unseals" "tpm2_" "$OUT"
+PASSPHRASE_METHOD=credential render script source "$BIN" "$ARGS_B"
+check_has "credential script: reads the credential on stdin" \
+    'exec < "${CREDENTIALS_DIRECTORY:?not set: start the node with systemctl}/bls-passphrase"' "$OUT"
+
 
 # Node arguments the writer refuses.
 for bad in "--datadir /var/lib/telcoin" "--http --observer" "--http --validator" \

@@ -2081,15 +2081,6 @@ create_service_user() {
         groupadd --system "$TN_LOG_GROUP"
         print_ok "Created system group '${TN_LOG_GROUP}' (log readers)"
     fi
-    # For TPM installs, add service user to tss group for TPM device access
-    if [[ "${PASSPHRASE_METHOD:-}" == "tpm" ]]; then
-        if getent group tss &>/dev/null; then
-            usermod -aG tss "$SERVICE_USER" 2>/dev/null || true
-            print_ok "Added '${SERVICE_USER}' to tss group (TPM device access)"
-        else
-            print_warn "tss group not found -- TPM device access may fail"
-        fi
-    fi
 }
 
 # create_directories [INSTALL_DIR] [DATA_DIR] [LOG_DIR] [CONFIG_DIR] -- the
@@ -2598,9 +2589,12 @@ _tn_gen_settings() {
         /home/*|/root/*|/run/user/*) print_warn "the data dir ${TN_G_DATA} is under /home, /root or /run/user, which the node unit hides" >&2; return 1 ;;
     esac
     TN_G_PASS="$(_tn_gen_value PASSPHRASE_METHOD PASSPHRASE_METHOD stdin)" || return 1
+    # loadcredential is the name older releases recorded for the stdin delivery.
     case "$TN_G_PASS" in
-        stdin|loadcredential|credential|tpm) ;;
-        *) print_warn "unknown passphrase method '${TN_G_PASS}' (expected stdin, credential or tpm)" >&2; return 1 ;;
+        stdin|credential) ;;
+        loadcredential) TN_G_PASS=stdin ;;
+        tpm) print_warn "the passphrase is sealed to the TPM, which these scripts no longer use; move it to an encrypted credential first: sudo ./edit-config.sh --migrate-credential" >&2; return 1 ;;
+        *) print_warn "unknown passphrase method '${TN_G_PASS}' (expected credential or stdin)" >&2; return 1 ;;
     esac
     TN_G_NET="$(_tn_gen_value NETWORK NETWORK "")" || return 1
     TN_G_LOGT="$(_tn_gen_value LOG_TARGET LOG_TARGET "")" || return 1
@@ -2736,8 +2730,8 @@ tn_write_node_env() {
 # tn_docker_image_allowed. NODE_ARGS must pass _tn_node_args_ok. The script reads
 # the three node.env keys (never sources the file), opens the credential as its
 # stdin and execs the node with --bls-passphrase-source stdin; the docker form
-# runs the container with -i and the hardening flags. The tpm passphrase method
-# unseals into the node's stdin through a pipe instead.
+# runs the container with -i and the hardening flags. Both passphrase methods
+# (credential, stdin) hand the node the same $CREDENTIALS_DIRECTORY file.
 _tn_start_script_text() {
     local method="${1:-}" runner="${2:-}" args="${3:-}" ids mem dbin envf
     _tn_gen_settings "$method" || return 1
@@ -2771,25 +2765,8 @@ while IFS= read -r tn_line || [[ -n "\$tn_line" ]]; do
 done < ${envf}
 : "\${PRIMARY_LISTENER_MULTIADDR:?missing from ${envf}}"
 : "\${WORKER_LISTENER_MULTIADDR:?missing from ${envf}}"
-EOS
-    if [[ "$TN_G_PASS" == "tpm" ]]; then
-        cat <<EOS
-tn_unseal() {
-    local d rc=0
-    d="\$(mktemp -d)"
-    tpm2_createprimary -Q -C e -c "\$d/primary.ctx" >/dev/null &&
-        tpm2_load -Q -C "\$d/primary.ctx" -u ${TN_G_CONF}/bls-tpm.pub -r ${TN_G_CONF}/bls-tpm.priv -c "\$d/sealed.ctx" >/dev/null &&
-        tpm2_unseal -Q -c "\$d/sealed.ctx" || rc=\$?
-    rm -rf "\$d"
-    return "\$rc"
-}
-exec < <(tn_unseal)
-EOS
-    else
-        cat <<EOS
 exec < "\${CREDENTIALS_DIRECTORY:?not set: start the node with systemctl}/bls-passphrase"
 EOS
-    fi
     if [[ "$TN_G_FORM" == "docker" ]]; then
         printf 'exec %s run -i --rm --name %s --user %s -e HOME=/home/nonroot -e PRIMARY_LISTENER_MULTIADDR -e WORKER_LISTENER_MULTIADDR --network=host --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --pids-limit 4096 %s--ulimit nofile=65536:65536 --ulimit core=0 --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 --stop-timeout 80 --pull=never -v %s:/home/nonroot %s telcoin node --bls-passphrase-source stdin %s\n' \
             "$dbin" "$TN_G_SVC" "$ids" "${mem:+--memory ${mem} }" "$TN_G_DATA" "$runner" "$args"
@@ -2833,14 +2810,14 @@ tn_write_start_script() {
 # account inside the sandbox below; the docker form runs it as root (the docker
 # client) and leaves the confinement to the container flags. The passphrase
 # method picks the credential line: LoadCredential= of <config dir>/bls-passphrase
-# (stdin, loadcredential), LoadCredentialEncrypted= of bls-passphrase.cred
-# (credential), none for tpm. The log target picks journal or append: to the two
+# (stdin), LoadCredentialEncrypted= of bls-passphrase.cred (credential). The log
+# target picks journal or append: to the two
 # pre-created files in the log dir (which the node never needs to write).
 _tn_node_unit_text() {
     local method="${1:-}" cred="" out err rw dbin
     _tn_gen_settings "$method" || return 1
     case "$TN_G_PASS" in
-        stdin|loadcredential) cred="LoadCredential=bls-passphrase:${TN_G_CONF}/bls-passphrase" ;;
+        stdin) cred="LoadCredential=bls-passphrase:${TN_G_CONF}/bls-passphrase" ;;
         credential) cred="LoadCredentialEncrypted=bls-passphrase:${TN_G_CONF}/bls-passphrase.cred" ;;
     esac
     if [[ "$TN_G_LOGT" == "journal" ]]; then
@@ -2916,14 +2893,7 @@ ProtectSystem=strict
 ReadWritePaths=${rw}
 ProtectHome=yes
 PrivateTmp=yes
-EOU
-    if [[ "$TN_G_PASS" == "tpm" ]]; then
-        # The TPM device must stay visible (PrivateDevices=yes would hide it).
-        printf '%s\n' "DevicePolicy=closed" "DeviceAllow=/dev/tpmrm0 rw" "DeviceAllow=/dev/tpm0 rw"
-    else
-        printf '%s\n' "PrivateDevices=yes"
-    fi
-    cat <<EOU
+PrivateDevices=yes
 UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -2997,20 +2967,22 @@ _tn_passfile_trim_safe() {
 # missing. RUNNER replaces the binary or image the script runs (empty: keep it).
 # The caller holds the update lock, owns any backup, and reloads systemd and
 # restarts. rc 0 rewritten, 1 refused with nothing changed (an old Docker unit
-# with the command inline or a passphrase written in the unit: those are
-# migrated separately; arguments or listeners that cannot be read), 2 a write
-# failed (files written before it stay; each one is complete).
+# with the command inline or a passphrase written in the unit: those move with
+# tn_migrate_embedded_passphrase / tn_migrate_credential, which set
+# _TN_RERENDER_LEGACY=1 to rewrite them here; arguments or listeners that cannot
+# be read), 2 a write failed (files written before it stay; each one is complete).
+# In that legacy mode --observer and --validator are dropped from the arguments.
 tn_rerender_node_launch() {
-    local runner="${1:-}" fn="${2:-}" line svc method file cur kind args unit envf p w rc=0
+    local runner="${1:-}" fn="${2:-}" line svc method file cur kind args unit envf p w rc=0 legacy="${_TN_RERENDER_LEGACY:-0}"
     line="$(tn_node_launch_target)" || return 1
     read -r svc method file <<< "$line"
     unit="/etc/systemd/system/${svc}.service"
-    if _tn_launch_is_unit "$file"; then
-        _tn_guard_say warn "${svc}: the node command is inline in ${file}; that unit is migrated on its own, not rewritten here." "$fn"
+    if [[ "$legacy" != "1" ]] && _tn_launch_is_unit "$file"; then
+        _tn_guard_say warn "${svc}: the node command is inline in ${file}; that unit moves with sudo ./edit-config.sh --migrate-credential, not here." "$fn"
         return 1
     fi
-    if grep -q 'TN_BLS_PASSPHRASE=' "${TN_ROOT_PREFIX:-}${unit}" 2>/dev/null; then
-        _tn_guard_say warn "${svc}: a passphrase is written in the unit; it is migrated on its own, not rewritten here." "$fn"
+    if [[ "$legacy" != "1" ]] && tn_has_embedded_passphrase "${TN_ROOT_PREFIX:-}${unit}"; then
+        _tn_guard_say warn "${svc}: a passphrase is written in the unit; it moves with sudo ./edit-config.sh --migrate-credential, not here." "$fn"
         return 1
     fi
     cur="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
@@ -3021,10 +2993,11 @@ tn_rerender_node_launch() {
     rc=0
     args="$(_tn_launch_awk args "$file" 2>/dev/null)" || rc=$?
     [[ $rc -eq 10 ]] || return 1
-    args="$(printf '%s\n' "$args" | awk '{ out = ""
+    args="$(printf '%s\n' "$args" | TN_RR_LEGACY="$legacy" awk '{ out = ""
         for (i = 1; i <= NF; i++) {
             if ($i == "--bls-passphrase-source") { i++; continue }
             if (index($i, "--bls-passphrase-source=") == 1) continue
+            if (ENVIRON["TN_RR_LEGACY"] == "1" && ($i ~ /^--(observer|validator)(=.*)?$/)) continue
             out = out (out == "" ? "" : " ") $i
         }
         print out }')"
@@ -3050,13 +3023,10 @@ tn_rerender_node_launch() {
     _tn_gen_settings "$method" || return 1
     # The stdin source trims trailing whitespace, which the old environment delivery
     # kept: a passphrase ending in whitespace stays on the old delivery until it is
-    # rotated. A TPM install moves with the credential migration instead.
+    # rotated. (_tn_gen_settings refuses a TPM install: it moves with the
+    # credential migration.)
     case "$TN_G_PASS" in
-        tpm)
-            _tn_guard_say warn "${svc}: the passphrase is sealed to the TPM; that install moves with the credential migration, not here." "$fn"
-            return 1
-            ;;
-        stdin|loadcredential)
+        stdin)
             if ! _tn_passfile_trim_safe "${TN_ROOT_PREFIX:-}${TN_G_CONF}/bls-passphrase"; then
                 _tn_guard_say warn "${svc}: the stored passphrase is missing, has more than one line, or ends in whitespace, which the stdin delivery would cut; the old delivery stays until the passphrase is changed with edit-config.sh." "$fn"
                 return 1
@@ -4502,114 +4472,682 @@ display_node_info() {
 # -----------------------------------------------------------------------------
 # CORE-3: CREDENTIALS AND GENESIS HASH
 # -----------------------------------------------------------------------------
-# (reserved; CORE-3 adds its helpers here)
-
-# =============================================================================
-# TPM / vTPM HELPER FUNCTIONS
-# =============================================================================
-
-# Check if a TPM2 chip is available on this system
-tpm_check_available() {
-    if [[ -e /dev/tpm0 ]] || [[ -e /dev/tpmrm0 ]]; then
-        print_ok "TPM2 chip detected"
-        # Install tpm2-tools if needed
-        if ! command -v tpm2_createprimary &>/dev/null; then
-            print_info "Installing tpm2-tools..."
-            install_package "tpm2-tools"
-        fi
-        print_ok "tpm2-tools available"
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Seal the BLS passphrase to the TPM chip.
-# Stores sealed blob at ${config_dir}/bls-tpm.pub and bls-tpm.priv
-# Shows the passphrase once and offers to delete the plaintext file.
 #
-# Usage: tpm_seal_passphrase <passphrase_file> <config_dir> <passphrase>
-tpm_seal_passphrase() {
-    local passphrase_file="$1"
-    local config_dir="$2"
-    local passphrase="$3"
+# The BLS key passphrase reaches the node from a systemd credential. Two forms:
+#   credential  <config dir>/bls-passphrase.cred, root 0600, encrypted with
+#               systemd-creds (host key, plus the TPM when the host has one);
+#               the unit loads it with LoadCredentialEncrypted=. Needs systemd
+#               250 or later.
+#   stdin       <config dir>/bls-passphrase, root 0600 plaintext, loaded with
+#               LoadCredential= (older releases recorded this as loadcredential).
+# Either way the start script feeds $CREDENTIALS_DIRECTORY/bls-passphrase to the
+# node on stdin. The passphrase travels in TN_CRED_PASS, a plain shell variable
+# that is never exported: printf (a builtin) writes it to systemd-creds' stdin.
 
-    print_step "Sealing BLS passphrase to TPM..."
+readonly TN_CRED_NAME="bls-passphrase"
+readonly TN_CRED_MIN_SYSTEMD=250      # systemd-creds, LoadCredentialEncrypted=
+readonly TN_MAINNET_MIN_SYSTEMD=250   # the OS floor for a mainnet node
+readonly TN_STDIN_MIN_SYSTEMD=247     # LoadCredential= (the stdin form)
 
-    # Create TPM primary key context
-    if ! tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null; then
-        print_error "TPM primary key creation failed."
-        print_info "Falling back to LoadCredential file storage."
-        rm -f /tmp/tn-tpm-primary.ctx
+# tn_systemd_version -- the running systemd's major version (systemctl --version).
+# rc 1 and nothing printed when it cannot be read.
+tn_systemd_version() {
+    local v
+    v="$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2; exit }')"
+    v="${v%%[!0-9]*}"
+    [[ "$v" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$((10#$v))"
+}
+
+# tn_creds_supported -- rc 0 when this host can hold an encrypted credential:
+# systemd 250 or later and systemd-creds on PATH.
+tn_creds_supported() {
+    local v
+    v="$(tn_systemd_version)" || return 1
+    (( v >= TN_CRED_MIN_SYSTEMD )) || return 1
+    command -v systemd-creds >/dev/null 2>&1
+}
+
+# tn_os_floor_check NETWORK [progress-fn] -- the systemd floor for a node. Every
+# network needs 247 (LoadCredential=); mainnet needs TN_MAINNET_MIN_SYSTEMD
+# (Ubuntu 24.04 ships 255) for the encrypted credential. Below 250 elsewhere it
+# warns: the passphrase then stays in a root-only file. rc 0 ok, 1 refused.
+tn_os_floor_check() {
+    local net="${1:-}" fn="${2:-}" v
+    if ! v="$(tn_systemd_version)"; then
+        _tn_guard_say warn "Cannot read the systemd version (systemctl --version); the node needs systemd ${TN_STDIN_MIN_SYSTEMD} or later." "$fn"
         return 1
     fi
-
-    # Create sealed data object from passphrase file
-    if ! tpm2_create -Q \
-        -C /tmp/tn-tpm-primary.ctx \
-        -i "$passphrase_file" \
-        -u "${config_dir}/bls-tpm.pub" \
-        -r "${config_dir}/bls-tpm.priv" 2>/dev/null; then
-        print_error "TPM sealing failed."
-        print_info "Falling back to LoadCredential file storage."
-        rm -f /tmp/tn-tpm-primary.ctx "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+    if (( v < TN_STDIN_MIN_SYSTEMD )); then
+        _tn_guard_say warn "systemd ${v} is too old: the node needs ${TN_STDIN_MIN_SYSTEMD} or later (Ubuntu 22.04 or later; Ubuntu 24.04 for mainnet)." "$fn"
         return 1
     fi
-
-    # Verify seal before removing primary context
-    tpm2_load -Q -C /tmp/tn-tpm-primary.ctx         -u "${config_dir}/bls-tpm.pub"         -r "${config_dir}/bls-tpm.priv"         -c /tmp/tn-tpm-verify.ctx 2>/dev/null
-    local verify_result
-    verify_result=$(tpm2_unseal -Q -c /tmp/tn-tpm-verify.ctx 2>/dev/null || echo "")
-    rm -f /tmp/tn-tpm-primary.ctx /tmp/tn-tpm-verify.ctx
-    if [[ -z "$verify_result" ]]; then
-        print_error "TPM seal verification failed."
-        rm -f "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+    if [[ "$net" != "testnet" && "$net" != "devnet" ]] && (( v < TN_MAINNET_MIN_SYSTEMD )); then
+        _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04): the BLS passphrase must be an encrypted credential there. Upgrade the OS and run setup again." "$fn"
         return 1
     fi
-    print_ok "TPM seal verified successfully"
-    chmod 600 "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
-    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv" 2>/dev/null || true
-    print_ok "Passphrase sealed to TPM: ${config_dir}/bls-tpm.pub / bls-tpm.priv"
+    if (( v < TN_CRED_MIN_SYSTEMD )); then
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (needs ${TN_CRED_MIN_SYSTEMD}, Ubuntu 24.04): the BLS passphrase stays in a root-only file (${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bls-passphrase)." "$fn"
+    fi
+    return 0
+}
 
-    # Show passphrase once and offer to delete plaintext file
-    echo ""
-    print_warn "================================================================"
-    print_warn "  IMPORTANT -- STORE YOUR PASSPHRASE OFFLINE NOW"
-    print_warn "================================================================"
-    print_warn "Your BLS passphrase has been sealed to this machine's TPM chip."
-    print_warn "If this machine is rebuilt or the TPM is reset, you will need"
-    print_warn "your passphrase to re-seal it."
-    echo ""
-    print_info "Your BLS passphrase is:"
-    echo ""
-    echo "    ${passphrase}"
-    echo ""
-    print_warn "Write this down and store it in a password manager or hardware"
-    print_warn "wallet. This is the ONLY time it will be shown."
-    print_warn "================================================================"
-    echo ""
+# tn_credential_key NETWORK -- the systemd-creds key for this host: host+tpm2 when
+# `systemd-creds has-tpm2` reports a usable TPM, else host. A host key alone is
+# refused (rc 1) off testnet and devnet unless TN_ALLOW_NO_TPM=1 (--allow-no-tpm).
+tn_credential_key() {
+    local net="${1:-}"
+    if systemd-creds has-tpm2 >/dev/null 2>&1; then
+        printf 'host+tpm2\n'
+        return 0
+    fi
+    if [[ "$net" != "testnet" && "$net" != "devnet" && "${TN_ALLOW_NO_TPM:-0}" != "1" ]]; then
+        print_warn "No usable TPM2 on this host: on mainnet the credential would rest on the host key alone. Pass --allow-no-tpm to accept that." >&2
+        return 1
+    fi
+    printf 'host\n'
+}
 
-    local confirm_text
-    read -r -p "  Type CONFIRMED to delete the plaintext passphrase file, or Enter to keep it: " confirm_text
-    if [[ "$confirm_text" == "CONFIRMED" ]]; then
-        rm -f "$passphrase_file"
-        print_ok "Plaintext passphrase file deleted. TPM is the only copy on this machine."
-        print_warn "Ensure you have stored your passphrase offline before continuing."
+# tn_pcrs_ok LIST -- rc 0 for a PCR list systemd-creds takes: indexes 0-23
+# joined by + or , (e.g. 7 or 0+7).
+tn_pcrs_ok() {
+    local list="${1:-}" p IFS='+,'
+    [[ "$list" =~ ^[0-9]{1,2}([+,][0-9]{1,2})*$ ]] || return 1
+    for p in $list; do
+        (( 10#$p <= 23 )) || return 1
+    done
+    return 0
+}
+
+# _tn_cred_pass_plain -- rc 0 when TN_CRED_PASS is set, not empty and not
+# exported; 1 when it is unset or empty; 2 (with a warning) when it is exported.
+_tn_cred_pass_plain() {
+    local decl
+    decl="$(declare -p TN_CRED_PASS 2>/dev/null)" || return 1
+    decl="${decl#declare -}"
+    decl="${decl%% *}"
+    if [[ "$decl" == *x* ]]; then
+        print_warn "TN_CRED_PASS is exported; it must be a plain shell variable" >&2
+        return 2
+    fi
+    [[ -n "${TN_CRED_PASS:-}" ]]
+}
+
+# _tn_cred_digest -- sha256 (hex) of TN_CRED_PASS plus a newline: what the
+# credential must decrypt to.
+_tn_cred_digest() {
+    local d
+    d="$(printf '%s\n' "$TN_CRED_PASS" | sha256sum)" || return 1  # passphrase-stdin-ok stdout is the sha256sum pipe
+    printf '%s\n' "${d%% *}"
+}
+
+# tn_store_credential DEST KEY [PCRS] -- encrypt TN_CRED_PASS (plus a newline)
+# with systemd-creds into DEST (root 0600): stdin to stdout into DEST.new through
+# tn_write_root_file, decrypt it again and compare the sha256 digests, then rename
+# it over DEST. KEY is host or host+tpm2; PCRS (host+tpm2 only) binds it to those
+# PCRs. The value is never on a command line or in a file of its own. rc 0
+# stored, 1 refused (nothing changed), 2 failed (DEST untouched, DEST.new gone).
+tn_store_credential() {
+    local dest="${1:-}" key="${2:-}" pcrs="${3:-}" new want got
+    local -a opt ps=()
+    _tn_cred_pass_plain 2>/dev/null || { print_warn "tn_store_credential: no passphrase to store (TN_CRED_PASS empty or exported)" >&2; return 1; }
+
+    case "$key" in
+        host|host+tpm2) ;;
+        *) print_warn "tn_store_credential: unknown key '${key}' (host or host+tpm2)" >&2; return 1 ;;
+    esac
+    if [[ -n "$pcrs" ]] && { [[ "$key" != "host+tpm2" ]] || ! tn_pcrs_ok "$pcrs"; }; then
+        print_warn "tn_store_credential: PCR binding '${pcrs}' needs a TPM and a list such as 7 or 0+7" >&2
+        return 1
+    fi
+    [[ "$dest" == /* && "$dest" != */ ]] || { print_warn "tn_store_credential: '${dest}' is not an absolute file path" >&2; return 1; }
+    command -v systemd-creds >/dev/null 2>&1 || { print_warn "tn_store_credential: systemd-creds is not installed" >&2; return 2; }
+    opt=("--name=${TN_CRED_NAME}" "--with-key=${key}")
+    [[ -n "$pcrs" ]] && opt+=("--tpm2-pcrs=${pcrs}")
+    want="$(_tn_cred_digest)" || return 2
+    new="${dest}.new"
+    printf '%s\n' "$TN_CRED_PASS" | systemd-creds encrypt "${opt[@]}" - - 2>/dev/null | tn_write_root_file "$new" 0600 || ps=("${PIPESTATUS[@]}")  # passphrase-stdin-ok stdout is the systemd-creds pipe
+    if [[ ${#ps[@]} -gt 0 || ! -s "$new" ]]; then
+        rm -f -- "$new" 2>/dev/null || true
+        if [[ "${ps[2]:-0}" == "1" && "${ps[1]:-0}" == "0" ]]; then
+            print_warn "tn_store_credential: writing ${new} was refused; nothing changed" >&2
+            return 1
+        fi
+        print_warn "tn_store_credential: systemd-creds encrypt failed; nothing changed" >&2
+        return 2
+    fi
+    got="$(systemd-creds decrypt "--name=${TN_CRED_NAME}" "$new" - 2>/dev/null | sha256sum)" || got=""
+    got="${got%% *}"
+    if [[ "$got" != "$want" ]]; then
+        rm -f -- "$new" 2>/dev/null || true
+        print_warn "tn_store_credential: the new credential does not decrypt to the passphrase; nothing changed" >&2
+        return 2
+    fi
+    if ! mv -fT -- "$new" "$dest" 2>/dev/null; then
+        rm -f -- "$new" 2>/dev/null || true
+        print_warn "tn_store_credential: could not move the credential into place at ${dest}" >&2
+        return 2
+    fi
+    return 0
+}
+
+# tn_has_embedded_passphrase UNIT -- rc 0 when UNIT writes the passphrase itself
+# (an Environment= line or an inline docker -e holding TN_BLS_PASSPHRASE=), as
+# units from before the start-script design did. Comment lines do not count.
+tn_has_embedded_passphrase() {
+    local unit="${1:-}"
+    [[ -f "$unit" ]] || return 1
+    TN_HEP_KEY="TN_BLS_PASSPHRASE=" awk '
+        BEGIN { k = ENVIRON["TN_HEP_KEY"] }
+        /^[ \t]*[#;]/ { next }
+        index($0, k) { found = 1; exit }
+        END { exit found ? 0 : 1 }' "$unit" 2>/dev/null
+}
+
+# _tn_unit_pass_read UNIT -- set TN_CRED_PASS (not exported) to the passphrase
+# UNIT holds: Environment="TN_BLS_PASSPHRASE=..." (quoted or not) or an inline
+# -e TN_BLS_PASSPHRASE=... . awk reads the unit and gets the key name from its
+# environment; the value only ever crosses a pipe. A reference ($NAME) is not a
+# value. rc 1 when there is no value, two different ones, or one holding a
+# quote, backslash, $ or % (systemd would have changed it on the way).
+_tn_unit_pass_read() {
+    local unit="${1:-}" v
+    [[ -f "$unit" && ! -L "$unit" ]] || return 1
+    v="$(TN_UPR_KEY="TN_BLS_PASSPHRASE=" LC_ALL=C awk '
+        BEGIN { k = ENVIRON["TN_UPR_KEY"]; n = 0; bad = 0; q = "\047"; dq = "\"" }
+        /^[ \t]*[#;]/ { next }
+        {
+            line = $0
+            while ((i = index(line, k)) > 0) {
+                pre = (i > 1) ? substr(line, i - 1, 1) : ""
+                rest = substr(line, i + length(k))
+                if (pre == dq || pre == q) {
+                    j = index(rest, pre)
+                    if (j == 0) { bad = 1; break }
+                    v = substr(rest, 1, j - 1)
+                    line = substr(rest, j + 1)
+                } else if (match(rest, /[ \t]/)) {
+                    v = substr(rest, 1, RSTART - 1)
+                    line = substr(rest, RSTART)
+                } else {
+                    v = rest
+                    line = ""
+                }
+                if (substr(v, 1, 1) == "$") continue
+                if (n == 0) { val = v; n = 1 } else if (v != val) { bad = 1 }
+            }
+        }
+        END {
+            if (bad || n == 0 || val == "" || val ~ /["\047\\$%]/) exit 1
+            printf "%s", val
+        }' "$unit" 2>/dev/null)" || return 1
+    [[ -n "$v" ]] || return 1
+    TN_CRED_PASS="$v"
+    v=""
+    return 0
+}
+
+# _tn_cred_plain_ok FILE -- rc 0 when FILE is a regular root-owned file (not a
+# symlink): a stored plaintext passphrase this library may read.
+_tn_cred_plain_ok() {
+    [[ -f "${1:-}" && ! -L "${1:-}" && "$(stat -c %u -- "$1" 2>/dev/null)" == "0" ]]
+}
+
+# _tn_shred FILE... -- shred -u each regular FILE (best effort on SSDs, copy-on-
+# write and cloud disks), then rm -f it; a symlink is unlinked, never followed.
+
+_tn_shred() {
+    local f
+    for f in "$@"; do
+        if [[ -L "$f" ]]; then
+            rm -f -- "$f" 2>/dev/null || true
+        elif [[ -f "$f" ]]; then
+            if command -v shred >/dev/null 2>&1; then
+                shred -u -- "$f" 2>/dev/null || true
+            fi
+            rm -f -- "$f" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# _tn_cred_old_copies SVC CONF [KEEP_PLAIN] -- print (one per line) the files that
+# still hold the passphrase after a move: CONF/bls-passphrase (unless KEEP_PLAIN
+# is 1: it is the new home), the TPM blobs, unit backups beside the unit or in
+# the backup dir that contain TN_BLS_PASSPHRASE=, and passphrase-file backups in
+# the backup dir.
+_tn_cred_old_copies() {
+    local svc="$1" conf="$2" keep="${3:-0}" udir bdir f
+    udir="${TN_ROOT_PREFIX:-}/etc/systemd/system"
+    bdir="${TN_BACKUP_DIR:-/var/backups/telcoin}"
+    if [[ "$keep" != "1" ]]; then
+        f="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
+        [[ -e "$f" || -L "$f" ]] && printf '%s\n' "$f"
+    fi
+    for f in "${TN_ROOT_PREFIX:-}${conf}/bls-tpm.pub" "${TN_ROOT_PREFIX:-}${conf}/bls-tpm.priv"; do
+        [[ -e "$f" || -L "$f" ]] && printf '%s\n' "$f"
+    done
+    for f in "${udir}/${svc}".*bak* "${bdir}"/*; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        case "${f##*/}" in
+            bls-passphrase*) printf '%s\n' "$f"; continue ;;
+        esac
+        grep -q 'TN_BLS_PASSPHRASE=' "$f" 2>/dev/null && printf '%s\n' "$f"
+    done
+    return 0
+}
+
+# _tn_cred_confirm SVC [progress-fn] -- rc 0 once SVC is active and its RPC
+# answers (the node read its key), within TN_CRED_HEALTH_SECS (default 300).
+_tn_cred_confirm() {
+    local svc="$1" fn="${2:-}" url limit waited=0
+    limit="${TN_CRED_HEALTH_SECS:-300}"
+    [[ "$limit" =~ ^[0-9]{1,4}$ ]] || limit=300
+    url="$(tn_local_rpc_url 2>/dev/null)" || url=""
+    while :; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null && [[ -n "$url" ]] \
+            && tn_rpc_call "$url" eth_chainId '[]' 5 >/dev/null 2>&1; then
+            _tn_guard_say log "${svc} is running and answering RPC: it unlocked its key." "$fn"
+            return 0
+        fi
+        (( waited < limit )) || break
+        sleep 3
+        waited=$(( waited + 3 ))
+    done
+    return 1
+}
+
+# _tn_meta_keep KEY -- print "1<value>" when KEY is in .node-meta, "0" when it is
+# not (for _tn_meta_put). rc 2 when KEY is there more than once.
+_tn_meta_keep() {
+    local v rc=0
+    v="$(meta_get "$1" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) printf '1%s\n' "$v" ;;
+        2) return 2 ;;
+        *) printf '0\n' ;;
+    esac
+}
+
+# _tn_meta_put KEY SAVED -- set KEY to the value _tn_meta_keep saved ("1<v>"), or
+# remove it ("0").
+_tn_meta_put() {
+    local meta
+    meta="$(node_meta_path 2>/dev/null)" || return 1
+    if [[ "${2:0:1}" == "1" ]]; then
+        meta_set "$1" "${2:1}" "$meta"
     else
-        print_info "Plaintext file kept at: ${passphrase_file}"
-        print_info "The node will use TPM first, falling back to the file if TPM is unavailable."
+        meta_unset "$1" "$meta"
     fi
 }
 
-# Remove TPM sealed files for a node type (called during node removal)
-tpm_remove_sealed_files() {
-    local config_dir="$1"
-    if [[ -f "${config_dir}/bls-tpm.pub" ]] || [[ -f "${config_dir}/bls-tpm.priv" ]]; then
-        print_step "Removing TPM sealed passphrase files..."
-        rm -f "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
-        print_ok "TPM sealed files removed"
+# The files _tn_cred_switch may change, with their backups: path, backup ("-"
+# when the file did not exist), sha256, mode, group. Filled by _tn_cred_save.
+_TN_CS_PATH=()
+_TN_CS_BAK=()
+_TN_CS_SUM=()
+_TN_CS_MODE=()
+_TN_CS_GRP=()
+
+# _tn_cred_save PATH -- record PATH for _tn_cred_restore, backing it up first
+# when it exists (tn_backup_file). rc 1 when the backup failed.
+_tn_cred_save() {
+    local p="$1" out mg
+    if [[ -f "$p" && ! -L "$p" ]]; then
+        mg="$(stat -c '%a %G' -- "$p" 2>/dev/null)" || return 1
+        out="$(tn_backup_file "$p" "${p##*/}")" || return 1
+        _TN_CS_BAK+=("${out% *}")
+        _TN_CS_SUM+=("${out##* }")
+        _TN_CS_MODE+=("${mg% *}")
+        _TN_CS_GRP+=("${mg#* }")
+    elif [[ -e "$p" || -L "$p" ]]; then
+        return 1
+    else
+        _TN_CS_BAK+=("-")
+        _TN_CS_SUM+=("-")
+        _TN_CS_MODE+=("-")
+        _TN_CS_GRP+=("-")
     fi
+    _TN_CS_PATH+=("$p")
 }
+
+# _tn_cred_restore -- put every saved file back (a file that did not exist is
+# shredded); rc 1 when one could not be restored.
+_tn_cred_restore() {
+    local i rc=0
+    for ((i = 0; i < ${#_TN_CS_PATH[@]}; i++)); do
+        if [[ "${_TN_CS_BAK[$i]}" == "-" ]]; then
+            _tn_shred "${_TN_CS_PATH[$i]}"
+        else
+            tn_restore_backup "${_TN_CS_BAK[$i]}" "${_TN_CS_SUM[$i]}" "${_TN_CS_PATH[$i]}" "${_TN_CS_MODE[$i]}" "${_TN_CS_GRP[$i]}" || rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# _tn_cred_drop_saved -- shred the backups _tn_cred_save made (they may hold the
+# passphrase) and forget them.
+_tn_cred_drop_saved() {
+    local b
+    for b in ${_TN_CS_BAK[@]+"${_TN_CS_BAK[@]}"}; do
+        [[ "$b" == "-" ]] || _tn_shred "$b"
+    done
+    _TN_CS_PATH=(); _TN_CS_BAK=(); _TN_CS_SUM=(); _TN_CS_MODE=(); _TN_CS_GRP=()
+}
+
+# _tn_cred_switch TARGET KEY PCRS [progress-fn] -- move the installed node to the
+# passphrase in TN_CRED_PASS: TARGET credential (encrypted with KEY, bound to PCRS
+# when given) or stdin (a root 0600 file, for hosts below systemd 250). Backs up
+# the unit, start script, node.env and both passphrase files; stores the
+# passphrase; records PASSPHRASE_METHOD, CREDENTIAL_KEY and CREDENTIAL_PCRS;
+# re-renders the unit and start script (old inline and embedded-passphrase units
+# included, tn_rerender_node_launch); reloads systemd; runs the committee guard
+# and the restart window; restarts and confirms the node unlocked its key; then
+# shreds every old copy of the passphrase and the backups. When the restart does
+# not come up, every file and .node-meta key goes back and the node restarts on
+# them (no window wait). The caller holds the update lock. rc 0 done, 1 refused
+# (nothing changed), 2 failed and rolled back, 3 the rollback restart failed too
+# (the backups stay; their paths are printed).
+_tn_cred_switch() {
+    local target="$1" key="$2" pcrs="$3" fn="${4:-}" svc conf form p="" rc=0 f keep=0
+    # shellcheck disable=SC2034 # read by tn_rerender_node_launch (dynamic scope)
+    local m_method m_key m_pcrs PASSPHRASE_METHOD="$1" _TN_RERENDER_LEGACY=1
+    svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }
+    conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    if [[ "$target" != "credential" && "$(tn_detect_network 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
+        _tn_guard_say warn "Off testnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04); nothing changed." "$fn"
+        return 1
+    fi
+    m_method="$(_tn_meta_keep PASSPHRASE_METHOD)" || p=PASSPHRASE_METHOD
+    m_key="$(_tn_meta_keep CREDENTIAL_KEY)" || p=CREDENTIAL_KEY
+    m_pcrs="$(_tn_meta_keep CREDENTIAL_PCRS)" || p=CREDENTIAL_PCRS
+    if [[ -n "$p" ]]; then
+        _tn_guard_say warn "${p} is set more than once in .node-meta; remove the extra lines first." "$fn"
+        return 1
+    fi
+    form=source
+    [[ "$(meta_get INSTALL_METHOD 2>/dev/null || true)" == "docker" ]] && form=docker
+    _tn_cred_drop_saved
+    for p in "/etc/systemd/system/${svc}.service" "$(tn_start_script_path "$form")" "${conf}/node.env" \
+        "${conf}/bls-passphrase.cred" "${conf}/bls-passphrase"; do
+        if ! _tn_cred_save "${TN_ROOT_PREFIX:-}${p}"; then
+            _tn_cred_drop_saved
+            _tn_guard_say warn "Could not back up ${p}; nothing changed." "$fn"
+            return 1
+        fi
+    done
+    # 1. The passphrase in its new form.
+    if [[ "$target" == "credential" ]]; then
+        tn_store_credential "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase.cred" "$key" "$pcrs" || rc=$?
+    else
+        printf '%s\n' "$TN_CRED_PASS" | tn_write_root_file "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase" 0600 || rc=$?  # passphrase-stdin-ok stdout is the root-write pipe
+    fi
+    if [[ $rc -ne 0 ]]; then
+        _tn_cred_restore || true
+        _tn_cred_drop_saved
+        _tn_guard_say warn "Could not store the passphrase; nothing changed." "$fn"
+        [[ $rc -eq 1 ]] && return 1
+        return 2
+    fi
+    # 2. Record the method; render the unit and start script for it.
+    if [[ "$target" == "credential" ]]; then
+        _tn_meta_put PASSPHRASE_METHOD 1credential && _tn_meta_put CREDENTIAL_KEY "1${key}" \
+            && _tn_meta_put CREDENTIAL_PCRS "$([[ -n "$pcrs" ]] && printf '1%s' "$pcrs" || printf 0)" || rc=2
+    else
+        _tn_meta_put PASSPHRASE_METHOD 1stdin && _tn_meta_put CREDENTIAL_KEY 0 && _tn_meta_put CREDENTIAL_PCRS 0 || rc=2
+    fi
+    [[ $rc -eq 0 ]] && { tn_rerender_node_launch "" "$fn" || rc=$?; }
+    [[ $rc -eq 0 ]] && { systemctl daemon-reload >/dev/null 2>&1 || rc=2; }
+    # 3. The committee guard and the restart window, then the restart.
+    if [[ $rc -eq 0 ]] && ! tn_committee_down_guard "" "$fn"; then
+        _tn_guard_say warn "Restarting ${svc} now would put the committee's quorum at risk; nothing was restarted (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
+        rc=1
+    fi
+    if [[ $rc -ne 0 ]]; then
+        _tn_meta_put PASSPHRASE_METHOD "$m_method" || true
+        _tn_meta_put CREDENTIAL_KEY "$m_key" || true
+        _tn_meta_put CREDENTIAL_PCRS "$m_pcrs" || true
+        _tn_cred_restore || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        _tn_cred_drop_saved
+        _tn_guard_say warn "The passphrase delivery of ${svc} was not changed." "$fn"
+        [[ $rc -eq 1 ]] && return 1
+        return 2
+    fi
+    tn_wait_restart_window "$(tn_local_rpc_url 2>/dev/null || true)" "$fn" || true
+    if systemctl restart "$svc" >/dev/null 2>&1 && _tn_cred_confirm "$svc" "$fn"; then
+        # 4. Done: every old copy of the passphrase goes, then the backups.
+        [[ "$target" == "stdin" ]] && keep=1
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && _tn_shred "$f"
+        done < <(_tn_cred_old_copies "$svc" "$conf" "$keep")
+        _tn_cred_drop_saved
+        if id -nG "${SERVICE_USER:-telcoin}" 2>/dev/null | tr ' ' '\n' | grep -qx tss; then
+            gpasswd -d "${SERVICE_USER:-telcoin}" tss >/dev/null 2>&1 || true
+        fi
+        if [[ "$target" == "credential" ]]; then
+            _tn_guard_say log "${svc} reads its passphrase from the encrypted credential ${conf}/bls-passphrase.cred (${key}${pcrs:+, PCRs ${pcrs}}). Old copies were shredded (shred is best effort on SSDs, copy-on-write and cloud disks)." "$fn"
+        else
+            _tn_guard_say log "${svc} reads its passphrase from ${conf}/bls-passphrase (root only). Old copies were shredded (shred is best effort on SSDs, copy-on-write and cloud disks)." "$fn"
+        fi
+        return 0
+    fi
+    _tn_guard_say warn "${svc} did not come back with the new passphrase delivery; restoring its previous files." "$fn"
+    _tn_meta_put PASSPHRASE_METHOD "$m_method" || true
+    _tn_meta_put CREDENTIAL_KEY "$m_key" || true
+    _tn_meta_put CREDENTIAL_PCRS "$m_pcrs" || true
+    rc=0
+    _tn_cred_restore || rc=3
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [[ $rc -eq 0 ]] && systemctl restart "$svc" >/dev/null 2>&1 && _tn_cred_confirm "$svc" "$fn"; then
+        _tn_cred_drop_saved
+        return 2
+    fi
+    _tn_guard_say warn "${svc} did not come back on its previous files either. Backups (root only): ${_TN_CS_BAK[*]}" "$fn"
+    return 3
+}
+
+# tn_migrate_credential [progress-fn] -- move the installed node's passphrase to
+# the encrypted credential (_tn_cred_switch): from TN_CRED_PASS when the caller
+# set it (a plain variable: an operator who typed it), else from a unit that
+# embeds it (tn_migrate_embedded_passphrase), else from <config dir>/bls-passphrase.
+# The key is tn_credential_key's choice (TN_ALLOW_NO_TPM=1 accepts host alone on
+# mainnet); TN_BIND_PCRS binds it to PCRs. The caller holds the update lock. rc 0
+# done (or already done), 1 refused (systemd below 250, no systemd-creds, no
+# stored passphrase, one with a line break or edge whitespace, no TPM on mainnet),
+# 2 failed and rolled back, 3 the rollback failed too.
+tn_migrate_credential() {
+    local fn="${1:-}" v svc conf unit plain method net key rc=0 cr=$'\r'
+    if ! tn_creds_supported; then
+        v="$(tn_systemd_version 2>/dev/null)" || v="unknown"
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (systemd ${TN_CRED_MIN_SYSTEMD} with systemd-creds, Ubuntu 24.04, is needed); nothing changed." "$fn"
+        return 1
+    fi
+    svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }
+    conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service"
+    plain="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
+    if tn_has_embedded_passphrase "$unit"; then
+        tn_migrate_embedded_passphrase "$unit" "$fn"
+        return $?
+    fi
+    method="$(meta_get PASSPHRASE_METHOD 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        _tn_guard_say warn "PASSPHRASE_METHOD is set more than once in .node-meta; remove the extra lines first." "$fn"
+        return 1
+    fi
+    if [[ "$method" == "credential" && -f "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase.cred" && ! -e "$plain" ]]; then
+        _tn_guard_say log "${svc} already reads its passphrase from the encrypted credential." "$fn"
+        return 0
+    fi
+    rc=0
+    _tn_cred_pass_plain || rc=$?
+    [[ $rc -eq 2 ]] && return 1
+    if [[ $rc -ne 0 ]]; then
+        if ! _tn_cred_plain_ok "$plain"; then
+            _tn_guard_say warn "No stored passphrase to move (${conf}/bls-passphrase is missing or not a root-owned file); type it instead: sudo ./edit-config.sh --migrate-credential" "$fn"
+            return 1
+        fi
+        if ! _tn_passfile_trim_safe "$plain"; then
+            _tn_guard_say warn "${conf}/bls-passphrase has more than one line or ends in whitespace; change the passphrase with edit-config.sh first." "$fn"
+            return 1
+        fi
+        TN_CRED_PASS=""
+        IFS= read -r TN_CRED_PASS < "$plain" || true
+        TN_CRED_PASS="${TN_CRED_PASS%"$cr"}"
+    fi
+    if ! tn_passphrase_ok "$TN_CRED_PASS"; then
+        TN_CRED_PASS=""
+        _tn_guard_say warn "The passphrase is empty, holds a line break, or starts or ends with whitespace, which the credential cannot carry; change it with edit-config.sh first." "$fn"
+        return 1
+    fi
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if ! key="$(tn_credential_key "$net")"; then
+        TN_CRED_PASS=""
+        return 1
+    fi
+    rc=0
+    _tn_cred_switch credential "$key" "${TN_BIND_PCRS:-}" "$fn" || rc=$?
+    TN_CRED_PASS=""
+    return "$rc"
+}
+
+
+# tn_migrate_embedded_passphrase UNIT [progress-fn] -- move a unit that embeds the
+# passphrase (tn_has_embedded_passphrase) to the current unit and start script,
+# with the value stored as the encrypted credential, or on hosts below systemd 250
+# (testnet only) as a root 0600 file. The value is read by awk from the unit
+# (_tn_unit_pass_read) unless the caller set TN_CRED_PASS; it never reaches a
+# command line. Every unit backup holding TN_BLS_PASSPHRASE= is shredded after
+# the node came back. rc as tn_migrate_credential; rc 0 also when UNIT embeds
+# nothing.
+tn_migrate_embedded_passphrase() {
+    local unit="${1:-}" fn="${2:-}" net key="" target=stdin rc=0
+    if ! tn_has_embedded_passphrase "$unit"; then
+        _tn_guard_say log "${unit} does not hold a passphrase." "$fn"
+        return 0
+    fi
+    _tn_cred_pass_plain || rc=$?
+    [[ $rc -eq 2 ]] && return 1
+    if [[ $rc -ne 0 ]] && ! _tn_unit_pass_read "$unit"; then
+        _tn_guard_say warn "The passphrase in ${unit} cannot be read back as one plain value; type it instead: sudo ./edit-config.sh --migrate-credential" "$fn"
+        return 1
+    fi
+    rc=0
+    if ! tn_passphrase_ok "$TN_CRED_PASS"; then
+        TN_CRED_PASS=""
+        _tn_guard_say warn "The passphrase in ${unit} starts or ends with whitespace, which the new delivery would cut; change it with edit-config.sh option 5 after typing it: sudo ./edit-config.sh --migrate-credential" "$fn"
+        return 1
+    fi
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if tn_creds_supported; then
+        target=credential
+        if ! key="$(tn_credential_key "$net")"; then
+            TN_CRED_PASS=""
+            return 1
+        fi
+    fi
+    _tn_cred_switch "$target" "$key" "${TN_BIND_PCRS:-}" "$fn" || rc=$?
+    TN_CRED_PASS=""
+    return "$rc"
+}
+
+# tn_host_audit -- print a summary of host hardening for the node, one
+# "ok|warn|info  text" line per fact: systemd version against the floor, how the
+# BLS passphrase is stored (method, key, files; never the value), TPM2 presence,
+# a dm-crypt layer under the data and config dirs, core dumps (LimitCORE= of the
+# unit, fs.suid_dumpable, kernel.core_pattern) and kernel.yama.ptrace_scope.
+# rc 0 when nothing warned, 1 otherwise. Reads only.
+tn_host_audit() {
+    local warn=0 v meta method key svc unit conf data cred plain d src types s pat
+    conf="${TN_ROOT_PREFIX:-}${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    _tn_audit_say() {
+        [[ "$1" == "warn" ]] && warn=1
+        printf '%-5s %s\n' "$1" "$2"
+    }
+    if v="$(tn_systemd_version)"; then
+        if (( v >= TN_CRED_MIN_SYSTEMD )); then
+            _tn_audit_say ok "systemd ${v} (encrypted credentials supported)"
+        else
+            _tn_audit_say warn "systemd ${v}: below ${TN_CRED_MIN_SYSTEMD}, no encrypted credentials (mainnet needs Ubuntu 24.04)"
+        fi
+    else
+        _tn_audit_say warn "systemd version unknown"
+    fi
+    method="$(meta_get PASSPHRASE_METHOD "$meta" 2>/dev/null)" || method=""
+    key="$(meta_get CREDENTIAL_KEY "$meta" 2>/dev/null)" || key=""
+    cred="${conf}/bls-passphrase.cred"
+    plain="${conf}/bls-passphrase"
+    case "$method" in
+        credential) _tn_audit_say ok "BLS passphrase: encrypted credential (${key:-key not recorded})" ;;
+        stdin|loadcredential) _tn_audit_say warn "BLS passphrase: plaintext root-only file; encrypt it with edit-config.sh --migrate-credential" ;;
+        tpm) _tn_audit_say warn "BLS passphrase: sealed with the old TPM method; move it with edit-config.sh --migrate-credential" ;;
+        "") _tn_audit_say info "BLS passphrase: no PASSPHRASE_METHOD recorded (no node installed?)" ;;
+        *) _tn_audit_say warn "BLS passphrase: unknown PASSPHRASE_METHOD" ;;
+    esac
+    if [[ -e "$cred" ]]; then
+        s="$(stat -c '%U:%G %a' -- "$cred" 2>/dev/null || true)"
+        if [[ "$s" == "root:root 600" && ! -L "$cred" ]]; then
+            _tn_audit_say ok "${cred} root:root 600"
+        else
+            _tn_audit_say warn "${cred} is ${s:-unreadable} (expected root:root 600)"
+        fi
+    fi
+    if [[ -e "$plain" && "$method" == "credential" ]]; then
+        _tn_audit_say warn "${plain} still exists beside the credential; edit-config.sh --migrate-credential shreds it"
+    fi
+    if [[ -e "${conf}/bls-tpm.pub" || -e "${conf}/bls-tpm.priv" ]]; then
+        _tn_audit_say warn "old TPM sealed blobs in ${conf}; edit-config.sh --migrate-credential removes them"
+    fi
+    svc="$(tn_resolve_service 2>/dev/null)" || svc=""
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc:-telcoin}.service"
+    if [[ -n "$svc" ]] && tn_has_embedded_passphrase "$unit"; then
+        _tn_audit_say warn "${unit} holds the passphrase; run edit-config.sh --migrate-credential"
+    fi
+    if command -v systemd-creds >/dev/null 2>&1 && systemd-creds has-tpm2 >/dev/null 2>&1; then
+        _tn_audit_say ok "TPM2 usable by systemd-creds"
+    else
+        _tn_audit_say info "no usable TPM2 (credentials rest on the host key)"
+    fi
+    data="$(meta_get DATA_DIR "$meta" 2>/dev/null)" || data=""
+    data="${data:-$DEFAULT_DATA_DIR}"
+    for d in "$data" "${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"; do
+        [[ -d "$d" ]] || continue
+        src="$(findmnt -n -o SOURCE --target "$d" 2>/dev/null | head -n 1)"
+        types=""
+        [[ "$src" == /dev/* ]] && types="$(lsblk -s -n -o TYPE -- "$src" 2>/dev/null | tr '\n' ' ')"
+        case " $types " in
+            *" crypt "*) _tn_audit_say ok "${d}: on an encrypted (dm-crypt) device" ;;
+            *) _tn_audit_say info "${d}: no dm-crypt layer seen (${src:-unknown}); cloud disk encryption is not visible from the host" ;;
+        esac
+    done
+    if [[ -n "$svc" ]]; then
+        v="$(systemctl show -p LimitCORE --value "$svc" 2>/dev/null || true)"
+        if [[ "$v" == "0" ]]; then
+            _tn_audit_say ok "${svc}: core dumps off (LimitCORE=0)"
+        else
+            _tn_audit_say warn "${svc}: LimitCORE=${v:-unknown} (expected 0)"
+        fi
+    fi
+    v="$(cat /proc/sys/fs/suid_dumpable 2>/dev/null || true)"
+    if [[ "$v" == "0" ]]; then
+        _tn_audit_say ok "fs.suid_dumpable = 0"
+    else
+        _tn_audit_say warn "fs.suid_dumpable = ${v:-unknown} (0 keeps setuid and credential-changing processes from dumping core)"
+    fi
+    pat="$(cat /proc/sys/kernel/core_pattern 2>/dev/null || true)"
+    _tn_audit_say info "kernel.core_pattern = ${pat:-unknown}"
+    v="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || true)"
+    case "$v" in
+        1|2|3) _tn_audit_say ok "kernel.yama.ptrace_scope = ${v}" ;;
+        *) _tn_audit_say warn "kernel.yama.ptrace_scope = ${v:-unavailable} (1 or higher keeps processes from tracing the node)" ;;
+    esac
+    unset -f _tn_audit_say
+    return "$warn"
+}
+
+# (genesis hash pins: below)
 
 print_summary() {
     local title="$1"
