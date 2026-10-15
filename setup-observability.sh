@@ -95,11 +95,46 @@ health_restart_hint() {
 # health_restart_window -- right before the node restart that binds the health port:
 # the epoch-boundary wait (obs_restart_window), reported through addons_say. Without
 # lib/observability.sh 1.0.2 the restart does not wait (addons_lib_check said so).
+# rc 1 when the committee guard refuses the restart now (said); the caller skips it.
 health_restart_window() {
     if declare -F obs_restart_window >/dev/null 2>&1; then
-        obs_restart_window addons_say
+        obs_restart_window addons_say || return 1
     fi
     return 0
+}
+
+# so_meta KEY DEFAULT -- addon_meta_get for this script: a key written twice in
+# .node-meta stops the run (a JSON error in --json mode) instead of a default.
+so_meta() {
+    local v
+    if ! v="$(addon_meta_get "$1" "${2:-}")"; then
+        printf '%s\n' "__TN_DUP__"
+        return 0
+    fi
+    printf '%s\n' "$v"
+}
+so_meta_check() {
+    [[ "$2" != "__TN_DUP__" ]] && return 0
+    if json_mode; then
+        json_fail "$1 is set more than once in .node-meta; remove the extra lines and run this again"
+    fi
+    print_error "$1 is set more than once in .node-meta; remove the extra lines and run this again."
+    exit 1
+}
+
+# health_firewall_ready -- rc 0 when ufw is installed and active, so the health port's
+# source-restricted rule takes effect; otherwise says why the health check is refused
+# (--healthcheck binds on every interface) and returns 1 before anything changes.
+health_firewall_ready() {
+    if ufw_installed && ufw_active; then
+        return 0
+    fi
+    if ufw_installed; then
+        print_error "ufw is inactive, so the health port ${TN_KUMA_PORT} would be reachable from the internet. Enable the firewall first (sudo bash firewall-setup.sh), then this option again. Nothing was changed."
+    else
+        print_error "ufw is not installed, so the health port ${TN_KUMA_PORT} would be reachable from the internet. Install ufw and run firewall-setup.sh first, then this option again. Nothing was changed."
+    fi
+    return 1
 }
 
 # Load NETWORK + node context from .node-meta so require_testnet can gate.
@@ -111,9 +146,23 @@ load_node_context() {
         print_info  "Run setup-node.sh first."
         exit 1
     fi
-    NETWORK="$(meta_get NETWORK "$meta" 2>/dev/null || true)"
-    INSTALL_METHOD="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"
-    REGION="$(meta_get REGION "$meta" 2>/dev/null || true)"
+    NETWORK="$(so_meta NETWORK "")"; so_meta_check NETWORK "$NETWORK"
+    INSTALL_METHOD="$(so_meta INSTALL_METHOD binary)"; so_meta_check INSTALL_METHOD "$INSTALL_METHOD"
+    [[ -n "$INSTALL_METHOD" ]] || INSTALL_METHOD="binary"
+    REGION="$(so_meta REGION "")"; so_meta_check REGION "$REGION"
+}
+
+# so_write_begin -- before the first change: the update lock and, on a host set up
+# by an older release, the ownership migration (addon_meta_write_begin). Stops the
+# run when either refuses.
+so_write_begin() {
+    if addon_meta_write_begin; then
+        return 0
+    fi
+    if json_mode; then
+        json_fail "the update lock or the ownership migration stopped this run (see the server log); nothing was changed"
+    fi
+    exit 1
 }
 
 # _obs_prompt_region — set REGION (shared identity label), defaulting to the current value.
@@ -150,7 +199,7 @@ enable_logging() {
     echo ""
     # Turn logs on; preserve any existing metrics opt-in so obs_enable renders both.
     local meta; meta="$(node_meta_path || true)"
-    ENABLE_METRICS="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
+    ENABLE_METRICS="$(so_meta ENABLE_METRICS false)"; so_meta_check ENABLE_METRICS "$ENABLE_METRICS"
     ENABLE_OBSERVABILITY="true"
     _obs_prompt_region
     if _obs_collect_token; then
@@ -172,7 +221,7 @@ enable_metrics() {
     echo ""
     # Turn metrics on; preserve any existing logs opt-in so obs_enable renders both.
     local meta; meta="$(node_meta_path || true)"
-    ENABLE_OBSERVABILITY="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
+    ENABLE_OBSERVABILITY="$(so_meta ENABLE_OBSERVABILITY false)"; so_meta_check ENABLE_OBSERVABILITY "$ENABLE_OBSERVABILITY"
     ENABLE_METRICS="true"
     _obs_prompt_region
     if _obs_collect_token; then
@@ -208,6 +257,7 @@ enable_health() {
     print_info "ufw rule to the Association monitor only (${TN_KUMA_SRC})."
     addons_lib_check
     echo ""
+    health_firewall_ready || return 0
     local target svc method file live=true why=""
     if target="$(tn_node_launch_target)"; then
         read -r svc method file <<< "$target"
@@ -216,8 +266,9 @@ enable_health() {
             print_ok "Added --healthcheck ${TN_KUMA_PORT} to ${file}"
             print_warn "The node must restart for the health endpoint to bind."
             if confirm "Restart ${svc} now?"; then
-                health_restart_window
-                if systemctl restart "$svc"; then
+                if ! health_restart_window; then
+                    print_info "$(health_restart_hint "$svc")"
+                elif systemctl restart "$svc"; then
                     print_ok "${svc} restarted."
                 else
                     print_warn "Restart failed; check journalctl -u ${svc} -n 50. $(health_restart_hint "$svc")"
@@ -292,7 +343,7 @@ show_status() {
     print_step "Health monitor"
     local meta hc
     meta="$(node_meta_path || true)"
-    hc="$(meta_get ENABLE_HEALTHCHECK_MONITOR "$meta" 2>/dev/null || echo false)"
+    hc="$(so_meta ENABLE_HEALTHCHECK_MONITOR false)"; so_meta_check ENABLE_HEALTHCHECK_MONITOR "$hc"
     print_info "Configured: ENABLE_HEALTHCHECK_MONITOR=${hc:-false}"
     local extras; extras="$(kuma_extra_list)"
     [[ -n "$extras" ]] && print_info "Additional health-port sources (besides ${TN_KUMA_SRC}): ${extras}"
@@ -346,6 +397,7 @@ json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
 # yields done:false, with the last error event's message when there was one.
 json_on_exit() {
     local rc=$? msg
+    tn_release_update_lock 2>/dev/null || true
     [[ "$JSON_DONE_EMITTED" == "true" ]] && return
     msg="$JSON_LAST_ERROR"
     if [[ -z "$msg" ]]; then
@@ -431,12 +483,12 @@ json_enable_pipes() {
     if [[ "$want_logs" == "true" ]]; then
         ENABLE_OBSERVABILITY="true"
     else
-        ENABLE_OBSERVABILITY="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
+        ENABLE_OBSERVABILITY="$(so_meta ENABLE_OBSERVABILITY false)"; so_meta_check ENABLE_OBSERVABILITY "$ENABLE_OBSERVABILITY"
     fi
     if [[ "$want_metrics" == "true" ]]; then
         ENABLE_METRICS="true"
     else
-        ENABLE_METRICS="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
+        ENABLE_METRICS="$(so_meta ENABLE_METRICS false)"; so_meta_check ENABLE_METRICS "$ENABLE_METRICS"
     fi
     OBS_FLAG_ERROR=""
     if ! obs_enable "$token" addons_say; then
@@ -461,6 +513,7 @@ json_enable_pipes() {
 json_enable_health() {
     local target svc method file rc=0
     json_need_node "health monitoring"
+    health_firewall_ready || json_fail "health monitoring needs an active ufw firewall first (run firewall-setup.sh); nothing was changed"
     target="$(tn_node_launch_target)"
     read -r svc method file <<< "$target"
     OBS_FLAG_ERROR=""
@@ -511,6 +564,7 @@ run_json_mode() {
     detect_distro
     load_node_context
     require_testnet
+    so_write_begin
     export TN_ASSUME_YES=true   # belt-and-braces: no lib confirm should block
 
     # In json mode set REGION from --region instead of prompting (mirrors _obs_prompt_region).
@@ -609,6 +663,8 @@ main() {
     done
     if json_mode; then
         json_setup_fds
+        # json_on_exit releases the update lock too.
+        TN_EXIT_TRAP_OWNED=1
         trap json_on_exit EXIT
     fi
     while [[ $# -gt 0 ]]; do
@@ -645,6 +701,7 @@ main() {
     detect_distro
     load_node_context
     require_testnet
+    so_write_begin
     main_menu
 }
 

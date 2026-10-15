@@ -46,6 +46,14 @@ OBS_HTTP_ADDR="127.0.0.1:12345"           # Alloy's own metrics/UI (localhost on
 : "${DEFAULT_INSTALL_DIR:=/opt/telcoin}"
 : "${SERVICE_USER:=telcoin}"
 : "${SERVICE_GROUP:=telcoin}"
+# Native Alloy runs as its own system account, never as the node's service user.
+OBS_ALLOY_USER="telcoin-alloy"
+# Node-written JSON logs (binary installs): a directory the node owns inside the
+# root-owned log dir, group telcoin-log so Alloy can read it. Recorded as NODE_LOG_DIR.
+: "${OBS_NODE_LOG_DIR_DEFAULT:=${DEFAULT_LOG_DIR}/node}"
+# Primary fingerprint of Grafana's apt signing key (checked against
+# https://apt.grafana.com/gpg.key and the Ubuntu keyserver, 2026-10-15).
+OBS_GRAFANA_KEY_FPR="B53AE77BADB630A683046005963FA27710458545"
 
 # -----------------------------------------------------------------------------
 # Effective push-URL selection (testnet vs devnet, with explicit override)
@@ -60,13 +68,17 @@ OBS_HTTP_ADDR="127.0.0.1:12345"           # Alloy's own metrics/UI (localhost on
 # For testnet with no override this resolves to exactly $OBS_PUSH_URL_TESTNET /
 # $OBS_METRICS_PUSH_URL_TESTNET — i.e. the testnet render is byte-for-byte
 # unchanged. Devnet with nothing configured yields EMPTY; obs_enable guards on
-# that and refuses to write a config that ships nowhere.
+# that and refuses to write a config that ships nowhere. Any NETWORK other than
+# testnet and devnet (mainnet, unset, unknown) yields EMPTY, override or not, so the
+# add-on never ships a mainnet node's logs anywhere.
 obs_effective_push_url() {
+    case "${NETWORK:-}" in testnet|devnet) ;; *) return 0 ;; esac
     if [[ -n "${OBS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_PUSH_URL}"
     elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_PUSH_URL_DEVNET:-}"
     else printf '%s' "${OBS_PUSH_URL_TESTNET}"; fi
 }
 obs_effective_metrics_url() {
+    case "${NETWORK:-}" in testnet|devnet) ;; *) return 0 ;; esac
     if [[ -n "${OBS_METRICS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL}"
     elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL_DEVNET:-}"
     else printf '%s' "${OBS_METRICS_PUSH_URL_TESTNET}"; fi
@@ -79,18 +91,28 @@ obs_effective_metrics_url() {
 # obs_reth_log_flags <docker|binary> — the reth flags that make the node write a
 # JSON appender Alloy can tail, as ONE space-joined string. The log dir differs by
 # runtime: docker writes the container path /home/nonroot/logs (= host DATA_DIR/logs);
-# binary writes the host path /var/log/telcoin. reth appends telcoin-network-logs/ to
-# whatever --log.file.directory is given (telcoin-network-cli/src/cli.rs), so the
-# config.alloy __path__ (/var/log/telcoin/telcoin-network-logs/reth.log*) matches both:
-# the docker sidecar mounts DATA_DIR/logs -> /var/log/telcoin, native reads it directly.
+# binary writes the node log dir (obs_node_log_dir, /var/log/telcoin/node). reth
+# appends telcoin-network-logs/ to whatever --log.file.directory is given
+# (telcoin-network-cli/src/cli.rs). The docker sidecar mounts DATA_DIR/logs ->
+# /var/log/telcoin, matching config.alloy's __path__; for native Alloy
+# obs_write_config_alloy points __path__ at the node log dir.
 obs_reth_log_flags() {
     local method="${1:-binary}" dir
     if [[ "$method" == "docker" ]]; then
         dir="/home/nonroot/logs"
     else
-        dir="${DEFAULT_LOG_DIR}"
+        dir="$(obs_node_log_dir)"
     fi
     printf '%s' "--log.file.format json --log.file.directory ${dir} --log.file.max-size 100 --log.file.max-files 5"
+}
+
+# obs_node_log_dir — where a binary install's node writes its JSON logs: NODE_LOG_DIR
+# (global, else .node-meta), else /var/log/telcoin/node. A duplicated key falls back to
+# the default (obs_enable reads the key strictly first).
+obs_node_log_dir() {
+    local d="${NODE_LOG_DIR:-}"
+    [[ -n "$d" ]] || d="$(meta_get NODE_LOG_DIR 2>/dev/null)" || d=""
+    printf '%s\n' "${d:-$OBS_NODE_LOG_DIR_DEFAULT}"
 }
 
 # obs_metrics_port — the node metrics port as configured: METRICS_PORT (global at install
@@ -136,8 +158,12 @@ obs_metrics_reth_flags() {
 # tn_resolve_data_dir (lib/fallback.sh, which knows the unified and the legacy layouts)
 # finds, else DEFAULT_DATA_DIR. Docker installs keep the reth logs under <data dir>/logs.
 _obs_data_dir() {
-    local dd
-    dd="$(meta_get DATA_DIR "${1:-}" 2>/dev/null || true)"
+    local dd rc=0
+    dd="$(meta_get DATA_DIR "${1:-}" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        print_error "DATA_DIR is set more than once in .node-meta; remove the extra lines and run this again." >&2
+        return 2
+    fi
     if [[ -z "$dd" ]] && declare -F tn_resolve_data_dir >/dev/null 2>&1; then
         dd="$(tn_resolve_data_dir 2>/dev/null || true)"
     fi
@@ -195,17 +221,21 @@ obs_label_sourcing() {
 # matching observability/config.alloy. The per-pipeline blocks are sliced straight out of
 # that single checked-in source (no drift); a missing source falls back to an embedded,
 # functionally-identical copy that the same slicer renders.
+# <logdir> (optional, native installs): the directory reth writes telcoin-network-logs/
+# under; __path__ is pointed there. The file is root-owned, group <group> (default
+# root), mode 0640, so only Alloy's account can read it.
 obs_write_config_alloy() {
-    local dest="${1:-${OBS_ETC_DIR}/config.alloy}"
+    local dest="${1:-${OBS_ETC_DIR}/config.alloy}" logdir="${2:-}" group="${3:-root}"
     install -d -m 0750 "$(dirname "$dest")"
     local src="$OBS_CONFIG_SRC" tmp=""
     if [[ ! -f "$src" ]]; then
         print_warn "observability/config.alloy missing; using the embedded fallback (functionally identical)."
         tmp="$(mktemp)"; _obs_alloy_fallback > "$tmp"; src="$tmp"
     fi
-    _obs_slice_alloy "$src" "$dest"
+    _obs_slice_alloy "$src" "$dest" "$logdir"
     [[ -n "$tmp" ]] && rm -f "$tmp"
-    chmod 0644 "$dest"
+    chown "root:${group}" "$dest" 2>/dev/null || true
+    chmod 0640 "$dest"
 }
 
 # _obs_slice_alloy <src> <dest> — copy src to dest keeping only the enabled pipeline
@@ -214,11 +244,14 @@ obs_write_config_alloy() {
 # divider; everything before the first anchor is the shared header (always kept). Both
 # pipelines enabled → byte-identical to src.
 _obs_slice_alloy() {
-    local src="$1" dest="$2" logs=0 metrics=0
+    local src="$1" dest="$2" logdir="${3:-}" logs=0 metrics=0
     [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]] && logs=1
     [[ "${ENABLE_METRICS:-false}" == "true" ]] && metrics=1
-    awk -v logs="$logs" -v metrics="$metrics" '
-        BEGIN { region = "header" }
+    TN_OBS_LOGDIR="$logdir" awk -v logs="$logs" -v metrics="$metrics" '
+        BEGIN { region = "header"; nd = ENVIRON["TN_OBS_LOGDIR"]; od = "/var/log/telcoin/telcoin-network-logs/" }
+        nd != "" && /__path__/ && (i = index($0, od)) > 0 {
+            $0 = substr($0, 1, i - 1) nd "/telcoin-network-logs/" substr($0, i + length(od))
+        }
         /^local\.file_match/         { region = "logs" }
         /^\/\/ --- Metrics pipeline/ { region = "metrics" }
         region == "header"                  { print; next }
@@ -389,14 +422,51 @@ _obs_disable_packaged_alloy() {
     systemctl disable --now alloy.service >/dev/null 2>&1 || true
 }
 
+# _obs_key_fpr <keyring> <gpg-home> — the primary fingerprint of a binary keyring that
+# holds exactly one primary key; rc 1 otherwise.
+_obs_key_fpr() {
+    local out
+    out="$(gpg --homedir "$2" --batch --with-colons --show-keys "$1" 2>/dev/null)" || return 1
+    printf '%s\n' "$out" | awk -F: '
+        $1 == "pub" { n++; want = 1; next }
+        $1 == "fpr" && want { fpr = $10 }
+        { want = 0 }
+        END { if (n != 1 || fpr == "") exit 1; print fpr }'
+}
+
+# _obs_grafana_key <dest> — install Grafana's apt key at <dest> (root 0644) only when
+# it holds one primary key with OBS_GRAFANA_KEY_FPR. An existing <dest> with that
+# fingerprint is kept; any other is replaced by a verified download. rc 1 on a failed
+# download or another fingerprint (nothing installed).
+_obs_grafana_key() {
+    local dest="$1" tmp fpr rc=0
+    tmp="$(mktemp -d)" || return 1
+    mkdir -m 0700 "${tmp}/gpg" || { rm -rf "$tmp"; return 1; }
+    if [[ -f "$dest" && ! -L "$dest" ]] && fpr="$(_obs_key_fpr "$dest" "${tmp}/gpg")" \
+        && [[ "$fpr" == "$OBS_GRAFANA_KEY_FPR" ]]; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    if ! curl --proto '=https' --tlsv1.2 -fsSL -o "${tmp}/key.asc" https://apt.grafana.com/gpg.key \
+        || ! gpg --homedir "${tmp}/gpg" --batch --yes --dearmor -o "${tmp}/key.gpg" "${tmp}/key.asc" >/dev/null 2>&1; then
+        print_warn "Could not download Grafana's apt key."
+        rc=1
+    elif ! fpr="$(_obs_key_fpr "${tmp}/key.gpg" "${tmp}/gpg")" || [[ "$fpr" != "$OBS_GRAFANA_KEY_FPR" ]]; then
+        print_error "Grafana's apt key has fingerprint ${fpr:-unreadable}, not the expected ${OBS_GRAFANA_KEY_FPR}; not using the Grafana repository."
+        rc=1
+    elif ! tn_write_root_file "$dest" 0644 < "${tmp}/key.gpg"; then
+        rc=1
+    fi
+    rm -rf "$tmp"
+    return "$rc"
+}
+
 _obs_install_alloy_apt() {
     command -v gpg >/dev/null 2>&1 || apt-get install -y gnupg >/dev/null 2>&1 || true
     local key=/etc/apt/keyrings/grafana.gpg
     install -d -m 0755 /etc/apt/keyrings
-    if [[ ! -f "$key" ]]; then
-        curl --proto '=https' --tlsv1.2 -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o "$key" 2>/dev/null || return 1
-    fi
-    echo "deb [signed-by=${key}] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
+    _obs_grafana_key "$key" || return 1
+    echo "deb [signed-by=${key}] https://apt.grafana.com stable main" | tn_write_root_file /etc/apt/sources.list.d/grafana.list 0644 || return 1
     apt-get update -y >/dev/null 2>&1 || return 1
     # Install the pinned version only. Grafana packages Alloy with a Debian
     # revision (e.g. 1.5.1-1), so an exact "=1.5.1" pin never matches -- resolve
@@ -429,28 +499,31 @@ _obs_install_alloy_tarball() {
     url="https://github.com/grafana/alloy/releases/download/v${TN_ALLOY_NATIVE_VERSION}/alloy-linux-${arch}.zip"
     tmp="$(mktemp -d)"
     print_info "Downloading ${url}"
-    if curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "${tmp}/alloy.zip" 2>/dev/null; then
-        # Verify the download against the release SHA256SUMS before installing.
-        # Grafana ships a single SHA256SUMS per release (not a per-asset .sha256
-        # sidecar), so pull our asset's line out of it. Handles both the plain
-        # ("hash  asset") and binary ("hash *asset") sums formats.
-        local want got asset sums_url
-        asset="alloy-linux-${arch}.zip"
-        sums_url="https://github.com/grafana/alloy/releases/download/v${TN_ALLOY_NATIVE_VERSION}/SHA256SUMS"
-        want="$(curl --proto '=https' --tlsv1.2 -fsSL --max-time 15 "$sums_url" 2>/dev/null \
-            | awk -v a="$asset" '{f=$2; sub(/^\*/,"",f); if (f==a){print $1; exit}}')"
-        if [[ -n "$want" ]]; then
-            got="$(sha256sum "${tmp}/alloy.zip" 2>/dev/null | awk '{print $1}')"
-            if [[ "$want" != "$got" ]]; then
-                print_error "Alloy tarball checksum mismatch — refusing to install."
-                rm -rf "$tmp"
-                return 1
-            fi
-            print_ok "Alloy tarball checksum verified."
-        else
-            print_warn "Could not fetch Alloy checksum (SHA256SUMS); installing unverified (TLS only)."
-        fi
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "${tmp}/alloy.zip" 2>/dev/null; then
+        print_error "Could not download ${url}; Alloy was not installed."
+        rm -rf "$tmp"
+        return 1
     fi
+    # Verify the download against the release SHA256SUMS before installing; no
+    # checksum, no install. Grafana ships a single SHA256SUMS per release (not a
+    # per-asset .sha256 sidecar), so pull our asset's line out of it. Handles both the
+    # plain ("hash  asset") and binary ("hash *asset") sums formats.
+    local want got asset sums_url
+    asset="alloy-linux-${arch}.zip"
+    sums_url="https://github.com/grafana/alloy/releases/download/v${TN_ALLOY_NATIVE_VERSION}/SHA256SUMS"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 15 "$sums_url" -o "${tmp}/SHA256SUMS" 2>/dev/null; then
+        print_error "Could not fetch the Alloy checksum file (${sums_url}); Alloy was not installed."
+        rm -rf "$tmp"
+        return 1
+    fi
+    want="$(awk -v a="$asset" '{f=$2; sub(/^\*/,"",f); if (f==a){print $1; exit}}' "${tmp}/SHA256SUMS")"
+    got="$(sha256sum "${tmp}/alloy.zip" 2>/dev/null | awk '{print $1}')"
+    if [[ ! "$want" =~ ^[0-9a-f]{64}$ || "$want" != "$got" ]]; then
+        print_error "Alloy tarball checksum ${want:+mismatch}${want:-missing for ${asset}} — refusing to install."
+        rm -rf "$tmp"
+        return 1
+    fi
+    print_ok "Alloy tarball checksum verified."
     if [[ -f "${tmp}/alloy.zip" ]] && ( cd "$tmp" && unzip -o -q alloy.zip ) 2>/dev/null; then
         bin="$(find "$tmp" -maxdepth 1 -type f -name 'alloy-linux-*' ! -name '*.zip' | head -1)"
         [[ -n "$bin" ]] || bin="$(find "$tmp" -maxdepth 1 -type f -name 'alloy*' ! -name '*.zip' | head -1)"
@@ -484,36 +557,87 @@ obs_install_alloy_native() {
 # systemd unit writers
 # -----------------------------------------------------------------------------
 
-# obs_write_alloy_native_unit <token> — native unit + its mode-600 env file. Runs as
-# the telcoin service user (can read /var/log/telcoin, write /var/lib/telcoin-alloy).
+# obs_alloy_account — make sure the system account native Alloy runs as exists
+# (OBS_ALLOY_USER, no home, no login shell). rc 1 when it cannot be created.
+obs_alloy_account() {
+    getent passwd "$OBS_ALLOY_USER" >/dev/null 2>&1 && return 0
+    if ! useradd --system --user-group --no-create-home --home-dir "$OBS_DATA_DIR" \
+        --shell /usr/sbin/nologin "$OBS_ALLOY_USER" >/dev/null 2>&1; then
+        print_error "Could not create the system account ${OBS_ALLOY_USER} for Alloy."
+        return 1
+    fi
+    return 0
+}
+
+# obs_alloy_unit_text <alloy-binary> <env-file> <supplementary-group|""> [dir...] —
+# print the native unit. Alloy runs as OBS_ALLOY_USER with its state in
+# StateDirectory= (systemd re-owns an older state dir to that account), reads the
+# node logs through the supplementary group (telcoin-log), and cannot see the node's
+# data dir(s) given as [dir...], /var/lib/telcoin, the credential store or the
+# passphrase file.
+obs_alloy_unit_text() {
+    local bin="$1" envf="$2" grp="${3:-}" hidden d
+    shift 3
+    hidden="-/var/lib/telcoin -/etc/credstore.encrypted -/etc/telcoin/bls-passphrase"
+    for d in "$@"; do
+        if [[ -n "$d" && "$d" != /var/lib/telcoin ]]; then
+            hidden="${hidden} -${d}"
+        fi
+    done
+    printf '%s\n' \
+        '[Unit]' \
+        'Description=Telcoin node log shipper (Grafana Alloy -> central Loki)' \
+        'After=network-online.target' \
+        'Wants=network-online.target' \
+        'StartLimitIntervalSec=300' \
+        'StartLimitBurst=5' \
+        '' \
+        '[Service]' \
+        'Type=simple' \
+        "User=${OBS_ALLOY_USER}" \
+        "Group=${OBS_ALLOY_USER}"
+    if [[ -n "$grp" ]]; then
+        printf 'SupplementaryGroups=%s\n' "$grp"
+    fi
+    printf '%s\n' \
+        "EnvironmentFile=${envf}" \
+        "ExecStart=${bin} run --server.http.listen-addr=${OBS_HTTP_ADDR} --storage.path=${OBS_DATA_DIR} ${OBS_ETC_DIR}/config.alloy" \
+        "StateDirectory=${OBS_DATA_DIR##*/}" \
+        'StateDirectoryMode=0750' \
+        'ProtectSystem=strict' \
+        "ReadWritePaths=${OBS_DATA_DIR}" \
+        "InaccessiblePaths=${hidden}" \
+        'ProtectHome=yes' \
+        'PrivateTmp=yes' \
+        'PrivateDevices=yes' \
+        'NoNewPrivileges=yes' \
+        'CapabilityBoundingSet=' \
+        'ProtectProc=invisible' \
+        'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX' \
+        'Restart=on-failure' \
+        'RestartSec=10' \
+        'MemoryMax=512M' \
+        'CPUQuota=50%' \
+        'TasksMax=256' \
+        '' \
+        '[Install]' \
+        'WantedBy=multi-user.target'
+}
+
+# obs_write_alloy_native_unit <token> — native unit (obs_alloy_unit_text, root 0644)
+# + its mode-600 env file, which systemd reads as root. Alloy joins the telcoin-log
+# group when it exists. rc 1 when the unit could not be written.
 obs_write_alloy_native_unit() {
-    local token="$1"
+    local token="$1" grp="" dd
     local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
     local bin; bin="$(command -v alloy 2>/dev/null || echo /usr/bin/alloy)"
     _obs_write_env_file "$envf" "$token"
-    cat > "/etc/systemd/system/${OBS_ALLOY_UNIT}" <<EOF
-[Unit]
-Description=Telcoin node log shipper (Grafana Alloy -> central Loki)
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_GROUP}
-EnvironmentFile=${envf}
-ExecStart=${bin} run --server.http.listen-addr=${OBS_HTTP_ADDR} --storage.path=${OBS_DATA_DIR} ${OBS_ETC_DIR}/config.alloy
-Restart=on-failure
-RestartSec=10
-MemoryMax=512M
-CPUQuota=50%
-TasksMax=256
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    if getent group telcoin-log >/dev/null 2>&1; then
+        grp="telcoin-log"
+    fi
+    dd="$(_obs_data_dir 2>/dev/null)" || dd=""
+    obs_alloy_unit_text "$bin" "$envf" "$grp" "$dd" \
+        | tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${OBS_ALLOY_UNIT}" 0644 || return 1
     systemctl daemon-reload
 }
 
@@ -668,7 +792,30 @@ obs_restart_window() {
     fi
     _obs_lib_has tn_wait_restart_window "$_OBS_NO_WAIT" "$fn" || return 0
     tn_wait_restart_window "" "$fn" || true
-    return 0
+    obs_quorum_guard "$fn"
+}
+
+# obs_quorum_guard [progress-fn] — rc 0 when a node restart may go ahead now: the
+# committee guard (tn_committee_down_guard) passes, cannot read the committee (warned),
+# or TN_ALLOW_QUORUM_RISK=1 overrides it. rc 1 when the restart would leave the
+# committee without a quorum (said; the caller does not restart).
+obs_quorum_guard() {
+    local fn="${1:-obs_wait_say}" rc=0
+    declare -F "$fn" >/dev/null 2>&1 || fn="obs_wait_say"
+    # CORE-2: drop the declare -F guard once tn_committee_down_guard is in lib/common.sh.
+    declare -F tn_committee_down_guard >/dev/null 2>&1 || return 0
+    tn_committee_down_guard "" "$fn" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        2) "$fn" warn "The committee could not be read, so the restart goes ahead without the quorum check." || true
+           return 0 ;;
+    esac
+    if [[ "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]]; then
+        "$fn" warn "TN_ALLOW_QUORUM_RISK=1: restarting although the committee may lose its quorum." || true
+        return 0
+    fi
+    "$fn" warn "Not restarting: the committee could lose its quorum (see above). Restart later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart." || true
+    return 1
 }
 
 # obs_restart_hint SVC -- how to restart the node later without landing on an epoch
@@ -772,6 +919,23 @@ _obs_flags_apply() {
                 failed=1
             fi
         fi
+        # Binary installs write their JSON logs to the node log dir (NODE_LOG_DIR), not
+        # to the root-owned log dir an older release named.
+        if [[ "$method" != "docker" && "$have_get" == "true" && "$failed" -eq 0 ]]; then
+            local want_dir cur_dir
+            want_dir="$(obs_node_log_dir)"
+            cur_dir="$(tn_launch_flag_get "$file" --log.file.directory 2>/dev/null)" || cur_dir=""
+            if [[ "$cur_dir" != "$want_dir" ]]; then
+                rc=0
+                tn_launch_flag_set "$file" --log.file.directory "$want_dir" >/dev/null 2>&1 || rc=$?
+                case "$rc" in
+                    0) print_step "Pointing the node's JSON logs at ${want_dir}"; _OBS_FLAGS_CHANGED=1 ;;
+                    1) ;;
+                    *) _obs_flag_error "Could not set --log.file.directory ${want_dir} on the node command in ${shown}. Set it by hand, then run this enable again."
+                       failed=1 ;;
+                esac
+            fi
+        fi
     fi
 
     if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
@@ -814,7 +978,9 @@ obs_check_reth_flags() {
     fi
     copy="$file"     # a missing file: every read and edit fails the same way, nothing is written
     if [[ -f "$file" ]]; then
-        tmpd="$(mktemp -d 2>/dev/null || true)"
+        # Under /run (root-owned, closed to others): the launch writer refuses a copy
+        # in a directory such as /tmp.
+        tmpd="$(mktemp -d "${TN_OBS_RUN_PARENT:-/run}/tn-obs.XXXXXX" 2>/dev/null || true)"
         [[ -n "$tmpd" && -d "$tmpd" ]] || return 0
         copy="${tmpd}/${file##*/}"
         if ! cp "$file" "$copy" 2>/dev/null; then
@@ -879,8 +1045,9 @@ obs_ensure_reth_flags() {
 
     print_warn "The node must restart to pick up the new reth flags."
     if confirm "Restart ${svc} now?"; then
-        obs_restart_window "$fn"
-        if systemctl restart "$svc"; then
+        if ! obs_restart_window "$fn"; then
+            print_info "Restart later. $(obs_restart_hint "$svc")"
+        elif systemctl restart "$svc"; then
             print_ok "${svc} restarted."
         else
             print_warn "Restart failed; check journalctl -u ${svc} -n 50. $(obs_restart_hint "$svc")"
@@ -904,6 +1071,31 @@ obs_ensure_reth_flags() {
 # serves BOTH pipelines (one obs-hub gate). rc 1 on any failure; when the cause is a
 # node flag that could not be added, OBS_FLAG_ERROR says why and .node-meta is left
 # as it was.
+# obs_prepare_node_log_dir — create the node log dir (NODE_LOG_DIR from .node-meta,
+# else /var/log/telcoin/node) as SERVICE_USER:telcoin-log 0750 with install -d (no
+# recursive chown) and print it. Refused (rc 1, said): a duplicated NODE_LOG_DIR, no
+# telcoin-log group, a path that is not absolute or is a symlink, or a parent that is
+# not a root-owned directory closed to others.
+obs_prepare_node_log_dir() {
+    local d parent
+    d="$(addon_meta_get NODE_LOG_DIR "$OBS_NODE_LOG_DIR_DEFAULT")" || return 1
+    [[ -n "$d" ]] || d="$OBS_NODE_LOG_DIR_DEFAULT"
+    if ! getent group telcoin-log >/dev/null 2>&1; then
+        print_error "There is no telcoin-log group, so the node log dir ${d} cannot be created. Run update-node.sh or edit-config.sh once (they move the host to the root-owned layout), then this enable again."
+        return 1
+    fi
+    parent="${d%/*}"
+    if [[ "$d" != /* || -L "$d" || -z "$parent" ]] || ! tn_root_dir_ok "$parent"; then
+        print_error "Refusing the node log dir ${d}: it must be an absolute path that is not a symlink, inside a root-owned directory closed to others."
+        return 1
+    fi
+    if ! install -d -o "$SERVICE_USER" -g telcoin-log -m 0750 -- "$d"; then
+        print_error "Could not create the node log dir ${d}."
+        return 1
+    fi
+    printf '%s\n' "$d"
+}
+
 obs_enable() {
     local token="${1:-}" progress="${2:-}"
     OBS_FLAG_ERROR=""
@@ -949,31 +1141,46 @@ obs_enable() {
         return 1
     fi
 
-    local meta method
+    local meta method nld="" dd
     meta="$(node_meta_path || true)"
-    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
+    method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
+    [[ -n "$method" ]] || method="binary"
+
+    if [[ "$method" != "docker" ]]; then
+        # Native Alloy: its own account, reading the node log dir through telcoin-log.
+        if [[ "$logs_on" == "true" ]]; then
+            nld="$(obs_prepare_node_log_dir)" || return 1
+            NODE_LOG_DIR="$nld"
+        fi
+        obs_alloy_account || return 1
+        if ! getent group telcoin-log >/dev/null 2>&1; then
+            print_warn "There is no telcoin-log group on this host, so Alloy cannot read the node logs. Run update-node.sh or edit-config.sh once (they move the host to the root-owned layout and create the group), then this enable again."
+        fi
+    fi
 
     OBS_ALLOY_TOUCHED=true
-    install -d -m 0750 "$OBS_ETC_DIR"
-    obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
-
     if [[ "$method" == "docker" ]]; then
+        install -d -m 0750 "$OBS_ETC_DIR"
+        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
         local log_host_dir
-        log_host_dir="$(_obs_data_dir "$meta")/logs"
-        install -d -m 0755 "$log_host_dir"
-        chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$log_host_dir" 2>/dev/null || true
+        dd="$(_obs_data_dir "$meta")" || return 1
+        log_host_dir="${dd}/logs"
+        # Inside the data dir: created by the service user, never chowned by root.
+        if ! tn_as_service_user mkdir -p -m 0755 -- "$log_host_dir"; then
+            print_error "Could not create ${log_host_dir} as ${SERVICE_USER}."
+            return 1
+        fi
         install -d -m 0750 "$OBS_DATA_DIR"
         obs_run_alloy_docker "$token" "$log_host_dir"
     else
-        install -d -m 0755 "$DEFAULT_LOG_DIR"
-        chown "${SERVICE_USER}:${SERVICE_GROUP}" "$DEFAULT_LOG_DIR" 2>/dev/null || true
-        install -d -m 0750 "$OBS_DATA_DIR"
-        chown "${SERVICE_USER}:${SERVICE_GROUP}" "$OBS_DATA_DIR" 2>/dev/null || true
+        install -d -m 0750 -o root -g "$OBS_ALLOY_USER" "$OBS_ETC_DIR"
+        chgrp "$OBS_ALLOY_USER" "$OBS_ETC_DIR" 2>/dev/null || true
+        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy" "$nld" "$OBS_ALLOY_USER"
         if ! obs_install_alloy_native; then
-            print_error "Could not install Alloy natively (apt + tarball both failed)."
+            print_error "Could not install Alloy natively (apt + tarball both failed, or the download did not verify)."
             return 1
         fi
-        obs_write_alloy_native_unit "$token"
+        obs_write_alloy_native_unit "$token" || { print_error "Could not write the ${OBS_ALLOY_UNIT} unit."; return 1; }
     fi
 
     # enable (boot) + restart (now): restart also reloads a rewritten config/env when the
@@ -1000,6 +1207,7 @@ obs_enable() {
         meta_set ENABLE_OBSERVABILITY "$logs_on" "$meta"
         meta_set ENABLE_METRICS "$metrics_on" "$meta"
         [[ -n "${REGION:-}" ]] && meta_set REGION "$REGION" "$meta"
+        [[ -n "$nld" ]] && meta_set NODE_LOG_DIR "$nld" "$meta"
     fi
 
     local what=""
@@ -1043,7 +1251,7 @@ obs_disable() {
 obs_disable_logs() {
     local meta metrics_on
     meta="$(node_meta_path || true)"
-    metrics_on="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
+    metrics_on="$(addon_meta_get ENABLE_METRICS false)" || return 1
     if [[ "$metrics_on" == "true" ]]; then
         print_step "Disabling log shipping (metrics stays on)"
         ENABLE_OBSERVABILITY=false; ENABLE_METRICS=true
@@ -1064,7 +1272,7 @@ obs_disable_logs() {
 obs_disable_metrics() {
     local meta logs_on
     meta="$(node_meta_path || true)"
-    logs_on="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
+    logs_on="$(addon_meta_get ENABLE_OBSERVABILITY false)" || return 1
     if [[ "$logs_on" == "true" ]]; then
         print_step "Disabling metrics shipping (logs stays on)"
         ENABLE_OBSERVABILITY=true; ENABLE_METRICS=false
@@ -1086,9 +1294,9 @@ obs_status() {
     print_step "Observability (logs + metrics shipping)"
     local meta logs_enabled metrics_enabled method
     meta="$(node_meta_path || true)"
-    logs_enabled="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
-    metrics_enabled="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
-    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"
+    logs_enabled="$(addon_meta_get ENABLE_OBSERVABILITY false)" || return 1
+    metrics_enabled="$(addon_meta_get ENABLE_METRICS false)" || return 1
+    method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
     print_info "Configured: ENABLE_OBSERVABILITY=${logs_enabled:-false} (logs), ENABLE_METRICS=${metrics_enabled:-false} (metrics)"
 
     # Captured first and read from a here-string: `cmd | grep -q` under pipefail fails when
@@ -1144,7 +1352,7 @@ obs_status() {
         if [[ "$method" == "docker" ]]; then
             logdir="$(_obs_data_dir "$meta")/logs/telcoin-network-logs"
         else
-            logdir="${DEFAULT_LOG_DIR}/telcoin-network-logs"
+            logdir="$(obs_node_log_dir)/telcoin-network-logs"
         fi
         logf="${logdir}/reth.log"
         if [[ -f "$logf" ]]; then
