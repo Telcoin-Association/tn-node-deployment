@@ -106,6 +106,7 @@ tn_rpc_call() {
 sleep() { :; }
 # The test runs as any user: its fixture files stand in for root-owned ones.
 _tn_cred_plain_ok() { [[ -f "$1" && ! -L "$1" ]]; }
+tn_root_dir_ok() { [[ -d "$1" && ! -L "$1" ]]; }
 
 TN_CRED_HEALTH_SECS=0
 
@@ -180,6 +181,31 @@ check_rc "store: encrypt failure rc 2" 2 "$rc"
 check "store: encrypt failure leaves nothing" "no no" "$(exists "$ETC/bls-passphrase.cred") $(exists "$ETC/bls-passphrase.cred.new")"
 rc=0; ( export TN_CRED_PASS; tn_store_credential "$ETC/bls-passphrase.cred" host "" ) 2>/dev/null || rc=$?
 check_rc "store: an exported TN_CRED_PASS is refused" 1 "$rc"
+# Destinations that cannot be written are refused (rc 1) before anything is encrypted.
+fixture testnet credential
+TN_CRED_PASS="$PASS"
+mkdir -p "$T/real"
+ln -s "$T/real" "$ETC/linkdir"
+ln -s "$T/real/x" "$ETC/bls-passphrase.cred.new"
+mkdir -p "$ETC/adir.cred"
+for d in "$ETC/linkdir/c.cred" "$ETC/bls-passphrase.cred" "$ETC/adir.cred"; do
+    rc=0; tn_store_credential "$d" host "" 2>/dev/null || rc=$?
+    check_rc "store: refused destination ${d##*/etc/telcoin/} rc 1" 1 "$rc"
+done
+check "store: refused destinations, nothing encrypted or written" "no no" \
+    "$(grep -q '^encrypt' "$REC/creds.argv" 2>/dev/null && echo yes || echo no) $(exists "$T/real/x")"
+rm -f "$ETC/linkdir" "$ETC/bls-passphrase.cred.new"
+rmdir "$ETC/adir.cred"
+# The writer runs in this shell with DEST.new named for the EXIT traps; the
+# trap helper removes it.
+tn_write_root_file() { printf '%s\n' "$TN_INFLIGHT_CRED" > "$REC/inflight"; cat > "$1" && chmod "$2" "$1"; }
+rc=0; tn_store_credential "$ETC/bls-passphrase.cred" host "" || rc=$?
+check "store: DEST.new named while it is written, cleared after" "$ETC/bls-passphrase.cred.new|" "$(cat "$REC/inflight")|${TN_INFLIGHT_CRED}"
+tn_write_root_file() { cat > "$1" && chmod "$2" "$1"; }
+printf 'x\n' > "$ETC/bls-passphrase.cred.new"
+TN_INFLIGHT_CRED="$ETC/bls-passphrase.cred.new"
+tn_remove_inflight_tmp
+check "store: the EXIT helper removes an in-flight DEST.new" "no" "$(exists "$ETC/bls-passphrase.cred.new")"
 TN_CRED_PASS=""
 
 # ---- tn_has_embedded_passphrase ---------------------------------------------------------
@@ -226,11 +252,11 @@ check "migrate tpm2: key" "host+tpm2" "$(meta_get CREDENTIAL_KEY 2>/dev/null)"
 check "migrate tpm2: pcrs" "7" "$(meta_get CREDENTIAL_PCRS 2>/dev/null)"
 
 # Refusals: nothing changes.
-for case_ in "249 testnet sys" "255 mainnet notpm"; do
+for case_ in "249 testnet sys 1" "255 mainnet notpm 1" "252 mainnet floor 0"; do
     set -- $case_
     fixture "$2" stdin
     printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
-    rc=0; STUB_SYSTEMD="$1" STUB_TPM=1 tn_migrate_credential 2>/dev/null || rc=$?
+    rc=0; STUB_SYSTEMD="$1" STUB_TPM="$4" tn_migrate_credential 2>/dev/null || rc=$?
     check_rc "migrate refused ($3): rc 1" 1 "$rc"
     check "migrate refused ($3): plaintext kept, no credential" "yes no" "$(exists "$ETC/bls-passphrase") $(exists "$ETC/bls-passphrase.cred")"
     check "migrate refused ($3): method unchanged" "stdin" "$(meta_get PASSPHRASE_METHOD 2>/dev/null)"
@@ -265,6 +291,58 @@ check "guard refuses: no credential, plaintext kept" "no yes" "$(exists "$ETC/bl
 check "guard refuses: method restored" "stdin" "$(meta_get PASSPHRASE_METHOD 2>/dev/null)"
 check "guard refuses: no CREDENTIAL_KEY" "" "$(meta_get CREDENTIAL_KEY 2>/dev/null)"
 check "guard refuses: no restart" "" "$(grep restart "$REC/systemctl.argv" 2>/dev/null)"
+check "guard refuses: refused before any write or reload (reload, backups, re-render)" "0 0 no" \
+    "$(grep -c daemon-reload "$REC/systemctl.argv" 2>/dev/null) $(ls "$T/bak" | wc -l | tr -d ' ') $(exists "$REC/rerender")"
+
+# A run stopped inside the move: the EXIT trap (tn_remove_inflight_tmp) finishes
+# or undoes it. stopped_in WHERE runs the migration in a subshell whose EXIT trap
+# is the library's, and exits 143 from the stub named by WHERE.
+stopped_in() {
+    (
+        trap 'tn_remove_inflight_tmp; printf "%s\n" "$TN_CRED_EXIT_MSG" > "$REC/exitmsg"' EXIT
+        case "$1" in
+            backup) tn_backup_file() { exit 143; } ;;
+            wait) tn_wait_restart_window() { exit 143; } ;;
+            confirm) tn_rpc_call() { exit 143; } ;;
+            shred) _tn_cred_old_copies() { printf '%s\n' "$ETC/bls-passphrase"; exit 143; } ;;
+        esac
+        tn_migrate_credential
+    ) >/dev/null 2>&1
+}
+fixture testnet stdin
+printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
+stopped_in wait
+check "stopped before the restart: unit, files and method back" "yes no yes stdin" \
+    "$([[ "$(cat "$UNIT")" == "$ORIG_UNIT" ]] && echo yes) $(exists "$ETC/bls-passphrase.cred") $(exists "$ETC/bls-passphrase") $(meta_get PASSPHRASE_METHOD 2>/dev/null)"
+check "stopped before the restart: backups shredded, reloaded, no restart" "0 2 0" \
+    "$(ls "$T/bak" | wc -l | tr -d ' ') $(grep -c daemon-reload "$REC/systemctl.argv") $(grep -c '^restart' "$REC/systemctl.argv")"
+check_has "stopped before the restart: the message says so" "stopped during the passphrase move, before the restart: every file it changed and .node-meta are back as they were" "$(cat "$REC/exitmsg")"
+fixture testnet stdin
+printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
+stopped_in backup
+check "stopped while backing up: nothing changed" "yes yes no" \
+    "$([[ "$(cat "$UNIT")" == "$ORIG_UNIT" ]] && echo yes) $(exists "$ETC/bls-passphrase") $(exists "$ETC/bls-passphrase.cred")"
+fixture testnet stdin
+printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
+stopped_in confirm
+check "stopped after the restart was issued: new files stay, backups kept" "credential yes 2" \
+    "$(meta_get PASSPHRASE_METHOD 2>/dev/null) $(exists "$ETC/bls-passphrase.cred") $(ls "$T/bak" | wc -l | tr -d ' ')"
+check "stopped after the restart was issued: the message names the backups" "yes" \
+    "$(grep -q "previous ones are kept (root only): $T/bak/" "$REC/exitmsg" && echo yes)"
+fixture testnet stdin
+printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
+stopped_in shred
+check "stopped while shredding: the trap finishes (plaintext and backups gone)" "no 0 credential" \
+    "$(exists "$ETC/bls-passphrase") $(ls "$T/bak" | wc -l | tr -d ' ') $(meta_get PASSPHRASE_METHOD 2>/dev/null)"
+
+# After the node came back on the new files, the start wrapper an older release
+# ran is removed.
+fixture testnet stdin
+printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
+mkdir -p "$TN_ROOT_PREFIX$DEFAULT_INSTALL_DIR"
+printf '#!/bin/sh\n' > "$TN_ROOT_PREFIX$DEFAULT_INSTALL_DIR/start-telcoin.sh"
+rc=0; tn_migrate_credential 2>/dev/null || rc=$?
+check "migrate: the old start wrapper is removed" "0 no" "${rc} $(exists "$TN_ROOT_PREFIX$DEFAULT_INSTALL_DIR/start-telcoin.sh")"
 
 # The node does not come back: rollback, rc 2; rollback fails too: rc 3.
 fixture testnet stdin

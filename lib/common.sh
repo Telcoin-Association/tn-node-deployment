@@ -527,11 +527,24 @@ tn_root_dir_ok() {
 # between the temp file and its rename leaves no root-owned temp file behind.
 TN_INFLIGHT_TMP=""
 
-# tn_remove_inflight_tmp -- remove TN_INFLIGHT_TMP when it is set. Never fails.
+# TN_INFLIGHT_CRED -- the credential tn_store_credential has written and not yet
+# moved into place (<dest>.new), "" otherwise.
+TN_INFLIGHT_CRED=""
+
+# tn_remove_inflight_tmp -- remove TN_INFLIGHT_TMP and TN_INFLIGHT_CRED when set,
+# and finish or undo a passphrase move (_tn_cred_switch) the run was stopped in
+# (_tn_cred_on_exit; TN_CRED_EXIT_MSG then says what it did). Never fails.
 tn_remove_inflight_tmp() {
     if [[ -n "${TN_INFLIGHT_TMP:-}" ]]; then
         rm -f -- "$TN_INFLIGHT_TMP" 2>/dev/null || true
         TN_INFLIGHT_TMP=""
+    fi
+    if [[ -n "${TN_INFLIGHT_CRED:-}" ]]; then
+        rm -f -- "$TN_INFLIGHT_CRED" 2>/dev/null || true
+        TN_INFLIGHT_CRED=""
+    fi
+    if [[ -n "${_TN_CS_STATE:-}" ]] && declare -F _tn_cred_on_exit >/dev/null 2>&1; then
+        _tn_cred_on_exit || true
     fi
     return 0
 }
@@ -4905,11 +4918,15 @@ _tn_cred_digest() {
 # with systemd-creds into DEST (root 0600): stdin to stdout into DEST.new through
 # tn_write_root_file, decrypt it again and compare the sha256 digests, then rename
 # it over DEST. KEY is host or host+tpm2; PCRS (host+tpm2 only) binds it to those
-# PCRs. The value is never on a command line or in a file of its own. rc 0
+# PCRs. The value is never on a command line or in a file of its own: printf (a
+# builtin) writes it into systemd-creds' stdin through a pipe, and the writer
+# reads the ciphertext from a process substitution in this shell, so
+# TN_INFLIGHT_TMP and TN_INFLIGHT_CRED (DEST.new) name what an EXIT trap must
+# remove. DEST and DEST.new are checked before anything is encrypted. rc 0
 # stored, 1 refused (nothing changed), 2 failed (DEST untouched, DEST.new gone).
 tn_store_credential() {
-    local dest="${1:-}" key="${2:-}" pcrs="${3:-}" new want got
-    local -a opt ps=()
+    local dest="${1:-}" key="${2:-}" pcrs="${3:-}" new want got dir rc=0
+    local -a opt
     _tn_cred_pass_plain 2>/dev/null || { print_warn "tn_store_credential: no passphrase to store (TN_CRED_PASS empty or exported)" >&2; return 1; }
 
     case "$key" in
@@ -4921,15 +4938,23 @@ tn_store_credential() {
         return 1
     fi
     [[ "$dest" == /* && "$dest" != */ ]] || { print_warn "tn_store_credential: '${dest}' is not an absolute file path" >&2; return 1; }
+    new="${dest}.new"
+    dir="${dest%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if [[ -L "$dest" || -d "$dest" || -L "$new" || -d "$new" ]] || ! tn_root_dir_ok "$dir"; then
+        print_warn "tn_store_credential: refusing ${dest}: it or ${new##*/} is a symlink or a directory, or ${dir} is not a root-owned, root-only-writable directory; nothing changed" >&2
+        return 1
+    fi
     command -v systemd-creds >/dev/null 2>&1 || { print_warn "tn_store_credential: systemd-creds is not installed" >&2; return 2; }
     opt=("--name=${TN_CRED_NAME}" "--with-key=${key}")
     [[ -n "$pcrs" ]] && opt+=("--tpm2-pcrs=${pcrs}")
     want="$(_tn_cred_digest)" || return 2
-    new="${dest}.new"
-    printf '%s\n' "$TN_CRED_PASS" | systemd-creds encrypt "${opt[@]}" - - 2>/dev/null | tn_write_root_file "$new" 0600 || ps=("${PIPESTATUS[@]}")  # passphrase-stdin-ok stdout is the systemd-creds pipe
-    if [[ ${#ps[@]} -gt 0 || ! -s "$new" ]]; then
+    TN_INFLIGHT_CRED="$new"
+    tn_write_root_file "$new" 0600 < <(printf '%s\n' "$TN_CRED_PASS" | systemd-creds encrypt "${opt[@]}" - - 2>/dev/null) || rc=$?  # passphrase-stdin-ok stdin of systemd-creds, a pipe
+    if [[ $rc -ne 0 || ! -s "$new" ]]; then
         rm -f -- "$new" 2>/dev/null || true
-        if [[ "${ps[2]:-0}" == "1" && "${ps[1]:-0}" == "0" ]]; then
+        TN_INFLIGHT_CRED=""
+        if [[ $rc -eq 1 ]]; then
             print_warn "tn_store_credential: writing ${new} was refused; nothing changed" >&2
             return 1
         fi
@@ -4940,14 +4965,17 @@ tn_store_credential() {
     got="${got%% *}"
     if [[ "$got" != "$want" ]]; then
         rm -f -- "$new" 2>/dev/null || true
+        TN_INFLIGHT_CRED=""
         print_warn "tn_store_credential: the new credential does not decrypt to the passphrase; nothing changed" >&2
         return 2
     fi
     if ! mv -fT -- "$new" "$dest" 2>/dev/null; then
         rm -f -- "$new" 2>/dev/null || true
+        TN_INFLIGHT_CRED=""
         print_warn "tn_store_credential: could not move the credential into place at ${dest}" >&2
         return 2
     fi
+    TN_INFLIGHT_CRED=""
     return 0
 }
 
@@ -5108,6 +5136,19 @@ _TN_CS_BAK=()
 _TN_CS_SUM=()
 _TN_CS_MODE=()
 _TN_CS_GRP=()
+# Where a passphrase move stands, for the EXIT traps (_tn_cred_on_exit): "" none;
+# saving (backups being taken, nothing changed yet); written (files changed, no
+# restart issued); restarting (the restart on the new files was issued);
+# cleanup (the node came back; old copies are being shredded). With it: the
+# service, config dir, whether the plaintext file stays (1), and the three
+# .node-meta values to put back (_tn_meta_keep form).
+_TN_CS_STATE=""
+_TN_CS_SVC=""
+_TN_CS_CONF=""
+_TN_CS_KEEP=0
+_TN_CS_META=()
+# What _tn_cred_on_exit did, one sentence for the caller's last report.
+TN_CRED_EXIT_MSG=""
 
 # _tn_cred_save PATH -- record PATH for _tn_cred_restore, backing it up first
 # when it exists (tn_backup_file). rc 1 when the backup failed.
@@ -5155,23 +5196,88 @@ _tn_cred_drop_saved() {
     _TN_CS_PATH=(); _TN_CS_BAK=(); _TN_CS_SUM=(); _TN_CS_MODE=(); _TN_CS_GRP=()
 }
 
+# _tn_cred_meta_back -- put the three .node-meta keys back as _TN_CS_META saved them.
+_tn_cred_meta_back() {
+    _tn_meta_put PASSPHRASE_METHOD "${_TN_CS_META[0]:-0}" || true
+    _tn_meta_put CREDENTIAL_KEY "${_TN_CS_META[1]:-0}" || true
+    _tn_meta_put CREDENTIAL_PCRS "${_TN_CS_META[2]:-0}" || true
+}
+
+# _tn_cred_finish SVC CONF KEEP -- after the node came back on the new delivery:
+# shred every old copy of the passphrase (_tn_cred_old_copies), the backups, and
+# the start wrapper an older release ran (${DEFAULT_INSTALL_DIR}/start-SVC.sh,
+# nothing runs it any more).
+_tn_cred_finish() {
+    local svc="$1" conf="$2" keep="${3:-0}" f
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && _tn_shred "$f"
+    done < <(_tn_cred_old_copies "$svc" "$conf" "$keep")
+    _tn_cred_drop_saved
+    f="${TN_ROOT_PREFIX:-}${DEFAULT_INSTALL_DIR:-/opt/telcoin}/start-${svc}.sh"
+    if [[ -f "$f" || -L "$f" ]] \
+        && ! grep -qF -- "start-${svc}.sh" "${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service" 2>/dev/null; then
+        rm -f -- "$f" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# _tn_cred_on_exit -- for the EXIT traps (tn_remove_inflight_tmp calls it): finish
+# or undo the passphrase move _tn_cred_switch was in when the run was stopped, and
+# set TN_CRED_EXIT_MSG to what was done. Before any write the backups are
+# shredded; after the writes and before the restart every file and .node-meta key
+# goes back (daemon-reload; no restart); after the restart was issued the new
+# files stay and the backups are kept and named; after the node came back the
+# old copies are shredded. Never fails.
+_tn_cred_on_exit() {
+    local st="${_TN_CS_STATE:-}"
+    _TN_CS_STATE=""
+    TN_CRED_EXIT_MSG=""
+    case "$st" in
+        saving)
+            _tn_cred_drop_saved
+            TN_CRED_EXIT_MSG="stopped before the passphrase move changed anything; nothing was changed"
+            ;;
+        written)
+            _tn_cred_meta_back
+            if _tn_cred_restore; then
+                systemctl daemon-reload >/dev/null 2>&1 || true
+                _tn_cred_drop_saved
+                TN_CRED_EXIT_MSG="stopped during the passphrase move, before the restart: every file it changed and .node-meta are back as they were"
+            else
+                systemctl daemon-reload >/dev/null 2>&1 || true
+                TN_CRED_EXIT_MSG="stopped during the passphrase move, before the restart, and putting the files back failed: restore them from the backups (root only): ${_TN_CS_BAK[*]}"
+            fi
+            ;;
+        restarting)
+            TN_CRED_EXIT_MSG="stopped after ${_TN_CS_SVC} was restarted on the new passphrase delivery, before it was confirmed: the new files stay; the previous ones are kept (root only): ${_TN_CS_BAK[*]}. Check journalctl -u ${_TN_CS_SVC}, then run sudo ./edit-config.sh --migrate-credential again to shred the old copies"
+            ;;
+        cleanup)
+            _tn_cred_finish "$_TN_CS_SVC" "$_TN_CS_CONF" "$_TN_CS_KEEP"
+            TN_CRED_EXIT_MSG="stopped after the passphrase move completed: ${_TN_CS_SVC} runs on the new delivery and the old copies were shredded"
+            ;;
+    esac
+    return 0
+}
+
 # _tn_cred_switch TARGET KEY PCRS [progress-fn] [RESTART] -- move the installed node to the
 # passphrase in TN_CRED_PASS: TARGET credential (encrypted with KEY, bound to PCRS
-# when given) or stdin (a root 0600 file, for hosts below systemd 250). Backs up
-# the unit, start script, node.env and both passphrase files; stores the
+# when given) or stdin (a root 0600 file, for hosts below systemd 250). When the
+# node will restart, the committee guard runs first, before anything is written.
+# Backs up the unit, start script, node.env and both passphrase files; stores the
 # passphrase; records PASSPHRASE_METHOD, CREDENTIAL_KEY and CREDENTIAL_PCRS;
 # re-renders the unit and start script (old inline and embedded-passphrase units
-# included, tn_rerender_node_launch); reloads systemd; runs the committee guard
-# and the restart window; restarts and confirms the node unlocked its key; then
-# shreds every old copy of the passphrase and the backups. When the restart does
-# not come up, every file and .node-meta key goes back and the node restarts on
-# them (no window wait). RESTART no skips the guard, the wait and the restart: the
-# new files take effect at the next start; the default (auto) is no for a node that
-# is not running and yes otherwise. The caller holds the
+# included, tn_rerender_node_launch); reloads systemd; waits for the restart
+# window; restarts and confirms the node unlocked its key; then shreds every old
+# copy of the passphrase, the backups and an older release's start wrapper. When
+# the restart does not come up, every file and .node-meta key goes back and the
+# node restarts on them (no window wait). RESTART no skips the guard, the wait
+# and the restart: the new files take effect at the next start; the default
+# (auto) is no for a node that is not running and yes otherwise. _TN_CS_STATE
+# tracks the steps for the EXIT traps (_tn_cred_on_exit). The caller holds the
 # update lock. rc 0 done, 1 refused (nothing changed), 2 failed and rolled back, 3
 # the rollback restart failed too (the backups stay; their paths are printed).
 _tn_cred_switch() {
-    local target="$1" key="$2" pcrs="$3" fn="${4:-}" restart="${5:-auto}" svc conf form p="" rc=0 f keep=0
+    local target="$1" key="$2" pcrs="$3" fn="${4:-}" restart="${5:-auto}" svc conf form p="" rc=0 keep=0 plain
     # shellcheck disable=SC2034 # read by tn_rerender_node_launch (dynamic scope)
     local m_method m_key m_pcrs PASSPHRASE_METHOD="$1" _TN_RERENDER_LEGACY=1
     svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }
@@ -5191,26 +5297,41 @@ _tn_cred_switch() {
         _tn_guard_say warn "${p} is set more than once in .node-meta; remove the extra lines first." "$fn"
         return 1
     fi
+    # The committee guard before the first write: a refusal changes nothing.
+    if [[ "$restart" == "yes" ]] && ! tn_committee_down_guard "" "$fn"; then
+        _tn_guard_say warn "Restarting ${svc} now would put the committee's quorum at risk; nothing was changed (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
+        return 1
+    fi
     form=source
     [[ "$(meta_get INSTALL_METHOD 2>/dev/null || true)" == "docker" ]] && form=docker
+    [[ "$target" == "stdin" ]] && keep=1
     _tn_cred_drop_saved
+    _TN_CS_SVC="$svc"
+    _TN_CS_CONF="$conf"
+    _TN_CS_KEEP="$keep"
+    _TN_CS_META=("$m_method" "$m_key" "$m_pcrs")
+    _TN_CS_STATE=saving
     for p in "/etc/systemd/system/${svc}.service" "$(tn_start_script_path "$form")" "${conf}/node.env" \
         "${conf}/bls-passphrase.cred" "${conf}/bls-passphrase"; do
         if ! _tn_cred_save "${TN_ROOT_PREFIX:-}${p}"; then
             _tn_cred_drop_saved
+            _TN_CS_STATE=""
             _tn_guard_say warn "Could not back up ${p}; nothing changed." "$fn"
             return 1
         fi
     done
     # 1. The passphrase in its new form.
+    _TN_CS_STATE=written
     if [[ "$target" == "credential" ]]; then
         tn_store_credential "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase.cred" "$key" "$pcrs" || rc=$?
     else
-        printf '%s\n' "$TN_CRED_PASS" | tn_write_root_file "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase" 0600 || rc=$?  # passphrase-stdin-ok stdout is the root-write pipe
+        plain="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
+        tn_write_root_file "$plain" 0600 < <(printf '%s\n' "$TN_CRED_PASS") || rc=$?  # passphrase-stdin-ok stdin of the root writer, a pipe
     fi
     if [[ $rc -ne 0 ]]; then
         _tn_cred_restore || true
         _tn_cred_drop_saved
+        _TN_CS_STATE=""
         _tn_guard_say warn "Could not store the passphrase; nothing changed." "$fn"
         [[ $rc -eq 1 ]] && return 1
         return 2
@@ -5224,39 +5345,32 @@ _tn_cred_switch() {
     fi
     [[ $rc -eq 0 ]] && { tn_rerender_node_launch "" "$fn" || rc=$?; }
     [[ $rc -eq 0 ]] && { systemctl daemon-reload >/dev/null 2>&1 || rc=2; }
-    # 3. The committee guard and the restart window, then the restart.
-    if [[ $rc -eq 0 && "$restart" == "no" ]]; then
-        [[ "$target" == "stdin" ]] && keep=1
-        while IFS= read -r f; do
-            [[ -n "$f" ]] && _tn_shred "$f"
-        done < <(_tn_cred_old_copies "$svc" "$conf" "$keep")
-        _tn_cred_drop_saved
-        _tn_guard_say log "${svc} is stopped: the new passphrase delivery takes effect when it starts." "$fn"
-        return 0
-    fi
-    if [[ $rc -eq 0 ]] && ! tn_committee_down_guard "" "$fn"; then
-        _tn_guard_say warn "Restarting ${svc} now would put the committee's quorum at risk; nothing was restarted (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
-        rc=1
-    fi
     if [[ $rc -ne 0 ]]; then
-        _tn_meta_put PASSPHRASE_METHOD "$m_method" || true
-        _tn_meta_put CREDENTIAL_KEY "$m_key" || true
-        _tn_meta_put CREDENTIAL_PCRS "$m_pcrs" || true
+        _tn_cred_meta_back
         _tn_cred_restore || true
         systemctl daemon-reload >/dev/null 2>&1 || true
         _tn_cred_drop_saved
+        _TN_CS_STATE=""
         _tn_guard_say warn "The passphrase delivery of ${svc} was not changed." "$fn"
         [[ $rc -eq 1 ]] && return 1
         return 2
     fi
+    # 3. A stopped node takes the new files at its next start.
+    if [[ "$restart" == "no" ]]; then
+        _TN_CS_STATE=cleanup
+        _tn_cred_finish "$svc" "$conf" "$keep"
+        _TN_CS_STATE=""
+        _tn_guard_say log "${svc} is stopped: the new passphrase delivery takes effect when it starts." "$fn"
+        return 0
+    fi
+    # 4. The restart window, then the restart.
     tn_wait_restart_window "$(tn_local_rpc_url 2>/dev/null || true)" "$fn" || true
+    _TN_CS_STATE=restarting
     if systemctl restart "$svc" >/dev/null 2>&1 && _tn_cred_confirm "$svc" "$fn"; then
-        # 4. Done: every old copy of the passphrase goes, then the backups.
-        [[ "$target" == "stdin" ]] && keep=1
-        while IFS= read -r f; do
-            [[ -n "$f" ]] && _tn_shred "$f"
-        done < <(_tn_cred_old_copies "$svc" "$conf" "$keep")
-        _tn_cred_drop_saved
+        # 5. Done: every old copy of the passphrase goes, then the backups.
+        _TN_CS_STATE=cleanup
+        _tn_cred_finish "$svc" "$conf" "$keep"
+        _TN_CS_STATE=""
         if id -nG "${SERVICE_USER:-telcoin}" 2>/dev/null | tr ' ' '\n' | grep -qx tss; then
             gpasswd -d "${SERVICE_USER:-telcoin}" tss >/dev/null 2>&1 || true
         fi
@@ -5268,18 +5382,30 @@ _tn_cred_switch() {
         return 0
     fi
     _tn_guard_say warn "${svc} did not come back with the new passphrase delivery; restoring its previous files." "$fn"
-    _tn_meta_put PASSPHRASE_METHOD "$m_method" || true
-    _tn_meta_put CREDENTIAL_KEY "$m_key" || true
-    _tn_meta_put CREDENTIAL_PCRS "$m_pcrs" || true
+    _tn_cred_meta_back
     rc=0
     _tn_cred_restore || rc=3
     systemctl daemon-reload >/dev/null 2>&1 || true
     if [[ $rc -eq 0 ]] && systemctl restart "$svc" >/dev/null 2>&1 && _tn_cred_confirm "$svc" "$fn"; then
         _tn_cred_drop_saved
+        _TN_CS_STATE=""
         return 2
     fi
+    _TN_CS_STATE=""
     _tn_guard_say warn "${svc} did not come back on its previous files either. Backups (root only): ${_TN_CS_BAK[*]}" "$fn"
     return 3
+}
+
+# _tn_cred_mainnet_floor NETWORK [progress-fn] -- rc 1 (with the reason) when
+# NETWORK is not testnet or devnet and systemd is below TN_MAINNET_MIN_SYSTEMD:
+# a mainnet node keeps its credential on the OS floor setup requires.
+_tn_cred_mainnet_floor() {
+    local net="${1:-}" fn="${2:-}" v
+    [[ "$net" == "testnet" || "$net" == "devnet" ]] && return 0
+    v="$(tn_systemd_version 2>/dev/null)" || v=0
+    (( v >= TN_MAINNET_MIN_SYSTEMD )) && return 0
+    _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04); upgrade the OS first. Nothing changed." "$fn"
+    return 1
 }
 
 # tn_migrate_credential [progress-fn] -- move the installed node's passphrase to
@@ -5288,9 +5414,10 @@ _tn_cred_switch() {
 # embeds it (tn_migrate_embedded_passphrase), else from <config dir>/bls-passphrase.
 # The key is tn_credential_key's choice (TN_ALLOW_NO_TPM=1 accepts host alone on
 # mainnet); TN_BIND_PCRS binds it to PCRs. The caller holds the update lock. rc 0
-# done (or already done), 1 refused (systemd below 250, no systemd-creds, no
-# stored passphrase, one with a line break or edge whitespace, no TPM on mainnet),
-# 2 failed and rolled back, 3 the rollback failed too.
+# done (or already done), 1 refused (systemd below 250, or below
+# TN_MAINNET_MIN_SYSTEMD off testnet and devnet, no systemd-creds, no stored
+# passphrase, one with a line break or edge whitespace, no TPM on mainnet), 2
+# failed and rolled back, 3 the rollback failed too.
 tn_migrate_credential() {
     local fn="${1:-}" v svc conf unit plain method net key rc=0 cr=$'\r'
     if ! tn_creds_supported; then
@@ -5302,6 +5429,8 @@ tn_migrate_credential() {
     conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
     unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service"
     plain="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    _tn_cred_mainnet_floor "$net" "$fn" || return 1
     if tn_has_embedded_passphrase "$unit"; then
         tn_migrate_embedded_passphrase "$unit" "$fn"
         return $?
@@ -5336,7 +5465,6 @@ tn_migrate_credential() {
         _tn_guard_say warn "The passphrase is empty, holds a line break, or starts or ends with whitespace, which the credential cannot carry; change it with edit-config.sh first." "$fn"
         return 1
     fi
-    net="$(tn_detect_network 2>/dev/null)" || net=""
     if ! key="$(tn_credential_key "$net")"; then
         TN_CRED_PASS=""
         return 1
@@ -5375,6 +5503,10 @@ tn_migrate_embedded_passphrase() {
         return 1
     fi
     net="$(tn_detect_network 2>/dev/null)" || net=""
+    if ! _tn_cred_mainnet_floor "$net" "$fn"; then
+        TN_CRED_PASS=""
+        return 1
+    fi
     if tn_creds_supported; then
         target=credential
         if ! key="$(tn_credential_key "$net")"; then
