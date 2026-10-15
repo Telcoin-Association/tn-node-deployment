@@ -218,6 +218,16 @@ class AuditTest(ServerTestCase):
         lines = self.audit_lines(lambda: self.client.get("/api/nodes", headers={"X-TN-UI-Token": ""}))
         self.assertEqual((lines[0]["status"], lines[0]["token"]), (401, "none"))
 
+    def test_query_string_secrets_are_redacted(self):
+        lines = self.audit_lines(lambda: self.client.post(
+            "/api/caddy/disable?password=QuerySecret1234567&Token=abc&keep=1", json={},
+            buffered=True))
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["args"]["password"], "***")
+        self.assertEqual(lines[0]["args"]["Token"], "***")
+        self.assertEqual(lines[0]["args"]["keep"], "1")
+        self.assertNotIn("QuerySecret1234567", json.dumps(lines))
+
     def test_reads_are_not_logged(self):
         self.assertEqual(self.audit_lines(lambda: self.client.get("/api/system")), [])
 

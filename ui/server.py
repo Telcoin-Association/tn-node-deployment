@@ -1019,14 +1019,20 @@ def _major(version):
 _SECRET_KEYS = ("passphrase", "password", "token")
 
 
+def _audit_value(key, value):
+    """`value`, or *** when `key` names a secret."""
+    low = str(key).lower()
+    return "***" if any(x in low for x in _SECRET_KEYS) else value
+
+
 def _audit_args():
-    args = {k: v for k, v in request.args.items()}
+    """The query string and JSON body of the request, secret fields as ***."""
+    args = {k: _audit_value(k, v) for k, v in request.args.items()}
     if request.mimetype == "application/json":
         body = request.get_json(silent=True)
         if isinstance(body, dict):
             for k, v in body.items():
-                low = str(k).lower()
-                args[k] = "***" if any(x in low for x in _SECRET_KEYS) else v
+                args[k] = _audit_value(k, v)
     return args
 
 

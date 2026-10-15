@@ -681,6 +681,18 @@ check "audit: the refusal names its reason" "1" \
     "$(printf '%s\n' "$audit" | grep -c '"phase":"refused","sudo_uid":"[^"]*","detail":"invalid metrics address')"
 check_lacks "audit: read-only calls are not logged" '"sub":"meta-cat"' "$audit"
 check "audit: the log is not group or world readable" "600" "$(stat -c %a "$T/audit/audit.log" 2>/dev/null)"
+rm -rf "$T/audit"
+trace update-prepare "$(printf 'a b\tc')" >/dev/null
+trace config-set verbosity -vvv "$(printf 'ex\ttra')" >/dev/null
+trace meta-cat "$(printf 'x\ty')" >/dev/null
+audit="$(cat "$T/audit/audit.log" 2>/dev/null)"
+check "audit: a call refused by the generic checks leaves one refused line each" "2" \
+    "$(printf '%s\n' "$audit" | grep -c '"phase":"refused"')"
+check_has "audit: the generic refusal names the subcommand, not the arguments" \
+    "$(printf '%s\n' "$audit" | grep '"sub":"update-prepare","args":"","phase":"refused"')" "$audit"
+check "audit: a control character in a refused call is written as a space" "1" \
+    "$(printf '%s\n' "$audit" | grep -c '"detail":"too many arguments for config-set: verbosity -vvv ex tra"')"
+check_lacks "audit: a refused read-only call is not logged" '"sub":"meta-cat"' "$audit"
 
 # ---- Read-only views --------------------------------------------------------------------
 fixture unified

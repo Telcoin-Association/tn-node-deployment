@@ -167,8 +167,10 @@ _arg_ok() {
     return 0
 }
 
-# Minimal JSON string escaper (this helper has no json lib; values here are simple).
-_json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//$'\n'/ }"; }
+# Minimal JSON string escaper (this helper has no json lib): backslash and
+# double quote escaped, every control character (a refused argument may hold
+# one) written as a space.
+_json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//[[:cntrl:]]/ }"; }
 
 # The subcommands that change state; each is audited.
 is_mutating() {
@@ -1406,6 +1408,12 @@ main() {
         shift
     fi
     max="$(max_args "$sub")" || die "unknown subcommand: ${sub:-<empty>}"
+    # A state-changing call is audited from here on, so a refusal by the checks
+    # below leaves a "refused" line too. Its arguments are recorded once they
+    # have passed those checks.
+    if is_mutating "$sub"; then
+        AUDIT_SUB="$sub"
+    fi
 
     # ui/server.py before 1.9.0 puts observer|validator in front of a node
     # subcommand's arguments. Drop it only when the call has more arguments than
@@ -1420,8 +1428,7 @@ main() {
     for a in "$@"; do
         _arg_ok "$a" || die "invalid argument for ${sub}"
     done
-    if is_mutating "$sub"; then
-        AUDIT_SUB="$sub"
+    if [[ -n "$AUDIT_SUB" ]]; then
         AUDIT_ARGS="$*"
         audit_line start
     fi
