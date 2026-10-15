@@ -388,12 +388,14 @@ pending_key_check() {
         NEW_VERSION)
             # Shown to the operator only; no control characters.
             [[ "$v" != *[[:cntrl:]]* ]] ;;
-        BUILT_BINARY|BIN_BACKUP|UNIT_BACKUP|UNIT_FILE)
+        BUILT_BINARY|BIN_BACKUP|UNIT_BACKUP|UNIT_FILE|START_BACKUP|NODEENV_BACKUP)
             re='^/[A-Za-z0-9._/+=-]+$'
             [[ "$v" =~ $re ]] ;;
-        BUILT_HASH|BIN_BACKUP_SHA256|UNIT_BACKUP_SHA256)
+        BUILT_HASH|BIN_BACKUP_SHA256|UNIT_BACKUP_SHA256|START_BACKUP_SHA256|NODEENV_BACKUP_SHA256)
             re='^[0-9a-f]{64}$'
             [[ "$v" =~ $re ]] ;;
+        NODEENV_WAS_ABSENT)
+            [[ "$v" == "1" ]] ;;
         PREPARED_AT)
             re='^[0-9TZ:-]+$'
             [[ "$v" =~ $re ]] ;;
@@ -666,6 +668,145 @@ restore_unit_file() {
         rm -f -- "$SWAP_ENV_ADDED" || rc=1
     fi
     return "$rc"
+}
+
+# The launch files of a binary or release install (the unit, the start script
+# and node.env), backed up by launch_backup_all before an apply rewrites them in
+# the current form, and put back by launch_restore_all with the old binary or on
+# --discard.
+LAUNCH_UNIT_FILE=""
+LAUNCH_BK_UNIT=""
+LAUNCH_BK_UNIT_SHA256=""
+LAUNCH_BK_START=""
+LAUNCH_BK_START_SHA256=""
+LAUNCH_BK_ENV=""
+LAUNCH_BK_ENV_SHA256=""
+LAUNCH_ENV_ABSENT=""
+
+# launch_start_path -- the start script of a binary or release install.
+launch_start_path() { printf '%s\n' "${TN_ROOT_PREFIX:-}$(tn_start_script_path source)"; }
+
+# launch_backup_all -- back up the unit, the start script (when there is one) and
+# node.env (tn_backup_file) and record them in the pending state: UNIT_FILE,
+# UNIT_BACKUP, UNIT_BACKUP_SHA256, START_BACKUP, START_BACKUP_SHA256 and
+# NODEENV_BACKUP, NODEENV_BACKUP_SHA256, or NODEENV_WAS_ABSENT=1 when there is no
+# node.env. Sets the LAUNCH_* globals. Call it directly, not in $( ). rc 1 with
+# a message on stderr when a copy or the record fails (copies made are removed).
+launch_backup_all() {
+    local unit start env out made="" keys=()
+    unit="$(swap_unit_path)"
+    start="$(launch_start_path)"
+    env="$(swap_env_path)"
+    LAUNCH_UNIT_FILE="" LAUNCH_BK_UNIT="" LAUNCH_BK_UNIT_SHA256="" LAUNCH_BK_START="" LAUNCH_BK_START_SHA256=""
+    LAUNCH_BK_ENV="" LAUNCH_BK_ENV_SHA256="" LAUNCH_ENV_ABSENT=""
+    if ! out="$(tn_backup_file "$unit")"; then
+        print_warn "Could not back up ${unit}" >&2
+        return 1
+    fi
+    made="${out% *}"
+    LAUNCH_UNIT_FILE="$unit" LAUNCH_BK_UNIT="${out% *}" LAUNCH_BK_UNIT_SHA256="${out##* }"
+    keys=("UNIT_FILE=${unit}" "UNIT_BACKUP=${LAUNCH_BK_UNIT}" "UNIT_BACKUP_SHA256=${LAUNCH_BK_UNIT_SHA256}")
+    if [[ -e "$start" || -L "$start" ]]; then
+        if ! out="$(tn_backup_file "$start")"; then
+            print_warn "Could not back up ${start}" >&2
+            rm -f -- "$made"
+            return 1
+        fi
+        made="${made} ${out% *}"
+        LAUNCH_BK_START="${out% *}" LAUNCH_BK_START_SHA256="${out##* }"
+        keys+=("START_BACKUP=${LAUNCH_BK_START}" "START_BACKUP_SHA256=${LAUNCH_BK_START_SHA256}")
+    fi
+    if [[ -e "$env" || -L "$env" ]]; then
+        if ! out="$(tn_backup_file "$env")"; then
+            print_warn "Could not back up ${env}" >&2
+            # shellcheck disable=SC2086  # backup paths have no spaces (tn_backup_file)
+            rm -f -- $made
+            return 1
+        fi
+        made="${made} ${out% *}"
+        LAUNCH_BK_ENV="${out% *}" LAUNCH_BK_ENV_SHA256="${out##* }"
+        keys+=("NODEENV_BACKUP=${LAUNCH_BK_ENV}" "NODEENV_BACKUP_SHA256=${LAUNCH_BK_ENV_SHA256}")
+    else
+        LAUNCH_ENV_ABSENT=1
+        keys+=("NODEENV_WAS_ABSENT=1")
+    fi
+    if ! pending_state_add "${keys[@]}"; then
+        print_warn "Could not record the launch file backups in the pending update" >&2
+        # shellcheck disable=SC2086
+        rm -f -- $made
+        return 1
+    fi
+    print_info "Launch file backups: ${made}" >&2
+    return 0
+}
+
+# launch_file_backed FILE -- rc 0 when FILE is the unit or the start script that
+# launch_backup_all copied.
+launch_file_backed() {
+    [[ -n "${1:-}" ]] || return 1
+    [[ "$1" == "$LAUNCH_UNIT_FILE" && -n "$LAUNCH_BK_UNIT" ]] && return 0
+    [[ "$1" == "$(launch_start_path)" && -n "$LAUNCH_BK_START" ]]
+}
+
+# launch_load_state STATE -- set the LAUNCH_* globals from pending-state text.
+launch_load_state() {
+    local st="${1:-}"
+    LAUNCH_UNIT_FILE="$(pending_field "$st" UNIT_FILE || true)"
+    LAUNCH_BK_UNIT="$(pending_field "$st" UNIT_BACKUP || true)"
+    LAUNCH_BK_UNIT_SHA256="$(pending_field "$st" UNIT_BACKUP_SHA256 || true)"
+    LAUNCH_BK_START="$(pending_field "$st" START_BACKUP || true)"
+    LAUNCH_BK_START_SHA256="$(pending_field "$st" START_BACKUP_SHA256 || true)"
+    LAUNCH_BK_ENV="$(pending_field "$st" NODEENV_BACKUP || true)"
+    LAUNCH_BK_ENV_SHA256="$(pending_field "$st" NODEENV_BACKUP_SHA256 || true)"
+    LAUNCH_ENV_ABSENT="$(pending_field "$st" NODEENV_WAS_ABSENT || true)"
+}
+
+# launch_restore_all -- put back what the LAUNCH_* globals name: UNIT_FILE (root
+# 0644 for a unit, 0755 for a start script), the start script root 0755 and
+# node.env root 0644 through tn_restore_backup, and remove a node.env that did
+# not exist. Each restore runs; rc 1 when any copy no longer matched its sha256
+# (that file is unchanged) or a restore failed. The caller reloads systemd.
+launch_restore_all() {
+    local rc=0 m
+    if [[ -n "$LAUNCH_BK_UNIT" && -n "$LAUNCH_UNIT_FILE" ]]; then
+        m=0755
+        [[ "$LAUNCH_UNIT_FILE" != *.service ]] || m=0644
+        tn_restore_backup "$LAUNCH_BK_UNIT" "$LAUNCH_BK_UNIT_SHA256" "$LAUNCH_UNIT_FILE" "$m" root || rc=1
+    fi
+    if [[ -n "$LAUNCH_BK_START" ]]; then
+        tn_restore_backup "$LAUNCH_BK_START" "$LAUNCH_BK_START_SHA256" "$(launch_start_path)" 0755 root || rc=1
+    fi
+    if [[ -n "$LAUNCH_BK_ENV" ]]; then
+        tn_restore_backup "$LAUNCH_BK_ENV" "$LAUNCH_BK_ENV_SHA256" "$(swap_env_path)" 0644 root || rc=1
+    elif [[ "$LAUNCH_ENV_ABSENT" == "1" ]]; then
+        rm -f -- "$(swap_env_path)" || rc=1
+    fi
+    return "$rc"
+}
+
+# _launch_hint_one BACKUP SHA256 MODE DEST -- one sha256-checked install line.
+_launch_hint_one() {
+    printf "echo '%s  %s' | sha256sum -c - && install -o root -g root -m %s %s %s" "$2" "$1" "$3" "$1" "$4"
+}
+
+# launch_restore_hint -- the shell lines that put every launch file backup back
+# by hand (each checks its sha256 first), then reload systemd.
+launch_restore_hint() {
+    local h="" m
+    if [[ -n "$LAUNCH_BK_UNIT" ]]; then
+        m=0755
+        [[ "$LAUNCH_UNIT_FILE" != *.service ]] || m=0644
+        h="$(_launch_hint_one "$LAUNCH_BK_UNIT" "$LAUNCH_BK_UNIT_SHA256" "$m" "$LAUNCH_UNIT_FILE") && "
+    fi
+    if [[ -n "$LAUNCH_BK_START" ]]; then
+        h="${h}$(_launch_hint_one "$LAUNCH_BK_START" "$LAUNCH_BK_START_SHA256" 0755 "$(launch_start_path)") && "
+    fi
+    if [[ -n "$LAUNCH_BK_ENV" ]]; then
+        h="${h}$(_launch_hint_one "$LAUNCH_BK_ENV" "$LAUNCH_BK_ENV_SHA256" 0644 "$(swap_env_path)") && "
+    elif [[ "$LAUNCH_ENV_ABSENT" == "1" ]]; then
+        h="${h}rm -f $(swap_env_path) && "
+    fi
+    printf '%s' "${h}systemctl daemon-reload"
 }
 
 # backup_installed_binary FILE -- back up the installed binary before an apply
@@ -1746,10 +1887,23 @@ record_installed_ref() {
 }
 
 # discard_pending -- remove the pending state and the staged binary it names.
+# An apply that stopped after backing up the launch files (the unit, the start
+# script, node.env) gets them put back first and systemd reloaded; a backup that
+# no longer matches its sha256 is left out with a warning. The node is not
+# restarted, and the binary is not touched.
 discard_pending() {
     local st b=""
     if st="$(read_pending_state 2>/dev/null)"; then
         b="$(pending_field "$st" BUILT_BINARY || true)"
+        launch_load_state "$st"
+        if [[ -n "${LAUNCH_BK_UNIT}${LAUNCH_BK_START}${LAUNCH_BK_ENV}${LAUNCH_ENV_ABSENT}" ]]; then
+            if launch_restore_all; then
+                update_wait_say log "Put the launch files back as they were before the interrupted apply."
+            else
+                update_wait_say warn "Could not put every launch file back (see above); by hand: $(launch_restore_hint)"
+            fi
+            [[ -n "${TN_ROOT_PREFIX:-}" ]] || systemctl daemon-reload 9>&- || true
+        fi
     fi
     clear_pending_state
     tn_staged_cleanup "$b"
@@ -1864,32 +2018,33 @@ apply_source_update() {
         print_ok "Binary swapped: ${pre_install_hash:0:12}... -> ${post_install_hash:0:12}..."
     fi
 
-    # Drop the retired --observer flag from the start wrapper when the new
-    # release rejects it. The decision reads the ref only (a tag carries the
-    # release version; a branch or SHA counts as newest). The built binary's
-    # --version reports the crate version (0.1.0), not the release, so it must
-    # not take part or a `main` build would never be stripped. The wrapper is
-    # backed up first and the rollback below restores it with the old binary.
-    # No backup, no strip: a wrapper that keeps the flag fails the health check
-    # and rolls back cleanly.
-    local wrapper wrapper_backed=false undo
+    # The unit, the start script and node.env are backed up before anything
+    # rewrites them, and the rollback below restores them with the old binary.
+    # No backup, no rewrite: the node starts with the files it ran with.
+    # Then the retired --observer flag is dropped from the launch file when the
+    # new release rejects it. The decision reads the ref only (a tag carries the
+    # release version); the built binary's --version reports the crate version,
+    # not the release, so it must not take part.
+    local wrapper launch_backed=false undo
+    if launch_backup_all; then
+        launch_backed=true
+    else
+        print_warn "Could not back up the unit, start script and node.env -- they stay as they are (no rewrite in the current form, no --observer strip)."
+    fi
     wrapper="$(tn_node_launch_target 2>/dev/null || true)"
     wrapper="${wrapper##* }"
-    if observer_strip_needed "$wrapper" "$new_ref"; then
-        if apply_root_dir_refusal "$wrapper" >/dev/null || ! backup_unit_file "$wrapper"; then
-            print_warn "Could not back up ${wrapper} -- leaving the retired --observer flag in place."
+    if [[ "$launch_backed" == "true" ]] && observer_strip_needed "$wrapper" "$new_ref"; then
+        if apply_root_dir_refusal "$wrapper" >/dev/null || ! launch_file_backed "$wrapper"; then
+            print_warn "${wrapper} is not a backed-up launch file -- leaving the retired --observer flag in place."
+        elif tn_node_strip_observer_flag "$wrapper"; then
+            print_info "Stripped the retired --observer flag from ${wrapper}"
         else
-            wrapper_backed=true
-            if tn_node_strip_observer_flag "$wrapper"; then
-                print_info "Stripped the retired --observer flag from ${wrapper}"
-            else
-                print_warn "Could not strip the retired --observer flag from ${wrapper} -- continuing."
-                print_info "  If ${SERVICE_NAME} fails to start, remove the flag from that file by hand."
-            fi
+            print_warn "Could not strip the retired --observer flag from ${wrapper} -- continuing."
+            print_info "  If ${SERVICE_NAME} fails to start, remove the flag from that file by hand."
         fi
     fi
 
-    update_rerender_launch
+    [[ "$launch_backed" != "true" ]] || update_rerender_launch
     print_step "Starting ${SERVICE_NAME} on new binary..."
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
@@ -1911,8 +2066,8 @@ apply_source_update() {
     fi
 
     undo="$(binary_restore_hint "$installed")"
-    if [[ "$wrapper_backed" == "true" ]]; then
-        undo="${undo} && $(unit_restore_hint "$wrapper")"
+    if [[ "$launch_backed" == "true" ]]; then
+        undo="${undo} && $(launch_restore_hint)"
     fi
     # A one-way update is never rolled back, and the rollback is not offered:
     # the previous binary cannot open the migrated data dir.
@@ -1935,9 +2090,12 @@ apply_source_update() {
             print_info "  ${undo} && systemctl start ${SERVICE_NAME}"
             return 1
         fi
-        # The old binary goes back with the wrapper it ran under.
-        if [[ "$wrapper_backed" == "true" ]] && ! restore_unit_file "$wrapper"; then
-            print_warn "Could not restore ${wrapper} from ${UNIT_BK_PATH} -- the previous binary starts without the --observer flag."
+        # The old binary goes back with the unit, start script and node.env it ran with.
+        if [[ "$launch_backed" == "true" ]]; then
+            if ! launch_restore_all; then
+                print_warn "Could not restore every launch file (see above); by hand: $(launch_restore_hint)"
+            fi
+            systemctl daemon-reload 9>&- || print_warn "systemctl daemon-reload failed; ${SERVICE_NAME} may start with the rewritten unit."
         fi
         start_service
         if verify_health_after_restart; then
@@ -2687,25 +2845,28 @@ json_apply_source() {
         return 1
     fi
 
-    # Drop the retired --observer flag from the start wrapper (see
-    # apply_source_update): back up, strip, and restore on rollback below.
-    local wrapper wrapper_backed=false undo
+    # Back up the unit, start script and node.env, then drop the retired
+    # --observer flag and rewrite them in the current form (see
+    # apply_source_update); the rollback below restores all three.
+    local wrapper launch_backed=false undo
+    if launch_backup_all; then
+        launch_backed=true
+    else
+        json_event warn "could not back up the unit, start script and node.env -- they stay as they are (no rewrite in the current form, no --observer strip)"
+    fi
     wrapper="$(tn_node_launch_target 2>/dev/null || true)"
     wrapper="${wrapper##* }"
-    if observer_strip_needed "$wrapper" "$new_ref"; then
-        if apply_root_dir_refusal "$wrapper" >/dev/null || ! backup_unit_file "$wrapper"; then
-            json_event warn "could not back up ${wrapper} -- leaving the retired --observer flag in place"
+    if [[ "$launch_backed" == "true" ]] && observer_strip_needed "$wrapper" "$new_ref"; then
+        if apply_root_dir_refusal "$wrapper" >/dev/null || ! launch_file_backed "$wrapper"; then
+            json_event warn "${wrapper} is not a backed-up launch file -- leaving the retired --observer flag in place"
+        elif tn_node_strip_observer_flag "$wrapper"; then
+            json_event step "stripped retired --observer flag from ${wrapper}"
         else
-            wrapper_backed=true
-            if tn_node_strip_observer_flag "$wrapper"; then
-                json_event step "stripped retired --observer flag from ${wrapper}"
-            else
-                json_event warn "could not strip the retired --observer flag from ${wrapper} -- continuing"
-            fi
+            json_event warn "could not strip the retired --observer flag from ${wrapper} -- continuing"
         fi
     fi
 
-    update_rerender_launch
+    [[ "$launch_backed" != "true" ]] || update_rerender_launch
     json_event step "Starting ${SERVICE_NAME} on new binary"
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
@@ -2730,8 +2891,8 @@ json_apply_source() {
     fi
 
     undo="$(binary_restore_hint "$installed")"
-    if [[ "$wrapper_backed" == "true" ]]; then
-        undo="${undo} && $(unit_restore_hint "$wrapper")"
+    if [[ "$launch_backed" == "true" ]]; then
+        undo="${undo} && $(launch_restore_hint)"
     fi
     # One-way update: no rollback (see apply_source_update).
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then
@@ -2747,9 +2908,12 @@ json_apply_source() {
         json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false$(update_vote_field),\"msg\":\"$(json_escape "health check failed AND backup restore failed; service left stopped -- restore by hand: ${undo}")\"}"
         return 1
     fi
-    # The old binary goes back with the wrapper it ran under.
-    if [[ "$wrapper_backed" == "true" ]] && ! restore_unit_file "$wrapper"; then
-        json_event warn "could not restore ${wrapper} from ${UNIT_BK_PATH}"
+    # The old binary goes back with the unit, start script and node.env it ran with.
+    if [[ "$launch_backed" == "true" ]]; then
+        if ! launch_restore_all; then
+            json_event warn "could not restore every launch file -- by hand: $(launch_restore_hint)"
+        fi
+        systemctl daemon-reload 9>&- || json_event warn "systemctl daemon-reload failed; ${SERVICE_NAME} may start with the rewritten unit"
     fi
     start_service
     if verify_health_after_restart; then

@@ -280,6 +280,73 @@ EOF
     check "e2e --json tampered backup: live binary unchanged" "new-binary" "$(cat "$INST")"
     check "e2e --json tampered backup: done says not rolled back" yes "$(has "$(cat "$T/json.log")" '"rolled_back":false')"
     check "e2e --json tampered backup: node left stopped" "1" "$STARTS"
+
+    # The unit, start script and node.env the apply rewrites go back with the binary.
+    systemctl() { :; }
+    P="${TN_ROOT_PREFIX:-}"
+    LU="${P}/etc/systemd/system/${SERVICE_NAME}.service"
+    LS="${P}/usr/local/libexec/telcoin/tn-start"
+    LE="${P}/etc/telcoin/node.env"
+    for d in "$P/etc" "$P/etc/systemd" "$P/etc/systemd/system" "$P/etc/telcoin" "$P/usr" "$P/usr/local" \
+        "$P/usr/local/libexec" "$P/usr/local/libexec/telcoin"; do
+        install -d -o root -g root -m 0755 "$d"
+    done
+    launch_setup() {  # launch_setup with-env|no-env
+        printf 'old-unit\n' > "$LU"; chmod 0644 "$LU"
+        printf 'old-start\n' > "$LS"; chmod 0755 "$LS"
+        rm -f "$LE"
+        if [[ "$1" == with-env ]]; then printf 'old-env\n' > "$LE"; chmod 0644 "$LE"; fi
+    }
+    update_rerender_launch() {
+        printf 'new-unit\n' > "$LU"; printf 'new-start\n' > "$LS"; printf 'new-env\n' > "$LE"
+    }
+    launch_now() { printf '%s|%s|%s' "$(cat "$LU")" "$(cat "$LS")" "$(cat "$LE" 2>/dev/null || echo absent)"; }
+
+    e2e_setup
+    launch_setup with-env
+    TAMPER=no
+    apply_source_update > "$T/e2e.out" 2>&1
+    check "e2e launch rollback: unit, start script and node.env back" "old-unit|old-start|old-env" "$(launch_now)"
+    check "e2e launch rollback: modes" "0 0 644|0 0 755|0 0 644" "$(owner_mode "$LU")|$(owner_mode "$LS")|$(owner_mode "$LE")"
+    check "e2e launch rollback: old binary back" "old-binary" "$(cat "$INST")"
+
+    e2e_setup
+    launch_setup no-env
+    exec 3>"$T/json.log"
+    JSON_MODE=true
+    json_apply_source > "$T/e2e.out" 2>&1
+    JSON_MODE=false
+    exec 3>&-
+    check "e2e --json launch rollback: a node.env the render added is removed" "old-unit|old-start|absent" "$(launch_now)"
+    check "e2e --json launch rollback: done says rolled back" yes "$(has "$(cat "$T/json.log")" '"rolled_back":true')"
+
+    # Interrupted apply: the backups are in the pending state; --discard restores them.
+    e2e_setup
+    launch_setup with-env
+    launch_backup_all 2>/dev/null
+    STATE="$(read_pending_state 2>/dev/null)"
+    check "pending state: every launch backup recorded" "yes yes yes yes yes yes" \
+        "$(for k in UNIT_FILE UNIT_BACKUP UNIT_BACKUP_SHA256 START_BACKUP START_BACKUP_SHA256 NODEENV_BACKUP_SHA256; do [[ -n "$(pending_field "$STATE" "$k")" ]] && printf 'yes ' || printf 'no '; done | sed 's/ $//')"
+    HINT="$(launch_restore_hint)"
+    check "undo hint names every backup" "yes yes yes yes" \
+        "$(has "$HINT" "$LAUNCH_BK_UNIT") $(has "$HINT" "$LAUNCH_BK_START") $(has "$HINT" "$LAUNCH_BK_ENV") $(has "$HINT" "daemon-reload")"
+    update_rerender_launch
+    LAUNCH_BK_UNIT="" LAUNCH_BK_START="" LAUNCH_BK_ENV=""
+    discard_pending > "$T/e2e.out" 2>&1
+    check "discard after an interrupted apply: launch files back" "old-unit|old-start|old-env" "$(launch_now)"
+    check "discard: pending state gone" no "$([[ -e "$(pending_state_path)" ]] && echo yes || echo no)"
+    e2e_setup
+    launch_setup no-env
+    launch_backup_all 2>/dev/null
+    check "pending state: absent node.env recorded" "1" "$(pending_field "$(read_pending_state 2>/dev/null)" NODEENV_WAS_ABSENT)"
+    update_rerender_launch
+    discard_pending > "$T/e2e.out" 2>&1
+    check "discard: a node.env the render added is removed" "old-unit|old-start|absent" "$(launch_now)"
+    e2e_setup
+    discard_pending > "$T/e2e.out" 2>&1
+    check "discard of a prepared update: launch files untouched" "old-unit|old-start|absent" "$(launch_now)"
+    rm -f "$LU" "$LS" "$LE"
+    unset -f systemctl update_rerender_launch
 else
     skip "end-to-end source apply rollback" "writes /opt/telcoin: container only, and only when it does not exist"
 fi
