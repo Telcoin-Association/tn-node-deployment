@@ -532,8 +532,9 @@ TN_INFLIGHT_TMP=""
 TN_INFLIGHT_CRED=""
 
 # tn_remove_inflight_tmp -- remove TN_INFLIGHT_TMP and TN_INFLIGHT_CRED when set,
-# and finish or undo a passphrase move (_tn_cred_switch) the run was stopped in
-# (_tn_cred_on_exit; TN_CRED_EXIT_MSG then says what it did). Never fails.
+# finish or undo a passphrase move (_tn_cred_switch) the run was stopped in
+# (_tn_cred_on_exit; TN_CRED_EXIT_MSG then says what it did), and remove the
+# release staging directories this run made (tn_staging_sweep). Never fails.
 tn_remove_inflight_tmp() {
     if [[ -n "${TN_INFLIGHT_TMP:-}" ]]; then
         rm -f -- "$TN_INFLIGHT_TMP" 2>/dev/null || true
@@ -546,6 +547,7 @@ tn_remove_inflight_tmp() {
     if [[ -n "${_TN_CS_STATE:-}" ]] && declare -F _tn_cred_on_exit >/dev/null 2>&1; then
         _tn_cred_on_exit || true
     fi
+    tn_staging_sweep || true
     return 0
 }
 
@@ -6288,7 +6290,7 @@ _tn_release_fetch() {
         _tn_c4_say warn "The staging directory is not a root-owned 0700 directory; nothing was downloaded." "$fn"
         return 1
     }
-    stg="$(mktemp -d "${parent}/rel.XXXXXX")" || return 2
+    stg="$(mktemp -d "${parent}/rel.$$.XXXXXX")" || return 2
     _tn_release_keyring "$stg" || {
         f=$?
         _tn_release_cleanup "$stg"
@@ -6686,7 +6688,7 @@ tn_rustup_ensure() {
             ;;
     esac
     parent="$(tn_staging_dir)" || return 1
-    stg="$(mktemp -d "${parent}/rustup.XXXXXX")" || return 2
+    stg="$(mktemp -d "${parent}/rustup.$$.XXXXXX")" || return 2
     if ! _tn_release_get "https://static.rust-lang.org/rustup/archive/${TN_RUSTUP_INIT_VERSION}/${triple}/rustup-init" \
         "${stg}/rustup-init" 134217728 600; then
         _tn_c4_say warn "Could not download rustup-init ${TN_RUSTUP_INIT_VERSION} (${triple})." "$fn"
@@ -6852,7 +6854,7 @@ _tn_tag_sig_check() {
         return 4
     fi
     parent="$(tn_staging_dir)" || { printf 'the staging directory is unusable\n'; return 4; }
-    tmp="$(mktemp -d "${parent}/tag.XXXXXX")" || { printf 'no temporary directory\n'; return 4; }
+    tmp="$(mktemp -d "${parent}/tag.$$.XXXXXX")" || { printf 'no temporary directory\n'; return 4; }
     if ! _tn_release_keyring "$tmp"; then
         _tn_release_cleanup "$tmp"
         printf 'the release signing keys cannot be read\n'
@@ -7041,7 +7043,7 @@ tn_stage_binary() {
         _tn_c4_say warn "The staging directory is not a root-owned 0700 directory." "$fn"
         return 1
     }
-    stg="$(mktemp -d "${parent}/bin.XXXXXX")" || return 2
+    stg="$(mktemp -d "${parent}/bin.$$.XXXXXX")" || return 2
     case "$src" in
         "${parent}/"*)
             ( umask 077; cat -- "$src" > "${stg}/telcoin-network" ) 2>/dev/null || ok=false
@@ -7105,6 +7107,51 @@ tn_staged_cleanup() {
     esac
     [[ -d "$d" && ! -L "$d" ]] || return 0
     rm -rf -- "$d"
+}
+
+# _tn_staging_pending_dir -- the staging directory of the staged binary the pending
+# update names (BUILT_BINARY in <config dir>/.pending-update): it outlives the run
+# that prepared it, until update-node applies or discards it.
+_tn_staging_pending_dir() {
+    local f b
+    f="$(tn_resolve_config_dir 2>/dev/null)/.pending-update" || return 0
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    b="$(awk 'index($0, "BUILT_BINARY=") == 1 { print substr($0, 14); exit }' "$f" 2>/dev/null)" || b=""
+    [[ -n "$b" ]] && printf '%s\n' "${b%/*}"
+    return 0
+}
+
+# tn_staging_sweep [stale] -- remove release staging directories (rel., rustup.,
+# tag., bin. and docker-apt. entries) under the staging directory. Each is named
+# KIND.<pid>.XXXXXX with the PID ($$) of the script run that made it, also when a
+# subshell made it. Without an argument, the ones of this run: the EXIT traps of
+# setup-node, update-node and edit-config call this through
+# tn_remove_inflight_tmp, so a signal mid-download or mid-install leaves none.
+# With "stale", the ones of runs that are no longer alive, and those named
+# without a PID (made by an earlier release of these scripts): setup-node and
+# update-node call this once they hold the update lock. The staged binary of a
+# pending update (_tn_staging_pending_dir) is always kept. Never fails.
+tn_staging_sweep() {
+    local mode="${1:-run}" parent keep e base rest pid
+    parent="${TN_RELEASE_STAGING_DIR:-/var/lib/telcoin-staging}"
+    [[ -d "$parent" && ! -L "$parent" ]] || return 0
+    keep="$(_tn_staging_pending_dir)"
+    for e in "$parent"/rel.* "$parent"/rustup.* "$parent"/tag.* "$parent"/bin.* "$parent"/docker-apt.*; do
+        [[ -d "$e" && ! -L "$e" && "$e" != "$keep" ]] || continue
+        base="${e##*/}"
+        rest="${base#*.}"
+        pid=""
+        if [[ "$rest" == *.* && "${rest%%.*}" =~ ^[0-9]+$ ]]; then
+            pid="${rest%%.*}"
+        fi
+        if [[ "$mode" == "stale" ]]; then
+            [[ -z "$pid" ]] || [[ "$pid" != "$$" && ! -d "/proc/${pid}" ]] || continue
+        else
+            [[ "$pid" == "$$" ]] || continue
+        fi
+        _tn_release_cleanup "$e" 2>/dev/null || true
+    done
+    return 0
 }
 
 # =============================================================================

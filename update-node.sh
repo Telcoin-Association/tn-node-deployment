@@ -2276,6 +2276,9 @@ update_lock() {
         UPDATE_LOCK_CLEANUP="${3:-}"
         trap update_on_exit EXIT
     fi
+    # Release staging directories an earlier run left (the staged binary of a
+    # pending update stays).
+    tn_staging_sweep stale
     return 0
 }
 

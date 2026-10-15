@@ -775,7 +775,7 @@ _setup_docker_apt() {
     fi
     command_exists gpg || install_package gnupg || setup_fail "gpg is needed to check Docker's apt signing key."
     parent="$(tn_staging_dir)" || setup_fail "The staging directory /var/lib/telcoin-staging is not a root-owned 0700 directory."
-    tmp="$(mktemp -d "${parent}/docker-apt.XXXXXX")" || setup_fail "Could not create a temporary directory in ${parent}."
+    tmp="$(mktemp -d "${parent}/docker-apt.$$.XXXXXX")" || setup_fail "Could not create a temporary directory in ${parent}."
     ( umask 077; mkdir -p -- "${tmp}/gnupg" ) || { _tn_release_cleanup "$tmp"; setup_fail "Could not create a temporary directory in ${parent}."; }
     if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 60 --max-filesize 1048576 \
         -o "${tmp}/key" --url "https://download.docker.com/linux/${os}/gpg" 9>&-; then
@@ -1512,7 +1512,8 @@ setup_keygen_passphrase() {
 # Take the update lock right after the root check, so setup never runs beside
 # update-node.sh, edit-config.sh, install-caddy.sh or another setup, then bring a host an
 # older release laid out to the root-owned layout before anything is written
-# (setup_migrate_layout). Held until step_create_service has started the node
+# (setup_migrate_layout); release staging directories of earlier runs are removed
+# (tn_staging_sweep). Held until step_create_service has started the node
 # (setup_release_lock); json_on_exit releases it on every other way out. Safe to call
 # twice.
 setup_take_lock() {
@@ -1522,6 +1523,8 @@ setup_take_lock() {
         setup_fail "Another setup or update holds the update lock ($(tn_update_lock_path))${TN_UPDATE_LOCK_HOLDER:+, PID ${TN_UPDATE_LOCK_HOLDER}}. Wait for it to finish, then run setup again."
     fi
     SETUP_LOCK_HELD=true
+    # Release staging directories an earlier run left (it was killed, say).
+    tn_staging_sweep stale
     setup_migrate_layout
 }
 
