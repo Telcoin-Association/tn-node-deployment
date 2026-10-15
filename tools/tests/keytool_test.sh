@@ -104,6 +104,8 @@ STAKED=0
 tn_node_mode() { printf 'rpc down'; return 1; }
 tn_detect_network() { printf '%s\n' "$NET"; }
 node_is_staked_validator() { printf '%s\n' "$2" > "$T/stake-url"; return "$STAKED"; }
+# The public RPC serves the network's chain (the chain-id check is quorum_guard_test's).
+_tn_rpc_chain_is() { return 0; }
 tn_epoch_secs_left() { printf '%s\n' "$1" > "$T/epoch-url"; printf '9999 5 0 0\n'; }
 say() { printf '%s %s\n' "$1" "$2" >> "$T/say"; }
 run_wait() { rm -f "$T/say" "$T/epoch-url" "$T/stake-url"; tn_wait_restart_window "http://127.0.0.1:8545" say; }

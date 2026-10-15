@@ -3586,6 +3586,17 @@ _tn_commit_authors() {
     printf '%s %s %s\n' "$n" "$((10#$ts))" "$ep"
 }
 
+# _tn_rpc_chain_is URL ID -- rc 0 when URL answers eth_chainId with chain ID
+# (decimal). A public RPC is used for the committee, the commit or the stake
+# only after this: before a launch it may serve another network.
+_tn_rpc_chain_is() {
+    local out hex
+    out="$(tn_rpc_call "$1" eth_chainId '[]' 5 2>/dev/null)" || return 1
+    hex="$(tn_json_field "$out" result 2>/dev/null)" || return 1
+    [[ "$hex" =~ ^0x[0-9a-fA-F]{1,15}$ ]] || return 1
+    [[ "$((16#${hex#0x}))" == "${2:-}" ]]
+}
+
 # _tn_guard_unreadable WHY MODE [progress-fn] -- the committee could not be
 # counted. rc 0 (a warning) on testnet and devnet and on a mainnet node whose
 # VALIDATOR_ADDRESS the registry reports as not staked; rc 2 on a staked or
@@ -3605,7 +3616,10 @@ _tn_guard_unreadable() {
     esac
     if [[ "$net" == "mainnet" && "$mode" != "CvvActive" ]]; then
         addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null)" || rc=$?
-        if [[ $rc -eq 0 && -n "$addr" && -n "$pub" ]]; then
+        if [[ $rc -eq 0 && -n "$addr" && -n "$pub" ]] && ! _tn_rpc_chain_is "$pub" "$MAINNET_CHAIN_ID"; then
+            st=2
+            hint="; ${pub} does not answer with chain ${MAINNET_CHAIN_ID}, so the stake was not read there"
+        elif [[ $rc -eq 0 && -n "$addr" && -n "$pub" ]]; then
             node_is_staked_validator "$addr" "$pub" >/dev/null 2>&1 || st=$?
         else
             st=2
@@ -3624,12 +3638,30 @@ _tn_guard_unreadable() {
     return 2
 }
 
+# _tn_guard_src_ok SRC -- for tn_committee_down_guard (its locals url, pub, want,
+# pub_state and pub_note, by dynamic scope): rc 0 for the node's own URL, and for
+# the public RPC once it has answered eth_chainId with the network's chain id
+# (asked once); otherwise rc 1 and pub_note says why.
+_tn_guard_src_ok() {
+    [[ "$1" == "$pub" && "$1" != "$url" ]] || return 0
+    if [[ -z "$pub_state" ]]; then
+        pub_state=bad
+        if [[ -n "$want" ]] && _tn_rpc_chain_is "$pub" "$want"; then
+            pub_state=ok
+        else
+            pub_note="; ${pub} does not answer with chain ${want:-of this network}"
+        fi
+    fi
+    [[ "$pub_state" == ok ]]
+}
+
 # tn_committee_down_guard [URL] [progress-fn] -- may this node stop now without
 # putting the committee at risk? Reads the node's mode (tn_node_mode), the
 # current committee (tn_epoch_info) and the authors of the latest consensus
 # commit (tn_latestConsensusHeader) from URL (default tn_local_rpc_url); the
 # committee and the commit come from the network's public RPC when URL cannot
-# give them. n is the committee size, f = floor((n-1)/3), and down counts the
+# give them, and only after that RPC answers eth_chainId with the network's chain
+# id (otherwise the count cannot be made). n is the committee size, f = floor((n-1)/3), and down counts the
 # members that authored no header in that commit (an estimate until the node
 # reports peer liveness: a slow member counts as down). This node adds one to
 # down when it stops, unless its own mode could not be read: a node that does
@@ -3644,6 +3676,7 @@ _tn_guard_unreadable() {
 # progress-fn (`fn log|warn MSG`) or stderr.
 tn_committee_down_guard() {
     local url="${1:-}" fn="${2:-}" mode="" rc=0 net pub="" src info committee n hdr counted live ts ep age f down now self=1 note=""
+    local want="" pub_state="" pub_note=""
     [[ -n "$url" ]] || url="$(tn_local_rpc_url 2>/dev/null || true)"
     mode="$(tn_node_mode "$url" 2>/dev/null)" || mode=""
     case "$mode" in
@@ -3656,31 +3689,33 @@ tn_committee_down_guard() {
     esac
     net="$(_tn_guard_network)"
     case "$net" in
-        mainnet) pub="$MAINNET_RPC_URL" ;;
-        testnet) pub="$TESTNET_RPC_URL" ;;
-        devnet)  pub="$DEVNET_RPC_URL" ;;
+        mainnet) pub="$MAINNET_RPC_URL"; want="$MAINNET_CHAIN_ID" ;;
+        testnet) pub="$TESTNET_RPC_URL"; want="$TESTNET_CHAIN_ID" ;;
+        devnet)  pub="$DEVNET_RPC_URL"; want="$DEVNET_CHAIN_ID" ;;
     esac
     info=""
     for src in "$url" "$pub"; do
         [[ -n "$src" ]] || continue
+        _tn_guard_src_ok "$src" || continue
         info="$(tn_epoch_info "$src" "" 5 2>/dev/null)" && break
         info=""
     done
     committee="$(printf '%s' "$info" | awk '{print $5}')"
     if [[ -z "$info" || -z "$committee" || "$committee" == "-" ]]; then
-        _tn_guard_unreadable "the committee could not be read" "$mode" "$fn" || return $?
+        _tn_guard_unreadable "the committee could not be read${pub_note}" "$mode" "$fn" || return $?
         return 0
     fi
     n="$(printf '%s\n' "$committee" | tr ',' '\n' | grep -c .)"
     counted=""
     for src in "$url" "$pub"; do
         [[ -n "$src" ]] || continue
+        _tn_guard_src_ok "$src" || continue
         hdr="$(tn_rpc_call "$src" tn_latestConsensusHeader '[]' 5 2>/dev/null)" || continue
         counted="$(_tn_commit_authors "$hdr")" && break
         counted=""
     done
     if [[ -z "$counted" ]]; then
-        _tn_guard_unreadable "the latest consensus commit could not be read" "$mode" "$fn" || return $?
+        _tn_guard_unreadable "the latest consensus commit could not be read${pub_note}" "$mode" "$fn" || return $?
         return 0
     fi
     read -r live ts ep <<< "$counted"
@@ -4157,6 +4192,11 @@ _tn_mode_unknown_wait_url() {
     if [[ $rc -eq 1 || ( $rc -eq 0 && -z "$addr" ) ]]; then
         return 1
     fi
+    # A public RPC that does not serve this network's chain is not asked.
+    case "$net" in
+        mainnet) [[ -z "$pub" ]] || _tn_rpc_chain_is "$pub" "$MAINNET_CHAIN_ID" || pub="" ;;
+        testnet) [[ -z "$pub" ]] || _tn_rpc_chain_is "$pub" "$TESTNET_CHAIN_ID" || pub="" ;;
+    esac
     if [[ $rc -ne 0 || -z "$pub" ]]; then
         src=2
     else

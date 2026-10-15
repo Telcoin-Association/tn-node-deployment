@@ -53,6 +53,9 @@ curl() {
         tn_nodeMode) [[ "$url" == "$LOCAL" ]] || return 7; a="{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"${MODE}\"}" ;;
         tn_getCurrentEpochInfo) [[ "$COMMITTEE_UP" == 1 ]] || return 7; a="$(committee_json)" ;;
         tn_latestConsensusHeader) a="$(header_json)" ;;
+        eth_chainId)
+            if [[ "$url" == "$LOCAL" ]]; then a='{"jsonrpc":"2.0","id":1,"result":"0x1e7"}'
+            else a="{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x$(printf '%x' "${PUB_CHAIN:-487}")\"}"; fi ;;
         *) return 7 ;;
     esac
     printf '%s\n200' "$a"
@@ -94,8 +97,16 @@ COMMITTEE_UP=0 TN_ALLOW_QUORUM_RISK=1 guard "mainnet, committee unreadable, over
 AGE=600 guard "mainnet, commit 600 s old: refused (rc 2)" 2
 HDR_EPOCH=6 guard "mainnet, commit from another epoch: refused (rc 2)" 2
 LOCAL_UP=0 PUBLIC_UP=0 STAKED=0 guard "mainnet, nothing answers, staked: refused (rc 2)" 2
-LOCAL_UP=0 PUBLIC_UP=0 STAKED=1 guard "mainnet, nothing answers, not staked: allowed" 0
-LOCAL_UP=0 PUBLIC_UP=0 STAKED=2 guard "mainnet, nothing answers, stake unknown: refused (rc 2)" 2
+LOCAL_UP=0 PUBLIC_UP=0 STAKED=1 guard "mainnet, nothing answers: the stake is not read either, refused (rc 2)" 2
+LOCAL_UP=0 COMMITTEE_UP=0 STAKED=0 guard "mainnet, no committee, staked: refused (rc 2)" 2
+LOCAL_UP=0 COMMITTEE_UP=0 STAKED=1 guard "mainnet, no committee, not staked: allowed" 0
+LOCAL_UP=0 COMMITTEE_UP=0 STAKED=2 guard "mainnet, no committee, stake unknown: refused (rc 2)" 2
+# The public RPC is trusted only when it answers with the network's chain id.
+PUB_CHAIN=2017 LOCAL_UP=0 PUBLIC_UP=1 LIVE=9 guard "mainnet, local down, public RPC on chain 2017: not counted (rc 2)" 2
+check_has "the refusal says the public RPC serves another chain" "yes" \
+    "$(printf '%s' "$MSG" | grep -q 'does not answer with chain 487' && echo yes)"
+PUB_CHAIN=2017 LOCAL_UP=0 COMMITTEE_UP=0 STAKED=1 guard "mainnet, public RPC on chain 2017: its stake answer is not used (rc 2)" 2
+PUB_CHAIN=487 LOCAL_UP=0 PUBLIC_UP=1 LIVE=9 guard "mainnet, local down, public RPC on chain 487: counted" 0
 # A node that does not answer authored nothing: it is among the down already,
 # so stopping it adds none.
 LOCAL_UP=0 PUBLIC_UP=1 LIVE=7 guard "local down, public RPC counts 3 down (this node among them): allowed" 0

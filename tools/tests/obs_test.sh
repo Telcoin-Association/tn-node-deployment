@@ -191,6 +191,10 @@ tn_epoch_info() { return 1; }
 tn_rpc_call() { return 1; }
 tn_genesis_chain_id() { return 1; }
 node_is_staked_validator() { return "${NSV_RC:-0}"; }
+# The public RPC serves the network's chain but gives no committee (the chain-id
+# check itself is quorum_guard_test's).
+REAL_CHAIN="$(declare -f _tn_rpc_chain_is)"
+_tn_rpc_chain_is() { return 0; }
 guard_case() { # guard_case NAME EXPECTED-RC META-LINES [ENV=VAL...]
     local name="$1" want="$2" meta="$3"
     shift 3
@@ -206,6 +210,7 @@ guard_case "unknown network, committee unreadable: refused" 1 'OWNERSHIP_LAYOUT=
 guard_case "mainnet, mode unreadable, staked: refused" 1 'NETWORK=mainnet\nVALIDATOR_ADDRESS=0x1111111111111111111111111111111111111111' NSV_RC=0
 guard_case "mainnet, mode unreadable, not staked: restart" 0 'NETWORK=mainnet\nVALIDATOR_ADDRESS=0x1111111111111111111111111111111111111111' NSV_RC=1
 unset -f tn_node_mode tn_epoch_info tn_rpc_call tn_genesis_chain_id node_is_staked_validator
+eval "$REAL_CHAIN"
 printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 
 # obs_restart_window: the guard first, then the epoch wait, right before the restart; the
