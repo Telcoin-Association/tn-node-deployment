@@ -80,6 +80,19 @@ else
     ln -s /etc/shadow "$P/opt/telcoin/evil"
     chown -h nobody:"$SG" "$P/opt/telcoin/evil"
 
+    # A missing log-reader group is created before step 1; when that fails, nothing
+    # changes. getent and groupadd are stubbed: the host's groups stay as they are.
+    getent() {
+        if [[ "$1 ${2:-}" == "group telcoin-log" && -n "${STUB_NO_LOG_GROUP:-}" ]]; then return 2; fi
+        command getent "$@"
+    }
+    groupadd() { printf '%s\n' "$*" >> "$T/groupadd"; return "${STUB_GROUPADD_RC:-0}"; }
+    say() { printf '%s %s\n' "$1" "$2" >&2; }
+    rc=0; STUB_NO_LOG_GROUP=1 STUB_GROUPADD_RC=1 TN_ROOT_PREFIX="$P" tn_migrate_ownership say 2>"$T/err" || rc=$?
+    check "migrate: missing log group that cannot be created: rc 1, nothing changed" "1 nobody nobody yes" \
+        "${rc} $(stat -c %U "$P/opt/telcoin") $(stat -c %U "$P/etc/telcoin") $([[ -e "$P/opt/telcoin/start-telcoin.sh" ]] && echo yes)"
+    check "migrate: the refusal names the group" "yes" "$(grep -q 'telcoin-log is missing' "$T/err" && echo yes)"
+
     rc=0; TN_ROOT_PREFIX="$P" tn_migrate_ownership quiet 2>"$T/err" || rc=$?
     check_rc "migrate: planted symlink refused" 1 "$rc"
     check_has "migrate: symlink listed" "symlink: $P/opt/telcoin/evil" "$(cat "$T/err")"
@@ -123,7 +136,10 @@ else
     printf 'x\n' > "$P2/etc/telcoin/stray"
     chown -R nobody:"$SG" "$P2/etc/telcoin"
     chown 4242 "$P2/etc/telcoin/stray"
-    rc=0; TN_ROOT_PREFIX="$P2" tn_migrate_ownership quiet 2>"$T/err" || rc=$?
+    : > "$T/groupadd"
+    rc=0; STUB_NO_LOG_GROUP=1 TN_ROOT_PREFIX="$P2" tn_migrate_ownership quiet 2>"$T/err" || rc=$?
+    check "migrate: a missing log group is created first" "--system telcoin-log" "$(cat "$T/groupadd")"
+    unset -f getent groupadd
     check_rc "migrate: foreign owner refused" 1 "$rc"
     check_has "migrate: foreign owner listed" "owned by uid 4242: $P2/etc/telcoin/stray" "$(cat "$T/err")"
     rm -rf "$RB"

@@ -1258,6 +1258,12 @@ tn_migrate_ownership() {
     libexec="${pre}$(tn_start_script_path source)"
     libexec="${libexec%/*}"
 
+    # The log dir (step 4) becomes root:telcoin-log: the group must exist before
+    # step 1, so a missing group that cannot be created changes nothing.
+    if [[ -e "$logd" || -L "$logd" ]] && ! _tn_log_group_ensure; then
+        "$fn" warn "The log-reader group ${TN_LOG_GROUP} is missing and could not be created (groupadd --system ${TN_LOG_GROUP}); nothing was changed." || true
+        return 1
+    fi
     "$fn" step "Moving the install and config directories to root ownership..." || true
     # Step 1: the two top directories only.
     for d in "$inst" "$etc"; do
@@ -2239,10 +2245,19 @@ create_service_user() {
     # descriptors.
     if getent group "$TN_LOG_GROUP" &>/dev/null; then
         print_ok "Group '${TN_LOG_GROUP}' already exists"
-    else
-        groupadd --system "$TN_LOG_GROUP"
+    elif _tn_log_group_ensure; then
         print_ok "Created system group '${TN_LOG_GROUP}' (log readers)"
+    else
+        print_error "Could not create the system group '${TN_LOG_GROUP}' (groupadd)."
+        return 1
     fi
+}
+
+# _tn_log_group_ensure -- the log-reader group TN_LOG_GROUP exists, or is created
+# now as a system group (groupadd --system). rc 1 when it cannot be created.
+_tn_log_group_ensure() {
+    getent group "$TN_LOG_GROUP" >/dev/null 2>&1 && return 0
+    groupadd --system "$TN_LOG_GROUP" >/dev/null 2>&1
 }
 
 # create_directories [INSTALL_DIR] [DATA_DIR] [LOG_DIR] [CONFIG_DIR] -- the
