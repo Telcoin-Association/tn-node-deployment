@@ -3026,6 +3026,7 @@ async function renderSystem(){
       <div class="kv"><span class="k">Disk</span><span class="v">${esc((disk.used||'?')+' / '+(disk.total||'?')+' ('+(disk.percent||'?')+'%)')}</span></div>
       <div class="kv"><span class="k">Memory</span><span class="v">${esc(mem.used_gb!=null?(mem.used_gb+' / '+mem.total_gb+' GB ('+mem.percent+'%)'):'—')}</span></div>
     </div>
+    ${ro ? '' : '<div class="card" id="auditCard" style="margin-top:14px"><h3>Host Security Audit</h3><div class="muted">Running check-node.sh --audit…</div></div>'}
     <div class="card" id="fwCard" style="margin-top:14px"><h3>Firewall</h3><div class="muted">Loading firewall status…</div></div>
     ${logRotCard}
     <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>
@@ -3033,6 +3034,7 @@ async function renderSystem(){
     <div class="card" id="addonsCard" style="margin-top:14px;display:none"></div>
     ${dangerZoneHtml()}`;
   loadFirewall();
+  loadHostAudit();
   const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
   const lrc=$('#logRotClear'); if(lrc) lrc.addEventListener('click', ()=>clearRotatedLogs(lrc));
   renderAccessCards();
@@ -3211,6 +3213,23 @@ async function loadFirewall(){
       <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong></div>`;
   card.querySelectorAll('[data-fw-port]').forEach(b=>b.addEventListener('click', ()=>toggleFirewallPort(b.dataset.fwPort, b.dataset.fwState, b)));
   const fe=$('#fwEnable'); if(fe) fe.addEventListener('click', ()=>enableFirewall(fe));
+}
+
+// System > Host Security Audit: check-node.sh --audit, read-only (the engine
+// prints facts, never a secret). Each line is ok, warn or info.
+async function loadHostAudit(){
+  const card=$('#auditCard'); if(!card) return;
+  const a = await api('/api/system/audit');
+  if(!a || !a.available){
+    card.innerHTML = `<h3>Host Security Audit</h3><p class="muted" style="font-size:13px">Audit unavailable${a&&a.error?' ('+esc(a.error)+')':''}. Run <span class="mono">sudo bash check-node.sh --audit</span> on the server.</p>`;
+    return;
+  }
+  const badge = l => l==='ok' ? '<span class="badge ok">ok</span>'
+    : l==='warn' ? '<span class="badge warn">warn</span>'
+    : `<span class="badge" style="${BADGE_GREY}">info</span>`;
+  card.innerHTML = `<h3>Host Security Audit</h3>
+    <p class="muted" style="font-size:13px;margin:0 0 10px">From <span class="mono">check-node.sh --audit</span>. ${a.warnings ? a.warnings+' warning'+(a.warnings===1?'':'s')+'.' : 'Nothing to warn about.'}</p>
+    ${a.items.map(i=>`<div class="kv" style="align-items:center"><span class="k" style="flex:0 0 auto">${badge(i.level)}</span><span class="v" style="text-align:left;overflow-wrap:anywhere">${esc(i.text)}</span></div>`).join('')}`;
 }
 
 // The SSH sources as the server checks them: addresses or CIDRs (/8 or

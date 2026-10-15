@@ -275,6 +275,11 @@ HELPER_REPLIES = {
     "node-env-cat": (0, "PRIMARY_LISTENER_MULTIADDR=/ip4/10.0.0.5/udp/49590/quic-v1\n", ""),
     "journal-tail": (0, "journal one\njournal two", ""),
     "quorum-check": (0, json.dumps({"available": True, "rc": 0, "detail": ""}), ""),
+    "host-audit": (1, "\x1b[33m  [WARN]\x1b[0m No Telcoin node detected on this server\n"
+                      "ok    systemd 255 (encrypted credentials supported)\n"
+                      "warn  BLS passphrase: plaintext root-only file; encrypt it with "
+                      "edit-config.sh --migrate-credential\n"
+                      "info  no usable TPM2 (credentials rest on the host key)\n", ""),
 }
 
 
@@ -305,6 +310,7 @@ class ServerTestCase(unittest.TestCase):
 
         server._helper_cache.update({"expires": 0.0, "data": None})
         server._quorum_cache.update({"expires": 0.0, "data": None})
+        server._audit_cache.update({"expires": 0.0, "data": None})
         server._write_times.clear()
         self.patch(server, "SYSTEMD_DIR", os.path.join(self.tmp.name, "systemd"))
         self.patch(server, "DEFAULT_CONFIG_DIR", os.path.join(self.tmp.name, "etc-telcoin"))
@@ -395,6 +401,7 @@ class CrossFileContractTest(ServerTestCase):
 
         server.read_node_env()
         server.quorum_status()
+        c.get("/api/system/audit")
 
         self.nodes = external_nodes()
         c.get("/api/logs/observer?lines=50")
@@ -978,6 +985,41 @@ class FirewallEnableTest(ServerTestCase):
         rules = helper_rules(split_transitional(sudoers_text())[0])
         self.assertIn("firewall-enable", rules)
         self.assertIn("firewall-enable *", rules)
+
+
+class HostAuditTest(ServerTestCase):
+
+    def test_lines_in_the_audit_form_are_kept(self):
+        body = self.client.get("/api/system/audit").get_json()
+        self.assertTrue(body["available"])
+        self.assertEqual(body["warnings"], 1)
+        self.assertEqual([i["level"] for i in body["items"]], ["ok", "warn", "info"])
+        self.assertEqual(body["items"][2]["text"], "no usable TPM2 (credentials rest on the host key)")
+        self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "host-audit"]])
+        self.assertFalse(server.host_has_tpm(body))
+
+    def test_tpm_answer(self):
+        self.assertTrue(server.host_has_tpm({"items": [{"level": "ok", "text": "TPM2 usable by systemd-creds"}]}))
+        self.assertIsNone(server.host_has_tpm({"items": []}))
+
+    def test_no_secret_like_value_reaches_the_page(self):
+        # Whatever the helper prints outside the audit form is dropped, so a
+        # stray line can never carry a value to the page.
+        self.helper_replies["host-audit"] = (0, "TN_BLS_PASSPHRASE=hunter2-secret\n"
+                                                "passphrase: hunter2-secret\n"
+                                                "ok    kernel.yama.ptrace_scope = 1\n", "")
+        text = json.dumps(self.client.get("/api/system/audit").get_json())
+        self.assertNotIn("hunter2", text)
+        self.assertIn("ptrace_scope", text)
+
+    def test_a_helper_failure_is_reported(self):
+        self.helper_replies["host-audit"] = (1, "", "check script not found: /opt/x (run update-scripts.sh)")
+        body = self.client.get("/api/system/audit").get_json()
+        self.assertFalse(body["available"])
+        self.assertIn("run update-scripts.sh", body["error"])
+
+    def test_not_on_the_public_path(self):
+        self.assertNotIn("api_system_audit", server.PUBLIC_ENDPOINTS)
 
 
 # ---------------------------------------------------------------------------

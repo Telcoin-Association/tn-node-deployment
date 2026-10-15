@@ -854,6 +854,33 @@ check_has "quorum-check reports the guard's answer" '{"available":true,"rc":0,"d
 t="$(export TN_TEST_LIB_RC=1; trace quorum-check)"
 check_has "quorum-check reports a refusal" '{"available":true,"rc":1,"detail":"guard says 1"}' "$t"
 
+# ---- host-audit: check-node.sh --audit, read-only, no secret in its output ----------
+# The real check-node.sh and library against a fake root (TN_ROOT_PREFIX) whose
+# node keeps its passphrase in the root-only file: the audit names the method
+# and the files, never the value.
+fixture unified
+make_fake "$T/engine/check-node.sh" check-node '# --audit'
+t="$(CHECK_SCRIPT="$T/engine/check-node.sh"; trace host-audit)"
+check_has "host-audit runs check-node.sh --audit" "check-node [--audit]" "$t"
+refused "host-audit takes no argument" host-audit extra
+make_fake "$T/engine/check-old.sh" check-old
+t="$(CHECK_SCRIPT="$T/engine/check-old.sh"; trace host-audit)"
+check_has "host-audit refuses a check-node.sh without --audit" \
+    "check-old.sh in the engine copy has no --audit (it is older than this helper): run update-scripts.sh, then try again" "$t"
+t="$(CHECK_SCRIPT="$T/nocheck/check-node.sh"; trace host-audit)"
+check_has "host-audit without check-node.sh says so" "check script not found: $T/nocheck/check-node.sh (run update-scripts.sh)" "$t"
+AUD_SECRET="Zq7-audit-secret-passphrase-4411"
+mkdir -p "$T/audroot/etc/telcoin"
+printf 'NETWORK=testnet\nPASSPHRASE_METHOD=stdin\nVALIDATOR_ADDRESS=0x%040d\n' 0 > "$T/audroot/etc/telcoin/.node-meta"
+printf '%s\n' "$AUD_SECRET" > "$T/audroot/etc/telcoin/bls-passphrase"
+printf 'TN_BLS_PASSPHRASE=%s\n' "$AUD_SECRET" > "$T/audroot/etc/telcoin/bls-passphrase.env"
+chmod 600 "$T/audroot/etc/telcoin/bls-passphrase" "$T/audroot/etc/telcoin/bls-passphrase.env"
+t="$(export TN_ROOT_PREFIX="$T/audroot"; CHECK_SCRIPT="${TEST_DIR}/../../check-node.sh"; trace host-audit)"
+check_has "host-audit reports the passphrase method" \
+    "warn  BLS passphrase: plaintext root-only file; encrypt it with edit-config.sh --migrate-credential" "$t"
+check_lacks "host-audit never prints the passphrase" "$AUD_SECRET" "$t"
+check_lacks "host-audit prints no part of it either" "audit-secret" "$t"
+
 # ---- Start-script resolution (current layout) ---------------------------------------
 fixture none
 mkdir -p "$UNIT_DIR" "$LIBEXEC_DIR"

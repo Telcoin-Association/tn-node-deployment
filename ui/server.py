@@ -4479,6 +4479,53 @@ def api_system():
     return jsonify(info)
 
 
+# The host hardening summary: check-node.sh --audit through the helper's
+# read-only host-audit, one {"level": ok|warn|info, "text"} per line it prints
+# in that form (anything else, such as a colour-coded notice, is dropped). The
+# engine never prints a secret. Cached a minute. Not on the public path.
+_AUDIT_LINE_RE = re.compile(r"(ok|warn|info)\s+(\S.*)")
+_AUDIT_TTL = 60.0
+_audit_cache = {"expires": 0.0, "data": None}
+
+
+def host_audit():
+    now = time.monotonic()
+    if _audit_cache["data"] is not None and _audit_cache["expires"] > now:
+        return dict(_audit_cache["data"])
+    rc, out, err = run(["sudo", "-n", HELPER, "host-audit"], timeout=30)
+    items = []
+    for line in (out or "").splitlines():
+        m = _AUDIT_LINE_RE.fullmatch(_ANSI_RE.sub("", line).strip())
+        if m:
+            items.append({"level": m.group(1), "text": m.group(2)[:300]})
+    if rc in (0, 1) and items:
+        data = {"available": True, "items": items, "error": "",
+                "warnings": sum(1 for i in items if i["level"] == "warn")}
+    else:
+        data = {"available": False, "items": [], "warnings": 0,
+                "error": _ANSI_RE.sub("", err or out or "host audit unavailable").strip()[-300:]}
+    if _may_cache():
+        _audit_cache.update(expires=now + _AUDIT_TTL, data=data)
+    return dict(data)
+
+
+def host_has_tpm(audit=None):
+    """True / False when the host audit says whether systemd-creds has a usable
+    TPM2, None when it cannot tell."""
+    audit = audit if audit is not None else host_audit()
+    for item in audit.get("items") or []:
+        if item["text"].startswith("TPM2 usable"):
+            return True
+        if item["text"].startswith("no usable TPM2"):
+            return False
+    return None
+
+
+@app.route("/api/system/audit")
+def api_system_audit():
+    return jsonify(host_audit())
+
+
 @app.route("/api/addons/status")
 def api_addons_status():
     """Read-only status of the testnet opt-in add-ons (health monitor / logging /

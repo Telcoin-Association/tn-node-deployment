@@ -440,6 +440,8 @@ ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper firewall-port
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper addons-status
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper meta-cat
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper node-env-cat
+# Read-only: the host hardening summary (check-node.sh --audit; never a secret).
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper host-audit
 # (Node removal is intentionally NOT exposed in the UI -- it is irreversible and
 # runs on the server via remove-node.sh -- so the telcoin-ui user gets no
 # node-remove grant.)
@@ -480,7 +482,7 @@ ok "Helper installed (root:root 0755)"
 # ---- 7. Engine scripts (root-owned, OUTSIDE /opt/telcoin-ui) ------------------
 # update-node.sh, edit-config.sh, setup-node.sh, install-caddy.sh,
 # firewall-setup.sh and remove-node.sh drive the UI's features through their
-# --json modes, with every lib/ file they source (lib/*.sh, lib/*.env) and the
+# --json modes (check-node.sh through its read-only --audit), with every lib/ file they source (lib/*.sh, lib/*.env) and the
 # release signing keys (lib/release-keys/*.asc) when this checkout has them.
 # Built in a fresh root-only directory and renamed over the old one.
 if [[ -f "${REPO_DIR}/update-node.sh" && -f "${REPO_DIR}/lib/common.sh" && -f "${REPO_DIR}/lib/fallback.sh" ]]; then
@@ -488,7 +490,7 @@ if [[ -f "${REPO_DIR}/update-node.sh" && -f "${REPO_DIR}/lib/common.sh" && -f "$
     ENGINE_NEW="$(new_tree "$UPDATE_DIR")"
     mkdir -p "${ENGINE_NEW}/lib"
     install -m 0755 "${REPO_DIR}/update-node.sh" "${ENGINE_NEW}/update-node.sh"
-    for s in edit-config.sh firewall-setup.sh remove-node.sh setup-node.sh install-caddy.sh; do
+    for s in edit-config.sh firewall-setup.sh remove-node.sh setup-node.sh install-caddy.sh check-node.sh; do
         if [[ -f "${REPO_DIR}/${s}" ]]; then
             install -m 0755 "${REPO_DIR}/${s}" "${ENGINE_NEW}/${s}"
         else

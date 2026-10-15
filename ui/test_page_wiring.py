@@ -75,5 +75,16 @@ class FirewallEnableTest(unittest.TestCase):
         self.assertIn("mask<8", body)
 
 
+class HostAuditCardTest(unittest.TestCase):
+
+    def test_the_system_panel_loads_the_audit_read_only(self):
+        body = function_body("loadHostAudit")
+        self.assertIn("api('/api/system/audit')", body)
+        # Text only: every engine line goes through esc().
+        self.assertIn("esc(i.text)", body)
+        self.assertNotIn("method:'POST'", body)
+        self.assertIn("loadHostAudit();", function_body("renderSystem"))
+
+
 if __name__ == "__main__":
     unittest.main()

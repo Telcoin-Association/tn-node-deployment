@@ -76,6 +76,7 @@
 #   telcoin-ui-helper addons-status                             (read-only)
 #   telcoin-ui-helper meta-cat                                  (read-only)
 #   telcoin-ui-helper node-env-cat                              (read-only)
+#   telcoin-ui-helper host-audit                                (read-only)
 #   telcoin-ui-helper setup-keygen                              (settings via TN_SETUP_*, passphrase on stdin)
 #   telcoin-ui-helper setup-finalize                            (settings via TN_SETUP_*)
 #   telcoin-ui-helper docker-detect
@@ -128,6 +129,8 @@ FIREWALL_SCRIPT="/opt/telcoin-ui-update/firewall-setup.sh"
 SETUP_SCRIPT="/opt/telcoin-ui-update/setup-node.sh"
 # install-caddy.sh, same root-owned dir.
 CADDY_SCRIPT="/opt/telcoin-ui-update/install-caddy.sh"
+# check-node.sh, same root-owned dir; only its read-only --audit mode is used.
+CHECK_SCRIPT="/opt/telcoin-ui-update/check-node.sh"
 # The engine copy of the shared library. Used only when it and its directory
 # are root-owned and not writable by group or others (LIB_REQUIRE_ROOT=1).
 HELPER_LIB="/opt/telcoin-ui-update/lib/common.sh"
@@ -1144,6 +1147,16 @@ cmd_node_env_cat() {
     grep -E '^(PRIMARY_LISTENER_MULTIADDR|WORKER_LISTENER_MULTIADDR|TN_RPC_ADDR)=' "$f" 2>/dev/null || true
 }
 
+# check-node.sh --audit: the host hardening summary, one "ok|warn|info  text"
+# line per fact (the systemd floor, how the BLS passphrase is kept -- never its
+# value --, TPM2, disk encryption, core dumps, ptrace scope). Exit 0 when nothing
+# warned, 1 otherwise. Read-only; stdin closed.
+cmd_host_audit() {
+    [[ -f "$CHECK_SCRIPT" ]] || die "check script not found: $CHECK_SCRIPT (run update-scripts.sh)"
+    engine_has "$CHECK_SCRIPT" --audit
+    exec bash "$CHECK_SCRIPT" --audit </dev/null
+}
+
 cmd_addons_status() {
     local meta
     meta="$(node_meta_path)"
@@ -1422,7 +1435,7 @@ max_args() {
         tracing-enable|tracing-disable|update-check|update-apply|update-discard) echo 0 ;;
         restart-count|quorum-check|log-clear|journal-follow|clear-rotated) echo 0 ;;
         logrotate-seed|caddy-status|caddy-disable|rpc-status|rpc-disable) echo 0 ;;
-        firewall-status|addons-status|meta-cat|node-env-cat) echo 0 ;;
+        firewall-status|addons-status|meta-cat|node-env-cat|host-audit) echo 0 ;;
         setup-keygen|setup-finalize|docker-detect|internal-ip) echo 0 ;;
         update-prepare|journal-tail|set-hostname|set-logrotate|credential) echo 1 ;;
         firewall-enable) echo 1 ;;
@@ -1500,6 +1513,7 @@ main() {
         addons-status)   cmd_addons_status ;;
         meta-cat)        cmd_meta_cat ;;
         node-env-cat)    cmd_node_env_cat ;;
+        host-audit)      cmd_host_audit ;;
         setup-keygen)    cmd_setup_keygen ;;
         setup-finalize)  cmd_setup_finalize ;;
         docker-detect)    cmd_docker_detect ;;

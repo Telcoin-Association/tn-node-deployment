@@ -62,6 +62,7 @@ READ_ENDPOINTS = {
     "api_nodes", "api_setup_defaults", "api_preflight", "api_rpc_status",
     "api_status", "api_system", "api_traces", "api_traces_stats",
     "api_tracing_status", "api_update_status", "api_validator", "api_version",
+    "api_system_audit",
 }
 
 
