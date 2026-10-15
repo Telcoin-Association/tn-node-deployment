@@ -259,4 +259,39 @@ check "menu disable: a refused migration changes nothing" "migrate" "$(cat "$MIG
 printf 'NETWORK=testnet\nINSTALL_METHOD=binary\nINSTALL_METHOD=docker\n' > "$RP/etc/telcoin/.node-meta"
 ( load_node_context ) >"$T/out" 2>&1; check_rc "duplicated INSTALL_METHOD stops setup-observability" 1 $?
 
+# --- the ingest token: --token-stdin, and a warning for --token on argv ---------------------------
+tokrun() { # tokrun STDIN ARGS... -- main with run_json_mode replaced; RC, EV (JSON events)
+    local input="$1"
+    shift
+    : > "$T/ev"
+    RC=0
+    ( run_json_mode() { printf 'TOKEN=%s\n' "$JSON_TOKEN" > "$T/tok"; json_done '{"event":"done","ok":true}'; }
+      json_setup_fds() { exec 3>>"$T/ev"; }
+      main "$@" <<< "$input" ) >"$T/out" 2>&1 || RC=$?
+    EV="$(cat "$T/ev")"
+}
+rm -f "$T/tok"
+tokrun "tok-from-stdin" --json --enable-logs --token-stdin
+check_rc "--token-stdin rc 0" 0 "$RC"
+check "--token-stdin: token read from stdin" "TOKEN=tok-from-stdin" "$(cat "$T/tok" 2>/dev/null)"
+check_lacks "--token-stdin: no argv warning" "command line" "$EV"
+rm -f "$T/tok"
+tokrun $'tok-crlf\r' --json --enable-logs --token-stdin
+check "--token-stdin: CR dropped" "TOKEN=tok-crlf" "$(cat "$T/tok" 2>/dev/null)"
+rm -f "$T/tok"
+tokrun "" --json --enable-logs --token argv-token
+check_rc "--token rc 0" 0 "$RC"
+check "--token: still used" "TOKEN=argv-token" "$(cat "$T/tok" 2>/dev/null)"
+check "--token: warns that it is on the command line" "yes" \
+    "$(grep -q '"event":"warn".*--token puts the ingest token on the command line' "$T/ev" && echo yes)"
+tokrun "tok" --json --enable-logs --token argv-token --token-stdin
+check_rc "--token with --token-stdin refused" 1 "$RC"
+check "--token with --token-stdin: done event says why" "yes" "$(grep -q 'cannot be combined' "$T/ev" && echo yes)"
+tokrun "" --json --enable-logs --token-stdin
+check_rc "--token-stdin with nothing on stdin refused" 1 "$RC"
+( run_json_mode() { :; }; main_menu() { :; }; main --token-stdin <<< "tok" ) >"$T/out" 2>&1
+check_rc "--token-stdin without --json refused" 1 $?
+check "--token-stdin without --json: said" "yes" "$(grep -q 'goes with --json' "$T/out" && echo yes)"
+
+
 finish

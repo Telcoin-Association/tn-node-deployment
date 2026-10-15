@@ -10,6 +10,9 @@
 #
 # USAGE:
 #   sudo bash setup-observability.sh
+#   printf '%s\n' "$TOKEN" | sudo bash setup-observability.sh --json --enable-logs --token-stdin
+#     (--token-stdin reads the ingest token from one line of stdin; --token VALUE
+#     still works but puts the token on the command line, where local users can see it)
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -572,7 +575,8 @@ json_disable_health() {
 }
 
 # run_json_mode — bootstrap (root/distro/context/gate) then apply requested toggles.
-# Enables need a token (--token or TN_OBS_TOKEN); a missing one is a clear json error.
+# Enables need a token (--token-stdin, --token or TN_OBS_TOKEN); a missing one is a
+# clear json error.
 run_json_mode() {
     check_root
     detect_distro
@@ -591,13 +595,14 @@ run_json_mode() {
         addons_lib_check
     fi
 
-    # Resolve the shared ingest token only when a pipeline is being ENABLED: --token,
-    # else TN_OBS_TOKEN, else the token already stored on this node, else fail.
+    # Resolve the shared ingest token only when a pipeline is being ENABLED:
+    # --token-stdin or --token, else TN_OBS_TOKEN, else the token already stored on
+    # this node, else fail.
     local token=""
     if [[ "$enabling_pipe" == "true" ]]; then
         token="${JSON_TOKEN:-${TN_OBS_TOKEN:-}}"
         [[ -n "$token" ]] || token="$(obs_existing_token)"
-        [[ -n "$token" ]] || json_fail "enabling logs/metrics requires an ingest token (--token or TN_OBS_TOKEN)"
+        [[ -n "$token" ]] || json_fail "enabling logs/metrics requires an ingest token (--token-stdin, --token or TN_OBS_TOKEN)"
     fi
 
     # Apply in a deterministic order. Disables first so a same-call enable wins; both
@@ -696,8 +701,18 @@ addons_require_lib() {
     exit 2
 }
 
+# so_read_token_stdin -- read the ingest token from one line of stdin (a trailing CR
+# dropped) into JSON_TOKEN. rc 1 when the line is empty.
+so_read_token_stdin() {
+    local line=""
+    IFS= read -r line || [[ -n "$line" ]] || line=""
+    line="${line%$'\r'}"
+    [[ -n "$line" ]] || return 1
+    JSON_TOKEN="$line"
+}
+
 main() {
-    local arg
+    local arg token_stdin=false token_argv=false
     # --json is found before anything else runs: from here stdout carries JSON only, and
     # json_on_exit closes the run with a done event whatever stops it, a bad argument too.
     for arg in "$@"; do
@@ -721,6 +736,7 @@ main() {
             --disable-logs)      JSON_DISABLE_LOGS=true; shift ;;
             --disable-metrics)   JSON_DISABLE_METRICS=true; shift ;;
             --disable-health)    JSON_DISABLE_HEALTH=true; shift ;;
+            --token-stdin)       token_stdin=true; shift ;;
             --region|--token|--push-url|--metrics-push-url)
                 # A value flag needs a value; the next option is not one.
                 if [[ $# -lt 2 || "$2" == --* ]]; then
@@ -728,7 +744,7 @@ main() {
                 fi
                 case "$1" in
                     --region)           JSON_REGION="$2" ;;
-                    --token)            JSON_TOKEN="$2" ;;
+                    --token)            JSON_TOKEN="$2"; token_argv=true ;;
                     --push-url)         OBS_PUSH_URL="$2" ;;
                     --metrics-push-url) OBS_METRICS_PUSH_URL="$2" ;;
                 esac
@@ -736,6 +752,13 @@ main() {
             *) shift ;;
         esac
     done
+    if [[ "$token_stdin" == "true" ]]; then
+        [[ "$token_argv" != "true" ]] || arg_fail "--token and --token-stdin cannot be combined; give the token one way."
+        json_mode || arg_fail "--token-stdin goes with --json (the menu asks for the token)."
+        so_read_token_stdin || arg_fail "--token-stdin: no token on stdin."
+    elif [[ "$token_argv" == "true" ]]; then
+        addons_say warn "--token puts the ingest token on the command line, where other local users can read it while this runs; pipe it in with --token-stdin instead."
+    fi
 
     if json_mode; then
         run_json_mode
