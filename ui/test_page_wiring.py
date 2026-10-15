@@ -143,5 +143,25 @@ class UpdatePanelTest(unittest.TestCase):
         self.assertIn("onReject})", run)
 
 
+class StaleTextTest(unittest.TestCase):
+    """open-ui.sh opens http://127.0.0.1:8080; no operator-facing text in the UI
+    files says otherwise, and the server's start refusal names the token."""
+
+    FILES = ("server.py", "static/index.html", "install-ui.sh", "telcoin-ui-helper.sh",
+             "../open-ui.sh")
+
+    def test_no_localhost_8080_text(self):
+        for name in self.FILES:
+            with self.subTest(file=name):
+                with open(os.path.join(HERE, name), encoding="utf-8") as f:
+                    self.assertNotIn("localhost:8080", f.read())
+
+    def test_start_refusal_names_the_token(self):
+        with open(os.path.join(HERE, "server.py"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("no auth of its own", text)
+        self.assertIn("per-install token", text[text.index('if __name__ == "__main__":'):])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,8 +3,8 @@
 Who may call the UI API (server.py _enforce_local_origin, _json_body, the token)
 and what a write leaves behind (the audit line, the redacted stream).
 
-Off the public path every /api/ request needs Host on localhost:8080 (421
-otherwise) and the per-install token in X-TN-UI-Token (401). A write also needs
+Off the public path every /api/ request needs a loopback Host on port 8080
+(127.0.0.1, localhost or [::1]; 421 otherwise) and the per-install token in X-TN-UI-Token (401). A write also needs
 no foreign Origin or cross-site Sec-Fetch-Site (403), Content-Type
 application/json (415) and a JSON object body (400). No route changes anything
 on GET: the url_map walk below proves every write route answers 405 to GET and

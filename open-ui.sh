@@ -4,7 +4,7 @@
 #
 # Runs on your laptop/workstation, NOT on the node. Reads the UI access token
 # over SSH (sudo cat /etc/telcoin-ui/token), opens an SSH tunnel to the server's
-# localhost:8080 and launches your browser at http://127.0.0.1:8080/#t=<token>.
+# 127.0.0.1:8080 and launches your browser at http://127.0.0.1:8080/#t=<token>.
 # The token travels in the URL fragment, which the browser never sends to the
 # server. Works on macOS, Linux, and Windows (Git Bash / WSL). Ctrl+C closes the
 # tunnel.

@@ -987,6 +987,22 @@ class FirewallEnableTest(ServerTestCase):
         self.assertIn("firewall-enable *", rules)
 
 
+class DockerLaunchLineTest(ServerTestCase):
+
+    def test_image_comes_from_the_start_script_when_meta_has_none(self):
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
+        server.clear_meta_cache()
+        image = server.GAR_IMAGE_BASE + "@sha256:" + "d" * 64
+        script = os.path.join(self.tmp.name, "tn-start-docker")
+        with open(script, "w") as f:
+            f.write("#!/bin/bash\nexec docker run --rm --name telcoin %s node --http\n" % image)
+        os.makedirs(server.SYSTEMD_DIR, exist_ok=True)
+        with open(os.path.join(server.SYSTEMD_DIR, "telcoin.service"), "w") as f:
+            f.write("[Service]\nExecStart=/usr/local/libexec/telcoin/tn-start-docker\n")
+        self.patch(server, "wrapper_path", lambda t: script)
+        self.assertEqual(server.docker_image_ref("observer"), image)
+
+
 class UpdateEventsTest(ServerTestCase):
 
     def test_check_passes_tag_moved_through(self):

@@ -1122,22 +1122,25 @@ def _iso_uptime_seconds(iso):
 # =============================================================================
 
 def docker_image_ref(t):
-    """Full docker image (registry/path:tag) from meta DOCKER_IMAGE, else grep
-    the unit file. '' if neither has one."""
+    """Full docker image (registry/path@sha256:digest, or :tag on older installs)
+    from meta DOCKER_IMAGE, else from the launch line: the start script the unit
+    runs (tn-start-docker is root 0755, readable as is), then the unit itself
+    (older installs run docker inline). '' if none has one."""
     meta = read_meta(t)
     img = meta.get("DOCKER_IMAGE", "").strip()
     if img:
         return img
-    path = service_file(t)
-    if os.path.exists(path):
+    for path in (wrapper_path(t), service_file(t)):
+        if not os.path.exists(path):
+            continue
         try:
             with open(path, "r") as f:
-                unit = f.read()
-            m = re.search(r"(us-docker[^\s\"]+|gcr\.io[^\s\"]+|ghcr\.io[^\s\"]+)", unit)
-            if m:
-                return m.group(1)
+                text = f.read()
         except (OSError, IOError):
-            pass
+            continue
+        m = re.search(r"(us-docker[^\s\"]+|gcr\.io[^\s\"]+|ghcr\.io[^\s\"]+)", text)
+        if m:
+            return m.group(1)
     return ""
 
 
@@ -5675,10 +5678,10 @@ if __name__ == "__main__":
     if BIND_HOST not in _LOOPBACK_HOSTS:
         _log(
             f"refusing to start: BIND_HOST={BIND_HOST!r} is not loopback "
-            f"({' / '.join(_LOOPBACK_HOSTS)}). This UI has no auth of its own; "
-            "binding off-loopback exposes unauthenticated full node management. "
-            "Put a header-stamping reverse proxy (install-caddy.sh) in front "
-            "instead -- see the comment above BIND_HOST."
+            f"({' / '.join(_LOOPBACK_HOSTS)}). Off loopback the per-install token "
+            "would be the only thing between whoever reaches the port and full node "
+            "management. Put a header-stamping reverse proxy (install-caddy.sh) in "
+            "front instead -- see the comment above BIND_HOST."
         )
         sys.exit(1)
     UI_TOKEN = load_token()

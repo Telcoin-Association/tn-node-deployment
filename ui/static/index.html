@@ -497,7 +497,7 @@ const el = (tag,cls,html)=>{const e=document.createElement(tag);if(cls)e.classNa
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 // =============================================================================
-// UI token. open-ui.sh opens http://localhost:8080/#t=<token>; the page keeps
+// UI token. open-ui.sh opens http://127.0.0.1:8080/#t=<token>; the page keeps
 // the token in sessionStorage, removes it from the address bar, and sends it in
 // the X-TN-UI-Token header on every API call. A URL fragment never reaches the
 // server, a proxy or a log. Without it every /api/ call answers 401.

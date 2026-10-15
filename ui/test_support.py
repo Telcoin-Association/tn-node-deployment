@@ -3,14 +3,15 @@
 The server answers /api/ only with the per-install token and only on a local
 Host, so the suites call local_client() once at import time: it sets a test
 token on the server module and makes app.test_client() send that token and
-Host: localhost:8080 on every request unless the test passes its own headers
+Host: 127.0.0.1:8080 (what open-ui.sh opens) on every request unless the test
+passes its own headers
 (test_csrf.py does, to check the refusals).
 """
 
 from flask.testing import FlaskClient
 
 TEST_TOKEN = "ab" * 32
-LOCAL_BASE = "http://localhost:8080"
+LOCAL_BASE = "http://127.0.0.1:8080"
 
 
 class LocalClient(FlaskClient):
