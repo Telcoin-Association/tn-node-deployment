@@ -2214,7 +2214,8 @@ caddy_read_password_stdin() {
 # mainnet validators. NETWORK comes from .node-meta (else the genesis chain id); the
 # stake from node_is_staked_validator for VALIDATOR_ADDRESS, asked of the local node
 # first, then of the network's public RPC when the local answer is unreadable. Runs
-# once per run; any other network passes.
+# once per run; testnet and devnet pass. A network that cannot be told (no NETWORK
+# and no readable genesis chain id) is refused like an unreadable stake.
 caddy_mainnet_gate() {
     local net addr rc
     [[ "$CADDY_GATE_DONE" == "true" ]] && return 0
@@ -2222,6 +2223,7 @@ caddy_mainnet_gate() {
     if [[ -z "$net" ]]; then
         net="$(tn_detect_network 2>/dev/null)" || net=""
     fi
+    [[ -n "$net" ]] || die "The network of this node cannot be told (no NETWORK in .node-meta and no readable genesis chain id), so this run cannot confirm it is not a staked mainnet validator. Caddy (dashboard and public RPC) is not offered on mainnet validators. Nothing was changed."
     if [[ "$net" != "mainnet" ]]; then
         CADDY_GATE_DONE=true
         return 0

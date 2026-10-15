@@ -361,6 +361,11 @@ printf 'NETWORK=mainnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 NSV_RC=1 gate; check_rc "mainnet without VALIDATOR_ADDRESS refused" 1 $?
 printf 'NETWORK=mainnet\nNETWORK=testnet\n' > "$RP/etc/telcoin/.node-meta"
 gate; check_rc "duplicated NETWORK refused" 1 $?
+printf 'OWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
+gate; check_rc "unknown network (no NETWORK, no genesis) refused" 1 $?
+check "unknown network: said" "yes" "$(grep -q 'network of this node cannot be told' "$T/out" && echo yes)"
+printf 'NETWORK=devnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
+gate; check_rc "devnet allowed" 0 $?
 printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nVALIDATOR_ADDRESS=%s\n' "$ADDR" > "$RP/etc/telcoin/.node-meta"
 NSV_RC=0 gate; check_rc "testnet staked validator allowed" 0 $?
 check "testnet: stake not asked" "" "$(cat "$NSV_LOG")"
