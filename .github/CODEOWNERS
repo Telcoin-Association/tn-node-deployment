@@ -1,0 +1,20 @@
+# Code owners. The main-branch ruleset requires a review from a code owner.
+#
+# The release path (the updater, the installer, lib/, ui/, the workflows, the
+# release tooling and the maintainer key directory) is listed separately so a
+# second owner can be added to each line; the ruleset sets how many approvals
+# a pull request needs.
+
+*                           @grantkee
+
+/update-scripts.sh          @grantkee
+/install.sh                 @grantkee
+/lib/                       @grantkee
+/lib/allowed_signers        @grantkee
+/lib/wgvpn/peers/ssh/       @grantkee
+/ui/                        @grantkee
+/.github/                   @grantkee
+/tools/release-scripts.sh   @grantkee
+/MANIFEST                   @grantkee
+/MANIFEST.sig               @grantkee
+/RELEASE                    @grantkee
