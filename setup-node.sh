@@ -1650,14 +1650,16 @@ step_create_infrastructure() {
 
     # Record the service account in .node-meta NOW (not just at the end), so an
     # install interrupted after this point still leaves remove-node.sh enough to
-    # clean up the user/group. The install method and the image or binary go in too:
-    # a --json finalize is a new process and reads them back from here when its
-    # flags leave them out. step_create_service later adds the full metadata.
+    # clean up the user/group. The install method, the data dir and the image or binary
+    # go in too: a --json finalize is a new process and reads them back from here when
+    # its flags leave them out (and stops when a flag differs). step_create_service
+    # later adds the full metadata.
     # OWNERSHIP_LAYOUT=2: this layout is the root-owned one, so nothing is migrated.
     write_node_meta \
         "HOST_SERVICE_USER=${SERVICE_USER}" \
         "HOST_SERVICE_GROUP=${SERVICE_GROUP}" \
         "INSTALL_METHOD=${INSTALL_METHOD:-binary}" \
+        "DATA_DIR=${DATA_DIR}" \
         "OWNERSHIP_LAYOUT=2"
     write_node_meta_runner
     print_ok "Recorded service account in ${CONFIG_DIR}/.node-meta (${SERVICE_USER}:${SERVICE_GROUP})"
@@ -2687,11 +2689,22 @@ json_phase_keygen() {
     json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
 }
 
-# Finalize is a new process. The install method and the docker image or binary come from
-# its flags or, for any the flags leave out, from what keygen recorded in .node-meta.
+# finalize_same_as_keygen FLAG VALUE RECORDED -- stop when a finalize flag and the
+# value keygen recorded in .node-meta are both set and differ: the keys, the image or
+# binary and the data dir keygen used are the ones finalize must run.
+finalize_same_as_keygen() {
+    if [[ -n "$2" && -n "$3" && "$2" != "$3" ]]; then
+        setup_fail "--${1} ${2} differs from ${3}, which keygen recorded in ${CONFIG_DIR}/.node-meta; finalize with the keygen value (or leave the flag out), or run keygen again. Nothing was changed."
+    fi
+}
+
+# Finalize is a new process. The install method, the data dir and the docker image or
+# binary come from its flags or, for any the flags leave out, from what keygen recorded
+# in .node-meta; a flag that differs from the recorded value stops it. --data-dir is
+# compared only when it is not the default, which is what an absent flag leaves.
 # Stops when the node would have nothing to run, before anything is written.
 finalize_install_inputs() {
-    local meta="${CONFIG_DIR}/.node-meta"
+    local meta="${CONFIG_DIR}/.node-meta" rec=""
     # The passphrase form keygen recorded wins over a flag: the stored file is that one.
     local pm=""
     setup_meta_read pm PASSPHRASE_METHOD "$meta"
@@ -2702,8 +2715,16 @@ finalize_install_inputs() {
         stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || setup_fail "PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing: run --phase=keygen first." ;;
         *) setup_fail "No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD): run --phase=keygen first." ;;
     esac
-    if [[ -z "$INSTALL_METHOD" ]]; then
-        setup_meta_read INSTALL_METHOD INSTALL_METHOD "$meta"
+    setup_meta_read rec INSTALL_METHOD "$meta"
+    finalize_same_as_keygen install-method "$INSTALL_METHOD" "$rec"
+    INSTALL_METHOD="${INSTALL_METHOD:-$rec}"
+    setup_meta_read rec DATA_DIR "$meta"
+    if [[ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ]]; then
+        finalize_same_as_keygen data-dir "$DATA_DIR" "$rec"
+    fi
+    DATA_DIR="${rec:-$DATA_DIR}"
+    if ! validate_setup_path "$DATA_DIR"; then
+        setup_fail "DATA_DIR=${DATA_DIR} in ${meta} is not an absolute path of letters, digits and . _ / - only."
     fi
     # Values read back from .node-meta get the checks the flags got: the image and the
     # binary path go into the root-run start wrapper.
@@ -2712,9 +2733,9 @@ finalize_install_inputs() {
         *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, docker or existing." ;;
     esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
-        if [[ -z "$DOCKER_IMAGE" ]]; then
-            setup_meta_read DOCKER_IMAGE DOCKER_IMAGE "$meta"
-        fi
+        setup_meta_read rec DOCKER_IMAGE "$meta"
+        finalize_same_as_keygen docker-image "$DOCKER_IMAGE" "$rec"
+        DOCKER_IMAGE="${DOCKER_IMAGE:-$rec}"
         if [[ -z "$DOCKER_IMAGE" ]]; then
             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
         fi
@@ -2723,9 +2744,9 @@ finalize_install_inputs() {
         fi
         return 0
     fi
-    if [[ -z "$BINARY_PATH" ]]; then
-        setup_meta_read BINARY_PATH BINARY_PATH "$meta"
-    fi
+    setup_meta_read rec BINARY_PATH "$meta"
+    finalize_same_as_keygen binary-path "$BINARY_PATH" "$rec"
+    BINARY_PATH="${BINARY_PATH:-$rec}"
     if [[ -n "$BINARY_PATH" ]] && ! validate_setup_path "$BINARY_PATH"; then
         setup_fail "BINARY_PATH=${BINARY_PATH} in ${meta} may hold only letters, digits and . _ / -, because the start wrapper runs it; pass --binary-path."
     fi
