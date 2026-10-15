@@ -49,6 +49,15 @@ FW_SSH_PORTS=()
 FW_SSH_SRCS=()
 FW_P2P_SRCS=()
 FW_P2P_LOADED=false
+# Set by apply_recommended_firewall while it changes rules: the saved rule files
+# (fw_snapshot), whether ufw was active before, and FW_APPLY_INFLIGHT=true until
+# the new rules are complete or the old ones are back. fw_on_exit (the EXIT trap
+# of every run; TERM, INT and HUP exit through it) puts the old rules back when
+# the run ends while a step is in flight, and removes the saved files.
+FW_SNAP=""
+FW_WAS_ACTIVE=false
+FW_APPLY_INFLIGHT=false
+FW_STDERR_SAVED=false
 
 # =============================================================================
 # HELPERS
@@ -546,19 +555,26 @@ fw_preflight() {
 }
 
 # fw_snapshot -- copy ufw's rule files, ufw.conf and /etc/default/ufw into a new
-# root-only directory (mktemp -d under TN_FW_SNAP_PARENT, default /run) and print
-# its path. rc 1 when the copy fails.
+# root-only directory (mktemp -d under TN_FW_SNAP_PARENT, default /run) and set
+# FW_SNAP to its path, in this shell, so fw_on_exit can see it. rc 1 when the
+# copy fails (FW_SNAP empty, nothing left behind).
 fw_snapshot() {
-    local d f
-    d="$(mktemp -d "${TN_FW_SNAP_PARENT:-/run}/tn-fw.XXXXXX")" || return 1
+    local f
+    FW_SNAP="$(mktemp -d "${TN_FW_SNAP_PARENT:-/run}/tn-fw.XXXXXX")" || { FW_SNAP=""; return 1; }
     for f in "$FW_UFW_DIR"/*.rules "$FW_UFW_DIR"/ufw.conf; do
         [[ -f "$f" ]] || continue
-        cp -p -- "$f" "$d/" || { rm -rf -- "$d"; return 1; }
+        cp -p -- "$f" "$FW_SNAP/" || { fw_snapshot_drop; return 1; }
     done
     if [[ -f "$FW_UFW_DEFAULT" ]]; then
-        cp -p -- "$FW_UFW_DEFAULT" "$d/default-ufw" || { rm -rf -- "$d"; return 1; }
+        cp -p -- "$FW_UFW_DEFAULT" "$FW_SNAP/default-ufw" || { fw_snapshot_drop; return 1; }
     fi
-    printf '%s\n' "$d"
+    return 0
+}
+
+# fw_snapshot_drop -- remove the saved rule files (FW_SNAP) and forget them.
+fw_snapshot_drop() {
+    [[ -n "$FW_SNAP" ]] && rm -rf -- "$FW_SNAP"
+    FW_SNAP=""
 }
 
 # fw_restore SNAPSHOT WAS_ACTIVE -- put the saved files back, then return ufw to
@@ -811,7 +827,7 @@ view_status() {
 # files are).
 apply_recommended_firewall() {
     local do_reset="${1:-}"
-    local nodes keep_web=false web_was_open=false was_active=false snap
+    local nodes keep_web=false web_was_open=false snap
     fw_preflight || return 1
     nodes=$(detect_installed_nodes)
     # Before a reset wipes the rules: is Caddy serving the public edge on this box, and
@@ -822,27 +838,35 @@ apply_recommended_firewall() {
             web_was_open=true
         fi
     fi
+    FW_WAS_ACTIVE=false
     if ufw_active; then
-        was_active=true
+        FW_WAS_ACTIVE=true
     fi
-    if ! snap="$(fw_snapshot)"; then
+    if ! fw_snapshot; then
         fw_error "Could not save the current ufw rule files; nothing was changed."
         return 1
     fi
+    FW_APPLY_INFLIGHT=true
     if ! fw_apply_rules "$do_reset" "$nodes" "$keep_web"; then
-        if fw_restore "$snap" "$was_active"; then
-            rm -rf -- "$snap"
-            if [[ "$was_active" == "true" ]]; then
+        if fw_restore "$FW_SNAP" "$FW_WAS_ACTIVE"; then
+            FW_APPLY_INFLIGHT=false
+            fw_snapshot_drop
+            if [[ "$FW_WAS_ACTIVE" == "true" ]]; then
                 fw_error "Stopped at that step; the previous ufw rules were put back and ufw is active again."
             else
                 fw_error "Stopped at that step; the previous ufw rules were put back and ufw stays inactive, as it was."
             fi
             return 2
         fi
+        # Keep the saved files for the operator: fw_on_exit must not remove them.
+        snap="$FW_SNAP"
+        FW_APPLY_INFLIGHT=false
+        FW_SNAP=""
         fw_error "Stopped at that step, and the previous ufw rules could not be put back: ufw may now be DISABLED. The saved rule files are in ${snap}. Fix the cause and run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --reset"
         return 3
     fi
-    rm -rf -- "$snap"
+    FW_APPLY_INFLIGHT=false
+    fw_snapshot_drop
     if [[ "$keep_web" == "true" ]]; then
         if [[ "$web_was_open" == "true" ]]; then
             print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
@@ -1807,13 +1831,35 @@ json_event() {
     json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
 }
 
-# fw_on_exit -- the EXIT trap of a --json run, installed by main right after the fd
-# swap. When the run ends without its final answer (a failing command under set -e,
-# not root), send {"event":"done","ok":false,"error":...,"msg":...} with the last
-# error event's message, so every --json run ends with one parseable answer; the
-# "error" key is what the UI's firewall card shows when status is unavailable.
+# fw_on_exit -- the EXIT trap of every run, installed by main first (TERM, INT and
+# HUP are turned into an exit, so they end here too). When the run ends while
+# apply_recommended_firewall is changing rules (FW_APPLY_INFLIGHT), it puts the
+# saved rule files back and returns ufw to its earlier state (fw_restore), then
+# removes them; when that fails it keeps them and names them. Then it releases
+# the update lock. In --json mode, when the run ends without its final answer
+# (a signal, a failing command, not root), it sends {"event":"done","ok":false,
+# "error":...,"msg":...} with the last error event's message, so every --json run
+# ends with one parseable answer; the "error" key is what the UI's firewall card
+# shows when status is unavailable.
 fw_on_exit() {
     local rc=$? msg
+    trap '' TERM INT HUP
+    # The signal may land inside a call whose output is dropped: report on the
+    # stderr main saved as fd 4.
+    if [[ "$FW_STDERR_SAVED" == "true" ]]; then
+        exec 2>&4
+    fi
+    if [[ "$FW_APPLY_INFLIGHT" == "true" && -n "$FW_SNAP" ]]; then
+        FW_APPLY_INFLIGHT=false
+        if fw_restore "$FW_SNAP" "$FW_WAS_ACTIVE"; then
+            fw_snapshot_drop
+            fw_error "Stopped (exit ${rc}) while the firewall rules were being applied; the previous ufw rules were put back."
+        else
+            fw_error "Stopped (exit ${rc}) while the firewall rules were being applied, and the previous ufw rules could not be put back: ufw may now be DISABLED. The saved rule files are in ${FW_SNAP}. Fix the cause and run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --reset"
+            FW_SNAP=""
+        fi
+    fi
+    fw_snapshot_drop
     if [[ -n "${TN_UPDATE_LOCK_KIND:-}" ]]; then
         tn_release_update_lock 2>/dev/null || true
     fi
@@ -2014,13 +2060,20 @@ main() {
         exit 1
     fi
 
+    # One exit path for every mode: fw_on_exit puts the old rules back when the run
+    # ends mid-apply, and releases the update lock (taken only when a source list is
+    # stored), which therefore must not replace this trap.
+    TN_EXIT_TRAP_OWNED=1
+    exec 4>&2
+    FW_STDERR_SAVED=true
+    trap fw_on_exit EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+
     if [[ "$json_mode" == "true" ]]; then
         JSON_MODE=true
         json_setup_fds
-        # The update lock (taken only when a source list is stored) must not replace
-        # fw_on_exit; fw_on_exit releases it.
-        TN_EXIT_TRAP_OWNED=1
-        trap fw_on_exit EXIT
         check_root
         fw_load_network || exit 1
         case "$action" in
