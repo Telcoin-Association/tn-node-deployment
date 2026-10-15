@@ -47,6 +47,21 @@ check "vhs :: refused" 1 "$(vh ::)"
 check "vhs /08 leading zero refused" 1 "$(vh 10.0.0.0/08)"
 check "vhs /33 refused" 1 "$(vh 10.0.0.0/33)"
 check "vhs empty refused" 1 "$(vh '')"
+# ufw refuses an IPv4 octet with a leading zero; so does the check, before any change.
+check "vhs 010.0.113.0/24 refused" 1 "$(vh 010.0.113.0/24)"
+check "vhs 203.000.113.7 refused" 1 "$(vh 203.000.113.7)"
+check "vhs 203.0.113.07/32 refused" 1 "$(vh 203.0.113.07/32)"
+check "vhs 203.0.113.0/24 still ok" 0 "$(vh 203.0.113.0/24)"
+check "vhs 10.0.0.0/8 ok" 0 "$(vh 10.0.0.0/8)"
+check "vhs 100.64.0.0/10 ok" 0 "$(vh 100.64.0.0/10)"
+check "vhs 0.1.2.3 ok (a single zero octet)" 0 "$(vh 0.1.2.3)"
+# Masks shorter than /8 are close to "anywhere" and are refused.
+check "vhs 128.0.0.0/1 refused" 1 "$(vh 128.0.0.0/1)"
+check "vhs 10.0.0.0/7 refused" 1 "$(vh 10.0.0.0/7)"
+check "vhs 0::/1 refused" 1 "$(vh 0::/1)"
+check "vhs 2000::/3 refused" 1 "$(vh 2000::/3)"
+check "vhs 2001:db8::/8 ok" 0 "$(vh 2001:db8::/8)"
+check "vhs 2001:db8::1/129 refused" 1 "$(vh 2001:db8::1/129)"
 
 # --- apply_kuma_rule on testnet ---------------------------------------------
 printf 'NETWORK=testnet\nKUMA_EXTRA_SRC=198.51.100.7 0.0.0.0/0\n' > "$META"

@@ -132,6 +132,18 @@ FW_SSH_FROM="0.0.0.0/0"
 run_apply --reset
 check_rc "--ssh-from 0.0.0.0/0 rc 1" 1 "$RC"
 check "--ssh-from 0.0.0.0/0 no change" "" "$(mutating)"
+for bad in 010.0.113.0/24 203.0.113.07 128.0.0.0/1 2000::/3; do
+    fresh_flags; reset_state yes
+    FW_SSH_FROM="203.0.113.0/24,${bad}"
+    run_apply --reset
+    check_rc "--ssh-from ${bad} rc 1" 1 "$RC"
+    check "--ssh-from ${bad} no change" "" "$(mutating)"
+    fresh_flags; reset_state yes
+    FW_SSH_FROM="203.0.113.0/24"; FW_P2P_FROM="198.51.100.0/24,${bad}"
+    run_apply --reset
+    check_rc "--p2p-from ${bad} rc 1" 1 "$RC"
+    check "--p2p-from ${bad} no change" "" "$(mutating)"
+done
 fresh_flags; reset_state yes
 SSHD_PORT_LINE="port 70000" run_apply --reset
 check_rc "sshd port 70000 rc 1" 1 "$RC"

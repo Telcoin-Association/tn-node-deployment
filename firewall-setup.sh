@@ -399,8 +399,10 @@ fw_port_ok() {
 # fw_src_list SPEC -- print the sources in SPEC one per line. SPEC is a comma list
 # of addresses or CIDRs, or the path of a readable file holding them (one or more
 # per line, comma separated; # starts a comment). Every entry must pass
-# validate_health_src, which refuses /0 and the unspecified address. rc 1 (message
-# on stderr) on the first bad entry or an empty list.
+# validate_health_src, which refuses the unspecified address, masks shorter than
+# /8 and IPv4 octets with leading zeros, so ufw never meets a source it rejects
+# halfway through the rules. rc 1 (message on stderr) on the first bad entry or
+# an empty list.
 fw_src_list() {
     local spec="${1:-}" raw s n=0
     if [[ -f "$spec" ]]; then
@@ -412,7 +414,7 @@ fw_src_list() {
         s="${s//[[:space:]]/}"
         [[ -n "$s" ]] || continue
         if ! validate_health_src "$s"; then
-            print_error "Not an address or a CIDR narrower than /0: '${s}'" >&2
+            print_error "Not an address or a CIDR of /8 or narrower (no leading zeros): '${s}'" >&2
             return 1
         fi
         printf '%s\n' "$s"
@@ -539,7 +541,7 @@ fw_preflight() {
         read -r -a extras <<< "$list" || true
         for s in ${extras[@]+"${extras[@]}"}; do
             if ! validate_health_src "$s"; then
-                fw_error "KUMA_EXTRA_SRC holds '${s}', which is not an address or a CIDR narrower than /0; remove it (Manage node ports) first. Nothing was changed."
+                fw_error "KUMA_EXTRA_SRC holds '${s}', which is not an address or a CIDR of /8 or narrower; remove it (Manage node ports) first. Nothing was changed."
                 return 1
             fi
         done

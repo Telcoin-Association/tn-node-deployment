@@ -6117,28 +6117,32 @@ get_ssh_port() {
 
 # validate_health_src <ip|cidr> — accept a bare IPv4/IPv6 OR a CIDR (v4 or v6).
 # For a CIDR, split on '/', require a decimal mask without leading zeros, and
-# dispatch by family: IPv4 with mask 1..32, or IPv6 with mask 1..128. For a bare
-# address: IPv4 or IPv6. A /0 mask or the unspecified address (0.0.0.0, ::) means
-# "anywhere" and is refused. Generalizes the IPv4-only validate_cidr for the
-# operator-chosen health and SSH sources. Returns 0 if valid.
+# dispatch by family: IPv4 with mask 8..32, or IPv6 with mask 8..128. For a bare
+# address: IPv4 or IPv6. An IPv4 octet with a leading zero (010.0.0.1) is refused,
+# as ufw refuses it. A /0 mask or the unspecified address (0.0.0.0, ::) means
+# "anywhere" and is refused, and so is any mask shorter than /8. Generalizes the
+# IPv4-only validate_cidr for the operator-chosen health and SSH sources. Returns
+# 0 if valid.
 validate_health_src() {
-    local src="${1:-}"
+    local src="${1:-}" ip mask
     # Never "anywhere": no /0 mask and no unspecified address.
     case "$src" in
         0.0.0.0|0.0.0.0/*|::|::/*) return 1 ;;
     esac
-    if [[ "$src" == */* ]]; then
-        local ip="${src%/*}" mask="${src#*/}"
-        [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
-        if validate_ipv4 "$ip"; then
-            (( mask >= 0 && mask <= 32 ))
-        elif validate_ipv6 "$ip"; then
-            (( mask >= 0 && mask <= 128 ))
-        else
-            return 1
-        fi
+    ip="${src%%/*}"
+    if validate_ipv4 "$ip"; then
+        [[ ".${ip}" == *.0[0-9]* ]] && return 1
+    elif ! validate_ipv6 "$ip"; then
+        return 1
+    fi
+    [[ "$src" == */* ]] || return 0
+    mask="${src#*/}"
+    [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+    (( mask >= 8 )) || return 1
+    if validate_ipv4 "$ip"; then
+        (( mask <= 32 ))
     else
-        validate_ipv4 "$src" || validate_ipv6 "$src"
+        (( mask <= 128 ))
     fi
 }
 
@@ -6172,7 +6176,7 @@ apply_kuma_extra_rules() {
     read -r -a srcs <<< "$list" || true
     for src in ${srcs[@]+"${srcs[@]}"}; do
         if ! validate_health_src "$src"; then
-            print_warn "Skipping health source '${src}' from KUMA_EXTRA_SRC: not an address or a CIDR narrower than /0." >&2
+            print_warn "Skipping health source '${src}' from KUMA_EXTRA_SRC: not an address or a CIDR of /8 or narrower." >&2
             rc=1
             continue
         fi
