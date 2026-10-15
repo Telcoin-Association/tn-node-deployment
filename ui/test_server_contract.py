@@ -987,6 +987,48 @@ class FirewallEnableTest(ServerTestCase):
         self.assertIn("firewall-enable *", rules)
 
 
+class UpdateEventsTest(ServerTestCase):
+
+    def test_check_passes_tag_moved_through(self):
+        self.helper_replies["update-check"] = (0, json.dumps({
+            "install_method": "release", "current_ref": "v1.0.0", "latest_ref": "v1.0.1",
+            "update_available": True, "pending": None, "storage_migration": False,
+            "tag_moved": True}), "")
+        body = self.client.get("/api/update/status/observer").get_json()
+        self.assertIs(body["tag_moved"], True)
+        self.assertEqual(body["install_method"], "release")
+
+    def test_done_fields_reach_the_page_unchanged(self):
+        self.helper_replies["meta-cat"] = (0, "NETWORK=mainnet\n", "")
+        server.clear_meta_cache()
+        for done in ({"event": "done", "ok": False, "phase": "prepare", "downgrade": True,
+                      "storage_downgrade": True, "msg": "v1.0.0 is older than the running v1.1.0"},
+                     {"event": "done", "ok": False, "phase": "apply", "rolled_back": True,
+                      "voting": False, "msg": "not voting"}):
+            with self.subTest(done=done):
+                self.popen_script = {"lines": [json.dumps(done)], "rc": 1}
+                url = "/api/update/%s/observer" % done["phase"]
+                body = {"ref": "v1.0.0"} if done["phase"] == "prepare" else {}
+                server._write_times.clear()
+                events = self.stream_events(self.client.post(url, json=body, buffered=True).data)
+                self.assertIn(done, events)
+
+    def test_refusal_messages_for_refs_that_are_not_release_tags(self):
+        for net, ref, example in (("mainnet", "v1.0.0-adiri", "vX.Y.Z"), ("testnet", "v1.0.0", "vX.Y.Z-adiri"),
+                                  ("mainnet", "main", "vX.Y.Z")):
+            with self.subTest(net=net, ref=ref):
+                self.helper_replies["meta-cat"] = (0, "NETWORK=%s\n" % net, "")
+                server.clear_meta_cache()
+                self.calls.clear()
+                server._write_times.clear()
+                resp = self.client.post("/api/update/prepare/observer", json={"ref": ref})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.get_json()["error"],
+                                 "ref must be a %s release tag (%s); branches and commit ids are refused"
+                                 % (net, example))
+                self.assertEqual([c for c in self.helper_calls() if "update-prepare" in c], [])
+
+
 class SetupDefaultsTest(ServerTestCase):
 
     TAGS = "\n".join("abc123\trefs/tags/" + t for t in (

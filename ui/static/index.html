@@ -2288,6 +2288,7 @@ async function renderUpdate(){
     <div class="card" id="updProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3>
       <div class="log-body" id="updLog" style="height:280px"></div>
+      <div id="updOutcome"></div>
     </div>`;
   fillUpdateStatus();
 }
@@ -2312,7 +2313,7 @@ async function fillUpdateStatus(){
     return;
   }
   const method = u.install_method || 'unknown';
-  const canUpdate = (method==='source' || method==='docker');
+  const canUpdate = (method==='source' || method==='docker' || method==='release');
   const pending = u.pending;
   const rows = [
     ['Install method', method],
@@ -2324,7 +2325,7 @@ async function fillUpdateStatus(){
   let actions = '';
   if(!canUpdate){
     actions = `<p style="color:var(--text2);font-size:13px;margin-top:12px">Install method
-      <strong>${esc(method)}</strong> can't be updated from here — only source builds and Docker installs are supported.</p>`;
+      <strong>${esc(method)}</strong> can't be updated from here — only release, source and Docker installs are supported.</p>`;
   } else {
     actions = `
       <div class="field"><label>Target release tag</label>
@@ -2340,8 +2341,16 @@ async function fillUpdateStatus(){
       ${quorumNote(u.quorum)}`;
   }
 
+  // tag_moved: a release tag upstream now points at another commit than this
+  // server's copy of it; update-node does not offer that release.
+  const moved = u.tag_moved===true
+    ? `<div class="note" style="margin-top:12px;border-color:rgba(255,77,109,0.35);background:rgba(255,77,109,0.07)">⚠ A release tag
+        upstream now points at a different commit than this server's copy of it, so that release is not offered.
+        Check the release announcement before you update.</div>`
+    : '';
   box.innerHTML = `<div class="card"><h3>Update · ${esc(cap(t))}</h3>
     ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
+    ${moved}
     ${actions}</div>`;
 
   const p=$('#updPrepare'); if(p) p.addEventListener('click', ()=>{
@@ -2478,12 +2487,36 @@ async function startUpdateStream(kind, ref){
   const url = '/api/update/'+kind+'/'+state.node;
   // Prepare and apply are POST streams. Leaving the tab aborts the request.
   const ctl = new AbortController(); state.updateAbort = ctl;
-  const d = await streamPost(url, kind==='prepare' ? {ref:ref} : {}, {target:'#updLog', what:'Update', signal:ctl.signal});
+  const out=$('#updOutcome'); if(out) out.innerHTML='';
+  // A refusal before the engine runs (a ref that is not a release tag of this
+  // node's network, say) goes into the progress pane as well as a toast.
+  const onReject = (status, msg) => {
+    appendStream('#updLog', {event:'error', msg: msg || ('refused (HTTP '+status+')')});
+    toast('Update '+kind+' refused'+(msg?': '+msg:''), 'error');
+  };
+  const d = await streamPost(url, kind==='prepare' ? {ref:ref} : {}, {target:'#updLog', what:'Update', signal:ctl.signal, onReject});
   if(ctl.signal.aborted) return;
   if(state.updateAbort===ctl) state.updateAbort = null;
+  if(out) out.innerHTML = updateOutcomeHtml(d);
   if(d && d.ok) toast('Update '+kind+' succeeded','success');
-  else toast('Update '+kind+(d&&d.rolled_back?' failed — rolled back':' did not complete'),'error');
+  else if(d && d.downgrade) toast('Downgrade refused','error');
+  else if(d && d.voting===false) toast('The node is not voting after the update'+(d.rolled_back?' — rolled back':''),'error');
+  else if(d) toast('Update '+kind+(d.rolled_back?' failed — rolled back':' did not complete'),'error');
   fillUpdateStatus(); loadNodes();
+}
+
+// What update-node's done event says beyond ok and msg: a refused downgrade
+// ("downgrade", "storage_downgrade") and, after an apply, a node that came back
+// without voting ("voting": false; rolled back unless the update was one-way).
+function updateOutcomeHtml(d){
+  if(!d) return '';
+  const notes = [];
+  if(d.downgrade===true) notes.push('Downgrade refused: the target release is older than the running one.'
+    + (d.storage_downgrade===true ? ' It also cannot open the data directory the running release has migrated.' : '')
+    + ' Nothing was changed.');
+  if(d.voting===false) notes.push('The node came back but is not voting in consensus'
+    + (d.rolled_back===true ? '; the update was rolled back.' : '. Check it with check-node.sh on the server.'));
+  return notes.map(n=>`<div class="note" style="margin-top:10px;border-color:rgba(255,77,109,0.35);background:rgba(255,77,109,0.07)">${esc(n)}</div>`).join('');
 }
 
 function stopUpdateStream(){ if(state.updateAbort){ state.updateAbort.abort(); state.updateAbort=null; } }

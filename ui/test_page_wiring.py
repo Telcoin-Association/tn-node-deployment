@@ -120,5 +120,28 @@ class SetupWizardTest(unittest.TestCase):
         self.assertIn("'/api/setup/defaults?network='+setupNetwork()", function_body("loadSetupDefaults"))
 
 
+class UpdatePanelTest(unittest.TestCase):
+
+    def test_done_fields_are_shown(self):
+        body = function_body("updateOutcomeHtml")
+        self.assertIn("d.downgrade===true", body)
+        self.assertIn("d.storage_downgrade===true", body)
+        self.assertIn("d.voting===false", body)
+        self.assertIn("esc(n)", body)
+        run = function_body("startUpdateStream")
+        self.assertIn("out.innerHTML = updateOutcomeHtml(d)", run)
+        self.assertIn("d.voting===false", run)
+
+    def test_a_moved_tag_is_shown(self):
+        body = function_body("fillUpdateStatus")
+        self.assertIn("u.tag_moved===true", body)
+        self.assertIn("method==='release'", body)
+
+    def test_refusals_before_the_engine_land_in_the_pane(self):
+        run = function_body("startUpdateStream")
+        self.assertIn("appendStream('#updLog', {event:'error'", run)
+        self.assertIn("onReject})", run)
+
+
 if __name__ == "__main__":
     unittest.main()
