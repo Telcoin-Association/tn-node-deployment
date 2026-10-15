@@ -254,6 +254,23 @@ check "sshd -t failure on a fresh drop-in removes it" "no" "$([[ -e "$TNV_DROPIN
 printf '%s\n' "$K1" > "$TNADMIN_HOME/.ssh/authorized_keys.tnvpn"
 vpn_reassert sshd >/dev/null 2>&1
 check "old per-user key file removed once the drop-in moved" "no" "$([[ -e "$TNADMIN_HOME/.ssh/authorized_keys.tnvpn" ]] && echo yes || echo no)"
+# A .ssh (or home) that links elsewhere: nothing is removed through the link.
+vpn_reassert sshd >/dev/null 2>&1
+mkdir -p "$T/elsewhere" "$T/elsehome/.ssh"
+echo keep > "$T/elsewhere/authorized_keys.tnvpn"
+echo keep > "$T/elsehome/.ssh/authorized_keys.tnvpn"
+mv "$TNADMIN_HOME/.ssh" "$TNADMIN_HOME/.ssh.real"
+ln -s "$T/elsewhere" "$TNADMIN_HOME/.ssh"
+vpn_drop_user_keyfile >/dev/null 2>&1
+check "symlinked .ssh: the file behind it stays" "keep" "$(cat "$T/elsewhere/authorized_keys.tnvpn" 2>/dev/null)"
+rm -f "$TNADMIN_HOME/.ssh"
+mv "$TNADMIN_HOME/.ssh.real" "$TNADMIN_HOME/.ssh"
+mv "$TNADMIN_HOME" "${TNADMIN_HOME}.real"
+ln -s "$T/elsehome" "$TNADMIN_HOME"
+vpn_drop_user_keyfile >/dev/null 2>&1
+check "symlinked home: the file behind it stays" "keep" "$(cat "$T/elsehome/.ssh/authorized_keys.tnvpn" 2>/dev/null)"
+rm -f "$TNADMIN_HOME"
+mv "${TNADMIN_HOME}.real" "$TNADMIN_HOME"
 
 # --- sudoers --------------------------------------------------------------------------------
 write_tnadmin_sudoers false >"$T/out" 2>&1; check_rc "recovery sudoers rc 0" 0 $?

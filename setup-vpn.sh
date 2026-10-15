@@ -355,12 +355,16 @@ vpn_sshd_apply() {
 
 # vpn_drop_user_keyfile -- remove the per-user key file that older releases (and
 # the vendored bootstrap) wrote in tnadmin's home, once the drop-in reads the
-# root-owned file instead. Unlinks one fixed name; never follows a link.
+# root-owned file instead. Unlinks one fixed name; never follows a link: it does
+# nothing when the home or its .ssh is a symlink or not a directory.
 vpn_drop_user_keyfile() {
     local home
     grep -qF "$TNV_AUTH_PATH" "$TNV_DROPIN" 2>/dev/null || return 0
     home="$(getent passwd "$TNV_USER" 2>/dev/null | cut -d: -f6)" || home=""
     [[ "$home" == /* ]] || return 0
+    if [[ -L "$home" || ! -d "$home" || -L "${home}/.ssh" || ! -d "${home}/.ssh" ]]; then
+        return 0
+    fi
     rm -f -- "${home}/.ssh/authorized_keys.tnvpn" 2>/dev/null || true
     return 0
 }
