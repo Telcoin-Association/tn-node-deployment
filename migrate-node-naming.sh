@@ -740,13 +740,13 @@ rewrite_unit() {
 #      one adjacent separator, leaving the rest of the command intact.
 # The post-condition guard below fails the migration (-> rollback) if either token survives.
 rewrite_wrapper() {
-    local mode=0755 group=root
+    local mode=0755 group=root text
     print_step "Normalizing start wrapper -> ${UNIFIED_WRAPPER} (stripping --observer and --instance)"
     # Written root:root 0755 in the root-owned /usr/local/libexec/telcoin through
     # tn_write_root_file, as setup-node.sh writes both forms (no secret in either).
     migrate_backup_ok "$WRAPPER_BAK" "$WRAPPER_SHA"
     _tn_root_layout_dir "${UNIFIED_WRAPPER%/*}" root 0755
-    sed -E \
+    text="$(sed -E \
         -e "s#/etc/telcoin/${ROLE}#/etc/telcoin#g" \
         -e "s#/var/lib/telcoin/${ROLE}#/var/lib/telcoin#g" \
         -e "s#telcoin-${ROLE}#telcoin#g" \
@@ -754,7 +754,9 @@ rewrite_wrapper() {
         -e 's/(^|[[:space:]])--observer([[:space:]]|$)/\2/g' \
         -e '/^[[:space:]]*--instance([[:space:]]+|=)[0-9]+[[:space:]]*\\?[[:space:]]*$/d' \
         -e 's/(^|[[:space:]])--instance([[:space:]]+|=)[0-9]+([[:space:]]|$)/\3/g' \
-        "$WRAPPER_BAK" | tn_write_root_file "$UNIFIED_WRAPPER" "$mode" "$group"
+        "$WRAPPER_BAK")"
+    # A here-string, not a pipe: the write runs in this shell.
+    tn_write_root_file "$UNIFIED_WRAPPER" "$mode" "$group" <<< "$text"
     WROTE_WRAPPER=true
 
     # Safety check: the normalized wrapper must NOT still pass --observer or --instance.

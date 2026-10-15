@@ -416,7 +416,9 @@ pending_field() {
 write_pending_state() {
     local state
     state="$(pending_parse)" || return 1
-    printf '%s' "$state" | tn_write_root_file "$(pending_state_path)" 0600
+    # A here-string, not a pipe: the write runs in this shell, never in a subshell
+    # that could outlive a signal that ends the run (and the lock with it).
+    tn_write_root_file "$(pending_state_path)" 0600 <<< "$state"
 }
 
 # pending_state_add KEY=VALUE... -- set these keys in the pending state (an
@@ -441,7 +443,7 @@ pending_state_add() {
     for kv in "$@"; do
         out="${out}${kv}${nl}"
     done
-    printf '%s' "$out" | write_pending_state
+    write_pending_state <<< "$out"
 }
 
 # clear_pending_state -- remove the pending state (a symlink in its place too;

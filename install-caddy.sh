@@ -650,11 +650,11 @@ caddy_install_apt_key() {
 
 # Write the Caddy apt source line (signed-by the pinned keyring), root 0644.
 caddy_write_apt_list() {
-    {
-        printf '# Caddy stable, written by install-caddy.sh. Signed by the key in %s\n' "$CADDY_APT_KEYRING"
-        printf '# (primary fingerprint %s).\n' "$CADDY_APT_KEY_FPR"
-        printf 'deb [signed-by=%s] %s any-version main\n' "$CADDY_APT_KEYRING" "$CADDY_APT_REPO"
-    } | tn_write_root_file "${TN_ROOT_PREFIX:-}${CADDY_APT_LIST}" 0644
+    tn_write_root_file "${TN_ROOT_PREFIX:-}${CADDY_APT_LIST}" 0644 <<EOF
+# Caddy stable, written by install-caddy.sh. Signed by the key in ${CADDY_APT_KEYRING}
+# (primary fingerprint ${CADDY_APT_KEY_FPR}).
+deb [signed-by=${CADDY_APT_KEYRING}] ${CADDY_APT_REPO} any-version main
+EOF
 }
 
 # Install Caddy from the official (cloudsmith) apt repo if missing, then check the
@@ -975,7 +975,7 @@ caddy_admin_dropin() {
     if [[ ! -d "$dir" ]]; then
         install -d -o root -g root -m 0755 -- "$dir" || return 1
     fi
-    printf '%s\n' "$want" | tn_write_root_file "$CADDY_ADMIN_DROPIN" 0644 || return 1
+    tn_write_root_file "$CADDY_ADMIN_DROPIN" 0644 <<< "$want" || return 1
     systemctl daemon-reload 2>/dev/null || caddy_say warn "systemctl daemon-reload failed after writing ${CADDY_ADMIN_DROPIN}."
     return 0
 }

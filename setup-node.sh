@@ -681,8 +681,13 @@ _preflight_source() {
     commit="$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
     branch="$(git -C "$source_dir" symbolic-ref --short HEAD 2>/dev/null || echo "detached")"
     built_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    if printf 'build_ref=%s\ncommit=%s\nbranch=%s\nbuilt_at=%s\n' "$build_ref" "$commit" "$branch" "$built_at" \
-        | tn_write_root_file /etc/telcoin/build-info 0644; then
+    if tn_write_root_file /etc/telcoin/build-info 0644 <<EOF
+build_ref=${build_ref}
+commit=${commit}
+branch=${branch}
+built_at=${built_at}
+EOF
+    then
         print_ok "Build info written: /etc/telcoin/build-info"
     else
         setup_warn "Could not write /etc/telcoin/build-info (the UI shows the build ref from it)."
@@ -1384,19 +1389,20 @@ setup_write_restart_guards() {
                 || setup_fail "Could not create ${d}."
         fi
     done
-    # shellcheck disable=SC2016
-    printf '%s\n' \
-        '# Managed by tn-node-deployment (setup-node.sh): needrestart never restarts the' \
-        '# Telcoin node or Docker. Restart them yourself, one validator at a time.' \
-        '$nrconf{override_rc}{qr(^telcoin)} = 0;' \
-        '$nrconf{override_rc}{qr(^docker)} = 0;' \
-        | tn_write_root_file /etc/needrestart/conf.d/50-telcoin.conf 0644 \
+    # Here-documents, not pipes: the write runs in this shell, so a signal that ends
+    # setup cannot leave a writer running after the lock is released.
+    tn_write_root_file /etc/needrestart/conf.d/50-telcoin.conf 0644 <<'EOF' \
         || setup_fail "Could not write /etc/needrestart/conf.d/50-telcoin.conf."
-    printf '%s\n' \
-        '// Managed by tn-node-deployment (setup-node.sh): updates install, reboots are manual.' \
-        'Unattended-Upgrade::Automatic-Reboot "false";' \
-        | tn_write_root_file /etc/apt/apt.conf.d/52telcoin-no-reboot 0644 \
+# Managed by tn-node-deployment (setup-node.sh): needrestart never restarts the
+# Telcoin node or Docker. Restart them yourself, one validator at a time.
+$nrconf{override_rc}{qr(^telcoin)} = 0;
+$nrconf{override_rc}{qr(^docker)} = 0;
+EOF
+    tn_write_root_file /etc/apt/apt.conf.d/52telcoin-no-reboot 0644 <<'EOF' \
         || setup_fail "Could not write /etc/apt/apt.conf.d/52telcoin-no-reboot."
+// Managed by tn-node-deployment (setup-node.sh): updates install, reboots are manual.
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
     print_ok "Package updates will not restart the node or reboot the host"
 }
 

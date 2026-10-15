@@ -167,14 +167,14 @@ ${content}"
     if [[ ! -d "${f%/*}" ]]; then
         install -d -m 0755 -o root -g root "${f%/*}" || return 2
     fi
-    if ! printf '%s\n' "$content" | tn_write_root_file "$f" 0644; then
+    if ! tn_write_root_file "$f" 0644 <<< "$content"; then
         print_error "Could not write ${f}; nothing was changed."
         return 2
     fi
     if ! "$bin" -t >/dev/null 2>&1; then
         print_error "sshd -t rejected the new configuration; putting the previous one back."
         if [[ "$had" == "true" ]]; then
-            printf '%s\n' "$prev" | tn_write_root_file "$f" 0644 || print_error "Could not restore ${f}; fix it by hand before the next sshd restart."
+            tn_write_root_file "$f" 0644 <<< "$prev" || print_error "Could not restore ${f}; fix it by hand before the next sshd restart."
         else
             rm -f -- "$f"
         fi

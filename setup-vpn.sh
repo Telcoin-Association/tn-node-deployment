@@ -264,7 +264,7 @@ EOF
 # drop-in on disk but ignored. No-op when an Include is present; otherwise append
 # it, check with sshd -t and put the file back on failure.
 vpn_sshd_include() {
-    local f="$TNV_SSHD_CONFIG" old
+    local f="$TNV_SSHD_CONFIG" old text nl=$'\n'
     if [[ ! -f "$f" || -L "$f" ]]; then
         print_warn "No regular ${f}; cannot add the Include line." >&2
         return 1
@@ -273,9 +273,12 @@ vpn_sshd_include() {
         return 0
     fi
     old="$(cat -- "$f")" || return 1
-    if ! printf '%s\n\n%s\n%s\n' "$old" \
-            "# Added by the Telcoin VPN add-on: read the sshd_config.d drop-ins." \
-            "Include /etc/ssh/sshd_config.d/*.conf" | tn_write_root_file "$f" 0644; then
+    text="${old}${nl}${nl}# Added by the Telcoin VPN add-on: read the sshd_config.d drop-ins."
+    text="${text}${nl}Include /etc/ssh/sshd_config.d/*.conf"
+    # A here-string, not a here-document: this function is copied into the
+    # self-heal helper with declare -f, which cannot reproduce a here-document
+    # inside an if condition.
+    if ! tn_write_root_file "$f" 0644 <<< "$text"; then
         return 1
     fi
     if sshd -t >/dev/null 2>&1; then
@@ -283,7 +286,7 @@ vpn_sshd_include() {
         vpn_say "Added the missing Include line to ${f}; the drop-ins are read again."
         return 0
     fi
-    printf '%s\n' "$old" | tn_write_root_file "$f" 0644 || true
+    tn_write_root_file "$f" 0644 <<< "$old" || true
     print_warn "sshd -t rejected the Include line; ${f} is back as it was." >&2
     return 1
 }
@@ -330,13 +333,13 @@ vpn_sshd_apply() {
         if [[ ! -d "$d" ]]; then
             install -d -m 0755 -- "$d" || return 1
         fi
-        if ! printf '%s\n' "$desired" | tn_write_root_file "$TNV_DROPIN" 0644; then
+        if ! tn_write_root_file "$TNV_DROPIN" 0644 <<< "$desired"; then
             print_warn "Could not write ${TNV_DROPIN}; SSH is unchanged." >&2
             return 1
         fi
         if ! sshd -t >/dev/null 2>&1; then
             if [[ "$had" == 1 ]]; then
-                printf '%s\n' "$cur" | tn_write_root_file "$TNV_DROPIN" 0644 || rm -f -- "$TNV_DROPIN"
+                tn_write_root_file "$TNV_DROPIN" 0644 <<< "$cur" || rm -f -- "$TNV_DROPIN"
             else
                 rm -f -- "$TNV_DROPIN"
             fi
@@ -417,7 +420,7 @@ vpn_reassert() {
             fi
             if [[ -f "$TNV_AUTH" && ! -L "$TNV_AUTH" && "$cur" == "$keys" ]]; then
                 vpn_say "Maintainer keys already current (${n} key(s) in ${TNV_AUTH})."
-            elif { if [[ -n "$keys" ]]; then printf '%s\n' "$keys"; fi; } | tn_write_root_file "$TNV_AUTH" 0644; then
+            elif if [[ -n "$keys" ]]; then tn_write_root_file "$TNV_AUTH" 0644 <<< "$keys"; else tn_write_root_file "$TNV_AUTH" 0644 < /dev/null; fi; then
                 vpn_say "Wrote ${n} maintainer key(s) to ${TNV_AUTH} (root, 0644)."
             else
                 print_warn "Could not write ${TNV_AUTH}; the maintainer keys were left as they are." >&2
@@ -555,7 +558,7 @@ install_selfheal_helper() {
     if [[ ! -d "${TNV_SELF%/*}" ]]; then
         install -d -m 0755 -- "${TNV_SELF%/*}" || return 1
     fi
-    printf '%s\n' "$text" | tn_write_root_file "$TNV_SELF" 0755
+    tn_write_root_file "$TNV_SELF" 0755 <<< "$text"
 }
 
 # install_selfheal_units (H3) -- install the helper and the two units, then enable
@@ -571,8 +574,8 @@ install_selfheal_units() {
         return 0
     fi
     if ! install_selfheal_helper \
-        || ! vpn_selfheal_service_unit | tn_write_root_file "$TNV_SERVICE_UNIT" 0644 \
-        || ! vpn_selfheal_path_unit | tn_write_root_file "$TNV_PATH_UNIT" 0644; then
+        || ! tn_write_root_file "$TNV_SERVICE_UNIT" 0644 <<< "$(vpn_selfheal_service_unit)" \
+        || ! tn_write_root_file "$TNV_PATH_UNIT" 0644 <<< "$(vpn_selfheal_path_unit)"; then
         print_warn "Could not install the self-heal helper or units."
         return 1
     fi
@@ -731,7 +734,7 @@ assemble_pubkeys() {
 # install_keys_file -- record TNADMIN_PUBKEYS in /etc/wgvpn/tnadmin.keys (root
 # 0644), the copy the self-heal helper reads. Skips an unchanged file.
 install_keys_file() {
-    local d="${TNV_KEYS%/*}" cur=""
+    local d="${TNV_KEYS%/*}" cur="" nl=$'\n'
     if [[ ! -d "$d" ]]; then
         install -d -m 0755 -o root -g root -- "$d" || return 1
     fi
@@ -741,7 +744,12 @@ install_keys_file() {
             return 0
         fi
     fi
-    printf '%s' "$TNADMIN_PUBKEYS" | tn_write_root_file "$TNV_KEYS" 0644
+    if [[ -z "$TNADMIN_PUBKEYS" ]]; then
+        tn_write_root_file "$TNV_KEYS" 0644 < /dev/null
+    else
+        # TNADMIN_PUBKEYS ends with its newline; the here-string adds it back.
+        tn_write_root_file "$TNV_KEYS" 0644 <<< "${TNADMIN_PUBKEYS%"$nl"}"
+    fi
 }
 
 # write_tnadmin_keys -- record the verified set (install_keys_file) and install it

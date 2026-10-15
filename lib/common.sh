@@ -890,7 +890,7 @@ EOF
 # refused (bad SIZE, group telcoin-log missing, or the write refused); 2 the
 # write failed.
 tn_install_logrotate() {
-    local size="${1:-}" dest="${TN_LOGROTATE_FILE:-/etc/logrotate.d/telcoin}"
+    local size="${1:-}" dest="${TN_LOGROTATE_FILE:-/etc/logrotate.d/telcoin}" text
     if [[ -n "$size" && ! "$size" =~ ^[0-9]+[KMG]$ ]]; then
         print_warn "tn_install_logrotate: invalid size '${size}' (e.g. 100M, 1G)" >&2
         return 1
@@ -905,7 +905,8 @@ tn_install_logrotate() {
         fi
         size="100M"
     fi
-    _tn_logrotate_text "$size" | tn_write_root_file "$dest" 0644
+    text="$(_tn_logrotate_text "$size")" || return 2
+    tn_write_root_file "$dest" 0644 <<< "$text"
 }
 
 # _tn_root_binary_ok PATH -- rc 0 when PATH (after resolving symlinks) is a
@@ -1032,7 +1033,7 @@ _tn_own_move_start() {
               line = substr(line, i + length(ENVIRON["TN_OLD"]))
           }
           print out line }' "$unit")" || return 2
-    printf '%s\n' "$body" | tn_write_root_file "$unit" 0644 || return $?
+    tn_write_root_file "$unit" 0644 <<< "$body" || return $?
     if [[ -n "$pre" ]]; then
         rm -f -- "$old"
     elif command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload; then
@@ -2194,7 +2195,7 @@ write_source_version_marker() {
     # Root-owned 0644 through a temp file and a rename. A refusal (the install
     # dir not yet root-owned) only costs the UI its version label, so warn and
     # go on rather than fail the install or apply that called this.
-    if ! printf '%s\n' "$desc" | tn_write_root_file "$marker" 0644; then
+    if ! tn_write_root_file "$marker" 0644 <<< "$desc"; then
         print_warn "Could not record the installed version in ${marker}." >&2
     fi
     return 0
@@ -2768,7 +2769,7 @@ tn_write_node_env() {
     text="$(_tn_node_env_text "${1:-}" "${2:-}" "${3:-}")" || return 1
     conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
     _tn_safe_path "$conf" || return 1
-    printf '%s\n' "$text" | tn_write_root_file "${TN_ROOT_PREFIX:-}${conf}/node.env" 0644
+    tn_write_root_file "${TN_ROOT_PREFIX:-}${conf}/node.env" 0644 <<< "$text"
 }
 
 # _tn_start_script_text METHOD RUNNER NODE_ARGS -- the start script for METHOD
@@ -2849,7 +2850,7 @@ tn_write_start_script() {
     fi
     dest="${TN_ROOT_PREFIX:-}${TN_G_SCRIPT}"
     _tn_root_layout_dir "${dest%/*}" root 0755 || return $?
-    printf '%s\n' "$text" | tn_write_root_file "$dest" 0755
+    tn_write_root_file "$dest" 0755 <<< "$text"
 }
 
 # _tn_node_unit_text METHOD -- the systemd unit for METHOD (globals as in
@@ -2980,7 +2981,7 @@ tn_write_node_unit() {
     local text
     _tn_gen_settings "${1:-}" || return 1
     text="$(_tn_node_unit_text "${1:-}")" || return 1
-    printf '%s\n' "$text" | tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${TN_G_SVC}.service" 0644
+    tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${TN_G_SVC}.service" 0644 <<< "$text"
 }
 
 # _tn_launch_listener NAME FILE... -- the first NAME=<multiaddr> written in FILEs
@@ -3100,8 +3101,12 @@ tn_install_journald_dropin() {
     local dir="${TN_ROOT_PREFIX:-}/etc/systemd/journald.conf.d"
     [[ -f "${dir}/50-telcoin.conf" ]] && return 0
     _tn_root_layout_dir "$dir" root 0755 || return $?
-    printf '%s\n' "# Written by the Telcoin Network deployment scripts." "[Journal]" "SystemMaxUse=4G" "SystemKeepFree=2G" \
-        | tn_write_root_file "${dir}/50-telcoin.conf" 0644
+    tn_write_root_file "${dir}/50-telcoin.conf" 0644 <<'EOF'
+# Written by the Telcoin Network deployment scripts.
+[Journal]
+SystemMaxUse=4G
+SystemKeepFree=2G
+EOF
 }
 
 # tn_service_user_ok USER [GROUP] -- rc 0 when USER (and GROUP, when given) may
@@ -5776,12 +5781,20 @@ meta_set() {
 }
 
 # _tn_meta_write FILE BODY [LINE] — write BODY (and LINE, when given) to FILE
-# root:root 0600 via tn_write_root_file; its return code.
+# root:root 0600 via tn_write_root_file; its return code. Each non-empty part
+# ends with a newline; both empty writes an empty file. Fed by a here-string,
+# not a pipe, so the write runs in the caller's shell.
 _tn_meta_write() {
-    {
-        if [[ -n "$2" ]]; then printf '%s\n' "$2"; fi
-        if [[ -n "${3:-}" ]]; then printf '%s\n' "$3"; fi
-    } | tn_write_root_file "$1" 0600
+    local text="$2" nl=$'\n'
+    if [[ -n "${3:-}" ]]; then
+        if [[ -n "$text" ]]; then text="${text}${nl}"; fi
+        text="${text}$3"
+    fi
+    if [[ -z "$text" ]]; then
+        tn_write_root_file "$1" 0600 < /dev/null
+    else
+        tn_write_root_file "$1" 0600 <<< "$text"
+    fi
 }
 
 # _tn_meta_rewrite <key> <file> — print FILE without its KEY= lines (CRLF lines

@@ -466,7 +466,7 @@ _obs_install_alloy_apt() {
     local key=/etc/apt/keyrings/grafana.gpg
     install -d -m 0755 /etc/apt/keyrings
     _obs_grafana_key "$key" || return 1
-    echo "deb [signed-by=${key}] https://apt.grafana.com stable main" | tn_write_root_file /etc/apt/sources.list.d/grafana.list 0644 || return 1
+    tn_write_root_file /etc/apt/sources.list.d/grafana.list 0644 <<< "deb [signed-by=${key}] https://apt.grafana.com stable main" || return 1
     apt-get update -y >/dev/null 2>&1 || return 1
     # Install the pinned version only. Grafana packages Alloy with a Debian
     # revision (e.g. 1.5.1-1), so an exact "=1.5.1" pin never matches -- resolve
@@ -628,7 +628,7 @@ obs_alloy_unit_text() {
 # + its mode-600 env file, which systemd reads as root. Alloy joins the telcoin-log
 # group when it exists. rc 1 when the unit could not be written.
 obs_write_alloy_native_unit() {
-    local token="$1" grp="" dd
+    local token="$1" grp="" dd text
     local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
     local bin; bin="$(command -v alloy 2>/dev/null || echo /usr/bin/alloy)"
     _obs_write_env_file "$envf" "$token"
@@ -636,8 +636,8 @@ obs_write_alloy_native_unit() {
         grp="telcoin-log"
     fi
     dd="$(_obs_data_dir 2>/dev/null)" || dd=""
-    obs_alloy_unit_text "$bin" "$envf" "$grp" "$dd" \
-        | tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${OBS_ALLOY_UNIT}" 0644 || return 1
+    text="$(obs_alloy_unit_text "$bin" "$envf" "$grp" "$dd")" || return 1
+    tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${OBS_ALLOY_UNIT}" 0644 <<< "$text" || return 1
     systemctl daemon-reload
 }
 
