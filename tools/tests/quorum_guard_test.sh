@@ -4,7 +4,9 @@
 # current committee (n members) and the latest consensus commit (with `live`
 # distinct authors). Covers n = 4, 7 and 10 with 0 to f+1 members down, a node
 # that is not voting, an unreadable committee on mainnet and testnet, a stale or
-# other-epoch commit, the fallback to the public RPC, and TN_ALLOW_QUORUM_RISK=1.
+# other-epoch commit, the fallback to the public RPC (a node that does not answer
+# is counted among the down, not added again), a mainnet node with no
+# VALIDATOR_ADDRESS, and TN_ALLOW_QUORUM_RISK=1.
 # Maintainer tooling (not updater-tracked). bash 3.2 safe.
 # shellcheck source=tools/tests/lib.sh
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
@@ -94,8 +96,21 @@ HDR_EPOCH=6 guard "mainnet, commit from another epoch: refused (rc 2)" 2
 LOCAL_UP=0 PUBLIC_UP=0 STAKED=0 guard "mainnet, nothing answers, staked: refused (rc 2)" 2
 LOCAL_UP=0 PUBLIC_UP=0 STAKED=1 guard "mainnet, nothing answers, not staked: allowed" 0
 LOCAL_UP=0 PUBLIC_UP=0 STAKED=2 guard "mainnet, nothing answers, stake unknown: refused (rc 2)" 2
-LOCAL_UP=0 PUBLIC_UP=1 LIVE=7 guard "local down, public RPC counts 3 down: refused" 1
+# A node that does not answer authored nothing: it is among the down already,
+# so stopping it adds none.
+LOCAL_UP=0 PUBLIC_UP=1 LIVE=7 guard "local down, public RPC counts 3 down (this node among them): allowed" 0
+check_has "the count says this node is among them" "yes" "$(printf '%s' "$MSG" | grep -q 'counted among them' && echo yes)"
+LOCAL_UP=0 PUBLIC_UP=1 LIVE=6 guard "local down, public RPC counts 4 down: refused" 1
 LOCAL_UP=0 PUBLIC_UP=1 LIVE=9 guard "local down, public RPC counts 1 down: allowed" 0
+LOCAL_UP=0 PUBLIC_UP=1 N=4 LIVE=3 guard "n=4, this node crashed, the other 3 up: allowed" 0
+LOCAL_UP=0 PUBLIC_UP=1 N=4 LIVE=2 guard "n=4, this node and one more down: refused" 1
+
+# Mainnet with no VALIDATOR_ADDRESS to ask the registry about: the stake is not
+# known, so a blind stop is refused.
+printf 'NETWORK=mainnet\n' > "$META"
+LOCAL_UP=0 PUBLIC_UP=0 STAKED=1 guard "mainnet, nothing answers, no VALIDATOR_ADDRESS: refused (rc 2)" 2
+check_has "the refusal says the address is missing" "yes" "$(printf '%s' "$MSG" | grep -q 'no VALIDATOR_ADDRESS' && echo yes)"
+LOCAL_UP=0 PUBLIC_UP=0 TN_ALLOW_QUORUM_RISK=1 guard "mainnet, no VALIDATOR_ADDRESS, override: allowed" 0
 
 printf 'NETWORK=testnet\n' > "$META"
 COMMITTEE_UP=0 guard "testnet, committee unreadable: warns, allowed" 0

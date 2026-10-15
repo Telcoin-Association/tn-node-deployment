@@ -3386,11 +3386,13 @@ _tn_commit_authors() {
 }
 
 # _tn_guard_unreadable WHY MODE [progress-fn] -- the committee could not be
-# counted. rc 0 (a warning) on testnet and devnet and on a mainnet node that is
-# not staked; rc 2 on a staked or voting mainnet node, or when the network or
-# the stake is unknown. TN_ALLOW_QUORUM_RISK=1 turns rc 2 into a warning.
+# counted. rc 0 (a warning) on testnet and devnet and on a mainnet node whose
+# VALIDATOR_ADDRESS the registry reports as not staked; rc 2 on a staked or
+# voting mainnet node, when the network or the stake is unknown, or when no
+# VALIDATOR_ADDRESS is recorded to ask about. TN_ALLOW_QUORUM_RISK=1 turns rc 2
+# into a warning.
 _tn_guard_unreadable() {
-    local why="$1" mode="$2" fn="${3:-}" net="" addr="" pub="" rc=0 st=0
+    local why="$1" mode="$2" fn="${3:-}" net="" addr="" pub="" rc=0 st=0 hint=""
     net="$(_tn_guard_network)"
     case "$net" in
         testnet|devnet)
@@ -3404,10 +3406,9 @@ _tn_guard_unreadable() {
         addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null)" || rc=$?
         if [[ $rc -eq 0 && -n "$addr" && -n "$pub" ]]; then
             node_is_staked_validator "$addr" "$pub" >/dev/null 2>&1 || st=$?
-        elif [[ $rc -eq 1 || -z "$addr" ]]; then
-            st=1
         else
             st=2
+            [[ -n "$addr" ]] || hint="; no VALIDATOR_ADDRESS in .node-meta to check the stake"
         fi
         if [[ $st -eq 1 ]]; then
             _tn_guard_say warn "could not count the committee members that are down (${why}); this node is not staked, going ahead." "$fn"
@@ -3418,7 +3419,7 @@ _tn_guard_unreadable() {
         _tn_guard_say warn "could not count the committee members that are down (${why}); going ahead because the quorum-risk override is set." "$fn"
         return 0
     fi
-    _tn_guard_say warn "could not count the committee members that are down (${why}). Stopping a ${net:-node of an unknown network} committee member blind is refused; once the fleet coordinator confirms the other members are up, run again with --allow-quorum-risk." "$fn"
+    _tn_guard_say warn "could not count the committee members that are down (${why}${hint}). Stopping a ${net:-node of an unknown network} committee member blind is refused; once the fleet coordinator confirms the other members are up, run again with --allow-quorum-risk." "$fn"
     return 2
 }
 
@@ -3429,16 +3430,19 @@ _tn_guard_unreadable() {
 # committee and the commit come from the network's public RPC when URL cannot
 # give them. n is the committee size, f = floor((n-1)/3), and down counts the
 # members that authored no header in that commit (an estimate until the node
-# reports peer liveness: a slow member counts as down). rc 0 when the node is
-# readable and not CvvActive, or when down + 1 < f + 1; rc 1 when stopping it
-# would leave f + 1 members down; rc 2 when the count cannot be made (no
-# committee, no commit, a commit more than 120 s old or from another epoch) on a
-# staked or voting mainnet node or an unknown network (testnet, devnet and an
-# unstaked node warn and get rc 0). TN_ALLOW_QUORUM_RISK=1 turns rc 1 and rc 2
+# reports peer liveness: a slow member counts as down). This node adds one to
+# down when it stops, unless its own mode could not be read: a node that does
+# not answer authored nothing, so it is already among the down. rc 0 when the
+# node is readable and not CvvActive, or when down (+ 1) < f + 1; rc 1 when
+# stopping it would leave f + 1 members down; rc 2 when the count cannot be
+# made (no committee, no commit, a commit more than 120 s old or from another
+# epoch) on a mainnet node not known to be unstaked or an unknown network
+# (testnet, devnet and a mainnet node the registry reports unstaked warn and
+# get rc 0; see _tn_guard_unreadable). TN_ALLOW_QUORUM_RISK=1 turns rc 1 and rc 2
 # into a warning and rc 0 (coordinated restarts). Never sleeps; messages go to
 # progress-fn (`fn log|warn MSG`) or stderr.
 tn_committee_down_guard() {
-    local url="${1:-}" fn="${2:-}" mode="" rc=0 net pub="" src info committee n hdr counted live ts ep age f down now
+    local url="${1:-}" fn="${2:-}" mode="" rc=0 net pub="" src info committee n hdr counted live ts ep age f down now self=1 note=""
     [[ -n "$url" ]] || url="$(tn_local_rpc_url 2>/dev/null || true)"
     mode="$(tn_node_mode "$url" 2>/dev/null)" || mode=""
     case "$mode" in
@@ -3492,15 +3496,19 @@ tn_committee_down_guard() {
     (( live <= n )) || live="$n"
     f=$(( (n - 1) / 3 ))
     down=$(( n - live ))
-    if (( down + 1 < f + 1 )); then
-        _tn_guard_say log "committee of ${n}: ${down} member(s) down; stopping this node leaves $((down + 1)), below the $((f + 1)) that halts consensus." "$fn"
+    if [[ -z "$mode" ]]; then
+        self=0
+        note=" (this node does not answer and is counted among them)"
+    fi
+    if (( down + self < f + 1 )); then
+        _tn_guard_say log "committee of ${n}: ${down} member(s) down${note}; stopping this node leaves $((down + self)), below the $((f + 1)) that halts consensus." "$fn"
         return 0
     fi
     if [[ "${TN_ALLOW_QUORUM_RISK:-0}" == "1" ]]; then
-        _tn_guard_say warn "committee of ${n}: ${down} member(s) down; stopping this node makes $((down + 1)) of the $((f + 1)) that halt consensus. Going ahead because the quorum-risk override is set." "$fn"
+        _tn_guard_say warn "committee of ${n}: ${down} member(s) down${note}; stopping this node makes $((down + self)) of the $((f + 1)) that halt consensus. Going ahead because the quorum-risk override is set." "$fn"
         return 0
     fi
-    _tn_guard_say warn "committee of ${n}: ${down} member(s) down; stopping this node makes $((down + 1)) of the $((f + 1)) that halt consensus. Refused: wait until the others are back, or, for a coordinated restart, run again with --allow-quorum-risk." "$fn"
+    _tn_guard_say warn "committee of ${n}: ${down} member(s) down${note}; stopping this node makes $((down + self)) of the $((f + 1)) that halt consensus. Refused: wait until the others are back, or, for a coordinated restart, run again with --allow-quorum-risk." "$fn"
     return 1
 }
 
