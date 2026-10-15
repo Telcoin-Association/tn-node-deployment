@@ -984,6 +984,10 @@ PUBLIC_STATUS_DROP = (
     "image", "container", "recent_log_events", "last_error", "advertised_name",
     "service",
 )
+# /api/nodes: dropped from each node slot and from `node`.
+PUBLIC_NODES_DROP = ("image", "container", "service")
+# /api/system: the host's name and its exact kernel and OS release.
+PUBLIC_SYSTEM_DROP = ("hostname", "kernel", "distro")
 
 
 @app.before_request
@@ -3001,6 +3005,10 @@ def api_nodes():
     # Read-only when reached over the public Caddy path (vs the SSH tunnel). The
     # UI uses this to hide every management control and show a read-only banner.
     out["public_readonly"] = is_public_request()
+    if out["public_readonly"]:
+        for slot in [out[t] for t in NODE_TYPES] + [out["node"] or {}]:
+            for key in PUBLIC_NODES_DROP:
+                slot.pop(key, None)
     # Operator facts, never sent on the public path: whether the privileged
     # helper speaks the API this server needs, and how the role above was decided
     # (onchain_role's source: network, local, cached or default; null with no
@@ -4334,7 +4342,11 @@ def api_rpc_disable():
 
 @app.route("/api/system")
 def api_system():
-    return jsonify(system_info())
+    info = system_info()
+    if is_public_request():
+        for key in PUBLIC_SYSTEM_DROP:
+            info.pop(key, None)
+    return jsonify(info)
 
 
 @app.route("/api/addons/status")

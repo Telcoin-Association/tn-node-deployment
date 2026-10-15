@@ -19,8 +19,9 @@ Covered here:
      other read is refused (403).
   4. A public request never reaches sudo or the helper, and never fills a cache
      the operator view reads.
-  5. Public /api/status drops server.PUBLIC_STATUS_DROP; /api/version and
-     /api/nodes give the major version only.
+  5. Public /api/status drops server.PUBLIC_STATUS_DROP, /api/nodes drops
+     server.PUBLIC_NODES_DROP and /api/system server.PUBLIC_SYSTEM_DROP;
+     /api/version and /api/nodes give the major version only.
 
     python3 -m pytest -q ui/test_public_readonly.py
 """
@@ -185,6 +186,28 @@ class PublicResponsesTest(ServerTestCase):
                 self.assertNotIn(key, body)
         operator = self.client.get("/api/status/observer").get_json()
         for key in ("internal_ip", "data_dir", "passphrase_method", "docker_image"):
+            with self.subTest(key=key):
+                self.assertIn(key, operator)
+
+    def test_public_nodes_drop_image_container_and_service(self):
+        body = self.get_public("/api/nodes").get_json()
+        self.assertIsNotNone(body["node"])
+        for slot in [body[t] for t in server.NODE_TYPES] + [body["node"]]:
+            for key in server.PUBLIC_NODES_DROP:
+                with self.subTest(slot=slot.get("type"), key=key):
+                    self.assertNotIn(key, slot)
+        operator = self.client.get("/api/nodes").get_json()
+        self.assertIn("service", operator["node"])
+        self.assertIn("image", operator["observer"])
+
+    def test_public_system_drops_host_name_and_releases(self):
+        body = self.get_public("/api/system").get_json()
+        for key in server.PUBLIC_SYSTEM_DROP:
+            with self.subTest(key=key):
+                self.assertNotIn(key, body)
+        self.assertIn("memory", body)
+        operator = self.client.get("/api/system").get_json()
+        for key in server.PUBLIC_SYSTEM_DROP:
             with self.subTest(key=key):
                 self.assertIn(key, operator)
 
