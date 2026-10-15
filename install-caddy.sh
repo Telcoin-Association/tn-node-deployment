@@ -1765,6 +1765,11 @@ caddy_restart_window() {
     url="$(tn_local_rpc_url)"
     rc=0
     tn_committee_down_guard "$url" caddy_wait_say || rc=$?
+    # TN_ALLOW_QUORUM_RISK=1 (which the guard honours itself) lets a refusal through.
+    if [[ "$rc" -ne 0 && "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]]; then
+        caddy_say warn "TN_ALLOW_QUORUM_RISK=1: restarting although the committee check did not pass."
+        rc=0
+    fi
     if [[ "$rc" -ne 0 ]]; then
         if [[ "$rc" -eq 2 ]]; then
             why="the committee could not be read on a node whose vote counts"

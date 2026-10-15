@@ -268,12 +268,12 @@ disable_metrics() {
 
 enable_health() {
     print_header "Enable health monitoring"
-    addon_meta_write_begin || { pause; return 0; }
     print_info "Adds --healthcheck ${TN_KUMA_PORT} to the node launch and source-restricts the"
     print_info "ufw rule to the Association monitor only (${TN_KUMA_SRC})."
     addons_lib_check
     echo ""
     health_firewall_ready || return 0
+    addon_meta_write_begin || { pause; return 0; }
     local target svc method file live=true why=""
     if target="$(tn_node_launch_target)"; then
         read -r svc method file <<< "$target"

@@ -482,6 +482,8 @@ tn_committee_down_guard() { return "${CDG_RC:-0}"; }
 ( CDG_RC=2; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "guard rc 2 refuses the restart" 1 $?
 check "guard rc 2: said" "yes" "$(grep -q 'committee could not be read on a node whose vote counts' "$T/out" && echo yes)"
 ( CDG_RC=0; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "guard passes" 0 $?
+( CDG_RC=1; TN_ALLOW_QUORUM_RISK=1; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "guard rc 1 + TN_ALLOW_QUORUM_RISK=1 goes on" 0 $?
+( CDG_RC=2; TN_ALLOW_QUORUM_RISK=1; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "guard rc 2 + TN_ALLOW_QUORUM_RISK=1 goes on" 0 $?
 ( CDG_RC=0; CADDY_WINDOW_DONE=false; tn_wait_restart_window() { return 3; }; caddy_restart_window ) >"$T/out" 2>&1
 check_rc "a failed epoch wait refuses the restart" 1 $?
 eval "$REAL_CDG"

@@ -178,6 +178,8 @@ tn_committee_down_guard() { return "${CDG_RC:-0}"; }
 ( CDG_RC=1; obs_quorum_guard ) >/dev/null 2>&1; check_rc "quorum risk: no restart" 1 $?
 ( CDG_RC=2; obs_quorum_guard ) >/dev/null 2>&1; check_rc "guard rc 2 (unreadable where it counts): no restart" 1 $?
 ( CDG_RC=0; obs_quorum_guard ) >/dev/null 2>&1; check_rc "guard passes" 0 $?
+( CDG_RC=1; TN_ALLOW_QUORUM_RISK=1; obs_quorum_guard ) >/dev/null 2>&1; check_rc "guard rc 1 + TN_ALLOW_QUORUM_RISK=1: restart" 0 $?
+( CDG_RC=2; TN_ALLOW_QUORUM_RISK=1; obs_quorum_guard ) >/dev/null 2>&1; check_rc "guard rc 2 + TN_ALLOW_QUORUM_RISK=1: restart" 0 $?
 eval "$REAL_CDG"
 
 # The real guard with the committee unreadable: the node votes (CvvActive) and no RPC
@@ -218,8 +220,10 @@ check "restart window: no wait after a refusal" "guard" "$(paste -sd' ' "$ORDER"
 : > "$ORDER"; ( CDG_RC=2; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: guard rc 2, rc 1" 1 $?
 : > "$ORDER"; ( WAIT_RC=3; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: a failed wait, rc 1" 1 $?
 unset -f tn_wait_restart_window
-: > "$ORDER"; ( obs_restart_window ) >/dev/null 2>&1; check_rc "restart window without the wait helper: no restart" 1 $?
+: > "$ORDER"; ( obs_restart_window ) >"$T/out" 2>&1; check_rc "restart window without the wait helper: restart after the guard" 0 $?
 check "restart window without the wait helper: the guard still ran" "guard" "$(paste -sd' ' "$ORDER")"
+check "restart window without the wait helper: warned" "yes" "$(grep -q 'has no tn_wait_restart_window' "$T/out" && echo yes)"
+: > "$ORDER"; ( CDG_RC=1; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window without the wait helper: guard refusal still stops it" 1 $?
 eval "$REAL_CDG"
 eval "$REAL_WAIT"
 
