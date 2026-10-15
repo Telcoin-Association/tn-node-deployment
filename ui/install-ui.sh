@@ -154,7 +154,7 @@ verify_started() {
     err "telcoin-ui did not become active after start/restart."
     # Who owns 8080? ss -H = no header; pick the first holder.
     local holder
-    holder="$(ss -ltnpH 'sport = :8080' 2>/dev/null | head -n1)"
+    holder="$(ss -ltnpH 'sport = :8080' 2>/dev/null | head -n1 || true)"
     if [[ -n "$holder" ]]; then
         local who="${holder##*users:}"
         warn "Port 8080 is held by another process: ${who:-$holder}"
