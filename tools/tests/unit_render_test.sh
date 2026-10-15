@@ -406,6 +406,23 @@ rc=0; _TN_RERENDER_LEGACY=1 tn_rerender_node_launch "" >"$T/rr.log" 2>&1 || rc=$
 check "root: an unreadable inline node line is refused, nothing written" "1 no same" \
     "${rc} $([[ -e "$R/usr/local/libexec/telcoin/tn-start" ]] && echo yes || echo no) $(cmp -s "$T/rr.unit" "$R/etc/systemd/system/telcoin.service" && echo same || echo changed)"
 check "root: the refusal names the manual steps" "yes" "$(grep -q 'edit-config.sh --migrate-credential again' "$T/rr.log" && echo yes)"
+# A Docker start script that runs its image by tag is re-rendered by digest, and
+# .node-meta records the image, its digest and the release tag.
+rm -f "$R/usr/local/libexec/telcoin/tn-start"
+tn_write_node_env "$P" "$W" >/dev/null 2>&1
+printf 'INSTALL_METHOD=docker\nNETWORK=testnet\nDATA_DIR=/var/lib/telcoin\nRELEASE_TAG=v0.15.0-adiri\n' > "$R/etc/telcoin/.node-meta"
+chmod 0600 "$R/etc/telcoin/.node-meta"
+TAGGED="${IMG%@*}:v0.16.0-adiri"
+TN_DOCKER_REQUIRE_DIGEST=0 _tn_start_script_text docker "$TAGGED" "$ARGS_D" > "$R/usr/local/libexec/telcoin/tn-start-docker" 2>"$T/rr.log"
+chmod 0755 "$R/usr/local/libexec/telcoin/tn-start-docker"
+_tn_node_unit_text docker > "$R/etc/systemd/system/telcoin.service" 2>/dev/null
+tn_docker_local_digest() { [[ "$1" == "$TAGGED" ]] && printf '%s\n' "$IMG"; }
+rc=0; tn_rerender_node_launch "" >>"$T/rr.log" 2>&1 || rc=$?
+check_rc "root: a tag-form Docker script is re-rendered" 0 "$rc" || sed 's/^/      /' "$T/rr.log"
+check "root: tag-form: the image, digest and release tag recorded" \
+    "DOCKER_IMAGE=${IMG} DOCKER_IMAGE_DIGEST=${IMG##*@} RELEASE_TAG=v0.16.0-adiri" \
+    "DOCKER_IMAGE=$(meta_get DOCKER_IMAGE 2>/dev/null) DOCKER_IMAGE_DIGEST=$(meta_get DOCKER_IMAGE_DIGEST 2>/dev/null) RELEASE_TAG=$(meta_get RELEASE_TAG 2>/dev/null)"
+unset -f tn_docker_local_digest
 rc=0; tn_install_journald_dropin >/dev/null 2>&1 || rc=$?
 check_rc "root: journald drop-in written" 0 "$rc"
 check_has "root: journald cap" "SystemMaxUse=4G" "$(cat "$R/etc/systemd/journald.conf.d/50-telcoin.conf" 2>/dev/null)"

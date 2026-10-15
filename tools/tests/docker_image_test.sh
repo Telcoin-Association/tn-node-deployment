@@ -133,6 +133,21 @@ check "registry digest (CRLF header)" "sha256:${D64}" "$out"
 printf 'sha256:short\n' > "$REC/digest.v0.16.0-adiri"
 rc=0; out="$(tn_registry_digest "$R" v0.16.0-adiri)" || rc=$?
 check_rc "registry digest malformed refused" 1 "$rc"
+
+# --- tn_docker_release_tag_for: the release tag a digest belongs to ---------------------
+D2="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+printf 'sha256:%s\n' "$D64" > "$REC/digest.v0.16.0-adiri"
+printf 'sha256:%s\n' "$D2" > "$REC/digest.v0.17.0-adiri"
+out="$(NETWORK=testnet tn_docker_release_tag_for testnet "${R}@sha256:${D64}" 2>/dev/null)"
+check "tag for a digest: older release found" "v0.16.0-adiri" "$out"
+out="$(tn_docker_release_tag_for testnet "${R}@sha256:${D2}" 2>/dev/null)"
+check "tag for a digest: newest release found" "v0.17.0-adiri" "$out"
+rc=0; out="$(tn_docker_release_tag_for testnet "${R}@sha256:$(printf '%064d' 7)" 2>/dev/null)" || rc=$?
+check "tag for a digest: no release names it" "1 " "$rc $out"
+out="$(tn_docker_release_tag_for testnet "$DEFAULT_DOCKER_IMAGE" 2>/dev/null)"
+check "tag for a digest: the pinned default" "$DEFAULT_DOCKER_TAG" "$out"
+rc=0; out="$(tn_docker_release_tag_for testnet "evil.example/adiri@sha256:${D2}" 2>/dev/null)" || rc=$?
+check "tag for a digest: other repository refused" "1 " "$rc $out"
 rc=0; out="$(tn_registry_digest "$R" 'v1;x')" || rc=$?
 check_rc "registry digest odd tag refused" 1 "$rc"
 

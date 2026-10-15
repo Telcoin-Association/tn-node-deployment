@@ -142,6 +142,7 @@ class UpdatePanelTest(unittest.TestCase):
     def test_a_moved_tag_is_shown(self):
         body = function_body("fillUpdateStatus")
         self.assertIn("u.tag_moved===true", body)
+        self.assertIn("u.tag_unknown===true", body)
         self.assertIn("method==='release'", body)
 
     def test_refusals_before_the_engine_land_in_the_pane(self):

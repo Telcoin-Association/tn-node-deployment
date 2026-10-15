@@ -2317,7 +2317,7 @@ async function fillUpdateStatus(){
   const pending = u.pending;
   const rows = [
     ['Install method', method],
-    ['Current version', u.current_ref || '—'],
+    ['Current version', (u.current_ref || '—') + (u.tag_unknown===true ? '  (release tag unknown)' : '')],
     ['Latest available', (u.latest_ref || '—') + (u.update_available ? '  ⬆ newer' : '')],
     ['Pending', pending ? String(pending) : 'none'],
   ];

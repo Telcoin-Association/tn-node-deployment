@@ -1217,6 +1217,21 @@ fetch_docker_tags() {
         done | sort -u -V | tail -n 15
 }
 
+# docker_running_digest IMAGE -- the digest (sha256:<hex>) the running IMAGE is:
+# its own for <repo>@sha256:<digest>, else the one Docker holds for the
+# <repo>:<tag> (tn_docker_local_digest). Nothing when unknown.
+docker_running_digest() {
+    local img="${1:-}" d
+    case "$img" in
+        *@sha256:*) printf '%s\n' "${img##*@}" ;;
+        ?*)
+            d="$(tn_docker_local_digest "$img" 2>/dev/null)" || return 0
+            [[ "$d" == *@sha256:* ]] && printf '%s\n' "${d##*@}"
+            ;;
+    esac
+    return 0
+}
+
 # docker_current_tag IMAGE -- the release tag the running IMAGE came from: the tag
 # of a <repo>:<tag> IMAGE; for <repo>@sha256:<digest>, RELEASE_TAG in .node-meta
 # when DOCKER_IMAGE_DIGEST there names that digest. Nothing when neither says.
@@ -2453,7 +2468,7 @@ latest_docker_ref() {
 
 json_check() {
     local install_method="$1"
-    local current="" latest="" pending="null" avail="false" running="" mig="false" moved="false"
+    local current="" latest="" pending="null" avail="false" running="" mig="false" moved="false" unknown="false"
 
     if [[ -f "$(pending_state_path)" ]]; then
         local phase
@@ -2479,12 +2494,31 @@ json_check() {
             [[ -n "$latest" && "$current" != "$latest" ]] && avail="true"
             ;;
         docker)
-            local img
+            # Compared by digest: the running image's against the newest release
+            # tag's (resolved as an update would, tn_docker_resolve_ref). A running
+            # digest whose release tag is not known is reported as tag_unknown,
+            # never as an update.
+            local img net cur_d="" lat_d="" out
             img=$(detect_current_docker_image 2>/dev/null || echo "")
             running="$(docker_current_tag "$img")"
             current="${running:-$img}"
             latest=$(latest_docker_ref 2>/dev/null || echo "")
-            [[ -n "$latest" && -n "$current" && "$current" != "$latest" ]] && avail="true"
+            if [[ -n "$latest" && -n "$img" ]]; then
+                cur_d="$(docker_running_digest "$img")"
+                net="$(tn_detect_network 2>/dev/null)" || net=""
+                if [[ -n "$net" ]] && out="$(tn_docker_resolve_ref "$net" "$latest" "" 2>/dev/null)"; then
+                    out="${out%% *}"
+                    lat_d="${out##*@}"
+                fi
+                if [[ -n "$cur_d" && -n "$lat_d" && "$cur_d" == "$lat_d" ]]; then
+                    running="$latest"
+                    current="$latest"
+                elif [[ -z "$running" ]]; then
+                    unknown="true"
+                elif [[ -n "$cur_d" && -n "$lat_d" ]] || [[ "$running" != "$latest" ]]; then
+                    avail="true"
+                fi
+            fi
             ;;
         *)
             current=$(detect_current_source_ref 2>/dev/null || echo "")
@@ -2496,7 +2530,7 @@ json_check() {
         mig="true"
     fi
 
-    json_emit "{\"install_method\":\"$(json_escape "$install_method")\",\"current_ref\":\"$(json_escape "$current")\",\"latest_ref\":\"$(json_escape "$latest")\",\"update_available\":${avail},\"pending\":${pending},\"storage_migration\":${mig},\"tag_moved\":${moved}}"
+    json_emit "{\"install_method\":\"$(json_escape "$install_method")\",\"current_ref\":\"$(json_escape "$current")\",\"latest_ref\":\"$(json_escape "$latest")\",\"update_available\":${avail},\"pending\":${pending},\"storage_migration\":${mig},\"tag_moved\":${moved},\"tag_unknown\":${unknown}}"
     # This object is the whole answer: the UI reads the last JSON line of a
     # check, so no done event may follow it.
     JSON_DONE_SENT=true

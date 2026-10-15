@@ -155,4 +155,33 @@ NODE_STATE=stopped
 exit_case false 0
 check "a run that ends well says nothing about a stopped node" no "$([[ "$OUT" == *"is stopped"* ]] && echo yes || echo no)"
 unset -f systemctl tn_release_update_lock
+# --- json_check (Docker): releases compared by digest -------------------------------------
+R="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+DA="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+DB="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+json_emit() { printf '%s\n' "$1" >> "$T/check.json"; }
+pending_state_path() { printf '%s\n' "$T/no-pending"; }
+detect_current_docker_image() { printf '%s\n' "$RUN_IMG"; }
+latest_docker_ref() { printf '%s\n' "v0.17.0-adiri"; }
+tn_docker_resolve_ref() { printf '%s@%s %s\n' "$R" "$LATEST_D" "$2"; }
+storage_migrating_upgrade() { return 1; }
+jc() {  # jc NAME META RUN-IMG LATEST-DIGEST EXPECTED-FIELDS
+    printf '%s\n' "$2" > "$META"
+    RUN_IMG="$3" LATEST_D="$4"
+    : > "$T/check.json"
+    json_check docker >/dev/null 2>&1
+    check "$1" "$5" "$(sed -n 's/.*"current_ref":"\([^"]*\)".*"update_available":\([a-z]*\).*"tag_unknown":\([a-z]*\).*/\1 \2 \3/p' "$T/check.json")"
+}
+jc "digest-only install on the newest release: no update, tag filled in" \
+    "NETWORK=testnet" "${R}@${DB}" "$DB" "v0.17.0-adiri false false"
+jc "digest-only install, unknown release behind: tag unknown, no update" \
+    "NETWORK=testnet" "${R}@${DA}" "$DB" "${R}@${DA} false true"
+jc "recorded release behind: update" \
+    "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.16.0-adiri' "$DA")" "${R}@${DA}" "$DB" "v0.16.0-adiri true false"
+jc "recorded tag of another digest is not trusted" \
+    "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.16.0-adiri' "$DB")" "${R}@${DA}" "$DB" "${R}@${DA} false true"
+jc "latest digest unresolvable: recorded tag compared" \
+    "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.17.0-adiri' "$DA")" "${R}@${DA}" "" "v0.17.0-adiri false false"
+
+
 finish

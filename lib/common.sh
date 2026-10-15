@@ -3311,6 +3311,7 @@ _tn_passfile_trim_safe() {
 # arguments.
 tn_rerender_node_launch() {
     local runner="${1:-}" fn="${2:-}" line svc method file cur kind args unit envf p w rc=0 legacy="${_TN_RERENDER_LEGACY:-0}"
+    local conv_tag="" converted=0 net
     line="$(tn_node_launch_target)" || return 1
     read -r svc method file <<< "$line"
     unit="/etc/systemd/system/${svc}.service"
@@ -3343,12 +3344,15 @@ tn_rerender_node_launch() {
     kind="${cur%% *}"
     [[ -n "$runner" ]] || runner="${cur#* }"
     # Images run by digest: an older start script that names a tag keeps the
-    # image Docker already holds under that tag, by its digest.
+    # image Docker already holds under that tag, by its digest (recorded in
+    # .node-meta below, with the tag when it is a release tag).
     if [[ "$kind" == "docker" && "$runner" != *@sha256:* ]]; then
+        [[ "${runner##*/}" != *:* ]] || conv_tag="${runner##*:}"
         if ! runner="$(tn_docker_local_digest "$runner")"; then
             _tn_guard_say warn "${svc}: ${file} runs the image by tag and Docker holds no digest for it; pull a release by digest with update-node.sh first." "$fn"
             return 1
         fi
+        converted=1
     fi
     if [[ "$kind" == "docker" ]]; then
         method="docker"
@@ -3395,6 +3399,14 @@ tn_rerender_node_launch() {
     tn_write_start_script "$method" "$runner" "$args" || return $?
     tn_write_node_unit "$method" || return $?
     _tn_guard_say log "${svc}: start script and unit rewritten in the current form." "$fn"
+    if [[ $converted -eq 1 ]]; then
+        meta_set DOCKER_IMAGE "$runner" >/dev/null 2>&1 || true
+        meta_set DOCKER_IMAGE_DIGEST "${runner##*@}" >/dev/null 2>&1 || true
+        net="$(tn_detect_network 2>/dev/null)" || net=""
+        if [[ -n "$conv_tag" && -n "$net" ]] && tn_release_tag_ok "$net" "$conv_tag"; then
+            meta_set RELEASE_TAG "$conv_tag" >/dev/null 2>&1 || true
+        fi
+    fi
     return 0
 }
 
@@ -6836,6 +6848,40 @@ tn_docker_recorded_tag() {
     t="$(meta_get RELEASE_TAG 2>/dev/null)" || return 1
     [[ -n "$t" ]] || return 1
     printf '%s\n' "$t"
+}
+
+# tn_docker_release_tag_for NETWORK IMAGE -- the release tag of NETWORK whose
+# image is IMAGE (<repo>@sha256:<digest>), to record beside the digest: the tag
+# .node-meta records for it (tn_docker_recorded_tag), DEFAULT_DOCKER_TAG for
+# DEFAULT_DOCKER_IMAGE, else the newest of the repository's release tags (the
+# newest 15) for which the registry serves IMAGE's digest (tn_registry_digest).
+# Prints nothing, rc 1, when none matches or the registry cannot be read.
+tn_docker_release_tag_for() {
+    local net="${1:-}" img="${2:-}" repo host path json t d
+    [[ "$img" == *@sha256:* ]] || return 1
+    if t="$(tn_docker_recorded_tag "$img" 2>/dev/null)"; then
+        printf '%s\n' "$t"
+        return 0
+    fi
+    if [[ "$img" == "$DEFAULT_DOCKER_IMAGE" ]] && tn_release_tag_ok "$net" "$DEFAULT_DOCKER_TAG"; then
+        printf '%s\n' "$DEFAULT_DOCKER_TAG"
+        return 0
+    fi
+    repo="${img%@*}"
+    tn_docker_repo_ok "$net" "$repo" 2>/dev/null || return 1
+    host="${repo%%/*}"
+    path="${repo#*/}"
+    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || return 1
+    for t in $(printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
+        | while IFS= read -r t; do if tn_release_tag_ok "$net" "$t"; then printf '%s\n' "$t"; fi; done \
+        | sort -u -V | tail -n 15 | sort -r -V); do
+        d="$(tn_registry_digest "$repo" "$t" 2>/dev/null)" || continue
+        if [[ "$d" == "${img##*@}" ]]; then
+            printf '%s\n' "$t"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # tn_docker_holds_digest IMAGE -- rc 0 when Docker holds an image whose

@@ -182,7 +182,7 @@ Unit, start script and logs:
 - Downgrades are refused (`"downgrade":true` in the `--json` done, plus `"storage_downgrade"`).
   New `--allow-downgrade` (testnet, interactive only) allows one. New `--allow-dirty` works as
   in setup-node.
-- `--check` adds `"tag_moved"`, and `current_ref` is the running release.
+- `--check` adds `"tag_moved"`, and `current_ref` is the running release. Docker installs compare the running digest with the newest release's; a digest whose release tag is not known reports `"tag_unknown":true`, never an update.
 - After the restart, apply checks that the node is on its network's chain, that its consensus
   header advances, and that a node that was voting before the update votes again within
   `TN_UPDATE_VOTE_TIMEOUT` seconds (default 600; `TN_UPDATE_VOTE_POLL` 10). A failure rolls

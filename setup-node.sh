@@ -905,7 +905,7 @@ _preflight_docker() {
 
     # The network's image repository first: a network without one is refused before
     # Docker's apt repository, the engine or daemon.json is touched.
-    local repo input tag="$RELEASE_TAG"
+    local repo input tag="$RELEASE_TAG" looked=false
     repo="$(tn_docker_repo_for "$NETWORK")" \
         || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
 
@@ -928,9 +928,11 @@ _preflight_docker() {
     echo ""
 
     if [[ -n "$DOCKER_IMAGE" ]]; then
-        # By digest alone: the release .node-meta records for that digest, if any,
-        # is held to the oldest supported release; otherwise that check only warns.
-        tag="$(tn_docker_recorded_tag "$DOCKER_IMAGE")" || tag=""
+        # By digest alone: the release that digest belongs to (.node-meta's record,
+        # else the registry's release tags), if found, is held to the oldest
+        # supported release; otherwise that check only warns.
+        tag="$(tn_docker_release_tag_for "$NETWORK" "$DOCKER_IMAGE" 2>/dev/null)" || tag=""
+        looked=true
         check_release_floor "${tag:-$DOCKER_IMAGE}"
     elif [[ -n "$tag" ]]; then
         check_release_floor "$tag"
@@ -967,6 +969,14 @@ _preflight_docker() {
     fi
     if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
         setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>."
+    fi
+    # The release tag goes into .node-meta beside the digest, so update-node.sh
+    # --check can compare releases; a digest no release tag names is recorded alone.
+    if [[ -z "$tag" && "$looked" == false ]]; then
+        tag="$(tn_docker_release_tag_for "$NETWORK" "$DOCKER_IMAGE" 2>/dev/null)" || tag=""
+    fi
+    if [[ -z "$tag" ]]; then
+        print_info "No ${NETWORK} release tag names ${DOCKER_IMAGE}; .node-meta records the digest only, and update-node.sh --check reports its release as unknown."
     fi
     RELEASE_TAG="$tag"
 
