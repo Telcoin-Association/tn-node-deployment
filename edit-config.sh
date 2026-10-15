@@ -2467,8 +2467,11 @@ refresh_chain_configs() {
     # update-node.sh builds from the same checkout, so the pull waits for it too.
     menu_lock || return 0
 
-    # Pull latest from repo
-    if [[ -d "${source_dir}/.git" ]]; then
+    # Pull latest from repo (never on mainnet: its files come only as published,
+    # and the pins below decide).
+    if [[ -d "${source_dir}/.git" && "$network" == "mainnet" ]]; then
+        print_info "Mainnet chain configs are used as published (no pull)."
+    elif [[ -d "${source_dir}/.git" ]]; then
         print_step "Pulling latest chain configs..."
         if ! git -C "$source_dir" pull; then
             print_error "git pull failed in ${source_dir}. Chain configs unchanged."
@@ -2512,8 +2515,18 @@ refresh_chain_configs() {
         return
     fi
 
+    # The pinned hashes (tn_chain_configs_check), before anything is copied.
+    if ! tn_chain_configs_check "$chain_config_src" "$network" edit_wait_say; then
+        print_error "The chain configs in ${chain_config_src} do not match the ${network} pins (see above). Chain configs unchanged."
+        print_info "New pins come with a signed scripts release (update-scripts.sh)."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+
     # Same chain or nothing: the node's current genesis and the new one must
     # both declare a chain id, and the same one.
+
     node_genesis="${node_data_dir}/genesis/genesis.yaml"
     node_id="$(tn_genesis_chain_id "$node_genesis" 2>/dev/null || true)"
     src_id="$(tn_genesis_chain_id "${chain_config_src}/genesis.yaml" 2>/dev/null || true)"

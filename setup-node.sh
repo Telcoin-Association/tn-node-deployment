@@ -1645,7 +1645,7 @@ step_create_infrastructure() {
     # Node flags: asked of the release now, before any key exists, and recorded for a
     # --json finalize.
     prepare_node_extra_flags
-    ensure_chain_configs_available
+    ensure_chain_configs_available "$NETWORK" || setup_fail "The ${NETWORK} chain configs are not the pinned ones (see above); nothing was copied."
     print_ok "Infrastructure ready"
 }
 
@@ -1849,50 +1849,58 @@ step_write_config() {
 
     local chain_subdir
     case "$NETWORK" in
-        testnet) chain_subdir="testnet" ;;
-        devnet)  chain_subdir="devnet" ;;
-        *)       chain_subdir="mainnet" ;;
+        testnet|mainnet|devnet) chain_subdir="$NETWORK" ;;
+        *) setup_fail "no chain-configs for network ${NETWORK}" ;;
     esac
 
-    local chain_configs_found=false
     # TN_GENESIS_DIR (optional) points DIRECTLY at the dir holding genesis.yaml/
-    # committee.yaml/parameters.yaml and is checked FIRST. Expands to nothing when
-    # unset, so the existing search order is unchanged.
+    # committee.yaml/parameters.yaml and is checked FIRST. Never the working
+    # directory: only these absolute places.
     local search_paths=(
         ${TN_GENESIS_DIR:+"$TN_GENESIS_DIR"}
         "${TN_SOURCE_DIR}/chain-configs/${chain_subdir}"
         "/opt/telcoin-source/chain-configs/${chain_subdir}"
-        "./chain-configs/${chain_subdir}"
         "${CONFIG_DIR}/chain-configs/${chain_subdir}"
     )
-
-    for search_path in "${search_paths[@]}"; do
-        if [[ -f "${search_path}/genesis.yaml" ]] && \
-           [[ -f "${search_path}/committee.yaml" ]] && \
-           [[ -f "${search_path}/parameters.yaml" ]]; then
-            print_ok "Found chain-configs at: ${search_path}"
-            # The service user copies them, so it reads only what it may read: a
-            # chain-config directory it cannot read stops setup here.
-            if ! tn_as_service_user cp -- "${search_path}/genesis.yaml" "${genesis_dir}/genesis.yaml" \
-                || ! tn_as_service_user cp -- "${search_path}/committee.yaml" "${genesis_dir}/committee.yaml" \
-                || ! tn_as_service_user cp -- "${search_path}/parameters.yaml" "${DATA_DIR}/parameters.yaml"; then
-                setup_fail "Could not copy the chain config files from ${search_path} as ${SERVICE_USER}: they must be readable by that user."
+    local search_path found="" try
+    for try in 1 2; do
+        for search_path in "${search_paths[@]}"; do
+            if [[ -f "${search_path}/genesis.yaml" ]] && \
+               [[ -f "${search_path}/committee.yaml" ]] && \
+               [[ -f "${search_path}/parameters.yaml" ]]; then
+                found="$search_path"
+                break 2
             fi
-            print_ok "Chain config files copied"
-            chain_configs_found=true
-            break
-        fi
-    done
-
-    if [[ "$chain_configs_found" == "false" ]]; then
+        done
+        [[ "$try" == 1 ]] || break
         print_warn "Chain config files not found automatically."
-        print_info "Copy from: https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
+        print_info "Copy genesis.yaml, committee.yaml and parameters.yaml from"
+        print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
+        print_info "into ${CONFIG_DIR}/chain-configs/${chain_subdir}/ (or pass --genesis-dir)."
         echo ""
         if json_mode; then
             setup_fail "Chain config files missing and cannot prompt in non-interactive mode."
         fi
-        read -r -p "  Press Enter once you have copied the chain config files: "
+        read -r -p "  Press Enter once you have copied the chain config files: " || true
+    done
+    [[ -n "$found" ]] || setup_fail "Chain config files not found in ${search_paths[*]}."
+    print_ok "Found chain-configs at: ${found}"
+    # The pinned hashes, before anything is copied.
+    tn_chain_configs_check "$found" "$NETWORK" setup_progress \
+        || setup_fail "The chain configs in ${found} do not match the ${NETWORK} pins (see above); nothing was copied."
+    # The service user copies them, so it reads only what it may read: a
+    # chain-config directory it cannot read stops setup here.
+    if ! tn_as_service_user cp -- "${found}/genesis.yaml" "${genesis_dir}/genesis.yaml" \
+        || ! tn_as_service_user cp -- "${found}/committee.yaml" "${genesis_dir}/committee.yaml" \
+        || ! tn_as_service_user cp -- "${found}/parameters.yaml" "${DATA_DIR}/parameters.yaml"; then
+        setup_fail "Could not copy the chain config files from ${found} as ${SERVICE_USER}: they must be readable by that user."
     fi
+    # And the copies, so a file swapped between the check and the copy is caught.
+    if [[ "$NETWORK" != "devnet" ]] && ! _setup_copied_configs_ok "$genesis_dir"; then
+        tn_as_service_user rm -f -- "${genesis_dir}/genesis.yaml" "${genesis_dir}/committee.yaml" "${DATA_DIR}/parameters.yaml" || true
+        setup_fail "The copied chain configs in ${DATA_DIR} do not match the ${NETWORK} pins; they were removed."
+    fi
+    print_ok "Chain config files copied (sha256 checked)"
 
     # Optional advertised node name -> data dir's network-config (no-op if blank).
     write_advertised_name "$DATA_DIR" "$ADVERTISED_NAME" || true
@@ -1900,7 +1908,21 @@ step_write_config() {
     print_ok "Configuration ready under: ${DATA_DIR}"
 }
 
+# _setup_copied_configs_ok GENESIS_DIR -- rc 0 when the three copied chain configs
+# (GENESIS_DIR/genesis.yaml, GENESIS_DIR/committee.yaml, DATA_DIR/parameters.yaml)
+# still carry the NETWORK pins.
+_setup_copied_configs_ok() {
+    local f got want
+    for f in "${1}/genesis.yaml" "${1}/committee.yaml" "${DATA_DIR}/parameters.yaml"; do
+        want="$(tn_chain_config_pin "$NETWORK" "${f##*/}")"
+        got="$(sha256sum < "$f" 2>/dev/null)" || return 1
+        [[ -n "$want" && "${got%% *}" == "$want" ]] || return 1
+    done
+    return 0
+}
+
 # Build NODE_EXTRA_FLAGS, the node flags for the launch line, and record the choices in
+
 # .node-meta (BOOTSTRAP_PEERS_FILE, STATE_EXPORT). Each flag in use must be listed by the
 # `node --help` of the release this run installs: the flags are opt-in, and a node given
 # a flag its release does not know refuses to start, so a missing one stops setup. The

@@ -2322,42 +2322,71 @@ tn_sync_submodules() {
     git -C "$repo_dir" submodule update --init --recursive --force
 }
 
+# ensure_chain_configs_available [NETWORK] -- make the telcoin-network checkout
+# (TN_SOURCE_DIR) that holds the chain configs available: clone it (with the
+# operator's consent) when it is missing; on testnet and devnet pull it
+# (--ff-only), never on mainnet, whose files come only as published. Then the
+# directory setup will copy from (TN_GENESIS_DIR when set, else the checkout's
+# chain-configs/<network>) is compared with the network's pins
+# (tn_chain_configs_check) before anything is copied. NETWORK defaults to the
+# NETWORK global; TN_ROOT_PREFIX is honoured for the checkout. rc 0 ready (or
+# skipped by the operator: setup asks for the files later), 1 refused: the files
+# do not match their pins or the network has none. Exits 1 when the clone fails.
 ensure_chain_configs_available() {
-    print_step "Ensuring chain-config files are available..."
+    local net="${1:-${NETWORK:-}}" source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}" dir
 
-    local source_dir="$TN_SOURCE_DIR"
+    print_step "Ensuring chain-config files are available..."
+    case "$net" in
+        testnet|mainnet|devnet) ;;
+        *)
+            print_error "no chain configs for network '${net}' (expected testnet, mainnet or devnet)."
+            return 1
+            ;;
+    esac
 
     if [[ -d "${source_dir}/.git" ]]; then
-        print_info "Repository already present -- pulling latest..."
-        git -C "$source_dir" pull --ff-only 2>/dev/null && \
-            print_ok "Repository up to date" || \
-            print_warn "Could not pull latest. Using existing files."
-        # Warn-only: chain configs are plain files in the superproject, so a
-        # submodule failure must not block them; it only matters for builds.
-        tn_sync_submodules "$source_dir" || \
-            print_warn "submodule sync reported an issue -- chain configs are unaffected"
-        return 0
-    fi
-
-    echo ""
-    print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
-    print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
-    print_info "Repository: ${TN_REPO}"
-    print_info "Clone destination: ${source_dir}"
-    echo ""
-
-    if confirm "Clone the repository now to get the chain-config files?"; then
-        print_step "Cloning repository..."
-        if git clone --recurse-submodules "$TN_REPO" "$source_dir"; then
-            print_ok "Repository cloned to: ${source_dir}"
+        if [[ "$net" == "mainnet" ]]; then
+            print_info "Repository present; mainnet chain configs are used as published (no pull)."
         else
-            print_error "Clone failed. Check your internet connection."
-            print_info "Manual clone: git clone ${TN_REPO} ${source_dir}"
-            exit 1
+            print_info "Repository already present -- pulling latest..."
+            git -C "$source_dir" pull --ff-only 2>/dev/null && \
+                print_ok "Repository up to date" || \
+                print_warn "Could not pull latest. Using existing files."
+            # Warn-only: chain configs are plain files in the superproject, so a
+            # submodule failure must not block them; it only matters for builds.
+            tn_sync_submodules "$source_dir" || \
+                print_warn "submodule sync reported an issue -- chain configs are unaffected"
         fi
-    else
-        print_warn "Skipped. You will need to provide chain-config files manually in the next step."
+    elif [[ -z "${TN_GENESIS_DIR:-}" ]]; then
+        echo ""
+        print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
+        print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
+        print_info "Repository: ${TN_REPO}"
+        print_info "Clone destination: ${source_dir}"
+        echo ""
+
+        if confirm "Clone the repository now to get the chain-config files?"; then
+            print_step "Cloning repository..."
+            if git clone --recurse-submodules "$TN_REPO" "$source_dir"; then
+                print_ok "Repository cloned to: ${source_dir}"
+            else
+                print_error "Clone failed. Check your internet connection."
+                print_info "Manual clone: git clone ${TN_REPO} ${source_dir}"
+                exit 1
+            fi
+        else
+            print_warn "Skipped. You will need to provide chain-config files manually in the next step."
+            return 0
+        fi
     fi
+
+    dir="${TN_GENESIS_DIR:-${source_dir}/chain-configs/${net}}"
+    if ! tn_chain_configs_check "$dir" "$net"; then
+        print_error "The chain configs in ${dir} do not match the ${net} pins (see above); nothing was copied."
+        return 1
+    fi
+    [[ "$net" == "devnet" ]] || print_ok "Chain configs in ${dir} match the ${net} pins"
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -4860,8 +4889,7 @@ _tn_cred_switch() {
         restart=no
         systemctl is-active --quiet "$svc" 2>/dev/null && restart=yes
     fi
-    if [[ "$target" != "credential" && "$(tn_detect_network
- 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
+    if [[ "$target" != "credential" && "$(tn_detect_network 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
         _tn_guard_say warn "Off testnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04); nothing changed." "$fn"
         return 1
     fi
@@ -4916,7 +4944,6 @@ _tn_cred_switch() {
         return 0
     fi
     if [[ $rc -eq 0 ]] && ! tn_committee_down_guard "" "$fn"; then
-
         _tn_guard_say warn "Restarting ${svc} now would put the committee's quorum at risk; nothing was restarted (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
         rc=1
     fi
@@ -5164,7 +5191,76 @@ tn_host_audit() {
     return "$warn"
 }
 
-# (genesis hash pins: below)
+# Chain-config pins: the sha256 of genesis.yaml, committee.yaml and
+# parameters.yaml each network runs. Testnet: chain-configs/testnet in the
+# telcoin-network repository at TESTNET_CHAIN_CONFIGS_TAG (the release
+# DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
+# Mainnet: empty until the genesis ceremony publishes the files and a signed
+# script release carries their hashes; while any of the three is empty, a
+# mainnet install or refresh refuses (tn_chain_configs_check). Devnet has none.
+readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"
+readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
+readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
+readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
+readonly MAINNET_GENESIS_SHA256=""
+readonly MAINNET_COMMITTEE_SHA256=""
+readonly MAINNET_PARAMETERS_SHA256=""
+
+# tn_chain_config_pin NETWORK FILE -- the pinned sha256 of FILE (genesis.yaml,
+# committee.yaml or parameters.yaml) for NETWORK; prints nothing when there is
+# none.
+tn_chain_config_pin() {
+    case "${1:-}:${2:-}" in
+        testnet:genesis.yaml)    printf '%s\n' "$TESTNET_GENESIS_SHA256" ;;
+        testnet:committee.yaml)  printf '%s\n' "$TESTNET_COMMITTEE_SHA256" ;;
+        testnet:parameters.yaml) printf '%s\n' "$TESTNET_PARAMETERS_SHA256" ;;
+        mainnet:genesis.yaml)    printf '%s\n' "$MAINNET_GENESIS_SHA256" ;;
+        mainnet:committee.yaml)  printf '%s\n' "$MAINNET_COMMITTEE_SHA256" ;;
+        mainnet:parameters.yaml) printf '%s\n' "$MAINNET_PARAMETERS_SHA256" ;;
+    esac
+    return 0
+}
+
+# tn_chain_configs_check DIR NETWORK [progress-fn] -- compare DIR/genesis.yaml,
+# committee.yaml and parameters.yaml with NETWORK's pins, before anything copies
+# them. Each must be a regular file (not a symlink) with the pinned sha256; a
+# mismatch names the expected and the actual value. devnet has no pins (a
+# warning, rc 0). rc 0 all three match, 1 refused: a mismatch, a missing file,
+# mainnet pins not published yet, or a network other than testnet, mainnet and
+# devnet.
+tn_chain_configs_check() {
+    local dir="${1:-}" net="${2:-}" fn="${3:-}" f want got bad=0
+    case "$net" in
+        testnet|mainnet) ;;
+        devnet)
+            _tn_guard_say warn "devnet chain configs have no pinned hashes; ${dir} is used as it is." "$fn"
+            return 0
+            ;;
+        *)
+            _tn_guard_say warn "no chain configs for network '${net}' (expected testnet, mainnet or devnet)." "$fn"
+            return 1
+            ;;
+    esac
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        want="$(tn_chain_config_pin "$net" "$f")"
+        if [[ -z "$want" ]]; then
+            _tn_guard_say warn "${net} has no pinned sha256 for ${f} yet (it ships with the genesis ceremony); unpinned chain configs are not used." "$fn"
+            return 1
+        fi
+        if [[ -L "${dir}/${f}" || ! -f "${dir}/${f}" ]]; then
+            _tn_guard_say warn "${dir}/${f} is missing or not a regular file." "$fn"
+            bad=1
+            continue
+        fi
+        got="$(sha256sum < "${dir}/${f}" 2>/dev/null)" || got=""
+        got="${got%% *}"
+        if [[ "$got" != "$want" ]]; then
+            _tn_guard_say warn "${dir}/${f}: sha256 ${got:-unreadable}, expected ${want} (${net})." "$fn"
+            bad=1
+        fi
+    done
+    return "$bad"
+}
 
 print_summary() {
     local title="$1"
