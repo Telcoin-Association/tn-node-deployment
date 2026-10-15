@@ -149,7 +149,7 @@ make_fake() {
 make_fake "$T/engine/update-node.sh"    update-node
 make_fake "$T/engine/edit-config.sh"    edit-config
 # The engine scripts know the stdin flags (the helper greps for them).
-make_fake "$T/engine/setup-node.sh"     setup-node    '# --passphrase-stdin'
+make_fake "$T/engine/setup-node.sh"     setup-node    '# --passphrase-stdin --release-tag --log-target'
 make_fake "$T/engine/install-caddy.sh"  install-caddy '# --password-stdin'
 make_fake "$T/engine/firewall-setup.sh" firewall-setup
 make_fake "$T/bin/systemctl" systemctl
@@ -188,7 +188,8 @@ unset TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_PASSPHRASE_METHOD TN_SET
       TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER \
       TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP TN_SETUP_RPC_DOMAIN \
       TN_SETUP_RPC_PUBLIC TN_SETUP_INSTANCE TN_SETUP_SERVICE_USER TN_SETUP_SERVICE_GROUP \
-      TN_SETUP_ADVERTISED_NAME TN_SETUP_DATA_DIR TN_CADDY_PASSWORD TN_BLS_PASSPHRASE
+      TN_SETUP_ADVERTISED_NAME TN_SETUP_DATA_DIR TN_CADDY_PASSWORD TN_BLS_PASSPHRASE \
+      TN_SETUP_LOG_TARGET TN_SETUP_ALLOW_NO_TPM
 
 # add_unit <unit> [traced] -- a unit file, the wrapper its ExecStart names (with
 # tracing flags when "traced"), and the log its StandardOutput appends to.
@@ -539,6 +540,35 @@ refused_in "setup-keygen refused once keygen wrote .node-meta" setup-keygen
 t="$(export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize </dev/null)"
 check_has "setup-finalize runs after keygen wrote .node-meta" "rc=0" "$t"
 unset TN_SETUP_NETWORK
+
+# Release installs, the log target, --allow-no-tpm and the Docker image.
+fixture none
+t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
+check_has "mainnet release keygen: --release-tag and the journal by default" \
+    "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [journal] [--passphrase-stdin]" "$t"
+t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0 TN_SETUP_LOG_TARGET=file TN_SETUP_ALLOW_NO_TPM=1; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
+check_has "mainnet: an explicit file target and --allow-no-tpm" \
+    "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [file] [--allow-no-tpm] [--passphrase-stdin]" "$t"
+t="$(export TN_SETUP_NETWORK=testnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v0.16.0-adiri TN_SETUP_ALLOW_NO_TPM=1; printf 'a good passphrase\n' | trace setup-keygen)"
+check_has "testnet: no log target unless asked, no --allow-no-tpm" \
+    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--install-method] [release] [--release-tag] [v0.16.0-adiri] [--passphrase-stdin]" "$t"
+t="$(export TN_SETUP_NETWORK=testnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_BUILD_REF=v0.16.0-adiri; printf 'a good passphrase\n' | trace setup-keygen)"
+check_has "a Docker install by release tag sends --release-tag" \
+    "setup-node [--json] [--phase=keygen] [--network] [testnet] [--install-method] [docker] [--release-tag] [v0.16.0-adiri] [--passphrase-stdin]" "$t"
+export TN_SETUP_NETWORK=testnet
+export TN_SETUP_LOG_TARGET=syslog; refused_in "setup-keygen refuses a log target other than journal or file" setup-keygen; unset TN_SETUP_LOG_TARGET
+export TN_SETUP_ALLOW_NO_TPM=yes; refused_in "setup-keygen refuses TN_SETUP_ALLOW_NO_TPM=yes" setup-keygen; unset TN_SETUP_ALLOW_NO_TPM
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri
+refused_in "setup-keygen refuses an image by tag (a tag goes in TN_SETUP_BUILD_REF)" setup-keygen
+export TN_SETUP_DOCKER_IMAGE="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:${DIGEST}" TN_SETUP_BUILD_REF=v0.16.0-adiri
+refused_in "setup-keygen refuses an image digest and a release tag together" setup-keygen
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE TN_SETUP_BUILD_REF
+make_fake "$T/engine/setup-node-norel.sh" setup-node-norel '# --passphrase-stdin'
+t="$(export TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v0.16.0-adiri; SETUP_SCRIPT="$T/engine/setup-node-norel.sh"; trace setup-keygen < "$T/pass-in")"
+check_has "a release tag needs an engine with --release-tag" \
+    "setup-node-norel.sh in the engine copy has no --release-tag (it is older than this helper): run update-scripts.sh, then try again" "$t"
+unset TN_SETUP_NETWORK
+check_lacks "--build-ref is never sent" "[--build-ref]" "$(cat "$T/all-calls.log")"
 
 # ---- Strict hostname rule ---------------------------------------------------------
 l61="$(printf '%061d' 0 | tr 0 a)"

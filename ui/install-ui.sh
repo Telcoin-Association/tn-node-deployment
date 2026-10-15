@@ -449,7 +449,7 @@ ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper host-audit
 # variables kept below for these two commands only, and the BLS passphrase on
 # stdin. The helper refuses both once a node is installed.
 Cmnd_Alias TN_SETUP = /usr/local/sbin/telcoin-ui-helper setup-keygen, /usr/local/sbin/telcoin-ui-helper setup-finalize
-Defaults!TN_SETUP env_keep += "TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_ADDRESS TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP TN_SETUP_RPC_DOMAIN TN_SETUP_SERVICE_USER TN_SETUP_SERVICE_GROUP TN_SETUP_ADVERTISED_NAME TN_SETUP_DATA_DIR"
+Defaults!TN_SETUP env_keep += "TN_SETUP_NETWORK TN_SETUP_INSTALL_METHOD TN_SETUP_ADDRESS TN_SETUP_BUILD_REF TN_SETUP_DOCKER_IMAGE TN_SETUP_EXT_PRIMARY TN_SETUP_EXT_WORKER TN_SETUP_LIS_PRIMARY TN_SETUP_LIS_WORKER TN_SETUP_PUBLIC_IP TN_SETUP_RPC_DOMAIN TN_SETUP_SERVICE_USER TN_SETUP_SERVICE_GROUP TN_SETUP_ADVERTISED_NAME TN_SETUP_DATA_DIR TN_SETUP_LOG_TARGET TN_SETUP_ALLOW_NO_TPM"
 ${SVC_USER} ALL=(root) NOPASSWD: TN_SETUP
 # Read-only views of an externally deployed (dev-team docker) node. The
 # container argument must be one docker-detect reports; none of these can start,

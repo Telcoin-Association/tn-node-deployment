@@ -86,5 +86,39 @@ class HostAuditCardTest(unittest.TestCase):
         self.assertIn("loadHostAudit();", function_body("renderSystem"))
 
 
+class SetupWizardTest(unittest.TestCase):
+
+    def test_mainnet_defaults_to_a_signed_release(self):
+        body = function_body("setSetupNetwork")
+        self.assertIn("s.method = net==='mainnet' ? 'release' : 'source';", body)
+        method = function_body("stepMethod")
+        for m in ("release", "source", "docker"):
+            self.assertIn('data-m="%s"' % m, method)
+
+    def test_payload_carries_the_network_release_tag_log_target_and_tpm_choice(self):
+        body = function_body("buildSetupPayload")
+        self.assertIn("network: setupNetwork(),", body)
+        self.assertIn("build_ref: (s.method==='source' || s.method==='release') ? s.buildRef : ''", body)
+        self.assertIn("log_target: setupNetwork()==='mainnet' ? 'journal' : ''", body)
+        self.assertIn("allow_no_tpm: noTpmReported() && !!s.allowNoTpm", body)
+        self.assertNotIn("network: 'testnet'", body)
+
+    def test_allow_no_tpm_is_offered_only_when_the_engine_reports_no_tpm(self):
+        body = function_body("noTpmReported")
+        self.assertIn("setupNetwork()==='mainnet'", body)
+        self.assertIn("state.preflight?.tpm===false || state.setup.tpmRefused", body)
+        self.assertIn("${noTpmReported() ?", function_body("stepReview"))
+        self.assertIn("/--allow-no-tpm/.test(", function_body("runKeygen"))
+
+    def test_docker_field_takes_a_release_tag_or_a_digest_never_latest(self):
+        body = function_body("dockerImageError")
+        self.assertIn("latest is refused", body)
+        self.assertIn("@sha256:[0-9a-f]{64}$", body)
+        self.assertIn("dockerImageError(state.setup.dockerImage)", function_body("stepMethod"))
+
+    def test_defaults_are_asked_for_the_chosen_network(self):
+        self.assertIn("'/api/setup/defaults?network='+setupNetwork()", function_body("loadSetupDefaults"))
+
+
 if __name__ == "__main__":
     unittest.main()

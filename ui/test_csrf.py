@@ -458,13 +458,63 @@ class MainnetAndImagesTest(ServerTestCase):
 
     def test_image_rule(self):
         base = server.GAR_IMAGE_BASE
-        self.assertTrue(server.image_allowed(base + ":v0.16.0-adiri", "testnet"))
-        self.assertTrue(server.image_allowed(base + "@sha256:" + "a" * 64, "testnet"))
-        for bad in (base + ":latest", base + ":v0.16.0-devnet", "busybox:v0.16.0-adiri",
-                    base + "@sha256:" + "A" * 64, "-" + base + ":v0.16.0-adiri"):
+        digest = base + "@sha256:" + "a" * 64
+        self.assertTrue(server.image_allowed(digest, "testnet"))
+        # A tag is never an image to run; the wizard sends it as the release.
+        for bad in (base + ":v0.16.0-adiri", base + ":latest", base + ":v0.16.0-devnet",
+                    "busybox:v0.16.0-adiri", base + "@sha256:" + "A" * 64, "-" + digest):
             with self.subTest(image=bad):
                 self.assertFalse(server.image_allowed(bad, "testnet"))
-        self.assertFalse(server.image_allowed(base + ":v0.16.0-adiri", "mainnet"))
+        self.assertFalse(server.image_allowed(digest, "mainnet"))
+
+    def test_wizard_image_field(self):
+        base = server.GAR_IMAGE_BASE
+        digest = base + "@sha256:" + "a" * 64
+        choice = server.docker_image_choice
+        self.assertEqual(choice("v0.16.0-adiri", "testnet"), ("v0.16.0-adiri", "", None))
+        self.assertEqual(choice(base + ":v0.16.0-adiri", "testnet"), ("v0.16.0-adiri", "", None))
+        self.assertEqual(choice(digest, "testnet"), ("", digest, None))
+        self.assertEqual(choice("v1.0.0", "mainnet"), ("v1.0.0", "", None))
+        self.assertEqual(choice("", "testnet"), ("", "", None))
+        for bad, net in (("latest", "testnet"), (base + ":latest", "testnet"), ("v1.0.0", "testnet"),
+                         ("v0.16.0-adiri", "mainnet"), (digest, "mainnet"), ("main", "testnet"),
+                         ("busybox@sha256:" + "a" * 64, "testnet")):
+            with self.subTest(image=bad, network=net):
+                tag, img, err = choice(bad, net)
+                self.assertIsNone(tag)
+                self.assertIn("docker image", err)
+        self.assertIn("latest is refused", choice(base + ":latest", "testnet")[2])
+
+    def test_wizard_env_log_target_and_tpm(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            env, _ = server._setup_env(dict(FULL_SETUP, network="mainnet", install_method="release",
+                                            build_ref="v1.0.0", docker_image="",
+                                            passphrase="a mainnet passphrase 16+"), want_passphrase=True)
+            self.assertEqual((env["TN_SETUP_LOG_TARGET"], env["TN_SETUP_ALLOW_NO_TPM"]), ("journal", ""))
+            env, _ = server._setup_env(dict(FULL_SETUP, network="mainnet", install_method="release",
+                                            build_ref="v1.0.0", log_target="file", allow_no_tpm=True,
+                                            passphrase="a mainnet passphrase 16+"), want_passphrase=True)
+            self.assertEqual((env["TN_SETUP_LOG_TARGET"], env["TN_SETUP_ALLOW_NO_TPM"]), ("file", "1"))
+            self.assertEqual(env["TN_SETUP_DOCKER_IMAGE"], "")
+            env, _ = server._setup_env(dict(FULL_SETUP, allow_no_tpm=True), want_passphrase=False)
+            self.assertEqual((env["TN_SETUP_LOG_TARGET"], env["TN_SETUP_ALLOW_NO_TPM"]), ("", ""))
+            env, err = server._setup_env(dict(FULL_SETUP, log_target="syslog"), want_passphrase=False)
+            self.assertEqual(err, "log target must be journal or file")
+            env, err = server._setup_env(dict(FULL_SETUP, network="mainnet", install_method="release",
+                                              build_ref=""), want_passphrase=False)
+            self.assertIn("required for a release install", err)
+
+    def test_wizard_env_for_each_image_form(self):
+        base = server.GAR_IMAGE_BASE
+        digest = base + "@sha256:" + "b" * 64
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for image, ref, img in (("v0.16.0-adiri", "v0.16.0-adiri", ""),
+                                    (base + ":v0.16.0-adiri", "v0.16.0-adiri", ""),
+                                    (digest, "", digest)):
+                with self.subTest(image=image):
+                    env, err = server._setup_env(dict(FULL_SETUP, docker_image=image), want_passphrase=False)
+                    self.assertIsNone(err)
+                    self.assertEqual((env["TN_SETUP_BUILD_REF"], env["TN_SETUP_DOCKER_IMAGE"]), (ref, img))
 
     def test_status_shows_the_digest(self):
         self.helper_replies["meta-cat"] = (0, "DOCKER_IMAGE=" + server.GAR_IMAGE_BASE

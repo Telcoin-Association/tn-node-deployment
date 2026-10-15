@@ -328,18 +328,43 @@ def passphrase_ok(value, network=""):
     return True
 
 
+# The Docker repository of each network (lib/common.sh tn_docker_repo_for).
+# Mainnet has no published repository yet.
+DOCKER_REPO = {"testnet": "us-docker.pkg.dev/telcoin-network/tn-public/adiri"}
+
+
 def image_allowed(image, network):
-    """Twin of tn_docker_image_allowed as far as the UI needs it: the testnet
-    repository by digest or by a testnet release tag. Mainnet has no published
-    repository yet, so nothing passes there."""
-    if not isinstance(image, str) or network != "testnet":
+    """Twin of tn_docker_image_allowed: the network's repository by digest,
+    <repository>@sha256:<64 hex>. Tags, latest included, are refused (a
+    release is chosen by its tag, which the engine resolves to a digest)."""
+    base = DOCKER_REPO.get(network)
+    if not isinstance(image, str) or not base:
         return False
-    base = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
     if image.startswith(base + "@sha256:"):
         return re.fullmatch(r"[0-9a-f]{64}", image[len(base) + 8:]) is not None
-    if image.startswith(base + ":"):
-        return RELEASE_TAG_RE["testnet"].fullmatch(image[len(base) + 1:]) is not None
     return False
+
+
+def docker_image_choice(value, network):
+    """The wizard's Docker image field: a release tag of the network (bare, or
+    after the network's repository and a colon) or the network's image by
+    digest. Returns (release_tag, digest_image, None) with one of the two set,
+    ("", "", None) when empty, or (None, None, error). latest is refused."""
+    v = str(value or "").strip()
+    if not v:
+        return "", "", None
+    if v == "latest" or v.endswith(":latest"):
+        return None, None, "docker image latest is refused: give a release tag or the image by digest"
+    if release_tag_ok(network, v):
+        return v, "", None
+    base = DOCKER_REPO.get(network)
+    if base and v.startswith(base + ":") and release_tag_ok(network, v[len(base) + 1:]):
+        return v[len(base) + 1:], "", None
+    if image_allowed(v, network):
+        return "", v, None
+    example = "v1.2.3-adiri" if network == "testnet" else "v1.2.3"
+    return None, None, (f"docker image must be a {network} release tag such as {example}, "
+                        "or the network's image by digest (<repository>@sha256:<digest>)")
 
 
 # Service account rule (lib/common.sh tn_service_user_ok): a plain lowercase
@@ -2723,8 +2748,11 @@ def network_traffic():
 # Public Artifact Registry tag list for the testnet docker image (same source
 # update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
 GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
-GAR_IMAGE_BASE = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.16.0-adiri"  # fallback only when the registry is unreachable
+GAR_IMAGE_BASE = DOCKER_REPO["testnet"]
+# Fallback only when the registry is unreachable: v0.16.0-adiri by digest, as
+# lib/common.sh DEFAULT_DOCKER_IMAGE.
+DEFAULT_DOCKER_IMAGE = (GAR_IMAGE_BASE +
+                        "@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea")
 
 
 def detect_public_ip():
@@ -2787,8 +2815,9 @@ def _image_digest(tag):
 def latest_docker_image(network="testnet"):
     """The newest testnet release image, pinned by digest when the registry
     reports one (us-docker.pkg.dev/.../adiri@sha256:...), else by its release
-    tag. Only tags passing the testnet release rule count, so hot-patch, devnet
-    and `latest` tags are never offered. The library's latest_docker_image is
+    tag (the wizard sends a tag as the release, which the engine resolves to a
+    digest). Only tags passing the testnet release rule count, so hot-patch,
+    devnet and `latest` tags are never offered. The library's latest_docker_image is
     asked first when it answers with an image this server accepts. Mainnet has
     no published repository yet: ''."""
     if network != "testnet":
@@ -2822,26 +2851,29 @@ def latest_docker_image(network="testnet"):
 # carry v0.10.0-adiri while the registry still lags on v0.9.x. So the wizard's
 # source "latest release" must come from git, not the registry.
 TN_SOURCE_REPO = "https://github.com/Telcoin-Association/telcoin-network.git"
-_source_tag_cache = {"ts": 0.0, "data": None}
+_source_tag_cache = {}       # network -> {"ts", "data"}
 
 
-def latest_source_tag():
-    """Latest clean `vX.Y.Z-adiri` source-build git tag from GitHub (via
-    `git ls-remote --tags`, no clone needed) -- the source-of-truth for source
-    builds, matching the CLI menu. Highest semver wins; patch-suffixed tags
-    (…-adiri-foo) are ignored. Cached 5 min. '' on failure."""
+def latest_source_tag(network="testnet"):
+    """Latest release git tag of the network from GitHub (via `git ls-remote
+    --tags`, no clone needed): vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet (the
+    release rule, so hot-patch tags are ignored). The release a source build or
+    a release install takes, matching the CLI menu. Highest semver wins. Cached
+    5 min per network. '' on failure."""
+    if network not in RELEASE_TAG_RE:
+        return ""
     now = time.time()
-    c = _source_tag_cache
+    c = _source_tag_cache.setdefault(network, {"ts": 0.0, "data": None})
     if c["data"] is not None and now - c["ts"] < 300:
         return c["data"]
     rc, out, _ = run(["git", "ls-remote", "--tags", TN_SOURCE_REPO], timeout=20)
     best_key, best_tag = None, ""
     if rc == 0 and out:
         for line in out.splitlines():
-            m = re.search(r"refs/tags/(v(\d+)\.(\d+)\.(\d+)-adiri)$", line)
-            if not m:
+            m = re.search(r"refs/tags/(v[0-9][^/^{}]*)$", line)
+            if not m or not RELEASE_TAG_RE[network].fullmatch(m.group(1)):
                 continue
-            key = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+            key = tuple(int(x) for x in re.findall(r"[0-9]+", m.group(1))[:3])
             if best_key is None or key > best_key:
                 best_key, best_tag = key, m.group(1)
     if best_tag:
@@ -4128,8 +4160,22 @@ def _setup_env(data, want_passphrase):
         return None, "invalid address"
     if build_ref and not release_tag_ok(net, build_ref):
         return None, f"build ref must be a {net} release tag"
-    if image and not image_allowed(image, net):
-        return None, "docker image must be the network's image, by digest or release tag"
+    if method != "docker":
+        image = ""          # an image left in the form applies to Docker installs only
+    if image:
+        tag, image, err = docker_image_choice(image, net)
+        if err:
+            return None, err
+        if tag:
+            if build_ref and build_ref != tag:
+                return None, "give the docker image by digest or its release tag, not both"
+            build_ref = tag
+    log_target = str(data.get("log_target") or "").strip()
+    if log_target not in ("", "journal", "file"):
+        return None, "log target must be journal or file"
+    if not log_target and net == "mainnet":
+        log_target = "journal"
+    allow_no_tpm = data.get("allow_no_tpm") is True and net == "mainnet"
     for m in (ext_primary, ext_worker, lis_primary, lis_worker):
         if m and not _SETUP_MULTIADDR_RE.fullmatch(m):
             return None, "invalid multiaddr"
@@ -4150,8 +4196,8 @@ def _setup_env(data, want_passphrase):
         return None, "invalid advertised name"
     if data_dir and (not _DATA_DIR_ALLOWED_RE.fullmatch(data_dir) or ".." in data_dir):
         return None, "invalid data directory (/var/lib/telcoin or a path under it)"
-    if method == "source" and not build_ref:
-        return None, "build_ref required for source install"
+    if method in ("source", "release") and not build_ref:
+        return None, f"build_ref (a release tag) required for a {method} install"
     if want_passphrase and not passphrase_ok(data.get("passphrase"), net):
         return None, ("passphrase required: no line breaks, no spaces or tabs at either end"
                       + (", at least 16 bytes on mainnet" if net == "mainnet" else ""))
@@ -4173,6 +4219,8 @@ def _setup_env(data, want_passphrase):
     env["TN_SETUP_SERVICE_GROUP"] = service_group
     env["TN_SETUP_ADVERTISED_NAME"] = advertised_name
     env["TN_SETUP_DATA_DIR"] = data_dir
+    env["TN_SETUP_LOG_TARGET"] = log_target
+    env["TN_SETUP_ALLOW_NO_TPM"] = "1" if allow_no_tpm else ""
     return env, None
 
 
@@ -4185,12 +4233,20 @@ def _node_installed():
 @app.route("/api/setup/defaults")
 def api_setup_defaults():
     """Auto-detected defaults to prefill the setup wizard (matching what the CLI
-    detects/uses): public IP, internal IP, latest docker image, service user/group."""
+    detects/uses) for ?network=testnet|mainnet (default testnet): public IP,
+    internal IP, latest docker image (by digest; '' without a repository), the
+    latest release tag (source_ref), the default install method (a signed
+    release on mainnet, a source build elsewhere), the default log target
+    (journal on mainnet) and the service user/group."""
+    net = network_rule(request.args.get("network")) or "testnet"
     resp = jsonify({
+        "network": net,
         "public_ip": detect_public_ip(),
         "internal_ip": detect_internal_ip(),
-        "docker_image": latest_docker_image(),
-        "source_ref": latest_source_tag(),
+        "docker_image": latest_docker_image(net),
+        "source_ref": latest_source_tag(net),
+        "install_method": "release" if net == "mainnet" else "source",
+        "log_target": "journal" if net == "mainnet" else "",
         "service_user": "telcoin",
         "service_group": "telcoin",
     })
@@ -5023,9 +5079,15 @@ def api_preflight():
     rust = {"ok": bool(shutil.which("rustc"))}
 
 
+    # TPM2, as check-node.sh --audit reports it (true / false / null when the
+    # audit is not available). The wizard offers --allow-no-tpm on mainnet only
+    # when this is false.
+    tpm = host_has_tpm()
+
     # Advisory hardware tiers (see hardware_profile); never blocks setup.
     hardware = hardware_profile()
     return jsonify({
+        "tpm": tpm,
         "systemd": systemd,
         "internet": internet,
         "disk": disk,

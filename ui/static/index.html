@@ -450,6 +450,8 @@ const state = {
            eth:'', bls:'', blsConfirm:'', buildRef:'', dockerImage:'', publicIp:'', internalIp:'',
            sourceRef:'',          // latest release tag for this network (/api/setup/defaults); the only source build offered
            rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
+           allowNoTpm:false,      // mainnet without a usable TPM2: --allow-no-tpm (offered only then)
+           tpmRefused:false,      // the engine refused keygen for want of a TPM2
            rpcDomain:'',          // public RPC hostname as typed (sent normalised as rpc_domain)
            rpcDns:null,           // last wizard DNS check {host, html}, restored on re-render
            accessLoaded:false },  // Caddy + RPC status fetched for the hostname placeholder
@@ -3324,9 +3326,9 @@ function renderSetup(){
 async function loadSetupDefaults(){
   if(state.setup.defaultsLoaded) return;
   state.setup.defaultsLoaded = true;   // guard re-entry (renderSetup re-call below)
-  const d = await api('/api/setup/defaults');
-  if(!d || d.error) return;
   const s = state.setup;
+  const d = await api('/api/setup/defaults?network='+setupNetwork());
+  if(!d || d.error) return;
   if(!s.publicIp)     s.publicIp     = d.public_ip || '';
   if(!s.internalIp)   s.internalIp   = d.internal_ip || '';
   if(!s.dockerImage)  s.dockerImage  = d.docker_image || '';
@@ -3337,6 +3339,28 @@ async function loadSetupDefaults(){
 }
 
 function goStep(n){ state.setupStep=n; renderSetup(); }
+
+// The wizard's network as the server names it.
+function setupNetwork(){ return state.setup.network==='mainnet' ? 'mainnet' : 'testnet'; }
+
+// Switch the wizard's network: the defaults (latest release, image) are the
+// new network's, and mainnet installs a signed release by default.
+function setSetupNetwork(net){
+  const s = state.setup;
+  if(s.network===net) return;
+  s.network = net;
+  s.method = net==='mainnet' ? 'release' : 'source';
+  s.sourceRef = ''; s.buildRef = ''; s.dockerImage = '';
+  s.allowNoTpm = false; s.tpmRefused = false;
+  s.defaultsLoaded = false;
+  renderSetup();
+}
+
+// --allow-no-tpm is offered only on mainnet and only when the engine reported
+// no usable TPM2: check-node.sh --audit at preflight, or a refused keygen.
+function noTpmReported(){
+  return setupNetwork()==='mainnet' && (state.preflight?.tpm===false || state.setup.tpmRefused);
+}
 
 async function stepPreflight(body){
   body.innerHTML = `<h3>Step 1 · Preflight Checks</h3><div id="pfList"><div class="muted">Running checks…</div></div>
@@ -3355,6 +3379,9 @@ async function stepPreflight(body){
     ...hwTierRows(d.hardware),
     ['docker', d.docker?.ok, 'Docker engine available (optional)', false],
     ['rust', d.rust?.ok, 'Rust toolchain for source build (optional)', false],
+    ['TPM2', d.tpm===true, d.tpm===true ? 'TPM2 usable: the passphrase credential is sealed with it'
+      : d.tpm===false ? 'No usable TPM2: on mainnet the passphrase credential then rests on the host key alone (you will be asked to accept that)'
+      : 'TPM2 unknown (check-node.sh --audit unavailable)', false],
   ];
   const row = ([name,ok,desc,hardReq])=>{
     const icon = ok?'<span style="color:var(--green)">✓</span>':(hardReq?'<span style="color:var(--red)">✗</span>':'<span style="color:var(--yellow)">!</span>');
@@ -3408,23 +3435,38 @@ function stepNetwork(body){
     <div class="radio-cards">
       <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
         <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
-      <div class="rcard disabled"><div class="rt">Mainnet <span class="tag">coming soon</span></div><div class="rd">Production network — not yet available.</div></div>
+      <div class="rcard ${state.setup.network==='mainnet'?'sel':''}" data-net="mainnet">
+        <div class="rt">Mainnet</div><div class="rd">Production network. Installs a signed release and logs to the systemd journal by default; setup stops with the engine's reason while a release is not published.</div></div>
     </div>
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(1)">← Back</button><button class="btn btn-green" onclick="goStep(3)">Continue →</button></div>`;
-  body.querySelectorAll('[data-net]').forEach(r=>r.addEventListener('click',()=>{state.setup.network=r.dataset.net;renderSetup();}));
+  body.querySelectorAll('[data-net]').forEach(r=>r.addEventListener('click',()=>setSetupNetwork(r.dataset.net)));
 }
 
-// Source version: a source build checks out a release tag only. The page offers
-// the latest release tag the server found for this network (/api/setup/defaults
-// source_ref); the server and the helper refuse anything else.
+// Release tag: a release install or a source build takes a release tag only.
+// The page offers the latest release tag the server found for this network
+// (/api/setup/defaults source_ref); the server and the helper refuse anything else.
 function stepSourceField(){
   const sref = state.setup.sourceRef || '';
+  const label = state.setup.method==='release' ? 'Release to install (signed, verified before install)' : 'Source version to build';
   if(!sref){
-    return `<div class="field"><label>Source version to build</label>
-      <div class="note">No release tag was found for this network, so a source build cannot start. Check this server's connection to GitHub and reload, or choose Docker.</div></div>`;
+    return `<div class="field"><label>${label}</label>
+      <div class="note">No release tag was found for this network, so this install cannot start. Check this server's connection to GitHub and reload, or choose Docker.</div></div>`;
   }
-  return `<div class="field"><label>Source version to build</label>
+  return `<div class="field"><label>${label}</label>
       <select id="mSourceMode"><option value="tag" selected>${esc(sref)} — latest release</option></select></div>`;
+}
+
+// The Docker image field takes a release tag of the network (the engine runs
+// that release's image by digest) or the image by digest; latest is refused.
+function dockerImageError(v){
+  const x = String(v||'').trim();
+  if(!x) return 'Enter a release tag or the image by digest';
+  if(x==='latest' || /:latest$/.test(x)) return 'latest is refused: give a release tag or the image by digest';
+  const tag = setupNetwork()==='mainnet' ? /^v[0-9]+\.[0-9]+\.[0-9]+$/ : /^v[0-9]+\.[0-9]+\.[0-9]+-adiri$/;
+  const t = x.includes('@') ? '' : x.replace(/^.*:/, '');
+  if(tag.test(t)) return '';
+  if(/@sha256:[0-9a-f]{64}$/.test(x)) return '';
+  return 'Not a '+setupNetwork()+' release tag or an image digest';
 }
 
 // The effective build ref: the detected release tag, or '' when there is none.
@@ -3435,28 +3477,32 @@ function captureSource(){
 
 function stepMethod(body){
   const m = state.setup.method;
-  const methodField = m==='source'
+  const mainnet = setupNetwork()==='mainnet';
+  const methodField = (m==='source' || m==='release')
     ? stepSourceField()
-    : `<div class="field"><label>Docker image (latest auto-filled — edit to pin a different tag)</label>
-        <input id="mDockerImage" placeholder="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri" value="${esc(state.setup.dockerImage||'')}"></div>`;
+    : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (…@sha256:…); latest is refused</label>
+        <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
-    <div class="radio-cards" style="grid-template-columns:1fr 1fr 1fr">
-      <div class="rcard ${m==='source'?'sel':''}" data-m="source"><div class="rt">Build from Source</div><div class="rd">Compile the Rust binary on this host. Most flexible.</div></div>
-      <div class="rcard ${m==='docker'?'sel':''}" data-m="docker"><div class="rt">Docker</div><div class="rd">Run the official container image.</div></div>
+    <div class="radio-cards" style="grid-template-columns:1fr 1fr">
+      <div class="rcard ${m==='release'?'sel':''}" data-m="release"><div class="rt">Signed Release${mainnet?' <span class="tag">default</span>':''}</div><div class="rd">Download the published binary; its signature and checksums are verified before install (x86_64).</div></div>
+      <div class="rcard ${m==='source'?'sel':''}" data-m="source"><div class="rt">Build from Source</div><div class="rd">Compile the Rust binary on this host from a release tag.</div></div>
+      <div class="rcard ${m==='docker'?'sel':''}" data-m="docker"><div class="rt">Docker</div><div class="rd">Run the official container image, by digest.</div></div>
       <div class="rcard disabled"><div class="rt">Existing Binary <span class="tag">coming soon</span></div><div class="rd">Use a pre-built binary.</div></div>
     </div>
     ${methodField}
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(2)">← Back</button><button class="btn btn-green" id="methodNext">Continue →</button></div>`;
   body.querySelectorAll('[data-m]').forEach(r=>r.addEventListener('click',()=>{
     // Persist whichever method field is currently shown before switching.
-    if(state.setup.method==='source') captureSource();
+    if(state.setup.method==='source' || state.setup.method==='release') captureSource();
     if($('#mDockerImage')) state.setup.dockerImage=$('#mDockerImage').value.trim();
     state.setup.method=r.dataset.m; renderSetup();
   }));
   $('#methodNext').addEventListener('click', ()=>{
-    if(state.setup.method==='source') captureSource();
+    const sm = state.setup.method;
+    if(sm==='source' || sm==='release') captureSource();
     if($('#mDockerImage')) state.setup.dockerImage=$('#mDockerImage').value.trim();
-    if(state.setup.method==='source' && !state.setup.buildRef){ toast('No release tag found to build; choose Docker or reload once GitHub is reachable','error'); return; }
+    if((sm==='source' || sm==='release') && !state.setup.buildRef){ toast('No release tag found; choose Docker or reload once GitHub is reachable','error'); return; }
+    if(sm==='docker'){ const e = dockerImageError(state.setup.dockerImage); if(e){ toast(e,'error'); return; } }
     goStep(4);
   });
 }
@@ -3606,7 +3652,7 @@ function stepReview(body){
   const s = state.setup;
   const rows = [
     ['Network', s.network==='adiri'?'Adiri Testnet':s.network],
-    ['Install Method', s.method + (s.method==='source'?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
+    ['Install Method', s.method + ((s.method==='source'||s.method==='release')?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
     ['Address', s.eth||'(not set)'],
     ['Public IP', s.publicIp||'(not set)'],
     ['Internal IP (listener)', s.internalIp||'0.0.0.0'],
@@ -3615,10 +3661,16 @@ function stepReview(body){
   rows.push(
     ['Service user / group', (s.serviceUser||'telcoin')+' / '+(s.serviceGroup||'telcoin')],
     ['BLS Passphrase', s.bls?'•••••••• (set)':'(not set)'],
-    ['Passphrase Protection', 'Encrypted systemd credential'],
+    ['Passphrase Protection', 'Encrypted systemd credential' + (noTpmReported() ? ' (host key alone: no usable TPM2)' : '')],
   );
+  if(setupNetwork()==='mainnet') rows.push(['Node logs', 'systemd journal (capped at 4G)']);
   body.innerHTML = `<h3>Step 5 · Install</h3>
     ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
+    ${noTpmReported() ? `<div class="note" style="margin-top:14px;border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
+      This host has no usable TPM2, so on mainnet the BLS passphrase credential can only be encrypted with the host key
+      (<span class="mono">/var/lib/systemd/credential.secret</span>). Setup stops unless you accept that.
+      <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="allowNoTpm" ${s.allowNoTpm?'checked':''}>
+      Encrypt with the host key alone (<span class="mono">--allow-no-tpm</span>)</label></div>` : ''}
     <div class="note" style="margin-top:14px">Phase 1 generates the node keys (no service is created or started yet). After you confirm a backup, phase 2 finalizes and starts the node.</div>
     <div class="svc-row"><button class="btn btn-green" id="genKeysBtn">⚙ Generate Keys</button>
       <button class="btn btn-out" onclick="goStep(4)">← Back</button></div>
@@ -3628,6 +3680,7 @@ function stepReview(body){
     </div>
     <div id="backupGate"></div>`;
   $('#genKeysBtn').addEventListener('click', runKeygen);
+  const ant=$('#allowNoTpm'); if(ant) ant.addEventListener('change', ()=>{ state.setup.allowNoTpm = ant.checked; });
 }
 
 function buildSetupPayload(includePassphrase){
@@ -3636,11 +3689,13 @@ function buildSetupPayload(includePassphrase){
   const ip = s.publicIp || '0.0.0.0';      // external advertised addr
   const lip = s.internalIp || '0.0.0.0';   // listener bind addr (internal NIC)
   const payload = {
-    network: 'testnet',
+    network: setupNetwork(),
     install_method: s.method,
     address: s.eth,
-    build_ref: s.method==='source' ? s.buildRef : '',
+    build_ref: (s.method==='source' || s.method==='release') ? s.buildRef : '',
     docker_image: s.method==='docker' ? s.dockerImage : '',
+    log_target: setupNetwork()==='mainnet' ? 'journal' : '',
+    allow_no_tpm: noTpmReported() && !!s.allowNoTpm,
     external_primary: `/ip4/${ip}/udp/${p2p}/quic-v1`,
     external_worker:  `/ip4/${ip}/udp/${worker}/quic-v1`,
     listener_primary: `/ip4/${lip}/udp/${p2p}/quic-v1`,
@@ -3694,7 +3749,7 @@ async function runKeygen(){
   const card=$('#setupProgressCard'); if(card) card.style.display='block';
   const buildNote = state.setup.method==='source'
     ? 'source builds take 20–40 min'
-    : 'pulling the docker image';
+    : state.setup.method==='release' ? 'downloading and verifying the release' : 'pulling the docker image';
   const log=$('#setupLog'); if(log) log.innerHTML='<div class="log-line info">» generating keys… ('+buildNote+' — keep this tab open)</div>';
   let refused = null;
   const d = await streamSetup('keygen', true, (status, msg)=>{ refused = {status, msg}; });
@@ -3706,7 +3761,17 @@ async function runKeygen(){
     toast('Key generation refused'+(refused.msg?': '+refused.msg:''),'error');
     if(b) b.disabled=false;
   }
-  else { toast('Key generation failed'+(d&&d.msg?': '+d.msg:''),'error'); if(b) b.disabled=false; }
+  else {
+    // The engine stops a mainnet keygen on a host without a usable TPM2 and
+    // names --allow-no-tpm: offer that choice and let the operator retry.
+    if(d && /--allow-no-tpm/.test(String(d.msg||'')+String(d.error||'')) && setupNetwork()==='mainnet' && !state.setup.tpmRefused){
+      state.setup.tpmRefused = true;
+      toast('No usable TPM2 on this host: accept the host key below to continue','error');
+      renderSetup();
+      return;
+    }
+    toast('Key generation failed'+(d&&d.msg?': '+d.msg:''),'error'); if(b) b.disabled=false;
+  }
 }
 
 function showBackupGate(d){

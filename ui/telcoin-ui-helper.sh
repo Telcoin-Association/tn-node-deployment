@@ -1194,6 +1194,11 @@ cmd_addons_status() {
 # stdin (keygen only) and goes to setup-node.sh on its stdin
 # (--passphrase-stdin). Public RPC is requested by TN_SETUP_RPC_DOMAIN alone: a
 # hostname becomes --rpc-domain, and --rpc-public is never sent.
+# TN_SETUP_BUILD_REF is the release tag (--release-tag) of a release or source
+# install, or the release whose image a Docker install runs (by digest);
+# TN_SETUP_DOCKER_IMAGE is the image by digest. TN_SETUP_LOG_TARGET is journal
+# or file (journal when empty on mainnet); TN_SETUP_ALLOW_NO_TPM=1 sends
+# --allow-no-tpm on mainnet.
 # =============================================================================
 
 # service_account_ok <user> <group> -- the library's tn_service_user_ok: a plain
@@ -1234,6 +1239,8 @@ cmd_setup() {
     local svc_group="${TN_SETUP_SERVICE_GROUP:-}"
     local adv_name="${TN_SETUP_ADVERTISED_NAME:-}"
     local data_dir="${TN_SETUP_DATA_DIR:-}"
+    local log_target="${TN_SETUP_LOG_TARGET:-}"
+    local allow_no_tpm="${TN_SETUP_ALLOW_NO_TPM:-}"
     local net_rule
 
     # An installed node is never set up again from the UI: both phases stop when
@@ -1262,7 +1269,17 @@ cmd_setup() {
     [[ -z "$build_ref" ]] || release_tag_ok "$net_rule" "$build_ref" \
         || die "invalid build ref (a ${net_rule} release tag): $build_ref"
     [[ -z "$image" ]] || docker_image_ok "$image" "$net_rule" \
-        || die "invalid docker image for ${net_rule}: $image"
+        || die "invalid docker image for ${net_rule} (its repository by digest; a release goes in TN_SETUP_BUILD_REF): $image"
+    [[ -z "$image" || -z "$build_ref" ]] || die "give the Docker image by digest or its release tag, not both"
+    case "$log_target" in
+        ""|journal|file) ;;
+        *) die "invalid log target (journal or file): $log_target" ;;
+    esac
+    [[ -n "$log_target" || "$net_rule" != mainnet ]] || log_target=journal
+    case "$allow_no_tpm" in
+        ""|0|1) ;;
+        *) die "invalid TN_SETUP_ALLOW_NO_TPM (1, 0 or empty): $allow_no_tpm" ;;
+    esac
     # These values skip _arg_ok (they arrive in TN_SETUP_*), so the address
     # part refuses whitespace and control characters itself.
     local m ma_re='^/(ip4|ip6)/[^/[:space:][:cntrl:]]+/udp/[0-9]+/quic-v1$'
@@ -1286,7 +1303,7 @@ cmd_setup() {
     local -a args=( --json "--phase=${phase}" --network "$network" )
     [[ -n "$method" ]]      && args+=( --install-method "$method" )
     [[ -n "$addr" ]]        && args+=( --address "$addr" )
-    [[ -n "$build_ref" ]]   && args+=( --build-ref "$build_ref" )
+    [[ -n "$build_ref" ]]   && args+=( --release-tag "$build_ref" )
     [[ -n "$image" ]]       && args+=( --docker-image "$image" )
     [[ -n "$ext_primary" ]] && args+=( --external-primary "$ext_primary" )
     [[ -n "$ext_worker" ]]  && args+=( --external-worker "$ext_worker" )
@@ -1298,6 +1315,12 @@ cmd_setup() {
     [[ -n "$svc_group" ]]   && args+=( --service-group "$svc_group" )
     [[ -n "$adv_name" ]]    && args+=( --advertised-name "$adv_name" )
     [[ -n "$data_dir" ]]    && args+=( --data-dir "$data_dir" )
+    [[ -n "$log_target" ]]  && args+=( --log-target "$log_target" )
+    if [[ "$allow_no_tpm" == 1 && "$net_rule" == mainnet ]]; then
+        args+=( --allow-no-tpm )
+    fi
+    [[ -z "$build_ref" ]]  || engine_has "$SETUP_SCRIPT" --release-tag
+    [[ -z "$log_target" ]] || engine_has "$SETUP_SCRIPT" --log-target
 
     if [[ "$phase" != keygen ]]; then
         exec_job bash "$SETUP_SCRIPT" "${args[@]}" </dev/null

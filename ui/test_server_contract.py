@@ -987,6 +987,43 @@ class FirewallEnableTest(ServerTestCase):
         self.assertIn("firewall-enable *", rules)
 
 
+class SetupDefaultsTest(ServerTestCase):
+
+    TAGS = "\n".join("abc123\trefs/tags/" + t for t in (
+        "v0.15.0-adiri", "v0.16.0-adiri", "v0.16.1-adiri-hotfix", "v0.9.9", "v1.0.0", "v1.0.1",
+        "v1.0.1-rc1", "v1.0.1^{}", "main"))
+
+    def setUp(self):
+        super().setUp()
+        server._source_tag_cache.clear()
+        self.host_replies["git"] = (0, self.TAGS, "")
+        self.patch(server, "detect_public_ip", lambda: "203.0.113.10")
+        self.patch(server, "detect_internal_ip", lambda: "10.0.0.5")
+        self.patch(server, "latest_docker_image",
+                   lambda net="testnet": server.DEFAULT_DOCKER_IMAGE if net == "testnet" else "")
+
+    def test_latest_release_tag_per_network(self):
+        self.assertEqual(server.latest_source_tag("testnet"), "v0.16.0-adiri")
+        self.assertEqual(server.latest_source_tag("mainnet"), "v1.0.1")
+        self.assertEqual(server.latest_source_tag("devnet"), "")
+
+    def test_mainnet_defaults_to_a_release_install_logging_to_the_journal(self):
+        d = self.client.get("/api/setup/defaults?network=mainnet").get_json()
+        self.assertEqual((d["network"], d["install_method"], d["log_target"], d["source_ref"],
+                          d["docker_image"]), ("mainnet", "release", "journal", "v1.0.1", ""))
+        d = self.client.get("/api/setup/defaults").get_json()
+        self.assertEqual((d["network"], d["install_method"], d["log_target"], d["source_ref"]),
+                         ("testnet", "source", "", "v0.16.0-adiri"))
+        self.assertIn("@sha256:", d["docker_image"])
+
+    def test_preflight_reports_the_tpm_from_the_audit(self):
+        self.patch(server, "hardware_profile", lambda: {"cpu": 8})
+        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm"], False)
+        server._audit_cache.update({"expires": 0.0, "data": None})
+        self.helper_replies["host-audit"] = (0, "ok    TPM2 usable by systemd-creds\n", "")
+        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm"], True)
+
+
 class HostAuditTest(ServerTestCase):
 
     def test_lines_in_the_audit_form_are_kept(self):
