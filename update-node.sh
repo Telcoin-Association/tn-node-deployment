@@ -1076,48 +1076,21 @@ apply_docker_update() {
         print_error "$refusal"
         return 1
     fi
+    update_swap_precheck "$launch_file" "$old_image" || return 1
     backup_unit_file "$launch_file" || return 1
-
-    # Hash the launch config before/after the substitution so we can detect
-    # "perl did nothing" -- symmetric with the source-binary hash check
-    # added in v1.1.41. Avoids reporting a successful update when the
-    # file was actually unchanged.
-    local pre_unit_hash post_unit_hash
-    pre_unit_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
     update_epoch_wait || return 1
     print_step "Stopping ${SERVICE_NAME}..."
     wait_for_service_stopped "$SERVICE_NAME"
 
-    print_step "Updating image reference in ${launch_file}..."
-    # No guard on perl itself: a failure (not installed, ENOSPC) leaves the
-    # file unchanged or without the new image string, and both cases are
-    # caught by the hash + grep checks right below.
-    perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
-    # daemon-reload matters on legacy unit installs; harmless for the wrapper.
-    systemctl daemon-reload || \
-        print_warn "systemctl daemon-reload failed -- a legacy unit install may restart on the old image"
-
-    post_unit_hash=$(sha256sum "$launch_file" | awk '{print $1}')
-    if [[ "$pre_unit_hash" == "$post_unit_hash" ]]; then
-        print_error "Launch config is unchanged after edit -- old image string not found."
-        print_info "  Expected to replace: ${old_image}"
-        print_info "  Launch config: ${launch_file}"
-        print_info "Restoring from backup and aborting."
-        # File is unchanged, so the restore is precautionary -- best-effort.
-        restore_unit_file "$launch_file" 2>/dev/null || true
-        systemctl daemon-reload 2>/dev/null || true
-        start_service 2>/dev/null || true
-        return 1
-    fi
-    # Confirm the new image actually appears in the file (defends against a
-    # perl substitution that replaced the wrong text).
-    if ! grep -qF "$new_image" "$launch_file"; then
-        print_error "New image string not present in launch config after edit."
-        print_info "  Expected to find: ${new_image}"
-        print_info "Restoring from backup and aborting."
+    # The start script and unit are rendered again with the new image (and the
+    # retired --observer flag dropped when the new release rejects it). The
+    # backup above predates both, so the rollback below restores the old image.
+    print_step "Writing ${new_image} into ${launch_file}..."
+    if ! update_swap_image "$new_image" "$launch_file"; then
+        print_error "The start script was not updated; restoring it from the backup."
         if ! restore_unit_file "$launch_file"; then
-            print_error "Backup restore FAILED -- ${launch_file} is in an edited, unverified state."
+            print_error "Backup restore FAILED -- ${launch_file} may be in an edited state."
             print_info "  Restore manually: $(unit_restore_hint "$launch_file") && systemctl daemon-reload && systemctl start ${SERVICE_NAME}"
             return 1
         fi
@@ -1125,24 +1098,8 @@ apply_docker_update() {
         start_service 2>/dev/null || true
         return 1
     fi
-    print_ok "Launch config updated: ${pre_unit_hash:0:12}... -> ${post_unit_hash:0:12}..."
+    print_ok "Start script now runs ${new_image}"
 
-    # Drop the retired --observer flag when the new release rejects it. The
-    # version test reads the image name:tag only, so a registry host:port is
-    # never taken for a version. The backup above predates this edit, so the
-    # rollback below restores the flag together with the old image.
-    if observer_strip_needed "$launch_file" "${new_image##*/}"; then
-        if tn_node_strip_observer_flag "$launch_file"; then
-            print_info "Stripped the retired --observer flag from ${launch_file}"
-            systemctl daemon-reload || \
-                print_warn "systemctl daemon-reload failed -- a legacy unit install may restart with the retired --observer flag"
-        else
-            print_warn "Could not strip the retired --observer flag from ${launch_file} -- continuing."
-            print_info "  If ${SERVICE_NAME} fails to start, remove the flag from that file by hand."
-        fi
-    fi
-
-    update_rerender_launch
     print_step "Starting ${SERVICE_NAME} on new image..."
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
@@ -1925,6 +1882,86 @@ update_migrate_ownership() {
     return 1
 }
 
+# update_legacy_refusal -- rc 1 (with the one command that fixes it) when the node's
+# unit still holds the BLS passphrase, still carries the whole docker command inline,
+# or the passphrase is still sealed with the old TPM method. Those installs move to
+# the current unit, start script and encrypted credential with
+# edit-config.sh --migrate-credential before they can be updated. Reads only.
+update_legacy_refusal() {
+    local unit="/etc/systemd/system/${SERVICE_NAME}.service" msg="" method="" file=""
+    if tn_has_embedded_passphrase "$unit"; then
+        msg="${unit} still holds the BLS passphrase."
+    elif [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "tpm" ]]; then
+        msg="The BLS passphrase is still sealed with the old TPM method, which these scripts no longer use."
+    else
+        method="$(meta_get INSTALL_METHOD 2>/dev/null || true)"
+        if [[ "$method" == "docker" ]]; then
+            file="$(docker_launch_file 2>/dev/null || true)"
+            [[ "$file" == *.service ]] && msg="${file} still runs the docker command inline."
+        fi
+    fi
+    [[ -n "$msg" ]] || return 0
+    msg="${msg} Move it to the current unit, start script and encrypted credential first: sudo ./edit-config.sh --migrate-credential (nothing was changed)"
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_event error "$msg"
+    else
+        print_error "$msg"
+    fi
+    return 1
+}
+
+# update_swap_precheck FILE OLD_IMAGE -- rc 1 (with the reason) unless FILE, the
+# docker launch file, is the current start script (tn_start_script_path docker) and
+# runs OLD_IMAGE, the image the pending update was prepared against: the swap
+# renders that script and the unit again, so an older launch file moves first.
+# Reads only.
+update_swap_precheck() {
+    local file="${1:-}" old="${2:-}" want cur rc=0
+    want="$(tn_start_script_path docker)"
+    if [[ "$file" != "$want" ]]; then
+        update_wait_say warn "${SERVICE_NAME} still starts from ${file}, not ${want}; move it first: sudo ./edit-config.sh --migrate-credential. Nothing was changed."
+        return 1
+    fi
+    cur="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
+    if [[ $rc -ne 10 || "$cur" != "docker ${old}" ]]; then
+        update_wait_say warn "${file} does not run ${old}, the image this update was prepared against; discard the pending update and prepare it again. Nothing was changed."
+        return 1
+    fi
+    return 0
+}
+
+# update_swap_image NEW_IMAGE FILE -- while the node is stopped, put NEW_IMAGE in the
+# docker start script FILE by rendering the start script and unit again
+# (tn_rerender_node_launch, which takes only this network's repository by digest or
+# release tag): no text substitution on the file. The retired --observer flag is
+# dropped first when the new release rejects it. rc 1 when the render refused or
+# failed, or FILE does not run NEW_IMAGE afterwards; the caller restores the backup.
+update_swap_image() {
+    local new="${1:-}" file="${2:-}" rc=0 cur
+    if observer_strip_needed "$file" "${new##*/}"; then
+        if tn_node_strip_observer_flag "$file"; then
+            update_wait_say log "Stripped the retired --observer flag from ${file}."
+        else
+            update_wait_say warn "Could not strip the retired --observer flag from ${file}."
+            return 1
+        fi
+    fi
+    update_node_log_dir
+    tn_rerender_node_launch "$new" update_wait_say || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        update_wait_say warn "The start script was not written for ${new} (see above)."
+        return 1
+    fi
+    rc=0
+    cur="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
+    if [[ $rc -ne 10 || "$cur" != "docker ${new}" ]]; then
+        update_wait_say warn "${file} does not run ${new} after the rewrite."
+        return 1
+    fi
+    systemctl daemon-reload 9>&- || update_wait_say warn "systemctl daemon-reload failed; ${SERVICE_NAME} may start with its previous unit."
+    return 0
+}
+
 # update_arg_error <msg> -- report a command-line error: an error event in
 # --json mode, an [ERROR] line on stderr otherwise. The caller exits.
 update_arg_error() {
@@ -2366,24 +2403,19 @@ json_apply_docker() {
     if refusal="$(apply_root_dir_refusal "$launch_file")"; then
         json_event error "$refusal"; return 1
     fi
+    update_swap_precheck "$launch_file" "$old_image" || { json_event error
+ "the launch file is not the current start script; nothing was changed"; return 1; }
     # Warn-only in --json mode (see apply_docker_update).
     storage_migration_begin "${old_image##*/}" "${new_image##*/}" || return 1
     backup_unit_file "$launch_file" || { json_event error "could not back up launch config"; return 1; }
-    local pre_hash post_hash
-    pre_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
     update_epoch_wait || { json_event error "the committee quorum check refused the stop; nothing was changed on the running node"; return 1; }
     json_event step "Stopping ${SERVICE_NAME}"
     wait_for_service_stopped "$SERVICE_NAME"
 
-    json_event step "Updating image reference in ${launch_file}"
-    # No guard on perl itself: a failure leaves the file unchanged or without
-    # the new image string -- both caught by the hash/grep check below.
-    perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
-    # daemon-reload matters on legacy unit installs; harmless for the wrapper.
-    systemctl daemon-reload || json_event warn "systemctl daemon-reload failed"
-    post_hash=$(sha256sum "$launch_file" | awk '{print $1}')
-    if [[ "$pre_hash" == "$post_hash" ]] || ! grep -qF "$new_image" "$launch_file"; then
+    # Rendered again with the new image (see apply_docker_update).
+    json_event step "Writing ${new_image} into ${launch_file}"
+    if ! update_swap_image "$new_image" "$launch_file"; then
         json_event error "launch config image not updated -- restoring backup"
         restore_unit_file "$launch_file" 2>/dev/null || \
             json_event error "backup restore also failed -- restore by hand: $(unit_restore_hint "$launch_file")"
@@ -2392,20 +2424,8 @@ json_apply_docker() {
         return 1
     fi
 
-    # Drop the retired --observer flag when the new release rejects it (see
-    # apply_docker_update). The backup above predates this edit, so the
-    # rollback below restores the flag together with the old image.
-    if observer_strip_needed "$launch_file" "${new_image##*/}"; then
-        if tn_node_strip_observer_flag "$launch_file"; then
-            json_event step "stripped retired --observer flag from ${launch_file}"
-            systemctl daemon-reload || json_event warn "systemctl daemon-reload failed"
-        else
-            json_event warn "could not strip the retired --observer flag from ${launch_file} -- continuing"
-        fi
-    fi
-
-    update_rerender_launch
     json_event step "Starting ${SERVICE_NAME} on new image"
+
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
 
@@ -2488,6 +2508,9 @@ run_json_mode() {
             fi
             update_migrate_ownership || return 1
             ;;
+    esac
+    case "$JSON_ACTION" in
+        prepare|apply) update_legacy_refusal || return 1 ;;
     esac
     local install_method
     if ! install_method=$(detect_install_method); then
@@ -2615,6 +2638,7 @@ main() {
     # ownership migration runs first, under the lock.
     update_lock || exit 1
     update_migrate_ownership || exit 1
+    update_legacy_refusal || exit 1
 
     # Handle --discard flag. A pending state that cannot be read (a symlink, a
     # wrong owner, a malformed value) can still be discarded.
