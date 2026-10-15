@@ -139,6 +139,11 @@ STORAGE_MIGRATION=false
 STORAGE_MIGRATION_STARTED=false
 # Set by verify_health_after_restart: true when its last run saw a healthy node.
 UPDATE_HEALTH_OK=false
+# The node's consensus mode right before the stop (update_record_mode), and the
+# result of verify_consensus_participation: ok|failed, and whether it votes.
+UPDATE_MODE_BEFORE=""
+UPDATE_PARTICIPATION=""
+UPDATE_VOTING=false
 
 SERVICE_NAME=""
 RPC_URL=""
@@ -796,7 +801,9 @@ storage_migration_verify_failed() {
         state="The node is not running; it may have stopped before or during the migration"
     fi
     discard_pending
-    if [[ "$UPDATE_HEALTH_OK" == "true" ]]; then
+    if [[ "$UPDATE_PARTICIPATION" == "failed" ]]; then
+        what="${SERVICE_NAME} answered after starting ${1}, but it is not following consensus or not voting (see above)."
+    elif [[ "$UPDATE_HEALTH_OK" == "true" ]]; then
         what="${SERVICE_NAME} answered after starting ${1}, but it is not running the prepared update."
     else
         what="${SERVICE_NAME} did not answer within $(update_verify_window)s of starting ${1}."
@@ -804,7 +811,7 @@ storage_migration_verify_failed() {
     msg="${what} Not rolled back: the previous release cannot open the migrated data dir. ${state} (journalctl -u ${SERVICE_NAME} -f). To go back: systemctl stop ${SERVICE_NAME}; restore ${dd:-the data dir} from the pre-update snapshot; ${2}; systemctl start ${SERVICE_NAME}."
     if [[ "$JSON_MODE" == "true" ]]; then
         json_event error "$msg"
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"storage_migration\":true,\"msg\":\"$(json_escape "$msg")\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"storage_migration\":true$(update_vote_field),\"msg\":\"$(json_escape "$msg")\"}"
     else
         print_error "$msg"
     fi
@@ -842,6 +849,133 @@ verify_health_after_restart() {
     done
     print_error "Service did not become healthy within ${limit}s"
     return 1
+}
+
+# _uc_header_number JSON -- the block number of a tn_latestConsensusHeader answer
+# (result.number, a non-negative integer). rc 1 when there is none.
+_uc_header_number() {
+    local n=""
+    if command -v python3 >/dev/null 2>&1; then
+        n="$(TN_RESP="${1:-}" python3 -I -c '
+import json, os
+try:
+    d = json.loads(os.environ.get("TN_RESP", ""))
+except Exception:
+    d = None
+r = d.get("result") if isinstance(d, dict) else None
+n = r.get("number") if isinstance(r, dict) else None
+print(n if isinstance(n, int) and not isinstance(n, bool) and n >= 0 else "")
+' 2>/dev/null)" || n=""
+    else
+        n="$(tn_json_field "${1:-}" number 2>/dev/null)" || n=""
+    fi
+    [[ "$n" =~ ^[0-9]{1,19}$ ]] || return 1
+    printf '%s\n' "$n"
+}
+
+# _uc_vote_setting NAME DEFAULT -- a whole number of seconds from NAME (1 to 99999),
+# else DEFAULT.
+_uc_vote_setting() {
+    local v="${!1:-}"
+    if [[ "$v" =~ ^[0-9]{1,5}$ ]] && (( 10#$v > 0 )); then
+        printf '%s\n' "$((10#$v))"
+    else
+        printf '%s\n' "$2"
+    fi
+}
+
+# verify_consensus_participation -- the post-restart check every apply runs after
+# verify_health_after_restart: the node answers eth_chainId with its network's chain
+# id (2017 testnet, 487 mainnet); its tn_latestConsensusHeader number advances
+# between reads TN_UPDATE_VOTE_POLL seconds apart (default 10); and a node that was
+# CvvActive before the stop (UPDATE_MODE_BEFORE, recorded by update_epoch_wait)
+# reads CvvActive again from tn_nodeMode. Both wait at most TN_UPDATE_VOTE_TIMEOUT
+# seconds together (default 600). Sets UPDATE_PARTICIPATION (ok|failed) and
+# UPDATE_VOTING (true when tn_nodeMode last read CvvActive). rc 0 passed, 1 failed
+# with the reason reported.
+verify_consensus_participation() {
+    local url="${RPC_URL:-}" net want out hex got n1 n2="" mode="" waited=0 limit poll
+    UPDATE_PARTICIPATION=failed
+    UPDATE_VOTING=false
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    poll="$(_uc_vote_setting TN_UPDATE_VOTE_POLL 10)"
+    limit="$(_uc_vote_setting TN_UPDATE_VOTE_TIMEOUT 600)"
+    update_wait_say step "Checking that ${SERVICE_NAME} follows consensus on its chain..."
+    net="$(detect_network 2>/dev/null)" || net=""
+    case "$net" in
+        testnet) want="$TESTNET_CHAIN_ID" ;;
+        mainnet) want="$MAINNET_CHAIN_ID" ;;
+        *) want="" ;;
+    esac
+    out="$(tn_rpc_call "$url" eth_chainId '[]' 5 2>/dev/null)" || out=""
+    hex="$(tn_json_field "$out" result 2>/dev/null)" || hex=""
+    if [[ ! "$hex" =~ ^0x[0-9a-fA-F]{1,15}$ ]]; then
+        update_fail "${SERVICE_NAME} did not answer eth_chainId after the restart."
+        return 1
+    fi
+    got="$((16#${hex#0x}))"
+    if [[ -z "$want" ]]; then
+        update_wait_say warn "The network of this node is unknown, so its chain id (${got}) is not checked."
+    elif [[ "$got" != "$want" ]]; then
+        update_fail "${SERVICE_NAME} runs chain id ${got}, not ${want} (${net})."
+        return 1
+    fi
+    if ! n1="$(_uc_header_number "$(tn_rpc_call "$url" tn_latestConsensusHeader '[]' 5 2>/dev/null)")"; then
+        update_fail "${SERVICE_NAME} gave no consensus header number after the restart."
+        return 1
+    fi
+    while (( waited < limit )); do
+        sleep "$poll" 9>&-
+        waited=$(( waited + poll ))
+        n2="$(_uc_header_number "$(tn_rpc_call "$url" tn_latestConsensusHeader '[]' 5 2>/dev/null)")" || n2=""
+        if [[ -n "$n2" ]] && (( 10#$n2 > 10#$n1 )); then
+            break
+        fi
+    done
+    if [[ -z "$n2" ]] || (( 10#$n2 <= 10#$n1 )); then
+        update_fail "The consensus header of ${SERVICE_NAME} did not advance within ${limit}s (it stayed at ${n1}): the node is not following consensus."
+        return 1
+    fi
+    update_wait_say log "Consensus header advanced: ${n1} -> ${n2} (${waited}s)."
+    mode="$(tn_node_mode "$url" 5 2>/dev/null)" || mode=""
+    if [[ "${UPDATE_MODE_BEFORE:-}" == "CvvActive" ]]; then
+        while [[ "$mode" != "CvvActive" ]] && (( waited < limit )); do
+            sleep "$poll" 9>&-
+            waited=$(( waited + poll ))
+            mode="$(tn_node_mode "$url" 5 2>/dev/null)" || mode=""
+        done
+        if [[ "$mode" != "CvvActive" ]]; then
+            update_fail "${SERVICE_NAME} was voting (CvvActive) before the update and reads ${mode:-no mode} ${waited}s after it (TN_UPDATE_VOTE_TIMEOUT=${limit}): it is not voting."
+            return 1
+        fi
+        update_wait_say log "${SERVICE_NAME} votes again (CvvActive, ${waited}s)."
+    fi
+    [[ "$mode" == "CvvActive" ]] && UPDATE_VOTING=true
+    UPDATE_PARTICIPATION=ok
+    return 0
+}
+
+# update_vote_field -- ',"voting":false' for a --json done event after the
+# consensus participation check failed; nothing otherwise.
+update_vote_field() {
+    if [[ "${UPDATE_PARTICIPATION:-}" == "failed" ]]; then
+        printf ',"voting":false'
+    fi
+}
+
+# update_record_mode -- the node's consensus mode right before the stop
+# (tn_node_mode), kept in UPDATE_MODE_BEFORE and in the pending state (MODE_BEFORE)
+# for verify_consensus_participation. Empty when it cannot be read.
+update_record_mode() {
+    UPDATE_MODE_BEFORE="$(tn_node_mode "$(tn_local_rpc_url)" 5 2>/dev/null)" || UPDATE_MODE_BEFORE=""
+    case "$UPDATE_MODE_BEFORE" in
+        CvvActive|CvvInactive|Observer)
+            pending_state_add "MODE_BEFORE=${UPDATE_MODE_BEFORE}" >/dev/null 2>&1 || true
+            update_wait_say log "Consensus mode before the stop: ${UPDATE_MODE_BEFORE}."
+            ;;
+        *) UPDATE_MODE_BEFORE="" ;;
+    esac
+    return 0
 }
 
 # The plain health probe above passes even when the node came back on the OLD
@@ -1003,7 +1137,8 @@ update_rerender_launch() {
 
 # update_epoch_wait -- called by each apply path just before it stops the node,
 # after the lock is held and the new binary or image is ready, and never before
-# a rollback restart. When the node votes in the current committee and the
+# a rollback restart, and records the node's consensus mode for the check after
+# the restart (update_record_mode). When the node votes in the current committee and the
 # epoch boundary is close, tn_wait_restart_window (lib/common.sh) holds the stop
 # until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds.
 # --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips the wait, never the committee
@@ -1012,17 +1147,16 @@ update_epoch_wait() {
     update_quorum_guard || return 1
     if [[ "$NO_EPOCH_WAIT" == "true" ]]; then
         update_wait_say log "Not waiting for the epoch boundary (--no-epoch-wait)."
-        return 0
-    fi
-    if [[ "${TN_SKIP_EPOCH_WAIT:-}" == "1" ]]; then
+    elif [[ "${TN_SKIP_EPOCH_WAIT:-}" == "1" ]]; then
         update_wait_say log "Not waiting for the epoch boundary (TN_SKIP_EPOCH_WAIT=1)."
-        return 0
-    fi
-    declare -F tn_wait_restart_window >/dev/null 2>&1 || {
+    elif ! declare -F tn_wait_restart_window >/dev/null 2>&1; then
         update_wait_say warn "lib/common.sh ${COMMON_VERSION:-unknown} cannot wait for the epoch boundary, so the node restarts now even if it is in the committee. Run update-scripts.sh to get the wait."
-        return 0
-    }
-    tn_wait_restart_window "$(tn_local_rpc_url)" update_wait_say
+    else
+        tn_wait_restart_window "$(tn_local_rpc_url)" update_wait_say
+    fi
+    # Record mode: what the node was (voting or not) when it is stopped, for the
+    # participation check after the restart.
+    update_record_mode
     return 0
 }
 
@@ -1267,7 +1401,7 @@ apply_docker_update() {
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
 
-    if verify_health_after_restart && verify_running_image_id "$pulled_image_id"; then
+    if verify_health_after_restart && verify_running_image_id "$pulled_image_id" && verify_consensus_participation; then
         clear_pending_state
         docker_record_meta "$new_image" "$new_ref"
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
@@ -1729,7 +1863,8 @@ apply_source_update() {
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
     start_service
 
-    if verify_health_after_restart && verify_installed_binary_hash "$installed" "$expected_hash"; then
+    if verify_health_after_restart && verify_installed_binary_hash "$installed" "$expected_hash" \
+        && verify_consensus_participation; then
         clear_pending_state
         tn_staged_cleanup "$built"
         # Record the now-running release so the UI reports the installed binary's
@@ -2526,10 +2661,10 @@ json_apply_source() {
     json_event step "Verifying node health"
     local verify_ok=false
     if verify_health_after_restart; then
-        if verify_installed_binary_hash "$installed" "$expected_hash"; then
-            verify_ok=true
-        else
+        if ! verify_installed_binary_hash "$installed" "$expected_hash"; then
             json_event step "installed binary does not match the prepared build -- failing verify"
+        elif verify_consensus_participation; then
+            verify_ok=true
         fi
     fi
     if [[ "$verify_ok" == "true" ]]; then
@@ -2557,7 +2692,7 @@ json_apply_source() {
     # If the restore fails, do NOT start the service: it would come up on the
     # new binary and a passing re-verify would misreport "rolled back".
     if ! restore_installed_binary "$installed"; then
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"$(json_escape "health check failed AND backup restore failed; service left stopped -- restore by hand: ${undo}")\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false$(update_vote_field),\"msg\":\"$(json_escape "health check failed AND backup restore failed; service left stopped -- restore by hand: ${undo}")\"}"
         return 1
     fi
     # The old binary goes back with the wrapper it ran under.
@@ -2568,9 +2703,9 @@ json_apply_source() {
     if verify_health_after_restart; then
         clear_pending_state
         tn_staged_cleanup "$built"
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":true,\"msg\":\"health check failed; rolled back to previous binary\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":true$(update_vote_field),\"msg\":\"health check failed; rolled back to previous binary\"}"
     else
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed and rollback failed; inspect journalctl -u ${SERVICE_NAME}\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false$(update_vote_field),\"msg\":\"health check failed and rollback failed; inspect journalctl -u ${SERVICE_NAME}\"}"
     fi
     return 1
 }
@@ -2626,10 +2761,10 @@ json_apply_docker() {
     json_event step "Verifying node health"
     local verify_ok=false
     if verify_health_after_restart; then
-        if verify_running_image_id "$pulled_image_id"; then
-            verify_ok=true
-        else
+        if ! verify_running_image_id "$pulled_image_id"; then
             json_event step "running container is not on the pulled image -- failing verify"
+        elif verify_consensus_participation; then
+            verify_ok=true
         fi
     fi
     if [[ "$verify_ok" == "true" ]]; then
@@ -2650,16 +2785,16 @@ json_apply_docker() {
     # If the restore fails, do NOT start the service: it would come up on the
     # new image and a passing re-verify would misreport "rolled back".
     if ! restore_unit_file "$launch_file"; then
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"$(json_escape "health check failed AND backup restore failed; service left stopped -- restore by hand: $(unit_restore_hint "$launch_file")")\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false$(update_vote_field),\"msg\":\"$(json_escape "health check failed AND backup restore failed; service left stopped -- restore by hand: $(unit_restore_hint "$launch_file")")\"}"
         return 1
     fi
     systemctl daemon-reload 2>/dev/null || true
     start_service
     if verify_health_after_restart; then
         clear_pending_state
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":true,\"msg\":\"health check failed; rolled back to previous image\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":true$(update_vote_field),\"msg\":\"health check failed; rolled back to previous image\"}"
     else
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check and rollback failed; inspect journalctl -u ${SERVICE_NAME}\"}"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false$(update_vote_field),\"msg\":\"health check and rollback failed; inspect journalctl -u ${SERVICE_NAME}\"}"
     fi
     return 1
 }
