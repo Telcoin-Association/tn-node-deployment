@@ -396,6 +396,37 @@ class LogLimitsTest(ServerTestCase):
             for _ in range(taken):
                 server._LOG_STREAMS.release()
 
+    def free_stream_slots(self):
+        taken = 0
+        while server._LOG_STREAMS.acquire(blocking=False):
+            taken += 1
+        for _ in range(taken):
+            server._LOG_STREAMS.release()
+        return taken
+
+    def test_head_requests_hold_no_live_stream_slot(self):
+        path = os.path.join(self.tmp.name, "node.log")
+        with open(path, "w") as f:
+            f.write("a line\n")
+        self.patch(server, "parse_service_file", lambda t: {"log_path": path})
+        for _ in range(12):
+            resp = self.client.head("/api/logs/observer/stream")
+            self.assertEqual(resp.status_code, 200)
+            resp.close()
+        self.assertEqual(self.free_stream_slots(), 8)
+
+    def test_a_closed_stream_gives_its_slot_back_once(self):
+        # The file is missing, so the stream ends on its own; the generator's
+        # end and the response close both run, and the slot comes back once
+        # (a second release would raise on the bounded semaphore).
+        self.patch(server, "parse_service_file",
+                   lambda t: {"log_path": os.path.join(self.tmp.name, "absent.log")})
+        for _ in range(10):
+            resp = self.client.get("/api/logs/observer/stream", buffered=False)
+            self.assertIn(b"log file not found", b"".join(resp.response))
+            resp.close()
+        self.assertEqual(self.free_stream_slots(), 8)
+
     def test_download_is_capped(self):
         path = os.path.join(self.tmp.name, "big.log")
         with open(path, "wb") as f:

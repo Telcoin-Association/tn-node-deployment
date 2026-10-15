@@ -3574,15 +3574,25 @@ def api_logs_stream(node_type):
             yield "data: (live tail not available for external nodes)\n\n"
         return Response(notice(), mimetype="text/event-stream", headers=headers)
 
-    if not _LOG_STREAMS.acquire(blocking=False):
-        return jsonify({"error": "too many live log streams -- close one and retry"}), 429
-
     if _log_target(node_type) == "journal":
         argv = ["sudo", "-n", HELPER, "journal-follow"]
         path = None
     else:
         path = parse_service_file(node_type)["log_path"]
         argv = ["tail", "-n", "0", "-F", path or ""]
+
+    if not _LOG_STREAMS.acquire(blocking=False):
+        return jsonify({"error": "too many live log streams -- close one and retry"}), 429
+
+    # The slot is given back once, by whichever comes first: the end of the
+    # stream, or the response being closed. A HEAD request, or a client that
+    # leaves before the first byte, never starts the generator, so the close
+    # is what frees its slot.
+    once = threading.Lock()
+
+    def release():
+        if once.acquire(blocking=False):
+            _LOG_STREAMS.release()
 
     def generate():
         try:
@@ -3593,9 +3603,11 @@ def api_logs_stream(node_type):
         except GeneratorExit:
             return
         finally:
-            _LOG_STREAMS.release()
+            release()
 
-    return Response(generate(), mimetype="text/event-stream", headers=headers)
+    resp = Response(generate(), mimetype="text/event-stream", headers=headers)
+    resp.call_on_close(release)
+    return resp
 
 
 def _file_tail_chunks(path, cap, chunk=1024 * 1024):
