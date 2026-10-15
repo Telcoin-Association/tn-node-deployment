@@ -38,8 +38,10 @@ TOK="$(printf '%064d' 0 | tr 0 a)"
 : > "$T/opened.log"
 FAKE_TOKEN="$TOK" bash "$OPEN_UI" user@host >/dev/null 2>&1; rc=$?
 check "a good run exits 0" "0" "$rc"
-check "the browser gets the token in the fragment" "http://localhost:8080/#t=${TOK}" "$(cat "$T/opened.log")"
+check "the browser gets the token in the fragment" "http://127.0.0.1:8080/#t=${TOK}" "$(cat "$T/opened.log")"
 check "the tunnel asks ssh to fail on a busy port" "1" "$(grep -c 'ExitOnForwardFailure=yes' "$T/ssh.log")"
+check "the tunnel listens on the address the browser opens" "1" \
+    "$(grep -c -- '-L 127.0.0.1:8080:127.0.0.1:8080' "$T/ssh.log")"
 
 : > "$T/opened.log"
 FAKE_TOKEN="$TOK" FAKE_TUNNEL=fail bash "$OPEN_UI" user@host >/dev/null 2>&1; rc=$?

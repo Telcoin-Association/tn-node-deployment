@@ -4,7 +4,7 @@
 #
 # Runs on your laptop/workstation, NOT on the node. Reads the UI access token
 # over SSH (sudo cat /etc/telcoin-ui/token), opens an SSH tunnel to the server's
-# localhost:8080 and launches your browser at http://localhost:8080/#t=<token>.
+# localhost:8080 and launches your browser at http://127.0.0.1:8080/#t=<token>.
 # The token travels in the URL fragment, which the browser never sends to the
 # server. Works on macOS, Linux, and Windows (Git Bash / WSL). Ctrl+C closes the
 # tunnel.
@@ -12,14 +12,17 @@
 #   Usage:  ./open-ui.sh user@SERVER_IP
 #           ./open-ui.sh            (prompts for the target)
 #
-# If another local process already listens on port 8080, the tunnel fails
-# (ExitOnForwardFailure) and no browser opens, so a page squatting on the port
-# never receives the token.
+# The tunnel listens on 127.0.0.1 only, and the browser opens that same address
+# (not "localhost", which may resolve to ::1 first and reach a different
+# listener). If another local process already holds 127.0.0.1:8080, the tunnel
+# fails (ExitOnForwardFailure) and no browser opens, so a page squatting on the
+# port never receives the token.
 #
 set -euo pipefail
 
 PORT=8080
-URL="http://localhost:${PORT}"
+LOCAL_HOST="127.0.0.1"
+URL="http://${LOCAL_HOST}:${PORT}"
 
 c_green='\033[0;32m'; c_blue='\033[0;34m'; c_yellow='\033[1;33m'; c_red='\033[0;31m'; c_off='\033[0m'
 
@@ -63,7 +66,7 @@ fi
 echo ""
 echo -e "${c_green}Telcoin Node Manager -- SSH tunnel${c_off}"
 echo -e "  Target:  ${c_blue}${TARGET}${c_off}"
-echo -e "  Tunnel:  localhost:${PORT}  ->  ${TARGET} : 127.0.0.1:${PORT}"
+echo -e "  Tunnel:  ${LOCAL_HOST}:${PORT}  ->  ${TARGET} : 127.0.0.1:${PORT}"
 echo -e "  Browser: ${c_blue}${URL}${c_off}"
 echo ""
 echo -e "  ${c_yellow}Press Ctrl+C to close the tunnel.${c_off}"
@@ -74,7 +77,7 @@ echo ""
 # error instead), then the foreground wait keeps Ctrl+C closing it.
 CTL="$(mktemp -u "${TMPDIR:-/tmp}/tn-ui-ssh.XXXXXX")"
 if ! ssh -f -N -M -S "$CTL" -o ExitOnForwardFailure=yes \
-        -L "127.0.0.1:${PORT}:127.0.0.1:${PORT}" -- "$TARGET"; then
+        -L "${LOCAL_HOST}:${PORT}:127.0.0.1:${PORT}" -- "$TARGET"; then
     echo -e "${c_red}The tunnel did not start.${c_off} Is something on this machine already using port ${PORT}?" >&2
     exit 1
 fi
