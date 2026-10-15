@@ -662,6 +662,36 @@ for fv in "metrics=on" "metrics=OFF" "metrics=127.0.0.1" "verbosity=-vvvvvv" "do
           "allow_private_forward_targets=TRUE" "not_a_field=1"; do
     refused "config-set refuses ${fv}" config-set "${fv%%=*}" "${fv#*=}"
 done
+# A listener keeps the UDP port of the external address .node-meta records for
+# it (edit-config.sh's rule and messages); no recorded address passes.
+fixture unified
+printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.7/udp/49590/quic-v1\nEXTERNAL_WORKER_ADDR=/dns4/n.example.org/udp/49594/quic-v1\n' >> "${ETC_DIR}/.node-meta"
+t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49590/quic-v1)"
+check_has "config-set takes a primary listener on the advertised port" \
+    "edit-config [--json] [--set] [primary_listener=/ip4/0.0.0.0/udp/49590/quic-v1]" "$t"
+t="$(trace config-set worker_listener /ip6/::/udp/49594/quic-v1)"
+check_has "config-set takes a worker listener on the advertised port" \
+    "edit-config [--json] [--set] [worker_listener=/ip6/::/udp/49594/quic-v1]" "$t"
+t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49600/quic-v1)"
+check_has "config-set refuses a primary listener on another port, with edit-config's message" \
+    "the primary listener port 49600 must match the advertised external port 49590 (EXTERNAL_PRIMARY_ADDR in .node-meta), which is the port peers dial" "$t"
+refused "a listener on another port runs nothing" config-set worker_listener /ip4/0.0.0.0/udp/49590/quic-v1
+t="$(trace config-set worker_listener /ip4/0.0.0.0/udp/049594/quic-v1)"
+check_has "a port of more than five digits has no port to compare, as in edit-config" \
+    "the worker listener port ? must match the advertised external port 49594 (EXTERNAL_WORKER_ADDR in .node-meta), which is the port peers dial" "$t"
+fixture unified
+printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.7/tcp/49590\n' >> "${ETC_DIR}/.node-meta"
+t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49590/quic-v1)"
+check_has "a recorded address without a UDP port refuses" \
+    "EXTERNAL_PRIMARY_ADDR in .node-meta (/ip4/203.0.113.7/tcp/49590) has no UDP port to compare the primary listener with" "$t"
+fixture unified
+printf 'EXTERNAL_WORKER_ADDR=/ip4/203.0.113.7/udp/49594/quic-v1\nEXTERNAL_WORKER_ADDR=/ip4/203.0.113.7/udp/49595/quic-v1\n' >> "${ETC_DIR}/.node-meta"
+t="$(trace config-set worker_listener /ip4/0.0.0.0/udp/49594/quic-v1)"
+check_has "a recorded address set twice refuses" \
+    "EXTERNAL_WORKER_ADDR is set more than once in .node-meta; remove the extra lines first" "$t"
+t="$(trace config-set primary_listener /ip4/0.0.0.0/udp/49600/quic-v1)"
+check_has "the other listener is checked on its own key" \
+    "edit-config [--json] [--set] [primary_listener=/ip4/0.0.0.0/udp/49600/quic-v1]" "$t"
 same_with_tokens unified config-set state_export 5
 check_has "config-set state_export 5 argv" "edit-config [--json] [--set] [state_export=5]" "$BASE"
 

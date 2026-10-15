@@ -765,6 +765,37 @@ config_script_ready() {
     [[ -f "$CONFIG_SCRIPT" ]] || die "config script not found: $CONFIG_SCRIPT"
 }
 
+# udp_port <multiaddr> -- the UDP port of a multiaddr (/ip4/../udp/<port>/..),
+# 1 to 65535; rc 1 when it has none. lib/common.sh _tn_multiaddr_udp_port.
+udp_port() {
+    local re='/udp/([0-9]{1,5})(/|$)' port
+    [[ "${1:-}" =~ $re ]] || return 1
+    port=$(( 10#${BASH_REMATCH[1]} ))
+    (( port >= 1 && port <= 65535 )) || return 1
+    printf '%s\n' "$port"
+}
+
+# listener_port_advertised <field> <multiaddr> -- edit-config.sh's rule, with its
+# messages: a listener's UDP port must be the port of the external address
+# .node-meta records for it (EXTERNAL_PRIMARY_ADDR or EXTERNAL_WORKER_ADDR, the
+# port peers dial). No recorded address (an older install) passes; a recorded
+# one without a UDP port, or set more than once, refuses the call.
+listener_port_advertised() {
+    local key label ext rc=0 want got
+    case "$1" in
+        primary_listener) key=EXTERNAL_PRIMARY_ADDR; label="primary" ;;
+        *) key=EXTERNAL_WORKER_ADDR; label="worker" ;;
+    esac
+    ext="$(meta_value "$key" 2>/dev/null)" || rc=$?
+    [[ $rc -ne 2 ]] || die "${key} is set more than once in .node-meta; remove the extra lines first"
+    [[ -n "$ext" ]] || return 0
+    want="$(udp_port "$ext")" \
+        || die "${key} in .node-meta (${ext}) has no UDP port to compare the ${label} listener with"
+    got="$(udp_port "$2")" || got=""
+    [[ "$got" == "$want" ]] \
+        || die "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial"
+}
+
 cmd_config_set() {
     local field="$1" value="$2"
     config_script_ready
@@ -775,7 +806,8 @@ cmd_config_set() {
     case "$field" in
         primary_listener|worker_listener)
             [[ "$value" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] \
-                || die "invalid multiaddr: $value" ;;
+                || die "invalid multiaddr: $value"
+            listener_port_advertised "$field" "$value" ;;
         metrics)
             # off removes --metrics. The endpoint stays on loopback; a public
             # bind needs a root operator (edit-config.sh --allow-public-metrics).
