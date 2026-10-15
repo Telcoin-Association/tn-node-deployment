@@ -5402,7 +5402,7 @@ _tn_path_owner() {
 # builtin (no argv). rc 0 even when the reader has already gone (SIGPIPE ignored),
 # so under pipefail a keytool pipeline's status is keytool's own.
 _tn_feed_pass() {
-    ( trap '' PIPE; printf '%s\n' "$TN_KEYTOOL_PASS" ) 2>/dev/null || true
+    ( trap '' PIPE; printf '%s\n' "$TN_KEYTOOL_PASS" ) 2>/dev/null || true  # passphrase-stdin-ok stdout is the keytool stdin pipe
 }
 
 tn_keytool() {

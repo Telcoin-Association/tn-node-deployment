@@ -1818,8 +1818,6 @@ update_lock() {
 # under the install trees, or a mainnet node that needs a fresh install.
 update_migrate_ownership() {
     local rc=0 msg
-    # MERGE: drop this declare -F guard once tn_migrate_ownership is in lib/common.sh.
-    declare -F tn_migrate_ownership >/dev/null || return 0
     tn_migrate_ownership update_wait_say || rc=$?
     case "$rc" in
         0) return 0 ;;

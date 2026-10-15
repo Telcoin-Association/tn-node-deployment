@@ -303,11 +303,13 @@ rm -f "$P"
 # -----------------------------------------------------------------------------
 # The ownership migration hook that runs right after the update lock
 # -----------------------------------------------------------------------------
-run update_migrate_ownership
-check_rc "migration hook: helper absent, nothing to do" 0 "$RC"
 MIG_ARG=""
 MIG_RC=0
-tn_migrate_ownership() { MIG_ARG="${1:-}"; return "$MIG_RC"; }
+tn_migrate_ownership() { MIG_ARG="${1:-}"; printf 'called\n' >> "$T/mig.calls"; return "$MIG_RC"; }
+: > "$T/mig.calls"
+run update_migrate_ownership
+check_rc "migration hook: layout already in place, nothing to do" 0 "$RC"
+check "migration hook: helper called unconditionally" "called" "$(cat "$T/mig.calls")"
 update_migrate_ownership
 check_rc "migration hook: done" 0 "$?"
 check "migration hook: progress printer passed" "update_wait_say" "$MIG_ARG"

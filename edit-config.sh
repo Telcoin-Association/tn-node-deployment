@@ -551,10 +551,7 @@ edit_migrate_ownership() {
     if [[ "$EDIT_OWNERSHIP_DONE" == "true" ]]; then
         return 0
     fi
-    # MERGE: drop this declare -F guard once tn_migrate_ownership is in lib/common.sh.
-    if declare -F tn_migrate_ownership >/dev/null; then
-        tn_migrate_ownership edit_wait_say || rc=$?
-    fi
+    tn_migrate_ownership edit_wait_say || rc=$?
     case "$rc" in
         0)
             EDIT_OWNERSHIP_DONE=true

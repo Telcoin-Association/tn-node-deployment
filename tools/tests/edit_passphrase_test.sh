@@ -117,11 +117,17 @@ fixture() {
     printf '[Service]\nLoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase\nExecStart=/usr/local/libexec/telcoin/tn-start\n' > "$TARGET_SERVICE_FILE"
     chmod 0644 "$TARGET_SERVICE_FILE"
 }
+# set_network NETWORK [old-layout] -- .node-meta for a node set up by this
+# release (OWNERSHIP_LAYOUT=2, so tn_migrate_ownership has nothing to do), or,
+# with old-layout, for one still on the service-user-owned layout.
 set_network() {
     if [[ -n "$1" ]]; then
         printf 'NETWORK=%s\n' "$1" > "$FXB/etc/telcoin/.node-meta"
     else
         : > "$FXB/etc/telcoin/.node-meta"
+    fi
+    if [[ "${2:-}" != "old-layout" ]]; then
+        printf 'OWNERSHIP_LAYOUT=2\n' >> "$FXB/etc/telcoin/.node-meta"
     fi
 }
 
@@ -176,6 +182,16 @@ check "unknown network: mainnet rules apply" yes "$(has "$OUT" "at least 16 byte
 printf 'NETWORK=testnet\nNETWORK=testnet\n' > "$FXB/etc/telcoin/.node-meta"
 edit "short"
 check "duplicate NETWORK: mainnet rules apply" yes "$(has "$OUT" "at least 16 bytes")"
+
+# A mainnet node still on the old ownership layout is not migrated in place:
+# the edit stops under the lock, before anything is written or stopped.
+set_network mainnet old-layout
+: > "$ARGV_LOG"
+edit "abcdefghijklmnop"
+check "old layout on mainnet: refused, fresh install asked for" yes "$(has "$OUT" "must be installed fresh")"
+check "old layout on mainnet: file unchanged" "old-passphrase-value" "$(cat "$PASSFILE")"
+check "old layout on mainnet: nothing stopped" no "$(has "$(cat "$ARGV_LOG")" "systemctl stop")"
+check "old layout on mainnet: .node-meta unchanged" "NETWORK=mainnet" "$(cat "$FXB/etc/telcoin/.node-meta")"
 
 # -----------------------------------------------------------------------------
 # Accepted values: root 0600 write (as root), refused directory (otherwise)
