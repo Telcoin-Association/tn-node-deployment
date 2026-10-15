@@ -48,12 +48,12 @@ passphrase_print_lint() {
             if (i == 0) return 0
             if (substr(s, i + 22) !~ /[^[:space:]]/) return 0
             code = substr(s, 1, i - 1)
-            re = "printf[[:space:]]+" q "%s(\\\\n)?" q "[[:space:]]+\"\\$\\{?(TN_BLS_PASSPHRASE|TN_SETUP_PASS|TN_KEYTOOL_PASS)\\}?\""
+            re = "printf[[:space:]]+" q "%s(\\\\n)?" q "[[:space:]]+\"\\$\\{?(TN_BLS_PASSPHRASE|TN_SETUP_PASS|TN_KEYTOOL_PASS|TN_CRED_PASS)\\}?\""
             if (code !~ re) return 0
             tmp = code
             if (gsub(/printf/, "", tmp) != 1) return 0
             tmp = code
-            if (gsub(/(TN_BLS_PASSPHRASE|TN_SETUP_PASS|TN_KEYTOOL_PASS)/, "", tmp) != 1) return 0
+            if (gsub(/(TN_BLS_PASSPHRASE|TN_SETUP_PASS|TN_KEYTOOL_PASS|TN_CRED_PASS)/, "", tmp) != 1) return 0
             gsub(/2>\/dev\/null/, "", code)
             if (code ~ /[>`]|\$\(|(^|[^A-Za-z0-9_])(echo|tee|cat|logger|xargs)([^A-Za-z0-9_]|$)/) return 0
             return 1
@@ -61,7 +61,7 @@ passphrase_print_lint() {
         function flag(s,    pre, rest, m, cmd) {
             # echo/printf in command position, later expanding a passphrase name.
             if (s !~ /(^|[;&|({`]|\$\(|[[:space:]](then|do|else))[[:space:]]*(echo|printf)[[:space:]]/) return 0
-            if (!match(s, /\\?\$\{?(TN_BLS_PASSPHRASE|TN_SETUP_PASS|TN_KEYTOOL_PASS)([^A-Za-z0-9_]|$)/)) return 0
+            if (!match(s, /\\?\$\{?(TN_BLS_PASSPHRASE|TN_SETUP_PASS|TN_KEYTOOL_PASS|TN_CRED_PASS)([^A-Za-z0-9_]|$)/)) return 0
             rest = substr(s, RSTART + RLENGTH - 1)
             # A single | (not ||) after the value, into a command that consumes it.
             while (match(rest, /\|/)) {

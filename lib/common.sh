@@ -4515,7 +4515,7 @@ display_node_info() {
 
 readonly TN_CRED_NAME="bls-passphrase"
 readonly TN_CRED_MIN_SYSTEMD=250      # systemd-creds, LoadCredentialEncrypted=
-readonly TN_MAINNET_MIN_SYSTEMD=250   # the OS floor for a mainnet node
+readonly TN_MAINNET_MIN_SYSTEMD=255   # the OS floor for a mainnet node (Ubuntu 24.04)
 readonly TN_STDIN_MIN_SYSTEMD=247     # LoadCredential= (the stdin form)
 
 # tn_systemd_version -- the running systemd's major version (systemctl --version).
