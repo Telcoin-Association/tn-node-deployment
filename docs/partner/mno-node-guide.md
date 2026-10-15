@@ -665,7 +665,7 @@ An older release cannot start on the migrated data directory; it stops with `inv
 
 A node that votes in the committee should not be down when the epoch changes: the epoch closes at the first commit at or after the boundary, and the committee exchanges epoch votes for 60 to 75 seconds afterwards.
 So these scripts check before they restart the node: `update-node.sh` when it applies an update, `edit-config.sh`, `install-caddy.sh` (`rpc-enable` and `rpc-disable`), `setup-observability.sh` and `prepare-stake.sh --rotate-address`.
-Other restarts happen at once: `systemctl`, and in the Node Manager UI the Start, Stop and Restart buttons, the tracing toggle and saving the advertised node name.
+In the Node Manager UI the Stop and Restart buttons, the tracing toggle and saving the advertised node name follow the same rule: the page asks first, then the Node Manager takes the update lock, runs the quorum check, waits for the epoch boundary when the node votes, checks again and only then stops the node. A plain `systemctl` restart and the Start button act at once.
 
 Before they stop a node that votes in the committee, `update-node.sh`, `edit-config.sh`, `install-caddy.sh`, `setup-observability.sh` and a `setup-node.sh` re-run over a running node also count the committee members that are already down.
 If stopping this node as well would halt consensus, the script refuses and changes nothing on the running node: `... Refused: wait until the others are back, or, for a coordinated restart, run again with --allow-quorum-risk.`
