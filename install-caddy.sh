@@ -30,14 +30,24 @@
 #   - The new file is rendered to a temp file inside /etc/caddy and checked with
 #     `caddy validate`, whose output is shown (bcrypt / base64 hashes redacted). A
 #     failure leaves the live Caddyfile untouched and exits non-zero.
-#   - The live file is backed up to /etc/caddy/Caddyfile.bak.<YYYYmmdd_HHMMSS> (cp -p,
-#     path printed), then replaced by an atomic rename keeping its owner + mode.
+#   - The live file is backed up to /etc/caddy/Caddyfile.bak.<YYYYmmdd_HHMMSS> (root
+#     0600, path printed; the five newest are kept), then replaced by an atomic rename
+#     (tn_write_root_file) as root:caddy 0640.
+#   - The managed file puts Caddy's admin API on a unix socket only
+#     (unix//run/caddy/admin.sock, mode 0600); the drop-in
+#     /etc/systemd/system/caddy.service.d/tn-admin.conf gives Caddy /run/caddy.
 #   - Caddy running -> `systemctl reload` only, never a blind restart. A rejected reload
 #     restores that backup over the live file and exits non-zero (rpc-enable then stops:
 #     nothing is advertised, the node is not restarted); a reload that succeeds but leaves
 #     Caddy down exits non-zero with the new file kept. Caddy stopped -> first start.
-#     One exception: taking over a hand-made Caddyfile with `admin off` (no admin API, so
-#     no reload is possible) restarts Caddy once, saying why.
+#     One exception: when the admin address changes (the first switch to the socket, a
+#     hand-made Caddyfile with `admin off`, a teardown back to Caddy's default) no reload
+#     can reach the running Caddy, so that apply restarts Caddy once, saying why.
+#   - Caddy comes from its apt repository, whose signing key must have the pinned
+#     fingerprint (CADDY_APT_KEY_FPR); any other key stops the install before apt-get
+#     update.
+#   - Dashboard and public RPC are refused on a staked mainnet validator (and on a
+#     mainnet node whose stake cannot be read).
 #   - Hostnames are normalised first (trimmed, lowercased, one trailing dot dropped) and
 #     must pass the UI's rule (two or more labels, at most 253 characters, not an IP
 #     address: Caddy needs a DNS name for the certificate); only the normalised name is
@@ -92,12 +102,17 @@
 # USAGE (JSON, driven by the Node Manager UI helper):
 #   install-caddy.sh --json --phase=status
 #   install-caddy.sh --json --phase=check-dns --domain <d> [--public-ip <inbound-ip>]
-#   install-caddy.sh --json --phase=enable --domain <d> --username <u>   (password: $TN_CADDY_PASSWORD)
+#   install-caddy.sh --json --phase=enable --domain <d> --username <u> --password-stdin
+#       (the password, at least 16 characters, is one line on stdin; $TN_CADDY_PASSWORD
+#       is still read, and unset at once, when --password-stdin is not given)
 #   install-caddy.sh --json --phase=disable
 #   install-caddy.sh --json --phase=rpc-status
 #   install-caddy.sh --json --phase=rpc-check-dns --rpc-domain <d> [--public-ip <inbound-ip>]
 #   install-caddy.sh --json --phase=rpc-enable --rpc-domain <d> [--move-dashboard-to <host>]
+#       (the exposure summary goes out as a `warn` event; the UI action is the consent)
 #   install-caddy.sh --json --phase=rpc-disable
+# rpc-enable without --json prints the same summary and asks for a yes on a terminal;
+# without a terminal it needs --yes.
 # =============================================================================
 
 set -euo pipefail
@@ -126,10 +141,26 @@ readonly CADDY_KEEP_BACKUPS=5
 # Stamp line of the RPC block write_rpc_block emits. A tn-rpc block without it was
 # written by install-caddy.sh 1.3.0 or older (caddy_rpc_block_stale).
 readonly RPC_BLOCK_STAMP="# tn-rpc block v2"
-readonly CADDYFILE="/etc/caddy/Caddyfile"
+# TN_ROOT_PREFIX points the file paths at a fixture tree (tests only).
+readonly CADDYFILE="${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile"
 readonly CADDY_DIR="${CADDYFILE%/*}"
-readonly CADDYFILE_ORIG="/etc/caddy/Caddyfile.tn-orig"
-readonly UI_UPSTREAM="127.0.0.1:8080"
+readonly CADDYFILE_ORIG="${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile.tn-orig"
+# Caddy's apt repository and the primary key fingerprint its signing key must have
+# (checked against the key served at CADDY_APT_KEY_URL and the Ubuntu keyserver,
+# 2026-10-15). A different key stops the install.
+readonly CADDY_APT_KEY_URL="https://dl.cloudsmith.io/public/caddy/stable/gpg.key"
+readonly CADDY_APT_KEY_FPR="65760C51EDEA2017CEA2CA15155B6D79CA56EA34"
+readonly CADDY_APT_KEYRING="/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+readonly CADDY_APT_LIST="/etc/apt/sources.list.d/caddy-stable.list"
+readonly CADDY_APT_REPO="https://dl.cloudsmith.io/public/caddy/stable/deb/debian"
+# Admin API: a unix socket only. The drop-in gives Caddy its runtime directory.
+readonly CADDY_ADMIN_ADDR="unix//run/caddy/admin.sock|0600"
+readonly CADDY_ADMIN_DROPIN="${TN_ROOT_PREFIX:-}/etc/systemd/system/caddy.service.d/tn-admin.conf"
+# Dashboard password floor, in bytes.
+readonly CADDY_PASSWORD_MIN=16
+# The Node Manager UI port: never a proxy target for the public RPC site.
+readonly CADDY_UI_PORT=8080
+readonly UI_UPSTREAM="127.0.0.1:${CADDY_UI_PORT}"
 readonly PUBLIC_HEADER="X-TN-Dashboard-Public"
 # First line of every Caddyfile we generate -- lets us tell our own managed
 # config apart from one the operator (or another tool) set up by hand.
@@ -188,6 +219,28 @@ CADDY_DONE_NOTES=""
 # passed), http (advertise https:// only; the warning is out).
 CADDY_WS_PLAN=""
 CADDY_WS_FLAGS=""
+# Launch-file backup made by caddy_ws_inject (tn_backup_file): its hash and the
+# launch file's mode and group, for tn_restore_backup.
+CADDY_LAUNCH_BAK_SHA=""
+CADDY_LAUNCH_MODE=""
+CADDY_LAUNCH_GROUP=""
+# Root-only run directory (mktemp -d under TN_CADDY_RUN_PARENT, default /run) holding
+# the node-info.yaml backup and the launch dry-run copy; removed on exit.
+CADDY_RUN_DIR=""
+CADDY_NI_BAK=""
+# Proxy targets for the RPC site (caddy_rpc_enable_precheck): reth's HTTP and WS
+# ports from the node launch, else .node-meta, else 8545/8546.
+CADDY_RPC_PORT=""
+CADDY_WS_PORT_SET=""
+# The dashboard password: --password-stdin, else TN_CADDY_PASSWORD read and unset by
+# main. Never exported.
+CADDY_PASSWORD=""
+CADDY_PASSWORD_STDIN=false
+# --yes: the operator accepts the public RPC exposure summary without a prompt.
+CADDY_YES=false
+# caddy_mainnet_gate has passed in this run; .node-meta may be written (caddy_meta_ready).
+CADDY_GATE_DONE=false
+CADDY_META_READY=false
 
 # =============================================================================
 # JSON / NON-INTERACTIVE MODE (mirrors setup-*.sh)
@@ -547,8 +600,67 @@ caddy_check_version() {
     die "Caddy ${v} is installed, and this script needs ${CADDY_MIN_VERSION} or newer (basic_auth, heredocs). Install the current release from the official Caddy apt repository (https://caddyserver.com/docs/install#debian-ubuntu-raspbian): add the repository, then sudo apt-get update && sudo apt-get install caddy. Run this again afterwards. The Caddyfile was not changed."
 }
 
+# caddy_key_primary_fpr <keyring> <gpg-home> -- print the primary key fingerprint of a
+# binary keyring holding exactly one primary key; rc 1 otherwise (no key, several
+# keys, gpg cannot read it).
+caddy_key_primary_fpr() {
+    local out
+    out="$(gpg --homedir "$2" --batch --with-colons --show-keys "$1" 2>/dev/null)" || return 1
+    printf '%s\n' "$out" | awk -F: '
+        $1 == "pub" { n++; want = 1; next }
+        $1 == "fpr" && want { fpr = $10 }
+        { want = 0 }
+        END { if (n != 1 || fpr == "") exit 1; print fpr }'
+}
+
+# Fetch Caddy's apt signing key over https into a root-only temp directory, dearmor
+# it there, and install it as CADDY_APT_KEYRING (root 0644) only when it holds one
+# primary key whose fingerprint is CADDY_APT_KEY_FPR. rc 1 (message said, nothing
+# installed) on a download failure, an unreadable key or another fingerprint.
+caddy_install_apt_key() {
+    local dir fpr
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/tn-caddy-key.XXXXXX")" || return 1
+    caddy_tmp_track "$dir"
+    if ! mkdir -m 0700 "${dir}/gpg"; then
+        print_error "Could not create a temporary GnuPG home in ${dir}."
+        return 1
+    fi
+    if ! curl -fsSL --proto '=https' --tlsv1.2 -o "${dir}/key.asc" "$CADDY_APT_KEY_URL"; then
+        print_error "Could not download the Caddy apt signing key from ${CADDY_APT_KEY_URL}."
+        return 1
+    fi
+    if ! gpg --homedir "${dir}/gpg" --batch --yes --dearmor -o "${dir}/key.gpg" "${dir}/key.asc" >/dev/null 2>&1; then
+        print_error "The file served at ${CADDY_APT_KEY_URL} is not an OpenPGP key."
+        return 1
+    fi
+    if ! fpr="$(caddy_key_primary_fpr "${dir}/key.gpg" "${dir}/gpg")"; then
+        print_error "The Caddy apt key from ${CADDY_APT_KEY_URL} does not hold exactly one primary key."
+        return 1
+    fi
+    if [[ "$fpr" != "$CADDY_APT_KEY_FPR" ]]; then
+        print_error "The Caddy apt key has fingerprint ${fpr}, not the expected ${CADDY_APT_KEY_FPR}. Nothing was installed. If Caddy rotated its key, check the new one with the Caddy project before updating install-caddy.sh."
+        return 1
+    fi
+    if [[ ! -d "${TN_ROOT_PREFIX:-}${CADDY_APT_KEYRING%/*}" ]]; then
+        install -d -o root -g root -m 0755 -- "${TN_ROOT_PREFIX:-}${CADDY_APT_KEYRING%/*}" || return 1
+    fi
+    tn_write_root_file "${TN_ROOT_PREFIX:-}${CADDY_APT_KEYRING}" 0644 < "${dir}/key.gpg" || return 1
+    print_ok "Caddy apt key verified (${CADDY_APT_KEY_FPR})."
+}
+
+# Write the Caddy apt source line (signed-by the pinned keyring), root 0644.
+caddy_write_apt_list() {
+    {
+        printf '# Caddy stable, written by install-caddy.sh. Signed by the key in %s\n' "$CADDY_APT_KEYRING"
+        printf '# (primary fingerprint %s).\n' "$CADDY_APT_KEY_FPR"
+        printf 'deb [signed-by=%s] %s any-version main\n' "$CADDY_APT_KEYRING" "$CADDY_APT_REPO"
+    } | tn_write_root_file "${TN_ROOT_PREFIX:-}${CADDY_APT_LIST}" 0644
+}
+
 # Install Caddy from the official (cloudsmith) apt repo if missing, then check the
-# version floor (an installed caddy may be an older distribution package).
+# version floor (an installed caddy may be an older distribution package). The
+# repository key is checked against CADDY_APT_KEY_FPR before apt-get update; any
+# failure stops the run.
 install_caddy_pkg() {
     if command -v caddy >/dev/null 2>&1; then
         print_ok "Caddy already installed: $(caddy version 2>/dev/null | head -1)"
@@ -556,13 +668,12 @@ install_caddy_pkg() {
         return 0
     fi
     print_info "Installing Caddy from the official repository..."
-    run_streamed apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-        > /etc/apt/sources.list.d/caddy-stable.list
-    run_streamed apt-get update
-    run_streamed apt-get install -y caddy
+    run_streamed apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg \
+        || die "apt-get could not install curl and gpg, which the Caddy install needs. Nothing was changed."
+    caddy_install_apt_key || die "the Caddy apt key was not installed (see the message above); Caddy was not installed."
+    caddy_write_apt_list || die "could not write ${CADDY_APT_LIST}; Caddy was not installed."
+    run_streamed apt-get update || die "apt-get update failed; Caddy was not installed."
+    run_streamed apt-get install -y caddy || die "apt-get install caddy failed."
     command -v caddy >/dev/null 2>&1 || die "Caddy installation failed"
     caddy_check_version
 }
@@ -686,6 +797,10 @@ caddy_write_managed() {
         printf '%s\n' "$CADDY_MARKER"
         printf '# Single managed Caddyfile. Per-vhost blocks are fenced below; install-caddy.sh\n'
         printf '# toggles each independently and preserves the other block verbatim.\n'
+        printf '# Global options: the admin API listens on a unix socket only.\n'
+        printf '{\n'
+        printf '\tadmin %s\n' "$CADDY_ADMIN_ADDR"
+        printf '}\n'
         if [[ -n "$dash" && -s "$dash" ]]; then
             printf '\n%s\n' "$DASH_BEGIN"
             cat "$dash"
@@ -704,10 +819,13 @@ caddy_write_managed() {
 # same-filesystem rename) as the live Caddyfile:
 #   1. `caddy validate` it with the output SHOWN to the operator (hashes redacted); on
 #      failure remove it and die -- the live file is untouched;
-#   2. keep the true pre-Telcoin config once (Caddyfile.tn-orig, never our own file);
-#   3. back up the live file to Caddyfile.bak.<YYYYmmdd_HHMMSS> (cp -p; never clobbers
-#      an existing backup) and record it in CADDY_LAST_BACKUP for caddy_apply_live;
-#   4. give <tmp> the live file's owner+mode (root:root 0644 when none), then mv -f;
+#   2. keep the true pre-Telcoin config once (Caddyfile.tn-orig, root 0600, never our
+#      own file);
+#   3. back up the live file to Caddyfile.bak.<YYYYmmdd_HHMMSS> (root 0600; never
+#      clobbers an existing backup) and record it in CADDY_LAST_BACKUP for
+#      caddy_apply_live;
+#   4. write <tmp> over the live file through tn_write_root_file: root:caddy 0640
+#      (root:root 0644 while there is no caddy group), then remove <tmp>;
 #   5. prune the timestamped backups to the newest CADDY_KEEP_BACKUPS.
 # <validate>=novalidate skips step 1 (said so) -- only caddy_teardown passes it, when
 # the caddy binary is gone and there is nothing to validate with.
@@ -726,26 +844,40 @@ caddy_swap_in() {
         die "the new Caddyfile failed validation (caddy validate exit ${rc}, output above) -- live config ${CADDYFILE} left unchanged"
     fi
     if [[ -f "$CADDYFILE" && ! -f "$CADDYFILE_ORIG" ]] && ! grep -qF "$CADDY_MARKER" "$CADDYFILE" 2>/dev/null; then
-        cp -p "$CADDYFILE" "$CADDYFILE_ORIG"
+        tn_write_root_file "$CADDYFILE_ORIG" 0600 < "$CADDYFILE" \
+            || { rm -f "$tmp"; die "could not keep a copy of the current Caddyfile as ${CADDYFILE_ORIG} -- live config ${CADDYFILE} left unchanged"; }
     fi
     if [[ -f "$CADDYFILE" ]]; then
         bak="${CADDYFILE}.bak.$(date +%Y%m%d_%H%M%S)"
-        while [[ -e "$bak" ]]; do
+        while [[ -e "$bak" || -L "$bak" ]]; do
             sleep 1
             bak="${CADDYFILE}.bak.$(date +%Y%m%d_%H%M%S)"
         done
-        cp -p "$CADDYFILE" "$bak"
+        tn_write_root_file "$bak" 0600 < "$CADDYFILE" \
+            || { rm -f "$tmp"; die "could not back up the live Caddyfile to ${bak} -- live config ${CADDYFILE} left unchanged"; }
         CADDY_LAST_BACKUP="$bak"
         caddy_say info "Backed up the live Caddyfile to ${bak}"
-        chown --reference="$CADDYFILE" "$tmp"
-        chmod --reference="$CADDYFILE" "$tmp"
-    else
-        chown root:root "$tmp"
-        chmod 0644 "$tmp"
     fi
-    mv -f "$tmp" "$CADDYFILE"
+    caddy_live_write < "$tmp" || { rm -f "$tmp"; die "could not write ${CADDYFILE} -- it is unchanged"; }
+    rm -f "$tmp"
     CADDY_SWAPPED=true
     caddy_prune_backups
+}
+
+# caddy_live_group -- the group the live Caddyfile gets: caddy when that group
+# exists (Caddy runs as user caddy), else root.
+caddy_live_group() {
+    if getent group caddy >/dev/null 2>&1; then echo caddy; else echo root; fi
+}
+
+# Write stdin over the live Caddyfile: root:caddy 0640, or root:root 0644 when there
+# is no caddy group (Caddy not installed). tn_write_root_file's return code.
+caddy_live_write() {
+    if [[ "$(caddy_live_group)" == "caddy" ]]; then
+        tn_write_root_file "$CADDYFILE" 0640 caddy
+    else
+        tn_write_root_file "$CADDYFILE" 0644
+    fi
 }
 
 # Delete all but the newest CADDY_KEEP_BACKUPS timestamped backups
@@ -757,11 +889,16 @@ caddy_prune_backups() {
     local f suffix n i
     local -a found=() sorted=()
     for f in "${CADDYFILE}".bak.[0-9]*_[0-9]*; do
-        [[ -f "$f" ]] || continue
+        [[ -f "$f" && ! -L "$f" ]] || continue
         suffix="${f#"${CADDYFILE}.bak."}"
         [[ "$suffix" =~ ^[0-9]{8}_[0-9]{6}$ ]] || continue
+        # Backups written by an older release were 0644; none stays readable.
+        chmod 0600 "$f" 2>/dev/null || true
         found+=("$f")
     done
+    if [[ -f "$CADDYFILE_ORIG" && ! -L "$CADDYFILE_ORIG" ]]; then
+        chmod 0600 "$CADDYFILE_ORIG" 2>/dev/null || true
+    fi
     n=${#found[@]}
     [[ "$n" -gt "$CADDY_KEEP_BACKUPS" ]] || return 0
     while IFS= read -r f; do
@@ -778,23 +915,69 @@ caddy_prune_backups() {
     return 0
 }
 
-# Put CADDY_LAST_BACKUP back as the live Caddyfile (byte-identical, same owner+mode via
-# cp -p, then an atomic rename). 1 when this run swapped nothing / there is no backup.
+# Put CADDY_LAST_BACKUP back as the live Caddyfile (byte-identical, root:caddy 0640
+# through tn_write_root_file). 1 when this run swapped nothing / there is no backup.
 caddy_restore_backup() {
-    local bak="$CADDY_LAST_BACKUP" rtmp
-    [[ "$CADDY_SWAPPED" == "true" && -n "$bak" && -f "$bak" ]] || return 1
-    rtmp="$(mktemp "${CADDYFILE}.tn-restore.XXXXXX")" || return 1
-    caddy_tmp_track "$rtmp"
-    cp -p "$bak" "$rtmp" || return 1
-    mv -f "$rtmp" "$CADDYFILE" || return 1
+    local bak="$CADDY_LAST_BACKUP"
+    [[ "$CADDY_SWAPPED" == "true" && -n "$bak" && -f "$bak" && ! -L "$bak" ]] || return 1
+    caddy_live_write < "$bak"
 }
 
-# 0 (true) when the Caddyfile this run replaced (CADDY_LAST_BACKUP) turns Caddy's admin
-# API off (`admin off` in its global options). `systemctl reload caddy` goes through
-# that API, so a Caddy started from such a file can never be reloaded.
-caddy_backup_admin_off() {
-    [[ "$CADDY_SWAPPED" == "true" && -n "$CADDY_LAST_BACKUP" && -f "$CADDY_LAST_BACKUP" ]] || return 1
-    awk '{sub(/(^|[[:space:]])#.*$/, "")} /(^|[[:space:]{])admin[[:space:]]+off([[:space:]}]|$)/ {f=1} END {exit !f}' "$CADDY_LAST_BACKUP" 2>/dev/null
+# The command an operator runs to put <backup> back by hand.
+caddy_restore_hint() {
+    printf 'sudo install -m 0640 -o root -g caddy %s %s && sudo systemctl restart caddy' "$1" "${CADDYFILE#"${TN_ROOT_PREFIX:-}"}"
+}
+
+# caddy_admin_addr <file> -- print the admin address <file> gives Caddy in its global
+# options (`off`, `unix//path|mode`, `localhost:2019`, ...), or `default` when it sets
+# none. Comments are ignored.
+caddy_admin_addr() {
+    local a
+    a="$(awk '{ sub(/(^|[[:space:]])#.*$/, "") }
+        match($0, /(^|[[:space:]{])admin[[:space:]]+[^[:space:]{}]+/) {
+            s = substr($0, RSTART, RLENGTH); sub(/^.*admin[[:space:]]+/, "", s); print s; exit
+        }' "$1" 2>/dev/null)" || a=""
+    printf '%s\n' "${a:-default}"
+}
+
+# 0 (true) when the Caddyfile this run replaced (CADDY_LAST_BACKUP; Caddy's default
+# when there was none) and the live one name different admin addresses. `systemctl
+# reload caddy` sends the new config to the admin address the NEW file names, which
+# the running Caddy is not listening on, so such a change needs a restart.
+caddy_admin_changed() {
+    local old="default" new
+    [[ "$CADDY_SWAPPED" == "true" ]] || return 1
+    if [[ -n "$CADDY_LAST_BACKUP" && -f "$CADDY_LAST_BACKUP" ]]; then
+        old="$(caddy_admin_addr "$CADDY_LAST_BACKUP")"
+    fi
+    new="$(caddy_admin_addr "$CADDYFILE")"
+    [[ "$old" != "$new" ]]
+}
+
+# Write (or, with `remove`, delete) the caddy.service drop-in that gives Caddy its
+# runtime directory /run/caddy (0750) for the admin socket, then reload systemd when
+# the drop-in changed. rc 1 when it could not be written.
+caddy_admin_dropin() {
+    local want body dir="${CADDY_ADMIN_DROPIN%/*}"
+    if [[ "${1:-}" == "remove" ]]; then
+        [[ -e "$CADDY_ADMIN_DROPIN" || -L "$CADDY_ADMIN_DROPIN" ]] || return 0
+        rm -f -- "$CADDY_ADMIN_DROPIN"
+        rmdir -- "$dir" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+        return 0
+    fi
+    want="$(printf '%s\n' '# Written by install-caddy.sh: runtime directory for the admin API socket.' \
+        '[Service]' 'RuntimeDirectory=caddy' 'RuntimeDirectoryMode=0750')"
+    if [[ -f "$CADDY_ADMIN_DROPIN" && ! -L "$CADDY_ADMIN_DROPIN" ]]; then
+        body="$(cat "$CADDY_ADMIN_DROPIN" 2>/dev/null || true)"
+        [[ "$body" == "$want" ]] && return 0
+    fi
+    if [[ ! -d "$dir" ]]; then
+        install -d -o root -g root -m 0755 -- "$dir" || return 1
+    fi
+    printf '%s\n' "$want" | tn_write_root_file "$CADDY_ADMIN_DROPIN" 0644 || return 1
+    systemctl daemon-reload 2>/dev/null || caddy_say warn "systemctl daemon-reload failed after writing ${CADDY_ADMIN_DROPIN}."
+    return 0
 }
 
 # Put the freshly swapped-in Caddyfile into effect. Caddy ACTIVE -> `systemctl reload`
@@ -803,18 +986,20 @@ caddy_backup_admin_off() {
 # Caddy still runs, and dies non-zero naming the backup -- NEVER a fallback restart,
 # which would take every vhost down on a bad config. A reload that succeeds but leaves
 # Caddy inactive a second later dies saying exactly that (the new config stays on
-# disk). One exception to reload-only: when the file just replaced had `admin off`
-# (an operator Caddyfile taken over after confirmation) no reload can work, so that
-# apply is a `systemctl restart`, with the reason printed. Caddy NOT active ->
-# `systemctl restart` (first start) and die if it does not come up. Every caller stops
-# on that die, so e.g. rpc-enable never advertises an endpoint whose vhost failed to load.
+# disk). One exception to reload-only: when the admin address changes between the
+# replaced file and the new one (the first switch to the admin socket, an operator
+# Caddyfile with `admin off` taken over after confirmation, a teardown back to Caddy's
+# default) no reload can reach the running Caddy, so that apply is a `systemctl
+# restart`, with the reason printed. Caddy NOT active -> `systemctl restart` (first
+# start) and die if it does not come up. Every caller stops on that die, so e.g.
+# rpc-enable never advertises an endpoint whose vhost failed to load.
 caddy_apply_live() {
     if systemctl is-active --quiet caddy 2>/dev/null; then
-        if caddy_backup_admin_off; then
-            caddy_say info "The Caddyfile being replaced (${CADDY_LAST_BACKUP}) sets 'admin off', and 'systemctl reload' needs Caddy's admin API -- restarting Caddy once to apply the new config (the managed file keeps the admin API on, so later changes reload)."
-            systemctl restart caddy || die "caddy failed to restart with the new config and is DOWN (check: journalctl -u caddy). To go back: sudo cp -p ${CADDY_LAST_BACKUP} ${CADDYFILE} && sudo systemctl restart caddy"
+        if caddy_admin_changed; then
+            caddy_say info "The new Caddyfile moves Caddy's admin API ($(caddy_admin_addr "${CADDY_LAST_BACKUP:-/dev/null}") -> $(caddy_admin_addr "$CADDYFILE")), and 'systemctl reload' cannot reach the running Caddy across that change -- restarting Caddy once to apply the new config (later changes reload)."
+            systemctl restart caddy || die "caddy failed to restart with the new config and is DOWN (check: journalctl -u caddy). To go back: $(caddy_restore_hint "${CADDY_LAST_BACKUP:-<backup>}")"
             sleep 1
-            systemctl is-active --quiet caddy || die "caddy is not active after the restart with the new config (check: journalctl -u caddy). To go back: sudo cp -p ${CADDY_LAST_BACKUP} ${CADDYFILE} && sudo systemctl restart caddy"
+            systemctl is-active --quiet caddy || die "caddy is not active after the restart with the new config (check: journalctl -u caddy). To go back: $(caddy_restore_hint "${CADDY_LAST_BACKUP:-<backup>}")"
             return 0
         fi
         if ! systemctl reload caddy; then
@@ -832,9 +1017,11 @@ caddy_apply_live() {
     systemctl is-active --quiet caddy || die "caddy is not active after start (check: journalctl -u caddy). Previous Caddyfile: ${CADDY_LAST_BACKUP:-none}"
 }
 
-# Enable caddy at boot, then apply the new config (reload if running, else first start).
+# Enable caddy at boot, give it the admin socket directory, then apply the new config
+# (reload if running, else first start).
 caddy_reload() {
     systemctl enable caddy >/dev/null 2>&1 || true
+    caddy_admin_dropin || die "could not write ${CADDY_ADMIN_DROPIN}, which Caddy needs for its admin socket. ${CADDYFILE} holds the new config; Caddy was not reloaded."
     caddy_apply_live
 }
 
@@ -865,8 +1052,12 @@ caddy_teardown() {
     fi
     if [[ "$have_caddy" == "true" ]]; then
         caddy_swap_in "$tmp"
+        # The restored or stub file names its own admin address (or the default);
+        # Caddy no longer needs the socket directory.
+        caddy_admin_dropin remove
         caddy_apply_live
     else
+        caddy_admin_dropin remove
         caddy_swap_in "$tmp" novalidate
         caddy_say info "Caddy is not installed -- ${CADDYFILE} was rewritten; there is no Caddy service to reload."
     fi
@@ -950,14 +1141,17 @@ HTML
 #     answers) and no per-IP limits (carrier NAT puts many users behind one address).
 # 127.0.0.1 (not localhost) matches reth's IPv4 loopback bind (http_addr/ws_addr
 # default to Ipv4Addr::LOCALHOST). Tabs keep the file `caddy fmt`-clean, heredoc
-# included. Ports come from .node-meta (meta_get), default 8545/8546 -- so a node that
-# pinned non-default ports is proxied correctly too. <with_ws> (default true) only
-# decides whether the page mentions wss://; the WebSocket route is always there.
+# included. Ports come from the node launch (--http.port / --ws.port), else
+# .node-meta (RPC_PORT / WS_PORT), else 8545/8546 (caddy_node_port); a port outside
+# 1024-65535 or the Node Manager's own port is refused before anything is written.
+# <with_ws> (default true) only decides whether the page mentions wss://; the
+# WebSocket route is always there.
 write_rpc_block() {
     local domain="$1" outfile="$2" with_ws="${3:-true}"
     local rpc_port ws_port
-    rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"; [[ "$rpc_port" =~ ^[0-9]+$ ]] || rpc_port=8545
-    ws_port="$(meta_get WS_PORT 2>/dev/null || true)";   [[ "$ws_port"  =~ ^[0-9]+$ ]] || ws_port=8546
+    rpc_port="${CADDY_RPC_PORT:-}"
+    [[ -n "$rpc_port" ]] || rpc_port="$(caddy_node_port --http.port RPC_PORT 8545)" || die "no usable reth HTTP port for the public RPC site (see above). Nothing was changed."
+    ws_port="$(caddy_ws_port)" || die "no usable reth WebSocket port for the public RPC site (see above). Nothing was changed."
     {
         printf '%s: public JSON-RPC + WebSocket endpoint, written by\n' "$RPC_BLOCK_STAMP"
         printf '# install-caddy.sh rpc-enable (run it again with the same hostname to rewrite\n'
@@ -1002,6 +1196,51 @@ write_rpc_block() {
         printf '\t}\n'
         printf '}\n'
     } > "$outfile"
+}
+
+# caddy_proxy_port_ok <port> -- 0 when <port> is a decimal port 1024-65535 other than
+# the Node Manager UI's (CADDY_UI_PORT): the only ports the public RPC site may proxy to.
+caddy_proxy_port_ok() {
+    local p="${1:-}"
+    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+    p=$((10#$p))
+    [[ "$p" -ge 1024 && "$p" -le 65535 && "$p" -ne "$CADDY_UI_PORT" ]]
+}
+
+# caddy_launch_port <flag> -- print the value the node launch file gives <flag>
+# (--http.port, --ws.port); rc 1 when there is no readable launch file or no flag.
+caddy_launch_port() {
+    local target svc method file
+    declare -F tn_node_launch_target >/dev/null 2>&1 || return 1
+    declare -F tn_launch_flag_get >/dev/null 2>&1 || return 1
+    target="$(tn_node_launch_target 2>/dev/null)" || return 1
+    read -r svc method file <<< "$target"
+    [[ -n "$file" && -f "$file" ]] || return 1
+    tn_launch_flag_get "$file" "$1" 2>/dev/null
+}
+
+# caddy_node_port <flag> <meta-key> <default> -- print the port reth listens on for
+# <flag>: the node launch file first (what the node really runs with), else
+# .node-meta <meta-key>, else <default>. rc 1 (message on stderr) when the value is
+# not a port 1024-65535 or is the Node Manager UI port; rc 2 when <meta-key> is
+# set more than once in .node-meta.
+caddy_node_port() {
+    local flag="$1" key="$2" dflt="$3" v src
+    src="the node launch (${flag})"
+    v="$(caddy_launch_port "$flag")" || v=""
+    if [[ -z "$v" ]]; then
+        src=".node-meta ${key}"
+        v="$(addon_meta_get "$key" "")" || return 2
+    fi
+    if [[ -z "$v" ]]; then
+        src="the default"
+        v="$dflt"
+    fi
+    if ! caddy_proxy_port_ok "$v"; then
+        print_error "Refusing port '${v}' from ${src} as a proxy target: it must be 1024-65535 and not the Node Manager port ${CADDY_UI_PORT}." >&2
+        return 1
+    fi
+    printf '%s\n' "$((10#$v))"
 }
 
 # 0 (true) when the managed Caddyfile holds a tn-rpc block without RPC_BLOCK_STAMP:
@@ -1059,7 +1298,9 @@ caddy_node_info_path() {
 # error, 3 unexpected shape).
 caddy_edit_node_info() {
     local ni="$1" mode="$2" http_url="${3:-}" ws_url="${4:-}"
-    TN_NI_FILE="$ni" TN_NI_MODE="$mode" TN_NI_HTTP="$http_url" TN_NI_WS="$ws_url" python3 - <<'PYEOF'
+    # Runs as the service user (the data dir is that user's): a link planted in the
+    # data dir gives the editor nothing beyond that user's own rights.
+    tn_as_service_user env TN_NI_FILE="$ni" TN_NI_MODE="$mode" TN_NI_HTTP="$http_url" TN_NI_WS="$ws_url" python3 -I - <<'PYEOF'
 import os, sys
 
 path = os.environ["TN_NI_FILE"]
@@ -1290,25 +1531,59 @@ caddy_node_info_can_edit() {
     tn_launch_runner >/dev/null 2>&1
 }
 
-# Give <ni> the owner and mode of <bak> again. keytool rewrites node-info.yaml in
-# place, so this is a safety net for an editor that replaced the file instead.
-caddy_node_info_keep_perms() {
-    chown --reference="$2" "$1" 2>/dev/null || true
-    chmod --reference="$2" "$1" 2>/dev/null || true
+# caddy_run_dir -- print this run's root-only directory (mktemp -d under
+# TN_CADDY_RUN_PARENT, default /run; mode 0700), creating it on first use. It holds
+# the node-info.yaml backup and the launch dry-run copy, and the EXIT trap removes it.
+caddy_run_dir() {
+    if [[ -z "$CADDY_RUN_DIR" || ! -d "$CADDY_RUN_DIR" ]]; then
+        CADDY_RUN_DIR="$(mktemp -d "${TN_CADDY_RUN_PARENT:-/run}/tn-caddy.XXXXXX")" || return 1
+        caddy_tmp_track "$CADDY_RUN_DIR"
+        chmod 0700 "$CADDY_RUN_DIR" || return 1
+    fi
+    printf '%s\n' "$CADDY_RUN_DIR"
+}
+
+# caddy_ni_backup <ni> -- copy node-info.yaml, read as the service user, into the
+# root-only run directory (CADDY_NI_BAK). rc 1 when it cannot be read or copied.
+caddy_ni_backup() {
+    local dir
+    dir="$(caddy_run_dir)" || return 1
+    CADDY_NI_BAK="${dir}/node-info.yaml"
+    if ! tn_as_service_user cat -- "$1" > "$CADDY_NI_BAK"; then
+        rm -f -- "$CADDY_NI_BAK"
+        CADDY_NI_BAK=""
+        return 1
+    fi
+    return 0
+}
+
+# caddy_ni_restore <ni> -- write the backup back over <ni> as the service user (root
+# only opens the backup). rc 1 when there is no backup or the write failed.
+caddy_ni_restore() {
+    [[ -n "$CADDY_NI_BAK" && -f "$CADDY_NI_BAK" ]] || return 1
+    # shellcheck disable=SC2016  # $1 expands in the service user's sh, not here
+    tn_as_service_user sh -c 'cat > "$1"' sh "$1" < "$CADDY_NI_BAK"
+}
+
+# Drop the node-info.yaml backup (the edit was kept).
+caddy_ni_discard() {
+    [[ -n "$CADDY_NI_BAK" ]] && rm -f -- "$CADDY_NI_BAK"
+    CADDY_NI_BAK=""
+    return 0
 }
 
 # Make worker 0 of <ni> advertise <http> (+ <ws> when non-empty) for mode=set, or
-# nothing for mode=clear, then read it back and compare. The caller has copied <ni>
-# to <ni>.tn-bak. Prefers `keytool set-rpc` run by the node's own release, through
+# nothing for mode=clear, then read it back and compare. The caller has backed <ni>
+# up (caddy_ni_backup). Prefers `keytool set-rpc` run by the node's own release, through
 # tn_launch_runner + tn_keytool (lib/common.sh 1.6.0): the node that reads the file
 # writes it. When keytool cannot run or fails, or worker 0 does not read back as
 # wanted, the backup is restored and the python3 editor (caddy_edit_node_info) tries.
-# Owner and mode are restored from the backup after either editor.
+# Both editors run as the service user, which owns the data dir.
 # rc 0 written and verified; 1 failed, <ni> restored from the backup; 2 no editor
 # could run (no keytool runner, no python3), <ni> untouched.
 caddy_node_info_write() {
     local ni="$1" mode="$2" http_url="${3:-}" ws_url="${4:-}"
-    local bak="${1}.tn-bak" want spec="" out rc first cur tried=false
+    local want spec="" out rc first cur tried=false
     local -a args=()
     if [[ "$mode" == "set" ]]; then
         want="${http_url} ${ws_url:-none}"
@@ -1331,7 +1606,6 @@ caddy_node_info_write() {
         rc=0
         out="$(tn_keytool "$spec" "${ni%/*}" "${args[@]}" 2>&1)" || rc=$?
         if [[ "$rc" -eq 0 ]]; then
-            caddy_node_info_keep_perms "$ni" "$bak"
             cur="$(caddy_node_info_rpc_get "$ni" || echo unreadable)"
             if [[ "$cur" == "$want" ]]; then
                 caddy_say info "node-info.yaml written by keytool set-rpc (${spec})."
@@ -1342,7 +1616,7 @@ caddy_node_info_write() {
             first="$(printf '%s\n' "$out" | awk 'NF {print; exit}' || true)"
             caddy_say info "keytool set-rpc failed (rc ${rc}${first:+: ${first}}). Restoring node-info.yaml and trying the python3 editor."
         fi
-        cp -p "$bak" "$ni" 2>/dev/null || true
+        caddy_ni_restore "$ni" 2>/dev/null || true
     fi
     if ! command -v python3 >/dev/null 2>&1; then
         if [[ "$tried" == "true" ]]; then
@@ -1352,25 +1626,31 @@ caddy_node_info_write() {
         return 2
     fi
     if caddy_edit_node_info "$ni" "$mode" "$http_url" "$ws_url"; then
-        caddy_node_info_keep_perms "$ni" "$bak"
         cur="$(caddy_node_info_rpc_get "$ni" || echo unreadable)"
         [[ "$cur" == "$want" ]] && return 0
         caddy_say warn "After the python3 edit, worker 0 of node-info.yaml reads '${cur}' instead of '${want}'."
     fi
-    cp -p "$bak" "$ni" 2>/dev/null || true
+    caddy_ni_restore "$ni" 2>/dev/null || true
     return 1
 }
 
-# Undo / keep a launch-file --ws edit made by caddy_ws_inject (no-op when none).
+# Undo / keep a launch-file --ws edit made by caddy_ws_inject (no-op when none). The
+# backup (tn_backup_file, /var/backups/telcoin) goes back through tn_restore_backup,
+# which refuses a backup whose hash changed.
 caddy_launch_rollback() {
     [[ -n "$CADDY_LAUNCH_BAK" && -f "$CADDY_LAUNCH_BAK" ]] || return 0
-    mv -f "$CADDY_LAUNCH_BAK" "$CADDY_LAUNCH_FILE"
+    if ! tn_restore_backup "$CADDY_LAUNCH_BAK" "$CADDY_LAUNCH_BAK_SHA" "$CADDY_LAUNCH_FILE" "$CADDY_LAUNCH_MODE" "$CADDY_LAUNCH_GROUP"; then
+        caddy_say warn "Could not restore the node launch file ${CADDY_LAUNCH_FILE} from ${CADDY_LAUNCH_BAK}; it still carries the --ws change. Put it back by hand from that backup."
+        CADDY_LAUNCH_BAK=""
+        return 0
+    fi
+    rm -f -- "$CADDY_LAUNCH_BAK"
     if [[ "$CADDY_LAUNCH_METHOD" == "docker" ]]; then systemctl daemon-reload 2>/dev/null || true; fi
     caddy_say warn "Restored the node launch file ${CADDY_LAUNCH_FILE} (the --ws change was undone)."
     CADDY_LAUNCH_BAK=""
 }
 caddy_launch_commit() {
-    [[ -n "$CADDY_LAUNCH_BAK" ]] && rm -f "$CADDY_LAUNCH_BAK"
+    [[ -n "$CADDY_LAUNCH_BAK" ]] && rm -f -- "$CADDY_LAUNCH_BAK"
     CADDY_LAUNCH_BAK=""
 }
 
@@ -1423,17 +1703,31 @@ caddy_node_unlock() {
 # recovers from a rollback never calls it. Progress goes through caddy_say (step /
 # log / warn events in --json runs).
 caddy_restart_window() {
+    local rc
     [[ "$CADDY_WINDOW_DONE" == "true" ]] && return 0
     CADDY_WINDOW_DONE=true
     caddy_node_lock
     caddy_lib_has "the node restarts without waiting for the epoch boundary, even when it is in the committee" tn_wait_restart_window tn_local_rpc_url || return 0
     tn_wait_restart_window "$(tn_local_rpc_url)" caddy_wait_say || true
+    # CORE-2: drop the declare -F guard once tn_committee_down_guard is in lib/common.sh.
+    if declare -F tn_committee_down_guard >/dev/null 2>&1; then
+        rc=0
+        tn_committee_down_guard "$(tn_local_rpc_url)" caddy_wait_say || rc=$?
+        case "$rc" in
+            0) ;;
+            2) caddy_say warn "The committee could not be read, so this run cannot tell how many committee members are down; going on." ;;
+            *)
+                [[ "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]] \
+                    || die "restarting this node now could leave the committee without a quorum (see above); nothing on the node was changed. Run this again later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
+                ;;
+        esac
+    fi
     return 0
 }
 
 # Restart the node and verify RPC returns. FAST-FAIL if the unit enters `failed` (an
 # invalid worker.rpc crash-loops at startup: Restart=on-failure, StartLimitBurst=5):
-# restore node-info.yaml.tn-bak AND any launch-file --ws edit, restart to recover, and
+# restore node-info.yaml from its backup AND any launch-file --ws edit, restart to recover, and
 # die naming what was rolled back and whether the node came back. A slow DB-replay
 # (neither up nor failed) is NON-fatal -- the change is kept and advertises once the
 # node finishes starting (a warning and a closing note say so). <ni> is '' when only
@@ -1448,11 +1742,12 @@ caddy_restart_node_guarded() {
     if [[ -z "$svc" ]]; then
         caddy_say warn "No telcoin node service was found, so the node was not restarted. The change takes effect when the node next starts."
         caddy_note "node not restarted: no node service found"
-        [[ -n "$ni" ]] && rm -f "${ni}.tn-bak"
+        caddy_ni_discard
         caddy_launch_commit
         return 0
     fi
-    rpc_port="$(meta_get RPC_PORT 2>/dev/null || true)"; [[ "$rpc_port" =~ ^[0-9]+$ ]] || rpc_port=8545
+    rpc_port="${CADDY_RPC_PORT:-}"
+    [[ -n "$rpc_port" ]] || rpc_port="$(caddy_node_port --http.port RPC_PORT 8545)" || die "no usable reth HTTP port to check the node after its restart (see above); the node was not restarted.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
 
     caddy_restart_window
     caddy_say step "Restarting ${svc} to apply the change"
@@ -1473,7 +1768,10 @@ caddy_restart_node_guarded() {
         if [[ -n "$CADDY_LAUNCH_BAK" ]]; then what="${what:+${what} and }the --ws launch flags"; fi
         what="${what:-the change}"
         caddy_say warn "${svc} entered the failed state after the change; rolling back ${what}."
-        [[ -n "$ni" ]] && mv -f "${ni}.tn-bak" "$ni"
+        if [[ -n "$ni" ]] && ! caddy_ni_restore "$ni"; then
+            caddy_say warn "Could not restore ${ni} from its backup as the service user; it keeps the new worker rpc."
+        fi
+        caddy_ni_discard
         caddy_launch_rollback
         # A unit that crash-looped into `failed` has also used up its start-rate limit
         # (Restart=on-failure + StartLimitBurst), and systemd refuses a manual restart
@@ -1490,13 +1788,14 @@ caddy_restart_node_guarded() {
     fi
 
     if [[ "$rpc_up" == "true" ]]; then
-        [[ -n "$ni" ]] && rm -f "${ni}.tn-bak"
+        caddy_ni_discard
         caddy_launch_commit
         caddy_say ok "Node restarted; RPC responding on 127.0.0.1:${rpc_port}."
         return 0
     fi
 
-    caddy_say warn "${svc} is still starting (DB replay?) and RPC has not answered yet. The change is kept and takes effect once the node is up. Backup(s): ${ni:+${ni}.tn-bak }${CADDY_LAUNCH_BAK}"
+    caddy_ni_discard
+    caddy_say warn "${svc} is still starting (DB replay?) and RPC has not answered yet. The change is kept and takes effect once the node is up.${CADDY_LAUNCH_BAK:+ Launch file backup: ${CADDY_LAUNCH_BAK}}"
     caddy_note "node still starting; the change applies once it is up"
     return 0
 }
@@ -1605,12 +1904,21 @@ caddy_node_info_advertise() {
     # The update lock, then a committee node waits for the epoch boundary, before
     # anything is edited.
     caddy_restart_window
-    cp -p "$ni" "${ni}.tn-bak"
+    if ! caddy_ni_backup "$ni"; then
+        if [[ "$mode" == "clear" ]]; then
+            caddy_say warn "Could not back up ${ni} as the service user, so the worker rpc was not cleared; it still advertises the removed endpoint. Clear it by hand (set 'rpc: ~' on the first entry under p2p_info.workers), then restart the node (sudo systemctl restart ${svc})."
+            caddy_note "node-info.yaml still advertises the endpoint"
+            caddy_restart_for_launch
+            return 0
+        fi
+        caddy_launch_rollback
+        die "could not back up node-info.yaml as the service user (${SERVICE_USER:-unset}), so it was not edited."
+    fi
     rc=0
     caddy_node_info_write "$ni" "$mode" "$http_url" "$ws_url" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         # caddy_node_info_write restored the file from the backup (or never touched it).
-        rm -f "${ni}.tn-bak"
+        caddy_ni_discard
         if [[ "$mode" == "clear" ]]; then
             # rpc-disable has already removed the public site; a node-info.yaml that
             # cannot be edited is a warning, not a failure of the takedown.
@@ -1630,11 +1938,14 @@ caddy_node_info_advertise() {
     caddy_restart_node_guarded "$ni"
 }
 
-# reth WebSocket port: .node-meta WS_PORT, default 8546 (same source as write_rpc_block).
+# reth WebSocket port: the node launch --ws.port, else .node-meta WS_PORT, else 8546
+# (caddy_node_port). rc 1/2 as caddy_node_port.
 caddy_ws_port() {
-    local p; p="$(meta_get WS_PORT 2>/dev/null || true)"
-    [[ "$p" =~ ^[0-9]+$ ]] || p=8546
-    printf '%s\n' "$p"
+    if [[ -n "$CADDY_WS_PORT_SET" ]]; then
+        printf '%s\n' "$CADDY_WS_PORT_SET"
+        return 0
+    fi
+    caddy_node_port --ws.port WS_PORT 8546
 }
 
 # 0 (true) when <file> carries launch flag <flag-regex> as a whole word (`--f`, `--f v`,
@@ -1738,10 +2049,11 @@ caddy_ws_plan() {
     caddy_launch_carries "$file" --ws.port || CADDY_WS_FLAGS="${CADDY_WS_FLAGS} --ws.port ${ws_port}"
     # Dry run on a copy with the same name (a .service file follows unit rules), so a
     # refused edit is known before any wait.
+    # The copy sits in a root-only directory under /run: the launch writer refuses a
+    # directory that is not root-owned and closed to others (as /tmp is).
     rc=4
-    dir="$(mktemp -d "${TMPDIR:-/tmp}/tn-ws-dry.XXXXXX" 2>/dev/null || true)"
+    dir="$(caddy_run_dir 2>/dev/null)" && dir="$(mktemp -d "${dir}/ws-dry.XXXXXX" 2>/dev/null)" || dir=""
     if [[ -n "$dir" ]]; then
-        caddy_tmp_track "$dir"
         copy="${dir}/${file##*/}"
         if cp -p "$file" "$copy" 2>/dev/null; then
             rc=0
@@ -1782,27 +2094,39 @@ caddy_ws_plan() {
 caddy_ws_inject() {
     local ws_port="$1" file="$CADDY_LAUNCH_FILE" rc why
     local by_hand="add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the node launch by hand and re-run rpc-enable to advertise wss:// too"
+    local out st
     caddy_restart_window
-    if ! cp -p "$file" "${file}.tn-bak"; then
+    st="$(stat -c '%a %g' -- "$file" 2>/dev/null)" || st=""
+    out=""
+    if [[ -n "$st" ]]; then
+        out="$(tn_backup_file "$file" "caddy-launch.${file##*/}" 2>/dev/null)" || out=""
+    fi
+    if [[ -z "$out" ]]; then
         caddy_say warn "Could not back up the node launch (${file}), so --ws is not added. Advertising https:// only (no wss://)."
         return 1
     fi
+    CADDY_LAUNCH_MODE="$(_tn_strip_gw "${st%% *}")"
+    CADDY_LAUNCH_GROUP="${st##* }"
+    CADDY_LAUNCH_BAK_SHA="${out##* }"
+    out="${out% *}"
     # Marker: a whole-word --ws on a live line. rc per the launch-flag family: 0 added,
     # 1 already there, 2 no node launch line, 3 refused, 4 could not write.
     rc=0
     tn_node_inject_flags "$file" '(^|[[:space:]])--ws([[:space:]]|$)' "$CADDY_WS_FLAGS" || rc=$?
     if [[ "$rc" -eq 0 ]] && tn_launch_flag_get "$file" --ws >/dev/null 2>&1 && caddy_launch_syntax_ok "$file"; then
         if [[ "$CADDY_LAUNCH_METHOD" == "docker" ]]; then systemctl daemon-reload || caddy_say warn "systemctl daemon-reload failed"; fi
-        CADDY_LAUNCH_BAK="${file}.tn-bak"
+        CADDY_LAUNCH_BAK="$out"
         caddy_say ok "Enabled the reth WebSocket: added '${CADDY_WS_FLAGS}' to the node launch (${file}); it takes effect on the node restart below."
         return 0
     fi
     # Anything else leaves the file as it was: the helper wrote nothing (rc 1-4), or
     # the edit did not read back and the backup goes back.
-    if [[ "$rc" -eq 0 ]]; then
-        mv -f "${file}.tn-bak" "$file"
+    if [[ "$rc" -ne 0 ]]; then
+        rm -f -- "$out"
+    elif tn_restore_backup "$out" "$CADDY_LAUNCH_BAK_SHA" "$file" "$CADDY_LAUNCH_MODE" "$CADDY_LAUNCH_GROUP"; then
+        rm -f -- "$out"
     else
-        rm -f "${file}.tn-bak"
+        caddy_say warn "Could not restore ${file} from ${out}; put it back by hand from that backup."
     fi
     case "$rc" in
         0) why="the edited launch file did not read back --ws (or no longer parses), so the edit was undone" ;;
@@ -1836,23 +2160,97 @@ caddy_ws_verify() {
 # PHASES -- DASHBOARD
 # =============================================================================
 
+# caddy_password_len <value> -- its length in bytes.
+caddy_password_len() {
+    local LC_ALL=C v="${1:-}"
+    printf '%s\n' "${#v}"
+}
+
+# caddy_password_problem <value> -- print why <value> cannot be the dashboard password
+# (empty when it can): at least CADDY_PASSWORD_MIN bytes, no control characters.
+caddy_password_problem() {
+    local v="${1:-}"
+    if [[ "$(caddy_password_len "$v")" -lt "$CADDY_PASSWORD_MIN" ]]; then
+        printf 'the password must be at least %s characters\n' "$CADDY_PASSWORD_MIN"
+    elif [[ "$v" == *[[:cntrl:]]* ]]; then
+        printf 'the password must not contain control characters\n'
+    fi
+}
+
+# Print a new random dashboard password (24 characters, letters and digits).
+caddy_generate_password() {
+    local p=""
+    if command -v openssl >/dev/null 2>&1; then
+        p="$(openssl rand -base64 33 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24)" || p=""
+    fi
+    if [[ "${#p}" -lt 24 ]]; then
+        # A fixed read, so no stage of the pipe is cut off early (pipefail).
+        p="$(head -c 512 /dev/urandom 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24)" || p=""
+    fi
+    printf '%s\n' "$p"
+}
+
+# Read the dashboard password for --password-stdin: one line from stdin, one trailing
+# CR dropped, into CADDY_PASSWORD.
+caddy_read_password_stdin() {
+    local line=""
+    IFS= read -r line || [[ -n "$line" ]] || line=""
+    CADDY_PASSWORD="${line%$'\r'}"
+}
+
+# caddy_mainnet_gate -- refuse (die) the dashboard and public RPC on a mainnet node
+# that is a staked validator, or whose stake status cannot be read: Caddy is not for
+# mainnet validators. NETWORK comes from .node-meta (else the genesis chain id); the
+# stake from node_is_staked_validator for VALIDATOR_ADDRESS, asked of the local node
+# first, then of the network's public RPC when the local answer is unreadable. Runs
+# once per run; any other network passes.
+caddy_mainnet_gate() {
+    local net addr rc
+    [[ "$CADDY_GATE_DONE" == "true" ]] && return 0
+    net="$(addon_meta_get NETWORK "")" || die "NETWORK is set more than once in .node-meta; fix the file before enabling external access. Nothing was changed."
+    if [[ -z "$net" ]]; then
+        net="$(tn_detect_network 2>/dev/null)" || net=""
+    fi
+    if [[ "$net" != "mainnet" ]]; then
+        CADDY_GATE_DONE=true
+        return 0
+    fi
+    addr="$(addon_meta_get VALIDATOR_ADDRESS "")" || die "VALIDATOR_ADDRESS is set more than once in .node-meta; fix the file first. Nothing was changed."
+    [[ -n "$addr" ]] || die "This mainnet node has no VALIDATOR_ADDRESS in .node-meta, so this run cannot confirm it is not a staked validator. Caddy (dashboard and public RPC) is not offered on mainnet validators. Nothing was changed."
+    rc=0
+    node_is_staked_validator "$addr" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        rc=0
+        node_is_staked_validator "$addr" "$MAINNET_RPC_URL" || rc=$?
+    fi
+    case "$rc" in
+        1) CADDY_GATE_DONE=true; return 0 ;;
+        0) die "This mainnet node (${addr}) is a staked validator. Caddy (dashboard and public RPC) is not offered on mainnet validators: serve the dashboard over the SSH tunnel, and public RPC from a separate RPC node. Nothing was changed." ;;
+        *) die "Could not read the stake status of ${addr} from the local node or ${MAINNET_RPC_URL}. Caddy is not offered on mainnet validators, so this run stops until the status can be read. Nothing was changed." ;;
+    esac
+}
+
 # Refusals for a dashboard enable, checked before anything is written (and, in a
-# --json run, before any step is announced): the hostname <domain> (normalised), the
-# username, the password length and the one-hostname-per-site rule.
+# --json run, before any step is announced): a staked mainnet validator, the hostname
+# <domain> (normalised), the username, the password and the one-hostname-per-site rule.
 caddy_dashboard_precheck() {
-    local domain="$1" username="$2" clash pw="${TN_CADDY_PASSWORD:-}"
+    local domain="$1" username="$2" clash why
     caddy_require_domain "$domain" "domain"
     caddy_validate_username "$username" || die "invalid username (2-32 chars: letters, digits, . _ -)"
-    [[ "${#pw}" -ge 8 ]] || die "password too short (minimum 8 characters)"
+    why="$(caddy_password_problem "$CADDY_PASSWORD")"
+    [[ -z "$why" ]] || die "${why} (give it on stdin with --password-stdin)"
     if clash="$(caddy_domain_clash dashboard "$domain")"; then die "$clash"; fi
+    caddy_mainnet_gate
     return 0
 }
 
 # Enable the dashboard vhost: install + configure + start, preserving any RPC vhost
-# verbatim. Password arrives via TN_CADDY_PASSWORD (env only -- never argv/logs).
-# Caddy only: the node is not edited or restarted, so no update lock or epoch wait.
+# verbatim. The password is CADDY_PASSWORD (from --password-stdin, or the
+# TN_CADDY_PASSWORD that main read and unset; never argv, logs or a child's
+# environment). Caddy only: the node is not edited or restarted, so no update lock or
+# epoch wait.
 do_enable() {
-    local domain username="$2" pw="${TN_CADDY_PASSWORD:-}"
+    local domain username="$2" pw="$CADDY_PASSWORD"
     domain="$(caddy_norm_host "$1")"
     caddy_dashboard_precheck "$domain" "$username"
 
@@ -1991,26 +2389,43 @@ caddy_meta_record() {
         fi
         return 0
     fi
+    if ! caddy_meta_ready; then
+        caddy_say warn "The update lock or the ownership migration stopped the .node-meta update, so PUBLIC_RPC_DOMAIN, PUBLIC_RPC_URL and PUBLIC_WS_URL were not changed."
+        caddy_note ".node-meta not updated"
+        return 0
+    fi
     if [[ -n "$domain" ]]; then
-        caddy_lib_has "the public endpoint is not recorded in .node-meta" meta_set || return 0
         if [[ "$with_ws" == "true" ]]; then ws="wss://${domain}"; fi
         meta_set PUBLIC_RPC_DOMAIN "$domain" >/dev/null 2>&1 || failed="${failed} PUBLIC_RPC_DOMAIN"
         meta_set PUBLIC_RPC_URL "https://${domain}" >/dev/null 2>&1 || failed="${failed} PUBLIC_RPC_URL"
         meta_set PUBLIC_WS_URL "$ws" >/dev/null 2>&1 || failed="${failed} PUBLIC_WS_URL"
     else
         for key in PUBLIC_RPC_DOMAIN PUBLIC_RPC_URL PUBLIC_WS_URL; do
-            if caddy_lib_has "the PUBLIC_RPC_* keys in .node-meta are emptied instead of removed" meta_unset; then
-                meta_unset "$key" >/dev/null 2>&1 || failed="${failed} ${key}"
-            elif declare -F meta_set >/dev/null 2>&1; then
-                meta_set "$key" "" >/dev/null 2>&1 || failed="${failed} ${key}"
-            else
-                failed="${failed} ${key}"
-            fi
+            meta_unset "$key" >/dev/null 2>&1 || failed="${failed} ${key}"
         done
     fi
     if [[ -n "$failed" ]]; then
         caddy_say warn "Could not update${failed} in $(node_meta_path 2>/dev/null || echo .node-meta). The UI and check-node may show the previous public endpoint until it is fixed by hand."
     fi
+    return 0
+}
+
+# caddy_meta_ready -- make .node-meta writable for this run: the update lock (held
+# until the operation ends; the EXIT trap releases it) and addon_meta_write_begin,
+# which migrates an old ownership layout. rc 0 ready; 1 the lock is held elsewhere or
+# the migration refused (message said; nothing written).
+caddy_meta_ready() {
+    [[ "$CADDY_META_READY" == "true" ]] && return 0
+    if [[ "$CADDY_LOCK_HELD" != "true" ]]; then
+        TN_EXIT_TRAP_OWNED=1
+        if ! tn_acquire_update_lock >/dev/null 2>&1; then
+            print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}." >&2
+            return 1
+        fi
+        CADDY_LOCK_HELD=true
+    fi
+    addon_meta_write_begin || return 1
+    CADDY_META_READY=true
     return 0
 }
 
@@ -2033,6 +2448,10 @@ caddy_retarget_dashboard() {
 # notes are not mistaken for this one's.
 caddy_operation_reset() {
     CADDY_WINDOW_DONE=false
+    CADDY_META_READY=false
+    CADDY_RPC_PORT=""
+    CADDY_WS_PORT_SET=""
+    CADDY_NI_BAK=""
     CADDY_LAUNCH_FILE=""
     CADDY_LAUNCH_BAK=""
     CADDY_LAUNCH_METHOD=""
@@ -2052,7 +2471,7 @@ caddy_operation_reset() {
 CADDY_DASH_FROM=""
 CADDY_DASH_MOVE=false
 caddy_rpc_enable_precheck() {
-    local domain="$1" move_to="${2:-}" clash
+    local domain="$1" move_to="${2:-}" clash rc
     caddy_require_domain "$domain" "RPC domain"
     CADDY_DASH_MOVE=false
     CADDY_DASH_FROM="$(caddy_current_dashboard_domain)"
@@ -2066,7 +2485,40 @@ caddy_rpc_enable_precheck() {
         fi
     fi
     if [[ "$CADDY_DASH_MOVE" != "true" ]] && clash="$(caddy_domain_clash rpc "$domain")"; then die "$clash"; fi
+    caddy_mainnet_gate
+    rc=0
+    CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || rc=$?
+    [[ "$rc" -eq 0 ]] || die "no usable reth HTTP port for the public RPC site (see above). Nothing was changed."
+    CADDY_WS_PORT_SET="$(caddy_node_port --ws.port WS_PORT 8546)" || rc=$?
+    [[ "$rc" -eq 0 ]] || die "no usable reth WebSocket port for the public RPC site (see above). Nothing was changed."
     return 0
+}
+
+# The P2-5 exposure summary for a public RPC site on <domain>, one sentence per line.
+caddy_rpc_exposure_summary() {
+    printf '%s\n' \
+        "Public RPC on https://${1}/ answers anyone on the internet, for every JSON-RPC namespace the node serves, with CORS open to every origin." \
+        "This edge has no rate limit, per-IP limit or method filter: only the node's own launch limits bound the load." \
+        "For production traffic put a rate-limited gateway in front of it, and never enable it on a staked validator."
+}
+
+# caddy_rpc_confirm <domain> -- state the exposure summary and get consent. --json:
+# a `warn` event (the UI action is the consent). Otherwise --yes, or a yes typed on a
+# terminal; without a terminal and without --yes the run stops before any change.
+caddy_rpc_confirm() {
+    local line ans
+    if json_mode; then
+        json_event warn "$(caddy_rpc_exposure_summary "$1" | tr '\n' ' ')"
+        return 0
+    fi
+    while IFS= read -r line; do print_warn "$line"; done < <(caddy_rpc_exposure_summary "$1")
+    [[ "$CADDY_YES" == "true" ]] && return 0
+    [[ -t 0 ]] || die "public RPC needs your consent to the exposure above: run again with --yes (or from a terminal). Nothing was changed."
+    read -r -p "  Expose this node's RPC publicly? [y/N]: " ans
+    case "$ans" in
+        y|Y) return 0 ;;
+    esac
+    die "public RPC not enabled (not confirmed). Nothing was changed."
 }
 
 # Enable the public RPC vhost (preserving any dashboard vhost), open 80/443, then add
@@ -2099,11 +2551,16 @@ do_rpc_enable() {
 
     caddy_assert_ports_free
     caddy_assert_not_foreign
+    # .node-meta records the endpoint at the end: take the update lock and migrate an
+    # old ownership layout now, so a refusal comes before anything changes.
+    if [[ -n "$(node_meta_path 2>/dev/null || true)" ]]; then
+        caddy_meta_ready || die "the update lock or the ownership migration stopped this run (see above). Nothing was changed."
+    fi
     install_caddy_pkg
 
     # Decide the node side first: WebSocket (may need --ws in the node launch) and
     # whether node-info.yaml needs an edit. Nothing is changed or waited for here.
-    ws_port="$(caddy_ws_port)"
+    ws_port="$(caddy_ws_port)" || die "no usable reth WebSocket port (see above). Nothing was changed."
     caddy_ws_plan "$ws_port"
     if [[ "$CADDY_WS_PLAN" == "http" ]]; then want_ws=false; fi
     if [[ "$CADDY_WS_PLAN" == "inject" ]]; then node_change=true; fi
@@ -2166,6 +2623,7 @@ do_rpc_disable() {
     caddy_meta_record ""
 
     CADDY_LOCK_NOTE="The public RPC site is removed, but node-info.yaml still advertises it; run rpc-disable again once the update has finished."
+    CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || die "the public RPC site is removed, but there is no usable reth HTTP port to check the node with (see above), so node-info.yaml was not changed and still advertises it."
     caddy_node_info_advertise clear
     caddy_node_unlock
 }
@@ -2248,6 +2706,7 @@ run_json_rpc_enable() {
     domain="$(caddy_norm_host "$JSON_RPC_DOMAIN")"
     move_to="$(caddy_norm_host "$JSON_MOVE_DASH")"
     caddy_rpc_enable_precheck "$domain" "$move_to"
+    caddy_rpc_confirm "$domain"
     json_event step "Checking ports 80 and 443 are free"
     json_event step "Installing Caddy (if needed)"
     json_event step "Configuring the public RPC endpoint for ${domain}"
@@ -2385,6 +2844,7 @@ dashboard_enable_interactive() {
     print_info "login, behind Caddy. Public access is READ-ONLY -- management stays on the"
     print_info "SSH tunnel."
     echo ""
+    caddy_mainnet_gate
     caddy_prompt_public_ip
     echo ""
 
@@ -2404,10 +2864,18 @@ dashboard_enable_interactive() {
         print_warn "Invalid username (2-32 chars: letters, digits, . _ -)."
     done
     while true; do
-        read -r -s -p "  Dashboard password (min 8 chars): " pw; echo ""
+        read -r -s -p "  Dashboard password (min ${CADDY_PASSWORD_MIN} chars; Enter alone generates one): " pw; echo ""
+        if [[ -z "$pw" ]]; then
+            pw="$(caddy_generate_password)"
+            [[ -z "$(caddy_password_problem "$pw")" ]] || { print_warn "Could not generate a password; type one."; continue; }
+            print_info "Generated dashboard password (shown once; store it in your password manager):"
+            printf '      %s\n' "$pw"
+            break
+        fi
         read -r -s -p "  Confirm password: " pw2; echo ""
         [[ "$pw" == "$pw2" ]] || { print_warn "Passwords do not match."; continue; }
-        [[ "${#pw}" -ge 8 ]]  || { print_warn "Too short (min 8)."; continue; }
+        why="$(caddy_password_problem "$pw")"
+        [[ -z "$why" ]] || { print_warn "Not accepted: ${why}."; continue; }
         break
     done
 
@@ -2422,9 +2890,11 @@ dashboard_enable_interactive() {
     resolve_port_conflicts
     caddy_confirm_foreign_overwrite
 
-    export TN_CADDY_PASSWORD="$pw"
+    CADDY_PASSWORD="$pw"
+    pw=""
+    pw2=""
     do_enable "$domain" "$username"
-    unset TN_CADDY_PASSWORD
+    CADDY_PASSWORD=""
     echo ""
     print_ok "External dashboard access enabled at https://${domain}"
     print_info "The TLS certificate is issued on the first request -- give it a few seconds."
@@ -2439,6 +2909,7 @@ rpc_enable_interactive() {
     print_info "edge. Enabling ALSO advertises the endpoint in node-info.yaml (so peers discover"
     print_info "it) and restarts the node when that, or adding --ws, changes anything."
     echo ""
+    caddy_mainnet_gate
     caddy_prompt_public_ip
     echo ""
 
@@ -2476,6 +2947,7 @@ rpc_enable_interactive() {
     print_warn "ports 80/443, advertise the endpoint to peers (node-info.yaml worker rpc), and"
     print_warn "RESTART the node if node-info.yaml or its launch changes (adding --ws first if"
     print_warn "reth's WebSocket is off)."
+    while IFS= read -r ans; do print_warn "$ans"; done < <(caddy_rpc_exposure_summary "$domain")
     [[ -n "$move_to" ]] && print_warn "The dashboard moves to https://${move_to} (same login)."
     read -r -p "  Proceed? [y/N]: " ans
     case "$ans" in
@@ -2642,7 +3114,8 @@ interactive_menu() {
 # =============================================================================
 # Run ONE phase with human-readable output and no prompts -- how setup-node.sh drives
 # the RPC flow at first install. Same phases and flags as the JSON contract (enable
-# reads the password from $TN_CADDY_PASSWORD); failures exit non-zero. check-dns and
+# reads the password from --password-stdin, else $TN_CADDY_PASSWORD; rpc-enable asks
+# for consent on a terminal and needs --yes without one); failures exit non-zero. check-dns and
 # rpc-check-dns exit 0 only when the domain resolves to an address that reaches this
 # host (1 otherwise), so callers can gate on the exit code.
 run_phase_human() {
@@ -2664,6 +3137,8 @@ run_phase_human() {
         rpc-check-dns) do_check_dns_human "$JSON_RPC_DOMAIN" ;;
         rpc-enable)
             check_root
+            caddy_rpc_enable_precheck "$JSON_RPC_DOMAIN" "$JSON_MOVE_DASH"
+            caddy_rpc_confirm "$JSON_RPC_DOMAIN"
             do_rpc_enable "$JSON_RPC_DOMAIN" "$JSON_MOVE_DASH"
             caddy_rpc_enabled_summary "$JSON_RPC_DOMAIN"
             ;;
@@ -2691,8 +3166,22 @@ caddy_usage_error() {
     exit 2
 }
 
+# Die unless lib/common.sh has the helpers this release writes through (it ships with
+# this script; an older copy means update-scripts.sh did not finish).
+caddy_require_lib() {
+    local fn missing=""
+    for fn in tn_write_root_file tn_backup_file tn_restore_backup tn_as_service_user \
+              addon_meta_get addon_meta_write_begin tn_acquire_update_lock _tn_strip_gw; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
+    done
+    [[ -z "$missing" ]] && return 0
+    caddy_usage_error "lib/common.sh ${COMMON_VERSION:-unknown} lacks ${missing}; run update-scripts.sh, then this again."
+}
+
 main() {
-    local arg
+    local arg pw_env="${TN_CADDY_PASSWORD:-}"
+    # The password never stays in the environment of anything this run starts.
+    unset TN_CADDY_PASSWORD
     # --json first, so a usage error below is reported in the form the caller reads.
     for arg in "$@"; do
         if [[ "$arg" == "--json" ]]; then JSON_MODE=true; fi
@@ -2700,6 +3189,8 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json)         shift ;;
+            --password-stdin) CADDY_PASSWORD_STDIN=true; shift ;;
+            --yes|-y)       CADDY_YES=true; shift ;;
             --phase|--domain|--username|--rpc-domain|--move-dashboard-to|--public-ip)
                 # A value flag given as the last word has no value: a usage error,
                 # never a silent exit.
@@ -2732,6 +3223,14 @@ main() {
     JSON_DOMAIN="$(caddy_norm_host "$JSON_DOMAIN")"
     JSON_RPC_DOMAIN="$(caddy_norm_host "$JSON_RPC_DOMAIN")"
     JSON_MOVE_DASH="$(caddy_norm_host "$JSON_MOVE_DASH")"
+    caddy_require_lib
+    if [[ "$CADDY_PASSWORD_STDIN" == "true" ]]; then
+        [[ -z "$pw_env" ]] || caddy_usage_error "the password came both on stdin (--password-stdin) and in TN_CADDY_PASSWORD; give it one way only."
+        caddy_read_password_stdin
+    else
+        CADDY_PASSWORD="$pw_env"
+    fi
+    pw_env=""
 
     # A signal exits with the conventional 128+N status, so the EXIT trap below (and
     # json_on_exit, which reports "exited early (rc=...)") sees a non-zero rc instead of
