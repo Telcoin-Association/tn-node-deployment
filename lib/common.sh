@@ -3812,11 +3812,14 @@ _tn_wait_say() {
 #      CvvActive: log and return. Node mode unreadable: when this node is a
 #      staked validator (or, on mainnet or an unknown network, its stake cannot
 #      be read either), go on as for CvvActive with the epoch timing read from
-#      the network's public RPC (_tn_mode_unknown_wait_url); otherwise log and
-#      return.
-#   2. Time to the boundary unreadable: warn and return. More than the margin
-#      away: log and return. Passed more than the margin ago with the epoch still
-#      open (stalled, or this node far behind): warn once and return.
+#      the network's public RPC (_tn_mode_unknown_wait_url), then from url when
+#      the public RPC does not answer; otherwise log and return.
+#   2. Time to the boundary unreadable: warn and return; but for a node whose
+#      mode was unreadable (step 1), warn and wait TN_EPOCH_MARGIN +
+#      TN_EPOCH_SETTLE seconds, at most TN_EPOCH_WAIT_MAX (_tn_wait_blind). More
+#      than the margin away: log and return. Passed more than the margin ago
+#      with the epoch still open (stalled, or this node far behind): warn once
+#      and return.
 #   3. Otherwise one step message, then poll until the epoch id rises, with a log
 #      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
 #   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap.
@@ -3861,10 +3864,36 @@ _tn_mode_unknown_wait_url() {
     return "$rc"
 }
 
+# _tn_wait_blind FN MARGIN SETTLE CAP POLL WHY -- the epoch timing of a node
+# that must wait could not be read anywhere: warn, then wait MARGIN + SETTLE
+# seconds (at most CAP) in naps of POLL seconds with a heartbeat each, so the
+# restart does not land on a boundary that could not be seen. A signal the
+# caller traps and returns from ends the wait with a warning. Always rc 0.
+_tn_wait_blind() {
+    local fn="$1" margin="$2" settle="$3" cap="$4" poll="$5" why="$6" total slept=0 nap nrc
+    total=$(( margin + settle ))
+    if (( total > cap )); then total="$cap"; fi
+    "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${why}). Waiting ${total}s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip." || true
+    while (( slept < total )); do
+        nap="$poll"
+        if (( nap > total - slept )); then nap=$(( total - slept )); fi
+        nrc=0
+        _tn_nap "$nap" || nrc=$?
+        if (( nrc > 128 )); then
+            "$fn" warn "Stopped waiting after ${slept}s: a signal interrupted the wait. Continuing." || true
+            return 0
+        fi
+        slept=$(( slept + nap ))
+        "$fn" log "Waited ${slept}s of ${total}s for an epoch boundary that could not be read." || true
+    done
+    return 0
+}
+
 tn_wait_restart_window() {
     local url="${1:-}" fn="${2:-}"
     local margin settle cap poll mode out rc secs epoch boundary dur
     local start now waited slept remaining nap nrc due fails cur info note settle_left
+    local fallback="" must_wait=""
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)" || url="http://127.0.0.1:0"
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="_tn_wait_say"
@@ -3898,6 +3927,10 @@ tn_wait_restart_window() {
         else
             "$fn" log "Could not read the node mode from ${url} (${mode}); this node is a staked validator, so the epoch timing is read from ${out} instead." || true
         fi
+        # This node must wait: when the public RPC does not answer, the local
+        # one may still give the epoch timing; when neither does, wait blind.
+        fallback="$url"
+        must_wait=1
         url="$out"
         mode="CvvActive"
     fi
@@ -3907,7 +3940,23 @@ tn_wait_restart_window() {
     fi
     rc=0
     out="$(tn_epoch_secs_left "$url")" || rc=$?
+    if [[ "$rc" -ne 0 && -n "$fallback" && "$fallback" != "$url" ]]; then
+        note="$out"
+        rc=0
+        out="$(tn_epoch_secs_left "$fallback")" || rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+            "$fn" log "The epoch timing could not be read from ${url} (${note}); it is read from ${fallback} instead." || true
+            url="$fallback"
+        else
+            out="${url}: ${note}; ${fallback}: ${out}"
+        fi
+        note=""
+    fi
     if [[ "$rc" -ne 0 ]]; then
+        if [[ -n "$must_wait" ]]; then
+            _tn_wait_blind "$fn" "$margin" "$settle" "$cap" "$poll" "$out"
+            return 0
+        fi
         "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${out}). Continuing without waiting." || true
         return 0
     fi

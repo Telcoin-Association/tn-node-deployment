@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tools/tests/keytool_test.sh -- tn_keytool passes the passphrase on stdin only,
-# and tn_wait_restart_window waits for a staked node whose mode is unreadable.
+# and tn_wait_restart_window waits for a staked node whose mode is unreadable
+# (epoch timing from the public RPC, then the local one, else a bounded wait).
 # A recording stub stands in for the node binary and for docker;
 # tn_as_service_user is replaced by a shim that drops TN_BLS_PASSPHRASE the same
 # way (its own privilege drop is covered by primitives_test.sh). Maintainer
@@ -124,5 +125,49 @@ check "wait: duplicated address on mainnet waits" "$MAINNET_RPC_URL" "$(cat "$T/
 printf 'NETWORK=testnet\n' > "$META"
 NET=testnet; STAKED=0; run_wait
 check "wait: no validator address skips" "none" "$(cat "$T/epoch-url" 2>/dev/null || echo none)"
+
+# The epoch timing from the public RPC, then the local one; when neither answers,
+# a node that must wait waits TN_EPOCH_MARGIN + TN_EPOCH_SETTLE (at most
+# TN_EPOCH_WAIT_MAX). EPOCH_OK lists the URLs that answer; naps are counted.
+EPOCH_OK=""
+tn_epoch_secs_left() {
+    printf '%s\n' "$1" >> "$T/epoch-url"
+    case " $EPOCH_OK " in
+        *" $1 "*) printf '9999 5 0 0\n' ;;
+        *) printf 'connection refused'; return 1 ;;
+    esac
+}
+NAPPED=0
+_tn_nap() { NAPPED=$(( NAPPED + $1 )); return 0; }
+LOCAL="http://127.0.0.1:8545"
+printf 'VALIDATOR_ADDRESS=0x%040d\n' 7 > "$META"
+NET=mainnet; STAKED=2; EPOCH_OK="$LOCAL"; NAPPED=0; run_wait
+check "wait: public RPC down, epoch read from the local RPC next" "$(printf '%s\n%s' "$MAINNET_RPC_URL" "$LOCAL")" "$(cat "$T/epoch-url")"
+check_has "wait: that answer is used (outside the margin)" "yes" "$(grep -q 'outside the' "$T/say" && echo yes)"
+check "wait: no blind wait when the local RPC answers" "0" "$NAPPED"
+NET=mainnet; STAKED=2; EPOCH_OK=""; NAPPED=0; run_wait
+check "wait: neither answers on mainnet: waits margin + settle" "390" "$NAPPED"
+check_has "wait: the blind wait warns" "yes" "$(grep -q '^warn .*Waiting 390s' "$T/say" && echo yes)"
+NET=mainnet; STAKED=2; EPOCH_OK=""; NAPPED=0
+TN_EPOCH_WAIT_MAX=100 run_wait
+check "wait: the blind wait is capped by TN_EPOCH_WAIT_MAX" "100" "$NAPPED"
+NET=mainnet; STAKED=2; EPOCH_OK=""; NAPPED=0
+TN_SKIP_EPOCH_WAIT=1 run_wait
+check "wait: TN_SKIP_EPOCH_WAIT=1 skips the blind wait" "0" "$NAPPED"
+NET=testnet; STAKED=0; EPOCH_OK=""; NAPPED=0; run_wait
+check "wait: staked testnet node, neither answers: waits" "390" "$NAPPED"
+tn_detect_network() { return 1; }
+NET=""; STAKED=2; EPOCH_OK=""; NAPPED=0; run_wait
+check "wait: unknown network: epoch read from the local RPC" "$LOCAL" "$(cat "$T/epoch-url")"
+check "wait: unknown network, local down: waits margin + settle" "390" "$NAPPED"
+tn_node_mode() { printf 'CvvActive'; return 0; }
+NET=mainnet; STAKED=0; EPOCH_OK=""; NAPPED=0; run_wait
+check "wait: mode read, epoch unreadable: continues without a blind wait" "0" "$NAPPED"
+_tn_nap() { NAPPED=$(( NAPPED + $1 )); return 143; }
+tn_node_mode() { printf 'rpc down'; return 1; }
+tn_detect_network() { printf '%s\n' "$NET"; }
+NET=mainnet; STAKED=2; EPOCH_OK=""; NAPPED=0; run_wait
+check_has "wait: a signal ends the blind wait" "yes" "$(grep -q 'a signal interrupted the wait' "$T/say" && echo yes)"
+check "wait: after one nap" "15" "$NAPPED"
 
 finish
