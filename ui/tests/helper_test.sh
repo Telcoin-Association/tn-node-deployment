@@ -743,6 +743,17 @@ check_has "logrotate-seed keeps copytruncate" "    copytruncate" "$t"
 trace set-logrotate 3G >/dev/null
 t="$(trace logrotate-seed)"
 check_has "logrotate-seed keeps an existing size" "    size 3G" "$t"
+# The library refuses (rc 1) while the telcoin-log group is missing: the call
+# still fails, and says to run the ownership migration.
+t="$(_lib_call() { return 1; }; getent() { return 2; }; trace set-logrotate 1G)"
+check_has "set-logrotate without the log group fails" "rc=1" "$t"
+check_has "set-logrotate without the log group says how to migrate" \
+    "could not write ${LOGROTATE_CONF}: the telcoin-log group does not exist yet. Run update-node.sh or edit-config.sh once (as root) to migrate the node's file ownership, then try again." "$t"
+t="$(_lib_call() { return 1; }; getent() { return 2; }; trace logrotate-seed)"
+check_has "logrotate-seed without the log group says how to migrate" \
+    "could not write ${LOGROTATE_CONF}: the telcoin-log group does not exist yet. Run update-node.sh or edit-config.sh once (as root) to migrate the node's file ownership, then try again." "$t"
+t="$(_lib_call() { return 1; }; getent() { return 0; }; trace set-logrotate 1G)"
+check_has "another library failure keeps the plain message" "could not write ${LOGROTATE_CONF} (rc 1)" "$t"
 ln -s /etc/passwd "$T/root/etc/logrotate.d/evil"
 LOGROTATE_CONF="$T/root/etc/logrotate.d/evil" refused "set-logrotate refuses a symlinked config" set-logrotate 1G
 check_lacks "the symlink target was not written" "size 1G" "$(cat /etc/passwd)"

@@ -535,7 +535,7 @@ LOGROTATE_CONF="/etc/logrotate.d/telcoin"
 if bash "${HELPER_DST}" logrotate-seed >/dev/null; then
     ok "Node-log rotation configured (${LOGROTATE_CONF})"
 else
-    warn "Could not configure node-log rotation (${LOGROTATE_CONF}); set it from the UI or re-run this installer."
+    warn "Could not configure node-log rotation (${LOGROTATE_CONF}); see the message above, then re-run this installer or set it from the UI."
 fi
 
 # ---- 10. Access token, systemd unit and daemon-reload ------------------------

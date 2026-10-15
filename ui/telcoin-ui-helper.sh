@@ -876,6 +876,17 @@ logrotate_template() {
     printf '    rotate 5\n    missingok\n    notifempty\n    compress\n    delaycompress\n    copytruncate\n}\n'
 }
 
+# logrotate_refused RC -- stop a logrotate write that failed with RC. The
+# library refuses (rc 1) while the log group does not exist yet, which means the
+# node's file-ownership migration has not run on this host; say how to run it.
+logrotate_refused() {
+    local rc="$1"
+    if [[ "$rc" -eq 1 ]] && ! getent group "$LOG_GROUP" >/dev/null 2>&1; then
+        die "could not write ${LOGROTATE_CONF}: the ${LOG_GROUP} group does not exist yet. Run update-node.sh or edit-config.sh once (as root) to migrate the node's file ownership, then try again."
+    fi
+    die "could not write ${LOGROTATE_CONF} (rc ${rc})"
+}
+
 # set-logrotate SIZE: rewrite the config with SIZE. logrotate-seed (root only,
 # install-ui.sh): keep an existing config, else write the default (100M).
 cmd_set_logrotate() {
@@ -886,7 +897,7 @@ cmd_set_logrotate() {
         rc=0
         logrotate_template "$size" | _write_root "$LOGROTATE_CONF" 0644 || rc=$?
     fi
-    [[ $rc -eq 0 ]] || die "could not write ${LOGROTATE_CONF} (rc ${rc})"
+    [[ $rc -eq 0 ]] || logrotate_refused "$rc"
     echo "ok"
 }
 
@@ -899,7 +910,7 @@ cmd_logrotate_seed() {
             logrotate_template 100M | _write_root "$LOGROTATE_CONF" 0644 || rc=$?
         fi
     fi
-    [[ $rc -eq 0 ]] || die "could not write ${LOGROTATE_CONF} (rc ${rc})"
+    [[ $rc -eq 0 ]] || logrotate_refused "$rc"
     echo "ok"
 }
 
