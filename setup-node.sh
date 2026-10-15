@@ -1853,6 +1853,11 @@ prepare_node_extra_flags() {
             flags="${flags:+${flags} }--enable-state-export --state-export-keep ${STATE_EXPORT}"
             ;;
     esac
+    # A node that serves RPC to the internet gets conservative limits and only the
+    # namespaces wallets need.
+    if [[ "${ENABLE_PUBLIC_RPC:-false}" == "true" ]]; then
+        flags="${flags:+${flags} }$(public_rpc_limit_flags)"
+    fi
     # The release knows every flag in use; now the map itself.
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
         install_bootstrap_peers "$spec" "$BOOTSTRAP_PEERS_SRC" "$peers"
@@ -1868,6 +1873,12 @@ prepare_node_extra_flags() {
     fi
     NODE_EXTRA_FLAGS_SPEC="$spec"
     return 0
+}
+
+# The launch flags of a node that serves public RPC: bounded log queries,
+# subscriptions and request size, and HTTP limited to eth, net, web3 and tn.
+public_rpc_limit_flags() {
+    printf '%s' "--rpc.max-blocks-per-filter 10000 --rpc.max-logs-per-response 10000 --rpc.max-subscriptions-per-connection 100 --rpc.max-request-size 2 --http.api eth,net,web3,tn"
 }
 
 # The runner spec (lib/common.sh) of the node this run installs: docker:<image> or
