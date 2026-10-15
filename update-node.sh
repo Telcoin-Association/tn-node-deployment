@@ -152,13 +152,19 @@ detect_node() {
     fi
 }
 
-# Read INSTALL_METHOD from .node-meta. Returns "source" | "docker" | "existing" | "".
+# Read INSTALL_METHOD from .node-meta (meta_get: CRLF-safe). Prints "source",
+# "docker", "existing" or the stored value; nothing and rc 0 when there is no
+# .node-meta or no such key; nothing and rc 2 when the key is listed more than
+# once (meta_get has said so on stderr), so the caller stops instead of guessing.
 detect_install_method() {
-    local meta
-    meta="$(node_meta_path)" || return 0
-    if [[ -f "$meta" ]]; then
-        grep "^INSTALL_METHOD=" "$meta" 2>/dev/null | cut -d= -f2 || true
-    fi
+    local v rc=0
+    v="$(meta_get INSTALL_METHOD)" || rc=$?
+    case "$rc" in
+        0) printf '%s\n' "$v" ;;
+        1) ;;
+        *) return 2 ;;
+    esac
+    return 0
 }
 
 # existing_binary_path -- the binary an `existing` install runs: the path in the
@@ -166,7 +172,7 @@ detect_install_method() {
 # BINARY_PATH from .node-meta (recorded by setup-node 1.3.0), else the source
 # build's path, which older installs used.
 existing_binary_path() {
-    local spec="" path=""
+    local spec="" path="" rc
     if declare -F tn_launch_runner >/dev/null 2>&1; then
         spec="$(tn_launch_runner 2>/dev/null || true)"
     fi
@@ -174,7 +180,15 @@ existing_binary_path() {
         binary:/*) path="${spec#binary:}" ;;
     esac
     if [[ -z "$path" ]]; then
-        path="$(meta_get BINARY_PATH 2>/dev/null || true)"
+        rc=0
+        path="$(meta_get BINARY_PATH 2>/dev/null)" || rc=$?
+        if [[ "$rc" -eq 2 ]]; then
+            # Two BINARY_PATH lines: name neither, and never fall back to the
+            # default path, which may not be the file this node runs.
+            print_error "BINARY_PATH is set more than once in $(node_meta_path 2>/dev/null || echo .node-meta); remove the extra lines first." >&2
+            printf '%s\n' "<the binary this node runs: fix BINARY_PATH in .node-meta>"
+            return 2
+        fi
         [[ "$path" == /* ]] || path=""
     fi
     if [[ -z "$path" ]]; then
@@ -207,35 +221,14 @@ existing_update_refusal() {
     print_info "for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh"
 }
 
-# Read NETWORK from .node-meta first, then fall back to inspecting the
-# chain config's chain_name. Returns "testnet" | "mainnet" | "" (unknown).
+# detect_network -- print testnet or mainnet: NETWORK in .node-meta (CRLF-safe),
+# else the chain id of the node's genesis (487 mainnet, 2017 testnet). A thin
+# wrapper over tn_detect_network (lib/common.sh), kept for its callers. Prints
+# nothing and returns 1 when the network cannot be told: a NETWORK listed more
+# than once, any other value (devnet, a typo, empty), or no NETWORK and no known
+# chain id. The reason goes to stderr, so --json stdout stays clean.
 detect_network() {
-    local meta
-    meta="$(node_meta_path || true)"
-    local net=""
-    if [[ -n "$meta" && -f "$meta" ]]; then
-        net=$(grep "^NETWORK=" "$meta" 2>/dev/null | cut -d= -f2 || true)
-        [[ -n "$net" ]] && { echo "$net"; return 0; }
-    fi
-    # Fall back: read genesis.yaml. Older installs do not write NETWORK to
-    # .node-meta. Match the well-known chain_name values from common.sh.
-    local data_dir
-    data_dir="$(tn_resolve_data_dir)"
-    [[ -n "$meta" && -f "$meta" ]] && {
-        local meta_dir
-        meta_dir=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
-        [[ -n "$meta_dir" ]] && [[ -d "$meta_dir" ]] && data_dir="$meta_dir"
-    }
-    local genesis="${data_dir}/genesis/genesis.yaml"
-    if [[ -f "$genesis" ]]; then
-        local name
-        name=$(grep -E '^[[:space:]]*chain_name:' "$genesis" 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*chain_name:[[:space:]]*//; s/["'\'']//g; s/[[:space:]]//g')
-        case "$name" in
-            "$TESTNET_CHAIN_NAME"|adiri) echo "testnet"; return 0 ;;
-            "$MAINNET_CHAIN_NAME"|telcoin) echo "mainnet"; return 0 ;;
-        esac
-    fi
-    echo ""
+    tn_detect_network
 }
 
 # Resolve the file that carries the docker image reference on this install:
@@ -2030,7 +2023,10 @@ run_json_mode() {
             ;;
     esac
     local install_method
-    install_method=$(detect_install_method || true)
+    if ! install_method=$(detect_install_method); then
+        json_event error "INSTALL_METHOD is set more than once in .node-meta -- remove the extra lines, then try again"
+        return 1
+    fi
     case "$JSON_ACTION" in
         check)   json_check   "$install_method" ;;
         prepare) json_prepare "$install_method" "$JSON_REF" ;;
@@ -2125,7 +2121,10 @@ main() {
     print_info "Service:       ${SERVICE_NAME}"
 
     local install_method
-    install_method=$(detect_install_method)
+    if ! install_method=$(detect_install_method); then
+        print_error "INSTALL_METHOD is set more than once in $(node_meta_path 2>/dev/null || echo .node-meta) -- remove the extra lines, then run this again."
+        exit 1
+    fi
     print_info "Install method: ${install_method:-unknown (no .node-meta found)}"
 
     case "$install_method" in
