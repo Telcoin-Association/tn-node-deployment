@@ -1,7 +1,8 @@
 ## Review: mainnet hardening round (2026-10-15)
 
-Branch `mainnet-hardening`, forked from `main` at 037c810: 155 commits up to 417fbe2, then the
-docs and release prep. The packages, merge order and per-package gates are in `tasks/plan.md`;
+Branch `mainnet-hardening`, forked from `main` at 037c810: 208 commits (code packages, one
+independent verification per package with its fix pass, docs, the scripts-v2.0.0 release prep,
+and a whole-range review with its fix pass). The packages, merge order and per-package gates are in `tasks/plan.md`;
 what remains is in `followup.md`.
 
 ### What landed
