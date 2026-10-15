@@ -27,7 +27,14 @@ OLD=037c810
 SCRIPTS=(setup-node update-node edit-config prepare-stake)
 REQUIRED=(tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write_root_file
           tn_detect_network tn_write_node_unit tn_remove_inflight_tmp tn_committee_down_guard
-          tn_docker_image_allowed tn_rerender_node_launch)
+          tn_docker_image_allowed tn_rerender_node_launch
+          tn_has_embedded_passphrase _tn_unit_pass_read _tn_unit_runs_node_inline
+          tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported
+          tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch
+          tn_chain_configs_check)
+# The credential helpers migrate-node-naming.sh also requires (its own message).
+MIGRATE_REQUIRED=(tn_remove_inflight_tmp tn_has_embedded_passphrase _tn_unit_pass_read
+          tn_store_credential tn_creds_supported tn_credential_key _tn_cred_old_copies)
 
 # ---- each required helper: without it, every script refuses ---------------------------
 mkdir -p "$T/cur"
@@ -50,6 +57,14 @@ for fn in "${REQUIRED[@]}"; do
         fi
     done
     check "without ${fn}: every script refuses" " ${SCRIPTS[*]}" "$got"
+done
+cp "$REPO/migrate-node-naming.sh" "$T/cur/migrate-node-naming.sh"
+for fn in "${MIGRATE_REQUIRED[@]}"; do
+    sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
+    rc=0
+    "$BASH" "$T/cur/migrate-node-naming.sh" --help > /dev/null 2> "$T/err" < /dev/null || rc=$?
+    check "without ${fn}: migrate-node-naming refuses" "1 yes" \
+        "${rc} $(grep -q "has no ${fn}\. Run update-scripts.sh" "$T/err" && echo yes)"
 done
 cp "$REPO/lib/common.sh" "$T/cur/lib/common.sh"
 

@@ -79,7 +79,11 @@ set -E
 for _tn_fn in tn_backup_file tn_restore_backup tn_write_root_file tn_start_script_path \
               tn_wait_restart_window tn_update_lock_path _tn_root_layout_dir _tn_strip_gw \
               tn_write_node_unit tn_rerender_node_launch tn_precreate_log_files \
-              tn_committee_down_guard; do
+              tn_committee_down_guard tn_remove_inflight_tmp \
+              tn_has_embedded_passphrase _tn_unit_pass_read _tn_unit_runs_node_inline \
+              tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported \
+              tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch \
+              tn_chain_configs_check _tn_cred_old_copies; do
     if ! declare -F "$_tn_fn" >/dev/null 2>&1; then
         print_error "lib/common.sh ${COMMON_VERSION:-unknown} has no ${_tn_fn}. Run update-scripts.sh and try again."
         exit 1

@@ -145,7 +145,11 @@ _tn_old=""
 version_gte "${COMMON_VERSION:-0}" "1.6.0" || _tn_old=1
 for _tn_fn in tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write_root_file \
               tn_detect_network tn_write_node_unit tn_remove_inflight_tmp tn_committee_down_guard \
-              tn_docker_image_allowed tn_rerender_node_launch; do
+              tn_docker_image_allowed tn_rerender_node_launch \
+              tn_has_embedded_passphrase _tn_unit_pass_read _tn_unit_runs_node_inline \
+              tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported \
+              tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch \
+              tn_chain_configs_check; do
     declare -F "$_tn_fn" >/dev/null 2>&1 || _tn_old=1
 done
 if [[ -n "$_tn_old" ]]; then
