@@ -520,9 +520,9 @@ setup_store_passphrase() {
         print_ok "Passphrase stored as an encrypted credential (root, mode 600): ${cred}"
         return 0
     fi
-    if ! printf '%s\n' "$TN_SETUP_PASS" | tn_write_root_file "$plain" 0600; then
-        setup_fail "Could not write ${plain}."
-    fi
+    rc=0
+    tn_write_root_file "$plain" 0600 < <(trap - ERR; printf '%s\n' "$TN_SETUP_PASS") || rc=$?  # passphrase-stdin-ok stdin of the root writer, a pipe
+    [[ $rc -eq 0 ]] || setup_fail "Could not write ${plain}."
     _tn_shred "$cred"
     write_node_meta "PASSPHRASE_METHOD=stdin"
     meta_unset CREDENTIAL_KEY "$meta" || setup_fail "Could not remove CREDENTIAL_KEY from ${meta}."
