@@ -1383,8 +1383,38 @@ edit_field_known() {
     return 1
 }
 
+# listener_port_advertised FIELD VALUE -- rc 0 when VALUE's UDP port is the port
+# of the external address .node-meta records for that listener
+# (EXTERNAL_PRIMARY_ADDR or EXTERNAL_WORKER_ADDR: the address peers dial), or when
+# none is recorded (an older install). rc 1 with the reason reported otherwise,
+# a recorded address without a UDP port or set more than once included.
+listener_port_advertised() {
+    local field="$1" value="$2" key label ext rc=0 want got
+    case "$field" in
+        primary_listener) key=EXTERNAL_PRIMARY_ADDR; label="primary" ;;
+        *) key=EXTERNAL_WORKER_ADDR; label="worker" ;;
+    esac
+    ext="$(meta_get "$key" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        edit_error "${key} is set more than once in .node-meta; remove the extra lines first"
+        return 1
+    fi
+    [[ -n "$ext" ]] || return 0
+    if ! want="$(_tn_multiaddr_udp_port "$ext")"; then
+        edit_error "${key} in .node-meta (${ext}) has no UDP port to compare the ${label} listener with"
+        return 1
+    fi
+    got="$(_tn_multiaddr_udp_port "$value")" || got=""
+    if [[ "$got" != "$want" ]]; then
+        edit_error "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial"
+        return 1
+    fi
+    return 0
+}
+
 # set_field FIELD VALUE -- validate and save one --set field (rc as for the
-# setters above).
+# setters above). A listener keeps the advertised external port
+# (listener_port_advertised).
 set_field() {
     local field="$1" value="$2"
     case "$field" in
@@ -1393,6 +1423,7 @@ set_field() {
                 edit_error "invalid multiaddr: ${value}"
                 return 1
             fi
+            listener_port_advertised "$field" "$value" || return 1
             edit_launch_unambiguous || return 1
             edit_backup "$TARGET_LAUNCH_FILE" || return 1
             edit_backup "$TARGET_SERVICE_FILE" || return 1

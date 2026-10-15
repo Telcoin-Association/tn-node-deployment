@@ -4,7 +4,8 @@
 # moves an older install to node.env first), set_verbosity re-renders the start
 # script with only the -v word changed, and set_rpc_addr changes only the bind
 # words (plus the public RPC limits for 0.0.0.0) and refuses any other value,
-# including ones holding /, & or a line break. perl on PATH fails loudly. A copy
+# including ones holding /, & or a line break. set_field keeps a listener on
+# the advertised external port .node-meta records. perl on PATH fails loudly. A copy
 # of edit-config.sh without its last line is sourced at the top level; root
 # writes go straight to the test dir. Maintainer tooling (not updater-tracked).
 # bash 3.2 safe.
@@ -79,6 +80,32 @@ fresh
 rm -f "$ENVF"
 rc=0; set_listener_var WORKER_LISTENER_MULTIADDR "$W" >/dev/null 2>&1 || rc=$?
 check "older install that cannot be moved: refused, no node.env" "1 no" "$rc $([[ -e "$ENVF" ]] && echo yes || echo no)"
+
+# --- set_field: a listener keeps the advertised external port ----------------------
+META_F="$T/root/etc/telcoin/.node-meta"
+cp "$META_F" "$T/meta.saved"
+printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.7/udp/49590/quic-v1\nEXTERNAL_WORKER_ADDR=/ip4/203.0.113.7/udp/49594/quic-v1\n' >> "$META_F"
+fresh
+field_case() {  # field_case NAME FIELD VALUE EXPECTED-RC
+    cp "$ENVF" "$T/env.before"
+    EDIT_LAST_ERROR=""
+    rc=0; set_field "$2" "$3" >/dev/null 2>&1 || rc=$?
+    if [[ "$4" == 0 ]]; then
+        check "$1" "0 yes" "$rc $(grep -qxF -- "$([[ "$2" == primary_listener ]] && echo PRIMARY || echo WORKER)_LISTENER_MULTIADDR=$3" "$ENVF" && echo yes || echo no)"
+    else
+        check "$1" "1 same" "$rc $(same "$T/env.before" "$ENVF")"
+    fi
+}
+field_case "set_field: primary on the advertised port" primary_listener /ip4/10.0.0.9/udp/49590/quic-v1 0
+field_case "set_field: primary on another port refused" primary_listener /ip4/10.0.0.9/udp/40000/quic-v1 1
+check "set_field: the refusal names the advertised port" yes \
+    "$([[ "$EDIT_LAST_ERROR" == *"advertised external port 49590"* ]] && echo yes || echo no)"
+field_case "set_field: worker on the advertised port" worker_listener /ip6/::/udp/49594/quic-v1 0
+field_case "set_field: worker on the primary's port refused" worker_listener /ip4/10.0.0.9/udp/49590/quic-v1 1
+printf 'EXTERNAL_PRIMARY_ADDR=/ip4/203.0.113.8/udp/49590/quic-v1\n' >> "$META_F"
+field_case "set_field: a duplicated external address refused" primary_listener /ip4/10.0.0.9/udp/49590/quic-v1 1
+cp "$T/meta.saved" "$META_F"
+field_case "set_field: no external address recorded (older install) accepted" primary_listener /ip4/10.0.0.9/udp/40000/quic-v1 0
 
 # --- set_verbosity ----------------------------------------------------------------
 fresh
