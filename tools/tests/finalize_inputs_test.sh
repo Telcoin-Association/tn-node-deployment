@@ -24,8 +24,11 @@ NETWORK=testnet
 CONFIG_DIR="$T/conf"
 printf 'stored\n' > "$CONFIG_DIR/bls-passphrase"
 check_binary_path() { return 0; }
-IMG="${GAR_IMAGE_BASE}:v0.16.0-adiri"
-IMG_OTHER="${GAR_IMAGE_BASE}:v0.15.0-adiri"
+# Images run by digest (TN_DOCKER_REQUIRE_DIGEST defaults to 1); IMG_TAG is the
+# older tag form, which a keygen record may still hold and finalize refuses.
+IMG="${GAR_IMAGE_BASE}@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+IMG_OTHER="${GAR_IMAGE_BASE}@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+IMG_TAG="${GAR_IMAGE_BASE}:v0.16.0-adiri"
 BIN=/opt/telcoin/telcoin-network
 
 has() {
@@ -78,6 +81,13 @@ check "data dir refusal names both" yes "$(has "$ERR" "--data-dir /mnt/other dif
 fin DOCKER_IMAGE="$IMG_OTHER"
 check_rc "--docker-image other than keygen's: refused" 1 "$RC"
 check "image refusal names both" yes "$(has "$ERR" "--docker-image ${IMG_OTHER} differs from ${IMG}")"
+# A keygen record that names the image by tag is refused, pointing at the digest form.
+keygen_meta "INSTALL_METHOD=docker" "DATA_DIR=/mnt/tn" "DOCKER_IMAGE=${IMG_TAG}"
+fin
+check_rc "docker: a tag-form keygen record refused" 1 "$RC"
+check "tag-form refusal names the record and the digest form" yes \
+    "$(has "$ERR" "DOCKER_IMAGE=${IMG_TAG} in $CONFIG_DIR/.node-meta is not an image reference such as ${DEFAULT_DOCKER_IMAGE}")"
+keygen_meta "INSTALL_METHOD=docker" "DATA_DIR=/mnt/tn" "DOCKER_IMAGE=${IMG}"
 
 # An existing-binary keygen with the default data dir.
 keygen_meta "INSTALL_METHOD=existing" "DATA_DIR=${DEFAULT_DATA_DIR}" "DOCKER_IMAGE=" "BINARY_PATH=${BIN}"

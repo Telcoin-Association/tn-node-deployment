@@ -589,7 +589,7 @@ _setup_install_staged() {
     tn_staged_cleanup "$staged"
     BINARY_PATH="${INSTALL_DIR}/telcoin-network"
     RELEASE_TAG="$tag"
-    if ! printf '%s\n' "$tag" | tn_write_root_file "${INSTALL_DIR}/telcoin-network.version" 0644; then
+    if ! tn_write_root_file "${INSTALL_DIR}/telcoin-network.version" 0644 <<< "$tag"; then
         setup_warn "Could not record the installed release in ${INSTALL_DIR}/telcoin-network.version."
     fi
     print_ok "Binary installed: ${BINARY_PATH} (${tag})"
@@ -787,14 +787,16 @@ _setup_docker_apt() {
     if [[ ! -e /etc/apt/keyrings && ! -L /etc/apt/keyrings ]]; then
         install -d -o root -g root -m 0755 -- /etc/apt/keyrings || { _tn_release_cleanup "$tmp"; setup_fail "Could not create /etc/apt/keyrings."; }
     fi
-    if ! GNUPGHOME="${tmp}/gnupg" gpg --batch --no-tty --dearmor < "${tmp}/key" 2>/dev/null \
-        | tn_write_root_file /etc/apt/keyrings/docker.gpg 0644; then
+    # The binary keyring goes through a file in the temp dir, not a pipe: the writer
+    # then runs in this shell.
+    if ! GNUPGHOME="${tmp}/gnupg" gpg --batch --no-tty --dearmor < "${tmp}/key" > "${tmp}/docker.gpg" 2>/dev/null \
+        || ! tn_write_root_file /etc/apt/keyrings/docker.gpg 0644 < "${tmp}/docker.gpg"; then
         _tn_release_cleanup "$tmp"
         setup_fail "Could not write /etc/apt/keyrings/docker.gpg."
     fi
     _tn_release_cleanup "$tmp"
-    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$arch" "$os" "$codename" \
-        | tn_write_root_file /etc/apt/sources.list.d/docker.list 0644 \
+    tn_write_root_file /etc/apt/sources.list.d/docker.list 0644 \
+        <<< "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${os} ${codename} stable" \
         || setup_fail "Could not write /etc/apt/sources.list.d/docker.list."
     update_package_index
     local pkg
@@ -846,7 +848,7 @@ print(json.dumps(d, indent=2))
         3) print_ok "Docker live-restore already on (${f})"; return 0 ;;
         *) setup_fail "${f} is not a JSON object setup can merge; ${manual}" ;;
     esac
-    printf '%s\n' "$merged" | tn_write_root_file "$f" 0644 || setup_fail "Could not write ${f}; ${manual}"
+    tn_write_root_file "$f" 0644 <<< "$merged" || setup_fail "Could not write ${f}; ${manual}"
     if systemctl reload docker 9>&- 2>/dev/null; then
         print_ok "Docker live-restore on (${f})"
     else

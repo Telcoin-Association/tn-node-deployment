@@ -1686,7 +1686,7 @@ prepare_release_update() {
 # the version marker beside the binary (the UI reports the running release from it)
 # and RELEASE_TAG in .node-meta name TAG. A failed write warns.
 record_installed_ref() {
-    if ! printf '%s\n' "$1" | tn_write_root_file "${DEFAULT_INSTALL_DIR}/telcoin-network.version" 0644; then
+    if ! tn_write_root_file "${DEFAULT_INSTALL_DIR}/telcoin-network.version" 0644 <<< "$1"; then
         update_wait_say warn "Could not record ${1} in ${DEFAULT_INSTALL_DIR}/telcoin-network.version."
     fi
     meta_set RELEASE_TAG "$1" >/dev/null 2>&1 || update_wait_say warn "Could not record RELEASE_TAG=${1} in .node-meta."
