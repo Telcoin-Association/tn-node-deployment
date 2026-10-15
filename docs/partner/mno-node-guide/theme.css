@@ -3,7 +3,8 @@
  * partner guide
  *
  * Rendered by WeasyPrint (CSS paged media) from the HTML that pandoc writes to
- * docs/partner/mno-node-guide/build/. Font paths are relative to this file.
+ * docs/partner/mno-node-guide/build/. Font paths are relative to this file; the
+ * build copies this stylesheet into build/ with those paths adjusted.
  * Built by tools/build-partner-pdf.sh mno-node-guide; open
  * build/mno-node-guide.html in a browser for a rough screen preview (paged-media
  * rules only apply in the PDF).

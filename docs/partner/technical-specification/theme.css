@@ -4,7 +4,9 @@
  *
  * Rendered by WeasyPrint (CSS paged media) from the HTML that pandoc writes to
  * docs/partner/technical-specification/build/. Font and cover paths here are
- * relative to this file; the template's logo paths are relative to build/.
+ * relative to this file; the build copies this stylesheet into build/ with those
+ * paths adjusted and the cover art inlined, so the PDF bytes do not depend on the
+ * checkout path. The template's logo paths are relative to build/.
  * Built by tools/build-partner-pdf.sh technical-specification; open
  * build/technical-specification.html in a browser for a rough screen preview
  * (paged-media rules only apply in the PDF).

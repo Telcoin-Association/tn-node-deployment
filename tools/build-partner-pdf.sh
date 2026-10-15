@@ -17,9 +17,11 @@
 #
 # pandoc turns the Markdown into HTML with the document's template and metadata,
 # then WeasyPrint lays that HTML out as pages using its theme.css (CSS paged
-# media: running header and footer, page numbers, TOC leaders). Scratch output
-# (HTML preview, candidate PDF, WeasyPrint log) goes to docs/partner/<doc>/build/,
-# which is gitignored.
+# media: running header and footer, page numbers, TOC leaders). The stylesheet
+# is staged beside the HTML with its raster images inlined, so the PDF's bytes
+# do not depend on where the repo is checked out. Scratch output (HTML preview,
+# staged stylesheet, candidate PDF, WeasyPrint log) goes to
+# docs/partner/<doc>/build/, which is gitignored.
 #
 # Before rendering, the Markdown is linted for things that must never reach a
 # partner: personal addresses, removed flags and scripts, repo-relative links,
@@ -358,6 +360,41 @@ print(pages, mailto)
 PY
 }
 
+# Copy the document's theme.css beside the HTML with its asset references adjusted.
+# Raster images (the cover art) become data: URIs, because WeasyPrint names every
+# image object in the PDF after the hash of the image's URL, so a file: URL would
+# make the PDF's bytes depend on the checkout path and every fresh clone would see
+# "toolchain drift". Every other url("../assets/...") gains one level, since the
+# copy sits one directory deeper than the committed file. Fonts are embedded by
+# content and need no inlining.
+_stage_css() {   # _stage_css SRC DST
+    python3 - "$1" "$2" <<'PY'
+import base64
+import re
+import sys
+from pathlib import Path
+
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+assets = src.parent.parent / "assets"
+raster = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+          ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def swap(match):
+    rel = match.group(2)
+    mime = raster.get(Path(rel).suffix.lower())
+    if mime is None:
+        return f'url("../../assets/{rel}")'
+    data = base64.b64encode((assets / rel).read_bytes()).decode("ascii")
+    return f'url("data:{mime};base64,{data}")'
+
+
+text = src.read_text(encoding="utf-8")
+pattern = r'url\((["\']?)\.\./assets/([^"\')]+)\1\)'
+dst.write_text(re.sub(pattern, swap, text), encoding="utf-8")
+PY
+}
+
 # Succeed if no source changed (tracked or untracked) since commit $1.
 _sources_clean_since() {
     local base="$1"
@@ -373,10 +410,10 @@ WP_VER="not run"
 if [[ $HTML_ONLY -eq 0 ]]; then
     _need weasyprint 61.0
     WP_VER="$(_tool_version weasyprint)"
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "error: python3 not found on PATH (used for the PDF sanity check)" >&2
-        exit 1
-    fi
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: python3 not found on PATH (used to stage the stylesheet and for the PDF sanity check)" >&2
+    exit 1
 fi
 
 for f in "$MD" "$META" "$TEMPLATE" "$CSS"; do
@@ -459,14 +496,18 @@ fi
 # ---- 3. pandoc --------------------------------------------------------------
 
 mkdir -p "$BUILD_DIR"
-rm -f "$HTML"
+rm -f "$HTML" "${BUILD_DIR}/theme.css"
+if ! _stage_css "$CSS" "${BUILD_DIR}/theme.css"; then
+    echo "error: could not stage ${CSS} into ${BUILD_DIR}/ (missing asset?)" >&2
+    exit 1
+fi
 if ! pandoc "$MD" \
         --from=gfm --to=html5 --standalone \
         --template="$TEMPLATE" \
         --metadata-file="$META" \
         --shift-heading-level-by=-1 --number-sections --toc --toc-depth="$TOC_DEPTH" \
         --syntax-highlighting=none \
-        --css=../theme.css -V asset-dir=../../assets \
+        --css=theme.css -V asset-dir=../../assets \
         --fail-if-warnings \
         --output="$HTML"; then
     echo "error: pandoc failed on ${MD}" >&2
