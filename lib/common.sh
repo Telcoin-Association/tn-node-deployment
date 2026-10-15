@@ -940,16 +940,35 @@ tn_install_logrotate() {
     tn_write_root_file "$dest" 0644 <<< "$text"
 }
 
-# _tn_root_binary_ok PATH -- rc 0 when PATH (after resolving symlinks) is a
-# regular file owned by root and not group- or other-writable, and both the
-# directory holding PATH and the one holding the resolved file pass
-# tn_root_dir_ok. So root never runs a binary another account could have placed.
+# _tn_root_binary_ok PATH -- rc 0 when PATH is a regular file owned by root
+# and not group- or other-writable, reached through symlinks that are each owned
+# by root, with every directory on the way (the one holding PATH, each link's
+# and the file's) passing tn_root_dir_ok. The chain is followed one readlink at
+# a time (at most 16 links). So root never runs a binary another account could
+# have placed or redirected. On rc 0, TN_ROOT_BINARY_REAL holds the file's
+# resolved path: run that, not PATH.
+TN_ROOT_BINARY_REAL=""
 _tn_root_binary_ok() {
-    local p="${1:-}" real st dir
+    local p="${1:-}" real st dir link n=0
+    TN_ROOT_BINARY_REAL=""
     [[ "$p" == /* ]] || return 1
-    dir="${p%/*}"
-    [[ -n "$dir" ]] || dir=/
-    tn_root_dir_ok "$dir" || return 1
+    while :; do
+        dir="${p%/*}"
+        [[ -n "$dir" ]] || dir=/
+        tn_root_dir_ok "$dir" || return 1
+        [[ -L "$p" ]] || break
+        n=$((n + 1))
+        [[ $n -le 16 ]] || return 1
+        # stat without -L reports the link itself.
+        st="$(stat -c '%u' -- "$p" 2>/dev/null)" || return 1
+        [[ "$st" == 0 ]] || return 1
+        link="$(readlink -- "$p" 2>/dev/null)" || return 1
+        [[ -n "$link" ]] || return 1
+        if [[ "$link" != /* ]]; then
+            link="${dir%/}/${link}"
+        fi
+        p="$link"
+    done
     real="$(readlink -f -- "$p" 2>/dev/null)" || return 1
     [[ "$real" == /* && -f "$real" && ! -L "$real" ]] || return 1
     dir="${real%/*}"
@@ -960,6 +979,7 @@ _tn_root_binary_ok() {
     case "${st##* }" in
         *[2367]?|*[2367]) return 1 ;;
     esac
+    TN_ROOT_BINARY_REAL="$real"
     return 0
 }
 
@@ -6728,12 +6748,14 @@ tn_launch_flag_unset() {
 # tn_launch_runner [FILE] — print the runner spec of the node command in launch
 # file FILE (default: the file tn_node_launch_target names): "docker:<image>" when
 # the command is `docker run ... <image> telcoin node ...`, else "binary:<path>"
-# for `<path> node ...` (a bare name is looked up on PATH). Read from the launch
-# file, which is what actually starts the node, not from .node-meta. rc 0 printed,
-# 1 no runner recognised, 2 no live node --http line or no node service, 3 a
-# command the parser cannot read, 4 FILE missing or unreadable, 5 the binary is
-# refused: it, or a directory holding it, is not root-owned or is writable by
-# others (_tn_root_binary_ok), so root will not run it (a message says so).
+# for `<path> node ...` (a bare name is looked up on PATH; <path> is printed with
+# its symlinks resolved, the file that runs). Read from the launch file, which is
+# what actually starts the node, not from .node-meta. rc 0 printed, 1 no runner
+# recognised, 2 no live node --http line or no node service, 3 a command the
+# parser cannot read, 4 FILE missing or unreadable, 5 the binary is refused: it,
+# a link on the way to it, or a directory holding either is not root-owned or is
+# writable by others (_tn_root_binary_ok), so root will not run it (a message
+# says so).
 tn_launch_runner() {
     local file="${1:-}" target out rc kind val image_re
     image_re='^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
@@ -6767,10 +6789,11 @@ tn_launch_runner() {
                 *[[:space:]]*|*'$'*|*'`'*) return 1 ;;
             esac
             if ! _tn_root_binary_ok "$val"; then
-                printf 'tn_launch_runner: refusing %s: the binary or a directory holding it is not root-owned or is writable by others\n' "$val" >&2
+                printf 'tn_launch_runner: refusing %s: the binary, a link to it or a directory holding either is not root-owned or is writable by others\n' "$val" >&2
                 return 5
             fi
-            printf 'binary:%s\n' "$val"
+            # The checked file itself, symlinks resolved: that is what runs.
+            printf 'binary:%s\n' "$TN_ROOT_BINARY_REAL"
             ;;
         *)
             return 1
@@ -6805,7 +6828,7 @@ _tn_runner_probe() {
             bin="${spec#binary:}"
             [[ -f "$bin" && -x "$bin" ]] || return 127
             _tn_root_binary_ok "$bin" || return 127
-            tn_as_service_user "$bin" "$@" </dev/null
+            tn_as_service_user "$TN_ROOT_BINARY_REAL" "$@" </dev/null
             ;;
         *)
             return 127
