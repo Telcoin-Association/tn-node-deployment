@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: double-quoted programs whose
+# dollar signs the shell leaves alone. Expected: no findings.
+
+perl -pe "s/\$x/y/" "$1"
+perl -ne "print if /foo$/" "$1"
+perl -e "print \"\$0\\n\""
+perl -le "print 1 + 2"

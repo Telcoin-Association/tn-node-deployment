@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: perl commands that only appear
+# in comments. Expected: no findings.
+
+# perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
+    # perl -pe "s/$a/$b/" "$f"
+true # perl -ne "print if /$pat/" "$f"

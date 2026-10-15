@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: -0777 slurp programs.
+# Expected findings: lines 6 and 7.
+
+marker="$1"
+perl -0777 -pe "s/\n# ${marker}\n.*//s" "$2"
+perl -0777 -i -pe "s/BEGIN $marker.*END $marker//s" "$2"

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: commands accepted with the
+# exemption marker. Expected: no findings.
+
+ver="1.2.3"
+perl -e "print qq($ver\n)" # perl-interp-ok ver is a fixed constant above
+perl -pe \
+    "s/VERSION/$ver/" \
+    "$1" # perl-interp-ok ver is a fixed constant above
+perl - "$1" <<EOF2 # perl-interp-ok ver is a fixed constant above
+s/VERSION/$ver/;
+EOF2
+perl <<EOF2
+print "$ver\n"; # perl-interp-ok ver is a fixed constant above
+EOF2

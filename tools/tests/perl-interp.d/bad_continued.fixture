@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: programs that reach perl on a
+# later line. Expected findings: lines 7, 11 and 15 (the line holding perl).
+
+old="$1"
+new="$2"
+perl -i -pe \
+    "s/$old/$new/g" \
+    "$3"
+
+TN_X=1 perl -0777 \
+    -ne "print if /$old/" "$3"
+
+out="$(printf '%s\n' "$old" |
+    perl -pe "
+        s/a/$new/;
+    ")"
+printf '%s\n' "$out"
