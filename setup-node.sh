@@ -2664,9 +2664,10 @@ json_set_network() {
 }
 
 # json_refuse_installed PHASE -- a --json keygen or finalize never runs over an
-# installed node (its unit exists): nothing is written, the run stops.
+# installed node (its unit exists): nothing is written, the run stops. run_json_mode
+# asks before it takes the lock, and the phase asks again under the lock.
 json_refuse_installed() {
-    local unit="/etc/systemd/system/${SERVICE_NAME}.service"
+    local unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
     if [[ -e "$unit" || -L "$unit" ]]; then
         setup_fail "A node is already installed (${unit} exists), so --phase=${1} does not run. Use edit-config.sh to change it, or remove-node.sh first."
     fi
@@ -2882,6 +2883,9 @@ run_json_mode() {
     json_check_install_flags
     json_check_keygen_inputs
     json_require_root
+    # An installed node is refused before the lock, whose layout migration would
+    # otherwise change an older install first; the phase checks again under the lock.
+    json_refuse_installed "$JSON_PHASE"
     setup_take_lock
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     case "$JSON_PHASE" in

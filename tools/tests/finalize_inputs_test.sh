@@ -3,9 +3,10 @@
 # --phase=finalize (finalize_install_inputs). The install method, data dir,
 # docker image and binary path come from the finalize flags or, when a flag
 # leaves one out, from what keygen recorded in .node-meta; a flag that differs
-# from the recorded value stops finalize before anything is written. A copy of
-# setup-node.sh without its last line is sourced at the top level. Maintainer
-# tooling (not updater-tracked). bash 3.2 safe.
+# from the recorded value stops finalize before anything is written. An
+# installed node is refused before the update lock and its layout migration
+# (run_json_mode). A copy of setup-node.sh without its last line is sourced at
+# the top level. Maintainer tooling (not updater-tracked). bash 3.2 safe.
 # shellcheck source=tools/tests/lib.sh
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 T="$TN_TEST_TMP"
@@ -97,4 +98,38 @@ check "no recorded data dir: the flag is used" "0 existing|/mnt/tn||${BIN}" "$RC
 keygen_meta "INSTALL_METHOD=existing" "DATA_DIR=/mnt/x y" "BINARY_PATH=${BIN}"
 fin
 check_rc "a recorded data dir with a space: refused" 1 "$RC"
+
+# run_json_mode refuses an installed node before the update lock and the layout
+# migration it brings, so an older install is left as it is; with no unit the
+# lock, the migration and the phase run in that order.
+json_set_network() { :; }
+json_check_install_flags() { :; }
+json_check_keygen_inputs() { :; }
+json_require_root() { :; }
+tn_acquire_update_lock() { printf 'lock\n' >> "$T/ev"; return 0; }
+tn_release_update_lock() { return 0; }
+tn_migrate_ownership() { printf 'migrate\n' >> "$T/ev"; return 0; }
+json_phase_finalize() { printf 'phase\n' >> "$T/ev"; }
+json_phase_keygen() { printf 'phase\n' >> "$T/ev"; }
+evs() {
+    local e
+    e="$(tr '\n' ' ' < "$T/ev" | sed 's/ $//')"
+    printf '%s' "${e:-none}"
+}
+mkdir -p "$TN_ROOT_PREFIX/etc/systemd/system"
+printf '[Service]\nExecStart=/opt/telcoin/start-telcoin.sh\n' > "$TN_ROOT_PREFIX/etc/systemd/system/telcoin.service"
+keygen_meta "INSTALL_METHOD=existing" "BINARY_PATH=${BIN}"
+cp "$CONFIG_DIR/.node-meta" "$T/meta.before"
+for phase in finalize keygen; do
+    : > "$T/ev"
+    rc=0; ( JSON_PHASE="$phase" run_json_mode ) > "$T/out" 2>&1 || rc=$?
+    check "installed node, --phase=${phase}: refused before the lock and the migration" "1 none" \
+        "$rc $(evs)"
+done
+check "installed node: .node-meta unchanged" same "$(cmp -s "$T/meta.before" "$CONFIG_DIR/.node-meta" && echo same || echo changed)"
+check "installed node: the refusal says why" yes "$(has "$(cat "$T/out")" "already installed")"
+rm -f "$TN_ROOT_PREFIX/etc/systemd/system/telcoin.service"
+: > "$T/ev"
+rc=0; ( JSON_PHASE=finalize run_json_mode ) > "$T/out" 2>&1 || rc=$?
+check "no unit: lock, migration, then the phase" "0 lock migrate phase" "$rc $(evs)"
 finish
