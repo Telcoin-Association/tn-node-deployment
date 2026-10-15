@@ -202,8 +202,12 @@ CADDY_LAUNCH_METHOD=""
 # dashboard moved.
 CADDY_WS_OK=true
 CADDY_DASH_MOVED_TO=""
-# caddy_restart_window has run for the current operation (the epoch wait happens once).
+# caddy_restart_window has run for the current operation (guard and wait happen once).
 CADDY_WINDOW_DONE=false
+# A node edit of this run (node-info.yaml, the --ws launch flags) waits for the
+# restart that applies it; caddy_restart_abandon puts it back when the run stops
+# first (a guard refusal, a failed wait, a signal).
+CADDY_RESTART_PENDING=false
 # Library helpers already reported missing by caddy_lib_has (space-separated names).
 CADDY_LIB_WARNED=""
 # The update lock is held by this run (caddy_node_lock); CADDY_LOCK_NOTE is appended
@@ -228,6 +232,7 @@ CADDY_LAUNCH_GROUP=""
 # the node-info.yaml backup and the launch dry-run copy; removed on exit.
 CADDY_RUN_DIR=""
 CADDY_NI_BAK=""
+CADDY_NI_FILE=""
 # Proxy targets for the RPC site (caddy_rpc_enable_precheck): reth's HTTP and WS
 # ports from the node launch, else .node-meta, else 8545/8546.
 CADDY_RPC_PORT=""
@@ -319,8 +324,10 @@ caddy_cleanup_tmp() {
     for f in $CADDY_TMP_FILES; do rm -rf "$f" 2>/dev/null || true; done
     CADDY_TMP_FILES=""
 }
-# EXIT-trap body (json_on_exit runs it too): temp files, then the update lock.
+# EXIT-trap body (json_on_exit runs it too): a node edit still waiting for its
+# restart is put back, then temp files, then the update lock.
 caddy_exit_cleanup() {
+    caddy_restart_abandon || true
     caddy_cleanup_tmp
     caddy_node_unlock
 }
@@ -1554,6 +1561,7 @@ caddy_run_dir() {
 # root-only run directory (CADDY_NI_BAK). rc 1 when it cannot be read or copied.
 caddy_ni_backup() {
     caddy_run_dir || return 1
+    CADDY_NI_FILE="$1"
     CADDY_NI_BAK="${CADDY_RUN_DIR}/node-info.yaml"
     if ! tn_as_service_user cat -- "$1" > "$CADDY_NI_BAK"; then
         rm -f -- "$CADDY_NI_BAK"
@@ -1698,33 +1706,60 @@ caddy_node_unlock() {
     CADDY_LOCK_HELD=false
 }
 
-# Right before the first node edit of an operation (the --ws launch edit or the
-# node-info.yaml write), and only when that edit will happen: take the update lock
-# (caddy_node_lock), then hold the run while the node votes in the current committee
-# and the epoch boundary is close: tn_wait_restart_window (lib/common.sh 1.5.0) waits
-# for the epoch to close and settle, at most TN_EPOCH_WAIT_MAX seconds;
-# TN_SKIP_EPOCH_WAIT=1 skips it. Waiting before the edit means an operator who stops
-# the run during the wait leaves nothing half applied. Once per operation:
-# caddy_restart_node_guarded calls it again, a no-op by then. The restart that
-# recovers from a rollback never calls it. Progress goes through caddy_say (step /
-# log / warn events in --json runs).
+# caddy_restart_window -- right before a node restart (caddy_restart_node_guarded),
+# with the update lock held (caddy_node_lock): the committee guard first
+# (tn_committee_down_guard; it passes with a warning on testnet, devnet and an
+# unstaked node when the committee cannot be read, and with TN_ALLOW_QUORUM_RISK=1),
+# then the epoch wait (tn_wait_restart_window: while the node votes in the current
+# committee and the boundary is close, it waits for the epoch to close and settle,
+# at most TN_EPOCH_WAIT_MAX seconds; TN_SKIP_EPOCH_WAIT=1 skips it). When the guard
+# refuses (rc 1; rc 2 on a staked mainnet node or an unknown network) or the wait
+# fails, this run's node edits are put back (caddy_restart_abandon) and the run
+# stops; the node is not restarted. Once per operation. The restart that recovers
+# from a rollback never calls it. Progress goes through caddy_say (step / log / warn
+# events in --json runs).
 caddy_restart_window() {
-    local rc
+    local rc url why
     [[ "$CADDY_WINDOW_DONE" == "true" ]] && return 0
     CADDY_WINDOW_DONE=true
     caddy_node_lock
-    caddy_lib_has "the node restarts without waiting for the epoch boundary, even when it is in the committee" tn_wait_restart_window tn_local_rpc_url || return 0
-    tn_wait_restart_window "$(tn_local_rpc_url)" caddy_wait_say || true
+    url="$(tn_local_rpc_url)"
     rc=0
-    tn_committee_down_guard "$(tn_local_rpc_url)" caddy_wait_say || rc=$?
-    case "$rc" in
-        0) ;;
-        2) caddy_say warn "The committee could not be read, so this run cannot tell how many committee members are down; going on." ;;
-        *)
-            [[ "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]] \
-                || die "restarting this node now could leave the committee without a quorum (see above); nothing on the node was changed. Run this again later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
-            ;;
-    esac
+    tn_committee_down_guard "$url" caddy_wait_say || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        if [[ "$rc" -eq 2 ]]; then
+            why="the committee could not be read on a node whose vote counts"
+        else
+            why="restarting this node now could leave the committee without a quorum"
+        fi
+        caddy_restart_abandon
+        die "${why} (see above), so the node was not restarted and this run's node changes were put back. Run this again later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
+    fi
+    rc=0
+    tn_wait_restart_window "$url" caddy_wait_say || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        caddy_restart_abandon
+        die "the epoch-boundary wait failed (rc ${rc}), so the node was not restarted and this run's node changes were put back.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
+    fi
+    return 0
+}
+
+# caddy_restart_abandon -- the run stops after a node edit and before the restart that
+# applies it (CADDY_RESTART_PENDING): put node-info.yaml back from its backup (as the
+# service user) and undo the --ws launch edit, so the node keeps its old settings and
+# a later restart does not pick up an unchecked change. No-op otherwise.
+caddy_restart_abandon() {
+    [[ "$CADDY_RESTART_PENDING" == "true" ]] || return 0
+    CADDY_RESTART_PENDING=false
+    if [[ -n "$CADDY_NI_FILE" && -n "$CADDY_NI_BAK" ]]; then
+        if caddy_ni_restore "$CADDY_NI_FILE"; then
+            caddy_say warn "Put ${CADDY_NI_FILE} back as it was; the node was not restarted."
+        else
+            caddy_say warn "Could not put ${CADDY_NI_FILE} back from its backup; it keeps this run's change, which applies at the next node restart."
+        fi
+        caddy_ni_discard
+    fi
+    caddy_launch_rollback
     return 0
 }
 
@@ -1735,9 +1770,9 @@ caddy_restart_window() {
 # (neither up nor failed) is NON-fatal -- the change is kept and advertises once the
 # node finishes starting (a warning and a closing note say so). <ni> is '' when only
 # the launch file changed. Works for binary AND docker installs (the host
-# node-info.yaml is bind-mounted). The epoch wait (caddy_restart_window) has normally
-# run before the edit; the call here only covers a path that reached the restart
-# without it. The recovery restart never waits.
+# node-info.yaml is bind-mounted). The committee guard and the epoch wait
+# (caddy_restart_window) run right before the restart; the recovery restart never
+# waits.
 caddy_restart_node_guarded() {
     local ni="${1:-}"
     local svc rpc_port i rpc_up=false failed=false what="" node_state
@@ -1745,6 +1780,7 @@ caddy_restart_node_guarded() {
     if [[ -z "$svc" ]]; then
         caddy_say warn "No telcoin node service was found, so the node was not restarted. The change takes effect when the node next starts."
         caddy_note "node not restarted: no node service found"
+        CADDY_RESTART_PENDING=false
         caddy_ni_discard
         caddy_launch_commit
         return 0
@@ -1753,6 +1789,7 @@ caddy_restart_node_guarded() {
     [[ -n "$rpc_port" ]] || rpc_port="$(caddy_node_port --http.port RPC_PORT 8545)" || die "no usable reth HTTP port to check the node after its restart (see above); the node was not restarted.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
 
     caddy_restart_window
+    CADDY_RESTART_PENDING=false
     caddy_say step "Restarting ${svc} to apply the change"
     systemctl restart "$svc" 2>/dev/null || true
 
@@ -1842,9 +1879,10 @@ caddy_node_info_needs_edit() {
 # default true) also advertises wss://<domain>/; false writes http only (decided by
 # caddy_ws_plan / caddy_ws_inject). Worker 0's current value is read first: when it
 # already is what is wanted, nothing is edited, there is no epoch wait and no restart
-# (unless caddy_ws_inject edited the launch file). Otherwise caddy_restart_window takes
-# the update lock and runs the epoch wait BEFORE the edit, then caddy_node_info_write
-# edits and verifies. Best-effort: a missing node-info.yaml, or no way to edit it (no
+# (unless caddy_ws_inject edited the launch file). Otherwise the update lock is taken,
+# caddy_node_info_write edits and verifies, and caddy_restart_node_guarded runs the
+# committee guard and the epoch wait right before the restart (a refusal puts the
+# edit back). Best-effort: a missing node-info.yaml, or no way to edit it (no
 # keytool runner and no python3), is a warning plus a closing note (the proxy still
 # works; it just won't be discovered on-network). A launch file edited by
 # caddy_ws_inject gets its node restart on every path.
@@ -1909,9 +1947,9 @@ caddy_node_info_advertise() {
         return 0
     fi
 
-    # The update lock, then a committee node waits for the epoch boundary, before
-    # anything is edited.
-    caddy_restart_window
+    # The update lock before anything is edited; the committee guard and the epoch
+    # wait run right before the restart (caddy_restart_node_guarded).
+    caddy_node_lock
     if ! caddy_ni_backup "$ni"; then
         if [[ "$mode" == "clear" ]]; then
             caddy_say warn "Could not back up ${ni} as the service user, so the worker rpc was not cleared; it still advertises the removed endpoint. Clear it by hand (set 'rpc: ~' on the first entry under p2p_info.workers), then restart the node (sudo systemctl restart ${svc})."
@@ -1924,7 +1962,9 @@ caddy_node_info_advertise() {
     fi
     rc=0
     caddy_node_info_write "$ni" "$mode" "$http_url" "$ws_url" || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
+    if [[ "$rc" -eq 0 ]]; then
+        CADDY_RESTART_PENDING=true
+    else
         # caddy_node_info_write restored the file from the backup (or never touched it).
         caddy_ni_discard
         if [[ "$mode" == "clear" ]]; then
@@ -2015,7 +2055,7 @@ caddy_ws_holder_is_node() {
 #             process, no node service or launch file, an older lib/common.sh, or a
 #             launch line the helper refuses to edit).
 # A dry run that answers 1 (--ws already on a live line) counts as ok. The real edit
-# (caddy_ws_inject) runs later, after the update lock and the epoch wait.
+# (caddy_ws_inject) runs later, under the update lock.
 caddy_ws_plan() {
     local ws_port="$1" target="" svc="" method="" file="" holder rc why dir copy
     local by_hand="add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the node launch by hand and re-run rpc-enable to advertise wss:// too"
@@ -2096,9 +2136,8 @@ caddy_ws_plan() {
     return 0
 }
 
-# Carry out an `inject` plan: the update lock and the epoch wait (caddy_restart_window),
-# then back the launch file up (after the wait, so the copy holds the file as it is at
-# the edit), add CADDY_WS_FLAGS with tn_node_inject_flags and keep the edit only when the
+# Carry out an `inject` plan: the update lock (caddy_node_lock), then back the launch
+# file up (under the lock, so the copy holds the file as it is at the edit), add CADDY_WS_FLAGS with tn_node_inject_flags and keep the edit only when the
 # helper returns 0, the node command reads back --ws and a start wrapper still passes
 # `bash -n`; otherwise the backup goes back. The brick guard restores the file if the
 # node then fails to start. 0 = advertise ws; 1 = advertise http only (warning said).
@@ -2106,7 +2145,7 @@ caddy_ws_inject() {
     local ws_port="$1" file="$CADDY_LAUNCH_FILE" rc why
     local by_hand="add --ws --ws.addr 127.0.0.1 --ws.port ${ws_port} to the node launch by hand and re-run rpc-enable to advertise wss:// too"
     local out st
-    caddy_restart_window
+    caddy_node_lock
     st="$(stat -c '%a %g' -- "$file" 2>/dev/null)" || st=""
     out=""
     if [[ -n "$st" ]]; then
@@ -2127,6 +2166,7 @@ caddy_ws_inject() {
     if [[ "$rc" -eq 0 ]] && tn_launch_flag_get "$file" --ws >/dev/null 2>&1 && caddy_launch_syntax_ok "$file"; then
         if [[ "$CADDY_LAUNCH_METHOD" == "docker" ]]; then systemctl daemon-reload || caddy_say warn "systemctl daemon-reload failed"; fi
         CADDY_LAUNCH_BAK="$out"
+        CADDY_RESTART_PENDING=true
         caddy_say ok "Enabled the reth WebSocket: added '${CADDY_WS_FLAGS}' to the node launch (${file}); it takes effect on the node restart below."
         return 0
     fi
@@ -2461,6 +2501,8 @@ caddy_retarget_dashboard() {
 # notes are not mistaken for this one's.
 caddy_operation_reset() {
     CADDY_WINDOW_DONE=false
+    CADDY_RESTART_PENDING=false
+    CADDY_NI_FILE=""
     CADDY_META_READY=false
     CADDY_RPC_PORT=""
     CADDY_WS_PORT_SET=""
@@ -2545,8 +2587,8 @@ caddy_rpc_confirm() {
 #      restart will follow, the update lock is taken now, so a held lock refuses
 #      before the Caddyfile is touched;
 #   3. Caddyfile swap + reload (the page mentions wss:// only when it will be served);
-#   4. the epoch wait, then the edits and the guarded restart -- only when step 2
-#      found something to change.
+#   4. the edits, then the committee guard, the epoch wait and the guarded restart
+#      -- only when step 2 found something to change.
 # <move_to> (--move-dashboard-to): when <domain> is the hostname the dashboard is
 # served on, the dashboard block moves to <move_to> -- only its site address changes
 # -- in the SAME swap + reload. Without it that clash dies before anything is written
@@ -2601,9 +2643,9 @@ do_rpc_enable() {
     caddy_open_ports
     caddy_reload
 
-    # The node side: --ws first (the update lock and the epoch wait run right before
-    # the first edit), then node-info.yaml and one guarded restart.
-    CADDY_LOCK_NOTE="The Caddy site for ${domain} is configured; the node launch and node-info.yaml were not changed. Run rpc-enable again once the update has finished."
+    # The node side: --ws first (under the update lock), then node-info.yaml and one
+    # guarded restart (the committee guard and the epoch wait right before it).
+    CADDY_LOCK_NOTE="The Caddy site for ${domain} is configured; the node launch and node-info.yaml were not changed. Run rpc-enable again later (once any update in progress has finished)."
     CADDY_WS_OK="$want_ws"
     if [[ "$CADDY_WS_PLAN" == "inject" ]]; then
         caddy_ws_inject "$ws_port" || CADDY_WS_OK=false
@@ -2619,8 +2661,9 @@ do_rpc_enable() {
 # on a committee node: remove the RPC block (preserving any dashboard vhost; full
 # teardown when no managed vhost remains) with a Caddy reload -- no lock, no epoch
 # wait -- and drop the PUBLIC_RPC_* keys from .node-meta. Then un-advertise in
-# node-info.yaml: the update lock and the epoch wait only when worker 0 still
-# advertises something, then the edit and a guarded restart. A lock held by another
+# node-info.yaml: only when worker 0 still advertises something, the update lock,
+# the edit, then the committee guard, the epoch wait and a guarded restart (allowed
+# on mainnet too; a guard refusal puts node-info.yaml back). A lock held by another
 # run refuses that second part (`done ok:false`; the site is already gone).
 do_rpc_disable() {
     caddy_operation_reset
@@ -2637,7 +2680,7 @@ do_rpc_disable() {
     caddy_say ok "The public RPC site is removed."
     caddy_meta_record ""
 
-    CADDY_LOCK_NOTE="The public RPC site is removed, but node-info.yaml still advertises it; run rpc-disable again once the update has finished."
+    CADDY_LOCK_NOTE="The public RPC site is removed, but node-info.yaml still advertises it; run rpc-disable again later (once any update in progress has finished)."
     CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || die "the public RPC site is removed, but there is no usable reth HTTP port to check the node with (see above), so node-info.yaml was not changed and still advertises it."
     caddy_node_info_advertise clear
     caddy_node_unlock
@@ -3185,7 +3228,8 @@ caddy_usage_error() {
 caddy_require_lib() {
     local fn missing=""
     for fn in tn_write_root_file tn_backup_file tn_restore_backup tn_as_service_user \
-              addon_meta_get addon_meta_write_begin tn_acquire_update_lock _tn_strip_gw; do
+              addon_meta_get addon_meta_write_begin tn_acquire_update_lock _tn_strip_gw \
+              tn_committee_down_guard tn_wait_restart_window tn_local_rpc_url; do
         declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
     done
     [[ -z "$missing" ]] && return 0

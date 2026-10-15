@@ -415,14 +415,118 @@ check_rc "--yes accepts" 0 $?
 check_rc "--json: the UI action is the consent" 0 $?
 check "--json: summary is a warn event" "yes" "$(grep -q '^{"event":"warn","msg":"Public RPC on https://rpc.example.org/' "$T/events" && echo yes)"
 
-# --- committee guard before a node restart ------------------------------------------------------
-tn_wait_restart_window() { return 0; }
+# --- committee guard, then the epoch wait, right before a node restart ---------------------------
+REAL_CDG="$(declare -f tn_committee_down_guard)"
 tn_local_rpc_url() { echo http://127.0.0.1:8545; }
+tn_wait_restart_window() { return 0; }
 caddy_node_lock() { return 0; }
 tn_committee_down_guard() { return "${CDG_RC:-0}"; }
 ( CDG_RC=1; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "quorum risk refuses the restart" 1 $?
-( CDG_RC=1; TN_ALLOW_QUORUM_RISK=1; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "TN_ALLOW_QUORUM_RISK=1 goes on" 0 $?
-( CDG_RC=2; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "committee unreadable warns and goes on" 0 $?
+( CDG_RC=2; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "guard rc 2 refuses the restart" 1 $?
+check "guard rc 2: said" "yes" "$(grep -q 'committee could not be read on a node whose vote counts' "$T/out" && echo yes)"
 ( CDG_RC=0; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1; check_rc "guard passes" 0 $?
+( CDG_RC=0; CADDY_WINDOW_DONE=false; tn_wait_restart_window() { return 3; }; caddy_restart_window ) >"$T/out" 2>&1
+check_rc "a failed epoch wait refuses the restart" 1 $?
+eval "$REAL_CDG"
+
+# The real guard with the committee unreadable (the node votes, no RPC answers).
+tn_node_mode() { echo CvvActive; }
+tn_epoch_info() { return 1; }
+tn_rpc_call() { return 1; }
+cguard() { # cguard NAME EXPECTED-RC META [ENV=VAL]
+    local name="$1" want="$2"
+    printf '%b\n' "$3" > "$RP/etc/telcoin/.node-meta"
+    ( [[ -n "${4:-}" ]] && export "${4?}"; CADDY_WINDOW_DONE=false; caddy_restart_window ) >"$T/out" 2>&1
+    check_rc "real guard: ${name}" "$want" $?
+}
+cguard "testnet, committee unreadable: restart" 0 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2'
+cguard "mainnet voting node, committee unreadable: refused" 1 'NETWORK=mainnet\nOWNERSHIP_LAYOUT=2'
+cguard "mainnet with TN_ALLOW_QUORUM_RISK=1: restart" 0 'NETWORK=mainnet\nOWNERSHIP_LAYOUT=2' TN_ALLOW_QUORUM_RISK=1
+cguard "unknown network, committee unreadable: refused" 1 'OWNERSHIP_LAYOUT=2'
+unset -f tn_node_mode tn_epoch_info tn_rpc_call
+
+# rpc-enable and rpc-disable through caddy_node_info_advertise: the lock before the edit,
+# then guard, wait and restart; a refusal puts node-info.yaml back and never restarts.
+ORDER="$T/order"
+NIF="$RP/data/node-info.yaml"
+mkdir -p "$RP/data"
+caddy_node_lock() { [[ "${_LOCKED:-}" == 1 ]] && return 0; _LOCKED=1; echo lock >> "$ORDER"; }
+tn_committee_down_guard() { echo guard >> "$ORDER"; return "${CDG_RC:-0}"; }
+tn_wait_restart_window() { echo wait >> "$ORDER"; return "${WAIT_RC:-0}"; }
+caddy_node_info_can_edit() { return 0; }
+caddy_node_info_rpc_get() { echo "${NI_CUR:-none none}"; }
+caddy_node_info_write() { echo edit >> "$ORDER"; printf 'edited\n' > "$1"; return 0; }
+tn_resolve_service() { echo telcoin; }
+systemctl() { [[ "$1" == restart ]] && echo restart >> "$ORDER"; [[ "$1" == is-failed ]] && return 1; return 0; }
+curl() { echo '{"result":"0x7e1"}'; }
+adv() { # adv MODE -- one advertise run on a fresh node-info.yaml; RC and ORDER
+    printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nDATA_DIR=/data\n' > "$RP/etc/telcoin/.node-meta"
+    printf 'original\n' > "$NIF"
+    : > "$ORDER"
+    RC=0
+    ( caddy_operation_reset; CADDY_RPC_PORT=8545
+      if [[ "$1" == set ]]; then caddy_node_info_advertise set rpc.example.org true
+      else NI_CUR="https://rpc.example.org/ none"; caddy_node_info_advertise clear; fi
+      caddy_exit_cleanup ) >"$T/out" 2>&1 || RC=$?
+}
+adv set
+check_rc "rpc-enable advertise rc 0" 0 "$RC"
+check "rpc-enable: lock, edit, guard, wait, restart" "lock edit guard wait restart" "$(paste -sd' ' "$ORDER")"
+check "rpc-enable: the edit is kept" "edited" "$(cat "$NIF")"
+CDG_RC=1 adv set
+check_rc "rpc-enable, guard refuses: rc 1" 1 "$RC"
+check "rpc-enable, guard refuses: no wait, no restart" "lock edit guard" "$(paste -sd' ' "$ORDER")"
+check "rpc-enable, guard refuses: node-info.yaml put back" "original" "$(cat "$NIF")"
+check "rpc-enable, guard refuses: said" "yes" "$(grep -q 'node changes were put back' "$T/out" && echo yes)"
+WAIT_RC=4 adv set
+check_rc "rpc-enable, wait fails: rc 1" 1 "$RC"
+check "rpc-enable, wait fails: no restart" "lock edit guard wait" "$(paste -sd' ' "$ORDER")"
+check "rpc-enable, wait fails: node-info.yaml put back" "original" "$(cat "$NIF")"
+adv clear
+check_rc "rpc-disable advertise rc 0" 0 "$RC"
+check "rpc-disable: lock, edit, guard, wait, restart" "lock edit guard wait restart" "$(paste -sd' ' "$ORDER")"
+CDG_RC=2 adv clear
+check_rc "rpc-disable on a node whose vote counts, committee unreadable: rc 1" 1 "$RC"
+check "rpc-disable, guard rc 2: no restart" "lock edit guard" "$(paste -sd' ' "$ORDER")"
+check "rpc-disable, guard rc 2: node-info.yaml put back" "original" "$(cat "$NIF")"
+unset -f caddy_node_info_can_edit caddy_node_info_rpc_get caddy_node_info_write tn_resolve_service systemctl curl
+eval "$REAL_CDG"
+
+# A TERM during the epoch wait (after the edit): the EXIT trap puts node-info.yaml back.
+cat > "$T/c/wait_driver.sh" <<'DRV'
+# shellcheck source=/dev/null
+source "$(dirname "$0")/install-caddy.sh"
+tn_as_service_user() { "$@"; }
+caddy_node_lock() { :; }
+tn_local_rpc_url() { echo http://127.0.0.1:8545; }
+tn_committee_down_guard() { return 0; }
+tn_wait_restart_window() { : > "$HOLD_DIR/held"; while :; do command sleep 0.1; done; }
+caddy_node_info_can_edit() { return 0; }
+caddy_node_info_rpc_get() { echo "none none"; }
+caddy_node_info_write() { printf 'edited\n' > "$1"; return 0; }
+tn_resolve_service() { echo telcoin; }
+trap 'exit 143' TERM
+trap caddy_exit_cleanup EXIT
+CADDY_RPC_PORT=8545
+caddy_node_info_advertise set rpc.example.org true
+DRV
+printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nDATA_DIR=/data\n' > "$RP/etc/telcoin/.node-meta"
+printf 'original\n' > "$NIF"
+HOLD_DIR="$T/hold.wait"
+rm -rf "$HOLD_DIR"; mkdir -p "$HOLD_DIR"
+set -m
+HOLD_DIR="$HOLD_DIR" TN_CADDY_RUN_PARENT="$T/run2" bash "$T/c/wait_driver.sh" >"$T/out" 2>&1 </dev/null &
+wpid=$!
+set +m
+i=0
+while [[ ! -e "$HOLD_DIR/held" && "$i" -lt 200 ]]; do command sleep 0.1; i=$((i + 1)); done
+check "TERM in the wait: the edit was made first" "edited" "$(cat "$NIF")"
+kill -TERM -- "-$wpid" 2>/dev/null
+wrc=0
+wait "$wpid" || wrc=$?
+check_rc "TERM in the wait: exit 143" 143 "$wrc"
+check "TERM in the wait: node-info.yaml put back" "original" "$(cat "$NIF")"
+check "TERM in the wait: no run directory left" "" "$(ls "$T/run2")"
+printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 
 finish
