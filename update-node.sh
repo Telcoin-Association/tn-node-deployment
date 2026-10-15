@@ -1106,6 +1106,23 @@ apply_docker_update() {
 # SOURCE PATH
 # =============================================================================
 
+# _uc_built_binary_ok FILE [UID] -- rc 0 when the build output FILE is a
+# regular file, not a symlink, owned by UID (default: the uid this script runs
+# as, which ran the build). Read only after cargo has returned. Prints nothing.
+_uc_built_binary_ok() {
+    local f="${1:-}" want="${2:-}" uid
+    [[ -n "$want" ]] || want="$(id -u)"
+    [[ -n "$f" && -f "$f" && ! -L "$f" ]] || return 1
+    uid="$(stat -c '%u' -- "$f" 2>/dev/null)" || return 1
+    [[ "$uid" == "$want" ]]
+}
+
+# build_log_file -- create the cargo log for one prepare with mktemp (0600, a
+# new name every time) and print its path. rc 1 when mktemp fails.
+build_log_file() {
+    mktemp "${TMPDIR:-/tmp}/tn-build.XXXXXX" 2>/dev/null
+}
+
 prepare_source_build() {
     local new_ref="$1" refusal
     print_header "Prepare Update -- Source Build"
@@ -1121,6 +1138,21 @@ prepare_source_build() {
         print_error "Source directory not found at ${TN_SOURCE_DIR}"
         print_info "This script can only update installs that built from /opt/telcoin-source."
         return 1
+    fi
+
+    # The network decides the build features (adiri on testnet, none on
+    # mainnet). It must be known before the checkout moves or cargo runs: a
+    # build for the wrong network refuses to start on this node's chain.
+    local network cargo_features
+    if ! network="$(detect_network)" || ! cargo_features="$(tn_cargo_features_for "$network")"; then
+        print_error "Cannot tell which network this node runs, so the build features are unknown. Nothing was changed."
+        print_info "Set NETWORK=testnet or NETWORK=mainnet, on one line, in $(node_meta_path 2>/dev/null || echo "$(tn_resolve_config_dir)/.node-meta")."
+        return 1
+    fi
+    if [[ -n "$cargo_features" ]]; then
+        print_info "Network: ${network} -- building with ${cargo_features}"
+    else
+        print_info "Network: ${network} -- building without the adiri feature"
     fi
 
     local current_ref
@@ -1168,25 +1200,6 @@ prepare_source_build() {
         return 1
     fi
     print_ok "Submodules: $(git -C "$TN_SOURCE_DIR" submodule status 2>/dev/null | tr '\n' ' ')"
-
-    # The adiri feature flag is required for testnet builds; mainnet builds omit it.
-    local network cargo_features=""
-    network=$(detect_network)
-    case "$network" in
-        testnet)
-            cargo_features="--features adiri"
-            print_info "Network: testnet -- enabling --features adiri"
-            ;;
-        mainnet)
-            print_info "Network: mainnet -- building without the adiri feature"
-            ;;
-        *)
-            print_warn "Could not determine network from .node-meta or genesis.yaml."
-            print_warn "Defaulting to testnet (--features adiri) since mainnet has not launched."
-            print_warn "Pass NETWORK=mainnet in $(node_meta_path || echo "$(tn_resolve_config_dir)/.node-meta") to override."
-            cargo_features="--features adiri"
-            ;;
-    esac
 
     # Disk-space pre-flight. A clean cargo build can produce a target/
     # directory of several GB. Refuse to start a build when we can already
@@ -1243,6 +1256,14 @@ prepare_source_build() {
     local pre_build_hash=""
     [[ -f "$built" ]] && pre_build_hash=$(sha256sum "$built" | awk '{print $1}')
 
+    # A fresh 0600 log per build (mktemp), never a fixed name in /tmp.
+    local build_log
+    if ! build_log="$(build_log_file)"; then
+        print_error "Could not create a build log in ${TMPDIR:-/tmp}. Nothing was built."
+        return 1
+    fi
+    print_info "Build log: ${build_log}"
+
     print_step "Building release binary (${new_ref}, ${cargo_features:-no features})..."
     # Use pushd/popd instead of a subshell so PIPESTATUS is captured from
     # the pipeline below. set -o pipefail (inherited from common.sh) makes
@@ -1251,17 +1272,19 @@ prepare_source_build() {
     # unchecked subshell, which let a failed build go undetected.
     pushd "$TN_SOURCE_DIR" >/dev/null
     # shellcheck disable=SC2086
-    if ! cargo build --release $cargo_features 9>&- 2>&1 | tee /tmp/tn-update-build.log 9>&-; then
+    if ! cargo build --release $cargo_features 9>&- 2>&1 | tee "$build_log" 9>&-; then
         popd >/dev/null
-        print_error "cargo build failed. See /tmp/tn-update-build.log for the full output."
+        print_error "cargo build failed. See ${build_log} for the full output."
         print_info "  Last few lines:"
-        tail -10 /tmp/tn-update-build.log 2>/dev/null | sed 's/^/    /'
+        tail -10 "$build_log" 2>/dev/null | sed 's/^/    /'
         return 1
     fi
     popd >/dev/null
 
-    if [[ ! -f "$built" ]]; then
-        print_error "Build did not produce ${built}. See /tmp/tn-update-build.log"
+    # The output is inspected only now that cargo has returned: a regular
+    # file (not a symlink) owned by the account that ran the build.
+    if ! _uc_built_binary_ok "$built"; then
+        print_error "Build did not produce a regular file owned by the build account at ${built}. See ${build_log}"
         return 1
     fi
 
@@ -1898,6 +1921,13 @@ json_prepare_source() {
     if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
         json_event error "source directory not found at ${TN_SOURCE_DIR}"; return 1
     fi
+    # Network and build features first: nothing is checked out or built for
+    # a network that cannot be told (see prepare_source_build).
+    local network cargo_features
+    if ! network="$(detect_network)" || ! cargo_features="$(tn_cargo_features_for "$network")"; then
+        json_event error "cannot tell which network this node runs, so the build features are unknown; set NETWORK=testnet or NETWORK=mainnet on one line in .node-meta. Nothing was changed."
+        return 1
+    fi
     local current_ref
     current_ref=$(detect_current_source_ref || echo "unknown")
 
@@ -1926,14 +1956,6 @@ json_prepare_source() {
     fi
     json_event step "Submodules: $(git -C "$TN_SOURCE_DIR" submodule status 2>/dev/null | tr '\n' ' ')"
 
-    # The adiri feature flag is required for testnet builds; mainnet omits it.
-    local network cargo_features=""
-    network=$(detect_network)
-    case "$network" in
-        mainnet) ;;
-        *) cargo_features="--features adiri" ;;
-    esac
-
     # Make cargo findable under sudo's PATH (mirrors prepare_source_build).
     local user_cargo_dir=""
     [[ -n "${SUDO_USER:-}" ]] && [[ -d "/home/${SUDO_USER}/.cargo/bin" ]] \
@@ -1950,17 +1972,23 @@ json_prepare_source() {
     local pre_build_hash=""
     [[ -f "$built" ]] && pre_build_hash=$(sha256sum "$built" | awk '{print $1}')
 
-    json_event step "Building ${new_ref} (${cargo_features:-no features}) -- this can take 20-40 minutes"
+    local build_log
+    if ! build_log="$(build_log_file)"; then
+        json_event error "could not create a build log in ${TMPDIR:-/tmp}; nothing was built"
+        return 1
+    fi
+    json_event step "Building ${new_ref} (${cargo_features:-no features}) -- this can take 20-40 minutes; log: ${build_log}"
     pushd "$TN_SOURCE_DIR" >/dev/null
     # shellcheck disable=SC2086
-    if ! cargo build --release $cargo_features 9>&- >/tmp/tn-update-build.log 2>&1; then
+    if ! cargo build --release $cargo_features 9>&- >"$build_log" 2>&1; then
         popd >/dev/null
-        json_event error "cargo build failed -- see /tmp/tn-update-build.log on the host"
+        json_event error "cargo build failed -- see ${build_log} on the host"
         return 1
     fi
     popd >/dev/null
 
-    [[ -f "$built" ]] || { json_event error "build produced no binary at ${built}"; return 1; }
+    # Inspected only after cargo returned (see prepare_source_build).
+    _uc_built_binary_ok "$built" || { json_event error "build produced no regular file owned by the build account at ${built}"; return 1; }
     if ! "$built" --version >/dev/null 2>&1; then
         json_event error "built binary failed its --version check"; return 1
     fi
