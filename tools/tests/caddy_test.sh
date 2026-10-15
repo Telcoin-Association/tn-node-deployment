@@ -282,6 +282,64 @@ check "no .tn-bak write or cp -p of node files left in the script" "0" \
     "$(grep -v '^[[:space:]]*#' "${TN_TEST_REPO}/install-caddy.sh" | grep -cE 'tn-bak|chown --reference|chmod --reference' || true)"
 check "TN_CADDY_PASSWORD never exported" "0" "$(grep -c 'export TN_CADDY_PASSWORD' "${TN_TEST_REPO}/install-caddy.sh" || true)"
 
+# --- the run directory is removed on exit, also on a signal during the restart -----------------
+# A driver process sources the script, arms the traps main arms, backs node-info.yaml
+# up (which creates the run directory), uses the directory a second time, and then
+# either exits or holds in a stubbed `systemctl restart` until it is sent TERM.
+mkdir -p "$T/run2" "$T/hbin"
+cat > "$T/hbin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = restart ]; then
+    : > "${HOLD_DIR:?}/held"
+    while [ ! -e "$HOLD_DIR/release" ]; do sleep 0.1; done
+fi
+exit 0
+STUB
+chmod +x "$T/hbin/systemctl"
+cat > "$T/c/rundir_driver.sh" <<'DRV'
+# shellcheck source=/dev/null
+source "$(dirname "$0")/install-caddy.sh"
+tn_as_service_user() { "$@"; }
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap caddy_exit_cleanup EXIT
+caddy_ni_backup "$1" || exit 9
+caddy_run_dir || exit 9
+printf '%s\n' "$CADDY_RUN_DIR" > "$HOLD_DIR/dir"
+[ "$2" = hold ] && systemctl restart telcoin
+exit 0
+DRV
+rundir_run() {
+    HOLD_DIR="$T/hold.$1"
+    rm -rf "$HOLD_DIR"
+    mkdir -p "$HOLD_DIR"
+    if [[ "$1" == clean ]]; then
+        HOLD_DIR="$HOLD_DIR" TN_CADDY_RUN_PARENT="$T/run2" PATH="$T/hbin:$PATH" \
+            bash "$T/c/rundir_driver.sh" "$NI" clean >"$T/out" 2>&1 </dev/null
+        RUNDIR_RC=$?
+        return
+    fi
+    set -m
+    HOLD_DIR="$HOLD_DIR" TN_CADDY_RUN_PARENT="$T/run2" PATH="$T/hbin:$PATH" \
+        bash "$T/c/rundir_driver.sh" "$NI" hold >"$T/out" 2>&1 </dev/null &
+    local pid=$! i=0
+    set +m
+    while [[ ! -e "$HOLD_DIR/held" && "$i" -lt 200 ]]; do command sleep 0.1; i=$((i + 1)); done
+    kill -TERM -- "-$pid" 2>/dev/null
+    RUNDIR_RC=0
+    wait "$pid" || RUNDIR_RC=$?
+}
+rundir_run clean
+check_rc "run dir: clean driver run rc 0" 0 "$RUNDIR_RC"
+check "run dir: the backup went into a tn-caddy.* directory" "yes" \
+    "$(d="$(cat "$T/hold.clean/dir" 2>/dev/null)"; [[ "$d" == "$T/run2/tn-caddy."* ]] && echo yes)"
+check "run dir: a clean run leaves no directory" "" "$(ls "$T/run2")"
+rundir_run term
+check "run dir: the restart was in flight when TERM came" "yes" "$([[ -e "$T/hold.term/held" ]] && echo yes)"
+check_rc "run dir: TERM during the restart exits 143" 143 "$RUNDIR_RC"
+check "run dir: TERM during the restart leaves no directory" "" "$(ls "$T/run2")"
+
 # --- mainnet validator refusal ------------------------------------------------------------------
 NSV_LOG="$T/nsv.log"
 node_is_staked_validator() {

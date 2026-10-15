@@ -1531,24 +1531,25 @@ caddy_node_info_can_edit() {
     tn_launch_runner >/dev/null 2>&1
 }
 
-# caddy_run_dir -- print this run's root-only directory (mktemp -d under
-# TN_CADDY_RUN_PARENT, default /run; mode 0700), creating it on first use. It holds
-# the node-info.yaml backup and the launch dry-run copy, and the EXIT trap removes it.
+# caddy_run_dir -- create this run's root-only directory on first use (mktemp -d
+# under TN_CADDY_RUN_PARENT, default /run; mode 0700) and set CADDY_RUN_DIR to it.
+# It holds the node-info.yaml backup and the launch dry-run copy, and the EXIT trap
+# removes it. Call it directly, never in $(...): CADDY_RUN_DIR and the EXIT trap's
+# list must be set in this shell. rc 1 when it cannot be created.
 caddy_run_dir() {
     if [[ -z "$CADDY_RUN_DIR" || ! -d "$CADDY_RUN_DIR" ]]; then
-        CADDY_RUN_DIR="$(mktemp -d "${TN_CADDY_RUN_PARENT:-/run}/tn-caddy.XXXXXX")" || return 1
+        CADDY_RUN_DIR="$(mktemp -d "${TN_CADDY_RUN_PARENT:-/run}/tn-caddy.XXXXXX")" || { CADDY_RUN_DIR=""; return 1; }
         caddy_tmp_track "$CADDY_RUN_DIR"
         chmod 0700 "$CADDY_RUN_DIR" || return 1
     fi
-    printf '%s\n' "$CADDY_RUN_DIR"
+    return 0
 }
 
 # caddy_ni_backup <ni> -- copy node-info.yaml, read as the service user, into the
 # root-only run directory (CADDY_NI_BAK). rc 1 when it cannot be read or copied.
 caddy_ni_backup() {
-    local dir
-    dir="$(caddy_run_dir)" || return 1
-    CADDY_NI_BAK="${dir}/node-info.yaml"
+    caddy_run_dir || return 1
+    CADDY_NI_BAK="${CADDY_RUN_DIR}/node-info.yaml"
     if ! tn_as_service_user cat -- "$1" > "$CADDY_NI_BAK"; then
         rm -f -- "$CADDY_NI_BAK"
         CADDY_NI_BAK=""
@@ -2049,7 +2050,10 @@ caddy_ws_plan() {
     # The copy sits in a root-only directory under /run: the launch writer refuses a
     # directory that is not root-owned and closed to others (as /tmp is).
     rc=4
-    dir="$(caddy_run_dir 2>/dev/null)" && dir="$(mktemp -d "${dir}/ws-dry.XXXXXX" 2>/dev/null)" || dir=""
+    dir=""
+    if caddy_run_dir 2>/dev/null; then
+        dir="$(mktemp -d "${CADDY_RUN_DIR}/ws-dry.XXXXXX" 2>/dev/null)" || dir=""
+    fi
     if [[ -n "$dir" ]]; then
         copy="${dir}/${file##*/}"
         if cp -p "$file" "$copy" 2>/dev/null; then
