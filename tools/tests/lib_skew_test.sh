@@ -4,7 +4,8 @@
 # setup-node, update-node, edit-config and prepare-stake refuse up front with one
 # message (and a --json error plus done event), before they stop a node or pull
 # an image, and check-node warns once about the hardening checks the older
-# library turns off.
+# library turns off. Without one of the release, build and image helpers,
+# setup-node, update-node and edit-config refuse the same way.
 #
 #   bash tools/tests/lib_skew_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/lib_skew_test.sh
@@ -32,6 +33,12 @@ REQUIRED=(tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write_roo
           tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported
           tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch
           tn_chain_configs_check)
+# The release, build and image helpers setup-node, update-node and edit-config
+# also require.
+CORE4_SCRIPTS=(setup-node update-node edit-config)
+CORE4_REQUIRED=(tn_docker_repo_for tn_docker_resolve_ref tn_docker_holds_digest tn_docker_image_for_tag
+          tn_staging_dir tn_release_stage tn_stage_binary tn_build_user_ensure tn_rustup_ensure
+          tn_source_checkout_tag tn_source_build tn_staged_cleanup tn_staging_sweep)
 # The credential helpers migrate-node-naming.sh also requires (its own message).
 MIGRATE_REQUIRED=(tn_remove_inflight_tmp tn_has_embedded_passphrase _tn_unit_pass_read
           tn_store_credential tn_creds_supported tn_credential_key _tn_cred_old_copies)
@@ -57,6 +64,22 @@ for fn in "${REQUIRED[@]}"; do
         fi
     done
     check "without ${fn}: every script refuses" " ${SCRIPTS[*]}" "$got"
+done
+for fn in "${CORE4_REQUIRED[@]}"; do
+    sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
+    if ! grep -q "^${fn}_absent_here() {" "$T/cur/lib/common.sh"; then
+        check "${fn}: defined in lib/common.sh" "yes" "no"
+        continue
+    fi
+    got=""
+    for s in "${CORE4_SCRIPTS[@]}"; do
+        rc=0
+        "$BASH" "$T/cur/${s}.sh" --help > /dev/null 2> "$T/err" < /dev/null || rc=$?
+        if [[ $rc -eq 1 ]] && grep -q "is older than this ${s}.sh: run update-scripts.sh" "$T/err"; then
+            got="${got} ${s}"
+        fi
+    done
+    check "without ${fn}: setup-node, update-node and edit-config refuse" " ${CORE4_SCRIPTS[*]}" "$got"
 done
 cp "$REPO/migrate-node-naming.sh" "$T/cur/migrate-node-naming.sh"
 for fn in "${MIGRATE_REQUIRED[@]}"; do

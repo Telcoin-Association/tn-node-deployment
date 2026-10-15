@@ -88,7 +88,10 @@ for _tn_fn in tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write
               tn_has_embedded_passphrase _tn_unit_pass_read _tn_unit_runs_node_inline \
               tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported \
               tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch \
-              tn_chain_configs_check; do
+              tn_chain_configs_check \
+              tn_docker_repo_for tn_docker_resolve_ref tn_docker_holds_digest tn_docker_image_for_tag \
+              tn_staging_dir tn_release_stage tn_stage_binary tn_build_user_ensure tn_rustup_ensure \
+              tn_source_checkout_tag tn_source_build tn_staged_cleanup tn_staging_sweep; do
     declare -F "$_tn_fn" >/dev/null 2>&1 || _tn_old=1
 done
 if [[ -n "$_tn_old" ]]; then
