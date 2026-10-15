@@ -7,6 +7,18 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Partner documents, October 2026 -- docs/partner/ reorganised, technical specification added
+`docs/partner/` now holds one directory per partner document plus a shared `assets/` tree.
+The MNO node guide moved unchanged into `docs/partner/mno-node-guide/` (version 1.3: the
+partner contact is `devs@telcoin.org`). `docs/partner/technical-specification/` is new: the
+Telcoin Network Technical Specification the Association hands to partners, transcribed from
+the April 2026 document into Markdown, brought up to telcoin-network `v0.16.0-adiri`
+(`protocol:` in its `metadata.yaml`), and rendered with its own template and theme (Inter,
+the light lavender palette, the card cover) into a committed PDF. `tools/build-partner-pdf.sh`
+takes the document name or `--all`; the reference toolchain is pandoc 3.12.1, WeasyPrint
+70.0 and poppler 26.10.0. AGENTS.md "Partner documents" has the rules. Nothing updater-tracked
+changed.
+
 ### v0.16.0-adiri round, October 2026 -- update-scripts v1.1.72
 Full release note: [CHANGELOG/v0.16.0-adiri.md](CHANGELOG/v0.16.0-adiri.md).
 

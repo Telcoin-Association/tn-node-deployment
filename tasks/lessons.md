@@ -230,3 +230,39 @@ only in the orchestrator's head, so a dead agent took its context with it.
   v0.16.0-adiri branch had to be rewritten with `git filter-branch --msg-filter` and force-pushed to
   drop the `Co-Authored-By: Claude …` trailer before the PR could be opened. Commit messages end after
   the body; PR bodies carry no "Generated with" footer.
+
+## Partner documents round (2026-10-15): WeasyPrint determinism, review scope, agent conventions
+
+- **WeasyPrint names raster image objects after `md5(url)` of the resolved file URL** (images.py
+  line 327 in 70.0), so a stylesheet that references a PNG by path makes the PDF's bytes depend on
+  the checkout path: the guide (fonts and SVG logos only) was byte-identical from any path, the
+  specification (cover PNG) was not, and a fresh clone reported "toolchain drift" for unchanged
+  sources. Fonts are embedded by content and SVGs are drawn as vectors. Fix at build time: stage
+  the stylesheet beside the HTML with raster `url()`s inlined as data URIs (10b666e). Test
+  "byte-identical" claims from a second worktree at a different path, not with a second run in
+  the same tree.
+- **Re-verify every PR pointer in an approved plan against `git log <old>..<new>` before briefing
+  agents.** The plan listed the region-aware committee draw (#1279); #1328 removed it before the
+  tag. The facts preamble (`tasks/spec-refresh-facts.md`) caught it in two minutes and no agent
+  wrote it up.
+- **"Missing" findings inflate a refresh.** Eight reviewers returned 40 additions beside 108
+  corrections and the document grew from 493 to 742 lines (25 to 38 pages) before the fidelity
+  reviewer classified every addition (5 partner-needed, 18 out of scope). Next time: brief
+  reviewers that `missing` means a fact without which a corrected sentence is untrue, and have
+  consolidators apply only riders attached to a correction, with standalone additions listed for
+  triage instead of applied.
+- **Two transcribers diverged on one rule.** T1 and T2 got the same code-span instruction and
+  applied it differently (type names, status names); the consolidators had to harmonise and C1's
+  reading had to be relayed to C2 mid-flight. Give a convention as an explicit list with examples
+  of both sides, not a principle.
+- **Independent reviewers converged on the same error from different chapters** (the committee
+  "N+2" sentence, found by Q1 from chapter 6's wording and by Q2a and Q2b from the contract).
+  Cross-chapter consistency checks in the review briefs paid for themselves; keep them.
+- **A reference artefact captured mid-stream caused a false alarm.** The pdftotext reference was
+  taken at 35 pages, one sentence tightening later made it stale, and a `diff && commit` chain
+  silently skipped the commit. Compare against the committed object (`git show HEAD:path`), and
+  never chain a commit behind a check whose failure is silent.
+- **Splitting the consolidation into two agents on scratch copies joined at a chapter heading**
+  (C1: title and chapters 1-5, C2: chapters 6-10, each with its own log) kept both under 220k
+  tokens and let C1 start before the last reviewer finished. The join was one `sed` and a diff
+  of the untouched half. Reuse the pattern for long documents.

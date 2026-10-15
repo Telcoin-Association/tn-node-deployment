@@ -1,3 +1,78 @@
+# Review — Technical Specification as a partner document (2026-10-15, branch docs/technical-specification)
+
+Nothing is pushed. Branch `docs/technical-specification` off `main` (037c810), six commits:
+1331145 (guide moved to `docs/partner/mno-node-guide/`, fonts to `assets/fonts/geist/`, build
+script by document name, PDF carried over at R100), 9a0f5d3 (Inter v4.1, two light-background
+logos, cover art, assets README), 6010ed3 (partner contact devs@telcoin.org, guide 1.3 dated
+15 October 2026 and rebuilt, AGENTS.md "Partner documents", README pointer), 924fa0c (the
+specification: Markdown, metadata 1.1 / 15 October 2026 / protocol v0.16.0-adiri, template,
+theme, 34-page PDF), 10b666e (the build stages each theme beside the HTML with raster images
+inlined, so the PDF bytes do not depend on the checkout path), and the commit carrying this
+file, the CHANGELOG clause and the task files. No attribution trailers. The original Google
+Docs PDF stays untracked at `docs/Telcoin Network Technical Specification.pdf` for the user to
+delete after sign-off; `.claude/project-context.md` stays untracked.
+
+## What landed
+
+- `docs/partner/technical-specification/technical-specification.md`: 738 lines, the ten
+  chapters of the April 2026 document in their order, 59 headings, 12 tables, three added
+  subsections (Gas over-reservation penalty, Fork gates with the six armed Adiri epochs,
+  Transaction forwarding), one renamed section ("Keccak-256 hashing" to "Hashing": consensus
+  digests are BLAKE3). Every change from the faithful transcription is logged with a code
+  citation at the tag in `tasks/ckpt-spec-refresh-log.md` (parts A, B and C).
+- The refresh corrected, among 108 stale statements: the committee drawn at the close of epoch
+  N serves epoch N+3 and the node, not the contract, does the draw from the seed chain; the
+  leader commit rule is f+1; four epoch-boundary system calls, 100M gas each; `mix_hash` carries
+  the seed-chain PREVRANDAO; four gossip topics with committee publishers and no transaction
+  topic; role-specific request-response ids `/tn-primary-{chain_id}/0.0.2`; three reputation
+  levels with a ban at -50; node modes derived from committee membership, `CvvInactive`
+  carrying over; `final_state` only pins a pack's start state; the fixed-stake membership model,
+  rewards weighted by leader rounds, exit over three committees; every node holds a BLS key with
+  derived Ed25519 network keys. The intent-scope table gains `EpochCloseSeed`.
+- The toolchain on this Mac is pandoc 3.12.1, WeasyPrint 70.0, poppler 26.10.0 (installed this
+  session). The guide PDF was rebuilt once for the contact change; a word-level diff against the
+  pandoc 3.12 baseline showed only the address, version and date tokens.
+
+## Verification
+
+- `bash tools/build-partner-pdf.sh --all` in a worktree at another path: "PDF unchanged" for
+  both documents, `git status --porcelain` empty; the same in the main tree. Before 10b666e the
+  specification reported "toolchain drift" from any other path, because WeasyPrint names image
+  objects after the md5 of the image URL.
+- Script: `/bin/bash -n`, `bash -n`, `tools/check-bash32.sh`, `shellcheck --severity=warning`
+  all clean; usage errors exit 2 (no argument, `bogus`, two names, `--all` with a name or with
+  `PARTNER_MD`, an unknown flag); anti-churn in a scratch clone: a perturbed PDF gives
+  "toolchain drift" and exit 0, `--force` writes, a Markdown edit writes and warns to bump the
+  metadata.
+- Specification PDF: 34 pages, empty WeasyPrint log, cover with no header or footer, header and
+  footer on pages 2 to 34, "Page | 2 / 34" and "Page | 34 / 34", the confidentiality line with
+  the date on every page, `mailto:devs@telcoin.org` on the cover, three-level contents with only
+  chapters numbered, all 59 entries matching their pages; text contains v0.16.0-adiri and the
+  `/tn-primary-` ids and none of `/telcoin-network/0.0.1`, `--observer`, `tn-txn`, personal
+  addresses or "mainnet".
+- `.gitignore` `docs/partner/*/build/` and `.gitattributes` `docs/partner/*/*.pdf` verified with
+  `git check-ignore` and `git check-attr`; `git log --follow` on the guide PDF reaches 7fb7c8d;
+  `git diff -M --stat` shows the move commit's PDF as a pure rename; no `.sha256` changed; the
+  only references to the old partner paths are historical CHANGELOG lines.
+- Reviews: fidelity (Q1) found no transcription defect and a complete log, and classified 68
+  additions beyond the corrections (5 partner-needed kept, 18 out of scope dropped, 7 duplicate
+  pairs resolved); technical disproof (Q2a/b/c, fresh agents against the code) found 5 wrong and
+  36 imprecise statements among 151 checked, all applied; render review (Q3, Q3r) found no
+  must-fix item, the one remaining runt page was removed by tightening one sentence.
+
+## Out of scope, for the user
+
+- `support@telcoin.org` remains in README.md (6), OPERATOR.md (12), `setup-node.sh`,
+  `check-node.sh` and `update-scripts.sh` (1 each; those three are updater-tracked and need
+  version bumps, sidecars and a changelog entry if changed), and in three historical CHANGELOG
+  lines.
+- Two telcoin-network docs disagree with the code at the tag and could be fixed upstream:
+  `docs/src/network/discovery.md` (a record holds up to 4 addresses, not 1) and `SYNC.md:51`
+  ("headers include certificates"; the sub-DAG stores headers without signatures).
+- The cover counts as page 1 (the original numbered the contents page as 1); the cover card is
+  about 4.6 mm narrower than the original's; the first column of the three-chains table is
+  regular weight where the original is bold.
+
 # Review — followup.md backlog round (2026-10-01 19:20 → 2026-10-02, three repos)
 
 Nothing is pushed. `main` is 42 commits ahead of `origin/main` (`7fb7c8d..6622d1e`; the release
