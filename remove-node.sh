@@ -20,7 +20,8 @@ readonly SCRIPT_VERSION="1.2.9"
 # logrotate and journald files, the lock directory). It is the same root the
 # resolvers in lib/fallback.sh probe: empty in production, a fixture tree in
 # tools/tests/remove_test.sh. The older shared paths (/opt/telcoin,
-# /opt/telcoin-source, /var/log/telcoin) and the scan are not prefixed.
+# /opt/telcoin-source, /var/log/telcoin) are prefixed only in remove_leftovers;
+# remove_shared_components and the scan use them as they are.
 TN_RM_ROOT="${TN_ROOT_PREFIX:-}"
 
 # =============================================================================
@@ -256,40 +257,13 @@ show_detected() {
     print_header "Detected Node Installations"
 
     if [[ ${#INSTALLED_UNITS[@]} -eq 0 ]]; then
-        # Check for partial installs (directories exist but no service file). The
-        # unified dirs (/etc/telcoin, /var/lib/telcoin) are the parents of any
-        # legacy role subdir, so removing them clears a half-removed legacy install.
-        local partial=false
-        local partial_items=()
-        [[ -d /var/lib/telcoin ]]    && partial=true && partial_items+=("/var/lib/telcoin")
-        [[ -d /opt/telcoin ]]        && partial=true && partial_items+=("/opt/telcoin")
-        [[ -d /opt/telcoin-source ]] && partial=true && partial_items+=("/opt/telcoin-source")
-        [[ -d /etc/telcoin ]]        && partial=true && partial_items+=("/etc/telcoin")
-        [[ -d /var/log/telcoin ]]    && partial=true && partial_items+=("/var/log/telcoin")
-
-        if [[ "$partial" == "true" ]]; then
-            print_warn "No complete node installation found, but leftover files detected:"
-            for item in "${partial_items[@]}"; do
-                print_info "  ${item}"
-            done
-            echo ""
-            if confirm "Remove these leftover files and directories?"; then
-                # Shred the key and passphrase files these trees can hold first
-                # (unified layout and the legacy per-role subdirectories).
-                local sub
-                for sub in "" /validator /observer; do
-                    shred_key_files "/var/lib/telcoin${sub}/node-keys" "/etc/telcoin${sub}"
-                done
-                for item in "${partial_items[@]}"; do
-                    rm -rf "$item"
-                    print_ok "Removed: ${item}"
-                done
-            else
-                print_info "Leftover files kept."
-            fi
-            report_orphaned_groups
-        else
+        # No node unit: offer to finish what an earlier removal left behind.
+        local lrc=0
+        remove_leftovers || lrc=$?
+        if [[ $lrc -eq 3 ]]; then
             print_warn "No standard Telcoin node installation detected on this server."
+        else
+            report_orphaned_groups
         fi
 
         # A node may still be present via a non-standard install (manual / dev /
@@ -434,20 +408,56 @@ _rm_dir() {
     return 0
 }
 
-# remove_unit_leftovers UNIT -- remove what older releases left beside the unit
-# file: the UNIT.bak.* and UNIT.service.bak.* copies (shredded: they can hold the
-# passphrase) and the drop-in directory UNIT.service.d.
+# remove_unit_leftovers UNIT [check] -- remove what older releases and an
+# interrupted removal leave beside the node unit files, for UNIT and for every
+# other node unit name (tn_all_node_services) whose unit file is gone: the
+# NAME.bak.* and NAME.service.bak.* copies (shredded: they can hold the
+# passphrase) and the drop-in directory NAME.service.d. A node unit still
+# installed keeps its own. UNIT may be empty (no unit file is left). With
+# "check", nothing is removed: rc 0 when there is something to remove, else 1.
 remove_unit_leftovers() {
-    local unit="$1" sd f
+    local unit="${1:-}" check="${2:-}" sd n f
     sd="${TN_RM_ROOT}/etc/systemd/system"
-    for f in "${sd}/${unit}.bak."* "${sd}/${unit}.service.bak."*; do
-        _rm_shred "$f"
-    done
-    _rm_dir "${sd}/${unit}.service.d"
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        if [[ "$n" != "$unit" && -f "${sd}/${n}.service" ]]; then
+            continue
+        fi
+        for f in "${sd}/${n}.bak."* "${sd}/${n}.service.bak."* "${sd}/${n}.service.d"; do
+            if [[ ! -e "$f" && ! -L "$f" ]]; then
+                continue
+            fi
+            if [[ "$check" == "check" ]]; then
+                return 0
+            fi
+            if [[ "$f" == "${sd}/${n}.service.d" ]]; then
+                _rm_dir "$f"
+            else
+                _rm_shred "$f"
+            fi
+        done
+    done < <(tn_all_node_services)
+    [[ "$check" != "check" ]]
 }
 
+# stop_and_disable_service UNIT -- stop and disable UNIT, remove its unit file
+# and what lies beside it (remove_unit_leftovers), and reload systemd. An empty
+# UNIT means no node unit file is left (an earlier removal stopped part way):
+# every node unit name is stopped and disabled in case systemd still has it
+# loaded, and the leftovers of all of them are removed.
 stop_and_disable_service() {
-    local service_name="$1"
+    local service_name="${1:-}" n
+    if [[ -z "$service_name" ]]; then
+        print_step "Stopping any node unit systemd still has loaded..."
+        while IFS= read -r n; do
+            [[ -n "$n" ]] || continue
+            systemctl stop "$n" 2>/dev/null || true
+            systemctl disable "$n" 2>/dev/null || true
+        done < <(tn_all_node_services)
+        remove_unit_leftovers ""
+        systemctl daemon-reload 2>/dev/null || true
+        return 0
+    fi
     print_step "Stopping and disabling ${service_name}..."
     systemctl stop "$service_name" 2>/dev/null || true
     systemctl disable "$service_name" 2>/dev/null || true
@@ -628,6 +638,107 @@ remove_node_host_files() {
         _rm_dir "${r}/var/lib/tn-build"
         print_ok "Removed /var/lib/tn-build"
     fi
+    return 0
+}
+
+# rm_leftovers_present -- rc 0 when files a node install leaves behind are still
+# here: /etc/telcoin (.node-meta and the config), the backups in
+# /var/backups/telcoin, the data dir /var/lib/telcoin, the start scripts in a
+# real /usr/local/libexec/telcoin directory, or unit backups and drop-ins of a
+# node unit whose unit file is gone. rc 1 when none of them is.
+rm_leftovers_present() {
+    local r="$TN_RM_ROOT" p m f
+    for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin"; do
+        if [[ -e "$p" || -L "$p" ]]; then
+            return 0
+        fi
+    done
+    if [[ -d "${r}/usr/local/libexec/telcoin" && ! -L "${r}/usr/local/libexec/telcoin" ]]; then
+        for m in source docker; do
+            f="$(tn_start_script_path "$m")" || continue
+            if [[ -e "${r}${f}" || -L "${r}${f}" ]]; then
+                return 0
+            fi
+        done
+    fi
+    remove_unit_leftovers "" check
+}
+
+# remove_leftovers -- the menu with no node unit installed: list what a node
+# install left behind (an earlier removal stopped part way, or kept the keys or
+# the data), ask once, then remove it all. The node keys under the data dirs
+# are shredded as the service account (.node-meta HOST_SERVICE_USER, else the
+# default), the config tree /etc/telcoin is shredded, and the shared host files
+# go through remove_node_host_files. A DATA_DIR that .node-meta records outside
+# /var/lib/telcoin is listed and removed too. rc 0 done or kept at the
+# operator's word; 1 refused before any change (a key set more than once in
+# .node-meta); 3 nothing found.
+remove_leftovers() {
+    local r="$TN_RM_ROOT" meta dd="" user="" group="" item m f
+    local -a dirs=() shown=()
+    meta="$(tn_resolve_config_dir)/.node-meta"
+    if [[ -f "$meta" ]]; then
+        dd="$(rm_meta_get DATA_DIR "$meta")" || return 1
+        user="$(rm_meta_get HOST_SERVICE_USER "$meta")" || return 1
+        group="$(rm_meta_get HOST_SERVICE_GROUP "$meta")" || return 1
+    fi
+    [[ -n "$user" && "$user" != "root" ]] || user="${SERVICE_USER:-telcoin}"
+    [[ -n "$group" && "$group" != "root" ]] || group="${SERVICE_GROUP:-telcoin}"
+    case "$dd" in
+        /?*) ;;
+        *) dd="" ;;
+    esac
+    case "$dd" in
+        "${r}/var/lib/telcoin"|"${r}/var/lib/telcoin/"*) dd="" ;;
+    esac
+    for item in "${r}/var/lib/telcoin" "$dd" "${r}/opt/telcoin" "${r}/opt/telcoin-source" \
+                "${r}/etc/telcoin" "${r}/var/log/telcoin"; do
+        if [[ -n "$item" ]] && [[ -e "$item" || -L "$item" ]]; then
+            dirs+=("$item")
+        fi
+    done
+    for m in source docker; do
+        f="$(tn_start_script_path "$m")" || continue
+        if [[ -e "${r}${f}" || -L "${r}${f}" ]]; then
+            shown+=("$f")
+        fi
+    done
+    if [[ -e "${r}/var/backups/telcoin" || -L "${r}/var/backups/telcoin" ]]; then
+        shown+=("/var/backups/telcoin")
+    fi
+    if remove_unit_leftovers "" check; then
+        shown+=("unit backups and drop-ins in /etc/systemd/system")
+    fi
+    if [[ ${#dirs[@]} -eq 0 && ${#shown[@]} -eq 0 ]]; then
+        return 3
+    fi
+
+    print_warn "No complete node installation found, but leftover files detected:"
+    for item in ${dirs[@]+"${dirs[@]}"}; do
+        print_info "  ${item#"$r"}"
+    done
+    for item in ${shown[@]+"${shown[@]}"}; do
+        print_info "  ${item}"
+    done
+    echo ""
+    if ! confirm "Remove these leftover files and directories?"; then
+        print_info "Leftover files kept."
+        return 0
+    fi
+
+    # The keys first: every file under a node-keys dir in the data dirs (as the
+    # service account that owns them), then the whole config tree.
+    for item in "${r}/var/lib/telcoin" "$dd"; do
+        [[ -n "$item" ]] || continue
+        _rm_shred_tree "$item" "$user" "$group" -path '*/node-keys/*'
+    done
+    _rm_shred_tree "${r}/etc/telcoin" "$user" "$group"
+    stop_and_disable_service ""
+    remove_node_host_files
+    for item in ${dirs[@]+"${dirs[@]}"}; do
+        _rm_dir "$item"
+        print_ok "Removed: ${item#"$r"}"
+    done
     return 0
 }
 
@@ -1325,6 +1436,10 @@ main_menu() {
 #              node unit is installed, the shared host files
 #              (remove_node_host_files)
 # A key set more than once in .node-meta stops every scope before any change.
+# When the unit file is already gone (an earlier run stopped part way, or ran
+# with a smaller scope), a run continues as long as the node left files behind
+# (rm_leftovers_present), does what its scope still needs and ends with the
+# usual "done" event; with nothing left it reports "no node installed".
 #
 #   remove-node.sh --json --remove <observer|validator> --scope <service|data|keys> --yes
 #
@@ -1362,9 +1477,19 @@ json_remove() {
     # Resolve the actually-installed node (unified telcoin unit, or a legacy unit)
     # instead of assuming telcoin-<slot>. One node per VM, so whichever slot the
     # UI sends, this is the node to remove.
-    local svc unit
-    svc="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
-    unit="${TN_RM_ROOT}/etc/systemd/system/${svc}.service"
+    # With no unit file left (an earlier removal stopped part way, or ran with a
+    # smaller scope), the removal continues as long as the node left files
+    # behind (rm_leftovers_present); svc is then empty.
+    local svc="" unit=""
+    if svc="$(tn_resolve_service)"; then
+        unit="${TN_RM_ROOT}/etc/systemd/system/${svc}.service"
+    else
+        svc=""
+        if ! rm_leftovers_present; then
+            json_event error "no node installed"
+            return 1
+        fi
+    fi
 
     # Read .node-meta BEFORE anything is removed. It is authoritative for the
     # install method, the service user/group and the data dir; a key set more
@@ -1406,12 +1531,16 @@ json_remove() {
     fi
 
     # The unit, its old backups (shredded) and its drop-in directory.
-    json_event step "Stopping and disabling ${svc}"
+    if [[ -n "$svc" ]]; then
+        json_event step "Stopping and disabling ${svc}"
+    else
+        json_event step "No node unit is left: finishing the removal of the files the node left behind"
+    fi
     stop_and_disable_service "$svc"
 
     if [[ "$is_docker" == "true" ]] && command -v docker >/dev/null 2>&1; then
         local ctr
-        ctr="$(tn_resolve_container 2>/dev/null || echo "$svc")"
+        ctr="$(tn_resolve_container 2>/dev/null || echo "${svc:-$TN_CONTAINER_NEW}")"
         json_event step "Removing docker container ${ctr}"
         docker stop "$ctr" 2>/dev/null || true
         docker rm "$ctr" 2>/dev/null || true
@@ -1504,7 +1633,7 @@ json_remove() {
     fi
 
     # "node_type" echoes the UI slot name; the key is kept for existing UI clients.
-    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$slot")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"${svc} removed (scope: ${scope})\"}"
+    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$slot")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"${svc:-the node} removed (scope: ${scope})\"}"
 }
 
 run_json_mode() {

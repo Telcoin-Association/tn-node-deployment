@@ -454,6 +454,122 @@ done
 check_has "json telcoin-log removed" "groupdel telcoin-log" "$(calls)"
 check_has "json reports the log group" "yes" "$(grep -q 'Group telcoin-log removed' "$T/json" && echo yes)"
 
+# --- an interrupted removal can be finished ------------------------------------
+# mkinterrupted -- the fixture after a removal stopped right after the unit file
+# went: .node-meta, the keys, the backups, the start scripts and an unshredded
+# unit backup are still here.
+mkinterrupted() {
+    mkfixture
+    rm -f "$SD/telcoin.service"
+}
+
+mkinterrupted
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "resume json keys: rc 0" 0 "$rc"
+check_has "resume json keys: done event" "yes" "$(grep -q '"event":"done","ok":true' "$T/json" && echo yes)"
+check_lacks "resume json keys: no error event" '"event":"error"' "$(cat "$T/json")"
+for p in "$SD/telcoin.service.bak.20240101" "$SD/telcoin.bak.1" "$SD/telcoin.service.d" "$ETC" "$DATA" \
+         "$LX" "$BK" "$R/etc/logrotate.d/telcoin" "$R/etc/systemd/journald.conf.d/50-telcoin.conf"; do
+    gone "resume json keys ${p#"$R"}" "$p"
+done
+for f in "$SD/telcoin.service.bak.20240101" "$ETC/bls-passphrase.cred" "$DATA/node-keys/bls.key" \
+         "$BK/bls-passphrase.Ef34Gh"; do
+    check_has "resume json keys shredded ${f#"$R"}" "shred -u -- $f" "$(calls)"
+done
+kept "resume json keys: another unit's backup" "$SD/telcoin-alloy.service.bak.1"
+kept "resume json keys: symlink target outside the tree" "$OUT/unit-target"
+
+# Run again with nothing left: there is no node.
+: > "$CALLS"
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "nothing left: rc 1" 1 "$rc"
+check_has "nothing left: no node installed" "yes" "$(grep -q '"event":"error","msg":"no node installed"' "$T/json" && echo yes)"
+check_lacks "nothing left: no call" "systemctl" "$(calls)"
+
+# Only the start scripts and the backups left: still finished.
+mkinterrupted
+rm -rf "$ETC" "$DATA" "$SD/telcoin.service.bak.20240101" "$SD/telcoin.bak.1" "$SD/telcoin.service.d" "$SD/telcoin.service.bak.link"
+( set -e; json_remove observer keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "scripts and backups left: rc 0" 0 "$rc"
+gone "scripts and backups left: start scripts" "$LX"
+gone "scripts and backups left: backups" "$BK"
+
+# --scope service with the unit gone: done, keys and data kept.
+mkinterrupted
+( set -e; json_remove validator service ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "resume json service: rc 0" 0 "$rc"
+check_has "resume json service: done event" "yes" "$(grep -q '"event":"done","ok":true' "$T/json" && echo yes)"
+gone "resume json service: unit backup" "$SD/telcoin.service.bak.20240101"
+kept "resume json service: node key" "$DATA/node-keys/bls.key"
+kept "resume json service: passphrase" "$ETC/bls-passphrase.cred"
+
+# The menu with no unit: remove_leftovers lists and removes what is left,
+# including a data dir .node-meta records outside /var/lib/telcoin.
+mkleftover() {
+    mkinterrupted
+    CUST="$R/srv/tn-data"
+    mkdir -p "$CUST/node-keys" "$CUST/db"
+    printf 'k\n' > "$CUST/node-keys/bls.key"
+    printf 'db\n' > "$CUST/db/data"
+    printf 'DATA_DIR=%s\n' "$CUST" >> "$ETC/.node-meta"
+    mkdir -p "$DATA/validator/node-keys"
+    printf 'k\n' > "$DATA/validator/node-keys/bls.key"
+    printf 'decoy\n' > "$R/srv/keep"
+}
+mkleftover
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "leftovers: rc 0" "rc=0" "$(cat "$T/out")"
+for want in /var/lib/telcoin /srv/tn-data /etc/telcoin /usr/local/libexec/telcoin/tn-start \
+            /usr/local/libexec/telcoin/tn-start-docker /var/backups/telcoin \
+            "unit backups and drop-ins in /etc/systemd/system"; do
+    check_has "leftovers: listed ${want}" "yes" "$(grep -qF -- "  ${want}" "$T/out" && echo yes)"
+done
+for p in "$DATA" "$CUST" "$ETC" "$LX" "$BK" "$SD/telcoin.service.bak.20240101" "$SD/telcoin.service.d" \
+         "$R/etc/logrotate.d/telcoin" "$R/etc/systemd/journald.conf.d/50-telcoin.conf"; do
+    gone "leftovers ${p#"$R"}" "$p"
+done
+for f in "$DATA/node-keys/bls.key" "$DATA/validator/node-keys/bls.key" "$CUST/node-keys/bls.key" \
+         "$ETC/bls-passphrase.cred" "$ETC/bls-passphrase" "$ETC/.node-meta" "$BK/bls-passphrase.Ef34Gh" \
+         "$SD/telcoin.service.bak.20240101"; do
+    check_has "leftovers shredded ${f#"$R"}" "shred -u -- $f" "$(calls)"
+done
+check_lacks "leftovers: chain db not shredded" "$CUST/db/data" "$(calls)"
+kept "leftovers: a file beside the custom data dir" "$R/srv/keep"
+kept "leftovers: another unit's backup" "$SD/telcoin-alloy.service.bak.1"
+kept "leftovers: backup symlink target" "$OUT/backup-target"
+
+mkleftover
+before="$(find "$R" "$OUT" | sort)"
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+check_has "leftovers declined: rc 0" "rc=0" "$(cat "$T/out")"
+check "leftovers declined: nothing removed" "$before" "$(find "$R" "$OUT" | sort)"
+
+mkleftover
+printf 'DATA_DIR=%s\n' "$CUST" >> "$ETC/.node-meta"
+before="$(find "$R" "$OUT" | sort)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "leftovers with a duplicated key: rc 1" "rc=1" "$(cat "$T/out")"
+check "leftovers with a duplicated key: nothing removed" "$before" "$(find "$R" "$OUT" | sort)"
+
+rm -rf "$R"; mkdir -p "$R"
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+check_has "no leftovers: rc 3" "rc=3" "$(cat "$T/out")"
+
+# The menu reaches remove_leftovers when no node unit is installed.
+mkleftover
+( confirm() { case "$1" in Remove*) return 0 ;; *) return 1 ;; esac; }
+  scan_custom_installs() { echo "SCAN"; }
+  set -e; detect_node_installs; show_detected; echo "not reached" ) > "$T/out" 2>&1; rc=$?
+check_rc "menu leftovers: exits 0" 0 "$rc"
+gone "menu leftovers: config tree" "$ETC"
+gone "menu leftovers: custom data dir" "$CUST"
+gone "menu leftovers: start scripts" "$LX"
+check_lacks "menu leftovers: scan declined" "SCAN" "$(cat "$T/out")"
+
 # --scope service keeps keys, data and the shared host files.
 mkfixture
 ( set -e; json_remove observer service ) 3> "$T/json" > /dev/null 2>&1; rc=$?
