@@ -77,7 +77,8 @@ set -E
 
 # This script writes through the root-write helpers of the current library.
 for _tn_fn in tn_backup_file tn_restore_backup tn_write_root_file tn_start_script_path \
-              tn_wait_restart_window tn_update_lock_path _tn_root_layout_dir _tn_strip_gw; do
+              tn_wait_restart_window tn_update_lock_path _tn_root_layout_dir _tn_strip_gw \
+              tn_write_node_unit tn_rerender_node_launch tn_precreate_log_files; do
     if ! declare -F "$_tn_fn" >/dev/null 2>&1; then
         print_error "lib/common.sh ${COMMON_VERSION:-unknown} has no ${_tn_fn}. Run update-scripts.sh and try again."
         exit 1
@@ -636,35 +637,36 @@ relocate_dir() {
 # =============================================================================
 # STEP 6 -- REWRITE THE SYSTEMD UNIT
 # =============================================================================
-# Targeted substitutions on the .bak copy (order matters): role-suffixed paths
-# first, then the role-suffixed name (catches --name, ExecStart/Stop, Description,
-# SyslogIdentifier, log paths). The container/host log dir (/var/log/telcoin) is
-# shared and stays put; only the telcoin-<role> filename part is rewritten.
-# Cosmetic: the role is dropped from Description (-> "Telcoin Network Node"). The
-# legacy wrapper path is replaced first, literally, by the unified start script.
-# The unit is written root-owned, with the legacy unit's mode minus group/other
-# write, through tn_write_root_file; it must then start the unified script.
+# The unified unit is written fresh by tn_write_node_unit (lib/common.sh), the
+# writer setup-node.sh uses: telcoin.service starting the unified start script,
+# with the node sandbox, the passphrase as a systemd credential and the log
+# target from .node-meta (the files: telcoin.log and telcoin-error.log in the
+# shared log dir, pre-created here). The legacy unit stays in its backup for the
+# rollback.
 rewrite_unit() {
-    local mode body
-    print_step "Rewriting systemd unit -> ${UNIFIED_UNIT}"
+    local method="source"
+    print_step "Writing systemd unit -> ${UNIFIED_UNIT}"
     migrate_backup_ok "$UNIT_BAK" "$UNIT_SHA"
-    mode="$(_tn_strip_gw "${UNIT_MODE:-644}")"
-    body="$(TN_OLD="$LEGACY_WRAPPER" TN_NEW="$UNIFIED_WRAPPER" awk '
-        { out = ""; line = $0
-          while ((i = index(line, ENVIRON["TN_OLD"])) > 0) {
-              out = out substr(line, 1, i - 1) ENVIRON["TN_NEW"]
-              line = substr(line, i + length(ENVIRON["TN_OLD"]))
-          }
-          print out line }' "$UNIT_BAK" | sed -E \
-        -e "s#/etc/telcoin/${ROLE}#/etc/telcoin#g" \
-        -e "s#/var/lib/telcoin/${ROLE}#/var/lib/telcoin#g" \
-        -e "s#telcoin-${ROLE}#telcoin#g" \
-        -e 's#Network (Observer|Validator) Node#Network Node#g')"
-    printf '%s\n' "$body" | tn_write_root_file "$UNIFIED_UNIT" "$mode"
+    if [[ "$INSTALL_METHOD_L" == "docker" ]]; then
+        method="docker"
+    fi
+    # The library's unit writer, as setup-node.sh uses it: the unified service name,
+    # the relocated data dir, the account and passphrase method from the moved
+    # .node-meta.
+    SERVICE_NAME="$UNIFIED_SERVICE"
+    DATA_DIR="$EFFECTIVE_DATA_DIR"
     WROTE_UNIT=true
+    if ! tn_write_node_unit "$method"; then
+        print_error "Could not write ${UNIFIED_UNIT} (see above) -- aborting."
+        return 1
+    fi
     if ! grep -E '^ExecStart=' "$UNIFIED_UNIT" | grep -qF -- "$UNIFIED_WRAPPER"; then
         print_error "The rewritten unit does not start ${UNIFIED_WRAPPER} -- aborting."
         return 1
+    fi
+    if grep -q '^StandardOutput=append:' "$UNIFIED_UNIT"; then
+        tn_precreate_log_files "$DEFAULT_LOG_DIR" "$UNIFIED_SERVICE" \
+            || print_warn "Could not pre-create the node log files in ${DEFAULT_LOG_DIR}; systemd creates them at the first start."
     fi
     print_ok "Wrote ${UNIFIED_UNIT}"
 }
@@ -688,14 +690,8 @@ rewrite_unit() {
 rewrite_wrapper() {
     local mode=0755 group=root
     print_step "Normalizing start wrapper -> ${UNIFIED_WRAPPER} (stripping --observer and --instance)"
-    # Written root-owned in the root-owned /usr/local/libexec/telcoin through
-    # tn_write_root_file: root 0755 for a binary install, root:<service group>
-    # 0750 for Docker, as setup-node.sh writes them.
-    if [[ "$INSTALL_METHOD_L" == "docker" ]]; then
-        mode=0750
-        group="${SERVICE_GROUP:-root}"
-        getent group "$group" >/dev/null 2>&1 || group=root
-    fi
+    # Written root:root 0755 in the root-owned /usr/local/libexec/telcoin through
+    # tn_write_root_file, as setup-node.sh writes both forms (no secret in either).
     migrate_backup_ok "$WRAPPER_BAK" "$WRAPPER_SHA"
     _tn_root_layout_dir "${UNIFIED_WRAPPER%/*}" root 0755
     sed -E \
@@ -715,6 +711,32 @@ rewrite_wrapper() {
         return 1
     fi
     print_ok "Wrote ${UNIFIED_WRAPPER} (no --observer/--instance)"
+}
+
+# =============================================================================
+# STEP 8b -- START SCRIPT IN THE CURRENT FORM
+# =============================================================================
+# tn_rerender_node_launch rewrites the normalized start script with the
+# passphrase on stdin and the listener addresses in node.env (written from the
+# old exports), keeping its node arguments. When it refuses (a TPM install, a
+# stored passphrase ending in whitespace) the normalized script stays: the new
+# unit runs it as well.
+convert_launch() {
+    if tn_rerender_node_launch "" migrate_progress; then
+        WROTE_WRAPPER=true
+        return 0
+    fi
+    print_warn "Kept the normalized start script ${UNIFIED_WRAPPER}; update-node.sh or edit-config.sh moves it to the current form later."
+    return 0
+}
+
+# migrate_progress KIND MESSAGE -- progress-fn for the library helpers.
+migrate_progress() {
+    case "${1:-}" in
+        warn) print_warn "${2:-}" ;;
+        *)    print_info "${2:-}" ;;
+    esac
+    return 0
 }
 
 # =============================================================================
@@ -923,6 +945,7 @@ main() {
     rewrite_unit         # step 6
     rewrite_wrapper      # step 7 (strip --observer and --instance)
     update_meta          # step 8
+    convert_launch       # step 8b (start script in the current form; a refusal keeps it)
     finalize_units       # step 9
     start_and_verify      # step 10 (failure -> rollback via ERR trap)
     remove_legacy_units   # step 10.5 (non-fatal; only after a verified start)
