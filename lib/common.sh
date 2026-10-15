@@ -5914,9 +5914,11 @@ tn_docker_local_digest() {
     printf '%s\n' "$d"
 }
 
-# _tn_c4_say KIND MESSAGE [progress-fn] -- progress-fn, else stderr.
+# _tn_c4_say KIND MESSAGE [progress-fn] -- progress-fn, else stderr. The
+# progress-fn's stdout goes to stderr too: the helpers that report progress print
+# their result on stdout, and callers capture it with $(...).
 _tn_c4_say() {
-    _tn_guard_say "$@"
+    _tn_guard_say "$@" >&2
 }
 
 # _tn_release_triple -- the release target triple of this host's architecture.
@@ -6506,6 +6508,329 @@ tn_build_version() {
     tn_as_build_user rm -rf -- "$d" || true
     [[ $rc -eq 0 ]] || return $rc
     printf '%s\n' "$out"
+}
+
+# tn_built_binary_ok FILE [UID] -- rc 0 when the build output FILE is a regular
+# file, not a symlink, owned by UID (default: the build account's uid). Read
+# only after the build has returned. Prints nothing.
+tn_built_binary_ok() {
+    local f="${1:-}" want="${2:-}" uid
+    if [[ -z "$want" ]]; then
+        want="$(id -u "$TN_BUILD_USER" 2>/dev/null)" || return 1
+    fi
+    [[ -n "$f" && -f "$f" && ! -L "$f" ]] || return 1
+    uid="$(stat -c '%u' -- "$f" 2>/dev/null)" || return 1
+    [[ "$uid" == "$want" ]]
+}
+
+# _tn_release_keys_present -- rc 0 when lib/release-keys holds a key file (*.asc).
+_tn_release_keys_present() {
+    local k
+    for k in "$(_tn_release_keys_dir)"/*.asc; do
+        if [[ -f "$k" && ! -L "$k" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# tn_docker_image_for_tag NETWORK TAG [progress-fn] -- print NETWORK's release
+# image TAG by digest, <repo>@sha256:<hex>. The digest comes from the signed
+# release (tn_fetch_release_image). On testnet only, when no release signing key
+# is installed, or the release publishes no signed files (a network rc 2, as for
+# the releases made before signed releases), the digest the registry serves for
+# the tag is used instead, with a warning. A release whose files fail
+# verification is never replaced by the registry's answer. rc 1 refused or not
+# resolvable, 3 TAG is not a NETWORK release tag.
+tn_docker_image_for_tag() {
+    local net="${1:-}" tag="${2:-}" fn="${3:-}" repo img d rc=0
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z)." "$fn"
+        return 3
+    fi
+    repo="$(tn_docker_repo_for "$net")" || return 1
+    if _tn_release_keys_present; then
+        img="$(tn_fetch_release_image "$tag" "$net" "" "$fn")" || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            printf '%s\n' "$img"
+            return 0
+        fi
+        if [[ $rc -ne 2 || "$net" != "testnet" ]]; then
+            return 1
+        fi
+        _tn_c4_say warn "Release ${tag} has no signed image digest to read; using the digest the registry serves for ${repo}:${tag} (testnet only)." "$fn"
+    elif [[ "$net" != "testnet" ]]; then
+        _tn_c4_say warn "No release signing key in $(_tn_release_keys_dir); a ${net} image is taken only from a signed release." "$fn"
+        return 1
+    else
+        _tn_c4_say warn "No release signing key in $(_tn_release_keys_dir); using the digest the registry serves for ${repo}:${tag}, which no signed release confirms (testnet only)." "$fn"
+    fi
+    if ! d="$(tn_registry_digest "$repo" "$tag")"; then
+        _tn_c4_say warn "The registry gave no digest for ${repo}:${tag}." "$fn"
+        return 1
+    fi
+    printf '%s@%s\n' "$repo" "$d"
+}
+
+# _tn_tag_sig_check DIR TAG -- check the signature on release tag TAG in the git
+# checkout DIR against the keys in lib/release-keys (git verify-tag with gpg, in
+# a throwaway GNUPGHOME). rc 0: a good signature by a listed primary key; 1: a
+# bad, expired or revoked signature; 4: it cannot be told (no gpg, no key file,
+# an unsigned or lightweight tag, a key that is not listed). The reason is
+# printed on stdout when rc is not 0.
+_tn_tag_sig_check() {
+    local dir="${1:-}" tag="${2:-}" parent tmp k out t kw rest fpr good=0 ok=0 bad="" unknown=""
+    if ! command -v gpg >/dev/null 2>&1; then
+        printf 'gpg is not installed\n'
+        return 4
+    fi
+    if ! _tn_release_keys_present; then
+        printf 'no release signing key in %s\n' "$(_tn_release_keys_dir)"
+        return 4
+    fi
+    parent="$(tn_staging_dir)" || { printf 'the staging directory is unusable\n'; return 4; }
+    tmp="$(mktemp -d "${parent}/tag.XXXXXX")" || { printf 'no temporary directory\n'; return 4; }
+    if ! _tn_release_keyring "$tmp"; then
+        _tn_release_cleanup "$tmp"
+        printf 'the release signing keys cannot be read\n'
+        return 4
+    fi
+    for k in "$(_tn_release_keys_dir)"/*.asc; do
+        [[ -f "$k" && ! -L "$k" ]] || continue
+        GNUPGHOME="$tmp/gnupg" gpg --batch --no-tty --quiet --import < "$k" >/dev/null 2>&1 || true
+    done
+    out="$(GNUPGHOME="$tmp/gnupg" git -C "$dir" -c gpg.format=openpgp -c gpg.program=gpg \
+        verify-tag --raw "refs/tags/${tag}" 2>&1 >/dev/null 9>&-)" || true
+    while read -r t kw rest; do
+        [[ "$t" == "[GNUPG:]" ]] || continue
+        case "$kw" in
+            BADSIG|EXPKEYSIG|REVKEYSIG|EXPSIG|ERRSIG) [[ -n "$bad" ]] || bad="$kw" ;;
+            NO_PUBKEY) unknown="$kw" ;;
+            GOODSIG) good=1 ;;
+            VALIDSIG)
+                fpr="${rest##* }"
+                if [[ "$good" -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]] && grep -qxF -- "$fpr" "$tmp/allow"; then
+                    ok=1
+                fi
+                good=0
+                ;;
+        esac
+    done <<< "$out"
+    _tn_release_cleanup "$tmp"
+    if [[ -n "$bad" ]]; then
+        printf 'the tag signature is not good (%s)\n' "$bad"
+        return 1
+    fi
+    if [[ "$ok" -eq 1 ]]; then
+        return 0
+    fi
+    if [[ -n "$unknown" ]]; then
+        printf 'the tag is signed by a key that is not in %s\n' "$(_tn_release_keys_dir)"
+    else
+        printf 'the tag carries no signature by a release key\n'
+    fi
+    return 4
+}
+
+# tn_source_checkout_tag DIR NETWORK TAG [ALLOW_DIRTY] [progress-fn] -- put the
+# checkout DIR (cloned from TN_REPO over https when missing; it must belong to
+# the account running this, root on a host) at release tag TAG, detached, with
+# its submodules at the recorded commits. TAG must pass tn_release_tag_ok: no
+# branch, no commit id. The tag is fetched from origin into refs/tn-remote-tags/
+# and compared with a local tag of the same name, which is never moved: a
+# difference refuses ("re-pointed upstream"). The tag's signature is checked
+# against lib/release-keys (_tn_tag_sig_check): a bad one refuses everywhere;
+# one that cannot be checked refuses on mainnet and warns on testnet. A tree
+# with local changes or untracked files refuses unless ALLOW_DIRTY is true
+# (testnet only), which discards them (reset --hard, clean -ffd). rc 0 checked
+# out, 1 refused (nothing moved), 2 failed.
+tn_source_checkout_tag() {
+    local dir="${1:-}" net="${2:-}" tag="${3:-}" dirty_ok="${4:-false}" fn="${5:-}"
+    local remote="" have="" st why rc=0 n
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z); branches and commit ids are not built." "$fn"
+        return 1
+    fi
+    if [[ "$dirty_ok" == "true" && "$net" != "testnet" ]]; then
+        _tn_c4_say warn "--allow-dirty is taken on testnet only." "$fn"
+        return 1
+    fi
+    if [[ -z "$dir" || "$dir" != /* ]]; then
+        _tn_c4_say warn "No source directory to build in." "$fn"
+        return 1
+    fi
+    if [[ ! -d "${dir}/.git" ]]; then
+        if [[ -e "$dir" || -L "$dir" ]]; then
+            _tn_c4_say warn "${dir} exists but is not a git checkout; move it aside first." "$fn"
+            return 1
+        fi
+        _tn_c4_say log "Cloning ${TN_REPO} into ${dir}..." "$fn"
+        if ! GIT_ALLOW_PROTOCOL=https git clone --quiet -- "$TN_REPO" "$dir" 9>&-; then
+            _tn_c4_say warn "Could not clone ${TN_REPO}." "$fn"
+            return 2
+        fi
+    fi
+    if [[ -L "$dir" || "$(stat -c '%u' -- "$dir" 2>/dev/null)" != "$(id -u)" ]]; then
+        _tn_c4_say warn "${dir} must be a directory owned by $(id -un) (not a symlink); nothing was checked out." "$fn"
+        return 1
+    fi
+    _tn_c4_say step "Fetching ${tag} from origin..." "$fn"
+    if GIT_ALLOW_PROTOCOL=https git -C "$dir" fetch --quiet --no-tags origin \
+        "+refs/tags/${tag}:refs/tn-remote-tags/${tag}" 9>&- 2>/dev/null; then
+        remote="$(git -C "$dir" rev-parse -q --verify "refs/tn-remote-tags/${tag}" 2>/dev/null)" || remote=""
+    fi
+    have="$(git -C "$dir" rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)" || have=""
+    if [[ -z "$remote" ]]; then
+        if [[ -z "$have" ]]; then
+            _tn_c4_say warn "Could not fetch tag ${tag} from origin, and the checkout does not have it." "$fn"
+            return 2
+        fi
+        _tn_c4_say warn "Could not reach origin; using the local tag ${tag} (not compared with origin's)." "$fn"
+    elif [[ -n "$have" && "$have" != "$remote" ]]; then
+        _tn_c4_say warn "Tag ${tag} re-pointed upstream: origin has ${remote:0:12}, this checkout ${have:0:12}. Nothing was checked out; ask the release team which one is the release." "$fn"
+        return 1
+    elif [[ -z "$have" ]]; then
+        git -C "$dir" update-ref "refs/tags/${tag}" "$remote" "" 2>/dev/null || return 2
+    fi
+    why="$(_tn_tag_sig_check "$dir" "$tag")" || rc=$?
+    case "$rc" in
+        0) _tn_c4_say log "Tag ${tag} carries a good signature by a release key." "$fn" ;;
+        1)
+            _tn_c4_say warn "Tag ${tag}: ${why}. Nothing was checked out." "$fn"
+            return 1
+            ;;
+        *)
+            if [[ "$net" != "testnet" ]]; then
+                _tn_c4_say warn "Tag ${tag} cannot be verified: ${why}. A ${net} source build needs a tag signed by a release key; nothing was checked out." "$fn"
+                return 1
+            fi
+            _tn_c4_say warn "Tag ${tag} is not verified (${why}); building it anyway because this is testnet." "$fn"
+            ;;
+    esac
+    st="$(git -C "$dir" status --porcelain --untracked-files=all 2>/dev/null)" || {
+        _tn_c4_say warn "git status failed in ${dir}." "$fn"
+        return 2
+    }
+    if [[ -n "$st" ]]; then
+        n="$(printf '%s\n' "$st" | awk 'END { print NR }')"
+        if [[ "$dirty_ok" != "true" ]]; then
+            _tn_c4_say warn "${dir} has ${n} changed or untracked paths (git -C ${dir} status --porcelain --untracked-files=all); nothing was checked out. Remove them, or on testnet pass --allow-dirty to discard them." "$fn"
+            return 1
+        fi
+        _tn_c4_say warn "--allow-dirty: discarding ${n} changed or untracked paths in ${dir}." "$fn"
+        if ! git -C "$dir" reset --quiet --hard 2>/dev/null || ! git -C "$dir" clean -ffdq 2>/dev/null; then
+            _tn_c4_say warn "Could not discard the local changes in ${dir}." "$fn"
+            return 2
+        fi
+    fi
+    if ! git -C "$dir" -c advice.detachedHead=false checkout --quiet --detach "refs/tags/${tag}^{commit}" 2>/dev/null; then
+        _tn_c4_say warn "Could not check out ${tag} in ${dir}." "$fn"
+        return 2
+    fi
+    if ! tn_sync_submodules "$dir"; then
+        _tn_c4_say warn "The submodules of ${dir} could not be put at the commits ${tag} records (git -C ${dir} submodule update --init --recursive --force)." "$fn"
+        return 2
+    fi
+    return 0
+}
+
+# tn_source_build DIR NETWORK -- build telcoin-network in the checkout DIR as the
+# build account (tn_as_build_user: env -i, its own toolchain, its own target
+# dir): the toolchain rust-toolchain.toml names, then cargo build --release
+# --locked -p telcoin-network --bin telcoin-network with the network's features
+# (tn_cargo_features_for). Build output goes to stdout and stderr; the binary is
+# left at TN_BUILD_HOME/target/release/telcoin-network. The account and its
+# rustup must be ready (tn_build_user_ensure, tn_rustup_ensure). rc 1 refused
+# (no build for NETWORK, an unusable toolchain name), 2 the build failed.
+tn_source_build() {
+    local dir="${1:-}" net="${2:-}" feats tc
+    if ! feats="$(tn_cargo_features_for "$net")"; then
+        print_warn "No source build is defined for network '${net}'." >&2
+        return 1
+    fi
+    tc="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${dir}/rust-toolchain.toml" 2>/dev/null | head -n 1)" || tc=""
+    if [[ -n "$tc" ]]; then
+        if [[ ! "$tc" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            print_warn "rust-toolchain.toml names a toolchain this script does not install: ${tc}" >&2
+            return 1
+        fi
+        ( cd -- "$dir" && tn_as_build_user rustup toolchain install --profile minimal "$tc" ) || return 2
+    fi
+    # shellcheck disable=SC2086
+    ( cd -- "$dir" && tn_as_build_user cargo build --release --locked -p telcoin-network --bin telcoin-network $feats ) || return 2
+}
+
+# tn_stage_binary SRC NETWORK [REF] [progress-fn] -- copy the node binary SRC
+# into a new root-only directory under the staging directory, run the copy's
+# --version as the build account (tn_build_version) and check it with
+# tn_release_version_ok for NETWORK (and REF's version when REF is given; a
+# source build leaves REF empty, since releases before the signed ones report
+# the crate version). Prints the copy's path; its --version text is beside it
+# in "version". The caller removes that directory when done. rc 1 refused, 2
+# failed; nothing is left behind on failure.
+tn_stage_binary() {
+    local src="${1:-}" net="${2:-}" ref="${3:-}" fn="${4:-}" parent stg ver
+    [[ -f "$src" && ! -L "$src" ]] || return 1
+    parent="$(tn_staging_dir)" || {
+        _tn_c4_say warn "The staging directory is not a root-owned 0700 directory." "$fn"
+        return 1
+    }
+    stg="$(mktemp -d "${parent}/bin.XXXXXX")" || return 2
+    if ! ( umask 077; cat -- "$src" > "${stg}/telcoin-network" ) 2>/dev/null \
+        || ! chmod 0755 -- "${stg}/telcoin-network"; then
+        rm -rf -- "$stg"
+        return 2
+    fi
+    if ! ver="$(tn_build_version "${stg}/telcoin-network" 2>/dev/null)" || [[ -z "$ver" ]]; then
+        _tn_c4_say warn "The new binary did not answer --version (run as ${TN_BUILD_USER})." "$fn"
+        rm -rf -- "$stg"
+        return 1
+    fi
+    if ! tn_release_version_ok "$ver" "$net" "$ref"; then
+        rm -rf -- "$stg"
+        return 1
+    fi
+    if ! printf '%s\n' "$ver" > "${stg}/version"; then
+        rm -rf -- "$stg"
+        return 2
+    fi
+    printf '%s/telcoin-network\n' "$stg"
+}
+
+# tn_release_stage TAG NETWORK [BASE_URL] [progress-fn] -- fetch and verify
+# release TAG (tn_fetch_verified_release), take its binary out of the tarball
+# (tn_release_extract_binary) and stage it (tn_stage_binary: its --version must
+# name TAG's version and fit NETWORK). Prints the staged binary's path; the
+# download is removed. rc as tn_fetch_verified_release (1 refused, 2 network or
+# I/O, 3 bad tag).
+tn_release_stage() {
+    local tag="${1:-}" net="${2:-}" base="${3:-}" fn="${4:-}" tarball rel out rc=0
+    tarball="$(tn_fetch_verified_release "$tag" "$net" "$base" "$fn")" || return $?
+    rel="$(dirname -- "$tarball")"
+    tn_release_extract_binary "$tarball" "${rel}/telcoin-network.bin" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        out="$(tn_stage_binary "${rel}/telcoin-network.bin" "$net" "$tag" "$fn")" || rc=$?
+    else
+        _tn_c4_say warn "Release ${tag}: the binary could not be taken out of ${tarball##*/}." "$fn"
+    fi
+    _tn_release_cleanup "$rel"
+    [[ $rc -eq 0 ]] || return $rc
+    printf '%s\n' "$out"
+}
+
+# tn_staged_cleanup PATH -- remove the staging directory that holds PATH (a path
+# tn_stage_binary printed). Anything outside the staging directory is left alone.
+tn_staged_cleanup() {
+    local p="${1:-}" d parent
+    [[ -n "$p" ]] || return 0
+    d="${p%/*}"
+    parent="${TN_RELEASE_STAGING_DIR:-/var/lib/telcoin-staging}"
+    case "$d" in
+        "${parent}"/bin.*) ;;
+        *) return 0 ;;
+    esac
+    [[ -d "$d" && ! -L "$d" ]] || return 0
+    rm -rf -- "$d"
 }
 
 # =============================================================================

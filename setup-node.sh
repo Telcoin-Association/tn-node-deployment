@@ -55,6 +55,23 @@
 # https://<d>/ + wss://<d>/ and does not restart the node when node-info.yaml already
 # holds them; an explicit URL that differs is replaced then (a warning says so up front).
 #
+# NODE BINARY. --install-method source|release|docker|existing picks how the node is
+# obtained (interactive setup asks when it is not given).
+#   --install-method release Download a signed release: SHA256SUMS signed by a key in
+#                            lib/release-keys, the tarball and the release's chain-config
+#                            hashes checked, the binary's --version checked before root
+#                            installs it.
+#   --release-tag <tag>      The release to install or build: vX.Y.Z-adiri on testnet,
+#                            vX.Y.Z on mainnet (--build-ref is the older name). Source
+#                            builds take release tags only, never a branch or a commit;
+#                            with --install-method docker it picks that release's image,
+#                            by digest.
+#   --allow-dirty            Testnet source builds, interactive only: discard local changes
+#                            and untracked files in /opt/telcoin-source instead of stopping.
+# Source builds run as the unprivileged tn-build account with its own Rust toolchain
+# (rustup-init pinned by version and sha256); root only installs the result. Docker
+# images run by digest from the network's repository.
+#
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
 #   --bootstrap-peers <file> The peers the node dials at start, replacing the genesis
@@ -390,10 +407,18 @@ step_preflight() {
 
     echo ""
     print_step "Selecting install method..."
-    json_mode || _select_install_method_with_guard
+    # --install-method skips the menu (it was checked in init_install_flags).
+    if [[ -z "$INSTALL_METHOD" ]] && ! json_mode; then
+        _select_install_method_with_guard
+    fi
+    # --allow-dirty discards local changes before a testnet source build only.
+    if [[ "$ALLOW_DIRTY" == "true" && ( "$INSTALL_METHOD" != "source" || "$NETWORK" != "testnet" ) ]]; then
+        setup_fail "--allow-dirty is taken only for a testnet source build."
+    fi
 
     case "$INSTALL_METHOD" in
         source)   _preflight_source ;;
+        release)  _preflight_release ;;
         docker)   _preflight_docker ;;
         existing) _preflight_existing ;;
     esac
@@ -530,23 +555,56 @@ setup_keep_stored_passphrase() {
     return 0
 }
 
-_preflight_source() {
-    print_step "Installing source build dependencies..."
+# The release tag a source or release install uses (--release-tag; --build-ref is the
+# same flag under its older name) and --allow-dirty (testnet, interactive: discard
+# local changes in the source checkout before the build).
+RELEASE_TAG=""
+ALLOW_DIRTY=false
 
-    if ! check_rust; then
-        print_info "Installing Rust..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-        export PATH="${HOME}/.cargo/bin:${PATH}"
-        [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
-        if ! check_rust; then
-            setup_fail "Rust installation failed. Cannot continue."
+# _setup_tag_example -- a release tag of NETWORK's form, for messages and prompts.
+_setup_tag_example() {
+    if [[ "$NETWORK" == "mainnet" ]]; then
+        printf 'v1.0.0'
+    else
+        printf '%s' "$DEFAULT_DOCKER_TAG"
+    fi
+}
+
+# _setup_install_staged STAGED TAG -- install the staged node binary (tn_stage_binary)
+# as ${INSTALL_DIR}/telcoin-network, root 0755, beside the old one and renamed over it
+# (tn_install_root_binary); record TAG in the version marker beside it (the UI reports
+# the running release from it); remove the staging directory.
+_setup_install_staged() {
+    local staged="$1" tag="$2"
+    if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
+        if ! install -d -o root -g root -m 0755 -- "$INSTALL_DIR"; then
+            tn_staged_cleanup "$staged"
+            setup_fail "Could not create ${INSTALL_DIR}."
         fi
     fi
+    if ! tn_install_root_binary "$staged" "${INSTALL_DIR}/telcoin-network"; then
+        tn_staged_cleanup "$staged"
+        setup_fail "Could not install the node binary in ${INSTALL_DIR} (it must be a root-owned directory that only root can write)."
+    fi
+    tn_staged_cleanup "$staged"
+    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
+    RELEASE_TAG="$tag"
+    if ! printf '%s\n' "$tag" | tn_write_root_file "${INSTALL_DIR}/telcoin-network.version" 0644; then
+        setup_warn "Could not record the installed release in ${INSTALL_DIR}/telcoin-network.version."
+    fi
+    print_ok "Binary installed: ${BINARY_PATH} (${tag})"
+}
 
-    # Test for the file first: under set -e, bash 3.2 exits on a `source` of a missing
-    # file even with `|| true` (bash 5 does not), as update-node.sh already guards.
-    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${PATH}"
-    [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
+# Source builds take a release tag of the node's network only (tn_release_tag_ok): no
+# branch, no commit id. tn_source_checkout_tag puts the root-owned /opt/telcoin-source
+# at the tag (compared with origin's, its signature checked against lib/release-keys, no
+# local changes unless --allow-dirty on testnet); the build runs as the unprivileged
+# build account with its own toolchain from a pinned rustup-init, in an empty
+# environment (tn_build_user_ensure, tn_rustup_ensure, tn_source_build); root copies the
+# result into its staging directory, checks its --version as the build account
+# (tn_stage_binary) and installs it.
+_preflight_source() {
+    print_step "Installing source build dependencies..."
 
     local build_deps=("build-essential" "cmake" "clang" "libclang-dev" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
     local missing_deps=()
@@ -569,132 +627,84 @@ _preflight_source() {
         print_ok "Build dependencies present"
     fi
 
-    local source_dir="/opt/telcoin-source"
-    if [[ -d "$source_dir/.git" ]]; then
-        # Refresh a reused clone THOROUGHLY so it is never stale across
-        # remove/reinstall cycles: all branches + ALL tags (incl. re-pointed
-        # ones), and prune deleted refs. A bare `fetch --all` does NOT reliably
-        # fetch tags -- that is how clones ended up missing newer -adiri release
-        # tags (e.g. showing v0.6.0-adiri-101 instead of v0.10.0-adiri).
-        print_info "Refreshing existing source clone (all branches + tags)..."
-        run_streamed git -C "$source_dir" fetch --all --tags --prune --force
-    else
-        print_info "Cloning Telcoin Network repository..."
-        run_streamed git clone --recurse-submodules "$TN_REPO" "$source_dir"
+    local source_dir="$TN_SOURCE_DIR" build_ref="$RELEASE_TAG"
+    if [[ -z "$build_ref" ]]; then
+        json_mode && setup_fail "No --release-tag (or --build-ref) supplied for a source build."
+        if [[ ! -d "${source_dir}/.git" ]]; then
+            print_info "Cloning Telcoin Network repository..."
+            GIT_ALLOW_PROTOCOL=https git clone --quiet -- "$TN_REPO" "$source_dir" 9>&- \
+                || setup_fail "Could not clone ${TN_REPO} into ${source_dir}."
+        fi
+        echo ""
+        print_header "Source Release Tag Selection"
+        print_info "Source builds take a ${NETWORK} release tag (such as $(_setup_tag_example)):"
+        print_info "branches and commit ids are refused."
+        echo ""
+        while true; do
+            build_ref=$(pick_source_version "$NETWORK") || setup_fail "No source ref selected -- cannot continue setup."
+            tn_release_tag_ok "$NETWORK" "$build_ref" && break
+            print_warn "${build_ref} is not a ${NETWORK} release tag; pick one such as $(_setup_tag_example)."
+        done
     fi
-
-    echo ""
-    print_header "Source Branch / Tag Selection"
-    print_info "Per the Telcoin dev team, the general case for testnet is to build"
-    print_info "from the latest -adiri tag. main works too and is the right default"
-    print_info "for devnet. mainnet will have its own tag set when it launches."
-    echo ""
-
-    local build_ref
-    if json_mode; then
-        # Already held to the release floor in run_json_mode, before check_root.
-        build_ref="$JSON_BUILD_REF"
-        [[ -n "$build_ref" ]] || setup_fail "No --build-ref supplied for source build."
-    else
-        build_ref=$(pick_source_version "$NETWORK") || setup_fail "No source ref selected -- cannot continue setup."
-        # The picker lists only supported tags, but main or a typed ref can be anything.
-        check_release_floor "$build_ref"
-    fi
+    tn_release_tag_ok "$NETWORK" "$build_ref" \
+        || setup_fail "${build_ref} is not a ${NETWORK} release tag (such as $(_setup_tag_example)); source builds take release tags only."
+    check_release_floor "$build_ref"
 
     print_step "Checking out: ${build_ref}..."
-    if ! git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; then
-        if ! { git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
-               git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; }; then
-            setup_fail "Branch or tag '${build_ref}' not found in repository."
-        fi
-    fi
-    # If build_ref is a branch (e.g. main), hard-reset to the remote tip so we
-    # never build a stale local branch. No-op for tags/commits (immutable).
-    if git -C "$source_dir" show-ref --verify --quiet "refs/remotes/origin/${build_ref}"; then
-        git -C "$source_dir" reset --hard "origin/${build_ref}" 2>/dev/null || true
-    fi
-    # Sync submodules to the checked-out ref so a reused clone never builds with
-    # stale submodule state.
-    run_streamed git -C "$source_dir" submodule update --init --recursive --force \
-        || print_warn "submodule sync reported an issue -- build may fail"
+    tn_source_checkout_tag "$source_dir" "$NETWORK" "$build_ref" "$ALLOW_DIRTY" setup_progress \
+        || setup_fail "The source checkout of ${build_ref} was refused or failed (see above); nothing was built."
     print_ok "Checked out: ${build_ref}"
 
-    if [[ -f "${source_dir}/rust-toolchain.toml" ]]; then
-        local required_toolchain
-        required_toolchain=$(grep "channel" "${source_dir}/rust-toolchain.toml" 2>/dev/null | head -1 | cut -d'"' -f2)
-        if [[ -n "$required_toolchain" ]]; then
-            print_info "Installing required Rust toolchain: ${required_toolchain}..."
-            rustup toolchain install "$required_toolchain" 2>/dev/null || true
-            print_ok "Rust toolchain ready: ${required_toolchain}"
-        fi
-    fi
+    print_step "Preparing the build account ${TN_BUILD_USER} and its toolchain..."
+    tn_build_user_ensure setup_progress \
+        || setup_fail "Could not prepare the build account ${TN_BUILD_USER} (see above)."
+    tn_rustup_ensure setup_progress \
+        || setup_fail "Could not give ${TN_BUILD_USER} a Rust toolchain (see above)."
 
-    # The network's cargo features come from one place (tn_cargo_features_for): adiri for
-    # testnet, none for mainnet. Any other network has no source build.
-    local cargo_features=""
-    cargo_features="$(tn_cargo_features_for "${NETWORK:-}")" \
-        || setup_fail "No source build is defined for network '${NETWORK:-}' (testnet or mainnet only). Use --install-method docker or existing."
-    if [[ -n "$cargo_features" ]]; then
-        print_info "Building with: ${cargo_features}"
-    fi
-
-    # The build log is a fresh mktemp file in a root-only directory, never a fixed /tmp
-    # name. It is removed after a good build and kept when the build fails.
-    local log_dir="/var/lib/telcoin-staging" build_log=""
-    if [[ ! -e "$log_dir" && ! -L "$log_dir" ]]; then
-        install -d -o root -g root -m 0700 -- "$log_dir" || setup_fail "Could not create ${log_dir}."
-    fi
-    tn_root_dir_ok "$log_dir" || setup_fail "Refusing ${log_dir} for the build log: it is not a root-owned directory that only root can write."
+    # The build log is a fresh mktemp file in the root-only staging directory, never a
+    # fixed /tmp name. It is removed after a good build and kept when the build fails.
+    local log_dir build_log
+    log_dir="$(tn_staging_dir)" \
+        || setup_fail "Refusing /var/lib/telcoin-staging for the build log: it is not a root-owned 0700 directory."
     build_log="$(mktemp "${log_dir}/tn-build-log.XXXXXX")" || setup_fail "Could not create a build log in ${log_dir}."
 
-    print_info "Building release binary (this takes 20-40 minutes)..."
+    print_info "Building release binary as ${TN_BUILD_USER} (this takes 20-40 minutes)..."
     print_info "Build log: ${build_log}"
-    cd "$source_dir"
-    # fd 9 (the update lock) is closed for cargo, so a build left running after setup
-    # stops cannot hold the lock.
+    # fd 9 (the update lock) is closed for the build (tn_as_build_user) and for tee, so a
+    # build left running after setup stops cannot hold the lock.
     local build_ok=true
     if json_mode; then
         # Stream each build line to the UI (and keep the full log on disk) so the
         # operator sees compile progress instead of a frozen screen.
-        # shellcheck disable=SC2086
-        cargo build --release $cargo_features 2>&1 9>&- | tee "$build_log" | while IFS= read -r _line; do
+        tn_source_build "$source_dir" "$NETWORK" 2>&1 | tee "$build_log" 9>&- | while IFS= read -r _line; do
             json_emit "{\"event\":\"log\",\"msg\":\"$(json_escape "$_line")\"}"
         done || build_ok=false
     else
-        # shellcheck disable=SC2086
-        cargo build --release $cargo_features 2>&1 9>&- | tee "$build_log" || build_ok=false
+        tn_source_build "$source_dir" "$NETWORK" 2>&1 | tee "$build_log" 9>&- || build_ok=false
     fi
 
-    local built="${source_dir}/target/release/telcoin-network"
-    if [[ "$build_ok" != "true" || ! -f "$built" ]]; then
+    # The output is read only now that the build has returned: a regular file owned by
+    # the build account, copied into root's staging directory and checked there.
+    local built="${TN_BUILD_HOME}/target/release/telcoin-network" staged
+    if [[ "$build_ok" != "true" ]] || ! tn_built_binary_ok "$built"; then
         setup_fail "Build failed. See ${build_log}"
     fi
+    staged="$(tn_stage_binary "$built" "$NETWORK" "" setup_progress)" \
+        || setup_fail "The built binary failed its --version check (see above). Build log: ${build_log}"
     rm -f -- "$build_log"
-
-    # The binary and its directory are root-owned: installed beside the old one and
-    # renamed over it (tn_install_root_binary), never copied into place.
-    if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
-        install -d -o root -g root -m 0755 -- "$INSTALL_DIR" || setup_fail "Could not create ${INSTALL_DIR}."
-    fi
-    tn_install_root_binary "$built" "${INSTALL_DIR}/telcoin-network" \
-        || setup_fail "Could not install the node binary in ${INSTALL_DIR} (it must be a root-owned directory that only root can write)."
-    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
-    # Record the installed ref so the UI reports the running binary's version.
-    write_source_version_marker "$INSTALL_DIR" "$source_dir" "$build_ref"
-    print_ok "Binary installed: ${BINARY_PATH}"
+    _setup_install_staged "$staged" "$build_ref"
 
     # Write build info for Node Manager UI (root 0644, through a temp file and a rename).
     if [[ ! -e /etc/telcoin && ! -L /etc/telcoin ]]; then
         install -d -o root -g root -m 0755 -- /etc/telcoin || setup_fail "Could not create /etc/telcoin."
     fi
-    local commit branch built_at
+    local commit built_at
     commit="$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
-    branch="$(git -C "$source_dir" symbolic-ref --short HEAD 2>/dev/null || echo "detached")"
     built_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     if tn_write_root_file /etc/telcoin/build-info 0644 <<EOF
 build_ref=${build_ref}
 commit=${commit}
-branch=${branch}
+branch=detached
 built_at=${built_at}
 EOF
     then
@@ -704,12 +714,157 @@ EOF
     fi
 }
 
+# Release installs: the node binary of a signed release. tn_release_stage downloads
+# SHA256SUMS and its signature (checked with gpgv against lib/release-keys), the
+# tarball (checked against its line), compares the release's chain-config hashes with
+# this script release's pins, takes only the binary out of the tarball and checks its
+# --version (run as the build account, never as root: it must name the tag's version
+# and fit the network's build features). Root installs the result.
+_preflight_release() {
+    local tag="$RELEASE_TAG" staged rc=0
+    print_step "Installing the node from a signed release..."
+    command_exists gpg || install_package gnupg || setup_fail "gpg is needed to check a release signature."
+    command_exists gpgv || install_package gpgv || setup_fail "gpgv is needed to check a release signature."
+    if [[ -z "$tag" ]]; then
+        json_mode && setup_fail "--install-method release needs --release-tag TAG (a ${NETWORK} release tag such as $(_setup_tag_example))."
+        while true; do
+            read -r -p "  Release tag to install (such as $(_setup_tag_example)): " tag
+            tn_release_tag_ok "$NETWORK" "$tag" && break
+            print_warn "${tag:-(empty)} is not a ${NETWORK} release tag (such as $(_setup_tag_example))."
+        done
+    fi
+    tn_release_tag_ok "$NETWORK" "$tag" \
+        || setup_fail "${tag} is not a ${NETWORK} release tag (such as $(_setup_tag_example))."
+    check_release_floor "$tag"
+    tn_build_user_ensure setup_progress \
+        || setup_fail "Could not prepare the build account ${TN_BUILD_USER}, which runs the release binary's --version check (see above)."
+
+    print_step "Downloading and verifying release ${tag}..."
+    staged="$(tn_release_stage "$tag" "$NETWORK" "" setup_progress)" || rc=$?
+    case "$rc" in
+        0) ;;
+        2) setup_fail "Could not download release ${tag} (see above); nothing was installed." ;;
+        3) setup_fail "${tag} is not a ${NETWORK} release tag." ;;
+        *) setup_fail "Release ${tag} did not verify (see above); nothing was installed." ;;
+    esac
+    print_ok "Release ${tag} verified: $(head -n 1 "${staged%/*}/version" 2>/dev/null)"
+    _setup_install_staged "$staged" "$tag"
+}
+
+# Docker's apt signing key (download.docker.com/linux/<distro>/gpg): its primary key
+# fingerprint, read with gpg --show-keys from the published file on 2026-10-15. The
+# repository is added only when the downloaded key has exactly this fingerprint.
+readonly TN_DOCKER_APT_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+
+# _setup_docker_apt -- install Docker Engine from Docker's apt repository: the
+# signing key is downloaded over https and compared with TN_DOCKER_APT_FINGERPRINT
+# before it is installed (/etc/apt/keyrings/docker.gpg) and the repository listed
+# with signed-by= (/etc/apt/sources.list.d/docker.list), both root 0644. Ubuntu and
+# Debian only; anything else stops with the manual step.
+_setup_docker_apt() {
+    local os codename arch parent tmp fpr
+    os="$( . /etc/os-release 2>/dev/null; printf '%s' "${ID:-}" )"
+    codename="$( . /etc/os-release 2>/dev/null; printf '%s' "${VERSION_CODENAME:-}" )"
+    arch="$(dpkg --print-architecture 2>/dev/null)" || arch=""
+    if [[ "$PKG_MANAGER" != "apt" || ! "$os" =~ ^(ubuntu|debian)$ || ! "$codename" =~ ^[a-z]+$ || ! "$arch" =~ ^[a-z0-9]+$ ]]; then
+        setup_fail "Docker is installed by setup on Ubuntu and Debian only. Install Docker Engine from Docker's own repository (https://docs.docker.com/engine/install/), then run setup again."
+    fi
+    command_exists gpg || install_package gnupg || setup_fail "gpg is needed to check Docker's apt signing key."
+    parent="$(tn_staging_dir)" || setup_fail "The staging directory /var/lib/telcoin-staging is not a root-owned 0700 directory."
+    tmp="$(mktemp -d "${parent}/docker-apt.XXXXXX")" || setup_fail "Could not create a temporary directory in ${parent}."
+    ( umask 077; mkdir -p -- "${tmp}/gnupg" ) || { _tn_release_cleanup "$tmp"; setup_fail "Could not create a temporary directory in ${parent}."; }
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 60 --max-filesize 1048576 \
+        -o "${tmp}/key" --url "https://download.docker.com/linux/${os}/gpg" 9>&-; then
+        _tn_release_cleanup "$tmp"
+        setup_fail "Could not download Docker's apt signing key."
+    fi
+    fpr="$(GNUPGHOME="${tmp}/gnupg" gpg --batch --no-tty --with-colons --import-options show-only --import < "${tmp}/key" 2>/dev/null \
+        | awk -F: '$1 == "pub" { want = 1; next } $1 == "fpr" && want { print $10; want = 0 }')" || fpr=""
+    if [[ "$fpr" != "$TN_DOCKER_APT_FINGERPRINT" ]]; then
+        _tn_release_cleanup "$tmp"
+        setup_fail "Docker's apt signing key has the fingerprint ${fpr:-(none)}, not the pinned ${TN_DOCKER_APT_FINGERPRINT}; Docker was not installed. Check https://docs.docker.com/engine/install/${os}/ for a key change before going on."
+    fi
+    if [[ ! -e /etc/apt/keyrings && ! -L /etc/apt/keyrings ]]; then
+        install -d -o root -g root -m 0755 -- /etc/apt/keyrings || { _tn_release_cleanup "$tmp"; setup_fail "Could not create /etc/apt/keyrings."; }
+    fi
+    if ! GNUPGHOME="${tmp}/gnupg" gpg --batch --no-tty --dearmor < "${tmp}/key" 2>/dev/null \
+        | tn_write_root_file /etc/apt/keyrings/docker.gpg 0644; then
+        _tn_release_cleanup "$tmp"
+        setup_fail "Could not write /etc/apt/keyrings/docker.gpg."
+    fi
+    _tn_release_cleanup "$tmp"
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/%s %s stable\n' "$arch" "$os" "$codename" \
+        | tn_write_root_file /etc/apt/sources.list.d/docker.list 0644 \
+        || setup_fail "Could not write /etc/apt/sources.list.d/docker.list."
+    update_package_index
+    local pkg
+    for pkg in docker-ce docker-ce-cli containerd.io; do
+        install_package "$pkg" || setup_fail "Could not install ${pkg} from Docker's repository."
+    done
+}
+
+# _setup_docker_live_restore -- "live-restore": true in /etc/docker/daemon.json, so a
+# restart of the Docker engine leaves the node's container running. A missing file is
+# written; an existing JSON object is merged with python3 (else jq), keeping its other
+# settings, and written back root 0644 through tn_write_root_file. A file that is not
+# a JSON object, a symlink, or a host with neither tool stops setup with the manual
+# step. dockerd then reloads its configuration (live-restore needs no engine restart).
+_setup_docker_live_restore() {
+    local f="/etc/docker/daemon.json" merged="" rc=0
+    local manual="add \"live-restore\": true to ${f} by hand (it must stay one JSON object), then run: systemctl reload docker"
+    if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+        setup_fail "${f} is not a regular file; ${manual}"
+    fi
+    if [[ ! -e /etc/docker && ! -L /etc/docker ]]; then
+        install -d -o root -g root -m 0755 -- /etc/docker || setup_fail "Could not create /etc/docker."
+    fi
+    if [[ ! -e "$f" ]]; then
+        merged="$(printf '{\n  "live-restore": true\n}')"
+    elif command_exists python3; then
+        merged="$(python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+if not isinstance(d, dict):
+    sys.exit(1)
+if d.get("live-restore") is True:
+    sys.exit(3)
+d["live-restore"] = True
+print(json.dumps(d, indent=2))
+' < "$f" 2>/dev/null)" || rc=$?
+    elif command_exists jq; then
+        if jq -e 'type == "object" and .["live-restore"] == true' < "$f" >/dev/null 2>&1; then
+            rc=3
+        else
+            merged="$(jq 'if type == "object" then . + {"live-restore": true} else error("not an object") end' < "$f" 2>/dev/null)" || rc=$?
+        fi
+    else
+        setup_fail "Neither python3 nor jq is installed to merge ${f}; ${manual}"
+    fi
+    case "$rc" in
+        0) ;;
+        3) print_ok "Docker live-restore already on (${f})"; return 0 ;;
+        *) setup_fail "${f} is not a JSON object setup can merge; ${manual}" ;;
+    esac
+    printf '%s\n' "$merged" | tn_write_root_file "$f" 0644 || setup_fail "Could not write ${f}; ${manual}"
+    if systemctl reload docker 9>&- 2>/dev/null; then
+        print_ok "Docker live-restore on (${f})"
+    else
+        setup_warn "Wrote live-restore to ${f}, but docker did not reload its configuration; run: systemctl reload docker"
+    fi
+}
+
+# Docker installs: the engine from Docker's apt repository (fingerprint-pinned key),
+# live-restore on, and the node's image by digest: <repository>@sha256:<digest> in the
+# network's repository (tn_docker_repo_for). --docker-image takes a digest reference;
+# --release-tag takes the release's image digest (tn_docker_image_for_tag: from the
+# signed release, else on testnet from the registry); without either, the newest
+# release image by digest (latest_docker_image). Never a tag, never latest.
 _preflight_docker() {
     print_step "Setting up Docker..."
 
     if ! command -v docker &>/dev/null; then
-        print_info "Installing Docker..."
-        curl -fsSL https://get.docker.com | sh
+        print_info "Installing Docker from Docker's apt repository..."
+        _setup_docker_apt
         if ! command -v docker &>/dev/null; then
             setup_fail "Docker installation failed. Please install Docker manually."
         fi
@@ -717,55 +872,56 @@ _preflight_docker() {
     else
         print_ok "Docker is installed"
     fi
+    _setup_docker_live_restore
 
+    local repo input tag="$RELEASE_TAG"
+    repo="$(tn_docker_repo_for "$NETWORK")" \
+        || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
     echo ""
-    print_info "The official Telcoin Network Docker image is hosted at:"
-    print_info "  ${GAR_IMAGE_BASE}"
-    echo ""
-    print_info "Enter the full image URL including tag (default is the latest"
-    print_info "published -adiri tag, auto-detected from the registry)."
+    print_info "The ${NETWORK} Telcoin Network image comes from:"
+    print_info "  ${repo}"
+    print_info "and runs by digest (${repo}@sha256:<digest>), never by a tag."
     echo ""
 
-    # The image is written unquoted into the root-run start wrapper, so it must be a plain
-    # image reference (validate_docker_image), whether typed, auto-detected or passed.
-    local input
-    if json_mode; then
-        # The UI passes --docker-image, already checked in run_json_mode before
-        # check_root; only auto-detect, and check, when it didn't.
-        if [[ -z "${DOCKER_IMAGE:-}" ]]; then
-            DOCKER_IMAGE="$(latest_docker_image)"
-            if ! validate_docker_image "$DOCKER_IMAGE"; then
-                setup_fail "The registry gave an image reference setup cannot use: ${DOCKER_IMAGE}. Pass --docker-image with the full image and tag."
-            fi
-            check_release_floor "$DOCKER_IMAGE"
-        fi
+    if [[ -n "$DOCKER_IMAGE" ]]; then
+        tag=""
+    elif [[ -n "$tag" ]]; then
+        check_release_floor "$tag"
+        DOCKER_IMAGE="$(tn_docker_image_for_tag "$NETWORK" "$tag" setup_progress)" \
+            || setup_fail "Could not resolve release ${tag} to an image digest (see above)."
+    elif json_mode; then
+        DOCKER_IMAGE="$(latest_docker_image "$NETWORK")" \
+            || setup_fail "Could not read the newest ${NETWORK} release image; pass --release-tag or --docker-image <repository>@sha256:<digest>."
     else
         local default_image
-        default_image="$(latest_docker_image)"
+        default_image="$(latest_docker_image "$NETWORK")" || default_image=""
         while true; do
-            read -r -p "  Docker image (press Enter to accept default)
-  [${default_image}]: " input
-            DOCKER_IMAGE="${input:-$default_image}"
-            validate_docker_image "$DOCKER_IMAGE" && break
-            print_warn "Not an image reference: ${DOCKER_IMAGE}. Give the full image with its tag, such as ${DEFAULT_DOCKER_IMAGE}."
+            read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
+  [${default_image:-none}]: " input
+            tag=""
+            if [[ -z "$input" ]]; then
+                DOCKER_IMAGE="$default_image"
+            elif tn_release_tag_ok "$NETWORK" "$input"; then
+                tag="$input"
+                DOCKER_IMAGE="$(tn_docker_image_for_tag "$NETWORK" "$tag")" || DOCKER_IMAGE=""
+            else
+                DOCKER_IMAGE="$input"
+            fi
+            [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" && break
+            print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as ${DEFAULT_DOCKER_IMAGE}."
         done
-        check_release_floor "$DOCKER_IMAGE"
+        [[ -z "$tag" ]] || check_release_floor "$tag"
     fi
+    if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+        setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>."
+    fi
+    RELEASE_TAG="$tag"
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
-    if ! docker pull "$DOCKER_IMAGE"; then
+    if ! docker pull "$DOCKER_IMAGE" 9>&-; then
         setup_fail "Failed to pull Docker image: ${DOCKER_IMAGE}"
     fi
     print_ok "Docker image pulled: ${DOCKER_IMAGE}"
-
-    DOCKER_UID=1101
-    print_info "Note: Docker install requires service user UID ${DOCKER_UID}"
-
-    local existing_user
-    existing_user=$(getent passwd "$DOCKER_UID" | cut -d: -f1 2>/dev/null || echo "")
-    if [[ -n "$existing_user" ]] && [[ "$existing_user" != "$SERVICE_USER" ]]; then
-        setup_fail "UID ${DOCKER_UID} is already in use by user '${existing_user}'"
-    fi
 
     BINARY_PATH="docker"
 }
@@ -1065,6 +1221,19 @@ init_public_rpc_flags() {
 # systemd. Source and docker installs bring their own binary, so there it is ignored,
 # with a warning. Whether the file runs is checked after check_root.
 init_install_flags() {
+    case "$INSTALL_METHOD" in
+        ""|source|release|docker|existing) ;;
+        *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, release, docker or existing)" ;;
+    esac
+    # --build-ref is the older name of --release-tag; the two must agree.
+    if [[ -n "$RELEASE_TAG" && -n "$JSON_BUILD_REF" && "$RELEASE_TAG" != "$JSON_BUILD_REF" ]]; then
+        setup_fail "--release-tag ${RELEASE_TAG} and --build-ref ${JSON_BUILD_REF} name different releases."
+    fi
+    RELEASE_TAG="${RELEASE_TAG:-$JSON_BUILD_REF}"
+    JSON_BUILD_REF="$RELEASE_TAG"
+    if [[ "$ALLOW_DIRTY" == "true" ]] && json_mode; then
+        setup_fail "--allow-dirty is taken in an interactive run only."
+    fi
     [[ -n "$BINARY_PATH" ]] || return 0
     if [[ -z "$INSTALL_METHOD" ]] && json_mode; then
         INSTALL_METHOD="existing"
@@ -2263,6 +2432,14 @@ step_create_service() {
         "LOG_TARGET=${LOG_TARGET}" \
         "OWNERSHIP_LAYOUT=2"
     write_node_meta_runner
+    # The digest a Docker node runs, and the release tag the binary or image came from
+    # when it is known (a source build, a release install, --release-tag).
+    if [[ "${INSTALL_METHOD:-}" == "docker" && "${DOCKER_IMAGE:-}" == *@sha256:* ]]; then
+        write_node_meta "DOCKER_IMAGE_DIGEST=${DOCKER_IMAGE##*@}"
+    fi
+    if [[ -n "${RELEASE_TAG:-}" ]]; then
+        write_node_meta "RELEASE_TAG=${RELEASE_TAG}"
+    fi
     print_ok "Node metadata written: ${meta_file}"
 
     # The two log files the unit appends to (StandardOutput=append:) exist before the
@@ -2810,23 +2987,30 @@ public_rpc_json() {
 # --docker-image, both held to the network's oldest supported release.
 json_check_install_flags() {
     case "$INSTALL_METHOD" in
-        ""|source|docker|existing) ;;
-        *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, docker or existing)" ;;
+        ""|source|release|docker|existing) ;;
+        *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, release, docker or existing)" ;;
     esac
     if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
-        setup_fail "--install-method is missing (expected source, docker or existing)"
+        setup_fail "--install-method is missing (expected source, release, docker or existing)"
     fi
-    if [[ "$INSTALL_METHOD" == "source" && "$JSON_PHASE" == "keygen" && -z "$JSON_BUILD_REF" ]]; then
-        setup_fail "No --build-ref supplied for source build."
+    if [[ "$JSON_PHASE" == "keygen" && -z "$RELEASE_TAG" ]] && [[ "$INSTALL_METHOD" == "source" || "$INSTALL_METHOD" == "release" ]]; then
+        setup_fail "No --release-tag (or --build-ref) supplied for a ${INSTALL_METHOD} install."
     fi
-    if [[ -n "$JSON_BUILD_REF" ]]; then
-        check_release_floor "$JSON_BUILD_REF"
+    # Source builds and release installs take a release tag of the network only: no
+    # branch, no commit id (tn_release_tag_ok).
+    if [[ -n "$RELEASE_TAG" ]]; then
+        if ! tn_release_tag_ok "$NETWORK" "$RELEASE_TAG"; then
+            setup_fail "${RELEASE_TAG} is not a ${NETWORK} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z); branches and commit ids are refused."
+        fi
+        check_release_floor "$RELEASE_TAG"
     fi
     if [[ -n "$DOCKER_IMAGE" ]]; then
-        if ! validate_docker_image "$DOCKER_IMAGE"; then
-            setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give the full image reference with its tag, such as ${DEFAULT_DOCKER_IMAGE}"
+        if [[ -n "$RELEASE_TAG" ]]; then
+            setup_fail "Give --docker-image or --release-tag, not both."
         fi
-        check_release_floor "$DOCKER_IMAGE"
+        if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+            setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give this network's image by digest (<repository>@sha256:<digest>), such as ${DEFAULT_DOCKER_IMAGE}, or its release tag with --release-tag"
+        fi
     fi
     return 0
 }
@@ -2935,7 +3119,7 @@ main() {
         # such a word is the next option, not a value. (--rpc-public may stand alone.)
         case "$1" in
             --phase|--network|--install-method|--passphrase-method|--address|--build-ref|\
-            --docker-image|--binary-path|--external-primary|--external-worker|\
+            --docker-image|--binary-path|--external-primary|--external-worker|--release-tag|\
             --listener-primary|--listener-worker|--public-ip|--public-rpc-url|\
             --public-ws-url|--rpc-http|--rpc-ws|--rpc-domain|--advertised-name|--data-dir|\
             --service-user|--service-group|--genesis-dir|--log-target|--bind-pcrs)
@@ -2959,6 +3143,8 @@ main() {
             --passphrase-method)   PASSPHRASE_METHOD="${2:-}"; shift 2 ;;
             --address)             VALIDATOR_ADDRESS="${2:-}"; shift 2 ;;
             --build-ref)           JSON_BUILD_REF="${2:-}"; shift 2 ;;
+            --release-tag)         RELEASE_TAG="${2:-}"; shift 2 ;;
+            --allow-dirty)         ALLOW_DIRTY=true; shift ;;
             --docker-image)        DOCKER_IMAGE="${2:-}"; shift 2 ;;
             # The node binary for --install-method existing: an absolute path to an
             # executable file. Skips the search and the prompt in _preflight_existing.
