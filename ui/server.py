@@ -827,14 +827,17 @@ def _external_block(t):
 # =============================================================================
 # PUBLIC (read-only) ACCESS GUARD
 #
-# The dashboard is reachable two ways: directly over the SSH tunnel
-# (127.0.0.1:8080 -- trusted, full management), and -- when install-caddy is
-# enabled -- publicly via the Caddy reverse proxy. Caddy stamps an unforgeable
-# X-TN-Dashboard-Public header on every proxied request (it deletes any
-# client-supplied value then sets its own), which the SSH path never carries.
-# Public requests are READ-ONLY: every write route is refused 403 here, server-
-# side, so management is impossible over the public path even if the UI's gating
-# were bypassed. Management requires the SSH tunnel.
+# The dashboard is reachable two ways: over the SSH tunnel (127.0.0.1:8080,
+# full management with the per-install token), and -- when install-caddy is
+# enabled -- publicly through the Caddy reverse proxy. Caddy deletes any
+# client-supplied X-TN-Dashboard-Public header and sets its own on every
+# proxied request, so everything that arrives through Caddy is public. The
+# header is not a secret: any client that reaches 127.0.0.1:8080 directly can
+# send it as well, and then gets exactly what a public visitor gets. A request
+# carrying it is READ-ONLY: every write route is refused 403 here, server-side,
+# only the PUBLIC_ENDPOINTS reads answer, and none of them calls the root
+# helper. It skips the Host and token checks below, which guard the management
+# path; management requires the SSH tunnel and the token.
 # =============================================================================
 
 def is_public_request():
@@ -5428,16 +5431,15 @@ def api_network_status():
 # MAIN
 # =============================================================================
 
-# The bind address IS the trust boundary for the management path. This server
-# has NO authentication of its own: the SSH-tunnel / loopback path is trusted
-# purely because it is unreachable from off-host. Caddy (install-caddy.sh) is
-# the ONLY intended public entrypoint, and it forces every proxied request
-# read-only via the unforgeable X-TN-Dashboard-Public header. Exposing this
-# port by ANY other means -- binding 0.0.0.0, a second reverse proxy that does
-# not stamp that header, `docker -p 8080:8080`, or `ssh -g`/GatewayPorts --
-# hands full node control to whoever can reach it and learns the token. Keep
-# this on loopback; the guard below refuses to start otherwise, and also without
-# the per-install token.
+# The management path is guarded by the loopback bind together with the
+# per-install token, the Host check and the Origin checks (_enforce_local_origin).
+# Caddy (install-caddy.sh) is the ONLY intended public entrypoint, and it forces
+# every proxied request read-only by setting X-TN-Dashboard-Public itself.
+# Exposing this port by ANY other means -- binding 0.0.0.0, a second reverse
+# proxy that does not set that header, `docker -p 8080:8080`, or `ssh -g` /
+# GatewayPorts -- leaves the token as the only thing between whoever can reach
+# it and full node control. Keep this on loopback; the guard below refuses to
+# start otherwise, and also without the per-install token.
 BIND_HOST = "127.0.0.1"
 BIND_PORT = 8080
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1")
