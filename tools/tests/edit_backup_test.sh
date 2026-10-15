@@ -3,7 +3,8 @@
 # tools/tests/edit_backup_test.sh -- edit-config.sh's backups and restores
 # (root-only backup directory, sha256 checked on restore), the data-dir writes
 # done as the service user (restore and the chain-config refresh copy), the
-# shared update lock and the ownership-migration hook in edit_lock.
+# shared update lock, the ownership-migration hook in edit_lock, and an older
+# install moved to the current start script by an edit that is then abandoned.
 #
 #   bash tools/tests/edit_backup_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/edit_backup_test.sh
@@ -180,6 +181,64 @@ edit_reset_backups
 ln -s "$LF" "$RB/fx/opt/link"
 run edit_backup "$RB/fx/opt/link"
 check_rc "symlink refused by edit_backup" 1 "$RC"
+
+# An install from before node.env moved to the current start script by an edit
+# (launch_current_form), then the edit is abandoned: refused (run_set restores)
+# or stopped by TERM (the EXIT trap restores). The start script the move created
+# is removed with node.env, and the old launch file and unit are back.
+OLDLF="$RB/fx/opt/telcoin/start-telcoin.sh"
+NEWLF="$RB/fx/usr/local/libexec/telcoin/tn-start"
+UNITF="$RB/fx/etc/systemd/system/telcoin.service"
+OLD_UNIT='[Service]
+ExecStart=/opt/telcoin/start-telcoin.sh'
+old_form() {
+    rm -rf "$RB/fx/usr" "$RB/fx/etc/telcoin/node.env"
+    mkdir -p "$RB/fx/opt/telcoin" "$RB/fx/etc/systemd/system"
+    chmod 0755 "$RB/fx/opt/telcoin" "$RB/fx/etc/systemd" "$RB/fx/etc/systemd/system"
+    printf '#!/bin/bash\nexport PRIMARY_LISTENER_MULTIADDR=x\nexec node --http\n' > "$OLDLF"
+    chmod 0755 "$OLDLF"
+    printf '%s\n' "$OLD_UNIT" > "$UNITF"
+    chmod 0644 "$UNITF"
+    TARGET_LAUNCH_FILE="$OLDLF"
+    TARGET_SERVICE_FILE="$UNITF"
+    edit_reset_backups
+}
+tn_rerender_node_launch() {
+    mkdir -p "${NEWLF%/*}"
+    printf '#!/bin/bash\nexec node --bls-passphrase-source stdin --http\n' > "$NEWLF"
+    printf 'PRIMARY_LISTENER_MULTIADDR=x\n' > "$RB/fx/etc/telcoin/node.env"
+    printf '[Service]\nExecStart=/usr/local/libexec/telcoin/tn-start\n' > "$UNITF"
+    return 0
+}
+resolve_launch_file() { TARGET_LAUNCH_FILE="$NEWLF"; }
+old_form_back() {
+    printf '%s %s %s %s' \
+        "$([[ -e "$NEWLF" ]] && echo stray-tn-start || echo no-tn-start)" \
+        "$([[ -e "$RB/fx/etc/telcoin/node.env" ]] && echo node.env || echo no-node.env)" \
+        "$([[ "$(cat "$UNITF")" == "$OLD_UNIT" ]] && echo unit-back || echo unit-changed)" \
+        "$([[ -f "$OLDLF" ]] && echo old-launch || echo no-old-launch)"
+}
+old_form
+# Called directly (not through run): the backup set lives in this shell.
+launch_current_form >/dev/null 2>&1
+RC=$?
+check_rc "old form: moved to the current start script" 0 "$RC"
+check "old form: the new start script is in the backup set as new" "yes" \
+    "$(i=0; while [[ $i -lt ${#EDIT_BK_FILES[@]} ]]; do [[ "${EDIT_BK_FILES[$i]}" == "$NEWLF" && -z "${EDIT_BK_COPIES[$i]}" ]] && echo yes; i=$((i + 1)); done)"
+run edit_restore_backups
+check_rc "old form, edit refused: restore rc 0" 0 "$RC"
+check "old form, edit refused: no stray tn-start, node.env gone, unit and launch file back" \
+    "no-tn-start no-node.env unit-back old-launch" "$(old_form_back)"
+old_form
+(
+    trap edit_on_exit EXIT
+    launch_current_form >/dev/null 2>&1
+    EDIT_SIGNAL=TERM
+    exit 143
+) >/dev/null 2>&1
+check "old form, stopped by TERM: no stray tn-start, node.env gone, unit and launch file back" \
+    "no-tn-start no-node.env unit-back old-launch" "$(old_form_back)"
+unset -f tn_rerender_node_launch resolve_launch_file
 
 if [[ $SU_OK != 1 ]]; then
     skip "data-dir restore as the service user" "no nobody account usable with setpriv or runuser"

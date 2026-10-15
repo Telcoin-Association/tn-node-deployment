@@ -72,8 +72,8 @@ rm -f "$ENVF"
 tn_rerender_node_launch() { printf 'rerender\n' >> "$T/backups"; _tn_node_env_text "$P" "$W" > "$ENVF"; return 0; }
 rc=0; set_listener_var WORKER_LISTENER_MULTIADDR "$W" >/dev/null 2>&1 || rc=$?
 check_rc "older install: moved, then set" 0 "$rc"
-check "older install: backups before the move" \
-    "$(printf '%s\n%s\n%s\nrerender' "$ENVF" "$TARGET_LAUNCH_FILE" "$TARGET_SERVICE_FILE")" "$(cat "$T/backups")"
+check "older install: backups (both start-script paths too) before the move" \
+    "$(printf '%s\n%s\n%s\n%s\nrerender' "$ENVF" "$TARGET_LAUNCH_FILE" "$TARGET_SERVICE_FILE" "$T/root/usr/local/libexec/telcoin/tn-start-docker")" "$(cat "$T/backups")"
 tn_rerender_node_launch() { return 1; }
 fresh
 rm -f "$ENVF"

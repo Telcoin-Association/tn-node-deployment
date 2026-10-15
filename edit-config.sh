@@ -324,9 +324,12 @@ node_env_file() {
 # (passphrase on stdin, listeners in node.env): an install from before is moved
 # first with tn_rerender_node_launch, which rewrites the start script and unit
 # and writes node.env from the addresses its old files carry. The launch file,
-# the unit and node.env are backed up first (edit_backup), so a failed or
-# abandoned edit puts all three back. rc 1 when the move is refused (reported).
+# the unit, node.env and both current start-script paths are backed up first
+# (edit_backup; a path that does not exist yet is recorded as new), so a failed
+# or abandoned edit puts every one back and removes a start script the move
+# created. rc 1 when the move is refused (reported).
 launch_current_form() {
+    local m
     if [[ -f "$(node_env_file)" ]] \
         && [[ "$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --bls-passphrase-source 2>/dev/null)" == "stdin" ]]; then
         return 0
@@ -334,6 +337,9 @@ launch_current_form() {
     edit_backup "$TARGET_LAUNCH_FILE" || return 1
     edit_backup "$TARGET_SERVICE_FILE" || return 1
     edit_backup "$(node_env_file)" || return 1
+    for m in source docker; do
+        edit_backup "${TN_ROOT_PREFIX:-}$(tn_start_script_path "$m")" || return 1
+    done
     if ! tn_rerender_node_launch "" edit_wait_say; then
         edit_error "${TARGET_LAUNCH_FILE} could not be moved to the current start script (see above); nothing was changed by this edit"
         return 1
