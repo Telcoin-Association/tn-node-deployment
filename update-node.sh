@@ -2403,8 +2403,7 @@ json_apply_docker() {
     if refusal="$(apply_root_dir_refusal "$launch_file")"; then
         json_event error "$refusal"; return 1
     fi
-    update_swap_precheck "$launch_file" "$old_image" || { json_event error
- "the launch file is not the current start script; nothing was changed"; return 1; }
+    update_swap_precheck "$launch_file" "$old_image" || { json_event error "the launch file is not the current start script; nothing was changed"; return 1; }
     # Warn-only in --json mode (see apply_docker_update).
     storage_migration_begin "${old_image##*/}" "${new_image##*/}" || return 1
     backup_unit_file "$launch_file" || { json_event error "could not back up launch config"; return 1; }
