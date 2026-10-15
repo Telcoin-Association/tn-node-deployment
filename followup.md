@@ -10,13 +10,6 @@ round. Each item says what it is, where it lives and what closes it.
 U-numbers name the telcoin-network items of the round. Their issues are drafted but not posted
 yet; this file gains the issue numbers when they are.
 
-## Pending merge
-
-- A fix pass for release installs and Docker digests is in progress: source builds in a transient
-  systemd scope, staging cleanup when a run is interrupted by a signal, an image repository
-  allowlist (`TN_TESTNET_IMAGE_REPOS`), and edge cases in the `/etc/docker/daemon.json` merge.
-  Closes when it merges.
-
 ## Release prep
 
 - `lib/release-keys/` holds only its README. With no `*.asc` key in it, every node release

@@ -92,15 +92,26 @@ How the node binary is obtained:
   A tag with a bad signature is refused; on mainnet the tag must be signed by a release key,
   and on testnet an unsigned tag builds with a warning. The build log goes to
   `/var/lib/telcoin-staging`. A devnet source build is refused.
+- Each build command runs as `tn-build` with no inherited file descriptors, and every process
+  of that account is stopped before root copies the output; `--version` runs as `tn-build` on
+  a fresh copy.
+- Release, rustup, tag and binary staging directories are named by the run's PID. A run
+  removes its own at exit, also after a signal, and the next run that takes the update lock
+  removes those of runs that died.
 - New `--allow-dirty` (testnet, interactive only) discards local changes in
   `/opt/telcoin-source` instead of stopping.
 - Docker comes from Docker's own apt repository after its signing key's fingerprint is checked
   (no `get.docker.com`), and setup merges `"live-restore": true` into
   `/etc/docker/daemon.json` (with python3 or jq; without either it stops and prints the manual
-  step).
+  step). An empty file counts as `{}`, a file that is not exactly one JSON object stops setup,
+  and setup says live-restore is on only after reading it back.
 - The Docker image is pulled and run by digest. `--docker-image` must be
-  `<repository>@sha256:<digest>`, and a release tag resolves to its digest. `.node-meta`
-  records `DOCKER_IMAGE_DIGEST` and `RELEASE_TAG`.
+  `<repository>@sha256:<digest>`, and a release tag resolves to its digest. Setup checks the
+  digest of the pulled image. `.node-meta` records `DOCKER_IMAGE_DIGEST` and `RELEASE_TAG`.
+- Testnet images come from `us-docker.pkg.dev/telcoin-network/tn-public/adiri` or
+  `ghcr.io/telcoin-association/telcoin-network` (`TN_TESTNET_IMAGE_REPOS`). A mainnet or
+  devnet Docker install is refused before anything on the host changes, and an interactive
+  run refuses `--docker-image` together with `--release-tag`.
 
 BLS passphrase:
 
@@ -164,6 +175,9 @@ Unit, start script and logs:
   download and verify the signed release; Docker installs pull the network's release image by
   digest and check the digest after the pull. The staged binary is removed after apply,
   rollback or discard.
+- The source picker offers release tags only. A Docker image given by digest alone takes its
+  release tag from `.node-meta` when the recorded digest matches; when the running release is
+  not recorded, the downgrade check warns that it cannot tell and goes on.
 - A changed binary between prepare and apply is a refusal, not a question.
 - Downgrades are refused (`"downgrade":true` in the `--json` done, plus `"storage_downgrade"`).
   New `--allow-downgrade` (testnet, interactive only) allows one. New `--allow-dirty` works as
@@ -194,6 +208,7 @@ Unit, start script and logs:
 
 ### edit-config 2.0.0
 
+- On mainnet the Docker image item says why there is no image repository yet.
 - New `--migrate-credential` moves the passphrase into the encrypted credential and shreds the
   old copies. It also moves a unit that holds the passphrase, runs docker inline or runs the
   node binary inline, and a TPM-sealed install, to the current start script and unit. When
@@ -377,6 +392,8 @@ skipped.
   directory, the logrotate file and the drop-ins setup wrote, `/var/lib/telcoin-staging`, the
   `tn-build` account with `/var/lib/tn-build`, and `/run/telcoin`.
 - Asks before it removes the `telcoin-log` group when the service account is kept.
+- Stops the `tn-build` account's processes before it removes the account, and reports a
+  failed `userdel`.
 - With the testnet add-ons, also removes the VPN self-heal units and helper, the tnadmin key
   files, the overlay SSH rules and the `telcoin-alloy` account.
 - With the UI, also removes its venv, token and state directory, and keeps the UI audit log in
@@ -416,6 +433,8 @@ skipped.
 
 ### lib/common 2.0.0 and lib/fallback 1.1.0
 
+- The required-helper lists of setup-node, update-node and edit-config include the release
+  helpers, so a script refuses to run against a library without them.
 - New root-write primitives: write through a temp file and a rename, a backup with a recorded
   hash, a hash-checked restore, a root-owned binary install, and a service-account runner.
   Every script above writes through them.

@@ -732,20 +732,22 @@ When prompted during setup you can choose how to obtain the `telcoin-network` bi
 
 | Option | Description | Notes |
 |---|---|---|
-| Build from source (`source`) | Checks out a release tag in the root-owned `/opt/telcoin-source`, compares it with the tag on origin (a re-pointed tag is refused) and checks the tag's signature against `lib/release-keys`. The build runs as the unprivileged `tn-build` account with its own Rust toolchain from a `rustup-init` pinned by version and SHA-256. Root copies the result into its staging directory, has `tn-build` run its `--version` check, and installs it as `/opt/telcoin/telcoin-network` | Takes 20-40 min and about 4 GB of RAM. A tag signature that cannot be checked refuses on mainnet and warns on testnet. `--allow-dirty` (testnet, interactive only) discards local changes in the checkout instead of stopping |
-| Signed release (`release`) | Downloads the release's `SHA256SUMS` and `SHA256SUMS.asc`, checks the signature with `gpgv`, the tarball against its line and the chain-config lines against the hashes this script release pins, then takes only the binary out of the tarball and has `tn-build` run its `--version` check before root installs it | Release tarballs are x86_64 only: refused on aarch64. See [How updates are verified](#how-updates-are-verified) |
+| Build from source (`source`) | Checks out a release tag in the root-owned `/opt/telcoin-source`, compares it with the tag on origin (a re-pointed tag is refused) and checks the tag's signature against `lib/release-keys`. The build runs as the unprivileged `tn-build` account with its own Rust toolchain from a `rustup-init` pinned by version and SHA-256. Each build command runs as `tn-build` with no inherited file descriptors, and every process of that account is stopped before root copies the output into its staging directory. `tn-build` runs `--version` on a fresh copy, and root installs its own copy as `/opt/telcoin/telcoin-network` | Takes 20-40 min and about 4 GB of RAM. A tag signature that cannot be checked refuses on mainnet and warns on testnet. `--allow-dirty` (testnet, interactive only) discards local changes in the checkout instead of stopping |
+| Signed release (`release`) | Downloads the release's `SHA256SUMS` and `SHA256SUMS.asc`, checks the signature with `gpgv`, the tarball against its line and the chain-config lines against the hashes this script release pins, then takes only the binary out of the tarball and has `tn-build` run its `--version` check before root installs it | Release tarballs are x86_64 only; on aarch64 the install stops because the release has no aarch64 tarball. See [How updates are verified](#how-updates-are-verified) |
 | Docker (`docker`) | Runs the network's release image by digest | See [Docker Install Notes](#docker-install-notes) |
 | Existing binary (`existing`) | Use a binary already on this machine | Setup searches `PATH`, `/usr/local/bin`, `/opt` and `/home`, or takes `--binary-path <absolute path>`. The file must be root-owned in root-owned directories; `update-node.sh` does not replace it |
 
 Setup takes a release tag, never a branch, a commit id or `latest`: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet. Pick it from the list, type it at the prompt, or pass `--release-tag <tag>` (`--build-ref` is the older name of the same flag; when both are given they must name the same release). On testnet a release older than `v0.13.0-adiri` is refused, the first release that has all three of `keytool set-rpc`, proof-of-possession signing and state export.
 
+Downloads and builds stage under `/var/lib/telcoin-staging` in directories named by the run's PID. A run removes its own at exit, also after a signal, and the next run that takes the update lock removes those of runs that died.
+
 ### Docker Install Notes
 
 When Docker is selected the script will:
 - Install Docker Engine when it is missing, from Docker's own apt repository, after checking that the repository's signing key has the fingerprint the script pins (Ubuntu and Debian only; elsewhere install Docker first). Setup no longer runs the `get.docker.com` script
-- Turn on `live-restore` in `/etc/docker/daemon.json`, merged into an existing file with python3 or jq, so a restart of the Docker engine leaves the node running. A file it cannot merge stops setup with the manual step
-- Ask for the image: a release tag, which it resolves to the digest the signed release publishes, or `<repository>@sha256:<digest>`. Enter takes the newest release image by digest. The repository is fixed per network: testnet `us-docker.pkg.dev/telcoin-network/tn-public/adiri`. Mainnet and devnet have no repository yet, so a Docker install there is refused. `--docker-image` takes a digest reference only; `--release-tag` names the release instead
-- Pull the image by its digest, which Docker checks the downloaded content against
+- Turn on `live-restore` in `/etc/docker/daemon.json`, merged into an existing file with python3 or jq, so a restart of the Docker engine leaves the node running. An empty file counts as `{}`; a file that is not exactly one JSON object stops setup with the manual step. Setup reads the file back and says live-restore is on only when it is
+- Ask for the image: a release tag, which it resolves to the digest the signed release publishes, or `<repository>@sha256:<digest>`. Enter takes the newest release image by digest. Testnet images come from `us-docker.pkg.dev/telcoin-network/tn-public/adiri` or `ghcr.io/telcoin-association/telcoin-network` (`TN_TESTNET_IMAGE_REPOS`); other repositories are refused. Mainnet and devnet have no repository yet, so a Docker install there is refused before setup changes anything on the host. `--docker-image` takes a digest reference only; `--release-tag` names the release instead, and an interactive run refuses the two together
+- Pull the image by its digest, which Docker checks the downloaded content against, and check the digest of the pulled image again
 - Generate keys using the Docker image
 - Create a systemd service whose start script runs `docker run` as the service user's uid:gid (`--user`), with every capability dropped, `no-new-privileges`, a read-only root filesystem and `--pull=never`
 
@@ -910,7 +912,7 @@ sudo bash ~/telcoin-node-scripts/update-node.sh --discard            # drop a pr
 ```
 
 - Updates take release tags only: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet; a branch, a commit id or `latest` is refused. A source install checks the tag out (refused when origin's tag moved or its signature is bad), builds it as `tn-build` and stages the result root-only. A release install downloads and verifies the release (see [How updates are verified](#how-updates-are-verified)). A Docker install takes only its network's release tags, resolves the tag to the image digest, and checks after the pull that Docker holds the image under that digest. `--ref` (the Node Manager UI's flag) takes a release tag or, on a Docker install, the network's image by digest.
-- A release older than the running one is refused (the `--json` `done` carries `"downgrade":true`, and `"storage_downgrade":true` when the running release is at or above `v0.16.0-adiri`). `--allow-downgrade` lets an interactive run on testnet go back anyway.
+- A release older than the running one is refused (the `--json` `done` carries `"downgrade":true`, and `"storage_downgrade":true` when the running release is at or above `v0.16.0-adiri`). `--allow-downgrade` lets an interactive run on testnet go back anyway. When the running release is not recorded (no version marker, or a digest-only Docker image whose digest differs from the one in `.node-meta`), update-node warns that it cannot check for a downgrade and goes on. A Docker image given by digest alone takes its release tag from `.node-meta` when the recorded digest matches.
 - A prepared update whose binary or image changed between prepare and apply is refused. The staged binary is removed after apply, rollback or discard.
 - Apply checks the committee before it stops the node and refuses a stop that would take the committee below quorum (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)); `--allow-quorum-risk` overrides it for a coordinated restart. It then waits for the epoch boundary before it stops a committee node, in all four apply paths (source or release and Docker, interactive and `--json`), once the update lock is held and the new binary or image is ready. `--no-epoch-wait` or `TN_SKIP_EPOCH_WAIT=1` skips the wait.
 - While the node is stopped, apply rewrites the start script and the unit from `.node-meta`, so an older install picks up the current form. The first root run on a testnet host laid out by an older release moves it to the root-owned layout first (see [System Layout](#system-layout)), and a node whose unit still holds the passphrase is refused with the `edit-config.sh --migrate-credential` hint.
@@ -939,7 +941,7 @@ The script automatically detects what is installed (including legacy per-role la
 - Docker container and optionally the image (if Docker install)
 - Chain database
 - Node keys and passphrase (requires typing `DELETE` to confirm -- cannot be undone)
-- Binary and source code, the release staging directory `/var/lib/telcoin-staging`, and the `tn-build` account with `/var/lib/tn-build`
+- Binary and source code, the release staging directory `/var/lib/telcoin-staging`, and the `tn-build` account with `/var/lib/tn-build` (its processes are stopped first, and a failed `userdel` is reported)
 - The host files beside the node: the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin/node.env`, the backups in `/var/backups/telcoin`, the logrotate and journald files, and `/run/telcoin`
 - Log directory
 - Service user and group, and the `telcoin-log` group (asked separately when you keep the service user, which may still need it)
@@ -1616,6 +1618,9 @@ The library every script sources. Scripts 2.0.0 refuse to run on an older copy a
   `v0.16.0-adiri`); the mainnet pins and the mainnet image repository are not set yet, so
   mainnet installs are refused until they are.
 - A `.node-meta` key set more than once is refused instead of read from its first line.
+- Testnet accepts release images from either repository in `TN_TESTNET_IMAGE_REPOS`; mainnet
+  and devnet still have none. Release staging directories are swept at exit and by the next
+  locked run, and the required-helper lists include the release helpers.
 
 Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 
@@ -1733,6 +1738,12 @@ gains `lib/wgvpn/peers/ssh/KEYS`, the list of maintainer key fingerprints setup-
 - `--json`: accepts `--network mainnet`; keygen and finalize refuse an existing node unit;
   finalize refuses flags that differ from what keygen recorded and an empty listener
   multiaddr; TERM, INT and HUP end the run with 143, 130 and 129.
+- Source builds stop every `tn-build` process after each build command and pass it no open
+  file descriptors; staging directories are named by the run's PID and removed at exit.
+- Testnet images may come from `us-docker.pkg.dev/telcoin-network/tn-public/adiri` or
+  `ghcr.io/telcoin-association/telcoin-network`; a mainnet or devnet Docker install is refused
+  before anything changes; the pulled digest is checked; an empty `daemon.json` counts as `{}`
+  and anything but one JSON object stops setup.
 
 Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 
@@ -1757,6 +1768,9 @@ Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 - A unit that still holds the BLS passphrase, runs the node command inline or uses the old
   TPM method is refused until `sudo bash edit-config.sh --migrate-credential` has run.
 - When a run ends with the node stopped, it says so and how to start it.
+- The source picker offers release tags only. A digest-only Docker image takes its release tag
+  from `.node-meta` when the recorded digest matches; when the running release is not
+  recorded, the downgrade check warns instead of refusing.
 
 Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 

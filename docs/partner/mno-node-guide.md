@@ -282,9 +282,9 @@ An argument setup does not recognise is reported on stderr as `Unknown argument:
 
 | Menu choice | `--install-method` | What it does | How it updates |
 |---|---|---|---|
-| `1) Build from source` | `source` | Installs the build dependencies with apt, clones telcoin-network to `/opt/telcoin-source`, checks the release tag's signature, and builds it as the `tn-build` account with a pinned Rust toolchain (20 to 40 minutes). Root only installs the result, as `/opt/telcoin/telcoin-network`. | `update-node.sh` |
+| `1) Build from source` | `source` | Installs the build dependencies with apt, clones telcoin-network to `/opt/telcoin-source`, checks the release tag's signature, and builds it as the `tn-build` account with a pinned Rust toolchain (20 to 40 minutes). Every `tn-build` process is stopped after each build command, before root copies the output. Root only installs the result, as `/opt/telcoin/telcoin-network`. | `update-node.sh` |
 | `2) Signed release` | `release` | Downloads the release tarball with `SHA256SUMS` and `SHA256SUMS.asc`, checks the signature and the hashes, runs the binary's `--version` as `tn-build`, and installs `/opt/telcoin/telcoin-network`. | `update-node.sh` |
-| `3) Docker` | `docker` | Installs Docker if missing, from Docker's apt repository after checking its signing key, and turns on `live-restore`. Pulls the image by digest from `us-docker.pkg.dev/telcoin-network/tn-public/adiri`; the default is the newest testnet release, or `v0.16.0-adiri` if the registry cannot be reached. | `update-node.sh` |
+| `3) Docker` | `docker` | Installs Docker if missing, from Docker's apt repository after checking its signing key, and turns on `live-restore`. Pulls the image by digest from `us-docker.pkg.dev/telcoin-network/tn-public/adiri` or `ghcr.io/telcoin-association/telcoin-network` and checks the pulled digest; the default is the newest testnet release, or `v0.16.0-adiri` if the registry cannot be reached. | `update-node.sh` |
 | `4) I already have it` | `existing` | Uses a `telcoin-network` binary you supply. | By hand (see [Update the node](#update-the-node)). |
 
 `--release-tag <tag>` picks the release for the first three; `--build-ref` is its older name.
