@@ -472,11 +472,17 @@ command_exists() {
 # here (busybox has no `cp --no-preserve`), the helper fails closed.
 
 # tn_root_dir_ok DIR -- rc 0 when DIR is an absolute path and DIR and every
-# parent up to / is a real directory (not a symlink), owned by uid 0 and neither
-# group- nor other-writable. A path with a "." or ".." component is refused.
-# Reads only; prints nothing.
+# parent up to / is a real directory (not a symlink), owned by uid 0 and not
+# other-writable. Group write is refused in the directories these scripts own
+# and everything below them (/var/log/telcoin, /etc/telcoin, /opt/telcoin,
+# /usr/local/libexec/telcoin, /var/backups/telcoin, /var/lib/telcoin-staging,
+# /run/telcoin, also under TN_ROOT_PREFIX). Above them, and in system paths the
+# scripts do not own, a group-writable directory passes only when its group is a
+# system group (gid below 1000): stock Ubuntu ships /var/log root:syslog 0775. A
+# path with a "." or ".." component is refused. Reads only; prints nothing.
+# (Copied into the VPN self-heal helper with declare -f: keep it self-contained.)
 tn_root_dir_ok() {
-    local d="${1:-}" st uid mode
+    local d="${1:-}" st uid gid mode rel
     [[ "$d" == /* ]] || return 1
     case "/${d}/" in
         */./*|*/../*) return 1 ;;
@@ -487,13 +493,27 @@ tn_root_dir_ok() {
         done
         [[ -L "$d" ]] && return 1
         [[ -d "$d" ]] || return 1
-        st="$(stat -c '%u %a' -- "$d" 2>/dev/null)" || return 1
+        st="$(stat -c '%u %g %a' -- "$d" 2>/dev/null)" || return 1
         uid="${st%% *}"
         mode="${st##* }"
-        [[ "$uid" == 0 && "$mode" =~ ^[0-7]+$ ]] || return 1
+        gid="${st#* }"
+        gid="${gid%% *}"
+        [[ "$uid" == 0 && "$gid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]+$ ]] || return 1
         # The last two octal digits are group and other; 2, 3, 6 and 7 carry w.
         case "$mode" in
-            *[2367]?|*[2367]) return 1 ;;
+            *[2367]) return 1 ;;
+            *[2367]?)
+                rel="$d"
+                if [[ -n "${TN_ROOT_PREFIX:-}" && "$rel" == "${TN_ROOT_PREFIX}"/* ]]; then
+                    rel="${rel#"$TN_ROOT_PREFIX"}"
+                fi
+                case "${rel}/" in
+                    /var/log/telcoin/*|/etc/telcoin/*|/opt/telcoin/*|/usr/local/libexec/telcoin/*|\
+                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/run/telcoin/*)
+                        return 1 ;;
+                esac
+                (( 10#$gid < 1000 )) || return 1
+                ;;
         esac
         [[ "$d" == / ]] && return 0
         d="${d%/*}"
