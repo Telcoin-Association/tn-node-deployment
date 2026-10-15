@@ -4162,7 +4162,54 @@ require_testnet() {
 # -----------------------------------------------------------------------------
 # ADD: ADD-ON GATES
 # -----------------------------------------------------------------------------
-# (reserved; ADD adds its helpers here)
+# Maintainer overlay range admitted to sshd by allow_overlay_ssh and the VPN drop-in
+# (the maintainers' /24, not the whole overlay). lib/testnet-addons.env is the
+# editable home; this default only keeps set -u happy if that file is missing.
+: "${TN_OVERLAY_ADMIN_CIDR:=10.100.9.0/24}"
+
+# addon_meta_get <key> [default] — strict .node-meta read for the add-on scripts.
+# Prints the value, or DEFAULT (may be empty) when the key or the file is absent;
+# rc 0. A key written on more than one line has no single value: prints nothing,
+# says so on stderr and returns 2, so the caller stops instead of acting on a
+# default. Use as: v="$(addon_meta_get KEY dflt)" || exit 1
+addon_meta_get() {
+    local key="${1:-}" dflt="${2:-}" v rc
+    rc=0
+    v="$(meta_get "$key" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        print_error "${key} is set more than once in .node-meta; remove the extra lines and run this again." >&2
+        return 2
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        v="$dflt"
+    fi
+    printf '%s\n' "$v"
+}
+
+# tn_testnet_addons_present — rc 0 when a testnet add-on or the Caddy edge is
+# installed on this host, printing a comma list of what was found (vpn,
+# observability, caddy); rc 1 and no output when none is. Reads files only, so it
+# is safe before any install step. TN_ROOT_PREFIX points it at a fixture tree.
+tn_testnet_addons_present() {
+    local p="${TN_ROOT_PREFIX:-}" found="" f
+    for f in /etc/wireguard/wg0.conf /etc/sudoers.d/90-tnadmin \
+             /etc/systemd/system/tn-vpn-selfheal.service \
+             /etc/systemd/system/tn-vpn-selfheal.path /usr/local/sbin/tn-vpn-selfheal; do
+        if [[ -e "${p}${f}" || -L "${p}${f}" ]]; then
+            found="vpn"
+            break
+        fi
+    done
+    if [[ -e "${p}/etc/systemd/system/telcoin-alloy.service" ]]; then
+        found="${found:+${found},}observability"
+    fi
+    if [[ -f "${p}/etc/caddy/Caddyfile" ]] \
+        && grep -qF "# Managed by the Telcoin Node Manager" "${p}/etc/caddy/Caddyfile" 2>/dev/null; then
+        found="${found:+${found},}caddy"
+    fi
+    [[ -n "$found" ]] || return 1
+    printf '%s\n' "$found"
+}
 
 # -----------------------------------------------------------------------------
 # .node-meta persistence (single primitive for every opt-in's state)
@@ -4344,14 +4391,20 @@ get_ssh_port() {
 }
 
 # validate_health_src <ip|cidr> — accept a bare IPv4/IPv6 OR a CIDR (v4 or v6).
-# For a CIDR, split on '/', require a numeric mask, and dispatch by family: IPv4 with
-# mask 0..32, or IPv6 with mask 0..128. For a bare address: IPv4 or IPv6. Generalizes
-# the IPv4-only validate_cidr for the operator-chosen health sources. Returns 0 if valid.
+# For a CIDR, split on '/', require a decimal mask without leading zeros, and
+# dispatch by family: IPv4 with mask 1..32, or IPv6 with mask 1..128. For a bare
+# address: IPv4 or IPv6. A /0 mask or the unspecified address (0.0.0.0, ::) means
+# "anywhere" and is refused. Generalizes the IPv4-only validate_cidr for the
+# operator-chosen health and SSH sources. Returns 0 if valid.
 validate_health_src() {
-    local src="$1"
+    local src="${1:-}"
+    # Never "anywhere": no /0 mask and no unspecified address.
+    case "$src" in
+        0.0.0.0|0.0.0.0/*|::|::/*) return 1 ;;
+    esac
     if [[ "$src" == */* ]]; then
         local ip="${src%/*}" mask="${src#*/}"
-        [[ "$mask" =~ ^[0-9]+$ ]] || return 1
+        [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
         if validate_ipv4 "$ip"; then
             (( mask >= 0 && mask <= 32 ))
         elif validate_ipv6 "$ip"; then
@@ -4366,19 +4419,41 @@ validate_health_src() {
 
 # kuma_extra_list — echo the space-separated operator-chosen health sources persisted
 # in .node-meta (KUMA_EXTRA_SRC), or nothing. The single source of truth for the set.
+# rc 2 (nothing printed, a message on stderr) when the key is on more than one line:
+# the set is then unknown and callers must not rewrite or apply it.
 kuma_extra_list() {
-    meta_get KUMA_EXTRA_SRC 2>/dev/null || true
+    local v rc
+    rc=0
+    v="$(meta_get KUMA_EXTRA_SRC 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        print_warn "KUMA_EXTRA_SRC is set more than once in .node-meta; no extra health source is applied until the extra lines are removed." >&2
+        return 2
+    fi
+    [[ -n "$v" ]] && printf '%s\n' "$v"
+    return 0
 }
 
 # apply_kuma_extra_rules — (re)apply an `allow from <src>` rule for every operator-
 # persisted health source so they survive a `ufw --force reset`. Idempotent (ufw
 # dedups) and quiet (the operator gets a dedicated confirmation elsewhere). No-op when
-# the list is empty.
+# the list is empty. Every entry must pass validate_health_src (so never /0); an entry
+# that does not is skipped with a warning. rc 1 when an entry was skipped, a rule
+# failed or the list is unreadable (duplicated key), else 0.
 apply_kuma_extra_rules() {
-    local src
-    for src in $(kuma_extra_list); do
-        ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+    local src list rc
+    local -a srcs
+    rc=0
+    list="$(kuma_extra_list)" || return 1
+    read -r -a srcs <<< "$list" || true
+    for src in ${srcs[@]+"${srcs[@]}"}; do
+        if ! validate_health_src "$src"; then
+            print_warn "Skipping health source '${src}' from KUMA_EXTRA_SRC: not an address or a CIDR narrower than /0." >&2
+            rc=1
+            continue
+        fi
+        ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || rc=1
     done
+    return "$rc"
 }
 
 # kuma_extra_add <src> — validate, dedupe-append to KUMA_EXTRA_SRC, persist, then apply
@@ -4386,7 +4461,7 @@ apply_kuma_extra_rules() {
 kuma_extra_add() {
     local src="$1" cur s
     validate_health_src "$src" || return 1
-    cur="$(kuma_extra_list)"
+    cur="$(kuma_extra_list)" || return 1
     for s in $cur; do
         # Already persisted: just (re)apply the rule idempotently and report success.
         if [[ "$s" == "$src" ]]; then
@@ -4402,7 +4477,7 @@ kuma_extra_add() {
 # then delete its ufw allow rule. Removing an entry that isn't present is harmless.
 kuma_extra_remove() {
     local src="$1" cur new="" s
-    cur="$(kuma_extra_list)"
+    cur="$(kuma_extra_list)" || return 1
     for s in $cur; do
         [[ "$s" == "$src" ]] && continue
         new="${new:+$new }$s"
@@ -4419,14 +4494,29 @@ kuma_extra_remove() {
 # restriction and keep the port open to the whole internet. Because every call site
 # routes through here, the operator's extras are restored automatically after a
 # `ufw --force reset`. Idempotent (ufw dedups identical rules).
+# Testnet and devnet only (is_testnet_like reads NETWORK, which the caller loads from
+# .node-meta). On any other network, NETWORK unset included, the health port is
+# never opened: the monitor rule and the operator extras are deleted instead, and
+# the function returns 1 with a warning on stderr.
 apply_kuma_rule() {
-    local rc
+    local rc src list
+    local -a srcs
+    rc=0
     # Drop a stale open-to-Anywhere rule (and its v6 twin) for the health port, if any.
     ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 || true
-    ufw allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp
-    rc=$?
+    if ! is_testnet_like; then
+        ufw delete allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+        list="$(meta_get KUMA_EXTRA_SRC 2>/dev/null)" || list=""
+        read -r -a srcs <<< "$list" || true
+        for src in ${srcs[@]+"${srcs[@]}"}; do
+            ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+        done
+        print_warn "Health port ${TN_KUMA_PORT}/tcp stays closed: health monitoring is a testnet-only add-on (NETWORK=${NETWORK:-unset})." >&2
+        return 1
+    fi
+    ufw allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp || rc=$?
     # Layer operator-chosen sources on top of the TA baseline.
-    apply_kuma_extra_rules
+    apply_kuma_extra_rules || rc=1
     return "$rc"
 }
 
@@ -4447,12 +4537,24 @@ apply_lb_hc_rule() {
     done
 }
 
-# allow_overlay_ssh — admit SSH from the whole WireGuard overlay so the core team can
-# reach the node over the VPN even after public SSH is restricted. Idempotent.
+# allow_overlay_ssh — admit SSH from the maintainer overlay range
+# (TN_OVERLAY_ADMIN_CIDR, not the whole overlay) so the core team can reach the node
+# over the VPN even after public SSH is restricted. Deletes the older whole-overlay
+# rule first. Testnet and devnet only: on any other network it deletes both rules
+# and returns 1. Idempotent.
 allow_overlay_ssh() {
-    local port; port="$(get_ssh_port)"
-    [[ -n "$port" ]] || port=22
-    ufw allow from "${TN_OVERLAY_CIDR}" to any port "${port}" proto tcp
+    local port
+    port="$(get_ssh_port | head -n1)"
+    [[ "$port" =~ ^[0-9]+$ ]] || port=22
+    if [[ "${TN_OVERLAY_CIDR}" != "${TN_OVERLAY_ADMIN_CIDR}" ]]; then
+        ufw delete allow from "${TN_OVERLAY_CIDR}" to any port "${port}" proto tcp >/dev/null 2>&1 || true
+    fi
+    if ! is_testnet_like; then
+        ufw delete allow from "${TN_OVERLAY_ADMIN_CIDR}" to any port "${port}" proto tcp >/dev/null 2>&1 || true
+        print_warn "Overlay SSH is a testnet-only add-on (NETWORK=${NETWORK:-unset}); no overlay rule added." >&2
+        return 1
+    fi
+    ufw allow from "${TN_OVERLAY_ADMIN_CIDR}" to any port "${port}" proto tcp
 }
 
 # -----------------------------------------------------------------------------
@@ -5842,7 +5944,12 @@ prompt_testnet_addons() {
     print_info "Exposes a TCP health endpoint (port ${TN_KUMA_PORT:-43174}) probed by the"
     print_info "Association uptime monitor (${TN_KUMA_SRC:-104.155.184.201/32}) so we can alert you if your node drops."
     print_info "You can also allow your own monitoring hosts later: firewall-setup.sh -> Manage node ports."
-    if confirm "Enable the health-monitor endpoint?"; then
+    if ! ufw_installed || ! ufw_active; then
+        # The health server listens on every interface; without an active firewall the
+        # port would be open to the internet, so the option is not offered.
+        print_warn "Not offered: ufw is not active, so the health port would be reachable from the internet."
+        print_info "Run firewall-setup.sh first, then setup-observability.sh to enable health monitoring."
+    elif confirm "Enable the health-monitor endpoint?"; then
         ENABLE_HEALTHCHECK_MONITOR="true"
     fi
 
