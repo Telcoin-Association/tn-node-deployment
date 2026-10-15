@@ -447,8 +447,8 @@ const state = {
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
   setupStep: 1,
   setup: { network:'adiri', method:'source',
-           eth:'', bls:'', blsConfirm:'', buildRef:'main', dockerImage:'', publicIp:'', internalIp:'',
-           sourceMode:'main', customRef:'', sourceRef:'', sourceModeTouched:false,   // source-version picker (mirrors CLI: main/latest tag/custom)
+           eth:'', bls:'', blsConfirm:'', buildRef:'', dockerImage:'', publicIp:'', internalIp:'',
+           sourceRef:'',          // latest release tag for this network (/api/setup/defaults); the only source build offered
            rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
            rpcDomain:'',          // public RPC hostname as typed (sent normalised as rpc_domain)
            rpcDns:null,           // last wizard DNS check {host, html}, restored on re-render
@@ -3209,10 +3209,6 @@ async function loadSetupDefaults(){
   if(!s.internalIp)   s.internalIp   = d.internal_ip || '';
   if(!s.dockerImage)  s.dockerImage  = d.docker_image || '';
   if(!s.sourceRef)    s.sourceRef    = d.source_ref || '';
-  // Network-aware default (mirrors the CLI): testnet should default to the latest
-  // tagged release (main is bleeding-edge and not network-compatible). Only until
-  // the operator changes it. devnet keeps main.
-  if(!s.sourceModeTouched && s.sourceRef && isTestnetNetwork()) s.sourceMode='tag';
   if(!s.serviceUser)  s.serviceUser  = d.service_user || 'telcoin';
   if(!s.serviceGroup) s.serviceGroup = d.service_group || 'telcoin';
   if(state.view==='setup') renderSetup();   // refresh to show prefilled values
@@ -3296,34 +3292,23 @@ function stepNetwork(body){
   body.querySelectorAll('[data-net]').forEach(r=>r.addEventListener('click',()=>{state.setup.network=r.dataset.net;renderSetup();}));
 }
 
-// Source-version picker -- mirrors the CLI menu (pick_source_version): main is
-// the default, then the latest detected release tag, then custom. Sets
-// state.setup.buildRef to the effective ref the backend checks out.
+// Source version: a source build checks out a release tag only. The page offers
+// the latest release tag the server found for this network (/api/setup/defaults
+// source_ref); the server and the helper refuse anything else.
 function stepSourceField(){
-  const s = state.setup;
-  const smode = s.sourceMode || 'main';
-  const sref = s.sourceRef || '';
-  const opts = `
-    <option value="main" ${smode==='main'?'selected':''}>main — latest current version</option>
-    ${sref?`<option value="tag" ${smode==='tag'?'selected':''}>${esc(sref)} — latest release</option>`:''}
-    <option value="custom" ${smode==='custom'?'selected':''}>Custom branch / tag / commit…</option>`;
+  const sref = state.setup.sourceRef || '';
+  if(!sref){
+    return `<div class="field"><label>Source version to build</label>
+      <div class="note">No release tag was found for this network, so a source build cannot start. Check this server's connection to GitHub and reload, or choose Docker.</div></div>`;
+  }
   return `<div class="field"><label>Source version to build</label>
-      <select id="mSourceMode">${opts}</select>
-      ${smode==='custom'
-        ? `<input id="mBuildRef" style="margin-top:8px" placeholder="e.g. v0.16.0-adiri or main" value="${esc(s.customRef||'')}">`
-        : ''}</div>`;
+      <select id="mSourceMode"><option value="tag" selected>${esc(sref)} — latest release</option></select></div>`;
 }
 
-function isTestnetNetwork(){ return ['adiri','testnet'].includes(state.setup.network); }
-
-// Snapshot the source picker into state and derive the effective build ref.
+// The effective build ref: the detected release tag, or '' when there is none.
 function captureSource(){
   const s = state.setup;
-  const sel = $('#mSourceMode'); if(sel) s.sourceMode = sel.value;
-  const inp = $('#mBuildRef');   if(inp) s.customRef = inp.value.trim();
-  s.buildRef = s.sourceMode==='main' ? 'main'
-             : s.sourceMode==='tag'  ? (s.sourceRef||'')
-             : (s.customRef||'');
+  s.buildRef = s.sourceRef || '';
 }
 
 function stepMethod(body){
@@ -3346,12 +3331,10 @@ function stepMethod(body){
     if($('#mDockerImage')) state.setup.dockerImage=$('#mDockerImage').value.trim();
     state.setup.method=r.dataset.m; renderSetup();
   }));
-  // Re-render when the source-version mode changes (to show/hide the custom box).
-  const sm=$('#mSourceMode'); if(sm) sm.addEventListener('change', ()=>{ state.setup.sourceModeTouched=true; captureSource(); renderSetup(); });
   $('#methodNext').addEventListener('click', ()=>{
     if(state.setup.method==='source') captureSource();
     if($('#mDockerImage')) state.setup.dockerImage=$('#mDockerImage').value.trim();
-    if(state.setup.method==='source' && !state.setup.buildRef){ toast('Enter a source ref to build','error'); return; }
+    if(state.setup.method==='source' && !state.setup.buildRef){ toast('No release tag found to build; choose Docker or reload once GitHub is reachable','error'); return; }
     goStep(4);
   });
 }
@@ -3749,7 +3732,7 @@ function stopTracesRefresh(){ if(state.tracesTimer){ clearInterval(state.tracesT
 function versionHtml(ref){
   const base = esc(ref || '—');
   const br = state.buildInfo && state.buildInfo.exists ? (state.buildInfo.branch || '') : '';
-  if(br && br!=='main' && br!=='detached'){
+  if(br && !/^(main|detached)$/.test(br)){
     return `${base}<br><span style="font-size:11px;color:var(--text3)">branch: ${esc(br)}</span>`;
   }
   return base;
