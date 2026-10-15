@@ -2254,20 +2254,13 @@ update_migrate_ownership() {
 # the current unit, start script and encrypted credential with
 # edit-config.sh --migrate-credential before they can be updated. Reads only.
 update_legacy_refusal() {
-    local unit="/etc/systemd/system/${SERVICE_NAME}.service" msg="" method="" file=""
+    local unit="/etc/systemd/system/${SERVICE_NAME}.service" msg=""
     if tn_has_embedded_passphrase "$unit"; then
         msg="${unit} still holds the BLS passphrase."
     elif [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "tpm" ]]; then
         msg="The BLS passphrase is still sealed with the old TPM method, which these scripts no longer use."
-    else
-        method="$(meta_get INSTALL_METHOD 2>/dev/null || true)"
-        if [[ "$method" == "docker" ]]; then
-            file="$(docker_launch_file 2>/dev/null || true)"
-        else
-            file="$(tn_node_launch_target 2>/dev/null || true)"
-            file="${file##* }"
-        fi
-        [[ "$file" == *.service ]] && msg="${file} still runs the node command inline."
+    elif _tn_unit_runs_node_inline "$unit"; then
+        msg="${unit} still runs the node command inline."
     fi
     [[ -n "$msg" ]] || return 0
     msg="${msg} Move it to the current unit, start script and encrypted credential first: sudo ./edit-config.sh --migrate-credential (nothing was changed)"
@@ -2818,11 +2811,12 @@ run_json_mode() {
                 json_event error "another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})} -- wait for it to finish"
                 return 1
             fi
+            # The read-only legacy check first: a refused legacy host stays as it was.
+            if [[ "$JSON_ACTION" != "discard" ]]; then
+                update_legacy_refusal || return 1
+            fi
             update_migrate_ownership || return 1
             ;;
-    esac
-    case "$JSON_ACTION" in
-        prepare|apply) update_legacy_refusal || return 1 ;;
     esac
     local install_method
     if ! install_method=$(detect_install_method); then
@@ -2956,10 +2950,11 @@ main() {
 
     # Everything past this point can mutate node state (discard, prepare,
     # apply) -- one update at a time. See tn_acquire_update_lock. The
-    # ownership migration runs first, under the lock.
+    # ownership migration runs first, under the lock, after the read-only
+    # legacy check (a refused legacy host stays as it was).
     update_lock || exit 1
-    update_migrate_ownership || exit 1
     update_legacy_refusal || exit 1
+    update_migrate_ownership || exit 1
 
     # Handle --discard flag. A pending state that cannot be read (a symlink, a
     # wrong owner, a malformed value) can still be discarded.

@@ -7657,6 +7657,17 @@ _tn_root_file_ok() {
 # intended and, for a shell wrapper that passed bash -n, still passes it. The
 # caller owns any backup, the daemon-reload of a unit and the restart.
 
+# _tn_unit_runs_node_inline UNIT — rc 0 when the systemd unit UNIT itself holds the
+# node command (`docker run ... node ... --http` or `<binary> node ... --http` on
+# its ExecStart= line), as units from before the start scripts did. Reads only;
+# the answer does not depend on who owns the install files.
+_tn_unit_runs_node_inline() {
+    local rc=0
+    [[ -f "${1:-}" ]] || return 1
+    _tn_launch_awk runner "$1" >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 10 ]]
+}
+
 # _tn_launch_is_unit FILE — rc 0 when FILE is a systemd unit (name ends in .service).
 _tn_launch_is_unit() {
     [[ "${1:-}" == *.service ]]

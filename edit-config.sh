@@ -656,14 +656,16 @@ edit_lock() {
         return 1
     fi
     EDIT_LOCK_HELD=true
-    if ! edit_migrate_ownership; then
+    # The legacy check reads only, and runs before the ownership migration, so a
+    # refused legacy host is left exactly as it was.
+    local reason
+    if [[ "$EDIT_LEGACY_OK" != "true" ]] && reason="$(edit_legacy_reason)"; then
+        edit_error "${reason}; move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)"
         edit_release_lock
         EDIT_LOCK_HELD=false
         return 1
     fi
-    local reason
-    if [[ "$EDIT_LEGACY_OK" != "true" ]] && reason="$(edit_legacy_reason)"; then
-        edit_error "${reason}; move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)"
+    if ! edit_migrate_ownership; then
         edit_release_lock
         EDIT_LOCK_HELD=false
         return 1
@@ -1974,8 +1976,8 @@ edit_legacy_reason() {
         printf '%s\n' "${TARGET_SERVICE_FILE} holds the BLS passphrase"
     elif [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "tpm" ]]; then
         printf '%s\n' "the BLS passphrase is sealed with the old TPM method"
-    elif [[ "${TARGET_LAUNCH_FILE:-}" == *.service ]]; then
-        printf '%s\n' "${TARGET_LAUNCH_FILE} runs the node command inline"
+    elif _tn_unit_runs_node_inline "$TARGET_SERVICE_FILE"; then
+        printf '%s\n' "${TARGET_SERVICE_FILE} runs the node command inline"
     else
         return 1
     fi

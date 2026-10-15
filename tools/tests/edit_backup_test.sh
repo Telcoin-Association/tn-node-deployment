@@ -86,6 +86,18 @@ edit_unlock
 edit_lock
 edit_unlock
 check "migration: runs once per run" "1" "$MIGRATE_CALLS"
+# A legacy unit is refused before the ownership migration runs: nothing changes.
+SAVED_TSF="$TARGET_SERVICE_FILE"
+for legacy_unit in 'Environment="TN_BLS_PASSPHRASE=x"
+ExecStart=/usr/local/libexec/telcoin/tn-start' 'ExecStart=/opt/telcoin/telcoin-network node --datadir /var/lib/telcoin --http'; do
+    printf '[Service]\n%s\n' "$legacy_unit" > "$T/legacy.service"
+    TARGET_SERVICE_FILE="$T/legacy.service"
+    MIGRATE_CALLS=0
+    EDIT_OWNERSHIP_DONE=false
+    rc=0; edit_lock 2>/dev/null || rc=$?
+    check "legacy unit (${legacy_unit%%=*}): refused before the ownership migration" "1 0 false" "${rc} ${MIGRATE_CALLS} ${EDIT_LOCK_HELD}"
+done
+TARGET_SERVICE_FILE="$SAVED_TSF"
 unset -f tn_migrate_ownership
 
 # -----------------------------------------------------------------------------
