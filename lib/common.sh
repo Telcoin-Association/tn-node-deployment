@@ -380,6 +380,267 @@ command_exists() {
 }
 
 # -----------------------------------------------------------------------------
+# ROOT-OWNED WRITES
+# -----------------------------------------------------------------------------
+#
+# Primitives for files root writes in places no other account can redirect.
+# Return codes: 0 done; 1 refused, nothing changed; 2 an I/O or runtime
+# failure, nothing changed (the destination untouched, no temp file left).
+# Messages go to stderr and never carry file contents. They assume GNU
+# coreutils and util-linux (the Linux node); where a tool lacks an option used
+# here (busybox has no `cp --no-preserve`), the helper fails closed.
+
+# tn_root_dir_ok DIR -- rc 0 when DIR is an absolute path and DIR and every
+# parent up to / is a real directory (not a symlink), owned by uid 0 and neither
+# group- nor other-writable. A path with a "." or ".." component is refused.
+# Reads only; prints nothing.
+tn_root_dir_ok() {
+    local d="${1:-}" st uid mode
+    [[ "$d" == /* ]] || return 1
+    case "/${d}/" in
+        */./*|*/../*) return 1 ;;
+    esac
+    while :; do
+        while [[ "$d" == */ && "$d" != / ]]; do
+            d="${d%/}"
+        done
+        [[ -L "$d" ]] && return 1
+        [[ -d "$d" ]] || return 1
+        st="$(stat -c '%u %a' -- "$d" 2>/dev/null)" || return 1
+        uid="${st%% *}"
+        mode="${st##* }"
+        [[ "$uid" == 0 && "$mode" =~ ^[0-7]+$ ]] || return 1
+        # The last two octal digits are group and other; 2, 3, 6 and 7 carry w.
+        case "$mode" in
+            *[2367]?|*[2367]) return 1 ;;
+        esac
+        [[ "$d" == / ]] && return 0
+        d="${d%/*}"
+        [[ -n "$d" ]] || d=/
+    done
+}
+
+# tn_write_root_file DEST MODE [GROUP] -- write stdin to DEST, owned
+# root:GROUP (default root) with MODE. The content goes to a temp file in
+# DEST's directory (mktemp: 0600 root while it is written), which gets its owner
+# and mode and then replaces DEST in one rename (mv -fT). Readers see the old
+# file or the new one, never a partial one, and rename(2) replaces the name
+# without following it. Refused (rc 1): DEST not an absolute file path, DEST a
+# directory or a symlink, MODE not 3 or 4 octal digits, GROUP not a plain group
+# name, DEST's directory failing tn_root_dir_ok. rc 2: mktemp, the write, chown,
+# chmod or the rename failed; DEST is untouched and the temp file removed.
+tn_write_root_file() {
+    local dest="${1:-}" mode="${2:-}" group="${3:-root}" dir tmp
+    if [[ "$dest" != /* || "$dest" == */ ]]; then
+        print_warn "tn_write_root_file: refusing '${dest}': not an absolute file path" >&2
+        return 1
+    fi
+    if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+        print_warn "tn_write_root_file: refusing mode '${mode}' for ${dest}" >&2
+        return 1
+    fi
+    if [[ ! "$group" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+        print_warn "tn_write_root_file: refusing group '${group}' for ${dest}" >&2
+        return 1
+    fi
+    if [[ -L "$dest" || -d "$dest" ]]; then
+        print_warn "tn_write_root_file: refusing ${dest}: it is a symlink or a directory" >&2
+        return 1
+    fi
+    dir="${dest%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if ! tn_root_dir_ok "$dir"; then
+        print_warn "tn_write_root_file: refusing ${dest}: ${dir} or a parent is not a root-owned, root-only-writable directory" >&2
+        return 1
+    fi
+    tmp="$(mktemp "${dir}/.tn.XXXXXX" 2>/dev/null)" || tmp=""
+    if [[ -z "$tmp" || ! -f "$tmp" ]]; then
+        print_warn "tn_write_root_file: cannot create a temp file in ${dir}" >&2
+        return 2
+    fi
+    if ! cat > "$tmp" \
+        || ! chown -- "root:${group}" "$tmp" \
+        || ! chmod -- "$mode" "$tmp" \
+        || ! mv -f -T -- "$tmp" "$dest"; then
+        rm -f -- "$tmp"
+        print_warn "tn_write_root_file: writing ${dest} failed; it is unchanged" >&2
+        return 2
+    fi
+    return 0
+}
+
+# tn_backup_file SRC [NAME] -- copy SRC into the root-only backup directory and
+# print "<backup-path> <sha256>" on stdout (split it with ${out% *} and
+# ${out##* }). The directory is TN_BACKUP_DIR (default /var/backups/telcoin),
+# created 0700 when absent. The copy is a new 0600 root file made with
+# `cp --no-preserve=all` under umask 077, so SRC's owner, mode and timestamps
+# are not carried over. NAME (default SRC's file name) starts the backup's file
+# name; every character outside A-Z a-z 0-9 . _ - (a "/" included) becomes "_".
+# Refused (rc 1): SRC a symlink or not a regular file; the backup directory not
+# absolute, a symlink, not owned by root, not mode 0700, or failing
+# tn_root_dir_ok. rc 2: creating the directory, the copy or the hash failed
+# (no partial backup is left).
+tn_backup_file() {
+    local src="${1:-}" name="${2:-}" bdir="${TN_BACKUP_DIR:-/var/backups/telcoin}" st tmp sum
+    if [[ -L "$src" || ! -f "$src" ]]; then
+        print_warn "tn_backup_file: refusing '${src}': not a regular file (or a symlink)" >&2
+        return 1
+    fi
+    [[ -n "$name" ]] || name="${src##*/}"
+    name="${name//[^A-Za-z0-9._-]/_}"
+    while [[ "$bdir" == */ && "$bdir" != / ]]; do
+        bdir="${bdir%/}"
+    done
+    if [[ "$bdir" != /* || -L "$bdir" ]]; then
+        print_warn "tn_backup_file: refusing backup directory '${bdir}': not absolute, or a symlink" >&2
+        return 1
+    fi
+    if [[ ! -e "$bdir" ]]; then
+        # umask 077 covers the parents -p creates; -m sets the leaf.
+        # shellcheck disable=SC2174
+        if ! ( umask 077; mkdir -p -m 0700 -- "$bdir" ); then
+            print_warn "tn_backup_file: cannot create ${bdir}" >&2
+            return 2
+        fi
+    fi
+    st="$(stat -c '%u %a' -- "$bdir" 2>/dev/null)" || st=""
+    if [[ "$st" != "0 700" ]] || ! tn_root_dir_ok "$bdir"; then
+        print_warn "tn_backup_file: refusing backup directory ${bdir}: it must be a root-owned 0700 directory under root-owned parents" >&2
+        return 1
+    fi
+    tmp="$(mktemp "${bdir}/${name}.XXXXXX" 2>/dev/null)" || tmp=""
+    if [[ -z "$tmp" || ! -f "$tmp" ]]; then
+        print_warn "tn_backup_file: cannot create a backup file in ${bdir}" >&2
+        return 2
+    fi
+    if ! ( umask 077; cp --no-preserve=all -- "$src" "$tmp" ); then
+        rm -f -- "$tmp"
+        print_warn "tn_backup_file: copying ${src} failed; no backup was made" >&2
+        return 2
+    fi
+    sum="$(sha256sum < "$tmp" 2>/dev/null)" || sum=""
+    sum="${sum%% *}"
+    if [[ ! "$sum" =~ ^[0-9a-f]{64}$ ]]; then
+        rm -f -- "$tmp"
+        print_warn "tn_backup_file: hashing the copy of ${src} failed; no backup was made" >&2
+        return 2
+    fi
+    printf '%s %s\n' "$tmp" "$sum"
+}
+
+# tn_restore_backup BACKUP SHA256 DEST MODE [GROUP] -- put a backup made by
+# tn_backup_file back: when BACKUP still hashes to SHA256, write it to DEST via
+# tn_write_root_file (same MODE, GROUP and return codes). Refused (rc 1): a hash
+# mismatch, SHA256 not 64 lowercase hex digits, BACKUP a symlink or not a
+# regular file, or BACKUP's directory failing tn_root_dir_ok (so nobody can swap
+# the file between the hash and the write). DEST is untouched on refusal.
+tn_restore_backup() {
+    local backup="${1:-}" want="${2:-}" dest="${3:-}" mode="${4:-}" group="${5:-root}" bdir got
+    if [[ -L "$backup" || ! -f "$backup" ]]; then
+        print_warn "tn_restore_backup: refusing '${backup}': not a regular file (or a symlink)" >&2
+        return 1
+    fi
+    if [[ ! "$want" =~ ^[0-9a-f]{64}$ ]]; then
+        print_warn "tn_restore_backup: refusing ${backup}: the expected sha256 is malformed" >&2
+        return 1
+    fi
+    bdir="${backup%/*}"
+    [[ -n "$bdir" ]] || bdir=/
+    if [[ "$backup" != /* ]] || ! tn_root_dir_ok "$bdir"; then
+        print_warn "tn_restore_backup: refusing ${backup}: its directory is not root-owned and root-only-writable" >&2
+        return 1
+    fi
+    got="$(sha256sum < "$backup" 2>/dev/null)" || got=""
+    got="${got%% *}"
+    if [[ "$got" != "$want" ]]; then
+        print_warn "tn_restore_backup: refusing ${backup}: its sha256 does not match; ${dest} is unchanged" >&2
+        return 1
+    fi
+    tn_write_root_file "$dest" "$mode" "$group" < "$backup"
+}
+
+# tn_install_root_binary SRC DEST -- install SRC as DEST, root:root 0755:
+# `install` to DEST.new.<pid> in DEST's directory, then one rename over DEST
+# (mv -fT). Refused (rc 1): SRC a symlink or not a regular file, DEST not an
+# absolute file path, DEST a symlink or a directory, or DEST's directory failing
+# tn_root_dir_ok. rc 2: install or the rename failed; DEST is untouched and the
+# .new file removed.
+tn_install_root_binary() {
+    local src="${1:-}" dest="${2:-}" dir new
+    if [[ -L "$src" || ! -f "$src" ]]; then
+        print_warn "tn_install_root_binary: refusing '${src}': not a regular file (or a symlink)" >&2
+        return 1
+    fi
+    if [[ "$dest" != /* || "$dest" == */ || -L "$dest" || -d "$dest" ]]; then
+        print_warn "tn_install_root_binary: refusing '${dest}': not an absolute file path, or a symlink or directory" >&2
+        return 1
+    fi
+    dir="${dest%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if ! tn_root_dir_ok "$dir"; then
+        print_warn "tn_install_root_binary: refusing ${dest}: ${dir} or a parent is not a root-owned, root-only-writable directory" >&2
+        return 1
+    fi
+    new="${dest}.new.$$"
+    rm -f -- "$new"
+    if ! install -o root -g root -m 0755 -- "$src" "$new" \
+        || ! mv -f -T -- "$new" "$dest"; then
+        rm -f -- "$new"
+        print_warn "tn_install_root_binary: installing ${dest} failed; it is unchanged" >&2
+        return 2
+    fi
+    return 0
+}
+
+# tn_as_service_user CMD [ARG...] -- run CMD as SERVICE_USER:SERVICE_GROUP with
+# no supplementary groups and no_new_privs set, without TN_BLS_PASSPHRASE in its
+# environment, and return its exit code. Uses `setpriv --reuid --regid
+# --clear-groups --no-new-privs`, or `runuser -u -g` where setpriv is missing
+# (runuser does not set no_new_privs). The arguments pass through as separate
+# words; nothing re-joins them into a shell string. rc 126 without running
+# anything: no CMD, SERVICE_USER empty, unknown, malformed or uid 0, the group
+# unknown or gid 0, or neither tool installed. SERVICE_GROUP defaults to the
+# user's primary group.
+tn_as_service_user() {
+    local u="${SERVICE_USER:-}" g="${SERVICE_GROUP:-}" uid gid
+    if [[ $# -eq 0 ]]; then
+        print_warn "tn_as_service_user: no command given" >&2
+        return 126
+    fi
+    if [[ ! "$u" =~ ^[A-Za-z_][A-Za-z0-9_.-]*[$]?$ ]]; then
+        print_warn "tn_as_service_user: refusing service user '${u}'" >&2
+        return 126
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || uid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ ]]; then
+        print_warn "tn_as_service_user: refusing service user '${u}': unknown or root" >&2
+        return 126
+    fi
+    [[ -n "$g" ]] || g="$(id -gn "$u" 2>/dev/null)" || g=""
+    if [[ "$g" =~ ^[0-9]+$ ]]; then
+        gid="$g"
+    elif [[ "$g" =~ ^[A-Za-z_][A-Za-z0-9_.-]*[$]?$ ]]; then
+        gid="$(getent group "$g" 2>/dev/null | cut -d: -f3)" || gid=""
+    else
+        gid=""
+    fi
+    if [[ ! "$gid" =~ ^[0-9]+$ || "$gid" =~ ^0+$ ]]; then
+        print_warn "tn_as_service_user: refusing service group '${g}': unknown or root" >&2
+        return 126
+    fi
+    if command -v setpriv >/dev/null 2>&1; then
+        env -u TN_BLS_PASSPHRASE setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- "$@"
+        return
+    fi
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$u" -g "$g" -- env -u TN_BLS_PASSPHRASE "$@"
+        return
+    fi
+    print_warn "tn_as_service_user: neither setpriv nor runuser is installed" >&2
+    return 126
+}
+
+# -----------------------------------------------------------------------------
 # INPUT VALIDATION HELPERS
 # -----------------------------------------------------------------------------
 
@@ -488,6 +749,46 @@ validate_docker_image() {
     [[ "$img" == *:* ]] || return 1
     [[ "$img" =~ ^[A-Za-z0-9._/:@-]+$ ]] || return 1
     return 0
+}
+
+# tn_passphrase_ok VALUE [NETWORK] -- rc 0 when VALUE can be a BLS key
+# passphrase: not empty, no CR or LF anywhere, and no whitespace at either end.
+# Whitespace here is the six ASCII characters space, tab, LF, VT, FF and CR
+# (the C locale's [[:space:]]); the node's stdin reader trims trailing
+# whitespace, so such a value would not round-trip. With NETWORK mainnet the
+# value must also be at least 16 bytes long: bytes, not characters (counted
+# with LC_ALL=C wc -c), so a multibyte character counts once per byte. Any
+# other NETWORK gets the base rules only. Prints nothing; the value stays in
+# builtins and never reaches a command line.
+tn_passphrase_ok() {
+    local v="${1-}" net="${2:-}" ws n
+    ws=$' \t\n\v\f\r'
+    [[ -n "$v" ]] || return 1
+    case "$v" in
+        *$'\n'*|*$'\r'*) return 1 ;;
+        ["$ws"]*|*["$ws"]) return 1 ;;
+    esac
+    if [[ "$net" == mainnet ]]; then
+        n="$(printf '%s' "$v" | LC_ALL=C wc -c)" || return 1
+        n="${n//[!0-9]/}"
+        [[ -n "$n" ]] || return 1
+        (( n >= 16 )) || return 1
+    fi
+    return 0
+}
+
+# tn_release_tag_ok NETWORK TAG -- rc 0 when TAG is a release tag of NETWORK:
+# testnet vX.Y.Z-adiri, mainnet vX.Y.Z (X, Y and Z digits; nothing before or
+# after). Any other NETWORK, devnet included, is rc 1. The one place that says
+# which tags the source picker, the updater and the Docker tag filter accept.
+tn_release_tag_ok() {
+    local net="${1:-}" tag="${2:-}" re
+    case "$net" in
+        testnet) re='^v[0-9]+\.[0-9]+\.[0-9]+-adiri$' ;;
+        mainnet) re='^v[0-9]+\.[0-9]+\.[0-9]+$' ;;
+        *) return 1 ;;
+    esac
+    [[ "$tag" =~ $re ]]
 }
 
 # -----------------------------------------------------------------------------
@@ -1367,6 +1668,61 @@ select_install_method() {
     print_ok "Install method: ${INSTALL_METHOD}"
 }
 
+# tn_cargo_features_for NETWORK -- print the cargo feature flags a source build
+# for NETWORK needs: "--features adiri" for testnet, nothing for mainnet (rc 0).
+# rc 1 and no output for anything else, devnet and an empty value included, so
+# a caller never falls into a default build.
+tn_cargo_features_for() {
+    case "${1:-}" in
+        testnet) printf '%s\n' "--features adiri" ;;
+        mainnet) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# tn_detect_network [META] -- print testnet or mainnet for this node.
+# NETWORK in META (default: node_meta_path) decides when the key is present:
+# testnet and mainnet print; any other value (devnet, empty, a typo) is rc 1; a
+# key listed more than once (meta_get rc 2) is rc 1 with no fallback. Without
+# the key, the chain id in <data-dir>/genesis/genesis.yaml decides: 487
+# mainnet, 2017 testnet, anything else or no readable genesis rc 1. The data
+# dir is META's DATA_DIR when that directory exists (honouring TN_ROOT_PREFIX),
+# else tn_resolve_data_dir; no caller global is read. Reads files only, builds
+# and runs nothing. A reason goes to stderr on rc 1.
+tn_detect_network() {
+    local meta="${1:-}" net rc dd id
+    if [[ -z "$meta" ]]; then
+        meta="$(node_meta_path 2>/dev/null)" || meta=""
+    fi
+    if [[ -n "$meta" ]]; then
+        rc=0
+        net="$(meta_get NETWORK "$meta")" || rc=$?
+        case "$rc" in
+            0)
+                case "$net" in
+                    testnet|mainnet) printf '%s\n' "$net"; return 0 ;;
+                esac
+                print_warn "tn_detect_network: NETWORK='${net}' in ${meta} is neither testnet nor mainnet" >&2
+                return 1
+                ;;
+            1) ;;
+            *) return 1 ;;
+        esac
+    fi
+    dd=""
+    if [[ -n "$meta" ]]; then
+        dd="$(_tn_meta_data_dir "$meta")" || dd=""
+    fi
+    [[ -n "$dd" ]] || dd="$(tn_resolve_data_dir)"
+    id="$(tn_genesis_chain_id "${dd}/genesis/genesis.yaml")" || id=""
+    case "$id" in
+        "$MAINNET_CHAIN_ID") printf 'mainnet\n'; return 0 ;;
+        "$TESTNET_CHAIN_ID") printf 'testnet\n'; return 0 ;;
+    esac
+    print_warn "tn_detect_network: no NETWORK in .node-meta, and the chain id of ${dd}/genesis/genesis.yaml (${id:-unreadable}) is neither ${MAINNET_CHAIN_ID} nor ${TESTNET_CHAIN_ID}" >&2
+    return 1
+}
+
 # -----------------------------------------------------------------------------
 # CHAIN CONFIG FILES
 # -----------------------------------------------------------------------------
@@ -1432,6 +1788,18 @@ ensure_chain_configs_available() {
 # -----------------------------------------------------------------------------
 # SYSTEMD SERVICE
 # -----------------------------------------------------------------------------
+
+# tn_start_script_path METHOD -- print the root-owned start script the node unit
+# runs for an install METHOD: /usr/local/libexec/telcoin/tn-start for source and
+# release installs, /usr/local/libexec/telcoin/tn-start-docker for docker. rc 1
+# and no output for any other method.
+tn_start_script_path() {
+    case "${1:-}" in
+        source|release) printf '%s\n' "/usr/local/libexec/telcoin/tn-start" ;;
+        docker)         printf '%s\n' "/usr/local/libexec/telcoin/tn-start-docker" ;;
+        *) return 1 ;;
+    esac
+}
 
 write_systemd_service() {
     local service_name="$1"
@@ -3158,12 +3526,24 @@ node_meta_path() {
 # meta_get <key> [file] — echo KEY's value (everything after the first '='). Returns
 # 1 (and echoes nothing) if the key/file is absent. Default file = node_meta_path.
 # One trailing CR is dropped, so a .node-meta saved with CRLF line endings reads
-# NETWORK=testnet, not "testnet\r".
+# NETWORK=testnet, not "testnet\r". A key on more than one line has no single
+# value: meta_get then prints nothing on stdout, warns on stderr naming the key
+# and the file, and returns 2. Callers that treat any non-zero rc as "absent"
+# get no value either way.
 meta_get() {
-    local key="${1:-}" file="${2:-}" line cr
+    local key="${1:-}" file="${2:-}" line cr n
     cr=$'\r'
     [[ -n "$file" ]] || file="$(node_meta_path)" || return 1
     [[ -f "$file" ]] || return 1
+    n="$(grep -c -E "^${key}=" "$file" 2>/dev/null)" || true
+    case "$n" in
+        ""|0) return 1 ;;
+        1) ;;
+        *)
+            print_warn "meta_get: ${key} is set ${n} times in ${file}; using none of them (remove the extra lines)" >&2
+            return 2
+            ;;
+    esac
     line="$(grep -m1 -E "^${key}=" "$file" 2>/dev/null)" || return 1
     [[ -n "$line" ]] || return 1
     line="${line%"$cr"}"
