@@ -41,6 +41,13 @@ allowed "whitespace refused" 1 "${R}@sha256:${D64} --privileged"
 allowed "mainnet has no repository yet" 1 "${R}@sha256:${D64}" mainnet
 allowed "devnet has no repository yet" 1 "${R}@sha256:${D64}" devnet
 allowed "default image is allowed" 0 "$DEFAULT_DOCKER_IMAGE"
+GH="ghcr.io/telcoin-association/telcoin-network"
+allowed "testnet: the release workflow's repository by digest accepted" 0 "${GH}@sha256:${D64}"
+allowed "testnet: another ghcr.io repository refused" 1 "ghcr.io/someone-else/telcoin-network@sha256:${D64}"
+allowed "testnet: a repository that only starts like an allowed one refused" 1 "${GH}-x@sha256:${D64}"
+allowed "testnet: a repository that only ends like an allowed one refused" 1 "evil.example/${GH}@sha256:${D64}"
+allowed "mainnet: the testnet repositories refused" 1 "${GH}@sha256:${D64}" mainnet
+allowed "testnet: a tag on the release workflow's repository refused by default" 1 "${GH}:v0.16.0-adiri"
 TN_DOCKER_REQUIRE_DIGEST=0
 allowed "=0: release tag accepted" 0 "${R}:v0.16.0-adiri"
 allowed "=0: latest refused" 1 "${R}:latest"
@@ -48,6 +55,8 @@ allowed "=0: devnet tag refused" 1 "${R}:v0.16.0-devnet"
 allowed "=0: hot-patch tag refused" 1 "${R}:v0.16.0-adiri-hotfix1"
 allowed "=0: mainnet-form tag refused on testnet" 1 "${R}:v0.16.0"
 allowed "=0: digest still accepted" 0 "${R}@sha256:${D64}"
+allowed "=0: release tag on the release workflow's repository accepted" 0 "${GH}:v0.16.0-adiri"
+allowed "=0: release tag on another repository refused" 1 "evil.example/adiri:v0.16.0-adiri"
 TN_DOCKER_REQUIRE_DIGEST=1
 allowed "=1: release tag refused" 1 "${R}:v0.16.0-adiri"
 unset TN_DOCKER_REQUIRE_DIGEST
@@ -59,7 +68,7 @@ check_rc "validate_docker_image: tag refused" 1 "$rc"
 # --- tn_docker_repo_for --------------------------------------------------------------
 rc=0; out="$(tn_docker_repo_for testnet 2>/dev/null)" || rc=$?
 check_rc "repo testnet" 0 "$rc"
-check "repo testnet value" "$R" "$out"
+check "repo testnet value (the default, not the list)" "$R" "$out"
 rc=0; out="$(tn_docker_repo_for mainnet 2>"$T/err")" || rc=$?
 check_rc "repo mainnet refused" 1 "$rc"
 check "repo mainnet prints nothing" "" "$out"
@@ -190,6 +199,17 @@ res "resolve: other repository by digest refused" "docker.io/library/busybox@sha
 res "resolve: other repository by tag refused" "docker.io/library/busybox:v0.17.0-adiri" 1 ""
 res "resolve: leading dash refused" "-v0.17.0-adiri" 1 ""
 res "resolve: short digest refused" "${R}@sha256:abc" 1 ""
+res "resolve: the release workflow's repository by digest taken as given" "${GH}@sha256:${D64}" 0 "${GH}@sha256:${D64} "
+res "resolve: release tag on the release workflow's repository" "${GH}:v0.17.0-adiri" 0 "${R}@sha256:${D64} v0.17.0-adiri"
+res "resolve: a third repository by digest refused" "ghcr.io/someone-else/telcoin-network@sha256:${D64}" 1 ""
+rc=0; o="$(tn_docker_resolve_ref mainnet "${GH}@sha256:${D64}" 2>/dev/null)" || rc=$?
+check "resolve: mainnet refuses the testnet repositories" "1 " "$rc $o"
+for repo in "$R" "$GH" "ghcr.io/someone-else/telcoin-network"; do
+    rc=0; tn_docker_repo_ok testnet "$repo" || rc=$?
+    check "repo_ok testnet ${repo}" "$([[ "$repo" == *someone-else* ]] && echo 1 || echo 0)" "$rc"
+done
+rc=0; tn_docker_repo_ok mainnet "$GH" || rc=$?
+check_rc "repo_ok mainnet: none yet" 1 "$rc"
 printf '%s@sha256:%s\n' "$R" "$D64" > "$REC/local.$(printf '%s' "${R}@sha256:${D64}" | tr '/:@' '___')"
 printf '%s@sha256:%s\n' "$R" "$D64" > "$REC/local.$(printf '%s' "${R}@sha256:$(printf '%s' "$D64" | tr 0 e)" | tr '/:@' '___')"
 rc=0; tn_docker_holds_digest "${R}@sha256:${D64}" || rc=$?

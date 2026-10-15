@@ -3386,35 +3386,35 @@ tn_service_user_ok() {
     return 0
 }
 
-# tn_docker_image_allowed IMAGE [NETWORK] -- rc 0 when IMAGE is NETWORK's
-# repository (tn_docker_repo_for when present, else the testnet repository) by
-# digest, <repo>@sha256:<64 hex>. A tag that passes tn_release_tag_ok is
-# accepted only with TN_DOCKER_REQUIRE_DIGEST=0 (the default, 1, refuses
-# tags). NETWORK defaults to the NETWORK global, then tn_detect_network. Refuses a leading -, any whitespace, other repositories and
-# networks without one. Prints nothing.
+# tn_docker_image_allowed IMAGE [NETWORK] -- rc 0 when IMAGE is an image of
+# NETWORK by digest, <repo>@sha256:<64 hex>, with <repo> one NETWORK's images may
+# come from (tn_docker_repo_ok: the network's repository, and on testnet those in
+# TN_TESTNET_IMAGE_REPOS). A tag that passes tn_release_tag_ok is accepted only
+# with TN_DOCKER_REQUIRE_DIGEST=0 (the default, 1, refuses tags). NETWORK
+# defaults to the NETWORK global, then tn_detect_network. Refuses a leading -,
+# any whitespace, other repositories and networks without one. Prints nothing.
 tn_docker_image_allowed() {
-    local img="${1:-}" net="${2:-}" repo="" rest
+    local img="${1:-}" net="${2:-}" repo rest
     [[ -n "$img" && "$img" != -* ]] || return 1
     [[ ! "$img" =~ [[:space:]] ]] || return 1
     [[ -n "$net" ]] || net="${NETWORK:-}"
     [[ -n "$net" ]] || net="$(tn_detect_network 2>/dev/null)" || return 1
-    if declare -F tn_docker_repo_for >/dev/null 2>&1; then
-        repo="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 1
-    elif [[ "$net" == "testnet" ]]; then
-        repo="$GAR_IMAGE_BASE"
-    fi
-    [[ -n "$repo" ]] || return 1
     case "$img" in
-        "${repo}@sha256:"*)
-            rest="${img#"${repo}@sha256:"}"
-            [[ "$rest" =~ ^[0-9a-f]{64}$ ]]
+        *@sha256:*)
+            repo="${img%%@*}"
+            rest="${img#*@sha256:}"
+            [[ "$rest" =~ ^[0-9a-f]{64}$ ]] || return 1
             ;;
-        "${repo}:"*)
+        */*:*)
             [[ "${TN_DOCKER_REQUIRE_DIGEST:-1}" == "0" ]] || return 1
-            tn_release_tag_ok "$net" "${img#"${repo}:"}"
+            repo="${img%:*}"
+            rest="${img##*:}"
+            [[ "$repo" != *@* ]] || return 1
+            tn_release_tag_ok "$net" "$rest" || return 1
             ;;
         *) return 1 ;;
     esac
+    tn_docker_repo_ok "$net" "$repo"
 }
 
 # _tn_guard_say KIND MESSAGE [progress-fn] -- hand MESSAGE to progress-fn, or
@@ -5985,14 +5985,21 @@ pick_action() {
 # that must come from a key in lib/release-keys/*.asc (see the README there).
 # Source builds run as the unprivileged build account (TN_BUILD_USER) with its
 # own toolchain from a rustup-init pinned by version and sha256; root only
-# installs the result. Docker images come from one repository per network and
-# run by digest.
+# installs the result. Docker images come from the network's repositories
+# (TN_TESTNET_IMAGE_REPOS on testnet) and run by digest.
 
 # Image repository per network (testnet: GAR_IMAGE_BASE). Which repositories
 # publish mainnet and devnet images is an open decision: while a constant is
 # empty, tn_docker_repo_for refuses that network, and so does every Docker path.
 readonly TN_MAINNET_IMAGE_REPO=""
 readonly TN_DEVNET_IMAGE_REPO=""
+
+# Every repository a testnet image may come from, space separated: the default
+# (GAR_IMAGE_BASE, which tn_docker_repo_for prints, where the registry fallback
+# and the newest-image lookup read) and the one the release workflow publishes
+# to. A signed release's IMAGE_DIGEST names one of them. Mainnet and devnet take
+# only their own constant.
+readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ghcr.io/telcoin-association/telcoin-network"
 
 # Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
 readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
@@ -6030,6 +6037,21 @@ tn_docker_repo_for() {
         return 1
     fi
     printf '%s\n' "$repo"
+}
+
+# tn_docker_repo_ok NETWORK REPO -- rc 0 when REPO is a repository NETWORK's
+# images may come from: tn_docker_repo_for's, and on testnet any repository in
+# TN_TESTNET_IMAGE_REPOS. rc 1 otherwise, and for a network without one.
+tn_docker_repo_ok() {
+    local net="${1:-}" repo="${2:-}" def
+    [[ -n "$repo" ]] || return 1
+    def="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 1
+    [[ "$repo" == "$def" ]] && return 0
+    [[ "$net" == "testnet" ]] || return 1
+    case " ${TN_TESTNET_IMAGE_REPOS} " in
+        *" ${repo} "*) return 0 ;;
+    esac
+    return 1
 }
 
 # tn_registry_digest REPO TAG -- print the manifest digest (sha256:<64 hex>) the
@@ -6399,10 +6421,11 @@ tn_fetch_verified_release() {
 
 # tn_fetch_release_image TAG NETWORK [BASE_URL] [progress-fn] -- the release's
 # image by digest: IMAGE_DIGEST from a release checked as in
-# tn_fetch_verified_release (no tarball), which must name NETWORK's repository
-# (tn_docker_image_allowed). Prints <repo>@sha256:<digest>; the staging
-# directory is removed. rc as tn_fetch_verified_release; 1 also when the image
-# is not NETWORK's.
+# tn_fetch_verified_release (no tarball), which must name a repository NETWORK's
+# images may come from (tn_docker_image_allowed: on testnet any of
+# TN_TESTNET_IMAGE_REPOS). Prints <repo>@sha256:<digest>; the staging directory
+# is removed. rc as tn_fetch_verified_release; 1 also when the image is not
+# NETWORK's.
 tn_fetch_release_image() {
     local tag="${1:-}" net="${2:-}" fn="${4:-}" stg img rc=0
     stg="$(_tn_release_fetch "$tag" "$net" "${3:-}" image "$fn")" || rc=$?
@@ -6410,7 +6433,7 @@ tn_fetch_release_image() {
     img="$(cat -- "${stg}/IMAGE_DIGEST")" || img=""
     _tn_release_cleanup "$stg"
     if ! TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$img" "$net"; then
-        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img}, which is not the ${net} image repository." "$fn"
+        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img}, which is not in a ${net} image repository these scripts accept." "$fn"
         return 1
     fi
     printf '%s\n' "$img"
@@ -6800,9 +6823,10 @@ tn_docker_image_for_tag() {
 }
 
 # tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names, by
-# digest: a release tag of NETWORK, alone or as <repo>:<tag> of NETWORK's
-# repository, resolved with tn_docker_image_for_tag; or <repo>@sha256:<digest>,
-# taken as given. Prints "<repo>@sha256:<digest> <tag>" (the tag empty for a
+# digest: a release tag of NETWORK, alone or as <repo>:<tag> of a repository
+# NETWORK's images may come from (tn_docker_repo_ok), resolved with
+# tn_docker_image_for_tag; or <repo>@sha256:<digest> of such a repository, taken
+# as given. Prints "<repo>@sha256:<digest> <tag>" (the tag empty for a
 # digest given alone). rc 1, with the reason on stderr, for anything else:
 # another repository, a tag that is not a release tag of NETWORK, latest, a
 # leading "-". Nothing is pulled.
@@ -6812,7 +6836,11 @@ tn_docker_resolve_ref() {
     case "$arg" in
         ""|-*) ;;
         *@sha256:*) img="$arg" ;;
-        "${repo}:"*) tag="${arg#"${repo}:"}" ;;
+        */*:*)
+            if [[ "${arg%:*}" != *@* ]] && tn_docker_repo_ok "$net" "${arg%:*}"; then
+                tag="${arg##*:}"
+            fi
+            ;;
         */*|*:*|*@*) ;;
         *) tag="$arg" ;;
     esac

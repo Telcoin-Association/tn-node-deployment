@@ -268,6 +268,20 @@ check_rc "IMAGE_DIGEST by tag refused" 1 "$RC"
 stage_empty "IMAGE_DIGEST by tag"
 cp "$T/img.good" "$REL/IMAGE_DIGEST"
 
+# --- image in the repository the release workflow publishes to ----------------------------------
+printf 'ghcr.io/telcoin-association/telcoin-network@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
+write_sums
+sign "$FA"
+rc=0; img="$(tn_fetch_release_image "$TAG" testnet "https://fixture.invalid/$TAG" 2>/dev/null)" || rc=$?
+check "image in ghcr.io/telcoin-association/telcoin-network: taken" "0 ghcr.io/telcoin-association/telcoin-network@sha256:${D64}" "$rc $img"
+stage_empty "ghcr repository"
+printf 'ghcr.io/someone-else/telcoin-network@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
+write_sums
+sign "$FA"
+rc=0; img="$(tn_fetch_release_image "$TAG" testnet "https://fixture.invalid/$TAG" 2>/dev/null)" || rc=$?
+check "image in a repository not in the list refused" "1 " "$rc $img"
+cp "$T/img.good" "$REL/IMAGE_DIGEST"
+
 # --- image from another repository ---------------------------------------------------------------
 printf 'evil.example/adiri@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
 write_sums
