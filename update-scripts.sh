@@ -245,10 +245,11 @@ fetch() {
 }
 
 # fetch_published_sha URL -- print the SHA-256 that URL.sha256 publishes for URL.
-# rc 0: printed a 64-hex-digit hash. rc 1: no usable sidecar (HTTP error, or the
-# first field is not a 64-hex-digit hash). rc 2: the sidecar could not be fetched
-# (network). The signed manifest is authoritative; a sidecar that exists must
-# agree with it (older updaters still read the sidecars).
+# rc 0: printed a 64-hex-digit hash. rc 1: no sidecar is published (HTTP error).
+# rc 2: the sidecar could not be fetched (network). rc 3: a sidecar is published
+# but its first field is not a 64-hex-digit hash. The signed manifest is
+# authoritative; a sidecar that exists must agree with it (older updaters still
+# read the sidecars).
 fetch_published_sha() {
     local body sha rc=0
     body="$(curl --proto '=https' --tlsv1.2 -fsSL --max-time 10 "${1}.sha256" 2>/dev/null)" || rc=$?
@@ -258,7 +259,7 @@ fetch_published_sha() {
         return 2
     fi
     sha="$(printf '%s\n' "$body" | awk 'NR == 1 {print $1}')"
-    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || return 3
     printf '%s\n' "$sha"
 }
 
@@ -319,7 +320,10 @@ bootstrap_signers() {
         return 1
     fi
     want="$(fetch_published_sha "$url")" || rc=$?
-    if [[ $rc -ne 0 ]]; then
+    if [[ $rc -eq 3 ]]; then
+        print_error "The published checksum for lib/allowed_signers in release $1 is malformed; nothing was changed."
+        return 1
+    elif [[ $rc -ne 0 ]]; then
         print_error "No checksum is published for lib/allowed_signers in release $1; nothing was changed."
         return 1
     fi
@@ -539,6 +543,10 @@ stage_files() {
         side="$(fetch_published_sha "$url")" || rc=$?
         if [[ $rc -eq 2 ]]; then
             echo -e "${RED}FAILED${RESET}  (checksum download error)"
+            return 1
+        fi
+        if [[ $rc -eq 3 ]]; then
+            echo -e "${RED}FAILED${RESET}  (its published .sha256 is malformed)"
             return 1
         fi
         if [[ $rc -eq 0 && "$side" != "$want" ]]; then

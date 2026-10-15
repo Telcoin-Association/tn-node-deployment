@@ -259,6 +259,14 @@ install_release "$R1"
 refused "stale sidecar"
 says "stale sidecar" "FAILED  (its .sha256 disagrees with the signed manifest)"
 
+# --- a published sidecar that is not a hash -----------------------------------------------
+Z="$SRC/sidecarbad"; cp -R "$R2" "$Z"
+printf 'not-a-hash  setup-node.sh\n' > "$Z/setup-node.sh.sha256"
+publish "$Z" scripts-v1.1.0
+install_release "$R1"
+refused "malformed sidecar"
+says "malformed sidecar" "FAILED  (its published .sha256 is malformed)"
+
 # --- lower serial -------------------------------------------------------------------------
 install_release "$R2"
 publish "$R1" scripts-v1.0.0
@@ -378,6 +386,14 @@ printf '%s  lib/allowed_signers\n' "$(_h "$R1/setup-node.sh")" > "$G/lib/allowed
 publish "$G" scripts-v1.1.0
 refused "bootstrap: signer sidecar mismatch"
 says "bootstrap: signer sidecar mismatch" "does not match its published checksum"
+
+install_release "$R1"
+rm -f "$INST/MANIFEST" "$INST/MANIFEST.sig" "$INST/lib/allowed_signers"
+H="$SRC/bootmalformed"; cp -R "$R2" "$H"
+printf 'nothash  lib/allowed_signers\n' > "$H/lib/allowed_signers.sha256"
+publish "$H" scripts-v1.1.0
+refused "bootstrap: malformed signer sidecar"
+says "bootstrap: malformed signer sidecar" "The published checksum for lib/allowed_signers in release scripts-v1.1.0 is malformed"
 
 install_release "$R1"
 rm -f "$INST/lib/allowed_signers"
