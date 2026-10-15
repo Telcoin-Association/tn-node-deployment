@@ -564,6 +564,14 @@ check_lacks "the dashboard password never reaches an argument" "a-dashboard-pass
 refused "caddy-enable without a password on stdin" caddy-enable node7.example.org admin < /dev/null
 printf 'short-pass\n' > "$T/caddy-short"
 refused "caddy-enable with a password under 16 characters" caddy-enable node7.example.org admin < "$T/caddy-short"
+printf 'fifteen-chars!!\n' > "$T/caddy-15"
+refused "caddy-enable with a 15-character password" caddy-enable node7.example.org admin < "$T/caddy-15"
+printf 'a-dashboard\tpassword-1\n' > "$T/caddy-tab"
+refused "caddy-enable with a tab in the password" caddy-enable node7.example.org admin < "$T/caddy-tab"
+printf 'sixteen-chars-ok\n' > "$T/caddy-16"
+t="$(trace caddy-enable node7.example.org admin < "$T/caddy-16")"
+check_has "caddy-enable accepts a 16-character password" \
+    "install-caddy [--json] [--phase=enable] [--domain] [node7.example.org] [--username] [admin]" "$t"
 
 # ---- rpc-enable argv shapes ---------------------------------------------------------
 fixture none

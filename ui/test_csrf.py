@@ -314,12 +314,28 @@ class SecretStreamTest(ServerTestCase):
             self.engine_json(sec), 'a\\"b\\\\c\\u0009d\u00e9']), [sec])
         self.assertEqual(out, "|".join(["***"] * 5))
 
-    def test_short_caddy_password_is_refused(self):
-        resp = self.client.post("/api/caddy/enable",
+    def caddy_enable(self, pw):
+        return self.client.post("/api/caddy/enable", buffered=True,
                                 json={"domain": "dashboard.example.com", "username": "admin",
-                                      "password": "fifteen-chars!!"})
-        self.assertEqual(resp.status_code, 400)
+                                      "password": pw})
+
+    def test_short_caddy_password_is_refused(self):
+        for pw, message in (("fifteen-chars!!", "at least 16 characters"),
+                            ("", "at least 16 characters"),
+                            ("\u00e9" * 7 + "x", "at least 16 characters"),   # 15 bytes
+                            ("sixteen-chars\tok", "control characters"),
+                            ("sixteen-chars-ok\n", "control characters")):
+            with self.subTest(pw=pw):
+                resp = self.caddy_enable(pw)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn(message, resp.get_json()["error"])
         self.assertEqual(self.procs, [])
+
+    def test_sixteen_byte_caddy_password_reaches_the_helper(self):
+        for pw in ("sixteen-chars-ok", "\u00e9" * 8):
+            with self.subTest(pw=pw):
+                self.assertEqual(self.caddy_enable(pw).status_code, 200)
+                self.assertEqual(self.procs[-1].stdin.data, pw + "\n")
 
 
 class PassphraseRuleTest(unittest.TestCase):

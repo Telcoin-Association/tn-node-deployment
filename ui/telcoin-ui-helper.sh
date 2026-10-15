@@ -973,7 +973,13 @@ cmd_caddy_enable() {
     [[ -n "$username" && "$username" =~ ^[A-Za-z0-9._-]{2,32}$ ]] || die "invalid username"
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
     read_secret || die "the dashboard password must arrive on stdin"
-    [[ ${#SECRET} -ge 16 ]] || die "the dashboard password must be at least 16 characters"
+    # install-caddy.sh's rule: at least 16 bytes, no control characters.
+    local n
+    n="$(printf '%s' "$SECRET" | LC_ALL=C wc -c | tr -d ' ')"
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 16 )) || die "the dashboard password must be at least 16 characters"
+    case "$SECRET" in
+        *[[:cntrl:]]*) die "the dashboard password must not contain control characters" ;;
+    esac
     local -a args=( --json --phase=enable --domain "$domain" --username "$username" )
     [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
     if grep -q -- '--password-stdin' "$CADDY_SCRIPT" 2>/dev/null; then

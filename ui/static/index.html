@@ -2622,7 +2622,9 @@ async function caddyEnable(){
   if(rpc.enabled && sameHost(domain, rpc.domain)) return toast('That hostname serves the public RPC endpoint. Use dashboard.'+normHost(rpc.domain)+' instead.','error');
   if(!CADDY_USER_RE.test(username)) return toast('Username: 2–32 chars (letters, digits, . _ -)','error');
   if(publicIp && !setupValidIp(publicIp)) return toast('Enter a valid inbound public IP, or leave it blank','error');
-  if(pw.length<16) return toast('Password must be at least 16 characters','error');
+  // install-caddy.sh's rule: at least 16 bytes in UTF-8 (16 plain ASCII characters), no control characters.
+  if(new TextEncoder().encode(pw).length<16) return toast('The dashboard password must be at least 16 characters','error');
+  if(/[\x00-\x1f\x7f-\x9f]/.test(pw)) return toast('The dashboard password must not contain control characters (such as a tab)','error');
   if(pw!==pw2) return toast('Passwords do not match','error');
   const btn=$('#caddyEnable'); if(btn) btn.disabled=true;
   const log=$('#caddyLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» enabling external access… (the TLS certificate is issued on the first request — keep this tab open)</div>'; }

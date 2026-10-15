@@ -4222,6 +4222,22 @@ def api_caddy_dns_check():
     return jsonify(res)
 
 
+# install-caddy.sh's dashboard password rule (CADDY_PASSWORD_MIN): at least 16
+# bytes in UTF-8, so 16 characters of plain ASCII, and no control characters.
+CADDY_PASSWORD_MIN = 16
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def caddy_password_error(password):
+    """Why `password` cannot be the dashboard password, or None when it can."""
+    if len(password.encode("utf-8")) < CADDY_PASSWORD_MIN:
+        return f"the dashboard password must be at least {CADDY_PASSWORD_MIN} characters"
+    if _CONTROL_RE.search(password):
+        return ("the dashboard password must not contain control characters "
+                "(such as a tab or a line break)")
+    return None
+
+
 @app.route("/api/caddy/enable", methods=["POST"])
 def api_caddy_enable():
     data, err = _json_body()
@@ -4236,10 +4252,9 @@ def api_caddy_enable():
             "dashboard hostname", domain, "dashboard.node7.example.com")}), 400
     if not _CADDY_USER_RE.match(username):
         return jsonify({"error": "invalid username (2-32 chars: letters, digits, . _ -)"}), 400
-    if len(password) < 16:
-        return jsonify({"error": "password too short (min 16 chars)"}), 400
-    if "\n" in password or "\r" in password:
-        return jsonify({"error": "the password cannot contain a line break"}), 400
+    pw_err = caddy_password_error(password)
+    if pw_err:
+        return jsonify({"error": pw_err}), 400
     if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
         return jsonify({"error": "invalid public IP"}), 400
     cmd = ["sudo", "-n", HELPER, "caddy-enable", domain, username]
