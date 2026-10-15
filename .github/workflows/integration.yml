@@ -25,6 +25,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      # P0-09 checks the logrotate files with logrotate -d; P0-16 needs ufw and
+      # sshd. A package already on the image is left as it is.
+      - name: Install the tools the assertions use
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends logrotate ufw openssh-server
       - name: Run tools/tests/vm.d as root
         run: |
           fail=0
