@@ -4,7 +4,9 @@
 # fails tn_passphrase_ok stops the run before the root check (so before any write),
 # TN_BLS_PASSPHRASE is dropped from setup's own environment before anything runs, keytool
 # gets the passphrase on stdin only, and keygen keeps only a wrapped key (bls.kw). Also:
-# a SIGTERM ends a --json run with a done event that names it.
+# a SIGTERM ends a --json run with a done event that names it; --network mainnet sets
+# the network for the run and applies the mainnet passphrase rule; finalize refuses empty listeners
+# (Docker included) before it writes anything.
 #
 # A copy of setup-node.sh without its last line (`main "$@"`) is sourced at the top level
 # (the lib is linked beside it), then the steps that touch the host are replaced: the
@@ -225,6 +227,43 @@ printf 'short-pass\nshort-pass\nlong-enough-pass-16\nlong-enough-pass-16\n' > "$
 check_rc "prompt mainnet: rc" 0 "$(prompt "$T/in" mainnet)"
 check "prompt mainnet: short one asked again" "long-enough-pass-16" "$(cat "$REC/prompt")"
 check_rc "prompt: end of input stops" 1 "$(prompt /dev/null testnet)"
+
+# ---- --network mainnet: recorded, and the mainnet passphrase rule applies -----------------
+check "mainnet: json_set_network" "mainnet 487" "$( json_set_network mainnet; printf '%s %s' "$NETWORK" "$CHAIN_ID" )"
+KGM=()
+for a in "${KG[@]}"; do
+    if [[ "$a" == testnet ]]; then KGM+=(mainnet); else KGM+=("$a"); fi
+done
+reset
+printf 'abcdefghijklmno\n' > "$T/in"
+refused "mainnet: a 15-byte passphrase" "$T/in" "${KGM[@]}" --passphrase-stdin
+check_has "mainnet: the 16-byte rule is named" "yes" "$(grep -q '16' "$T/out" && echo yes)"
+reset
+printf 'abcdefghijklmnop\n' > "$T/in"
+step_config() { printf '%s %s\n' "$NETWORK" "$CHAIN_ID" > "$REC/network"; }
+check_rc "mainnet: keygen with 16 bytes rc" 0 "$(run_main "$T/in" "${KGM[@]}" --passphrase-stdin)"
+check "mainnet: the steps run with NETWORK=mainnet, chain 487" "mainnet 487" "$(cat "$REC/network" 2>/dev/null)"
+step_config() { :; }
+
+# ---- finalize refuses empty listeners before it writes anything (Docker too) --------------
+step_write_config() { : > "$REC/wrote-config"; }
+step_create_service() { : > "$REC/wrote-service"; }
+json_refuse_installed() { :; }
+FZ=(--json --phase=finalize --network testnet --install-method docker
+    --docker-image "$DEFAULT_DOCKER_IMAGE" --data-dir "$T/data")
+for case_args in none empty; do
+    reset
+    if [[ "$case_args" == none ]]; then
+        rc="$(run_main /dev/null "${FZ[@]}")"
+    else
+        rc="$(run_main /dev/null "${FZ[@]}" --listener-primary "" --listener-worker "")"
+    fi
+    check_rc "finalize docker, listeners ${case_args}: rc" 1 "$rc"
+    check_has "finalize docker, listeners ${case_args}: refused with the listener message" "yes" \
+        "$(grep -q '"event":"done","ok":false,"msg":"finalize needs --listener-primary and --listener-worker' "$T/out" && echo yes)"
+    check "finalize docker, listeners ${case_args}: no config, no start script or unit written" "no no" \
+        "$([[ -e "$REC/wrote-config" ]] && echo yes || echo no) $([[ -e "$REC/wrote-service" ]] && echo yes || echo no)"
+done
 
 # ---- a signal ends the run: the done event names it, with the status ---------------------
 reset

@@ -2650,10 +2650,13 @@ json_set_network() {
         testnet|adiri)
             NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
             RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
+        mainnet)
+            NETWORK="mainnet"; CHAIN_ID="$MAINNET_CHAIN_ID"; CHAIN_NAME="$MAINNET_CHAIN_NAME"
+            RPC_URL="${MAINNET_RPC_URL:-}"; EXPLORER_URL="${MAINNET_EXPLORER:-}" ;;
         devnet)
             NETWORK="devnet"; CHAIN_ID="$DEVNET_CHAIN_ID"; CHAIN_NAME="$DEVNET_CHAIN_NAME"
             RPC_URL="${DEVNET_RPC_URL:-}"; EXPLORER_URL="${DEVNET_EXPLORER:-}" ;;
-        *) setup_fail "unsupported network: ${1} (expected testnet or devnet)" ;;
+        *) setup_fail "unsupported network: ${1} (expected testnet, mainnet or devnet)" ;;
     esac
 }
 
