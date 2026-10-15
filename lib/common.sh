@@ -675,7 +675,7 @@ tn_install_root_binary() {
 
 # tn_as_service_user CMD [ARG...] -- run CMD as SERVICE_USER:SERVICE_GROUP with
 # no supplementary groups and no_new_privs set, without TN_BLS_PASSPHRASE in its
-# environment, and return its exit code. Uses `setpriv --reuid --regid
+# environment and without fd 9 (the update lock), and return its exit code. Uses `setpriv --reuid --regid
 # --clear-groups --no-new-privs`, or `runuser -u -g` where setpriv is missing
 # (runuser does not set no_new_privs). The arguments pass through as separate
 # words; nothing re-joins them into a shell string. rc 126 without running
@@ -709,12 +709,14 @@ tn_as_service_user() {
         print_warn "tn_as_service_user: refusing service group '${g}': unknown or root" >&2
         return 126
     fi
+    # 9>&- keeps the update lock's descriptor away from the child (on the
+    # command itself: bash 3.2 leaks a descriptor closed on a function call).
     if command -v setpriv >/dev/null 2>&1; then
-        env -u TN_BLS_PASSPHRASE setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- "$@"
+        env -u TN_BLS_PASSPHRASE setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- "$@" 9>&-
         return
     fi
     if command -v runuser >/dev/null 2>&1; then
-        runuser -u "$u" -g "$g" -- env -u TN_BLS_PASSPHRASE "$@"
+        runuser -u "$u" -g "$g" -- env -u TN_BLS_PASSPHRASE "$@" 9>&-
         return
     fi
     print_warn "tn_as_service_user: neither setpriv nor runuser is installed" >&2

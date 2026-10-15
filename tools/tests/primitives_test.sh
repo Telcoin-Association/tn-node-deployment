@@ -372,6 +372,10 @@ else
     check "as_service_user: arguments stay separate words" "a b|c|" "$OUT"
     run tn_as_service_user sh -c 'exit 3'
     check_rc "as_service_user: the command's rc passes through" 3 "$RC"
+    exec 9>>"$T/fd9"
+    run tn_as_service_user sh -c 'if [ -e /proc/self/fd/9 ]; then echo open; else echo closed; fi'
+    exec 9>&-
+    check "as_service_user: fd 9 (the update lock) closed for the child" "closed" "$OUT"
 fi
 SERVICE_USER="$saved_user"
 SERVICE_GROUP="$saved_group"
