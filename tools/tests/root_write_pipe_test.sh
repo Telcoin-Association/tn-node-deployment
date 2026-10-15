@@ -43,7 +43,7 @@ scan() {
         }' "$@"
 }
 
-ALLOWED="setup-node.sh:step_generate_keys edit-config.sh:edit_bls_passphrase"
+ALLOWED="setup-node.sh:setup_store_passphrase migrate-node-naming.sh:store_passphrase edit-config.sh:edit_bls_passphrase lib/common.sh:tn_store_credential lib/common.sh:_tn_cred_switch"
 
 # The rule on fixed lines first.
 FX="$TN_TEST_TMP/fx.sh"
