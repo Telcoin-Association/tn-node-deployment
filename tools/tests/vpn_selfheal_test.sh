@@ -354,6 +354,17 @@ check_lacks "revoke dropped full root" "NOPASSWD:ALL" "$(cat "$RP/etc/sudoers.d/
 check_has "status reports the helper" "yes" "$(grep -q 'Self-heal runs the root-owned' "$T/out" && echo yes)"
 ( set -e; NETWORK=mainnet; do_selfheal ) >"$T/out" 2>&1; check_rc "do_selfheal off testnet under set -e" 0 $?
 
+# --- remove-node.sh tears the self-heal down before the drop-in it watches ---------------------
+RN="${TN_TEST_REPO}/remove-node.sh"
+sh_line="$(grep -n 'systemctl disable --now tn-vpn-selfheal.path tn-vpn-selfheal.service' "$RN" | head -1 | cut -d: -f1)"
+dropin_line="$(grep -n 'rm -f /etc/ssh/sshd_config.d/15-tnadmin-overlay.conf' "$RN" | head -1 | cut -d: -f1)"
+check "remove-node: self-heal stopped before the drop-in goes" "yes" \
+    "$([[ -n "$sh_line" && -n "$dropin_line" && "$sh_line" -lt "$dropin_line" ]] && echo yes)"
+check "remove-node: key files removed" "yes" \
+    "$(grep -q 'rm -f /etc/wgvpn/tnadmin.keys /etc/wgvpn/tnadmin.revoked /etc/wgvpn/tnadmin.authorized_keys' "$RN" && echo yes)"
+check "remove-node: admin range rule deleted" "yes" \
+    "$(grep -q 'for cidr in "\${TN_OVERLAY_ADMIN_CIDR:-}" "\${TN_OVERLAY_CIDR:-}"' "$RN" && echo yes)"
+
 # --- verb gating --------------------------------------------------------------------------------
 ( parse_args --status --grant-maintainer-root ) >/dev/null 2>&1; check_rc "grant flag refused with --status" 1 $?
 ( MODE=enable; ROOT_GRANT=""; parse_args --sync-keys --grant-maintainer-root; printf '%s %s\n' "$MODE" "$ROOT_GRANT" ) > "$T/out" 2>&1

@@ -565,6 +565,11 @@ offer_ui_removal() {
 # were enabled (each block guards on the component existing). Called from the
 # node full-removal flow.
 remove_testnet_addons() {
+    local found
+    found="$(tn_testnet_addons_present 2>/dev/null || true)"
+    if [[ -n "$found" ]]; then
+        print_info "Testnet add-ons found on this host: ${found}."
+    fi
     # --- Alloy log shipper -----------------------------------------------------
     if [[ -f /etc/systemd/system/telcoin-alloy.service ]] || systemctl list-unit-files 2>/dev/null | grep -q '^telcoin-alloy.service'; then
         print_info "Removing Alloy log shipper (telcoin-alloy)..."
@@ -576,6 +581,21 @@ remove_testnet_addons() {
         systemctl daemon-reload 2>/dev/null || true
     fi
     rm -rf /etc/telcoin/alloy /var/lib/telcoin-alloy
+    if id -u telcoin-alloy >/dev/null 2>&1; then
+        userdel telcoin-alloy >/dev/null 2>&1 || true
+    fi
+
+    # --- VPN self-heal ----------------------------------------------------------
+    # Stopped and removed first: its path unit watches the sshd drop-in removed
+    # below, and would otherwise run the helper again and put the drop-in back.
+    if [[ -e /etc/systemd/system/tn-vpn-selfheal.path || -e /etc/systemd/system/tn-vpn-selfheal.service \
+          || -e /usr/local/sbin/tn-vpn-selfheal ]]; then
+        print_info "Removing the VPN self-heal units and helper..."
+        systemctl disable --now tn-vpn-selfheal.path tn-vpn-selfheal.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/tn-vpn-selfheal.path /etc/systemd/system/tn-vpn-selfheal.service \
+              /usr/local/sbin/tn-vpn-selfheal
+        systemctl daemon-reload 2>/dev/null || true
+    fi
 
     # --- WireGuard admin overlay ----------------------------------------------
     if [[ -f /etc/wireguard/wg0.conf ]] || ip link show wg0 >/dev/null 2>&1; then
@@ -587,12 +607,17 @@ remove_testnet_addons() {
         if sshd -t >/dev/null 2>&1; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; fi
         systemctl disable --now tn-nftables.service >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/tn-nftables.service /etc/wgvpn/nftables-node.nft /usr/local/sbin/tn-node-ssh-lockdown
+        rm -f /etc/wgvpn/tnadmin.keys /etc/wgvpn/tnadmin.revoked /etc/wgvpn/tnadmin.authorized_keys
         rmdir /etc/wgvpn 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
-        # Remove the overlay-SSH ufw rule (mirrors setup-vpn.sh --disable).
+        # Remove the overlay-SSH ufw rules (mirrors setup-vpn.sh --disable): the
+        # maintainers' admin range and the whole-overlay rule older releases added.
         if ufw_installed && ufw_active; then
-            local sp; sp="$(get_ssh_port)"; [[ -n "$sp" ]] || sp=22
-            ufw delete allow from "${TN_OVERLAY_CIDR}" to any port "${sp}" proto tcp &>/dev/null || true
+            local sp cidr; sp="$(get_ssh_port)"; [[ -n "$sp" ]] || sp=22
+            for cidr in "${TN_OVERLAY_ADMIN_CIDR:-}" "${TN_OVERLAY_CIDR:-}"; do
+                [[ -n "$cidr" ]] || continue
+                ufw delete allow from "$cidr" to any port "${sp}" proto tcp &>/dev/null || true
+            done
         fi
         if id -u tnadmin >/dev/null 2>&1; then
             userdel -r tnadmin >/dev/null 2>&1 || true
