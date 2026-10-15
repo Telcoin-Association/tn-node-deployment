@@ -52,6 +52,16 @@ flags "docker by digest" 0 testnet docker "" "" "${R}@sha256:${D64}"
 flags "docker by tag refused" 1 testnet docker "" "" "${R}:v0.16.0-adiri"
 flags "docker image and release tag together refused" 1 testnet docker v0.16.0-adiri "" "${R}@sha256:${D64}"
 flags "unknown install method refused" 1 testnet binary "" "" ""
+flags "docker on mainnet (no image repository) refused" 1 mainnet docker "" "" ""
+check "docker on mainnet: the refusal names the open decision" yes "$(grep -q 'open decision' "$T/sn.err" && echo yes || echo no)"
+flags "docker on devnet (no image repository) refused" 1 devnet docker "" "" ""
+# _preflight_docker: a network without an image repository stops before Docker's apt
+# repository, the engine or daemon.json is touched.
+for net in mainnet devnet; do
+    rc="$(sn "NETWORK=$net RELEASE_TAG= DOCKER_IMAGE=; command() { return 1; }; _setup_docker_apt() { echo APT_RAN; }; _setup_docker_live_restore() { echo LIVE_RESTORE_RAN; }; _preflight_docker")"
+    check "_preflight_docker on $net: refused before apt and daemon.json" "1 no no" \
+        "$rc $(grep -q APT_RAN "$T/sn.out" && echo yes || echo no) $(grep -q LIVE_RESTORE_RAN "$T/sn.out" && echo yes || echo no)"
+done
 rc="$(sn "JSON_MODE=true ALLOW_DIRTY=true INSTALL_METHOD=source; init_install_flags")"
 check_rc "--allow-dirty in --json refused" 1 "$rc"
 

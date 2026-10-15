@@ -869,6 +869,12 @@ print(json.dumps(d, indent=2))
 _preflight_docker() {
     print_step "Setting up Docker..."
 
+    # The network's image repository first: a network without one is refused before
+    # Docker's apt repository, the engine or daemon.json is touched.
+    local repo input tag="$RELEASE_TAG"
+    repo="$(tn_docker_repo_for "$NETWORK")" \
+        || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
+
     if ! command -v docker &>/dev/null; then
         print_info "Installing Docker from Docker's apt repository..."
         _setup_docker_apt
@@ -881,9 +887,6 @@ _preflight_docker() {
     fi
     _setup_docker_live_restore
 
-    local repo input tag="$RELEASE_TAG"
-    repo="$(tn_docker_repo_for "$NETWORK")" \
-        || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
     echo ""
     print_info "The ${NETWORK} Telcoin Network image comes from:"
     print_info "  ${repo}"
@@ -3010,6 +3013,11 @@ json_check_install_flags() {
             setup_fail "${RELEASE_TAG} is not a ${NETWORK} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z); branches and commit ids are refused."
         fi
         check_release_floor "$RELEASE_TAG"
+    fi
+    # Docker on a network with no image repository (an open decision for mainnet)
+    # is refused here, before anything touches the box.
+    if [[ "$INSTALL_METHOD" == "docker" ]] && ! tn_docker_repo_for "$NETWORK" >/dev/null; then
+        setup_fail "No ${NETWORK} image repository is set, so a Docker install is refused on ${NETWORK} (which repository publishes ${NETWORK} images is an open decision)."
     fi
     if [[ -n "$DOCKER_IMAGE" ]]; then
         if [[ -n "$RELEASE_TAG" ]]; then
