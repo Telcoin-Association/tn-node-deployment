@@ -958,47 +958,76 @@ tn_install_logrotate() {
     tn_write_root_file "$dest" 0644 <<< "$text"
 }
 
-# _tn_root_binary_ok PATH -- rc 0 when PATH is a regular file owned by root
-# and not group- or other-writable, reached through symlinks that are each owned
-# by root, with every directory on the way (the one holding PATH, each link's
-# and the file's) passing tn_root_dir_ok. The chain is followed one readlink at
-# a time (at most 16 links). So root never runs a binary another account could
-# have placed or redirected. On rc 0, TN_ROOT_BINARY_REAL holds the file's
-# resolved path: run that, not PATH.
+# _tn_root_binary_ok PATH -- rc 0 when PATH leads to a regular file owned by
+# root and not group- or other-writable, and every step on the way is root's:
+# PATH is resolved one component at a time, each directory entered must pass
+# tn_root_dir_ok, and each symlink met (file or directory, at most 16) must be
+# owned by root in a directory that passes tn_root_dir_ok; its target is then
+# followed in turn, readlink by readlink. ".." leaves a directory that was
+# already checked, so it is resolved by name. So root never runs a binary that
+# another account could have placed or redirected. On rc 0, TN_ROOT_BINARY_REAL
+# holds the file's resolved path: run that, not PATH.
 TN_ROOT_BINARY_REAL=""
 _tn_root_binary_ok() {
-    local p="${1:-}" real st dir link n=0
+    local p="${1:-}" cur=/ rest comp next link st n=0
     TN_ROOT_BINARY_REAL=""
     [[ "$p" == /* ]] || return 1
-    while :; do
-        dir="${p%/*}"
-        [[ -n "$dir" ]] || dir=/
-        tn_root_dir_ok "$dir" || return 1
-        [[ -L "$p" ]] || break
-        n=$((n + 1))
-        [[ $n -le 16 ]] || return 1
-        # stat without -L reports the link itself.
-        st="$(stat -c '%u' -- "$p" 2>/dev/null)" || return 1
-        [[ "$st" == 0 ]] || return 1
-        link="$(readlink -- "$p" 2>/dev/null)" || return 1
-        [[ -n "$link" ]] || return 1
-        if [[ "$link" != /* ]]; then
-            link="${dir%/}/${link}"
+    rest="${p#/}"
+    while [[ -n "$rest" ]]; do
+        if [[ "$rest" == */* ]]; then
+            comp="${rest%%/*}"
+            rest="${rest#*/}"
+        else
+            comp="$rest"
+            rest=""
         fi
-        p="$link"
+        case "$comp" in
+            ""|.) continue ;;
+            ..)
+                cur="${cur%/*}"
+                [[ -n "$cur" ]] || cur=/
+                continue
+                ;;
+        esac
+        next="${cur%/}/${comp}"
+        if [[ -L "$next" ]]; then
+            n=$((n + 1))
+            [[ $n -le 16 ]] || return 1
+            tn_root_dir_ok "$cur" || return 1
+            # stat without -L reports the link itself.
+            st="$(stat -c '%u' -- "$next" 2>/dev/null)" || return 1
+            [[ "$st" == 0 ]] || return 1
+            link="$(readlink -- "$next" 2>/dev/null)" || return 1
+            [[ -n "$link" ]] || return 1
+            if [[ "$link" == /* ]]; then
+                cur=/
+                link="${link#/}"
+            fi
+            if [[ -n "$rest" ]]; then
+                rest="${link}/${rest}"
+            else
+                rest="$link"
+            fi
+            continue
+        fi
+        if [[ -n "$rest" ]]; then
+            [[ -d "$next" ]] || return 1
+            tn_root_dir_ok "$next" || return 1
+            cur="$next"
+            continue
+        fi
+        # The last component: the file itself.
+        tn_root_dir_ok "$cur" || return 1
+        [[ -f "$next" ]] || return 1
+        st="$(stat -c '%u %a' -- "$next" 2>/dev/null)" || return 1
+        [[ "${st%% *}" == 0 ]] || return 1
+        case "${st##* }" in
+            *[2367]?|*[2367]) return 1 ;;
+        esac
+        TN_ROOT_BINARY_REAL="$next"
+        return 0
     done
-    real="$(readlink -f -- "$p" 2>/dev/null)" || return 1
-    [[ "$real" == /* && -f "$real" && ! -L "$real" ]] || return 1
-    dir="${real%/*}"
-    [[ -n "$dir" ]] || dir=/
-    tn_root_dir_ok "$dir" || return 1
-    st="$(stat -c '%u %a' -- "$real" 2>/dev/null)" || return 1
-    [[ "${st%% *}" == 0 ]] || return 1
-    case "${st##* }" in
-        *[2367]?|*[2367]) return 1 ;;
-    esac
-    TN_ROOT_BINARY_REAL="$real"
-    return 0
+    return 1
 }
 
 # _tn_own_scan TREE SUID -- print "<reason>: <path>" for every entry under TREE

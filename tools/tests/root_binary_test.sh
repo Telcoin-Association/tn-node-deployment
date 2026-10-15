@@ -32,6 +32,11 @@ ok() {
 }
 
 check "relative path refused" "1 " "$(ok relative/bin)"
+# System binaries, whatever links lead to them (busybox applets, a coreutils
+# multicall binary behind "../lib/..." links): root's all the way.
+for b in /bin/sh "$(type -P env)"; do
+    check "system binary ${b} passes, resolved" "0 $(readlink -f -- "$b")" "$(ok "$b")"
+done
 
 if [[ "$(id -u)" == 0 && -d /root ]]; then
     RB="$(mktemp -d /root/tn_rootbin.XXXXXX 2>/dev/null)" || RB=""
@@ -75,6 +80,19 @@ check "a link to a root file in an account's directory refused" "1 " "$(ok "$R/t
 
 ln -s loop "$R/loop"
 check "a link loop refused" "1 " "$(ok "$R/loop")"
+
+# Relative links with "..", and directory links.
+mkdir -p "$R/sub" "$R/bin2"
+chmod 0755 "$R/sub" "$R/bin2"
+cp "$R/bin" "$R/sub/tool"
+ln -s ../sub/tool "$R/bin2/t"
+check "a relative link through .. passes" "0 $R/sub/tool" "$(ok "$R/bin2/t")"
+ln -s sub "$R/ldir"
+check "a root directory link passes" "0 $R/sub/tool" "$(ok "$R/ldir/tool")"
+ln -s "$U" "$R/ludir"
+check "a directory link into an account's directory refused" "1 " "$(ok "$R/ludir/file")"
+ln -s "$U/../r/bin" "$R/tn4"
+check "a path through an account's directory and back by .. refused" "1 " "$(ok "$R/tn4")"
 
 cp "$R/bin" "$R/gw"
 chmod 0775 "$R/gw"
