@@ -4,7 +4,8 @@
 # and its refusal stops the apply before the node is stopped; a duplicated
 # RPC_PORT stops detect_node instead of guessing a port; json_prepare_docker
 # composes a bare tag against the network's repository and refuses any other
-# image before it pulls, logging the pull to a fresh file. A copy of
+# image before it pulls, logging the pull to a fresh file; a run that ends
+# with the node stopped says so in its exit trap. A copy of
 # update-node.sh without its last line is sourced at the top level. Maintainer
 # tooling (not updater-tracked). bash 3.2 safe.
 # shellcheck source=tools/tests/lib.sh
@@ -98,4 +99,29 @@ nld_case "observability off: untouched" "NETWORK=testnet" "$OBS" none
 nld_case "already elsewhere: untouched" "$(printf 'NETWORK=testnet\nENABLE_OBSERVABILITY=true')" \
     "--datadir /var/lib/telcoin --http --log.file.directory /var/log/telcoin/node" none
 unset -f tn_node_launch_target tn_root_dir_ok getent install tn_launch_flag_set meta_set
+
+# --- update_on_exit: a run that ends with the node stopped says so -------------------
+NODE_STATE=stopped
+systemctl() { case "$1" in is-active) [[ "$NODE_STATE" == running ]] ;; *) return 0 ;; esac; }
+tn_release_update_lock() { return 0; }
+# (json_emit is the recording stub above: the JSON stream lands in json.log.)
+exit_case() {  # exit_case JSON-MODE RC -> OUT (what the terminal shows), JS (the JSON stream)
+    : > "$T/json.log"
+    ( JSON_MODE="$1"; JSON_DONE_SENT=false; trap update_on_exit EXIT; exit "$2" ) > "$T/out" 2>&1
+    OUT="$(cat "$T/out")"
+    JS="$(cat "$T/json.log")"
+}
+exit_case false 143
+check "TERM with the node stopped: says it is stopped and how to start it" "yes yes" \
+    "$([[ "$OUT" == *"telcoin is stopped"* ]] && echo yes || echo no) $([[ "$OUT" == *"sudo systemctl start telcoin"* ]] && echo yes || echo no)"
+exit_case true 143
+check "--json, TERM with the node stopped: one done, then the error event" "1 yes" \
+    "$(printf '%s\n' "$JS" | grep -c '"event":"done"') $(printf '%s\n' "$JS" | tail -n 1 | grep -q '"event":"error".*telcoin is stopped' && echo yes || echo no)"
+NODE_STATE=running
+exit_case false 143
+check "TERM with the node running: no stopped message" no "$([[ "$OUT" == *"is stopped"* ]] && echo yes || echo no)"
+NODE_STATE=stopped
+exit_case false 0
+check "a run that ends well says nothing about a stopped node" no "$([[ "$OUT" == *"is stopped"* ]] && echo yes || echo no)"
+unset -f systemctl tn_release_update_lock
 finish

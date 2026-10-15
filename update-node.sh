@@ -1856,6 +1856,21 @@ update_on_exit() {
         fi
         json_emit "{\"event\":\"done\",\"ok\":false${phase},\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
     fi
+    # A run that fails (a signal or an error between the stop and the start, say)
+    # and leaves the node's service installed but not running says so plainly,
+    # with how to start it. It does not start the node itself: the update may have
+    # stopped part-way. In --json mode this is an error event (the UI shows it
+    # before the done it holds back).
+    if [[ "$rc" -ne 0 && -n "${SERVICE_NAME:-}" ]] \
+        && [[ -f "${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service" ]] \
+        && ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        msg="${SERVICE_NAME} is stopped: this run ended before starting it again. Start it with: sudo systemctl start ${SERVICE_NAME} (then check it with sudo ./check-node.sh), or run sudo ./update-node.sh again."
+        if [[ "$JSON_MODE" == "true" ]]; then
+            json_emit "{\"event\":\"error\",\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
+        else
+            print_warn "$msg" 2>/dev/null || true
+        fi
+    fi
     return "$rc"
 }
 
