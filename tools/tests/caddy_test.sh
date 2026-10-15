@@ -255,6 +255,49 @@ caddy_node_port --http.port RPC_PORT 8545 >/dev/null 2>&1; check_rc "duplicated 
 printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 check "nothing set: default 8546" "8546" "$(caddy_node_port --ws.port WS_PORT 8546 2>/dev/null)"
 
+# --- the python node-info.yaml editor: temp file and rename ----------------------------------------
+if command -v python3 >/dev/null 2>&1; then
+    NE="$T/ne"
+    mkdir -p "$NE"
+    printf 'p2p_info:\n  primary:\n    network_address: /ip4/1.2.3.4/udp/49590/quic-v1\n  workers:\n    - network_address: /ip4/1.2.3.4/udp/49594/quic-v1\n      rpc: ~\n' > "$NE/node-info.yaml"
+    chmod 0640 "$NE/node-info.yaml"
+    orig="$(cat "$NE/node-info.yaml")"
+    caddy_edit_node_info "$NE/node-info.yaml" set https://rpc.example.org/ wss://rpc.example.org/ >"$T/out" 2>&1
+    check_rc "editor set rc 0" 0 $?
+    check "editor set: worker 0 advertises the URLs" "https://rpc.example.org/|wss://rpc.example.org/" \
+        "$(caddy_edit_node_info "$NE/node-info.yaml" get 2>/dev/null)"
+    check "editor set: mode kept" "640" "$(stat -c '%a' "$NE/node-info.yaml")"
+    check "editor set: no temp file left" "" "$(ls -A "$NE" | grep -v '^node-info.yaml$')"
+    # A TERM between the temp write and the rename: the original stays, the temp goes.
+    # The python3 shim holds the editor right before os.replace until it is killed.
+    mkdir -p "$T/pybin"
+    cat > "$T/pybin/python3" <<STUB
+#!/usr/bin/env bash
+src="\$(cat)"
+hold='open(os.environ["TN_TEST_HOLD"], "w").close(); import time; time.sleep(60); os.replace(tmp, path)'
+src="\${src/os.replace(tmp, path)/\$hold}"
+printf '%s\n' "\$src" | exec $(command -v python3) "\$@"
+STUB
+    chmod +x "$T/pybin/python3"
+    printf '%s\n' "$orig" > "$NE/node-info.yaml"
+    rm -f "$T/held"
+    set -m
+    ( PATH="$T/pybin:$PATH"; export TN_TEST_HOLD="$T/held"
+      caddy_edit_node_info "$NE/node-info.yaml" set https://rpc.example.org/ "" ) >"$T/out" 2>&1 &
+    epid=$!
+    set +m
+    i=0
+    while [[ ! -e "$T/held" && "$i" -lt 100 ]]; do command sleep 0.1; i=$((i + 1)); done
+    check "editor TERM: held after the temp write" "yes" "$([[ -e "$T/held" ]] && echo yes)"
+    check "editor TERM: temp file present while held" "1" "$(ls -A "$NE" | grep -c '^\.node-info\..*\.tmp$')"
+    kill -TERM -- "-$epid" 2>/dev/null
+    wait "$epid" 2>/dev/null
+    check "editor TERM: original intact" "$orig" "$(cat "$NE/node-info.yaml")"
+    check "editor TERM: temp file removed" "" "$(ls -A "$NE" | grep -v '^node-info.yaml$')"
+else
+    skip "python node-info editor" "python3 absent"
+fi
+
 # --- dashboard block: security headers and a request body cap ----------------------------------
 # (The rendered file was checked with `caddy validate` 2.8.4 when this was written.)
 write_dashboard_block dash.example.org admin '$2a$14$abcdefghijklmnopqrstuv' "$T/dash"

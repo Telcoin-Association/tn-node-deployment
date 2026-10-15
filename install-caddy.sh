@@ -1318,8 +1318,9 @@ caddy_node_info_path() {
 # "<http>|<ws>" of the FIRST worker ('' parts when absent) and never writes. Idempotent:
 # a semantic no-op (same URLs, even if quoted differently) leaves the file byte-identical
 # and unwritten. Key order and every other line are kept; primary, execution_address
-# and the other workers are never touched. Returns the python rc (0 ok, 2 read/write
-# error, 3 unexpected shape).
+# and the other workers are never touched. A change is written to a temp file in the
+# same directory (the file's mode kept) and renamed over the file. Returns the python
+# rc (0 ok, 2 read/write error, 3 unexpected shape).
 caddy_edit_node_info() {
     local ni="$1" mode="$2" http_url="${3:-}" ws_url="${4:-}"
     # Runs as the service user (the data dir is that user's): a link planted in the
@@ -1515,12 +1516,38 @@ out = list(lines)
 for start, end, new in sorted(edits, reverse=True):
     out[start:end] = new
 
+# Write a temp file in the same directory, then rename it over the file: a stop at
+# any point leaves the old file or the new one, never a half-written one. The temp
+# file is removed on an error or on TERM, INT or HUP.
+import signal, stat, tempfile
+
+def _stop(signum, frame):
+    raise SystemExit(128 + signum)
+
+for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(_sig, _stop)
+tmp = None
 try:
-    with open(path, "w") as f:             # in-place truncate-write: preserves owner+mode
-        f.writelines(out)
-except OSError as exc:
-    sys.stderr.write("cannot write %s: %s\n" % (path, exc))
-    sys.exit(2)
+    try:
+        mode_bits = stat.S_IMODE(os.stat(path).st_mode)
+        fd, tmp = tempfile.mkstemp(prefix=".node-info.", suffix=".tmp",
+                                   dir=os.path.dirname(os.path.abspath(path)))
+        with os.fdopen(fd, "w") as f:
+            f.writelines(out)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode_bits)
+        os.replace(tmp, path)
+        tmp = None
+    except OSError as exc:
+        sys.stderr.write("cannot write %s: %s\n" % (path, exc))
+        sys.exit(2)
+finally:
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 sys.exit(0)
 PYEOF
 }
