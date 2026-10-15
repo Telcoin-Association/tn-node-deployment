@@ -125,6 +125,11 @@ dg() {  # dg NAME RUNNING TARGET EXPECTED-RC
 dg "upgrade passes" v0.16.0-adiri v0.17.0-adiri 0
 dg "same release passes" v0.16.0-adiri v0.16.0-adiri 0
 dg "unknown running release passes" "" v0.1.0-adiri 0
+out="$(update_downgrade_check "" v0.17.0-adiri 2>&1)"
+check "unknown running release: a warning says the downgrade check cannot be made" yes \
+    "$(printf '%s' "$out" | grep -q 'running release is not recorded.*cannot be checked' && echo yes || echo no)"
+out="$(update_downgrade_check v0.16.0-adiri v0.17.0-adiri 2>&1)"
+check "known running release: no such warning" "" "$out"
 dg "older release refused" v0.17.0-adiri v0.16.0-adiri 1
 ALLOW_DOWNGRADE=true
 dg "--allow-downgrade, interactive testnet: passes" v0.17.0-adiri v0.16.0-adiri 0

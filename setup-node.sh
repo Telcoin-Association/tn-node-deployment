@@ -926,7 +926,10 @@ _preflight_docker() {
     echo ""
 
     if [[ -n "$DOCKER_IMAGE" ]]; then
-        tag=""
+        # By digest alone: the release .node-meta records for that digest, if any,
+        # is held to the oldest supported release; otherwise that check only warns.
+        tag="$(tn_docker_recorded_tag "$DOCKER_IMAGE")" || tag=""
+        check_release_floor "${tag:-$DOCKER_IMAGE}"
     elif [[ -n "$tag" ]]; then
         check_release_floor "$tag"
         DOCKER_IMAGE="$(tn_docker_image_for_tag "$NETWORK" "$tag" setup_progress)" \
@@ -935,7 +938,7 @@ _preflight_docker() {
         DOCKER_IMAGE="$(latest_docker_image "$NETWORK")" \
             || setup_fail "Could not read the newest ${NETWORK} release image; pass --release-tag or --docker-image <repository>@sha256:<digest>."
     else
-        local default_image
+        local default_image typed=""
         default_image="$(latest_docker_image "$NETWORK")" || default_image=""
         while true; do
             read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
@@ -948,11 +951,17 @@ _preflight_docker() {
                 DOCKER_IMAGE="$(tn_docker_image_for_tag "$NETWORK" "$tag")" || DOCKER_IMAGE=""
             else
                 DOCKER_IMAGE="$input"
+                typed="$input"
             fi
             [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" && break
+            typed=""
             print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as ${DEFAULT_DOCKER_IMAGE}."
         done
-        [[ -z "$tag" ]] || check_release_floor "$tag"
+        if [[ -n "$tag" ]]; then
+            check_release_floor "$tag"
+        elif [[ -n "$typed" ]]; then
+            check_release_floor "$typed"
+        fi
     fi
     if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
         setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>."

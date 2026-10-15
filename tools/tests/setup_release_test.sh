@@ -74,6 +74,17 @@ check_has "the image was pulled by digest" "pull ${R}@sha256:${D64}" "$(cat "$T/
 rc="$(sn "$PD; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s' \"\$BINARY_PATH\" > \"\$T/bp\"")"
 check "pulled image held under its digest: setup goes on" "0 docker" "$rc $(cat "$T/bp" 2>/dev/null)"
 
+# _preflight_docker: an image given by digest alone is held to the oldest supported
+# release through the release .node-meta records for that digest; otherwise a warning.
+PDW='command() { [ "$2" = docker ]; }; _setup_docker_live_restore() { :; }; docker() { :; }; tn_docker_holds_digest() { return 0; }; setup_warn() { printf "WARN %s\n" "$*" >&2; }; NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE="${R}@sha256:${D64}"'
+rm -f "$T/root/etc/telcoin/.node-meta"
+rc="$(sn "$PDW; _preflight_docker")"
+check "digest alone, nothing recorded: goes on with a floor warning" "0 yes" "$rc $(grep -q 'WARN.*cannot be checked against the v' "$T/sn.err" && echo yes || echo no)"
+printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.12.0-adiri\n' "$D64" > "$T/root/etc/telcoin/.node-meta"
+rc="$(sn "$PDW; _preflight_docker")"
+check "digest alone, recorded as a release below the floor: refused" "1 yes" "$rc $(grep -q 'older than v' "$T/sn.err" && echo yes || echo no)"
+rm -f "$T/root/etc/telcoin/.node-meta"
+
 # live-restore merge (tn_write_root_file and systemctl stubbed).
 LR='tn_write_root_file() { cat > "$1"; }; systemctl() { printf "%s\n" "$*" >> "$T/systemctl.log"; }; _setup_docker_live_restore'
 DJ="$T/root/etc/docker/daemon.json"

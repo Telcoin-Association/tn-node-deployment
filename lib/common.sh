@@ -6826,8 +6826,10 @@ tn_docker_image_for_tag() {
 # digest: a release tag of NETWORK, alone or as <repo>:<tag> of a repository
 # NETWORK's images may come from (tn_docker_repo_ok), resolved with
 # tn_docker_image_for_tag; or <repo>@sha256:<digest> of such a repository, taken
-# as given. Prints "<repo>@sha256:<digest> <tag>" (the tag empty for a
-# digest given alone). rc 1, with the reason on stderr, for anything else:
+# as given. Prints "<repo>@sha256:<digest> <tag>". For a digest given alone the
+# tag is the release .node-meta records for that digest (tn_docker_recorded_tag),
+# else empty, with a warning that the downgrade and oldest-release checks cannot
+# be applied. rc 1, with the reason on stderr, for anything else:
 # another repository, a tag that is not a release tag of NETWORK, latest, a
 # leading "-". Nothing is pulled.
 tn_docker_resolve_ref() {
@@ -6855,7 +6857,30 @@ tn_docker_resolve_ref() {
         print_warn "Image refused: ${arg:-(empty)}. A node runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest." >&2
         return 1
     fi
+    # A digest given alone: its release is the one .node-meta records for that
+    # digest, if any; otherwise it is unknown, and so is whether it is older.
+    if [[ -z "$tag" ]]; then
+        tag="$(tn_docker_recorded_tag "$img")" || tag=""
+        tn_release_tag_ok "$net" "$tag" || tag=""
+        if [[ -z "$tag" ]]; then
+            _tn_c4_say warn "${img} is given by digest alone, so the release it holds is unknown: the downgrade and oldest-release checks cannot be applied to it. Give its ${net} release tag instead to have them applied." "$fn"
+        fi
+    fi
     printf '%s %s\n' "$img" "$tag"
+}
+
+# tn_docker_recorded_tag IMAGE -- the release tag .node-meta records for IMAGE
+# (<repo>@sha256:<digest>): RELEASE_TAG, when DOCKER_IMAGE_DIGEST there names
+# IMAGE's digest. Prints nothing (rc 1) otherwise.
+tn_docker_recorded_tag() {
+    local img="${1:-}" re d t
+    re='@(sha256:[0-9a-f]{64})$'
+    [[ "$img" =~ $re ]] || return 1
+    d="${BASH_REMATCH[1]}"
+    [[ "$(meta_get DOCKER_IMAGE_DIGEST 2>/dev/null || true)" == "$d" ]] || return 1
+    t="$(meta_get RELEASE_TAG 2>/dev/null)" || return 1
+    [[ -n "$t" ]] || return 1
+    printf '%s\n' "$t"
 }
 
 # tn_docker_holds_digest IMAGE -- rc 0 when Docker holds an image whose

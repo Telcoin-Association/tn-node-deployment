@@ -202,6 +202,29 @@ res "resolve: short digest refused" "${R}@sha256:abc" 1 ""
 res "resolve: the release workflow's repository by digest taken as given" "${GH}@sha256:${D64}" 0 "${GH}@sha256:${D64} "
 res "resolve: release tag on the release workflow's repository" "${GH}:v0.17.0-adiri" 0 "${R}@sha256:${D64} v0.17.0-adiri"
 res "resolve: a third repository by digest refused" "ghcr.io/someone-else/telcoin-network@sha256:${D64}" 1 ""
+# A digest given alone: the release .node-meta records for that digest, else a
+# warning that the downgrade and oldest-release checks cannot be applied.
+META_DIGEST="" META_TAG=""
+meta_get() {
+    case "$1" in
+        DOCKER_IMAGE_DIGEST) [[ -n "$META_DIGEST" ]] && printf '%s\n' "$META_DIGEST" ;;
+        RELEASE_TAG) [[ -n "$META_TAG" ]] && printf '%s\n' "$META_TAG" ;;
+        *) return 1 ;;
+    esac
+}
+rc=0; o="$(tn_docker_resolve_ref testnet "${R}@sha256:${D64}" 2>"$T/err")" || rc=$?
+check "resolve: digest alone, nothing recorded: no tag" "0 ${R}@sha256:${D64} " "$rc $o"
+check "resolve: digest alone, nothing recorded: warns the checks cannot be applied" yes "$(grep -q 'digest alone.*cannot be applied' "$T/err" && echo yes || echo no)"
+META_DIGEST="sha256:${D64}" META_TAG="v0.16.0-adiri"
+rc=0; o="$(tn_docker_resolve_ref testnet "${R}@sha256:${D64}" 2>"$T/err")" || rc=$?
+check "resolve: digest alone, recorded for this digest: the recorded release" "0 ${R}@sha256:${D64} v0.16.0-adiri" "$rc $o"
+check "resolve: recorded release: no warning" "" "$(cat "$T/err")"
+rc=0; o="$(tn_docker_resolve_ref testnet "${R}@sha256:$(printf '%s' "$D64" | tr 0 e)" 2>/dev/null)" || rc=$?
+check "resolve: digest alone, another digest recorded: no tag" "0 ${R}@sha256:$(printf '%s' "$D64" | tr 0 e) " "$rc $o"
+META_TAG="main"
+rc=0; o="$(tn_docker_resolve_ref testnet "${R}@sha256:${D64}" 2>/dev/null)" || rc=$?
+check "resolve: a recorded tag that is not a release tag is not used" "0 ${R}@sha256:${D64} " "$rc $o"
+unset -f meta_get
 rc=0; o="$(tn_docker_resolve_ref mainnet "${GH}@sha256:${D64}" 2>/dev/null)" || rc=$?
 check "resolve: mainnet refuses the testnet repositories" "1 " "$rc $o"
 for repo in "$R" "$GH" "ghcr.io/someone-else/telcoin-network"; do

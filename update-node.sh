@@ -1505,7 +1505,8 @@ update_fail() {
 }
 
 # update_downgrade_check RUNNING TARGET -- rc 0 unless TARGET's x.y.z is below
-# RUNNING's (either without one: rc 0, nothing to compare). A downgrade is refused
+# RUNNING's (either without one: rc 0, nothing to compare; a RUNNING without one,
+# when TARGET has one, is said in a warning). A downgrade is refused
 # (rc 1): an error event and a done event carrying "downgrade":true and
 # "storage_downgrade" (true when RUNNING is at or above STORAGE_MIGRATION_FLOOR and
 # TARGET below it: the older release cannot open the migrated data dir) in --json
@@ -1514,7 +1515,12 @@ update_fail() {
 update_downgrade_check() {
     local run="${1:-}" new="${2:-}" re rv nv storage=false msg net
     re='([0-9]+[.][0-9]+[.][0-9]+)'
-    [[ "$run" =~ $re ]] || return 0
+    if [[ ! "$run" =~ $re ]]; then
+        if [[ "$new" =~ $re ]]; then
+            update_wait_say warn "The running release is not recorded (no version marker or release tag), so whether ${new} is older cannot be checked."
+        fi
+        return 0
+    fi
     rv="${BASH_REMATCH[1]}"
     [[ "$new" =~ $re ]] || return 0
     nv="${BASH_REMATCH[1]}"
