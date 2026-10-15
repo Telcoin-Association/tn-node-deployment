@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # tools/tests/service_user_test.sh -- tn_service_user_ok, the rule for the
 # account the node runs as. Functions shadow id and getent with a fixed set of
-# accounts, so the result does not depend on the host. Maintainer tooling (not
-# updater-tracked). bash 3.2 safe.
+# accounts, so the result does not depend on the host. Then, as root inside a
+# container only, create_service_user for a Docker install: the account it
+# makes is a system account (no fixed UID), and an account at UID 1101 an older
+# setup made passes on a re-run. Maintainer tooling (not updater-tracked).
+# bash 3.2 safe.
 # shellcheck source=tools/tests/lib.sh
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 eval "$(tn_test_source_common)"
@@ -15,7 +18,14 @@ op 990 op sudo
 logger 991 logger adm
 dock 992 dock docker
 whl 993 whl wheel
-zero 0 root'
+zero 0 root
+olddock 1101 olddock
+oldsh 1101 oldsh
+oldadm 1101 oldadm sudo'
+# name shell (getent passwd)
+SHELLS='olddock /usr/sbin/nologin
+oldsh /bin/bash
+oldadm /bin/false'
 GROUPS_DB='telcoin 998
 tn2 997
 rootish 0
@@ -33,6 +43,12 @@ id() {
 }
 getent() {
     local line
+    if [[ "${1:-}" == passwd ]]; then
+        line="$(printf '%s\n' "$SHELLS" | awk -v n="${2:-}" '$1 == n')"
+        [[ -n "$line" ]] || return 2
+        printf '%s:x:1101:1101::/nonexistent:%s\n' "${line%% *}" "${line##* }"
+        return 0
+    fi
     [[ "${1:-}" == group ]] || return 2
     line="$(printf '%s\n' "$GROUPS_DB" | awk -v n="${2:-}" '$1 == n')"
     [[ -n "$line" ]] || return 2
@@ -71,7 +87,55 @@ ok_case "32 characters pass" 0 "$(printf 'a%.0s' $(seq 1 32))"
 ok_case "space refused" 1 "tel coin"
 ok_case "empty refused" 1 ""
 ok_case "bad group name refused" 1 telcoin 'tel;coin'
+ok_case "UID 1101 from an older Docker setup, no login shell: passes" 0 olddock olddock
+ok_case "UID 1101 with a login shell refused" 1 oldsh
+ok_case "UID 1101 in sudo refused" 1 oldadm
 msg="$(tn_service_user_ok op 2>&1 >/dev/null)"
 check_has "refusal names the group" "yes" "$(printf '%s' "$msg" | grep -q sudo && echo yes)"
 check "nothing on stdout" "" "$(tn_service_user_ok root 2>/dev/null)"
+unset -f id getent
+
+# --- create_service_user, for real (root in a container only) ---------------------
+why=""
+if [[ "$(id -u)" != 0 ]]; then
+    why="not root"
+elif [[ ! -e /.dockerenv ]]; then
+    why="creates accounts; runs only inside a container"
+else
+    for c in useradd userdel groupadd groupdel getent; do
+        command -v "$c" >/dev/null 2>&1 || why="${c} absent"
+    done
+fi
+if [[ -n "$why" ]]; then
+    skip "create_service_user for a Docker install" "$why"
+    finish
+fi
+MADE_LOG_GROUP=0
+getent group "$TN_LOG_GROUP" >/dev/null 2>&1 || MADE_LOG_GROUP=1
+cleanup_accounts() {
+    userdel tnsvcdock >/dev/null 2>&1
+    userdel tnsvcold >/dev/null 2>&1
+    groupdel tnsvcdock >/dev/null 2>&1
+    groupdel tnsvcold >/dev/null 2>&1
+    [[ $MADE_LOG_GROUP == 1 ]] && groupdel "$TN_LOG_GROUP" >/dev/null 2>&1
+    tn_test_cleanup
+}
+trap cleanup_accounts EXIT
+rc=0
+SERVICE_USER=tnsvcdock SERVICE_GROUP=tnsvcdock INSTALL_METHOD=docker create_service_user >/dev/null 2>&1 || rc=$?
+check_rc "fresh Docker install: account created" 0 "$rc"
+uid="$(id -u tnsvcdock 2>/dev/null || echo none)"
+check "fresh Docker install: a system UID, not 1101" "yes" \
+    "$([[ "$uid" =~ ^[0-9]+$ ]] && (( uid >= 1 && uid <= 999 )) && echo yes || echo "no (${uid})")"
+ok_case "fresh Docker install: the account passes on a re-run" 0 tnsvcdock tnsvcdock
+if getent passwd 1101 >/dev/null 2>&1; then
+    skip "re-run with an older setup's UID 1101 account" "UID 1101 already in use here"
+else
+    groupadd --system tnsvcold
+    useradd --uid 1101 --system --no-create-home --shell /bin/false --gid tnsvcold tnsvcold 2>/dev/null
+    ok_case "older setup's UID 1101 account: passes on a re-run" 0 tnsvcold tnsvcold
+    rc=0
+    SERVICE_USER=tnsvcold SERVICE_GROUP=tnsvcold INSTALL_METHOD=docker create_service_user >/dev/null 2>&1 || rc=$?
+    check "older setup's UID 1101 account: kept as it is" "0 1101" "$rc $(id -u tnsvcold)"
+fi
 finish

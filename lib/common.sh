@@ -2190,24 +2190,19 @@ create_service_user() {
         print_ok "Created system group '${SERVICE_GROUP}'"
     fi
 
-    # Create user if it doesn't exist
-    # For Docker installs, force UID 1101 to match the container's nonroot user
+    # Create the user if it does not exist: a system account (UID below 1000)
+    # with no login shell, for every install method. A Docker install runs the
+    # container as this account's uid:gid (--user in the start script), so no
+    # fixed UID is needed.
     print_step "Creating service user: ${SERVICE_USER}..."
     if id "$SERVICE_USER" &>/dev/null; then
         print_ok "User '${SERVICE_USER}' already exists"
         usermod -aG "$SERVICE_GROUP" "$SERVICE_USER" 2>/dev/null || true
     else
-        if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-            useradd --uid "${DOCKER_UID:-1101}" --system --no-create-home --shell /bin/false \
-                    --gid "$SERVICE_GROUP" \
-                    --comment "Telcoin Network node service account" "$SERVICE_USER"
-            print_ok "Created system user '${SERVICE_USER}' (UID ${DOCKER_UID:-1101}) in group '${SERVICE_GROUP}'"
-        else
-            useradd --system --no-create-home --shell /bin/false \
-                    --gid "$SERVICE_GROUP" \
-                    --comment "Telcoin Network node service account" "$SERVICE_USER"
-            print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
-        fi
+        useradd --system --no-create-home --shell /bin/false \
+                --gid "$SERVICE_GROUP" \
+                --comment "Telcoin Network node service account" "$SERVICE_USER"
+        print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
     fi
     # Log readers (the node's log files are root:telcoin-log 0640). The service
     # user is not a member: systemd opens the log files and hands the node the
@@ -3233,8 +3228,12 @@ EOF
 # must have a UID from 1 to 999 and belong to none of sudo, adm, docker, wheel;
 # an existing GROUP must not be GID 0. A USER that does not exist yet passes
 # (setup creates it as a system account). rc 1 with the reason on stderr.
+# One exception to the UID range: setup used to create the account of a Docker
+# install with UID 1101, so an existing USER with UID 1101 passes when it has no
+# login shell (false or nologin) and, like any other, no admin group; re-running
+# setup on such a host keeps working.
 tn_service_user_ok() {
-    local u="${1:-}" g="${2:-}" re='^[a-z_][a-z0-9_-]{0,31}$' uid gid grp IFS=' '
+    local u="${1:-}" g="${2:-}" re='^[a-z_][a-z0-9_-]{0,31}$' uid gid grp sh IFS=' '
     if [[ ! "$u" =~ $re ]]; then
         print_warn "service user '${u}' is not a plain lowercase account name" >&2; return 1
     fi
@@ -3254,7 +3253,13 @@ tn_service_user_ok() {
         fi
     fi
     uid="$(id -u "$u" 2>/dev/null)" || return 0
-    if [[ ! "$uid" =~ ^[0-9]+$ ]] || (( uid < 1 || uid > 999 )); then
+    if [[ "$uid" == "1101" ]]; then
+        sh="$(getent passwd "$u" 2>/dev/null | cut -d: -f7)"
+        case "$sh" in
+            /bin/false|/usr/bin/false|/sbin/nologin|/usr/sbin/nologin|/bin/nologin|/usr/bin/nologin) ;;
+            *) print_warn "service user ${u} (UID 1101) has a login shell (${sh:-unknown}); pick another name" >&2; return 1 ;;
+        esac
+    elif [[ ! "$uid" =~ ^[0-9]+$ ]] || (( uid < 1 || uid > 999 )); then
         print_warn "service user ${u} is not a system account (UID ${uid}); pick another name" >&2; return 1
     fi
     for grp in $(id -nG "$u" 2>/dev/null); do
