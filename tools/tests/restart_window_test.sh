@@ -75,4 +75,12 @@ check "migrate stop_legacy: refused after the wait, not stopped" "rc=1 order=gua
 check "setup-node: guard, wait, guard, then systemctl restart" \
     "setup_quorum_guard tn_wait_restart_window setup_quorum_guard systemctl" \
     "$(awk '/^            setup_quorum_guard "http/ { f = 1 } f && !/^ *#/ { print $1 } f && /systemctl restart/ { exit }' "$TN_TEST_REPO/setup-node.sh" | paste -sd' ' -)"
+
+# setup-node passes --allow-quorum-risk (TN_ALLOW_QUORUM_RISK) to the
+# install-caddy.sh child that restarts the node for public RPC.
+check "setup-node: the rpc-enable child gets TN_ALLOW_QUORUM_RISK" 1 \
+    "$(grep -c 'TN_ALLOW_QUORUM_RISK="${TN_ALLOW_QUORUM_RISK:-}" bash "$caddy" --phase=rpc-enable' "$TN_TEST_REPO/setup-node.sh")"
+# shellcheck disable=SC2016
+check "the variable reaches a child that way" "1" \
+    "$(TN_ALLOW_QUORUM_RISK=1; TN_ALLOW_QUORUM_RISK="${TN_ALLOW_QUORUM_RISK:-}" bash -c 'printf %s "${TN_ALLOW_QUORUM_RISK:-}"')"
 finish

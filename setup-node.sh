@@ -2678,7 +2678,8 @@ step_public_rpc() {
     # --yes accepts only the public RPC exposure summary: the operator's --rpc-domain
     # (or the domain typed at the prompt) is that consent.
     print_step "Enabling public RPC for ${d} (Caddy + node-info.yaml advertisement)..."
-    if ! TN_ASSUME_YES=false bash "$caddy" --phase=rpc-enable --yes --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-; then
+    # --allow-quorum-risk reaches the child's restart too (it reads the variable).
+    if ! TN_ASSUME_YES=false TN_ALLOW_QUORUM_RISK="${TN_ALLOW_QUORUM_RISK:-}" bash "$caddy" --phase=rpc-enable --yes --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-; then
         public_rpc_pending "install-caddy.sh did not finish enabling it (see the messages above)."
         return 0
     fi
