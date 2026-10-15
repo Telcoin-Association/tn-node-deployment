@@ -1048,9 +1048,39 @@ remove_legacy_units() {
 # it), so every command is guarded and the step always returns 0 -- a firewall
 # hiccup must never roll back an otherwise-healthy migration. Idempotent (ufw
 # dedups identical rules; re-running the migration re-asserts the same two rules).
+# A host whose firewall admits P2P only from a source list (P2P_ALLOW_FROM in
+# .node-meta, set by firewall-setup.sh --p2p-from) gets one rule per source and
+# port instead, never an open rule; a list that cannot be read or holds an entry
+# that is not an address or CIDR opens nothing and says so.
 open_consensus_ports() {
+    local srcs="" rc=0 s port bad=""
+    local -a list=()
     print_step "Opening P2P consensus UDP ports (49590 primary, 49594 worker)..."
     if command -v ufw >/dev/null 2>&1; then
+        srcs="$(meta_get P2P_ALLOW_FROM 2>/dev/null)" || rc=$?
+        if [[ $rc -eq 2 ]]; then
+            print_warn "P2P_ALLOW_FROM is set more than once in .node-meta, so no P2P rule was added."
+            print_warn "Fix .node-meta, then run firewall-setup.sh to open UDP 49590 and 49594."
+            return 0
+        fi
+        if [[ -n "$srcs" ]]; then
+            IFS=, read -r -a list <<< "$srcs" || true
+            for s in ${list[@]+"${list[@]}"}; do
+                [[ "$s" =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] || bad="${bad} ${s}"
+            done
+            if [[ -n "$bad" || ${#list[@]} -eq 0 ]]; then
+                print_warn "P2P_ALLOW_FROM in .node-meta holds an entry that is not an address or CIDR (${bad# }), so no P2P rule was added."
+                print_warn "Run firewall-setup.sh --p2p-from to set the list and open UDP 49590 and 49594."
+                return 0
+            fi
+            for port in 49590 49594; do
+                for s in "${list[@]}"; do
+                    ufw allow from "$s" to any port "$port" proto udp >/dev/null 2>&1 || true
+                done
+            done
+            print_ok "ufw rules ensured for 49590/udp and 49594/udp from ${srcs} (P2P_ALLOW_FROM)."
+            return 0
+        fi
         ufw allow 49590/udp >/dev/null 2>&1 || true
         ufw allow 49594/udp >/dev/null 2>&1 || true
         print_ok "ufw rules ensured for 49590/udp and 49594/udp."
