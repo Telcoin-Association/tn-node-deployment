@@ -1704,7 +1704,7 @@ check_update_lock() {
             print_warn "Update lock ${path} is mode ${mode}, not 0600: any account that can read it can hold the lock and block updates."
             print_info "  The next setup, update or edit sets it to 0600 (or now: sudo chmod 0600 ${path})"
         fi
-        [[ -z "$mode" ]] || note=" (mode ${mode})${note}"
+        [[ -z "$mode" ]] || note="${note} (mode ${mode})"
     fi
     if [[ -f "$path" && ! -L "$path" && -r /proc/locks ]]; then
         ino="$(stat -c '%i' -- "$path" 2>/dev/null || true)"
