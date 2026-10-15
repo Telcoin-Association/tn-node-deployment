@@ -249,6 +249,22 @@ parse_args() {
     done
 }
 
+# cleanup -- the EXIT trap: put a moved-aside install back when the new tree
+# did not get into place, then remove the staging directory.
+cleanup() {
+    if [[ -n "${ASIDE:-}" ]]; then
+        if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+            print_warn "The previous install is kept in ${ASIDE}/telcoin-node-scripts."
+        elif mv "${ASIDE}/telcoin-node-scripts" "$INSTALL_DIR" 2>/dev/null; then
+            rmdir "$ASIDE" 2>/dev/null || true
+            print_info "The existing install at ${INSTALL_DIR} was put back as it was."
+        else
+            print_error "The existing install could not be put back; it is in ${ASIDE}/telcoin-node-scripts."
+        fi
+    fi
+    rm -rf "${STAGE:-}"
+}
+
 main() {
     parse_args "$@"
 
@@ -268,8 +284,9 @@ main() {
 
     # Everything is downloaded and checked in a staging directory beside the
     # install, then moved into place in one step.
+    ASIDE=""
     STAGE="$(mktemp -d "${HOME}/.telcoin-node-scripts.XXXXXX")" || fail "Could not create a staging directory in ${HOME}."
-    trap 'rm -rf "$STAGE"' EXIT
+    trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
@@ -286,10 +303,25 @@ main() {
     verify_release "${STAGE}/src" "${STAGE}/tree"
 
     print_step "Installing to ${INSTALL_DIR}..."
+    # An existing install is moved aside first, into a new directory of its
+    # own (so the move can never land inside another directory), and removed
+    # only once the verified tree is in place. Until then the EXIT trap puts
+    # it back.
     if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
-        rm -rf "$INSTALL_DIR"
+        ASIDE="$(mktemp -d "${INSTALL_DIR%/*}/.telcoin-node-scripts.old.$(date +%Y%m%d%H%M%S).XXXXXX")" \
+            || fail "Could not create a directory in ${HOME} to move the existing install aside; nothing was changed."
+        if ! mv "$INSTALL_DIR" "${ASIDE}/telcoin-node-scripts"; then
+            rmdir "$ASIDE" 2>/dev/null || true
+            ASIDE=""
+            fail "Could not move the existing install at ${INSTALL_DIR} aside; nothing was changed."
+        fi
     fi
     mv "${STAGE}/tree" "$INSTALL_DIR" || fail "Could not move the verified files to ${INSTALL_DIR}."
+    if [[ -n "$ASIDE" ]]; then
+        local old="$ASIDE"
+        ASIDE=""
+        rm -rf "$old"
+    fi
     print_ok "Scripts installed (${TN_SCRIPTS_TAG})"
 
     echo ""

@@ -207,6 +207,48 @@ check "good: scripts executable" "yes" "$([[ -x "$DEST/setup-node.sh" && -x "$DE
 check "good: fetched only the tag archive" "$ARCHIVE_URL_BASE/$TAG.tar.gz" "$(cat "$T/curl.log")"
 check "good: no staging dir left" "0" "$(staged_left)"
 
+# --- over an existing install ----------------------------------------------------------
+printf 'operator edit\n' >> "$DEST/setup-node.sh"
+run_installer "$GOOD" --yes
+check_rc "reinstall: exits 0" 0 "$RC"
+check "reinstall: setup-node.sh is the release copy" "$(_h "$REL/setup-node.sh")" "$(_h "$DEST/setup-node.sh" 2>/dev/null)"
+check "reinstall: no staging or moved-aside dir left" "0" "$(staged_left)"
+
+# A mv shim that fails when its first argument matches the pattern in MVFAIL.
+REAL_MV="$(command -v mv)"
+mkdir -p "$T/mvbin"
+cat > "$T/mvbin/mv" <<EOF
+#!/bin/sh
+case "\$1" in \$MVFAIL) echo "mv: refused by the test" >&2; exit 1 ;; esac
+exec $REAL_MV "\$@"
+EOF
+chmod +x "$T/mvbin/mv"
+# run_mvfail PATTERN -- run the good installer with --yes over the existing
+# install, with mv failing for a source matching PATTERN.
+run_mvfail() {
+    local before path_was="$PATH"
+    before="$(cd "$DEST" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(_h "$f")" "$f"; done)"
+    PATH="$T/mvbin:$PATH"
+    MVFAIL="$1" run_installer "$GOOD" --yes
+    PATH="$path_was"
+    AFTER_SAME="$([[ "$before" == "$(cd "$DEST" 2>/dev/null && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(_h "$f")" "$f"; done)" ]] && echo yes || echo no)"
+}
+export MVFAIL=""
+
+# --- the verified tree cannot be moved in: the existing install is put back -------------
+run_mvfail '*/tree'
+check_rc "new tree not moved in: exits 1" 1 "$RC"
+check "new tree not moved in: existing install put back as it was" "yes" "$AFTER_SAME"
+check "new tree not moved in: no staging or moved-aside dir left" "0" "$(staged_left)"
+check "new tree not moved in: says so" "yes" "$(printf '%s\n' "$OUT" | grep -qF "was put back as it was" && echo yes || echo no)"
+
+# --- the existing install cannot be moved aside: nothing changes --------------------------
+run_mvfail "$DEST"
+check_rc "existing install not moved aside: exits 1" 1 "$RC"
+check "existing install not moved aside: untouched" "yes" "$AFTER_SAME"
+check "existing install not moved aside: no staging or moved-aside dir left" "0" "$(staged_left)"
+check "existing install not moved aside: says so" "yes" "$(printf '%s\n' "$OUT" | grep -qF "aside; nothing was changed" && echo yes || echo no)"
+
 # expect_refusal NAME COPY -- exits 1, the existing install is untouched.
 expect_refusal() {
     local before
