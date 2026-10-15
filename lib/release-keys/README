@@ -1,0 +1,48 @@
+Release signing keys
+====================
+
+This directory holds the OpenPGP public keys whose signatures the node scripts
+accept on a telcoin-network release. setup-node.sh (--install-method release,
+and Docker installs given a release tag) and update-node.sh download a
+release's SHA256SUMS and SHA256SUMS.asc and run
+
+    gpgv --status-fd 1 --keyring <every *.asc here, dearmored> SHA256SUMS.asc SHA256SUMS
+
+They accept the release only when gpgv reports a good signature (GOODSIG then
+VALIDSIG) whose primary key fingerprint belongs to one of these files, and no
+line reports BADSIG, EXPKEYSIG, REVKEYSIG, NO_PUBKEY, ERRSIG or EXPSIG. Then
+every file used from the release (the tarball, IMAGE_DIGEST) must match its
+SHA256SUMS line, and the chain-config lines must carry the hashes these scripts
+pin. Nothing from a release that fails a check is installed or run.
+
+Format
+------
+
+One ASCII-armored public key per file, named <github-handle>.asc, the same
+files as .github/maintainer-gpg-keys/ in the telcoin-network repository on
+main. Every *.asc file here is read; other files (this README) are ignored. A
+key that is expired or revoked stays refused even while its file is here.
+
+Adding or removing a key
+------------------------
+
+1. Take the key from .github/maintainer-gpg-keys/<handle>.asc on the
+   telcoin-network main branch, and check its fingerprint against the
+   maintainer release keys table in that repository's SECURITY.md and
+   against https://github.com/<handle>.gpg:
+
+       gpg --show-keys --with-fingerprint <handle>.asc
+
+2. Add (or delete) lib/release-keys/<handle>.asc in tn-node-deployment and
+   list it in update-scripts.sh SCRIPTS so the updater ships it.
+
+3. Publish a signed script release. Hosts pick the key set up with
+   update-scripts.sh; the keys are part of the signed MANIFEST, like the
+   scripts that read them.
+
+A release signed only by a key that is not here yet is refused until the
+script release that carries the key is installed. A release whose
+SHA256SUMS.asc also carries a signature by a key that is not here is refused
+as well (NO_PUBKEY): add every signer's key before that release is installed.
+
+While this directory holds no *.asc file, every release download is refused.

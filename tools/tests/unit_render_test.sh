@@ -22,7 +22,7 @@ PASSPHRASE_METHOD=stdin
 LOG_TARGET=file
 TN_DOCKER_IDS=1101:1101
 TN_DOCKER_MEMORY=8g
-IMG="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri"
+IMG="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 BIN=/opt/telcoin/telcoin-network
 PEERS='--bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)"'
 ARGS_B="--datadir /var/lib/telcoin --log.stdout.format log-fmt -vvv --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${PEERS}"
@@ -216,7 +216,9 @@ img_case() {  # img_case NAME RC IMAGE [NETWORK]
     tn_docker_image_allowed "$3" "${4:-}" || rc=$?
     check_rc "image: $1" "$2" "$rc"
 }
-img_case "testnet release tag" 0 "${REPO}:v0.16.0-adiri"
+img_case "testnet release tag refused by default" 1 "${REPO}:v0.16.0-adiri"
+rc=0; TN_DOCKER_REQUIRE_DIGEST=0 tn_docker_image_allowed "${REPO}:v0.16.0-adiri" testnet || rc=$?
+check_rc "image: testnet release tag with TN_DOCKER_REQUIRE_DIGEST=0" 0 "$rc"
 img_case "testnet digest" 0 "${REPO}@sha256:${D64}"
 img_case "short digest refused" 1 "${REPO}@sha256:abc"
 img_case "upper-case digest refused" 1 "${REPO}@sha256:$(printf '%s' "$D64" | tr a-f A-F)"
@@ -233,7 +235,7 @@ rc=0; TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "${REPO}:v0.16.0-adiri"
 check_rc "image: tag refused once digests are required" 1 "$rc"
 rc=0; TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "${REPO}@sha256:${D64}" testnet || rc=$?
 check_rc "image: digest passes once digests are required" 0 "$rc"
-rc=0; validate_docker_image "${REPO}:v0.16.0-adiri" || rc=$?
+rc=0; validate_docker_image "${REPO}@sha256:${D64}" || rc=$?
 check_rc "validate_docker_image uses NETWORK" 0 "$rc"
 rc=0; validate_docker_image "evil.example/adiri:v0.16.0-adiri" || rc=$?
 check_rc "validate_docker_image refuses another registry" 1 "$rc"

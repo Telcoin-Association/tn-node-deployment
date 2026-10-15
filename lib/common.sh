@@ -1378,28 +1378,45 @@ validate_multiaddr() {
 # Public Artifact Registry for the testnet (-adiri) docker image.
 readonly GAR_IMAGE_BASE="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
-# Fallback only when the registry is unreachable.
-readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.16.0-adiri"
+# Fallback only when the registry is unreachable: v0.16.0-adiri by digest (the
+# Docker-Content-Digest the registry served for that tag on 2026-10-15).
+readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"
+readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea"
 
-# Echo the latest published -adiri docker image ref (registry/path:tag) by
-# querying the public Artifact Registry tag list and picking the highest version
-# (sort -V). Mirrors the UI's latest_docker_image() so the CLI and GUI offer the
-# same default. Falls back to DEFAULT_DOCKER_IMAGE when the registry is
-# unreachable, so a node default is never the long-stale hardcoded tag.
+# latest_docker_image [NETWORK] -- the newest release image of NETWORK (default:
+# the NETWORK global, else testnet) by digest, <repo>@sha256:<hex>: the highest
+# tag in the network's repository (tn_docker_repo_for) that passes
+# tn_release_tag_ok, resolved to the digest the registry serves for it. Never a
+# tag, never latest, hot-patch or devnet tags. Mirrors the UI's
+# latest_docker_image. On testnet, when the registry cannot be read, it falls
+# back to DEFAULT_DOCKER_IMAGE (with a warning on stderr). rc 1 and nothing on
+# stdout for a network without a repository, or when nothing can be resolved.
+# The signed release's IMAGE_DIGEST (tn_fetch_release_image) is the stronger
+# source when the release tag is known.
 latest_docker_image() {
-    local json best=""
-    json=$(curl -sf --max-time 10 "$GAR_TAGS_URL" 2>/dev/null || true)
+    local net="${1:-${NETWORK:-testnet}}" repo host path json best="" digest
+    repo="$(tn_docker_repo_for "$net")" || return 1
+    host="${repo%%/*}"
+    path="${repo#*/}"
+    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || json=""
     if [[ -n "$json" ]]; then
-        best=$(printf '%s' "$json" \
-            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*' \
-            | grep -- '-adiri' \
-            | sort -V | tail -1 || true)
+        best="$(printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
+            | while IFS= read -r t; do if tn_release_tag_ok "$net" "$t"; then printf '%s\n' "$t"; fi; done \
+            | sort -u -V | tail -n 1)" || best=""
     fi
     if [[ -n "$best" ]]; then
-        echo "${GAR_IMAGE_BASE}:${best}"
-    else
-        echo "$DEFAULT_DOCKER_IMAGE"
+        if digest="$(tn_registry_digest "$repo" "$best")"; then
+            printf '%s@%s\n' "$repo" "$digest"
+            return 0
+        fi
+        print_warn "The registry lists ${repo}:${best} but gave no digest for it." >&2
     fi
+    if [[ "$net" == "testnet" ]]; then
+        print_warn "Could not read the newest image from ${repo}; offering ${DEFAULT_DOCKER_TAG} (${DEFAULT_DOCKER_IMAGE})." >&2
+        printf '%s\n' "$DEFAULT_DOCKER_IMAGE"
+        return 0
+    fi
+    return 1
 }
 
 # tn_docker_ref_ok IMAGE -- rc 0 when IMAGE has the shape of an image reference
@@ -2355,9 +2372,9 @@ select_install_method() {
     print_header "Binary Installation Method"
     echo "  How would you like to obtain the telcoin binary?"
     echo ""
-    echo "  1) Build from source  -- compiles from GitHub (~30 min, needs Rust)"
-    echo "  2) Pre-built binary   -- downloads a release binary (coming soon)"
-    echo "  3) Docker             -- pulls official image from Google Artifact Registry"
+    echo "  1) Build from source  -- builds a signed release tag (~30 min, as the tn-build account)"
+    echo "  2) Signed release     -- downloads a release binary and checks its signature"
+    echo "  3) Docker             -- runs the network's release image, pinned by digest"
     echo "  4) I already have it  -- specify path to existing binary"
     echo ""
 
@@ -2366,7 +2383,7 @@ select_install_method() {
         read -r -p "  Enter choice [1/2/3/4]: " choice
         case "$choice" in
             1) INSTALL_METHOD="source";   break ;;
-            2) INSTALL_METHOD="binary";   break ;;
+            2) INSTALL_METHOD="release";  break ;;
             3) INSTALL_METHOD="docker";   break ;;
             4) INSTALL_METHOD="existing"; break ;;
             *) print_warn "Please enter 1, 2, 3, or 4." ;;
@@ -2444,14 +2461,23 @@ tn_detect_network() {
 # update-node.sh (which never synced submodules) died in cargo with a missing-
 # file error. `submodule sync` first, so URL changes in .gitmodules are honored
 # before fetching; then `update --init --recursive --force` to pin content to
-# the superproject's recorded shas. Returns non-zero when the update fails
-# (e.g. submodule remote unreachable); callers decide hard-fail vs warn.
-# No-op (returns 0) when the directory is not a git checkout.
+# the superproject's recorded shas. Submodules are fetched over https only
+# (GIT_ALLOW_PROTOCOL), and afterwards every submodule must sit at the commit
+# the superproject records (no +, - or U in `git submodule status`). Returns
+# non-zero when the update fails (e.g. submodule remote unreachable) or a
+# submodule is elsewhere; callers decide hard-fail vs warn. No-op (returns 0)
+# when the directory is not a git checkout.
 tn_sync_submodules() {
-    local repo_dir="$1"
+    local repo_dir="$1" st
     [[ -d "${repo_dir}/.git" ]] || return 0
-    git -C "$repo_dir" submodule sync --recursive 2>/dev/null || true
-    git -C "$repo_dir" submodule update --init --recursive --force
+    GIT_ALLOW_PROTOCOL=https git -C "$repo_dir" submodule sync --recursive >/dev/null 2>&1 || true
+    GIT_ALLOW_PROTOCOL=https git -C "$repo_dir" submodule update --init --recursive --force || return 1
+    st="$(git -C "$repo_dir" submodule status --recursive 2>/dev/null)" || return 1
+    if printf '%s\n' "$st" | grep -q '^[-+U]'; then
+        print_warn "A submodule of ${repo_dir} is not at the commit the checkout records." >&2
+        return 1
+    fi
+    return 0
 }
 
 # ensure_chain_configs_available [NETWORK] -- make the telcoin-network checkout
@@ -3204,6 +3230,14 @@ tn_rerender_node_launch() {
         print out }')"
     kind="${cur%% *}"
     [[ -n "$runner" ]] || runner="${cur#* }"
+    # Images run by digest: an older start script that names a tag keeps the
+    # image Docker already holds under that tag, by its digest.
+    if [[ "$kind" == "docker" && "$runner" != *@sha256:* ]]; then
+        if ! runner="$(tn_docker_local_digest "$runner")"; then
+            _tn_guard_say warn "${svc}: ${file} runs the image by tag and Docker holds no digest for it; pull a release by digest with update-node.sh first." "$fn"
+            return 1
+        fi
+    fi
     if [[ "$kind" == "docker" ]]; then
         method="docker"
     else
@@ -3319,9 +3353,9 @@ tn_service_user_ok() {
 
 # tn_docker_image_allowed IMAGE [NETWORK] -- rc 0 when IMAGE is NETWORK's
 # repository (tn_docker_repo_for when present, else the testnet repository) by
-# digest, <repo>@sha256:<64 hex>, or, until TN_DOCKER_REQUIRE_DIGEST=1, by a tag
-# that passes tn_release_tag_ok. NETWORK defaults to the NETWORK global, then
-# tn_detect_network. Refuses a leading -, any whitespace, other repositories and
+# digest, <repo>@sha256:<64 hex>. A tag that passes tn_release_tag_ok is
+# accepted only with TN_DOCKER_REQUIRE_DIGEST=0 (the default, 1, refuses
+# tags). NETWORK defaults to the NETWORK global, then tn_detect_network. Refuses a leading -, any whitespace, other repositories and
 # networks without one. Prints nothing.
 tn_docker_image_allowed() {
     local img="${1:-}" net="${2:-}" repo="" rest
@@ -3341,7 +3375,7 @@ tn_docker_image_allowed() {
             [[ "$rest" =~ ^[0-9a-f]{64}$ ]]
             ;;
         "${repo}:"*)
-            [[ "${TN_DOCKER_REQUIRE_DIGEST:-0}" != "1" ]] || return 1
+            [[ "${TN_DOCKER_REQUIRE_DIGEST:-1}" == "0" ]] || return 1
             tn_release_tag_ok "$net" "${img#"${repo}:"}"
             ;;
         *) return 1 ;;
@@ -3716,14 +3750,16 @@ tn_local_rpc_url() {
     printf 'http://127.0.0.1:%s\n' "$((10#$port))"
 }
 
-# tn_node_mode [url] — the node's consensus mode from tn_nodeMode: CvvActive (in
-# the committee and voting), CvvInactive (in the committee, catching up) or
-# Observer. url defaults to tn_local_rpc_url. Any other answer is malformed.
+# tn_node_mode [url] [max_time] — the node's consensus mode from tn_nodeMode:
+# CvvActive (in the committee and voting), CvvInactive (in the committee,
+# catching up) or Observer. url defaults to tn_local_rpc_url; max_time bounds
+# the call in seconds (tn_rpc_call's default 10 when empty). Any other answer is
+# malformed.
 tn_node_mode() {
-    local url="${1:-}" out rc mode
+    local url="${1:-}" max_time="${2:-10}" out rc mode
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
     rc=0
-    out="$(tn_rpc_call "$url" tn_nodeMode '[]')" || rc=$?
+    out="$(tn_rpc_call "$url" tn_nodeMode '[]' "$max_time")" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         printf '%s\n' "$out"
         return 1
@@ -5788,7 +5824,689 @@ pick_action() {
 # -----------------------------------------------------------------------------
 # CORE-4: RELEASES AND IMAGE REPOSITORIES
 # -----------------------------------------------------------------------------
-# (reserved; CORE-4 adds its helpers here)
+#
+# Signed releases: SHA256SUMS carries a detached GPG signature (SHA256SUMS.asc)
+# that must come from a key in lib/release-keys/*.asc (see the README there).
+# Source builds run as the unprivileged build account (TN_BUILD_USER) with its
+# own toolchain from a rustup-init pinned by version and sha256; root only
+# installs the result. Docker images come from one repository per network and
+# run by digest.
+
+# Image repository per network (testnet: GAR_IMAGE_BASE). Which repositories
+# publish mainnet and devnet images is an open decision: while a constant is
+# empty, tn_docker_repo_for refuses that network, and so does every Docker path.
+readonly TN_MAINNET_IMAGE_REPO=""
+readonly TN_DEVNET_IMAGE_REPO=""
+
+# Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
+readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
+
+# The build account and its home (toolchain, cargo cache, target dir). Not under
+# /home, no login shell, member of no other group. Overridable for tests only.
+TN_BUILD_USER="${TN_BUILD_USER:-tn-build}"
+TN_BUILD_HOME="${TN_BUILD_HOME:-/var/lib/tn-build}"
+
+# rustup-init for the build account, pinned by version and sha256 (the values
+# published at static.rust-lang.org/rustup/archive/<version>/<triple>/
+# rustup-init.sha256, checked against the downloaded files on 2026-10-15), and
+# the toolchain it installs: the channel the node's rust-toolchain.toml names.
+readonly TN_RUSTUP_INIT_VERSION="1.29.1"
+readonly TN_RUSTUP_INIT_SHA256_X86_64="dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71"
+readonly TN_RUSTUP_INIT_SHA256_AARCH64="15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
+readonly TN_RUST_TOOLCHAIN="1.94"
+
+# tn_docker_repo_for NETWORK -- print NETWORK's image repository: testnet the
+# adiri repository; mainnet and devnet their constants. rc 1 with the reason on
+# stderr while the constant is empty, and for any other NETWORK.
+tn_docker_repo_for() {
+    local net="${1:-}" repo=""
+    case "$net" in
+        testnet) repo="$GAR_IMAGE_BASE" ;;
+        mainnet) repo="$TN_MAINNET_IMAGE_REPO" ;;
+        devnet) repo="$TN_DEVNET_IMAGE_REPO" ;;
+        *)
+            print_warn "No image repository for network '${net}' (testnet, mainnet or devnet)." >&2
+            return 1
+            ;;
+    esac
+    if [[ -z "$repo" ]]; then
+        print_warn "No ${net} image repository is set: which repository publishes ${net} images is still an open decision, so Docker installs and updates are refused on ${net}." >&2
+        return 1
+    fi
+    printf '%s\n' "$repo"
+}
+
+# tn_registry_digest REPO TAG -- print the manifest digest (sha256:<64 hex>) the
+# registry serves for REPO:TAG, from the Docker-Content-Digest header of an
+# anonymous HEAD request (registry v2 API over https). rc 1 when there is none.
+tn_registry_digest() {
+    local repo="${1:-}" tag="${2:-}" host path hdr d
+    [[ "$repo" == */* && "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    host="${repo%%/*}"
+    path="${repo#*/}"
+    hdr="$(curl --proto '=https' --tlsv1.2 -fsSI --max-time 10 \
+        -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+        --url "https://${host}/v2/${path}/manifests/${tag}" 2>/dev/null)" || return 1
+    d="$(printf '%s\n' "$hdr" | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2; exit }')"
+    [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$d"
+}
+
+# tn_docker_local_digest IMAGE -- print IMAGE by digest: IMAGE itself when it is
+# <repo>@sha256:<hex>; for <repo>:<tag>, the RepoDigests entry for <repo> of the
+# image Docker already holds under that name (docker image inspect; nothing is
+# pulled). rc 1 when Docker holds no such digest.
+tn_docker_local_digest() {
+    local img="${1:-}" repo d
+    [[ -n "$img" && "$img" != -* && ! "$img" =~ [[:space:]] ]] || return 1
+    case "$img" in
+        *@sha256:*)
+            [[ "$img" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]] || return 1
+            printf '%s\n' "$img"
+            return 0
+            ;;
+    esac
+    repo="${img%:*}"
+    [[ -n "$repo" && "$repo" != "$img" ]] || return 1
+    d="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null \
+        | awk -v r="${repo}@" 'index($0, r) == 1 { print; exit }')" || d=""
+    [[ "$d" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$d"
+}
+
+# _tn_c4_say KIND MESSAGE [progress-fn] -- progress-fn, else stderr.
+_tn_c4_say() {
+    _tn_guard_say "$@"
+}
+
+# _tn_release_triple -- the release target triple of this host's architecture.
+_tn_release_triple() {
+    case "$(uname -m 2>/dev/null)" in
+        x86_64|amd64) printf 'x86_64-unknown-linux-gnu\n' ;;
+        aarch64|arm64) printf 'aarch64-unknown-linux-gnu\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _tn_release_keys_dir -- lib/release-keys beside this file (TN_RELEASE_KEYS_DIR
+# overrides it for tests).
+_tn_release_keys_dir() {
+    if [[ -n "${TN_RELEASE_KEYS_DIR:-}" ]]; then
+        printf '%s\n' "$TN_RELEASE_KEYS_DIR"
+        return 0
+    fi
+    printf '%s/release-keys\n' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+}
+
+# tn_staging_dir -- print the release staging directory, /var/lib/telcoin-staging,
+# created root 0700 when missing. rc 1 when it is a symlink, not root-owned, or
+# not exactly 0700 (or a parent fails tn_root_dir_ok), 2 when it cannot be
+# created. TN_RELEASE_STAGING_DIR (tests) names an existing 0700 directory of
+# the current user instead.
+tn_staging_dir() {
+    local d="${TN_RELEASE_STAGING_DIR:-}" st
+    if [[ -n "$d" ]]; then
+        [[ -d "$d" && ! -L "$d" ]] || return 1
+        st="$(stat -c '%u %a' -- "$d" 2>/dev/null)" || return 1
+        [[ "$st" == "$(id -u) 700" ]] || return 1
+        printf '%s\n' "$d"
+        return 0
+    fi
+    d="/var/lib/telcoin-staging"
+    if [[ ! -e "$d" && ! -L "$d" ]]; then
+        install -d -o root -g root -m 0700 -- "$d" 2>/dev/null || return 2
+    fi
+    tn_root_dir_ok "$d" || return 1
+    st="$(stat -c '%a' -- "$d" 2>/dev/null)" || return 1
+    [[ "$st" == "700" ]] || return 1
+    printf '%s\n' "$d"
+}
+
+# _tn_release_cleanup DIR -- stop any gpg-agent started under DIR/gnupg and
+# remove DIR.
+_tn_release_cleanup() {
+    [[ -n "${1:-}" && -d "$1" && ! -L "$1" ]] || return 0
+    if [[ -d "$1/gnupg" ]] && command -v gpgconf >/dev/null 2>&1; then
+        GNUPGHOME="$1/gnupg" gpgconf --kill all >/dev/null 2>&1 || true
+    fi
+    rm -rf -- "$1"
+}
+
+# _tn_release_get URL OUT MAX_BYTES MAX_SECONDS -- one https download. rc 2 on
+# any failure (OUT removed).
+_tn_release_get() {
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time "$4" --max-filesize "$3" \
+        -o "$2" --url "$1" 2>/dev/null; then
+        rm -f -- "$2"
+        return 2
+    fi
+    [[ -f "$2" && ! -L "$2" ]] || return 2
+}
+
+# _tn_release_keyring DIR -- dearmor every lib/release-keys/*.asc into
+# DIR/keyring.gpg and write each key's primary fingerprint to DIR/allow (one per
+# line). rc 1 when there is no key file, 2 when gpg fails.
+_tn_release_keyring() {
+    local d="$1" kdir k n=0 f
+    kdir="$(_tn_release_keys_dir)"
+    ( umask 077; mkdir -p -- "$d/gnupg" ) || return 2
+    : > "$d/keyring.gpg" || return 2
+    : > "$d/allow" || return 2
+    for k in "$kdir"/*.asc; do
+        [[ -f "$k" && ! -L "$k" ]] || continue
+        GNUPGHOME="$d/gnupg" gpg --batch --no-tty --quiet --dearmor < "$k" >> "$d/keyring.gpg" 2>/dev/null || return 2
+        f="$(GNUPGHOME="$d/gnupg" gpg --batch --no-tty --quiet --with-colons --import-options show-only --import < "$k" 2>/dev/null \
+            | awk -F: '$1 == "pub" { want = 1; next } $1 == "fpr" && want { print $10; want = 0 }')" || return 2
+        [[ -n "$f" ]] || return 2
+        printf '%s\n' "$f" >> "$d/allow" || return 2
+        n=$((n + 1))
+    done
+    (( n > 0 )) || return 1
+    return 0
+}
+
+# _tn_release_sig_ok DIR -- gpgv over DIR/SHA256SUMS with DIR/SHA256SUMS.asc and
+# DIR/keyring.gpg, read from the status lines: rc 0 when some GOODSIG is followed
+# by a VALIDSIG whose primary key fingerprint (its last field) is in DIR/allow,
+# and no line says BADSIG, EXPKEYSIG, REVKEYSIG, NO_PUBKEY, ERRSIG or EXPSIG.
+# Prints the refusing keyword (or "NOSIG") on rc 1.
+_tn_release_sig_ok() {
+    local d="$1" out tag kw rest fpr good=0 ok=0 bad=""
+    out="$(GNUPGHOME="$d/gnupg" gpgv --status-fd 1 --keyring "$d/keyring.gpg" \
+        "$d/SHA256SUMS.asc" "$d/SHA256SUMS" 2>/dev/null)" || true
+    while read -r tag kw rest; do
+        [[ "$tag" == "[GNUPG:]" ]] || continue
+        case "$kw" in
+            BADSIG|EXPKEYSIG|REVKEYSIG|NO_PUBKEY|ERRSIG|EXPSIG)
+                [[ -n "$bad" ]] || bad="$kw"
+                ;;
+            GOODSIG) good=1 ;;
+            VALIDSIG)
+                fpr="${rest##* }"
+                if [[ "$good" -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]] && grep -qxF -- "$fpr" "$d/allow"; then
+                    ok=1
+                fi
+                good=0
+                ;;
+        esac
+    done <<< "$out"
+    if [[ -n "$bad" ]]; then
+        printf '%s\n' "$bad"
+        return 1
+    fi
+    if [[ "$ok" -ne 1 ]]; then
+        printf 'NOSIG\n'
+        return 1
+    fi
+    return 0
+}
+
+# _tn_release_sums_names FILE TAG NETWORK -- rc 0 when FILE (SHA256SUMS) has only
+# "<64 hex>  <name>" lines naming exactly IMAGE_DIGEST, one
+# telcoin-network-TAG-<triple>.tar.gz and NETWORK's chain-configs/<dir>/
+# committee.yaml, genesis.yaml and parameters.yaml, each once. Prints the reason
+# on rc 1.
+_tn_release_sums_names() {
+    local f="$1" tag="$2" net="$3" cc line name mid n=0 tars=0 seen=" " re
+    case "$net" in
+        testnet) cc="chain-configs/testnet" ;;
+        mainnet) cc="chain-configs/mainnet" ;;
+        *) printf 'no release channel for network %s\n' "$net"; return 1 ;;
+    esac
+    re='^[0-9a-f]{64}  [A-Za-z0-9._/-]+$'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ ! "$line" =~ $re ]]; then
+            printf 'malformed line in SHA256SUMS\n'
+            return 1
+        fi
+        name="${line#*  }"
+        case "$seen" in
+            *" ${name} "*) printf 'SHA256SUMS names %s twice\n' "$name"; return 1 ;;
+        esac
+        seen="${seen}${name} "
+        case "$name" in
+            IMAGE_DIGEST|"${cc}/committee.yaml"|"${cc}/genesis.yaml"|"${cc}/parameters.yaml") ;;
+            *)
+                mid="${name#"telcoin-network-${tag}-"}"
+                mid="${mid%-unknown-linux-gnu.tar.gz}"
+                if [[ "$name" == "telcoin-network-${tag}-"*"-unknown-linux-gnu.tar.gz" && "$mid" =~ ^[a-z0-9_]+$ ]]; then
+                    tars=$((tars + 1))
+                else
+                    printf 'SHA256SUMS names %s, which is not part of a %s release\n' "$name" "$net"
+                    return 1
+                fi
+                ;;
+        esac
+        n=$((n + 1))
+    done < "$f"
+    if [[ "$n" -ne 5 || "$tars" -ne 1 ]]; then
+        printf 'SHA256SUMS must name exactly IMAGE_DIGEST, the tarball and the three %s files\n' "$cc"
+        return 1
+    fi
+    return 0
+}
+
+# _tn_release_sum FILE NAME -- the hash SHA256SUMS FILE gives NAME.
+_tn_release_sum() {
+    awk -v n="$2" 'substr($0, 67) == n { print substr($0, 1, 64); exit }' "$1"
+}
+
+# _tn_release_file_ok DIR NAME -- rc 0 when DIR/NAME is a regular file whose
+# sha256 is the one DIR/SHA256SUMS gives it.
+_tn_release_file_ok() {
+    local want got
+    want="$(_tn_release_sum "$1/SHA256SUMS" "$2")"
+    [[ -n "$want" && -f "$1/$2" && ! -L "$1/$2" ]] || return 1
+    got="$(sha256sum < "$1/$2" 2>/dev/null)" || return 1
+    [[ "${got%% *}" == "$want" ]]
+}
+
+# _tn_release_fetch TAG NETWORK BASE_URL MODE [progress-fn] -- download and check
+# a release into a new staging directory (printed on stdout): SHA256SUMS and its
+# signature first (gpgv against lib/release-keys), then the names it lists, the
+# chain-config hashes against this script release's pins, IMAGE_DIGEST and, in
+# MODE full, this host's tarball, each against its line. rc 1 refused, 2
+# network or I/O, 3 TAG is not a NETWORK release tag. The staging directory is
+# removed on every failure.
+_tn_release_fetch() {
+    local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
+    local parent stg why f want got triple tarball cc img
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z)." "$fn"
+        return 3
+    fi
+    [[ -n "$base" ]] || base="${TN_RELEASE_BASE_URL}/${tag}"
+    base="${base%/}"
+    for f in curl gpg gpgv sha256sum; do
+        if ! command -v "$f" >/dev/null 2>&1; then
+            _tn_c4_say warn "${f} is not installed; a release cannot be checked without it." "$fn"
+            return 2
+        fi
+    done
+    triple="$(_tn_release_triple)" || triple=""
+    if [[ "$mode" == "full" && -z "$triple" ]]; then
+        _tn_c4_say warn "No release binary is published for this architecture ($(uname -m 2>/dev/null))." "$fn"
+        return 1
+    fi
+    parent="$(tn_staging_dir)" || {
+        _tn_c4_say warn "The staging directory is not a root-owned 0700 directory; nothing was downloaded." "$fn"
+        return 1
+    }
+    stg="$(mktemp -d "${parent}/rel.XXXXXX")" || return 2
+    _tn_release_keyring "$stg" || {
+        f=$?
+        _tn_release_cleanup "$stg"
+        if [[ "$f" -eq 1 ]]; then
+            _tn_c4_say warn "No release signing key in $(_tn_release_keys_dir) (*.asc); a release cannot be checked without one." "$fn"
+            return 1
+        fi
+        _tn_c4_say warn "Could not read the release signing keys in $(_tn_release_keys_dir)." "$fn"
+        return 2
+    }
+    for f in SHA256SUMS SHA256SUMS.asc; do
+        if ! _tn_release_get "${base}/${f}" "${stg}/${f}" 1048576 60; then
+            _tn_c4_say warn "Could not download ${base}/${f}." "$fn"
+            _tn_release_cleanup "$stg"
+            return 2
+        fi
+    done
+    if ! why="$(_tn_release_sig_ok "$stg")"; then
+        case "$why" in
+            BADSIG) why="the signature does not match SHA256SUMS (BADSIG)" ;;
+            EXPKEYSIG) why="it was made by an expired key (EXPKEYSIG)" ;;
+            REVKEYSIG) why="it was made by a revoked key (REVKEYSIG)" ;;
+            EXPSIG) why="the signature has expired (EXPSIG)" ;;
+            NO_PUBKEY|ERRSIG) why="a signature is by a key that is not in $(_tn_release_keys_dir) (${why})" ;;
+            *) why="no good signature by a key in $(_tn_release_keys_dir)" ;;
+        esac
+        _tn_c4_say warn "Release ${tag}: SHA256SUMS is not verified: ${why}. Nothing from this release is used." "$fn"
+        _tn_release_cleanup "$stg"
+        return 1
+    fi
+    if ! why="$(_tn_release_sums_names "${stg}/SHA256SUMS" "$tag" "$net")"; then
+        _tn_c4_say warn "Release ${tag}: ${why}." "$fn"
+        _tn_release_cleanup "$stg"
+        return 1
+    fi
+    # The chain-config lines must carry the hashes this script release pins.
+    cc="chain-configs/${net}"
+    for f in committee.yaml genesis.yaml parameters.yaml; do
+        want="$(tn_chain_config_pin "$net" "$f")"
+        got="$(_tn_release_sum "${stg}/SHA256SUMS" "${cc}/${f}")"
+        if [[ -z "$want" ]]; then
+            _tn_c4_say warn "Release ${tag}: these scripts pin no sha256 for ${net} ${f} yet, so the release's chain configs cannot be checked." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+        if [[ "$got" != "$want" ]]; then
+            _tn_c4_say warn "Release ${tag}: ${cc}/${f} has sha256 ${got}, but these scripts pin ${want}. Update the scripts (update-scripts.sh) before using this release." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+    done
+    if ! _tn_release_get "${base}/IMAGE_DIGEST" "${stg}/IMAGE_DIGEST" 4096 60; then
+        _tn_c4_say warn "Could not download ${base}/IMAGE_DIGEST." "$fn"
+        _tn_release_cleanup "$stg"
+        return 2
+    fi
+    img="$(cat -- "${stg}/IMAGE_DIGEST" 2>/dev/null)" || img=""
+    if ! _tn_release_file_ok "$stg" IMAGE_DIGEST \
+        || [[ "$(awk 'END { print NR }' "${stg}/IMAGE_DIGEST")" != "1" ]] \
+        || [[ ! "$img" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$ ]]; then
+        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST does not match SHA256SUMS or is not one <repository>@sha256:<digest> line." "$fn"
+        _tn_release_cleanup "$stg"
+        return 1
+    fi
+    if [[ "$mode" == "full" ]]; then
+        tarball="telcoin-network-${tag}-${triple}.tar.gz"
+        if [[ -z "$(_tn_release_sum "${stg}/SHA256SUMS" "$tarball")" ]]; then
+            _tn_c4_say warn "Release ${tag} has no ${triple} tarball." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+        if ! _tn_release_get "${base}/${tarball}" "${stg}/${tarball}" 1073741824 1800; then
+            _tn_c4_say warn "Could not download ${base}/${tarball}." "$fn"
+            _tn_release_cleanup "$stg"
+            return 2
+        fi
+        if ! _tn_release_file_ok "$stg" "$tarball"; then
+            _tn_c4_say warn "Release ${tag}: ${tarball} does not match its SHA256SUMS line." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+    fi
+    printf '%s\n' "$stg"
+    return 0
+}
+
+# tn_fetch_verified_release TAG NETWORK [BASE_URL] [progress-fn] -- download
+# SHA256SUMS, SHA256SUMS.asc, IMAGE_DIGEST and this host's tarball for release
+# TAG into a new root-only directory under /var/lib/telcoin-staging, and check
+# them: the signature with gpgv against the keys in lib/release-keys (a GOODSIG
+# and VALIDSIG by a listed primary key; any BADSIG, EXPKEYSIG, REVKEYSIG,
+# NO_PUBKEY, ERRSIG or EXPSIG refuses), the names SHA256SUMS lists, its
+# chain-config hashes against this script release's pins, and each file's hash.
+# BASE_URL defaults to the GitHub release of TAG. Prints the tarball path; the
+# verified SHA256SUMS sits beside it (TN_RELEASE_SUMS is set to it when the
+# function is not run in a subshell). The caller removes that directory when
+# done. rc 1 verification failed, 2 network or I/O, 3 TAG is not a NETWORK
+# release tag; nothing is left behind on failure.
+tn_fetch_verified_release() {
+    local tag="${1:-}" net="${2:-}" stg rc=0
+    stg="$(_tn_release_fetch "$tag" "$net" "${3:-}" full "${4:-}")" || rc=$?
+    [[ $rc -eq 0 ]] || return $rc
+    TN_RELEASE_SUMS="${stg}/SHA256SUMS"
+    printf '%s/telcoin-network-%s-%s.tar.gz\n' "$stg" "$tag" "$(_tn_release_triple)"
+}
+
+# tn_fetch_release_image TAG NETWORK [BASE_URL] [progress-fn] -- the release's
+# image by digest: IMAGE_DIGEST from a release checked as in
+# tn_fetch_verified_release (no tarball), which must name NETWORK's repository
+# (tn_docker_image_allowed). Prints <repo>@sha256:<digest>; the staging
+# directory is removed. rc as tn_fetch_verified_release; 1 also when the image
+# is not NETWORK's.
+tn_fetch_release_image() {
+    local tag="${1:-}" net="${2:-}" fn="${4:-}" stg img rc=0
+    stg="$(_tn_release_fetch "$tag" "$net" "${3:-}" image "$fn")" || rc=$?
+    [[ $rc -eq 0 ]] || return $rc
+    img="$(cat -- "${stg}/IMAGE_DIGEST")" || img=""
+    _tn_release_cleanup "$stg"
+    if ! TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$img" "$net"; then
+        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img}, which is not the ${net} image repository." "$fn"
+        return 1
+    fi
+    printf '%s\n' "$img"
+}
+
+# tn_release_extract_binary TARBALL OUT -- write the node binary from a verified
+# release TARBALL (telcoin-network-<tag>-<triple>.tar.gz) to OUT, mode 0755. The
+# tarball must list exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and
+# NOTICE under its top directory, the binary as a regular file; nothing else is
+# extracted and no owner or mode is taken from the archive. rc 1 refused, 2 I/O.
+tn_release_extract_binary() {
+    local tarball="${1:-}" out="${2:-}" dir listing want kind
+    [[ -f "$tarball" && ! -L "$tarball" && -n "$out" && ! -L "$out" ]] || return 1
+    dir="${tarball##*/}"
+    dir="${dir%.tar.gz}"
+    listing="$(tar -tzf "$tarball" 2>/dev/null)" || return 2
+    listing="$(printf '%s\n' "$listing" | awk -v d="${dir}/" '$0 != d' | LC_ALL=C sort)"
+    want="$(printf '%s\n' "${dir}/LICENSE-APACHE" "${dir}/LICENSE-MIT" "${dir}/NOTICE" "${dir}/telcoin-network" | LC_ALL=C sort)"
+    if [[ "$listing" != "$want" ]]; then
+        print_warn "${tarball##*/} must hold exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and NOTICE under ${dir}/." >&2
+        return 1
+    fi
+    kind="$(tar -tvzf "$tarball" "${dir}/telcoin-network" 2>/dev/null | head -n 1)" || kind=""
+    if [[ "${kind:0:1}" != "-" ]]; then
+        print_warn "${dir}/telcoin-network in ${tarball##*/} is not a regular file." >&2
+        return 1
+    fi
+    rm -f -- "$out"
+    if ! ( umask 077; tar -xzOf "$tarball" "${dir}/telcoin-network" > "$out" ) 2>/dev/null; then
+        rm -f -- "$out"
+        return 2
+    fi
+    if [[ ! -s "$out" ]]; then
+        rm -f -- "$out"
+        return 1
+    fi
+    chmod 0755 -- "$out" || return 2
+}
+
+# tn_release_version_ok TEXT NETWORK REF -- rc 0 when TEXT, a node binary's
+# --version output, fits NETWORK and REF: its "Version:" is REF's x.y.z (when
+# REF carries one), it has exactly one "Build Features:" line, which is empty on
+# mainnet and on testnet lists adiri and nothing but adiri and faucet (the adiri
+# feature turns faucet on). The reason goes to stderr on rc 1.
+tn_release_version_ok() {
+    local text="${1:-}" net="${2:-}" ref="${3:-}" want="" ver n feats f has_adiri=0 re
+    local -a list
+    re='([0-9]+[.][0-9]+[.][0-9]+)'
+    if [[ "$ref" =~ $re ]]; then
+        want="${BASH_REMATCH[1]}"
+    fi
+    ver="$(printf '%s\n' "$text" | awk '{ for (i = 1; i < NF; i++) if ($i == "Version:") { print $(i + 1); exit } }')" || ver=""
+    if [[ -n "$want" && "$ver" != "$want" ]]; then
+        print_warn "The binary reports version ${ver:-none}, not ${want} (${ref})." >&2
+        return 1
+    fi
+    n="$(printf '%s\n' "$text" | grep -c '^Build Features:')" || n=0
+    if [[ "$n" != "1" ]]; then
+        print_warn "The binary's --version has ${n} Build Features lines; expected one." >&2
+        return 1
+    fi
+    feats="$(printf '%s\n' "$text" | sed -n 's/^Build Features:[[:space:]]*//p' | tr -d '[:space:]')"
+    case "$net" in
+        mainnet)
+            if [[ -n "$feats" ]]; then
+                print_warn "This build has the features ${feats}; a mainnet build has none." >&2
+                return 1
+            fi
+            ;;
+        testnet)
+            list=()
+            [[ -z "$feats" ]] || IFS=',' read -r -a list <<< "$feats"
+            for f in ${list[@]+"${list[@]}"}; do
+                case "$f" in
+                    adiri) has_adiri=1 ;;
+                    faucet) ;;
+                    *)
+                        print_warn "This build has the feature ${f}; a testnet build has adiri (and faucet) only." >&2
+                        return 1
+                        ;;
+                esac
+            done
+            if [[ "$has_adiri" -ne 1 ]]; then
+                print_warn "This build lacks the adiri feature a testnet build needs (features: ${feats:-none})." >&2
+                return 1
+            fi
+            ;;
+        *)
+            print_warn "No build rule for network '${net}'." >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# tn_as_build_user CMD [ARG...] -- run CMD as TN_BUILD_USER with no
+# supplementary groups and no_new_privs set (setpriv), in an environment that
+# holds only HOME, USER, LOGNAME, PATH (the account's cargo bin, then
+# /usr/local/bin:/usr/bin:/bin), CARGO_HOME, RUSTUP_HOME, CARGO_TARGET_DIR (all
+# under TN_BUILD_HOME), LANG and TERM: nothing of the caller's environment. fd 9
+# (the update lock) is closed for it. rc 126 without running anything when the
+# account is unknown, malformed or uid/gid 0, or setpriv is missing.
+tn_as_build_user() {
+    local u="$TN_BUILD_USER" h="$TN_BUILD_HOME" uid gid
+    if [[ $# -eq 0 ]]; then
+        print_warn "tn_as_build_user: no command given" >&2
+        return 126
+    fi
+    if [[ ! "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "$h" != /* ]]; then
+        print_warn "tn_as_build_user: refusing build account '${u}' (home ${h})" >&2
+        return 126
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || uid=""
+    gid="$(id -g "$u" 2>/dev/null)" || gid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ || ! "$gid" =~ ^[0-9]+$ || "$gid" =~ ^0+$ ]]; then
+        print_warn "tn_as_build_user: refusing build account '${u}': unknown or root" >&2
+        return 126
+    fi
+    if ! command -v setpriv >/dev/null 2>&1; then
+        print_warn "tn_as_build_user: setpriv is not installed" >&2
+        return 126
+    fi
+    setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- \
+        env -i HOME="$h" USER="$u" LOGNAME="$u" \
+        PATH="${h}/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+        CARGO_HOME="${h}/.cargo" RUSTUP_HOME="${h}/.rustup" CARGO_TARGET_DIR="${h}/target" \
+        LANG=C.UTF-8 TERM=dumb "$@" 9>&-
+}
+
+# tn_build_user_ensure [progress-fn] -- make the build account ready: create it
+# when missing (system account, own group, home TN_BUILD_HOME, no login shell),
+# create its home 0700, and give it a git config that accepts the root-owned
+# checkout (TN_SOURCE_DIR), whose commit the build reads. Refused (rc 1): an
+# existing account that is uid 0, not a system account, or a member of sudo,
+# adm, docker, wheel or the service group; a home that is a symlink or belongs
+# to someone else. rc 2 when creating it failed.
+tn_build_user_ensure() {
+    local fn="${1:-}" u="$TN_BUILD_USER" h="$TN_BUILD_HOME" uid g st
+    if [[ ! "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "$h" != /* ]]; then
+        _tn_c4_say warn "Refusing build account '${u}' (home ${h})." "$fn"
+        return 1
+    fi
+    if ! id -u "$u" >/dev/null 2>&1; then
+        if ! useradd --system --user-group --home-dir "$h" --no-create-home \
+            --shell /usr/sbin/nologin --comment "telcoin-network source builds" "$u" >/dev/null 2>&1; then
+            _tn_c4_say warn "Could not create the build account ${u}." "$fn"
+            return 2
+        fi
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || uid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ ]] || (( 10#$uid >= 1000 )); then
+        _tn_c4_say warn "The build account ${u} exists with uid ${uid:-unknown}; it must be a system account (uid 1-999)." "$fn"
+        return 1
+    fi
+    for g in $(id -nG "$u" 2>/dev/null); do
+        case "$g" in
+            sudo|adm|docker|wheel|"${SERVICE_GROUP:-telcoin}"|"$TN_LOG_GROUP")
+                _tn_c4_say warn "The build account ${u} belongs to ${g}; remove it from that group (it needs none)." "$fn"
+                return 1
+                ;;
+        esac
+    done
+    if [[ ! -e "$h" && ! -L "$h" ]]; then
+        if ! install -d -o "$u" -g "$(id -g "$u")" -m 0700 -- "$h"; then
+            _tn_c4_say warn "Could not create ${h}." "$fn"
+            return 2
+        fi
+    fi
+    st="$(stat -c '%u' -- "$h" 2>/dev/null)" || st=""
+    if [[ -L "$h" || ! -d "$h" || "$st" != "$uid" ]]; then
+        _tn_c4_say warn "${h} must be a directory owned by ${u} (not a symlink)." "$fn"
+        return 1
+    fi
+    chmod 0700 -- "$h" || return 2
+    if ! printf '[safe]\n\tdirectory = %s\n' "$TN_SOURCE_DIR" \
+        | tn_as_build_user sh -c 'umask 077; cat > "$HOME/.gitconfig"'; then
+        _tn_c4_say warn "Could not write ${h}/.gitconfig." "$fn"
+        return 2
+    fi
+    return 0
+}
+
+# tn_rustup_ensure [progress-fn] -- give the build account a Rust toolchain when it
+# has none: download rustup-init TN_RUSTUP_INIT_VERSION for this architecture over
+# https into the staging directory, compare its sha256 with the pinned constant,
+# then run that copy as the build account (tn_as_build_user) with the
+# TN_RUST_TOOLCHAIN default and the minimal profile. Never runs anything as root.
+# rc 0 ready, 1 refused (hash mismatch, unknown architecture), 2 failed.
+tn_rustup_ensure() {
+    local fn="${1:-}" triple want parent stg got rc=0
+    if tn_as_build_user test -x "${TN_BUILD_HOME}/.cargo/bin/rustup" 2>/dev/null; then
+        return 0
+    fi
+    triple="$(_tn_release_triple)" || triple=""
+    case "$triple" in
+        x86_64-unknown-linux-gnu) want="$TN_RUSTUP_INIT_SHA256_X86_64" ;;
+        aarch64-unknown-linux-gnu) want="$TN_RUSTUP_INIT_SHA256_AARCH64" ;;
+        *)
+            _tn_c4_say warn "No pinned rustup-init for this architecture ($(uname -m 2>/dev/null))." "$fn"
+            return 1
+            ;;
+    esac
+    parent="$(tn_staging_dir)" || return 1
+    stg="$(mktemp -d "${parent}/rustup.XXXXXX")" || return 2
+    if ! _tn_release_get "https://static.rust-lang.org/rustup/archive/${TN_RUSTUP_INIT_VERSION}/${triple}/rustup-init" \
+        "${stg}/rustup-init" 134217728 600; then
+        _tn_c4_say warn "Could not download rustup-init ${TN_RUSTUP_INIT_VERSION} (${triple})." "$fn"
+        rm -rf -- "$stg"
+        return 2
+    fi
+    got="$(sha256sum < "${stg}/rustup-init" 2>/dev/null)" || got=""
+    got="${got%% *}"
+    if [[ "$got" != "$want" ]]; then
+        _tn_c4_say warn "rustup-init ${TN_RUSTUP_INIT_VERSION} (${triple}) has sha256 ${got:-unreadable}, not the pinned ${want}; it was not run." "$fn"
+        rm -rf -- "$stg"
+        return 1
+    fi
+    if ! tn_as_build_user sh -c 'umask 077; cat > "$HOME/rustup-init" && chmod 0700 "$HOME/rustup-init"' \
+        < "${stg}/rustup-init"; then
+        rm -rf -- "$stg"
+        return 2
+    fi
+    rm -rf -- "$stg"
+    tn_as_build_user "${TN_BUILD_HOME}/rustup-init" -y --no-modify-path --profile minimal \
+        --default-toolchain "$TN_RUST_TOOLCHAIN" || rc=2
+    tn_as_build_user rm -f -- "${TN_BUILD_HOME}/rustup-init" || true
+    if [[ $rc -ne 0 ]]; then
+        _tn_c4_say warn "rustup-init failed for the build account." "$fn"
+    fi
+    return $rc
+}
+
+# tn_build_version BIN -- print BIN --version, run as the build account (30 s at
+# most). A file of another owner (a root copy from a release) is first copied
+# into a fresh directory in the build account's home and run from there.
+tn_build_version() {
+    local bin="${1:-}" uid owner d out rc=0
+    [[ -f "$bin" && ! -L "$bin" ]] || return 1
+    uid="$(id -u "$TN_BUILD_USER" 2>/dev/null)" || return 1
+    owner="$(stat -c '%u' -- "$bin" 2>/dev/null)" || return 1
+    if [[ "$owner" == "$uid" ]]; then
+        tn_as_build_user timeout 30 "$bin" --version
+        return
+    fi
+    d="$(tn_as_build_user mktemp -d "${TN_BUILD_HOME}/probe.XXXXXX")" || return 2
+    if tn_as_build_user sh -c 'cat > "$1" && chmod 0700 "$1"' sh "${d}/telcoin-network" < "$bin"; then
+        out="$(tn_as_build_user timeout 30 "${d}/telcoin-network" --version)" || rc=$?
+    else
+        rc=2
+    fi
+    tn_as_build_user rm -rf -- "$d" || true
+    [[ $rc -eq 0 ]] || return $rc
+    printf '%s\n' "$out"
+}
 
 # =============================================================================
 # TESTNET OPT-IN ADD-ONS — shared scaffolding (COMMON_VERSION >= 1.2.0)
