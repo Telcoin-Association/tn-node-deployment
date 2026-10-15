@@ -1810,6 +1810,30 @@ update_lock() {
     return 0
 }
 
+# update_migrate_ownership -- once the update lock is held and before anything
+# else is written, bring an existing install to the root-owned file layout
+# with tn_migrate_ownership (idempotent; it never restarts the node). rc 0
+# when the layout is in place, rc 1 with the reason reported (an error event
+# in --json mode) when the migration refuses: a symlink or an unexpected owner
+# under the install trees, or a mainnet node that needs a fresh install.
+update_migrate_ownership() {
+    local rc=0 msg
+    # MERGE: drop this declare -F guard once tn_migrate_ownership is in lib/common.sh.
+    declare -F tn_migrate_ownership >/dev/null || return 0
+    tn_migrate_ownership update_wait_say || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        3) msg="This mainnet node still has the old file ownership layout and must be installed fresh; it is not migrated in place. Nothing was changed." ;;
+        *) msg="The file ownership migration stopped (see the list above). Review those paths, then run the update again. Nothing else was changed." ;;
+    esac
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_event error "$msg"
+    else
+        print_error "$msg"
+    fi
+    return 1
+}
+
 # update_arg_error <msg> -- report a command-line error: an error event in
 # --json mode, an [ERROR] line on stderr otherwise. The caller exits.
 update_arg_error() {
@@ -2350,6 +2374,7 @@ run_json_mode() {
                 json_event error "another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})} -- wait for it to finish"
                 return 1
             fi
+            update_migrate_ownership || return 1
             ;;
     esac
     local install_method
@@ -2473,8 +2498,10 @@ main() {
     esac
 
     # Everything past this point can mutate node state (discard, prepare,
-    # apply) -- one update at a time. See tn_acquire_update_lock.
+    # apply) -- one update at a time. See tn_acquire_update_lock. The
+    # ownership migration runs first, under the lock.
     update_lock || exit 1
+    update_migrate_ownership || exit 1
 
     # Handle --discard flag. A pending state that cannot be read (a symlink, a
     # wrong owner, a malformed value) can still be discarded.
