@@ -812,12 +812,32 @@ _setup_docker_apt() {
     done
 }
 
+# _setup_daemon_json_live_restore FILE -- rc 0 when FILE holds exactly one JSON
+# object with "live-restore": true (python3, else jq); rc 1 otherwise, 2 when
+# neither tool is installed.
+_setup_daemon_json_live_restore() {
+    if command_exists python3; then
+        python3 -I -c '
+import json, sys
+t = sys.stdin.read()
+d = json.loads(t) if t.strip() else {}
+sys.exit(0 if isinstance(d, dict) and d.get("live-restore") is True else 1)
+' < "$1" >/dev/null 2>&1
+    elif command_exists jq; then
+        jq -s -e 'length == 1 and (.[0] | type) == "object" and .[0]["live-restore"] == true' < "$1" >/dev/null 2>&1
+    else
+        return 2
+    fi
+}
+
 # _setup_docker_live_restore -- "live-restore": true in /etc/docker/daemon.json, so a
 # restart of the Docker engine leaves the node's container running. A missing file is
-# written; an existing JSON object is merged with python3 (else jq), keeping its other
-# settings, and written back root 0644 through tn_write_root_file. A file that is not
-# a JSON object, a symlink, or a host with neither tool stops setup with the manual
-# step. dockerd then reloads its configuration (live-restore needs no engine restart).
+# written; an existing one must hold exactly one JSON object (an empty file counts as
+# {}), which is merged with python3 (else jq), keeping its other settings, and written
+# back root 0644 through tn_write_root_file. Anything else (two documents, an array, a
+# symlink), or a host with neither tool, stops setup with the manual step. The file is
+# read back before setup says live-restore is on. dockerd then reloads its
+# configuration (live-restore needs no engine restart).
 _setup_docker_live_restore() {
     local d="${TN_ROOT_PREFIX:-}/etc/docker" f merged="" rc=0
     f="${d}/daemon.json"
@@ -833,7 +853,8 @@ _setup_docker_live_restore() {
     elif command_exists python3; then
         merged="$(python3 -I -c '
 import json, sys
-d = json.load(sys.stdin)
+t = sys.stdin.read()
+d = json.loads(t) if t.strip() else {}
 if not isinstance(d, dict):
     sys.exit(1)
 if d.get("live-restore") is True:
@@ -842,10 +863,12 @@ d["live-restore"] = True
 print(json.dumps(d, indent=2))
 ' < "$f" 2>/dev/null)" || rc=$?
     elif command_exists jq; then
-        if jq -e 'type == "object" and .["live-restore"] == true' < "$f" >/dev/null 2>&1; then
+        # -s reads every document in the file: exactly one object, or none (an
+        # empty file, taken as {}), is merged; anything else is refused.
+        if jq -s -e 'length == 1 and (.[0] | type) == "object" and .[0]["live-restore"] == true' < "$f" >/dev/null 2>&1; then
             rc=3
         else
-            merged="$(jq 'if type == "object" then . + {"live-restore": true} else error("not an object") end' < "$f" 2>/dev/null)" || rc=$?
+            merged="$(jq -s 'if length == 0 then {} elif length == 1 and (.[0] | type) == "object" then .[0] else error("not one JSON object") end | . + {"live-restore": true}' < "$f" 2>/dev/null)" || rc=$?
         fi
     else
         setup_fail "Neither python3 nor jq is installed to merge ${f}; ${manual}"
@@ -853,9 +876,15 @@ print(json.dumps(d, indent=2))
     case "$rc" in
         0) ;;
         3) print_ok "Docker live-restore already on (${f})"; return 0 ;;
-        *) setup_fail "${f} is not a JSON object setup can merge; ${manual}" ;;
+        *) setup_fail "${f} is not a single JSON object setup can merge; ${manual}" ;;
     esac
+    [[ -n "$merged" ]] || setup_fail "Could not merge ${f}; ${manual}"
     tn_write_root_file "$f" 0644 <<< "$merged" || setup_fail "Could not write ${f}; ${manual}"
+    rc=0
+    _setup_daemon_json_live_restore "$f" || rc=$?
+    if [[ $rc -eq 1 ]]; then
+        setup_fail "${f} does not have \"live-restore\": true after the write; ${manual}"
+    fi
     if systemctl reload docker 9>&- 2>/dev/null; then
         print_ok "Docker live-restore on (${f})"
     else

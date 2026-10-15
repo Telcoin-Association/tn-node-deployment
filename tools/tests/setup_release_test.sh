@@ -101,6 +101,40 @@ else
     check "not a JSON object: stops with the manual step" "1 yes [1, 2]" "$rc $(grep -q 'by hand' "$T/sn.err" && echo yes || echo no) $(cat "$DJ")"
 fi
 
+# Empty files and several documents, with python3 and with jq alone.
+lr_on() { grep -q '"live-restore": true' "$DJ" && echo yes || echo no; }
+for tool in python3 jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        skip "daemon.json edge cases with $tool" "$tool absent"
+        continue
+    fi
+    only=""
+    if [[ "$tool" == "jq" ]]; then
+        only='command_exists() { [ "$1" != python3 ] && command -v "$1" >/dev/null 2>&1; }; '
+    fi
+    : > "$DJ"
+    : > "$T/systemctl.log"
+    rc="$(sn "${only}${LR}")"
+    check "$tool: an empty daemon.json is taken as {}" "0 yes" "$rc $(lr_on)"
+    check "$tool: live-restore reported on only once set" yes "$(grep -q 'live-restore on' "$T/sn.out" && echo yes || echo no)"
+    printf '  \n\n' > "$DJ"
+    rc="$(sn "${only}${LR}")"
+    check "$tool: a whitespace-only daemon.json is taken as {}" "0 yes" "$rc $(lr_on)"
+    printf '{"a": 1}\n{"b": 2}\n' > "$DJ"
+    cp "$DJ" "$T/before"
+    rc="$(sn "${only}${LR}")"
+    check "$tool: two JSON documents are refused, file untouched" "1 same" "$rc $(cmp -s "$DJ" "$T/before" && echo same || echo changed)"
+    printf '{"live-restore": true}\n{"b": 2}\n' > "$DJ"
+    cp "$DJ" "$T/before"
+    rc="$(sn "${only}${LR}")"
+    check "$tool: two documents, the first already on: refused, not reported on" "1 same no" \
+        "$rc $(cmp -s "$DJ" "$T/before" && echo same || echo changed) $(grep -q 'already on' "$T/sn.out" && echo yes || echo no)"
+    printf '{"log-driver": "local"}\n' > "$DJ"
+    rc="$(sn "${only}tn_write_root_file() { printf '{}\\n' > \"\$1\"; }; systemctl() { :; }; _setup_docker_live_restore")"
+    check "$tool: a write that does not hold the key is not reported on" "1 no" \
+        "$rc $(grep -q 'live-restore on' "$T/sn.out" && echo yes || echo no)"
+done
+
 # edit-config set_docker_image.
 ec() {
     ( set +e
