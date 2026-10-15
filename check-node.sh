@@ -1677,6 +1677,12 @@ report_node_config
 # checked against VALIDATOR_ADDRESS in .node-meta before anything relies on either.
 resolve_identity
 report_address_mismatch
+# Hardening checks. Each function lands with its own package; a missing one is skipped.
+for _hc in check_bls_cleartext check_update_lock check_ownership_layout check_unit_environ \
+           check_unit_sandbox check_health_score check_healthcheck_on_mainnet; do
+    have_fns "$_hc" && "$_hc"
+done
+unset _hc
 
 # =============================================================================
 # 2. LOCAL RPC PROBE (probed before the report header; rendered here)
