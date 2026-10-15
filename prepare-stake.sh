@@ -22,8 +22,9 @@
 # staked or is retired, and while update-node.sh is applying an update (the two
 # share the update lock). The BLS key passphrase comes from
 # TN_BLS_PASSPHRASE, then <config dir>/bls-passphrase, then a prompt on the
-# terminal. It only ever reaches keytool through the environment, never a
-# command line.
+# terminal. It reaches keytool only on keytool's standard input, never through
+# the environment or a command line. keytool, and every write inside the data
+# dir (the node-info.yaml backup and its restore), runs as the service account.
 #
 # USAGE:
 #   sudo bash prepare-stake.sh [--network-rpc <URL>] [--json]
@@ -46,7 +47,7 @@
 # so nothing this script starts inherits it. Only --rotate-address uses the
 # private copy, for its one keytool call. The unset also drops an export flag
 # these names may have arrived with.
-unset PS_PASS PS_ENV_PASS
+unset PS_PASS PS_ENV_PASS TN_KEYTOOL_PASS
 PS_ENV_PASS="${TN_BLS_PASSPHRASE:-}"
 unset TN_BLS_PASSPHRASE
 
@@ -259,9 +260,7 @@ ps_on_interrupt() {
     fi
     case "$PS_PHASE" in
         window)
-            if cp -p "$BACKUP" "$NODE_INFO" 2>/dev/null; then
-                chown "${NI_UID}:${NI_GID}" "$NODE_INFO" 2>/dev/null || true
-                chmod "$NI_MODE" "$NODE_INFO" 2>/dev/null || true
+            if ps_restore_node_info; then
                 PS_MSG="${why} while the proof of possession was being signed; node-info.yaml is back as it was (from ${BACKUP})."
             else
                 PS_MSG="${why} while the proof of possession was being signed, and putting node-info.yaml back failed: copy ${BACKUP} over ${NODE_INFO} by hand."
@@ -752,19 +751,46 @@ ps_is_root() {
     [[ "$(id -u 2>/dev/null)" == "0" ]]
 }
 
+# ps_meta_read KEY -- KEY's value from .node-meta in PS_META_VAL ("" when
+# absent). A key set more than once has no single value: exit 1, nothing done.
+PS_META_VAL=""
+ps_meta_read() {
+    local rc=0
+    PS_META_VAL="$(meta_get "$1" "$META_FILE" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        ps_fail 1 "${1} is set more than once in ${META_FILE}. Remove the extra lines, then run this again."
+    fi
+    [[ "$rc" -eq 0 ]] || PS_META_VAL=""
+    return 0
+}
+
 # Fill in the node this script works on: config and data dirs, node-info.yaml,
 # the network (NETWORK in .node-meta, testnet when absent), its chain id and
-# public RPC (or --network-rpc), the service and the recorded address.
+# public RPC (or --network-rpc), the service, the recorded address and the
+# service account keytool runs as (HOST_SERVICE_USER/GROUP when recorded).
 ps_resolve_node() {
-    local def_rpc=""
+    local def_rpc="" rc=0
     CONFIG_DIR="$(tn_resolve_config_dir)"
-    DATA_DIR="$(tn_resolve_data_dir)"
+    DATA_DIR="$(tn_resolve_data_dir)" || rc=$?
+    if [[ "$rc" -ne 0 || -z "$DATA_DIR" ]]; then
+        ps_fail 1 "Could not tell this node's data dir: DATA_DIR is set more than once in .node-meta. Remove the extra lines, then run this again."
+    fi
     NODE_INFO="${DATA_DIR}/node-info.yaml"
     META_FILE="$(node_meta_path 2>/dev/null || true)"
     NETWORK=""
     if [[ -n "$META_FILE" ]]; then
-        NETWORK="$(meta_get NETWORK "$META_FILE" 2>/dev/null || true)"
-        META_ADDR="$(meta_get VALIDATOR_ADDRESS "$META_FILE" 2>/dev/null || true)"
+        ps_meta_read NETWORK
+        NETWORK="$PS_META_VAL"
+        ps_meta_read VALIDATOR_ADDRESS
+        META_ADDR="$PS_META_VAL"
+        ps_meta_read HOST_SERVICE_USER
+        if [[ -n "$PS_META_VAL" ]]; then
+            SERVICE_USER="$PS_META_VAL"
+        fi
+        ps_meta_read HOST_SERVICE_GROUP
+        if [[ -n "$PS_META_VAL" ]]; then
+            SERVICE_GROUP="$PS_META_VAL"
+        fi
         NETWORK_SRC="from .node-meta"
         if [[ -z "$NETWORK" ]]; then
             NETWORK="testnet"
@@ -785,7 +811,9 @@ ps_resolve_node() {
         ps_fail 1 "There is no public RPC for ${NETWORK}; pass --network-rpc <URL>."
     fi
     SERVICE="$(tn_resolve_service 2>/dev/null || true)"
-    LOCAL_RPC="$(tn_local_rpc_url)"
+    if ! LOCAL_RPC="$(tn_local_rpc_url)"; then
+        ps_fail 1 "RPC_PORT is set more than once in ${META_FILE}. Remove the extra lines, then run this again."
+    fi
 
     print_step "Node"
     print_info "Config dir:   ${CONFIG_DIR}"
@@ -1416,12 +1444,41 @@ ps_get_passphrase() {
     ps_fail 1 "No BLS key passphrase. Set TN_BLS_PASSPHRASE (sudo drops it unless you run sudo --preserve-env=TN_BLS_PASSPHRASE), keep it in ${f} with mode 600, or run this on a terminal to type it."
 }
 
+# ps_restore_node_info -- copy BACKUP over node-info.yaml as the service
+# account (cp -p keeps the backup's mode), never as root inside the data dir.
+ps_restore_node_info() {
+    tn_as_service_user cp -p -- "$BACKUP" "$NODE_INFO" 2>/dev/null
+}
+
+# ps_progress step|log|warn MESSAGE -- the progress printer the library helpers
+# call (tn_migrate_ownership).
+ps_progress() {
+    case "${1:-}" in
+        warn) ps_warn "${2:-}" ;;
+        step) print_step "${2:-}" ;;
+        *)    print_info "${2:-}" ;;
+    esac
+    return 0
+}
+
+# ps_migrate_layout -- with the update lock held and before anything is
+# written: tn_migrate_ownership brings an install made by an older release to
+# the root-owned layout (idempotent; it never restarts the node). A refusal ends
+# the run with nothing about the rotation changed.
+ps_migrate_layout() {
+    local rc=0
+    tn_migrate_ownership ps_progress || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        3) ps_done 3 "refused" "Refused: this mainnet node still has the old file ownership layout and must be installed fresh; it is not migrated in place. Nothing was changed." ;;
+        *) ps_fail 1 "The file ownership migration stopped (rc ${rc}; see the messages above). Review those paths, then run this again. node-info.yaml was not changed." ;;
+    esac
+}
+
 # ps_rollback WHY -- put node-info.yaml back from BACKUP, then exit 4.
 ps_rollback() {
     local why="$1"
-    if cp -p "$BACKUP" "$NODE_INFO" 2>/dev/null; then
-        chown "${NI_UID}:${NI_GID}" "$NODE_INFO" 2>/dev/null || true
-        chmod "$NI_MODE" "$NODE_INFO" 2>/dev/null || true
+    if ps_restore_node_info; then
         PS_PHASE=""
         ps_done 4 "rolled-back" "${why} node-info.yaml is back as it was (from ${BACKUP})."
     fi
@@ -1520,24 +1577,31 @@ ps_rotate() {
     if ! tn_acquire_update_lock >/dev/null 2>&1; then
         ps_done 3 "refused" "Refused: an update is in progress${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; try again when it has finished."
     fi
+    ps_migrate_layout
     old_bls="$(tn_node_info_field "$NODE_INFO" bls_public_key || true)"
     old_name="$(tn_node_info_field "$NODE_INFO" name || true)"
     if [[ -z "$old_bls" ]]; then
         ps_fail 1 "${NODE_INFO} has no bls_public_key; nothing changed."
     fi
+    # keytool and the backup run as the service account, which must own the
+    # file; root never writes, chowns or chmods inside the data dir.
+    if [[ -L "$NODE_INFO" || ! -f "$NODE_INFO" ]]; then
+        ps_fail 1 "${NODE_INFO} is not a regular file (or it is a symbolic link); nothing changed."
+    fi
     info="$(ps_stat "$NODE_INFO")" || ps_fail 1 "Could not read the owner and mode of ${NODE_INFO}; nothing changed."
     read -r NI_UID NI_GID NI_MODE <<<"$info"
+    if [[ "$NI_UID" != "$(id -u "${SERVICE_USER:-}" 2>/dev/null)" ]]; then
+        ps_fail 1 "${NODE_INFO} is not owned by the service account ${SERVICE_USER:-?} (uid ${NI_UID}); nothing changed."
+    fi
 
     BACKUP="${NODE_INFO}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-    if [[ -e "$BACKUP" ]]; then
+    if [[ -e "$BACKUP" || -L "$BACKUP" ]]; then
         BACKUP="${BACKUP}.$$"
     fi
-    if ! cp -p "$NODE_INFO" "$BACKUP"; then
+    if ! tn_as_service_user cp -p -- "$NODE_INFO" "$BACKUP"; then
         BACKUP=""
         ps_fail 1 "Could not back up ${NODE_INFO}; nothing changed."
     fi
-    chown "${NI_UID}:${NI_GID}" "$BACKUP" 2>/dev/null || true
-    chmod "$NI_MODE" "$BACKUP" 2>/dev/null || true
     PS_PHASE="window"
     print_ok "Backed up node-info.yaml to ${BACKUP}"
 
@@ -1547,14 +1611,15 @@ ps_rotate() {
     # keytool runs as a background job that ignores TERM, INT and HUP, so a
     # signal never stops it half way through writing node-info.yaml; `wait`
     # returns at once on a signal and the EXIT trap waits for the job before it
-    # puts the backup back. In the job the passphrase is a plain shell variable,
-    # not exported (ps_get_passphrase unset the environment copy), and
-    # tn_keytool passes it to the keytool process alone. The job does not get
+    # puts the backup back. In the job the passphrase is TN_KEYTOOL_PASS, a plain
+    # shell variable that is never exported (the start of the script unset any
+    # inherited copy, and tn_keytool refuses an exported one); tn_keytool feeds
+    # it to keytool on its standard input alone. The job does not get
     # descriptor 9 (the flock kind of the update lock). keytool's own report
     # (and its hint to run export-staking-args) is dropped; the checks below
     # read node-info.yaml instead.
     ( trap '' TERM INT HUP
-      TN_BLS_PASSPHRASE="$PS_PASS"
+      TN_KEYTOOL_PASS="$PS_PASS"
       tn_keytool "$RUNNER" "$DATA_DIR" generate pop --address "$NEW_ADDR" ) \
         >/dev/null 2>"${errf:-/dev/null}" 9>&- &
     PS_KT_PID=$!
@@ -1581,8 +1646,8 @@ ps_rotate() {
     if [[ "$got_name" != "$old_name" ]]; then
         ps_rollback "After keytool, the node name in node-info.yaml is different; it must not change."
     fi
-    chown "${NI_UID}:${NI_GID}" "$NODE_INFO" 2>/dev/null || ps_warn "Could not set the owner of ${NODE_INFO} back to ${NI_UID}:${NI_GID}."
-    chmod "$NI_MODE" "$NODE_INFO" 2>/dev/null || ps_warn "Could not set the mode of ${NODE_INFO} back to ${NI_MODE}."
+    tn_as_service_user chmod -- "$NI_MODE" "$NODE_INFO" 2>/dev/null \
+        || ps_warn "Could not set the mode of ${NODE_INFO} back to ${NI_MODE}."
     PS_PHASE="rotated"
     print_ok "node-info.yaml names ${NEW_CS}; the BLS key and the node name are unchanged."
 
