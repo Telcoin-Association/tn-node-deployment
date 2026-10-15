@@ -464,15 +464,33 @@ only overlay source sshd admits. The bundle gains `lib/wgvpn/peers/ssh/KEYS`.
 - Log streams cut every spelling of a secret. Secrets reach the scripts on stdin only.
 - The helper checks every argument against a pattern and writes each call, refused ones
   included, to the root-only `/var/log/telcoin-ui/audit.log`.
-- New helper subcommands for `node.env`, the journal, the committee check and the logrotate
-  seed; `HELPER_API` and `HELPER_API_REQUIRED` are 3.
-- The setup wizard refuses when a node unit or `.node-meta` exists, offers only the detected
-  release tag, and holds the dashboard password to 16 bytes. Public `/api/nodes` and
-  `/api/system` drop operator-only fields.
+- New helper subcommands for `node.env`, the journal, the committee check, the logrotate
+  seed, the credential (`credential migrate|reseal`), enabling the firewall with an SSH source
+  list, and the host audit; `HELPER_API` and `HELPER_API_REQUIRED` are 3.
+- The helper refuses an action when the engine library lacks a function it needs or an engine
+  script lacks its stdin flag, and says to run update-scripts.sh. Its own copies of the
+  library functions are gone. `config-set` applies the same listener-port rule as edit-config.
+- The setup wizard refuses when a node unit or `.node-meta` exists and holds the dashboard
+  password to 16 bytes. It installs a signed release, a source build of a release tag, or
+  Docker; the tag field starts at the latest release tag, and the Docker field takes a release
+  tag or a digest (`latest` refused). The mainnet defaults are the signed release and journal
+  logging, and `--allow-no-tpm` is offered only when the host audit finds no TPM2. The Mainnet
+  card stays disabled until the mainnet release. Public `/api/nodes` and `/api/system` drop
+  operator-only fields.
+- The Config tab moves the passphrase to the encrypted credential and re-seals it
+  (`edit-config.sh --migrate-credential` / `--reseal`).
+- The System tab shows the host audit (`check-node.sh --audit`) and, when the firewall is off,
+  enables it with an SSH source list passed as `--ssh-from`; on mainnet an empty list is
+  refused with firewall-setup's own message.
+- Before public RPC is enabled, the page shows the exposure summary install-caddy prints.
+- The update panel reports a refused downgrade, a node that is not voting after an update, and
+  a release tag that moved.
 - install-ui installs the app and a venv as root-owned trees (`/opt/telcoin-ui`,
   `/opt/telcoin-ui-venv`) from the hashed `ui/requirements.txt` (`--require-hashes`; flask
   3.1.3, werkzeug 3.1.9). It checks the sudoers file with `visudo`, and runs updates and setup
-  in their own `systemd-run --scope`.
+  in their own `systemd-run --scope`. It copies check-node.sh into the engine dir and keeps two
+  more non-secret setup values across sudo (`TN_SETUP_LOG_TARGET`, `TN_SETUP_ALLOW_NO_TPM`);
+  hosts that already run the UI re-run `install-ui.sh --update` for them.
 - The UI unit gets `TasksMax=256`, `MemoryMax=512M` and `CPUQuota=50%`.
 - install-ui reads the library only after checking the checkout: no symlinks, nothing writable
   by other users, owned by root or the operator. A `su -` root shell installs only from a

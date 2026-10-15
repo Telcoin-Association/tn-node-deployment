@@ -1029,7 +1029,7 @@ On testnet only, a Docker install or update given a release tag falls back to th
 
 A source build verifies the git tag itself: the tag's signature is checked against the same `lib/release-keys` (a bad signature refuses everywhere, one that cannot be checked refuses on mainnet and warns on testnet), the tag must match the one on origin, and the chain configs in the checkout must match the pins.
 
-Release tarballs are built for x86_64 only, so `--install-method release` is refused on aarch64. To check a release by hand, put the three files in an empty directory and run:
+Release tarballs are built for x86_64 only. On aarch64 a release install stops with "Release TAG has no aarch64-unknown-linux-gnu tarball"; use a source or Docker install there. To check a release by hand, put the three files in an empty directory and run:
 
 ```bash
 for k in ~/telcoin-node-scripts/lib/release-keys/*.asc; do gpg --dearmor < "$k"; done > keys.gpg
@@ -1115,6 +1115,8 @@ The **Settings** tab can start/stop a local Jaeger instance and toggle OpenTelem
 
 The wizard runs `setup-node.sh` in two phases: key generation, then finalize once you have backed up the keys. On the Configure step, the Public RPC card asks for the public RPC hostname. It suggests the node's own name, checks the name with the hostname rule below, warns when the name already serves the dashboard, and checks DNS against the public IP the wizard uses (when you press "Check DNS" and when the field loses focus). A DNS mismatch is only a warning, because `setup-node.sh` checks again before it enables public RPC and keeps the node private while the name does not resolve. Continue needs a valid hostname while Public is selected. The review step reads "Public at <hostname>" or "Private".
 
+The Install step offers three methods: a signed release (the release tarball, checked as [How updates are verified](#how-updates-are-verified) describes), a source build of a release tag, and Docker. The tag field starts at the latest release tag for the network. The Docker field takes a release tag or an image digest, and `latest` is refused. On testnet the default is the source build. The mainnet defaults are the signed release with logs in the systemd journal, and the wizard offers `--allow-no-tpm` only when the host audit finds no TPM2. The Mainnet card stays disabled until the mainnet release.
+
 When the server refuses a setup request, the wizard shows the server's own message on the step where you clicked; at finalize the button stays available for a retry. After finalize, the completion card shows the public RPC state: enabled or private, the hostname, the HTTPS and WSS URLs `node-info.yaml` advertises, and whether the WebSocket port listens.
 
 Dashboard and public RPC hostnames must have two or more labels of letters, digits and inner hyphens, each label at most 63 characters and the whole name at most 253, and must not be an IPv4 address. The page, the server and the helper apply the same rule, and the page sends names lowercased without a trailing dot.
@@ -1122,6 +1124,10 @@ Dashboard and public RPC hostnames must have two or more labels of letters, digi
 ### System tab
 
 The Public RPC card shows whether `node-info.yaml` advertises the endpoint to peers over HTTPS and WebSocket and whether the node's WebSocket port is listening. It warns when only HTTPS is advertised or the port is closed, and says when the advertised name differs from the one Caddy serves. When `node-info.yaml` advertises an endpoint that Caddy no longer serves, the card offers "Withdraw advertisement", which runs rpc-disable and restarts the node. A Caddy site written by `install-caddy.sh` 1.3.0 or older gets a refresh button, which is a Caddy reload. The hostname field suggests the node's own name, and typing the dashboard's hostname opens a box that moves the dashboard to `dashboard.<name>` in the same step.
+
+Before you confirm public RPC, the page shows the same exposure summary that `install-caddy.sh` prints.
+
+The Host Security Audit card shows the output of `check-node.sh --audit`. When the firewall is off, the firewall card can turn it on: it asks for the SSH sources (addresses or CIDRs, /8 or narrower, at most 16) and passes them to `firewall-setup.sh` as `--ssh-from`. On mainnet `firewall-setup.sh` refuses without a list, and the card shows its message as written. The form has no field for `--p2p-from` or `--ssh-anywhere`; use `firewall-setup.sh` on the server for those.
 
 The firewall card lists node ports beyond its three toggles, read-only. CPU counts are physical cores, shown as "8 (16 threads)", and the setup preflight judges the hardware tiers on physical cores too.
 
@@ -1135,13 +1141,17 @@ On a synced node, the Current Epoch tile counts down to the epoch boundary, corr
 
 Progress panes read one stream per action. Stray script output appears as log lines, warnings are yellow, and a dropped connection adds a line asking you to check the status before you retry; updates and config saves no longer reconnect on their own, which could run the action a second time. An update or a config save on a committee node can wait up to 30 minutes for the epoch boundary (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)), with a progress line every 15 seconds. Keep the page open until the action finishes: leaving the tab stops the script. A one-way update (see [Updating the node](#updating-the-node)) shows its warning in the pane when you prepare it, and after the restart its health check can take up to 10 minutes. During an update's epoch wait nothing has changed yet, so stopping there leaves the node as it was. A config save writes its change before it waits, so a save stopped before its restart is rolled back: every file it changed is put back, and the result says so (`rolled_back: true`). Once the restart has been issued, the edit stays.
 
+### Config tab and update panel
+
+The Config tab moves an older install's passphrase to the encrypted credential ("Migrate to an encrypted credential", `edit-config.sh --migrate-credential`) and re-seals an existing credential ("Re-seal the passphrase credential", `edit-config.sh --reseal`). Both run the quorum check, wait for the epoch window and restart a running node, and both put every file back when the node does not come up. The update panel reports a refused downgrade, a node that is not voting after the update (rolled back unless the update was one-way), and a release tag that now points at another commit than the one installed.
+
 ### Security model
 
 - Binds `127.0.0.1` only; never `0.0.0.0`. Reached via an SSH tunnel — no new firewall ports — unless you opt into public access via Caddy (above), which is **read-only** and enforced server-side.
 - Every API request must name the UI's own host (`127.0.0.1`, `localhost` or `[::1]` on port 8080; anything else gets 421) and carry the access token (401 without it). A request that changes something must also be a JSON `POST` (415 otherwise) with no foreign `Origin` (403). Bodies are capped at 64 KiB, changes are rate-limited (429), and every change and every refused request is logged with secrets left out: by the server to the journal (`journalctl -u telcoin-ui | grep '"audit":1'`), and by the helper to the root-only `/var/log/telcoin-ui/audit.log`.
 - The UI runs as the unprivileged `telcoin-ui` user. Its `sudo` rights come from one sudoers drop-in, `/etc/sudoers.d/telcoin-ui` (mode 440). The installer builds a new whitelist under a dotted name that sudo ignores and checks it with `visudo -c` (step 5). It renames the candidate over the live drop-in at step 11, after the helper, the engine copies, the UI files and the unit are in place; step 12 then starts or restarts the UI. A rejected candidate is discarded and the live drop-in stays as it was. The drop-in grants nothing else:
   - `systemctl start|stop|restart` for the unified `telcoin` unit and for the legacy `telcoin-observer` and `telcoin-validator` units.
-  - Named sub-commands of one root-owned helper, `/usr/local/sbin/telcoin-ui-helper`, which performs every other privileged action. Most are pinned to fixed arguments. The few that take a value (an update ref, a config field and value, a hostname, a log-rotation size, a domain, a container name) wildcard it in sudoers, and the helper validates it before use. The helper runs root-owned copies of `update-node.sh`, `edit-config.sh`, `setup-node.sh`, `install-caddy.sh` and `firewall-setup.sh` from `/opt/telcoin-ui-update`.
+  - Named sub-commands of one root-owned helper, `/usr/local/sbin/telcoin-ui-helper`, which performs every other privileged action. Most are pinned to fixed arguments. The few that take a value (an update ref, a config field and value, a hostname, a log-rotation size, a domain, a container name) wildcard it in sudoers, and the helper validates it before use. The helper runs root-owned copies of `update-node.sh`, `edit-config.sh`, `setup-node.sh`, `install-caddy.sh`, `firewall-setup.sh` and `check-node.sh` from `/opt/telcoin-ui-update`. When that copy of the library lacks a function the helper needs, or a script lacks the flag that takes a secret on standard input, the helper refuses the action and says to run `update-scripts.sh` and then `install-ui.sh --update`.
   - Secrets never pass through sudo: the server writes the BLS passphrase and the dashboard password to the helper's standard input, and the helper hands them to the script on its standard input (`setup-node.sh --passphrase-stdin`, `install-caddy.sh --password-stdin`). Only the non-secret `TN_SETUP_*` setup values are kept across sudo, and only for `setup-keygen` and `setup-finalize`.
 - The helper speaks API 3 (`helper-version` prints 3): node subcommands take no `observer|validator` argument, every argument is checked against a pattern before anything runs, and the helper finds the node the way `lib/fallback.sh` does. The installer swaps the whitelist in last, so an interrupted run leaves the old whitelist with the new helper.
 - Config edits go through `config-set`, which accepts only these fields and value shapes; `edit-config.sh` then does the full checks: `primary_listener` and `worker_listener` (a QUIC multiaddr), `metrics` (`<IPv4>:<port>` or `off`), `verbosity` (`-v` to `-vvvvv`), `docker_image`, `bootstrap_peers` (`none` or an absolute path), `state_export` (`off`, `unlimited` or 1 to 999999) and `allow_private_forward_targets` (`true` or `false`). The page has no inputs for the last three yet, and its metrics field does not accept `off`; use `edit-config.sh` on the server for those.
@@ -1628,10 +1638,19 @@ The Node Manager UI now needs a per-install token on every API call. The token l
   included, in the root-only `/var/log/telcoin-ui/audit.log`. `HELPER_API` and
   `HELPER_API_REQUIRED` are 3: the server needs the helper's new subcommands for `node.env`,
   the journal, the committee check and the logrotate seed.
-- The setup wizard refuses when a node unit or `.node-meta` already exists, offers only the
-  detected release tag for a source build, and holds the dashboard password to 16 bytes.
-  Public `/api/nodes` and `/api/system` no longer return operator-only fields.
-- Updates take release tags only.
+- The setup wizard refuses when a node unit or `.node-meta` already exists and holds the
+  dashboard password to 16 bytes. It installs a signed release, a source build of a release
+  tag, or Docker (a release tag or a digest; `latest` refused). On mainnet it defaults to the
+  signed release and journal logging and offers `--allow-no-tpm` only without a TPM2; the
+  Mainnet card stays disabled until the mainnet release. Public `/api/nodes` and `/api/system`
+  no longer return operator-only fields.
+- New actions: migrate the passphrase to the encrypted credential and re-seal it (Config tab),
+  the host audit and enabling the firewall with an SSH source list (System tab), and the
+  public-RPC exposure summary before you confirm.
+- Updates take release tags only; the update panel reports a refused downgrade, a node that is
+  not voting after the update, and a moved release tag.
+- The helper refuses an action, with a pointer to update-scripts.sh, when the engine copy is
+  too old for it.
 
 update-scripts no longer redeploys the UI: after it updates the UI files, run the
 `sudo bash ui/install-ui.sh --update` it prints. Full release note:

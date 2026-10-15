@@ -12,11 +12,6 @@ yet; this file gains the issue numbers when they are.
 
 ## Pending merge
 
-- A Node Manager UI follow-up pass is in progress: it retires the helper's local copies of
-  library functions, adds credential migration and re-seal to the Config tab, passes `--ssh-from`
-  when the UI enables the mainnet firewall, offers the release install method in the setup wizard
-  and shows the `--audit` report in the System panel. Closes when it merges; the UI items below
-  are updated then.
 - A fix pass for release installs and Docker digests is in progress: source builds in a transient
   systemd scope, staging cleanup when a run is interrupted by a signal, an image repository
   allowlist (`TN_TESTNET_IMAGE_REPOS`), and edge cases in the `/etc/docker/daemon.json` merge.
@@ -210,16 +205,20 @@ yet; this file gains the issue numbers when they are.
 - install-ui's one-time move of `node-role.json` checks the old copy under `/opt/telcoin-ui`, then
   root installs it, and that old path may belong to the UI account. Closes when the copy is read as
   the UI account.
-- The helper's local `_write_root`, used only with an older engine library, does not check the
-  parent directory the way the library does and renames with `mv -f`; its local logrotate template
-  also differs from the library's. Both go with the fallback retirement in the pending UI pass.
 - The read-only public path is not bound to the dashboard's host name: `is_public_request` only
   checks that the `X-TN-Dashboard-Public` header is present, so any local process can read the
   eight public routes (none reaches sudo). Closes when the path is tied to the dashboard Host.
 - `ui/server.py`'s refusal to bind off loopback still says "This UI has no auth of its own",
   although the UI now has a per-install token. Closes when the message is reworded.
-- The UI shows `edit-config.sh --migrate-credential` and `--reseal` as commands to run on the
-  server; it cannot run them itself. Closes with the pending UI pass.
+- The Config tab's credential migration and re-seal cannot pass `--allow-no-tpm`, so on a mainnet
+  host without a TPM2 they are refused and the operator runs `edit-config.sh` on the server.
+  Closes when the Config tab offers the flag the way the setup wizard does.
+- The System tab's firewall form takes an SSH source list only; it has no field for
+  `--p2p-from`, `--ssh-anywhere` or `--p2p-anywhere`. Closes when the form offers them.
+- `ui/server.py` keeps its own front-line copies of rules the library and helper also enforce
+  (`passphrase_ok`, `image_allowed`, `release_tag_ok`). They have to change together
+  with the library. Closes when the server asks the helper instead, or a test compares the
+  copies.
 - A wizard keygen that fails after `.node-meta` is written cannot be retried: the helper refuses
   with "a node install already started", finalize is offered only after a successful keygen, and
   the way out is `remove-node.sh` over SSH. The wizard's Back button also stays live after keygen
@@ -229,10 +228,6 @@ yet; this file gains the issue numbers when they are.
   with `--no-block`. The quorum badge on the update panel is display only. Updates and config
   saves do run both checks through update-node and edit-config. Closes when UI restarts go through
   the same wait and guard.
-- The helper's `config-set` checks only the multiaddr shape of a listener; the rule that its UDP
-  port must equal the one in `EXTERNAL_PRIMARY_ADDR` or `EXTERNAL_WORKER_ADDR` is enforced by
-  edit-config, so the operator learns of it from the script's error. Closes when the helper or
-  server checks it up front.
 - The Config tab offers `docker_image` as an editable field for Docker installs, which the
   server's `CONFIG_FIELDS` and the helper both refuse. Closes when the field is read-only there.
 - An action stops when the operator closes the browser or leaves the Update or Config tab: the
