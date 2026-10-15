@@ -1032,7 +1032,8 @@ _preflight_existing() {
 # 0 when BINARY_PATH can go into the start wrapper: an absolute path of letters, digits
 # and . _ / - (the wrapper holds it unquoted and runs as root) naming an executable file
 # (the wrapper execs it from systemd, where a relative path or a missing file only shows
-# up as a crash loop). Otherwise 1, with the reason on stdout.
+# up as a crash loop) that passes _tn_root_binary_ok and that the service account can
+# read and run (tn_service_user_can_run). Otherwise 1, with the reason on stdout.
 binary_path_ok() {
     case "${BINARY_PATH:-}" in
         /*) ;;
@@ -1044,6 +1045,16 @@ binary_path_ok() {
     fi
     if [[ ! -f "$BINARY_PATH" || ! -x "$BINARY_PATH" ]]; then
         printf 'No executable node binary at %s.' "$BINARY_PATH"
+        return 1
+    fi
+    # The start-script writer and the keytool refuse what these two refuse; say it
+    # here, before anything is written.
+    if ! _tn_root_binary_ok "$BINARY_PATH"; then
+        printf 'refusing %s: the node binary must be a root-owned file, not group- or other-writable, in root-owned directories.' "$BINARY_PATH"
+        return 1
+    fi
+    if ! tn_service_user_can_run "$TN_ROOT_BINARY_REAL"; then
+        printf 'refusing %s: the service account %s cannot read and run %s; make it readable and executable (for example chmod 0755) in directories that account can enter.' "$BINARY_PATH" "${SERVICE_USER:-}" "$TN_ROOT_BINARY_REAL"
         return 1
     fi
     return 0

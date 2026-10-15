@@ -1063,6 +1063,29 @@ _tn_root_binary_ok() {
     return 1
 }
 
+# tn_service_user_can_run FILE -- rc 0 when the service account (SERVICE_USER) can
+# read and execute FILE. Asked as that account (tn_as_service_user) when it exists;
+# before setup creates it, from the permission bits: FILE other-readable and
+# other-executable, every directory above it other-searchable. rc 1 otherwise.
+tn_service_user_can_run() {
+    local f="${1:-}" d m
+    [[ "$f" == /* && -f "$f" ]] || return 1
+    if id -u "${SERVICE_USER:-}" >/dev/null 2>&1; then
+        tn_as_service_user test -r "$f" 2>/dev/null || return 1
+        tn_as_service_user test -x "$f" 2>/dev/null || return 1
+        return 0
+    fi
+    m="$(stat -c %a -- "$f" 2>/dev/null)" || return 1
+    [[ "$m" =~ ^[0-7]+$ ]] && (( (8#$m & 5) == 5 )) || return 1
+    d="${f%/*}"
+    while [[ -n "$d" ]]; do
+        m="$(stat -c %a -- "$d" 2>/dev/null)" || return 1
+        [[ "$m" =~ ^[0-7]+$ ]] && (( (8#$m & 1) == 1 )) || return 1
+        d="${d%/*}"
+    done
+    return 0
+}
+
 # _tn_own_scan TREE SUID -- print "<reason>: <path>" for every entry under TREE
 # (not TREE itself) that is a symlink, neither a regular file nor a directory, a
 # regular file with more than one hard link, or owned by neither root nor uid
