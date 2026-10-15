@@ -68,6 +68,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # only module that knows the legacy names/layout.
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
+# The library must be the one shipped with this script (a partial update leaves
+# an older one, which lacks helpers this script calls): COMMON_VERSION 2.0.0 or
+# newer, then the helpers this script calls. Refuse up front with one message.
+if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
+    || ! tn_require_fns tn_update_lock_path tn_write_root_file tn_backup_file \
+        tn_restore_backup tn_write_node_unit tn_rerender_node_launch tn_committee_down_guard \
+        tn_store_credential _tn_cred_old_copies tn_precreate_log_files >/dev/null; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this migrate-node-naming.sh: run update-scripts.sh and try again."
+    case " $* " in
+        *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
+        *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
+    esac
+    exit 1
+fi
+unset _tn_old
 
 # errtrace: WITHOUT -E the ERR trap (on_error) is NOT inherited by shell
 # functions, so a failure inside a migration step would exit WITHOUT running
@@ -75,21 +90,6 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # runs. (common.sh's own `set -euo pipefail` does not clear -E.)
 set -E
 
-# This script writes through the root-write helpers of the current library.
-for _tn_fn in tn_backup_file tn_restore_backup tn_write_root_file tn_start_script_path \
-              tn_wait_restart_window tn_update_lock_path _tn_root_layout_dir _tn_strip_gw \
-              tn_write_node_unit tn_rerender_node_launch tn_precreate_log_files \
-              tn_committee_down_guard tn_remove_inflight_tmp \
-              tn_has_embedded_passphrase _tn_unit_pass_read _tn_unit_runs_node_inline \
-              tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported \
-              tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch \
-              tn_chain_configs_check _tn_cred_old_copies; do
-    if ! declare -F "$_tn_fn" >/dev/null 2>&1; then
-        print_error "lib/common.sh ${COMMON_VERSION:-unknown} has no ${_tn_fn}. Run update-scripts.sh and try again."
-        exit 1
-    fi
-done
-unset _tn_fn
 
 # Version, gated by update-scripts.sh like every other tracked file.
 readonly SCRIPT_VERSION="2.0.0"

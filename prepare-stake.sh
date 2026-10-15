@@ -53,20 +53,12 @@ unset TN_BLS_PASSPHRASE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
-# The library must be the one shipped with this script: an older one (a partial
-# update) lacks helpers this script calls. Refuse up front with one message.
-_tn_old=""
-version_gte "${COMMON_VERSION:-0}" "1.6.0" || _tn_old=1
-for _tn_fn in tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write_root_file \
-              tn_detect_network tn_write_node_unit tn_remove_inflight_tmp tn_committee_down_guard \
-              tn_docker_image_allowed tn_rerender_node_launch \
-              tn_has_embedded_passphrase _tn_unit_pass_read _tn_unit_runs_node_inline \
-              tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported \
-              tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch \
-              tn_chain_configs_check; do
-    declare -F "$_tn_fn" >/dev/null 2>&1 || _tn_old=1
-done
-if [[ -n "$_tn_old" ]]; then
+# The library must be the one shipped with this script (a partial update leaves
+# an older one, which lacks helpers this script calls): COMMON_VERSION 2.0.0 or
+# newer, then the helpers this script calls. Refuse up front with one message.
+if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
+    || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_as_service_user \
+        tn_committee_down_guard tn_detect_network >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this prepare-stake.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -74,7 +66,7 @@ if [[ -n "$_tn_old" ]]; then
     esac
     exit 1
 fi
-unset _tn_fn _tn_old
+unset _tn_old
 
 readonly SCRIPT_VERSION="2.0.0"
 

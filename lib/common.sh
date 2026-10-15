@@ -2196,6 +2196,20 @@ version_gte() {
     [[ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]
 }
 
+# tn_require_fns NAME... -- rc 0 when every NAME is a defined function; rc 1
+# otherwise, with the missing names on stdout (one line, space separated). The
+# scripts call it right after sourcing this file, behind their COMMON_VERSION
+# gate, with the helpers they call themselves.
+tn_require_fns() {
+    local fn missing=""
+    for fn in "$@"; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing} ${fn}"
+    done
+    [[ -z "$missing" ]] && return 0
+    printf '%s\n' "${missing# }"
+    return 1
+}
+
 check_rust() {
     print_step "Checking Rust installation..."
     if ! command_exists rustc; then

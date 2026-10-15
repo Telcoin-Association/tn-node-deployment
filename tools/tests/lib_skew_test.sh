@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # =============================================================================
 # tools/tests/lib_skew_test.sh -- the scripts against an older lib/common.sh:
-# setup-node, update-node, edit-config and prepare-stake refuse up front with one
-# message (and a --json error plus done event), before they stop a node or pull
-# an image, and check-node warns once about the hardening checks the older
-# library turns off. Without one of the release, build and image helpers,
-# setup-node, update-node and edit-config refuse the same way.
+# setup-node, update-node, edit-config, prepare-stake, migrate-node-naming and
+# remove-node refuse up front with one message (and a --json error plus done
+# event) when COMMON_VERSION is below 2.0.0, when the library has no
+# tn_require_fns, or when one of the helpers the script names to tn_require_fns
+# is missing, before they stop a node or pull an image. check-node warns once
+# about the hardening checks the older library turns off.
 #
 #   bash tools/tests/lib_skew_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/lib_skew_test.sh
 #
-# First, each required helper on its own: a copy of the current library without
-# it makes every one of the four scripts refuse. Then the library at 037c810
-# (COMMON_VERSION 1.6.1, the release before the hardening round), read with
-# git; without git or that commit (a container, a shallow clone) that part
-# prints SKIP. bash 3.2 safe.
+# First tn_require_fns itself, then each script's own list (read from the
+# script): a copy of the current library without one of its helpers makes that
+# script refuse. Then the library at 037c810 (COMMON_VERSION 1.6.1, the release
+# before the hardening round), read with git; without git or that commit (a
+# container, a shallow clone) that part prints SKIP. bash 3.2 safe.
 # =============================================================================
 
 set -u
@@ -25,71 +26,62 @@ set -u
 T="$TN_TEST_TMP"
 REPO="$TN_TEST_REPO"
 OLD=037c810
-SCRIPTS=(setup-node update-node edit-config prepare-stake)
-REQUIRED=(tn_migrate_ownership tn_passphrase_ok tn_update_lock_path tn_write_root_file
-          tn_detect_network tn_write_node_unit tn_remove_inflight_tmp tn_committee_down_guard
-          tn_docker_image_allowed tn_rerender_node_launch
-          tn_has_embedded_passphrase _tn_unit_pass_read _tn_unit_runs_node_inline
-          tn_migrate_credential tn_migrate_embedded_passphrase tn_creds_supported
-          tn_credential_key tn_pcrs_ok tn_store_credential _tn_cred_switch
-          tn_chain_configs_check)
-# The release, build and image helpers setup-node, update-node and edit-config
-# also require.
-CORE4_SCRIPTS=(setup-node update-node edit-config)
-CORE4_REQUIRED=(tn_docker_repo_for tn_docker_resolve_ref tn_docker_holds_digest tn_docker_image_for_tag
-          tn_staging_dir tn_release_stage tn_stage_binary tn_build_user_ensure tn_rustup_ensure
-          tn_source_checkout_tag tn_source_build tn_staged_cleanup tn_staging_sweep)
-# The credential helpers migrate-node-naming.sh also requires (its own message).
-MIGRATE_REQUIRED=(tn_remove_inflight_tmp tn_has_embedded_passphrase _tn_unit_pass_read
-          tn_store_credential tn_creds_supported tn_credential_key _tn_cred_old_copies)
+SCRIPTS=(setup-node update-node edit-config prepare-stake migrate-node-naming remove-node)
 
-# ---- each required helper: without it, every script refuses ---------------------------
+# required_of SCRIPT -- the helper names SCRIPT passes to tn_require_fns.
+required_of() {
+    awk '/\|\| ! tn_require_fns/ { f = 1 } f { print } f && />\/dev\/null; then/ { exit }' "$REPO/${1}.sh" \
+        | tr -d '\\\n' | sed 's/.*tn_require_fns//; s/>\/dev\/null.*//'
+}
+# refuses DIR SCRIPT -- "yes" when DIR/SCRIPT.sh --help exits 1 with the one message.
+refuses() {
+    local rc=0
+    "$BASH" "$1/${2}.sh" --help > /dev/null 2> "$T/err" < /dev/null || rc=$?
+    if [[ $rc -eq 1 ]] && grep -q "is older than this ${2}.sh: run update-scripts.sh" "$T/err"; then
+        echo yes
+    else
+        echo "no (rc ${rc})"
+    fi
+}
+
+# ---- tn_require_fns ------------------------------------------------------------------
+# In a child shell, so this one keeps none of the library's functions (the
+# check-node part below must see only the old library's).
+# shellcheck disable=SC2016
+req_run() { "$BASH" -c 'source "$1/lib/common.sh" >/dev/null 2>&1; set +e; shift; o="$(tn_require_fns "$@")"; echo "$? $o"' _ "$REPO" "$@"; }
+check "tn_require_fns: all defined" "0 " "$(req_run version_gte tn_require_fns)"
+check "tn_require_fns: names the missing ones" "1 tn_no_such_a tn_no_such_b" \
+    "$(req_run version_gte tn_no_such_a tn_no_such_b)"
+
+# ---- each script's own list: without one of its helpers, the script refuses ------------
 mkdir -p "$T/cur"
 cp -R "$REPO/lib" "$T/cur/lib"
 for s in "${SCRIPTS[@]}"; do
     cp "$REPO/${s}.sh" "$T/cur/${s}.sh"
-done
-for fn in "${REQUIRED[@]}"; do
-    sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
-    if ! grep -q "^${fn}_absent_here() {" "$T/cur/lib/common.sh"; then
-        check "${fn}: defined in lib/common.sh" "yes" "no"
-        continue
-    fi
-    got=""
-    for s in "${SCRIPTS[@]}"; do
-        rc=0
-        "$BASH" "$T/cur/${s}.sh" --help > /dev/null 2> "$T/err" < /dev/null || rc=$?
-        if [[ $rc -eq 1 ]] && grep -q "is older than this ${s}.sh: run update-scripts.sh" "$T/err"; then
-            got="${got} ${s}"
+    req="$(required_of "$s")"
+    check "${s}: names its helpers to tn_require_fns" yes "$([[ -n "${req// /}" ]] && echo yes || echo no)"
+    for fn in $req; do
+        sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
+        if ! grep -q "^${fn}_absent_here() {" "$T/cur/lib/common.sh"; then
+            check "${s}: ${fn} defined in lib/common.sh" "yes" "no"
+            continue
         fi
+        check "${s} without ${fn}: refused" yes "$(refuses "$T/cur" "$s")"
     done
-    check "without ${fn}: every script refuses" " ${SCRIPTS[*]}" "$got"
 done
-for fn in "${CORE4_REQUIRED[@]}"; do
-    sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
-    if ! grep -q "^${fn}_absent_here() {" "$T/cur/lib/common.sh"; then
-        check "${fn}: defined in lib/common.sh" "yes" "no"
-        continue
-    fi
-    got=""
-    for s in "${CORE4_SCRIPTS[@]}"; do
-        rc=0
-        "$BASH" "$T/cur/${s}.sh" --help > /dev/null 2> "$T/err" < /dev/null || rc=$?
-        if [[ $rc -eq 1 ]] && grep -q "is older than this ${s}.sh: run update-scripts.sh" "$T/err"; then
-            got="${got} ${s}"
-        fi
-    done
-    check "without ${fn}: setup-node, update-node and edit-config refuse" " ${CORE4_SCRIPTS[*]}" "$got"
+# A library below 2.0.0, or one without tn_require_fns, is refused by every script.
+sed 's/^readonly COMMON_VERSION=.*/readonly COMMON_VERSION="1.9.9"/' "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
+for s in "${SCRIPTS[@]}"; do
+    check "${s} with COMMON_VERSION 1.9.9: refused" yes "$(refuses "$T/cur" "$s")"
 done
-cp "$REPO/migrate-node-naming.sh" "$T/cur/migrate-node-naming.sh"
-for fn in "${MIGRATE_REQUIRED[@]}"; do
-    sed "s/^${fn}() {/${fn}_absent_here() {/" "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
-    rc=0
-    "$BASH" "$T/cur/migrate-node-naming.sh" --help > /dev/null 2> "$T/err" < /dev/null || rc=$?
-    check "without ${fn}: migrate-node-naming refuses" "1 yes" \
-        "${rc} $(grep -q "has no ${fn}\. Run update-scripts.sh" "$T/err" && echo yes)"
+sed 's/^tn_require_fns() {/tn_require_fns_absent_here() {/' "$REPO/lib/common.sh" > "$T/cur/lib/common.sh"
+for s in "${SCRIPTS[@]}"; do
+    check "${s} without tn_require_fns: refused" yes "$(refuses "$T/cur" "$s")"
 done
 cp "$REPO/lib/common.sh" "$T/cur/lib/common.sh"
+for s in "${SCRIPTS[@]}"; do
+    check "${s} with its own library: not refused" "" "$("$BASH" "$T/cur/${s}.sh" --help 2>&1 < /dev/null | grep 'is older than this')"
+done
 
 if ! command -v git >/dev/null 2>&1 \
     || ! git -C "$REPO" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
@@ -98,7 +90,7 @@ if ! command -v git >/dev/null 2>&1 \
 fi
 mkdir -p "$T/old"
 git -C "$REPO" archive "$OLD" lib | tar -x -C "$T/old"
-for s in setup-node update-node edit-config prepare-stake check-node; do
+for s in "${SCRIPTS[@]}" check-node; do
     cp "$REPO/${s}.sh" "$T/old/${s}.sh"
 done
 check "old library is 1.6.1" "1.6.1" "$(sed -n 's/^readonly COMMON_VERSION="\(.*\)"$/\1/p' "$T/old/lib/common.sh")"

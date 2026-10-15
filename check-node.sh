@@ -2072,8 +2072,8 @@ else
 fi
 [[ "$QUERY_NETWORK" == "true" ]] && print_info "Network RPC:  ${NETWORK_RPC}"
 print_info "Time:         $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-if ! version_gte "${COMMON_VERSION:-0}" "1.6.0"; then
-    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 1.6.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
+if ! version_gte "${COMMON_VERSION:-0}" "2.0.0"; then
+    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 2.0.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
 fi
 echo ""
 
