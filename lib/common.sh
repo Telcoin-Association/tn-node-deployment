@@ -1266,16 +1266,25 @@ latest_docker_image() {
     fi
 }
 
-# Validate a Docker image reference (registry/path:tag).
-# Accepts the registries this suite uses plus generic host/name:tag forms.
-validate_docker_image() {
-    local img="$1"
-    [[ -n "$img" ]] || return 1
+# tn_docker_ref_ok IMAGE -- rc 0 when IMAGE has the shape of an image reference
+# (registry/path:tag or registry/path@sha256:digest): no whitespace, no leading -,
+# only letters, digits and . _ / : @ -. Shape only; which images may run is
+# tn_docker_image_allowed's call (validate_docker_image applies both).
+tn_docker_ref_ok() {
+    local img="${1:-}"
+    [[ -n "$img" && "$img" != -* ]] || return 1
     [[ "$img" =~ [[:space:]] ]] && return 1
-    # Require at least one ":" for tag and "/" for registry/repo separation.
     [[ "$img" == *:* ]] || return 1
     [[ "$img" =~ ^[A-Za-z0-9._/:@-]+$ ]] || return 1
     return 0
+}
+
+# validate_docker_image IMAGE [NETWORK] -- rc 0 when IMAGE has the shape of an
+# image reference and tn_docker_image_allowed accepts it for NETWORK: this
+# network's repository by digest, or by a release tag until digests are required.
+validate_docker_image() {
+    tn_docker_ref_ok "${1:-}" || return 1
+    tn_docker_image_allowed "${1:-}" "${2:-}"
 }
 
 # tn_passphrase_ok VALUE [NETWORK] -- rc 0 when VALUE can be a BLS key
@@ -2377,51 +2386,6 @@ tn_start_script_path() {
     esac
 }
 
-write_systemd_service() {
-    local service_name="$1"
-    local description="$2"
-    local exec_start="$3"
-    local data_dir="${4:-$DEFAULT_DATA_DIR}"
-    local log_dir="${5:-$DEFAULT_LOG_DIR}"
-
-    local service_file="/etc/systemd/system/${service_name}.service"
-    print_step "Writing systemd service: ${service_file}"
-
-    cat > "$service_file" <<EOF
-[Unit]
-Description=${description}
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_GROUP}
-ExecStart=${exec_start}
-Restart=on-failure
-RestartSec=10
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ReadWritePaths=${data_dir} ${log_dir}
-LimitNOFILE=65536
-StandardOutput=append:${log_dir}/${service_name}.log
-StandardError=append:${log_dir}/${service_name}-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    print_ok "Service file written: ${service_file}"
-    print_info "Start:        systemctl start ${service_name}"
-    print_info "Enable boot:  systemctl enable ${service_name}"
-    print_info "View logs:    journalctl -u ${service_name} -f"
-}
-
-
 # Detect the internal/private IP of this machine.
 # On cloud/data centre servers this is the VM's internal NIC address (e.g. 10.x.x.x)
 # which is different from the public IP that peers connect to externally.
@@ -2525,7 +2489,565 @@ select_listener_ip() {
 # -----------------------------------------------------------------------------
 # CORE-2: SERVICE USER, NODE ENV, START SCRIPT, UNIT
 # -----------------------------------------------------------------------------
-# (reserved; CORE-2 adds its helpers here)
+#
+# One writer for each file that starts the node, shared by setup-node,
+# update-node, edit-config and migrate-node-naming:
+#   tn_write_node_env      <config dir>/node.env (listener addresses, root 0644)
+#   tn_write_start_script  /usr/local/libexec/telcoin/tn-start[-docker] (root 0755)
+#   tn_write_node_unit     /etc/systemd/system/<service>.service (root 0644)
+# Each renders its text with a _tn_*_text function (pure: the fixture tests call
+# it without root) and writes it through tn_write_root_file. Written paths honour
+# TN_ROOT_PREFIX; the text always names the real paths. A global the caller leaves
+# unset comes from .node-meta (_tn_gen_value), and a key set there twice refuses.
+# The BLS passphrase is never in any of these files: the unit loads it as a
+# systemd credential and the start script hands that file to the node on stdin
+# (--bls-passphrase-source stdin), so it is never on a command line or in an
+# environment. None of the writers reloads systemd or restarts the node.
+
+# MemoryDenyWriteExecute= and SystemCallFilter= in the unit of a binary install:
+# 1 (default) emits them with SystemCallErrorNumber=EPERM; audit emits them
+# without it, so a denied call stops the node and the kernel audit log names the
+# syscall (the soak setting); 0 leaves all of them out.
+TN_UNIT_STRICT_SANDBOX="${TN_UNIT_STRICT_SANDBOX:-1}"
+
+# _tn_gen_value NAME KEY [DEFAULT] -- print the global NAME when it is set and not
+# empty, else KEY from .node-meta, else DEFAULT. rc 1 and nothing printed when
+# KEY is set more than once in .node-meta.
+_tn_gen_value() {
+    local name="$1" key="$2" def="${3:-}" v="" rc=0
+    v="${!name:-}"
+    if [[ -z "$v" ]]; then
+        v="$(meta_get "$key" 2>/dev/null)" || rc=$?
+        if [[ $rc -eq 2 ]]; then
+            print_warn "${key} is set more than once in .node-meta; remove the extra lines first" >&2
+            return 1
+        fi
+    fi
+    printf '%s\n' "${v:-$def}"
+}
+
+# _tn_gen_meta_first KEY NAME -- KEY from .node-meta when it is there, else the
+# global NAME (may print an empty line). rc 1 when KEY is set more than once.
+_tn_gen_meta_first() {
+    local key="$1" name="$2" v="" rc=0
+    v="$(meta_get "$key" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "${key} is set more than once in .node-meta; remove the extra lines first" >&2
+        return 1
+    fi
+    printf '%s\n' "${v:-${!name:-}}"
+}
+
+# _tn_safe_path PATH -- rc 0 for an absolute path made of letters, digits and
+# . _ / + - with no empty, . or .. component (it lands unquoted in the unit and
+# the start script).
+_tn_safe_path() {
+    local p="${1:-}" re='^/[A-Za-z0-9._/+-]+$'
+    [[ "$p" =~ $re ]] || return 1
+    case "${p}/" in
+        *//*|*/./*|*/../*) return 1 ;;
+    esac
+    return 0
+}
+
+# _tn_launch_form METHOD -- binary for source, release, binary and existing
+# installs, docker for docker; rc 1 otherwise.
+_tn_launch_form() {
+    case "${1:-}" in
+        source|release|binary|existing) printf 'binary\n' ;;
+        docker) printf 'docker\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _tn_gen_settings METHOD -- resolve what the three renderers need into TN_G_*
+# globals: FORM, SVC, USER, GROUP, DATA, LOGDIR, NODELOG, CONF, PASS (passphrase
+# method), LOGT (journal|file), NET, CHAIN, SCRIPT (start script path). rc 1
+# with a message on stderr when something is missing or unusable.
+_tn_gen_settings() {
+    local method="${1:-}" v
+    TN_G_FORM="$(_tn_launch_form "$method")" || {
+        print_warn "unknown install method '${method}' (expected source, release, binary, existing or docker)" >&2
+        return 1
+    }
+    TN_G_SVC="${SERVICE_NAME:-}"
+    if [[ -z "$TN_G_SVC" ]]; then
+        TN_G_SVC="$(tn_resolve_service 2>/dev/null || true)"
+    fi
+    TN_G_SVC="${TN_G_SVC:-telcoin}"
+    [[ "$TN_G_SVC" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || { print_warn "unusable service name '${TN_G_SVC}'" >&2; return 1; }
+    # The account comes from .node-meta first: the library presets SERVICE_USER
+    # and SERVICE_GROUP to telcoin, so a global says nothing about this host.
+    TN_G_USER="$(_tn_gen_meta_first HOST_SERVICE_USER SERVICE_USER)" || return 1
+    TN_G_GROUP="$(_tn_gen_meta_first HOST_SERVICE_GROUP SERVICE_GROUP)" || return 1
+    TN_G_USER="${TN_G_USER:-telcoin}"
+    TN_G_GROUP="${TN_G_GROUP:-$TN_G_USER}"
+    case "$TN_G_USER:$TN_G_GROUP" in
+        root:*|*:root) print_warn "the node never runs as root (service account ${TN_G_USER}:${TN_G_GROUP})" >&2; return 1 ;;
+    esac
+    [[ "$TN_G_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$TN_G_GROUP" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || {
+        print_warn "unusable service account '${TN_G_USER}:${TN_G_GROUP}'" >&2; return 1; }
+    TN_G_DATA="$(_tn_gen_value DATA_DIR DATA_DIR "$DEFAULT_DATA_DIR")" || return 1
+    TN_G_LOGDIR="${LOG_DIR:-$DEFAULT_LOG_DIR}"
+    TN_G_CONF="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    TN_G_NODELOG="$(_tn_gen_value NODE_LOG_DIR NODE_LOG_DIR "")" || return 1
+    for v in "$TN_G_DATA" "$TN_G_LOGDIR" "$TN_G_CONF" ${TN_G_NODELOG:+"$TN_G_NODELOG"}; do
+        _tn_safe_path "$v" || { print_warn "unusable path '${v}' (absolute; letters, digits and . _ / + - only)" >&2; return 1; }
+    done
+    # ProtectHome=yes hides these trees from the node.
+    case "${TN_G_DATA}/" in
+        /home/*|/root/*|/run/user/*) print_warn "the data dir ${TN_G_DATA} is under /home, /root or /run/user, which the node unit hides" >&2; return 1 ;;
+    esac
+    TN_G_PASS="$(_tn_gen_value PASSPHRASE_METHOD PASSPHRASE_METHOD stdin)" || return 1
+    case "$TN_G_PASS" in
+        stdin|loadcredential|credential|tpm) ;;
+        *) print_warn "unknown passphrase method '${TN_G_PASS}' (expected stdin, credential or tpm)" >&2; return 1 ;;
+    esac
+    TN_G_NET="$(_tn_gen_value NETWORK NETWORK "")" || return 1
+    TN_G_LOGT="$(_tn_gen_value LOG_TARGET LOG_TARGET "")" || return 1
+    if [[ -z "$TN_G_LOGT" ]]; then
+        TN_G_LOGT="file"
+        [[ "$TN_G_NET" == "mainnet" ]] && TN_G_LOGT=journal
+    fi
+    case "$TN_G_LOGT" in
+        journal|file) ;;
+        *) print_warn "unknown log target '${TN_G_LOGT}' (expected journal or file)" >&2; return 1 ;;
+    esac
+    case "$TN_G_NET" in
+        testnet) TN_G_CHAIN="$TESTNET_CHAIN_NAME" ;;
+        mainnet) TN_G_CHAIN="$MAINNET_CHAIN_NAME" ;;
+        devnet)  TN_G_CHAIN="$DEVNET_CHAIN_NAME" ;;
+        *)       TN_G_CHAIN="${CHAIN_NAME:-node}" ;;
+    esac
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        TN_G_SCRIPT="$(tn_start_script_path docker)"
+    else
+        TN_G_SCRIPT="$(tn_start_script_path source)"
+    fi
+    return 0
+}
+
+# _tn_node_args_ok ARGS -- rc 0 when ARGS, the words after `node` on the launch
+# line, are plain words: flags (-v..., --name, --name=value) and values made of
+# letters, digits and . _ , : / @ + = -, plus the one quoted form the scripts use
+# for the bootstrap peers map, "$(cat /abs/path)". ARGS must hold --http and never
+# --bls-passphrase-source (the start script sets it), --observer or --validator.
+_tn_node_args_ok() {
+    local args="${1:-}" w prev="" http=0 IFS=' '
+    local re_cs='^[A-Za-z0-9._,:/@+= "$()-]*$' re_word='^[A-Za-z0-9._,:/@+=-]+$'
+    local re_cat='^/[A-Za-z0-9._/+-]+\)"$' re_v='^-v+$'
+    [[ "$args" =~ $re_cs ]] || return 1
+    for w in $args; do
+        if [[ "$prev" == '"$(cat' ]]; then
+            [[ "$w" =~ $re_cat ]] || return 1
+            prev="$w"
+            continue
+        fi
+        case "$w" in
+            '"$(cat') prev="$w"; continue ;;
+            --http) http=1 ;;
+            --bls-passphrase-source|--bls-passphrase-source=*|--observer|--observer=*|--validator|--validator=*) return 1 ;;
+        esac
+        [[ "$w" =~ $re_word ]] || return 1
+        if [[ "$w" == -* ]]; then
+            [[ "$w" =~ $re_v ]] || _tn_launch_flag_ok "${w%%=*}" || return 1
+        fi
+        prev="$w"
+    done
+    [[ "$prev" != '"$(cat' && $http -eq 1 ]]
+}
+
+# _tn_docker_ids -- print uid:gid for the container's --user: the service
+# account's ids (TN_DOCKER_IDS overrides, for fixture tests). rc 1 when either is
+# missing or 0.
+_tn_docker_ids() {
+    local u g re='^[1-9][0-9]*:[1-9][0-9]*$' ids
+    if [[ -n "${TN_DOCKER_IDS:-}" ]]; then
+        ids="$TN_DOCKER_IDS"
+    else
+        u="$(id -u "$TN_G_USER" 2>/dev/null || true)"
+        g="$(getent group "$TN_G_GROUP" 2>/dev/null | cut -d: -f3)"
+        ids="${u}:${g}"
+    fi
+    [[ "$ids" =~ $re ]] || return 1
+    printf '%s\n' "$ids"
+}
+
+# _tn_docker_memory -- the container memory cap for --memory: TN_DOCKER_MEMORY
+# when it is set (digits with an optional b, k, m or g), else 90% of the host's
+# RAM in MiB. Prints nothing when neither is known.
+_tn_docker_memory() {
+    local kb
+    if [[ -n "${TN_DOCKER_MEMORY:-}" ]]; then
+        [[ "$TN_DOCKER_MEMORY" =~ ^[1-9][0-9]*[bkmg]?$ ]] && printf '%s\n' "$TN_DOCKER_MEMORY"
+        return 0
+    fi
+    kb="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+    [[ "$kb" =~ ^[0-9]+$ ]] || return 0
+    (( kb >= 1048576 )) || return 0
+    printf '%sm\n' "$(( kb * 9 / 10 / 1024 ))"
+}
+
+# _tn_docker_bin -- the absolute path of the docker client (/usr/bin/docker
+# when it is not on PATH).
+_tn_docker_bin() {
+    local d
+    d="$(command -v docker 2>/dev/null || true)"
+    _tn_safe_path "$d" || d=/usr/bin/docker
+    printf '%s\n' "$d"
+}
+
+# _tn_node_env_text PRIMARY WORKER [RPC_ADDR] -- node.env: the two listener
+# multiaddrs (both required; validate_multiaddr) and the RPC bind address
+# (default 127.0.0.1). rc 1 with a message on stderr otherwise.
+_tn_node_env_text() {
+    local p="${1:-}" w="${2:-}" a="${3:-127.0.0.1}"
+    if [[ -z "$p" || -z "$w" ]]; then
+        print_warn "node.env needs both listener addresses (primary and worker); one is empty" >&2
+        return 1
+    fi
+    validate_multiaddr "$p" || { print_warn "not a listener multiaddr: ${p}" >&2; return 1; }
+    validate_multiaddr "$w" || { print_warn "not a listener multiaddr: ${w}" >&2; return 1; }
+    if ! { [[ "$a" == "0.0.0.0" || "$a" == "::" ]] || _tn_ipv4_strict "$a" || _tn_ipv6_strict "$a"; }; then
+        print_warn "not an IP address for the RPC bind: ${a}" >&2
+        return 1
+    fi
+    printf '%s\n' \
+        "# Node listener addresses, read by the node start script. Written by the" \
+        "# deployment scripts (tn_write_node_env); edit with edit-config.sh." \
+        "PRIMARY_LISTENER_MULTIADDR=${p}" \
+        "WORKER_LISTENER_MULTIADDR=${w}" \
+        "TN_RPC_ADDR=${a}"
+}
+
+# tn_write_node_env PRIMARY WORKER [RPC_ADDR] -- write <config dir>/node.env root
+# 0644 (CONFIG_DIR, default /etc/telcoin; TN_ROOT_PREFIX honoured). rc 0 written,
+# 1 refused (nothing changed), 2 write failed.
+tn_write_node_env() {
+    local text conf
+    text="$(_tn_node_env_text "${1:-}" "${2:-}" "${3:-}")" || return 1
+    conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    _tn_safe_path "$conf" || return 1
+    printf '%s\n' "$text" | tn_write_root_file "${TN_ROOT_PREFIX:-}${conf}/node.env" 0644
+}
+
+# _tn_start_script_text METHOD RUNNER NODE_ARGS -- the start script for METHOD
+# (see _tn_gen_settings for the globals it reads). RUNNER is the node binary
+# (absolute path) or, for docker, the image, which must pass
+# tn_docker_image_allowed. NODE_ARGS must pass _tn_node_args_ok. The script reads
+# the three node.env keys (never sources the file), opens the credential as its
+# stdin and execs the node with --bls-passphrase-source stdin; the docker form
+# runs the container with -i and the hardening flags. The tpm passphrase method
+# unseals into the node's stdin through a pipe instead.
+_tn_start_script_text() {
+    local method="${1:-}" runner="${2:-}" args="${3:-}" ids mem dbin envf
+    _tn_gen_settings "$method" || return 1
+    if ! _tn_node_args_ok "$args"; then
+        print_warn "node arguments refused: they must be plain words with --http, and never --bls-passphrase-source, --observer or --validator" >&2
+        return 1
+    fi
+    envf="${TN_G_CONF}/node.env"
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        if [[ "$runner" == -* ]] || ! tn_docker_image_allowed "$runner" "$TN_G_NET"; then
+            print_warn "image refused: ${runner} (it must be this network's repository by digest or by a release tag)" >&2
+            return 1
+        fi
+        ids="$(_tn_docker_ids)" || { print_warn "no uid:gid for ${TN_G_USER}:${TN_G_GROUP} (the account must exist and not be root)" >&2; return 1; }
+        mem="$(_tn_docker_memory)"
+        dbin="$(_tn_docker_bin)"
+    else
+        _tn_safe_path "$runner" || { print_warn "node binary path refused: ${runner}" >&2; return 1; }
+    fi
+    cat <<EOS
+#!/bin/bash
+# Telcoin Network node start script. Written by the deployment scripts
+# (tn_write_start_script); a rewrite replaces any hand edit. The BLS passphrase
+# reaches the node on stdin: it is never in this file, on a command line or in
+# an environment.
+set -euo pipefail
+while IFS= read -r tn_line || [[ -n "\$tn_line" ]]; do
+    case "\$tn_line" in
+        PRIMARY_LISTENER_MULTIADDR=*|WORKER_LISTENER_MULTIADDR=*|TN_RPC_ADDR=*) export "\$tn_line" ;;
+    esac
+done < ${envf}
+: "\${PRIMARY_LISTENER_MULTIADDR:?missing from ${envf}}"
+: "\${WORKER_LISTENER_MULTIADDR:?missing from ${envf}}"
+EOS
+    if [[ "$TN_G_PASS" == "tpm" ]]; then
+        cat <<EOS
+tn_unseal() {
+    local d rc=0
+    d="\$(mktemp -d)"
+    tpm2_createprimary -Q -C e -c "\$d/primary.ctx" >/dev/null &&
+        tpm2_load -Q -C "\$d/primary.ctx" -u ${TN_G_CONF}/bls-tpm.pub -r ${TN_G_CONF}/bls-tpm.priv -c "\$d/sealed.ctx" >/dev/null &&
+        tpm2_unseal -Q -c "\$d/sealed.ctx" || rc=\$?
+    rm -rf "\$d"
+    return "\$rc"
+}
+exec < <(tn_unseal)
+EOS
+    else
+        cat <<EOS
+exec < "\${CREDENTIALS_DIRECTORY:?not set: start the node with systemctl}/bls-passphrase"
+EOS
+    fi
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        printf 'exec %s run -i --rm --name %s --user %s -e HOME=/home/nonroot -e PRIMARY_LISTENER_MULTIADDR -e WORKER_LISTENER_MULTIADDR --network=host --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --pids-limit 4096 %s--ulimit nofile=65536:65536 --ulimit core=0 --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 --stop-timeout 80 --pull=never -v %s:/home/nonroot %s telcoin node --bls-passphrase-source stdin %s\n' \
+            "$dbin" "$TN_G_SVC" "$ids" "${mem:+--memory ${mem} }" "$TN_G_DATA" "$runner" "$args"
+    else
+        printf 'exec %s node --bls-passphrase-source stdin %s\n' "$runner" "$args"
+    fi
+}
+
+# tn_write_start_script METHOD RUNNER NODE_ARGS -- write the start script
+# (tn_start_script_path) root:root 0755 through tn_write_root_file, after the
+# rendered text passes bash -n and the launch-file parser finds its node line
+# (so the flag editors can work on it). A binary RUNNER must be a root-owned file
+# in root-owned directories (_tn_root_binary_ok). Neither file holds a secret,
+# so both forms are world-readable (the UI reads the launch line). rc 0 written,
+# 1 refused (nothing changed), 2 write failed.
+tn_write_start_script() {
+    local method="${1:-}" runner="${2:-}" args="${3:-}" text dest rc=0
+    # Settings in this shell too: the text is rendered in a subshell.
+    _tn_gen_settings "$method" || return 1
+    text="$(_tn_start_script_text "$method" "$runner" "$args")" || return 1
+    if [[ "$TN_G_FORM" == "binary" ]] && ! _tn_root_binary_ok "${TN_ROOT_PREFIX:-}${runner}"; then
+        print_warn "refusing ${runner}: the node binary must be a root-owned file, not group- or other-writable, in root-owned directories" >&2
+        return 1
+    fi
+    if ! printf '%s\n' "$text" | bash -n 2>/dev/null; then
+        print_warn "the rendered start script does not parse; nothing written" >&2
+        return 1
+    fi
+    printf '%s\n' "$text" | _tn_launch_awk target /dev/stdin "" "" "" "" 0 >/dev/null 2>&1 || rc=$?
+    if [[ $rc -ne 10 ]]; then
+        print_warn "the rendered start script has no node line the launch editors can read; nothing written" >&2
+        return 1
+    fi
+    dest="${TN_ROOT_PREFIX:-}${TN_G_SCRIPT}"
+    _tn_root_layout_dir "${dest%/*}" root 0755 || return $?
+    printf '%s\n' "$text" | tn_write_root_file "$dest" 0755
+}
+
+# _tn_node_unit_text METHOD -- the systemd unit for METHOD (globals as in
+# _tn_gen_settings). The binary form runs the start script as the service
+# account inside the sandbox below; the docker form runs it as root (the docker
+# client) and leaves the confinement to the container flags. The passphrase
+# method picks the credential line: LoadCredential= of <config dir>/bls-passphrase
+# (stdin, loadcredential), LoadCredentialEncrypted= of bls-passphrase.cred
+# (credential), none for tpm. The log target picks journal or append: to the two
+# pre-created files in the log dir (which the node never needs to write).
+_tn_node_unit_text() {
+    local method="${1:-}" cred="" out err rw dbin
+    _tn_gen_settings "$method" || return 1
+    case "$TN_G_PASS" in
+        stdin|loadcredential) cred="LoadCredential=bls-passphrase:${TN_G_CONF}/bls-passphrase" ;;
+        credential) cred="LoadCredentialEncrypted=bls-passphrase:${TN_G_CONF}/bls-passphrase.cred" ;;
+    esac
+    if [[ "$TN_G_LOGT" == "journal" ]]; then
+        out="journal"
+        err="journal"
+    else
+        out="append:${TN_G_LOGDIR}/${TN_G_SVC}.log"
+        err="append:${TN_G_LOGDIR}/${TN_G_SVC}-error.log"
+    fi
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        dbin="$(_tn_docker_bin)"
+        cat <<EOU
+[Unit]
+Description=Telcoin Network Node (${TN_G_CHAIN}) [Docker]
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+${cred:+${cred}
+}EnvironmentFile=${TN_G_CONF}/node.env
+UnsetEnvironment=TN_BLS_PASSPHRASE
+ExecStartPre=-${dbin} stop -t 80 ${TN_G_SVC}
+ExecStartPre=-${dbin} rm -f ${TN_G_SVC}
+ExecStart=${TN_G_SCRIPT}
+ExecStop=${dbin} stop -t 80 ${TN_G_SVC}
+TimeoutStopSec=100
+Restart=on-failure
+RestartSec=10
+LimitCORE=0
+StandardOutput=${out}
+StandardError=${err}
+SyslogIdentifier=${TN_G_SVC}
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOU
+        return 0
+    fi
+    rw="$TN_G_DATA${TN_G_NODELOG:+ ${TN_G_NODELOG}}"
+    cat <<EOU
+[Unit]
+Description=Telcoin Network Node (${TN_G_CHAIN})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=${TN_G_USER}
+Group=${TN_G_GROUP}
+${cred:+${cred}
+}EnvironmentFile=${TN_G_CONF}/node.env
+UnsetEnvironment=TN_BLS_PASSPHRASE
+Environment=HOME=${TN_G_DATA}
+ExecStart=${TN_G_SCRIPT}
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+LimitNOFILE=65536
+LimitCORE=0
+StandardOutput=${out}
+StandardError=${err}
+SyslogIdentifier=${TN_G_SVC}
+ProtectSystem=strict
+ReadWritePaths=${rw}
+ProtectHome=yes
+PrivateTmp=yes
+EOU
+    if [[ "$TN_G_PASS" == "tpm" ]]; then
+        # The TPM device must stay visible (PrivateDevices=yes would hide it).
+        printf '%s\n' "DevicePolicy=closed" "DeviceAllow=/dev/tpmrm0 rw" "DeviceAllow=/dev/tpm0 rw"
+    else
+        printf '%s\n' "PrivateDevices=yes"
+    fi
+    cat <<EOU
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+EOU
+    case "${TN_UNIT_STRICT_SANDBOX:-1}" in
+        0) ;;
+        audit)
+            printf '%s\n' "MemoryDenyWriteExecute=yes" "SystemCallFilter=@system-service" "SystemCallFilter=~@privileged"
+            ;;
+        *)
+            printf '%s\n' "MemoryDenyWriteExecute=yes" "SystemCallFilter=@system-service" "SystemCallFilter=~@privileged" "SystemCallErrorNumber=EPERM"
+            ;;
+    esac
+    printf '\n%s\n%s\n' "[Install]" "WantedBy=multi-user.target"
+}
+
+# tn_write_node_unit METHOD -- write /etc/systemd/system/<service>.service root
+# 0644 (TN_ROOT_PREFIX honoured). Does not reload systemd. rc 0 written, 1
+# refused (nothing changed), 2 write failed.
+tn_write_node_unit() {
+    local text
+    _tn_gen_settings "${1:-}" || return 1
+    text="$(_tn_node_unit_text "${1:-}")" || return 1
+    printf '%s\n' "$text" | tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${TN_G_SVC}.service" 0644
+}
+
+# tn_install_journald_dropin -- cap the journal for a node that logs to it:
+# /etc/systemd/journald.conf.d/50-telcoin.conf root 0644 (SystemMaxUse=4G,
+# SystemKeepFree=2G). An existing file is kept. The caller restarts journald
+# (systemctl restart systemd-journald) if it wants the cap now. rc as
+# tn_write_root_file.
+tn_install_journald_dropin() {
+    local dir="${TN_ROOT_PREFIX:-}/etc/systemd/journald.conf.d"
+    [[ -f "${dir}/50-telcoin.conf" ]] && return 0
+    _tn_root_layout_dir "$dir" root 0755 || return $?
+    printf '%s\n' "# Written by the Telcoin Network deployment scripts." "[Journal]" "SystemMaxUse=4G" "SystemKeepFree=2G" \
+        | tn_write_root_file "${dir}/50-telcoin.conf" 0644
+}
+
+# tn_service_user_ok USER [GROUP] -- rc 0 when USER (and GROUP, when given) may
+# run the node: a name matching ^[a-z_][a-z0-9_-]{0,31}$, never root or
+# telcoin-ui (a GROUP also never sudo, adm, docker or wheel); an existing USER
+# must have a UID from 1 to 999 and belong to none of sudo, adm, docker, wheel;
+# an existing GROUP must not be GID 0. A USER that does not exist yet passes
+# (setup creates it as a system account). rc 1 with the reason on stderr.
+tn_service_user_ok() {
+    local u="${1:-}" g="${2:-}" re='^[a-z_][a-z0-9_-]{0,31}$' uid gid grp IFS=' '
+    if [[ ! "$u" =~ $re ]]; then
+        print_warn "service user '${u}' is not a plain lowercase account name" >&2; return 1
+    fi
+    case "$u" in
+        root|telcoin-ui) print_warn "the node never runs as ${u}" >&2; return 1 ;;
+    esac
+    if [[ -n "$g" ]]; then
+        if [[ ! "$g" =~ $re ]]; then
+            print_warn "service group '${g}' is not a plain lowercase group name" >&2; return 1
+        fi
+        case "$g" in
+            root|telcoin-ui|sudo|adm|docker|wheel) print_warn "the node's group cannot be ${g}" >&2; return 1 ;;
+        esac
+        gid="$(getent group "$g" 2>/dev/null | cut -d: -f3)"
+        if [[ "$gid" == "0" ]]; then
+            print_warn "service group ${g} has GID 0" >&2; return 1
+        fi
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || return 0
+    if [[ ! "$uid" =~ ^[0-9]+$ ]] || (( uid < 1 || uid > 999 )); then
+        print_warn "service user ${u} is not a system account (UID ${uid}); pick another name" >&2; return 1
+    fi
+    for grp in $(id -nG "$u" 2>/dev/null); do
+        case "$grp" in
+            sudo|adm|docker|wheel) print_warn "service user ${u} belongs to ${grp}; pick an account without admin groups" >&2; return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# tn_docker_image_allowed IMAGE [NETWORK] -- rc 0 when IMAGE is NETWORK's
+# repository (tn_docker_repo_for when present, else the testnet repository) by
+# digest, <repo>@sha256:<64 hex>, or, until TN_DOCKER_REQUIRE_DIGEST=1, by a tag
+# that passes tn_release_tag_ok. NETWORK defaults to the NETWORK global, then
+# tn_detect_network. Refuses a leading -, any whitespace, other repositories and
+# networks without one. Prints nothing.
+tn_docker_image_allowed() {
+    local img="${1:-}" net="${2:-}" repo="" rest
+    [[ -n "$img" && "$img" != -* ]] || return 1
+    [[ ! "$img" =~ [[:space:]] ]] || return 1
+    [[ -n "$net" ]] || net="${NETWORK:-}"
+    [[ -n "$net" ]] || net="$(tn_detect_network 2>/dev/null)" || return 1
+    if declare -F tn_docker_repo_for >/dev/null 2>&1; then
+        repo="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 1
+    elif [[ "$net" == "testnet" ]]; then
+        repo="$GAR_IMAGE_BASE"
+    fi
+    [[ -n "$repo" ]] || return 1
+    case "$img" in
+        "${repo}@sha256:"*)
+            rest="${img#"${repo}@sha256:"}"
+            [[ "$rest" =~ ^[0-9a-f]{64}$ ]]
+            ;;
+        "${repo}:"*)
+            [[ "${TN_DOCKER_REQUIRE_DIGEST:-0}" != "1" ]] || return 1
+            tn_release_tag_ok "$net" "${img#"${repo}:"}"
+            ;;
+        *) return 1 ;;
+    esac
+}
 
 # =============================================================================
 # JSON-RPC, EPOCH AND RESTART-WINDOW HELPERS
