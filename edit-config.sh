@@ -954,13 +954,18 @@ edit_wait_say() {
 # epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds.
 # --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips the wait, never the committee
 # quorum check before it (tn_committee_down_guard; --allow-quorum-risk
-# overrides), whose refusal is the only way it returns 1: nothing is stopped.
-edit_epoch_wait() {
+# overrides), which runs again after the wait, right before the restart. A
+# refusal by either is the only way it returns 1: nothing is stopped.
+edit_quorum_guard() {
     if declare -F tn_committee_down_guard >/dev/null 2>&1 \
         && ! tn_committee_down_guard "$(tn_local_rpc_url)" edit_wait_say; then
         edit_wait_say warn "Not restarting ${TARGET_SERVICE}: the committee check refused it. Run again later, or with --allow-quorum-risk for a coordinated restart."
         return 1
     fi
+    return 0
+}
+edit_epoch_wait() {
+    edit_quorum_guard || return 1
     if [[ "$NO_EPOCH_WAIT" == "true" ]]; then
         edit_wait_say log "Not waiting for the epoch boundary (--no-epoch-wait)."
         return 0
@@ -970,6 +975,7 @@ edit_epoch_wait() {
         return 0
     fi
     tn_wait_restart_window "$(tn_local_rpc_url)" edit_wait_say
+    edit_quorum_guard || return 1
     return 0
 }
 

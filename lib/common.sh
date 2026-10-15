@@ -4112,6 +4112,9 @@ _tn_wait_say() {
 # included, and 0 turns the wait off; TN_EPOCH_POLL (15, clamped to 5-20) is the
 # poll and heartbeat interval. Each epoch read while waiting may take at most
 # 30 - poll seconds, so two heartbeats are never more than 30 s apart.
+# TN_EPOCH_JITTER_MAX (30, 0 off) bounds a random pause after the settle, so
+# nodes that waited for the same boundary do not stop on the same second.
+# Callers run the committee guard again after this returns: the wait can be long.
 #
 # Policy:
 #   1. Skipped (TN_SKIP_EPOCH_WAIT=1 or TN_EPOCH_WAIT_MAX=0), or mode not
@@ -4128,7 +4131,8 @@ _tn_wait_say() {
 #      and return.
 #   3. Otherwise one step message, then poll until the epoch id rises, with a log
 #      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
-#   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap.
+#   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap, then
+#      pause a random 0 to TN_EPOCH_JITTER_MAX seconds, also inside the cap.
 # A signal the caller traps (TERM, INT, HUP) runs its trap at once, not after the
 # current sleep (_tn_nap); when that trap returns instead of exiting, the wait
 # stops there with a warning, still rc 0.
@@ -4352,6 +4356,7 @@ tn_wait_restart_window() {
         return 0
     fi
     "$fn" log "Epoch ${epoch} closed (now epoch ${cur}). Giving the new committee ${settle_left}s to settle." || true
+    remaining=$(( cap - waited - settle_left ))
     while (( settle_left > 0 )); do
         nap="$poll"
         if (( nap > settle_left )); then nap="$settle_left"; fi
@@ -4366,7 +4371,28 @@ tn_wait_restart_window() {
             "$fn" log "Settling: ${settle_left}s left." || true
         fi
     done
+    _tn_restart_jitter "$fn" "$remaining"
     "$fn" log "Epoch ${cur} is under way; continuing." || true
+    return 0
+}
+
+# _tn_restart_jitter FN LEFT -- after the settle, pause a random 0 to
+# TN_EPOCH_JITTER_MAX seconds (default 30; 0 turns it off), at most LEFT (what
+# the TN_EPOCH_WAIT_MAX cap leaves), so committee nodes that waited for the same
+# epoch boundary do not all stop within the same poll. A signal the caller traps
+# and returns from ends the pause with a warning. Always rc 0.
+_tn_restart_jitter() {
+    local fn="$1" left="${2:-0}" max j nrc=0
+    max="$(_tn_env_uint TN_EPOCH_JITTER_MAX 30)"
+    (( max > left )) && max="$left"
+    (( max > 0 )) || return 0
+    j=$(( RANDOM % (max + 1) ))
+    (( j > 0 )) || return 0
+    "$fn" log "Pausing ${j}s more (random, at most ${max}s, TN_EPOCH_JITTER_MAX) so nodes that waited for the same boundary do not restart together." || true
+    _tn_nap "$j" || nrc=$?
+    if (( nrc > 128 )); then
+        "$fn" warn "Stopped the pause after the settle: a signal interrupted it. Continuing." || true
+    fi
     return 0
 }
 
@@ -5512,8 +5538,18 @@ _tn_cred_switch() {
         _tn_guard_say log "${svc} is stopped: the new passphrase delivery takes effect when it starts." "$fn"
         return 0
     fi
-    # 4. The restart window, then the restart.
+    # 4. The restart window, the committee guard again (the wait can last up to
+    # TN_EPOCH_WAIT_MAX), then the restart. A refusal now puts every file back.
     tn_wait_restart_window "$(tn_local_rpc_url 2>/dev/null || true)" "$fn" || true
+    if ! tn_committee_down_guard "" "$fn"; then
+        _tn_cred_meta_back
+        _tn_cred_restore || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        _tn_cred_drop_saved
+        _TN_CS_STATE=""
+        _tn_guard_say warn "Restarting ${svc} after the epoch wait would put the committee's quorum at risk; the passphrase delivery was not changed (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
+        return 1
+    fi
     _TN_CS_STATE=restarting
     if systemctl restart "$svc" >/dev/null 2>&1 && _tn_cred_confirm "$svc" "$fn"; then
         # 5. Done: every old copy of the passphrase goes, then the backups.

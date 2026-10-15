@@ -39,6 +39,25 @@ rc=0; update_epoch_wait >/dev/null 2>&1 || rc=$?
 check "--no-epoch-wait still runs the guard" "1 yes no" "$rc $GUARDED $WAITED"
 NO_EPOCH_WAIT=false
 
+# The guard runs again after the wait: guard, wait, guard; a refusal after the
+# wait stops the apply too.
+ORDER=""
+tn_committee_down_guard() {
+    ORDER="${ORDER} guard"
+    case "$ORDER" in *wait*) return "${GUARD_AFTER_RC:-0}" ;; esac
+    return 0
+}
+tn_wait_restart_window() { ORDER="${ORDER} wait"; return 0; }
+tn_node_mode() { return 1; }
+ORDER="" GUARD_AFTER_RC=0
+rc=0; update_epoch_wait >/dev/null 2>&1 || rc=$?
+check "order: guard, wait, guard" "0  guard wait guard" "$rc $ORDER"
+ORDER="" GUARD_AFTER_RC=1
+rc=0; update_epoch_wait >/dev/null 2>&1 || rc=$?
+check "guard refuses after the wait: rc 1" "1  guard wait guard" "$rc $ORDER"
+unset GUARD_AFTER_RC
+unset -f tn_node_mode
+
 # The apply paths stop the node only after update_epoch_wait succeeds.
 check "every update_epoch_wait call stops the apply on refusal" "4" \
     "$(grep -c 'update_epoch_wait || ' "$TN_TEST_REPO/update-node.sh")"

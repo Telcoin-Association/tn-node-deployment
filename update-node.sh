@@ -1356,6 +1356,9 @@ update_epoch_wait() {
         update_wait_say warn "lib/common.sh ${COMMON_VERSION:-unknown} cannot wait for the epoch boundary, so the node restarts now even if it is in the committee. Run update-scripts.sh to get the wait."
     else
         tn_wait_restart_window "$(tn_local_rpc_url)" update_wait_say
+        # The wait can last up to TN_EPOCH_WAIT_MAX: check the committee again
+        # right before the stop.
+        update_quorum_guard || return 1
     fi
     # Record mode: what the node was (voting or not) when it is stopped, for the
     # participation check after the restart.

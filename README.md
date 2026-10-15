@@ -784,6 +784,7 @@ Only a node that reports `CvvActive` from `tn_nodeMode` waits, and only when the
 | `TN_SKIP_EPOCH_WAIT=1` | unset | Skip the wait. `update-node.sh` and `edit-config.sh` also take `--no-epoch-wait` |
 | `TN_EPOCH_MARGIN` | 300 | Wait only when the boundary is this many seconds away or closer |
 | `TN_EPOCH_SETTLE` | 90 | Seconds to wait after the epoch closes |
+| `TN_EPOCH_JITTER_MAX` | 30 | Then a random pause of up to this many seconds, so nodes that waited for the same boundary do not restart together; 0 turns it off. The committee check runs again after the wait |
 | `TN_EPOCH_WAIT_MAX` | 1800 | Longest wait in seconds, settle included; 0 turns the wait off |
 | `TN_EPOCH_POLL` | 15 | Seconds between progress lines, 5 to 20 |
 

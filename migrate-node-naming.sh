@@ -647,12 +647,13 @@ migrate_backup_failed() {
 # =============================================================================
 # STEP 3 -- STOP THE LEGACY SERVICE
 # =============================================================================
-stop_legacy() {
+# stop_guard -- the committee check before the legacy service stops: when
+# stopping this node now would leave the committee one member short of a halt,
+# or the count cannot be made on a staked mainnet node, the run stops here with
+# the legacy service untouched and the snapshot dropped. --allow-quorum-risk
+# overrides for a coordinated restart.
+stop_guard() {
     local rc=0
-    # The committee check comes first: when stopping this node now would leave the
-    # committee one member short of a halt, or the count cannot be made on a staked
-    # mainnet node, the run stops here with the legacy service untouched and the
-    # snapshot dropped. --allow-quorum-risk overrides for a coordinated restart.
     tn_committee_down_guard "$STOP_RPC_URL" _tn_wait_say || rc=$?
     if [[ $rc -ne 0 ]]; then
         trap - ERR
@@ -660,9 +661,17 @@ stop_legacy() {
         print_error "Not stopping telcoin-${ROLE}: the committee check refused it (see above). Nothing was changed. Run the migration again later, or with --allow-quorum-risk for a coordinated restart."
         exit 1
     fi
+    return 0
+}
+
+stop_legacy() {
+    # The committee check comes first, and again after the epoch wait (which can
+    # last up to TN_EPOCH_WAIT_MAX), right before the stop.
+    stop_guard
     # A committee node is not stopped just before the epoch boundary: wait for the
     # restart window first (it returns at once for any other node, never fails).
     tn_wait_restart_window "$STOP_RPC_URL"
+    stop_guard
     print_step "Stopping the legacy service (telcoin-${ROLE})..."
     systemctl stop "telcoin-${ROLE}" 2>/dev/null || true
     systemctl disable "telcoin-${ROLE}" 2>/dev/null || true

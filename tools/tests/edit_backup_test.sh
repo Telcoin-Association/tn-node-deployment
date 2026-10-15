@@ -270,6 +270,23 @@ check "menu edit, guard refusal: says nothing was changed" yes "$(has "$(cat "$T
 check "menu edit, guard refusal: no longer pending" false "$EDIT_PENDING"
 unset -f systemctl confirm tn_committee_down_guard
 
+# edit_epoch_wait: the guard, the wait, the guard again; a refusal after the wait
+# returns 1 (nothing is restarted).
+REAL_WAIT="$(declare -f tn_wait_restart_window)"
+REAL_CDG="$(declare -f tn_committee_down_guard)"
+tn_committee_down_guard() {
+    EV="${EV}${EV:+ }guard"
+    case "$EV" in *wait*) return "${GUARD_AFTER_RC:-0}" ;; esac
+    return 0
+}
+tn_wait_restart_window() { EV="${EV}${EV:+ }wait"; return 0; }
+EV=""; rc=0; NO_EPOCH_WAIT=false TN_SKIP_EPOCH_WAIT=0 edit_epoch_wait >/dev/null 2>&1 || rc=$?
+check "edit_epoch_wait: guard, wait, guard" "0 guard wait guard" "$rc $EV"
+EV=""; rc=0; GUARD_AFTER_RC=1 NO_EPOCH_WAIT=false TN_SKIP_EPOCH_WAIT=0 edit_epoch_wait >/dev/null 2>&1 || rc=$?
+check "edit_epoch_wait: a refusal after the wait returns 1" "1 guard wait guard" "$rc $EV"
+eval "$REAL_WAIT"
+eval "$REAL_CDG"
+
 if [[ $SU_OK != 1 ]]; then
     skip "data-dir restore as the service user" "no nobody account usable with setpriv or runuser"
     skip "chain-config copy as the service user" "no nobody account usable with setpriv or runuser"

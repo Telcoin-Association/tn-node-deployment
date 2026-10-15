@@ -1758,12 +1758,29 @@ caddy_node_unlock() {
 # from a rollback never calls it. Progress goes through caddy_say (step / log / warn
 # events in --json runs).
 caddy_restart_window() {
-    local rc url why
+    local rc url
     [[ "$CADDY_WINDOW_DONE" == "true" ]] && return 0
     CADDY_WINDOW_DONE=true
     caddy_node_lock
     url="$(tn_local_rpc_url)"
+    caddy_quorum_guard "$url"
     rc=0
+    tn_wait_restart_window "$url" caddy_wait_say || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        caddy_restart_abandon
+        die "the epoch-boundary wait failed (rc ${rc}), so the node was not restarted and this run's node changes were put back.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
+    fi
+    # The wait can last up to TN_EPOCH_WAIT_MAX: check the committee again right
+    # before the restart.
+    caddy_quorum_guard "$url"
+    return 0
+}
+
+# caddy_quorum_guard URL -- tn_committee_down_guard for caddy_restart_window; on a
+# refusal (TN_ALLOW_QUORUM_RISK=1 lets it through) the run's node edits are put
+# back (caddy_restart_abandon) and the run stops.
+caddy_quorum_guard() {
+    local url="$1" rc=0 why
     tn_committee_down_guard "$url" caddy_wait_say || rc=$?
     # TN_ALLOW_QUORUM_RISK=1 (which the guard honours itself) lets a refusal through.
     if [[ "$rc" -ne 0 && "${TN_ALLOW_QUORUM_RISK:-}" == "1" ]]; then
@@ -1778,12 +1795,6 @@ caddy_restart_window() {
         fi
         caddy_restart_abandon
         die "${why} (see above), so the node was not restarted and this run's node changes were put back. Run this again later, or set TN_ALLOW_QUORUM_RISK=1 for a coordinated restart.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
-    fi
-    rc=0
-    tn_wait_restart_window "$url" caddy_wait_say || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-        caddy_restart_abandon
-        die "the epoch-boundary wait failed (rc ${rc}), so the node was not restarted and this run's node changes were put back.${CADDY_LOCK_NOTE:+ ${CADDY_LOCK_NOTE}}"
     fi
     return 0
 }

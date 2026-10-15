@@ -92,8 +92,13 @@ tn_rerender_node_launch() {
         printf '[Service]\nLoadCredential=bls-passphrase:/etc/telcoin/bls-passphrase\nExecStart=/usr/local/libexec/telcoin/tn-start\n' > "$UNIT"
     fi
 }
-tn_committee_down_guard() { return "${STUB_GUARD_RC:-0}"; }
-tn_wait_restart_window() { printf 'wait\n' >> "$REC/wait"; }
+# STUB_GUARD_AFTER_RC is the answer once the wait has run (the second guard).
+tn_committee_down_guard() {
+    printf 'guard\n' >> "$REC/order"
+    if [[ -s "$REC/wait" ]]; then return "${STUB_GUARD_AFTER_RC:-${STUB_GUARD_RC:-0}}"; fi
+    return "${STUB_GUARD_RC:-0}"
+}
+tn_wait_restart_window() { printf 'wait\n' >> "$REC/wait"; printf 'wait\n' >> "$REC/order"; }
 tn_local_rpc_url() { printf 'http://127.0.0.1:8545\n'; }
 # The RPC probe fails STUB_RPC_FAILS times, then answers.
 tn_rpc_call() {
@@ -293,6 +298,23 @@ check "guard refuses: no CREDENTIAL_KEY" "" "$(meta_get CREDENTIAL_KEY 2>/dev/nu
 check "guard refuses: no restart" "" "$(grep restart "$REC/systemctl.argv" 2>/dev/null)"
 check "guard refuses: refused before any write or reload (reload, backups, re-render)" "0 0 no" \
     "$(grep -c daemon-reload "$REC/systemctl.argv" 2>/dev/null) $(ls "$T/bak" | wc -l | tr -d ' ') $(exists "$REC/rerender")"
+
+# The guard runs again after the epoch wait; a refusal then puts everything back.
+fixture testnet stdin
+printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
+rc=0; STUB_GUARD_AFTER_RC=1 tn_migrate_credential 2>/dev/null || rc=$?
+check_rc "guard refuses after the wait: rc 1" 1 "$rc"
+check "guard refuses after the wait: order guard, wait, guard" "guard wait guard" "$(paste -sd' ' "$REC/order")"
+check "guard refuses after the wait: unit restored" "$ORIG_UNIT" "$(cat "$UNIT")"
+check "guard refuses after the wait: no credential, plaintext kept" "no yes" "$(exists "$ETC/bls-passphrase.cred") $(exists "$ETC/bls-passphrase")"
+check "guard refuses after the wait: method restored" "stdin" "$(meta_get PASSPHRASE_METHOD 2>/dev/null)"
+check "guard refuses after the wait: no restart" "" "$(grep restart "$REC/systemctl.argv" 2>/dev/null)"
+unset STUB_GUARD_AFTER_RC
+fixture testnet stdin
+printf '%s\n' "$PASS" > "$ETC/bls-passphrase"
+rc=0; tn_migrate_credential >/dev/null 2>&1 || rc=$?
+check "a migration that restarts: guard, wait, guard, then the restart" "0 guard wait guard 1" \
+    "$rc $(paste -sd' ' "$REC/order") $(grep -c restart "$REC/systemctl.argv" 2>/dev/null)"
 
 # A run stopped inside the move: the EXIT trap (tn_remove_inflight_tmp) finishes
 # or undoes it. stopped_in WHERE runs the migration in a subshell whose EXIT trap

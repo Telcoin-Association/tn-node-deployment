@@ -2532,6 +2532,8 @@ step_create_service() {
             # halt, and after the current epoch closes when the node votes in it.
             setup_quorum_guard "http://127.0.0.1:${RPC_PORT}"
             tn_wait_restart_window "http://127.0.0.1:${RPC_PORT}" setup_progress
+            # Again after the wait, which can last up to TN_EPOCH_WAIT_MAX.
+            setup_quorum_guard "http://127.0.0.1:${RPC_PORT}"
             systemctl restart "$SERVICE_NAME"
         else
             systemctl start "$SERVICE_NAME"

@@ -783,7 +783,8 @@ obs_wait_say() {
 # Alloy shipper, which takes no part in consensus). First the committee guard
 # (obs_quorum_guard), then, when the node votes in the current committee and the
 # epoch boundary is close, tn_wait_restart_window (lib/common.sh) holds the restart
-# until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds;
+# until the epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds, and
+# the guard runs again after it;
 # TN_SKIP_EPOCH_WAIT=1 skips it, and a lib/common.sh without it skips it with a
 # warning (the guard still runs). progress-fn is called as `fn step|log|warn MSG`
 # (default obs_wait_say). rc 0 restart now; rc 1 the guard refused or the wait
@@ -800,6 +801,9 @@ obs_restart_window() {
         "$fn" warn "Not restarting: the epoch-boundary wait failed (rc ${rc})." || true
         return 1
     fi
+    # The wait can last up to TN_EPOCH_WAIT_MAX: the guard again, right before
+    # the restart.
+    obs_quorum_guard "$fn" || return 1
     return 0
 }
 

@@ -1387,6 +1387,7 @@ These environment variables tune it; pass them through `sudo`, as in `sudo TN_SK
 | `TN_SKIP_EPOCH_WAIT` | unset | `1` skips the wait. |
 | `TN_EPOCH_MARGIN` | 300 | Seconds before the boundary inside which a restart waits. |
 | `TN_EPOCH_SETTLE` | 90 | Seconds to wait after the epoch changes. |
+| `TN_EPOCH_JITTER_MAX` | 30 | Then a random pause of up to this many seconds, so nodes that waited for the same boundary do not restart together. `0` turns it off. The committee check runs again after the wait. |
 | `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. |
 | `TN_EPOCH_POLL` | 15 | Seconds between progress lines, held between 5 and 20. |
 

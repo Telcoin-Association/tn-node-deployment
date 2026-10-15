@@ -211,10 +211,16 @@ printf 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\n' > "$RP/etc/telcoin/.node-meta"
 # obs_restart_window: the guard first, then the epoch wait, right before the restart; the
 # guard runs even when the wait helper is missing.
 ORDER="$T/order"
-tn_committee_down_guard() { echo guard >> "$ORDER"; return "${CDG_RC:-0}"; }
+tn_committee_down_guard() {
+    echo guard >> "$ORDER"
+    if grep -q wait "$ORDER"; then return "${CDG_AFTER_RC:-${CDG_RC:-0}}"; fi
+    return "${CDG_RC:-0}"
+}
 tn_wait_restart_window() { echo wait >> "$ORDER"; return "${WAIT_RC:-0}"; }
 : > "$ORDER"; ( obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: rc 0" 0 $?
-check "restart window: guard then wait" "guard wait" "$(paste -sd' ' "$ORDER")"
+check "restart window: guard, wait, guard" "guard wait guard" "$(paste -sd' ' "$ORDER")"
+: > "$ORDER"; ( CDG_AFTER_RC=1; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: guard refuses after the wait, rc 1" 1 $?
+check "restart window: the second guard ran after the wait" "guard wait guard" "$(paste -sd' ' "$ORDER")"
 : > "$ORDER"; ( CDG_RC=1; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: guard refuses, rc 1" 1 $?
 check "restart window: no wait after a refusal" "guard" "$(paste -sd' ' "$ORDER")"
 : > "$ORDER"; ( CDG_RC=2; obs_restart_window ) >/dev/null 2>&1; check_rc "restart window: guard rc 2, rc 1" 1 $?

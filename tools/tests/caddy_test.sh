@@ -510,7 +510,11 @@ ORDER="$T/order"
 NIF="$RP/data/node-info.yaml"
 mkdir -p "$RP/data"
 caddy_node_lock() { [[ "${_LOCKED:-}" == 1 ]] && return 0; _LOCKED=1; echo lock >> "$ORDER"; }
-tn_committee_down_guard() { echo guard >> "$ORDER"; return "${CDG_RC:-0}"; }
+tn_committee_down_guard() {
+    echo guard >> "$ORDER"
+    if grep -q wait "$ORDER"; then return "${CDG_AFTER_RC:-${CDG_RC:-0}}"; fi
+    return "${CDG_RC:-0}"
+}
 tn_wait_restart_window() { echo wait >> "$ORDER"; return "${WAIT_RC:-0}"; }
 caddy_node_info_can_edit() { return 0; }
 caddy_node_info_rpc_get() { echo "${NI_CUR:-none none}"; }
@@ -530,8 +534,12 @@ adv() { # adv MODE -- one advertise run on a fresh node-info.yaml; RC and ORDER
 }
 adv set
 check_rc "rpc-enable advertise rc 0" 0 "$RC"
-check "rpc-enable: lock, edit, guard, wait, restart" "lock edit guard wait restart" "$(paste -sd' ' "$ORDER")"
+check "rpc-enable: lock, edit, guard, wait, guard, restart" "lock edit guard wait guard restart" "$(paste -sd' ' "$ORDER")"
 check "rpc-enable: the edit is kept" "edited" "$(cat "$NIF")"
+CDG_AFTER_RC=1 adv set
+check_rc "rpc-enable, guard refuses after the wait: rc 1" 1 "$RC"
+check "rpc-enable, guard refuses after the wait: no restart" "lock edit guard wait guard" "$(paste -sd' ' "$ORDER")"
+check "rpc-enable, guard refuses after the wait: node-info.yaml put back" "original" "$(cat "$NIF")"
 CDG_RC=1 adv set
 check_rc "rpc-enable, guard refuses: rc 1" 1 "$RC"
 check "rpc-enable, guard refuses: no wait, no restart" "lock edit guard" "$(paste -sd' ' "$ORDER")"
@@ -543,7 +551,7 @@ check "rpc-enable, wait fails: no restart" "lock edit guard wait" "$(paste -sd' 
 check "rpc-enable, wait fails: node-info.yaml put back" "original" "$(cat "$NIF")"
 adv clear
 check_rc "rpc-disable advertise rc 0" 0 "$RC"
-check "rpc-disable: lock, edit, guard, wait, restart" "lock edit guard wait restart" "$(paste -sd' ' "$ORDER")"
+check "rpc-disable: lock, edit, guard, wait, guard, restart" "lock edit guard wait guard restart" "$(paste -sd' ' "$ORDER")"
 CDG_RC=2 adv clear
 check_rc "rpc-disable on a node whose vote counts, committee unreadable: rc 1" 1 "$RC"
 check "rpc-disable, guard rc 2: no restart" "lock edit guard" "$(paste -sd' ' "$ORDER")"
