@@ -1665,11 +1665,13 @@ check_bls_cleartext() {
 
 # check_update_lock -- the update lock every setup, update and edit takes
 # (tn_update_lock_path): its directory must be root-owned and writable by root
-# only, the lock file a regular root-owned file. Reports the holder's PID (the
-# number the holder wrote into the file) while the lock is held; held means a
-# flock on the file in /proc/locks, or the mkdir fallback's <lock>.d.
+# only, the lock file a regular root-owned file, mode 0600 (any account that can
+# open it can hold the lock; the next setup, update or edit repairs the mode, so
+# a looser mode warns). Reports the mode, and the holder's PID (the number the
+# holder wrote into the file) while the lock is held; held means a flock on the
+# file in /proc/locks, or the mkdir fallback's <lock>.d.
 check_update_lock() {
-    local path dir owner ino held="" holder="" cmd="" note=""
+    local path dir owner mode="" ino held="" holder="" cmd="" note=""
     have_fns tn_update_lock_path tn_root_dir_ok || return 0
     path="$(tn_update_lock_path)"
     dir="${path%/*}"
@@ -1695,6 +1697,14 @@ check_update_lock() {
             (( ++HEALTH_ISSUES ))
             return 0
         fi
+    fi
+    if [[ -f "$path" && ! -L "$path" ]]; then
+        mode="$(stat -c '%a' -- "$path" 2>/dev/null || true)"
+        if [[ -z "$note" && -n "$mode" && "$mode" != 600 ]]; then
+            print_warn "Update lock ${path} is mode ${mode}, not 0600: any account that can read it can hold the lock and block updates."
+            print_info "  The next setup, update or edit sets it to 0600 (or now: sudo chmod 0600 ${path})"
+        fi
+        [[ -z "$mode" ]] || note=" (mode ${mode})${note}"
     fi
     if [[ -f "$path" && ! -L "$path" && -r /proc/locks ]]; then
         ino="$(stat -c '%i' -- "$path" 2>/dev/null || true)"

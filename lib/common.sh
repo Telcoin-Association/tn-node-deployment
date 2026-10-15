@@ -180,18 +180,21 @@ check_root() {
 #
 # Primary path is flock(1) on /run/telcoin/update.lock. /run/telcoin is created
 # root 0755 when absent and must pass tn_root_dir_ok; the lock file must be a
-# regular file owned by root (never a symlink). Only root can create, replace or
-# open the lock for writing, so no other account can hold it or point it
-# elsewhere. fd 9 is held open for the life of the process and the kernel drops
-# the lock when the last copy of that descriptor closes, so a crash, SIGKILL or
-# reboot leaves nothing to clean up (but see the next paragraph about
-# children). Where flock is missing, or /run does not exist (stock macOS), fall
-# back to an atomic mkdir lock (mkdir fails on anything that already exists,
-# symlinks included) with a PID-staleness takeover: <lock file>.d when the lock
-# directory is usable, else ${TMPDIR:-/tmp}/telcoin-update.lock.d. On failure,
+# regular file owned by root (never a symlink), created 0600 (an existing
+# root-owned file with another mode is set to 0600). flock needs only a read
+# descriptor, so only root may open the file at all: no other account can hold
+# the lock, replace it or point it elsewhere. fd 9 is held open for the life of
+# the process and the kernel drops the lock when the last copy of that
+# descriptor closes, so a crash, SIGKILL or reboot leaves nothing to clean up
+# (but see the next paragraph about children). Where flock is missing, or /run
+# does not exist (stock macOS), fall back to an atomic mkdir lock (mkdir fails
+# on anything that already exists, symlinks included) with a PID-staleness
+# takeover: <lock file>.d when the lock directory is usable, else
+# ${TMPDIR:-/tmp}/telcoin-update.lock.d. On failure,
 # TN_UPDATE_LOCK_HOLDER carries the holder's PID ("" if unknown) so JSON-mode
 # callers can report it. TN_UPDATE_LOCK_FILE overrides the path for tests; the
-# root-owner checks then do not apply (the symlink check still does).
+# root-owner and mode checks then do not apply (the symlink check still does,
+# and a missing file is still created 0600).
 #
 # Every child the holder starts inherits fd 9, and the kernel frees a flock only
 # when the last descriptor of the open file goes. A child that outlives the holder
@@ -247,7 +250,7 @@ tn_acquire_update_lock() {
     TN_UPDATE_LOCK_HOLDER=""
     TN_UPDATE_LOCK_DIR=""
     TN_UPDATE_LOCK_KIND=""
-    local lock_file lock_parent strict="" lock_dir prc=0 owner
+    local lock_file lock_parent strict="" lock_dir prc=0 owner mode old_umask
     lock_file="$(tn_update_lock_path)"
     lock_parent="${lock_file%/*}"
     [[ -n "$lock_parent" ]] || lock_parent=/
@@ -268,15 +271,28 @@ tn_acquire_update_lock() {
                 print_error "Refusing the lock file ${lock_file}: it is not owned by root."
                 return 1
             fi
+            # flock needs only a read descriptor, so a lock file others can
+            # read lets any account hold the lock. Repair a root-owned file
+            # left with a looser mode by an earlier run.
+            mode="$(stat -c %a -- "$lock_file" 2>/dev/null || true)"
+            if [[ "$mode" != 600 ]] && ! chmod 0600 -- "$lock_file" 2>/dev/null; then
+                print_error "Refusing the lock file ${lock_file}: mode ${mode:-unknown}, and it cannot be set to 0600."
+                return 1
+            fi
         fi
     fi
 
     if [[ $prc -eq 0 ]] && command -v flock >/dev/null 2>&1; then
         # Append-mode open: must not truncate the PID a current holder wrote.
+        # umask 077 creates a missing lock file 0600, readable by root only.
+        old_umask="$(umask)"
+        umask 077
         if ! exec 9>>"$lock_file"; then
+            umask "$old_umask"
             print_error "Cannot open lock file ${lock_file} (are you root?)"
             return 1
         fi
+        umask "$old_umask"
         if ! flock -n 9; then
             TN_UPDATE_LOCK_HOLDER="$(cat "$lock_file" 2>/dev/null || true)"
             print_error "Another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}."

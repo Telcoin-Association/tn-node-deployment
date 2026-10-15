@@ -3,9 +3,9 @@
 # tools/tests/check_node_hardening_test.sh -- check-node.sh's hardening checks:
 # check_bls_cleartext (cleartext bls.key without bls.kw fails, both warn),
 # check_update_lock (free, held with the holder's PID, a dead holder, the mkdir
-# fallback, an unsafe lock directory), check_ownership_layout (old layout warns,
-# or fails on mainnet; a recorded layout 2 is checked path by path) and
-# detect_data_dir's duplicated DATA_DIR.
+# fallback, an unsafe lock directory, the lock file's mode),
+# check_ownership_layout (old layout warns, or fails on mainnet; a recorded
+# layout 2 is checked path by path) and detect_data_dir's duplicated DATA_DIR.
 #
 #   bash tools/tests/check_node_hardening_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/check_node_hardening_test.sh
@@ -160,8 +160,14 @@ if [[ $IS_ROOT == 1 && -e /.dockerenv && ! -e /run/telcoin ]]; then
     run check_update_lock
     check "lock: a lock file not owned by root fails" "yes 1" "$(has "$OUT" "not owned by root") $ADDED"
     chown 0 /run/telcoin/update.lock
+    chmod 0644 /run/telcoin/update.lock
     run check_update_lock
-    check "lock: root-owned directory and file" "yes 0" "$(has "$OUT" "is free") $ADDED"
+    check "lock: a 0644 lock file warns and names the mode" "yes yes yes 0" \
+        "$(has "$OUT" "is mode 644, not 0600") $(has "$OUT" "sets it to 0600") $(has "$OUT" "is free (mode 644)") $ADDED"
+    chmod 0600 /run/telcoin/update.lock
+    run check_update_lock
+    check "lock: root-owned directory and 0600 file" "yes no 0" \
+        "$(has "$OUT" "is free (mode 600)") $(has "$OUT" "not 0600") $ADDED"
 else
     skip "lock: the default lock directory" "needs root inside a container with no /run/telcoin"
 fi
