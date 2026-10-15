@@ -829,7 +829,7 @@ To check one yourself, for an `existing` install or before you trust a download,
 
 A node release lives at `https://github.com/Telcoin-Association/telcoin-network/releases/download/<tag>/`.
 Its `SHA256SUMS` lists five files: `IMAGE_DIGEST`, the tarball `telcoin-network-<tag>-x86_64-unknown-linux-gnu.tar.gz`, and the chain configs `chain-configs/<dir>/committee.yaml`, `genesis.yaml` and `parameters.yaml` (`<dir>` is `testnet` for `-adiri` tags and `mainnet` for mainnet tags).
-`SHA256SUMS.asc` is a detached GPG signature by a release key; the public keys ship with the scripts in `lib/release-keys/*.asc`.
+`SHA256SUMS.asc` is a detached GPG signature by a release key; the public keys ship with the scripts in `lib/release-keys/*.asc` once the maintainers add them. This release ships none yet, so a signed-release install or update is refused until a key arrives with `update-scripts.sh`.
 
 ```bash
 TAG=v0.16.0-adiri
