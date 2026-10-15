@@ -2295,8 +2295,10 @@ step_public_rpc() {
     # --json) so its progress shows here. stdin is /dev/null and TN_ASSUME_YES is forced
     # off, so nothing can block on a prompt or auto-accept one (e.g. replacing a Caddyfile
     # this repo did not write); fd3 (the --json event stream) is closed for the child.
+    # --yes accepts only the public RPC exposure summary: the operator's --rpc-domain
+    # (or the domain typed at the prompt) is that consent.
     print_step "Enabling public RPC for ${d} (Caddy + node-info.yaml advertisement)..."
-    if ! TN_ASSUME_YES=false bash "$caddy" --phase=rpc-enable --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-; then
+    if ! TN_ASSUME_YES=false bash "$caddy" --phase=rpc-enable --yes --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-; then
         public_rpc_pending "install-caddy.sh did not finish enabling it (see the messages above)."
         return 0
     fi

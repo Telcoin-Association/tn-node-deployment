@@ -877,6 +877,42 @@ update_quorum_guard() {
     return 0
 }
 
+# update_node_log_dir -- an observability host set up before NODE_LOG_DIR still
+# points the node's JSON logs (--log.file.directory) at the root-owned log dir,
+# which the node can no longer write. Binary installs only: point the flag at
+# NODE_LOG_DIR (default <log dir>/node; created <service user>:telcoin-log 0750
+# inside the root-owned log dir) and record the key, so the unit written next
+# lists the directory in ReadWritePaths=. Called while the node is stopped; a
+# failure warns and changes nothing more.
+update_node_log_dir() {
+    local file line cur want user rc=0
+    [[ "$(meta_get ENABLE_OBSERVABILITY 2>/dev/null || true)" == "true" ]] || return 0
+    line="$(tn_node_launch_target 2>/dev/null)" || return 0
+    file="${line##* }"
+    [[ "$(_tn_launch_awk runner "$file" 2>/dev/null)" == binary\ * ]] || return 0
+    cur="$(tn_launch_flag_get "$file" --log.file.directory 2>/dev/null)" || return 0
+    [[ "${cur%/}" == "$DEFAULT_LOG_DIR" ]] || return 0
+    want="$(meta_get NODE_LOG_DIR 2>/dev/null || true)"
+    [[ -n "$want" ]] || want="${DEFAULT_LOG_DIR}/node"
+    user="$(meta_get HOST_SERVICE_USER 2>/dev/null || true)"
+    user="${user:-$SERVICE_USER}"
+    if [[ "$want" != /* || -L "$want" ]] || ! tn_root_dir_ok "${want%/*}" \
+        || ! getent group telcoin-log >/dev/null 2>&1 \
+        || ! install -d -o "$user" -g telcoin-log -m 0750 -- "$want"; then
+        update_wait_say warn "Could not prepare the node log dir ${want}; the node's JSON logs stay pointed at ${DEFAULT_LOG_DIR}, which it cannot write (re-enable observability to fix it)."
+        return 0
+    fi
+    tn_launch_flag_set "$file" --log.file.directory "$want" >/dev/null 2>&1 || rc=$?
+    if [[ $rc -gt 1 ]]; then
+        update_wait_say warn "Could not point --log.file.directory at ${want} in ${file}; set it by hand."
+        return 0
+    fi
+    meta_set NODE_LOG_DIR "$want" >/dev/null 2>&1 \
+        || update_wait_say warn "Could not record NODE_LOG_DIR=${want} in .node-meta."
+    update_wait_say log "The node's JSON logs now go to ${want}."
+    return 0
+}
+
 # update_rerender_launch -- while the node is stopped, rewrite its start script and
 # unit in the current form (tn_rerender_node_launch: the passphrase on stdin from
 # the systemd credential, the unit sandbox) and reload systemd. A refusal or a
@@ -884,6 +920,7 @@ update_quorum_guard() {
 update_rerender_launch() {
     local rc=0
     declare -F tn_rerender_node_launch >/dev/null 2>&1 || return 0
+    update_node_log_dir
     tn_rerender_node_launch "" update_wait_say || rc=$?
     if [[ $rc -eq 0 ]]; then
         systemctl daemon-reload 9>&- || update_wait_say warn "systemctl daemon-reload failed; ${SERVICE_NAME} may start with its previous unit."

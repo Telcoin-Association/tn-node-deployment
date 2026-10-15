@@ -70,4 +70,32 @@ prep_case "other registry refused before the pull" 1 "docker.io/library/busybox:
 prep_case "non-release tag refused before the pull" 1 "v0.16.0-adiri-hotfix" none
 prep_case "leading dash refused" 1 "--help" none
 check_lacks "pull log is not a fixed /tmp name" "/tmp/tn-update-build.log" "$(cat "$TN_TEST_REPO/update-node.sh")"
+# update_node_log_dir: an observability host's JSON logs move off the root-owned dir.
+LF="$T/tn-start"
+NETWORK=testnet DATA_DIR=/var/lib/telcoin PASSPHRASE_METHOD=stdin LOG_TARGET=file
+tn_node_launch_target() { printf 'telcoin source %s\n' "$LF"; }
+tn_root_dir_ok() { return 0; }
+getent() { return 0; }
+install() { printf '%s\n' "$*" > "$T/install.log"; return 0; }
+tn_launch_flag_set() { printf '%s %s\n' "$2" "$3" > "$T/flag.log"; return 0; }
+meta_set() { printf '%s=%s\n' "$1" "$2" > "$T/metaset.log"; return 0; }
+nld_case() {  # nld_case NAME META ARGS EXPECTED-FLAG-LOG
+    rm -f "$T/flag.log" "$T/metaset.log"
+    printf '%s\n' "$2" > "$META"
+    _tn_start_script_text source /opt/telcoin/telcoin-network "$3" > "$LF" 2>/dev/null
+    update_node_log_dir >/dev/null 2>&1
+    check "$1" "$4" "$(cat "$T/flag.log" 2>/dev/null || echo none)"
+}
+OBS="--datadir /var/lib/telcoin --http --log.file.format json --log.file.directory /var/log/telcoin"
+nld_case "obs host on the old log dir: moved to /var/log/telcoin/node" \
+    "$(printf 'NETWORK=testnet\nENABLE_OBSERVABILITY=true')" "$OBS" "--log.file.directory /var/log/telcoin/node"
+check "obs host: NODE_LOG_DIR recorded" "NODE_LOG_DIR=/var/log/telcoin/node" "$(cat "$T/metaset.log" 2>/dev/null)"
+check_has "obs host: dir made for the service user, group telcoin-log, 0750" "yes" \
+    "$(grep -q -- '-g telcoin-log -m 0750 -- /var/log/telcoin/node' "$T/install.log" && echo yes)"
+nld_case "NODE_LOG_DIR from .node-meta wins" \
+    "$(printf 'NETWORK=testnet\nENABLE_OBSERVABILITY=true\nNODE_LOG_DIR=/var/log/telcoin/n2')" "$OBS" "--log.file.directory /var/log/telcoin/n2"
+nld_case "observability off: untouched" "NETWORK=testnet" "$OBS" none
+nld_case "already elsewhere: untouched" "$(printf 'NETWORK=testnet\nENABLE_OBSERVABILITY=true')" \
+    "--datadir /var/lib/telcoin --http --log.file.directory /var/log/telcoin/node" none
+unset -f tn_node_launch_target tn_root_dir_ok getent install tn_launch_flag_set meta_set
 finish
