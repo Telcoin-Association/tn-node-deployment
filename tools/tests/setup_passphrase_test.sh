@@ -3,7 +3,8 @@
 # every child's environment and argv: --passphrase-stdin is read once, a passphrase that
 # fails tn_passphrase_ok stops the run before the root check (so before any write),
 # TN_BLS_PASSPHRASE is dropped from setup's own environment before anything runs, keytool
-# gets the passphrase on stdin only, and keygen keeps only a wrapped key (bls.kw).
+# gets the passphrase on stdin only, and keygen keeps only a wrapped key (bls.kw). Also:
+# a SIGTERM ends a --json run with a done event that names it.
 #
 # A copy of setup-node.sh without its last line (`main "$@"`) is sourced at the top level
 # (the lib is linked beside it), then the steps that touch the host are replaced: the
@@ -224,6 +225,33 @@ printf 'short-pass\nshort-pass\nlong-enough-pass-16\nlong-enough-pass-16\n' > "$
 check_rc "prompt mainnet: rc" 0 "$(prompt "$T/in" mainnet)"
 check "prompt mainnet: short one asked again" "long-enough-pass-16" "$(cat "$REC/prompt")"
 check_rc "prompt: end of input stops" 1 "$(prompt /dev/null testnet)"
+
+# ---- a signal ends the run: the done event names it, with the status ---------------------
+reset
+printf 'sig-pass-1\n' > "$T/in"
+step_preflight() {
+    : > "$REC/blocked"
+    sleep 30 &
+    printf '%s\n' "$!" > "$REC/sleep.pid"
+    wait "$!"
+}
+# shellcheck source=/dev/null
+( . "$T/sn/pre.sh"; main "${KG[@]}" --passphrase-stdin ) < "$T/in" > "$T/out" 2> "$T/err" &
+pid=$!
+n=0
+while [[ ! -e "$REC/blocked" && $n -lt 100 ]]; do
+    n=$((n + 1))
+    sleep 0.1 2>/dev/null || sleep 1
+done
+kill -TERM "$pid" 2>/dev/null
+rc=0
+wait "$pid" || rc=$?
+kill "$(cat "$REC/sleep.pid" 2>/dev/null)" 2>/dev/null
+check_rc "signal: SIGTERM ends setup with rc 143" 143 "$rc"
+check "signal: one done event, naming SIGTERM and rc 143" '{"event":"done","ok":false,"msg":"setup stopped by SIGTERM (rc=143)"}' \
+    "$(grep '"event":"done"' "$T/out")"
+check "signal: the lock is free again" "free" \
+    "$( ( TN_EXIT_TRAP_OWNED=1; tn_acquire_update_lock >/dev/null 2>&1 && echo free || echo held ) )"
 
 # ---- nothing before main sees the passphrase ---------------------------------------------
 # The real setup-node.sh (--help: it parses, prints the header and exits) under PATH shims

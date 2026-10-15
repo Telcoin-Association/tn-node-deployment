@@ -2573,6 +2573,7 @@ JSON_BUILD_REF=""
 JSON_NETWORK_INPUT="testnet"
 JSON_DONE_EMITTED=false
 JSON_LAST_ERROR=""   # the last error event's message; json_on_exit reuses it for done
+SETUP_SIGNAL=""      # TERM, INT or HUP when a signal ended the run (json_on_exit names it)
 # Optional override: dir holding genesis.yaml/committee.yaml/parameters.yaml,
 # checked first by step_write_config. Preserve any env value; default empty so
 # `set -u` never trips and the ${TN_GENESIS_DIR:+...} expansion is a no-op.
@@ -2628,11 +2629,18 @@ run_streamed() {
 # {"event":"done","ok":false,...} when the run is ending without its done event, with
 # the last error event's message, or a pointer to stderr when there was none.
 json_on_exit() {
-    local rc=$?
+    local rc=$? msg
+    # The cleanup must finish: no second signal interrupts it.
+    trap '' TERM INT HUP
     tn_remove_inflight_tmp
     setup_release_lock
     if json_mode && [[ "$JSON_DONE_EMITTED" != "true" ]]; then
-        json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "${JSON_LAST_ERROR:-setup exited early (rc=${rc}) -- see server logs / journalctl}")\"}" 2>/dev/null || true
+        if [[ -n "$SETUP_SIGNAL" ]]; then
+            msg="setup stopped by SIG${SETUP_SIGNAL} (rc=${rc})${JSON_LAST_ERROR:+; the last error was: ${JSON_LAST_ERROR}}"
+        else
+            msg="${JSON_LAST_ERROR:-setup exited early (rc=${rc}) -- see server logs / journalctl}"
+        fi
+        json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
     fi
     return "$rc"
 }
@@ -2879,6 +2887,12 @@ main() {
     # json_on_exit owns the EXIT trap and releases the update lock (setup_take_lock).
     TN_EXIT_TRAP_OWNED=1
     trap json_on_exit EXIT
+    # A signal ends the run through the EXIT trap with the usual status (128 +
+    # the signal number), and a --json run's done event names the signal. A
+    # trap runs once the current command returns.
+    trap 'SETUP_SIGNAL=TERM; exit 143' TERM
+    trap 'SETUP_SIGNAL=INT; exit 130' INT
+    trap 'SETUP_SIGNAL=HUP; exit 129' HUP
 
     while [[ $# -gt 0 ]]; do
         # Every option below that ends in `shift 2` needs a value. As the last argument it
