@@ -1149,7 +1149,8 @@ def detect_install_method(t):
 #   credential  a systemd encrypted credential (LoadCredentialEncrypted=), fed to
 #               the node on stdin by the root-owned start script;
 #   stdin       the interim form: a root-only credential file (LoadCredential=)
-#               fed to the node on stdin;
+#               fed to the node on stdin (older installs record it as
+#               loadcredential);
 #   env         the legacy forms (the start script exports TN_BLS_PASSPHRASE, or
 #               the unit embeds it); flagged for migration with
 #               `edit-config.sh --migrate-credential`.
@@ -1158,7 +1159,8 @@ PASSPHRASE_METHODS = ("credential", "stdin", "env")
 
 def detect_passphrase_method(t):
     """credential | stdin | env | '' (unknown). meta PASSPHRASE_METHOD first
-    (legacy values loadcredential and tpm read as env); else the unit: a
+    (loadcredential, the older name of stdin, reads as stdin; the old TPM method
+    reads as env, flagged for migration); else the unit: a
     LoadCredentialEncrypted= line -> credential, a TN_BLS_PASSPHRASE environment
     line -> env, a LoadCredential= line -> stdin when the start script passes
     --bls-passphrase-source stdin, else env."""
@@ -1166,7 +1168,9 @@ def detect_passphrase_method(t):
     val = meta.get("PASSPHRASE_METHOD", "").strip()
     if val in PASSPHRASE_METHODS:
         return val
-    if val in ("loadcredential", "tpm"):
+    if val == "loadcredential":
+        return "stdin"
+    if val == "tpm":
         return "env"
     path = service_file(t)
     try:
@@ -3835,6 +3839,29 @@ def api_config_set(node_type):
     if not config_value_ok(field, value):
         return jsonify({"error": "invalid value for field"}), 400
     return _update_stream(["sudo", "-n", HELPER, "config-set", field, value])
+
+
+# The BLS passphrase credential: migrate (into the encrypted systemd credential)
+# or reseal (encrypt it again with this host's key as it is now), through the
+# helper's credential subcommand and edit-config.sh's --json mode. Both restart
+# the node; the page reads the events like a config save.
+CREDENTIAL_ACTIONS = ("migrate", "reseal")
+
+
+@app.route("/api/config/<node_type>/credential", methods=["POST"])
+def api_config_credential(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
+    data, err = _json_body()
+    if err:
+        return err
+    action = str(data.get("action") or "").strip()
+    if action not in CREDENTIAL_ACTIONS:
+        return jsonify({"error": "action must be migrate or reseal"}), 400
+    return _update_stream(["sudo", "-n", HELPER, "credential", action])
 
 
 # Advertised node name ("Advertised Node Name" in the UI) = the network-config

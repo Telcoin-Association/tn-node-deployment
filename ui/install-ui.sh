@@ -400,6 +400,10 @@ ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper journal-follo
 # Config edits through edit-config.sh --json: a field from a fixed allowlist and
 # a value checked against that field's pattern.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper config-set *
+# BLS passphrase: move it into the encrypted credential, or seal that again
+# (edit-config.sh --migrate-credential / --reseal). Exactly these two calls.
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper credential migrate
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper credential reseal
 # Advertised node name (network-config hostname); written as the node's service
 # user, then the node restarts.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper set-hostname *

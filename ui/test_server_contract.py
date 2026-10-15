@@ -412,6 +412,9 @@ class CrossFileContractTest(ServerTestCase):
         c.post("/api/logs/observer/clear", json={})
         c.post("/api/config/observer/set", json={"field": "verbosity", "value": "-vv"},
                buffered=True)
+        for action in server.CREDENTIAL_ACTIONS:
+            c.post("/api/config/observer/credential", json={"action": action}, buffered=True)
+        server._write_times.clear()     # the write rate limit would refuse the rest
         c.post("/api/config/observer/hostname", json={"name": "node7"})
         c.post("/api/config/observer/logrotate", json={"size": "1G"})
         c.post("/api/config/observer/clear-rotated", json={})
@@ -858,6 +861,56 @@ class ConfigSetTest(ServerTestCase):
             with self.subTest(field=field, value=value):
                 self.assertTrue(server.config_value_ok(field, value))
                 self.assertFalse(server.config_value_ok(field, value + "\n"))
+
+
+class CredentialTest(ServerTestCase):
+
+    def post(self, body):
+        self.calls.clear()
+        return self.client.post("/api/config/observer/credential", json=body, buffered=True)
+
+    def test_each_action_is_one_helper_call_without_other_arguments(self):
+        for action, flag in (("migrate", "--migrate-credential"), ("reseal", "--reseal")):
+            with self.subTest(action=action):
+                self.popen_script = {"lines": [json.dumps({"event": "done", "ok": True,
+                                                           "field": "passphrase", "value": action,
+                                                           "msg": "passphrase " + action + " done"})],
+                                     "rc": 0}
+                resp = self.post({"action": action})
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "credential", action]])
+                events = self.stream_events(resp.data)
+                done = [e for e in events if e.get("event") == "done"]
+                self.assertEqual(len(done), 1)
+                self.assertTrue(done[0]["ok"])
+
+    def test_a_failure_reaches_the_page(self):
+        self.popen_script = {"lines": [json.dumps({"event": "error", "msg": "no usable TPM2 here"}),
+                                       json.dumps({"event": "done", "ok": False, "field": "passphrase",
+                                                   "msg": "passphrase reseal failed (rc 1)"})],
+                             "rc": 1}
+        events = self.stream_events(self.post({"action": "reseal"}).data)
+        self.assertIn({"event": "error", "msg": "no usable TPM2 here"}, events)
+        self.assertFalse([e for e in events if e.get("event") == "done"][0]["ok"])
+
+    def test_other_actions_are_refused_before_the_helper(self):
+        for body in ({}, {"action": ""}, {"action": "Migrate"}, {"action": "tpm"},
+                     {"action": "--reseal"}, {"action": ["migrate"]}, {"action": "migrate reseal"}):
+            with self.subTest(body=body):
+                resp = self.post(body)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(self.helper_calls(), [])
+
+    def test_external_nodes_are_read_only(self):
+        self.nodes = external_nodes()
+        resp = self.post({"action": "migrate"})
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_sudoers_allows_exactly_the_two_calls(self):
+        rules = helper_rules(split_transitional(sudoers_text())[0])
+        self.assertEqual(sorted(r for r in rules if r.startswith("credential")),
+                         ["credential migrate", "credential reseal"])
 
 
 # ---------------------------------------------------------------------------

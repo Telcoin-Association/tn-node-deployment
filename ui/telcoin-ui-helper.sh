@@ -57,6 +57,7 @@
 #   telcoin-ui-helper journal-tail    <lines>                   (read-only)
 #   telcoin-ui-helper journal-follow                            (read-only)
 #   telcoin-ui-helper config-set      <field> <value>
+#   telcoin-ui-helper credential      <migrate|reseal>
 #   telcoin-ui-helper set-hostname    <name>
 #   telcoin-ui-helper set-logrotate   <size e.g. 1G>
 #   telcoin-ui-helper logrotate-seed                            (root only; install-ui.sh)
@@ -181,6 +182,7 @@ is_mutating() {
     case "${1:-}" in
         jaeger-start|jaeger-stop|tracing-enable|tracing-disable) return 0 ;;
         update-prepare|update-apply|update-discard|log-clear|config-set) return 0 ;;
+        credential) return 0 ;;
         set-hostname|set-logrotate|logrotate-seed|clear-rotated) return 0 ;;
         caddy-enable|caddy-disable|rpc-enable|rpc-disable|firewall-port) return 0 ;;
         setup-keygen|setup-finalize) return 0 ;;
@@ -837,6 +839,24 @@ cmd_config_set() {
     exec bash "$CONFIG_SCRIPT" --json --set "${field}=${value}"
 }
 
+# The BLS passphrase credential: edit-config.sh --json --migrate-credential
+# (move the passphrase into the encrypted systemd credential) or --reseal
+# (encrypt the credential again with this host's key as it is now). No other
+# argument reaches the engine. It reads the stored passphrase itself; stdin is
+# closed, so it never waits for a typed one. Both restart the node and stream
+# JSON events ending in a done event.
+cmd_credential() {
+    local verb="$1" flag
+    config_script_ready
+    case "$verb" in
+        migrate) flag=--migrate-credential ;;
+        reseal)  flag=--reseal ;;
+        *) die "credential takes migrate or reseal, not: ${verb:-<empty>}" ;;
+    esac
+    engine_has "$CONFIG_SCRIPT" "$flag"
+    exec_job bash "$CONFIG_SCRIPT" --json "$flag" </dev/null
+}
+
 # Set the "Advertised Node Name" -- the `hostname` field in the node's
 # network-config YAML -- and restart the node so it reads the new value. The data
 # dir belongs to the node's service account, so every read and write of
@@ -1374,7 +1394,7 @@ max_args() {
         logrotate-seed|caddy-status|caddy-disable|rpc-status|rpc-disable) echo 0 ;;
         firewall-status|addons-status|meta-cat|node-env-cat) echo 0 ;;
         setup-keygen|setup-finalize|docker-detect|internal-ip) echo 0 ;;
-        update-prepare|journal-tail|set-hostname|set-logrotate) echo 1 ;;
+        update-prepare|journal-tail|set-hostname|set-logrotate|credential) echo 1 ;;
         docker-status|docker-logs-full|docker-node-info|docker-stats|docker-log-size) echo 1 ;;
         config-set|caddy-dns-check|rpc-dns-check|firewall-port|docker-logs) echo 2 ;;
         caddy-enable|rpc-enable) echo 3 ;;
@@ -1430,6 +1450,7 @@ main() {
         journal-tail)    cmd_journal_tail "${1:-}" ;;
         journal-follow)  cmd_journal_follow ;;
         config-set)      cmd_config_set "${1:-}" "${2:-}" ;;
+        credential)      cmd_credential "${1:-}" ;;
         set-hostname)    cmd_set_hostname "${1:-}" ;;
         set-logrotate)   cmd_set_logrotate "${1:-}" ;;
         logrotate-seed)  cmd_logrotate_seed ;;

@@ -554,7 +554,7 @@ class PassphraseDisplayTest(ServerTestCase):
 
     def test_methods(self):
         for meta, want in (("credential", "credential"), ("stdin", "stdin"), ("env", "env"),
-                           ("loadcredential", "env"), ("tpm", "env")):
+                           ("loadcredential", "stdin"), ("tpm", "env")):
             with self.subTest(meta=meta):
                 self.helper_replies["meta-cat"] = (0, f"PASSPHRASE_METHOD={meta}\n", "")
                 server.clear_meta_cache()

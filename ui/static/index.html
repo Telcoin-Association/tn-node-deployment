@@ -533,16 +533,25 @@ function showTokenBanner(){
   b.style.display = 'block';
 }
 
-// How the node gets its BLS passphrase (/api/status passphrase_method), with
-// the CLI step that changes it. Read-only: the UI never migrates or re-seals.
+// How the node gets its BLS passphrase (/api/status passphrase_method):
+// credential (encrypted systemd credential), stdin (root-only file read on
+// stdin) or env (a legacy form). Config > BLS Passphrase migrates or re-seals.
 function passphraseLabel(s){
   const m = s && s.passphrase_method;
-  if(m==='credential') return 'Encrypted credential' + (s.credential_key ? ' ('+esc(s.credential_key)+')' : '')
-    + ' <span style="color:var(--text2)">· re-seal: sudo bash edit-config.sh --reseal</span>';
-  if(m==='stdin') return 'Root-only credential file, read on stdin';
-  if(m==='env') return '<span style="color:var(--yellow)">Environment (legacy)</span>'
-    + ' <span style="color:var(--text2)">· migrate: sudo bash edit-config.sh --migrate-credential</span>';
+  if(m==='credential') return 'credential · encrypted systemd credential' + (s.credential_key ? ' ('+esc(s.credential_key)+')' : '');
+  if(m==='stdin') return 'stdin · root-only file read on stdin'
+    + ' <span style="color:var(--text2)">· encrypt it from Config</span>';
+  if(m==='env') return '<span style="color:var(--yellow)">env · legacy</span>'
+    + ' <span style="color:var(--text2)">· migrate it from Config</span>';
   return esc(m||'—');
+}
+
+// The action that applies to a passphrase method: reseal for the encrypted
+// credential, migrate for the root-only file or a legacy form, none otherwise.
+function credentialAction(m){
+  if(m==='credential') return 'reseal';
+  if(m==='stdin' || m==='env') return 'migrate';
+  return '';
 }
 
 async function api(path, opts){
@@ -2122,11 +2131,13 @@ async function renderConfig(){
         </span>
       </div>
     </div>
+    ${credentialCard(d, t)}
     <div class="card" id="cfgProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3>
       <div class="log-body" id="cfgLog" style="height:240px"></div>
     </div>`;
 
+  const crb=$('#credAction'); if(crb) crb.addEventListener('click', ()=>runCredential(crb.dataset.action, crb));
   const eb=$('#cfgEdit'); if(eb) eb.addEventListener('click', ()=>{ state.configEditing=true; renderConfig(); });
   const db=$('#cfgDone'); if(db) db.addEventListener('click', ()=>{ stopConfigStream(); state.configEditing=false; renderConfig(); });
   c.querySelectorAll('[data-cfg-save]').forEach(b=>b.addEventListener('click', ()=>{
@@ -2213,6 +2224,45 @@ async function saveConfigField(field, value, btn){
 }
 
 function stopConfigStream(){ if(state.configAbort){ state.configAbort.abort(); state.configAbort=null; } }
+
+// Config > BLS Passphrase: how the node keeps its passphrase, and the one
+// edit-config.sh action that applies (--migrate-credential or --reseal, through
+// the helper). Both restart the node.
+function credentialCard(d, t){
+  const m = d.passphrase_method || '';
+  const act = credentialAction(m);
+  const restart = t==='validator'
+    ? ' <strong style="color:var(--yellow)">(a validator restart drops consensus rounds during the brief downtime)</strong>' : '';
+  const what = act==='reseal'
+    ? 'Encrypts the credential again with this host’s key as it is now (the TPM when the host has one), for example after a TPM or firmware change.'
+    : act==='migrate'
+      ? 'Moves the passphrase into an encrypted systemd credential and shreds the old copy.'
+      : 'No passphrase action applies to this node.';
+  return `<div class="card" style="margin-top:14px">
+      <h3 style="margin:0 0 4px">BLS Passphrase</h3>
+      <div class="kv"><span class="k">Method</span><span class="v mono" id="credMethod">${esc(m||'—')}</span></div>
+      <p class="muted" style="font-size:13px;margin:8px 0 12px">${what}${act?' The node restarts'+restart+'.':''}</p>
+      ${act ? `<button class="btn btn-out" id="credAction" data-action="${act}">${act==='reseal'?'Re-seal':'Migrate to an encrypted credential'}</button>` : ''}
+    </div>`;
+}
+
+async function runCredential(action, btn){
+  if(action!=='migrate' && action!=='reseal') return;
+  const what = action==='reseal' ? 'Re-seal the passphrase credential' : 'Migrate the passphrase to an encrypted credential';
+  if(!confirm(what+'? The node restarts'+(state.node==='validator'?' — expect missed consensus rounds during the brief downtime':'')+'.')) return;
+  stopConfigStream();
+  const card=$('#cfgProgressCard'); if(card) card.style.display='block';
+  const log=$('#cfgLog'); if(log) log.innerHTML='<div class="log-line info">» '+esc(what)+'…</div>';
+  if(btn) btn.disabled=true;
+  const ctl = new AbortController(); state.configAbort = ctl;
+  const d = await streamPost('/api/config/'+state.node+'/credential', {action:action},
+    {target:'#cfgLog', what:'Passphrase', signal:ctl.signal});
+  if(ctl.signal.aborted) return;
+  if(state.configAbort===ctl) state.configAbort = null;
+  if(d && d.ok) toast(action==='reseal' ? 'Credential sealed again' : 'Passphrase moved to an encrypted credential', 'success');
+  else toast((action==='reseal' ? 'Re-seal' : 'Migration')+' failed'+(d && d.msg ? ': '+d.msg : ''), 'error');
+  refreshAfterChange();
+}
 
 // =============================================================================
 // UPDATE -- in-UI node updater (current vs latest, Prepare + Apply, live log)

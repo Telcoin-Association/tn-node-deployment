@@ -695,6 +695,32 @@ check_has "the other listener is checked on its own key" \
 same_with_tokens unified config-set state_export 5
 check_has "config-set state_export 5 argv" "edit-config [--json] [--set] [state_export=5]" "$BASE"
 
+# ---- credential: migrate or reseal, nothing else ---------------------------------------
+# shellcheck disable=SC2016
+make_fake "$T/engine/edit-config.sh" edit-config \
+    '# --migrate-credential --reseal
+[ -t 0 ] || { IFS= read -r line && echo "stdin [$line]" >> "'"$T"'/calls.log"; }; exit 0'
+fixture unified
+t="$(trace credential migrate < "$T/pass-in")"
+check_has "credential migrate runs edit-config.sh --json --migrate-credential" \
+    "edit-config [--json] [--migrate-credential]" "$t"
+check_lacks "credential migrate closes the engine's stdin" "stdin [" "$t"
+t="$(trace credential reseal)"
+check_has "credential reseal runs edit-config.sh --json --reseal" "edit-config [--json] [--reseal]" "$t"
+for v in "" Migrate seal tpm --reseal "migrate extra"; do
+    # shellcheck disable=SC2086
+    refused "credential refuses '${v}'" credential $v
+done
+refused "credential refuses a second argument" credential migrate reseal
+make_fake "$T/engine/edit-config-old.sh" edit-config-old
+t="$(CONFIG_SCRIPT="$T/engine/edit-config-old.sh"; trace credential reseal)"
+check_has "credential refuses an engine without --reseal" \
+    "edit-config-old.sh in the engine copy has no --reseal (it is older than this helper): run update-scripts.sh, then try again" "$t"
+rm -rf "$T/audit"
+trace credential migrate >/dev/null
+check "credential is audited" "1" "$(grep -c '"sub":"credential","args":"migrate","phase":"start"' "$T/audit/audit.log" 2>/dev/null)"
+make_fake "$T/engine/edit-config.sh" edit-config
+
 # ---- Other subcommands keep working -------------------------------------------------
 fixture unified
 t="$(trace firewall-port 49590/udp on)"
