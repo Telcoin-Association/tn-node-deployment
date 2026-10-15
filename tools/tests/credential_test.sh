@@ -135,7 +135,7 @@ for v in "" 24 "7+" "+7" "a" "7 8" "-1" "100"; do
     check_rc "pcrs refused: '${v}'" 1 "$rc"
 done
 check "systemd version parsed" "255" "$(STUB_SYSTEMD=255 tn_systemd_version)"
-for row in "255 mainnet 0" "250 mainnet 0" "249 mainnet 1" "249 testnet 0" "247 testnet 0" "246 testnet 1" "246 mainnet 1" "255 testnet 0" "249 '' 1"; do
+for row in "255 mainnet 0" "254 mainnet 1" "249 mainnet 1" "249 testnet 0" "247 testnet 0" "246 testnet 1" "246 mainnet 1" "255 testnet 0" "249 '' 1"; do
     set -- $row
     net="${2//\'/}"
     rc=0; STUB_SYSTEMD="$1" tn_os_floor_check "$net" 2>/dev/null || rc=$?

@@ -31,7 +31,7 @@ floor() {
     printf '%s\n' "$rc"
 }
 check_rc "mainnet, systemd 255: ok" 0 "$(floor 255 mainnet)"
-check_rc "mainnet, systemd 250: ok" 0 "$(floor 250 mainnet)"
+check_rc "mainnet, systemd 254: refused" 1 "$(floor 254 mainnet)"
 check_rc "mainnet, systemd 249: refused" 1 "$(floor 249 mainnet)"
 check_has "mainnet, 249: names the floor" "yes" "$(grep -q 'below the mainnet floor' "$T/err" && echo yes)"
 check_rc "testnet, systemd 249: ok" 0 "$(floor 249 testnet)"
