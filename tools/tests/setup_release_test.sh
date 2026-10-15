@@ -60,19 +60,27 @@ LR='tn_write_root_file() { cat > "$1"; }; systemctl() { printf "%s\n" "$*" >> "$
 DJ="$T/root/etc/docker/daemon.json"
 mkdir -p "$T/root/etc/docker"   # install -d -o root needs root
 rc="$(sn "$LR")"
-check "absent daemon.json: written with live-restore" "0 true" "$rc $(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["live-restore"]).lower())' "$DJ" 2>/dev/null)"
+check "absent daemon.json: written with live-restore" "0 yes" "$rc $(grep -q '"live-restore": true' "$DJ" 2>/dev/null && echo yes || echo no)"
 printf '{"log-driver": "json-file", "live-restore": false}\n' > "$DJ"
-rc="$(sn "$LR")"
-check "existing daemon.json: merged, other settings kept" "0 true json-file" \
-    "$rc $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(str(d["live-restore"]).lower(), d["log-driver"])' "$DJ" 2>/dev/null)"
-check_has "docker reloaded, not restarted" "reload docker" "$(cat "$T/systemctl.log" 2>/dev/null)"
-cp "$DJ" "$T/before"
-: > "$T/systemctl.log"
-rc="$(sn "$LR")"
-check "already on: file untouched, no reload" "0 same none" "$rc $(cmp -s "$DJ" "$T/before" && echo same || echo changed) $(cat "$T/systemctl.log")none"
-printf '[1, 2]\n' > "$DJ"
-rc="$(sn "$LR")"
-check "not a JSON object: stops with the manual step" "1 yes [1, 2]" "$rc $(grep -q 'by hand' "$T/sn.err" && echo yes || echo no) $(cat "$DJ")"
+if ! command -v python3 >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; then
+    cp "$DJ" "$T/before"
+    rc="$(sn "$LR")"
+    check "existing daemon.json, no python3 or jq: stops with the manual step, file untouched" "1 yes same" \
+        "$rc $(grep -q 'Neither python3 nor jq' "$T/sn.err" && echo yes || echo no) $(cmp -s "$DJ" "$T/before" && echo same || echo changed)"
+    skip "daemon.json merge" "python3 and jq absent"
+else
+    rc="$(sn "$LR")"
+    check "existing daemon.json: merged, other settings kept" "0 yes yes" \
+        "$rc $(grep -q '"live-restore": true' "$DJ" && echo yes || echo no) $(grep -q '"log-driver": "json-file"' "$DJ" && echo yes || echo no)"
+    check_has "docker reloaded, not restarted" "reload docker" "$(cat "$T/systemctl.log" 2>/dev/null)"
+    cp "$DJ" "$T/before"
+    : > "$T/systemctl.log"
+    rc="$(sn "$LR")"
+    check "already on: file untouched, no reload" "0 same none" "$rc $(cmp -s "$DJ" "$T/before" && echo same || echo changed) $(cat "$T/systemctl.log")none"
+    printf '[1, 2]\n' > "$DJ"
+    rc="$(sn "$LR")"
+    check "not a JSON object: stops with the manual step" "1 yes [1, 2]" "$rc $(grep -q 'by hand' "$T/sn.err" && echo yes || echo no) $(cat "$DJ")"
+fi
 
 # edit-config set_docker_image.
 ec() {
