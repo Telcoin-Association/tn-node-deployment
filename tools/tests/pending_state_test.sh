@@ -300,4 +300,30 @@ check "planted state: --json launch file unchanged" "$LAUNCH_BEFORE" "$(cat "$FX
 check "planted state: --json nothing stopped" "" "$(cat "$T/argv.log")"
 rm -f "$P"
 
+# -----------------------------------------------------------------------------
+# The ownership migration hook that runs right after the update lock
+# -----------------------------------------------------------------------------
+run update_migrate_ownership
+check_rc "migration hook: helper absent, nothing to do" 0 "$RC"
+MIG_ARG=""
+MIG_RC=0
+tn_migrate_ownership() { MIG_ARG="${1:-}"; return "$MIG_RC"; }
+update_migrate_ownership
+check_rc "migration hook: done" 0 "$?"
+check "migration hook: progress printer passed" "update_wait_say" "$MIG_ARG"
+MIG_RC=3
+run update_migrate_ownership
+check_rc "migration hook: mainnet refusal stops the run" 1 "$RC"
+check "migration hook: mainnet refusal explained" yes "$(has "$OUT$ERR" "must be installed fresh")"
+MIG_RC=1
+run update_migrate_ownership
+check_rc "migration hook: symlink or owner refusal stops the run" 1 "$RC"
+exec 3>"$T/json.log"
+JSON_MODE=true
+run update_migrate_ownership
+JSON_MODE=false
+exec 3>&-
+check "migration hook: --json error event" yes "$(has "$(cat "$T/json.log")" '"event":"error"')"
+unset -f tn_migrate_ownership
+
 finish
