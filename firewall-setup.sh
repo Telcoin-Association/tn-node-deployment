@@ -49,6 +49,10 @@ FW_SSH_PORTS=()
 FW_SSH_SRCS=()
 FW_P2P_SRCS=()
 FW_P2P_LOADED=false
+# Filled by fw_preflight: sources of the stored lists that this run's lists
+# replace (fw_stale_sources); their per-source rules are deleted on --enable.
+FW_SSH_STALE=()
+FW_P2P_STALE=()
 # Set by apply_recommended_firewall while it changes rules: the saved rule files
 # (fw_snapshot), whether ufw was active before, and FW_APPLY_INFLIGHT=true until
 # the new rules are complete or the old ones are back. fw_on_exit (the EXIT trap
@@ -451,6 +455,57 @@ fw_sources() {
     fi
 }
 
+# fw_src_deletable SRC -- 0 when SRC is an address or CIDR ufw accepts as a source
+# (no leading-zero octet, mask 1-32 or 1-128), so a delete of its rule can run.
+fw_src_deletable() {
+    local s="$1" ip mask max
+    ip="${s%%/*}"
+    if validate_ipv4 "$ip"; then
+        [[ ".${ip}" == *.0[0-9]* ]] && return 1
+        max=32
+    elif validate_ipv6 "$ip"; then
+        max=128
+    else
+        return 1
+    fi
+    [[ "$s" == */* ]] || return 0
+    mask="${s#*/}"
+    [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] && (( mask <= max ))
+}
+
+# fw_stale_sources ssh|p2p -- print, one per line, the sources of the stored list
+# (SSH_ALLOW_FROM / P2P_ALLOW_FROM) that this run's --ssh-from / --p2p-from list,
+# or --ssh-anywhere / --p2p-anywhere, replaces and does not keep. Nothing when no
+# new list is given or nothing is stored; a stored key set more than once is
+# warned about and gives nothing. Run after FW_SSH_SRCS / FW_P2P_SRCS are filled.
+fw_stale_sources() {
+    local kind="$1" given anywhere key stored s n keep
+    local -a now=()
+    if [[ "$kind" == "ssh" ]]; then
+        given="$FW_SSH_FROM"; anywhere="$FW_SSH_ANYWHERE"; key="SSH_ALLOW_FROM"
+        now=(${FW_SSH_SRCS[@]+"${FW_SSH_SRCS[@]}"})
+    else
+        given="$FW_P2P_FROM"; anywhere="$FW_P2P_ANYWHERE"; key="P2P_ALLOW_FROM"
+        now=(${FW_P2P_SRCS[@]+"${FW_P2P_SRCS[@]}"})
+    fi
+    [[ -n "$given" || "$anywhere" == "true" ]] || return 0
+    if ! stored="$(addon_meta_get "$key" 2>/dev/null)"; then
+        print_warn "${key} is set more than once in .node-meta, so the rules of the sources it held stay; check them with: sudo ufw status numbered" >&2
+        return 0
+    fi
+    while IFS= read -r s; do
+        s="${s//[[:space:]]/}"
+        [[ -n "$s" ]] || continue
+        fw_src_deletable "$s" || continue
+        keep=false
+        for n in ${now[@]+"${now[@]}"}; do
+            [[ "$n" == "$s" ]] && keep=true
+        done
+        [[ "$keep" == "true" ]] || printf '%s\n' "$s"
+    done <<< "$(printf '%s\n' "$stored" | tr ',' '\n')"
+    return 0
+}
+
 # fw_load_p2p_srcs -- fill FW_P2P_SRCS from fw_sources p2p once per run.
 fw_load_p2p_srcs() {
     local list s
@@ -528,6 +583,14 @@ fw_preflight() {
         fw_error "The P2P source list is not usable; nothing was changed."
         return 1
     fi
+    FW_SSH_STALE=()
+    FW_P2P_STALE=()
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && FW_SSH_STALE+=("$s")
+    done <<< "$(fw_stale_sources ssh)"
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && FW_P2P_STALE+=("$s")
+    done <<< "$(fw_stale_sources p2p)"
     if [[ "${NETWORK:-}" == "mainnet" && ${#FW_SSH_SRCS[@]} -eq 0 && "$FW_SSH_ANYWHERE" != "true" ]]; then
         fw_error "Mainnet: give the SSH sources with --ssh-from CIDR[,CIDR] (or --ssh-anywhere to keep SSH open to every address); nothing was changed."
         return 1
@@ -814,7 +877,8 @@ view_status() {
 # network an old monitor rule is deleted), the load-balancer health ranges, the
 # overlay SSH rule, the node P2P ports (per source with P2P_ALLOW_FROM), 80/443
 # when Caddy serves the public edge here, and only then the default policies,
-# the deletion of the blanket SSH rule (with a source list) and
+# the deletion of the blanket SSH rule (with a source list), the deletion of the
+# rules of sources a replaced --ssh-from / --p2p-from list no longer holds, and
 # `ufw --force enable`. Every allow comes before the default deny, so there is
 # never a window with SSH closed.
 #
@@ -885,7 +949,7 @@ apply_recommended_firewall() {
 # apply_recommended_firewall (see there for the order). Needs fw_preflight first.
 # rc 1 at the first step that fails (reported by fw_try).
 fw_apply_rules() {
-    local do_reset="$1" nodes="$2" keep_web="$3" p s krc
+    local do_reset="$1" nodes="$2" keep_web="$3" p s krc label
     local -a fixed=()
     if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
         fw_try "ufw --force reset" ufw --force reset || return 1
@@ -943,6 +1007,23 @@ fw_apply_rules() {
     if [[ ${#FW_SSH_SRCS[@]} -gt 0 ]]; then
         for p in "${FW_SSH_PORTS[@]}"; do
             fw_try "ufw delete allow ${p}/tcp" ufw delete allow "${p}/tcp" || return 1
+        done
+    fi
+    # A replaced source list: drop the rules of the sources it no longer holds, now
+    # that the new rules are in (a reset has removed them already). The GCE and
+    # overlay ranges added above stay.
+    if [[ "$do_reset" != "--reset" && "$do_reset" != "reset" ]]; then
+        for s in ${FW_SSH_STALE[@]+"${FW_SSH_STALE[@]}"}; do
+            case " ${fixed[*]-} " in *" ${s} "*) continue ;; esac
+            for p in "${FW_SSH_PORTS[@]}"; do
+                fw_try "ufw delete allow from ${s} to any port ${p} proto tcp" ufw delete allow from "$s" to any port "$p" proto tcp || return 1
+            done
+        done
+        for s in ${FW_P2P_STALE[@]+"${FW_P2P_STALE[@]}"}; do
+            while read -r p label; do
+                [[ -n "$p" ]] || continue
+                fw_try "ufw delete allow from ${s} to any port ${p} proto udp" ufw delete allow from "$s" to any port "$p" proto udp || return 1
+            done < <(fw_p2p_ports)
         done
     fi
     fw_try "ufw --force enable" ufw --force enable || return 1

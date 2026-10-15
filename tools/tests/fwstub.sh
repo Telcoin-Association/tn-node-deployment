@@ -57,7 +57,9 @@ case "$*" in
     "default deny incoming") echo 'DEFAULT_INPUT_POLICY="DROP"' > "$R/etc/default/ufw" ;;
     "default allow outgoing") : ;;
     "delete "*)
-        r="${*#delete }"
+        # ${*#...} would strip each word, not the joined line: join first.
+        r="$*"
+        r="${r#delete }"
         grep -vxF -- "$r" "$rules" > "$rules.tmp"; mv "$rules.tmp" "$rules" ;;
     allow*|limit*)
         grep -qxF -- "$*" "$rules" || printf '%s\n' "$*" >> "$rules" ;;

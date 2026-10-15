@@ -118,6 +118,45 @@ check_rc "mainnet re-enable from stored lists rc 0" 0 "$RC"
 check_lacks "re-enable adds no blanket ssh" "allow 22/tcp" "$(grep -v '^delete' "$UFW_LOG")"
 check "re-enable final rules lack blanket ssh" "" "$(grep -x 'allow 22/tcp' "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
 
+# A replaced list on --enable (no reset): the rules of the sources it drops go, after
+# the new rules are in; sources it keeps stay.
+printf 'NETWORK=mainnet\nSSH_ALLOW_FROM=203.0.113.0/24\nP2P_ALLOW_FROM=198.51.100.0/24,198.51.100.9\n' > "$META"
+fresh_flags; FW_SSH_FROM="192.0.2.0/24"; FW_P2P_FROM="198.51.100.0/24,192.0.2.7"
+: > "$UFW_LOG"
+run_apply
+check_rc "replaced lists rc 0" 0 "$RC"
+rules="$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+check_has "new SSH source rule" "allow from 192.0.2.0/24 to any port 22 proto tcp" "$rules"
+check_lacks "dropped SSH source rule gone" "allow from 203.0.113.0/24" "$rules"
+check_has "kept P2P source rule" "allow from 198.51.100.0/24 to any port 49590 proto udp" "$rules"
+check_has "new P2P source rule" "allow from 192.0.2.7 to any port 49594 proto udp" "$rules"
+check_lacks "dropped P2P source rules gone" "allow from 198.51.100.9 " "$rules"
+add="$(line_no 'allow from 192.0.2.0/24 to any port 22 proto tcp')"
+del="$(line_no 'delete allow from 203.0.113.0/24 to any port 22 proto tcp')"
+check "dropped SSH source deleted after the new one is in" "yes" "$([[ -n "$add" && -n "$del" && "$add" -lt "$del" ]] && echo yes)"
+check "replaced lists: enable is the last call" "--force enable" "$(mutating | tail -n1)"
+# --ssh-anywhere drops the stored per-source rules too (the blanket rule covers them).
+printf 'NETWORK=testnet\nSSH_ALLOW_FROM=192.0.2.0/24\n' > "$META"
+NETWORK=testnet; fresh_flags; FW_SSH_ANYWHERE=true
+: > "$UFW_LOG"
+run_apply
+check_rc "--ssh-anywhere over a stored list rc 0" 0 "$RC"
+rules="$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+check_has "--ssh-anywhere: blanket rule" "allow 22/tcp" "$rules"
+check_lacks "--ssh-anywhere: stored source rule gone" "allow from 192.0.2.0/24" "$rules"
+# On GCE the IAP range stays even when the old list named it and the new one does not.
+mkdir -p "$TN_ROOT_PREFIX/sys/class/dmi/id"
+echo "Google Compute Engine" > "$TN_ROOT_PREFIX/sys/class/dmi/id/product_name"
+printf 'NETWORK=testnet\nSSH_ALLOW_FROM=35.235.240.0/20,192.0.2.0/24\n' > "$META"
+fresh_flags; FW_SSH_FROM="203.0.113.0/24"
+: > "$UFW_LOG"
+run_apply
+check_rc "GCE replaced list rc 0" 0 "$RC"
+check_has "GCE: IAP rule kept" "allow from 35.235.240.0/20 to any port 22 proto tcp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+check_lacks "GCE: dropped source gone" "allow from 192.0.2.0/24 to any port 22" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+rm -rf "$TN_ROOT_PREFIX/sys"
+NETWORK=mainnet
+
 # A duplicated stored list refuses.
 printf 'NETWORK=mainnet\nSSH_ALLOW_FROM=203.0.113.0/24\nSSH_ALLOW_FROM=0.0.0.0/0\n' > "$META"
 fresh_flags; reset_state yes
