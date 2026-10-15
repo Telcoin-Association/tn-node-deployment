@@ -473,17 +473,107 @@ start_service() {
     systemctl start "$SERVICE_NAME"
 }
 
-# Backup a launch config file (unit or wrapper) with a timestamped sibling.
-# Echoes ONLY the backup path on stdout -- callers capture it via $(...), so the
-# human-readable info line must go to stderr or it corrupts the captured path.
+# Backups (unit or start script, and the installed binary) go to the root-only
+# backup directory through tn_backup_file, never beside the live file. Each
+# backup's path and sha256 are recorded in the pending state, and a restore
+# goes through tn_restore_backup, which refuses a backup that no longer
+# matches its sha256 and leaves the live file as it is.
+UNIT_BK_PATH=""
+UNIT_BK_SHA256=""
+UNIT_BK_MODE=""
+UNIT_BK_GROUP=""
+BIN_BK_PATH=""
+BIN_BK_SHA256=""
+
+# backup_unit_file FILE -- back up a launch file (the unit or the start script)
+# before an apply edits it, and record UNIT_FILE, UNIT_BACKUP and
+# UNIT_BACKUP_SHA256 in the pending state. Sets UNIT_BK_PATH, UNIT_BK_SHA256
+# and FILE's mode and group (UNIT_BK_MODE, UNIT_BK_GROUP) for
+# restore_unit_file. Call it directly, not in $( ). rc 1 with a message on
+# stderr when the copy or the record fails.
 backup_unit_file() {
-    local file="$1"
-    local ts backup
-    ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${file}.bak.${ts}"
-    cp -p "$file" "$backup" || return 1
-    print_info "Launch config backup: ${backup}" >&2
-    echo "$backup"
+    local file="${1:-}" st out
+    UNIT_BK_PATH=""
+    UNIT_BK_SHA256=""
+    UNIT_BK_MODE=""
+    UNIT_BK_GROUP=""
+    st="$(stat -c '%a %G' -- "$file" 2>/dev/null)" || st=""
+    if [[ -z "$st" ]] || ! out="$(tn_backup_file "$file")"; then
+        print_warn "Could not back up ${file}" >&2
+        return 1
+    fi
+    if ! pending_state_add "UNIT_FILE=${file}" "UNIT_BACKUP=${out% *}" "UNIT_BACKUP_SHA256=${out##* }"; then
+        print_warn "Could not record the backup of ${file} in the pending update" >&2
+        rm -f -- "${out% *}"
+        return 1
+    fi
+    UNIT_BK_PATH="${out% *}"
+    UNIT_BK_SHA256="${out##* }"
+    UNIT_BK_MODE="${st%% *}"
+    UNIT_BK_GROUP="${st##* }"
+    print_info "Launch config backup: ${UNIT_BK_PATH}" >&2
+    return 0
+}
+
+# restore_unit_file FILE -- put FILE back from the backup_unit_file copy, with
+# its old mode and group. Refused (rc 1, FILE unchanged) when the copy no
+# longer matches its sha256.
+restore_unit_file() {
+    tn_restore_backup "$UNIT_BK_PATH" "$UNIT_BK_SHA256" "${1:-}" "$UNIT_BK_MODE" "$UNIT_BK_GROUP"
+}
+
+# backup_installed_binary FILE -- back up the installed binary before an apply
+# replaces it, and record BIN_BACKUP and BIN_BACKUP_SHA256 in the pending
+# state. Sets BIN_BK_PATH and BIN_BK_SHA256. Call it directly, not in $( ).
+# rc 1 with a message on stderr when the copy or the record fails.
+backup_installed_binary() {
+    local file="${1:-}" out
+    BIN_BK_PATH=""
+    BIN_BK_SHA256=""
+    if ! out="$(tn_backup_file "$file")"; then
+        print_warn "Could not back up ${file}" >&2
+        return 1
+    fi
+    if ! pending_state_add "BIN_BACKUP=${out% *}" "BIN_BACKUP_SHA256=${out##* }"; then
+        print_warn "Could not record the backup of ${file} in the pending update" >&2
+        rm -f -- "${out% *}"
+        return 1
+    fi
+    BIN_BK_PATH="${out% *}"
+    BIN_BK_SHA256="${out##* }"
+    return 0
+}
+
+# restore_installed_binary FILE -- put the backup_installed_binary copy back as
+# FILE, root:root 0755. Refused (rc 1, FILE unchanged) when the copy no longer
+# matches its sha256.
+restore_installed_binary() {
+    tn_restore_backup "$BIN_BK_PATH" "$BIN_BK_SHA256" "${1:-}" 0755 root
+}
+
+# unit_restore_hint FILE / binary_restore_hint FILE -- the shell line an
+# operator runs to put a backup back by hand: check its sha256, then install
+# it with the right owner and mode.
+unit_restore_hint() {
+    printf "echo '%s  %s' | sha256sum -c - && install -o root -g %s -m %s %s %s" \
+        "$UNIT_BK_SHA256" "$UNIT_BK_PATH" "$UNIT_BK_GROUP" "$UNIT_BK_MODE" "$UNIT_BK_PATH" "${1:-}"
+}
+binary_restore_hint() {
+    printf "echo '%s  %s' | sha256sum -c - && install -o root -g root -m 0755 %s %s" \
+        "$BIN_BK_SHA256" "$BIN_BK_PATH" "$BIN_BK_PATH" "${1:-}"
+}
+
+# apply_root_dir_refusal FILE -- rc 0, with the reason on stdout, when FILE's
+# directory is not one tn_root_dir_ok accepts, so the root writes of an apply
+# would be refused. Checked before the node is stopped.
+apply_root_dir_refusal() {
+    local dir="${1%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if tn_root_dir_ok "$dir"; then
+        return 1
+    fi
+    printf '%s\n' "${dir} (holding ${1}) is not a root-owned directory that only root can write, so ${1} cannot be replaced safely. Nothing was stopped or changed."
+    return 0
 }
 
 # observer_strip_needed <file> <target text...> -- rc 0 when the launch file
@@ -515,9 +605,19 @@ observer_strip_needed() {
 # Empty when there is none: setup and verified applies have written it since
 # well before v0.16.0, so a node without one runs an older release. `git
 # describe` of the checkout is no use here: a prepare moves the checkout while
-# the old binary keeps running.
+# the old binary keeps running. The marker is read only when it is a regular
+# root-owned file (not a symlink) and its first line is a plain ref word;
+# anything else reads as no marker.
 installed_source_ref() {
-    head -n 1 "${DEFAULT_INSTALL_DIR}/telcoin-network.version" 2>/dev/null || true
+    local f="${DEFAULT_INSTALL_DIR}/telcoin-network.version" ref re
+    re='^[A-Za-z0-9._/+=@~^-]+$'
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    [[ "$(stat -c '%u' -- "$f" 2>/dev/null)" == "0" ]] || return 0
+    ref="$(head -n 1 -- "$f" 2>/dev/null)" || ref=""
+    if [[ "$ref" =~ $re ]]; then
+        printf '%s\n' "$ref"
+    fi
+    return 0
 }
 
 # storage_migrating_upgrade <running> <target> -- rc 0 when going from <running>
@@ -880,8 +980,12 @@ apply_docker_update() {
         print_error "Could not resolve the docker launch config (wrapper or unit) for ${SERVICE_NAME}."
         return 1
     }
-    local backup
-    backup=$(backup_unit_file "$launch_file") || return 1
+    local refusal
+    if refusal="$(apply_root_dir_refusal "$launch_file")"; then
+        print_error "$refusal"
+        return 1
+    fi
+    backup_unit_file "$launch_file" || return 1
 
     # Hash the launch config before/after the substitution so we can detect
     # "perl did nothing" -- symmetric with the source-binary hash check
@@ -910,7 +1014,7 @@ apply_docker_update() {
         print_info "  Launch config: ${launch_file}"
         print_info "Restoring from backup and aborting."
         # File is unchanged, so the restore is precautionary -- best-effort.
-        cp -p "$backup" "$launch_file" 2>/dev/null || true
+        restore_unit_file "$launch_file" 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
         start_service 2>/dev/null || true
         return 1
@@ -921,9 +1025,9 @@ apply_docker_update() {
         print_error "New image string not present in launch config after edit."
         print_info "  Expected to find: ${new_image}"
         print_info "Restoring from backup and aborting."
-        if ! cp -p "$backup" "$launch_file"; then
+        if ! restore_unit_file "$launch_file"; then
             print_error "Backup restore FAILED -- ${launch_file} is in an edited, unverified state."
-            print_info "  Restore manually: cp -p ${backup} ${launch_file} && systemctl daemon-reload && systemctl start ${SERVICE_NAME}"
+            print_info "  Restore manually: $(unit_restore_hint "$launch_file") && systemctl daemon-reload && systemctl start ${SERVICE_NAME}"
             return 1
         fi
         systemctl daemon-reload 2>/dev/null || true
@@ -965,7 +1069,7 @@ apply_docker_update() {
     # A one-way update is never rolled back, and the rollback is not offered:
     # the previous image cannot open the migrated data dir.
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then
-        storage_migration_verify_failed "$new_image" "cp -p ${backup} ${launch_file} && systemctl daemon-reload"
+        storage_migration_verify_failed "$new_image" "$(unit_restore_hint "$launch_file") && systemctl daemon-reload"
         return 1
     fi
 
@@ -977,10 +1081,10 @@ apply_docker_update() {
         wait_for_service_stopped "$SERVICE_NAME"
         # If the restore fails, do NOT start the service: it would come up on
         # the new image and the next health pass could misreport "rolled back".
-        if ! cp -p "$backup" "$launch_file"; then
+        if ! restore_unit_file "$launch_file"; then
             print_error "Backup restore failed -- launch config still references ${new_image}."
             print_error "Node left STOPPED. Recover manually:"
-            print_info "  cp -p ${backup} ${launch_file} && systemctl daemon-reload && systemctl start ${SERVICE_NAME}"
+            print_info "  $(unit_restore_hint "$launch_file") && systemctl daemon-reload && systemctl start ${SERVICE_NAME}"
             return 1
         fi
         systemctl daemon-reload 2>/dev/null || true
@@ -1255,16 +1359,19 @@ apply_source_update() {
         print_error "Installed binary not found at ${installed}"
         return 1
     fi
+    local refusal
+    if refusal="$(apply_root_dir_refusal "$installed")"; then
+        print_error "$refusal"
+        return 1
+    fi
 
-    # Backup current binary (mode+ownership preserved)
-    local ts backup
-    ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${installed}.bak.${ts}"
-    cp -p "$installed" "$backup" || {
+    # Back up the current binary into the root-only backup directory; the
+    # rollback below checks the copy's sha256 before it puts it back.
+    if ! backup_installed_binary "$installed"; then
         print_error "Could not back up current binary."
         return 1
-    }
-    print_info "Binary backup: ${backup}"
+    fi
+    print_info "Binary backup: ${BIN_BK_PATH}"
 
     # Hash the installed binary before we copy over it. If the cp does not
     # actually change anything (built and installed already identical), we
@@ -1278,24 +1385,31 @@ apply_source_update() {
     wait_for_service_stopped "$SERVICE_NAME"
 
     print_step "Installing new binary..."
-    # Check cp's exit code explicitly. A failed cp (disk full, permissions,
-    # I/O error) under set -uo pipefail would leave the installed binary
-    # in some indeterminate state; we want a loud failure with a restore
-    # attempt rather than silently proceeding to start the service.
-    if ! cp -p "$built" "$installed"; then
-        print_error "Failed to copy ${built} to ${installed}"
+    # tn_install_root_binary installs root:root 0755 beside the live file and
+    # renames it into place, so a failure (disk full, I/O error) leaves the
+    # old binary untouched: start it again and stop here.
+    if ! tn_install_root_binary "$built" "$installed"; then
+        print_error "Failed to install ${built} as ${installed}; the previous binary is unchanged."
         print_info "  Checking disk: $(df -h "$installed" | tail -1)"
-        print_info "Restoring backup and aborting."
-        cp -p "$backup" "$installed" 2>/dev/null || true
         start_service 2>/dev/null || true
         return 1
-    fi
-    if ! chmod +x "$installed"; then
-        print_warn "Could not chmod +x ${installed} -- service may fail to start."
     fi
 
     local post_install_hash
     post_install_hash=$(sha256sum "$installed" | awk '{print $1}')
+    # The file installed must be the one prepared (or the one the operator
+    # approved above); anything else goes back before the node starts.
+    if [[ "$post_install_hash" != "$expected_hash" ]]; then
+        print_error "The installed binary does not match the prepared build (sha256 ${post_install_hash:0:12}..., expected ${expected_hash:0:12}...)."
+        if restore_installed_binary "$installed"; then
+            print_info "Previous binary put back; restarting it."
+            start_service 2>/dev/null || true
+        else
+            print_error "Could not put the previous binary back. Node left STOPPED. Recover manually:"
+            print_info "  $(binary_restore_hint "$installed") && systemctl start ${SERVICE_NAME}"
+        fi
+        return 1
+    fi
     if [[ "$pre_install_hash" == "$post_install_hash" ]]; then
         print_warn "Installed binary is identical to what was already at ${installed}."
         print_warn "The build did not produce different output -- you may still be"
@@ -1313,18 +1427,20 @@ apply_source_update() {
     # backed up first and the rollback below restores it with the old binary.
     # No backup, no strip: a wrapper that keeps the flag fails the health check
     # and rolls back cleanly.
-    local wrapper wrapper_backup=""
+    local wrapper wrapper_backed=false undo
     wrapper="$(tn_node_launch_target 2>/dev/null || true)"
     wrapper="${wrapper##* }"
     if observer_strip_needed "$wrapper" "$new_ref"; then
-        if ! wrapper_backup=$(backup_unit_file "$wrapper"); then
-            wrapper_backup=""
+        if apply_root_dir_refusal "$wrapper" >/dev/null || ! backup_unit_file "$wrapper"; then
             print_warn "Could not back up ${wrapper} -- leaving the retired --observer flag in place."
-        elif tn_node_strip_observer_flag "$wrapper"; then
-            print_info "Stripped the retired --observer flag from ${wrapper}"
         else
-            print_warn "Could not strip the retired --observer flag from ${wrapper} -- continuing."
-            print_info "  If ${SERVICE_NAME} fails to start, remove the flag from that file by hand."
+            wrapper_backed=true
+            if tn_node_strip_observer_flag "$wrapper"; then
+                print_info "Stripped the retired --observer flag from ${wrapper}"
+            else
+                print_warn "Could not strip the retired --observer flag from ${wrapper} -- continuing."
+                print_info "  If ${SERVICE_NAME} fails to start, remove the flag from that file by hand."
+            fi
         fi
     fi
 
@@ -1346,10 +1462,14 @@ apply_source_update() {
         return 0
     fi
 
+    undo="$(binary_restore_hint "$installed")"
+    if [[ "$wrapper_backed" == "true" ]]; then
+        undo="${undo} && $(unit_restore_hint "$wrapper")"
+    fi
     # A one-way update is never rolled back, and the rollback is not offered:
     # the previous binary cannot open the migrated data dir.
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then
-        storage_migration_verify_failed "$new_ref" "cp -p ${backup} ${installed}${wrapper_backup:+ && cp -p ${wrapper_backup} ${wrapper}}"
+        storage_migration_verify_failed "$new_ref" "$undo"
         return 1
     fi
 
@@ -1361,16 +1481,15 @@ apply_source_update() {
         wait_for_service_stopped "$SERVICE_NAME"
         # If the restore fails, do NOT start the service: it would come up on
         # the new binary and the next health pass could misreport "rolled back".
-        if ! cp -p "$backup" "$installed"; then
+        if ! restore_installed_binary "$installed"; then
             print_error "Backup restore failed -- ${installed} still holds the new binary."
             print_error "Node left STOPPED. Recover manually:"
-            print_info "  cp -p ${backup} ${installed}${wrapper_backup:+ && cp -p ${wrapper_backup} ${wrapper}} && systemctl start ${SERVICE_NAME}"
+            print_info "  ${undo} && systemctl start ${SERVICE_NAME}"
             return 1
         fi
-        chmod +x "$installed" 2>/dev/null || true
         # The old binary goes back with the wrapper it ran under.
-        if [[ -n "$wrapper_backup" ]] && ! cp -p "$wrapper_backup" "$wrapper"; then
-            print_warn "Could not restore ${wrapper} from ${wrapper_backup} -- the previous binary starts without the --observer flag."
+        if [[ "$wrapper_backed" == "true" ]] && ! restore_unit_file "$wrapper"; then
+            print_warn "Could not restore ${wrapper} from ${UNIT_BK_PATH} -- the previous binary starts without the --observer flag."
         fi
         start_service
         if verify_health_after_restart; then
@@ -1959,40 +2078,53 @@ json_apply_source() {
     if [[ ! -f "$installed" ]]; then
         json_event error "installed binary not found at ${installed}"; return 1
     fi
+    local refusal
+    if refusal="$(apply_root_dir_refusal "$installed")"; then
+        json_event error "$refusal"; return 1
+    fi
     # Warn-only in --json mode (see apply_source_update for the running ref).
     storage_migration_begin "$(installed_source_ref)" "$new_ref" || return 1
 
-    local ts backup
-    ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${installed}.bak.${ts}"
-    cp -p "$installed" "$backup" || { json_event error "could not back up current binary"; return 1; }
+    # Root-only backup; the rollback checks its sha256 before putting it back.
+    backup_installed_binary "$installed" || { json_event error "could not back up current binary"; return 1; }
 
     update_epoch_wait
     json_event step "Stopping ${SERVICE_NAME}"
     wait_for_service_stopped "$SERVICE_NAME"
 
     json_event step "Installing new binary"
-    if ! cp -p "$built" "$installed"; then
-        json_event error "failed to install new binary -- restoring backup"
-        cp -p "$backup" "$installed" 2>/dev/null || true
+    # A failed install leaves the previous binary in place (see
+    # apply_source_update).
+    if ! tn_install_root_binary "$built" "$installed"; then
+        json_event error "failed to install the new binary; the previous binary is unchanged and was restarted"
         start_service 2>/dev/null || true
         return 1
     fi
-    chmod +x "$installed" 2>/dev/null || true
+    if [[ "$(sha256sum "$installed" | awk '{print $1}')" != "$expected_hash" ]]; then
+        if restore_installed_binary "$installed"; then
+            json_event error "the installed binary does not match the prepared build; the previous binary was put back and restarted"
+            start_service 2>/dev/null || true
+        else
+            json_event error "the installed binary does not match the prepared build and the previous binary could not be put back; service left stopped -- $(binary_restore_hint "$installed")"
+        fi
+        return 1
+    fi
 
     # Drop the retired --observer flag from the start wrapper (see
     # apply_source_update): back up, strip, and restore on rollback below.
-    local wrapper wrapper_backup=""
+    local wrapper wrapper_backed=false undo
     wrapper="$(tn_node_launch_target 2>/dev/null || true)"
     wrapper="${wrapper##* }"
     if observer_strip_needed "$wrapper" "$new_ref"; then
-        if ! wrapper_backup=$(backup_unit_file "$wrapper"); then
-            wrapper_backup=""
+        if apply_root_dir_refusal "$wrapper" >/dev/null || ! backup_unit_file "$wrapper"; then
             json_event warn "could not back up ${wrapper} -- leaving the retired --observer flag in place"
-        elif tn_node_strip_observer_flag "$wrapper"; then
-            json_event step "stripped retired --observer flag from ${wrapper}"
         else
-            json_event warn "could not strip the retired --observer flag from ${wrapper} -- continuing"
+            wrapper_backed=true
+            if tn_node_strip_observer_flag "$wrapper"; then
+                json_event step "stripped retired --observer flag from ${wrapper}"
+            else
+                json_event warn "could not strip the retired --observer flag from ${wrapper} -- continuing"
+            fi
         fi
     fi
 
@@ -2018,9 +2150,13 @@ json_apply_source() {
         return 0
     fi
 
+    undo="$(binary_restore_hint "$installed")"
+    if [[ "$wrapper_backed" == "true" ]]; then
+        undo="${undo} && $(unit_restore_hint "$wrapper")"
+    fi
     # One-way update: no rollback (see apply_source_update).
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then
-        storage_migration_verify_failed "$new_ref" "cp -p ${backup} ${installed}${wrapper_backup:+ && cp -p ${wrapper_backup} ${wrapper}}"
+        storage_migration_verify_failed "$new_ref" "$undo"
         return 1
     fi
 
@@ -2028,14 +2164,13 @@ json_apply_source() {
     wait_for_service_stopped "$SERVICE_NAME"
     # If the restore fails, do NOT start the service: it would come up on the
     # new binary and a passing re-verify would misreport "rolled back".
-    if ! cp -p "$backup" "$installed"; then
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed AND backup restore failed; service left stopped -- restore ${backup} to ${installed}${wrapper_backup:+ and ${wrapper_backup} to ${wrapper}} manually\"}"
+    if ! restore_installed_binary "$installed"; then
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"$(json_escape "health check failed AND backup restore failed; service left stopped -- restore by hand: ${undo}")\"}"
         return 1
     fi
-    chmod +x "$installed" 2>/dev/null || true
     # The old binary goes back with the wrapper it ran under.
-    if [[ -n "$wrapper_backup" ]] && ! cp -p "$wrapper_backup" "$wrapper"; then
-        json_event warn "could not restore ${wrapper} from ${wrapper_backup}"
+    if [[ "$wrapper_backed" == "true" ]] && ! restore_unit_file "$wrapper"; then
+        json_event warn "could not restore ${wrapper} from ${UNIT_BK_PATH}"
     fi
     start_service
     if verify_health_after_restart; then
@@ -2064,12 +2199,13 @@ json_apply_docker() {
     local launch_file
     launch_file=$(docker_launch_file) || {
         json_event error "could not resolve docker launch config (wrapper or unit)"; return 1; }
+    local refusal
+    if refusal="$(apply_root_dir_refusal "$launch_file")"; then
+        json_event error "$refusal"; return 1
+    fi
     # Warn-only in --json mode (see apply_docker_update).
     storage_migration_begin "${old_image##*/}" "${new_image##*/}" || return 1
-    local ts backup
-    ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${launch_file}.bak.${ts}"
-    cp -p "$launch_file" "$backup" || { json_event error "could not back up launch config"; return 1; }
+    backup_unit_file "$launch_file" || { json_event error "could not back up launch config"; return 1; }
     local pre_hash post_hash
     pre_hash=$(sha256sum "$launch_file" | awk '{print $1}')
 
@@ -2086,8 +2222,8 @@ json_apply_docker() {
     post_hash=$(sha256sum "$launch_file" | awk '{print $1}')
     if [[ "$pre_hash" == "$post_hash" ]] || ! grep -qF "$new_image" "$launch_file"; then
         json_event error "launch config image not updated -- restoring backup"
-        cp -p "$backup" "$launch_file" 2>/dev/null || \
-            json_event error "backup restore also failed -- restore ${backup} to ${launch_file} manually"
+        restore_unit_file "$launch_file" 2>/dev/null || \
+            json_event error "backup restore also failed -- restore by hand: $(unit_restore_hint "$launch_file")"
         systemctl daemon-reload 2>/dev/null || true
         start_service 2>/dev/null || true
         return 1
@@ -2126,7 +2262,7 @@ json_apply_docker() {
 
     # One-way update: no rollback (see apply_docker_update).
     if [[ "$STORAGE_MIGRATION" == "true" ]]; then
-        storage_migration_verify_failed "$new_image" "cp -p ${backup} ${launch_file} && systemctl daemon-reload"
+        storage_migration_verify_failed "$new_image" "$(unit_restore_hint "$launch_file") && systemctl daemon-reload"
         return 1
     fi
 
@@ -2134,8 +2270,8 @@ json_apply_docker() {
     wait_for_service_stopped "$SERVICE_NAME"
     # If the restore fails, do NOT start the service: it would come up on the
     # new image and a passing re-verify would misreport "rolled back".
-    if ! cp -p "$backup" "$launch_file"; then
-        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed AND backup restore failed; service left stopped -- restore ${backup} to ${launch_file} manually\"}"
+    if ! restore_unit_file "$launch_file"; then
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"$(json_escape "health check failed AND backup restore failed; service left stopped -- restore by hand: $(unit_restore_hint "$launch_file")")\"}"
         return 1
     fi
     systemctl daemon-reload 2>/dev/null || true
