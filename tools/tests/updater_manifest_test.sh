@@ -308,16 +308,51 @@ refused "signer list not listed"
 says "signer list not listed" "lib/allowed_signers not listed"
 
 # --- self-update: the release ships a different updater ------------------------------------
+# The release copy appends a line to $MARK each time it runs.
+MARK="$T/release-updater-ran"
+export MARK
 U="$SRC/selfupd"; cp -R "$R2" "$U"
-printf '# fixture: release copy of the updater\n' >> "$U/update-scripts.sh"
+awk '{print} /^set -euo pipefail$/ && !done {print "[ -n \"${MARK:-}\" ] && echo ran >> \"$MARK\" || true"; done = 1}' \
+    "$R2/update-scripts.sh" > "$U/update-scripts.sh"
 write_manifest "$U" scripts-v1.3.0 103 1.0.0; sign "$U" key1; sidecars "$U"
 publish "$U" scripts-v1.3.0
 install_release "$R1"
+rm -f "$MARK"
 run_updater y
 check_rc "self-update: exits 0" 0 "$RC"
+check "self-update: release copy ran once" "ran" "$(cat "$MARK" 2>/dev/null)"
 check "self-update: updater is the release copy" "$(_h "$U/update-scripts.sh")" "$(_h "$INST/update-scripts.sh")"
-check "self-update: rest installed by the new copy" "$(_h "$U/MANIFEST")" "$(_h "$INST/MANIFEST")"
-check_has "self-update: relaunched" "  ->  Updating the updater itself to the scripts-v1.3.0 copy and relaunching..." "$(plain "$OUT")"
+check "self-update: updater executable" "yes" "$([[ -x "$INST/update-scripts.sh" ]] && echo yes || echo no)"
+check "self-update: rest installed by the new copy" "$(_h "$U/setup-node.sh")" "$(_h "$INST/setup-node.sh")"
+check "self-update: release recorded" "$(_h "$U/MANIFEST")" "$(_h "$INST/MANIFEST")"
+check "self-update: no staging dir left" "" "$(cd "$INST" && find . -name '.tn-update.*')"
+check_has "self-update: runs the release copy" "  ->  Running the scripts-v1.3.0 copy of update-scripts.sh to install the release..." "$(plain "$OUT")"
+
+# --- self-update declined: the release copy asks, nothing is installed -----------------------
+install_release "$R1"
+before="$(tree_sig)"
+rm -f "$MARK"
+run_updater n
+check_rc "self-update declined: exits 0" 0 "$RC"
+check "self-update declined: release copy asked" "ran" "$(cat "$MARK" 2>/dev/null)"
+check "self-update declined: tree byte-identical, updater too" "$before" "$(tree_sig)"
+
+# --- self-update with a tampered file: refused before the release copy runs -----------------
+# The manifest lists a new updater and setup-node.sh; the published setup-node.sh
+# is not the one it lists. Nothing changes, the installed updater's mode included.
+Y="$SRC/selfbad"; cp -R "$U" "$Y"
+printf '#!/usr/bin/env bash\necho tampered\n' > "$Y/setup-node.sh"
+printf '%s  setup-node.sh\n' "$(_h "$Y/setup-node.sh")" > "$Y/setup-node.sh.sha256"
+publish "$Y" scripts-v1.3.0
+install_release "$R1"
+chmod 0750 "$INST/update-scripts.sh"
+mode_before="$(ls -ln "$INST/update-scripts.sh" | awk '{print $1}')"
+rm -f "$MARK"
+refused "self-update, tampered file"
+says "self-update, tampered file" "FAILED  (does not match the signed manifest)"
+check "self-update, tampered file: updater mode unchanged" "$mode_before" "$(ls -ln "$INST/update-scripts.sh" | awk '{print $1}')"
+check "self-update, tampered file: release copy never ran" "no" "$([[ -e "$MARK" ]] && echo yes || echo no)"
+check "self-update, tampered file: no staging dir left" "" "$(cd "$INST" && find . -name '.tn-update.*')"
 
 # --- self-update refused: the release copy is older than its own min_updater ---------------
 V="$SRC/selfold"; cp -R "$U" "$V"

@@ -15,6 +15,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# A release that ships a new update-scripts.sh has that copy run from the
+# staging dir of the run that verified it (see self_update). The copy then
+# works on the tree the staging dir sits in and takes the staging dir over.
+ADOPTED_STAGE=""
+if [[ "${TN_UPDATER_RELAUNCHED:-}" == "1" && "${SCRIPT_DIR##*/}" == .tn-update.* ]]; then
+    ADOPTED_STAGE="$SCRIPT_DIR"
+    SCRIPT_DIR="${SCRIPT_DIR%/*}"
+fi
+
 # Pull in the node-identity resolvers so the restart hint below can name the
 # actually-installed unit (the bare telcoin unit, or a legacy role-suffixed one).
 # This script does not source lib/common.sh, so source fallback.sh directly.
@@ -128,8 +137,9 @@ readonly SIGNERS_FILE="${SCRIPT_DIR}/lib/allowed_signers"
 
 # This run's staging directory, inside SCRIPT_DIR so that installing a verified
 # file is a rename on the same filesystem. The EXIT trap removes it however the
-# run ends, so a run that refuses or fails leaves the tree as it found it.
-STAGE=""
+# run ends, so a run that refuses or fails leaves the tree as it found it. A
+# release copy run by self_update uses the staging dir it runs from.
+STAGE="$ADOPTED_STAGE"
 # 1 while the install pass is moving files into place (for the exit message).
 INSTALLING=0
 
@@ -426,41 +436,43 @@ refuse_min_updater() {
 }
 
 # self_update -- when the verified manifest lists a different update-scripts.sh,
-# fetch that copy from the release tag, check it against the manifest, install it
-# and run it, so the whole update runs with the release's own updater logic.
-# Once per invocation (TN_UPDATER_RELAUNCHED). Returns non-zero, with the tree
-# unchanged, when the new copy cannot be verified or is older than min_updater.
+# download and verify every changed file of the release (stage_files), the
+# updater among them, then run the release copy of the updater from the staging
+# dir. That copy takes the staging dir over, reuses the files verified here,
+# asks, and installs the whole release, itself included, in its one install
+# pass: the update runs with the release's own updater logic, and the tree
+# changes only in that pass. Once per invocation (TN_UPDATER_RELAUNCHED).
+# Returns non-zero, with nothing installed, when a file cannot be downloaded or
+# verified or the release copy is older than min_updater.
 self_update() {
-    local want have new newver
+    local want have run newver
     [[ "${TN_UPDATER_RELAUNCHED:-}" != "1" ]] || return 0
     want="$(manifest_sha_for update-scripts.sh)"
     have="$(_sha256 "${SCRIPT_DIR}/update-scripts.sh")"
     [[ "$want" != "$have" ]] || return 0
 
-    print_info "Updating the updater itself to the ${M_RELEASE} copy and relaunching..."
-    new="${STAGE}/update-scripts.sh.new"
-    if ! fetch "$(tag_url "$M_RELEASE" update-scripts.sh)" "$new"; then
-        print_error "Could not download update-scripts.sh of release ${M_RELEASE}; nothing was changed."
+    print_info "Release ${M_RELEASE} ships a new update-scripts.sh: verifying every changed file before running it..."
+    echo ""
+    plan_changes || return 1
+    if ! stage_files; then
+        echo ""
+        print_error "A file of release ${M_RELEASE} failed verification or download; nothing was installed."
+        print_info "Run the updater again in a few minutes; if it keeps failing, contact support@telcoin.org."
         return 1
     fi
-    if [[ "$(_sha256 "$new")" != "$want" ]]; then
-        print_error "The downloaded update-scripts.sh does not match the signed manifest; nothing was changed."
-        return 1
-    fi
-    if ! bash -n "$new" 2>/dev/null; then
-        print_error "The downloaded update-scripts.sh does not parse; nothing was changed."
-        return 1
-    fi
-    newver="$(_file_version "$new" SCRIPT_VERSION)"
+    echo ""
+    newver="$(_file_version "${STAGE}/files/update-scripts.sh" SCRIPT_VERSION)"
     if [[ "$newver" == "-" ]] || version_gt "$M_MIN_UPDATER" "$newver"; then
         refuse_min_updater "${SCRIPT_VERSION} (and the release copy is ${newver})"
         return 1
     fi
-    chmod +x "$new"
-    mv -f "$new" "${SCRIPT_DIR}/update-scripts.sh"
-    # exec does not run the EXIT trap: remove the staging dir first.
-    cleanup_stage
-    TN_UPDATER_RELAUNCHED=1 exec bash "${SCRIPT_DIR}/update-scripts.sh"
+    # The copy that runs sits at the top of the staging dir, apart from the
+    # files/ tree that the install pass moves into place.
+    run="${STAGE}/update-scripts.sh"
+    cp "${STAGE}/files/update-scripts.sh" "$run" || return 1
+    print_info "Running the ${M_RELEASE} copy of update-scripts.sh to install the release..."
+    # exec skips the EXIT trap: the release copy removes the staging dir.
+    TN_UPDATER_RELAUNCHED=1 exec bash "$run"
 }
 
 # plan_changes -- fill UPD_PATHS with every listed file that is missing or
@@ -494,13 +506,24 @@ plan_changes() {
 
 # stage_files -- download every file in UPD_PATHS from the release tag into the
 # staging dir and check it: the manifest hash, the published sidecar when one
-# exists, and `bash -n` for scripts. rc 0 only when every file passed.
+# exists, and `bash -n` for scripts. A file self_update already verified into
+# this staging dir is kept when it still matches the manifest. rc 0 only when
+# every file passed.
 stage_files() {
     local i p url tmp want side rc
     for ((i = 0; i < ${#UPD_PATHS[@]}; i++)); do
         p="${UPD_PATHS[i]}"
         want="$(manifest_sha_for "$p")"
         tmp="${STAGE}/files/${p}"
+        if [[ -f "$tmp" && ! -L "$tmp" && "$(_sha256 "$tmp")" == "$want" ]]; then
+            printf "  Staged      %-36s " "${p}..."
+            if [[ "$p" == *.sh ]] && ! bash -n "$tmp" 2>/dev/null; then
+                echo -e "${RED}FAILED${RESET}  (syntax check)"
+                return 1
+            fi
+            echo -e "${GREEN}verified${RESET}"
+            continue
+        fi
         mkdir -p "$(dirname "$tmp")"
         url="$(tag_url "$M_RELEASE" "$p")"
         printf "  Downloading %-36s " "${p}..."
@@ -595,10 +618,12 @@ run_update() {
         exit 1
     fi
 
-    STAGE="$(mktemp -d "${SCRIPT_DIR}/.tn-update.XXXXXX")" || {
-        print_error "Could not create a staging directory in ${SCRIPT_DIR}."
-        exit 1
-    }
+    if [[ -z "$STAGE" ]]; then
+        STAGE="$(mktemp -d "${SCRIPT_DIR}/.tn-update.XXXXXX")" || {
+            print_error "Could not create a staging directory in ${SCRIPT_DIR}."
+            exit 1
+        }
+    fi
 
     read_release_tag || exit 1
     print_info "Latest release: ${RELEASE_TAG}"
@@ -708,16 +733,17 @@ downloads that release's MANIFEST and MANIFEST.sig, and checks the signature
 against lib/allowed_signers in
   ${SCRIPT_DIR}
 It refuses a release older than the installed one (the serial in MANIFEST), and
-a release whose min_updater is newer than this updater when the release copy of
-the updater cannot be installed first.
+a release whose min_updater is newer than both this updater and the release's
+own copy of it.
 
-When the release lists a different update-scripts.sh, that copy is checked
-against the manifest and run first. Every changed file is then downloaded from
-the release tag and must match its MANIFEST hash (and its .sha256 sidecar, when
-one is published) before anything is installed; then all of them are installed
+Every changed file is downloaded from the release tag and must match its
+MANIFEST hash (and its .sha256 sidecar, when one is published) before anything
+is installed. When the release lists a different update-scripts.sh, the
+release's copy, verified with the rest, then runs from the staging directory
+and carries on from there. It asks "Install these changes? [Y/n]"; Enter means
+yes. All the changed files, the updater among them, are then installed
 together, files the release no longer ships are removed, and MANIFEST records
 the installed release. On any refusal or failure the tree is left as it was.
-It asks "Install these changes? [Y/n]" first; Enter means yes.
 
 The web UI is not redeployed automatically: the updater prints the sudo command.
 
