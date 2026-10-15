@@ -4,7 +4,8 @@
 # the tn_passphrase_ok refusals (blanks at either end, short on mainnet, an
 # unknown network read as mainnet), the root 0600 write (a host without
 # systemd-creds keeps the root-only file), the move of a legacy Docker unit
-# that embeds the value, the refusal of every other edit on such a unit, and
+# that embeds the value, the refusal of every other edit on such a unit, a
+# committee check refusing the restart (edit put back, update lock released), and
 # that the value never reaches a child process's argument list or environment.
 #
 #   bash tools/tests/edit_passphrase_test.sh
@@ -292,6 +293,40 @@ else
         skip "legacy unit: root move" "$ROOT_WHY"
     fi
 fi
+
+# -----------------------------------------------------------------------------
+# A running node and a committee check that refuses the restart: the edit is
+# put back and the update lock is free once the menu item returns
+# -----------------------------------------------------------------------------
+fixture "$BASE"
+set_network testnet
+TARGET_LAUNCH_FILE=""
+systemctl() {
+    printf 'systemctl %s\n' "$*" >> "$ARGV_LOG"
+    case "$1" in is-active) return 0 ;; esac
+    return 0
+}
+tn_committee_down_guard() { printf 'guard\n' >> "$ARGV_LOG"; return 1; }
+: > "$ARGV_LOG"
+USED+=("guard-refused-value-5")
+printf '1\n%s\n%s\n' "guard-refused-value-5" "guard-refused-value-5" > "$T/in"
+edit_bls_passphrase < "$T/in" > "$T/out" 2>&1
+OUT="$(cat "$T/out")"
+lock_probe=free
+if command -v flock >/dev/null 2>&1 && [[ -e "$TN_UPDATE_LOCK_FILE" ]]; then
+    flock -n "$TN_UPDATE_LOCK_FILE" true 2>/dev/null || lock_probe=held
+fi
+check "guard refusal: the update lock is released (state, kind, probe)" "false - free" \
+    "${EDIT_LOCK_HELD} ${TN_UPDATE_LOCK_KIND:--} ${lock_probe}"
+check "guard refusal: the stored passphrase is as before" "old-passphrase-value" "$(cat "$PASSFILE")"
+check "guard refusal: nothing stopped or restarted" "no no" \
+    "$(has "$(cat "$ARGV_LOG")" "systemctl stop") $(has "$(cat "$ARGV_LOG")" "systemctl restart")"
+if [[ $WRITE_OK == 1 ]]; then
+    check "guard refusal: the check ran and the reason is shown" "yes yes" \
+        "$(has "$(cat "$ARGV_LOG")" "guard") $(has "$OUT" "quorum")"
+fi
+edit_unlock
+unset -f systemctl tn_committee_down_guard
 
 # -----------------------------------------------------------------------------
 # The value never reached a child's argv or environment
