@@ -3,9 +3,9 @@
 # committee quorum guard runs before the epoch wait (also with --no-epoch-wait)
 # and its refusal stops the apply before the node is stopped; a duplicated
 # RPC_PORT stops detect_node instead of guessing a port; json_prepare_docker
-# composes a bare tag against the network's repository and refuses any other
-# image before it pulls, logging the pull to a fresh file; a run that ends
-# with the node stopped says so in its exit trap. A copy of
+# resolves a release tag to its digest, refuses any other image before it pulls,
+# checks the pulled digest, refuses a downgrade, and logs the pull to a fresh
+# file; a run that ends with the node stopped says so in its exit trap. A copy of
 # update-node.sh without its last line is sourced at the top level. Maintainer
 # tooling (not updater-tracked). bash 3.2 safe.
 # shellcheck source=tools/tests/lib.sh
@@ -51,25 +51,50 @@ printf 'NETWORK=testnet\nRPC_PORT=9545\n' > "$META"
 RPC_URL=""; detect_node >/dev/null 2>&1
 check "single RPC_PORT is used" "http://127.0.0.1:9545" "$RPC_URL"
 
-# json_prepare_docker: which images reach docker pull.
+# json_prepare_docker: which images reach docker pull. A release tag resolves to
+# its digest (tn_docker_image_for_tag, shimmed); Docker must hold the pulled image
+# under that digest; an older release is refused as a downgrade.
 JSON_MODE=true
+REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+DIG="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+HELD="${REPO}@${DIG}"
 json_emit() { printf '%s\n' "$1" >> "$T/json.log"; }
-detect_current_docker_image() { echo "us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri"; }
+detect_current_docker_image() { echo "${REPO}:v0.15.0-adiri"; }
 write_pending_state() { cat > "$T/pending"; }
 storage_migration_begin() { return 0; }
-docker() { if [[ "$1" == pull ]]; then printf '%s\n' "$2" > "$T/pulled"; fi; return 0; }
+tn_docker_image_for_tag() { printf '%s@%s\n' "$REPO" "$DIG"; }
+docker() {
+    case "$1" in
+        pull) printf '%s\n' "$2" > "$T/pulled" ;;
+        image) printf '%s\n' "$HELD" ;;
+    esac
+    return 0
+}
 prep_case() {  # prep_case NAME RC ARG PULLED
     local rc=0
-    rm -f "$T/pulled"
+    rm -f "$T/pulled" "$T/pending"
+    : > "$T/json.log"
     json_prepare_docker "$3" >/dev/null 2>&1 || rc=$?
     check "$1" "$2 $4" "$rc $(cat "$T/pulled" 2>/dev/null || echo none)"
 }
-REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-prep_case "bare release tag composed on the testnet repository" 0 v0.16.0-adiri "${REPO}:v0.16.0-adiri"
-prep_case "full release reference accepted" 0 "${REPO}:v0.16.0-adiri" "${REPO}:v0.16.0-adiri"
+prep_case "bare release tag resolved to its digest" 0 v0.16.0-adiri "${REPO}@${DIG}"
+check_has "pending: target tag recorded" "NEW_REF=v0.16.0-adiri" "$(cat "$T/pending" 2>/dev/null)"
+check_has "pending: running tag recorded" "OLD_REF=v0.15.0-adiri" "$(cat "$T/pending" 2>/dev/null)"
+check_has "pending: image by digest" "NEW_IMAGE=${REPO}@${DIG}" "$(cat "$T/pending" 2>/dev/null)"
+prep_case "release tag on the testnet repository resolved to its digest" 0 "${REPO}:v0.16.0-adiri" "${REPO}@${DIG}"
+prep_case "digest reference taken as given" 0 "${REPO}@${DIG}" "${REPO}@${DIG}"
 prep_case "other registry refused before the pull" 1 "docker.io/library/busybox:v0.16.0-adiri" none
+prep_case "other registry by digest refused before the pull" 1 "docker.io/library/busybox@${DIG}" none
+prep_case "latest refused before the pull" 1 "${REPO}:latest" none
 prep_case "non-release tag refused before the pull" 1 "v0.16.0-adiri-hotfix" none
 prep_case "leading dash refused" 1 "--help" none
+prep_case "older release refused as a downgrade" 1 "v0.14.0-adiri" none
+check "downgrade: done event says so" yes "$(grep -q '"phase":"prepare","downgrade":true' "$T/json.log" && echo yes || echo no)"
+HELD="${REPO}@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+rm -f "$T/pending"
+prep_case "digest mismatch after the pull refused" 1 v0.16.0-adiri "${REPO}@${DIG}"
+check "digest mismatch: no pending state" no "$([[ -e "$T/pending" ]] && echo yes || echo no)"
+HELD="${REPO}@${DIG}"
 check_lacks "pull log is not a fixed /tmp name" "/tmp/tn-update-build.log" "$(cat "$TN_TEST_REPO/update-node.sh")"
 # update_node_log_dir: an observability host's JSON logs move off the root-owned dir.
 LF="$T/tn-start"

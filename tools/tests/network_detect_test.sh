@@ -198,17 +198,17 @@ check "build log: mode 600" "600" "$(stat -c '%a' -- "$L1" 2>/dev/null)"
 check "build log: a new name each time" yes "$([[ -n "$L1" && "$L1" != "$L2" ]] && echo yes || echo no)"
 
 printf 'bin\n' > "$T/built"
-run _uc_built_binary_ok "$T/built"
+run tn_built_binary_ok "$T/built" "$(id -u)"
 check_rc "built binary: regular file owned by this uid" 0 "$RC"
 ln -s "$T/built" "$T/built-link"
-run _uc_built_binary_ok "$T/built-link"
+run tn_built_binary_ok "$T/built-link" "$(id -u)"
 check_rc "built binary: symlink refused" 1 "$RC"
-run _uc_built_binary_ok "$T/missing"
+run tn_built_binary_ok "$T/missing" "$(id -u)"
 check_rc "built binary: missing refused" 1 "$RC"
 mkdir "$T/built-dir"
-run _uc_built_binary_ok "$T/built-dir"
+run tn_built_binary_ok "$T/built-dir" "$(id -u)"
 check_rc "built binary: directory refused" 1 "$RC"
-run _uc_built_binary_ok "$T/built" 4242
+run tn_built_binary_ok "$T/built" 4242
 check_rc "built binary: another owner refused" 1 "$RC"
 
 finish

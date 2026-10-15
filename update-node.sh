@@ -3,9 +3,11 @@
 # update-node.sh -- Telcoin Network Node Update
 #
 # Updates a running Telcoin node to a newer version. Auto-detects the
-# install method (source build / docker) and offers a two-phase workflow:
+# install method (source build / signed release / docker) and offers a
+# two-phase workflow:
 #
-#   1. PREPARE  -- build new binary or pull new image (zero service impact)
+#   1. PREPARE  -- build or download the new binary, or pull the new image
+#                  (zero service impact)
 #   2. APPLY    -- stop service, swap, restart, verify (brief downtime)
 #
 # The two phases can be run together (prepare-and-apply) or split so the
@@ -39,6 +41,22 @@
 #   sudo bash update-node.sh --no-epoch-wait  # restart without the epoch wait
 #   sudo bash update-node.sh --allow-quorum-risk  # stop even when the committee
 #                                             # check says too many members are down
+#   sudo bash update-node.sh --allow-dirty    # testnet: discard local changes in
+#                                             # /opt/telcoin-source before the build
+#   sudo bash update-node.sh --allow-downgrade  # testnet: allow a release older
+#                                             # than the running one
+#
+# Updates take release tags only (vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet),
+# never a branch or a commit id. A source build checks the tag out (refused when
+# origin's tag moved, or when its signature is bad), builds it as the
+# unprivileged tn-build account, and stages the result root-only; a release
+# install downloads the release and checks its signature (lib/release-keys) and
+# hashes; a Docker install pulls the release image by digest. --allow-dirty and
+# --allow-downgrade are taken in an interactive run on testnet only.
+#
+# After the restart, APPLY checks the node is on its network's chain, that its
+# consensus header advances, and that a node that was voting (CvvActive) before
+# the update votes again within TN_UPDATE_VOTE_TIMEOUT seconds (default 600).
 #
 # TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
 # TN_UPDATE_VERIFY_TIMEOUT=<seconds> sets the post-restart health window
@@ -139,6 +157,18 @@ JSON_MODE=false
 JSON_ACTION=""
 JSON_REF=""
 ASSUME_YES=false
+# --allow-dirty / --allow-downgrade (interactive, testnet only).
+ALLOW_DIRTY=false
+ALLOW_DOWNGRADE=false
+# Set by the prepares: the staged binary, its --version line and sha256; the
+# resolved Docker target; the newest source tag and whether a tag moved upstream.
+PREP_STAGED=""
+PREP_VERSION=""
+PREP_HASH=""
+DOCKER_TARGET_IMAGE=""
+DOCKER_TARGET_TAG=""
+LATEST_SOURCE_REF=""
+SOURCE_TAG_MOVED=false
 # Set once the run has sent its final JSON answer (a done event, or the single
 # --check status object), so update_on_exit never adds a second one.
 JSON_DONE_SENT=false
@@ -238,7 +268,7 @@ existing_update_refusal() {
     path="$(existing_binary_path)"
     svc="${SERVICE_NAME:-telcoin}"
     if [[ "$JSON_MODE" == "true" ]]; then
-        json_event error "install method 'existing': this node runs ${path}, which update-node.sh does not replace. To update it, stop the node, replace that file with the new release binary and start the node again (systemctl stop ${svc}; install -m 0755 <new binary> ${path}; systemctl start ${svc}). On a committee node, run only the install step while the node runs, then restart with edit-config.sh, menu item 12 (Restart node), which waits for the epoch boundary."
+        json_event error "install method 'existing': this node runs ${path}, which update-node.sh does not replace. To update it, stop the node, replace that file with the new release binary and start the node again (systemctl stop ${svc}; install -m 0755 <new binary> ${path}; systemctl start ${svc}). On a committee node, run only the install step while the node runs, then restart with edit-config.sh, menu item 12 (Restart node), which waits for the epoch boundary. Check a downloaded release first: gpgv --keyring <the keys in lib/release-keys, gpg --dearmor> SHA256SUMS.asc SHA256SUMS; sha256sum -c --ignore-missing SHA256SUMS; then the binary's --version must name the release."
         return 0
     fi
     print_error "Install method is 'existing': this node runs ${path}, which update-node.sh does not replace."
@@ -249,6 +279,14 @@ existing_update_refusal() {
     print_info "On a committee node, run only the install line instead (it replaces the file while the"
     print_info "node runs), then restart with edit-config.sh, menu item 12 (Restart node), which waits"
     print_info "for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh"
+    print_info "Check a release before installing it (TAG is the release, such as v0.16.0-adiri):"
+    print_info "  base=${TN_RELEASE_BASE_URL:-https://github.com/Telcoin-Association/telcoin-network/releases/download}/TAG"
+    print_info "  curl -fsSL -O \"\$base/SHA256SUMS\" -O \"\$base/SHA256SUMS.asc\" -O \"\$base/telcoin-network-TAG-x86_64-unknown-linux-gnu.tar.gz\""
+    print_info "  cat ~/telcoin-node-scripts/lib/release-keys/*.asc | gpg --dearmor > release-keys.gpg"
+    print_info "  gpgv --keyring ./release-keys.gpg SHA256SUMS.asc SHA256SUMS"
+    print_info "  sha256sum -c --ignore-missing SHA256SUMS"
+    print_info "  tar -xzf telcoin-network-TAG-x86_64-unknown-linux-gnu.tar.gz && telcoin-network-TAG-x86_64-unknown-linux-gnu/telcoin-network --version"
+    print_info "Or let the scripts do all of this: a fresh install with setup-node.sh --install-method release."
 }
 
 # detect_network -- print testnet or mainnet: NETWORK in .node-meta (CRLF-safe),
@@ -275,10 +313,18 @@ docker_launch_file() {
     echo "$file"
 }
 
+# detect_current_docker_image -- the image the Docker start script runs: the runner
+# of its node line (_tn_launch_awk runner; a digest reference stays whole), else, for
+# a launch file that parser cannot read, the first registry image word in it.
 detect_current_docker_image() {
-    local file
+    local file cur rc=0
     file="$(docker_launch_file)" || return 1
-    grep -oE 'us-docker[^ ]+|gcr\.io[^ ]+|ghcr\.io[^ ]+' "$file" | head -1
+    cur="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 10 && "$cur" == "docker "?* ]]; then
+        printf '%s\n' "${cur#docker }"
+        return 0
+    fi
+    grep -oE '(us-docker[.]pkg[.]dev|gcr[.]io|ghcr[.]io)/[^ "]+' "$file" | head -1
 }
 
 # git describe-style summary of the current source ref + commit
@@ -306,9 +352,13 @@ pending_key_check() {
     local k="${1:-}" v="${2-}" re
     case "$k" in
         PHASE)
-            [[ "$v" == "pull_complete" || "$v" == "build_complete" ]] ;;
+            [[ "$v" == "pull_complete" || "$v" == "build_complete" || "$v" == "fetch_complete" ]] ;;
         INSTALL_METHOD)
-            [[ "$v" == "source" || "$v" == "docker" ]] ;;
+            [[ "$v" == "source" || "$v" == "release" || "$v" == "docker" ]] ;;
+        MODE_BEFORE)
+            # tn_node_mode's answer before the stop (verify_consensus_participation).
+            re='^[A-Za-z]*$'
+            [[ "$v" =~ $re ]] ;;
         OLD_IMAGE)
             # The running image: its shape only (it may predate the release rule).
             tn_docker_ref_ok "$v" ;;
@@ -636,7 +686,7 @@ observer_strip_needed() {
 # =============================================================================
 
 # installed_source_ref -- the ref of the source binary that runs now, from the
-# marker that setup and verified applies write (write_source_version_marker).
+# marker that setup and verified applies write (record_installed_ref).
 # Empty when there is none: setup and verified applies have written it since
 # well before v0.16.0, so a node without one runs an older release. `git
 # describe` of the checkout is no use here: a prepare moves the checkout while
@@ -745,7 +795,7 @@ storage_migration_verify_failed() {
     if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         state="The node is not running; it may have stopped before or during the migration"
     fi
-    clear_pending_state
+    discard_pending
     if [[ "$UPDATE_HEALTH_OK" == "true" ]]; then
         what="${SERVICE_NAME} answered after starting ${1}, but it is not running the prepared update."
     else
@@ -980,89 +1030,178 @@ update_epoch_wait() {
 # DOCKER PATH
 # =============================================================================
 
+# fetch_docker_tags [NETWORK] -- the release tags in the network's image repository
+# (tn_docker_repo_for; NETWORK defaults to this node's), oldest first, at most 15.
+# Only tags that pass tn_release_tag_ok are kept, so latest, hot-patch, branch and
+# other networks' tags are never offered. Nothing when the repository or the
+# registry cannot be read.
 fetch_docker_tags() {
-    # The heredoc below IS python3's stdin (its program source), so the tag JSON
-    # cannot also arrive on stdin -- the old `curl ... | python3 <<EOF` fed the
-    # script to itself and always returned nothing (SC2259). Pass the payload via
-    # the environment instead: keeps the readable heredoc and parses for real.
-    TN_TAGS_JSON="$(curl -sS --max-time 5 "$GAR_TAGS_URL" 2>/dev/null)" python3 <<'PYEOF' 2>/dev/null
-import json, os, re
-try:
-    d = json.loads(os.environ.get('TN_TAGS_JSON', ''))
-    tags = d.get('tags', [])
-    parsed = []
-    for t in tags:
-        m = re.match(r'^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$', t)
-        if m:
-            parsed.append((tuple(int(x) for x in m.groups()[:3]), m.group(4) or '', t))
-    parsed.sort()
-    for _, _, tag in parsed[-15:]:
-        print(tag)
-except Exception:
-    pass
-PYEOF
+    local net="${1:-}" repo host path json
+    if [[ -z "$net" ]]; then
+        net="$(tn_detect_network 2>/dev/null)" || return 0
+    fi
+    repo="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 0
+    host="${repo%%/*}"
+    path="${repo#*/}"
+    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || return 0
+    printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
+        | while IFS= read -r t; do
+            if tn_release_tag_ok "$net" "$t"; then
+                printf '%s\n' "$t"
+            fi
+        done | sort -u -V | tail -n 15
 }
 
-# Compose the full image URL given a current image (with registry path) and a new tag.
-compose_image_url() {
-    local current_image="$1"
-    local new_tag="$2"
-    echo "${current_image%:*}:${new_tag}"
+# docker_current_tag IMAGE -- the release tag the running IMAGE came from: the tag
+# of a <repo>:<tag> IMAGE; for <repo>@sha256:<digest>, RELEASE_TAG in .node-meta
+# when DOCKER_IMAGE_DIGEST there names that digest. Nothing when neither says.
+docker_current_tag() {
+    local img="${1:-}" t=""
+    case "$img" in
+        *@sha256:*)
+            if [[ "$(meta_get DOCKER_IMAGE_DIGEST 2>/dev/null || true)" == "${img##*@}" ]]; then
+                t="$(meta_get RELEASE_TAG 2>/dev/null)" || t=""
+            fi
+            ;;
+        *)
+            if [[ "${img##*/}" == *:* ]]; then
+                t="${img##*:}"
+            fi
+            ;;
+    esac
+    printf '%s\n' "$t"
+}
+
+# docker_resolve_target ARG NETWORK -- the image a Docker update to ARG runs, by
+# digest. A release tag of NETWORK, alone or as <repo>:<tag> of the network's
+# repository, resolves to that release's digest (tn_docker_image_for_tag: the
+# signed release's IMAGE_DIGEST, else on testnet the registry's); a
+# <repo>@sha256:<digest> reference is taken as given. Sets DOCKER_TARGET_IMAGE and
+# DOCKER_TARGET_TAG (empty for a digest given alone). rc 1, with the reason on
+# stderr, for anything else: another repository, a tag that is not a release tag
+# of NETWORK, latest, a leading "-". Nothing is pulled here.
+docker_resolve_target() {
+    local arg="${1:-}" net="${2:-}" repo tag=""
+    DOCKER_TARGET_IMAGE=""
+    DOCKER_TARGET_TAG=""
+    repo="$(tn_docker_repo_for "$net")" || return 1
+    case "$arg" in
+        ""|-*) ;;
+        *@sha256:*) DOCKER_TARGET_IMAGE="$arg" ;;
+        "${repo}:"*) tag="${arg#"${repo}:"}" ;;
+        */*|*:*|*@*) ;;
+        *) tag="$arg" ;;
+    esac
+    if [[ -n "$tag" ]]; then
+        if ! tn_release_tag_ok "$net" "$tag"; then
+            print_warn "${tag} is not a ${net} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z); nothing pulled." >&2
+            return 1
+        fi
+        DOCKER_TARGET_IMAGE="$(tn_docker_image_for_tag "$net" "$tag" update_wait_say)" || {
+            DOCKER_TARGET_IMAGE=""
+            return 1
+        }
+        DOCKER_TARGET_TAG="$tag"
+    fi
+    if [[ -z "$DOCKER_TARGET_IMAGE" ]] || ! validate_docker_image "$DOCKER_TARGET_IMAGE" "$net"; then
+        print_warn "Image refused: ${arg:-(empty)}. An update runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest; nothing pulled." >&2
+        DOCKER_TARGET_IMAGE=""
+        DOCKER_TARGET_TAG=""
+        return 1
+    fi
+    return 0
+}
+
+# docker_pull_target IMAGE CURRENT TAG -- pull IMAGE (a digest reference) with the
+# log in a fresh file, check that Docker holds it under that digest (RepoDigests),
+# and write the pending state: OLD_IMAGE CURRENT, NEW_IMAGE IMAGE, PULLED_IMAGE_ID,
+# OLD_REF/NEW_REF the running and target release tags when known. rc 1 with the
+# reason reported (update_wait_say) on any failure.
+docker_pull_target() {
+    local img="$1" current="$2" tag="${3:-}" old_tag pull_log pulled_id state
+    if ! pull_log="$(build_log_file)"; then
+        update_wait_say warn "Could not create a log file for the image pull; nothing pulled."
+        return 1
+    fi
+    update_wait_say step "Pulling ${img}"
+    # 9>&-: the pull must not hold the update lock (see update_lock).
+    if ! docker pull "$img" 9>&- >"$pull_log" 2>&1; then
+        update_wait_say warn "Image pull failed -- see ${pull_log} on the host. The node was not touched."
+        return 1
+    fi
+    rm -f -- "$pull_log"
+    if ! docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null | grep -qxF -- "$img"; then
+        update_wait_say warn "Docker does not hold ${img} under that digest after the pull (digest mismatch); nothing was prepared."
+        return 1
+    fi
+    # Image ID of what was pulled: apply checks the restarted container runs it.
+    pulled_id="$(docker image inspect --format '{{.Id}}' "$img" 2>/dev/null || echo "")"
+    old_tag="$(docker_current_tag "$current")"
+    state="PHASE=pull_complete
+INSTALL_METHOD=docker
+OLD_IMAGE=${current}
+NEW_IMAGE=${img}
+PULLED_IMAGE_ID=${pulled_id}
+OLD_REF=${old_tag}"
+    if [[ -n "$tag" ]]; then
+        state="${state}
+NEW_REF=${tag}"
+    fi
+    state="${state}
+PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    if ! printf '%s\n' "$state" | write_pending_state; then
+        update_wait_say warn "Could not write pending state at $(pending_state_path)"
+        return 1
+    fi
+    return 0
 }
 
 prepare_docker_update() {
-    local new_image="$1"
+    local arg="$1" net current
     print_header "Prepare Update -- Docker Install"
-
-    local current_image
-    if ! validate_docker_image "$new_image"; then
-        print_error "Image refused: ${new_image} is not this network's repository by digest or by a release tag."
+    if ! net="$(detect_network)"; then
+        print_error "Cannot tell which network this node runs, so its image repository is unknown. Nothing was changed."
         return 1
     fi
-    current_image=$(detect_current_docker_image) || {
+    current=$(detect_current_docker_image) || {
         print_error "Could not read current Docker image from the ${SERVICE_NAME} launch config (wrapper or unit)"
         return 1
     }
-    print_info "Current image: ${current_image}"
-    print_info "Target image:  ${new_image}"
+    docker_resolve_target "$arg" "$net" || return 1
+    update_downgrade_check "$(docker_current_tag "$current")" "$DOCKER_TARGET_TAG" || return 1
+    print_info "Current image: ${current}"
+    print_info "Target image:  ${DOCKER_TARGET_IMAGE}${DOCKER_TARGET_TAG:+ (${DOCKER_TARGET_TAG})}"
     echo ""
     if ! confirm "Proceed with the pull?"; then
         print_info "Cancelled."
         return 1
     fi
-
-    local current_tag="${current_image##*:}"
-    print_step "Pulling image: ${new_image}"
-    # 9>&-: the pull must not hold the update lock (see update_lock).
-    if ! docker pull "$new_image" 9>&-; then
-        print_error "Image pull failed. Service untouched."
-        return 1
-    fi
-    print_ok "Image pulled. Service still running on ${current_tag}."
-
-    # Image ID of what we just pulled -- apply verifies the restarted
-    # container is actually running THIS image, not merely "something healthy".
-    local pulled_image_id
-    pulled_image_id=$(docker image inspect --format '{{.Id}}' "$new_image" 2>/dev/null || echo "")
-
-    if ! write_pending_state <<EOF
-PHASE=pull_complete
-INSTALL_METHOD=docker
-OLD_IMAGE=${current_image}
-NEW_IMAGE=${new_image}
-PULLED_IMAGE_ID=${pulled_image_id}
-PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-EOF
-    then
-        print_error "Could not write pending state at $(pending_state_path)"
-        return 1
-    fi
+    docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG" || return 1
+    print_ok "Image pulled. Service still running on ${current}."
     print_ok "Pending update saved: $(pending_state_path)"
+}
+
+# docker_record_meta IMAGE TAG -- after a verified Docker update, .node-meta names
+# what runs: DOCKER_IMAGE IMAGE, DOCKER_IMAGE_DIGEST its digest, RELEASE_TAG TAG
+# (removed when TAG is empty: an image given by digest alone). A failed write warns.
+docker_record_meta() {
+    local ok=true
+    meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 || ok=false
+    meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 || ok=false
+    if [[ -n "${2:-}" ]]; then
+        meta_set RELEASE_TAG "$2" >/dev/null 2>&1 || ok=false
+    else
+        meta_unset RELEASE_TAG >/dev/null 2>&1 || ok=false
+    fi
+    if [[ "$ok" != "true" ]]; then
+        update_wait_say warn "Could not record the new image in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)."
+    fi
+    return 0
 }
 
 apply_docker_update() {
     # Read pending state
-    local state old_image new_image pulled_image_id
+    local state old_image new_image pulled_image_id old_ref new_ref
     if ! state="$(read_pending_state)"; then
         print_error "The pending update cannot be read (see above) -- cannot apply."
         return 1
@@ -1070,6 +1209,8 @@ apply_docker_update() {
     old_image="$(pending_field "$state" OLD_IMAGE)"
     new_image="$(pending_field "$state" NEW_IMAGE)"
     pulled_image_id="$(pending_field "$state" PULLED_IMAGE_ID)"
+    old_ref="$(pending_field "$state" OLD_REF || true)"
+    new_ref="$(pending_field "$state" NEW_REF || true)"
     if [[ -z "$old_image" ]] || [[ -z "$new_image" ]]; then
         print_error "Pending state is incomplete -- cannot apply."
         return 1
@@ -1079,10 +1220,11 @@ apply_docker_update() {
     print_info "From: ${old_image}"
     print_info "To:   ${new_image}"
     echo ""
+    # The release tags recorded at prepare (a digest carries no version), else
     # name:tag only, so a registry host:port is never read as a version. The
-    # launch file names OLD_IMAGE (the substitution below fails otherwise), so
-    # it is the running release.
-    storage_migration_begin "${old_image##*/}" "${new_image##*/}" || return 1
+    # launch file names OLD_IMAGE (the swap refuses otherwise), so it is the
+    # running release.
+    storage_migration_begin "${old_ref:-${old_image##*/}}" "${new_ref:-${new_image##*/}}" || return 1
     validator_downtime_warning_if_applicable || return 1
 
     # The image reference lives in the start wrapper on current installs and in
@@ -1127,6 +1269,7 @@ apply_docker_update() {
 
     if verify_health_after_restart && verify_running_image_id "$pulled_image_id"; then
         clear_pending_state
+        docker_record_meta "$new_image" "$new_ref"
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
@@ -1176,38 +1319,228 @@ apply_docker_update() {
 # SOURCE PATH
 # =============================================================================
 
-# _uc_built_binary_ok FILE [UID] -- rc 0 when the build output FILE is a
-# regular file, not a symlink, owned by UID (default: the uid this script runs
-# as, which ran the build). Read only after cargo has returned. Prints nothing.
-_uc_built_binary_ok() {
-    local f="${1:-}" want="${2:-}" uid
-    [[ -n "$want" ]] || want="$(id -u)"
-    [[ -n "$f" && -f "$f" && ! -L "$f" ]] || return 1
-    uid="$(stat -c '%u' -- "$f" 2>/dev/null)" || return 1
-    [[ "$uid" == "$want" ]]
-}
-
 # build_log_file -- create the cargo log for one prepare with mktemp (0600, a
 # new name every time) and print its path. rc 1 when mktemp fails.
 build_log_file() {
     mktemp "${TMPDIR:-/tmp}/tn-build.XXXXXX" 2>/dev/null
 }
 
-prepare_source_build() {
-    local new_ref="$1" refusal
-    print_header "Prepare Update -- Source Build"
+# update_fail MSG -- report why a prepare or apply stops: an error event in --json
+# mode (update_on_exit repeats it in the done event), an [ERROR] line otherwise.
+update_fail() {
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_event error "$1"
+    else
+        print_error "$1"
+    fi
+}
 
-    # A ref typed at the custom prompt goes to git as an argument: refuse one
-    # that git would read as an option, before any git command runs.
-    if refusal="$(update_ref_refusal "$new_ref")"; then
-        print_error "$refusal"
+# update_downgrade_check RUNNING TARGET -- rc 0 unless TARGET's x.y.z is below
+# RUNNING's (either without one: rc 0, nothing to compare). A downgrade is refused
+# (rc 1): an error event and a done event carrying "downgrade":true and
+# "storage_downgrade" (true when RUNNING is at or above STORAGE_MIGRATION_FLOOR and
+# TARGET below it: the older release cannot open the migrated data dir) in --json
+# mode, [ERROR] lines otherwise. --allow-downgrade, which only an interactive run on
+# testnet takes, lets it through with a warning.
+update_downgrade_check() {
+    local run="${1:-}" new="${2:-}" re rv nv storage=false msg net
+    re='([0-9]+[.][0-9]+[.][0-9]+)'
+    [[ "$run" =~ $re ]] || return 0
+    rv="${BASH_REMATCH[1]}"
+    [[ "$new" =~ $re ]] || return 0
+    nv="${BASH_REMATCH[1]}"
+    if version_gte "$nv" "$rv"; then
+        return 0
+    fi
+    if version_gte "$rv" "$STORAGE_MIGRATION_FLOOR" && ! version_gte "$nv" "$STORAGE_MIGRATION_FLOOR"; then
+        storage=true
+    fi
+    net="$(detect_network 2>/dev/null)" || net=""
+    if [[ "$ALLOW_DOWNGRADE" == "true" && "$JSON_MODE" != "true" && "$net" == "testnet" ]]; then
+        print_warn "Downgrade from ${run} to ${new}, allowed by --allow-downgrade."
+        if [[ "$storage" == "true" ]]; then
+            print_warn "${new} cannot open a data dir that v${STORAGE_MIGRATION_FLOOR} or later has migrated: restore a snapshot taken before that migration first."
+        fi
+        return 0
+    fi
+    msg="${new} is older than the running ${run}: downgrades are refused."
+    if [[ "$storage" == "true" ]]; then
+        msg="${msg} ${new} is below v${STORAGE_MIGRATION_FLOOR} and cannot open the data dir the running release has migrated."
+    fi
+    msg="${msg} Nothing was changed."
+    if [[ "$JSON_MODE" == "true" ]]; then
+        json_event error "$msg"
+        json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"prepare\",\"downgrade\":true,\"storage_downgrade\":${storage},\"msg\":\"$(json_escape "$msg")\"}"
+    else
+        print_error "$msg"
+        print_info "On testnet, an interactive run with --allow-downgrade goes ahead anyway."
+    fi
+    return 1
+}
+
+# source_checkout TAG NETWORK -- put /opt/telcoin-source at release TAG
+# (tn_source_checkout_tag, discarding local changes only with --allow-dirty) and
+# check the free disk space where the build account builds. rc 1 with the reason
+# reported.
+source_checkout() {
+    local tag="$1" net="$2" avail_gb min_gb=5 where
+    if ! tn_source_checkout_tag "$TN_SOURCE_DIR" "$net" "$tag" "$ALLOW_DIRTY" update_wait_say; then
+        update_fail "The checkout of ${tag} was refused or failed (see above); nothing was built."
         return 1
     fi
+    update_wait_say log "Submodules: $(git -C "$TN_SOURCE_DIR" submodule status 2>/dev/null | tr '\n' ' ')"
+    # A clean cargo build fills several GB under the build account's target dir.
+    where="$TN_BUILD_HOME"
+    [[ -d "$where" ]] || where="${where%/*}"
+    avail_gb="$(df -BG --output=avail "$where" 2>/dev/null | awk 'NR==2 {gsub("G",""); print $1}')"
+    if [[ "$avail_gb" =~ ^[0-9]+$ ]] && (( avail_gb < min_gb )); then
+        update_fail "Only ${avail_gb}G free on the mount holding ${where}; a source build needs ${min_gb}G or more. Free some space (du -sh ${TN_BUILD_HOME}/target) and try again."
+        return 1
+    fi
+    if [[ -n "$avail_gb" ]]; then
+        update_wait_say log "Disk free for the build: ${avail_gb}G (>= ${min_gb}G required)"
+    fi
+    return 0
+}
+
+# source_build_stage NETWORK -- build the checkout as the build account
+# (tn_build_user_ensure, tn_rustup_ensure, tn_source_build: an empty environment,
+# its own toolchain, fd 9 closed), with the log in a fresh file (shown as it runs
+# in interactive mode), then stage the result root-only and check its --version as
+# the build account (tn_stage_binary). Sets PREP_STAGED. rc 1 with the reason
+# reported.
+source_build_stage() {
+    local net="$1" build_log built ok=true
+    PREP_STAGED=""
+    if ! tn_build_user_ensure update_wait_say || ! tn_rustup_ensure update_wait_say; then
+        update_fail "The build account ${TN_BUILD_USER} or its toolchain is not ready (see above); nothing was built."
+        return 1
+    fi
+    if ! build_log="$(build_log_file)"; then
+        update_fail "Could not create a build log in ${TMPDIR:-/tmp}; nothing was built."
+        return 1
+    fi
+    update_wait_say step "Building as ${TN_BUILD_USER} ($(tn_cargo_features_for "$net" || true)) -- this can take 20-40 minutes; log: ${build_log}"
+    if [[ "$JSON_MODE" == "true" ]]; then
+        tn_source_build "$TN_SOURCE_DIR" "$net" >"$build_log" 2>&1 || ok=false
+    else
+        tn_source_build "$TN_SOURCE_DIR" "$net" 2>&1 | tee "$build_log" 9>&- || ok=false
+    fi
+    # Read only now that the build has returned: a regular file owned by the build
+    # account, copied into root's staging directory before anything checks it.
+    built="${TN_BUILD_HOME}/target/release/telcoin-network"
+    if [[ "$ok" != "true" ]] || ! tn_built_binary_ok "$built"; then
+        update_fail "The build failed or left no regular file owned by ${TN_BUILD_USER} at ${built} -- see ${build_log} on the host."
+        return 1
+    fi
+    if ! PREP_STAGED="$(tn_stage_binary "$built" "$net" "" update_wait_say)"; then
+        PREP_STAGED=""
+        update_fail "The built binary failed its --version check (see above); build log ${build_log}."
+        return 1
+    fi
+    rm -f -- "$build_log"
+    return 0
+}
+
+# release_stage TAG NETWORK -- download, verify and stage release TAG
+# (tn_release_stage: the signed SHA256SUMS, the tarball and chain-config hashes,
+# the binary's --version run as the build account). Sets PREP_STAGED. rc 1 with the
+# reason reported.
+release_stage() {
+    local rc=0
+    PREP_STAGED=""
+    if ! tn_build_user_ensure update_wait_say; then
+        update_fail "Could not prepare the build account ${TN_BUILD_USER}, which runs the new binary's --version check (see above)."
+        return 1
+    fi
+    update_wait_say step "Downloading and verifying release ${1}"
+    PREP_STAGED="$(tn_release_stage "$1" "$2" "" update_wait_say)" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        2) update_fail "Could not download release ${1} (see above); nothing was prepared." ;;
+        *) update_fail "Release ${1} did not verify (see above); nothing was prepared." ;;
+    esac
+    PREP_STAGED=""
+    return 1
+}
+
+# binary_prepare METHOD TAG NETWORK -- prepare the update of a source or release
+# install to release TAG (both modes). TAG must be a release tag of NETWORK
+# (update_ref_refusal) and not a downgrade (update_downgrade_check). A source
+# install checks TAG out and builds it as the build account (an interactive run
+# confirms first); a release install downloads and verifies it. Either way the new
+# binary waits root-only in the staging directory with its --version checked, and
+# the pending state names it with its sha256. Sets PREP_VERSION and PREP_HASH. rc 1
+# with the reason reported; the running node is never touched.
+binary_prepare() {
+    local method="$1" tag="$2" net="$3" running refusal staged installed state
+    installed="${DEFAULT_INSTALL_DIR}/telcoin-network"
+    PREP_VERSION=""
+    PREP_HASH=""
+    if refusal="$(update_ref_refusal "$tag" "$net")"; then
+        update_fail "${refusal} Nothing was changed."
+        return 1
+    fi
+    running="$(installed_source_ref)"
+    update_downgrade_check "$running" "$tag" || return 1
+    update_wait_say log "Running release: ${running:-unknown}; target: ${tag}"
+    if [[ "$method" == "source" ]]; then
+        if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
+            update_fail "Source directory not found at ${TN_SOURCE_DIR}; this script updates only installs built from it."
+            return 1
+        fi
+        source_checkout "$tag" "$net" || return 1
+        if [[ "$JSON_MODE" != "true" ]]; then
+            echo ""
+            print_warn "Source build typically takes 20-40 minutes."
+            print_info "Service stays running during the build -- only the apply step incurs downtime."
+            echo ""
+            if ! confirm "Start the build now?"; then
+                print_info "Cancelled."
+                return 1
+            fi
+        fi
+        source_build_stage "$net" || return 1
+    else
+        release_stage "$tag" "$net" || return 1
+    fi
+    staged="$PREP_STAGED"
+    PREP_VERSION="$(head -n 1 "${staged%/*}/version" 2>/dev/null | tr -d '[:cntrl:]')"
+    PREP_HASH="$(sha256sum < "$staged" | awk '{print $1}')"
+    state="PHASE=build_complete"
+    [[ "$method" == "release" ]] && state="PHASE=fetch_complete"
+    if [[ -z "$running" ]]; then
+        running="$(detect_current_source_ref 2>/dev/null || true)"
+    fi
+    if ! write_pending_state <<PEND
+${state}
+INSTALL_METHOD=${method}
+OLD_REF=${running}
+NEW_REF=${tag}
+NEW_VERSION=${PREP_VERSION}
+BUILT_BINARY=${staged}
+BUILT_HASH=${PREP_HASH}
+PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+PEND
+    then
+        tn_staged_cleanup "$staged"
+        update_fail "Could not write pending state at $(pending_state_path)"
+        return 1
+    fi
+    if [[ -f "$installed" && "$(sha256sum < "$installed" | awk '{print $1}')" == "$PREP_HASH" ]]; then
+        update_wait_say warn "The prepared binary is identical to the installed one (${PREP_HASH:0:12}...): applying it only restarts the node."
+    fi
+    return 0
+}
+
+prepare_source_build() {
+    local new_ref="$1" network cargo_features
+    print_header "Prepare Update -- Source Build"
 
     # The network decides the build features (adiri on testnet, none on
-    # mainnet). It must be known before the checkout moves or cargo runs: a
-    # build for the wrong network refuses to start on this node's chain.
-    local network cargo_features
+    # mainnet) and which tags are releases. It must be known before the checkout
+    # moves or cargo runs: a build for the wrong network refuses to start on
+    # this node's chain.
     if ! network="$(detect_network)" || ! cargo_features="$(tn_cargo_features_for "$network")"; then
         print_error "Cannot tell which network this node runs, so the build features are unknown. Nothing was changed."
         print_info "Set NETWORK=testnet or NETWORK=mainnet, on one line, in $(node_meta_path 2>/dev/null || echo "$(tn_resolve_config_dir)/.node-meta")."
@@ -1218,193 +1551,49 @@ prepare_source_build() {
     else
         print_info "Network: ${network} -- building without the adiri feature"
     fi
-
-    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
-        print_error "Source directory not found at ${TN_SOURCE_DIR}"
-        print_info "This script can only update installs that built from /opt/telcoin-source."
-        return 1
-    fi
-
-    local current_ref
-    current_ref=$(detect_current_source_ref || echo "unknown")
-    print_info "Current source ref: ${current_ref}"
-    print_info "Target ref:         ${new_ref}"
-
-    # Force-fetch tags BEFORE the checkout below: that flow prefers a local
-    # ref, and release tags are occasionally re-cut at the same name (e.g. a
-    # bad v0.13.0-adiri retagged to a corrected commit). Without --force the
-    # stale local tag wins and the node silently rebuilds the OLD commit while
-    # `git describe` still reports the right-looking version. Offline prepares
-    # are tolerated (checkout proceeds against local refs). setup-node.sh
-    # already refreshes reused clones with `fetch --all --tags --prune --force`
-    # for exactly this reason. Network git and the build run with 9>&- (see
-    # update_lock).
-    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 9>&- 2>/dev/null || true
-
-    print_step "Checking out: ${new_ref}"
-    if ! git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
-        # Try fetching the ref explicitly then checking out
-        if git -C "$TN_SOURCE_DIR" fetch origin "$new_ref" 9>&- 2>/dev/null && \
-           git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
-            print_ok "Checked out: ${new_ref}"
-        else
-            print_error "Could not check out '${new_ref}' -- branch or tag not found."
-            return 1
-        fi
-    else
-        print_ok "Checked out: ${new_ref}"
-    fi
-    # Pull if this is a branch (not a tag) so we get the latest commit on it
-    git -C "$TN_SOURCE_DIR" pull --ff-only 9>&- 2>/dev/null || true
-
-    # checkout/pull move the superproject only; sync submodules to the new ref
-    # or the build fails on files the stale submodule doesn't have (this is
-    # what broke v0.12.0-adiri source updates -- see tn_sync_submodules).
-    # Runs before the disk check and build confirmation so the operator never
-    # signs off on a 20-40 minute build against a broken tree.
-    print_step "Syncing git submodules..."
-    if ! tn_sync_submodules "$TN_SOURCE_DIR"; then
-        print_error "git submodule sync failed."
-        print_info "Manual fix, then re-run the update:"
-        print_info "  git -C ${TN_SOURCE_DIR} submodule update --init --recursive --force"
-        return 1
-    fi
-    print_ok "Submodules: $(git -C "$TN_SOURCE_DIR" submodule status 2>/dev/null | tr '\n' ' ')"
-
-    # Disk-space pre-flight. A clean cargo build can produce a target/
-    # directory of several GB. Refuse to start a build when we can already
-    # see disk is tight -- cleaner than failing mid-compile with cryptic
-    # "no space left on device" errors.
-    local avail_gb min_required_gb=5
-    avail_gb=$(df -BG --output=avail "$TN_SOURCE_DIR" 2>/dev/null | awk 'NR==2 {gsub("G",""); print $1}')
-    if [[ -n "$avail_gb" ]] && [[ "$avail_gb" -lt "$min_required_gb" ]]; then
-        print_error "Only ${avail_gb}G available on the mount holding ${TN_SOURCE_DIR}"
-        print_error "A source build typically needs ${min_required_gb}G+ for cargo artefacts."
-        print_info "Free up some space and try again:"
-        print_info "  du -sh ${TN_SOURCE_DIR}/target 2>/dev/null"
-        print_info "  cargo clean --manifest-path ${TN_SOURCE_DIR}/Cargo.toml"
-        return 1
-    fi
-    [[ -n "$avail_gb" ]] && print_info "Disk free on source mount: ${avail_gb}G (>= ${min_required_gb}G required)"
-
-    echo ""
-    print_warn "Source build typically takes 20-40 minutes."
-    print_info "Service stays running during the build -- only the apply step incurs downtime."
-    echo ""
-    if ! confirm "Start the build now?"; then
-        print_info "Cancelled."
-        return 1
-    fi
-
-    # Make cargo findable. Sudo's PATH usually does not include
-    # ~/.cargo/bin, which is where rustup installs cargo. Mirror what
-    # setup-{observer,validator}.sh do at install time. Look at three
-    # plausible locations so this works whether rustup ran as root or as
-    # the invoking user.
-    local user_cargo_dir=""
-    [[ -n "${SUDO_USER:-}" ]] && [[ -d "/home/${SUDO_USER}/.cargo/bin" ]] \
-        && user_cargo_dir="/home/${SUDO_USER}/.cargo/bin"
-    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${user_cargo_dir}:${PATH}"
-    [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
-    [[ -n "$user_cargo_dir" ]] && [[ -f "/home/${SUDO_USER}/.cargo/env" ]] \
-        && source "/home/${SUDO_USER}/.cargo/env" 2>/dev/null || true
-
-    if ! command -v cargo >/dev/null 2>&1; then
-        print_error "cargo not found in PATH. Looked in:"
-        print_info "  \${HOME}/.cargo/bin"
-        print_info "  /root/.cargo/bin"
-        [[ -n "$user_cargo_dir" ]] && print_info "  ${user_cargo_dir}"
-        print_info "Install Rust:"
-        print_info "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-        return 1
-    fi
-    print_info "cargo: $(command -v cargo)"
-
-    # Capture the pre-build binary hash so we can detect "cargo did nothing"
-    # after the build runs.
-    local built="${TN_SOURCE_DIR}/target/release/telcoin-network"
-    local pre_build_hash=""
-    [[ -f "$built" ]] && pre_build_hash=$(sha256sum "$built" | awk '{print $1}')
-
-    # A fresh 0600 log per build (mktemp), never a fixed name in /tmp.
-    local build_log
-    if ! build_log="$(build_log_file)"; then
-        print_error "Could not create a build log in ${TMPDIR:-/tmp}. Nothing was built."
-        return 1
-    fi
-    print_info "Build log: ${build_log}"
-
-    print_step "Building release binary (${new_ref}, ${cargo_features:-no features})..."
-    # Use pushd/popd instead of a subshell so PIPESTATUS is captured from
-    # the pipeline below. set -o pipefail (inherited from common.sh) makes
-    # the pipeline return non-zero if cargo itself fails -- v1.1.40 and
-    # earlier discarded that exit code by running the pipeline inside an
-    # unchecked subshell, which let a failed build go undetected.
-    pushd "$TN_SOURCE_DIR" >/dev/null
-    # shellcheck disable=SC2086
-    if ! cargo build --release $cargo_features 9>&- 2>&1 | tee "$build_log" 9>&-; then
-        popd >/dev/null
-        print_error "cargo build failed. See ${build_log} for the full output."
-        print_info "  Last few lines:"
-        tail -10 "$build_log" 2>/dev/null | sed 's/^/    /'
-        return 1
-    fi
-    popd >/dev/null
-
-    # The output is inspected only now that cargo has returned: a regular
-    # file (not a symlink) owned by the account that ran the build.
-    if ! _uc_built_binary_ok "$built"; then
-        print_error "Build did not produce a regular file owned by the build account at ${built}. See ${build_log}"
-        return 1
-    fi
-
-    # Sanity-check the new binary runs (catches the rare case where cargo
-    # finishes but the resulting binary is broken).
-    if ! "$built" --version &>/dev/null; then
-        print_error "Built binary failed --version check. Build may be corrupt."
-        return 1
-    fi
-    local new_version
-    new_version=$("$built" --version 2>/dev/null | head -1)
-
-    # Did cargo actually produce a new binary? If the hash hasn't changed,
-    # cargo decided no rebuild was needed (or did nothing). That used to
-    # silently install the unchanged old binary on top of itself.
-    local binary_hash
-    binary_hash=$(sha256sum "$built" | awk '{print $1}')
-    if [[ -n "$pre_build_hash" ]] && [[ "$pre_build_hash" == "$binary_hash" ]]; then
-        print_warn "Binary hash did not change after build."
-        print_info "  Pre-build:  ${pre_build_hash:0:16}..."
-        print_info "  Post-build: ${binary_hash:0:16}..."
-        print_info "  This usually means cargo decided no rebuild was needed,"
-        print_info "  even though the build command exited 0. Double-check your ref:"
-        print_info "    git -C ${TN_SOURCE_DIR} log -1 --format='%h %s'"
-        if ! confirm "Proceed anyway with the existing (unchanged) binary?"; then
-            print_info "Cancelled."
-            return 1
-        fi
-    fi
-    print_ok "Build complete: ${new_version}"
-
-    if ! write_pending_state <<EOF
-PHASE=build_complete
-INSTALL_METHOD=source
-OLD_REF=${current_ref}
-NEW_REF=${new_ref}
-NEW_VERSION=${new_version}
-BUILT_BINARY=${built}
-BUILT_HASH=${binary_hash}
-PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-EOF
-    then
-        print_error "Could not write pending state at $(pending_state_path)"
-        return 1
-    fi
+    binary_prepare source "$new_ref" "$network" || return 1
+    print_ok "Build complete: ${PREP_VERSION}"
     print_ok "Pending update saved: $(pending_state_path)"
 }
 
+# prepare_release_update TAG -- the interactive prepare of a release install.
+prepare_release_update() {
+    local tag="$1" network
+    print_header "Prepare Update -- Signed Release"
+    if ! network="$(detect_network)"; then
+        print_error "Cannot tell which network this node runs, so its releases are unknown. Nothing was changed."
+        return 1
+    fi
+    binary_prepare release "$tag" "$network" || return 1
+    print_ok "Release verified: ${PREP_VERSION}"
+    print_ok "Pending update saved: $(pending_state_path)"
+}
+
+# record_installed_ref TAG -- after a verified apply of a source or release update:
+# the version marker beside the binary (the UI reports the running release from it)
+# and RELEASE_TAG in .node-meta name TAG. A failed write warns.
+record_installed_ref() {
+    if ! printf '%s\n' "$1" | tn_write_root_file "${DEFAULT_INSTALL_DIR}/telcoin-network.version" 0644; then
+        update_wait_say warn "Could not record ${1} in ${DEFAULT_INSTALL_DIR}/telcoin-network.version."
+    fi
+    meta_set RELEASE_TAG "$1" >/dev/null 2>&1 || update_wait_say warn "Could not record RELEASE_TAG=${1} in .node-meta."
+    return 0
+}
+
+# discard_pending -- remove the pending state and the staged binary it names.
+discard_pending() {
+    local st b=""
+    if st="$(read_pending_state 2>/dev/null)"; then
+        b="$(pending_field "$st" BUILT_BINARY || true)"
+    fi
+    clear_pending_state
+    tn_staged_cleanup "$b"
+}
+
+# apply_source_update -- apply a prepared source or release update (both install
+# the binary at ${DEFAULT_INSTALL_DIR}/telcoin-network).
 apply_source_update() {
-    local state built old_ref new_ref new_version expected_hash
+    local state built old_ref new_ref new_version expected_hash method
     if ! state="$(read_pending_state)"; then
         print_error "The pending update cannot be read (see above) -- cannot apply."
         return 1
@@ -1414,31 +1603,29 @@ apply_source_update() {
     new_ref="$(pending_field "$state" NEW_REF)"
     new_version="$(pending_field "$state" NEW_VERSION)"
     expected_hash="$(pending_field "$state" BUILT_HASH)"
+    method="$(pending_field "$state" INSTALL_METHOD || true)"
     if [[ -z "$built" ]] || [[ ! -f "$built" ]]; then
         print_error "Pending built binary not found at ${built:-?}"
         return 1
     fi
 
-    print_header "Apply Update -- Source Install"
+    if [[ "$method" == "release" ]]; then
+        print_header "Apply Update -- Release Install"
+    else
+        print_header "Apply Update -- Source Install"
+    fi
     print_info "From: ${old_ref}"
     print_info "To:   ${new_ref}  (${new_version})"
     echo ""
 
-    # Sanity: confirm the binary on disk still matches the one we built
+    # The binary on disk must still be the one prepared; a changed file is never
+    # installed (there is no "proceed anyway").
     local actual_hash
     actual_hash=$(sha256sum "$built" | awk '{print $1}')
-    if [[ "$actual_hash" != "$expected_hash" ]]; then
-        print_warn "Built binary hash has changed since prepare phase."
-        print_info "  Expected: ${expected_hash}"
-        print_info "  Actual:   ${actual_hash}"
-        if ! confirm "Proceed anyway?"; then
-            print_info "Cancelled."
-            return 1
-        fi
-        # Operator approved installing the changed binary -- the post-restart
-        # identity check must verify against what is actually being installed,
-        # or it would force a rollback of an explicitly approved apply.
-        expected_hash="$actual_hash"
+    if [[ -z "$expected_hash" || "$actual_hash" != "$expected_hash" ]]; then
+        print_error "The prepared binary ${built} changed since the prepare (sha256 ${actual_hash:0:12}..., expected ${expected_hash:0:12}...). Nothing was installed."
+        print_info "Discard the pending update (--discard) and prepare it again."
+        return 1
     fi
 
     # The running release comes from the version marker, not from OLD_REF: that
@@ -1544,9 +1731,10 @@ apply_source_update() {
 
     if verify_health_after_restart && verify_installed_binary_hash "$installed" "$expected_hash"; then
         clear_pending_state
-        # Record the now-running ref so the UI reports the installed binary's
+        tn_staged_cleanup "$built"
+        # Record the now-running release so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
-        write_source_version_marker "$DEFAULT_INSTALL_DIR" "$TN_SOURCE_DIR" "$new_ref"
+        record_installed_ref "$new_ref"
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
@@ -1588,6 +1776,7 @@ apply_source_update() {
         start_service
         if verify_health_after_restart; then
             clear_pending_state
+            tn_staged_cleanup "$built"
             print_ok "Rolled back to previous binary"
         else
             print_error "Rollback failed too. Inspect logs:"
@@ -1596,6 +1785,7 @@ apply_source_update() {
     else
         print_warn "Leaving node on new binary. Pending state cleared."
         clear_pending_state
+        tn_staged_cleanup "$built"
     fi
 }
 
@@ -1659,14 +1849,37 @@ validator_downtime_warning_if_applicable() {
 # =============================================================================
 
 
+# pick_release_version -- ask for the release tag a release install updates to
+# (Enter takes the newest one origin publishes). Echoes the tag; prompts go to stderr.
+pick_release_version() {
+    local net latest cur tag
+    net="$(detect_network)" || return 1
+    cur="$(installed_source_ref)"
+    latest="$(latest_release_ref)"
+    print_info "Running release:     ${cur:-unknown}" >&2
+    print_info "Newest ${net} release: ${latest:-unknown (origin not reachable)}" >&2
+    echo "" >&2
+    read -r -p "  Release tag to install [${latest:-none}] (Enter takes it): " tag >&2
+    tag="${tag:-$latest}"
+    if [[ -z "$tag" ]]; then
+        print_info "Cancelled." >&2
+        return 1
+    fi
+    if [[ "$tag" == "$cur" ]]; then
+        print_info "That is the running release. Nothing to update." >&2
+        return 1
+    fi
+    printf '%s\n' "$tag"
+}
+
 pick_docker_version() {
     local current_image
     current_image=$(detect_current_docker_image) || {
         print_error "Could not read current Docker image from the ${SERVICE_NAME} launch config (wrapper or unit)" >&2
         return 1
     }
-    local current_tag="${current_image##*:}"
-    local registry_path="${current_image%:*}"
+    local current_tag
+    current_tag="$(docker_current_tag "$current_image")"
 
     print_step "Querying registry for available tags..." >&2
     local -a all_tags
@@ -1694,7 +1907,7 @@ pick_docker_version() {
             print_info "That is your current tag. Nothing to update." >&2
             return 1
         fi
-        echo "${registry_path}:${custom_tag}"
+        echo "${custom_tag}"
         return 0
     fi
 
@@ -1749,7 +1962,7 @@ pick_docker_version() {
             print_info "That is your current tag. Nothing to update." >&2
             return 1
         fi
-        echo "${registry_path}:${custom_tag}"
+        echo "${custom_tag}"
         return 0
     fi
     if (( choice >= 1 && choice <= tag_count )); then
@@ -1758,7 +1971,7 @@ pick_docker_version() {
             print_info "That is your current tag. Nothing to update." >&2
             return 1
         fi
-        echo "${registry_path}:${selected}"
+        echo "${selected}"
         return 0
     fi
 
@@ -2011,37 +2224,73 @@ update_arg_error() {
     fi
 }
 
-# update_ref_refusal <ref> -- rc 0, with the reason on stdout, when ref starts
-# with "-": no tag, branch, commit or image tag does, and git or docker would
-# read it as an option. Used by the --ref parser and by the interactive source
-# prepare (the custom ref prompt), so both refuse with the same words.
+# update_ref_refusal <ref> [network] -- rc 0, with the reason on stdout, when ref
+# starts with "-" (git or docker would read it as an option) or, with a network,
+# when it is not a release tag of that network (tn_release_tag_ok): updates take
+# release tags only, never a branch or a commit id. Used by the --ref parser and
+# by every prepare, so they refuse with the same words.
 update_ref_refusal() {
     case "${1:-}" in
         -*) printf 'Invalid ref "%s": a ref cannot start with "-".\n' "$1"; return 0 ;;
     esac
+    if [[ -n "${2:-}" ]] && ! tn_release_tag_ok "$2" "${1:-}"; then
+        printf '%s is not a %s release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z): updates take release tags only, never a branch or a commit id.\n' "${1:-(empty)}" "$2"
+        return 0
+    fi
     return 1
 }
 
-# Newest tag for the operator's network (source installs). Echoes "" if none.
+# latest_source_ref [DIR] -- the newest release tag of this node's network on origin,
+# for --check (source installs; DIR defaults to TN_SOURCE_DIR). origin's tags are fetched into refs/tn-remote-tags/
+# (pruned; local tags are never moved), and the highest one that passes
+# tn_release_tag_ok and agrees with a local tag of the same name is printed and
+# left in LATEST_SOURCE_REF. A tag whose local copy points elsewhere is never
+# offered: SOURCE_TAG_MOVED is set to true (both globals survive only outside
+# $(...)). Prints nothing when there is none.
 latest_source_ref() {
-    [[ -d "${TN_SOURCE_DIR}/.git" ]] || return 0
-    local network suffix=""
-    network=$(detect_network)
-    case "$network" in
-        testnet) suffix="$NETWORK_TAG_SUFFIX_TESTNET" ;;
-        mainnet) suffix="$NETWORK_TAG_SUFFIX_MAINNET" ;;
-    esac
-    # --force so a re-cut tag (same name, new commit) updates the local ref;
-    # without it the newest-tag probe keeps reporting the stale commit's tag.
-    git -C "$TN_SOURCE_DIR" fetch --tags --force --quiet 2>/dev/null || true
-    local t
+    local dir="${1:-$TN_SOURCE_DIR}" network t remote have
+    LATEST_SOURCE_REF=""
+    SOURCE_TAG_MOVED=false
+    [[ -d "${dir}/.git" ]] || return 0
+    network="$(detect_network 2>/dev/null)" || return 0
+    GIT_ALLOW_PROTOCOL=https git -C "$dir" fetch --quiet --prune --no-tags origin \
+        '+refs/tags/*:refs/tn-remote-tags/*' 9>&- 2>/dev/null || true
     while IFS= read -r t; do
-        [[ -z "$t" ]] && continue
-        [[ -n "$suffix" && "$t" != *"$suffix"* ]] && continue
-        echo "$t"
-        return 0
-    done < <(git -C "$TN_SOURCE_DIR" tag --sort=-creatordate 2>/dev/null)
+        [[ -n "$t" ]] || continue
+        remote="$(git -C "$dir" rev-parse -q --verify "refs/tn-remote-tags/${t}" 2>/dev/null)" || continue
+        have="$(git -C "$dir" rev-parse -q --verify "refs/tags/${t}" 2>/dev/null)" || have=""
+        if [[ -n "$have" && "$have" != "$remote" ]]; then
+            SOURCE_TAG_MOVED=true
+            continue
+        fi
+        if [[ -z "$LATEST_SOURCE_REF" ]]; then
+            LATEST_SOURCE_REF="$t"
+        fi
+    done < <(git -C "$dir" for-each-ref --format='%(refname:strip=2)' refs/tn-remote-tags 2>/dev/null \
+        | while IFS= read -r t; do
+            if tn_release_tag_ok "$network" "$t"; then
+                printf '%s\n' "$t"
+            fi
+        done | sort -u -V -r)
+    if [[ -n "$LATEST_SOURCE_REF" ]]; then
+        printf '%s\n' "$LATEST_SOURCE_REF"
+    fi
     return 0
+}
+
+# latest_release_ref -- the newest release tag of this node's network that origin
+# publishes (git ls-remote of TN_REPO: release installs have no checkout). Nothing
+# when it cannot be read.
+latest_release_ref() {
+    local network
+    network="$(detect_network 2>/dev/null)" || return 0
+    GIT_ALLOW_PROTOCOL=https git ls-remote --tags --refs -- "$TN_REPO" 'v*' 9>&- 2>/dev/null \
+        | awk '{ sub("^refs/tags/", "", $2); print $2 }' \
+        | while IFS= read -r t; do
+            if tn_release_tag_ok "$network" "$t"; then
+                printf '%s\n' "$t"
+            fi
+        done | sort -u -V | tail -n 1
 }
 
 # Newest published docker tag. fetch_docker_tags emits oldest-first.
@@ -2051,7 +2300,7 @@ latest_docker_ref() {
 
 json_check() {
     local install_method="$1"
-    local current="" latest="" pending="null" avail="false" running="" mig="false"
+    local current="" latest="" pending="null" avail="false" running="" mig="false" moved="false"
 
     if [[ -f "$(pending_state_path)" ]]; then
         local phase
@@ -2061,20 +2310,28 @@ json_check() {
 
     case "$install_method" in
         source)
-            current=$(detect_current_source_ref 2>/dev/null || echo "")
-            latest=$(latest_source_ref 2>/dev/null || echo "")
-            local exact_tag
-            exact_tag=$(git -C "$TN_SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo "")
-            [[ -n "$latest" && "$exact_tag" != "$latest" ]] && avail="true"
+            # The running release (the version marker), else the checkout.
             running="$(installed_source_ref)"
+            current="$running"
+            [[ -n "$current" ]] || current=$(detect_current_source_ref 2>/dev/null || echo "")
+            latest_source_ref >/dev/null 2>&1 || true
+            latest="$LATEST_SOURCE_REF"
+            moved="$SOURCE_TAG_MOVED"
+            [[ -n "$latest" && "$current" != "$latest" ]] && avail="true"
+            ;;
+        release)
+            running="$(installed_source_ref)"
+            current="$running"
+            latest=$(latest_release_ref 2>/dev/null || echo "")
+            [[ -n "$latest" && "$current" != "$latest" ]] && avail="true"
             ;;
         docker)
             local img
             img=$(detect_current_docker_image 2>/dev/null || echo "")
-            current="${img##*:}"
+            running="$(docker_current_tag "$img")"
+            current="${running:-$img}"
             latest=$(latest_docker_ref 2>/dev/null || echo "")
             [[ -n "$latest" && -n "$current" && "$current" != "$latest" ]] && avail="true"
-            running="${img##*/}"
             ;;
         *)
             current=$(detect_current_source_ref 2>/dev/null || echo "")
@@ -2086,7 +2343,7 @@ json_check() {
         mig="true"
     fi
 
-    json_emit "{\"install_method\":\"$(json_escape "$install_method")\",\"current_ref\":\"$(json_escape "$current")\",\"latest_ref\":\"$(json_escape "$latest")\",\"update_available\":${avail},\"pending\":${pending},\"storage_migration\":${mig}}"
+    json_emit "{\"install_method\":\"$(json_escape "$install_method")\",\"current_ref\":\"$(json_escape "$current")\",\"latest_ref\":\"$(json_escape "$latest")\",\"update_available\":${avail},\"pending\":${pending},\"storage_migration\":${mig},\"tag_moved\":${moved}}"
     # This object is the whole answer: the UI reads the last JSON line of a
     # check, so no done event may follow it.
     JSON_DONE_SENT=true
@@ -2101,172 +2358,63 @@ json_prepare() {
         json_event error "no ref supplied"; return 1
     fi
     case "$install_method" in
-        source) json_prepare_source "$ref" ;;
-        docker) json_prepare_docker "$ref" ;;
+        source)  json_prepare_source "$ref" ;;
+        release) json_prepare_release "$ref" ;;
+        docker)  json_prepare_docker "$ref" ;;
         *) json_event error "install method '${install_method}' cannot be updated"; return 1 ;;
     esac
 }
 
 json_prepare_source() {
-    local new_ref="$1"
+    local new_ref="$1" network cargo_features
     # Network and build features first: nothing is checked out or built for
     # a network that cannot be told (see prepare_source_build).
-    local network cargo_features
     if ! network="$(detect_network)" || ! cargo_features="$(tn_cargo_features_for "$network")"; then
         json_event error "cannot tell which network this node runs, so the build features are unknown; set NETWORK=testnet or NETWORK=mainnet on one line in .node-meta. Nothing was changed."
         return 1
     fi
-    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
-        json_event error "source directory not found at ${TN_SOURCE_DIR}"; return 1
-    fi
-    local current_ref
-    current_ref=$(detect_current_source_ref || echo "unknown")
+    binary_prepare source "$new_ref" "$network" || return 1
+    json_prepare_done "$new_ref"
+}
 
-    # Force-fetch tags before checkout -- same stale re-cut-tag hazard as the
-    # interactive path (see prepare_source_build); offline is tolerated.
-    # Network git and the build run with 9>&- (see update_lock).
-    git -C "$TN_SOURCE_DIR" fetch origin --tags --force 9>&- 2>/dev/null || true
-
-    json_event step "Checking out ${new_ref}"
-    if ! git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; then
-        if ! { git -C "$TN_SOURCE_DIR" fetch origin "$new_ref" 9>&- 2>/dev/null && \
-               git -C "$TN_SOURCE_DIR" checkout "$new_ref" 2>/dev/null; }; then
-            json_event error "could not check out '${new_ref}' -- branch or tag not found"
-            return 1
-        fi
-    fi
-    git -C "$TN_SOURCE_DIR" pull --ff-only 9>&- 2>/dev/null || true
-
-    # checkout/pull move the superproject only; sync submodules to the new ref
-    # or the build fails on files the stale submodule doesn't have (this is
-    # what broke v0.12.0-adiri source updates -- see tn_sync_submodules).
-    json_event step "Syncing git submodules"
-    if ! tn_sync_submodules "$TN_SOURCE_DIR"; then
-        json_event error "git submodule sync failed -- run: git -C ${TN_SOURCE_DIR} submodule update --init --recursive --force"
+json_prepare_release() {
+    local tag="$1" network
+    if ! network="$(detect_network)"; then
+        json_event error "cannot tell which network this node runs, so its releases are unknown; set NETWORK=testnet or NETWORK=mainnet on one line in .node-meta. Nothing was changed."
         return 1
     fi
-    json_event step "Submodules: $(git -C "$TN_SOURCE_DIR" submodule status 2>/dev/null | tr '\n' ' ')"
+    binary_prepare release "$tag" "$network" || return 1
+    json_prepare_done "$tag"
+}
 
-    # Make cargo findable under sudo's PATH (mirrors prepare_source_build).
-    local user_cargo_dir=""
-    [[ -n "${SUDO_USER:-}" ]] && [[ -d "/home/${SUDO_USER}/.cargo/bin" ]] \
-        && user_cargo_dir="/home/${SUDO_USER}/.cargo/bin"
-    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${user_cargo_dir}:${PATH}"
-    [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
-    [[ -n "$user_cargo_dir" ]] && [[ -f "/home/${SUDO_USER}/.cargo/env" ]] \
-        && source "/home/${SUDO_USER}/.cargo/env" 2>/dev/null || true
-    if ! command -v cargo >/dev/null 2>&1; then
-        json_event error "cargo not found in PATH -- install Rust on this host"; return 1
-    fi
-
-    local built="${TN_SOURCE_DIR}/target/release/telcoin-network"
-    local pre_build_hash=""
-    [[ -f "$built" ]] && pre_build_hash=$(sha256sum "$built" | awk '{print $1}')
-
-    local build_log
-    if ! build_log="$(build_log_file)"; then
-        json_event error "could not create a build log in ${TMPDIR:-/tmp}; nothing was built"
-        return 1
-    fi
-    json_event step "Building ${new_ref} (${cargo_features:-no features}) -- this can take 20-40 minutes; log: ${build_log}"
-    pushd "$TN_SOURCE_DIR" >/dev/null
-    # shellcheck disable=SC2086
-    if ! cargo build --release $cargo_features 9>&- >"$build_log" 2>&1; then
-        popd >/dev/null
-        json_event error "cargo build failed -- see ${build_log} on the host"
-        return 1
-    fi
-    popd >/dev/null
-
-    # Inspected only after cargo returned (see prepare_source_build).
-    _uc_built_binary_ok "$built" || { json_event error "build produced no regular file owned by the build account at ${built}"; return 1; }
-    if ! "$built" --version >/dev/null 2>&1; then
-        json_event error "built binary failed its --version check"; return 1
-    fi
-    local new_version binary_hash
-    new_version=$("$built" --version 2>/dev/null | head -1)
-    binary_hash=$(sha256sum "$built" | awk '{print $1}')
-    if [[ -n "$pre_build_hash" && "$pre_build_hash" == "$binary_hash" ]]; then
-        json_event step "Note: binary hash unchanged -- cargo decided no rebuild was needed for ${new_ref}"
-    fi
-
-    if ! write_pending_state <<EOF
-PHASE=build_complete
-INSTALL_METHOD=source
-OLD_REF=${current_ref}
-NEW_REF=${new_ref}
-NEW_VERSION=${new_version}
-BUILT_BINARY=${built}
-BUILT_HASH=${binary_hash}
-PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-EOF
-    then
-        json_event error "could not write pending state at $(pending_state_path)"
-        return 1
-    fi
+# json_prepare_done TAG -- the done event of a prepared source or release update.
+json_prepare_done() {
     # The UI cannot ask at apply time, so a one-way target is announced here.
-    storage_migration_begin "$(installed_source_ref)" "$new_ref"
-    json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"}"
+    storage_migration_begin "$(installed_source_ref)" "$1"
+    json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_ref\":\"$(json_escape "$1")\",\"new_version\":\"$(json_escape "$PREP_VERSION")\"}"
 }
 
 json_prepare_docker() {
-    local arg="$1"
-    local current_image
-    current_image=$(detect_current_docker_image) || {
-        json_event error "could not read current docker image from unit"; return 1; }
-    # A bare release tag is composed against this network's repository; a full
-    # reference must already be that repository by digest or by a release tag
-    # (tn_docker_image_allowed). Nothing is pulled otherwise.
-    local new_image net repo="" pull_log
-    net="$(tn_detect_network 2>/dev/null)" || net=""
-    if [[ "$arg" == *:* || "$arg" == */* || "$arg" == *@* ]]; then
-        new_image="$arg"
-    else
-        if declare -F tn_docker_repo_for >/dev/null 2>&1; then
-            repo="$(tn_docker_repo_for "$net" 2>/dev/null)" || repo=""
-        elif [[ "$net" == "testnet" ]]; then
-            repo="$GAR_IMAGE_BASE"
-        fi
-        if [[ -z "$repo" ]]; then
-            json_event error "no image repository is known for network '${net:-unknown}'; nothing pulled"; return 1
-        fi
-        new_image="${repo}:${arg}"
+    local arg="$1" net current cur_tag
+    if ! net="$(detect_network)"; then
+        json_event error "cannot tell which network this node runs, so its image repository is unknown; nothing pulled"; return 1
     fi
-    if ! validate_docker_image "$new_image" "$net"; then
-        json_event error "image refused: ${new_image} is not this network's repository by digest or by a release tag; nothing pulled"; return 1
+    current=$(detect_current_docker_image) || {
+        json_event error "could not read current docker image from the launch file"; return 1; }
+    # A release tag (alone or on this network's repository) resolves to its digest
+    # (the signed release's IMAGE_DIGEST); a digest reference must be this network's
+    # repository. Nothing else is pulled.
+    if ! docker_resolve_target "$arg" "$net"; then
+        json_event error "image refused: ${arg} is not a ${net} release tag or this network's image by digest; nothing pulled"; return 1
     fi
-
-    json_event step "Pulling ${new_image}"
-    # The pull log: a fresh root-only file, never a fixed name in /tmp.
-    if ! pull_log="$(build_log_file)"; then
-        json_event error "could not create a log file for the image pull"; return 1
-    fi
-    # 9>&-: the pull must not hold the update lock (see update_lock).
-    if ! docker pull "$new_image" 9>&- >"$pull_log" 2>&1; then
-        json_event error "image pull failed -- see ${pull_log} on the host"; return 1
-    fi
-    rm -f -- "$pull_log"
-
-    # Image ID of what we just pulled -- apply verifies the restarted
-    # container is actually running THIS image, not merely "something healthy".
-    local pulled_image_id
-    pulled_image_id=$(docker image inspect --format '{{.Id}}' "$new_image" 2>/dev/null || echo "")
-
-    if ! write_pending_state <<EOF
-PHASE=pull_complete
-INSTALL_METHOD=docker
-OLD_IMAGE=${current_image}
-NEW_IMAGE=${new_image}
-PULLED_IMAGE_ID=${pulled_image_id}
-PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-EOF
-    then
-        json_event error "could not write pending state at $(pending_state_path)"
-        return 1
+    cur_tag="$(docker_current_tag "$current")"
+    update_downgrade_check "$cur_tag" "$DOCKER_TARGET_TAG" || return 1
+    if ! docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG"; then
+        json_event error "the image ${DOCKER_TARGET_IMAGE} was not prepared (see the warning above)"; return 1
     fi
     # The UI cannot ask at apply time, so a one-way target is announced here.
-    storage_migration_begin "${current_image##*/}" "${new_image##*/}"
-    json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_image\":\"$(json_escape "$new_image")\"}"
+    storage_migration_begin "${cur_tag:-${current##*/}}" "${DOCKER_TARGET_TAG:-${DOCKER_TARGET_IMAGE##*/}}"
+    json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"prepare\",\"new_image\":\"$(json_escape "$DOCKER_TARGET_IMAGE")\",\"new_ref\":\"$(json_escape "$DOCKER_TARGET_TAG")\"}"
 }
 
 json_apply() {
@@ -2292,7 +2440,7 @@ json_apply() {
         json_event error "validator apply requires explicit confirmation (--yes)"; return 1
     fi
     case "$install_method" in
-        source) json_apply_source ;;
+        source|release) json_apply_source ;;
         docker) json_apply_docker ;;
         *) json_event error "install method '${install_method}' cannot be applied"; return 1 ;;
     esac
@@ -2311,6 +2459,10 @@ json_apply_source() {
     expected_hash="$(pending_field "$state" BUILT_HASH)"
     if [[ -z "$built" || ! -f "$built" ]]; then
         json_event error "prepared binary not found at ${built:-?}"; return 1
+    fi
+    # A prepared binary that changed since the prepare is never installed.
+    if [[ -z "$expected_hash" || "$(sha256sum "$built" | awk '{print $1}')" != "$expected_hash" ]]; then
+        json_event error "the prepared binary ${built} changed since the prepare; nothing was installed -- discard the pending update and prepare it again"; return 1
     fi
     local installed="${DEFAULT_INSTALL_DIR}/telcoin-network"
     if [[ ! -f "$installed" ]]; then
@@ -2382,9 +2534,10 @@ json_apply_source() {
     fi
     if [[ "$verify_ok" == "true" ]]; then
         clear_pending_state
-        # Record the now-running ref so the UI reports the installed binary's
+        tn_staged_cleanup "$built"
+        # Record the now-running release so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
-        write_source_version_marker "$DEFAULT_INSTALL_DIR" "$TN_SOURCE_DIR" "$new_ref"
+        record_installed_ref "$new_ref"
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"}"
         return 0
     fi
@@ -2414,6 +2567,7 @@ json_apply_source() {
     start_service
     if verify_health_after_restart; then
         clear_pending_state
+        tn_staged_cleanup "$built"
         json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":true,\"msg\":\"health check failed; rolled back to previous binary\"}"
     else
         json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"msg\":\"health check failed and rollback failed; inspect journalctl -u ${SERVICE_NAME}\"}"
@@ -2422,7 +2576,7 @@ json_apply_source() {
 }
 
 json_apply_docker() {
-    local state old_image new_image pulled_image_id
+    local state old_image new_image pulled_image_id old_ref new_ref
     if ! state="$(read_pending_state)"; then
         json_event error "the pending update cannot be read (see stderr) -- discard it and prepare again"
         return 1
@@ -2430,6 +2584,8 @@ json_apply_docker() {
     old_image="$(pending_field "$state" OLD_IMAGE)"
     new_image="$(pending_field "$state" NEW_IMAGE)"
     pulled_image_id="$(pending_field "$state" PULLED_IMAGE_ID)"
+    old_ref="$(pending_field "$state" OLD_REF || true)"
+    new_ref="$(pending_field "$state" NEW_REF || true)"
     if [[ -z "$old_image" || -z "$new_image" ]]; then
         json_event error "pending state is incomplete -- cannot apply"; return 1
     fi
@@ -2444,7 +2600,7 @@ json_apply_docker() {
     fi
     update_swap_precheck "$launch_file" "$old_image" || { json_event error "the launch file is not the current start script; nothing was changed"; return 1; }
     # Warn-only in --json mode (see apply_docker_update).
-    storage_migration_begin "${old_image##*/}" "${new_image##*/}" || return 1
+    storage_migration_begin "${old_ref:-${old_image##*/}}" "${new_ref:-${new_image##*/}}" || return 1
     backup_unit_file "$launch_file" || { json_event error "could not back up launch config"; return 1; }
 
     update_epoch_wait || { json_event error "the committee quorum check refused the stop; nothing was changed on the running node"; return 1; }
@@ -2478,6 +2634,7 @@ json_apply_docker() {
     fi
     if [[ "$verify_ok" == "true" ]]; then
         clear_pending_state
+        docker_record_meta "$new_image" "$new_ref"
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_image\":\"$(json_escape "$new_image")\"}"
         return 0
     fi
@@ -2509,7 +2666,7 @@ json_apply_docker() {
 
 json_discard() {
     if [[ -f "$(pending_state_path)" ]]; then
-        clear_pending_state
+        discard_pending
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"discard\",\"msg\":\"pending update cleared\"}"
     else
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"discard\",\"msg\":\"no pending update to discard\"}"
@@ -2608,7 +2765,7 @@ main() {
                 # starting with "--" is the next flag, not a value; any other
                 # word starting with "-" is refused as a ref.
                 if [[ $# -lt 2 || "$2" == --* ]]; then
-                    update_arg_error "--ref needs a value: a release tag, branch, commit or image tag."
+                    update_arg_error "--ref needs a value: a release tag (or, on a Docker install, the network's image by digest)."
                     exit 1
                 fi
                 if refusal="$(update_ref_refusal "$2")"; then
@@ -2620,6 +2777,8 @@ main() {
             --yes)       ASSUME_YES=true; shift ;;
             --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
             --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
+            --allow-dirty) ALLOW_DIRTY=true; shift ;;
+            --allow-downgrade) ALLOW_DOWNGRADE=true; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule.
                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
@@ -2636,6 +2795,13 @@ main() {
     # in human mode; nothing in --json mode, whose stdout stays pure JSON.
     if [[ -n "$LEGACY_ROLE_FLAG" && "$JSON_MODE" != "true" ]]; then
         print_info "Ignoring ${LEGACY_ROLE_FLAG}: the node's role is decided on-chain, not by a flag." >&2
+    fi
+
+    # Discarding local source changes and going back to an older release are
+    # decisions for an operator at the terminal, never for the UI.
+    if [[ "$JSON_MODE" == "true" && ( "$ALLOW_DIRTY" == "true" || "$ALLOW_DOWNGRADE" == "true" ) ]]; then
+        update_arg_error "--allow-dirty and --allow-downgrade are taken in an interactive run only."
+        exit 1
     fi
 
     # Non-interactive JSON mode short-circuits the whole interactive flow.
@@ -2661,12 +2827,12 @@ main() {
             existing_update_refusal
             exit 1
             ;;
-        source|docker)
+        source|release|docker)
             ;;
         *)
             print_error "Install method is unknown -- cannot proceed safely."
             print_info "Re-run setup-node.sh to rewrite .node-meta, or supply"
-            print_info "INSTALL_METHOD={source|docker} manually in $(node_meta_path || echo "$(tn_resolve_config_dir)/.node-meta")"
+            print_info "INSTALL_METHOD={source|release|docker} manually in $(node_meta_path || echo "$(tn_resolve_config_dir)/.node-meta")"
             exit 1
             ;;
     esac
@@ -2686,7 +2852,7 @@ main() {
             pstate="$(read_pending_state)" || pstate="(cannot be read; see above)"
             show_pending_summary "$pstate"
             if confirm "Discard this pending update?"; then
-                clear_pending_state
+                discard_pending
                 print_ok "Pending state cleared."
             else
                 print_info "Kept."
@@ -2724,14 +2890,14 @@ main() {
         read -r -p "  Enter choice [1-3]: " choice
         case "$choice" in
             1)
-                if [[ "$install_method" == "source" ]]; then
-                    apply_source_update
-                else
+                if [[ "$install_method" == "docker" ]]; then
                     apply_docker_update
+                else
+                    apply_source_update
                 fi
                 ;;
             2)
-                clear_pending_state
+                discard_pending
                 print_info "Pending state cleared."
                 echo ""
                 # Fall through to the no-pending-state flow below
@@ -2747,29 +2913,29 @@ main() {
     # No pending state (or pending state was just discarded) -> show what is
     # available, let the operator pick a version, then ask prepare vs apply.
     local target=""
-    if [[ "$install_method" == "source" ]]; then
-        target=$(pick_source_version "$(detect_network)") || { print_info "No update prepared."; exit 0; }
-    else
-        target=$(pick_docker_version) || { print_info "No update prepared."; exit 0; }
-    fi
+    case "$install_method" in
+        source)  target=$(pick_source_version "$(detect_network)") || { print_info "No update prepared."; exit 0; } ;;
+        release) target=$(pick_release_version) || { print_info "No update prepared."; exit 0; } ;;
+        *)       target=$(pick_docker_version) || { print_info "No update prepared."; exit 0; } ;;
+    esac
 
     local action
     action=$(pick_action)
     case "$action" in
         prepare)
-            if [[ "$install_method" == "source" ]]; then
-                prepare_source_build "$target"
-            else
-                prepare_docker_update "$target"
-            fi
+            case "$install_method" in
+                source)  prepare_source_build "$target" ;;
+                release) prepare_release_update "$target" ;;
+                *)       prepare_docker_update "$target" ;;
+            esac
             print_info "Run this script again when you are ready to apply."
             ;;
         prepare_and_apply)
-            if [[ "$install_method" == "source" ]]; then
-                prepare_source_build "$target" && apply_source_update
-            else
-                prepare_docker_update "$target" && apply_docker_update
-            fi
+            case "$install_method" in
+                source)  prepare_source_build "$target" && apply_source_update ;;
+                release) prepare_release_update "$target" && apply_source_update ;;
+                *)       prepare_docker_update "$target" && apply_docker_update ;;
+            esac
             ;;
         cancel) print_info "Cancelled." ;;
     esac
