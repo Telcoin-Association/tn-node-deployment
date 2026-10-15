@@ -516,21 +516,30 @@ report_orphaned_groups() {
 # REMOVE NODE MANAGER UI
 # =============================================================================
 
-# Uninstall the Telcoin Node Manager UI (service, app, helper + update engine,
-# sudoers, and the service user). Safe to call when the UI is absent / partial.
+# Uninstall the Telcoin Node Manager UI (service, app, venv, helper + update
+# engine, sudoers, access token, state dir, and the service user). The sudoers
+# file goes first, so the UI account loses its grants before anything else
+# changes. The helper's audit log (/var/log/telcoin-ui) stays as a record. Safe
+# to call when the UI is absent / partial.
 remove_ui_components() {
     print_step "Removing Telcoin Node Manager UI..."
+    rm -f /etc/sudoers.d/telcoin-ui
     systemctl stop telcoin-ui 2>/dev/null || true
     systemctl disable telcoin-ui 2>/dev/null || true
     rm -f /etc/systemd/system/telcoin-ui.service
     systemctl daemon-reload 2>/dev/null || true
-    rm -rf /opt/telcoin-ui /opt/telcoin-ui-update
-    rm -f /usr/local/sbin/telcoin-ui-helper
-    rm -f /etc/sudoers.d/telcoin-ui
+    rm -rf /opt/telcoin-ui /opt/telcoin-ui-venv /opt/telcoin-ui-update
+    # Temp trees an interrupted install-ui.sh run can leave beside them.
+    rm -rf /opt/.telcoin-ui.* /opt/.telcoin-ui-venv.* /opt/.telcoin-ui-update.*
+    rm -f /usr/local/sbin/telcoin-ui-helper /usr/local/sbin/telcoin-ui-helper.new
+    rm -rf /etc/telcoin-ui /var/lib/telcoin-ui
     if id telcoin-ui &>/dev/null; then
         userdel telcoin-ui 2>/dev/null || true
     fi
     print_ok "Telcoin Node Manager UI removed"
+    if [[ -d /var/log/telcoin-ui ]]; then
+        print_info "The UI audit log stays in /var/log/telcoin-ui (remove it by hand when no longer needed)."
+    fi
 }
 
 # Interactive: offer to also remove the web UI. $1 is the unit base name just
