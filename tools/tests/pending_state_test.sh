@@ -264,7 +264,7 @@ TN_ROOT_PREFIX="$FX"
 P="$(pending_state_path)"
 printf 'exec docker run --rm us-docker.pkg.dev/a/b:v0.16.0-adiri telcoin node\n' > "$FX/launch"
 LAUNCH_BEFORE="$(cat "$FX/launch")"
-# Written raw, as an attacker or a hand edit would, not through write_pending_state.
+# Written raw (a hand edit, say), not through write_pending_state.
 printf 'PHASE=pull_complete\nINSTALL_METHOD=docker\nOLD_IMAGE=us-docker.pkg.dev/a/b:v0.16.0-adiri\nNEW_IMAGE=x@{[MARKER]}\nPULLED_IMAGE_ID=\n' > "$P"
 chmod 0600 "$P"
 docker_launch_file() { printf '%s\n' "$FX/launch"; }
