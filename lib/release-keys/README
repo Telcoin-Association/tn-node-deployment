@@ -2,9 +2,10 @@ Release signing keys
 ====================
 
 This directory holds the OpenPGP public keys whose signatures the node scripts
-accept on a telcoin-network release. setup-node.sh (--install-method release,
-and Docker installs given a release tag) and update-node.sh download a
-release's SHA256SUMS and SHA256SUMS.asc and run
+accept on a telcoin-network release and on its source tag. setup-node.sh
+(--install-method release, and Docker installs given a release tag),
+update-node.sh and edit-config.sh (a Docker image given as a release tag)
+download a release's SHA256SUMS and SHA256SUMS.asc and run
 
     gpgv --status-fd 1 --keyring <every *.asc here, dearmored> SHA256SUMS.asc SHA256SUMS
 
@@ -13,7 +14,16 @@ VALIDSIG) whose primary key fingerprint belongs to one of these files, and no
 line reports BADSIG, EXPKEYSIG, REVKEYSIG, NO_PUBKEY, ERRSIG or EXPSIG. Then
 every file used from the release (the tarball, IMAGE_DIGEST) must match its
 SHA256SUMS line, and the chain-config lines must carry the hashes these scripts
-pin. Nothing from a release that fails a check is installed or run.
+pin. IMAGE_DIGEST must name an image repository the scripts accept for the
+network (on testnet the Artifact Registry adiri repository or
+ghcr.io/telcoin-association/telcoin-network). Nothing from a release that fails
+a check is installed or run.
+
+Source builds check the release tag with the same keys: git verify-tag runs in
+a throwaway GnuPG home that holds them. A bad, expired or revoked tag signature
+refuses the build on every network. A tag that cannot be checked (no key here,
+gpg missing, an unsigned tag, or a signer whose key is not here) refuses the
+build on mainnet and builds with a warning on testnet.
 
 Format
 ------
@@ -45,4 +55,11 @@ script release that carries the key is installed. A release whose
 SHA256SUMS.asc also carries a signature by a key that is not here is refused
 as well (NO_PUBKEY): add every signer's key before that release is installed.
 
-While this directory holds no *.asc file, every release download is refused.
+While this directory holds no *.asc file, no release can be verified:
+--install-method release, release updates and every mainnet image are
+refused, and so are mainnet source builds. On testnet, a Docker install,
+update or image change given a release tag then uses the digest the registry
+serves for that tag, with a warning that no signed release confirms it (as it
+does for a release that publishes no signed files), and a source build goes
+ahead with a warning. A release whose files are published but fail a check is
+never replaced by the registry's answer.
