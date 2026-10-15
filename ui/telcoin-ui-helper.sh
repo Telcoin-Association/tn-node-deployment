@@ -97,7 +97,7 @@ set -euo pipefail
 # Printed by `helper-version`. ui/server.py 1.9.0 and later need 2: node
 # subcommands without the role argument, rpc-enable with a dashboard move, and
 # setup reading TN_SETUP_RPC_DOMAIN.
-HELPER_API=2
+HELPER_API=3
 
 JAEGER_NAME="jaeger"
 JAEGER_IMAGE="jaegertracing/all-in-one:latest"

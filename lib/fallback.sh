@@ -36,7 +36,7 @@
 _TN_FALLBACK_SH=1
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly FALLBACK_VERSION="1.0.3"
+readonly FALLBACK_VERSION="1.1.0"
 
 # Root prepended to every absolute probe path. Empty in production; a temp dir
 # under test. `:=` leaves a caller-provided value (the test harness) untouched.

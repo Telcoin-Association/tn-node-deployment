@@ -75,7 +75,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "1.9.1"
+UI_VERSION = "2.0.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -505,7 +505,7 @@ def read_node_env():
 # older helper has no helper-version subcommand, and an older sudoers whitelist
 # has no line for it, so either one fails the call and the page asks the operator
 # to re-run install-ui.sh.
-HELPER_API_REQUIRED = 2
+HELPER_API_REQUIRED = 3
 _helper_cache = {"expires": 0.0, "data": None}
 _HELPER_TTL = 60.0
 

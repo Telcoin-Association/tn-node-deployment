@@ -13,7 +13,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.9"
+readonly SCRIPT_VERSION="2.0.0"
 
 # Root prepended to the systemd unit directory and to the host files removed
 # beside the node (unit backups and drop-ins, start scripts, node.env, backups,

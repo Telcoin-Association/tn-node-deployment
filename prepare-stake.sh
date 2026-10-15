@@ -76,7 +76,7 @@ if [[ -n "$_tn_old" ]]; then
 fi
 unset _tn_fn _tn_old
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="2.0.0"
 
 # lib/common.sh turns on errexit. Every step here checks its own result and
 # says what went wrong, so errexit stays off; nounset and pipefail stay on.

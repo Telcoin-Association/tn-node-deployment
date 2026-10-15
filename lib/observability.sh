@@ -18,7 +18,7 @@
 # Version (tracked by update-scripts.sh). Bump when observability/config.alloy or the
 # lib/wgvpn bundle changes too, so the updater pulls the testnet-addons bundle alongside.
 # Plain (not readonly) so re-sourcing common.sh can't trip on a readonly redefinition.
-OBSERVABILITY_VERSION="1.0.2"
+OBSERVABILITY_VERSION="2.0.0"
 
 # Resolve the checked-in canonical config relative to this lib dir.
 __OBS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"

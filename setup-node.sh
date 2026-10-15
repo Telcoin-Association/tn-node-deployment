@@ -166,7 +166,7 @@ if [[ -n "$_tn_old" ]]; then
 fi
 unset _tn_fn _tn_old
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="2.0.0"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).

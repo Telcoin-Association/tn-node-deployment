@@ -37,7 +37,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="2.0.0"
 readonly WGVPN_DIR="${SCRIPT_DIR}/lib/wgvpn"
 # The maintainer key directory (KEYS + <name>.pub files). Not readonly: the fixture
 # tests point it at a scratch copy.

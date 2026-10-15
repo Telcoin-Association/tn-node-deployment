@@ -236,7 +236,7 @@ def external_nodes(slot="observer"):
 
 # Helper replies by subcommand: (rc, stdout, stderr).
 HELPER_REPLIES = {
-    "helper-version": (0, "2", ""),
+    "helper-version": (0, "3", ""),
     "meta-cat": (0, "NODE_TYPE=observer\nDATA_DIR=/var/lib/telcoin\n"
                     "PUBLIC_RPC_DOMAIN=node7.example.com\n", ""),
     "caddy-status": (0, json.dumps({"installed": True, "running": True, "enabled": True,
@@ -1490,7 +1490,7 @@ class NodesAndStatusTest(ServerTestCase):
         self.nodes = scripts_nodes("validator", role_source="local",
                                    role_checked_at=1790000000, role_address="0x" + "ab" * 20)
         data = self.nodes_json()
-        self.assertEqual(data["helper"], {"ok": True, "api": 2, "required": 2, "error": ""})
+        self.assertEqual(data["helper"], {"ok": True, "api": 3, "required": 3, "error": ""})
         self.assertEqual(data["role_source"], "local")
         self.assertEqual(data["role_checked_at"], 1790000000)
         self.assertEqual(data["role_address"], "0x" + "ab" * 20)
@@ -1525,9 +1525,9 @@ class NodesAndStatusTest(ServerTestCase):
         server._helper_cache.update({"expires": 0.0, "data": None})
         self.helper_replies["helper-version"] = (1, "", "sudo: a password is required")
         bad = server.helper_status()
-        self.assertEqual(bad, {"ok": False, "api": None, "required": 2,
+        self.assertEqual(bad, {"ok": False, "api": None, "required": 3,
                                "error": "sudo: a password is required"})
-        self.helper_replies["helper-version"] = (0, "2\n", "")
+        self.helper_replies["helper-version"] = (0, "3\n", "")
         self.assertEqual(server.helper_status(), bad, "a failed probe is cached too")
         self.assertEqual(len(self.helper_calls()), 2,
                          "a denied sudo is not repeated on every poll")
@@ -1546,9 +1546,9 @@ class NodesAndStatusTest(ServerTestCase):
         self.assertEqual((st["ok"], st["api"]), (False, None))
 
     def test_helper_status_newer_api(self):
-        self.helper_replies["helper-version"] = (0, "3", "")
+        self.helper_replies["helper-version"] = (0, "4", "")
         st = server.helper_status()
-        self.assertEqual(st, {"ok": True, "api": 3, "required": 2, "error": ""})
+        self.assertEqual(st, {"ok": True, "api": 4, "required": 3, "error": ""})
 
     def test_rpc_status_meta_domain_and_pass_through(self):
         full = {"installed": True, "running": True, "enabled": True,

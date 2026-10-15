@@ -133,7 +133,7 @@ die() {
     exit 1
 }
 
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="2.0.0"
 # basic_auth (the dashboard block) and heredocs (the RPC block page) need Caddy 2.8.0.
 readonly CADDY_MIN_VERSION="2.8.0"
 # Timestamped Caddyfile backups kept by caddy_prune_backups.

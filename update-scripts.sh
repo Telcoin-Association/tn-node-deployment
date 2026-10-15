@@ -35,7 +35,7 @@ if [ -r "${SCRIPT_DIR}/lib/fallback.sh" ]; then
     source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 fi
 
-readonly SCRIPT_VERSION="1.1.72"
+readonly SCRIPT_VERSION="2.0.0"
 readonly TN_REPO_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment"
 # main serves only the RELEASE pointer and the connectivity probe; every release
 # file is fetched from the tag RELEASE names.
@@ -90,6 +90,8 @@ declare -a SCRIPTS=(
     "setup-vpn.sh:setup-vpn.sh:SCRIPT_VERSION"
     "setup-observability.sh:setup-observability.sh:SCRIPT_VERSION"
     "ui/server.py:ui/server.py:UI_VERSION"
+    "lib/allowed_signers:lib/allowed_signers:NONE"
+    "lib/release-keys/README:lib/release-keys/README:NONE"
 )
 
 # The web UI is shipped as a bundle gated on ui/server.py's UI_VERSION. When that
@@ -121,6 +123,7 @@ declare -a TESTNET_ADDONS_BUNDLE=(
     "lib/wgvpn/peers/ssh/umair.pub:lib/wgvpn/peers/ssh/umair.pub"
     "lib/wgvpn/peers/ssh/xerxes.pub:lib/wgvpn/peers/ssh/xerxes.pub"
     "lib/wgvpn/peers/ssh/README:lib/wgvpn/peers/ssh/README"
+    "lib/wgvpn/peers/ssh/KEYS:lib/wgvpn/peers/ssh/KEYS:NONE"
 )
 # NOTE: this list MUST name every maintainer key in lib/wgvpn/peers/ssh/*.pub. The
 # updater fetches files by explicit path (it cannot glob the remote), so a key omitted

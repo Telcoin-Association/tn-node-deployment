@@ -302,7 +302,7 @@ resolve() {
 
 # ---- helper-version --------------------------------------------------------------
 fixture none
-check "helper-version prints 2" "2" "$( (set -euo pipefail; main helper-version) 2>&1 )"
+check "helper-version prints 3" "3" "$( (set -euo pipefail; main helper-version) 2>&1 )"
 refused "an unknown subcommand is refused" bogus-subcommand
 
 # ---- The 14 node subcommands: the old role argument changes nothing ------------

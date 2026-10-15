@@ -112,7 +112,7 @@ if [[ -n "$_tn_old" ]]; then
 fi
 unset _tn_fn _tn_old
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="2.0.0"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
