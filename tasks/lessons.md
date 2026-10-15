@@ -230,3 +230,86 @@ only in the orchestrator's head, so a dead agent took its context with it.
   v0.16.0-adiri branch had to be rewritten with `git filter-branch --msg-filter` and force-pushed to
   drop the `Co-Authored-By: Claude …` trailer before the PR could be opened. Commit messages end after
   the body; PR bodies carry no "Generated with" footer.
+
+## Mainnet hardening round (2026-10-15)
+
+### bash 3.2: a `case` pattern's `)` inside `$( )` fails only when the line runs
+
+**Symptom:** a function that passed `bash -n` under bash 3.2 and `tools/check-bash32.sh`
+failed under 3.2 the first time it ran, with ``syntax error near unexpected token `newline'``
+on a line that read fine.
+
+**Cause:** bash 3.2 finds the end of a `$( ... )` by counting parentheses instead of parsing
+its body, so the `)` of a `case` pattern such as `x)` closes the substitution early. The body is
+parsed only when the line executes: `bash -n` never sees the error, and the lint has no rule
+for it.
+
+**Rule:** inside `$( )`, never write a `case` with bare `pat)` patterns. Move the `case` into a
+function and call the function in the substitution, or write each pattern with its optional
+leading parenthesis, `(pat)`. Run new `$( )` code under `bash:3.2` itself, not only `bash -n`.
+
+### A test stub on `PATH` calls the tool it wraps by absolute path
+
+**Symptom:** a fixture test spawned about 70,000 processes on the host before it was killed.
+
+**Cause:** the test put a directory of wrapper stubs first on `PATH`, and the `env` stub ran
+the real command through `env`. That `env` resolved through `PATH` to the stub itself, which
+called itself again without end.
+
+**Rule:** a stub that wraps a tool calls the real one by absolute path, resolved before the
+stub directory goes on `PATH` (`real_env="$(command -v env)"` first, then prepend the stub
+dir). Never call the wrapped tool by its bare name from inside the stub.
+
+### Harness counters do not survive a `( ... )` subshell
+
+**Symptom:** a refusal check failed and printed its `FAIL` line, yet the test file's totals
+said 0 failed and it exited 0, so the run passed.
+
+**Cause:** `check` counts in `CHECKS` and `FAILS`, variables of the shell that runs it. A check
+inside `( export VAR=1; check ... )` runs in a subshell, and its counts vanish when the
+subshell exits. The same holds inside `$( )` and in the body of a `... | while` loop.
+
+**Rule:** call `check` only in the test's own shell. To give one call its own environment,
+`export` the variable before the call and `unset` it after, or capture the output and exit
+code in the subshell and run `check` on them outside it.
+
+### A check pinned to a line breaks when a merge reflows that line
+
+**Symptom:** after a merge, several verifier checks failed although the behaviour they guarded
+had not changed. The merge had only rewrapped or moved the lines they matched.
+
+**Cause:** the checks matched a whole source line with a regex, or read a `file:LINE`
+position, so they tested the layout of the code rather than what it does.
+
+**Rule:** check behaviour: run the function against a fixture and compare its output, its exit
+code or the files it wrote. When a text check is the only option, match the smallest token that
+carries the meaning, never a line number or a whole line.
+
+### Nested heredocs need distinct delimiters
+
+**Symptom:** a test that wrote a fixture script through `cat > fx.sh <<'EOF'` got a fixture
+cut short, and the rest of the fixture's text ran as commands of the test itself.
+
+**Cause:** the fixture held a heredoc of its own that ended in `EOF`. The first line that is
+exactly the delimiter ends the outer heredoc, wherever it sits, so the inner `EOF` closed the
+outer document early.
+
+**Rule:** give every heredoc level its own delimiter (the tests use names such as `FIX`,
+`STUB`, `SHIM` and `DRV`), and never reuse `EOF` inside a heredoc body. When a fixture looks
+truncated, look for its delimiter inside the body first.
+
+### A reader that gains a failure code needs every caller swept
+
+**Symptom:** once `meta_get` returned 2 for a key that appears twice in `.node-meta`, a review
+found callers across most scripts and the library that carried on with a default instead: the
+default data dir, RPC port 8545, the `binary` install method, testnet as the network.
+
+**Cause:** those callers read `v="$(meta_get KEY 2>/dev/null)" || v=default` (or `|| true`).
+They were written when the only failure was a missing key, so they turned the new "duplicated
+key" result into the default without a word.
+
+**Rule:** when a helper gains a return code, grep every caller and decide for each one. A value
+that picks a path, a network, a binary, a port or an address fails closed with a clear message
+(`addon_meta_get` and `rm_meta_get` stop on a duplicate). A read used only for display may fall
+back but says so (check-node's `meta_flag` reports the value as unknown with a warning). Never
+hide a new failure mode behind `2>/dev/null`.
