@@ -2,8 +2,9 @@
 # tools/tests/source_ref_test.sh -- source builds and binary updates take release
 # tags only. tn_source_checkout_tag refuses branches, commit ids and other networks'
 # tags before git runs, a tag re-pointed upstream, a dirty tree without --allow-dirty
-# (testnet only), and on mainnet a tag whose signature cannot be checked; it fetches a
-# tag origin added. update-node.sh refuses a branch or commit ref and a downgrade
+# (testnet only), and on mainnet a tag whose signature cannot be checked (a signer
+# whose key is not shipped among them: _tn_tag_sig_check rc 4 naming its key id, so
+# testnet builds it with a warning); it fetches a tag origin added. update-node.sh refuses a branch or commit ref and a downgrade
 # (with "downgrade" and "storage_downgrade" in the --json done event) before any git.
 # tn_rustup_ensure never runs a rustup-init whose sha256 is not the pinned one (curl
 # shim). tn_source_build runs rustup and cargo through tn_as_build_user with an empty
@@ -377,12 +378,23 @@ fi
 K --armor --export "$FA" > "$T/keys/a.asc"
 GNUPGHOME="$GH" G -C "$W" -c gpg.program=gpg -c "user.signingkey=$FA" tag -s v1.1.0 -m signed-a 2>/dev/null
 GNUPGHOME="$GH" G -C "$W" -c gpg.program=gpg -c "user.signingkey=$FB" tag -s v1.2.0 -m signed-b 2>/dev/null
-G -C "$W" push -q origin refs/tags/v1.1.0 refs/tags/v1.2.0 2>/dev/null
+GNUPGHOME="$GH" G -C "$W" -c gpg.program=gpg -c "user.signingkey=$FB" tag -s v0.21.0-adiri -m signed-b 2>/dev/null
+G -C "$W" push -q origin refs/tags/v1.1.0 refs/tags/v1.2.0 refs/tags/v0.21.0-adiri 2>/dev/null
+IDB="${FB#????????????????????????}"
 H3="$(head_of)"
 co "mainnet tag signed by a release key: checked out" mainnet v1.1.0 false 0 "$(commit_of v1.1.0)"
 check "good signature reported" yes "$(has "$(cat "$T/co.out")" 'good signature')"
 H4="$(head_of)"
 co "mainnet tag signed by another key: refused" mainnet v1.2.0 false 1 "$H4"
+check "mainnet, another key: cannot be verified, the key named" yes \
+    "$(has "$(cat "$T/co.out")" "Tag v1.2.0 cannot be verified: the tag is signed by key ${IDB}, which is not in")"
+rc=0; out="$(_tn_tag_sig_check "$SRC" v1.2.0)" || rc=$?
+check "tag by a key that is not shipped: rc 4 (cannot be told), its key id named" \
+    "4 the tag is signed by key ${IDB}, which is not in ${T}/keys" "$rc $out"
+co "testnet tag signed by a key that is not shipped: checked out with a warning" testnet v0.21.0-adiri false 0 "$(commit_of v0.21.0-adiri)"
+check "testnet, another key: the warning names the key" yes \
+    "$(has "$(cat "$T/co.out")" "Tag v0.21.0-adiri is not verified (the tag is signed by key ${IDB}, which is not in")"
+H4="$(head_of)"
 co "mainnet unsigned tag with a release key present: refused" mainnet v1.0.0 false 1 "$H4"
 check "signature checks leave nothing in staging" yes "$(stg_empty)"
 : "$H0$H3"

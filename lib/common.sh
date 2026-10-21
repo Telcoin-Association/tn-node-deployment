@@ -6461,20 +6461,19 @@ _tn_release_keyring() {
     return 0
 }
 
-# _tn_release_sig_ok DIR -- gpgv over DIR/SHA256SUMS with DIR/SHA256SUMS.asc and
-# DIR/keyring.gpg (the keys of lib/release-keys), read from the status lines.
-# rc 0 when some GOODSIG is followed by a VALIDSIG whose primary key fingerprint
-# (its last field) is in DIR/allow, and no line says BADSIG (by any key),
-# EXPKEYSIG, REVKEYSIG or EXPSIG. A signature by a key that is not in the
-# keyring (NO_PUBKEY, or ERRSIG with code 9) refuses nothing by itself: such a
-# co-signer is one whose key has not shipped here yet. Any other ERRSIG refuses.
-# Prints one line, "<verdict> [<key id>...]": GOOD on rc 0; on rc 1 the refusing
-# keyword, or NOSIG when no listed key made a good signature. The key ids are
-# those of the signatures by keys not in the keyring, each once.
-_tn_release_sig_ok() {
-    local d="$1" out tag kw rest fpr id code x good=0 ok=0 bad="" unknown=""
-    out="$(GNUPGHOME="$d/gnupg" gpgv --status-fd 1 --keyring "$d/keyring.gpg" \
-        "$d/SHA256SUMS.asc" "$d/SHA256SUMS" 2>/dev/null)" || true
+# _tn_gpg_status_verdict ALLOW -- judge the gpg status lines on stdin (gpgv
+# --status-fd, or git verify-tag --raw) against ALLOW, a file of allowlisted
+# primary key fingerprints, one per line. rc 0 when some GOODSIG is followed by
+# a VALIDSIG whose primary key fingerprint (its last field) is in ALLOW, and no
+# line says BADSIG (by any key), EXPKEYSIG, REVKEYSIG or EXPSIG. A signature by
+# a key that is not in the keyring (NO_PUBKEY, or ERRSIG with code 9) refuses
+# nothing by itself: such a signer is one whose key has not shipped here yet.
+# Any other ERRSIG refuses. Prints one line, "<verdict> [<key id>...]": GOOD on
+# rc 0; on rc 1 the refusing keyword, or NOSIG when no listed key made a good
+# signature. The key ids are those of the signatures by keys not in the
+# keyring, each once. The one parser for release files and release tags.
+_tn_gpg_status_verdict() {
+    local allow="$1" tag kw rest fpr id code x good=0 ok=0 bad="" unknown=""
     while read -r tag kw rest; do
         [[ "$tag" == "[GNUPG:]" ]] || continue
         case "$kw" in
@@ -6497,13 +6496,13 @@ _tn_release_sig_ok() {
             GOODSIG) good=1 ;;
             VALIDSIG)
                 fpr="${rest##* }"
-                if [[ "$good" -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]] && grep -qxF -- "$fpr" "$d/allow"; then
+                if [[ "$good" -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]] && grep -qxF -- "$fpr" "$allow"; then
                     ok=1
                 fi
                 good=0
                 ;;
         esac
-    done <<< "$out"
+    done
     if [[ -n "$bad" ]]; then
         printf '%s%s\n' "$bad" "${unknown:+ ${unknown}}"
         return 1
@@ -6514,6 +6513,16 @@ _tn_release_sig_ok() {
     fi
     printf 'GOOD%s\n' "${unknown:+ ${unknown}}"
     return 0
+}
+
+# _tn_release_sig_ok DIR -- gpgv over DIR/SHA256SUMS with DIR/SHA256SUMS.asc and
+# DIR/keyring.gpg (the keys of lib/release-keys), judged by
+# _tn_gpg_status_verdict against DIR/allow: its rc and its one line.
+_tn_release_sig_ok() {
+    local d="$1" out
+    out="$(GNUPGHOME="$d/gnupg" gpgv --status-fd 1 --keyring "$d/keyring.gpg" \
+        "$d/SHA256SUMS.asc" "$d/SHA256SUMS" 2>/dev/null)" || true
+    _tn_gpg_status_verdict "$d/allow" <<< "$out"
 }
 
 # _tn_release_sums_names FILE TAG NETWORK -- rc 0 when FILE (SHA256SUMS) has only
@@ -7248,12 +7257,14 @@ tn_docker_holds_digest() {
 
 # _tn_tag_sig_check DIR TAG -- check the signature on release tag TAG in the git
 # checkout DIR against the keys in lib/release-keys (git verify-tag with gpg, in
-# a throwaway GNUPGHOME). rc 0: a good signature by a listed primary key; 1: a
-# bad, expired or revoked signature; 4: it cannot be told (no gpg, no key file,
-# an unsigned or lightweight tag, a key that is not listed). The reason is
-# printed on stdout when rc is not 0.
+# a throwaway GNUPGHOME), judged by _tn_gpg_status_verdict as release files are.
+# rc 0: a good signature by a listed primary key; 1: a bad, expired or revoked
+# signature, or an ERRSIG other than a missing key; 4: it cannot be told (no
+# gpg, no key file, an unsigned or lightweight tag, a signer whose key is not
+# here: NO_PUBKEY, or ERRSIG for a missing key, named by its key id). The
+# reason is printed on stdout when rc is not 0.
 _tn_tag_sig_check() {
-    local dir="${1:-}" tag="${2:-}" parent tmp k out t kw rest fpr good=0 ok=0 bad="" unknown=""
+    local dir="${1:-}" tag="${2:-}" parent tmp k out verdict kw ids="" vrc=0
     if ! command -v gpg >/dev/null 2>&1; then
         printf 'gpg is not installed\n'
         return 4
@@ -7275,31 +7286,17 @@ _tn_tag_sig_check() {
     done
     out="$(GNUPGHOME="$tmp/gnupg" git -C "$dir" -c gpg.format=openpgp -c gpg.program=gpg \
         verify-tag --raw "refs/tags/${tag}" 2>&1 >/dev/null 9>&-)" || true
-    while read -r t kw rest; do
-        [[ "$t" == "[GNUPG:]" ]] || continue
-        case "$kw" in
-            BADSIG|EXPKEYSIG|REVKEYSIG|EXPSIG|ERRSIG) [[ -n "$bad" ]] || bad="$kw" ;;
-            NO_PUBKEY) unknown="$kw" ;;
-            GOODSIG) good=1 ;;
-            VALIDSIG)
-                fpr="${rest##* }"
-                if [[ "$good" -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]] && grep -qxF -- "$fpr" "$tmp/allow"; then
-                    ok=1
-                fi
-                good=0
-                ;;
-        esac
-    done <<< "$out"
+    verdict="$(_tn_gpg_status_verdict "$tmp/allow" <<< "$out")" || vrc=$?
     _tn_release_cleanup "$tmp"
-    if [[ -n "$bad" ]]; then
-        printf 'the tag signature is not good (%s)\n' "$bad"
+    [[ $vrc -ne 0 ]] || return 0
+    kw="${verdict%% *}"
+    [[ "$verdict" != *" "* ]] || ids="${verdict#* }"
+    if [[ "$kw" != NOSIG ]]; then
+        printf 'the tag signature is not good (%s)\n' "${kw:-no verdict}"
         return 1
     fi
-    if [[ "$ok" -eq 1 ]]; then
-        return 0
-    fi
-    if [[ -n "$unknown" ]]; then
-        printf 'the tag is signed by a key that is not in %s\n' "$(_tn_release_keys_dir)"
+    if [[ -n "$ids" ]]; then
+        printf 'the tag is signed by key %s, which is not in %s\n' "$ids" "$(_tn_release_keys_dir)"
     else
         printf 'the tag carries no signature by a release key\n'
     fi

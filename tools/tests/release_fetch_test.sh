@@ -14,8 +14,9 @@
 # downloaded); the staging dir is empty after every failure. The status-line
 # policy of _tn_release_sig_ok is also checked against a stubbed gpgv, for the
 # lines a real keyring cannot produce (a BADSIG by a key that is not there,
-# EXPSIG, an ERRSIG other than a missing key). Without gpg (bash:3.2) the gpg
-# cases SKIP.
+# EXPSIG, an ERRSIG other than a missing key), and _tn_gpg_status_verdict, the
+# parser it shares with the release tag check, on tag-style output. Without gpg
+# (bash:3.2) the gpg cases SKIP.
 #
 #   bash tools/tests/release_fetch_test.sh
 #
@@ -162,6 +163,15 @@ check "policy: an ERRSIG other than a missing key refuses" "1 ERRSIG" "$(pol "$G
 check "policy: a VALIDSIG whose primary key is not listed refuses" "1 NOSIG" "$(pol "[GNUPG:] GOODSIG CCCCCCCCCCCCCCCC C <c@example.invalid>
 [GNUPG:] VALIDSIG CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC 2026-10-21 0 0 4 0 22 10 00 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")"
 check "policy: a VALIDSIG without its GOODSIG refuses" "1 NOSIG" "$(pol "[GNUPG:] VALIDSIG ${PA} 2026-10-21 0 0 4 0 22 10 00 ${PA}")"
+# The same parser judges a release tag (git verify-tag --raw, which adds NEWSIG):
+# a signer whose key is not here is no verdict of bad, an ERRSIG for another reason is.
+vd() { local rc=0 v; v="$(printf '%s\n' "$1" | _tn_gpg_status_verdict "$SD/allow")" || rc=$?; printf '%s %s' "$rc" "$v"; }
+check "tag verdict: a signer whose key is not here" "1 NOSIG 1111222233334444" "$(vd "[GNUPG:] NEWSIG
+$UX")"
+check "tag verdict: an ERRSIG other than a missing key" "1 ERRSIG" "$(vd "[GNUPG:] NEWSIG
+[GNUPG:] ERRSIG 1111222233334444 22 10 00 1792597639 4 -")"
+check "tag verdict: a good listed signature" "0 GOOD" "$(vd "[GNUPG:] NEWSIG
+$GA")"
 
 if ! command -v gpg >/dev/null 2>&1 || ! command -v gpgv >/dev/null 2>&1; then
     skip "release fixture" "gpg absent"
