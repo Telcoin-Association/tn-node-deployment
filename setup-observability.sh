@@ -10,12 +10,15 @@
 #
 # USAGE:
 #   sudo bash setup-observability.sh
+#   printf '%s\n' "$TOKEN" | sudo bash setup-observability.sh --json --enable-logs --token-stdin
+#     (--token-stdin reads the ingest token from one line of stdin; --token VALUE
+#     still works but puts the token on the command line, where local users can see it)
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="2.0.0"
 
 pause() { echo ""; read -r -p "  Press Enter to return to menu..."; }
 
@@ -93,13 +96,48 @@ health_restart_hint() {
 }
 
 # health_restart_window -- right before the node restart that binds the health port:
-# the epoch-boundary wait (obs_restart_window), reported through addons_say. Without
-# lib/observability.sh 1.0.2 the restart does not wait (addons_lib_check said so).
+# the committee guard, then the epoch-boundary wait (obs_restart_window), reported
+# through addons_say. rc 1 when the guard refuses the restart now or the wait failed
+# (said); the caller skips it.
 health_restart_window() {
     if declare -F obs_restart_window >/dev/null 2>&1; then
-        obs_restart_window addons_say
+        obs_restart_window addons_say || return 1
     fi
     return 0
+}
+
+# so_meta KEY DEFAULT -- addon_meta_get for this script: a key written twice in
+# .node-meta stops the run (a JSON error in --json mode) instead of a default.
+so_meta() {
+    local v
+    if ! v="$(addon_meta_get "$1" "${2:-}")"; then
+        printf '%s\n' "__TN_DUP__"
+        return 0
+    fi
+    printf '%s\n' "$v"
+}
+so_meta_check() {
+    [[ "$2" != "__TN_DUP__" ]] && return 0
+    if json_mode; then
+        json_fail "$1 is set more than once in .node-meta; remove the extra lines and run this again"
+    fi
+    print_error "$1 is set more than once in .node-meta; remove the extra lines and run this again."
+    exit 1
+}
+
+# health_firewall_ready -- rc 0 when ufw is installed and active, so the health port's
+# source-restricted rule takes effect; otherwise says why the health check is refused
+# (--healthcheck binds on every interface) and returns 1 before anything changes.
+health_firewall_ready() {
+    if ufw_installed && ufw_active; then
+        return 0
+    fi
+    if ufw_installed; then
+        print_error "ufw is inactive, so the health port ${TN_KUMA_PORT} would be reachable from the internet. Enable the firewall first (sudo bash firewall-setup.sh), then this option again. Nothing was changed."
+    else
+        print_error "ufw is not installed, so the health port ${TN_KUMA_PORT} would be reachable from the internet. Install ufw and run firewall-setup.sh first, then this option again. Nothing was changed."
+    fi
+    return 1
 }
 
 # Load NETWORK + node context from .node-meta so require_testnet can gate.
@@ -111,9 +149,31 @@ load_node_context() {
         print_info  "Run setup-node.sh first."
         exit 1
     fi
-    NETWORK="$(meta_get NETWORK "$meta" 2>/dev/null || true)"
-    INSTALL_METHOD="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"
-    REGION="$(meta_get REGION "$meta" 2>/dev/null || true)"
+    NETWORK="$(so_meta NETWORK "")"; so_meta_check NETWORK "$NETWORK"
+    INSTALL_METHOD="$(so_meta INSTALL_METHOD binary)"; so_meta_check INSTALL_METHOD "$INSTALL_METHOD"
+    [[ -n "$INSTALL_METHOD" ]] || INSTALL_METHOD="binary"
+    REGION="$(so_meta REGION "")"; so_meta_check REGION "$REGION"
+}
+
+# so_lock_begin -- the menu session's update lock, without the ownership migration
+# (a status screen changes nothing); each menu action that changes something runs
+# addon_meta_write_begin first. Stops the run when the lock is held elsewhere.
+so_lock_begin() {
+    addon_meta_lock && return 0
+    exit 1
+}
+
+# so_write_begin -- before the first change: the update lock and, on a host set up
+# by an older release, the ownership migration (addon_meta_write_begin). Stops the
+# run when either refuses.
+so_write_begin() {
+    if addon_meta_write_begin; then
+        return 0
+    fi
+    if json_mode; then
+        json_fail "the update lock or the ownership migration stopped this run (see the server log); nothing was changed"
+    fi
+    exit 1
 }
 
 # _obs_prompt_region — set REGION (shared identity label), defaulting to the current value.
@@ -143,6 +203,7 @@ _obs_collect_token() {
 # shellcheck disable=SC2034
 enable_logging() {
     print_header "Enable log shipping"
+    addon_meta_write_begin || { pause; return 0; }
     print_info "Ships this node's logs to the Telcoin Association's Loki:"
     print_info "  ${OBS_PUSH_URL_TESTNET}"
     print_info "You need a per-operator ingest token from the Association (docs/testnet-addons.md)."
@@ -150,7 +211,7 @@ enable_logging() {
     echo ""
     # Turn logs on; preserve any existing metrics opt-in so obs_enable renders both.
     local meta; meta="$(node_meta_path || true)"
-    ENABLE_METRICS="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
+    ENABLE_METRICS="$(so_meta ENABLE_METRICS false)"; so_meta_check ENABLE_METRICS "$ENABLE_METRICS"
     ENABLE_OBSERVABILITY="true"
     _obs_prompt_region
     if _obs_collect_token; then
@@ -165,6 +226,7 @@ enable_logging() {
 # shellcheck disable=SC2034
 enable_metrics() {
     print_header "Enable metrics shipping"
+    addon_meta_write_begin || { pause; return 0; }
     print_info "Ships this node's Prometheus metrics to the Association's central Prometheus:"
     print_info "  ${OBS_METRICS_PUSH_URL_TESTNET}"
     print_info "Reuses the SAME ingest token as logging (one token covers both)."
@@ -172,7 +234,7 @@ enable_metrics() {
     echo ""
     # Turn metrics on; preserve any existing logs opt-in so obs_enable renders both.
     local meta; meta="$(node_meta_path || true)"
-    ENABLE_OBSERVABILITY="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
+    ENABLE_OBSERVABILITY="$(so_meta ENABLE_OBSERVABILITY false)"; so_meta_check ENABLE_OBSERVABILITY "$ENABLE_OBSERVABILITY"
     ENABLE_METRICS="true"
     _obs_prompt_region
     if _obs_collect_token; then
@@ -185,6 +247,7 @@ enable_metrics() {
 disable_logging() {
     print_header "Disable log shipping"
     if confirm "Stop shipping logs (metrics, if on, keeps running)?"; then
+        addon_meta_write_begin || { pause; return 0; }
         obs_disable_logs
     else
         print_info "Cancelled."
@@ -195,6 +258,7 @@ disable_logging() {
 disable_metrics() {
     print_header "Disable metrics shipping"
     if confirm "Stop shipping metrics (logs, if on, keeps running)?"; then
+        addon_meta_write_begin || { pause; return 0; }
         obs_disable_metrics
     else
         print_info "Cancelled."
@@ -208,6 +272,8 @@ enable_health() {
     print_info "ufw rule to the Association monitor only (${TN_KUMA_SRC})."
     addons_lib_check
     echo ""
+    health_firewall_ready || return 0
+    addon_meta_write_begin || { pause; return 0; }
     local target svc method file live=true why=""
     if target="$(tn_node_launch_target)"; then
         read -r svc method file <<< "$target"
@@ -216,8 +282,9 @@ enable_health() {
             print_ok "Added --healthcheck ${TN_KUMA_PORT} to ${file}"
             print_warn "The node must restart for the health endpoint to bind."
             if confirm "Restart ${svc} now?"; then
-                health_restart_window
-                if systemctl restart "$svc"; then
+                if ! health_restart_window; then
+                    print_info "$(health_restart_hint "$svc")"
+                elif systemctl restart "$svc"; then
                     print_ok "${svc} restarted."
                 else
                     print_warn "Restart failed; check journalctl -u ${svc} -n 50. $(health_restart_hint "$svc")"
@@ -266,6 +333,7 @@ enable_health() {
 
 disable_health() {
     print_header "Disable health monitoring"
+    addon_meta_write_begin || { pause; return 0; }
     if ufw_installed && ufw_active; then
         ufw delete allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp &>/dev/null || true
         print_ok "Removed the ufw rule ${TN_KUMA_SRC} -> ${TN_KUMA_PORT}/tcp"
@@ -292,7 +360,7 @@ show_status() {
     print_step "Health monitor"
     local meta hc
     meta="$(node_meta_path || true)"
-    hc="$(meta_get ENABLE_HEALTHCHECK_MONITOR "$meta" 2>/dev/null || echo false)"
+    hc="$(so_meta ENABLE_HEALTHCHECK_MONITOR false)"; so_meta_check ENABLE_HEALTHCHECK_MONITOR "$hc"
     print_info "Configured: ENABLE_HEALTHCHECK_MONITOR=${hc:-false}"
     local extras; extras="$(kuma_extra_list)"
     [[ -n "$extras" ]] && print_info "Additional health-port sources (besides ${TN_KUMA_SRC}): ${extras}"
@@ -346,6 +414,7 @@ json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
 # yields done:false, with the last error event's message when there was one.
 json_on_exit() {
     local rc=$? msg
+    tn_release_update_lock 2>/dev/null || true
     [[ "$JSON_DONE_EMITTED" == "true" ]] && return
     msg="$JSON_LAST_ERROR"
     if [[ -z "$msg" ]]; then
@@ -431,12 +500,12 @@ json_enable_pipes() {
     if [[ "$want_logs" == "true" ]]; then
         ENABLE_OBSERVABILITY="true"
     else
-        ENABLE_OBSERVABILITY="$(meta_get ENABLE_OBSERVABILITY "$meta" 2>/dev/null || echo false)"
+        ENABLE_OBSERVABILITY="$(so_meta ENABLE_OBSERVABILITY false)"; so_meta_check ENABLE_OBSERVABILITY "$ENABLE_OBSERVABILITY"
     fi
     if [[ "$want_metrics" == "true" ]]; then
         ENABLE_METRICS="true"
     else
-        ENABLE_METRICS="$(meta_get ENABLE_METRICS "$meta" 2>/dev/null || echo false)"
+        ENABLE_METRICS="$(so_meta ENABLE_METRICS false)"; so_meta_check ENABLE_METRICS "$ENABLE_METRICS"
     fi
     OBS_FLAG_ERROR=""
     if ! obs_enable "$token" addons_say; then
@@ -461,6 +530,7 @@ json_enable_pipes() {
 json_enable_health() {
     local target svc method file rc=0
     json_need_node "health monitoring"
+    health_firewall_ready || json_fail "health monitoring needs an active ufw firewall first (run firewall-setup.sh); nothing was changed"
     target="$(tn_node_launch_target)"
     read -r svc method file <<< "$target"
     OBS_FLAG_ERROR=""
@@ -505,12 +575,14 @@ json_disable_health() {
 }
 
 # run_json_mode — bootstrap (root/distro/context/gate) then apply requested toggles.
-# Enables need a token (--token or TN_OBS_TOKEN); a missing one is a clear json error.
+# Enables need a token (--token-stdin, --token or TN_OBS_TOKEN); a missing one is a
+# clear json error.
 run_json_mode() {
     check_root
     detect_distro
     load_node_context
     require_testnet
+    so_write_begin
     export TN_ASSUME_YES=true   # belt-and-braces: no lib confirm should block
 
     # In json mode set REGION from --region instead of prompting (mirrors _obs_prompt_region).
@@ -523,13 +595,14 @@ run_json_mode() {
         addons_lib_check
     fi
 
-    # Resolve the shared ingest token only when a pipeline is being ENABLED: --token,
-    # else TN_OBS_TOKEN, else the token already stored on this node, else fail.
+    # Resolve the shared ingest token only when a pipeline is being ENABLED:
+    # --token-stdin or --token, else TN_OBS_TOKEN, else the token already stored on
+    # this node, else fail.
     local token=""
     if [[ "$enabling_pipe" == "true" ]]; then
         token="${JSON_TOKEN:-${TN_OBS_TOKEN:-}}"
         [[ -n "$token" ]] || token="$(obs_existing_token)"
-        [[ -n "$token" ]] || json_fail "enabling logs/metrics requires an ingest token (--token or TN_OBS_TOKEN)"
+        [[ -n "$token" ]] || json_fail "enabling logs/metrics requires an ingest token (--token-stdin, --token or TN_OBS_TOKEN)"
     fi
 
     # Apply in a deterministic order. Disables first so a same-call enable wins; both
@@ -598,8 +671,48 @@ arg_fail() {
     exit 1
 }
 
+# addons_require_lib -- exit 2 before anything else when lib/common.sh or
+# lib/observability.sh lacks a helper this script calls (scripts updated without
+# the libraries). One message names update-scripts.sh; a --json run also gets it
+# as its done event.
+addons_require_lib() {
+    local fn missing="" lib="" are="is" msg
+    for fn in addon_meta_get addon_meta_lock addon_meta_write_begin tn_write_root_file \
+              tn_root_dir_ok tn_as_service_user tn_acquire_update_lock tn_wait_restart_window \
+              tn_committee_down_guard apply_kuma_rule is_testnet_like require_testnet; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
+    done
+    [[ -n "$missing" ]] && lib="lib/common.sh"
+    for fn in obs_lib_check obs_inject_flags obs_restart_window obs_quorum_guard obs_node_log_dir; do
+        if ! declare -F "$fn" >/dev/null 2>&1; then
+            missing="${missing:+${missing}, }${fn}"
+            case "$lib" in
+                "") lib="lib/observability.sh" ;;
+                lib/common.sh) lib="lib/common.sh and lib/observability.sh"; are="are" ;;
+            esac
+        fi
+    done
+    [[ -z "$missing" ]] && return 0
+    msg="${lib} ${are} older than this script (it lacks ${missing}): run update-scripts.sh, then this again. Nothing was changed."
+    print_error "$msg"
+    if json_mode; then
+        printf '{"event":"done","ok":false,"error":"%s","msg":"%s"}\n' "$(json_escape "$msg")" "$(json_escape "$msg")"
+    fi
+    exit 2
+}
+
+# so_read_token_stdin -- read the ingest token from one line of stdin (a trailing CR
+# dropped) into JSON_TOKEN. rc 1 when the line is empty.
+so_read_token_stdin() {
+    local line=""
+    IFS= read -r line || [[ -n "$line" ]] || line=""
+    line="${line%$'\r'}"
+    [[ -n "$line" ]] || return 1
+    JSON_TOKEN="$line"
+}
+
 main() {
-    local arg
+    local arg token_stdin=false token_argv=false
     # --json is found before anything else runs: from here stdout carries JSON only, and
     # json_on_exit closes the run with a done event whatever stops it, a bad argument too.
     for arg in "$@"; do
@@ -607,8 +720,11 @@ main() {
             JSON_MODE=true
         fi
     done
+    addons_require_lib
     if json_mode; then
         json_setup_fds
+        # json_on_exit releases the update lock too.
+        TN_EXIT_TRAP_OWNED=1
         trap json_on_exit EXIT
     fi
     while [[ $# -gt 0 ]]; do
@@ -620,6 +736,7 @@ main() {
             --disable-logs)      JSON_DISABLE_LOGS=true; shift ;;
             --disable-metrics)   JSON_DISABLE_METRICS=true; shift ;;
             --disable-health)    JSON_DISABLE_HEALTH=true; shift ;;
+            --token-stdin)       token_stdin=true; shift ;;
             --region|--token|--push-url|--metrics-push-url)
                 # A value flag needs a value; the next option is not one.
                 if [[ $# -lt 2 || "$2" == --* ]]; then
@@ -627,7 +744,7 @@ main() {
                 fi
                 case "$1" in
                     --region)           JSON_REGION="$2" ;;
-                    --token)            JSON_TOKEN="$2" ;;
+                    --token)            JSON_TOKEN="$2"; token_argv=true ;;
                     --push-url)         OBS_PUSH_URL="$2" ;;
                     --metrics-push-url) OBS_METRICS_PUSH_URL="$2" ;;
                 esac
@@ -635,6 +752,13 @@ main() {
             *) shift ;;
         esac
     done
+    if [[ "$token_stdin" == "true" ]]; then
+        [[ "$token_argv" != "true" ]] || arg_fail "--token and --token-stdin cannot be combined; give the token one way."
+        json_mode || arg_fail "--token-stdin goes with --json (the menu asks for the token)."
+        so_read_token_stdin || arg_fail "--token-stdin: no token on stdin."
+    elif [[ "$token_argv" == "true" ]]; then
+        addons_say warn "--token puts the ingest token on the command line, where other local users can read it while this runs; pipe it in with --token-stdin instead."
+    fi
 
     if json_mode; then
         run_json_mode
@@ -645,6 +769,7 @@ main() {
     detect_distro
     load_node_context
     require_testnet
+    so_lock_begin
     main_menu
 }
 

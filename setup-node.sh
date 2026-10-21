@@ -55,6 +55,23 @@
 # https://<d>/ + wss://<d>/ and does not restart the node when node-info.yaml already
 # holds them; an explicit URL that differs is replaced then (a warning says so up front).
 #
+# NODE BINARY. --install-method source|release|docker|existing picks how the node is
+# obtained (interactive setup asks when it is not given).
+#   --install-method release Download a signed release: SHA256SUMS signed by a key in
+#                            lib/release-keys, the tarball and the release's chain-config
+#                            hashes checked, the binary's --version checked before root
+#                            installs it.
+#   --release-tag <tag>      The release to install or build: vX.Y.Z-adiri on testnet,
+#                            vX.Y.Z on mainnet (--build-ref is the older name). Source
+#                            builds take release tags only, never a branch or a commit;
+#                            with --install-method docker it picks that release's image,
+#                            by digest.
+#   --allow-dirty            Testnet source builds, interactive only: discard local changes
+#                            and untracked files in /opt/telcoin-source instead of stopping.
+# Source builds run as the unprivileged tn-build account with its own Rust toolchain
+# (rustup-init pinned by version and sha256); root only installs the result. Docker
+# images run by digest from the network's repository.
+#
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
 #   --bootstrap-peers <file> The peers the node dials at start, replacing the genesis
@@ -78,21 +95,70 @@
 # .node-meta: BOOTSTRAP_PEERS_FILE for --bootstrap-peers, STATE_EXPORT for the two state
 # export flags.
 #
+# BLS KEY PASSPHRASE (key generation). Interactive setup asks for it twice. A --json
+# keygen takes it from standard input (--passphrase-stdin) or, as before, from the
+# TN_BLS_PASSPHRASE environment variable, which setup removes from its own environment
+# before it runs anything; giving both is an error. The passphrase may not be empty, hold
+# a line break, or start or end with whitespace; on mainnet it needs at least 16 bytes.
+#   --passphrase-stdin       Read the passphrase from standard input: one line, read
+#                            once, without echo (a trailing CR is dropped).
+#
+# PASSPHRASE STORAGE. With systemd 250 or later the passphrase is kept only as a
+# systemd credential, /etc/telcoin/bls-passphrase.cred (root 0600), encrypted by
+# systemd-creds with the host key and, when the host has a usable TPM2, the TPM; the
+# plaintext never lands on disk. Below systemd 250 (testnet and devnet only) it stays in
+# the root-only file /etc/telcoin/bls-passphrase. Mainnet needs systemd 255 or later
+# (Ubuntu 24.04).
+#   --passphrase-method credential|stdin  Force one of the two (default: credential
+#                            wherever it works). Mainnet takes credential only.
+#   --allow-no-tpm           On mainnet, accept a credential encrypted with the host key
+#                            alone when the host has no usable TPM2.
+#   --bind-pcrs <list>       Also bind the credential to these TPM PCRs (indexes joined
+#                            by +, e.g. 7). A firmware or Secure Boot change to them stops
+#                            the node from starting until edit-config.sh --reseal runs.
+#   --audit                  Print a summary of the host's hardening (disk encryption,
+#                            core dumps, ptrace scope, passphrase storage) and exit.
+#
+# LOGS AND RESTARTS
+#   --log-target journal|file  Where the node logs: the systemd journal (default on
+#                            mainnet; capped at 4G by a journald drop-in) or the two files
+#                            in /var/log/telcoin (default elsewhere; rotated by logrotate).
+#   --allow-quorum-risk      Restart a running committee node even when the members that
+#                            are already down plus this one would halt consensus (for a
+#                            coordinated restart only).
+#
 #   -h, --help               Print this text and exit.
 # =============================================================================
 
+# The BLS key passphrase leaves the environment before any command runs, so no
+# child of setup (dirname, the library's own commands, installers, apt, cargo,
+# docker) inherits it. An inherited TN_SETUP_PASS or TN_KEYTOOL_PASS is dropped
+# first, or the assignment below would stay exported. main reads TN_SETUP_PASS.
+unset TN_SETUP_PASS TN_KEYTOOL_PASS TN_CRED_PASS
+TN_SETUP_PASS="${TN_BLS_PASSPHRASE:-}"
+unset TN_BLS_PASSPHRASE
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
-if ! version_gte "${COMMON_VERSION:-0}" "1.6.0"; then
-    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than 1.6.0. Run update-scripts.sh and try again."
+# The library must be the one shipped with this script (a partial update leaves
+# an older one, which lacks helpers this script calls): COMMON_VERSION 2.0.0 or
+# newer, then the helpers this script calls. Refuse up front with one message.
+if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
+    || ! tn_require_fns tn_migrate_ownership tn_passphrase_ok tn_update_lock_path \
+        tn_write_root_file tn_write_start_script tn_write_node_unit tn_write_node_env \
+        tn_committee_down_guard tn_service_user_ok tn_service_user_can_run \
+        tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
+        tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar >/dev/null; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
         *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
     esac
     exit 1
 fi
+unset _tn_old
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="2.0.0"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -165,8 +231,19 @@ P2P_PORT="$DEFAULT_P2P_PORT"
 WORKER_PORT="$DEFAULT_WORKER_PORT"
 RPC_PORT="$DEFAULT_RPC_PORT"
 METRICS_PORT="$DEFAULT_METRICS_PORT"
-USE_LOAD_CREDENTIAL=false
-PASSPHRASE_METHOD="loadcredential"  # loadcredential | tpm
+PASSPHRASE_METHOD=""        # credential | stdin ('' = chosen by setup_passphrase_method)
+CREDENTIAL_KEY=""           # host+tpm2 | host (the credential's systemd-creds key)
+ALLOW_NO_TPM=false          # --allow-no-tpm
+BIND_PCRS=""                # --bind-pcrs
+AUDIT_ONLY=false            # --audit
+LOG_TARGET=""                        # journal | file (--log-target; empty: by network)
+# The BLS key passphrase lives in TN_SETUP_PASS, a plain shell variable: the top of
+# this file fills it from TN_BLS_PASSPHRASE (then unset), main from --passphrase-stdin,
+# step_generate_keys from the prompt. It is never exported, so no child process inherits it; keytool gets it on its
+# standard input (tn_keytool, TN_KEYTOOL_PASS).
+PASSPHRASE_STDIN=false      # --passphrase-stdin
+TN_SETUP_PASS_SRC=""        # env | stdin: where TN_SETUP_PASS came from ('' = not yet given)
+SETUP_LOCK_HELD=false       # true while this run holds the update lock (setup_take_lock)
 
 # Testnet opt-in add-ons (see lib/common.sh / docs/testnet-addons.md). OFF by default;
 # set by prompt_testnet_addons (interactive testnet only) and persisted to .node-meta.
@@ -227,7 +304,12 @@ step_welcome() {
 step_preflight() {
     print_header "Step 1 of 8: Pre-flight Checks"
     check_root
+    # The update lock (a --json run took it before step_preflight) and, on a re-run over
+    # an older install, the move to the root-owned layout, before anything is written.
+    setup_take_lock
     detect_distro
+    # Before any package is installed: package maintenance must not restart the node.
+    setup_write_restart_guards
     check_cve_2026_31431
 
     # Pick where node data lives BEFORE the disk check, so the check lands on the
@@ -296,21 +378,18 @@ step_preflight() {
         fi
     done
 
-    # Check systemd version -- LoadCredential requires 247+ (Ubuntu 22.04+)
-    print_step "Checking systemd version..."
-    local systemd_ver
-    systemd_ver=$(systemctl --version 2>/dev/null | head -1 | awk '{print $2}')
-    if [[ -z "$systemd_ver" ]] || [[ "$systemd_ver" -lt 247 ]]; then
-        setup_fail "systemd ${systemd_ver:-unknown} detected -- version 247+ required. Upgrade to Ubuntu 22.04 LTS or later and try again."
-    fi
-    print_ok "systemd ${systemd_ver} detected (247+ required)"
-    USE_LOAD_CREDENTIAL=true
-
     # Select network first so NETWORK is set before source build (needed for --features adiri).
     # In JSON mode network/method/passphrase are already set from flags by the orchestrator.
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
+
+    # The systemd floor: 247 everywhere (LoadCredential=), 255 on mainnet
+    # (TN_MAINNET_MIN_SYSTEMD: the encrypted credential; Ubuntu 24.04). Below 250
+    # elsewhere it warns: the passphrase then stays in a root-only file.
+    print_step "Checking systemd version..."
+    tn_os_floor_check "$NETWORK" setup_progress || setup_fail "This host's systemd is below the floor for ${NETWORK} (see above)."
+    print_ok "systemd $(tn_systemd_version) detected"
 
     # Testnet opt-in add-ons: ask now ("ask early") so step_create_service can bake the
     # right node-launch flags on the first pass. Side-effect installs run later in
@@ -329,17 +408,23 @@ step_preflight() {
 
     echo ""
     print_step "Selecting install method..."
-    json_mode || _select_install_method_with_guard
+    # --install-method skips the menu (it was checked in init_install_flags).
+    if [[ -z "$INSTALL_METHOD" ]] && ! json_mode; then
+        _select_install_method_with_guard
+    fi
+    # --allow-dirty discards local changes before a testnet source build only.
+    if [[ "$ALLOW_DIRTY" == "true" && ( "$INSTALL_METHOD" != "source" || "$NETWORK" != "testnet" ) ]]; then
+        setup_fail "--allow-dirty is taken only for a testnet source build."
+    fi
 
     case "$INSTALL_METHOD" in
         source)   _preflight_source ;;
+        release)  _preflight_release ;;
         docker)   _preflight_docker ;;
         existing) _preflight_existing ;;
     esac
 
-    if [[ "$INSTALL_METHOD" != "docker" ]] && ! json_mode; then
-        _select_passphrase_method
-    fi
+    setup_passphrase_method
 
     print_ok "Pre-flight checks complete"
 }
@@ -363,66 +448,164 @@ _select_install_method_with_guard() {
     done
 }
 
-_select_passphrase_method() {
-    echo ""
-    print_header "BLS Passphrase Protection"
-    echo "  How would you like to protect the BLS passphrase?"
-    echo ""
-    echo "  1) systemd LoadCredential (default -- recommended for most operators)"
-    echo "       Passphrase secured by systemd. Never appears in process listings."
-    echo "       Works on any Ubuntu 22.04+ server. Easy to recover."
-    echo ""
-    echo "  2) TPM/vTPM sealing (advanced -- maximum security)"
-    echo "       Passphrase sealed to this machine's TPM chip."
-    echo "       Cannot be decrypted on any other machine, even with root access."
-    echo "       Requires TPM2 chip (GCP Shielded VM, AWS Nitro, or bare metal TPM2)."
-    echo "       Recovery requires your offline backup passphrase."
-    echo ""
-
-    local choice
-    while true; do
-        read -r -p "  Enter choice [1/2]: " choice
-        case "$choice" in
-            1)
-                PASSPHRASE_METHOD="loadcredential"
-                print_ok "Passphrase method: systemd LoadCredential"
-                break
-                ;;
-            2)
-                if tpm_check_available; then
-                    PASSPHRASE_METHOD="tpm"
-                    print_ok "Passphrase method: TPM sealing"
-                    print_warn "You will need to store your passphrase securely offline."
-                else
-                    print_error "No TPM2 chip detected on this system."
-                    print_info "TPM sealing requires /dev/tpm0 or /dev/tpmrm0."
-                    print_info "Falling back to systemd LoadCredential."
-                    PASSPHRASE_METHOD="loadcredential"
-                fi
-                break
-                ;;
-            *) print_warn "Please enter 1 or 2." ;;
-        esac
-    done
+# How the BLS passphrase is kept (PASSPHRASE_METHOD) and, for the encrypted credential,
+# its systemd-creds key (CREDENTIAL_KEY): credential wherever systemd-creds works, else
+# stdin (the root-only file), which only testnet and devnet take. An explicit
+# --passphrase-method is checked, not changed. The key is host+tpm2 when the host has a
+# usable TPM2, else host, which mainnet takes only with --allow-no-tpm. Every install
+# method uses it (the Docker start script reads the credential as root).
+setup_passphrase_method() {
+    local supported=false
+    if tn_creds_supported; then
+        supported=true
+    fi
+    case "$PASSPHRASE_METHOD" in
+        "")
+            PASSPHRASE_METHOD=stdin
+            [[ "$supported" == "true" ]] && PASSPHRASE_METHOD=credential
+            ;;
+        credential)
+            [[ "$supported" == "true" ]] || setup_fail "--passphrase-method credential needs systemd ${TN_CRED_MIN_SYSTEMD} or later with systemd-creds (Ubuntu 24.04)."
+            ;;
+    esac
+    if [[ "$PASSPHRASE_METHOD" == "stdin" ]]; then
+        if [[ "$NETWORK" != "testnet" && "$NETWORK" != "devnet" ]]; then
+            setup_fail "On ${NETWORK} the BLS passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04)."
+        fi
+        if [[ -n "$BIND_PCRS" ]]; then
+            setup_fail "--bind-pcrs needs the encrypted credential, which this host cannot make (systemd ${TN_CRED_MIN_SYSTEMD} or later)."
+        fi
+        CREDENTIAL_KEY=""
+        setup_warn "The BLS passphrase will be kept in the root-only file ${CONFIG_DIR}/bls-passphrase. Once the host runs systemd ${TN_CRED_MIN_SYSTEMD} or later, encrypt it with: sudo ./edit-config.sh --migrate-credential"
+        return 0
+    fi
+    if [[ "$ALLOW_NO_TPM" == "true" ]]; then
+        TN_ALLOW_NO_TPM=1
+    fi
+    CREDENTIAL_KEY="$(tn_credential_key "$NETWORK")" \
+        || setup_fail "No usable TPM2 on this host: on ${NETWORK} pass --allow-no-tpm to keep the passphrase encrypted with the host key alone."
+    if [[ -n "$BIND_PCRS" && "$CREDENTIAL_KEY" != "host+tpm2" ]]; then
+        setup_fail "--bind-pcrs needs a usable TPM2, and this host has none."
+    fi
+    if [[ "$CREDENTIAL_KEY" == "host" ]]; then
+        setup_warn "No usable TPM2: the passphrase credential is encrypted with this host's key (/var/lib/systemd/credential.secret) alone."
+    fi
+    print_ok "BLS passphrase: encrypted systemd credential (${CREDENTIAL_KEY}${BIND_PCRS:+, PCRs ${BIND_PCRS}})"
+    return 0
 }
 
-_preflight_source() {
-    print_step "Installing source build dependencies..."
+# Store TN_SETUP_PASS the way PASSPHRASE_METHOD says, and record it in .node-meta: the
+# encrypted credential (tn_store_credential: encrypted from a pipe, round-trip checked;
+# no plaintext file is written and an older one is shredded) or the root 0600 file
+# (tn_write_root_file).
+setup_store_passphrase() {
+    local cred="${CONFIG_DIR}/bls-passphrase.cred" plain="${CONFIG_DIR}/bls-passphrase" meta="${CONFIG_DIR}/.node-meta" rc=0
+    if [[ "$PASSPHRASE_METHOD" == "credential" ]]; then
+        TN_CRED_PASS="$TN_SETUP_PASS"
+        tn_store_credential "$cred" "$CREDENTIAL_KEY" "$BIND_PCRS" || rc=$?
+        TN_CRED_PASS=""
+        if [[ $rc -ne 0 ]]; then
+            setup_fail "Could not store the passphrase as an encrypted credential (${cred}); see above."
+        fi
+        _tn_shred "$plain"
+        write_node_meta "PASSPHRASE_METHOD=credential" "CREDENTIAL_KEY=${CREDENTIAL_KEY}"
+        if [[ -n "$BIND_PCRS" ]]; then
+            write_node_meta "CREDENTIAL_PCRS=${BIND_PCRS}"
+        else
+            meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
+        fi
+        print_ok "Passphrase stored as an encrypted credential (root, mode 600): ${cred}"
+        return 0
+    fi
+    rc=0
+    tn_write_root_file "$plain" 0600 < <(trap - ERR; printf '%s\n' "$TN_SETUP_PASS") || rc=$?  # passphrase-stdin-ok stdin of the root writer, a pipe
+    [[ $rc -eq 0 ]] || setup_fail "Could not write ${plain}."
+    _tn_shred "$cred"
+    write_node_meta "PASSPHRASE_METHOD=stdin"
+    meta_unset CREDENTIAL_KEY "$meta" || setup_fail "Could not remove CREDENTIAL_KEY from ${meta}."
+    meta_unset CREDENTIAL_PCRS "$meta" || setup_fail "Could not remove CREDENTIAL_PCRS from ${meta}."
+    print_ok "Passphrase stored for LoadCredential (root, mode 600): ${plain}"
+    return 0
+}
 
-    if ! check_rust; then
-        print_info "Installing Rust..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-        export PATH="${HOME}/.cargo/bin:${PATH}"
-        [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
-        if ! check_rust; then
-            setup_fail "Rust installation failed. Cannot continue."
+# Kept keys keep their stored passphrase: an encrypted credential stays as it is; a
+# root-only file moves into the credential when PASSPHRASE_METHOD is credential (read
+# with the read builtin, shredded after), else stays. Stops when neither exists.
+setup_keep_stored_passphrase() {
+    local cred="${CONFIG_DIR}/bls-passphrase.cred" plain="${CONFIG_DIR}/bls-passphrase" cr=$'\r' v=""
+    if [[ -f "$cred" && ! -L "$cred" ]]; then
+        PASSPHRASE_METHOD=credential
+        setup_meta_read v CREDENTIAL_KEY "${CONFIG_DIR}/.node-meta"
+        CREDENTIAL_KEY="${v:-$CREDENTIAL_KEY}"
+        _tn_shred "$plain"
+        print_ok "Keeping the stored passphrase credential: ${cred}"
+        return 0
+    fi
+    if [[ -L "$plain" || ! -f "$plain" ]] || ! _tn_passfile_trim_safe "$plain"; then
+        setup_fail "The kept keys have no usable stored passphrase (${cred} or ${plain}); remove ${DATA_DIR}/node-keys and run setup again to make new keys."
+    fi
+    if [[ "$PASSPHRASE_METHOD" == "credential" ]]; then
+        IFS= read -r TN_SETUP_PASS < "$plain" || true
+        TN_SETUP_PASS="${TN_SETUP_PASS%"$cr"}"
+        setup_store_passphrase
+        TN_SETUP_PASS=""
+        return 0
+    fi
+    write_node_meta "PASSPHRASE_METHOD=stdin"
+    print_ok "Keeping the stored passphrase: ${plain}"
+    return 0
+}
+
+# The release tag a source or release install uses (--release-tag; --build-ref is the
+# same flag under its older name) and --allow-dirty (testnet, interactive: discard
+# local changes in the source checkout before the build).
+RELEASE_TAG=""
+ALLOW_DIRTY=false
+
+# _setup_tag_example -- a release tag of NETWORK's form, for messages and prompts.
+_setup_tag_example() {
+    if [[ "$NETWORK" == "mainnet" ]]; then
+        printf 'v1.0.0'
+    else
+        printf '%s' "$DEFAULT_DOCKER_TAG"
+    fi
+}
+
+# _setup_install_staged STAGED TAG -- install the staged node binary (tn_stage_binary)
+# as ${INSTALL_DIR}/telcoin-network, root 0755, beside the old one and renamed over it
+# (tn_install_root_binary); record TAG in the version marker beside it (the UI reports
+# the running release from it); remove the staging directory.
+_setup_install_staged() {
+    local staged="$1" tag="$2"
+    if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
+        if ! install -d -o root -g root -m 0755 -- "$INSTALL_DIR"; then
+            tn_staged_cleanup "$staged"
+            setup_fail "Could not create ${INSTALL_DIR}."
         fi
     fi
+    if ! tn_install_root_binary "$staged" "${INSTALL_DIR}/telcoin-network"; then
+        tn_staged_cleanup "$staged"
+        setup_fail "Could not install the node binary in ${INSTALL_DIR} (it must be a root-owned directory that only root can write)."
+    fi
+    tn_staged_cleanup "$staged"
+    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
+    RELEASE_TAG="$tag"
+    if ! tn_write_root_file "${INSTALL_DIR}/telcoin-network.version" 0644 <<< "$tag"; then
+        setup_warn "Could not record the installed release in ${INSTALL_DIR}/telcoin-network.version."
+    fi
+    print_ok "Binary installed: ${BINARY_PATH} (${tag})"
+}
 
-    # Test for the file first: under set -e, bash 3.2 exits on a `source` of a missing
-    # file even with `|| true` (bash 5 does not), as update-node.sh already guards.
-    export PATH="${HOME}/.cargo/bin:/root/.cargo/bin:${PATH}"
-    [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env" 2>/dev/null || true
+# Source builds take a release tag of the node's network only (tn_release_tag_ok): no
+# branch, no commit id. tn_source_checkout_tag puts the root-owned /opt/telcoin-source
+# at the tag (compared with origin's, its signature checked against lib/release-keys, no
+# local changes unless --allow-dirty on testnet); the build runs as the unprivileged
+# build account with its own toolchain from a pinned rustup-init, in an empty
+# environment (tn_build_user_ensure, tn_rustup_ensure, tn_source_build); root copies the
+# result into its staging directory, checks its --version as the build account
+# (tn_stage_binary) and installs it.
+_preflight_source() {
+    print_step "Installing source build dependencies..."
 
     local build_deps=("build-essential" "cmake" "clang" "libclang-dev" "libclang-16-dev" "pkg-config" "libssl-dev" "libapr1-dev")
     local missing_deps=()
@@ -445,114 +628,285 @@ _preflight_source() {
         print_ok "Build dependencies present"
     fi
 
-    local source_dir="/opt/telcoin-source"
-    if [[ -d "$source_dir/.git" ]]; then
-        # Refresh a reused clone THOROUGHLY so it is never stale across
-        # remove/reinstall cycles: all branches + ALL tags (incl. re-pointed
-        # ones), and prune deleted refs. A bare `fetch --all` does NOT reliably
-        # fetch tags -- that is how clones ended up missing newer -adiri release
-        # tags (e.g. showing v0.6.0-adiri-101 instead of v0.10.0-adiri).
-        print_info "Refreshing existing source clone (all branches + tags)..."
-        run_streamed git -C "$source_dir" fetch --all --tags --prune --force
-    else
-        print_info "Cloning Telcoin Network repository..."
-        run_streamed git clone --recurse-submodules "$TN_REPO" "$source_dir"
+    local source_dir="$TN_SOURCE_DIR" build_ref="$RELEASE_TAG"
+    if [[ -z "$build_ref" ]]; then
+        json_mode && setup_fail "No --release-tag (or --build-ref) supplied for a source build."
+        if [[ ! -d "${source_dir}/.git" ]]; then
+            print_info "Cloning Telcoin Network repository..."
+            GIT_ALLOW_PROTOCOL=https git clone --quiet -- "$TN_REPO" "$source_dir" 9>&- \
+                || setup_fail "Could not clone ${TN_REPO} into ${source_dir}."
+        fi
+        echo ""
+        print_header "Source Release Tag Selection"
+        print_info "Source builds take a ${NETWORK} release tag (such as $(_setup_tag_example)):"
+        print_info "branches and commit ids are refused."
+        echo ""
+        while true; do
+            build_ref=$(pick_source_version "$NETWORK") || setup_fail "No source ref selected -- cannot continue setup."
+            tn_release_tag_ok "$NETWORK" "$build_ref" && break
+            print_warn "${build_ref} is not a ${NETWORK} release tag; pick one such as $(_setup_tag_example)."
+        done
     fi
-
-    echo ""
-    print_header "Source Branch / Tag Selection"
-    print_info "Per the Telcoin dev team, the general case for testnet is to build"
-    print_info "from the latest -adiri tag. main works too and is the right default"
-    print_info "for devnet. mainnet will have its own tag set when it launches."
-    echo ""
-
-    local build_ref
-    if json_mode; then
-        # Already held to the release floor in run_json_mode, before check_root.
-        build_ref="$JSON_BUILD_REF"
-        [[ -n "$build_ref" ]] || setup_fail "No --build-ref supplied for source build."
-    else
-        build_ref=$(pick_source_version "$NETWORK") || setup_fail "No source ref selected -- cannot continue setup."
-        # The picker lists only supported tags, but main or a typed ref can be anything.
-        check_release_floor "$build_ref"
-    fi
+    tn_release_tag_ok "$NETWORK" "$build_ref" \
+        || setup_fail "${build_ref} is not a ${NETWORK} release tag (such as $(_setup_tag_example)); source builds take release tags only."
+    check_release_floor "$build_ref"
 
     print_step "Checking out: ${build_ref}..."
-    if ! git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; then
-        if ! { git -C "$source_dir" fetch origin "$build_ref" 2>/dev/null && \
-               git -C "$source_dir" checkout --force "$build_ref" 2>/dev/null; }; then
-            setup_fail "Branch or tag '${build_ref}' not found in repository."
-        fi
-    fi
-    # If build_ref is a branch (e.g. main), hard-reset to the remote tip so we
-    # never build a stale local branch. No-op for tags/commits (immutable).
-    if git -C "$source_dir" show-ref --verify --quiet "refs/remotes/origin/${build_ref}"; then
-        git -C "$source_dir" reset --hard "origin/${build_ref}" 2>/dev/null || true
-    fi
-    # Sync submodules to the checked-out ref so a reused clone never builds with
-    # stale submodule state.
-    run_streamed git -C "$source_dir" submodule update --init --recursive --force \
-        || print_warn "submodule sync reported an issue -- build may fail"
+    tn_source_checkout_tag "$source_dir" "$NETWORK" "$build_ref" "$ALLOW_DIRTY" setup_progress \
+        || setup_fail "The source checkout of ${build_ref} was refused or failed (see above); nothing was built."
     print_ok "Checked out: ${build_ref}"
 
-    if [[ -f "${source_dir}/rust-toolchain.toml" ]]; then
-        local required_toolchain
-        required_toolchain=$(grep "channel" "${source_dir}/rust-toolchain.toml" 2>/dev/null | head -1 | cut -d'"' -f2)
-        if [[ -n "$required_toolchain" ]]; then
-            print_info "Installing required Rust toolchain: ${required_toolchain}..."
-            rustup toolchain install "$required_toolchain" 2>/dev/null || true
-            print_ok "Rust toolchain ready: ${required_toolchain}"
-        fi
-    fi
+    print_step "Preparing the build account ${TN_BUILD_USER} and its toolchain..."
+    tn_build_user_ensure setup_progress \
+        || setup_fail "Could not prepare the build account ${TN_BUILD_USER} (see above)."
+    tn_rustup_ensure setup_progress \
+        || setup_fail "Could not give ${TN_BUILD_USER} a Rust toolchain (see above)."
 
-    local cargo_features=""
-    if [[ "${NETWORK:-}" == "testnet" ]]; then
-        cargo_features="--features adiri"
-        print_info "Building with testnet features: adiri"
-    fi
+    # The build log is a fresh mktemp file in the root-only staging directory, never a
+    # fixed /tmp name. It is removed after a good build and kept when the build fails.
+    local log_dir build_log
+    log_dir="$(tn_staging_dir)" \
+        || setup_fail "Refusing /var/lib/telcoin-staging for the build log: it is not a root-owned 0700 directory."
+    build_log="$(mktemp "${log_dir}/tn-build-log.XXXXXX")" || setup_fail "Could not create a build log in ${log_dir}."
 
-    print_info "Building release binary (this takes 20-40 minutes)..."
-    cd "$source_dir"
+    print_info "Building release binary as ${TN_BUILD_USER} (this takes 20-40 minutes)..."
+    print_info "Build log: ${build_log}"
+    # fd 9 (the update lock) is closed for the build (tn_as_build_user) and for tee, so a
+    # build left running after setup stops cannot hold the lock.
+    local build_ok=true
     if json_mode; then
         # Stream each build line to the UI (and keep the full log on disk) so the
         # operator sees compile progress instead of a frozen screen.
-        cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log | while IFS= read -r _line; do
+        tn_source_build "$source_dir" "$NETWORK" 2>&1 | tee "$build_log" 9>&- | while IFS= read -r _line; do
             json_emit "{\"event\":\"log\",\"msg\":\"$(json_escape "$_line")\"}"
-        done
+        done || build_ok=false
     else
-        cargo build --release $cargo_features 2>&1 | tee /tmp/tn-build.log
+        tn_source_build "$source_dir" "$NETWORK" 2>&1 | tee "$build_log" 9>&- || build_ok=false
     fi
 
-    local built="${source_dir}/target/release/telcoin-network"
-    if [[ ! -f "$built" ]]; then
-        setup_fail "Build failed. See /tmp/tn-build.log"
+    # The output is read only now that the build has returned: a regular file owned by
+    # the build account, copied into root's staging directory and checked there.
+    local built="${TN_BUILD_HOME}/target/release/telcoin-network" staged
+    if [[ "$build_ok" != "true" ]] || ! tn_built_binary_ok "$built"; then
+        setup_fail "Build failed. See ${build_log}"
     fi
+    staged="$(tn_stage_binary "$built" "$NETWORK" "" setup_progress)" \
+        || setup_fail "The built binary failed its --version check (see above). Build log: ${build_log}"
+    rm -f -- "$build_log"
+    _setup_install_staged "$staged" "$build_ref"
 
-    mkdir -p "$INSTALL_DIR"
-    cp "$built" "${INSTALL_DIR}/telcoin-network"
-    chmod +x "${INSTALL_DIR}/telcoin-network"
-    BINARY_PATH="${INSTALL_DIR}/telcoin-network"
-    # Record the installed ref so the UI reports the running binary's version.
-    write_source_version_marker "$INSTALL_DIR" "$source_dir" "$build_ref"
-    print_ok "Binary installed: ${BINARY_PATH}"
-
-    # Write build info for Node Manager UI
-    mkdir -p /etc/telcoin
-    {
-        echo "build_ref=${build_ref}"
-        echo "commit=$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
-        echo "branch=$(git -C "$source_dir" symbolic-ref --short HEAD 2>/dev/null || echo "detached")"
-        echo "built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    } > /etc/telcoin/build-info
-    print_ok "Build info written: /etc/telcoin/build-info"
+    # Write build info for Node Manager UI (root 0644, through a temp file and a rename).
+    if [[ ! -e /etc/telcoin && ! -L /etc/telcoin ]]; then
+        install -d -o root -g root -m 0755 -- /etc/telcoin || setup_fail "Could not create /etc/telcoin."
+    fi
+    local commit built_at
+    commit="$(git -C "$source_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    built_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    if tn_write_root_file /etc/telcoin/build-info 0644 <<EOF
+build_ref=${build_ref}
+commit=${commit}
+branch=detached
+built_at=${built_at}
+EOF
+    then
+        print_ok "Build info written: /etc/telcoin/build-info"
+    else
+        setup_warn "Could not write /etc/telcoin/build-info (the UI shows the build ref from it)."
+    fi
 }
 
+# Release installs: the node binary of a signed release. tn_release_stage downloads
+# SHA256SUMS and its signature (checked with gpgv against lib/release-keys), the
+# tarball (checked against its line), compares the release's chain-config hashes with
+# this script release's pins, takes only the binary out of the tarball and checks its
+# --version (run as the build account, never as root: it must name the tag's version
+# and fit the network's build features). Root installs the result.
+_preflight_release() {
+    local tag="$RELEASE_TAG" staged rc=0
+    print_step "Installing the node from a signed release..."
+    command_exists gpg || install_package gnupg || setup_fail "gpg is needed to check a release signature."
+    command_exists gpgv || install_package gpgv || setup_fail "gpgv is needed to check a release signature."
+    if [[ -z "$tag" ]]; then
+        json_mode && setup_fail "--install-method release needs --release-tag TAG (a ${NETWORK} release tag such as $(_setup_tag_example))."
+        while true; do
+            read -r -p "  Release tag to install (such as $(_setup_tag_example)): " tag
+            tn_release_tag_ok "$NETWORK" "$tag" && break
+            print_warn "${tag:-(empty)} is not a ${NETWORK} release tag (such as $(_setup_tag_example))."
+        done
+    fi
+    tn_release_tag_ok "$NETWORK" "$tag" \
+        || setup_fail "${tag} is not a ${NETWORK} release tag (such as $(_setup_tag_example))."
+    check_release_floor "$tag"
+    tn_build_user_ensure setup_progress \
+        || setup_fail "Could not prepare the build account ${TN_BUILD_USER}, which runs the release binary's --version check (see above)."
+
+    print_step "Downloading and verifying release ${tag}..."
+    staged="$(tn_release_stage "$tag" "$NETWORK" "" setup_progress)" || rc=$?
+    case "$rc" in
+        0) ;;
+        2) setup_fail "Could not download release ${tag} (see above); nothing was installed." ;;
+        3) setup_fail "${tag} is not a ${NETWORK} release tag." ;;
+        *) setup_fail "Release ${tag} did not verify (see above); nothing was installed." ;;
+    esac
+    print_ok "Release ${tag} verified: $(head -n 1 "${staged%/*}/version" 2>/dev/null)"
+    _setup_install_staged "$staged" "$tag"
+}
+
+# Docker's apt signing key (download.docker.com/linux/<distro>/gpg): its primary key
+# fingerprint, read with gpg --show-keys from the published file on 2026-10-15. The
+# repository is added only when the downloaded key has exactly this fingerprint.
+readonly TN_DOCKER_APT_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+
+# _setup_docker_apt -- install Docker Engine from Docker's apt repository: the
+# signing key is downloaded over https and compared with TN_DOCKER_APT_FINGERPRINT
+# before it is installed (/etc/apt/keyrings/docker.gpg) and the repository listed
+# with signed-by= (/etc/apt/sources.list.d/docker.list), both root 0644. Ubuntu and
+# Debian only; anything else stops with the manual step.
+_setup_docker_apt() {
+    local os codename arch parent tmp fpr
+    os="$( . /etc/os-release 2>/dev/null; printf '%s' "${ID:-}" )"
+    codename="$( . /etc/os-release 2>/dev/null; printf '%s' "${VERSION_CODENAME:-}" )"
+    arch="$(dpkg --print-architecture 2>/dev/null)" || arch=""
+    if [[ "$PKG_MANAGER" != "apt" || ! "$os" =~ ^(ubuntu|debian)$ || ! "$codename" =~ ^[a-z]+$ || ! "$arch" =~ ^[a-z0-9]+$ ]]; then
+        setup_fail "Docker is installed by setup on Ubuntu and Debian only. Install Docker Engine from Docker's own repository (https://docs.docker.com/engine/install/), then run setup again."
+    fi
+    command_exists gpg || install_package gnupg || setup_fail "gpg is needed to check Docker's apt signing key."
+    parent="$(tn_staging_dir)" || setup_fail "The staging directory /var/lib/telcoin-staging is not a root-owned 0700 directory."
+    tmp="$(mktemp -d "${parent}/docker-apt.$$.XXXXXX")" || setup_fail "Could not create a temporary directory in ${parent}."
+    ( umask 077; mkdir -p -- "${tmp}/gnupg" ) || { _tn_release_cleanup "$tmp"; setup_fail "Could not create a temporary directory in ${parent}."; }
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time 60 --max-filesize 1048576 \
+        -o "${tmp}/key" --url "https://download.docker.com/linux/${os}/gpg" 9>&-; then
+        _tn_release_cleanup "$tmp"
+        setup_fail "Could not download Docker's apt signing key."
+    fi
+    fpr="$(GNUPGHOME="${tmp}/gnupg" gpg --batch --no-tty --with-colons --import-options show-only --import < "${tmp}/key" 2>/dev/null \
+        | awk -F: '$1 == "pub" { want = 1; next } $1 == "fpr" && want { print $10; want = 0 }')" || fpr=""
+    if [[ "$fpr" != "$TN_DOCKER_APT_FINGERPRINT" ]]; then
+        _tn_release_cleanup "$tmp"
+        setup_fail "Docker's apt signing key has the fingerprint ${fpr:-(none)}, not the pinned ${TN_DOCKER_APT_FINGERPRINT}; Docker was not installed. Check https://docs.docker.com/engine/install/${os}/ for a key change before going on."
+    fi
+    if [[ ! -e /etc/apt/keyrings && ! -L /etc/apt/keyrings ]]; then
+        install -d -o root -g root -m 0755 -- /etc/apt/keyrings || { _tn_release_cleanup "$tmp"; setup_fail "Could not create /etc/apt/keyrings."; }
+    fi
+    # The binary keyring goes through a file in the temp dir, not a pipe: the writer
+    # then runs in this shell.
+    if ! GNUPGHOME="${tmp}/gnupg" gpg --batch --no-tty --dearmor < "${tmp}/key" > "${tmp}/docker.gpg" 2>/dev/null \
+        || ! tn_write_root_file /etc/apt/keyrings/docker.gpg 0644 < "${tmp}/docker.gpg"; then
+        _tn_release_cleanup "$tmp"
+        setup_fail "Could not write /etc/apt/keyrings/docker.gpg."
+    fi
+    _tn_release_cleanup "$tmp"
+    tn_write_root_file /etc/apt/sources.list.d/docker.list 0644 \
+        <<< "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${os} ${codename} stable" \
+        || setup_fail "Could not write /etc/apt/sources.list.d/docker.list."
+    update_package_index
+    local pkg
+    for pkg in docker-ce docker-ce-cli containerd.io; do
+        install_package "$pkg" || setup_fail "Could not install ${pkg} from Docker's repository."
+    done
+}
+
+# _setup_daemon_json_live_restore FILE -- rc 0 when FILE holds exactly one JSON
+# object with "live-restore": true (python3, else jq); rc 1 otherwise, 2 when
+# neither tool is installed.
+_setup_daemon_json_live_restore() {
+    if command_exists python3; then
+        python3 -I -c '
+import json, sys
+t = sys.stdin.read()
+d = json.loads(t) if t.strip() else {}
+sys.exit(0 if isinstance(d, dict) and d.get("live-restore") is True else 1)
+' < "$1" >/dev/null 2>&1
+    elif command_exists jq; then
+        jq -s -e 'length == 1 and (.[0] | type) == "object" and .[0]["live-restore"] == true' < "$1" >/dev/null 2>&1
+    else
+        return 2
+    fi
+}
+
+# _setup_docker_live_restore -- "live-restore": true in /etc/docker/daemon.json, so a
+# restart of the Docker engine leaves the node's container running. A missing file is
+# written; an existing one must hold exactly one JSON object (an empty file counts as
+# {}), which is merged with python3 (else jq), keeping its other settings, and written
+# back root 0644 through tn_write_root_file. Anything else (two documents, an array, a
+# symlink), or a host with neither tool, stops setup with the manual step. The file is
+# read back before setup says live-restore is on. dockerd then reloads its
+# configuration (live-restore needs no engine restart).
+_setup_docker_live_restore() {
+    local d="${TN_ROOT_PREFIX:-}/etc/docker" f merged="" rc=0
+    f="${d}/daemon.json"
+    local manual="add \"live-restore\": true to ${f} by hand (it must stay one JSON object), then run: systemctl reload docker"
+    if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+        setup_fail "${f} is not a regular file; ${manual}"
+    fi
+    if [[ ! -e "$d" && ! -L "$d" ]]; then
+        install -d -o root -g root -m 0755 -- "$d" || setup_fail "Could not create ${d}."
+    fi
+    if [[ ! -e "$f" ]]; then
+        merged="$(printf '{\n  "live-restore": true\n}')"
+    elif command_exists python3; then
+        merged="$(python3 -I -c '
+import json, sys
+t = sys.stdin.read()
+d = json.loads(t) if t.strip() else {}
+if not isinstance(d, dict):
+    sys.exit(1)
+if d.get("live-restore") is True:
+    sys.exit(3)
+d["live-restore"] = True
+print(json.dumps(d, indent=2))
+' < "$f" 2>/dev/null)" || rc=$?
+    elif command_exists jq; then
+        # -s reads every document in the file: exactly one object, or none (an
+        # empty file, taken as {}), is merged; anything else is refused.
+        if jq -s -e 'length == 1 and (.[0] | type) == "object" and .[0]["live-restore"] == true' < "$f" >/dev/null 2>&1; then
+            rc=3
+        else
+            merged="$(jq -s 'if length == 0 then {} elif length == 1 and (.[0] | type) == "object" then .[0] else error("not one JSON object") end | . + {"live-restore": true}' < "$f" 2>/dev/null)" || rc=$?
+        fi
+    else
+        setup_fail "Neither python3 nor jq is installed to merge ${f}; ${manual}"
+    fi
+    case "$rc" in
+        0) ;;
+        3) print_ok "Docker live-restore already on (${f})"; return 0 ;;
+        *) setup_fail "${f} is not a single JSON object setup can merge; ${manual}" ;;
+    esac
+    [[ -n "$merged" ]] || setup_fail "Could not merge ${f}; ${manual}"
+    tn_write_root_file "$f" 0644 <<< "$merged" || setup_fail "Could not write ${f}; ${manual}"
+    rc=0
+    _setup_daemon_json_live_restore "$f" || rc=$?
+    if [[ $rc -eq 1 ]]; then
+        setup_fail "${f} does not have \"live-restore\": true after the write; ${manual}"
+    fi
+    if systemctl reload docker 9>&- 2>/dev/null; then
+        print_ok "Docker live-restore on (${f})"
+    else
+        setup_warn "Wrote live-restore to ${f}, but docker did not reload its configuration; run: systemctl reload docker"
+    fi
+}
+
+# Docker installs: the engine from Docker's apt repository (fingerprint-pinned key),
+# live-restore on, and the node's image by digest: <repository>@sha256:<digest> in the
+# network's repository (tn_docker_repo_for). --docker-image takes a digest reference;
+# --release-tag takes the release's image digest (tn_docker_image_for_tag: from the
+# signed release, else on testnet from the registry); without either, the newest
+# release image by digest (latest_docker_image). Never a tag, never latest.
 _preflight_docker() {
     print_step "Setting up Docker..."
 
+    # The network's image repository first: a network without one (or mainnet before
+    # a mainnet release can be verified, tn_docker_network_ok) is refused before
+    # Docker's apt repository, the engine or daemon.json is touched.
+    local repo input tag="$RELEASE_TAG" looked=false
+    tn_docker_network_ok "$NETWORK" \
+        || setup_fail "A Docker install is refused on ${NETWORK} (see above)."
+    repo="$(tn_docker_repo_for "$NETWORK")" \
+        || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
+
     if ! command -v docker &>/dev/null; then
-        print_info "Installing Docker..."
-        curl -fsSL https://get.docker.com | sh
+        print_info "Installing Docker from Docker's apt repository..."
+        _setup_docker_apt
         if ! command -v docker &>/dev/null; then
             setup_fail "Docker installation failed. Please install Docker manually."
         fi
@@ -560,55 +914,75 @@ _preflight_docker() {
     else
         print_ok "Docker is installed"
     fi
+    _setup_docker_live_restore
 
     echo ""
-    print_info "The official Telcoin Network Docker image is hosted at:"
-    print_info "  ${GAR_IMAGE_BASE}"
-    echo ""
-    print_info "Enter the full image URL including tag (default is the latest"
-    print_info "published -adiri tag, auto-detected from the registry)."
+    print_info "The ${NETWORK} Telcoin Network image comes from:"
+    print_info "  ${repo}"
+    print_info "and runs by digest (${repo}@sha256:<digest>), never by a tag."
     echo ""
 
-    # The image is written unquoted into the root-run start wrapper, so it must be a plain
-    # image reference (validate_docker_image), whether typed, auto-detected or passed.
-    local input
-    if json_mode; then
-        # The UI passes --docker-image, already checked in run_json_mode before
-        # check_root; only auto-detect, and check, when it didn't.
-        if [[ -z "${DOCKER_IMAGE:-}" ]]; then
-            DOCKER_IMAGE="$(latest_docker_image)"
-            if ! validate_docker_image "$DOCKER_IMAGE"; then
-                setup_fail "The registry gave an image reference setup cannot use: ${DOCKER_IMAGE}. Pass --docker-image with the full image and tag."
-            fi
-            check_release_floor "$DOCKER_IMAGE"
-        fi
+    if [[ -n "$DOCKER_IMAGE" ]]; then
+        # By digest alone: the release that digest belongs to (.node-meta's record,
+        # else the registry's release tags), if found, is held to the oldest
+        # supported release; otherwise that check only warns.
+        tag="$(tn_docker_release_tag_for "$NETWORK" "$DOCKER_IMAGE" 2>/dev/null)" || tag=""
+        looked=true
+        check_release_floor "${tag:-$DOCKER_IMAGE}"
+    elif [[ -n "$tag" ]]; then
+        check_release_floor "$tag"
+        DOCKER_IMAGE="$(tn_docker_image_for_tag "$NETWORK" "$tag" setup_progress)" \
+            || setup_fail "Could not resolve release ${tag} to an image digest (see above)."
+    elif json_mode; then
+        DOCKER_IMAGE="$(latest_docker_image "$NETWORK")" \
+            || setup_fail "Could not read the newest ${NETWORK} release image; pass --release-tag or --docker-image <repository>@sha256:<digest>."
     else
-        local default_image
-        default_image="$(latest_docker_image)"
+        local default_image typed=""
+        default_image="$(latest_docker_image "$NETWORK")" || default_image=""
         while true; do
-            read -r -p "  Docker image (press Enter to accept default)
-  [${default_image}]: " input
-            DOCKER_IMAGE="${input:-$default_image}"
-            validate_docker_image "$DOCKER_IMAGE" && break
-            print_warn "Not an image reference: ${DOCKER_IMAGE}. Give the full image with its tag, such as ${DEFAULT_DOCKER_IMAGE}."
+            read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
+  [${default_image:-none}]: " input
+            tag=""
+            if [[ -z "$input" ]]; then
+                DOCKER_IMAGE="$default_image"
+            elif tn_release_tag_ok "$NETWORK" "$input"; then
+                tag="$input"
+                DOCKER_IMAGE="$(tn_docker_image_for_tag "$NETWORK" "$tag")" || DOCKER_IMAGE=""
+            else
+                DOCKER_IMAGE="$input"
+                typed="$input"
+            fi
+            [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" && break
+            typed=""
+            print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as ${DEFAULT_DOCKER_IMAGE}."
         done
-        check_release_floor "$DOCKER_IMAGE"
+        if [[ -n "$tag" ]]; then
+            check_release_floor "$tag"
+        elif [[ -n "$typed" ]]; then
+            check_release_floor "$typed"
+        fi
     fi
+    if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+        setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>."
+    fi
+    # The release tag goes into .node-meta beside the digest, so update-node.sh
+    # --check can compare releases; a digest no release tag names is recorded alone.
+    if [[ -z "$tag" && "$looked" == false ]]; then
+        tag="$(tn_docker_release_tag_for "$NETWORK" "$DOCKER_IMAGE" 2>/dev/null)" || tag=""
+    fi
+    if [[ -z "$tag" ]]; then
+        print_info "No ${NETWORK} release tag names ${DOCKER_IMAGE}; .node-meta records the digest only, and update-node.sh --check reports its release as unknown."
+    fi
+    RELEASE_TAG="$tag"
 
     print_step "Pulling Docker image: ${DOCKER_IMAGE}..."
-    if ! docker pull "$DOCKER_IMAGE"; then
+    if ! docker pull "$DOCKER_IMAGE" 9>&-; then
         setup_fail "Failed to pull Docker image: ${DOCKER_IMAGE}"
     fi
-    print_ok "Docker image pulled: ${DOCKER_IMAGE}"
-
-    DOCKER_UID=1101
-    print_info "Note: Docker install requires service user UID ${DOCKER_UID}"
-
-    local existing_user
-    existing_user=$(getent passwd "$DOCKER_UID" | cut -d: -f1 2>/dev/null || echo "")
-    if [[ -n "$existing_user" ]] && [[ "$existing_user" != "$SERVICE_USER" ]]; then
-        setup_fail "UID ${DOCKER_UID} is already in use by user '${existing_user}'"
+    if ! tn_docker_holds_digest "$DOCKER_IMAGE"; then
+        setup_fail "Docker does not hold ${DOCKER_IMAGE} under that digest after the pull (digest mismatch); the image was not used."
     fi
+    print_ok "Docker image pulled: ${DOCKER_IMAGE}"
 
     BINARY_PATH="docker"
 }
@@ -653,7 +1027,8 @@ _preflight_existing() {
 # 0 when BINARY_PATH can go into the start wrapper: an absolute path of letters, digits
 # and . _ / - (the wrapper holds it unquoted and runs as root) naming an executable file
 # (the wrapper execs it from systemd, where a relative path or a missing file only shows
-# up as a crash loop). Otherwise 1, with the reason on stdout.
+# up as a crash loop) that passes _tn_root_binary_ok and that the service account can
+# read and run (tn_service_user_can_run). Otherwise 1, with the reason on stdout.
 binary_path_ok() {
     case "${BINARY_PATH:-}" in
         /*) ;;
@@ -665,6 +1040,16 @@ binary_path_ok() {
     fi
     if [[ ! -f "$BINARY_PATH" || ! -x "$BINARY_PATH" ]]; then
         printf 'No executable node binary at %s.' "$BINARY_PATH"
+        return 1
+    fi
+    # The start-script writer and the keytool refuse what these two refuse; say it
+    # here, before anything is written.
+    if ! _tn_root_binary_ok "$BINARY_PATH"; then
+        printf 'refusing %s: the node binary must be a root-owned file, not group- or other-writable, in root-owned directories.' "$BINARY_PATH"
+        return 1
+    fi
+    if ! tn_service_user_can_run "$TN_ROOT_BINARY_REAL"; then
+        printf 'refusing %s: the service account %s cannot read and run %s; make it readable and executable (for example chmod 0755) in directories that account can enter.' "$BINARY_PATH" "${SERVICE_USER:-}" "$TN_ROOT_BINARY_REAL"
         return 1
     fi
     return 0
@@ -908,6 +1293,23 @@ init_public_rpc_flags() {
 # systemd. Source and docker installs bring their own binary, so there it is ignored,
 # with a warning. Whether the file runs is checked after check_root.
 init_install_flags() {
+    case "$INSTALL_METHOD" in
+        ""|source|release|docker|existing) ;;
+        *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, release, docker or existing)" ;;
+    esac
+    # --build-ref is the older name of --release-tag; the two must agree.
+    if [[ -n "$RELEASE_TAG" && -n "$JSON_BUILD_REF" && "$RELEASE_TAG" != "$JSON_BUILD_REF" ]]; then
+        setup_fail "--release-tag ${RELEASE_TAG} and --build-ref ${JSON_BUILD_REF} name different releases."
+    fi
+    RELEASE_TAG="${RELEASE_TAG:-$JSON_BUILD_REF}"
+    JSON_BUILD_REF="$RELEASE_TAG"
+    # Both name the image to run; neither is dropped in favour of the other.
+    if [[ -n "$DOCKER_IMAGE" && -n "$RELEASE_TAG" ]]; then
+        setup_fail "Give --docker-image or --release-tag, not both."
+    fi
+    if [[ "$ALLOW_DIRTY" == "true" ]] && json_mode; then
+        setup_fail "--allow-dirty is taken in an interactive run only."
+    fi
     [[ -n "$BINARY_PATH" ]] || return 0
     if [[ -z "$INSTALL_METHOD" ]] && json_mode; then
         INSTALL_METHOD="existing"
@@ -1019,14 +1421,14 @@ peers_file_ok() {
 finalize_node_extra_flags() {
     local meta="${CONFIG_DIR}/.node-meta" v msg=""
     if [[ -z "$BOOTSTRAP_PEERS_SRC" ]]; then
-        v="$(meta_get BOOTSTRAP_PEERS_FILE "$meta" 2>/dev/null || true)"
+        setup_meta_read v BOOTSTRAP_PEERS_FILE "$meta"
         if [[ -n "$v" ]]; then
             msg="$(peers_file_ok "$v")" || setup_fail "BOOTSTRAP_PEERS_FILE in ${meta}: ${msg}. Put the file back, or pass --bootstrap-peers FILE."
             BOOTSTRAP_PEERS_SRC="$v"
         fi
     fi
     if [[ -z "$STATE_EXPORT" ]]; then
-        v="$(meta_get STATE_EXPORT "$meta" 2>/dev/null || true)"
+        setup_meta_read v STATE_EXPORT "$meta"
         case "$v" in
             ""|off|unlimited) ;;
             *)
@@ -1080,6 +1482,186 @@ setup_warn() {
         json_event log "WARNING: $1"
     fi
     return 0
+}
+
+# setup_meta_read VAR KEY FILE -- set VAR to KEY's value in FILE ('' when the key or the
+# file is absent). A KEY set on more than one line has no single value (meta_get rc 2):
+# setup stops with a message instead of guessing.
+setup_meta_read() {
+    local _val="" _rc=0
+    _val="$(meta_get "$2" "$3" 2>/dev/null)" || _rc=$?
+    if [[ $_rc -eq 2 ]]; then
+        setup_fail "${2} is set more than once in ${3}; remove the extra lines and run setup again."
+    fi
+    printf -v "$1" '%s' "$_val"
+}
+
+# The passphrase rule for NETWORK, as a message (it never holds the passphrase).
+setup_passphrase_rule() {
+    local rule="The BLS key passphrase may not be empty, hold a line break, or start or end with whitespace"
+    if [[ "${1:-}" == "mainnet" ]]; then
+        rule="${rule}, and on mainnet it needs at least 16 bytes"
+    fi
+    printf '%s.' "$rule"
+}
+
+# --passphrase-stdin: read the BLS key passphrase from standard input into TN_SETUP_PASS,
+# once: one line, without echo, one trailing CR dropped. TN_BLS_PASSPHRASE as well
+# (moved into TN_SETUP_PASS at the top of this file) is refused, as is an empty or
+# malformed value; the mainnet length rule follows once the network is known (json_check_keygen_inputs,
+# step_generate_keys). Without the flag, records where an inherited value came from.
+setup_read_passphrase() {
+    local line="" cr=$'\r'
+    if [[ "$PASSPHRASE_STDIN" != "true" ]]; then
+        if [[ -n "$TN_SETUP_PASS" ]]; then
+            TN_SETUP_PASS_SRC="env"
+        fi
+        return 0
+    fi
+    if [[ -n "$TN_SETUP_PASS" ]]; then
+        TN_SETUP_PASS=""
+        setup_fail "Give the BLS key passphrase one way: --passphrase-stdin or TN_BLS_PASSPHRASE, not both."
+    fi
+    if ! IFS= read -r -s line && [[ -z "$line" ]]; then
+        setup_fail "--passphrase-stdin: no passphrase on standard input."
+    fi
+    TN_SETUP_PASS="${line%"$cr"}"
+    line=""
+    TN_SETUP_PASS_SRC="stdin"
+    if ! tn_passphrase_ok "$TN_SETUP_PASS"; then
+        setup_fail "--passphrase-stdin: $(setup_passphrase_rule)"
+    fi
+    return 0
+}
+
+# The passphrase for keygen, in TN_SETUP_PASS: the one given on standard input or (a
+# --json run) in TN_BLS_PASSPHRASE, else asked for twice at the prompt. Whatever the
+# source, it must pass tn_passphrase_ok for NETWORK; the prompt asks again until it does.
+setup_keygen_passphrase() {
+    local confirm_pass="" got=0
+    if json_mode || [[ "$TN_SETUP_PASS_SRC" == "stdin" ]]; then
+        [[ -n "$TN_SETUP_PASS" ]] || setup_fail "No BLS key passphrase: keygen takes it on standard input with --passphrase-stdin, or from TN_BLS_PASSPHRASE."
+        tn_passphrase_ok "$TN_SETUP_PASS" "$NETWORK" || setup_fail "$(setup_passphrase_rule "$NETWORK")"
+        return 0
+    fi
+    echo ""
+    print_warn "Set a passphrase to encrypt your BLS validator key."
+    print_warn "Store this securely -- you need it every time the node starts."
+    print_info "$(setup_passphrase_rule "$NETWORK")"
+    echo ""
+    while true; do
+        TN_SETUP_PASS=""
+        confirm_pass=""
+        got=0
+        IFS= read -r -s -p "  Enter BLS key passphrase: " TN_SETUP_PASS || got=1
+        echo ""
+        IFS= read -r -s -p "  Confirm BLS key passphrase: " confirm_pass || got=1
+        echo ""
+        if [[ "$got" -ne 0 && -z "$TN_SETUP_PASS" ]]; then
+            setup_fail "No BLS key passphrase was entered (end of input)."
+        fi
+        if [[ "$TN_SETUP_PASS" != "$confirm_pass" ]]; then
+            print_warn "Passphrases do not match -- try again."
+            continue
+        fi
+        if ! tn_passphrase_ok "$TN_SETUP_PASS" "$NETWORK"; then
+            print_warn "$(setup_passphrase_rule "$NETWORK") Try again."
+            continue
+        fi
+        break
+    done
+    confirm_pass=""
+    TN_SETUP_PASS_SRC="prompt"
+    return 0
+}
+
+# Take the update lock right after the root check, so setup never runs beside
+# update-node.sh, edit-config.sh, install-caddy.sh or another setup, then bring a host an
+# older release laid out to the root-owned layout before anything is written
+# (setup_migrate_layout); release staging directories of earlier runs are removed
+# (tn_staging_sweep). Held until step_create_service has started the node
+# (setup_release_lock); json_on_exit releases it on every other way out. Safe to call
+# twice.
+setup_take_lock() {
+    [[ "$SETUP_LOCK_HELD" == "true" ]] && return 0
+    TN_EXIT_TRAP_OWNED=1
+    if ! tn_acquire_update_lock; then
+        setup_fail "Another setup or update holds the update lock ($(tn_update_lock_path))${TN_UPDATE_LOCK_HOLDER:+, PID ${TN_UPDATE_LOCK_HOLDER}}. Wait for it to finish, then run setup again."
+    fi
+    SETUP_LOCK_HELD=true
+    # Release staging directories an earlier run left (it was killed, say).
+    tn_staging_sweep stale
+    setup_migrate_layout
+}
+
+# Release the update lock when this run holds it. Never fails.
+setup_release_lock() {
+    [[ "$SETUP_LOCK_HELD" == "true" ]] || return 0
+    tn_release_update_lock 2>/dev/null || true
+    SETUP_LOCK_HELD=false
+    return 0
+}
+
+# A re-run over an install made by an older release: tn_migrate_ownership makes its
+# install, config and log directories root-owned and records OWNERSHIP_LAYOUT=2, which
+# every root write below relies on. A first install (no .node-meta) or one already at
+# layout 2: nothing to do. It never restarts the node. The service account it reads
+# from .node-meta does not replace the one this run was given.
+setup_migrate_layout() {
+    local rc=0 user="$SERVICE_USER" group="$SERVICE_GROUP"
+    tn_migrate_ownership setup_progress || rc=$?
+    SERVICE_USER="$user"
+    SERVICE_GROUP="$group"
+    case "$rc" in
+        0) return 0 ;;
+        1) setup_fail "The existing install has entries to review before setup can go on (see the messages above): a symlink, a special file, an unexpected owner, or a network that cannot be told." ;;
+        3) setup_fail "This mainnet host was installed by an older release and is not migrated in place. Install a fresh host with this release." ;;
+        *) setup_fail "Moving the existing install to root ownership failed (rc ${rc}); see the messages above." ;;
+    esac
+}
+
+# Progress function for the library helpers (`fn step|log|warn MESSAGE`): the message on
+# stderr and, in --json mode, as a log event (warnings start with WARNING:).
+setup_progress() {
+    case "${1:-}" in
+        warn) setup_warn "${2:-}" ;;
+        step) print_step "${2:-}" ;;
+        *)    print_info "${2:-}" ;;
+    esac
+    if json_mode && [[ "${1:-}" != "warn" ]]; then
+        json_event log "${2:-}"
+    fi
+    return 0
+}
+
+# Keep package maintenance from restarting the node behind the operator's back: a
+# needrestart rule that never restarts the telcoin or docker services, and an apt rule
+# that turns off the unattended-upgrades automatic reboot. Security updates still
+# install; restarts and reboots are left to the operator. Both files are written
+# root-owned 0644 through tn_write_root_file; a missing directory is created root 0755.
+setup_write_restart_guards() {
+    local d
+    for d in /etc/needrestart/conf.d /etc/apt/apt.conf.d; do
+        if [[ ! -e "$d" && ! -L "$d" ]]; then
+            install -d -o root -g root -m 0755 -- "$d" \
+                || setup_fail "Could not create ${d}."
+        fi
+    done
+    # Here-documents, not pipes: the write runs in this shell, so a signal that ends
+    # setup cannot leave a writer running after the lock is released.
+    tn_write_root_file /etc/needrestart/conf.d/50-telcoin.conf 0644 <<'EOF' \
+        || setup_fail "Could not write /etc/needrestart/conf.d/50-telcoin.conf."
+# Managed by tn-node-deployment (setup-node.sh): needrestart never restarts the
+# Telcoin node or Docker. Restart them yourself, one validator at a time.
+$nrconf{override_rc}{qr(^telcoin)} = 0;
+$nrconf{override_rc}{qr(^docker)} = 0;
+EOF
+    tn_write_root_file /etc/apt/apt.conf.d/52telcoin-no-reboot 0644 <<'EOF' \
+        || setup_fail "Could not write /etc/apt/apt.conf.d/52telcoin-no-reboot."
+// Managed by tn-node-deployment (setup-node.sh): updates install, reboots are manual.
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+    print_ok "Package updates will not restart the node or reboot the host"
 }
 
 # Hold REF, a source ref or a docker image, to the oldest release these scripts support
@@ -1202,9 +1784,14 @@ init_node_inputs() {
         setup_fail "invalid --address ${VALIDATOR_ADDRESS} -- expected 0x followed by 40 hex digits."
     fi
     case "$PASSPHRASE_METHOD" in
-        loadcredential|tpm) ;;
-        *) setup_fail "unknown --passphrase-method ${PASSPHRASE_METHOD} (expected loadcredential or tpm)" ;;
+        ""|credential|stdin) ;;
+        loadcredential) PASSPHRASE_METHOD=stdin ;;
+        tpm) setup_fail "--passphrase-method tpm is no longer offered: the passphrase is kept as an encrypted systemd credential (credential) or, below systemd ${TN_CRED_MIN_SYSTEMD} on testnet, in a root-only file (stdin)." ;;
+        *) setup_fail "unknown --passphrase-method ${PASSPHRASE_METHOD} (expected credential or stdin)" ;;
     esac
+    if [[ -n "$BIND_PCRS" ]] && ! tn_pcrs_ok "$BIND_PCRS"; then
+        setup_fail "--bind-pcrs takes TPM PCR indexes 0-23 joined by + (for example 7 or 0+7), not ${BIND_PCRS}."
+    fi
     if ! validate_service_name "$SERVICE_USER" "Service user" >/dev/null 2>&1; then
         setup_fail "invalid --service-user ${SERVICE_USER} -- a letter, then up to 31 letters, digits, _ or -."
     fi
@@ -1250,25 +1837,38 @@ step_create_infrastructure() {
         read -r -p "  Service user name  [${SERVICE_USER}]: " input
         local proposed_user="${input:-$SERVICE_USER}"
         if validate_service_name "$proposed_user" "Service user"; then
-            if id "$proposed_user" &>/dev/null && [[ $(id -u "$proposed_user") -lt 1000 ]] || ! id "$proposed_user" &>/dev/null; then
+            # tn_service_user_ok says why on stderr: root, telcoin-ui, a regular
+            # account (UID 1000 or above) or a member of sudo, adm, docker or wheel.
+            if tn_service_user_ok "$proposed_user"; then
                 SERVICE_USER="$proposed_user"
                 break
-            else
-                print_error "User '${proposed_user}' already exists as a regular user (UID $(id -u "$proposed_user"))."
-                print_info "Please choose a different name or press Enter to use the default."
             fi
+            print_info "Please choose a different name or press Enter to use the default."
         fi
     done
 
     while ! json_mode; do
         read -r -p "  Service group name [${SERVICE_GROUP}]: " input
         local proposed_group="${input:-$SERVICE_GROUP}"
-        if validate_service_name "$proposed_group" "Service group"; then
+        if validate_service_name "$proposed_group" "Service group" \
+            && tn_service_user_ok "$SERVICE_USER" "$proposed_group"; then
             SERVICE_GROUP="$proposed_group"
             break
         fi
     done
     echo ""
+    # The same rule for --json and for the values the prompts accepted.
+    if ! tn_service_user_ok "$SERVICE_USER" "$SERVICE_GROUP"; then
+        setup_fail "The node cannot run as ${SERVICE_USER}:${SERVICE_GROUP} (see the message above)."
+    fi
+    # A mainnet node is installed without the testnet add-ons (VPN, observability,
+    # Caddy): the operator removes them first.
+    if [[ "$NETWORK" == "mainnet" ]]; then
+        local addons=""
+        if addons="$(tn_testnet_addons_present 2>/dev/null)"; then
+            setup_fail "Testnet add-ons are present on this host (${addons:-unknown}); a mainnet node is not installed beside them. Remove them first (remove-node.sh)."
+        fi
+    fi
 
     # Remove stale groupadd/useradd lock files if present. A crashed process can
     # leave these behind (notably /etc/.pwd.lock, the lckpwdf() lock), making
@@ -1281,31 +1881,45 @@ step_create_infrastructure() {
 
     create_service_user
 
+    # The layout: install and config directories root-owned, the log directory
+    # root:telcoin-log with its two files pre-created, and only the data directory the
+    # service user's (create_directories). Nothing that exists is re-owned recursively.
+    local rc=0
+    create_directories "$INSTALL_DIR" "$DATA_DIR" "$LOG_DIR" "$CONFIG_DIR" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        setup_fail "Could not lay out the node directories (see the message above)."
+    fi
+    # Node log rotation (an existing config, such as a size set in the UI, is kept).
+    rc=0
+    tn_install_logrotate || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        setup_warn "Could not write the node log rotation config (/etc/logrotate.d/telcoin); the node logs will grow until it is in place."
+    fi
+
     # Record the service account in .node-meta NOW (not just at the end), so an
     # install interrupted after this point still leaves remove-node.sh enough to
-    # clean up the user/group. The install method and the image or binary go in too:
-    # a --json finalize is a new process and reads them back from here when its
-    # flags leave them out. step_create_service later adds the full metadata.
-    mkdir -p "$CONFIG_DIR"
+    # clean up the user/group. The install method, the data dir and the image or binary
+    # go in too: a --json finalize is a new process and reads them back from here when
+    # its flags leave them out (and stops when a flag differs). step_create_service
+    # later adds the full metadata.
+    # OWNERSHIP_LAYOUT=2: this layout is the root-owned one, so nothing is migrated.
     write_node_meta \
         "HOST_SERVICE_USER=${SERVICE_USER}" \
         "HOST_SERVICE_GROUP=${SERVICE_GROUP}" \
-        "INSTALL_METHOD=${INSTALL_METHOD:-binary}"
+        "INSTALL_METHOD=${INSTALL_METHOD:-binary}" \
+        "DATA_DIR=${DATA_DIR}" \
+        "OWNERSHIP_LAYOUT=2"
     write_node_meta_runner
     print_ok "Recorded service account in ${CONFIG_DIR}/.node-meta (${SERVICE_USER}:${SERVICE_GROUP})"
 
-    print_step "Creating reth cache directory..."
-    mkdir -p "/home/${SERVICE_USER}/.cache/reth/logs/telcoin-network-logs"
-    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "/home/${SERVICE_USER}"
-    print_ok "Reth cache directory created"
+    # No home directory for the service account: the unit hides /home and sets HOME to
+    # the data dir, where the node's own cache and log files go.
 
-    create_directories "$INSTALL_DIR" "$DATA_DIR" "$LOG_DIR" "$CONFIG_DIR"
     verify_binary "$BINARY_PATH"
     # Node flags: asked of the release now, before any key exists, and recorded for a
-    # --json finalize. After create_directories, whose chown -R of CONFIG_DIR would hand
-    # the peers file to the service user.
+    # --json finalize.
     prepare_node_extra_flags
-    ensure_chain_configs_available
+    ensure_chain_configs_available "$NETWORK" || setup_fail "The ${NETWORK} chain configs are not the pinned ones (see above); nothing was copied."
     print_ok "Infrastructure ready"
 }
 
@@ -1332,21 +1946,21 @@ step_generate_keys() {
         print_warn "Key files already exist in ${DATA_DIR}/node-keys/"
         if ! confirm "Overwrite existing keys?"; then
             print_ok "Keeping existing keys"
+            setup_keep_stored_passphrase
             return 0
         fi
     fi
 
-    local input bls_passphrase bls_passphrase_confirm
+    local input
     if json_mode; then
-        # Address + multiaddrs come from flags (init_node_inputs checked their form);
-        # passphrase from TN_BLS_PASSPHRASE (env only). json_check_keygen_inputs already
-        # refused a missing one before check_root; these checks stay as a safety net.
+        # Address + multiaddrs come from flags (init_node_inputs checked their form); the
+        # passphrase from --passphrase-stdin or TN_BLS_PASSPHRASE (setup_keygen_passphrase
+        # below). json_check_keygen_inputs already refused a missing one before
+        # check_root; these checks stay as a safety net.
         [[ -n "$VALIDATOR_ADDRESS" ]] || setup_fail "--address is missing: keygen needs the node's execution address (0x followed by 40 hex digits)."
         for v in PRIMARY_MULTIADDR WORKER_MULTIADDR PRIMARY_LISTENER_MULTIADDR WORKER_LISTENER_MULTIADDR; do
             [[ -n "${!v}" ]] || setup_fail "missing multiaddr: ${v}"
         done
-        bls_passphrase="${TN_BLS_PASSPHRASE:-}"
-        [[ -n "$bls_passphrase" ]] || setup_fail "TN_BLS_PASSPHRASE not set -- cannot generate keys."
     else
         # The keytool refuses anything else, and the address goes into .node-meta.
         while true; do
@@ -1422,27 +2036,11 @@ step_generate_keys() {
             validate_multiaddr "$WORKER_LISTENER_MULTIADDR" && break
             print_warn "Invalid multiaddr. Expected /ip4/<addr>/udp/<port>/quic-v1 or /ip6/..."
         done
-
-        echo ""
-        print_warn "Set a passphrase to encrypt your BLS validator key."
-        print_warn "Store this securely -- you need it every time the node starts."
-        echo ""
-
-        while true; do
-            read -r -s -p "  Enter BLS key passphrase: " bls_passphrase
-            echo ""
-            read -r -s -p "  Confirm BLS key passphrase: " bls_passphrase_confirm
-            echo ""
-            if [[ "$bls_passphrase" == "$bls_passphrase_confirm" ]]; then
-                if [[ -z "$bls_passphrase" ]]; then
-                    print_warn "Empty passphrase is not recommended."
-                    if ! confirm "Continue with no passphrase?"; then continue; fi
-                fi
-                break
-            fi
-            print_warn "Passphrases do not match -- try again."
-        done
     fi
+
+    # The passphrase (TN_SETUP_PASS): given, or asked for here. There is no key without
+    # one: an empty passphrase would leave the BLS key in the clear (bls.key).
+    setup_keygen_passphrase
 
     # Advertised-RPC args, built once for both keytool calls below and emitted ONLY when
     # set, so a caller that passes neither gets a byte-identical keytool command line to
@@ -1474,72 +2072,34 @@ step_generate_keys() {
     fi
 
     print_step "Generating validator keys..."
-    # Exported for BOTH branches below: the binary keytool reads it directly,
-    # and the docker branch pass-throughs it with `-e TN_BLS_PASSPHRASE` (NAME
-    # only, value taken from this environment -- same convention as the runtime
-    # wrapper). Never put the value in the docker argv: the full command line
-    # is world-readable in /proc/<pid>/cmdline for the life of the keygen.
-    export TN_BLS_PASSPHRASE="$bls_passphrase"
-
-    if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        # Run keygen as the host service account that OWNS DATA_DIR (bind-mounted as the
-        # container HOME /home/nonroot) -- NOT the image's default nonroot UID -- so reth
-        # can write the generated keys. Mirrors the runtime ExecStart's --user. A numeric
-        # --user has no passwd entry in the image, so $HOME would fall back to "/" and
-        # reth's default log dir ($HOME/.cache/reth/logs) would be unwritable; pin
-        # HOME=/home/nonroot (the writable bind-mounted datadir) so reth logs land there.
-        local docker_uid docker_gid
-        docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
-        docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
-        if docker run --rm \
-            --user "${docker_uid}:${docker_gid}" \
-            -e HOME=/home/nonroot \
-            -e TN_BLS_PASSPHRASE \
-            -v "${DATA_DIR}:/home/nonroot" \
-            "$DOCKER_IMAGE" \
-            telcoin keytool generate validator \
-            --datadir /home/nonroot \
-            --address "$VALIDATOR_ADDRESS" \
-            --external-primary-addr "$PRIMARY_MULTIADDR" \
-            --external-worker-addrs "$WORKER_MULTIADDR" \
-            ${rpc_args[@]+"${rpc_args[@]}"}; then
-            print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
-        else
-            setup_fail "Key generation failed."
-        fi
-    else
-        if "$BINARY_PATH" keytool generate validator \
-            --datadir "$DATA_DIR" \
-            --address "$VALIDATOR_ADDRESS" \
-            --external-primary-addr "$PRIMARY_MULTIADDR" \
-            --external-worker-addrs "$WORKER_MULTIADDR" \
-            ${rpc_args[@]+"${rpc_args[@]}"}; then
-            print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
-        else
-            setup_fail "Key generation failed."
-        fi
+    # tn_keytool runs keytool as the service user (the data dir is that user's) and
+    # writes the passphrase to keytool's standard input (--bls-passphrase-source stdin;
+    # docker run -i for an image), so it is in no command line and no environment.
+    # TN_KEYTOOL_PASS is a plain shell variable for this one call, never exported.
+    local keytool_rc=0
+    TN_KEYTOOL_PASS="$TN_SETUP_PASS"
+    tn_keytool "$(node_runner_spec)" "$DATA_DIR" generate validator \
+        --address "$VALIDATOR_ADDRESS" \
+        --external-primary-addr "$PRIMARY_MULTIADDR" \
+        --external-worker-addrs "$WORKER_MULTIADDR" \
+        ${rpc_args[@]+"${rpc_args[@]}"} || keytool_rc=$?
+    unset TN_KEYTOOL_PASS
+    if [[ "$keytool_rc" -ne 0 ]]; then
+        setup_fail "Key generation failed (keytool rc ${keytool_rc})."
     fi
-
-    unset TN_BLS_PASSPHRASE
-    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$DATA_DIR"
-
-    local passphrase_file="${CONFIG_DIR}/bls-passphrase"
-    # Create 0600 from the first byte (umask in a subshell, like
-    # lib/observability.sh does for its token file): write-then-chmod left a
-    # window where the passphrase was readable under the default umask. The
-    # chmod stays for re-runs -- umask does not tighten a pre-existing file.
-    ( umask 077; printf '%s\n' "$bls_passphrase" > "$passphrase_file" )
-    chmod 600 "$passphrase_file"
-    chown "${SERVICE_USER}:${SERVICE_GROUP}" "$passphrase_file"
-
-    if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-        tpm_seal_passphrase "$passphrase_file" "$CONFIG_DIR" "$bls_passphrase"
-    else
-        print_ok "Passphrase stored via LoadCredential (mode 600): ${passphrase_file}"
+    # The key must be the wrapped one: bls.kw present, no cleartext bls.key. Otherwise
+    # the new keys directory goes (removed by the service user, whose directory it is).
+    if [[ ! -f "${DATA_DIR}/node-keys/bls.kw" || -e "${DATA_DIR}/node-keys/bls.key" || -L "${DATA_DIR}/node-keys/bls.key" ]]; then
+        tn_as_service_user rm -rf -- "${DATA_DIR}/node-keys" || true
+        setup_fail "Key generation did not leave an encrypted BLS key (node-keys/bls.kw without node-keys/bls.key); the new keys directory was removed."
     fi
+    print_ok "Node keys generated in: ${DATA_DIR}/node-keys/"
 
-    bls_passphrase=""
-    bls_passphrase_confirm=""
+    # The passphrase the unit loads: the encrypted credential (encrypted from a pipe, no
+    # plaintext file) or the root 0600 file (setup_store_passphrase).
+    setup_store_passphrase
+
+    TN_SETUP_PASS=""
 
     display_node_info "$DATA_DIR" "$VALIDATOR_ADDRESS"
 
@@ -1555,61 +2115,88 @@ step_generate_keys() {
 step_write_config() {
     print_header "Step 6 of 8: Writing Configuration"
 
+    # Everything below lands in the data dir, so the service user writes it
+    # (tn_as_service_user): root never creates, copies or re-owns files there.
     local genesis_dir="${DATA_DIR}/genesis"
-    mkdir -p "$genesis_dir"
-    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$genesis_dir"
+    tn_as_service_user mkdir -p -- "$genesis_dir" \
+        || setup_fail "Could not create ${genesis_dir} as ${SERVICE_USER}."
 
     local chain_subdir
     case "$NETWORK" in
-        testnet) chain_subdir="testnet" ;;
-        devnet)  chain_subdir="devnet" ;;
-        *)       chain_subdir="mainnet" ;;
+        testnet|mainnet|devnet) chain_subdir="$NETWORK" ;;
+        *) setup_fail "no chain-configs for network ${NETWORK}" ;;
     esac
 
-    local chain_configs_found=false
     # TN_GENESIS_DIR (optional) points DIRECTLY at the dir holding genesis.yaml/
-    # committee.yaml/parameters.yaml and is checked FIRST. Expands to nothing when
-    # unset, so the existing search order is unchanged.
+    # committee.yaml/parameters.yaml and is checked FIRST. Never the working
+    # directory: only these absolute places.
     local search_paths=(
         ${TN_GENESIS_DIR:+"$TN_GENESIS_DIR"}
         "${TN_SOURCE_DIR}/chain-configs/${chain_subdir}"
         "/opt/telcoin-source/chain-configs/${chain_subdir}"
-        "./chain-configs/${chain_subdir}"
         "${CONFIG_DIR}/chain-configs/${chain_subdir}"
     )
-
-    for search_path in "${search_paths[@]}"; do
-        if [[ -f "${search_path}/genesis.yaml" ]] && \
-           [[ -f "${search_path}/committee.yaml" ]] && \
-           [[ -f "${search_path}/parameters.yaml" ]]; then
-            print_ok "Found chain-configs at: ${search_path}"
-            cp "${search_path}/genesis.yaml"    "${genesis_dir}/genesis.yaml"
-            cp "${search_path}/committee.yaml"  "${genesis_dir}/committee.yaml"
-            cp "${search_path}/parameters.yaml" "${DATA_DIR}/parameters.yaml"
-            chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$genesis_dir" "${DATA_DIR}/parameters.yaml"
-            print_ok "Chain config files copied"
-            chain_configs_found=true
-            break
-        fi
-    done
-
-    if [[ "$chain_configs_found" == "false" ]]; then
+    local search_path found="" try
+    for try in 1 2; do
+        for search_path in "${search_paths[@]}"; do
+            if [[ -f "${search_path}/genesis.yaml" ]] && \
+               [[ -f "${search_path}/committee.yaml" ]] && \
+               [[ -f "${search_path}/parameters.yaml" ]]; then
+                found="$search_path"
+                break 2
+            fi
+        done
+        [[ "$try" == 1 ]] || break
         print_warn "Chain config files not found automatically."
-        print_info "Copy from: https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
+        print_info "Copy genesis.yaml, committee.yaml and parameters.yaml from"
+        print_info "  https://github.com/Telcoin-Association/telcoin-network/tree/main/chain-configs/${chain_subdir}/"
+        print_info "into ${CONFIG_DIR}/chain-configs/${chain_subdir}/ (or pass --genesis-dir)."
         echo ""
         if json_mode; then
             setup_fail "Chain config files missing and cannot prompt in non-interactive mode."
         fi
-        read -r -p "  Press Enter once you have copied the chain config files: "
+        read -r -p "  Press Enter once you have copied the chain config files: " || true
+    done
+    [[ -n "$found" ]] || setup_fail "Chain config files not found in ${search_paths[*]}."
+    print_ok "Found chain-configs at: ${found}"
+    # The pinned hashes, before anything is copied.
+    tn_chain_configs_check "$found" "$NETWORK" setup_progress \
+        || setup_fail "The chain configs in ${found} do not match the ${NETWORK} pins (see above); nothing was copied."
+    # The service user copies them, so it reads only what it may read: a
+    # chain-config directory it cannot read stops setup here.
+    if ! tn_as_service_user cp -- "${found}/genesis.yaml" "${genesis_dir}/genesis.yaml" \
+        || ! tn_as_service_user cp -- "${found}/committee.yaml" "${genesis_dir}/committee.yaml" \
+        || ! tn_as_service_user cp -- "${found}/parameters.yaml" "${DATA_DIR}/parameters.yaml"; then
+        setup_fail "Could not copy the chain config files from ${found} as ${SERVICE_USER}: they must be readable by that user."
     fi
+    # And the copies, so a file swapped between the check and the copy is caught.
+    if [[ "$NETWORK" != "devnet" ]] && ! _setup_copied_configs_ok "$genesis_dir"; then
+        tn_as_service_user rm -f -- "${genesis_dir}/genesis.yaml" "${genesis_dir}/committee.yaml" "${DATA_DIR}/parameters.yaml" || true
+        setup_fail "The copied chain configs in ${DATA_DIR} do not match the ${NETWORK} pins; they were removed."
+    fi
+    print_ok "Chain config files copied (sha256 checked)"
 
     # Optional advertised node name -> data dir's network-config (no-op if blank).
-    write_advertised_name "$DATA_DIR" "$ADVERTISED_NAME" "${SERVICE_USER}:${SERVICE_GROUP}"
+    write_advertised_name "$DATA_DIR" "$ADVERTISED_NAME" || true
 
     print_ok "Configuration ready under: ${DATA_DIR}"
 }
 
+# _setup_copied_configs_ok GENESIS_DIR -- rc 0 when the three copied chain configs
+# (GENESIS_DIR/genesis.yaml, GENESIS_DIR/committee.yaml, DATA_DIR/parameters.yaml)
+# still carry the NETWORK pins.
+_setup_copied_configs_ok() {
+    local f got want
+    for f in "${1}/genesis.yaml" "${1}/committee.yaml" "${DATA_DIR}/parameters.yaml"; do
+        want="$(tn_chain_config_pin "$NETWORK" "${f##*/}")"
+        got="$(sha256sum < "$f" 2>/dev/null)" || return 1
+        [[ -n "$want" && "${got%% *}" == "$want" ]] || return 1
+    done
+    return 0
+}
+
 # Build NODE_EXTRA_FLAGS, the node flags for the launch line, and record the choices in
+
 # .node-meta (BOOTSTRAP_PEERS_FILE, STATE_EXPORT). Each flag in use must be listed by the
 # `node --help` of the release this run installs: the flags are opt-in, and a node given
 # a flag its release does not know refuses to start, so a missing one stops setup. The
@@ -1620,7 +2207,7 @@ step_write_config() {
 # start wrapper is written (a --json finalize is a new process); a second run in one
 # process, for the same release, does nothing.
 prepare_node_extra_flags() {
-    local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$'
+    local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$' w
     spec="$(node_runner_spec)"
     if [[ "$NODE_EXTRA_FLAGS_SPEC" == "$spec" ]]; then
         return 0
@@ -1647,6 +2234,16 @@ prepare_node_extra_flags() {
             flags="${flags:+${flags} }--enable-state-export --state-export-keep ${STATE_EXPORT}"
             ;;
     esac
+    # A node that serves RPC to the internet gets conservative limits and only the
+    # namespaces wallets need; its release must list each of those flags too.
+    if [[ "${ENABLE_PUBLIC_RPC:-false}" == "true" ]]; then
+        for w in $(public_rpc_limit_flags); do
+            if [[ "$w" == --* ]]; then
+                require_node_flag "$spec" "$w" v0.13.0-adiri
+            fi
+        done
+        flags="${flags:+${flags} }$(public_rpc_limit_flags)"
+    fi
     # The release knows every flag in use; now the map itself.
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
         install_bootstrap_peers "$spec" "$BOOTSTRAP_PEERS_SRC" "$peers"
@@ -1662,6 +2259,23 @@ prepare_node_extra_flags() {
     fi
     NODE_EXTRA_FLAGS_SPEC="$spec"
     return 0
+}
+
+# setup_quorum_guard URL -- stop setup before a restart that would leave the committee
+# one member short of a halt (tn_committee_down_guard); --allow-quorum-risk overrides.
+setup_quorum_guard() {
+    local rc=0
+    tn_committee_down_guard "$1" setup_progress || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        setup_fail "Not restarting ${SERVICE_NAME}: the committee check refused it (see above). The new files are in place and take effect at the next restart; for a coordinated restart run again with --allow-quorum-risk."
+    fi
+    return 0
+}
+
+# The launch flags of a node that serves public RPC: bounded log queries,
+# subscriptions and request size, and HTTP limited to eth, net, web3 and tn.
+public_rpc_limit_flags() {
+    printf '%s' "--rpc.max-blocks-per-filter 10000 --rpc.max-logs-per-response 10000 --rpc.max-subscriptions-per-connection 100 --rpc.max-request-size 2 --http.api eth,net,web3,tn"
 }
 
 # The runner spec (lib/common.sh) of the node this run installs: docker:<image> or
@@ -1743,6 +2357,21 @@ install_bootstrap_peers() {
     return 0
 }
 
+# Make the start script's directory (/usr/local/libexec/telcoin) a root:root 0755
+# directory, creating it when absent, and refuse a script path that is a symlink or a
+# directory. Stops setup otherwise.
+setup_start_script_dir() {
+    local script="$1" rc=0
+    _tn_root_layout_dir "${script%/*}" root 0755 || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        setup_fail "Could not prepare ${script%/*} for the start script (it must be a root-owned directory)."
+    fi
+    if [[ -L "$script" || -d "$script" ]]; then
+        setup_fail "Refusing ${script}: it is a symlink or a directory."
+    fi
+    return 0
+}
+
 # The flags appended to the node launch line for METHOD (docker | binary): the testnet
 # add-on flags (tn_node_launch_flags), then NODE_EXTRA_FLAGS. The wrapper heredocs expand
 # this text once, so a "$(cat FILE)" inside it lands in the wrapper as written and runs
@@ -1774,7 +2403,6 @@ step_create_service() {
     local worker_multiaddr="$WORKER_LISTENER_MULTIADDR"
     print_info "P2P listener (internal): ${primary_multiaddr}"
 
-    local passphrase_file="${CONFIG_DIR}/bls-passphrase"
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
 
     # The UI runs setup as two separate processes (keygen, then finalize). The
@@ -1789,235 +2417,62 @@ step_create_service() {
 
     prepare_node_extra_flags
 
+    # Where the node logs: the journal (default on mainnet) or the two files in the
+    # root-owned log dir. Recorded in .node-meta below, so every later rewrite of the
+    # unit keeps it.
+    if [[ -z "${LOG_TARGET:-}" ]]; then
+        LOG_TARGET="file"
+        [[ "$NETWORK" == "mainnet" ]] && LOG_TARGET="journal"
+    fi
+
+    # node.env, the start script and the unit come from the library writers
+    # (tn_write_node_env, tn_write_start_script, tn_write_node_unit), the same ones
+    # update-node.sh, edit-config.sh and migrate-node-naming.sh use. The listener
+    # addresses live in node.env; the flags stay on the start script's node line; the
+    # passphrase reaches the node on stdin from the systemd credential and is never in
+    # any of these files.
+    if ! tn_write_node_env "$primary_multiaddr" "$worker_multiaddr"; then
+        setup_fail "Could not write ${CONFIG_DIR}/node.env (both listener addresses must be set and valid: ${primary_multiaddr:-<empty>}, ${worker_multiaddr:-<empty>})."
+    fi
+    print_ok "Listener addresses written: ${CONFIG_DIR}/node.env"
+
+    local wrapper runner node_args launch_flags method
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        # Guard: never write a wrapper without an image (docker would take the next
-        # word, `telcoin`, for the image name).
+        # Never a script without an image (docker would take the next word for it).
         if [[ -z "${DOCKER_IMAGE:-}" ]]; then
-            setup_fail "No docker image to run (--docker-image) -- cannot write start wrapper."
+            setup_fail "No docker image to run (--docker-image) -- cannot write the start script."
         fi
-        local docker_uid docker_gid
-        docker_uid=$(id -u "$SERVICE_USER" 2>/dev/null || echo "1101")
-        docker_gid=$(id -g "$SERVICE_GROUP" 2>/dev/null || echo "1101")
-
-        # Testnet opt-in launch flags (healthcheck + JSON log shipping) and the node flags
-        # (bootstrap peers, state export) as ONE line, so an empty tail can't leave a
-        # dangling backslash. Docker reth log dir is the container path
-        # /home/nonroot/logs (= host ${DATA_DIR}/logs). The peers map is read on the host,
-        # where "$(cat ...)" runs, and reaches the container as one argument.
-        local launch_flags; launch_flags="$(node_launch_flags docker)"
-
-        # BLS passphrase is injected at RUNTIME, mirroring the source/binary path below: a
-        # root-owned wrapper reads it (TPM, else the systemd LoadCredential dir) and
-        # pass-throughs it to the container with `-e TN_BLS_PASSPHRASE` (NAME only -- the
-        # value is NEVER written into the unit, so `systemctl cat`/`show` stay clean). The
-        # value still lives in the container's env (inherent to Docker; see the README
-        # security note) -- keeping it out of the persisted unit is the meaningful win.
-        #
-        # Pin HOME=/home/nonroot in the docker run: a numeric --user has no passwd entry in
-        # the image, so $HOME would default to "/" and reth's default log dir
-        # ($HOME/.cache/reth/logs) would be unwritable -> the node crash-loops on boot unless
-        # obs logging happens to add --log.file.directory. The datadir is bind-mounted at
-        # /home/nonroot and owned by --user, so logs/keys land writable. (Same root cause as
-        # the keygen docker run.)
-        local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
-        install -d -m 0755 "${INSTALL_DIR}"
-        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-            cat > "$wrapper" <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from TPM (with LoadCredential fallback) and starts the node container.
-if command -v tpm2_unseal &>/dev/null && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.pub ]] && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.priv ]]; then
-    tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null
-    tpm2_load -Q -C /tmp/tn-tpm-primary.ctx \
-        -u ${CONFIG_DIR}/bls-tpm.pub \
-        -r ${CONFIG_DIR}/bls-tpm.priv \
-        -c /tmp/tn-tpm-sealed.ctx 2>/dev/null
-    export TN_BLS_PASSPHRASE=\$(tpm2_unseal -Q -c /tmp/tn-tpm-sealed.ctx 2>/dev/null)
-    rm -f /tmp/tn-tpm-primary.ctx /tmp/tn-tpm-sealed.ctx
-fi
-if [[ -z "\${TN_BLS_PASSPHRASE:-}" ]]; then
-    export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase" 2>/dev/null || echo "")
-fi
-exec docker run --rm \
---name ${SERVICE_NAME} \
---user ${docker_uid}:${docker_gid} \
--e "HOME=/home/nonroot" \
---network=host \
--e TN_BLS_PASSPHRASE \
--e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
--e "WORKER_LISTENER_MULTIADDR=${worker_multiaddr}" \
--v ${DATA_DIR}:/home/nonroot \
--v ${CONFIG_DIR}:/etc/telcoin:ro \
-${DOCKER_IMAGE} \
-telcoin node \
---datadir /home/nonroot \
---log.stdout.format log-fmt \
--vvv \
---http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
-        else
-            cat > "$wrapper" <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from the systemd credential directory and starts the node container.
-export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase")
-exec docker run --rm \
---name ${SERVICE_NAME} \
---user ${docker_uid}:${docker_gid} \
--e "HOME=/home/nonroot" \
---network=host \
--e TN_BLS_PASSPHRASE \
--e "PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}" \
--e "WORKER_LISTENER_MULTIADDR=${worker_multiaddr}" \
--v ${DATA_DIR}:/home/nonroot \
--v ${CONFIG_DIR}:/etc/telcoin:ro \
-${DOCKER_IMAGE} \
-telcoin node \
---datadir /home/nonroot \
---log.stdout.format log-fmt \
--vvv \
---http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
-        fi
-        # Root-owned + non-writable by SERVICE_USER: the unit runs ExecStart as root, so a
-        # service-user-writable wrapper would be a root-escalation vector.
-        chmod 0750 "$wrapper"
-        chown root:root "$wrapper"
-        print_ok "Wrapper script written: ${wrapper}"
-
-        {
-            cat <<EOF
-[Unit]
-Description=Telcoin Network Node (${CHAIN_NAME}) [Docker]
-After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=root
-EOF
-            # Only include LoadCredential for the loadcredential method (TPM manages the
-            # passphrase itself -- the credential file may not exist).
-            if [[ "$PASSPHRASE_METHOD" != "tpm" ]]; then
-                echo "LoadCredential=bls-passphrase:${passphrase_file}"
-            fi
-            cat <<EOF
-ExecStartPre=-/usr/bin/docker rm -f ${SERVICE_NAME}
-ExecStart=${wrapper}
-ExecStop=docker stop ${SERVICE_NAME}
-Restart=on-failure
-RestartSec=10
-StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
-StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        } > "$service_file"
-
+        method="docker"
+        runner="$DOCKER_IMAGE"
+        # Inside the container the data dir is /home/nonroot (HOME is pinned there too,
+        # so the reth logs land in the bind-mounted data dir).
+        launch_flags="$(node_launch_flags docker)"
+        node_args="--datadir /home/nonroot --log.stdout.format log-fmt -vvv --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1${launch_flags:+ ${launch_flags}}"
     else
-        # Guard: never write a wrapper with an empty binary path (it would exec
-        # the system `node` and fail with "node: bad option: --datadir").
+        # Never a script with an empty binary path (it would exec the system `node`).
         if [[ -z "${BINARY_PATH:-}" || ! -x "${BINARY_PATH}" ]]; then
-            setup_fail "Node binary not found at '${BINARY_PATH:-<unset>}' -- cannot write start wrapper. A source build installs it at ${INSTALL_DIR}/telcoin-network; an existing install needs --binary-path."
+            setup_fail "Node binary not found at '${BINARY_PATH:-<unset>}' -- cannot write the start script. A source build installs it at ${INSTALL_DIR}/telcoin-network; an existing install needs --binary-path."
         fi
-        local wrapper="${INSTALL_DIR}/start-${SERVICE_NAME}.sh"
-
-        # Testnet opt-in launch flags (healthcheck + JSON log shipping) and the node flags
-        # (bootstrap peers, state export) as ONE line, so an empty tail can't leave a
-        # dangling backslash. Binary reth log dir is the host path /var/log/telcoin
-        # (already in the unit's ReadWritePaths, owned telcoin:telcoin).
-        local launch_flags; launch_flags="$(node_launch_flags binary)"
-
-        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-            cat > "$wrapper" <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from TPM (with LoadCredential fallback) and starts the node
-if command -v tpm2_unseal &>/dev/null && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.pub ]] && \
-   [[ -f ${CONFIG_DIR}/bls-tpm.priv ]]; then
-    tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null
-    tpm2_load -Q -C /tmp/tn-tpm-primary.ctx \
-        -u ${CONFIG_DIR}/bls-tpm.pub \
-        -r ${CONFIG_DIR}/bls-tpm.priv \
-        -c /tmp/tn-tpm-sealed.ctx 2>/dev/null
-    export TN_BLS_PASSPHRASE=\$(tpm2_unseal -Q -c /tmp/tn-tpm-sealed.ctx 2>/dev/null)
-    rm -f /tmp/tn-tpm-primary.ctx /tmp/tn-tpm-sealed.ctx
-fi
-if [[ -z "\${TN_BLS_PASSPHRASE:-}" ]]; then
-    export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase" 2>/dev/null || echo "")
-fi
-export PRIMARY_LISTENER_MULTIADDR="${primary_multiaddr}"
-export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
-exec ${BINARY_PATH} node \
-  --datadir ${DATA_DIR} \
-  --log.stdout.format log-fmt \
-  -vvv \
-  --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
+        method="${INSTALL_METHOD:-source}"
+        runner="$BINARY_PATH"
+        launch_flags="$(node_launch_flags binary)"
+        node_args="--datadir ${DATA_DIR} --log.stdout.format log-fmt -vvv --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1${launch_flags:+ ${launch_flags}}"
+    fi
+    wrapper="$(tn_start_script_path "$([[ "$method" == docker ]] && echo docker || echo source)")"
+    setup_start_script_dir "$wrapper"
+    if ! tn_write_start_script "$method" "$runner" "$node_args"; then
+        setup_fail "Could not write the start script ${wrapper} (see the message above)."
+    fi
+    print_ok "Start script written: ${wrapper}"
+    if ! tn_write_node_unit "$method"; then
+        setup_fail "Could not write ${service_file} (see the message above)."
+    fi
+    if [[ "$LOG_TARGET" == "journal" ]]; then
+        if tn_install_journald_dropin; then
+            systemctl restart systemd-journald 2>/dev/null || true
         else
-            cat > "$wrapper" <<EOF
-#!/usr/bin/env bash
-# Auto-generated by setup-node.sh v${SCRIPT_VERSION}
-# Reads BLS passphrase from systemd credential directory and starts the node
-export TN_BLS_PASSPHRASE=\$(cat "\${CREDENTIALS_DIRECTORY}/bls-passphrase")
-export PRIMARY_LISTENER_MULTIADDR="${primary_multiaddr}"
-export WORKER_LISTENER_MULTIADDR="${worker_multiaddr}"
-exec ${BINARY_PATH} node \
-  --datadir ${DATA_DIR} \
-  --log.stdout.format log-fmt \
-  -vvv \
-  --http --http.addr 127.0.0.1 --ws --ws.addr 127.0.0.1 ${launch_flags}
-EOF
+            setup_warn "Could not write the journal size cap (/etc/systemd/journald.conf.d/50-telcoin.conf); journald keeps its own defaults."
         fi
-
-        chmod +x "$wrapper"
-        chown "${SERVICE_USER}:${SERVICE_GROUP}" "$wrapper"
-        print_ok "Wrapper script written: ${wrapper}"
-
-        {
-            cat <<EOF
-[Unit]
-Description=Telcoin Network Node (${CHAIN_NAME})
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_GROUP}
-EOF
-            # Only include LoadCredential for loadcredential method
-            # TPM method manages passphrase directly -- file may not exist
-            if [[ "$PASSPHRASE_METHOD" != "tpm" ]]; then
-                echo "LoadCredential=bls-passphrase:${passphrase_file}"
-            fi
-            cat <<EOF
-Environment="PRIMARY_LISTENER_MULTIADDR=${primary_multiaddr}"
-Environment="WORKER_LISTENER_MULTIADDR=${worker_multiaddr}"
-ExecStart=${wrapper}
-Restart=on-failure
-RestartSec=10
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ReadWritePaths=${DATA_DIR} ${LOG_DIR}
-LimitNOFILE=65536
-StandardOutput=append:${LOG_DIR}/${SERVICE_NAME}.log
-StandardError=append:${LOG_DIR}/${SERVICE_NAME}-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        } > "$service_file"
     fi
 
     systemctl daemon-reload
@@ -2052,21 +2507,40 @@ EOF
         "VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}" \
         "VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}" \
         "PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}" \
-        "PUBLIC_WS_URL=${PUBLIC_WS_URL:-}"
+        "PUBLIC_WS_URL=${PUBLIC_WS_URL:-}" \
+        "LOG_TARGET=${LOG_TARGET}" \
+        "OWNERSHIP_LAYOUT=2"
     write_node_meta_runner
+    # The digest a Docker node runs, and the release tag the binary or image came from
+    # when it is known (a source build, a release install, --release-tag).
+    if [[ "${INSTALL_METHOD:-}" == "docker" && "${DOCKER_IMAGE:-}" == *@sha256:* ]]; then
+        write_node_meta "DOCKER_IMAGE_DIGEST=${DOCKER_IMAGE##*@}"
+    fi
+    if [[ -n "${RELEASE_TAG:-}" ]]; then
+        write_node_meta "RELEASE_TAG=${RELEASE_TAG}"
+    fi
     print_ok "Node metadata written: ${meta_file}"
 
-    # Start each install with a clean log. The unit appends
-    # (StandardOutput=append:), so a re-install would otherwise concatenate its
-    # output onto the previous install's log -- mixing old + new runs in the file
-    # the UI's "download full log" serves. Truncate in place (preserves the
-    # service-user ownership); systemd recreates a fresh file for a new install.
-    [[ -f "${LOG_DIR}/${SERVICE_NAME}.log" ]] && : > "${LOG_DIR}/${SERVICE_NAME}.log" || true
-    [[ -f "${LOG_DIR}/${SERVICE_NAME}-error.log" ]] && : > "${LOG_DIR}/${SERVICE_NAME}-error.log" || true
+    # The two log files the unit appends to (StandardOutput=append:) exist before the
+    # first start, root:telcoin-log 0640 in the root-owned log dir, so systemd never
+    # creates them. A re-run keeps their content.
+    tn_precreate_log_files "$LOG_DIR" "$SERVICE_NAME" \
+        || setup_fail "Could not prepare the node log files in ${LOG_DIR}."
 
     echo ""
     if json_mode || confirm "Start the node now?"; then
-        systemctl start "$SERVICE_NAME"
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            # A re-run over a running node: restart it so the new unit and start script
+            # take effect, unless that would leave the committee one member short of a
+            # halt, and after the current epoch closes when the node votes in it.
+            setup_quorum_guard "http://127.0.0.1:${RPC_PORT}"
+            tn_wait_restart_window "http://127.0.0.1:${RPC_PORT}" setup_progress
+            # Again after the wait, which can last up to TN_EPOCH_WAIT_MAX.
+            setup_quorum_guard "http://127.0.0.1:${RPC_PORT}"
+            systemctl restart "$SERVICE_NAME"
+        else
+            systemctl start "$SERVICE_NAME"
+        fi
         sleep 3
 
         if systemctl is-active --quiet "$SERVICE_NAME"; then
@@ -2204,8 +2678,11 @@ step_public_rpc() {
     # --json) so its progress shows here. stdin is /dev/null and TN_ASSUME_YES is forced
     # off, so nothing can block on a prompt or auto-accept one (e.g. replacing a Caddyfile
     # this repo did not write); fd3 (the --json event stream) is closed for the child.
+    # --yes accepts only the public RPC exposure summary: the operator's --rpc-domain
+    # (or the domain typed at the prompt) is that consent.
     print_step "Enabling public RPC for ${d} (Caddy + node-info.yaml advertisement)..."
-    if ! TN_ASSUME_YES=false bash "$caddy" --phase=rpc-enable --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-; then
+    # --allow-quorum-risk reaches the child's restart too (it reads the variable).
+    if ! TN_ASSUME_YES=false TN_ALLOW_QUORUM_RISK="${TN_ALLOW_QUORUM_RISK:-}" bash "$caddy" --phase=rpc-enable --yes --rpc-domain "$d" ${RPC_INBOUND_IP:+--public-ip "$RPC_INBOUND_IP"} </dev/null 3>&-; then
         public_rpc_pending "install-caddy.sh did not finish enabling it (see the messages above)."
         return 0
     fi
@@ -2272,12 +2749,10 @@ step_final_summary() {
         "Explorer=${EXPLORER_URL}" \
         ${node_flags[@]+"${node_flags[@]}"}
 
-    if [[ "${INSTALL_METHOD:-}" != "docker" ]]; then
-        if [[ "$PASSPHRASE_METHOD" == "tpm" ]]; then
-            print_info "BLS passphrase sealed to TPM chip."
-        else
-            print_info "BLS passphrase secured via systemd LoadCredential (not exposed in service file)."
-        fi
+    if [[ "$PASSPHRASE_METHOD" == "credential" ]]; then
+        print_info "BLS passphrase kept as an encrypted systemd credential (${CONFIG_DIR}/bls-passphrase.cred, ${CREDENTIAL_KEY:-host})."
+    else
+        print_info "BLS passphrase kept in the root-only file ${CONFIG_DIR}/bls-passphrase (systemd LoadCredential)."
     fi
 
     # Public RPC (only when a domain was chosen): the endpoints, and either the enabled +
@@ -2350,8 +2825,9 @@ step_final_summary() {
 # fd handling mirrors update-node.sh: stdout -> fd3 (newline-delimited JSON),
 # real stdout -> stderr. main finds --json and swaps the fds before it parses
 # anything, and installs json_on_exit, so every --json run prints only JSON on
-# stdout and ends with exactly one done event, however it stops. BLS passphrase
-# arrives via TN_BLS_PASSPHRASE env ONLY.
+# stdout and ends with exactly one done event, however it stops. The BLS passphrase
+# arrives on standard input (--passphrase-stdin) or in TN_BLS_PASSPHRASE, which the
+# top of this file moves into TN_SETUP_PASS, a shell variable that is never exported.
 #
 # Note: on-chain validator registration (governance approval, staking,
 # activate()) is intentionally NOT performed here -- the UI surfaces the
@@ -2364,6 +2840,7 @@ JSON_BUILD_REF=""
 JSON_NETWORK_INPUT="testnet"
 JSON_DONE_EMITTED=false
 JSON_LAST_ERROR=""   # the last error event's message; json_on_exit reuses it for done
+SETUP_SIGNAL=""      # TERM, INT or HUP when a signal ended the run (json_on_exit names it)
 # Optional override: dir holding genesis.yaml/committee.yaml/parameters.yaml,
 # checked first by step_write_config. Preserve any env value; default empty so
 # `set -u` never trips and the ${TN_GENESIS_DIR:+...} expansion is a no-op.
@@ -2414,14 +2891,23 @@ run_streamed() {
     "$@"
 }
 
-# The EXIT trap, installed by main before it parses anything. In --json mode it
-# sends {"event":"done","ok":false,...} when the run is ending without its done
-# event, with the last error event's message, or a pointer to stderr when there
-# was none. Human mode: nothing.
+# The EXIT trap, installed by main before it parses anything. It releases the update
+# lock when this run still holds it (both modes). In --json mode it then sends
+# {"event":"done","ok":false,...} when the run is ending without its done event, with
+# the last error event's message, or a pointer to stderr when there was none.
 json_on_exit() {
-    local rc=$?
+    local rc=$? msg
+    # The cleanup must finish: no second signal interrupts it.
+    trap '' TERM INT HUP
+    tn_remove_inflight_tmp
+    setup_release_lock
     if json_mode && [[ "$JSON_DONE_EMITTED" != "true" ]]; then
-        json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "${JSON_LAST_ERROR:-setup exited early (rc=${rc}) -- see server logs / journalctl}")\"}" 2>/dev/null || true
+        if [[ -n "$SETUP_SIGNAL" ]]; then
+            msg="setup stopped by SIG${SETUP_SIGNAL} (rc=${rc})${JSON_LAST_ERROR:+; the last error was: ${JSON_LAST_ERROR}}"
+        else
+            msg="${JSON_LAST_ERROR:-setup exited early (rc=${rc}) -- see server logs / journalctl}"
+        fi
+        json_done "{\"event\":\"done\",\"ok\":false,\"msg\":\"$(json_escape "$msg")\"}" 2>/dev/null || true
     fi
     return "$rc"
 }
@@ -2431,14 +2917,29 @@ json_set_network() {
         testnet|adiri)
             NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
             RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
+        mainnet)
+            NETWORK="mainnet"; CHAIN_ID="$MAINNET_CHAIN_ID"; CHAIN_NAME="$MAINNET_CHAIN_NAME"
+            RPC_URL="${MAINNET_RPC_URL:-}"; EXPLORER_URL="${MAINNET_EXPLORER:-}" ;;
         devnet)
             NETWORK="devnet"; CHAIN_ID="$DEVNET_CHAIN_ID"; CHAIN_NAME="$DEVNET_CHAIN_NAME"
             RPC_URL="${DEVNET_RPC_URL:-}"; EXPLORER_URL="${DEVNET_EXPLORER:-}" ;;
-        *) setup_fail "unsupported network: ${1} (expected testnet or devnet)" ;;
+        *) setup_fail "unsupported network: ${1} (expected testnet, mainnet or devnet)" ;;
     esac
 }
 
+# json_refuse_installed PHASE -- a --json keygen or finalize never runs over an
+# installed node (its unit exists): nothing is written, the run stops. run_json_mode
+# asks before it takes the lock, and the phase asks again under the lock.
+json_refuse_installed() {
+    local unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
+    if [[ -e "$unit" || -L "$unit" ]]; then
+        setup_fail "A node is already installed (${unit} exists), so --phase=${1} does not run. Use edit-config.sh to change it, or remove-node.sh first."
+    fi
+    return 0
+}
+
 json_phase_keygen() {
+    json_refuse_installed keygen
     json_event step "Running preflight checks and installing dependencies"
     step_preflight
     json_event step "Applying node configuration"
@@ -2453,24 +2954,53 @@ json_phase_keygen() {
     json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"keygen\",\"node_type\":\"observer\",\"node_info_path\":\"$(json_escape "$info")\",\"keys_dir\":\"$(json_escape "${DATA_DIR}/node-keys")\",\"node_info\":\"${info_content}\",\"msg\":\"keys generated -- BACK THEM UP before finalizing\"}"
 }
 
-# Finalize is a new process. The install method and the docker image or binary come from
-# its flags or, for any the flags leave out, from what keygen recorded in .node-meta.
+# finalize_same_as_keygen FLAG VALUE RECORDED -- stop when a finalize flag and the
+# value keygen recorded in .node-meta are both set and differ: the keys, the image or
+# binary and the data dir keygen used are the ones finalize must run.
+finalize_same_as_keygen() {
+    if [[ -n "$2" && -n "$3" && "$2" != "$3" ]]; then
+        setup_fail "--${1} ${2} differs from ${3}, which keygen recorded in ${CONFIG_DIR}/.node-meta; finalize with the keygen value (or leave the flag out), or run keygen again. Nothing was changed."
+    fi
+}
+
+# Finalize is a new process. The install method, the data dir and the docker image or
+# binary come from its flags or, for any the flags leave out, from what keygen recorded
+# in .node-meta; a flag that differs from the recorded value stops it. --data-dir is
+# compared only when it is not the default, which is what an absent flag leaves.
 # Stops when the node would have nothing to run, before anything is written.
 finalize_install_inputs() {
-    local meta="${CONFIG_DIR}/.node-meta"
-    if [[ -z "$INSTALL_METHOD" ]]; then
-        INSTALL_METHOD="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || true)"
+    local meta="${CONFIG_DIR}/.node-meta" rec=""
+    # The passphrase form keygen recorded wins over a flag: the stored file is that one.
+    local pm=""
+    setup_meta_read pm PASSPHRASE_METHOD "$meta"
+    [[ "$pm" == "loadcredential" ]] && pm=stdin
+    PASSPHRASE_METHOD="${pm:-$PASSPHRASE_METHOD}"
+    case "$PASSPHRASE_METHOD" in
+        credential) [[ -f "${CONFIG_DIR}/bls-passphrase.cred" ]] || setup_fail "PASSPHRASE_METHOD=credential but ${CONFIG_DIR}/bls-passphrase.cred is missing: run --phase=keygen first." ;;
+        stdin) [[ -f "${CONFIG_DIR}/bls-passphrase" ]] || setup_fail "PASSPHRASE_METHOD=stdin but ${CONFIG_DIR}/bls-passphrase is missing: run --phase=keygen first." ;;
+        *) setup_fail "No stored BLS passphrase recorded in ${meta} (PASSPHRASE_METHOD): run --phase=keygen first." ;;
+    esac
+    setup_meta_read rec INSTALL_METHOD "$meta"
+    finalize_same_as_keygen install-method "$INSTALL_METHOD" "$rec"
+    INSTALL_METHOD="${INSTALL_METHOD:-$rec}"
+    setup_meta_read rec DATA_DIR "$meta"
+    if [[ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ]]; then
+        finalize_same_as_keygen data-dir "$DATA_DIR" "$rec"
+    fi
+    DATA_DIR="${rec:-$DATA_DIR}"
+    if ! validate_setup_path "$DATA_DIR"; then
+        setup_fail "DATA_DIR=${DATA_DIR} in ${meta} is not an absolute path of letters, digits and . _ / - only."
     fi
     # Values read back from .node-meta get the checks the flags got: the image and the
     # binary path go into the root-run start wrapper.
     case "$INSTALL_METHOD" in
-        ""|source|docker|existing) ;;
-        *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, docker or existing." ;;
+        ""|source|docker|existing|release) ;;
+        *) setup_fail "INSTALL_METHOD=${INSTALL_METHOD} in ${meta} is not source, release, docker or existing." ;;
     esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
-        if [[ -z "$DOCKER_IMAGE" ]]; then
-            DOCKER_IMAGE="$(meta_get DOCKER_IMAGE "$meta" 2>/dev/null || true)"
-        fi
+        setup_meta_read rec DOCKER_IMAGE "$meta"
+        finalize_same_as_keygen docker-image "$DOCKER_IMAGE" "$rec"
+        DOCKER_IMAGE="${DOCKER_IMAGE:-$rec}"
         if [[ -z "$DOCKER_IMAGE" ]]; then
             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
         fi
@@ -2479,9 +3009,9 @@ finalize_install_inputs() {
         fi
         return 0
     fi
-    if [[ -z "$BINARY_PATH" ]]; then
-        BINARY_PATH="$(meta_get BINARY_PATH "$meta" 2>/dev/null || true)"
-    fi
+    setup_meta_read rec BINARY_PATH "$meta"
+    finalize_same_as_keygen binary-path "$BINARY_PATH" "$rec"
+    BINARY_PATH="${BINARY_PATH:-$rec}"
     if [[ -n "$BINARY_PATH" ]] && ! validate_setup_path "$BINARY_PATH"; then
         setup_fail "BINARY_PATH=${BINARY_PATH} in ${meta} may hold only letters, digits and . _ / -, because the start wrapper runs it; pass --binary-path."
     fi
@@ -2495,12 +3025,22 @@ finalize_install_inputs() {
 }
 
 json_phase_finalize() {
+    local v
+    json_refuse_installed finalize
     finalize_install_inputs
+    # The node binds to these; an empty one would start a node with no listener.
+    for v in "$PRIMARY_LISTENER_MULTIADDR" "$WORKER_LISTENER_MULTIADDR"; do
+        if [[ -z "$v" ]] || ! validate_multiaddr "$v"; then
+            setup_fail "finalize needs --listener-primary and --listener-worker, each a /ip4/<addr>/udp/<port>/quic-v1 (or /ip6/...) multiaddr; got '${v}'."
+        fi
+    done
     finalize_node_extra_flags
     json_event step "Writing configuration"
     step_write_config
     json_event step "Creating service and starting node"
     step_create_service
+    # install-caddy.sh (step_public_rpc) takes the lock itself.
+    setup_release_lock
     if [[ -n "$PUBLIC_RPC_DOMAIN" ]]; then
         json_event step "Enabling public RPC for ${PUBLIC_RPC_DOMAIN}"
         step_public_rpc
@@ -2529,23 +3069,36 @@ public_rpc_json() {
 # --docker-image, both held to the network's oldest supported release.
 json_check_install_flags() {
     case "$INSTALL_METHOD" in
-        ""|source|docker|existing) ;;
-        *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, docker or existing)" ;;
+        ""|source|release|docker|existing) ;;
+        *) setup_fail "unknown --install-method ${INSTALL_METHOD} (expected source, release, docker or existing)" ;;
     esac
     if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
-        setup_fail "--install-method is missing (expected source, docker or existing)"
+        setup_fail "--install-method is missing (expected source, release, docker or existing)"
     fi
-    if [[ "$INSTALL_METHOD" == "source" && "$JSON_PHASE" == "keygen" && -z "$JSON_BUILD_REF" ]]; then
-        setup_fail "No --build-ref supplied for source build."
+    if [[ "$JSON_PHASE" == "keygen" && -z "$RELEASE_TAG" ]] && [[ "$INSTALL_METHOD" == "source" || "$INSTALL_METHOD" == "release" ]]; then
+        setup_fail "No --release-tag (or --build-ref) supplied for a ${INSTALL_METHOD} install."
     fi
-    if [[ -n "$JSON_BUILD_REF" ]]; then
-        check_release_floor "$JSON_BUILD_REF"
+    # Source builds and release installs take a release tag of the network only: no
+    # branch, no commit id (tn_release_tag_ok).
+    if [[ -n "$RELEASE_TAG" ]]; then
+        if ! tn_release_tag_ok "$NETWORK" "$RELEASE_TAG"; then
+            setup_fail "${RELEASE_TAG} is not a ${NETWORK} release tag ($(tn_release_tag_grammar)); branches and commit ids are refused."
+        fi
+        check_release_floor "$RELEASE_TAG"
+    fi
+    # Docker on a network with no image repository (an open decision for devnet),
+    # or on mainnet before a mainnet release can be verified, is refused here,
+    # before anything touches the box.
+    if [[ "$INSTALL_METHOD" == "docker" ]] && ! tn_docker_network_ok "$NETWORK"; then
+        setup_fail "A Docker install is refused on ${NETWORK} (see above); nothing on this host was changed."
     fi
     if [[ -n "$DOCKER_IMAGE" ]]; then
-        if ! validate_docker_image "$DOCKER_IMAGE"; then
-            setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give the full image reference with its tag, such as ${DEFAULT_DOCKER_IMAGE}"
+        if [[ -n "$RELEASE_TAG" ]]; then
+            setup_fail "Give --docker-image or --release-tag, not both."
         fi
-        check_release_floor "$DOCKER_IMAGE"
+        if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+            setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give this network's image by digest (<repository>@sha256:<digest>), such as ${DEFAULT_DOCKER_IMAGE}, or its release tag with --release-tag"
+        fi
     fi
     return 0
 }
@@ -2566,9 +3119,10 @@ json_require_root() {
 
 # What a keygen needs and would otherwise find missing only in step_generate_keys, after
 # the preflight (for a source install, a 20-40 minute build): the execution address, the
-# four multiaddrs and the BLS passphrase, which arrives in TN_BLS_PASSPHRASE only. Their
-# form is checked in init_node_inputs; step_generate_keys keeps its own checks as a safety
-# net. Finalize needs none of them.
+# four multiaddrs and the BLS passphrase (TN_SETUP_PASS, from --passphrase-stdin or
+# TN_BLS_PASSPHRASE), which must pass tn_passphrase_ok for the network. The form of the
+# others is checked in init_node_inputs; step_generate_keys keeps its own checks as a
+# safety net. Finalize needs none of them.
 json_check_keygen_inputs() {
     local pair flag var
     [[ "$JSON_PHASE" == "keygen" ]] || return 0
@@ -2583,8 +3137,14 @@ json_check_keygen_inputs() {
             setup_fail "${flag} is missing: keygen needs all four multiaddrs (--external-primary, --external-worker, --listener-primary, --listener-worker)."
         fi
     done
-    if [[ -z "${TN_BLS_PASSPHRASE:-}" ]]; then
-        setup_fail "TN_BLS_PASSPHRASE is not set: keygen takes the BLS key passphrase from that environment variable only."
+    if [[ -z "$TN_SETUP_PASS" ]]; then
+        setup_fail "No BLS key passphrase: keygen takes it on standard input with --passphrase-stdin, or from TN_BLS_PASSPHRASE."
+    fi
+    if ! tn_passphrase_ok "$TN_SETUP_PASS" "$NETWORK"; then
+        setup_fail "$(setup_passphrase_rule "$NETWORK")"
+    fi
+    if [[ "$PASSPHRASE_METHOD" == "stdin" && "$NETWORK" != "testnet" && "$NETWORK" != "devnet" ]]; then
+        setup_fail "--passphrase-method stdin is not taken on ${NETWORK}: the passphrase is kept only as an encrypted credential there."
     fi
     return 0
 }
@@ -2600,6 +3160,10 @@ run_json_mode() {
     json_check_install_flags
     json_check_keygen_inputs
     json_require_root
+    # An installed node is refused before the lock, whose layout migration would
+    # otherwise change an older install first; the phase checks again under the lock.
+    json_refuse_installed "$JSON_PHASE"
+    setup_take_lock
     export TN_ASSUME_YES=true   # non-interactive: auto-accept confirms (no stdin)
     case "$JSON_PHASE" in
         keygen)   json_phase_keygen ;;
@@ -2612,6 +3176,8 @@ run_json_mode() {
 # =============================================================================
 
 main() {
+    # TN_SETUP_PASS holds TN_BLS_PASSPHRASE's value, moved out of the environment
+    # at the top of this file before any command ran.
     local arg
     # --json is found before anything prints: from here on stdout carries JSON
     # events only, and json_on_exit ends the run with a done event when nothing
@@ -2624,7 +3190,15 @@ main() {
     if json_mode; then
         json_setup_fds
     fi
+    # json_on_exit owns the EXIT trap and releases the update lock (setup_take_lock).
+    TN_EXIT_TRAP_OWNED=1
     trap json_on_exit EXIT
+    # A signal ends the run through the EXIT trap with the usual status (128 +
+    # the signal number), and a --json run's done event names the signal. A
+    # trap runs once the current command returns.
+    trap 'SETUP_SIGNAL=TERM; exit 143' TERM
+    trap 'SETUP_SIGNAL=INT; exit 130' INT
+    trap 'SETUP_SIGNAL=HUP; exit 129' HUP
 
     while [[ $# -gt 0 ]]; do
         # Every option below that ends in `shift 2` needs a value. As the last argument it
@@ -2633,10 +3207,10 @@ main() {
         # such a word is the next option, not a value. (--rpc-public may stand alone.)
         case "$1" in
             --phase|--network|--install-method|--passphrase-method|--address|--build-ref|\
-            --docker-image|--binary-path|--external-primary|--external-worker|\
+            --docker-image|--binary-path|--external-primary|--external-worker|--release-tag|\
             --listener-primary|--listener-worker|--public-ip|--public-rpc-url|\
             --public-ws-url|--rpc-http|--rpc-ws|--rpc-domain|--advertised-name|--data-dir|\
-            --service-user|--service-group|--genesis-dir)
+            --service-user|--service-group|--genesis-dir|--log-target|--bind-pcrs)
                 if [[ $# -lt 2 || "$2" == -* ]]; then
                     setup_fail "$1 requires a value"
                 fi
@@ -2657,6 +3231,8 @@ main() {
             --passphrase-method)   PASSPHRASE_METHOD="${2:-}"; shift 2 ;;
             --address)             VALIDATOR_ADDRESS="${2:-}"; shift 2 ;;
             --build-ref)           JSON_BUILD_REF="${2:-}"; shift 2 ;;
+            --release-tag)         RELEASE_TAG="${2:-}"; shift 2 ;;
+            --allow-dirty)         ALLOW_DIRTY=true; shift ;;
             --docker-image)        DOCKER_IMAGE="${2:-}"; shift 2 ;;
             # The node binary for --install-method existing: an absolute path to an
             # executable file. Skips the search and the prompt in _preflight_existing.
@@ -2699,6 +3275,12 @@ main() {
             --bootstrap-peers)     BOOTSTRAP_PEERS_SRC="${2:-}"; shift 2 ;;
             --enable-state-export) STATE_EXPORT_ENABLE=true; shift ;;
             --state-export-keep)   STATE_EXPORT_KEEP="${2:-}"; shift 2 ;;
+            --passphrase-stdin)    PASSPHRASE_STDIN=true; shift ;;
+            --log-target)          LOG_TARGET="${2:-}"; shift 2 ;;
+            --allow-quorum-risk)   TN_ALLOW_QUORUM_RISK=1; shift ;;
+            --allow-no-tpm)        ALLOW_NO_TPM=true; shift ;;
+            --bind-pcrs)           BIND_PCRS="${2:-}"; shift 2 ;;
+            --audit)               AUDIT_ONLY=true; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule.
                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
@@ -2712,6 +3294,17 @@ main() {
         esac
     done
 
+    if [[ "$AUDIT_ONLY" == "true" ]]; then
+        TN_SETUP_PASS=""
+        tn_host_audit
+        exit $?
+    fi
+    case "${LOG_TARGET:-}" in
+        ""|journal|file) ;;
+        *) setup_fail "--log-target takes journal or file, not ${LOG_TARGET}." ;;
+    esac
+
+    setup_read_passphrase       # --passphrase-stdin is read here, once
     init_public_rpc_flags       # bad public-RPC flags or URLs stop here, before any work
     init_install_flags
     init_node_inputs
@@ -2729,6 +3322,8 @@ main() {
     step_generate_keys
     step_write_config
     step_create_service
+    # Public RPC and the add-ons run their own scripts, which take the lock themselves.
+    setup_release_lock
     step_public_rpc
     step_testnet_addons
     step_final_summary

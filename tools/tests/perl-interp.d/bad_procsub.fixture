@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: a perl program read from a
+# process substitution. Expected findings: lines 7, 8, 9 and 10.
+
+v="$1"
+file="$2"
+perl <(printf 'print q(%s)' "$v") "$file"
+perl -w < <(printf 'print q(%s)' "$v")
+perl -- <(printf 'print q(%s)' "$v")
+perl 0< <(printf 'print q(%s)' "$v")

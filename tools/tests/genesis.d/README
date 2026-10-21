@@ -1,0 +1,5 @@
+chain-configs/testnet/{genesis,committee,parameters}.yaml from the
+telcoin-network repository at tag v0.16.0-adiri, unchanged. genesis_hash_test.sh
+checks them against the TESTNET_*_SHA256 pins in lib/common.sh. Refresh them
+together with the pins:
+  git -C <telcoin-network> show <tag>:chain-configs/testnet/<file> > <file>

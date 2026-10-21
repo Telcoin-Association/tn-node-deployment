@@ -12,8 +12,76 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+# The library must be the one shipped with this script (a partial update leaves
+# an older one, which lacks helpers this script calls): COMMON_VERSION 2.0.0 or
+# newer, then the helpers this script calls. Refuse up front with one message.
+if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
+    || ! tn_require_fns tn_update_lock_path tn_testnet_addons_present tn_start_script_path \
+        tn_as_service_user >/dev/null; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this remove-node.sh: run update-scripts.sh and try again."
+    case " $* " in
+        *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
+        *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
+    esac
+    exit 1
+fi
+unset _tn_old
 
-readonly SCRIPT_VERSION="1.2.9"
+readonly SCRIPT_VERSION="2.0.0"
+
+# Root prepended to the systemd unit directory and to the host files removed
+# beside the node (unit backups and drop-ins, start scripts, node.env, backups,
+# logrotate and journald files, the lock directory). It is the same root the
+# resolvers in lib/fallback.sh probe: empty in production, a fixture tree in
+# tools/tests/remove_test.sh. The older shared paths (/opt/telcoin,
+# /opt/telcoin-source, /var/log/telcoin) are prefixed only in remove_leftovers;
+# remove_shared_components and the scan use them as they are.
+TN_RM_ROOT="${TN_ROOT_PREFIX:-}"
+
+# True once remove_node_host_files has left /run/telcoin for rm_exit: the update
+# lock this run holds lives there, so the directory goes after its release.
+RM_RUN_DIR_PENDING=false
+
+# rm_take_lock -- take the update lock (tn_acquire_update_lock) right before the
+# first change, once per run, so no update or other node operation runs while
+# this removal changes the host. rm_exit, the EXIT trap set here, releases it.
+# Under a fixture root (TN_RM_ROOT) the lock file lives in that root too, as
+# every other path here does. rc 0 held; 1 another run holds it (said on stderr).
+rm_take_lock() {
+    [[ -z "${TN_UPDATE_LOCK_KIND:-}" ]] || return 0
+    if [[ -n "$TN_RM_ROOT" && -z "${TN_UPDATE_LOCK_FILE:-}" ]]; then
+        TN_UPDATE_LOCK_FILE="${TN_RM_ROOT}/run/telcoin/update.lock"
+    fi
+    TN_EXIT_TRAP_OWNED=1
+    if ! tn_acquire_update_lock >/dev/null 2>&1; then
+        print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished. Nothing was removed."
+        return 1
+    fi
+    trap rm_exit EXIT
+    return 0
+}
+
+# rm_exit -- the EXIT trap rm_take_lock sets: release the update lock, then
+# remove /run/telcoin when remove_node_host_files left it for last.
+rm_exit() {
+    tn_release_update_lock
+    if [[ "$RM_RUN_DIR_PENDING" == "true" ]]; then
+        RM_RUN_DIR_PENDING=false
+        _rm_dir "${TN_RM_ROOT}/run/telcoin"
+    fi
+}
+
+# _rm_lock_lives_in DIR -- rc 0 when this run holds the update lock and its lock
+# file (or mkdir lock directory) is directly inside DIR.
+_rm_lock_lives_in() {
+    local held
+    case "${TN_UPDATE_LOCK_KIND:-}" in
+        flock) held="$(tn_update_lock_path)" ;;
+        mkdir) held="${TN_UPDATE_LOCK_DIR:-}" ;;
+        *) return 1 ;;
+    esac
+    [[ -n "$held" && "${held%/*}" == "$1" ]]
+}
 
 # =============================================================================
 # HELPERS
@@ -28,22 +96,37 @@ config_dir_for_unit() {
     tn_resolve_config_dir
 }
 
+# rm_meta_get KEY META -- print KEY's value from the .node-meta file META (nothing
+# when KEY is absent; rc 0 either way). A key set more than once has no single
+# value: print an error naming KEY and return 2, so the caller stops instead of
+# guessing which account or directory to delete.
+rm_meta_get() {
+    local v rc=0
+    v="$(meta_get "$1" "$2" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_error "${1} is set more than once in ${2}; keep one line and run this again. This node is not removed."
+        return 2
+    fi
+    printf '%s\n' "$v"
+}
+
 # Resolve a node's data dir from its .node-meta (DATA_DIR=), falling back to the
 # resolver's path (/var/lib/telcoin for the unified install, /var/lib/telcoin/<role>
 # for a legacy install). Mirrors check-node.sh so all scripts agree on the path.
-# Always echoes a path and returns 0 so set -e never trips.
+# Echoes a path and returns 0, except when DATA_DIR is set more than once in
+# .node-meta: then it prints the error, echoes nothing and returns 2, and the
+# caller removes nothing.
 detect_data_dir() {
     local meta dd
     meta="$(tn_resolve_config_dir)/.node-meta"
     if [[ -f "$meta" ]]; then
-        dd=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
+        dd="$(rm_meta_get DATA_DIR "$meta")" || return 2
         if [[ -n "$dd" ]] && [[ -d "$dd" ]]; then
-            echo "$dd"
+            printf '%s\n' "$dd"
             return 0
         fi
     fi
     tn_resolve_data_dir
-    return 0
 }
 
 # Stop a unit and wait for it to actually finish exiting before returning.
@@ -76,7 +159,7 @@ other_node_unit_files() {
     local self="$1" name unit
     while IFS= read -r name; do
         [[ -z "$name" || "$name" == "$self" ]] && continue
-        unit="/etc/systemd/system/${name}.service"
+        unit="${TN_RM_ROOT}/etc/systemd/system/${name}.service"
         [[ -f "$unit" ]] && printf '%s\n' "$unit"
     done < <(tn_all_node_services)
 }
@@ -123,6 +206,19 @@ declare -a INSTALLED_UNITS=()
 declare -a UNIT_DOCKER=()
 declare -a UNIT_USER=()
 declare -a UNIT_GROUP=()
+# Units whose .node-meta sets HOST_SERVICE_USER, HOST_SERVICE_GROUP,
+# INSTALL_METHOD or DATA_DIR more than once. They stay in INSTALLED_UNITS (so a
+# sibling's teardown keeps the shared components) but are never removed.
+declare -a BLOCKED_UNITS=()
+
+# unit_blocked UNIT -- 0 when UNIT is in BLOCKED_UNITS.
+unit_blocked() {
+    local want="$1" u
+    for u in ${BLOCKED_UNITS[@]+"${BLOCKED_UNITS[@]}"}; do
+        [[ "$u" == "$want" ]] && return 0
+    done
+    return 1
+}
 
 # unit_index UNIT -- print UNIT's index in INSTALLED_UNITS (and so in UNIT_DOCKER,
 # UNIT_USER and UNIT_GROUP). Returns 1 and prints nothing when UNIT is not there.
@@ -163,16 +259,18 @@ forget_unit() {
 # tn_all_node_services (telcoin + the legacy names) and inspecting the ones that
 # are actually installed. .node-meta is authoritative; the unit's User=/Group= is
 # the fallback. The config dir comes from the resolvers. No role is recorded:
-# the role is decided on-chain each epoch, not by anything on this server.
+# the role is decided on-chain each epoch, not by anything on this server. A key
+# set more than once in .node-meta puts the unit in BLOCKED_UNITS.
 detect_node_installs() {
     set +e  # grep returning no match is fine here
     INSTALLED_UNITS=()
     UNIT_DOCKER=(); UNIT_USER=(); UNIT_GROUP=()
+    BLOCKED_UNITS=()
 
-    local unit_name unit_file meta method is_docker svc_user svc_group
+    local unit_name unit_file meta method is_docker svc_user svc_group dup
     while IFS= read -r unit_name; do
         [[ -z "$unit_name" ]] && continue
-        unit_file="/etc/systemd/system/${unit_name}.service"
+        unit_file="${TN_RM_ROOT}/etc/systemd/system/${unit_name}.service"
         [[ -f "$unit_file" ]] || continue
 
         is_docker=false
@@ -184,10 +282,13 @@ detect_node_installs() {
 
         # Read from metadata file first (most reliable, set during setup).
         if [[ -f "$meta" ]]; then
-            svc_user=$(grep "^HOST_SERVICE_USER=" "$meta" | cut -d= -f2 || echo "")
-            svc_group=$(grep "^HOST_SERVICE_GROUP=" "$meta" | cut -d= -f2 || echo "")
-            method=$(grep "^INSTALL_METHOD=" "$meta" | cut -d= -f2 || echo "")
+            dup=false
+            svc_user="$(rm_meta_get HOST_SERVICE_USER "$meta")" || dup=true
+            svc_group="$(rm_meta_get HOST_SERVICE_GROUP "$meta")" || dup=true
+            method="$(rm_meta_get INSTALL_METHOD "$meta")" || dup=true
+            rm_meta_get DATA_DIR "$meta" >/dev/null || dup=true
             [[ "$method" == "docker" ]] && is_docker=true
+            [[ "$dup" == "true" ]] && BLOCKED_UNITS+=("$unit_name")
         else
             # Fall back to reading the service file.
             svc_user=$(grep "^User=" "$unit_file" | cut -d= -f2 || echo "")
@@ -215,34 +316,13 @@ show_detected() {
     print_header "Detected Node Installations"
 
     if [[ ${#INSTALLED_UNITS[@]} -eq 0 ]]; then
-        # Check for partial installs (directories exist but no service file). The
-        # unified dirs (/etc/telcoin, /var/lib/telcoin) are the parents of any
-        # legacy role subdir, so removing them clears a half-removed legacy install.
-        local partial=false
-        local partial_items=()
-        [[ -d /var/lib/telcoin ]]    && partial=true && partial_items+=("/var/lib/telcoin")
-        [[ -d /opt/telcoin ]]        && partial=true && partial_items+=("/opt/telcoin")
-        [[ -d /opt/telcoin-source ]] && partial=true && partial_items+=("/opt/telcoin-source")
-        [[ -d /etc/telcoin ]]        && partial=true && partial_items+=("/etc/telcoin")
-        [[ -d /var/log/telcoin ]]    && partial=true && partial_items+=("/var/log/telcoin")
-
-        if [[ "$partial" == "true" ]]; then
-            print_warn "No complete node installation found, but leftover files detected:"
-            for item in "${partial_items[@]}"; do
-                print_info "  ${item}"
-            done
-            echo ""
-            if confirm "Remove these leftover files and directories?"; then
-                for item in "${partial_items[@]}"; do
-                    rm -rf "$item"
-                    print_ok "Removed: ${item}"
-                done
-            else
-                print_info "Leftover files kept."
-            fi
-            report_orphaned_groups
-        else
+        # No node unit: offer to finish what an earlier removal left behind.
+        local lrc=0
+        remove_leftovers || lrc=$?
+        if [[ $lrc -eq 3 ]]; then
             print_warn "No standard Telcoin node installation detected on this server."
+        else
+            report_orphaned_groups
         fi
 
         # A node may still be present via a non-standard install (manual / dev /
@@ -267,6 +347,9 @@ show_detected() {
         print_info "  Service group: ${UNIT_GROUP[$i]:-(none)}"
         status=$(systemctl is-active "$unit" 2>/dev/null || echo "inactive")
         print_info "  Status:        ${status}"
+        if unit_blocked "$unit"; then
+            print_warn "  Removal blocked: .node-meta sets a key more than once (see the error above)."
+        fi
         echo ""
         i=$((i + 1))
     done
@@ -279,12 +362,168 @@ show_detected() {
 # REMOVAL FUNCTIONS
 # =============================================================================
 
+_RM_SHRED_NOTED=false
+
+# _rm_shred_note -- print, once per run, that the overwrite is best effort.
+_rm_shred_note() {
+    if [[ "$_RM_SHRED_NOTED" != "true" ]]; then
+        _RM_SHRED_NOTED=true
+        print_info "Overwriting files with shred before deleting them is best effort on SSDs, copy-on-write and cloud disks."
+    fi
+}
+
+# _rm_private DIR [all] -- rc 0 when no other account can change what DIR holds
+# while this script works in it: DIR and its parent (with "all", also every
+# directory below DIR on the same file system) are owned by the account running
+# this script, writable by no other account, and group-writable only for this
+# account's own primary group. Only then is a file in there overwritten by path
+# as this account. Reads only.
+_rm_private() {
+    local d="$1" up me mygid bad
+    me="$(id -u)"
+    mygid="$(id -g)"
+    up="${d%/*}"
+    [[ -n "$up" ]] || up=/
+    bad="$(find "$up" -maxdepth 0 \( ! -user "$me" -o -perm -0002 -o \( -perm -0020 ! -group "$mygid" \) \) -print 2>/dev/null)"
+    [[ -z "$bad" ]] || return 1
+    if [[ "${2:-}" == "all" ]]; then
+        bad="$(find "$d" -xdev -type d \( ! -user "$me" -o -perm -0002 -o \( -perm -0020 ! -group "$mygid" \) \) -print 2>/dev/null)"
+    else
+        bad="$(find "$d" -maxdepth 0 \( ! -user "$me" -o -perm -0002 -o \( -perm -0020 ! -group "$mygid" \) \) -print 2>/dev/null)"
+    fi
+    [[ -z "$bad" ]]
+}
+
+# _rm_shred FILE... -- delete each FILE. A regular file is overwritten first with
+# `shred -u` when shred is installed and its directory is private to this
+# account (_rm_private); `rm -f` always follows, so a missing or failing shred
+# still deletes it. A symlink is unlinked itself and never followed; a directory
+# or an absent path is left alone. Always returns 0.
+_rm_shred() {
+    local f
+    for f in "$@"; do
+        if [[ -L "$f" ]]; then
+            rm -f -- "$f" 2>/dev/null || true
+        elif [[ -f "$f" ]]; then
+            if command -v shred >/dev/null 2>&1 && _rm_private "${f%/*}"; then
+                _rm_shred_note
+                shred -u -- "$f" >/dev/null 2>&1 || true
+            fi
+            rm -f -- "$f" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# _rm_shred_tree DIR [USER GROUP [FIND_TEST...]] -- overwrite and delete, with
+# `shred -u`, every regular file under DIR (only those that also match the find
+# tests FIND_TEST..., such as -path '*/node-keys/*'). find hands each file to
+# shred itself, so no name is ever split or re-read, and it never follows a
+# symlink or leaves DIR's file system. Who runs it:
+#   - DIR is private to this account (_rm_private DIR all): this account (root
+#     in production; /etc/telcoin and /var/backups/telcoin are root's);
+#   - otherwise USER, an existing account other than root: find and shred run as
+#     USER:GROUP (tn_as_service_user), so they can only touch what USER can
+#     already write (the data dir and its node-keys belong to the service user);
+#   - otherwise (no USER, the account is gone, or no setpriv/runuser) nothing is
+#     overwritten and a note says so.
+# Nothing is done when DIR is a symlink or not a directory, and nothing is
+# overwritten when shred is not installed. DIR and the files left are for the
+# caller to remove (rm -rf as root never follows a symlink). Always returns 0.
+_rm_shred_tree() {
+    local dir="${1:-}" user="${2:-}" group="${3:-}" uid rc=0
+    if [[ $# -ge 3 ]]; then shift 3; else set --; fi
+    [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    command -v shred >/dev/null 2>&1 || return 0
+    _rm_shred_note
+    if _rm_private "$dir" all; then
+        find "$dir" -xdev -type f ${1+"$@"} -exec shred -u -- {} \; >/dev/null 2>&1 || true
+        return 0
+    fi
+    uid=""
+    if [[ -n "$user" ]]; then
+        uid="$(id -u "$user" 2>/dev/null)" || uid=""
+    fi
+    if [[ "$uid" =~ ^[0-9]+$ && ! "$uid" =~ ^0+$ ]]; then
+        if [[ -n "$group" ]] && ! getent group "$group" >/dev/null 2>&1; then
+            group=""
+        fi
+        ( SERVICE_USER="$user"; SERVICE_GROUP="$group"
+          tn_as_service_user find "$dir" -xdev -type f ${1+"$@"} -exec shred -u -- {} \; ) >/dev/null 2>&1 || rc=$?
+        [[ $rc -eq 126 ]] || return 0
+    fi
+    print_info "The files under ${dir#"$TN_RM_ROOT"} are deleted without being overwritten first: the directory belongs to an account that is gone or cannot be switched to."
+    return 0
+}
+
+# _rm_dir DIR -- rm -rf the real directory DIR; a symlink named DIR is unlinked
+# and its target left alone. Always returns 0.
+_rm_dir() {
+    if [[ -L "$1" ]]; then
+        rm -f -- "$1" 2>/dev/null || true
+    elif [[ -d "$1" ]]; then
+        rm -rf -- "$1" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# remove_unit_leftovers UNIT [check] -- remove what older releases and an
+# interrupted removal leave beside the node unit files, for UNIT and for every
+# other node unit name (tn_all_node_services) whose unit file is gone: the
+# NAME.bak, NAME.bak.*, NAME.service.bak and NAME.service.bak.* copies
+# (shredded: they can hold the passphrase) and the drop-in directory
+# NAME.service.d. A node unit still installed keeps its own. UNIT may be empty
+# (no unit file is left). With "check", nothing is removed: rc 0 when there is
+# something to remove, else 1.
+remove_unit_leftovers() {
+    local unit="${1:-}" check="${2:-}" sd n f
+    sd="${TN_RM_ROOT}/etc/systemd/system"
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        if [[ "$n" != "$unit" && -f "${sd}/${n}.service" ]]; then
+            continue
+        fi
+        for f in "${sd}/${n}.bak" "${sd}/${n}.bak."* "${sd}/${n}.service.bak" "${sd}/${n}.service.bak."* \
+                 "${sd}/${n}.service.d"; do
+            if [[ ! -e "$f" && ! -L "$f" ]]; then
+                continue
+            fi
+            if [[ "$check" == "check" ]]; then
+                return 0
+            fi
+            if [[ "$f" == "${sd}/${n}.service.d" ]]; then
+                _rm_dir "$f"
+            else
+                _rm_shred "$f"
+            fi
+        done
+    done < <(tn_all_node_services)
+    [[ "$check" != "check" ]]
+}
+
+# stop_and_disable_service UNIT -- stop and disable UNIT, remove its unit file
+# and what lies beside it (remove_unit_leftovers), and reload systemd. An empty
+# UNIT means no node unit file is left (an earlier removal stopped part way):
+# every node unit name is stopped and disabled in case systemd still has it
+# loaded, and the leftovers of all of them are removed.
 stop_and_disable_service() {
-    local service_name="$1"
+    local service_name="${1:-}" n
+    if [[ -z "$service_name" ]]; then
+        print_step "Stopping any node unit systemd still has loaded..."
+        while IFS= read -r n; do
+            [[ -n "$n" ]] || continue
+            systemctl stop "$n" 2>/dev/null || true
+            systemctl disable "$n" 2>/dev/null || true
+        done < <(tn_all_node_services)
+        remove_unit_leftovers ""
+        systemctl daemon-reload 2>/dev/null || true
+        return 0
+    fi
     print_step "Stopping and disabling ${service_name}..."
     systemctl stop "$service_name" 2>/dev/null || true
     systemctl disable "$service_name" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${service_name}.service"
+    rm -f "${TN_RM_ROOT}/etc/systemd/system/${service_name}.service"
+    remove_unit_leftovers "$service_name"
     systemctl daemon-reload
     print_ok "Service ${service_name} removed"
 }
@@ -321,15 +560,26 @@ remove_docker_container() {
     fi
 }
 
+# remove_chain_data [USER GROUP] -- ask, then remove the data dir; the node keys
+# in it are shredded first as USER:GROUP (the service account, which owns the
+# data dir; default SERVICE_USER and SERVICE_GROUP), see _rm_shred_tree.
 remove_chain_data() {
+    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}"
     local data_dir
-    data_dir=$(detect_data_dir)
+    if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
+        print_error "Chain data not removed: the data directory is unknown."
+        return 1
+    fi
 
     if [[ -d "$data_dir" ]]; then
         local size
         size=$(du -sh "$data_dir" 2>/dev/null | cut -f1)
         print_info "Chain data at ${data_dir} (${size})"
         if confirm "Remove chain data? (node will need to resync if reinstalled)"; then
+            # The node keys under the data dir go with it: shred them first.
+            if [[ ! -L "$data_dir" ]]; then
+                _rm_shred_tree "${data_dir}/node-keys" "$user" "$group"
+            fi
             rm -rf "$data_dir"
             print_ok "Chain data removed"
         else
@@ -338,11 +588,37 @@ remove_chain_data() {
     fi
 }
 
-# The warning is the same for every node: the role is decided on-chain, so
-# nothing on this server says whether these keys are staked to validate.
+# shred_key_files KEYS_DIR CONFIG_DIR [USER GROUP] -- shred every file under
+# KEYS_DIR (as USER:GROUP, the service account that owns the data dir; see
+# _rm_shred_tree) and remove it, then shred every file under CONFIG_DIR (the
+# passphrase files, .node-meta and any temp copy beside them), and in
+# /etc/telcoin the encrypted credential bls-passphrase.cred, the plaintext
+# bls-passphrase and the TPM-sealed bls-tpm.pub / bls-tpm.priv of very old
+# installs. The caller removes CONFIG_DIR.
+shred_key_files() {
+    local keys_dir="$1" config_dir="$2" d
+    local user="${3:-${SERVICE_USER:-telcoin}}" group="${4:-${SERVICE_GROUP:-telcoin}}"
+    _rm_shred_tree "$keys_dir" "$user" "$group"
+    _rm_dir "$keys_dir"
+    if [[ ! -L "$config_dir" ]]; then
+        _rm_shred_tree "$config_dir" "$user" "$group"
+    fi
+    d="${TN_RM_ROOT}/etc/telcoin"
+    _rm_shred "${d}/bls-passphrase.cred" "${d}/bls-passphrase" "${d}/bls-tpm.pub" "${d}/bls-tpm.priv"
+}
+
+# remove_keys [USER GROUP] -- ask (typed DELETE), then shred and remove the node
+# keys (as USER:GROUP, see shred_key_files) and the config dir. The warning is
+# the same for every node: the role is decided on-chain, so nothing on this
+# server says whether these keys are staked to validate.
 remove_keys() {
-    local keys_dir config_dir
-    keys_dir="$(detect_data_dir)/node-keys"
+    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}"
+    local data_dir keys_dir config_dir
+    if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
+        print_error "Keys not removed: the data directory is unknown."
+        return 1
+    fi
+    keys_dir="${data_dir}/node-keys"
     config_dir="$(tn_resolve_config_dir)"
 
     if [[ -d "$keys_dir" ]] || [[ -d "$config_dir" ]]; then
@@ -366,15 +642,203 @@ remove_keys() {
         local confirm_text
         read -r -p "  Type DELETE to confirm permanent key removal, or Enter to skip: " confirm_text
         if [[ "$confirm_text" == "DELETE" ]]; then
-            rm -rf "$keys_dir"
-            # Also remove TPM sealed files if present (before the dir itself).
-            tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
+            shred_key_files "$keys_dir" "$config_dir" "$user" "$group"
             rm -rf "$config_dir"
             print_ok "Keys and passphrase removed"
         else
             print_info "Keys kept -- skipping key removal"
         fi
     fi
+}
+
+# _rm_build_account -- remove the source-build account tn-build when it exists. Its
+# processes are stopped first (userdel refuses an account that runs one); OK is
+# printed only when userdel succeeds, a warning with the manual step otherwise.
+_rm_build_account() {
+    id -u tn-build >/dev/null 2>&1 || return 0
+    if declare -F _tn_build_user_reap >/dev/null 2>&1; then
+        _tn_build_user_reap "$(id -u tn-build)" "$(id -g tn-build)" || true
+    fi
+    if userdel tn-build >/dev/null 2>&1; then
+        print_ok "Removed the tn-build account"
+    else
+        print_warn "Could not remove the tn-build account (userdel failed; a process of it may still run). Remove it by hand: sudo userdel tn-build"
+    fi
+    return 0
+}
+
+# remove_node_host_files -- remove the host files every node install shares:
+# the start scripts in /usr/local/libexec/telcoin (and that directory when it is
+# empty; a symlink there is left alone with a warning, nothing is removed
+# through it), /etc/telcoin/node.env (and /etc/telcoin when that leaves it
+# empty), the backups in /var/backups/telcoin (shredded: they can hold unit,
+# launch-file and passphrase copies), the logrotate file (TN_LOGROTATE_FILE),
+# the journald drop-in 50-telcoin.conf, the needrestart rule 50-telcoin.conf,
+# the apt rule 52telcoin-no-reboot, the release staging directory
+# /var/lib/telcoin-staging, the source-build account tn-build (its processes
+# stopped first; a failed userdel is a warning) with its home /var/lib/tn-build,
+# and the lock directory /run/telcoin. When the update lock
+# this run holds lives in /run/telcoin, the directory is removed by rm_exit
+# after the lock is released. The caller runs it only when no other node
+# install remains. Every path is under TN_RM_ROOT (see the top of this file).
+remove_node_host_files() {
+    local r="$TN_RM_ROOT" lx m f
+    local -a files=()
+    lx="${r}/usr/local/libexec/telcoin"
+    if [[ -L "$lx" ]]; then
+        print_warn "/usr/local/libexec/telcoin is a symlink: the start scripts behind it are left in place. Check where it points and remove it by hand."
+    else
+        for m in source docker; do
+            f="$(tn_start_script_path "$m")" || continue
+            files+=("${r}${f}")
+        done
+    fi
+    files+=("${r}/etc/telcoin/node.env"
+            "${TN_LOGROTATE_FILE:-${r}/etc/logrotate.d/telcoin}"
+            "${r}/etc/systemd/journald.conf.d/50-telcoin.conf"
+            "${r}/etc/needrestart/conf.d/50-telcoin.conf"
+            "${r}/etc/apt/apt.conf.d/52telcoin-no-reboot")
+    for f in "${files[@]}"; do
+        if [[ -L "$f" || -f "$f" ]]; then
+            rm -f -- "$f" 2>/dev/null || true
+            print_ok "Removed ${f#"$r"}"
+        fi
+    done
+    if [[ ! -L "$lx" ]]; then
+        rmdir "$lx" 2>/dev/null || true
+    fi
+    rmdir "${r}/etc/telcoin" 2>/dev/null || true
+    if [[ -L "${r}/var/backups/telcoin" || -d "${r}/var/backups/telcoin" ]]; then
+        _rm_shred_tree "${r}/var/backups/telcoin"
+        _rm_dir "${r}/var/backups/telcoin"
+        print_ok "Removed /var/backups/telcoin"
+    fi
+    if [[ -L "${r}/run/telcoin" || -d "${r}/run/telcoin" ]]; then
+        if [[ ! -L "${r}/run/telcoin" ]] && _rm_lock_lives_in "${r}/run/telcoin"; then
+            RM_RUN_DIR_PENDING=true
+            print_info "/run/telcoin holds the update lock of this run: it is removed when the run ends."
+        else
+            _rm_dir "${r}/run/telcoin"
+            print_ok "Removed /run/telcoin"
+        fi
+    fi
+    # Release staging (downloads and build logs) and the source-build account with
+    # its home (toolchain, cargo cache, build output). lib/release-keys stays: it is
+    # part of the operator's scripts tree.
+    if [[ -L "${r}/var/lib/telcoin-staging" || -d "${r}/var/lib/telcoin-staging" ]]; then
+        _rm_dir "${r}/var/lib/telcoin-staging"
+        print_ok "Removed /var/lib/telcoin-staging"
+    fi
+    if [[ -z "$r" ]]; then
+        _rm_build_account
+    fi
+    if [[ -L "${r}/var/lib/tn-build" || -d "${r}/var/lib/tn-build" ]]; then
+        _rm_dir "${r}/var/lib/tn-build"
+        print_ok "Removed /var/lib/tn-build"
+    fi
+    return 0
+}
+
+# rm_leftovers_present -- rc 0 when files a node install leaves behind are still
+# here: /etc/telcoin (.node-meta and the config), the backups in
+# /var/backups/telcoin, the data dir /var/lib/telcoin, the start scripts in a
+# real /usr/local/libexec/telcoin directory, or unit backups and drop-ins of a
+# node unit whose unit file is gone. rc 1 when none of them is.
+rm_leftovers_present() {
+    local r="$TN_RM_ROOT" p m f
+    for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin"; do
+        if [[ -e "$p" || -L "$p" ]]; then
+            return 0
+        fi
+    done
+    if [[ -d "${r}/usr/local/libexec/telcoin" && ! -L "${r}/usr/local/libexec/telcoin" ]]; then
+        for m in source docker; do
+            f="$(tn_start_script_path "$m")" || continue
+            if [[ -e "${r}${f}" || -L "${r}${f}" ]]; then
+                return 0
+            fi
+        done
+    fi
+    remove_unit_leftovers "" check
+}
+
+# remove_leftovers -- the menu with no node unit installed: list what a node
+# install left behind (an earlier removal stopped part way, or kept the keys or
+# the data), ask once, then remove it all. The node keys under the data dirs
+# are shredded as the service account (.node-meta HOST_SERVICE_USER, else the
+# default), the config tree /etc/telcoin is shredded, and the shared host files
+# go through remove_node_host_files. A DATA_DIR that .node-meta records outside
+# /var/lib/telcoin is listed and removed too. rc 0 done or kept at the
+# operator's word; 1 refused before any change (a key set more than once in
+# .node-meta, or another run holds the update lock); 3 nothing found.
+remove_leftovers() {
+    local r="$TN_RM_ROOT" meta dd="" user="" group="" item m f
+    local -a dirs=() shown=()
+    meta="$(tn_resolve_config_dir)/.node-meta"
+    if [[ -f "$meta" ]]; then
+        dd="$(rm_meta_get DATA_DIR "$meta")" || return 1
+        user="$(rm_meta_get HOST_SERVICE_USER "$meta")" || return 1
+        group="$(rm_meta_get HOST_SERVICE_GROUP "$meta")" || return 1
+    fi
+    [[ -n "$user" && "$user" != "root" ]] || user="${SERVICE_USER:-telcoin}"
+    [[ -n "$group" && "$group" != "root" ]] || group="${SERVICE_GROUP:-telcoin}"
+    case "$dd" in
+        /?*) ;;
+        *) dd="" ;;
+    esac
+    case "$dd" in
+        "${r}/var/lib/telcoin"|"${r}/var/lib/telcoin/"*) dd="" ;;
+    esac
+    for item in "${r}/var/lib/telcoin" "$dd" "${r}/opt/telcoin" "${r}/opt/telcoin-source" \
+                "${r}/etc/telcoin" "${r}/var/log/telcoin"; do
+        if [[ -n "$item" ]] && [[ -e "$item" || -L "$item" ]]; then
+            dirs+=("$item")
+        fi
+    done
+    for m in source docker; do
+        f="$(tn_start_script_path "$m")" || continue
+        if [[ -e "${r}${f}" || -L "${r}${f}" ]]; then
+            shown+=("$f")
+        fi
+    done
+    if [[ -e "${r}/var/backups/telcoin" || -L "${r}/var/backups/telcoin" ]]; then
+        shown+=("/var/backups/telcoin")
+    fi
+    if remove_unit_leftovers "" check; then
+        shown+=("unit backups and drop-ins in /etc/systemd/system")
+    fi
+    if [[ ${#dirs[@]} -eq 0 && ${#shown[@]} -eq 0 ]]; then
+        return 3
+    fi
+
+    print_warn "No complete node installation found, but leftover files detected:"
+    for item in ${dirs[@]+"${dirs[@]}"}; do
+        print_info "  ${item#"$r"}"
+    done
+    for item in ${shown[@]+"${shown[@]}"}; do
+        print_info "  ${item}"
+    done
+    echo ""
+    if ! confirm "Remove these leftover files and directories?"; then
+        print_info "Leftover files kept."
+        return 0
+    fi
+    rm_take_lock || return 1
+
+    # The keys first: every file under a node-keys dir in the data dirs (as the
+    # service account that owns them), then the whole config tree.
+    for item in "${r}/var/lib/telcoin" "$dd"; do
+        [[ -n "$item" ]] || continue
+        _rm_shred_tree "$item" "$user" "$group" -path '*/node-keys/*'
+    done
+    _rm_shred_tree "${r}/etc/telcoin" "$user" "$group"
+    stop_and_disable_service ""
+    remove_node_host_files
+    for item in ${dirs[@]+"${dirs[@]}"}; do
+        _rm_dir "$item"
+        print_ok "Removed: ${item#"$r"}"
+    done
+    return 0
 }
 
 remove_shared_components() {
@@ -413,6 +877,8 @@ remove_shared_components() {
                 print_ok "Logs removed"
             fi
         fi
+
+        remove_node_host_files
     fi
 }
 
@@ -442,6 +908,7 @@ remove_service_user() {
     if [[ -n "$self_unit" ]] && user_used_by_other_node "$service_user" "$self_unit"; then
         print_info "User '${service_user}' is still in use by the other Telcoin node -- keeping it."
         [[ -n "$service_group" ]] && KEPT_GROUPS+=("$service_group")
+        remove_log_group "$service_user" "$self_unit"
         return
     fi
 
@@ -467,6 +934,60 @@ remove_service_user() {
             KEPT_GROUPS+=("$service_group")
         fi
     fi
+
+    # The service account is kept (declined, or its removal failed) and may
+    # still need the log-reader group: ask before removing that group.
+    local log_group="${TN_LOG_GROUP:-telcoin-log}"
+    if id "$service_user" &>/dev/null && getent group "$log_group" &>/dev/null; then
+        if ! confirm "Also remove the log-reader group '${log_group}'? The service user '${service_user}' is kept and may still need it to read the node logs."; then
+            print_info "Group '${log_group}' kept."
+            KEPT_GROUPS+=("$log_group")
+            return 0
+        fi
+    fi
+    remove_log_group "$service_user" "$self_unit"
+}
+
+# remove_log_group SERVICE_USER SELF_UNIT -- remove the log-reader group
+# (TN_LOG_GROUP, telcoin-log) when no other node unit than SELF_UNIT is installed
+# and getent lists no member in it but SERVICE_USER. Otherwise the group is kept
+# and recorded in KEPT_GROUPS. RM_LOG_GROUP_MSG holds the outcome line (empty
+# when the group does not exist) for the JSON path.
+RM_LOG_GROUP_MSG=""
+remove_log_group() {
+    local svc_user="${1:-}" self_unit="${2:-}" g line m
+    local -a list=() others=()
+    g="${TN_LOG_GROUP:-telcoin-log}"
+    RM_LOG_GROUP_MSG=""
+    line="$(getent group "$g" 2>/dev/null)" || return 0
+    [[ -n "$line" ]] || return 0
+    if [[ -n "$(other_node_unit_files "$self_unit")" ]]; then
+        RM_LOG_GROUP_MSG="Group ${g} is still used by the other Telcoin node -- keeping it."
+        print_info "$RM_LOG_GROUP_MSG"
+        KEPT_GROUPS+=("$g")
+        return 0
+    fi
+    IFS=',' read -r -a list <<< "${line##*:}"
+    for m in ${list[@]+"${list[@]}"}; do
+        if [[ -n "$m" && "$m" != "$svc_user" ]]; then
+            others+=("$m")
+        fi
+    done
+    if [[ ${#others[@]} -gt 0 ]]; then
+        RM_LOG_GROUP_MSG="Group ${g} still has other members (${others[*]}) -- keeping it."
+        print_info "$RM_LOG_GROUP_MSG"
+        KEPT_GROUPS+=("$g")
+        return 0
+    fi
+    if groupdel "$g" 2>/dev/null; then
+        RM_LOG_GROUP_MSG="Group ${g} removed"
+        print_ok "$RM_LOG_GROUP_MSG"
+    else
+        RM_LOG_GROUP_MSG="Could not remove group ${g} (still in use?) -- run: groupdel ${g}"
+        print_warn "Could not remove group '${g}' (still in use?). Remove manually:"
+        print_info "  sudo groupdel ${g}"
+    fi
+    return 0
 }
 
 # 0 when GROUP was kept on purpose during this run (see KEPT_GROUPS).
@@ -516,21 +1037,33 @@ report_orphaned_groups() {
 # REMOVE NODE MANAGER UI
 # =============================================================================
 
-# Uninstall the Telcoin Node Manager UI (service, app, helper + update engine,
-# sudoers, and the service user). Safe to call when the UI is absent / partial.
+# Uninstall the Telcoin Node Manager UI (service, app, venv, helper + update
+# engine, sudoers, access token, state dir, and the service user). The sudoers
+# file goes first, so the UI account loses its grants before anything else
+# changes. The helper's audit log (/var/log/telcoin-ui) stays as a record. Safe
+# to call when the UI is absent / partial.
 remove_ui_components() {
     print_step "Removing Telcoin Node Manager UI..."
+    rm -f /etc/sudoers.d/telcoin-ui
+    # An interrupted install-ui.sh run can leave its sudoers candidate (inert:
+    # sudo skips names with a dot).
+    rm -f /etc/sudoers.d/.telcoin-ui.*
     systemctl stop telcoin-ui 2>/dev/null || true
     systemctl disable telcoin-ui 2>/dev/null || true
     rm -f /etc/systemd/system/telcoin-ui.service
     systemctl daemon-reload 2>/dev/null || true
-    rm -rf /opt/telcoin-ui /opt/telcoin-ui-update
-    rm -f /usr/local/sbin/telcoin-ui-helper
-    rm -f /etc/sudoers.d/telcoin-ui
+    rm -rf /opt/telcoin-ui /opt/telcoin-ui-venv /opt/telcoin-ui-update
+    # Temp trees an interrupted install-ui.sh run can leave beside them.
+    rm -rf /opt/.telcoin-ui.* /opt/.telcoin-ui-venv.* /opt/.telcoin-ui-update.*
+    rm -f /usr/local/sbin/telcoin-ui-helper /usr/local/sbin/telcoin-ui-helper.new
+    rm -rf /etc/telcoin-ui /var/lib/telcoin-ui
     if id telcoin-ui &>/dev/null; then
         userdel telcoin-ui 2>/dev/null || true
     fi
     print_ok "Telcoin Node Manager UI removed"
+    if [[ -d /var/log/telcoin-ui ]]; then
+        print_info "The UI audit log stays in /var/log/telcoin-ui (remove it by hand when no longer needed)."
+    fi
 }
 
 # Interactive: offer to also remove the web UI. $1 is the unit base name just
@@ -553,43 +1086,94 @@ offer_ui_removal() {
 # =============================================================================
 
 # Idempotent host-wide teardown of the opt-in add-ons. Safe to call even if none
-# were enabled (each block guards on the component existing). Called from the
-# node full-removal flow.
+# were enabled (each step guards on the component existing or is a no-op).
+# Called from the node full-removal flow. The VPN files, the tnadmin sudoers file,
+# the account and the overlay SSH rules go whether or not wg0 is still up or
+# configured, so a half-removed VPN is cleared too. TN_ROOT_PREFIX (empty in
+# production) roots the file paths for the fixture test.
 remove_testnet_addons() {
+    local found p="${TN_ROOT_PREFIX:-}" f left=false reload=false sp cidr
+    local -a vpn_files=(/etc/wireguard/wg0.conf /etc/wireguard/wg0-private.key
+        /etc/systemd/system/tn-nftables.service /etc/wgvpn/nftables-node.nft
+        /usr/local/sbin/tn-node-ssh-lockdown
+        /etc/wgvpn/tnadmin.keys /etc/wgvpn/tnadmin.revoked /etc/wgvpn/tnadmin.authorized_keys
+        /etc/sudoers.d/90-tnadmin)
+    local dropin=/etc/ssh/sshd_config.d/15-tnadmin-overlay.conf
+    found="$(tn_testnet_addons_present 2>/dev/null || true)"
+    if [[ -n "$found" ]]; then
+        print_info "Testnet add-ons found on this host: ${found}."
+    fi
     # --- Alloy log shipper -----------------------------------------------------
-    if [[ -f /etc/systemd/system/telcoin-alloy.service ]] || systemctl list-unit-files 2>/dev/null | grep -q '^telcoin-alloy.service'; then
+    if [[ -f "${p}/etc/systemd/system/telcoin-alloy.service" ]] || systemctl list-unit-files 2>/dev/null | grep -q '^telcoin-alloy.service'; then
         print_info "Removing Alloy log shipper (telcoin-alloy)..."
         systemctl disable --now telcoin-alloy.service >/dev/null 2>&1 || true
         docker rm -f telcoin-alloy >/dev/null 2>&1 || true
         docker rmi "${TN_ALLOY_IMAGE:-grafana/alloy:v1.5.1}" >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/telcoin-alloy.service
-        rm -f /usr/local/bin/alloy   # native tarball install path (no-op for apt/docker installs)
+        rm -f "${p}/etc/systemd/system/telcoin-alloy.service"
+        rm -f "${p}/usr/local/bin/alloy"   # native tarball install path (no-op for apt/docker installs)
         systemctl daemon-reload 2>/dev/null || true
     fi
-    rm -rf /etc/telcoin/alloy /var/lib/telcoin-alloy
+    rm -rf "${p}/etc/telcoin/alloy" "${p}/var/lib/telcoin-alloy"
+    if id -u telcoin-alloy >/dev/null 2>&1; then
+        userdel telcoin-alloy >/dev/null 2>&1 || true
+    fi
 
-    # --- WireGuard admin overlay ----------------------------------------------
-    if [[ -f /etc/wireguard/wg0.conf ]] || ip link show wg0 >/dev/null 2>&1; then
-        print_info "Removing WireGuard admin overlay (wg0 + tnadmin)..."
+    # --- VPN self-heal ----------------------------------------------------------
+    # Stopped and removed first: its path unit watches the sshd drop-in removed
+    # below, and would otherwise run the helper again and put the drop-in back.
+    if [[ -e "${p}/etc/systemd/system/tn-vpn-selfheal.path" || -e "${p}/etc/systemd/system/tn-vpn-selfheal.service" \
+          || -e "${p}/usr/local/sbin/tn-vpn-selfheal" ]]; then
+        print_info "Removing the VPN self-heal units and helper..."
+        systemctl disable --now tn-vpn-selfheal.path tn-vpn-selfheal.service >/dev/null 2>&1 || true
+        rm -f "${p}/etc/systemd/system/tn-vpn-selfheal.path" "${p}/etc/systemd/system/tn-vpn-selfheal.service" \
+              "${p}/usr/local/sbin/tn-vpn-selfheal"
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+
+    # --- WireGuard admin overlay: the link -------------------------------------
+    if [[ -f "${p}/etc/wireguard/wg0.conf" ]] || ip link show wg0 >/dev/null 2>&1; then
+        print_info "Removing WireGuard admin overlay (wg0)..."
         wg-quick down wg0 >/dev/null 2>&1 || true
         systemctl disable wg-quick@wg0.service >/dev/null 2>&1 || true
-        rm -f /etc/wireguard/wg0.conf /etc/wireguard/wg0-private.key
-        rm -f /etc/ssh/sshd_config.d/15-tnadmin-overlay.conf
-        if sshd -t >/dev/null 2>&1; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; fi
-        systemctl disable --now tn-nftables.service >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/tn-nftables.service /etc/wgvpn/nftables-node.nft /usr/local/sbin/tn-node-ssh-lockdown
-        rmdir /etc/wgvpn 2>/dev/null || true
-        systemctl daemon-reload 2>/dev/null || true
-        # Remove the overlay-SSH ufw rule (mirrors setup-vpn.sh --disable).
-        if ufw_installed && ufw_active; then
-            local sp; sp="$(get_ssh_port)"; [[ -n "$sp" ]] || sp=22
-            ufw delete allow from "${TN_OVERLAY_CIDR}" to any port "${sp}" proto tcp &>/dev/null || true
-        fi
-        if id -u tnadmin >/dev/null 2>&1; then
-            userdel -r tnadmin >/dev/null 2>&1 || true
-            rm -f /etc/sudoers.d/90-tnadmin
-        fi
         print_info "Note: ask the Telcoin Association to de-enroll this node's overlay peer."
+    fi
+
+    # --- VPN files, sudoers, account and firewall rules ------------------------
+    for f in "${vpn_files[@]}" "$dropin"; do
+        if [[ -e "${p}${f}" || -L "${p}${f}" ]]; then
+            left=true
+        fi
+    done
+    if [[ "$left" == "true" ]] || id -u tnadmin >/dev/null 2>&1; then
+        print_info "Removing the admin overlay files, the tnadmin account and its sudo rules..."
+    fi
+    if [[ -e "${p}/etc/systemd/system/tn-nftables.service" ]]; then
+        systemctl disable --now tn-nftables.service >/dev/null 2>&1 || true
+        reload=true
+    fi
+    if [[ -e "${p}${dropin}" || -L "${p}${dropin}" ]]; then
+        rm -f "${p}${dropin}"
+        if sshd -t >/dev/null 2>&1; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; fi
+    fi
+    for f in "${vpn_files[@]}"; do
+        rm -f "${p}${f}"
+    done
+    rmdir "${p}/etc/wgvpn" 2>/dev/null || true
+    if [[ "$reload" == "true" ]]; then
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    # The overlay SSH rules (mirrors setup-vpn.sh --disable): the maintainers' admin
+    # range and the whole-overlay rule older releases added. ufw edits its rule
+    # files when inactive too, and deleting a rule that is not there is a no-op.
+    if ufw_installed; then
+        sp="$(get_ssh_port)"; [[ -n "$sp" ]] || sp=22
+        for cidr in "${TN_OVERLAY_ADMIN_CIDR:-}" "${TN_OVERLAY_CIDR:-}"; do
+            [[ -n "$cidr" ]] || continue
+            ufw delete allow from "$cidr" to any port "${sp}" proto tcp &>/dev/null || true
+        done
+    fi
+    if id -u tnadmin >/dev/null 2>&1; then
+        userdel -r tnadmin >/dev/null 2>&1 || true
     fi
 }
 
@@ -607,6 +1191,10 @@ remove_testnet_addons() {
 remove_node_unit() {
     local unit="$1"
     local idx is_docker svc_user svc_group
+    if unit_blocked "$unit"; then
+        print_error "Not removing ${unit}: its .node-meta sets a key more than once (see above). Nothing was changed."
+        return 1
+    fi
     is_docker=false
     svc_user=""
     svc_group=""
@@ -615,6 +1203,11 @@ remove_node_unit() {
         svc_user="${UNIT_USER[$idx]:-}"
         svc_group="${UNIT_GROUP[$idx]:-}"
     fi
+    # The account the node keys are shredded as: the unit's service account, or
+    # the configured default when none is recorded or the unit runs as root.
+    local key_user="$svc_user" key_group="$svc_group"
+    [[ -n "$key_user" && "$key_user" != "root" ]] || key_user="${SERVICE_USER:-telcoin}"
+    [[ -n "$key_group" && "$key_group" != "root" ]] || key_group="${SERVICE_GROUP:-telcoin}"
 
     # Stop service
     stop_and_disable_service "$unit"
@@ -628,11 +1221,10 @@ remove_node_unit() {
         remove_docker_container "$ctr" "$unit"
     fi
 
-    # Chain data
-    remove_chain_data
-
-    # Keys -- separate explicit confirmation
-    remove_keys
+    # Chain data, then the keys (separate explicit confirmation). Both run before
+    # the service account is removed: the node keys are shredded as that account.
+    remove_chain_data "$key_user" "$key_group"
+    remove_keys "$key_user" "$key_group"
 
     # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
     remove_testnet_addons
@@ -670,6 +1262,10 @@ remove_all_nodes() {
         read -r -p "  Press Enter to return to menu..."
         return
     fi
+    if ! rm_take_lock; then
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
 
     echo ""
 
@@ -701,7 +1297,11 @@ wipe_chain_data_only() {
     for unit in ${INSTALLED_UNITS[@]+"${INSTALLED_UNITS[@]}"}; do
         print_warn "This will wipe all chain data (${unit}). The node will resync."
         if confirm "Wipe chain data for ${unit}?"; then
-            ddir="$(detect_data_dir)"
+            if ! ddir="$(detect_data_dir)" || [[ -z "$ddir" ]]; then
+                print_error "Chain data for ${unit} not wiped: the data directory is unknown."
+                continue
+            fi
+            rm_take_lock || break
             wait_for_service_stopped "$unit"
             rm -rf "${ddir}/db"
             systemctl start "$unit" 2>/dev/null || true
@@ -745,8 +1345,10 @@ custom_is_excluded_path() {
     # Exclude the installed node's own data dir (standard, even if on a custom
     # drive). The resolver yields the single unified/legacy dir for this VM.
     local dd
-    dd=$(detect_data_dir)
-    [[ "$p" == "$dd" || "$p" == "$dd"/* ]] && return 0
+    dd="$(detect_data_dir 2>/dev/null)" || dd=""
+    if [[ -n "$dd" ]] && [[ "$p" == "$dd" || "$p" == "$dd"/* ]]; then
+        return 0
+    fi
     return 1
 }
 
@@ -940,9 +1542,18 @@ main_menu() {
 # Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper.
 # DESTRUCTIVE: requires --yes, and the server gates it behind a typed "DELETE"
 # confirmation. Scope is cumulative:
-#   service -> stop+disable+rm unit (+ docker container)
-#   data    -> service + remove chain data
-#   keys    -> data + remove keys/config/.node-meta (+ TPM sealed files)
+#   service -> stop+disable+rm unit, its old backups (shredded) and drop-in dir
+#              (+ docker container)
+#   data    -> service + remove chain data (node keys inside it shredded)
+#   keys    -> data + shred keys and passphrase files, remove config/.node-meta,
+#              the service account, the log-reader group and, when no other
+#              node unit is installed, the shared host files
+#              (remove_node_host_files)
+# A key set more than once in .node-meta stops every scope before any change.
+# When the unit file is already gone (an earlier run stopped part way, or ran
+# with a smaller scope), a run continues as long as the node left files behind
+# (rm_leftovers_present), does what its scope still needs and ends with the
+# usual "done" event; with nothing left it reports "no node installed".
 #
 #   remove-node.sh --json --remove <observer|validator> --scope <service|data|keys> --yes
 #
@@ -980,29 +1591,46 @@ json_remove() {
     # Resolve the actually-installed node (unified telcoin unit, or a legacy unit)
     # instead of assuming telcoin-<slot>. One node per VM, so whichever slot the
     # UI sends, this is the node to remove.
-    local svc unit
-    svc="$(tn_resolve_service)" || { json_event error "no node installed"; return 1; }
-    unit="/etc/systemd/system/${svc}.service"
+    # With no unit file left (an earlier removal stopped part way, or ran with a
+    # smaller scope), the removal continues as long as the node left files
+    # behind (rm_leftovers_present); svc is then empty.
+    local svc="" unit=""
+    if svc="$(tn_resolve_service)"; then
+        unit="${TN_RM_ROOT}/etc/systemd/system/${svc}.service"
+    else
+        svc=""
+        if ! rm_leftovers_present; then
+            json_event error "no node installed"
+            return 1
+        fi
+    fi
 
-    # Detect docker BEFORE removing the unit (.node-meta is authoritative; fall
-    # back to the legacy inline `docker run` in the unit).
-    local is_docker=false
-    local meta
+    # Read .node-meta BEFORE anything is removed. It is authoritative for the
+    # install method, the service user/group and the data dir; a key set more
+    # than once stops the removal here, with nothing changed.
+    local meta method="" svc_user="" svc_group="" dup=""
     meta="$(tn_resolve_config_dir)/.node-meta"
-    if [[ "$(grep '^INSTALL_METHOD=' "$meta" 2>/dev/null | cut -d= -f2- || true)" == "docker" ]] \
-       || grep -q "docker run" "$unit" 2>/dev/null; then
+    if [[ -f "$meta" ]]; then
+        method="$(rm_meta_get INSTALL_METHOD "$meta")" || dup=INSTALL_METHOD
+        svc_user="$(rm_meta_get HOST_SERVICE_USER "$meta")" || dup=HOST_SERVICE_USER
+        svc_group="$(rm_meta_get HOST_SERVICE_GROUP "$meta")" || dup=HOST_SERVICE_GROUP
+        rm_meta_get DATA_DIR "$meta" >/dev/null || dup=DATA_DIR
+    fi
+    if [[ -n "$dup" ]]; then
+        json_event error "${dup} is set more than once in ${meta}; keep one line and run this again (nothing was removed)"
+        return 1
+    fi
+
+    # Docker when .node-meta says so; fall back to the legacy inline `docker run`
+    # in the unit.
+    local is_docker=false
+    if [[ "$method" == "docker" ]] || grep -q "docker run" "$unit" 2>/dev/null; then
         is_docker=true
     fi
 
-    # Resolve the service user/group BEFORE deleting the unit/.node-meta, so a
-    # 'keys' (full) removal can clean up the account instead of orphaning it.
-    # .node-meta is authoritative; the unit's User=/Group= is the fallback (but
-    # docker units run as root, so ignore root and use the default service name).
-    local svc_user="" svc_group=""
-    if [[ -f "$meta" ]]; then
-        svc_user=$(grep '^HOST_SERVICE_USER=' "$meta" 2>/dev/null | cut -d= -f2- || true)
-        svc_group=$(grep '^HOST_SERVICE_GROUP=' "$meta" 2>/dev/null | cut -d= -f2- || true)
-    fi
+    # The service user/group, so a 'keys' (full) removal can clean up the account
+    # instead of orphaning it. The unit's User=/Group= is the fallback (but docker
+    # units run as root, so ignore root and use the default service name).
     [[ -z "$svc_user" ]]  && svc_user=$(grep '^User=' "$unit" 2>/dev/null | cut -d= -f2- || true)
     [[ -z "$svc_group" ]] && svc_group=$(grep '^Group=' "$unit" 2>/dev/null | cut -d= -f2- || true)
     [[ -z "$svc_user"  || "$svc_user"  == "root" ]] && svc_user="${SERVICE_USER:-telcoin}"
@@ -1011,17 +1639,28 @@ json_remove() {
     # Resolve the data dir from .node-meta BEFORE it (and the meta) get removed,
     # so a custom data drive is cleaned up instead of orphaned.
     local data_dir
-    data_dir=$(detect_data_dir)
+    if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
+        json_event error "the data directory is unknown (nothing was removed)"
+        return 1
+    fi
 
-    json_event step "Stopping and disabling ${svc}"
-    systemctl stop "$svc" 2>/dev/null || true
-    systemctl disable "$svc" 2>/dev/null || true
-    rm -f "$unit"
-    systemctl daemon-reload
+    # No update or other node operation may run while this one changes the host.
+    if ! rm_take_lock 2>/dev/null; then
+        json_event error "another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished (nothing was removed)"
+        return 1
+    fi
+
+    # The unit, its old backups (shredded) and its drop-in directory.
+    if [[ -n "$svc" ]]; then
+        json_event step "Stopping and disabling ${svc}"
+    else
+        json_event step "No node unit is left: finishing the removal of the files the node left behind"
+    fi
+    stop_and_disable_service "$svc"
 
     if [[ "$is_docker" == "true" ]] && command -v docker >/dev/null 2>&1; then
         local ctr
-        ctr="$(tn_resolve_container 2>/dev/null || echo "$svc")"
+        ctr="$(tn_resolve_container 2>/dev/null || echo "${svc:-$TN_CONTAINER_NEW}")"
         json_event step "Removing docker container ${ctr}"
         docker stop "$ctr" 2>/dev/null || true
         docker rm "$ctr" 2>/dev/null || true
@@ -1030,6 +1669,11 @@ json_remove() {
     if [[ "$scope" == "data" || "$scope" == "keys" ]]; then
         if [[ -d "$data_dir" ]]; then
             json_event step "Removing chain data ${data_dir}"
+            # The node keys under the data dir go with it: shred them first, as
+            # the service account (before that account is removed below).
+            if [[ ! -L "$data_dir" ]]; then
+                _rm_shred_tree "${data_dir}/node-keys" "$svc_user" "$svc_group"
+            fi
             rm -rf "$data_dir"
         fi
     fi
@@ -1037,11 +1681,8 @@ json_remove() {
     if [[ "$scope" == "keys" ]]; then
         local config_dir
         config_dir="$(tn_resolve_config_dir)"
-        json_event step "Removing keys and config ${config_dir}"
-        rm -rf "${data_dir}/node-keys" 2>/dev/null || true
-        if declare -f tpm_remove_sealed_files >/dev/null 2>&1; then
-            tpm_remove_sealed_files "$config_dir" 2>/dev/null || true
-        fi
+        json_event step "Removing keys and config ${config_dir} (key and passphrase files are shredded)"
+        shred_key_files "${data_dir}/node-keys" "$config_dir" "$svc_user" "$svc_group"
         rm -rf "$config_dir" 2>/dev/null || true
 
         # Full removal: tear down the testnet add-ons too -- the Alloy log shipper holds
@@ -1065,6 +1706,17 @@ json_remove() {
             json_event step "Removing service group ${svc_group}"
             groupdel "$svc_group" 2>/dev/null \
                 || json_event step "Could not remove group ${svc_group} (still in use) -- run: groupdel ${svc_group}"
+        fi
+
+        # The log-reader group and the host files every node install shares, when
+        # no other node unit is installed here.
+        remove_log_group "$svc_user" "$svc"
+        if [[ -n "$RM_LOG_GROUP_MSG" ]]; then
+            json_event step "$RM_LOG_GROUP_MSG"
+        fi
+        if [[ -z "$(other_node_unit_files "$svc")" ]]; then
+            json_event step "Removing start scripts, node.env, backups, logrotate and journald files and the lock directory"
+            remove_node_host_files
         fi
 
         # Warn about any Telcoin-related groups that remain orphaned.
@@ -1101,7 +1753,7 @@ json_remove() {
     fi
 
     # "node_type" echoes the UI slot name; the key is kept for existing UI clients.
-    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$slot")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"${svc} removed (scope: ${scope})\"}"
+    json_emit "{\"event\":\"done\",\"ok\":true,\"node_type\":\"$(json_escape "$slot")\",\"scope\":\"$(json_escape "$scope")\",\"ui_removed\":${ui_scheduled},\"msg\":\"${svc:-the node} removed (scope: ${scope})\"}"
 }
 
 run_json_mode() {

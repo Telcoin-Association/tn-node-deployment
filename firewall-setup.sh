@@ -12,8 +12,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="1.6.0"
-readonly SSH_CONFIG="/etc/ssh/sshd_config"
+readonly SCRIPT_VERSION="2.0.0"
+readonly SSH_CONFIG="${TN_ROOT_PREFIX:-}/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
 # 43174/tcp is the Uptime Kuma health-monitoring endpoint used by the
@@ -27,6 +27,41 @@ readonly UPTIME_KUMA_PORT="43174"
 # The Caddyfile install-caddy.sh writes. Rooted at TN_ROOT_PREFIX (empty in
 # production, a temp tree under test), like the resolvers in lib/fallback.sh.
 readonly FW_CADDYFILE="${TN_ROOT_PREFIX:-}/etc/caddy/Caddyfile"
+# ufw keeps its rule files and enabled flag here; apply_recommended_firewall saves
+# them before it changes anything and puts them back when a step fails.
+readonly FW_UFW_DIR="${TN_ROOT_PREFIX:-}/etc/ufw"
+readonly FW_UFW_DEFAULT="${TN_ROOT_PREFIX:-}/etc/default/ufw"
+# The sshd hardening drop-in. The 00- prefix sorts before cloud-init's
+# 50-cloud-init.conf, and sshd keeps the first value it reads for a keyword.
+readonly FW_SSHD_DROPIN="${TN_ROOT_PREFIX:-}/etc/ssh/sshd_config.d/00-telcoin-hardening.conf"
+# Google Cloud IAP TCP forwarding range: kept in the SSH source list on a GCE VM.
+readonly FW_IAP_SSH_CIDR="35.235.240.0/20"
+
+# Source lists for this run: --ssh-from / --p2p-from (comma lists or a file), and
+# --ssh-anywhere / --p2p-anywhere (drop a stored list). Empty = not given.
+FW_SSH_FROM=""
+FW_P2P_FROM=""
+FW_SSH_ANYWHERE=false
+FW_P2P_ANYWHERE=false
+# Filled by fw_preflight: the validated sshd ports and SSH sources, and (lazily,
+# fw_load_p2p_srcs) the P2P sources. An empty source array means "anywhere".
+FW_SSH_PORTS=()
+FW_SSH_SRCS=()
+FW_P2P_SRCS=()
+FW_P2P_LOADED=false
+# Filled by fw_preflight: sources of the stored lists that this run's lists
+# replace (fw_stale_sources); their per-source rules are deleted on --enable.
+FW_SSH_STALE=()
+FW_P2P_STALE=()
+# Set by apply_recommended_firewall while it changes rules: the saved rule files
+# (fw_snapshot), whether ufw was active before, and FW_APPLY_INFLIGHT=true until
+# the new rules are complete or the old ones are back. fw_on_exit (the EXIT trap
+# of every run; TERM, INT and HUP exit through it) puts the old rules back when
+# the run ends while a step is in flight, and removes the saved files.
+FW_SNAP=""
+FW_WAS_ACTIVE=false
+FW_APPLY_INFLIGHT=false
+FW_STDERR_SAVED=false
 
 # =============================================================================
 # HELPERS
@@ -86,12 +121,93 @@ kuma_offer_anywhere_cleanup() {
     fi
 }
 
-get_ssh_password_auth() {
-    grep -E "^PasswordAuthentication " "$SSH_CONFIG" 2>/dev/null | awk '{print $2}' || echo "yes"
+# fw_sshd_effective KEYWORD DEFAULT -- the value sshd uses for KEYWORD (lowercase):
+# `sshd -T` when it runs, else the first KEYWORD line of sshd_config, else DEFAULT.
+fw_sshd_effective() {
+    local key="$1" dflt="$2" bin out v=""
+    bin="$(fw_sshd_bin)"
+    if [[ -n "$bin" ]] && out="$("$bin" -T 2>/dev/null)"; then
+        v="$(awk -v k="$key" 'tolower($1) == k { print $2; exit }' <<< "$out")"
+    fi
+    if [[ -z "$v" ]]; then
+        v="$(awk -v k="$key" 'tolower($1) == k { print $2; exit }' "$SSH_CONFIG" 2>/dev/null)" || v=""
+    fi
+    printf '%s\n' "${v:-$dflt}"
 }
 
-get_ssh_root_login() {
-    grep -E "^PermitRootLogin " "$SSH_CONFIG" 2>/dev/null | awk '{print $2}' || echo "yes"
+get_ssh_password_auth() { fw_sshd_effective passwordauthentication yes; }
+get_ssh_root_login()    { fw_sshd_effective permitrootlogin yes; }
+
+# fw_sshd_reload -- reload sshd (ssh.service on Debian/Ubuntu, sshd.service elsewhere).
+fw_sshd_reload() {
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null
+}
+
+# fw_sshd_harden "Keyword value"... -- set each directive in the drop-in
+# FW_SSHD_DROPIN (directives already there for other keywords stay), written
+# through tn_write_root_file (root 0644). `sshd -t` checks the result: on a failure
+# the previous drop-in is put back (or the new one removed), nothing is reloaded and
+# rc is 1. Then sshd is reloaded and each keyword is read back with `sshd -T`; a
+# value that did not take is a warning (rc 3), as is a sshd_config without an
+# Include line for sshd_config.d. rc 2 when the drop-in could not be written.
+fw_sshd_harden() {
+    local f="$FW_SSHD_DROPIN" bin had=false prev="" content kv key want got rc=0
+    bin="$(fw_sshd_bin)"
+    if [[ -z "$bin" ]]; then
+        print_error "sshd not found; nothing was changed."
+        return 1
+    fi
+    if [[ -L "$f" ]]; then
+        print_error "${f} is a symlink; nothing was changed."
+        return 1
+    fi
+    if [[ -f "$f" ]]; then
+        had=true
+        prev="$(cat -- "$f")" || return 2
+    fi
+    content="$prev"
+    for kv in "$@"; do
+        key="${kv%% *}"
+        content="$(printf '%s\n' "$content" | awk -v k="$key" 'tolower($1) != tolower(k) && $0 != ""')"
+        content="${content:+${content}
+}${kv}"
+    done
+    if [[ "$had" != "true" ]]; then
+        content="# Managed by firewall-setup.sh (Telcoin node scripts): sshd hardening.
+# 00- sorts before other drop-ins; sshd keeps the first value it reads.
+${content}"
+    fi
+    if [[ ! -d "${f%/*}" ]]; then
+        install -d -m 0755 -o root -g root "${f%/*}" || return 2
+    fi
+    if ! tn_write_root_file "$f" 0644 <<< "$content"; then
+        print_error "Could not write ${f}; nothing was changed."
+        return 2
+    fi
+    if ! "$bin" -t >/dev/null 2>&1; then
+        print_error "sshd -t rejected the new configuration; putting the previous one back."
+        if [[ "$had" == "true" ]]; then
+            tn_write_root_file "$f" 0644 <<< "$prev" || print_error "Could not restore ${f}; fix it by hand before the next sshd restart."
+        else
+            rm -f -- "$f"
+        fi
+        return 1
+    fi
+    if ! grep -qiE '^[[:space:]]*Include[[:space:]].*sshd_config\.d' "$SSH_CONFIG" 2>/dev/null; then
+        print_warn "${SSH_CONFIG} has no 'Include /etc/ssh/sshd_config.d/*.conf' line, so sshd ignores ${f}."
+        rc=3
+    fi
+    fw_sshd_reload || print_warn "sshd reload failed; the new settings apply at the next sshd restart."
+    for kv in "$@"; do
+        key="${kv%% *}"
+        want="${kv#* }"
+        got="$(fw_sshd_effective "$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')" "")"
+        if [[ "$(printf '%s' "$got" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')" ]]; then
+            print_warn "sshd still reports ${key} ${got:-unknown} (wanted ${want}); an earlier drop-in or a Match block sets it."
+            rc=3
+        fi
+    done
+    return "$rc"
 }
 
 get_current_ip() {
@@ -185,8 +301,8 @@ fw_p2p_ports() {
     if target="$(tn_node_launch_target 2>/dev/null)"; then
         read -r svc _ file <<< "$target"
         unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service"
-        primary="$(fw_listener_port PRIMARY_LISTENER_MULTIADDR "$unit" "$file")" || primary=""
-        w0="$(fw_listener_port WORKER_LISTENER_MULTIADDR "$unit" "$file")" || w0=""
+        primary="$(fw_listener_port PRIMARY_LISTENER_MULTIADDR "$unit" "${TN_ROOT_PREFIX:-}/etc/telcoin/node.env" "$file")" || primary=""
+        w0="$(fw_listener_port WORKER_LISTENER_MULTIADDR "$unit" "${TN_ROOT_PREFIX:-}/etc/telcoin/node.env" "$file")" || w0=""
     fi
     ni="$(tn_resolve_data_dir 2>/dev/null || true)/node-info.yaml"
     if [[ -z "$primary" ]] && declare -F tn_node_info_field >/dev/null 2>&1; then
@@ -257,15 +373,295 @@ fw_p2p_all_open() {
     return 0
 }
 
-# fw_p2p_allow -- add an ALLOW rule for every P2P port (ufw skips existing ones). The
-# first `ufw allow` that fails is reported (fw_try) and ends it with rc 1, so the
-# caller stops there.
+# fw_p2p_allow -- add an ALLOW rule for every P2P port (ufw skips existing ones).
+# With a P2P source list (--p2p-from, or P2P_ALLOW_FROM in .node-meta) it adds one
+# rule per source and port and then deletes the open rule of that port (IPv4 and
+# IPv6 together). The first ufw call that fails is reported (fw_try) and ends it
+# with rc 1, so the caller stops there; an unreadable source list is rc 1 too.
 fw_p2p_allow() {
-    local port label
+    local port label s
+    fw_load_p2p_srcs || return 1
     while read -r port label; do
         [[ -n "$port" ]] || continue
-        fw_try "ufw allow ${port}/udp" ufw allow "${port}/udp" || return 1
+        if [[ ${#FW_P2P_SRCS[@]} -gt 0 ]]; then
+            for s in "${FW_P2P_SRCS[@]}"; do
+                fw_try "ufw allow from ${s} to any port ${port} proto udp" ufw allow from "$s" to any port "$port" proto udp || return 1
+            done
+            fw_try "ufw delete allow ${port}/udp" ufw delete allow "${port}/udp" || return 1
+        else
+            fw_try "ufw allow ${port}/udp" ufw allow "${port}/udp" || return 1
+        fi
     done < <(fw_p2p_ports)
+    return 0
+}
+
+# fw_port_ok VALUE -- 0 when VALUE is a decimal port 1-65535 without leading zeros.
+fw_port_ok() {
+    [[ "${1:-}" =~ ^[1-9][0-9]{0,4}$ ]] && (( ${1} <= 65535 ))
+}
+
+# fw_src_list SPEC -- print the sources in SPEC one per line. SPEC is a comma list
+# of addresses or CIDRs, or the path of a readable file holding them (one or more
+# per line, comma separated; # starts a comment). Every entry must pass
+# validate_health_src, which refuses the unspecified address, masks shorter than
+# /8 and IPv4 octets with leading zeros, so ufw never meets a source it rejects
+# halfway through the rules. rc 1 (message on stderr) on the first bad entry or
+# an empty list.
+fw_src_list() {
+    local spec="${1:-}" raw s n=0
+    if [[ -f "$spec" ]]; then
+        raw="$(sed -e 's/#.*//' "$spec" | tr ',' '\n')" || return 1
+    else
+        raw="$(printf '%s\n' "$spec" | tr ',' '\n')"
+    fi
+    while IFS= read -r s; do
+        s="${s//[[:space:]]/}"
+        [[ -n "$s" ]] || continue
+        if ! validate_health_src "$s"; then
+            print_error "Not an address or a CIDR of /8 or narrower (no leading zeros): '${s}'" >&2
+            return 1
+        fi
+        printf '%s\n' "$s"
+        n=$((n + 1))
+    done <<< "$raw"
+    if [[ "$n" -eq 0 ]]; then
+        print_error "The source list is empty." >&2
+        return 1
+    fi
+    return 0
+}
+
+# fw_sources ssh|p2p -- the effective source list, one per line: the --ssh-from /
+# --p2p-from value of this run, else SSH_ALLOW_FROM / P2P_ALLOW_FROM in .node-meta,
+# else nothing (anywhere). --ssh-anywhere / --p2p-anywhere print nothing. rc 1 on
+# an invalid entry or a key set more than once (message on stderr).
+fw_sources() {
+    local kind="$1" given anywhere key stored
+    if [[ "$kind" == "ssh" ]]; then
+        given="$FW_SSH_FROM"; anywhere="$FW_SSH_ANYWHERE"; key="SSH_ALLOW_FROM"
+    else
+        given="$FW_P2P_FROM"; anywhere="$FW_P2P_ANYWHERE"; key="P2P_ALLOW_FROM"
+    fi
+    [[ "$anywhere" == "true" ]] && return 0
+    if [[ -n "$given" ]]; then
+        fw_src_list "$given"
+        return
+    fi
+    stored="$(addon_meta_get "$key")" || return 1
+    [[ -n "$stored" ]] || return 0
+    if ! fw_src_list "$stored"; then
+        print_error "${key} in .node-meta holds an invalid entry; pass --${kind}-from again." >&2
+        return 1
+    fi
+}
+
+# fw_src_deletable SRC -- 0 when SRC is an address or CIDR ufw accepts as a source
+# (no leading-zero octet, mask 1-32 or 1-128), so a delete of its rule can run.
+fw_src_deletable() {
+    local s="$1" ip mask max
+    ip="${s%%/*}"
+    if validate_ipv4 "$ip"; then
+        [[ ".${ip}" == *.0[0-9]* ]] && return 1
+        max=32
+    elif validate_ipv6 "$ip"; then
+        max=128
+    else
+        return 1
+    fi
+    [[ "$s" == */* ]] || return 0
+    mask="${s#*/}"
+    [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] && (( mask <= max ))
+}
+
+# fw_stale_sources ssh|p2p -- print, one per line, the sources of the stored list
+# (SSH_ALLOW_FROM / P2P_ALLOW_FROM) that this run's --ssh-from / --p2p-from list,
+# or --ssh-anywhere / --p2p-anywhere, replaces and does not keep. Nothing when no
+# new list is given or nothing is stored; a stored key set more than once is
+# warned about and gives nothing. Run after FW_SSH_SRCS / FW_P2P_SRCS are filled.
+fw_stale_sources() {
+    local kind="$1" given anywhere key stored s n keep
+    local -a now=()
+    if [[ "$kind" == "ssh" ]]; then
+        given="$FW_SSH_FROM"; anywhere="$FW_SSH_ANYWHERE"; key="SSH_ALLOW_FROM"
+        now=(${FW_SSH_SRCS[@]+"${FW_SSH_SRCS[@]}"})
+    else
+        given="$FW_P2P_FROM"; anywhere="$FW_P2P_ANYWHERE"; key="P2P_ALLOW_FROM"
+        now=(${FW_P2P_SRCS[@]+"${FW_P2P_SRCS[@]}"})
+    fi
+    [[ -n "$given" || "$anywhere" == "true" ]] || return 0
+    if ! stored="$(addon_meta_get "$key" 2>/dev/null)"; then
+        print_warn "${key} is set more than once in .node-meta, so the rules of the sources it held stay; check them with: sudo ufw status numbered" >&2
+        return 0
+    fi
+    while IFS= read -r s; do
+        s="${s//[[:space:]]/}"
+        [[ -n "$s" ]] || continue
+        fw_src_deletable "$s" || continue
+        keep=false
+        for n in ${now[@]+"${now[@]}"}; do
+            [[ "$n" == "$s" ]] && keep=true
+        done
+        [[ "$keep" == "true" ]] || printf '%s\n' "$s"
+    done <<< "$(printf '%s\n' "$stored" | tr ',' '\n')"
+    return 0
+}
+
+# fw_load_p2p_srcs -- fill FW_P2P_SRCS from fw_sources p2p once per run.
+fw_load_p2p_srcs() {
+    local list s
+    [[ "$FW_P2P_LOADED" == "true" ]] && return 0
+    list="$(fw_sources p2p)" || return 1
+    FW_P2P_SRCS=()
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && FW_P2P_SRCS+=("$s")
+    done <<< "$list"
+    FW_P2P_LOADED=true
+}
+
+# fw_on_gce -- 0 on a Google Compute Engine VM (DMI product name), where IAP TCP
+# forwarding is the console SSH path.
+fw_on_gce() {
+    grep -qi "Google Compute Engine" "${TN_ROOT_PREFIX:-}/sys/class/dmi/id/product_name" 2>/dev/null
+}
+
+# fw_sshd_bin -- the sshd binary, or nothing.
+fw_sshd_bin() {
+    if command -v sshd >/dev/null 2>&1; then
+        command -v sshd
+    elif [[ -x /usr/sbin/sshd ]]; then
+        printf '%s\n' /usr/sbin/sshd
+    fi
+}
+
+# fw_ssh_ports -- the ports sshd listens on, one per line: `sshd -T` (the
+# effective configuration), else the Port lines of sshd_config, else 22. rc 1 when
+# a value is not a port 1-65535.
+fw_ssh_ports() {
+    local bin out ports="" p
+    bin="$(fw_sshd_bin)"
+    if [[ -n "$bin" ]] && out="$("$bin" -T 2>/dev/null)"; then
+        ports="$(awk 'tolower($1) == "port" { print $2 }' <<< "$out")"
+    fi
+    [[ -n "$ports" ]] || ports="$(get_ssh_port)"
+    [[ -n "$ports" ]] || ports=22
+    while IFS= read -r p; do
+        [[ -n "$p" ]] || continue
+        fw_port_ok "$p" || return 1
+        printf '%s\n' "$p"
+    done <<< "$(printf '%s\n' "$ports" | sort -un)"
+}
+
+# fw_preflight -- check everything apply_recommended_firewall needs before it
+# changes anything: ufw present, sshd ports valid, SSH and P2P source lists valid,
+# the stored health sources valid on testnet, every P2P port valid, and on mainnet
+# an SSH source list (or --ssh-anywhere). Fills FW_SSH_PORTS, FW_SSH_SRCS and
+# FW_P2P_SRCS. rc 1 with an error (fw_error) when anything is wrong.
+fw_preflight() {
+    local list s port label
+    if ! command -v ufw >/dev/null 2>&1; then
+        fw_error "ufw is not installed; nothing was changed."
+        return 1
+    fi
+    if ! list="$(fw_ssh_ports)"; then
+        fw_error "sshd reports a listen port outside 1-65535; nothing was changed."
+        return 1
+    fi
+    FW_SSH_PORTS=()
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && FW_SSH_PORTS+=("$s")
+    done <<< "$list"
+    if ! list="$(fw_sources ssh)"; then
+        fw_error "The SSH source list is not usable; nothing was changed."
+        return 1
+    fi
+    FW_SSH_SRCS=()
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && FW_SSH_SRCS+=("$s")
+    done <<< "$list"
+    FW_P2P_LOADED=false
+    if ! fw_load_p2p_srcs; then
+        fw_error "The P2P source list is not usable; nothing was changed."
+        return 1
+    fi
+    FW_SSH_STALE=()
+    FW_P2P_STALE=()
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && FW_SSH_STALE+=("$s")
+    done <<< "$(fw_stale_sources ssh)"
+    while IFS= read -r s; do
+        [[ -n "$s" ]] && FW_P2P_STALE+=("$s")
+    done <<< "$(fw_stale_sources p2p)"
+    if [[ "${NETWORK:-}" == "mainnet" && ${#FW_SSH_SRCS[@]} -eq 0 && "$FW_SSH_ANYWHERE" != "true" ]]; then
+        fw_error "Mainnet: give the SSH sources with --ssh-from CIDR[,CIDR] (or --ssh-anywhere to keep SSH open to every address); nothing was changed."
+        return 1
+    fi
+    if is_testnet_like; then
+        if ! list="$(kuma_extra_list)"; then
+            fw_error "KUMA_EXTRA_SRC cannot be read; nothing was changed."
+            return 1
+        fi
+        local -a extras=()
+        read -r -a extras <<< "$list" || true
+        for s in ${extras[@]+"${extras[@]}"}; do
+            if ! validate_health_src "$s"; then
+                fw_error "KUMA_EXTRA_SRC holds '${s}', which is not an address or a CIDR of /8 or narrower; remove it (Manage node ports) first. Nothing was changed."
+                return 1
+            fi
+        done
+    fi
+    while read -r port label; do
+        [[ -n "$port" ]] || continue
+        if ! fw_port_ok "$port"; then
+            fw_error "The ${label} P2P port '${port}' is not 1-65535; nothing was changed."
+            return 1
+        fi
+    done < <(fw_p2p_ports)
+    return 0
+}
+
+# fw_snapshot -- copy ufw's rule files, ufw.conf and /etc/default/ufw into a new
+# root-only directory (mktemp -d under TN_FW_SNAP_PARENT, default /run) and set
+# FW_SNAP to its path, in this shell, so fw_on_exit can see it. rc 1 when the
+# copy fails (FW_SNAP empty, nothing left behind).
+fw_snapshot() {
+    local f
+    FW_SNAP="$(mktemp -d "${TN_FW_SNAP_PARENT:-/run}/tn-fw.XXXXXX")" || { FW_SNAP=""; return 1; }
+    for f in "$FW_UFW_DIR"/*.rules "$FW_UFW_DIR"/ufw.conf; do
+        [[ -f "$f" ]] || continue
+        cp -p -- "$f" "$FW_SNAP/" || { fw_snapshot_drop; return 1; }
+    done
+    if [[ -f "$FW_UFW_DEFAULT" ]]; then
+        cp -p -- "$FW_UFW_DEFAULT" "$FW_SNAP/default-ufw" || { fw_snapshot_drop; return 1; }
+    fi
+    return 0
+}
+
+# fw_snapshot_drop -- remove the saved rule files (FW_SNAP) and forget them.
+fw_snapshot_drop() {
+    [[ -n "$FW_SNAP" ]] && rm -rf -- "$FW_SNAP"
+    FW_SNAP=""
+}
+
+# fw_restore SNAPSHOT WAS_ACTIVE -- put the saved files back, then return ufw to
+# the state it had: `ufw --force enable` (which reloads the restored rules) when it
+# was active or the restored ufw.conf says ENABLED=yes, `ufw --force disable`
+# otherwise. rc 1 when any step fails.
+fw_restore() {
+    local d="$1" was_active="$2" f rc=0
+    for f in "$d"/*; do
+        [[ -f "$f" ]] || continue
+        if [[ "${f##*/}" == "default-ufw" ]]; then
+            cp -p -- "$f" "$FW_UFW_DEFAULT" || rc=1
+        else
+            cp -p -- "$f" "$FW_UFW_DIR/" || rc=1
+        fi
+    done
+    [[ "$rc" -eq 0 ]] || return 1
+    if [[ "$was_active" == "true" ]] || grep -q '^ENABLED=yes' "$FW_UFW_DIR/ufw.conf" 2>/dev/null; then
+        ufw --force enable >/dev/null 2>&1 || return 1
+    else
+        ufw --force disable >/dev/null 2>&1 || return 1
+    fi
     return 0
 }
 
@@ -467,30 +863,38 @@ view_status() {
 # ENABLE FIREWALL WITH RECOMMENDED DEFAULTS
 # =============================================================================
 
-# apply_recommended_firewall — stage the lockout-safe ruleset and enable ufw, with NO prompt.
-# Shared by the interactive enable_firewall and the non-interactive `--json --enable`. Order is
-# load-bearing: SSH (operator + the IAP range via the blanket :22 allow) + the WireGuard overlay
-# (the Association recovery path, 10.100.0.0/16) + the source-restricted kuma monitor are ALL
-# allowed BEFORE `ufw --force enable`, so enabling can never lock out the IAP door or the overlay.
-# Opens the node P2P ports (fw_p2p_ports: 49590/49594 unless the node uses others) when a node
-# is installed. 80/443 are opened here only when Caddy serves the public RPC/dashboard on this
-# box (caddy_serves_public_edge), checked on EVERY run and allowed before the enable, so turning
-# ufw on never takes a live site down; otherwise install-caddy.sh in this repo opens them when it
-# enables the public RPC/dashboard (the maintainer-only common/config-caddy.sh does the same on
-# the maintainer fleet, provenance only). Mirrors the interactive defaults exactly.
+# apply_recommended_firewall [--reset] — stage the lockout-safe ruleset and enable
+# ufw, with NO prompt. Shared by the interactive enable_firewall, `--enable`,
+# `--reset` and `--json --enable`.
 #
-# RECONCILE by default: it only ENSURES the managed rules + policies exist and never
-# removes anything, so a re-run can't silently drop an operator's custom rules (a manual
-# 443, a bespoke allow, etc.). Pass "--reset" to first `ufw --force reset` for a clean
-# slate -- destructive, removes ALL existing rules including unmanaged ones, except that
-# 80/443 come back when Caddy serves the public edge here. To close them, disable that
-# access with install-caddy.sh (--json --phase=rpc-disable / --phase=disable, or its
-# interactive menu); it closes 80/443 once no vhost remains. Either way the lockout-safe
-# ordering holds: SSH + overlay + kuma are allowed BEFORE enable.
+# Before anything changes, fw_preflight checks every input (ufw present, sshd
+# ports from `sshd -T`, the SSH and P2P source lists, the stored health sources,
+# the P2P ports; on mainnet an SSH source list or --ssh-anywhere); a failure
+# there is rc 1 with nothing changed. Then ufw's rule files are saved
+# (fw_snapshot) and the rules go in this order: SSH (per source when a list is
+# set, the IAP range on GCE and the overlay admin range on a VPN host first; else
+# the blanket port rule), the health port (testnet and devnet only; on any other
+# network an old monitor rule is deleted), the load-balancer health ranges, the
+# overlay SSH rule, the node P2P ports (per source with P2P_ALLOW_FROM), 80/443
+# when Caddy serves the public edge here, and only then the default policies,
+# the deletion of the blanket SSH rule (with a source list), the deletion of the
+# rules of sources a replaced --ssh-from / --p2p-from list no longer holds, and
+# `ufw --force enable`. Every allow comes before the default deny, so there is
+# never a window with SSH closed.
+#
+# RECONCILE by default: it only ENSURES the managed rules + policies exist, so a
+# re-run keeps an operator's custom rules. "--reset" first runs `ufw --force
+# reset` for a clean slate (all rules removed, except that 80/443 come back when
+# Caddy serves the public edge here).
+#
+# rc 0 done; 1 refused by the preflight (nothing changed); 2 a step failed and the
+# previous rule files and ufw state were put back; 3 a step failed and putting
+# them back failed too: ufw may now be DISABLED (the message says where the saved
+# files are).
 apply_recommended_firewall() {
     local do_reset="${1:-}"
-    local ssh_port nodes keep_web=false web_was_open=false
-    ssh_port=$(get_ssh_port)
+    local nodes keep_web=false web_was_open=false snap
+    fw_preflight || return 1
     nodes=$(detect_installed_nodes)
     # Before a reset wipes the rules: is Caddy serving the public edge on this box, and
     # does the running firewall already let it in?
@@ -500,19 +904,89 @@ apply_recommended_firewall() {
             web_was_open=true
         fi
     fi
-    # Every step is checked: the first rule that cannot be added is reported (fw_try)
-    # and ends this with rc 1, before `ufw --force enable`. Rules added before it stay.
+    FW_WAS_ACTIVE=false
+    if ufw_active; then
+        FW_WAS_ACTIVE=true
+    fi
+    if ! fw_snapshot; then
+        fw_error "Could not save the current ufw rule files; nothing was changed."
+        return 1
+    fi
+    FW_APPLY_INFLIGHT=true
+    if ! fw_apply_rules "$do_reset" "$nodes" "$keep_web"; then
+        if fw_restore "$FW_SNAP" "$FW_WAS_ACTIVE"; then
+            FW_APPLY_INFLIGHT=false
+            fw_snapshot_drop
+            if [[ "$FW_WAS_ACTIVE" == "true" ]]; then
+                fw_error "Stopped at that step; the previous ufw rules were put back and ufw is active again."
+            else
+                fw_error "Stopped at that step; the previous ufw rules were put back and ufw stays inactive, as it was."
+            fi
+            return 2
+        fi
+        # Keep the saved files for the operator: fw_on_exit must not remove them.
+        snap="$FW_SNAP"
+        FW_APPLY_INFLIGHT=false
+        FW_SNAP=""
+        fw_error "Stopped at that step, and the previous ufw rules could not be put back: ufw may now be DISABLED. The saved rule files are in ${snap}. Fix the cause and run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --reset"
+        return 3
+    fi
+    FW_APPLY_INFLIGHT=false
+    fw_snapshot_drop
+    if [[ "$keep_web" == "true" ]]; then
+        if [[ "$web_was_open" == "true" ]]; then
+            print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
+        else
+            print_info "Allowed TCP 80/443 -- Caddy serves the public RPC/dashboard on this box."
+        fi
+        print_info "To close them, turn that access off with install-caddy.sh (sudo bash ${SCRIPT_DIR}/install-caddy.sh);"
+        print_info "  it closes 80/443 once no site remains."
+    fi
+    return 0
+}
+
+# fw_apply_rules RESET NODES KEEP_WEB -- the rule sequence of
+# apply_recommended_firewall (see there for the order). Needs fw_preflight first.
+# rc 1 at the first step that fails (reported by fw_try).
+fw_apply_rules() {
+    local do_reset="$1" nodes="$2" keep_web="$3" p s krc label
+    local -a fixed=()
     if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
         fw_try "ufw --force reset" ufw --force reset || return 1
     fi
-    fw_try "ufw default deny incoming" ufw default deny incoming || return 1
-    fw_try "ufw default allow outgoing" ufw default allow outgoing || return 1
-    fw_try "ufw allow ${ssh_port}/tcp" ufw allow "${ssh_port}/tcp" || return 1
-    fw_try "The health-port rule (${UPTIME_KUMA_PORT}/tcp from ${TN_KUMA_SRC})" apply_kuma_rule || return 1
-    # LB health-check ranges (no-op unless TN_LB_HC_RANGES set)
-    fw_try "The load-balancer health-check rules" apply_lb_hc_rule || return 1
-    if vpn_active; then
-        fw_try "The overlay SSH rule (from ${TN_OVERLAY_CIDR})" allow_overlay_ssh || return 1
+    if [[ ${#FW_SSH_SRCS[@]} -gt 0 ]]; then
+        if fw_on_gce; then
+            fixed+=("$FW_IAP_SSH_CIDR")
+        fi
+        if is_testnet_like && vpn_active; then
+            fixed+=("$TN_OVERLAY_ADMIN_CIDR")
+        fi
+    fi
+    for p in "${FW_SSH_PORTS[@]}"; do
+        if [[ ${#FW_SSH_SRCS[@]} -gt 0 ]]; then
+            for s in ${fixed[@]+"${fixed[@]}"} "${FW_SSH_SRCS[@]}"; do
+                fw_try "ufw allow from ${s} to any port ${p} proto tcp" ufw allow from "$s" to any port "$p" proto tcp || return 1
+            done
+        else
+            fw_try "ufw allow ${p}/tcp" ufw allow "${p}/tcp" || return 1
+        fi
+    done
+    if is_testnet_like; then
+        fw_try "The health-port rule (${UPTIME_KUMA_PORT}/tcp from ${TN_KUMA_SRC})" apply_kuma_rule || return 1
+        # LB health-check ranges (no-op unless TN_LB_HC_RANGES set)
+        fw_try "The load-balancer health-check rules" apply_lb_hc_rule || return 1
+        if vpn_active; then
+            fw_try "The overlay SSH rule (from ${TN_OVERLAY_ADMIN_CIDR})" allow_overlay_ssh || return 1
+        fi
+    else
+        # Not a testnet: the health port stays closed; delete a monitor rule left from
+        # before. rc 1 is that normal outcome; rc 2 is a delete that failed.
+        krc=0
+        apply_kuma_rule >/dev/null 2>&1 || krc=$?
+        if [[ "$krc" -eq 2 ]]; then
+            fw_error "Deleting the health-port ${UPTIME_KUMA_PORT}/tcp rules failed."
+            return 1
+        fi
     fi
     # Every installed node needs P2P open inbound: the role is decided on-chain at
     # each epoch and no networking is provisioned when a node joins the committee,
@@ -526,17 +1000,71 @@ apply_recommended_firewall() {
         fw_try "ufw allow 80/tcp" ufw allow 80/tcp || return 1
         fw_try "ufw allow 443/tcp" ufw allow 443/tcp || return 1
     fi
-    fw_try "ufw --force enable" ufw --force enable || return 1
-    if [[ "$keep_web" == "true" ]]; then
-        if [[ "$web_was_open" == "true" ]]; then
-            print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
-        else
-            print_info "Allowed TCP 80/443 -- Caddy serves the public RPC/dashboard on this box."
-        fi
-        print_info "To close them, turn that access off with install-caddy.sh (sudo bash ${SCRIPT_DIR}/install-caddy.sh);"
-        print_info "  it closes 80/443 once no site remains."
+    fw_try "ufw default deny incoming" ufw default deny incoming || return 1
+    fw_try "ufw default allow outgoing" ufw default allow outgoing || return 1
+    # With a source list, drop the blanket rule (one delete removes the IPv4 and IPv6
+    # rules) after the per-source rules are in, so SSH is never closed in between.
+    if [[ ${#FW_SSH_SRCS[@]} -gt 0 ]]; then
+        for p in "${FW_SSH_PORTS[@]}"; do
+            fw_try "ufw delete allow ${p}/tcp" ufw delete allow "${p}/tcp" || return 1
+        done
     fi
+    # A replaced source list: drop the rules of the sources it no longer holds, now
+    # that the new rules are in (a reset has removed them already). The GCE and
+    # overlay ranges added above stay.
+    if [[ "$do_reset" != "--reset" && "$do_reset" != "reset" ]]; then
+        for s in ${FW_SSH_STALE[@]+"${FW_SSH_STALE[@]}"}; do
+            case " ${fixed[*]-} " in *" ${s} "*) continue ;; esac
+            for p in "${FW_SSH_PORTS[@]}"; do
+                fw_try "ufw delete allow from ${s} to any port ${p} proto tcp" ufw delete allow from "$s" to any port "$p" proto tcp || return 1
+            done
+        done
+        for s in ${FW_P2P_STALE[@]+"${FW_P2P_STALE[@]}"}; do
+            while read -r p label; do
+                [[ -n "$p" ]] || continue
+                fw_try "ufw delete allow from ${s} to any port ${p} proto udp" ufw delete allow from "$s" to any port "$p" proto udp || return 1
+            done < <(fw_p2p_ports)
+        done
+    fi
+    fw_try "ufw --force enable" ufw --force enable || return 1
     return 0
+}
+
+# fw_persist_sources -- record the source lists given on this run in .node-meta
+# (SSH_ALLOW_FROM, P2P_ALLOW_FROM as comma lists; --ssh-anywhere / --p2p-anywhere
+# remove the key), so a later enable keeps them. Call fw_meta_lock first. rc 1
+# when a write failed (warned).
+fw_persist_sources() {
+    local rc=0 v
+    if [[ -n "$FW_SSH_FROM" ]]; then
+        v="$(printf '%s\n' ${FW_SSH_SRCS[@]+"${FW_SSH_SRCS[@]}"} | paste -sd, -)"
+        meta_set SSH_ALLOW_FROM "$v" || rc=1
+    elif [[ "$FW_SSH_ANYWHERE" == "true" ]]; then
+        meta_unset SSH_ALLOW_FROM || rc=1
+    fi
+    if [[ -n "$FW_P2P_FROM" ]]; then
+        v="$(printf '%s\n' ${FW_P2P_SRCS[@]+"${FW_P2P_SRCS[@]}"} | paste -sd, -)"
+        meta_set P2P_ALLOW_FROM "$v" || rc=1
+    elif [[ "$FW_P2P_ANYWHERE" == "true" ]]; then
+        meta_unset P2P_ALLOW_FROM || rc=1
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        print_warn "The source lists could not be saved in .node-meta; give the same flags again on the next run." >&2
+    fi
+    return "$rc"
+}
+
+# fw_wants_meta_write -- 0 when this run will change a stored source list.
+fw_wants_meta_write() {
+    [[ -n "$FW_SSH_FROM" || -n "$FW_P2P_FROM" || "$FW_SSH_ANYWHERE" == "true" || "$FW_P2P_ANYWHERE" == "true" ]] || return 1
+    node_meta_path >/dev/null 2>&1
+}
+
+# fw_meta_lock -- when this run will write .node-meta: take the update lock and
+# migrate an old ownership layout (addon_meta_write_begin). rc 1 when refused.
+fw_meta_lock() {
+    fw_wants_meta_write || return 0
+    addon_meta_write_begin
 }
 
 enable_firewall() {
@@ -556,13 +1084,44 @@ enable_firewall() {
         p2p_text="$(fw_p2p_port_text)"
     fi
 
+    # SSH sources: a stored list is kept unless a new one is typed. On mainnet SSH
+    # open to every address needs an explicit yes.
+    local cur_src new_src
+    cur_src="$(fw_sources ssh | paste -sd, -)" || cur_src=""
+    echo ""
+    print_info "SSH is allowed from: ${cur_src:-anywhere}"
+    read -r -p "  Restrict SSH to these sources (comma-separated IPs/CIDRs; Enter keeps the current setting): " new_src
+    if [[ -n "$new_src" ]]; then
+        if ! fw_src_list "$new_src" >/dev/null; then
+            echo ""; read -r -p "  Press Enter to return to menu..."
+            return
+        fi
+        FW_SSH_FROM="$new_src"
+        cur_src="$(fw_src_list "$new_src" | paste -sd, -)"
+    elif [[ -z "$cur_src" && "${NETWORK:-}" == "mainnet" ]]; then
+        print_warn "Mainnet: SSH open to every address is not the default."
+        if confirm "Keep SSH open to every address anyway?"; then
+            FW_SSH_ANYWHERE=true
+        else
+            print_info "Cancelled -- no changes made."
+            echo ""; read -r -p "  Press Enter to return to menu..."
+            return
+        fi
+    fi
+
     echo ""
     print_info "This will apply the following settings:"
     echo "  - Default inbound policy: DENY"
     echo "  - Default outbound policy: ALLOW"
     echo "  - Allow established connections"
-    echo "  - Allow SSH on port ${ssh_port}"
-    echo "  - Allow TCP ${UPTIME_KUMA_PORT} (Uptime Kuma) from the Association monitor only (${TN_KUMA_SRC})"
+    if [[ -n "$cur_src" ]]; then
+        echo "  - Allow SSH on port ${ssh_port} from ${cur_src} only (the open SSH rule is removed)"
+    else
+        echo "  - Allow SSH on port ${ssh_port}"
+    fi
+    if is_testnet_like; then
+        echo "  - Allow TCP ${UPTIME_KUMA_PORT} (Uptime Kuma) from the Association monitor only (${TN_KUMA_SRC})"
+    fi
     if [[ "$nodes" != "none" ]]; then
         echo "  - Allow UDP ${p2p_text} (node P2P -- required for consensus)"
     fi
@@ -605,17 +1164,21 @@ enable_firewall() {
 
     # Stage the lockout-safe ruleset + enable (shared with --json --enable). SSH + overlay +
     # kuma are allowed before enable, so this can't sever the IAP door or the overlay.
-    if ! apply_recommended_firewall "$reset_arg"; then
-        print_warn "Stopped at that step: the rules added before it stay, and ufw --force enable was not run."
+    if ! fw_meta_lock || ! apply_recommended_firewall "$reset_arg"; then
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
     fi
+    if fw_wants_meta_write; then
+        fw_persist_sources || true
+    fi
 
     print_ok "Firewall enabled with recommended defaults"
     [[ -n "$reset_arg" ]] && print_info "Existing rules were reset to a clean slate"
-    print_ok "SSH port ${ssh_port}/tcp allowed"
-    print_ok "Uptime Kuma port ${UPTIME_KUMA_PORT}/tcp allowed from ${TN_KUMA_SRC} (Association monitor)"
+    print_ok "SSH port ${ssh_port}/tcp allowed from ${cur_src:-anywhere}"
+    if is_testnet_like; then
+        print_ok "Uptime Kuma port ${UPTIME_KUMA_PORT}/tcp allowed from ${TN_KUMA_SRC} (Association monitor)"
+    fi
     if [[ "$nodes" != "none" ]]; then
         print_ok "Node P2P UDP ${p2p_text} allowed"
     fi
@@ -659,9 +1222,9 @@ manage_ssh() {
                 print_warn "You will be locked out if you only use password login"
                 echo ""
                 if confirm "Disable password authentication?"; then
-                    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$SSH_CONFIG"
-                    systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null
-                    print_ok "Password authentication disabled"
+                    if fw_sshd_harden "PasswordAuthentication no" "KbdInteractiveAuthentication no"; then
+                        print_ok "Password authentication disabled (${FW_SSHD_DROPIN})"
+                    fi
                 else
                     print_info "Cancelled -- no changes made"
                 fi
@@ -672,9 +1235,9 @@ manage_ssh() {
                 print_ok "Root login is already disabled"
             else
                 if confirm "Disable root login via SSH?"; then
-                    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' "$SSH_CONFIG"
-                    systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null
-                    print_ok "Root login disabled"
+                    if fw_sshd_harden "PermitRootLogin no"; then
+                        print_ok "Root login disabled (${FW_SSHD_DROPIN})"
+                    fi
                 else
                     print_info "Cancelled -- no changes made"
                 fi
@@ -844,6 +1407,17 @@ manage_node_ports() {
 
     echo ""
     print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}."
+    if ! is_testnet_like; then
+        # Mainnet (or no node yet): the health port is never opened.
+        local krc=0
+        apply_kuma_rule >/dev/null 2>&1 || krc=$?
+        if [[ "$krc" -eq 2 ]]; then
+            print_error "A health-port ${UPTIME_KUMA_PORT}/tcp rule could not be deleted; check: sudo ufw status numbered"
+        fi
+        print_info "Health monitoring is a testnet-only add-on; TCP ${UPTIME_KUMA_PORT} stays closed here."
+        manage_node_ports_web
+        return
+    fi
     print_info "The Telcoin Association uptime monitor probes this port to confirm your node is up."
     local kstate; kstate="$(kuma_rule_state)"
     case "$kstate" in
@@ -855,11 +1429,11 @@ manage_node_ports() {
     echo "  How should the health port be reachable?"
     echo "    1) Association monitor only        -- from ${TN_KUMA_SRC}  [recommended]"
     echo "    2) Association monitor + your IPs  -- TA plus a list you manage"
-    echo "    3) Open to anyone                  -- any source IP"
-    echo "    4) Leave as-is"
+    echo "    3) Leave as-is"
+    echo "  (The health port is never opened to every address.)"
     echo ""
     local kchoice
-    read -r -p "  Enter choice [1-4]: " kchoice
+    read -r -p "  Enter choice [1-3]: " kchoice
     case "$kchoice" in
         1)
             apply_kuma_rule &>/dev/null
@@ -876,16 +1450,15 @@ manage_node_ports() {
             # A lingering open-to-Anywhere rule would still override the restriction.
             kuma_offer_anywhere_cleanup
             ;;
-        3)
-            ufw allow "${UPTIME_KUMA_PORT}/tcp" &>/dev/null
-            print_ok "TCP ${UPTIME_KUMA_PORT} opened to anyone"
-            print_info "Any persisted operator sources become redundant (but stay harmless)."
-            ;;
         *)
             print_info "Left ${UPTIME_KUMA_PORT}/tcp as-is."
             ;;
     esac
+    manage_node_ports_web
+}
 
+# manage_node_ports_web -- the 80/443 part of manage_node_ports.
+manage_node_ports_web() {
     echo ""
     print_info "Public dashboard (HTTP/HTTPS -- TCP 80/443):"
     # 443 is owned by Caddy now (install-caddy.sh opens/closes 80+443 with the
@@ -1076,17 +1649,18 @@ manage_whitelist() {
 
 # vpn_active -- the WireGuard overlay is configured on this node (wg0 exists, or
 # .node-meta records ENABLE_VPN=true). Used to keep overlay SSH from being locked out.
+# vpn_active -- wg0 is up, or ENABLE_VPN=true in .node-meta. A duplicated
+# ENABLE_VPN counts as not active (no overlay rule is added) and is reported.
 vpn_active() {
+    local v
     ip link show wg0 >/dev/null 2>&1 && return 0
-    local meta; meta="$(node_meta_path 2>/dev/null || true)"
-    [[ -n "$meta" ]] && [[ "$(meta_get ENABLE_VPN "$meta" 2>/dev/null || echo false)" == "true" ]]
+    v="$(addon_meta_get ENABLE_VPN false)" || return 1
+    [[ "$v" == "true" ]]
 }
 
 # fw_is_testnet -- this host runs a testnet node (gates the add-on menu item).
 fw_is_testnet() {
-    local meta; meta="$(node_meta_path 2>/dev/null || true)"
-    [[ -n "$meta" ]] || return 1
-    [[ "$(meta_get NETWORK "$meta" 2>/dev/null || true)" == "testnet" ]]
+    [[ "${NETWORK:-}" == "testnet" ]]
 }
 
 # =============================================================================
@@ -1139,8 +1713,12 @@ desired_firewall_rules() {
         has_node=true
     fi
 
-    printf '%s\t%s\t%s\n' "${ssh_port}/tcp"         "SSH"                "anywhere"
-    printf '%s\t%s\t%s\n' "${UPTIME_KUMA_PORT}/tcp" "Uptime Kuma health" "restricted"
+    local ssh_src
+    ssh_src="$(fw_sources ssh 2>/dev/null | paste -sd, -)" || ssh_src=""
+    printf '%s\t%s\t%s\n' "${ssh_port}/tcp"         "SSH"                "${ssh_src:-anywhere}"
+    if is_testnet_like; then
+        printf '%s\t%s\t%s\n' "${UPTIME_KUMA_PORT}/tcp" "Uptime Kuma health" "restricted"
+    fi
     if [[ "$has_node" == "true" ]]; then
         p2p="$(fw_p2p_ports)"
         nworkers="$(grep -c ' worker-' <<< "$p2p" || true)"
@@ -1150,7 +1728,7 @@ desired_firewall_rules() {
         done <<< "$p2p"
     fi
     if vpn_active; then
-        printf '%s\t%s\t%s\n' "overlay-ssh" "SSH from WireGuard overlay" "${TN_OVERLAY_CIDR}"
+        printf '%s\t%s\t%s\n' "overlay-ssh" "SSH from WireGuard overlay" "${TN_OVERLAY_ADMIN_CIDR}"
     fi
     if caddy_managed_active; then
         printf '%s\t%s\t%s\n' "80/tcp"  "Caddy HTTP (ACME)"       "anywhere"
@@ -1165,7 +1743,7 @@ fw_rule_satisfied() {
     local spec="$1"
     case "$spec" in
         overlay-ssh)
-            ufw status 2>/dev/null | grep -F "$TN_OVERLAY_CIDR" | grep -q ALLOW ;;
+            ufw status 2>/dev/null | grep -F "$TN_OVERLAY_ADMIN_CIDR" | grep -q ALLOW ;;
         "${UPTIME_KUMA_PORT}/tcp")
             [[ "$(kuma_rule_state)" != "closed" ]] ;;
         */tcp|*/udp)
@@ -1200,14 +1778,16 @@ manage_addon_rules() {
         anywhere)   print_warn "Health ${UPTIME_KUMA_PORT}/tcp: open to Anywhere" ;;
         closed)     print_info "Health ${UPTIME_KUMA_PORT}/tcp: closed" ;;
     esac
-    if ufw status 2>/dev/null | grep -q "${TN_OVERLAY_CIDR}"; then
-        print_ok "Overlay SSH: allowed from ${TN_OVERLAY_CIDR}"
+    if ufw status 2>/dev/null | grep -qF "${TN_OVERLAY_CIDR}"; then
+        print_warn "Overlay SSH: allowed from the whole overlay ${TN_OVERLAY_CIDR}; option 1 narrows it to ${TN_OVERLAY_ADMIN_CIDR}."
+    elif ufw status 2>/dev/null | grep -qF "${TN_OVERLAY_ADMIN_CIDR}"; then
+        print_ok "Overlay SSH: allowed from ${TN_OVERLAY_ADMIN_CIDR}"
     else
         print_info "Overlay SSH: not allowed"
         vpn_active && print_warn "VPN is active but overlay SSH is missing -- option 1 restores core-team access."
     fi
     echo ""
-    echo "  1) Allow SSH from the WireGuard overlay (${TN_OVERLAY_CIDR})"
+    echo "  1) Allow SSH from the maintainer overlay range (${TN_OVERLAY_ADMIN_CIDR})"
     echo "  2) Restrict health port ${UPTIME_KUMA_PORT}/tcp to the Association monitor (${TN_KUMA_SRC})"
     echo "  3) Remove the overlay SSH allowance"
     echo "  4) Back"
@@ -1216,12 +1796,13 @@ manage_addon_rules() {
     echo ""
     local c; read -r -p "  Enter choice [1-4]: " c
     case "$c" in
-        1) allow_overlay_ssh &>/dev/null && print_ok "Allowed SSH from ${TN_OVERLAY_CIDR}" ;;
+        1) allow_overlay_ssh &>/dev/null && print_ok "Allowed SSH from ${TN_OVERLAY_ADMIN_CIDR}" ;;
         2) apply_kuma_rule  &>/dev/null && print_ok "Restricted ${UPTIME_KUMA_PORT}/tcp to ${TN_KUMA_SRC}" ;;
         3)
             vpn_active && print_warn "VPN is active -- removing overlay SSH cuts off Association admin access."
-            if confirm "Remove the overlay SSH allowance (${TN_OVERLAY_CIDR} -> ${ssh_port})?"; then
-                ufw delete allow from "${TN_OVERLAY_CIDR}" to any port "${ssh_port}" proto tcp &>/dev/null \
+            if confirm "Remove the overlay SSH allowance (${TN_OVERLAY_ADMIN_CIDR} -> ${ssh_port})?"; then
+                ufw delete allow from "${TN_OVERLAY_CIDR}" to any port "${ssh_port}" proto tcp &>/dev/null || true
+                ufw delete allow from "${TN_OVERLAY_ADMIN_CIDR}" to any port "${ssh_port}" proto tcp &>/dev/null \
                     && print_ok "Removed" || print_warn "No matching rule found"
             fi
             ;;
@@ -1343,13 +1924,38 @@ json_event() {
     json_emit "{\"event\":\"${1}\",\"msg\":\"$(json_escape "${2:-}")\"}"
 }
 
-# fw_on_exit -- the EXIT trap of a --json run, installed by main right after the fd
-# swap. When the run ends without its final answer (a failing command under set -e,
-# not root), send {"event":"done","ok":false,"error":...,"msg":...} with the last
-# error event's message, so every --json run ends with one parseable answer; the
-# "error" key is what the UI's firewall card shows when status is unavailable.
+# fw_on_exit -- the EXIT trap of every run, installed by main first (TERM, INT and
+# HUP are turned into an exit, so they end here too). When the run ends while
+# apply_recommended_firewall is changing rules (FW_APPLY_INFLIGHT), it puts the
+# saved rule files back and returns ufw to its earlier state (fw_restore), then
+# removes them; when that fails it keeps them and names them. Then it releases
+# the update lock. In --json mode, when the run ends without its final answer
+# (a signal, a failing command, not root), it sends {"event":"done","ok":false,
+# "error":...,"msg":...} with the last error event's message, so every --json run
+# ends with one parseable answer; the "error" key is what the UI's firewall card
+# shows when status is unavailable.
 fw_on_exit() {
     local rc=$? msg
+    trap '' TERM INT HUP
+    # The signal may land inside a call whose output is dropped: report on the
+    # stderr main saved as fd 4.
+    if [[ "$FW_STDERR_SAVED" == "true" ]]; then
+        exec 2>&4
+    fi
+    if [[ "$FW_APPLY_INFLIGHT" == "true" && -n "$FW_SNAP" ]]; then
+        FW_APPLY_INFLIGHT=false
+        if fw_restore "$FW_SNAP" "$FW_WAS_ACTIVE"; then
+            fw_snapshot_drop
+            fw_error "Stopped (exit ${rc}) while the firewall rules were being applied; the previous ufw rules were put back."
+        else
+            fw_error "Stopped (exit ${rc}) while the firewall rules were being applied, and the previous ufw rules could not be put back: ufw may now be DISABLED. The saved rule files are in ${FW_SNAP}. Fix the cause and run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --reset"
+            FW_SNAP=""
+        fi
+    fi
+    fw_snapshot_drop
+    if [[ -n "${TN_UPDATE_LOCK_KIND:-}" ]]; then
+        tn_release_update_lock 2>/dev/null || true
+    fi
     if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
         msg="$JSON_LAST_ERROR"
         if [[ -z "$msg" ]]; then
@@ -1454,10 +2060,16 @@ json_fw_port() {
     if [[ "$pstate" == "on" ]]; then
         json_event step "Opening ${spec}"
         if [[ "$spec" == "${UPTIME_KUMA_PORT}/tcp" ]]; then
+            is_testnet_like || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"the health port is a testnet-only add-on and stays closed on this network\"}"; return 1; }
             # The health port must NEVER be open to the world: source-restrict it to the
             # Association monitor (TN_KUMA_SRC) instead of `ufw allow 43174/tcp` (Anywhere).
             apply_kuma_rule >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw allow failed for $(json_escape "$spec")\"}"; return 1; }
         else
+            fw_load_p2p_srcs 2>/dev/null || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"P2P_ALLOW_FROM in .node-meta cannot be read\"}"; return 1; }
+            if [[ ${#FW_P2P_SRCS[@]} -gt 0 ]]; then
+                json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"the P2P ports are limited to P2P_ALLOW_FROM; run firewall-setup.sh --enable on the server to apply that list\"}"
+                return 1
+            fi
             ufw allow "$spec" >/dev/null 2>&1 || { json_emit "{\"event\":\"done\",\"ok\":false,\"msg\":\"ufw allow failed for $(json_escape "$spec")\"}"; return 1; }
         fi
     else
@@ -1480,17 +2092,23 @@ json_fw_port() {
 # here only when Caddy already serves the public RPC/dashboard (caddy_serves_public_edge);
 # otherwise install-caddy.sh (this repo) adds them when it enables that access.
 json_fw_enable() {
-    local ssh_port active=false
+    local ssh_port active=false rc
     if ! ufw_installed; then
         fw_try "apt-get install -y ufw" apt-get install -y ufw || return 1
     fi
     ssh_port=$(get_ssh_port)
-    if ! apply_recommended_firewall; then
+    fw_meta_lock || return 1
+    rc=0
+    apply_recommended_firewall || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
         if ufw_active; then
             active=true
         fi
-        json_emit "{\"event\":\"done\",\"ok\":false,\"action\":\"enable\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"$(json_escape "${JSON_LAST_ERROR:-A firewall rule could not be added.} Stopped there: the rules added before it stay, and ufw --force enable was not run.")\"}"
-        return 1
+        json_emit "{\"event\":\"done\",\"ok\":false,\"action\":\"enable\",\"rc\":${rc},\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"$(json_escape "${JSON_LAST_ERROR:-A firewall rule could not be added.}")\"}"
+        return "$rc"
+    fi
+    if fw_wants_meta_write; then
+        fw_persist_sources || true
     fi
     ufw_active && active=true
     json_emit "{\"event\":\"done\",\"ok\":${active},\"action\":\"enable\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"ufw enabled with recommended lockout-safe defaults (SSH + overlay + kuma pre-allowed)\"}"
@@ -1500,8 +2118,38 @@ json_fw_enable() {
 # MAIN
 # =============================================================================
 
+# fw_require_lib JSON -- exit 2 before anything else when lib/common.sh lacks a
+# helper this script calls (scripts updated without the library). One message
+# names update-scripts.sh; with JSON=true it also comes as the done event.
+fw_require_lib() {
+    local fn missing="" msg
+    for fn in addon_meta_get addon_meta_write_begin tn_write_root_file tn_root_dir_ok \
+              tn_acquire_update_lock tn_release_update_lock validate_health_src \
+              apply_kuma_rule allow_overlay_ssh is_testnet_like; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
+    done
+    [[ -z "$missing" ]] && return 0
+    msg="lib/common.sh is older than this script (it lacks ${missing}): run update-scripts.sh, then this again. Nothing was changed."
+    print_error "$msg"
+    if [[ "${1:-false}" == "true" ]]; then
+        printf '{"event":"done","ok":false,"error":"%s","msg":"%s"}\n' "$(json_escape "$msg")" "$(json_escape "$msg")"
+    fi
+    exit 2
+}
+
+# fw_load_network -- set NETWORK from .node-meta ("" when no node is installed).
+# rc 1 when the key is set more than once.
+fw_load_network() {
+    local n
+    if ! n="$(addon_meta_get NETWORK 2>/dev/null)"; then
+        fw_error "NETWORK is set more than once in .node-meta; remove the extra lines and run this again."
+        return 1
+    fi
+    NETWORK="$n"
+}
+
 main() {
-    local json_mode=false action="" fw_port="" fw_state="" reset_mode=false
+    local json_mode=false action="" fw_port="" fw_state="" reset_mode=false rc
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json)   json_mode=true; shift ;;
@@ -1510,15 +2158,37 @@ main() {
             --reset)  reset_mode=true; shift ;;
             --port)   action="port"; fw_port="${2:-}"; fw_state="${3:-}"
                       shift; [[ $# -gt 0 ]] && shift; [[ $# -gt 0 ]] && shift ;;
+            --ssh-from)     FW_SSH_FROM="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
+            --ssh-from=*)   FW_SSH_FROM="${1#*=}"; shift ;;
+            --p2p-from)     FW_P2P_FROM="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
+            --p2p-from=*)   FW_P2P_FROM="${1#*=}"; shift ;;
+            --ssh-anywhere) FW_SSH_ANYWHERE=true; shift ;;
+            --p2p-anywhere) FW_P2P_ANYWHERE=true; shift ;;
             *) shift ;;
         esac
     done
+    fw_require_lib "$json_mode"
+    if [[ -n "$FW_SSH_FROM" && "$FW_SSH_ANYWHERE" == "true" ]] || [[ -n "$FW_P2P_FROM" && "$FW_P2P_ANYWHERE" == "true" ]]; then
+        print_error "--ssh-from/--p2p-from and --ssh-anywhere/--p2p-anywhere cannot be combined."
+        exit 1
+    fi
+
+    # One exit path for every mode: fw_on_exit puts the old rules back when the run
+    # ends mid-apply, and releases the update lock (taken only when a source list is
+    # stored), which therefore must not replace this trap.
+    TN_EXIT_TRAP_OWNED=1
+    exec 4>&2
+    FW_STDERR_SAVED=true
+    trap fw_on_exit EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
 
     if [[ "$json_mode" == "true" ]]; then
         JSON_MODE=true
         json_setup_fds
-        trap fw_on_exit EXIT
         check_root
+        fw_load_network || exit 1
         case "$action" in
             status) fw_lib_check; json_fw_status ;;
             enable) fw_lib_check; json_fw_enable ;;
@@ -1528,21 +2198,41 @@ main() {
         exit $?
     fi
 
-    # Non-interactive CLI clean-slate: gate the destructive reset behind --reset.
-    # Re-applies the lockout-safe recommended defaults after wiping all rules.
-    if [[ "$reset_mode" == "true" ]]; then
+    # Non-interactive CLI: --reset (clean slate) or --enable (reconcile) re-apply the
+    # lockout-safe recommended defaults. Exit codes are apply_recommended_firewall's.
+    if [[ "$reset_mode" == "true" || "$action" == "enable" ]]; then
         check_root
+        fw_load_network || exit 1
         fw_lib_check
-        print_warn "Resetting ufw -- ALL existing rules (including custom ones) will be removed."
-        if ! apply_recommended_firewall --reset; then
-            print_warn "Stopped at that step: the rules added before it stay, and ufw --force enable was not run."
-            exit 1
+        fw_meta_lock || exit 1
+        if [[ "$reset_mode" == "true" ]]; then
+            print_warn "Resetting ufw -- ALL existing rules (including custom ones) will be removed."
+            rc=0
+            apply_recommended_firewall --reset || rc=$?
+        else
+            rc=0
+            apply_recommended_firewall || rc=$?
         fi
-        print_ok "Firewall reset to a clean slate and re-enabled with recommended defaults"
+        if [[ "$rc" -ne 0 ]]; then
+            exit "$rc"
+        fi
+        if fw_wants_meta_write; then
+            fw_persist_sources || true
+        fi
+        if [[ "$reset_mode" == "true" ]]; then
+            print_ok "Firewall reset to a clean slate and re-enabled with recommended defaults"
+        else
+            print_ok "Firewall enabled with recommended defaults"
+        fi
         exit 0
+    fi
+    if [[ -n "$FW_SSH_FROM$FW_P2P_FROM" || "$FW_SSH_ANYWHERE" == "true" || "$FW_P2P_ANYWHERE" == "true" ]]; then
+        print_error "--ssh-from, --p2p-from, --ssh-anywhere and --p2p-anywhere go with --enable or --reset."
+        exit 1
     fi
 
     check_root
+    fw_load_network || exit 1
     main_menu
 }
 

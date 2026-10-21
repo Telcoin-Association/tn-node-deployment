@@ -1,0 +1,24 @@
+# lib/allowed_signers -- the keys that may sign a tn-node-deployment script release
+#
+# update-scripts.sh and install.sh install a release only when its MANIFEST.sig
+# verifies against this file:
+#
+#   ssh-keygen -Y verify -f lib/allowed_signers -I release@telcoin.org \
+#       -n tn-node-scripts -s MANIFEST.sig < MANIFEST
+#
+# Format: the ALLOWED SIGNERS section of ssh-keygen(1), one key per line:
+#
+#   release@telcoin.org namespaces="tn-node-scripts" <key type> <base64 public key> <comment>
+#
+# The principal is always release@telcoin.org and the namespace always
+# tn-node-scripts. A release signer uses a hardware-backed key, key type
+# sk-ssh-ed25519@openssh.com; the comment names the signer. Lines starting with
+# # are comments and blank lines are ignored.
+#
+# A host replaces this file only from a release whose MANIFEST verifies against
+# the copy it already has, so adding or removing a signer takes a signature from
+# a key the host already trusts. install.sh carries an identical copy (written
+# by tools/release-scripts.sh); tools/tests/install_test.sh checks the two match.
+#
+# No release key is listed yet. Until a signer's public key line is added below,
+# no manifest verifies and neither the updater nor the installer installs anything.

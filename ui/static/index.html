@@ -446,10 +446,12 @@ const state = {
   logBuffer: [],                          // client-side line buffer (static + live)
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
   setupStep: 1,
-  setup: { network:'adiri', method:'source', passphrase:'loadcredential',
-           eth:'', bls:'', blsConfirm:'', buildRef:'main', dockerImage:'', publicIp:'', internalIp:'',
-           sourceMode:'main', customRef:'', sourceRef:'', sourceModeTouched:false,   // source-version picker (mirrors CLI: main/latest tag/custom)
+  setup: { network:'adiri', method:'source',
+           eth:'', bls:'', blsConfirm:'', buildRef:'', dockerImage:'', publicIp:'', internalIp:'',
+           sourceRef:'',          // latest release tag for this network (/api/setup/defaults); the only source build offered
            rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
+           allowNoTpm:false,      // mainnet without a usable TPM2: --allow-no-tpm (offered only then)
+           noTpmRefused:false,    // the engine refused keygen for want of a TPM2
            rpcDomain:'',          // public RPC hostname as typed (sent normalised as rpc_domain)
            rpcDns:null,           // last wizard DNS check {host, html}, restored on re-render
            accessLoaded:false },  // Caddy + RPC status fetched for the hostname placeholder
@@ -494,9 +496,69 @@ const $ = (s,r=document)=>r.querySelector(s);
 const el = (tag,cls,html)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;};
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+// =============================================================================
+// UI token. open-ui.sh opens http://127.0.0.1:8080/#t=<token>; the page keeps
+// the token in sessionStorage, removes it from the address bar, and sends it in
+// the X-TN-UI-Token header on every API call. A URL fragment never reaches the
+// server, a proxy or a log. Without it every /api/ call answers 401.
+// =============================================================================
+const TN_TOKEN = (()=>{
+  let tok = '';
+  const m = (location.hash||'').match(/(?:^#|&)t=([0-9a-f]{64})(?:&|$)/);
+  try{
+    if(m){ sessionStorage.setItem('tn-ui-token', m[1]); }
+    tok = (m && m[1]) || sessionStorage.getItem('tn-ui-token') || '';
+  }catch(_){ tok = (m && m[1]) || ''; }
+  if(m) history.replaceState(null, '', location.pathname + location.search);
+  return tok;
+})();
+
+// fetch() with the token header. A POST always sends JSON ({} when there is no
+// body): the server refuses any other content type.
+function tnFetch(url, init){
+  const o = Object.assign({}, init||{});
+  const h = new Headers(o.headers||{});
+  if(TN_TOKEN) h.set('X-TN-UI-Token', TN_TOKEN);
+  if((o.method||'GET').toUpperCase()==='POST'){
+    h.set('Content-Type', 'application/json');
+    if(o.body==null) o.body = '{}';
+  }
+  o.headers = h;
+  o.credentials = 'same-origin';
+  return fetch(url, o).then(r=>{ if(r.status===401) showTokenBanner(); return r; });
+}
+
+function showTokenBanner(){
+  const b = $('#roBanner'), m = $('#roBannerMsg'); if(!b || !m) return;
+  m.innerHTML = '<strong style="color:var(--yellow)">🔒 Not signed in.</strong> '
+    + 'Open the UI with <span class="mono">./open-ui.sh user@server</span>, which hands this page its access token.';
+  b.style.display = 'block';
+}
+
+// How the node gets its BLS passphrase (/api/status passphrase_method):
+// credential (encrypted systemd credential), stdin (root-only file read on
+// stdin) or env (a legacy form). Config > BLS Passphrase migrates or re-seals.
+function passphraseLabel(s){
+  const m = s && s.passphrase_method;
+  if(m==='credential') return 'credential · encrypted systemd credential' + (s.credential_key ? ' ('+esc(s.credential_key)+')' : '');
+  if(m==='stdin') return 'stdin · root-only file read on stdin'
+    + ' <span style="color:var(--text2)">· encrypt it from Config</span>';
+  if(m==='env') return '<span style="color:var(--yellow)">env · legacy</span>'
+    + ' <span style="color:var(--text2)">· migrate it from Config</span>';
+  return esc(m||'—');
+}
+
+// The action that applies to a passphrase method: reseal for the encrypted
+// credential, migrate for the root-only file or a legacy form, none otherwise.
+function credentialAction(m){
+  if(m==='credential') return 'reseal';
+  if(m==='stdin' || m==='env') return 'migrate';
+  return '';
+}
+
 async function api(path, opts){
   try{
-    const r = await fetch(path, opts);
+    const r = await tnFetch(path, opts);
     return await r.json();
   }catch(e){ return {error:String(e)}; }
 }
@@ -1091,7 +1153,7 @@ async function renderDashboard(){
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
         ${externalDetailRows(s)}
-        <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
+        <div class="kv"><span class="k">Passphrase</span><span class="v">${passphraseLabel(s)}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
         <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
@@ -1412,7 +1474,7 @@ async function renderValidatorDashboard(c){
         <div class="kv"><span class="k">Version</span><span class="v" id="verDetail">…</span></div>
         <div class="kv"><span class="k">Install Method</span><span class="v">${esc(s.install_method||'—')}</span></div>
         ${externalDetailRows(s)}
-        <div class="kv"><span class="k">Passphrase</span><span class="v">${esc(s.passphrase_method||'—')}</span></div>
+        <div class="kv"><span class="k">Passphrase</span><span class="v">${passphraseLabel(s)}</span></div>
         <div class="kv"><span class="k">RPC Port</span><span class="v">${esc(String(s.rpc_port||'—'))}</span></div>
         <div class="kv"><span class="k">Internal IP</span><span class="v">${esc(s.internal_ip||'—')}</span></div>
         <div class="kv"><span class="k">Data Directory</span><span class="v">${esc(s.data_dir||'—')}</span></div>
@@ -1564,7 +1626,8 @@ async function augmentDashboardUpdate(){
   if(state.view!=='dashboard' || !u || u.error) return;
   const ind=$('#updInd'); if(!ind) return;
   if(u.update_available){
-    ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--yellow)">⬆ update available</a>';
+    const fleet = state.node==='validator' ? ' · coordinate with the fleet before applying' : '';
+    ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--yellow)">⬆ update available'+fleet+'</a>';
   } else if(u.pending){
     ind.innerHTML = '<a href="#" onclick="switchView(\'update\');return false;" style="color:var(--accent)">● update pending</a>';
   } else {
@@ -1610,6 +1673,9 @@ async function augmentDashboardJaeger(s){
 }
 
 async function serviceAction(action){
+  if(action!=='start' && !confirm(restartConfirmText(action==='stop'
+      ? 'Stop the '+state.node+' node? It stays down until you start it again.'
+      : 'Restart the '+state.node+' node?'))) return;
   const pill = $('#svcPill');
   const verbing = {start:'starting…',stop:'stopping…',restart:'restarting…'}[action];
   document.querySelectorAll('#view-dashboard [data-act]').forEach(b=>{
@@ -1618,14 +1684,52 @@ async function serviceAction(action){
   });
   if(pill){ pill.className='pill busy'; pill.textContent='● '+verbing; }
 
-  const r = await api('/api/service/'+state.node+'/'+action, {method:'POST'});
-  if(r.ok){
-    toast(`${cap(state.node)} ${action} succeeded`, 'success');
+  if(action==='start'){
+    const r = await api('/api/service/'+state.node+'/'+action, {method:'POST'});
+    if(r.ok) toast(`${cap(state.node)} ${action} succeeded`, 'success');
+    else toast(`${cap(state.node)} ${action} failed: ${r.error||'unknown error'}`, 'error');
   }else{
-    toast(`${cap(state.node)} ${action} failed: ${r.error||'unknown error'}`, 'error');
+    const d = await nodeRestartStream('/api/service/'+state.node+'/'+action, {}, cap(action));
+    if(d && d.ok) toast(`${cap(state.node)} ${action} succeeded`, 'success');
+    else toast(`${cap(state.node)} ${action} not done`+(d && d.msg ? ': '+d.msg : ''), 'error');
   }
   await refreshAfterChange();
   setTimeout(refreshAfterChange, 1500);   // catch the post-(re)start settle
+}
+
+// What the operator confirms before the node stops or restarts: QUESTION, then
+// how the Node Manager does it.
+function restartConfirmText(question){
+  return question+'\n\nThe Node Manager waits for any running update to finish first, checks that the committee keeps its quorum without this node, and, when this node is in the committee and an epoch boundary is close, waits for the boundary (up to 30 minutes) before it acts.';
+}
+
+// Calls that stop or restart the node (stop, restart, the tracing toggle, the
+// advertised name) stream the helper's progress into a panel: the update lock,
+// the committee check, the epoch wait, the check again, then the stop or
+// restart. When the committee check refuses ({"quorum":true} on the done event),
+// the operator may override it once, for a restart the fleet has coordinated.
+// Resolves with the done event, or null.
+async function nodeRestartStream(url, body, what){
+  let panel = $('#restartPanel');
+  if(!panel){
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="card" id="restartPanel" style="position:fixed;right:16px;bottom:16px;width:min(560px,calc(100vw - 32px));z-index:60;max-height:50vh;display:flex;flex-direction:column">'
+      +'<div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0" id="restartTitle"></h3>'
+      +'<button class="btn btn-out" id="restartClose" style="padding:2px 10px">✕</button></div>'
+      +'<div class="log-body" id="restartLog" style="height:200px;margin-top:8px"></div></div>');
+    panel = $('#restartPanel');
+    $('#restartClose').addEventListener('click', ()=>{ panel.style.display='none'; });
+  }
+  panel.style.display='flex';
+  $('#restartTitle').textContent = what+' · '+cap(state.node);
+  $('#restartLog').innerHTML = '';
+  let d = await streamPost(url, body, {target:'#restartLog', what:what});
+  if(d && !d.ok && d.quorum === true && confirm('The committee check refused this: '+(d.msg||'')
+      +'\n\nOverride it? Only for a restart the fleet has coordinated: stopping a committee member while others are down can stall the network.')){
+    appendStream('#restartLog', {event:'warn', msg:'Committee check overridden by the operator.'});
+    d = await streamPost(url, Object.assign({}, body, {allow_quorum_risk:true}), {target:'#restartLog', what:what});
+  }
+  return d;
 }
 
 // =============================================================================
@@ -1708,8 +1812,17 @@ async function fillLogVerbosityNote(){
 
 // Download the complete log file from disk (server streams it as an attachment
 // named telcoin-<type>.log), regardless of the current viewer filter.
-function downloadFullLog(){
-  window.location.href = '/api/logs/'+state.node+'/download';
+async function downloadFullLog(){
+  // fetch with the token header, then save the blob (a plain link cannot send it).
+  try{
+    const r = await tnFetch('/api/logs/'+state.node+'/download');
+    if(!r.ok){ toast('Download failed ('+r.status+')','error'); return; }
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = 'telcoin-'+state.node+'.log';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+  }catch(e){ toast('Download failed: '+e,'error'); }
 }
 
 async function clearLog(){
@@ -1806,19 +1919,42 @@ function startLive(){
   $('#liveStatus').innerHTML = '<span class="live-dot"></span> LIVE';
   state.logBuffer = [];
   body.innerHTML='';
-  state.es = new EventSource(`/api/logs/${state.node}/stream`);
-  state.es.onmessage = ev=>{
+  // fetch rather than EventSource, which cannot send the token header. Each
+  // "data:" line is one log line; ":" lines are keepalives.
+  const ctl = new AbortController();
+  state.es = {close: ()=>ctl.abort()};
+  const onLine = text=>{
     // Keep every line in the buffer (so filtering never loses lines), but only
     // paint the ones that pass the active filter.
-    state.logBuffer.push(ev.data);
+    state.logBuffer.push(text);
     while(state.logBuffer.length>2000) state.logBuffer.shift();
-    if(logMatches(ev.data)){
-      body.insertAdjacentHTML('beforeend', colorize(ev.data));
+    if(logMatches(text)){
+      body.insertAdjacentHTML('beforeend', colorize(text));
       while(body.children.length>1000) body.removeChild(body.firstChild);
       body.scrollTop = body.scrollHeight;
     }
   };
-  state.es.onerror = ()=>{ /* keep open; browser auto-reconnects */ };
+  (async ()=>{
+    try{
+      const r = await tnFetch(`/api/logs/${state.node}/stream`, {signal:ctl.signal});
+      if(!r.ok){
+        let msg=''; try{ msg=(await r.json()).error; }catch(_){ }
+        toast('Live log: '+(msg||r.status),'error'); stopLive(); return;
+      }
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      for(;;){
+        const {value, done} = await reader.read();
+        if(done) break;
+        buf += dec.decode(value, {stream:true});
+        let i;
+        while((i = buf.indexOf('\n')) >= 0){
+          const l = buf.slice(0,i); buf = buf.slice(i+1);
+          if(l.startsWith('data: ')) onLine(l.slice(6));
+        }
+      }
+    }catch(_){ /* aborted by Stop or a dropped connection */ }
+  })();
 }
 
 function stopLive(){
@@ -1977,6 +2113,8 @@ async function renderConfig(){
 
   const editing = !!state.configEditing;
 
+  // The advertised external addresses, for the listener port check on Save.
+  state.cfgExternal = {primary_listener: d.external_primary||'', worker_listener: d.external_worker||''};
   // Editable fields (the exact set edit-config.sh's menu edits). docker_image
   // only for docker installs.
   const editable = [
@@ -2038,11 +2176,13 @@ async function renderConfig(){
         </span>
       </div>
     </div>
+    ${credentialCard(d, t)}
     <div class="card" id="cfgProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3>
       <div class="log-body" id="cfgLog" style="height:240px"></div>
     </div>`;
 
+  const crb=$('#credAction'); if(crb) crb.addEventListener('click', ()=>runCredential(crb.dataset.action, crb));
   const eb=$('#cfgEdit'); if(eb) eb.addEventListener('click', ()=>{ state.configEditing=true; renderConfig(); });
   const db=$('#cfgDone'); if(db) db.addEventListener('click', ()=>{ stopConfigStream(); state.configEditing=false; renderConfig(); });
   c.querySelectorAll('[data-cfg-save]').forEach(b=>b.addEventListener('click', ()=>{
@@ -2095,32 +2235,50 @@ async function saveAdvertisedName(btn){
     const msg = t==='validator'
       ? `Are you sure you want to change the Advertised node name to "${name}"? This restarts the validator now — brief downtime, missed consensus rounds.`
       : `Are you sure you want to change the Advertised node name to "${name}"? This restarts the node now.`;
-    if(!confirm(msg)) return;
-  } else if(t==='validator' && !confirm('Set the advertised name and restart the validator now? This causes brief downtime.')) {
+    if(!confirm(restartConfirmText(msg))) return;
+  } else if(t==='validator' && !confirm(restartConfirmText('Set the advertised name and restart the validator now? This causes brief downtime.'))) {
     return;
   }
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Saving…'; }
-  const r = await api('/api/config/'+t+'/hostname', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name}),
-  });
+  const d = await nodeRestartStream('/api/config/'+t+'/hostname', {name}, 'Advertised name');
   if(btn){ btn.disabled=false; btn.textContent=label; }
-  if(r && r.ok){ toast('Advertised name '+(current?'changed':'saved')+' — node restarting','success'); refreshAfterChange(); }
-  else toast('Failed to set name: '+((r&&r.error)||'unknown error'),'error');
+  if(d && d.ok){ toast('Advertised name '+(current?'changed':'saved')+' — node restarted','success'); refreshAfterChange(); }
+  else toast('Name not set'+(d && d.msg ? ': '+d.msg : ''),'error');
+}
+
+// The UDP port of a multiaddr (/ip4/../udp/<port>/..), or '' when it has none.
+function udpPort(addr){
+  const m = /\/udp\/(\d{1,5})(\/|$)/.exec(addr||'');
+  return m ? String(parseInt(m[1],10)) : '';
 }
 
 async function saveConfigField(field, value, btn){
   if(!configValueOk(field, value)){ toast('Invalid value for '+field, 'error'); return; }
+  // A listener on another port than the advertised external one: edit-config
+  // refuses it unless the operator confirms a NAT or port forward maps it.
+  let allowPortMismatch = false;
+  if(field==='primary_listener'||field==='worker_listener'){
+    const ext = (state.cfgExternal||{})[field]||'';
+    const want = udpPort(ext), got = udpPort(value);
+    if(want && got && want!==got){
+      if(!confirm('This listener port ('+got+') differs from the advertised external port ('+want+') that peers dial ('+ext+').\n\n'
+        +'That is right only when a NAT or port forward maps external UDP '+want+' to UDP '+got+' on this host. Otherwise peers cannot reach the node.\n\nSave with the mismatch?')) return;
+      allowPortMismatch = true;
+    }
+  }
   if(state.node==='validator' &&
      !confirm('Saving restarts the validator now — expect missed consensus rounds during the brief downtime. Continue?')) return;
   stopConfigStream();
   const card=$('#cfgProgressCard'); if(card) card.style.display='block';
   const log=$('#cfgLog'); if(log) log.innerHTML='<div class="log-line info">» saving '+esc(field)+'…</div>';
   if(btn) btn.disabled=true;
-  const url='/api/config/'+state.node+'/set?field='+encodeURIComponent(field)+'&value='+encodeURIComponent(value);
-  // A GET stream read with streamFetch (see Action streams); Done or leaving the
-  // tab aborts it, as closing the EventSource did before.
+  const url='/api/config/'+state.node+'/set';
+  // A POST stream read with streamFetch (see Action streams); Done or leaving
+  // the tab aborts it.
   const ctl = new AbortController(); state.configAbort = ctl;
-  const d = await streamFetch(url, {method:'GET'}, {target:'#cfgLog', what:'Save', signal:ctl.signal});
+  const body = {field:field, value:value};
+  if(allowPortMismatch) body.allow_port_mismatch = true;
+  const d = await streamPost(url, body, {target:'#cfgLog', what:'Save', signal:ctl.signal});
   if(ctl.signal.aborted) return;
   if(state.configAbort===ctl) state.configAbort = null;
   if(d && d.ok) toast('Saved '+field+' — node restarted','success');
@@ -2129,6 +2287,45 @@ async function saveConfigField(field, value, btn){
 }
 
 function stopConfigStream(){ if(state.configAbort){ state.configAbort.abort(); state.configAbort=null; } }
+
+// Config > BLS Passphrase: how the node keeps its passphrase, and the one
+// edit-config.sh action that applies (--migrate-credential or --reseal, through
+// the helper). Both restart the node.
+function credentialCard(d, t){
+  const m = d.passphrase_method || '';
+  const act = credentialAction(m);
+  const restart = t==='validator'
+    ? ' <strong style="color:var(--yellow)">(a validator restart drops consensus rounds during the brief downtime)</strong>' : '';
+  const what = act==='reseal'
+    ? 'Encrypts the credential again with this host’s key as it is now (the TPM2 when the host has one), for example after a TPM2 or firmware change.'
+    : act==='migrate'
+      ? 'Moves the passphrase into an encrypted systemd credential and shreds the old copy.'
+      : 'No passphrase action applies to this node.';
+  return `<div class="card" style="margin-top:14px">
+      <h3 style="margin:0 0 4px">BLS Passphrase</h3>
+      <div class="kv"><span class="k">Method</span><span class="v mono" id="credMethod">${esc(m||'—')}</span></div>
+      <p class="muted" style="font-size:13px;margin:8px 0 12px">${what}${act?' The node restarts'+restart+'.':''}</p>
+      ${act ? `<button class="btn btn-out" id="credAction" data-action="${act}">${act==='reseal'?'Re-seal':'Migrate to an encrypted credential'}</button>` : ''}
+    </div>`;
+}
+
+async function runCredential(action, btn){
+  if(action!=='migrate' && action!=='reseal') return;
+  const what = action==='reseal' ? 'Re-seal the passphrase credential' : 'Migrate the passphrase to an encrypted credential';
+  if(!confirm(what+'? The node restarts'+(state.node==='validator'?' — expect missed consensus rounds during the brief downtime':'')+'.')) return;
+  stopConfigStream();
+  const card=$('#cfgProgressCard'); if(card) card.style.display='block';
+  const log=$('#cfgLog'); if(log) log.innerHTML='<div class="log-line info">» '+esc(what)+'…</div>';
+  if(btn) btn.disabled=true;
+  const ctl = new AbortController(); state.configAbort = ctl;
+  const d = await streamPost('/api/config/'+state.node+'/credential', {action:action},
+    {target:'#cfgLog', what:'Passphrase', signal:ctl.signal});
+  if(ctl.signal.aborted) return;
+  if(state.configAbort===ctl) state.configAbort = null;
+  if(d && d.ok) toast(action==='reseal' ? 'Credential sealed again' : 'Passphrase moved to an encrypted credential', 'success');
+  else toast((action==='reseal' ? 'Re-seal' : 'Migration')+' failed'+(d && d.msg ? ': '+d.msg : ''), 'error');
+  refreshAfterChange();
+}
 
 // =============================================================================
 // UPDATE -- in-UI node updater (current vs latest, Prepare + Apply, live log)
@@ -2152,8 +2349,18 @@ async function renderUpdate(){
     <div class="card" id="updProgressCard" style="display:none;margin-top:14px">
       <h3>Progress</h3>
       <div class="log-body" id="updLog" style="height:280px"></div>
+      <div id="updOutcome"></div>
     </div>`;
   fillUpdateStatus();
+}
+
+// The committee check behind a restart (display only): what the helper's
+// quorum-check said, or nothing when the library has no such check yet.
+function quorumNote(q){
+  if(!q || !q.available) return '';
+  if(q.rc===0) return '<p style="color:var(--green);font-size:12px;margin-top:8px">✓ Committee check: a restart now keeps the committee above quorum.</p>';
+  if(q.rc===1) return '<p style="color:var(--red);font-size:12px;margin-top:8px">✗ Committee check: other committee members are down; restarting this node now risks quorum. '+esc(q.detail||'')+'</p>';
+  return '<p style="color:var(--yellow);font-size:12px;margin-top:8px">! Committee check: the committee could not be read. '+esc(q.detail||'')+'</p>';
 }
 
 async function fillUpdateStatus(){
@@ -2167,11 +2374,11 @@ async function fillUpdateStatus(){
     return;
   }
   const method = u.install_method || 'unknown';
-  const canUpdate = (method==='source' || method==='docker');
+  const canUpdate = (method==='source' || method==='docker' || method==='release');
   const pending = u.pending;
   const rows = [
     ['Install method', method],
-    ['Current version', u.current_ref || '—'],
+    ['Current version', (u.current_ref || '—') + (u.tag_unknown===true ? '  (release tag unknown)' : '')],
     ['Latest available', (u.latest_ref || '—') + (u.update_available ? '  ⬆ newer' : '')],
     ['Pending', pending ? String(pending) : 'none'],
   ];
@@ -2179,23 +2386,32 @@ async function fillUpdateStatus(){
   let actions = '';
   if(!canUpdate){
     actions = `<p style="color:var(--text2);font-size:13px;margin-top:12px">Install method
-      <strong>${esc(method)}</strong> can't be updated from here — only source builds and Docker installs are supported.</p>`;
+      <strong>${esc(method)}</strong> can't be updated from here — only release, source and Docker installs are supported.</p>`;
   } else {
     actions = `
-      <div class="field"><label>Target ref / tag</label>
+      <div class="field"><label>Target release tag</label>
         <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
-          placeholder="${method==='docker'?'image tag, e.g. v0.16.0-adiri':'tag / branch / commit'}"></div>
+          placeholder="release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)"></div>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
         ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
         ${pending?'<button class="btn btn-red" id="updDiscard">Discard pending</button>':''}
         <button class="btn btn-out" id="updRecheck">↻ Re-check</button>
       </div>
-      ${t==='validator'?'<p style="color:var(--yellow);font-size:12px;margin-top:12px">⚠ Applying on a validator restarts the node — expect missed consensus rounds during the downtime.</p>':''}`;
+      ${t==='validator'?'<p style="color:var(--yellow);font-size:12px;margin-top:12px">⚠ Applying on a validator restarts the node — expect missed consensus rounds during the downtime. Coordinate with the fleet before applying: one validator down at a time.</p>':''}
+      ${quorumNote(u.quorum)}`;
   }
 
+  // tag_moved: a release tag upstream now points at another commit than this
+  // server's copy of it; update-node does not offer that release.
+  const moved = u.tag_moved===true
+    ? `<div class="note" style="margin-top:12px;border-color:rgba(255,77,109,0.35);background:rgba(255,77,109,0.07)">⚠ A release tag
+        upstream now points at a different commit than this server's copy of it, so that release is not offered.
+        Check the release announcement before you update.</div>`
+    : '';
   box.innerHTML = `<div class="card"><h3>Update · ${esc(cap(t))}</h3>
     ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
+    ${moved}
     ${actions}</div>`;
 
   const p=$('#updPrepare'); if(p) p.addEventListener('click', ()=>{
@@ -2276,7 +2492,7 @@ async function streamFetch(url, init, handlers){
   const aborted = () => !!(h.signal && h.signal.aborted);
   let resp;
   try{
-    resp = await fetch(url, Object.assign({}, init, h.signal ? {signal:h.signal} : {}));
+    resp = await tnFetch(url, Object.assign({}, init, h.signal ? {signal:h.signal} : {}));
   }catch(e){
     if(!aborted()) toast((h.what ? h.what+' request' : 'Request')+' failed: '+e, 'error');
     return null;
@@ -2322,24 +2538,50 @@ async function streamFetch(url, init, handlers){
 }
 
 function streamPost(url, body, handlers){
-  return streamFetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})}, handlers);
+  return streamFetch(url, {method:'POST', body:JSON.stringify(body||{})}, handlers);
 }
 
 async function startUpdateStream(kind, ref){
   stopUpdateStream();
   const card=$('#updProgressCard'); if(card) card.style.display='block';
   const log=$('#updLog'); if(log) log.innerHTML='<div class="log-line info">» starting '+esc(kind)+'…</div>';
-  let url = '/api/update/'+kind+'/'+state.node;
-  if(kind==='prepare') url += '?ref='+encodeURIComponent(ref);
-  // Prepare and apply are GET routes (older pages read them with EventSource).
-  // Leaving the tab aborts the request, as closing the EventSource did before.
+  const url = '/api/update/'+kind+'/'+state.node;
+  // Prepare and apply are POST streams. Leaving the tab aborts the request.
   const ctl = new AbortController(); state.updateAbort = ctl;
-  const d = await streamFetch(url, {method:'GET'}, {target:'#updLog', what:'Update', signal:ctl.signal});
+  const out=$('#updOutcome'); if(out) out.innerHTML='';
+  // A refusal before the engine runs (a ref that is not a release tag of this
+  // node's network, say) goes into the progress pane as well as a toast.
+  const onReject = (status, msg) => {
+    appendStream('#updLog', {event:'error', msg: msg || ('refused (HTTP '+status+')')});
+    toast('Update '+kind+' refused'+(msg?': '+msg:''), 'error');
+  };
+  const d = await streamPost(url, kind==='prepare' ? {ref:ref} : {}, {target:'#updLog', what:'Update', signal:ctl.signal, onReject});
   if(ctl.signal.aborted) return;
   if(state.updateAbort===ctl) state.updateAbort = null;
-  if(d && d.ok) toast('Update '+kind+' succeeded','success');
-  else toast('Update '+kind+(d&&d.rolled_back?' failed — rolled back':' did not complete'),'error');
+  if(out) out.innerHTML = updateOutcomeHtml(d);
+  if(d && d.ok && d.voting===false) toast('Update '+kind+' applied, but the node is not voting yet','info');
+  else if(d && d.ok) toast('Update '+kind+' succeeded','success');
+  else if(d && d.downgrade) toast('Downgrade refused','error');
+  else if(d && d.voting===false) toast('The node is not voting after the update'+(d.rolled_back?' — rolled back':''),'error');
+  else if(d) toast('Update '+kind+(d.rolled_back?' failed — rolled back':' did not complete'),'error');
   fillUpdateStatus(); loadNodes();
+}
+
+// What update-node's done event says beyond ok and msg: a refused downgrade
+// ("downgrade", "storage_downgrade") and, after an apply, a node that came back
+// without voting ("voting": false; with ok true it kept the new release while the
+// node catches up, otherwise rolled back unless the update was one-way).
+function updateOutcomeHtml(d){
+  if(!d) return '';
+  const notes = [];
+  if(d.downgrade===true) notes.push('Downgrade refused: the target release is older than the running one.'
+    + (d.storage_downgrade===true ? ' It also cannot open the data directory the running release has migrated.' : '')
+    + ' Nothing was changed.');
+  if(d.voting===false) notes.push('The node came back but is not voting in consensus'
+    + (d.rolled_back===true ? '; the update was rolled back.'
+       : d.ok===true ? ' yet (it may still be catching up). The new release stays; check it again with check-node.sh on the server.'
+       : '. Check it with check-node.sh on the server.'));
+  return notes.map(n=>`<div class="note" style="margin-top:10px;border-color:rgba(255,77,109,0.35);background:rgba(255,77,109,0.07)">${esc(n)}</div>`).join('');
 }
 
 function stopUpdateStream(){ if(state.updateAbort){ state.updateAbort.abort(); state.updateAbort=null; } }
@@ -2363,10 +2605,11 @@ async function jaegerControl(action, btn){
 }
 
 async function setTracing(type, enable, btn){
+  if(!confirm(restartConfirmText((enable?'Turn tracing on':'Turn tracing off')+' for the '+type+' node? The node restarts.'))) return;
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> '+(enable?'Enabling…':'Disabling…'); }
-  const r = await api('/api/tracing/'+(enable?'enable':'disable')+'/'+type, {method:'POST'});
-  if(r.ok) toast('Tracing '+(enable?'enabled':'disabled')+' for '+cap(type)+' — node restarted','success');
-  else toast('Tracing change failed: '+(r.error||'unknown error'),'error');
+  const d = await nodeRestartStream('/api/tracing/'+(enable?'enable':'disable')+'/'+type, {}, 'Tracing');
+  if(d && d.ok) toast(d.msg || ('Tracing '+(enable?'enabled':'disabled')+' for '+cap(type)),'success');
+  else toast('Tracing change not done'+(d && d.msg ? ': '+d.msg : ''),'error');
   await loadNodes();
   rerenderActive();
 }
@@ -2456,7 +2699,7 @@ function renderCaddyCard(){
         <input id="caddyPublicIp" placeholder="auto-detect — leave blank unless behind NAT" value="${esc(state.setup.publicIp||'')}" autocomplete="off">
         <div style="color:var(--text2);font-size:12px;margin-top:4px">Only needed when this node's <strong>inbound</strong> IP — where Let's Encrypt reaches ports 80/443 — differs from the auto-detected egress (outbound) IP, i.e. multi-IP or 1:1-NAT hosts. Leave blank otherwise. The propagation check is IPv4 (A records) only.</div></div>
       <div class="grid two-col">
-        <div class="field"><label>Password (min 8 chars)</label><input id="caddyPw" type="password" autocomplete="new-password"></div>
+        <div class="field"><label>Password (min 16 chars)</label><input id="caddyPw" type="password" autocomplete="new-password"></div>
         <div class="field"><label>Confirm password</label><input id="caddyPw2" type="password" autocomplete="new-password"></div>
       </div>
       <div class="svc-row"><button class="btn btn-out" id="caddyDns">Check DNS</button><button class="btn btn-green" id="caddyEnable">Enable External Access</button></div>
@@ -2530,7 +2773,9 @@ async function caddyEnable(){
   if(rpc.enabled && sameHost(domain, rpc.domain)) return toast('That hostname serves the public RPC endpoint. Use dashboard.'+normHost(rpc.domain)+' instead.','error');
   if(!CADDY_USER_RE.test(username)) return toast('Username: 2–32 chars (letters, digits, . _ -)','error');
   if(publicIp && !setupValidIp(publicIp)) return toast('Enter a valid inbound public IP, or leave it blank','error');
-  if(pw.length<8) return toast('Password must be at least 8 characters','error');
+  // install-caddy.sh's rule: at least 16 bytes in UTF-8 (16 plain ASCII characters), no control characters.
+  if(new TextEncoder().encode(pw).length<16) return toast('The dashboard password must be at least 16 characters','error');
+  if(/[\x00-\x1f\x7f-\x9f]/.test(pw)) return toast('The dashboard password must not contain control characters (such as a tab)','error');
   if(pw!==pw2) return toast('Passwords do not match','error');
   const btn=$('#caddyEnable'); if(btn) btn.disabled=true;
   const log=$('#caddyLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» enabling external access… (the TLS certificate is issued on the first request — keep this tab open)</div>'; }
@@ -2685,10 +2930,15 @@ async function rpcEnable(refreshHost){
     if(!validHost(move)) return toast('Enter a valid new hostname for the dashboard','error');
     if(sameHost(move, domain)) return toast('The new dashboard hostname must differ from the RPC hostname','error');
   }
-  const prompt = refresh
+  // install-caddy.sh states the exposure (its `warn` event) and takes this click
+  // as the consent, so the page shows the same text before asking.
+  const ex = await api('/api/rpc/exposure?domain='+encodeURIComponent(domain));
+  if(!ex || !ex.ok || !ex.summary) return toast('Could not read the exposure summary'+(ex&&ex.error?': '+ex.error:'')+'; nothing was changed','error');
+  const prompt = (refresh
     ? `Re-run RPC enable for ${domain}? This rewrites its Caddy block and reloads Caddy.`
     : `Expose this node's JSON-RPC publicly at https://${domain}? This opens 80/443, advertises the endpoint to peers, and restarts the node.`
-      + (move ? ` The dashboard moves to https://${move}.` : '');
+      + (move ? ` The dashboard moves to https://${move}.` : ''))
+    + '\n\n' + ex.summary + '\n\nOK is your consent to this exposure.';
   if(!confirm(prompt)) return;
   const btn=$(refresh?'#rpcRefresh':'#rpcEnable'); if(btn) btn.disabled=true;
   const log=$('#rpcLog'); if(log){ log.style.display='block'; log.innerHTML='<div class="log-line info">» '+(refresh
@@ -2882,6 +3132,7 @@ async function renderSystem(){
       <div class="kv"><span class="k">Disk</span><span class="v">${esc((disk.used||'?')+' / '+(disk.total||'?')+' ('+(disk.percent||'?')+'%)')}</span></div>
       <div class="kv"><span class="k">Memory</span><span class="v">${esc(mem.used_gb!=null?(mem.used_gb+' / '+mem.total_gb+' GB ('+mem.percent+'%)'):'—')}</span></div>
     </div>
+    ${ro ? '' : '<div class="card" id="auditCard" style="margin-top:14px"><h3>Host Security Audit</h3><div class="muted">Running check-node.sh --audit…</div></div>'}
     <div class="card" id="fwCard" style="margin-top:14px"><h3>Firewall</h3><div class="muted">Loading firewall status…</div></div>
     ${logRotCard}
     <div class="card" id="caddyCard" style="margin-top:14px">Loading external access…</div>
@@ -2889,6 +3140,7 @@ async function renderSystem(){
     <div class="card" id="addonsCard" style="margin-top:14px;display:none"></div>
     ${dangerZoneHtml()}`;
   loadFirewall();
+  loadHostAudit();
   const lrb=$('#logRotSave'); if(lrb) lrb.addEventListener('click', ()=>saveLogRotate(lrb));
   const lrc=$('#logRotClear'); if(lrc) lrc.addEventListener('click', ()=>clearRotatedLogs(lrc));
   renderAccessCards();
@@ -3018,10 +3270,23 @@ async function loadFirewall(){
     ? '<span class="muted">not installed</span>'
     : (active ? '<span class="badge ok">active</span>' : '<span class="badge warn">inactive</span>');
 
-  const inactiveInfo = (f.installed && !active)
+  // ufw off: enable it here with firewall-setup.sh's lockout-safe defaults. The
+  // SSH sources the operator enters go to the engine as --ssh-from; a mainnet
+  // node without them (and without a stored list) is refused by the engine, and
+  // its message is shown as is.
+  const enableForm = (!f.active && !isReadonly())
     ? `<div class="note" style="margin-top:12px;border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
-        UFW is not active. Port management is disabled until the firewall is enabled. To enable, run
-        <span class="mono">sudo firewall-setup.sh</span> on the server and select option 2. Once enabled, you can manage node ports from this panel.</div>`
+        UFW is ${f.installed?'not active':'not installed'}. Port management is disabled until the firewall is enabled.
+        <strong>Enable firewall</strong> applies the recommended lockout-safe defaults of <span class="mono">firewall-setup.sh</span>
+        (SSH, the node ports, then deny everything else).
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="fwSshFrom" style="flex:1;min-width:220px" placeholder="SSH sources, e.g. 203.0.113.7/32, 198.51.100.0/24" autocomplete="off">
+          <button class="btn btn-green" id="fwEnable">Enable firewall</button>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:6px">SSH sources: addresses or CIDRs (/8 or narrower), separated by commas.
+          When given, SSH is allowed from these only. Required on mainnet unless the node already has a stored list.</div>
+        <div id="fwEnableErr" style="display:none;margin-top:8px;color:var(--red);font-size:13px"></div>
+      </div>`
     : '';
 
   // Desired-state vs actual + drift (server-derived from node type / VPN / Caddy).
@@ -3044,7 +3309,7 @@ async function loadFirewall(){
   card.innerHTML = `
     <h3>Firewall</h3>
     <div class="kv"><span class="k">ufw</span><span class="v">${ufwBadge}</span></div>
-    ${inactiveInfo}
+    ${enableForm}
     <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
     ${portRows}
@@ -3053,6 +3318,61 @@ async function loadFirewall(){
     <div class="note" style="margin-top:14px">Only the three node ports can be toggled here.${extras.length?' Open or close the other node ports with <span class="mono">firewall-setup.sh</span>.':''}
       <strong>SSH and system access settings must be configured via <span class="mono">firewall-setup.sh</span> directly on the server to avoid lockout.</strong></div>`;
   card.querySelectorAll('[data-fw-port]').forEach(b=>b.addEventListener('click', ()=>toggleFirewallPort(b.dataset.fwPort, b.dataset.fwState, b)));
+  const fe=$('#fwEnable'); if(fe) fe.addEventListener('click', ()=>enableFirewall(fe));
+}
+
+// System > Host Security Audit: check-node.sh --audit, read-only (the engine
+// prints facts, never a secret). Each line is ok, warn or info.
+async function loadHostAudit(){
+  const card=$('#auditCard'); if(!card) return;
+  const a = await api('/api/system/audit');
+  if(!a || !a.available){
+    card.innerHTML = `<h3>Host Security Audit</h3><p class="muted" style="font-size:13px">Audit unavailable${a&&a.error?' ('+esc(a.error)+')':''}. Run <span class="mono">sudo bash check-node.sh --audit</span> on the server.</p>`;
+    return;
+  }
+  const badge = l => l==='ok' ? '<span class="badge ok">ok</span>'
+    : l==='warn' ? '<span class="badge warn">warn</span>'
+    : `<span class="badge" style="${BADGE_GREY}">info</span>`;
+  card.innerHTML = `<h3>Host Security Audit</h3>
+    <p class="muted" style="font-size:13px;margin:0 0 10px">From <span class="mono">check-node.sh --audit</span>. ${a.warnings ? a.warnings+' warning'+(a.warnings===1?'':'s')+'.' : 'Nothing to warn about.'}</p>
+    ${a.items.map(i=>`<div class="kv" style="align-items:center"><span class="k" style="flex:0 0 auto">${badge(i.level)}</span><span class="v" style="text-align:left;overflow-wrap:anywhere">${esc(i.text)}</span></div>`).join('')}`;
+}
+
+// The SSH sources as the server checks them: addresses or CIDRs (/8 or
+// narrower), split on commas, spaces or new lines, at most 16. The server and
+// the helper check them again; the engine has the last word.
+function fwSshSources(text){
+  const items = String(text||'').split(/[\s,]+/).filter(Boolean);
+  if(items.length > 16) return {error:'at most 16 SSH sources'};
+  for(const it of items){
+    const m = /^([0-9A-Fa-f.:]+)(?:\/([1-9][0-9]{0,2}))?$/.exec(it);
+    const v4 = m && /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/.test(m[1]);
+    const v6 = m && !v4 && m[1].includes(':');
+    const mask = m && m[2] ? Number(m[2]) : null;
+    const bad = !m || (!v4 && !v6) || m[1]==='0.0.0.0' || m[1]==='::'
+      || (mask!==null && (mask<8 || mask>(v4?32:128)));
+    if(bad) return {error:'not an address or a CIDR of /8 or narrower: '+it};
+  }
+  return {list: items.join(',')};
+}
+
+async function enableFirewall(btn){
+  const errBox=$('#fwEnableErr');
+  const show = msg => { if(errBox){ errBox.textContent=msg; errBox.style.display=msg?'block':'none'; } };
+  const src = fwSshSources(($('#fwSshFrom')||{}).value);
+  if(src.error){ show(src.error); return; }
+  show('');
+  const who = src.list ? 'SSH will be allowed only from '+src.list.split(',').join(', ')+'.' : 'SSH stays open (or limited to the list this node already keeps).';
+  if(!confirm('Enable the firewall with the recommended defaults? '+who+' Everything else inbound is denied.')) return;
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span>'; }
+  const r = await api('/api/firewall/enable', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ssh_from: src.list}),
+  });
+  if(r.ok){ toast('Firewall enabled','success'); loadFirewall(); return; }
+  if(btn){ btn.disabled=false; btn.textContent='Enable firewall'; }
+  show(r.error||'firewall enable failed');
+  toast('Firewall not enabled','error');
 }
 
 async function toggleFirewallPort(spec, pstate, btn){
@@ -3110,23 +3430,46 @@ function renderSetup(){
 async function loadSetupDefaults(){
   if(state.setup.defaultsLoaded) return;
   state.setup.defaultsLoaded = true;   // guard re-entry (renderSetup re-call below)
-  const d = await api('/api/setup/defaults');
-  if(!d || d.error) return;
   const s = state.setup;
+  const d = await api('/api/setup/defaults?network='+setupNetwork());
+  if(!d || d.error) return;
   if(!s.publicIp)     s.publicIp     = d.public_ip || '';
   if(!s.internalIp)   s.internalIp   = d.internal_ip || '';
   if(!s.dockerImage)  s.dockerImage  = d.docker_image || '';
   if(!s.sourceRef)    s.sourceRef    = d.source_ref || '';
-  // Network-aware default (mirrors the CLI): testnet should default to the latest
-  // tagged release (main is bleeding-edge and not network-compatible). Only until
-  // the operator changes it. devnet keeps main.
-  if(!s.sourceModeTouched && s.sourceRef && isTestnetNetwork()) s.sourceMode='tag';
   if(!s.serviceUser)  s.serviceUser  = d.service_user || 'telcoin';
   if(!s.serviceGroup) s.serviceGroup = d.service_group || 'telcoin';
   if(state.view==='setup') renderSetup();   // refresh to show prefilled values
 }
 
 function goStep(n){ state.setupStep=n; renderSetup(); }
+
+// Mainnet in the setup wizard: off until the mainnet release. Everything behind
+// it (signed-release default, journal log target, --allow-no-tpm) is in place,
+// so enabling it is this one line.
+const SETUP_MAINNET_ENABLED = false;
+
+// The wizard's network as the server names it.
+function setupNetwork(){ return state.setup.network==='mainnet' ? 'mainnet' : 'testnet'; }
+
+// Switch the wizard's network: the defaults (latest release, image) are the
+// new network's, and mainnet installs a signed release by default.
+function setSetupNetwork(net){
+  const s = state.setup;
+  if(s.network===net) return;
+  s.network = net;
+  s.method = net==='mainnet' ? 'release' : 'source';
+  s.sourceRef = ''; s.buildRef = ''; s.dockerImage = '';
+  s.allowNoTpm = false; s.noTpmRefused = false;
+  s.defaultsLoaded = false;
+  renderSetup();
+}
+
+// --allow-no-tpm is offered only on mainnet and only when the engine reported
+// no usable TPM2: check-node.sh --audit at preflight, or a refused keygen.
+function noTpmReported(){
+  return setupNetwork()==='mainnet' && (state.preflight?.tpm2===false || state.setup.noTpmRefused);
+}
 
 async function stepPreflight(body){
   body.innerHTML = `<h3>Step 1 · Preflight Checks</h3><div id="pfList"><div class="muted">Running checks…</div></div>
@@ -3145,7 +3488,9 @@ async function stepPreflight(body){
     ...hwTierRows(d.hardware),
     ['docker', d.docker?.ok, 'Docker engine available (optional)', false],
     ['rust', d.rust?.ok, 'Rust toolchain for source build (optional)', false],
-    ['tpm', d.tpm?.ok, 'TPM device for sealed passphrase (optional)', false],
+    ['TPM2', d.tpm2===true, d.tpm2===true ? 'TPM2 usable: the passphrase credential is sealed with it'
+      : d.tpm2===false ? 'No usable TPM2: on mainnet the passphrase credential then rests on the host key alone (you will be asked to accept that)'
+      : 'TPM2 unknown (check-node.sh --audit unavailable)', false],
   ];
   const row = ([name,ok,desc,hardReq])=>{
     const icon = ok?'<span style="color:var(--green)">✓</span>':(hardReq?'<span style="color:var(--red)">✗</span>':'<span style="color:var(--yellow)">!</span>');
@@ -3199,68 +3544,79 @@ function stepNetwork(body){
     <div class="radio-cards">
       <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
         <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
-      <div class="rcard disabled"><div class="rt">Mainnet <span class="tag">coming soon</span></div><div class="rd">Production network — not yet available.</div></div>
+      ${SETUP_MAINNET_ENABLED
+        ? `<div class="rcard ${state.setup.network==='mainnet'?'sel':''}" data-net="mainnet">
+        <div class="rt">Mainnet</div><div class="rd">Production network. Installs a signed release and logs to the systemd journal by default.</div></div>`
+        : `<div class="rcard disabled"><div class="rt">Mainnet <span class="tag">coming soon</span></div><div class="rd">Production network — enabled with the mainnet release.</div></div>`}
     </div>
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(1)">← Back</button><button class="btn btn-green" onclick="goStep(3)">Continue →</button></div>`;
-  body.querySelectorAll('[data-net]').forEach(r=>r.addEventListener('click',()=>{state.setup.network=r.dataset.net;renderSetup();}));
+  body.querySelectorAll('[data-net]').forEach(r=>r.addEventListener('click',()=>setSetupNetwork(r.dataset.net)));
 }
 
-// Source-version picker -- mirrors the CLI menu (pick_source_version): main is
-// the default, then the latest detected release tag, then custom. Sets
-// state.setup.buildRef to the effective ref the backend checks out.
+// Release tag: a release install or a source build takes a release tag only.
+// The page offers the latest release tag the server found for this network
+// (/api/setup/defaults source_ref); the server and the helper refuse anything else.
 function stepSourceField(){
-  const s = state.setup;
-  const smode = s.sourceMode || 'main';
-  const sref = s.sourceRef || '';
-  const opts = `
-    <option value="main" ${smode==='main'?'selected':''}>main — latest current version</option>
-    ${sref?`<option value="tag" ${smode==='tag'?'selected':''}>${esc(sref)} — latest release</option>`:''}
-    <option value="custom" ${smode==='custom'?'selected':''}>Custom branch / tag / commit…</option>`;
-  return `<div class="field"><label>Source version to build</label>
-      <select id="mSourceMode">${opts}</select>
-      ${smode==='custom'
-        ? `<input id="mBuildRef" style="margin-top:8px" placeholder="e.g. v0.16.0-adiri or main" value="${esc(s.customRef||'')}">`
-        : ''}</div>`;
+  const sref = state.setup.sourceRef || '';
+  const label = state.setup.method==='release' ? 'Release to install (signed, verified before install)' : 'Source version to build';
+  if(!sref){
+    return `<div class="field"><label>${label}</label>
+      <div class="note">No release tag was found for this network, so this install cannot start. Check this server's connection to GitHub and reload, or choose Docker.</div></div>`;
+  }
+  return `<div class="field"><label>${label}</label>
+      <select id="mSourceMode"><option value="tag" selected>${esc(sref)} — latest release</option></select></div>`;
 }
 
-function isTestnetNetwork(){ return ['adiri','testnet'].includes(state.setup.network); }
+// The Docker image field takes a release tag of the network (the engine runs
+// that release's image by digest) or the image by digest; latest is refused.
+function dockerImageError(v){
+  const x = String(v||'').trim();
+  if(!x) return 'Enter a release tag or the image by digest';
+  if(x.split(':').pop()==='latest') return 'latest is refused: give a release tag or the image by digest';
+  // The same grammar as the library's tn_release_tag_ok: no leading zero in a part; a testnet
+  // release candidate (-rcN) is accepted here because it is a named tag, never a default.
+  const part = '(0|[1-9][0-9]*)';
+  const tag = new RegExp(setupNetwork()==='mainnet' ? '^v'+part+'\\.'+part+'\\.'+part+'$' : '^v'+part+'\\.'+part+'\\.'+part+'-adiri(-rc[1-9][0-9]*)?$');
+  const t = x.includes('@') ? '' : x.replace(/^.*:/, '');
+  if(tag.test(t)) return '';
+  if(/@sha256:[0-9a-f]{64}$/.test(x)) return '';
+  return 'Not a '+setupNetwork()+' release tag or an image digest';
+}
 
-// Snapshot the source picker into state and derive the effective build ref.
+// The effective build ref: the detected release tag, or '' when there is none.
 function captureSource(){
   const s = state.setup;
-  const sel = $('#mSourceMode'); if(sel) s.sourceMode = sel.value;
-  const inp = $('#mBuildRef');   if(inp) s.customRef = inp.value.trim();
-  s.buildRef = s.sourceMode==='main' ? 'main'
-             : s.sourceMode==='tag'  ? (s.sourceRef||'')
-             : (s.customRef||'');
+  s.buildRef = s.sourceRef || '';
 }
 
 function stepMethod(body){
   const m = state.setup.method;
-  const methodField = m==='source'
+  const mainnet = setupNetwork()==='mainnet';
+  const methodField = (m==='source' || m==='release')
     ? stepSourceField()
-    : `<div class="field"><label>Docker image (latest auto-filled — edit to pin a different tag)</label>
-        <input id="mDockerImage" placeholder="us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri" value="${esc(state.setup.dockerImage||'')}"></div>`;
+    : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (…@sha256:…); latest is refused</label>
+        <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
-    <div class="radio-cards" style="grid-template-columns:1fr 1fr 1fr">
-      <div class="rcard ${m==='source'?'sel':''}" data-m="source"><div class="rt">Build from Source</div><div class="rd">Compile the Rust binary on this host. Most flexible.</div></div>
-      <div class="rcard ${m==='docker'?'sel':''}" data-m="docker"><div class="rt">Docker</div><div class="rd">Run the official container image.</div></div>
+    <div class="radio-cards" style="grid-template-columns:1fr 1fr">
+      <div class="rcard ${m==='release'?'sel':''}" data-m="release"><div class="rt">Signed Release${mainnet?' <span class="tag">default</span>':''}</div><div class="rd">Download the published binary; its signature and checksums are verified before install (x86_64).</div></div>
+      <div class="rcard ${m==='source'?'sel':''}" data-m="source"><div class="rt">Build from Source</div><div class="rd">Compile the Rust binary on this host from a release tag.</div></div>
+      <div class="rcard ${m==='docker'?'sel':''}" data-m="docker"><div class="rt">Docker</div><div class="rd">Run the official container image, by digest.</div></div>
       <div class="rcard disabled"><div class="rt">Existing Binary <span class="tag">coming soon</span></div><div class="rd">Use a pre-built binary.</div></div>
     </div>
     ${methodField}
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(2)">← Back</button><button class="btn btn-green" id="methodNext">Continue →</button></div>`;
   body.querySelectorAll('[data-m]').forEach(r=>r.addEventListener('click',()=>{
     // Persist whichever method field is currently shown before switching.
-    if(state.setup.method==='source') captureSource();
+    if(state.setup.method==='source' || state.setup.method==='release') captureSource();
     if($('#mDockerImage')) state.setup.dockerImage=$('#mDockerImage').value.trim();
     state.setup.method=r.dataset.m; renderSetup();
   }));
-  // Re-render when the source-version mode changes (to show/hide the custom box).
-  const sm=$('#mSourceMode'); if(sm) sm.addEventListener('change', ()=>{ state.setup.sourceModeTouched=true; captureSource(); renderSetup(); });
   $('#methodNext').addEventListener('click', ()=>{
-    if(state.setup.method==='source') captureSource();
+    const sm = state.setup.method;
+    if(sm==='source' || sm==='release') captureSource();
     if($('#mDockerImage')) state.setup.dockerImage=$('#mDockerImage').value.trim();
-    if(state.setup.method==='source' && !state.setup.buildRef){ toast('Enter a source ref to build','error'); return; }
+    if((sm==='source' || sm==='release') && !state.setup.buildRef){ toast('No release tag found; choose Docker or reload once GitHub is reachable','error'); return; }
+    if(sm==='docker'){ const e = dockerImageError(state.setup.dockerImage); if(e){ toast(e,'error'); return; } }
     goStep(4);
   });
 }
@@ -3339,7 +3695,6 @@ async function setupRpcDnsCheck(){
 
 function stepConfigure(body){
   const s = state.setup;
-  const p = s.passphrase;
   // Unified single-node setup: every node is provisioned validator-capable and the
   // install always dispatches through the canonical observer flow, so there is no
   // role branch here. The role is decided on-chain after the node syncs.
@@ -3355,7 +3710,7 @@ function stepConfigure(body){
     <div class="field"><label>Public / external IP (advertised to peers) — auto-detected</label><input id="cfgPubIp" placeholder="e.g. 203.0.113.10" value="${esc(s.publicIp||'')}"></div>
     <div class="field"><label>Internal / NIC IP (listener bind) — auto-detected</label><input id="cfgIntIp" placeholder="e.g. 10.0.0.5 or 0.0.0.0" value="${esc(s.internalIp||'')}"></div>
     <div class="field"><label>Advertised node name <span style="color:var(--text2);font-weight:400">— optional, a public label; you can set or change it later</span></label><input id="cfgAdvName" placeholder="e.g. my-${esc(state.node)}" value="${esc(s.advName||'')}" autocomplete="off"></div>
-    <div class="field"><label>Data directory <span style="color:var(--text2);font-weight:400">— optional; if your node data is on a separate drive, enter the full path here</span></label><input id="cfgDataDir" placeholder="/var/lib/telcoin/${esc(state.node)}" value="${esc(s.dataDir||'')}" autocomplete="off"></div>
+    <div class="field"><label>Data directory <span style="color:var(--text2);font-weight:400">— optional; /var/lib/telcoin or a path under it (mount a separate drive there)</span></label><input id="cfgDataDir" placeholder="/var/lib/telcoin/${esc(state.node)}" value="${esc(s.dataDir||'')}" autocomplete="off"></div>
     ${rpcCards}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
       <div class="field"><label>Service user name</label><input id="cfgSvcUser" placeholder="telcoin" value="${esc(s.serviceUser||'')}"></div>
@@ -3363,16 +3718,10 @@ function stepConfigure(body){
     </div>
     <div class="field"><label>BLS passphrase (encrypts the node key — needed on every start)</label><input id="cfgBls" type="password" placeholder="••••••••" value="${esc(s.bls||'')}"></div>
     <div class="field"><label>Confirm BLS passphrase</label><input id="cfgBlsConfirm" type="password" placeholder="••••••••" value="${esc(s.blsConfirm||'')}"></div>
-    <div class="field"><label>Passphrase Protection</label>
-      <div class="radio-cards">
-        <div class="rcard ${p==='loadcredential'?'sel':''}" data-p="loadcredential"><div class="rt">LoadCredential</div><div class="rd">systemd-managed credential file. Simple, works everywhere.</div></div>
-        <div class="rcard ${p==='tpm'?'sel':''}" data-p="tpm"><div class="rt">TPM / vTPM</div><div class="rd">Seal the passphrase to hardware TPM. More secure.</div></div>
-      </div>
-    </div>
+    <div class="note">The passphrase is stored as a systemd encrypted credential that only root can read, and reaches the node on its standard input. It may not start or end with a space or tab.</div>
     <div class="note">External multiaddrs use your public IP; listener multiaddrs bind your internal IP — both on the standard P2P ports (49590/49594).</div>
     <div class="wiz-nav"><button class="btn btn-out" onclick="goStep(3)">← Back</button><button class="btn btn-green" id="cfgNext">Continue →</button></div>`;
   body.querySelectorAll('[data-rpc]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.rpcPublic=(r.dataset.rpc==='public'); renderSetup(); }));
-  body.querySelectorAll('[data-p]').forEach(r=>r.addEventListener('click',()=>{ captureCfg(); state.setup.passphrase=r.dataset.p; renderSetup(); }));
   const rpcIn=$('#cfgRpcDomain');
   if(rpcIn){
     // Typing clears the previous DNS result; leaving the field checks the new name.
@@ -3403,6 +3752,9 @@ function stepConfigure(body){
     if(s.serviceUser && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceUser)){ toast('Invalid service user name','error'); return; }
     if(s.serviceGroup && !/^[a-zA-Z][a-zA-Z0-9_-]{0,31}$/.test(s.serviceGroup)){ toast('Invalid service group name','error'); return; }
     if(!s.bls){ toast('Enter a BLS passphrase','error'); return; }
+    if(/^[ \t\n\v\f\r]|[ \t\n\v\f\r]$|[\r\n]/.test(s.bls)){ toast('The BLS passphrase may not start or end with a space or tab','error'); return; }
+    if(s.serviceUser && !/^[a-z_][a-z0-9_-]{0,31}$/.test(s.serviceUser)){ toast('Service user: lowercase letters, digits, _ and - only','error'); return; }
+    if(s.dataDir && (!/^\/var\/lib\/telcoin(\/[A-Za-z0-9._-]+)*$/.test(s.dataDir) || s.dataDir.includes('..'))){ toast('Data directory must be /var/lib/telcoin or a path under it','error'); return; }
     if(s.bls!==s.blsConfirm){ toast('BLS passphrases do not match','error'); return; }
     goStep(5);
   });
@@ -3414,7 +3766,7 @@ function stepReview(body){
   const s = state.setup;
   const rows = [
     ['Network', s.network==='adiri'?'Adiri Testnet':s.network],
-    ['Install Method', s.method + (s.method==='source'?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
+    ['Install Method', s.method + ((s.method==='source'||s.method==='release')?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
     ['Address', s.eth||'(not set)'],
     ['Public IP', s.publicIp||'(not set)'],
     ['Internal IP (listener)', s.internalIp||'0.0.0.0'],
@@ -3423,10 +3775,16 @@ function stepReview(body){
   rows.push(
     ['Service user / group', (s.serviceUser||'telcoin')+' / '+(s.serviceGroup||'telcoin')],
     ['BLS Passphrase', s.bls?'•••••••• (set)':'(not set)'],
-    ['Passphrase Protection', s.passphrase==='tpm'?'TPM / vTPM':'LoadCredential'],
+    ['Passphrase Protection', 'Encrypted systemd credential' + (noTpmReported() ? ' (host key alone: no usable TPM2)' : '')],
   );
+  if(setupNetwork()==='mainnet') rows.push(['Node logs', 'systemd journal (capped at 4G)']);
   body.innerHTML = `<h3>Step 5 · Install</h3>
     ${rows.map(([k,v])=>`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
+    ${noTpmReported() ? `<div class="note" style="margin-top:14px;border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
+      This host has no usable TPM2, so on mainnet the BLS passphrase credential can only be encrypted with the host key
+      (<span class="mono">/var/lib/systemd/credential.secret</span>). Setup stops unless you accept that.
+      <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="allowNoTpm" ${s.allowNoTpm?'checked':''}>
+      Encrypt with the host key alone (<span class="mono">--allow-no-tpm</span>)</label></div>` : ''}
     <div class="note" style="margin-top:14px">Phase 1 generates the node keys (no service is created or started yet). After you confirm a backup, phase 2 finalizes and starts the node.</div>
     <div class="svc-row"><button class="btn btn-green" id="genKeysBtn">⚙ Generate Keys</button>
       <button class="btn btn-out" onclick="goStep(4)">← Back</button></div>
@@ -3436,6 +3794,7 @@ function stepReview(body){
     </div>
     <div id="backupGate"></div>`;
   $('#genKeysBtn').addEventListener('click', runKeygen);
+  const ant=$('#allowNoTpm'); if(ant) ant.addEventListener('change', ()=>{ state.setup.allowNoTpm = ant.checked; });
 }
 
 function buildSetupPayload(includePassphrase){
@@ -3444,12 +3803,13 @@ function buildSetupPayload(includePassphrase){
   const ip = s.publicIp || '0.0.0.0';      // external advertised addr
   const lip = s.internalIp || '0.0.0.0';   // listener bind addr (internal NIC)
   const payload = {
-    network: 'testnet',
+    network: setupNetwork(),
     install_method: s.method,
-    passphrase_method: s.passphrase,
     address: s.eth,
-    build_ref: s.method==='source' ? s.buildRef : '',
+    build_ref: (s.method==='source' || s.method==='release') ? s.buildRef : '',
     docker_image: s.method==='docker' ? s.dockerImage : '',
+    log_target: setupNetwork()==='mainnet' ? 'journal' : '',
+    allow_no_tpm: noTpmReported() && !!s.allowNoTpm,
     external_primary: `/ip4/${ip}/udp/${p2p}/quic-v1`,
     external_worker:  `/ip4/${ip}/udp/${worker}/quic-v1`,
     listener_primary: `/ip4/${lip}/udp/${p2p}/quic-v1`,
@@ -3503,7 +3863,7 @@ async function runKeygen(){
   const card=$('#setupProgressCard'); if(card) card.style.display='block';
   const buildNote = state.setup.method==='source'
     ? 'source builds take 20–40 min'
-    : 'pulling the docker image';
+    : state.setup.method==='release' ? 'downloading and verifying the release' : 'pulling the docker image';
   const log=$('#setupLog'); if(log) log.innerHTML='<div class="log-line info">» generating keys… ('+buildNote+' — keep this tab open)</div>';
   let refused = null;
   const d = await streamSetup('keygen', true, (status, msg)=>{ refused = {status, msg}; });
@@ -3515,7 +3875,17 @@ async function runKeygen(){
     toast('Key generation refused'+(refused.msg?': '+refused.msg:''),'error');
     if(b) b.disabled=false;
   }
-  else { toast('Key generation failed'+(d&&d.msg?': '+d.msg:''),'error'); if(b) b.disabled=false; }
+  else {
+    // The engine stops a mainnet keygen on a host without a usable TPM2 and
+    // names --allow-no-tpm: offer that choice and let the operator retry.
+    if(d && /--allow-no-tpm/.test(String(d.msg||'')+String(d.error||'')) && setupNetwork()==='mainnet' && !state.setup.noTpmRefused){
+      state.setup.noTpmRefused = true;
+      toast('No usable TPM2 on this host: accept the host key below to continue','error');
+      renderSetup();
+      return;
+    }
+    toast('Key generation failed'+(d&&d.msg?': '+d.msg:''),'error'); if(b) b.disabled=false;
+  }
 }
 
 function showBackupGate(d){
@@ -3663,7 +4033,7 @@ function stopTracesRefresh(){ if(state.tracesTimer){ clearInterval(state.tracesT
 function versionHtml(ref){
   const base = esc(ref || '—');
   const br = state.buildInfo && state.buildInfo.exists ? (state.buildInfo.branch || '') : '';
-  if(br && br!=='main' && br!=='detached'){
+  if(br && !/^(main|detached)$/.test(br)){
     return `${base}<br><span style="font-size:11px;color:var(--text3)">branch: ${esc(br)}</span>`;
   }
   return base;
@@ -3682,7 +4052,7 @@ function fmtTel(x){
   if(!isFinite(n)) return null;
   return n.toLocaleString('en-US', {maximumFractionDigits:4}) + ' TEL';
 }
-function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Mainnet'})[n] || (n?cap(n):'—'); }
+function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Telcoin Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
 // Nav-bar network status pill (Adiri Testnet, from /api/network/status)

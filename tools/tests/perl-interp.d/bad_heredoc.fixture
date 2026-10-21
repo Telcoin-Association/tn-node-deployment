@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: perl programs read from an
+# unquoted heredoc or a here-string. Expected findings: lines 8, 13, 14 and 17.
+
+new="$1"
+file="$2"
+perl - "$file" <<EOF2
+s/old/$new/;
+print "\$_\n";
+EOF2
+
+perl <<-EOF2
+	my $x = 1;
+	print "${new}\n";
+	EOF2
+
+perl <<< "print q($new)"

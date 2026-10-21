@@ -1,0 +1,106 @@
+Release signing keys
+====================
+
+This directory holds the OpenPGP public keys whose signatures the node scripts
+accept on a telcoin-network release and on its source tag. setup-node.sh
+(--install-method release, and Docker installs given a release tag),
+update-node.sh and edit-config.sh (a Docker image given as a release tag)
+download a release's SHA256SUMS and SHA256SUMS.asc and run
+
+    gpgv --status-fd 1 --keyring <every *.asc here, dearmored> SHA256SUMS.asc SHA256SUMS
+
+and read its status lines:
+
+  - accepted only when at least one signature is good (GOODSIG then VALIDSIG)
+    and its primary key fingerprint belongs to one of these files;
+  - refused on any BADSIG, by whichever key;
+  - refused on EXPKEYSIG, REVKEYSIG or EXPSIG: these come only from a key in
+    the keyring, which holds the keys listed here, so an expired or revoked
+    listed key refuses the release even beside another good signature;
+  - refused when no listed key made a good signature: an unsigned file, or one
+    signed only by keys that are not here;
+  - a further signature by a key that is not here (NO_PUBKEY, or ERRSIG for a
+    missing key) is not checked and does not refuse: the scripts print a
+    warning that names its key id, once. Any other ERRSIG refuses.
+
+Why an unknown co-signer only warns: the telcoin-network release pipeline
+refuses to sign, verify or publish a SHA256SUMS.asc that carries any
+signature that is not good or not by an allowlisted maintainer key, and the
+manual check on the install page refuses one too. So a published release only
+ever carries allowlisted signatures, and the warning covers the one case left:
+a co-signer allowlisted on telcoin-network main whose key has not shipped here
+yet (this directory lags main's list until the next script release).
+
+Then every file used from the release (the tarball, IMAGE_DIGEST) must match its
+SHA256SUMS line, and the chain-config lines must carry the hashes these scripts
+pin. IMAGE_DIGEST must name an image repository the scripts accept for the
+network (on testnet the Artifact Registry adiri repository or
+ghcr.io/telcoin-association/telcoin-network). Nothing from a release that fails
+a check is installed or run.
+
+Source builds check the release tag with the same keys: git verify-tag runs in
+a throwaway GnuPG home that holds them. A bad, expired or revoked tag signature
+refuses the build on every network. A tag that cannot be checked (no key here,
+gpg missing, an unsigned tag, or a signer whose key is not here) refuses the
+build on mainnet and builds with a warning on testnet.
+
+Format
+------
+
+ASCII-armored public keys, one file per maintainer, named <github-handle>.asc,
+the same files as .github/maintainer-gpg-keys/ in the telcoin-network
+repository on main. Every *.asc file here is read; other files (this README)
+are ignored. A file may carry more than one primary key: every primary key
+(every "pub" that gpg --show-keys lists) in every file joins the keyring and the
+fingerprint allowlist, whether the file holds one armored block or several. A
+key that is expired or revoked stays refused even while its file is here.
+
+Shipped keys
+------------
+
+    handle     primary key fingerprint                    expires      added
+    grantkee   4E36D35A4AB61B589861D01AC7173F2377CA7573   2028-10-16   2026-10-21
+
+grantkee.asc is a byte-for-byte copy of .github/maintainer-gpg-keys/grantkee.asc
+in telcoin-network (an RSA-2048 primary key that signs; its subkeys are not
+used here).
+
+Before a key expires, its maintainer extends the expiry, re-exports the public
+key and ships the new file in a script release, the same way a key is added
+below. Hosts must install that script release before the old expiry date: from
+that date gpgv reports EXPKEYSIG for every release signed with the key, and the
+scripts refuse those releases.
+
+Adding or removing a key
+------------------------
+
+1. Take the key from .github/maintainer-gpg-keys/<handle>.asc on the
+   telcoin-network main branch, and check its fingerprint against the
+   maintainer release keys table in that repository's SECURITY.md and
+   against https://github.com/<handle>.gpg:
+
+       gpg --show-keys --with-fingerprint <handle>.asc
+
+2. Add (or delete) lib/release-keys/<handle>.asc in tn-node-deployment and
+   list it in update-scripts.sh SCRIPTS so the updater ships it.
+
+3. Publish a signed script release. Hosts pick the key set up with
+   update-scripts.sh; the keys are part of the signed MANIFEST, like the
+   scripts that read them. The Node Manager UI runs its own copy of the
+   scripts and keys (/opt/telcoin-ui-update), which takes the new key set
+   only with the next install-ui.sh --update, as for every other script file.
+
+A release signed only by a key that is not here yet is refused until the
+script release that carries the key is installed. A release whose
+SHA256SUMS.asc carries a good signature by a key here and also a signature by
+a key that is not here is taken on the first, with a warning that names the
+second key's id (see above); ship every signer's key so the warning goes away.
+
+While this directory holds no *.asc file, no release can be verified:
+--install-method release, release updates and every mainnet image are
+refused, and so are mainnet source builds. On testnet, a Docker install,
+update or image change given a release tag then uses the digest the registry
+serves for that tag, with a warning that no signed release confirms it (as it
+does for a release that publishes no signed files), and a source build goes
+ahead with a warning. A release whose files are published but fail a check is
+never replaced by the registry's answer.

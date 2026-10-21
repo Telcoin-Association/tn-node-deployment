@@ -40,7 +40,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="1.6.1"
+readonly COMMON_VERSION="2.0.0"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -67,13 +67,11 @@ readonly TN_REPO="https://github.com/Telcoin-Association/telcoin-network.git"
 readonly TN_SOURCE_DIR="/opt/telcoin-source"
 readonly MIN_RUST_VERSION="1.75.0"
 
-# Tag suffixes used by each Telcoin network. Used by source-build pickers to
-# default to the right release for the network the operator selected.
-#   testnet -> "-adiri"  (Adiri testnet)
-#   mainnet -> "-telcoin" (placeholder; will be confirmed when mainnet launches)
-#   devnet  -> follows main; no tag filter
+# The suffix of each network's release tags: testnet vX.Y.Z-adiri, mainnet
+# vX.Y.Z with none. tn_release_tag_ok is the rule these scripts apply; these two
+# stay for scripts of an earlier release that read them.
 readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"
-readonly NETWORK_TAG_SUFFIX_MAINNET="-telcoin"
+readonly NETWORK_TAG_SUFFIX_MAINNET=""
 
 # Oldest release the source-build picker offers and tn_ref_min_check accepts.
 # Older tags exist upstream but lack features these scripts rely on:
@@ -178,14 +176,23 @@ check_root() {
 # or the interactive menu) and simply exit on failure; read-only --check runs
 # never take it.
 #
-# Primary path is flock(1) on /var/lock (present on every systemd host): fd 9
-# is held open for the life of the process and the kernel drops the lock when
-# the last copy of that descriptor closes, so a crash, SIGKILL or reboot leaves
-# nothing to clean up (but see the next paragraph about children). Where
-# flock or /var/lock is missing (stock macOS), fall back to an atomic mkdir
-# lock (mkdir fails on anything that already exists, symlinks included) with a
-# PID-staleness takeover. On failure, TN_UPDATE_LOCK_HOLDER carries the
-# holder's PID ("" if unknown) so JSON-mode callers can report it.
+# Primary path is flock(1) on /run/telcoin/update.lock. /run/telcoin is created
+# root 0755 when absent and must pass tn_root_dir_ok; the lock file must be a
+# regular file owned by root (never a symlink), created 0600 (an existing
+# root-owned file with another mode is set to 0600). flock needs only a read
+# descriptor, so only root may open the file at all: no other account can hold
+# the lock, replace it or point it elsewhere. fd 9 is held open for the life of
+# the process and the kernel drops the lock when the last copy of that
+# descriptor closes, so a crash, SIGKILL or reboot leaves nothing to clean up
+# (but see the next paragraph about children). Where flock is missing, or /run
+# does not exist (stock macOS), fall back to an atomic mkdir lock (mkdir fails
+# on anything that already exists, symlinks included) with a PID-staleness
+# takeover: <lock file>.d when the lock directory is usable, else
+# ${TMPDIR:-/tmp}/telcoin-update.lock.d. On failure,
+# TN_UPDATE_LOCK_HOLDER carries the holder's PID ("" if unknown) so JSON-mode
+# callers can report it. TN_UPDATE_LOCK_FILE overrides the path for tests; the
+# root-owner and mode checks then do not apply (the symlink check still does,
+# and a missing file is still created 0600).
 #
 # Every child the holder starts inherits fd 9, and the kernel frees a flock only
 # when the last descriptor of the open file goes. A child that outlives the holder
@@ -202,20 +209,88 @@ check_root() {
 TN_UPDATE_LOCK_HOLDER=""
 TN_UPDATE_LOCK_DIR=""
 TN_UPDATE_LOCK_KIND=""
+readonly TN_UPDATE_LOCK_DEFAULT="/run/telcoin/update.lock"
+
+# tn_update_lock_path -- print the lock file path (TN_UPDATE_LOCK_FILE or the
+# default). check-node reports on the same path.
+tn_update_lock_path() {
+    printf '%s\n' "${TN_UPDATE_LOCK_FILE:-$TN_UPDATE_LOCK_DEFAULT}"
+}
+
+# _tn_lock_parent_ready DIR STRICT -- rc 0 when DIR can hold the flock lock: it
+# exists (created root 0755 here when absent and STRICT is set) and, when STRICT
+# is set, passes tn_root_dir_ok. rc 1 refused (DIR is present but unsafe, or
+# cannot be created although its parent exists); rc 3 DIR's parent is absent
+# (no /run: the caller may use the mkdir fallback).
+_tn_lock_parent_ready() {
+    local dir="$1" strict="$2" up
+    if [[ -z "$strict" ]]; then
+        [[ -d "$dir" && ! -L "$dir" ]] && return 0
+        return 3
+    fi
+    if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+        up="${dir%/*}"
+        [[ -n "$up" ]] || up=/
+        [[ -d "$up" ]] || return 3
+        if ! install -d -o root -g root -m 0755 -- "$dir" 2>/dev/null; then
+            print_error "Cannot create the lock directory ${dir} (are you root?)"
+            return 1
+        fi
+    fi
+    if ! tn_root_dir_ok "$dir"; then
+        print_error "Refusing the lock directory ${dir}: it or a parent is a symlink, not owned by root, or writable by others."
+        return 1
+    fi
+    return 0
+}
+
 tn_acquire_update_lock() {
     TN_UPDATE_LOCK_HOLDER=""
     TN_UPDATE_LOCK_DIR=""
     TN_UPDATE_LOCK_KIND=""
-    # Overridable for tests only; production callers always use the default.
-    local lock_file="${TN_UPDATE_LOCK_FILE:-/var/lock/telcoin-update.lock}"
-    local lock_parent="${lock_file%/*}"
+    local lock_file lock_parent strict="" lock_dir prc=0 owner mode old_umask
+    lock_file="$(tn_update_lock_path)"
+    lock_parent="${lock_file%/*}"
+    [[ -n "$lock_parent" ]] || lock_parent=/
+    [[ -n "${TN_UPDATE_LOCK_FILE:-}" ]] || strict=1
 
-    if command -v flock >/dev/null 2>&1 && [[ -d "$lock_parent" ]]; then
+    _tn_lock_parent_ready "$lock_parent" "$strict" || prc=$?
+    if [[ $prc -eq 1 ]]; then
+        return 1
+    fi
+    if [[ $prc -eq 0 ]]; then
+        if [[ -L "$lock_file" ]] || { [[ -e "$lock_file" ]] && [[ ! -f "$lock_file" ]]; }; then
+            print_error "Refusing the lock file ${lock_file}: it is a symlink or not a regular file."
+            return 1
+        fi
+        if [[ -n "$strict" && -e "$lock_file" ]]; then
+            owner="$(stat -c %u -- "$lock_file" 2>/dev/null || true)"
+            if [[ "$owner" != 0 ]]; then
+                print_error "Refusing the lock file ${lock_file}: it is not owned by root."
+                return 1
+            fi
+            # flock needs only a read descriptor, so a lock file others can
+            # read lets any account hold the lock. Repair a root-owned file
+            # left with a looser mode by an earlier run.
+            mode="$(stat -c %a -- "$lock_file" 2>/dev/null || true)"
+            if [[ "$mode" != 600 ]] && ! chmod 0600 -- "$lock_file" 2>/dev/null; then
+                print_error "Refusing the lock file ${lock_file}: mode ${mode:-unknown}, and it cannot be set to 0600."
+                return 1
+            fi
+        fi
+    fi
+
+    if [[ $prc -eq 0 ]] && command -v flock >/dev/null 2>&1; then
         # Append-mode open: must not truncate the PID a current holder wrote.
+        # umask 077 creates a missing lock file 0600, readable by root only.
+        old_umask="$(umask)"
+        umask 077
         if ! exec 9>>"$lock_file"; then
+            umask "$old_umask"
             print_error "Cannot open lock file ${lock_file} (are you root?)"
             return 1
         fi
+        umask "$old_umask"
         if ! flock -n 9; then
             TN_UPDATE_LOCK_HOLDER="$(cat "$lock_file" 2>/dev/null || true)"
             print_error "Another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}."
@@ -230,9 +305,13 @@ tn_acquire_update_lock() {
         return 0
     fi
 
-    # mkdir fallback (no flock / no /var/lock). PID-staleness check replaces
-    # the kernel's automatic release; the dir is removed on normal exit.
-    local lock_dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
+    # mkdir fallback (no flock, or no /run). PID-staleness check replaces the
+    # kernel's automatic release; the dir is removed on normal exit.
+    if [[ $prc -eq 0 ]]; then
+        lock_dir="${lock_file}.d"
+    else
+        lock_dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
+    fi
     if mkdir "$lock_dir" 2>/dev/null; then
         printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
         TN_UPDATE_LOCK_DIR="$lock_dir"
@@ -380,6 +459,968 @@ command_exists() {
 }
 
 # -----------------------------------------------------------------------------
+# ROOT-OWNED WRITES
+# -----------------------------------------------------------------------------
+#
+# Primitives for files root writes in places no other account can redirect.
+# Return codes: 0 done; 1 refused, nothing changed; 2 an I/O or runtime
+# failure, nothing changed (the destination untouched, no temp file left).
+# Messages go to stderr and never carry file contents. They assume GNU
+# coreutils and util-linux (the Linux node); where a tool lacks an option used
+# here (busybox has no `cp --no-preserve`), the helper fails closed.
+
+# tn_root_dir_ok DIR -- rc 0 when DIR is an absolute path and DIR and every
+# parent up to / is a real directory (not a symlink), owned by uid 0 and not
+# other-writable. Group write is refused in the directories these scripts own
+# and everything below them (/var/log/telcoin, /etc/telcoin, /opt/telcoin,
+# /usr/local/libexec/telcoin, /var/backups/telcoin, /var/lib/telcoin-staging,
+# /run/telcoin, also under TN_ROOT_PREFIX). Above them, and in system paths the
+# scripts do not own, a group-writable directory passes only when its group is a
+# system group (gid below 1000): stock Ubuntu ships /var/log root:syslog 0775. A
+# path with a "." or ".." component is refused. Reads only; prints nothing.
+# (Copied into the VPN self-heal helper with declare -f: keep it self-contained.)
+tn_root_dir_ok() {
+    local d="${1:-}" st uid gid mode rel
+    [[ "$d" == /* ]] || return 1
+    case "/${d}/" in
+        */./*|*/../*) return 1 ;;
+    esac
+    while :; do
+        while [[ "$d" == */ && "$d" != / ]]; do
+            d="${d%/}"
+        done
+        [[ -L "$d" ]] && return 1
+        [[ -d "$d" ]] || return 1
+        st="$(stat -c '%u %g %a' -- "$d" 2>/dev/null)" || return 1
+        uid="${st%% *}"
+        mode="${st##* }"
+        gid="${st#* }"
+        gid="${gid%% *}"
+        [[ "$uid" == 0 && "$gid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]+$ ]] || return 1
+        # The last two octal digits are group and other; 2, 3, 6 and 7 carry w.
+        case "$mode" in
+            *[2367]) return 1 ;;
+            *[2367]?)
+                rel="$d"
+                if [[ -n "${TN_ROOT_PREFIX:-}" && "$rel" == "${TN_ROOT_PREFIX}"/* ]]; then
+                    rel="${rel#"$TN_ROOT_PREFIX"}"
+                fi
+                case "${rel}/" in
+                    /var/log/telcoin/*|/etc/telcoin/*|/opt/telcoin/*|/usr/local/libexec/telcoin/*|\
+                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/run/telcoin/*)
+                        return 1 ;;
+                esac
+                (( 10#$gid < 1000 )) || return 1
+                ;;
+        esac
+        [[ "$d" == / ]] && return 0
+        d="${d%/*}"
+        [[ -n "$d" ]] || d=/
+    done
+}
+
+# TN_INFLIGHT_TMP -- the temp file tn_write_root_file or tn_install_root_binary
+# is filling right now ("" otherwise). The EXIT traps of setup-node, update-node
+# and edit-config call tn_remove_inflight_tmp, so a signal that ends the run
+# between the temp file and its rename leaves no root-owned temp file behind.
+TN_INFLIGHT_TMP=""
+
+# TN_INFLIGHT_CRED -- the credential tn_store_credential has written and not yet
+# moved into place (<dest>.new), "" otherwise.
+TN_INFLIGHT_CRED=""
+
+# tn_remove_inflight_tmp -- remove TN_INFLIGHT_TMP and TN_INFLIGHT_CRED when set,
+# finish or undo a passphrase move (_tn_cred_switch) the run was stopped in
+# (_tn_cred_on_exit; TN_CRED_EXIT_MSG then says what it did), and remove the
+# release staging directories this run made (tn_staging_sweep). Never fails.
+tn_remove_inflight_tmp() {
+    if [[ -n "${TN_INFLIGHT_TMP:-}" ]]; then
+        rm -f -- "$TN_INFLIGHT_TMP" 2>/dev/null || true
+        TN_INFLIGHT_TMP=""
+    fi
+    if [[ -n "${TN_INFLIGHT_CRED:-}" ]]; then
+        rm -f -- "$TN_INFLIGHT_CRED" 2>/dev/null || true
+        TN_INFLIGHT_CRED=""
+    fi
+    if [[ -n "${_TN_CS_STATE:-}" ]] && declare -F _tn_cred_on_exit >/dev/null 2>&1; then
+        _tn_cred_on_exit || true
+    fi
+    tn_staging_sweep || true
+    return 0
+}
+
+# tn_write_root_file DEST MODE [GROUP] -- write stdin to DEST, owned
+# root:GROUP (default root) with MODE. The content goes to a temp file in
+# DEST's directory (mktemp: 0600 root while it is written), which gets its owner
+# and mode and then replaces DEST in one rename (mv -fT). Readers see the old
+# file or the new one, never a partial one, and rename(2) replaces the name
+# without following it. Refused (rc 1): DEST not an absolute file path, DEST a
+# directory or a symlink, MODE not 3 or 4 octal digits, GROUP not a plain group
+# name, DEST's directory failing tn_root_dir_ok. rc 2: mktemp, the write, chown,
+# chmod or the rename failed; DEST is untouched and the temp file removed. The
+# temp file's path is in TN_INFLIGHT_TMP until the rename. Feed stdin from a
+# here-string, a here-document or a file, not a pipe: the right-hand side of a
+# pipe runs in a subshell that can outlive the caller.
+tn_write_root_file() {
+    local dest="${1:-}" mode="${2:-}" group="${3:-root}" dir tmp
+    if [[ "$dest" != /* || "$dest" == */ ]]; then
+        print_warn "tn_write_root_file: refusing '${dest}': not an absolute file path" >&2
+        return 1
+    fi
+    if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+        print_warn "tn_write_root_file: refusing mode '${mode}' for ${dest}" >&2
+        return 1
+    fi
+    if [[ ! "$group" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+        print_warn "tn_write_root_file: refusing group '${group}' for ${dest}" >&2
+        return 1
+    fi
+    if [[ -L "$dest" || -d "$dest" ]]; then
+        print_warn "tn_write_root_file: refusing ${dest}: it is a symlink or a directory" >&2
+        return 1
+    fi
+    dir="${dest%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if ! tn_root_dir_ok "$dir"; then
+        print_warn "tn_write_root_file: refusing ${dest}: ${dir} or a parent is not a root-owned, root-only-writable directory" >&2
+        return 1
+    fi
+    tmp="$(mktemp "${dir}/.tn.XXXXXX" 2>/dev/null)" || tmp=""
+    if [[ -z "$tmp" || ! -f "$tmp" ]]; then
+        print_warn "tn_write_root_file: cannot create a temp file in ${dir}" >&2
+        return 2
+    fi
+    TN_INFLIGHT_TMP="$tmp"
+    if ! cat > "$tmp" \
+        || ! chown -- "root:${group}" "$tmp" \
+        || ! chmod -- "$mode" "$tmp" \
+        || ! mv -f -T -- "$tmp" "$dest"; then
+        rm -f -- "$tmp"
+        TN_INFLIGHT_TMP=""
+        print_warn "tn_write_root_file: writing ${dest} failed; it is unchanged" >&2
+        return 2
+    fi
+    TN_INFLIGHT_TMP=""
+    return 0
+}
+
+# tn_backup_file SRC [NAME] -- copy SRC into the root-only backup directory and
+# print "<backup-path> <sha256>" on stdout (split it with ${out% *} and
+# ${out##* }). The directory is TN_BACKUP_DIR (default /var/backups/telcoin),
+# created 0700 when absent. The copy is a new 0600 root file made with
+# `cp --no-preserve=all` under umask 077, so SRC's owner, mode and timestamps
+# are not carried over. NAME (default SRC's file name) starts the backup's file
+# name; every character outside A-Z a-z 0-9 . _ - (a "/" included) becomes "_".
+# Refused (rc 1): SRC a symlink or not a regular file; the backup directory not
+# absolute, a symlink, not owned by root, not mode 0700, or failing
+# tn_root_dir_ok. rc 2: creating the directory, the copy or the hash failed
+# (no partial backup is left).
+tn_backup_file() {
+    local src="${1:-}" name="${2:-}" bdir="${TN_BACKUP_DIR:-/var/backups/telcoin}" st tmp sum up d made=""
+    if [[ -L "$src" || ! -f "$src" ]]; then
+        print_warn "tn_backup_file: refusing '${src}': not a regular file (or a symlink)" >&2
+        return 1
+    fi
+    [[ -n "$name" ]] || name="${src##*/}"
+    name="${name//[^A-Za-z0-9._-]/_}"
+    while [[ "$bdir" == */ && "$bdir" != / ]]; do
+        bdir="${bdir%/}"
+    done
+    if [[ "$bdir" != /* || -L "$bdir" ]]; then
+        print_warn "tn_backup_file: refusing backup directory '${bdir}': not absolute, or a symlink" >&2
+        return 1
+    fi
+    if [[ ! -e "$bdir" ]]; then
+        # Decide before creating anything: the nearest existing parent must pass
+        # tn_root_dir_ok, so a refusal leaves no directory behind.
+        up="${bdir%/*}"
+        while [[ -n "$up" && ! -e "$up" && ! -L "$up" ]]; do
+            up="${up%/*}"
+        done
+        [[ -n "$up" ]] || up=/
+        if ! tn_root_dir_ok "$up"; then
+            print_warn "tn_backup_file: refusing backup directory ${bdir}: ${up} or a parent is not a root-owned, root-only-writable directory" >&2
+            return 1
+        fi
+        # umask 077 covers the parents -p creates; -m sets the leaf.
+        # shellcheck disable=SC2174
+        if ! ( umask 077; mkdir -p -m 0700 -- "$bdir" ); then
+            print_warn "tn_backup_file: cannot create ${bdir}" >&2
+            return 2
+        fi
+        made="$up"
+    fi
+    st="$(stat -c '%u %a' -- "$bdir" 2>/dev/null)" || st=""
+    if [[ "$st" != "0 700" ]] || ! tn_root_dir_ok "$bdir"; then
+        # Remove the (empty) directories this call just made, leaf first.
+        d="$bdir"
+        while [[ -n "$made" && "$d" != "$made" && "$d" == "${made%/}"/* ]]; do
+            rmdir -- "$d" 2>/dev/null || break
+            d="${d%/*}"
+        done
+        print_warn "tn_backup_file: refusing backup directory ${bdir}: it must be a root-owned 0700 directory under root-owned parents" >&2
+        return 1
+    fi
+    tmp="$(mktemp "${bdir}/${name}.XXXXXX" 2>/dev/null)" || tmp=""
+    if [[ -z "$tmp" || ! -f "$tmp" ]]; then
+        print_warn "tn_backup_file: cannot create a backup file in ${bdir}" >&2
+        return 2
+    fi
+    if ! ( umask 077; cp --no-preserve=all -- "$src" "$tmp" ); then
+        rm -f -- "$tmp"
+        print_warn "tn_backup_file: copying ${src} failed; no backup was made" >&2
+        return 2
+    fi
+    sum="$(sha256sum < "$tmp" 2>/dev/null)" || sum=""
+    sum="${sum%% *}"
+    if [[ ! "$sum" =~ ^[0-9a-f]{64}$ ]]; then
+        rm -f -- "$tmp"
+        print_warn "tn_backup_file: hashing the copy of ${src} failed; no backup was made" >&2
+        return 2
+    fi
+    printf '%s %s\n' "$tmp" "$sum"
+}
+
+# tn_restore_backup BACKUP SHA256 DEST MODE [GROUP] -- put a backup made by
+# tn_backup_file back: when BACKUP still hashes to SHA256, write it to DEST via
+# tn_write_root_file (same MODE, GROUP and return codes). Refused (rc 1): a hash
+# mismatch, SHA256 not 64 lowercase hex digits, BACKUP a symlink or not a
+# regular file, or BACKUP's directory failing tn_root_dir_ok (so nobody can swap
+# the file between the hash and the write). DEST is untouched on refusal.
+tn_restore_backup() {
+    local backup="${1:-}" want="${2:-}" dest="${3:-}" mode="${4:-}" group="${5:-root}" bdir got
+    if [[ -L "$backup" || ! -f "$backup" ]]; then
+        print_warn "tn_restore_backup: refusing '${backup}': not a regular file (or a symlink)" >&2
+        return 1
+    fi
+    if [[ ! "$want" =~ ^[0-9a-f]{64}$ ]]; then
+        print_warn "tn_restore_backup: refusing ${backup}: the expected sha256 is malformed" >&2
+        return 1
+    fi
+    bdir="${backup%/*}"
+    [[ -n "$bdir" ]] || bdir=/
+    if [[ "$backup" != /* ]] || ! tn_root_dir_ok "$bdir"; then
+        print_warn "tn_restore_backup: refusing ${backup}: its directory is not root-owned and root-only-writable" >&2
+        return 1
+    fi
+    got="$(sha256sum < "$backup" 2>/dev/null)" || got=""
+    got="${got%% *}"
+    if [[ "$got" != "$want" ]]; then
+        print_warn "tn_restore_backup: refusing ${backup}: its sha256 does not match; ${dest} is unchanged" >&2
+        return 1
+    fi
+    tn_write_root_file "$dest" "$mode" "$group" < "$backup"
+}
+
+# tn_install_root_binary SRC DEST -- install SRC as DEST, root:root 0755:
+# `install` to DEST.new.<pid> in DEST's directory, then one rename over DEST
+# (mv -fT). Refused (rc 1): SRC a symlink or not a regular file, DEST not an
+# absolute file path, DEST a symlink or a directory, or DEST's directory failing
+# tn_root_dir_ok. rc 2: install or the rename failed; DEST is untouched and the
+# .new file removed. The .new file's path is in TN_INFLIGHT_TMP until the
+# rename, and a DEST.new.<pid> an earlier run left (killed mid-install) is
+# removed first: only root can create it in that directory.
+tn_install_root_binary() {
+    local src="${1:-}" dest="${2:-}" dir new stale
+    if [[ -L "$src" || ! -f "$src" ]]; then
+        print_warn "tn_install_root_binary: refusing '${src}': not a regular file (or a symlink)" >&2
+        return 1
+    fi
+    if [[ "$dest" != /* || "$dest" == */ || -L "$dest" || -d "$dest" ]]; then
+        print_warn "tn_install_root_binary: refusing '${dest}': not an absolute file path, or a symlink or directory" >&2
+        return 1
+    fi
+    dir="${dest%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if ! tn_root_dir_ok "$dir"; then
+        print_warn "tn_install_root_binary: refusing ${dest}: ${dir} or a parent is not a root-owned, root-only-writable directory" >&2
+        return 1
+    fi
+    for stale in "${dest}".new.[0-9]*; do
+        if [[ -f "$stale" || -L "$stale" ]]; then
+            rm -f -- "$stale"
+        fi
+    done
+    new="${dest}.new.$$"
+    rm -f -- "$new"
+    TN_INFLIGHT_TMP="$new"
+    if ! install -o root -g root -m 0755 -- "$src" "$new" \
+        || ! mv -f -T -- "$new" "$dest"; then
+        rm -f -- "$new"
+        TN_INFLIGHT_TMP=""
+        print_warn "tn_install_root_binary: installing ${dest} failed; it is unchanged" >&2
+        return 2
+    fi
+    TN_INFLIGHT_TMP=""
+    return 0
+}
+
+# tn_as_service_user CMD [ARG...] -- run CMD as SERVICE_USER:SERVICE_GROUP with
+# no supplementary groups and no_new_privs set, without TN_BLS_PASSPHRASE in its
+# environment and without fd 9 (the update lock), and return its exit code. Uses `setpriv --reuid --regid
+# --clear-groups --no-new-privs`, or `runuser -u -g` where setpriv is missing
+# (runuser does not set no_new_privs). The arguments pass through as separate
+# words; nothing re-joins them into a shell string. rc 126 without running
+# anything: no CMD, SERVICE_USER empty, unknown, malformed or uid 0, the group
+# unknown or gid 0, or neither tool installed. SERVICE_GROUP defaults to the
+# user's primary group.
+tn_as_service_user() {
+    local u="${SERVICE_USER:-}" g="${SERVICE_GROUP:-}" uid gid
+    if [[ $# -eq 0 ]]; then
+        print_warn "tn_as_service_user: no command given" >&2
+        return 126
+    fi
+    if [[ ! "$u" =~ ^[A-Za-z_][A-Za-z0-9_.-]*[$]?$ ]]; then
+        print_warn "tn_as_service_user: refusing service user '${u}'" >&2
+        return 126
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || uid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ ]]; then
+        print_warn "tn_as_service_user: refusing service user '${u}': unknown or root" >&2
+        return 126
+    fi
+    [[ -n "$g" ]] || g="$(id -gn "$u" 2>/dev/null)" || g=""
+    if [[ "$g" =~ ^[0-9]+$ ]]; then
+        gid="$g"
+    elif [[ "$g" =~ ^[A-Za-z_][A-Za-z0-9_.-]*[$]?$ ]]; then
+        gid="$(getent group "$g" 2>/dev/null | cut -d: -f3)" || gid=""
+    else
+        gid=""
+    fi
+    if [[ ! "$gid" =~ ^[0-9]+$ || "$gid" =~ ^0+$ ]]; then
+        print_warn "tn_as_service_user: refusing service group '${g}': unknown or root" >&2
+        return 126
+    fi
+    # 9>&- keeps the update lock's descriptor away from the child (on the
+    # command itself: bash 3.2 leaks a descriptor closed on a function call).
+    if command -v setpriv >/dev/null 2>&1; then
+        env -u TN_BLS_PASSPHRASE setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- "$@" 9>&-
+        return
+    fi
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$u" -g "$g" -- env -u TN_BLS_PASSPHRASE "$@" 9>&-
+        return
+    fi
+    print_warn "tn_as_service_user: neither setpriv nor runuser is installed" >&2
+    return 126
+}
+
+# -----------------------------------------------------------------------------
+# CORE-1a: OWNERSHIP MIGRATION AND LOGS
+# -----------------------------------------------------------------------------
+#
+# Layout (setup since COMMON_VERSION 2.0.0; older hosts via tn_migrate_ownership):
+# only the data dir belongs to the service user. Install and config trees and the
+# start scripts are root-owned; the log dir is root:telcoin-log 0750 with the two
+# node log files pre-created root:telcoin-log 0640 (systemd opens them for the
+# node, so the node needs no write access to the directory).
+
+readonly TN_LOG_GROUP="telcoin-log"
+
+# _tn_strip_gw MODE -- print octal MODE without the group and other write bits.
+_tn_strip_gw() {
+    printf '%04o\n' "$(( 8#${1:-0} & ~8#022 ))"
+}
+
+# _tn_parent_ready DIR -- rc 0 when DIR's parent passes tn_root_dir_ok, creating
+# a missing parent chain root 0755 first. rc 1 refused, 2 mkdir failed.
+_tn_parent_ready() {
+    local parent="${1%/*}"
+    [[ -n "$parent" ]] || parent=/
+    if [[ ! -e "$parent" && ! -L "$parent" ]]; then
+        ( umask 022; mkdir -p -- "$parent" ) || return 2
+    fi
+    if ! tn_root_dir_ok "$parent"; then
+        print_error "Refusing ${1}: ${parent} or a parent is not a root-owned, root-only-writable directory."
+        return 1
+    fi
+    return 0
+}
+
+# _tn_root_layout_dir DIR GROUP MODE -- make DIR a root:GROUP directory with MODE.
+# Absent: created with install -d. Present: must be a real directory (not a
+# symlink); only DIR itself gets the owner and mode, never its contents. rc 0, 1
+# refused (DIR a symlink or not a directory, its parent not root-owned), 2 failed.
+_tn_root_layout_dir() {
+    local dir="$1" group="$2" mode="$3" rc=0
+    while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
+    if [[ "$dir" != /* ]]; then
+        print_error "Refusing '${dir}': not an absolute path."
+        return 1
+    fi
+    _tn_parent_ready "$dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    if [[ -L "$dir" ]] || { [[ -e "$dir" ]] && [[ ! -d "$dir" ]]; }; then
+        print_error "Refusing ${dir}: it is a symlink or not a directory."
+        return 1
+    fi
+    if [[ ! -d "$dir" ]]; then
+        install -d -o root -g "$group" -m "$mode" -- "$dir" || return 2
+        return 0
+    fi
+    chown -h -- "root:${group}" "$dir" || return 2
+    chmod -- "$mode" "$dir" || return 2
+}
+
+# _tn_data_layout_dir DIR -- make DIR the service user's data dir,
+# SERVICE_USER:SERVICE_GROUP 0700. Absent: created with install -d. Present: it
+# must be a real directory owned by the service user (its mode is set to 0700),
+# or an empty root-owned directory (a fresh mount point; lost+found allowed),
+# which is handed to the service user. Contents are never re-owned. rc 0, 1
+# refused, 2 failed.
+_tn_data_layout_dir() {
+    local dir="$1" rc=0 suid owner entries
+    while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
+    if [[ "$dir" != /* || "$dir" == / ]]; then
+        print_error "Refusing data dir '${dir}': not an absolute path."
+        return 1
+    fi
+    suid="$(id -u "${SERVICE_USER:-}" 2>/dev/null)" || suid=""
+    if [[ ! "$suid" =~ ^[0-9]+$ || "$suid" =~ ^0+$ ]]; then
+        print_error "Refusing data dir ${dir}: service user '${SERVICE_USER:-}' is unknown or root."
+        return 1
+    fi
+    _tn_parent_ready "$dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    if [[ -L "$dir" ]] || { [[ -e "$dir" ]] && [[ ! -d "$dir" ]]; }; then
+        print_error "Refusing data dir ${dir}: it is a symlink or not a directory."
+        return 1
+    fi
+    if [[ ! -d "$dir" ]]; then
+        install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 -- "$dir" || return 2
+        return 0
+    fi
+    owner="$(stat -c %u -- "$dir" 2>/dev/null)" || owner=""
+    if [[ "$owner" == "$suid" ]]; then
+        chmod -- 0700 "$dir" || return 2
+        return 0
+    fi
+    entries="$(ls -A -- "$dir" 2>/dev/null)" || entries="?"
+    if [[ "$owner" == 0 ]] && [[ -z "$entries" || "$entries" == "lost+found" ]]; then
+        chown -h -- "${SERVICE_USER}:${SERVICE_GROUP}" "$dir" || return 2
+        chmod -- 0700 "$dir" || return 2
+        return 0
+    fi
+    print_error "Refusing data dir ${dir}: it exists, is not empty and is owned by uid ${owner:-?}, not ${SERVICE_USER}."
+    return 1
+}
+
+# tn_precreate_log_files LOG_DIR [SERVICE] -- make LOG_DIR/<SERVICE>.log and
+# LOG_DIR/<SERVICE>-error.log (SERVICE defaults to SERVICE_NAME, then telcoin)
+# root:telcoin-log 0640 regular files with one link. An existing such file
+# keeps its content. A symlink, a file with other hard links or any other
+# non-regular entry at either path is reported on stderr and replaced by an
+# empty file (a directory there is refused). LOG_DIR must already pass
+# tn_root_dir_ok. rc 0, 1 refused, 2 failed.
+tn_precreate_log_files() {
+    local dir="${1:-}" svc="${2:-${SERVICE_NAME:-telcoin}}" f path links
+    if ! tn_root_dir_ok "$dir"; then
+        print_error "Refusing to create log files in ${dir}: not a root-owned, root-only-writable directory."
+        return 1
+    fi
+    for f in "${svc}.log" "${svc}-error.log"; do
+        path="${dir}/${f}"
+        if [[ -d "$path" && ! -L "$path" ]]; then
+            print_error "Refusing ${path}: it is a directory."
+            return 1
+        fi
+        if [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -f "$path" ]]; }; then
+            print_warn "Replacing ${path}: it was a symlink or not a regular file." >&2
+            rm -f -- "$path" || return 2
+        elif [[ -f "$path" ]]; then
+            links="$(stat -c %h -- "$path" 2>/dev/null)" || links=""
+            if [[ "$links" != 1 ]]; then
+                print_warn "Replacing ${path}: it had other hard links." >&2
+                rm -f -- "$path" || return 2
+            fi
+        fi
+        if [[ -f "$path" ]]; then
+            chown -h -- "root:${TN_LOG_GROUP}" "$path" || return 2
+            chmod -- 0640 "$path" || return 2
+        else
+            install -m 0640 -o root -g "$TN_LOG_GROUP" /dev/null "$path" || return 2
+        fi
+    done
+    return 0
+}
+
+# _tn_logrotate_text SIZE -- the node-log logrotate config, rotating at SIZE.
+# copytruncate: the node holds the file open (systemd appends to it), so the log
+# is copied and truncated in place rather than renamed.
+_tn_logrotate_text() {
+    cat <<EOF
+# Managed by tn-node-deployment (tn_install_logrotate). Node logs rotate when they reach 'size'.
+${DEFAULT_LOG_DIR}/*.log {
+    su root ${TN_LOG_GROUP}
+    size ${1}
+    maxsize 1G
+    rotate 5
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+}
+
+# tn_install_logrotate [SIZE] -- write the node-log rotation config
+# (TN_LOGROTATE_FILE, default /etc/logrotate.d/telcoin) root 0644 through
+# tn_write_root_file. Without SIZE an existing regular file is kept, so a size set
+# from the UI survives, and a missing one gets the 100M template. With SIZE
+# (^[0-9]+[KMG]$) the file is rewritten at that size. rc 0 written or kept; 1
+# refused (bad SIZE, group telcoin-log missing, or the write refused); 2 the
+# write failed.
+tn_install_logrotate() {
+    local size="${1:-}" dest="${TN_LOGROTATE_FILE:-/etc/logrotate.d/telcoin}" text
+    if [[ -n "$size" && ! "$size" =~ ^[0-9]+[KMG]$ ]]; then
+        print_warn "tn_install_logrotate: invalid size '${size}' (e.g. 100M, 1G)" >&2
+        return 1
+    fi
+    if ! getent group "$TN_LOG_GROUP" >/dev/null 2>&1; then
+        print_warn "tn_install_logrotate: group ${TN_LOG_GROUP} does not exist" >&2
+        return 1
+    fi
+    if [[ -z "$size" ]]; then
+        if [[ -f "$dest" && ! -L "$dest" ]]; then
+            return 0
+        fi
+        size="100M"
+    fi
+    text="$(_tn_logrotate_text "$size")" || return 2
+    tn_write_root_file "$dest" 0644 <<< "$text"
+}
+
+# _tn_root_binary_ok PATH -- rc 0 when PATH leads to a regular file owned by
+# root and not group- or other-writable, and every step on the way is root's:
+# PATH is resolved one component at a time, each directory entered must pass
+# tn_root_dir_ok, and each symlink met (file or directory, at most 16) must be
+# owned by root in a directory that passes tn_root_dir_ok; its target is then
+# followed in turn, readlink by readlink. ".." leaves a directory that was
+# already checked, so it is resolved by name. So root never runs a binary that
+# another account could have placed or redirected. On rc 0, TN_ROOT_BINARY_REAL
+# holds the file's resolved path: run that, not PATH.
+TN_ROOT_BINARY_REAL=""
+_tn_root_binary_ok() {
+    local p="${1:-}" cur=/ rest comp next link st n=0
+    TN_ROOT_BINARY_REAL=""
+    [[ "$p" == /* ]] || return 1
+    rest="${p#/}"
+    while [[ -n "$rest" ]]; do
+        if [[ "$rest" == */* ]]; then
+            comp="${rest%%/*}"
+            rest="${rest#*/}"
+        else
+            comp="$rest"
+            rest=""
+        fi
+        case "$comp" in
+            ""|.) continue ;;
+            ..)
+                cur="${cur%/*}"
+                [[ -n "$cur" ]] || cur=/
+                continue
+                ;;
+        esac
+        next="${cur%/}/${comp}"
+        if [[ -L "$next" ]]; then
+            n=$((n + 1))
+            [[ $n -le 16 ]] || return 1
+            tn_root_dir_ok "$cur" || return 1
+            # stat without -L reports the link itself.
+            st="$(stat -c '%u' -- "$next" 2>/dev/null)" || return 1
+            [[ "$st" == 0 ]] || return 1
+            link="$(readlink -- "$next" 2>/dev/null)" || return 1
+            [[ -n "$link" ]] || return 1
+            if [[ "$link" == /* ]]; then
+                cur=/
+                link="${link#/}"
+            fi
+            if [[ -n "$rest" ]]; then
+                rest="${link}/${rest}"
+            else
+                rest="$link"
+            fi
+            continue
+        fi
+        if [[ -n "$rest" ]]; then
+            [[ -d "$next" ]] || return 1
+            tn_root_dir_ok "$next" || return 1
+            cur="$next"
+            continue
+        fi
+        # The last component: the file itself.
+        tn_root_dir_ok "$cur" || return 1
+        [[ -f "$next" ]] || return 1
+        st="$(stat -c '%u %a' -- "$next" 2>/dev/null)" || return 1
+        [[ "${st%% *}" == 0 ]] || return 1
+        case "${st##* }" in
+            *[2367]?|*[2367]) return 1 ;;
+        esac
+        TN_ROOT_BINARY_REAL="$next"
+        return 0
+    done
+    return 1
+}
+
+# tn_service_user_can_run FILE -- rc 0 when the service account (SERVICE_USER) can
+# read and execute FILE. Asked as that account (tn_as_service_user) when it exists;
+# before setup creates it, from the permission bits: FILE other-readable and
+# other-executable, every directory above it other-searchable. rc 1 otherwise.
+tn_service_user_can_run() {
+    local f="${1:-}" d m
+    [[ "$f" == /* && -f "$f" ]] || return 1
+    if id -u "${SERVICE_USER:-}" >/dev/null 2>&1; then
+        tn_as_service_user test -r "$f" 2>/dev/null || return 1
+        tn_as_service_user test -x "$f" 2>/dev/null || return 1
+        return 0
+    fi
+    m="$(stat -c %a -- "$f" 2>/dev/null)" || return 1
+    [[ "$m" =~ ^[0-7]+$ ]] && (( (8#$m & 5) == 5 )) || return 1
+    d="${f%/*}"
+    while [[ -n "$d" ]]; do
+        m="$(stat -c %a -- "$d" 2>/dev/null)" || return 1
+        [[ "$m" =~ ^[0-7]+$ ]] && (( (8#$m & 1) == 1 )) || return 1
+        d="${d%/*}"
+    done
+    return 0
+}
+
+# _tn_own_scan TREE SUID -- print "<reason>: <path>" for every entry under TREE
+# (not TREE itself) that is a symlink, neither a regular file nor a directory, a
+# regular file with more than one hard link, or owned by neither root nor uid
+# SUID. Symlinks are never followed. rc 1 when anything was printed.
+_tn_own_scan() {
+    local tree="$1" suid="$2" p st found=0
+    [[ -d "$tree" ]] || return 0
+    while IFS= read -r -d '' p; do
+        if [[ -L "$p" ]]; then
+            printf 'symlink: %s\n' "$p"; found=1; continue
+        fi
+        if [[ ! -f "$p" && ! -d "$p" ]]; then
+            printf 'not a file or directory: %s\n' "$p"; found=1; continue
+        fi
+        st="$(stat -c '%u %h' -- "$p" 2>/dev/null)" || st="? ?"
+        if [[ "${st%% *}" != 0 && "${st%% *}" != "$suid" ]]; then
+            printf 'owned by uid %s: %s\n' "${st%% *}" "$p"; found=1; continue
+        fi
+        if [[ -f "$p" && "${st##* }" != 1 ]]; then
+            printf 'more than one hard link: %s\n' "$p"; found=1
+        fi
+    done < <(find -P "$tree" -mindepth 1 -print0 2>/dev/null)
+    return "$found"
+}
+
+# _tn_own_mode PATH CUR -- "<group> <mode>" for an entry being re-owned by
+# tn_migrate_ownership: the layout table for the files it names, else root and
+# CUR without group and other write. bls-tpm.* stays readable by the service
+# group, because the start script that unseals it runs as the service user.
+_tn_own_mode() {
+    local name="${1##*/}" cur="$2"
+    case "$name" in
+        .node-meta|.pending-update|bls-passphrase) printf 'root 0600\n' ;;
+        node.env|bootstrap-peers.yaml|telcoin-network.version) printf 'root 0644\n' ;;
+        telcoin-network|start-*.sh) printf 'root 0755\n' ;;
+        bls-tpm.pub|bls-tpm.priv) printf '%s 0640\n' "${SERVICE_GROUP:-root}" ;;
+        *) printf 'root %s\n' "$(_tn_strip_gw "$cur")" ;;
+    esac
+}
+
+# _tn_own_apply TREE -- re-own every entry under TREE root (chown -h) with the
+# mode from _tn_own_mode, parents before children. Each entry is checked again
+# right before it is changed, when its directory is already root-owned. Prints
+# "<reason>: <path>" and returns 1 for an entry that is now a symlink or not a
+# file or directory; 2 when chown or chmod failed.
+_tn_own_apply() {
+    local tree="$1" p cur gm rc=0
+    [[ -d "$tree" ]] || return 0
+    while IFS= read -r -d '' p; do
+        if [[ -L "$p" ]] || [[ ! -f "$p" && ! -d "$p" ]]; then
+            printf 'symlink or special file: %s\n' "$p"
+            rc=1
+            continue
+        fi
+        cur="$(stat -c '%a' -- "$p" 2>/dev/null)" || { rc=2; continue; }
+        if [[ -d "$p" ]]; then
+            gm="root $(_tn_strip_gw "$cur")"
+        else
+            gm="$(_tn_own_mode "$p" "$cur")"
+        fi
+        if ! chown -h -- "root:${gm%% *}" "$p" || ! chmod -- "${gm##* }" "$p"; then
+            rc=2
+        fi
+    done < <(find -P "$tree" -mindepth 1 -print0 2>/dev/null)
+    return "$rc"
+}
+
+# _tn_own_move_start PRE SVC METHOD FN -- move the start wrapper an older release
+# kept at <install>/start-<svc>.sh to tn_start_script_path METHOD (root 0755;
+# docker alike), point the unit's references at the new path,
+# reload systemd and remove the old file. Without a reload (no systemctl, or a
+# TN_ROOT_PREFIX fixture tree) the old file is removed only under a fixture tree.
+# rc 0 moved or nothing to move, 1 refused, 2 failed (the old file stays in use).
+_tn_own_move_start() {
+    local pre="$1" svc="$2" method="$3" fn="$4" old_real old new_real new unit body mode group rc=0
+    old_real="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
+    old="${pre}${old_real}"
+    [[ -f "$old" && ! -L "$old" ]] || return 0
+    # Both forms root 0755: neither holds a secret, and the UI reads the launch line.
+    mode=0755
+    group=root
+    if [[ "$method" == "docker" ]]; then
+        new_real="$(tn_start_script_path docker)" || return 1
+    else
+        new_real="$(tn_start_script_path source)" || return 1
+    fi
+    new="${pre}${new_real}"
+    _tn_root_layout_dir "${new%/*}" root 0755 || return $?
+    tn_write_root_file "$new" "$mode" "$group" < "$old" || return $?
+    unit="${pre}/etc/systemd/system/${svc}.service"
+    if [[ ! -f "$unit" || -L "$unit" ]] || ! grep -qF -- "$old_real" "$unit"; then
+        "$fn" warn "The unit ${unit} does not name ${old_real}; the new start script ${new_real} is in place but unused until the unit is rewritten." || true
+        return 0
+    fi
+    body="$(TN_OLD="$old_real" TN_NEW="$new_real" awk '
+        { out = ""; line = $0
+          while ((i = index(line, ENVIRON["TN_OLD"])) > 0) {
+              out = out substr(line, 1, i - 1) ENVIRON["TN_NEW"]
+              line = substr(line, i + length(ENVIRON["TN_OLD"]))
+          }
+          print out line }' "$unit")" || return 2
+    tn_write_root_file "$unit" 0644 <<< "$body" || return $?
+    if [[ -n "$pre" ]]; then
+        rm -f -- "$old"
+    elif command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload; then
+        rm -f -- "$old"
+    else
+        "$fn" warn "systemd was not reloaded; ${old_real} stays until the next daemon-reload." || true
+        rc=0
+    fi
+    "$fn" log "Start script moved to ${new_real}; the unit uses it from the next restart." || true
+    return "$rc"
+}
+
+# tn_migrate_ownership [progress-fn] -- move a host set up by an older release
+# (the service user owning the install, config and log trees) to the root-owned
+# layout. The caller holds the update lock. Never stops or restarts the node; a
+# moved start script takes effect at the caller's next restart.
+#   0. OWNERSHIP_LAYOUT=2 already in .node-meta (or no .node-meta): rc 0 at once.
+#      Mainnet: rc 3 and nothing changed (a mainnet host is installed fresh).
+#      Network not known (and not devnet): rc 1.
+#   1. The install and config dirs themselves become root:root 0755, so the
+#      service user can no longer add or rename entries in them.
+#   2. Both trees (and /usr/local/libexec/telcoin) are scanned: a symlink, a
+#      special file, a file with other hard links or an entry owned by neither
+#      root nor the service user stops the migration with the list on stderr,
+#      rc 1, nothing changed beyond step 1.
+#   3. Every entry becomes root-owned (chown -h, never recursive, parents first)
+#      with the layout table's mode (others keep theirs minus group and other
+#      write); bls-tpm.* root:SERVICE_GROUP 0640.
+#   4. The log dir becomes root:telcoin-log 0750, its two log files are made
+#      root:telcoin-log 0640, a symlink there replaced (tn_precreate_log_files).
+#   5. The start script moves to /usr/local/libexec/telcoin (_tn_own_move_start).
+#      A binary node whose JSON logs (--log.file.directory) went into the log dir
+#      gets them moved to NODE_LOG_DIR (tn_move_node_log_dir), and its start script
+#      and unit are re-rendered (tn_rerender_node_launch) and systemd reloaded, so
+#      the next start can reach that directory.
+#   6. OWNERSHIP_LAYOUT=2 is recorded, and a warning says the node binary was
+#      writable by the service user and should be reinstalled from a release.
+# progress-fn is called as `fn step|log|warn MESSAGE` (default: stderr). Paths
+# honour TN_ROOT_PREFIX. SERVICE_USER/SERVICE_GROUP default to .node-meta's
+# HOST_SERVICE_USER/HOST_SERVICE_GROUP. rc 0 done or already, 1 refused (list
+# printed), 2 a step failed (entries already re-owned stay root-owned), 3 mainnet.
+tn_migrate_ownership() {
+    local fn="${1:-}" pre="${TN_ROOT_PREFIX:-}" meta layout rc=0 net raw suid svc method
+    local inst etc logd libexec list d nl
+    nl=$'\n'
+    if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
+        fn="_tn_wait_say"
+    fi
+    meta="${pre}${DEFAULT_CONFIG_DIR}/.node-meta"
+    if [[ ! -e "$meta" && ! -L "$meta" ]]; then
+        "$fn" log "No ${meta}; no installed node layout to migrate." || true
+        return 0
+    fi
+    layout="$(meta_get OWNERSHIP_LAYOUT "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        "$fn" warn "OWNERSHIP_LAYOUT is set more than once in ${meta}; fix the file first." || true
+        return 1
+    fi
+    if [[ "$layout" == "2" ]]; then
+        return 0
+    fi
+    rc=0
+    net="$(tn_detect_network "$meta" 2>/dev/null)" || net=""
+    if [[ -z "$net" ]]; then
+        raw="$(meta_get NETWORK "$meta" 2>/dev/null)" || raw=""
+        [[ "$raw" == "devnet" ]] && net="devnet"
+    fi
+    if [[ "$net" == "mainnet" ]]; then
+        "$fn" warn "This mainnet host was set up with service-user-owned install and config directories. It is not migrated in place: install it fresh with this release." || true
+        return 3
+    fi
+    if [[ -z "$net" ]]; then
+        "$fn" warn "Cannot tell this node's network from ${meta}; not migrating the ownership layout." || true
+        return 1
+    fi
+    raw="$(meta_get HOST_SERVICE_USER "$meta" 2>/dev/null)" || raw=""
+    [[ -n "$raw" ]] && SERVICE_USER="$raw"
+    raw="$(meta_get HOST_SERVICE_GROUP "$meta" 2>/dev/null)" || raw=""
+    [[ -n "$raw" ]] && SERVICE_GROUP="$raw"
+    suid="$(id -u "${SERVICE_USER:-}" 2>/dev/null)" || suid=""
+    if [[ ! "$suid" =~ ^[0-9]+$ || "$suid" =~ ^0+$ ]]; then
+        "$fn" warn "The service user '${SERVICE_USER:-}' is unknown or root; not migrating." || true
+        return 1
+    fi
+    rc=0
+    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        "$fn" warn "INSTALL_METHOD is set more than once in ${meta}; fix the file first." || true
+        return 1
+    fi
+    svc="$(tn_resolve_service 2>/dev/null)" || svc="${SERVICE_NAME:-telcoin}"
+    inst="${pre}${DEFAULT_INSTALL_DIR}"
+    etc="${pre}${DEFAULT_CONFIG_DIR}"
+    logd="${pre}${DEFAULT_LOG_DIR}"
+    libexec="${pre}$(tn_start_script_path source)"
+    libexec="${libexec%/*}"
+
+    # The log dir (step 4) becomes root:telcoin-log: the group must exist before
+    # step 1, so a missing group that cannot be created changes nothing.
+    if [[ -e "$logd" || -L "$logd" ]] && ! _tn_log_group_ensure; then
+        "$fn" warn "The log-reader group ${TN_LOG_GROUP} is missing and could not be created (groupadd --system ${TN_LOG_GROUP}); nothing was changed." || true
+        return 1
+    fi
+    "$fn" step "Moving the install and config directories to root ownership..." || true
+    # Step 1: the two top directories only.
+    for d in "$inst" "$etc"; do
+        [[ -e "$d" || -L "$d" ]] || continue
+        rc=0
+        _tn_root_layout_dir "$d" root 0755 || rc=$?
+        [[ $rc -eq 0 ]] || return "$rc"
+    done
+    # Step 2: nothing is changed below the top directories if anything is off.
+    list="$(_tn_own_scan "$inst" "$suid"; _tn_own_scan "$etc" "$suid"; _tn_own_scan "$libexec" "$suid")"
+    if [[ -d "$libexec" ]] && ! tn_root_dir_ok "$libexec"; then
+        [[ -z "$list" ]] || list="${list}${nl}"
+        list="${list}not a root-owned directory: ${libexec}"
+    fi
+    if [[ -n "$list" ]]; then
+        "$fn" warn "Found entries that need a review before the ownership migration (nothing below the top directories was changed):" || true
+        printf '%s\n' "$list" >&2
+        return 1
+    fi
+    # Step 3.
+    for d in "$inst" "$etc"; do
+        rc=0
+        list="$(_tn_own_apply "$d")" || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            [[ -z "$list" ]] || printf '%s\n' "$list" >&2
+            "$fn" warn "Re-owning ${d} did not finish (rc ${rc}); entries already changed stay root-owned." || true
+            return "$rc"
+        fi
+    done
+    # Step 4: the log dir (P0-9) and its two files.
+    if [[ -e "$logd" || -L "$logd" ]]; then
+        rc=0
+        _tn_root_layout_dir "$logd" "$TN_LOG_GROUP" 0750 || rc=$?
+        [[ $rc -eq 0 ]] || return "$rc"
+        tn_precreate_log_files "$logd" "$svc" || return $?
+    fi
+    # Step 5.
+    rc=0
+    _tn_own_move_start "$pre" "$svc" "${method:-binary}" "$fn" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    rc=0
+    tn_move_node_log_dir "$fn" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        rc=0
+        tn_rerender_node_launch "" "$fn" || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            "$fn" warn "The unit was not rewritten for the node log dir ${NODE_LOG_DIR:-}; the node cannot write its JSON logs after its next restart until it is (run sudo ./update-node.sh or sudo ./edit-config.sh --migrate-credential)." || true
+        elif [[ -z "$pre" ]]; then
+            systemctl daemon-reload 9>&- || "$fn" warn "systemctl daemon-reload failed; run it before the next node restart." || true
+        fi
+    fi
+    rc=0
+    # Re-check: nothing under the trees may be left service-user-owned or linked.
+    list="$(_tn_own_scan "$inst" 0; _tn_own_scan "$etc" 0; _tn_own_scan "$libexec" 0)"
+    if [[ -n "$list" ]]; then
+        "$fn" warn "Entries appeared or changed during the migration; review them and run it again:" || true
+        printf '%s\n' "$list" >&2
+        return 1
+    fi
+    # Step 6.
+    rc=0
+    meta_set OWNERSHIP_LAYOUT 2 "$meta" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    "$fn" log "Install, config and log directories are root-owned (OWNERSHIP_LAYOUT=2)." || true
+    if [[ "${method:-binary}" != "docker" ]]; then
+        "$fn" warn "The node binary was writable by the service user before this migration. Reinstall it from a verified release to be sure it was not replaced." || true
+    fi
+    return 0
+}
+
+# tn_node_log_dir_prepare DIR [USER] -- create the node's JSON log dir DIR (an
+# existing one gets the same owner and mode) USER:telcoin-log 2750 with install
+# -d, never recursively. The setgid bit gives what the node writes there the
+# group telcoin-log; with the unit's UMask=0027 the log shipper (a telcoin-log
+# member) can read it. USER defaults to SERVICE_USER. rc 0 done; 1 refused (a
+# path that is not absolute, holds .., or is a symlink, a parent that fails
+# tn_root_dir_ok, no telcoin-log group); 2 install failed.
+tn_node_log_dir_prepare() {
+    local d="${1:-}" user="${2:-${SERVICE_USER:-}}"
+    [[ "$d" == /?* && "$d" != *..* && ! -L "$d" && -n "$user" ]] || return 1
+    tn_root_dir_ok "${d%/*}" || return 1
+    getent group "$TN_LOG_GROUP" >/dev/null 2>&1 || return 1
+    install -d -o "$user" -g "$TN_LOG_GROUP" -m 2750 -- "$d" || return 2
+}
+
+# tn_move_node_log_dir [progress-fn] -- a binary node whose launch line writes
+# its JSON logs (--log.file.directory) into the log dir or below it, other than
+# into NODE_LOG_DIR, cannot reach that path in the root-owned layout (the log dir
+# is root:telcoin-log 0750). Prepare NODE_LOG_DIR (.node-meta, default <log
+# dir>/node; tn_node_log_dir_prepare as HOST_SERVICE_USER or SERVICE_USER), point
+# the flag there, record the key and set the global NODE_LOG_DIR. Never restarts:
+# the caller re-renders the unit (its ReadWritePaths= and log group follow
+# NODE_LOG_DIR) and reloads systemd. rc 0 moved; 1 nothing to move (no binary
+# launch line, no such flag, already in place); 2 failed (said; the flag is
+# unchanged).
+tn_move_node_log_dir() {
+    local fn="${1:-}" line file cur want user logd rc=0
+    if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
+        fn="_tn_wait_say"
+    fi
+    line="$(tn_node_launch_target 2>/dev/null)" || return 1
+    file="${line##* }"
+    [[ "$(_tn_launch_awk runner "$file" 2>/dev/null)" == binary\ * ]] || return 1
+    cur="$(tn_launch_flag_get "$file" --log.file.directory 2>/dev/null)" || return 1
+    cur="${cur%/}"
+    logd="${DEFAULT_LOG_DIR%/}"
+    [[ "$cur" == "$logd" || "$cur" == "$logd"/* ]] || return 1
+    want="$(meta_get NODE_LOG_DIR 2>/dev/null || true)"
+    [[ -n "$want" ]] || want="${logd}/node"
+    want="${want%/}"
+    [[ "$cur" != "$want" ]] || return 1
+    user="$(meta_get HOST_SERVICE_USER 2>/dev/null || true)"
+    user="${user:-$SERVICE_USER}"
+    if ! tn_node_log_dir_prepare "${TN_ROOT_PREFIX:-}${want}" "$user"; then
+        "$fn" warn "Could not prepare the node log dir ${want}; the node's JSON logs stay pointed at ${cur}, which it cannot reach in the root-owned layout. Turn log shipping off and on again (setup-observability.sh) to fix it." || true
+        return 2
+    fi
+    tn_launch_flag_set "$file" --log.file.directory "$want" >/dev/null 2>&1 || rc=$?
+    if [[ $rc -gt 1 ]]; then
+        "$fn" warn "Could not point --log.file.directory at ${want} in ${file}; set it by hand." || true
+        return 2
+    fi
+    NODE_LOG_DIR="$want"
+    meta_set NODE_LOG_DIR "$want" >/dev/null 2>&1 \
+        || "$fn" warn "Could not record NODE_LOG_DIR=${want} in .node-meta." || true
+    "$fn" log "The node's JSON logs now go to ${want}." || true
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # INPUT VALIDATION HELPERS
 # -----------------------------------------------------------------------------
 
@@ -451,43 +1492,254 @@ validate_multiaddr() {
     return 1
 }
 
-# Public Artifact Registry for the testnet (-adiri) docker image.
-readonly GAR_IMAGE_BASE="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+# Image repositories. The release pipeline publishes every channel's images to
+# ghcr.io (TN_GHCR_IMAGE_REPO): the testnet and mainnet repository. The testnet
+# images of the releases made before signed releases, v0.16.0-adiri among them,
+# are in the Artifact Registry adiri repository (TN_TESTNET_LEGACY_IMAGE_REPO;
+# GAR_IMAGE_BASE is its older name, kept for the scripts and tests that read it).
+# The legacy repository is read only while the testnet channel has no release on
+# GitHub, and for images recorded from it.
+readonly TN_GHCR_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
+readonly TN_TESTNET_LEGACY_IMAGE_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+readonly GAR_IMAGE_BASE="$TN_TESTNET_LEGACY_IMAGE_REPO"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
-# Fallback only when the registry is unreachable.
-readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}:v0.16.0-adiri"
+# Fallback only while testnet has no signed release, or neither GitHub nor the
+# registry answers: v0.16.0-adiri by digest (the Docker-Content-Digest the legacy
+# registry served for that tag on 2026-10-15).
+readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"
+readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea"
 
-# Echo the latest published -adiri docker image ref (registry/path:tag) by
-# querying the public Artifact Registry tag list and picking the highest version
-# (sort -V). Mirrors the UI's latest_docker_image() so the CLI and GUI offer the
-# same default. Falls back to DEFAULT_DOCKER_IMAGE when the registry is
-# unreachable, so a node default is never the long-stale hardcoded tag.
+# The GitHub Releases API of telcoin-network: the source of each channel's newest release.
+readonly TN_RELEASES_API_URL="https://api.github.com/repos/Telcoin-Association/telcoin-network/releases?per_page=100"
+
+# latest_docker_image [NETWORK] -- the newest release image of NETWORK (default:
+# the NETWORK global, else testnet) by digest, <repo>@sha256:<hex>. The release
+# is the newest final the channel has on GitHub (tn_release_newest_tag), and its
+# image is the one its signed IMAGE_DIGEST names (tn_fetch_release_image), never
+# the registry's digest. When that release fails a check (a bad signature, a hash
+# that differs, a repository the scripts do not accept) nothing is offered: rc 1
+# on both networks, with the reason on stderr. When its signed files cannot be
+# downloaded or checked (not published yet, network, gpg or a key file missing),
+# testnet takes DEFAULT_DOCKER_IMAGE with a warning that gives the reason, and
+# mainnet gets rc 1. Never a tag, a release candidate, latest, hot-patch or
+# devnet tags.
+# Mirrors the UI's latest_docker_image. On testnet only, while the channel has no
+# release (or the Releases API cannot be read), the newest final tag of the
+# legacy repository (TN_TESTNET_LEGACY_IMAGE_REPO) by its registry digest, else
+# DEFAULT_DOCKER_IMAGE, each with a warning on stderr. Mainnet never falls back.
+# rc 1 and nothing on stdout for a network without a repository, or when nothing
+# can be resolved.
 latest_docker_image() {
-    local json best=""
-    json=$(curl -sf --max-time 10 "$GAR_TAGS_URL" 2>/dev/null || true)
-    if [[ -n "$json" ]]; then
-        best=$(printf '%s' "$json" \
-            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*' \
-            | grep -- '-adiri' \
-            | sort -V | tail -1 || true)
+    local net="${1:-${NETWORK:-testnet}}" repo tag best="" digest img why rc=0
+    tn_docker_repo_for "$net" >/dev/null || return 1
+    if tag="$(tn_release_newest_tag "$net")"; then
+        img="$(tn_fetch_release_image "$tag" "$net")" || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            printf '%s\n' "$img"
+            return 0
+        fi
+        if [[ $rc -ne 2 ]]; then
+            print_warn "Release ${tag} did not verify (see above); no image is offered until it does. A release whose files fail a check is never replaced by the registry's answer or by the pinned default." >&2
+            return 1
+        fi
+        why="its signed files could not be downloaded or checked (see above)"
+        if [[ "$net" != "testnet" ]]; then
+            print_warn "Release ${tag} gave no verified image digest: ${why}. A ${net} image is taken only from a signed release." >&2
+            return 1
+        fi
+        print_warn "Release ${tag} gave no verified image digest: ${why}. The registry is not asked for a published release; offering ${DEFAULT_DOCKER_TAG} (${DEFAULT_DOCKER_IMAGE}) instead (testnet only)." >&2
+        printf '%s\n' "$DEFAULT_DOCKER_IMAGE"
+        return 0
     fi
+    [[ "$net" == "testnet" ]] || return 1
+    repo="$TN_TESTNET_LEGACY_IMAGE_REPO"
+    best="$(tn_registry_tags "$repo" \
+        | while IFS= read -r tag; do if tn_release_tag_final "$net" "$tag"; then printf '%s\n' "$tag"; fi; done \
+        | tn_release_tags_sort | tail -n 1)" || best=""
     if [[ -n "$best" ]]; then
-        echo "${GAR_IMAGE_BASE}:${best}"
-    else
-        echo "$DEFAULT_DOCKER_IMAGE"
+        if digest="$(tn_registry_digest "$repo" "$best")"; then
+            print_warn "Taking ${repo}:${best}, the newest image of the legacy repository, by the digest the registry serves; no signed release confirms it (testnet only)." >&2
+            printf '%s@%s\n' "$repo" "$digest"
+            return 0
+        fi
+        print_warn "The registry lists ${repo}:${best} but gave no digest for it." >&2
     fi
+    print_warn "Could not read the newest image from ${repo}; offering ${DEFAULT_DOCKER_TAG} (${DEFAULT_DOCKER_IMAGE})." >&2
+    printf '%s\n' "$DEFAULT_DOCKER_IMAGE"
+    return 0
 }
 
-# Validate a Docker image reference (registry/path:tag).
-# Accepts the registries this suite uses plus generic host/name:tag forms.
-validate_docker_image() {
-    local img="$1"
-    [[ -n "$img" ]] || return 1
+# tn_release_newest_tag NETWORK -- print the newest final release tag NETWORK has
+# on GitHub, from the first 100 releases of TN_RELEASES_API_URL: drafts are
+# skipped; prereleases count on testnet (every Adiri release is one) and are
+# skipped on mainnet; the tag must pass tn_release_tag_final (no release
+# candidate), and the newest is the highest by tn_release_tag_key. rc 1 and
+# nothing on stdout when no release matches ("no ... release is published" on
+# stderr) or the API cannot be read ("cannot read" on stderr), and for a network
+# without releases.
+tn_release_newest_tag() {
+    local net="${1:-}" json best
+    case "$net" in
+        testnet|mainnet) ;;
+        *) return 1 ;;
+    esac
+    if ! json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 \
+        -H 'Accept: application/vnd.github+json' -A 'telcoin-node-scripts' \
+        --url "$TN_RELEASES_API_URL" 2>/dev/null)" || [[ "$json" != *"["* ]]; then
+        print_warn "Cannot read the telcoin-network releases from GitHub (${TN_RELEASES_API_URL%%\?*}), so the newest ${net} release is unknown." >&2
+        return 1
+    fi
+    # The three fields each release object has, in document order. A string value
+    # never matches here: its quotes are escaped inside JSON text.
+    best="$(printf '%s' "$json" \
+        | grep -oE '"(tag_name|draft|prerelease)"[[:space:]]*:[[:space:]]*("[^"\\]*"|true|false)' \
+        | awk -v net="$net" '
+            {
+                k = $0; sub(/^"/, "", k); sub(/".*/, "", k)
+                v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/"/, "", v)
+                f[k] = v; n++
+                if (n == 3) {
+                    if (f["draft"] == "false" && (net == "testnet" || f["prerelease"] == "false")) print f["tag_name"]
+                    n = 0; split("", f)
+                }
+            }' \
+        | while IFS= read -r t; do if tn_release_tag_final "$net" "$t"; then printf '%s\n' "$t"; fi; done \
+        | tn_release_tags_sort | tail -n 1)" || best=""
+    if [[ -z "$best" ]]; then
+        print_warn "No ${net} release is published on GitHub yet." >&2
+        return 1
+    fi
+    printf '%s\n' "$best"
+}
+
+# tn_docker_ref_ok IMAGE -- rc 0 when IMAGE has the shape of an image reference
+# (registry/path:tag or registry/path@sha256:digest): no whitespace, no leading -,
+# only letters, digits and . _ / : @ -. Shape only; which images may run is
+# tn_docker_image_allowed's call (validate_docker_image applies both).
+tn_docker_ref_ok() {
+    local img="${1:-}"
+    [[ -n "$img" && "$img" != -* ]] || return 1
     [[ "$img" =~ [[:space:]] ]] && return 1
-    # Require at least one ":" for tag and "/" for registry/repo separation.
     [[ "$img" == *:* ]] || return 1
     [[ "$img" =~ ^[A-Za-z0-9._/:@-]+$ ]] || return 1
     return 0
+}
+
+# validate_docker_image IMAGE [NETWORK] -- rc 0 when IMAGE has the shape of an
+# image reference and tn_docker_image_allowed accepts it for NETWORK: this
+# network's repository by digest, or by a release tag until digests are required.
+validate_docker_image() {
+    tn_docker_ref_ok "${1:-}" || return 1
+    tn_docker_image_allowed "${1:-}" "${2:-}"
+}
+
+# tn_passphrase_ok VALUE [NETWORK] -- rc 0 when VALUE can be a BLS key
+# passphrase: not empty, no CR or LF anywhere, and no whitespace at either end.
+# Whitespace here is the six ASCII characters space, tab, LF, VT, FF and CR
+# (the C locale's [[:space:]]); the node's stdin reader trims trailing
+# whitespace, so such a value would not round-trip. With NETWORK mainnet the
+# value must also be at least 16 bytes long: bytes, not characters (counted
+# with LC_ALL=C wc -c), so a multibyte character counts once per byte. Any
+# other NETWORK gets the base rules only. Prints nothing; the value stays in
+# builtins and never reaches a command line.
+tn_passphrase_ok() {
+    local v="${1-}" net="${2:-}" ws n
+    ws=$' \t\n\v\f\r'
+    [[ -n "$v" ]] || return 1
+    case "$v" in
+        *$'\n'*|*$'\r'*) return 1 ;;
+        ["$ws"]*|*["$ws"]) return 1 ;;
+    esac
+    if [[ "$net" == mainnet ]]; then
+        n="$(printf '%s' "$v" | LC_ALL=C wc -c)" || return 1
+        n="${n//[!0-9]/}"
+        [[ -n "$n" ]] || return 1
+        (( n >= 16 )) || return 1
+    fi
+    return 0
+}
+
+# tn_release_tag_ok NETWORK TAG -- rc 0 when TAG is a release tag of NETWORK:
+# testnet vX.Y.Z-adiri, or its release candidate vX.Y.Z-adiri-rcN (N from 1, no
+# leading zero); mainnet vX.Y.Z, finals only (X, Y and Z are 0 or digits that
+# do not start with 0, as the release pipeline's TAG_RE has them; nothing
+# before or after). Any other NETWORK, devnet included, is rc 1. The one place
+# that says which tags the source picker, the updater and the Docker tag filter
+# accept when a tag is named. A pick of the newest release takes finals only
+# (tn_release_tag_final), so a release candidate runs only when it is named.
+tn_release_tag_ok() {
+    local net="${1:-}" tag="${2:-}" n re
+    n='(0|[1-9][0-9]*)'
+    case "$net" in
+        testnet) re="^v${n}\.${n}\.${n}-adiri(-rc[1-9][0-9]*)?$" ;;
+        mainnet) re="^v${n}\.${n}\.${n}$" ;;
+        *) return 1 ;;
+    esac
+    [[ "$tag" =~ $re ]]
+}
+
+# tn_release_tag_final NETWORK TAG -- rc 0 when TAG passes tn_release_tag_ok and
+# is a final release, not a release candidate: what a newest-release pick may
+# offer (latest_docker_image, tn_release_newest_tag, the pickers, --check).
+tn_release_tag_final() {
+    tn_release_tag_ok "${1:-}" "${2:-}" || return 1
+    [[ "${2:-}" != *-rc[0-9]* ]]
+}
+
+# tn_release_tag_grammar -- the release tag forms, for messages.
+tn_release_tag_grammar() {
+    printf '%s\n' "testnet vX.Y.Z-adiri or the release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z; release candidates are testnet only"
+}
+
+# _tn_release_tag_key TAG -- set TN_RELEASE_TAG_KEY to TAG's sort key (see
+# tn_release_tag_key) without a subshell; rc 1 and an empty key otherwise.
+_tn_release_tag_key() {
+    local re x y z r
+    TN_RELEASE_TAG_KEY=""
+    re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?$'
+    [[ "${1:-}" =~ $re ]] || return 1
+    x=$((10#${BASH_REMATCH[1]}))
+    y=$((10#${BASH_REMATCH[2]}))
+    z=$((10#${BASH_REMATCH[3]}))
+    r="${BASH_REMATCH[6]}"
+    [[ -n "$r" ]] || r=999999999
+    printf -v TN_RELEASE_TAG_KEY '%09d %09d %09d %09d' "$x" "$y" "$z" "$r"
+}
+
+# tn_release_tag_key TAG -- print TAG's sort key "X Y Z R", each field nine
+# digits, zero-padded, so keys order the same as text (LC_ALL=C sort) and as
+# numbers: R is N for the release candidate -rcN and 999999999 for a final, so
+# rc1 < rc2 < the final of the same X.Y.Z < any rc of a higher X.Y.Z. TAG is
+# vX.Y.Z with an optional -adiri and an optional -rcN (the network is not
+# judged here: that is tn_release_tag_ok). rc 1 and nothing for anything else.
+tn_release_tag_key() {
+    _tn_release_tag_key "${1:-}" || return 1
+    printf '%s\n' "$TN_RELEASE_TAG_KEY"
+}
+
+# tn_release_tag_newer A B -- rc 0 when release tag A is newer than release tag
+# B by tn_release_tag_key (rc2 over rc1 and a final over its rc are newer; an rc
+# over its final is older). rc 1 when A is the same or older, 2 when either is
+# not a release tag form.
+tn_release_tag_newer() {
+    local a b
+    _tn_release_tag_key "${1:-}" || return 2
+    a="$TN_RELEASE_TAG_KEY"
+    _tn_release_tag_key "${2:-}" || return 2
+    b="$TN_RELEASE_TAG_KEY"
+    [[ "$a" != "$b" ]] || return 1
+    [[ "$(printf '%s\n%s\n' "$a" "$b" | LC_ALL=C sort | tail -n 1)" == "$a" ]]
+}
+
+# tn_release_tags_sort -- read release tags on stdin, one per line, and print
+# them oldest first by tn_release_tag_key, each once. Lines that are not a
+# release tag form are dropped.
+tn_release_tags_sort() {
+    local t
+    while IFS= read -r t; do
+        _tn_release_tag_key "$t" || continue
+        printf '%s %s\n' "$TN_RELEASE_TAG_KEY" "$t"
+    done | LC_ALL=C sort -u | awk '{ print $5 }'
 }
 
 # -----------------------------------------------------------------------------
@@ -702,20 +1954,20 @@ rpc_url_is_private() {
 #   rc 0  allowed: a release tag at or above the floor, or no floor for <network>
 #   rc 1  refused: an empty ref, or a version below the floor whatever its suffix
 #   rc 2  allowed with a warning: not a release tag (main, a commit, a digest, or
-#         a pre-release such as v0.13.0-rc1), so the version is unknown
-# A release tag is vX.Y.Z with no suffix or with the network's tag suffix
-# (-adiri on testnet). <network> is testnet (or adiri), mainnet or devnet;
-# devnet, and an empty or unknown network, have no floor.
+#         a pre-release such as v0.13.0-rc1 on mainnet), so the version is unknown
+# A release tag is one tn_release_tag_ok accepts for <network> (testnet
+# vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
+# devnet; devnet, and an empty or unknown network, have no floor.
 tn_ref_min_check() {
-    local ref="${1:-}" network="${2:-}" floor suffix tag ver rest tag_re
+    local ref="${1:-}" network="${2:-}" floor example tag ver tag_re
     if [[ -z "$ref" ]]; then
         printf '%s\n' "empty ref: no source ref or docker image was given."
         return 1
     fi
     case "$network" in
-        testnet|adiri) floor="$MIN_SOURCE_VERSION_TESTNET"; suffix="$NETWORK_TAG_SUFFIX_TESTNET" ;;
-        mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET"; suffix="$NETWORK_TAG_SUFFIX_MAINNET" ;;
-        *)             floor=""; suffix="" ;;
+        testnet|adiri) network=testnet; floor="$MIN_SOURCE_VERSION_TESTNET"; example="v${floor}-adiri" ;;
+        mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET"; example="v${floor}" ;;
+        *)             floor="" ;;
     esac
     [[ -n "$floor" ]] || return 0
     tag="$ref"
@@ -725,15 +1977,14 @@ tn_ref_min_check() {
     tag_re='^v?([0-9]+\.[0-9]+\.[0-9]+)(-[A-Za-z0-9][A-Za-z0-9.-]*)?$'
     if [[ "$tag" =~ $tag_re ]]; then
         ver="${BASH_REMATCH[1]}"
-        rest="${BASH_REMATCH[2]}"
         if ! version_gte "$ver" "$floor"; then
             printf '%s\n' "${ref} is older than v${floor}, the oldest ${network} release these scripts support (v${floor} is the first release that has all of keytool set-rpc, proof-of-possession signing and state export together). Pick v${floor} or a newer release."
             return 1
         fi
-        if [[ -z "$rest" || "$rest" == "$suffix" ]]; then
+        if tn_release_tag_ok "$network" "$tag"; then
             return 0
         fi
-        printf '%s\n' "${ref} is not a release tag (release tags look like v${floor}${suffix}), so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is a release at v${floor} or newer."
+        printf '%s\n' "${ref} is not a release tag (release tags look like ${example}), so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is a release at v${floor} or newer."
         return 2
     fi
     printf '%s\n' "${ref} is not a release tag, so it cannot be checked against the v${floor} minimum for ${network}. Make sure it is v${floor} or newer."
@@ -1090,6 +2341,20 @@ version_gte() {
     [[ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]
 }
 
+# tn_require_fns NAME... -- rc 0 when every NAME is a defined function; rc 1
+# otherwise, with the missing names on stdout (one line, space separated). The
+# scripts call it right after sourcing this file, behind their COMMON_VERSION
+# gate, with the helpers they call themselves.
+tn_require_fns() {
+    local fn missing=""
+    for fn in "$@"; do
+        declare -F "$fn" >/dev/null 2>&1 || missing="${missing} ${fn}"
+    done
+    [[ -z "$missing" ]] && return 0
+    printf '%s\n' "${missing# }"
+    return 1
+}
+
 check_rust() {
     print_step "Checking Rust installation..."
     if ! command_exists rustc; then
@@ -1217,47 +2482,77 @@ create_service_user() {
         print_ok "Created system group '${SERVICE_GROUP}'"
     fi
 
-    # Create user if it doesn't exist
-    # For Docker installs, force UID 1101 to match the container's nonroot user
+    # Create the user if it does not exist: a system account (UID below 1000)
+    # with no login shell, for every install method. A Docker install runs the
+    # container as this account's uid:gid (--user in the start script), so no
+    # fixed UID is needed.
     print_step "Creating service user: ${SERVICE_USER}..."
     if id "$SERVICE_USER" &>/dev/null; then
         print_ok "User '${SERVICE_USER}' already exists"
         usermod -aG "$SERVICE_GROUP" "$SERVICE_USER" 2>/dev/null || true
     else
-        if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-            useradd --uid "${DOCKER_UID:-1101}" --system --no-create-home --shell /bin/false \
-                    --gid "$SERVICE_GROUP" \
-                    --comment "Telcoin Network node service account" "$SERVICE_USER"
-            print_ok "Created system user '${SERVICE_USER}' (UID ${DOCKER_UID:-1101}) in group '${SERVICE_GROUP}'"
-        else
-            useradd --system --no-create-home --shell /bin/false \
-                    --gid "$SERVICE_GROUP" \
-                    --comment "Telcoin Network node service account" "$SERVICE_USER"
-            print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
-        fi
+        useradd --system --no-create-home --shell /bin/false \
+                --gid "$SERVICE_GROUP" \
+                --comment "Telcoin Network node service account" "$SERVICE_USER"
+        print_ok "Created system user '${SERVICE_USER}' in group '${SERVICE_GROUP}'"
     fi
-    # For TPM installs, add service user to tss group for TPM device access
-    if [[ "${PASSPHRASE_METHOD:-}" == "tpm" ]]; then
-        if getent group tss &>/dev/null; then
-            usermod -aG tss "$SERVICE_USER" 2>/dev/null || true
-            print_ok "Added '${SERVICE_USER}' to tss group (TPM device access)"
-        else
-            print_warn "tss group not found -- TPM device access may fail"
-        fi
+    # Log readers (the node's log files are root:telcoin-log 0640). The service
+    # user is not a member: systemd opens the log files and hands the node the
+    # descriptors.
+    if getent group "$TN_LOG_GROUP" &>/dev/null; then
+        print_ok "Group '${TN_LOG_GROUP}' already exists"
+    elif _tn_log_group_ensure; then
+        print_ok "Created system group '${TN_LOG_GROUP}' (log readers)"
+    else
+        print_error "Could not create the system group '${TN_LOG_GROUP}' (groupadd)."
+        return 1
     fi
 }
 
+# _tn_log_group_ensure -- the log-reader group TN_LOG_GROUP exists, or is created
+# now as a system group (groupadd --system). rc 1 when it cannot be created.
+_tn_log_group_ensure() {
+    getent group "$TN_LOG_GROUP" >/dev/null 2>&1 && return 0
+    groupadd --system "$TN_LOG_GROUP" >/dev/null 2>&1
+}
+
+# create_directories [INSTALL_DIR] [DATA_DIR] [LOG_DIR] [CONFIG_DIR] -- the
+# on-disk layout. Only the data dir belongs to the service user:
+#   INSTALL_DIR, CONFIG_DIR   root:root 0755
+#   LOG_DIR                   root:telcoin-log 0750, telcoin.log and
+#                             telcoin-error.log pre-created root:telcoin-log 0640
+#   DATA_DIR                  SERVICE_USER:SERVICE_GROUP 0700
+# A missing directory is created with `install -d`. An existing one is never
+# re-owned recursively: a root-owned one gets its own owner and mode set, a
+# symlink is refused, and an existing data dir must already belong to the
+# service user (or be an empty root-owned directory such as a fresh mount
+# point). rc 0 done; 1 refused (a message says which path and why; run
+# tn_migrate_ownership for a host laid out by an older release); 2 a command
+# failed.
 create_directories() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local data_dir="${2:-$DEFAULT_DATA_DIR}"
     local log_dir="${3:-$DEFAULT_LOG_DIR}"
     local config_dir="${4:-$DEFAULT_CONFIG_DIR}"
+    local dir rc
     print_step "Creating directory structure..."
-    for dir in "$install_dir" "$data_dir" "$log_dir" "$config_dir"; do
-        mkdir -p "$dir"
-        chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$dir"
-        print_ok "Created: ${dir}"
+    for dir in "$install_dir" "$config_dir"; do
+        rc=0
+        _tn_root_layout_dir "$dir" root 0755 || rc=$?
+        [[ $rc -eq 0 ]] || return "$rc"
+        print_ok "Directory: ${dir} (root:root 0755)"
     done
+    rc=0
+    _tn_root_layout_dir "$log_dir" "$TN_LOG_GROUP" 0750 || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    rc=0
+    tn_precreate_log_files "$log_dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    print_ok "Directory: ${log_dir} (root:${TN_LOG_GROUP} 0750)"
+    rc=0
+    _tn_data_layout_dir "$data_dir" || rc=$?
+    [[ $rc -eq 0 ]] || return "$rc"
+    print_ok "Directory: ${data_dir} (${SERVICE_USER}:${SERVICE_GROUP} 0700)"
 }
 
 # -----------------------------------------------------------------------------
@@ -1268,23 +2563,31 @@ create_directories() {
 # network-config. Mirrors telcoin-ui-helper's set-hostname so a name chosen at
 # setup time matches what the UI Config tab writes later. No-op when empty; a
 # bad name warns and is skipped (the operator can set it later in the dashboard).
-# Args: <data_dir> <name> [<owner_user:owner_group>]
+# The file is edited by the service user (tn_as_service_user), never by root,
+# because it lives in the service user's data dir. rc is the edit's own.
+# Args: <data_dir> <name> (a third argument, once the owner to chown to, is ignored)
 write_advertised_name() {
-    local data_dir="$1" name="$2" owner="${3:-}"
+    local data_dir="$1" name="$2"
     [[ -z "$name" ]] && return 0
     if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
         print_warn "Invalid advertised name '${name}' -- skipping (set it later in the dashboard)."
         return 0
     fi
     local nc="${data_dir}/network-config"
-    if [[ -f "$nc" ]] && grep -qE '^hostname:' "$nc"; then
-        sed -i -E "s#^hostname:.*#hostname: \"${name}\"#" "$nc"
-    elif [[ -f "$nc" ]]; then
-        printf 'hostname: "%s"\n' "$name" >> "$nc"
-    else
-        printf 'hostname: "%s"\n' "$name" > "$nc"
+    # The name passed the regex above, so it is safe inside the sed expression.
+    # shellcheck disable=SC2016
+    if ! tn_as_service_user sh -c '
+        nc="$1"; name="$2"
+        if [ -f "$nc" ] && grep -qE "^hostname:" "$nc"; then
+            sed -i -E "s#^hostname:.*#hostname: \"${name}\"#" "$nc"
+        elif [ -f "$nc" ]; then
+            printf "hostname: \"%s\"\n" "$name" >> "$nc"
+        else
+            printf "hostname: \"%s\"\n" "$name" > "$nc"
+        fi' sh "$nc" "$name"; then
+        print_warn "Could not write the advertised name into ${nc}."
+        return 1
     fi
-    [[ -n "$owner" ]] && chown "$owner" "$nc" 2>/dev/null || true
     print_ok "Advertised node name set: ${name}"
 }
 
@@ -1303,7 +2606,13 @@ write_source_version_marker() {
     fi
     [[ -z "$desc" ]] && desc="$fallback"
     [[ -z "$desc" ]] && return 0
-    printf '%s\n' "$desc" > "$marker" 2>/dev/null && chmod 0644 "$marker" 2>/dev/null || true
+    # Root-owned 0644 through a temp file and a rename. A refusal (the install
+    # dir not yet root-owned) only costs the UI its version label, so warn and
+    # go on rather than fail the install or apply that called this.
+    if ! tn_write_root_file "$marker" 0644 <<< "$desc"; then
+        print_warn "Could not record the installed version in ${marker}." >&2
+    fi
+    return 0
 }
 
 select_network() {
@@ -1347,9 +2656,9 @@ select_install_method() {
     print_header "Binary Installation Method"
     echo "  How would you like to obtain the telcoin binary?"
     echo ""
-    echo "  1) Build from source  -- compiles from GitHub (~30 min, needs Rust)"
-    echo "  2) Pre-built binary   -- downloads a release binary (coming soon)"
-    echo "  3) Docker             -- pulls official image from Google Artifact Registry"
+    echo "  1) Build from source  -- builds a signed release tag (~30 min, as the tn-build account)"
+    echo "  2) Signed release     -- downloads a release binary and checks its signature"
+    echo "  3) Docker             -- runs the network's release image, pinned by digest"
     echo "  4) I already have it  -- specify path to existing binary"
     echo ""
 
@@ -1358,13 +2667,68 @@ select_install_method() {
         read -r -p "  Enter choice [1/2/3/4]: " choice
         case "$choice" in
             1) INSTALL_METHOD="source";   break ;;
-            2) INSTALL_METHOD="binary";   break ;;
+            2) INSTALL_METHOD="release";  break ;;
             3) INSTALL_METHOD="docker";   break ;;
             4) INSTALL_METHOD="existing"; break ;;
             *) print_warn "Please enter 1, 2, 3, or 4." ;;
         esac
     done
     print_ok "Install method: ${INSTALL_METHOD}"
+}
+
+# tn_cargo_features_for NETWORK -- print the cargo feature flags a source build
+# for NETWORK needs: "--features adiri" for testnet, nothing for mainnet (rc 0).
+# rc 1 and no output for anything else, devnet and an empty value included, so
+# a caller never falls into a default build.
+tn_cargo_features_for() {
+    case "${1:-}" in
+        testnet) printf '%s\n' "--features adiri" ;;
+        mainnet) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# tn_detect_network [META] -- print testnet or mainnet for this node.
+# NETWORK in META (default: node_meta_path) decides when the key is present:
+# testnet and mainnet print; any other value (devnet, empty, a typo) is rc 1; a
+# key listed more than once (meta_get rc 2) is rc 1 with no fallback. Without
+# the key, the chain id in <data-dir>/genesis/genesis.yaml decides: 487
+# mainnet, 2017 testnet, anything else or no readable genesis rc 1. The data
+# dir is META's DATA_DIR when that directory exists (honouring TN_ROOT_PREFIX),
+# else tn_resolve_data_dir; no caller global is read. Reads files only, builds
+# and runs nothing. A reason goes to stderr on rc 1.
+tn_detect_network() {
+    local meta="${1:-}" net rc dd id
+    if [[ -z "$meta" ]]; then
+        meta="$(node_meta_path 2>/dev/null)" || meta=""
+    fi
+    if [[ -n "$meta" ]]; then
+        rc=0
+        net="$(meta_get NETWORK "$meta")" || rc=$?
+        case "$rc" in
+            0)
+                case "$net" in
+                    testnet|mainnet) printf '%s\n' "$net"; return 0 ;;
+                esac
+                print_warn "tn_detect_network: NETWORK='${net}' in ${meta} is neither testnet nor mainnet" >&2
+                return 1
+                ;;
+            1) ;;
+            *) return 1 ;;
+        esac
+    fi
+    dd=""
+    if [[ -n "$meta" ]]; then
+        dd="$(_tn_meta_data_dir "$meta")" || dd=""
+    fi
+    [[ -n "$dd" ]] || dd="$(tn_resolve_data_dir)"
+    id="$(tn_genesis_chain_id "${dd}/genesis/genesis.yaml")" || id=""
+    case "$id" in
+        "$MAINNET_CHAIN_ID") printf 'mainnet\n'; return 0 ;;
+        "$TESTNET_CHAIN_ID") printf 'testnet\n'; return 0 ;;
+    esac
+    print_warn "tn_detect_network: no NETWORK in .node-meta, and the chain id of ${dd}/genesis/genesis.yaml (${id:-unreadable}) is neither ${MAINNET_CHAIN_ID} nor ${TESTNET_CHAIN_ID}" >&2
+    return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -1381,102 +2745,107 @@ select_install_method() {
 # update-node.sh (which never synced submodules) died in cargo with a missing-
 # file error. `submodule sync` first, so URL changes in .gitmodules are honored
 # before fetching; then `update --init --recursive --force` to pin content to
-# the superproject's recorded shas. Returns non-zero when the update fails
-# (e.g. submodule remote unreachable); callers decide hard-fail vs warn.
-# No-op (returns 0) when the directory is not a git checkout.
+# the superproject's recorded shas. Submodules are fetched over https only
+# (GIT_ALLOW_PROTOCOL), and afterwards every submodule must sit at the commit
+# the superproject records (no +, - or U in `git submodule status`). Returns
+# non-zero when the update fails (e.g. submodule remote unreachable) or a
+# submodule is elsewhere; callers decide hard-fail vs warn. No-op (returns 0)
+# when the directory is not a git checkout.
 tn_sync_submodules() {
-    local repo_dir="$1"
+    local repo_dir="$1" st
     [[ -d "${repo_dir}/.git" ]] || return 0
-    git -C "$repo_dir" submodule sync --recursive 2>/dev/null || true
-    git -C "$repo_dir" submodule update --init --recursive --force
+    GIT_ALLOW_PROTOCOL=https git -C "$repo_dir" submodule sync --recursive >/dev/null 2>&1 || true
+    GIT_ALLOW_PROTOCOL=https git -C "$repo_dir" submodule update --init --recursive --force || return 1
+    st="$(git -C "$repo_dir" submodule status --recursive 2>/dev/null)" || return 1
+    if printf '%s\n' "$st" | grep -q '^[-+U]'; then
+        print_warn "A submodule of ${repo_dir} is not at the commit the checkout records." >&2
+        return 1
+    fi
+    return 0
 }
 
+# ensure_chain_configs_available [NETWORK] -- make the telcoin-network checkout
+# (TN_SOURCE_DIR) that holds the chain configs available: clone it (with the
+# operator's consent) when it is missing; on testnet and devnet pull it
+# (--ff-only), never on mainnet, whose files come only as published. Then the
+# directory setup will copy from (TN_GENESIS_DIR when set, else the checkout's
+# chain-configs/<network>) is compared with the network's pins
+# (tn_chain_configs_check) before anything is copied. NETWORK defaults to the
+# NETWORK global; TN_ROOT_PREFIX is honoured for the checkout. rc 0 ready (or
+# skipped by the operator: setup asks for the files later), 1 refused: the files
+# do not match their pins or the network has none. Exits 1 when the clone fails.
 ensure_chain_configs_available() {
-    print_step "Ensuring chain-config files are available..."
+    local net="${1:-${NETWORK:-}}" source_dir="${TN_ROOT_PREFIX:-}${TN_SOURCE_DIR}" dir
 
-    local source_dir="$TN_SOURCE_DIR"
+    print_step "Ensuring chain-config files are available..."
+    case "$net" in
+        testnet|mainnet|devnet) ;;
+        *)
+            print_error "no chain configs for network '${net}' (expected testnet, mainnet or devnet)."
+            return 1
+            ;;
+    esac
 
     if [[ -d "${source_dir}/.git" ]]; then
-        print_info "Repository already present -- pulling latest..."
-        git -C "$source_dir" pull --ff-only 2>/dev/null && \
-            print_ok "Repository up to date" || \
-            print_warn "Could not pull latest. Using existing files."
-        # Warn-only: chain configs are plain files in the superproject, so a
-        # submodule failure must not block them; it only matters for builds.
-        tn_sync_submodules "$source_dir" || \
-            print_warn "submodule sync reported an issue -- chain configs are unaffected"
-        return 0
-    fi
-
-    echo ""
-    print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
-    print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
-    print_info "Repository: ${TN_REPO}"
-    print_info "Clone destination: ${source_dir}"
-    echo ""
-
-    if confirm "Clone the repository now to get the chain-config files?"; then
-        print_step "Cloning repository..."
-        if git clone --recurse-submodules "$TN_REPO" "$source_dir"; then
-            print_ok "Repository cloned to: ${source_dir}"
+        if [[ "$net" == "mainnet" ]]; then
+            print_info "Repository present; mainnet chain configs are used as published (no pull)."
         else
-            print_error "Clone failed. Check your internet connection."
-            print_info "Manual clone: git clone ${TN_REPO} ${source_dir}"
-            exit 1
+            print_info "Repository already present -- pulling latest..."
+            git -C "$source_dir" pull --ff-only 2>/dev/null && \
+                print_ok "Repository up to date" || \
+                print_warn "Could not pull latest. Using existing files."
+            # Warn-only: chain configs are plain files in the superproject, so a
+            # submodule failure must not block them; it only matters for builds.
+            tn_sync_submodules "$source_dir" || \
+                print_warn "submodule sync reported an issue -- chain configs are unaffected"
         fi
-    else
-        print_warn "Skipped. You will need to provide chain-config files manually in the next step."
+    elif [[ -z "${TN_GENESIS_DIR:-}" ]]; then
+        echo ""
+        print_info "The chain-config YAML files (genesis.yaml, committee.yaml, parameters.yaml)"
+        print_info "are required to run a node. They live in the Telcoin Network GitHub repo."
+        print_info "Repository: ${TN_REPO}"
+        print_info "Clone destination: ${source_dir}"
+        echo ""
+
+        if confirm "Clone the repository now to get the chain-config files?"; then
+            print_step "Cloning repository..."
+            if git clone --recurse-submodules "$TN_REPO" "$source_dir"; then
+                print_ok "Repository cloned to: ${source_dir}"
+            else
+                print_error "Clone failed. Check your internet connection."
+                print_info "Manual clone: git clone ${TN_REPO} ${source_dir}"
+                exit 1
+            fi
+        else
+            print_warn "Skipped. You will need to provide chain-config files manually in the next step."
+            return 0
+        fi
     fi
+
+    dir="${TN_GENESIS_DIR:-${source_dir}/chain-configs/${net}}"
+    if ! tn_chain_configs_check "$dir" "$net"; then
+        print_error "The chain configs in ${dir} do not match the ${net} pins (see above); nothing was copied."
+        return 1
+    fi
+    [[ "$net" == "devnet" ]] || print_ok "Chain configs in ${dir} match the ${net} pins"
+    return 0
 }
 
 # -----------------------------------------------------------------------------
 # SYSTEMD SERVICE
 # -----------------------------------------------------------------------------
 
-write_systemd_service() {
-    local service_name="$1"
-    local description="$2"
-    local exec_start="$3"
-    local data_dir="${4:-$DEFAULT_DATA_DIR}"
-    local log_dir="${5:-$DEFAULT_LOG_DIR}"
-
-    local service_file="/etc/systemd/system/${service_name}.service"
-    print_step "Writing systemd service: ${service_file}"
-
-    cat > "$service_file" <<EOF
-[Unit]
-Description=${description}
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_GROUP}
-ExecStart=${exec_start}
-Restart=on-failure
-RestartSec=10
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ReadWritePaths=${data_dir} ${log_dir}
-LimitNOFILE=65536
-StandardOutput=append:${log_dir}/${service_name}.log
-StandardError=append:${log_dir}/${service_name}-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    print_ok "Service file written: ${service_file}"
-    print_info "Start:        systemctl start ${service_name}"
-    print_info "Enable boot:  systemctl enable ${service_name}"
-    print_info "View logs:    journalctl -u ${service_name} -f"
+# tn_start_script_path METHOD -- print the root-owned start script the node unit
+# runs for an install METHOD: /usr/local/libexec/telcoin/tn-start for source and
+# release installs, /usr/local/libexec/telcoin/tn-start-docker for docker. rc 1
+# and no output for any other method.
+tn_start_script_path() {
+    case "${1:-}" in
+        source|release) printf '%s\n' "/usr/local/libexec/telcoin/tn-start" ;;
+        docker)         printf '%s\n' "/usr/local/libexec/telcoin/tn-start-docker" ;;
+        *) return 1 ;;
+    esac
 }
-
 
 # Detect the internal/private IP of this machine.
 # On cloud/data centre servers this is the VM's internal NIC address (e.g. 10.x.x.x)
@@ -1576,6 +2945,952 @@ select_listener_ip() {
     fi
 
     print_ok "Listener IP: ${LISTENER_IP}"
+}
+
+# -----------------------------------------------------------------------------
+# CORE-2: SERVICE USER, NODE ENV, START SCRIPT, UNIT
+# -----------------------------------------------------------------------------
+#
+# One writer for each file that starts the node, shared by setup-node,
+# update-node, edit-config and migrate-node-naming:
+#   tn_write_node_env      <config dir>/node.env (listener addresses, root 0644)
+#   tn_write_start_script  /usr/local/libexec/telcoin/tn-start[-docker] (root 0755)
+#   tn_write_node_unit     /etc/systemd/system/<service>.service (root 0644)
+# Each renders its text with a _tn_*_text function (pure: the fixture tests call
+# it without root) and writes it through tn_write_root_file. Written paths honour
+# TN_ROOT_PREFIX; the text always names the real paths. A global the caller leaves
+# unset comes from .node-meta (_tn_gen_value), and a key set there twice refuses.
+# The BLS passphrase is never in any of these files: the unit loads it as a
+# systemd credential and the start script hands that file to the node on stdin
+# (--bls-passphrase-source stdin), so it is never on a command line or in an
+# environment. None of the writers reloads systemd or restarts the node.
+
+# MemoryDenyWriteExecute= and SystemCallFilter= in the unit of a binary install:
+# 1 (default) emits them with SystemCallErrorNumber=EPERM; audit emits them
+# without it, so a denied call stops the node and the kernel audit log names the
+# syscall (the soak setting); 0 leaves all of them out.
+TN_UNIT_STRICT_SANDBOX="${TN_UNIT_STRICT_SANDBOX:-1}"
+
+# _tn_gen_value NAME KEY [DEFAULT] -- print the global NAME when it is set and not
+# empty, else KEY from .node-meta, else DEFAULT. rc 1 and nothing printed when
+# KEY is set more than once in .node-meta.
+_tn_gen_value() {
+    local name="$1" key="$2" def="${3:-}" v="" rc=0
+    v="${!name:-}"
+    if [[ -z "$v" ]]; then
+        v="$(meta_get "$key" 2>/dev/null)" || rc=$?
+        if [[ $rc -eq 2 ]]; then
+            print_warn "${key} is set more than once in .node-meta; remove the extra lines first" >&2
+            return 1
+        fi
+    fi
+    printf '%s\n' "${v:-$def}"
+}
+
+# _tn_gen_meta_first KEY NAME -- KEY from .node-meta when it is there, else the
+# global NAME (may print an empty line). rc 1 when KEY is set more than once.
+_tn_gen_meta_first() {
+    local key="$1" name="$2" v="" rc=0
+    v="$(meta_get "$key" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "${key} is set more than once in .node-meta; remove the extra lines first" >&2
+        return 1
+    fi
+    printf '%s\n' "${v:-${!name:-}}"
+}
+
+# _tn_safe_path PATH -- rc 0 for an absolute path made of letters, digits and
+# . _ / + - with no empty, . or .. component (it lands unquoted in the unit and
+# the start script).
+_tn_safe_path() {
+    local p="${1:-}" re='^/[A-Za-z0-9._/+-]+$'
+    [[ "$p" =~ $re ]] || return 1
+    case "${p}/" in
+        *//*|*/./*|*/../*) return 1 ;;
+    esac
+    return 0
+}
+
+# _tn_launch_form METHOD -- binary for source, release, binary and existing
+# installs, docker for docker; rc 1 otherwise.
+_tn_launch_form() {
+    case "${1:-}" in
+        source|release|binary|existing) printf 'binary\n' ;;
+        docker) printf 'docker\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _tn_gen_settings METHOD -- resolve what the three renderers need into TN_G_*
+# globals: FORM, SVC, USER, GROUP, DATA, LOGDIR, NODELOG, CONF, PASS (passphrase
+# method), LOGT (journal|file), NET, CHAIN, SCRIPT (start script path). rc 1
+# with a message on stderr when something is missing or unusable.
+_tn_gen_settings() {
+    local method="${1:-}" v
+    TN_G_FORM="$(_tn_launch_form "$method")" || {
+        print_warn "unknown install method '${method}' (expected source, release, binary, existing or docker)" >&2
+        return 1
+    }
+    TN_G_SVC="${SERVICE_NAME:-}"
+    if [[ -z "$TN_G_SVC" ]]; then
+        TN_G_SVC="$(tn_resolve_service 2>/dev/null || true)"
+    fi
+    TN_G_SVC="${TN_G_SVC:-telcoin}"
+    [[ "$TN_G_SVC" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || { print_warn "unusable service name '${TN_G_SVC}'" >&2; return 1; }
+    # The account comes from .node-meta first: the library presets SERVICE_USER
+    # and SERVICE_GROUP to telcoin, so a global says nothing about this host.
+    TN_G_USER="$(_tn_gen_meta_first HOST_SERVICE_USER SERVICE_USER)" || return 1
+    TN_G_GROUP="$(_tn_gen_meta_first HOST_SERVICE_GROUP SERVICE_GROUP)" || return 1
+    TN_G_USER="${TN_G_USER:-telcoin}"
+    TN_G_GROUP="${TN_G_GROUP:-$TN_G_USER}"
+    case "$TN_G_USER:$TN_G_GROUP" in
+        root:*|*:root) print_warn "the node never runs as root (service account ${TN_G_USER}:${TN_G_GROUP})" >&2; return 1 ;;
+    esac
+    [[ "$TN_G_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$TN_G_GROUP" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || {
+        print_warn "unusable service account '${TN_G_USER}:${TN_G_GROUP}'" >&2; return 1; }
+    TN_G_DATA="$(_tn_gen_value DATA_DIR DATA_DIR "$DEFAULT_DATA_DIR")" || return 1
+    TN_G_LOGDIR="${LOG_DIR:-$DEFAULT_LOG_DIR}"
+    TN_G_CONF="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    TN_G_NODELOG="$(_tn_gen_value NODE_LOG_DIR NODE_LOG_DIR "")" || return 1
+    for v in "$TN_G_DATA" "$TN_G_LOGDIR" "$TN_G_CONF" ${TN_G_NODELOG:+"$TN_G_NODELOG"}; do
+        _tn_safe_path "$v" || { print_warn "unusable path '${v}' (absolute; letters, digits and . _ / + - only)" >&2; return 1; }
+    done
+    # ProtectHome=yes hides these trees from the node.
+    case "${TN_G_DATA}/" in
+        /home/*|/root/*|/run/user/*) print_warn "the data dir ${TN_G_DATA} is under /home, /root or /run/user, which the node unit hides" >&2; return 1 ;;
+    esac
+    TN_G_PASS="$(_tn_gen_value PASSPHRASE_METHOD PASSPHRASE_METHOD stdin)" || return 1
+    # loadcredential is the name older releases recorded for the stdin delivery.
+    case "$TN_G_PASS" in
+        stdin|credential) ;;
+        loadcredential) TN_G_PASS=stdin ;;
+        tpm) print_warn "the passphrase is sealed to the TPM, which these scripts no longer use; move it to an encrypted credential first: sudo ./edit-config.sh --migrate-credential" >&2; return 1 ;;
+        *) print_warn "unknown passphrase method '${TN_G_PASS}' (expected credential or stdin)" >&2; return 1 ;;
+    esac
+    TN_G_NET="$(_tn_gen_value NETWORK NETWORK "")" || return 1
+    TN_G_LOGT="$(_tn_gen_value LOG_TARGET LOG_TARGET "")" || return 1
+    if [[ -z "$TN_G_LOGT" ]]; then
+        TN_G_LOGT="file"
+        [[ "$TN_G_NET" == "mainnet" ]] && TN_G_LOGT=journal
+    fi
+    case "$TN_G_LOGT" in
+        journal|file) ;;
+        *) print_warn "unknown log target '${TN_G_LOGT}' (expected journal or file)" >&2; return 1 ;;
+    esac
+    case "$TN_G_NET" in
+        testnet) TN_G_CHAIN="$TESTNET_CHAIN_NAME" ;;
+        mainnet) TN_G_CHAIN="$MAINNET_CHAIN_NAME" ;;
+        devnet)  TN_G_CHAIN="$DEVNET_CHAIN_NAME" ;;
+        *)       TN_G_CHAIN="${CHAIN_NAME:-node}" ;;
+    esac
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        TN_G_SCRIPT="$(tn_start_script_path docker)"
+    else
+        TN_G_SCRIPT="$(tn_start_script_path source)"
+    fi
+    return 0
+}
+
+# _tn_node_args_ok ARGS -- rc 0 when ARGS, the words after `node` on the launch
+# line, are plain words: flags (-v..., --name, --name=value) and values made of
+# letters, digits and . _ , : / @ + = -, plus the one quoted form the scripts use
+# for the bootstrap peers map: --bootstrap-peers "$(cat <config dir>/bootstrap-peers.yaml)"
+# (CONFIG_DIR, default /etc/telcoin), accepted after that flag and for that file
+# only. ARGS must hold --http and never --bls-passphrase-source (the start script
+# sets it), --observer or --validator.
+_tn_node_args_ok() {
+    local args="${1:-}" w prev="" http=0 IFS=' '
+    local re_cs='^[A-Za-z0-9._,:/@+= "$()-]*$' re_word='^[A-Za-z0-9._,:/@+=-]+$'
+    local re_v='^-v+$' peers="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bootstrap-peers.yaml"
+    [[ "$args" =~ $re_cs ]] || return 1
+    for w in $args; do
+        if [[ "$prev" == '"$(cat' ]]; then
+            [[ "$w" == "${peers})\"" ]] || return 1
+            prev="$w"
+            continue
+        fi
+        case "$w" in
+            '"$(cat')
+                [[ "$prev" == "--bootstrap-peers" ]] || return 1
+                prev="$w"
+                continue
+                ;;
+            --http) http=1 ;;
+            --bls-passphrase-source|--bls-passphrase-source=*|--observer|--observer=*|--validator|--validator=*) return 1 ;;
+        esac
+        [[ "$w" =~ $re_word ]] || return 1
+        if [[ "$w" == -* ]]; then
+            [[ "$w" =~ $re_v ]] || _tn_launch_flag_ok "${w%%=*}" || return 1
+        fi
+        prev="$w"
+    done
+    [[ "$prev" != '"$(cat' && $http -eq 1 ]]
+}
+
+# _tn_docker_ids -- print uid:gid for the container's --user: the service
+# account's ids (TN_DOCKER_IDS overrides, for fixture tests). rc 1 when either is
+# missing or 0.
+_tn_docker_ids() {
+    local u g re='^[1-9][0-9]*:[1-9][0-9]*$' ids
+    if [[ -n "${TN_DOCKER_IDS:-}" ]]; then
+        ids="$TN_DOCKER_IDS"
+    else
+        u="$(id -u "$TN_G_USER" 2>/dev/null || true)"
+        g="$(getent group "$TN_G_GROUP" 2>/dev/null | cut -d: -f3)"
+        ids="${u}:${g}"
+    fi
+    [[ "$ids" =~ $re ]] || return 1
+    printf '%s\n' "$ids"
+}
+
+# _tn_docker_memory -- the container memory cap for --memory: TN_DOCKER_MEMORY
+# when it is set (1 to 9 digits with an optional unit b, k, m or g in either
+# case, printed in lower case; at least 6m, docker's floor), else 90% of the
+# host's RAM in MiB (MemTotal from TN_MEMINFO, a fixture override, default
+# /proc/meminfo). rc 1 with a message for a TN_DOCKER_MEMORY docker cannot use.
+# When the host's RAM cannot be read or is under 1 GiB it prints nothing (no
+# cap is written) and warns on stderr.
+_tn_docker_memory() {
+    local kb v n u bytes
+    if [[ -n "${TN_DOCKER_MEMORY:-}" ]]; then
+        v="$(printf '%s' "$TN_DOCKER_MEMORY" | tr 'BKMG' 'bkmg')"
+        if [[ ! "$v" =~ ^([1-9][0-9]{0,8})([bkmg]?)$ ]]; then
+            print_warn "TN_DOCKER_MEMORY=${TN_DOCKER_MEMORY} is not a memory size such as 8g or 8192m (digits and one of b, k, m, g)" >&2
+            return 1
+        fi
+        n="${BASH_REMATCH[1]}"
+        u="${BASH_REMATCH[2]}"
+        case "$u" in
+            k) bytes=$(( n * 1024 )) ;;
+            m) bytes=$(( n * 1048576 )) ;;
+            g) bytes=$(( n * 1073741824 )) ;;
+            *) bytes="$n" ;;
+        esac
+        if (( bytes < 6291456 )); then
+            print_warn "TN_DOCKER_MEMORY=${TN_DOCKER_MEMORY} is below docker's 6m floor for --memory" >&2
+            return 1
+        fi
+        printf '%s\n' "$v"
+        return 0
+    fi
+    kb="$(awk '$1 == "MemTotal:" { print $2; exit }' "${TN_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)"
+    if [[ ! "$kb" =~ ^[0-9]{1,15}$ ]] || (( kb < 1048576 )); then
+        print_warn "no container memory cap written: the host's memory is under 1 GiB or could not be read; set TN_DOCKER_MEMORY (such as 768m) to cap it" >&2
+        return 0
+    fi
+    printf '%sm\n' "$(( kb * 9 / 10 / 1024 ))"
+}
+
+# _tn_docker_bin -- the absolute path of the docker client (/usr/bin/docker
+# when it is not on PATH).
+_tn_docker_bin() {
+    local d
+    d="$(command -v docker 2>/dev/null || true)"
+    _tn_safe_path "$d" || d=/usr/bin/docker
+    printf '%s\n' "$d"
+}
+
+# _tn_node_env_text PRIMARY WORKER [RPC_ADDR] -- node.env: the two listener
+# multiaddrs (both required; validate_multiaddr) and the RPC bind address
+# (default 127.0.0.1). rc 1 with a message on stderr otherwise.
+_tn_node_env_text() {
+    local p="${1:-}" w="${2:-}" a="${3:-127.0.0.1}"
+    if [[ -z "$p" || -z "$w" ]]; then
+        print_warn "node.env needs both listener addresses (primary and worker); one is empty" >&2
+        return 1
+    fi
+    validate_multiaddr "$p" || { print_warn "not a listener multiaddr: ${p}" >&2; return 1; }
+    validate_multiaddr "$w" || { print_warn "not a listener multiaddr: ${w}" >&2; return 1; }
+    if ! { [[ "$a" == "0.0.0.0" || "$a" == "::" ]] || _tn_ipv4_strict "$a" || _tn_ipv6_strict "$a"; }; then
+        print_warn "not an IP address for the RPC bind: ${a}" >&2
+        return 1
+    fi
+    printf '%s\n' \
+        "# Node listener addresses, read by the node start script. Written by the" \
+        "# deployment scripts (tn_write_node_env); edit with edit-config.sh." \
+        "PRIMARY_LISTENER_MULTIADDR=${p}" \
+        "WORKER_LISTENER_MULTIADDR=${w}" \
+        "TN_RPC_ADDR=${a}"
+}
+
+# tn_write_node_env PRIMARY WORKER [RPC_ADDR] -- write <config dir>/node.env root
+# 0644 (CONFIG_DIR, default /etc/telcoin; TN_ROOT_PREFIX honoured). rc 0 written,
+# 1 refused (nothing changed), 2 write failed.
+tn_write_node_env() {
+    local text conf
+    text="$(_tn_node_env_text "${1:-}" "${2:-}" "${3:-}")" || return 1
+    conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    _tn_safe_path "$conf" || return 1
+    tn_write_root_file "${TN_ROOT_PREFIX:-}${conf}/node.env" 0644 <<< "$text"
+}
+
+# _tn_start_script_text METHOD RUNNER NODE_ARGS -- the start script for METHOD
+# (see _tn_gen_settings for the globals it reads). RUNNER is the node binary
+# (absolute path) or, for docker, the image, which must pass
+# tn_docker_image_allowed. NODE_ARGS must pass _tn_node_args_ok. The script reads
+# the three node.env keys (never sources the file), opens the credential as its
+# stdin and execs the node with --bls-passphrase-source stdin; the docker form
+# runs the container with -i and the hardening flags. Both passphrase methods
+# (credential, stdin) hand the node the same $CREDENTIALS_DIRECTORY file.
+_tn_start_script_text() {
+    local method="${1:-}" runner="${2:-}" args="${3:-}" ids mem dbin envf
+    _tn_gen_settings "$method" || return 1
+    if ! _tn_node_args_ok "$args"; then
+        print_warn "node arguments refused: they must be plain words with --http, and never --bls-passphrase-source, --observer or --validator" >&2
+        return 1
+    fi
+    envf="${TN_G_CONF}/node.env"
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        if [[ "$runner" == -* ]] || ! tn_docker_image_allowed "$runner" "$TN_G_NET"; then
+            print_warn "image refused: ${runner} (it must be this network's repository by digest or by a release tag)" >&2
+            return 1
+        fi
+        ids="$(_tn_docker_ids)" || { print_warn "no uid:gid for ${TN_G_USER}:${TN_G_GROUP} (the account must exist and not be root)" >&2; return 1; }
+        mem="$(_tn_docker_memory)" || return 1
+        dbin="$(_tn_docker_bin)"
+    else
+        _tn_safe_path "$runner" || { print_warn "node binary path refused: ${runner}" >&2; return 1; }
+    fi
+    cat <<EOS
+#!/bin/bash
+# Telcoin Network node start script. Written by the deployment scripts
+# (tn_write_start_script); a rewrite replaces any hand edit. The BLS passphrase
+# reaches the node on stdin: it is never in this file, on a command line or in
+# an environment.
+set -euo pipefail
+while IFS= read -r tn_line || [[ -n "\$tn_line" ]]; do
+    case "\$tn_line" in
+        PRIMARY_LISTENER_MULTIADDR=*|WORKER_LISTENER_MULTIADDR=*|TN_RPC_ADDR=*) export "\$tn_line" ;;
+    esac
+done < ${envf}
+: "\${PRIMARY_LISTENER_MULTIADDR:?missing from ${envf}}"
+: "\${WORKER_LISTENER_MULTIADDR:?missing from ${envf}}"
+exec < "\${CREDENTIALS_DIRECTORY:?not set: start the node with systemctl}/bls-passphrase"
+EOS
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        printf 'exec %s run -i --rm --name %s --user %s -e HOME=/home/nonroot -e PRIMARY_LISTENER_MULTIADDR -e WORKER_LISTENER_MULTIADDR --network=host --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --pids-limit 4096 %s--ulimit nofile=65536:65536 --ulimit core=0 --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 --stop-timeout 80 --pull=never -v %s:/home/nonroot %s telcoin node --bls-passphrase-source stdin %s\n' \
+            "$dbin" "$TN_G_SVC" "$ids" "${mem:+--memory ${mem} }" "$TN_G_DATA" "$runner" "$args"
+    else
+        printf 'exec %s node --bls-passphrase-source stdin %s\n' "$runner" "$args"
+    fi
+}
+
+# tn_write_start_script METHOD RUNNER NODE_ARGS -- write the start script
+# (tn_start_script_path) root:root 0755 through tn_write_root_file, after the
+# rendered text passes bash -n and the launch-file parser finds its node line
+# (so the flag editors can work on it). A binary RUNNER must be a root-owned file
+# in root-owned directories (_tn_root_binary_ok). Neither file holds a secret,
+# so both forms are world-readable (the UI reads the launch line). rc 0 written,
+# 1 refused (nothing changed), 2 write failed.
+tn_write_start_script() {
+    local method="${1:-}" runner="${2:-}" args="${3:-}" text dest
+    # Settings in this shell too: the text is rendered in a subshell.
+    _tn_gen_settings "$method" || return 1
+    text="$(_tn_start_script_checked "$method" "$runner" "$args")" || return 1
+    dest="${TN_ROOT_PREFIX:-}${TN_G_SCRIPT}"
+    _tn_root_layout_dir "${dest%/*}" root 0755 || return $?
+    tn_write_root_file "$dest" 0755 <<< "$text"
+}
+
+# _tn_start_script_checked METHOD RUNNER NODE_ARGS -- print the start script
+# text after every check tn_write_start_script makes: a binary RUNNER must pass
+# _tn_root_binary_ok, the text must pass bash -n and hold a node line the launch
+# editors can read. rc 1 refused (reported on stderr), nothing printed.
+_tn_start_script_checked() {
+    local method="${1:-}" runner="${2:-}" args="${3:-}" text rc=0
+    _tn_gen_settings "$method" || return 1
+    text="$(_tn_start_script_text "$method" "$runner" "$args")" || return 1
+    if [[ "$TN_G_FORM" == "binary" ]] && ! _tn_root_binary_ok "${TN_ROOT_PREFIX:-}${runner}"; then
+        print_warn "refusing ${runner}: the node binary must be a root-owned file, not group- or other-writable, in root-owned directories" >&2
+        return 1
+    fi
+    if ! printf '%s\n' "$text" | bash -n 2>/dev/null; then
+        print_warn "the rendered start script does not parse; nothing written" >&2
+        return 1
+    fi
+    printf '%s\n' "$text" | _tn_launch_awk target /dev/stdin "" "" "" "" 0 >/dev/null 2>&1 || rc=$?
+    if [[ $rc -ne 10 ]]; then
+        print_warn "the rendered start script has no node line the launch editors can read; nothing written" >&2
+        return 1
+    fi
+    printf '%s\n' "$text"
+}
+
+# _tn_node_unit_text METHOD -- the systemd unit for METHOD (globals as in
+# _tn_gen_settings). The binary form runs the start script as the service
+# account inside the sandbox below; the docker form runs it as root (the docker
+# client) and leaves the confinement to the container flags. The passphrase
+# method picks the credential line: LoadCredential= of <config dir>/bls-passphrase
+# (stdin), LoadCredentialEncrypted= of bls-passphrase.cred (credential). The log
+# target picks journal or append: to the two
+# pre-created files in the log dir (which the node never needs to write).
+# With NODE_LOG_DIR set (observability's JSON logs) the binary form joins the
+# log-reader group, which lets the node through the root:telcoin-log log dir
+# into its setgid node log dir; UMask=0027 then leaves the files it writes
+# there group-readable for the log shipper.
+_tn_node_unit_text() {
+    local method="${1:-}" cred="" out err rw dbin
+    _tn_gen_settings "$method" || return 1
+    case "$TN_G_PASS" in
+        stdin) cred="LoadCredential=bls-passphrase:${TN_G_CONF}/bls-passphrase" ;;
+        credential) cred="LoadCredentialEncrypted=bls-passphrase:${TN_G_CONF}/bls-passphrase.cred" ;;
+    esac
+    if [[ "$TN_G_LOGT" == "journal" ]]; then
+        out="journal"
+        err="journal"
+    else
+        out="append:${TN_G_LOGDIR}/${TN_G_SVC}.log"
+        err="append:${TN_G_LOGDIR}/${TN_G_SVC}-error.log"
+    fi
+    if [[ "$TN_G_FORM" == "docker" ]]; then
+        dbin="$(_tn_docker_bin)"
+        cat <<EOU
+[Unit]
+Description=Telcoin Network Node (${TN_G_CHAIN}) [Docker]
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+${cred:+${cred}
+}EnvironmentFile=-${TN_G_CONF}/node.env
+UnsetEnvironment=TN_BLS_PASSPHRASE
+ExecStartPre=-${dbin} stop -t 80 ${TN_G_SVC}
+ExecStartPre=-${dbin} rm -f ${TN_G_SVC}
+ExecStart=${TN_G_SCRIPT}
+ExecStop=${dbin} stop -t 80 ${TN_G_SVC}
+TimeoutStopSec=100
+Restart=on-failure
+RestartSec=10
+LimitCORE=0
+StandardOutput=${out}
+StandardError=${err}
+SyslogIdentifier=${TN_G_SVC}
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOU
+        return 0
+    fi
+    rw="$TN_G_DATA${TN_G_NODELOG:+ ${TN_G_NODELOG}}"
+    cat <<EOU
+[Unit]
+Description=Telcoin Network Node (${TN_G_CHAIN})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=${TN_G_USER}
+Group=${TN_G_GROUP}
+${TN_G_NODELOG:+SupplementaryGroups=${TN_LOG_GROUP}
+}${cred:+${cred}
+}EnvironmentFile=-${TN_G_CONF}/node.env
+UnsetEnvironment=TN_BLS_PASSPHRASE
+Environment=HOME=${TN_G_DATA}
+ExecStart=${TN_G_SCRIPT}
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+LimitNOFILE=65536
+LimitCORE=0
+StandardOutput=${out}
+StandardError=${err}
+SyslogIdentifier=${TN_G_SVC}
+ProtectSystem=strict
+ReadWritePaths=${rw}
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+UMask=0027
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+EOU
+    case "${TN_UNIT_STRICT_SANDBOX:-1}" in
+        0) ;;
+        audit)
+            printf '%s\n' "MemoryDenyWriteExecute=yes" "SystemCallFilter=@system-service" "SystemCallFilter=~@privileged"
+            ;;
+        *)
+            printf '%s\n' "MemoryDenyWriteExecute=yes" "SystemCallFilter=@system-service" "SystemCallFilter=~@privileged" "SystemCallErrorNumber=EPERM"
+            ;;
+    esac
+    printf '\n%s\n%s\n' "[Install]" "WantedBy=multi-user.target"
+}
+
+# tn_write_node_unit METHOD -- write /etc/systemd/system/<service>.service root
+# 0644 (TN_ROOT_PREFIX honoured). Does not reload systemd. rc 0 written, 1
+# refused (nothing changed), 2 write failed.
+tn_write_node_unit() {
+    local text
+    _tn_gen_settings "${1:-}" || return 1
+    text="$(_tn_node_unit_text "${1:-}")" || return 1
+    tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${TN_G_SVC}.service" 0644 <<< "$text"
+}
+
+# _tn_launch_listener NAME FILE... -- the first NAME=<multiaddr> written in FILEs
+# (an older start script exports the listeners, an older Docker script passes
+# them with -e, an older unit sets them with Environment=). rc 1 when none passes
+# validate_multiaddr.
+_tn_launch_listener() {
+    local name="$1" v
+    shift
+    v="$(grep -hoE -- "${name}=[\"']?[^\"'[:space:]\\\\]*" "$@" 2>/dev/null | head -n 1)"
+    v="${v#*=}"
+    v="${v#[\"\']}"
+    validate_multiaddr "$v" || return 1
+    printf '%s\n' "$v"
+}
+
+# _tn_passfile_trim_safe FILE -- rc 0 when FILE (a stored passphrase, read by
+# root) is a regular file of one line that does not end in whitespace before its
+# newline, so the node's stdin source reads the same value. The value is never
+# printed or held in a shell variable.
+_tn_passfile_trim_safe() {
+    local f="${1:-}"
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    LC_ALL=C awk 'NR > 1 { bad = 1 } { last = $0 } END { if (NR != 1 || bad || last == "" || last ~ /[[:space:]]$/) exit 1 }' "$f" 2>/dev/null
+}
+
+# tn_rerender_node_launch [RUNNER] [progress-fn] -- rewrite the installed node's
+# start script and unit in the current form (tn_write_start_script,
+# tn_write_node_unit), keeping the node arguments of its launch line, and write
+# node.env from the listener addresses the old files carry when node.env is
+# missing. RUNNER replaces the binary or image the script runs (empty: keep it).
+# The caller holds the update lock, owns any backup, and reloads systemd and
+# restarts. rc 0 rewritten, 1 refused with nothing changed (an old unit with the
+# node command inline, `docker run ...` or `<binary> node ...`, or a passphrase
+# written in the unit: those move with tn_migrate_embedded_passphrase /
+# tn_migrate_credential, which set _TN_RERENDER_LEGACY=1 to rewrite them here,
+# node.env coming from the unit's Environment= or -e listener lines; arguments
+# or listeners that cannot be read, where legacy mode prints the steps to move the
+# unit by hand), 2 a write failed (files written before it stay; each one is
+# complete). In that legacy mode --observer and --validator are dropped from the
+# arguments.
+tn_rerender_node_launch() {
+    local runner="${1:-}" fn="${2:-}" line svc method file cur kind args unit envf p w rc=0 legacy="${_TN_RERENDER_LEGACY:-0}"
+    local conv_tag="" converted=0 net
+    line="$(tn_node_launch_target)" || return 1
+    read -r svc method file <<< "$line"
+    unit="/etc/systemd/system/${svc}.service"
+    if [[ "$legacy" != "1" ]] && _tn_launch_is_unit "$file"; then
+        _tn_guard_say warn "${svc}: the node command is inline in ${file}; that unit moves with sudo ./edit-config.sh --migrate-credential, not here." "$fn"
+        return 1
+    fi
+    if [[ "$legacy" != "1" ]] && tn_has_embedded_passphrase "${TN_ROOT_PREFIX:-}${unit}"; then
+        _tn_guard_say warn "${svc}: a passphrase is written in the unit; it moves with sudo ./edit-config.sh --migrate-credential, not here." "$fn"
+        return 1
+    fi
+    cur="$(_tn_launch_awk runner "$file" 2>/dev/null)" || rc=$?
+    [[ $rc -eq 10 ]] && { rc=0; args="$(_tn_launch_awk args "$file" 2>/dev/null)" || rc=$?; }
+    if [[ $rc -ne 10 ]]; then
+        if [[ "$legacy" == "1" ]] && _tn_launch_is_unit "$file"; then
+            _tn_guard_say warn "${svc}: the node command in ${file} cannot be read (one ExecStart= line of the form <binary> node ... --http, or docker run ... node ... --http, with no shell operators, is needed). Move it by hand: edit ${file} to that form, run sudo systemctl daemon-reload, then run sudo ./edit-config.sh --migrate-credential again. Nothing was changed." "$fn"
+        else
+            _tn_guard_say warn "${svc}: no node command to read in ${file}." "$fn"
+        fi
+        return 1
+    fi
+    args="$(printf '%s\n' "$args" | TN_RR_LEGACY="$legacy" awk '{ out = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i == "--bls-passphrase-source") { i++; continue }
+            if (index($i, "--bls-passphrase-source=") == 1) continue
+            if (ENVIRON["TN_RR_LEGACY"] == "1" && ($i ~ /^--(observer|validator)(=.*)?$/)) continue
+            out = out (out == "" ? "" : " ") $i
+        }
+        print out }')"
+    kind="${cur%% *}"
+    [[ -n "$runner" ]] || runner="${cur#* }"
+    # Images run by digest: an older start script that names a tag keeps the
+    # image Docker already holds under that tag, by its digest (recorded in
+    # .node-meta below, with the tag when it is a release tag).
+    if [[ "$kind" == "docker" && "$runner" != *@sha256:* ]]; then
+        [[ "${runner##*/}" != *:* ]] || conv_tag="${runner##*:}"
+        if ! runner="$(tn_docker_local_digest "$runner")"; then
+            _tn_guard_say warn "${svc}: ${file} runs the image by tag and Docker holds no digest for it; pull a release by digest with update-node.sh first." "$fn"
+            return 1
+        fi
+        converted=1
+    fi
+    if [[ "$kind" == "docker" ]]; then
+        method="docker"
+    else
+        case "$method" in
+            source|release|existing|binary) ;;
+            *) method="source" ;;
+        esac
+    fi
+    envf="${TN_ROOT_PREFIX:-}${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/node.env"
+    if [[ ! -f "$envf" ]]; then
+        p="$(_tn_launch_listener PRIMARY_LISTENER_MULTIADDR "$file" "${TN_ROOT_PREFIX:-}${unit}")" || p=""
+        w="$(_tn_launch_listener WORKER_LISTENER_MULTIADDR "$file" "${TN_ROOT_PREFIX:-}${unit}")" || w=""
+        if [[ -z "$p" || -z "$w" ]]; then
+            _tn_guard_say warn "${svc}: the listener addresses are not in ${file} or the unit; set them with edit-config.sh first." "$fn"
+            return 1
+        fi
+    fi
+    _tn_gen_settings "$method" || return 1
+    # The stdin source trims trailing whitespace, which the old environment delivery
+    # kept: a passphrase ending in whitespace stays on the old delivery until it is
+    # rotated. (_tn_gen_settings refuses a TPM install: it moves with the
+    # credential migration.)
+    case "$TN_G_PASS" in
+        stdin)
+            if ! _tn_passfile_trim_safe "${TN_ROOT_PREFIX:-}${TN_G_CONF}/bls-passphrase"; then
+                _tn_guard_say warn "${svc}: the stored passphrase is missing, has more than one line, or ends in whitespace, which the stdin delivery would cut; the old delivery stays until the passphrase is changed with edit-config.sh." "$fn"
+                return 1
+            fi
+            ;;
+    esac
+    _tn_node_args_ok "$args" || { _tn_guard_say warn "${svc}: the node arguments in ${file} are not plain words; not rewritten." "$fn"; return 1; }
+    # The three texts render and pass their checks (the runner or image included)
+    # before the first write, so a refusal (rc 1) changes nothing.
+    if [[ ! -f "$envf" ]]; then
+        _tn_node_env_text "$p" "$w" >/dev/null || return 1
+    fi
+    _tn_start_script_checked "$method" "$runner" "$args" >/dev/null || return 1
+    _tn_node_unit_text "$method" >/dev/null || return 1
+    # Now the writes, node.env first.
+    if [[ ! -f "$envf" ]]; then
+        tn_write_node_env "$p" "$w" || return $?
+    fi
+    tn_write_start_script "$method" "$runner" "$args" || return $?
+    tn_write_node_unit "$method" || return $?
+    _tn_guard_say log "${svc}: start script and unit rewritten in the current form." "$fn"
+    if [[ $converted -eq 1 ]]; then
+        meta_set DOCKER_IMAGE "$runner" >/dev/null 2>&1 || true
+        meta_set DOCKER_IMAGE_DIGEST "${runner##*@}" >/dev/null 2>&1 || true
+        net="$(tn_detect_network 2>/dev/null)" || net=""
+        if [[ -n "$conv_tag" && -n "$net" ]] && tn_release_tag_ok "$net" "$conv_tag"; then
+            meta_set RELEASE_TAG "$conv_tag" >/dev/null 2>&1 || true
+        fi
+    fi
+    return 0
+}
+
+# tn_install_journald_dropin -- cap the journal for a node that logs to it:
+# /etc/systemd/journald.conf.d/50-telcoin.conf root 0644 (SystemMaxUse=4G,
+# SystemKeepFree=2G). An existing file is kept. The caller restarts journald
+# (systemctl restart systemd-journald) if it wants the cap now. rc as
+# tn_write_root_file.
+tn_install_journald_dropin() {
+    local dir="${TN_ROOT_PREFIX:-}/etc/systemd/journald.conf.d"
+    [[ -f "${dir}/50-telcoin.conf" ]] && return 0
+    _tn_root_layout_dir "$dir" root 0755 || return $?
+    tn_write_root_file "${dir}/50-telcoin.conf" 0644 <<'EOF'
+# Written by the Telcoin Network deployment scripts.
+[Journal]
+SystemMaxUse=4G
+SystemKeepFree=2G
+EOF
+}
+
+# tn_service_user_ok USER [GROUP] -- rc 0 when USER (and GROUP, when given) may
+# run the node: a name matching ^[a-z_][a-z0-9_-]{0,31}$, never root or
+# telcoin-ui (a GROUP also never sudo, adm, docker or wheel); an existing USER
+# must have a UID from 1 to 999 and belong to none of sudo, adm, docker, wheel;
+# an existing GROUP must not be GID 0. A USER that does not exist yet passes
+# (setup creates it as a system account). rc 1 with the reason on stderr.
+# One exception to the UID range: setup used to create the account of a Docker
+# install with UID 1101, so an existing USER with UID 1101 passes when it has no
+# login shell (false or nologin) and, like any other, no admin group; re-running
+# setup on such a host keeps working.
+tn_service_user_ok() {
+    local u="${1:-}" g="${2:-}" re='^[a-z_][a-z0-9_-]{0,31}$' uid gid grp sh IFS=' '
+    if [[ ! "$u" =~ $re ]]; then
+        print_warn "service user '${u}' is not a plain lowercase account name" >&2; return 1
+    fi
+    case "$u" in
+        root|telcoin-ui) print_warn "the node never runs as ${u}" >&2; return 1 ;;
+    esac
+    if [[ -n "$g" ]]; then
+        if [[ ! "$g" =~ $re ]]; then
+            print_warn "service group '${g}' is not a plain lowercase group name" >&2; return 1
+        fi
+        case "$g" in
+            root|telcoin-ui|sudo|adm|docker|wheel) print_warn "the node's group cannot be ${g}" >&2; return 1 ;;
+        esac
+        gid="$(getent group "$g" 2>/dev/null | cut -d: -f3)"
+        if [[ "$gid" == "0" ]]; then
+            print_warn "service group ${g} has GID 0" >&2; return 1
+        fi
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || return 0
+    if [[ "$uid" == "1101" ]]; then
+        sh="$(getent passwd "$u" 2>/dev/null | cut -d: -f7)"
+        case "$sh" in
+            /bin/false|/usr/bin/false|/sbin/nologin|/usr/sbin/nologin|/bin/nologin|/usr/bin/nologin) ;;
+            *) print_warn "service user ${u} (UID 1101) has a login shell (${sh:-unknown}); pick another name" >&2; return 1 ;;
+        esac
+    elif [[ ! "$uid" =~ ^[0-9]+$ ]] || (( uid < 1 || uid > 999 )); then
+        print_warn "service user ${u} is not a system account (UID ${uid}); pick another name" >&2; return 1
+    fi
+    for grp in $(id -nG "$u" 2>/dev/null); do
+        case "$grp" in
+            sudo|adm|docker|wheel) print_warn "service user ${u} belongs to ${grp}; pick an account without admin groups" >&2; return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# tn_docker_image_allowed IMAGE [NETWORK] -- rc 0 when IMAGE is an image of
+# NETWORK by digest, <repo>@sha256:<64 hex>, with <repo> one NETWORK's images may
+# come from (tn_docker_repo_ok: the network's repository, and on testnet those in
+# TN_TESTNET_IMAGE_REPOS). A tag that passes tn_release_tag_ok is accepted only
+# with TN_DOCKER_REQUIRE_DIGEST=0 (the default, 1, refuses tags). NETWORK
+# defaults to the NETWORK global, then tn_detect_network. Refuses a leading -,
+# any whitespace, other repositories and networks without one. Prints nothing.
+tn_docker_image_allowed() {
+    local img="${1:-}" net="${2:-}" repo rest
+    [[ -n "$img" && "$img" != -* ]] || return 1
+    [[ ! "$img" =~ [[:space:]] ]] || return 1
+    [[ -n "$net" ]] || net="${NETWORK:-}"
+    [[ -n "$net" ]] || net="$(tn_detect_network 2>/dev/null)" || return 1
+    case "$img" in
+        *@sha256:*)
+            repo="${img%%@*}"
+            rest="${img#*@sha256:}"
+            [[ "$rest" =~ ^[0-9a-f]{64}$ ]] || return 1
+            ;;
+        */*:*)
+            [[ "${TN_DOCKER_REQUIRE_DIGEST:-1}" == "0" ]] || return 1
+            repo="${img%:*}"
+            rest="${img##*:}"
+            [[ "$repo" != *@* ]] || return 1
+            tn_release_tag_ok "$net" "$rest" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    tn_docker_repo_ok "$net" "$repo"
+}
+
+# _tn_guard_say KIND MESSAGE [progress-fn] -- hand MESSAGE to progress-fn, or
+# print it on stderr.
+_tn_guard_say() {
+    if [[ -n "${3:-}" ]] && declare -F "$3" >/dev/null 2>&1; then
+        "$3" "$1" "$2" || true
+    else
+        printf '%s\n' "$2" >&2
+    fi
+}
+
+# _tn_guard_network -- testnet, mainnet or devnet for this host (tn_detect_network,
+# or NETWORK=devnet in .node-meta); an empty line when not known.
+_tn_guard_network() {
+    local net=""
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if [[ -z "$net" && "$(meta_get NETWORK 2>/dev/null || true)" == "devnet" ]]; then
+        net="devnet"
+    fi
+    printf '%s\n' "$net"
+}
+
+# _tn_commit_authors JSON -- from a tn_latestConsensusHeader answer print
+# "<distinct authors> <commit timestamp> <epoch|->". rc 1 when the answer has no
+# commit timestamp or no author.
+_tn_commit_authors() {
+    local json="$1" rest a list="" n ts ep="-"
+    local a_re='"author"[[:space:]]*:[[:space:]]*"([1-9A-HJ-NP-Za-km-z]{1,128})"'
+    local ts_re='"commit_timestamp"[[:space:]]*:[[:space:]]*([0-9]{1,15})'
+    local ep_re='"epoch"[[:space:]]*:[[:space:]]*([0-9]{1,10})'
+    [[ "$json" =~ $ts_re ]] || return 1
+    ts="${BASH_REMATCH[1]}"
+    [[ "$json" =~ $ep_re ]] && ep="${BASH_REMATCH[1]}"
+    rest="$json"
+    while [[ "$rest" =~ $a_re ]]; do
+        a="${BASH_REMATCH[1]}"
+        list="${list}${a}"$'\n'
+        rest="${rest#*"${BASH_REMATCH[0]}"}"
+    done
+    n="$(printf '%s' "$list" | sort -u | grep -c . || true)"
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) || return 1
+    printf '%s %s %s\n' "$n" "$((10#$ts))" "$ep"
+}
+
+# _tn_rpc_chain_is URL ID -- rc 0 when URL answers eth_chainId with chain ID
+# (decimal). A public RPC is used for the committee, the commit or the stake
+# only after this: before a launch it may serve another network.
+_tn_rpc_chain_is() {
+    local out hex
+    out="$(tn_rpc_call "$1" eth_chainId '[]' 5 2>/dev/null)" || return 1
+    hex="$(tn_json_field "$out" result 2>/dev/null)" || return 1
+    [[ "$hex" =~ ^0x[0-9a-fA-F]{1,15}$ ]] || return 1
+    [[ "$((16#${hex#0x}))" == "${2:-}" ]]
+}
+
+# _tn_guard_unreadable WHY MODE [progress-fn] -- the committee could not be
+# counted. rc 0 (a warning) on testnet and devnet and on a mainnet node whose
+# VALIDATOR_ADDRESS the registry reports as not staked; rc 2 on a staked or
+# voting mainnet node, when the network or the stake is unknown, or when no
+# VALIDATOR_ADDRESS is recorded to ask about. TN_ALLOW_QUORUM_RISK=1 turns rc 2
+# into a warning.
+_tn_guard_unreadable() {
+    local why="$1" mode="$2" fn="${3:-}" net="" addr="" pub="" rc=0 st=0 hint=""
+    net="$(_tn_guard_network)"
+    case "$net" in
+        testnet|devnet)
+            _tn_guard_say warn "could not count the committee members that are down (${why}); going ahead on ${net}." "$fn"
+            return 0
+            ;;
+        mainnet) pub="$MAINNET_RPC_URL" ;;
+        *) net="" ;;
+    esac
+    if [[ "$net" == "mainnet" && "$mode" != "CvvActive" ]]; then
+        addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null)" || rc=$?
+        if [[ $rc -eq 0 && -n "$addr" && -n "$pub" ]] && ! _tn_rpc_chain_is "$pub" "$MAINNET_CHAIN_ID"; then
+            st=2
+            hint="; ${pub} does not answer with chain ${MAINNET_CHAIN_ID}, so the stake was not read there"
+        elif [[ $rc -eq 0 && -n "$addr" && -n "$pub" ]]; then
+            node_is_staked_validator "$addr" "$pub" >/dev/null 2>&1 || st=$?
+        else
+            st=2
+            [[ -n "$addr" ]] || hint="; no VALIDATOR_ADDRESS in .node-meta to check the stake"
+        fi
+        if [[ $st -eq 1 ]]; then
+            _tn_guard_say warn "could not count the committee members that are down (${why}); this node is not staked, going ahead." "$fn"
+            return 0
+        fi
+    fi
+    if [[ "${TN_ALLOW_QUORUM_RISK:-0}" == "1" ]]; then
+        _tn_guard_say warn "could not count the committee members that are down (${why}); going ahead because the quorum-risk override is set." "$fn"
+        return 0
+    fi
+    _tn_guard_say warn "could not count the committee members that are down (${why}${hint}). Stopping a ${net:-node of an unknown network} committee member blind is refused; once the fleet coordinator confirms the other members are up, run again with --allow-quorum-risk." "$fn"
+    return 2
+}
+
+# _tn_guard_src_ok SRC -- for tn_committee_down_guard (its locals url, pub, want,
+# pub_state and pub_note, by dynamic scope): rc 0 for the node's own URL, and for
+# the public RPC once it has answered eth_chainId with the network's chain id
+# (asked once); otherwise rc 1 and pub_note says why.
+_tn_guard_src_ok() {
+    [[ "$1" == "$pub" && "$1" != "$url" ]] || return 0
+    if [[ -z "$pub_state" ]]; then
+        pub_state=bad
+        if [[ -n "$want" ]] && _tn_rpc_chain_is "$pub" "$want"; then
+            pub_state=ok
+        else
+            pub_note="; ${pub} does not answer with chain ${want:-of this network}"
+        fi
+    fi
+    [[ "$pub_state" == ok ]]
+}
+
+# tn_committee_down_guard [URL] [progress-fn] -- may this node stop now without
+# putting the committee at risk? Reads the node's mode (tn_node_mode), the
+# current committee (tn_epoch_info) and the authors of the latest consensus
+# commit (tn_latestConsensusHeader) from URL (default tn_local_rpc_url); the
+# committee and the commit come from the network's public RPC when URL cannot
+# give them, and only after that RPC answers eth_chainId with the network's chain
+# id (otherwise the count cannot be made). n is the committee size, f = floor((n-1)/3), and down counts the
+# members that authored no header in that commit (an estimate until the node
+# reports peer liveness: a slow member counts as down). This node adds one to
+# down when it stops, unless its own mode could not be read: a node that does
+# not answer authored nothing, so it is already among the down. rc 0 when the
+# node is readable and not CvvActive, or when down (+ 1) < f + 1; rc 1 when
+# stopping it would leave f + 1 members down; rc 2 when the count cannot be
+# made (no committee, no commit, a commit more than 120 s old or from another
+# epoch) on a mainnet node not known to be unstaked or an unknown network
+# (testnet, devnet and a mainnet node the registry reports unstaked warn and
+# get rc 0; see _tn_guard_unreadable). TN_ALLOW_QUORUM_RISK=1 turns rc 1 and rc 2
+# into a warning and rc 0 (coordinated restarts). Never sleeps; messages go to
+# progress-fn (`fn log|warn MSG`) or stderr.
+tn_committee_down_guard() {
+    local url="${1:-}" fn="${2:-}" mode="" rc=0 net pub="" src info committee n hdr counted live ts ep age f down now self=1 note=""
+    local want="" pub_state="" pub_note=""
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url 2>/dev/null || true)"
+    mode="$(tn_node_mode "$url" 2>/dev/null)" || mode=""
+    case "$mode" in
+        CvvInactive|Observer)
+            _tn_guard_say log "this node is ${mode}: stopping it does not change the committee's quorum." "$fn"
+            return 0
+            ;;
+        CvvActive) ;;
+        *) mode="" ;;
+    esac
+    net="$(_tn_guard_network)"
+    case "$net" in
+        mainnet) pub="$MAINNET_RPC_URL"; want="$MAINNET_CHAIN_ID" ;;
+        testnet) pub="$TESTNET_RPC_URL"; want="$TESTNET_CHAIN_ID" ;;
+        devnet)  pub="$DEVNET_RPC_URL"; want="$DEVNET_CHAIN_ID" ;;
+    esac
+    info=""
+    for src in "$url" "$pub"; do
+        [[ -n "$src" ]] || continue
+        _tn_guard_src_ok "$src" || continue
+        info="$(tn_epoch_info "$src" "" 5 2>/dev/null)" && break
+        info=""
+    done
+    committee="$(printf '%s' "$info" | awk '{print $5}')"
+    if [[ -z "$info" || -z "$committee" || "$committee" == "-" ]]; then
+        _tn_guard_unreadable "the committee could not be read${pub_note}" "$mode" "$fn" || return $?
+        return 0
+    fi
+    n="$(printf '%s\n' "$committee" | tr ',' '\n' | grep -c .)"
+    counted=""
+    for src in "$url" "$pub"; do
+        [[ -n "$src" ]] || continue
+        _tn_guard_src_ok "$src" || continue
+        hdr="$(tn_rpc_call "$src" tn_latestConsensusHeader '[]' 5 2>/dev/null)" || continue
+        counted="$(_tn_commit_authors "$hdr")" && break
+        counted=""
+    done
+    if [[ -z "$counted" ]]; then
+        _tn_guard_unreadable "the latest consensus commit could not be read${pub_note}" "$mode" "$fn" || return $?
+        return 0
+    fi
+    read -r live ts ep <<< "$counted"
+    now="$(_tn_now)"
+    age=$(( now - ts ))
+    if (( age > 120 )); then
+        _tn_guard_unreadable "the latest consensus commit is ${age} s old" "$mode" "$fn" || return $?
+        return 0
+    fi
+    if [[ "$ep" != "-" && "$ep" != "${info%% *}" ]]; then
+        _tn_guard_unreadable "the latest commit is from epoch ${ep}, the committee from epoch ${info%% *}" "$mode" "$fn" || return $?
+        return 0
+    fi
+    (( live <= n )) || live="$n"
+    f=$(( (n - 1) / 3 ))
+    down=$(( n - live ))
+    if [[ -z "$mode" ]]; then
+        self=0
+        note=" (this node does not answer and is counted among them)"
+    fi
+    if (( down + self < f + 1 )); then
+        _tn_guard_say log "committee of ${n}: ${down} member(s) down${note}; stopping this node leaves $((down + self)), below the $((f + 1)) that halts consensus." "$fn"
+        return 0
+    fi
+    if [[ "${TN_ALLOW_QUORUM_RISK:-0}" == "1" ]]; then
+        _tn_guard_say warn "committee of ${n}: ${down} member(s) down${note}; stopping this node makes $((down + self)) of the $((f + 1)) that halt consensus. Going ahead because the quorum-risk override is set." "$fn"
+        return 0
+    fi
+    _tn_guard_say warn "committee of ${n}: ${down} member(s) down${note}; stopping this node makes $((down + self)) of the $((f + 1)) that halt consensus. Refused: wait until the others are back, or, for a coordinated restart, run again with --allow-quorum-risk." "$fn"
+    return 1
 }
 
 # =============================================================================
@@ -1756,10 +4071,17 @@ _tn_json_uint() {
 }
 
 # tn_local_rpc_url — the local node's HTTP RPC: http://127.0.0.1:<port>, where the
-# port is RPC_PORT from .node-meta, else the RPC_PORT variable, else 8545.
+# port is RPC_PORT from .node-meta, else the RPC_PORT variable, else 8545. When
+# .node-meta sets RPC_PORT more than once there is no single port: nothing is
+# printed, a warning goes to stderr and rc is 2 (no guess at the default).
 tn_local_rpc_url() {
-    local port=""
-    port="$(meta_get RPC_PORT 2>/dev/null || true)"
+    local port="" rc=0 meta
+    meta="$(node_meta_path 2>/dev/null || true)"
+    port="$(meta_get RPC_PORT "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "RPC_PORT is set more than once in ${meta}; remove the extra lines (no RPC port assumed)" >&2
+        return 2
+    fi
     if ! validate_port "$port" 2>/dev/null; then
         port="${RPC_PORT:-}"
         if ! validate_port "$port" 2>/dev/null; then
@@ -1769,14 +4091,16 @@ tn_local_rpc_url() {
     printf 'http://127.0.0.1:%s\n' "$((10#$port))"
 }
 
-# tn_node_mode [url] — the node's consensus mode from tn_nodeMode: CvvActive (in
-# the committee and voting), CvvInactive (in the committee, catching up) or
-# Observer. url defaults to tn_local_rpc_url. Any other answer is malformed.
+# tn_node_mode [url] [max_time] — the node's consensus mode from tn_nodeMode:
+# CvvActive (in the committee and voting), CvvInactive (in the committee,
+# catching up) or Observer. url defaults to tn_local_rpc_url; max_time bounds
+# the call in seconds (tn_rpc_call's default 10 when empty). Any other answer is
+# malformed.
 tn_node_mode() {
-    local url="${1:-}" out rc mode
+    local url="${1:-}" max_time="${2:-10}" out rc mode
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
     rc=0
-    out="$(tn_rpc_call "$url" tn_nodeMode '[]')" || rc=$?
+    out="$(tn_rpc_call "$url" tn_nodeMode '[]' "$max_time")" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         printf '%s\n' "$out"
         return 1
@@ -1968,26 +4292,104 @@ _tn_wait_say() {
 # included, and 0 turns the wait off; TN_EPOCH_POLL (15, clamped to 5-20) is the
 # poll and heartbeat interval. Each epoch read while waiting may take at most
 # 30 - poll seconds, so two heartbeats are never more than 30 s apart.
+# TN_EPOCH_JITTER_MAX (30, 0 off) bounds a random pause after the settle, so
+# nodes that waited for the same boundary do not stop on the same second.
+# Callers run the committee guard again after this returns: the wait can be long.
 #
 # Policy:
-#   1. Skipped (TN_SKIP_EPOCH_WAIT=1 or TN_EPOCH_WAIT_MAX=0), node mode
-#      unreadable, or mode not CvvActive: log and return.
-#   2. Time to the boundary unreadable: warn and return. More than the margin
-#      away: log and return. Passed more than the margin ago with the epoch still
-#      open (stalled, or this node far behind): warn once and return.
+#   1. Skipped (TN_SKIP_EPOCH_WAIT=1 or TN_EPOCH_WAIT_MAX=0), or mode not
+#      CvvActive: log and return. Node mode unreadable: when this node is a
+#      staked validator (or, on mainnet or an unknown network, its stake cannot
+#      be read either), go on as for CvvActive with the epoch timing read from
+#      the network's public RPC (_tn_mode_unknown_wait_url), then from url when
+#      the public RPC does not answer; otherwise log and return.
+#   2. Time to the boundary unreadable: warn and return; but for a node whose
+#      mode was unreadable (step 1), warn and wait TN_EPOCH_MARGIN +
+#      TN_EPOCH_SETTLE seconds, at most TN_EPOCH_WAIT_MAX (_tn_wait_blind). More
+#      than the margin away: log and return. Passed more than the margin ago
+#      with the epoch still open (stalled, or this node far behind): warn once
+#      and return.
 #   3. Otherwise one step message, then poll until the epoch id rises, with a log
 #      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
-#   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap.
+#   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap, then
+#      pause a random 0 to TN_EPOCH_JITTER_MAX seconds, also inside the cap.
 # A signal the caller traps (TERM, INT, HUP) runs its trap at once, not after the
 # current sleep (_tn_nap); when that trap returns instead of exiting, the wait
 # stops there with a warning, still rc 0.
 # Callers wait before stopping or editing anything, and never before the restart
 # that rolls back a failed change.
+# _tn_mode_unknown_wait_url FN URL — the node mode could not be read from URL.
+# rc 0 and print the RPC URL to read the epoch timing from when the wait must go
+# on: VALIDATOR_ADDRESS (.node-meta) is a staked validator on the network's
+# public RPC, or its stake status cannot be read (duplicated key, RPC down) and
+# the network is mainnet or cannot be told (rc 3 then). The URL printed is the
+# public RPC of the network, or URL when the network is unknown. rc 1: no wait
+# (no validator address, a definite non-validator, or testnet with an unreadable
+# stake). Prints nothing else, so the caller's progress function stays in charge.
+_tn_mode_unknown_wait_url() {
+    local url="$1" net pub="" addr rc=0 src=0
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    case "$net" in
+        mainnet) pub="$MAINNET_RPC_URL" ;;
+        testnet) pub="$TESTNET_RPC_URL" ;;
+    esac
+    addr="$(meta_get VALIDATOR_ADDRESS 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 1 || ( $rc -eq 0 && -z "$addr" ) ]]; then
+        return 1
+    fi
+    # A public RPC that does not serve this network's chain is not asked.
+    case "$net" in
+        mainnet) [[ -z "$pub" ]] || _tn_rpc_chain_is "$pub" "$MAINNET_CHAIN_ID" || pub="" ;;
+        testnet) [[ -z "$pub" ]] || _tn_rpc_chain_is "$pub" "$TESTNET_CHAIN_ID" || pub="" ;;
+    esac
+    if [[ $rc -ne 0 || -z "$pub" ]]; then
+        src=2
+    else
+        node_is_staked_validator "$addr" "$pub" || src=$?
+    fi
+    case "$src" in
+        0) rc=0 ;;
+        2)
+            [[ "$net" == "testnet" ]] && return 1
+            rc=3
+            ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "${pub:-$url}"
+    return "$rc"
+}
+
+# _tn_wait_blind FN MARGIN SETTLE CAP POLL WHY -- the epoch timing of a node
+# that must wait could not be read anywhere: warn, then wait MARGIN + SETTLE
+# seconds (at most CAP) in naps of POLL seconds with a heartbeat each, so the
+# restart does not land on a boundary that could not be seen. A signal the
+# caller traps and returns from ends the wait with a warning. Always rc 0.
+_tn_wait_blind() {
+    local fn="$1" margin="$2" settle="$3" cap="$4" poll="$5" why="$6" total slept=0 nap nrc
+    total=$(( margin + settle ))
+    if (( total > cap )); then total="$cap"; fi
+    "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${why}). Waiting ${total}s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip." || true
+    while (( slept < total )); do
+        nap="$poll"
+        if (( nap > total - slept )); then nap=$(( total - slept )); fi
+        nrc=0
+        _tn_nap "$nap" || nrc=$?
+        if (( nrc > 128 )); then
+            "$fn" warn "Stopped waiting after ${slept}s: a signal interrupted the wait. Continuing." || true
+            return 0
+        fi
+        slept=$(( slept + nap ))
+        "$fn" log "Waited ${slept}s of ${total}s for an epoch boundary that could not be read." || true
+    done
+    return 0
+}
+
 tn_wait_restart_window() {
     local url="${1:-}" fn="${2:-}"
     local margin settle cap poll mode out rc secs epoch boundary dur
     local start now waited slept remaining nap nrc due fails cur info note settle_left
-    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    local fallback="" must_wait=""
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)" || url="http://127.0.0.1:0"
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="_tn_wait_say"
     fi
@@ -2009,8 +4411,23 @@ tn_wait_restart_window() {
     rc=0
     mode="$(tn_node_mode "$url")" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        "$fn" log "Could not read the node mode from ${url} (${mode}); not waiting for the epoch boundary." || true
-        return 0
+        rc=0
+        out="$(_tn_mode_unknown_wait_url "$url")" || rc=$?
+        if [[ "$rc" -ne 0 && "$rc" -ne 3 ]]; then
+            "$fn" log "Could not read the node mode from ${url} (${mode}); not waiting for the epoch boundary." || true
+            return 0
+        fi
+        if [[ "$rc" -eq 3 ]]; then
+            "$fn" warn "Could not read the node mode from ${url} (${mode}) nor this node's stake status; waiting as for a committee member, with the epoch timing from ${out}." || true
+        else
+            "$fn" log "Could not read the node mode from ${url} (${mode}); this node is a staked validator, so the epoch timing is read from ${out} instead." || true
+        fi
+        # This node must wait: when the public RPC does not answer, the local
+        # one may still give the epoch timing; when neither does, wait blind.
+        fallback="$url"
+        must_wait=1
+        url="$out"
+        mode="CvvActive"
     fi
     if [[ "$mode" != "CvvActive" ]]; then
         "$fn" log "Node mode is ${mode}, so this node is not voting in the current committee; no need to wait for the epoch boundary." || true
@@ -2018,7 +4435,23 @@ tn_wait_restart_window() {
     fi
     rc=0
     out="$(tn_epoch_secs_left "$url")" || rc=$?
+    if [[ "$rc" -ne 0 && -n "$fallback" && "$fallback" != "$url" ]]; then
+        note="$out"
+        rc=0
+        out="$(tn_epoch_secs_left "$fallback")" || rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+            "$fn" log "The epoch timing could not be read from ${url} (${note}); it is read from ${fallback} instead." || true
+            url="$fallback"
+        else
+            out="${url}: ${note}; ${fallback}: ${out}"
+        fi
+        note=""
+    fi
     if [[ "$rc" -ne 0 ]]; then
+        if [[ -n "$must_wait" ]]; then
+            _tn_wait_blind "$fn" "$margin" "$settle" "$cap" "$poll" "$out"
+            return 0
+        fi
         "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${out}). Continuing without waiting." || true
         return 0
     fi
@@ -2108,6 +4541,7 @@ tn_wait_restart_window() {
         return 0
     fi
     "$fn" log "Epoch ${epoch} closed (now epoch ${cur}). Giving the new committee ${settle_left}s to settle." || true
+    remaining=$(( cap - waited - settle_left ))
     while (( settle_left > 0 )); do
         nap="$poll"
         if (( nap > settle_left )); then nap="$settle_left"; fi
@@ -2122,7 +4556,28 @@ tn_wait_restart_window() {
             "$fn" log "Settling: ${settle_left}s left." || true
         fi
     done
+    _tn_restart_jitter "$fn" "$remaining"
     "$fn" log "Epoch ${cur} is under way; continuing." || true
+    return 0
+}
+
+# _tn_restart_jitter FN LEFT -- after the settle, pause a random 0 to
+# TN_EPOCH_JITTER_MAX seconds (default 30; 0 turns it off), at most LEFT (what
+# the TN_EPOCH_WAIT_MAX cap leaves), so committee nodes that waited for the same
+# epoch boundary do not all stop within the same poll. A signal the caller traps
+# and returns from ends the pause with a warning. Always rc 0.
+_tn_restart_jitter() {
+    local fn="$1" left="${2:-0}" max j nrc=0
+    max="$(_tn_env_uint TN_EPOCH_JITTER_MAX 30)"
+    (( max > left )) && max="$left"
+    (( max > 0 )) || return 0
+    j=$(( RANDOM % (max + 1) ))
+    (( j > 0 )) || return 0
+    "$fn" log "Pausing ${j}s more (random, at most ${max}s, TN_EPOCH_JITTER_MAX) so nodes that waited for the same boundary do not restart together." || true
+    _tn_nap "$j" || nrc=$?
+    if (( nrc > 128 )); then
+        "$fn" warn "Stopped the pause after the settle: a signal interrupted it. Continuing." || true
+    fi
     return 0
 }
 
@@ -2672,7 +5127,11 @@ display_node_info() {
     # keytool asks for a passphrase source even though this export never reads the
     # key, and -q keeps its log line out of the output; both go before `keytool`.
     if [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
-        export_cmd="docker run --rm -v ${data_dir}:/home/nonroot/data:ro ${DOCKER_IMAGE:-<IMAGE>} telcoin -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="/home/nonroot/data/node-info.yaml"
+        # As the node's container runs: the service account's uid:gid, never root.
+        local ids
+        ids="$(id -u "${SERVICE_USER:-telcoin}" 2>/dev/null):$(getent group "${SERVICE_GROUP:-telcoin}" 2>/dev/null | cut -d: -f3)"
+        [[ "$ids" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || ids="<UID>:<GID>"
+        export_cmd="docker run --rm --user ${ids} -v ${data_dir}:/home/nonroot/data:ro ${DOCKER_IMAGE:-<IMAGE>} telcoin -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="/home/nonroot/data/node-info.yaml"
     else
         export_cmd="${BINARY_PATH:-telcoin-network} -q --bls-passphrase-source no-passphrase keytool"; node_info_arg="$node_info_file"
     fi
@@ -2701,111 +5160,899 @@ display_node_info() {
 
 
 
-# =============================================================================
-# TPM / vTPM HELPER FUNCTIONS
-# =============================================================================
-
-# Check if a TPM2 chip is available on this system
-tpm_check_available() {
-    if [[ -e /dev/tpm0 ]] || [[ -e /dev/tpmrm0 ]]; then
-        print_ok "TPM2 chip detected"
-        # Install tpm2-tools if needed
-        if ! command -v tpm2_createprimary &>/dev/null; then
-            print_info "Installing tpm2-tools..."
-            install_package "tpm2-tools"
-        fi
-        print_ok "tpm2-tools available"
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Seal the BLS passphrase to the TPM chip.
-# Stores sealed blob at ${config_dir}/bls-tpm.pub and bls-tpm.priv
-# Shows the passphrase once and offers to delete the plaintext file.
+# -----------------------------------------------------------------------------
+# CORE-3: CREDENTIALS AND GENESIS HASH
+# -----------------------------------------------------------------------------
 #
-# Usage: tpm_seal_passphrase <passphrase_file> <config_dir> <passphrase>
-tpm_seal_passphrase() {
-    local passphrase_file="$1"
-    local config_dir="$2"
-    local passphrase="$3"
+# The BLS key passphrase reaches the node from a systemd credential. Two forms:
+#   credential  <config dir>/bls-passphrase.cred, root 0600, encrypted with
+#               systemd-creds (host key, plus the TPM when the host has one);
+#               the unit loads it with LoadCredentialEncrypted=. Needs systemd
+#               250 or later.
+#   stdin       <config dir>/bls-passphrase, root 0600 plaintext, loaded with
+#               LoadCredential= (older releases recorded this as loadcredential).
+# Either way the start script feeds $CREDENTIALS_DIRECTORY/bls-passphrase to the
+# node on stdin. The passphrase travels in TN_CRED_PASS, a plain shell variable
+# that is never exported: printf (a builtin) writes it to systemd-creds' stdin.
 
-    print_step "Sealing BLS passphrase to TPM..."
+readonly TN_CRED_NAME="bls-passphrase"
+readonly TN_CRED_MIN_SYSTEMD=250      # systemd-creds, LoadCredentialEncrypted=
+readonly TN_MAINNET_MIN_SYSTEMD=255   # the OS floor for a mainnet node (Ubuntu 24.04)
+readonly TN_STDIN_MIN_SYSTEMD=247     # LoadCredential= (the stdin form)
 
-    # Create TPM primary key context
-    if ! tpm2_createprimary -Q -C e -c /tmp/tn-tpm-primary.ctx 2>/dev/null; then
-        print_error "TPM primary key creation failed."
-        print_info "Falling back to LoadCredential file storage."
-        rm -f /tmp/tn-tpm-primary.ctx
+# tn_systemd_version -- the running systemd's major version (systemctl --version).
+# rc 1 and nothing printed when it cannot be read.
+tn_systemd_version() {
+    local v
+    v="$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2; exit }')"
+    v="${v%%[!0-9]*}"
+    [[ "$v" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$((10#$v))"
+}
+
+# tn_creds_supported -- rc 0 when this host can hold an encrypted credential:
+# systemd 250 or later and systemd-creds on PATH.
+tn_creds_supported() {
+    local v
+    v="$(tn_systemd_version)" || return 1
+    (( v >= TN_CRED_MIN_SYSTEMD )) || return 1
+    command -v systemd-creds >/dev/null 2>&1
+}
+
+# tn_os_floor_check NETWORK [progress-fn] -- the systemd floor for a node. Every
+# network needs 247 (LoadCredential=); mainnet needs TN_MAINNET_MIN_SYSTEMD
+# (Ubuntu 24.04 ships 255) for the encrypted credential. Below 250 elsewhere it
+# warns: the passphrase then stays in a root-only file. rc 0 ok, 1 refused.
+tn_os_floor_check() {
+    local net="${1:-}" fn="${2:-}" v
+    if ! v="$(tn_systemd_version)"; then
+        _tn_guard_say warn "Cannot read the systemd version (systemctl --version); the node needs systemd ${TN_STDIN_MIN_SYSTEMD} or later." "$fn"
         return 1
     fi
-
-    # Create sealed data object from passphrase file
-    if ! tpm2_create -Q \
-        -C /tmp/tn-tpm-primary.ctx \
-        -i "$passphrase_file" \
-        -u "${config_dir}/bls-tpm.pub" \
-        -r "${config_dir}/bls-tpm.priv" 2>/dev/null; then
-        print_error "TPM sealing failed."
-        print_info "Falling back to LoadCredential file storage."
-        rm -f /tmp/tn-tpm-primary.ctx "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+    if (( v < TN_STDIN_MIN_SYSTEMD )); then
+        _tn_guard_say warn "systemd ${v} is too old: the node needs ${TN_STDIN_MIN_SYSTEMD} or later (Ubuntu 22.04 or later; Ubuntu 24.04 for mainnet)." "$fn"
         return 1
     fi
-
-    # Verify seal before removing primary context
-    tpm2_load -Q -C /tmp/tn-tpm-primary.ctx         -u "${config_dir}/bls-tpm.pub"         -r "${config_dir}/bls-tpm.priv"         -c /tmp/tn-tpm-verify.ctx 2>/dev/null
-    local verify_result
-    verify_result=$(tpm2_unseal -Q -c /tmp/tn-tpm-verify.ctx 2>/dev/null || echo "")
-    rm -f /tmp/tn-tpm-primary.ctx /tmp/tn-tpm-verify.ctx
-    if [[ -z "$verify_result" ]]; then
-        print_error "TPM seal verification failed."
-        rm -f "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
+    if [[ "$net" != "testnet" && "$net" != "devnet" ]] && (( v < TN_MAINNET_MIN_SYSTEMD )); then
+        _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04): the BLS passphrase must be an encrypted credential there. Upgrade the OS and run setup again." "$fn"
         return 1
     fi
-    print_ok "TPM seal verified successfully"
-    chmod 600 "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
-    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv" 2>/dev/null || true
-    print_ok "Passphrase sealed to TPM: ${config_dir}/bls-tpm.pub / bls-tpm.priv"
+    if (( v < TN_CRED_MIN_SYSTEMD )); then
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (needs ${TN_CRED_MIN_SYSTEMD}, Ubuntu 24.04): the BLS passphrase stays in a root-only file (${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bls-passphrase)." "$fn"
+    fi
+    return 0
+}
 
-    # Show passphrase once and offer to delete plaintext file
-    echo ""
-    print_warn "================================================================"
-    print_warn "  IMPORTANT -- STORE YOUR PASSPHRASE OFFLINE NOW"
-    print_warn "================================================================"
-    print_warn "Your BLS passphrase has been sealed to this machine's TPM chip."
-    print_warn "If this machine is rebuilt or the TPM is reset, you will need"
-    print_warn "your passphrase to re-seal it."
-    echo ""
-    print_info "Your BLS passphrase is:"
-    echo ""
-    echo "    ${passphrase}"
-    echo ""
-    print_warn "Write this down and store it in a password manager or hardware"
-    print_warn "wallet. This is the ONLY time it will be shown."
-    print_warn "================================================================"
-    echo ""
+# tn_credential_key NETWORK -- the systemd-creds key for this host: host+tpm2 when
+# `systemd-creds has-tpm2` reports a usable TPM, else host. A host key alone is
+# refused (rc 1) off testnet and devnet unless TN_ALLOW_NO_TPM=1 (--allow-no-tpm).
+tn_credential_key() {
+    local net="${1:-}"
+    if systemd-creds has-tpm2 >/dev/null 2>&1; then
+        printf 'host+tpm2\n'
+        return 0
+    fi
+    if [[ "$net" != "testnet" && "$net" != "devnet" && "${TN_ALLOW_NO_TPM:-0}" != "1" ]]; then
+        print_warn "No usable TPM2 on this host: on mainnet the credential would rest on the host key alone. Pass --allow-no-tpm to accept that." >&2
+        return 1
+    fi
+    printf 'host\n'
+}
 
-    local confirm_text
-    read -r -p "  Type CONFIRMED to delete the plaintext passphrase file, or Enter to keep it: " confirm_text
-    if [[ "$confirm_text" == "CONFIRMED" ]]; then
-        rm -f "$passphrase_file"
-        print_ok "Plaintext passphrase file deleted. TPM is the only copy on this machine."
-        print_warn "Ensure you have stored your passphrase offline before continuing."
+# tn_pcrs_ok LIST -- rc 0 for a PCR list systemd-creds takes: indexes 0-23
+# joined by + or , (e.g. 7 or 0+7).
+tn_pcrs_ok() {
+    local list="${1:-}" p IFS='+,'
+    [[ "$list" =~ ^[0-9]{1,2}([+,][0-9]{1,2})*$ ]] || return 1
+    for p in $list; do
+        (( 10#$p <= 23 )) || return 1
+    done
+    return 0
+}
+
+# _tn_cred_pass_plain -- rc 0 when TN_CRED_PASS is set, not empty and not
+# exported; 1 when it is unset or empty; 2 (with a warning) when it is exported.
+_tn_cred_pass_plain() {
+    local decl
+    decl="$(declare -p TN_CRED_PASS 2>/dev/null)" || return 1
+    decl="${decl#declare -}"
+    decl="${decl%% *}"
+    if [[ "$decl" == *x* ]]; then
+        print_warn "TN_CRED_PASS is exported; it must be a plain shell variable" >&2
+        return 2
+    fi
+    [[ -n "${TN_CRED_PASS:-}" ]]
+}
+
+# _tn_cred_digest -- sha256 (hex) of TN_CRED_PASS plus a newline: what the
+# credential must decrypt to.
+_tn_cred_digest() {
+    local d
+    d="$(printf '%s\n' "$TN_CRED_PASS" | sha256sum)" || return 1  # passphrase-stdin-ok stdout is the sha256sum pipe
+    printf '%s\n' "${d%% *}"
+}
+
+# tn_store_credential DEST KEY [PCRS] -- encrypt TN_CRED_PASS (plus a newline)
+# with systemd-creds into DEST (root 0600): stdin to stdout into DEST.new through
+# tn_write_root_file, decrypt it again and compare the sha256 digests, then rename
+# it over DEST. KEY is host or host+tpm2; PCRS (host+tpm2 only) binds it to those
+# PCRs. The value is never on a command line or in a file of its own: printf (a
+# builtin) writes it into systemd-creds' stdin through a pipe, and the writer
+# reads the ciphertext from a process substitution in this shell, so
+# TN_INFLIGHT_TMP and TN_INFLIGHT_CRED (DEST.new) name what an EXIT trap must
+# remove. DEST and DEST.new are checked before anything is encrypted. rc 0
+# stored, 1 refused (nothing changed), 2 failed (DEST untouched, DEST.new gone).
+tn_store_credential() {
+    local dest="${1:-}" key="${2:-}" pcrs="${3:-}" new want got dir rc=0
+    local -a opt
+    _tn_cred_pass_plain 2>/dev/null || { print_warn "tn_store_credential: no passphrase to store (TN_CRED_PASS empty or exported)" >&2; return 1; }
+
+    case "$key" in
+        host|host+tpm2) ;;
+        *) print_warn "tn_store_credential: unknown key '${key}' (host or host+tpm2)" >&2; return 1 ;;
+    esac
+    if [[ -n "$pcrs" ]] && { [[ "$key" != "host+tpm2" ]] || ! tn_pcrs_ok "$pcrs"; }; then
+        print_warn "tn_store_credential: PCR binding '${pcrs}' needs a TPM and a list such as 7 or 0+7" >&2
+        return 1
+    fi
+    [[ "$dest" == /* && "$dest" != */ ]] || { print_warn "tn_store_credential: '${dest}' is not an absolute file path" >&2; return 1; }
+    new="${dest}.new"
+    dir="${dest%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if [[ -L "$dest" || -d "$dest" || -L "$new" || -d "$new" ]] || ! tn_root_dir_ok "$dir"; then
+        print_warn "tn_store_credential: refusing ${dest}: it or ${new##*/} is a symlink or a directory, or ${dir} is not a root-owned, root-only-writable directory; nothing changed" >&2
+        return 1
+    fi
+    command -v systemd-creds >/dev/null 2>&1 || { print_warn "tn_store_credential: systemd-creds is not installed" >&2; return 2; }
+    opt=("--name=${TN_CRED_NAME}" "--with-key=${key}")
+    [[ -n "$pcrs" ]] && opt+=("--tpm2-pcrs=${pcrs}")
+    want="$(_tn_cred_digest)" || return 2
+    TN_INFLIGHT_CRED="$new"
+    # The substitution drops an inherited ERR trap: a caller running with errtrace
+    # must not run its error handler in that subshell.
+    tn_write_root_file "$new" 0600 < <(trap - ERR; printf '%s\n' "$TN_CRED_PASS" | systemd-creds encrypt "${opt[@]}" - - 2>/dev/null) || rc=$?  # passphrase-stdin-ok stdin of systemd-creds, a pipe
+    if [[ $rc -ne 0 || ! -s "$new" ]]; then
+        rm -f -- "$new" 2>/dev/null || true
+        TN_INFLIGHT_CRED=""
+        if [[ $rc -eq 1 ]]; then
+            print_warn "tn_store_credential: writing ${new} was refused; nothing changed" >&2
+            return 1
+        fi
+        print_warn "tn_store_credential: systemd-creds encrypt failed; nothing changed" >&2
+        return 2
+    fi
+    got="$(systemd-creds decrypt "--name=${TN_CRED_NAME}" "$new" - 2>/dev/null | sha256sum)" || got=""
+    got="${got%% *}"
+    if [[ "$got" != "$want" ]]; then
+        rm -f -- "$new" 2>/dev/null || true
+        TN_INFLIGHT_CRED=""
+        print_warn "tn_store_credential: the new credential does not decrypt to the passphrase; nothing changed" >&2
+        return 2
+    fi
+    if ! mv -fT -- "$new" "$dest" 2>/dev/null; then
+        rm -f -- "$new" 2>/dev/null || true
+        TN_INFLIGHT_CRED=""
+        print_warn "tn_store_credential: could not move the credential into place at ${dest}" >&2
+        return 2
+    fi
+    TN_INFLIGHT_CRED=""
+    return 0
+}
+
+# tn_has_embedded_passphrase UNIT -- rc 0 when UNIT writes the passphrase itself
+# (an Environment= line or an inline docker -e holding TN_BLS_PASSPHRASE=), as
+# units from before the start-script design did. Comment lines do not count.
+tn_has_embedded_passphrase() {
+    local unit="${1:-}"
+    [[ -f "$unit" ]] || return 1
+    TN_HEP_KEY="TN_BLS_PASSPHRASE=" awk '
+        BEGIN { k = ENVIRON["TN_HEP_KEY"] }
+        /^[ \t]*[#;]/ { next }
+        index($0, k) { found = 1; exit }
+        END { exit found ? 0 : 1 }' "$unit" 2>/dev/null
+}
+
+# _tn_unit_pass_read UNIT -- set TN_CRED_PASS (not exported) to the passphrase
+# UNIT holds: Environment="TN_BLS_PASSPHRASE=..." (quoted or not) or an inline
+# -e TN_BLS_PASSPHRASE=... . awk reads the unit and gets the key name from its
+# environment; the value only ever crosses a pipe. A reference ($NAME) is not a
+# value. rc 1 when there is no value, two different ones, or one holding a
+# quote, backslash, $ or % (systemd would have changed it on the way).
+_tn_unit_pass_read() {
+    local unit="${1:-}" v
+    [[ -f "$unit" && ! -L "$unit" ]] || return 1
+    v="$(TN_UPR_KEY="TN_BLS_PASSPHRASE=" LC_ALL=C awk '
+        BEGIN { k = ENVIRON["TN_UPR_KEY"]; n = 0; bad = 0; q = "\047"; dq = "\"" }
+        /^[ \t]*[#;]/ { next }
+        {
+            line = $0
+            while ((i = index(line, k)) > 0) {
+                pre = (i > 1) ? substr(line, i - 1, 1) : ""
+                rest = substr(line, i + length(k))
+                if (pre == dq || pre == q) {
+                    j = index(rest, pre)
+                    if (j == 0) { bad = 1; break }
+                    v = substr(rest, 1, j - 1)
+                    line = substr(rest, j + 1)
+                } else if (match(rest, /[ \t]/)) {
+                    v = substr(rest, 1, RSTART - 1)
+                    line = substr(rest, RSTART)
+                } else {
+                    v = rest
+                    line = ""
+                }
+                if (substr(v, 1, 1) == "$") continue
+                if (n == 0) { val = v; n = 1 } else if (v != val) { bad = 1 }
+            }
+        }
+        END {
+            if (bad || n == 0 || val == "" || val ~ /["\047\\$%]/) exit 1
+            printf "%s", val
+        }' "$unit" 2>/dev/null)" || return 1
+    [[ -n "$v" ]] || return 1
+    TN_CRED_PASS="$v"
+    v=""
+    return 0
+}
+
+# _tn_cred_plain_ok FILE -- rc 0 when FILE is a regular root-owned file (not a
+# symlink): a stored plaintext passphrase this library may read.
+_tn_cred_plain_ok() {
+    [[ -f "${1:-}" && ! -L "${1:-}" && "$(stat -c %u -- "$1" 2>/dev/null)" == "0" ]]
+}
+
+# _tn_shred FILE... -- shred -u each regular FILE (best effort on SSDs, copy-on-
+# write and cloud disks), then rm -f it; a symlink is unlinked, never followed.
+
+_tn_shred() {
+    local f
+    for f in "$@"; do
+        if [[ -L "$f" ]]; then
+            rm -f -- "$f" 2>/dev/null || true
+        elif [[ -f "$f" ]]; then
+            if command -v shred >/dev/null 2>&1; then
+                shred -u -- "$f" 2>/dev/null || true
+            fi
+            rm -f -- "$f" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# _tn_cred_old_copies SVC CONF [KEEP_PLAIN] -- print (one per line) the files that
+# still hold the passphrase after a move: CONF/bls-passphrase (unless KEEP_PLAIN
+# is 1: it is the new home), the TPM blobs, unit backups beside the unit or in
+# the backup dir that contain TN_BLS_PASSPHRASE=, and passphrase-file backups in
+# the backup dir.
+_tn_cred_old_copies() {
+    local svc="$1" conf="$2" keep="${3:-0}" udir bdir f
+    udir="${TN_ROOT_PREFIX:-}/etc/systemd/system"
+    bdir="${TN_BACKUP_DIR:-/var/backups/telcoin}"
+    if [[ "$keep" != "1" ]]; then
+        f="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
+        [[ -e "$f" || -L "$f" ]] && printf '%s\n' "$f"
+    fi
+    for f in "${TN_ROOT_PREFIX:-}${conf}/bls-tpm.pub" "${TN_ROOT_PREFIX:-}${conf}/bls-tpm.priv"; do
+        [[ -e "$f" || -L "$f" ]] && printf '%s\n' "$f"
+    done
+    for f in "${udir}/${svc}".*bak* "${bdir}"/*; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        case "${f##*/}" in
+            bls-passphrase*) printf '%s\n' "$f"; continue ;;
+        esac
+        grep -q 'TN_BLS_PASSPHRASE=' "$f" 2>/dev/null && printf '%s\n' "$f"
+    done
+    return 0
+}
+
+# _tn_cred_confirm SVC [progress-fn] -- rc 0 once SVC is active and its RPC
+# answers (the node read its key), within TN_CRED_HEALTH_SECS (default 300).
+_tn_cred_confirm() {
+    local svc="$1" fn="${2:-}" url limit waited=0
+    limit="${TN_CRED_HEALTH_SECS:-300}"
+    [[ "$limit" =~ ^[0-9]{1,4}$ ]] || limit=300
+    url="$(tn_local_rpc_url 2>/dev/null)" || url=""
+    while :; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null && [[ -n "$url" ]] \
+            && tn_rpc_call "$url" eth_chainId '[]' 5 >/dev/null 2>&1; then
+            _tn_guard_say log "${svc} is running and answering RPC: it unlocked its key." "$fn"
+            return 0
+        fi
+        (( waited < limit )) || break
+        sleep 3
+        waited=$(( waited + 3 ))
+    done
+    return 1
+}
+
+# _tn_meta_keep KEY -- print "1<value>" when KEY is in .node-meta, "0" when it is
+# not (for _tn_meta_put). rc 2 when KEY is there more than once.
+_tn_meta_keep() {
+    local v rc=0
+    v="$(meta_get "$1" 2>/dev/null)" || rc=$?
+    case "$rc" in
+        0) printf '1%s\n' "$v" ;;
+        2) return 2 ;;
+        *) printf '0\n' ;;
+    esac
+}
+
+# _tn_meta_put KEY SAVED -- set KEY to the value _tn_meta_keep saved ("1<v>"), or
+# remove it ("0").
+_tn_meta_put() {
+    local meta
+    meta="$(node_meta_path 2>/dev/null)" || return 1
+    if [[ "${2:0:1}" == "1" ]]; then
+        meta_set "$1" "${2:1}" "$meta"
     else
-        print_info "Plaintext file kept at: ${passphrase_file}"
-        print_info "The node will use TPM first, falling back to the file if TPM is unavailable."
+        meta_unset "$1" "$meta"
     fi
 }
 
-# Remove TPM sealed files for a node type (called during node removal)
-tpm_remove_sealed_files() {
-    local config_dir="$1"
-    if [[ -f "${config_dir}/bls-tpm.pub" ]] || [[ -f "${config_dir}/bls-tpm.priv" ]]; then
-        print_step "Removing TPM sealed passphrase files..."
-        rm -f "${config_dir}/bls-tpm.pub" "${config_dir}/bls-tpm.priv"
-        print_ok "TPM sealed files removed"
+# The files _tn_cred_switch may change, with their backups: path, backup ("-"
+# when the file did not exist), sha256, mode, group. Filled by _tn_cred_save.
+_TN_CS_PATH=()
+_TN_CS_BAK=()
+_TN_CS_SUM=()
+_TN_CS_MODE=()
+_TN_CS_GRP=()
+# Where a passphrase move stands, for the EXIT traps (_tn_cred_on_exit): "" none;
+# saving (backups being taken, nothing changed yet); written (files changed, no
+# restart issued); restarting (the restart on the new files was issued);
+# cleanup (the node came back; old copies are being shredded). With it: the
+# service, config dir, whether the plaintext file stays (1), and the three
+# .node-meta values to put back (_tn_meta_keep form).
+_TN_CS_STATE=""
+_TN_CS_SVC=""
+_TN_CS_CONF=""
+_TN_CS_KEEP=0
+_TN_CS_META=()
+# What _tn_cred_on_exit did, one sentence for the caller's last report.
+TN_CRED_EXIT_MSG=""
+
+# _tn_cred_save PATH -- record PATH for _tn_cred_restore, backing it up first
+# when it exists (tn_backup_file). rc 1 when the backup failed.
+_tn_cred_save() {
+    local p="$1" out mg
+    if [[ -f "$p" && ! -L "$p" ]]; then
+        mg="$(stat -c '%a %G' -- "$p" 2>/dev/null)" || return 1
+        out="$(tn_backup_file "$p" "${p##*/}")" || return 1
+        _TN_CS_BAK+=("${out% *}")
+        _TN_CS_SUM+=("${out##* }")
+        _TN_CS_MODE+=("${mg% *}")
+        _TN_CS_GRP+=("${mg#* }")
+    elif [[ -e "$p" || -L "$p" ]]; then
+        return 1
+    else
+        _TN_CS_BAK+=("-")
+        _TN_CS_SUM+=("-")
+        _TN_CS_MODE+=("-")
+        _TN_CS_GRP+=("-")
     fi
+    _TN_CS_PATH+=("$p")
+}
+
+# _tn_cred_restore -- put every saved file back (a file that did not exist is
+# shredded); rc 1 when one could not be restored.
+_tn_cred_restore() {
+    local i rc=0
+    for ((i = 0; i < ${#_TN_CS_PATH[@]}; i++)); do
+        if [[ "${_TN_CS_BAK[$i]}" == "-" ]]; then
+            _tn_shred "${_TN_CS_PATH[$i]}"
+        else
+            tn_restore_backup "${_TN_CS_BAK[$i]}" "${_TN_CS_SUM[$i]}" "${_TN_CS_PATH[$i]}" "${_TN_CS_MODE[$i]}" "${_TN_CS_GRP[$i]}" || rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# _tn_cred_drop_saved -- shred the backups _tn_cred_save made (they may hold the
+# passphrase) and forget them.
+_tn_cred_drop_saved() {
+    local b
+    for b in ${_TN_CS_BAK[@]+"${_TN_CS_BAK[@]}"}; do
+        [[ "$b" == "-" ]] || _tn_shred "$b"
+    done
+    _TN_CS_PATH=(); _TN_CS_BAK=(); _TN_CS_SUM=(); _TN_CS_MODE=(); _TN_CS_GRP=()
+}
+
+# _tn_cred_meta_back -- put the three .node-meta keys back as _TN_CS_META saved them.
+_tn_cred_meta_back() {
+    _tn_meta_put PASSPHRASE_METHOD "${_TN_CS_META[0]:-0}" || true
+    _tn_meta_put CREDENTIAL_KEY "${_TN_CS_META[1]:-0}" || true
+    _tn_meta_put CREDENTIAL_PCRS "${_TN_CS_META[2]:-0}" || true
+}
+
+# _tn_cred_finish SVC CONF KEEP -- after the node came back on the new delivery:
+# shred every old copy of the passphrase (_tn_cred_old_copies), the backups, and
+# the start wrapper an older release ran (${DEFAULT_INSTALL_DIR}/start-SVC.sh,
+# nothing runs it any more).
+_tn_cred_finish() {
+    local svc="$1" conf="$2" keep="${3:-0}" f
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && _tn_shred "$f"
+    done < <(_tn_cred_old_copies "$svc" "$conf" "$keep")
+    _tn_cred_drop_saved
+    f="${TN_ROOT_PREFIX:-}${DEFAULT_INSTALL_DIR:-/opt/telcoin}/start-${svc}.sh"
+    if [[ -f "$f" || -L "$f" ]] \
+        && ! grep -qF -- "start-${svc}.sh" "${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service" 2>/dev/null; then
+        rm -f -- "$f" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# _tn_cred_on_exit -- for the EXIT traps (tn_remove_inflight_tmp calls it): finish
+# or undo the passphrase move _tn_cred_switch was in when the run was stopped, and
+# set TN_CRED_EXIT_MSG to what was done. Before any write the backups are
+# shredded; after the writes and before the restart every file and .node-meta key
+# goes back (daemon-reload; no restart); after the restart was issued the new
+# files stay and the backups are kept and named; after the node came back the
+# old copies are shredded. Never fails.
+_tn_cred_on_exit() {
+    local st="${_TN_CS_STATE:-}"
+    _TN_CS_STATE=""
+    TN_CRED_EXIT_MSG=""
+    case "$st" in
+        saving)
+            _tn_cred_drop_saved
+            TN_CRED_EXIT_MSG="stopped before the passphrase move changed anything; nothing was changed"
+            ;;
+        written)
+            _tn_cred_meta_back
+            if _tn_cred_restore; then
+                systemctl daemon-reload >/dev/null 2>&1 || true
+                _tn_cred_drop_saved
+                TN_CRED_EXIT_MSG="stopped during the passphrase move, before the restart: every file it changed and .node-meta are back as they were"
+            else
+                systemctl daemon-reload >/dev/null 2>&1 || true
+                TN_CRED_EXIT_MSG="stopped during the passphrase move, before the restart, and putting the files back failed: restore them from the backups (root only): ${_TN_CS_BAK[*]}"
+            fi
+            ;;
+        restarting)
+            TN_CRED_EXIT_MSG="stopped after ${_TN_CS_SVC} was restarted on the new passphrase delivery, before it was confirmed: the new files stay; the previous ones are kept (root only): ${_TN_CS_BAK[*]}. Check journalctl -u ${_TN_CS_SVC}, then run sudo ./edit-config.sh --migrate-credential again to shred the old copies"
+            ;;
+        cleanup)
+            _tn_cred_finish "$_TN_CS_SVC" "$_TN_CS_CONF" "$_TN_CS_KEEP"
+            TN_CRED_EXIT_MSG="stopped after the passphrase move completed: ${_TN_CS_SVC} runs on the new delivery and the old copies were shredded"
+            ;;
+    esac
+    return 0
+}
+
+# _tn_cred_switch TARGET KEY PCRS [progress-fn] [RESTART] -- move the installed node to the
+# passphrase in TN_CRED_PASS: TARGET credential (encrypted with KEY, bound to PCRS
+# when given) or stdin (a root 0600 file, for hosts below systemd 250). When the
+# node will restart, the committee guard runs first, before anything is written.
+# Backs up the unit, start script, node.env and both passphrase files; stores the
+# passphrase; records PASSPHRASE_METHOD, CREDENTIAL_KEY and CREDENTIAL_PCRS;
+# re-renders the unit and start script (old inline and embedded-passphrase units
+# included, tn_rerender_node_launch); reloads systemd; waits for the restart
+# window; restarts and confirms the node unlocked its key; then shreds every old
+# copy of the passphrase, the backups and an older release's start wrapper. When
+# the restart does not come up, every file and .node-meta key goes back and the
+# node restarts on them (no window wait). RESTART no skips the guard, the wait
+# and the restart: the new files take effect at the next start; the default
+# (auto) is no for a node that is not running and yes otherwise. _TN_CS_STATE
+# tracks the steps for the EXIT traps (_tn_cred_on_exit). The caller holds the
+# update lock. rc 0 done, 1 refused (nothing changed), 2 failed and rolled back, 3
+# the rollback restart failed too (the backups stay; their paths are printed).
+_tn_cred_switch() {
+    local target="$1" key="$2" pcrs="$3" fn="${4:-}" restart="${5:-auto}" svc conf form p="" rc=0 keep=0 plain
+    # shellcheck disable=SC2034 # read by tn_rerender_node_launch (dynamic scope)
+    local m_method m_key m_pcrs PASSPHRASE_METHOD="$1" _TN_RERENDER_LEGACY=1
+    svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }
+    conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    if [[ "$restart" == "auto" ]]; then
+        restart=no
+        systemctl is-active --quiet "$svc" 2>/dev/null && restart=yes
+    fi
+    if [[ "$target" != "credential" && "$(tn_detect_network 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
+        _tn_guard_say warn "Off testnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04); nothing changed." "$fn"
+        return 1
+    fi
+    m_method="$(_tn_meta_keep PASSPHRASE_METHOD)" || p=PASSPHRASE_METHOD
+    m_key="$(_tn_meta_keep CREDENTIAL_KEY)" || p=CREDENTIAL_KEY
+    m_pcrs="$(_tn_meta_keep CREDENTIAL_PCRS)" || p=CREDENTIAL_PCRS
+    if [[ -n "$p" ]]; then
+        _tn_guard_say warn "${p} is set more than once in .node-meta; remove the extra lines first." "$fn"
+        return 1
+    fi
+    # The committee guard before the first write: a refusal changes nothing.
+    if [[ "$restart" == "yes" ]] && ! tn_committee_down_guard "" "$fn"; then
+        _tn_guard_say warn "Restarting ${svc} now would put the committee's quorum at risk; nothing was changed (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
+        return 1
+    fi
+    form=source
+    [[ "$(meta_get INSTALL_METHOD 2>/dev/null || true)" == "docker" ]] && form=docker
+    [[ "$target" == "stdin" ]] && keep=1
+    _tn_cred_drop_saved
+    _TN_CS_SVC="$svc"
+    _TN_CS_CONF="$conf"
+    _TN_CS_KEEP="$keep"
+    _TN_CS_META=("$m_method" "$m_key" "$m_pcrs")
+    _TN_CS_STATE=saving
+    for p in "/etc/systemd/system/${svc}.service" "$(tn_start_script_path "$form")" "${conf}/node.env" \
+        "${conf}/bls-passphrase.cred" "${conf}/bls-passphrase"; do
+        if ! _tn_cred_save "${TN_ROOT_PREFIX:-}${p}"; then
+            _tn_cred_drop_saved
+            _TN_CS_STATE=""
+            _tn_guard_say warn "Could not back up ${p}; nothing changed." "$fn"
+            return 1
+        fi
+    done
+    # 1. The passphrase in its new form.
+    _TN_CS_STATE=written
+    if [[ "$target" == "credential" ]]; then
+        tn_store_credential "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase.cred" "$key" "$pcrs" || rc=$?
+    else
+        plain="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
+        tn_write_root_file "$plain" 0600 < <(trap - ERR; printf '%s\n' "$TN_CRED_PASS") || rc=$?  # passphrase-stdin-ok stdin of the root writer, a pipe
+    fi
+    if [[ $rc -ne 0 ]]; then
+        _tn_cred_restore || true
+        _tn_cred_drop_saved
+        _TN_CS_STATE=""
+        _tn_guard_say warn "Could not store the passphrase; nothing changed." "$fn"
+        [[ $rc -eq 1 ]] && return 1
+        return 2
+    fi
+    # 2. Record the method; render the unit and start script for it.
+    if [[ "$target" == "credential" ]]; then
+        _tn_meta_put PASSPHRASE_METHOD 1credential && _tn_meta_put CREDENTIAL_KEY "1${key}" \
+            && _tn_meta_put CREDENTIAL_PCRS "$([[ -n "$pcrs" ]] && printf '1%s' "$pcrs" || printf 0)" || rc=2
+    else
+        _tn_meta_put PASSPHRASE_METHOD 1stdin && _tn_meta_put CREDENTIAL_KEY 0 && _tn_meta_put CREDENTIAL_PCRS 0 || rc=2
+    fi
+    [[ $rc -eq 0 ]] && { tn_rerender_node_launch "" "$fn" || rc=$?; }
+    [[ $rc -eq 0 ]] && { systemctl daemon-reload >/dev/null 2>&1 || rc=2; }
+    if [[ $rc -ne 0 ]]; then
+        _tn_cred_meta_back
+        _tn_cred_restore || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        _tn_cred_drop_saved
+        _TN_CS_STATE=""
+        _tn_guard_say warn "The passphrase delivery of ${svc} was not changed." "$fn"
+        [[ $rc -eq 1 ]] && return 1
+        return 2
+    fi
+    # 3. A stopped node takes the new files at its next start.
+    if [[ "$restart" == "no" ]]; then
+        _TN_CS_STATE=cleanup
+        _tn_cred_finish "$svc" "$conf" "$keep"
+        _TN_CS_STATE=""
+        _tn_guard_say log "${svc} is stopped: the new passphrase delivery takes effect when it starts." "$fn"
+        return 0
+    fi
+    # 4. The restart window, the committee guard again (the wait can last up to
+    # TN_EPOCH_WAIT_MAX), then the restart. A refusal now puts every file back.
+    tn_wait_restart_window "$(tn_local_rpc_url 2>/dev/null || true)" "$fn" || true
+    if ! tn_committee_down_guard "" "$fn"; then
+        _tn_cred_meta_back
+        _tn_cred_restore || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        _tn_cred_drop_saved
+        _TN_CS_STATE=""
+        _tn_guard_say warn "Restarting ${svc} after the epoch wait would put the committee's quorum at risk; the passphrase delivery was not changed (TN_ALLOW_QUORUM_RISK=1 overrides)." "$fn"
+        return 1
+    fi
+    _TN_CS_STATE=restarting
+    if systemctl restart "$svc" >/dev/null 2>&1 && _tn_cred_confirm "$svc" "$fn"; then
+        # 5. Done: every old copy of the passphrase goes, then the backups.
+        _TN_CS_STATE=cleanup
+        _tn_cred_finish "$svc" "$conf" "$keep"
+        _TN_CS_STATE=""
+        if id -nG "${SERVICE_USER:-telcoin}" 2>/dev/null | tr ' ' '\n' | grep -qx tss; then
+            gpasswd -d "${SERVICE_USER:-telcoin}" tss >/dev/null 2>&1 || true
+        fi
+        if [[ "$target" == "credential" ]]; then
+            _tn_guard_say log "${svc} reads its passphrase from the encrypted credential ${conf}/bls-passphrase.cred (${key}${pcrs:+, PCRs ${pcrs}}). Old copies were shredded (shred is best effort on SSDs, copy-on-write and cloud disks)." "$fn"
+        else
+            _tn_guard_say log "${svc} reads its passphrase from ${conf}/bls-passphrase (root only). Old copies were shredded (shred is best effort on SSDs, copy-on-write and cloud disks)." "$fn"
+        fi
+        return 0
+    fi
+    _tn_guard_say warn "${svc} did not come back with the new passphrase delivery; restoring its previous files." "$fn"
+    _tn_cred_meta_back
+    rc=0
+    _tn_cred_restore || rc=3
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [[ $rc -eq 0 ]] && systemctl restart "$svc" >/dev/null 2>&1 && _tn_cred_confirm "$svc" "$fn"; then
+        _tn_cred_drop_saved
+        _TN_CS_STATE=""
+        return 2
+    fi
+    _TN_CS_STATE=""
+    _tn_guard_say warn "${svc} did not come back on its previous files either. Backups (root only): ${_TN_CS_BAK[*]}" "$fn"
+    return 3
+}
+
+# _tn_cred_mainnet_floor NETWORK [progress-fn] -- rc 1 (with the reason) when
+# NETWORK is not testnet or devnet and systemd is below TN_MAINNET_MIN_SYSTEMD:
+# a mainnet node keeps its credential on the OS floor setup requires.
+_tn_cred_mainnet_floor() {
+    local net="${1:-}" fn="${2:-}" v
+    [[ "$net" == "testnet" || "$net" == "devnet" ]] && return 0
+    v="$(tn_systemd_version 2>/dev/null)" || v=0
+    (( v >= TN_MAINNET_MIN_SYSTEMD )) && return 0
+    _tn_guard_say warn "systemd ${v} is below the mainnet floor (${TN_MAINNET_MIN_SYSTEMD}, Ubuntu 24.04); upgrade the OS first. Nothing changed." "$fn"
+    return 1
+}
+
+# tn_migrate_credential [progress-fn] -- move the installed node's passphrase to
+# the encrypted credential (_tn_cred_switch): from TN_CRED_PASS when the caller
+# set it (a plain variable: an operator who typed it), else from a unit that
+# embeds it (tn_migrate_embedded_passphrase), else from <config dir>/bls-passphrase.
+# The key is tn_credential_key's choice (TN_ALLOW_NO_TPM=1 accepts host alone on
+# mainnet); TN_BIND_PCRS binds it to PCRs. The caller holds the update lock. rc 0
+# done (or already done), 1 refused (systemd below 250, or below
+# TN_MAINNET_MIN_SYSTEMD off testnet and devnet, no systemd-creds, no stored
+# passphrase, one with a line break or edge whitespace, no TPM on mainnet), 2
+# failed and rolled back, 3 the rollback failed too.
+tn_migrate_credential() {
+    local fn="${1:-}" v svc conf unit plain method net key rc=0 cr=$'\r'
+    if ! tn_creds_supported; then
+        v="$(tn_systemd_version 2>/dev/null)" || v="unknown"
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (systemd ${TN_CRED_MIN_SYSTEMD} with systemd-creds, Ubuntu 24.04, is needed); nothing changed." "$fn"
+        return 1
+    fi
+    svc="$(tn_resolve_service 2>/dev/null)" || { _tn_guard_say warn "No node service found." "$fn"; return 1; }
+    conf="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service"
+    plain="${TN_ROOT_PREFIX:-}${conf}/bls-passphrase"
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    _tn_cred_mainnet_floor "$net" "$fn" || return 1
+    if tn_has_embedded_passphrase "$unit"; then
+        tn_migrate_embedded_passphrase "$unit" "$fn"
+        return $?
+    fi
+    method="$(meta_get PASSPHRASE_METHOD 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        _tn_guard_say warn "PASSPHRASE_METHOD is set more than once in .node-meta; remove the extra lines first." "$fn"
+        return 1
+    fi
+    if [[ "$method" == "credential" && -f "${TN_ROOT_PREFIX:-}${conf}/bls-passphrase.cred" && ! -e "$plain" ]]; then
+        _tn_guard_say log "${svc} already reads its passphrase from the encrypted credential." "$fn"
+        return 0
+    fi
+    rc=0
+    _tn_cred_pass_plain || rc=$?
+    [[ $rc -eq 2 ]] && return 1
+    if [[ $rc -ne 0 ]]; then
+        if ! _tn_cred_plain_ok "$plain"; then
+            _tn_guard_say warn "No stored passphrase to move (${conf}/bls-passphrase is missing or not a root-owned file); type it instead: sudo ./edit-config.sh --migrate-credential" "$fn"
+            return 1
+        fi
+        if ! _tn_passfile_trim_safe "$plain"; then
+            _tn_guard_say warn "${conf}/bls-passphrase has more than one line or ends in whitespace; change the passphrase with edit-config.sh first." "$fn"
+            return 1
+        fi
+        TN_CRED_PASS=""
+        IFS= read -r TN_CRED_PASS < "$plain" || true
+        TN_CRED_PASS="${TN_CRED_PASS%"$cr"}"
+    fi
+    if ! tn_passphrase_ok "$TN_CRED_PASS"; then
+        TN_CRED_PASS=""
+        _tn_guard_say warn "The passphrase is empty, holds a line break, or starts or ends with whitespace, which the credential cannot carry; change it with edit-config.sh first." "$fn"
+        return 1
+    fi
+    if ! key="$(tn_credential_key "$net")"; then
+        TN_CRED_PASS=""
+        return 1
+    fi
+    rc=0
+    _tn_cred_switch credential "$key" "${TN_BIND_PCRS:-}" "$fn" || rc=$?
+    TN_CRED_PASS=""
+    return "$rc"
+}
+
+
+# tn_migrate_embedded_passphrase UNIT [progress-fn] -- move a unit that embeds the
+# passphrase (tn_has_embedded_passphrase) to the current unit and start script,
+# with the value stored as the encrypted credential, or on hosts below systemd 250
+# (testnet only) as a root 0600 file. The value is read by awk from the unit
+# (_tn_unit_pass_read) unless the caller set TN_CRED_PASS; it never reaches a
+# command line. Every unit backup holding TN_BLS_PASSPHRASE= is shredded after
+# the node came back. rc as tn_migrate_credential; rc 0 also when UNIT embeds
+# nothing.
+tn_migrate_embedded_passphrase() {
+    local unit="${1:-}" fn="${2:-}" net key="" target=stdin rc=0
+    if ! tn_has_embedded_passphrase "$unit"; then
+        _tn_guard_say log "${unit} does not hold a passphrase." "$fn"
+        return 0
+    fi
+    _tn_cred_pass_plain || rc=$?
+    [[ $rc -eq 2 ]] && return 1
+    if [[ $rc -ne 0 ]] && ! _tn_unit_pass_read "$unit"; then
+        _tn_guard_say warn "The passphrase in ${unit} cannot be read back as one plain value; type it instead: sudo ./edit-config.sh --migrate-credential" "$fn"
+        return 1
+    fi
+    rc=0
+    if ! tn_passphrase_ok "$TN_CRED_PASS"; then
+        TN_CRED_PASS=""
+        _tn_guard_say warn "The passphrase in ${unit} starts or ends with whitespace, which the new delivery would cut; change it with edit-config.sh option 5 after typing it: sudo ./edit-config.sh --migrate-credential" "$fn"
+        return 1
+    fi
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if ! _tn_cred_mainnet_floor "$net" "$fn"; then
+        TN_CRED_PASS=""
+        return 1
+    fi
+    if tn_creds_supported; then
+        target=credential
+        if ! key="$(tn_credential_key "$net")"; then
+            TN_CRED_PASS=""
+            return 1
+        fi
+    fi
+    _tn_cred_switch "$target" "$key" "${TN_BIND_PCRS:-}" "$fn" || rc=$?
+    TN_CRED_PASS=""
+    return "$rc"
+}
+
+# tn_host_audit -- print a summary of host hardening for the node, one
+# "ok|warn|info  text" line per fact: systemd version against the floor, how the
+# BLS passphrase is stored (method, key, files; never the value), TPM2 presence,
+# a dm-crypt layer under the data and config dirs, core dumps (LimitCORE= of the
+# unit, fs.suid_dumpable, kernel.core_pattern) and kernel.yama.ptrace_scope.
+# rc 0 when nothing warned, 1 otherwise. Reads only.
+tn_host_audit() {
+    local warn=0 v meta method key svc unit conf data cred plain d src types s pat
+    conf="${TN_ROOT_PREFIX:-}${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    _tn_audit_say() {
+        [[ "$1" == "warn" ]] && warn=1
+        printf '%-5s %s\n' "$1" "$2"
+    }
+    if v="$(tn_systemd_version)"; then
+        if (( v >= TN_CRED_MIN_SYSTEMD )); then
+            _tn_audit_say ok "systemd ${v} (encrypted credentials supported)"
+        else
+            _tn_audit_say warn "systemd ${v}: below ${TN_CRED_MIN_SYSTEMD}, no encrypted credentials (mainnet needs Ubuntu 24.04)"
+        fi
+    else
+        _tn_audit_say warn "systemd version unknown"
+    fi
+    method="$(meta_get PASSPHRASE_METHOD "$meta" 2>/dev/null)" || method=""
+    key="$(meta_get CREDENTIAL_KEY "$meta" 2>/dev/null)" || key=""
+    cred="${conf}/bls-passphrase.cred"
+    plain="${conf}/bls-passphrase"
+    case "$method" in
+        credential) _tn_audit_say ok "BLS passphrase: encrypted credential (${key:-key not recorded})" ;;
+        stdin|loadcredential) _tn_audit_say warn "BLS passphrase: plaintext root-only file; encrypt it with edit-config.sh --migrate-credential" ;;
+        tpm) _tn_audit_say warn "BLS passphrase: sealed with the old TPM method; move it with edit-config.sh --migrate-credential" ;;
+        "") _tn_audit_say info "BLS passphrase: no PASSPHRASE_METHOD recorded (no node installed?)" ;;
+        *) _tn_audit_say warn "BLS passphrase: unknown PASSPHRASE_METHOD" ;;
+    esac
+    if [[ -e "$cred" ]]; then
+        s="$(stat -c '%U:%G %a' -- "$cred" 2>/dev/null || true)"
+        if [[ "$s" == "root:root 600" && ! -L "$cred" ]]; then
+            _tn_audit_say ok "${cred} root:root 600"
+        else
+            _tn_audit_say warn "${cred} is ${s:-unreadable} (expected root:root 600)"
+        fi
+    fi
+    if [[ -e "$plain" && "$method" == "credential" ]]; then
+        _tn_audit_say warn "${plain} still exists beside the credential; edit-config.sh --migrate-credential shreds it"
+    fi
+    if [[ -e "${conf}/bls-tpm.pub" || -e "${conf}/bls-tpm.priv" ]]; then
+        _tn_audit_say warn "old TPM sealed blobs in ${conf}; edit-config.sh --migrate-credential removes them"
+    fi
+    svc="$(tn_resolve_service 2>/dev/null)" || svc=""
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc:-telcoin}.service"
+    if [[ -n "$svc" ]] && tn_has_embedded_passphrase "$unit"; then
+        _tn_audit_say warn "${unit} holds the passphrase; run edit-config.sh --migrate-credential"
+    fi
+    if command -v systemd-creds >/dev/null 2>&1 && systemd-creds has-tpm2 >/dev/null 2>&1; then
+        _tn_audit_say ok "TPM2 usable by systemd-creds"
+    else
+        _tn_audit_say info "no usable TPM2 (credentials rest on the host key)"
+    fi
+    data="$(meta_get DATA_DIR "$meta" 2>/dev/null)" || data=""
+    data="${data:-$DEFAULT_DATA_DIR}"
+    for d in "$data" "${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"; do
+        [[ -d "$d" ]] || continue
+        src="$(findmnt -n -o SOURCE --target "$d" 2>/dev/null | head -n 1)"
+        types=""
+        [[ "$src" == /dev/* ]] && types="$(lsblk -s -n -o TYPE -- "$src" 2>/dev/null | tr '\n' ' ')"
+        case " $types " in
+            *" crypt "*) _tn_audit_say ok "${d}: on an encrypted (dm-crypt) device" ;;
+            *) _tn_audit_say info "${d}: no dm-crypt layer seen (${src:-unknown}); cloud disk encryption is not visible from the host" ;;
+        esac
+    done
+    if [[ -n "$svc" ]]; then
+        v="$(systemctl show -p LimitCORE --value "$svc" 2>/dev/null || true)"
+        if [[ "$v" == "0" ]]; then
+            _tn_audit_say ok "${svc}: core dumps off (LimitCORE=0)"
+        else
+            _tn_audit_say warn "${svc}: LimitCORE=${v:-unknown} (expected 0)"
+        fi
+    fi
+    v="$(cat /proc/sys/fs/suid_dumpable 2>/dev/null || true)"
+    if [[ "$v" == "0" ]]; then
+        _tn_audit_say ok "fs.suid_dumpable = 0"
+    else
+        _tn_audit_say warn "fs.suid_dumpable = ${v:-unknown} (0 keeps setuid and credential-changing processes from dumping core)"
+    fi
+    pat="$(cat /proc/sys/kernel/core_pattern 2>/dev/null || true)"
+    _tn_audit_say info "kernel.core_pattern = ${pat:-unknown}"
+    v="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || true)"
+    case "$v" in
+        1|2|3) _tn_audit_say ok "kernel.yama.ptrace_scope = ${v}" ;;
+        *) _tn_audit_say warn "kernel.yama.ptrace_scope = ${v:-unavailable} (1 or higher keeps processes from tracing the node)" ;;
+    esac
+    unset -f _tn_audit_say
+    return "$warn"
+}
+
+# Chain-config pins: the sha256 of genesis.yaml, committee.yaml and
+# parameters.yaml each network runs. Testnet: chain-configs/testnet in the
+# telcoin-network repository at TESTNET_CHAIN_CONFIGS_TAG (the release
+# DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
+# Mainnet: empty until the genesis ceremony publishes the files and a signed
+# script release carries their hashes; while any of the three is empty, a
+# mainnet install or refresh refuses (tn_chain_configs_check). Devnet has none.
+readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"
+readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
+readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
+readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
+readonly MAINNET_GENESIS_SHA256=""
+readonly MAINNET_COMMITTEE_SHA256=""
+readonly MAINNET_PARAMETERS_SHA256=""
+
+# tn_chain_config_pin NETWORK FILE -- the pinned sha256 of FILE (genesis.yaml,
+# committee.yaml or parameters.yaml) for NETWORK; prints nothing when there is
+# none.
+tn_chain_config_pin() {
+    case "${1:-}:${2:-}" in
+        testnet:genesis.yaml)    printf '%s\n' "$TESTNET_GENESIS_SHA256" ;;
+        testnet:committee.yaml)  printf '%s\n' "$TESTNET_COMMITTEE_SHA256" ;;
+        testnet:parameters.yaml) printf '%s\n' "$TESTNET_PARAMETERS_SHA256" ;;
+        mainnet:genesis.yaml)    printf '%s\n' "$MAINNET_GENESIS_SHA256" ;;
+        mainnet:committee.yaml)  printf '%s\n' "$MAINNET_COMMITTEE_SHA256" ;;
+        mainnet:parameters.yaml) printf '%s\n' "$MAINNET_PARAMETERS_SHA256" ;;
+    esac
+    return 0
+}
+
+# tn_chain_configs_check DIR NETWORK [progress-fn] -- compare DIR/genesis.yaml,
+# committee.yaml and parameters.yaml with NETWORK's pins, before anything copies
+# them. Each must be a regular file (not a symlink) with the pinned sha256; a
+# mismatch names the expected and the actual value. devnet has no pins (a
+# warning, rc 0). rc 0 all three match, 1 refused: a mismatch, a missing file,
+# mainnet pins not published yet, or a network other than testnet, mainnet and
+# devnet.
+tn_chain_configs_check() {
+    local dir="${1:-}" net="${2:-}" fn="${3:-}" f want got bad=0
+    case "$net" in
+        testnet|mainnet) ;;
+        devnet)
+            _tn_guard_say warn "devnet chain configs have no pinned hashes; ${dir} is used as it is." "$fn"
+            return 0
+            ;;
+        *)
+            _tn_guard_say warn "no chain configs for network '${net}' (expected testnet, mainnet or devnet)." "$fn"
+            return 1
+            ;;
+    esac
+    for f in genesis.yaml committee.yaml parameters.yaml; do
+        want="$(tn_chain_config_pin "$net" "$f")"
+        if [[ -z "$want" ]]; then
+            _tn_guard_say warn "${net} has no pinned sha256 for ${f} yet (it ships with the genesis ceremony); unpinned chain configs are not used." "$fn"
+            return 1
+        fi
+        if [[ -L "${dir}/${f}" || ! -f "${dir}/${f}" ]]; then
+            _tn_guard_say warn "${dir}/${f} is missing or not a regular file." "$fn"
+            bad=1
+            continue
+        fi
+        got="$(sha256sum < "${dir}/${f}" 2>/dev/null)" || got=""
+        got="${got%% *}"
+        if [[ "$got" != "$want" ]]; then
+            _tn_guard_say warn "${dir}/${f}: sha256 ${got:-unreadable}, expected ${want} (${net})." "$fn"
+            bad=1
+        fi
+    done
+    return "$bad"
 }
 
 print_summary() {
@@ -2841,199 +6088,70 @@ print_summary() {
 # Usage: pick_source_version <network>
 #   network = "testnet" | "mainnet" | "devnet" | ""  (empty -> show everything)
 # -----------------------------------------------------------------------------
+# pick_source_version NETWORK [DIR] -- ask which release tag to build (the menu
+# goes to stderr, the answer to stdout). Offers the newest final release tag of
+# NETWORK (tn_release_tag_final, ordered by tn_release_tag_key) in the checkout DIR
+# (default TN_SOURCE_DIR), at or above the oldest release these scripts support,
+# or another release tag typed in (a testnet release candidate only so). Never a
+# branch, main or a commit id: source builds take release tags only. rc 1 on
+# cancel, on a typed value that is not a release tag of NETWORK, and for a
+# network without release tags (devnet).
 pick_source_version() {
-    local network="$1"
-    if [[ ! -d "${TN_SOURCE_DIR}/.git" ]]; then
-        print_error "Source directory not found at ${TN_SOURCE_DIR}" >&2
+    local network="${1:-}" dir="${2:-$TN_SOURCE_DIR}" min_ver="" latest="" exact current label choice custom
+    local i=1 tag_opt=0 custom_opt cancel_opt default_opt
+    case "$network" in
+        testnet) min_ver="$MIN_SOURCE_VERSION_TESTNET" ;;
+        mainnet) min_ver="$MIN_SOURCE_VERSION_MAINNET" ;;
+        *)
+            print_error "No release tags are built from source for network '${network}'." >&2
+            return 1
+            ;;
+    esac
+    if [[ ! -d "${dir}/.git" ]]; then
+        print_error "Source directory not found at ${dir}" >&2
         return 1
     fi
 
-    # Pick the suffix, minimum version, and label for the operator's network.
-    local suffix="" min_ver="" net_label=""
-    case "$network" in
-        testnet) suffix="$NETWORK_TAG_SUFFIX_TESTNET"; min_ver="$MIN_SOURCE_VERSION_TESTNET"; net_label="testnet (adiri)" ;;
-        mainnet) suffix="$NETWORK_TAG_SUFFIX_MAINNET"; min_ver="$MIN_SOURCE_VERSION_MAINNET"; net_label="mainnet" ;;
-        devnet)  suffix="";  min_ver=""; net_label="devnet (follows main)" ;;
-        *)       suffix="";  min_ver=""; net_label="unknown -- no tag filter" ;;
-    esac
-
-    print_step "Fetching latest refs from origin..." >&2
-    if ! git -C "$TN_SOURCE_DIR" fetch --tags --quiet 2>/dev/null; then
-        print_warn "git fetch failed -- showing cached refs only" >&2
+    print_step "Fetching release tags from origin..." >&2
+    if ! GIT_ALLOW_PROTOCOL=https git -C "$dir" fetch --tags --quiet 9>&- 2>/dev/null; then
+        print_warn "git fetch failed -- showing the tags this checkout already has" >&2
     fi
-
-    # Describe-style summary string (for display). Includes -N-gSHA suffix
-    # when HEAD is past a tag, so the operator sees how far past.
-    local current_describe
-    current_describe=$(git -C "$TN_SOURCE_DIR" describe --tags --always --dirty 2>/dev/null || echo "unknown")
-
-    # Accurate "where am I" detection. We compute three pieces of state and
-    # use them in the display + marker logic below.
-    #
-    #   exact_tag       non-empty only when HEAD is EXACTLY at an annotated tag
-    #   head_branch     name of the local branch HEAD is on (empty if detached)
-    #   on_main_state   "tip"     -- on main branch, HEAD == origin/main
-    #                   "behind"  -- on main branch, but origin/main has advanced
-    #                   "none"    -- not on main (could be feature branch or detached)
-    #   feature_branch  set to head_branch when on a NON-main local branch
-    #                   (e.g. log_db_name) so we can label that instead of
-    #                   misreporting the operator as "detached"
-    local exact_tag head_sha main_sha head_branch on_main_state="none"
-    local behind_count=0 main_tip_summary=""
-    local feature_branch="" feature_ahead_main=0 feature_summary=""
-
-    exact_tag=$(git -C "$TN_SOURCE_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo "")
-    head_sha=$(git -C "$TN_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "")
-    main_sha=$(git -C "$TN_SOURCE_DIR" rev-parse origin/main 2>/dev/null || echo "")
-    head_branch=$(git -C "$TN_SOURCE_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "")
-
-    if [[ "$head_branch" == "main" ]] && [[ -n "$head_sha" ]] && [[ -n "$main_sha" ]]; then
-        if [[ "$head_sha" == "$main_sha" ]]; then
-            on_main_state="tip"
-        elif git -C "$TN_SOURCE_DIR" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
-            on_main_state="behind"
-            behind_count=$(git -C "$TN_SOURCE_DIR" rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
-            main_tip_summary=$(git -C "$TN_SOURCE_DIR" log --max-count=1 --format='%h %ar -- %s' origin/main 2>/dev/null || echo "")
-        fi
-    elif [[ -n "$head_branch" ]] && [[ "$head_branch" != "main" ]]; then
-        # Operator is on a named local branch other than main (e.g. log_db_name).
-        feature_branch="$head_branch"
-        feature_ahead_main=$(git -C "$TN_SOURCE_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo "0")
-        feature_summary=$(git -C "$TN_SOURCE_DIR" log -1 --format='%s' HEAD 2>/dev/null || echo "")
-    fi
-
-    # Collect tags, newest by creator date first.
-    local -a all_tags
-    while IFS= read -r t; do
-        [[ -z "$t" ]] && continue
-        all_tags+=("$t")
-    done < <(git -C "$TN_SOURCE_DIR" tag --sort=-creatordate 2>/dev/null | head -20)
-
-    # Filter by network suffix when applicable. testnet keeps only tags
-    # containing "-adiri", mainnet only "-telcoin". devnet/unknown keeps all.
-    local -a tags
-    if [[ -n "$suffix" ]]; then
-        local t
-        for t in "${all_tags[@]}"; do
-            [[ "$t" == *"$suffix"* ]] && tags+=("$t")
-        done
-        # If filtering left us with nothing, fall back to showing everything
-        # so the operator still has options.
-        if [[ ${#tags[@]} -eq 0 ]]; then
-            print_warn "No tags matched the ${network} pattern (${suffix}). Showing all tags." >&2
-            tags=("${all_tags[@]}")
-        fi
-    else
-        tags=("${all_tags[@]}")
-    fi
-
-    # Apply minimum-version filter: drop tags older than MIN_SOURCE_VERSION_*
-    # so operators are not shown obsolete releases. main and custom remain
-    # available below the list, so anyone who genuinely needs an older build
-    # can still type it. If the filter would leave the list empty, fall back
-    # to showing the unfiltered list rather than nothing.
-    if [[ -n "$min_ver" ]]; then
-        local -a recent_tags
-        local tag base_ver
-        for tag in "${tags[@]}"; do
-            # Strip leading "v" and trailing "-suffix" to get X.Y.Z
-            base_ver="${tag#v}"
-            base_ver="${base_ver%%-*}"
-            if [[ "$base_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-                && version_gte "$base_ver" "$min_ver"; then
-                recent_tags+=("$tag")
+    latest="$(git -C "$dir" tag --list 'v*' 2>/dev/null | while IFS= read -r t; do
+            tn_release_tag_final "$network" "$t" || continue
+            v="${t#v}"
+            v="${v%%-*}"
+            if [[ -z "$min_ver" ]] || version_gte "$v" "$min_ver"; then
+                printf '%s\n' "$t"
             fi
-        done
-        if [[ ${#recent_tags[@]} -gt 0 ]]; then
-            tags=("${recent_tags[@]}")
-        else
-            print_warn "No tags >= v${min_ver} found. Showing unfiltered list." >&2
-        fi
-    fi
+        done | tn_release_tags_sort | tail -n 1)" || latest=""
+    exact="$(git -C "$dir" describe --tags --exact-match HEAD 2>/dev/null)" || exact=""
+    current="${exact:-$(git -C "$dir" describe --tags --always 2>/dev/null || echo unknown)}"
 
     echo "" >&2
-    print_info "Network:              ${net_label}" >&2
-    # Friendlier "current" description naming what the operator is actually
-    # on: exact tag, main (at-tip or behind), a non-main feature branch, or
-    # a truly detached commit.
-    if [[ -n "$exact_tag" ]]; then
-        print_info "Current source ref:   ${exact_tag} (exactly on this tag)" >&2
-    elif [[ "$on_main_state" == "tip" ]]; then
-        print_info "Current source ref:   main @ ${head_sha:0:8}  (${current_describe})" >&2
-        print_info "origin/main:          up to date" >&2
-    elif [[ "$on_main_state" == "behind" ]]; then
-        local commits_word="commits"
-        [[ "$behind_count" == "1" ]] && commits_word="commit"
-        print_info "Current source ref:   built from main @ ${head_sha:0:8}  (${current_describe})" >&2
-        print_warn "origin/main has moved: ${behind_count} ${commits_word} since your build" >&2
-        [[ -n "$main_tip_summary" ]] && print_info "Latest on main:       ${main_tip_summary}" >&2
-    elif [[ -n "$feature_branch" ]]; then
-        local ahead_word="commits"
-        [[ "$feature_ahead_main" == "1" ]] && ahead_word="commit"
-        print_info "Current source ref:   branch '${feature_branch}' @ ${head_sha:0:8}" >&2
-        if [[ "$feature_ahead_main" -gt 0 ]]; then
-            print_info "Relative to main:     ${feature_ahead_main} ${ahead_word} ahead of main" >&2
-        fi
-        [[ -n "$feature_summary" ]] && print_info "Latest commit:        \"${feature_summary}\"" >&2
+    print_info "Network:              ${network}" >&2
+    print_info "Current source ref:   ${current}" >&2
+    echo "" >&2
+    print_info "Release tags to build (branches, main and commit ids are not built):" >&2
+    if [[ -n "$latest" ]]; then
+        label="${latest}  (latest ${network} release)"
+        [[ "$exact" == "$latest" ]] && label="${latest}  <-- current"
+        tag_opt=$i
+        printf "  %2d) %s\n" "$tag_opt" "$label" >&2
+        i=$((i + 1))
     else
-        print_info "Current source ref:   ${current_describe}  (detached / not on any branch or tag)" >&2
+        print_warn "No ${network} release tag${min_ver:+ at or above v${min_ver}} in ${dir}." >&2
     fi
-    if [[ ${#tags[@]} -gt 0 ]]; then
-        local latest_tag="${tags[0]}"
-        if [[ "$exact_tag" == "$latest_tag" ]]; then
-            print_ok  "You are on the latest ${network:-applicable} tag (${latest_tag})." >&2
-        else
-            print_info "Latest matching tag:  ${latest_tag}  (recommended for ${network:-this network})" >&2
-        fi
-    fi
+    custom_opt=$i
+    printf "  %2d) Another %s release tag\n" "$custom_opt" "$network" >&2
+    i=$((i + 1))
+    cancel_opt=$i
+    printf "  %2d) Cancel\n" "$cancel_opt" >&2
     echo "" >&2
+    default_opt=$custom_opt
+    (( tag_opt > 0 )) && default_opt=$tag_opt
 
-    print_info "Available versions to build:" >&2
-    local i=1
-
-    # 1) main -- the latest current version (default). Marked per where HEAD sits
-    #    relative to origin/main.
-    local main_label="main (latest current version"
-    [[ "$network" == "devnet" ]] && main_label="main (recommended for devnet"
-    main_label="${main_label})"
-    case "$on_main_state" in
-        tip)
-            main_label="${main_label}  <-- current"
-            ;;
-        behind)
-            local commits_word="commits"
-            [[ "$behind_count" == "1" ]] && commits_word="commit"
-            main_label="${main_label}  <-- ${behind_count} ${commits_word} newer than your build"
-            ;;
-    esac
-    local main_opt=$i; printf "  %2d) %s\n" "$main_opt" "$main_label" >&2; (( ++i ))
-
-    # 2) latest tagged release (most recent detected tag), if any exist.
-    local tag_opt=0 latest_tag=""
-    if [[ ${#tags[@]} -gt 0 ]]; then
-        latest_tag="${tags[0]}"
-        local tag_label="${latest_tag}  (latest ${network:-tagged} release)"
-        [[ "$exact_tag" == "$latest_tag" ]] && tag_label="${latest_tag}  <-- current"
-        tag_opt=$i; printf "  %2d) %s\n" "$tag_opt" "$tag_label" >&2; (( ++i ))
-    fi
-
-    local custom_opt=$i; printf "  %2d) Custom branch / tag / commit hash\n"  "$custom_opt" >&2; (( ++i ))
-    local cancel_opt=$i; printf "  %2d) Cancel\n"                              "$cancel_opt" >&2
-    echo "" >&2
-
-    # Network-aware default: testnet/mainnet operators should get the latest
-    # tagged release (main is bleeding-edge and not network-compatible); devnet
-    # follows main. main stays listed first either way.
-    local default_opt=$main_opt
-    if [[ "$network" != "devnet" && $tag_opt -gt 0 ]]; then
-        default_opt=$tag_opt
-    fi
-
-    local choice
     read -r -p "  Select [1-${cancel_opt}] (default ${default_opt}): " choice >&2
-    # Empty input -> the network-aware default
     [[ -z "$choice" ]] && choice=$default_opt
-
     if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
         print_warn "Invalid selection." >&2
         return 1
@@ -3043,21 +6161,19 @@ pick_source_version() {
         return 1
     fi
     if (( choice == custom_opt )); then
-        local custom_ref
-        read -r -p "  Enter branch / tag / commit hash: " custom_ref >&2
-        [[ -z "$custom_ref" ]] && { print_info "Cancelled." >&2; return 1; }
-        echo "$custom_ref"
-        return 0
-    fi
-    if (( choice == main_opt )); then
-        echo "main"
+        read -r -p "  ${network} release tag: " custom >&2
+        [[ -z "$custom" ]] && { print_info "Cancelled." >&2; return 1; }
+        if ! tn_release_tag_ok "$network" "$custom"; then
+            print_warn "${custom} is not a ${network} release tag; branches, main and commit ids are not built." >&2
+            return 1
+        fi
+        printf '%s\n' "$custom"
         return 0
     fi
     if (( tag_opt > 0 && choice == tag_opt )); then
-        echo "$latest_tag"
+        printf '%s\n' "$latest"
         return 0
     fi
-
     print_warn "Invalid selection." >&2
     return 1
 }
@@ -3079,6 +6195,1408 @@ pick_action() {
         2) echo "prepare_and_apply" ;;
         *) echo "cancel" ;;
     esac
+}
+
+# -----------------------------------------------------------------------------
+# CORE-4: RELEASES AND IMAGE REPOSITORIES
+# -----------------------------------------------------------------------------
+#
+# Signed releases: SHA256SUMS carries a detached GPG signature (SHA256SUMS.asc)
+# that must come from a key in lib/release-keys/*.asc (see the README there).
+# Source builds run as the unprivileged build account (TN_BUILD_USER) with its
+# own toolchain from a rustup-init pinned by version and sha256; root only
+# installs the result. Docker images come from the network's repositories
+# (TN_TESTNET_IMAGE_REPOS on testnet) and run by digest.
+
+# Image repository per network: testnet and mainnet TN_GHCR_IMAGE_REPO, where the
+# release pipeline publishes. Which repository publishes devnet images is an open
+# decision: while its constant is empty, tn_docker_repo_for refuses devnet, and
+# so does every Docker path.
+readonly TN_MAINNET_IMAGE_REPO="$TN_GHCR_IMAGE_REPO"
+readonly TN_DEVNET_IMAGE_REPO=""
+
+# Every repository a testnet image may come from, space separated: the legacy
+# Artifact Registry repository of the releases before signed releases (and of
+# DEFAULT_DOCKER_IMAGE) and the one the release pipeline publishes to, which
+# tn_docker_repo_for prints. A signed release's IMAGE_DIGEST names one of them.
+# Mainnet and devnet take only their own constant.
+readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ghcr.io/telcoin-association/telcoin-network"
+
+# Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
+readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
+
+# The build account and its home (toolchain, cargo cache, target dir). Not under
+# /home, no login shell, member of no other group. Overridable for tests only.
+TN_BUILD_USER="${TN_BUILD_USER:-tn-build}"
+TN_BUILD_HOME="${TN_BUILD_HOME:-/var/lib/tn-build}"
+
+# rustup-init for the build account, pinned by version and sha256 (the values
+# published at static.rust-lang.org/rustup/archive/<version>/<triple>/
+# rustup-init.sha256, checked against the downloaded files on 2026-10-15), and
+# the toolchain it installs: the channel the node's rust-toolchain.toml names.
+readonly TN_RUSTUP_INIT_VERSION="1.29.1"
+readonly TN_RUSTUP_INIT_SHA256_X86_64="dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71"
+readonly TN_RUSTUP_INIT_SHA256_AARCH64="15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
+readonly TN_RUST_TOOLCHAIN="1.94"
+
+# tn_docker_repo_for NETWORK -- print NETWORK's image repository: testnet the
+# ghcr.io repository the release pipeline publishes to; mainnet and devnet their
+# constants. rc 1 with the reason on
+# stderr while the constant is empty, and for any other NETWORK.
+tn_docker_repo_for() {
+    local net="${1:-}" repo=""
+    case "$net" in
+        testnet) repo="$TN_GHCR_IMAGE_REPO" ;;
+        mainnet) repo="$TN_MAINNET_IMAGE_REPO" ;;
+        devnet) repo="$TN_DEVNET_IMAGE_REPO" ;;
+        *)
+            print_warn "No image repository for network '${net}' (testnet, mainnet or devnet)." >&2
+            return 1
+            ;;
+    esac
+    if [[ -z "$repo" ]]; then
+        print_warn "No ${net} image repository is set: which repository publishes ${net} images is still an open decision, so Docker installs and updates are refused on ${net}." >&2
+        return 1
+    fi
+    printf '%s\n' "$repo"
+}
+
+# tn_docker_network_ok NETWORK -- rc 0 when a Docker install or image change may
+# go ahead on NETWORK: it has an image repository (tn_docker_repo_for) and, on
+# mainnet, these scripts pin its chain configs, without which no mainnet release
+# verifies (_tn_release_fetch refuses it) and so no mainnet image resolves.
+# Callers ask before anything on the host changes. rc 1 with the reason on stderr.
+tn_docker_network_ok() {
+    local net="${1:-}"
+    tn_docker_repo_for "$net" >/dev/null || return 1
+    if [[ "$net" == "mainnet" && -z "$(tn_chain_config_pin mainnet genesis.yaml 2>/dev/null)" ]]; then
+        print_warn "No mainnet release can be verified yet: these scripts pin no mainnet chain configs, so Docker installs and image changes are refused on mainnet." >&2
+        return 1
+    fi
+    return 0
+}
+
+# tn_docker_repo_ok NETWORK REPO -- rc 0 when REPO is a repository NETWORK's
+# images may come from: tn_docker_repo_for's, and on testnet any repository in
+# TN_TESTNET_IMAGE_REPOS. rc 1 otherwise, and for a network without one.
+tn_docker_repo_ok() {
+    local net="${1:-}" repo="${2:-}" def
+    [[ -n "$repo" ]] || return 1
+    def="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 1
+    [[ "$repo" == "$def" ]] && return 0
+    [[ "$net" == "testnet" ]] || return 1
+    case " ${TN_TESTNET_IMAGE_REPOS} " in
+        *" ${repo} "*) return 0 ;;
+    esac
+    return 1
+}
+
+# tn_registry_token REPO -- print the anonymous pull token REPO's registry wants:
+# for ghcr.io/<path> the "token" field of https://ghcr.io/token?scope=
+# repository:<path>:pull (ghcr asks for one even for a public package). Prints
+# nothing, rc 0, for any other registry. rc 1 and nothing when ghcr gives none:
+# a 401, 403 or 404 there means the package is not public or does not exist,
+# and the registry counts as unreadable.
+tn_registry_token() {
+    local repo="${1:-}" host path json tok
+    host="${repo%%/*}"
+    path="${repo#*/}"
+    [[ "$host" == "ghcr.io" ]] || return 0
+    [[ "$path" =~ ^[a-z0-9][a-z0-9._/-]*$ ]] || return 1
+    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 -A 'telcoin-node-scripts' \
+        --url "https://ghcr.io/token?scope=repository:${path}:pull" 2>/dev/null)" || return 1
+    tok="$(printf '%s' "$json" | tr -d '\r\n' | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [[ -n "$tok" && "$tok" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || return 1
+    printf '%s\n' "$tok"
+}
+
+# _tn_registry_auth REPO -- set TN_REGISTRY_TOKEN to REPO's pull token
+# (tn_registry_token; empty for a registry that wants none) without a subshell,
+# so lookups share it: a token is kept for the last repository that gave one
+# (_TN_REGISTRY_TOKEN_REPO, _TN_REGISTRY_TOKEN_KEPT) and reused for 120 seconds
+# (_TN_REGISTRY_TOKEN_AT, by SECONDS), well inside a pull token's lifetime. A
+# function that makes several lookups runs this first in its own shell, so the
+# $(...) subshells of the lookups find the token kept. rc 1, TN_REGISTRY_TOKEN
+# empty, when the registry gives no token; a failure is not kept.
+_tn_registry_auth() {
+    local repo="${1:-}" tok
+    TN_REGISTRY_TOKEN=""
+    if [[ -n "$repo" && "$repo" == "${_TN_REGISTRY_TOKEN_REPO:-}" ]] \
+        && (( SECONDS - ${_TN_REGISTRY_TOKEN_AT:-0} < 120 )); then
+        TN_REGISTRY_TOKEN="${_TN_REGISTRY_TOKEN_KEPT:-}"
+        return 0
+    fi
+    tok="$(tn_registry_token "$repo")" || return 1
+    TN_REGISTRY_TOKEN="$tok"
+    if [[ -n "$tok" ]]; then
+        _TN_REGISTRY_TOKEN_REPO="$repo"
+        _TN_REGISTRY_TOKEN_KEPT="$tok"
+        _TN_REGISTRY_TOKEN_AT="$SECONDS"
+    fi
+    return 0
+}
+
+# _tn_registry_get REPO SUBPATH [curl-args...] -- curl https://<host>/v2/<path>/SUBPATH
+# of REPO with REPO's pull token (_tn_registry_auth) as a Bearer header when it
+# has one. rc 1 when the token or the request fails.
+_tn_registry_get() {
+    local repo="${1:-}" sub="${2:-}" host path
+    shift 2
+    host="${repo%%/*}"
+    path="${repo#*/}"
+    _tn_registry_auth "$repo" || return 1
+    if [[ -n "$TN_REGISTRY_TOKEN" ]]; then
+        curl --proto '=https' --tlsv1.2 --max-time 10 -H "Authorization: Bearer ${TN_REGISTRY_TOKEN}" "$@" \
+            --url "https://${host}/v2/${path}/${sub}" 2>/dev/null
+    else
+        curl --proto '=https' --tlsv1.2 --max-time 10 "$@" \
+            --url "https://${host}/v2/${path}/${sub}" 2>/dev/null
+    fi
+}
+
+# tn_registry_tags REPO -- print the v* tags the registry lists for REPO
+# (tags/list, with REPO's pull token), one per line, unfiltered and unordered:
+# callers keep the release tags they want (tn_release_tag_ok or _final) and
+# order them with tn_release_tags_sort. rc 1 when the registry cannot be read.
+tn_registry_tags() {
+    local repo="${1:-}" json
+    [[ "$repo" == */* ]] || return 1
+    _tn_registry_auth "$repo" || return 1
+    json="$(_tn_registry_get "$repo" tags/list -sf)" || return 1
+    printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"'
+    return 0
+}
+
+# tn_registry_digest REPO TAG -- print the manifest digest (sha256:<64 hex>) the
+# registry serves for REPO:TAG, from the Docker-Content-Digest header of a HEAD
+# request (registry v2 API over https, with REPO's pull token). rc 1 when there
+# is none.
+tn_registry_digest() {
+    local repo="${1:-}" tag="${2:-}" hdr d
+    [[ "$repo" == */* && "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    _tn_registry_auth "$repo" || return 1
+    hdr="$(_tn_registry_get "$repo" "manifests/${tag}" -fsSI \
+        -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json')" || return 1
+    d="$(printf '%s\n' "$hdr" | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2; exit }')"
+    [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$d"
+}
+
+# tn_docker_local_digest IMAGE -- print IMAGE by digest: IMAGE itself when it is
+# <repo>@sha256:<hex>; for <repo>:<tag>, the RepoDigests entry for <repo> of the
+# image Docker already holds under that name (docker image inspect; nothing is
+# pulled). rc 1 when Docker holds no such digest.
+tn_docker_local_digest() {
+    local img="${1:-}" repo d
+    [[ -n "$img" && "$img" != -* && ! "$img" =~ [[:space:]] ]] || return 1
+    case "$img" in
+        *@sha256:*)
+            [[ "$img" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]] || return 1
+            printf '%s\n' "$img"
+            return 0
+            ;;
+    esac
+    repo="${img%:*}"
+    [[ -n "$repo" && "$repo" != "$img" ]] || return 1
+    d="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null \
+        | awk -v r="${repo}@" 'index($0, r) == 1 { print; exit }')" || d=""
+    [[ "$d" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$d"
+}
+
+# _tn_c4_say KIND MESSAGE [progress-fn] -- progress-fn, else stderr. The
+# progress-fn's stdout goes to stderr too: the helpers that report progress print
+# their result on stdout, and callers capture it with $(...).
+_tn_c4_say() {
+    _tn_guard_say "$@" >&2
+}
+
+# _tn_release_triple -- the release target triple of this host's architecture.
+_tn_release_triple() {
+    case "$(uname -m 2>/dev/null)" in
+        x86_64|amd64) printf 'x86_64-unknown-linux-gnu\n' ;;
+        aarch64|arm64) printf 'aarch64-unknown-linux-gnu\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _tn_release_keys_dir -- lib/release-keys beside this file (TN_RELEASE_KEYS_DIR
+# overrides it for tests).
+_tn_release_keys_dir() {
+    if [[ -n "${TN_RELEASE_KEYS_DIR:-}" ]]; then
+        printf '%s\n' "$TN_RELEASE_KEYS_DIR"
+        return 0
+    fi
+    printf '%s/release-keys\n' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+}
+
+# tn_staging_dir -- print the release staging directory, /var/lib/telcoin-staging,
+# created root 0700 when missing. rc 1 when it is a symlink, not root-owned, or
+# not exactly 0700 (or a parent fails tn_root_dir_ok), 2 when it cannot be
+# created. TN_RELEASE_STAGING_DIR (tests) names an existing 0700 directory of
+# the current user instead.
+tn_staging_dir() {
+    local d="${TN_RELEASE_STAGING_DIR:-}" st
+    if [[ -n "$d" ]]; then
+        [[ -d "$d" && ! -L "$d" ]] || return 1
+        st="$(stat -c '%u %a' -- "$d" 2>/dev/null)" || return 1
+        [[ "$st" == "$(id -u) 700" ]] || return 1
+        printf '%s\n' "$d"
+        return 0
+    fi
+    d="/var/lib/telcoin-staging"
+    if [[ ! -e "$d" && ! -L "$d" ]]; then
+        install -d -o root -g root -m 0700 -- "$d" 2>/dev/null || return 2
+    fi
+    tn_root_dir_ok "$d" || return 1
+    st="$(stat -c '%a' -- "$d" 2>/dev/null)" || return 1
+    [[ "$st" == "700" ]] || return 1
+    printf '%s\n' "$d"
+}
+
+# _tn_release_cleanup DIR -- stop any gpg-agent started under DIR/gnupg and
+# remove DIR.
+_tn_release_cleanup() {
+    [[ -n "${1:-}" && -d "$1" && ! -L "$1" ]] || return 0
+    if [[ -d "$1/gnupg" ]] && command -v gpgconf >/dev/null 2>&1; then
+        GNUPGHOME="$1/gnupg" gpgconf --kill all >/dev/null 2>&1 || true
+    fi
+    rm -rf -- "$1"
+}
+
+# _tn_release_get URL OUT MAX_BYTES MAX_SECONDS -- one https download. rc 2 on
+# any failure (OUT removed).
+_tn_release_get() {
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --max-time "$4" --max-filesize "$3" \
+        -o "$2" --url "$1" 2>/dev/null; then
+        rm -f -- "$2"
+        return 2
+    fi
+    [[ -f "$2" && ! -L "$2" ]] || return 2
+}
+
+# _tn_release_keyring DIR -- dearmor every lib/release-keys/*.asc into
+# DIR/keyring.gpg and write each key's primary fingerprint to DIR/allow (one per
+# line). rc 1 when there is no key file, 2 when gpg fails.
+_tn_release_keyring() {
+    local d="$1" kdir k n=0 f
+    kdir="$(_tn_release_keys_dir)"
+    ( umask 077; mkdir -p -- "$d/gnupg" ) || return 2
+    : > "$d/keyring.gpg" || return 2
+    : > "$d/allow" || return 2
+    for k in "$kdir"/*.asc; do
+        [[ -f "$k" && ! -L "$k" ]] || continue
+        GNUPGHOME="$d/gnupg" gpg --batch --no-tty --quiet --dearmor < "$k" >> "$d/keyring.gpg" 2>/dev/null || return 2
+        f="$(GNUPGHOME="$d/gnupg" gpg --batch --no-tty --quiet --with-colons --import-options show-only --import < "$k" 2>/dev/null \
+            | awk -F: '$1 == "pub" { want = 1; next } $1 == "fpr" && want { print $10; want = 0 }')" || return 2
+        [[ -n "$f" ]] || return 2
+        printf '%s\n' "$f" >> "$d/allow" || return 2
+        n=$((n + 1))
+    done
+    (( n > 0 )) || return 1
+    return 0
+}
+
+# _tn_gpg_status_verdict ALLOW -- judge the gpg status lines on stdin (gpgv
+# --status-fd, or git verify-tag --raw) against ALLOW, a file of allowlisted
+# primary key fingerprints, one per line. rc 0 when some GOODSIG is followed by
+# a VALIDSIG whose primary key fingerprint (its last field) is in ALLOW, and no
+# line says BADSIG (by any key), EXPKEYSIG, REVKEYSIG or EXPSIG. A signature by
+# a key that is not in the keyring (NO_PUBKEY, or ERRSIG with code 9) refuses
+# nothing by itself: such a signer is one whose key has not shipped here yet.
+# Any other ERRSIG refuses. Prints one line, "<verdict> [<key id>...]": GOOD on
+# rc 0; on rc 1 the refusing keyword, or NOSIG when no listed key made a good
+# signature. The key ids are those of the signatures by keys not in the
+# keyring, each once. The one parser for release files and release tags.
+_tn_gpg_status_verdict() {
+    local allow="$1" tag kw rest fpr id code x good=0 ok=0 bad="" unknown=""
+    while read -r tag kw rest; do
+        [[ "$tag" == "[GNUPG:]" ]] || continue
+        case "$kw" in
+            BADSIG|EXPKEYSIG|REVKEYSIG|EXPSIG)
+                [[ -n "$bad" ]] || bad="$kw"
+                ;;
+            NO_PUBKEY|ERRSIG)
+                # ERRSIG <keyid> <pkalgo> <hashalgo> <class> <time> <code> [<fpr>]
+                read -r id x x x x code x <<< "$rest"
+                [[ "$kw" == NO_PUBKEY ]] && code=9
+                if [[ "$code" != 9 || ! "$id" =~ ^[0-9A-F]{16,40}$ ]]; then
+                    [[ -n "$bad" ]] || bad="ERRSIG"
+                else
+                    case " ${unknown} " in
+                        *" ${id} "*) ;;
+                        *) unknown="${unknown:+${unknown} }${id}" ;;
+                    esac
+                fi
+                ;;
+            GOODSIG) good=1 ;;
+            VALIDSIG)
+                fpr="${rest##* }"
+                if [[ "$good" -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]] && grep -qxF -- "$fpr" "$allow"; then
+                    ok=1
+                fi
+                good=0
+                ;;
+        esac
+    done
+    if [[ -n "$bad" ]]; then
+        printf '%s%s\n' "$bad" "${unknown:+ ${unknown}}"
+        return 1
+    fi
+    if [[ "$ok" -ne 1 ]]; then
+        printf 'NOSIG%s\n' "${unknown:+ ${unknown}}"
+        return 1
+    fi
+    printf 'GOOD%s\n' "${unknown:+ ${unknown}}"
+    return 0
+}
+
+# _tn_release_sig_ok DIR -- gpgv over DIR/SHA256SUMS with DIR/SHA256SUMS.asc and
+# DIR/keyring.gpg (the keys of lib/release-keys), judged by
+# _tn_gpg_status_verdict against DIR/allow: its rc and its one line.
+_tn_release_sig_ok() {
+    local d="$1" out
+    out="$(GNUPGHOME="$d/gnupg" gpgv --status-fd 1 --keyring "$d/keyring.gpg" \
+        "$d/SHA256SUMS.asc" "$d/SHA256SUMS" 2>/dev/null)" || true
+    _tn_gpg_status_verdict "$d/allow" <<< "$out"
+}
+
+# _tn_release_sums_names FILE TAG NETWORK -- rc 0 when FILE (SHA256SUMS) has only
+# "<64 hex>  <name>" lines naming exactly IMAGE_DIGEST, one
+# telcoin-network-TAG-<triple>.tar.gz and NETWORK's chain-configs/<dir>/
+# committee.yaml, genesis.yaml and parameters.yaml, each once. Prints the reason
+# on rc 1.
+_tn_release_sums_names() {
+    local f="$1" tag="$2" net="$3" cc line name mid n=0 tars=0 seen=" " re
+    case "$net" in
+        testnet) cc="chain-configs/testnet" ;;
+        mainnet) cc="chain-configs/mainnet" ;;
+        *) printf 'no release channel for network %s\n' "$net"; return 1 ;;
+    esac
+    re='^[0-9a-f]{64}  [A-Za-z0-9._/-]+$'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ ! "$line" =~ $re ]]; then
+            printf 'malformed line in SHA256SUMS\n'
+            return 1
+        fi
+        name="${line#*  }"
+        case "$seen" in
+            *" ${name} "*) printf 'SHA256SUMS names %s twice\n' "$name"; return 1 ;;
+        esac
+        seen="${seen}${name} "
+        case "$name" in
+            IMAGE_DIGEST|"${cc}/committee.yaml"|"${cc}/genesis.yaml"|"${cc}/parameters.yaml") ;;
+            *)
+                mid="${name#"telcoin-network-${tag}-"}"
+                mid="${mid%-unknown-linux-gnu.tar.gz}"
+                if [[ "$name" == "telcoin-network-${tag}-"*"-unknown-linux-gnu.tar.gz" && "$mid" =~ ^[a-z0-9_]+$ ]]; then
+                    tars=$((tars + 1))
+                else
+                    printf 'SHA256SUMS names %s, which is not part of a %s release\n' "$name" "$net"
+                    return 1
+                fi
+                ;;
+        esac
+        n=$((n + 1))
+    done < "$f"
+    if [[ "$n" -ne 5 || "$tars" -ne 1 ]]; then
+        printf 'SHA256SUMS must name exactly IMAGE_DIGEST, the tarball and the three %s files\n' "$cc"
+        return 1
+    fi
+    return 0
+}
+
+# _tn_release_sum FILE NAME -- the hash SHA256SUMS FILE gives NAME.
+_tn_release_sum() {
+    awk -v n="$2" 'substr($0, 67) == n { print substr($0, 1, 64); exit }' "$1"
+}
+
+# _tn_release_file_ok DIR NAME -- rc 0 when DIR/NAME is a regular file whose
+# sha256 is the one DIR/SHA256SUMS gives it.
+_tn_release_file_ok() {
+    local want got
+    want="$(_tn_release_sum "$1/SHA256SUMS" "$2")"
+    [[ -n "$want" && -f "$1/$2" && ! -L "$1/$2" ]] || return 1
+    got="$(sha256sum < "$1/$2" 2>/dev/null)" || return 1
+    [[ "${got%% *}" == "$want" ]]
+}
+
+# _tn_release_fetch TAG NETWORK BASE_URL MODE [progress-fn] -- download and check
+# a release into a new staging directory (printed on stdout): SHA256SUMS and its
+# signature first (gpgv against lib/release-keys), then the names it lists, the
+# chain-config hashes against this script release's pins, IMAGE_DIGEST and, in
+# MODE full, this host's tarball, each against its line. rc 1 refused, 2
+# network or I/O, 3 TAG is not a NETWORK release tag. The staging directory is
+# removed on every failure.
+_tn_release_fetch() {
+    local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
+    local parent stg why f want got triple tarball cc img sigrc unknown
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
+        return 3
+    fi
+    [[ -n "$base" ]] || base="${TN_RELEASE_BASE_URL}/${tag}"
+    base="${base%/}"
+    for f in curl gpg gpgv sha256sum; do
+        if ! command -v "$f" >/dev/null 2>&1; then
+            _tn_c4_say warn "${f} is not installed; a release cannot be checked without it." "$fn"
+            return 2
+        fi
+    done
+    triple="$(_tn_release_triple)" || triple=""
+    if [[ "$mode" == "full" && -z "$triple" ]]; then
+        _tn_c4_say warn "No release binary is published for this architecture ($(uname -m 2>/dev/null))." "$fn"
+        return 1
+    fi
+    parent="$(tn_staging_dir)" || {
+        _tn_c4_say warn "The staging directory is not a root-owned 0700 directory; nothing was downloaded." "$fn"
+        return 1
+    }
+    stg="$(mktemp -d "${parent}/rel.$$.XXXXXX")" || return 2
+    _tn_release_keyring "$stg" || {
+        f=$?
+        _tn_release_cleanup "$stg"
+        if [[ "$f" -eq 1 ]]; then
+            _tn_c4_say warn "No release signing key in $(_tn_release_keys_dir) (*.asc); a release cannot be checked without one." "$fn"
+            return 1
+        fi
+        _tn_c4_say warn "Could not read the release signing keys in $(_tn_release_keys_dir)." "$fn"
+        return 2
+    }
+    for f in SHA256SUMS SHA256SUMS.asc; do
+        if ! _tn_release_get "${base}/${f}" "${stg}/${f}" 1048576 60; then
+            _tn_c4_say warn "Could not download ${base}/${f}." "$fn"
+            _tn_release_cleanup "$stg"
+            return 2
+        fi
+    done
+    sigrc=0
+    why="$(_tn_release_sig_ok "$stg")" || sigrc=$?
+    unknown=""
+    case "$why" in
+        *" "*) unknown="${why#* }" ;;
+    esac
+    why="${why%% *}"
+    if [[ $sigrc -ne 0 ]]; then
+        case "$why" in
+            BADSIG) why="a signature does not match SHA256SUMS (BADSIG)" ;;
+            EXPKEYSIG) why="a signature was made by an expired key (EXPKEYSIG)" ;;
+            REVKEYSIG) why="a signature was made by a revoked key (REVKEYSIG)" ;;
+            EXPSIG) why="a signature has expired (EXPSIG)" ;;
+            ERRSIG) why="a signature could not be checked (ERRSIG)" ;;
+            *)
+                why="no good signature by a key in $(_tn_release_keys_dir)"
+                [[ -z "$unknown" ]] || why="${why}; it is signed only by key ${unknown}, which is not there"
+                ;;
+        esac
+        _tn_c4_say warn "Release ${tag}: SHA256SUMS is not verified: ${why}. Nothing from this release is used." "$fn"
+        _tn_release_cleanup "$stg"
+        return 1
+    fi
+    if [[ -n "$unknown" ]]; then
+        _tn_c4_say warn "Release ${tag}: SHA256SUMS.asc also carries a signature by key ${unknown}, which is not in $(_tn_release_keys_dir), so that signature was not checked. The release is taken on the good signature by a listed key; update-scripts.sh brings newer keys." "$fn"
+    fi
+    if ! why="$(_tn_release_sums_names "${stg}/SHA256SUMS" "$tag" "$net")"; then
+        _tn_c4_say warn "Release ${tag}: ${why}." "$fn"
+        _tn_release_cleanup "$stg"
+        return 1
+    fi
+    # The chain-config lines must carry the hashes this script release pins.
+    cc="chain-configs/${net}"
+    for f in committee.yaml genesis.yaml parameters.yaml; do
+        want="$(tn_chain_config_pin "$net" "$f")"
+        got="$(_tn_release_sum "${stg}/SHA256SUMS" "${cc}/${f}")"
+        if [[ -z "$want" ]]; then
+            _tn_c4_say warn "Release ${tag}: these scripts pin no sha256 for ${net} ${f} yet, so the release's chain configs cannot be checked." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+        if [[ "$got" != "$want" ]]; then
+            _tn_c4_say warn "Release ${tag}: ${cc}/${f} has sha256 ${got}, but these scripts pin ${want}. Update the scripts (update-scripts.sh) before using this release." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+    done
+    if ! _tn_release_get "${base}/IMAGE_DIGEST" "${stg}/IMAGE_DIGEST" 4096 60; then
+        _tn_c4_say warn "Could not download ${base}/IMAGE_DIGEST." "$fn"
+        _tn_release_cleanup "$stg"
+        return 2
+    fi
+    img="$(cat -- "${stg}/IMAGE_DIGEST" 2>/dev/null)" || img=""
+    if ! _tn_release_file_ok "$stg" IMAGE_DIGEST \
+        || [[ "$(awk 'END { print NR }' "${stg}/IMAGE_DIGEST")" != "1" ]] \
+        || [[ ! "$img" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$ ]]; then
+        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST does not match SHA256SUMS or is not one <repository>@sha256:<digest> line." "$fn"
+        _tn_release_cleanup "$stg"
+        return 1
+    fi
+    if [[ "$mode" == "full" ]]; then
+        tarball="telcoin-network-${tag}-${triple}.tar.gz"
+        if [[ -z "$(_tn_release_sum "${stg}/SHA256SUMS" "$tarball")" ]]; then
+            _tn_c4_say warn "Release ${tag} has no ${triple} tarball." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+        if ! _tn_release_get "${base}/${tarball}" "${stg}/${tarball}" 1073741824 1800; then
+            _tn_c4_say warn "Could not download ${base}/${tarball}." "$fn"
+            _tn_release_cleanup "$stg"
+            return 2
+        fi
+        if ! _tn_release_file_ok "$stg" "$tarball"; then
+            _tn_c4_say warn "Release ${tag}: ${tarball} does not match its SHA256SUMS line." "$fn"
+            _tn_release_cleanup "$stg"
+            return 1
+        fi
+    fi
+    printf '%s\n' "$stg"
+    return 0
+}
+
+# tn_fetch_verified_release TAG NETWORK [BASE_URL] [progress-fn] -- download
+# SHA256SUMS, SHA256SUMS.asc, IMAGE_DIGEST and this host's tarball for release
+# TAG into a new root-only directory under /var/lib/telcoin-staging, and check
+# them: the signature with gpgv against the keys in lib/release-keys (a GOODSIG
+# and VALIDSIG by a listed primary key; any BADSIG, EXPKEYSIG, REVKEYSIG or
+# EXPSIG refuses; a further signature by a key that is not there, NO_PUBKEY or
+# ERRSIG, is a warning that names its key id), the names SHA256SUMS lists, its
+# chain-config hashes against this script release's pins, and each file's hash.
+# BASE_URL defaults to the GitHub release of TAG. Prints the tarball path; the
+# verified SHA256SUMS sits beside it (TN_RELEASE_SUMS is set to it when the
+# function is not run in a subshell). The caller removes that directory when
+# done. rc 1 verification failed, 2 network or I/O, 3 TAG is not a NETWORK
+# release tag; nothing is left behind on failure.
+tn_fetch_verified_release() {
+    local tag="${1:-}" net="${2:-}" stg rc=0
+    stg="$(_tn_release_fetch "$tag" "$net" "${3:-}" full "${4:-}")" || rc=$?
+    [[ $rc -eq 0 ]] || return $rc
+    TN_RELEASE_SUMS="${stg}/SHA256SUMS"
+    printf '%s/telcoin-network-%s-%s.tar.gz\n' "$stg" "$tag" "$(_tn_release_triple)"
+}
+
+# tn_fetch_release_image TAG NETWORK [BASE_URL] [progress-fn] -- the release's
+# image by digest: IMAGE_DIGEST from a release checked as in
+# tn_fetch_verified_release (no tarball), which must name a repository NETWORK's
+# images may come from (tn_docker_image_allowed: on testnet any of
+# TN_TESTNET_IMAGE_REPOS). Prints <repo>@sha256:<digest>; the staging directory
+# is removed. rc as tn_fetch_verified_release; 1 also when the image is not
+# NETWORK's.
+tn_fetch_release_image() {
+    local tag="${1:-}" net="${2:-}" fn="${4:-}" stg img rc=0
+    stg="$(_tn_release_fetch "$tag" "$net" "${3:-}" image "$fn")" || rc=$?
+    [[ $rc -eq 0 ]] || return $rc
+    img="$(cat -- "${stg}/IMAGE_DIGEST")" || img=""
+    _tn_release_cleanup "$stg"
+    if ! TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$img" "$net"; then
+        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img}, which is not in a ${net} image repository these scripts accept." "$fn"
+        return 1
+    fi
+    printf '%s\n' "$img"
+}
+
+# tn_release_extract_binary TARBALL OUT -- write the node binary from a verified
+# release TARBALL (telcoin-network-<tag>-<triple>.tar.gz) to OUT, mode 0755. The
+# tarball must list exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and
+# NOTICE under its top directory, the binary as a regular file; nothing else is
+# extracted and no owner or mode is taken from the archive. rc 1 refused, 2 I/O.
+tn_release_extract_binary() {
+    local tarball="${1:-}" out="${2:-}" dir listing want kind
+    [[ -f "$tarball" && ! -L "$tarball" && -n "$out" && ! -L "$out" ]] || return 1
+    dir="${tarball##*/}"
+    dir="${dir%.tar.gz}"
+    listing="$(tar -tzf "$tarball" 2>/dev/null)" || return 2
+    listing="$(printf '%s\n' "$listing" | awk -v d="${dir}/" '$0 != d' | LC_ALL=C sort)"
+    want="$(printf '%s\n' "${dir}/LICENSE-APACHE" "${dir}/LICENSE-MIT" "${dir}/NOTICE" "${dir}/telcoin-network" | LC_ALL=C sort)"
+    if [[ "$listing" != "$want" ]]; then
+        print_warn "${tarball##*/} must hold exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and NOTICE under ${dir}/." >&2
+        return 1
+    fi
+    kind="$(tar -tvzf "$tarball" "${dir}/telcoin-network" 2>/dev/null | head -n 1)" || kind=""
+    if [[ "${kind:0:1}" != "-" ]]; then
+        print_warn "${dir}/telcoin-network in ${tarball##*/} is not a regular file." >&2
+        return 1
+    fi
+    rm -f -- "$out"
+    if ! ( umask 077; tar -xzOf "$tarball" "${dir}/telcoin-network" > "$out" ) 2>/dev/null; then
+        rm -f -- "$out"
+        return 2
+    fi
+    if [[ ! -s "$out" ]]; then
+        rm -f -- "$out"
+        return 1
+    fi
+    chmod 0755 -- "$out" || return 2
+}
+
+# tn_release_version_ok TEXT NETWORK REF -- rc 0 when TEXT, a node binary's
+# --version output, fits NETWORK and REF: its "Version:" is REF's x.y.z (when
+# REF carries one), it has exactly one "Build Features:" line, which is empty on
+# mainnet and on testnet lists adiri and nothing but adiri and faucet (the adiri
+# feature turns faucet on). The reason goes to stderr on rc 1.
+tn_release_version_ok() {
+    local text="${1:-}" net="${2:-}" ref="${3:-}" want="" ver n feats f has_adiri=0 re
+    local -a list
+    re='([0-9]+[.][0-9]+[.][0-9]+)'
+    if [[ "$ref" =~ $re ]]; then
+        want="${BASH_REMATCH[1]}"
+    fi
+    ver="$(printf '%s\n' "$text" | awk '{ for (i = 1; i < NF; i++) if ($i == "Version:") { print $(i + 1); exit } }')" || ver=""
+    if [[ -n "$want" && "$ver" != "$want" ]]; then
+        print_warn "The binary reports version ${ver:-none}, not ${want} (${ref})." >&2
+        return 1
+    fi
+    n="$(printf '%s\n' "$text" | grep -c '^Build Features:')" || n=0
+    if [[ "$n" != "1" ]]; then
+        print_warn "The binary's --version has ${n} Build Features lines; expected one." >&2
+        return 1
+    fi
+    feats="$(printf '%s\n' "$text" | sed -n 's/^Build Features:[[:space:]]*//p' | tr -d '[:space:]')"
+    case "$net" in
+        mainnet)
+            if [[ -n "$feats" ]]; then
+                print_warn "This build has the features ${feats}; a mainnet build has none." >&2
+                return 1
+            fi
+            ;;
+        testnet)
+            list=()
+            [[ -z "$feats" ]] || IFS=',' read -r -a list <<< "$feats"
+            for f in ${list[@]+"${list[@]}"}; do
+                case "$f" in
+                    adiri) has_adiri=1 ;;
+                    faucet) ;;
+                    *)
+                        print_warn "This build has the feature ${f}; a testnet build has adiri (and faucet) only." >&2
+                        return 1
+                        ;;
+                esac
+            done
+            if [[ "$has_adiri" -ne 1 ]]; then
+                print_warn "This build lacks the adiri feature a testnet build needs (features: ${feats:-none})." >&2
+                return 1
+            fi
+            ;;
+        *)
+            print_warn "No build rule for network '${net}'." >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# _tn_exec_closed CMD [ARG...] -- exec CMD with every file descriptor above 2
+# closed: the update lock (fd 9), the --json event channel (fd 3) and anything
+# else this script holds open. Run it in a subshell; it replaces that shell.
+_tn_exec_closed() {
+    local p n fds=""
+    for p in /proc/self/fd/*; do
+        n="${p##*/}"
+        if [[ "$n" =~ ^[0-9]+$ ]]; then
+            fds="${fds} ${n}"
+        fi
+    done
+    [[ -n "$fds" ]] || fds="3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20"
+    for n in $fds; do
+        if (( n > 2 )); then
+            eval "exec ${n}>&-"
+        fi
+    done
+    exec "$@"
+}
+
+# _tn_uid_procs_alive UID -- rc 0 when a process whose real uid is UID is alive
+# (zombies, which can no longer run or fork, do not count).
+_tn_uid_procs_alive() {
+    local s k v rest state ruid
+    for s in /proc/[0-9]*/status; do
+        state=""
+        ruid=""
+        while read -r k v rest; do
+            case "$k" in
+                State:) state="$v" ;;
+                Uid:) ruid="$v"; break ;;
+            esac
+        done 2>/dev/null < "$s"
+        if [[ "$ruid" == "$1" && "$state" != "Z" && "$state" != "X" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# _tn_build_user_reap UID GID -- stop every process of the build account (UID): a
+# kill -KILL -1 run as that account, a single kill(2) that reaches all of its
+# processes at once, so none can fork away from it; repeated until /proc shows
+# none left, for 5 s at most. Nothing is done when UID is the caller's own uid
+# (a test run as the build account). rc 1 when a process is still alive.
+_tn_build_user_reap() {
+    local uid="$1" gid="$2" i=0
+    [[ "$uid" =~ ^[0-9]+$ && ! "$uid" =~ ^0+$ && "$uid" != "$(id -u)" ]] || return 0
+    while _tn_uid_procs_alive "$uid"; do
+        if (( i >= 50 )); then
+            return 1
+        fi
+        if (( i % 10 == 0 )); then
+            # The shell checks it runs as UID before kill -1, so a setpriv that did
+            # not switch accounts kills nothing.
+            ( _tn_exec_closed setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- \
+                env -i PATH=/usr/bin:/bin sh -c '[ "$(id -u)" = "$1" ] && kill -KILL -1' sh "$uid" ) \
+                >/dev/null 2>&1 || true
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 0
+}
+
+# tn_as_build_user CMD [ARG...] -- run CMD as TN_BUILD_USER with no
+# supplementary groups and no_new_privs set (setpriv), in an environment that
+# holds only HOME, USER, LOGNAME, PATH (the account's cargo bin, then
+# /usr/local/bin:/usr/bin:/bin), CARGO_HOME, RUSTUP_HOME, CARGO_TARGET_DIR (all
+# under TN_BUILD_HOME), LANG and TERM: nothing of the caller's environment, and
+# no file descriptor above 2 (not the update lock, not the --json channel). When
+# CMD returns, every process the account still runs is killed
+# (_tn_build_user_reap), so nothing it started outlives the call. rc is CMD's;
+# 125 when a process of the account could not be stopped; 126 without running
+# anything when the account is unknown, malformed or uid/gid 0, or setpriv is
+# missing.
+tn_as_build_user() {
+    local u="$TN_BUILD_USER" h="$TN_BUILD_HOME" uid gid rc=0
+    if [[ $# -eq 0 ]]; then
+        print_warn "tn_as_build_user: no command given" >&2
+        return 126
+    fi
+    if [[ ! "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "$h" != /* ]]; then
+        print_warn "tn_as_build_user: refusing build account '${u}' (home ${h})" >&2
+        return 126
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || uid=""
+    gid="$(id -g "$u" 2>/dev/null)" || gid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ || ! "$gid" =~ ^[0-9]+$ || "$gid" =~ ^0+$ ]]; then
+        print_warn "tn_as_build_user: refusing build account '${u}': unknown or root" >&2
+        return 126
+    fi
+    if ! command -v setpriv >/dev/null 2>&1; then
+        print_warn "tn_as_build_user: setpriv is not installed" >&2
+        return 126
+    fi
+    ( _tn_exec_closed setpriv --reuid "$uid" --regid "$gid" --clear-groups --no-new-privs -- \
+        env -i HOME="$h" USER="$u" LOGNAME="$u" \
+        PATH="${h}/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+        CARGO_HOME="${h}/.cargo" RUSTUP_HOME="${h}/.rustup" CARGO_TARGET_DIR="${h}/target" \
+        LANG=C.UTF-8 TERM=dumb "$@" ) || rc=$?
+    if ! _tn_build_user_reap "$uid" "$gid"; then
+        print_warn "tn_as_build_user: a process of ${u} is still running after its command and could not be stopped" >&2
+        [[ $rc -ne 0 ]] || rc=125
+    fi
+    return $rc
+}
+
+# tn_build_user_ensure [progress-fn] -- make the build account ready: create it
+# when missing (system account, own group, home TN_BUILD_HOME, no login shell),
+# create its home 0700, and give it a git config that accepts the root-owned
+# checkout (TN_SOURCE_DIR), whose commit the build reads. Refused (rc 1): an
+# existing account that is uid 0, not a system account, or a member of sudo,
+# adm, docker, wheel or the service group; a home that is a symlink or belongs
+# to someone else. rc 2 when creating it failed.
+tn_build_user_ensure() {
+    local fn="${1:-}" u="$TN_BUILD_USER" h="$TN_BUILD_HOME" uid g st
+    if [[ ! "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "$h" != /* ]]; then
+        _tn_c4_say warn "Refusing build account '${u}' (home ${h})." "$fn"
+        return 1
+    fi
+    if ! id -u "$u" >/dev/null 2>&1; then
+        if ! useradd --system --user-group --home-dir "$h" --no-create-home \
+            --shell /usr/sbin/nologin --comment "telcoin-network source builds" "$u" >/dev/null 2>&1; then
+            _tn_c4_say warn "Could not create the build account ${u}." "$fn"
+            return 2
+        fi
+    fi
+    uid="$(id -u "$u" 2>/dev/null)" || uid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ ]] || (( 10#$uid >= 1000 )); then
+        _tn_c4_say warn "The build account ${u} exists with uid ${uid:-unknown}; it must be a system account (uid 1-999)." "$fn"
+        return 1
+    fi
+    for g in $(id -nG "$u" 2>/dev/null); do
+        case "$g" in
+            sudo|adm|docker|wheel|"${SERVICE_GROUP:-telcoin}"|"$TN_LOG_GROUP")
+                _tn_c4_say warn "The build account ${u} belongs to ${g}; remove it from that group (it needs none)." "$fn"
+                return 1
+                ;;
+        esac
+    done
+    if [[ ! -e "$h" && ! -L "$h" ]]; then
+        if ! install -d -o "$u" -g "$(id -g "$u")" -m 0700 -- "$h"; then
+            _tn_c4_say warn "Could not create ${h}." "$fn"
+            return 2
+        fi
+    fi
+    st="$(stat -c '%u' -- "$h" 2>/dev/null)" || st=""
+    if [[ -L "$h" || ! -d "$h" || "$st" != "$uid" ]]; then
+        _tn_c4_say warn "${h} must be a directory owned by ${u} (not a symlink)." "$fn"
+        return 1
+    fi
+    chmod 0700 -- "$h" || return 2
+    if ! printf '[safe]\n\tdirectory = %s\n' "$TN_SOURCE_DIR" \
+        | tn_as_build_user sh -c 'umask 077; cat > "$HOME/.gitconfig"'; then
+        _tn_c4_say warn "Could not write ${h}/.gitconfig." "$fn"
+        return 2
+    fi
+    return 0
+}
+
+# tn_rustup_ensure [progress-fn] -- give the build account a Rust toolchain when it
+# has none: download rustup-init TN_RUSTUP_INIT_VERSION for this architecture over
+# https into the staging directory, compare its sha256 with the pinned constant,
+# then run that copy as the build account (tn_as_build_user) with the
+# TN_RUST_TOOLCHAIN default and the minimal profile. Never runs anything as root.
+# rc 0 ready, 1 refused (hash mismatch, unknown architecture), 2 failed.
+tn_rustup_ensure() {
+    local fn="${1:-}" triple want parent stg got rc=0
+    if tn_as_build_user test -x "${TN_BUILD_HOME}/.cargo/bin/rustup" 2>/dev/null; then
+        return 0
+    fi
+    triple="$(_tn_release_triple)" || triple=""
+    case "$triple" in
+        x86_64-unknown-linux-gnu) want="$TN_RUSTUP_INIT_SHA256_X86_64" ;;
+        aarch64-unknown-linux-gnu) want="$TN_RUSTUP_INIT_SHA256_AARCH64" ;;
+        *)
+            _tn_c4_say warn "No pinned rustup-init for this architecture ($(uname -m 2>/dev/null))." "$fn"
+            return 1
+            ;;
+    esac
+    if ! parent="$(tn_staging_dir)"; then
+        _tn_c4_say warn "The staging directory /var/lib/telcoin-staging is not a root-owned 0700 directory (or cannot be created); rustup-init was not downloaded." "$fn"
+        return 1
+    fi
+    if ! stg="$(mktemp -d "${parent}/rustup.$$.XXXXXX")"; then
+        _tn_c4_say warn "Could not create a directory in ${parent} for rustup-init." "$fn"
+        return 2
+    fi
+    if ! _tn_release_get "https://static.rust-lang.org/rustup/archive/${TN_RUSTUP_INIT_VERSION}/${triple}/rustup-init" \
+        "${stg}/rustup-init" 134217728 600; then
+        _tn_c4_say warn "Could not download rustup-init ${TN_RUSTUP_INIT_VERSION} (${triple})." "$fn"
+        rm -rf -- "$stg"
+        return 2
+    fi
+    got="$(sha256sum < "${stg}/rustup-init" 2>/dev/null)" || got=""
+    got="${got%% *}"
+    if [[ "$got" != "$want" ]]; then
+        _tn_c4_say warn "rustup-init ${TN_RUSTUP_INIT_VERSION} (${triple}) has sha256 ${got:-unreadable}, not the pinned ${want}; it was not run." "$fn"
+        rm -rf -- "$stg"
+        return 1
+    fi
+    if ! tn_as_build_user sh -c 'umask 077; cat > "$HOME/rustup-init" && chmod 0700 "$HOME/rustup-init"' \
+        < "${stg}/rustup-init"; then
+        rm -rf -- "$stg"
+        return 2
+    fi
+    rm -rf -- "$stg"
+    tn_as_build_user "${TN_BUILD_HOME}/rustup-init" -y --no-modify-path --profile minimal \
+        --default-toolchain "$TN_RUST_TOOLCHAIN" || rc=2
+    tn_as_build_user rm -f -- "${TN_BUILD_HOME}/rustup-init" || true
+    if [[ $rc -ne 0 ]]; then
+        _tn_c4_say warn "rustup-init failed for the build account." "$fn"
+    fi
+    return $rc
+}
+
+# tn_build_version BIN -- print BIN --version, run as the build account (30 s at
+# most) on a copy in a fresh directory of the build account's home. BIN must be
+# a regular file of the caller (root's staged copy, tn_stage_binary); anything
+# else is refused (rc 1) and never run.
+tn_build_version() {
+    local bin="${1:-}" d out rc=0
+    [[ -f "$bin" && ! -L "$bin" ]] || return 1
+    [[ "$(stat -c '%u' -- "$bin" 2>/dev/null)" == "$(id -u)" ]] || return 1
+    d="$(tn_as_build_user mktemp -d "${TN_BUILD_HOME}/probe.XXXXXX")" || return 2
+    [[ "$d" == "${TN_BUILD_HOME}/probe."* && "$d" != *[[:space:]]* ]] || return 2
+    if tn_as_build_user sh -c 'cat > "$1" && chmod 0700 "$1"' sh "${d}/telcoin-network" < "$bin"; then
+        out="$(tn_as_build_user timeout 30 "${d}/telcoin-network" --version)" || rc=$?
+    else
+        rc=2
+    fi
+    tn_as_build_user rm -rf -- "$d" || true
+    [[ $rc -eq 0 ]] || return $rc
+    printf '%s\n' "$out"
+}
+
+# tn_built_binary_ok FILE [UID] -- rc 0 when the build output FILE is a regular
+# file, not a symlink, owned by UID (default: the build account's uid). Read
+# only after the build has returned. Prints nothing.
+tn_built_binary_ok() {
+    local f="${1:-}" want="${2:-}" uid
+    if [[ -z "$want" ]]; then
+        want="$(id -u "$TN_BUILD_USER" 2>/dev/null)" || return 1
+    fi
+    [[ -n "$f" && -f "$f" && ! -L "$f" ]] || return 1
+    uid="$(stat -c '%u' -- "$f" 2>/dev/null)" || return 1
+    [[ "$uid" == "$want" ]]
+}
+
+# _tn_release_keys_present -- rc 0 when lib/release-keys holds a key file (*.asc).
+_tn_release_keys_present() {
+    local k
+    for k in "$(_tn_release_keys_dir)"/*.asc; do
+        if [[ -f "$k" && ! -L "$k" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# tn_docker_image_for_tag NETWORK TAG [progress-fn] -- print NETWORK's release
+# image TAG by digest, <repo>@sha256:<hex>, for a TAG that is named (--release-tag,
+# --docker-image, a typed tag, an update ref). The digest comes from the signed
+# release (tn_fetch_release_image). On testnet only, when no release signing key
+# is installed, or the release publishes no signed files (a network rc 2), the
+# digest the registry serves for the tag is used instead, with a warning: the
+# network's repository first, then the legacy one (TN_TESTNET_LEGACY_IMAGE_REPO),
+# each with its pull token. That fallback is the legacy case, a tag with no
+# signed release such as the releases made before signed releases
+# (v0.16.0-adiri); the newest-release pick (latest_docker_image) never takes it.
+# A release whose files fail verification is never replaced by the registry's
+# answer. rc 1 refused or not resolvable, 3 TAG is not a NETWORK release tag.
+tn_docker_image_for_tag() {
+    local net="${1:-}" tag="${2:-}" fn="${3:-}" repo img d r rc=0
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
+        return 3
+    fi
+    repo="$(tn_docker_repo_for "$net")" || return 1
+    if _tn_release_keys_present; then
+        img="$(tn_fetch_release_image "$tag" "$net" "" "$fn")" || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            printf '%s\n' "$img"
+            return 0
+        fi
+        if [[ $rc -ne 2 || "$net" != "testnet" ]]; then
+            return 1
+        fi
+        _tn_c4_say warn "Release ${tag} has no signed image digest to read; using the digest the registry serves for ${repo}:${tag} (testnet only)." "$fn"
+    elif [[ "$net" != "testnet" ]]; then
+        _tn_c4_say warn "No release signing key in $(_tn_release_keys_dir); a ${net} image is taken only from a signed release." "$fn"
+        return 1
+    else
+        _tn_c4_say warn "No release signing key in $(_tn_release_keys_dir); using the digest the registry serves for ${repo}:${tag}, which no signed release confirms (testnet only)." "$fn"
+    fi
+    for r in "$repo" "$TN_TESTNET_LEGACY_IMAGE_REPO"; do
+        if d="$(tn_registry_digest "$r" "$tag")"; then
+            printf '%s@%s\n' "$r" "$d"
+            return 0
+        fi
+    done
+    _tn_c4_say warn "The registry gave no digest for ${tag} in ${repo} or ${TN_TESTNET_LEGACY_IMAGE_REPO}." "$fn"
+    return 1
+}
+
+# tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names, by
+# digest: a release tag of NETWORK, alone or as <repo>:<tag> of a repository
+# NETWORK's images may come from (tn_docker_repo_ok), resolved with
+# tn_docker_image_for_tag; or <repo>@sha256:<digest> of such a repository, taken
+# as given. Prints "<repo>@sha256:<digest> <tag>". For a digest given alone the
+# tag is the release .node-meta records for that digest (tn_docker_recorded_tag),
+# else empty, with a warning that the downgrade and oldest-release checks cannot
+# be applied. rc 1, with the reason on stderr, for anything else:
+# another repository, a tag that is not a release tag of NETWORK, latest, a
+# leading "-". Nothing is pulled.
+tn_docker_resolve_ref() {
+    local net="${1:-}" arg="${2:-}" fn="${3:-}" repo tag="" img=""
+    repo="$(tn_docker_repo_for "$net")" || return 1
+    case "$arg" in
+        ""|-*) ;;
+        *@sha256:*) img="$arg" ;;
+        */*:*)
+            if [[ "${arg%:*}" != *@* ]] && tn_docker_repo_ok "$net" "${arg%:*}"; then
+                tag="${arg##*:}"
+            fi
+            ;;
+        */*|*:*|*@*) ;;
+        *) tag="$arg" ;;
+    esac
+    if [[ -n "$tag" ]]; then
+        if ! tn_release_tag_ok "$net" "$tag"; then
+            print_warn "${tag} is not a ${net} release tag ($(tn_release_tag_grammar))." >&2
+            return 1
+        fi
+        img="$(tn_docker_image_for_tag "$net" "$tag" "$fn")" || return 1
+    fi
+    if [[ -z "$img" ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$img" "$net"; then
+        print_warn "Image refused: ${arg:-(empty)}. A node runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest." >&2
+        return 1
+    fi
+    # A digest given alone: its release is the one .node-meta records for that
+    # digest, if any; otherwise it is unknown, and so is whether it is older.
+    if [[ -z "$tag" ]]; then
+        tag="$(tn_docker_recorded_tag "$img")" || tag=""
+        tn_release_tag_ok "$net" "$tag" || tag=""
+        if [[ -z "$tag" ]]; then
+            _tn_c4_say warn "${img} is given by digest alone, so the release it holds is unknown: the downgrade and oldest-release checks cannot be applied to it. Give its ${net} release tag instead to have them applied." "$fn"
+        fi
+    fi
+    printf '%s %s\n' "$img" "$tag"
+}
+
+# tn_docker_recorded_tag IMAGE -- the release tag .node-meta records for IMAGE
+# (<repo>@sha256:<digest>): RELEASE_TAG, when DOCKER_IMAGE_DIGEST there names
+# IMAGE's digest. Prints nothing (rc 1) otherwise.
+tn_docker_recorded_tag() {
+    local img="${1:-}" re d t
+    re='@(sha256:[0-9a-f]{64})$'
+    [[ "$img" =~ $re ]] || return 1
+    d="${BASH_REMATCH[1]}"
+    [[ "$(meta_get DOCKER_IMAGE_DIGEST 2>/dev/null || true)" == "$d" ]] || return 1
+    t="$(meta_get RELEASE_TAG 2>/dev/null)" || return 1
+    [[ -n "$t" ]] || return 1
+    printf '%s\n' "$t"
+}
+
+# tn_docker_release_tag_for NETWORK IMAGE -- the release tag of NETWORK whose
+# image is IMAGE (<repo>@sha256:<digest>), to record beside the digest: the tag
+# .node-meta records for it (tn_docker_recorded_tag), DEFAULT_DOCKER_TAG for
+# DEFAULT_DOCKER_IMAGE, else the newest of the repository's release tags (the
+# newest 15 by tn_release_tag_key, release candidates included: this names the
+# image, it picks nothing) for which the registry serves IMAGE's digest
+# (tn_registry_digest).
+# Prints nothing, rc 1, when none matches or the registry cannot be read.
+tn_docker_release_tag_for() {
+    local net="${1:-}" img="${2:-}" repo tags t d
+    [[ "$img" == *@sha256:* ]] || return 1
+    if t="$(tn_docker_recorded_tag "$img" 2>/dev/null)"; then
+        printf '%s\n' "$t"
+        return 0
+    fi
+    if [[ "$img" == "$DEFAULT_DOCKER_IMAGE" ]] && tn_release_tag_ok "$net" "$DEFAULT_DOCKER_TAG"; then
+        printf '%s\n' "$DEFAULT_DOCKER_TAG"
+        return 0
+    fi
+    repo="${img%@*}"
+    tn_docker_repo_ok "$net" "$repo" 2>/dev/null || return 1
+    # One pull token for the listing and every manifest lookup below.
+    _tn_registry_auth "$repo" || return 1
+    tags="$(tn_registry_tags "$repo")" || return 1
+    for t in $(printf '%s\n' "$tags" \
+        | while IFS= read -r t; do if tn_release_tag_ok "$net" "$t"; then printf '%s\n' "$t"; fi; done \
+        | tn_release_tags_sort | tail -n 15 | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }'); do
+        d="$(tn_registry_digest "$repo" "$t" 2>/dev/null)" || continue
+        if [[ "$d" == "${img##*@}" ]]; then
+            printf '%s\n' "$t"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# tn_docker_holds_digest IMAGE -- rc 0 when Docker holds an image whose
+# RepoDigests list IMAGE (<repo>@sha256:<digest>): what a pull by digest must leave.
+tn_docker_holds_digest() {
+    [[ "${1:-}" == *@sha256:* ]] || return 1
+    docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null | grep -qxF -- "$1"
+}
+
+# _tn_tag_sig_check DIR TAG -- check the signature on release tag TAG in the git
+# checkout DIR against the keys in lib/release-keys (git verify-tag with gpg, in
+# a throwaway GNUPGHOME), judged by _tn_gpg_status_verdict as release files are.
+# rc 0: a good signature by a listed primary key; 1: a bad, expired or revoked
+# signature, or an ERRSIG other than a missing key; 4: it cannot be told (no
+# gpg, no key file, an unsigned or lightweight tag, a signer whose key is not
+# here: NO_PUBKEY, or ERRSIG for a missing key, named by its key id). The
+# reason is printed on stdout when rc is not 0.
+_tn_tag_sig_check() {
+    local dir="${1:-}" tag="${2:-}" parent tmp k out verdict kw ids="" vrc=0
+    if ! command -v gpg >/dev/null 2>&1; then
+        printf 'gpg is not installed\n'
+        return 4
+    fi
+    if ! _tn_release_keys_present; then
+        printf 'no release signing key in %s\n' "$(_tn_release_keys_dir)"
+        return 4
+    fi
+    parent="$(tn_staging_dir)" || { printf 'the staging directory is unusable\n'; return 4; }
+    tmp="$(mktemp -d "${parent}/tag.$$.XXXXXX")" || { printf 'no temporary directory\n'; return 4; }
+    if ! _tn_release_keyring "$tmp"; then
+        _tn_release_cleanup "$tmp"
+        printf 'the release signing keys cannot be read\n'
+        return 4
+    fi
+    for k in "$(_tn_release_keys_dir)"/*.asc; do
+        [[ -f "$k" && ! -L "$k" ]] || continue
+        GNUPGHOME="$tmp/gnupg" gpg --batch --no-tty --quiet --import < "$k" >/dev/null 2>&1 || true
+    done
+    out="$(GNUPGHOME="$tmp/gnupg" git -C "$dir" -c gpg.format=openpgp -c gpg.program=gpg \
+        verify-tag --raw "refs/tags/${tag}" 2>&1 >/dev/null 9>&-)" || true
+    verdict="$(_tn_gpg_status_verdict "$tmp/allow" <<< "$out")" || vrc=$?
+    _tn_release_cleanup "$tmp"
+    [[ $vrc -ne 0 ]] || return 0
+    kw="${verdict%% *}"
+    [[ "$verdict" != *" "* ]] || ids="${verdict#* }"
+    if [[ "$kw" != NOSIG ]]; then
+        printf 'the tag signature is not good (%s)\n' "${kw:-no verdict}"
+        return 1
+    fi
+    if [[ -n "$ids" ]]; then
+        printf 'the tag is signed by key %s, which is not in %s\n' "$ids" "$(_tn_release_keys_dir)"
+    else
+        printf 'the tag carries no signature by a release key\n'
+    fi
+    return 4
+}
+
+# tn_source_checkout_tag DIR NETWORK TAG [ALLOW_DIRTY] [progress-fn] -- put the
+# checkout DIR (cloned from TN_REPO over https when missing; it must belong to
+# the account running this, root on a host) at release tag TAG, detached, with
+# its submodules at the recorded commits. TAG must pass tn_release_tag_ok: no
+# branch, no commit id. The tag is fetched from origin into refs/tn-remote-tags/
+# and compared with a local tag of the same name, which is never moved: a
+# difference refuses ("re-pointed upstream"). The tag's signature is checked
+# against lib/release-keys (_tn_tag_sig_check): a bad one refuses everywhere;
+# one that cannot be checked refuses on mainnet and warns on testnet. A tree
+# with local changes or untracked files refuses unless ALLOW_DIRTY is true
+# (testnet only), which discards them (reset --hard, clean -ffd). rc 0 checked
+# out, 1 refused (nothing moved), 2 failed, 3 TAG is not a NETWORK release tag
+# (nothing ran; a release candidate on mainnet is one).
+tn_source_checkout_tag() {
+    local dir="${1:-}" net="${2:-}" tag="${3:-}" dirty_ok="${4:-false}" fn="${5:-}"
+    local remote="" have="" st why rc=0 n
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar)); branches and commit ids are not built." "$fn"
+        return 3
+    fi
+    if [[ "$dirty_ok" == "true" && "$net" != "testnet" ]]; then
+        _tn_c4_say warn "--allow-dirty is taken on testnet only." "$fn"
+        return 1
+    fi
+    if [[ -z "$dir" || "$dir" != /* ]]; then
+        _tn_c4_say warn "No source directory to build in." "$fn"
+        return 1
+    fi
+    if [[ ! -d "${dir}/.git" ]]; then
+        if [[ -e "$dir" || -L "$dir" ]]; then
+            _tn_c4_say warn "${dir} exists but is not a git checkout; move it aside first." "$fn"
+            return 1
+        fi
+        _tn_c4_say log "Cloning ${TN_REPO} into ${dir}..." "$fn"
+        if ! GIT_ALLOW_PROTOCOL=https git clone --quiet -- "$TN_REPO" "$dir" 9>&-; then
+            _tn_c4_say warn "Could not clone ${TN_REPO}." "$fn"
+            return 2
+        fi
+    fi
+    if [[ -L "$dir" || "$(stat -c '%u' -- "$dir" 2>/dev/null)" != "$(id -u)" ]]; then
+        _tn_c4_say warn "${dir} must be a directory owned by $(id -un) (not a symlink); nothing was checked out." "$fn"
+        return 1
+    fi
+    _tn_c4_say step "Fetching ${tag} from origin..." "$fn"
+    if GIT_ALLOW_PROTOCOL=https git -C "$dir" fetch --quiet --no-tags origin \
+        "+refs/tags/${tag}:refs/tn-remote-tags/${tag}" 9>&- 2>/dev/null; then
+        remote="$(git -C "$dir" rev-parse -q --verify "refs/tn-remote-tags/${tag}" 2>/dev/null)" || remote=""
+    fi
+    have="$(git -C "$dir" rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)" || have=""
+    if [[ -z "$remote" ]]; then
+        if [[ -z "$have" ]]; then
+            _tn_c4_say warn "Could not fetch tag ${tag} from origin, and the checkout does not have it." "$fn"
+            return 2
+        fi
+        _tn_c4_say warn "Could not reach origin; using the local tag ${tag} (not compared with origin's)." "$fn"
+    elif [[ -n "$have" && "$have" != "$remote" ]]; then
+        _tn_c4_say warn "Tag ${tag} re-pointed upstream: origin has ${remote:0:12}, this checkout ${have:0:12}. Nothing was checked out; ask the release team which one is the release." "$fn"
+        return 1
+    elif [[ -z "$have" ]]; then
+        git -C "$dir" update-ref "refs/tags/${tag}" "$remote" "" 2>/dev/null || return 2
+    fi
+    why="$(_tn_tag_sig_check "$dir" "$tag")" || rc=$?
+    case "$rc" in
+        0) _tn_c4_say log "Tag ${tag} carries a good signature by a release key." "$fn" ;;
+        1)
+            _tn_c4_say warn "Tag ${tag}: ${why}. Nothing was checked out." "$fn"
+            return 1
+            ;;
+        *)
+            if [[ "$net" != "testnet" ]]; then
+                _tn_c4_say warn "Tag ${tag} cannot be verified: ${why}. A ${net} source build needs a tag signed by a release key; nothing was checked out." "$fn"
+                return 1
+            fi
+            _tn_c4_say warn "Tag ${tag} is not verified (${why}); building it anyway because this is testnet." "$fn"
+            ;;
+    esac
+    st="$(git -C "$dir" status --porcelain --untracked-files=all 2>/dev/null)" || {
+        _tn_c4_say warn "git status failed in ${dir}." "$fn"
+        return 2
+    }
+    if [[ -n "$st" ]]; then
+        n="$(printf '%s\n' "$st" | awk 'END { print NR }')"
+        if [[ "$dirty_ok" != "true" ]]; then
+            _tn_c4_say warn "${dir} has ${n} changed or untracked paths (git -C ${dir} status --porcelain --untracked-files=all); nothing was checked out. Remove them, or on testnet pass --allow-dirty to discard them." "$fn"
+            return 1
+        fi
+        _tn_c4_say warn "--allow-dirty: discarding ${n} changed or untracked paths in ${dir}." "$fn"
+        if ! git -C "$dir" reset --quiet --hard 2>/dev/null || ! git -C "$dir" clean -ffdq 2>/dev/null; then
+            _tn_c4_say warn "Could not discard the local changes in ${dir}." "$fn"
+            return 2
+        fi
+    fi
+    if ! git -C "$dir" -c advice.detachedHead=false checkout --quiet --detach "refs/tags/${tag}^{commit}" 2>/dev/null; then
+        _tn_c4_say warn "Could not check out ${tag} in ${dir}." "$fn"
+        return 2
+    fi
+    if ! tn_sync_submodules "$dir"; then
+        _tn_c4_say warn "The submodules of ${dir} could not be put at the commits ${tag} records (git -C ${dir} submodule update --init --recursive --force)." "$fn"
+        return 2
+    fi
+    return 0
+}
+
+# tn_source_build DIR NETWORK -- build telcoin-network in the checkout DIR as the
+# build account (tn_as_build_user: env -i, its own toolchain, its own target
+# dir): the toolchain rust-toolchain.toml names, then cargo build --release
+# --locked -p telcoin-network --bin telcoin-network with the network's features
+# (tn_cargo_features_for). Build output goes to stdout and stderr; the binary is
+# left at TN_BUILD_HOME/target/release/telcoin-network. The account and its
+# rustup must be ready (tn_build_user_ensure, tn_rustup_ensure). rc 1 refused
+# (no build for NETWORK, an unusable toolchain name), 2 the build failed.
+tn_source_build() {
+    local dir="${1:-}" net="${2:-}" feats tc
+    if ! feats="$(tn_cargo_features_for "$net")"; then
+        print_warn "No source build is defined for network '${net}'." >&2
+        return 1
+    fi
+    tc="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "${dir}/rust-toolchain.toml" 2>/dev/null | head -n 1)" || tc=""
+    if [[ -n "$tc" ]]; then
+        if [[ ! "$tc" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            print_warn "rust-toolchain.toml names a toolchain this script does not install: ${tc}" >&2
+            return 1
+        fi
+        ( cd -- "$dir" && tn_as_build_user rustup toolchain install --profile minimal "$tc" ) || return 2
+    fi
+    # shellcheck disable=SC2086
+    ( cd -- "$dir" && tn_as_build_user cargo build --release --locked -p telcoin-network --bin telcoin-network $feats ) || return 2
+}
+
+# tn_stage_binary SRC NETWORK [REF] [progress-fn] -- copy the node binary SRC
+# into a new root-only directory under the staging directory, run the copy's
+# --version as the build account (tn_build_version) and check it with
+# tn_release_version_ok for NETWORK (and REF's version when REF is given; a
+# source build leaves REF empty, since releases before the signed ones report
+# the crate version). SRC outside the staging directory (the build output, in
+# the build account's tree) is read as the build account, so root opens nothing
+# there; the copy is written by this shell and is root's. SRC inside the staging
+# directory (a release binary) is read directly. Prints the copy's path; its
+# --version text is beside it in "version". The caller removes that directory
+# when done. rc 1 refused, 2 failed; nothing is left behind on failure.
+tn_stage_binary() {
+    local src="${1:-}" net="${2:-}" ref="${3:-}" fn="${4:-}" parent stg ver ok=true
+    [[ -f "$src" && ! -L "$src" ]] || return 1
+    parent="$(tn_staging_dir)" || {
+        _tn_c4_say warn "The staging directory is not a root-owned 0700 directory." "$fn"
+        return 1
+    }
+    stg="$(mktemp -d "${parent}/bin.$$.XXXXXX")" || return 2
+    case "$src" in
+        "${parent}/"*)
+            ( umask 077; cat -- "$src" > "${stg}/telcoin-network" ) 2>/dev/null || ok=false
+            ;;
+        *)
+            ( umask 077; tn_as_build_user cat -- "$src" > "${stg}/telcoin-network" ) 2>/dev/null || ok=false
+            ;;
+    esac
+    if [[ "$ok" != "true" ]] || ! chmod 0755 -- "${stg}/telcoin-network"; then
+        _tn_c4_say warn "Could not copy ${src} into the staging directory (read as ${TN_BUILD_USER} unless it is already there)." "$fn"
+        rm -rf -- "$stg"
+        return 2
+    fi
+    if ! ver="$(tn_build_version "${stg}/telcoin-network" 2>/dev/null)" || [[ -z "$ver" ]]; then
+        _tn_c4_say warn "The new binary did not answer --version (run as ${TN_BUILD_USER})." "$fn"
+        rm -rf -- "$stg"
+        return 1
+    fi
+    if ! tn_release_version_ok "$ver" "$net" "$ref"; then
+        rm -rf -- "$stg"
+        return 1
+    fi
+    if ! printf '%s\n' "$ver" > "${stg}/version"; then
+        rm -rf -- "$stg"
+        return 2
+    fi
+    printf '%s/telcoin-network\n' "$stg"
+}
+
+# tn_release_stage TAG NETWORK [BASE_URL] [progress-fn] -- fetch and verify
+# release TAG (tn_fetch_verified_release), take its binary out of the tarball
+# (tn_release_extract_binary) and stage it (tn_stage_binary: its --version must
+# name TAG's version and fit NETWORK). Prints the staged binary's path; the
+# download is removed. rc as tn_fetch_verified_release (1 refused, 2 network or
+# I/O, 3 bad tag).
+tn_release_stage() {
+    local tag="${1:-}" net="${2:-}" base="${3:-}" fn="${4:-}" tarball rel out rc=0
+    tarball="$(tn_fetch_verified_release "$tag" "$net" "$base" "$fn")" || return $?
+    rel="$(dirname -- "$tarball")"
+    tn_release_extract_binary "$tarball" "${rel}/telcoin-network.bin" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        out="$(tn_stage_binary "${rel}/telcoin-network.bin" "$net" "$tag" "$fn")" || rc=$?
+    else
+        _tn_c4_say warn "Release ${tag}: the binary could not be taken out of ${tarball##*/}." "$fn"
+    fi
+    _tn_release_cleanup "$rel"
+    [[ $rc -eq 0 ]] || return $rc
+    printf '%s\n' "$out"
+}
+
+# tn_staged_cleanup PATH -- remove the staging directory that holds PATH (a path
+# tn_stage_binary printed). Anything outside the staging directory is left alone.
+tn_staged_cleanup() {
+    local p="${1:-}" d parent
+    [[ -n "$p" ]] || return 0
+    d="${p%/*}"
+    parent="${TN_RELEASE_STAGING_DIR:-/var/lib/telcoin-staging}"
+    case "$d" in
+        "${parent}"/bin.*) ;;
+        *) return 0 ;;
+    esac
+    [[ -d "$d" && ! -L "$d" ]] || return 0
+    rm -rf -- "$d"
+}
+
+# _tn_staging_pending_dir -- the staging directory of the staged binary the pending
+# update names (BUILT_BINARY in <config dir>/.pending-update): it outlives the run
+# that prepared it, until update-node applies or discards it.
+_tn_staging_pending_dir() {
+    local f b
+    f="$(tn_resolve_config_dir 2>/dev/null)/.pending-update" || return 0
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    b="$(awk 'index($0, "BUILT_BINARY=") == 1 { print substr($0, 14); exit }' "$f" 2>/dev/null)" || b=""
+    [[ -n "$b" ]] && printf '%s\n' "${b%/*}"
+    return 0
+}
+
+# tn_staging_sweep [stale] -- remove release staging directories (rel., rustup.,
+# tag., bin. and docker-apt. entries) under the staging directory. Each is named
+# KIND.<pid>.XXXXXX with the PID ($$) of the script run that made it, also when a
+# subshell made it. Without an argument, the ones of this run: the EXIT traps of
+# setup-node, update-node and edit-config call this through
+# tn_remove_inflight_tmp, so a signal mid-download or mid-install leaves none.
+# With "stale", the ones of runs that are no longer alive, and those named
+# without a PID (made by an earlier release of these scripts): setup-node and
+# update-node call this once they hold the update lock. The staged binary of a
+# pending update (_tn_staging_pending_dir) is always kept. Never fails.
+tn_staging_sweep() {
+    local mode="${1:-run}" parent keep e base rest pid
+    parent="${TN_RELEASE_STAGING_DIR:-/var/lib/telcoin-staging}"
+    [[ -d "$parent" && ! -L "$parent" ]] || return 0
+    keep="$(_tn_staging_pending_dir)"
+    for e in "$parent"/rel.* "$parent"/rustup.* "$parent"/tag.* "$parent"/bin.* "$parent"/docker-apt.*; do
+        [[ -d "$e" && ! -L "$e" && "$e" != "$keep" ]] || continue
+        base="${e##*/}"
+        rest="${base#*.}"
+        pid=""
+        if [[ "$rest" == *.* && "${rest%%.*}" =~ ^[0-9]+$ ]]; then
+            pid="${rest%%.*}"
+        fi
+        if [[ "$mode" == "stale" ]]; then
+            [[ -z "$pid" ]] || [[ "$pid" != "$$" && ! -d "/proc/${pid}" ]] || continue
+        else
+            [[ "$pid" == "$$" ]] || continue
+        fi
+        _tn_release_cleanup "$e" 2>/dev/null || true
+    done
+    return 0
 }
 
 # =============================================================================
@@ -3143,6 +7661,94 @@ require_testnet() {
 }
 
 # -----------------------------------------------------------------------------
+# ADD: ADD-ON GATES
+# -----------------------------------------------------------------------------
+# Maintainer overlay range admitted to sshd by allow_overlay_ssh and the VPN drop-in
+# (the maintainers' /24, not the whole overlay). lib/testnet-addons.env is the
+# editable home; this default only keeps set -u happy if that file is missing.
+: "${TN_OVERLAY_ADMIN_CIDR:=10.100.9.0/24}"
+
+# addon_meta_get <key> [default] — strict .node-meta read for the add-on scripts.
+# Prints the value, or DEFAULT (may be empty) when the key or the file is absent;
+# rc 0. A key written on more than one line has no single value: prints nothing,
+# says so on stderr and returns 2, so the caller stops instead of acting on a
+# default. Use as: v="$(addon_meta_get KEY dflt)" || exit 1
+addon_meta_get() {
+    local key="${1:-}" dflt="${2:-}" v rc
+    rc=0
+    v="$(meta_get "$key" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        print_error "${key} is set more than once in .node-meta; remove the extra lines and run this again." >&2
+        return 2
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        v="$dflt"
+    fi
+    printf '%s\n' "$v"
+}
+
+# addon_meta_lock — take the update lock unless this run holds it already, and
+# nothing more: for a teardown or a read that must also work on a host laid out
+# by an older release (no ownership migration; a .node-meta write there is then
+# refused by meta_set, rc 1, and the caller warns). The caller's EXIT trap rules
+# are those of addon_meta_write_begin. rc 0 held; 1 another run holds it (said).
+addon_meta_lock() {
+    [[ -n "${TN_UPDATE_LOCK_KIND:-}" ]] && return 0
+    if ! tn_acquire_update_lock >/dev/null 2>&1; then
+        print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished." >&2
+        return 1
+    fi
+    return 0
+}
+
+# addon_meta_write_begin — run once before an add-on script's first .node-meta
+# write on an existing install: take the update lock (tn_acquire_update_lock; a
+# caller with its own EXIT trap sets TN_EXIT_TRAP_OWNED=1 first and releases the
+# lock from that trap) and migrate an old ownership layout so meta_set can write.
+# rc 0 ready (also on a repeat call in the same run); 1 the lock is held by another
+# run or the migration refused or failed (message on stderr; nothing was written).
+addon_meta_write_begin() {
+    local rc
+    if [[ "${_ADDON_META_READY:-0}" == "1" && -n "${TN_UPDATE_LOCK_KIND:-}" ]]; then
+        return 0
+    fi
+    addon_meta_lock || return 1
+    rc=0
+    tn_migrate_ownership >&2 || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        print_error "The ownership migration stopped (rc ${rc}); .node-meta was not changed." >&2
+        return 1
+    fi
+    _ADDON_META_READY=1
+    return 0
+}
+
+# tn_testnet_addons_present — rc 0 when a testnet add-on or the Caddy edge is
+# installed on this host, printing a comma list of what was found (vpn,
+# observability, caddy); rc 1 and no output when none is. Reads files only, so it
+# is safe before any install step. TN_ROOT_PREFIX points it at a fixture tree.
+tn_testnet_addons_present() {
+    local p="${TN_ROOT_PREFIX:-}" found="" f
+    for f in /etc/wireguard/wg0.conf /etc/sudoers.d/90-tnadmin \
+             /etc/systemd/system/tn-vpn-selfheal.service \
+             /etc/systemd/system/tn-vpn-selfheal.path /usr/local/sbin/tn-vpn-selfheal; do
+        if [[ -e "${p}${f}" || -L "${p}${f}" ]]; then
+            found="vpn"
+            break
+        fi
+    done
+    if [[ -e "${p}/etc/systemd/system/telcoin-alloy.service" ]]; then
+        found="${found:+${found},}observability"
+    fi
+    if [[ -f "${p}/etc/caddy/Caddyfile" ]] \
+        && grep -qF "# Managed by the Telcoin Node Manager" "${p}/etc/caddy/Caddyfile" 2>/dev/null; then
+        found="${found:+${found},}caddy"
+    fi
+    [[ -n "$found" ]] || return 1
+    printf '%s\n' "$found"
+}
+
+# -----------------------------------------------------------------------------
 # .node-meta persistence (single primitive for every opt-in's state)
 # -----------------------------------------------------------------------------
 
@@ -3158,28 +7764,44 @@ node_meta_path() {
 # meta_get <key> [file] — echo KEY's value (everything after the first '='). Returns
 # 1 (and echoes nothing) if the key/file is absent. Default file = node_meta_path.
 # One trailing CR is dropped, so a .node-meta saved with CRLF line endings reads
-# NETWORK=testnet, not "testnet\r".
+# NETWORK=testnet, not "testnet\r". A key on more than one line has no single
+# value: meta_get then prints nothing on stdout, warns on stderr naming the key
+# and the file, and returns 2. Callers that treat any non-zero rc as "absent"
+# get no value either way.
 meta_get() {
-    local key="${1:-}" file="${2:-}" line cr
+    local key="${1:-}" file="${2:-}" line cr n
     cr=$'\r'
     [[ -n "$file" ]] || file="$(node_meta_path)" || return 1
     [[ -f "$file" ]] || return 1
+    n="$(grep -c -E "^${key}=" "$file" 2>/dev/null)" || true
+    case "$n" in
+        ""|0) return 1 ;;
+        1) ;;
+        *)
+            print_warn "meta_get: ${key} is set ${n} times in ${file}; using none of them (remove the extra lines)" >&2
+            return 2
+            ;;
+    esac
     line="$(grep -m1 -E "^${key}=" "$file" 2>/dev/null)" || return 1
     [[ -n "$line" ]] || return 1
     line="${line%"$cr"}"
     printf '%s\n' "${line#*=}"
 }
 
-# meta_set <key> <value> [file] — idempotent upsert into .node-meta (mode 600).
-# Rewrites via _tn_meta_rewrite + append (no sed) so values containing / + = are
-# safe. Every other key in the file survives; a KEY= line ending in CR (a file
-# saved with CRLF line endings) is replaced like any other, and the rewrite drops
-# the trailing CR of every line. Refuses (rc 1, file untouched) a key that
-# is not ^[A-Z][A-Z0-9_]*$ or a value holding a CR or LF, which would otherwise
-# smuggle a second KEY= line into the file. Warnings go to stderr so JSON-mode
-# callers keep a clean stdout.
+# meta_set <key> <value> [file] — idempotent upsert into .node-meta. The file
+# is rewritten root:root 0600 through tn_write_root_file (a temp file in the same
+# directory, then one rename), so its directory must pass tn_root_dir_ok and the
+# file must not be a symlink. Values containing / + = are safe (no sed). Every
+# other key in the file survives; a KEY= line ending in CR (a file saved with
+# CRLF line endings) is replaced like any other, and the rewrite drops the
+# trailing CR of every line. Refuses (rc 1, file untouched) a key that is not
+# ^[A-Z][A-Z0-9_]*$, a value holding a CR or LF (which would otherwise smuggle a
+# second KEY= line into the file), no .node-meta to write, or a write that
+# tn_write_root_file refuses (a host laid out by an older release: run
+# tn_migrate_ownership). rc 2 when the write failed. Warnings go to stderr so
+# JSON-mode callers keep a clean stdout.
 meta_set() {
-    local key="${1:-}" val="${2:-}" file="${3:-}" tmp nl cr
+    local key="${1:-}" val="${2:-}" file="${3:-}" nl cr body="" dir
     nl=$'\n'
     cr=$'\r'
     if [[ ! "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
@@ -3195,22 +7817,31 @@ meta_set() {
         print_warn "meta_set: no .node-meta found; cannot persist ${key}" >&2
         return 1
     fi
-    mkdir -p "$(dirname "$file")" || return 1
-    [[ -f "$file" ]] || { ( umask 077; : > "$file" ) || return 1; }
-    tmp="$(mktemp 2>/dev/null || true)"
-    [[ -n "$tmp" && -f "$tmp" ]] || return 1
-    if ! _tn_meta_rewrite "$key" "$file" > "$tmp"; then
-        rm -f "$tmp"
-        return 1
+    dir="${file%/*}"
+    if [[ -n "$dir" && ! -e "$dir" ]]; then
+        install -d -o root -g root -m 0755 -- "$dir" || return 2
     fi
-    printf '%s=%s\n' "$key" "$val" >> "$tmp"
-    if ! cat "$tmp" > "$file"; then
-        rm -f "$tmp"
-        return 1
+    if [[ -f "$file" && ! -L "$file" ]]; then
+        body="$(_tn_meta_rewrite "$key" "$file")" || return 2
     fi
-    rm -f "$tmp"
-    chmod 600 "$file" 2>/dev/null || true
-    return 0
+    _tn_meta_write "$file" "$body" "${key}=${val}"
+}
+
+# _tn_meta_write FILE BODY [LINE] — write BODY (and LINE, when given) to FILE
+# root:root 0600 via tn_write_root_file; its return code. Each non-empty part
+# ends with a newline; both empty writes an empty file. Fed by a here-string,
+# not a pipe, so the write runs in the caller's shell.
+_tn_meta_write() {
+    local text="$2" nl=$'\n'
+    if [[ -n "${3:-}" ]]; then
+        if [[ -n "$text" ]]; then text="${text}${nl}"; fi
+        text="${text}$3"
+    fi
+    if [[ -z "$text" ]]; then
+        tn_write_root_file "$1" 0600 < /dev/null
+    else
+        tn_write_root_file "$1" 0600 <<< "$text"
+    fi
 }
 
 # _tn_meta_rewrite <key> <file> — print FILE without its KEY= lines (CRLF lines
@@ -3226,9 +7857,10 @@ _tn_meta_rewrite() {
 # meta_unset <key> [file] — remove every KEY= line from .node-meta (a line ending
 # in CR included; the rewrite drops the trailing CR of every line). rc 0 when the
 # key (or the file) is absent, and the file is then left untouched. Same key rule
-# as meta_set (rc 1 otherwise); other keys survive and the file stays mode 600.
+# and the same root-owned 0600 write as meta_set (rc 1 refused, 2 failed); other
+# keys survive.
 meta_unset() {
-    local key="${1:-}" file="${2:-}" tmp
+    local key="${1:-}" file="${2:-}" body
     if [[ ! "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
         print_warn "meta_unset: refusing key '${key}' (expected A-Z, 0-9 and _ only, starting with a letter)" >&2
         return 1
@@ -3236,19 +7868,12 @@ meta_unset() {
     [[ -n "$file" ]] || file="$(node_meta_path || true)"
     [[ -n "$file" && -f "$file" ]] || return 0
     grep -qE "^${key}=" "$file" 2>/dev/null || return 0
-    tmp="$(mktemp 2>/dev/null || true)"
-    [[ -n "$tmp" && -f "$tmp" ]] || return 1
-    if ! _tn_meta_rewrite "$key" "$file" > "$tmp"; then
-        rm -f "$tmp"
+    if [[ -L "$file" ]]; then
+        print_warn "meta_unset: refusing ${file}: it is a symlink" >&2
         return 1
     fi
-    if ! cat "$tmp" > "$file"; then
-        rm -f "$tmp"
-        return 1
-    fi
-    rm -f "$tmp"
-    chmod 600 "$file" 2>/dev/null || true
-    return 0
+    body="$(_tn_meta_rewrite "$key" "$file")" || return 2
+    _tn_meta_write "$file" "$body"
 }
 
 # -----------------------------------------------------------------------------
@@ -3311,41 +7936,73 @@ get_ssh_port() {
 }
 
 # validate_health_src <ip|cidr> — accept a bare IPv4/IPv6 OR a CIDR (v4 or v6).
-# For a CIDR, split on '/', require a numeric mask, and dispatch by family: IPv4 with
-# mask 0..32, or IPv6 with mask 0..128. For a bare address: IPv4 or IPv6. Generalizes
-# the IPv4-only validate_cidr for the operator-chosen health sources. Returns 0 if valid.
+# For a CIDR, split on '/', require a decimal mask without leading zeros, and
+# dispatch by family: IPv4 with mask 8..32, or IPv6 with mask 8..128. For a bare
+# address: IPv4 or IPv6. An IPv4 octet with a leading zero (010.0.0.1) is refused,
+# as ufw refuses it. A /0 mask or the unspecified address (0.0.0.0, ::) means
+# "anywhere" and is refused, and so is any mask shorter than /8. Generalizes the
+# IPv4-only validate_cidr for the operator-chosen health and SSH sources. Returns
+# 0 if valid.
 validate_health_src() {
-    local src="$1"
-    if [[ "$src" == */* ]]; then
-        local ip="${src%/*}" mask="${src#*/}"
-        [[ "$mask" =~ ^[0-9]+$ ]] || return 1
-        if validate_ipv4 "$ip"; then
-            (( mask >= 0 && mask <= 32 ))
-        elif validate_ipv6 "$ip"; then
-            (( mask >= 0 && mask <= 128 ))
-        else
-            return 1
-        fi
+    local src="${1:-}" ip mask
+    # Never "anywhere": no /0 mask and no unspecified address.
+    case "$src" in
+        0.0.0.0|0.0.0.0/*|::|::/*) return 1 ;;
+    esac
+    ip="${src%%/*}"
+    if validate_ipv4 "$ip"; then
+        [[ ".${ip}" == *.0[0-9]* ]] && return 1
+    elif ! validate_ipv6 "$ip"; then
+        return 1
+    fi
+    [[ "$src" == */* ]] || return 0
+    mask="${src#*/}"
+    [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+    (( mask >= 8 )) || return 1
+    if validate_ipv4 "$ip"; then
+        (( mask <= 32 ))
     else
-        validate_ipv4 "$src" || validate_ipv6 "$src"
+        (( mask <= 128 ))
     fi
 }
 
 # kuma_extra_list — echo the space-separated operator-chosen health sources persisted
 # in .node-meta (KUMA_EXTRA_SRC), or nothing. The single source of truth for the set.
+# rc 2 (nothing printed, a message on stderr) when the key is on more than one line:
+# the set is then unknown and callers must not rewrite or apply it.
 kuma_extra_list() {
-    meta_get KUMA_EXTRA_SRC 2>/dev/null || true
+    local v rc
+    rc=0
+    v="$(meta_get KUMA_EXTRA_SRC 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        print_warn "KUMA_EXTRA_SRC is set more than once in .node-meta; no extra health source is applied until the extra lines are removed." >&2
+        return 2
+    fi
+    [[ -n "$v" ]] && printf '%s\n' "$v"
+    return 0
 }
 
 # apply_kuma_extra_rules — (re)apply an `allow from <src>` rule for every operator-
 # persisted health source so they survive a `ufw --force reset`. Idempotent (ufw
 # dedups) and quiet (the operator gets a dedicated confirmation elsewhere). No-op when
-# the list is empty.
+# the list is empty. Every entry must pass validate_health_src (so never /0); an entry
+# that does not is skipped with a warning. rc 1 when an entry was skipped, a rule
+# failed or the list is unreadable (duplicated key), else 0.
 apply_kuma_extra_rules() {
-    local src
-    for src in $(kuma_extra_list); do
-        ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || true
+    local src list rc
+    local -a srcs
+    rc=0
+    list="$(kuma_extra_list)" || return 1
+    read -r -a srcs <<< "$list" || true
+    for src in ${srcs[@]+"${srcs[@]}"}; do
+        if ! validate_health_src "$src"; then
+            print_warn "Skipping health source '${src}' from KUMA_EXTRA_SRC: not an address or a CIDR of /8 or narrower." >&2
+            rc=1
+            continue
+        fi
+        ufw allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 || rc=1
     done
+    return "$rc"
 }
 
 # kuma_extra_add <src> — validate, dedupe-append to KUMA_EXTRA_SRC, persist, then apply
@@ -3353,7 +8010,7 @@ apply_kuma_extra_rules() {
 kuma_extra_add() {
     local src="$1" cur s
     validate_health_src "$src" || return 1
-    cur="$(kuma_extra_list)"
+    cur="$(kuma_extra_list)" || return 1
     for s in $cur; do
         # Already persisted: just (re)apply the rule idempotently and report success.
         if [[ "$s" == "$src" ]]; then
@@ -3369,7 +8026,7 @@ kuma_extra_add() {
 # then delete its ufw allow rule. Removing an entry that isn't present is harmless.
 kuma_extra_remove() {
     local src="$1" cur new="" s
-    cur="$(kuma_extra_list)"
+    cur="$(kuma_extra_list)" || return 1
     for s in $cur; do
         [[ "$s" == "$src" ]] && continue
         new="${new:+$new }$s"
@@ -3386,14 +8043,36 @@ kuma_extra_remove() {
 # restriction and keep the port open to the whole internet. Because every call site
 # routes through here, the operator's extras are restored automatically after a
 # `ufw --force reset`. Idempotent (ufw dedups identical rules).
+# Testnet and devnet only (is_testnet_like reads NETWORK, which the caller loads from
+# .node-meta). On any other network, NETWORK unset included, the health port is
+# never opened: the open rule, the monitor rule and the operator extras are deleted
+# instead, and the function returns 1 with a warning on stderr; rc 2 (an error on
+# stderr) when one of those deletes fails, so the caller stops instead of leaving
+# the port open (ufw returns 0 for a rule that is not there).
 apply_kuma_rule() {
-    local rc
+    local rc src list
+    local -a srcs
+    rc=0
+    if ! is_testnet_like; then
+        list="$(meta_get KUMA_EXTRA_SRC 2>/dev/null)" || list=""
+        read -r -a srcs <<< "$list" || true
+        for src in "" "${TN_KUMA_SRC}" ${srcs[@]+"${srcs[@]}"}; do
+            if [[ -z "$src" ]]; then
+                ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 && continue
+            else
+                ufw delete allow from "$src" to any port "${TN_KUMA_PORT}" proto tcp >/dev/null 2>&1 && continue
+            fi
+            print_error "Could not delete the health-port rule ${TN_KUMA_PORT}/tcp${src:+ from ${src}}; the port may still be open. Check: sudo ufw status numbered" >&2
+            return 2
+        done
+        print_warn "Health port ${TN_KUMA_PORT}/tcp stays closed: health monitoring is a testnet-only add-on (NETWORK=${NETWORK:-unset})." >&2
+        return 1
+    fi
     # Drop a stale open-to-Anywhere rule (and its v6 twin) for the health port, if any.
     ufw delete allow "${TN_KUMA_PORT}/tcp" >/dev/null 2>&1 || true
-    ufw allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp
-    rc=$?
+    ufw allow from "${TN_KUMA_SRC}" to any port "${TN_KUMA_PORT}" proto tcp || rc=$?
     # Layer operator-chosen sources on top of the TA baseline.
-    apply_kuma_extra_rules
+    apply_kuma_extra_rules || rc=1
     return "$rc"
 }
 
@@ -3414,12 +8093,24 @@ apply_lb_hc_rule() {
     done
 }
 
-# allow_overlay_ssh — admit SSH from the whole WireGuard overlay so the core team can
-# reach the node over the VPN even after public SSH is restricted. Idempotent.
+# allow_overlay_ssh — admit SSH from the maintainer overlay range
+# (TN_OVERLAY_ADMIN_CIDR, not the whole overlay) so the core team can reach the node
+# over the VPN even after public SSH is restricted. Deletes the older whole-overlay
+# rule first. Testnet and devnet only: on any other network it deletes both rules
+# and returns 1. Idempotent.
 allow_overlay_ssh() {
-    local port; port="$(get_ssh_port)"
-    [[ -n "$port" ]] || port=22
-    ufw allow from "${TN_OVERLAY_CIDR}" to any port "${port}" proto tcp
+    local port
+    port="$(get_ssh_port | head -n1)"
+    [[ "$port" =~ ^[0-9]+$ ]] || port=22
+    if [[ "${TN_OVERLAY_CIDR}" != "${TN_OVERLAY_ADMIN_CIDR}" ]]; then
+        ufw delete allow from "${TN_OVERLAY_CIDR}" to any port "${port}" proto tcp >/dev/null 2>&1 || true
+    fi
+    if ! is_testnet_like; then
+        ufw delete allow from "${TN_OVERLAY_ADMIN_CIDR}" to any port "${port}" proto tcp >/dev/null 2>&1 || true
+        print_warn "Overlay SSH is a testnet-only add-on (NETWORK=${NETWORK:-unset}); no overlay rule added." >&2
+        return 1
+    fi
+    ufw allow from "${TN_OVERLAY_ADMIN_CIDR}" to any port "${port}" proto tcp
 }
 
 # -----------------------------------------------------------------------------
@@ -3455,22 +8146,53 @@ tn_node_launch_flags() {
 }
 
 # tn_node_launch_target — echo "<svc> <method> <file>" for the installed node, where
-# file is the launch config to patch: the systemd unit (docker) or the start wrapper
-# (binary/source). Returns 1 if no node service is present.
+# file is the launch config to patch: the start script under
+# /usr/local/libexec/telcoin (tn_start_script_path), else the start wrapper an older
+# release wrote as ${DEFAULT_INSTALL_DIR}/start-<svc>.sh, else the systemd unit
+# (old installs that run the node inline: `docker run ...` or
+# `<binary> node ...` on the ExecStart= line). rc 1 no node service; 2 INSTALL_METHOD
+# appears more than once in .node-meta; 3 refused: the file is a symlink, is not
+# owned by root, or its directory fails tn_root_dir_ok (an older layout: run
+# tn_migrate_ownership). A message on stderr explains rc 2 and 3.
 tn_node_launch_target() {
-    local svc method meta file
+    local svc method meta file rc=0 smethod new
     svc="$(tn_resolve_service)" || return 1
     meta="$(node_meta_path || true)"
-    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || echo binary)"; [[ -n "$method" ]] || method="binary"
-    # Docker installs now run via a start wrapper too (the BLS LoadCredential change moved
-    # the `docker run` out of the unit's ExecStart into ${INSTALL_DIR}/start-<svc>.sh). The
-    # --http line obs flags attach to therefore lives in the wrapper -- patch it when present.
-    # Fall back to the unit for legacy docker installs that still inline `docker run`.
-    if [[ "$method" == "docker" ]]; then
-        if [[ -f "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" ]]; then file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
-        else file="/etc/systemd/system/${svc}.service"; fi
-    else file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"; fi
+    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "tn_node_launch_target: INSTALL_METHOD is set more than once in ${meta}; remove the extra lines first" >&2
+        return 2
+    fi
+    [[ -n "$method" ]] || method="binary"
+    smethod="source"
+    [[ "$method" == "docker" ]] && smethod="docker"
+    new="${TN_ROOT_PREFIX:-}$(tn_start_script_path "$smethod")"
+    if [[ -e "$new" || -L "$new" ]]; then
+        file="$new"
+    elif [[ ! -e "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" && ! -L "${DEFAULT_INSTALL_DIR}/start-${svc}.sh" ]]; then
+        file="${TN_ROOT_PREFIX:-}/etc/systemd/system/${svc}.service"
+    else
+        file="${DEFAULT_INSTALL_DIR}/start-${svc}.sh"
+    fi
+    if ! _tn_root_file_ok "$file"; then
+        print_warn "tn_node_launch_target: refusing ${file}: it is a symlink, not owned by root, or in a directory that is not root-owned (run the ownership migration)" >&2
+        return 3
+    fi
     printf '%s %s %s\n' "$svc" "$method" "$file"
+}
+
+# _tn_root_file_ok PATH — rc 0 when PATH does not exist or is a regular,
+# root-owned file that is not a symlink, and its directory passes tn_root_dir_ok.
+_tn_root_file_ok() {
+    local p="${1:-}" dir owner
+    [[ "$p" == /* && ! -L "$p" ]] || return 1
+    dir="${p%/*}"
+    [[ -n "$dir" ]] || dir=/
+    tn_root_dir_ok "$dir" || return 1
+    [[ -e "$p" ]] || return 0
+    [[ -f "$p" ]] || return 1
+    owner="$(stat -c %u -- "$p" 2>/dev/null)" || return 1
+    [[ "$owner" == 0 ]]
 }
 
 # -----------------------------------------------------------------------------
@@ -3503,10 +8225,22 @@ tn_node_launch_target() {
 # --http line, 3 refused (a trailing comment on a line that would change, a bad
 # flag or value, a quote the parser cannot balance, or a staged copy that fails the
 # checks), 4 I/O error. The file is untouched unless rc is 0. Edits are staged in a
-# temp file and written back with `cat >`, which keeps owner and mode, only when
+# temp file and written back through tn_write_root_file (_tn_launch_write: owner
+# root, group and mode kept, one rename; a refusal there is rc 3) only when
 # the staged copy is non-empty, has as many --http lines as before, reads back as
 # intended and, for a shell wrapper that passed bash -n, still passes it. The
 # caller owns any backup, the daemon-reload of a unit and the restart.
+
+# _tn_unit_runs_node_inline UNIT — rc 0 when the systemd unit UNIT itself holds the
+# node command (`docker run ... node ... --http` or `<binary> node ... --http` on
+# its ExecStart= line), as units from before the start scripts did. Reads only;
+# the answer does not depend on who owns the install files.
+_tn_unit_runs_node_inline() {
+    local rc=0
+    [[ -f "${1:-}" ]] || return 1
+    _tn_launch_awk runner "$1" >/dev/null 2>&1 || rc=$?
+    [[ $rc -eq 10 ]]
+}
 
 # _tn_launch_is_unit FILE — rc 0 when FILE is a systemd unit (name ends in .service).
 _tn_launch_is_unit() {
@@ -3516,7 +8250,8 @@ _tn_launch_is_unit() {
 # _tn_launch_awk MODE FILE [FLAG [VALUE [HASVAL [FLAGS [UNIT]]]]] — the launch-file
 # parser. MODE is target (print the target line number), get, probe (print
 # "<count> <boolean 0|1> <raw value>" of FLAG), runner (print "docker <image>" or
-# "binary <path>"), set, unset or inject (print the whole edited file). UNIT (1 or
+# "binary <path>"), args (print the words after `node`, as written, on one line),
+# set, unset or inject (print the whole edited file). UNIT (1 or
 # 0) says how to read FILE; it defaults to the name of FILE, and a staged temp copy
 # passes the kind of the file it was made from. Inputs reach awk through the
 # environment, so nothing is escape-processed. Exit 10 done, 11 no change needed or
@@ -3748,6 +8483,7 @@ _tn_launch_awk() {
             }
             if (mode == "get") { if (!no) exit 11; print unq(OR[1]); exit 10 }
             if (mode == "probe") { printf "%d %d %s\n", no, (no ? OB[1] : 0), (no ? OR[1] : ""); exit 10 }
+            if (mode == "args") { s = ""; for (k = tn + 1; k <= CT1[tc]; k++) s = s (s == "" ? "" : " ") TT[k]; print s; exit 10 }
             if (mode == "runner") {
                 dk = 0; dr = 0
                 for (k = CT0[tc]; k < tn; k++) {
@@ -3884,24 +8620,22 @@ _tn_launch_staged_ok() {
     return 0
 }
 
-# _tn_launch_write FILE TMP — copy TMP over FILE in place (cat >, so owner and mode
-# stay) and compare the bytes; on a failure the old content is put back. rc 0
-# written, 4 I/O error.
+# _tn_launch_write FILE TMP — replace FILE with the content of TMP through
+# tn_write_root_file: owner root, FILE's group and mode kept (group and other
+# write dropped), one rename, so FILE is never half-written. rc 0 written, 3
+# refused (FILE a symlink, or its directory not root-owned), 4 I/O error.
 _tn_launch_write() {
-    local file="$1" tmp="$2" keep
-    keep="$(mktemp 2>/dev/null || true)"
-    [[ -n "$keep" && -f "$keep" ]] || return 4
-    if ! { cat "$file" > "$keep"; } 2>/dev/null; then
-        rm -f "$keep"
-        return 4
-    fi
-    if { cat "$tmp" > "$file"; } 2>/dev/null && cmp -s "$tmp" "$file"; then
-        rm -f "$keep"
-        return 0
-    fi
-    { cat "$keep" > "$file"; } 2>/dev/null || true
-    rm -f "$keep"
-    return 4
+    local file="$1" tmp="$2" st mode group rc=0
+    st="$(stat -c '%a %g' -- "$file" 2>/dev/null)" || return 4
+    mode="$(_tn_strip_gw "${st%% *}")"
+    group="${st##* }"
+    tn_write_root_file "$file" "$mode" "$group" < "$tmp" || rc=$?
+    case "$rc" in
+        0) cmp -s "$tmp" "$file" || return 4 ;;
+        1) return 3 ;;
+        *) return 4 ;;
+    esac
+    return 0
 }
 
 # _tn_launch_edit OP FILE FLAG VALUE HASVAL FLAGS MARKER — stage one edit with the
@@ -4033,10 +8767,14 @@ tn_launch_flag_unset() {
 # tn_launch_runner [FILE] — print the runner spec of the node command in launch
 # file FILE (default: the file tn_node_launch_target names): "docker:<image>" when
 # the command is `docker run ... <image> telcoin node ...`, else "binary:<path>"
-# for `<path> node ...` (a bare name is looked up on PATH). Read from the launch
-# file, which is what actually starts the node, not from .node-meta. rc 0 printed,
-# 1 no runner recognised, 2 no live node --http line or no node service, 3 a
-# command the parser cannot read, 4 FILE missing or unreadable.
+# for `<path> node ...` (a bare name is looked up on PATH; <path> is printed with
+# its symlinks resolved, the file that runs). Read from the launch file, which is
+# what actually starts the node, not from .node-meta. rc 0 printed, 1 no runner
+# recognised, 2 no live node --http line or no node service, 3 a command the
+# parser cannot read, 4 FILE missing or unreadable, 5 the binary is refused: it,
+# a link on the way to it, or a directory holding either is not root-owned or is
+# writable by others (_tn_root_binary_ok), so root will not run it (a message
+# says so).
 tn_launch_runner() {
     local file="${1:-}" target out rc kind val image_re
     image_re='^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
@@ -4069,7 +8807,12 @@ tn_launch_runner() {
             case "$val" in
                 *[[:space:]]*|*'$'*|*'`'*) return 1 ;;
             esac
-            printf 'binary:%s\n' "$val"
+            if ! _tn_root_binary_ok "$val"; then
+                printf 'tn_launch_runner: refusing %s: the binary, a link to it or a directory holding either is not root-owned or is writable by others\n' "$val" >&2
+                return 5
+            fi
+            # The checked file itself, symlinks resolved: that is what runs.
+            printf 'binary:%s\n' "$TN_ROOT_BINARY_REAL"
             ;;
         *)
             return 1
@@ -4087,8 +8830,10 @@ tn_launch_runner() {
 # installed rather than a version number (every release reports crate 0.1.0).
 
 # _tn_runner_probe SPEC ARGS... — run the node binary of SPEC with ARGS for a help
-# or parse probe: no data dir mounted, stdin from /dev/null. rc is the binary's
-# own, or 127 when SPEC is malformed or names no executable file.
+# or parse probe: no data dir mounted, stdin from /dev/null. A binary runs as the
+# service user (tn_as_service_user) and only when it passes _tn_root_binary_ok.
+# rc is the binary's own, 126 when it cannot be run as the service user, or 127
+# when SPEC is malformed, names no executable file or a binary that is refused.
 _tn_runner_probe() {
     local spec="${1:-}" bin
     if [[ $# -gt 0 ]]; then
@@ -4101,7 +8846,8 @@ _tn_runner_probe() {
         binary:/?*)
             bin="${spec#binary:}"
             [[ -f "$bin" && -x "$bin" ]] || return 127
-            "$bin" "$@" </dev/null
+            _tn_root_binary_ok "$bin" || return 127
+            tn_as_service_user "$TN_ROOT_BINARY_REAL" "$@" </dev/null
             ;;
         *)
             return 127
@@ -4305,25 +9051,48 @@ _tn_path_owner() {
 #     prints on stdout cannot spoil a $(...) capture, unless ARGS already has it;
 #     and --datadir, the data dir as keytool sees it. A --datadir X (or
 #     --datadir=X) anywhere in ARGS is moved there, since keytool refuses it
-#     after some subcommands. When ARGS starts with export-staking-args and
-#     TN_BLS_PASSPHRASE is unset or empty, --bls-passphrase-source no-passphrase is
-#     added too: that command never reads the key yet refuses to run without a
-#     passphrase source. Never for generate ..., which would then write or read
-#     the key in the clear, nor for anything else.
-#   * A non-empty TN_BLS_PASSPHRASE reaches keytool through the environment only;
-#     docker gets `-e TN_BLS_PASSPHRASE` by name, so the value is in no argv. An
-#     empty one is treated as unset: keytool runs without the variable.
-#   * docker runs as the owner of DATA_DIR, with HOME=/home/nonroot and DATA_DIR
-#     mounted there, the way setup-node.sh runs keygen. DATA_DIR must exist.
-# rc is keytool's own, or 4 when it cannot be started (bad SPEC, no executable
-# file, no DATA_DIR for docker, too few arguments, --datadir without a value);
-# docker's own failures come back as docker's rc (125 and up).
+#     after some subcommands.
+#   * The passphrase comes from the shell variable TN_KEYTOOL_PASS, which must NOT
+#     be exported (rc 4 when it is: it would be in every child's environment, so
+#     set it with a plain assignment, not as a prefix of this call). A non-empty
+#     value is written to keytool's standard input (printf, a builtin, so it is
+#     in no argv) and keytool gets --bls-passphrase-source stdin; docker runs with
+#     -i. TN_BLS_PASSPHRASE is never read and never reaches keytool. Without a
+#     passphrase keytool's stdin is /dev/null, and when ARGS starts with
+#     export-staking-args --bls-passphrase-source no-passphrase is added: that
+#     command never reads the key yet refuses to run without a passphrase source.
+#     Never for generate ..., which would then write or read the key in the clear.
+#     A --bls-passphrase-source in ARGS together with TN_KEYTOOL_PASS is rc 4.
+#   * keytool runs as the service user (SERVICE_USER, SERVICE_GROUP), never as
+#     root: a binary through tn_as_service_user with HOME=DATA_DIR, docker with
+#     --user <uid>:<gid>, HOME=/home/nonroot and DATA_DIR mounted there. keytool
+#     opens its log file under $HOME/.cache, so HOME must be writable by the
+#     service user (root's HOME is not). DATA_DIR must exist and be owned by the
+#     service user.
+# rc is keytool's own, 126 when it cannot be run as the service user, or 4 when it
+# cannot be started (bad SPEC, no executable file, DATA_DIR missing or not the
+# service user's, too few arguments, --datadir without a value, the passphrase
+# rules above); docker's own failures come back as docker's rc (125 and up).
+# _tn_feed_pass — write TN_KEYTOOL_PASS and a newline to stdout with the printf
+# builtin (no argv). rc 0 even when the reader has already gone (SIGPIPE ignored),
+# so under pipefail a keytool pipeline's status is keytool's own.
+_tn_feed_pass() {
+    ( trap '' PIPE; printf '%s\n' "$TN_KEYTOOL_PASS" ) 2>/dev/null || true  # passphrase-stdin-ok stdout is the keytool stdin pipe
+}
+
 tn_keytool() {
-    local spec="${1:-}" data_dir="${2:-}" in_dir arg rest done_part first bin owner uid gid
+    local spec="${1:-}" data_dir="${2:-}" in_dir arg rest done_part first bin owner uid gid decl
     local dd_val="" has_q=0 has_src=0 has_pass=0 is_dd
     local -a args=() glob=() drun=()
     if [[ $# -lt 3 || -z "$data_dir" ]]; then
         printf 'tn_keytool: usage: tn_keytool SPEC DATA_DIR KEYTOOL-ARGS...\n' >&2
+        return 4
+    fi
+    decl="$(declare -p TN_KEYTOOL_PASS 2>/dev/null)" || decl=""
+    decl="${decl#declare -}"
+    decl="${decl%% *}"
+    if [[ "$decl" == *x* ]]; then
+        printf 'tn_keytool: TN_KEYTOOL_PASS is exported; set it as a plain shell variable instead\n' >&2
         return 4
     fi
     shift 2
@@ -4370,15 +9139,40 @@ tn_keytool() {
         fi
     done
     first="${args[0]:-}"
-    if [[ -n "${TN_BLS_PASSPHRASE:-}" ]]; then
+    if [[ -n "${TN_KEYTOOL_PASS:-}" ]]; then
         has_pass=1
+    fi
+    if [[ "$has_pass" -eq 1 && "$has_src" -eq 1 ]]; then
+        printf 'tn_keytool: a --bls-passphrase-source argument cannot be combined with TN_KEYTOOL_PASS\n' >&2
+        return 4
     fi
     if [[ "$has_q" -eq 0 ]]; then
         glob+=(-q)
     fi
     glob+=(--datadir "$dd_val")
-    if [[ "$has_src" -eq 0 && "$first" == "export-staking-args" && "$has_pass" -eq 0 ]]; then
+    if [[ "$has_pass" -eq 1 ]]; then
+        glob+=(--bls-passphrase-source stdin)
+    elif [[ "$has_src" -eq 0 && "$first" == "export-staking-args" ]]; then
         glob+=(--bls-passphrase-source no-passphrase)
+    fi
+    if [[ ! -d "$data_dir" || -L "$data_dir" ]]; then
+        printf 'tn_keytool: data dir %s does not exist\n' "$data_dir" >&2
+        return 4
+    fi
+    owner="$(_tn_path_owner "$data_dir")" || {
+        printf 'tn_keytool: cannot read the owner of %s\n' "$data_dir" >&2
+        return 4
+    }
+    uid="$(id -u "${SERVICE_USER:-}" 2>/dev/null)" || uid=""
+    gid="$(getent group "${SERVICE_GROUP:-}" 2>/dev/null | cut -d: -f3)" || gid=""
+    [[ -n "$gid" ]] || gid="$(id -g "${SERVICE_USER:-}" 2>/dev/null)" || gid=""
+    if [[ ! "$uid" =~ ^[0-9]+$ || "$uid" =~ ^0+$ || ! "$gid" =~ ^[0-9]+$ || "$gid" =~ ^0+$ ]]; then
+        printf 'tn_keytool: service user %s:%s is unknown or root\n' "${SERVICE_USER:-}" "${SERVICE_GROUP:-}" >&2
+        return 4
+    fi
+    if [[ "${owner%% *}" != "$uid" ]]; then
+        printf 'tn_keytool: %s is not owned by the service user %s\n' "$data_dir" "${SERVICE_USER:-}" >&2
+        return 4
     fi
     case "$spec" in
         binary:*)
@@ -4388,31 +9182,21 @@ tn_keytool() {
                 return 4
             fi
             if [[ "$has_pass" -eq 1 ]]; then
-                TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+                _tn_feed_pass | tn_as_service_user env HOME="$data_dir" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
             else
-                ( unset TN_BLS_PASSPHRASE; "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
+                tn_as_service_user env HOME="$data_dir" "$bin" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} </dev/null
             fi
             ;;
         docker:*)
-            if [[ ! -d "$data_dir" ]]; then
-                printf 'tn_keytool: data dir %s does not exist\n' "$data_dir" >&2
-                return 4
-            fi
-            owner="$(_tn_path_owner "$data_dir")" || {
-                printf 'tn_keytool: cannot read the owner of %s\n' "$data_dir" >&2
-                return 4
-            }
-            uid="${owner%% *}"
-            gid="${owner##* }"
-            drun=(run --rm --user "${uid}:${gid}" -e HOME=/home/nonroot)
+            drun=(run --rm)
             if [[ "$has_pass" -eq 1 ]]; then
-                drun+=(-e TN_BLS_PASSPHRASE)
+                drun+=(-i)
             fi
-            drun+=(-v "${data_dir}:/home/nonroot" "${spec#docker:}" telcoin)
+            drun+=(--user "${uid}:${gid}" -e HOME=/home/nonroot -v "${data_dir}:/home/nonroot" "${spec#docker:}" telcoin)
             if [[ "$has_pass" -eq 1 ]]; then
-                TN_BLS_PASSPHRASE="$TN_BLS_PASSPHRASE" docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"}
+                _tn_feed_pass | ( unset TN_BLS_PASSPHRASE; docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
             else
-                ( unset TN_BLS_PASSPHRASE; docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} )
+                ( unset TN_BLS_PASSPHRASE; docker "${drun[@]}" ${glob[@]+"${glob[@]}"} keytool ${args[@]+"${args[@]}"} </dev/null )
             fi
             ;;
     esac
@@ -4642,8 +9426,8 @@ tn_node_has_observer_flag() {
 #     it so the continuation does not swallow the next command;
 #   * on any other non-comment line the token and one adjacent run of whitespace
 #     are removed; comment lines are never touched; --instance is never touched.
-# The edit is staged in a temp file and only written back (cat > file, which keeps
-# owner and mode) when the temp copy is non-empty, no longer has the flag, and has
+# The edit is staged in a temp file and only written back (_tn_launch_write: root
+# owner, group and mode kept) when the temp copy is non-empty, no longer has the flag, and has
 # the same number of whole-word --http lines. On any failed check the file is left
 # as it was and rc is 1. The caller owns the backup, daemon-reload (docker unit)
 # and restart, as with tn_node_inject_flags.
@@ -4682,7 +9466,7 @@ tn_node_strip_observer_flag() {
     http_after="$(grep -cE -- "$http_re" "$tmp" 2>/dev/null || true)"
     if [[ -s "$tmp" ]] && ! tn_node_has_observer_flag "$tmp" \
         && [[ -n "$http_before" && "$http_before" == "$http_after" ]]; then
-        if cat "$tmp" > "$file"; then
+        if _tn_launch_write "$file" "$tmp"; then
             rm -f "$tmp"; return 0
         fi
     fi
@@ -4733,7 +9517,12 @@ prompt_testnet_addons() {
     print_info "Exposes a TCP health endpoint (port ${TN_KUMA_PORT:-43174}) probed by the"
     print_info "Association uptime monitor (${TN_KUMA_SRC:-104.155.184.201/32}) so we can alert you if your node drops."
     print_info "You can also allow your own monitoring hosts later: firewall-setup.sh -> Manage node ports."
-    if confirm "Enable the health-monitor endpoint?"; then
+    if ! ufw_installed || ! ufw_active; then
+        # The health server listens on every interface; without an active firewall the
+        # port would be open to the internet, so the option is not offered.
+        print_warn "Not offered: ufw is not active, so the health port would be reachable from the internet."
+        print_info "Run firewall-setup.sh first, then setup-observability.sh to enable health monitoring."
+    elif confirm "Enable the health-monitor endpoint?"; then
         ENABLE_HEALTHCHECK_MONITOR="true"
     fi
 

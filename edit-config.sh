@@ -20,6 +20,28 @@
 #   sudo bash edit-config.sh --json --set <field>=<value>
 #                                                     # the same, as JSON events
 #   --no-epoch-wait                                   # restart without the epoch wait
+#   --allow-quorum-risk                               # restart even when the committee
+#                                                     # check says too many are down
+#   --allow-port-mismatch                             # a listener port other than the
+#                                                     # advertised external port (NAT
+#                                                     # or port forward maps it)
+#   --allow-public-metrics                            # metrics on an address other
+#                                                     # than 127.0.0.1 (root only)
+#   sudo bash edit-config.sh --migrate-credential     # move the BLS passphrase to an
+#                                                     # encrypted systemd credential
+#                                                     # (also moves a unit that holds
+#                                                     # it, or runs docker inline, to
+#                                                     # the current start script)
+#   sudo bash edit-config.sh --reseal                 # encrypt the credential again
+#                                                     # with this host's TPM/PCR state
+#   --allow-no-tpm                                    # with the two above, on mainnet:
+#                                                     # accept the host key alone
+#   --bind-pcrs <list>|none                           # with the two above: bind to
+#                                                     # these TPM PCRs (e.g. 7)
+#
+# A node whose unit still holds the BLS passphrase (or runs the docker command
+# inline, or used the old TPM method) refuses every other edit until
+# --migrate-credential has run.
 #
 # TN_SKIP_EPOCH_WAIT=1 skips the epoch wait the same way as --no-epoch-wait.
 #
@@ -33,7 +55,12 @@
 #   worker_listener=<multiaddr>
 #   metrics=<IPv4:PORT>|off           add, change or remove --metrics
 #   verbosity=-v|-vv|-vvv|-vvvv|-vvvvv
-#   docker_image=<registry/path:tag>  Docker installs only; pulled first
+#   docker_image=<release tag>|<repository>@sha256:<digest>
+#                                     Docker installs only: a release tag of the
+#                                     node's network (resolved to that release's
+#                                     image digest) or the image by digest; never
+#                                     a tag in the start script, never latest.
+#                                     Pulled and checked first
 #   bootstrap_peers=<path>|none       peers the node dials at start instead of
 #                                     the bootstrap servers in its genesis: an
 #                                     absolute path to a YAML or JSON map keyed
@@ -62,16 +89,24 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
-if ! version_gte "${COMMON_VERSION:-0}" "1.6.0"; then
-    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than 1.6.0. Run update-scripts.sh and try again."
+# The library must be the one shipped with this script (a partial update leaves
+# an older one, which lacks helpers this script calls): COMMON_VERSION 2.0.0 or
+# newer, then the helpers this script calls. Refuse up front with one message.
+if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
+    || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_start_script \
+        tn_write_node_env tn_rerender_node_launch tn_committee_down_guard tn_backup_file \
+        tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
+        tn_docker_resolve_ref tn_docker_network_ok >/dev/null; then
+    _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
         *) printf '[ERROR] %s\n' "$_tn_old" >&2 ;;
     esac
     exit 1
 fi
+unset _tn_old
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="2.0.0"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -84,21 +119,26 @@ service_file_for() {
     printf '%s/etc/systemd/system/%s.service' "${TN_ROOT_PREFIX:-}" "$1"
 }
 
-# Resolve the selected node's data dir from .node-meta (DATA_DIR=), falling back
-# to the resolved data dir (unified /var/lib/telcoin, or legacy role dir) for
-# older installs. Mirrors check-node.sh so all scripts agree on the path.
+# Resolve the selected node's data dir from .node-meta (DATA_DIR=, read with
+# meta_get: CRLF-safe), falling back to the resolved data dir (unified
+# /var/lib/telcoin, or legacy role dir) for older installs. Mirrors check-node.sh
+# so all scripts agree on the path. A DATA_DIR listed more than once prints
+# nothing and returns 2 (meta_get names the key on stderr): neither line is
+# trusted and the default is not guessed.
 detect_data_dir() {
-    local meta default dd
-    meta="$(node_meta_path 2>/dev/null || true)"
-    default="$(tn_resolve_data_dir)"
-    if [[ -n "$meta" ]] && [[ -f "$meta" ]]; then
-        dd=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
-        if [[ -n "$dd" ]] && [[ -d "$dd" ]]; then
-            echo "$dd"
+    local meta dd rc=0
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" ]]; then
+        dd="$(meta_get DATA_DIR "$meta")" || rc=$?
+        if [[ "$rc" -eq 2 ]]; then
+            return 2
+        fi
+        if [[ "$rc" -eq 0 && -n "$dd" && -d "$dd" ]]; then
+            printf '%s\n' "$dd"
             return 0
         fi
     fi
-    echo "$default"
+    tn_resolve_data_dir
     return 0
 }
 
@@ -111,8 +151,22 @@ TARGET_SERVICE_FILE=""
 # unit on a wrapper install silently changes nothing the service reads.
 TARGET_LAUNCH_FILE=""
 
-# --no-epoch-wait: restart without waiting for the epoch boundary.
+# --no-epoch-wait: restart without waiting for the epoch boundary. It also sets
+# TN_SKIP_EPOCH_WAIT=1 (not exported), which the library's passphrase moves
+# (_tn_cred_switch) read.
 NO_EPOCH_WAIT=false
+# --allow-public-metrics: a metrics address other than 127.0.0.1 (never in --json).
+ALLOW_PUBLIC_METRICS=false
+# --migrate-credential / --reseal: the one passphrase action to run without the menu.
+EDIT_ACTION=""
+# --allow-no-tpm: on mainnet, a credential on the host key alone. --bind-pcrs LIST|none.
+EDIT_ALLOW_NO_TPM=false
+EDIT_BIND_PCRS=""
+# True while a passphrase move runs: edit_lock then lets a node through whose unit
+# still holds the passphrase (every other edit is refused on such a node).
+EDIT_LEGACY_OK=false
+# The passphrase during a move: a plain shell variable, never exported.
+TN_CRED_PASS=""
 
 # --json: stdout carries JSON events only (see json_setup_fds). --set runs one
 # edit without the menu, in either mode.
@@ -134,10 +188,14 @@ EDIT_LAST_ERROR=""
 # kind (TN_UPDATE_LOCK_KIND) and releases it (tn_release_update_lock).
 EDIT_LOCK_HELD=false
 
-# Files the current edit changed, each with its backup (edit_backup). An empty
-# backup means the file did not exist before, so a restore removes it.
+# Files the current edit changed, each with its backup (edit_backup) in the
+# root-only backup directory, the backup's sha256, and the file's mode and
+# group ("<mode> <group>"). An empty backup means the file did not exist
+# before, so a restore removes it.
 EDIT_BK_FILES=()
 EDIT_BK_COPIES=()
+EDIT_BK_SUMS=()
+EDIT_BK_MODES=()
 
 # True from the first edit_backup of an edit until the restart that applies it
 # is issued (or, in the menu, the operator chooses to restart later). A run that
@@ -160,21 +218,20 @@ EDIT_SPEC=""
 # HELPERS
 # =============================================================================
 
-# Create a timestamped backup of the systemd unit file. Must succeed before any
-# in-place edit. Echoes the backup path so the caller can show or roll back.
+# Back up the systemd unit file into the root-only backup directory
+# (tn_backup_file: /var/backups/telcoin, never beside the live file). Must
+# succeed before any in-place edit. Echoes "<backup path> <sha256>" so the
+# caller can show it or restore it with tn_restore_backup.
 backup_service_file() {
-    local file="$1"
-    local ts backup
-    ts=$(date -u '+%Y%m%d-%H%M%S')
-    backup="${file}.bak.${ts}"
-    if ! cp -p "$file" "$backup"; then
+    local file="$1" out
+    if ! out="$(tn_backup_file "$file")"; then
         print_error "Could not create backup of ${file}" >&2
         return 1
     fi
-    # Info to stderr so callers capturing the path via $(...) still show it
-    # to the operator (same convention as update-node.sh backup_unit_file).
-    print_info "Backup written: ${backup}" >&2
-    echo "$backup"
+    # Info to stderr so callers capturing the record via $(...) still show it
+    # to the operator.
+    print_info "Backup written: ${out% *}" >&2
+    printf '%s\n' "$out"
 }
 
 # Read a value from the service file Environment= lines
@@ -256,26 +313,74 @@ is_docker_install() {
 # docker -e "VAR=..." (wrapper), export VAR="..." (binary wrapper), and the
 # unquoted legacy inline-unit form. Strips the quotes the wrapper forms carry.
 read_listener_from_launch() {
-    local varname="$1"
+    local varname="$1" envf
+    envf="$(node_env_file)"
+    if [[ -f "$envf" ]]; then
+        grep -E "^${varname}=" "$envf" 2>/dev/null | head -1 | cut -d= -f2-
+        return 0
+    fi
     read_launch_line "$TARGET_LAUNCH_FILE" | \
         grep -oE "${varname}=\"?[^ \"]+" | head -1 | cut -d= -f2- | tr -d '"'
 }
 
-# Set one listener var everywhere the service can read it. Docker: the -e line
-# in the launch config (wrapper or legacy unit). Binary/source: the unit's
-# Environment= line AND the wrapper's export line -- the wrapper export is what
-# the process actually sees on current installs, the unit line is kept in sync
-# for legacy readers. The [^ \"] bound keeps the wrapper's closing quote.
-set_listener_var() {
-    local varname="$1" value="$2"
-    if is_docker_install; then
-        perl -i -pe "s|${varname}=[^ \"]+|${varname}=${value}|g" "$TARGET_LAUNCH_FILE"
-    else
-        set_env_var "$varname" "$value" "$TARGET_SERVICE_FILE"
-        if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
-            perl -i -pe "s|^(export ${varname}=).*\$|\${1}\"${value}\"|" "$TARGET_LAUNCH_FILE"
-        fi
+# node_env_file -- this install's node.env (listener addresses, root 0644).
+node_env_file() {
+    printf '%s%s/node.env\n' "${TN_ROOT_PREFIX:-}" "$DEFAULT_CONFIG_DIR"
+}
+
+# launch_current_form -- make sure the node runs from a current start script
+# (passphrase on stdin, listeners in node.env): an install from before is moved
+# first with tn_rerender_node_launch, which rewrites the start script and unit
+# and writes node.env from the addresses its old files carry. The launch file,
+# the unit, node.env and both current start-script paths are backed up first
+# (edit_backup; a path that does not exist yet is recorded as new), so a failed
+# or abandoned edit puts every one back and removes a start script the move
+# created. rc 1 when the move is refused (reported).
+launch_current_form() {
+    local m
+    if [[ -f "$(node_env_file)" ]] \
+        && [[ "$(tn_launch_flag_get "$TARGET_LAUNCH_FILE" --bls-passphrase-source 2>/dev/null)" == "stdin" ]]; then
+        return 0
     fi
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_backup "$TARGET_SERVICE_FILE" || return 1
+    edit_backup "$(node_env_file)" || return 1
+    for m in source docker; do
+        edit_backup "${TN_ROOT_PREFIX:-}$(tn_start_script_path "$m")" || return 1
+    done
+    if ! tn_rerender_node_launch "" edit_wait_say; then
+        edit_error "${TARGET_LAUNCH_FILE} could not be moved to the current start script (see above); nothing was changed by this edit"
+        return 1
+    fi
+    resolve_launch_file
+    return 0
+}
+
+# set_listener_var VAR VALUE -- set one listener address. The addresses live in
+# node.env, which is rewritten whole through tn_write_node_env (no sed or perl
+# ever sees the value); node.env is backed up first. rc 1 refused or failed.
+set_listener_var() {
+    local varname="$1" value="$2" envf p w a
+    if ! validate_multiaddr "$value"; then
+        edit_error "invalid multiaddr: ${value}"
+        return 1
+    fi
+    envf="$(node_env_file)"
+    edit_backup "$envf" || return 1
+    launch_current_form || return 1
+    p="$(grep -E '^PRIMARY_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    w="$(grep -E '^WORKER_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    a="$(grep -E '^TN_RPC_ADDR=' "$envf" | head -1 | cut -d= -f2-)"
+    case "$varname" in
+        PRIMARY_LISTENER_MULTIADDR) p="$value" ;;
+        WORKER_LISTENER_MULTIADDR)  w="$value" ;;
+        *) edit_error "unknown listener ${varname}"; return 1 ;;
+    esac
+    if ! CONFIG_DIR="$DEFAULT_CONFIG_DIR" tn_write_node_env "$p" "$w" "${a:-127.0.0.1}"; then
+        edit_error "could not write ${envf}"
+        return 1
+    fi
+    return 0
 }
 
 # Back up every file an edit can touch: the launch file, plus the unit when
@@ -297,41 +402,71 @@ backup_edit_targets() {
     edit_report_backups
 }
 
-# Replace or add an Environment= line in the service file
-set_env_var() {
-    local var_name="$1"
-    local new_value="$2"
-    local service_file="$3"
-
-    if grep -q "Environment=\"${var_name}=" "$service_file"; then
-        # Replace existing
-        sed -i "s|Environment=\"${var_name}=.*\"|Environment=\"${var_name}=${new_value}\"|" "$service_file"
-    else
-        # Add after the last Environment= line
-        sed -i "/^Environment=/a Environment=\"${var_name}=${new_value}\"" "$service_file"
-    fi
-}
-
-# Replace the verbosity flag (-v .. -vvvvv) in a launch file. The old
-# `sed s| -v\+ |...|` matched the FIRST " -v " on the line -- on a docker
-# launch line that is the -v VOLUME flag, not verbosity, and on wrapper files
-# the verbosity token sits at line start where the leading-space pattern never
-# matched at all. Match -v{1,5} only when followed by a line continuation,
-# another --flag, or end of line: a volume -v is always followed by a path
-# (and `command -v tool` by a bare word), so neither can match.
+# set_verbosity NEW [FILE] -- set the node's verbosity word (-v .. -vvvvv). The
+# start script is rewritten whole by tn_write_start_script with the same runner
+# and arguments and only that word changed (added when there was none); an
+# older launch file is moved to the current form first. No value reaches sed or
+# perl. rc 1 refused or failed.
 set_verbosity() {
-    local new_verbosity="$1"
-    local service_file="$2"
-    perl -i -pe "s/(^|\s)-v{1,5}(?=\s+(?:\\\\|--)|\s*\$)/\${1}${new_verbosity}/" "$service_file"
+    local new="$1" runner args method kind rc=0
+    if [[ ! "$new" =~ ^-v{1,5}$ ]]; then
+        edit_error "verbosity must be -v .. -vvvvv"
+        return 1
+    fi
+    launch_current_form || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    runner="$(_tn_launch_awk runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
+    [[ $rc -eq 10 ]] || { edit_error "cannot read the node command in ${TARGET_LAUNCH_FILE}"; return 1; }
+    rc=0
+    args="$(_tn_launch_awk args "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
+    [[ $rc -eq 10 ]] || { edit_error "cannot read the node arguments in ${TARGET_LAUNCH_FILE}"; return 1; }
+    args="$(printf '%s\n' "$args" | TN_V="$new" awk '{ out = ""; found = 0
+        for (i = 1; i <= NF; i++) {
+            if ($i == "--bls-passphrase-source") { i++; continue }
+            if ($i ~ /^-v+$/ && !found) { $i = ENVIRON["TN_V"]; found = 1 }
+            out = out (out == "" ? "" : " ") $i
+        }
+        if (!found) out = out " " ENVIRON["TN_V"]
+        print out }')"
+    kind="${runner%% *}"
+    method="docker"
+    if [[ "$kind" != "docker" ]]; then
+        method="$(meta_get INSTALL_METHOD 2>/dev/null || true)"
+        case "$method" in source|release|existing|binary) ;; *) method="source" ;; esac
+    fi
+    if ! tn_write_start_script "$method" "${runner#* }" "$args"; then
+        edit_error "could not rewrite ${TARGET_LAUNCH_FILE} (see above)"
+        return 1
+    fi
+    return 0
 }
 
-# Swap docker image OLD for NEW in a launch file. The images reach perl through
-# the environment, so an image pinned by digest (name@sha256:...) is copied
-# literally instead of being read as a perl array.
+# swap_docker_image NEW -- run NEW, an image by digest (<repo>@sha256:<digest> of
+# this network's repository), in the docker start script by rendering the start
+# script and unit again (tn_rerender_node_launch); no text substitution on either
+# file, and never a tag. An older launch file moves to the current form first
+# (launch_current_form). The start script, unit and node.env are backed up
+# (edit_backup) before the first write. rc 1 refused or failed (reported).
 swap_docker_image() {
-    local old="$1" new="$2" file="$3"
-    TN_OLD_IMAGE="$old" TN_NEW_IMAGE="$new" \
-        perl -i -pe 's/\Q$ENV{TN_OLD_IMAGE}\E/$ENV{TN_NEW_IMAGE}/g' "$file"
+    local new="${1:-}" cur rc=0
+    if [[ "$new" != *@sha256:* ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$new"; then
+        edit_error "refusing ${new:-an empty image}: the start script runs this network's image by digest only"
+        return 1
+    fi
+    launch_current_form || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_backup "$TARGET_SERVICE_FILE" || return 1
+    if ! tn_rerender_node_launch "$new" edit_wait_say; then
+        edit_error "the start script could not be written for ${new} (see above)"
+        return 1
+    fi
+    resolve_launch_file
+    cur="$(_tn_launch_awk runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || rc=$?
+    if [[ $rc -ne 10 || "$cur" != "docker ${new}" ]]; then
+        edit_error "${TARGET_LAUNCH_FILE} does not run ${new} after the rewrite"
+        return 1
+    fi
+    return 0
 }
 
 # The image a docker launch line runs: the first registry-looking word, else
@@ -446,10 +581,18 @@ edit_on_exit() {
         rm -f "$EDIT_TMP" 2>/dev/null
         EDIT_TMP=""
     fi
+    # This also finishes or undoes a passphrase move the run was stopped in, and
+    # TN_CRED_EXIT_MSG then says which.
+    TN_CRED_EXIT_MSG=""
+    tn_remove_inflight_tmp
+    if [[ -n "${TN_CRED_EXIT_MSG:-}" ]]; then
+        TN_CRED_EXIT_MSG="${EDIT_SIGNAL:+SIG${EDIT_SIGNAL}: }${TN_CRED_EXIT_MSG}"
+        [[ "$JSON_MODE" == "true" ]] || print_warn "$TN_CRED_EXIT_MSG" >&2
+    fi
     edit_release_lock
     EDIT_LOCK_HELD=false
     if [[ "$JSON_MODE" == "true" && "$JSON_DONE_SENT" != "true" ]]; then
-        msg="$EDIT_LAST_ERROR"
+        msg="${TN_CRED_EXIT_MSG:-$EDIT_LAST_ERROR}"
         if [[ -z "$msg" && -n "$EDIT_SIGNAL" ]]; then
             if [[ "$EDIT_RESTARTED" == "true" ]]; then
                 msg="stopped by SIG${EDIT_SIGNAL} after the restart was issued; the edit stays in place"
@@ -485,7 +628,7 @@ edit_abort_pending() {
         edit_error "${why}, so the edit was rolled back: every file it changed is as it was before this run."
     else
         EDIT_ROLLED_BACK=false
-        edit_error "${why}, and putting the files back failed (see the errors above): copy each .bak file over its original by hand."
+        edit_error "${why}, and putting the files back failed (see the errors above): put each backup named above back over its file by hand, after checking its sha256."
     fi
 }
 
@@ -519,26 +662,58 @@ edit_lock() {
         return 1
     fi
     EDIT_LOCK_HELD=true
+    # The legacy check reads only, and runs before the ownership migration, so a
+    # refused legacy host is left exactly as it was.
+    local reason
+    if [[ "$EDIT_LEGACY_OK" != "true" ]] && reason="$(edit_legacy_reason)"; then
+        edit_error "${reason}; move it to the current unit and start script first: sudo ./edit-config.sh --migrate-credential (nothing was changed)"
+        edit_release_lock
+        EDIT_LOCK_HELD=false
+        return 1
+    fi
+    if ! edit_migrate_ownership; then
+        edit_release_lock
+        EDIT_LOCK_HELD=false
+        return 1
+    fi
     return 0
 }
 
-# edit_release_lock -- release the update lock this process holds, of either
-# kind: tn_release_update_lock unlocks and closes file descriptor 9 (flock) or
-# removes the lock dir (mkdir), and is a no-op when nothing is held. The hard
-# guard keeps this script on lib/common.sh 1.6.0, so the fallback for a library
-# without that function is only a safety net: close fd 9, and remove the mkdir
-# lock dir when its pid file names this process.
-edit_release_lock() {
-    local dir
-    if declare -F tn_release_update_lock >/dev/null 2>&1; then
-        tn_release_update_lock
+# Set once edit_migrate_ownership has brought the install to the root-owned
+# layout in this run.
+EDIT_OWNERSHIP_DONE=false
+
+# edit_migrate_ownership -- with the update lock held and before the first
+# write of the run, bring an existing install to the root-owned file layout
+# with tn_migrate_ownership (idempotent; it never restarts the node). Every
+# write path takes the lock through edit_lock, so this is the one call site;
+# it runs once per run. rc 1, with the reason reported, when the migration
+# refuses: a symlink or an unexpected owner under the install trees, or a
+# mainnet node that needs a fresh install.
+edit_migrate_ownership() {
+    local rc=0
+    if [[ "$EDIT_OWNERSHIP_DONE" == "true" ]]; then
         return 0
     fi
-    exec 9>&-
-    dir="${TMPDIR:-/tmp}/telcoin-update.lock.d"
-    if [[ -d "$dir" && "$(cat "${dir}/pid" 2>/dev/null || true)" == "$$" ]]; then
-        rm -rf "$dir" 2>/dev/null || true
-    fi
+    tn_migrate_ownership edit_wait_say || rc=$?
+    case "$rc" in
+        0)
+            EDIT_OWNERSHIP_DONE=true
+            return 0
+            ;;
+        3) edit_error "this mainnet node still has the old file ownership layout and must be installed fresh; it is not migrated in place. Nothing was changed." ;;
+        *) edit_error "the file ownership migration stopped (see the list above); review those paths, then try again. Nothing was changed." ;;
+    esac
+    return 1
+}
+
+# edit_release_lock -- release the update lock this process holds, the same
+# shared lock update-node.sh takes: tn_release_update_lock (lib/common.sh,
+# present since 1.5.0; the guard at the top requires 1.6.0) unlocks it and is
+# a no-op when nothing is held. This script never builds a lock path of its
+# own.
+edit_release_lock() {
+    tn_release_update_lock
     return 0
 }
 
@@ -567,16 +742,94 @@ menu_lock() {
 edit_reset_backups() {
     EDIT_BK_FILES=()
     EDIT_BK_COPIES=()
+    EDIT_BK_SUMS=()
+    EDIT_BK_MODES=()
     EDIT_PENDING=false
 }
 
-# edit_backup FILE -- before the first change to FILE in this edit, copy it to
-# FILE.bak.<UTC time> and record the pair for edit_restore_backups. A FILE that
-# does not exist yet is recorded as new, so the restore removes it. From here
-# until the restart is issued the edit is pending (EDIT_PENDING). rc 1, with an
-# error reported, when the copy fails.
+# edit_in_data_dir FILE -- rc 0 when FILE lies inside the node's data dir,
+# which belongs to the service user: such a file is read and written by a
+# process running as that user (tn_as_service_user), never by root.
+edit_in_data_dir() {
+    local dd
+    dd="$(detect_data_dir)" || return 1
+    [[ -n "$dd" && "${1:-}" == "${dd%/}/"* ]]
+}
+
+# _uc_service_user_write DEST MODE -- write stdin to DEST as the service user:
+# a mktemp file beside DEST, chmod MODE, then one rename over DEST (mv -fT),
+# each step run through tn_as_service_user, so a link planted in the data dir
+# gains nothing beyond that user's own rights. rc 2 on any failure, the temp
+# file removed and DEST untouched.
+_uc_service_user_write() {
+    local dest="${1:-}" mode="${2:-}" tmp
+    if [[ "$dest" != /* || ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+        return 2
+    fi
+    tmp="$(tn_as_service_user mktemp "${dest%/*}/.tn.XXXXXX")" || tmp=""
+    [[ -n "$tmp" ]] || return 2
+    # shellcheck disable=SC2016  # $1 expands in the child shell
+    if ! tn_as_service_user sh -c 'cat > "$1"' sh "$tmp" \
+        || ! tn_as_service_user chmod -- "$mode" "$tmp" \
+        || ! tn_as_service_user mv -f -T -- "$tmp" "$dest"; then
+        tn_as_service_user rm -f -- "$tmp" 2>/dev/null || true
+        return 2
+    fi
+    return 0
+}
+
+# edit_backup_copy FILE -- print "<backup path> <sha256>" for a new backup of
+# FILE in the root-only backup directory (tn_backup_file). A file in the data
+# dir is read by the service user into a root-only temp file first, so root
+# never opens a path that user controls.
+edit_backup_copy() {
+    local file="$1" tmp rc=0 out
+    if ! edit_in_data_dir "$file"; then
+        tn_backup_file "$file"
+        return
+    fi
+    tmp="$(mktemp "${TMPDIR:-/tmp}/tn-edit.XXXXXX")" || return 2
+    if tn_as_service_user cat -- "$file" > "$tmp"; then
+        out="$(tn_backup_file "$tmp" "${file##*/}")" || rc=$?
+    else
+        rc=2
+    fi
+    rm -f -- "$tmp"
+    [[ "$rc" -eq 0 ]] || return "$rc"
+    printf '%s\n' "$out"
+}
+
+# edit_restore_one FILE BACKUP SHA256 "MODE GROUP" -- put FILE back from its
+# backup, refusing (rc 1, FILE unchanged) a backup whose sha256 changed. A file
+# outside the data dir goes through tn_restore_backup (root-owned, temp file
+# and rename); one inside it is written by the service user.
+edit_restore_one() {
+    local file="$1" copy="$2" sum="$3" mg="$4" got
+    if ! edit_in_data_dir "$file"; then
+        tn_restore_backup "$copy" "$sum" "$file" "${mg%% *}" "${mg##* }"
+        # The status explicitly: a bare return run from the EXIT trap would give
+        # the status from before the trap (143 after a TERM), not the restore's.
+        return $?
+    fi
+    if [[ -L "$copy" || ! -f "$copy" ]]; then
+        return 1
+    fi
+    got="$(sha256sum < "$copy" 2>/dev/null)" || got=""
+    if [[ "${got%% *}" != "$sum" ]]; then
+        print_warn "Refusing ${copy}: its sha256 does not match; ${file} is unchanged" >&2
+        return 1
+    fi
+    _uc_service_user_write "$file" "${mg%% *}" < "$copy"
+}
+
+# edit_backup FILE -- before the first change to FILE in this edit, copy it
+# into the root-only backup directory (edit_backup_copy) and record the file,
+# the copy, its sha256 and FILE's mode and group for edit_restore_backups. A
+# FILE that does not exist yet is recorded as new, so the restore removes it.
+# A symlink is refused. From here until the restart is issued the edit is
+# pending (EDIT_PENDING). rc 1, with an error reported, when the copy fails.
 edit_backup() {
-    local file="$1" i copy
+    local file="$1" i copy sum mg out
     i=0
     while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
         if [[ "${EDIT_BK_FILES[$i]}" == "$file" ]]; then
@@ -585,18 +838,21 @@ edit_backup() {
         i=$((i + 1))
     done
     copy=""
-    if [[ -e "$file" ]]; then
-        copy="${file}.bak.$(date -u '+%Y%m%d-%H%M%S')"
-        if [[ -e "$copy" ]]; then
-            copy="${copy}.$$"
-        fi
-        if ! cp -p "$file" "$copy" 2>/dev/null; then
+    sum=""
+    mg=""
+    if [[ -e "$file" || -L "$file" ]]; then
+        mg="$(stat -c '%a %G' -- "$file" 2>/dev/null)" || mg=""
+        if [[ -L "$file" || -z "$mg" ]] || ! out="$(edit_backup_copy "$file")"; then
             edit_error "could not back up ${file}"
             return 1
         fi
+        copy="${out% *}"
+        sum="${out##* }"
     fi
     EDIT_BK_FILES+=("$file")
     EDIT_BK_COPIES+=("$copy")
+    EDIT_BK_SUMS+=("$sum")
+    EDIT_BK_MODES+=("$mg")
     EDIT_PENDING=true
     return 0
 }
@@ -623,20 +879,27 @@ edit_any_changed() {
 
 # edit_restore_backups -- undo the current edit: put back every file
 # edit_backup recorded (a file that was new is removed), then reload systemd.
-# Each file that cannot be restored is reported; rc 1 if there was one.
+# A backup whose sha256 no longer matches is not used. Each file that cannot
+# be restored is reported; rc 1 if there was one.
 edit_restore_backups() {
-    local i file copy bad=0
+    local i file copy bad=0 rc
     EDIT_PENDING=false
     i=0
     while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
         file="${EDIT_BK_FILES[$i]}"
         copy="${EDIT_BK_COPIES[$i]}"
         if [[ -z "$copy" ]]; then
-            if ! rm -f "$file" 2>/dev/null; then
+            rc=0
+            if edit_in_data_dir "$file"; then
+                tn_as_service_user rm -f -- "$file" 2>/dev/null || rc=$?
+            else
+                rm -f -- "$file" 2>/dev/null || rc=$?
+            fi
+            if [[ "$rc" -ne 0 ]]; then
                 edit_error "could not remove ${file}"
                 bad=1
             fi
-        elif ! cp -p "$copy" "$file" 2>/dev/null; then
+        elif ! edit_restore_one "$file" "$copy" "${EDIT_BK_SUMS[$i]}" "${EDIT_BK_MODES[$i]}"; then
             edit_error "could not restore ${file} from ${copy}"
             bad=1
         fi
@@ -658,13 +921,16 @@ edit_drop_backups() {
     return 0
 }
 
-# edit_report_backups -- name the backups of an edit that changed something.
+# edit_report_backups -- name the backups of an edit that changed something,
+# each with the file it belongs to and its sha256.
 edit_report_backups() {
-    local c
-    for c in ${EDIT_BK_COPIES[@]+"${EDIT_BK_COPIES[@]}"}; do
-        if [[ -n "$c" ]]; then
-            edit_log "Backup written: ${c}"
+    local i
+    i=0
+    while [[ "$i" -lt "${#EDIT_BK_FILES[@]}" ]]; do
+        if [[ -n "${EDIT_BK_COPIES[$i]}" ]]; then
+            edit_log "Backup of ${EDIT_BK_FILES[$i]} written: ${EDIT_BK_COPIES[$i]} (sha256 ${EDIT_BK_SUMS[$i]})"
         fi
+        i=$((i + 1))
     done
     return 0
 }
@@ -686,8 +952,20 @@ edit_wait_say() {
 # restart. When the node votes in the current committee and the epoch boundary
 # is close, tn_wait_restart_window (lib/common.sh) holds the restart until the
 # epoch has closed and settled, at most TN_EPOCH_WAIT_MAX seconds.
-# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips it. Always returns 0.
+# --no-epoch-wait or TN_SKIP_EPOCH_WAIT=1 skips the wait, never the committee
+# quorum check before it (tn_committee_down_guard; --allow-quorum-risk
+# overrides), which runs again after the wait, right before the restart. A
+# refusal by either is the only way it returns 1: nothing is stopped.
+edit_quorum_guard() {
+    if declare -F tn_committee_down_guard >/dev/null 2>&1 \
+        && ! tn_committee_down_guard "$(tn_local_rpc_url)" edit_wait_say; then
+        edit_wait_say warn "Not restarting ${TARGET_SERVICE}: the committee check refused it. Run again later, or with --allow-quorum-risk for a coordinated restart."
+        return 1
+    fi
+    return 0
+}
 edit_epoch_wait() {
+    edit_quorum_guard || return 1
     if [[ "$NO_EPOCH_WAIT" == "true" ]]; then
         edit_wait_say log "Not waiting for the epoch boundary (--no-epoch-wait)."
         return 0
@@ -697,6 +975,7 @@ edit_epoch_wait() {
         return 0
     fi
     tn_wait_restart_window "$(tn_local_rpc_url)" edit_wait_say
+    edit_quorum_guard || return 1
     return 0
 }
 
@@ -784,6 +1063,13 @@ set_metrics() {
     local value="$1"
     if [[ "$value" != "off" ]] && ! validate_ip_port "$value"; then
         edit_error "invalid metrics address (want IPv4:PORT or off): ${value}"
+        return 1
+    fi
+    # Metrics stay on loopback unless a root operator says otherwise at the
+    # console; the UI (--json) never can.
+    if [[ "$value" != "off" && "$value" != 127.0.0.1:* ]] \
+        && { [[ "$ALLOW_PUBLIC_METRICS" != "true" ]] || [[ "$JSON_MODE" == "true" ]]; }; then
+        edit_error "metrics bind to 127.0.0.1 only (got ${value}); a root operator can pass --allow-public-metrics outside --json mode"
         return 1
     fi
     edit_launch_spec || return 1
@@ -1086,11 +1372,19 @@ set_private_forward_targets() {
 # set_docker_image IMAGE -- pull IMAGE and swap it into the launch file (Docker
 # installs only). Mirrors edit_docker_image. The same image is a no-op.
 set_docker_image() {
-    local new_image="$1" exec_start current_image
-    if ! validate_docker_image "$new_image"; then
-        edit_error "invalid docker image reference: ${new_image}"
+    local value="$1" net out new_image new_tag exec_start current_image
+    if ! net="$(tn_detect_network 2>/dev/null)"; then
+        edit_error "cannot tell which network this node runs, so its image repository is unknown"
         return 1
     fi
+    # A release tag resolves to the release's digest; a digest reference must be
+    # this network's repository. Tags are never written into the start script.
+    if ! out="$(tn_docker_resolve_ref "$net" "$value" edit_wait_say)"; then
+        edit_error "image refused: ${value} (give a ${net} release tag, or this network's image by digest: <repository>@sha256:<digest>)"
+        return 1
+    fi
+    new_image="${out%% *}"
+    new_tag="${out#* }"
     exec_start="$(read_launch_line "$TARGET_LAUNCH_FILE")"
     if ! grep -qF "docker run" <<<"$exec_start"; then
         edit_error "node is not a docker install"
@@ -1110,8 +1404,32 @@ set_docker_image() {
         edit_error "failed to pull image: ${new_image}"
         return 1
     fi
-    edit_backup "$TARGET_LAUNCH_FILE" || return 1
-    swap_docker_image "$current_image" "$new_image" "$TARGET_LAUNCH_FILE"
+    if ! tn_docker_holds_digest "$new_image"; then
+        edit_error "Docker does not hold ${new_image} under that digest after the pull (digest mismatch)"
+        return 1
+    fi
+    swap_docker_image "$new_image" || return 1
+    edit_record_image "$new_image" "$new_tag"
+}
+
+# edit_record_image IMAGE TAG -- after the start script runs IMAGE: .node-meta
+# DOCKER_IMAGE and DOCKER_IMAGE_DIGEST name it, RELEASE_TAG names TAG (removed when
+# TAG is empty: an image given by digest alone). A failed write warns. Only
+# informational: the start script stays what runs, and readers of RELEASE_TAG
+# check DOCKER_IMAGE_DIGEST against it first.
+edit_record_image() {
+    local ok=true
+    meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 || ok=false
+    meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 || ok=false
+    if [[ -n "${2:-}" ]]; then
+        meta_set RELEASE_TAG "$2" >/dev/null 2>&1 || ok=false
+    else
+        meta_unset RELEASE_TAG >/dev/null 2>&1 || ok=false
+    fi
+    if [[ "$ok" != "true" ]]; then
+        edit_wait_say warn "Could not record the image in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)."
+    fi
+    return 0
 }
 
 # The fields --set accepts.
@@ -1123,8 +1441,45 @@ edit_field_known() {
     return 1
 }
 
+# listener_port_advertised FIELD VALUE -- rc 0 when VALUE's UDP port is the port
+# of the external address .node-meta records for that listener
+# (EXTERNAL_PRIMARY_ADDR or EXTERNAL_WORKER_ADDR: the address peers dial), or when
+# none is recorded (an older install). rc 1 with the reason reported otherwise,
+# a recorded address without a UDP port or set more than once included. A
+# different port is accepted, with a warning, under --allow-port-mismatch
+# (TN_ALLOW_PORT_MISMATCH=1): a NAT or port forward may map the advertised
+# external port to another local port.
+listener_port_advertised() {
+    local field="$1" value="$2" key label ext rc=0 want got
+    case "$field" in
+        primary_listener) key=EXTERNAL_PRIMARY_ADDR; label="primary" ;;
+        *) key=EXTERNAL_WORKER_ADDR; label="worker" ;;
+    esac
+    ext="$(meta_get "$key" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        edit_error "${key} is set more than once in .node-meta; remove the extra lines first"
+        return 1
+    fi
+    [[ -n "$ext" ]] || return 0
+    if ! want="$(_tn_multiaddr_udp_port "$ext")"; then
+        edit_error "${key} in .node-meta (${ext}) has no UDP port to compare the ${label} listener with"
+        return 1
+    fi
+    got="$(_tn_multiaddr_udp_port "$value")" || got=""
+    if [[ "$got" != "$want" ]]; then
+        if [[ -n "$got" && "${TN_ALLOW_PORT_MISMATCH:-}" == "1" ]]; then
+            edit_warn "the ${label} listener port ${got} differs from the advertised external port ${want} (${key} in .node-meta), which is the port peers dial; kept because the mismatch was allowed: the NAT or port forward must map external UDP ${want} to this host's UDP ${got}"
+            return 0
+        fi
+        edit_error "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial. If a NAT or port forward maps external UDP ${want} to local UDP ${got:-?}, allow the mismatch: edit-config.sh --allow-port-mismatch (TN_ALLOW_PORT_MISMATCH=1), or confirm it in the Node Manager"
+        return 1
+    fi
+    return 0
+}
+
 # set_field FIELD VALUE -- validate and save one --set field (rc as for the
-# setters above).
+# setters above). A listener keeps the advertised external port
+# (listener_port_advertised).
 set_field() {
     local field="$1" value="$2"
     case "$field" in
@@ -1133,6 +1488,7 @@ set_field() {
                 edit_error "invalid multiaddr: ${value}"
                 return 1
             fi
+            listener_port_advertised "$field" "$value" || return 1
             edit_launch_unambiguous || return 1
             edit_backup "$TARGET_LAUNCH_FILE" || return 1
             edit_backup "$TARGET_SERVICE_FILE" || return 1
@@ -1147,6 +1503,10 @@ set_field() {
         verbosity)
             if [[ ! "$value" =~ ^-v{1,5}$ ]]; then
                 edit_error "verbosity must be -v .. -vvvvv"
+                return 1
+            fi
+            if [[ "$JSON_MODE" == "true" && ! "$value" =~ ^-v{1,3}$ ]]; then
+                edit_error "verbosity from --json is at most -vvv"
                 return 1
             fi
             edit_launch_unambiguous || return 1
@@ -1176,7 +1536,8 @@ set_field() {
 # wait runs only when the operator chose to restart. Releases the update lock.
 # The edit stops being pending (EDIT_PENDING) when the restart is issued or the
 # operator chooses to restart later; a run stopped before either, at the
-# prompt or during the wait, puts the files back (edit_on_exit).
+# prompt or during the wait, puts the files back (edit_on_exit), and so does a
+# refusal by the committee check.
 apply_changes() {
     set +e  # Restart failure should not exit the script
     print_step "Applying changes..."
@@ -1184,8 +1545,26 @@ apply_changes() {
     print_ok "systemd reloaded"
 
     echo ""
-    if confirm "Restart the node now to apply changes?"; then
-        edit_epoch_wait
+    if ! confirm "Restart the node now to apply changes?"; then
+        EDIT_PENDING=false
+        print_info "Changes saved. Restart the node when ready:"
+        print_info "  sudo systemctl restart ${TARGET_SERVICE}"
+    elif ! edit_epoch_wait; then
+        # The committee check refused the restart. An edit with recorded backups
+        # is put back (as --set does), so it cannot load at a later restart with
+        # no health check; one without (a chain-config refresh) stays saved.
+        if [[ ${#EDIT_BK_FILES[@]} -eq 0 ]]; then
+            EDIT_PENDING=false
+            print_info "Changes saved, not applied. Restart the node once the committee check allows it"
+            print_info "(edit-config.sh menu: Restart node)."
+        elif edit_restore_backups; then
+            print_info "The edit was put back; nothing was changed. Make it again once the committee"
+            print_info "check allows the restart (or start edit-config.sh with --allow-quorum-risk for"
+            print_info "a coordinated restart)."
+        else
+            print_error "The committee check refused the restart, and some files could not be put back (see the errors above)."
+        fi
+    else
         EDIT_PENDING=false
         print_step "Restarting ${TARGET_SERVICE}..."
         systemctl restart "$TARGET_SERVICE" || true
@@ -1197,10 +1576,6 @@ apply_changes() {
             print_info "  sudo tail -30 /var/log/telcoin/${TARGET_SERVICE}.log"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
         fi
-    else
-        EDIT_PENDING=false
-        print_info "Changes saved. Restart the node when ready:"
-        print_info "  sudo systemctl restart ${TARGET_SERVICE}"
     fi
     edit_unlock
     echo ""
@@ -1247,7 +1622,7 @@ edit_restart() {
     if ! systemctl daemon-reload >&2 2>&1; then
         edit_warn "systemctl daemon-reload failed; restarting anyway"
     fi
-    edit_epoch_wait
+    edit_epoch_wait || return 2
     EDIT_PENDING=false
     EDIT_RESTARTED=true
     edit_step "Restarting ${TARGET_SERVICE}"
@@ -1467,11 +1842,15 @@ edit_listener_addresses() {
     menu_lock || { set -e; return; }
     backup_edit_targets || { set -e; return 0; }
 
-    # Write wherever the service actually reads (launch file for docker,
-    # unit Environment= plus wrapper export for binary/source). Multiaddrs
-    # are already validated above, so the substitutions are safe.
-    set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary"
-    set_listener_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"
+    # The addresses go to node.env (an older install is moved to it first).
+    if ! { set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" \
+        && set_listener_var "WORKER_LISTENER_MULTIADDR" "$new_worker"; }; then
+        edit_restore_backups || true
+        edit_unlock
+        set -e
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
 
     print_ok "Listener addresses updated"
     print_info "Primary: ${new_primary}"
@@ -1524,7 +1903,12 @@ edit_verbosity() {
     menu_lock || return 0
     backup_edit_targets || return 0
 
-    set_verbosity "$new_verbosity" "$TARGET_LAUNCH_FILE"
+    if ! set_verbosity "$new_verbosity" "$TARGET_LAUNCH_FILE"; then
+        edit_restore_backups || true
+        edit_unlock
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
     print_ok "Log verbosity updated to: ${new_verbosity}"
     apply_changes
 }
@@ -1532,206 +1916,334 @@ edit_verbosity() {
 edit_rpc() {
     print_header "Edit RPC Access"
 
-    # The --http flags live in the start wrapper on current installs, and the
-    # ExecStart rewrite below only works on legacy inline units. Refuse loudly
-    # instead of appending junk arguments to the unit's wrapper path.
-    if [[ "$TARGET_LAUNCH_FILE" != "$TARGET_SERVICE_FILE" ]]; then
-        print_warn "This install launches via a start wrapper -- RPC editing here"
-        print_warn "is not supported yet for wrapper installs."
-        print_info "Edit the --http flags on the last line of:"
-        print_info "  ${TARGET_LAUNCH_FILE}"
-        print_info "then restart: sudo systemctl restart ${TARGET_SERVICE}"
-        echo ""
-        read -r -p "  Press Enter to return to menu..."
-        return
-    fi
-
-    local exec_start
-    exec_start=$(read_exec_start "$TARGET_SERVICE_FILE")
-
-    echo "  1) Private (recommended) -- RPC accessible from this server only"
-    echo "              No firewall changes needed. Best for personal use,"
-    echo "              development, and internal tooling."
+    echo "  1) Private (recommended) -- RPC on 127.0.0.1, reachable from this server"
+    echo "              only (and through Caddy when public RPC is enabled with"
+    echo "              install-caddy.sh). No firewall changes needed."
     echo ""
-    echo "  2) Public                -- RPC endpoint accessible from the internet"
-    echo "              Requires nginx on port 443 (HTTPS)."
-    echo "              You will need to open port 443 on your firewall"
-    echo "              and router. An example nginx config will be"
-    echo "              generated for you to configure."
+    echo "  2) Public                -- RPC bound to 0.0.0.0. Put a TLS proxy with rate"
+    echo "              limits in front of it; the node gets the public RPC limits."
+    echo "              Not offered on mainnet."
     echo ""
-    echo "  3) Disabled              -- RPC completely off"
+    echo "  The local RPC stays on in every case: the deployment scripts read it."
     echo ""
-
-    # Strip every --http* flag (with or without a value) from an ExecStart line.
-    # Captures --http, --http.addr, --http.port, --http.api, --http.corsdomain,
-    # --http.vhosts, --http.maxconnections and any future --http.* variants.
-    _strip_http_flags() {
-        local exec="$1"
-        # Two-pass: first remove flags that take a value, then bare --http.
-        echo "$exec" | \
-            sed -E 's/ --http\.[a-zA-Z.]+( +[^ -][^ ]*)?//g' | \
-            sed -E 's/ --http( |$)/\1/g'
-    }
 
     local choice
     while true; do
-        read -r -p "  Enter choice [1/2/3]: " choice
+        read -r -p "  Enter choice [1/2]: " choice
         case "$choice" in
-            1|2|3) break ;;
-            *) print_warn "Please enter 1, 2, or 3." ;;
+            1|2) break ;;
+            *) print_warn "Please enter 1 or 2." ;;
         esac
     done
-
-    menu_lock || return 0
-    if ! edit_launch_unambiguous; then
-        echo ""
-        read -r -p "  Press Enter to return to menu..." || true
-        return 0
+    if [[ "$choice" == "1" ]]; then
+        menu_apply set_rpc_addr 127.0.0.1 "RPC bind address"
+    else
+        menu_apply set_rpc_addr 0.0.0.0 "RPC bind address"
     fi
-    edit_backup "$TARGET_SERVICE_FILE" || return 0
-    edit_report_backups
-
-    local current_exec clean_exec
-    current_exec=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" | sed 's/^ExecStart=//')
-    clean_exec=$(_strip_http_flags "$current_exec")
-
-    case "$choice" in
-        1)
-            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 127.0.0.1|" "$TARGET_SERVICE_FILE"
-            print_ok "RPC set to private (localhost only)"
-            ;;
-        2)
-            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec} --http --http.addr 0.0.0.0|" "$TARGET_SERVICE_FILE"
-            print_ok "RPC set to public (0.0.0.0)"
-            print_warn "Ensure you have an nginx reverse proxy configured before"
-            print_warn "opening this port on your firewall."
-            ;;
-        3)
-            sed -i "s|^ExecStart=.*$|ExecStart=${clean_exec}|" "$TARGET_SERVICE_FILE"
-            print_ok "RPC disabled"
-            ;;
-    esac
-
-    apply_changes
 }
 
-edit_bls_passphrase() {
-    print_header "Edit BLS Passphrase"
+# set_rpc_addr ADDR -- the node's RPC bind address: --http.addr and --ws.addr on
+# the launch line through the launch editor (edit_flag_change), and TN_RPC_ADDR
+# in node.env when there is one. ADDR is 127.0.0.1, or 0.0.0.0 off mainnet, which
+# also sets the public RPC limits. Anything else is refused before a file
+# changes; no value reaches sed or perl. rc as for the other setters.
+set_rpc_addr() {
+    local addr="$1" envf p w pair
+    case "$addr" in
+        127.0.0.1) ;;
+        0.0.0.0)
+            if [[ "$(meta_get NETWORK 2>/dev/null || true)" == "mainnet" ]]; then
+                edit_error "a mainnet node keeps its RPC on 127.0.0.1; public RPC goes through install-caddy.sh"
+                return 1
+            fi
+            ;;
+        *)
+            edit_error "the RPC bind address is 127.0.0.1 or 0.0.0.0, not ${addr}"
+            return 1
+            ;;
+    esac
+    edit_launch_spec || return 1
+    edit_backup "$TARGET_LAUNCH_FILE" || return 1
+    edit_flag_change set --http.addr "$addr" || return 1
+    edit_flag_change set --ws.addr "$addr" || return 1
+    if [[ "$addr" == "0.0.0.0" ]]; then
+        for pair in "--rpc.max-blocks-per-filter 10000" "--rpc.max-logs-per-response 10000" \
+            "--rpc.max-subscriptions-per-connection 100" "--rpc.max-request-size 2" \
+            "--http.api eth,net,web3,tn"; do
+            edit_flag_change set "${pair%% *}" "${pair#* }" || return 1
+        done
+    fi
+    envf="$(node_env_file)"
+    if [[ -f "$envf" ]]; then
+        edit_backup "$envf" || return 1
+        p="$(grep -E '^PRIMARY_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+        w="$(grep -E '^WORKER_LISTENER_MULTIADDR=' "$envf" | head -1 | cut -d= -f2-)"
+        if ! CONFIG_DIR="$DEFAULT_CONFIG_DIR" tn_write_node_env "$p" "$w" "$addr"; then
+            edit_error "could not write ${envf}"
+            return 1
+        fi
+    fi
+    return 0
+}
 
-    local passphrase_file
-    passphrase_file="$(tn_resolve_config_dir)/bls-passphrase"
-
-    if [[ ! -f "$passphrase_file" ]]; then
-        print_error "Passphrase file not found at: ${passphrase_file}"
+# edit_legacy_reason -- print why this node must move to the current unit, start
+# script and passphrase delivery before anything else is edited: its unit holds
+# the BLS passphrase, its passphrase is sealed with the old TPM method, or its
+# unit runs the node command inline. Prints nothing (rc 1) when none applies.
+edit_legacy_reason() {
+    if tn_has_embedded_passphrase "$TARGET_SERVICE_FILE"; then
+        printf '%s\n' "${TARGET_SERVICE_FILE} holds the BLS passphrase"
+    elif [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "tpm" ]]; then
+        printf '%s\n' "the BLS passphrase is sealed with the old TPM method"
+    elif _tn_unit_runs_node_inline "$TARGET_SERVICE_FILE"; then
+        printf '%s\n' "${TARGET_SERVICE_FILE} runs the node command inline"
+    else
         return 1
     fi
+}
 
+# edit_cred_type_pass -- ask for the node's current BLS passphrase twice, without
+# echo, into TN_CRED_PASS (a plain shell variable, never exported), for a move whose
+# stored value cannot be read: an old TPM install, or a unit value systemd would
+# have changed on the way. Without a terminal one line is read from stdin. rc 1
+# when the two differ or the value is empty, holds a line break, or starts or ends
+# with whitespace.
+edit_cred_type_pass() {
+    local again="" cr=$'\r'
+    TN_CRED_PASS=""
+    if [[ -t 0 ]]; then
+        IFS= read -r -s -p "  Enter the node's current BLS passphrase: " TN_CRED_PASS || TN_CRED_PASS=""
+        echo "" >&2
+        IFS= read -r -s -p "  Confirm it: " again || again=""
+        echo "" >&2
+    else
+        IFS= read -r TN_CRED_PASS || true
+        again="$TN_CRED_PASS"
+    fi
+    TN_CRED_PASS="${TN_CRED_PASS%"$cr"}"
+    again="${again%"$cr"}"
+    if [[ "$TN_CRED_PASS" != "$again" ]] || ! tn_passphrase_ok "$TN_CRED_PASS"; then
+        again=""
+        TN_CRED_PASS=""
+        edit_error "the two entries differ, or the passphrase is empty, holds a line break, or starts or ends with whitespace; nothing was changed"
+        return 1
+    fi
+    again=""
+    return 0
+}
+
+# edit_cred_report RC WHAT -- report how a passphrase move (_tn_cred_switch and the
+# migrations) ended.
+edit_cred_report() {
+    case "${1:-}" in
+        0) edit_ok "${2:-done}" ;;
+        1) edit_error "nothing was changed (see above)" ;;
+        2) edit_error "${TARGET_SERVICE} did not come back with the new passphrase delivery; its previous files are back and it runs on them" ;;
+        *) edit_error "${TARGET_SERVICE} did not come back on its previous files either; see the backups named above and journalctl -u ${TARGET_SERVICE}" ;;
+    esac
+}
+
+# edit_cred_pcrs KEY -- the PCR list for a new credential: --bind-pcrs when given
+# (none clears it), else the one .node-meta records, kept only with a TPM.
+edit_cred_pcrs() {
+    local key="${1:-}" pcrs
+    if [[ -n "$EDIT_BIND_PCRS" ]]; then
+        [[ "$EDIT_BIND_PCRS" == "none" ]] || printf '%s\n' "$EDIT_BIND_PCRS"
+        return 0
+    fi
+    pcrs="$(meta_get CREDENTIAL_PCRS 2>/dev/null || true)"
+    if [[ -n "$pcrs" && "$key" == "host+tpm2" ]] && tn_pcrs_ok "$pcrs"; then
+        printf '%s\n' "$pcrs"
+    fi
+    return 0
+}
+
+# edit_migrate_credential -- --migrate-credential and the menu: move the node to the
+# current unit and start script with its passphrase in the encrypted credential
+# (tn_migrate_credential), read from the root-only file or from a unit that holds
+# it (tn_migrate_embedded_passphrase); the passphrase is asked for when neither can
+# be read. Below systemd 250 a unit that holds it moves to the root-only file
+# (testnet only). Old copies are shredded once the node is back. rc as the helpers.
+edit_migrate_credential() {
+    local conf rc=0
+    conf="$(tn_resolve_config_dir)"
+    EDIT_LEGACY_OK=true
+    edit_lock || return 1
+    TN_CRED_PASS=""
+    if tn_has_embedded_passphrase "$TARGET_SERVICE_FILE"; then
+        if ! _tn_unit_pass_read "$TARGET_SERVICE_FILE"; then
+            edit_warn "the passphrase in ${TARGET_SERVICE_FILE} cannot be read back as one plain value; type it instead"
+            edit_cred_type_pass || return 1
+        fi
+        tn_migrate_embedded_passphrase "$TARGET_SERVICE_FILE" edit_wait_say || rc=$?
+    else
+        if [[ ! -f "${conf}/bls-passphrase" ]] \
+            && ! [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "credential" && -f "${conf}/bls-passphrase.cred" ]]; then
+            edit_warn "no stored passphrase to move (${conf}/bls-passphrase is missing); type it instead"
+            edit_cred_type_pass || return 1
+        fi
+        tn_migrate_credential edit_wait_say || rc=$?
+    fi
+    TN_CRED_PASS=""
+    resolve_launch_file 2>/dev/null || true
+    edit_cred_report "$rc" "${TARGET_SERVICE} now runs from the current unit and start script with its passphrase stored as $(meta_get PASSPHRASE_METHOD 2>/dev/null || echo unknown)"
+    return "$rc"
+}
+
+# edit_reseal -- --reseal and the menu: encrypt the credential again with this host's
+# key as it is now (the TPM when there is a usable one) and the PCR choice
+# (--bind-pcrs LIST, --bind-pcrs none, else the recorded one): after a TPM change, a
+# PCR policy change, or a move between host and host+tpm2. The value is decrypted
+# into a pipe, never a file; when it no longer decrypts here it is asked for. Then
+# the restart steps of a migration, with the old credential put back if the node
+# does not come up. rc as _tn_cred_switch.
+edit_reseal() {
+    local cred net key pcrs rc=0 restart=yes
+    cred="$(tn_resolve_config_dir)/bls-passphrase.cred"
+    if [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" != "credential" || ! -f "$cred" ]]; then
+        edit_error "this node does not keep its passphrase as an encrypted credential; run sudo ./edit-config.sh --migrate-credential first"
+        return 1
+    fi
+    if ! tn_creds_supported; then
+        edit_error "systemd-creds is not available on this host"
+        return 1
+    fi
+    edit_lock || return 1
+    TN_CRED_PASS="$(systemd-creds decrypt "--name=${TN_CRED_NAME}" "$cred" - 2>/dev/null)" || TN_CRED_PASS=""
+    if [[ -z "$TN_CRED_PASS" ]]; then
+        edit_warn "${cred} does not decrypt on this host any more; type the passphrase to seal it again"
+        edit_cred_type_pass || return 1
+    fi
+    net="$(tn_detect_network 2>/dev/null)" || net=""
+    if [[ "$EDIT_ALLOW_NO_TPM" == "true" ]]; then
+        TN_ALLOW_NO_TPM=1
+    fi
+    if ! key="$(tn_credential_key "$net")"; then
+        TN_CRED_PASS=""
+        edit_error "no usable TPM2 here; pass --allow-no-tpm to seal it with the host key alone"
+        return 1
+    fi
+    pcrs="$(edit_cred_pcrs "$key")"
+    systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
+    _tn_cred_switch credential "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
+    TN_CRED_PASS=""
+    edit_cred_report "$rc" "the credential is sealed again (${key}${pcrs:+, PCRs ${pcrs}})"
+    return "$rc"
+}
+
+# edit_pause -- hold the result on screen in the menu.
+edit_pause() {
+    edit_unlock
+    echo ""
+    read -r -p "  Press Enter to return to menu..." || true
+}
+
+# edit_bls_passphrase -- menu 5: change the stored passphrase, seal the credential
+# again, or move the node to the encrypted credential. A node whose unit still
+# holds the passphrase (or runs docker inline, or used the old TPM method) is
+# offered the move only.
+edit_bls_passphrase() {
+    print_header "Edit BLS Passphrase"
+    local reason method choice
+    if reason="$(edit_legacy_reason)"; then
+        print_warn "This node must move to the current unit and start script first: ${reason}."
+        print_info "The move stores the passphrase as an encrypted credential (or, below systemd ${TN_CRED_MIN_SYSTEMD}, in a root-only file) and shreds the old copies."
+        if confirm "Move it now?"; then
+            edit_migrate_credential || true
+        fi
+        edit_pause
+        return 0
+    fi
+    method="$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)"
+    case "$method" in
+        credential) print_info "Stored as an encrypted credential ($(meta_get CREDENTIAL_KEY 2>/dev/null || echo host))." ;;
+        *) print_info "Stored in the root-only file $(tn_resolve_config_dir)/bls-passphrase." ;;
+    esac
+    echo ""
+    echo "  1) Change the stored passphrase"
+    if [[ "$method" == "credential" ]]; then
+        echo "  2) Seal the credential again (TPM or PCR change)"
+    elif tn_creds_supported; then
+        echo "  2) Move it to an encrypted credential"
+    fi
+    echo "  3) Back"
+    read -r -p "  Enter choice [1-3]: " choice || choice=3
+    case "$choice" in
+        1) edit_change_passphrase ;;
+        2)
+            if [[ "$method" == "credential" ]]; then
+                edit_reseal || true
+            elif tn_creds_supported; then
+                edit_migrate_credential || true
+            fi
+            edit_pause
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+# edit_change_passphrase -- store a new passphrase (asked twice, no echo; the rules of
+# tn_passphrase_ok for this network, mainnet rules when it cannot be told) as the
+# encrypted credential where systemd-creds works, else in the root-only file, then
+# restart through the committee guard and the epoch wait; the old files come back if
+# the node does not unlock its key. Keys are not re-encrypted: they must already be
+# wrapped with the new passphrase.
+edit_change_passphrase() {
     print_warn "Changing the BLS passphrase updates the stored passphrase used"
     print_warn "to decrypt your keys at startup. This does NOT re-encrypt your"
     print_warn "key files -- your keys must have been generated with this passphrase."
     print_warn "Only use this if you know your keys match the new passphrase."
     echo ""
-
     if ! confirm "Are you sure you want to change the stored passphrase?"; then
         print_info "Passphrase unchanged."
         return 0
     fi
-
-    local new_pass new_pass_confirm
+    local network new_pass="" new_confirm="" cr=$'\r' target=stdin key="" pcrs="" restart=yes rc=0
+    network="$(tn_detect_network 2>/dev/null)" || network="mainnet"
     while true; do
-        read -r -s -p "  Enter new BLS passphrase: " new_pass
+        IFS= read -r -s -p "  Enter new BLS passphrase: " new_pass || new_pass=""
         echo ""
-        read -r -s -p "  Confirm new BLS passphrase: " new_pass_confirm
+        IFS= read -r -s -p "  Confirm new BLS passphrase: " new_confirm || new_confirm=""
         echo ""
-        if [[ "$new_pass" == "$new_pass_confirm" ]]; then
-            break
-        fi
+        new_pass="${new_pass%"$cr"}"
+        new_confirm="${new_confirm%"$cr"}"
+        [[ "$new_pass" == "$new_confirm" ]] && break
         print_warn "Passphrases do not match -- try again."
     done
-
-    # Nothing is stopped or written before the update lock is held.
-    if ! menu_lock; then
+    new_confirm=""
+    if ! tn_passphrase_ok "$new_pass" "$network"; then
         new_pass=""
-        new_pass_confirm=""
+        print_error "Passphrase refused: it must not be empty, must not start or end with a space or tab, and must not contain a line break."
+        if [[ "$network" == "mainnet" ]]; then
+            print_info "On mainnet it must also be at least 16 bytes long."
+        fi
+        print_info "Passphrase unchanged."
+        edit_pause
         return 0
     fi
-
-    # Stop the service before rewriting the passphrase file so we never race
-    # against a node that may have the old file mapped in its credential dir.
-    # A committee node waits for the epoch boundary first: this stop is the
-    # start of its restart.
-    local was_active="no"
-    if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
-        was_active="yes"
-        edit_epoch_wait
-        print_step "Stopping ${TARGET_SERVICE} before passphrase rewrite..."
-        systemctl stop "$TARGET_SERVICE"
-        local stop_attempts=0
-        while systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null && (( stop_attempts < 15 )); do
-            sleep 1
-            (( ++stop_attempts ))
-        done
-        if systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null; then
-            print_error "Service did not stop within 15s. Aborting passphrase rewrite."
-            new_pass=""
-            new_pass_confirm=""
-            echo ""
-            read -r -p "  Press Enter to return to menu..."
-            return 1
-        fi
-        print_ok "Service stopped"
+    if ! menu_lock; then
+        new_pass=""
+        return 0
     fi
-
-    # For Docker installs the passphrase is also embedded in the unit file,
-    # so back up the unit before any write.
-    local exec_start backup=""
-    exec_start=$(grep "^ExecStart=" "$TARGET_SERVICE_FILE" 2>/dev/null || echo "")
-    if echo "$exec_start" | grep -qF "docker run"; then
-        backup=$(backup_service_file "$TARGET_SERVICE_FILE") || {
-            [[ "$was_active" == "yes" ]] && systemctl start "$TARGET_SERVICE"
-            return 1
-        }
-    fi
-
-    # Update the passphrase file
-    echo "$new_pass" > "$passphrase_file"
-    chmod 600 "$passphrase_file"
-    chown "${SERVICE_USER}:${SERVICE_USER}" "$passphrase_file" 2>/dev/null || true
-    print_ok "Passphrase file updated"
-
-    # Binary/source installs use LoadCredential -- passphrase read from file at
-    # runtime, no service file change needed.
-    # Docker installs embed passphrase in ExecStart -- update it.
-    if echo "$exec_start" | grep -qF "docker run"; then
-        local bls_pass
-        bls_pass=$(cat "$passphrase_file")
-        perl -i -pe "s|TN_BLS_PASSPHRASE=[^ ]+|TN_BLS_PASSPHRASE=${bls_pass}|g" "$TARGET_SERVICE_FILE"
-        print_ok "Docker service file updated with new passphrase"
-    else
-        print_ok "Binary install -- passphrase file updated (LoadCredential reads it at runtime)"
-    fi
-
+    TN_CRED_PASS="$new_pass"
     new_pass=""
-    new_pass_confirm=""
-
-    # Restart the service if it was running before
-    if [[ "$was_active" == "yes" ]]; then
-        print_step "Restarting ${TARGET_SERVICE}..."
-        systemctl daemon-reload
-        systemctl start "$TARGET_SERVICE"
-        sleep 3
-        if systemctl is-active --quiet "$TARGET_SERVICE"; then
-            print_ok "Service restarted successfully"
-        else
-            print_error "Service failed to restart. Check logs:"
-            print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
+    if tn_creds_supported; then
+        target=credential
+        [[ "$EDIT_ALLOW_NO_TPM" == "true" ]] && TN_ALLOW_NO_TPM=1
+        if ! key="$(tn_credential_key "$network")"; then
+            TN_CRED_PASS=""
+            print_error "No usable TPM2 here: pass --allow-no-tpm to keep the passphrase encrypted with the host key alone. Passphrase unchanged."
+            edit_pause
+            return 0
         fi
-        edit_unlock
-        echo ""
-        read -r -p "  Press Enter to return to menu..."
-    else
-        apply_changes
+        pcrs="$(edit_cred_pcrs "$key")"
     fi
+    systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
+    _tn_cred_switch "$target" "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
+    TN_CRED_PASS=""
+    edit_cred_report "$rc" "the new passphrase is stored ($( [[ "$target" == credential ]] && echo "encrypted credential, ${key}" || echo "root-only file" ))"
+    edit_pause
+    return 0
 }
 
 edit_p2p_ports() {
@@ -1794,8 +2306,13 @@ edit_p2p_ports() {
         new_worker="/ip4/0.0.0.0/udp/${new_worker_port}/quic-v1"
     fi
 
-    set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary"
-    set_listener_var "WORKER_LISTENER_MULTIADDR"  "$new_worker"
+    if ! { set_listener_var "PRIMARY_LISTENER_MULTIADDR" "$new_primary" \
+        && set_listener_var "WORKER_LISTENER_MULTIADDR" "$new_worker"; }; then
+        edit_restore_backups || true
+        edit_unlock
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
     print_ok "P2P ports updated"
     print_info "Primary: ${new_primary}"
     print_info "Worker:  ${new_worker}"
@@ -1819,36 +2336,55 @@ edit_docker_image() {
     local current_image
     current_image="$(launch_docker_image "$exec_start")"
 
+    local net repo
+    if ! net="$(tn_detect_network 2>/dev/null)"; then
+        print_error "Cannot tell this node's network, so its image repository is unknown; the image is not changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    # tn_docker_network_ok says why (devnet has no repository, an open decision;
+    # mainnet has no release that verifies yet).
+    if ! tn_docker_network_ok "$net" || ! repo="$(tn_docker_repo_for "$net")"; then
+        print_error "No ${net} image can be used yet; the image is not changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
     print_info "Current image: ${current_image:-unknown}"
     echo ""
-    print_info "Enter the new image URL and tag."
-    print_info "Check for latest tags at:"
-    print_info "  https://console.cloud.google.com/artifacts/docker/telcoin-network/us/tn-public/adiri"
+    print_info "Enter a ${net} release tag (such as ${DEFAULT_DOCKER_TAG}) to run that release's"
+    print_info "image by digest, or the image itself as ${repo}@sha256:<digest>."
+    print_info "The node never runs an image by tag. Enter keeps the current image."
     echo ""
 
-    local new_image
-    read -r -p "  New Docker image [${current_image}]: " input
-    new_image="${input:-$current_image}"
-
-    if [[ "$new_image" == "$current_image" ]]; then
+    local input out new_image new_tag
+    read -r -p "  Release tag or image: " input
+    if [[ -z "$input" || "$input" == "$current_image" ]]; then
         print_info "Image unchanged."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
     fi
-
-    if ! validate_docker_image "$new_image"; then
-        print_error "Image reference looks invalid: ${new_image}"
-        print_info "Expected format: registry/path:tag (e.g. us-docker.pkg.dev/.../adiri:v0.9.2)."
+    if ! out="$(tn_docker_resolve_ref "$net" "$input")"; then
+        print_error "Image refused: ${input}"
+        print_info "Give a ${net} release tag, or ${repo}@sha256:<digest>."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    new_image="${out%% *}"
+    new_tag="${out#* }"
+    if [[ "$new_image" == "$current_image" ]]; then
+        print_info "The node already runs ${new_image}."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
     fi
 
     print_step "Pulling new image: ${new_image}..."
-    if ! docker pull "$new_image"; then
-        print_error "Failed to pull image: ${new_image}"
-        print_info "Check the image URL and tag and try again."
+    if ! docker pull "$new_image" || ! tn_docker_holds_digest "$new_image"; then
+        print_error "Failed to pull ${new_image}, or Docker does not hold it under that digest."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
@@ -1858,10 +2394,17 @@ edit_docker_image() {
     menu_lock || return 0
     backup_edit_targets || return 0
 
-    # Replace old image with new image in the launch file (wrapper or unit)
-    swap_docker_image "$current_image" "$new_image" "$TARGET_LAUNCH_FILE"
-    print_ok "Launch config updated to use: ${new_image}"
+    # The start script and unit are rendered again with the new image.
+    if ! swap_docker_image "$new_image"; then
+        edit_restore_backups || true
+        edit_unlock
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+    edit_record_image "$new_image" "$new_tag"
+    print_ok "Launch config updated to use: ${new_image}${new_tag:+ (${new_tag})}"
     apply_changes
+
 }
 
 edit_bootstrap_peers() {
@@ -1974,19 +2517,73 @@ chain_config_subdir() {
     esac
 }
 
+# refresh_copy_configs SRC_DIR DATA_DIR -- copy genesis.yaml, committee.yaml
+# and parameters.yaml from SRC_DIR into DATA_DIR (the first two under
+# genesis/) as the service user: each is copied to a mktemp name beside its
+# destination and made 0644, and only when all three are staged are they
+# renamed into place. Every step runs through tn_as_service_user, so nothing
+# in the data dir is written or re-owned by root. rc 1 when staging failed
+# (nothing changed, the staged copies removed); rc 2 when a rename failed
+# after an earlier one succeeded.
+refresh_copy_configs() {
+    local src="$1" dd="$2" i tmp ok=true
+    local -a from to tmps
+    from=("${src}/genesis.yaml" "${src}/committee.yaml" "${src}/parameters.yaml")
+    to=("${dd}/genesis/genesis.yaml" "${dd}/genesis/committee.yaml" "${dd}/parameters.yaml")
+    tmps=()
+    tn_as_service_user mkdir -p -- "${dd}/genesis" || return 1
+    for i in 0 1 2; do
+        tmp="$(tn_as_service_user mktemp "${to[$i]%/*}/.tn.XXXXXX")" || tmp=""
+        if [[ -z "$tmp" ]]; then
+            ok=false
+            break
+        fi
+        tmps+=("$tmp")
+        if ! tn_as_service_user cp -- "${from[$i]}" "$tmp" \
+            || ! tn_as_service_user chmod -- 0644 "$tmp"; then
+            ok=false
+            break
+        fi
+    done
+    if [[ "$ok" != "true" ]]; then
+        for tmp in ${tmps[@]+"${tmps[@]}"}; do
+            tn_as_service_user rm -f -- "$tmp" 2>/dev/null || true
+        done
+        return 1
+    fi
+    for i in 0 1 2; do
+        if ! tn_as_service_user mv -f -T -- "${tmps[$i]}" "${to[$i]}"; then
+            for tmp in ${tmps[@]+"${tmps[@]}"}; do
+                tn_as_service_user rm -f -- "$tmp" 2>/dev/null || true
+            done
+            [[ "$i" -eq 0 ]] && return 1
+            return 2
+        fi
+    done
+    return 0
+}
+
 refresh_chain_configs() {
     print_header "Refresh Chain Configs"
 
     local source_dir="$TN_SOURCE_DIR"
-    local node_data_dir network subdir chain_config_src node_genesis node_id src_id
-    node_data_dir=$(detect_data_dir)
+    local node_data_dir network subdir chain_config_src node_genesis node_id src_id rc
+    if ! node_data_dir="$(detect_data_dir)"; then
+        print_error "Cannot tell the node's data dir: DATA_DIR is set more than once in .node-meta. Chain configs unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
 
     # The network comes from .node-meta. Copying another network's files would
     # move the node to that chain, so an unknown network is refused.
-    network="$(meta_get NETWORK 2>/dev/null || true)"
+    rc=0
+    network="$(meta_get NETWORK)" || rc=$?
     subdir="$(chain_config_subdir "$network")"
     if [[ -z "$subdir" ]]; then
-        if [[ -z "$network" ]]; then
+        if [[ "$rc" -eq 2 ]]; then
+            print_error "Cannot tell which network this node runs: NETWORK is set more than once in .node-meta. Chain configs unchanged."
+        elif [[ -z "$network" ]]; then
             print_error "Cannot tell which network this node runs: .node-meta has no NETWORK. Chain configs unchanged."
         else
             print_error "Cannot refresh chain configs for NETWORK=${network} (.node-meta); expected testnet, mainnet or devnet."
@@ -2014,8 +2611,11 @@ refresh_chain_configs() {
     # update-node.sh builds from the same checkout, so the pull waits for it too.
     menu_lock || return 0
 
-    # Pull latest from repo
-    if [[ -d "${source_dir}/.git" ]]; then
+    # Pull latest from repo (never on mainnet: its files come only as published,
+    # and the pins below decide).
+    if [[ -d "${source_dir}/.git" && "$network" == "mainnet" ]]; then
+        print_info "Mainnet chain configs are used as published (no pull)."
+    elif [[ -d "${source_dir}/.git" ]]; then
         print_step "Pulling latest chain configs..."
         if ! git -C "$source_dir" pull; then
             print_error "git pull failed in ${source_dir}. Chain configs unchanged."
@@ -2059,8 +2659,18 @@ refresh_chain_configs() {
         return
     fi
 
+    # The pinned hashes (tn_chain_configs_check), before anything is copied.
+    if ! tn_chain_configs_check "$chain_config_src" "$network" edit_wait_say; then
+        print_error "The chain configs in ${chain_config_src} do not match the ${network} pins (see above). Chain configs unchanged."
+        print_info "New pins come with a signed scripts release (update-scripts.sh)."
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
+    fi
+
     # Same chain or nothing: the node's current genesis and the new one must
     # both declare a chain id, and the same one.
+
     node_genesis="${node_data_dir}/genesis/genesis.yaml"
     node_id="$(tn_genesis_chain_id "$node_genesis" 2>/dev/null || true)"
     src_id="$(tn_genesis_chain_id "${chain_config_src}/genesis.yaml" 2>/dev/null || true)"
@@ -2072,22 +2682,20 @@ refresh_chain_configs() {
     fi
     print_ok "Chain id ${src_id} matches the node's genesis"
 
-    print_step "Copying chain configs to ${node_data_dir}..."
-    mkdir -p "${node_data_dir}/genesis"
-    cp "${chain_config_src}/genesis.yaml"    "${node_data_dir}/genesis/"
-    cp "${chain_config_src}/committee.yaml"  "${node_data_dir}/genesis/"
-    cp "${chain_config_src}/parameters.yaml" "${node_data_dir}/"
-
-    local svc_user
-    svc_user=$(grep "^User=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "root")
-    local svc_group
-    svc_group=$(grep "^Group=" "$TARGET_SERVICE_FILE" 2>/dev/null | cut -d= -f2 || echo "")
-
-    if [[ -n "$svc_group" ]] && getent group "$svc_group" &>/dev/null; then
-        chown -R "${svc_user}:${svc_group}" "$node_data_dir" 2>/dev/null || \
-            chown -R "${svc_user}" "$node_data_dir" 2>/dev/null || true
-    else
-        chown -R "${svc_user}" "$node_data_dir" 2>/dev/null || true
+    # The data dir belongs to the service user, so the copy runs as that user
+    # (no root cp, no chown -R of the data dir).
+    print_step "Copying chain configs to ${node_data_dir} as ${SERVICE_USER}..."
+    rc=0
+    refresh_copy_configs "$chain_config_src" "$node_data_dir" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        if [[ "$rc" -eq 1 ]]; then
+            print_error "Could not copy the chain configs into ${node_data_dir} as ${SERVICE_USER}. Chain configs unchanged."
+        else
+            print_error "Copying the chain configs into ${node_data_dir} stopped part way: some files are new and some are not. Run this again before restarting the node."
+        fi
+        echo ""
+        read -r -p "  Press Enter to return to menu..." || true
+        return 0
     fi
     print_ok "Chain configs updated"
 
@@ -2109,7 +2717,12 @@ restart_node() {
 
     if confirm "Restart ${TARGET_SERVICE} now?"; then
         menu_lock || return 0
-        edit_epoch_wait
+        if ! edit_epoch_wait; then
+            edit_unlock
+            echo ""
+            read -r -p "  Press Enter to return to menu..." || true
+            return 0
+        fi
         print_step "Restarting ${TARGET_SERVICE}..."
         systemctl restart "$TARGET_SERVICE" || true
         sleep 3
@@ -2145,7 +2758,7 @@ main_menu() {
         echo "  1) Listener addresses      (PRIMARY/WORKER_LISTENER_MULTIADDR)"
         echo "  2) Metrics address"
         echo "  3) Log verbosity"
-        echo "  4) RPC access              (private / public / disabled)"
+        echo "  4) RPC access              (private / public)"
         echo "  5) BLS passphrase"
         echo "  6) P2P ports               (49590/49594)"
         echo "  7) Docker image            (Docker installs only)"
@@ -2242,9 +2855,20 @@ run_set() {
     fi
     edit_report_backups
 
-    if edit_restart; then
+    rc=0
+    edit_restart || rc=$?
+    if [[ $rc -eq 0 ]]; then
         edit_done true "$field" "$value" "applied and ${TARGET_SERVICE} healthy"
         return 0
+    fi
+    if [[ $rc -eq 2 ]]; then
+        # The committee check refused the restart: the node never stopped.
+        if edit_restore_backups; then
+            edit_done false "$field" "" "the committee quorum check refused the restart; nothing was changed (--allow-quorum-risk overrides for a coordinated restart)" true
+        else
+            edit_done false "$field" "" "the committee quorum check refused the restart, and some files could not be restored; see the errors above"
+        fi
+        return 1
     fi
 
     # No epoch wait here: the node is already down or failing.
@@ -2304,7 +2928,21 @@ main() {
                 EDIT_SET_PAIR="$2"
                 shift 2
                 ;;
-            --no-epoch-wait) NO_EPOCH_WAIT=true; shift ;;
+            --no-epoch-wait) NO_EPOCH_WAIT=true; TN_SKIP_EPOCH_WAIT=1; shift ;;
+            --allow-quorum-risk) TN_ALLOW_QUORUM_RISK=1; shift ;;
+            --allow-port-mismatch) TN_ALLOW_PORT_MISMATCH=1; shift ;;
+            --allow-public-metrics) ALLOW_PUBLIC_METRICS=true; shift ;;
+            --migrate-credential) EDIT_ACTION=migrate; shift ;;
+            --reseal) EDIT_ACTION=reseal; shift ;;
+            --allow-no-tpm) EDIT_ALLOW_NO_TPM=true; TN_ALLOW_NO_TPM=1; shift ;;
+            --bind-pcrs)
+                if [[ $# -lt 2 || "$2" == -* ]]; then
+                    edit_error "--bind-pcrs needs a PCR list (for example 7 or 0+7) or none"
+                    exit 1
+                fi
+                EDIT_BIND_PCRS="$2"
+                shift 2
+                ;;
             -h|--help)
                 # The header block only: everything up to its closing rule. Read
                 # from this file, not "$0", which names the caller when sourced.
@@ -2324,10 +2962,34 @@ main() {
         print_info "Ignoring ${LEGACY_ROLE_FLAG}: the node's role is decided on-chain, not by a flag." >&2
     fi
 
+    if [[ -n "$EDIT_BIND_PCRS" && "$EDIT_BIND_PCRS" != "none" ]] && ! tn_pcrs_ok "$EDIT_BIND_PCRS"; then
+        edit_error "--bind-pcrs takes TPM PCR indexes 0-23 joined by + (for example 7 or 0+7), or none"
+        exit 1
+    fi
+    if [[ -n "$EDIT_ACTION" ]]; then
+        edit_require_root
+        resolve_target || exit 1
+        local action_rc=0
+        if [[ "$EDIT_ACTION" == "migrate" ]]; then
+            edit_migrate_credential || action_rc=$?
+        else
+            edit_reseal || action_rc=$?
+        fi
+        if [[ "$JSON_MODE" == "true" ]]; then
+            if [[ $action_rc -eq 0 ]]; then
+                edit_done true passphrase "$EDIT_ACTION" "passphrase ${EDIT_ACTION} done"
+            else
+                edit_done false passphrase "$EDIT_ACTION" "passphrase ${EDIT_ACTION} failed (rc ${action_rc})" "$([[ $action_rc -eq 2 ]] && echo true || echo false)"
+            fi
+
+        fi
+        exit "$action_rc"
+    fi
     if [[ "$JSON_MODE" == "true" || "$EDIT_SET_GIVEN" == "true" ]]; then
         run_set
         exit $?
     fi
+
 
     clear 2>/dev/null || true
     print_header "Telcoin Network Node Configuration Editor  v${SCRIPT_VERSION}"

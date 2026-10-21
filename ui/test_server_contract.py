@@ -39,22 +39,34 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import server  # noqa: E402
+from test_support import local_client  # noqa: E402
 
+local_client(server)
+
+REPO = os.path.dirname(HERE)
 SERVER_PY = os.path.join(HERE, "server.py")
 INSTALLER = os.path.join(HERE, "install-ui.sh")
 HELPER_SH = os.path.join(HERE, "telcoin-ui-helper.sh")
 HELPER_PATH = "/usr/local/sbin/telcoin-ui-helper"
 
-# The 14 node subcommands and the arguments each takes once the role is gone
-# (A.1). The server must send exactly this many.
+# The node subcommands and the arguments each takes once the role is gone
+# (A.1). The server must send exactly this many, not counting the trailing
+# allow-quorum-risk of the calls that stop or restart the node (OVERRIDABLE).
 NODE_SUBCOMMAND_ARITY = {
+    "service": 1,
     "tracing-enable": 0, "tracing-disable": 0, "update-check": 0,
     "update-prepare": 1, "update-apply": 0, "update-discard": 0,
     "restart-count": 0, "log-clear": 0, "config-set": 2, "set-hostname": 1,
     "addons-status": 0, "meta-cat": 0, "setup-keygen": 0, "setup-finalize": 0,
 }
 
+OVERRIDABLE = {"service", "tracing-enable", "tracing-disable", "set-hostname"}
+
 DONE_OK = json.dumps({"event": "done", "ok": True, "msg": "finished"})
+
+# The real run(), before any test replaces it (test_public_readonly.py uses it
+# to prove a public request never reaches sudo).
+REAL_RUN = server.run
 
 
 def read(path):
@@ -85,20 +97,29 @@ def split_transitional(text):
 
 
 _HELPER_LINE_RE = re.compile(
-    r"^\$\{SVC_USER\} ALL=\(ALL\) NOPASSWD: " + re.escape(HELPER_PATH) + r" (.+)$", re.M)
+    r"^\$\{SVC_USER\} ALL=\(root\) NOPASSWD: " + re.escape(HELPER_PATH) + r" (.+)$", re.M)
 
 
 def helper_rules(text):
     """The argument patterns of the helper lines in a sudoers text, such as
-    'update-check' or 'config-set *'."""
-    return [r.rstrip() for r in _HELPER_LINE_RE.findall(text)]
+    'update-check' or 'config-set *', including the commands of the TN_SETUP
+    alias when the text grants it."""
+    rules = [r.rstrip() for r in _HELPER_LINE_RE.findall(text)]
+    if re.search(r"^\$\{SVC_USER\} ALL=\(root\) NOPASSWD: TN_SETUP$", text, re.M):
+        m = re.search(r"^Cmnd_Alias TN_SETUP = (.+)$", text, re.M)
+        if not m:
+            raise AssertionError("TN_SETUP is granted but not defined")
+        for cmd in m.group(1).split(","):
+            cmd = cmd.strip()
+            assert cmd.startswith(HELPER_PATH + " "), cmd
+            rules.append(cmd[len(HELPER_PATH) + 1:])
+    return rules
 
 
 def env_keep_vars():
-    m = re.search(r'^Defaults!' + re.escape(HELPER_PATH) + r' env_keep \+= "([^"]*)"$',
-                  sudoers_text(), re.M)
+    m = re.search(r'^Defaults!TN_SETUP env_keep \+= "([^"]*)"$', sudoers_text(), re.M)
     if not m:
-        raise AssertionError("env_keep line for the helper not found")
+        raise AssertionError("env_keep line for TN_SETUP not found")
     return set(m.group(1).split())
 
 
@@ -143,6 +164,21 @@ class FakeStdout:
 
     def readline(self):
         return self._lines.pop(0) if self._lines else ""
+
+    def close(self):
+        self.closed = True
+
+
+class FakeStdin:
+    """Records what the server writes to a child's stdin."""
+
+    def __init__(self):
+        self.data = ""
+        self.closed = False
+
+    def write(self, text):
+        self.data += text
+        return len(text)
 
     def close(self):
         self.closed = True
@@ -204,7 +240,7 @@ def external_nodes(slot="observer"):
 
 # Helper replies by subcommand: (rc, stdout, stderr).
 HELPER_REPLIES = {
-    "helper-version": (0, "2", ""),
+    "helper-version": (0, "3", ""),
     "meta-cat": (0, "NODE_TYPE=observer\nDATA_DIR=/var/lib/telcoin\n"
                     "PUBLIC_RPC_DOMAIN=node7.example.com\n", ""),
     "caddy-status": (0, json.dumps({"installed": True, "running": True, "enabled": True,
@@ -216,6 +252,8 @@ HELPER_REPLIES = {
     "rpc-dns-check": (0, json.dumps({"propagated": True}), ""),
     "firewall-status": (0, json.dumps({"installed": True, "active": True}), ""),
     "firewall-port": (0, json.dumps({"ok": True}), ""),
+    "firewall-enable": (0, json.dumps({"event": "done", "ok": True, "action": "enable",
+                                       "active": True, "msg": "ufw enabled"}), ""),
     "update-check": (0, json.dumps({"current_ref": "v0.14.0-adiri",
                                     "latest_ref": "v0.15.0-adiri"}), ""),
     "update-discard": (0, "", ""),
@@ -239,6 +277,14 @@ HELPER_REPLIES = {
     "jaeger-stop": (0, "", ""),
     "tracing-enable": (0, "", ""),
     "tracing-disable": (0, "", ""),
+    "node-env-cat": (0, "PRIMARY_LISTENER_MULTIADDR=/ip4/10.0.0.5/udp/49590/quic-v1\n", ""),
+    "journal-tail": (0, "journal one\njournal two", ""),
+    "quorum-check": (0, json.dumps({"available": True, "rc": 0, "detail": ""}), ""),
+    "host-audit": (1, "\x1b[33m  [WARN]\x1b[0m No Telcoin node detected on this server\n"
+                      "ok    systemd 255 (encrypted credentials supported)\n"
+                      "warn  BLS passphrase: plaintext root-only file; encrypt it with "
+                      "edit-config.sh --migrate-credential\n"
+                      "info  no usable TPM2 (credentials rest on the host key)\n", ""),
 }
 
 
@@ -268,8 +314,14 @@ class ServerTestCase(unittest.TestCase):
         self.patch(server, "CPUINFO_PATH", os.path.join(self.tmp.name, "no-cpuinfo"))
 
         server._helper_cache.update({"expires": 0.0, "data": None})
+        server._quorum_cache.update({"expires": 0.0, "data": None})
+        server._audit_cache.update({"expires": 0.0, "data": None})
+        server._write_times.clear()
+        self.patch(server, "SYSTEMD_DIR", os.path.join(self.tmp.name, "systemd"))
+        self.patch(server, "DEFAULT_CONFIG_DIR", os.path.join(self.tmp.name, "etc-telcoin"))
         server.clear_meta_cache()
         server._docker_stats_cache.clear()
+        server._docker_image_cache.clear()
         server._setup_running["active"] = False
         self.client = server.app.test_client()
 
@@ -292,6 +344,7 @@ class ServerTestCase(unittest.TestCase):
     def popen(self, argv, stdout=None, stderr=None, env=None, **kwargs):
         self.calls.append([str(a) for a in argv])
         proc = FakePopen(argv, stderr, env, kwargs, **self.popen_script)
+        proc.stdin = FakeStdin()
         self.procs.append(proc)
         return proc
 
@@ -323,7 +376,7 @@ class ServerTestCase(unittest.TestCase):
 
 FULL_SETUP = {
     "network": "testnet", "install_method": "docker",
-    "docker_image": "us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri",
+    "docker_image": "ghcr.io/telcoin-association/telcoin-network:v0.15.0-adiri",
     "passphrase_method": "loadcredential", "address": "0x" + "ab" * 20,
     "external_primary": "/ip4/203.0.113.10/udp/49590/quic-v1",
     "external_worker": "/ip4/203.0.113.10/udp/49594/quic-v1",
@@ -352,22 +405,43 @@ class CrossFileContractTest(ServerTestCase):
         # execution address the role check asks the chain about).
         server.read_node_info_text("observer", external_nodes()["observer"])
 
+        server.read_node_env()
+        server.quorum_status()
+        c.get("/api/system/audit")
+
         self.nodes = external_nodes()
         c.get("/api/logs/observer?lines=50")
         c.get("/api/logs/observer/download")
         self.nodes = scripts_nodes()
 
-        c.post("/api/logs/observer/clear")
-        c.get("/api/config/observer/set?field=verbosity&value=-vv", buffered=True)
-        c.post("/api/config/observer/hostname", json={"name": "node7"})
+        # A node that logs to the journal: tail and follow go through the helper.
+        self.helper_replies["meta-cat"] = (0, "LOG_TARGET=journal\n", "")
+        server.clear_meta_cache()
+        c.get("/api/logs/observer?lines=50")
+        resp = c.get("/api/logs/observer/stream")
+        next(iter(resp.response), None)
+        resp.close()
+        self.helper_replies["meta-cat"] = HELPER_REPLIES["meta-cat"]
+        server.clear_meta_cache()
+
+        c.post("/api/logs/observer/clear", json={})
+        c.post("/api/config/observer/set", json={"field": "verbosity", "value": "-vv"},
+               buffered=True)
+        for action in server.CREDENTIAL_ACTIONS:
+            c.post("/api/config/observer/credential", json={"action": action}, buffered=True)
+        server._write_times.clear()     # the write rate limit would refuse the rest
+        c.post("/api/config/observer/hostname", json={"name": "node7"}, buffered=True)
         c.post("/api/config/observer/logrotate", json={"size": "1G"})
-        c.post("/api/config/observer/clear-rotated")
+        c.post("/api/config/observer/clear-rotated", json={})
         c.get("/api/firewall")
         for spec in server.FIREWALL_PORTS:
             port, proto = spec.split("/")
             for state in ("on", "off"):
                 c.post("/api/firewall/port", json={"port": port, "proto": proto,
                                                    "state": state})
+        c.post("/api/firewall/enable", json={})
+        c.post("/api/firewall/enable", json={"ssh_from": "203.0.113.7/32, 2001:db8::/48"})
+        server._write_times.clear()     # the write rate limit would refuse the rest
         c.post("/api/setup/observer/keygen", json=FULL_SETUP, buffered=True)
         c.post("/api/setup/observer/finalize", json=FULL_SETUP, buffered=True)
         c.get("/api/caddy/status")
@@ -375,9 +449,9 @@ class CrossFileContractTest(ServerTestCase):
         c.post("/api/caddy/dns-check", json={"domain": "dashboard.example.com",
                                              "public_ip": "203.0.113.10"})
         c.post("/api/caddy/enable", json={"domain": "dashboard.example.com",
-                                          "username": "admin", "password": "long enough",
+                                          "username": "admin", "password": "long enough password",
                                           "public_ip": "203.0.113.10"}, buffered=True)
-        c.post("/api/caddy/disable", buffered=True)
+        c.post("/api/caddy/disable", json={}, buffered=True)
         c.get("/api/rpc/status")
         c.post("/api/rpc/dns-check", json={"domain": "node7.example.com",
                                            "public_ip": "203.0.113.10"})
@@ -388,17 +462,34 @@ class CrossFileContractTest(ServerTestCase):
                      {"domain": "node7.example.com", "public_ip": "203.0.113.10",
                       "move_dashboard_to": "dashboard.node7.example.com"}):
             c.post("/api/rpc/enable", json=body, buffered=True)
-        c.post("/api/rpc/disable", buffered=True)
+        c.post("/api/rpc/disable", json={}, buffered=True)
         c.get("/api/addons/status?node_type=observer")
         c.get("/api/update/status/observer")
-        c.get("/api/update/prepare/observer?ref=v0.15.0-adiri", buffered=True)
-        c.get("/api/update/apply/observer", buffered=True)
-        c.post("/api/update/discard/observer")
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
+        server.clear_meta_cache()
+        c.post("/api/update/prepare/observer", json={"ref": "v0.15.0-adiri"}, buffered=True)
+        self.helper_replies["meta-cat"] = HELPER_REPLIES["meta-cat"]
+        server.clear_meta_cache()
+        c.post("/api/update/apply/observer", json={}, buffered=True)
+        c.post("/api/update/discard/observer", json={})
         c.get("/api/jaeger/status")
-        c.post("/api/jaeger/start")
-        c.post("/api/jaeger/stop")
-        c.post("/api/tracing/enable/observer")
-        c.post("/api/tracing/disable/observer")
+        c.post("/api/jaeger/start", json={})
+        c.post("/api/jaeger/stop", json={})
+        server._write_times.clear()
+        c.post("/api/tracing/enable/observer", json={}, buffered=True)
+        c.post("/api/tracing/disable/observer", json={}, buffered=True)
+        c.post("/api/tracing/enable/observer", json={"allow_quorum_risk": True}, buffered=True)
+        c.post("/api/tracing/disable/observer", json={"allow_quorum_risk": True}, buffered=True)
+        c.post("/api/config/observer/hostname", json={"name": "node7", "allow_quorum_risk": True},
+               buffered=True)
+        # Stop and restart go through the helper; start stays a systemctl call.
+        server._write_times.clear()
+        os.makedirs(server.SYSTEMD_DIR, exist_ok=True)
+        open(server.service_file("observer"), "w").close()
+        for action in ("stop", "restart"):
+            c.post("/api/service/observer/" + action, json={}, buffered=True)
+            c.post("/api/service/observer/" + action, json={"allow_quorum_risk": True},
+                   buffered=True)
 
     def test_helper_path_matches_sudoers(self):
         self.assertEqual(server.HELPER, HELPER_PATH)
@@ -440,8 +531,11 @@ class CrossFileContractTest(ServerTestCase):
             sub = argv[3]
             if sub in NODE_SUBCOMMAND_ARITY:
                 seen.add(sub)
+                n = len(argv) - 4
+                if sub in OVERRIDABLE and argv[-1] == "allow-quorum-risk":
+                    n -= 1
                 with self.subTest(argv=argv):
-                    self.assertEqual(len(argv) - 4, NODE_SUBCOMMAND_ARITY[sub])
+                    self.assertEqual(n, NODE_SUBCOMMAND_ARITY[sub])
         self.assertEqual(seen, set(NODE_SUBCOMMAND_ARITY))
 
     def test_every_sudoers_subcommand_is_dispatched_by_the_helper(self):
@@ -464,9 +558,12 @@ class CrossFileContractTest(ServerTestCase):
         set_vars = {k for k in env if k.startswith("TN_")}
         self.assertIn("TN_SETUP_RPC_DOMAIN", set_vars)
         self.assertEqual(set_vars - keep, set())
-        # Every TN_* the source assigns (TN_CADDY_PASSWORD included).
+        # Every TN_* the source assigns.
         assigned = set(re.findall(r'env\["(TN_[A-Z_]+)"\]', read(SERVER_PY)))
         self.assertEqual(assigned - keep, set())
+        # No secret is kept across sudo, and no secret is put in the environment.
+        for secret in ("TN_BLS_PASSPHRASE", "TN_CADDY_PASSWORD", "TN_SETUP_PASSPHRASE_METHOD"):
+            self.assertNotIn(secret, keep | assigned | set_vars)
         for gone in ("TN_SETUP_RPC_PUBLIC", "TN_SETUP_INSTANCE"):
             self.assertNotIn(gone, set_vars | assigned | keep)
 
@@ -486,16 +583,17 @@ class CrossFileContractTest(ServerTestCase):
         bounds = [pos for _, pos in marks] + [len(text)]
         steps = {n: text[bounds[i]:bounds[i + 1]] for i, (n, _) in enumerate(marks)}
         anchors = {
-            1: ["$EUID -ne 0", "WAS_ACTIVE="],
-            2: ["pip3 install flask"],
+            1: ["$EUID -ne 0", "WAS_ACTIVE=", '"${SUDO_USER:-}" == "$SVC_USER"'],
+            2: ["--require-hashes", "--only-binary=:all:", 'swap_tree "$VENV_NEW" "$VENV_DIR"'],
             3: ["useradd --system"],
             4: ['bash -n "${SRC_DIR}/telcoin-ui-helper.sh"'],
             5: ['mktemp "${SUDOERS_TMP_TEMPLATE}"', 'visudo -cf "${SUDOERS_TMP}"'],
             6: ['"${HELPER_DST}.new"', 'mv -f "${HELPER_DST}.new" "${HELPER_DST}"'],
-            7: ['"${UPDATE_DIR}/update-node.sh"'],
-            8: ['cp "${SRC_DIR}/server.py"', "chown -R"],
-            9: ["LOGROTATE_CONF="],
-            10: ["systemctl daemon-reload"],
+            7: ['"${ENGINE_NEW}/update-node.sh"', 'swap_tree "$ENGINE_NEW" "$UPDATE_DIR"',
+                'lib/release-keys/*.asc'],
+            8: ['cp "${SRC_DIR}/server.py"', 'swap_tree "$UI_NEW" "$INSTALL_DIR"'],
+            9: ["LOGROTATE_CONF=", "logrotate-seed"],
+            10: ["ensure_token 0", "systemctl daemon-reload"],
             11: ['mv -f "${SUDOERS_TMP}" "${SUDOERS_FILE}"'],
             12: ["systemctl restart telcoin-ui"],
         }
@@ -506,6 +604,10 @@ class CrossFileContractTest(ServerTestCase):
         self.assertEqual(text.count('mv -f "${SUDOERS_TMP}" "${SUDOERS_FILE}"'), 1,
                          "the whitelist is swapped in once, at step 11")
         self.assertEqual(text.count("visudo -cf"), 1)
+        # Retired: an unpinned pip install into the system Python, and a chown of
+        # the app tree to the UI account.
+        for gone in ("pip3 install", "--break-system-packages", "chown -R \"${SVC_USER}"):
+            self.assertNotIn(gone, text)
 
 
 # ---------------------------------------------------------------------------
@@ -568,10 +670,13 @@ class SetupEnvTest(ServerTestCase):
         data = dict(FULL_SETUP)
         data.pop("passphrase")
         env, err = server._setup_env(data, want_passphrase=True)
-        self.assertEqual(err, "passphrase required")
+        self.assertTrue(err.startswith("passphrase required"), err)
         env, err = server._setup_env(data, want_passphrase=False)
         self.assertIsNone(err)
         self.assertNotIn("TN_BLS_PASSPHRASE", env)
+        env, err = server._setup_env(FULL_SETUP, want_passphrase=True)
+        self.assertIsNone(err)
+        self.assertNotIn("TN_BLS_PASSPHRASE", env, "the passphrase never enters the environment")
 
     def test_routes_refuse_before_any_helper_call(self):
         for phase in ("keygen", "finalize"):
@@ -596,8 +701,11 @@ class SetupEnvTest(ServerTestCase):
                 proc = self.procs[-1]
                 self.assertEqual(proc.args, ["sudo", "-n", HELPER_PATH, "setup-" + phase])
                 self.assertEqual(proc.env["TN_SETUP_RPC_DOMAIN"], "node7.example.com")
-                self.assertEqual(proc.env.get("TN_BLS_PASSPHRASE") is not None,
-                                 phase == "keygen")
+                self.assertNotIn("TN_BLS_PASSPHRASE", proc.env)
+                self.assertEqual(proc.stdin.data,
+                                 FULL_SETUP["passphrase"] + "\n" if phase == "keygen" else "")
+                self.assertEqual(proc.kwargs.get("stdin"),
+                                 subprocess.PIPE if phase == "keygen" else subprocess.DEVNULL)
                 self.assertFalse(server._setup_running["active"],
                                  "the setup guard is released when the stream closes")
 
@@ -675,7 +783,7 @@ class RpcEnableTest(ServerTestCase):
                 self.assertEqual(self.helper_calls()[-1][4], self.D)
 
     def test_caddy_enable_uses_the_strict_rule(self):
-        body = {"domain": "1.2.3.4", "username": "admin", "password": "long enough"}
+        body = {"domain": "1.2.3.4", "username": "admin", "password": "long enough password"}
         resp = self.client.post("/api/caddy/enable", json=body)
         self.assertEqual(resp.status_code, 400)
         self.assertIn('That dashboard hostname is not valid: "1.2.3.4".', resp.get_json()["error"])
@@ -706,8 +814,8 @@ CONFIG_GOOD = [
     ("worker_listener", "/ip6/::/udp/49594/quic-v1"),
     ("metrics", "127.0.0.1:9101"),
     ("metrics", "off"),
-    ("verbosity", "-vvvvv"),
-    ("docker_image", "us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri"),
+    ("verbosity", "-v"),
+    ("verbosity", "-vvv"),
     ("bootstrap_peers", "none"),
     ("bootstrap_peers", "/home/ubuntu/peers.yaml"),
     ("state_export", "off"),
@@ -722,7 +830,10 @@ CONFIG_BAD = [
     ("metrics", "OFF"),
     ("metrics", "127.0.0.1"),
     ("verbosity", "-vvvvvv"),
-    ("docker_image", "adiri"),
+    ("verbosity", "-vvvv"),
+    ("verbosity", "-vvvvv"),
+    ("metrics", "0.0.0.0:9101"),
+    ("metrics", "10.0.0.5:9101"),
     ("bootstrap_peers", "peers.yaml"),
     ("bootstrap_peers", "None"),
     ("bootstrap_peers", "/tmp/peers file.yaml"),
@@ -743,8 +854,8 @@ class ConfigSetTest(ServerTestCase):
 
     def set_field(self, field, value):
         self.calls.clear()
-        return self.client.get("/api/config/observer/set",
-                               query_string={"field": field, "value": value}, buffered=True)
+        return self.client.post("/api/config/observer/set",
+                                json={"field": field, "value": value}, buffered=True)
 
     def test_fields_and_patterns_match_the_helper(self):
         helper = helper_config_patterns()
@@ -770,11 +881,39 @@ class ConfigSetTest(ServerTestCase):
                 self.assertEqual(self.helper_calls(), [])
 
     def test_unknown_fields_are_refused(self):
-        for field in ("not_a_field", "Metrics", "hostname", ""):
+        for field in ("not_a_field", "Metrics", "hostname", "", "docker_image"):
             with self.subTest(field=field):
                 resp = self.set_field(field, "off")
                 self.assertEqual(resp.status_code, 400)
                 self.assertEqual(resp.get_json(), {"error": "field not editable"})
+                self.assertEqual(self.helper_calls(), [])
+
+    def test_allow_port_mismatch_adds_the_helper_option_for_a_listener(self):
+        addr = "/ip4/0.0.0.0/udp/49600/quic-v1"
+        for field in ("primary_listener", "worker_listener"):
+            with self.subTest(field=field):
+                self.calls.clear()
+                resp = self.client.post("/api/config/observer/set", buffered=True, json={
+                    "field": field, "value": addr, "allow_port_mismatch": True})
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(self.helper_calls(), [[
+                    "sudo", "-n", HELPER_PATH, "config-set", field, addr, "allow-port-mismatch"]])
+        self.calls.clear()
+        resp = self.client.post("/api/config/observer/set", buffered=True, json={
+            "field": "primary_listener", "value": addr, "allow_port_mismatch": False})
+        self.assertEqual(self.helper_calls(), [[
+            "sudo", "-n", HELPER_PATH, "config-set", "primary_listener", addr]])
+
+    def test_allow_port_mismatch_refused_elsewhere_or_not_a_bool(self):
+        for body in ({"field": "verbosity", "value": "-vv", "allow_port_mismatch": True},
+                     {"field": "primary_listener", "value": "/ip4/0.0.0.0/udp/49600/quic-v1",
+                      "allow_port_mismatch": "yes"},
+                     {"field": "primary_listener", "value": "/ip4/0.0.0.0/udp/49600/quic-v1",
+                      "allow_port_mismatch": 1}):
+            with self.subTest(body=body):
+                self.calls.clear()
+                resp = self.client.post("/api/config/observer/set", json=body, buffered=True)
+                self.assertEqual(resp.status_code, 400)
                 self.assertEqual(self.helper_calls(), [])
 
     def test_a_trailing_newline_fails_as_in_bash(self):
@@ -784,6 +923,347 @@ class ConfigSetTest(ServerTestCase):
             with self.subTest(field=field, value=value):
                 self.assertTrue(server.config_value_ok(field, value))
                 self.assertFalse(server.config_value_ok(field, value + "\n"))
+
+
+class CredentialTest(ServerTestCase):
+
+    def post(self, body):
+        self.calls.clear()
+        return self.client.post("/api/config/observer/credential", json=body, buffered=True)
+
+    def test_each_action_is_one_helper_call_without_other_arguments(self):
+        for action, flag in (("migrate", "--migrate-credential"), ("reseal", "--reseal")):
+            with self.subTest(action=action):
+                self.popen_script = {"lines": [json.dumps({"event": "done", "ok": True,
+                                                           "field": "passphrase", "value": action,
+                                                           "msg": "passphrase " + action + " done"})],
+                                     "rc": 0}
+                resp = self.post({"action": action})
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "credential", action]])
+                events = self.stream_events(resp.data)
+                done = [e for e in events if e.get("event") == "done"]
+                self.assertEqual(len(done), 1)
+                self.assertTrue(done[0]["ok"])
+
+    def test_a_failure_reaches_the_page(self):
+        self.popen_script = {"lines": [json.dumps({"event": "error", "msg": "no usable TPM2 here"}),
+                                       json.dumps({"event": "done", "ok": False, "field": "passphrase",
+                                                   "msg": "passphrase reseal failed (rc 1)"})],
+                             "rc": 1}
+        events = self.stream_events(self.post({"action": "reseal"}).data)
+        self.assertIn({"event": "error", "msg": "no usable TPM2 here"}, events)
+        self.assertFalse([e for e in events if e.get("event") == "done"][0]["ok"])
+
+    def test_other_actions_are_refused_before_the_helper(self):
+        for body in ({}, {"action": ""}, {"action": "Migrate"}, {"action": "tpm"},
+                     {"action": "--reseal"}, {"action": ["migrate"]}, {"action": "migrate reseal"}):
+            with self.subTest(body=body):
+                resp = self.post(body)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(self.helper_calls(), [])
+
+    def test_external_nodes_are_read_only(self):
+        self.nodes = external_nodes()
+        resp = self.post({"action": "migrate"})
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_sudoers_allows_exactly_the_two_calls(self):
+        rules = helper_rules(split_transitional(sudoers_text())[0])
+        self.assertEqual(sorted(r for r in rules if r.startswith("credential")),
+                         ["credential migrate", "credential reseal"])
+
+
+class RestartRoutesTest(ServerTestCase):
+    """Stop, restart and the edits that restart the node stream a helper call
+    that takes the update lock and checks the committee first; start stays a
+    direct systemctl call."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(server.SYSTEMD_DIR, exist_ok=True)
+        open(server.service_file("observer"), "w").close()
+
+    def post(self, url, body):
+        self.calls.clear()
+        server._write_times.clear()
+        return self.client.post(url, json=body, buffered=True)
+
+    def test_stop_and_restart_stream_the_helper(self):
+        refused = json.dumps({"event": "done", "ok": False, "quorum": True,
+                              "msg": "Not restarted: the committee check refused it"})
+        self.popen_script = {"lines": [json.dumps({"event": "step", "msg": "Checking the committee"}),
+                                       refused], "rc": 1}
+        for action in ("stop", "restart"):
+            with self.subTest(action=action):
+                resp = self.post("/api/service/observer/" + action, {})
+                self.assertEqual(resp.mimetype, "text/event-stream")
+                self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "service", action]])
+                self.assertFalse([c for c in self.calls if "/bin/systemctl" in c])
+                done = [e for e in self.stream_events(resp.data) if e.get("event") == "done"]
+                self.assertEqual(len(done), 1)
+                self.assertIs(done[0]["quorum"], True)
+
+    def test_the_override_is_sent_only_when_asked_for_exactly(self):
+        for body, extra in (({"allow_quorum_risk": True}, ["allow-quorum-risk"]),
+                            ({"allow_quorum_risk": "true"}, []), ({"allow_quorum_risk": 1}, []),
+                            ({"allow_quorum_risk": False}, []), ({}, [])):
+            with self.subTest(body=body):
+                self.post("/api/service/observer/restart", body)
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "service", "restart"] + extra])
+                self.post("/api/tracing/enable/observer", body)
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "tracing-enable"] + extra])
+                self.post("/api/config/observer/hostname", dict(body, name="node7"))
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "set-hostname", "node7"] + extra])
+
+    def test_start_stays_a_systemctl_call(self):
+        self.helper_replies = dict(HELPER_REPLIES)
+        self.host_replies["sudo"] = (0, "", "")
+        self.calls.clear()
+        server._write_times.clear()
+        with mock.patch.object(server.time, "sleep", lambda *_: None):
+            resp = self.client.post("/api/service/observer/start", json={})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(["sudo", "/bin/systemctl", "start", server.service_name("observer")], self.calls)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_sudoers_has_no_raw_stop_or_restart(self):
+        text = sudoers_text()
+        self.assertNotRegex(text, r"/bin/systemctl (stop|restart) telcoin")
+        self.assertRegex(text, r"(?m)^\$\{SVC_USER\} ALL=\(root\) NOPASSWD: /bin/systemctl start telcoin$")
+        rules = helper_rules(split_transitional(text)[0])
+        self.assertEqual(sorted(r for r in rules if r.startswith("service")),
+                         ["service restart", "service restart allow-quorum-risk",
+                          "service stop", "service stop allow-quorum-risk"])
+        for sub in ("tracing-enable", "tracing-disable"):
+            self.assertEqual(sorted(r for r in rules if r.split()[0] == sub),
+                             [sub, sub + " allow-quorum-risk"])
+
+
+class FirewallEnableTest(ServerTestCase):
+
+    def post(self, body):
+        self.calls.clear()
+        server._write_times.clear()
+        return self.client.post("/api/firewall/enable", json=body)
+
+    def test_sources_become_one_comma_list(self):
+        for raw, want in (("203.0.113.7", "203.0.113.7"),
+                          ("203.0.113.0/24, 198.51.100.7/32\n2001:db8::/32",
+                           "203.0.113.0/24,198.51.100.7/32,2001:db8::/32"),
+                          (",10.0.0.1,,10.0.0.0/8,", "10.0.0.1,10.0.0.0/8")):
+            with self.subTest(raw=raw):
+                body = self.post({"ssh_from": raw}).get_json()
+                self.assertTrue(body["ok"])
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "firewall-enable", want]])
+
+    def test_no_sources_sends_none(self):
+        for body in ({}, {"ssh_from": ""}, {"ssh_from": "  "}):
+            with self.subTest(body=body):
+                self.post(body)
+                self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "firewall-enable"]])
+
+    def test_bad_sources_never_reach_the_helper(self):
+        bad = ["0.0.0.0/0", "0.0.0.0", "::/0", "::", "10.0.0.0/7", "010.0.0.1", "10.0.0.256",
+               "10.0.0.1/33", "10.0.0.1/08", "2001:db8::/129", "/etc/passwd", "fe80::1%eth0",
+               "10.0.0.1;id", "node.example.org", ",".join("10.0.0.%d" % i for i in range(1, 18))]
+        for raw in bad + [["10.0.0.1"], 7]:
+            with self.subTest(raw=raw):
+                resp = self.post({"ssh_from": raw})
+                self.assertEqual(resp.status_code, 400)
+                self.assertFalse(resp.get_json()["ok"])
+                self.assertEqual(self.helper_calls(), [])
+        self.assertEqual(server.ssh_source_list(",".join("10.0.0.%d" % i for i in range(1, 17)))[1], None)
+
+    def test_the_engine_refusal_comes_back_verbatim(self):
+        msg = ("Mainnet: give the SSH sources with --ssh-from CIDR[,CIDR] (or --ssh-anywhere to "
+               "keep SSH open to every address); nothing was changed.")
+        self.helper_replies["firewall-enable"] = (1, "\n".join([
+            json.dumps({"event": "error", "msg": msg}),
+            json.dumps({"event": "done", "ok": False, "action": "enable", "rc": 1,
+                        "ssh_port": "22", "active": False, "msg": msg})]), "")
+        body = self.post({}).get_json()
+        self.assertEqual(body, {"ok": False, "active": False, "error": msg})
+
+    def test_a_helper_refusal_comes_back(self):
+        self.helper_replies["firewall-enable"] = (1, "", "invalid SSH source: x")
+        self.assertEqual(self.post({"ssh_from": "10.0.0.1"}).get_json()["error"], "invalid SSH source: x")
+
+    def test_external_nodes_are_read_only(self):
+        self.nodes = external_nodes()
+        resp = self.post({"ssh_from": "10.0.0.1"})
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_sudoers_allows_the_call_with_and_without_sources(self):
+        rules = helper_rules(split_transitional(sudoers_text())[0])
+        self.assertIn("firewall-enable", rules)
+        self.assertIn("firewall-enable *", rules)
+
+
+class RpcExposureTest(ServerTestCase):
+
+    def engine_summary(self, domain):
+        """install-caddy.sh's caddy_rpc_exposure_summary, run, joined as its
+        --json warn event joins it (newlines to spaces)."""
+        script = read(os.path.join(REPO, "install-caddy.sh"))
+        m = re.search(r"^caddy_rpc_exposure_summary\(\) \{\n.*?^\}\n", script, re.S | re.M)
+        self.assertIsNotNone(m, "caddy_rpc_exposure_summary not found in install-caddy.sh")
+        out = subprocess.run(["bash", "-c", m.group(0) + 'caddy_rpc_exposure_summary "$1" | tr "\\n" " "',
+                              "_", domain], capture_output=True, text=True, check=True).stdout
+        return out.strip()
+
+    def test_the_page_text_is_the_engine_text(self):
+        for domain in ("node7.example.com", "rpc.adiri.telcoin.network"):
+            with self.subTest(domain=domain):
+                self.assertEqual(server.rpc_exposure_summary(domain), self.engine_summary(domain))
+
+    def test_route(self):
+        body = self.client.get("/api/rpc/exposure?domain=Node7.Example.com.").get_json()
+        self.assertEqual(body, {"ok": True, "domain": "node7.example.com",
+                                "summary": server.rpc_exposure_summary("node7.example.com")})
+        self.assertEqual(self.client.get("/api/rpc/exposure?domain=localhost").status_code, 400)
+        self.assertEqual(self.helper_calls(), [])
+        self.assertNotIn("api_rpc_exposure", server.PUBLIC_ENDPOINTS)
+
+
+class DockerLaunchLineTest(ServerTestCase):
+
+    def test_image_comes_from_the_start_script_when_meta_has_none(self):
+        # A node installed from the legacy repository before .node-meta kept the image.
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
+        server.clear_meta_cache()
+        image = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + "d" * 64
+        script = os.path.join(self.tmp.name, "tn-start-docker")
+        with open(script, "w") as f:
+            f.write("#!/bin/bash\nexec docker run --rm --name telcoin %s node --http\n" % image)
+        os.makedirs(server.SYSTEMD_DIR, exist_ok=True)
+        with open(os.path.join(server.SYSTEMD_DIR, "telcoin.service"), "w") as f:
+            f.write("[Service]\nExecStart=/usr/local/libexec/telcoin/tn-start-docker\n")
+        self.patch(server, "wrapper_path", lambda t: script)
+        self.assertEqual(server.docker_image_ref("observer"), image)
+
+
+class UpdateEventsTest(ServerTestCase):
+
+    def test_check_passes_tag_moved_through(self):
+        self.helper_replies["update-check"] = (0, json.dumps({
+            "install_method": "release", "current_ref": "v1.0.0", "latest_ref": "v1.0.1",
+            "update_available": True, "pending": None, "storage_migration": False,
+            "tag_moved": True}), "")
+        body = self.client.get("/api/update/status/observer").get_json()
+        self.assertIs(body["tag_moved"], True)
+        self.assertEqual(body["install_method"], "release")
+
+    def test_done_fields_reach_the_page_unchanged(self):
+        self.helper_replies["meta-cat"] = (0, "NETWORK=mainnet\n", "")
+        server.clear_meta_cache()
+        for done in ({"event": "done", "ok": False, "phase": "prepare", "downgrade": True,
+                      "storage_downgrade": True, "msg": "v1.0.0 is older than the running v1.1.0"},
+                     {"event": "done", "ok": False, "phase": "apply", "rolled_back": True,
+                      "voting": False, "msg": "not voting"}):
+            with self.subTest(done=done):
+                self.popen_script = {"lines": [json.dumps(done)], "rc": 1}
+                url = "/api/update/%s/observer" % done["phase"]
+                body = {"ref": "v1.0.0"} if done["phase"] == "prepare" else {}
+                server._write_times.clear()
+                events = self.stream_events(self.client.post(url, json=body, buffered=True).data)
+                self.assertIn(done, events)
+
+    def test_refusal_messages_for_refs_that_are_not_release_tags(self):
+        for net, ref, example in (("mainnet", "v1.0.0-adiri", "vX.Y.Z"), ("testnet", "v1.0.0", "vX.Y.Z-adiri"),
+                                  ("mainnet", "main", "vX.Y.Z")):
+            with self.subTest(net=net, ref=ref):
+                self.helper_replies["meta-cat"] = (0, "NETWORK=%s\n" % net, "")
+                server.clear_meta_cache()
+                self.calls.clear()
+                server._write_times.clear()
+                resp = self.client.post("/api/update/prepare/observer", json={"ref": ref})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.get_json()["error"],
+                                 "ref must be a %s release tag (%s); branches and commit ids are refused"
+                                 % (net, example))
+                self.assertEqual([c for c in self.helper_calls() if "update-prepare" in c], [])
+
+
+class SetupDefaultsTest(ServerTestCase):
+
+    TAGS = "\n".join("abc123\trefs/tags/" + t for t in (
+        "v0.15.0-adiri", "v0.16.0-adiri", "v0.16.1-adiri-hotfix", "v0.9.9", "v1.0.0", "v1.0.1",
+        "v1.0.1-rc1", "v1.0.2-rc1", "v1.0.1^{}", "v0.17.0-adiri-rc1", "v0.16.0-adiri-rc2", "main"))
+
+    def setUp(self):
+        super().setUp()
+        server._source_tag_cache.clear()
+        self.host_replies["git"] = (0, self.TAGS, "")
+        self.patch(server, "detect_public_ip", lambda: "203.0.113.10")
+        self.patch(server, "detect_internal_ip", lambda: "10.0.0.5")
+        self.patch(server, "latest_docker_image",
+                   lambda net="testnet": server.DEFAULT_DOCKER_IMAGE if net == "testnet" else "")
+
+    def test_latest_release_tag_per_network(self):
+        # Finals only: v0.17.0-adiri-rc1 is a testnet release tag, but a release
+        # candidate is never the newest release.
+        self.assertTrue(server.release_tag_ok("testnet", "v0.17.0-adiri-rc1"))
+        self.assertEqual(server.latest_source_tag("testnet"), "v0.16.0-adiri")
+        self.assertEqual(server.latest_source_tag("mainnet"), "v1.0.1")
+        self.assertEqual(server.latest_source_tag("devnet"), "")
+
+    def test_mainnet_defaults_to_a_release_install_logging_to_the_journal(self):
+        d = self.client.get("/api/setup/defaults?network=mainnet").get_json()
+        self.assertEqual((d["network"], d["install_method"], d["log_target"], d["source_ref"],
+                          d["docker_image"]), ("mainnet", "release", "journal", "v1.0.1", ""))
+        d = self.client.get("/api/setup/defaults").get_json()
+        self.assertEqual((d["network"], d["install_method"], d["log_target"], d["source_ref"]),
+                         ("testnet", "source", "", "v0.16.0-adiri"))
+        self.assertIn("@sha256:", d["docker_image"])
+
+    def test_preflight_reports_the_tpm_from_the_audit(self):
+        self.patch(server, "hardware_profile", lambda: {"cpu": 8})
+        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm2"], False)
+        server._audit_cache.update({"expires": 0.0, "data": None})
+        self.helper_replies["host-audit"] = (0, "ok    TPM2 usable by systemd-creds\n", "")
+        self.assertIs(self.client.get("/api/setup/preflight").get_json()["tpm2"], True)
+
+
+class HostAuditTest(ServerTestCase):
+
+    def test_lines_in_the_audit_form_are_kept(self):
+        body = self.client.get("/api/system/audit").get_json()
+        self.assertTrue(body["available"])
+        self.assertEqual(body["warnings"], 1)
+        self.assertEqual([i["level"] for i in body["items"]], ["ok", "warn", "info"])
+        self.assertEqual(body["items"][2]["text"], "no usable TPM2 (credentials rest on the host key)")
+        self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "host-audit"]])
+        self.assertFalse(server.host_has_tpm(body))
+
+    def test_tpm_answer(self):
+        self.assertTrue(server.host_has_tpm({"items": [{"level": "ok", "text": "TPM2 usable by systemd-creds"}]}))
+        self.assertIsNone(server.host_has_tpm({"items": []}))
+
+    def test_no_secret_like_value_reaches_the_page(self):
+        # Whatever the helper prints outside the audit form is dropped, so a
+        # stray line can never carry a value to the page.
+        self.helper_replies["host-audit"] = (0, "TN_BLS_PASSPHRASE=hunter2-secret\n"
+                                                "passphrase: hunter2-secret\n"
+                                                "ok    kernel.yama.ptrace_scope = 1\n", "")
+        text = json.dumps(self.client.get("/api/system/audit").get_json())
+        self.assertNotIn("hunter2", text)
+        self.assertIn("ptrace_scope", text)
+
+    def test_a_helper_failure_is_reported(self):
+        self.helper_replies["host-audit"] = (1, "", "check script not found: /opt/x (run update-scripts.sh)")
+        body = self.client.get("/api/system/audit").get_json()
+        self.assertFalse(body["available"])
+        self.assertIn("run update-scripts.sh", body["error"])
+
+    def test_not_on_the_public_path(self):
+        self.assertNotIn("api_system_audit", server.PUBLIC_ENDPOINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -918,17 +1398,19 @@ class StreamTest(ServerTestCase):
 
     def test_routes_keep_their_method_and_framing(self):
         cases = [
-            ("get", "/api/update/prepare/observer?ref=v0.15.0-adiri", None),
-            ("get", "/api/update/apply/observer", None),
-            ("get", "/api/config/observer/set?field=verbosity&value=-vv", None),
+            ("post", "/api/update/prepare/observer", {"ref": "v0.15.0-adiri"}),
+            ("post", "/api/update/apply/observer", {}),
+            ("post", "/api/config/observer/set", {"field": "verbosity", "value": "-vv"}),
             ("post", "/api/setup/observer/keygen", FULL_SETUP),
             ("post", "/api/setup/observer/finalize", FULL_SETUP),
             ("post", "/api/caddy/enable", {"domain": "dashboard.example.com",
-                                           "username": "admin", "password": "long enough"}),
-            ("post", "/api/caddy/disable", None),
+                                           "username": "admin",
+                                           "password": "long enough password"}),
+            ("post", "/api/caddy/disable", {}),
             ("post", "/api/rpc/enable", {"domain": "node7.example.com"}),
-            ("post", "/api/rpc/disable", None),
+            ("post", "/api/rpc/disable", {}),
         ]
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
         self.popen_script = {"lines": ["stray"], "rc": 3, "stderr_text": "why\n"}
         for method, url, body in cases:
             with self.subTest(url=url):
@@ -1130,7 +1612,7 @@ class NodesAndStatusTest(ServerTestCase):
         self.nodes = scripts_nodes("validator", role_source="local",
                                    role_checked_at=1790000000, role_address="0x" + "ab" * 20)
         data = self.nodes_json()
-        self.assertEqual(data["helper"], {"ok": True, "api": 2, "required": 2, "error": ""})
+        self.assertEqual(data["helper"], {"ok": True, "api": 3, "required": 3, "error": ""})
         self.assertEqual(data["role_source"], "local")
         self.assertEqual(data["role_checked_at"], 1790000000)
         self.assertEqual(data["role_address"], "0x" + "ab" * 20)
@@ -1165,9 +1647,9 @@ class NodesAndStatusTest(ServerTestCase):
         server._helper_cache.update({"expires": 0.0, "data": None})
         self.helper_replies["helper-version"] = (1, "", "sudo: a password is required")
         bad = server.helper_status()
-        self.assertEqual(bad, {"ok": False, "api": None, "required": 2,
+        self.assertEqual(bad, {"ok": False, "api": None, "required": 3,
                                "error": "sudo: a password is required"})
-        self.helper_replies["helper-version"] = (0, "2\n", "")
+        self.helper_replies["helper-version"] = (0, "3\n", "")
         self.assertEqual(server.helper_status(), bad, "a failed probe is cached too")
         self.assertEqual(len(self.helper_calls()), 2,
                          "a denied sudo is not repeated on every poll")
@@ -1186,9 +1668,9 @@ class NodesAndStatusTest(ServerTestCase):
         self.assertEqual((st["ok"], st["api"]), (False, None))
 
     def test_helper_status_newer_api(self):
-        self.helper_replies["helper-version"] = (0, "3", "")
+        self.helper_replies["helper-version"] = (0, "4", "")
         st = server.helper_status()
-        self.assertEqual(st, {"ok": True, "api": 3, "required": 2, "error": ""})
+        self.assertEqual(st, {"ok": True, "api": 4, "required": 3, "error": ""})
 
     def test_rpc_status_meta_domain_and_pass_through(self):
         full = {"installed": True, "running": True, "enabled": True,
@@ -1216,8 +1698,9 @@ class NodesAndStatusTest(ServerTestCase):
         self.helper_replies["caddy-status"] = (0, 'note\n{"installed": true, "domain": "d.e"}', "")
         self.assertEqual(self.client.get("/api/caddy/status").get_json()["domain"], "d.e")
         self.helper_replies["update-check"] = (0, 'log line\n{"latest_ref": "v9"}', "")
-        self.assertEqual(self.client.get("/api/update/status/observer").get_json(),
-                         {"latest_ref": "v9"})
+        body = self.client.get("/api/update/status/observer").get_json()
+        self.assertEqual(body["latest_ref"], "v9")
+        self.assertEqual(body["quorum"], {"available": True, "rc": 0, "detail": ""})
 
     def test_endpoint_constants(self):
         self.assertEqual(server.NETWORK_PUBLIC_RPC[2017], ["https://rpc.adiri.tel"])
@@ -1241,31 +1724,56 @@ class NodesAndStatusTest(ServerTestCase):
 # ---------------------------------------------------------------------------
 
 class RefValidationTest(ServerTestCase):
+    """An update ref, and a source setup's build ref, is a release tag of the
+    node's network: vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet."""
 
-    def test_update_prepare_refuses_a_leading_dash(self):
-        for ref in ("-v0.15.0", "--help", "-", "", "v0.15.0 adiri", "v0.15.0;id"):
+    def prepare(self, ref, network="testnet"):
+        self.helper_replies["meta-cat"] = (0, f"NETWORK={network}\n", "")
+        server.clear_meta_cache()
+        self.calls.clear()
+        return self.client.post("/api/update/prepare/observer", json={"ref": ref}, buffered=True)
+
+    def action_calls(self):
+        """Helper calls other than the meta-cat read that finds the network."""
+        return [c for c in self.helper_calls() if c[3] != "meta-cat"]
+
+    def test_update_prepare_refuses_anything_but_a_release_tag(self):
+        for ref in ("-v0.15.0", "--help", "-", "", "v0.15.0 adiri", "v0.15.0;id", "main",
+                    "feature/epoch-wait", "0.15.0", "v1.2-", "v0.15.0",
+                    "5535ef1f0425973bd81ef3162f3d07219c3456d0", "v0.15.0-adiri-hotfix"):
             with self.subTest(ref=ref):
-                resp = self.client.get("/api/update/prepare/observer", query_string={"ref": ref})
+                resp = self.prepare(ref)
                 self.assertEqual(resp.status_code, 400)
-                self.assertEqual(resp.get_json(), {"error": "invalid ref"})
-        self.assertEqual(self.helper_calls(), [], "a refused ref never reaches the helper")
+                self.assertIn("release tag", resp.get_json()["error"])
+                self.assertEqual(self.action_calls(), [], "a refused ref never reaches the helper")
 
-    def test_update_prepare_accepts_ordinary_refs(self):
-        for ref in ("v0.15.0-adiri", "main", "feature/epoch-wait", "0.15.0", "_x", "v1.2-"):
+    def test_update_prepare_accepts_release_tags(self):
+        for ref, net in (("v0.15.0-adiri", "testnet"), ("v0.16.1-adiri", "adiri"),
+                         ("v1.0.0", "mainnet")):
             with self.subTest(ref=ref):
-                self.calls.clear()
-                resp = self.client.get("/api/update/prepare/observer", query_string={"ref": ref},
-                                       buffered=True)
+                resp = self.prepare(ref, net)
                 self.assertEqual(resp.status_code, 200)
-                self.assertEqual(self.helper_calls(),
+                self.assertEqual(self.action_calls(),
                                  [["sudo", "-n", HELPER_PATH, "update-prepare", ref]])
 
-    def test_setup_build_ref_refuses_a_leading_dash(self):
+    def test_update_prepare_follows_the_network(self):
+        self.assertEqual(self.prepare("v1.0.0-adiri", "mainnet").status_code, 400)
+        self.assertEqual(self.prepare("v1.0.0", "testnet").status_code, 400)
+        self.assertEqual(self.prepare("v1.0.0", "devnet").status_code, 400)
+
+    def test_update_prepare_and_apply_refuse_get(self):
+        self.assertEqual(self.client.get("/api/update/prepare/observer?ref=v0.15.0-adiri").status_code, 405)
+        self.assertEqual(self.client.get("/api/update/apply/observer").status_code, 405)
+        self.assertEqual(self.helper_calls(), [])
+
+    def test_setup_build_ref_is_a_release_tag(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            env, err = server._setup_env(dict(FULL_SETUP, install_method="source",
-                                              build_ref="-v0.15.0"), want_passphrase=True)
-            self.assertIsNone(env)
-            self.assertEqual(err, "invalid build ref")
+            for bad in ("-v0.15.0", "main", "v1.0.0"):
+                with self.subTest(ref=bad):
+                    env, err = server._setup_env(dict(FULL_SETUP, install_method="source",
+                                                      build_ref=bad), want_passphrase=True)
+                    self.assertIsNone(env)
+                    self.assertEqual(err, "build ref must be a testnet release tag")
             env, err = server._setup_env(dict(FULL_SETUP, install_method="source",
                                               build_ref="v0.15.0-adiri"), want_passphrase=True)
             self.assertIsNone(err)

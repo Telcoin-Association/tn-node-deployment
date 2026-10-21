@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: a perl program fed in on stdin,
+# where the lint cannot read it. Expected findings: lines 7, 8, 9, 10, 12, 13,
+# 14, 15 and 17.
+
+prog="print qq($1)"
+printf '%s\n' "$prog" | perl
+printf '%s\n' "$prog" | perl -w
+printf '%s\n' "$prog" | perl --
+printf '%s\n' "$prog" | perl -l - "$2"
+printf '%s\n' "$prog" |
+    perl -w
+out="$(printf '%s\n' "$prog" | perl)"
+printf '%s\n' "$prog" | sudo perl
+printf '%s\n' "$prog" | env LC_ALL=C perl
+run_prog() {
+    perl
+}

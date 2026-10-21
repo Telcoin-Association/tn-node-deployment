@@ -17,6 +17,9 @@ array, a missing service file yields installed:false -- never a 500.
 """
 
 import collections
+import hashlib
+import hmac
+import ipaddress
 import json
 import os
 import re
@@ -29,7 +32,8 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-from flask import Flask, Response, jsonify, request, send_file, send_from_directory
+from flask import (Flask, Response, has_request_context, jsonify, request,
+                   send_from_directory)
 
 # Diagnostics. _log always writes to stderr (-> journald: `journalctl -u
 # telcoin-ui`); _dbg only when TN_UI_DEBUG is set (verbose request/response
@@ -50,6 +54,8 @@ def _dbg(msg):
 # =============================================================================
 
 app = Flask(__name__)
+# Request bodies are small JSON objects; anything larger is refused (413).
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
 
 # Silence Werkzeug's per-request access log. The dashboard polls several endpoints
 # every ~15s while open, so an always-on dashboard writes ~1 access line/sec to the
@@ -69,7 +75,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "1.9.1"
+UI_VERSION = "2.0.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -89,6 +95,21 @@ TN_SOURCE_DIR = "/opt/telcoin-source"
 
 # Where systemd unit files live; a constant so the tests can point it elsewhere.
 SYSTEMD_DIR = "/etc/systemd/system"
+
+# Start scripts. Current installs run the node from a root-owned script in
+# /usr/local/libexec/telcoin (tn-start; tn-start-docker for Docker) and keep the
+# listener addresses in /etc/telcoin/node.env; older installs run a wrapper
+# ending in .sh under /opt/telcoin. Both forms are read; neither is written here.
+START_SCRIPTS = {
+    "source": "/usr/local/libexec/telcoin/tn-start",
+    "docker": "/usr/local/libexec/telcoin/tn-start-docker",
+}
+START_SCRIPT_RE = re.compile(
+    r"^ExecStart=(\S+\.sh|/usr/local/libexec/telcoin/tn-start(?:-docker)?)\s*$", re.MULTILINE)
+# The engine copy of lib/common.sh install-ui.sh ships (root-owned). The server
+# sources it, as its own unprivileged user, only to ask the same rule the
+# helper applies; when it is missing the local rule below answers.
+LIB_COMMON = "/opt/telcoin-ui-update/lib/common.sh"
 
 
 def resolve_service_unit(t):
@@ -208,6 +229,9 @@ def run(cmd, timeout=10):
     a timeout or missing binary comes back as a non-zero rc with the error in
     stderr, so callers can treat everything uniformly.
     """
+    if cmd[:1] == ["sudo"] and _public_ctx():
+        # The public dashboard never reaches the root helper (or sudo at all).
+        return 1, "", "not available on the public dashboard"
     try:
         p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout
@@ -245,6 +269,181 @@ def valid_type(t):
 
 def bad_type():
     return jsonify({"error": "invalid node_type"}), 400
+
+
+# =============================================================================
+# Rules shared with the helper and lib/common.sh. Each is a twin of the
+# library's rule, kept equal by the tests, and answers here without running
+# bash. The library is asked only for what a twin cannot answer: the newest
+# release image by digest (latest_docker_image NETWORK: the newest final
+# release the channel has on GitHub, its image from the release's signed
+# IMAGE_DIGEST).
+# =============================================================================
+
+# Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri or its
+# release candidate vX.Y.Z-adiri-rcN (N from 1, no leading zero), mainnet
+# vX.Y.Z (finals only); X, Y and Z are 0 or have no leading zero, as the
+# release pipeline's TAG_RE has them. Branch names, commit ids and anything
+# else are refused.
+# A tag the user names may be a release candidate; a pick of the newest
+# release takes finals only (release_tag_final), ordered by release_tag_key.
+_TAG_PART = r"(?:0|[1-9][0-9]*)"
+RELEASE_TAG_RE = {
+    "testnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}-adiri(?:-rc[1-9][0-9]*)?"),
+    "mainnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}"),
+}
+
+
+def release_tag_ok(network, tag):
+    """The twin of tn_release_tag_ok; any other network (devnet included) is
+    refused, as the library refuses it."""
+    if not isinstance(tag, str) or network not in RELEASE_TAG_RE:
+        return False
+    return RELEASE_TAG_RE[network].fullmatch(tag) is not None
+
+
+def release_tag_final(network, tag):
+    """The twin of tn_release_tag_final: a release tag of the network that is a
+    final release, not a release candidate (what a newest-release pick offers)."""
+    return release_tag_ok(network, tag) and re.search(r"-rc[0-9]", tag) is None
+
+
+# The release tag forms tn_release_tag_key orders: vX.Y.Z, an optional -adiri
+# and an optional -rcN, each number at most nine digits (N at most eight).
+_RELEASE_TAG_KEY_RE = re.compile(
+    r"v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?")
+_RELEASE_TAG_FINAL_RANK = 999999999
+
+
+def release_tag_key(tag):
+    """The twin of tn_release_tag_key: (X, Y, Z, R), R the N of -rcN and
+    999999999 for a final, so rc1 < rc2 < the final of the same X.Y.Z < any rc
+    of a higher X.Y.Z. The network is not judged here (release_tag_ok is).
+    None for anything that is not a release tag form."""
+    m = _RELEASE_TAG_KEY_RE.fullmatch(tag) if isinstance(tag, str) else None
+    if m is None:
+        return None
+    rank = int(m.group(6)) if m.group(6) else _RELEASE_TAG_FINAL_RANK
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), rank
+
+
+def network_rule(value):
+    """testnet | mainnet for a NETWORK value (adiri is testnet); None otherwise."""
+    v = str(value or "").strip()
+    return {"testnet": "testnet", "adiri": "testnet", "mainnet": "mainnet"}.get(v)
+
+
+# The six ASCII whitespace characters lib/common.sh tn_passphrase_ok treats as
+# space (C locale [[:space:]]).
+_PASS_WS = " \t\n\v\f\r"
+
+
+def passphrase_ok(value, network=""):
+    """Twin of tn_passphrase_ok: not empty, no CR or LF, no whitespace at either
+    end; on mainnet at least 16 bytes (UTF-8 bytes, not characters)."""
+    if not isinstance(value, str) or value == "":
+        return False
+    if "\n" in value or "\r" in value:
+        return False
+    if value[0] in _PASS_WS or value[-1] in _PASS_WS:
+        return False
+    if network == "mainnet" and len(value.encode("utf-8")) < 16:
+        return False
+    return True
+
+
+# Image repositories (lib/common.sh): TN_GHCR_IMAGE_REPO, where the release
+# pipeline publishes the testnet and mainnet images, and
+# TN_TESTNET_LEGACY_IMAGE_REPO, which holds the testnet images of the releases
+# made before signed releases (DEFAULT_DOCKER_IMAGE among them).
+GHCR_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
+TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+# Every repository a network's images may come from (tn_docker_repo_ok): on
+# testnet TN_TESTNET_IMAGE_REPOS (the legacy repository and ghcr.io), on mainnet
+# TN_MAINNET_IMAGE_REPO alone. Devnet has none, so nothing is accepted there.
+DOCKER_REPO = {
+    "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
+    "mainnet": (GHCR_IMAGE_REPO,),
+}
+# Fallback for testnet only, when the library cannot name the newest image:
+# v0.16.0-adiri by digest, as lib/common.sh DEFAULT_DOCKER_IMAGE.
+DEFAULT_DOCKER_IMAGE = (TESTNET_LEGACY_IMAGE_REPO +
+                        "@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea")
+
+
+def docker_repo_ok(network, repo):
+    """Twin of tn_docker_repo_ok: REPO is a repository the network's images may
+    come from (DOCKER_REPO)."""
+    return isinstance(repo, str) and repo in DOCKER_REPO.get(network, ())
+
+
+def image_allowed(image, network):
+    """Twin of tn_docker_image_allowed with digests required
+    (TN_DOCKER_REQUIRE_DIGEST=1): <repository>@sha256:<64 hex>, the repository
+    one the network's images may come from (docker_repo_ok). Tags, latest
+    included, are refused (a release is chosen by its tag, which the engine
+    resolves to a digest)."""
+    if not isinstance(image, str) or "@sha256:" not in image:
+        return False
+    repo = image.split("@", 1)[0]
+    rest = image.split("@sha256:", 1)[1]
+    return re.fullmatch(r"[0-9a-f]{64}", rest) is not None and docker_repo_ok(network, repo)
+
+
+def docker_image_choice(value, network):
+    """The wizard's Docker image field: a release tag of the network (bare, or
+    after one of the network's repositories and a colon) or the network's image
+    by digest. Returns (release_tag, digest_image, None) with one of the two set,
+    ("", "", None) when empty, or (None, None, error). latest is refused."""
+    v = str(value or "").strip()
+    if not v:
+        return "", "", None
+    if v.rsplit(":", 1)[-1] == "latest":
+        return None, None, "docker image latest is refused: give a release tag or the image by digest"
+    if release_tag_ok(network, v):
+        return v, "", None
+    # <repository>:<tag>, as tn_docker_resolve_ref splits it at the last colon.
+    repo, colon, tag = v.rpartition(":")
+    if colon and docker_repo_ok(network, repo) and release_tag_ok(network, tag):
+        return tag, "", None
+    if image_allowed(v, network):
+        return "", v, None
+    example = "v1.2.3-adiri" if network == "testnet" else "v1.2.3"
+    return None, None, (f"docker image must be a {network} release tag such as {example}, "
+                        "or the network's image by digest (<repository>@sha256:<digest>)")
+
+
+# Service account rule (lib/common.sh tn_service_user_ok): a plain lowercase
+# name; never root or telcoin-ui; an existing account must be a system account
+# (UID 1 to 999) outside sudo, adm, docker and wheel. A name not yet on the
+# host passes (setup creates it).
+_SERVICE_NAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+_ADMIN_GROUPS = ("sudo", "adm", "docker", "wheel")
+
+
+def service_account_error(user, group):
+    """None when USER:GROUP may run the node, else the reason."""
+    import grp
+    import pwd
+    user = user or "telcoin"
+    group = group or user
+    for what, name in (("service user", user), ("service group", group)):
+        if not _SERVICE_NAME_RE.fullmatch(name) or name in ("root", "telcoin-ui"):
+            return f"invalid {what}: {name} (lowercase name; not root or telcoin-ui)"
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        return None
+    if not 0 < pw.pw_uid < 1000:
+        return f"service user {user} is not a system account (UID {pw.pw_uid})"
+    for g in grp.getgrall():
+        if g.gr_name in _ADMIN_GROUPS and (user in g.gr_mem or g.gr_gid == pw.pw_gid):
+            return f"service user {user} belongs to {g.gr_name}"
+    return None
+
+
+# Data dirs setup may create: /var/lib/telcoin or a path under it.
+_DATA_DIR_ALLOWED_RE = re.compile(r"/var/lib/telcoin(/[A-Za-z0-9._-]+)*")
 
 
 # Hostnames (dashboard, public RPC, the dashboard's new home on a move) follow
@@ -320,6 +519,8 @@ def read_meta(t=None):
     cached = _meta_cache.get("meta")
     if cached and cached[0] > now:
         return cached[1]
+    if not _may_cache():
+        return {}
     out = {}
     rc, text, _ = run(["sudo", "-n", HELPER, "meta-cat"], timeout=10)
     if rc == 0 and text:
@@ -333,11 +534,24 @@ def read_meta(t=None):
     return out
 
 
+def read_node_env():
+    """PRIMARY_LISTENER_MULTIADDR, WORKER_LISTENER_MULTIADDR and TN_RPC_ADDR from
+    /etc/telcoin/node.env via the helper's node-env-cat; {} when absent."""
+    rc, text, _ = run(["sudo", "-n", HELPER, "node-env-cat"], timeout=10)
+    out = {}
+    if rc == 0 and text:
+        for line in text.splitlines():
+            k, sep, v = line.strip().partition("=")
+            if sep and k in ("PRIMARY_LISTENER_MULTIADDR", "WORKER_LISTENER_MULTIADDR", "TN_RPC_ADDR"):
+                out[k] = v.strip().strip('"')
+    return out
+
+
 # The helper API this server speaks (HELPER_API in ui/telcoin-ui-helper.sh). An
 # older helper has no helper-version subcommand, and an older sudoers whitelist
 # has no line for it, so either one fails the call and the page asks the operator
 # to re-run install-ui.sh.
-HELPER_API_REQUIRED = 2
+HELPER_API_REQUIRED = 3
 _helper_cache = {"expires": 0.0, "data": None}
 _HELPER_TTL = 60.0
 
@@ -407,7 +621,7 @@ def parse_service_file(t):
     # ExecStart=... points to. Pull the wrapper contents in so the same regexes
     # below find --metrics regardless of install method.
     searchable = unit
-    m = re.search(r"^ExecStart=(\S+\.sh)\s*$", unit, re.MULTILINE)
+    m = START_SCRIPT_RE.search(unit)
     if m and os.path.exists(m.group(1)):
         try:
             with open(m.group(1), "r") as wf:
@@ -449,6 +663,13 @@ def parse_service_file(t):
     mw = re.search(r"WORKER_LISTENER_MULTIADDR=([^\"\s\\]+)", searchable)
     if mw:
         cfg["worker_listener"] = mw.group(1)
+    # Current installs keep the listeners in /etc/telcoin/node.env, read through
+    # the helper (node-env-cat) like .node-meta, so there is one code path.
+    env = read_node_env()
+    for key, field in (("PRIMARY_LISTENER_MULTIADDR", "primary_listener"),
+                       ("WORKER_LISTENER_MULTIADDR", "worker_listener")):
+        if env.get(key):
+            cfg[field] = env[key]
 
     cfg["http"] = "--http" in searchable
     return cfg
@@ -527,7 +748,8 @@ def _docker_stats(name):
         "net_io": parts[2].strip() if len(parts) > 2 else None,
         "block_io": parts[3].strip() if len(parts) > 3 else None,
     }
-    _docker_stats_cache[name] = (now, data)
+    if _may_cache():
+        _docker_stats_cache[name] = (now, data)
     return data
 
 
@@ -650,8 +872,9 @@ def detect_nodes():
             out["validator"] = dict(node, staked=True)
             out[slot] = _empty_slot()
 
-    _detect_cache["ts"] = now
-    _detect_cache["data"] = out
+    if _may_cache():
+        _detect_cache["ts"] = now
+        _detect_cache["data"] = out
     return out
 
 
@@ -676,45 +899,244 @@ def _external_block(t):
 # =============================================================================
 # PUBLIC (read-only) ACCESS GUARD
 #
-# The dashboard is reachable two ways: directly over the SSH tunnel
-# (127.0.0.1:8080 -- trusted, full management), and -- when install-caddy is
-# enabled -- publicly via the Caddy reverse proxy. Caddy stamps an unforgeable
-# X-TN-Dashboard-Public header on every proxied request (it deletes any
-# client-supplied value then sets its own), which the SSH path never carries.
-# Public requests are READ-ONLY: every write route is refused 403 here, server-
-# side, so management is impossible over the public path even if the UI's gating
-# were bypassed. Management requires the SSH tunnel.
+# The dashboard is reachable two ways: over the SSH tunnel (127.0.0.1:8080,
+# full management with the per-install token), and -- when install-caddy is
+# enabled -- publicly through the Caddy reverse proxy. Caddy deletes any
+# client-supplied X-TN-Dashboard-Public header and sets its own on every
+# proxied request, so everything that arrives through Caddy is public. The
+# header is not a secret: any client that reaches 127.0.0.1:8080 directly can
+# send it as well, and then gets exactly what a public visitor gets. A request
+# carrying it is READ-ONLY: every write route is refused 403 here, server-side,
+# only the PUBLIC_ENDPOINTS reads answer, and none of them calls the root
+# helper. It skips the Host and token checks below, which guard the management
+# path; management requires the SSH tunnel and the token.
 # =============================================================================
 
 def is_public_request():
     return bool(request.headers.get("X-TN-Dashboard-Public"))
 
 
-def _is_write_request():
-    """True for requests that mutate node/host state. POST/PUT/DELETE/PATCH are
-    always writes; a few GET routes are SSE 'action' streams (config-set, update
-    prepare/apply) and count as writes too.
+def _public_ctx():
+    """True while serving a request that arrived on the public (Caddy) path."""
+    return has_request_context() and is_public_request()
 
-    If you add a mutating GET route, add its path here AND classify it in
-    test_public_readonly.py -- that test walks app.url_map and fails until every
-    route is declared read or write, so a new write cannot silently leak onto
-    the public (read-only) path."""
-    if request.method in ("GET", "HEAD", "OPTIONS"):
-        p = request.path
-        return (p.endswith("/set")
-                or p.startswith("/api/update/prepare/")
-                or p.startswith("/api/update/apply/"))
-    return True
+
+def _may_cache():
+    """Shared caches are filled only by operator requests: a public request
+    never calls the helper, so what it sees must not replace what they see."""
+    return not _public_ctx()
+
+
+def _is_write_request():
+    """True for requests that mutate node/host state: every method other than
+    GET, HEAD and OPTIONS. No GET route changes anything (test_csrf.py walks
+    app.url_map to prove it)."""
+    return request.method not in ("GET", "HEAD", "OPTIONS")
+
+
+# ---------------------------------------------------------------------------
+# Who may call the API.
+#
+# Off the public path every /api/ request must:
+#   - name this server in Host (localhost, 127.0.0.1 or [::1] on BIND_PORT),
+#     else 421 -- a DNS-rebinding page names its own host;
+#   - for a write, carry no Origin other than those hosts and no Sec-Fetch-Site
+#     other than same-origin or none, else 403 -- a page on another site;
+#   - carry the per-install token in X-TN-UI-Token, else 401. install-ui.sh
+#     writes it to /etc/telcoin-ui/token (root:telcoin-ui 0640); open-ui.sh
+#     hands it to the page in the URL fragment, never in a URL the server sees;
+#   - for a write, send Content-Type: application/json, else 415. A JSON body
+#     cannot come from a plain HTML form, and a cross-site fetch with it needs a
+#     CORS preflight this server never answers.
+# "/" and /static stay open so the page itself loads.
+# ---------------------------------------------------------------------------
+
+TOKEN_FILE = os.environ.get("TN_UI_TOKEN_FILE", "/etc/telcoin-ui/token")
+UI_TOKEN = None           # set by load_token() at start; None refuses every API call
+_TOKEN_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def load_token(path=None):
+    """Read the per-install token (64 hex characters). Returns it, or None
+    when the file is missing, unreadable or malformed."""
+    try:
+        with open(path or TOKEN_FILE, "r") as f:
+            tok = f.read().strip()
+    except OSError:
+        return None
+    return tok if _TOKEN_RE.fullmatch(tok) else None
+
+
+def _local_hosts():
+    return {f"localhost:{BIND_PORT}", f"127.0.0.1:{BIND_PORT}", f"[::1]:{BIND_PORT}"}
+
+
+def _token_ok():
+    sent = request.headers.get("X-TN-UI-Token", "")
+    return bool(UI_TOKEN) and hmac.compare_digest(sent.encode(), UI_TOKEN.encode())
+
+
+def _deny(code, msg):
+    resp = jsonify({"ok": False, "error": msg})
+    resp.status_code = code
+    return resp
+
+
+# Per-client budget for writes: at most _WRITE_LIMIT in any _WRITE_WINDOW
+# seconds, else 429. Every tunnel request comes from 127.0.0.1, so this bounds
+# the whole management surface.
+_WRITE_LIMIT = 30
+_WRITE_WINDOW = 60.0
+_write_times = {}
+_write_lock = threading.Lock()
+
+
+def _write_allowed(client):
+    now = time.monotonic()
+    with _write_lock:
+        q = _write_times.setdefault(client, collections.deque())
+        while q and now - q[0] > _WRITE_WINDOW:
+            q.popleft()
+        if len(q) >= _WRITE_LIMIT:
+            return False
+        q.append(now)
+        return True
+
+
+@app.before_request
+def _enforce_local_origin():
+    if is_public_request():
+        return None          # the public path has its own allowlist below
+    path = request.path
+    if path != "/" and not path.startswith("/api/") and not path.startswith("/static/"):
+        return None
+    if request.host not in _local_hosts():
+        return _deny(421, "misdirected request: this UI answers only on localhost")
+    write = _is_write_request()
+    if write:
+        site = request.headers.get("Sec-Fetch-Site")
+        if site not in (None, "same-origin", "none"):
+            return _deny(403, "cross-site request refused")
+        origin = request.headers.get("Origin")
+        if origin is not None and origin not in {"http://" + h for h in _local_hosts()}:
+            return _deny(403, "cross-origin request refused")
+    if not path.startswith("/api/"):
+        return None
+    if not _token_ok():
+        return _deny(401, "missing or wrong UI token -- open the UI with open-ui.sh")
+    if write:
+        if request.mimetype != "application/json":
+            return _deny(415, "send Content-Type: application/json")
+        if not _write_allowed(request.remote_addr or "?"):
+            return _deny(429, "too many changes in a short time -- wait a minute")
+    return None
+
+
+def _json_body():
+    """(dict, None) for a request whose body is a JSON object; (None, response)
+    otherwise: 415 for another content type, 400 for anything but an object."""
+    if request.mimetype != "application/json":
+        return None, _deny(415, "send Content-Type: application/json")
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, _deny(400, "the body must be a JSON object")
+    return data, None
+
+
+# =============================================================================
+# Public (Caddy) path: read-only, and only these GET routes answer. They never
+# call the root helper (run() refuses sudo there), and /api/status drops the
+# fields below.
+# =============================================================================
+
+PUBLIC_ENDPOINTS = frozenset({
+    "index", "static", "api_nodes", "api_status", "api_validator",
+    "api_network_status", "api_version", "api_system",
+})
+PUBLIC_STATUS_DROP = (
+    "internal_ip", "data_dir", "config_file", "passphrase_method",
+    "passphrase_migration", "credential_key", "docker_image", "docker_image_digest",
+    "image", "container", "recent_log_events", "last_error", "advertised_name",
+    "service",
+)
+# /api/nodes: dropped from each node slot and from `node`.
+PUBLIC_NODES_DROP = ("image", "container", "service")
+# /api/system: the host's name and its exact kernel and OS release.
+PUBLIC_SYSTEM_DROP = ("hostname", "kernel", "distro")
 
 
 @app.before_request
 def _enforce_public_readonly():
-    if is_public_request() and _is_write_request():
-        return jsonify({
-            "ok": False,
-            "error": "read-only (public access) -- connect via the SSH tunnel "
-                     "for management",
-        }), 403
+    if not is_public_request():
+        return None
+    if _is_write_request():
+        return _deny(403, "read-only (public access) -- connect via the SSH "
+                          "tunnel for management")
+    if request.endpoint not in PUBLIC_ENDPOINTS:
+        return _deny(403, "not available on the public dashboard -- connect via "
+                          "the SSH tunnel")
+    return None
+
+
+def _major(version):
+    """The major part of a version string ("v0.16.0-adiri" -> "v0"); "" when
+    there is none."""
+    m = re.match(r"v?(\d+)", str(version or ""))
+    return f"v{m.group(1)}" if m else ""
+
+
+# =============================================================================
+# Audit: one JSON line in the journal (journalctl -u telcoin-ui | grep
+# '"audit":1') for every write and every refused request. Secret fields are
+# replaced by "***"; the token is identified by a hash prefix, never sent.
+# =============================================================================
+
+_SECRET_KEYS = ("passphrase", "password", "token")
+
+
+def _audit_value(key, value):
+    """`value`, or *** when `key` names a secret."""
+    low = str(key).lower()
+    return "***" if any(x in low for x in _SECRET_KEYS) else value
+
+
+def _audit_args():
+    """The query string and JSON body of the request, secret fields as ***."""
+    args = {k: _audit_value(k, v) for k, v in request.args.items()}
+    if request.mimetype == "application/json":
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            for k, v in body.items():
+                args[k] = _audit_value(k, v)
+    return args
+
+
+@app.after_request
+def _after(resp):
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    if _is_write_request() or resp.status_code in (401, 403, 405, 413, 415, 421, 429):
+        sent = request.headers.get("X-TN-UI-Token", "")
+        if not sent:
+            token_id = "none"
+        elif _token_ok():
+            token_id = hashlib.sha256(sent.encode()).hexdigest()[:8]
+        else:
+            token_id = "wrong"
+        try:
+            args = _audit_args()
+        except Exception:  # pragma: no cover - defensive
+            args = {}
+        line = {
+            "audit": 1, "method": request.method, "path": request.path,
+            "args": args, "origin": request.headers.get("Origin"),
+            "sec_fetch_site": request.headers.get("Sec-Fetch-Site"),
+            "host": request.host, "token": token_id,
+            "public": is_public_request(), "status": resp.status_code,
+        }
+        _log(json.dumps(line, default=str, sort_keys=True))
+    return resp
 
 
 def _iso_uptime_seconds(iso):
@@ -746,22 +1168,25 @@ def _iso_uptime_seconds(iso):
 # =============================================================================
 
 def docker_image_ref(t):
-    """Full docker image (registry/path:tag) from meta DOCKER_IMAGE, else grep
-    the unit file. '' if neither has one."""
+    """Full docker image (registry/path@sha256:digest, or :tag on older installs)
+    from meta DOCKER_IMAGE, else from the launch line: the start script the unit
+    runs (tn-start-docker is root 0755, readable as is), then the unit itself
+    (older installs run docker inline). '' if none has one."""
     meta = read_meta(t)
     img = meta.get("DOCKER_IMAGE", "").strip()
     if img:
         return img
-    path = service_file(t)
-    if os.path.exists(path):
+    for path in (wrapper_path(t), service_file(t)):
+        if not os.path.exists(path):
+            continue
         try:
             with open(path, "r") as f:
-                unit = f.read()
-            m = re.search(r"(us-docker[^\s\"]+|gcr\.io[^\s\"]+|ghcr\.io[^\s\"]+)", unit)
-            if m:
-                return m.group(1)
+                text = f.read()
         except (OSError, IOError):
-            pass
+            continue
+        m = re.search(r"(us-docker[^\s\"]+|gcr\.io[^\s\"]+|ghcr\.io[^\s\"]+)", text)
+        if m:
+            return m.group(1)
     return ""
 
 
@@ -785,7 +1210,9 @@ def detect_install_method(t):
     execline = m.group(1).strip() if m else ""
     if re.search(r"(us-docker|gcr\.io|ghcr\.io|/docker\b|\bdocker\s+run)", execline):
         return "docker"
-    mw = re.search(r"^ExecStart=(\S+\.sh)\s*$", unit, re.MULTILINE)
+    if re.search(r"^ExecStart=" + re.escape(START_SCRIPTS["docker"]) + r"\s*$", unit, re.MULTILINE):
+        return "docker"
+    mw = START_SCRIPT_RE.search(unit)
     if mw and os.path.exists(mw.group(1)):
         return "source"
     if execline:
@@ -793,26 +1220,49 @@ def detect_install_method(t):
     return ""
 
 
+# How the node gets its BLS key passphrase, as the page shows it:
+#   credential  a systemd encrypted credential (LoadCredentialEncrypted=), fed to
+#               the node on stdin by the root-owned start script;
+#   stdin       the interim form: a root-only credential file (LoadCredential=)
+#               fed to the node on stdin (older installs record it as
+#               loadcredential);
+#   env         the legacy forms (the start script exports TN_BLS_PASSPHRASE, or
+#               the unit embeds it); flagged for migration with
+#               `edit-config.sh --migrate-credential`.
+PASSPHRASE_METHODS = ("credential", "stdin", "env")
+
+
 def detect_passphrase_method(t):
-    """meta PASSPHRASE_METHOD first; else infer: a sealed TPM keypair
-    (bls-tpm.pub/.priv) under /etc/telcoin/<type>/ -> 'tpm'; a
-    LoadCredential=bls-passphrase line in the unit -> 'loadcredential'."""
+    """credential | stdin | env | '' (unknown). meta PASSPHRASE_METHOD first
+    (loadcredential, the older name of stdin, reads as stdin; the old TPM method
+    reads as env, flagged for migration); else the unit: a
+    LoadCredentialEncrypted= line -> credential, a TN_BLS_PASSPHRASE environment
+    line -> env, a LoadCredential= line -> stdin when the start script passes
+    --bls-passphrase-source stdin, else env."""
     meta = read_meta(t)
     val = meta.get("PASSPHRASE_METHOD", "").strip()
-    if val:
+    if val in PASSPHRASE_METHODS:
         return val
-    cdir = config_dir(t)
-    if (os.path.exists(os.path.join(cdir, "bls-tpm.pub")) or
-            os.path.exists(os.path.join(cdir, "bls-tpm.priv"))):
-        return "tpm"
+    if val == "loadcredential":
+        return "stdin"
+    if val == "tpm":
+        return "env"
     path = service_file(t)
-    if os.path.exists(path):
+    try:
+        with open(path, "r") as f:
+            unit = f.read()
+    except (OSError, IOError):
+        return ""
+    if "LoadCredentialEncrypted=bls-passphrase" in unit:
+        return "credential"
+    if re.search(r"^Environment=.*TN_BLS_PASSPHRASE=", unit, re.MULTILINE):
+        return "env"
+    if "LoadCredential=bls-passphrase" in unit:
         try:
-            with open(path, "r") as f:
-                if "LoadCredential=bls-passphrase" in f.read():
-                    return "loadcredential"
+            with open(wrapper_path(t), "r") as f:
+                return "stdin" if "--bls-passphrase-source stdin" in f.read() else "env"
         except (OSError, IOError):
-            pass
+            return "env"
     return ""
 
 
@@ -889,6 +1339,7 @@ def node_version(t):
 # Adding a network here makes the whole UI (identity, network panel, status-page
 # link) work on it -- nothing else is hardcoded to testnet.
 NETWORKS = {
+    487: {"name": "Telcoin Mainnet", "slug": "mainnet"},
     2017: {"name": "Adiri Testnet", "slug": "testnet"},
     32285: {"name": "Adiri Devnet", "slug": "devnet"},
 }
@@ -901,6 +1352,9 @@ NETWORKS = {
 # 2017 until mainnet launches. A chain id omitted here degrades the "Network
 # Block"/"Consensus Lag" compare cards to "—".
 NETWORK_PUBLIC_RPC = {
+    # Mainnet (chain 487): the public endpoint is set at launch. Until then the
+    # list stays empty and the compare cards show "—".
+    487:   [],
     2017:  ["https://rpc.adiri.tel"],
     32285: [
         "https://rpc.devnet.telcoin.network",
@@ -1387,9 +1841,13 @@ _ROLE_DEFAULT = {"validator": None, "source": "default", "checked_at": None, "st
 
 # The last answer the network or the synced local node gave, kept across restarts
 # so that a node whose chain cannot be reached opens in the view it last had.
-# /opt/telcoin-ui belongs to the UI user: install-ui.sh creates it and
-# remove-node.sh deletes it. A constant so the tests can point it elsewhere.
-NODE_ROLE_FILE = "/opt/telcoin-ui/node-role.json"
+# It lives in the service's state directory (StateDirectory=telcoin-ui, which
+# systemd passes as STATE_DIRECTORY); the app tree /opt/telcoin-ui is root-owned.
+# install-ui.sh moves a copy an older install left there once; remove-node.sh
+# deletes the directory. A constant so the tests can point it elsewhere.
+NODE_ROLE_FILE = os.path.join(
+    (os.environ.get("STATE_DIRECTORY") or "/var/lib/telcoin-ui").split(":")[0],
+    "node-role.json")
 _role_save_logged = {"failed": False}
 
 
@@ -1537,7 +1995,8 @@ def onchain_role(t, det=None):
     if prev is None or (prev["validator"], prev["source"]) != (data["validator"], data["source"]):
         _log(f"onchain_role: {data['source']} answer, validator={data['validator']} "
              f"status={data['status']}")
-    _role_cache.update(key=key, expires=now + _ROLE_TTL, data=data, generation=generation)
+    if _may_cache():
+        _role_cache.update(key=key, expires=now + _ROLE_TTL, data=data, generation=generation)
     return dict(data)
 
 
@@ -2335,13 +2794,6 @@ def network_traffic():
     return out
 
 
-# Public Artifact Registry tag list for the testnet docker image (same source
-# update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
-GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
-GAR_IMAGE_BASE = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-DEFAULT_DOCKER_IMAGE = GAR_IMAGE_BASE + ":v0.16.0-adiri"  # fallback only when the registry is unreachable
-
-
 def detect_public_ip():
     """Best-effort public IP via api.ipify.org (mirrors the setup scripts).
     '' on failure."""
@@ -2376,54 +2828,105 @@ def internal_ip():
     return ip or detect_internal_ip()
 
 
-def latest_docker_image():
-    """Latest published testnet (-adiri) docker image ref from the public
-    Artifact Registry, e.g. us-docker.pkg.dev/.../adiri:v0.9.3-adiri. Falls back
-    to DEFAULT_DOCKER_IMAGE when the registry is unreachable."""
-    try:
-        req = urllib.request.Request(GAR_TAGS_URL, headers={"User-Agent": "telcoin-ui"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            data = json.loads(r.read().decode())
-    except Exception:
-        return DEFAULT_DOCKER_IMAGE
-    parsed = []
-    tags = (data.get("tags") or []) if isinstance(data, dict) else []
-    for t in tags:
-        m = re.match(r"^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$", t)
-        if m and "adiri" in (m.group(4) or ""):
-            parsed.append(((int(m.group(1)), int(m.group(2)), int(m.group(3))), t))
-    if parsed:
-        parsed.sort()
-        return GAR_IMAGE_BASE + ":" + parsed[-1][1]
-    return DEFAULT_DOCKER_IMAGE
+# The library's latest_docker_image reads the GitHub Releases API and then the
+# release's signed files (three small downloads and a signature check) before
+# it answers, so its probe may take up to DOCKER_PROBE_TIMEOUT seconds. Its
+# answer is cached per network (DOCKER_IMAGE_TTL seconds, a failed lookup
+# DOCKER_IMAGE_FAIL_TTL), so a page load waits for it at most once in that
+# window.
+DOCKER_PROBE_TIMEOUT = 25
+DOCKER_IMAGE_TTL = 600
+DOCKER_IMAGE_FAIL_TTL = 60
+_docker_image_cache = {}     # network -> {"expires", "data"}
+
+# Mainnet in the setup wizard stays off until the mainnet release (the page's
+# SETUP_MAINNET_ENABLED); until then no mainnet image is looked up or offered.
+TN_MAINNET_ENABLED = False
 
 
-# Source-build refs are GIT tags (what `cargo build` checks out), which are a
-# DIFFERENT, more up-to-date set than the docker registry tags -- e.g. GitHub may
-# carry v0.10.0-adiri while the registry still lags on v0.9.x. So the wizard's
-# source "latest release" must come from git, not the registry.
-TN_SOURCE_REPO = "https://github.com/Telcoin-Association/telcoin-network.git"
-_source_tag_cache = {"ts": 0.0, "data": None}
-
-
-def latest_source_tag():
-    """Latest clean `vX.Y.Z-adiri` source-build git tag from GitHub (via
-    `git ls-remote --tags`, no clone needed) -- the source-of-truth for source
-    builds, matching the CLI menu. Highest semver wins; patch-suffixed tags
-    (…-adiri-foo) are ignored. Cached 5 min. '' on failure."""
+def latest_docker_image(network="testnet"):
+    """The newest release image of the network by digest, <repository>@sha256:
+    <hex>, as the library's latest_docker_image names it: the newest final
+    release the channel has on GitHub (never a release candidate, hot-patch,
+    devnet or `latest` tag), its image from the release's signed IMAGE_DIGEST
+    only (on testnet the library names DEFAULT_DOCKER_IMAGE when that release's
+    signed files cannot be downloaded or checked, nothing when the release fails
+    a check, and the legacy repository while the channel has no release). The answer must pass image_allowed.
+    Testnet falls back to DEFAULT_DOCKER_IMAGE when the library names nothing;
+    mainnet never falls back, and gives '' while TN_MAINNET_ENABLED is off; any
+    other network ''. Cached per network (see DOCKER_IMAGE_TTL); the probe
+    times out after DOCKER_PROBE_TIMEOUT s."""
+    if network not in DOCKER_REPO or (network == "mainnet" and not TN_MAINNET_ENABLED):
+        return ""
     now = time.time()
-    c = _source_tag_cache
+    c = _docker_image_cache.get(network)
+    if c and now < c["expires"]:
+        return c["data"]
+    image, found = _latest_docker_image_probe(network)
+    _docker_image_cache[network] = {
+        "expires": now + (DOCKER_IMAGE_TTL if found else DOCKER_IMAGE_FAIL_TTL), "data": image}
+    return image
+
+
+def _latest_docker_image_probe(network):
+    """(image, True) when the library's latest_docker_image NETWORK names an
+    image image_allowed accepts (the last line of its output); otherwise
+    (DEFAULT_DOCKER_IMAGE, False) on testnet and ("", False) elsewhere. The
+    library stages the release's signed files in TN_RELEASE_STAGING_DIR: a
+    fresh 0700 directory of this server's own user, removed afterwards (its
+    default staging directory is root's)."""
+    fallback = DEFAULT_DOCKER_IMAGE if network == "testnet" else ""
+    try:
+        staging = tempfile.mkdtemp(prefix="tn-ui-release.")
+    except OSError:
+        return fallback, False
+    try:
+        os.chmod(staging, 0o700)
+        rc, out, _ = run(["bash", "-c",
+                          'TN_RELEASE_STAGING_DIR="$2"; export TN_RELEASE_STAGING_DIR; '
+                          'source "$1" >/dev/null 2>&1 && declare -F latest_docker_image >/dev/null '
+                          '&& latest_docker_image "$3"', "_", LIB_COMMON, staging, network],
+                         timeout=DOCKER_PROBE_TIMEOUT)
+    except OSError:
+        rc, out = 1, ""
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    lines = out.splitlines() if rc == 0 else []
+    image = lines[-1].strip() if lines else ""
+    if image_allowed(image, network):
+        return image, True
+    return fallback, False
+
+
+# Source-build refs are GIT tags (what `cargo build` checks out). A tag can be
+# pushed before its release and image are published, so the wizard's source
+# "latest release" comes from git, not from the image lookup.
+TN_SOURCE_REPO = "https://github.com/Telcoin-Association/telcoin-network.git"
+_source_tag_cache = {}       # network -> {"ts", "data"}
+
+
+def latest_source_tag(network="testnet"):
+    """Latest release git tag of the network from GitHub (via `git ls-remote
+    --tags`, no clone needed): vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet, finals
+    only (release_tag_final, so release candidates and hot-patch tags are never
+    picked). The release a source build or a release install takes, matching
+    the CLI menu. The newest by release_tag_key wins. Cached 5 min per network.
+    '' on failure."""
+    if network not in RELEASE_TAG_RE:
+        return ""
+    now = time.time()
+    c = _source_tag_cache.setdefault(network, {"ts": 0.0, "data": None})
     if c["data"] is not None and now - c["ts"] < 300:
         return c["data"]
     rc, out, _ = run(["git", "ls-remote", "--tags", TN_SOURCE_REPO], timeout=20)
     best_key, best_tag = None, ""
     if rc == 0 and out:
         for line in out.splitlines():
-            m = re.search(r"refs/tags/(v(\d+)\.(\d+)\.(\d+)-adiri)$", line)
-            if not m:
+            m = re.search(r"refs/tags/(v[0-9][^/^{}]*)$", line)
+            if not m or not release_tag_final(network, m.group(1)):
                 continue
-            key = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
-            if best_key is None or key > best_key:
+            key = release_tag_key(m.group(1))
+            if key is not None and (best_key is None or key > best_key):
                 best_key, best_tag = key, m.group(1)
     if best_tag:
         c["ts"], c["data"] = now, best_tag
@@ -2600,6 +3103,10 @@ def api_nodes():
     # Read-only when reached over the public Caddy path (vs the SSH tunnel). The
     # UI uses this to hide every management control and show a read-only banner.
     out["public_readonly"] = is_public_request()
+    if out["public_readonly"]:
+        for slot in [out[t] for t in NODE_TYPES] + [out["node"] or {}]:
+            for key in PUBLIC_NODES_DROP:
+                slot.pop(key, None)
     # Operator facts, never sent on the public path: whether the privileged
     # helper speaks the API this server needs, and how the role above was decided
     # (onchain_role's source: network, local, cached or default; null with no
@@ -2616,7 +3123,7 @@ def api_nodes():
             out["role_address"] = node_det.get("role_address")
     # Dashboard (UI bundle) version, so the header can show operators which
     # Node Manager version their node is running.
-    out["ui_version"] = UI_VERSION
+    out["ui_version"] = _major(UI_VERSION) if out["public_readonly"] else UI_VERSION
     # Never cache node detection -- after a remove/install the UI must see the
     # change immediately (the empty-state switch keys off this).
     resp = jsonify(out)
@@ -2791,8 +3298,20 @@ def api_status(node_type):
         "memory": mem_info(),
         "install_method": install_method,
         "passphrase_method": passphrase_method,
+        # The legacy env forms need `edit-config.sh --migrate-credential`; an
+        # encrypted credential is re-sealed with `edit-config.sh --reseal`.
+        # Display only: the UI never runs either.
+        "passphrase_migration": passphrase_method == "env",
+        "credential_key": read_meta(t).get("CREDENTIAL_KEY", "") if not external else "",
         "docker_image": docker_image,
+        "docker_image_digest": (docker_image.split("@", 1)[1]
+                                if "@sha256:" in (docker_image or "") else ""),
     })
+    if is_public_request():
+        body = resp.get_json()
+        for key in PUBLIC_STATUS_DROP:
+            body.pop(key, None)
+        resp = jsonify(body)
     # Never cache status -- every dashboard refresh must re-read live values
     # (log size, blocks, CPU, ...), not a value frozen at page load.
     resp.headers["Cache-Control"] = "no-store"
@@ -3030,6 +3549,16 @@ def api_validator(node_type):
 # ROUTES -- service control
 # =============================================================================
 
+def _with_override(argv, data):
+    """argv of a helper call that stops or restarts the node (service,
+    tracing-*, set-hostname), with allow-quorum-risk added only when the request
+    sets allow_quorum_risk to true: the operator's override of the committee
+    check for a restart the fleet has coordinated."""
+    if data.get("allow_quorum_risk") is True:
+        return argv + ["allow-quorum-risk"]
+    return argv
+
+
 @app.route("/api/service/<node_type>/<action>", methods=["POST"])
 def api_service(node_type, action):
     if not valid_type(node_type):
@@ -3042,6 +3571,15 @@ def api_service(node_type, action):
     if not os.path.exists(service_file(node_type)):
         return jsonify({"ok": False, "status": "not installed",
                         "error": "service not installed"}), 404
+
+    if action != "start":
+        # Stop and restart go through the helper, which takes the update lock and
+        # runs the committee check, the epoch wait (up to TN_EPOCH_WAIT_MAX) and
+        # the check again first, so the progress streams.
+        data, err = _json_body()
+        if err:
+            return err
+        return _update_stream(_with_override(["sudo", "-n", HELPER, "service", action], data))
 
     # Use the exact binary path the sudoers whitelist grants (/bin/systemctl).
     # Bare `sudo systemctl` would resolve via secure_path to /usr/bin/systemctl
@@ -3059,6 +3597,22 @@ def api_service(node_type, action):
 # =============================================================================
 # ROUTES -- logs
 # =============================================================================
+
+def _log_target(t):
+    """journal when the node logs to the systemd journal (LOG_TARGET=journal in
+    .node-meta), else file."""
+    return "journal" if read_meta(t).get("LOG_TARGET", "").strip() == "journal" else "file"
+
+
+# At most this many live log streams at once (each pins a thread and a tail or
+# journalctl process); more get 429. A comment line every _STREAM_KEEPALIVE
+# seconds lets a dead client be noticed and its stream reaped.
+_LOG_STREAMS = threading.BoundedSemaphore(8)
+_STREAM_KEEPALIVE = 15.0
+# The full-log download sends at most the last this many bytes.
+LOG_DOWNLOAD_CAP = 200 * 1024 * 1024
+_DOWNLOAD_LINES = 200000
+
 
 @app.route("/api/logs/<node_type>")
 def api_logs(node_type):
@@ -3081,6 +3635,10 @@ def api_logs(node_type):
             return jsonify({"lines": []})
         return jsonify({"lines": out.splitlines() if out else []})
 
+    if _log_target(node_type) == "journal":
+        rc, out, _ = run(["sudo", "-n", HELPER, "journal-tail", str(lines)], timeout=20)
+        return jsonify({"lines": out.splitlines() if rc == 0 and out else []})
+
     path = parse_service_file(node_type)["log_path"]
     if not path or not os.path.exists(path):
         return jsonify({"lines": []})
@@ -3091,54 +3649,115 @@ def api_logs(node_type):
     return jsonify({"lines": out.splitlines() if out else []})
 
 
+def _follow(argv):
+    """SSE frames for each line a follower process prints, with a keepalive
+    comment while it is quiet, and one at once when there is no line yet, so
+    the response starts (headers and all) without waiting for the log. The
+    process is stopped when the client goes."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                            errors="replace")
+    lines = collections.deque()
+    done = threading.Event()
+
+    def pump():
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                lines.append(line)
+        finally:
+            done.set()
+
+    threading.Thread(target=pump, daemon=True).start()
+    try:
+        last = time.monotonic() - _STREAM_KEEPALIVE
+        while True:
+            while lines:
+                yield f"data: {lines.popleft().rstrip()}\n\n"
+                last = time.monotonic()
+            if done.is_set() and not lines:
+                return
+            if time.monotonic() - last >= _STREAM_KEEPALIVE:
+                yield ": keepalive\n\n"
+                last = time.monotonic()
+            done.wait(0.25)
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+
+
 @app.route("/api/logs/<node_type>/stream")
 def api_logs_stream(node_type):
     if not valid_type(node_type):
         return bad_type()
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
     # External (docker) nodes have no tailable log file; live streaming is not
     # offered (the UI hides the Live button -- this is the matching notice).
     if is_external(node_type):
         def notice():
             yield "data: (live tail not available for external nodes)\n\n"
-        return Response(notice(), mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache",
-                                 "X-Accel-Buffering": "no"})
+        return Response(notice(), mimetype="text/event-stream", headers=headers)
 
-    path = parse_service_file(node_type)["log_path"]
+    if _log_target(node_type) == "journal":
+        argv = ["sudo", "-n", HELPER, "journal-follow"]
+        path = None
+    else:
+        path = parse_service_file(node_type)["log_path"]
+        argv = ["tail", "-n", "0", "-F", path or ""]
+
+    if not _LOG_STREAMS.acquire(blocking=False):
+        return jsonify({"error": "too many live log streams -- close one and retry"}), 429
+
+    # The slot is given back once, by whichever comes first: the end of the
+    # stream, or the response being closed. A HEAD request, or a client that
+    # leaves before the first byte, never starts the generator, so the close
+    # is what frees its slot.
+    once = threading.Lock()
+
+    def release():
+        if once.acquire(blocking=False):
+            _LOG_STREAMS.release()
 
     def generate():
-        if not path or not os.path.exists(path):
-            yield "data: (log file not found)\n\n"
-            return
-        proc = subprocess.Popen(
-            ["tail", "-n", "0", "-F", path],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
         try:
-            for line in iter(proc.stdout.readline, ""):
-                yield f"data: {line.rstrip()}\n\n"
+            if argv[0] == "tail" and (not path or not os.path.exists(path)):
+                yield "data: (log file not found)\n\n"
+                return
+            yield from _follow(argv)
         except GeneratorExit:
-            # Client disconnected -- tear down the tail subprocess.
-            pass
+            return
         finally:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                proc.kill()
+            release()
 
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache",
-                             "X-Accel-Buffering": "no"})
+    resp = Response(generate(), mimetype="text/event-stream", headers=headers)
+    resp.call_on_close(release)
+    return resp
+
+
+def _file_tail_chunks(path, cap, chunk=1024 * 1024):
+    """The last `cap` bytes of a file, in chunks."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - cap))
+        while True:
+            data = f.read(chunk)
+            if not data:
+                return
+            yield data
 
 
 @app.route("/api/logs/<node_type>/download")
 def api_logs_download(node_type):
-    """Download the complete log as telcoin-<type>.log. External nodes stream the
-    full container log via the helper; scripts nodes send the on-disk file."""
+    """Download the log as telcoin-<type>.log, capped: the last
+    LOG_DOWNLOAD_CAP bytes of the file, or the last _DOWNLOAD_LINES lines of a
+    container log or the journal (both through the helper)."""
     if not valid_type(node_type):
         return bad_type()
+    disposition = {"Content-Disposition": f'attachment; filename="telcoin-{node_type}.log"'}
     det = detect_type(node_type)
     if det.get("mode") == "external":
         name = det.get("container")
@@ -3148,15 +3767,18 @@ def api_logs_download(node_type):
                              timeout=60)
             if rc == 0:
                 body = out
-        return Response(
-            body, mimetype="text/plain",
-            headers={"Content-Disposition":
-                     f'attachment; filename="telcoin-{node_type}.log"'})
+        return Response(body, mimetype="text/plain", headers=disposition)
+    if _log_target(node_type) == "journal":
+        rc, out, _ = run(["sudo", "-n", HELPER, "journal-tail", str(_DOWNLOAD_LINES)], timeout=60)
+        return Response(out if rc == 0 else "", mimetype="text/plain", headers=disposition)
     path = parse_service_file(node_type)["log_path"]
     if not path or not os.path.exists(path):
         return jsonify({"error": "log file not found"}), 404
-    return send_file(path, mimetype="text/plain", as_attachment=True,
-                     download_name=f"telcoin-{node_type}.log")
+    try:
+        chunks = _file_tail_chunks(path, LOG_DOWNLOAD_CAP)
+    except OSError:
+        return jsonify({"error": "log file not readable"}), 404
+    return Response(chunks, mimetype="text/plain", headers=disposition)
 
 
 @app.route("/api/logs/<node_type>/clear", methods=["POST"])
@@ -3265,10 +3887,15 @@ def api_config(node_type):
 # Each pattern is the helper's, character for character (test_server_contract.py
 # compares them).
 _MULTIADDR_RE = re.compile(r"^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$")
-# off removes --metrics.
-_METRICS_RE = re.compile(r"^(off|([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5})$")
-_VERBOSITY_RE = re.compile(r"^-v{1,5}$")
-_IMAGE_CHARS_RE = re.compile(r"^[A-Za-z0-9._/:@-]+$")
+# Setup passes its multiaddrs in TN_SETUP_* variables, which skip the helper's
+# generic argument check, so the address part also refuses whitespace and
+# control characters here (the helper's setup pattern does the same).
+_SETUP_MULTIADDR_RE = re.compile(r"/(ip4|ip6)/[^/\s\x00-\x1f\x7f-\x9f]+/udp/[0-9]+/quic-v1")
+# off removes --metrics. The UI keeps the endpoint on loopback; a public bind
+# needs a root operator at the console (edit-config.sh --allow-public-metrics).
+_METRICS_RE = re.compile(r"^(off|127\.0\.0\.1:[0-9]{1,5})$")
+# The UI caps verbosity at -vvv.
+_VERBOSITY_RE = re.compile(r"^-v{1,3}$")
 # An absolute path to a peers file already on the node (the UI cannot upload
 # one), or none to remove the flag and the file.
 _BOOTSTRAP_PEERS_RE = re.compile(r"^(none|/[A-Za-z0-9._/-]+)$")
@@ -3281,7 +3908,6 @@ CONFIG_VALUE_RE = {
     "worker_listener": _MULTIADDR_RE,
     "metrics": _METRICS_RE,
     "verbosity": _VERBOSITY_RE,
-    "docker_image": _IMAGE_CHARS_RE,
     "bootstrap_peers": _BOOTSTRAP_PEERS_RE,
     "state_export": _STATE_EXPORT_RE,
     # edit-config.sh refuses true on testnet and mainnet.
@@ -3294,31 +3920,63 @@ def config_value_ok(field, value):
     """True when the helper's config-set would accept `value` for `field`.
     fullmatch, so a trailing newline fails here as it does in bash."""
     rx = CONFIG_VALUE_RE.get(field)
-    if rx is None or not rx.fullmatch(value):
-        return False
-    # An image reference needs a tag or digest.
-    return field != "docker_image" or ":" in value
+    return rx is not None and rx.fullmatch(value) is not None
 
 
-@app.route("/api/config/<node_type>/set")
+@app.route("/api/config/<node_type>/set", methods=["POST"])
 def api_config_set(node_type):
-    # GET, because older pages read the restart+verify progress with
-    # EventSource; the current page reads it with fetch, which never re-sends the
-    # request after a dropped connection. The field/value are query params,
-    # validated here and again in the helper + edit-config.sh. Reuses the same
-    # SSE plumbing as updates.
+    # POST {"field": ..., "value": ..., "allow_port_mismatch": true|false};
+    # the page reads the restart+verify progress with fetch. Validated here and
+    # again in the helper + edit-config.sh. Reuses the same SSE plumbing as
+    # updates. allow_port_mismatch (a listener only, sent after the operator
+    # confirmed that a NAT or port forward maps the advertised external port to
+    # the new one) adds the helper's allow-port-mismatch argument.
     if not valid_type(node_type):
         return bad_type()
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    field = (request.args.get("field") or "").strip()
-    value = (request.args.get("value") or "").strip()
+    data, err = _json_body()
+    if err:
+        return err
+    field = str(data.get("field") or "").strip()
+    value = str(data.get("value") or "").strip()
     if field not in CONFIG_FIELDS:
         return jsonify({"error": "field not editable"}), 400
     if not config_value_ok(field, value):
         return jsonify({"error": "invalid value for field"}), 400
-    return _update_stream(["sudo", "-n", HELPER, "config-set", field, value])
+    allow = data.get("allow_port_mismatch", False)
+    if not isinstance(allow, bool):
+        return jsonify({"error": "allow_port_mismatch must be true or false"}), 400
+    cmd = ["sudo", "-n", HELPER, "config-set", field, value]
+    if allow:
+        if field not in ("primary_listener", "worker_listener"):
+            return jsonify({"error": "allow_port_mismatch applies to the listeners only"}), 400
+        cmd.append("allow-port-mismatch")
+    return _update_stream(cmd)
+
+
+# The BLS passphrase credential: migrate (into the encrypted systemd credential)
+# or reseal (encrypt it again with this host's key as it is now), through the
+# helper's credential subcommand and edit-config.sh's --json mode. Both restart
+# the node; the page reads the events like a config save.
+CREDENTIAL_ACTIONS = ("migrate", "reseal")
+
+
+@app.route("/api/config/<node_type>/credential", methods=["POST"])
+def api_config_credential(node_type):
+    if not valid_type(node_type):
+        return bad_type()
+    blocked = _external_block(node_type)
+    if blocked:
+        return blocked
+    data, err = _json_body()
+    if err:
+        return err
+    action = str(data.get("action") or "").strip()
+    if action not in CREDENTIAL_ACTIONS:
+        return jsonify({"error": "action must be migrate or reseal"}), 400
+    return _update_stream(["sudo", "-n", HELPER, "credential", action])
 
 
 # Advertised node name ("Advertised Node Name" in the UI) = the network-config
@@ -3334,17 +3992,18 @@ def api_set_hostname(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
     name = str(data.get("name") or "").strip()
     if not _NODE_NAME_RE.match(name):
         return jsonify({"ok": False,
                         "error": "invalid name (letters, digits, . _ - ; start "
                                  "alphanumeric; max 64 chars)"}), 400
     # The helper writes network-config + .node-meta and restarts the node so it
-    # reads the new name.
-    rc, out, err = run(["sudo", "-n", HELPER, "set-hostname", name], timeout=30)
-    ok = rc == 0 and out.strip().splitlines()[-1:] == ["ok"]
-    return jsonify({"ok": ok, "error": "" if ok else (err or out or "set failed")})
+    # reads the new name, under the update lock and after the committee check and
+    # the epoch wait, so the progress streams.
+    return _update_stream(_with_override(["sudo", "-n", HELPER, "set-hostname", name], data))
 
 
 # Node-log rotation size (one global logrotate config for both node types).
@@ -3358,7 +4017,9 @@ def api_set_logrotate(node_type):
     blocked = _external_block(node_type)  # external docker logs aren't on disk here
     if blocked:
         return blocked
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
     size = str(data.get("size") or "").strip().upper()
     if not _LOGROTATE_SIZE_RE.match(size):
         return jsonify({"ok": False, "error": "invalid size -- use e.g. 500M or 1G"}), 400
@@ -3417,7 +4078,9 @@ def api_firewall():
 
 @app.route("/api/firewall/port", methods=["POST"])
 def api_firewall_port():
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
     port = str(data.get("port") or "").strip()
     proto = str(data.get("proto") or "").strip()
     state = str(data.get("state") or "").strip()
@@ -3441,6 +4104,77 @@ def api_firewall_port():
     return jsonify({"ok": False, "error": err or out or "firewall update failed"})
 
 
+# SSH sources for firewall-setup.sh --ssh-from, as lib/common.sh
+# validate_health_src takes them: an address, or a CIDR with a mask of /8 or
+# narrower (no leading zeros); never the unspecified address or /0. At most 16;
+# the page may separate them with commas, spaces or new lines.
+FW_SSH_SOURCES_MAX = 16
+_FW_SRC_CHARS_RE = re.compile(r"[0-9A-Fa-f.:]+(?:/[0-9]{1,3})?")
+_FW_MASK_RE = re.compile(r"[1-9][0-9]{0,2}")
+
+
+def ssh_source_ok(src):
+    if not isinstance(src, str) or not _FW_SRC_CHARS_RE.fullmatch(src):
+        return False
+    ip, sep, mask = src.partition("/")
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.is_unspecified:
+        return False
+    if sep:
+        if not _FW_MASK_RE.fullmatch(mask):
+            return False
+        if not 8 <= int(mask) <= (32 if addr.version == 4 else 128):
+            return False
+    return True
+
+
+def ssh_source_list(text):
+    """(comma list, None) for the operator's SSH sources ("" when none were
+    given), or (None, error)."""
+    if not isinstance(text, str):
+        return None, "ssh_from must be text"
+    items = [x for x in re.split(r"[\s,]+", text) if x]
+    if len(items) > FW_SSH_SOURCES_MAX:
+        return None, "at most %d SSH sources" % FW_SSH_SOURCES_MAX
+    for item in items:
+        if not ssh_source_ok(item):
+            return None, ("not an address or a CIDR of /8 or narrower: %s" % item)[:200]
+    return ",".join(items), None
+
+
+@app.route("/api/firewall/enable", methods=["POST"])
+def api_firewall_enable():
+    """Enable ufw with firewall-setup.sh's lockout-safe defaults. POST
+    {"ssh_from": "<sources>"}: the sources become --ssh-from, so SSH is allowed
+    from them only; without them the engine uses the list .node-meta keeps, and
+    on mainnet refuses when there is none. The engine's message comes back as
+    is in `error`."""
+    data, err = _json_body()
+    if err:
+        return err
+    det = detect_nodes()
+    if not any(det.get(t, {}).get("mode") == "scripts" for t in NODE_TYPES):
+        return jsonify({"ok": False, "error": "read-only (external node)"}), 403
+    ssh_from, error = ssh_source_list(data.get("ssh_from") or "")
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    argv = ["sudo", "-n", HELPER, "firewall-enable"]
+    if ssh_from:
+        argv.append(ssh_from)
+    rc, out, err = run(argv, timeout=180)
+    done = _parse_json_tail(out)
+    if isinstance(done, dict) and "ok" in done:
+        ok = done.get("ok") is True
+        return jsonify({"ok": ok, "active": done.get("active") is True,
+                        "error": "" if ok else str(done.get("msg") or done.get("error") or
+                                                   "firewall enable failed")})
+    return jsonify({"ok": False, "active": False,
+                    "error": (err or out or "firewall enable failed").strip()[-600:]})
+
+
 # Node removal is intentionally NOT exposed in the UI: it is irreversible
 # (validator keys), so it runs on the server via remove-node.sh (which also
 # removes the UI itself). The dashboard's System tab just points operators there.
@@ -3451,31 +4185,31 @@ def api_firewall_port():
 #
 # Two phases via the helper's setup-keygen / setup-finalize, which run
 # setup-node.sh --json --phase=...  Config travels in TN_SETUP_* env vars and
-# the BLS passphrase in TN_BLS_PASSPHRASE (env only -- never argv, never the URL,
-# kept in-process here). These are POST + streamed (not EventSource) precisely so
+# the BLS passphrase on the helper's stdin (never argv, never the URL, never an
+# environment variable; the helper hands it on with --passphrase-stdin). These
+# are POST + streamed (not EventSource) precisely so
 # the passphrase never lands in a query string or access log. The frontend reads
 # the streamed body with fetch(). The <node_type> URL segment is the page's
 # presentation slot; the helper call carries no role.
 # =============================================================================
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_BUILD_REF_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")  # no leading "-", as REF_RE
 _PUBLIC_IP_RE = re.compile(r"^[0-9a-fA-F.:]+$")
 _SVC_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")  # mirrors validate_service_name
-_DATA_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")  # absolute path, safe charset
 
 
 def _setup_env(data, want_passphrase):
-    """Validate a setup config dict and build the child env (TN_SETUP_* [+
-    TN_BLS_PASSPHRASE]). Returns (env, None) or (None, error_message).
+    """Validate a setup config dict and build the child env (TN_SETUP_*).
+    Returns (env, None) or (None, error_message). The passphrase is checked
+    here (want_passphrase) but never put in the environment: the keygen route
+    writes it to the helper's stdin.
 
     Public RPC is requested by a hostname: rpc_domain becomes TN_SETUP_RPC_DOMAIN,
     which the helper passes to setup-node.sh as --rpc-domain. rpc_public: true
     without a hostname is refused, and an explicit rpc_public: false drops a
     hostname left over in the form, so choosing private RPC never publishes it."""
-    network = str(data.get("network") or "testnet").strip()
+    network = str(data.get("network") or "").strip()
     method = str(data.get("install_method") or "").strip()
-    passm = str(data.get("passphrase_method") or "loadcredential").strip()
     address = str(data.get("address") or "").strip()
     build_ref = str(data.get("build_ref") or "").strip()
     image = str(data.get("docker_image") or "").strip()
@@ -3493,20 +4227,38 @@ def _setup_env(data, want_passphrase):
     advertised_name = str(data.get("advertised_name") or "").strip()
     data_dir = str(data.get("data_dir") or "").strip()
 
-    if network not in ("testnet", "adiri"):
+    if not network:
+        return None, "network required (testnet or mainnet)"
+    net = network_rule(network)
+    if net is None:
         return None, "invalid network"
-    if method not in ("source", "docker", "existing", ""):
+    if method not in ("source", "docker", "existing", "release", ""):
         return None, "invalid install method"
-    if passm not in ("loadcredential", "tpm"):
-        return None, "invalid passphrase method"
+    if str(data.get("passphrase_method") or "").strip() == "tpm":
+        return None, ("TPM sealing was removed; the passphrase is stored as an "
+                      "encrypted systemd credential")
     if address and not _ADDRESS_RE.match(address):
         return None, "invalid address"
-    if build_ref and not _BUILD_REF_RE.match(build_ref):
-        return None, "invalid build ref"
-    if image and not (_IMAGE_CHARS_RE.match(image) and ":" in image):
-        return None, "invalid docker image"
+    if build_ref and not release_tag_ok(net, build_ref):
+        return None, f"build ref must be a {net} release tag"
+    if method != "docker":
+        image = ""          # an image left in the form applies to Docker installs only
+    if image:
+        tag, image, err = docker_image_choice(image, net)
+        if err:
+            return None, err
+        if tag:
+            if build_ref and build_ref != tag:
+                return None, "give the docker image by digest or its release tag, not both"
+            build_ref = tag
+    log_target = str(data.get("log_target") or "").strip()
+    if log_target not in ("", "journal", "file"):
+        return None, "log target must be journal or file"
+    if not log_target and net == "mainnet":
+        log_target = "journal"
+    allow_no_tpm = data.get("allow_no_tpm") is True and net == "mainnet"
     for m in (ext_primary, ext_worker, lis_primary, lis_worker):
-        if m and not _MULTIADDR_RE.match(m):
+        if m and not _SETUP_MULTIADDR_RE.fullmatch(m):
             return None, "invalid multiaddr"
     if public_ip and not _PUBLIC_IP_RE.match(public_ip):
         return None, "invalid public ip"
@@ -3518,17 +4270,23 @@ def _setup_env(data, want_passphrase):
         return None, "invalid service user"
     if service_group and not _SVC_NAME_RE.match(service_group):
         return None, "invalid service group"
+    acct = service_account_error(service_user, service_group)
+    if acct:
+        return None, acct
     if advertised_name and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", advertised_name):
         return None, "invalid advertised name"
-    if data_dir and (not _DATA_DIR_RE.match(data_dir) or ".." in data_dir):
-        return None, "invalid data directory (must be an absolute path)"
-    if method == "source" and not build_ref:
-        return None, "build_ref required for source install"
+    if data_dir and (not _DATA_DIR_ALLOWED_RE.fullmatch(data_dir) or ".." in data_dir):
+        return None, "invalid data directory (/var/lib/telcoin or a path under it)"
+    if method in ("source", "release") and not build_ref:
+        return None, f"build_ref (a release tag) required for a {method} install"
+    if want_passphrase and not passphrase_ok(data.get("passphrase"), net):
+        return None, ("passphrase required: no line breaks, no spaces or tabs at either end"
+                      + (", at least 16 bytes on mainnet" if net == "mainnet" else ""))
 
     env = os.environ.copy()
+    env.pop("TN_BLS_PASSPHRASE", None)
     env["TN_SETUP_NETWORK"] = network
     env["TN_SETUP_INSTALL_METHOD"] = method
-    env["TN_SETUP_PASSPHRASE_METHOD"] = passm
     env["TN_SETUP_ADDRESS"] = address
     env["TN_SETUP_BUILD_REF"] = build_ref
     env["TN_SETUP_DOCKER_IMAGE"] = image
@@ -3542,25 +4300,34 @@ def _setup_env(data, want_passphrase):
     env["TN_SETUP_SERVICE_GROUP"] = service_group
     env["TN_SETUP_ADVERTISED_NAME"] = advertised_name
     env["TN_SETUP_DATA_DIR"] = data_dir
-
-    if want_passphrase:
-        passphrase = data.get("passphrase")
-        if not passphrase:
-            return None, "passphrase required"
-        env["TN_BLS_PASSPHRASE"] = str(passphrase)
-
+    env["TN_SETUP_LOG_TARGET"] = log_target
+    env["TN_SETUP_ALLOW_NO_TPM"] = "1" if allow_no_tpm else ""
     return env, None
+
+
+def _node_installed():
+    """True when any node unit is installed on this host."""
+    return any(os.path.exists(os.path.join(SYSTEMD_DIR, n + ".service"))
+               for n in ("telcoin", "telcoin-validator", "telcoin-observer"))
 
 
 @app.route("/api/setup/defaults")
 def api_setup_defaults():
     """Auto-detected defaults to prefill the setup wizard (matching what the CLI
-    detects/uses): public IP, internal IP, latest docker image, service user/group."""
+    detects/uses) for ?network=testnet|mainnet (default testnet): public IP,
+    internal IP, latest docker image (by digest; '' without a repository), the
+    latest release tag (source_ref), the default install method (a signed
+    release on mainnet, a source build elsewhere), the default log target
+    (journal on mainnet) and the service user/group."""
+    net = network_rule(request.args.get("network")) or "testnet"
     resp = jsonify({
+        "network": net,
         "public_ip": detect_public_ip(),
         "internal_ip": detect_internal_ip(),
-        "docker_image": latest_docker_image(),
-        "source_ref": latest_source_tag(),
+        "docker_image": latest_docker_image(net),
+        "source_ref": latest_source_tag(net),
+        "install_method": "release" if net == "mainnet" else "source",
+        "log_target": "journal" if net == "mainnet" else "",
         "service_user": "telcoin",
         "service_group": "telcoin",
     })
@@ -3596,14 +4363,21 @@ def api_setup_keygen(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
+    if _node_installed() or os.path.exists(os.path.join(DEFAULT_CONFIG_DIR, ".node-meta")):
+        return jsonify({"error": "a node is already installed (or its setup has started); "
+                                 "use edit-config.sh, or remove-node.sh first"}), 409
     env, err = _setup_env(data, want_passphrase=True)
     if err:
         return jsonify({"error": err}), 400
     if not _begin_setup():
         return jsonify({"error": "a node setup is already running -- wait for it to finish"}), 409
+    passphrase = data["passphrase"]
     return _update_stream(["sudo", "-n", HELPER, "setup-keygen"],
-                          env=env, on_close=_end_setup)
+                          env=env, on_close=_end_setup,
+                          stdin_data=passphrase + "\n", redact=(passphrase,))
 
 
 @app.route("/api/setup/<node_type>/finalize", methods=["POST"])
@@ -3613,10 +4387,18 @@ def api_setup_finalize(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
+    if _node_installed():
+        return jsonify({"error": "a node is already installed; use edit-config.sh, "
+                                 "or remove-node.sh first"}), 409
     env, err = _setup_env(data, want_passphrase=False)
     if err:
         return jsonify({"error": err}), 400
+    if not (env["TN_SETUP_LIS_PRIMARY"] and env["TN_SETUP_LIS_WORKER"]):
+        return jsonify({"error": "finalize needs both listener multiaddrs "
+                                 "(listener_primary, listener_worker)"}), 400
     if not _begin_setup():
         return jsonify({"error": "a node setup is already running -- wait for it to finish"}), 409
     return _update_stream(["sudo", "-n", HELPER, "setup-finalize"],
@@ -3630,8 +4412,9 @@ def api_setup_finalize(node_type):
 # + basic_auth). dns-check/enable/disable are management actions: they run via
 # the root helper and -- being POSTs -- are refused on the public (read-only)
 # path by the before_request guard, so external access can only be configured
-# from the SSH tunnel. The password travels in TN_CADDY_PASSWORD (env only,
-# never argv/URL). status is a read (GET) and stays available either way.
+# from the SSH tunnel. The password travels on the helper's stdin (never argv,
+# URL or environment; --password-stdin to install-caddy.sh). status is a read
+# (GET) and stays available either way.
 # =============================================================================
 
 _CADDY_USER_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")
@@ -3658,7 +4441,9 @@ def api_caddy_status():
 
 @app.route("/api/caddy/dns-check", methods=["POST"])
 def api_caddy_dns_check():
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
     domain = norm_host(data.get("domain"))
     if not valid_hostname(domain):
         return jsonify({"ok": False, "error": host_error(
@@ -3677,28 +4462,48 @@ def api_caddy_dns_check():
     return jsonify(res)
 
 
+# install-caddy.sh's dashboard password rule (CADDY_PASSWORD_MIN): at least 16
+# bytes in UTF-8, so 16 characters of plain ASCII, and no control characters.
+CADDY_PASSWORD_MIN = 16
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def caddy_password_error(password):
+    """Why `password` cannot be the dashboard password, or None when it can."""
+    if len(password.encode("utf-8")) < CADDY_PASSWORD_MIN:
+        return f"the dashboard password must be at least {CADDY_PASSWORD_MIN} characters"
+    if _CONTROL_RE.search(password):
+        return ("the dashboard password must not contain control characters "
+                "(such as a tab or a line break)")
+    return None
+
+
 @app.route("/api/caddy/enable", methods=["POST"])
 def api_caddy_enable():
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
     domain = norm_host(data.get("domain"))
     username = (data.get("username") or "").strip()
-    password = data.get("password") or ""
+    password = data.get("password") if isinstance(data.get("password"), str) else ""
     public_ip = (data.get("public_ip") or "").strip()
     if not valid_hostname(domain):
         return jsonify({"error": host_error(
             "dashboard hostname", domain, "dashboard.node7.example.com")}), 400
     if not _CADDY_USER_RE.match(username):
         return jsonify({"error": "invalid username (2-32 chars: letters, digits, . _ -)"}), 400
-    if len(password) < 8:
-        return jsonify({"error": "password too short (min 8 chars)"}), 400
+    pw_err = caddy_password_error(password)
+    if pw_err:
+        return jsonify({"error": pw_err}), 400
     if public_ip and not _CADDY_PUBLIC_IP_RE.match(public_ip):
         return jsonify({"error": "invalid public IP"}), 400
-    env = os.environ.copy()
-    env["TN_CADDY_PASSWORD"] = str(password)
     cmd = ["sudo", "-n", HELPER, "caddy-enable", domain, username]
     if public_ip:
         cmd.append(public_ip)
-    return _update_stream(cmd, env=env)
+    # The password goes to the helper on stdin, never in argv or the environment,
+    # and is cut from anything the stream sends back.
+    return _update_stream(cmd, env=os.environ.copy(), stdin_data=password + "\n",
+                          redact=(password,))
 
 
 @app.route("/api/caddy/disable", methods=["POST"])
@@ -3744,7 +4549,9 @@ def api_rpc_status():
 
 @app.route("/api/rpc/dns-check", methods=["POST"])
 def api_rpc_dns_check():
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
     domain = norm_host(data.get("domain"))
     if not valid_hostname(domain):
         return jsonify({"ok": False, "error": host_error("public RPC hostname", domain)}), 400
@@ -3762,13 +4569,41 @@ def api_rpc_dns_check():
     return jsonify(res)
 
 
+# The exposure summary install-caddy.sh states before it enables public RPC (its
+# caddy_rpc_exposure_summary, sent as a `warn` event in --json mode, where the UI
+# action is the consent). The page shows it in the confirmation before it calls
+# rpc-enable; test_server_contract.py runs the engine's function and compares.
+RPC_EXPOSURE_SUMMARY = (
+    "Public RPC on https://{domain}/ answers anyone on the internet, for every JSON-RPC "
+    "namespace the node serves, with CORS open to every origin.",
+    "This edge has no rate limit, per-IP limit or method filter: only the node's own "
+    "launch limits bound the load.",
+    "For production traffic put a rate-limited gateway in front of it, and never enable "
+    "it on a staked validator.",
+)
+
+
+def rpc_exposure_summary(domain):
+    return " ".join(line.format(domain=domain) for line in RPC_EXPOSURE_SUMMARY)
+
+
+@app.route("/api/rpc/exposure")
+def api_rpc_exposure():
+    domain = norm_host(request.args.get("domain"))
+    if not valid_hostname(domain):
+        return jsonify({"ok": False, "error": host_error("public RPC hostname", domain)}), 400
+    return jsonify({"ok": True, "domain": domain, "summary": rpc_exposure_summary(domain)})
+
+
 @app.route("/api/rpc/enable", methods=["POST"])
 def api_rpc_enable():
     # Optional move_dashboard_to: when the dashboard is served on the RPC
     # hostname, install-caddy.sh moves it (same login) to this hostname first.
     # The helper takes `rpc-enable <host> [<ip>|-] [<dashboard-host>]`, where "-"
     # holds the inbound-IP place when only the dashboard host is given.
-    data = request.get_json(silent=True) or {}
+    data, err = _json_body()
+    if err:
+        return err
     domain = norm_host(data.get("domain"))
     public_ip = str(data.get("public_ip") or "").strip()
     move = norm_host(data.get("move_dashboard_to"))
@@ -3800,7 +4635,58 @@ def api_rpc_disable():
 
 @app.route("/api/system")
 def api_system():
-    return jsonify(system_info())
+    info = system_info()
+    if is_public_request():
+        for key in PUBLIC_SYSTEM_DROP:
+            info.pop(key, None)
+    return jsonify(info)
+
+
+# The host hardening summary: check-node.sh --audit through the helper's
+# read-only host-audit, one {"level": ok|warn|info, "text"} per line it prints
+# in that form (anything else, such as a colour-coded notice, is dropped). The
+# engine never prints a secret. Cached a minute. Not on the public path.
+_AUDIT_LINE_RE = re.compile(r"(ok|warn|info)\s+(\S.*)")
+_AUDIT_TTL = 60.0
+_audit_cache = {"expires": 0.0, "data": None}
+
+
+def host_audit():
+    now = time.monotonic()
+    if _audit_cache["data"] is not None and _audit_cache["expires"] > now:
+        return dict(_audit_cache["data"])
+    rc, out, err = run(["sudo", "-n", HELPER, "host-audit"], timeout=30)
+    items = []
+    for line in (out or "").splitlines():
+        m = _AUDIT_LINE_RE.fullmatch(_ANSI_RE.sub("", line).strip())
+        if m:
+            items.append({"level": m.group(1), "text": m.group(2)[:300]})
+    if rc in (0, 1) and items:
+        data = {"available": True, "items": items, "error": "",
+                "warnings": sum(1 for i in items if i["level"] == "warn")}
+    else:
+        data = {"available": False, "items": [], "warnings": 0,
+                "error": _ANSI_RE.sub("", err or out or "host audit unavailable").strip()[-300:]}
+    if _may_cache():
+        _audit_cache.update(expires=now + _AUDIT_TTL, data=data)
+    return dict(data)
+
+
+def host_has_tpm(audit=None):
+    """True / False when the host audit says whether systemd-creds has a usable
+    TPM2, None when it cannot tell."""
+    audit = audit if audit is not None else host_audit()
+    for item in audit.get("items") or []:
+        if item["text"].startswith("TPM2 usable"):
+            return True
+        if item["text"].startswith("no usable TPM2"):
+            return False
+    return None
+
+
+@app.route("/api/system/audit")
+def api_system_audit():
+    return jsonify(host_audit())
 
 
 @app.route("/api/addons/status")
@@ -3848,16 +4734,20 @@ def api_netstat():
 
 # Allowed git ref / docker tag shape for the prepare endpoint. The helper
 # re-validates, but reject obviously bad input before we ever shell out.
-# A git ref or image tag. It may not start with "-", so it can never reach git or
-# update-node.sh as an option (update-node 1.2.0 refuses such a value as well).
-REF_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
+# An update ref is a release tag of the node's network (release_tag_ok, the
+# same rule as lib/common.sh tn_release_tag_ok): branch names and commit ids
+# are refused here, in the helper and in update-node.sh.
+REF_RE = RELEASE_TAG_RE
 
 
 @app.route("/api/version/<node_type>")
 def api_version(node_type):
     if not valid_type(node_type):
         return bad_type()
-    return jsonify(node_version(node_type))
+    ver = dict(node_version(node_type))
+    if is_public_request():
+        ver = {"ref": _major(ver.get("ref")), "kind": ver.get("kind", "")}
+    return jsonify(ver)
 
 
 @app.route("/api/build-info")
@@ -3883,6 +4773,7 @@ def api_update_status(node_type):
     rc, out, err = run(["sudo", "-n", HELPER, "update-check"], timeout=30)
     res = _parse_json_tail(out) if rc == 0 else None
     if res is not None:
+        res["quorum"] = quorum_status()
         return jsonify(res)
     # Helper/sudo unavailable (e.g. dev box) -- degrade gracefully.
     return jsonify({
@@ -3893,6 +4784,27 @@ def api_update_status(node_type):
         "pending": None,
         "error": err or out or "update check unavailable",
     })
+
+
+_quorum_cache = {"expires": 0.0, "data": None}
+_QUORUM_TTL = 60.0
+
+
+def quorum_status():
+    """The committee check behind the update badge (display only): {available,
+    rc, detail} from the helper's quorum-check, cached a minute. rc 0 a restart
+    is safe, 1 it would put the committee at risk, 2 the committee could not be
+    read. {"available": false} until the library has the check."""
+    now = time.monotonic()
+    if _quorum_cache["data"] is not None and _quorum_cache["expires"] > now:
+        return dict(_quorum_cache["data"])
+    rc, out, _ = run(["sudo", "-n", HELPER, "quorum-check"], timeout=20)
+    data = _parse_json_tail(out) if rc == 0 else None
+    if not isinstance(data, dict) or not isinstance(data.get("available"), bool):
+        data = {"available": False}
+    if _may_cache():
+        _quorum_cache.update(expires=now + _QUORUM_TTL, data=data)
+    return dict(data)
 
 
 # Terminal escape sequences (colours, cursor moves, window titles) that stray
@@ -3927,13 +4839,15 @@ def _stream_frame(line):
     return _sse({"event": "log", "msg": msg}), "log"
 
 
-def _stderr_tail(path, lines=12, limit=900):
-    """The last non-blank lines of a stream's captured stderr, escapes removed,
-    joined with " | " and cut to `limit` characters. '' when there are none."""
+def _stderr_tail(path, lines=12, limit=900, redact=()):
+    """The last non-blank lines of a stream's captured stderr, each with the
+    `redact` values cut and escapes removed, joined with " | " and cut to
+    `limit` characters. '' when there are none. Each line is redacted before
+    the cut, so the cut can never leave part of a secret behind."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             kept = collections.deque(
-                (_ANSI_RE.sub("", ln).strip() for ln in f if ln.strip()),
+                (_ANSI_RE.sub("", _redact(ln, redact)).strip() for ln in f if ln.strip()),
                 maxlen=lines)
     except OSError:
         return ""
@@ -3966,7 +4880,36 @@ def _synthesized_done(rc):
     return {"event": "done", "ok": rc == 0, "synthesized": True, "rc": rc, "msg": msg}
 
 
-def _update_stream(argv, env=None, on_close=None):
+def _redact_forms(sec):
+    """Every way `sec` can appear in a child's output, longest first: as
+    written; in JSON from Python, with ASCII escapes or with UTF-8 kept
+    (ensure_ascii=False); and in JSON from the engine scripts' json_escape,
+    which keeps UTF-8, escapes backslash and double quote, and turns a tab or
+    CR into a space (install-caddy.sh writes control characters as \\u00XX
+    instead)."""
+    engine = sec.replace("\\", "\\\\").replace('"', '\\"')
+    forms = {
+        sec,
+        json.dumps(sec)[1:-1],
+        json.dumps(sec, ensure_ascii=False)[1:-1],
+        engine.replace("\t", " ").replace("\r", " "),
+        re.sub(r"[\x01-\x1f]", lambda m: "\\u%04x" % ord(m.group()), engine),
+    }
+    return sorted(forms, key=len, reverse=True)
+
+
+def _redact(text, secrets):
+    """`text` with every secret, in every form _redact_forms lists, replaced
+    by ***."""
+    for sec in secrets:
+        if not sec:
+            continue
+        for form in _redact_forms(sec):
+            text = text.replace(form, "***")
+    return text
+
+
+def _update_stream(argv, env=None, on_close=None, stdin_data=None, redact=()):
     """Stream a --json helper call (an update, a config save, a setup phase, a
     Caddy or public RPC change) as Server-Sent Events, one `data:` frame per
     event. Every stream ends with exactly one `done` and then `closed`; the page
@@ -3985,7 +4928,10 @@ def _update_stream(argv, env=None, on_close=None):
     replaces the child environment (Setup passes TN_SETUP_* and
     TN_BLS_PASSPHRASE this way). `on_close` runs once when the response is
     closed, after the child has exited or been stopped (Setup releases its
-    single-flight guard with it)."""
+    single-flight guard with it). `stdin_data`, when given, is written to the
+    child's stdin, which is then closed (the setup passphrase, the dashboard
+    password); otherwise the child's stdin is /dev/null. Every value in `redact`
+    is cut from every frame and from the stderr tail before it is sent."""
     def generate():
         proc, errpath = None, None
         try:
@@ -3996,7 +4942,13 @@ def _update_stream(argv, env=None, on_close=None):
                 with os.fdopen(fd, "w") as errf:
                     proc = subprocess.Popen(
                         argv, stdout=subprocess.PIPE, stderr=errf, env=env,
+                        stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
                         text=True, encoding="utf-8", errors="replace")
+                if stdin_data is not None:
+                    try:
+                        proc.stdin.write(stdin_data)
+                    finally:
+                        proc.stdin.close()
             except OSError as e:
                 rc = 127 if isinstance(e, FileNotFoundError) else 1
                 yield _sse({"event": "error", "msg": f"could not start {argv[0]}: {e}"})
@@ -4007,7 +4959,7 @@ def _update_stream(argv, env=None, on_close=None):
             done_frame, read_error = None, ""
             try:
                 for raw in iter(proc.stdout.readline, ""):
-                    frame, event = _stream_frame(raw)
+                    frame, event = _stream_frame(_redact(raw, redact) if redact else raw)
                     if frame is None or event == "closed":
                         continue   # `closed` ends the stream, and only the server sends it
                     if event == "done":
@@ -4018,8 +4970,8 @@ def _update_stream(argv, env=None, on_close=None):
                 read_error = f"reading the script output failed: {e}"
 
             rc = _reap(proc, grace=10)
-            tail = _stderr_tail(errpath) if rc != 0 else ""
-            detail = " | ".join(x for x in (read_error, tail) if x)
+            tail = _stderr_tail(errpath, redact=redact) if rc != 0 else ""
+            detail = _redact(" | ".join(x for x in (read_error, tail) if x), redact)
             if detail:
                 yield _sse({"event": "error", "msg": "output: " + detail})
             yield done_frame or _sse(_synthesized_done(rc))
@@ -4049,28 +5001,38 @@ def _update_stream(argv, env=None, on_close=None):
     return resp
 
 
-@app.route("/api/update/prepare/<node_type>")
+@app.route("/api/update/prepare/<node_type>", methods=["POST"])
 def api_update_prepare(node_type):
-    # GET, because older pages read it with EventSource (the current page uses
-    # fetch); the ref is a query param, validated here and again in the helper.
+    # POST {"ref": "<release tag>"}; validated here and again in the helper.
     if not valid_type(node_type):
         return bad_type()
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    ref = (request.args.get("ref") or "").strip()
-    if not REF_RE.match(ref):
-        return jsonify({"error": "invalid ref"}), 400
+    data, err = _json_body()
+    if err:
+        return err
+    ref = str(data.get("ref") or "").strip()
+    net = network_rule(read_meta(node_type).get("NETWORK"))
+    if net is None:
+        return jsonify({"error": "cannot tell this node's network (NETWORK in .node-meta)"}), 400
+    if not release_tag_ok(net, ref):
+        example = "vX.Y.Z-adiri" if net == "testnet" else "vX.Y.Z"
+        return jsonify({"error": f"ref must be a {net} release tag ({example}); "
+                                 "branches and commit ids are refused"}), 400
     return _update_stream(["sudo", "-n", HELPER, "update-prepare", ref])
 
 
-@app.route("/api/update/apply/<node_type>")
+@app.route("/api/update/apply/<node_type>", methods=["POST"])
 def api_update_apply(node_type):
     if not valid_type(node_type):
         return bad_type()
     blocked = _external_block(node_type)
     if blocked:
         return blocked
+    _data, err = _json_body()
+    if err:
+        return err
     return _update_stream(["sudo", "-n", HELPER, "update-apply"])
 
 
@@ -4223,18 +5185,21 @@ def api_preflight():
     # Rust toolchain (soft).
     rust = {"ok": bool(shutil.which("rustc"))}
 
-    # TPM device (soft).
-    tpm = {"ok": os.path.exists("/dev/tpm0") or os.path.exists("/dev/tpmrm0")}
+
+    # TPM2, as check-node.sh --audit reports it (true / false / null when the
+    # audit is not available). The wizard offers --allow-no-tpm on mainnet only
+    # when this is false.
+    tpm2 = host_has_tpm()
 
     # Advisory hardware tiers (see hardware_profile); never blocks setup.
     hardware = hardware_profile()
     return jsonify({
+        "tpm2": tpm2,
         "systemd": systemd,
         "internet": internet,
         "disk": disk,
         "docker": docker,
         "rust": rust,
-        "tpm": tpm,
         "hardware": hardware,
         # The page shows the CPU as "8 cores (16 threads)".
         "cpu_physical": hardware["cpu"],
@@ -4270,7 +5235,7 @@ def wrapper_path(t):
         try:
             with open(path, "r") as f:
                 unit = f.read()
-            m = re.search(r"^ExecStart=(\S+\.sh)\s*$", unit, re.MULTILINE)
+            m = START_SCRIPT_RE.search(unit)
             if m:
                 return m.group(1)
         except (OSError, IOError):
@@ -4431,12 +5396,12 @@ def api_tracing_enable(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    # 30s: the helper edits the wrapper then restarts the node with --no-block,
-    # so it returns once the restart job is queued (no wait on the node's stop
-    # window) -- ample headroom for an enqueue-and-return.
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-enable"], timeout=30)
-    ok = rc == 0
-    return jsonify({"ok": ok, "error": "" if ok else (err or out or "enable failed")})
+    data, err = _json_body()
+    if err:
+        return err
+    # The helper edits the start script and restarts the node under the update
+    # lock, after the committee check and the epoch wait: the progress streams.
+    return _update_stream(_with_override(["sudo", "-n", HELPER, "tracing-enable"], data))
 
 
 @app.route("/api/tracing/disable/<node_type>", methods=["POST"])
@@ -4446,9 +5411,10 @@ def api_tracing_disable(node_type):
     blocked = _external_block(node_type)
     if blocked:
         return blocked
-    rc, out, err = run(["sudo", "-n", HELPER, "tracing-disable"], timeout=30)
-    ok = rc == 0
-    return jsonify({"ok": ok, "error": "" if ok else (err or out or "disable failed")})
+    data, err = _json_body()
+    if err:
+        return err
+    return _update_stream(_with_override(["sudo", "-n", HELPER, "tracing-disable"], data))
 
 
 @app.route("/api/tracing/status/<node_type>")
@@ -4800,15 +5766,15 @@ def api_network_status():
 # MAIN
 # =============================================================================
 
-# The bind address IS the trust boundary for the management path. This server
-# has NO authentication of its own: the SSH-tunnel / loopback path is trusted
-# purely because it is unreachable from off-host. Caddy (install-caddy.sh) is
-# the ONLY intended public entrypoint, and it forces every proxied request
-# read-only via the unforgeable X-TN-Dashboard-Public header. Exposing this
-# port by ANY other means -- binding 0.0.0.0, a second reverse proxy that does
-# not stamp that header, `docker -p 8080:8080`, or `ssh -g`/GatewayPorts --
-# hands unauthenticated, full node control to whoever can reach it. Keep this
-# on loopback; the guard below refuses to start otherwise.
+# The management path is guarded by the loopback bind together with the
+# per-install token, the Host check and the Origin checks (_enforce_local_origin).
+# Caddy (install-caddy.sh) is the ONLY intended public entrypoint, and it forces
+# every proxied request read-only by setting X-TN-Dashboard-Public itself.
+# Exposing this port by ANY other means -- binding 0.0.0.0, a second reverse
+# proxy that does not set that header, `docker -p 8080:8080`, or `ssh -g` /
+# GatewayPorts -- leaves the token as the only thing between whoever can reach
+# it and full node control. Keep this on loopback; the guard below refuses to
+# start otherwise, and also without the per-install token.
 BIND_HOST = "127.0.0.1"
 BIND_PORT = 8080
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1")
@@ -4817,10 +5783,15 @@ if __name__ == "__main__":
     if BIND_HOST not in _LOOPBACK_HOSTS:
         _log(
             f"refusing to start: BIND_HOST={BIND_HOST!r} is not loopback "
-            f"({' / '.join(_LOOPBACK_HOSTS)}). This UI has no auth of its own; "
-            "binding off-loopback exposes unauthenticated full node management. "
-            "Put a header-stamping reverse proxy (install-caddy.sh) in front "
-            "instead -- see the comment above BIND_HOST."
+            f"({' / '.join(_LOOPBACK_HOSTS)}). Off loopback the per-install token "
+            "would be the only thing between whoever reaches the port and full node "
+            "management. Put a header-stamping reverse proxy (install-caddy.sh) in "
+            "front instead -- see the comment above BIND_HOST."
         )
+        sys.exit(1)
+    UI_TOKEN = load_token()
+    if not UI_TOKEN:
+        _log(f"refusing to start: no UI token in {TOKEN_FILE} (64 hex characters). "
+             "Run: sudo bash ui/install-ui.sh  (it creates the token)")
         sys.exit(1)
     app.run(host=BIND_HOST, port=BIND_PORT, debug=False, threaded=True)

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: -ne and bundled switches.
+# Expected findings: lines 7, 8, 9, 10, 11 and 12.
+
+pat="$1"
+file="$2"
+perl -ne "print if /$pat/" "$file"
+perl -lne "print if /\Q${pat}\E/" "$file"
+perl -i.bak -pe "s/x/$pat/" "$file"
+perl -e"print qq($pat)"
+perl -Mstrict -wle "print length('$pat')"
+perl -s -e 'print $x' -new="$pat"
