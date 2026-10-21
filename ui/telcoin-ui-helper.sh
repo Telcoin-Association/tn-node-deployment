@@ -778,13 +778,16 @@ _ui_locked() {
 # subshell runs in the background so that a TERM, INT or HUP this call gets (the
 # server stops it when the page goes away) is passed on to it: it puts the edit
 # back and ends without touching the node, unless the stop or restart has begun.
+# It is an explicit ( ) subshell: bash before 5.1 does not run an EXIT trap set
+# inside a function started with & on its own, and _ui_locked's EXIT trap is
+# what releases the update lock.
 UI_JOB=""
 ui_restart() {
     local rc=0 svc url
     svc="$(node_service)"
     url="$(node_rpc_url)"
     _lib_usable || lib_missing "tn_wait_restart_window"
-    _lib_run _ui_locked "$1" "$svc" "$url" "${2:-}" &
+    ( _lib_run _ui_locked "$1" "$svc" "$url" "${2:-}" ) &
     UI_JOB=$!
     trap 'kill -TERM "$UI_JOB" 2>/dev/null || true' TERM INT HUP
     wait "$UI_JOB" || rc=$?
