@@ -73,6 +73,11 @@ rc=0; out="$(tn_fetch_verified_release main testnet 2>/dev/null)" || rc=$?
 check_rc "a branch is not a release tag" 3 "$rc"
 rc=0; out="$(tn_fetch_verified_release v0.16.0-adiri devnet 2>/dev/null)" || rc=$?
 check_rc "devnet has no releases" 3 "$rc"
+rc=0; out="$(tn_fetch_verified_release v1.0.0-rc1 mainnet https://fixture.invalid/x 2>"$T/err")" || rc=$?
+check_rc "mainnet refuses a release candidate" 3 "$rc"
+check_has "the refusal names the grammar" "1" "$(grep -c 'release candidates are testnet only' "$T/err")"
+rc=0; out="$(tn_fetch_verified_release v1.0.0-adiri-rc1 mainnet https://fixture.invalid/x 2>/dev/null)" || rc=$?
+check_rc "mainnet refuses a testnet release candidate" 3 "$rc"
 check "nothing downloaded for a bad tag" "" "$(cat "$REC/curl.log")"
 stage_empty "bad tag"
 
@@ -96,6 +101,12 @@ rc=0; tn_release_version_ok "$(V 0.17.0 adiri,other)" testnet v0.17.0-adiri 2>/d
 check_rc "testnet refuses another feature" 1 "$rc"
 rc=0; tn_release_version_ok "$(V 0.16.0 adiri)" testnet v0.17.0-adiri 2>/dev/null || rc=$?
 check_rc "version must match the tag" 1 "$rc"
+rc=0; tn_release_version_ok "$(V 0.17.0 adiri)" testnet v0.17.0-adiri-rc1 2>/dev/null || rc=$?
+check_rc "release candidate: Version is the tag's X.Y.Z" 0 "$rc"
+rc=0; tn_release_version_ok "$(V 0.17.0-rc1 adiri)" testnet v0.17.0-adiri-rc1 2>/dev/null || rc=$?
+check_rc "release candidate: a Version carrying -rc1 refused" 1 "$rc"
+rc=0; tn_release_version_ok "$(V 0.17.0 adiri,faucet)" testnet v0.17.0-adiri-rc2 2>/dev/null || rc=$?
+check_rc "release candidate: adiri,faucet" 0 "$rc"
 rc=0; tn_release_version_ok "$(V 0.17.0 ''; printf 'Build Features: adiri\n')" mainnet v0.17.0 2>/dev/null || rc=$?
 check_rc "two Build Features lines refused" 1 "$rc"
 rc=0; tn_release_version_ok "telcoin-network-cli Version: 0.17.0" mainnet v0.17.0 2>/dev/null || rc=$?

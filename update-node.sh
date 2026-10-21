@@ -85,7 +85,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
     || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_root_file \
         tn_rerender_node_launch tn_move_node_log_dir tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_install_root_binary tn_release_stage tn_source_build \
-        tn_docker_resolve_ref tn_docker_local_digest >/dev/null; then
+        tn_docker_resolve_ref tn_docker_local_digest tn_release_tags_sort tn_release_tag_newer >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this update-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -1370,11 +1370,12 @@ update_epoch_wait() {
 # DOCKER PATH
 # =============================================================================
 
-# fetch_docker_tags [NETWORK] -- the release tags in the network's image repository
-# (tn_docker_repo_for; NETWORK defaults to this node's), oldest first, at most 15.
-# Only tags that pass tn_release_tag_ok are kept, so latest, hot-patch, branch and
-# other networks' tags are never offered. Nothing when the repository or the
-# registry cannot be read.
+# fetch_docker_tags [NETWORK] -- the final release tags in the network's image
+# repository (tn_docker_repo_for; NETWORK defaults to this node's), oldest first by
+# tn_release_tag_key, at most 15. Only tags that pass tn_release_tag_final are kept,
+# so latest, hot-patch, branch, release-candidate and other networks' tags are
+# never offered (a release candidate is taken only when typed). Nothing when the
+# repository or the registry cannot be read.
 fetch_docker_tags() {
     local net="${1:-}" repo host path json
     if [[ -z "$net" ]]; then
@@ -1386,10 +1387,10 @@ fetch_docker_tags() {
     json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || return 0
     printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
         | while IFS= read -r t; do
-            if tn_release_tag_ok "$net" "$t"; then
+            if tn_release_tag_final "$net" "$t"; then
                 printf '%s\n' "$t"
             fi
-        done | sort -u -V | tail -n 15
+        done | tn_release_tags_sort | tail -n 15
 }
 
 # docker_running_digest IMAGE -- the digest (sha256:<hex>) the running IMAGE is:
@@ -1670,16 +1671,18 @@ update_fail() {
     fi
 }
 
-# update_downgrade_check RUNNING TARGET -- rc 0 unless TARGET's x.y.z is below
-# RUNNING's (either without one: rc 0, nothing to compare; a RUNNING without one,
-# when TARGET has one, is said in a warning). A downgrade is refused
+# update_downgrade_check RUNNING TARGET -- rc 0 unless TARGET is older than
+# RUNNING by tn_release_tag_newer (a release candidate is older than its final and
+# newer than the rc before it; a value with an x.y.z that is not a release tag
+# form compares as that final). Either without an x.y.z: rc 0, nothing to compare;
+# a RUNNING without one, when TARGET has one, is said in a warning. A downgrade is refused
 # (rc 1): an error event and a done event carrying "downgrade":true and
 # "storage_downgrade" (true when RUNNING is at or above STORAGE_MIGRATION_FLOOR and
 # TARGET below it: the older release cannot open the migrated data dir) in --json
 # mode, [ERROR] lines otherwise. --allow-downgrade, which only an interactive run on
 # testnet takes, lets it through with a warning.
 update_downgrade_check() {
-    local run="${1:-}" new="${2:-}" re rv nv storage=false msg net
+    local run="${1:-}" new="${2:-}" re rv nv rt nt storage=false msg net
     re='([0-9]+[.][0-9]+[.][0-9]+)'
     if [[ ! "$run" =~ $re ]]; then
         if [[ "$new" =~ $re ]]; then
@@ -1690,7 +1693,11 @@ update_downgrade_check() {
     rv="${BASH_REMATCH[1]}"
     [[ "$new" =~ $re ]] || return 0
     nv="${BASH_REMATCH[1]}"
-    if version_gte "$nv" "$rv"; then
+    rt="$run"
+    tn_release_tag_key "$rt" >/dev/null 2>&1 || rt="v${rv}"
+    nt="$new"
+    tn_release_tag_key "$nt" >/dev/null 2>&1 || nt="v${nv}"
+    if ! tn_release_tag_newer "$rt" "$nt"; then
         return 0
     fi
     if version_gte "$rv" "$STORAGE_MIGRATION_FLOOR" && ! version_gte "$nv" "$STORAGE_MIGRATION_FLOOR"; then
@@ -2596,16 +2603,16 @@ update_ref_refusal() {
         -*) printf 'Invalid ref "%s": a ref cannot start with "-".\n' "$1"; return 0 ;;
     esac
     if [[ -n "${2:-}" ]] && ! tn_release_tag_ok "$2" "${1:-}"; then
-        printf '%s is not a %s release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z): updates take release tags only, never a branch or a commit id.\n' "${1:-(empty)}" "$2"
+        printf '%s is not a %s release tag (%s): updates take release tags only, never a branch or a commit id.\n' "${1:-(empty)}" "$2" "$(tn_release_tag_grammar)"
         return 0
     fi
     return 1
 }
 
-# latest_source_ref [DIR] -- the newest release tag of this node's network on origin,
-# for --check (source installs; DIR defaults to TN_SOURCE_DIR). origin's tags are fetched into refs/tn-remote-tags/
-# (pruned; local tags are never moved), and the highest one that passes
-# tn_release_tag_ok and agrees with a local tag of the same name is printed and
+# latest_source_ref [DIR] -- the newest final release tag of this node's network on
+# origin, for --check (source installs; DIR defaults to TN_SOURCE_DIR). origin's tags are fetched into refs/tn-remote-tags/
+# (pruned; local tags are never moved), and the highest one by tn_release_tag_key
+# that passes tn_release_tag_final (no release candidate) and agrees with a local tag of the same name is printed and
 # left in LATEST_SOURCE_REF. A tag whose local copy points elsewhere is never
 # offered: SOURCE_TAG_MOVED is set to true (both globals survive only outside
 # $(...)). Prints nothing when there is none.
@@ -2630,29 +2637,29 @@ latest_source_ref() {
         fi
     done < <(git -C "$dir" for-each-ref --format='%(refname:strip=2)' refs/tn-remote-tags 2>/dev/null \
         | while IFS= read -r t; do
-            if tn_release_tag_ok "$network" "$t"; then
+            if tn_release_tag_final "$network" "$t"; then
                 printf '%s\n' "$t"
             fi
-        done | sort -u -V -r)
+        done | tn_release_tags_sort | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
     if [[ -n "$LATEST_SOURCE_REF" ]]; then
         printf '%s\n' "$LATEST_SOURCE_REF"
     fi
     return 0
 }
 
-# latest_release_ref -- the newest release tag of this node's network that origin
-# publishes (git ls-remote of TN_REPO: release installs have no checkout). Nothing
-# when it cannot be read.
+# latest_release_ref -- the newest final release tag of this node's network that
+# origin publishes (git ls-remote of TN_REPO: release installs have no checkout;
+# tn_release_tag_final, ordered by tn_release_tag_key). Nothing when it cannot be read.
 latest_release_ref() {
     local network
     network="$(detect_network 2>/dev/null)" || return 0
     GIT_ALLOW_PROTOCOL=https git ls-remote --tags --refs -- "$TN_REPO" 'v*' 9>&- 2>/dev/null \
         | awk '{ sub("^refs/tags/", "", $2); print $2 }' \
         | while IFS= read -r t; do
-            if tn_release_tag_ok "$network" "$t"; then
+            if tn_release_tag_final "$network" "$t"; then
                 printf '%s\n' "$t"
             fi
-        done | sort -u -V | tail -n 1
+        done | tn_release_tags_sort | tail -n 1
 }
 
 # Newest published docker tag. fetch_docker_tags emits oldest-first.

@@ -1518,8 +1518,8 @@ latest_docker_image() {
     json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || json=""
     if [[ -n "$json" ]]; then
         best="$(printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
-            | while IFS= read -r t; do if tn_release_tag_ok "$net" "$t"; then printf '%s\n' "$t"; fi; done \
-            | sort -u -V | tail -n 1)" || best=""
+            | while IFS= read -r t; do if tn_release_tag_final "$net" "$t"; then printf '%s\n' "$t"; fi; done \
+            | tn_release_tags_sort | tail -n 1)" || best=""
     fi
     if [[ -n "$best" ]]; then
         if digest="$(tn_registry_digest "$repo" "$best")"; then
@@ -1584,17 +1584,84 @@ tn_passphrase_ok() {
 }
 
 # tn_release_tag_ok NETWORK TAG -- rc 0 when TAG is a release tag of NETWORK:
-# testnet vX.Y.Z-adiri, mainnet vX.Y.Z (X, Y and Z digits; nothing before or
-# after). Any other NETWORK, devnet included, is rc 1. The one place that says
-# which tags the source picker, the updater and the Docker tag filter accept.
+# testnet vX.Y.Z-adiri, or its release candidate vX.Y.Z-adiri-rcN (N from 1, no
+# leading zero); mainnet vX.Y.Z, finals only (X, Y and Z digits; nothing before
+# or after). Any other NETWORK, devnet included, is rc 1. The one place that
+# says which tags the source picker, the updater and the Docker tag filter
+# accept when a tag is named. A pick of the newest release takes finals only
+# (tn_release_tag_final), so a release candidate runs only when it is named.
 tn_release_tag_ok() {
     local net="${1:-}" tag="${2:-}" re
     case "$net" in
-        testnet) re='^v[0-9]+\.[0-9]+\.[0-9]+-adiri$' ;;
+        testnet) re='^v[0-9]+\.[0-9]+\.[0-9]+-adiri(-rc[1-9][0-9]*)?$' ;;
         mainnet) re='^v[0-9]+\.[0-9]+\.[0-9]+$' ;;
         *) return 1 ;;
     esac
     [[ "$tag" =~ $re ]]
+}
+
+# tn_release_tag_final NETWORK TAG -- rc 0 when TAG passes tn_release_tag_ok and
+# is a final release, not a release candidate: what a newest-release pick may
+# offer (latest_docker_image, tn_release_newest_tag, the pickers, --check).
+tn_release_tag_final() {
+    tn_release_tag_ok "${1:-}" "${2:-}" || return 1
+    [[ "${2:-}" != *-rc[0-9]* ]]
+}
+
+# tn_release_tag_grammar -- the release tag forms, for messages.
+tn_release_tag_grammar() {
+    printf '%s\n' "testnet vX.Y.Z-adiri or the release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z; release candidates are testnet only"
+}
+
+# _tn_release_tag_key TAG -- set TN_RELEASE_TAG_KEY to TAG's sort key (see
+# tn_release_tag_key) without a subshell; rc 1 and an empty key otherwise.
+_tn_release_tag_key() {
+    local re x y z r
+    TN_RELEASE_TAG_KEY=""
+    re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?$'
+    [[ "${1:-}" =~ $re ]] || return 1
+    x=$((10#${BASH_REMATCH[1]}))
+    y=$((10#${BASH_REMATCH[2]}))
+    z=$((10#${BASH_REMATCH[3]}))
+    r="${BASH_REMATCH[6]}"
+    [[ -n "$r" ]] || r=999999999
+    printf -v TN_RELEASE_TAG_KEY '%09d %09d %09d %09d' "$x" "$y" "$z" "$r"
+}
+
+# tn_release_tag_key TAG -- print TAG's sort key "X Y Z R", each field nine
+# digits, zero-padded, so keys order the same as text (LC_ALL=C sort) and as
+# numbers: R is N for the release candidate -rcN and 999999999 for a final, so
+# rc1 < rc2 < the final of the same X.Y.Z < any rc of a higher X.Y.Z. TAG is
+# vX.Y.Z with an optional -adiri and an optional -rcN (the network is not
+# judged here: that is tn_release_tag_ok). rc 1 and nothing for anything else.
+tn_release_tag_key() {
+    _tn_release_tag_key "${1:-}" || return 1
+    printf '%s\n' "$TN_RELEASE_TAG_KEY"
+}
+
+# tn_release_tag_newer A B -- rc 0 when release tag A is newer than release tag
+# B by tn_release_tag_key (rc2 over rc1 and a final over its rc are newer; an rc
+# over its final is older). rc 1 when A is the same or older, 2 when either is
+# not a release tag form.
+tn_release_tag_newer() {
+    local a b
+    _tn_release_tag_key "${1:-}" || return 2
+    a="$TN_RELEASE_TAG_KEY"
+    _tn_release_tag_key "${2:-}" || return 2
+    b="$TN_RELEASE_TAG_KEY"
+    [[ "$a" != "$b" ]] || return 1
+    [[ "$(printf '%s\n%s\n' "$a" "$b" | LC_ALL=C sort | tail -n 1)" == "$a" ]]
+}
+
+# tn_release_tags_sort -- read release tags on stdin, one per line, and print
+# them oldest first by tn_release_tag_key, each once. Lines that are not a
+# release tag form are dropped.
+tn_release_tags_sort() {
+    local t
+    while IFS= read -r t; do
+        _tn_release_tag_key "$t" || continue
+        printf '%s %s\n' "$TN_RELEASE_TAG_KEY" "$t"
+    done | LC_ALL=C sort -u | awk '{ print $5 }'
 }
 
 # -----------------------------------------------------------------------------
@@ -1809,9 +1876,9 @@ rpc_url_is_private() {
 #   rc 0  allowed: a release tag at or above the floor, or no floor for <network>
 #   rc 1  refused: an empty ref, or a version below the floor whatever its suffix
 #   rc 2  allowed with a warning: not a release tag (main, a commit, a digest, or
-#         a pre-release such as v0.13.0-rc1), so the version is unknown
+#         a pre-release such as v0.13.0-rc1 on mainnet), so the version is unknown
 # A release tag is one tn_release_tag_ok accepts for <network> (testnet
-# vX.Y.Z-adiri, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
+# vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
 # devnet; devnet, and an empty or unknown network, have no floor.
 tn_ref_min_check() {
     local ref="${1:-}" network="${2:-}" floor example tag ver tag_re
@@ -5944,9 +6011,10 @@ print_summary() {
 #   network = "testnet" | "mainnet" | "devnet" | ""  (empty -> show everything)
 # -----------------------------------------------------------------------------
 # pick_source_version NETWORK [DIR] -- ask which release tag to build (the menu
-# goes to stderr, the answer to stdout). Offers the newest release tag of NETWORK
-# (tn_release_tag_ok) in the checkout DIR (default TN_SOURCE_DIR), at or above the oldest
-# release these scripts support, or another release tag typed in. Never a
+# goes to stderr, the answer to stdout). Offers the newest final release tag of
+# NETWORK (tn_release_tag_final, ordered by tn_release_tag_key) in the checkout DIR
+# (default TN_SOURCE_DIR), at or above the oldest release these scripts support,
+# or another release tag typed in (a testnet release candidate only so). Never a
 # branch, main or a commit id: source builds take release tags only. rc 1 on
 # cancel, on a typed value that is not a release tag of NETWORK, and for a
 # network without release tags (devnet).
@@ -5971,13 +6039,13 @@ pick_source_version() {
         print_warn "git fetch failed -- showing the tags this checkout already has" >&2
     fi
     latest="$(git -C "$dir" tag --list 'v*' 2>/dev/null | while IFS= read -r t; do
-            tn_release_tag_ok "$network" "$t" || continue
+            tn_release_tag_final "$network" "$t" || continue
             v="${t#v}"
             v="${v%%-*}"
             if [[ -z "$min_ver" ]] || version_gte "$v" "$min_ver"; then
                 printf '%s\n' "$t"
             fi
-        done | sort -V | tail -n 1)" || latest=""
+        done | tn_release_tags_sort | tail -n 1)" || latest=""
     exact="$(git -C "$dir" describe --tags --exact-match HEAD 2>/dev/null)" || exact=""
     current="${exact:-$(git -C "$dir" describe --tags --always 2>/dev/null || echo unknown)}"
 
@@ -6385,7 +6453,7 @@ _tn_release_fetch() {
     local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
     local parent stg why f want got triple tarball cc img sigrc unknown
     if ! tn_release_tag_ok "$net" "$tag"; then
-        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z)." "$fn"
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
         return 3
     fi
     [[ -n "$base" ]] || base="${TN_RELEASE_BASE_URL}/${tag}"
@@ -6908,7 +6976,7 @@ _tn_release_keys_present() {
 tn_docker_image_for_tag() {
     local net="${1:-}" tag="${2:-}" fn="${3:-}" repo img d rc=0
     if ! tn_release_tag_ok "$net" "$tag"; then
-        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z)." "$fn"
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
         return 3
     fi
     repo="$(tn_docker_repo_for "$net")" || return 1
@@ -6961,7 +7029,7 @@ tn_docker_resolve_ref() {
     esac
     if [[ -n "$tag" ]]; then
         if ! tn_release_tag_ok "$net" "$tag"; then
-            print_warn "${tag} is not a ${net} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z)." >&2
+            print_warn "${tag} is not a ${net} release tag ($(tn_release_tag_grammar))." >&2
             return 1
         fi
         img="$(tn_docker_image_for_tag "$net" "$tag" "$fn")" || return 1
@@ -7000,7 +7068,9 @@ tn_docker_recorded_tag() {
 # image is IMAGE (<repo>@sha256:<digest>), to record beside the digest: the tag
 # .node-meta records for it (tn_docker_recorded_tag), DEFAULT_DOCKER_TAG for
 # DEFAULT_DOCKER_IMAGE, else the newest of the repository's release tags (the
-# newest 15) for which the registry serves IMAGE's digest (tn_registry_digest).
+# newest 15 by tn_release_tag_key, release candidates included: this names the
+# image, it picks nothing) for which the registry serves IMAGE's digest
+# (tn_registry_digest).
 # Prints nothing, rc 1, when none matches or the registry cannot be read.
 tn_docker_release_tag_for() {
     local net="${1:-}" img="${2:-}" repo host path json t d
@@ -7020,7 +7090,7 @@ tn_docker_release_tag_for() {
     json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || return 1
     for t in $(printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
         | while IFS= read -r t; do if tn_release_tag_ok "$net" "$t"; then printf '%s\n' "$t"; fi; done \
-        | sort -u -V | tail -n 15 | sort -r -V); do
+        | tn_release_tags_sort | tail -n 15 | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }'); do
         d="$(tn_registry_digest "$repo" "$t" 2>/dev/null)" || continue
         if [[ "$d" == "${img##*@}" ]]; then
             printf '%s\n' "$t"
@@ -7108,13 +7178,14 @@ _tn_tag_sig_check() {
 # one that cannot be checked refuses on mainnet and warns on testnet. A tree
 # with local changes or untracked files refuses unless ALLOW_DIRTY is true
 # (testnet only), which discards them (reset --hard, clean -ffd). rc 0 checked
-# out, 1 refused (nothing moved), 2 failed.
+# out, 1 refused (nothing moved), 2 failed, 3 TAG is not a NETWORK release tag
+# (nothing ran; a release candidate on mainnet is one).
 tn_source_checkout_tag() {
     local dir="${1:-}" net="${2:-}" tag="${3:-}" dirty_ok="${4:-false}" fn="${5:-}"
     local remote="" have="" st why rc=0 n
     if ! tn_release_tag_ok "$net" "$tag"; then
-        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z); branches and commit ids are not built." "$fn"
-        return 1
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar)); branches and commit ids are not built." "$fn"
+        return 3
     fi
     if [[ "$dirty_ok" == "true" && "$net" != "testnet" ]]; then
         _tn_c4_say warn "--allow-dirty is taken on testnet only." "$fn"

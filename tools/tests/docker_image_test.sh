@@ -57,6 +57,8 @@ allowed "=0: mainnet-form tag refused on testnet" 1 "${R}:v0.16.0"
 allowed "=0: digest still accepted" 0 "${R}@sha256:${D64}"
 allowed "=0: release tag on the release workflow's repository accepted" 0 "${GH}:v0.16.0-adiri"
 allowed "=0: release tag on another repository refused" 1 "evil.example/adiri:v0.16.0-adiri"
+allowed "=0: a testnet release candidate accepted" 0 "${R}:v0.17.0-adiri-rc1"
+allowed "=0: rc0 refused" 1 "${R}:v0.17.0-adiri-rc0"
 TN_DOCKER_REQUIRE_DIGEST=1
 allowed "=1: release tag refused" 1 "${R}:v0.16.0-adiri"
 unset TN_DOCKER_REQUIRE_DIGEST
@@ -106,11 +108,12 @@ esac
 SH
 chmod 0755 "$T/bin/curl"
 PATH="$T/bin:$PATH"
-printf '{"name":"x","tags":["latest","v0.16.0-adiri","v0.17.0-adiri","v0.17.1-adiri-hotfix","v0.18.0-devnet","v0.9.0-adiri","v1.0.0"]}' > "$REC/tags.json"
+printf '{"name":"x","tags":["latest","v0.16.0-adiri","v0.17.0-adiri","v0.17.1-adiri-hotfix","v0.18.0-adiri-rc1","v0.18.0-devnet","v0.9.0-adiri","v1.0.0"]}' > "$REC/tags.json"
 printf 'sha256:%s\n' "$D64" > "$REC/digest.v0.17.0-adiri"
+printf 'sha256:%s\n' "$(printf '%s' "$D64" | tr 0 c)" > "$REC/digest.v0.18.0-adiri-rc1"
 rc=0; out="$(latest_docker_image testnet 2>/dev/null)" || rc=$?
 check_rc "latest testnet" 0 "$rc"
-check "latest testnet: newest release tag by digest" "${R}@sha256:${D64}" "$out"
+check "latest testnet: newest final release tag by digest (a newer rc skipped)" "${R}@sha256:${D64}" "$out"
 check_has "latest asked the manifest of v0.17.0-adiri" "1 https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/manifests/v0.17.0-adiri" "$(cat "$REC/curl.log")"
 rc=0; out="$(NETWORK=testnet latest_docker_image 2>/dev/null)" || rc=$?
 check "latest: NETWORK global" "${R}@sha256:${D64}" "$out"
@@ -148,6 +151,8 @@ out="$(tn_docker_release_tag_for testnet "$DEFAULT_DOCKER_IMAGE" 2>/dev/null)"
 check "tag for a digest: the pinned default" "$DEFAULT_DOCKER_TAG" "$out"
 rc=0; out="$(tn_docker_release_tag_for testnet "evil.example/adiri@sha256:${D2}" 2>/dev/null)" || rc=$?
 check "tag for a digest: other repository refused" "1 " "$rc $out"
+out="$(tn_docker_release_tag_for testnet "${R}@sha256:$(printf '%s' "$D64" | tr 0 c)" 2>/dev/null)"
+check "tag for a digest: a release candidate's digest names the rc" "v0.18.0-adiri-rc1" "$out"
 rc=0; out="$(tn_registry_digest "$R" 'v1;x')" || rc=$?
 check_rc "registry digest odd tag refused" 1 "$rc"
 
@@ -184,6 +189,12 @@ rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri-hotfix 2>/dev/null)" 
 check "for_tag: a non-release tag is rc 3" "3 " "$rc $out"
 rc=0; out="$(tn_docker_image_for_tag mainnet v1.0.0 2>/dev/null)" || rc=$?
 check_rc "for_tag: mainnet (no repository yet) refused" 1 "$rc"
+rc=0; out="$(tn_docker_image_for_tag mainnet v1.0.0-rc1 2>"$T/err")" || rc=$?
+check "for_tag: a mainnet release candidate is rc 3" "3 " "$rc $out"
+check_has "for_tag: the refusal names the grammar" "1" "$(grep -c 'release candidates are testnet only' "$T/err")"
+printf 'sha256:%s\n' "$D2" > "$REC/digest.v0.17.0-adiri-rc2"
+rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri-rc2 2>/dev/null)" || rc=$?
+check "for_tag: a named testnet release candidate resolves" "0 ${R}@sha256:${D2}" "$rc $out"
 : > "$T/keys/k.asc"
 FETCH_RC=0
 tn_fetch_release_image() { [[ "$FETCH_RC" -eq 0 ]] || return "$FETCH_RC"; printf '%s@sha256:%s\n' "$R" "$D64" | tr 0 f; }
@@ -210,6 +221,7 @@ res "resolve: digest taken as given, no tag" "${R}@sha256:${D64}" 0 "${R}@sha256
 res "resolve: latest refused" "${R}:latest" 1 ""
 res "resolve: bare latest refused" latest 1 ""
 res "resolve: hot-patch tag refused" v0.17.1-adiri-hotfix 1 ""
+res "resolve: a named release candidate" v0.17.0-adiri-rc2 0 "${R}@sha256:${D2} v0.17.0-adiri-rc2"
 res "resolve: other repository by digest refused" "docker.io/library/busybox@sha256:${D64}" 1 ""
 res "resolve: other repository by tag refused" "docker.io/library/busybox:v0.17.0-adiri" 1 ""
 res "resolve: leading dash refused" "-v0.17.0-adiri" 1 ""

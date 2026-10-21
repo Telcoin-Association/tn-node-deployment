@@ -3079,7 +3079,7 @@ json_check_install_flags() {
     # branch, no commit id (tn_release_tag_ok).
     if [[ -n "$RELEASE_TAG" ]]; then
         if ! tn_release_tag_ok "$NETWORK" "$RELEASE_TAG"; then
-            setup_fail "${RELEASE_TAG} is not a ${NETWORK} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z); branches and commit ids are refused."
+            setup_fail "${RELEASE_TAG} is not a ${NETWORK} release tag ($(tn_release_tag_grammar)); branches and commit ids are refused."
         fi
         check_release_floor "$RELEASE_TAG"
     fi

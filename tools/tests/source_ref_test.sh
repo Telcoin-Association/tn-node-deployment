@@ -78,11 +78,11 @@ ran_git() { [[ -s "$T/git.log" ]] && echo yes || echo no; }
 stg_empty() { [[ -z "$(ls -A "$T/stg" 2>/dev/null)" ]] && echo yes || echo no; }
 
 # --- refusals before git runs ----------------------------------------------------------
-co_refused() {  # co_refused NAME NETWORK TAG [ALLOW_DIRTY]
+co_refused() {  # co_refused NAME NETWORK TAG [ALLOW_DIRTY] [RC, default 3: not a release tag]
     local rc=0
     : > "$T/git.log"
     tn_source_checkout_tag "$T/src" "$2" "$3" "${4:-false}" >/dev/null 2>&1 || rc=$?
-    check "$1: refused, git never ran" "1 no" "$rc $(ran_git)"
+    check "$1: refused, git never ran" "${5:-3} no" "$rc $(ran_git)"
 }
 co_refused "branch main" testnet main
 co_refused "commit id" testnet 5535ef1f0425973bd81ef3162f3d07219c3456d0
@@ -90,12 +90,52 @@ co_refused "hot-patch tag" testnet v0.16.0-adiri-hotfix
 co_refused "mainnet tag on testnet" testnet v0.16.0
 co_refused "testnet tag on mainnet" mainnet v0.16.0-adiri
 co_refused "devnet" devnet v0.16.0-adiri
-co_refused "--allow-dirty on mainnet" mainnet v1.0.0 true
+co_refused "--allow-dirty on mainnet" mainnet v1.0.0 true 1
+co_refused "a release candidate on mainnet" mainnet v1.0.0-rc1
+co_refused "a testnet release candidate on mainnet" mainnet v1.0.0-adiri-rc1
+co_refused "rc0 is not a release candidate" testnet v0.17.0-adiri-rc0
+co_refused "rc01 is not a release candidate" testnet v0.17.0-adiri-rc01
+co_refused "an rc without -adiri on testnet" testnet v0.17.0-rc1
+co_refused "rc before -adiri" testnet v0.17.0-rc1-adiri
+
+# --- the tag grammar and its order ------------------------------------------------------
+tok() { local rc=0; tn_release_tag_ok "$1" "$2" || rc=$?; printf '%s' "$rc"; }
+fin() { local rc=0; tn_release_tag_final "$1" "$2" || rc=$?; printf '%s' "$rc"; }
+check "grammar: testnet final" 0 "$(tok testnet v0.17.0-adiri)"
+check "grammar: testnet rc1" 0 "$(tok testnet v0.17.0-adiri-rc1)"
+check "grammar: testnet rc12" 0 "$(tok testnet v0.17.0-adiri-rc12)"
+check "grammar: testnet rc0 refused" 1 "$(tok testnet v0.17.0-adiri-rc0)"
+check "grammar: testnet -rc without a number refused" 1 "$(tok testnet v0.17.0-adiri-rc)"
+check "grammar: mainnet final" 0 "$(tok mainnet v1.0.0)"
+check "grammar: mainnet rc refused" 1 "$(tok mainnet v1.0.0-rc1)"
+check "grammar: devnet rc refused" 1 "$(tok devnet v1.0.0-adiri-rc1)"
+check "final: a testnet final is one" 0 "$(fin testnet v0.17.0-adiri)"
+check "final: a testnet rc is not" 1 "$(fin testnet v0.17.0-adiri-rc1)"
+check "final: a mainnet final is one" 0 "$(fin mainnet v1.0.0)"
+check "final: not a release tag at all" 1 "$(fin testnet main)"
+newer() { local rc=0; tn_release_tag_newer "$1" "$2" || rc=$?; printf '%s' "$rc"; }
+check "order: rc2 is newer than rc1" 0 "$(newer v0.17.0-adiri-rc2 v0.17.0-adiri-rc1)"
+check "order: rc10 is newer than rc9" 0 "$(newer v0.17.0-adiri-rc10 v0.17.0-adiri-rc9)"
+check "order: a final is newer than its rc" 0 "$(newer v0.17.0-adiri v0.17.0-adiri-rc3)"
+check "order: an rc is older than its final" 1 "$(newer v0.17.0-adiri-rc3 v0.17.0-adiri)"
+check "order: an rc of a higher version is newer than a lower final" 0 "$(newer v0.18.0-adiri-rc1 v0.17.9-adiri)"
+check "order: 0.10.0 is newer than 0.9.0" 0 "$(newer v0.10.0-adiri v0.9.0-adiri)"
+check "order: the same tag is not newer" 1 "$(newer v0.17.0-adiri v0.17.0-adiri)"
+check "order: not a tag form" 2 "$(newer main v0.17.0-adiri)"
+check "order: keys" "000000000 000000017 000000000 000000002|000000000 000000017 000000000 999999999" \
+    "$(tn_release_tag_key v0.17.0-adiri-rc2)|$(tn_release_tag_key v0.17.0-adiri)"
+check "order: a sorted list, oldest first, each once" \
+    "v0.9.0-adiri v0.17.0-adiri-rc1 v0.17.0-adiri-rc2 v0.17.0-adiri-rc10 v0.17.0-adiri v0.18.0-adiri-rc1" \
+    "$(printf '%s\n' v0.17.0-adiri v0.17.0-adiri-rc10 main v0.18.0-adiri-rc1 v0.9.0-adiri v0.17.0-adiri-rc2 v0.17.0-adiri-rc1 v0.17.0-adiri | tn_release_tags_sort | tr '\n' ' ' | sed 's/ $//')"
 
 rc=0; out="$(update_ref_refusal main testnet)" || rc=$?
 check "update_ref_refusal: a branch is refused" "0 yes" "$rc $(has "$out" 'not a testnet release tag')"
 rc=0; update_ref_refusal v0.16.0-adiri testnet >/dev/null || rc=$?
 check_rc "update_ref_refusal: a release tag passes" 1 "$rc"
+rc=0; update_ref_refusal v0.17.0-adiri-rc1 testnet >/dev/null || rc=$?
+check_rc "update_ref_refusal: a named testnet release candidate passes" 1 "$rc"
+rc=0; out="$(update_ref_refusal v1.0.0-rc1 mainnet)" || rc=$?
+check "update_ref_refusal: a mainnet release candidate is refused, naming the grammar" "0 yes" "$rc $(has "$out" 'release candidates are testnet only')"
 rc=0; update_ref_refusal --help >/dev/null || rc=$?
 check_rc "update_ref_refusal: a leading dash is refused" 0 "$rc"
 
@@ -132,6 +172,14 @@ check "unknown running release: a warning says the downgrade check cannot be mad
 out="$(update_downgrade_check v0.16.0-adiri v0.17.0-adiri 2>&1)"
 check "known running release: no such warning" "" "$out"
 dg "older release refused" v0.17.0-adiri v0.16.0-adiri 1
+dg "rc2 over rc1 passes" v0.17.0-adiri-rc1 v0.17.0-adiri-rc2 0
+dg "rc10 over rc9 passes" v0.17.0-adiri-rc9 v0.17.0-adiri-rc10 0
+dg "final over its rc passes" v0.17.0-adiri-rc2 v0.17.0-adiri 0
+dg "rc over its final refused" v0.17.0-adiri v0.17.0-adiri-rc2 1
+dg "rc1 over rc2 refused" v0.17.0-adiri-rc2 v0.17.0-adiri-rc1 1
+dg "rc of a higher version over a lower final passes" v0.17.0-adiri v0.18.0-adiri-rc1 0
+dg "a final below a running rc refused" v0.18.0-adiri-rc1 v0.17.0-adiri 1
+dg "a running marker without a tag form compares as its final" "0.17.0" v0.17.0-adiri-rc1 1
 ALLOW_DOWNGRADE=true
 dg "--allow-downgrade, interactive testnet: passes" v0.17.0-adiri v0.16.0-adiri 0
 printf 'NETWORK=mainnet\n' > "$META"
@@ -153,6 +201,8 @@ mc() {  # mc NAME REF NETWORK EXPECTED-RC
 }
 mc "floor: testnet release tag at the floor" v0.13.0-adiri testnet 0
 mc "floor: testnet release tag below the floor" v0.12.0-adiri testnet 1
+mc "floor: testnet release candidate at the floor" v0.13.0-adiri-rc1 testnet 0
+mc "floor: testnet release candidate below the floor" v0.12.0-adiri-rc1 testnet 1
 mc "floor: testnet hot-patch tag only warns" v0.16.0-adiri-hotfix testnet 2
 mc "floor: a mainnet-form tag on testnet only warns" v0.16.0 testnet 2
 mc "floor: a -telcoin tag on testnet only warns" v0.16.0-telcoin testnet 2
@@ -269,9 +319,15 @@ printf 'three\n' > "$W/f"; G -C "$W" commit -qam three
 G -C "$W" tag -a v0.18.0-adiri -m r18
 G -C "$W" push -q origin HEAD:refs/heads/main refs/tags/v0.18.0-adiri 2>/dev/null
 co "new tag on origin: fetched and checked out" testnet v0.18.0-adiri false 0 "$(commit_of v0.18.0-adiri)"
+# A release candidate newer than every final: checked out when named.
+printf 'four\n' > "$W/f"; G -C "$W" commit -qam four
+G -C "$W" tag -a v0.19.0-adiri-rc1 -m r19rc1
+G -C "$W" push -q origin HEAD:refs/heads/main refs/tags/v0.19.0-adiri-rc1 2>/dev/null
+co "a named release candidate: checked out" testnet v0.19.0-adiri-rc1 false 0 "$(commit_of v0.19.0-adiri-rc1)"
 check "checkouts leave nothing in staging" yes "$(stg_empty)"
 
-# latest_source_ref: the newest release tag that did not move; a moved tag is flagged.
+# latest_source_ref: the newest final release tag that did not move (a newer
+# release candidate is not offered); a moved tag is flagged.
 latest_source_ref "$SRC" >/dev/null 2>&1
 check "latest_source_ref: newest unmoved tag, moved tag flagged" "v0.18.0-adiri true" "$LATEST_SOURCE_REF $SOURCE_TAG_MOVED"
 
@@ -279,7 +335,7 @@ check "latest_source_ref: newest unmoved tag, moved tag flagged" "v0.18.0-adiri 
 P="$T/pick"
 G init -q "$P"
 printf 'p\n' > "$P/f"; G -C "$P" add f; G -C "$P" commit -qm p
-for t in v0.12.0-adiri v0.16.0-adiri v0.17.0-adiri v0.18.0-adiri-hotfix v1.0.0 v1.1.0-telcoin v2.0.0-rc1; do
+for t in v0.12.0-adiri v0.16.0-adiri v0.17.0-adiri-rc1 v0.17.0-adiri v0.18.0-adiri-hotfix v0.18.0-adiri-rc2 v1.0.0 v1.1.0-telcoin v2.0.0-rc1; do
     G -C "$P" tag "$t"
 done
 G -C "$P" branch feature 2>/dev/null
@@ -293,6 +349,9 @@ check_lacks "picker: main is not offered" "main (latest" "$(cat "$T/pick.err")"
 check_lacks "picker: no branch or commit option" "branch / tag / commit" "$(cat "$T/pick.err")"
 check "picker, mainnet default: the newest vX.Y.Z tag (no suffix)" "0 v1.0.0" "$(pick mainnet '\n')"
 check "picker, another release tag typed" "0 v0.16.0-adiri" "$(pick testnet '2\nv0.16.0-adiri\n')"
+check "picker, a newer release candidate is not the default" "0 v0.17.0-adiri" "$(pick testnet '\n')"
+check "picker, a release candidate typed on testnet" "0 v0.18.0-adiri-rc2" "$(pick testnet '2\nv0.18.0-adiri-rc2\n')"
+check "picker, a release candidate typed on mainnet: refused" "1 " "$(pick mainnet '2\nv2.0.0-rc1\n')"
 check "picker, main typed: refused" "1 " "$(pick testnet '2\nmain\n')"
 check "picker, a branch typed: refused" "1 " "$(pick testnet '2\nfeature\n')"
 check "picker, a mainnet tag typed on testnet: refused" "1 " "$(pick testnet '2\nv1.0.0\n')"
