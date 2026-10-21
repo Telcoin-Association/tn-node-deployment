@@ -8,9 +8,11 @@
 # legacy registry), tn_release_newest_tag over a Releases API answer (drafts,
 # prereleases, an rc newer than the newest final, a mainnet final, no release,
 # API unreachable), latest_docker_image (the signed IMAGE_DIGEST of the newest
-# release without asking the registry; on testnet only, with no release or no
-# API, the legacy repository's newest final, then the pinned default; nothing
-# on mainnet); tn_docker_local_digest against a docker shim;
+# release without asking the registry; when that release cannot be verified, an
+# unsigned one among them, the pinned default on testnet and nothing on mainnet,
+# never the registry's digest; on testnet only, with no release or no API, the
+# legacy repository's newest final, then the pinned default; nothing on
+# mainnet); tn_docker_local_digest against a docker shim;
 # tn_docker_image_for_tag (signed digest first, the registry's on testnet only
 # when no signed release exists, never after a failed verification),
 # tn_docker_resolve_ref and tn_docker_holds_digest.
@@ -92,15 +94,17 @@ check_rc "repo empty refused" 1 "$rc"
 # makes it a 403), tags/list and manifest HEADs of the legacy repository
 # ($REC/tags.json, $REC/digest.<tag>) and of ghcr ($REC/ghtags.json,
 # $REC/ghdigest.<tag>; ghcr answers 401 without the Bearer token), and the
-# GitHub Releases API ($REC/releases.json; $REC/api.down: unreachable). Every
-# call is logged as "<head> <auth> <url>".
+# GitHub Releases API ($REC/releases.json; $REC/api.down: unreachable) and the
+# release downloads ($REC/dl/<tag>/<file>). Every call is logged as
+# "<head> <auth> <url>".
 cat > "$T/bin/curl" <<'SH'
 #!/bin/sh
-head=0; url=""; auth="-"
+head=0; url=""; auth="-"; out=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -I|-fsSI|-sI) head=1; shift ;;
         --url) url="$2"; shift 2 ;;
+        -o) out="$2"; shift 2 ;;
         -H) case "$2" in Authorization:*) auth="$(printf '%s' "$2" | tr ' ' '_')" ;; esac; shift 2 ;;
         *) shift ;;
     esac
@@ -111,6 +115,10 @@ case "$url" in
     https://api.github.com/repos/Telcoin-Association/telcoin-network/releases\?per_page=100)
         [ -f "$REC/api.down" ] && exit 7
         cat "$REC/releases.json" ;;
+    https://github.com/Telcoin-Association/telcoin-network/releases/download/*)
+        f="$REC/dl/${url#https://github.com/Telcoin-Association/telcoin-network/releases/download/}"
+        [ -f "$f" ] || exit 22
+        if [ -n "$out" ]; then cat "$f" > "$out"; else cat "$f"; fi ;;
     https://ghcr.io/token\?scope=repository:telcoin-association/telcoin-network:pull)
         [ -f "$REC/token.down" ] && exit 22
         printf '{"token":"TOK123"}' ;;
@@ -241,8 +249,47 @@ rm -f "$REC/api.down"
 printf '[]' > "$REC/releases.json"
 rc=0; out="$(latest_docker_image mainnet 2>/dev/null)" || rc=$?
 check "latest, no mainnet release: rc 1, nothing" "1 " "$rc $out"
-# A release exists: its signed IMAGE_DIGEST wins, the registry is not asked.
+# A release is listed but publishes no SHA256SUMS.asc: no verified image digest,
+# so testnet takes the pinned default with the reason, mainnet gets rc 1, and the
+# registry is never asked for that release. With gpg, a throwaway key makes the
+# keyring readable and the missing signature is the reason; without gpg
+# (bash:3.2) the missing gpg is, which ends the same way.
 cp "$REC/releases.full.json" "$REC/releases.json"
+mkdir -p "$REC/dl/v0.18.0-adiri" "$REC/dl/v1.0.0" "$T/keys2"
+printf '%s  IMAGE_DIGEST\n' "$D64" > "$REC/dl/v0.18.0-adiri/SHA256SUMS"
+cp "$REC/dl/v0.18.0-adiri/SHA256SUMS" "$REC/dl/v1.0.0/SHA256SUMS"
+why="gpg is not installed"
+if command -v gpg >/dev/null 2>&1 && command -v gpgv >/dev/null 2>&1; then
+    mkdir -m 0700 "$T/gnupg"
+    GNUPGHOME="$T/gnupg" gpg --batch --no-tty --quiet --pinentry-mode loopback --passphrase '' \
+        --quick-gen-key 'Release A <a@example.invalid>' ed25519 sign 1y 2>/dev/null
+    GNUPGHOME="$T/gnupg" gpg --batch --no-tty --quiet --armor --export a@example.invalid > "$T/keys2/a.asc" 2>/dev/null
+    if [[ -s "$T/keys2/a.asc" ]]; then
+        why="Could not download https://github.com/Telcoin-Association/telcoin-network/releases/download/v0.18.0-adiri/SHA256SUMS.asc"
+    else
+        why="No release signing key"
+    fi
+fi
+mkdir -m 0700 "$T/stage"
+export TN_RELEASE_STAGING_DIR="$T/stage"
+TN_RELEASE_KEYS_DIR="$T/keys2"
+: > "$REC/curl.log"
+rc=0; out="$(latest_docker_image testnet 2>"$T/err")" || rc=$?
+check "latest, newest release unsigned, testnet: the pinned default" "0 $DEFAULT_DOCKER_IMAGE" "$rc $out"
+check_has "latest, newest release unsigned: the reason (${why%% http*})" "1" "$(grep -cF "$why" "$T/err")"
+check_has "latest, newest release unsigned: no verified digest, registry not asked" "1" \
+    "$(grep -c 'v0.18.0-adiri gave no verified image digest.*registry is not asked.*offering' "$T/err")"
+check "latest, newest release unsigned: no registry call" "0" "$(grep -c 'ghcr.io\|pkg.dev' "$REC/curl.log")"
+: > "$REC/curl.log"
+rc=0; out="$(latest_docker_image mainnet 2>"$T/err")" || rc=$?
+check "latest, newest mainnet release unsigned: rc 1, nothing" "1 " "$rc $out"
+check_has "latest, newest mainnet release unsigned: only from a signed release" "1" \
+    "$(grep -c 'v1.0.0 gave no verified image digest.*taken only from a signed release' "$T/err")"
+check "latest, newest mainnet release unsigned: no registry call" "0" "$(grep -c 'ghcr.io\|pkg.dev' "$REC/curl.log")"
+check "latest, newest release unsigned: nothing left in staging" "" "$(ls -A "$T/stage")"
+TN_RELEASE_KEYS_DIR="$T/keys"
+unset TN_RELEASE_STAGING_DIR
+# A release exists: its signed IMAGE_DIGEST wins, the registry is not asked.
 : > "$T/keys/k.asc"
 SIGNED="${GH}@sha256:$(printf '%s' "$D64" | tr 0 f)"
 tn_fetch_release_image() { printf '%s %s\n' "$1" "$2" >> "$REC/fetch.log"; printf '%s\n' "$SIGNED"; }
@@ -254,6 +301,15 @@ check "latest, release published: no registry asked" "0" "$(grep -c 'manifests\|
 : > "$REC/fetch.log"
 rc=0; out="$(latest_docker_image mainnet 2>/dev/null)" || rc=$?
 check "latest, mainnet release published: the signed IMAGE_DIGEST of v1.0.0" "0 ${SIGNED} v1.0.0 mainnet" "$rc $out $(cat "$REC/fetch.log")"
+# The newest release fails verification (rc 1): the same fallbacks, never the registry.
+tn_fetch_release_image() { return 1; }
+: > "$REC/curl.log"
+rc=0; out="$(latest_docker_image testnet 2>"$T/err")" || rc=$?
+check "latest, newest release refused, testnet: the pinned default" "0 $DEFAULT_DOCKER_IMAGE" "$rc $out"
+check_has "latest, newest release refused: said" "1" "$(grep -c 'v0.18.0-adiri gave no verified image digest: it was refused' "$T/err")"
+rc=0; out="$(latest_docker_image mainnet 2>/dev/null)" || rc=$?
+check "latest, newest mainnet release refused: rc 1, nothing" "1 " "$rc $out"
+check "latest, newest release refused: no registry call" "0" "$(grep -c 'ghcr.io\|pkg.dev' "$REC/curl.log")"
 unset -f tn_fetch_release_image
 rm -f "$T/keys/k.asc"
 printf '[]' > "$REC/releases.json"

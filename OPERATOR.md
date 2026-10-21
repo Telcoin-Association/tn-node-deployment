@@ -854,7 +854,7 @@ telcoin-network-$TAG-x86_64-unknown-linux-gnu/telcoin-network --version
 The scripts compare those three lines with the hashes they pin for the network as well.
 The tarball holds `telcoin-network`, `LICENSE-APACHE`, `LICENSE-MIT` and `NOTICE` and nothing else, and `--version` must name the tag's version, `X.Y.Z` (a release candidate's binary reports `X.Y.Z` too, without `-rcN`).
 Run `--version` as an unprivileged user, never as root.
-For a Docker install, `IMAGE_DIGEST` is one line that names the image by digest in the repository the release pipeline publishes to, `ghcr.io/telcoin-association/telcoin-network@sha256:<digest>`. Pull and run it by that digest (`docker pull "$(cat IMAGE_DIGEST)"`), never by a tag. The scripts take the newest image the same way: the digest in the signed `IMAGE_DIGEST` of the newest release, not the registry's answer.
+For a Docker install, `IMAGE_DIGEST` is one line that names the image by digest in the repository the release pipeline publishes to, `ghcr.io/telcoin-association/telcoin-network@sha256:<digest>`. Pull and run it by that digest (`docker pull "$(cat IMAGE_DIGEST)"`), never by a tag. The scripts take the newest image the same way: the digest in the signed `IMAGE_DIGEST` of the newest release, not the registry's answer. When that release cannot be verified (a check fails, or its signed files, gpg or a key file are missing), testnet takes `DEFAULT_DOCKER_IMAGE` with a warning that gives the reason and mainnet stops; the registry's digest is never taken for a release published on GitHub.
 
 A script release is the `scripts-v*` tag of this repository, with `MANIFEST` and `MANIFEST.sig` at its root.
 Check it against the signer list you already trust, the `lib/allowed_signers` of your installed scripts:

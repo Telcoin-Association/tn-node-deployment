@@ -1515,21 +1515,35 @@ readonly TN_RELEASES_API_URL="https://api.github.com/repos/Telcoin-Association/t
 # latest_docker_image [NETWORK] -- the newest release image of NETWORK (default:
 # the NETWORK global, else testnet) by digest, <repo>@sha256:<hex>. The release
 # is the newest final the channel has on GitHub (tn_release_newest_tag), and its
-# image comes from tn_docker_image_for_tag: the signed IMAGE_DIGEST, or on testnet
-# only, when that release publishes no signed files, the registry's digest for
-# it. Never a tag, a release candidate, latest, hot-patch or devnet tags. Mirrors
-# the UI's latest_docker_image. On testnet only, while the channel has no release
-# (or the Releases API cannot be read), the newest final tag of the legacy
-# repository (TN_TESTNET_LEGACY_IMAGE_REPO) by its registry digest, else
+# image is the one its signed IMAGE_DIGEST names (tn_fetch_release_image), never
+# the registry's digest. When that release cannot be verified (a check fails, its
+# signed files cannot be downloaded, gpg or a key file is missing), testnet takes
+# DEFAULT_DOCKER_IMAGE with a warning that gives the reason, and mainnet gets
+# rc 1. Never a tag, a release candidate, latest, hot-patch or devnet tags.
+# Mirrors the UI's latest_docker_image. On testnet only, while the channel has no
+# release (or the Releases API cannot be read), the newest final tag of the
+# legacy repository (TN_TESTNET_LEGACY_IMAGE_REPO) by its registry digest, else
 # DEFAULT_DOCKER_IMAGE, each with a warning on stderr. Mainnet never falls back.
 # rc 1 and nothing on stdout for a network without a repository, or when nothing
 # can be resolved.
 latest_docker_image() {
-    local net="${1:-${NETWORK:-testnet}}" repo tag best="" digest
+    local net="${1:-${NETWORK:-testnet}}" repo tag best="" digest img why rc=0
     tn_docker_repo_for "$net" >/dev/null || return 1
     if tag="$(tn_release_newest_tag "$net")"; then
-        tn_docker_image_for_tag "$net" "$tag"
-        return $?
+        img="$(tn_fetch_release_image "$tag" "$net")" || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            printf '%s\n' "$img"
+            return 0
+        fi
+        why="it was refused (see above)"
+        [[ $rc -ne 2 ]] || why="its signed files could not be downloaded or checked (see above)"
+        if [[ "$net" != "testnet" ]]; then
+            print_warn "Release ${tag} gave no verified image digest: ${why}. A ${net} image is taken only from a signed release." >&2
+            return 1
+        fi
+        print_warn "Release ${tag} gave no verified image digest: ${why}. The registry is not asked for a published release; offering ${DEFAULT_DOCKER_TAG} (${DEFAULT_DOCKER_IMAGE}) instead (testnet only)." >&2
+        printf '%s\n' "$DEFAULT_DOCKER_IMAGE"
+        return 0
     fi
     [[ "$net" == "testnet" ]] || return 1
     repo="$TN_TESTNET_LEGACY_IMAGE_REPO"
@@ -7086,13 +7100,16 @@ _tn_release_keys_present() {
 }
 
 # tn_docker_image_for_tag NETWORK TAG [progress-fn] -- print NETWORK's release
-# image TAG by digest, <repo>@sha256:<hex>. The digest comes from the signed
+# image TAG by digest, <repo>@sha256:<hex>, for a TAG that is named (--release-tag,
+# --docker-image, a typed tag, an update ref). The digest comes from the signed
 # release (tn_fetch_release_image). On testnet only, when no release signing key
-# is installed, or the release publishes no signed files (a network rc 2, as for
-# the releases made before signed releases), the digest the registry serves for
-# the tag is used instead, with a warning: the network's repository first, then
-# the legacy one (TN_TESTNET_LEGACY_IMAGE_REPO), each with its pull token. A
-# release whose files fail verification is never replaced by the registry's
+# is installed, or the release publishes no signed files (a network rc 2), the
+# digest the registry serves for the tag is used instead, with a warning: the
+# network's repository first, then the legacy one (TN_TESTNET_LEGACY_IMAGE_REPO),
+# each with its pull token. That fallback is the legacy case, a tag with no
+# signed release such as the releases made before signed releases
+# (v0.16.0-adiri); the newest-release pick (latest_docker_image) never takes it.
+# A release whose files fail verification is never replaced by the registry's
 # answer. rc 1 refused or not resolvable, 3 TAG is not a NETWORK release tag.
 tn_docker_image_for_tag() {
     local net="${1:-}" tag="${2:-}" fn="${3:-}" repo img d r rc=0
