@@ -9,10 +9,29 @@ download a release's SHA256SUMS and SHA256SUMS.asc and run
 
     gpgv --status-fd 1 --keyring <every *.asc here, dearmored> SHA256SUMS.asc SHA256SUMS
 
-They accept the release only when gpgv reports a good signature (GOODSIG then
-VALIDSIG) whose primary key fingerprint belongs to one of these files, and no
-line reports BADSIG, EXPKEYSIG, REVKEYSIG, NO_PUBKEY, ERRSIG or EXPSIG. Then
-every file used from the release (the tarball, IMAGE_DIGEST) must match its
+and read its status lines:
+
+  - accepted only when at least one signature is good (GOODSIG then VALIDSIG)
+    and its primary key fingerprint belongs to one of these files;
+  - refused on any BADSIG, by whichever key;
+  - refused on EXPKEYSIG, REVKEYSIG or EXPSIG: these come only from a key in
+    the keyring, which holds the keys listed here, so an expired or revoked
+    listed key refuses the release even beside another good signature;
+  - refused when no listed key made a good signature: an unsigned file, or one
+    signed only by keys that are not here;
+  - a further signature by a key that is not here (NO_PUBKEY, or ERRSIG for a
+    missing key) is not checked and does not refuse: the scripts print a
+    warning that names its key id, once. Any other ERRSIG refuses.
+
+Why an unknown co-signer only warns: the telcoin-network release pipeline
+refuses to sign, verify or publish a SHA256SUMS.asc that carries any
+signature that is not good or not by an allowlisted maintainer key, and the
+manual check on the install page refuses one too. So a published release only
+ever carries allowlisted signatures, and the warning covers the one case left:
+a co-signer allowlisted on telcoin-network main whose key has not shipped here
+yet (this directory lags main's list until the next script release).
+
+Then every file used from the release (the tarball, IMAGE_DIGEST) must match its
 SHA256SUMS line, and the chain-config lines must carry the hashes these scripts
 pin. IMAGE_DIGEST must name an image repository the scripts accept for the
 network (on testnet the Artifact Registry adiri repository or
@@ -73,8 +92,9 @@ Adding or removing a key
 
 A release signed only by a key that is not here yet is refused until the
 script release that carries the key is installed. A release whose
-SHA256SUMS.asc also carries a signature by a key that is not here is refused
-as well (NO_PUBKEY): add every signer's key before that release is installed.
+SHA256SUMS.asc carries a good signature by a key here and also a signature by
+a key that is not here is taken on the first, with a warning that names the
+second key's id (see above); ship every signer's key so the warning goes away.
 
 While this directory holds no *.asc file, no release can be verified:
 --install-method release, release updates and every mainnet image are

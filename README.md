@@ -1023,7 +1023,7 @@ A telcoin-network release publishes `SHA256SUMS` and its detached GPG signature,
 `setup-node.sh --install-method release`, a Docker install given a release tag, and `update-node.sh` on release and Docker installs check a release the same way:
 
 1. Release tags only: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet. Branches, commit ids and `latest` are refused.
-2. `gpgv` checks `SHA256SUMS.asc` against the GPG public keys this script release ships as `lib/release-keys/*.asc`. The release is accepted only on a good signature from one of those keys, and refused when `gpgv` reports `BADSIG`, `EXPKEYSIG`, `REVKEYSIG`, `NO_PUBKEY`, `ERRSIG` or `EXPSIG`. The keys reach a host inside the signed script release, like every other file. This script release ships `grantkee.asc` (primary key `4E36D35A4AB61B589861D01AC7173F2377CA7573`, expires 2028-10-16); the key list, the expiry dates and how a key is renewed are in `lib/release-keys/README`. With no key file installed, every release download is refused.
+2. `gpgv` checks `SHA256SUMS.asc` against the GPG public keys this script release ships as `lib/release-keys/*.asc`. The release is accepted only on a good signature (`GOODSIG` and `VALIDSIG`) by one of those keys. It is refused on a `BADSIG` by any key, on `EXPKEYSIG`, `REVKEYSIG` or `EXPSIG` (an expired or revoked listed key refuses even beside another good signature), and when no listed key signed it (an unsigned file, or one signed only by keys that are not shipped). A further signature by a key that is not shipped (`NO_PUBKEY`, or `ERRSIG` for a missing key) is not checked and does not refuse: the scripts print one warning that names its key id. The telcoin-network release pipeline refuses to sign, verify or publish a `SHA256SUMS.asc` that carries any signature that is not good or not by an allowlisted maintainer key, and the manual check on the install page refuses one too, so a published release only ever carries allowlisted signatures. The warning covers the one case left: a co-signer allowlisted on telcoin-network main whose key has not shipped in `lib/release-keys/` yet (the scripts' list lags main's until the next script release). The keys reach a host inside the signed script release, like every other file. This script release ships `grantkee.asc` (primary key `4E36D35A4AB61B589861D01AC7173F2377CA7573`, expires 2028-10-16); the key list, the expiry dates and how a key is renewed are in `lib/release-keys/README`. With no key file installed, every release download is refused.
 3. The tarball and `IMAGE_DIGEST` must match their lines, and the three chain-config lines must carry the SHA-256 values this script release pins for the network. Mainnet has no pins yet, so mainnet release installs are refused until a script release publishes them.
 4. Only the binary is taken out of the tarball, into the root-only staging directory `/var/lib/telcoin-staging`. Its `--version` is run by the unprivileged `tn-build` account, never by root, and must name the tag's version and the network's build features (none on mainnet; `adiri`, optionally with `faucet`, on testnet).
 5. A Docker image is pulled by the digest from `IMAGE_DIGEST`, and `update-node.sh` and `edit-config.sh` check that Docker holds it under that digest after the pull.
@@ -1612,9 +1612,11 @@ The library every script sources. Scripts 2.0.0 refuse to run on an older copy a
 - The committee check (`tn_committee_down_guard`) refuses a stop when the members already down
   plus this node would halt consensus. When it cannot count them it refuses on a mainnet node
   that may be staked, and warns and goes ahead on testnet.
-- Releases are verified with `gpgv` against `lib/release-keys/*.asc` (refused on BADSIG,
-  EXPKEYSIG, REVKEYSIG, NO_PUBKEY or ERRSIG; with no key file every release download is
-  refused). Release tags are `vX.Y.Z-adiri` on testnet and `vX.Y.Z` on mainnet.
+- Releases are verified with `gpgv` against `lib/release-keys/*.asc`: a good signature by a
+  listed key is required; BADSIG by any key, EXPKEYSIG, REVKEYSIG and EXPSIG refuse; a
+  further signature by a key that is not shipped (NO_PUBKEY, or ERRSIG for a missing key)
+  is a warning naming its key id. With no key file every release download is refused. The
+  first key ships: `lib/release-keys/grantkee.asc`. Release tags are `vX.Y.Z-adiri` on testnet and `vX.Y.Z` on mainnet.
 - Docker images run by digest: `DEFAULT_DOCKER_IMAGE` is
   `us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea`.
 - Chain configs are checked against pinned sha256 values (`TESTNET_CHAIN_CONFIGS_TAG`

@@ -846,7 +846,7 @@ tar -xzf telcoin-network-$TAG-x86_64-unknown-linux-gnu.tar.gz
 telcoin-network-$TAG-x86_64-unknown-linux-gnu/telcoin-network --version
 ```
 
-`gpgv` must report a good signature; the scripts also refuse a release when any line reports `BADSIG`, `EXPKEYSIG`, `REVKEYSIG`, `NO_PUBKEY` or `ERRSIG`.
+`gpgv` must report a good signature by a shipped key. The scripts refuse a release when any line reports `BADSIG` (by any key), `EXPKEYSIG`, `REVKEYSIG` or `EXPSIG`, or when no shipped key signed it. A further signature by a key that is not shipped (`NO_PUBKEY`, or `ERRSIG` for a missing key) only draws a warning that names its key id: the release pipeline publishes only allowlisted signatures, so that is a maintainer key that a later script release ships. Run `update-scripts.sh` to take it.
 `sha256sum` must print `OK` for all five names: the `git archive` line puts the tagged chain configs at the paths `SHA256SUMS` names, and without it `--ignore-missing` skips them silently.
 The scripts compare those three lines with the hashes they pin for the network as well.
 The tarball holds `telcoin-network`, `LICENSE-APACHE`, `LICENSE-MIT` and `NOTICE` and nothing else, and `--version` must name the tag.

@@ -47,7 +47,9 @@ Releases are checked with `gpgv` against the keys in `lib/release-keys/`, and th
 `IMAGE_DIGEST` and chain-config hashes against `SHA256SUMS`. The first key ships with this
 release: `lib/release-keys/grantkee.asc` (primary `4E36D35A4AB61B589861D01AC7173F2377CA7573`,
 expires 2028-10-16), tracked by the updater like the scripts; the UI's copy takes it with
-`install-ui.sh --update`. Updates take release tags only
+`install-ui.sh --update`. A release needs a good signature by a shipped key; a BADSIG by any
+key, an expired or revoked key and an expired signature refuse it, and a further signature by
+a key that has not shipped yet is a warning that names its key id. Updates take release tags only
 (testnet `vX.Y.Z-adiri`, mainnet `vX.Y.Z`), refuse downgrades and check afterwards that a
 voting node votes again. Source builds run as `tn-build`. Docker images run by digest, Docker
 comes from its own apt repository after a key check, and `live-restore` is on.

@@ -6260,19 +6260,37 @@ _tn_release_keyring() {
 }
 
 # _tn_release_sig_ok DIR -- gpgv over DIR/SHA256SUMS with DIR/SHA256SUMS.asc and
-# DIR/keyring.gpg, read from the status lines: rc 0 when some GOODSIG is followed
-# by a VALIDSIG whose primary key fingerprint (its last field) is in DIR/allow,
-# and no line says BADSIG, EXPKEYSIG, REVKEYSIG, NO_PUBKEY, ERRSIG or EXPSIG.
-# Prints the refusing keyword (or "NOSIG") on rc 1.
+# DIR/keyring.gpg (the keys of lib/release-keys), read from the status lines.
+# rc 0 when some GOODSIG is followed by a VALIDSIG whose primary key fingerprint
+# (its last field) is in DIR/allow, and no line says BADSIG (by any key),
+# EXPKEYSIG, REVKEYSIG or EXPSIG. A signature by a key that is not in the
+# keyring (NO_PUBKEY, or ERRSIG with code 9) refuses nothing by itself: such a
+# co-signer is one whose key has not shipped here yet. Any other ERRSIG refuses.
+# Prints one line, "<verdict> [<key id>...]": GOOD on rc 0; on rc 1 the refusing
+# keyword, or NOSIG when no listed key made a good signature. The key ids are
+# those of the signatures by keys not in the keyring, each once.
 _tn_release_sig_ok() {
-    local d="$1" out tag kw rest fpr good=0 ok=0 bad=""
+    local d="$1" out tag kw rest fpr id code x good=0 ok=0 bad="" unknown=""
     out="$(GNUPGHOME="$d/gnupg" gpgv --status-fd 1 --keyring "$d/keyring.gpg" \
         "$d/SHA256SUMS.asc" "$d/SHA256SUMS" 2>/dev/null)" || true
     while read -r tag kw rest; do
         [[ "$tag" == "[GNUPG:]" ]] || continue
         case "$kw" in
-            BADSIG|EXPKEYSIG|REVKEYSIG|NO_PUBKEY|ERRSIG|EXPSIG)
+            BADSIG|EXPKEYSIG|REVKEYSIG|EXPSIG)
                 [[ -n "$bad" ]] || bad="$kw"
+                ;;
+            NO_PUBKEY|ERRSIG)
+                # ERRSIG <keyid> <pkalgo> <hashalgo> <class> <time> <code> [<fpr>]
+                read -r id x x x x code x <<< "$rest"
+                [[ "$kw" == NO_PUBKEY ]] && code=9
+                if [[ "$code" != 9 || ! "$id" =~ ^[0-9A-F]{16,40}$ ]]; then
+                    [[ -n "$bad" ]] || bad="ERRSIG"
+                else
+                    case " ${unknown} " in
+                        *" ${id} "*) ;;
+                        *) unknown="${unknown:+${unknown} }${id}" ;;
+                    esac
+                fi
                 ;;
             GOODSIG) good=1 ;;
             VALIDSIG)
@@ -6285,13 +6303,14 @@ _tn_release_sig_ok() {
         esac
     done <<< "$out"
     if [[ -n "$bad" ]]; then
-        printf '%s\n' "$bad"
+        printf '%s%s\n' "$bad" "${unknown:+ ${unknown}}"
         return 1
     fi
     if [[ "$ok" -ne 1 ]]; then
-        printf 'NOSIG\n'
+        printf 'NOSIG%s\n' "${unknown:+ ${unknown}}"
         return 1
     fi
+    printf 'GOOD%s\n' "${unknown:+ ${unknown}}"
     return 0
 }
 
@@ -6364,7 +6383,7 @@ _tn_release_file_ok() {
 # removed on every failure.
 _tn_release_fetch() {
     local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
-    local parent stg why f want got triple tarball cc img
+    local parent stg why f want got triple tarball cc img sigrc unknown
     if ! tn_release_tag_ok "$net" "$tag"; then
         _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag (testnet vX.Y.Z-adiri, mainnet vX.Y.Z)." "$fn"
         return 3
@@ -6404,18 +6423,31 @@ _tn_release_fetch() {
             return 2
         fi
     done
-    if ! why="$(_tn_release_sig_ok "$stg")"; then
+    sigrc=0
+    why="$(_tn_release_sig_ok "$stg")" || sigrc=$?
+    unknown=""
+    case "$why" in
+        *" "*) unknown="${why#* }" ;;
+    esac
+    why="${why%% *}"
+    if [[ $sigrc -ne 0 ]]; then
         case "$why" in
-            BADSIG) why="the signature does not match SHA256SUMS (BADSIG)" ;;
-            EXPKEYSIG) why="it was made by an expired key (EXPKEYSIG)" ;;
-            REVKEYSIG) why="it was made by a revoked key (REVKEYSIG)" ;;
-            EXPSIG) why="the signature has expired (EXPSIG)" ;;
-            NO_PUBKEY|ERRSIG) why="a signature is by a key that is not in $(_tn_release_keys_dir) (${why})" ;;
-            *) why="no good signature by a key in $(_tn_release_keys_dir)" ;;
+            BADSIG) why="a signature does not match SHA256SUMS (BADSIG)" ;;
+            EXPKEYSIG) why="a signature was made by an expired key (EXPKEYSIG)" ;;
+            REVKEYSIG) why="a signature was made by a revoked key (REVKEYSIG)" ;;
+            EXPSIG) why="a signature has expired (EXPSIG)" ;;
+            ERRSIG) why="a signature could not be checked (ERRSIG)" ;;
+            *)
+                why="no good signature by a key in $(_tn_release_keys_dir)"
+                [[ -z "$unknown" ]] || why="${why}; it is signed only by key ${unknown}, which is not there"
+                ;;
         esac
         _tn_c4_say warn "Release ${tag}: SHA256SUMS is not verified: ${why}. Nothing from this release is used." "$fn"
         _tn_release_cleanup "$stg"
         return 1
+    fi
+    if [[ -n "$unknown" ]]; then
+        _tn_c4_say warn "Release ${tag}: SHA256SUMS.asc also carries a signature by key ${unknown}, which is not in $(_tn_release_keys_dir), so that signature was not checked. The release is taken on the good signature by a listed key; update-scripts.sh brings newer keys." "$fn"
     fi
     if ! why="$(_tn_release_sums_names "${stg}/SHA256SUMS" "$tag" "$net")"; then
         _tn_c4_say warn "Release ${tag}: ${why}." "$fn"
@@ -6477,8 +6509,9 @@ _tn_release_fetch() {
 # SHA256SUMS, SHA256SUMS.asc, IMAGE_DIGEST and this host's tarball for release
 # TAG into a new root-only directory under /var/lib/telcoin-staging, and check
 # them: the signature with gpgv against the keys in lib/release-keys (a GOODSIG
-# and VALIDSIG by a listed primary key; any BADSIG, EXPKEYSIG, REVKEYSIG,
-# NO_PUBKEY, ERRSIG or EXPSIG refuses), the names SHA256SUMS lists, its
+# and VALIDSIG by a listed primary key; any BADSIG, EXPKEYSIG, REVKEYSIG or
+# EXPSIG refuses; a further signature by a key that is not there, NO_PUBKEY or
+# ERRSIG, is a warning that names its key id), the names SHA256SUMS lists, its
 # chain-config hashes against this script release's pins, and each file's hash.
 # BASE_URL defaults to the GitHub release of TAG. Prints the tarball path; the
 # verified SHA256SUMS sits beside it (TN_RELEASE_SUMS is set to it when the

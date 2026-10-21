@@ -6,11 +6,16 @@
 # a temp GNUPGHOME). A curl shim serves the fixture for https://fixture.invalid/
 # and records that every download used --proto =https. Cases: a good release;
 # BADSIG (SHA256SUMS changed after signing); a tampered tarball; a revoked key
-# (REVKEYSIG); an expired key (EXPKEYSIG); an unknown key; a second signature by
-# an unknown key; a chain-config line that differs from the pins; an extra name;
-# a missing file (rc 2); no keys; a bad tag (rc 3, nothing downloaded); the
-# staging dir is empty after every failure. Without gpg (bash:3.2) the gpg cases
-# SKIP.
+# (REVKEYSIG), alone and beside a good signature; an expired key (EXPKEYSIG); an
+# unknown key alone (refused); a good signature plus one by an unknown key
+# (taken, one warning naming its key id); a BADSIG by a second listed key; a key
+# file with two primary keys; a chain-config line that differs from the pins; an
+# extra name; a missing file (rc 2); no keys; a bad tag (rc 3, nothing
+# downloaded); the staging dir is empty after every failure. The status-line
+# policy of _tn_release_sig_ok is also checked against a stubbed gpgv, for the
+# lines a real keyring cannot produce (a BADSIG by a key that is not there,
+# EXPSIG, an ERRSIG other than a missing key). Without gpg (bash:3.2) the gpg
+# cases SKIP.
 #
 #   bash tools/tests/release_fetch_test.sh
 #
@@ -97,6 +102,55 @@ rc=0; tn_release_version_ok "telcoin-network-cli Version: 0.17.0" mainnet v0.17.
 check_rc "no Build Features line refused" 1 "$rc"
 rc=0; tn_release_version_ok "$(V 0.17.0 '*')" testnet v0.17.0-adiri 2>/dev/null || rc=$?
 check_rc "a glob feature is refused, not expanded" 1 "$rc"
+
+# --- status-line policy, gpgv stubbed ----------------------------------------------
+SD="$T/sigpol"
+mkdir -p "$SD/bin"
+PA=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+PB=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+printf '%s\n%s\n' "$PA" "$PB" > "$SD/allow"
+printf '#!/bin/sh\ncat "$SIG_STATUS"\n' > "$SD/bin/gpgv"
+chmod 0755 "$SD/bin/gpgv"
+GA="[GNUPG:] GOODSIG AAAAAAAAAAAAAAAA A <a@example.invalid>
+[GNUPG:] VALIDSIG ${PA} 2026-10-21 0 0 4 0 22 10 00 ${PA}"
+GB="[GNUPG:] GOODSIG BBBBBBBBBBBBBBBB B <b@example.invalid>
+[GNUPG:] VALIDSIG ${PB} 2026-10-21 0 0 4 0 22 10 00 ${PB}"
+UX="[GNUPG:] ERRSIG 1111222233334444 22 10 00 1792597639 9 11112222333344445555666677778888AAAABBBB
+[GNUPG:] NO_PUBKEY 1111222233334444"
+UY="[GNUPG:] ERRSIG 5555666677778888 1 8 00 1792597639 9 -
+[GNUPG:] NO_PUBKEY 5555666677778888"
+pol() { # STATUS-LINES -> "<rc> <printed line>"
+    local rc=0 v
+    printf '%s\n' "$1" > "$SD/status"
+    v="$(SIG_STATUS="$SD/status" PATH="$SD/bin:$PATH" _tn_release_sig_ok "$SD")" || rc=$?
+    printf '%s %s' "$rc" "$v"
+}
+check "policy: a good listed signature" "0 GOOD" "$(pol "$GA")"
+check "policy: two good listed signatures" "0 GOOD" "$(pol "$GA
+$GB")"
+check "policy: good plus an unknown co-signer: taken, its key id named once" "0 GOOD 1111222233334444" "$(pol "$GA
+$UX")"
+check "policy: two unknown co-signers, each named once" "0 GOOD 1111222233334444 5555666677778888" "$(pol "$UX
+$GA
+$UY
+$UX")"
+check "policy: only an unknown signer refuses" "1 NOSIG 1111222233334444" "$(pol "$UX")"
+check "policy: no signature at all refuses" "1 NOSIG" "$(pol "")"
+check "policy: BADSIG by a key that is not there refuses" "1 BADSIG" "$(pol "$GA
+[GNUPG:] BADSIG 1111222233334444 X <x@example.invalid>")"
+check "policy: BADSIG by a second listed key refuses" "1 BADSIG" "$(pol "$GA
+[GNUPG:] BADSIG BBBBBBBBBBBBBBBB B <b@example.invalid>")"
+check "policy: EXPSIG refuses" "1 EXPSIG" "$(pol "$GA
+[GNUPG:] EXPSIG BBBBBBBBBBBBBBBB B <b@example.invalid>")"
+check "policy: EXPKEYSIG refuses" "1 EXPKEYSIG" "$(pol "[GNUPG:] EXPKEYSIG BBBBBBBBBBBBBBBB B <b@example.invalid>
+$GA")"
+check "policy: REVKEYSIG beside a good signature refuses" "1 REVKEYSIG" "$(pol "$GA
+[GNUPG:] REVKEYSIG BBBBBBBBBBBBBBBB B <b@example.invalid>")"
+check "policy: an ERRSIG other than a missing key refuses" "1 ERRSIG" "$(pol "$GA
+[GNUPG:] ERRSIG BBBBBBBBBBBBBBBB 99 10 00 1792597639 4 ${PB}")"
+check "policy: a VALIDSIG whose primary key is not listed refuses" "1 NOSIG" "$(pol "[GNUPG:] GOODSIG CCCCCCCCCCCCCCCC C <c@example.invalid>
+[GNUPG:] VALIDSIG CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC 2026-10-21 0 0 4 0 22 10 00 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")"
+check "policy: a VALIDSIG without its GOODSIG refuses" "1 NOSIG" "$(pol "[GNUPG:] VALIDSIG ${PA} 2026-10-21 0 0 4 0 22 10 00 ${PA}")"
 
 if ! command -v gpg >/dev/null 2>&1 || ! command -v gpgv >/dev/null 2>&1; then
     skip "release fixture" "gpg absent"
@@ -200,10 +254,14 @@ fetch "$TAG"
 check_rc "unknown key refused" 1 "$RC"
 stage_empty "unknown key"
 
-# --- a good signature plus one by an unknown key ------------------------------------------
+# --- a good signature plus one by an unknown key: taken, with one warning ------------------
+KB="${FB:24:16}"
 sign "$FA" "$FB"
 fetch "$TAG"
-check_rc "second signature by an unknown key refused" 1 "$RC"
+check_rc "a good signature plus one by an unknown key: taken" 0 "$RC"
+check "unknown co-signer: one warning line names its key id" "1" "$(grep -c "$KB" "$T/err")"
+check_has "unknown co-signer: the warning says the key is not there" "1" "$(grep -c 'not in .*so that signature was not checked' "$T/err")"
+[[ "$RC" -eq 0 ]] && _tn_release_cleanup "${OUT%/*}"
 stage_empty "two signatures"
 
 # --- two good signatures by listed keys ----------------------------------------------------
@@ -212,9 +270,36 @@ sign "$FA" "$FB"
 fetch "$TAG"
 check_rc "two listed signers" 0 "$RC"
 [[ "$RC" -eq 0 ]] && _tn_release_cleanup "${OUT%/*}"
+check "two listed signers: no warning" "0" "$(grep -c 'not checked' "$T/err")"
+
+# --- a BADSIG by the second listed key next to a good one ----------------------------------
+printf 'not the release\n' > "$T/other.txt"
+sign "$FA"
+G -u "$FB" --armor --detach-sign -o - "$T/other.txt" >> "$REL/SHA256SUMS.asc"
+fetch "$TAG"
+check_rc "a BADSIG by a second listed key refused" 1 "$RC"
+check_has "second listed key: BADSIG named" "1" "$(grep -c BADSIG "$T/err")"
+stage_empty "BADSIG by a second listed key"
 rm -f "$KEYS/b.asc"
 
+# --- one key file carrying two primary keys --------------------------------------------------
+mv "$KEYS/a.asc" "$T/a.asc.away"
+G --armor --export "$FA" "$FB" > "$KEYS/ab.asc"
+sign "$FB"
+fetch "$TAG"
+check_rc "one armored block, two primaries: the second one's signature taken" 0 "$RC"
+[[ "$RC" -eq 0 ]] && _tn_release_cleanup "${OUT%/*}"
+{ G --armor --export "$FA"; G --armor --export "$FB"; } > "$KEYS/ab.asc"
+fetch "$TAG"
+check_rc "two armored blocks in one file: the second one's signature taken" 0 "$RC"
+[[ "$RC" -eq 0 ]] && _tn_release_cleanup "${OUT%/*}"
+rm -f "$KEYS/ab.asc"
+mv "$T/a.asc.away" "$KEYS/a.asc"
+
 # --- REVKEYSIG ------------------------------------------------------------------------------
+# Both signature files are made while C still signs; the revocation comes after.
+sign "$FA" "$FC"
+cp "$REL/SHA256SUMS.asc" "$T/ac.asc"
 sign "$FC"
 rev="$(ls "$GNUPGHOME"/openpgp-revocs.d/"$FC".rev 2>/dev/null)"
 if [[ -n "$rev" ]]; then
@@ -224,6 +309,12 @@ if [[ -n "$rev" ]]; then
     check_rc "revoked key refused" 1 "$RC"
     check_has "REVKEYSIG named" "1" "$(grep -c REVKEYSIG "$T/err")"
     stage_empty "revoked key"
+    cp "$T/ac.asc" "$REL/SHA256SUMS.asc"
+    fetch "$TAG"
+    [[ "$RC" -eq 0 ]] && _tn_release_cleanup "${OUT%/*}"
+    check_rc "a revoked key beside a good listed signature refused" 1 "$RC"
+    check_has "revoked beside good: REVKEYSIG named" "1" "$(grep -c REVKEYSIG "$T/err")"
+    stage_empty "revoked beside good"
     rm -f "$KEYS/c.asc"
 else
     skip "revoked key" "no revocation certificate in GNUPGHOME"

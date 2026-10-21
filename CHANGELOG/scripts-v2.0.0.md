@@ -452,8 +452,9 @@ skipped.
   ahead.
 - The restart window reads epoch timing from the public RPC, then the local RPC; when neither
   answers it warns and waits the margin plus settle time, capped by `TN_EPOCH_WAIT_MAX`.
-- Release verification (`gpgv` against `lib/release-keys/*.asc`; BADSIG, EXPKEYSIG, REVKEYSIG,
-  NO_PUBKEY and ERRSIG refuse), release-tag rules, the image-by-digest resolver, the `tn-build`
+- Release verification (`gpgv` against `lib/release-keys/*.asc`: a good signature by a shipped
+  key is required; BADSIG by any key, EXPKEYSIG, REVKEYSIG and EXPSIG refuse; a further
+  signature by a key not shipped yet warns with its key id), release-tag rules, the image-by-digest resolver, the `tn-build`
   account and its pinned rustup, and the chain-config pins
   (`TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"`).
 - `DEFAULT_DOCKER_IMAGE` is the digest form
