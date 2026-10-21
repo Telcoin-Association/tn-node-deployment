@@ -589,7 +589,7 @@ It names the binary the node runs, taken from the launch file (else `BINARY_PATH
  ->  On a committee node, run only the install line instead (it replaces the file while the
  ->  node runs), then restart with edit-config.sh, menu item 12 (Restart node), which waits
  ->  for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh
- ->  Check a release before installing it (TAG is the release, such as v0.16.0-adiri):
+ ->  Check a release before installing it (TAG is the release, such as vX.Y.Z-adiri):
  ->    base=https://github.com/Telcoin-Association/telcoin-network/releases/download/TAG
  ->    curl -fsSL -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.asc" -O "$base/telcoin-network-TAG-x86_64-unknown-linux-gnu.tar.gz"
  ->    cat ~/telcoin-node-scripts/lib/release-keys/*.asc | gpg --dearmor > release-keys.gpg
@@ -745,6 +745,7 @@ What to expect from the UI:
 - Before public RPC is enabled, the page shows the same exposure summary `install-caddy.sh` prints and waits for you to confirm.
 - The update panel reports a refused downgrade, a node that is not voting after an update, and a release tag that now points at another commit.
 - When the engine copy under `/opt/telcoin-ui-update` is older than the helper needs, an action stops with a message to run `update-scripts.sh` and then `install-ui.sh --update`.
+- The UI installs and updates releases with its own copy of the scripts and of the release keys in `/opt/telcoin-ui-update/lib/release-keys/`. A key that arrives with `update-scripts.sh` (a new maintainer, or a renewed expiry date) reaches the UI only after `install-ui.sh --update`, like every other script file.
 - Updates and config saves run the same scripts, so they wait for the epoch boundary too (section 4.2): a progress pane can show `Waiting for epoch N to close` for up to 30 minutes, with a line every 15 seconds. Keep the tab open until the result line appears. Leaving the tab during the wait cancels the update before the node is stopped, and the prepared update stays for a later apply; leaving it once the apply has started can cut the apply off part way. A config save cut off before its restart puts the old settings back (section 4.3).
 - A one-way update (section 4.2) shows its warning in the progress pane when you prepare it. Apply does not ask about a snapshot, so take it before you press Apply, and expect the health check to take up to 10 minutes after the restart.
 
@@ -829,10 +830,10 @@ To check one yourself, for an `existing` install or before you trust a download,
 
 A node release lives at `https://github.com/Telcoin-Association/telcoin-network/releases/download/<tag>/`.
 Its `SHA256SUMS` lists five files: `IMAGE_DIGEST`, the tarball `telcoin-network-<tag>-x86_64-unknown-linux-gnu.tar.gz`, and the chain configs `chain-configs/<dir>/committee.yaml`, `genesis.yaml` and `parameters.yaml` (`<dir>` is `testnet` for `-adiri` tags and `mainnet` for mainnet tags).
-`SHA256SUMS.asc` is a detached GPG signature by a release key; the public keys ship with the scripts in `lib/release-keys/*.asc` once the maintainers add them. This release ships none yet, so a signed-release install or update is refused until a key arrives with `update-scripts.sh`.
+`SHA256SUMS.asc` is a detached GPG signature by a release key; the public keys ship with the scripts in `lib/release-keys/*.asc`. This script release ships one, `grantkee.asc` (primary key `4E36D35A4AB61B589861D01AC7173F2377CA7573`, expires 2028-10-16); `update-scripts.sh` brings later keys and refreshed expiry dates. The first signed node release is `v0.17.0-adiri`: `v0.16.0-adiri` and older have no release page, so use the tag of a published release in the commands below.
 
 ```bash
-TAG=v0.16.0-adiri
+TAG=vX.Y.Z-adiri   # a published release tag
 base=https://github.com/Telcoin-Association/telcoin-network/releases/download/$TAG
 curl -fsSL -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.asc" -O "$base/IMAGE_DIGEST" \
   -O "$base/telcoin-network-$TAG-x86_64-unknown-linux-gnu.tar.gz"
@@ -1449,7 +1450,7 @@ Start with `sudo bash ~/telcoin-node-scripts/check-node.sh` and `journalctl -u t
 | `committee of <n>: <d> member(s) down; stopping this node makes ... Refused: ...`, or `could not count the committee members that are down (...)` | The committee quorum check refused the stop or restart (section 4.11). | Wait until the other members are back. For a restart the fleet coordinator has planned, run again with `--allow-quorum-risk` or `TN_ALLOW_QUORUM_RISK=1`. On mainnet, record `VALIDATOR_ADDRESS` in `.node-meta` so an unstaked node can go ahead when the committee cannot be read. |
 | `... still has the old file ownership layout and must be installed fresh; it is not migrated in place.` | A mainnet host set up by older scripts. | Install it fresh on Ubuntu 24.04 (section 4.9). |
 | `Refusing <path> ...`, or the layout move stops with a list of paths | A symlink, special file, hard-linked file or unexpected owner in the install, config or log tree. | Fix or remove the listed paths, then run the script again. Nothing beyond the directories themselves was changed. |
-| `Release <tag> did not verify (see above); nothing was installed.`, or `No release signing key in .../lib/release-keys (*.asc)` | The release signature or a hash did not check, or the scripts carry no release key yet. | Run `update-scripts.sh` for the current keys, then try again; check the release by hand (section 4.10). Never install a release that fails. |
+| `Release <tag> did not verify (see above); nothing was installed.`, or `No release signing key in .../lib/release-keys (*.asc)` | The release signature or a hash did not check, or the scripts carry no key for the release (a key added or renewed after this script release, or a lib/release-keys/ emptied by hand). | Run `update-scripts.sh` for the current keys (and `install-ui.sh --update` when you use the Node Manager UI), then try again; check the release by hand (section 4.10). Never install a release that fails. |
 | `<tag> is not a testnet release tag ...`, `image refused: ...`, or `Refusing the image ...` | A branch, commit, `latest` or another repository's image. | Give a release tag (`vX.Y.Z-adiri` on testnet) or the network's image by digest. |
 | `... is older than the running ...: downgrades are refused.` | The target release is older than the one the node runs. | Pick a newer release. On testnet, an interactive run with `--allow-downgrade` goes ahead. |
 | `No usable TPM2 on this host: on mainnet pass --allow-no-tpm ...` | A mainnet host without a TPM2 that systemd-creds can use. | Add a TPM (a vTPM on cloud VMs), or accept the host key alone with `--allow-no-tpm`. |

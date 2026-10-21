@@ -28,10 +28,29 @@ build on mainnet and builds with a warning on testnet.
 Format
 ------
 
-One ASCII-armored public key per file, named <github-handle>.asc, the same
-files as .github/maintainer-gpg-keys/ in the telcoin-network repository on
-main. Every *.asc file here is read; other files (this README) are ignored. A
+ASCII-armored public keys, one file per maintainer, named <github-handle>.asc,
+the same files as .github/maintainer-gpg-keys/ in the telcoin-network
+repository on main. Every *.asc file here is read; other files (this README)
+are ignored. A file may carry more than one primary key: every primary key
+(every "pub" that gpg --show-keys lists) in every file joins the keyring and the
+fingerprint allowlist, whether the file holds one armored block or several. A
 key that is expired or revoked stays refused even while its file is here.
+
+Shipped keys
+------------
+
+    handle     primary key fingerprint                    expires      added
+    grantkee   4E36D35A4AB61B589861D01AC7173F2377CA7573   2028-10-16   2026-10-21
+
+grantkee.asc is a byte-for-byte copy of .github/maintainer-gpg-keys/grantkee.asc
+in telcoin-network (an RSA-2048 primary key that signs; its subkeys are not
+used here).
+
+Before a key expires, its maintainer extends the expiry, re-exports the public
+key and ships the new file in a script release, the same way a key is added
+below. Hosts must install that script release before the old expiry date: from
+that date gpgv reports EXPKEYSIG for every release signed with the key, and the
+scripts refuse those releases.
 
 Adding or removing a key
 ------------------------
@@ -48,7 +67,9 @@ Adding or removing a key
 
 3. Publish a signed script release. Hosts pick the key set up with
    update-scripts.sh; the keys are part of the signed MANIFEST, like the
-   scripts that read them.
+   scripts that read them. The Node Manager UI runs its own copy of the
+   scripts and keys (/opt/telcoin-ui-update), which takes the new key set
+   only with the next install-ui.sh --update, as for every other script file.
 
 A release signed only by a key that is not here yet is refused until the
 script release that carries the key is installed. A release whose

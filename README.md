@@ -1023,7 +1023,7 @@ A telcoin-network release publishes `SHA256SUMS` and its detached GPG signature,
 `setup-node.sh --install-method release`, a Docker install given a release tag, and `update-node.sh` on release and Docker installs check a release the same way:
 
 1. Release tags only: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet. Branches, commit ids and `latest` are refused.
-2. `gpgv` checks `SHA256SUMS.asc` against the GPG public keys this script release ships as `lib/release-keys/*.asc`. The release is accepted only on a good signature from one of those keys, and refused when `gpgv` reports `BADSIG`, `EXPKEYSIG`, `REVKEYSIG`, `NO_PUBKEY`, `ERRSIG` or `EXPSIG`. The keys reach a host inside the signed script release, like every other file. With no key file installed, every release download is refused.
+2. `gpgv` checks `SHA256SUMS.asc` against the GPG public keys this script release ships as `lib/release-keys/*.asc`. The release is accepted only on a good signature from one of those keys, and refused when `gpgv` reports `BADSIG`, `EXPKEYSIG`, `REVKEYSIG`, `NO_PUBKEY`, `ERRSIG` or `EXPSIG`. The keys reach a host inside the signed script release, like every other file. This script release ships `grantkee.asc` (primary key `4E36D35A4AB61B589861D01AC7173F2377CA7573`, expires 2028-10-16); the key list, the expiry dates and how a key is renewed are in `lib/release-keys/README`. With no key file installed, every release download is refused.
 3. The tarball and `IMAGE_DIGEST` must match their lines, and the three chain-config lines must carry the SHA-256 values this script release pins for the network. Mainnet has no pins yet, so mainnet release installs are refused until a script release publishes them.
 4. Only the binary is taken out of the tarball, into the root-only staging directory `/var/lib/telcoin-staging`. Its `--version` is run by the unprivileged `tn-build` account, never by root, and must name the tag's version and the network's build features (none on mainnet; `adiri`, optionally with `faucet`, on testnet).
 5. A Docker image is pulled by the digest from `IMAGE_DIGEST`, and `update-node.sh` and `edit-config.sh` check that Docker holds it under that digest after the pull.
@@ -1065,6 +1065,8 @@ sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update
 ```
 
 A UI whose helper is older than the server expects shows a banner saying the helper is outdated until you do. After the update, open the UI again with the new `open-ui.sh`.
+
+The UI's privileged actions run its own copy of the scripts in `/opt/telcoin-ui-update`, release keys included (`lib/release-keys/*.asc`). A key that a script release adds or renews reaches the UI only after `install-ui.sh --update`, like every other script file.
 
 ### Access
 

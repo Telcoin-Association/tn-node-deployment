@@ -282,7 +282,7 @@ existing_update_refusal() {
     print_info "On a committee node, run only the install line instead (it replaces the file while the"
     print_info "node runs), then restart with edit-config.sh, menu item 12 (Restart node), which waits"
     print_info "for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh"
-    print_info "Check a release before installing it (TAG is the release, such as v0.16.0-adiri):"
+    print_info "Check a release before installing it (TAG is the release, such as vX.Y.Z-adiri):"
     print_info "  base=${TN_RELEASE_BASE_URL:-https://github.com/Telcoin-Association/telcoin-network/releases/download}/TAG"
     print_info "  curl -fsSL -O \"\$base/SHA256SUMS\" -O \"\$base/SHA256SUMS.asc\" -O \"\$base/telcoin-network-TAG-x86_64-unknown-linux-gnu.tar.gz\""
     print_info "  cat ~/telcoin-node-scripts/lib/release-keys/*.asc | gpg --dearmor > release-keys.gpg"

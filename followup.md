@@ -12,11 +12,6 @@ yet; this file gains the issue numbers when they are.
 
 ## Release prep
 
-- `lib/release-keys/` holds only its README. With no `*.asc` key in it, every node release
-  download is refused: `--install-method release`, release updates in update-node, and the
-  signed-digest check for Docker images (testnet falls back to the registry digest with a
-  warning, mainnet refuses). Closes when a release maintainer commits their ASCII-armored GPG
-  public key there and release prep adds the file to `SCRIPTS` in `update-scripts.sh`.
 - `lib/allowed_signers` holds only comments, and there is no `RELEASE`, `MANIFEST` or
   `MANIFEST.sig` yet, so the signed updater has nothing to install. Closes at release prep: the
   release signer adds their SSH signing key, signs `MANIFEST` with the hardware key, and pushes the

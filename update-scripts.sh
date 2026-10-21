@@ -92,6 +92,7 @@ declare -a SCRIPTS=(
     "ui/server.py:ui/server.py:UI_VERSION"
     "lib/allowed_signers:lib/allowed_signers:NONE"
     "lib/release-keys/README:lib/release-keys/README:NONE"
+    "lib/release-keys/grantkee.asc:lib/release-keys/grantkee.asc:NONE"
 )
 
 # The web UI is shipped as a bundle gated on ui/server.py's UI_VERSION. When that
