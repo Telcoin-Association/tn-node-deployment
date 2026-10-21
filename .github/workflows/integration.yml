@@ -31,6 +31,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends logrotate ufw openssh-server
+      # The runner image differs from stock Ubuntu here: /opt, /usr/local and
+      # /usr/local/bin are not root 0755. Put the stock owner and mode back on
+      # those three directories (not recursive) before the assertions.
+      - name: Restore stock Ubuntu modes on /opt and /usr/local
+        run: |
+          stat -c '%U:%G %a %n' /opt /usr/local /usr/local/bin
+          sudo chown root:root /opt /usr/local /usr/local/bin
+          sudo chmod 0755 /opt /usr/local /usr/local/bin
       - name: Run tools/tests/vm.d as root
         run: |
           fail=0
