@@ -38,6 +38,7 @@ prep false
 check "private RPC: no limits" "" "$NODE_EXTRA_FLAGS"
 STATE_EXPORT=3
 NODE_EXTRA_FLAGS="" NODE_EXTRA_FLAGS_SPEC="" ENABLE_PUBLIC_RPC=true BOOTSTRAP_PEERS_SRC=""
+# shellcheck disable=SC2218  # sourced from setup-node.sh; a later stub replaces it
 prepare_node_extra_flags >/dev/null 2>&1
 check "public RPC with state export: both" "--enable-state-export --state-export-keep 3 ${LIMITS}" "$NODE_EXTRA_FLAGS"
 

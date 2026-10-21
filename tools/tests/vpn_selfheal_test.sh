@@ -132,9 +132,12 @@ check "probe address" "10.100.9.1" "$(vpn_probe_addr 10.100.9.0/24)"
 
 # --- vpn_root_file_ok refuses fixture files (not root-owned or in a writable tree) ------
 printf '%s\n' "$K1" > "$T/notroot"
+# shellcheck disable=SC2218  # sourced from the script under test; a later stub replaces it
 vpn_root_file_ok "$T/notroot"; check_rc "root_file_ok refuses a non-root tree" 1 $?
 ln -s "$T/notroot" "$T/link"
+# shellcheck disable=SC2218  # sourced from the script under test; a later stub replaces it
 vpn_root_file_ok "$T/link"; check_rc "root_file_ok refuses a symlink" 1 $?
+# shellcheck disable=SC2218  # sourced from the script under test; a later stub replaces it
 vpn_root_file_ok "relative"; check_rc "root_file_ok refuses a relative path" 1 $?
 printf 'SHA256:x\n' > "$RP/etc/wgvpn/tnadmin.revoked"
 out="$(printf '%s\n' "$K1" | vpn_filter_keys "$TNV_REVOKED" 2>/dev/null)"; rc=$?
