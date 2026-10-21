@@ -36,6 +36,7 @@ local_client(server)
 from test_server_contract import FULL_SETUP, ServerTestCase  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+LIB = os.path.join(HERE, "..", "lib", "common.sh")
 
 
 def write_rules():
@@ -388,6 +389,7 @@ class SetupRefusalTest(ServerTestCase):
             ({"passphrase_method": "tpm"}, "TPM sealing was removed"),
             ({"docker_image": "docker.io/library/busybox:latest"}, "docker image"),
             ({"docker_image": "us-docker.pkg.dev/telcoin-network/tn-public/adiri:latest"}, "docker image"),
+            ({"docker_image": "ghcr.io/telcoin-association/telcoin-network:latest"}, "docker image"),
             ({"passphrase": " padded "}, "passphrase required"),
         ]
         for over, message in cases:
@@ -431,46 +433,85 @@ class MainnetAndImagesTest(ServerTestCase):
         self.assertEqual(server.NETWORK_PUBLIC_RPC[487], [], "set at launch, no invented URL")
         self.assertIn("mainnet", server.KNOWN_SLUGS)
 
-    def test_latest_docker_image_takes_release_tags_only(self):
-        tags = {"tags": ["latest", "v0.17.0-devnet", "v0.16.0-adiri", "v0.16.1-adiri-hotfix",
-                         "v0.15.9-adiri", "v1.0.0"]}
-
-        class Resp(io.BytesIO):
-            headers = {}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        def urlopen(req, timeout=None):
-            if getattr(req, "method", None) == "HEAD" or req.get_method() == "HEAD":
-                r = Resp(b"")
-                r.headers = {"Docker-Content-Digest": "sha256:" + "c" * 64}
-                return r
-            return Resp(json.dumps(tags).encode())
-
+    def no_registry(self):
+        """Fail the test on any direct HTTP request: the image comes from the
+        library only."""
+        def urlopen(*a, **k):
+            raise AssertionError("the server asked a registry itself")
         self.patch(server.urllib.request, "urlopen", urlopen)
-        img = server.latest_docker_image("testnet")
-        self.assertEqual(img, server.GAR_IMAGE_BASE + "@sha256:" + "c" * 64)
-        self.assertTrue(server.image_allowed(img, "testnet"))
-        self.assertEqual(server.latest_docker_image("mainnet"), "")
 
-    def test_latest_docker_image_is_cached_with_short_probes(self):
+    def test_latest_docker_image_asks_the_library_only(self):
+        image = server.GHCR_IMAGE_REPO + "@sha256:" + "c" * 64
+        seen = []
+
+        def run(cmd, timeout=10):
+            staging = cmd[-2]
+            st = os.stat(staging)
+            seen.append({"cmd": cmd, "timeout": timeout, "uid": st.st_uid,
+                         "mode": st.st_mode & 0o7777, "dir": os.path.isdir(staging)})
+            return 0, "a warning the library printed\n" + image, ""
+
+        self.no_registry()
+        self.patch(server, "run", run)
+        self.assertEqual(server.latest_docker_image("testnet"), image)
+        self.assertEqual(len(seen), 1)
+        call = seen[0]
+        self.assertEqual(call["cmd"][:2], ["bash", "-c"])
+        self.assertIn('TN_RELEASE_STAGING_DIR="$2"; export TN_RELEASE_STAGING_DIR;', call["cmd"][2])
+        self.assertIn('latest_docker_image "$3"', call["cmd"][2])
+        self.assertEqual(call["cmd"][3:5], ["_", server.LIB_COMMON])
+        self.assertEqual(call["cmd"][-1], "testnet")
+        self.assertTrue(call["dir"])
+        self.assertEqual((call["uid"], call["mode"]), (os.getuid(), 0o700),
+                         "the staging directory is this user's own, mode 0700")
+        self.assertFalse(os.path.exists(call["cmd"][-2]), "the staging directory is removed afterwards")
+        self.assertEqual(call["timeout"], server.DOCKER_PROBE_TIMEOUT)
+
+    def test_an_image_the_rule_refuses_falls_back_to_the_default(self):
+        self.no_registry()
+        for out in ("", server.GHCR_IMAGE_REPO + ":v0.17.0-adiri", "busybox@sha256:" + "a" * 64,
+                    server.GHCR_IMAGE_REPO + "@sha256:" + "A" * 64):
+            with self.subTest(out=out):
+                server._docker_image_cache.clear()
+                self.patch(server, "run", lambda cmd, timeout=10, o=out: (0, o, ""))
+                self.assertEqual(server.latest_docker_image("testnet"), server.DEFAULT_DOCKER_IMAGE)
+        self.assertTrue(server.DEFAULT_DOCKER_IMAGE.startswith(server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:"))
+        self.assertTrue(server.image_allowed(server.DEFAULT_DOCKER_IMAGE, "testnet"))
+
+    def test_mainnet_image_stays_off_until_mainnet_is_enabled(self):
+        calls = []
+        self.no_registry()
+        self.patch(server, "run", lambda cmd, timeout=10: calls.append(cmd) or (1, "", ""))
+        self.assertIs(server.TN_MAINNET_ENABLED, False)
+        self.assertEqual(server.latest_docker_image("mainnet"), "")
+        self.assertEqual(server.latest_docker_image("devnet"), "")
+        self.assertEqual(calls, [], "nothing is looked up for mainnet while it is off")
+        ghcr = server.GHCR_IMAGE_REPO + "@sha256:" + "e" * 64
+        legacy = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + "e" * 64
+        self.patch(server, "TN_MAINNET_ENABLED", True)
+        for rc, out, want in ((1, "", ""), (0, legacy, ""), (0, ghcr, ghcr)):
+            with self.subTest(rc=rc, out=out):
+                server._docker_image_cache.clear()
+                self.patch(server, "run", lambda cmd, timeout=10, r=rc, o=out: calls.append(cmd) or (r, o, ""))
+                self.assertEqual(server.latest_docker_image("mainnet"), want,
+                                 "mainnet never falls back to the testnet default")
+        self.assertEqual(calls[-1][-1], "mainnet")
+
+    def test_latest_docker_image_is_cached_with_bounded_probes(self):
         timeouts = []
-        lib_image = server.GAR_IMAGE_BASE + "@sha256:" + "d" * 64
+        lib_image = server.GHCR_IMAGE_REPO + "@sha256:" + "d" * 64
 
         def run(cmd, timeout=10):
             timeouts.append(("run", timeout))
             return 0, lib_image + "\n", ""
 
         clock = [1000.0]
+        self.no_registry()
         self.patch(server, "run", run)
         self.patch(server.time, "time", lambda: clock[0])
         self.assertEqual(server.latest_docker_image("testnet"), lib_image)
         self.assertEqual(timeouts, [("run", server.DOCKER_PROBE_TIMEOUT)])
-        self.assertEqual(server.DOCKER_PROBE_TIMEOUT, 3)
+        self.assertEqual(server.DOCKER_PROBE_TIMEOUT, 25)
         clock[0] += server.DOCKER_IMAGE_TTL - 1
         self.assertEqual(server.latest_docker_image("testnet"), lib_image)
         self.assertEqual(len(timeouts), 1, "a second call within the TTL probes nothing")
@@ -486,74 +527,160 @@ class MainnetAndImagesTest(ServerTestCase):
             calls.append(timeout)
             return 1, "", ""
 
-        def urlopen(req, timeout=None):
-            calls.append(timeout)
-            raise OSError("down")
-
         clock = [5000.0]
+        self.no_registry()
         self.patch(server, "run", run)
-        self.patch(server.urllib.request, "urlopen", urlopen)
         self.patch(server.time, "time", lambda: clock[0])
         self.assertEqual(server.latest_docker_image("testnet"), server.DEFAULT_DOCKER_IMAGE)
-        self.assertEqual(calls, [3, 3])
+        self.assertEqual(calls, [server.DOCKER_PROBE_TIMEOUT])
         clock[0] += server.DOCKER_IMAGE_FAIL_TTL - 1
         server.latest_docker_image("testnet")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         clock[0] += 2
         server.latest_docker_image("testnet")
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 2)
 
     def test_release_tags_are_checked_without_the_library(self):
         ran = []
         self.patch(server, "run", lambda *a, **k: ran.append(a) or (0, "", ""))
-        self.assertTrue(server.release_tag_ok("testnet", "v0.16.0-adiri"))
-        self.assertFalse(server.release_tag_ok("testnet", "v0.16.0"))
-        self.assertTrue(server.release_tag_ok("mainnet", "v1.0.0"))
-        self.assertFalse(server.release_tag_ok("mainnet", "v1.0.0-adiri"))
-        self.assertFalse(server.release_tag_ok("devnet", "v1.0.0"))
+        ok, final = server.release_tag_ok, server.release_tag_final
+        self.assertTrue(ok("testnet", "v0.16.0-adiri"))
+        self.assertTrue(ok("testnet", "v0.17.0-adiri-rc1"))
+        self.assertTrue(ok("testnet", "v0.17.0-adiri-rc12"))
+        for bad in ("v0.16.0", "v0.17.0-adiri-rc0", "v0.17.0-adiri-rc01", "v0.17.0-adiri-rc",
+                    "v0.17.0-rc1", "v0.17.0-adiri-rc1-hotfix"):
+            with self.subTest(tag=bad):
+                self.assertFalse(ok("testnet", bad))
+        self.assertTrue(ok("mainnet", "v1.0.0"))
+        self.assertFalse(ok("mainnet", "v1.0.0-adiri"))
+        self.assertFalse(ok("mainnet", "v1.0.0-rc1"), "release candidates are testnet only")
+        self.assertFalse(ok("devnet", "v1.0.0"))
+        self.assertTrue(final("testnet", "v0.17.0-adiri"))
+        self.assertFalse(final("testnet", "v0.17.0-adiri-rc1"))
+        self.assertTrue(final("mainnet", "v1.0.0"))
+        self.assertFalse(final("mainnet", "v1.0.0-rc1"))
+        self.assertFalse(final("devnet", "v1.0.0"))
+        key = server.release_tag_key
+        self.assertLess(key("v0.17.0-adiri-rc1"), key("v0.17.0-adiri-rc2"))
+        self.assertLess(key("v0.17.0-adiri-rc2"), key("v0.17.0-adiri-rc10"))
+        self.assertLess(key("v0.17.0-adiri-rc10"), key("v0.17.0-adiri"))
+        self.assertLess(key("v0.17.0-adiri"), key("v0.17.1-adiri-rc1"))
+        self.assertLess(key("v0.9.0-adiri"), key("v0.10.0-adiri"))
+        self.assertIsNone(key("main"))
         self.assertEqual(ran, [])
 
     @unittest.skipUnless(shutil.which("bash"), "bash not installed")
-    def test_release_tag_twin_matches_the_library(self):
-        lib = os.path.join(os.path.dirname(os.path.abspath(server.__file__)), "..", "lib", "common.sh")
-        vectors = [(n, t) for n in ("testnet", "mainnet", "devnet")
-                   for t in ("v0.16.0-adiri", "v1.0.0", "v1.2.3-adiri-hotfix", "latest", "v1.0",
-                             "v01.0.0", "main", "v1.0.0 ", "0.16.0-adiri", "v10.20.30")]
-        script = 'source "$1" >/dev/null 2>&1; set +e; tn_release_tag_ok "$2" "$3"; echo $?'
-        for net, tag in vectors:
+    def test_release_tag_twins_match_the_library(self):
+        tags = ("v0.16.0-adiri", "v1.0.0", "v1.2.3-adiri-hotfix", "latest", "v1.0",
+                "v01.0.0", "main", "v1.0.0 ", "0.16.0-adiri", "v10.20.30",
+                "v0.17.0-adiri-rc1", "v0.17.0-adiri-rc10", "v0.17.0-adiri-rc0", "v0.17.0-adiri-rc01",
+                "v0.17.0-adiri-rc", "v0.17.0-adiri-rc1-hotfix", "v1.0.0-rc1", "v1.0.0-adiri-rc1 ")
+        vectors = [(n, t) for n in ("testnet", "mainnet", "devnet") for t in tags]
+        script = ('source "$1" >/dev/null 2>&1; set +e; shift; while [ $# -gt 1 ]; do '
+                  'tn_release_tag_ok "$1" "$2"; a=$?; tn_release_tag_final "$1" "$2"; b=$?; '
+                  'echo "$a $b"; shift 2; done')
+        args = [a for v in vectors for a in v]
+        out = subprocess.run(["bash", "-c", script, "_", LIB] + args,
+                             capture_output=True, text=True, timeout=60).stdout.splitlines()
+        self.assertEqual(len(out), len(vectors))
+        for (net, tag), line in zip(vectors, out):
             with self.subTest(net=net, tag=tag):
-                out = subprocess.run(["bash", "-c", script, "_", lib, net, tag],
-                                     capture_output=True, text=True, timeout=20).stdout.strip()
-                self.assertEqual(server.release_tag_ok(net, tag), out == "0")
+                self.assertEqual((server.release_tag_ok(net, tag), server.release_tag_final(net, tag)),
+                                 tuple(x == "0" for x in line.split()))
+
+    @unittest.skipUnless(shutil.which("bash"), "bash not installed")
+    def test_release_tag_order_matches_the_library(self):
+        tags = ["v0.17.0-adiri", "v0.17.0-adiri-rc2", "v0.9.0-adiri", "v0.17.0-adiri-rc10",
+                "v0.17.0-adiri-rc1", "v0.17.1-adiri-rc1", "v0.10.0-adiri", "v1.0.0", "v1.0.0-rc3",
+                "v0.17.0-adiri", "main", "v1234567890.0.0", "v1.0.0-adiri-rc123456789", "v0.16.0-adiri"]
+        script = 'source "$1" >/dev/null 2>&1; set +e; printf "%s\\n" "$2" | tn_release_tags_sort'
+        out = subprocess.run(["bash", "-c", script, "_", LIB, "\n".join(tags)],
+                             capture_output=True, text=True, timeout=20).stdout.split()
+        mine = sorted({t for t in tags if server.release_tag_key(t) is not None}, key=server.release_tag_key)
+        self.assertEqual(mine, out)
+        self.assertEqual(out[-1], "v1.0.0")
+
+    @unittest.skipUnless(shutil.which("bash"), "bash not installed")
+    def test_image_repositories_match_the_library(self):
+        script = ('source "$1" >/dev/null 2>&1; printf "%s\\n" "$TN_GHCR_IMAGE_REPO" '
+                  '"$TN_TESTNET_LEGACY_IMAGE_REPO" "$TN_MAINNET_IMAGE_REPO" "$DEFAULT_DOCKER_IMAGE" '
+                  '"$TN_TESTNET_IMAGE_REPOS"')
+        out = subprocess.run(["bash", "-c", script, "_", LIB],
+                             capture_output=True, text=True, timeout=20).stdout.splitlines()
+        self.assertEqual(out[:4], [server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO,
+                                   server.DOCKER_REPO["mainnet"][0], server.DEFAULT_DOCKER_IMAGE])
+        self.assertEqual(server.DOCKER_REPO["mainnet"], (server.GHCR_IMAGE_REPO,))
+        self.assertEqual(sorted(out[4].split()), sorted(server.DOCKER_REPO["testnet"]))
 
     def test_image_rule(self):
-        base = server.GAR_IMAGE_BASE
-        digest = base + "@sha256:" + "a" * 64
-        self.assertTrue(server.image_allowed(digest, "testnet"))
+        hexd = "a" * 64
+        ghcr = server.GHCR_IMAGE_REPO + "@sha256:" + hexd
+        legacy = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + hexd
+        self.assertTrue(server.image_allowed(ghcr, "testnet"))
+        self.assertTrue(server.image_allowed(legacy, "testnet"))
+        self.assertTrue(server.image_allowed(ghcr, "mainnet"))
+        self.assertFalse(server.image_allowed(legacy, "mainnet"), "the legacy repository is testnet only")
         # A tag is never an image to run; the wizard sends it as the release.
-        for bad in (base + ":v0.16.0-adiri", base + ":latest", base + ":v0.16.0-devnet",
-                    "busybox:v0.16.0-adiri", base + "@sha256:" + "A" * 64, "-" + digest):
-            with self.subTest(image=bad):
-                self.assertFalse(server.image_allowed(bad, "testnet"))
-        self.assertFalse(server.image_allowed(digest, "mainnet"))
+        for base in (server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO):
+            for bad in (base + ":v0.16.0-adiri", base + ":latest", base + ":v0.16.0-devnet",
+                        "busybox:v0.16.0-adiri", base + "@sha256:" + "A" * 64, "-" + base + "@sha256:" + hexd,
+                        base + "-fork@sha256:" + hexd, base + "@sha256:" + hexd + "\n",
+                        base + ":v0.16.0-adiri@sha256:" + hexd):
+                with self.subTest(image=bad):
+                    self.assertFalse(server.image_allowed(bad, "testnet"))
+        for net in ("devnet", "", None):
+            self.assertFalse(server.image_allowed(ghcr, net))
+
+    @unittest.skipUnless(shutil.which("bash"), "bash not installed")
+    def test_image_rule_matches_the_library(self):
+        hexd = "b" * 64
+        images = []
+        for base in (server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO, "busybox",
+                     server.GHCR_IMAGE_REPO + "-fork"):
+            images += [base + "@sha256:" + hexd, base + ":v0.16.0-adiri", base + ":v1.0.0",
+                       base + "@sha256:" + "B" * 64, base + "@sha256:" + hexd[:63]]
+        vectors = [(n, i) for n in ("testnet", "mainnet", "devnet") for i in images]
+        script = ('source "$1" >/dev/null 2>&1; set +e; shift; while [ $# -gt 1 ]; do '
+                  'TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$2" "$1" 2>/dev/null; echo $?; '
+                  'shift 2; done')
+        args = [a for v in vectors for a in v]
+        out = subprocess.run(["bash", "-c", script, "_", LIB] + args,
+                             capture_output=True, text=True, timeout=60).stdout.splitlines()
+        self.assertEqual(len(out), len(vectors))
+        for (net, image), rc in zip(vectors, out):
+            with self.subTest(net=net, image=image):
+                self.assertEqual(server.image_allowed(image, net), rc == "0")
 
     def test_wizard_image_field(self):
-        base = server.GAR_IMAGE_BASE
-        digest = base + "@sha256:" + "a" * 64
+        ghcr = server.GHCR_IMAGE_REPO
+        legacy = server.TESTNET_LEGACY_IMAGE_REPO
+        digest = ghcr + "@sha256:" + "a" * 64
+        legacy_digest = legacy + "@sha256:" + "a" * 64
         choice = server.docker_image_choice
-        self.assertEqual(choice("v0.16.0-adiri", "testnet"), ("v0.16.0-adiri", "", None))
-        self.assertEqual(choice(base + ":v0.16.0-adiri", "testnet"), ("v0.16.0-adiri", "", None))
-        self.assertEqual(choice(digest, "testnet"), ("", digest, None))
-        self.assertEqual(choice("v1.0.0", "mainnet"), ("v1.0.0", "", None))
-        self.assertEqual(choice("", "testnet"), ("", "", None))
-        for bad, net in (("latest", "testnet"), (base + ":latest", "testnet"), ("v1.0.0", "testnet"),
-                         ("v0.16.0-adiri", "mainnet"), (digest, "mainnet"), ("main", "testnet"),
-                         ("busybox@sha256:" + "a" * 64, "testnet")):
+        for value, net, want in (
+                ("v0.16.0-adiri", "testnet", ("v0.16.0-adiri", "", None)),
+                ("v0.17.0-adiri-rc1", "testnet", ("v0.17.0-adiri-rc1", "", None)),
+                (ghcr + ":v0.17.0-adiri", "testnet", ("v0.17.0-adiri", "", None)),
+                (ghcr + ":v0.17.0-adiri-rc2", "testnet", ("v0.17.0-adiri-rc2", "", None)),
+                (legacy + ":v0.16.0-adiri", "testnet", ("v0.16.0-adiri", "", None)),
+                (digest, "testnet", ("", digest, None)),
+                (legacy_digest, "testnet", ("", legacy_digest, None)),
+                ("v1.0.0", "mainnet", ("v1.0.0", "", None)),
+                (ghcr + ":v1.0.0", "mainnet", ("v1.0.0", "", None)),
+                (digest, "mainnet", ("", digest, None)),
+                ("", "testnet", ("", "", None))):
+            with self.subTest(image=value, network=net):
+                self.assertEqual(choice(value, net), want)
+        for bad, net in (("latest", "testnet"), (ghcr + ":latest", "testnet"), (legacy + ":latest", "testnet"),
+                         ("v1.0.0", "testnet"), ("v0.16.0-adiri", "mainnet"), ("v1.0.0-rc1", "mainnet"),
+                         (legacy_digest, "mainnet"), (legacy + ":v1.0.0", "mainnet"), ("main", "testnet"),
+                         ("busybox@sha256:" + "a" * 64, "testnet"), (ghcr + "-fork:v0.16.0-adiri", "testnet"),
+                         (digest, "devnet")):
             with self.subTest(image=bad, network=net):
                 tag, img, err = choice(bad, net)
                 self.assertIsNone(tag)
                 self.assertIn("docker image", err)
-        self.assertIn("latest is refused", choice(base + ":latest", "testnet")[2])
+        self.assertIn("latest is refused", choice(ghcr + ":latest", "testnet")[2])
 
     def test_wizard_env_log_target_and_tpm(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -575,19 +702,22 @@ class MainnetAndImagesTest(ServerTestCase):
             self.assertIn("required for a release install", err)
 
     def test_wizard_env_for_each_image_form(self):
-        base = server.GAR_IMAGE_BASE
-        digest = base + "@sha256:" + "b" * 64
+        ghcr = server.GHCR_IMAGE_REPO
+        digest = ghcr + "@sha256:" + "b" * 64
+        legacy_digest = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + "b" * 64
         with mock.patch.dict(os.environ, {}, clear=True):
             for image, ref, img in (("v0.16.0-adiri", "v0.16.0-adiri", ""),
-                                    (base + ":v0.16.0-adiri", "v0.16.0-adiri", ""),
-                                    (digest, "", digest)):
+                                    (ghcr + ":v0.17.0-adiri", "v0.17.0-adiri", ""),
+                                    (server.TESTNET_LEGACY_IMAGE_REPO + ":v0.16.0-adiri", "v0.16.0-adiri", ""),
+                                    (digest, "", digest), (legacy_digest, "", legacy_digest)):
                 with self.subTest(image=image):
                     env, err = server._setup_env(dict(FULL_SETUP, docker_image=image), want_passphrase=False)
                     self.assertIsNone(err)
                     self.assertEqual((env["TN_SETUP_BUILD_REF"], env["TN_SETUP_DOCKER_IMAGE"]), (ref, img))
 
     def test_status_shows_the_digest(self):
-        self.helper_replies["meta-cat"] = (0, "DOCKER_IMAGE=" + server.GAR_IMAGE_BASE
+        # A node installed from the legacy repository: the image .node-meta records.
+        self.helper_replies["meta-cat"] = (0, "DOCKER_IMAGE=" + server.TESTNET_LEGACY_IMAGE_REPO
                                            + "@sha256:" + "d" * 64 + "\n", "")
         server.clear_meta_cache()
         body = self.client.get("/api/status/observer").get_json()

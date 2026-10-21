@@ -376,7 +376,7 @@ class ServerTestCase(unittest.TestCase):
 
 FULL_SETUP = {
     "network": "testnet", "install_method": "docker",
-    "docker_image": "us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri",
+    "docker_image": "ghcr.io/telcoin-association/telcoin-network:v0.15.0-adiri",
     "passphrase_method": "loadcredential", "address": "0x" + "ab" * 20,
     "external_primary": "/ip4/203.0.113.10/udp/49590/quic-v1",
     "external_worker": "/ip4/203.0.113.10/udp/49594/quic-v1",
@@ -1135,9 +1135,10 @@ class RpcExposureTest(ServerTestCase):
 class DockerLaunchLineTest(ServerTestCase):
 
     def test_image_comes_from_the_start_script_when_meta_has_none(self):
+        # A node installed from the legacy repository before .node-meta kept the image.
         self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
         server.clear_meta_cache()
-        image = server.GAR_IMAGE_BASE + "@sha256:" + "d" * 64
+        image = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + "d" * 64
         script = os.path.join(self.tmp.name, "tn-start-docker")
         with open(script, "w") as f:
             f.write("#!/bin/bash\nexec docker run --rm --name telcoin %s node --http\n" % image)
@@ -1194,7 +1195,7 @@ class SetupDefaultsTest(ServerTestCase):
 
     TAGS = "\n".join("abc123\trefs/tags/" + t for t in (
         "v0.15.0-adiri", "v0.16.0-adiri", "v0.16.1-adiri-hotfix", "v0.9.9", "v1.0.0", "v1.0.1",
-        "v1.0.1-rc1", "v1.0.1^{}", "main"))
+        "v1.0.1-rc1", "v1.0.2-rc1", "v1.0.1^{}", "v0.17.0-adiri-rc1", "v0.16.0-adiri-rc2", "main"))
 
     def setUp(self):
         super().setUp()
@@ -1206,6 +1207,9 @@ class SetupDefaultsTest(ServerTestCase):
                    lambda net="testnet": server.DEFAULT_DOCKER_IMAGE if net == "testnet" else "")
 
     def test_latest_release_tag_per_network(self):
+        # Finals only: v0.17.0-adiri-rc1 is a testnet release tag, but a release
+        # candidate is never the newest release.
+        self.assertTrue(server.release_tag_ok("testnet", "v0.17.0-adiri-rc1"))
         self.assertEqual(server.latest_source_tag("testnet"), "v0.16.0-adiri")
         self.assertEqual(server.latest_source_tag("mainnet"), "v1.0.1")
         self.assertEqual(server.latest_source_tag("devnet"), "")

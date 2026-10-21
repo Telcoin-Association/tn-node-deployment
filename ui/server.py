@@ -275,13 +275,18 @@ def bad_type():
 # Rules shared with the helper and lib/common.sh. Each is a twin of the
 # library's rule, kept equal by the tests, and answers here without running
 # bash. The library is asked only for what a twin cannot answer: the newest
-# release image's registry digest (latest_docker_image).
+# release image by digest (latest_docker_image NETWORK: the newest final
+# release the channel has on GitHub, its image from the release's signed
+# IMAGE_DIGEST).
 # =============================================================================
 
-# Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri, mainnet
-# vX.Y.Z. Branch names, commit ids and anything else are refused.
+# Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri or its
+# release candidate vX.Y.Z-adiri-rcN (N from 1, no leading zero), mainnet
+# vX.Y.Z (finals only). Branch names, commit ids and anything else are refused.
+# A tag the user names may be a release candidate; a pick of the newest
+# release takes finals only (release_tag_final), ordered by release_tag_key.
 RELEASE_TAG_RE = {
-    "testnet": re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-adiri"),
+    "testnet": re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-adiri(?:-rc[1-9][0-9]*)?"),
     "mainnet": re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+"),
 }
 
@@ -292,6 +297,31 @@ def release_tag_ok(network, tag):
     if not isinstance(tag, str) or network not in RELEASE_TAG_RE:
         return False
     return RELEASE_TAG_RE[network].fullmatch(tag) is not None
+
+
+def release_tag_final(network, tag):
+    """The twin of tn_release_tag_final: a release tag of the network that is a
+    final release, not a release candidate (what a newest-release pick offers)."""
+    return release_tag_ok(network, tag) and re.search(r"-rc[0-9]", tag) is None
+
+
+# The release tag forms tn_release_tag_key orders: vX.Y.Z, an optional -adiri
+# and an optional -rcN, each number at most nine digits (N at most eight).
+_RELEASE_TAG_KEY_RE = re.compile(
+    r"v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?")
+_RELEASE_TAG_FINAL_RANK = 999999999
+
+
+def release_tag_key(tag):
+    """The twin of tn_release_tag_key: (X, Y, Z, R), R the N of -rcN and
+    999999999 for a final, so rc1 < rc2 < the final of the same X.Y.Z < any rc
+    of a higher X.Y.Z. The network is not judged here (release_tag_ok is).
+    None for anything that is not a release tag form."""
+    m = _RELEASE_TAG_KEY_RE.fullmatch(tag) if isinstance(tag, str) else None
+    if m is None:
+        return None
+    rank = int(m.group(6)) if m.group(6) else _RELEASE_TAG_FINAL_RANK
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), rank
 
 
 def network_rule(value):
@@ -319,27 +349,48 @@ def passphrase_ok(value, network=""):
     return True
 
 
-# The Docker repository of each network (lib/common.sh tn_docker_repo_for).
-# Mainnet has no published repository yet.
-DOCKER_REPO = {"testnet": "us-docker.pkg.dev/telcoin-network/tn-public/adiri"}
+# Image repositories (lib/common.sh): TN_GHCR_IMAGE_REPO, where the release
+# pipeline publishes the testnet and mainnet images, and
+# TN_TESTNET_LEGACY_IMAGE_REPO, which holds the testnet images of the releases
+# made before signed releases (DEFAULT_DOCKER_IMAGE among them).
+GHCR_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
+TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+# Every repository a network's images may come from (tn_docker_repo_ok): on
+# testnet TN_TESTNET_IMAGE_REPOS (the legacy repository and ghcr.io), on mainnet
+# TN_MAINNET_IMAGE_REPO alone. Devnet has none, so nothing is accepted there.
+DOCKER_REPO = {
+    "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
+    "mainnet": (GHCR_IMAGE_REPO,),
+}
+# Fallback for testnet only, when the library cannot name the newest image:
+# v0.16.0-adiri by digest, as lib/common.sh DEFAULT_DOCKER_IMAGE.
+DEFAULT_DOCKER_IMAGE = (TESTNET_LEGACY_IMAGE_REPO +
+                        "@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea")
+
+
+def docker_repo_ok(network, repo):
+    """Twin of tn_docker_repo_ok: REPO is a repository the network's images may
+    come from (DOCKER_REPO)."""
+    return isinstance(repo, str) and repo in DOCKER_REPO.get(network, ())
 
 
 def image_allowed(image, network):
-    """Twin of tn_docker_image_allowed: the network's repository by digest,
-    <repository>@sha256:<64 hex>. Tags, latest included, are refused (a
-    release is chosen by its tag, which the engine resolves to a digest)."""
-    base = DOCKER_REPO.get(network)
-    if not isinstance(image, str) or not base:
+    """Twin of tn_docker_image_allowed with digests required
+    (TN_DOCKER_REQUIRE_DIGEST=1): <repository>@sha256:<64 hex>, the repository
+    one the network's images may come from (docker_repo_ok). Tags, latest
+    included, are refused (a release is chosen by its tag, which the engine
+    resolves to a digest)."""
+    if not isinstance(image, str) or "@sha256:" not in image:
         return False
-    if image.startswith(base + "@sha256:"):
-        return re.fullmatch(r"[0-9a-f]{64}", image[len(base) + 8:]) is not None
-    return False
+    repo = image.split("@", 1)[0]
+    rest = image.split("@sha256:", 1)[1]
+    return re.fullmatch(r"[0-9a-f]{64}", rest) is not None and docker_repo_ok(network, repo)
 
 
 def docker_image_choice(value, network):
     """The wizard's Docker image field: a release tag of the network (bare, or
-    after the network's repository and a colon) or the network's image by
-    digest. Returns (release_tag, digest_image, None) with one of the two set,
+    after one of the network's repositories and a colon) or the network's image
+    by digest. Returns (release_tag, digest_image, None) with one of the two set,
     ("", "", None) when empty, or (None, None, error). latest is refused."""
     v = str(value or "").strip()
     if not v:
@@ -348,9 +399,10 @@ def docker_image_choice(value, network):
         return None, None, "docker image latest is refused: give a release tag or the image by digest"
     if release_tag_ok(network, v):
         return v, "", None
-    base = DOCKER_REPO.get(network)
-    if base and v.startswith(base + ":") and release_tag_ok(network, v[len(base) + 1:]):
-        return v[len(base) + 1:], "", None
+    # <repository>:<tag>, as tn_docker_resolve_ref splits it at the last colon.
+    repo, colon, tag = v.rpartition(":")
+    if colon and docker_repo_ok(network, repo) and release_tag_ok(network, tag):
+        return tag, "", None
     if image_allowed(v, network):
         return "", v, None
     example = "v1.2.3-adiri" if network == "testnet" else "v1.2.3"
@@ -2739,16 +2791,6 @@ def network_traffic():
     return out
 
 
-# Public Artifact Registry tag list for the testnet docker image (same source
-# update-node.sh uses), plus the image base / fallback the CLI setup defaults to.
-GAR_TAGS_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
-GAR_IMAGE_BASE = DOCKER_REPO["testnet"]
-# Fallback only when the registry is unreachable: v0.16.0-adiri by digest, as
-# lib/common.sh DEFAULT_DOCKER_IMAGE.
-DEFAULT_DOCKER_IMAGE = (GAR_IMAGE_BASE +
-                        "@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea")
-
-
 def detect_public_ip():
     """Best-effort public IP via api.ipify.org (mirrors the setup scripts).
     '' on failure."""
@@ -2783,49 +2825,34 @@ def internal_ip():
     return ip or detect_internal_ip()
 
 
-GAR_MANIFEST_URL = "https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/manifests/"
-_MANIFEST_ACCEPT = ", ".join((
-    "application/vnd.oci.image.index.v1+json",
-    "application/vnd.docker.distribution.manifest.list.v2+json",
-    "application/vnd.oci.image.manifest.v1+json",
-    "application/vnd.docker.distribution.manifest.v2+json",
-))
-
-
-# Each registry or library probe of latest_docker_image gives up after this
-# many seconds; its answer is cached per network (DOCKER_IMAGE_TTL seconds, a
-# failed lookup DOCKER_IMAGE_FAIL_TTL), so a page load waits for it at most
-# once in that window.
-DOCKER_PROBE_TIMEOUT = 3
+# The library's latest_docker_image reads the GitHub Releases API and then the
+# release's signed files (three small downloads and a signature check) before
+# it answers, so its probe may take up to DOCKER_PROBE_TIMEOUT seconds. Its
+# answer is cached per network (DOCKER_IMAGE_TTL seconds, a failed lookup
+# DOCKER_IMAGE_FAIL_TTL), so a page load waits for it at most once in that
+# window.
+DOCKER_PROBE_TIMEOUT = 25
 DOCKER_IMAGE_TTL = 600
 DOCKER_IMAGE_FAIL_TTL = 60
 _docker_image_cache = {}     # network -> {"expires", "data"}
 
-
-def _image_digest(tag):
-    """The registry's digest for a testnet image tag (Docker-Content-Digest of
-    its manifest), or None."""
-    try:
-        req = urllib.request.Request(GAR_MANIFEST_URL + tag, method="HEAD",
-                                     headers={"User-Agent": "telcoin-ui",
-                                              "Accept": _MANIFEST_ACCEPT})
-        with urllib.request.urlopen(req, timeout=DOCKER_PROBE_TIMEOUT) as r:
-            digest = r.headers.get("Docker-Content-Digest", "")
-    except Exception:
-        return None
-    return digest if re.fullmatch(r"sha256:[0-9a-f]{64}", digest or "") else None
+# Mainnet in the setup wizard stays off until the mainnet release (the page's
+# SETUP_MAINNET_ENABLED); until then no mainnet image is looked up or offered.
+TN_MAINNET_ENABLED = False
 
 
 def latest_docker_image(network="testnet"):
-    """The newest testnet release image, pinned by digest when the registry
-    reports one (us-docker.pkg.dev/.../adiri@sha256:...), else by its release
-    tag (the wizard sends a tag as the release, which the engine resolves to a
-    digest). Only tags passing the testnet release rule count, so hot-patch,
-    devnet and `latest` tags are never offered. The library's latest_docker_image is
-    asked first when it answers with an image this server accepts. Mainnet has
-    no published repository yet: ''. Cached per network (see
-    DOCKER_IMAGE_TTL); every probe times out after DOCKER_PROBE_TIMEOUT s."""
-    if network != "testnet":
+    """The newest release image of the network by digest, <repository>@sha256:
+    <hex>, as the library's latest_docker_image names it: the newest final
+    release the channel has on GitHub (never a release candidate, hot-patch,
+    devnet or `latest` tag), its image from the release's signed IMAGE_DIGEST
+    (on testnet only, the registry's digest when the release has no signed
+    files, then the legacy repository). The answer must pass image_allowed.
+    Testnet falls back to DEFAULT_DOCKER_IMAGE when the library names nothing;
+    mainnet never falls back, and gives '' while TN_MAINNET_ENABLED is off; any
+    other network ''. Cached per network (see DOCKER_IMAGE_TTL); the probe
+    times out after DOCKER_PROBE_TIMEOUT s."""
+    if network not in DOCKER_REPO or (network == "mainnet" and not TN_MAINNET_ENABLED):
         return ""
     now = time.time()
     c = _docker_image_cache.get(network)
@@ -2838,46 +2865,49 @@ def latest_docker_image(network="testnet"):
 
 
 def _latest_docker_image_probe(network):
-    """(image, True) from the library or the registry; (DEFAULT_DOCKER_IMAGE,
-    False) when neither answers."""
-    rc, out, _ = run(["bash", "-c", 'source "$1" >/dev/null 2>&1 && declare -F latest_docker_image >/dev/null '
-                      '&& latest_docker_image', "_", LIB_COMMON], timeout=DOCKER_PROBE_TIMEOUT)
-    if rc == 0 and image_allowed(out.strip(), network):
-        return out.strip(), True
+    """(image, True) when the library's latest_docker_image NETWORK names an
+    image image_allowed accepts (the last line of its output); otherwise
+    (DEFAULT_DOCKER_IMAGE, False) on testnet and ("", False) elsewhere. The
+    library stages the release's signed files in TN_RELEASE_STAGING_DIR: a
+    fresh 0700 directory of this server's own user, removed afterwards (its
+    default staging directory is root's)."""
+    fallback = DEFAULT_DOCKER_IMAGE if network == "testnet" else ""
     try:
-        req = urllib.request.Request(GAR_TAGS_URL, headers={"User-Agent": "telcoin-ui"})
-        with urllib.request.urlopen(req, timeout=DOCKER_PROBE_TIMEOUT) as r:
-            data = json.loads(r.read().decode())
-    except Exception:
-        return DEFAULT_DOCKER_IMAGE, False
-    parsed = []
-    tags = (data.get("tags") or []) if isinstance(data, dict) else []
-    for t in tags:
-        m = re.match(r"^v(\d+)\.(\d+)\.(\d+)-adiri$", str(t))
-        if m:
-            parsed.append(((int(m.group(1)), int(m.group(2)), int(m.group(3))), t))
-    if not parsed:
-        return DEFAULT_DOCKER_IMAGE, False
-    parsed.sort()
-    tag = parsed[-1][1]
-    digest = _image_digest(tag)
-    return (f"{GAR_IMAGE_BASE}@{digest}" if digest else f"{GAR_IMAGE_BASE}:{tag}"), True
+        staging = tempfile.mkdtemp(prefix="tn-ui-release.")
+    except OSError:
+        return fallback, False
+    try:
+        os.chmod(staging, 0o700)
+        rc, out, _ = run(["bash", "-c",
+                          'TN_RELEASE_STAGING_DIR="$2"; export TN_RELEASE_STAGING_DIR; '
+                          'source "$1" >/dev/null 2>&1 && declare -F latest_docker_image >/dev/null '
+                          '&& latest_docker_image "$3"', "_", LIB_COMMON, staging, network],
+                         timeout=DOCKER_PROBE_TIMEOUT)
+    except OSError:
+        rc, out = 1, ""
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    lines = out.splitlines() if rc == 0 else []
+    image = lines[-1].strip() if lines else ""
+    if image_allowed(image, network):
+        return image, True
+    return fallback, False
 
 
-# Source-build refs are GIT tags (what `cargo build` checks out), which are a
-# DIFFERENT, more up-to-date set than the docker registry tags -- e.g. GitHub may
-# carry v0.10.0-adiri while the registry still lags on v0.9.x. So the wizard's
-# source "latest release" must come from git, not the registry.
+# Source-build refs are GIT tags (what `cargo build` checks out). A tag can be
+# pushed before its release and image are published, so the wizard's source
+# "latest release" comes from git, not from the image lookup.
 TN_SOURCE_REPO = "https://github.com/Telcoin-Association/telcoin-network.git"
 _source_tag_cache = {}       # network -> {"ts", "data"}
 
 
 def latest_source_tag(network="testnet"):
     """Latest release git tag of the network from GitHub (via `git ls-remote
-    --tags`, no clone needed): vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet (the
-    release rule, so hot-patch tags are ignored). The release a source build or
-    a release install takes, matching the CLI menu. Highest semver wins. Cached
-    5 min per network. '' on failure."""
+    --tags`, no clone needed): vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet, finals
+    only (release_tag_final, so release candidates and hot-patch tags are never
+    picked). The release a source build or a release install takes, matching
+    the CLI menu. The newest by release_tag_key wins. Cached 5 min per network.
+    '' on failure."""
     if network not in RELEASE_TAG_RE:
         return ""
     now = time.time()
@@ -2889,10 +2919,10 @@ def latest_source_tag(network="testnet"):
     if rc == 0 and out:
         for line in out.splitlines():
             m = re.search(r"refs/tags/(v[0-9][^/^{}]*)$", line)
-            if not m or not RELEASE_TAG_RE[network].fullmatch(m.group(1)):
+            if not m or not release_tag_final(network, m.group(1)):
                 continue
-            key = tuple(int(x) for x in re.findall(r"[0-9]+", m.group(1))[:3])
-            if best_key is None or key > best_key:
+            key = release_tag_key(m.group(1))
+            if key is not None and (best_key is None or key > best_key):
                 best_key, best_tag = key, m.group(1)
     if best_tag:
         c["ts"], c["data"] = now, best_tag

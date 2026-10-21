@@ -188,10 +188,19 @@ lock_state() {
         echo free
     fi
 }
-# docker ps lists two Telcoin Network containers, tn-node and observer.
+# Image repositories the library accepts (TN_GHCR_IMAGE_REPO for testnet and
+# mainnet, TN_TESTNET_LEGACY_IMAGE_REPO for testnet only).
+GHCR_REPO="ghcr.io/telcoin-association/telcoin-network"
+LEGACY_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+# docker ps lists two Telcoin Network containers: tn-node runs the ghcr.io image
+# by digest, observer a legacy image by tag. fork runs a look-alike repository
+# and other an unrelated image.
+DOCKER_PS="$(printf 'tn-node\t%s@sha256:%064d\nobserver\t%s:v0.16.0-adiri\nfork\t%s-fork:v0.16.0-adiri\nother\tbusybox:latest' \
+    "$GHCR_REPO" 0 "$LEGACY_REPO" "$GHCR_REPO")"
+printf '%s\n' "$DOCKER_PS" > "$T/docker-ps.out"
 # shellcheck disable=SC2016
 make_fake "$T/bin/docker" docker \
-    '[ "$1" = ps ] && printf "tn-node\tus-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri\nobserver\tus-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri\nother\tbusybox:latest\n"; exit 0'
+    "[ \"\$1\" = ps ] && cat '$T/docker-ps.out'; exit 0"
 # The journal reports two starts of whatever unit it is asked about.
 # shellcheck disable=SC2016
 make_fake "$T/bin/journalctl" journalctl \
@@ -645,7 +654,7 @@ add_launch() {
         > "${UNIT_DIR}/telcoin.service"
     printf '#!/bin/bash\nset -euo pipefail\n%s\n' "$body" > "$file"
 }
-DOCKER_LINE='exec docker run --rm --name telcoin-node --network host -v /var/lib/telcoin:/home/nonroot/data us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:0123 telcoin node --datadir /home/nonroot/data --http --http.port 8545'
+DOCKER_LINE="exec docker run --rm --name telcoin-node --network host -v /var/lib/telcoin:/home/nonroot/data ${GHCR_REPO}@sha256:0123 telcoin node --datadir /home/nonroot/data --http --http.port 8545"
 fixture none
 add_meta -
 add_launch "${LIBEXEC_DIR}/tn-start-docker" "$DOCKER_LINE"
@@ -759,8 +768,9 @@ export TN_SETUP_EXT_WORKER="$(printf '/ip4/10.0.0.5\t/udp/49594/quic-v1')"; refu
 export TN_SETUP_INSTALL_METHOD=source TN_SETUP_BUILD_REF=main; refused_in "setup-keygen build ref main" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_BUILD_REF
 export TN_SETUP_INSTALL_METHOD=source TN_SETUP_BUILD_REF=v0.16.0; refused_in "setup-keygen mainnet tag on testnet" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_BUILD_REF
 export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=docker.io/library/busybox:latest; refused_in "setup-keygen foreign image" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
-export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:latest; refused_in "setup-keygen image tag latest" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
-export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-devnet; refused_in "setup-keygen devnet image tag" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}:latest"; refused_in "setup-keygen image tag latest" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}:latest"; refused_in "setup-keygen legacy image tag latest" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}:v0.16.0-devnet"; refused_in "setup-keygen devnet image tag" setup-keygen; unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
 refused "setup-keygen without a passphrase on stdin" setup-keygen < /dev/null
 printf ' padded \n' > "$T/pass-bad"
 refused "setup-keygen with a padded passphrase" setup-keygen < "$T/pass-bad"
@@ -769,8 +779,21 @@ refused "mainnet setup-keygen with a 10-byte passphrase" setup-keygen < "$T/pass
 export TN_SETUP_NETWORK=testnet
 refused "setup-finalize without listener multiaddrs (NC-2)" setup-finalize < /dev/null
 DIGEST="$(printf '%064d' 0 | tr 0 a)"
-t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
+t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
 check_has "setup-keygen accepts the testnet image by digest" "rc=0" "$t"
+t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
+check_has "setup-keygen accepts a legacy testnet image by digest" "rc=0" "$t"
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}-fork@sha256:${DIGEST}"; refused_in "setup-keygen refuses a look-alike repository" setup-keygen
+check_has "setup-keygen names the look-alike image it refuses" \
+    "invalid docker image for testnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${GHCR_REPO}-fork@sha256:${DIGEST}" \
+    "$(trace setup-keygen < "$T/pass-in")"
+unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
+export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}"
+refused_in "setup-keygen refuses the legacy repository on mainnet" setup-keygen
+check_has "setup-keygen names the legacy image it refuses on mainnet" \
+    "invalid docker image for mainnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${LEGACY_REPO}@sha256:${DIGEST}" \
+    "$(trace setup-keygen < "$T/pass-in")"
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE; export TN_SETUP_NETWORK=testnet
 fixture unified
 refused_in "setup-keygen refused on an installed node" setup-keygen
 export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1
@@ -813,9 +836,9 @@ check_has "a Docker install by release tag sends --release-tag" \
 export TN_SETUP_NETWORK=testnet
 export TN_SETUP_LOG_TARGET=syslog; refused_in "setup-keygen refuses a log target other than journal or file" setup-keygen; unset TN_SETUP_LOG_TARGET
 export TN_SETUP_ALLOW_NO_TPM=yes; refused_in "setup-keygen refuses TN_SETUP_ALLOW_NO_TPM=yes" setup-keygen; unset TN_SETUP_ALLOW_NO_TPM
-export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.16.0-adiri
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}:v0.16.0-adiri"
 refused_in "setup-keygen refuses an image by tag (a tag goes in TN_SETUP_BUILD_REF)" setup-keygen
-export TN_SETUP_DOCKER_IMAGE="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:${DIGEST}" TN_SETUP_BUILD_REF=v0.16.0-adiri
+export TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}" TN_SETUP_BUILD_REF=v0.16.0-adiri
 refused_in "setup-keygen refuses an image digest and a release tag together" setup-keygen
 unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE TN_SETUP_BUILD_REF
 make_fake "$T/engine/setup-node-norel.sh" setup-node-norel '# --passphrase-stdin'
@@ -938,7 +961,7 @@ for fv in "primary_listener=/ip4/0.0.0.0/udp/49590/quic-v1" \
 done
 for fv in "metrics=on" "metrics=OFF" "metrics=127.0.0.1" "verbosity=-vvvvvv" "docker_image=adiri" \
           "metrics=0.0.0.0:9101" "metrics=10.0.0.5:9101" "verbosity=-vvvv" "verbosity=-vvvvv" \
-          "docker_image=us-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri" \
+          "docker_image=${GHCR_REPO}:v0.15.0-adiri" \
           "bootstrap_peers=peers.yaml" "bootstrap_peers=None" "bootstrap_peers=/tmp/peers file.yaml" \
           'bootstrap_peers=/tmp/$(id).yaml' "bootstrap_peers=" \
           "state_export=0" "state_export=01" "state_export=1000000" "state_export=-1" \
@@ -1097,14 +1120,18 @@ fixture unified
 t="$(trace update-prepare v0.16.0-adiri)"
 check_has "update-prepare accepts a testnet release tag" \
     "update-node [--json] [--prepare] [--ref] [v0.16.0-adiri]" "$t"
+t="$(trace update-prepare v0.17.0-adiri-rc1)"
+check_has "update-prepare accepts a named testnet release candidate" \
+    "update-node [--json] [--prepare] [--ref] [v0.17.0-adiri-rc1]" "$t"
 for r in main feature/x v0.16.0 v0.16.0-adiri-hotfix v0.16-adiri 5535ef1f0425973bd81ef3162f3d07219c3456d0 \
-         V0.16.0-adiri "v0.16.0-adiri/../x"; do
+         V0.16.0-adiri "v0.16.0-adiri/../x" v0.17.0-adiri-rc0 v0.17.0-adiri-rc01 v0.17.0-adiri-rc v0.17.0-rc1; do
     refused "update-prepare refuses $r on testnet" update-prepare "$r"
 done
 printf 'NETWORK=mainnet\n' > "${ETC_DIR}/.node-meta"
 t="$(trace update-prepare v1.0.0)"
 check_has "update-prepare accepts a mainnet release tag" "update-node [--json] [--prepare] [--ref] [v1.0.0]" "$t"
 refused "update-prepare refuses a testnet tag on mainnet" update-prepare v1.0.0-adiri
+refused "update-prepare refuses a release candidate on mainnet" update-prepare v1.0.0-rc1
 printf 'NETWORK=devnet\n' > "${ETC_DIR}/.node-meta"
 refused "update-prepare refuses on devnet" update-prepare v1.0.0
 printf 'NETWORK=testnet\nNETWORK=mainnet\n' > "${ETC_DIR}/.node-meta"
@@ -1257,7 +1284,13 @@ refused_after_ps() {
     printf '%s\n' "$t" | sed 's/^/        /'
     return 1
 }
+t="$(trace docker-detect)"
+check "docker-detect lists the containers of the library's repositories, by digest or by tag" \
+    "$(printf 'rc=0\ntn-node\nobserver')" "$(printf '%s\n' "$t" | sed -n '1,/^--- calls$/p' | sed '$d')"
 refused_after_ps "docker-status refuses a container docker-detect does not list" docker-status other
+refused_after_ps "docker-status refuses a look-alike repository" docker-status fork
+t="$(trace docker-status observer)"
+check_has "docker-status takes a legacy-repository container" "rc=0" "$t"
 refused_after_ps "docker-logs refuses an unknown container" docker-logs nope 10
 refused_after_ps "docker-logs refuses a zero line count" docker-logs tn-node 0
 t="$(trace docker-status tn-node)"
@@ -1309,7 +1342,7 @@ fixture none
 t="$(export TN_SETUP_NETWORK=testnet; trace setup-keygen < "$T/pass-in")"
 check_has "setup-keygen without the library refuses" \
     "the engine library (${HELPER_LIB}) ${LIB_MSG} tn_service_user_ok: run update-scripts.sh, then try again" "$t"
-t="$(export TN_SETUP_NETWORK=testnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="us-docker.pkg.dev/telcoin-network/tn-public/adiri@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
+t="$(export TN_SETUP_NETWORK=testnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
 check_lacks "setup-keygen without the library never reaches setup-node" "setup-node [" "$t"
 HELPER_LIB="${TEST_DIR}/../../lib/common.sh"
 check "with the library: passphrase_ok refuses a 15-byte mainnet value" "1" \

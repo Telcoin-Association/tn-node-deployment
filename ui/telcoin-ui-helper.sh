@@ -521,7 +521,7 @@ node_network() {
 }
 
 # release_tag_ok <network> <tag> -- the library's tn_release_tag_ok (testnet
-# vX.Y.Z-adiri, mainnet vX.Y.Z).
+# vX.Y.Z-adiri or its release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z).
 release_tag_ok() {
     _lib_req tn_release_tag_ok "$1" "$2"
 }
@@ -1464,10 +1464,11 @@ service_account_ok() {
     _lib_req tn_service_user_ok "$1" "$2" >/dev/null
 }
 
-# docker_image_ok <image> <network> -- the library's tn_docker_image_allowed:
-# the network's repository by digest.
+# docker_image_ok <image> <network> -- the library's tn_docker_image_allowed
+# with digests required: <repository>@sha256:<digest>, the repository one the
+# network's images may come from (on testnet either testnet repository).
 docker_image_ok() {
-    _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null
+    TN_DOCKER_REQUIRE_DIGEST=1 _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null
 }
 
 # passphrase_ok <value> <network> -- the library's tn_passphrase_ok (no CR/LF,
@@ -1599,16 +1600,31 @@ cmd_setup_finalize() { cmd_setup finalize; }
 # the host. The container argument must be one docker-detect reports.
 # =============================================================================
 
-# Image substrings that identify a dev-team Telcoin Network container.
-DOCKER_TN_IMAGE_RE='us-docker\.pkg\.dev/telcoin-network/tn-public|telcoin-network/tn-public|/tn-public/'
+# _docker_tn_names -- read "<name><TAB><image>" lines on stdin and print each
+# name whose image, by tag or by digest, comes from a repository the library
+# accepts testnet or mainnet images from (tn_docker_repo_ok). Runs inside the
+# library (_lib_call).
+_docker_tn_names() {
+    local name img repo
+    while IFS=$'\t' read -r name img; do
+        repo="${img%%@*}"
+        case "${repo##*/}" in
+            *:*) repo="${repo%:*}" ;;
+        esac
+        if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo"; then
+            printf '%s\n' "$name"
+        fi
+    done
+}
 
-# Print the names of running Telcoin Network containers, one per line. Empty
-# output (rc 0) when docker is absent or no matching container runs.
+# Print the names of running Telcoin Network containers, one per line: those
+# running an image of the library's testnet or mainnet repositories. Empty
+# output (rc 0) when docker is absent, no matching container runs, or the
+# library cannot be read.
 cmd_docker_detect() {
     command -v docker >/dev/null 2>&1 || return 0
     docker ps --no-trunc --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
-        | grep -E "$DOCKER_TN_IMAGE_RE" \
-        | cut -f1 || true
+        | _lib_call _docker_tn_names || true
 }
 
 # The fields of `docker inspect` the UI reads, as a one-element JSON array in
