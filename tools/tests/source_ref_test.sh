@@ -26,6 +26,7 @@ TN_ROOT_PREFIX="$T/root"
 TN_RELEASE_STAGING_DIR="$T/stg"
 TN_RELEASE_KEYS_DIR="$T/keys"
 TN_BUILD_HOME="$T/bh"
+tn_test_timeout_standin "$TN_BUILD_HOME/.cargo/bin"
 if [[ "$(id -u)" == "0" ]]; then
     if ! id -u tnbuildtest >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /usr/sbin/nologin tnbuildtest >/dev/null 2>&1 || true

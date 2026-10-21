@@ -23,6 +23,7 @@ set -u
 
 T="$TN_TEST_TMP"
 mkdir -p "$T/stg" "$T/bin" "$T/bh/.cargo/bin" "$T/root/etc/telcoin"
+tn_test_timeout_standin "$T/bh/.cargo/bin"
 chmod 0700 "$T/stg"
 TN_ROOT_PREFIX="$T/root"
 TN_RELEASE_STAGING_DIR="$T/stg"

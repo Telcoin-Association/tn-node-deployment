@@ -12,6 +12,7 @@
 #   check_lacks NAME STRING TEXT     STRING appears nowhere in TEXT
 #   check_rc NAME EXPECTED ACTUAL    two exit codes are equal
 #   skip NAME REASON                 record a check that cannot run here
+#   tn_test_timeout_standin DIR      a timeout(1) for the build account (macOS)
 #   finish                           print the counts; exit 1 on any failure
 #
 # check, check_has and check_lacks behave exactly like their namesakes in
@@ -211,6 +212,20 @@ check_rc() {
     FAILS=$((FAILS + 1))
     printf 'FAIL  %s\n      expected rc %s, got rc %s\n' "$1" "$2" "$3"
     return 1
+}
+
+# tn_test_timeout_standin DIR -- the build account runs the node binary under
+# timeout(1) with PATH $TN_BUILD_HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+# (tn_as_build_user). Where those system directories hold no timeout (macOS),
+# write DIR/timeout (the test passes $TN_BUILD_HOME/.cargo/bin): it drops the
+# duration and runs the command without a time limit. Elsewhere it does nothing.
+tn_test_timeout_standin() {
+    if [[ -n "$(PATH=/usr/local/bin:/usr/bin:/bin type -P timeout)" ]]; then
+        return 0
+    fi
+    mkdir -p "$1" || return 1
+    printf '#!/bin/sh\nshift\nexec "$@"\n' > "$1/timeout" || return 1
+    chmod 0755 "$1/timeout"
 }
 
 # skip <name> <reason> -- a check this host cannot run (a missing tool, not root).
