@@ -1655,16 +1655,18 @@ tn_passphrase_ok() {
 
 # tn_release_tag_ok NETWORK TAG -- rc 0 when TAG is a release tag of NETWORK:
 # testnet vX.Y.Z-adiri, or its release candidate vX.Y.Z-adiri-rcN (N from 1, no
-# leading zero); mainnet vX.Y.Z, finals only (X, Y and Z digits; nothing before
-# or after). Any other NETWORK, devnet included, is rc 1. The one place that
-# says which tags the source picker, the updater and the Docker tag filter
+# leading zero); mainnet vX.Y.Z, finals only (X, Y and Z are 0 or digits that
+# do not start with 0, as the release pipeline's TAG_RE has them; nothing
+# before or after). Any other NETWORK, devnet included, is rc 1. The one place
+# that says which tags the source picker, the updater and the Docker tag filter
 # accept when a tag is named. A pick of the newest release takes finals only
 # (tn_release_tag_final), so a release candidate runs only when it is named.
 tn_release_tag_ok() {
-    local net="${1:-}" tag="${2:-}" re
+    local net="${1:-}" tag="${2:-}" n re
+    n='(0|[1-9][0-9]*)'
     case "$net" in
-        testnet) re='^v[0-9]+\.[0-9]+\.[0-9]+-adiri(-rc[1-9][0-9]*)?$' ;;
-        mainnet) re='^v[0-9]+\.[0-9]+\.[0-9]+$' ;;
+        testnet) re="^v${n}\.${n}\.${n}-adiri(-rc[1-9][0-9]*)?$" ;;
+        mainnet) re="^v${n}\.${n}\.${n}$" ;;
         *) return 1 ;;
     esac
     [[ "$tag" =~ $re ]]

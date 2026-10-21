@@ -451,6 +451,13 @@ tag_case 'leading text'               mainnet 'xv1.0.0'        1
 tag_case 'suffix after -adiri'        testnet 'v1.0.0-adiri-x' 1
 tag_case 'empty tag'                  mainnet ''               1
 tag_case 'devnet network'             devnet  'v1.0.0'         1
+tag_case 'leading zero in Y (testnet)' testnet 'v0.017.0-adiri' 1
+tag_case 'leading zero in X (mainnet)' mainnet 'v01.0.0'        1
+tag_case 'leading zero in Z (mainnet)' mainnet 'v1.0.00'        1
+tag_case 'rc with a leading zero'      testnet 'v1.2.3-adiri-rc01' 1
+tag_case 'zero parts (testnet)'        testnet 'v0.0.0-adiri'   0
+tag_case 'zero parts (mainnet)'        mainnet 'v0.0.0'         0
+tag_case 'multi-digit parts'           mainnet 'v10.20.30'      0
 tag_case 'empty network'              ''      'v1.0.0'         1
 
 # ---- tn_cargo_features_for ----------------------------------------------------------

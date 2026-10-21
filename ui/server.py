@@ -282,12 +282,15 @@ def bad_type():
 
 # Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri or its
 # release candidate vX.Y.Z-adiri-rcN (N from 1, no leading zero), mainnet
-# vX.Y.Z (finals only). Branch names, commit ids and anything else are refused.
+# vX.Y.Z (finals only); X, Y and Z are 0 or have no leading zero, as the
+# release pipeline's TAG_RE has them. Branch names, commit ids and anything
+# else are refused.
 # A tag the user names may be a release candidate; a pick of the newest
 # release takes finals only (release_tag_final), ordered by release_tag_key.
+_TAG_PART = r"(?:0|[1-9][0-9]*)"
 RELEASE_TAG_RE = {
-    "testnet": re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+-adiri(?:-rc[1-9][0-9]*)?"),
-    "mainnet": re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+"),
+    "testnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}-adiri(?:-rc[1-9][0-9]*)?"),
+    "mainnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}"),
 }
 
 

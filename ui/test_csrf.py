@@ -548,10 +548,13 @@ class MainnetAndImagesTest(ServerTestCase):
         self.assertTrue(ok("testnet", "v0.17.0-adiri-rc1"))
         self.assertTrue(ok("testnet", "v0.17.0-adiri-rc12"))
         for bad in ("v0.16.0", "v0.17.0-adiri-rc0", "v0.17.0-adiri-rc01", "v0.17.0-adiri-rc",
-                    "v0.17.0-rc1", "v0.17.0-adiri-rc1-hotfix"):
+                    "v0.17.0-rc1", "v0.17.0-adiri-rc1-hotfix", "v0.017.0-adiri",
+                    "v1.2.3-adiri-rc01", "v00.1.0-adiri"):
             with self.subTest(tag=bad):
                 self.assertFalse(ok("testnet", bad))
         self.assertTrue(ok("mainnet", "v1.0.0"))
+        self.assertTrue(ok("mainnet", "v0.0.10"))
+        self.assertFalse(ok("mainnet", "v1.00.0"), "no leading zero, as upstream TAG_RE")
         self.assertFalse(ok("mainnet", "v1.0.0-adiri"))
         self.assertFalse(ok("mainnet", "v1.0.0-rc1"), "release candidates are testnet only")
         self.assertFalse(ok("devnet", "v1.0.0"))
@@ -574,7 +577,8 @@ class MainnetAndImagesTest(ServerTestCase):
         tags = ("v0.16.0-adiri", "v1.0.0", "v1.2.3-adiri-hotfix", "latest", "v1.0",
                 "v01.0.0", "main", "v1.0.0 ", "0.16.0-adiri", "v10.20.30",
                 "v0.17.0-adiri-rc1", "v0.17.0-adiri-rc10", "v0.17.0-adiri-rc0", "v0.17.0-adiri-rc01",
-                "v0.17.0-adiri-rc", "v0.17.0-adiri-rc1-hotfix", "v1.0.0-rc1", "v1.0.0-adiri-rc1 ")
+                "v0.17.0-adiri-rc", "v0.17.0-adiri-rc1-hotfix", "v1.0.0-rc1", "v1.0.0-adiri-rc1 ",
+                "v0.017.0-adiri", "v1.2.3-adiri-rc01", "v0.0.0-adiri", "v1.00.0", "v0.0.10")
         vectors = [(n, t) for n in ("testnet", "mainnet", "devnet") for t in tags]
         script = ('source "$1" >/dev/null 2>&1; set +e; shift; while [ $# -gt 1 ]; do '
                   'tn_release_tag_ok "$1" "$2"; a=$?; tn_release_tag_final "$1" "$2"; b=$?; '
