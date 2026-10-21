@@ -31,8 +31,21 @@ SERVICE_USER=tn-no-such-user-xyz
 chmod 0755 "$T"  # mktemp -d made it 0700
 printf '#!/bin/sh\n' > "$T/d/bin"
 chmod 0755 "$T/d/bin"
-rc=0; tn_service_user_can_run "$T/d/bin" || rc=$?
-check_rc "service account: 0755 file in searchable dirs" 0 "$rc"
+# The permission-bit form walks every directory above the file, as below; macOS
+# keeps TMPDIR in a directory only its owner can search (0700).
+tmp_searchable=yes
+d="${T%/*}"
+while [[ -n "$d" ]]; do
+    m="$(stat -c %a -- "$d" 2>/dev/null)" || m=""
+    [[ "$m" =~ ^[0-7]+$ ]] && (( (8#$m & 1) == 1 )) || tmp_searchable=no
+    d="${d%/*}"
+done
+if [[ "$tmp_searchable" == yes ]]; then
+    rc=0; tn_service_user_can_run "$T/d/bin" || rc=$?
+    check_rc "service account: 0755 file in searchable dirs" 0 "$rc"
+else
+    skip "service account: 0755 file in searchable dirs" "a directory above ${T} is not searchable by others"
+fi
 chmod 0750 "$T/d/bin"
 rc=0; tn_service_user_can_run "$T/d/bin" || rc=$?
 check_rc "service account: 0750 file refused" 1 "$rc"

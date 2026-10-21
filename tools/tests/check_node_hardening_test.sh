@@ -140,11 +140,15 @@ if [[ -r /proc/locks ]] && flock -n -o "$T/flock.probe" true 2>/dev/null; then
 else
     skip "lock: held, with the holder's PID" "flock -o or /proc/locks absent"
 fi
-mkdir "$T/update.lock.d"
-printf '%s\n' "$$" > "$T/update.lock.d/pid"
-run check_update_lock
-check "lock: mkdir fallback held" "yes" "$(has "$OUT" "held by PID $$")"
-rm -rf "$T/update.lock.d"
+if [[ -d /proc/$$ ]]; then
+    mkdir "$T/update.lock.d"
+    printf '%s\n' "$$" > "$T/update.lock.d/pid"
+    run check_update_lock
+    check "lock: mkdir fallback held" "yes" "$(has "$OUT" "held by PID $$")"
+    rm -rf "$T/update.lock.d"
+else
+    skip "lock: mkdir fallback held" "/proc absent: check-node reads the holder PID there"
+fi
 unset TN_UPDATE_LOCK_FILE
 if [[ $IS_ROOT == 1 && -e /.dockerenv && ! -e /run/telcoin ]]; then
     MADE_RUN=1

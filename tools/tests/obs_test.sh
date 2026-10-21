@@ -78,7 +78,7 @@ cat > "$T/bin/getent" <<'STUB'
 exit 2
 STUB
 chmod +x "$T/bin/"*
-PATH="$T/bin:/usr/local/bin:/usr/bin:/bin"
+PATH="$T/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"  # macOS keeps sha256sum in /sbin
 hash -r
 
 eval "$(tn_test_source_common)"

@@ -79,8 +79,12 @@ TN_KEYTOOL_PASS="docker-pass-xx"
 rc=0; tn_keytool "docker:img:v1" "$T/data" generate validator || rc=$?
 check_rc "keytool: docker rc" 0 "$rc"
 check_has "keytool: docker -i" "-i" "$(cat "$REC.argv")"
+# The gid the way tn_keytool reads it: getent, else the account's primary group
+# (macOS has no getent).
+SVC_GID="$(command getent group "$SERVICE_GROUP" 2>/dev/null | cut -d: -f3)"
+[[ -n "$SVC_GID" ]] || SVC_GID="$(id -g "$SERVICE_USER")"
 check_has "keytool: docker --user service uid:gid" \
-    "$(id -u "$SERVICE_USER"):$(command getent group "$SERVICE_GROUP" | cut -d: -f3)" "$(cat "$REC.argv")"
+    "$(id -u "$SERVICE_USER"):${SVC_GID}" "$(cat "$REC.argv")"
 check "keytool: docker passphrase on stdin" "docker-pass-xx" "$(cat "$REC.stdin")"
 check_lacks "keytool: docker passphrase not in argv" "docker-pass-xx" "$(cat "$REC.argv")"
 check_lacks "keytool: docker gets no TN_BLS_PASSPHRASE" "TN_BLS_PASSPHRASE" "$(cat "$REC.argv") $(cat "$REC.env")"

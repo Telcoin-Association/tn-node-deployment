@@ -50,17 +50,22 @@ printf 'PHASE=build_complete\nBUILT_BINARY=%s\n' "$T/stg/bin.${DEAD}.pppppp/telc
 tn_remove_inflight_tmp
 check "exit sweep: only this run's entries go" \
     "$(want "bin.${DEAD}.pppppp" "rel.${DEAD}.cccccc" "rel.${LIVE}.bbbbbb" rel.dddddd tn-build-log.eeeeee)" "$(names)"
-for k in rel bin; do mk "$k.$$.ffffff"; done
-tn_staging_sweep stale
-check "stale sweep: dead and unnamed go; live, this run's, pending and the log stay" \
-    "$(want "bin.$$.ffffff" "bin.${DEAD}.pppppp" "rel.$$.ffffff" "rel.${LIVE}.bbbbbb" tn-build-log.eeeeee)" "$(names)"
-rm -f "$T/root/etc/telcoin/.pending-update"
-tn_staging_sweep stale
-check "stale sweep without a pending update: the dead run's staged binary goes" \
-    "$(want "bin.$$.ffffff" "rel.$$.ffffff" "rel.${LIVE}.bbbbbb" tn-build-log.eeeeee)" "$(names)"
-ln -s "$T/stg/rel.${LIVE}.bbbbbb" "$T/stg/rel.${DEAD}.symlnk"
-tn_staging_sweep stale
-check "a symlink is never followed or removed" yes "$([[ -L "$T/stg/rel.${DEAD}.symlnk" && -f "$T/stg/rel.${LIVE}.bbbbbb/f" ]] && echo yes || echo no)"
+# The stale sweep tells a live run from a dead one by /proc/<pid>.
+if [[ -d /proc/$$ ]]; then
+    for k in rel bin; do mk "$k.$$.ffffff"; done
+    tn_staging_sweep stale
+    check "stale sweep: dead and unnamed go; live, this run's, pending and the log stay" \
+        "$(want "bin.$$.ffffff" "bin.${DEAD}.pppppp" "rel.$$.ffffff" "rel.${LIVE}.bbbbbb" tn-build-log.eeeeee)" "$(names)"
+    rm -f "$T/root/etc/telcoin/.pending-update"
+    tn_staging_sweep stale
+    check "stale sweep without a pending update: the dead run's staged binary goes" \
+        "$(want "bin.$$.ffffff" "rel.$$.ffffff" "rel.${LIVE}.bbbbbb" tn-build-log.eeeeee)" "$(names)"
+    ln -s "$T/stg/rel.${LIVE}.bbbbbb" "$T/stg/rel.${DEAD}.symlnk"
+    tn_staging_sweep stale
+    check "a symlink is never followed or removed" yes "$([[ -L "$T/stg/rel.${DEAD}.symlnk" && -f "$T/stg/rel.${LIVE}.bbbbbb/f" ]] && echo yes || echo no)"
+else
+    skip "stale sweep: live, dead and pending runs; symlinks" "/proc absent: the sweep reads run PIDs there"
+fi
 rm -rf "$T/stg"/* "$T/stg"/.[!.]* 2>/dev/null
 
 # ---- staging names carry the run's PID ------------------------------------------------
