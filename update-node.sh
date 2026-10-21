@@ -85,7 +85,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
     || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_root_file \
         tn_rerender_node_launch tn_move_node_log_dir tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_install_root_binary tn_release_stage tn_source_build \
-        tn_docker_resolve_ref tn_docker_local_digest tn_release_tags_sort tn_release_tag_newer >/dev/null; then
+        tn_docker_resolve_ref tn_docker_local_digest tn_release_tags_sort tn_release_tag_newer \
+        tn_release_newest_tag tn_registry_tags tn_release_tag_final tn_release_tag_grammar >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this update-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -1371,22 +1372,24 @@ update_epoch_wait() {
 # =============================================================================
 
 # fetch_docker_tags [NETWORK] -- the final release tags in the network's image
-# repository (tn_docker_repo_for; NETWORK defaults to this node's), oldest first by
+# repository (tn_docker_repo_for, read with its pull token; on testnet the legacy
+# repository's as well; NETWORK defaults to this node's), oldest first by
 # tn_release_tag_key, at most 15. Only tags that pass tn_release_tag_final are kept,
 # so latest, hot-patch, branch, release-candidate and other networks' tags are
 # never offered (a release candidate is taken only when typed). Nothing when the
 # repository or the registry cannot be read.
 fetch_docker_tags() {
-    local net="${1:-}" repo host path json
+    local net="${1:-}" repo
     if [[ -z "$net" ]]; then
         net="$(tn_detect_network 2>/dev/null)" || return 0
     fi
     repo="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 0
-    host="${repo%%/*}"
-    path="${repo#*/}"
-    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || return 0
-    printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
-        | while IFS= read -r t; do
+    {
+        tn_registry_tags "$repo" 2>/dev/null || true
+        if [[ "$net" == "testnet" ]]; then
+            tn_registry_tags "$TN_TESTNET_LEGACY_IMAGE_REPO" 2>/dev/null || true
+        fi
+    } | while IFS= read -r t; do
             if tn_release_tag_final "$net" "$t"; then
                 printf '%s\n' "$t"
             fi
@@ -2224,7 +2227,7 @@ pick_release_version() {
     cur="$(installed_source_ref)"
     latest="$(latest_release_ref)"
     print_info "Running release:     ${cur:-unknown}" >&2
-    print_info "Newest ${net} release: ${latest:-unknown (origin not reachable)}" >&2
+    print_info "Newest ${net} release: ${latest:-unknown (GitHub not reachable, or no release published yet)}" >&2
     echo "" >&2
     read -r -p "  Release tag to install [${latest:-none}] (Enter takes it): " tag >&2
     tag="${tag:-$latest}"
@@ -2647,24 +2650,27 @@ latest_source_ref() {
     return 0
 }
 
-# latest_release_ref -- the newest final release tag of this node's network that
-# origin publishes (git ls-remote of TN_REPO: release installs have no checkout;
-# tn_release_tag_final, ordered by tn_release_tag_key). Nothing when it cannot be read.
+# latest_release_ref -- the newest final release of this node's network published
+# on GitHub (tn_release_newest_tag: a release install needs a release page with
+# signed files, not only a git tag). Nothing when there is none or GitHub cannot
+# be read.
 latest_release_ref() {
     local network
     network="$(detect_network 2>/dev/null)" || return 0
-    GIT_ALLOW_PROTOCOL=https git ls-remote --tags --refs -- "$TN_REPO" 'v*' 9>&- 2>/dev/null \
-        | awk '{ sub("^refs/tags/", "", $2); print $2 }' \
-        | while IFS= read -r t; do
-            if tn_release_tag_final "$network" "$t"; then
-                printf '%s\n' "$t"
-            fi
-        done | tn_release_tags_sort | tail -n 1
+    tn_release_newest_tag "$network" 2>/dev/null || true
 }
 
-# Newest published docker tag. fetch_docker_tags emits oldest-first.
+# latest_docker_ref -- the newest final release of this node's network for a
+# Docker install: tn_release_newest_tag, and on testnet only, while that has no
+# answer, the newest final tag the registries list (fetch_docker_tags, oldest first).
 latest_docker_ref() {
-    fetch_docker_tags | tail -1
+    local network
+    network="$(detect_network 2>/dev/null)" || return 0
+    if tn_release_newest_tag "$network" 2>/dev/null; then
+        return 0
+    fi
+    [[ "$network" == "testnet" ]] || return 0
+    fetch_docker_tags "$network" | tail -1
 }
 
 json_check() {

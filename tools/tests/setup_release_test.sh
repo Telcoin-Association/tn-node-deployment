@@ -52,8 +52,8 @@ flags "docker by digest" 0 testnet docker "" "" "${R}@sha256:${D64}"
 flags "docker by tag refused" 1 testnet docker "" "" "${R}:v0.16.0-adiri"
 flags "docker image and release tag together refused" 1 testnet docker v0.16.0-adiri "" "${R}@sha256:${D64}"
 flags "unknown install method refused" 1 testnet binary "" "" ""
-flags "docker on mainnet (no image repository) refused" 1 mainnet docker "" "" ""
-check "docker on mainnet: the refusal names the open decision" yes "$(grep -q 'open decision' "$T/sn.err" && echo yes || echo no)"
+flags "docker on mainnet (no mainnet release verifies yet) refused" 1 mainnet docker "" "" ""
+check "docker on mainnet: the refusal says no mainnet release can be verified" yes "$(grep -q 'No mainnet release can be verified yet' "$T/sn.err" && echo yes || echo no)"
 flags "docker on devnet (no image repository) refused" 1 devnet docker "" "" ""
 # _preflight_docker: a network without an image repository stops before Docker's apt
 # repository, the engine or daemon.json is touched.
@@ -156,8 +156,8 @@ done
          read_launch_line() { printf 'exec docker run --rm %s@sha256:%s telcoin node --http\n' "$R" "$D64"; }
          tn_detect_network() { printf 'mainnet\n'; }
          edit_docker_image ) < /dev/null > "$T/ec.out" 2>&1
-check "edit menu, mainnet: the open decision is named, nothing asked" "yes no" \
-    "$(grep -q 'open decision' "$T/ec.out" && echo yes || echo no) $(grep -q 'Release tag or image' "$T/ec.out" && echo yes || echo no)"
+check "edit menu, mainnet: the reason is named, nothing asked" "yes no" \
+    "$(grep -q 'No mainnet release can be verified yet' "$T/ec.out" && echo yes || echo no) $(grep -q 'Release tag or image' "$T/ec.out" && echo yes || echo no)"
 
 # edit-config set_docker_image.
 ec() {

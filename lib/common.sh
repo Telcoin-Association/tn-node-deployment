@@ -1492,48 +1492,104 @@ validate_multiaddr() {
     return 1
 }
 
-# Public Artifact Registry for the testnet (-adiri) docker image.
-readonly GAR_IMAGE_BASE="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+# Image repositories. The release pipeline publishes every channel's images to
+# ghcr.io (TN_GHCR_IMAGE_REPO): the testnet and mainnet repository. The testnet
+# images of the releases made before signed releases, v0.16.0-adiri among them,
+# are in the Artifact Registry adiri repository (TN_TESTNET_LEGACY_IMAGE_REPO;
+# GAR_IMAGE_BASE is its older name, kept for the scripts and tests that read it).
+# The legacy repository is read only while the testnet channel has no release on
+# GitHub, and for images recorded from it.
+readonly TN_GHCR_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
+readonly TN_TESTNET_LEGACY_IMAGE_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+readonly GAR_IMAGE_BASE="$TN_TESTNET_LEGACY_IMAGE_REPO"
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
-# Fallback only when the registry is unreachable: v0.16.0-adiri by digest (the
-# Docker-Content-Digest the registry served for that tag on 2026-10-15).
+# Fallback only while testnet has no signed release, or neither GitHub nor the
+# registry answers: v0.16.0-adiri by digest (the Docker-Content-Digest the legacy
+# registry served for that tag on 2026-10-15).
 readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"
 readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea"
 
+# The GitHub Releases API of telcoin-network: the source of each channel's newest release.
+readonly TN_RELEASES_API_URL="https://api.github.com/repos/Telcoin-Association/telcoin-network/releases?per_page=100"
+
 # latest_docker_image [NETWORK] -- the newest release image of NETWORK (default:
-# the NETWORK global, else testnet) by digest, <repo>@sha256:<hex>: the highest
-# tag in the network's repository (tn_docker_repo_for) that passes
-# tn_release_tag_ok, resolved to the digest the registry serves for it. Never a
-# tag, never latest, hot-patch or devnet tags. Mirrors the UI's
-# latest_docker_image. On testnet, when the registry cannot be read, it falls
-# back to DEFAULT_DOCKER_IMAGE (with a warning on stderr). rc 1 and nothing on
-# stdout for a network without a repository, or when nothing can be resolved.
-# The signed release's IMAGE_DIGEST (tn_fetch_release_image) is the stronger
-# source when the release tag is known.
+# the NETWORK global, else testnet) by digest, <repo>@sha256:<hex>. The release
+# is the newest final the channel has on GitHub (tn_release_newest_tag), and its
+# image comes from tn_docker_image_for_tag: the signed IMAGE_DIGEST, or on testnet
+# only, when that release publishes no signed files, the registry's digest for
+# it. Never a tag, a release candidate, latest, hot-patch or devnet tags. Mirrors
+# the UI's latest_docker_image. On testnet only, while the channel has no release
+# (or the Releases API cannot be read), the newest final tag of the legacy
+# repository (TN_TESTNET_LEGACY_IMAGE_REPO) by its registry digest, else
+# DEFAULT_DOCKER_IMAGE, each with a warning on stderr. Mainnet never falls back.
+# rc 1 and nothing on stdout for a network without a repository, or when nothing
+# can be resolved.
 latest_docker_image() {
-    local net="${1:-${NETWORK:-testnet}}" repo host path json best="" digest
-    repo="$(tn_docker_repo_for "$net")" || return 1
-    host="${repo%%/*}"
-    path="${repo#*/}"
-    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || json=""
-    if [[ -n "$json" ]]; then
-        best="$(printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
-            | while IFS= read -r t; do if tn_release_tag_final "$net" "$t"; then printf '%s\n' "$t"; fi; done \
-            | tn_release_tags_sort | tail -n 1)" || best=""
+    local net="${1:-${NETWORK:-testnet}}" repo tag best="" digest
+    tn_docker_repo_for "$net" >/dev/null || return 1
+    if tag="$(tn_release_newest_tag "$net")"; then
+        tn_docker_image_for_tag "$net" "$tag"
+        return $?
     fi
+    [[ "$net" == "testnet" ]] || return 1
+    repo="$TN_TESTNET_LEGACY_IMAGE_REPO"
+    best="$(tn_registry_tags "$repo" \
+        | while IFS= read -r tag; do if tn_release_tag_final "$net" "$tag"; then printf '%s\n' "$tag"; fi; done \
+        | tn_release_tags_sort | tail -n 1)" || best=""
     if [[ -n "$best" ]]; then
         if digest="$(tn_registry_digest "$repo" "$best")"; then
+            print_warn "Taking ${repo}:${best}, the newest image of the legacy repository, by the digest the registry serves; no signed release confirms it (testnet only)." >&2
             printf '%s@%s\n' "$repo" "$digest"
             return 0
         fi
         print_warn "The registry lists ${repo}:${best} but gave no digest for it." >&2
     fi
-    if [[ "$net" == "testnet" ]]; then
-        print_warn "Could not read the newest image from ${repo}; offering ${DEFAULT_DOCKER_TAG} (${DEFAULT_DOCKER_IMAGE})." >&2
-        printf '%s\n' "$DEFAULT_DOCKER_IMAGE"
-        return 0
+    print_warn "Could not read the newest image from ${repo}; offering ${DEFAULT_DOCKER_TAG} (${DEFAULT_DOCKER_IMAGE})." >&2
+    printf '%s\n' "$DEFAULT_DOCKER_IMAGE"
+    return 0
+}
+
+# tn_release_newest_tag NETWORK -- print the newest final release tag NETWORK has
+# on GitHub, from the first 100 releases of TN_RELEASES_API_URL: drafts are
+# skipped; prereleases count on testnet (every Adiri release is one) and are
+# skipped on mainnet; the tag must pass tn_release_tag_final (no release
+# candidate), and the newest is the highest by tn_release_tag_key. rc 1 and
+# nothing on stdout when no release matches ("no ... release is published" on
+# stderr) or the API cannot be read ("cannot read" on stderr), and for a network
+# without releases.
+tn_release_newest_tag() {
+    local net="${1:-}" json best
+    case "$net" in
+        testnet|mainnet) ;;
+        *) return 1 ;;
+    esac
+    if ! json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 \
+        -H 'Accept: application/vnd.github+json' -A 'telcoin-node-scripts' \
+        --url "$TN_RELEASES_API_URL" 2>/dev/null)" || [[ "$json" != *"["* ]]; then
+        print_warn "Cannot read the telcoin-network releases from GitHub (${TN_RELEASES_API_URL%%\?*}), so the newest ${net} release is unknown." >&2
+        return 1
     fi
-    return 1
+    # The three fields each release object has, in document order. A string value
+    # never matches here: its quotes are escaped inside JSON text.
+    best="$(printf '%s' "$json" \
+        | grep -oE '"(tag_name|draft|prerelease)"[[:space:]]*:[[:space:]]*("[^"\\]*"|true|false)' \
+        | awk -v net="$net" '
+            {
+                k = $0; sub(/^"/, "", k); sub(/".*/, "", k)
+                v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/"/, "", v)
+                f[k] = v; n++
+                if (n == 3) {
+                    if (f["draft"] == "false" && (net == "testnet" || f["prerelease"] == "false")) print f["tag_name"]
+                    n = 0; split("", f)
+                }
+            }' \
+        | while IFS= read -r t; do if tn_release_tag_final "$net" "$t"; then printf '%s\n' "$t"; fi; done \
+        | tn_release_tags_sort | tail -n 1)" || best=""
+    if [[ -z "$best" ]]; then
+        print_warn "No ${net} release is published on GitHub yet." >&2
+        return 1
+    fi
+    printf '%s\n' "$best"
 }
 
 # tn_docker_ref_ok IMAGE -- rc 0 when IMAGE has the shape of an image reference
@@ -6130,17 +6186,18 @@ pick_action() {
 # installs the result. Docker images come from the network's repositories
 # (TN_TESTNET_IMAGE_REPOS on testnet) and run by digest.
 
-# Image repository per network (testnet: GAR_IMAGE_BASE). Which repositories
-# publish mainnet and devnet images is an open decision: while a constant is
-# empty, tn_docker_repo_for refuses that network, and so does every Docker path.
-readonly TN_MAINNET_IMAGE_REPO=""
+# Image repository per network: testnet and mainnet TN_GHCR_IMAGE_REPO, where the
+# release pipeline publishes. Which repository publishes devnet images is an open
+# decision: while its constant is empty, tn_docker_repo_for refuses devnet, and
+# so does every Docker path.
+readonly TN_MAINNET_IMAGE_REPO="$TN_GHCR_IMAGE_REPO"
 readonly TN_DEVNET_IMAGE_REPO=""
 
-# Every repository a testnet image may come from, space separated: the default
-# (GAR_IMAGE_BASE, which tn_docker_repo_for prints, where the registry fallback
-# and the newest-image lookup read) and the one the release workflow publishes
-# to. A signed release's IMAGE_DIGEST names one of them. Mainnet and devnet take
-# only their own constant.
+# Every repository a testnet image may come from, space separated: the legacy
+# Artifact Registry repository of the releases before signed releases (and of
+# DEFAULT_DOCKER_IMAGE) and the one the release pipeline publishes to, which
+# tn_docker_repo_for prints. A signed release's IMAGE_DIGEST names one of them.
+# Mainnet and devnet take only their own constant.
 readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ghcr.io/telcoin-association/telcoin-network"
 
 # Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
@@ -6161,12 +6218,13 @@ readonly TN_RUSTUP_INIT_SHA256_AARCH64="15f6e4ce9f583b929c996c91562bad6d4454f328
 readonly TN_RUST_TOOLCHAIN="1.94"
 
 # tn_docker_repo_for NETWORK -- print NETWORK's image repository: testnet the
-# adiri repository; mainnet and devnet their constants. rc 1 with the reason on
+# ghcr.io repository the release pipeline publishes to; mainnet and devnet their
+# constants. rc 1 with the reason on
 # stderr while the constant is empty, and for any other NETWORK.
 tn_docker_repo_for() {
     local net="${1:-}" repo=""
     case "$net" in
-        testnet) repo="$GAR_IMAGE_BASE" ;;
+        testnet) repo="$TN_GHCR_IMAGE_REPO" ;;
         mainnet) repo="$TN_MAINNET_IMAGE_REPO" ;;
         devnet) repo="$TN_DEVNET_IMAGE_REPO" ;;
         *)
@@ -6179,6 +6237,21 @@ tn_docker_repo_for() {
         return 1
     fi
     printf '%s\n' "$repo"
+}
+
+# tn_docker_network_ok NETWORK -- rc 0 when a Docker install or image change may
+# go ahead on NETWORK: it has an image repository (tn_docker_repo_for) and, on
+# mainnet, these scripts pin its chain configs, without which no mainnet release
+# verifies (_tn_release_fetch refuses it) and so no mainnet image resolves.
+# Callers ask before anything on the host changes. rc 1 with the reason on stderr.
+tn_docker_network_ok() {
+    local net="${1:-}"
+    tn_docker_repo_for "$net" >/dev/null || return 1
+    if [[ "$net" == "mainnet" && -z "$(tn_chain_config_pin mainnet genesis.yaml 2>/dev/null)" ]]; then
+        print_warn "No mainnet release can be verified yet: these scripts pin no mainnet chain configs, so Docker installs and image changes are refused on mainnet." >&2
+        return 1
+    fi
+    return 0
 }
 
 # tn_docker_repo_ok NETWORK REPO -- rc 0 when REPO is a repository NETWORK's
@@ -6196,17 +6269,64 @@ tn_docker_repo_ok() {
     return 1
 }
 
-# tn_registry_digest REPO TAG -- print the manifest digest (sha256:<64 hex>) the
-# registry serves for REPO:TAG, from the Docker-Content-Digest header of an
-# anonymous HEAD request (registry v2 API over https). rc 1 when there is none.
-tn_registry_digest() {
-    local repo="${1:-}" tag="${2:-}" host path hdr d
-    [[ "$repo" == */* && "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+# tn_registry_token REPO -- print the anonymous pull token REPO's registry wants:
+# for ghcr.io/<path> the "token" field of https://ghcr.io/token?scope=
+# repository:<path>:pull (ghcr asks for one even for a public package). Prints
+# nothing, rc 0, for any other registry. rc 1 and nothing when ghcr gives none:
+# a 401, 403 or 404 there means the package is not public or does not exist,
+# and the registry counts as unreadable.
+tn_registry_token() {
+    local repo="${1:-}" host path json tok
     host="${repo%%/*}"
     path="${repo#*/}"
-    hdr="$(curl --proto '=https' --tlsv1.2 -fsSI --max-time 10 \
-        -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
-        --url "https://${host}/v2/${path}/manifests/${tag}" 2>/dev/null)" || return 1
+    [[ "$host" == "ghcr.io" ]] || return 0
+    [[ "$path" =~ ^[a-z0-9][a-z0-9._/-]*$ ]] || return 1
+    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 -A 'telcoin-node-scripts' \
+        --url "https://ghcr.io/token?scope=repository:${path}:pull" 2>/dev/null)" || return 1
+    tok="$(printf '%s' "$json" | tr -d '\r\n' | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [[ -n "$tok" && "$tok" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || return 1
+    printf '%s\n' "$tok"
+}
+
+# _tn_registry_get REPO SUBPATH [curl-args...] -- curl https://<host>/v2/<path>/SUBPATH
+# of REPO with REPO's pull token (tn_registry_token) as a Bearer header when it
+# has one. rc 1 when the token or the request fails.
+_tn_registry_get() {
+    local repo="${1:-}" sub="${2:-}" host path tok
+    shift 2
+    host="${repo%%/*}"
+    path="${repo#*/}"
+    tok="$(tn_registry_token "$repo")" || return 1
+    if [[ -n "$tok" ]]; then
+        curl --proto '=https' --tlsv1.2 --max-time 10 -H "Authorization: Bearer ${tok}" "$@" \
+            --url "https://${host}/v2/${path}/${sub}" 2>/dev/null
+    else
+        curl --proto '=https' --tlsv1.2 --max-time 10 "$@" \
+            --url "https://${host}/v2/${path}/${sub}" 2>/dev/null
+    fi
+}
+
+# tn_registry_tags REPO -- print the v* tags the registry lists for REPO
+# (tags/list, with REPO's pull token), one per line, unfiltered and unordered:
+# callers keep the release tags they want (tn_release_tag_ok or _final) and
+# order them with tn_release_tags_sort. rc 1 when the registry cannot be read.
+tn_registry_tags() {
+    local repo="${1:-}" json
+    [[ "$repo" == */* ]] || return 1
+    json="$(_tn_registry_get "$repo" tags/list -sf)" || return 1
+    printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"'
+    return 0
+}
+
+# tn_registry_digest REPO TAG -- print the manifest digest (sha256:<64 hex>) the
+# registry serves for REPO:TAG, from the Docker-Content-Digest header of a HEAD
+# request (registry v2 API over https, with REPO's pull token). rc 1 when there
+# is none.
+tn_registry_digest() {
+    local repo="${1:-}" tag="${2:-}" hdr d
+    [[ "$repo" == */* && "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    hdr="$(_tn_registry_get "$repo" "manifests/${tag}" -fsSI \
+        -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json')" || return 1
     d="$(printf '%s\n' "$hdr" | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2; exit }')"
     [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$d"
@@ -6970,11 +7090,12 @@ _tn_release_keys_present() {
 # release (tn_fetch_release_image). On testnet only, when no release signing key
 # is installed, or the release publishes no signed files (a network rc 2, as for
 # the releases made before signed releases), the digest the registry serves for
-# the tag is used instead, with a warning. A release whose files fail
-# verification is never replaced by the registry's answer. rc 1 refused or not
-# resolvable, 3 TAG is not a NETWORK release tag.
+# the tag is used instead, with a warning: the network's repository first, then
+# the legacy one (TN_TESTNET_LEGACY_IMAGE_REPO), each with its pull token. A
+# release whose files fail verification is never replaced by the registry's
+# answer. rc 1 refused or not resolvable, 3 TAG is not a NETWORK release tag.
 tn_docker_image_for_tag() {
-    local net="${1:-}" tag="${2:-}" fn="${3:-}" repo img d rc=0
+    local net="${1:-}" tag="${2:-}" fn="${3:-}" repo img d r rc=0
     if ! tn_release_tag_ok "$net" "$tag"; then
         _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
         return 3
@@ -6996,11 +7117,14 @@ tn_docker_image_for_tag() {
     else
         _tn_c4_say warn "No release signing key in $(_tn_release_keys_dir); using the digest the registry serves for ${repo}:${tag}, which no signed release confirms (testnet only)." "$fn"
     fi
-    if ! d="$(tn_registry_digest "$repo" "$tag")"; then
-        _tn_c4_say warn "The registry gave no digest for ${repo}:${tag}." "$fn"
-        return 1
-    fi
-    printf '%s@%s\n' "$repo" "$d"
+    for r in "$repo" "$TN_TESTNET_LEGACY_IMAGE_REPO"; do
+        if d="$(tn_registry_digest "$r" "$tag")"; then
+            printf '%s@%s\n' "$r" "$d"
+            return 0
+        fi
+    done
+    _tn_c4_say warn "The registry gave no digest for ${tag} in ${repo} or ${TN_TESTNET_LEGACY_IMAGE_REPO}." "$fn"
+    return 1
 }
 
 # tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names, by
@@ -7073,7 +7197,7 @@ tn_docker_recorded_tag() {
 # (tn_registry_digest).
 # Prints nothing, rc 1, when none matches or the registry cannot be read.
 tn_docker_release_tag_for() {
-    local net="${1:-}" img="${2:-}" repo host path json t d
+    local net="${1:-}" img="${2:-}" repo tags t d
     [[ "$img" == *@sha256:* ]] || return 1
     if t="$(tn_docker_recorded_tag "$img" 2>/dev/null)"; then
         printf '%s\n' "$t"
@@ -7085,10 +7209,8 @@ tn_docker_release_tag_for() {
     fi
     repo="${img%@*}"
     tn_docker_repo_ok "$net" "$repo" 2>/dev/null || return 1
-    host="${repo%%/*}"
-    path="${repo#*/}"
-    json="$(curl --proto '=https' --tlsv1.2 -sf --max-time 10 --url "https://${host}/v2/${path}/tags/list" 2>/dev/null)" || return 1
-    for t in $(printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"' \
+    tags="$(tn_registry_tags "$repo")" || return 1
+    for t in $(printf '%s\n' "$tags" \
         | while IFS= read -r t; do if tn_release_tag_ok "$net" "$t"; then printf '%s\n' "$t"; fi; done \
         | tn_release_tags_sort | tail -n 15 | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }'); do
         d="$(tn_registry_digest "$repo" "$t" 2>/dev/null)" || continue

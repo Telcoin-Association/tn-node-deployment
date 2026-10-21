@@ -96,7 +96,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
     || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_start_script \
         tn_write_node_env tn_rerender_node_launch tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
-        tn_docker_resolve_ref >/dev/null; then
+        tn_docker_resolve_ref tn_docker_network_ok >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -2343,9 +2343,10 @@ edit_docker_image() {
         read -r -p "  Press Enter to return to menu..."
         return
     fi
-    # tn_docker_repo_for says why a network has no repository (an open decision).
-    if ! repo="$(tn_docker_repo_for "$net")"; then
-        print_error "No ${net} image repository; the image is not changed."
+    # tn_docker_network_ok says why (devnet has no repository, an open decision;
+    # mainnet has no release that verifies yet).
+    if ! tn_docker_network_ok "$net" || ! repo="$(tn_docker_repo_for "$net")"; then
+        print_error "No ${net} image can be used yet; the image is not changed."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return

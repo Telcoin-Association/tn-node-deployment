@@ -148,7 +148,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_write_root_file tn_write_start_script tn_write_node_unit tn_write_node_env \
         tn_committee_down_guard tn_service_user_ok tn_service_user_can_run \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
-        tn_os_floor_check >/dev/null; then
+        tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -895,9 +895,12 @@ print(json.dumps(d, indent=2))
 _preflight_docker() {
     print_step "Setting up Docker..."
 
-    # The network's image repository first: a network without one is refused before
+    # The network's image repository first: a network without one (or mainnet before
+    # a mainnet release can be verified, tn_docker_network_ok) is refused before
     # Docker's apt repository, the engine or daemon.json is touched.
     local repo input tag="$RELEASE_TAG" looked=false
+    tn_docker_network_ok "$NETWORK" \
+        || setup_fail "A Docker install is refused on ${NETWORK} (see above)."
     repo="$(tn_docker_repo_for "$NETWORK")" \
         || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
 
@@ -3083,10 +3086,11 @@ json_check_install_flags() {
         fi
         check_release_floor "$RELEASE_TAG"
     fi
-    # Docker on a network with no image repository (an open decision for mainnet)
-    # is refused here, before anything touches the box.
-    if [[ "$INSTALL_METHOD" == "docker" ]] && ! tn_docker_repo_for "$NETWORK" >/dev/null; then
-        setup_fail "No ${NETWORK} image repository is set, so a Docker install is refused on ${NETWORK} (which repository publishes ${NETWORK} images is an open decision)."
+    # Docker on a network with no image repository (an open decision for devnet),
+    # or on mainnet before a mainnet release can be verified, is refused here,
+    # before anything touches the box.
+    if [[ "$INSTALL_METHOD" == "docker" ]] && ! tn_docker_network_ok "$NETWORK"; then
+        setup_fail "A Docker install is refused on ${NETWORK} (see above); nothing on this host was changed."
     fi
     if [[ -n "$DOCKER_IMAGE" ]]; then
         if [[ -n "$RELEASE_TAG" ]]; then
