@@ -313,3 +313,13 @@ that picks a path, a network, a binary, a port or an address fails closed with a
 (`addon_meta_get` and `rm_meta_get` stop on a duplicate). A read used only for display may fall
 back but says so (check-node's `meta_flag` reports the value as unknown with a warning). Never
 hide a new failure mode behind `2>/dev/null`.
+
+### A trailing echo hides a background command's exit status (2026-10-21)
+
+A long attestation run was started in the background as `attest.sh X; echo "exit=$?"`. The
+notification said "exit code 0" because the echo was the last command, the run had in fact
+failed one test, and the branch was pushed before the log was read.
+
+**Rule:** a background command whose exit status decides the next step ends with that command
+(or `rc=$?; ...; exit $rc`), never with an echo. Read the run's own result line in its log
+before any push, merge or "done"; the harness's exit summary is not the evidence.
