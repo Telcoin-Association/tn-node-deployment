@@ -202,7 +202,7 @@ Unit, start script and logs:
 - `--check` adds `"tag_moved"`, and `current_ref` is the running release. `latest_ref` is the
   newest final release, never a release candidate: from GitHub for release and Docker installs
   (on testnet, while the network has no release there or GitHub cannot be read, a Docker
-  install takes the registries' newest final tag), from origin's tags for source installs. Docker installs compare the running digest with the newest release's; a digest whose release tag is not known reports `"tag_unknown":true`, never an update.
+  install takes the registries' newest final tag), from origin's tags for source installs. `update_available` is true only when `latest_ref` is newer than the running release in release order (a node on a release candidate is not offered the older final). Docker installs take the running release from the recorded release tag of the running digest (a digest equal to the newest release's is that release); a digest whose release tag is not known reports `"tag_unknown":true`, never an update.
 - After the restart, apply checks that the node is on its network's chain, that its consensus
   header advances, and that a node that was voting before the update votes again within
   `TN_UPDATE_VOTE_TIMEOUT` seconds (default 600; `TN_UPDATE_VOTE_POLL` 10). A failure rolls

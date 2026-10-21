@@ -5,7 +5,10 @@
 # RPC_PORT stops detect_node instead of guessing a port; json_prepare_docker
 # resolves a release tag to its digest, refuses any other image before it pulls,
 # checks the pulled digest, refuses a downgrade, and logs the pull to a fresh
-# file; a run that ends with the node stopped says so in its exit trap. A copy of
+# file; a run that ends with the node stopped says so in its exit trap; --check
+# (json_check) reports an update only for a newer release by release order
+# (release, source and Docker installs; a node on a release candidate is not
+# offered the older final). A copy of
 # update-node.sh without its last line is sourced at the top level. Maintainer
 # tooling (not updater-tracked). bash 3.2 safe.
 # shellcheck source=tools/tests/lib.sh
@@ -181,7 +184,7 @@ DB="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 json_emit() { printf '%s\n' "$1" >> "$T/check.json"; }
 pending_state_path() { printf '%s\n' "$T/no-pending"; }
 detect_current_docker_image() { printf '%s\n' "$RUN_IMG"; }
-latest_docker_ref() { printf '%s\n' "v0.17.0-adiri"; }
+latest_docker_ref() { printf '%s\n' "${LATEST_REF:-v0.17.0-adiri}"; }
 tn_docker_resolve_ref() { printf '%s@%s %s\n' "$R" "$LATEST_D" "$2"; }
 storage_migrating_upgrade() { return 1; }
 jc() {  # jc NAME META RUN-IMG LATEST-DIGEST EXPECTED-FIELDS
@@ -201,6 +204,45 @@ jc "recorded tag of another digest is not trusted" \
     "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.16.0-adiri' "$DB")" "${R}@${DA}" "$DB" "${R}@${DA} false true"
 jc "latest digest unresolvable: recorded tag compared" \
     "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.17.0-adiri' "$DA")" "${R}@${DA}" "" "v0.17.0-adiri false false"
+jc "recorded release candidate newer than the newest final: no update" \
+    "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.18.0-adiri-rc1' "$DA")" "${R}@${DA}" "$DB" "v0.18.0-adiri-rc1 false false"
+jc "recorded release candidate of the newest final: update" \
+    "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.17.0-adiri-rc1' "$DA")" "${R}@${DA}" "$DB" "v0.17.0-adiri-rc1 true false"
+jc "recorded newest release by another digest: not newer, no update" \
+    "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.17.0-adiri' "$DA")" "${R}@${DA}" "$DB" "v0.17.0-adiri false false"
+LATEST_REF=v0.18.0-adiri-rc1
+jc "a release candidate as the newest is never offered" \
+    "$(printf 'NETWORK=testnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.17.0-adiri' "$DA")" "${R}@${DA}" "$DB" "v0.17.0-adiri false false"
+unset LATEST_REF
+printf 'NETWORK=testnet\n' > "$META"
+
+# --- json_check (release, source): update_available by release order ----------------------
+# The running release is the version marker (installed_source_ref), never the checkout.
+installed_source_ref() { printf '%s\n' "$RUN_REF"; }
+latest_release_ref() { printf '%s\n' "$NEW_REF"; }
+latest_source_ref() { LATEST_SOURCE_REF="$NEW_REF"; SOURCE_TAG_MOVED=false; printf '%s\n' "$NEW_REF"; }
+detect_current_source_ref() { printf '%s\n' "v0.17.0-adiri"; }
+jo() {  # jo NAME METHOD RUNNING LATEST EXPECTED-AVAIL
+    RUN_REF="$3"
+    NEW_REF="$4"
+    : > "$T/check.json"
+    json_check "$2" >/dev/null 2>&1
+    check "$1" "$5" "$(sed -n 's/.*"update_available":\([a-z]*\).*/\1/p' "$T/check.json")"
+}
+for m in release source; do
+    jo "${m}: running rc1, the newest final older: no update" "$m" v0.17.0-adiri-rc1 v0.16.0-adiri false
+    jo "${m}: running rc1, its final: update" "$m" v0.17.0-adiri-rc1 v0.17.0-adiri true
+    jo "${m}: running rc1, a newer final: update" "$m" v0.17.0-adiri-rc1 v0.17.1-adiri true
+    jo "${m}: running a final, the newest final newer: update" "$m" v0.16.0-adiri v0.17.0-adiri true
+    jo "${m}: running the newest final: no update" "$m" v0.17.0-adiri v0.17.0-adiri false
+    jo "${m}: running a final, the newest final older: no update" "$m" v0.17.0-adiri v0.16.0-adiri false
+    jo "${m}: running a final, its release candidate: no update" "$m" v0.17.0-adiri v0.17.0-adiri-rc2 false
+    jo "${m}: running a final, a newer release candidate is never offered" "$m" v0.17.0-adiri v0.18.0-adiri-rc1 false
+    jo "${m}: no newest release: no update" "$m" v0.17.0-adiri "" false
+done
+jo "release: running release not recorded: update" release "" v0.17.0-adiri true
+jo "source: no marker (an older release), checkout at the newest: update" source "" v0.17.0-adiri true
+jo "source: a running value with an x.y.z only compares as that final" source 0.17.0 v0.17.0-adiri false
 
 
 finish

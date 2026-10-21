@@ -2673,6 +2673,38 @@ latest_docker_ref() {
     fetch_docker_tags "$network" | tail -1
 }
 
+# check_offers_update LATEST RUNNING -- rc 0 when --check reports LATEST, the
+# newest final release it found, as an update over RUNNING, the release the node
+# runs: LATEST is newer by tn_release_tag_newer, so a node on a release candidate
+# is not offered an older final, and a final over its own release candidate is
+# an update. A value with an x.y.z that is not a release tag form compares as
+# that final, as in update_downgrade_check. A release candidate is never offered
+# (a check names finals only). When RUNNING has no x.y.z (the running release is
+# not recorded, a branch, a commit or latest), or LATEST has none, LATEST is an
+# update when it differs from RUNNING. rc 1 otherwise, and for an empty LATEST.
+check_offers_update() {
+    local new="${1:-}" run="${2:-}" re nt rt
+    [[ -n "$new" && "$new" != *-rc[0-9]* ]] || return 1
+    re='([0-9]+[.][0-9]+[.][0-9]+)'
+    if [[ ! "$new" =~ $re ]]; then
+        [[ "$new" != "$run" ]] && return 0
+        return 1
+    fi
+    nt="v${BASH_REMATCH[1]}"
+    if [[ ! "$run" =~ $re ]]; then
+        [[ "$new" != "$run" ]] && return 0
+        return 1
+    fi
+    rt="v${BASH_REMATCH[1]}"
+    if tn_release_tag_key "$new" >/dev/null 2>&1; then
+        nt="$new"
+    fi
+    if tn_release_tag_key "$run" >/dev/null 2>&1; then
+        rt="$run"
+    fi
+    tn_release_tag_newer "$nt" "$rt"
+}
+
 json_check() {
     local install_method="$1"
     local current="" latest="" pending="null" avail="false" running="" mig="false" moved="false" unknown="false"
@@ -2692,19 +2724,27 @@ json_check() {
             latest_source_ref >/dev/null 2>&1 || true
             latest="$LATEST_SOURCE_REF"
             moved="$SOURCE_TAG_MOVED"
-            [[ -n "$latest" && "$current" != "$latest" ]] && avail="true"
+            # By the running release (the marker), never the checkout: a node
+            # without a marker runs an older release (installed_source_ref).
+            if check_offers_update "$latest" "$running"; then
+                avail="true"
+            fi
             ;;
         release)
             running="$(installed_source_ref)"
             current="$running"
             latest=$(latest_release_ref 2>/dev/null || echo "")
-            [[ -n "$latest" && "$current" != "$latest" ]] && avail="true"
+            if check_offers_update "$latest" "$running"; then
+                avail="true"
+            fi
             ;;
         docker)
-            # Compared by digest: the running image's against the newest release
-            # tag's (resolved as an update would, tn_docker_resolve_ref). A running
-            # digest whose release tag is not known is reported as tag_unknown,
-            # never as an update.
+            # The same digest as the newest release tag's (resolved as an update
+            # would, tn_docker_resolve_ref) is that release. Otherwise the running
+            # release tag (docker_current_tag: the image's tag, or the RELEASE_TAG
+            # .node-meta records for its digest) is compared by release order
+            # (check_offers_update). A running digest whose release tag is not
+            # known is reported as tag_unknown, never as an update.
             local img net cur_d="" lat_d="" out
             img=$(detect_current_docker_image 2>/dev/null || echo "")
             running="$(docker_current_tag "$img")"
@@ -2722,7 +2762,7 @@ json_check() {
                     current="$latest"
                 elif [[ -z "$running" ]]; then
                     unknown="true"
-                elif [[ -n "$cur_d" && -n "$lat_d" ]] || [[ "$running" != "$latest" ]]; then
+                elif check_offers_update "$latest" "$running"; then
                     avail="true"
                 fi
             fi
