@@ -6302,17 +6302,43 @@ tn_registry_token() {
     printf '%s\n' "$tok"
 }
 
+# _tn_registry_auth REPO -- set TN_REGISTRY_TOKEN to REPO's pull token
+# (tn_registry_token; empty for a registry that wants none) without a subshell,
+# so lookups share it: a token is kept for the last repository that gave one
+# (_TN_REGISTRY_TOKEN_REPO, _TN_REGISTRY_TOKEN_KEPT) and reused for 120 seconds
+# (_TN_REGISTRY_TOKEN_AT, by SECONDS), well inside a pull token's lifetime. A
+# function that makes several lookups runs this first in its own shell, so the
+# $(...) subshells of the lookups find the token kept. rc 1, TN_REGISTRY_TOKEN
+# empty, when the registry gives no token; a failure is not kept.
+_tn_registry_auth() {
+    local repo="${1:-}" tok
+    TN_REGISTRY_TOKEN=""
+    if [[ -n "$repo" && "$repo" == "${_TN_REGISTRY_TOKEN_REPO:-}" ]] \
+        && (( SECONDS - ${_TN_REGISTRY_TOKEN_AT:-0} < 120 )); then
+        TN_REGISTRY_TOKEN="${_TN_REGISTRY_TOKEN_KEPT:-}"
+        return 0
+    fi
+    tok="$(tn_registry_token "$repo")" || return 1
+    TN_REGISTRY_TOKEN="$tok"
+    if [[ -n "$tok" ]]; then
+        _TN_REGISTRY_TOKEN_REPO="$repo"
+        _TN_REGISTRY_TOKEN_KEPT="$tok"
+        _TN_REGISTRY_TOKEN_AT="$SECONDS"
+    fi
+    return 0
+}
+
 # _tn_registry_get REPO SUBPATH [curl-args...] -- curl https://<host>/v2/<path>/SUBPATH
-# of REPO with REPO's pull token (tn_registry_token) as a Bearer header when it
+# of REPO with REPO's pull token (_tn_registry_auth) as a Bearer header when it
 # has one. rc 1 when the token or the request fails.
 _tn_registry_get() {
-    local repo="${1:-}" sub="${2:-}" host path tok
+    local repo="${1:-}" sub="${2:-}" host path
     shift 2
     host="${repo%%/*}"
     path="${repo#*/}"
-    tok="$(tn_registry_token "$repo")" || return 1
-    if [[ -n "$tok" ]]; then
-        curl --proto '=https' --tlsv1.2 --max-time 10 -H "Authorization: Bearer ${tok}" "$@" \
+    _tn_registry_auth "$repo" || return 1
+    if [[ -n "$TN_REGISTRY_TOKEN" ]]; then
+        curl --proto '=https' --tlsv1.2 --max-time 10 -H "Authorization: Bearer ${TN_REGISTRY_TOKEN}" "$@" \
             --url "https://${host}/v2/${path}/${sub}" 2>/dev/null
     else
         curl --proto '=https' --tlsv1.2 --max-time 10 "$@" \
@@ -6327,6 +6353,7 @@ _tn_registry_get() {
 tn_registry_tags() {
     local repo="${1:-}" json
     [[ "$repo" == */* ]] || return 1
+    _tn_registry_auth "$repo" || return 1
     json="$(_tn_registry_get "$repo" tags/list -sf)" || return 1
     printf '%s' "$json" | grep -oE '"v[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*"' | tr -d '"'
     return 0
@@ -6339,6 +6366,7 @@ tn_registry_tags() {
 tn_registry_digest() {
     local repo="${1:-}" tag="${2:-}" hdr d
     [[ "$repo" == */* && "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    _tn_registry_auth "$repo" || return 1
     hdr="$(_tn_registry_get "$repo" "manifests/${tag}" -fsSI \
         -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json')" || return 1
     d="$(printf '%s\n' "$hdr" | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2; exit }')"
@@ -7235,6 +7263,8 @@ tn_docker_release_tag_for() {
     fi
     repo="${img%@*}"
     tn_docker_repo_ok "$net" "$repo" 2>/dev/null || return 1
+    # One pull token for the listing and every manifest lookup below.
+    _tn_registry_auth "$repo" || return 1
     tags="$(tn_registry_tags "$repo")" || return 1
     for t in $(printf '%s\n' "$tags" \
         | while IFS= read -r t; do if tn_release_tag_ok "$net" "$t"; then printf '%s\n' "$t"; fi; done \

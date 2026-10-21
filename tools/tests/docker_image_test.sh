@@ -5,7 +5,8 @@
 # release tag accepted, latest and other tags never); tn_docker_repo_for per
 # network (ghcr for testnet and mainnet, devnet refused while unnamed); against a
 # curl shim: the ghcr pull token on the tags and manifest calls (none for the
-# legacy registry), tn_release_newest_tag over a Releases API answer (drafts,
+# legacy registry), fetched once and shared by a run's lookups for 120 s,
+# tn_release_newest_tag over a Releases API answer (drafts,
 # prereleases, an rc newer than the newest final, a mainnet final, no release,
 # API unreachable), latest_docker_image (the signed IMAGE_DIGEST of the newest
 # release without asking the registry; when that release cannot be verified, an
@@ -175,7 +176,39 @@ rc=0; out="$(tn_registry_digest "$GH" v0.17.0-adiri)" || rc=$?
 check "ghcr without a token (package not public): unreadable" "1 " "$rc $out"
 rc=0; out="$(tn_registry_tags "$GH")" || rc=$?
 check "ghcr tags without a token: unreadable" "1 " "$rc $out"
-rm -f "$REC/token.down" "$REC/ghtags.json" "$REC/ghdigest.v0.17.0-adiri"
+rm -f "$REC/token.down"
+# One pull token per repository for the process: tn_docker_release_tag_for's
+# listing and its three manifest lookups (four lookups) share one token call;
+# four digest lookups in this shell share one; after 120 s it is fetched again.
+printf '{"name":"telcoin-association/telcoin-network","tags":["v0.17.0-adiri","v0.17.1-adiri","v0.17.2-adiri"]}' > "$REC/ghtags.json"
+printf 'sha256:%s\n' "$(printf '%s' "$D64" | tr 0 1)" > "$REC/ghdigest.v0.17.1-adiri"
+printf 'sha256:%s\n' "$(printf '%s' "$D64" | tr 0 2)" > "$REC/ghdigest.v0.17.2-adiri"
+: > "$REC/curl.log"
+rc=0; out="$(tn_docker_release_tag_for testnet "${GH}@sha256:${D64}" 2>/dev/null)" || rc=$?
+check "token kept: the release tag found" "0 v0.17.0-adiri" "$rc $out"
+check "token kept: four lookups (a listing, three manifests)" "4" "$(grep -c 'ghcr.io/v2/' "$REC/curl.log")"
+check "token kept: one token call for them" "1" "$(grep -c 'ghcr.io/token' "$REC/curl.log")"
+check "token kept: every lookup carried it" "0" "$(grep 'ghcr.io/v2/' "$REC/curl.log" | grep -vc 'Bearer_TOK123')"
+: > "$REC/curl.log"
+for t in v0.17.0-adiri v0.17.1-adiri v0.17.2-adiri v0.17.0-adiri; do
+    tn_registry_digest "$GH" "$t" >> "$REC/digests" 2>/dev/null
+done
+check "token kept in this shell: four digests" "4" "$(grep -c '^sha256:' "$REC/digests")"
+check "token kept in this shell: one token call" "1" "$(grep -c 'ghcr.io/token' "$REC/curl.log")"
+tn_registry_digest "$R" v0.17.0-adiri >/dev/null 2>&1
+tn_registry_digest "$GH" v0.17.0-adiri >/dev/null 2>&1
+check "token kept: a registry that wants none leaves it in place" "1" "$(grep -c 'ghcr.io/token' "$REC/curl.log")"
+_TN_REGISTRY_TOKEN_AT=$((SECONDS - 121))
+tn_registry_digest "$GH" v0.17.0-adiri >/dev/null 2>&1
+check "token kept: fetched again after 120 s" "2" "$(grep -c 'ghcr.io/token' "$REC/curl.log")"
+touch "$REC/token.down"
+_TN_REGISTRY_TOKEN_AT=$((SECONDS - 121))
+rc=0; tn_registry_digest "$GH" v0.17.0-adiri >/dev/null 2>&1 || rc=$?
+check_rc "token kept: an expired token is not used when the registry gives none" 1 "$rc"
+check "token kept: no lookup without a token" "6" "$(grep -c 'ghcr.io/v2/' "$REC/curl.log")"
+rm -f "$REC/token.down" "$REC/digests" "$REC/ghdigest.v0.17.1-adiri" "$REC/ghdigest.v0.17.2-adiri"
+_TN_REGISTRY_TOKEN_REPO=""
+rm -f "$REC/ghtags.json" "$REC/ghdigest.v0.17.0-adiri"
 
 # The Releases API: drafts skipped, prereleases count on testnet only, finals only.
 cat > "$REC/releases.full.json" <<'JSON'
