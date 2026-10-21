@@ -51,8 +51,14 @@ expires 2028-10-16), tracked by the updater like the scripts; the UI's copy take
 key, an expired or revoked key and an expired signature refuse it, and a further signature by
 a key that has not shipped yet is a warning that names its key id. Updates take release tags only
 (testnet `vX.Y.Z-adiri`, mainnet `vX.Y.Z`), refuse downgrades and check afterwards that a
-voting node votes again. Source builds run as `tn-build`. Docker images run by digest, Docker
-comes from its own apt repository after a key check, and `live-restore` is on.
+voting node votes again. Testnet also takes a release candidate, `vX.Y.Z-adiri-rcN`, when it is
+named; no newest-release pick takes one, and an rc sorts below its final. Source builds run as
+`tn-build`. Docker images run by digest from `ghcr.io/telcoin-association/telcoin-network`, where
+the release pipeline publishes them for both networks (testnet also takes the legacy Artifact
+Registry repository), and the newest image is the one the signed `IMAGE_DIGEST` of the newest
+release on GitHub names. On testnet, while there is no release on GitHub, the scripts fall back
+to the legacy repository and then `DEFAULT_DOCKER_IMAGE` (`v0.16.0-adiri`), with a warning.
+Docker comes from its own apt repository after a key check, and `live-restore` is on.
 
 #### Restarts and the committee
 Before setup-node, update-node, edit-config, migrate-node-naming or an add-on stops or
@@ -69,7 +75,9 @@ moves its admin API to a socket and needs a 16-character dashboard password.
 
 #### Node Manager UI
 The UI needs a per-install token on every call; `open-ui.sh` opens
-`http://127.0.0.1:8080/#t=<token>`. install-ui builds root-owned trees and a hashed venv.
+`http://127.0.0.1:8080/#t=<token>`. install-ui builds root-owned trees and a hashed venv. The
+wizard's default Docker image comes from the library's newest-image pick, never a release
+candidate.
 
 #### Before you update
 Run `update-scripts.sh` once, then let the next update-node or edit-config run migrate the
@@ -78,9 +86,10 @@ the printed `install-ui.sh --update`. The release note has the full order and th
 refusals.
 
 #### Still open
-The mainnet image repository and the mainnet genesis, committee and parameters hashes are not
-set yet, so mainnet installs are refused until they are. The mainnet public RPC is set at
-launch.
+The mainnet image repository is now set: ghcr.io, as for testnet. The mainnet genesis,
+committee and parameters hashes are not set yet, so no mainnet release can be verified and
+mainnet installs, Docker installs among them, are refused until they are. The mainnet public
+RPC is set at launch.
 
 ### v0.16.0-adiri round, October 2026 -- update-scripts v1.1.72
 Full release note: [CHANGELOG/v0.16.0-adiri.md](CHANGELOG/v0.16.0-adiri.md).

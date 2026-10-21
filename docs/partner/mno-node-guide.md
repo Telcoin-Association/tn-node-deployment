@@ -197,13 +197,13 @@ Open them in every layer that filters traffic: `ufw` on the host (see [Firewall]
 | Mainnet | 487 (`0x1e7`) | `https://rpc.telcoin.network` is planned and set at launch | Not launched yet |
 | Devnet | 32285 (`0x7e1d`) | `https://rpc.devnet.telcoin.network` | None |
 
-Mainnet has not launched, and three of its settings are still open in the scripts:
+Mainnet has not launched, and two of its settings are still open in the scripts:
 
-- the image repository Docker installs pull mainnet images from;
 - the SHA-256 pins of the mainnet `genesis.yaml`, `committee.yaml` and `parameters.yaml`;
 - the public RPC, which is set at launch.
 
-Until a scripts release fills them in, a mainnet install stops: the chain-config check refuses files it has no pin for, and a Docker install refuses a network with no image repository.
+Until a scripts release fills them in, a mainnet install stops: the chain-config check refuses files it has no pin for, and without the pins no mainnet release can be verified, so a Docker install is refused before anything on the server changes.
+The mainnet image repository is set: `ghcr.io/telcoin-association/telcoin-network`, the same as testnet's.
 The interactive network menu marks mainnet as coming soon.
 
 The public RPCs sit behind a load balancer and answer JSON-RPC over HTTPS only; a WebSocket upgrade gets HTTP 405.
@@ -244,8 +244,8 @@ To pick up newer scripts on an existing install, run `bash ~/telcoin-node-script
 Nothing the scripts install is taken from a branch on trust.
 
 - The scripts come from a signed release tag, `scripts-vX.Y.Z`. Each release carries a `MANIFEST` with the SHA-256 of every file and a signature, `MANIFEST.sig`. The installer holds the release signing key and the tag it installs. It checks the signature with `ssh-keygen -Y verify`, then every file against its manifest hash, and installs nothing if one check fails. `update-scripts.sh` checks each later release the same way against `lib/allowed_signers` in your install.
-- Node releases are checked against the GPG keys in `lib/release-keys/*.asc`, which arrive with the signed scripts. A release publishes `SHA256SUMS` and its signature `SHA256SUMS.asc`. The scripts run `gpgv` on them and refuse the release on a bad, expired, revoked or unknown signature. `SHA256SUMS` lists the binary tarball, the Docker image digest (`IMAGE_DIGEST`) and the release's three chain-config files, and the scripts check what they use against it.
-- The node runs release tags only: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet. A branch, a commit id or `latest` is refused at setup and at every update.
+- Node releases are checked against the GPG keys in `lib/release-keys/*.asc`, which arrive with the signed scripts. A release publishes `SHA256SUMS` and its signature `SHA256SUMS.asc`. The scripts run `gpgv` on them and accept the release only when a key they ship signed it. A bad, expired or revoked signature refuses it; a further signature by a key that has not shipped yet only draws a warning. `SHA256SUMS` lists the binary tarball, the Docker image digest (`IMAGE_DIGEST`) and the release's three chain-config files, and the scripts check what they use against it.
+- The node runs release tags only: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet. A branch, a commit id or `latest` is refused at setup and at every update. On testnet a release candidate, `vX.Y.Z-adiri-rcN`, runs only when you name its tag; no default picks one.
 - Docker installs run the image by digest (`<repository>@sha256:<digest>`), so a tag that moves later cannot change what the node runs.
 - The chain configs (`genesis.yaml`, `committee.yaml` and `parameters.yaml`) are checked against SHA-256 pins that ship with the scripts before setup copies them.
 
@@ -284,7 +284,7 @@ An argument setup does not recognise is reported on stderr as `Unknown argument:
 |---|---|---|---|
 | `1) Build from source` | `source` | Installs the build dependencies with apt, clones telcoin-network to `/opt/telcoin-source`, checks the release tag's signature, and builds it as the `tn-build` account with a pinned Rust toolchain (20 to 40 minutes). Every `tn-build` process is stopped after each build command, before root copies the output. Root only installs the result, as `/opt/telcoin/telcoin-network`. | `update-node.sh` |
 | `2) Signed release` | `release` | Downloads the release tarball with `SHA256SUMS` and `SHA256SUMS.asc`, checks the signature and the hashes, runs the binary's `--version` as `tn-build`, and installs `/opt/telcoin/telcoin-network`. | `update-node.sh` |
-| `3) Docker` | `docker` | Installs Docker if missing, from Docker's apt repository after checking its signing key, and turns on `live-restore`. Pulls the image by digest from `us-docker.pkg.dev/telcoin-network/tn-public/adiri` or `ghcr.io/telcoin-association/telcoin-network` and checks the pulled digest; the default is the newest testnet release, or `v0.16.0-adiri` if the registry cannot be reached. | `update-node.sh` |
+| `3) Docker` | `docker` | Installs Docker if missing, from Docker's apt repository after checking its signing key, and turns on `live-restore`. Pulls the image by digest from `ghcr.io/telcoin-association/telcoin-network` (on testnet also the older `us-docker.pkg.dev/telcoin-network/tn-public/adiri`) and checks the pulled digest. The default is the newest release published on GitHub, by the digest its signed release names. Until testnet has one (`v0.17.0-adiri` is the first signed release), the default is the newest image of the older repository, or `v0.16.0-adiri` if that cannot be read, with a warning. | `update-node.sh` |
 | `4) I already have it` | `existing` | Uses a `telcoin-network` binary you supply. | By hand (see [Update the node](#update-the-node)). |
 
 `--release-tag <tag>` picks the release for the first three; `--build-ref` is its older name.
@@ -615,10 +615,11 @@ What else to expect:
 
 The script does not update `existing` installs.
 For one, it stops, names the binary the node runs (recorded as `BINARY_PATH` in `.node-meta`), and prints how to check a release by hand.
-On the server, in an empty directory, with the release you want as `TAG`:
+On the server, in an empty directory, with the release you want as `TAG`.
+Signed releases start at `v0.17.0-adiri`; `v0.16.0-adiri` and older have no release page.
 
 ```bash
-TAG=v0.16.0-adiri
+TAG=vX.Y.Z-adiri   # a published release
 base=https://github.com/Telcoin-Association/telcoin-network/releases/download/$TAG
 tgz=telcoin-network-$TAG-x86_64-unknown-linux-gnu.tar.gz
 curl -fsSL -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.asc" -O "$base/$tgz"
@@ -1418,7 +1419,7 @@ The tables below group the common symptoms by area.
 | `systemd <N> cannot encrypt credentials (needs 250, Ubuntu 24.04) ...` | A testnet server below systemd 250. A warning: the passphrase stays in a root-only file. | Move to Ubuntu 24.04 to keep it encrypted. |
 | `No usable TPM2 on this host: on mainnet pass --allow-no-tpm ...` | A mainnet server with no TPM the credential can use. | Give the server a TPM or vTPM, or accept the host key alone with `--allow-no-tpm` (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)). |
 | `<tag> is not a testnet release tag ...` | A branch, a commit, `latest` or a mistyped tag. | Give a release tag such as `v0.16.0-adiri`. |
-| `No release signing key in <dir> (*.asc) ...`, or `Release <tag> did not verify (see above); nothing was installed.` | The scripts have no release key, or the release's `SHA256SUMS` signature or a hash did not check out. | Run `update-scripts.sh` for the current keys and try again. If it still fails, email support@telcoin.org with the output and do not install that release. |
+| `No release signing key in <dir> (*.asc) ...`, or `Release <tag> did not verify (see above); nothing was installed.` | The scripts carry no key for the release (one added or renewed after your scripts release), or the release's `SHA256SUMS` signature or a hash did not check out. | Run `update-scripts.sh` for the current keys and try again. If it still fails, email support@telcoin.org with the output and do not install that release. |
 | `mainnet has no pinned sha256 for genesis.yaml yet ...` | Mainnet has not launched, so the scripts have no pins for its chain configs. | Install on testnet (see [Networks and endpoints](#networks-and-endpoints)). |
 | `CVE-2026-31431 (Copy Fail) -- setup cannot continue` | The `algif_aead` module is not blocked, or is still loaded. | Apply the mitigation from <https://copy.fail>, unload the module or reboot, then re-run setup. |
 | `Port <port>/<proto> (...) is already in use.` | Another process holds the port. | Find it with `sudo ss -lunp` (UDP) or `sudo ss -ltnp` (TCP), then stop it or choose another port. |
