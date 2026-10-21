@@ -22,7 +22,9 @@ HELPER_SRC="${TEST_DIR}/../telcoin-ui-helper.sh"
 CHECKS=0
 FAILS=0
 
-T="$(mktemp -d "${TMPDIR:-/tmp}/helper_test.XXXXXX")" || { echo "mktemp failed" >&2; exit 1; }
+# macOS sets TMPDIR with a trailing slash; strip it so no path holds "//".
+TMP_BASE="${TMPDIR:-/tmp}"
+T="$(mktemp -d "${TMP_BASE%/}/helper_test.XXXXXX")" || { echo "mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$T"' EXIT
 
 # check <name> <expected> <actual>
@@ -203,6 +205,26 @@ if ! "$REAL_SED" --version >/dev/null 2>&1; then
     printf '#!/bin/sh\nif [ "$1" = "-i" ]; then shift; exec "%s" -i "" "$@"; fi\nexec "%s" "$@"\n' \
         "$REAL_SED" "$REAL_SED" > "$T/bin/sed"
     chmod +x "$T/bin/sed"
+fi
+# The helper reads owners and modes with GNU `stat [-L] -c FORMAT`. BSD stat
+# (macOS) takes -f with other directives; map the ones the helper uses (%a is
+# the permission bits only there: no setuid, setgid or sticky).
+REAL_STAT="$(command -v stat)"
+if ! "$REAL_STAT" -c %u / >/dev/null 2>&1; then
+    # shellcheck disable=SC2016
+    printf '#!/bin/sh
+l=""
+if [ "$1" = "-L" ]; then l="-L"; shift; fi
+case "$1" in
+-c) f="$2"; shift 2 ;;
+-c?*) f="${1#-c}"; shift ;;
+*) exec "%s" $l "$@" ;;
+esac
+f="$(printf "%%s" "$f" | "%s" -e "s/%%a/%%Lp/g" -e "s/%%U/%%Su/g" -e "s/%%G/%%Sg/g" -e "s/%%s/%%z/g" -e "s/%%n/%%N/g" -e "s/%%h/%%l/g" -e "s/%%y/%%Sm/g")"
+exec "%s" $l -f "$f" "$@"
+' \
+        "$REAL_STAT" "$REAL_SED" "$REAL_STAT" > "$T/bin/stat"
+    chmod +x "$T/bin/stat"
 fi
 PATH="$T/bin:$PATH"
 
