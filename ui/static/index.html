@@ -3573,7 +3573,10 @@ function dockerImageError(v){
   const x = String(v||'').trim();
   if(!x) return 'Enter a release tag or the image by digest';
   if(x.split(':').pop()==='latest') return 'latest is refused: give a release tag or the image by digest';
-  const tag = setupNetwork()==='mainnet' ? /^v[0-9]+\.[0-9]+\.[0-9]+$/ : /^v[0-9]+\.[0-9]+\.[0-9]+-adiri$/;
+  // The same grammar as the library's tn_release_tag_ok: no leading zero in a part; a testnet
+  // release candidate (-rcN) is accepted here because it is a named tag, never a default.
+  const part = '(0|[1-9][0-9]*)';
+  const tag = new RegExp(setupNetwork()==='mainnet' ? '^v'+part+'\\.'+part+'\\.'+part+'$' : '^v'+part+'\\.'+part+'\\.'+part+'-adiri(-rc[1-9][0-9]*)?$');
   const t = x.includes('@') ? '' : x.replace(/^.*:/, '');
   if(tag.test(t)) return '';
   if(/@sha256:[0-9a-f]{64}$/.test(x)) return '';
