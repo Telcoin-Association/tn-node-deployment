@@ -1516,10 +1516,13 @@ readonly TN_RELEASES_API_URL="https://api.github.com/repos/Telcoin-Association/t
 # the NETWORK global, else testnet) by digest, <repo>@sha256:<hex>. The release
 # is the newest final the channel has on GitHub (tn_release_newest_tag), and its
 # image is the one its signed IMAGE_DIGEST names (tn_fetch_release_image), never
-# the registry's digest. When that release cannot be verified (a check fails, its
-# signed files cannot be downloaded, gpg or a key file is missing), testnet takes
-# DEFAULT_DOCKER_IMAGE with a warning that gives the reason, and mainnet gets
-# rc 1. Never a tag, a release candidate, latest, hot-patch or devnet tags.
+# the registry's digest. When that release fails a check (a bad signature, a hash
+# that differs, a repository the scripts do not accept) nothing is offered: rc 1
+# on both networks, with the reason on stderr. When its signed files cannot be
+# downloaded or checked (not published yet, network, gpg or a key file missing),
+# testnet takes DEFAULT_DOCKER_IMAGE with a warning that gives the reason, and
+# mainnet gets rc 1. Never a tag, a release candidate, latest, hot-patch or
+# devnet tags.
 # Mirrors the UI's latest_docker_image. On testnet only, while the channel has no
 # release (or the Releases API cannot be read), the newest final tag of the
 # legacy repository (TN_TESTNET_LEGACY_IMAGE_REPO) by its registry digest, else
@@ -1535,8 +1538,11 @@ latest_docker_image() {
             printf '%s\n' "$img"
             return 0
         fi
-        why="it was refused (see above)"
-        [[ $rc -ne 2 ]] || why="its signed files could not be downloaded or checked (see above)"
+        if [[ $rc -ne 2 ]]; then
+            print_warn "Release ${tag} did not verify (see above); no image is offered until it does. A release whose files fail a check is never replaced by the registry's answer or by the pinned default." >&2
+            return 1
+        fi
+        why="its signed files could not be downloaded or checked (see above)"
         if [[ "$net" != "testnet" ]]; then
             print_warn "Release ${tag} gave no verified image digest: ${why}. A ${net} image is taken only from a signed release." >&2
             return 1

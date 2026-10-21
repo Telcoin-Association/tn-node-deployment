@@ -117,8 +117,9 @@ How the node binary is obtained:
   repository `us-docker.pkg.dev/telcoin-network/tn-public/adiri`, which holds `v0.16.0-adiri`
   and older (`TN_TESTNET_IMAGE_REPOS`). Without an image flag (or on Enter) setup takes the
   newest final release on GitHub by the digest its signed `IMAGE_DIGEST` names, never the
-  registry's digest: when that release cannot be verified, testnet takes `DEFAULT_DOCKER_IMAGE`
-  with a warning that gives the reason and mainnet stops. On testnet
+  registry's digest: when its signed files cannot be downloaded or checked, testnet takes
+  `DEFAULT_DOCKER_IMAGE` with a warning that gives the reason and mainnet stops; a release that
+  fails a check is refused on both networks and nothing is offered. On testnet
   only, while the network has no release on GitHub (`v0.17.0-adiri` will be the first) or the
   Releases API cannot be read, it falls back, with a warning, to the legacy repository's newest
   final tag by its registry digest, then to `DEFAULT_DOCKER_IMAGE`.

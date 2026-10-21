@@ -334,12 +334,14 @@ check "latest, release published: no registry asked" "0" "$(grep -c 'manifests\|
 : > "$REC/fetch.log"
 rc=0; out="$(latest_docker_image mainnet 2>/dev/null)" || rc=$?
 check "latest, mainnet release published: the signed IMAGE_DIGEST of v1.0.0" "0 ${SIGNED} v1.0.0 mainnet" "$rc $out $(cat "$REC/fetch.log")"
-# The newest release fails verification (rc 1): the same fallbacks, never the registry.
+# The newest release fails verification (rc 1): nothing is offered on either network,
+# never the registry and never the pinned default.
 tn_fetch_release_image() { return 1; }
 : > "$REC/curl.log"
 rc=0; out="$(latest_docker_image testnet 2>"$T/err")" || rc=$?
-check "latest, newest release refused, testnet: the pinned default" "0 $DEFAULT_DOCKER_IMAGE" "$rc $out"
-check_has "latest, newest release refused: said" "1" "$(grep -c 'v0.18.0-adiri gave no verified image digest: it was refused' "$T/err")"
+check "latest, newest release refused, testnet: rc 1, nothing" "1 " "$rc $out"
+check_has "latest, newest release refused: said" "1" "$(grep -c 'v0.18.0-adiri did not verify (see above); no image is offered' "$T/err")"
+check "latest, newest release refused: not the pinned default" "0" "$(grep -c "$DEFAULT_DOCKER_IMAGE" "$T/err")"
 rc=0; out="$(latest_docker_image mainnet 2>/dev/null)" || rc=$?
 check "latest, newest mainnet release refused: rc 1, nothing" "1 " "$rc $out"
 check "latest, newest release refused: no registry call" "0" "$(grep -c 'ghcr.io\|pkg.dev' "$REC/curl.log")"

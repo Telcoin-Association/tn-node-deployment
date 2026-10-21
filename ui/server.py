@@ -2849,9 +2849,9 @@ def latest_docker_image(network="testnet"):
     <hex>, as the library's latest_docker_image names it: the newest final
     release the channel has on GitHub (never a release candidate, hot-patch,
     devnet or `latest` tag), its image from the release's signed IMAGE_DIGEST
-    only (on testnet the library names DEFAULT_DOCKER_IMAGE when that release
-    cannot be verified, and the legacy repository while the channel has no
-    release). The answer must pass image_allowed.
+    only (on testnet the library names DEFAULT_DOCKER_IMAGE when that release's
+    signed files cannot be downloaded or checked, nothing when the release fails
+    a check, and the legacy repository while the channel has no release). The answer must pass image_allowed.
     Testnet falls back to DEFAULT_DOCKER_IMAGE when the library names nothing;
     mainnet never falls back, and gives '' while TN_MAINNET_ENABLED is off; any
     other network ''. Cached per network (see DOCKER_IMAGE_TTL); the probe
