@@ -45,10 +45,96 @@ CHECKS=0
 FAILS=0
 SKIPS=0
 
-TN_TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tn_test.XXXXXX")" || {
+# macOS sets TMPDIR with a trailing slash; strip it so no path holds "//".
+_tn_test_tmpdir="${TMPDIR:-/tmp}"
+TN_TEST_TMP="$(mktemp -d "${_tn_test_tmpdir%/}/tn_test.XXXXXX")" || {
     echo "tools/tests/lib.sh: mktemp failed" >&2
     exit 1
 }
+
+# BSD userland (macOS): the scripts under test call GNU `stat -c FORMAT` and
+# `mv -T`, which BSD stat and mv lack. The shims below stand in for them only
+# when the GNU form is missing, so a Linux run (GNU or busybox) uses the real
+# tools unchanged. They are exported, so a script a test runs with bash sees
+# them too. Each finds the real tool on PATH when it is called (type -P), so a
+# test's own stand-in earlier on PATH still runs; never `command stat`: bash
+# 3.2 under set -e exits on a failing `command` even inside an if or ||.
+#
+#   stat [-L] -c FORMAT ARGS   runs stat [-L] -f FORMAT ARGS with the GNU
+#       directives mapped to BSD ones: %a %Lp, %U %Su, %G %Sg, %s %z, %n %N,
+#       %h %l, %y %Sm (%u %g %i are the same). %Lp holds the permission bits
+#       only: setuid, setgid and sticky are not shown. Any other call passes
+#       through unchanged.
+#   mv -T|-fT ... DEST         runs mv without T; refused (rc 1) when DEST is
+#       a directory, as GNU -T refuses it; a symlink DEST is replaced, not
+#       followed.
+if ! "$(type -P stat)" -c %u / >/dev/null 2>&1; then
+    stat() {
+        local lflag="" fmt real
+        real="$(type -P stat)"
+        if [[ "${1:-}" == -L ]]; then
+            lflag=-L
+            shift
+        fi
+        case "${1:-}" in
+            -c)
+                fmt="${2-}"
+                shift
+                [[ $# -eq 0 ]] || shift
+                ;;
+            -c?*)
+                fmt="${1#-c}"
+                shift
+                ;;
+            *)
+                "$real" ${lflag:+"$lflag"} "$@"
+                return
+                ;;
+        esac
+        fmt="$(printf '%s' "$fmt" | sed -e 's/%a/%Lp/g' -e 's/%U/%Su/g' -e 's/%G/%Sg/g' \
+            -e 's/%s/%z/g' -e 's/%n/%N/g' -e 's/%h/%l/g' -e 's/%y/%Sm/g')"
+        "$real" ${lflag:+"$lflag"} -f "$fmt" "$@"
+    }
+    export -f stat
+fi
+: > "$TN_TEST_TMP/.mv-probe"
+if ! "$(type -P mv)" -T "$TN_TEST_TMP/.mv-probe" "$TN_TEST_TMP/.mv-probe2" 2>/dev/null; then
+    mv() {
+        local a opts=1 tflag="" dest real
+        local -a args
+        real="$(type -P mv)"
+        args=()
+        for a in "$@"; do
+            if [[ $opts == 1 ]]; then
+                case "$a" in
+                    --) opts=0 ;;
+                    -T) tflag=1; continue ;;
+                    -[!-]*T*) tflag=1; a="${a//T/}" ;;
+                    -*) ;;
+                    *) opts=0 ;;
+                esac
+            fi
+            args+=("$a")
+        done
+        if [[ ${#args[@]} -eq 0 ]]; then
+            "$real"
+            return
+        fi
+        if [[ -n "$tflag" ]]; then
+            dest="${args[${#args[@]}-1]}"
+            if [[ -d "$dest" && ! -L "$dest" ]]; then
+                printf 'mv: cannot overwrite directory %s\n' "$dest" >&2
+                return 1
+            fi
+            if [[ -L "$dest" ]]; then
+                rm -f -- "$dest" || return 1
+            fi
+        fi
+        "$real" "${args[@]}"
+    }
+    export -f mv
+fi
+rm -f "$TN_TEST_TMP/.mv-probe" "$TN_TEST_TMP/.mv-probe2"
 
 tn_test_cleanup() {
     if [[ -n "${TN_TEST_TMP:-}" && -d "$TN_TEST_TMP" ]]; then

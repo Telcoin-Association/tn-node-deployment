@@ -215,7 +215,7 @@ check "reinstall: setup-node.sh is the release copy" "$(_h "$REL/setup-node.sh")
 check "reinstall: no staging or moved-aside dir left" "0" "$(staged_left)"
 
 # A mv shim that fails when its first argument matches the pattern in MVFAIL.
-REAL_MV="$(command -v mv)"
+REAL_MV="$(type -P mv)"  # the path, never a function of that name
 mkdir -p "$T/mvbin"
 cat > "$T/mvbin/mv" <<EOF
 #!/bin/sh
