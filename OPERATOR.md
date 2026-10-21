@@ -1317,10 +1317,10 @@ The second argument, `acceptRewardShortfall`, stays `false`; `true` forfeits any
 
 `setup-node.sh --json` runs in two phases so you can back up the keys in between.
 Pass the same flags to both phases.
-Keygen records the install method, the Docker image or binary path and the node flags in `.node-meta`, and finalize reads them back for any of those you leave out:
+Keygen records the install method, the Docker image or binary path and the node flags in `.node-meta`, and finalize reads them back for any of those you leave out. `vX.Y.Z-adiri` stands for the release you install (the newest final on the releases page, or a release candidate only when you mean one):
 
 ```bash
-ARGS=(--network testnet --install-method docker --release-tag v0.16.0-adiri
+ARGS=(--network testnet --install-method docker --release-tag vX.Y.Z-adiri
   --address 0xYOUR_EXECUTION_ADDRESS
   --external-primary /ip4/203.0.113.10/udp/49590/quic-v1
   --external-worker  /ip4/203.0.113.10/udp/49594/quic-v1
