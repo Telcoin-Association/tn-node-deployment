@@ -147,6 +147,10 @@ NEW_CS_WANT="$(ps_checksum_address "$NEW")"
 # rotate [SERVICE-USER] -- ps_rotate to NEW in a subshell; RC, OUT.
 rotate() {
     OUT="$( (
+        # The EXIT trap of main releases the update lock; this subshell runs
+        # ps_rotate without main, so it releases the lock itself (the mkdir
+        # fallback, used where flock is absent, outlives the subshell otherwise).
+        trap tn_release_update_lock EXIT
         PATH="$T/bin:$ORIG_PATH"
         PS_ROTATE="$NEW"
         PS_ENV_PASS="rotate-pass-value-42"
