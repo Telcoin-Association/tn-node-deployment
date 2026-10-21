@@ -30,6 +30,21 @@ yet; this file gains the issue numbers when they are.
   release steps, and the sidecar reads in `update-scripts.sh` (`fetch_published_sha`,
   `bootstrap_signers`).
 
+- The testnet fallbacks for a time without a signed release can go once `v0.17.0-adiri` is
+  published and installed everywhere: the legacy Artifact Registry tag listing in
+  `latest_docker_image`, the registry digest for a named tag whose release publishes no signed
+  files (`tn_docker_image_for_tag`), and `DEFAULT_DOCKER_IMAGE`/`DEFAULT_DOCKER_TAG` on the
+  legacy repository, which then move to the signed release's ghcr digest. Until then a tag a
+  user names (including `update-node.sh --check`'s `latest_ref` applied from the UI) can still
+  run by the registry's digest on testnet, with the warning.
+- `tn_release_newest_tag` reads the first page of the Releases API only (100 releases). Closes
+  when a channel's newest final can sit beyond that page: page, or filter the API by tag prefix.
+- Nothing tests GitHub's anonymous API rate limit (60 requests an hour per address), which the
+  docs name as one cause of "Cannot read the telcoin-network releases"; the fallback path is
+  covered, the limit itself is not.
+- `ui/dev/serve.py` still fakes a `latest_docker_image` that returns an Artifact Registry tag; the
+  dev server predates the ghcr move.
+
 ## Mainnet launch
 
 - No mainnet image repository is set: `tn_docker_repo_for mainnet` returns nothing

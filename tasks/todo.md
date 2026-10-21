@@ -1,3 +1,48 @@
+## Review: close-out of the hardening round (2026-10-21)
+
+Branch `mainnet-hardening`, b02735a + 24 commits (last code commit c960f96; this note on top): the four red CI jobs fixed, the
+maintainer release key shipped, and the scripts aligned with the signed-release pipeline of
+telcoin-network PR #694. Issues for every item are open in both repositories (tn-node-deployment
+#12-#51, telcoin-network #1723-#1735).
+
+### What landed
+
+- [x] CI: shellcheck 0.9 directives where a stub replaces a sourced function; the UI helper's
+      locked stop or restart runs in a subshell so the lock is released under bash 3.2; BSD
+      stand-ins in the fixture harness (`stat -c`, `mv -T`, `chmod MODE --`, `timeout`, `TMPDIR`)
+      and reasoned skips for `/proc`, `getent`, `PATH` and a 0700 `TMPDIR`; the VM job restores
+      stock modes on `/opt` and `/usr/local` that the runner image leaves world-writable.
+- [x] `lib/release-keys/grantkee.asc` ships (SCRIPTS row, sidecar, README with the refresh rule).
+- [x] Signature policy: one good signature by a shipped key accepts; `BADSIG`, `EXPKEYSIG`,
+      `REVKEYSIG`, `EXPSIG` refuse; an unshipped co-signer beside a good signature warns.
+- [x] Release candidates on testnet when named; every "newest" pick takes finals only; tags are
+      ordered by release (rc1 < rc2 < final) in the downgrade check and the pickers.
+- [x] Images from `ghcr.io/telcoin-association/telcoin-network` for both networks; "newest" from
+      the GitHub Releases API with the digest from the signed `IMAGE_DIGEST`; ghcr's anonymous
+      token for lookups; the Artifact Registry tag listing only as the testnet fallback while no
+      release exists; mainnet Docker refused up front until its pins exist.
+- [x] UI: the default image comes from the library; both testnet repositories and the mainnet one
+      are accepted by digest; no registry hardcode left in `server.py` or the helper.
+- [x] Docs: README, `OPERATOR.md`, changelog and release note, partner guide (PDF 1.3.2).
+
+### Gates on the tip
+
+- `tools/tests/run.sh`: 57 files, 0 failed under bash 5, bash 3.2 and as root in Ubuntu 24.04.
+- `ui/tests/helper_test.sh`: 494 checks, 0 failed under bash 5 and bash 3.2; `install_ui_test` 1/0;
+  pytest 258 passed (python 3.10).
+- shellcheck 0.9.0 and 0.11 error-clean; `check-bash32`, `check-perl-interp` (98 files) and the
+  passphrase-print lint clean; sidecars fresh; no attribution trailers.
+- GitHub: every CI and Integration job green (https://github.com/Telcoin-Association/tn-node-deployment/actions/runs/39637763432 and the Integration run https://github.com/Telcoin-Association/tn-node-deployment/actions/runs/39637763301).
+- Independent verifier over b02735a..c960f96: all seven sections pass with no error; the three warnings it raised (an rc-unaware update check, an unsigned registry fallback for a release the GitHub API lists, an unshipped tag signer refusing instead of warning on testnet) are closed in the follow-up commits ending at c960f96.
+
+### Left as-is (deliberate)
+
+- `DEFAULT_DOCKER_IMAGE` and `DEFAULT_DOCKER_TAG` stay at `v0.16.0-adiri` on Artifact Registry
+  until the first signed release (`v0.17.0-adiri`) exists; `TN_TESTNET_IMAGE_REPOS` keeps both.
+- Product code keeps the GNU forms (`chmod MODE --`, `stat -c`, `mv -T`, `timeout`); only the test
+  harness carries BSD stand-ins.
+- `ui/dev/serve.py` still fakes a registry tag for the dev server (predates the round).
+
 ## Review: mainnet hardening round (2026-10-15)
 
 Branch `mainnet-hardening`, forked from `main` at 037c810: 208 commits (code packages, one
