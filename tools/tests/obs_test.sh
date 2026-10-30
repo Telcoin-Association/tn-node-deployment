@@ -5,14 +5,17 @@
 # 404 for the zip or its SHA256SUMS, a mismatch, a missing line), Grafana's apt key
 # is pinned by fingerprint, the native unit's account and sandbox lines, the node log
 # dir (NODE_LOG_DIR) in the reth flags and in config.alloy's __path__, its creation
-# without a recursive chown, the committee guard before a node restart, and the
-# health check refused while ufw is not active.
+# without a recursive chown, the committee guard before a node restart, the
+# health check refused while ufw is not active, and a partial disable (logs or
+# metrics alone) rendering config.alloy like the enable (owner, group, log path)
+# and failing when Alloy does not restart or stay active (library, menu, --json).
 #
 #   bash tools/tests/obs_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/obs_test.sh
 #
-# curl, gpg, unzip, install and getent are PATH stubs; tn_write_root_file and
-# tn_root_dir_ok are replaced by functions (the fixture tree is not root-owned).
+# curl, gpg, unzip, install and getent are PATH stubs, and chown and systemctl for
+# the partial-disable cases; tn_write_root_file and tn_root_dir_ok are replaced by
+# functions (the fixture tree is not root-owned).
 # =============================================================================
 
 set -u
@@ -339,5 +342,204 @@ _obs_unit_has_log_dir telcoin /var/log/telcoin/node; check_rc "a unit without th
 printf 'SupplementaryGroups=telcoin-log\nReadWritePaths=/var/lib/telcoin /var/log/telcoin/node2\n' > "$U"
 _obs_unit_has_log_dir telcoin /var/log/telcoin/node; check_rc "a different dir does not count" 1 $?
 
+
+# --- partial disables render config.alloy like the enable; Alloy must stay up after a restart ---------
+# From here chown and systemctl are PATH stubs. chown logs "OWNER:GROUP FILE" and exits
+# CHOWN_RC. systemctl logs every call; restart exits ALLOY_RESTART_RC; is-active prints
+# ALLOY_STATE (default active), or activating once more than ALLOY_UP_CHECKS reads were
+# made, and exits 0 only for active. obs_disable is never driven here (it runs a real
+# docker rm -f).
+export CHOWN_LOG="$T/chown.log" SYSTEMCTL_LOG="$T/systemctl.log" ISACTIVE_N="$T/isactive.n"
+cat > "$T/bin/chown" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$2" >> "${CHOWN_LOG:?}"
+exit "${CHOWN_RC:-0}"
+STUB
+cat > "$T/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:?}"
+case "${1:-}" in
+    restart) exit "${ALLOY_RESTART_RC:-0}" ;;
+    is-active)
+        n=0
+        [ -f "${ISACTIVE_N:?}" ] && n="$(cat "$ISACTIVE_N")"
+        n=$((n + 1))
+        echo "$n" > "$ISACTIVE_N"
+        s="${ALLOY_STATE:-active}"
+        [ "$n" -gt "${ALLOY_UP_CHECKS:-999}" ] && s=activating
+        echo "$s"
+        [ "$s" = active ]
+        exit ;;
+esac
+exit 0
+STUB
+chmod +x "$T/bin/chown" "$T/bin/systemctl"
+hash -r
+SAVED_OBS_ETC_DIR="$OBS_ETC_DIR"
+OBS_ETC_DIR="$RP/etc/telcoin/alloy"
+CFG="${OBS_ETC_DIR}/config.alloy"
+META="$RP/etc/telcoin/.node-meta"
+mkdir -p "$OBS_ETC_DIR"
+# meta_set writes through this from here on, so .node-meta keeps what a disable records.
+tn_write_root_file() { printf '%s %s\n' "$1" "$2" >> "$WRITES"; cat > "$1"; }
+unset NODE_LOG_DIR
+NATIVE='NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=binary\nENABLE_OBSERVABILITY=true\nENABLE_METRICS=true\nNODE_LOG_DIR=/var/log/telcoin/node'
+DOCKER='NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=docker\nENABLE_OBSERVABILITY=true\nENABLE_METRICS=true\nNODE_LOG_DIR=/var/log/telcoin/node'
+NODEPATH='"/var/log/telcoin/node/telcoin-network-logs/reth.log*"'
+VENDPATH='"/var/log/telcoin/telcoin-network-logs/reth.log*"'
+SRC="${TN_TEST_REPO}/observability/config.alloy"
+ENABLE_OBSERVABILITY=true ENABLE_METRICS=false _obs_slice_alloy "$SRC" "$T/want-logs" /var/log/telcoin/node
+ENABLE_OBSERVABILITY=false ENABLE_METRICS=true _obs_slice_alloy "$SRC" "$T/want-metrics" ""
+
+pd_reset() { # pd_reset META -- META into .node-meta; no config, empty chown and systemctl logs
+    printf '%b\n' "$1" > "$META"
+    rm -f "$CFG" "$ISACTIVE_N"
+    : > "$CHOWN_LOG"
+    : > "$SYSTEMCTL_LOG"
+}
+pd() { # pd FUNC META [ENV=VAL...] -- FUNC in a subshell (sleep stubbed); output in $T/pd.out; its rc
+    local fn="$1"
+    pd_reset "$2"
+    shift 2
+    ( sleep() { :; }; for kv in "$@"; do export "${kv?}"; done; "$fn" ) >"$T/pd.out" 2>&1
+}
+yn() { if "$@"; then echo yes; else echo no; fi; }
+cfg_has() { yn grep -qF -- "$1" "$CFG"; }
+pd_said() { yn grep -qF -- "$1" "$T/pd.out"; }
+reads() { grep -c '^is-active ' "$SYSTEMCTL_LOG"; }
+
+pd obs_disable_metrics "$NATIVE"; rc=$?
+check_rc "native metrics disable: rc 0" 0 "$rc"
+check "native metrics disable: __path__ at the node log dir" "yes" "$(cfg_has "$NODEPATH")"
+check "native metrics disable: no vendored __path__" "no" "$(cfg_has "$VENDPATH")"
+check "native metrics disable: the file the enable renders for logs only" "$(cat "$T/want-logs")" "$(cat "$CFG")"
+check "native metrics disable: root:telcoin-alloy" "root:telcoin-alloy $CFG" "$(cat "$CHOWN_LOG")"
+check "native metrics disable: mode 0640" "640" "$(stat -c %a "$CFG")"
+check_has "native metrics disable: recorded" "ENABLE_METRICS=false" "$(cat "$META")"
+check "native metrics disable: logs pipeline kept" "yes" "$(cfg_has 'local.file_match')"
+check "native metrics disable: metrics pipeline gone" "no" "$(cfg_has 'prometheus.remote_write')"
+check "native metrics disable: restarted once" "1" "$(grep -c '^restart telcoin-alloy.service$' "$SYSTEMCTL_LOG")"
+check "settle window: 5 seconds" "5" "${OBS_ALLOY_SETTLE_SECS:-unset}"
+check "healthy restart: is-active read OBS_ALLOY_SETTLE_SECS times" "${OBS_ALLOY_SETTLE_SECS:-5}" "$(reads)"
+check "native metrics disable: said" "yes" "$(pd_said 'Metrics shipping stopped')"
+
+pd obs_disable_logs "$NATIVE"; rc=$?
+check_rc "native logs disable: rc 0" 0 "$rc"
+check "native logs disable: root:telcoin-alloy" "root:telcoin-alloy $CFG" "$(cat "$CHOWN_LOG")"
+check "native logs disable: the file the enable renders for metrics only" "$(cat "$T/want-metrics")" "$(cat "$CFG")"
+check "native logs disable: logs pipeline gone" "no" "$(cfg_has 'local.file_match')"
+check "native logs disable: metrics pipeline kept" "yes" "$(cfg_has 'prometheus.remote_write')"
+check_has "native logs disable: recorded" "ENABLE_OBSERVABILITY=false" "$(cat "$META")"
+
+pd obs_disable_metrics "$DOCKER"; rc=$?
+check_rc "docker metrics disable: rc 0" 0 "$rc"
+check "docker metrics disable: root:root" "root:root $CFG" "$(cat "$CHOWN_LOG")"
+check "docker metrics disable: vendored __path__" "yes" "$(cfg_has "$VENDPATH")"
+
+pd obs_disable_metrics "$NATIVE" NODE_LOG_DIR=/srv/tn/node; rc=$?
+check_rc "NODE_LOG_DIR global: rc 0" 0 "$rc"
+check "the NODE_LOG_DIR global wins over .node-meta" "yes" "$(cfg_has '"/srv/tn/node/telcoin-network-logs/reth.log*"')"
+
+pd obs_disable_metrics "$NATIVE" ALLOY_STATE=activating; rc=$?
+check_rc "Alloy in a restart loop: rc 1" 1 "$rc"
+check "Alloy in a restart loop: said" "yes" "$(pd_said 'did not stay running after the restart (state: activating)')"
+check "Alloy in a restart loop: stops at the first read" "1" "$(reads)"
+check_has "Alloy in a restart loop: the choice is still recorded" "ENABLE_METRICS=false" "$(cat "$META")"
+check "Alloy in a restart loop: says where the choice stands" "yes" "$(pd_said 'off in config.alloy and .node-meta')"
+check "Alloy in a restart loop: no success line" "no" "$(pd_said 'Metrics shipping stopped')"
+
+pd obs_disable_metrics "$NATIVE" ALLOY_UP_CHECKS=2; rc=$?
+check_rc "Alloy down after two reads: rc 1" 1 "$rc"
+check "Alloy down after two reads: a third read caught it" "3" "$(reads)"
+
+pd obs_disable_metrics "$NATIVE" ALLOY_RESTART_RC=1; rc=$?
+check_rc "restart fails: rc 1" 1 "$rc"
+check "restart fails: said" "yes" "$(pd_said 'Failed to start telcoin-alloy.service')"
+check "restart fails: no is-active read" "0" "$(reads)"
+
+pd obs_disable_metrics "$NATIVE" CHOWN_RC=1; rc=$?
+check_rc "chown fails: rc 1" 1 "$rc"
+check "chown fails: said" "yes" "$(pd_said "Could not write ${CFG} as root:telcoin-alloy 0640.")"
+check_has "chown fails: the choice is not recorded" "ENABLE_METRICS=true" "$(cat "$META")"
+check "chown fails: no restart" "no" "$(yn grep -q '^restart' "$SYSTEMCTL_LOG")"
+
+pd obs_disable_metrics "${NATIVE}\nINSTALL_METHOD=docker"; rc=$?
+check_rc "duplicated INSTALL_METHOD: rc 1" 1 "$rc"
+check "duplicated INSTALL_METHOD: no config written" "no" "$(yn test -e "$CFG")"
+check "duplicated INSTALL_METHOD: no chown, no systemctl" "" "$(cat "$CHOWN_LOG" "$SYSTEMCTL_LOG")"
+check_has "duplicated INSTALL_METHOD: nothing recorded" "ENABLE_METRICS=true" "$(cat "$META")"
+
+pd obs_disable_metrics "${NATIVE}\nNODE_LOG_DIR=/srv/other"; rc=$?
+check_rc "duplicated NODE_LOG_DIR: rc 1" 1 "$rc"
+check "duplicated NODE_LOG_DIR: no config written" "no" "$(yn test -e "$CFG")"
+check_has "duplicated NODE_LOG_DIR: nothing recorded" "ENABLE_METRICS=true" "$(cat "$META")"
+
+# obs_enable renders through the same helper and runs the same restart check (its
+# account, install, unit and node-flag steps are stubbed).
+oe() { # oe META LOGS METRICS [ENV=VAL...] -- obs_enable in a subshell; output in $T/pd.out; its rc
+    local logs="$2" metrics="$3"
+    pd_reset "$1"
+    shift 3
+    ( sleep() { :; }
+      obs_check_reth_flags() { return 0; }
+      obs_prepare_node_log_dir() { printf '%s\n' /var/log/telcoin/node; }
+      obs_alloy_account() { return 0; }
+      obs_install_alloy_native() { return 0; }
+      obs_write_alloy_native_unit() { return 0; }
+      obs_ensure_reth_flags() { return 0; }
+      _obs_data_dir() { printf '%s\n' "$T/dd"; }
+      tn_as_service_user() { return 0; }
+      obs_run_alloy_docker() { return 0; }
+      for kv in "$@"; do export "${kv?}"; done
+      NETWORK=testnet; ENABLE_OBSERVABILITY="$logs"; ENABLE_METRICS="$metrics"
+      obs_enable "tok-0123456789abcdef" ) >"$T/pd.out" 2>&1
+}
+BASE='NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=binary'
+oe "$BASE" true false; rc=$?
+check_rc "native enable: rc 0" 0 "$rc"
+check "native enable: the same file as the metrics disable leaves" "$(cat "$T/want-logs")" "$(cat "$CFG")"
+check "native enable: root:telcoin-alloy" "root:telcoin-alloy $CFG" "$(cat "$CHOWN_LOG")"
+check "native enable: is-active read OBS_ALLOY_SETTLE_SECS times" "${OBS_ALLOY_SETTLE_SECS:-5}" "$(reads)"
+check "native enable: running line" "yes" "$(pd_said 'Telemetry shipper running (telcoin-alloy.service).')"
+check_has "native enable: recorded" "ENABLE_OBSERVABILITY=true" "$(cat "$META")"
+oe "$BASE" true false ALLOY_STATE=failed; rc=$?
+check_rc "native enable, Alloy does not stay up: rc 1" 1 "$rc"
+check "native enable, Alloy does not stay up: said" "yes" "$(pd_said '(state: failed)')"
+check "native enable, Alloy does not stay up: no running line" "no" "$(pd_said 'Telemetry shipper running')"
+check_lacks "native enable, Alloy does not stay up: not recorded as enabled" "ENABLE_OBSERVABILITY=true" "$(cat "$META")"
+oe 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=docker' true true; rc=$?
+check_rc "docker enable: rc 0" 0 "$rc"
+check "docker enable: the vendored file, byte for byte" "$(cat "$SRC")" "$(cat "$CFG")"
+check "docker enable: root:root" "root:root $CFG" "$(cat "$CHOWN_LOG")"
+
+# The menu and --json callers say when a partial disable did not finish.
+( confirm() { return 0; }; pause() { :; }; addon_meta_write_begin() { return 0; }
+  obs_disable_metrics() { return 1; }; disable_metrics ) >"$T/out" 2>&1
+check "menu: a metrics disable that did not finish is said" "yes" "$(yn grep -q 'did not finish' "$T/out")"
+( confirm() { return 0; }; pause() { :; }; addon_meta_write_begin() { return 0; }
+  obs_disable_logs() { return 1; }; disable_logging ) >"$T/out" 2>&1
+check "menu: a log disable that did not finish is said" "yes" "$(yn grep -q 'Disabling log shipping did not finish' "$T/out")"
+jsonrun() { # jsonrun [ENV=VAL...] -- main --json --disable-metrics with the real run_json_mode on NATIVE; RC, EV
+    pd_reset "$NATIVE"
+    : > "$T/ev"
+    RC=0
+    ( sleep() { :; }; check_root() { :; }; detect_distro() { :; }
+      addon_meta_write_begin() { return 0; }
+      json_setup_fds() { exec 3>>"$T/ev"; }
+      for kv in "$@"; do export "${kv?}"; done
+      main --json --disable-metrics </dev/null ) >"$T/out" 2>&1 || RC=$?
+    EV="$(cat "$T/ev")"
+}
+jsonrun ALLOY_STATE=activating
+check_rc "json: Alloy down: rc 1" 1 "$RC"
+check "json: Alloy down: an error event" "yes" \
+    "$(yn grep -q '"event":"error","msg":"disabling metrics shipping did not finish' "$T/ev")"
+check "json: Alloy down: done ok:false" "yes" "$(yn grep -q '"event":"done","ok":false' "$T/ev")"
+check_lacks "json: Alloy down: no metrics:disabled marker" "metrics:disabled" "$EV"
+jsonrun
+check_rc "json: Alloy up: rc 0" 0 "$RC"
+check "json: Alloy up: the marker is in done" "yes" \
+    "$(yn grep -qF '"event":"done","ok":true,"applied":["metrics:disabled"]' "$T/ev")"
+OBS_ETC_DIR="$SAVED_OBS_ETC_DIR"
 
 finish
