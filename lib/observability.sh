@@ -28,6 +28,8 @@ OBS_CONFIG_SRC="${__OBS_LIB_DIR}/../observability/config.alloy"
 OBS_ETC_DIR="/etc/telcoin/alloy"          # config.alloy + mode-600 env file
 OBS_DATA_DIR="/var/lib/telcoin-alloy"     # Alloy WAL / positions
 OBS_ALLOY_UNIT="telcoin-alloy.service"
+# Seconds obs_restart_alloy watches the unit after a restart (one is-active read a second).
+OBS_ALLOY_SETTLE_SECS=5
 OBS_HTTP_ADDR="127.0.0.1:12345"           # Alloy's own metrics/UI (localhost only)
 
 # Defaults mirror lib/testnet-addons.env for set -u safety if sourced standalone.
@@ -95,7 +97,7 @@ obs_effective_metrics_url() {
 # appends telcoin-network-logs/ to whatever --log.file.directory is given
 # (telcoin-network-cli/src/cli.rs). The docker sidecar mounts DATA_DIR/logs ->
 # /var/log/telcoin, matching config.alloy's __path__; for native Alloy
-# obs_write_config_alloy points __path__ at the node log dir.
+# obs_render_config_alloy points __path__ at the node log dir.
 obs_reth_log_flags() {
     local method="${1:-binary}" dir
     if [[ "$method" == "docker" ]]; then
@@ -108,7 +110,7 @@ obs_reth_log_flags() {
 
 # obs_node_log_dir — where a binary install's node writes its JSON logs: NODE_LOG_DIR
 # (global, else .node-meta), else /var/log/telcoin/node. A duplicated key falls back to
-# the default (obs_enable reads the key strictly first).
+# the default (obs_enable and obs_render_config_alloy read the key strictly first).
 obs_node_log_dir() {
     local d="${NODE_LOG_DIR:-}"
     [[ -n "$d" ]] || d="$(meta_get NODE_LOG_DIR 2>/dev/null)" || d=""
@@ -223,19 +225,76 @@ obs_label_sourcing() {
 # functionally-identical copy that the same slicer renders.
 # <logdir> (optional, native installs): the directory reth writes telcoin-network-logs/
 # under; __path__ is pointed there. The file is root-owned, group <group> (default
-# root), mode 0640, so only Alloy's account can read it.
+# root), mode 0640, so only Alloy's account can read it. rc 1 (said) when the slice,
+# the chown or the chmod fails. Callers use obs_render_config_alloy, which picks
+# <logdir> and <group> for this installation.
 obs_write_config_alloy() {
     local dest="${1:-${OBS_ETC_DIR}/config.alloy}" logdir="${2:-}" group="${3:-root}"
-    install -d -m 0750 "$(dirname "$dest")"
-    local src="$OBS_CONFIG_SRC" tmp=""
+    local src="$OBS_CONFIG_SRC" tmp="" rc=0
+    install -d -m 0750 "$(dirname "$dest")" || rc=1
     if [[ ! -f "$src" ]]; then
         print_warn "observability/config.alloy missing; using the embedded fallback (functionally identical)."
         tmp="$(mktemp)"; _obs_alloy_fallback > "$tmp"; src="$tmp"
     fi
-    _obs_slice_alloy "$src" "$dest" "$logdir"
-    [[ -n "$tmp" ]] && rm -f "$tmp"
-    chown "root:${group}" "$dest" 2>/dev/null || true
-    chmod 0640 "$dest"
+    if [[ "$rc" -ne 0 ]] || ! _obs_slice_alloy "$src" "$dest" "$logdir" \
+        || ! chown "root:${group}" "$dest" || ! chmod 0640 "$dest"; then
+        rc=1
+    fi
+    [[ -z "$tmp" ]] || rm -f "$tmp"
+    if [[ "$rc" -ne 0 ]]; then
+        print_error "Could not write ${dest} as root:${group} 0640."
+        return 1
+    fi
+    return 0
+}
+
+# obs_render_config_alloy — write ${OBS_ETC_DIR}/config.alloy for this installation; the
+# one entry point obs_enable and both partial disables use, so every path renders the
+# same file. The pipelines follow ENABLE_OBSERVABILITY / ENABLE_METRICS (set them first).
+# Docker: root:root with the vendored __path__ (the sidecar mounts the logs there).
+# Native: group telcoin-alloy, and while logs ship __path__ points at the node log dir
+# (obs_node_log_dir; the NODE_LOG_DIR global wins over .node-meta). rc 1 when
+# INSTALL_METHOD, or NODE_LOG_DIR when it is read, is set twice in .node-meta (said,
+# nothing written), or when the write fails (said).
+obs_render_config_alloy() {
+    local method logdir=""
+    method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
+    [[ -n "$method" ]] || method="binary"
+    if [[ "$method" == "docker" ]]; then
+        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
+        return
+    fi
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
+        if [[ -z "${NODE_LOG_DIR:-}" ]]; then
+            addon_meta_get NODE_LOG_DIR "" >/dev/null || return 1
+        fi
+        logdir="$(obs_node_log_dir)"
+    fi
+    obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy" "$logdir" "$OBS_ALLOY_USER"
+}
+
+# obs_restart_alloy — restart the Alloy unit, then read its state once a second,
+# OBS_ALLOY_SETTLE_SECS reads in all: rc 0 when every read says active. rc 1 (said) when
+# the restart fails or a read says anything else; "activating" is systemd restarting a
+# unit that keeps exiting (Restart=), so it counts as down.
+obs_restart_alloy() {
+    local n="${OBS_ALLOY_SETTLE_SECS:-5}" i=1 state
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=5
+    if ! systemctl restart "$OBS_ALLOY_UNIT" >/dev/null 2>&1; then
+        print_error "Failed to start ${OBS_ALLOY_UNIT}. Check: journalctl -u ${OBS_ALLOY_UNIT} -n 50"
+        return 1
+    fi
+    while :; do
+        state="$(systemctl is-active "$OBS_ALLOY_UNIT" 2>/dev/null || true)"
+        if [[ "$state" != "active" ]]; then
+            print_error "${OBS_ALLOY_UNIT} did not stay running after the restart (state: ${state:-unknown}). Check: journalctl -u ${OBS_ALLOY_UNIT} -n 50"
+            return 1
+        fi
+        [[ "$i" -lt "$n" ]] || break
+        sleep 1
+        i=$((i + 1))
+    done
+    return 0
 }
 
 # _obs_slice_alloy <src> <dest> — copy src to dest keeping only the enabled pipeline
@@ -1105,10 +1164,11 @@ obs_ensure_reth_flags() {
 # env file to match, ensure the node carries the matching reth flags, and record state.
 # Idempotent — safe to re-run to flip one pipeline on/off (it restarts Alloy to load the
 # new config; Alloy restarts never wait for the epoch boundary). progress-fn reports the
-# epoch wait before a node restart (see obs_restart_window). The single ingest token
-# serves BOTH pipelines (one obs-hub gate). rc 1 on any failure; when the cause is a
-# node flag that could not be added, OBS_FLAG_ERROR says why and .node-meta is left
-# as it was.
+# epoch wait before a node restart (see obs_restart_window). After the restart Alloy
+# must stay active for OBS_ALLOY_SETTLE_SECS seconds (obs_restart_alloy). The single
+# ingest token serves BOTH pipelines (one obs-hub gate). rc 1 on any failure; when the
+# cause is a node flag that could not be added, OBS_FLAG_ERROR says why and .node-meta
+# is left as it was.
 # obs_prepare_node_log_dir — create the node log dir (NODE_LOG_DIR from .node-meta,
 # else /var/log/telcoin/node) as SERVICE_USER:telcoin-log 2750 with install -d (no
 # recursive chown; an existing dir gets that owner and mode) and print it. The
@@ -1203,7 +1263,7 @@ obs_enable() {
     OBS_ALLOY_TOUCHED=true
     if [[ "$method" == "docker" ]]; then
         install -d -m 0750 "$OBS_ETC_DIR"
-        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
+        obs_render_config_alloy || return 1
         local log_host_dir
         dd="$(_obs_data_dir "$meta")" || return 1
         log_host_dir="${dd}/logs"
@@ -1217,7 +1277,7 @@ obs_enable() {
     else
         install -d -m 0750 -o root -g "$OBS_ALLOY_USER" "$OBS_ETC_DIR"
         chgrp "$OBS_ALLOY_USER" "$OBS_ETC_DIR" 2>/dev/null || true
-        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy" "$nld" "$OBS_ALLOY_USER"
+        obs_render_config_alloy || return 1
         if ! obs_install_alloy_native; then
             print_error "Could not install Alloy natively (apt + tarball both failed, or the download did not verify)."
             return 1
@@ -1228,12 +1288,8 @@ obs_enable() {
     # enable (boot) + restart (now): restart also reloads a rewritten config/env when the
     # unit is already running (e.g. flipping metrics on while logs already ship).
     systemctl enable "$OBS_ALLOY_UNIT" >/dev/null 2>&1 || true
-    if systemctl restart "$OBS_ALLOY_UNIT" >/dev/null 2>&1; then
-        print_ok "Telemetry shipper running (${OBS_ALLOY_UNIT})."
-    else
-        print_error "Failed to start ${OBS_ALLOY_UNIT}. Check: journalctl -u ${OBS_ALLOY_UNIT} -n 50"
-        return 1
-    fi
+    obs_restart_alloy || return 1
+    print_ok "Telemetry shipper running (${OBS_ALLOY_UNIT})."
 
     # A pipeline whose node flags are missing is not recorded as enabled, so status
     # readers (the UI's add-ons card reads .node-meta) never show a half-applied enable.
@@ -1286,46 +1342,78 @@ obs_disable() {
     return 0
 }
 
-# obs_disable_logs — turn OFF log shipping but KEEP metrics if it is on: re-render the
-# Alloy config to metrics-only and reload it. If metrics is also off, fall through to the
-# full teardown. The node keeps writing JSON logs locally (harmless).
+# obs_disable_logs — turn OFF log shipping but KEEP metrics if it is on: render
+# config.alloy metrics-only exactly as obs_enable renders it (obs_render_config_alloy:
+# same owner, group and paths), record ENABLE_OBSERVABILITY=false in .node-meta, then
+# restart Alloy and watch it (obs_restart_alloy). The choice is recorded before the
+# restart because the next render reads it back. rc 1 (said) when the render fails
+# (nothing recorded, no restart), when .node-meta cannot be written, or when Alloy does
+# not stay running. If metrics is also off, fall through to the full teardown. The node
+# keeps writing JSON logs locally (harmless).
 obs_disable_logs() {
-    local meta metrics_on
+    local meta metrics_on rc=0 where="config.alloy"
     meta="$(node_meta_path || true)"
     metrics_on="$(addon_meta_get ENABLE_METRICS false)" || return 1
     if [[ "$metrics_on" == "true" ]]; then
         print_step "Disabling log shipping (metrics stays on)"
         ENABLE_OBSERVABILITY=false; ENABLE_METRICS=true
-        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
-        systemctl restart "$OBS_ALLOY_UNIT" >/dev/null 2>&1 || true
-        [[ -n "$meta" ]] && meta_set ENABLE_OBSERVABILITY false "$meta"
-        print_ok "Log shipping stopped; metrics still shipping → $(obs_effective_metrics_url)."
-        print_info "The node keeps writing JSON logs locally (harmless)."
-    else
-        obs_disable
+        obs_render_config_alloy || return 1
+        if [[ -n "$meta" ]]; then
+            if meta_set ENABLE_OBSERVABILITY false "$meta"; then
+                where="config.alloy and .node-meta"
+            else
+                print_error "Could not record ENABLE_OBSERVABILITY=false in .node-meta."
+                rc=1
+            fi
+        fi
+        if ! obs_restart_alloy; then
+            rc=1
+            print_error "Log shipping is off in ${where}; metrics shipping resumes once ${OBS_ALLOY_UNIT} runs (fix it, then run this disable again or restart the unit)."
+        fi
+        if [[ "$rc" -eq 0 ]]; then
+            print_ok "Log shipping stopped; metrics still shipping → $(obs_effective_metrics_url)."
+            print_info "The node keeps writing JSON logs locally (harmless)."
+        fi
+        return "$rc"
     fi
-    return 0
+    obs_disable
 }
 
-# obs_disable_metrics — turn OFF metrics shipping but KEEP logs if it is on: re-render the
-# Alloy config to logs-only and reload it. If logs is also off, fall through to the full
-# teardown. The node keeps serving its loopback --metrics endpoint (harmless; unscraped).
+# obs_disable_metrics — turn OFF metrics shipping but KEEP logs if it is on: render
+# config.alloy logs-only exactly as obs_enable renders it (obs_render_config_alloy: same
+# owner, group and node log path), record ENABLE_METRICS=false in .node-meta, then
+# restart Alloy and watch it (obs_restart_alloy). The choice is recorded before the
+# restart because the next render reads it back. rc 1 (said) when the render fails
+# (nothing recorded, no restart), when .node-meta cannot be written, or when Alloy does
+# not stay running. If logs is also off, fall through to the full teardown. The node
+# keeps serving its loopback --metrics endpoint (harmless; unscraped).
 obs_disable_metrics() {
-    local meta logs_on
+    local meta logs_on rc=0 where="config.alloy"
     meta="$(node_meta_path || true)"
     logs_on="$(addon_meta_get ENABLE_OBSERVABILITY false)" || return 1
     if [[ "$logs_on" == "true" ]]; then
         print_step "Disabling metrics shipping (logs stays on)"
         ENABLE_OBSERVABILITY=true; ENABLE_METRICS=false
-        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
-        systemctl restart "$OBS_ALLOY_UNIT" >/dev/null 2>&1 || true
-        [[ -n "$meta" ]] && meta_set ENABLE_METRICS false "$meta"
-        print_ok "Metrics shipping stopped; logs still shipping → $(obs_effective_push_url)."
-        print_info "The node keeps serving its loopback --metrics endpoint (harmless; nothing scrapes it now)."
-    else
-        obs_disable
+        obs_render_config_alloy || return 1
+        if [[ -n "$meta" ]]; then
+            if meta_set ENABLE_METRICS false "$meta"; then
+                where="config.alloy and .node-meta"
+            else
+                print_error "Could not record ENABLE_METRICS=false in .node-meta."
+                rc=1
+            fi
+        fi
+        if ! obs_restart_alloy; then
+            rc=1
+            print_error "Metrics shipping is off in ${where}; log shipping resumes once ${OBS_ALLOY_UNIT} runs (fix it, then run this disable again or restart the unit)."
+        fi
+        if [[ "$rc" -eq 0 ]]; then
+            print_ok "Metrics shipping stopped; logs still shipping → $(obs_effective_push_url)."
+            print_info "The node keeps serving its loopback --metrics endpoint (harmless; nothing scrapes it now)."
+        fi
+        return "$rc"
     fi
-    return 0
+    obs_disable
 }
 
 # obs_status — human-readable status: configured flags (logs + metrics), Alloy unit state,
