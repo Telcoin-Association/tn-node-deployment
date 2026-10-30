@@ -132,9 +132,11 @@ readonly STORAGE_MIGRATION_FLOOR="0.16.0"
 readonly STORAGE_MIGRATION_VERIFY_SECONDS=600
 # Set by storage_migration_begin on each apply: true when this update is one way.
 STORAGE_MIGRATION=false
-# Set right before the first start of the new release on a one-way update, so
-# the EXIT trap can tell a kill after that start (the data dir may be migrating)
-# from one before it (nothing migrated yet).
+# Set right before the first start of the new release on a one-way update
+# (storage_migration_mark_started), so the EXIT trap can tell a kill after that
+# start (the data dir may be migrating) from one before it (nothing migrated
+# yet). It is also persisted in the pending state, so that a later --discard
+# keeps the launch files the apply wrote (see discard_pending).
 STORAGE_MIGRATION_STARTED=false
 # Set by verify_health_after_restart: true when its last run saw a healthy node.
 UPDATE_HEALTH_OK=false
@@ -388,6 +390,8 @@ pending_key_check() {
             [[ "$v" =~ $re ]] ;;
         NODEENV_WAS_ABSENT)
             [[ "$v" == "1" ]] ;;
+        STORAGE_MIGRATION_STARTED)
+            [[ "$v" == "true" ]] ;;
         PREPARED_AT)
             re='^[0-9TZ:-]+$'
             [[ "$v" =~ $re ]] ;;
@@ -973,6 +977,21 @@ storage_migration_begin() {
         print_info "Cancelled. The prepared update is kept."
         return 1
     fi
+    return 0
+}
+
+# storage_migration_mark_started -- called by every apply path right before the
+# first start of the new release. A no-op unless this update is one way. Then
+# it records STORAGE_MIGRATION_STARTED=true in the pending state, so a later
+# --discard keeps the launch files this apply wrote (the previous release
+# cannot open the data dir the new one migrates), and sets the global for the
+# EXIT trap. A failed record warns; the global is set either way. Always rc 0.
+storage_migration_mark_started() {
+    [[ "$STORAGE_MIGRATION" == "true" ]] || return 0
+    if ! pending_state_add "STORAGE_MIGRATION_STARTED=true"; then
+        update_wait_say warn "Could not record in the pending state that the one-way update started; a --discard before the health check ends would put the previous launch files back."
+    fi
+    STORAGE_MIGRATION_STARTED=true
     return 0
 }
 
@@ -1602,7 +1621,7 @@ apply_docker_update() {
     print_ok "Start script now runs ${new_image}"
 
     print_step "Starting ${SERVICE_NAME} on new image..."
-    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
+    storage_migration_mark_started
     start_service
 
     if verify_health_after_restart && verify_running_image_id "$pulled_image_id" && verify_consensus_participation; then
@@ -2091,7 +2110,7 @@ apply_source_update() {
 
     [[ "$launch_backed" != "true" ]] || update_rerender_launch
     print_step "Starting ${SERVICE_NAME} on new binary..."
-    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
+    storage_migration_mark_started
     start_service
 
     if verify_health_after_restart && verify_installed_binary_hash "$installed" "$expected_hash" \
@@ -2957,7 +2976,7 @@ json_apply_source() {
 
     [[ "$launch_backed" != "true" ]] || update_rerender_launch
     json_event step "Starting ${SERVICE_NAME} on new binary"
-    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
+    storage_migration_mark_started
     start_service
 
     json_event step "Verifying node health"
@@ -3060,7 +3079,7 @@ json_apply_docker() {
 
     json_event step "Starting ${SERVICE_NAME} on new image"
 
-    if [[ "$STORAGE_MIGRATION" == "true" ]]; then STORAGE_MIGRATION_STARTED=true; fi
+    storage_migration_mark_started
     start_service
 
     json_event step "Verifying node health"
