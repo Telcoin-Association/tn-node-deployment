@@ -535,6 +535,19 @@ clear_pending_state() {
     fi
 }
 
+# clear_pending_after_start -- the end of an apply whose new release was
+# started and stays: remove the pending state and the staged binary it names
+# (BUILT_BINARY). Unlike discard_pending it restores nothing and prints
+# nothing; a missing or unreadable state is simply removed.
+clear_pending_after_start() {
+    local st b=""
+    if st="$(read_pending_state 2>/dev/null)"; then
+        b="$(pending_field "$st" BUILT_BINARY || true)"
+    fi
+    clear_pending_state
+    tn_staged_cleanup "$b"
+}
+
 # =============================================================================
 # HEALTH VERIFY (post-restart)
 # =============================================================================
@@ -998,9 +1011,11 @@ storage_migration_mark_started() {
 # storage_migration_verify_failed <target> <undo-cmd> -- the end of a one-way
 # apply whose post-restart check failed. No rollback: the previous release
 # cannot open the migrated data dir. The node is left running (it may still be
-# migrating), the pending state is cleared, and the version marker keeps the
-# previous ref until a verified apply. Prints how to go back; in --json mode an
-# error event and then the done event. Always rc 1.
+# migrating), the launch files stay as written (the unit, start script and
+# node.env this apply wrote; nothing is restored), the pending state is
+# cleared (clear_pending_after_start), and the version marker keeps the
+# previous ref until a verified apply. Prints how to go back; in --json mode
+# an error event and then the done event. Always rc 1.
 storage_migration_verify_failed() {
     local dd what state msg
     dd="$(tn_resolve_data_dir 2>/dev/null || true)"
@@ -1008,7 +1023,10 @@ storage_migration_verify_failed() {
     if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         state="The node is not running; it may have stopped before or during the migration"
     fi
-    discard_pending
+    # The apply has started the new release (this runs only after that start),
+    # so its launch files stay: the decision is on this run, not on
+    # STORAGE_MIGRATION_STARTED in the pending state, whose write may have failed.
+    clear_pending_after_start
     if [[ "$UPDATE_PARTICIPATION" == "failed" ]]; then
         what="${SERVICE_NAME} answered after starting ${1}, but it is not following consensus or not voting (see above)."
     elif [[ "$UPDATE_HEALTH_OK" == "true" ]]; then
@@ -1016,7 +1034,7 @@ storage_migration_verify_failed() {
     else
         what="${SERVICE_NAME} did not answer within $(update_verify_window)s of starting ${1}."
     fi
-    msg="${what} Not rolled back: the previous release cannot open the migrated data dir. ${state} (journalctl -u ${SERVICE_NAME} -f). To go back: systemctl stop ${SERVICE_NAME}; restore ${dd:-the data dir} from the pre-update snapshot; ${2}; systemctl start ${SERVICE_NAME}."
+    msg="${what} Not rolled back: the previous release cannot open the migrated data dir. The unit, start script and node.env stay as this update wrote them, so a restart of ${SERVICE_NAME} runs ${1} again. ${state} (journalctl -u ${SERVICE_NAME} -f). To go back: systemctl stop ${SERVICE_NAME}; restore ${dd:-the data dir} from the pre-update snapshot; ${2}; systemctl start ${SERVICE_NAME}."
     if [[ "$JSON_MODE" == "true" ]]; then
         json_event error "$msg"
         json_emit "{\"event\":\"done\",\"ok\":false,\"phase\":\"apply\",\"rolled_back\":false,\"storage_migration\":true$(update_vote_field),\"msg\":\"$(json_escape "$msg")\"}"
