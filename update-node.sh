@@ -149,6 +149,10 @@ UPDATE_VOTING=false
 SERVICE_NAME=""
 RPC_URL=""
 DISCARD_PENDING=false
+# Set by discard_pending: true when it kept the launch files of a one-way
+# update whose new release had already started (STORAGE_MIGRATION_STARTED in
+# the pending state); json_discard reports it in its done event.
+DISCARD_KEPT_LAUNCH=false
 # --observer / --validator as passed (the last one wins). Both are retired and
 # ignored: the node's role is decided on-chain. Older copies of the UI helper
 # still pass one on every --json call, so they must keep parsing cleanly.
@@ -816,6 +820,22 @@ launch_restore_hint() {
         h="${h}rm -f $(swap_env_path) && "
     fi
     printf '%s' "${h}systemctl daemon-reload"
+}
+
+# pending_undo_hint STATE -- the shell line that puts back by hand what the
+# pending-state text STATE backed up: the binary (BIN_BACKUP, root 0755 as
+# ${DEFAULT_INSTALL_DIR}/telcoin-network) when there is one, then the launch
+# files (launch_restore_hint), each checked against its sha256 first, ending
+# with systemctl daemon-reload. The caller's LAUNCH_* globals are left as they
+# were (the state is loaded in a subshell).
+pending_undo_hint() {
+    local st="${1:-}" bk sha h=""
+    bk="$(pending_field "$st" BIN_BACKUP || true)"
+    sha="$(pending_field "$st" BIN_BACKUP_SHA256 || true)"
+    if [[ -n "$bk" && -n "$sha" ]]; then
+        h="$(_launch_hint_one "$bk" "$sha" 0755 "${DEFAULT_INSTALL_DIR}/telcoin-network") && "
+    fi
+    printf '%s%s' "$h" "$(launch_load_state "$st"; launch_restore_hint)"
 }
 
 # backup_installed_binary FILE -- back up the installed binary before an apply
@@ -1971,14 +1991,22 @@ record_installed_ref() {
 # discard_pending -- remove the pending state and the staged binary it names.
 # An apply that stopped after backing up the launch files (the unit, the start
 # script, node.env) gets them put back first and systemd reloaded; a backup that
-# no longer matches its sha256 is left out with a warning. The node is not
-# restarted, and the binary is not touched.
+# no longer matches its sha256 is left out with a warning. The exception is a
+# one-way update whose new release was already started
+# (STORAGE_MIGRATION_STARTED=true in the state): its launch files stay as that
+# apply wrote them, since the previous release cannot open the migrated data
+# dir, DISCARD_KEPT_LAUNCH is set, and a warning says how to go back by hand.
+# The node is not restarted, and the binary is not touched.
 discard_pending() {
     local st b=""
+    DISCARD_KEPT_LAUNCH=false
     if st="$(read_pending_state 2>/dev/null)"; then
         b="$(pending_field "$st" BUILT_BINARY || true)"
         launch_load_state "$st"
-        if [[ -n "${LAUNCH_BK_UNIT}${LAUNCH_BK_START}${LAUNCH_BK_ENV}${LAUNCH_ENV_ABSENT}" ]]; then
+        if [[ "$(pending_field "$st" STORAGE_MIGRATION_STARTED || true)" == "true" ]]; then
+            DISCARD_KEPT_LAUNCH=true
+            update_wait_say warn "This is a one-way update whose new release was already started, so the unit, start script and node.env stay as that apply wrote them (the previous release cannot open the migrated data dir). Nothing was rolled back. To go back: systemctl stop ${SERVICE_NAME}; restore the data dir from the pre-update snapshot; $(pending_undo_hint "$st"); systemctl start ${SERVICE_NAME}."
+        elif [[ -n "${LAUNCH_BK_UNIT}${LAUNCH_BK_START}${LAUNCH_BK_ENV}${LAUNCH_ENV_ABSENT}" ]]; then
             if launch_restore_all; then
                 update_wait_say log "Put the launch files back as they were before the interrupted apply."
             else
@@ -3143,8 +3171,14 @@ json_apply_docker() {
 
 json_discard() {
     if [[ -f "$(pending_state_path)" ]]; then
+        # A kept launch-file set was already reported by discard_pending as a
+        # warn event (update_wait_say); the done says so in a field of its own.
         discard_pending
-        json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"discard\",\"msg\":\"pending update cleared\"}"
+        if [[ "$DISCARD_KEPT_LAUNCH" == "true" ]]; then
+            json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"discard\",\"storage_migration\":true,\"msg\":\"pending update cleared; the launch files of the started one-way update were kept\"}"
+        else
+            json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"discard\",\"msg\":\"pending update cleared\"}"
+        fi
     else
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"discard\",\"msg\":\"no pending update to discard\"}"
     fi
