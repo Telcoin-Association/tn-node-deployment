@@ -584,14 +584,16 @@ diff <(sed -n '/^local\.file_match/,$p' <adiri>/common/observability/node-agent/
      <(sed -n '/^local\.file_match/,$p' observability/config.alloy)
 ```
 
-**wg-node-bootstrap.sh**: a verbatim copy with one upstream-pushed change already
-present, the `WG_NODE_SSHD_HARDEN` guard (default `1` = upstream behavior).
-`setup-vpn.sh` calls it with `WG_NODE_SSHD_HARDEN=0`, `WG_NODE_ENFORCE=0` and only the
-keys that pass `KEYS` and the host's deny list. The bootstrap still writes two things
-`setup-vpn.sh` replaces as soon as it returns: `/etc/sudoers.d/90-tnadmin` with full root
-(rewritten to the recovery command list, also after a half-finished bootstrap) and
-`~tnadmin/.ssh/authorized_keys.tnvpn` (deleted once the drop-in reads
-`/etc/wgvpn/tnadmin.authorized_keys`). `setup-vpn.sh` refuses to run it while `~tnadmin`,
+**wg-node-bootstrap.sh**: a verbatim copy with two upstream-pushed changes, the
+`WG_NODE_SSHD_HARDEN` and `WG_NODE_SUDOERS` guards (both default `1` = upstream
+behavior). `setup-vpn.sh` calls it with `WG_NODE_SSHD_HARDEN=0`, `WG_NODE_SUDOERS=0`,
+`WG_NODE_ENFORCE=0` and only the keys that pass `KEYS` and the host's deny list.
+`setup-vpn.sh` writes `/etc/sudoers.d/90-tnadmin` itself before the bootstrap runs, and
+again afterwards only when the file differs (a vendored copy without the
+`WG_NODE_SUDOERS` guard writes full root there). The bootstrap still writes
+`~tnadmin/.ssh/authorized_keys.tnvpn`, which `setup-vpn.sh` deletes once the drop-in reads
+`/etc/wgvpn/tnadmin.authorized_keys`. `setup-vpn.sh` refuses to run it while `~tnadmin`,
 its `.ssh` or that key file is a symlink. The vendored file's header records the upstream
-`sha256`. To re-vendor after an upstream change, strip the 16-line provenance header and
-diff the body against the new upstream, then update the sha.
+`sha256`. To re-vendor after an upstream change, strip the 14-line provenance header
+(lines 2-15: `sed '2,15d' lib/wgvpn/wg-node-bootstrap.sh`) and diff the body against the
+new upstream, then update the sha.

@@ -273,11 +273,13 @@ drop-in reads the root-owned file.
 
 ### Sudo for tnadmin
 
-`/etc/sudoers.d/90-tnadmin` (root 0440) is rewritten right after the vendored bootstrap
-(which writes full root there) and on every `--sync-keys` and `--selfheal` run; the
-boot-time helper does not touch it. Each version
-is checked with `visudo -cf` before it is installed; when it cannot be built, checked or
-installed, the file is removed, so `tnadmin` is left with no sudo rather than full root.
+`/etc/sudoers.d/90-tnadmin` (root 0440) is written before the vendored bootstrap runs (the
+bootstrap is told not to write it), so during an enable `tnadmin` never holds more than
+the operator granted. It is rewritten on every `--sync-keys` and `--selfheal` run, and
+written again after the bootstrap only when an older vendored copy changed it; the
+boot-time helper does not touch it. Each version is checked with `visudo -cf` before it is
+installed; when it cannot be built, checked or installed, the file is removed, so `tnadmin`
+is left with no sudo rather than full root.
 
 The default rules allow these commands as root, with exactly these arguments (`<svc>` is
 the node unit, normally `telcoin`):

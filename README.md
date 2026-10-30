@@ -1731,7 +1731,8 @@ Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 `lib/testnet-addons.env` adds `TN_OVERLAY_ADMIN_CIDR`, the maintainer overlay range: the only
 overlay source the firewall's overlay SSH rule and the VPN sshd drop-in admit. The bundle
 gains `lib/wgvpn/peers/ssh/KEYS`, the list of maintainer key fingerprints setup-vpn.sh reads
-(see setup-vpn v2.0.0).
+(see setup-vpn v2.0.0). The vendored `wg-node-bootstrap.sh` gains the `WG_NODE_SUDOERS` guard,
+so setup-vpn.sh writes the tnadmin sudo rule itself.
 
 ### setup-node v2.0.0 — root-owned install, credential passphrase, signed releases, Docker by digest
 - Lays the host out root-owned and records `OWNERSHIP_LAYOUT=2`: `/opt/telcoin` and
@@ -1903,9 +1904,10 @@ Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
   update-scripts; `/etc/wgvpn/tnadmin.revoked` is a local deny list.
 - Keys live in `/etc/wgvpn/tnadmin.keys` and `/etc/wgvpn/tnadmin.authorized_keys`, and the
   sshd drop-in admits `tnadmin` only from the maintainer overlay range.
-- `tnadmin` gets a fixed list of recovery commands through sudo (checked with `visudo`). Full
-  root needs `--grant-maintainer-root`; `--revoke-maintainer-root` takes it back. Existing
-  hosts lose `NOPASSWD:ALL` at the next sync or self-heal.
+- `tnadmin` gets a fixed list of recovery commands through sudo (checked with `visudo`),
+  written before the WireGuard bootstrap runs. Full root needs `--grant-maintainer-root`;
+  `--revoke-maintainer-root` takes it back. Existing hosts lose `NOPASSWD:ALL` at the next
+  sync or self-heal.
 - Self-heal runs from the root-owned `/usr/local/sbin/tn-vpn-selfheal`.
 - `--status` and `--disable` work on any network; enable, `--sync-keys` and `--apply-firewall`
   are testnet only. Enable refuses a symlinked `~tnadmin` or `.ssh`.

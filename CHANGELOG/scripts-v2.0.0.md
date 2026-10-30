@@ -384,6 +384,8 @@ skipped.
   root-owned), written to `/etc/sudoers.d/90-tnadmin` and checked with `visudo`. Full root
   needs `--grant-maintainer-root`, and `--revoke-maintainer-root` takes it back (recorded as
   `VPN_MAINTAINER_ROOT`). Existing hosts lose `NOPASSWD:ALL` at the next sync or self-heal.
+  The enable writes the rule before the WireGuard bootstrap runs (the bootstrap is told not
+  to write one), so `tnadmin` never holds `NOPASSWD:ALL` during an enable unless granted.
 - Self-heal runs from the root-owned helper `/usr/local/sbin/tn-vpn-selfheal`, which removes
   its units and itself off testnet and devnet.
 - `--status` and `--disable` work on any network (`--status` takes no lock; `--disable`
@@ -517,7 +519,10 @@ skipped.
 ### Testnet add-ons 1.1.0
 
 `lib/testnet-addons.env` adds `TN_OVERLAY_ADMIN_CIDR`, the maintainer overlay range that is the
-only overlay source sshd admits. The bundle gains `lib/wgvpn/peers/ssh/KEYS`.
+only overlay source sshd admits. The bundle gains `lib/wgvpn/peers/ssh/KEYS`. The vendored
+`wg-node-bootstrap.sh` carries two guards, `WG_NODE_SSHD_HARDEN` and the new
+`WG_NODE_SUDOERS` (both default 1, upstream behavior); with `WG_NODE_SUDOERS=0` it leaves
+`/etc/sudoers.d/90-tnadmin` to the caller.
 
 ### Node Manager UI 2.0.0, install-ui 2.0.0 and open-ui.sh
 
