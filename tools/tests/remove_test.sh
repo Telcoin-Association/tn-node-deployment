@@ -5,11 +5,11 @@
 # legacy names), the key, passphrase and config files (shredded by find, as the
 # service account where the tree is not this account's own, never through a
 # symlink or a split name), the shared host files (start scripts, node.env,
-# backups, logrotate, journald, needrestart and apt files, the lock directory,
-# a symlinked libexec dir left alone), the log-reader group, the JSON path,
-# finishing a removal that stopped part way (JSON and the menu's leftover
-# path), the update lock, and the refusal to remove anything when .node-meta
-# sets a key more than once.
+# backups, logrotate, journald, needrestart and apt files; the lock directory and
+# its lock file stay; a symlinked libexec dir left alone), the log-reader group,
+# the JSON path, finishing a removal that stopped part way (JSON and the menu's
+# leftover path), the update lock, and the refusal to remove anything when
+# .node-meta sets a key more than once.
 #
 #   bash tools/tests/remove_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/remove_test.sh
@@ -356,7 +356,9 @@ gone "node.env" "$ETC/node.env"
 gone "backups dir" "$BK"
 gone "logrotate file" "$R/etc/logrotate.d/telcoin"
 gone "journald drop-in" "$R/etc/systemd/journald.conf.d/50-telcoin.conf"
-gone "lock dir" "$R/run/telcoin"
+kept "lock dir stays" "$R/run/telcoin"
+kept "lock file stays" "$R/run/telcoin/update.lock"
+check_has "says /run/telcoin stays" "yes" "$(grep -q '/run/telcoin stays' "$T/out" && echo yes)"
 gone "release staging dir" "$R/var/lib/telcoin-staging"
 gone "build account home" "$R/var/lib/tn-build"
 check_lacks "no userdel under a fixture root" "userdel" "$(calls)"
@@ -486,12 +488,26 @@ check_has "leftovers while locked: rc 1" "rc=1" "$(cat "$T/out")"
 check "leftovers while locked: nothing removed" "$before" "$(snapshot)"
 release_lock
 
-# The lock lives in /run/telcoin: that directory goes last, after the release.
+# The lock lives in /run/telcoin: a removal leaves the directory and the lock
+# file as they are (same inode), the library's EXIT trap is the one in place
+# when the removal returns, and the lock is free once the run has ended.
+ino_of() { ls -i -- "$1" | awk '{print $1}'; }
 mkfixture
-( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+before="$(ino_of "$R/run/telcoin/update.lock")"
+check "lock inode read" "yes" "$([[ "$before" =~ ^[0-9]+$ ]] && echo yes)"
+rm -f "$T/trap"
+( set -e; json_remove validator keys; trap -p EXIT > "$T/trap" ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
 check_rc "json keys with the lock in /run/telcoin: rc 0" 0 "$rc"
-check_has "json: /run/telcoin left for the end" "yes" "$(grep -q 'removed when the run ends' "$T/out" && echo yes)"
-gone "json: /run/telcoin removed at the end" "$R/run/telcoin"
+check "lock inode unchanged by a removal" "$before" "$(ino_of "$R/run/telcoin/update.lock")"
+kept "json: lock dir stays" "$R/run/telcoin"
+kept "json: lock file stays" "$R/run/telcoin/update.lock"
+check_has "json: says /run/telcoin stays" "yes" "$(grep -q '/run/telcoin stays' "$T/out" && echo yes)"
+check "json: the library EXIT trap releases the lock" "yes" \
+    "$(grep -qE 'tn_release_update_lock|update\.lock\.d' "$T/trap" 2>/dev/null && echo yes)"
+gone "json: no mkdir lock left behind" "$R/run/telcoin/update.lock.d"
+hold_lock
+check "json: the lock is free after the run" "yes" "$([[ -f "$T/held" ]] && echo yes)"
+release_lock
 check_has "json: config temp copy shredded" "shred -u -- $ETC/.tn.AbCdEf" "$(calls)"
 
 # --- remove_log_group / remove_service_user -----------------------------------
@@ -586,9 +602,10 @@ check_rc "json keys rc 0 under set -e" 0 "$rc"
 check_has "json done event" "yes" "$(grep -q '"event":"done","ok":true' "$T/json" && echo yes)"
 for p in "$SD/telcoin.service" "$SD/telcoin.service.bak.20240101" "$SD/telcoin.bak.1" \
          "$SD/telcoin.service.d" "$SD/telcoin.service.bak.link" "$ETC" "$DATA" "$LX" "$BK" \
-         "$R/etc/logrotate.d/telcoin" "$R/etc/systemd/journald.conf.d/50-telcoin.conf" "$R/run/telcoin"; do
+         "$R/etc/logrotate.d/telcoin" "$R/etc/systemd/journald.conf.d/50-telcoin.conf"; do
     gone "json ${p#"$R"}" "$p"
 done
+kept "json: /run/telcoin stays" "$R/run/telcoin"
 kept "json: symlink target outside the tree" "$OUT/unit-target"
 kept "json: backup symlink target" "$OUT/backup-target"
 kept "json: another unit's backup" "$SD/telcoin-alloy.service.bak.1"
