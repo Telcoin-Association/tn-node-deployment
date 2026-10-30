@@ -147,6 +147,11 @@ yet; this file gains the issue numbers when they are.
 
 ## Add-ons
 
+- In `setup-observability.sh --json`, a `json_fail` ends the run with a `done` that has no `applied`
+  field, so actions that did succeed earlier in the same call go unreported; and the library's own
+  messages (a failed Alloy restart, a config write that failed) reach only the server log, since fd 1
+  is pointed at stderr in `--json` mode. Closes when the synthesized `done` lists `applied` and the
+  error event carries the library's message.
 - firewall-setup writes no `DOCKER-USER` block to `/etc/ufw/after.rules`, so ports Docker
   publishes are not filtered by the ufw rules. Closes when firewall-setup adds the block and the
   fixture tests cover it.
@@ -200,6 +205,13 @@ yet; this file gains the issue numbers when they are.
 
 ## UI
 
+- The Node Manager UI's discard button reports only the helper's exit code; the `done` line of a
+  discard after a started one-way update carries `"storage_migration":true` and a warning that the
+  launch files were kept, which the UI does not show yet. Closes when the discard route streams or
+  surfaces that warning.
+- `ui/server.py` gives the helper's quorum check a 20-second timeout, while the library guard can take
+  about 35 seconds when the local RPC hangs (10 s mode, 5 s committee, 5 s commit, 3 s `tn_info`).
+  Closes when the timeout covers the guard's worst case or the guard takes a budget.
 - The Jaeger image is `jaegertracing/all-in-one:latest` (`JAEGER_IMAGE` in
   `ui/telcoin-ui-helper.sh`). Closes when it is pinned by digest.
 - The log download for an external node (`api_logs_download` in `ui/server.py`) collects the
@@ -346,6 +358,9 @@ yet; this file gains the issue numbers when they are.
   `--json --prepare` already warns.
 - No script runs `telcoin-network db migrate` (v0.16.0-adiri) between the stop and the first start,
   so a slow migration has to fit the 600-second health window of a one-way apply. Not tried.
+- A second `--apply` while the pending state holds `STORAGE_MIGRATION_STARTED=true` (an apply killed
+  after its first start) is not refused; it should stop with "the previous apply already started
+  <ref>; discard it or check the node" instead of backing up the new binary as the old one.
 
 ### remove-node and migrate-node-naming
 

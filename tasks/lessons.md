@@ -323,3 +323,46 @@ failed one test, and the branch was pushed before the log was read.
 **Rule:** a background command whose exit status decides the next step ends with that command
 (or `rc=$?; ...; exit $rc`), never with an echo. Read the run's own result line in its log
 before any push, merge or "done"; the harness's exit summary is not the evidence.
+
+### An unreadable answer is not a negative answer (2026-10-30)
+
+**Symptom:** the committee guard treated a node whose `tn_nodeMode` call failed (timeout,
+connection refused, method not found) as "authored nothing, so already among the down" and let
+it stop. A voting node with a slow or mis-ported RPC is among the authors of the latest commit,
+so the prospective count was one short and the guard could allow the stop that halts consensus.
+
+**Cause:** a failed read was folded into one of the two real answers instead of being kept as a
+third state. The epoch wait next to it already failed closed on the same input.
+
+**Rule:** when a check reads a fact that decides a destructive step, a read that fails is its own
+case and takes the safe branch. The unsafe branch needs a positive proof from another source
+(here: `tn_info` on the node itself returning an authority id that is absent from the counted
+commit). Grep for the sibling checks that read the same fact and make them agree.
+
+### A cleanup that reuses a rollback helper restores what must stay (2026-10-30)
+
+**Symptom:** the one-way update's failure path said "Not rolled back" and then called the
+`--discard` helper to clear the pending state, which also put the old unit, start script and
+node.env back while the new release was running on a migrated data dir.
+
+**Cause:** "clear the state" and "undo the apply" were one function because every earlier caller
+wanted both.
+
+**Rule:** split "forget" from "undo". A failure path after an irreversible step clears bookkeeping
+with a helper that restores nothing, and the irreversible step persists a marker so a later
+`--discard` run by a different process makes the same choice. Write a static fixture check that
+the failure function never calls the restore helper.
+
+### A render helper with optional arguments lets a second caller drop installation-specific settings (2026-10-30)
+
+**Symptom:** the Alloy config writer took `dest`, `logdir` and `group` as optional arguments; the
+enable path passed the native log dir and the service group, the partial-disable paths passed
+nothing, so a native host got a root-owned config pointing at the wrong log path, and the restart
+failure after it was hidden by `|| true`.
+
+**Cause:** the knowledge of what the installation needs lived in one caller, not in the helper.
+
+**Rule:** a helper that renders a file for an installation derives the installation-specific
+values itself (from `.node-meta`) and takes no optional arguments for them; callers that need a
+different file call a different helper. A restart whose success the caller reports must be
+checked (is-active for a few seconds) and its failure propagated, never `|| true`.

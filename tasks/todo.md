@@ -1,3 +1,71 @@
+## Review: the five defects of the 2026-10-28 review of PR #11 (2026-10-30)
+
+Branch `mainnet-hardening`, d8c138f + 18 fix commits (ff5a34b..963f0f8) + the release-prep commit
+3fb57d1 (sidecars, partner guide 1.3.3) + this note. Each item has a fixture that fails on d8c138f
+and passes on the tip.
+
+### What landed
+
+- [x] Quorum stop guard (`lib/common.sh`, ff5a34b): a node whose own `tn_nodeMode` cannot be read
+      is counted as still voting; it is counted among the down only when `tn_info` on its own RPC
+      returns an authority id that authored nothing in the counted commit (`_tn_commit_has_author`,
+      `tn_node_authority_id`; the public RPC is never asked). The refusal stays under the UI
+      helper's 300-character cut. `quorum_guard_test.sh` 85 checks (28 fail on d8c138f).
+- [x] One-way update failure (`update-node.sh`, 69b866b..e86ee71): a started one-way apply records
+      `STORAGE_MIGRATION_STARTED=true` in the pending state; a failed health check clears the state
+      without restoring the unit, start script or `node.env` (`clear_pending_after_start`) and says
+      so; a later `--discard` keeps them too and prints the manual way back (`pending_undo_hint`;
+      `--json` done carries `"storage_migration":true`). New `storage_migration_test.sh` (96 checks,
+      126 as root; 40+ fail on d8c138f).
+- [x] VPN enable sudoers (`setup-vpn.sh`, 9774caf; vendored bootstrap eed4faa): the consent-matching
+      `/etc/sudoers.d/90-tnadmin` is written before the vendored bootstrap runs, which now honours
+      `WG_NODE_SUDOERS=0` (default 1 keeps upstream behaviour); after the bootstrap the rule is
+      rewritten only when it differs (`vpn_sudoers_current`). The enable order and every
+      SSH-related step are unchanged. The guard is mirrored in the upstream checkout
+      (deploy-networks-common, branch `wgvpn-sudoers-guard`, commit 9b2c8f2, unpushed) and the
+      vendored header records its sha. New `vpn_enable_test.sh` (45 checks; 12 fail on d8c138f).
+- [x] Alloy partial disable (`lib/observability.sh`, 69c3afd; `setup-observability.sh`, 294e980):
+      one `obs_render_config_alloy` derives owner, group and the node log path from the installation
+      for the enable and both partial disables; `obs_restart_alloy` restarts and watches `is-active`
+      for 5 s; a disable records its choice, restarts through the helper, and exits non-zero when
+      Alloy does not stay up (menu says so; `--json` ends `done ok:false` without the marker).
+      `obs_test.sh` 103 -> 170 checks (39 fail on d8c138f).
+- [x] Update lock after a removal (`remove-node.sh`, 3b48813): `/run/telcoin` and the lock file stay
+      (the deferred unlink in the EXIT trap is gone), so no second operation can lock an unlinked
+      inode. `remove_test.sh`: same inode before and after, a fresh acquire succeeds (9 fail on
+      d8c138f).
+- [x] Docs: OPERATOR.md, README.md, CHANGELOG/scripts-v2.0.0.md, WGVPN.md, docs/testnet-addons.md
+      (the provenance header is 14 lines, `sed '2,15d'`), AGENTS.md, partner guide 1.3.3 (PDF
+      57 pages).
+
+### Gates on the tip
+
+- `tools/tests/run.sh`: 59 files, 0 failed under bash 5.3, bash 3.2.57 and as root in Ubuntu 24.04.
+- `ui/tests/helper_test.sh`: 494 checks under bash 5 and bash 3.2; `install_ui_test.sh` 1/1;
+  pytest 258 passed (python:3.10-slim).
+- `bash -n` (bash 5 and 3.2), `tools/check-bash32.sh`, shellcheck 0.9 and 0.11 `--severity=error`:
+  clean on the 13 touched files; `tools/check-perl-interp.sh` clean (100 files).
+- Sidecars fresh; no version constant changed; no `Co-Authored-By` or "Generated with" in any
+  commit; the vendored bootstrap body is byte-identical to the mirror
+  (f6e22378569c5f79bb24127dacaa14794f392aa1cececa037641f1e5f07f80d5).
+
+### Left to the user
+
+- Push `wgvpn-sudoers-guard` in `deploy-networks-common` (commit 9b2c8f2) and open its PR; the
+  superproject branch of the same name (df30349) only moves the `common` pin. Drop "pending merge"
+  from the vendored header when it merges, and keep the header sha equal to the merged file's.
+- Re-request the review if the token could not; sign `MANIFEST` and commit `lib/allowed_signers`
+  plus `MANIFEST*`/`RELEASE` on the final tip before merging #11.
+- The follow-ups added to `followup.md` (UI display of the one-way discard note, the quorum-check
+  timeout in `server.py`, a re-apply after a started one-way update, the `--json` done after a
+  failed add-on action).
+
+### Assumptions
+
+- 2.0.0 is unreleased, so a pending-state key unknown to an older dev build needs no shim.
+- `obs_enable` now takes about 4 s longer and fails when Alloy exits within 5 s of the restart.
+- The partner guide version is a document version, not a script version.
+
 ## Review: close-out of the hardening round (2026-10-21)
 
 Branch `mainnet-hardening`, b02735a + 24 commits (last code commit c960f96; this note on top): the four red CI jobs fixed, the
