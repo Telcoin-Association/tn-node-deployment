@@ -127,11 +127,20 @@ check_rc "parse: duplicate key refused" 1 "$RC"
 check "parse: duplicate key, nothing printed" "" "$OUT"
 check "parse: duplicate key named" yes "$(has "$ERR" "PHASE is listed more than once")"
 
-# A value shaped like an interpolation, in each field an apply passes on.
+# The one-way start marker (storage_migration_mark_started): true only.
+run pending_parse <<< "${GOOD_STATE}
+STORAGE_MIGRATION_STARTED=true"
+check_rc "parse: STORAGE_MIGRATION_STARTED=true rc 0" 0 "$RC"
+check "parse: STORAGE_MIGRATION_STARTED=true kept" "true" "$(pending_field "$OUT" STORAGE_MIGRATION_STARTED)"
+check "parse: STORAGE_MIGRATION_STARTED=true, no warnings" "" "$ERR"
+
+# A value shaped like an interpolation, in each field an apply passes on, and
+# a one-way start marker that is not exactly true.
 for bad in 'NEW_IMAGE=x@{[MARKER]}' 'OLD_IMAGE=a/b:1 c' 'NEW_IMAGE=-x/y:1' \
            'PULLED_IMAGE_ID=sha256:xyz' 'BUILT_HASH=abc' 'BUILT_BINARY=relative/path' \
            'BUILT_BINARY=/a/$(b)' 'NEW_REF=-x' 'PHASE=other' 'INSTALL_METHOD=binary' \
-           'UNIT_BACKUP_SHA256=0' 'BIN_BACKUP=/x y'; do
+           'UNIT_BACKUP_SHA256=0' 'BIN_BACKUP=/x y' 'STORAGE_MIGRATION_STARTED=1' \
+           'STORAGE_MIGRATION_STARTED=yes' 'STORAGE_MIGRATION_STARTED='; do
     run pending_parse <<< "PHASE=pull_complete
 ${bad}"
     check_rc "parse: refused ${bad}" 1 "$RC"
