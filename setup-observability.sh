@@ -248,7 +248,9 @@ disable_logging() {
     print_header "Disable log shipping"
     if confirm "Stop shipping logs (metrics, if on, keeps running)?"; then
         addon_meta_write_begin || { pause; return 0; }
-        obs_disable_logs
+        if ! obs_disable_logs; then
+            print_error "Disabling log shipping did not finish (see messages above)."
+        fi
     else
         print_info "Cancelled."
     fi
@@ -259,7 +261,9 @@ disable_metrics() {
     print_header "Disable metrics shipping"
     if confirm "Stop shipping metrics (logs, if on, keeps running)?"; then
         addon_meta_write_begin || { pause; return 0; }
-        obs_disable_metrics
+        if ! obs_disable_metrics; then
+            print_error "Disabling metrics shipping did not finish (see messages above)."
+        fi
     else
         print_info "Cancelled."
     fi
@@ -607,8 +611,16 @@ run_json_mode() {
 
     # Apply in a deterministic order. Disables first so a same-call enable wins; both
     # pipelines share one obs_enable call path so enabling both renders one config.
-    [[ "${JSON_DISABLE_LOGS:-false}" == "true" ]]    && { obs_disable_logs;    JSON_DID+=("logs:disabled"); }
-    [[ "${JSON_DISABLE_METRICS:-false}" == "true" ]] && { obs_disable_metrics; JSON_DID+=("metrics:disabled"); }
+    # A disable that does not finish ends the run (json_fail: error event, then exit, so
+    # json_on_exit sends done ok:false) before its marker is added.
+    [[ "${JSON_DISABLE_LOGS:-false}" == "true" ]] && {
+        obs_disable_logs || json_fail "disabling log shipping did not finish (see server logs)"
+        JSON_DID+=("logs:disabled")
+    }
+    [[ "${JSON_DISABLE_METRICS:-false}" == "true" ]] && {
+        obs_disable_metrics || json_fail "disabling metrics shipping did not finish (see server logs)"
+        JSON_DID+=("metrics:disabled")
+    }
     [[ "${JSON_DISABLE_HEALTH:-false}" == "true" ]]  && json_disable_health
     if [[ "$enabling_pipe" == "true" ]]; then
         json_enable_pipes "$token" "${JSON_ENABLE_LOGS:-false}" "${JSON_ENABLE_METRICS:-false}"
