@@ -3731,6 +3731,19 @@ _tn_commit_authors() {
     printf '%s %s %s\n' "$n" "$((10#$ts))" "$ep"
 }
 
+# _tn_commit_has_author JSON ID -- rc 0 when the tn_latestConsensusHeader answer
+# JSON names ID as the author of a header; rc 1 when it does not; rc 2 when ID is
+# not a base58 id (JSON is then not searched). The closing quote in the pattern
+# keeps ID from matching the start of a longer author.
+_tn_commit_has_author() {
+    local json="${1:-}" id="${2:-}" re
+    [[ "$id" =~ ^[1-9A-HJ-NP-Za-km-z]{1,128}$ ]] || return 2
+    # Base58 has no regex metacharacters, so the id goes into the pattern as is.
+    re='"author"[[:space:]]*:[[:space:]]*"'"${id}"'"'
+    [[ "$json" =~ $re ]] || return 1
+    return 0
+}
+
 # _tn_rpc_chain_is URL ID -- rc 0 when URL answers eth_chainId with chain ID
 # (decimal). A public RPC is used for the committee, the commit or the stake
 # only after this: before a launch it may serve another network.
@@ -3809,9 +3822,12 @@ _tn_guard_src_ok() {
 # id (otherwise the count cannot be made). n is the committee size, f = floor((n-1)/3), and down counts the
 # members that authored no header in that commit (an estimate until the node
 # reports peer liveness: a slow member counts as down). This node adds one to
-# down when it stops, unless its own mode could not be read: a node that does
-# not answer authored nothing, so it is already among the down. rc 0 when the
-# node is readable and not CvvActive, or when down (+ 1) < f + 1; rc 1 when
+# down when it stops (down + self). When its own mode cannot be read it is still
+# counted as voting, unless tn_info on its own URL (never the public RPC) gives
+# an authority id that authored nothing in the counted commit: then it is
+# already among the down and adds none. Each call is bounded: 10 s for the mode,
+# 5 s for the committee and the commit (per source), 3 s for tn_info. rc 0 when
+# the node is readable and not CvvActive, or when down + self < f + 1; rc 1 when
 # stopping it would leave f + 1 members down; rc 2 when the count cannot be
 # made (no committee, no commit, a commit more than 120 s old or from another
 # epoch) on a mainnet node not known to be unstaked or an unknown network
@@ -3821,7 +3837,7 @@ _tn_guard_src_ok() {
 # progress-fn (`fn log|warn MSG`) or stderr.
 tn_committee_down_guard() {
     local url="${1:-}" fn="${2:-}" mode="" rc=0 net pub="" src info committee n hdr counted live ts ep age f down now self=1 note=""
-    local want="" pub_state="" pub_note=""
+    local want="" pub_state="" pub_note="" aid="" hrc=0
     [[ -n "$url" ]] || url="$(tn_local_rpc_url 2>/dev/null || true)"
     mode="$(tn_node_mode "$url" 2>/dev/null)" || mode=""
     case "$mode" in
@@ -3878,8 +3894,21 @@ tn_committee_down_guard() {
     f=$(( (n - 1) / 3 ))
     down=$(( n - live ))
     if [[ -z "$mode" ]]; then
-        self=0
-        note=" (this node does not answer and is counted among them)"
+        # The mode was not read, which does not show that the node stopped
+        # voting: it stays counted (self=1) unless tn_info on its own URL gives an
+        # id that authored nothing in the commit counted above (hdr is that answer).
+        note=" (this node did not report its mode: counted as still voting)"
+        aid="$(tn_node_authority_id "$url" 3 2>/dev/null)" || aid=""
+        if [[ -n "$aid" ]]; then
+            hrc=0
+            _tn_commit_has_author "$hdr" "$aid" || hrc=$?
+            if [[ "$hrc" -eq 0 ]]; then
+                note=" (this node did not report its mode but authored in the latest commit: still voting)"
+            elif [[ "$hrc" -eq 1 ]]; then
+                self=0
+                note=" (this node did not report its mode and authored nothing in the latest commit: counted among them)"
+            fi
+        fi
     fi
     if (( down + self < f + 1 )); then
         _tn_guard_say log "committee of ${n}: ${down} member(s) down${note}; stopping this node leaves $((down + self)), below the $((f + 1)) that halts consensus." "$fn"
@@ -4115,6 +4144,31 @@ tn_node_mode() {
     mode="$(printf '%s' "$mode" | tr -cd 'A-Za-z0-9_-')"
     mode="${mode:0:40}"
     printf 'malformed node-mode %s\n' "${mode:-none}"
+    return 1
+}
+
+# tn_node_authority_id [url] [max_time] — the node's consensus authority id from
+# tn_info (consensus headers carry it as author, in the same base58 form). url
+# defaults to tn_local_rpc_url; max_time bounds the call in seconds (tn_rpc_call's
+# default 10 when empty). An id that is not 20 to 64 base58 characters is
+# malformed.
+tn_node_authority_id() {
+    local url="${1:-}" max_time="${2:-10}" out rc aid
+    [[ -n "$url" ]] || url="$(tn_local_rpc_url)"
+    rc=0
+    out="$(tn_rpc_call "$url" tn_info '[]' "$max_time")" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        printf '%s\n' "$out"
+        return 1
+    fi
+    aid="$(tn_json_field "$out" authority_id || true)"
+    if [[ "$aid" =~ ^[1-9A-HJ-NP-Za-km-z]{20,64}$ ]]; then
+        printf '%s\n' "$aid"
+        return 0
+    fi
+    aid="$(printf '%s' "$aid" | tr -cd 'A-Za-z0-9_-')"
+    aid="${aid:0:40}"
+    printf 'malformed authority-id %s\n' "${aid:-none}"
     return 1
 }
 
