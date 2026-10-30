@@ -16,7 +16,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # an older one, which lacks helpers this script calls): COMMON_VERSION 2.0.0 or
 # newer, then the helpers this script calls. Refuse up front with one message.
 if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
-    || ! tn_require_fns tn_update_lock_path tn_testnet_addons_present tn_start_script_path \
+    || ! tn_require_fns tn_acquire_update_lock tn_testnet_addons_present tn_start_script_path \
         tn_as_service_user >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this remove-node.sh: run update-scripts.sh and try again."
     case " $* " in
@@ -31,56 +31,29 @@ readonly SCRIPT_VERSION="2.0.0"
 
 # Root prepended to the systemd unit directory and to the host files removed
 # beside the node (unit backups and drop-ins, start scripts, node.env, backups,
-# logrotate and journald files, the lock directory). It is the same root the
+# logrotate and journald files). It is the same root the
 # resolvers in lib/fallback.sh probe: empty in production, a fixture tree in
 # tools/tests/remove_test.sh. The older shared paths (/opt/telcoin,
 # /opt/telcoin-source, /var/log/telcoin) are prefixed only in remove_leftovers;
 # remove_shared_components and the scan use them as they are.
 TN_RM_ROOT="${TN_ROOT_PREFIX:-}"
 
-# True once remove_node_host_files has left /run/telcoin for rm_exit: the update
-# lock this run holds lives there, so the directory goes after its release.
-RM_RUN_DIR_PENDING=false
-
 # rm_take_lock -- take the update lock (tn_acquire_update_lock) right before the
 # first change, once per run, so no update or other node operation runs while
-# this removal changes the host. rm_exit, the EXIT trap set here, releases it.
-# Under a fixture root (TN_RM_ROOT) the lock file lives in that root too, as
-# every other path here does. rc 0 held; 1 another run holds it (said on stderr).
+# this removal changes the host. The EXIT trap the library sets when it takes
+# the lock releases it. Under a fixture root (TN_RM_ROOT) the lock file lives in
+# that root too, as every other path here does. rc 0 held; 1 another run holds
+# it (said on stderr).
 rm_take_lock() {
     [[ -z "${TN_UPDATE_LOCK_KIND:-}" ]] || return 0
     if [[ -n "$TN_RM_ROOT" && -z "${TN_UPDATE_LOCK_FILE:-}" ]]; then
         TN_UPDATE_LOCK_FILE="${TN_RM_ROOT}/run/telcoin/update.lock"
     fi
-    TN_EXIT_TRAP_OWNED=1
     if ! tn_acquire_update_lock >/dev/null 2>&1; then
         print_error "Another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished. Nothing was removed."
         return 1
     fi
-    trap rm_exit EXIT
     return 0
-}
-
-# rm_exit -- the EXIT trap rm_take_lock sets: release the update lock, then
-# remove /run/telcoin when remove_node_host_files left it for last.
-rm_exit() {
-    tn_release_update_lock
-    if [[ "$RM_RUN_DIR_PENDING" == "true" ]]; then
-        RM_RUN_DIR_PENDING=false
-        _rm_dir "${TN_RM_ROOT}/run/telcoin"
-    fi
-}
-
-# _rm_lock_lives_in DIR -- rc 0 when this run holds the update lock and its lock
-# file (or mkdir lock directory) is directly inside DIR.
-_rm_lock_lives_in() {
-    local held
-    case "${TN_UPDATE_LOCK_KIND:-}" in
-        flock) held="$(tn_update_lock_path)" ;;
-        mkdir) held="${TN_UPDATE_LOCK_DIR:-}" ;;
-        *) return 1 ;;
-    esac
-    [[ -n "$held" && "${held%/*}" == "$1" ]]
 }
 
 # =============================================================================
@@ -676,11 +649,10 @@ _rm_build_account() {
 # the journald drop-in 50-telcoin.conf, the needrestart rule 50-telcoin.conf,
 # the apt rule 52telcoin-no-reboot, the release staging directory
 # /var/lib/telcoin-staging, the source-build account tn-build (its processes
-# stopped first; a failed userdel is a warning) with its home /var/lib/tn-build,
-# and the lock directory /run/telcoin. When the update lock
-# this run holds lives in /run/telcoin, the directory is removed by rm_exit
-# after the lock is released. The caller runs it only when no other node
-# install remains. Every path is under TN_RM_ROOT (see the top of this file).
+# stopped first; a failed userdel is a warning) with its home /var/lib/tn-build.
+# /run/telcoin stays: it holds the update lock every node operation takes, and
+# /run is emptied at reboot. The caller runs it only when no other node install
+# remains. Every path is under TN_RM_ROOT (see the top of this file).
 remove_node_host_files() {
     local r="$TN_RM_ROOT" lx m f
     local -a files=()
@@ -714,13 +686,7 @@ remove_node_host_files() {
         print_ok "Removed /var/backups/telcoin"
     fi
     if [[ -L "${r}/run/telcoin" || -d "${r}/run/telcoin" ]]; then
-        if [[ ! -L "${r}/run/telcoin" ]] && _rm_lock_lives_in "${r}/run/telcoin"; then
-            RM_RUN_DIR_PENDING=true
-            print_info "/run/telcoin holds the update lock of this run: it is removed when the run ends."
-        else
-            _rm_dir "${r}/run/telcoin"
-            print_ok "Removed /run/telcoin"
-        fi
+        print_info "/run/telcoin stays: it holds the update lock, and /run is emptied at reboot."
     fi
     # Release staging (downloads and build logs) and the source-build account with
     # its home (toolchain, cargo cache, build output). lib/release-keys stays: it is
@@ -1715,7 +1681,7 @@ json_remove() {
             json_event step "$RM_LOG_GROUP_MSG"
         fi
         if [[ -z "$(other_node_unit_files "$svc")" ]]; then
-            json_event step "Removing start scripts, node.env, backups, logrotate and journald files and the lock directory"
+            json_event step "Removing start scripts, node.env, backups, logrotate and journald files"
             remove_node_host_files
         fi
 

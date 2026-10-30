@@ -789,7 +789,8 @@ Do not delete the keys of a staked validator unless you hold a tested backup.
 
 Secrets are overwritten with `shred` before they are deleted: the passphrase credential and file, the keys when you delete them, and the backups in `/var/backups/telcoin`, which can hold unit and passphrase copies.
 Overwriting is best effort on SSDs, copy-on-write and cloud disks, and the script says so.
-When no other node install remains, it also removes the host files every install shares: the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin/node.env` (and `/etc/telcoin` once it is empty), `/var/backups/telcoin`, the logrotate file, the journald, needrestart and apt drop-ins, `/var/lib/telcoin-staging`, the `tn-build` account with `/var/lib/tn-build` (its processes are stopped first, and a failed `userdel` is reported), and `/run/telcoin`.
+When no other node install remains, it also removes the host files every install shares: the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin/node.env` (and `/etc/telcoin` once it is empty), `/var/backups/telcoin`, the logrotate file, the journald, needrestart and apt drop-ins, `/var/lib/telcoin-staging`, the `tn-build` account with `/var/lib/tn-build` (its processes are stopped first, and a failed `userdel` is reported).
+`/run/telcoin` stays until reboot: it holds the update lock.
 If you keep the service user, it asks `Also remove the log-reader group 'telcoin-log'?` before it removes that group.
 
 A removal that stopped part way can be finished: run `remove-node.sh` again, and it removes what is left while `/etc/telcoin`, the backups, the data directory or the start scripts remain.

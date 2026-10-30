@@ -947,7 +947,7 @@ The script automatically detects what is installed (including legacy per-role la
 - Chain database
 - Node keys and passphrase (requires typing `DELETE` to confirm -- cannot be undone)
 - Binary and source code, the release staging directory `/var/lib/telcoin-staging`, and the `tn-build` account with `/var/lib/tn-build` (its processes are stopped first, and a failed `userdel` is reported)
-- The host files beside the node: the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin/node.env`, the backups in `/var/backups/telcoin`, the logrotate and journald files, and `/run/telcoin`
+- The host files beside the node: the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin/node.env`, the backups in `/var/backups/telcoin`, and the logrotate and journald files (`/run/telcoin` stays until reboot: it holds the update lock)
 - Log directory
 - Service user and group, and the `telcoin-log` group (asked separately when you keep the service user, which may still need it)
 - On a testnet host, the add-ons' leftovers (the VPN self-heal units and helper, the maintainer key files, the overlay SSH rules and the `telcoin-alloy` account)
@@ -1915,9 +1915,9 @@ Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
   when the chain data goes (as the service account, before that account is removed). Shred is
   best effort on SSDs and copy-on-write disks, and the run says so.
 - Removes the files 2.0.0 adds: the libexec start scripts, `node.env`, `/var/backups/telcoin`,
-  logrotate and drop-in files, `/var/lib/telcoin-staging`, the `tn-build` account and
-  `/var/lib/tn-build`, and `/run/telcoin`. Asks before removing the `telcoin-log` group when
-  the service account is kept.
+  logrotate and drop-in files, `/var/lib/telcoin-staging`, and the `tn-build` account and
+  `/var/lib/tn-build`; `/run/telcoin` stays until reboot: it holds the update lock. Asks
+  before removing the `telcoin-log` group when the service account is kept.
 - Also removes the VPN self-heal units and key files, the overlay SSH rules and the
   `telcoin-alloy` account with the testnet add-ons, and the UI venv, token and state with the
   UI; the UI audit log in `/var/log/telcoin-ui` stays.

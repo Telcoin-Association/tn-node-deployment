@@ -414,8 +414,9 @@ skipped.
   account is removed; shred is best effort on SSDs and copy-on-write disks, and the run says
   so.
 - Removes the files this release adds: the libexec start scripts, `node.env`, the backups
-  directory, the logrotate file and the drop-ins setup wrote, `/var/lib/telcoin-staging`, the
-  `tn-build` account with `/var/lib/tn-build`, and `/run/telcoin`.
+  directory, the logrotate file and the drop-ins setup wrote, `/var/lib/telcoin-staging`, and the
+  `tn-build` account with `/var/lib/tn-build`. `/run/telcoin` stays until reboot: it holds the
+  update lock.
 - Asks before it removes the `telcoin-log` group when the service account is kept.
 - Stops the `tn-build` account's processes before it removes the account, and reports a
   failed `userdel`.
