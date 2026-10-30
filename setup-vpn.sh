@@ -829,10 +829,12 @@ vpn_sudoers_text() {
         "${TNADMIN_USER} ALL=(root) NOPASSWD: TN_RECOVERY"
 }
 
-# write_tnadmin_sudoers true|false -- replace /etc/sudoers.d/90-tnadmin (the
-# vendored bootstrap writes NOPASSWD:ALL there) with vpn_sudoers_text, checked
-# with visudo -cf first. When the text cannot be built, checked or installed the
-# file is removed, so tnadmin is left with no sudo rather than full root.
+# write_tnadmin_sudoers true|false -- write /etc/sudoers.d/90-tnadmin from
+# vpn_sudoers_text, checked with visudo -cf first. The enable writes it BEFORE the
+# vendored bootstrap runs (which is told not to write it); --sync-keys rewrites it
+# and --selfheal rewrites it when present. When the text cannot be built, checked
+# or installed the file is removed, so tnadmin is left with no sudo rather than
+# full root.
 write_tnadmin_sudoers() {
     local root="${1:-false}" f="${R}${TNADMIN_SUDOERS}" text tmpd="" rc=0
     [[ -d "${f%/*}" ]] || return 0
@@ -862,6 +864,16 @@ write_tnadmin_sudoers() {
         fi
     fi
     return 0
+}
+
+# vpn_sudoers_current true|false -- rc 0 when /etc/sudoers.d/90-tnadmin is a
+# regular file (not a symlink) holding exactly vpn_sudoers_text ROOT; rc 1
+# otherwise, including when that text cannot be built.
+vpn_sudoers_current() {
+    local f="${R}${TNADMIN_SUDOERS}" text
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    text="$(vpn_sudoers_text "${1:-false}")" || return 1
+    printf '%s\n' "$text" | cmp -s - "$f"
 }
 
 # vpn_tnadmin_home_safe -- the vendored bootstrap writes and chowns
@@ -974,20 +986,25 @@ capture_sshd_posture() {
     PRE_ROOT="$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2}' || true)"
 }
 
-# run_bootstrap ROOT -- run the vendored WireGuard bootstrap with the maintainer keys
-# that pass KEYS and the local deny list, then replace the NOPASSWD:ALL sudoers file
-# it writes (write_tnadmin_sudoers ROOT), also when it failed half-way.
+# run_bootstrap ROOT -- write the consent-matching sudo rule (write_tnadmin_sudoers
+# ROOT) first, then run the vendored WireGuard bootstrap with WG_NODE_SUDOERS=0 and
+# the maintainer keys that pass KEYS and the local deny list. The rule is written
+# again afterwards only when an older vendored copy (without that guard) changed it.
 run_bootstrap() {
     local root="${1:-false}" logf
     # Hub coordinates (public) from the vendored env file.
     # shellcheck source=/dev/null
     source "${WGVPN_DIR}/hub-coordinates.env"
+    # sudo matches the user name at login, so the rule can precede the account the
+    # bootstrap creates.
+    write_tnadmin_sudoers "$root" || true
     print_step "Running WireGuard node bootstrap (additive; dormant firewall)"
     logf="$(mktemp)"
     # All bootstrap inputs supplied via env so it never falls back to GCP metadata.
     # WG_NODE_ENFORCE=0  -> firewall installed but dormant (ufw stays active)
     # WG_NODE_PUBLIC_SSH=1 -> don't drop public :22 (operator keeps their access)
     # WG_NODE_SSHD_HARDEN=0 -> DON'T touch global sshd (we add a scoped drop-in)
+    # WG_NODE_SUDOERS=0 -> the sudo rule above stays; the bootstrap does not write NOPASSWD:ALL
     WG_HUB_ENDPOINT="$WG_HUB_ENDPOINT" \
     WG_HUB_PUBKEY="$WG_HUB_PUBKEY" \
     WG_OVERLAY_IP="$OVERLAY_IP" \
@@ -999,9 +1016,12 @@ run_bootstrap() {
     WG_NODE_ENFORCE=0 \
     WG_NODE_PUBLIC_SSH=1 \
     WG_NODE_SSHD_HARDEN=0 \
+    WG_NODE_SUDOERS=0 \
     bash "${WGVPN_DIR}/wg-node-bootstrap.sh" 2>&1 | tee "$logf" || true
-    # The bootstrap grants tnadmin NOPASSWD:ALL; narrow it before anything else.
-    if [[ -e "${R}${TNADMIN_SUDOERS}" ]]; then
+    # A vendored copy without the WG_NODE_SUDOERS guard writes NOPASSWD:ALL; put the
+    # rule back before anything else, and only when it differs.
+    if [[ -e "${R}${TNADMIN_SUDOERS}" ]] && ! vpn_sudoers_current "$root"; then
+        print_warn "The WireGuard bootstrap changed ${TNADMIN_SUDOERS}; writing the tnadmin sudo rules again."
         write_tnadmin_sudoers "$root" || true
     fi
     # The bootstrap's success signal is the WG_NODE_PUBKEY line it prints at the end;
