@@ -219,8 +219,10 @@ check "vendored header: line 16 is the upstream body" "#" "$(sed -n 16p "$VB")"
 check "vendored header: stripping lines 2-15 leaves the upstream start" \
     "$(printf '#!/bin/bash\n#\n# wg-node-bootstrap.sh')" \
     "$(sed '2,15d' "$VB" | head -n 3 | cut -c1-22)"
+# Portable SHA-256 of stdin (hash only): GNU sha256sum on Linux, shasum -a 256 on macOS.
+body_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-64; }
 check "vendored header: the recorded sha is the body's" \
-    "$(sed '2,15d' "$VB" | sha256sum | cut -c1-64)" \
+    "$(sed '2,15d' "$VB" | body_sha)" \
     "$(sed -n 's/^#   upstream sha256: \([0-9a-f]\{64\}\)$/\1/p' "$VB")"
 check "setup-vpn.sh passes WG_NODE_SUDOERS=0" "1" \
     "$(grep -cF 'WG_NODE_SUDOERS=0 \' "${TN_TEST_REPO}/setup-vpn.sh")"
