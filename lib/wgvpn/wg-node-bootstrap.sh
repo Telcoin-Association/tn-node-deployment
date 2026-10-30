@@ -1,9 +1,9 @@
 #!/bin/bash
 #
 # =============================================================================
-# VENDORED from adiri-genesis: common/wgvpn/node/wg-node-bootstrap.sh
+# VENDORED from deploy-networks-common: wgvpn/node/wg-node-bootstrap.sh (adiri-genesis common/)
 #   upstream sha256: f6e22378569c5f79bb24127dacaa14794f392aa1cececa037641f1e5f07f80d5
-#   vendored:        2026-10-30 (upstream branch wgvpn-sudoers-guard, pending merge)
+#   vendored:        2026-10-30 (upstream main 4a2925c, PR #6 merged 2026-10-30)
 #
 # Verbatim copy of the core team's node bootstrap, carrying TWO upstream-pushed
 # changes: the WG_NODE_SSHD_HARDEN guard and the WG_NODE_SUDOERS guard (both default

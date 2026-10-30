@@ -51,9 +51,9 @@ and passes on the tip.
 
 ### Left to the user
 
-- Push `wgvpn-sudoers-guard` in `deploy-networks-common` (commit 9b2c8f2) and open its PR; the
-  superproject branch of the same name (df30349) only moves the `common` pin. Drop "pending merge"
-  from the vendored header when it merges, and keep the header sha equal to the merged file's.
+- Done 2026-10-30: `wgvpn-sudoers-guard` merged in `deploy-networks-common` (PR #6, `main` 4a2925c);
+  the vendored header records it and its sha equals the merged file. The superproject branch of
+  the same name (df30349) only moves the `common` pin; fold it into the next pin bump.
 - Re-request the review if the token could not; sign `MANIFEST` and commit `lib/allowed_signers`
   plus `MANIFEST*`/`RELEASE` on the final tip before merging #11.
 - The follow-ups added to `followup.md` (UI display of the one-way discard note, the quorum-check
