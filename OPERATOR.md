@@ -875,7 +875,8 @@ On a host without an installed copy, use the `lib/allowed_signers` of the tag it
 Stopping a committee node while too many other members are already down halts consensus.
 Before a script stops or restarts the node, it counts the committee members that are down: n is the committee size, f is (n - 1) / 3 rounded down, and consensus halts once f + 1 members are down.
 A member counts as down when it authored no header in the most recent consensus commit, so a slow member counts as down too.
-The node itself adds one when it stops, unless its own mode cannot be read: a node that does not answer authored nothing, so it is already among the down.
+The node itself adds one when it stops, also when its own mode cannot be read, unless `tn_info` on the node itself returns an authority id that authored nothing in that commit (then it is already among the down).
+`tn_info` is asked only of the node, never of the public RPC.
 The check reads the committee and the most recent commit from the node, else from the network's public RPC.
 
 - A node that is readable and not voting (`tn_nodeMode` other than `CvvActive`) passes: stopping it does not change the quorum.

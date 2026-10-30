@@ -1615,8 +1615,10 @@ The library every script sources. Scripts 2.0.0 refuse to run on an older copy a
   250, on testnet and devnet only, it stays in the root-only `/etc/telcoin/bls-passphrase`. Mainnet needs
   systemd 255 (Ubuntu 24.04). The old TPM-unseal method is gone.
 - The committee check (`tn_committee_down_guard`) refuses a stop when the members already down
-  plus this node would halt consensus. When it cannot count them it refuses on a mainnet node
-  that may be staked, and warns and goes ahead on testnet.
+  plus this node would halt consensus. A node whose mode cannot be read is counted as voting
+  unless `tn_info` on the node proves it authored nothing in the latest commit. When it cannot
+  count them it refuses on a mainnet node that may be staked, and warns and goes ahead on
+  testnet.
 - Releases are verified with `gpgv` against `lib/release-keys/*.asc`: a good signature by a
   listed key is required; BADSIG by any key, EXPKEYSIG, REVKEYSIG and EXPSIG refuse; a
   further signature by a key that is not shipped (NO_PUBKEY, or ERRSIG for a missing key)

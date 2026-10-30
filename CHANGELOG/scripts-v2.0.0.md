@@ -471,9 +471,10 @@ skipped.
 - New writers render `node.env`, the start script and the unit from `.node-meta`.
 - New committee check (`tn_committee_down_guard`): a stop is refused when the members already
   down plus this one would halt consensus. Down means no header in the latest consensus commit,
-  so a slow member counts as down. When the count cannot be made, a mainnet node not known to
-  be unstaked, or a node of an unknown network, is refused; testnet and devnet warn and go
-  ahead.
+  so a slow member counts as down. A node whose mode cannot be read is counted as voting unless
+  `tn_info` on the node proves it authored nothing in that commit. When the count cannot be
+  made, a mainnet node not known to be unstaked, or a node of an unknown network, is refused;
+  testnet and devnet warn and go ahead.
 - The restart window reads epoch timing from the public RPC, then the local RPC; when neither
   answers it warns and waits the margin plus settle time, capped by `TN_EPOCH_WAIT_MAX`.
 - Release verification (`gpgv` against `lib/release-keys/*.asc`: a good signature by a shipped
