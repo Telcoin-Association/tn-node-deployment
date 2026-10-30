@@ -178,12 +178,14 @@ image tag on Docker installs (for an image run by digest, the `RELEASE_TAG` reco
 `DOCKER_IMAGE_DIGEST`) and from the root-owned `/opt/telcoin/telcoin-network.version` on source
 and release installs, never from the checkout's `git describe`; an unreadable running release
 counts as older. A failed check does not stop the node or restore the old binary or image,
-clears the pending state, keeps the version marker and prints the snapshot-restore steps. In
-`--json` mode it ends with a `done` carrying `"rolled_back":false` and
-`"storage_migration":true`, and `--check` reports the same boolean. The maintainer fleet driver
-(adiri-genesis `adiri-update-all.sh`, maintainer-only) reads both fields and sets
-`TN_UPDATE_VERIFY_TIMEOUT`, so keep those names. Do not re-add an automatic binary or image
-rollback for that case: only a data dir snapshot taken before the update can undo it.
+clears the pending state, keeps the version marker, prints the snapshot-restore steps and
+leaves the launch files as the apply wrote them; a later `--discard` keeps them too
+(`STORAGE_MIGRATION_STARTED` in the pending state). In `--json` mode it ends with a `done`
+carrying `"rolled_back":false` and `"storage_migration":true`, and `--check` reports the same
+boolean. The maintainer fleet driver (adiri-genesis `adiri-update-all.sh`, maintainer-only)
+reads both fields and sets `TN_UPDATE_VERIFY_TIMEOUT`, so keep those names. Do not re-add an
+automatic binary or image rollback for that case: only a data dir snapshot taken before the
+update can undo it.
 
 ## Staking helper
 

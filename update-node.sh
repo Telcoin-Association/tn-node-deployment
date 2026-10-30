@@ -32,8 +32,10 @@
 # disk is under twice the largest consensus-db/epochs/epoch-N), asks you to
 # confirm, and waits up to 600 seconds for the node to answer. If that check
 # fails, APPLY does not roll back: the node keeps running (it may still be
-# migrating) and the script prints how to restore the snapshot. A node whose
-# running release cannot be read counts as older.
+# migrating), the unit, start script and node.env stay as APPLY wrote them, and
+# the script prints how to restore the snapshot. Once the new release has
+# started, --discard keeps those launch files too. A node whose running release
+# cannot be read counts as older.
 #
 # USAGE:
 #   sudo bash update-node.sh
@@ -125,8 +127,9 @@ else
     readonly VERIFY_TIMEOUT_SECONDS=45
 fi
 readonly VERIFY_TIMEOUT_EXPLICIT
-# The first release whose first start migrates the consensus store one way
-# (epoch packs v1 -> v2); older releases cannot open the migrated data dir.
+# The newest release that migrates the consensus store one way on its first
+# start (v0.16.0: epoch packs v1 -> v2); older releases cannot open the
+# migrated data dir. Raise it when a release does.
 readonly STORAGE_MIGRATION_FLOOR="0.16.0"
 # Health window for such an update: the first start migrates before it answers.
 readonly STORAGE_MIGRATION_VERIFY_SECONDS=600
@@ -686,7 +689,7 @@ restore_unit_file() {
 # The launch files of a binary or release install (the unit, the start script
 # and node.env), backed up by launch_backup_all before an apply rewrites them in
 # the current form, and put back by launch_restore_all with the old binary or on
-# --discard.
+# --discard, unless a one-way update has started (see discard_pending).
 LAUNCH_UNIT_FILE=""
 LAUNCH_BK_UNIT=""
 LAUNCH_BK_UNIT_SHA256=""
@@ -913,7 +916,11 @@ observer_strip_needed() {
 # cannot open it afterwards. Swapping the binary or image back is then no
 # rollback, so an update across that line warns first, waits longer for the
 # first start, and never rolls back on its own: only a data dir snapshot taken
-# before the update can undo it.
+# before the update can undo it. Once the new release has started, the unit,
+# the start script and node.env stay as the apply wrote them: a failed check
+# keeps them (storage_migration_verify_failed), and so does a later --discard
+# (storage_migration_mark_started records STORAGE_MIGRATION_STARTED in the
+# pending state; see discard_pending).
 # =============================================================================
 
 # installed_source_ref -- the ref of the source binary that runs now, from the
@@ -2436,6 +2443,9 @@ pick_docker_version() {
 # A one-way apply (see storage_migrating_upgrade) whose check fails is not
 # rolled back and ends with
 #   {"event":"done","ok":false,"phase":"apply","rolled_back":false,"storage_migration":true,"msg":"..."}
+# A --discard after such an apply had started the new release keeps its launch
+# files (see discard_pending), says so in a warn event, and ends with
+#   {"event":"done","ok":true,"phase":"discard","storage_migration":true,"msg":"..."}
 # --check prints one status object instead (see json_check) and nothing else;
 # its "storage_migration" says whether updating to latest_ref is one way.
 # =============================================================================

@@ -210,6 +210,10 @@ Unit, start script and logs:
   header advances, and that a node that was voting before the update votes again within
   `TN_UPDATE_VOTE_TIMEOUT` seconds (default 600; `TN_UPDATE_VOTE_POLL` 10). A failure rolls
   back, except on a one-way update; the `--json` done carries `"voting":false`.
+- Once a one-way update has started the new release, the unit, start script and `node.env`
+  stay as apply wrote them: a failed check leaves them (the message says so), and so does a
+  later `--discard`, which prints how to go back by hand; its `--json` done carries
+  `"storage_migration":true`.
 - Apply re-renders the start script, `node.env` and the unit from `.node-meta` while the node
   is stopped, so hand edits outside the node line are not kept. On an observability host it
   moves `--log.file.directory` to `/var/log/telcoin/node`.
