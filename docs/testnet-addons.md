@@ -208,6 +208,12 @@ On binary and source installs Alloy is a native binary under `telcoin-alloy.serv
   `/etc/credstore.encrypted` and the passphrase file inaccessible to it.
 - Its configuration, `/etc/telcoin/alloy/config.alloy`, is root:telcoin-alloy 0640 in a
   root:telcoin-alloy 0750 directory. The token file beside it is root 0600.
+- A partial disable (logs off while metrics stay on, or the reverse) renders
+  `config.alloy` exactly as the enable does (same owner, group and node log path),
+  restarts Alloy, then watches the unit for 5 seconds; the enable runs the same check.
+  When the restart fails or Alloy does not stay running, the disable says so (with
+  `--json` the run ends with `ok:false`). The choice is already recorded in `.node-meta`,
+  so once Alloy is fixed run the disable again (or restart the unit).
 - Alloy 1.5.1 comes from Grafana's apt repository, pinned to that version, and only after
   the repository key's fingerprint matches `B53AE77BADB630A683046005963FA27710458545`.
   When apt cannot deliver it, the script downloads the release zip from GitHub and
@@ -215,7 +221,9 @@ On binary and source installs Alloy is a native binary under `telcoin-alloy.serv
   `SHA256SUMS`. No matching line, no install.
 
 Docker installs run Alloy as the sidecar container `telcoin-alloy`
-(`grafana/alloy:v1.5.1`) under the same unit name.
+(`grafana/alloy:v1.5.1`) under the same unit name. There a partial disable writes
+`config.alloy` root:root with the container's log path, as the enable does, and checks
+the unit for 5 seconds after the restart in the same way.
 
 ### Health monitoring
 

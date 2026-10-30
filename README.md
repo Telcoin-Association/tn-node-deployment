@@ -1967,6 +1967,8 @@ a transaction and never reads, asks for or prints a private key. Full release no
   change.
 - Alloy runs as its own `telcoin-alloy` account, the node's JSON logs move to
   `/var/log/telcoin/node/`, and the health check needs ufw active (observability v2.0.0).
+- Turning off logs or metrics alone keeps `config.alloy` readable by Alloy and pointed at
+  the node logs, and an Alloy that fails to restart or stay up is reported, not ignored.
 
 Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 

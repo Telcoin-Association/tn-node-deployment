@@ -404,6 +404,11 @@ skipped.
   setgid group `telcoin-log`; the unit joins that group with `UMask=0027`), and enabling, the
   ownership move and update-node move an older `--log.file.directory` there.
 - The health check is refused while ufw is missing or inactive.
+- Turning off one pipeline while the other stays on renders `config.alloy` the way the
+  enable does (owner, group and node log path). A restart that fails, or an Alloy that does
+  not stay active for 5 seconds after it (the enable checks the same), is reported instead
+  of being ignored: the menu says so, `--json` ends with `done` `ok:false`, and the library
+  call returns 1.
 - New `--token-stdin` reads the ingest token from one line of stdin; `--token` still works
   and warns that the token shows on the command line.
 - The menu session holds the update lock, and writes run the ownership migration first.
