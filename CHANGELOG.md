@@ -10,7 +10,9 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 ### Devnet Docker images, October 2026 -- lib/common v2.0.1, setup-node v2.0.1, update-node v2.0.1, edit-config v2.0.1, telcoin-ui v2.0.1
 A devnet node can now run as a Docker install. lib/common, setup-node, update-node and
 edit-config are 2.0.1. The UI server is 2.0.1 too (`UI_VERSION`), but only to keep its copies
-of the library rules in step: it still refuses devnet. Testnet and mainnet behave as before.
+of the library rules in step: it still refuses devnet. Testnet and mainnet behave as before,
+except that `tn_docker_repo_ok` now refuses a repository string containing whitespace and
+refusal messages mention the devnet grammar.
 
 #### Image repositories
 `TN_DEVNET_IMAGE_REPO` is the public legacy Artifact Registry repository,
@@ -28,10 +30,16 @@ image named by tag is still refused unless `TN_DOCKER_REQUIRE_DIGEST=0`.
 `setup-node.sh --release-tag` is refused on devnet, because a devnet tag has no signed release.
 
 #### Network checks
-`update-node.sh --ref <repository>@sha256:...`, `update-node.sh --check` and an image change in
-edit-config.sh now take the network from `_tn_guard_network` instead of `detect_network`.
-`_tn_guard_network` also reads `NETWORK=devnet` from `.node-meta`, so these work on a devnet
-host. `tn_docker_image_allowed`, and so `validate_docker_image`, falls back to
+`update-node.sh --json --ref <repository>@sha256:...`, the chain id check after an apply and an
+image change in edit-config.sh now take the network from `_tn_guard_network` instead of
+`detect_network`, and so does the image comparison in `update-node.sh --check`.
+`_tn_guard_network` also reads `NETWORK=devnet` from `.node-meta`, so a devnet host can change
+its image by digest: `update-node.sh --json --prepare --ref <repository>@sha256:<digest>`, then
+`update-node.sh --json --apply --yes`, or `edit-config.sh --set docker_image=`. The
+interactive update picker offers no digest. `--check` does not find a newer image on devnet:
+`latest_docker_ref` goes through `detect_network` and devnet has no release feed, so the
+comparison is never reached there. `tn_docker_image_allowed`, and so `validate_docker_image`,
+falls back to
 `_tn_guard_network` when neither its argument nor the `NETWORK` global names a network. Before,
 it fell back to `tn_detect_network`, so the checks that pass no network (edit-config's
 start-script swap, update-node's pending `NEW_IMAGE`) refused every devnet image.

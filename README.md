@@ -1571,7 +1571,9 @@ Devnet tags end in `-devnet` (`v0.2.0-devnet`), but devnet has no signed release
 tag resolves to an image and no newest-release pick runs there. When no network is given,
 `tn_docker_image_allowed` takes the host's from `_tn_guard_network`, which reads
 `NETWORK=devnet` in `.node-meta`; `tn_detect_network` still returns 1 on devnet. Testnet and
-mainnet behave as before. The full entry is in [CHANGELOG.md](CHANGELOG.md).
+mainnet behave as before, except that `tn_docker_repo_ok` now refuses a repository string
+containing whitespace and refusal messages mention the devnet grammar. The full entry is in
+[CHANGELOG.md](CHANGELOG.md).
 
 ### setup-node v2.0.1 — devnet Docker installs
 On devnet, `--install-method docker` needs `--docker-image <repository>@sha256:<digest>`.
@@ -1580,10 +1582,16 @@ host changes, since devnet has no signed release to install. `--install-method e
 works.
 
 ### update-node v2.0.1 — devnet image changes
-`--ref <repository>@sha256:<digest>` and `--check` find a devnet host through `NETWORK=devnet`
-in `.node-meta`, so a devnet Docker node can change its image by digest. A devnet tag is
-refused, and the registry is never asked for devnet tags. Source and release updates are still
-refused on devnet.
+`--json --ref <repository>@sha256:<digest>` finds a devnet host through `NETWORK=devnet` in
+`.node-meta`, so a devnet Docker node can change its image by digest:
+`update-node.sh --json --prepare --ref <repository>@sha256:<digest>`, then
+`update-node.sh --json --apply --yes`, or
+`edit-config.sh --set docker_image=<repository>@sha256:<digest>`.
+The interactive update picker offers no digest, and `--check` does not find a newer image on
+devnet: `latest_docker_ref` goes through `detect_network`, and devnet has no release feed. After
+the restart an apply checks the chain id against devnet's (32285). A devnet tag is refused, and
+the registry is never asked for devnet tags. Source and release updates are still refused on
+devnet.
 
 ### edit-config v2.0.1 — devnet image changes
 `--set docker_image=<repository>@sha256:<digest>` and the Docker image menu work on a devnet
