@@ -6718,11 +6718,16 @@ _tn_release_file_ok() {
 # signature first (gpgv against lib/release-keys), then the names it lists, the
 # chain-config hashes against this script release's pins, IMAGE_DIGEST and, in
 # MODE full, this host's tarball, each against its line. rc 1 refused, 2
-# network or I/O, 3 TAG is not a NETWORK release tag. The staging directory is
-# removed on every failure.
+# network or I/O, 3 TAG is not a NETWORK release tag or NETWORK is devnet,
+# which has no signed releases (nothing is downloaded). The staging directory
+# is removed on every failure.
 _tn_release_fetch() {
     local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
     local parent stg why f want got triple tarball cc img sigrc unknown
+    if [[ "$net" == "devnet" ]]; then
+        _tn_c4_say warn "Devnet has no signed releases, so ${tag:-(empty)} names no release to fetch: devnet images run by digest." "$fn"
+        return 3
+    fi
     if ! tn_release_tag_ok "$net" "$tag"; then
         _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
         return 3
@@ -7460,10 +7465,15 @@ _tn_tag_sig_check() {
 # with local changes or untracked files refuses unless ALLOW_DIRTY is true
 # (testnet only), which discards them (reset --hard, clean -ffd). rc 0 checked
 # out, 1 refused (nothing moved), 2 failed, 3 TAG is not a NETWORK release tag
-# (nothing ran; a release candidate on mainnet is one).
+# or NETWORK is devnet, which has no signed releases to build (nothing ran; a
+# release candidate on mainnet is not a release tag).
 tn_source_checkout_tag() {
     local dir="${1:-}" net="${2:-}" tag="${3:-}" dirty_ok="${4:-false}" fn="${5:-}"
     local remote="" have="" st why rc=0 n
+    if [[ "$net" == "devnet" ]]; then
+        _tn_c4_say warn "Devnet has no signed releases, so ${tag:-(empty)} is not built from source: devnet images run by digest." "$fn"
+        return 3
+    fi
     if ! tn_release_tag_ok "$net" "$tag"; then
         _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar)); branches and commit ids are not built." "$fn"
         return 3

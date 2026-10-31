@@ -1155,7 +1155,8 @@ _uc_vote_setting() {
 
 # verify_consensus_participation -- the post-restart check every apply runs after
 # verify_health_after_restart: the node answers eth_chainId with its network's chain
-# id (2017 testnet, 487 mainnet); its tn_latestConsensusHeader number advances
+# id (2017 testnet, 487 mainnet, 32285 devnet; the network as image_network takes
+# it, _tn_guard_network); its tn_latestConsensusHeader number advances
 # between reads TN_UPDATE_VOTE_POLL seconds apart (default 10); and a node that was
 # CvvActive before the stop (UPDATE_MODE_BEFORE, recorded by update_epoch_wait)
 # reads CvvActive again from tn_nodeMode. Both wait at most TN_UPDATE_VOTE_TIMEOUT
@@ -1174,10 +1175,11 @@ verify_consensus_participation() {
     poll="$(_uc_vote_setting TN_UPDATE_VOTE_POLL 10)"
     limit="$(_uc_vote_setting TN_UPDATE_VOTE_TIMEOUT 600)"
     update_wait_say step "Checking that ${SERVICE_NAME} follows consensus on its chain..."
-    net="$(detect_network 2>/dev/null)" || net=""
+    net="$(_tn_guard_network)" || net=""
     case "$net" in
         testnet) want="$TESTNET_CHAIN_ID" ;;
         mainnet) want="$MAINNET_CHAIN_ID" ;;
+        devnet) want="$DEVNET_CHAIN_ID" ;;
         *) want="" ;;
     esac
     out="$(tn_rpc_call "$url" eth_chainId '[]' 5 2>/dev/null)" || out=""

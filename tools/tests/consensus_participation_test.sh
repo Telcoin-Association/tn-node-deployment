@@ -143,6 +143,20 @@ rpc_seq eth_chainId '"0x7e1"'
 rpc_seq tn_latestConsensusHeader 'null'
 cpv "no header number: refused" Observer 1 false
 
+# A devnet node (NETWORK=devnet in .node-meta, which detect_network does not take) is
+# checked against the devnet chain id, as image_network names its network.
+printf 'NETWORK=devnet\nRPC_PORT=8545\n' > "$T/root/etc/telcoin/.node-meta"
+rpc_seq eth_chainId '"0x7e1d"'
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 101)"
+rpc_seq tn_nodeMode '"Observer"'
+cpv "devnet node on chain 32285: passes" Observer 0 false
+check "devnet: the chain id is checked" no "$(grep -q 'is not checked' "$T/out" && echo yes || echo no)"
+rpc_seq eth_chainId '"0x7e1"'
+rpc_seq tn_latestConsensusHeader "$(hdr 100)" "$(hdr 101)"
+cpv "devnet node on chain 2017: refused" Observer 1 false
+check "devnet wrong chain: says so" yes "$(grep -q 'runs chain id 2017, not 32285 (devnet)' "$T/out" && echo yes || echo no)"
+printf 'NETWORK=testnet\nRPC_PORT=8545\n' > "$T/root/etc/telcoin/.node-meta"
+
 # update_epoch_wait records the mode before the stop, also with --no-epoch-wait;
 # a refused quorum guard stops before it.
 tn_committee_down_guard() { return "$GUARD_RC"; }

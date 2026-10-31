@@ -93,7 +93,8 @@ co_refused "testnet tag on mainnet" mainnet v0.16.0-adiri
 co_refused "a testnet tag on devnet" devnet v0.16.0-adiri
 co_refused "a devnet tag on testnet" testnet v0.2.0-devnet
 co_refused "a devnet tag on mainnet" mainnet v0.2.0-devnet
-co_refused "--allow-dirty on devnet" devnet v0.2.0-devnet true 1
+co_refused "a devnet tag on devnet (devnet has no signed releases)" devnet x-devnet
+co_refused "--allow-dirty on devnet (refused as devnet first)" devnet v0.2.0-devnet true
 co_refused "--allow-dirty on mainnet" mainnet v1.0.0 true 1
 co_refused "a release candidate on mainnet" mainnet v1.0.0-rc1
 co_refused "a testnet release candidate on mainnet" mainnet v1.0.0-adiri-rc1
