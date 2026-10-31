@@ -748,7 +748,7 @@ Downloads and builds stage under `/var/lib/telcoin-staging` in directories named
 When Docker is selected the script will:
 - Install Docker Engine when it is missing, from Docker's own apt repository, after checking that the repository's signing key has the fingerprint the script pins (Ubuntu and Debian only; elsewhere install Docker first). Setup no longer runs the `get.docker.com` script
 - Turn on `live-restore` in `/etc/docker/daemon.json`, merged into an existing file with python3 or jq, so a restart of the Docker engine leaves the node running. An empty file counts as `{}`; a file that is not exactly one JSON object stops setup with the manual step. Setup reads the file back and says live-restore is on only when it is
-- Ask for the image: a release tag, which it resolves to the digest the signed release publishes, or `<repository>@sha256:<digest>`. Enter takes the newest final release of the network on GitHub, by the digest its signed `IMAGE_DIGEST` names; never a release candidate. Images come from `ghcr.io/telcoin-association/telcoin-network`, where the release pipeline publishes them, on testnet and mainnet; testnet also takes the legacy Artifact Registry repository `us-docker.pkg.dev/telcoin-network/tn-public/adiri`, which holds `v0.16.0-adiri` and older (`TN_TESTNET_IMAGE_REPOS`). Other repositories are refused. A mainnet Docker install is refused before setup changes anything on the host until a mainnet release can be verified (the mainnet chain-config pins are not set yet), and devnet has no image repository. `--docker-image` takes a digest reference only; `--release-tag` names the release instead, and an interactive run refuses the two together
+- Ask for the image: a release tag, which it resolves to the digest the signed release publishes, or `<repository>@sha256:<digest>`. Enter takes the newest final release of the network on GitHub, by the digest its signed `IMAGE_DIGEST` names; never a release candidate. Images come from `ghcr.io/telcoin-association/telcoin-network`, where the release pipeline publishes them, on testnet and mainnet; testnet also takes the legacy Artifact Registry repository `us-docker.pkg.dev/telcoin-network/tn-public/adiri`, which holds `v0.16.0-adiri` and older (`TN_TESTNET_IMAGE_REPOS`). Other repositories are refused. A mainnet Docker install is refused before setup changes anything on the host until a mainnet release can be verified (the mainnet chain-config pins are not set yet). Devnet takes `<repository>@sha256:<digest>` only, from the legacy repository or ghcr.io (`TN_DEVNET_IMAGE_REPOS`), and refuses `--release-tag`: devnet tags end in `-devnet` and have no signed release. The legacy repository also holds testnet images, so on devnet the digest you pin is the check. `--docker-image` takes a digest reference only; `--release-tag` names the release instead, and an interactive run refuses the two together
 - Pull the image by its digest, which Docker checks the downloaded content against, and check the digest of the pulled image again
 - Generate keys using the Docker image
 - Create a systemd service whose start script runs `docker run` as the service user's uid:gid (`--user`), with every capability dropped, `no-new-privileges`, a read-only root filesystem and `--pull=never`
@@ -1390,7 +1390,7 @@ These mainnet values are still open in this script release, and mainnet installs
 | The mainnet `genesis.yaml`, `committee.yaml` and `parameters.yaml` hashes | Mainnet chain configs cannot be checked and no mainnet release can be verified, so a mainnet install (any method) is refused: a Docker install or image change before anything on the host changes, the other methods before the chain configs are copied |
 | The mainnet public RPC set | Fixed at launch. Interactive setup does not offer mainnet yet |
 
-The testnet values are pinned: chain configs from `chain-configs/testnet` at `v0.16.0-adiri`. The image repository is set for both networks: `ghcr.io/telcoin-association/telcoin-network`, where the release pipeline publishes; testnet also takes the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (see [Docker Install Notes](#docker-install-notes)). Devnet has no image repository.
+The testnet values are pinned: chain configs from `chain-configs/testnet` at `v0.16.0-adiri`. The image repository is set for both networks: `ghcr.io/telcoin-association/telcoin-network`, where the release pipeline publishes; testnet also takes the legacy `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (see [Docker Install Notes](#docker-install-notes)). Devnet runs images by digest only, from the legacy repository or ghcr.io (`TN_DEVNET_IMAGE_REPOS`); its tags end in `-devnet` and have no signed release.
 
 ### RPC queries
 
@@ -1562,6 +1562,37 @@ prints the exact fix command.
 > **Versioning note (from v1.1.48 onwards):** each script bumps `SCRIPT_VERSION`
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
+
+### lib/common v2.0.1 — devnet Docker images by digest
+Devnet can run as a Docker install. `TN_DEVNET_IMAGE_REPO` is the legacy Artifact Registry
+repository `us-docker.pkg.dev/telcoin-network/tn-public/adiri`, and `TN_DEVNET_IMAGE_REPOS` also
+takes `ghcr.io/telcoin-association/telcoin-network`. A devnet image is named by digest only.
+Devnet tags end in `-devnet` (`v0.2.0-devnet`), but devnet has no signed releases, so no devnet
+tag resolves to an image and no newest-release pick runs there. When no network is given,
+`tn_docker_image_allowed` takes the host's from `_tn_guard_network`, which reads
+`NETWORK=devnet` in `.node-meta`; `tn_detect_network` still returns 1 on devnet. Testnet and
+mainnet behave as before. The full entry is in [CHANGELOG.md](CHANGELOG.md).
+
+### setup-node v2.0.1 — devnet Docker installs
+On devnet, `--install-method docker` needs `--docker-image <repository>@sha256:<digest>`.
+`--release-tag`, source builds and release installs are refused there before anything on the
+host changes, since devnet has no signed release to install. `--install-method existing` still
+works.
+
+### update-node v2.0.1 — devnet image changes
+`--ref <repository>@sha256:<digest>` and `--check` find a devnet host through `NETWORK=devnet`
+in `.node-meta`, so a devnet Docker node can change its image by digest. A devnet tag is
+refused, and the registry is never asked for devnet tags. Source and release updates are still
+refused on devnet.
+
+### edit-config v2.0.1 — devnet image changes
+`--set docker_image=<repository>@sha256:<digest>` and the Docker image menu work on a devnet
+host (`NETWORK=devnet` in `.node-meta`), by digest only. The menu asks for a digest there, not
+a release tag.
+
+### telcoin-ui v2.0.1 — devnet tag and repository rules in step with lib/common
+The server's copies of the release tag rule and the image repositories match lib/common 2.0.1.
+The UI still refuses devnet, and it never looks up a newest release or image for it.
 
 ### update-scripts v2.0.0 — signed script releases, all-or-nothing install
 `update-scripts.sh v2.0.0` installs the first signed script release, `scripts-v2.0.0`, which

@@ -7,6 +7,41 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Devnet Docker images, October 2026 -- lib/common v2.0.1, setup-node v2.0.1, update-node v2.0.1, edit-config v2.0.1, telcoin-ui v2.0.1
+A devnet node can now run as a Docker install. lib/common, setup-node, update-node and
+edit-config are 2.0.1. The UI server is 2.0.1 too (`UI_VERSION`), but only to keep its copies
+of the library rules in step: it still refuses devnet. Testnet and mainnet behave as before.
+
+#### Image repositories
+`TN_DEVNET_IMAGE_REPO` is the public legacy Artifact Registry repository,
+`us-docker.pkg.dev/telcoin-network/tn-public/adiri`. `TN_DEVNET_IMAGE_REPOS` also allows
+`ghcr.io/telcoin-association/telcoin-network`, the way `TN_TESTNET_IMAGE_REPOS` does on testnet,
+and `tn_docker_repo_ok` reads the network's list on testnet and devnet. A devnet image runs by
+digest, `<repository>@sha256:<64 hex>`, and the devnet fleet always pins it that way.
+
+#### Devnet tags
+Devnet tags end in `-devnet`, such as `v0.2.0-devnet`: `tn_release_tag_ok` takes
+`^[A-Za-z0-9][A-Za-z0-9._-]*-devnet$` on devnet (ASCII letters and digits only, in every
+locale), and ui/server.py has the same rule. The rule is there for named tags and to match the
+UI. `tn_release_tag_final` is false on devnet, so no newest-release pick runs there, and an
+image named by tag is still refused unless `TN_DOCKER_REQUIRE_DIGEST=0`.
+`setup-node.sh --release-tag` is refused on devnet, because a devnet tag has no signed release.
+
+#### Network checks
+`update-node.sh --ref <repository>@sha256:...`, `update-node.sh --check` and an image change in
+edit-config.sh now take the network from `_tn_guard_network` instead of `detect_network`.
+`_tn_guard_network` also reads `NETWORK=devnet` from `.node-meta`, so these work on a devnet
+host. `tn_docker_image_allowed`, and so `validate_docker_image`, falls back to
+`_tn_guard_network` when neither its argument nor the `NETWORK` global names a network. Before,
+it fell back to `tn_detect_network`, so the checks that pass no network (edit-config's
+start-script swap, update-node's pending `NEW_IMAGE`) refused every devnet image.
+`tn_detect_network` is unchanged and still returns 1 on devnet.
+
+#### Caveat
+`tn-public/adiri` also holds the testnet images, so the allow-list cannot stop a testnet image
+from being pinned on a devnet node. The real guard is the digest pin together with the
+`telcoin --version` probe in the devnet fleet tooling.
+
 ### Mainnet hardening round, October 2026 -- scripts-v2.0.0, update-scripts v2.0.0
 Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 

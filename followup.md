@@ -77,11 +77,17 @@ yet; this file gains the issue numbers when they are.
   when it merges and the devnet deployment is updated.
 - U-4, part of U-6 and the release side of U-12, the release pipeline: telcoin-network PR #694,
   draft. Still open there: the `v*` tag ruleset (a repository setting), a build-provenance
-  attestation, a separate devnet image repository with CI-built signed images (the rest of U-6),
-  and the node refusing fork-epoch overrides on chains 487 and 2017, plus the release check that
-  depends on it (the rest of U-12). The telcoin-network README, SECURITY, validator-operations and
-  maintainers pages still describe a release as the tarball and `IMAGE_DIGEST`, without the
-  chain-config lines. Closes when #694 merges with the ruleset set and those parts land.
+  attestation, and the node refusing fork-epoch overrides on chains 487 and 2017, plus the
+  release check that depends on it (the rest of U-12). The telcoin-network README, SECURITY,
+  validator-operations and maintainers pages still describe a release as the tarball and
+  `IMAGE_DIGEST`, without the chain-config lines. Closes when #694 merges with the ruleset set and
+  those parts land.
+  Closed in 2.0.1 (2026-10-30): the devnet image repository, the rest of U-6. Devnet Docker
+  installs take `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (`TN_DEVNET_IMAGE_REPO`) or
+  ghcr.io (`TN_DEVNET_IMAGE_REPOS`), by digest only, and devnet tags end in `-devnet`. There is no
+  separate devnet repository and no signed devnet release. `tn-public/adiri` also holds the
+  testnet images, so the allow-list cannot keep a testnet image off devnet; the digest pin and the
+  fleet's `telcoin --version` probe do that.
 - Node releases publish an x86_64 tarball only. On aarch64 a release install or update stops
   with "Release TAG has no aarch64-unknown-linux-gnu tarball". Closes when the release pipeline
   publishes an aarch64 tarball; the scripts already map the architecture.
