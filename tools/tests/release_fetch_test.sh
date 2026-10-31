@@ -73,7 +73,13 @@ check_rc "mainnet refuses an -adiri tag" 3 "$rc"
 rc=0; out="$(tn_fetch_verified_release main testnet 2>/dev/null)" || rc=$?
 check_rc "a branch is not a release tag" 3 "$rc"
 rc=0; out="$(tn_fetch_verified_release v0.16.0-adiri devnet 2>/dev/null)" || rc=$?
-check_rc "devnet has no releases" 3 "$rc"
+check_rc "devnet refuses an -adiri tag" 3 "$rc"
+rc=0; out="$(tn_fetch_verified_release v0.2.0-devnet testnet https://fixture.invalid/x 2>/dev/null)" || rc=$?
+check_rc "testnet refuses a devnet tag" 3 "$rc"
+rc=0; out="$(tn_fetch_verified_release v0.2.0-devnet mainnet https://fixture.invalid/x 2>/dev/null)" || rc=$?
+check_rc "mainnet refuses a devnet tag" 3 "$rc"
+rc=0; out="$(tn_fetch_release_image v0.2.0-devnet testnet https://fixture.invalid/x 2>/dev/null)" || rc=$?
+check_rc "image: testnet refuses a devnet tag" 3 "$rc"
 rc=0; out="$(tn_fetch_verified_release v1.0.0-rc1 mainnet https://fixture.invalid/x 2>"$T/err")" || rc=$?
 check_rc "mainnet refuses a release candidate" 3 "$rc"
 check_has "the refusal names the grammar" "1" "$(grep -c 'release candidates are testnet only' "$T/err")"

@@ -90,7 +90,10 @@ co_refused "commit id" testnet 5535ef1f0425973bd81ef3162f3d07219c3456d0
 co_refused "hot-patch tag" testnet v0.16.0-adiri-hotfix
 co_refused "mainnet tag on testnet" testnet v0.16.0
 co_refused "testnet tag on mainnet" mainnet v0.16.0-adiri
-co_refused "devnet" devnet v0.16.0-adiri
+co_refused "a testnet tag on devnet" devnet v0.16.0-adiri
+co_refused "a devnet tag on testnet" testnet v0.2.0-devnet
+co_refused "a devnet tag on mainnet" mainnet v0.2.0-devnet
+co_refused "--allow-dirty on devnet" devnet v0.2.0-devnet true 1
 co_refused "--allow-dirty on mainnet" mainnet v1.0.0 true 1
 co_refused "a release candidate on mainnet" mainnet v1.0.0-rc1
 co_refused "a testnet release candidate on mainnet" mainnet v1.0.0-adiri-rc1
@@ -113,10 +116,16 @@ check "grammar: mainnet leading zero refused" 1 "$(tok mainnet v1.02.3)"
 check "grammar: mainnet final" 0 "$(tok mainnet v1.0.0)"
 check "grammar: mainnet rc refused" 1 "$(tok mainnet v1.0.0-rc1)"
 check "grammar: devnet rc refused" 1 "$(tok devnet v1.0.0-adiri-rc1)"
+check "grammar: devnet v0.2.0-devnet" 0 "$(tok devnet v0.2.0-devnet)"
+check "grammar: devnet x-devnet" 0 "$(tok devnet x-devnet)"
+check "grammar: devnet tag on testnet refused" 1 "$(tok testnet v0.2.0-devnet)"
+check "grammar: devnet tag on mainnet refused" 1 "$(tok mainnet v0.2.0-devnet)"
+check "grammar: devnet -rc after -devnet refused" 1 "$(tok devnet v0.2.0-devnet-rc1)"
 check "final: a testnet final is one" 0 "$(fin testnet v0.17.0-adiri)"
 check "final: a testnet rc is not" 1 "$(fin testnet v0.17.0-adiri-rc1)"
 check "final: a mainnet final is one" 0 "$(fin mainnet v1.0.0)"
 check "final: not a release tag at all" 1 "$(fin testnet main)"
+check "final: a devnet tag never is (devnet has no signed releases)" 1 "$(fin devnet v0.2.0-devnet)"
 newer() { local rc=0; tn_release_tag_newer "$1" "$2" || rc=$?; printf '%s' "$rc"; }
 check "order: rc2 is newer than rc1" 0 "$(newer v0.17.0-adiri-rc2 v0.17.0-adiri-rc1)"
 check "order: rc10 is newer than rc9" 0 "$(newer v0.17.0-adiri-rc10 v0.17.0-adiri-rc9)"
@@ -126,6 +135,9 @@ check "order: an rc of a higher version is newer than a lower final" 0 "$(newer 
 check "order: 0.10.0 is newer than 0.9.0" 0 "$(newer v0.10.0-adiri v0.9.0-adiri)"
 check "order: the same tag is not newer" 1 "$(newer v0.17.0-adiri v0.17.0-adiri)"
 check "order: not a tag form" 2 "$(newer main v0.17.0-adiri)"
+check "order: devnet tags have no release order" 2 "$(newer v0.3.0-devnet v0.2.0-devnet)"
+check "order: a devnet tag is dropped from a sorted list" "v0.17.0-adiri" \
+    "$(printf '%s\n' v0.2.0-devnet v0.17.0-adiri x-devnet | tn_release_tags_sort | tr '\n' ' ' | sed 's/ $//')"
 check "order: keys" "000000000 000000017 000000000 000000002|000000000 000000017 000000000 999999999" \
     "$(tn_release_tag_key v0.17.0-adiri-rc2)|$(tn_release_tag_key v0.17.0-adiri)"
 check "order: a sorted list, oldest first, each once" \
@@ -360,6 +372,9 @@ check "picker, main typed: refused" "1 " "$(pick testnet '2\nmain\n')"
 check "picker, a branch typed: refused" "1 " "$(pick testnet '2\nfeature\n')"
 check "picker, a mainnet tag typed on testnet: refused" "1 " "$(pick testnet '2\nv1.0.0\n')"
 check "picker, cancel" "1 " "$(pick testnet '3\n')"
+G -C "$P" tag v0.2.0-devnet
+check "picker, a devnet tag in the checkout: the testnet default unchanged" "0 v0.17.0-adiri" "$(pick testnet '\n')"
+check "picker, a devnet tag typed on testnet: refused" "1 " "$(pick testnet '2\nv0.2.0-devnet\n')"
 check "picker, devnet: no source releases" "1 " "$(pick devnet '\n')"
 
 # --- signed tags (throwaway keys) ------------------------------------------------------

@@ -225,14 +225,14 @@ img_case "testnet digest" 0 "${REPO}@sha256:${D64}"
 img_case "short digest refused" 1 "${REPO}@sha256:abc"
 img_case "upper-case digest refused" 1 "${REPO}@sha256:$(printf '%s' "$D64" | tr a-f A-F)"
 img_case "hot-patch tag refused" 1 "${REPO}:v0.16.0-adiri-hotfix"
-img_case "devnet tag refused" 1 "${REPO}:v0.17.0-devnet"
+img_case "devnet tag refused on testnet" 1 "${REPO}:v0.17.0-devnet"
 img_case "latest refused" 1 "${REPO}:latest"
 img_case "other repository refused" 1 "docker.io/library/busybox:v0.16.0-adiri"
 img_case "lookalike repository refused" 1 "${REPO}x:v0.16.0-adiri"
 img_case "leading dash refused" 1 "-v/etc:/x"
 img_case "whitespace refused" 1 "${REPO}:v0.16.0-adiri --privileged"
 img_case "mainnet has no repository yet" 1 "${REPO}:v0.16.0" mainnet
-img_case "devnet refused" 1 "${REPO}:v0.16.0-adiri" devnet
+img_case "devnet: a testnet release tag refused" 1 "${REPO}:v0.16.0-adiri" devnet
 rc=0; TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "${REPO}:v0.16.0-adiri" testnet || rc=$?
 check_rc "image: tag refused once digests are required" 1 "$rc"
 rc=0; TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "${REPO}@sha256:${D64}" testnet || rc=$?
