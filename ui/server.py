@@ -75,7 +75,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "2.0.0"
+UI_VERSION = "2.0.1"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -283,20 +283,27 @@ def bad_type():
 # Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri or its
 # release candidate vX.Y.Z-adiri-rcN (N from 1, no leading zero), mainnet
 # vX.Y.Z (finals only); X, Y and Z are 0 or have no leading zero, as the
-# release pipeline's TAG_RE has them. Branch names, commit ids and anything
-# else are refused.
+# release pipeline's TAG_RE has them. Devnet: a name of letters, digits and
+# . _ - that starts with a letter or digit and ends in -devnet (v0.2.0-devnet);
+# devnet has no signed releases, so such a tag only names a build and is never
+# a newest-release pick (release_tag_final is False there). Branch names,
+# commit ids and anything else are refused.
 # A tag the user names may be a release candidate; a pick of the newest
 # release takes finals only (release_tag_final), ordered by release_tag_key.
 _TAG_PART = r"(?:0|[1-9][0-9]*)"
 RELEASE_TAG_RE = {
     "testnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}-adiri(?:-rc[1-9][0-9]*)?"),
     "mainnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}"),
+    "devnet": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*-devnet"),
 }
+# The networks with signed releases: the only ones a newest-release pick (the
+# source tag, the release image) runs for.
+RELEASE_NETWORKS = ("testnet", "mainnet")
 
 
 def release_tag_ok(network, tag):
-    """The twin of tn_release_tag_ok; any other network (devnet included) is
-    refused, as the library refuses it."""
+    """The twin of tn_release_tag_ok; any other network is refused, as the
+    library refuses it."""
     if not isinstance(tag, str) or network not in RELEASE_TAG_RE:
         return False
     return RELEASE_TAG_RE[network].fullmatch(tag) is not None
@@ -304,7 +311,10 @@ def release_tag_ok(network, tag):
 
 def release_tag_final(network, tag):
     """The twin of tn_release_tag_final: a release tag of the network that is a
-    final release, not a release candidate (what a newest-release pick offers)."""
+    final release, not a release candidate (what a newest-release pick offers).
+    Always False on devnet, which has no signed releases."""
+    if network not in RELEASE_NETWORKS:
+        return False
     return release_tag_ok(network, tag) and re.search(r"-rc[0-9]", tag) is None
 
 
@@ -358,12 +368,14 @@ def passphrase_ok(value, network=""):
 # made before signed releases (DEFAULT_DOCKER_IMAGE among them).
 GHCR_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
 TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-# Every repository a network's images may come from (tn_docker_repo_ok): on
-# testnet TN_TESTNET_IMAGE_REPOS (the legacy repository and ghcr.io), on mainnet
-# TN_MAINNET_IMAGE_REPO alone. Devnet has none, so nothing is accepted there.
+# Every repository a network's images may come from (tn_docker_repo_ok,
+# tn_docker_repos_for): on testnet TN_TESTNET_IMAGE_REPOS (the legacy repository
+# and ghcr.io), on devnet TN_DEVNET_IMAGE_REPOS (the same two; devnet images run
+# by digest only), on mainnet TN_MAINNET_IMAGE_REPO alone.
 DOCKER_REPO = {
     "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
     "mainnet": (GHCR_IMAGE_REPO,),
+    "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
 }
 # Fallback for testnet only, when the library cannot name the newest image:
 # v0.16.0-adiri by digest, as lib/common.sh DEFAULT_DOCKER_IMAGE.
@@ -2854,9 +2866,10 @@ def latest_docker_image(network="testnet"):
     a check, and the legacy repository while the channel has no release). The answer must pass image_allowed.
     Testnet falls back to DEFAULT_DOCKER_IMAGE when the library names nothing;
     mainnet never falls back, and gives '' while TN_MAINNET_ENABLED is off; any
-    other network ''. Cached per network (see DOCKER_IMAGE_TTL); the probe
-    times out after DOCKER_PROBE_TIMEOUT s."""
-    if network not in DOCKER_REPO or (network == "mainnet" and not TN_MAINNET_ENABLED):
+    other network '' (devnet included: it has no releases, its images are named
+    by digest). Cached per network (see DOCKER_IMAGE_TTL); the probe times out
+    after DOCKER_PROBE_TIMEOUT s."""
+    if network not in RELEASE_NETWORKS or (network == "mainnet" and not TN_MAINNET_ENABLED):
         return ""
     now = time.time()
     c = _docker_image_cache.get(network)
@@ -2911,8 +2924,8 @@ def latest_source_tag(network="testnet"):
     only (release_tag_final, so release candidates and hot-patch tags are never
     picked). The release a source build or a release install takes, matching
     the CLI menu. The newest by release_tag_key wins. Cached 5 min per network.
-    '' on failure."""
-    if network not in RELEASE_TAG_RE:
+    '' on failure, and for a network without releases (devnet)."""
+    if network not in RELEASE_NETWORKS:
         return ""
     now = time.time()
     c = _source_tag_cache.setdefault(network, {"ts": 0.0, "data": None})
