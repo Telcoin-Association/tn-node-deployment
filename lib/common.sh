@@ -40,7 +40,7 @@ readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
-readonly COMMON_VERSION="2.0.0"
+readonly COMMON_VERSION="2.0.1"
 
 # The operator runbook, for any message that should point operators at it.
 readonly TN_OPERATOR_GUIDE_URL="https://github.com/Telcoin-Association/tn-node-deployment/blob/main/OPERATOR.md"
@@ -1527,8 +1527,9 @@ readonly TN_RELEASES_API_URL="https://api.github.com/repos/Telcoin-Association/t
 # release (or the Releases API cannot be read), the newest final tag of the
 # legacy repository (TN_TESTNET_LEGACY_IMAGE_REPO) by its registry digest, else
 # DEFAULT_DOCKER_IMAGE, each with a warning on stderr. Mainnet never falls back.
-# rc 1 and nothing on stdout for a network without a repository, or when nothing
-# can be resolved.
+# rc 1 and nothing on stdout for devnet (it has no releases: its images are
+# named by digest), a network without a repository, or when nothing can be
+# resolved.
 latest_docker_image() {
     local net="${1:-${NETWORK:-testnet}}" repo tag best="" digest img why rc=0
     tn_docker_repo_for "$net" >/dev/null || return 1
@@ -1663,16 +1664,24 @@ tn_passphrase_ok() {
 # testnet vX.Y.Z-adiri, or its release candidate vX.Y.Z-adiri-rcN (N from 1, no
 # leading zero); mainnet vX.Y.Z, finals only (X, Y and Z are 0 or digits that
 # do not start with 0, as the release pipeline's TAG_RE has them; nothing
-# before or after). Any other NETWORK, devnet included, is rc 1. The one place
-# that says which tags the source picker, the updater and the Docker tag filter
-# accept when a tag is named. A pick of the newest release takes finals only
-# (tn_release_tag_final), so a release candidate runs only when it is named.
+# before or after); devnet a name of letters, digits and . _ - that starts with
+# a letter or digit and ends in -devnet (v0.2.0-devnet). Any other NETWORK is
+# rc 1. The one place that says which tags the source picker, the updater and
+# the Docker tag filter accept when a tag is named. A pick of the newest release
+# takes finals only (tn_release_tag_final), so a release candidate runs only
+# when it is named. A devnet tag only names a devnet build: devnet has no signed
+# releases, so its images run by digest and no devnet tag resolves to an image
+# (tn_docker_image_for_tag) or is ever picked.
 tn_release_tag_ok() {
-    local net="${1:-}" tag="${2:-}" n re
+    local net="${1:-}" tag="${2:-}" n re an
     n='(0|[1-9][0-9]*)'
+    # The ASCII letters and digits spelled out: a range such as A-Z also matches
+    # accented letters in some locales.
+    an='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
     case "$net" in
         testnet) re="^v${n}\.${n}\.${n}-adiri(-rc[1-9][0-9]*)?$" ;;
         mainnet) re="^v${n}\.${n}\.${n}$" ;;
+        devnet) re="^[${an}][${an}._-]*-devnet$" ;;
         *) return 1 ;;
     esac
     [[ "$tag" =~ $re ]]
@@ -1681,14 +1690,17 @@ tn_release_tag_ok() {
 # tn_release_tag_final NETWORK TAG -- rc 0 when TAG passes tn_release_tag_ok and
 # is a final release, not a release candidate: what a newest-release pick may
 # offer (latest_docker_image, tn_release_newest_tag, the pickers, --check).
+# Always rc 1 on devnet, so no newest-release pick turns on there (its tags have
+# no release order, tn_release_tag_key, and no signed release).
 tn_release_tag_final() {
+    [[ "${1:-}" != "devnet" ]] || return 1
     tn_release_tag_ok "${1:-}" "${2:-}" || return 1
     [[ "${2:-}" != *-rc[0-9]* ]]
 }
 
 # tn_release_tag_grammar -- the release tag forms, for messages.
 tn_release_tag_grammar() {
-    printf '%s\n' "testnet vX.Y.Z-adiri or the release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z; release candidates are testnet only"
+    printf '%s\n' "testnet vX.Y.Z-adiri or the release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z, devnet <name>-devnet; release candidates are testnet only"
 }
 
 # _tn_release_tag_key TAG -- set TN_RELEASE_TAG_KEY to TAG's sort key (see
@@ -3659,17 +3671,20 @@ tn_service_user_ok() {
 
 # tn_docker_image_allowed IMAGE [NETWORK] -- rc 0 when IMAGE is an image of
 # NETWORK by digest, <repo>@sha256:<64 hex>, with <repo> one NETWORK's images may
-# come from (tn_docker_repo_ok: the network's repository, and on testnet those in
-# TN_TESTNET_IMAGE_REPOS). A tag that passes tn_release_tag_ok is accepted only
-# with TN_DOCKER_REQUIRE_DIGEST=0 (the default, 1, refuses tags). NETWORK
-# defaults to the NETWORK global, then tn_detect_network. Refuses a leading -,
-# any whitespace, other repositories and networks without one. Prints nothing.
+# come from (tn_docker_repo_ok: TN_TESTNET_IMAGE_REPOS on testnet,
+# TN_DEVNET_IMAGE_REPOS on devnet, the mainnet repository on mainnet). A tag that
+# passes tn_release_tag_ok is accepted only with TN_DOCKER_REQUIRE_DIGEST=0 (the
+# default, 1, refuses tags). NETWORK defaults to the NETWORK global, then this
+# host's network (_tn_guard_network: tn_detect_network, or NETWORK=devnet in
+# .node-meta). Refuses a leading -, any whitespace, other repositories and
+# networks without one. Prints nothing.
 tn_docker_image_allowed() {
     local img="${1:-}" net="${2:-}" repo rest
     [[ -n "$img" && "$img" != -* ]] || return 1
     [[ ! "$img" =~ [[:space:]] ]] || return 1
     [[ -n "$net" ]] || net="${NETWORK:-}"
-    [[ -n "$net" ]] || net="$(tn_detect_network 2>/dev/null)" || return 1
+    [[ -n "$net" ]] || net="$(_tn_guard_network)"
+    [[ -n "$net" ]] || return 1
     case "$img" in
         *@sha256:*)
             repo="${img%%@*}"
@@ -6260,21 +6275,27 @@ pick_action() {
 # Source builds run as the unprivileged build account (TN_BUILD_USER) with its
 # own toolchain from a rustup-init pinned by version and sha256; root only
 # installs the result. Docker images come from the network's repositories
-# (TN_TESTNET_IMAGE_REPOS on testnet) and run by digest.
+# (tn_docker_repos_for: TN_TESTNET_IMAGE_REPOS on testnet, TN_DEVNET_IMAGE_REPOS
+# on devnet) and run by digest.
 
 # Image repository per network: testnet and mainnet TN_GHCR_IMAGE_REPO, where the
-# release pipeline publishes. Which repository publishes devnet images is an open
-# decision: while its constant is empty, tn_docker_repo_for refuses devnet, and
-# so does every Docker path.
+# release pipeline publishes; devnet the Artifact Registry repository its fleet's
+# images are pushed to (TN_TESTNET_LEGACY_IMAGE_REPO). Devnet has no signed
+# releases: its images are named by digest only, from TN_DEVNET_IMAGE_REPOS, and
+# no newest-release pick runs there (tn_release_tag_final).
 readonly TN_MAINNET_IMAGE_REPO="$TN_GHCR_IMAGE_REPO"
-readonly TN_DEVNET_IMAGE_REPO=""
+readonly TN_DEVNET_IMAGE_REPO="$TN_TESTNET_LEGACY_IMAGE_REPO"
 
 # Every repository a testnet image may come from, space separated: the legacy
 # Artifact Registry repository of the releases before signed releases (and of
 # DEFAULT_DOCKER_IMAGE) and the one the release pipeline publishes to, which
 # tn_docker_repo_for prints. A signed release's IMAGE_DIGEST names one of them.
-# Mainnet and devnet take only their own constant.
+# Mainnet takes only its own constant.
 readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ghcr.io/telcoin-association/telcoin-network"
+# Every repository a devnet image may come from, space separated: the devnet
+# repository (tn_docker_repo_for prints it) and ghcr.io. The allow-list for the
+# digests the devnet fleet pins.
+readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_IMAGE_REPO}"
 
 # Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
 readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
@@ -6295,8 +6316,10 @@ readonly TN_RUST_TOOLCHAIN="1.94"
 
 # tn_docker_repo_for NETWORK -- print NETWORK's image repository: testnet the
 # ghcr.io repository the release pipeline publishes to; mainnet and devnet their
-# constants. rc 1 with the reason on
-# stderr while the constant is empty, and for any other NETWORK.
+# constants (TN_MAINNET_IMAGE_REPO, TN_DEVNET_IMAGE_REPO). This is the repository
+# messages and examples name; every repository NETWORK's images may come from is
+# tn_docker_repos_for's. rc 1 with the reason on stderr when the constant is
+# empty, and for any other NETWORK.
 tn_docker_repo_for() {
     local net="${1:-}" repo=""
     case "$net" in
@@ -6309,10 +6332,25 @@ tn_docker_repo_for() {
             ;;
     esac
     if [[ -z "$repo" ]]; then
-        print_warn "No ${net} image repository is set: which repository publishes ${net} images is still an open decision, so Docker installs and updates are refused on ${net}." >&2
+        print_warn "No ${net} image repository is set, so Docker installs and updates are refused on ${net}." >&2
         return 1
     fi
     printf '%s\n' "$repo"
+}
+
+# tn_docker_repos_for NETWORK -- print every repository NETWORK's images may come
+# from, space separated: TN_TESTNET_IMAGE_REPOS on testnet, TN_DEVNET_IMAGE_REPOS
+# on devnet, tn_docker_repo_for's alone on mainnet. Each list holds
+# tn_docker_repo_for's repository. rc 1, with the reason on stderr, for a network
+# without a repository.
+tn_docker_repos_for() {
+    local net="${1:-}" def
+    def="$(tn_docker_repo_for "$net")" || return 1
+    case "$net" in
+        testnet) printf '%s\n' "$TN_TESTNET_IMAGE_REPOS" ;;
+        devnet) printf '%s\n' "$TN_DEVNET_IMAGE_REPOS" ;;
+        *) printf '%s\n' "$def" ;;
+    esac
 }
 
 # tn_docker_network_ok NETWORK -- rc 0 when a Docker install or image change may
@@ -6330,16 +6368,16 @@ tn_docker_network_ok() {
     return 0
 }
 
-# tn_docker_repo_ok NETWORK REPO -- rc 0 when REPO is a repository NETWORK's
-# images may come from: tn_docker_repo_for's, and on testnet any repository in
-# TN_TESTNET_IMAGE_REPOS. rc 1 otherwise, and for a network without one.
+# tn_docker_repo_ok NETWORK REPO -- rc 0 when REPO is one of the repositories
+# NETWORK's images may come from (tn_docker_repos_for): on testnet any in
+# TN_TESTNET_IMAGE_REPOS, on devnet any in TN_DEVNET_IMAGE_REPOS, on mainnet
+# TN_MAINNET_IMAGE_REPO alone. A REPO with whitespace in it is never one. rc 1
+# otherwise, and for a network without one.
 tn_docker_repo_ok() {
-    local net="${1:-}" repo="${2:-}" def
-    [[ -n "$repo" ]] || return 1
-    def="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 1
-    [[ "$repo" == "$def" ]] && return 0
-    [[ "$net" == "testnet" ]] || return 1
-    case " ${TN_TESTNET_IMAGE_REPOS} " in
+    local net="${1:-}" repo="${2:-}" repos
+    [[ -n "$repo" && ! "$repo" =~ [[:space:]] ]] || return 1
+    repos="$(tn_docker_repos_for "$net" 2>/dev/null)" || return 1
+    case " ${repos} " in
         *" ${repo} "*) return 0 ;;
     esac
     return 1
@@ -7209,7 +7247,9 @@ _tn_release_keys_present() {
 # signed release such as the releases made before signed releases
 # (v0.16.0-adiri); the newest-release pick (latest_docker_image) never takes it.
 # A release whose files fail verification is never replaced by the registry's
-# answer. rc 1 refused or not resolvable, 3 TAG is not a NETWORK release tag.
+# answer. Devnet has no signed releases, so a devnet tag is refused (rc 1)
+# before anything is downloaded: devnet images are named by digest. rc 1
+# refused or not resolvable, 3 TAG is not a NETWORK release tag.
 tn_docker_image_for_tag() {
     local net="${1:-}" tag="${2:-}" fn="${3:-}" repo img d r rc=0
     if ! tn_release_tag_ok "$net" "$tag"; then
@@ -7217,6 +7257,10 @@ tn_docker_image_for_tag() {
         return 3
     fi
     repo="$(tn_docker_repo_for "$net")" || return 1
+    if [[ "$net" == "devnet" ]]; then
+        _tn_c4_say warn "Devnet has no signed releases, so ${tag} names no image: give the devnet image by digest, ${repo}@sha256:<digest>." "$fn"
+        return 1
+    fi
     if _tn_release_keys_present; then
         img="$(tn_fetch_release_image "$tag" "$net" "" "$fn")" || rc=$?
         if [[ $rc -eq 0 ]]; then
@@ -7275,15 +7319,22 @@ tn_docker_resolve_ref() {
         img="$(tn_docker_image_for_tag "$net" "$tag" "$fn")" || return 1
     fi
     if [[ -z "$img" ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$img" "$net"; then
-        print_warn "Image refused: ${arg:-(empty)}. A node runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest." >&2
+        if [[ "$net" == "devnet" ]]; then
+            print_warn "Image refused: ${arg:-(empty)}. A devnet node runs an image by digest, <repository>@sha256:<digest>, from one of these repositories: $(tn_docker_repos_for devnet 2>/dev/null)." >&2
+        else
+            print_warn "Image refused: ${arg:-(empty)}. A node runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest." >&2
+        fi
         return 1
     fi
     # A digest given alone: its release is the one .node-meta records for that
     # digest, if any; otherwise it is unknown, and so is whether it is older.
+    # Every devnet image is given so (devnet has no signed releases).
     if [[ -z "$tag" ]]; then
         tag="$(tn_docker_recorded_tag "$img")" || tag=""
         tn_release_tag_ok "$net" "$tag" || tag=""
-        if [[ -z "$tag" ]]; then
+        if [[ -z "$tag" && "$net" == "devnet" ]]; then
+            _tn_c4_say warn "${img} is given by digest alone, as every devnet image is, so the release it holds is unknown: the downgrade check cannot be applied to it." "$fn"
+        elif [[ -z "$tag" ]]; then
             _tn_c4_say warn "${img} is given by digest alone, so the release it holds is unknown: the downgrade and oldest-release checks cannot be applied to it. Give its ${net} release tag instead to have them applied." "$fn"
         fi
     fi
@@ -7310,7 +7361,8 @@ tn_docker_recorded_tag() {
 # DEFAULT_DOCKER_IMAGE, else the newest of the repository's release tags (the
 # newest 15 by tn_release_tag_key, release candidates included: this names the
 # image, it picks nothing) for which the registry serves IMAGE's digest
-# (tn_registry_digest).
+# (tn_registry_digest). On devnet only the .node-meta record is read: devnet tags
+# have no release order, so the registry is not asked.
 # Prints nothing, rc 1, when none matches or the registry cannot be read.
 tn_docker_release_tag_for() {
     local net="${1:-}" img="${2:-}" repo tags t d
@@ -7319,6 +7371,7 @@ tn_docker_release_tag_for() {
         printf '%s\n' "$t"
         return 0
     fi
+    [[ "$net" != "devnet" ]] || return 1
     if [[ "$img" == "$DEFAULT_DOCKER_IMAGE" ]] && tn_release_tag_ok "$net" "$DEFAULT_DOCKER_TAG"; then
         printf '%s\n' "$DEFAULT_DOCKER_TAG"
         return 0
