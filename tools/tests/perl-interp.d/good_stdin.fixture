@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: stdin is data, the program is
+# visible and literal, or the word perl is not a command. Expected: no findings.
+
+arg="$1"
+file="$2"
+perl -e 'print "$ARGV[0]\n"' "$arg"
+printf '%s\n' "$arg" | perl -ne 'print if /x/'
+printf '%s\n' "$arg" | perl -pe 's/a/b/' -- "$file"
+# printf '%s\n' "$prog" | perl
+perl script.pl < "$file"
+printf '%s\n' "$arg" | perl "$file"
+perl < "$file"
+perl /dev/stdin <<'EOF2'
+print "$arg\n";
+EOF2
+perl - "$arg" <<'EOF2'
+print "$ARGV[0]\n";
+EOF2
+printf '%s\n' "$arg" | grep perl
+command -v perl >/dev/null
+for c in perl python; do echo "$c"; done
+case "$arg" in
+    perl) echo p ;;
+    python|perl|ruby) echo r ;;
+    perl | python ) echo q ;;
+    (perl) echo z ;;
+esac
+n="$(case "$arg" in perl) echo 1;; *) echo 2;; esac)"
+echo "$n"
+perl -v >/dev/null 2>&1
+perl -V:version
+perl -Mstrict -I/opt/lib -e 'print 1'
+printf '%s\n' "$arg" | perl -i.bak -pe 's/a/b/' "$file"
+echo "perl < <(x)"

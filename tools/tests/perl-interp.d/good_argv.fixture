@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: data passed as arguments, never
+# as program text. Expected: no findings.
+
+old="$1"
+new="$2"
+file="$3"
+perl -e 'my ($a, $b) = @ARGV; print "$a $b\n"' "$old" "$new"
+perl -s -e 'print "$old\n"' -- -old="$old"
+perl -i -pe 's/a/b/' "$file"
+perl -0777 -ne 'print' -- "$file" "$new"
+perl -ne 'print' <<EOF2
+$old
+${new}
+EOF2
+perl -pe 's/x/y/' <<< "$old"
+perl "$file" "$old"

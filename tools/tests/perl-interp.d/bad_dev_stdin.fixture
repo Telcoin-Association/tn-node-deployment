@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: perl /dev/stdin (or /dev/fd/0)
+# reads its program from stdin, like perl -. Expected findings: lines 8, 10,
+# 12, 14 and 15.
+
+v="$1"
+perl /dev/stdin <<EOF2
+print "$v\n";
+EOF2
+perl /dev/stdin "$2" <<< "print q($v)"
+perl /dev/fd/0 <<-EOF2
+	print "${v}\n";
+	EOF2
+printf '%s\n' "print q($v)" | perl /dev/stdin
+perl /dev/stdin

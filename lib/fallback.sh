@@ -36,7 +36,7 @@
 _TN_FALLBACK_SH=1
 
 # Version, gated by update-scripts.sh like every other tracked file.
-readonly FALLBACK_VERSION="1.0.3"
+readonly FALLBACK_VERSION="1.1.0"
 
 # Root prepended to every absolute probe path. Empty in production; a temp dir
 # under test. `:=` leaves a caller-provided value (the test harness) untouched.
@@ -56,12 +56,23 @@ _tn_var()      { printf '%s/var/lib/telcoin'    "${TN_ROOT_PREFIX}"; }
 
 # _tn_meta_get <key> <file> — echo KEY's value from a .node-meta file. Returns 1
 # if the file/key is absent. One trailing CR is dropped (a file saved with CRLF
-# line endings), as meta_get does. Self-contained (does not rely on common.sh's
-# meta_get, which is defined later in common.sh than this file is sourced).
+# line endings), as meta_get does. A key on more than one line is refused as
+# meta_get refuses it: nothing on stdout, a warning on stderr, rc 2.
+# Self-contained (does not rely on common.sh's meta_get, which is defined later
+# in common.sh than this file is sourced, and scripts may source this file alone).
 _tn_meta_get() {
-    local key="${1:-}" file="${2:-}" line cr
+    local key="${1:-}" file="${2:-}" line cr n
     cr=$'\r'
     [[ -f "$file" ]] || return 1
+    n="$(grep -c -E "^${key}=" "$file" 2>/dev/null)" || true
+    case "$n" in
+        ""|0) return 1 ;;
+        1) ;;
+        *)
+            printf '  [WARN] %s is set %s times in %s; using none of them (remove the extra lines)\n' "$key" "$n" "$file" >&2
+            return 2
+            ;;
+    esac
     line="$(grep -m1 -E "^${key}=" "$file" 2>/dev/null)" || true
     [[ -n "$line" ]] || return 1
     line="${line%"$cr"}"
@@ -137,10 +148,16 @@ tn_resolve_config_dir() {
 # _tn_meta_data_dir <meta-file> — echo the DATA_DIR= a .node-meta records (the datadir
 # the operator chose, e.g. on a separate disk) when it is an absolute path to an
 # existing directory; the probe and the echoed path are rooted at ${TN_ROOT_PREFIX}.
-# Returns 1 when the file or key is absent, empty, relative, or not a directory.
+# Returns 1 when the file or key is absent, empty, relative, or not a directory, and
+# 2 (nothing printed, an error on stderr) when the key is set more than once.
 _tn_meta_data_dir() {
-    local dd
-    dd="$(_tn_meta_get DATA_DIR "$1")" || return 1
+    local dd rc=0
+    dd="$(_tn_meta_get DATA_DIR "$1")" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        printf '  [ERROR] DATA_DIR is set more than once in %s; remove the extra lines (no data dir assumed)\n' "$1" >&2
+        return 2
+    fi
+    [[ $rc -eq 0 ]] || return 1
     [[ "$dd" == /* && -d "${TN_ROOT_PREFIX}${dd}" ]] || return 1
     printf '%s\n' "${TN_ROOT_PREFIX}${dd}"
 }
@@ -152,17 +169,25 @@ _tn_meta_data_dir() {
 #   unified .node-meta present  -> its DATA_DIR, else /var/lib/telcoin   (new install)
 #   else legacy role .node-meta -> its DATA_DIR, else /var/lib/telcoin/<role>
 #   else                        -> /var/lib/telcoin                     (new-install default)
+# A DATA_DIR set more than once in that .node-meta prints nothing and returns 2, so
+# a caller never acts on a guessed data dir.
 tn_resolve_data_dir() {
-    local etc var t
+    local etc var t rc
     etc="$(_tn_etc)"
     var="$(_tn_var)"
     if [[ -f "${etc}/.node-meta" ]]; then
-        _tn_meta_data_dir "${etc}/.node-meta" || printf '%s\n' "$var"
+        rc=0
+        _tn_meta_data_dir "${etc}/.node-meta" || rc=$?
+        [[ $rc -ne 2 ]] || return 2
+        [[ $rc -eq 0 ]] || printf '%s\n' "$var"
         return 0
     fi
     for t in validator observer; do
         if [[ -f "${etc}/${t}/.node-meta" ]]; then
-            _tn_meta_data_dir "${etc}/${t}/.node-meta" || printf '%s\n' "${var}/${t}"
+            rc=0
+            _tn_meta_data_dir "${etc}/${t}/.node-meta" || rc=$?
+            [[ $rc -ne 2 ]] || return 2
+            [[ $rc -eq 0 ]] || printf '%s\n' "${var}/${t}"
             return 0
         fi
     done

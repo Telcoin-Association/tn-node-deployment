@@ -1,0 +1,23 @@
+# Maintainer SSH keys the testnet VPN add-on (setup-vpn.sh) installs for tnadmin.
+#
+# One line per maintainer key: <name> <fingerprint>
+#   <name>         the key file <name>.pub in this directory
+#   <fingerprint>  what `ssh-keygen -lf <name>.pub -E sha256` prints (SHA256:...)
+# setup-vpn.sh reads only the .pub files listed here, and only when the file holds
+# exactly one key with that fingerprint. A .pub file that is not listed is ignored.
+#
+# Revoking a key: delete its line above the "# revoked:" heading and add a line
+#   # revoked: <fingerprint> <name> <date>
+# below it. A revoked fingerprint is never installed, even while its .pub file is
+# still on disk. Nodes drop the key at the next `setup-vpn.sh --sync-keys` or
+# self-heal run after update-scripts.sh. An operator blocks a key on one host with
+# a line in /etc/wgvpn/tnadmin.revoked (one fingerprint per line).
+bluelights SHA256:mAQ3wrd7/fklj488GXeI6FfyWXqkUAzU1uaj/pH83Jg
+grant SHA256:SLONc85R4Urf0SQQigRs/bXmMFBj7c+pXMsTu5RbsCg
+grant2 SHA256:pzCR1evjuQ50VqgFHD+P0qSUC9AvQ40GL7+a79PBC84
+oobi SHA256:dZh3yrVuaqMVaRc6uUT72xHLFOW3WiBr9GQdotksMmk
+sstanf SHA256:qOerhoY1Jzh3MCiOe/2tqF0e5cK8Q1lU1t5fAmUE+dA
+umair SHA256:ojq2Hkr8S2YjWb5Oqq6klcmAebIv8l7hrrRRA7Pza+A
+xerxes SHA256:EjPkbL6HreANgn430D+QPzEqdFZ9sfhSZ8AuFuwZBD4
+
+# revoked:

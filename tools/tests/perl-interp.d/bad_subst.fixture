@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: perl inside $( ), backticks and
+# pipelines, and a program held in a variable. Expected findings: lines 7, 8,
+# 9, 10 and 11.
+
+v="$1"
+out="$(printf '%s\n' "$v" | perl -pe "s/a/$v/")"
+old=`perl -e "print '$v'"`
+sudo -u nobody /usr/bin/perl -e "$v"
+perl -e $v
+printf '%s\n' "$v" | xargs perl -i -pe "s/a/`date`/"
+printf '%s %s\n' "$out" "$old"

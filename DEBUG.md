@@ -63,8 +63,8 @@ sudo bash setup-vpn.sh --status      # one-shot: tunnel, reboot-persistence, key
 # Or check each piece directly:
 sudo wg show wg0                                   # handshake with the hub? nonzero transfer?
 sudo ss -tlnp 'sport = :22'                        # is sshd actually listening on :22?
-sudo ufw status                                    # ACTIVE? is there an ALLOW from 10.100.0.0/16?
-sudo wc -l ~tnadmin/.ssh/authorized_keys.tnvpn     # maintainer keys present (one per line)?
+sudo ufw status                                    # ACTIVE? is there an ALLOW from 10.100.9.0/24 to :22?
+sudo wc -l /etc/wgvpn/tnadmin.authorized_keys      # maintainer keys present (one per line)?
 sudo sshd -t                                       # sshd config valid (a bad drop-in blocks reload)?
 sudo journalctl -u ssh -n50 --no-pager             # what does sshd say when you connect?
 ```
@@ -81,7 +81,7 @@ commands are for when you want to see the raw state or `--status` itself can't r
 | **Connection timed out during banner exchange** | Node `wg0` not handshaking with the hub (tunnel not converged, or registry pubkey ≠ node's actual key) — Cause 1 | On the node: `sudo bash setup-vpn.sh --status`; `sudo wg-quick up wg0`; if pubkey drifted, re-send `sudo wg show wg0` pubkey to the Association |
 | **Banner timeout, but the tunnel is up** | Operator's ACTIVE ufw has no overlay→:22 allow rule (ufw enabled/tightened after enrol) — Cause 2 | On the node: `sudo bash setup-vpn.sh --apply-firewall` (then `--status` to confirm) |
 | **Worked before, dead after a node reboot** | `wg-quick@wg0` was never enabled, so the tunnel didn't come back — Cause 3 | On the node: `sudo systemctl enable wg-quick@wg0` (`--status` check 2 catches this) |
-| **`Permission denied (publickey)`** | Maintainer key not on the node (not a transport problem) | Operator: `git pull && sudo bash setup-vpn.sh --sync-keys`. Admin (overlay up): `SYNC_ALL_NODES=1 ./common/wgvpn/sync-access.sh` |
+| **`Permission denied (publickey)`** | Maintainer key not on the node, or revoked in `KEYS`, or the connection does not come from the maintainer range `10.100.9.0/24` (the sshd drop-in gives `tnadmin` keys only from there; not a transport problem) | Operator: `bash update-scripts.sh && sudo bash setup-vpn.sh --sync-keys`. Admin (overlay up): `SYNC_ALL_NODES=1 ./common/wgvpn/sync-access.sh` |
 | **`tn_overlay_ip: cannot resolve` / ssh `UNKNOWN port 65535`** | Name not in `registry.csv` (or misspelled) — resolution returned nothing | Confirm the row exists and the name matches; `tn_overlay_ip <node>` must print an IP. Add via `add-node.sh` if missing |
 | **Host key verification failed** | Node was rebuilt; its host key changed (accept-new pinned the old one) | Clear the stale `known_hosts` line for the node's overlay IP, then retry |
 

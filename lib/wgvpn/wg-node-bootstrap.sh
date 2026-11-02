@@ -1,16 +1,16 @@
 #!/bin/bash
 #
 # =============================================================================
-# VENDORED from adiri-genesis: common/wgvpn/node/wg-node-bootstrap.sh
-#   upstream sha256: b2928a23c0e2209b55a7cca19a3e240b0f3b612ce3635dc08e1c7c816cb20d0b
-#   vendored:        2026-06-30
+# VENDORED from deploy-networks-common: wgvpn/node/wg-node-bootstrap.sh (adiri-genesis common/)
+#   upstream sha256: f6e22378569c5f79bb24127dacaa14794f392aa1cececa037641f1e5f07f80d5
+#   vendored:        2026-10-30 (upstream main 4a2925c, PR #6 merged 2026-10-30)
 #
-# Verbatim copy of the core team's node bootstrap, carrying ONE upstream-pushed
-# change already present in the source: the WG_NODE_SSHD_HARDEN guard (default 1 =
-# upstream behavior). setup-vpn.sh invokes this with WG_NODE_SSHD_HARDEN=0 so an
-# external operator's existing password/root SSH is never disabled — a scoped
-# `Match User tnadmin` drop-in is added by setup-vpn.sh instead. Keep this file
-# byte-identical to upstream below this header; re-vendor + diff procedure is in
+# Verbatim copy of the core team's node bootstrap, carrying TWO upstream-pushed
+# changes: the WG_NODE_SSHD_HARDEN guard and the WG_NODE_SUDOERS guard (both default
+# 1 = upstream behavior). setup-vpn.sh runs this with WG_NODE_SSHD_HARDEN=0 (a scoped
+# `Match User tnadmin` drop-in is added by setup-vpn.sh instead) and WG_NODE_SUDOERS=0
+# (setup-vpn.sh writes /etc/sudoers.d/90-tnadmin itself, before this runs). Keep this
+# file byte-identical to upstream below this header; re-vendor + diff procedure is in
 # docs/testnet-addons.md.
 # =============================================================================
 #
@@ -59,6 +59,9 @@
 #   WG_NODE_SSHD_HARDEN  1 = install the GLOBAL sshd drop-in disabling password/root SSH
 #                        (default; upstream GCP behavior) / 0 = leave sshd untouched so
 #                        the caller can add its own scoped drop-in (off-GCP lockout-safe)
+#   WG_NODE_SUDOERS      1 = write /etc/sudoers.d/90-<WG_TNADMIN_USER> granting that
+#                        user NOPASSWD:ALL (default; upstream behavior) / 0 = create the
+#                        user but leave that file alone so the caller can write its own rule
 
 set -uo pipefail
 
@@ -91,6 +94,7 @@ WG_NODE_FIREWALL="${WG_NODE_FIREWALL:-1}"
 WG_NODE_ENFORCE="${WG_NODE_ENFORCE:-0}"
 WG_NODE_PUBLIC_SSH="${WG_NODE_PUBLIC_SSH:-1}"
 WG_NODE_SSHD_HARDEN="${WG_NODE_SSHD_HARDEN:-1}"
+WG_NODE_SUDOERS="${WG_NODE_SUDOERS:-1}"
 HC_RANGES="${HC_RANGES:-130.211.0.0/22, 35.191.0.0/16, 209.85.152.0/22, 209.85.204.0/22}"
 # External uptime monitor(s) allowed to TCP-probe the health port (nft set body). Empty
 # default = no such rule (preserves the pre-lockdown posture where the cloud rule alone
@@ -114,9 +118,16 @@ fi
 # --- 2. tnadmin ops user -------------------------------------------------------
 echo "[wg-node] ensuring ${WG_TNADMIN_USER}"
 id -u "${WG_TNADMIN_USER}" >/dev/null 2>&1 || $SUDO useradd -m -s /bin/bash "${WG_TNADMIN_USER}"
+# WG_NODE_SUDOERS=0 skips the full-root sudo rule below. Off-GCP callers (setup-vpn.sh)
+# set 0 and write their own, narrower /etc/sudoers.d/90-<user> before this runs.
+# Default 1 keeps the upstream (GCP) behavior.
+if [ "${WG_NODE_SUDOERS}" = "1" ]; then
 echo "${WG_TNADMIN_USER} ALL=(ALL) NOPASSWD:ALL" | $SUDO tee "/etc/sudoers.d/90-${WG_TNADMIN_USER}" >/dev/null
 $SUDO chmod 440 "/etc/sudoers.d/90-${WG_TNADMIN_USER}"
 $SUDO visudo -cf "/etc/sudoers.d/90-${WG_TNADMIN_USER}" >/dev/null
+else
+echo "[wg-node] WG_NODE_SUDOERS=0 — leaving /etc/sudoers.d/90-${WG_TNADMIN_USER} to the caller"
+fi
 TN_HOME="$(getent passwd "${WG_TNADMIN_USER}" | cut -d: -f6)"
 $SUDO install -d -m 700 -o "${WG_TNADMIN_USER}" -g "${WG_TNADMIN_USER}" "${TN_HOME}/.ssh"
 # We own authorized_keys.tnvpn (registry maintainer keys); the guest agent owns the

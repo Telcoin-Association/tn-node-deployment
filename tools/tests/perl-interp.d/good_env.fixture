@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: values reach a single-quoted
+# program through %ENV. Expected: no findings.
+
+swap_docker_image() {
+    local old="$1" new="$2" file="$3"
+    TN_OLD_IMAGE="$old" TN_NEW_IMAGE="$new" \
+        perl -i -pe 's/\Q$ENV{TN_OLD_IMAGE}\E/$ENV{TN_NEW_IMAGE}/g' "$file"
+}
+
+export TN_KEY="$1"
+perl -ne 'print if /^\Q$ENV{TN_KEY}\E=/' "$2"
+perl -e $'print "tab\\there\\n"'

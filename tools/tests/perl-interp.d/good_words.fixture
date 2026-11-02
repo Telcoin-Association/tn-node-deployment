@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: the word perl with no program
+# after it. Expected: no findings.
+
+T="$1"
+file="$2"
+echo "perl is required: install perl and rerun"
+command -v perl >/dev/null 2>&1 || echo "perl missing"
+for c in systemctl perl docker; do printf '%s\n' "$c"; done
+printf '#!/bin/sh\necho "perl called: $*"\n' > "$T/bin/perl"
+chmod 0755 "$T/bin/perl"
+grep -c 'perl -i -pe "' "$file"
+grep -c "perl -i -pe \"s/\$x/" "$file"
+perl -i -pe 's/a/b/' "$file"
+case "$file" in
+    *perl*) echo "perl in the name: $file" ;;
+esac

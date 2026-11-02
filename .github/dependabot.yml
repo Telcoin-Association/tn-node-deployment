@@ -1,0 +1,13 @@
+# Weekly update proposals for the pinned workflow actions (SHA pins with the tag
+# in a comment) and the UI's Python requirements. Every proposal is a pull
+# request that goes through review and CI like any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /ui
+    schedule:
+      interval: weekly
