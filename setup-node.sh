@@ -158,7 +158,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.1"
 readonly SERVICE_NAME="telcoin"
 # The node's role is decided on-chain from committee membership, and the dashboard's
 # validator view follows the on-chain stake status (ConsensusRegistry getValidator).
@@ -564,10 +564,21 @@ ALLOW_DIRTY=false
 
 # _setup_tag_example -- a release tag of NETWORK's form, for messages and prompts.
 _setup_tag_example() {
-    if [[ "$NETWORK" == "mainnet" ]]; then
-        printf 'v1.0.0'
+    case "$NETWORK" in
+        mainnet) printf 'v1.0.0' ;;
+        devnet) printf 'v0.2.0-devnet' ;;
+        *) printf '%s' "$DEFAULT_DOCKER_TAG" ;;
+    esac
+}
+
+# _setup_image_example -- an image by digest of NETWORK's form, for messages: on
+# devnet its repository with a <digest> placeholder (devnet images are pinned by
+# digest and none is a default here), elsewhere DEFAULT_DOCKER_IMAGE.
+_setup_image_example() {
+    if [[ "$NETWORK" == "devnet" ]]; then
+        printf '%s@sha256:<digest>' "$TN_DEVNET_IMAGE_REPO"
     else
-        printf '%s' "$DEFAULT_DOCKER_TAG"
+        printf '%s' "$DEFAULT_DOCKER_IMAGE"
     fi
 }
 
@@ -888,10 +899,11 @@ print(json.dumps(d, indent=2))
 
 # Docker installs: the engine from Docker's apt repository (fingerprint-pinned key),
 # live-restore on, and the node's image by digest: <repository>@sha256:<digest> in the
-# network's repository (tn_docker_repo_for). --docker-image takes a digest reference;
+# network's repositories (tn_docker_repo_ok). --docker-image takes a digest reference;
 # --release-tag takes the release's image digest (tn_docker_image_for_tag: from the
 # signed release, else on testnet from the registry); without either, the newest
-# release image by digest (latest_docker_image). Never a tag, never latest.
+# release image by digest (latest_docker_image). Never a tag, never latest. Devnet
+# has no signed releases: there --docker-image is required and --release-tag refused.
 _preflight_docker() {
     print_step "Setting up Docker..."
 
@@ -903,6 +915,11 @@ _preflight_docker() {
         || setup_fail "A Docker install is refused on ${NETWORK} (see above)."
     repo="$(tn_docker_repo_for "$NETWORK")" \
         || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
+    # Devnet has no signed releases: its image is named by digest, never resolved
+    # from a release tag or picked as the newest release.
+    if [[ "$NETWORK" == "devnet" && ( -n "$tag" || -z "$DOCKER_IMAGE" ) ]]; then
+        setup_fail "A devnet Docker install runs the image given by --docker-image $(_setup_image_example), and takes no --release-tag: devnet has no signed releases. Nothing on this host was changed."
+    fi
 
     if ! command -v docker &>/dev/null; then
         print_info "Installing Docker from Docker's apt repository..."
@@ -954,7 +971,7 @@ _preflight_docker() {
             fi
             [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" && break
             typed=""
-            print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as ${DEFAULT_DOCKER_IMAGE}."
+            print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as $(_setup_image_example)."
         done
         if [[ -n "$tag" ]]; then
             check_release_floor "$tag"
@@ -3005,7 +3022,7 @@ finalize_install_inputs() {
             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
         fi
         if ! validate_docker_image "$DOCKER_IMAGE"; then
-            setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as ${DEFAULT_DOCKER_IMAGE}; pass --docker-image."
+            setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as $(_setup_image_example); pass --docker-image."
         fi
         return 0
     fi
@@ -3075,6 +3092,22 @@ json_check_install_flags() {
     if [[ "$JSON_PHASE" == "keygen" && -z "$INSTALL_METHOD" ]]; then
         setup_fail "--install-method is missing (expected source, release, docker or existing)"
     fi
+    # Devnet has no signed releases, so nothing there is installed from a release
+    # tag: --release-tag is refused outright, and so are the source and release
+    # installs that need one. A devnet node runs its image by digest (--docker-image
+    # <repository>@sha256:<digest>) or an existing binary. All refused here, before
+    # anything touches the box (Docker's apt repository included).
+    if [[ "$NETWORK" == "devnet" ]]; then
+        if [[ -n "$RELEASE_TAG" ]]; then
+            setup_fail "--release-tag ${RELEASE_TAG} is refused on devnet: devnet has no signed releases. Run the devnet image by digest instead: --install-method docker --docker-image $(_setup_image_example). Nothing on this host was changed."
+        fi
+        if [[ "$JSON_PHASE" == "keygen" ]] && [[ "$INSTALL_METHOD" == "source" || "$INSTALL_METHOD" == "release" ]]; then
+            setup_fail "--install-method ${INSTALL_METHOD} is refused on devnet: it needs a signed release, and devnet has none. Use --install-method docker --docker-image $(_setup_image_example), or --install-method existing. Nothing on this host was changed."
+        fi
+        if [[ "$JSON_PHASE" == "keygen" && "$INSTALL_METHOD" == "docker" && -z "$DOCKER_IMAGE" ]]; then
+            setup_fail "A devnet Docker install needs --docker-image $(_setup_image_example): devnet has no signed release to take the newest image from. Nothing on this host was changed."
+        fi
+    fi
     if [[ "$JSON_PHASE" == "keygen" && -z "$RELEASE_TAG" ]] && [[ "$INSTALL_METHOD" == "source" || "$INSTALL_METHOD" == "release" ]]; then
         setup_fail "No --release-tag (or --build-ref) supplied for a ${INSTALL_METHOD} install."
     fi
@@ -3086,9 +3119,8 @@ json_check_install_flags() {
         fi
         check_release_floor "$RELEASE_TAG"
     fi
-    # Docker on a network with no image repository (an open decision for devnet),
-    # or on mainnet before a mainnet release can be verified, is refused here,
-    # before anything touches the box.
+    # Docker on a network with no image repository, or on mainnet before a mainnet
+    # release can be verified, is refused here, before anything touches the box.
     if [[ "$INSTALL_METHOD" == "docker" ]] && ! tn_docker_network_ok "$NETWORK"; then
         setup_fail "A Docker install is refused on ${NETWORK} (see above); nothing on this host was changed."
     fi
@@ -3097,7 +3129,10 @@ json_check_install_flags() {
             setup_fail "Give --docker-image or --release-tag, not both."
         fi
         if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
-            setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give this network's image by digest (<repository>@sha256:<digest>), such as ${DEFAULT_DOCKER_IMAGE}, or its release tag with --release-tag"
+            if [[ "$NETWORK" == "devnet" ]]; then
+                setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give a devnet image by digest (<repository>@sha256:<digest>, the repository one of: ${TN_DEVNET_IMAGE_REPOS:-}), such as $(_setup_image_example)"
+            fi
+            setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give this network's image by digest (<repository>@sha256:<digest>), such as $(_setup_image_example), or its release tag with --release-tag"
         fi
     fi
     return 0

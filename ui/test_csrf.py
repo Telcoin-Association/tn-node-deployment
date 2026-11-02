@@ -496,6 +496,11 @@ class MainnetAndImagesTest(ServerTestCase):
                 self.assertEqual(server.latest_docker_image("mainnet"), want,
                                  "mainnet never falls back to the testnet default")
         self.assertEqual(calls[-1][-1], "mainnet")
+        # Devnet has an image repository but no releases: no newest image, nothing run.
+        before = len(calls)
+        server._docker_image_cache.clear()
+        self.assertEqual(server.latest_docker_image("devnet"), "")
+        self.assertEqual(len(calls), before, "nothing is looked up for devnet")
 
     def test_latest_docker_image_is_cached_with_bounded_probes(self):
         timeouts = []
@@ -558,11 +563,22 @@ class MainnetAndImagesTest(ServerTestCase):
         self.assertFalse(ok("mainnet", "v1.0.0-adiri"))
         self.assertFalse(ok("mainnet", "v1.0.0-rc1"), "release candidates are testnet only")
         self.assertFalse(ok("devnet", "v1.0.0"))
+        self.assertTrue(ok("devnet", "v0.2.0-devnet"))
+        self.assertTrue(ok("devnet", "x-devnet"))
+        for bad in ("-devnet", ".x-devnet", "_x-devnet", "v0.2.0-devnet-rc1", "\u00e9-devnet",
+                    "a\u00e9-devnet", "v0.2.0-DEVNET", "a/b-devnet", "v0 2-devnet", "v0.16.0-adiri",
+                    "main-0123abc", "v0.2.0-devnet\n"):
+            with self.subTest(tag=bad, network="devnet"):
+                self.assertFalse(ok("devnet", bad))
+        self.assertFalse(ok("testnet", "v0.2.0-devnet"))
+        self.assertFalse(ok("mainnet", "v0.2.0-devnet"))
         self.assertTrue(final("testnet", "v0.17.0-adiri"))
         self.assertFalse(final("testnet", "v0.17.0-adiri-rc1"))
         self.assertTrue(final("mainnet", "v1.0.0"))
         self.assertFalse(final("mainnet", "v1.0.0-rc1"))
         self.assertFalse(final("devnet", "v1.0.0"))
+        self.assertFalse(final("devnet", "v0.2.0-devnet"), "devnet has no signed releases")
+        self.assertFalse(final("devnet", "x-devnet"))
         key = server.release_tag_key
         self.assertLess(key("v0.17.0-adiri-rc1"), key("v0.17.0-adiri-rc2"))
         self.assertLess(key("v0.17.0-adiri-rc2"), key("v0.17.0-adiri-rc10"))
@@ -570,6 +586,7 @@ class MainnetAndImagesTest(ServerTestCase):
         self.assertLess(key("v0.17.0-adiri"), key("v0.17.1-adiri-rc1"))
         self.assertLess(key("v0.9.0-adiri"), key("v0.10.0-adiri"))
         self.assertIsNone(key("main"))
+        self.assertIsNone(key("v0.2.0-devnet"), "devnet tags have no release order")
         self.assertEqual(ran, [])
 
     @unittest.skipUnless(shutil.which("bash"), "bash not installed")
@@ -578,7 +595,10 @@ class MainnetAndImagesTest(ServerTestCase):
                 "v01.0.0", "main", "v1.0.0 ", "0.16.0-adiri", "v10.20.30",
                 "v0.17.0-adiri-rc1", "v0.17.0-adiri-rc10", "v0.17.0-adiri-rc0", "v0.17.0-adiri-rc01",
                 "v0.17.0-adiri-rc", "v0.17.0-adiri-rc1-hotfix", "v1.0.0-rc1", "v1.0.0-adiri-rc1 ",
-                "v0.017.0-adiri", "v1.2.3-adiri-rc01", "v0.0.0-adiri", "v1.00.0", "v0.0.10")
+                "v0.017.0-adiri", "v1.2.3-adiri-rc01", "v0.0.0-adiri", "v1.00.0", "v0.0.10",
+                "v0.2.0-devnet", "x-devnet", "a1.B_2-c-devnet", "-devnet", ".x-devnet", "_x-devnet",
+                "v0.2.0-devnet-rc1", "\u00e9-devnet", "a\u00e9-devnet", "v0.2.0-DEVNET", "a/b-devnet",
+                "v0.2.0-devnet ", "main-0123abc")
         vectors = [(n, t) for n in ("testnet", "mainnet", "devnet") for t in tags]
         script = ('source "$1" >/dev/null 2>&1; set +e; shift; while [ $# -gt 1 ]; do '
                   'tn_release_tag_ok "$1" "$2"; a=$?; tn_release_tag_final "$1" "$2"; b=$?; '
@@ -608,13 +628,16 @@ class MainnetAndImagesTest(ServerTestCase):
     def test_image_repositories_match_the_library(self):
         script = ('source "$1" >/dev/null 2>&1; printf "%s\\n" "$TN_GHCR_IMAGE_REPO" '
                   '"$TN_TESTNET_LEGACY_IMAGE_REPO" "$TN_MAINNET_IMAGE_REPO" "$DEFAULT_DOCKER_IMAGE" '
-                  '"$TN_TESTNET_IMAGE_REPOS"')
+                  '"$TN_TESTNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPO"')
         out = subprocess.run(["bash", "-c", script, "_", LIB],
                              capture_output=True, text=True, timeout=20).stdout.splitlines()
         self.assertEqual(out[:4], [server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO,
                                    server.DOCKER_REPO["mainnet"][0], server.DEFAULT_DOCKER_IMAGE])
         self.assertEqual(server.DOCKER_REPO["mainnet"], (server.GHCR_IMAGE_REPO,))
         self.assertEqual(sorted(out[4].split()), sorted(server.DOCKER_REPO["testnet"]))
+        self.assertEqual(sorted(out[5].split()), sorted(server.DOCKER_REPO["devnet"]))
+        self.assertEqual(out[6], server.TESTNET_LEGACY_IMAGE_REPO, "devnet's repository is the legacy one")
+        self.assertIn(out[6], server.DOCKER_REPO["devnet"])
 
     def test_image_rule(self):
         hexd = "a" * 64
@@ -632,7 +655,17 @@ class MainnetAndImagesTest(ServerTestCase):
                         base + ":v0.16.0-adiri@sha256:" + hexd):
                 with self.subTest(image=bad):
                     self.assertFalse(server.image_allowed(bad, "testnet"))
-        for net in ("devnet", "", None):
+        # Devnet: by digest from TN_DEVNET_IMAGE_REPOS (the same two repositories).
+        self.assertTrue(server.image_allowed(ghcr, "devnet"))
+        self.assertTrue(server.image_allowed(legacy, "devnet"))
+        for base in (server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO):
+            for bad in (base + ":v0.2.0-devnet", base + ":v0.16.0-adiri", base + ":main-0123abc",
+                        base + ":latest", "busybox@sha256:" + hexd, base + "-fork@sha256:" + hexd,
+                        "ghcr.io/someone-else/telcoin-network@sha256:" + hexd, base + "@sha256:" + "A" * 64,
+                        "-" + base + "@sha256:" + hexd, base + "@sha256:" + hexd + "\n"):
+                with self.subTest(image=bad, network="devnet"):
+                    self.assertFalse(server.image_allowed(bad, "devnet"))
+        for net in ("", None, "foo"):
             self.assertFalse(server.image_allowed(ghcr, net))
 
     @unittest.skipUnless(shutil.which("bash"), "bash not installed")
@@ -642,7 +675,8 @@ class MainnetAndImagesTest(ServerTestCase):
         for base in (server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO, "busybox",
                      server.GHCR_IMAGE_REPO + "-fork"):
             images += [base + "@sha256:" + hexd, base + ":v0.16.0-adiri", base + ":v1.0.0",
-                       base + "@sha256:" + "B" * 64, base + "@sha256:" + hexd[:63]]
+                       base + "@sha256:" + "B" * 64, base + "@sha256:" + hexd[:63],
+                       base + ":v0.2.0-devnet", base + ":main-0123abc"]
         vectors = [(n, i) for n in ("testnet", "mainnet", "devnet") for i in images]
         script = ('source "$1" >/dev/null 2>&1; set +e; shift; while [ $# -gt 1 ]; do '
                   'TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$2" "$1" 2>/dev/null; echo $?; '
@@ -672,6 +706,8 @@ class MainnetAndImagesTest(ServerTestCase):
                 ("v1.0.0", "mainnet", ("v1.0.0", "", None)),
                 (ghcr + ":v1.0.0", "mainnet", ("v1.0.0", "", None)),
                 (digest, "mainnet", ("", digest, None)),
+                (digest, "devnet", ("", digest, None)),
+                (legacy_digest, "devnet", ("", legacy_digest, None)),
                 ("", "testnet", ("", "", None))):
             with self.subTest(image=value, network=net):
                 self.assertEqual(choice(value, net), want)
@@ -679,7 +715,9 @@ class MainnetAndImagesTest(ServerTestCase):
                          ("v1.0.0", "testnet"), ("v0.16.0-adiri", "mainnet"), ("v1.0.0-rc1", "mainnet"),
                          (legacy_digest, "mainnet"), (legacy + ":v1.0.0", "mainnet"), ("main", "testnet"),
                          ("busybox@sha256:" + "a" * 64, "testnet"), (ghcr + "-fork:v0.16.0-adiri", "testnet"),
-                         (digest, "devnet")):
+                         ("v0.16.0-adiri", "devnet"), (legacy + ":v0.16.0-adiri", "devnet"),
+                         (ghcr + ":main-0123abc", "devnet"), ("busybox@sha256:" + "a" * 64, "devnet"),
+                         (digest, "foo")):
             with self.subTest(image=bad, network=net):
                 tag, img, err = choice(bad, net)
                 self.assertIsNone(tag)

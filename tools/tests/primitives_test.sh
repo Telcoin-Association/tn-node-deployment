@@ -450,7 +450,23 @@ tag_case 'trailing LF'                mainnet $'v1.0.0\n'      1
 tag_case 'leading text'               mainnet 'xv1.0.0'        1
 tag_case 'suffix after -adiri'        testnet 'v1.0.0-adiri-x' 1
 tag_case 'empty tag'                  mainnet ''               1
-tag_case 'devnet network'             devnet  'v1.0.0'         1
+tag_case 'v1.0.0 devnet'               devnet  'v1.0.0'         1
+tag_case 'v0.2.0-devnet devnet'        devnet  'v0.2.0-devnet'  0
+tag_case 'x-devnet devnet'             devnet  'x-devnet'       0
+tag_case 'letters digits . _ - devnet' devnet  'a1.B_2-c-devnet' 0
+tag_case 'v0.2.0-devnet testnet'       testnet 'v0.2.0-devnet'  1
+tag_case 'v0.2.0-devnet mainnet'       mainnet 'v0.2.0-devnet'  1
+tag_case 'v0.16.0-adiri devnet'        devnet  'v0.16.0-adiri'  1
+tag_case 'main-<sha> devnet'           devnet  'main-0123abc'   1
+tag_case 'nothing before -devnet'      devnet  '-devnet'        1
+tag_case 'starts with . (devnet)'      devnet  '.x-devnet'      1
+tag_case 'starts with _ (devnet)'      devnet  '_x-devnet'      1
+tag_case 'suffix after -devnet'        devnet  'v0.2.0-devnet-rc1' 1
+tag_case 'upper-case -DEVNET'          devnet  'v0.2.0-DEVNET'  1
+tag_case 'slash in a devnet tag'       devnet  'a/b-devnet'     1
+tag_case 'space in a devnet tag'       devnet  'v0 2-devnet'    1
+tag_case 'trailing LF (devnet)'        devnet  $'v0.2.0-devnet\n' 1
+tag_case 'empty tag (devnet)'          devnet  ''               1
 tag_case 'leading zero in Y (testnet)' testnet 'v0.017.0-adiri' 1
 tag_case 'leading zero in X (mainnet)' mainnet 'v01.0.0'        1
 tag_case 'leading zero in Z (mainnet)' mainnet 'v1.0.00'        1
@@ -459,6 +475,28 @@ tag_case 'zero parts (testnet)'        testnet 'v0.0.0-adiri'   0
 tag_case 'zero parts (mainnet)'        mainnet 'v0.0.0'         0
 tag_case 'multi-digit parts'           mainnet 'v10.20.30'      0
 tag_case 'empty network'              ''      'v1.0.0'         1
+# A letter outside ASCII is refused on devnet in every locale (a range such as
+# A-Z matches accented letters under some collations).
+for loc in C C.UTF-8 en_US.UTF-8; do
+    for t in 'é-devnet' 'aé-devnet' 'vé0.2.0-devnet'; do
+        RC=0; ( LC_ALL="$loc"; tn_release_tag_ok devnet "$t" ) 2>/dev/null || RC=$?
+        check_rc "release_tag_ok: ${t} devnet refused (LC_ALL=${loc})" 1 "$RC"
+    done
+done
+
+# ---- tn_release_tag_final ---------------------------------------------------------
+final_case() {
+    run tn_release_tag_final "$2" "$3"
+    check_rc "release_tag_final: $1" "$4" "$RC"
+}
+final_case 'v0.16.0-adiri testnet'      testnet 'v0.16.0-adiri'     0
+final_case 'v0.17.0-adiri-rc1 testnet'  testnet 'v0.17.0-adiri-rc1' 1
+final_case 'v1.0.0 mainnet'             mainnet 'v1.0.0'            0
+final_case 'v0.2.0-devnet devnet'       devnet  'v0.2.0-devnet'     1
+final_case 'x-devnet devnet'            devnet  'x-devnet'          1
+final_case 'v0.16.0-adiri devnet'       devnet  'v0.16.0-adiri'     1
+run tn_release_tag_grammar
+check "release_tag_grammar names the devnet form" yes "$(has "$OUT" 'devnet <name>-devnet')"
 
 # ---- tn_cargo_features_for ----------------------------------------------------------
 run tn_cargo_features_for testnet

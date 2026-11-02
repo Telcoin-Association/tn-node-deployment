@@ -88,7 +88,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_rerender_node_launch tn_move_node_log_dir tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_install_root_binary tn_release_stage tn_source_build \
         tn_docker_resolve_ref tn_docker_local_digest tn_release_tags_sort tn_release_tag_newer \
-        tn_release_newest_tag tn_registry_tags tn_release_tag_final tn_release_tag_grammar >/dev/null; then
+        tn_release_newest_tag tn_registry_tags tn_release_tag_final tn_release_tag_grammar \
+        _tn_guard_network >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this update-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -106,7 +107,7 @@ unset _tn_old
 # point of the two-phase design. Restore the intended semantics.
 set +e
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.1"
 # GAR_TAGS_URL is provided by lib/common.sh (sourced above). Re-declaring it
 # readonly here threw "GAR_TAGS_URL: readonly variable" to stderr, which the UI
 # surfaced as "update checks aren't available on this host".
@@ -310,6 +311,21 @@ existing_update_refusal() {
 # chain id. The reason goes to stderr, so --json stdout stays clean.
 detect_network() {
     tn_detect_network
+}
+
+# image_network -- print testnet, mainnet or devnet: the network of a Docker image
+# change (_tn_guard_network: detect_network, or NETWORK=devnet in .node-meta). A
+# devnet node changes its image by digest; nothing else updates on devnet. Prints
+# nothing and returns 1, with detect_network's reason on stderr, when the network
+# cannot be told.
+image_network() {
+    local net
+    net="$(_tn_guard_network)"
+    if [[ -z "$net" ]]; then
+        detect_network >/dev/null || true
+        return 1
+    fi
+    printf '%s\n' "$net"
 }
 
 # Resolve the file that carries the docker image reference on this install:
@@ -1139,7 +1155,8 @@ _uc_vote_setting() {
 
 # verify_consensus_participation -- the post-restart check every apply runs after
 # verify_health_after_restart: the node answers eth_chainId with its network's chain
-# id (2017 testnet, 487 mainnet); its tn_latestConsensusHeader number advances
+# id (2017 testnet, 487 mainnet, 32285 devnet; the network as image_network takes
+# it, _tn_guard_network); its tn_latestConsensusHeader number advances
 # between reads TN_UPDATE_VOTE_POLL seconds apart (default 10); and a node that was
 # CvvActive before the stop (UPDATE_MODE_BEFORE, recorded by update_epoch_wait)
 # reads CvvActive again from tn_nodeMode. Both wait at most TN_UPDATE_VOTE_TIMEOUT
@@ -1158,10 +1175,11 @@ verify_consensus_participation() {
     poll="$(_uc_vote_setting TN_UPDATE_VOTE_POLL 10)"
     limit="$(_uc_vote_setting TN_UPDATE_VOTE_TIMEOUT 600)"
     update_wait_say step "Checking that ${SERVICE_NAME} follows consensus on its chain..."
-    net="$(detect_network 2>/dev/null)" || net=""
+    net="$(_tn_guard_network)" || net=""
     case "$net" in
         testnet) want="$TESTNET_CHAIN_ID" ;;
         mainnet) want="$MAINNET_CHAIN_ID" ;;
+        devnet) want="$DEVNET_CHAIN_ID" ;;
         *) want="" ;;
     esac
     out="$(tn_rpc_call "$url" eth_chainId '[]' 5 2>/dev/null)" || out=""
@@ -1441,12 +1459,14 @@ update_epoch_wait() {
 # tn_release_tag_key, at most 15. Only tags that pass tn_release_tag_final are kept,
 # so latest, hot-patch, branch, release-candidate and other networks' tags are
 # never offered (a release candidate is taken only when typed). Nothing when the
-# repository or the registry cannot be read.
+# repository or the registry cannot be read, and on devnet, whose tags are no
+# release tags to offer (the registry is not asked there).
 fetch_docker_tags() {
     local net="${1:-}" repo
     if [[ -z "$net" ]]; then
         net="$(tn_detect_network 2>/dev/null)" || return 0
     fi
+    [[ "$net" == "testnet" || "$net" == "mainnet" ]] || return 0
     repo="$(tn_docker_repo_for "$net" 2>/dev/null)" || return 0
     {
         tn_registry_tags "$repo" 2>/dev/null || true
@@ -1561,7 +1581,7 @@ PREPARED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 prepare_docker_update() {
     local arg="$1" net current
     print_header "Prepare Update -- Docker Install"
-    if ! net="$(detect_network)"; then
+    if ! net="$(image_network)"; then
         print_error "Cannot tell which network this node runs, so its image repository is unknown. Nothing was changed."
         return 1
     fi
@@ -2827,7 +2847,7 @@ json_check() {
             latest=$(latest_docker_ref 2>/dev/null || echo "")
             if [[ -n "$latest" && -n "$img" ]]; then
                 cur_d="$(docker_running_digest "$img")"
-                net="$(tn_detect_network 2>/dev/null)" || net=""
+                net="$(image_network 2>/dev/null)" || net=""
                 if [[ -n "$net" ]] && out="$(tn_docker_resolve_ref "$net" "$latest" "" 2>/dev/null)"; then
                     out="${out%% *}"
                     lat_d="${out##*@}"
@@ -2905,15 +2925,18 @@ json_prepare_done() {
 
 json_prepare_docker() {
     local arg="$1" net current cur_tag
-    if ! net="$(detect_network)"; then
+    if ! net="$(image_network)"; then
         json_event error "cannot tell which network this node runs, so its image repository is unknown; nothing pulled"; return 1
     fi
     current=$(detect_current_docker_image) || {
         json_event error "could not read current docker image from the launch file"; return 1; }
     # A release tag (alone or on this network's repository) resolves to its digest
     # (the signed release's IMAGE_DIGEST); a digest reference must be this network's
-    # repository. Nothing else is pulled.
+    # repository. Nothing else is pulled. Devnet takes a digest reference only.
     if ! docker_resolve_target "$arg" "$net"; then
+        if [[ "$net" == "devnet" ]]; then
+            json_event error "image refused: ${arg} is not a devnet image by digest (<repository>@sha256:<digest>; devnet has no signed releases); nothing pulled"; return 1
+        fi
         json_event error "image refused: ${arg} is not a ${net} release tag or this network's image by digest; nothing pulled"; return 1
     fi
     cur_tag="$(docker_current_tag "$current")"

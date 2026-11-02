@@ -96,7 +96,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
     || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_start_script \
         tn_write_node_env tn_rerender_node_launch tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
-        tn_docker_resolve_ref tn_docker_network_ok >/dev/null; then
+        tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -106,7 +106,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.0.1"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -1370,17 +1370,24 @@ set_private_forward_targets() {
 }
 
 # set_docker_image IMAGE -- pull IMAGE and swap it into the launch file (Docker
-# installs only). Mirrors edit_docker_image. The same image is a no-op.
+# installs only). Mirrors edit_docker_image. The same image is a no-op. The network
+# is _tn_guard_network's, so a devnet node (NETWORK=devnet in .node-meta) changes
+# its image too, by digest only.
 set_docker_image() {
     local value="$1" net out new_image new_tag exec_start current_image
-    if ! net="$(tn_detect_network 2>/dev/null)"; then
+    net="$(_tn_guard_network)"
+    if [[ -z "$net" ]]; then
         edit_error "cannot tell which network this node runs, so its image repository is unknown"
         return 1
     fi
     # A release tag resolves to the release's digest; a digest reference must be
     # this network's repository. Tags are never written into the start script.
     if ! out="$(tn_docker_resolve_ref "$net" "$value" edit_wait_say)"; then
-        edit_error "image refused: ${value} (give a ${net} release tag, or this network's image by digest: <repository>@sha256:<digest>)"
+        if [[ "$net" == "devnet" ]]; then
+            edit_error "image refused: ${value} (give a devnet image by digest: <repository>@sha256:<digest>; devnet has no signed releases)"
+        else
+            edit_error "image refused: ${value} (give a ${net} release tag, or this network's image by digest: <repository>@sha256:<digest>)"
+        fi
         return 1
     fi
     new_image="${out%% *}"
@@ -2337,14 +2344,14 @@ edit_docker_image() {
     current_image="$(launch_docker_image "$exec_start")"
 
     local net repo
-    if ! net="$(tn_detect_network 2>/dev/null)"; then
+    net="$(_tn_guard_network)"
+    if [[ -z "$net" ]]; then
         print_error "Cannot tell this node's network, so its image repository is unknown; the image is not changed."
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
     fi
-    # tn_docker_network_ok says why (devnet has no repository, an open decision;
-    # mainnet has no release that verifies yet).
+    # tn_docker_network_ok says why (mainnet has no release that verifies yet).
     if ! tn_docker_network_ok "$net" || ! repo="$(tn_docker_repo_for "$net")"; then
         print_error "No ${net} image can be used yet; the image is not changed."
         echo ""
@@ -2353,8 +2360,14 @@ edit_docker_image() {
     fi
     print_info "Current image: ${current_image:-unknown}"
     echo ""
-    print_info "Enter a ${net} release tag (such as ${DEFAULT_DOCKER_TAG}) to run that release's"
-    print_info "image by digest, or the image itself as ${repo}@sha256:<digest>."
+    if [[ "$net" == "devnet" ]]; then
+        # Devnet has no signed releases: an image is named by digest only.
+        print_info "Enter the devnet image by digest, such as ${repo}@sha256:<digest>"
+        print_info "(devnet has no signed releases, so no release tag names an image)."
+    else
+        print_info "Enter a ${net} release tag (such as ${DEFAULT_DOCKER_TAG}) to run that release's"
+        print_info "image by digest, or the image itself as ${repo}@sha256:<digest>."
+    fi
     print_info "The node never runs an image by tag. Enter keeps the current image."
     echo ""
 
@@ -2368,7 +2381,11 @@ edit_docker_image() {
     fi
     if ! out="$(tn_docker_resolve_ref "$net" "$input")"; then
         print_error "Image refused: ${input}"
-        print_info "Give a ${net} release tag, or ${repo}@sha256:<digest>."
+        if [[ "$net" == "devnet" ]]; then
+            print_info "Give the devnet image by digest: ${repo}@sha256:<digest>."
+        else
+            print_info "Give a ${net} release tag, or ${repo}@sha256:<digest>."
+        fi
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return

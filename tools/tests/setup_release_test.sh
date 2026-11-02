@@ -2,11 +2,14 @@
 # tools/tests/setup_release_test.sh -- setup-node.sh's install inputs and Docker host
 # setup: --release-tag/--build-ref take release tags of the network only and must
 # agree, --docker-image takes a digest reference only (never with --release-tag),
-# --install-method release is known, --allow-dirty is refused in --json; the
+# --install-method release is known, --allow-dirty is refused in --json; on devnet
+# (no signed releases) --docker-image takes a digest of TN_DEVNET_IMAGE_REPOS and is
+# required at keygen, --release-tag and source or release installs are refused; the
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
 # edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
-# a digest, and records the image in .node-meta.
+# a digest, and records the image in .node-meta; on a devnet host (NETWORK=devnet in
+# .node-meta) it takes a digest only.
 #
 # Copies of setup-node.sh and edit-config.sh without their last line are sourced in
 # subshells (both source lib/common.sh, whose readonly constants cannot be set
@@ -54,9 +57,32 @@ flags "docker image and release tag together refused" 1 testnet docker v0.16.0-a
 flags "unknown install method refused" 1 testnet binary "" "" ""
 flags "docker on mainnet (no mainnet release verifies yet) refused" 1 mainnet docker "" "" ""
 check "docker on mainnet: the refusal says no mainnet release can be verified" yes "$(grep -q 'No mainnet release can be verified yet' "$T/sn.err" && echo yes || echo no)"
-flags "docker on devnet (no image repository) refused" 1 devnet docker "" "" ""
-# _preflight_docker: a network without an image repository stops before Docker's apt
-# repository, the engine or daemon.json is touched.
+flags "docker on devnet without --docker-image refused (no signed release to take the newest from)" 1 devnet docker "" "" ""
+check "docker on devnet without --docker-image: the refusal asks for one" yes "$(grep -q 'A devnet Docker install needs --docker-image' "$T/sn.err" && echo yes || echo no)"
+# Devnet: an image by digest from TN_DEVNET_IMAGE_REPOS, never a tag; no
+# --release-tag, and no install that needs a signed release.
+GH="ghcr.io/telcoin-association/telcoin-network"
+flags "devnet: docker by a legacy-repository digest" 0 devnet docker "" "" "${R}@sha256:${D64}"
+flags "devnet: docker by a ghcr digest" 0 devnet docker "" "" "${GH}@sha256:${D64}"
+flags "devnet: docker by another repository's digest refused" 1 devnet docker "" "" "docker.io/library/busybox@sha256:${D64}"
+check "devnet: the refusal names the devnet repositories" yes "$(grep -qF "the repository one of: ${R} ${GH})" "$T/sn.err" && echo yes || echo no)"
+flags "devnet: docker by a devnet tag refused" 1 devnet docker "" "" "${R}:v0.2.0-devnet"
+flags "devnet: docker by main-<sha> refused" 1 devnet docker "" "" "${R}:main-0123abc"
+flags "devnet: docker by a testnet release tag refused" 1 devnet docker "" "" "${R}:v0.16.0-adiri"
+flags "devnet: finalize of a docker install without --docker-image (keygen recorded it)" 0 devnet docker "" "" "" finalize
+flags "devnet: finalize with no install method (read back from .node-meta)" 0 devnet "" "" "" "" finalize
+flags "devnet: --release-tag x-devnet refused" 1 devnet docker x-devnet "" ""
+check "devnet: the --release-tag refusal says devnet has no signed releases" yes "$(grep -q -- '--release-tag x-devnet is refused on devnet: devnet has no signed releases' "$T/sn.err" && echo yes || echo no)"
+flags "devnet: --release-tag x-devnet refused at finalize too" 1 devnet docker x-devnet "" "" finalize
+flags "devnet: --build-ref v0.2.0-devnet refused" 1 devnet docker "" v0.2.0-devnet ""
+flags "devnet: --release-tag with an existing binary refused" 1 devnet existing v0.2.0-devnet "" ""
+flags "devnet: a source build at keygen refused" 1 devnet source "" "" ""
+check "devnet: the source refusal names the way out" yes "$(grep -q -- '--install-method source is refused on devnet: it needs a signed release' "$T/sn.err" && echo yes || echo no)"
+flags "devnet: a release install at keygen refused" 1 devnet release "" "" ""
+flags "devnet: an existing binary at keygen accepted" 0 devnet existing "" "" ""
+# _preflight_docker: mainnet (no mainnet release verifies yet) stops before Docker's
+# apt repository, the engine or daemon.json is touched; so does devnet without
+# --docker-image (it has no signed release to take an image from).
 for net in mainnet devnet; do
     rc="$(sn "NETWORK=$net RELEASE_TAG= DOCKER_IMAGE=; command() { return 1; }; _setup_docker_apt() { echo APT_RAN; }; _setup_docker_live_restore() { echo LIVE_RESTORE_RAN; }; _preflight_docker")"
     check "_preflight_docker on $net: refused before apt and daemon.json" "1 no no" \
@@ -64,6 +90,9 @@ for net in mainnet devnet; do
 done
 rc="$(sn "JSON_MODE=false NETWORK=testnet INSTALL_METHOD=docker RELEASE_TAG=v0.16.0-adiri DOCKER_IMAGE='${R}@sha256:${D64}'; init_install_flags")"
 check "interactive: --docker-image and --release-tag together refused" "1 yes" "$rc $(grep -q 'not both' "$T/sn.err" && echo yes || echo no)"
+rc="$(sn "NETWORK=devnet RELEASE_TAG=v0.2.0-devnet DOCKER_IMAGE=; command() { return 1; }; _setup_docker_apt() { echo APT_RAN; }; _setup_docker_live_restore() { echo LIVE_RESTORE_RAN; }; _preflight_docker")"
+check "_preflight_docker on devnet with a release tag: refused before apt and daemon.json" "1 no no yes" \
+    "$rc $(grep -q APT_RAN "$T/sn.out" && echo yes || echo no) $(grep -q LIVE_RESTORE_RAN "$T/sn.out" && echo yes || echo no) $(grep -q 'takes no --release-tag: devnet has no signed releases' "$T/sn.err" && echo yes || echo no)"
 rc="$(sn "JSON_MODE=true ALLOW_DIRTY=true INSTALL_METHOD=source; init_install_flags")"
 check_rc "--allow-dirty in --json refused" 1 "$rc"
 
@@ -75,6 +104,12 @@ check "pulled image not held under its digest: setup stops" "1 yes" "$rc $(grep 
 check_has "the image was pulled by digest" "pull ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
 rc="$(sn "$PD; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s' \"\$BINARY_PATH\" > \"\$T/bp\"")"
 check "pulled image held under its digest: setup goes on" "0 docker" "$rc $(cat "$T/bp" 2>/dev/null)"
+# Devnet by digest: pulled as given, no release tag looked up in a registry.
+: > "$T/docker.log"; rm -f "$T/bp" "$T/loud"
+rc="$(sn "$PD; NETWORK=devnet DOCKER_IMAGE=\"\${GH}@sha256:\${D64}\"; tn_registry_tags() { echo tags > \"\$T/loud\"; return 1; }; tn_registry_digest() { echo digest > \"\$T/loud\"; return 1; }; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s %s' \"\$BINARY_PATH\" \"\${RELEASE_TAG:-none}\" > \"\$T/bp\"")"
+check "devnet by digest: setup goes on, no release tag recorded" "0 docker none" "$rc $(cat "$T/bp" 2>/dev/null)"
+check_has "devnet by digest: the image was pulled by digest" "pull ${GH}@sha256:${D64}" "$(cat "$T/docker.log")"
+check "devnet by digest: no registry lookup" "no" "$([[ -e "$T/loud" ]] && echo yes || echo no)"
 
 # _preflight_docker: an image given by digest alone is held to the oldest supported
 # release through the release .node-meta records for that digest; otherwise a warning.
@@ -194,4 +229,80 @@ rc="$(ec "${R}@sha256:$(printf '%s' "$D64" | tr 0 a)")"
 check "edit: a digest alone runs as given, tag removed from .node-meta" "0 yes" "$rc $(grep -qx 'unset RELEASE_TAG' "$T/meta.log" && echo yes || echo no)"
 rc="$( ( set +e; source "$T/ec/edit-config.sh" >/dev/null 2>&1; set +e; edit_error() { :; }; launch_current_form() { echo called > "$T/lcf"; }; swap_docker_image "${R}:v0.16.0-adiri" ) >/dev/null 2>&1; printf '%s' "$?")"
 check "edit: swap_docker_image refuses a tag before touching anything" "1 no" "$rc $([[ -e "$T/lcf" ]] && echo yes || echo no)"
+
+# edit-config on a devnet host: tn_detect_network names no network and .node-meta
+# says NETWORK=devnet (_tn_guard_network). Images by digest only, from
+# TN_DEVNET_IMAGE_REPOS; a devnet tag names no image (the real
+# tn_docker_image_for_tag refuses it before any release is fetched).
+ecd() {
+    ( set +e
+      # shellcheck source=/dev/null
+      source "$T/ec/edit-config.sh" >/dev/null 2>&1
+      set +e
+      TARGET_LAUNCH_FILE="$T/tn-start-docker"
+      tn_detect_network() { return 1; }
+      meta_get() { [ "$1" = NETWORK ] && [ -n "$ECD_META" ] && printf '%s\n' "$ECD_META"; }
+      read_launch_line() { printf 'exec docker run --rm %s@sha256:%s telcoin node --http\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+      edit_launch_unambiguous() { return 0; }
+      tn_fetch_release_image() { echo fetched > "$T/fetched"; return 1; }
+      tn_docker_holds_digest() { return 0; }
+      docker() { printf '%s\n' "$*" >> "$T/docker.log"; }
+      swap_docker_image() { printf '%s\n' "$1" > "$T/swapped"; }
+      meta_set() { printf '%s=%s\n' "$1" "$2" >> "$T/meta.log"; }
+      meta_unset() { printf 'unset %s\n' "$1" >> "$T/meta.log"; }
+      edit_error() { printf '%s\n' "$*" >&2; }
+      edit_step() { :; }
+      set_docker_image "$1" ) >/dev/null 2>"$T/ec.err"
+    printf '%s' "$?"
+}
+swapped() { [[ -e "$T/swapped" ]] && cat "$T/swapped" || echo none; }
+ECD_META=devnet
+rm -f "$T/swapped" "$T/meta.log" "$T/fetched"
+rc="$(ecd "${GH}@sha256:${D64}")"
+check "edit, devnet: a ghcr digest runs as given" "0 ${GH}@sha256:${D64}" "$rc $(swapped)"
+check "edit, devnet: .node-meta records image and digest, no tag" "DOCKER_IMAGE=${GH}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} unset RELEASE_TAG" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+rm -f "$T/swapped" "$T/meta.log"
+rc="$(ecd "${R}@sha256:${D64}")"
+check "edit, devnet: a legacy-repository digest runs as given" "0 ${R}@sha256:${D64}" "$rc $(swapped)"
+for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.16.0-adiri "${R}:main-0123abc" "docker.io/library/busybox@sha256:${D64}" "${R}:latest"; do
+    rm -f "$T/swapped"
+    rc="$(ecd "$bad")"
+    check "edit, devnet: ${bad} refused, nothing swapped" "1 none yes" "$rc $(swapped) $(grep -q 'give a devnet image by digest' "$T/ec.err" && echo yes || echo no)"
+done
+check "edit, devnet: no release fetched for a devnet tag" "no" "$([[ -e "$T/fetched" ]] && echo yes || echo no)"
+ECD_META=""
+rm -f "$T/swapped"
+rc="$(ecd "${GH}@sha256:${D64}")"
+check "edit, network unknown: refused, nothing swapped" "1 none yes" "$rc $(swapped) $(grep -q 'cannot tell which network' "$T/ec.err" && echo yes || echo no)"
+ECD_META=testnet
+rc="$(ecd "${GH}@sha256:${D64}")"
+check "edit, .node-meta says testnet but detection fails: refused" "1 none" "$rc $(swapped)"
+# swap_docker_image itself (no network given): the devnet digest passes its check
+# and reaches the rewrite; with the network unknown it stops before it.
+swap_probe() {
+    rm -f "$T/lcf"
+    ( set +e; source "$T/ec/edit-config.sh" >/dev/null 2>&1; set +e
+      tn_detect_network() { return 1; }
+      meta_get() { [ "$1" = NETWORK ] && [ -n "$ECD_META" ] && printf '%s\n' "$ECD_META"; }
+      edit_error() { :; }; launch_current_form() { echo called > "$T/lcf"; return 1; }
+      swap_docker_image "$1" ) >/dev/null 2>&1
+    printf '%s %s' "$?" "$([[ -e "$T/lcf" ]] && echo yes || echo no)"
+}
+ECD_META=devnet
+check "swap, devnet: a ghcr digest reaches the rewrite" "1 yes" "$(swap_probe "${GH}@sha256:${D64}")"
+check "swap, devnet: another repository stops before it" "1 no" "$(swap_probe "docker.io/library/busybox@sha256:${D64}")"
+ECD_META=""
+check "swap, network unknown: stops before the rewrite" "1 no" "$(swap_probe "${GH}@sha256:${D64}")"
+# The interactive image menu on devnet asks for a digest, never a release tag.
+( set +e
+         # shellcheck source=/dev/null
+         source "$T/ec/edit-config.sh" >/dev/null 2>&1
+         set +e
+         read_launch_line() { printf 'exec docker run --rm %s@sha256:%s telcoin node --http\n' "$R" "$D64"; }
+         tn_detect_network() { return 1; }
+         meta_get() { [ "$1" = NETWORK ] && printf 'devnet\n'; }
+         edit_docker_image ) < /dev/null > "$T/ec.out" 2>&1
+check "edit menu, devnet: asks for the image by digest, not a release tag" "yes no" \
+    "$(grep -q 'Enter the devnet image by digest' "$T/ec.out" && echo yes || echo no) $(grep -q 'release tag (such as' "$T/ec.out" && echo yes || echo no)"
+unset ECD_META
 finish

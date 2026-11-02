@@ -3,6 +3,8 @@
 # tools/tests/network_detect_test.sh -- update-node.sh's network detection and
 # the source prepare's build features: CRLF .node-meta, the genesis chain id
 # fallback, a duplicated or unknown NETWORK (fail closed, no git, no cargo),
+# image_network (devnet from NETWORK=devnet in .node-meta) and the devnet image
+# paths that use it (pending NEW_IMAGE, fetch_docker_tags, json_prepare_docker),
 # duplicated INSTALL_METHOD and BINARY_PATH, the build log and the build
 # output check.
 #
@@ -112,6 +114,110 @@ run detect_network
 check_rc "duplicate NETWORK: rc 1 (no genesis fallback)" 1 "$RC"
 check "duplicate NETWORK: nothing printed" "" "$OUT"
 check "duplicate NETWORK: named on stderr" yes "$(has "$ERR" "NETWORK is set 2 times")"
+
+# -----------------------------------------------------------------------------
+# image_network: the network of a Docker image change (_tn_guard_network):
+# detect_network's, or devnet from NETWORK=devnet in .node-meta (detect_network
+# itself stays rc 1 there). Nothing else is guessed.
+# -----------------------------------------------------------------------------
+no_genesis
+meta $'NETWORK=devnet\n'
+run image_network
+check "image_network, NETWORK=devnet: devnet" "0 devnet" "$RC $OUT"
+meta $'NETWORK=devnet\r\n'
+run image_network
+check "image_network, CRLF NETWORK=devnet: devnet" "0 devnet" "$RC $OUT"
+meta $'NETWORK=testnet\n'
+run image_network
+check "image_network, NETWORK=testnet: testnet" "0 testnet" "$RC $OUT"
+meta $'NETWORK=mainnet\n'
+run image_network
+check "image_network, NETWORK=mainnet: mainnet" "0 mainnet" "$RC $OUT"
+genesis 32285
+meta $'INSTALL_METHOD=docker\n'
+run image_network
+check "image_network, no NETWORK, devnet genesis: rc 1, nothing" "1 " "$RC $OUT"
+no_genesis
+meta $'NETWORK=devnet\n' $'NETWORK=devnet\n'
+run image_network
+check "image_network, duplicate NETWORK=devnet: rc 1, nothing" "1 " "$RC $OUT"
+check "image_network, duplicate NETWORK=devnet: named on stderr" yes "$(has "$ERR" "NETWORK is set 2 times")"
+meta $'NETWORK=foo\n'
+run image_network
+check "image_network, NETWORK=foo: rc 1, nothing" "1 " "$RC $OUT"
+check "image_network, NETWORK=foo: detect_network's reason on stderr" yes "$(has "$ERR" "NETWORK='foo'")"
+
+# pending_key_check NEW_IMAGE on a devnet host: validate_docker_image takes the
+# network from _tn_guard_network (no NETWORK global in update-node.sh).
+R="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
+GH="ghcr.io/telcoin-association/telcoin-network"
+D64="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+pk() {  # pk NAME EXPECTED-RC IMAGE
+    local rc=0
+    ( unset NETWORK TN_DOCKER_REQUIRE_DIGEST; pending_key_check NEW_IMAGE "$3" ) >/dev/null 2>&1 || rc=$?
+    check_rc "$1" "$2" "$rc"
+}
+meta $'NETWORK=devnet\n'
+pk "pending NEW_IMAGE, devnet: a ghcr digest" 0 "${GH}@sha256:${D64}"
+pk "pending NEW_IMAGE, devnet: a legacy-repository digest" 0 "${R}@sha256:${D64}"
+pk "pending NEW_IMAGE, devnet: another repository refused" 1 "docker.io/library/busybox@sha256:${D64}"
+pk "pending NEW_IMAGE, devnet: a devnet tag refused" 1 "${R}:v0.2.0-devnet"
+pk "pending NEW_IMAGE, devnet: a leading dash refused" 1 "-${GH}@sha256:${D64}"
+meta $'NETWORK=testnet\n'
+pk "pending NEW_IMAGE, testnet: a legacy-repository digest" 0 "${R}@sha256:${D64}"
+meta $'NETWORK=mainnet\n'
+pk "pending NEW_IMAGE, mainnet: the legacy repository refused" 1 "${R}@sha256:${D64}"
+meta $'NETWORK=foo\n'
+pk "pending NEW_IMAGE, network unknown: refused" 1 "${GH}@sha256:${D64}"
+
+# fetch_docker_tags on devnet: nothing offered, and the registry is never asked
+# (tn_registry_tags is stubbed to fail loudly; testnet is the positive control).
+loud_tags() {  # loud_tags [NETWORK]
+    rm -f "$T/loud.log"
+    tn_registry_tags() { printf 'tn_registry_tags %s\n' "$*" >> "$T/loud.log"; printf 'v0.17.0-adiri\nv0.2.0-devnet\n'; }
+    fetch_docker_tags "$@"
+}
+rc=0; out="$(loud_tags devnet)" || rc=$?
+check "fetch_docker_tags devnet: nothing" "0 " "$rc $out"
+check "fetch_docker_tags devnet: the registry not asked" no "$(exists "$T/loud.log")"
+meta $'NETWORK=devnet\n'
+rc=0; out="$(loud_tags)" || rc=$?
+check "fetch_docker_tags, a devnet host: nothing" "0 " "$rc $out"
+check "fetch_docker_tags, a devnet host: the registry not asked" no "$(exists "$T/loud.log")"
+rc=0; out="$(loud_tags testnet)" || rc=$?
+check "fetch_docker_tags testnet (control): the stub's final testnet tag" "0 v0.17.0-adiri" "$rc $out"
+check "fetch_docker_tags testnet (control): the registry asked" yes "$(exists "$T/loud.log")"
+
+# json_prepare_docker on a devnet host: a digest from TN_DEVNET_IMAGE_REPOS goes on
+# to the pull; a tag (devnet or testnet) or another repository is refused first.
+# jpd_stubbed ARG -- json_prepare_docker with the running image and the pull
+# stubbed (in run's subshell, so the real functions stay for later cases).
+jpd_stubbed() {
+    detect_current_docker_image() { printf '%s@sha256:%s\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+    docker_pull_target() { printf '%s %s\n' "$1" "$3" > "$T/pulled"; return 1; }
+    json_prepare_docker "$1"
+}
+jpd() {  # jpd ARG -> JSON events in $T/json.log; RC
+    rm -f "$T/pulled"
+    exec 3>"$T/json.log"
+    JSON_MODE=true
+    run jpd_stubbed "$1"
+    JSON_MODE=false
+    exec 3>&-
+}
+meta $'NETWORK=devnet\n'
+jpd "${GH}@sha256:${D64}"
+check "json prepare, devnet: a ghcr digest reaches the pull" "1 ${GH}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
+for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.17.0-adiri "docker.io/library/busybox@sha256:${D64}"; do
+    jpd "$bad"
+    check "json prepare, devnet: ${bad} refused before any pull" "1 yes no" \
+        "$RC $(has "$(cat "$T/json.log")" "is not a devnet image by digest") $(exists "$T/pulled")"
+done
+meta $'NETWORK=foo\n'
+jpd "${GH}@sha256:${D64}"
+check "json prepare, network unknown: refused before any pull" "1 yes no" \
+    "$RC $(has "$(cat "$T/json.log")" "cannot tell which network") $(exists "$T/pulled")"
+unset -f jpd_stubbed jpd loud_tags pk
 
 # -----------------------------------------------------------------------------
 # prepare: an unknown network stops before git and cargo

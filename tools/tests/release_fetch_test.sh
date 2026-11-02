@@ -73,7 +73,13 @@ check_rc "mainnet refuses an -adiri tag" 3 "$rc"
 rc=0; out="$(tn_fetch_verified_release main testnet 2>/dev/null)" || rc=$?
 check_rc "a branch is not a release tag" 3 "$rc"
 rc=0; out="$(tn_fetch_verified_release v0.16.0-adiri devnet 2>/dev/null)" || rc=$?
-check_rc "devnet has no releases" 3 "$rc"
+check_rc "devnet refuses an -adiri tag" 3 "$rc"
+rc=0; out="$(tn_fetch_verified_release v0.2.0-devnet testnet https://fixture.invalid/x 2>/dev/null)" || rc=$?
+check_rc "testnet refuses a devnet tag" 3 "$rc"
+rc=0; out="$(tn_fetch_verified_release v0.2.0-devnet mainnet https://fixture.invalid/x 2>/dev/null)" || rc=$?
+check_rc "mainnet refuses a devnet tag" 3 "$rc"
+rc=0; out="$(tn_fetch_release_image v0.2.0-devnet testnet https://fixture.invalid/x 2>/dev/null)" || rc=$?
+check_rc "image: testnet refuses a devnet tag" 3 "$rc"
 rc=0; out="$(tn_fetch_verified_release v1.0.0-rc1 mainnet https://fixture.invalid/x 2>"$T/err")" || rc=$?
 check_rc "mainnet refuses a release candidate" 3 "$rc"
 check_has "the refusal names the grammar" "1" "$(grep -c 'release candidates are testnet only' "$T/err")"
@@ -81,6 +87,17 @@ rc=0; out="$(tn_fetch_verified_release v1.0.0-adiri-rc1 mainnet https://fixture.
 check_rc "mainnet refuses a testnet release candidate" 3 "$rc"
 check "nothing downloaded for a bad tag" "" "$(cat "$REC/curl.log")"
 stage_empty "bad tag"
+# Devnet has no signed releases: even a devnet tag is refused before any download,
+# with the fetcher replaced by one that fails loudly.
+rc=0; out="$(
+    _tn_release_get() { printf 'fetched %s\n' "$1" >> "$REC/devnet-get.log"; exit 99; }
+    _tn_release_fetch x-devnet devnet "" image 2>"$T/err"
+)" || rc=$?
+check_rc "devnet refuses a devnet tag (no signed releases)" 3 "$rc"
+check "devnet: the fetcher never ran" "" "$(cat "$REC/devnet-get.log" 2>/dev/null)"
+check "devnet: the refusal is one line" "1" "$(wc -l < "$T/err" | tr -d ' ')"
+check "devnet: nothing on stdout" "" "$out"
+stage_empty "devnet tag"
 
 # --- tn_release_version_ok ------------------------------------------------------
 V() { printf 'telcoin-network-cli Version: %s\nCommit SHA: abc\nBuild Timestamp: x\nBuild Features: %s\nBuild Profile: maxperf\n' "$1" "$2"; }

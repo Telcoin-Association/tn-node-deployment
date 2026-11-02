@@ -1212,7 +1212,9 @@ class SetupDefaultsTest(ServerTestCase):
         self.assertTrue(server.release_tag_ok("testnet", "v0.17.0-adiri-rc1"))
         self.assertEqual(server.latest_source_tag("testnet"), "v0.16.0-adiri")
         self.assertEqual(server.latest_source_tag("mainnet"), "v1.0.1")
+        self.calls.clear()
         self.assertEqual(server.latest_source_tag("devnet"), "")
+        self.assertEqual(self.calls, [], "devnet has no releases: nothing is run for it")
 
     def test_mainnet_defaults_to_a_release_install_logging_to_the_journal(self):
         d = self.client.get("/api/setup/defaults?network=mainnet").get_json()
@@ -1760,6 +1762,10 @@ class RefValidationTest(ServerTestCase):
         self.assertEqual(self.prepare("v1.0.0-adiri", "mainnet").status_code, 400)
         self.assertEqual(self.prepare("v1.0.0", "testnet").status_code, 400)
         self.assertEqual(self.prepare("v1.0.0", "devnet").status_code, 400)
+        resp = self.prepare("v0.2.0-devnet", "devnet")
+        self.assertEqual(resp.status_code, 400, "the UI does not update a devnet node")
+        self.assertIn("cannot tell this node's network", resp.get_json()["error"])
+        self.assertEqual(self.action_calls(), [])
 
     def test_update_prepare_and_apply_refuse_get(self):
         self.assertEqual(self.client.get("/api/update/prepare/observer?ref=v0.15.0-adiri").status_code, 405)
