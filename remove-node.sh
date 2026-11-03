@@ -38,6 +38,9 @@ readonly SCRIPT_VERSION="2.0.0"
 # remove_shared_components and the scan use them as they are.
 TN_RM_ROOT="${TN_ROOT_PREFIX:-}"
 
+# RM_JSON -- true in a --json run (run_json_mode), so rm_baseline_say sends events.
+RM_JSON=false
+
 # rm_take_lock -- take the update lock (tn_acquire_update_lock) right before the
 # first change, once per run, so no update or other node operation runs while
 # this removal changes the host. The EXIT trap the library sets when it takes
@@ -476,6 +479,21 @@ remove_unit_leftovers() {
     [[ "$check" != "check" ]]
 }
 
+# rm_baseline_say step|log|warn MSG -- the printer for tn_host_baseline_remove: a
+# JSON event of the same name in a --json run, a print_* line otherwise.
+rm_baseline_say() {
+    if [[ "$RM_JSON" == "true" ]]; then
+        json_event "${1:-log}" "${2:-}"
+    else
+        case "${1:-}" in
+            step) print_step "${2:-}" ;;
+            warn) print_warn "${2:-}" ;;
+            *)    print_info "${2:-}" ;;
+        esac
+    fi
+    return 0
+}
+
 # stop_and_disable_service UNIT -- stop and disable UNIT, remove its unit file
 # and what lies beside it (remove_unit_leftovers), and reload systemd. An empty
 # UNIT means no node unit file is left (an earlier removal stopped part way):
@@ -486,7 +504,7 @@ stop_and_disable_service() {
     # The host baseline (auditd rules, AIDE baseline) goes with the node unit,
     # before the directories do; nothing happens on a host without one.
     if declare -F tn_host_baseline_remove >/dev/null 2>&1; then
-        tn_host_baseline_remove
+        tn_host_baseline_remove rm_baseline_say
     fi
     if [[ -z "$service_name" ]]; then
         print_step "Stopping any node unit systemd still has loaded..."
@@ -1762,6 +1780,7 @@ json_remove() {
 
 run_json_mode() {
     json_setup_fds
+    RM_JSON=true
     check_root
     if [[ "$JSON_YES" != "true" ]]; then
         json_event error "refusing destructive removal without --yes"
