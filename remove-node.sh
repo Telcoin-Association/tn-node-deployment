@@ -615,13 +615,15 @@ shred_key_files() {
     _rm_shred "${d}/bls-passphrase.cred" "${d}/bls-passphrase" "${d}/bls-tpm.pub" "${d}/bls-tpm.priv"
 }
 
-# remove_keys [USER GROUP] -- ask (typed DELETE), then shred and remove the node
-# keys (as USER:GROUP, see shred_key_files) and the config dir. The warning is
+# remove_keys [USER GROUP [UNIT]] -- ask (typed DELETE), then shred and remove the node
+# keys (as USER:GROUP, see shred_key_files) and the config dir; while a node unit
+# other than UNIT remains, the P2P new-flow limit's ruleset in it stays
+# (_rm_p2p_keep), so that node keeps the limit at the next boot. The warning is
 # the same for every node: the role is decided on-chain, so nothing on this
 # server says whether these keys are staked to validate.
 remove_keys() {
-    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}"
-    local data_dir keys_dir config_dir
+    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}" self="${3:-}"
+    local data_dir keys_dir config_dir keep
     if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
         print_error "Keys not removed: the data directory is unknown."
         return 1
@@ -650,8 +652,12 @@ remove_keys() {
         local confirm_text
         read -r -p "  Type DELETE to confirm permanent key removal, or Enter to skip: " confirm_text
         if [[ "$confirm_text" == "DELETE" ]]; then
-            shred_key_files "$keys_dir" "$config_dir" "$user" "$group"
-            rm -rf "$config_dir"
+            keep="$(_rm_p2p_keep "$config_dir" "$self")"
+            if [[ -n "$keep" ]]; then
+                print_info "Keeping ${keep#"$TN_RM_ROOT"}: another node unit remains here, and the P2P new-flow limit stays whole for it"
+            fi
+            shred_key_files "$keys_dir" "$config_dir" "$user" "$group" "$keep"
+            _rm_config_dir "$config_dir" "$keep"
             print_ok "Keys and passphrase removed"
         else
             print_info "Keys kept -- skipping key removal"
@@ -1284,7 +1290,7 @@ remove_node_unit() {
     # Chain data, then the keys (separate explicit confirmation). Both run before
     # the service account is removed: the node keys are shredded as that account.
     remove_chain_data "$key_user" "$key_group"
-    remove_keys "$key_user" "$key_group"
+    remove_keys "$key_user" "$key_group" "$unit"
 
     # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
     remove_testnet_addons
