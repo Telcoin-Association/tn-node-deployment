@@ -82,15 +82,24 @@ OBS_GRAFANA_KEY_FPR="B53AE77BADB630A683046005963FA27710458545"
 # that and refuses to write a config that ships nowhere. Any NETWORK other than
 # testnet and devnet (mainnet, unset, unknown) yields EMPTY, override or not, so the
 # add-on never ships a mainnet node's logs anywhere.
+#
+# Between 1 and 2: with no override on this run, the URL the env file already holds
+# (OBS_PUSH_URL= / OBS_METRICS_PUSH_URL= in telcoin-alloy.env, written by the enable that
+# took the override), so a later render (--rotate-token, a partial disable, the other
+# pipeline's enable) keeps an operator's own hub instead of putting the default back.
 obs_effective_push_url() {
+    local v
     case "${NETWORK:-}" in testnet|devnet) ;; *) return 0 ;; esac
     if [[ -n "${OBS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_PUSH_URL}"
+    elif v="$(_obs_env_value OBS_PUSH_URL)" && [[ -n "$v" ]]; then printf '%s' "$v"
     elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_PUSH_URL_DEVNET:-}"
     else printf '%s' "${OBS_PUSH_URL_TESTNET}"; fi
 }
 obs_effective_metrics_url() {
+    local v
     case "${NETWORK:-}" in testnet|devnet) ;; *) return 0 ;; esac
     if [[ -n "${OBS_METRICS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL}"
+    elif v="$(_obs_env_value OBS_METRICS_PUSH_URL)" && [[ -n "$v" ]]; then printf '%s' "$v"
     elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL_DEVNET:-}"
     else printf '%s' "${OBS_METRICS_PUSH_URL_TESTNET}"; fi
 }
@@ -516,12 +525,34 @@ obs_write_token_file() {
     return 0
 }
 
+# _obs_env_value <KEY> -- the value of the first KEY= line of
+# ${OBS_ETC_DIR}/telcoin-alloy.env; empty when the file or the line is absent.
+_obs_env_value() {
+    local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
+    [[ -f "$envf" && -r "$envf" ]] || return 0
+    sed -n "s/^${1}=//p" "$envf" 2>/dev/null | head -n 1
+}
+
 # _obs_env_token -- the OBS_INGEST_TOKEN value an env file written before the token
 # file existed still holds; empty when there is none.
 _obs_env_token() {
-    local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
-    [[ -f "$envf" && -r "$envf" ]] || return 0
-    sed -n 's/^OBS_INGEST_TOKEN=//p' "$envf" 2>/dev/null | head -n 1
+    _obs_env_value OBS_INGEST_TOKEN
+}
+
+# _obs_urls_ok -- rc 0 when every pipeline ENABLE_OBSERVABILITY / ENABLE_METRICS turns on
+# has a push URL (obs_effective_push_url / obs_effective_metrics_url); otherwise says
+# which pipeline lacks one and the flag that sets it, and returns 1. Writes nothing.
+_obs_urls_ok() {
+    local rc=0
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" && -z "$(obs_effective_push_url)" ]]; then
+        print_error "There is no logs push URL for network '${NETWORK:-unset}', so Alloy would ship the logs nowhere. Pass --push-url to setup-observability.sh (or set OBS_PUSH_URL); nothing was written."
+        rc=1
+    fi
+    if [[ "${ENABLE_METRICS:-false}" == "true" && -z "$(obs_effective_metrics_url)" ]]; then
+        print_error "There is no metrics push URL for network '${NETWORK:-unset}', so Alloy would ship the metrics nowhere. Pass --metrics-push-url to setup-observability.sh (or set OBS_METRICS_PUSH_URL); nothing was written."
+        rc=1
+    fi
+    return "$rc"
 }
 
 OBS_TOKEN_MOVED_SAID=false
@@ -529,7 +560,10 @@ OBS_TOKEN_MOVED_SAID=false
 # _obs_write_env_file -- write ${OBS_ETC_DIR}/telcoin-alloy.env (root 0600) for this
 # installation: identity labels, OBS_PUSH_URL and OBS_PUSH_HOST (the TLS server name),
 # and with ENABLE_METRICS=true TN_METRICS_ADDR, OBS_METRICS_PUSH_URL and
-# OBS_METRICS_PUSH_HOST. A docker install (INSTALL_METHOD from .node-meta) also gets
+# OBS_METRICS_PUSH_HOST; the URLs are obs_effective_push_url / obs_effective_metrics_url
+# (an override on this run, else what the env file holds, else the network default),
+# and an enabled pipeline without one is refused (_obs_urls_ok). A docker install
+# (INSTALL_METHOD from .node-meta) also gets
 # CREDENTIALS_DIRECTORY, where the sidecar sees the token file; systemd sets it for the
 # native unit. The token is never written here. An env file from before the token file
 # that still holds OBS_INGEST_TOKEN= is migrated: its value goes to the token file when
@@ -539,6 +573,7 @@ _obs_write_env_file() {
     local envf="${OBS_ETC_DIR}/telcoin-alloy.env" method legacy tokf
     local push_url metrics_url text
     method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
+    _obs_urls_ok || return 1
     obs_label_sourcing
     install -d -m 0750 "$OBS_ETC_DIR"
     tokf="$(obs_token_file)"
@@ -548,7 +583,7 @@ _obs_write_env_file() {
     fi
     legacy="${legacy:+yes}"
     # Effective push URLs: explicit OBS_PUSH_URL/OBS_METRICS_PUSH_URL override wins,
-    # else _DEVNET when NETWORK=devnet, else _TESTNET (unchanged for testnet).
+    # else the env file's own line, else _DEVNET when NETWORK=devnet, else _TESTNET.
     push_url="$(obs_effective_push_url)"
     metrics_url="$(obs_effective_metrics_url)"
     text="TN_NODE=${TN_NODE}
@@ -914,8 +949,10 @@ obs_write_alloy_units() {
 # file into the token file), after making sure the telcoin-alloy account exists (its
 # group owns the token file on docker installs too). The partial disables and
 # --rotate-token use it, so a host still on the env-file token is migrated whenever
-# Alloy is restarted. rc 1 (said) when a step fails.
+# Alloy is restarted. An enabled pipeline without a push URL is refused before anything
+# is written (_obs_urls_ok). rc 1 (said) when a step fails.
 obs_render_alloy() {
+    _obs_urls_ok || return 1
     obs_alloy_account || return 1
     obs_render_config_alloy || return 1
     if ! obs_write_alloy_units; then
@@ -1576,6 +1613,10 @@ obs_rotate_token() {
     if [[ "$ENABLE_OBSERVABILITY" != "true" && "$ENABLE_METRICS" != "true" ]]; then
         OBS_ROTATE_MSG="log and metrics shipping are both off on this node; nothing was changed"
         print_error "Log and metrics shipping are both off on this node, so there is no token to rotate; enable logs or metrics instead. Nothing was changed."
+        return 1
+    fi
+    if ! _obs_urls_ok; then
+        OBS_ROTATE_MSG="an enabled pipeline has no push URL (pass --push-url or --metrics-push-url); nothing was changed"
         return 1
     fi
     unitf="${TN_ROOT_PREFIX:-}/etc/systemd/system/${OBS_ALLOY_UNIT}"
