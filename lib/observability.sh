@@ -1780,12 +1780,14 @@ obs_disable_metrics() {
     obs_disable
 }
 
-# _obs_token_status -- one status line about the ingest token file: present with the
-# expected owner and mode, wrong owner or mode, still in the env file, or missing; not
-# checked when this account cannot enter ${OBS_ETC_DIR} (check-node.sh without sudo).
-# Never prints the token.
+# _obs_token_status <logs-enabled> <metrics-enabled> -- one status line about the ingest
+# token file: present with the expected owner and mode, wrong owner or mode, still in the
+# env file, or missing; not checked when this account cannot enter ${OBS_ETC_DIR}
+# (check-node.sh without sudo). With both pipelines off (after a full disable) a missing
+# token is expected and said as information. Never prints the token.
 _obs_token_status() {
-    local f st envf="${OBS_ETC_DIR}/telcoin-alloy.env"
+    local f st envf="${OBS_ETC_DIR}/telcoin-alloy.env" off=false
+    [[ "${1:-false}" == "true" || "${2:-false}" == "true" ]] || off=true
     f="$(obs_token_file)"
     if [[ -d "$OBS_ETC_DIR" && ! -x "$OBS_ETC_DIR" ]]; then
         print_info "Ingest token file not checked: ${OBS_ETC_DIR} is closed to this account (run this with sudo)."
@@ -1798,8 +1800,12 @@ _obs_token_status() {
         else
             print_warn "Ingest token file ${f} is ${st}, not 0640 root:${OBS_ALLOY_USER}; run setup-observability.sh --rotate-token to write it again."
         fi
+    elif [[ -n "$(_obs_env_token)" && "$off" == "true" ]]; then
+        print_warn "The ingest token is still in ${envf} although log and metrics shipping are off; delete it (sudo shred -u ${envf}), or enable logs or metrics again, which moves it into ${f}."
     elif [[ -n "$(_obs_env_token)" ]]; then
         print_warn "The ingest token is still in ${envf}; run setup-observability.sh --rotate-token (the same token is fine) to move it into ${f}."
+    elif [[ "$off" == "true" ]]; then
+        print_info "No ingest token file: log and metrics shipping are off, and enabling either asks for the token."
     else
         print_warn "No ingest token file at ${f}, so Alloy cannot authenticate to the hub; run setup-observability.sh --rotate-token."
     fi
@@ -1831,7 +1837,7 @@ obs_status() {
     else
         print_warn "${OBS_ALLOY_UNIT} is installed but NOT active (journalctl -u ${OBS_ALLOY_UNIT})"
     fi
-    _obs_token_status
+    _obs_token_status "$logs_enabled" "$metrics_enabled"
 
     # Pull Alloy's own /metrics once; read both pipelines' progress out of it.
     local alloy_metrics
