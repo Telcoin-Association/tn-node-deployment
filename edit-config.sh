@@ -99,6 +99,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
     || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_start_script \
         tn_write_node_env tn_rerender_node_launch tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
+        tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
         tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
