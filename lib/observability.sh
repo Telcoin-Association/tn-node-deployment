@@ -1538,7 +1538,8 @@ obs_existing_token() {
     return 0
 }
 
-# _obs_snapshot FILE... -- remember each FILE's content, mode and group, or that it is
+# _obs_snapshot FILE... -- remember each FILE's content (byte for byte: a sentinel keeps
+# the trailing newlines command substitution would drop), mode and group, or that it is
 # absent, for _obs_restore (the files obs_rotate_token rewrites). Held in shell
 # variables only. rc 1 when a file cannot be read.
 _OBS_SNAP_PATH=()
@@ -1555,7 +1556,8 @@ _obs_snapshot() {
         _OBS_SNAP_PATH+=("$f")
         if [[ -f "$f" && ! -L "$f" ]]; then
             st="$(stat -c '%a %G' -- "$f" 2>/dev/null)" || return 1
-            body="$(cat -- "$f")" || return 1
+            body="$(cat -- "$f" && printf x)" || return 1
+            body="${body%x}"
             _OBS_SNAP_MODE+=("${st%% *}")
             _OBS_SNAP_GRP+=("${st#* }")
             _OBS_SNAP_BODY+=("$body")
@@ -1568,21 +1570,32 @@ _obs_snapshot() {
     return 0
 }
 
-# _obs_restore -- put back every file _obs_snapshot remembered, with its mode and group
-# (tn_write_root_file, fed like obs_write_token_file), shred one that was absent, then
-# reload systemd and forget the copies. rc 1 when a write failed.
+# _obs_restore -- put back each file _obs_snapshot remembered that has changed since,
+# byte for byte with its mode and group (tn_write_root_file, fed like
+# obs_write_token_file), and shred one that was absent then; a file that still holds
+# what was remembered is left alone. Then reload systemd and forget the copies. rc 1
+# when a write failed.
 _obs_restore() {
-    local i=0 rc=0
+    local i=0 rc=0 f now
     while [[ "$i" -lt "${#_OBS_SNAP_PATH[@]}" ]]; do
+        f="${_OBS_SNAP_PATH[$i]}"
         if [[ "${_OBS_SNAP_MODE[$i]}" == "-" ]]; then
-            _tn_shred "${_OBS_SNAP_PATH[$i]}"
-        elif ! tn_write_root_file "${_OBS_SNAP_PATH[$i]}" "${_OBS_SNAP_MODE[$i]}" "${_OBS_SNAP_GRP[$i]}" \
-                < <(trap - ERR; printf '%s\n' "${_OBS_SNAP_BODY[$i]}"); then
-            print_error "Could not put ${_OBS_SNAP_PATH[$i]} back."
-            rc=1
+            _tn_shred "$f"
+        else
+            now=""
+            if [[ -f "$f" && ! -L "$f" ]]; then
+                now="$(cat -- "$f" && printf x)" || now=""
+            fi
+            if [[ "$now" != "${_OBS_SNAP_BODY[$i]}x" ]] \
+                && ! tn_write_root_file "$f" "${_OBS_SNAP_MODE[$i]}" "${_OBS_SNAP_GRP[$i]}" \
+                    < <(trap - ERR; printf '%s' "${_OBS_SNAP_BODY[$i]}"); then
+                print_error "Could not put ${f} back."
+                rc=1
+            fi
         fi
         i=$((i + 1))
     done
+    now=""
     _OBS_SNAP_BODY=()
     systemctl daemon-reload >/dev/null 2>&1 || true
     return "$rc"
