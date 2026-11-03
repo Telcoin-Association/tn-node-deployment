@@ -9,7 +9,8 @@
 # there, signs it with a throwaway key (tools/tests/signing.sh), checks it,
 # and installs it with the install.sh the tool wrote, through a curl shim that
 # serves the release archive. Needs git and tar; without git (the bash:3.2
-# image) the whole file is SKIP. No network, nothing outside the temp dir.
+# image) all but the date arithmetic checks are SKIP. No network, nothing
+# outside the temp dir.
 # =============================================================================
 
 set -u
@@ -22,6 +23,36 @@ REPO="$TN_TEST_REPO"
 BIN="$T/bin"
 W="$T/repo"
 mkdir -p "$BIN" "$W" "$T/archives"
+
+# --- date arithmetic (every bash: no git needed) -------------------------------
+# ymd_days and days_ymd, cut from the tool, against day numbers computed with
+# GNU date; and every script that reads a MANIFEST date carries the same
+# ymd_days text.
+eval "$(sed -n '/^ymd_days() {/,/^}/p; /^days_ymd() {/,/^}/p' "$REPO/tools/release-scripts.sh")"
+bad=""
+for pair in 1970-01-01:0 1970-03-01:59 2000-02-29:11016 2000-03-01:11017 2024-02-29:19782 \
+            2026-11-03:20760 2027-02-01:20850 2100-02-28:47540 2100-03-01:47541 \
+            2399-12-31:157053 2400-02-29:157113 9999-12-31:2932896; do
+    [[ "$(ymd_days "${pair%%:*}")" == "${pair#*:}" && "$(days_ymd "${pair#*:}")" == "${pair%%:*}" ]] || bad="$bad $pair"
+done
+check "dates: known day numbers both ways" "" "$bad"
+bad=""
+for d in 2023-02-29 2100-02-29 1969-12-31 2026-13-01 2026-00-10 2026-04-31 2026-01-00 2026-1-01 \
+         20260101 2026/01/01 "2026-01-01 " " 2026-01-01" "" x; do
+    if ymd_days "$d" >/dev/null 2>&1; then bad="$bad [$d]"; fi
+done
+check "dates: malformed and impossible dates refused" "" "$bad"
+bad=""
+n=0
+while [[ $n -le 120000 ]]; do
+    [[ "$(ymd_days "$(days_ymd "$n")")" == "$n" ]] || bad="$bad $n"
+    n=$((n + 293))
+done
+check "dates: day number to date and back, 1970 to 2298" "" "$bad"
+ref="$(sed -n '/^ymd_days() {/,/^}/p' "$REPO/tools/release-scripts.sh")"
+for f in update-scripts.sh install.sh check-node.sh; do
+    check "dates: $f carries the same ymd_days" "$ref" "$(sed -n '/^ymd_days() {/,/^}/p' "$REPO/$f")"
+done
 
 if ! command -v git >/dev/null 2>&1 || ! git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     skip "release-scripts.sh" "git absent or not a git checkout"
@@ -40,6 +71,15 @@ _h() {
 . "$TN_TEST_DIR/signing.sh"
 export PATH="$BIN:$PATH"
 KEY1_LINE="$(newkey key1)"
+# A date shim answers `date -u +%Y-%m-%d` with TODAY; other calls run the real date.
+REAL_DATE="$(type -P date)"
+cat > "$BIN/date" <<EOF
+#!/bin/sh
+if [ -n "\${TODAY:-}" ] && [ "\$*" = "-u +%Y-%m-%d" ]; then echo "\$TODAY"; exit 0; fi
+exec $REAL_DATE "\$@"
+EOF
+chmod +x "$BIN/date"
+export TODAY=""
 
 gitc() {
     git -C "$W" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false "$@"
@@ -56,6 +96,16 @@ tool() {
 (cd "$REPO" && git ls-files | tar -cf - -T -) | tar -xf - -C "$W"
 git -C "$W" init -q
 commit_all "fixture"
+
+# --- check on a tree without MANIFEST ------------------------------------------
+rm -f "$W/MANIFEST" "$W/MANIFEST.sig" "$W/RELEASE"
+commit_all "no release yet" || true
+tool --check
+check_rc "no MANIFEST: check passes" 0 "$RC"
+check "no MANIFEST: nothing to check" "No MANIFEST in the tree: nothing to check." "$OUT"
+tool --check --require-fresh
+check_rc "no MANIFEST, --require-fresh: fails" 1 "$RC"
+check "no MANIFEST, --require-fresh: says why" "release-scripts.sh: no MANIFEST in the tree" "$OUT"
 
 # --- refusals before the tree is ready ---------------------------------------
 tool scripts-v2.0.0 --serial 200
@@ -85,6 +135,15 @@ tool scripts-v2.0.0
 check_rc "first release without --serial: refused" 1 "$RC"
 tool scripts-v2.0.0 --serial 200 --min-updater 99.0.0
 check_rc "min_updater above the tree updater: refused" 1 "$RC"
+for days in 0 3651 30x -5 ""; do
+    tool scripts-v2.0.0 --serial 200 --expires "$days"
+    check_rc "--expires '$days': refused" 1 "$RC"
+done
+check_has "--expires out of range: says why" "release-scripts.sh: --expires takes a number of days from 1 to 3650, got: " "$OUT"
+tool scripts-v2.0.0 --serial 200 --date 2026-02-30
+check_rc "--date not a calendar date: refused" 1 "$RC"
+check_has "--date not a calendar date: says why" "release-scripts.sh: date must be a calendar date like 2026-10-15, got: 2026-02-30" "$OUT"
+check "refusals leave the tree clean" "" "$(git -C "$W" status --porcelain)"
 
 # --- prepare -------------------------------------------------------------------
 tool scripts-v2.0.0 --serial 200 --date 2026-10-15
@@ -93,6 +152,8 @@ check_has "prepare: prints the signing command" "       ssh-keygen -Y sign -f ~/
 uver="$(sed -n 's/^readonly SCRIPT_VERSION="\([0-9.]*\)"$/\1/p' "$W/update-scripts.sh")"
 check "prepare: header" "$(printf 'format=1\nrelease=scripts-v2.0.0\nserial=200\nmin_updater=%s' "$uver")" "$(head -n 4 "$W/MANIFEST")"
 check "prepare: RELEASE" "scripts-v2.0.0 2026-10-15" "$(cat "$W/RELEASE")"
+check "prepare: date= and expires= (90 days by default) follow min_updater=" "$(printf 'date=2026-10-15\nexpires=2027-01-13')" "$(sed -n '5,6p' "$W/MANIFEST")"
+check_has "prepare: prints the expiry" "Release date 2026-10-15; the release expires 2027-01-13 (90 days later)." "$OUT"
 check "prepare: installer tag" 'readonly TN_SCRIPTS_TAG="scripts-v2.0.0"   # written by tools/release-scripts.sh' "$(grep '^readonly TN_SCRIPTS_TAG=' "$W/install.sh")"
 check "prepare: installer still ends with main" 'main "$@"' "$(tail -n 1 "$W/install.sh")"
 check "prepare: installer parses" "0" "$(bash -n "$W/install.sh" 2>&1; echo $?)"
@@ -125,6 +186,55 @@ tool --check --tag scripts-v2.0.0
 check_rc "check --tag signed: passes" 0 "$RC"
 tool --check --tag scripts-v2.0.1
 check_rc "check with another tag: fails" 1 "$RC"
+
+# --- check: the release date and the expiry -------------------------------------------
+TODAY=2026-11-03 tool --check --tag scripts-v2.0.0 --require-fresh
+check_rc "check, fresh, --require-fresh: passes" 0 "$RC"
+check_has "check: prints the release date" "Release date 2026-10-15." "$OUT"
+check_has "check: prints the expiry" "Release scripts-v2.0.0 expires 2027-01-13 (in 71 days)." "$OUT"
+TODAY=2027-01-12 tool --check
+check_has "check, the day before: 1 day" "Release scripts-v2.0.0 expires 2027-01-13 (in 1 day)." "$OUT"
+TODAY=2027-01-13 tool --check --tag scripts-v2.0.0
+check_rc "check, expired: still passes" 0 "$RC"
+check_has "check, expired: warns" "WARN release scripts-v2.0.0 expired on 2027-01-13 (today): a newer signed release is overdue" "$OUT"
+TODAY=2027-01-20 tool --check --tag scripts-v2.0.0 --require-fresh
+check_rc "check, expired, --require-fresh: fails" 1 "$RC"
+check_has "check, expired, --require-fresh: says why" "FAIL release scripts-v2.0.0 expired on 2027-01-13 (7 days ago): cut a newer release" "$OUT"
+cp "$W/MANIFEST" "$T/MANIFEST.keep"
+cp "$W/MANIFEST.sig" "$T/MANIFEST.sig.keep"
+cp "$W/RELEASE" "$T/RELEASE.keep"
+# reheader LINE... -- MANIFEST with its date= and expires= lines replaced by LINEs, signed.
+reheader() {
+    {
+        grep -E '^(format|release|serial|min_updater)=' "$T/MANIFEST.keep"
+        if [[ $# -gt 0 ]]; then printf '%s\n' "$@"; fi
+        grep '^sha256  ' "$T/MANIFEST.keep"
+    } > "$W/MANIFEST"
+    sign_file "$W/MANIFEST" key1
+}
+reheader
+TODAY=2027-06-01 tool --check --tag scripts-v2.0.0 --require-fresh
+check_rc "check, 2.0.0-shaped manifest: passes" 0 "$RC"
+check_has "check, 2.0.0-shaped manifest: no expiry" "MANIFEST has no expires= line: scripts-v2.0.0 does not expire." "$OUT"
+reheader date=2026-10-15 expires=2027-01-13 expires=2027-02-13
+tool --check
+check_rc "check, expires twice: fails" 1 "$RC"
+check_has "check, expires twice: says why" "release-scripts.sh: MANIFEST: expires= appears more than once" "$OUT"
+reheader date=2026-10-15 expires=2027-02-30
+tool --check
+check_rc "check, expires not a calendar date: fails" 1 "$RC"
+check_has "check, expires not a calendar date: says why" "release-scripts.sh: MANIFEST: expires=2027-02-30 is not a calendar date YYYY-MM-DD" "$OUT"
+reheader date=2026-10-15 expires=2026-10-15
+tool --check
+check_rc "check, expires not after date: fails" 1 "$RC"
+check_has "check, expires not after date: says why" "FAIL MANIFEST expires=2026-10-15 is not after date=2026-10-15" "$OUT"
+reheader date=2026-10-14 expires=2027-01-13
+tool --check
+check_rc "check, RELEASE dated otherwise: fails" 1 "$RC"
+check_has "check, RELEASE dated otherwise: says why" "FAIL RELEASE is dated 2026-10-15, MANIFEST date=2026-10-14" "$OUT"
+cp "$T/MANIFEST.keep" "$W/MANIFEST"
+cp "$T/MANIFEST.sig.keep" "$W/MANIFEST.sig"
+cp "$T/RELEASE.keep" "$W/RELEASE"
 cp "$W/setup-node.sh" "$T/setup-node.sh.keep"
 printf '# edited after signing\n' >> "$W/setup-node.sh"
 tool --check
@@ -171,9 +281,10 @@ printf '# next\n' >> "$W/open-ui.sh"
 commit_all "change"
 tool scripts-v2.0.1 --serial 200
 check_rc "next release with a serial not above 200: refused" 1 "$RC"
-tool scripts-v2.0.1 --date 2026-10-16
+tool scripts-v2.0.1 --date 2026-10-16 --expires 30
 check_rc "next release: exits 0" 0 "$RC"
 check "next release: serial 201" "serial=201" "$(grep '^serial=' "$W/MANIFEST")"
+check "next release: --expires 30" "$(printf 'date=2026-10-16\nexpires=2026-11-15')" "$(grep -E '^(date|expires)=' "$W/MANIFEST")"
 check "next release: old signature removed" "absent" "$([[ -e "$W/MANIFEST.sig" ]] && echo present || echo absent)"
 
 finish

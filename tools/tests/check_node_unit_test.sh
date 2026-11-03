@@ -141,4 +141,85 @@ check "no .node-meta, a mainnet chain id: the mainnet RPC" "$MAINNET_RPC_URL" "$
 # The report prints the header line and the section 3 skip from these variables.
 check "the report header prints NETWORK_RPC_LABEL" 1 "$(grep -c 'print_info "Network RPC:  ${NETWORK_RPC_LABEL}"' "$CN")"
 check "the section 3 skip prints NETWORK_SKIP_WHY" 1 "$(grep -c 'print_info "Network query skipped (${NETWORK_SKIP_WHY})"' "$CN")"
+# ---- REL: the script release block (report_scripts_release) ----------------------------
+# report_scripts_release and its helpers, cut from check-node.sh, over a fixture
+# scripts dir; a date shim on PATH answers `date -u +%Y-%m-%d` with TODAY.
+{
+    for f in ymd_days cn_days cn_manifest_key report_scripts_release; do
+        sed -n "/^${f}() {/,/^}/p" "$CN"
+    done
+} > "$T/rel.sh"
+# shellcheck source=/dev/null
+. "$T/rel.sh"
+mkdir -p "$T/relbin" "$T/scripts"
+REAL_DATE="$(type -P date)"
+cat > "$T/relbin/date" <<EOF
+#!/bin/sh
+if [ -n "\${TODAY:-}" ] && [ "\$*" = "-u +%Y-%m-%d" ]; then echo "\$TODAY"; exit 0; fi
+exec $REAL_DATE "\$@"
+EOF
+chmod +x "$T/relbin/date"
+PATH="$T/relbin:$PATH"
+export TODAY=""
+ESC="$(printf '\033')"
+# shellcheck disable=SC2034  # read by report_scripts_release
+SCRIPT_DIR="$T/scripts"
+# relrep -- run the block: OUT gets its text without colour escapes.
+relrep() {
+    OUT="$(report_scripts_release 2>&1 | sed "s/${ESC}\[[0-9;]*m//g")"
+}
+# record LINE... -- the fixture MANIFEST record: the LINEs, then one hash line.
+record() {
+    printf '%s\n' "$@" "sha256  $(printf '%064d' 0)  update-scripts.sh" > "$T/scripts/MANIFEST"
+}
+
+record format=1 release=scripts-v2.1.0 serial=2 min_updater=2.0.0 date=2026-11-10 expires=2027-02-08
+TODAY=2026-11-22 relrep
+check_has "scripts: the step" ">>> Checking the script release..." "$OUT"
+check_has "scripts: tag, serial, date and age" "  ->  Scripts release: scripts-v2.1.0 (serial 2), released 2026-11-10, 12 days ago" "$OUT"
+check_has "scripts: expiry ahead" "  [OK]  Scripts release expires 2027-02-08 (in 78 days)" "$OUT"
+TODAY=2026-11-10 relrep
+check_has "scripts: released today" "  ->  Scripts release: scripts-v2.1.0 (serial 2), released 2026-11-10, today" "$OUT"
+TODAY=2026-11-11 relrep
+check_has "scripts: released 1 day ago" "  ->  Scripts release: scripts-v2.1.0 (serial 2), released 2026-11-10, 1 day ago" "$OUT"
+TODAY=2027-02-07 relrep
+check_has "scripts: expires tomorrow" "  [OK]  Scripts release expires 2027-02-08 (in 1 day)" "$OUT"
+TODAY=2027-02-11 relrep
+check_has "scripts, expired: warns" "  [WARN] Scripts release scripts-v2.1.0 expired 3 days ago (on 2027-02-08): a newer signed release is overdue." "$OUT"
+check_has "scripts, expired: what to run" "  ->    Check for it: bash $T/scripts/update-scripts.sh --check" "$OUT"
+TODAY=2027-02-08 relrep
+check_has "scripts, expires today: expired today" "  [WARN] Scripts release scripts-v2.1.0 expired today (on 2027-02-08): a newer signed release is overdue." "$OUT"
+TODAY=2027-02-09 relrep
+check_has "scripts, expired yesterday: 1 day ago" "  [WARN] Scripts release scripts-v2.1.0 expired 1 day ago (on 2027-02-08): a newer signed release is overdue." "$OUT"
+
+record format=1 release=scripts-v2.0.0 serial=1 min_updater=2.0.0
+TODAY=2026-11-22 relrep
+check_has "scripts, 2.0.0 record: no date" "  ->  Scripts release: scripts-v2.0.0 (serial 1), release date not recorded" "$OUT"
+check_has "scripts, 2.0.0 record: no expiry" "  ->    The release carries no expiry date." "$OUT"
+check_lacks "scripts, 2.0.0 record: no warning" "[WARN]" "$OUT"
+
+record format=1 release=scripts-v2.1.0 serial=2 min_updater=2.0.0 date=2026-11-10 expires=2027-02-30
+TODAY=2026-11-22 relrep
+check_has "scripts, bad expires: warns" "  [WARN] The release record has an unreadable expiry date: expires=2027-02-30" "$OUT"
+record format=1 serial=2
+relrep
+check_has "scripts, no release= line: warns" "  [WARN] The release record $T/scripts/MANIFEST names no release and serial." "$OUT"
+
+rm -f "$T/scripts/MANIFEST"
+relrep
+check_has "scripts, no record: warns" "  [WARN] No signed release installed: $T/scripts has no MANIFEST record." "$OUT"
+check_has "scripts, no record: what to run" "  ->    Bring the scripts to the latest signed release: bash $T/scripts/update-scripts.sh" "$OUT"
+
+# The real date of this host (GNU, busybox or macOS), far-off dates either way.
+record format=1 release=scripts-v2.1.0 serial=2 min_updater=2.0.0 date=2019-10-01 expires=2019-12-31
+relrep
+check "scripts, real date: expired 2019-12-31" "yes" \
+    "$(printf '%s\n' "$OUT" | grep -qE '^  \[WARN\] Scripts release scripts-v2\.1\.0 expired [0-9]+ days ago \(on 2019-12-31\)' && echo yes || echo no)"
+record format=1 release=scripts-v2.1.0 serial=2 min_updater=2.0.0 date=2019-10-01 expires=2999-12-31
+relrep
+check "scripts, real date: expires 2999-12-31" "yes" \
+    "$(printf '%s\n' "$OUT" | grep -qE '^  \[OK\]  Scripts release expires 2999-12-31 \(in [0-9]+ days\)$' && echo yes || echo no)"
+TODAY=""
+check "the report runs the scripts block" 1 "$(grep -c '^report_scripts_release$' "$CN")"
+check_lacks "the scripts block warns and never counts a health issue" "HEALTH_ISSUES" "$(sed -n '/^report_scripts_release() {/,/^}/p' "$CN")"
 finish

@@ -113,8 +113,9 @@ tagged_installer() {
     ' "$INSTALLER" > "$3"
 }
 
-# make_release TAG SERIAL DIR -- a release tree in DIR with MANIFEST, signed
-# with key1; extra files not in MANIFEST stand in for docs and tools.
+# make_release TAG SERIAL DIR [HEADER...] -- a release tree in DIR with
+# MANIFEST (HEADER lines after min_updater=), signed with key1; extra files not
+# in MANIFEST stand in for docs and tools.
 make_release() {
     local d="$3" p
     mkdir -p "$d/lib" "$d/ui" "$d/tools"
@@ -126,6 +127,7 @@ make_release() {
     printf '#!/usr/bin/env bash\n' > "$d/tools/unlisted.sh"
     {
         printf 'format=1\nrelease=%s\nserial=%s\nmin_updater=1.0.0\n' "$1" "$2"
+        if [[ $# -gt 3 ]]; then printf '%s\n' "${@:4}"; fi
         for p in lib/allowed_signers setup-node.sh ui/server.py update-scripts.sh; do
             printf 'sha256  %s  %s\n' "$(_h "$d/$p")" "$p"
         done
@@ -286,6 +288,67 @@ cp -R "$REL" "$Z"
 rm -f "$Z/MANIFEST.sig"
 pack "$Z" "$TAG"
 expect_refusal "unsigned release" "$GOOD"
+
+# --- REL: release date and expiry (date=, expires=) -------------------------------------
+# A date shim answers `date -u +%Y-%m-%d` with TODAY; other calls run the real date.
+REAL_DATE="$(type -P date)"
+cat > "$BIN/date" <<EOF
+#!/bin/sh
+if [ -n "\${TODAY:-}" ] && [ "\$*" = "-u +%Y-%m-%d" ]; then echo "\$TODAY"; exit 0; fi
+exec $REAL_DATE "\$@"
+EOF
+chmod +x "$BIN/date"
+export TODAY=""
+ESC="$(printf '\033')"
+# plain TEXT -- TEXT without colour escapes.
+plain() {
+    printf '%s\n' "$1" | sed "s/${ESC}\[[0-9;]*m//g"
+}
+EXPIRED_LINE="  [WARN] Script release $TAG expired on 2027-02-01; a newer signed release is overdue. Installing it anyway."
+E="$T/rel-expires"
+make_release "$TAG" 100 "$E" date=2026-11-03 expires=2027-02-01
+check "expires: fixture header" "$(printf 'min_updater=1.0.0\ndate=2026-11-03\nexpires=2027-02-01')" "$(sed -n '4,6p' "$E/MANIFEST")"
+pack "$E" "$TAG"
+TODAY=2026-11-03 run_installer "$GOOD" --yes
+check_rc "expires, fresh: exits 0" 0 "$RC"
+check_lacks "expires, fresh: no warning" "expired" "$OUT"
+check "expires, fresh: the record is the release MANIFEST" "$(_h "$E/MANIFEST")" "$(_h "$DEST/MANIFEST" 2>/dev/null)"
+TODAY=2027-01-31 run_installer "$GOOD" --yes
+check_lacks "expires, the day before: no warning" "expired" "$OUT"
+TODAY=2027-02-01 run_installer "$GOOD" --yes
+check_rc "expired: exits 0" 0 "$RC"
+check_has "expired: the warning" "$EXPIRED_LINE" "$(plain "$OUT")"
+check "expired: installed anyway" "$(_h "$E/setup-node.sh")" "$(_h "$DEST/setup-node.sh" 2>/dev/null)"
+check "expired: warned before installing" "yes" \
+    "$(plain "$OUT" | awk -v w="$EXPIRED_LINE" '$0 == w {seen = 1} /Installing to / && seen {print "yes"; exit}')"
+# Far-off dates under this host's real date (GNU, busybox or macOS).
+make_release "$TAG" 100 "$E" expires=2019-12-31
+pack "$E" "$TAG"
+run_installer "$GOOD" --yes
+check_has "real date, expired 2019-12-31: the warning" "  [WARN] Script release $TAG expired on 2019-12-31; a newer signed release is overdue. Installing it anyway." "$(plain "$OUT")"
+make_release "$TAG" 100 "$E" expires=2999-12-31
+pack "$E" "$TAG"
+run_installer "$GOOD" --yes
+check_rc "real date, expires 2999-12-31: exits 0" 0 "$RC"
+check_lacks "real date, expires 2999-12-31: no warning" "expired" "$OUT"
+
+# Malformed or repeated date= / expires= refuse the release.
+# bad_headers NAME PHRASE HEADER... -- a signed release with these lines is refused.
+bad_headers() {
+    local name="$1" phrase="$2" d="$T/rel-hdr"
+    shift 2
+    rm -rf "$d"
+    make_release "$TAG" 100 "$d" "$@"
+    pack "$d" "$TAG"
+    expect_refusal "$name" "$GOOD"
+    check_has "$name: says why" "  [ERROR] $phrase" "$(plain "$OUT")"
+}
+bad_headers "expires not a calendar date" "MANIFEST expires=2027-02-30 is not a calendar date YYYY-MM-DD." date=2026-11-03 expires=2027-02-30
+bad_headers "expires empty" "MANIFEST expires= is not a calendar date YYYY-MM-DD." expires=
+bad_headers "date in another format" "MANIFEST date=03/11/2026 is not a calendar date YYYY-MM-DD." date=03/11/2026 expires=2027-02-01
+bad_headers "expires twice" "MANIFEST repeats expires=." expires=2027-02-01 expires=2027-03-01
+bad_headers "date twice" "MANIFEST repeats date=." date=2026-11-03 date=2026-11-04
+TODAY=""
 
 # --- an installer with no key lines ----------------------------------------------------
 printf '# no keys\n' > "$T/nokeys"

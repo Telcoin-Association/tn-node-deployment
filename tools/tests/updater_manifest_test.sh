@@ -63,6 +63,7 @@ while [ \$# -gt 0 ]; do
     shift
 done
 echo "\$url" >> "$T/curl.log"
+[ -z "\${CURL_FAIL:-}" ] || exit 7
 case "\$url" in
     https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/*)
         f="$RAW/\${url#https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/}" ;;
@@ -400,6 +401,189 @@ rm -f "$INST/lib/allowed_signers"
 publish "$R2" scripts-v1.1.0
 refused "signer list deleted after a signed install"
 says "signer list deleted after a signed install" "lib/allowed_signers is missing"
+
+# --- REL: release date and expiry (date=, expires=) and --check ------------------------------
+# A date shim on PATH answers `date -u +%Y-%m-%d` with TODAY when it is set, so
+# "today" is fixed for the expiry checks; every other call runs the real date.
+REAL_DATE="$(type -P date)"
+cat > "$BIN/date" <<EOF
+#!/bin/sh
+if [ -n "\${TODAY:-}" ] && [ "\$*" = "-u +%Y-%m-%d" ]; then echo "\$TODAY"; exit 0; fi
+exec $REAL_DATE "\$@"
+EOF
+chmod +x "$BIN/date"
+export TODAY=""
+
+# with_headers DIR LINE... -- put the header LINEs after min_updater= in DIR/MANIFEST.
+with_headers() {
+    local d="$1"
+    shift
+    awk -v extra="$(printf '%s\n' "$@")" '{print} /^min_updater=/ {printf "%s\n", extra}' "$d/MANIFEST" > "$d/MANIFEST.new"
+    mv -f "$d/MANIFEST.new" "$d/MANIFEST"
+}
+# run_check -- run INST's updater with --check (TMPDIR in the test dir), OUT/RC.
+mkdir -p "$T/tmp"
+run_check() {
+    : > "$T/curl.log"
+    OUT="$(cd "$T" && TMPDIR="$T/tmp" TERM=dumb bash "$INST/update-scripts.sh" --check < /dev/null 2>&1)"
+    RC=$?
+}
+
+# R3: serial 102, setup-node.sh 1.2.0, released 2026-11-03, expires 2027-02-01.
+R3="$SRC/r3"; cp -R "$R2" "$R3"
+printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION="1.2.0"\n' > "$R3/setup-node.sh"
+write_manifest "$R3" scripts-v1.5.0 102 1.0.0
+with_headers "$R3" date=2026-11-03 expires=2027-02-01
+sign "$R3" key1; sidecars "$R3"
+check "expires: fixture header" "$(printf 'format=1\nrelease=scripts-v1.5.0\nserial=102\nmin_updater=1.0.0\ndate=2026-11-03\nexpires=2027-02-01')" "$(head -n 6 "$R3/MANIFEST")"
+
+# A fresh release installs without a warning.
+install_release "$R2"
+publish "$R3" scripts-v1.5.0
+TODAY=2026-11-03 run_updater y
+check_rc "expires, fresh: exits 0" 0 "$RC"
+check "expires, fresh: installed" "$(_h "$R3/setup-node.sh")" "$(_h "$INST/setup-node.sh")"
+check "expires, fresh: release recorded" "$(_h "$R3/MANIFEST")" "$(_h "$INST/MANIFEST")"
+check_lacks "expires, fresh: no expiry warning" "expired" "$(plain "$OUT")"
+
+# --check: installed and newest are the same fresh release.
+before="$(tree_sig)"
+TODAY=2026-11-03 run_check
+check_rc "check, current: exits 0" 0 "$RC"
+check_has "check, current: installed line" "  ->  Installed:  scripts-v1.5.0, serial 102, released 2026-11-03, expires 2027-02-01 (signature verified)" "$(plain "$OUT")"
+check_has "check, current: newest line" "  ->  Newest:     scripts-v1.5.0, serial 102, released 2026-11-03, expires 2027-02-01 (signature verified)" "$(plain "$OUT")"
+check_has "check, current: nothing pending" "  [OK]  No update pending: every file matches scripts-v1.5.0." "$(plain "$OUT")"
+check_has "check, current: days left" "  [OK]  Up to date with scripts-v1.5.0; it expires 2027-02-01 (in 90 days)." "$(plain "$OUT")"
+check "check, current: tree byte-identical" "$before" "$(tree_sig)"
+check "check, current: temp dir removed" "" "$(ls -A "$T/tmp")"
+check_lacks "check, current: no banner" "Script Updater" "$OUT"
+TODAY=2027-01-31 run_check
+check_has "check, the day before: 1 day left" "  [OK]  Up to date with scripts-v1.5.0; it expires 2027-02-01 (in 1 day)." "$(plain "$OUT")"
+
+# --check: the installed release has expired.
+TODAY=2027-02-04 run_check
+check_rc "check, installed expired: exits 1" 1 "$RC"
+check_has "check, installed expired: says so" "  [WARN] Installed release scripts-v1.5.0 expired on 2027-02-01 (3 days ago); a newer signed release is overdue." "$(plain "$OUT")"
+check_lacks "check, installed expired: one expiry line for one release" "Newest release" "$(plain "$OUT")"
+TODAY=2027-02-01 run_check
+check_rc "check, expires today: exits 1" 1 "$RC"
+check_has "check, expires today: says today" "  [WARN] Installed release scripts-v1.5.0 expired on 2027-02-01 (today); a newer signed release is overdue." "$(plain "$OUT")"
+
+# An expired release is still installed, with the warning.
+install_release "$R2"
+TODAY=2027-02-02 run_updater y
+check_rc "expired at update: exits 0" 0 "$RC"
+check_has "expired at update: the warning" "  [WARN] Script release scripts-v1.5.0 expired on 2027-02-01; a newer signed release is overdue. Installing it anyway." "$(plain "$OUT")"
+check "expired at update: installed anyway" "$(_h "$R3/setup-node.sh")" "$(_h "$INST/setup-node.sh")"
+check "expired at update: release recorded" "$(_h "$R3/MANIFEST")" "$(_h "$INST/MANIFEST")"
+TODAY=2027-02-02 run_updater y
+check_rc "expired, up to date: exits 0" 0 "$RC"
+check_has "expired, up to date: the warning without installing" "  [WARN] Script release scripts-v1.5.0 expired on 2027-02-01; a newer signed release is overdue." "$(plain "$OUT")"
+check_has "expired, up to date: up to date" "  [OK]  All scripts are up to date (scripts-v1.5.0, serial 102)" "$(plain "$OUT")"
+
+# --check: an update is pending; then the newest release has expired too.
+install_release "$R2"
+TODAY=2026-11-03 run_check
+check_rc "check, pending: exits 1" 1 "$RC"
+check_has "check, pending: installed line of a 2.0.0-shaped record" "  ->  Installed:  scripts-v1.1.0, serial 101, release date not recorded, no expiry date (signature verified)" "$(plain "$OUT")"
+check_has "check, pending: says what to run" "  [WARN] Update pending: 1 file(s) to update, 0 to remove. Run: bash $INST/update-scripts.sh" "$(plain "$OUT")"
+TODAY=2027-03-01 run_check
+check_rc "check, pending and newest expired: exits 1" 1 "$RC"
+check_has "check, newest expired: says so" "  [WARN] Newest release scripts-v1.5.0 expired on 2027-02-01 (28 days ago); a newer signed release is overdue." "$(plain "$OUT")"
+
+# --check: a 2.0.0-shaped release (no date=, no expires=) installed and newest.
+publish "$R2" scripts-v1.1.0
+TODAY=2026-11-03 run_check
+check_rc "check, no expiry: exits 0" 0 "$RC"
+check_has "check, no expiry: says so" "  [OK]  Up to date with scripts-v1.1.0; it carries no expiry date." "$(plain "$OUT")"
+
+# --check: nothing installed, no RELEASE, a network failure, a tampered record.
+rm -f "$INST/MANIFEST" "$INST/MANIFEST.sig"
+TODAY=2026-11-03 run_check
+check_rc "check, nothing installed: exits 2" 2 "$RC"
+check_has "check, nothing installed: says so" "  [WARN] No signed release is installed in $INST (no MANIFEST record)." "$(plain "$OUT")"
+check_has "check, nothing installed: still names the newest" "  ->  Newest:     scripts-v1.1.0, serial 101, release date not recorded, no expiry date (signature verified)" "$(plain "$OUT")"
+check_has "check, nothing installed: what to run" "  ->  To install it: bash $INST/update-scripts.sh" "$(plain "$OUT")"
+install_release "$R2"
+CURL_FAIL=1 run_check
+check_rc "check, network failure: exits 2" 2 "$RC"
+says "check, network failure" "(network error). Try again in a few minutes."
+printf 'serial=999\n' >> "$INST/MANIFEST"
+run_check
+check_rc "check, tampered record: exits 2" 2 "$RC"
+says "check, tampered record" "The release manifest is not signed by a Telcoin release key"
+install_release "$R2"
+mv "$RAW/main/RELEASE" "$T/RELEASE.keep"
+run_check
+check_rc "check, no RELEASE: exits 2" 2 "$RC"
+says "check, no RELEASE" "No signed script release is published yet"
+mv "$T/RELEASE.keep" "$RAW/main/RELEASE"
+OUT="$(bash "$INST/update-scripts.sh" --check --bogus 2>&1)"; RC=$?
+check_rc "check with an unknown argument: exits 2" 2 "$RC"
+
+# Malformed and repeated date= / expires= refuse the whole manifest.
+# bad_headers NAME PHRASE LINE... -- a signed R3 with these header lines is refused.
+bad_headers() {
+    local name="$1" phrase="$2" d="$SRC/hdr"
+    shift 2
+    rm -rf "$d"; cp -R "$R3" "$d"
+    write_manifest "$d" scripts-v1.5.0 102 1.0.0
+    with_headers "$d" "$@"
+    sign "$d" key1; sidecars "$d"
+    publish "$d" scripts-v1.5.0
+    install_release "$R2"
+    refused "$name"
+    says "$name" "$phrase"
+}
+bad_headers "expires not a calendar date" "The release manifest is malformed (expires 2027-02-30)" date=2026-11-03 expires=2027-02-30
+bad_headers "expires in another format" "The release manifest is malformed (expires 2027/02/01)" expires=2027/02/01
+bad_headers "date not zero-padded" "The release manifest is malformed (date 2026-11-3)" date=2026-11-3 expires=2027-02-01
+bad_headers "expires twice" "date and expires may each appear once at most" expires=2027-02-01 expires=2027-03-01
+bad_headers "date twice" "date and expires may each appear once at most" date=2026-11-03 date=2026-11-04
+bad_headers "expires empty" "The release manifest is malformed (expires )" expires=
+# A manifest with expires= and no date= is fine.
+D2="$SRC/expiresonly"; rm -rf "$D2"; cp -R "$R3" "$D2"
+write_manifest "$D2" scripts-v1.5.0 102 1.0.0; with_headers "$D2" expires=2027-02-01
+sign "$D2" key1; sidecars "$D2"
+publish "$D2" scripts-v1.5.0
+install_release "$R2"
+TODAY=2026-11-03 run_updater y
+check_rc "expires without date: accepted" 0 "$RC"
+
+# The real date of this host (GNU, busybox or macOS): far-off dates either way.
+D3="$SRC/realdate"; rm -rf "$D3"; cp -R "$R3" "$D3"
+write_manifest "$D3" scripts-v1.6.0 103 1.0.0; with_headers "$D3" date=2026-11-03 expires=2999-12-31
+sign "$D3" key1; sidecars "$D3"
+publish "$D3" scripts-v1.6.0
+install_release "$D3"
+run_check
+check_rc "real date, expires 2999-12-31: exits 0" 0 "$RC"
+check "real date, expires 2999-12-31: days left counted" "yes" \
+    "$(plain "$OUT" | grep -qE '^  \[OK\]  Up to date with scripts-v1\.6\.0; it expires 2999-12-31 \(in [0-9]+ days\)\.$' && echo yes || echo no)"
+write_manifest "$D3" scripts-v1.6.0 103 1.0.0; with_headers "$D3" date=2019-10-01 expires=2019-12-31
+sign "$D3" key1; sidecars "$D3"
+publish "$D3" scripts-v1.6.0
+install_release "$D3"
+run_check
+check_rc "real date, expired 2019-12-31: exits 1" 1 "$RC"
+check "real date, expired 2019-12-31: days ago counted" "yes" \
+    "$(plain "$OUT" | grep -qE '^  \[WARN\] Installed release scripts-v1\.6\.0 expired on 2019-12-31 \([0-9]+ days ago\); a newer signed release is overdue\.$' && echo yes || echo no)"
+
+# A 2.0.0 updater (main 1187ddb, before this change) installs a release whose
+# manifest carries date= and expires=: it ignores header keys it does not know,
+# then hands over to the release copy of the updater.
+if command -v git >/dev/null 2>&1 && git -C "$REPO" cat-file -e 1187ddb:update-scripts.sh 2>/dev/null; then
+    publish "$R3" scripts-v1.5.0
+    install_release "$R2"
+    git -C "$REPO" show 1187ddb:update-scripts.sh > "$INST/update-scripts.sh"
+    TODAY=2026-11-03 run_updater y
+    check_rc "2.0.0 updater, manifest with expires=: exits 0" 0 "$RC"
+    check "2.0.0 updater: release installed" "$(_h "$R3/MANIFEST")" "$(_h "$INST/MANIFEST")"
+    check "2.0.0 updater: replaced by the release copy" "$(_h "$R3/update-scripts.sh")" "$(_h "$INST/update-scripts.sh")"
+else
+    skip "2.0.0 updater and expires=" "git or commit 1187ddb not available"
+fi
+TODAY=""
 
 # --- no release published yet ---------------------------------------------------------------
 rm -f "$RAW/main/RELEASE"
