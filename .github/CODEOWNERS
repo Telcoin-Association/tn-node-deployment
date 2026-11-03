@@ -1,4 +1,4 @@
-# The main-branch ruleset (issue #30) requires a review from a code owner once it is enabled.
+# Code owners. The main-branch ruleset (issue #30) requires a pull-request review; it will require that review from a code owner once a second owner is listed here and the ruleset's require_code_owner_review is set to true.
 #
 # The release path (the updater, the installer, lib/, ui/, the workflows, the
 # release tooling and the maintainer key directory) is listed separately so a
