@@ -647,6 +647,33 @@ _rm_build_account() {
     return 0
 }
 
+# _rm_p2p_limit -- remove firewall-setup.sh's per-source limit on new P2P flows:
+# disable and stop telcoin-p2p-limit.service, remove it and
+# /etc/telcoin/p2p-limit.nft, and delete the nftables table inet tn_p2p when nft
+# is installed and the table is there. Never fails.
+_rm_p2p_limit() {
+    local r="$TN_RM_ROOT" unit=/etc/systemd/system/telcoin-p2p-limit.service f=/etc/telcoin/p2p-limit.nft tables
+    if [[ -e "${r}${unit}" || -L "${r}${unit}" ]]; then
+        systemctl disable --now telcoin-p2p-limit.service >/dev/null 2>&1 || true
+        rm -f -- "${r}${unit}" 2>/dev/null || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        print_ok "Removed ${unit}"
+    fi
+    if [[ -e "${r}${f}" || -L "${r}${f}" ]]; then
+        rm -f -- "${r}${f}" 2>/dev/null || true
+        print_ok "Removed ${f}"
+    fi
+    command -v nft >/dev/null 2>&1 || return 0
+    tables="$(nft list tables 2>/dev/null)" || return 0
+    grep -qx 'table inet tn_p2p' <<< "$tables" || return 0
+    if nft -f - >/dev/null 2>&1 <<< $'table inet tn_p2p\ndelete table inet tn_p2p'; then
+        print_ok "Deleted the P2P new-flow limit (nftables table inet tn_p2p)"
+    else
+        print_warn "Could not delete the nftables table inet tn_p2p; remove it with: sudo nft delete table inet tn_p2p"
+    fi
+    return 0
+}
+
 # remove_node_host_files -- remove the host files every node install shares:
 # the start scripts in /usr/local/libexec/telcoin (and that directory when it is
 # empty; a symlink there is left alone with a warning, nothing is removed
@@ -683,6 +710,8 @@ remove_node_host_files() {
             print_ok "Removed ${f#"$r"}"
         fi
     done
+    # The P2P new-flow limit firewall-setup.sh keeps for this node, and its boot unit.
+    _rm_p2p_limit
     if [[ ! -L "$lx" ]]; then
         rmdir "$lx" 2>/dev/null || true
     fi
