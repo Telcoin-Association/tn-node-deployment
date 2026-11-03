@@ -99,7 +99,23 @@ const other = "adiri"; // network-gated: same label for the badge
 </script>
 <style>.adiri { color: red; } /* network-gated: testnet badge colour */</style>
 EOF
-printf '<p>adiri</p>\r\n' >> "$M/ui/static/index.html"
+# A marker line is nothing but the marker comment: code after the close of a
+# <!-- or /* marker, or no close at all, leaves the next line uncovered.
+{
+    printf '<p>adiri</p>\r\n'
+    cat <<'EOF'
+<!-- network-gated: code follows the close --> <b>adiri on the marker line</b>
+<p>adiri below a marker line that also holds code</p>
+/* network-gated: code follows the close */ .x { color: red; }
+.adiri { color: blue; }
+EOF
+    printf '/* network-gated: only blanks after the close */ \t \n'
+    cat <<'EOF'
+.adiri-ok { color: green; }
+<!-- network-gated: the close is missing
+<p>adiri below an unclosed marker</p>
+EOF
+} >> "$M/ui/static/index.html"
 
 cat > "$M/observability/config.alloy" <<'EOF'
 // vendored from adiri-genesis
@@ -133,6 +149,9 @@ ui/server.py:4: HUB = \"https://LOGS.HUB.EXAMPLE/x\"
 ui/telcoin-ui-helper.sh:4: printf '%s\\n' \"v0.16.0-adiri\"
 ui/static/index.html:5: <p>Adiri Testnet</p>
 ui/static/index.html:12: <p>adiri</p>
+ui/static/index.html:14: <p>adiri below a marker line that also holds code</p>
+ui/static/index.html:16: .adiri { color: blue; }
+ui/static/index.html:20: <p>adiri below an unclosed marker</p>
 observability/config.alloy:1: // vendored from adiri-genesis"
 
 out="$("$SH" "$LINT" "$M" 2> "$T/err")"
@@ -140,7 +159,7 @@ rc=$?
 check_rc "mixed tree: exit 1" 1 "$rc"
 check "mixed tree: exactly the unannotated hits, in scan order" "$WANT" "$out"
 check "mixed tree: the summary counts them" \
-    'check-network-hits: 15 of 28 hit(s) in 6 file(s) scanned have no network-gated: reason; mark each with "# network-gated: <reason>" (// or <!-- --> in JavaScript, Alloy and HTML) on the line or on a line of its own above' \
+    'check-network-hits: 18 of 33 hit(s) in 6 file(s) scanned have no network-gated: reason; mark each with "# network-gated: <reason>" (// or <!-- --> in JavaScript, Alloy and HTML) on the line or on a line of its own above' \
     "$(cat "$T/err")"
 check_lacks "excluded paths are never reported" 'rpc.adiri.tel 203.0.113.7' "$out"
 check_lacks "lib/testnet-addons.env itself is not scanned" "testnet-addons.env" "$out"
@@ -150,7 +169,7 @@ check_lacks "lib/testnet-addons.env itself is not scanned" "testnet-addons.env" 
 lst="$("$SH" "$LINT" --list "$M" 2> "$T/err")"
 rc=$?
 check_rc "--list: exit 1 while hits are unannotated" 1 "$rc"
-check "--list: one line per hit" 28 "$(printf '%s\n' "$lst" | grep -c .)"
+check "--list: one line per hit" 33 "$(printf '%s\n' "$lst" | grep -c .)"
 check "--list: the unannotated hits are the findings" \
     "$(printf '%s\n' "$WANT" | sed 's/^\([^:]*:[0-9]*\):.*/\1/')" \
     "$(printf '%s\n' "$lst" | sed -n 's/^\([^:]*:[0-9]*\): unannotated -- .*/\1/p')"
@@ -186,6 +205,16 @@ check_has "--list: CSS, the closing */ is not part of the reason" \
     'ui/static/index.html:11: testnet badge colour -- <style>.adiri { color: red; } /* network-gated: testnet badge colour */</style>' "$lst"
 check_has "--list: a trailing marker covers its own line only, not the next" \
     'ui/static/index.html:12: unannotated -- <p>adiri</p>' "$lst"
+check_has "--list: a marker line that also holds code covers its own line" \
+    'ui/static/index.html:13: code follows the close -- <!-- network-gated: code follows the close --> <b>adiri on the marker line</b>' "$lst"
+check_has "--list: code after the --> of a marker: the next line is not covered" \
+    'ui/static/index.html:14: unannotated -- <p>adiri below a marker line that also holds code</p>' "$lst"
+check_has "--list: code after the */ of a marker: the next line is not covered" \
+    'ui/static/index.html:16: unannotated -- .adiri { color: blue; }' "$lst"
+check_has "--list: only blanks after the */: a marker line" \
+    'ui/static/index.html:18: only blanks after the close -- .adiri-ok { color: green; }' "$lst"
+check_has "--list: a <!-- marker that does not close: the next line is not covered" \
+    'ui/static/index.html:20: unannotated -- <p>adiri below an unclosed marker</p>' "$lst"
 check_has "--list: Alloy, the marker line above" \
     'observability/config.alloy:3: header note naming the testnet source repository -- // mirrored from adiri-genesis' "$lst"
 check_has "--list: stderr names the patterns read from the stub env" \
@@ -214,7 +243,7 @@ rc=$?
 check_rc "clean tree: exit 0" 0 "$rc"
 check "clean tree: nothing on stdout" "" "$out"
 check "clean tree: the count of annotated hits" \
-    "check-network-hits: clean, 28 annotated hit(s) in 6 file(s) scanned" "$(cat "$T/err")"
+    "check-network-hits: clean, 33 annotated hit(s) in 6 file(s) scanned" "$(cat "$T/err")"
 
 # The default root is the tree the lint lives in, from its root or elsewhere.
 # The copy under tools/ names adiri itself and is out of scope.
@@ -223,12 +252,12 @@ out="$(cd "$C" && "$SH" tools/check-network-hits.sh 2> "$T/err")"
 rc=$?
 check_rc "no ROOT, run from the tree root: exit 0" 0 "$rc"
 check "no ROOT, run from the tree root: the same count" \
-    "check-network-hits: clean, 28 annotated hit(s) in 6 file(s) scanned" "$(cat "$T/err")"
+    "check-network-hits: clean, 33 annotated hit(s) in 6 file(s) scanned" "$(cat "$T/err")"
 out="$(cd "$T" && "$SH" "$C/tools/check-network-hits.sh" 2> "$T/err")"
 rc=$?
 check_rc "no ROOT, run from another directory: exit 0" 0 "$rc"
 check "no ROOT, run from another directory: the same count" \
-    "check-network-hits: clean, 28 annotated hit(s) in 6 file(s) scanned" "$(cat "$T/err")"
+    "check-network-hits: clean, 33 annotated hit(s) in 6 file(s) scanned" "$(cat "$T/err")"
 out="$(cd "$M" && "$SH" "$C/tools/check-network-hits.sh" 2>/dev/null)"
 rc=$?
 check_rc "no ROOT: the current directory is not the root" 0 "$rc"
