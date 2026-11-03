@@ -1,9 +1,11 @@
-# Code owners. The main-branch ruleset requires a review from a code owner.
+# The main-branch ruleset (issue #30) requires a review from a code owner once it is enabled.
 #
 # The release path (the updater, the installer, lib/, ui/, the workflows, the
 # release tooling and the maintainer key directory) is listed separately so a
 # second owner can be added to each line; the ruleset sets how many approvals
 # a pull request needs.
+#
+# second owner: TODO (a GitHub login; add it to each release-path line below)
 
 *                           @grantkee
 
