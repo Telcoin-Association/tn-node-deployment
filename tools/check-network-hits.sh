@@ -34,7 +34,8 @@
 #   - the line itself carries the marker (a trailing comment, or a comment
 #     line that names adiri and is itself the annotation), or
 #   - the line right above it is a marker line: nothing but the comment that
-#     holds the marker.
+#     holds the marker (a <!-- or /* marker closes on that line, and only
+#     blanks follow the --> or */).
 # A trailing marker covers its own line only, so a code line's reason never
 # vouches for the line after it. The forms:
 #     readonly TESTNET_RPC_URL="https://rpc.adiri.tel"  # network-gated: testnet constant, selected by NETWORK
@@ -43,7 +44,11 @@
 #     // network-gated: example shown only when NETWORK=testnet
 #     <!-- network-gated: status page per network (STATUS_PAGE_LINKS) -->
 # A marker line is never reported, even when it names adiri. A marker with an
-# empty reason (# network-gated: with nothing after it) covers nothing.
+# empty reason (# network-gated: with nothing after it) covers nothing. Inside
+# a JavaScript template literal an HTML marker is part of the rendered page and
+# a // is no comment at all: move the testnet text out of the template, onto a
+# line below a // marker line. Inside a heredoc a marker is written into the
+# file the heredoc makes: reword the line instead.
 #
 # Blind spots, which review has to cover: a testnet name or address built from
 # pieces ("rpc." + name + ".tel"), held in another variable or encoded; an
@@ -108,6 +113,22 @@ EOF
 # count "HITS UNANNOTATED".
 # shellcheck disable=SC2016
 AWK_PROG='
+# marker_line S -- 1 when S is nothing but the comment that holds a marker:
+# it starts with the marker, and a <!-- or /* comment closes on the line with
+# only blanks after it.
+function marker_line(s,    r, i) {
+    if (!match(s, /^[ \t]*(#|\/\/|<!--|\/\*)[ \t]*network-gated:/)) return 0
+    r = substr(s, RSTART + RLENGTH)
+    if (s ~ /^[ \t]*<!--/) {
+        i = index(r, "-->")
+        return (i > 0 && substr(r, i + 3) ~ /^[ \t]*$/)
+    }
+    if (s ~ /^[ \t]*\/\*/) {
+        i = index(r, "*/")
+        return (i > 0 && substr(r, i + 2) ~ /^[ \t]*$/)
+    }
+    return 1
+}
 function reason_of(s,    r) {
     if (!match(s, /(#|\/\/|<!--|\/\*)[ \t]*network-gated:/)) return ""
     r = substr(s, RSTART + RLENGTH)
@@ -148,7 +169,7 @@ FNR == 1 { prev = ""; name = FILENAME; sub(/^\.\//, "", name) }
         }
     }
     prev = ""
-    if (own != "" && line ~ /^[ \t]*(#|\/\/|<!--|\/\*)[ \t]*network-gated:/) prev = own
+    if (own != "" && marker_line(line)) prev = own
 }
 END {
     printf "%d %d\n", hits, bad
