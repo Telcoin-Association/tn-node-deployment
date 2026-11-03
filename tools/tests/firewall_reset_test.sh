@@ -14,7 +14,8 @@
 # rewriting it (under the update lock, after the rate and burst are checked),
 # the boot copy checked against the loaded table and a stopped change finished or
 # reported, the status line and the --json status field p2p_new_flow_limit, and
-# the expected rules naming the P2P source list (or saying it is not usable).
+# the expected rules naming the P2P source list (or saying it is not usable), and
+# the status screen's health-port block, shown only on testnet and devnet.
 #
 #   bash tools/tests/firewall_reset_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/firewall_reset_test.sh
@@ -778,6 +779,49 @@ check_rc "expected: the same list refuses an enable" 1 "$RC"
 rm -f "$TN_ROOT_PREFIX/etc/systemd/system/telcoin.service"
 printf 'NETWORK=testnet\n' > "$META"
 fresh_flags
+
+# --- the status screen's health-port block follows the network ----------------------
+# kuma_view NETWORK RULE... -- view_status with ufw on and the rules given; the
+# screen, without colours, in $T/view.out.
+kuma_view() {
+    local net="$1" r
+    shift
+    printf 'NETWORK=%s\n' "$net" > "$META"
+    NETWORK="$net"
+    : > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+    for r in "allow 22/tcp" "allow 49590/udp" "allow 49594/udp" "$@"; do
+        printf '%s\n' "$r" >> "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+    done
+    printf 'ENABLED=yes\n' > "$TN_ROOT_PREFIX/etc/ufw/ufw.conf"
+    view_status </dev/null 2>&1 | plain > "$T/view.out"
+}
+KMON="allow from ${TN_KUMA_SRC} to any port ${TN_KUMA_PORT} proto tcp"
+fresh_flags
+kuma_view mainnet
+check_has "kuma, mainnet closed: one line, closed by design" "  ->  Health port TCP ${TN_KUMA_PORT} stays closed: health monitoring is a testnet-only add-on" "$(cat "$T/view.out")"
+check_lacks "kuma, mainnet closed: no error" "CLOSED" "$(cat "$T/view.out")"
+check_lacks "kuma, mainnet closed: no testnet block" "Uptime Kuma" "$(cat "$T/view.out")"
+check_lacks "kuma, mainnet closed: no testnet monitor address" "${TN_KUMA_SRC%/*}" "$(cat "$T/view.out")"
+for open in "allow ${TN_KUMA_PORT}/tcp" "$KMON"; do
+    kuma_view mainnet "$open"
+    check_has "kuma, mainnet open (${open}): warned" "  [WARN] Health port TCP ${TN_KUMA_PORT} is open, although no monitor uses it on this network; Manage node ports (or --enable) closes it" "$(cat "$T/view.out")"
+    # The rule list above shows the rule as ufw has it; no line of the status names
+    # the testnet monitor as the source to use.
+    check_lacks "kuma, mainnet open (${open}): no testnet monitor address outside the rule list" "${TN_KUMA_SRC%/*}" "$(grep -v ' ALLOW ' "$T/view.out")"
+    check_lacks "kuma, mainnet open (${open}): no advice to restrict to the testnet monitor" "consider restricting" "$(cat "$T/view.out")"
+    check_lacks "kuma, mainnet open (${open}): no testnet block" "Uptime Kuma" "$(cat "$T/view.out")"
+done
+kuma_view testnet
+check_has "kuma, testnet: block header" "  ->  Uptime Kuma health monitoring -- TCP ${TN_KUMA_PORT}" "$(cat "$T/view.out")"
+check_has "kuma, testnet closed: error as before" "  [ERROR] TCP ${TN_KUMA_PORT} is CLOSED -- health monitoring will fail" "$(cat "$T/view.out")"
+kuma_view testnet "$KMON"
+check_has "kuma, testnet restricted: ok as before" "  [OK]  TCP ${TN_KUMA_PORT} $(kuma_restricted_desc)" "$(cat "$T/view.out")"
+kuma_view testnet "allow ${TN_KUMA_PORT}/tcp"
+check_has "kuma, testnet open to Anywhere: warning as before" "  [WARN] TCP ${TN_KUMA_PORT} open to Anywhere -- consider restricting to ${TN_KUMA_SRC} (menu: Manage node ports)" "$(cat "$T/view.out")"
+check_lacks "kuma, testnet: no mainnet line" "testnet-only add-on" "$(cat "$T/view.out")"
+printf 'NETWORK=testnet\n' > "$META"
+NETWORK=testnet
+fresh_flags; reset_state yes
 
 # --- fw_persist_sources -----------------------------------------------------------
 META_CALLS="$T/meta.calls"
