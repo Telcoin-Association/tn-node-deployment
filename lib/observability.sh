@@ -83,25 +83,45 @@ OBS_GRAFANA_KEY_FPR="B53AE77BADB630A683046005963FA27710458545"
 # testnet and devnet (mainnet, unset, unknown) yields EMPTY, override or not, so the
 # add-on never ships a mainnet node's logs anywhere.
 #
-# Between 1 and 2: with no override on this run, the URL the env file already holds
-# (OBS_PUSH_URL= / OBS_METRICS_PUSH_URL= in telcoin-alloy.env, written by the enable that
-# took the override), so a later render (--rotate-token, a partial disable, the other
-# pipeline's enable) keeps an operator's own hub instead of putting the default back.
+# An override is remembered as intent, never inferred from the stored URL: the env file
+# carries OBS_PUSH_URL_SOURCE=override (OBS_METRICS_PUSH_URL_SOURCE=override) only when
+# its URL came from an override, and a later render without the flag keeps that URL
+# (_obs_url_override). A URL written without the marker (the release default, or any
+# env file from 2.0.x) is replaced by the current default at the next render, so a
+# default that a script release changes reaches the host. The value "default"
+# (--push-url default) clears an override.
 obs_effective_push_url() {
     local v
     case "${NETWORK:-}" in testnet|devnet) ;; *) return 0 ;; esac
-    if [[ -n "${OBS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_PUSH_URL}"
-    elif v="$(_obs_env_value OBS_PUSH_URL)" && [[ -n "$v" ]]; then printf '%s' "$v"
+    if v="$(_obs_url_override OBS_PUSH_URL)"; then printf '%s' "$v"
     elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_PUSH_URL_DEVNET:-}"
     else printf '%s' "${OBS_PUSH_URL_TESTNET}"; fi
 }
 obs_effective_metrics_url() {
     local v
     case "${NETWORK:-}" in testnet|devnet) ;; *) return 0 ;; esac
-    if [[ -n "${OBS_METRICS_PUSH_URL:-}" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL}"
-    elif v="$(_obs_env_value OBS_METRICS_PUSH_URL)" && [[ -n "$v" ]]; then printf '%s' "$v"
+    if v="$(_obs_url_override OBS_METRICS_PUSH_URL)"; then printf '%s' "$v"
     elif [[ "${NETWORK:-}" == "devnet" ]]; then printf '%s' "${OBS_METRICS_PUSH_URL_DEVNET:-}"
     else printf '%s' "${OBS_METRICS_PUSH_URL_TESTNET}"; fi
+}
+
+# _obs_url_override <OBS_PUSH_URL|OBS_METRICS_PUSH_URL> -- rc 0 and the URL when that
+# push URL is an operator override for this render: the variable is set on this run to
+# anything but "default", or it is unset and the env file records its URL with
+# <name>_SOURCE=override. rc 1 (nothing printed) otherwise, also when the variable is
+# "default", which clears a recorded override.
+_obs_url_override() {
+    local name="$1" now v
+    now="${!name:-}"
+    if [[ -n "$now" ]]; then
+        [[ "$now" != "default" ]] || return 1
+        printf '%s' "$now"
+        return 0
+    fi
+    [[ "$(_obs_env_value "${name}_SOURCE")" == "override" ]] || return 1
+    v="$(_obs_env_value "$name")"
+    [[ -n "$v" ]] || return 1
+    printf '%s' "$v"
 }
 
 # -----------------------------------------------------------------------------
@@ -555,14 +575,30 @@ _obs_urls_ok() {
     return "$rc"
 }
 
+# _obs_url_changed_note <logs|metrics> <OBS_PUSH_URL|OBS_METRICS_PUSH_URL> <flag> <old> <new>
+# -- one line when a render moves a pipeline to another push URL: set by the flag (an
+# override), or following the release default (no override, or one cleared with
+# "default"). Nothing when the URL is unchanged or there was none before.
+_obs_url_changed_note() {
+    [[ -n "$4" && "$4" != "$5" ]] || return 0
+    if _obs_url_override "$2" >/dev/null; then
+        print_info "The ${1} push URL is now ${5} (set with ${3}; was ${4})."
+    else
+        print_info "The ${1} push URL follows the release default: ${5} (was ${4}). Pass ${3} to setup-observability.sh to ship somewhere else."
+    fi
+    return 0
+}
+
 OBS_TOKEN_MOVED_SAID=false
 
 # _obs_write_env_file -- write ${OBS_ETC_DIR}/telcoin-alloy.env (root 0600) for this
 # installation: identity labels, OBS_PUSH_URL and OBS_PUSH_HOST (the TLS server name),
 # and with ENABLE_METRICS=true TN_METRICS_ADDR, OBS_METRICS_PUSH_URL and
 # OBS_METRICS_PUSH_HOST; the URLs are obs_effective_push_url / obs_effective_metrics_url
-# (an override on this run, else what the env file holds, else the network default),
-# and an enabled pipeline without one is refused (_obs_urls_ok). A docker install
+# (an override on this run or one the env file records, else the release default), an
+# override is recorded with OBS_PUSH_URL_SOURCE=override / OBS_METRICS_PUSH_URL_SOURCE=
+# override, a URL that changes is said (_obs_url_changed_note), and an enabled pipeline
+# without one is refused (_obs_urls_ok). A docker install
 # (INSTALL_METHOD from .node-meta) also gets
 # CREDENTIALS_DIRECTORY, where the sidecar sees the token file; systemd sets it for the
 # native unit. The token is never written here. An env file from before the token file
@@ -571,7 +607,7 @@ OBS_TOKEN_MOVED_SAID=false
 # (said) when INSTALL_METHOD is set twice in .node-meta or a write fails.
 _obs_write_env_file() {
     local envf="${OBS_ETC_DIR}/telcoin-alloy.env" method legacy tokf
-    local push_url metrics_url text
+    local push_url metrics_url text old_push old_metrics
     method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
     _obs_urls_ok || return 1
     obs_label_sourcing
@@ -582,10 +618,12 @@ _obs_write_env_file() {
         obs_write_token_file "$legacy" || return 1
     fi
     legacy="${legacy:+yes}"
-    # Effective push URLs: explicit OBS_PUSH_URL/OBS_METRICS_PUSH_URL override wins,
-    # else the env file's own line, else _DEVNET when NETWORK=devnet, else _TESTNET.
+    # Effective push URLs: an override (on this run, or recorded with the _SOURCE
+    # marker) wins, else _DEVNET when NETWORK=devnet, else _TESTNET.
     push_url="$(obs_effective_push_url)"
     metrics_url="$(obs_effective_metrics_url)"
+    old_push="$(_obs_env_value OBS_PUSH_URL)"
+    old_metrics="$(_obs_env_value OBS_METRICS_PUSH_URL)"
     text="TN_NODE=${TN_NODE}
 TN_REGION=${TN_REGION}
 TN_VALIDATOR_ADDRESS=${TN_VALIDATOR_ADDRESS}
@@ -593,11 +631,19 @@ TN_CHAIN=${TN_CHAIN}
 TN_IMAGE_VERSION=${TN_IMAGE_VERSION}
 OBS_PUSH_URL=${push_url}
 OBS_PUSH_HOST=$(obs_url_host "$push_url")"
+    if _obs_url_override OBS_PUSH_URL >/dev/null; then
+        text="${text}
+OBS_PUSH_URL_SOURCE=override"
+    fi
     if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
         text="${text}
 TN_METRICS_ADDR=$(obs_metrics_addr)
 OBS_METRICS_PUSH_URL=${metrics_url}
 OBS_METRICS_PUSH_HOST=$(obs_url_host "$metrics_url")"
+        if _obs_url_override OBS_METRICS_PUSH_URL >/dev/null; then
+            text="${text}
+OBS_METRICS_PUSH_URL_SOURCE=override"
+        fi
     fi
     if [[ "$method" == "docker" ]]; then
         text="${text}
@@ -606,6 +652,12 @@ CREDENTIALS_DIRECTORY=${OBS_DOCKER_CRED_DIR}"
     if ! tn_write_root_file "$envf" 0600 <<< "$text"; then
         print_error "Could not write ${envf}."
         return 1
+    fi
+    if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
+        _obs_url_changed_note logs OBS_PUSH_URL --push-url "$old_push" "$push_url"
+    fi
+    if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
+        _obs_url_changed_note metrics OBS_METRICS_PUSH_URL --metrics-push-url "$old_metrics" "$metrics_url"
     fi
     if [[ -n "$legacy" && "$OBS_TOKEN_MOVED_SAID" != "true" ]]; then
         OBS_TOKEN_MOVED_SAID=true
