@@ -190,6 +190,7 @@ for mode in cli json; do
         check "$mode clean run: the baseline warning is an event before the done event" "yes" \
             "$(awk '/^\{"event":"warn","msg":"host baseline stub"\}$/ { w = NR } /^\{"event":"done"/ { d = NR } END { print ((w && d && w < d) ? "yes" : "no") }' "$T/out")"
     fi
+    check "$mode clean run: update lock released" "yes" "$(lock_free)"
     new_st="$(state)"
     new_tbl="$(table)"
     new_boot="$(boot)"
@@ -231,20 +232,33 @@ temp files: 0" "$new_boot"
             now_tbl="$(table)"
             if [ "$at" = nft ]; then
                 check "$name: ufw rules are the complete new set" "$new_st" "$now"
-                # TERM to the script alone lets nft finish; to the group it kills
-                # nft before it applies anything.
-                if [ "$target" = pid ]; then
-                    check "$name: nft finished, table is the complete new state" "$new_tbl" "$now_tbl"
-                else
-                    check "$name: nft killed, table is the old one" "$old_tbl" "$now_tbl"
-                fi
-                check "$name: one nft transaction" "1" "$(grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' ')"
+                # TERM to the script alone lets nft finish, and the exit trap
+                # writes the boot copy (CLI) or finishes the removal (--json). To
+                # the group it kills nft before it applies anything: the CLI write
+                # leaves the old table and boot copy, the --json removal is
+                # finished by the exit trap (a second transaction).
                 now_boot="$(boot)"
-                if [ "$now_boot" = "$old_boot" ] || [ "$now_boot" = "$new_boot" ]; then
-                    check "$name: boot copy is the old or the complete new one" "ok" "ok"
+                if [ "$mode" = cli ] && [ "$target" = group ]; then
+                    check "$name: nft killed, table is the old one" "$old_tbl" "$now_tbl"
+                    check "$name: nft killed, boot copy is the old one" "$old_boot" "$now_boot"
+                    check "$name: one nft transaction" "1" "$(grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' ')"
+                    msg="before the P2P new-flow limit was loaded; the previous limit and its boot copy stay as they were."
                 else
-                    check "$name: boot copy is the old or the complete new one" "$old_boot" "$now_boot"
+                    check "$name: table is the complete new state" "$new_tbl" "$now_tbl"
+                    check "$name: boot copy is the complete new one" "$new_boot" "$now_boot"
+                    if [ "$mode" = json ] && [ "$target" = group ]; then
+                        check "$name: the exit trap ran the removal again" "2" "$(grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' ')"
+                    else
+                        check "$name: one nft transaction" "1" "$(grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' ')"
+                    fi
+                    if [ "$mode" = json ]; then
+                        msg="while the P2P new-flow limit was being removed; the removal was finished."
+                    else
+                        msg="after the P2P new-flow limit was loaded; its boot copy was written too."
+                    fi
                 fi
+                check "$name: the stop is reported" "yes" \
+                    "$(grep -qF "$msg" "$T/out" "$T/err" 2>/dev/null && echo yes)"
             else
                 check "$name: table left as it was" "$old_tbl" "$now_tbl"
                 check "$name: boot copy left as it was" "$old_boot" "$(boot)"
@@ -259,6 +273,56 @@ temp files: 0" "$new_boot"
             fi
         done
     done
+done
+
+# --- another run holds the update lock: every apply refuses, nothing changes ------
+# hold_lock / release_lock -- the lock held by another process (flock, else the
+# mkdir lock with this shell as its live holder).
+HOLDER=""
+hold_lock() {
+    rm -f "$T/lock.ready" "$T/lock.release"
+    if command -v flock >/dev/null 2>&1; then
+        flock "$TN_UPDATE_LOCK_FILE" sh -c 'touch "$1"; while [ ! -e "$2" ]; do sleep 0.1; done' _ "$T/lock.ready" "$T/lock.release" &
+        HOLDER=$!
+        i=0
+        while [ ! -e "$T/lock.ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    else
+        mkdir -p "${TN_UPDATE_LOCK_FILE}.d"
+        echo "$$" > "${TN_UPDATE_LOCK_FILE}.d/pid"
+        HOLDER=""
+    fi
+}
+release_lock() {
+    if [ -n "$HOLDER" ]; then
+        touch "$T/lock.release"
+        wait "$HOLDER" 2>/dev/null
+        HOLDER=""
+    else
+        rm -rf "${TN_UPDATE_LOCK_FILE}.d"
+    fi
+}
+for args in "--reset" "--enable" "--reset --ssh-from 203.0.113.0/24" "--json --enable"; do
+    fixture
+    before_st="$(state)"
+    before_tbl="$(table)"
+    before_boot="$(boot)"
+    hold_lock
+    # shellcheck disable=SC2086
+    bash "$T/fw/driver.sh" $args >"$T/out" 2>"$T/err" </dev/null
+    rc=$?
+    release_lock
+    check "lock held, ${args}: refused (rc 1)" "1" "$rc"
+    check "lock held, ${args}: no ufw change" "" "$(grep -v '^status' "$UFW_LOG")"
+    check "lock held, ${args}: ufw rules as they were" "$before_st" "$(state)"
+    check "lock held, ${args}: table as it was" "$before_tbl" "$(table)"
+    check "lock held, ${args}: boot copy as it was" "$before_boot" "$(boot)"
+    check "lock held, ${args}: no nft transaction" "0" "$(grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' ')"
+    check "lock held, ${args}: says another update runs" "yes" \
+        "$(grep -q 'Another update is already running' "$T/out" "$T/err" && echo yes)"
+    if [ "$args" = "--json --enable" ]; then
+        check "lock held, ${args}: done event names the lock" "yes" \
+            "$(tail -n1 "$T/out" | grep -q '"event":"done","ok":false.*Another update is already running' && echo yes)"
+    fi
 done
 
 finish
