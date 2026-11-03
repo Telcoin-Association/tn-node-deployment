@@ -1704,11 +1704,16 @@ obs_disable_metrics() {
 }
 
 # _obs_token_status -- one status line about the ingest token file: present with the
-# expected owner and mode, wrong owner or mode, still in the env file, or missing.
+# expected owner and mode, wrong owner or mode, still in the env file, or missing; not
+# checked when this account cannot enter ${OBS_ETC_DIR} (check-node.sh without sudo).
 # Never prints the token.
 _obs_token_status() {
     local f st envf="${OBS_ETC_DIR}/telcoin-alloy.env"
     f="$(obs_token_file)"
+    if [[ -d "$OBS_ETC_DIR" && ! -x "$OBS_ETC_DIR" ]]; then
+        print_info "Ingest token file not checked: ${OBS_ETC_DIR} is closed to this account (run this with sudo)."
+        return 0
+    fi
     if [[ -f "$f" && ! -L "$f" ]]; then
         st="$(stat -c '%a %U:%G' -- "$f" 2>/dev/null)" || st="unreadable"
         if [[ "$st" == "640 root:${OBS_ALLOY_USER}" ]]; then
