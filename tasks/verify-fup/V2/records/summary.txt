@@ -1,0 +1,10 @@
+host    keys_v2.sh     rc=0  371 checks, 0 failures, 4 skipped
+host    audit_v2.sh    rc=1  39 checks, 3 failures, 2 skipped
+host    hooks_v2.sh    rc=1  101 checks, 1 failures, 1 skipped
+b32     keys_v2.sh     rc=1  831 checks, 4 failures, 0 skipped
+b32     audit_v2.sh    rc=1  99 checks, 3 failures, 1 skipped
+b32     hooks_v2.sh    rc=1  112 checks, 2 failures, 0 skipped
+ubuntu  keys_v2.sh     rc=0  831 checks, 0 failures, 0 skipped
+ubuntu  audit_v2.sh    rc=1  99 checks, 3 failures, 1 skipped
+ubuntu  hooks_v2.sh    rc=1  112 checks, 2 failures, 0 skipped
+ubuntu  real_v2.sh     rc=0  38 checks, 0 failures, 0 skipped

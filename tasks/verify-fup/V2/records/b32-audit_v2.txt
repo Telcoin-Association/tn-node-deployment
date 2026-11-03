@@ -1,0 +1,122 @@
+== AUDIT library (user root)
+ok    install without apt-get: rc 1
+ok    install without apt-get: says so
+ok    install without apt-get: no marker
+ok    install without a node unit: rc 1
+ok    install without a node unit: message
+ok    install without a node unit: apt-get not run
+ok    install without node keys: rc 1
+ok    install without node keys: message
+ok    install over a unit that holds the passphrase: rc 1
+ok    install over a unit that holds the passphrase: points at --migrate-credential
+ok    install over a unit that holds the passphrase: secret not printed
+ok    install, DATA_DIR with a space: rc 1
+ok    install, DATA_DIR with a space: names the path
+ok    install, DATA_DIR with a space: no rules file, no marker
+ok    install, DATA_DIR twice: rc 1
+ok    install, DATA_DIR twice: message
+ok    install, apt-get fails: rc 1
+ok    install, apt-get fails: retried after apt-get update
+ok    install, apt-get fails: no marker
+ok    install, aide without augenrules: rc 1
+ok    install, aide without augenrules: names augenrules
+ok    install, aide without augenrules: no marker, no rules
+ok    install, augenrules without aide: rc 1
+ok    install, augenrules without aide: names aide
+ok    install, augenrules without aide: no marker
+ok    install: rc 0
+ok    install: apt-get once, no recommends, noninteractive
+ok    install: rules file root:root 0640
+ok    install: rules text
+ok    install: augenrules --load ran
+ok    install: AIDE config root:root 0600
+ok    install: AIDE database_in
+ok    install: AIDE database_out
+ok    install: AIDE watches /opt/telcoin (anchored)
+ok    install: AIDE watches the start scripts
+ok    install: AIDE watches /etc/telcoin
+ok    install: AIDE leaves out the passphrase file and credential
+ok    install: AIDE leaves out the ingest token
+ok    install: AIDE watches the unit
+ok    install: aide --init ran once with the marker already set
+ok    install: database in place, .new gone
+ok    install: /var/lib/aide made root 0700
+ok    install: /etc/aide made root 0755
+ok    install: one HOST_BASELINE=true line
+ok    install: .node-meta still root 0600
+ok    install: no loaded-rules warning (rules loaded)
+ok    install again: rc 0
+ok    install again: same rules and AIDE config
+ok    install again: baseline made again
+ok    install again: still one HOST_BASELINE line
+ok    status, all in place: rc 0
+ok    status: marker line
+ok    status: rules line
+ok    status: rules loaded line
+ok    status: baseline line with an age
+ok    tn_host_audit carries the baseline lines
+ok    status, rules not loaded: rc 1
+ok    status, rules not loaded: warn
+ok    tn_host_audit rc 1 when the baseline warns
+ok    refresh: rc 0
+ok    refresh: aide --update ran
+ok    refresh: new database in place
+ok    refresh, aide exit 1 (differences): database replaced, rc 0
+ok    refresh, aide exit 5 (differences): database replaced, rc 0
+ok    refresh, aide exit 7 (differences): database replaced, rc 0
+ok    refresh, aide exit 17: old database kept, .new removed, rc 0
+ok    refresh, aide exit 17: warns that the baseline describes the old files
+ok    refresh, aide wrote no database: old kept, warning, rc 0
+ok    install, aide --init fails: rc 1
+ok    install, aide --init fails: init ran with the marker set
+ok    install, aide --init fails: marker removed, no database
+ok    install, aide --init fails: says HOST_BASELINE stays unset
+ok    install, augenrules --load fails: rc 0
+ok    install, augenrules --load fails: warns the rules load at the next boot
+ok    remove: rc 0
+ok    remove: rules, AIDE config and databases gone
+ok    remove: rules reloaded
+ok    remove: marker gone
+ok    remove: other .node-meta keys kept
+ok    remove: packages not purged
+ok    remove: says the packages stay
+ok    remove: /etc/aide and /var/lib/aide stay
+ok    remove again: silent, rc 0
+ok    remove without augenrules: rules file gone, rc 0
+ok    remove without augenrules: says the watches stay loaded until reboot
+ok    refresh without the marker: nothing, rc 0
+ok    status without the marker: one info line, rc 0
+ok    refresh, marker but aide not installed: warning, rc 0
+ok    refresh, marker but no AIDE config: warning, rc 0
+ok    refresh with the marker (as root): aide --update and rename
+ok    status, marker but no rules file: rc 1
+ok    status, marker but no rules file: warn line
+SKIP  status as a user (this run is root (the user run is the bash 5.3 host run))
+FAIL  [finding A-2] duplicated HOST_BASELINE: refresh says why it did nothing
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.DnaEiH/expected
+      +++ /tmp/tn_test.DnaEiH/actual
+      @@ -1 +1 @@
+      -yes
+      +no
+FAIL  [finding A-2] duplicated HOST_BASELINE: status does not say off
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.DnaEiH/expected
+      +++ /tmp/tn_test.DnaEiH/actual
+      @@ -1 +1 @@
+      -no
+      +yes
+ok    duplicated HOST_BASELINE: remove takes the files
+FAIL  [finding A-2] duplicated HOST_BASELINE: remove clears the marker lines
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.DnaEiH/expected
+      +++ /tmp/tn_test.DnaEiH/actual
+      @@ -1 +1 @@
+      -0
+      +2
+SIGTERM during aide --init leaves: marker=1 rules=root:root 640 conf=root:root 600 db=absent new=absent tmp=0
+ok    SIGTERM during aide --init: no root-writer temp file left in /etc/telcoin
+ok    SIGTERM during aide --init: status warns (marker set, database missing)
+ok    the library defines the four entry points
+
+99 checks, 3 failures, 1 skipped

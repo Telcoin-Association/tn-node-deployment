@@ -1,0 +1,59 @@
+== AUDIT library (user drtnarg)
+ok    install without apt-get: rc 1
+ok    install without apt-get: says so
+ok    install without apt-get: no marker
+ok    install without a node unit: rc 1
+ok    install without a node unit: message
+ok    install without a node unit: apt-get not run
+ok    install without node keys: rc 1
+ok    install without node keys: message
+ok    install over a unit that holds the passphrase: rc 1
+ok    install over a unit that holds the passphrase: points at --migrate-credential
+ok    install over a unit that holds the passphrase: secret not printed
+ok    install, DATA_DIR with a space: rc 1
+ok    install, DATA_DIR with a space: names the path
+ok    install, DATA_DIR with a space: no rules file, no marker
+ok    install, DATA_DIR twice: rc 1
+ok    install, DATA_DIR twice: message
+ok    install, apt-get fails: rc 1
+ok    install, apt-get fails: retried after apt-get update
+ok    install, apt-get fails: no marker
+ok    install, aide without augenrules: rc 1
+ok    install, aide without augenrules: names augenrules
+ok    install, aide without augenrules: no marker, no rules
+ok    install, augenrules without aide: rc 1
+ok    install, augenrules without aide: names aide
+ok    install, augenrules without aide: no marker
+SKIP  install happy path, refresh, remove (rename-based writes) (tn_write_root_file needs a root-owned tree)
+ok    refresh without the marker: nothing, rc 0
+ok    status without the marker: one info line, rc 0
+ok    refresh, marker but aide not installed: warning, rc 0
+ok    refresh, marker but no AIDE config: warning, rc 0
+ok    refresh with the marker (as drtnarg): aide --update and rename
+ok    status, marker but no rules file: rc 1
+ok    status, marker but no rules file: warn line
+ok    status as a user: auditctl not checked
+ok    status as a user: /var/lib/aide unreadable is info, not missing
+FAIL  [finding A-3] status as a user, .node-meta unreadable: not reported as off
+      expected (<) vs actual (>):
+      1c1
+      < no
+      ---
+      > yes
+FAIL  [finding A-2] duplicated HOST_BASELINE: refresh says why it did nothing
+      expected (<) vs actual (>):
+      1c1
+      < yes
+      ---
+      > no
+FAIL  [finding A-2] duplicated HOST_BASELINE: status does not say off
+      expected (<) vs actual (>):
+      1c1
+      < no
+      ---
+      > yes
+ok    duplicated HOST_BASELINE: remove takes the files
+SKIP  SIGTERM during aide --init (needs root)
+ok    the library defines the four entry points
+
+39 checks, 3 failures, 2 skipped
