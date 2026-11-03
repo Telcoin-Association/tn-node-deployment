@@ -503,6 +503,7 @@ same_host() {
 
 # node_network -- testnet or mainnet, from the library's tn_detect_network (meta
 # NETWORK, else the genesis chain id); the fallback reads NETWORK from .node-meta
+# network-gated: adiri is read as testnet
 # (adiri counts as testnet). Prints nothing and returns 1 for anything else.
 node_network() {
     local net rc=0
@@ -514,13 +515,14 @@ node_network() {
     [[ $rc -eq 127 ]] || return 1
     net="$(meta_value NETWORK 2>/dev/null)" || return 1
     case "$net" in
-        testnet|adiri) echo testnet ;;
+        testnet|adiri) echo testnet ;;  # network-gated: adiri is read as testnet
         mainnet) echo mainnet ;;
         *) return 1 ;;
     esac
 }
 
 # release_tag_ok <network> <tag> -- the library's tn_release_tag_ok (testnet
+# network-gated: the testnet tag form, beside the mainnet one
 # vX.Y.Z-adiri or its release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z).
 release_tag_ok() {
     _lib_req tn_release_tag_ok "$1" "$2"
@@ -911,7 +913,7 @@ cmd_update_prepare() {
     [[ -n "$ref" ]] || die "missing ref"
     net="$(node_network)" || die "cannot tell this node's network (NETWORK in .node-meta must be testnet or mainnet)"
     release_tag_ok "$net" "$ref" \
-        || die "ref must be a release tag of ${net} (vX.Y.Z$([[ "$net" == testnet ]] && echo -adiri)); branches and commit ids are refused: $ref"
+        || die "ref must be a release tag of ${net} (vX.Y.Z$([[ "$net" == testnet ]] && echo -adiri)); branches and commit ids are refused: $ref"  # network-gated: -adiri is printed only when net is testnet
     exec_job bash "$UPDATE_SCRIPT" --json --prepare --ref "$ref"
 }
 
@@ -1537,7 +1539,7 @@ cmd_setup() {
 
     # Validate every value before it reaches the setup script.
     case "$network" in
-        testnet|adiri) net_rule=testnet ;;
+        testnet|adiri) net_rule=testnet ;;  # network-gated: adiri is read as testnet
         mainnet) net_rule=mainnet ;;
         "") die "missing network (TN_SETUP_NETWORK)" ;;
         *) die "invalid network: $network" ;;

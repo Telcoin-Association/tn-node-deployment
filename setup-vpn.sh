@@ -1111,6 +1111,7 @@ EOF
     print_info "but the hub won't accept your peer yet."
     echo ""
     print_info "For the Association admin -- ONE command registers this node (run from the"
+    # network-gated: enrollment note of the testnet-only VPN (require_testnet); names the core team's repository
     print_info "adiri-genesis checkout; it stamps the enrollment date and pushes the hub):"
     cat <<EOF
 

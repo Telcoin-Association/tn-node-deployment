@@ -280,7 +280,9 @@ def bad_type():
 # IMAGE_DIGEST).
 # =============================================================================
 
+# network-gated: the testnet tag form, documented beside the mainnet one
 # Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri or its
+# network-gated: the testnet release candidate form
 # release candidate vX.Y.Z-adiri-rcN (N from 1, no leading zero), mainnet
 # vX.Y.Z (finals only); X, Y and Z are 0 or have no leading zero, as the
 # release pipeline's TAG_RE has them. Devnet: a name of letters, digits and
@@ -292,6 +294,7 @@ def bad_type():
 # release takes finals only (release_tag_final), ordered by release_tag_key.
 _TAG_PART = r"(?:0|[1-9][0-9]*)"
 RELEASE_TAG_RE = {
+    # network-gated: testnet tag form, the testnet entry of RELEASE_TAG_RE
     "testnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}-adiri(?:-rc[1-9][0-9]*)?"),
     "mainnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}"),
     "devnet": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*-devnet"),
@@ -318,9 +321,11 @@ def release_tag_final(network, tag):
     return release_tag_ok(network, tag) and re.search(r"-rc[0-9]", tag) is None
 
 
+# network-gated: the testnet suffix release_tag_key orders; release_tag_ok judges the network
 # The release tag forms tn_release_tag_key orders: vX.Y.Z, an optional -adiri
 # and an optional -rcN, each number at most nine digits (N at most eight).
 _RELEASE_TAG_KEY_RE = re.compile(
+    # network-gated: the testnet suffix release_tag_key orders; release_tag_ok judges the network
     r"v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?")
 _RELEASE_TAG_FINAL_RANK = 999999999
 
@@ -338,8 +343,10 @@ def release_tag_key(tag):
 
 
 def network_rule(value):
+    # network-gated: adiri is read as testnet, as the helper reads it
     """testnet | mainnet for a NETWORK value (adiri is testnet); None otherwise."""
     v = str(value or "").strip()
+    # network-gated: adiri is read as testnet, as the helper reads it
     return {"testnet": "testnet", "adiri": "testnet", "mainnet": "mainnet"}.get(v)
 
 
@@ -367,6 +374,7 @@ def passphrase_ok(value, network=""):
 # TN_TESTNET_LEGACY_IMAGE_REPO, which holds the testnet images of the releases
 # made before signed releases (DEFAULT_DOCKER_IMAGE among them).
 GHCR_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
+# network-gated: legacy testnet repository; DOCKER_REPO lists it for testnet and devnet, never mainnet
 TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 # Every repository a network's images may come from (tn_docker_repo_ok,
 # tn_docker_repos_for): on testnet TN_TESTNET_IMAGE_REPOS (the legacy repository
@@ -378,6 +386,7 @@ DOCKER_REPO = {
     "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
 }
 # Fallback for testnet only, when the library cannot name the newest image:
+# network-gated: the testnet fallback image; latest_docker_image takes it on testnet only
 # v0.16.0-adiri by digest, as lib/common.sh DEFAULT_DOCKER_IMAGE.
 DEFAULT_DOCKER_IMAGE = (TESTNET_LEGACY_IMAGE_REPO +
                         "@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea")
@@ -420,6 +429,7 @@ def docker_image_choice(value, network):
         return tag, "", None
     if image_allowed(v, network):
         return "", v, None
+    # network-gated: example in the testnet form, chosen when the network is testnet
     example = "v1.2.3-adiri" if network == "testnet" else "v1.2.3"
     return None, None, (f"docker image must be a {network} release tag such as {example}, "
                         "or the network's image by digest (<repository>@sha256:<digest>)")
@@ -1091,6 +1101,7 @@ def _enforce_public_readonly():
 
 
 def _major(version):
+    # network-gated: example version string; no endpoint
     """The major part of a version string ("v0.16.0-adiri" -> "v0"); "" when
     there is none."""
     m = re.match(r"v?(\d+)", str(version or ""))
@@ -1352,13 +1363,14 @@ def node_version(t):
 # link) work on it -- nothing else is hardcoded to testnet.
 NETWORKS = {
     487: {"name": "Telcoin Mainnet", "slug": "mainnet"},
-    2017: {"name": "Adiri Testnet", "slug": "testnet"},
-    32285: {"name": "Adiri Devnet", "slug": "devnet"},
+    2017: {"name": "Adiri Testnet", "slug": "testnet"},  # network-gated: display name of chain 2017, picked by the node's chain id
+    32285: {"name": "Adiri Devnet", "slug": "devnet"},  # network-gated: display name of the devnet chain 32285, picked by the node's chain id
 }
 
 # Public consensus-block RPC endpoints per chain id, tried in order (first
 # success wins). Both networks front their nodes with a global load balancer, so
 # the balanced hostname goes first; devnet keeps its individual nodes as
+# network-gated: documents the testnet public RPC below
 # fallbacks for when the balancer is degraded. Testnet uses rpc.adiri.tel:
 # rpc.telcoin.network is reserved for mainnet, even though it answers for chain
 # 2017 until mainnet launches. A chain id omitted here degrades the "Network
@@ -1367,7 +1379,7 @@ NETWORK_PUBLIC_RPC = {
     # Mainnet (chain 487): the public endpoint is set at launch. Until then the
     # list stays empty and the compare cards show "—".
     487:   [],
-    2017:  ["https://rpc.adiri.tel"],
+    2017:  ["https://rpc.adiri.tel"],  # network-gated: testnet public RPC, looked up by the node's chain id
     32285: [
         "https://rpc.devnet.telcoin.network",
         "https://node1.devnet.telcoin.network",
@@ -2100,6 +2112,7 @@ STAKED_STATUSES = (1, 2, 3, 4)
 
 # The ValidatorInfo struct getValidator returns, as (field, bits of its Solidity
 # type). Order and types follow IConsensusRegistry.sol at tn-contracts 10cc12b,
+# network-gated: the tn-contracts commit the testnet releases pin; no endpoint
 # the commit telcoin-network v0.16.0-adiri pins (as v0.15.0-adiri did), and the
 # node's own binding in crates/tn-reth/src/system_calls.rs. The struct has no
 # dynamic fields, so the eth_call result is these seven words inline, with no
@@ -2920,8 +2933,9 @@ _source_tag_cache = {}       # network -> {"ts", "data"}
 
 
 def latest_source_tag(network="testnet"):
-    """Latest release git tag of the network from GitHub (via `git ls-remote
-    --tags`, no clone needed): vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet, finals
+    # network-gated: the testnet tag form; the tag is read for the network asked
+    """Latest release git tag of the network, vX.Y.Z-adiri on testnet, vX.Y.Z on
+    mainnet, from GitHub (via `git ls-remote --tags`, no clone needed), finals
     only (release_tag_final, so release candidates and hot-patch tags are never
     picked). The release a source build or a release install takes, matching
     the CLI menu. The newest by release_tag_key wins. Cached 5 min per network.
@@ -5067,6 +5081,7 @@ def api_update_prepare(node_type):
     if net is None:
         return jsonify({"error": "cannot tell this node's network (NETWORK in .node-meta)"}), 400
     if not release_tag_ok(net, ref):
+        # network-gated: example in the testnet form, chosen when the network is testnet
         example = "vX.Y.Z-adiri" if net == "testnet" else "vX.Y.Z"
         return jsonify({"error": f"ref must be a {net} release tag ({example}); "
                                  "branches and commit ids are refused"}), 400

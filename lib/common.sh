@@ -17,8 +17,8 @@ source "${BASH_SOURCE[0]%/*}/fallback.sh"
 # -----------------------------------------------------------------------------
 
 readonly TESTNET_CHAIN_ID="2017"
-readonly TESTNET_CHAIN_NAME="adiri"
-readonly TESTNET_RPC_URL="https://rpc.adiri.tel"
+readonly TESTNET_CHAIN_NAME="adiri"  # network-gated: testnet constant, selected by NETWORK
+readonly TESTNET_RPC_URL="https://rpc.adiri.tel"  # network-gated: testnet constant, selected by NETWORK
 readonly TESTNET_EXPLORER="https://telscan.io"
 
 # Mainnet has not launched. The chain id matches chain-configs/mainnet/genesis.yaml
@@ -53,6 +53,7 @@ readonly DEVNET_EXPLORER="${DEVNET_EXPLORER:-}"
 readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
+# network-gated: the comment names the testnet fleet; 9101 is the default on every network
 readonly DEFAULT_METRICS_PORT="9101"   # node loopback Prometheus endpoint (matches the adiri fleet)
 readonly COMMON_VERSION="2.0.1"
 
@@ -81,15 +82,18 @@ readonly TN_REPO="https://github.com/Telcoin-Association/telcoin-network.git"
 readonly TN_SOURCE_DIR="/opt/telcoin-source"
 readonly MIN_RUST_VERSION="1.75.0"
 
+# network-gated: the testnet tag form, documented beside the mainnet one
 # The suffix of each network's release tags: testnet vX.Y.Z-adiri, mainnet
 # vX.Y.Z with none. tn_release_tag_ok is the rule these scripts apply; these two
 # stay for scripts of an earlier release that read them.
-readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"
+readonly NETWORK_TAG_SUFFIX_TESTNET="-adiri"  # network-gated: testnet constant; nothing in this release reads it
 readonly NETWORK_TAG_SUFFIX_MAINNET=""
 
 # Oldest release the source-build picker offers and tn_ref_min_check accepts.
 # Older tags exist upstream but lack features these scripts rely on:
+# network-gated: testnet release history behind MIN_SOURCE_VERSION_TESTNET; no endpoint
 # `keytool set-rpc` and `keytool generate pop` arrived in v0.12.0-adiri and
+# network-gated: testnet release history; no endpoint
 # `--enable-state-export` in v0.13.0-adiri, so 0.13.0 is the first release with
 # all three. main and custom refs stay available in the picker.
 # Bump this when the Telcoin team retires a baseline.
@@ -1508,19 +1512,24 @@ validate_multiaddr() {
 
 # Image repositories. The release pipeline publishes every channel's images to
 # ghcr.io (TN_GHCR_IMAGE_REPO): the testnet and mainnet repository. The testnet
+# network-gated: documents the legacy testnet repository; tn_docker_repos_for never gives it to mainnet
 # images of the releases made before signed releases, v0.16.0-adiri among them,
+# network-gated: names the legacy testnet repository; no mainnet path takes it
 # are in the Artifact Registry adiri repository (TN_TESTNET_LEGACY_IMAGE_REPO;
 # GAR_IMAGE_BASE is its older name, kept for the scripts and tests that read it).
 # The legacy repository is read only while the testnet channel has no release on
 # GitHub, and for images recorded from it.
 readonly TN_GHCR_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
+# network-gated: legacy testnet repository; tn_docker_repos_for lists it for testnet and devnet, never mainnet
 readonly TN_TESTNET_LEGACY_IMAGE_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 readonly GAR_IMAGE_BASE="$TN_TESTNET_LEGACY_IMAGE_REPO"
+# network-gated: tag list of the legacy testnet repository; nothing in this release reads it
 readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/adiri/tags/list"
 # Fallback only while testnet has no signed release, or neither GitHub nor the
+# network-gated: the testnet fallback image (latest_docker_image, testnet only)
 # registry answers: v0.16.0-adiri by digest (the Docker-Content-Digest the legacy
 # registry served for that tag on 2026-10-15).
-readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"
+readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"  # network-gated: testnet fallback tag (latest_docker_image, testnet only)
 readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea"
 
 # The GitHub Releases API of telcoin-network: the source of each channel's newest release.
@@ -1586,6 +1595,7 @@ latest_docker_image() {
 
 # tn_release_newest_tag NETWORK -- print the newest final release tag NETWORK has
 # on GitHub, from the first 100 releases of TN_RELEASES_API_URL: drafts are
+# network-gated: every testnet release is a prerelease; mainnet skips prereleases
 # skipped; prereleases count on testnet (every Adiri release is one) and are
 # skipped on mainnet; the tag must pass tn_release_tag_final (no release
 # candidate), and the newest is the highest by tn_release_tag_key. rc 1 and
@@ -1675,6 +1685,7 @@ tn_passphrase_ok() {
 }
 
 # tn_release_tag_ok NETWORK TAG -- rc 0 when TAG is a release tag of NETWORK:
+# network-gated: the testnet tag form, documented beside the mainnet one
 # testnet vX.Y.Z-adiri, or its release candidate vX.Y.Z-adiri-rcN (N from 1, no
 # leading zero); mainnet vX.Y.Z, finals only (X, Y and Z are 0 or digits that
 # do not start with 0, as the release pipeline's TAG_RE has them; nothing
@@ -1693,6 +1704,7 @@ tn_release_tag_ok() {
     # accented letters in some locales.
     an='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
     case "$net" in
+        # network-gated: testnet tag form, in the testnet arm of the network case
         testnet) re="^v${n}\.${n}\.${n}-adiri(-rc[1-9][0-9]*)?$" ;;
         mainnet) re="^v${n}\.${n}\.${n}$" ;;
         devnet) re="^[${an}][${an}._-]*-devnet$" ;;
@@ -1714,6 +1726,7 @@ tn_release_tag_final() {
 
 # tn_release_tag_grammar -- the release tag forms, for messages.
 tn_release_tag_grammar() {
+    # network-gated: message that lists the tag form of every network
     printf '%s\n' "testnet vX.Y.Z-adiri or the release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z, devnet <name>-devnet; release candidates are testnet only"
 }
 
@@ -1722,6 +1735,7 @@ tn_release_tag_grammar() {
 _tn_release_tag_key() {
     local re x y z r
     TN_RELEASE_TAG_KEY=""
+    # network-gated: accepts the testnet suffix to order tags; tn_release_tag_ok judges the network
     re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?$'
     [[ "${1:-}" =~ $re ]] || return 1
     x=$((10#${BASH_REMATCH[1]}))
@@ -1736,6 +1750,7 @@ _tn_release_tag_key() {
 # digits, zero-padded, so keys order the same as text (LC_ALL=C sort) and as
 # numbers: R is N for the release candidate -rcN and 999999999 for a final, so
 # rc1 < rc2 < the final of the same X.Y.Z < any rc of a higher X.Y.Z. TAG is
+# network-gated: the testnet suffix tn_release_tag_key orders; the network is judged elsewhere
 # vX.Y.Z with an optional -adiri and an optional -rcN (the network is not
 # judged here: that is tn_release_tag_ok). rc 1 and nothing for anything else.
 tn_release_tag_key() {
@@ -1974,7 +1989,9 @@ rpc_url_is_private() {
 
 # tn_ref_min_check <ref> <network> — check a release ref against the network's
 # oldest supported release (MIN_SOURCE_VERSION_*). <ref> is a git ref
+# network-gated: example refs in the testnet form; no endpoint
 # (v0.13.0-adiri, main, a commit) or a docker image reference, which is judged
+# network-gated: example image ref in the testnet form; no endpoint
 # on the part after its last ":" (…/adiri:v0.15.0-adiri). Prints one message on
 # stdout when rc is not 0:
 #   rc 0  allowed: a release tag at or above the floor, or no floor for <network>
@@ -1982,6 +1999,7 @@ rpc_url_is_private() {
 #   rc 2  allowed with a warning: not a release tag (main, a commit, a digest, or
 #         a pre-release such as v0.13.0-rc1 on mainnet), so the version is unknown
 # A release tag is one tn_release_tag_ok accepts for <network> (testnet
+# network-gated: the testnet tag form, and adiri as another name for testnet
 # vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
 # devnet; devnet, and an empty or unknown network, have no floor.
 tn_ref_min_check() {
@@ -1991,6 +2009,7 @@ tn_ref_min_check() {
         return 1
     fi
     case "$network" in
+        # network-gated: adiri is read as testnet; the example is the testnet tag form
         testnet|adiri) network=testnet; floor="$MIN_SOURCE_VERSION_TESTNET"; example="v${floor}-adiri" ;;
         mainnet)       floor="$MIN_SOURCE_VERSION_MAINNET"; example="v${floor}" ;;
         *)             floor="" ;;
@@ -2659,6 +2678,7 @@ select_network() {
     print_header "Network Selection"
     echo "  Which network do you want to connect to?"
     echo ""
+    # network-gated: the testnet choice of the network menu
     echo "  1) Adiri Testnet  (Chain ID: ${TESTNET_CHAIN_ID})  -- for testing"
     if tn_mainnet_enabled; then
         echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production"
@@ -2691,6 +2711,7 @@ select_network() {
                 echo ""
                 print_warn "Mainnet has not launched yet."
                 print_info "Mainnet configuration will be available once the network goes live."
+                # network-gated: shown only while mainnet is disabled: points at the testnet choice
                 print_info "Please select Adiri Testnet for now."
                 echo ""
                 read -r -p "  Press Enter to return to network selection..."
@@ -2729,12 +2750,13 @@ select_install_method() {
 }
 
 # tn_cargo_features_for NETWORK -- print the cargo feature flags a source build
+# network-gated: the testnet build feature, for NETWORK=testnet only
 # for NETWORK needs: "--features adiri" for testnet, nothing for mainnet (rc 0).
 # rc 1 and no output for anything else, devnet and an empty value included, so
 # a caller never falls into a default build.
 tn_cargo_features_for() {
     case "${1:-}" in
-        testnet) printf '%s\n' "--features adiri" ;;
+        testnet) printf '%s\n' "--features adiri" ;;  # network-gated: testnet arm: the feature of a testnet build
         mainnet) return 0 ;;
         *) return 1 ;;
     esac
@@ -2792,6 +2814,7 @@ tn_detect_network() {
 # `git checkout <tag>` + `git pull` move the superproject but NOT its
 # submodules, so a source tree can sit on a ref whose submodule pointer was
 # advanced while the working copy still holds the old submodule content. That
+# network-gated: testnet release history; no endpoint
 # is exactly what broke v0.12.0-adiri source updates: tn-contracts gained
 # deployments/*.json that genesis.rs include_str!'s, and every node updated via
 # update-node.sh (which never synced submodules) died in cargo with a missing-
@@ -4899,6 +4922,7 @@ _tn_word_fits() {
 #   word 5 stakeVersion      uint8
 #   word 6 region            uint8
 # (IConsensusRegistry.ValidatorInfo in tn-contracts 10cc12b7, the commit
+# network-gated: the tn-contracts commit the testnet releases pin; no endpoint
 # v0.16.0-adiri pins, as v0.15.0-adiri did.) The decode is strict: exactly
 # seven words, each zero above its type, isRetired 0 or 1, status within the
 # enum, and status 6 (Any) only with isRetired set: retiring a validator writes
@@ -6533,11 +6557,12 @@ tn_host_baseline_status() {
 # Chain-config pins: the sha256 of genesis.yaml, committee.yaml and
 # parameters.yaml each network runs. Testnet: chain-configs/testnet in the
 # telcoin-network repository at TESTNET_CHAIN_CONFIGS_TAG (the release
+# network-gated: testnet release history of the chain configs; no endpoint
 # DEFAULT_DOCKER_IMAGE runs; the three files are the same since v0.15.0-adiri).
 # Mainnet: empty until the genesis ceremony publishes the files and a signed
 # script release carries their hashes; while any of the three is empty, a
 # mainnet install or refresh refuses (tn_chain_configs_check). Devnet has none.
-readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"
+readonly TESTNET_CHAIN_CONFIGS_TAG="v0.16.0-adiri"  # network-gated: testnet constant: the tag of the testnet chain-config pins
 readonly TESTNET_GENESIS_SHA256="670c94e3816686bd4da5aedbfa994d4f362452eaf2552b2757f05226608188c2"
 readonly TESTNET_COMMITTEE_SHA256="009b6d7b568f7d04734b657080d55621eed70f68ecefe1284dd8cdd0f42f15ce"
 readonly TESTNET_PARAMETERS_SHA256="7c6a44712faef1dc47dbc5b4f21f62d1eeabf1f0d54d2cb600ad6c65d4eda091"
@@ -6626,6 +6651,7 @@ print_summary() {
 # caller can capture the selection via $(...). Returns 0 on selection, 1 on
 # cancel or error.
 #
+# network-gated: the testnet tag form; the picker offers the tags of its own NETWORK
 # Telcoin's testnet release tags (-adiri) sit on a branch parallel to main and
 # are the recommended default for testnet operators (per the dev team).
 # Main is acceptable for testnet (and is the right default for devnet) but is
@@ -7404,9 +7430,11 @@ tn_release_extract_binary() {
 # tn_release_version_ok TEXT NETWORK REF -- rc 0 when TEXT, a node binary's
 # --version output, fits NETWORK and REF: its "Version:" is REF's x.y.z (when
 # REF carries one), it has exactly one "Build Features:" line, which is empty on
+# network-gated: the testnet build features; a mainnet build must have none
 # mainnet and on testnet lists adiri and nothing but adiri and faucet (the adiri
 # feature turns faucet on). The reason goes to stderr on rc 1.
 tn_release_version_ok() {
+    # network-gated: has_adiri counts the testnet feature, checked in the testnet arm only
     local text="${1:-}" net="${2:-}" ref="${3:-}" want="" ver n feats f has_adiri=0 re
     local -a list
     re='([0-9]+[.][0-9]+[.][0-9]+)'
@@ -7436,15 +7464,17 @@ tn_release_version_ok() {
             [[ -z "$feats" ]] || IFS=',' read -r -a list <<< "$feats"
             for f in ${list[@]+"${list[@]}"}; do
                 case "$f" in
-                    adiri) has_adiri=1 ;;
+                    adiri) has_adiri=1 ;;  # network-gated: testnet arm: the testnet build feature
                     faucet) ;;
                     *)
+                        # network-gated: testnet arm: names the features a testnet build may have
                         print_warn "This build has the feature ${f}; a testnet build has adiri (and faucet) only." >&2
                         return 1
                         ;;
                 esac
             done
-            if [[ "$has_adiri" -ne 1 ]]; then
+            if [[ "$has_adiri" -ne 1 ]]; then  # network-gated: testnet arm: a testnet build needs the feature
+                # network-gated: testnet arm: names the feature a testnet build lacks
                 print_warn "This build lacks the adiri feature a testnet build needs (features: ${feats:-none})." >&2
                 return 1
             fi
@@ -7727,6 +7757,7 @@ _tn_release_keys_present() {
 # network's repository first, then the legacy one (TN_TESTNET_LEGACY_IMAGE_REPO),
 # each with its pull token. That fallback is the legacy case, a tag with no
 # signed release such as the releases made before signed releases
+# network-gated: legacy testnet tag; this fallback runs on testnet only
 # (v0.16.0-adiri); the newest-release pick (latest_docker_image) never takes it.
 # A release whose files fail verification is never replaced by the registry's
 # answer. Devnet has no signed releases, so a devnet tag is refused (rc 1)
@@ -8220,11 +8251,13 @@ fi
 # these (edit there). This mirror only guarantees the constants are set so the helpers
 # below — and the always-run status views — don't trip the inherited `set -u` if the
 # env file is briefly missing mid-update. `:=` is a no-op when the var is already set.
+# network-gated: default of the VPN hub endpoint; only setup-vpn reads it, behind require_testnet
 : "${TN_WG_HUB_ENDPOINT:=34.20.198.253:51820}"
 : "${TN_WG_HUB_PUBKEY:=hqIDskzaOS5t6DE91VX+V9Z4NJjKlNufl4kQr/KuF1k=}"
 : "${TN_OVERLAY_CIDR:=10.100.0.0/16}"
 : "${TN_OVERLAY_RESERVED_NETS:=0 1 2 9}"
 : "${TN_OVERLAY_EXTERNAL_BAND_HINT:=10.100.20.0/24}"
+# network-gated: default of the monitor source; apply_kuma_rule adds its rule only when is_testnet_like, else deletes it
 : "${TN_KUMA_SRC:=104.155.184.201/32}"
 : "${TN_KUMA_PORT:=43174}"
 # Optional, comma-separated extra CIDRs allowed to TCP-probe the health port (TN_KUMA_PORT)
@@ -8232,6 +8265,7 @@ fi
 # node sits behind a GCP LB. Empty by default, so generic operators see NO change; the devnet
 # deployment sets it (devnet-firewall.sh) to let LB backends pass. See apply_lb_hc_rule.
 : "${TN_LB_HC_RANGES:=}"
+# network-gated: default of the testnet log hub; obs_effective_push_url gives it only when NETWORK=testnet
 : "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
 : "${TN_ALLOY_IMAGE:=grafana/alloy:v1.5.1}"
 : "${TN_ALLOY_NATIVE_VERSION:=1.5.1}"
@@ -8241,9 +8275,11 @@ fi
 # -----------------------------------------------------------------------------
 
 # is_testnet — soft check for use INSIDE the interactive setup flow (NETWORK is
+# network-gated: documents is_testnet; no endpoint
 # already set there). Returns 0 on the Adiri testnet.
 is_testnet() { [[ "${NETWORK:-}" == "testnet" ]]; }
 
+# network-gated: documents is_testnet_like; no endpoint
 # is_testnet_like — soft check for the hard gate below. Returns 0 on the Adiri
 # testnet OR on devnet. Devnet shares the same opt-in add-on surface as testnet
 # (observability/health), so require_testnet treats it as allowed. The interactive
@@ -8255,6 +8291,7 @@ is_testnet_like() { [[ "${NETWORK:-}" == "testnet" || "${NETWORK:-}" == "devnet"
 require_testnet() {
     if ! is_testnet_like; then
         print_error "Testnet-only feature. This node's NETWORK is '${NETWORK:-unset}'."
+        # network-gated: refusal message off testnet: says where the add-ons are offered
         print_info  "The VPN / observability / healthcheck add-ons are offered only on the Adiri testnet."
         exit 1
     fi
@@ -8490,6 +8527,7 @@ validate_cidr() {
 }
 
 # validate_overlay_ip <a.b.c.d> — an IPv4 inside 10.100.0.0/16, host octet 1..254,
+# network-gated: names the reserved overlay net of the testnet core nodes; no endpoint
 # NOT in a reserved /24 (hub/adiri/devnet/maintainers). The core team assigns one
 # from the external band (10.100.20.0/24+); see lib/testnet-addons.env.
 validate_overlay_ip() {
@@ -9475,6 +9513,7 @@ _tn_help_lists() {
 }
 
 # tn_node_has_flag SPEC FLAG — rc 0 when `node --help` of SPEC lists FLAG (say
+# network-gated: testnet release history; no endpoint
 # --bootstrap-peers, new in v0.15.0-adiri), 1 when it does not, 4 when the probe
 # could not run (no such binary, docker failed).
 tn_node_has_flag() {
@@ -9806,6 +9845,7 @@ tn_keytool() {
 # node-info.yaml readers (COMMON_VERSION >= 1.6.0)
 # -----------------------------------------------------------------------------
 #
+# network-gated: testnet release history; no endpoint
 # keytool writes node-info.yaml beside the node keys. v0.15.0-adiri and later
 # write p2p_info.workers as a list with one entry per worker; v0.14.0 and older
 # write a single p2p_info.worker map. Both shapes are read, with awk only (no
@@ -10018,6 +10058,7 @@ tn_node_has_observer_flag() {
 
 # tn_node_strip_observer_flag <file> — idempotently remove the `--observer` flag
 # from a node launch file (start wrapper or legacy docker unit). Releases after
+# network-gated: testnet release history of --observer; no endpoint
 # v0.15.0-adiri reject the flag outright, so an old wrapper must lose it before the
 # node is restarted on a new binary or image.
 #   * flag absent (per tn_node_has_observer_flag): rc 0, file untouched;
@@ -10076,9 +10117,12 @@ tn_node_strip_observer_flag() {
 # tn_target_drops_observer <text...> — rc 0 when the release named by <text> no
 # longer needs `--observer` in the launch line, so stripping it is safe. <text> is
 # any tag / image / version string (all args joined with spaces), e.g.
+# network-gated: example targets in the testnet form; no endpoint
 # `v0.15.0-adiri`, `us-docker.pkg.dev/...:v0.14.0-adiri` or `main telcoin-network
+# network-gated: testnet release history of --observer; no endpoint
 # 0.16.0`. The FIRST x.y.z in it is compared against 0.15.0: v0.15.0-adiri still
 # accepts `--observer` as a hidden no-op and the first release after it,
+# network-gated: testnet release history of --observer; no endpoint
 # v0.16.0-adiri, rejects it when it parses its arguments (`unexpected argument
 # '--observer'`), so stripping from 0.15.0 upward is always safe. With no x.y.z
 # at all (branch name, bare SHA, digest) the target is assumed to be the newest
@@ -10115,6 +10159,7 @@ prompt_testnet_addons() {
     echo ""
     print_step "Health monitoring"
     print_info "Exposes a TCP health endpoint (port ${TN_KUMA_PORT:-43174}) probed by the"
+    # network-gated: monitor address in the testnet add-on prompt (prompt_testnet_addons returns unless is_testnet)
     print_info "Association uptime monitor (${TN_KUMA_SRC:-104.155.184.201/32}) so we can alert you if your node drops."
     print_info "You can also allow your own monitoring hosts later: firewall-setup.sh -> Manage node ports."
     if ! ufw_installed || ! ufw_active; then

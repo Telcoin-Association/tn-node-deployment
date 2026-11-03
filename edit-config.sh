@@ -67,14 +67,17 @@
 #                                     by BLS public key, at most 64 KiB. The
 #                                     node binary checks it, then it is
 #                                     installed as /etc/telcoin/bootstrap-peers.yaml.
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     Needs v0.15.0-adiri or later and a start
 #                                     wrapper (a node started straight from its
 #                                     systemd unit is refused). none removes
 #                                     the flag and the file.
 #   state_export=off|unlimited|N      write the execution state at each epoch
 #                                     boundary (--enable-state-export,
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     v0.13.0-adiri or later); N keeps only the
 #                                     last N epochs (1 to 999999,
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     --state-export-keep, v0.15.0-adiri or later)
 #   allow_private_forward_targets=true|false
 #                                     parameters.yaml: whether the node may
@@ -2595,6 +2598,7 @@ edit_bootstrap_peers() {
     print_info "A bootstrap peers file is a YAML or JSON map of peers keyed by BLS public"
     print_info "key, at most 64 KiB. The node dials them at start instead of the genesis"
     print_info "bootstrap servers. The node binary checks the file, then it is installed"
+    # network-gated: release named in the testnet tag form, shown on every network; edit_need_flag asks the installed release
     print_info "as ${peers}. Needs v0.15.0-adiri or later."
     echo ""
 
@@ -2624,7 +2628,9 @@ edit_state_export() {
     print_info "boundary to <data dir>/consensus-db/state_exports/epoch-N/."
     echo ""
     echo "  1) Off"
+    # network-gated: release named in the testnet tag form, shown on every network
     echo "  2) On, keep every epoch's export     (v0.13.0-adiri or later)"
+    # network-gated: release named in the testnet tag form, shown on every network
     echo "  3) On, keep only the last N epochs   (v0.15.0-adiri or later)"
     echo ""
 

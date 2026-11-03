@@ -1414,7 +1414,7 @@ scan_custom_installs() {
             custom_is_managed_name "$cname" && continue
             custom_ctrs+=("$cline")
         done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
-                   | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)
+                   | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)  # network-gated: finds leftover testnet-image containers on any host; each removal asks first
         for cline in ${custom_ctrs[@]+"${custom_ctrs[@]}"}; do
             IFS=$'\t' read -r cname cimage cstatus <<< "$cline"
             found=true

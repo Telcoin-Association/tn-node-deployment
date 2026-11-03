@@ -756,6 +756,7 @@ fetch_node_mode() {
 }
 
 # report_legacy_observer_flag -- warn when the node launch file (start wrapper, or
+# network-gated: release history of --observer; no endpoint
 # the unit of a legacy docker install) still passes --observer. v0.15.0-adiri
 # ignores the flag, but later releases reject it, so the node would not start
 # after a binary/image update. Warn-only: never touches HEALTH_ISSUES, and silent
@@ -767,6 +768,7 @@ report_legacy_observer_flag() {
     read -r svc _ file <<<"$target"
     [[ -n "$file" && -r "$file" ]] || return 0
     tn_node_has_observer_flag "$file" || return 0
+    # network-gated: warns about the retired --observer, which only installs of older script releases carry; names a testnet tag
     print_warn "Launch file ${file} still passes --observer; releases after v0.15.0-adiri reject it and the node will not start after an update."
     print_info "Fix: bash ${SCRIPT_DIR}/update-scripts.sh && sudo bash ${SCRIPT_DIR}/update-node.sh (strips the flag),"
     print_info "     or delete the --observer token from ${file} and restart ${svc}."
@@ -1355,6 +1357,7 @@ report_public_rpc() {
 # check_network_chain -- read the network RPC's own eth_chainId (§3). When it is
 # not the chain this node's network uses, the endpoint is the wrong yardstick
 # (today https://rpc.telcoin.network, the planned mainnet RPC, still serves the
+# network-gated: documents which chain the mainnet RPC serves today; no endpoint
 # Adiri testnet, chain 2017): warn, set NETWORK_WRONG_CHAIN and let §3 skip the
 # comparison instead of blaming the node. Says nothing when the chain id cannot
 # be read; the consensus probe that follows reports an endpoint that is down.

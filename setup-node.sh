@@ -15,6 +15,7 @@
 # advertise both in node-info.yaml (worker.rpc), from the first install. reth stays on
 # 127.0.0.1; Caddy (install-caddy.sh, in this repo) is the only public edge.
 #   --rpc-domain <hostname>  Public RPC on this DNS name (implies public). Use the node's
+# network-gated: example hostname in the testnet domain, in the help text
 #                            own public name, e.g. node7.adiri.telcoin.network; the
 #                            dashboard, if enabled later, needs a different one
 #                            (dashboard.<your-node-domain>). Point its A record at this
@@ -61,6 +62,7 @@
 #                            lib/release-keys, the tarball and the release's chain-config
 #                            hashes checked, the binary's --version checked before root
 #                            installs it.
+# network-gated: the testnet tag form, beside the mainnet one
 #   --release-tag <tag>      The release to install or build: vX.Y.Z-adiri on testnet,
 #                            vX.Y.Z on mainnet (--build-ref is the older name). Source
 #                            builds take release tags only, never a branch or a commit;
@@ -75,6 +77,7 @@
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
 #   --bootstrap-peers <file> The peers the node dials at start, replacing the genesis
+# network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            bootstrap servers (v0.15.0-adiri and later). The file holds
 #                            a YAML or JSON map keyed by BLS public key; each entry is a
 #                            node's primary and workers, as under p2p_info in its
@@ -85,11 +88,13 @@
 #                            --bootstrap-peers "$(cat /etc/telcoin/bootstrap-peers.yaml)",
 #                            so the file is read again at every start.
 #   --enable-state-export    Export each epoch's final execution state under
+# network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            <datadir>/consensus-db/state_exports/epoch-N/ (v0.13.0-adiri
 #                            and later). Each export is a full copy of the state, and
 #                            without --state-export-keep none is ever deleted.
 #   --state-export-keep <n>  Keep only the newest n exports, 1 to 999999; 2 or more keeps
 #                            the previous export while the next one is written. Turns on
+# network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            --enable-state-export as well (v0.15.0-adiri and later).
 # In a --json finalize run, a flag left out is read back from what keygen recorded in
 # .node-meta: BOOTSTRAP_PEERS_FILE for --bootstrap-peers, STATE_EXPORT for the two state
@@ -393,6 +398,7 @@ step_preflight() {
         fi
     done
 
+    # network-gated: documents the testnet build feature (tn_cargo_features_for)
     # Select network first so NETWORK is set before source build (needed for --features adiri).
     # In JSON mode network/method/passphrase are already set from flags by the orchestrator.
     echo ""
@@ -1218,8 +1224,10 @@ prompt_public_rpc() {
 
     echo ""
     print_info "Public RPC needs a DNS name for THIS node. Use the node's own public name"
+    # network-gated: example hostname in a prompt shown on every network; the operator types their own
     print_info "for the RPC endpoint, e.g. node7.adiri.telcoin.network."
     print_info "The Node Manager dashboard, if you enable it later, needs a DIFFERENT hostname:"
+    # network-gated: example hostname in a prompt shown on every network
     print_info "dashboard.<your-node-domain> (e.g. dashboard.node7.adiri.telcoin.network) --"
     print_info "one name cannot serve both."
     print_info "Before setup finishes, point the name's DNS A record at this server's INBOUND"
@@ -1237,6 +1245,7 @@ prompt_public_rpc() {
             return 0
         fi
         validate_rpc_domain "$input" && break
+        # network-gated: example hostname in a message shown on every network
         print_warn "Not a bare hostname: ${input}. Enter just the name, e.g. node7.adiri.telcoin.network (no https://, no path, no IP address)."
     done
     PUBLIC_RPC_DOMAIN="$input"
@@ -1299,6 +1308,7 @@ init_public_rpc_flags() {
             err="--no-public-rpc conflicts with --rpc-domain / --rpc-public -- pick one."
         fi
     elif [[ -n "$PUBLIC_RPC_DOMAIN" ]] && ! validate_rpc_domain "$PUBLIC_RPC_DOMAIN"; then
+        # network-gated: example hostname in a message shown on every network
         err="invalid --rpc-domain ${PUBLIC_RPC_DOMAIN} -- give a bare hostname such as node7.adiri.telcoin.network (no https://, no path, no IP address)."
     elif [[ "$RPC_DOMAIN_GIVEN" == "true" && -z "$PUBLIC_RPC_DOMAIN" ]]; then
         RPC_PRIVATE_NOTE="no public RPC domain given (--rpc-domain was empty)"
@@ -1319,6 +1329,7 @@ init_public_rpc_flags() {
         esac
         [[ -n "$url" ]] || continue
         if ! validate_rpc_url "$url" "$kind"; then
+            # network-gated: example hostname in a message shown on every network
             setup_fail "invalid ${flag} ${url} -- give a ${kind}:// or ${kind}s:// URL with a host name or IP address, such as ${kind}s://node7.adiri.telcoin.network/ (no spaces, quotes or user@ part)."
         fi
         if rpc_url_is_private "$url"; then
@@ -2276,17 +2287,21 @@ prepare_node_extra_flags() {
         if [[ ! "$peers" =~ $path_re ]]; then
             setup_fail "The custom config directory ${CONFIG_DIR} cannot be used with --bootstrap-peers: the start wrapper reads the peers file through this path unquoted, so it may hold only letters, digits and . _ / + -. Choose another config directory, or leave --bootstrap-peers out."
         fi
+        # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
         require_node_flag "$spec" --bootstrap-peers v0.15.0-adiri
         flags="--bootstrap-peers \"\$(cat ${peers})\""
     fi
     case "${STATE_EXPORT:-off}" in
         off) ;;
         unlimited)
+            # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
             require_node_flag "$spec" --enable-state-export v0.13.0-adiri
             flags="${flags:+${flags} }--enable-state-export"
             ;;
         *)
+            # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
             require_node_flag "$spec" --enable-state-export v0.13.0-adiri
+            # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
             require_node_flag "$spec" --state-export-keep v0.15.0-adiri
             flags="${flags:+${flags} }--enable-state-export --state-export-keep ${STATE_EXPORT}"
             ;;
@@ -2296,6 +2311,7 @@ prepare_node_extra_flags() {
     if [[ "${ENABLE_PUBLIC_RPC:-false}" == "true" ]]; then
         for w in $(public_rpc_limit_flags); do
             if [[ "$w" == --* ]]; then
+                # network-gated: first release with the flag, named in the testnet tag form for the refusal; require_node_flag asks the release
                 require_node_flag "$spec" "$w" v0.13.0-adiri
             fi
         done
@@ -3013,7 +3029,7 @@ json_on_exit() {
 
 json_set_network() {
     case "${1:-testnet}" in
-        testnet|adiri)
+        testnet|adiri)  # network-gated: adiri is read as testnet
             NETWORK="testnet"; CHAIN_ID="$TESTNET_CHAIN_ID"; CHAIN_NAME="$TESTNET_CHAIN_NAME"
             RPC_URL="${TESTNET_RPC_URL:-}"; EXPLORER_URL="${TESTNET_EXPLORER:-}" ;;
         mainnet)

@@ -53,7 +53,9 @@
 #     address: Caddy needs a DNS name for the certificate); only the normalised name is
 #     written anywhere.
 #   - Same-domain rule: the dashboard and the public RPC endpoint need DIFFERENT
+# network-gated: example hostname in the testnet domain; documentation only
 #     hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) carries RPC;
+# network-gated: example hostname in the testnet domain; documentation only
 #     the dashboard goes on another name (e.g. dashboard.nodeN.adiri.telcoin.network).
 #     A clash dies before anything is written; the dashboard block is never dropped.
 #     rpc-enable --move-dashboard-to <host> moves a dashboard sitting on the RPC
@@ -782,10 +784,12 @@ caddy_domain_clash() {
     if [[ "$kind" == "rpc" ]]; then
         other="$(caddy_current_dashboard_domain)"
         caddy_same_host "$domain" "$other" || return 1
+        # network-gated: example hostnames in a message shown on every network; the operator's own names are checked
         printf '%s' "${domain} already serves the Node Manager dashboard -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint, with the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed. To move the dashboard (same login) and enable RPC in one step, first create the DNS A record for dashboard.${domain} pointing at this server (Caddy requests a certificate for it), then run: sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-enable --rpc-domain ${domain} --move-dashboard-to dashboard.${domain}"
     else
         other="$(caddy_current_rpc_domain)"
         caddy_same_host "$domain" "$other" || return 1
+        # network-gated: example hostnames in a message shown on every network; the operator's own names are checked
         printf '%s' "${domain} already serves the public RPC endpoint -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint; put the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed."
     fi
     return 0
@@ -2962,6 +2966,7 @@ dashboard_enable_interactive() {
 
     local domain username pw pw2 clash why
     while true; do
+        # network-gated: example hostname in a prompt shown on every network; the operator types their own
         read -r -p "  Dashboard domain (e.g. admin.node1.adiri.telcoin.network): " domain
         domain="$(caddy_norm_host "$domain")"
         why="$(caddy_domain_problem "$domain")"
@@ -3027,6 +3032,7 @@ rpc_enable_interactive() {
 
     local domain move_to="" ans why
     while true; do
+        # network-gated: example hostname in a prompt shown on every network; the operator types their own
         read -r -p "  Public RPC domain (e.g. node1.adiri.telcoin.network): " domain
         domain="$(caddy_norm_host "$domain")"
         why="$(caddy_domain_problem "$domain")"

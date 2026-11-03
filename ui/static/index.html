@@ -446,7 +446,7 @@ const state = {
   logBuffer: [],                          // client-side line buffer (static + live)
   logFilter: { level:'all', search:'' },  // level (all/error/warn/info) + text search
   setupStep: 1,
-  setup: { network:'adiri', method:'source',
+  setup: { network:'adiri', method:'source',  // network-gated: the wizard starts on testnet; the helper reads adiri as testnet
            eth:'', bls:'', blsConfirm:'', buildRef:'', dockerImage:'', publicIp:'', internalIp:'',
            sourceRef:'',          // latest release tag for this network (/api/setup/defaults); the only source build offered
            rpcPublic:false, advName:'', dataDir:'', serviceUser:'', serviceGroup:'', defaultsLoaded:false,
@@ -571,6 +571,7 @@ async function api(path, opts){
 // then test with validHost and send the normalised value.
 // =============================================================================
 const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+// network-gated: placeholder of last resort in the testnet domain; shown only as an example
 const DEFAULT_RPC_HOST = 'node7.adiri.telcoin.network';   // placeholder of last resort
 function normHost(s){
   let h = String(s==null?'':s).trim().toLowerCase();
@@ -584,6 +585,7 @@ function sameHost(a, b){
   const x = normHost(a);
   return x!=='' && x===normHost(b);
 }
+// network-gated: example URL in a comment
 // Host part of an advertised URL such as https://node7.adiri.telcoin.network/,
 // normalised; '' when there is none.
 function hostOfUrl(u){
@@ -2401,7 +2403,7 @@ async function fillUpdateStatus(){
     actions = `
       <div class="field"><label>Target release tag</label>
         <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
-          placeholder="release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)"></div>
+          placeholder="release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)"></div>  <!-- network-gated: testnet and mainnet examples side by side -->
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
         ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
@@ -3594,8 +3596,9 @@ function hwInfoRow(hw, pf){
 function stepNetwork(body){
   body.innerHTML = `<h3>Step 2 · Network</h3>
     <div class="radio-cards">
+      <!-- network-gated: the testnet card; the helper reads adiri as testnet -->
       <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
-        <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
+        <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>  <!-- network-gated: label of the testnet card -->
       ${SETUP_MAINNET_ENABLED
         ? `<div class="rcard ${state.setup.network==='mainnet'?'sel':''}" data-net="mainnet">
         <div class="rt">Mainnet</div><div class="rd">Production network. Installs a signed release and logs to the systemd journal by default.</div></div>`
@@ -3628,6 +3631,7 @@ function dockerImageError(v){
   // The same grammar as the library's tn_release_tag_ok: no leading zero in a part; a testnet
   // release candidate (-rcN) is accepted here because it is a named tag, never a default.
   const part = '(0|[1-9][0-9]*)';
+  // network-gated: testnet tag form, chosen unless the wizard's network is mainnet
   const tag = new RegExp(setupNetwork()==='mainnet' ? '^v'+part+'\\.'+part+'\\.'+part+'$' : '^v'+part+'\\.'+part+'\\.'+part+'-adiri(-rc[1-9][0-9]*)?$');
   const t = x.includes('@') ? '' : x.replace(/^.*:/, '');
   if(tag.test(t)) return '';
@@ -3646,8 +3650,9 @@ function stepMethod(body){
   const mainnet = setupNetwork()==='mainnet';
   const methodField = (m==='source' || m==='release')
     ? stepSourceField()
+    // network-gated: example tag in the testnet form, chosen unless the wizard's network is mainnet
     : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (…@sha256:…); latest is refused</label>
-        <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;
+        <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;  // network-gated: the same example, chosen by network
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
     <div class="radio-cards" style="grid-template-columns:1fr 1fr">
       <div class="rcard ${m==='release'?'sel':''}" data-m="release"><div class="rt">Signed Release${mainnet?' <span class="tag">default</span>':''}</div><div class="rd">Download the published binary; its signature and checksums are verified before install (x86_64).</div></div>
@@ -3817,6 +3822,7 @@ function stepConfigure(body){
 function stepReview(body){
   const s = state.setup;
   const rows = [
+    // network-gated: label of the testnet choice in the review
     ['Network', s.network==='adiri'?'Adiri Testnet':s.network],
     ['Install Method', s.method + ((s.method==='source'||s.method==='release')?' ('+(s.buildRef||'?')+')':(s.dockerImage?' ('+s.dockerImage+')':''))],
     ['Address', s.eth||'(not set)'],
@@ -4104,9 +4110,11 @@ function fmtTel(x){
   if(!isFinite(n)) return null;
   return n.toLocaleString('en-US', {maximumFractionDigits:4}) + ' TEL';
 }
+// network-gated: display names keyed by network
 function netLabel(n){ return ({testnet:'Adiri Testnet', devnet:'Adiri Devnet', mainnet:'Telcoin Mainnet'})[n] || (n?cap(n):'—'); }
 
 // =============================================================================
+// network-gated: names the testnet in a comment
 // Nav-bar network status pill (Adiri Testnet, from /api/network/status)
 // =============================================================================
 function setNavNetPill(d){

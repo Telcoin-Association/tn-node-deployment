@@ -39,7 +39,9 @@ OBS_ALLOY_SETTLE_SECS=5
 OBS_HTTP_ADDR="127.0.0.1:12345"           # Alloy's own metrics/UI (localhost only)
 
 # Defaults mirror lib/testnet-addons.env for set -u safety if sourced standalone.
+# network-gated: testnet hub default; obs_effective_push_url gives it only when NETWORK=testnet
 : "${OBS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/loki/api/v1/push}"
+# network-gated: testnet hub default; obs_effective_metrics_url gives it only when NETWORK=testnet
 : "${OBS_METRICS_PUSH_URL_TESTNET:=https://obs.adiri.telcoin.network/api/v1/write}"
 # Devnet push endpoints fail closed: no public devnet hub is hardcoded. Empty
 # unless the operator sets them (env or setup-observability.sh --push-url /
@@ -71,6 +73,7 @@ OBS_GRAFANA_KEY_FPR="B53AE77BADB630A683046005963FA27710458545"
 #   1. an explicit OBS_PUSH_URL / OBS_METRICS_PUSH_URL (set by env, or by
 #      setup-observability.sh --push-url / --metrics-push-url) — always wins
 #   2. else NETWORK=devnet  -> OBS_*_PUSH_URL_DEVNET  (empty unless configured)
+# network-gated: documents the testnet arm of the push URL precedence
 #   3. else (testnet)       -> OBS_*_PUSH_URL_TESTNET (the adiri hub)
 #
 # For testnet with no override this resolves to exactly $OBS_PUSH_URL_TESTNET /
@@ -124,6 +127,7 @@ obs_node_log_dir() {
 }
 
 # obs_metrics_port — the node metrics port as configured: METRICS_PORT (global at install
+# network-gated: the comment names the testnet fleet; 9101 is the default on every network
 # time), else read back from .node-meta, else the default 9101 to match the adiri fleet.
 # Always printed; rc 1 when it is not a port number (digits, 1-65535), so a value such as
 # "9101;id" never reaches a launch file or the Alloy env file.
@@ -209,11 +213,13 @@ obs_label_sourcing() {
     TN_REGION="$(printf '%s' "$TN_REGION" | tr -cd 'A-Za-z0-9_-' | cut -c1-32)"; [[ -n "$TN_REGION" ]] || TN_REGION="unknown"
     TN_VALIDATOR_ADDRESS="$(meta_get VALIDATOR_ADDRESS "$meta" 2>/dev/null || true)"
     # chain label tracks the active network (config.alloy reads it via sys.env("TN_CHAIN")).
+    # network-gated: documents the testnet chain label
     # testnet + the empty/unknown fallback stay "adiri" so existing testnet telemetry is
     # byte-identical; devnet/mainnet map to their own chain names from lib/common.sh.
     case "${NETWORK:-}" in
         devnet)  TN_CHAIN="${DEVNET_CHAIN_NAME:-devnet}" ;;
         mainnet) TN_CHAIN="${MAINNET_CHAIN_NAME:-telcoin}" ;;
+        # network-gated: chain label of testnet and of an unknown NETWORK; obs ships nothing unless NETWORK is testnet or devnet
         *)       TN_CHAIN="${TESTNET_CHAIN_NAME:-adiri}" ;;
     esac
     TN_IMAGE_VERSION="$(obs_image_version)"
@@ -225,6 +231,7 @@ obs_label_sourcing() {
 
 # obs_write_config_alloy [dest] — deploy the Alloy config, rendering ONLY the pipeline(s)
 # the operator opted into: ENABLE_OBSERVABILITY → loki.* (logs), ENABLE_METRICS →
+# network-gated: names the upstream node agent config, not an endpoint
 # prometheus.* (metrics). With both on it is byte-identical to the canonical, adiri-
 # matching observability/config.alloy. The per-pipeline blocks are sliced straight out of
 # that single checked-in source (no drift); a missing source falls back to an embedded,
@@ -329,9 +336,11 @@ _obs_slice_alloy() {
 # checked-in observability/config.alloy is missing. _obs_slice_alloy slices it the same
 # way, so all four toggle states still render correctly. The relabel rule{} blocks are
 # MULTI-LINE on purpose — the one-line form is invalid River and crash-loops Alloy. Keep
+# network-gated: names the upstream node agent config, not an endpoint
 # in sync with observability/config.alloy (and thus adiri).
 _obs_alloy_fallback() {
     cat <<'ALLOY_EOF'
+// network-gated: names the upstream node agent config, not an endpoint
 // Fallback copy (canonical: observability/config.alloy, byte-identical to adiri).
 // Env: TN_NODE TN_REGION TN_VALIDATOR_ADDRESS TN_CHAIN TN_IMAGE_VERSION
 //      OBS_PUSH_URL OBS_PUSH_HOST TN_METRICS_ADDR OBS_METRICS_PUSH_URL
@@ -804,6 +813,7 @@ obs_write_alloy_native_unit() {
 }
 
 # obs_alloy_docker_unit_text <env-file> <log_host_dir> <gid> -- print the docker-sidecar
+# network-gated: names the core team's testnet sidecar this unit copies; no endpoint
 # unit. Mirrors the adiri start-validator-node.sh sidecar (container telcoin-alloy, host
 # network, RO config + logs), but supervised by systemd so it is greppable and restarts
 # with the host. The ExecStart uses backslash continuations that bash collapses to one
@@ -1374,6 +1384,7 @@ obs_enable() {
     # Fail closed: refuse to write an Alloy config that ships nowhere. On devnet the
     # push URLs default to empty (no public hub baked in) — the operator must set
     # OBS_PUSH_URL/OBS_METRICS_PUSH_URL (env or --push-url/--metrics-push-url) first.
+    # network-gated: documents the testnet case of the fail-closed check
     # On testnet the effective URLs resolve to the adiri hub, so this never trips.
     if [[ "$logs_on" == "true" && -z "$(obs_effective_push_url)" ]]; then
         print_error "obs_enable: no logs push URL configured for network '${NETWORK:-unset}'."

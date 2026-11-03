@@ -48,6 +48,7 @@
 #   sudo bash update-node.sh --allow-downgrade  # testnet: allow a release older
 #                                             # than the running one
 #
+# network-gated: the testnet tag form, beside the mainnet one
 # Updates take release tags only (vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet),
 # never a branch or a commit id. A source build checks the tag out (refused when
 # origin's tag moved, or when its signature is bad), builds it as the
@@ -293,6 +294,7 @@ existing_update_refusal() {
     print_info "On a committee node, run only the install line instead (it replaces the file while the"
     print_info "node runs), then restart with edit-config.sh, menu item 12 (Restart node), which waits"
     print_info "for the epoch boundary: sudo bash ~/telcoin-node-scripts/edit-config.sh"
+    # network-gated: example tag in the testnet form, shown on every network
     print_info "Check a release before installing it (TAG is the release, such as vX.Y.Z-adiri):"
     print_info "  base=${TN_RELEASE_BASE_URL:-https://github.com/Telcoin-Association/telcoin-network/releases/download}/TAG"
     print_info "  curl -fsSL -O \"\$base/SHA256SUMS\" -O \"\$base/SHA256SUMS.asc\" -O \"\$base/telcoin-network-TAG-x86_64-unknown-linux-gnu.tar.gz\""
@@ -914,6 +916,7 @@ apply_root_dir_refusal() {
 # observer_strip_needed <file> <target text...> -- rc 0 when the launch file
 # <file> still passes the retired --observer flag AND the update target (a tag,
 # image or version string; see tn_target_drops_observer) no longer accepts it.
+# network-gated: release history of --observer; no endpoint
 # v0.15.0-adiri takes the flag as a hidden no-op and later releases refuse to
 # start with it, so the apply paths strip it before restarting. No output.
 observer_strip_needed() {
@@ -2003,6 +2006,7 @@ prepare_source_build() {
     local new_ref="$1" network cargo_features
     print_header "Prepare Update -- Source Build"
 
+    # network-gated: documents the testnet build feature (tn_cargo_features_for)
     # The network decides the build features (adiri on testnet, none on
     # mainnet) and which tags are releases. It must be known before the checkout
     # moves or cargo runs: a build for the wrong network refuses to start on
@@ -2015,6 +2019,7 @@ prepare_source_build() {
     if [[ -n "$cargo_features" ]]; then
         print_info "Network: ${network} -- building with ${cargo_features}"
     else
+        # network-gated: message of a mainnet build: names the testnet feature it leaves out
         print_info "Network: ${network} -- building without the adiri feature"
     fi
     binary_prepare source "$new_ref" "$network" || return 1
