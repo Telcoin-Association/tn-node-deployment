@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Run: docker run --rm -v "$PWD:/w" ubuntu:24.04 bash /w/tasks/verify-fup/V2/repro/repro-s3.sh
 # S-3: setup-node calls tn_host_baseline_install without listing it in tn_require_fns:
 # a lib/common.sh 2.x without the tn_host_baseline_* functions passes the up-front check.

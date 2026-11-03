@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Run: docker run --rm -v "$PWD:/w" bash:3.2 bash /w/tasks/verify-fup/V2/repro/repro-k1.sh
 # K-1: under a setpriv that exits 1 (busybox), tn_keytool_has reports "not listed" (1), not "probe failed" (4)
 mkdir -p /opt/b; chmod 0755 /opt/b
