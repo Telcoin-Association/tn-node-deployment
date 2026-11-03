@@ -4,12 +4,13 @@
 # watches and an AIDE baseline of the node's files.
 #
 #   lib/common.sh  tn_host_baseline_install, _refresh, _remove, _status and the
-#                  lines tn_host_audit gains;
+#                  lines tn_host_audit gains; a failed install leaves nothing;
 #   setup-node.sh  --host-baseline (full setup, --json finalize and the
 #                  baseline-only run on an installed node);
 #   update-node.sh the refresh after a successful apply, never after a failed one;
 #   edit-config.sh the refresh after a successful --set restart and menu restart;
-#   remove-node.sh the teardown when the node unit goes;
+#   remove-node.sh the teardown when the last node unit goes, none while
+#                  another node unit remains (menu path and each --json scope);
 #   install-caddy.sh, firewall-setup.sh, setup-vpn.sh, setup-observability.sh
 #                  the refresh after an add-on change that went through.
 #
@@ -110,10 +111,12 @@ case "$mode" in
     update)
         if [ ! -f "${TN_ROOT_PREFIX}${in}" ]; then
             printf 'partial\n' > "${TN_ROOT_PREFIX}${out}"
+            printf '  ERROR: open (read-only) failed for file %s\n' "$in" >&2
             exit 18
         fi
         printf 'db update\n' > "${TN_ROOT_PREFIX}${out}" ;;
 esac
+[ "$rc" -le 7 ] || printf '  ERROR: stub aide failed\n' >&2
 exit "$rc"
 STUB
 chmod 0755 "$T/bin/"*
@@ -125,6 +128,10 @@ WRITES="$T/writes.log"
 if [[ $ROOT_OK != 1 ]]; then
     # Any user: record the destination and mode, write the content.
     tn_write_root_file() {
+        if [[ -n "${HB_WRITE_REFUSE:-}" && "${1#"$FX"}" == "$HB_WRITE_REFUSE" ]]; then
+            cat > /dev/null
+            return 1
+        fi
         printf '%s %s\n' "${1#"$FX"}" "$2" >> "$WRITES"
         cat > "$1"
     }
@@ -181,6 +188,8 @@ check "install: rules file" "## Telcoin node host baseline (setup-node.sh --host
 -w /etc/telcoin -p wa -k telcoin-config
 -w /etc/systemd/system/telcoin.service -p wa -k telcoin-unit" "$(cat "$RULES" 2>/dev/null)"
 check_has "install: rules loaded with augenrules --load" "augenrules --load" "$(cat "$HB_LOG")"
+check "install: the AIDE baseline first, the audit rules last" "aide --config=${FX}/etc/aide/telcoin-node.conf --init
+augenrules --load" "$(grep -E '^(aide|augenrules) ' "$HB_LOG")"
 check_has "install: aide init with the node config" "aide --config=${FX}/etc/aide/telcoin-node.conf --init" "$(cat "$HB_LOG")"
 check_lacks "install: aideinit (the whole-system init) never runs" "aideinit" "$(cat "$HB_LOG")"
 AC="$(cat "$ACONF" 2>/dev/null)"
@@ -273,10 +282,79 @@ refused "DATA_DIR set twice" "DATA_DIR is set more than once"
 fixture
 rm -rf "${FX:?}/var/lib/telcoin/node-keys"
 refused "no node keys" "No node keys at /var/lib/telcoin/node-keys"
+# A failure once something is written takes the whole baseline away again: no
+# rules, AIDE config, database or marker are left. The audit rules are written
+# last, so a failed AIDE step never reaches the kernel.
+gone4() { echo "$(yn test -e "$RULES") $(yn test -e "$ACONF") $(yn test -e "$ADB") $(yn test -e "${ADB}.new")"; }
+ran() { grep -q "^$1 " "$HB_LOG" 2>/dev/null && echo yes || echo no; }
 fixture
-printf '18\n' > "$HB_T/aide.rc"
-refused "aide --init fails" "no part of it is left"
-check "aide --init fails: no partial database left" "no no" "$(yn test -e "$ADB") $(yn test -e "${ADB}.new")"
+printf '8\n' > "$HB_T/aide.rc"
+refused "aide --init fails (rc 8)" "no part of it is left"
+check "aide --init fails: aide's error said, no command naming the removed config" "yes no" \
+    "$(said '^warn|AIDE: aide --init failed (rc 8): ERROR: stub aide failed$') $(said 'see: sudo aide')"
+check "aide --init fails: no rules, aide config, database or new database" "no no no no" "$(gone4)"
+check "aide --init fails: the audit rules never loaded" "no " "$(ran augenrules) $(cat "$HB_T/kernel.rules" 2>/dev/null)"
+check_has "aide --init fails: status says off" "info  host baseline: off (sudo ./setup-node.sh --host-baseline adds auditd watches and an AIDE baseline)" "$(tn_host_baseline_status 2>&1)"
+# The same failure on a run over an earlier baseline whose rules the kernel has
+# loaded: the rules file goes, then augenrules --load drops the watches.
+fixture
+tn_host_baseline_install say_log > /dev/null 2>&1
+check_has "re-run: the earlier baseline's watches are loaded" "-w /var/lib/telcoin/node-keys -p rwxa -k telcoin-keys" "$(cat "$HB_T/kernel.rules" 2>/dev/null)"
+printf '8\n' > "$HB_T/aide.rc"
+: > "$HB_LOG"
+refused "re-run, aide --init fails" "no part of it is left"
+check "re-run, aide --init fails: augenrules --load after the failed init" "aide --config=${FX}/etc/aide/telcoin-node.conf --init
+augenrules --load" "$(grep -E '^(aide|augenrules) ' "$HB_LOG")"
+check "re-run, aide --init fails: no rules, aide config or database left" "no no no no" "$(gone4)"
+check "re-run, aide --init fails: the watches are gone from the kernel" "" "$(cat "$HB_T/kernel.rules" 2>/dev/null)"
+# The AIDE config refused (the first write): nothing written, nothing run.
+fixture
+cp "$META" "$T/meta0"
+if [[ $ROOT_OK == 1 ]]; then
+    mkdir -p "$FX/etc/aide"
+    chown 65534 "$FX/etc/aide"
+else
+    HB_WRITE_REFUSE=/etc/aide/telcoin-node.conf
+fi
+refused "aide config refused" "Could not write /etc/aide/telcoin-node.conf; the host baseline was not made."
+HB_WRITE_REFUSE=""
+check "aide config refused: nothing written" "no no no no" "$(gone4)"
+check "aide config refused: neither aide nor augenrules ran, .node-meta unchanged" "no no yes" \
+    "$(ran aide) $(ran augenrules) $(cmp -s "$T/meta0" "$META" && echo yes || echo no)"
+# The audit rules refused (the last write): the AIDE side goes again.
+fixture
+if [[ $ROOT_OK == 1 ]]; then
+    chown 65534 "$FX/etc/audit/rules.d"
+else
+    HB_WRITE_REFUSE=/etc/audit/rules.d/telcoin-node.rules
+fi
+refused "audit rules refused" "Could not write /etc/audit/rules.d/telcoin-node.rules."
+HB_WRITE_REFUSE=""
+check "audit rules refused: the AIDE side taken away again" "yes yes" "$(ran aide) $(said 'no part of it is left')"
+check "audit rules refused: no rules, aide config or database left, nothing loaded" "no no no no no" "$(gone4) $(ran augenrules)"
+# meta_set fails: the AIDE config goes again, aide never runs.
+fixture
+eval "$(declare -f meta_set | sed '1s/^meta_set /_hb_meta_set_real /')"
+meta_set() { return 1; }
+refused "meta_set fails" "Could not record HOST_BASELINE=true in .node-meta."
+eval "$(declare -f _hb_meta_set_real | sed '1s/^_hb_meta_set_real /meta_set /')"
+check "meta_set fails: nothing left, aide and augenrules not run" "no no no no no no" "$(gone4) $(ran aide) $(ran augenrules)"
+# /var/lib/aide taken over between the check before the writes and the init.
+fixture
+eval "$(declare -f _tn_hb_db_dir_ok | sed '1s/^_tn_hb_db_dir_ok /_hb_dbok_saved /')"
+_tn_hb_db_dir_ok() {
+    local n
+    n="$(cat "$HB_T/dbok.n" 2>/dev/null || echo 0)"
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$HB_T/dbok.n"
+    [ "$n" -lt 2 ] && return 0
+    _tn_hb_say warn "AIDE: /var/lib/aide stand-in refusal" "${1:-}"
+    return 1
+}
+refused "/var/lib/aide taken over before the init" "no part of it is left"
+eval "$(declare -f _hb_dbok_saved | sed '1s/^_hb_dbok_saved /_tn_hb_db_dir_ok /')"
+check "/var/lib/aide taken over: checked twice, nothing left, aide not run" "2 no no no no no no" \
+    "$(cat "$HB_T/dbok.n") $(gone4) $(ran aide) $(ran augenrules)"
 if [[ $ROOT_OK == 1 ]]; then
     fixture
     mkdir -p "$FX/var/lib/aide"
@@ -732,6 +810,90 @@ RJ="$(cat "$HB_T/rm.json" 2>/dev/null)"
 check_has "remove-node --json: the teardown step is an event" '{"event":"step","msg":"Removing the host baseline (audit rules and AIDE baseline)"}' "$RJ"
 check_has "remove-node --json: the packages line is an event" '{"event":"log","msg":"Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide"}' "$RJ"
 check "remove-node --json: files and marker gone" "no none" "$(yn test -e "$RULES") $(meta_get HOST_BASELINE "$META" 2>/dev/null || echo none)"
+# Another node unit remains (a legacy two-unit host, or any sibling unit file):
+# the baseline stays for that node, and the run says so. It goes with the last.
+OBS_UNIT="$FX/etc/systemd/system/telcoin-observer.service"
+fixture
+printf '[Service]\n' > "$OBS_UNIT"
+rmrun telcoin
+check "remove-node, another unit remains: no teardown" "systemctl stop systemctl disable leftovers systemctl daemon-reload " "$(calls)"
+check "remove-node, another unit remains, no baseline here: nothing said about one" no \
+    "$(grep -q 'Host baseline' "$T/rm.out" && echo yes || echo no)"
+cat > "$T/remove-node/drv4.sh" <<'DRV'
+source "$HB_DRV/remove-node/remove-node.sh"
+set +e
+systemctl() { return 0; }
+if [[ -n "${HB_FAKE_WRITE:-}" ]]; then
+    tn_write_root_file() { cat > "$1"; }
+fi
+stop_and_disable_service "$1"
+DRV
+kept4() { echo "$(yn test -e "$RULES") $(yn test -e "$ACONF") $(yn test -e "$ADB") $(meta_get HOST_BASELINE "$META" 2>/dev/null || echo none)"; }
+if [[ $ROOT_OK != 1 ]]; then
+    export HB_FAKE_WRITE=1
+fi
+fixture
+tn_host_baseline_install say_log > /dev/null 2>&1
+printf '[Service]\n' > "$OBS_UNIT"
+bash "$T/remove-node/drv4.sh" telcoin > "$T/rm.out" 2>&1
+check "two units, one removed: rules, aide config, database and marker kept" "yes yes yes true" "$(kept4)"
+check "two units, one removed: says the baseline stays, removes the unit" "yes no yes" \
+    "$(grep -q 'Host baseline kept: another node unit remains here' "$T/rm.out" && echo yes || echo no) $(yn test -e "$UNIT") $(yn test -e "$OBS_UNIT")"
+check_lacks "two units, one removed: no teardown step" "Removing the host baseline" "$(cat "$T/rm.out")"
+bash "$T/remove-node/drv4.sh" telcoin-observer > "$T/rm.out" 2>&1
+check "the last unit removed: rules, aide config, database and marker gone" "no no no none" "$(kept4)"
+check "the last unit removed: says the packages stay, nothing kept" "yes no" \
+    "$(grep -q 'auditd and aide packages stay installed' "$T/rm.out" && echo yes || echo no) $(grep -q 'Host baseline kept' "$T/rm.out" && echo yes || echo no)"
+# --json, every scope: json_remove keeps the baseline while another unit remains
+# (the kept line a log event) and tears it down with the last unit. The account,
+# lock, shredding and shared host files are stand-ins here (remove_test.sh drives
+# them); the service account named in .node-meta does not exist.
+cat > "$T/remove-node/drv5.sh" <<'DRV'
+source "$HB_DRV/remove-node/remove-node.sh"
+set +e
+systemctl() { return 0; }
+if [[ -n "${HB_FAKE_WRITE:-}" ]]; then
+    tn_write_root_file() { cat > "$1"; }
+fi
+rm_take_lock() { return 0; }
+detect_data_dir() { printf '%s\n' "${TN_ROOT_PREFIX}/var/lib/telcoin"; }
+_rm_shred_tree() { :; }
+shred_key_files() { :; }
+remove_testnet_addons() { :; }
+remove_log_group() { RM_LOG_GROUP_MSG=""; }
+remove_node_host_files() { :; }
+userdel() { :; }
+groupdel() { :; }
+RM_JSON=true
+json_remove validator "$1" 3>> "$HB_T/rm.json"
+DRV
+rj() { cat "$HB_T/rm.json" 2>/dev/null; }
+for scope in service data keys; do
+    fixture
+    printf 'HOST_SERVICE_USER=tn-hb-nouser\nHOST_SERVICE_GROUP=tn-hb-nogroup\n' >> "$META"
+    tn_host_baseline_install say_log > /dev/null 2>&1
+    printf '[Service]\n' > "$OBS_UNIT"
+    bash "$T/remove-node/drv5.sh" "$scope" > /dev/null 2>&1
+    check "--json ${scope}, another unit remains: rules, aide config and database kept" "yes yes yes" \
+        "$(yn test -e "$RULES") $(yn test -e "$ACONF") $(yn test -e "$ADB")"
+    check_has "--json ${scope}, another unit remains: the kept line is a log event" \
+        '{"event":"log","msg":"Host baseline kept: another node unit remains here"}' "$(rj)"
+    check_lacks "--json ${scope}, another unit remains: no teardown event" "Removing the host baseline" "$(rj)"
+    check "--json ${scope}, another unit remains: done ok" yes "$(rj | grep -q '"event":"done","ok":true' && echo yes || echo no)"
+    if [[ "$scope" != "keys" ]]; then
+        check "--json ${scope}, another unit remains: marker kept" true "$(meta_get HOST_BASELINE "$META" 2>/dev/null || echo none)"
+    fi
+    fixture
+    printf 'HOST_SERVICE_USER=tn-hb-nouser\nHOST_SERVICE_GROUP=tn-hb-nogroup\n' >> "$META"
+    tn_host_baseline_install say_log > /dev/null 2>&1
+    bash "$T/remove-node/drv5.sh" "$scope" > /dev/null 2>&1
+    check "--json ${scope}, the last unit: rules, aide config, database and marker gone" "no no no none" "$(kept4)"
+    check_has "--json ${scope}, the last unit: the teardown step is an event" \
+        '{"event":"step","msg":"Removing the host baseline (audit rules and AIDE baseline)"}' "$(rj)"
+    check "--json ${scope}, the last unit: nothing kept, done ok" "no yes" \
+        "$(rj | grep -q 'Host baseline kept' && echo yes || echo no) $(rj | grep -q '"event":"done","ok":true' && echo yes || echo no)"
+done
+unset HB_FAKE_WRITE
 
 # setup-node.sh with a lib/common.sh that lacks tn_host_baseline_install: the
 # one-message refusal of the version gate, not "command not found" later.
