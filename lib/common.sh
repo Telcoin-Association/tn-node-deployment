@@ -6295,6 +6295,28 @@ _tn_hb_rules_loaded() {
     [[ "$out" == *telcoin-keys* ]]
 }
 
+# _tn_hb_db_dir_ok [FN] -- rc 0 when /var/lib/aide passes tn_root_dir_ok and the
+# database and its .new file are each absent or a regular file owned by root (not
+# a symlink): a directory another account owns (aide-common makes it _aide:root
+# 0700) would let that account replace the baseline. rc 1 otherwise (said
+# through FN). Reads only.
+_tn_hb_db_dir_ok() {
+    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" f uid
+    if ! tn_root_dir_ok "${p}/var/lib/aide"; then
+        _tn_hb_say warn "AIDE: /var/lib/aide is not a directory owned and writable by root alone (aide-common makes it _aide:root, so the _aide account could replace the baseline); the baseline was not made. Give it to root (sudo chown root:root /var/lib/aide) or purge aide-common, then run: sudo ./setup-node.sh --host-baseline" "$fn"
+        return 1
+    fi
+    for f in "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new"; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        uid="$(stat -c %u -- "$f" 2>/dev/null)" || uid=""
+        if [[ -L "$f" || ! -f "$f" || "$uid" != "0" ]]; then
+            _tn_hb_say warn "AIDE: ${f#"$p"} is a symlink, not a regular file, or not owned by root; the baseline was not made. Remove it, then try again." "$fn"
+            return 1
+        fi
+    done
+    return 0
+}
+
 # _tn_hb_aide_db init|update [FN] -- run aide --init or aide --update with the
 # node config, then rename the new database over the old one, as AIDE's own
 # workflow does (database_out, then database_in). aide --update exits 1 to 7
@@ -6305,10 +6327,7 @@ _tn_hb_aide_db() {
     local mode="$1" fn="${2:-}" p="${TN_ROOT_PREFIX:-}" db new rc=0
     db="${p}${TN_HB_AIDE_DB}"
     new="${db}.new"
-    if [[ -L "$db" || -L "$new" || -d "$db" || -d "$new" ]]; then
-        _tn_hb_say warn "AIDE: ${TN_HB_AIDE_DB} or its .new file is a symlink or a directory; the baseline was not made. Remove it, then try again." "$fn"
-        return 1
-    fi
+    _tn_hb_db_dir_ok "$fn" || return 1
     rm -f -- "$new" 2>/dev/null || true
     aide --config="${p}${TN_HB_AIDE_CONF}" "--${mode}" >/dev/null 2>&1 || rc=$?
     if (( rc > 7 )) || [[ ! -f "$new" || -L "$new" ]]; then
@@ -6426,6 +6445,7 @@ tn_host_baseline_install() {
         _tn_hb_say warn "Could not create /var/lib/aide; the host baseline was not made." "$fn"
         return 1
     fi
+    _tn_hb_db_dir_ok "$fn" || return 1
     aidec="$(_tn_hb_aide_text "$unit" "$bin")"
     if ! tn_write_root_file "${p}${TN_HB_AIDE_CONF}" 0600 <<< "$aidec"; then
         _tn_hb_say warn "Could not write ${TN_HB_AIDE_CONF}; the host baseline was not made." "$fn"
@@ -6450,9 +6470,13 @@ tn_host_baseline_install() {
 # replaces the old one). Nothing to do without the marker. A failure is a
 # warning through FN, never a failed apply: always returns 0.
 tn_host_baseline_refresh() {
-    local fn="${1:-}" mark=""
-    mark="$(meta_get HOST_BASELINE 2>/dev/null)" || mark=""
-    [[ "$mark" == "true" ]] || return 0
+    local fn="${1:-}" mark="" rc=0
+    mark="$(meta_get HOST_BASELINE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        _tn_hb_say warn "HOST_BASELINE is set more than once in .node-meta, so the AIDE baseline was not made again; keep one HOST_BASELINE=true line, then run: sudo ./setup-node.sh --host-baseline" "$fn"
+        return 0
+    fi
+    [[ $rc -eq 0 && "$mark" == "true" ]] || return 0
     if ! command -v aide >/dev/null 2>&1; then
         _tn_hb_say warn "HOST_BASELINE=true, but aide is not installed: the AIDE baseline was not made again. Put it back with: sudo ./setup-node.sh --host-baseline" "$fn"
         return 0
@@ -6469,15 +6493,38 @@ tn_host_baseline_refresh() {
     return 0
 }
 
+# _tn_hb_unwatch RULES -- drop each watch in RULES from the kernel with
+# auditctl -W and the same fields (only these watches: auditctl -D would delete
+# every rule on the host). rc 0 when auditctl is there and every -W worked.
+_tn_hb_unwatch() {
+    local line ok=0
+    command -v auditctl >/dev/null 2>&1 || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            "-w "*)
+                # The fields are split on purpose: the paths hold no spaces (_tn_hb_path_ok).
+                # shellcheck disable=SC2086
+                auditctl -W ${line#-w } >/dev/null 2>&1 || ok=1
+                ;;
+        esac
+    done < "$1"
+    return "$ok"
+}
+
 # tn_host_baseline_remove [FN] -- take the host baseline away: the audit rules
 # file (then augenrules --load, which drops its watches), the AIDE config and
-# the database files made with it, and HOST_BASELINE in .node-meta. The auditd
+# the database files made with it, and every HOST_BASELINE line in .node-meta.
+# Without augenrules, the watches are dropped with auditctl -W, else they stay
+# loaded until the next boot (a warning). The auditd
 # and aide packages, /etc/aide and /var/lib/aide stay. Prints nothing when none
 # of it is there. A step that did not work is a warning through FN; always
 # returns 0.
 tn_host_baseline_remove() {
-    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" f found=false mark=""
-    mark="$(meta_get HOST_BASELINE 2>/dev/null)" || mark=""
+    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" f found=false mark="" meta
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" ]] && grep -q '^HOST_BASELINE=' "$meta" 2>/dev/null; then
+        mark="set"
+    fi
     for f in "${p}${TN_HB_AUDIT_RULES}" "${p}${TN_HB_AIDE_CONF}" "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new"; do
         if [[ -e "$f" || -L "$f" ]]; then
             found=true
@@ -6486,9 +6533,17 @@ tn_host_baseline_remove() {
     [[ "$found" == "true" || -n "$mark" ]] || return 0
     _tn_hb_say step "Removing the host baseline (audit rules and AIDE baseline)" "$fn"
     if [[ -e "${p}${TN_HB_AUDIT_RULES}" || -L "${p}${TN_HB_AUDIT_RULES}" ]]; then
-        rm -f -- "${p}${TN_HB_AUDIT_RULES}" 2>/dev/null || true
-        if command -v augenrules >/dev/null 2>&1 && ! augenrules --load >/dev/null 2>&1; then
-            _tn_hb_say warn "augenrules --load failed: the node's audit watches stay loaded until the next boot." "$fn"
+        if command -v augenrules >/dev/null 2>&1; then
+            rm -f -- "${p}${TN_HB_AUDIT_RULES}" 2>/dev/null || true
+            if ! augenrules --load >/dev/null 2>&1; then
+                _tn_hb_say warn "augenrules --load failed: the node's audit watches stay loaded until the next boot." "$fn"
+            fi
+        elif _tn_hb_unwatch "${p}${TN_HB_AUDIT_RULES}"; then
+            rm -f -- "${p}${TN_HB_AUDIT_RULES}" 2>/dev/null || true
+            _tn_hb_say log "augenrules is missing: the node's audit watches were dropped one by one with auditctl -W." "$fn"
+        else
+            rm -f -- "${p}${TN_HB_AUDIT_RULES}" 2>/dev/null || true
+            _tn_hb_say warn "augenrules is missing and auditctl -W could not drop the node's audit watches: they stay loaded until the next boot." "$fn"
         fi
     fi
     rm -f -- "${p}${TN_HB_AIDE_CONF}" "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new" 2>/dev/null || true
@@ -6503,13 +6558,24 @@ tn_host_baseline_remove() {
 # "ok|warn|info  text" form: the HOST_BASELINE marker, the audit rules file and
 # whether the kernel has them loaded (auditctl -l lists telcoin-keys; root
 # only), the AIDE config and the baseline database with its age (root only:
-# /var/lib/aide is 0700). No marker: one info line, rc 0. Marker set: a missing
-# piece is a warning, and rc is 1 when anything warned. Reads only.
+# /var/lib/aide is 0700). No marker: one info line, rc 0; a .node-meta this
+# user cannot read: one "not checked" info line, rc 0; the marker on more than
+# one line: one warning, rc 1. Marker set: a missing piece is a warning, and rc
+# is 1 when anything warned. Reads only.
 tn_host_baseline_status() {
-    local p="${TN_ROOT_PREFIX:-}" mark="" warn=0 db mt now age fix
+    local p="${TN_ROOT_PREFIX:-}" mark="" warn=0 db mt now age fix meta rc=0
     fix="make it again: sudo ./setup-node.sh --host-baseline"
-    mark="$(meta_get HOST_BASELINE 2>/dev/null)" || mark=""
-    if [[ "$mark" != "true" ]]; then
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" && -e "$meta" && ! -r "$meta" ]]; then
+        printf '%-5s %s\n' info "host baseline: not checked (.node-meta is readable by root only)"
+        return 0
+    fi
+    mark="$(meta_get HOST_BASELINE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        printf '%-5s %s\n' warn "host baseline: HOST_BASELINE is set more than once in .node-meta; keep one HOST_BASELINE=true line, then run: sudo ./setup-node.sh --host-baseline"
+        return 1
+    fi
+    if [[ $rc -ne 0 || "$mark" != "true" ]]; then
         printf '%-5s %s\n' info "host baseline: off (sudo ./setup-node.sh --host-baseline adds auditd watches and an AIDE baseline)"
         return 0
     fi
