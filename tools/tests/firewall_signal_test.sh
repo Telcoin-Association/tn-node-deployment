@@ -10,9 +10,10 @@
 # --json mode still end with a done event. The same TERMs land while the nft
 # transaction of the P2P new-flow limit is in flight (the CLI run writes table
 # inet tn_p2p, the --json run with a P2P list deletes it): the table is then the
-# old one or the complete new state, never part of one, the ufw rules are the
-# complete new set, and a run stopped during the ufw calls leaves the table as it
-# was.
+# old one or the complete new state, never part of one, so is its boot copy
+# (/etc/telcoin/p2p-limit.nft and telcoin-p2p-limit.service), the ufw rules are
+# the complete new set, and a run stopped during the ufw calls leaves the table
+# and its boot copy as they were.
 #
 #   bash tools/tests/firewall_signal_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/firewall_signal_test.sh
@@ -76,6 +77,8 @@ cat > "$T/fw/driver.sh" <<'DRV'
 source "$(dirname "$0")/firewall-setup.sh"
 check_root() { :; }
 tn_migrate_ownership() { return 0; }
+# Root-owned writes in the fixture: a temp file renamed into place, like the real one.
+tn_write_root_file() { mkdir -p "${1%/*}" && cat > "$1.tmp.$$" && mv -f "$1.tmp.$$" "$1"; }
 detect_installed_nodes() { echo "telcoin.service"; }
 fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n'; }
 caddy_serves_public_edge() { return 1; }
@@ -101,12 +104,25 @@ fixture() {
     printf 'DEFAULT_INPUT_POLICY="DROP"\n' > "$R/etc/default/ufw"
     printf 'Port 22\n' > "$R/etc/ssh/sshd_config"
     printf '%s\n' "$OLD_TABLE" > "$R/.nft.table"
+    mkdir -p "$R/etc/systemd/system"
+    printf 'table inet tn_p2p\ndelete table inet tn_p2p\n%s\n' "$OLD_TABLE" > "$R/etc/telcoin/p2p-limit.nft"
+    printf '[Unit]\nDescription=old\n' > "$R/etc/systemd/system/telcoin-p2p-limit.service"
+    printf 'telcoin-p2p-limit.service\n' > "$R/.systemctl.enabled"
     : > "$UFW_LOG"
     : > "$NFT_LOG"
     rm -rf "$T/lock"/* "$T/snap"/*
 }
 state() { sort "$R/etc/ufw/user.rules"; cat "$R/etc/ufw/ufw.conf" "$R/etc/default/ufw"; }
 table() { if [ -f "$R/.nft.table" ]; then cat "$R/.nft.table"; else echo "(no table)"; fi; }
+# boot -- the boot copy: the ruleset file, the unit and whether it is enabled.
+boot() {
+    local f
+    for f in "$R/etc/telcoin/p2p-limit.nft" "$R/etc/systemd/system/telcoin-p2p-limit.service"; do
+        if [ -f "$f" ]; then cat "$f"; else echo "(no ${f##*/})"; fi
+    done
+    cat "$R/.systemctl.enabled" 2>/dev/null
+    ls "$R/etc/telcoin" "$R/etc/systemd/system" | grep -c '\.tmp\.' | sed 's/^/temp files: /'
+}
 lock_free() {
     if [ -d "${TN_UPDATE_LOCK_FILE}.d" ]; then echo no; return; fi
     if command -v flock >/dev/null 2>&1 && [ -e "$TN_UPDATE_LOCK_FILE" ]; then
@@ -169,13 +185,20 @@ for mode in cli json; do
     check_rc "$mode clean run rc 0" 0 "$CLEAN_RC"
     new_st="$(state)"
     new_tbl="$(table)"
+    new_boot="$(boot)"
     fixture
     old_st="$(state)"
     old_tbl="$(table)"
+    old_boot="$(boot)"
     if [ "$mode" = cli ]; then
+        check_has "$mode clean run writes the boot copy of the limit" "ExecStart=$T/bin/nft -f /etc/telcoin/p2p-limit.nft" "$new_boot"
+        check_has "$mode clean run enables the boot unit" "telcoin-p2p-limit.service" "$new_boot"
         check_has "$mode clean run writes the new-flow limit" "ct state new udp dport { 49590, 49594 } update @tn_p2p_src4 { ip saddr limit rate over 20/minute burst 40 packets } drop" "$(printf '%s\n' "$new_tbl" | sed 's/^ *//')"
     else
         check "$mode clean run deletes the new-flow limit (P2P list)" "(no table)" "$new_tbl"
+        check "$mode clean run removes the boot copy" "(no p2p-limit.nft)
+(no telcoin-p2p-limit.service)
+temp files: 0" "$new_boot"
     fi
     for at in 2 3 5 nft; do
         for target in pid group; do
@@ -208,8 +231,15 @@ for mode in cli json; do
                     check "$name: nft killed, table is the old one" "$old_tbl" "$now_tbl"
                 fi
                 check "$name: one nft transaction" "1" "$(grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' ')"
+                now_boot="$(boot)"
+                if [ "$now_boot" = "$old_boot" ] || [ "$now_boot" = "$new_boot" ]; then
+                    check "$name: boot copy is the old or the complete new one" "ok" "ok"
+                else
+                    check "$name: boot copy is the old or the complete new one" "$old_boot" "$now_boot"
+                fi
             else
                 check "$name: table left as it was" "$old_tbl" "$now_tbl"
+                check "$name: boot copy left as it was" "$old_boot" "$(boot)"
                 check "$name: no nft transaction" "0" "$(grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' ')"
             fi
             if [ "$mode" = json ]; then

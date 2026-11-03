@@ -8,8 +8,11 @@
 # limit on the P2P ports (nftables table inet tn_p2p): written in one transaction
 # when no P2P source list is set, deleted with a list (comma list, IPv6 CIDR,
 # list file, stored list) and on --reset without a node, TN_P2P_NEW_FLOW_RATE /
-# TN_P2P_NEW_FLOW_BURST and their refusals, the warning without nft, and the
-# status line and the --json status field p2p_new_flow_limit.
+# TN_P2P_NEW_FLOW_BURST and their refusals, the warning without nft, the boot
+# copy (/etc/telcoin/p2p-limit.nft and telcoin-p2p-limit.service, written and
+# enabled with the table, disabled and removed with it), "Manage node ports"
+# rewriting it, and the status line and the --json status field
+# p2p_new_flow_limit.
 #
 #   bash tools/tests/firewall_reset_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/firewall_reset_test.sh
@@ -45,6 +48,19 @@ ln -s "${TN_TEST_REPO}/lib" "$T/fw/lib"
 # shellcheck source=/dev/null
 source "$T/fw/firewall-setup.sh"
 set +e
+# Root-owned writes land in the fixture (tn_root_dir_ok cannot pass under a temp
+# dir): each call is logged as "PATH MODE"; WRITE_FAIL names a path that fails.
+WRITES="$T/writes"
+tn_write_root_file() {
+    printf '%s %s\n' "$1" "$2" >> "$WRITES"
+    if [[ -n "${WRITE_FAIL:-}" && "$1" == "$WRITE_FAIL" ]]; then
+        cat > /dev/null
+        return 2
+    fi
+    mkdir -p "${1%/*}"
+    cat > "$1"
+}
+export SYSTEMCTL_LOG="$T/systemctl.log"
 META="$TN_ROOT_PREFIX/etc/telcoin/.node-meta"
 
 # Fixture node: two P2P ports, no Caddy, no VPN, not on GCE.
@@ -278,11 +294,23 @@ status_field() {
     grep -o '"p2p_new_flow_limit":{[^}]*}' "$T/status.json"
 }
 V4_RULE='ct state new udp dport { 49590, 49594 } update @tn_p2p_src4 { ip saddr limit rate over 20/minute burst 40 packets } drop'
-V6_RULE='ct state new udp dport { 49590, 49594 } update @tn_p2p_src6 { ip6 saddr limit rate over 20/minute burst 40 packets } drop'
+V6_RULE='ct state new udp dport { 49590, 49594 } update @tn_p2p_src6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over 20/minute burst 40 packets } drop'
+UNITF="$TN_ROOT_PREFIX/etc/systemd/system/telcoin-p2p-limit.service"
+LIMITF="$TN_ROOT_PREFIX/etc/telcoin/p2p-limit.nft"
+# boot_reset -- no boot copy, no enabled unit, empty logs of the writes and systemctl.
+boot_reset() { rm -f "$UNITF" "$LIMITF" "$TN_ROOT_PREFIX/.systemctl.enabled"; : > "$WRITES"; : > "$SYSTEMCTL_LOG"; }
+# boot_fake -- a boot copy from an earlier run, its unit enabled.
+boot_fake() {
+    mkdir -p "${UNITF%/*}" "${LIMITF%/*}"
+    printf '[Unit]\n' > "$UNITF"; printf 'table inet tn_p2p\n' > "$LIMITF"
+    printf 'telcoin-p2p-limit.service\n' > "$TN_ROOT_PREFIX/.systemctl.enabled"
+    : > "$WRITES"; : > "$SYSTEMCTL_LOG"
+}
+plain() { sed 's/\x1b\[[0-9;]*m//g'; }
 trim() { sed 's/^[[:space:]]*//'; }
 
 printf 'NETWORK=testnet\n' > "$META"
-NETWORK=testnet; fresh_flags; reset_state yes; nft_reset
+NETWORK=testnet; fresh_flags; reset_state yes; nft_reset; boot_reset
 run_apply --reset
 check_rc "limit: open P2P reset rc 0" 0 "$RC"
 tbl="$(nft_table | trim)"
@@ -299,7 +327,42 @@ check "limit: one nft transaction" "1" "$(nft_applies)"
 check "limit: program adds, deletes, then writes the table" "table inet tn_p2p
 delete table inet tn_p2p
 table inet tn_p2p {" "$(nft_prog | grep -v '^#' | head -n 3)"
-check_has "limit: says what it applied" "  ->  P2P new-flow limit: UDP 49590 and 49594 accept at most 20 new flows per minute from one address after a burst of 40 (nftables table inet tn_p2p)." "$OUT"
+check_has "limit: says what it applied" "  ->  P2P new-flow limit: UDP 49590 and 49594 accept at most 20 new flows per minute from one IPv4 address or IPv6 /64 after a burst of 40 (nftables table inet tn_p2p)." "$OUT"
+check_has "limit: v6 set keyed on the /64" "yes" "$(grep -qF 'update @tn_p2p_src6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate' <<< "$tbl" && echo yes)"
+# The boot copy: the same program, the unit that loads it, enabled and not started.
+check "limit: boot copy is the program nft loaded" "$(nft_prog)" "$(cat "$LIMITF" 2>/dev/null)"
+check_has "limit: boot copy written root 0640" "$LIMITF 0640" "$(cat "$WRITES")"
+check_has "limit: unit written root 0644" "$UNITF 0644" "$(cat "$WRITES")"
+check "limit: unit text" "# Written by firewall-setup.sh: loads the per-source limit on new P2P flows
+# (nftables table inet tn_p2p) at boot. firewall-setup.sh rewrites
+# /etc/telcoin/p2p-limit.nft with the table and removes both files when the
+# limit is not wanted.
+[Unit]
+Description=Telcoin Network per-source limit on new P2P flows (nftables table inet tn_p2p)
+After=ufw.service network-pre.target
+ConditionPathExists=/etc/telcoin/p2p-limit.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$T/bin/nft -f /etc/telcoin/p2p-limit.nft
+ExecStop=-$T/bin/nft delete table inet tn_p2p
+
+[Install]
+WantedBy=multi-user.target" "$(cat "$UNITF" 2>/dev/null)"
+check "limit: daemon-reload then enable, never a start" "daemon-reload
+enable telcoin-p2p-limit.service" "$(grep -v '^is-enabled' "$SYSTEMCTL_LOG")"
+check_has "limit: says it comes back at boot" "  ->  telcoin-p2p-limit.service loads it again at boot (from /etc/telcoin/p2p-limit.nft)." "$OUT"
+check "limit: status active and persistent" '"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null,"persistent":true}' "$(status_field)"
+check_has "limit: status line at boot" "  [OK]  New-flow limit at boot: loaded by telcoin-p2p-limit.service (enabled)" "$(fw_p2p_limit_report 2>&1 | plain)"
+if command -v systemd-analyze >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    mkdir -p "$T/unitcheck"
+    cp "$UNITF" "$T/unitcheck/telcoin-p2p-limit.service"
+    systemd-analyze verify --man=no "$T/unitcheck/telcoin-p2p-limit.service" >"$T/sa.out" 2>&1
+    check_rc "limit: systemd-analyze verify accepts the unit" 0 "$?"
+else
+    skip "limit: systemd-analyze verify on the unit" "no systemd here"
+fi
 check "limit: ufw rules still complete" "ENABLED=yes" "$(cat "$TN_ROOT_PREFIX/etc/ufw/ufw.conf")"
 check_has "limit: ufw still opens the P2P port" "allow 49590/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
 cp "$TABLE" "$T/table.default"
@@ -332,9 +395,10 @@ run_apply
 check_rc "limit: env overrides rc 0" 0 "$RC"
 tbl="$(nft_table | trim)"
 check_has "limit: env rate and burst (v4)" "ct state new udp dport { 49590, 49594 } update @tn_p2p_src4 { ip saddr limit rate over 30/minute burst 90 packets } drop" "$tbl"
-check_has "limit: env rate and burst (v6)" "ct state new udp dport { 49590, 49594 } update @tn_p2p_src6 { ip6 saddr limit rate over 30/minute burst 90 packets } drop" "$tbl"
+check_has "limit: env rate and burst (v6)" "ct state new udp dport { 49590, 49594 } update @tn_p2p_src6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over 30/minute burst 90 packets } drop" "$tbl"
 check_has "limit: timeout follows the refill (90 at 30/minute)" "timeout 180s" "$tbl"
-check "limit: status field with the overrides" '"p2p_new_flow_limit":{"active":true,"rate":30,"burst":90,"reason":null}' "$(status_field)"
+check "limit: status field with the overrides" '"p2p_new_flow_limit":{"active":true,"rate":30,"burst":90,"reason":null,"persistent":true}' "$(status_field)"
+check "limit: the boot copy follows the overrides" "$(nft_prog)" "$(cat "$LIMITF" 2>/dev/null)"
 unset TN_P2P_NEW_FLOW_RATE TN_P2P_NEW_FLOW_BURST
 check "limit: timeout floor is a minute" "timeout 60s" "$(fw_p2p_limit_text 100 5 | grep -o 'timeout [0-9]*s' | head -n 1)"
 check "limit: timeout cap is a day" "timeout 86400s" "$(fw_p2p_limit_text 1 100000 | grep -o 'timeout [0-9]*s' | head -n 1)"
@@ -359,18 +423,19 @@ unset TN_P2P_NEW_FLOW_RATE TN_P2P_NEW_FLOW_BURST
 check_rc "limit: rate 100000 burst 1 accepted" 0 "$RC"
 
 # A ufw step that fails never reaches the table.
-cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"
+cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"; : > "$WRITES"
 fresh_flags; reset_state yes
 UFW_FAIL_AT=3 run_apply --reset
 check_rc "limit: ufw fails at call 3 rc 2" 2 "$RC"
 check "limit: ufw failure leaves the table" "$(cat "$T/table.default")" "$(nft_table)"
 check "limit: ufw failure makes no nft call" "" "$(cat "$NFT_LOG")"
+check "limit: ufw failure writes no boot copy" "" "$(grep -F 'p2p-limit' "$WRITES")"
 
 # A P2P source list (IPv4 and IPv6 CIDRs) replaces the limit: the table goes.
 for how in comma file stored; do
     printf 'NETWORK=testnet\n' > "$META"
     fresh_flags; reset_state yes
-    cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"
+    cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"; boot_fake
     case "$how" in
         comma) FW_P2P_FROM="10.0.0.0/8,2001:db8::/32" ;;
         file)  printf '# peers\n10.0.0.0/8, 2001:db8::/32  # two ranges\n\n' > "$T/p2p.list"; FW_P2P_FROM="$T/p2p.list" ;;
@@ -386,6 +451,11 @@ for how in comma file stored; do
     check "limit: P2P list (${how}) delete program" "table inet tn_p2p
 delete table inet tn_p2p" "$(nft_prog)"
     check_lacks "limit: P2P list (${how}) writes no meter" "limit rate" "$(cat "$NFT_LOG")"
+    check "limit: P2P list (${how}) unit removed" "no" "$([[ -e "$UNITF" ]] && echo yes || echo no)"
+    check "limit: P2P list (${how}) boot copy removed" "no" "$([[ -e "$LIMITF" ]] && echo yes || echo no)"
+    check "limit: P2P list (${how}) unit disabled and stopped, then daemon-reload" "disable --now telcoin-p2p-limit.service
+daemon-reload" "$(cat "$SYSTEMCTL_LOG")"
+    check "limit: P2P list (${how}) writes no boot copy" "" "$(cat "$WRITES")"
 done
 # With the list and no table, nothing is applied (only the tables are listed).
 : > "$NFT_LOG"
@@ -393,26 +463,29 @@ fresh_flags
 run_apply
 check_rc "limit: list, no table rc 0" 0 "$RC"
 check "limit: list, no table: no nft transaction" "0" "$(nft_applies)"
-check "limit: status with a stored list" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"p2p-list"}' "$(status_field)"
+check "limit: status with a stored list" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"p2p-list","persistent":false}' "$(status_field)"
 check_has "limit: status line with a list" "  ->  New-flow limit: not used; the P2P ports take only the P2P source list (P2P_ALLOW_FROM)" "$(fw_p2p_limit_report 2>&1)"
 # --p2p-anywhere drops the stored list and the limit comes back.
 fresh_flags; FW_P2P_ANYWHERE=true; reset_state yes; : > "$NFT_LOG"
 run_apply
 check_rc "limit: --p2p-anywhere rc 0" 0 "$RC"
 check "limit: --p2p-anywhere writes the table" "$(cat "$T/table.default")" "$(nft_table)"
+check "limit: --p2p-anywhere writes the boot copy" "yes yes" "$([[ -f "$LIMITF" ]] && echo yes) $([[ -f "$UNITF" ]] && echo yes)"
 printf 'NETWORK=testnet\n' > "$META"
 
 # --reset without a node deletes the table.
 detect_installed_nodes() { echo "none"; }
-fresh_flags; reset_state yes; cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"
+fresh_flags; reset_state yes; cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"; boot_fake
 run_apply --reset
 check_rc "limit: reset without a node rc 0" 0 "$RC"
 check "limit: reset without a node deletes the table" "" "$(nft_table)"
+check "limit: reset without a node removes the boot copy" "no no" "$([[ -e "$UNITF" ]] && echo yes || echo no) $([[ -e "$LIMITF" ]] && echo yes || echo no)"
+check_has "limit: reset without a node disables the unit" "disable --now telcoin-p2p-limit.service" "$(cat "$SYSTEMCTL_LOG")"
 detect_installed_nodes() { echo "telcoin.service"; }
 
 # nft refuses the program: a warning, rc 0, the table it had stays.
 fresh_flags; reset_state yes
-printf 'table inet tn_p2p {\n    chain old {\n    }\n}\n' > "$TABLE"; : > "$NFT_LOG"
+printf 'table inet tn_p2p {\n    chain old {\n    }\n}\n' > "$TABLE"; : > "$NFT_LOG"; boot_reset
 NFT_FAIL=1 run_apply
 check_rc "limit: nft refuses rc 0" 0 "$RC"
 check_has "limit: nft refusal warned" "yes" "$(grep -q 'nft did not load the P2P new-flow limit (exit 1: Error: Could not process rule: Operation not supported); table inet tn_p2p stays as it was. The ufw rules are applied.' "$T/out" && echo yes)"
@@ -420,24 +493,32 @@ check "limit: nft refusal keeps the old table" "table inet tn_p2p {
     chain old {
     }
 }" "$(nft_table)"
-check "limit: status: a table without the limit rule" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"unreadable"}' "$(status_field)"
+check "limit: nft refusal writes no boot copy" "" "$(cat "$WRITES")"
+check "limit: status: a table without the limit rule" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"unreadable","persistent":false}' "$(status_field)"
 check_has "limit: ufw applied despite nft" "allow 49594/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
 
 # Status field and line for each state.
 cp "$T/table.default" "$TABLE"
-check "limit: status active" '"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null}' "$(status_field)"
-check_has "limit: status line active" "  [OK]  New-flow limit: at most 20 new P2P flows per minute from one address after a burst of 40 (nftables table inet tn_p2p)" "$(fw_p2p_limit_report 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+check "limit: status active, no boot copy" '"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null,"persistent":false}' "$(status_field)"
+fw_p2p_limit_report > "$T/report" 2>&1
+check_has "limit: status line active" "  [OK]  New-flow limit: at most 20 new P2P flows per minute from one IPv4 address or IPv6 /64 after a burst of 40 (nftables table inet tn_p2p)" "$(plain < "$T/report")"
+check_has "limit: status line, not restored at boot" "  [WARN] New-flow limit at boot: not restored after a reboot (telcoin-p2p-limit.service is not enabled); run Enable recommended defaults (or --enable) again" "$(plain < "$T/report")"
 if command -v python3 >/dev/null 2>&1; then
-    check "limit: status object parses as JSON" "True 20 40 None" \
-        "$(python3 -c 'import json,sys; d=json.load(sys.stdin)["p2p_new_flow_limit"]; print(d["active"], d["rate"], d["burst"], d["reason"])' < "$T/status.json" 2>&1)"
+    check "limit: status object parses as JSON" "True 20 40 None False" \
+        "$(python3 -c 'import json,sys; d=json.load(sys.stdin)["p2p_new_flow_limit"]; print(d["active"], d["rate"], d["burst"], d["reason"], d["persistent"])' < "$T/status.json" 2>&1)"
 else
     skip "limit: status object parses as JSON" "no python3 here"
 fi
 rm -f "$TABLE"
-check "limit: status not applied" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"not-applied"}' "$(status_field)"
-check_has "limit: status line not applied" "  [WARN] New-flow limit: not applied; run Enable recommended defaults (or --enable) to add it" "$(fw_p2p_limit_report 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+check "limit: status not applied" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"not-applied","persistent":false}' "$(status_field)"
+check_has "limit: status line not applied" "  [WARN] New-flow limit: not applied; run Enable recommended defaults (or --enable) to add it" "$(fw_p2p_limit_report 2>&1 | plain)"
+# After a reboot the unit is enabled but nothing loaded the table: said so.
+boot_fake
+check "limit: status, unit enabled but no table" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"not-applied","persistent":true}' "$(status_field)"
+check_has "limit: status line, unit enabled but no table" "  [WARN] New-flow limit at boot: telcoin-p2p-limit.service is enabled but the table is not loaded; check: systemctl status telcoin-p2p-limit.service" "$(fw_p2p_limit_report 2>&1 | plain)"
+boot_reset
 export NFT_LIST_FAIL=1
-check "limit: status unreadable" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"unreadable"}' "$(status_field)"
+check "limit: status unreadable" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"unreadable","persistent":false}' "$(status_field)"
 unset NFT_LIST_FAIL
 view_status </dev/null >"$T/view.out" 2>&1
 check_has "limit: view_status shows the limit line" "yes" "$(grep -q "New-flow limit: not applied" "$T/view.out" && echo yes)"
@@ -447,14 +528,15 @@ mv "$T/bin/nft" "$T/bin/nft.off"; hash -r
 if command -v nft >/dev/null 2>&1; then
     skip "limit: nft absent" "an nft other than the stub is on PATH ($(command -v nft))"
 else
-    fresh_flags; reset_state yes; : > "$NFT_LOG"
+    fresh_flags; reset_state yes; : > "$NFT_LOG"; boot_fake
     run_apply --reset
     check_rc "limit: nft absent rc 0" 0 "$RC"
+    check "limit: nft absent removes a boot copy that could not run" "no no" "$([[ -e "$UNITF" ]] && echo yes || echo no) $([[ -e "$LIMITF" ]] && echo yes || echo no)"
     check "limit: nft absent warns once" "1" "$(grep -c 'nftables (nft) is not installed, so the P2P new-flow limit is not applied; P2P stays open to every source' "$T/out" | tr -d ' ')"
     check_has "limit: nft absent, ufw rules applied" "allow 49590/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
     check "limit: nft absent, ufw enabled" "ENABLED=yes" "$(cat "$TN_ROOT_PREFIX/etc/ufw/ufw.conf")"
-    check "limit: status nft missing" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"nft-missing"}' "$(status_field)"
-    check_has "limit: status line nft missing" "  [WARN] New-flow limit: not applied; nftables (nft) is not installed, so P2P stays open to every source" "$(fw_p2p_limit_report 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+    check "limit: status nft missing" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"nft-missing","persistent":false}' "$(status_field)"
+    check_has "limit: status line nft missing" "  [WARN] New-flow limit: not applied; nftables (nft) is not installed, so P2P stays open to every source" "$(fw_p2p_limit_report 2>&1 | plain)"
     # With a list set, a missing nft is not worth a warning.
     fresh_flags; FW_P2P_FROM="10.0.0.0/8"; reset_state yes
     run_apply --reset
@@ -463,6 +545,56 @@ else
 fi
 mv "$T/bin/nft.off" "$T/bin/nft"; hash -r
 rm -f "$TABLE"
+
+# The boot copy cannot be written: the table is loaded, a warning says it will not
+# come back after a reboot, rc 0.
+for which in file unit; do
+    fresh_flags; reset_state yes; nft_reset; boot_reset
+    if [[ "$which" == file ]]; then WRITE_FAIL="$LIMITF"; else WRITE_FAIL="$UNITF"; fi
+    export WRITE_FAIL
+    run_apply
+    unset WRITE_FAIL
+    check_rc "limit: boot ${which} write fails rc 0" 0 "$RC"
+    check "limit: boot ${which} write fails: table loaded" "$(cat "$T/table.default")" "$(nft_table)"
+    if [[ "$which" == file ]]; then
+        check_has "limit: boot file write fails: warned" "yes" "$(grep -q 'The P2P new-flow limit is loaded now but will not come back after a reboot: /etc/telcoin/p2p-limit.nft could not be written. Fix that and run --enable again.' "$T/out" && echo yes)"
+        check "limit: boot file write fails: no unit" "no" "$([[ -e "$UNITF" ]] && echo yes || echo no)"
+    else
+        check_has "limit: boot unit write fails: warned" "yes" "$(grep -q 'will not come back after a reboot: /etc/systemd/system/telcoin-p2p-limit.service could not be written' "$T/out" && echo yes)"
+    fi
+    check_lacks "limit: boot ${which} write fails: nothing enabled" "enable" "$(cat "$SYSTEMCTL_LOG")"
+    check "limit: boot ${which} write fails: status not persistent" '"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null,"persistent":false}' "$(status_field)"
+done
+
+# "Manage node ports" opening the P2P ports rewrites the limit and its boot copy
+# (a third P2P port here), and deletes them when a P2P source list is set.
+printf 'NETWORK=mainnet\n' > "$META"
+NETWORK=mainnet
+fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n49595 worker-1\n'; }
+fresh_flags; reset_state yes; nft_reset; boot_reset
+printf 'allow 22/tcp\nallow 49590/udp\nallow 49594/udp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+( confirm() { return 0; }; manage_node_ports ) </dev/null > "$T/mnp.out" 2>&1
+check_has "menu: third P2P port opened" "allow 49595/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+check_has "menu: table rewritten with the third port" "ct state new udp dport { 49590, 49594, 49595 } update @tn_p2p_src4 { ip saddr limit rate over 20/minute burst 40 packets } drop" "$(nft_table | trim)"
+check "menu: boot copy rewritten" "$(nft_prog)" "$(cat "$LIMITF" 2>/dev/null)"
+check_has "menu: unit enabled" "enable telcoin-p2p-limit.service" "$(cat "$SYSTEMCTL_LOG")"
+printf 'NETWORK=mainnet\nP2P_ALLOW_FROM=10.0.0.0/8\n' > "$META"
+fresh_flags; : > "$NFT_LOG"; : > "$SYSTEMCTL_LOG"
+printf 'allow 22/tcp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+( confirm() { return 0; }; manage_node_ports ) </dev/null > "$T/mnp.out" 2>&1
+check_has "menu with a list: source rule" "allow from 10.0.0.0/8 to any port 49595 proto udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+check "menu with a list: table deleted" "" "$(nft_table)"
+check "menu with a list: boot copy removed" "no no" "$([[ -e "$UNITF" ]] && echo yes || echo no) $([[ -e "$LIMITF" ]] && echo yes || echo no)"
+# Declining the prompt changes nothing.
+printf 'NETWORK=mainnet\n' > "$META"
+fresh_flags; : > "$NFT_LOG"
+printf 'allow 22/tcp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+( confirm() { return 1; }; manage_node_ports ) </dev/null > "$T/mnp.out" 2>&1
+check "menu declined: no nft call" "" "$(cat "$NFT_LOG")"
+fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n'; }
+printf 'NETWORK=testnet\n' > "$META"
+NETWORK=testnet
+rm -f "$TABLE"; boot_reset
 
 # --- fw_persist_sources -----------------------------------------------------------
 META_CALLS="$T/meta.calls"

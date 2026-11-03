@@ -15,7 +15,10 @@
 # every keyword the fixture sets, first value wins, reading
 # etc/ssh/sshd_config.d/*.conf in name order and then etc/ssh/sshd_config, the
 # way sshd does when sshd_config starts with the Include line. $SSHD_PORT_LINE
-# replaces the "port 22" line. systemctl appends to $SYSTEMCTL_LOG.
+# replaces the "port 22" line. systemctl appends to $SYSTEMCTL_LOG; with
+# TN_ROOT_PREFIX set it also keeps the enabled units in
+# $TN_ROOT_PREFIX/.systemctl.enabled (`enable U`, `disable [--now] U`), and
+# `is-enabled U` answers from it (rc 0 "enabled", rc 1 "disabled").
 #
 # nft keeps table inet tn_p2p in $TN_ROOT_PREFIX/.nft.table (the table block of
 # the last program it applied; absent when there is no table). Every call appends
@@ -99,6 +102,27 @@ STUB
     cat > "$bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+[ -n "${TN_ROOT_PREFIX:-}" ] || exit 0
+en="$TN_ROOT_PREFIX/.systemctl.enabled"
+case "${1:-}" in
+    enable)
+        shift
+        for u in "$@"; do
+            grep -qxF -- "$u" "$en" 2>/dev/null || printf '%s\n' "$u" >> "$en"
+        done ;;
+    disable)
+        shift
+        [ "${1:-}" = --now ] && shift
+        for u in "$@"; do
+            if [ -f "$en" ]; then grep -vxF -- "$u" "$en" > "$en.tmp"; mv "$en.tmp" "$en"; fi
+        done ;;
+    is-enabled)
+        shift
+        [ "${1:-}" = --quiet ] && shift
+        if grep -qxF -- "${1:-}" "$en" 2>/dev/null; then echo enabled; exit 0; fi
+        echo disabled
+        exit 1 ;;
+esac
 exit 0
 STUB
     cat > "$bin/nft" <<'STUB'
