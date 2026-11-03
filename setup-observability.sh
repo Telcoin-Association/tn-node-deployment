@@ -777,6 +777,15 @@ so_on_exit() {
     tn_release_update_lock 2>/dev/null || true
 }
 
+# so_signal_traps -- TERM, INT and HUP end the run through exit, so the EXIT trap runs:
+# bash 3.2 skips the EXIT trap of a shell that a signal kills by default when its
+# parent shell has one.
+so_signal_traps() {
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+}
+
 # run_rotate_cli -- --rotate-token without --json: the new token from --token-stdin,
 # --token or TN_OBS_TOKEN, else asked for (hidden) when stdin is a terminal. Exits 0
 # when rotated, 1 when refused or rolled back (said).
@@ -812,6 +821,7 @@ main() {
         # json_on_exit releases the update lock too.
         TN_EXIT_TRAP_OWNED=1
         trap json_on_exit EXIT
+        so_signal_traps
     fi
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -860,6 +870,7 @@ main() {
     # The menu and --rotate-token own the EXIT trap from here (so_on_exit).
     TN_EXIT_TRAP_OWNED=1
     trap so_on_exit EXIT
+    so_signal_traps
     if [[ "$rotate" == "true" ]]; then
         check_root
         detect_distro
