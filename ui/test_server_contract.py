@@ -1177,11 +1177,43 @@ class FirewallStatusTest(ServerTestCase):
     def test_the_kept_p2p_list_is_reported(self):
         for meta, want in (("NETWORK=testnet\nP2P_ALLOW_FROM=198.51.100.0/24,2001:db8::/32\n",
                             ["198.51.100.0/24", "2001:db8::/32"]),
+                           ("NETWORK=testnet\nP2P_ALLOW_FROM=10.0.0.0/8\r\nRPC_PORT=8545\n",
+                            ["10.0.0.0/8"]),
                            ("NETWORK=testnet\n", []),
                            ("NETWORK=testnet\nP2P_ALLOW_FROM=\n", []),
-                           ("", None)):
+                           ("# P2P_ALLOW_FROM=10.0.0.0/8\n", []),
+                           ("", [])):
             with self.subTest(meta=meta):
-                self.assertEqual(self.status(meta)["p2p_sources"], want)
+                body = self.status(meta)
+                self.assertEqual(body["p2p_sources"], want)
+                self.assertNotIn("p2p_sources_note", body)
+
+    def test_an_unreadable_meta_is_unknown_not_empty(self):
+        self.helper_replies["firewall-status"] = (0, json.dumps({"installed": True, "active": True}), "")
+        self.helper_replies["meta-cat"] = (1, "", "sudo: a password is required")
+        server.clear_meta_cache()
+        body = self.client.get("/api/firewall").get_json()
+        self.assertIsNone(body["p2p_sources"])
+        self.assertNotIn("p2p_sources_note", body)
+
+    def test_a_doubled_p2p_list_is_not_shown_and_says_why(self):
+        for meta in ("P2P_ALLOW_FROM=10.0.0.0/8\nNETWORK=testnet\nP2P_ALLOW_FROM=198.51.100.0/24\n",
+                     "P2P_ALLOW_FROM=10.0.0.0/8\nP2P_ALLOW_FROM=10.0.0.0/8\n",
+                     "P2P_ALLOW_FROM=\nP2P_ALLOW_FROM=10.0.0.0/8\n"):
+            with self.subTest(meta=meta):
+                body = self.status(meta)
+                self.assertIsNone(body["p2p_sources"])
+                self.assertEqual(body["p2p_sources_note"],
+                                 "P2P_ALLOW_FROM is set more than once in .node-meta; "
+                                 "remove the extra lines on the server")
+
+    def test_read_meta_is_unchanged_by_the_text_it_now_keeps(self):
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n RPC_PORT = 9545 \n#X=1\n", "")
+        server.clear_meta_cache()
+        self.assertEqual(server.read_meta(), {"NETWORK": "testnet", "RPC_PORT": "9545"})
+        self.assertEqual(server.read_meta("validator"), {"NETWORK": "testnet", "RPC_PORT": "9545"})
+        self.assertEqual(server.read_meta("bogus"), {})
+        self.assertEqual(len([c for c in self.helper_calls() if c[3] == "meta-cat"]), 1, "cached")
 
     def test_the_new_flow_limit_passes_through_unchanged(self):
         for limit in (self.LIMIT_ON, self.LIMIT_OFF):

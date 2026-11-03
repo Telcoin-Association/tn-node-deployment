@@ -3237,10 +3237,11 @@ function fwExtraPorts(f){
 }
 
 // The P2P source list the node keeps (the server's p2p_sources, from
-// .node-meta): the list, "every address" when it keeps none, "—" when unknown.
+// .node-meta): the list, "every address" when it keeps none, the server's
+// p2p_sources_note when the list cannot be used, else "—" (unknown).
 function fwP2pSourcesText(f){
   const l = f && f.p2p_sources;
-  if(!Array.isArray(l)) return '—';
+  if(!Array.isArray(l)) return (f && typeof f.p2p_sources_note==='string' && f.p2p_sources_note) || '—';
   const items = l.filter(x=>typeof x==='string' && x);
   return items.length ? items.join(', ') : 'every address';
 }

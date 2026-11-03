@@ -522,7 +522,7 @@ RPC_PUBLIC_NEEDS_HOST = "Public RPC needs a hostname. Enter one or choose Privat
 # instead -- the same privileged path addons-status already uses. Cached briefly
 # since the file only changes on install/remove/settings and read_meta() is
 # called several times per request; clear_meta_cache() drops it after a mutation.
-_meta_cache = {}          # "meta" -> (expires_monotonic, dict)
+_meta_cache = {}          # "meta" -> (expires_monotonic, dict, text or None)
 _META_TTL = 15.0
 
 
@@ -530,19 +530,16 @@ def clear_meta_cache():
     _meta_cache.clear()
 
 
-def read_meta(t=None):
-    """Parse the node's .node-meta (KEY=VALUE lines) via the root helper. {} if
-    missing/unreadable. The helper finds the file itself (the unified
-    /etc/telcoin/.node-meta, else a legacy per-role one), so both presentation
-    slots read the same file; `t` is only checked, never sent."""
-    if t is not None and t not in NODE_TYPES:
-        return {}
+def _meta_load():
+    """(KEY -> value, text) of .node-meta through the root helper's meta-cat,
+    cached for _META_TTL seconds. The text is '' when the node has no
+    .node-meta, and None when meta-cat failed (the dict is then {})."""
     now = time.monotonic()
     cached = _meta_cache.get("meta")
     if cached and cached[0] > now:
-        return cached[1]
+        return cached[1], cached[2]
     if not _may_cache():
-        return {}
+        return {}, None
     out = {}
     rc, text, _ = run(["sudo", "-n", HELPER, "meta-cat"], timeout=10)
     if rc == 0 and text:
@@ -552,8 +549,19 @@ def read_meta(t=None):
                 continue
             k, _, v = line.partition("=")
             out[k.strip()] = v.strip()
-    _meta_cache["meta"] = (now + _META_TTL, out)
-    return out
+    raw = (text or "") if rc == 0 else None
+    _meta_cache["meta"] = (now + _META_TTL, out, raw)
+    return out, raw
+
+
+def read_meta(t=None):
+    """Parse the node's .node-meta (KEY=VALUE lines) via the root helper. {} if
+    missing/unreadable. The helper finds the file itself (the unified
+    /etc/telcoin/.node-meta, else a legacy per-role one), so both presentation
+    slots read the same file; `t` is only checked, never sent."""
+    if t is not None and t not in NODE_TYPES:
+        return {}
+    return _meta_load()[0]
 
 
 def read_node_env():
@@ -4087,21 +4095,34 @@ def api_clear_rotated(node_type):
 FIREWALL_PORTS = ("49590/udp", "49594/udp", "43174/tcp")
 
 
+P2P_SOURCES_DOUBLED = ("P2P_ALLOW_FROM is set more than once in .node-meta; "
+                       "remove the extra lines on the server")
+
+
 def p2p_sources_kept():
-    """The P2P source list .node-meta keeps (P2P_ALLOW_FROM) as a list, [] when
-    it keeps none (P2P open to every address), None when .node-meta cannot be
-    read."""
-    meta = read_meta()
-    if not meta:
-        return None
-    return [x.strip() for x in meta.get("P2P_ALLOW_FROM", "").split(",") if x.strip()]
+    """(list, note) for the P2P source list .node-meta keeps, read as the
+    engine's meta_get reads P2P_ALLOW_FROM (lines that start with the key). []
+    when there is no such line or no .node-meta (the P2P ports are open to every
+    address); None when meta-cat failed; None with the P2P_SOURCES_DOUBLED note
+    when the key is on more than one line, which the engine refuses."""
+    _, text = _meta_load()
+    if text is None:
+        return None, ""
+    lines = [ln for ln in text.splitlines() if ln.startswith("P2P_ALLOW_FROM=")]
+    if len(lines) > 1:
+        return None, P2P_SOURCES_DOUBLED
+    if not lines:
+        return [], ""
+    value = lines[0][len("P2P_ALLOW_FROM="):].rstrip("\r")
+    return [x.strip() for x in value.split(",") if x.strip()], ""
 
 
 @app.route("/api/firewall")
 def api_firewall():
     """firewall-setup.sh --json --status as the engine prints it (with
     p2p_new_flow_limit when the engine reports it), plus `p2p_sources`: the P2P
-    source list the node keeps, from .node-meta."""
+    source list the node keeps, from .node-meta (p2p_sources_kept), and
+    `p2p_sources_note` when that list cannot be used."""
     rc, out, err = run(["sudo", "-n", HELPER, "firewall-status"], timeout=20)
     if rc == 0 and out:
         try:
@@ -4110,7 +4131,9 @@ def api_firewall():
             d = None
         if isinstance(d, dict):
             if "p2p_sources" not in d:
-                d["p2p_sources"] = p2p_sources_kept()
+                d["p2p_sources"], note = p2p_sources_kept()
+                if note:
+                    d["p2p_sources_note"] = note
             return jsonify(d)
     # Helper/sudo/ufw unavailable -- degrade gracefully (no 500).
     return jsonify({
