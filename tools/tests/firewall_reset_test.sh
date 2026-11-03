@@ -573,7 +573,11 @@ NETWORK=mainnet
 fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n49595 worker-1\n'; }
 fresh_flags; reset_state yes; nft_reset; boot_reset
 printf 'allow 22/tcp\nallow 49590/udp\nallow 49594/udp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+# The host baseline refresh (AUDIT-2) after the limit and its boot copy change.
+tn_host_baseline_refresh() { printf 'refresh %s\n' "${1:-}" >> "$T/hb.calls"; }
+rm -f "$T/hb.calls"
 ( confirm() { return 0; }; manage_node_ports ) </dev/null > "$T/mnp.out" 2>&1
+check "menu: the host baseline is made again" "refresh fw_baseline_say" "$(cat "$T/hb.calls" 2>/dev/null)"
 check_has "menu: third P2P port opened" "allow 49595/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
 check_has "menu: table rewritten with the third port" "ct state new udp dport { 49590, 49594, 49595 } update @tn_p2p_src4 { ip saddr limit rate over 20/minute burst 40 packets } drop" "$(nft_table | trim)"
 check "menu: boot copy rewritten" "$(nft_prog)" "$(cat "$LIMITF" 2>/dev/null)"
@@ -581,7 +585,9 @@ check_has "menu: unit enabled" "enable telcoin-p2p-limit.service" "$(cat "$SYSTE
 printf 'NETWORK=mainnet\nP2P_ALLOW_FROM=10.0.0.0/8\n' > "$META"
 fresh_flags; : > "$NFT_LOG"; : > "$SYSTEMCTL_LOG"
 printf 'allow 22/tcp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+rm -f "$T/hb.calls"
 ( confirm() { return 0; }; manage_node_ports ) </dev/null > "$T/mnp.out" 2>&1
+check "menu with a list: the host baseline is made again" "refresh fw_baseline_say" "$(cat "$T/hb.calls" 2>/dev/null)"
 check_has "menu with a list: source rule" "allow from 10.0.0.0/8 to any port 49595 proto udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
 check "menu with a list: table deleted" "" "$(nft_table)"
 check "menu with a list: boot copy removed" "no no" "$([[ -e "$UNITF" ]] && echo yes || echo no) $([[ -e "$LIMITF" ]] && echo yes || echo no)"
@@ -589,8 +595,11 @@ check "menu with a list: boot copy removed" "no no" "$([[ -e "$UNITF" ]] && echo
 printf 'NETWORK=mainnet\n' > "$META"
 fresh_flags; : > "$NFT_LOG"
 printf 'allow 22/tcp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+rm -f "$T/hb.calls"
 ( confirm() { return 1; }; manage_node_ports ) </dev/null > "$T/mnp.out" 2>&1
 check "menu declined: no nft call" "" "$(cat "$NFT_LOG")"
+check "menu declined: no host baseline refresh" "" "$(cat "$T/hb.calls" 2>/dev/null)"
+unset -f tn_host_baseline_refresh
 fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n'; }
 printf 'NETWORK=testnet\n' > "$META"
 NETWORK=testnet

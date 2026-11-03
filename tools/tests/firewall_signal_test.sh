@@ -83,6 +83,8 @@ detect_installed_nodes() { echo "telcoin.service"; }
 fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n'; }
 caddy_serves_public_edge() { return 1; }
 ip() { return 1; }
+# The host baseline refresh (AUDIT-2): recorded, and one warning through its printer.
+tn_host_baseline_refresh() { printf 'refresh %s\n' "${1:-}" >> "$TN_ROOT_PREFIX/.hb.calls"; "$1" warn "host baseline stub"; }
 main "$@"
 DRV
 
@@ -183,6 +185,11 @@ run_term() {
 for mode in cli json; do
     run_clean "$mode"
     check_rc "$mode clean run rc 0" 0 "$CLEAN_RC"
+    check "$mode clean run makes the host baseline again, once" "refresh fw_baseline_say" "$(cat "$R/.hb.calls" 2>/dev/null)"
+    if [ "$mode" = json ]; then
+        check "$mode clean run: the baseline warning is an event before the done event" "yes" \
+            "$(awk '/^\{"event":"warn","msg":"host baseline stub"\}$/ { w = NR } /^\{"event":"done"/ { d = NR } END { print ((w && d && w < d) ? "yes" : "no") }' "$T/out")"
+    fi
     new_st="$(state)"
     new_tbl="$(table)"
     new_boot="$(boot)"
@@ -211,6 +218,7 @@ temp files: 0" "$new_boot"
             now="$(state)"
             check "$name: held call reached" "yes" "$([ -e "$HELD" ] && echo yes)"
             check "$name: script stopped (rc not 0)" "yes" "$([ "$TERM_RC" -ne 0 ] && echo yes)"
+            check "$name: no host baseline refresh" "" "$(cat "$R/.hb.calls" 2>/dev/null)"
             if [ "$now" = "$old_st" ] || [ "$now" = "$new_st" ]; then
                 check "$name: rules are the old or the complete new set" "ok" "ok"
             else

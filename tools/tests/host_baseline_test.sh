@@ -9,7 +9,9 @@
 #                  baseline-only run on an installed node);
 #   update-node.sh the refresh after a successful apply, never after a failed one;
 #   edit-config.sh the refresh after a successful --set restart and menu restart;
-#   remove-node.sh the teardown when the node unit goes.
+#   remove-node.sh the teardown when the node unit goes;
+#   install-caddy.sh, firewall-setup.sh, setup-vpn.sh, setup-observability.sh
+#                  the refresh after an add-on change that went through.
 #
 #   bash tools/tests/host_baseline_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/host_baseline_test.sh
@@ -740,5 +742,312 @@ sed 's/^tn_host_baseline_install() {/_tn_gone_install() {/' "$TN_TEST_REPO/lib/c
 rc=0; bash "$T/skew/setup-node.sh" --help > /dev/null 2> "$T/skew.err" < /dev/null || rc=$?
 check "setup-node with a lib lacking tn_host_baseline_install: refused up front" "1 yes" \
     "$rc $(grep -q 'is older than this setup-node.sh: run update-scripts.sh' "$T/skew.err" && echo yes || echo no)"
+
+
+# =============================================================================
+# AUDIT-2 add-on refresh
+# The add-ons make the host baseline again after a change that went through
+# (tn_host_baseline_refresh with the script's own printer), never after a refused
+# or failed one, and do nothing with a lib/common.sh that lacks the function.
+# Each driver sources a copy without its `main "$@"` line, stubs what the
+# operation runs and records the calls in $HB_T/calls. The firewall's --reset and
+# --json --enable runs are checked in firewall_signal_test.sh and Manage node
+# ports in firewall_reset_test.sh, whose drivers run those paths already.
+# =============================================================================
+for sc in install-caddy firewall-setup setup-vpn setup-observability; do
+    mkdir -p "$T/$sc"
+    grep -v '^main "\$@"$' "$TN_TEST_REPO/${sc}.sh" > "$T/$sc/${sc}.sh"
+    ln -s "$TN_TEST_REPO/lib" "$T/$sc/lib"
+done
+# The recording stand-in of every driver. It says one warning through the printer
+# it was given, so a --json run shows where that line lands. HB_NOLIB=1: no
+# tn_host_baseline_refresh at all, as with an older lib/common.sh.
+cat > "$T/hbstub.sh" <<'STUB'
+rec() { printf '%s\n' "$*" >> "$HB_T/calls"; }
+if [[ "${HB_NOLIB:-0}" == 1 ]]; then
+    unset -f tn_host_baseline_refresh
+else
+    tn_host_baseline_refresh() {
+        rec "refresh${1:+ $1}"
+        if [[ -n "${1:-}" ]]; then
+            "$1" warn "hb stub warning"
+        else
+            print_warn "hb stub warning"
+        fi
+        return 0
+    }
+fi
+STUB
+answers() { printf '%s\n' "$@" > "$T/addon.in"; }
+addon_run() {  # addon_run SCRIPT ARGS... -- RC, JS (stdout: the JSON stream in --json runs), ERR
+    local sc="$1"
+    shift
+    rm -f "${HB_T:?}/calls"
+    RC=0
+    bash "$T/$sc/drv.sh" "$@" > "$T/addon.stdout" 2> "$T/addon.err" < "$T/addon.in" || RC=$?
+    JS="$(cat "$T/addon.stdout")"
+    ERR="$(cat "$T/addon.err")"
+    : > "$T/addon.in"
+}
+: > "$T/addon.in"
+# warn_then_done -- yes when the stub's warning is a warn event before the one done
+# event, the done event is the last line and every line is a JSON event.
+warn_then_done() {
+    printf '%s\n' "$JS" | awk '
+        !/^\{"event":/ { bad = 1 }
+        /^\{"event":"warn","msg":"hb stub warning"\}$/ { w = NR }
+        /^\{"event":"done"/ { d = NR; n++ }
+        END { print ((!bad && w && n == 1 && w < d && d == NR) ? "yes" : "no") }'
+}
+done_ok() { printf '%s\n' "$JS" | tail -n 1 | grep -q '^{"event":"done","ok":true' && echo yes || echo no; }
+no_cnf() { [[ "$ERR" == *"command not found"* ]] && echo no || echo yes; }
+
+# --- install-caddy.sh: rpc-enable and rpc-disable ------------------------------------
+cat > "$T/install-caddy/drv.sh" <<'DRV'
+source "$HB_DRV/install-caddy/install-caddy.sh"
+set +e
+source "$HB_DRV/hbstub.sh"
+for f in check_root caddy_rpc_enable_precheck caddy_rpc_confirm caddy_assert_ports_free caddy_assert_not_foreign \
+         caddy_meta_ready install_caddy_pkg caddy_ws_plan caddy_node_lock write_rpc_block caddy_write_managed \
+         caddy_open_ports caddy_reload caddy_ws_inject caddy_ws_verify caddy_teardown; do
+    eval "${f}() { return 0; }"
+done
+caddy_current_dashboard_block() { :; }
+caddy_extract_block() { :; }
+caddy_ws_port() { echo 8546; }
+caddy_node_port() { echo 8545; }
+caddy_node_info_needs_edit() { return 1; }
+caddy_meta_record() { rec meta; }
+caddy_node_info_advertise() {
+    rec advertise
+    [[ -z "${HB_FAIL:-}" ]] || die "node-info.yaml could not be edited"
+}
+caddy_node_unlock() { rec unlock; }
+JSON_RPC_DOMAIN=rpc.example.org
+JSON_MOVE_DASH=""
+case "$1" in
+    json-rpc-enable)  run_json_rpc_enable ;;
+    json-rpc-disable) run_json_rpc_disable ;;
+    json-disable)     run_json_disable ;;
+    rpc-enable)       do_rpc_enable rpc.example.org "" ;;
+    rpc-disable)      do_rpc_disable ;;
+esac
+DRV
+fixture
+# (in --json runs the last unlock is the EXIT trap's, caddy_exit_cleanup)
+addon_run install-caddy json-rpc-enable
+check "install-caddy --json rpc-enable: refresh after the last write, under the lock" "0 advertise meta refresh caddy_wait_say unlock unlock " "$RC $(calls)"
+check "install-caddy --json rpc-enable: the refresh warning is an event before done, done ok" "yes yes" "$(warn_then_done) $(done_ok)"
+addon_run install-caddy json-rpc-disable
+check "install-caddy --json rpc-disable: refresh before the lock goes" "0 meta advertise refresh caddy_wait_say unlock unlock " "$RC $(calls)"
+check "install-caddy --json rpc-disable: warning event before done" "yes yes" "$(warn_then_done) $(done_ok)"
+addon_run install-caddy rpc-enable
+check "install-caddy rpc-enable (menu): refresh, its warning a printed line" "0 advertise meta refresh caddy_wait_say unlock  yes" \
+    "$RC $(calls) $([[ "$JS$ERR" == *"hb stub warning"* && "$JS" != *'"event"'* ]] && echo yes || echo no)"
+addon_run install-caddy rpc-disable
+check "install-caddy rpc-disable (menu): refresh" "0 meta advertise refresh caddy_wait_say unlock " "$RC $(calls)"
+export HB_FAIL=1
+addon_run install-caddy json-rpc-enable
+check "install-caddy --json rpc-enable, node-info edit failed: no refresh, done ok:false" "1 advertise unlock  yes" \
+    "$RC $(calls) $(printf '%s\n' "$JS" | tail -n 1 | grep -q '"event":"done","ok":false' && echo yes || echo no)"
+addon_run install-caddy rpc-disable
+check "install-caddy rpc-disable, node-info edit failed: no refresh" "1 meta advertise " "$RC $(calls)"
+unset HB_FAIL
+addon_run install-caddy json-disable
+check "install-caddy --json dashboard disable: no refresh (nothing the baseline covers)" "0 unlock  yes" "$RC $(calls) $(done_ok)"
+export HB_NOLIB=1
+addon_run install-caddy json-rpc-enable
+check "install-caddy --json rpc-enable, lib without tn_host_baseline_refresh: rc 0, done ok, silent" "0 yes yes" "$RC $(done_ok) $(no_cnf)"
+unset HB_NOLIB
+check "install-caddy: the refresh sits in do_rpc_enable and do_rpc_disable only" "2" \
+    "$(grep -c '^    caddy_baseline_refresh$' "$TN_TEST_REPO/install-caddy.sh")"
+
+# --- firewall-setup.sh: the menu enable, --json --enable, the health sources --------
+cat > "$T/firewall-setup/drv.sh" <<'DRV'
+source "$HB_DRV/firewall-setup/firewall-setup.sh"
+set +e
+source "$HB_DRV/hbstub.sh"
+apply_recommended_firewall() { rec apply; return "${HB_APPLY_RC:-0}"; }
+for f in fw_meta_lock fw_wants_meta_write ufw_installed ufw_active print_header; do
+    eval "${f}() { return 0; }"
+done
+fw_persist_sources() { rec persist; }
+get_ssh_port() { echo 22; }
+detect_installed_nodes() { echo none; }
+fw_sources() { :; }
+get_current_ip() { :; }
+confirm() { return "${HB_CONFIRM:-0}"; }
+is_testnet_like() { return 1; }
+caddy_serves_public_edge() { return 1; }
+kuma_extra_list() { printf '%s\n' "${HB_EXTRAS:-}"; }
+kuma_extra_add() { rec "extra_add $1"; return "${HB_EXTRA_RC:-0}"; }
+kuma_extra_remove() { rec "extra_remove $1"; }
+case "$1" in
+    json)  JSON_MODE=true; json_setup_fds; json_fw_enable ;;
+    menu)  enable_firewall ;;
+    extra) manage_health_extra_ips ;;
+esac
+DRV
+addon_run firewall-setup json
+check "firewall-setup --json --enable: refresh after the source lists are stored" "0 apply persist refresh fw_baseline_say " "$RC $(calls)"
+check "firewall-setup --json --enable: warning event before done, done ok" "yes yes" "$(warn_then_done) $(done_ok)"
+export HB_APPLY_RC=2
+addon_run firewall-setup json
+unset HB_APPLY_RC
+check "firewall-setup --json --enable, apply failed: no refresh, done ok:false" "2 apply  yes" \
+    "$RC $(calls) $(printf '%s\n' "$JS" | tail -n 1 | grep -q '"event":"done","ok":false' && echo yes || echo no)"
+answers "" ""
+addon_run firewall-setup menu
+check "firewall-setup menu enable: refresh after the apply, its warning printed" "0 apply persist refresh fw_baseline_say  yes" \
+    "$RC $(calls) $([[ "$JS$ERR" == *"hb stub warning"* ]] && echo yes || echo no)"
+export HB_CONFIRM=1
+answers "" ""
+addon_run firewall-setup menu
+unset HB_CONFIRM
+check "firewall-setup menu enable cancelled: no refresh" "" "$(calls)"
+answers 1 203.0.113.9 3
+addon_run firewall-setup extra
+check "firewall-setup health source added: refresh" "extra_add 203.0.113.9 refresh fw_baseline_say " "$(calls)"
+export HB_EXTRA_RC=1
+answers 1 bogus 3
+addon_run firewall-setup extra
+unset HB_EXTRA_RC
+check "firewall-setup health source refused: no refresh" "extra_add bogus " "$(calls)"
+export HB_EXTRAS=203.0.113.9
+answers 2 203.0.113.9 3
+addon_run firewall-setup extra
+unset HB_EXTRAS
+check "firewall-setup health source removed: refresh" "extra_remove 203.0.113.9 refresh fw_baseline_say " "$(calls)"
+export HB_NOLIB=1
+addon_run firewall-setup json
+unset HB_NOLIB
+check "firewall-setup --json --enable, lib without tn_host_baseline_refresh: rc 0, done ok, silent" "0 yes yes" "$RC $(done_ok) $(no_cnf)"
+check "firewall-setup: every change that writes a covered file refreshes (menu, --json, CLI, node ports, health sources)" "6" \
+    "$(grep -c '^ *fw_baseline_refresh$' "$TN_TEST_REPO/firewall-setup.sh")"
+
+# --- setup-vpn.sh: enable, --sync-keys with a root flag, --disable -----------------
+cat > "$T/setup-vpn/drv.sh" <<'DRV'
+source "$HB_DRV/setup-vpn/setup-vpn.sh"
+set +e
+source "$HB_DRV/hbstub.sh"
+for f in print_header consent_gate addon_meta_write_begin addon_meta_lock prompt_overlay_ip vpn_tnadmin_home_safe \
+         capture_sshd_posture run_bootstrap write_tnadmin_keys write_scoped_sshd verify_sshd_unchanged \
+         do_apply_firewall nudge_handshake print_enrollment write_tnadmin_sudoers vpn_remove_selfheal \
+         systemctl sshd userdel getent; do
+    eval "${f}() { return 0; }"
+done
+wg-quick() { return 0; }
+ufw_installed() { return 1; }
+vpn_root_grant_wanted() { echo false; }
+assemble_pubkeys() { TNADMIN_INSTALL="${HB_KEYS-key}"; }
+persist_state() { rec persist; }
+install_selfheal_units() { rec selfheal; }
+meta_set() { rec "meta $1=$2"; }
+confirm() { return "${HB_CONFIRM:-0}"; }
+vpn_init_paths
+VPN_META="$TN_ROOT_PREFIX/etc/telcoin/.node-meta"
+case "$1" in
+    enable)    do_enable ;;
+    sync-keys) ROOT_GRANT="${2:-}"; do_sync_keys ;;
+    disable)   do_disable ;;
+esac
+DRV
+addon_run setup-vpn enable
+check "setup-vpn enable: refresh after the last write, its warning printed" "0 persist selfheal refresh yes" \
+    "$RC $(calls)$([[ "$JS$ERR" == *"hb stub warning"* ]] && echo yes || echo no)"
+export HB_KEYS=""
+addon_run setup-vpn enable
+unset HB_KEYS
+check "setup-vpn enable refused (every key blocked): no refresh" "1 " "$RC $(calls)"
+addon_run setup-vpn sync-keys
+check "setup-vpn --sync-keys without a root flag: no refresh (no covered file)" "0 selfheal " "$RC $(calls)"
+addon_run setup-vpn sync-keys grant
+check "setup-vpn --sync-keys --grant-maintainer-root: refresh after the .node-meta write" "0 meta VPN_MAINTAINER_ROOT=false refresh selfheal " "$RC $(calls)"
+addon_run setup-vpn disable
+check "setup-vpn --disable: refresh after ENABLE_VPN=false" "0 meta ENABLE_VPN=false refresh " "$RC $(calls)"
+export HB_CONFIRM=1
+addon_run setup-vpn disable
+unset HB_CONFIRM
+check "setup-vpn --disable cancelled: no refresh" "0 " "$RC $(calls)"
+export HB_NOLIB=1
+addon_run setup-vpn enable
+unset HB_NOLIB
+check "setup-vpn enable, lib without tn_host_baseline_refresh: rc 0, silent" "0 yes" "$RC $(no_cnf)"
+
+# --- setup-observability.sh: --json, --rotate-token, the menu actions ---------------
+cat > "$T/setup-observability/drv.sh" <<'DRV'
+source "$HB_DRV/setup-observability/setup-observability.sh"
+set +e
+source "$HB_DRV/hbstub.sh"
+for f in check_root detect_distro load_node_context require_testnet so_write_begin addon_meta_write_begin \
+         addons_lib_check so_meta_check _obs_prompt_region pause print_header json_need_node \
+         health_firewall_ready health_restart_window systemctl; do
+    eval "${f}() { return 0; }"
+done
+ufw_installed() { return 1; }
+so_meta() { echo false; }
+_obs_collect_token() { _OBS_TOKEN=tok; }
+confirm() { return 0; }
+obs_enable() { rec enable; return "${HB_RC:-0}"; }
+obs_disable_logs() { rec disable_logs; return "${HB_RC:-0}"; }
+obs_rotate_token() { rec rotate; return "${HB_RC:-0}"; }
+tn_node_launch_target() { printf 'telcoin release %s\n' "$HB_T/launch"; }
+health_flag_add() { rec flag; return 0; }
+health_flag_live() { return "${HB_RC:-0}"; }
+meta_set() { rec "meta $1=$2"; }
+node_meta_path() { printf '%s\n' "$TN_ROOT_PREFIX/etc/telcoin/.node-meta"; }
+case "$1" in
+    json|json-rotate)
+        JSON_MODE=true
+        json_setup_fds
+        trap json_on_exit EXIT
+        if [[ "$1" == json ]]; then
+            JSON_DISABLE_LOGS=true
+        else
+            JSON_ROTATE_TOKEN=true
+            JSON_TOKEN=newtok
+        fi
+        run_json_mode
+        ;;
+    rotate-cli) JSON_TOKEN=newtok; run_rotate_cli ;;
+    *) "$1" ;;
+esac
+DRV
+addon_run setup-observability json
+check "setup-observability --json: refresh after the actions, before done" "0 disable_logs refresh addons_say " "$RC $(calls)"
+check "setup-observability --json: warning event before done, done ok" "yes yes" "$(warn_then_done) $(done_ok)"
+addon_run setup-observability json-rotate
+check "setup-observability --json --rotate-token: refresh" "0 rotate refresh addons_say  yes" "$RC $(calls) $(done_ok)"
+addon_run setup-observability rotate-cli
+check "setup-observability --rotate-token: refresh, rc 0" "0 rotate refresh addons_say " "$RC $(calls)"
+for a in enable_logging disable_logging rotate_token; do
+    answers newtok
+    addon_run setup-observability "$a"
+    check "setup-observability menu ${a}: refresh after it went through" "refresh addons_say " "$(calls | sed 's/^[a-z_]* //')"
+done
+addon_run setup-observability enable_health
+check "setup-observability menu enable_health: refresh once the flag is on and recorded" "flag meta ENABLE_HEALTHCHECK_MONITOR=true refresh addons_say " "$(calls)"
+addon_run setup-observability disable_health
+check "setup-observability menu disable_health: refresh" "meta ENABLE_HEALTHCHECK_MONITOR=false refresh addons_say " "$(calls)"
+export HB_RC=1
+addon_run setup-observability json
+check "setup-observability --json, the disable failed: no refresh, done ok:false" "1 disable_logs  yes" \
+    "$RC $(calls) $(printf '%s\n' "$JS" | tail -n 1 | grep -q '"event":"done","ok":false' && echo yes || echo no)"
+addon_run setup-observability rotate-cli
+check "setup-observability --rotate-token refused: no refresh, rc 1" "1 rotate " "$RC $(calls)"
+for a in enable_logging disable_logging rotate_token; do
+    answers newtok
+    addon_run setup-observability "$a"
+    check "setup-observability menu ${a} failed: no refresh" "" "$(calls | sed 's/^[a-z_]* //')"
+done
+addon_run setup-observability enable_health
+check "setup-observability menu enable_health, flag not on the command: no refresh" "flag " "$(calls)"
+unset HB_RC
+export HB_NOLIB=1
+addon_run setup-observability json
+unset HB_NOLIB
+check "setup-observability --json, lib without tn_host_baseline_refresh: rc 0, done ok, silent" "0 yes yes" "$RC $(done_ok) $(no_cnf)"
+check "setup-observability: --json, --rotate-token and seven menu actions refresh" "9" \
+    "$(grep -cE '^ *so_baseline_refresh$|; so_baseline_refresh; else ' "$TN_TEST_REPO/setup-observability.sh")"
 
 finish
