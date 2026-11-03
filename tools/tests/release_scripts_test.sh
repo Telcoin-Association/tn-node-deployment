@@ -60,6 +60,7 @@ fw="$(printf '\357\274\222\357\274\220\357\274\222\357\274\226')"   # full-width
 ar="$(printf '\331\242')"                                                  # Arabic-Indic 2
 for f in tools/release-scripts.sh update-scripts.sh install.sh check-node.sh; do
     fn="$(sed -n '/^ymd_days() {/,/^}/p' "$REPO/$f")"
+    # shellcheck disable=SC2016  # the inner bash expands the program
     out="$(LC_ALL="$loc" "$BASH" -c 'eval "$1"; shift
         for d in "$@"; do ymd_days "$d"; echo "rc=$?"; done' _ "$fn" "${fw}-11-03" "2026-1${ar}-03" 2026-11-03 2>&1)"
     check "dates, $loc: $f refuses non-ASCII digits cleanly" "$(printf 'rc=1\nrc=1\n20760\nrc=0')" "$out"
