@@ -1,0 +1,51 @@
+
+### installed = newest, fresh (today 2027-03-15) (rc 0)
+  ->  Installed:  scripts-v1.1.0, serial 2, released 2027-03-01, expires 2027-05-30 (signature verified)
+  ->  Newest:     scripts-v1.1.0, serial 2, released 2027-03-01, expires 2027-05-30 (signature verified)
+  [OK]  No update pending: every file matches scripts-v1.1.0.
+  [OK]  Up to date with scripts-v1.1.0; it expires 2027-05-30 (in 76 days).
+
+### installed R1 expired, newest R2 fresh: pending (rc 1)
+  ->  Installed:  scripts-v1.0.0, serial 1, released 2027-01-01, expires 2027-03-10 (signature verified)
+  ->  Newest:     scripts-v1.1.0, serial 2, released 2027-03-01, expires 2027-05-30 (signature verified)
+  [WARN] Update pending: 1 file(s) to update, 0 to remove. Run: bash /tmp/tn_test.OnIxrZ/inst/update-scripts.sh
+  [WARN] Installed release scripts-v1.0.0 expired on 2027-03-10 (5 days ago); a newer signed release is overdue.
+
+### installed R1 expired, network down (rc 2)
+  ->  Installed:  scripts-v1.0.0, serial 1, released 2027-01-01, expires 2027-03-10 (signature verified)
+  [ERROR] Could not download https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment/main/RELEASE (network error). Try again in a few minutes.
+
+### installed MANIFEST.sig missing (rc 2)
+  [ERROR] The installed release record cannot be verified: /tmp/tn_test.OnIxrZ/inst/lib/allowed_signers or /tmp/tn_test.OnIxrZ/inst/MANIFEST.sig is missing.
+  ->  Re-install the scripts with the verified installer, then run the updater again:
+  ->    curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
+  ->  Newest:     scripts-v1.1.0, serial 2, released 2027-03-01, expires 2027-05-30 (signature verified)
+
+### nothing installed (rc 2)
+  [WARN] No signed release is installed in /tmp/tn_test.OnIxrZ/inst (no MANIFEST record).
+  ->  Newest:     scripts-v1.1.0, serial 2, released 2027-03-01, expires 2027-05-30 (signature verified)
+  ->  To install it: bash /tmp/tn_test.OnIxrZ/inst/update-scripts.sh
+
+### --help (tail)
+A release carries an expiry date (expires= in MANIFEST, 90 days after its
+release date unless the release signer chose otherwise). From that day on the
+updater warns "Script release <tag> expired on <date>; a newer signed release
+is overdue." and still installs the release: it verifies as before.
+
+The answer is read from standard input; there is no --yes option. To answer
+from a script: printf 'y\n' | bash update-scripts.sh
+
+Options:
+  --check      Report the installed release and the newest signed release (tag,
+               serial, release date, expiry date), whether an update is pending
+               and whether either release has expired. Installs nothing, needs
+               no root, and asks nothing.
+  -h, --help   Show this help and exit without contacting GitHub.
+
+Exit status: 0 when everything is current, updated, or the update is declined;
+1 when GitHub cannot be reached, or a release is refused or fails verification;
+2 for an unknown argument.
+With --check: 0 when the installed release is the newest and neither has
+expired; 1 when an update is pending or the installed or newest release has
+expired; 2 when no signed release is installed, or the newest release cannot
+be fetched or verified.

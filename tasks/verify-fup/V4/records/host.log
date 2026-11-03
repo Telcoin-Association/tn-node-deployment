@@ -1,0 +1,665 @@
+ok    tools/release-scripts.sh: ymd_days matches python3 on 640 dates (leap days, centuries, year ends)
+ok    tools/release-scripts.sh: ymd_days refuses 29 malformed or impossible dates
+ok    tools/release-scripts.sh: ymd_days 2024-02-29 under TZ=ABC-14
+ok    update-scripts.sh: ymd_days matches python3 on 640 dates (leap days, centuries, year ends)
+ok    update-scripts.sh: ymd_days refuses 29 malformed or impossible dates
+ok    update-scripts.sh: ymd_days 2024-02-29 under TZ=ABC-14
+ok    install.sh: ymd_days matches python3 on 640 dates (leap days, centuries, year ends)
+ok    install.sh: ymd_days refuses 29 malformed or impossible dates
+ok    install.sh: ymd_days 2024-02-29 under TZ=ABC-14
+ok    check-node.sh: ymd_days matches python3 on 640 dates (leap days, centuries, year ends)
+ok    check-node.sh: ymd_days refuses 29 malformed or impossible dates
+ok    check-node.sh: ymd_days 2024-02-29 under TZ=ABC-14
+ok    release-scripts: days_ymd inverts the python3 table
+ok    release-scripts: date + DAYS matches python3 on 318 rows
+
+14 checks, 0 failures, 0 skipped
+RESULT dates_v4_test.sh rc=0 14 checks, 0 failures, 0 skipped
+ok    no date/expires (2.0.0 shape): exits 0
+ok    no date/expires (2.0.0 shape): record is R2
+ok    no date/expires (2.0.0 shape): setup-node updated
+ok    date only: exits 0
+ok    date only: record is R2
+ok    date only: setup-node updated
+ok    expires only: exits 0
+ok    expires only: record is R2
+ok    expires only: setup-node updated
+ok    date and expires: exits 0
+ok    date and expires: record is R2
+ok    date and expires: setup-node updated
+ok    fresh release: no expiry warning
+ok    keys before format= (any order): exits 0
+ok    keys before format= (any order): record is R2
+ok    keys before format= (any order): setup-node updated
+ok    adversarial: expires earlier than date (updater accepts; signed): exits 0
+ok    adversarial: expires earlier than date (updater accepts; signed): record is R2
+ok    adversarial: expires earlier than date (updater accepts; signed): setup-node updated
+ok    adversarial: 'expires =' with a space is an unknown key: exits 0
+ok    adversarial: 'expires =' with a space is an unknown key: record is R2
+ok    adversarial: 'expires =' with a space is an unknown key: setup-node updated
+ok    adversarial: 'expires =' past date: no warning (key ignored)
+ok    duplicate date=: exits 1
+ok    duplicate date=: tree byte-identical
+ok    duplicate date=: says why
+ok    duplicate expires=: exits 1
+ok    duplicate expires=: tree byte-identical
+ok    duplicate expires=: says why
+ok    malformed expires=[2027-13-01]: exits 1
+ok    malformed expires=[2027-13-01]: tree byte-identical
+ok    malformed expires=[2027-13-01]: says why
+ok    malformed expires=[2027-13-01]: names the key
+ok    malformed date=[2027-13-01]: exits 1
+ok    malformed date=[2027-13-01]: tree byte-identical
+ok    malformed date=[2027-13-01]: says why
+ok    malformed date=[2027-13-01]: names the key
+ok    malformed expires=[2027-02-30]: exits 1
+ok    malformed expires=[2027-02-30]: tree byte-identical
+ok    malformed expires=[2027-02-30]: says why
+ok    malformed expires=[2027-02-30]: names the key
+ok    malformed date=[2027-02-30]: exits 1
+ok    malformed date=[2027-02-30]: tree byte-identical
+ok    malformed date=[2027-02-30]: says why
+ok    malformed date=[2027-02-30]: names the key
+ok    malformed expires=[27-1-1]: exits 1
+ok    malformed expires=[27-1-1]: tree byte-identical
+ok    malformed expires=[27-1-1]: says why
+ok    malformed expires=[27-1-1]: names the key
+ok    malformed date=[27-1-1]: exits 1
+ok    malformed date=[27-1-1]: tree byte-identical
+ok    malformed date=[27-1-1]: says why
+ok    malformed date=[27-1-1]: names the key
+ok    malformed expires=[]: exits 1
+ok    malformed expires=[]: tree byte-identical
+ok    malformed expires=[]: says why
+ok    malformed expires=[]: names the key
+ok    malformed date=[]: exits 1
+ok    malformed date=[]: tree byte-identical
+ok    malformed date=[]: says why
+ok    malformed date=[]: names the key
+ok    malformed expires=[2027-06-01 ]: exits 1
+ok    malformed expires=[2027-06-01 ]: tree byte-identical
+ok    malformed expires=[2027-06-01 ]: says why
+ok    malformed expires=[2027-06-01 ]: names the key
+ok    malformed date=[2027-06-01 ]: exits 1
+ok    malformed date=[2027-06-01 ]: tree byte-identical
+ok    malformed date=[2027-06-01 ]: says why
+ok    malformed date=[2027-06-01 ]: names the key
+ok    malformed expires=[ 2027-06-01]: exits 1
+ok    malformed expires=[ 2027-06-01]: tree byte-identical
+ok    malformed expires=[ 2027-06-01]: says why
+ok    malformed expires=[ 2027-06-01]: names the key
+ok    malformed date=[ 2027-06-01]: exits 1
+ok    malformed date=[ 2027-06-01]: tree byte-identical
+ok    malformed date=[ 2027-06-01]: says why
+ok    malformed date=[ 2027-06-01]: names the key
+ok    malformed expires=[2027-6-1]: exits 1
+ok    malformed expires=[2027-6-1]: tree byte-identical
+ok    malformed expires=[2027-6-1]: says why
+ok    malformed expires=[2027-6-1]: names the key
+ok    malformed date=[2027-6-1]: exits 1
+ok    malformed date=[2027-6-1]: tree byte-identical
+ok    malformed date=[2027-6-1]: says why
+ok    malformed date=[2027-6-1]: names the key
+ok    malformed expires=[1969-12-31]: exits 1
+ok    malformed expires=[1969-12-31]: tree byte-identical
+ok    malformed expires=[1969-12-31]: says why
+ok    malformed expires=[1969-12-31]: names the key
+ok    malformed date=[1969-12-31]: exits 1
+ok    malformed date=[1969-12-31]: tree byte-identical
+ok    malformed date=[1969-12-31]: says why
+ok    malformed date=[1969-12-31]: names the key
+ok    CRLF manifest with the new keys: exits 1
+ok    CRLF manifest with the new keys: tree byte-identical
+ok    CRLF manifest with the new keys: says why
+ok    lower serial (keys present): exits 1
+ok    lower serial (keys present): tree byte-identical
+ok    lower serial (keys present): says why
+ok    same serial, different manifest (keys present): exits 1
+ok    same serial, different manifest (keys present): tree byte-identical
+ok    same serial, different manifest (keys present): says why
+ok    min_updater too new (keys present, expired): exits 1
+ok    min_updater too new (keys present, expired): tree byte-identical
+ok    min_updater too new (keys present, expired): says why
+ok    min_updater refusal: no 'Installing it anyway'
+ok    bad signature (keys present): exits 1
+ok    bad signature (keys present): tree byte-identical
+ok    bad signature (keys present): says why
+ok    adversarial: huge serial 9999999999: exits 1
+ok    adversarial: huge serial 9999999999: tree byte-identical
+ok    adversarial: huge serial 9999999999: says why
+ok    adversarial: 9-digit serial 999999999: exits 0
+ok    adversarial: 9-digit serial 999999999: record is R2
+ok    adversarial: 9-digit serial 999999999: setup-node updated
+ok    expired newest: still installs: exits 0
+ok    expired newest: still installs: record is R2
+ok    expired newest: still installs: setup-node updated
+ok    expired newest: exact warning text
+ok    expired newest: warns once
+ok    expires == today: installs: exits 0
+ok    expires == today: installs: record is R2
+ok    expires == today: installs: setup-node updated
+ok    expires == today: warns (today counts as expired)
+ok    expires tomorrow: installs: exits 0
+ok    expires tomorrow: installs: record is R2
+ok    expires tomorrow: installs: setup-node updated
+ok    expires tomorrow: no warning
+ok    up to date + expired: exits 0
+ok    up to date + expired: warns
+ok    up to date + expired: no 'Installing it anyway'
+ok    expired + declined: exits 0
+ok    expired + declined: tree unchanged
+ok    expired + declined: warned
+ok    self-replace + expired: exits 0
+ok    self-replace + expired: relaunched
+ok    self-replace + expired: warning printed exactly once
+ok    self-replace + expired: new updater installed
+ok    self-replace + expired: no staging dir left
+ok    --check current and fresh: rc 0
+ok    --check current and fresh: tree untouched
+ok    --check current and fresh: TMPDIR clean
+ok    --check current and fresh: no file downloads
+ok    --check current and fresh: no sudo
+ok    --check current and fresh: no banner or screen clear
+ok    --check current and fresh: says [Installed:  scripts-v1.1.0, serial 2, released 2027-03-01, expires 2027-05-30 (signature verified)]
+ok    --check current and fresh: says [Newest:     scripts-v1.1.0, serial 2, released 2027-03-01, expires 2027-05-30 (signature verified)]
+ok    --check current and fresh: says [No update pending]
+ok    --check current and fresh: says [Up to date with scripts-v1.1.0; it expires 2027-05-30 (in 76 days).]
+ok    --check current, run from /: rc 0
+ok    --check current, run from /: tree untouched
+ok    --check current, run from /: TMPDIR clean
+ok    --check current, run from /: no file downloads
+ok    --check current, run from /: no sudo
+ok    --check current, run from /: no banner or screen clear
+ok    --check current, run from /: says [Up to date with scripts-v1.1.0]
+ok    --check current, relative path from lib/: rc 0
+ok    --check current, relative path from lib/: tree untouched
+ok    --check current, relative path from lib/: TMPDIR clean
+ok    --check current, relative path from lib/: no file downloads
+ok    --check current, relative path from lib/: no sudo
+ok    --check current, relative path from lib/: no banner or screen clear
+ok    --check current, relative path from lib/: says [Up to date with scripts-v1.1.0]
+ok    --check current, read-only tree (non-root): rc 0
+ok    --check current, read-only tree (non-root): tree untouched
+ok    --check current, read-only tree (non-root): TMPDIR clean
+ok    --check current, read-only tree (non-root): no file downloads
+ok    --check current, read-only tree (non-root): no sudo
+ok    --check current, read-only tree (non-root): no banner or screen clear
+ok    --check current, read-only tree (non-root): says [Up to date with scripts-v1.1.0]
+ok    --check current, no expiry keys: rc 0
+ok    --check current, no expiry keys: tree untouched
+ok    --check current, no expiry keys: TMPDIR clean
+ok    --check current, no expiry keys: no file downloads
+ok    --check current, no expiry keys: no sudo
+ok    --check current, no expiry keys: no banner or screen clear
+ok    --check current, no expiry keys: says [release date not recorded]
+ok    --check current, no expiry keys: says [no expiry date]
+ok    --check current, no expiry keys: says [it carries no expiry date]
+ok    --check update pending: rc 1
+ok    --check update pending: tree untouched
+ok    --check update pending: TMPDIR clean
+ok    --check update pending: no file downloads
+ok    --check update pending: no sudo
+ok    --check update pending: no banner or screen clear
+ok    --check update pending: says [Installed:  scripts-v1.0.0, serial 1, release date not recorded, no expiry date]
+ok    --check update pending: says [Update pending]
+ok    --check installed expired (= newest): rc 1
+ok    --check installed expired (= newest): tree untouched
+ok    --check installed expired (= newest): TMPDIR clean
+ok    --check installed expired (= newest): no file downloads
+ok    --check installed expired (= newest): no sudo
+ok    --check installed expired (= newest): no banner or screen clear
+ok    --check installed expired (= newest): says [Installed release scripts-v1.1.0 expired on 2027-03-10 (5 days ago)]
+ok    --check installed expired: one expiry line
+ok    --check installed expires today: rc 1
+ok    --check installed expires today: tree untouched
+ok    --check installed expires today: TMPDIR clean
+ok    --check installed expires today: no file downloads
+ok    --check installed expires today: no sudo
+ok    --check installed expires today: no banner or screen clear
+ok    --check installed expires today: says [expired on 2027-03-15 (today)]
+ok    --check installed expired yesterday: rc 1
+ok    --check installed expired yesterday: tree untouched
+ok    --check installed expired yesterday: TMPDIR clean
+ok    --check installed expired yesterday: no file downloads
+ok    --check installed expired yesterday: no sudo
+ok    --check installed expired yesterday: no banner or screen clear
+ok    --check installed expired yesterday: says [(1 day ago)]
+ok    --check newest expired: rc 1
+ok    --check newest expired: tree untouched
+ok    --check newest expired: TMPDIR clean
+ok    --check newest expired: no file downloads
+ok    --check newest expired: no sudo
+ok    --check newest expired: no banner or screen clear
+ok    --check newest expired: says [Update pending]
+ok    --check newest expired: says [Newest release scripts-v1.1.0 expired on 2027-03-10 (5 days ago)]
+ok    --check installed expired, newest fresh: rc 1
+ok    --check installed expired, newest fresh: tree untouched
+ok    --check installed expired, newest fresh: TMPDIR clean
+ok    --check installed expired, newest fresh: no file downloads
+ok    --check installed expired, newest fresh: no sudo
+ok    --check installed expired, newest fresh: no banner or screen clear
+ok    --check installed expired, newest fresh: says [Installed release scripts-v1.0.0 expired on 2027-03-10]
+ok    --check nothing installed: rc 2
+ok    --check nothing installed: tree untouched
+ok    --check nothing installed: TMPDIR clean
+ok    --check nothing installed: no file downloads
+ok    --check nothing installed: no sudo
+ok    --check nothing installed: no banner or screen clear
+ok    --check nothing installed: says [No signed release is installed]
+ok    --check nothing installed: says [Newest:     scripts-v1.1.0]
+ok    --check nothing installed, no signer list: rc 2
+ok    --check nothing installed, no signer list: tree untouched
+ok    --check nothing installed, no signer list: TMPDIR clean
+ok    --check nothing installed, no signer list: no file downloads
+ok    --check nothing installed, no signer list: no sudo
+ok    --check nothing installed, no signer list: no banner or screen clear
+ok    --check nothing installed, no signer list: says [No signed release is installed]
+ok    --check installed record signed by an unknown key: rc 2
+ok    --check installed record signed by an unknown key: tree untouched
+ok    --check installed record signed by an unknown key: TMPDIR clean
+ok    --check installed record signed by an unknown key: no file downloads
+ok    --check installed record signed by an unknown key: no sudo
+ok    --check installed record signed by an unknown key: no banner or screen clear
+ok    --check installed record signed by an unknown key: says [Re-install the scripts]
+ok    --check adversarial: installed MANIFEST readable, MANIFEST.sig missing: rc 2
+ok    --check adversarial: installed MANIFEST readable, MANIFEST.sig missing: tree untouched
+ok    --check adversarial: installed MANIFEST readable, MANIFEST.sig missing: TMPDIR clean
+ok    --check adversarial: installed MANIFEST readable, MANIFEST.sig missing: no file downloads
+ok    --check adversarial: installed MANIFEST readable, MANIFEST.sig missing: no sudo
+ok    --check adversarial: installed MANIFEST readable, MANIFEST.sig missing: no banner or screen clear
+ok    --check adversarial: installed MANIFEST readable, MANIFEST.sig missing: says [cannot be verified]
+ok    --check installed record tampered (serial edited): rc 2
+ok    --check installed record tampered (serial edited): tree untouched
+ok    --check installed record tampered (serial edited): TMPDIR clean
+ok    --check installed record tampered (serial edited): no file downloads
+ok    --check installed record tampered (serial edited): no sudo
+ok    --check installed record tampered (serial edited): no banner or screen clear
+ok    --check installed record tampered (serial edited): says [Re-install the scripts]
+ok    --check newest unfetchable (network): rc 2
+ok    --check newest unfetchable (network): tree untouched
+ok    --check newest unfetchable (network): TMPDIR clean
+ok    --check newest unfetchable (network): no file downloads
+ok    --check newest unfetchable (network): no sudo
+ok    --check newest unfetchable (network): no banner or screen clear
+ok    --check newest unfetchable (network): says [network error]
+ok    --check no RELEASE published: rc 2
+ok    --check no RELEASE published: tree untouched
+ok    --check no RELEASE published: TMPDIR clean
+ok    --check no RELEASE published: no file downloads
+ok    --check no RELEASE published: no sudo
+ok    --check no RELEASE published: no banner or screen clear
+ok    --check no RELEASE published: says [No signed script release is published yet]
+ok    --check MANIFEST.sig unfetchable: rc 2
+ok    --check MANIFEST.sig unfetchable: tree untouched
+ok    --check MANIFEST.sig unfetchable: TMPDIR clean
+ok    --check MANIFEST.sig unfetchable: no file downloads
+ok    --check MANIFEST.sig unfetchable: no sudo
+ok    --check MANIFEST.sig unfetchable: no banner or screen clear
+ok    --check MANIFEST.sig unfetchable: says [Could not download MANIFEST.sig]
+ok    --check MANIFEST unfetchable (network): rc 2
+ok    --check MANIFEST unfetchable (network): tree untouched
+ok    --check MANIFEST unfetchable (network): TMPDIR clean
+ok    --check MANIFEST unfetchable (network): no file downloads
+ok    --check MANIFEST unfetchable (network): no sudo
+ok    --check MANIFEST unfetchable (network): no banner or screen clear
+ok    --check MANIFEST unfetchable (network): says [Could not download MANIFEST of release scripts-v1.1.0]
+ok    --check tag has no MANIFEST: rc 2
+ok    --check tag has no MANIFEST: tree untouched
+ok    --check tag has no MANIFEST: TMPDIR clean
+ok    --check tag has no MANIFEST: no file downloads
+ok    --check tag has no MANIFEST: no sudo
+ok    --check tag has no MANIFEST: no banner or screen clear
+ok    --check tag has no MANIFEST: says [Release scripts-v1.1.0 has no MANIFEST]
+ok    --check newest unverifiable (unknown key): rc 2
+ok    --check newest unverifiable (unknown key): tree untouched
+ok    --check newest unverifiable (unknown key): TMPDIR clean
+ok    --check newest unverifiable (unknown key): no file downloads
+ok    --check newest unverifiable (unknown key): no sudo
+ok    --check newest unverifiable (unknown key): no banner or screen clear
+ok    --check newest malformed (expires=2027-02-30): rc 2
+ok    --check newest malformed (expires=2027-02-30): tree untouched
+ok    --check newest malformed (expires=2027-02-30): TMPDIR clean
+ok    --check newest malformed (expires=2027-02-30): no file downloads
+ok    --check newest malformed (expires=2027-02-30): no sudo
+ok    --check newest malformed (expires=2027-02-30): no banner or screen clear
+ok    --check newest malformed (expires=2027-02-30): says [release manifest is malformed]
+ok    --check RELEASE names a tag whose manifest is another release: rc 2
+ok    --check RELEASE names a tag whose manifest is another release: tree untouched
+ok    --check RELEASE names a tag whose manifest is another release: TMPDIR clean
+ok    --check RELEASE names a tag whose manifest is another release: no file downloads
+ok    --check RELEASE names a tag whose manifest is another release: no sudo
+ok    --check RELEASE names a tag whose manifest is another release: no banner or screen clear
+ok    --check RELEASE names a tag whose manifest is another release: says [but RELEASE names scripts-v1.2.0]
+ok    --check RELEASE older than installed: rc 1
+ok    --check RELEASE older than installed: tree untouched
+ok    --check RELEASE older than installed: TMPDIR clean
+ok    --check RELEASE older than installed: no file downloads
+ok    --check RELEASE older than installed: no sudo
+ok    --check RELEASE older than installed: no banner or screen clear
+ok    --check RELEASE older than installed: says [older than the installed serial 5]
+ok    --check installed expired + network down: rc 2
+ok    --check installed expired + network down: tree untouched
+ok    --check installed expired + network down: TMPDIR clean
+ok    --check installed expired + network down: no file downloads
+ok    --check installed expired + network down: no sudo
+ok    --check installed expired + network down: no banner or screen clear
+ok    --check installed expired + network down: says [network error]
+ok    --json --check: rc 2 (no JSON mode)
+ok    --check --bogus: rc 2
+ok    --bogus --check: rc 2
+ok    --help names --check
+ok    --help: rc 0
+ok    TZ probe: at least one far zone has a different local date now
+ok    --check TZ=ABC-14 expires = UTC today: rc 1
+ok    --check TZ=ABC-14 expires = UTC today: tree untouched
+ok    --check TZ=ABC-14 expires = UTC today: TMPDIR clean
+ok    --check TZ=ABC-14 expires = UTC today: no file downloads
+ok    --check TZ=ABC-14 expires = UTC today: no sudo
+ok    --check TZ=ABC-14 expires = UTC today: no banner or screen clear
+ok    --check TZ=ABC-14 expires = UTC today: says [(today)]
+ok    --check TZ=ABC+12 expires = UTC today: rc 1
+ok    --check TZ=ABC+12 expires = UTC today: tree untouched
+ok    --check TZ=ABC+12 expires = UTC today: TMPDIR clean
+ok    --check TZ=ABC+12 expires = UTC today: no file downloads
+ok    --check TZ=ABC+12 expires = UTC today: no sudo
+ok    --check TZ=ABC+12 expires = UTC today: no banner or screen clear
+ok    --check TZ=ABC+12 expires = UTC today: says [(today)]
+ok    --check TZ=ABC-14 expires = UTC tomorrow: rc 0
+ok    --check TZ=ABC-14 expires = UTC tomorrow: tree untouched
+ok    --check TZ=ABC-14 expires = UTC tomorrow: TMPDIR clean
+ok    --check TZ=ABC-14 expires = UTC tomorrow: no file downloads
+ok    --check TZ=ABC-14 expires = UTC tomorrow: no sudo
+ok    --check TZ=ABC-14 expires = UTC tomorrow: no banner or screen clear
+ok    --check TZ=ABC-14 expires = UTC tomorrow: says [(in 1 day)]
+ok    --check TZ=ABC+12 expires = UTC tomorrow: rc 0
+ok    --check TZ=ABC+12 expires = UTC tomorrow: tree untouched
+ok    --check TZ=ABC+12 expires = UTC tomorrow: TMPDIR clean
+ok    --check TZ=ABC+12 expires = UTC tomorrow: no file downloads
+ok    --check TZ=ABC+12 expires = UTC tomorrow: no sudo
+ok    --check TZ=ABC+12 expires = UTC tomorrow: no banner or screen clear
+ok    --check TZ=ABC+12 expires = UTC tomorrow: says [(in 1 day)]
+ok    no script read the local date
+ok    fullwidth expires (locale en_US.UTF-8): updater does not exit 0
+ok    fullwidth expires: tree unchanged
+probe offline-expired: rc=2 mentions-expiry=0
+probe fullwidth: locale=en_US.UTF-8 rc=1 out=/tmp/tn_test.wmp5vm/inst/update-scripts.sh: line 235: 10#: invalid integer constant (error token is "10#") 
+
+366 checks, 0 failures, 0 skipped
+RESULT updater_v4_test.sh rc=0 366 checks, 0 failures, 0 skipped
+ok    install no date/expires (2.0.0 shape): rc 0
+ok    install no date/expires (2.0.0 shape): installed
+ok    install no date/expires (2.0.0 shape): record is the release MANIFEST
+ok    install 2.0.0 shape: no warning
+ok    install date only: rc 0
+ok    install date only: installed
+ok    install date only: record is the release MANIFEST
+ok    install expires only, fresh: rc 0
+ok    install expires only, fresh: installed
+ok    install expires only, fresh: record is the release MANIFEST
+ok    install fresh: no warning
+ok    install keys before format=: rc 0
+ok    install keys before format=: installed
+ok    install keys before format=: record is the release MANIFEST
+ok    install expired: rc 0
+ok    install expired: installed
+ok    install expired: record is the release MANIFEST
+ok    install expired: exact warning
+ok    install expired: support line
+ok    install expired: still reports success
+ok    install expired: warns once
+ok    install expires today: rc 0
+ok    install expires today: installed
+ok    install expires today: record is the release MANIFEST
+ok    install expires today: warns
+ok    install expires tomorrow: rc 0
+ok    install expires tomorrow: installed
+ok    install expires tomorrow: record is the release MANIFEST
+ok    install expires tomorrow: no warning
+ok    install adversarial: expires before date (accepted): rc 0
+ok    install adversarial: expires before date (accepted): installed
+ok    install adversarial: expires before date (accepted): record is the release MANIFEST
+ok    install duplicate date=: rc 1
+ok    install duplicate date=: nothing installed
+ok    install duplicate date=: no staging left
+ok    install duplicate date=: says why
+ok    install duplicate expires=: rc 1
+ok    install duplicate expires=: nothing installed
+ok    install duplicate expires=: no staging left
+ok    install duplicate expires=: says why
+ok    install malformed expires=[2027-13-01]: rc 1
+ok    install malformed expires=[2027-13-01]: nothing installed
+ok    install malformed expires=[2027-13-01]: no staging left
+ok    install malformed expires=[2027-13-01]: says why
+ok    install malformed date=[2027-13-01]: rc 1
+ok    install malformed date=[2027-13-01]: nothing installed
+ok    install malformed date=[2027-13-01]: no staging left
+ok    install malformed date=[2027-13-01]: says why
+ok    install malformed expires=[2027-02-30]: rc 1
+ok    install malformed expires=[2027-02-30]: nothing installed
+ok    install malformed expires=[2027-02-30]: no staging left
+ok    install malformed expires=[2027-02-30]: says why
+ok    install malformed date=[2027-02-30]: rc 1
+ok    install malformed date=[2027-02-30]: nothing installed
+ok    install malformed date=[2027-02-30]: no staging left
+ok    install malformed date=[2027-02-30]: says why
+ok    install malformed expires=[27-1-1]: rc 1
+ok    install malformed expires=[27-1-1]: nothing installed
+ok    install malformed expires=[27-1-1]: no staging left
+ok    install malformed expires=[27-1-1]: says why
+ok    install malformed date=[27-1-1]: rc 1
+ok    install malformed date=[27-1-1]: nothing installed
+ok    install malformed date=[27-1-1]: no staging left
+ok    install malformed date=[27-1-1]: says why
+ok    install malformed expires=[]: rc 1
+ok    install malformed expires=[]: nothing installed
+ok    install malformed expires=[]: no staging left
+ok    install malformed expires=[]: says why
+ok    install malformed date=[]: rc 1
+ok    install malformed date=[]: nothing installed
+ok    install malformed date=[]: no staging left
+ok    install malformed date=[]: says why
+ok    install malformed expires=[2027-06-01 ]: rc 1
+ok    install malformed expires=[2027-06-01 ]: nothing installed
+ok    install malformed expires=[2027-06-01 ]: no staging left
+ok    install malformed expires=[2027-06-01 ]: says why
+ok    install malformed date=[2027-06-01 ]: rc 1
+ok    install malformed date=[2027-06-01 ]: nothing installed
+ok    install malformed date=[2027-06-01 ]: no staging left
+ok    install malformed date=[2027-06-01 ]: says why
+ok    install malformed expires=[1969-12-31]: rc 1
+ok    install malformed expires=[1969-12-31]: nothing installed
+ok    install malformed expires=[1969-12-31]: no staging left
+ok    install malformed expires=[1969-12-31]: says why
+ok    install malformed date=[1969-12-31]: rc 1
+ok    install malformed date=[1969-12-31]: nothing installed
+ok    install malformed date=[1969-12-31]: no staging left
+ok    install malformed date=[1969-12-31]: says why
+ok    install bad signature (keys): rc 1
+ok    install bad signature (keys): nothing installed
+ok    install bad signature (keys): no staging left
+ok    install bad signature (keys): says why
+ok    install other release (keys): rc 1
+ok    install other release (keys): nothing installed
+ok    install other release (keys): no staging left
+ok    install other release (keys): says why
+ok    install serial malformed (keys): rc 1
+ok    install serial malformed (keys): nothing installed
+ok    install serial malformed (keys): no staging left
+ok    install serial malformed (keys): says why
+ok    install huge serial (keys): rc 1
+ok    install huge serial (keys): nothing installed
+ok    install huge serial (keys): no staging left
+ok    install huge serial (keys): says why
+ok    install format 2 (keys): rc 1
+ok    install format 2 (keys): nothing installed
+ok    install format 2 (keys): no staging left
+ok    install format 2 (keys): says why
+ok    install CRLF (keys): rc 1
+ok    install CRLF: says why
+ok    install TZ=ABC-14 expires = UTC today: rc 0
+ok    install TZ=ABC-14 expires = UTC today: warns
+ok    install TZ=ABC+12 expires = UTC today: rc 0
+ok    install TZ=ABC+12 expires = UTC today: warns
+ok    installer never read the local date
+
+115 checks, 0 failures, 0 skipped
+RESULT install_v4_test.sh rc=0 115 checks, 0 failures, 0 skipped
+ok    check-node calls report_scripts_release at the top level
+ok    the call comes before the summary (exit 0)
+ok    fresh: info line
+ok    fresh: ok line
+ok    fresh: no warn
+ok    fresh: no health issue
+ok    expired 5 days: warn
+ok    expired: points at --check
+ok    expired: age of the release
+ok    expired: no health issue
+ok    expired 1 day
+ok    expires today
+ok    expires tomorrow: ok
+ok    released yesterday
+ok    released today
+ok    dated ahead of the clock
+ok    missing record: warn
+ok    missing record: hint
+ok    missing record: no health issue
+ok    no release= line: warn
+ok    no serial= line: warn
+ok    no serial= line: hint
+ok    2.0.0 shape: date not recorded
+ok    2.0.0 shape: no expiry
+ok    2.0.0 shape: no warn
+ok    unreadable expiry: warn
+ok    CRLF record: reported as lacking release=/serial=
+ok    TZ=ABC-14 expires = UTC today: expired today
+ok    TZ=ABC+12 expires = UTC today: expired today
+ok    check-node never read the local date
+
+30 checks, 0 failures, 0 skipped
+RESULT checknode_v4_test.sh rc=0 30 checks, 0 failures, 0 skipped
+ok    no MANIFEST: --check rc 0
+ok    no MANIFEST: --check output
+ok    no MANIFEST: --check --require-fresh rc 1
+ok    no MANIFEST: --check --require-sig rc 1
+ok    prepare default: rc 0
+ok    prepare default: header lines in order
+ok    prepare default: line 7 is a file line
+ok    prepare default: RELEASE
+ok    prepare default: says the expiry
+ok    prepare: no MANIFEST.sig left
+ok    prepare without --date: date= is today (UTC)
+ok    prepare without --date: expires= 90 days on
+ok    prepare --expires: 12 table rows (leap days, year ends, 3650)
+ok    prepare --expires 30
+ok    prepare 2024-02-29 + 365
+ok    prepare --expires 3650 (upper bound)
+ok    prepare --expires [0]: refused
+ok    prepare --expires [0]: says the range
+ok    prepare --expires [0]: wrote no MANIFEST
+ok    prepare --expires [3651]: refused
+ok    prepare --expires [3651]: says the range
+ok    prepare --expires [3651]: wrote no MANIFEST
+ok    prepare --expires [abc]: refused
+ok    prepare --expires [abc]: says the range
+ok    prepare --expires [abc]: wrote no MANIFEST
+ok    prepare --expires [030]: refused
+ok    prepare --expires [030]: says the range
+ok    prepare --expires [030]: wrote no MANIFEST
+ok    prepare --expires [-5]: refused
+ok    prepare --expires [-5]: says the range
+ok    prepare --expires [-5]: wrote no MANIFEST
+ok    prepare --expires []: refused
+ok    prepare --expires []: says the range
+ok    prepare --expires []: wrote no MANIFEST
+ok    prepare --expires [1.5]: refused
+ok    prepare --expires [1.5]: says the range
+ok    prepare --expires [1.5]: wrote no MANIFEST
+ok    prepare --expires [99999]: refused
+ok    prepare --expires [99999]: says the range
+ok    prepare --expires [99999]: wrote no MANIFEST
+ok    prepare --expires without a value: usage rc 2
+ok    prepare --date [2027-02-30]: refused
+ok    prepare --date [2027-02-30]: says why
+ok    prepare --date [2027-13-01]: refused
+ok    prepare --date [2027-13-01]: says why
+ok    prepare --date [27-1-1]: refused
+ok    prepare --date [27-1-1]: says why
+ok    prepare --date [2023-02-29]: refused
+ok    prepare --date [2023-02-29]: says why
+ok    --check fresh: rc 0
+ok    --check fresh: release date
+ok    --check fresh: expiry
+ok    --check fresh: passed
+ok    --check --require-sig --require-fresh fresh: rc 0
+ok    --check --tag fresh: rc 0
+ok    --check expires today: rc 0
+ok    --check expires today: warns
+ok    --check --require-fresh expires today: rc 1
+ok    --check --require-fresh: says why
+ok    --check expired 10 days: rc 0
+ok    --check expired 10 days: warns
+ok    --check --require-fresh expired: rc 1
+ok    --check --tag expired (no --require-fresh): rc 0
+ok    --check --require-fresh the day before: rc 0
+ok    --check the day before: in 1 day
+ok    --check 2.0.0 shape: rc 0
+ok    --check 2.0.0 shape: does not expire
+ok    --check --require-fresh 2.0.0 shape: rc 0
+ok    --check duplicate date=: rc 1
+ok    --check duplicate expires=: rc 1
+ok    --check malformed expires=[2027-02-30]: rc 1
+ok    --check malformed expires=[2027-13-01]: rc 1
+ok    --check malformed expires=[27-1-1]: rc 1
+ok    --check malformed expires=[2027-02-01 ]: rc 1
+FAIL  --check empty expires= (the updater refuses it): rc 1
+      expected rc 1, got rc 0
+FAIL  --check empty date= (the updater refuses it): rc 1
+      expected rc 1, got rc 0
+ok    --check expires equal to date: rc 1
+ok    --check expires equal to date: says why
+ok    --check expires before date: rc 1
+ok    --check expires= before min_updater= (order): rc 0
+ok    --check RELEASE date differs from date=: rc 1
+ok    --check CRLF manifest: rc 1
+ok    real clock: expires is UTC today
+ok    real clock TZ=ABC-14: expires = UTC today -> --require-fresh rc 1
+ok    real clock TZ=ABC-14: (today)
+ok    real clock TZ=ABC+12: expires = UTC today -> --require-fresh rc 1
+ok    real clock TZ=ABC+12: (today)
+ok    real clock TZ=ABC-14: expires = UTC tomorrow -> rc 0
+ok    real clock TZ=ABC+12: expires = UTC tomorrow -> rc 0
+ok    release-scripts never read the local date
+git mode: real git: 1
+
+90 checks, 2 failures, 0 skipped
+RESULT release_v4_test.sh rc=1 90 checks, 2 failures, 0 skipped
+ok    cache holds update-scripts 2.0.0
+ok    2.0.0 parse_manifest, keys after min_updater: accepted
+ok    2.0.0 parse_manifest, keys before format: accepted
+ok    2.0.0 parse_manifest, no keys: accepted
+ok    2.0.0 parse_manifest, malformed expires (2.0.0 does not read it): accepted
+ok    2.0.0 installer, expired keys: rc 0
+ok    2.0.0 installer, expired keys: installed
+ok    2.0.0 installer: no expiry warning (it knows nothing of expires=)
+ok    2.0.0 installer, keys before format: rc 0
+ok    2.0.0 updater, same updater + keys: rc 0
+ok    2.0.0 updater, same updater + keys: record is R2
+ok    2.0.0 updater, same updater + keys: setup-node updated
+ok    2.0.0 -> tip, expired: rc 0
+ok    2.0.0 -> tip, expired: relaunched the release copy
+ok    2.0.0 -> tip, expired: warning exactly once
+ok    2.0.0 -> tip, expired: warning text
+ok    2.0.0 -> tip, expired: tip updater installed
+ok    2.0.0 -> tip, expired: record is R2
+ok    2.0.0 -> tip: no staging dir left
+ok    after 2.0.0 -> tip: tip --check rc 1 (installed expired)
+ok    after 2.0.0 -> tip: --check names the expiry
+ok    2.0.0 -> tip, fresh: rc 0
+ok    2.0.0 -> tip, fresh: no warning
+ok    after 2.0.0 -> tip fresh: --check rc 0
+ok    2.0.0 -> tip, malformed expires: rc 1
+ok    2.0.0 -> tip, malformed expires: tree byte-identical
+ok    2.0.0 -> tip, malformed expires: tip copy says why
+
+27 checks, 0 failures, 0 skipped
+RESULT compat200_v4_test.sh rc=0 27 checks, 0 failures, 0 skipped

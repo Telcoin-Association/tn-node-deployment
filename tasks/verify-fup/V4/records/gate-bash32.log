@@ -1,0 +1,327 @@
+
+== tools/tests/updater_manifest_test.sh (bash 3.2.57(1)-release)
+SKIP  real ssh-keygen signatures (ssh-keygen absent: a fake signer stands in)
+ok    good: exits 0
+ok    good: setup-node.sh is the R2 copy
+ok    good: new file installed
+ok    good: dropped file removed
+ok    good: MANIFEST record is R2
+ok    good: MANIFEST.sig record is R2
+ok    good: no staging dir left
+ok    good: setup-node.sh executable
+ok    good: sudo never run
+ok    good: UI command printed, not run
+ok    good: nothing fetched from main but RELEASE and the probe
+ok    good: files fetched from the tag
+ok    rerun: exits 0
+ok    rerun: up to date
+ok    rerun: tree unchanged
+ok    declined: exits 0
+ok    declined: tree unchanged
+ok    wrong signer: exits 1
+ok    wrong signer: tree byte-identical
+ok    wrong signer: says why
+ok    tampered manifest: exits 1
+ok    tampered manifest: tree byte-identical
+ok    tampered manifest: says why
+ok    forged sidecar: exits 1
+ok    forged sidecar: tree byte-identical
+ok    forged sidecar: says why
+ok    forged sidecar: nothing installed
+ok    stale sidecar: exits 1
+ok    stale sidecar: tree byte-identical
+ok    stale sidecar: says why
+ok    malformed sidecar: exits 1
+ok    malformed sidecar: tree byte-identical
+ok    malformed sidecar: says why
+ok    lower serial: exits 1
+ok    lower serial: tree byte-identical
+ok    lower serial: says why
+ok    same serial: exits 1
+ok    same serial: tree byte-identical
+ok    same serial: says why
+ok    newer min_updater: exits 1
+ok    newer min_updater: tree byte-identical
+ok    newer min_updater: says why
+ok    newer min_updater: prints the bootstrap command
+ok    release mismatch: exits 1
+ok    release mismatch: tree byte-identical
+ok    release mismatch: says why
+ok    path outside the tree: exits 1
+ok    path outside the tree: tree byte-identical
+ok    path outside the tree: says why
+ok    path outside the tree: nothing written beside the tree
+ok    signer list not listed: exits 1
+ok    signer list not listed: tree byte-identical
+ok    signer list not listed: says why
+ok    self-update: exits 0
+ok    self-update: release copy ran once
+ok    self-update: updater is the release copy
+ok    self-update: updater executable
+ok    self-update: rest installed by the new copy
+ok    self-update: release recorded
+ok    self-update: no staging dir left
+ok    self-update: runs the release copy
+ok    self-update declined: exits 0
+ok    self-update declined: release copy asked
+ok    self-update declined: tree byte-identical, updater too
+ok    self-update, tampered file: exits 1
+ok    self-update, tampered file: tree byte-identical
+ok    self-update, tampered file: says why
+ok    self-update, tampered file: updater mode unchanged
+ok    self-update, tampered file: release copy never ran
+ok    self-update, tampered file: no staging dir left
+ok    self-update below min_updater: exits 1
+ok    self-update below min_updater: tree byte-identical
+ok    self-update below min_updater: says why
+ok    bootstrap: exits 0
+ok    bootstrap: signer list installed
+ok    bootstrap: release recorded
+ok    bootstrap: signer sidecar mismatch: exits 1
+ok    bootstrap: signer sidecar mismatch: tree byte-identical
+ok    bootstrap: signer sidecar mismatch: says why
+ok    bootstrap: malformed signer sidecar: exits 1
+ok    bootstrap: malformed signer sidecar: tree byte-identical
+ok    bootstrap: malformed signer sidecar: says why
+ok    signer list deleted after a signed install: exits 1
+ok    signer list deleted after a signed install: tree byte-identical
+ok    signer list deleted after a signed install: says why
+ok    expires: fixture header
+ok    expires, fresh: exits 0
+ok    expires, fresh: installed
+ok    expires, fresh: release recorded
+ok    expires, fresh: no expiry warning
+ok    check, current: exits 0
+ok    check, current: installed line
+ok    check, current: newest line
+ok    check, current: nothing pending
+ok    check, current: days left
+ok    check, current: tree byte-identical
+ok    check, current: temp dir removed
+ok    check, current: no banner
+ok    check, the day before: 1 day left
+ok    check, installed expired: exits 1
+ok    check, installed expired: says so
+ok    check, installed expired: one expiry line for one release
+ok    check, expires today: exits 1
+ok    check, expires today: says today
+ok    expired at update: exits 0
+ok    expired at update: the warning
+ok    expired at update: installed anyway
+ok    expired at update: release recorded
+ok    expired, up to date: exits 0
+ok    expired, up to date: the warning without installing
+ok    expired, up to date: up to date
+ok    check, pending: exits 1
+ok    check, pending: installed line of a 2.0.0-shaped record
+ok    check, pending: says what to run
+ok    check, pending and newest expired: exits 1
+ok    check, newest expired: says so
+ok    check, no expiry: exits 0
+ok    check, no expiry: says so
+ok    check, nothing installed: exits 2
+ok    check, nothing installed: says so
+ok    check, nothing installed: still names the newest
+ok    check, nothing installed: what to run
+ok    check, network failure: exits 2
+ok    check, network failure: says why
+ok    check, tampered record: exits 2
+ok    check, tampered record: says why
+ok    check, no RELEASE: exits 2
+ok    check, no RELEASE: says why
+ok    check with an unknown argument: exits 2
+ok    expires not a calendar date: exits 1
+ok    expires not a calendar date: tree byte-identical
+ok    expires not a calendar date: says why
+ok    expires in another format: exits 1
+ok    expires in another format: tree byte-identical
+ok    expires in another format: says why
+ok    date not zero-padded: exits 1
+ok    date not zero-padded: tree byte-identical
+ok    date not zero-padded: says why
+ok    expires twice: exits 1
+ok    expires twice: tree byte-identical
+ok    expires twice: says why
+ok    date twice: exits 1
+ok    date twice: tree byte-identical
+ok    date twice: says why
+ok    expires empty: exits 1
+ok    expires empty: tree byte-identical
+ok    expires empty: says why
+ok    expires without date: accepted
+ok    real date, expires 2999-12-31: exits 0
+ok    real date, expires 2999-12-31: days left counted
+ok    real date, expired 2019-12-31: exits 1
+ok    real date, expired 2019-12-31: days ago counted
+SKIP  2.0.0 updater and expires= (git or commit 1187ddb not available)
+ok    no RELEASE: exits 1
+ok    no RELEASE: tree byte-identical
+ok    no RELEASE: says why
+
+155 checks, 0 failures, 2 skipped
+== tools/tests/updater_manifest_test.sh: exit 0
+
+== tools/tests/release_scripts_test.sh (bash 3.2.57(1)-release)
+ok    dates: known day numbers both ways
+ok    dates: malformed and impossible dates refused
+ok    dates: day number to date and back, 1970 to 2298
+ok    dates: update-scripts.sh carries the same ymd_days
+ok    dates: install.sh carries the same ymd_days
+ok    dates: check-node.sh carries the same ymd_days
+SKIP  release-scripts.sh (git absent or not a git checkout)
+
+6 checks, 0 failures, 1 skipped
+== tools/tests/release_scripts_test.sh: exit 0
+
+== tools/tests/install_test.sh (bash 3.2.57(1)-release)
+ok    no refs/heads/main in install.sh
+ok    last line calls main
+ok    one main call
+ok    embedded signers identical to lib/allowed_signers
+ok    curl runs only https-only
+ok    wget runs only https-only
+ok    curl and wget each run once
+ok    top level runs nothing but set, readonly and definitions
+SKIP  real ssh-keygen signatures (ssh-keygen absent: a fake signer stands in)
+ok    untagged copy: exits 1
+ok    untagged copy: no download
+ok    untagged copy: nothing installed
+ok    truncated prefixes: none downloads or installs
+ok    copy without its last 5 lines: no download
+ok    copy without its last 5 lines: nothing installed
+ok    good: exits 0
+ok    good: listed files and the record, nothing else
+ok    good: setup-node.sh verified copy
+ok    good: scripts executable
+ok    good: fetched only the tag archive
+ok    good: no staging dir left
+ok    reinstall: exits 0
+ok    reinstall: setup-node.sh is the release copy
+ok    reinstall: no staging or moved-aside dir left
+ok    new tree not moved in: exits 1
+ok    new tree not moved in: existing install put back as it was
+ok    new tree not moved in: no staging or moved-aside dir left
+ok    new tree not moved in: says so
+ok    existing install not moved aside: exits 1
+ok    existing install not moved aside: untouched
+ok    existing install not moved aside: no staging or moved-aside dir left
+ok    existing install not moved aside: says so
+ok    tampered file: exits 1
+ok    tampered file: existing install untouched
+ok    tampered file: no staging dir left
+ok    wrong signer: exits 1
+ok    wrong signer: existing install untouched
+ok    wrong signer: no staging dir left
+ok    manifest for another release: exits 1
+ok    manifest for another release: existing install untouched
+ok    manifest for another release: no staging dir left
+ok    unsigned release: exits 1
+ok    unsigned release: existing install untouched
+ok    unsigned release: no staging dir left
+ok    expires: fixture header
+ok    expires, fresh: exits 0
+ok    expires, fresh: no warning
+ok    expires, fresh: the record is the release MANIFEST
+ok    expires, the day before: no warning
+ok    expired: exits 0
+ok    expired: the warning
+ok    expired: installed anyway
+ok    expired: warned before installing
+ok    real date, expired 2019-12-31: the warning
+ok    real date, expires 2999-12-31: exits 0
+ok    real date, expires 2999-12-31: no warning
+ok    expires not a calendar date: exits 1
+ok    expires not a calendar date: existing install untouched
+ok    expires not a calendar date: no staging dir left
+ok    expires not a calendar date: says why
+ok    expires empty: exits 1
+ok    expires empty: existing install untouched
+ok    expires empty: no staging dir left
+ok    expires empty: says why
+ok    date in another format: exits 1
+ok    date in another format: existing install untouched
+ok    date in another format: no staging dir left
+ok    date in another format: says why
+ok    expires twice: exits 1
+ok    expires twice: existing install untouched
+ok    expires twice: no staging dir left
+ok    expires twice: says why
+ok    date twice: exits 1
+ok    date twice: existing install untouched
+ok    date twice: no staging dir left
+ok    date twice: says why
+ok    installer without keys: exits 1
+ok    installer without keys: existing install untouched
+ok    installer without keys: no staging dir left
+
+78 checks, 0 failures, 1 skipped
+== tools/tests/install_test.sh: exit 0
+
+== tools/tests/check_node_unit_test.sh (bash 3.2.57(1)-release)
+ok    current form: no issue
+ok    current form: stdin reported
+ok    current unit: sandbox in place
+ok    older UMask=0077 unit: sandbox in place
+ok    UMask=0022: sandbox warning
+ok    exporting script: an issue
+ok    unit Environment= with the passphrase: an issue
+ok    the value is never printed
+ok    EnvironmentFile with the passphrase: an issue
+ok    bare unit: sandbox warning
+ok    bare unit: a warning, not an issue
+ok    mainnet without the monitor: ok
+ok    mainnet with --healthcheck: an issue
+ok    mainnet with the monitor in .node-meta: an issue
+ok    testnet: not checked
+ok    mainnet: its own public RPC
+ok    mainnet: the header line names the network
+ok    mainnet: the network is queried
+ok    testnet: its own public RPC
+ok    devnet: its own public RPC
+ok    unknown network: no network RPC
+ok    unknown network: not queried
+ok    unknown network: the skip note
+ok    unknown network: the reason other sections give
+ok    unknown network: the header line says none
+ok    NETWORK not a known name: no network RPC
+ok    NETWORK not a known name: never the testnet RPC
+ok    unknown network, --network-rpc: used
+ok    unknown network, --network-rpc: queried
+ok    unknown network, --network-rpc: the header line
+ok    mainnet, --network-rpc wins
+ok    mainnet, --network-rpc: the header line
+ok    --no-network, unknown network: no header line
+ok    --no-network: the reason stays --no-network
+ok    no .node-meta, a mainnet chain id: the mainnet RPC
+ok    the report header prints NETWORK_RPC_LABEL
+ok    the section 3 skip prints NETWORK_SKIP_WHY
+ok    scripts: the step
+ok    scripts: tag, serial, date and age
+ok    scripts: expiry ahead
+ok    scripts: released today
+ok    scripts: released 1 day ago
+ok    scripts: expires tomorrow
+ok    scripts, expired: warns
+ok    scripts, expired: what to run
+ok    scripts, expires today: expired today
+ok    scripts, expired yesterday: 1 day ago
+ok    scripts, 2.0.0 record: no date
+ok    scripts, 2.0.0 record: no expiry
+ok    scripts, 2.0.0 record: no warning
+ok    scripts, bad expires: warns
+ok    scripts, no release= line: warns
+ok    scripts, no record: warns
+ok    scripts, no record: what to run
+ok    scripts, real date: expired 2019-12-31
+ok    scripts, real date: expires 2999-12-31
+ok    the report runs the scripts block
+ok    the scripts block warns and never counts a health issue
+
+58 checks, 0 failures, 0 skipped
+== tools/tests/check_node_unit_test.sh: exit 0
+
+tools/tests/updater_manifest_test.sh exit 0
+tools/tests/release_scripts_test.sh  exit 0
+tools/tests/install_test.sh          exit 0
+tools/tests/check_node_unit_test.sh  exit 0
+4 test file(s), 0 failed (bash 3.2.57(1)-release)
