@@ -219,13 +219,9 @@ header() {
     awk -F= -v k="$2" '$1 == k {sub(/^[^=]*=/, ""); print; exit}' "$1"
 }
 
-# opt_header FILE KEY: the value of an optional KEY=... line in FILE, nothing
-# when it is absent; rc 1 when it is repeated.
-opt_header() {
-    local n
-    n="$(awk -F= -v k="$2" '$1 == k {c++} END {print c + 0}' "$1")"
-    [[ "$n" -le 1 ]] || return 1
-    awk -F= -v k="$2" '$1 == k {sub(/^[^=]*=/, ""); print; exit}' "$1"
+# header_count FILE KEY: how many KEY=... lines FILE has.
+header_count() {
+    awk -F= -v k="$2" '$1 == k {c++} END {print c + 0}' "$1"
 }
 
 updater_version() {
@@ -367,7 +363,7 @@ EOF
 
 check() {
     local tag="$1" require_sig="$2" require_fresh="$3"
-    local fmt rel serial min rdate expires uver itag rtag bad=0 tmp
+    local fmt rel serial min rdate="" expires="" n uver itag rtag bad=0 tmp
 
     if [[ ! -f MANIFEST ]]; then
         if [[ -n "$tag" || "$require_sig" == "1" || "$require_fresh" == "1" ]]; then
@@ -382,17 +378,23 @@ check() {
     rel="$(header MANIFEST release)" || die "MANIFEST: no single release= line"
     serial="$(header MANIFEST serial)" || die "MANIFEST: no single serial= line"
     min="$(header MANIFEST min_updater)" || die "MANIFEST: no single min_updater= line"
-    rdate="$(opt_header MANIFEST date)" || die "MANIFEST: date= appears more than once"
-    expires="$(opt_header MANIFEST expires)" || die "MANIFEST: expires= appears more than once"
     [[ "$fmt" == "1" ]] || die "MANIFEST: format=${fmt}, expected 1"
     [[ "$rel" =~ $TAG_RE ]] || die "MANIFEST: release=${rel} is not a scripts-vX.Y.Z tag"
     [[ "$serial" =~ ^[1-9][0-9]{0,8}$ ]] || die "MANIFEST: serial=${serial} is not a positive integer"
     [[ "$min" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "MANIFEST: min_updater=${min} is not X.Y.Z"
-    if [[ -n "$rdate" ]] && ! ymd_days "$rdate" >/dev/null; then
-        die "MANIFEST: date=${rdate} is not a calendar date YYYY-MM-DD"
+    # date= and expires= are optional; a line that is there must hold a calendar
+    # date (an empty value too is refused, as the updater and installer refuse it).
+    n="$(header_count MANIFEST date)"
+    [[ "$n" -le 1 ]] || die "MANIFEST: date= appears more than once"
+    if [[ "$n" == "1" ]]; then
+        rdate="$(header MANIFEST date)"
+        ymd_days "$rdate" >/dev/null || die "MANIFEST: date=${rdate} is not a calendar date YYYY-MM-DD"
     fi
-    if [[ -n "$expires" ]] && ! ymd_days "$expires" >/dev/null; then
-        die "MANIFEST: expires=${expires} is not a calendar date YYYY-MM-DD"
+    n="$(header_count MANIFEST expires)"
+    [[ "$n" -le 1 ]] || die "MANIFEST: expires= appears more than once"
+    if [[ "$n" == "1" ]]; then
+        expires="$(header MANIFEST expires)"
+        ymd_days "$expires" >/dev/null || die "MANIFEST: expires=${expires} is not a calendar date YYYY-MM-DD"
     fi
     if [[ -n "$tag" && "$rel" != "$tag" ]]; then
         die "MANIFEST: release=${rel} but the tag is ${tag}"

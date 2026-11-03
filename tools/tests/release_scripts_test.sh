@@ -227,6 +227,14 @@ reheader date=2026-10-15 expires=2027-02-30
 tool --check
 check_rc "check, expires not a calendar date: fails" 1 "$RC"
 check_has "check, expires not a calendar date: says why" "release-scripts.sh: MANIFEST: expires=2027-02-30 is not a calendar date YYYY-MM-DD" "$OUT"
+reheader date=2026-10-15 expires=
+tool --check
+check_rc "check, expires= empty: fails" 1 "$RC"
+check_has "check, expires= empty: says why" "release-scripts.sh: MANIFEST: expires= is not a calendar date YYYY-MM-DD" "$OUT"
+reheader date= expires=2027-01-13
+tool --check
+check_rc "check, date= empty: fails" 1 "$RC"
+check_has "check, date= empty: says why" "release-scripts.sh: MANIFEST: date= is not a calendar date YYYY-MM-DD" "$OUT"
 reheader date=2026-10-15 expires=2026-10-15
 tool --check
 check_rc "check, expires not after date: fails" 1 "$RC"
