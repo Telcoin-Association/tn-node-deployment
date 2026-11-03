@@ -45,6 +45,19 @@ addons_say() {
     return 0
 }
 
+# so_baseline_refresh -- after a change went through (an enable, a disable or a
+# token rotation: .node-meta, the Alloy files under /etc/telcoin/alloy, the node
+# launch): make the host baseline again (tn_host_baseline_refresh, a no-op without
+# HOST_BASELINE=true in .node-meta or with a lib/common.sh that lacks it). Its
+# lines go through addons_say: events before the done event in --json mode. The
+# ingest token file is outside the baseline. Never fails.
+so_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh addons_say
+    fi
+    return 0
+}
+
 # addons_lib_check -- before a status screen or an enable, warn when a library is
 # older than this script expects. lib/observability.sh 1.0.2 brings obs_lib_check,
 # obs_inject_flags and obs_restart_window; without them the flag edits and restarts
@@ -219,7 +232,7 @@ enable_logging() {
     ENABLE_OBSERVABILITY="true"
     _obs_prompt_region
     if _obs_collect_token; then
-        if obs_enable "$_OBS_TOKEN" addons_say; then print_ok "Log shipping enabled."; else print_error "Could not enable logging (see messages above)."; fi
+        if obs_enable "$_OBS_TOKEN" addons_say; then print_ok "Log shipping enabled."; so_baseline_refresh; else print_error "Could not enable logging (see messages above)."; fi
     fi
     _OBS_TOKEN=""
     pause
@@ -242,7 +255,7 @@ enable_metrics() {
     ENABLE_METRICS="true"
     _obs_prompt_region
     if _obs_collect_token; then
-        if obs_enable "$_OBS_TOKEN" addons_say; then print_ok "Metrics shipping enabled."; else print_error "Could not enable metrics (see messages above)."; fi
+        if obs_enable "$_OBS_TOKEN" addons_say; then print_ok "Metrics shipping enabled."; so_baseline_refresh; else print_error "Could not enable metrics (see messages above)."; fi
     fi
     _OBS_TOKEN=""
     pause
@@ -254,6 +267,8 @@ disable_logging() {
         addon_meta_write_begin || { pause; return 0; }
         if ! obs_disable_logs; then
             print_error "Disabling log shipping did not finish (see messages above)."
+        else
+            so_baseline_refresh
         fi
     else
         print_info "Cancelled."
@@ -267,6 +282,8 @@ disable_metrics() {
         addon_meta_write_begin || { pause; return 0; }
         if ! obs_disable_metrics; then
             print_error "Disabling metrics shipping did not finish (see messages above)."
+        else
+            so_baseline_refresh
         fi
     else
         print_info "Cancelled."
@@ -287,6 +304,8 @@ rotate_token() {
         print_warn "No token entered; nothing was changed."
     elif ! obs_rotate_token "$tok"; then
         print_error "The ingest token was not rotated (see messages above)."
+    else
+        so_baseline_refresh
     fi
     tok=""
     pause
@@ -350,6 +369,7 @@ enable_health() {
         if [[ -n "$meta" ]]; then
             meta_set ENABLE_HEALTHCHECK_MONITOR true "$meta"
         fi
+        so_baseline_refresh
         print_info "Verify once running: curl -s http://127.0.0.1:${TN_KUMA_PORT}  (expect OK)"
     else
         print_warn "Health monitoring is not recorded as enabled: ${why}"
@@ -373,6 +393,7 @@ disable_health() {
         done
     fi
     local meta; meta="$(node_meta_path || true)"; [[ -n "$meta" ]] && meta_set ENABLE_HEALTHCHECK_MONITOR false "$meta"
+    so_baseline_refresh
     print_info "The --healthcheck flag stays in the node launch (harmless once the port is"
     print_info "firewalled). To remove it entirely, re-run node setup without health monitoring."
     pause
@@ -673,6 +694,7 @@ run_json_mode() {
     if [[ "${#JSON_DID[@]}" -eq 0 ]]; then
         json_fail "no observability action requested (use --enable-logs/--enable-metrics/--enable-health, the --disable-* variants or --rotate-token)"
     fi
+    so_baseline_refresh
 
     # The done summary lists what changed.
     json_done "{\"event\":\"done\",\"ok\":true,\"applied\":[$(json_applied)],\"network\":\"$(json_escape "${NETWORK:-}")\",\"msg\":\"observability updated\"}"
@@ -803,6 +825,7 @@ run_rotate_cli() {
         exit 1
     fi
     tok=""
+    so_baseline_refresh
     exit 0
 }
 
