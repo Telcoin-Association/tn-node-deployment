@@ -6324,17 +6324,29 @@ _tn_hb_db_dir_ok() {
 # workflow does (database_out, then database_in). aide --update exits 1 to 7
 # when it found differences (bits: added, removed, changed) and still writes the
 # new database; 14 and above are errors, after which a partial new database is
-# removed, never renamed. rc 0 done; 1 failed (said through FN).
+# removed, never renamed. The warning carries the last line aide wrote on
+# stderr; the init warning names no command, since a failed install removes
+# the config again. rc 0 done; 1 failed (said through FN).
 _tn_hb_aide_db() {
-    local mode="$1" fn="${2:-}" p="${TN_ROOT_PREFIX:-}" db new rc=0
+    local mode="$1" fn="${2:-}" p="${TN_ROOT_PREFIX:-}" db new rc=0 err="" nl
+    nl=$'\n'
     db="${p}${TN_HB_AIDE_DB}"
     new="${db}.new"
     _tn_hb_db_dir_ok "$fn" || return 1
     rm -f -- "$new" 2>/dev/null || true
-    aide --config="${p}${TN_HB_AIDE_CONF}" "--${mode}" >/dev/null 2>&1 || rc=$?
+    # Only stderr is kept (2>&1 first, then stdout to /dev/null): aide reports there.
+    # shellcheck disable=SC2069
+    err="$(aide --config="${p}${TN_HB_AIDE_CONF}" "--${mode}" 2>&1 >/dev/null)" || rc=$?
     if (( rc > 7 )) || [[ ! -f "$new" || -L "$new" ]]; then
         rm -f -- "$new" 2>/dev/null || true
-        _tn_hb_say warn "AIDE: aide --${mode} failed (rc ${rc}); see: sudo aide --config=${TN_HB_AIDE_CONF} --${mode}" "$fn"
+        err="${err%"$nl"}"
+        err="${err##*"$nl"}"
+        err="${err#"${err%%[![:space:]]*}"}"
+        if [[ "$mode" == "init" ]]; then
+            _tn_hb_say warn "AIDE: aide --init failed (rc ${rc})${err:+: ${err}}" "$fn"
+        else
+            _tn_hb_say warn "AIDE: aide --${mode} failed (rc ${rc})${err:+: ${err}}; see: sudo aide --config=${TN_HB_AIDE_CONF} --${mode}" "$fn"
+        fi
         return 1
     fi
     if ! mv -f -T -- "$new" "$db" 2>/dev/null; then
@@ -6358,18 +6370,21 @@ _tn_hb_apt_install() {
 
 # tn_host_baseline_install [FN] -- put the host baseline in place on a host with
 # the node installed (FN: a step|log|warn printer, see _tn_hb_say). Installs
-# auditd and aide with apt-get (no recommended packages); writes the audit rules
-# (TN_HB_AUDIT_RULES, root 0640) and loads them with augenrules; writes the AIDE
-# config (TN_HB_AIDE_CONF, root 0600; /etc/aide and /var/lib/aide are made root
-# 0755 and 0700 when absent); records HOST_BASELINE=true in .node-meta, then
-# makes the AIDE database (TN_HB_AIDE_DB), so the baseline holds the marker.
-# Run as root under the update lock. Idempotent: a second run writes the same
-# files and makes the baseline again. Rules that do not load now (no kernel
-# audit, rules locked with -e 2) are a warning: auditd loads the file at the
-# next boot. rc 0 in place; 1 not in place, with HOST_BASELINE not set: no
+# auditd and aide with apt-get (no recommended packages) and checks what the
+# writes need (/etc/audit/rules.d, /etc/aide and /var/lib/aide, made root 0755
+# and 0700 when absent, and the owner of /var/lib/aide); then writes the AIDE
+# config (TN_HB_AIDE_CONF, root 0600), records HOST_BASELINE=true in .node-meta
+# and makes the AIDE database (TN_HB_AIDE_DB), so the baseline holds the marker;
+# last, writes the audit rules (TN_HB_AUDIT_RULES, root 0640) and loads them
+# with augenrules. Run as root under the update lock. Idempotent: a second run
+# writes the same files and makes the baseline again. Rules that do not load
+# now (no kernel audit, rules locked with -e 2) are a warning: auditd loads the
+# file at the next boot. rc 0 in place; 1 not in place (said through FN): no
 # apt-get, no node unit or node keys, a unit that holds the passphrase, a path
-# these files cannot name, or a failed install, write or database (said
-# through FN).
+# these files cannot name, or a failed install, write or database. A failure
+# after the AIDE config is written takes the whole baseline away again
+# (_tn_hb_install_undo), one an earlier run made included: no rules, config,
+# database or marker are left.
 tn_host_baseline_install() {
     local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" svc unit data bin="" conf="$DEFAULT_CONFIG_DIR" rc=0 v rules aidec
     if ! command -v apt-get >/dev/null 2>&1; then
@@ -6426,23 +6441,13 @@ tn_host_baseline_install() {
         fi
     done
 
-    _tn_hb_say step "Writing the audit rules ${TN_HB_AUDIT_RULES}" "$fn"
+    # Every prerequisite that can be checked is checked before anything is
+    # written: the audit rules directory, /etc/aide and /var/lib/aide (made when
+    # absent) and the owner of /var/lib/aide.
     if [[ ! -d "${p}/etc/audit/rules.d" ]]; then
         _tn_hb_say warn "auditd is installed but /etc/audit/rules.d is missing; the host baseline was not made." "$fn"
         return 1
     fi
-    rules="$(_tn_hb_rules_text "$data" "$conf" "$unit")"
-    if ! tn_write_root_file "${p}${TN_HB_AUDIT_RULES}" 0640 <<< "$rules"; then
-        _tn_hb_say warn "Could not write ${TN_HB_AUDIT_RULES}; the host baseline was not made." "$fn"
-        return 1
-    fi
-    if augenrules --load >/dev/null 2>&1 && _tn_hb_rules_loaded; then
-        _tn_hb_say log "Audit rules loaded: watches telcoin-keys (${data}/node-keys), telcoin-config (${conf}), telcoin-unit (${unit})." "$fn"
-    else
-        _tn_hb_say warn "The audit rules in ${TN_HB_AUDIT_RULES} did not load now (no kernel audit on this host, or the loaded rules are locked with -e 2); auditd loads them at the next boot. Check with: sudo auditctl -l | grep telcoin" "$fn"
-    fi
-
-    _tn_hb_say step "Making the AIDE baseline of the node's files" "$fn"
     if [[ ! -d "${p}/etc/aide" ]] && ! install -d -o root -g root -m 0755 -- "${p}/etc/aide" 2>/dev/null; then
         _tn_hb_say warn "Could not create /etc/aide; the host baseline was not made." "$fn"
         return 1
@@ -6452,21 +6457,50 @@ tn_host_baseline_install() {
         return 1
     fi
     _tn_hb_db_dir_ok "$fn" || return 1
+    rules="$(_tn_hb_rules_text "$data" "$conf" "$unit")"
     aidec="$(_tn_hb_aide_text "$unit" "$bin")"
+
+    # The AIDE config first: a refusal here leaves nothing of this run behind.
+    _tn_hb_say step "Making the AIDE baseline of the node's files" "$fn"
     if ! tn_write_root_file "${p}${TN_HB_AIDE_CONF}" 0600 <<< "$aidec"; then
         _tn_hb_say warn "Could not write ${TN_HB_AIDE_CONF}; the host baseline was not made." "$fn"
         return 1
     fi
+    # From here on a failure takes away everything this run put in place
+    # (_tn_hb_install_undo). The audit rules come last, so a failed AIDE step
+    # never changes the rules the kernel has loaded.
     if ! meta_set HOST_BASELINE true; then
-        _tn_hb_say warn "Could not record HOST_BASELINE=true in .node-meta; the host baseline was not made." "$fn"
+        _tn_hb_say warn "Could not record HOST_BASELINE=true in .node-meta." "$fn"
+        _tn_hb_install_undo "$fn"
         return 1
     fi
     if ! _tn_hb_aide_db init "$fn"; then
-        meta_unset HOST_BASELINE >/dev/null 2>&1 || true
-        _tn_hb_say warn "The AIDE baseline was not made, so HOST_BASELINE stays unset." "$fn"
+        _tn_hb_install_undo "$fn"
         return 1
     fi
+
+    _tn_hb_say step "Writing the audit rules ${TN_HB_AUDIT_RULES}" "$fn"
+    if ! tn_write_root_file "${p}${TN_HB_AUDIT_RULES}" 0640 <<< "$rules"; then
+        _tn_hb_say warn "Could not write ${TN_HB_AUDIT_RULES}." "$fn"
+        _tn_hb_install_undo "$fn"
+        return 1
+    fi
+    if augenrules --load >/dev/null 2>&1 && _tn_hb_rules_loaded; then
+        _tn_hb_say log "Audit rules loaded: watches telcoin-keys (${data}/node-keys), telcoin-config (${conf}), telcoin-unit (${unit})." "$fn"
+    else
+        _tn_hb_say warn "The audit rules in ${TN_HB_AUDIT_RULES} did not load now (no kernel audit on this host, or the loaded rules are locked with -e 2); auditd loads them at the next boot. Check with: sudo auditctl -l | grep telcoin" "$fn"
+    fi
     _tn_hb_say log "AIDE baseline made: ${TN_HB_AIDE_DB}. Check the node's files against it with: sudo aide --config=${TN_HB_AIDE_CONF} --check" "$fn"
+    return 0
+}
+
+# _tn_hb_install_undo [FN] -- after a failure in tn_host_baseline_install once it
+# has written something: take the whole host baseline away again (_tn_hb_teardown:
+# the audit rules and their watches, the AIDE config and database, every
+# HOST_BASELINE line), so the host shows no baseline at all, and say so.
+_tn_hb_install_undo() {
+    _tn_hb_teardown "${1:-}"
+    _tn_hb_say warn "The host baseline was not made. Its audit rules, AIDE config and database and the HOST_BASELINE line are removed, so no part of it is left; the auditd and aide packages stay installed." "${1:-}"
     return 0
 }
 
@@ -6517,45 +6551,76 @@ _tn_hb_unwatch() {
     return "$ok"
 }
 
-# tn_host_baseline_remove [FN] -- take the host baseline away: the audit rules
-# file (then augenrules --load, which drops its watches), the AIDE config and
-# the database files made with it, and every HOST_BASELINE line in .node-meta.
-# Without augenrules, the watches are dropped with auditctl -W, else they stay
-# loaded until the next boot (a warning). The auditd
-# and aide packages, /etc/aide and /var/lib/aide stay. Prints nothing when none
-# of it is there. A step that did not work is a warning through FN; always
-# returns 0.
-tn_host_baseline_remove() {
-    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" f found=false mark="" meta
+# _tn_hb_rules_drop [FN] -- remove the audit rules file and drop its watches
+# from the kernel: augenrules --load after the removal (it loads rules.d without
+# the file), or, without augenrules, auditctl -W for each watch in the file. A
+# load or -W that fails is a warning through FN: the watches stay loaded until
+# the next boot. Nothing when the file is not there. Always returns 0.
+_tn_hb_rules_drop() {
+    local fn="${1:-}" f="${TN_ROOT_PREFIX:-}${TN_HB_AUDIT_RULES}"
+    [[ -e "$f" || -L "$f" ]] || return 0
+    if command -v augenrules >/dev/null 2>&1; then
+        rm -f -- "$f" 2>/dev/null || true
+        if ! augenrules --load >/dev/null 2>&1; then
+            _tn_hb_say warn "augenrules --load failed: the node's audit watches stay loaded until the next boot." "$fn"
+        fi
+    elif _tn_hb_unwatch "$f"; then
+        rm -f -- "$f" 2>/dev/null || true
+        _tn_hb_say log "augenrules is missing: the node's audit watches were dropped one by one with auditctl -W." "$fn"
+    else
+        rm -f -- "$f" 2>/dev/null || true
+        _tn_hb_say warn "augenrules is missing and auditctl -W could not drop the node's audit watches: they stay loaded until the next boot." "$fn"
+    fi
+    return 0
+}
+
+# _tn_hb_teardown [FN] -- the removal tn_host_baseline_remove and a failed
+# tn_host_baseline_install share: the audit rules and their watches
+# (_tn_hb_rules_drop), the AIDE config and both database files, and every
+# HOST_BASELINE line in .node-meta. A step that did not work is a warning
+# through FN; always returns 0.
+_tn_hb_teardown() {
+    local fn="${1:-}" p="${TN_ROOT_PREFIX:-}" meta
+    _tn_hb_rules_drop "$fn"
+    rm -f -- "${p}${TN_HB_AIDE_CONF}" "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new" 2>/dev/null || true
+    meta="$(node_meta_path 2>/dev/null)" || meta=""
+    if [[ -n "$meta" ]] && grep -q '^HOST_BASELINE=' "$meta" 2>/dev/null \
+        && ! meta_unset HOST_BASELINE >/dev/null 2>&1; then
+        _tn_hb_say warn "Could not remove HOST_BASELINE from .node-meta." "$fn"
+    fi
+    return 0
+}
+
+# tn_host_baseline_present -- rc 0 when any piece of the host baseline is on
+# this host: a HOST_BASELINE line in .node-meta, the audit rules file, the AIDE
+# config or one of its database files; 1 when none is. Reads only.
+tn_host_baseline_present() {
+    local p="${TN_ROOT_PREFIX:-}" f meta
     meta="$(node_meta_path 2>/dev/null)" || meta=""
     if [[ -n "$meta" ]] && grep -q '^HOST_BASELINE=' "$meta" 2>/dev/null; then
-        mark="set"
+        return 0
     fi
     for f in "${p}${TN_HB_AUDIT_RULES}" "${p}${TN_HB_AIDE_CONF}" "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new"; do
         if [[ -e "$f" || -L "$f" ]]; then
-            found=true
+            return 0
         fi
     done
-    [[ "$found" == "true" || -n "$mark" ]] || return 0
+    return 1
+}
+
+# tn_host_baseline_remove [FN] -- take the host baseline away (_tn_hb_teardown):
+# the audit rules file (then augenrules --load, which drops its watches), the
+# AIDE config and the database files made with it, and every HOST_BASELINE line
+# in .node-meta. Without augenrules, the watches are dropped with auditctl -W,
+# else they stay loaded until the next boot (a warning). The auditd and aide
+# packages, /etc/aide and /var/lib/aide stay. Prints nothing when none of it is
+# there (tn_host_baseline_present). A step that did not work is a warning
+# through FN; always returns 0.
+tn_host_baseline_remove() {
+    local fn="${1:-}"
+    tn_host_baseline_present || return 0
     _tn_hb_say step "Removing the host baseline (audit rules and AIDE baseline)" "$fn"
-    if [[ -e "${p}${TN_HB_AUDIT_RULES}" || -L "${p}${TN_HB_AUDIT_RULES}" ]]; then
-        if command -v augenrules >/dev/null 2>&1; then
-            rm -f -- "${p}${TN_HB_AUDIT_RULES}" 2>/dev/null || true
-            if ! augenrules --load >/dev/null 2>&1; then
-                _tn_hb_say warn "augenrules --load failed: the node's audit watches stay loaded until the next boot." "$fn"
-            fi
-        elif _tn_hb_unwatch "${p}${TN_HB_AUDIT_RULES}"; then
-            rm -f -- "${p}${TN_HB_AUDIT_RULES}" 2>/dev/null || true
-            _tn_hb_say log "augenrules is missing: the node's audit watches were dropped one by one with auditctl -W." "$fn"
-        else
-            rm -f -- "${p}${TN_HB_AUDIT_RULES}" 2>/dev/null || true
-            _tn_hb_say warn "augenrules is missing and auditctl -W could not drop the node's audit watches: they stay loaded until the next boot." "$fn"
-        fi
-    fi
-    rm -f -- "${p}${TN_HB_AIDE_CONF}" "${p}${TN_HB_AIDE_DB}" "${p}${TN_HB_AIDE_DB}.new" 2>/dev/null || true
-    if [[ -n "$mark" ]] && ! meta_unset HOST_BASELINE >/dev/null 2>&1; then
-        _tn_hb_say warn "Could not remove HOST_BASELINE from .node-meta." "$fn"
-    fi
+    _tn_hb_teardown "$fn"
     _tn_hb_say log "Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide" "$fn"
     return 0
 }

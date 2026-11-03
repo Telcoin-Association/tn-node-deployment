@@ -275,7 +275,7 @@ rm -rf "${FX:?}/var/lib/telcoin/node-keys"
 refused "no node keys" "No node keys at /var/lib/telcoin/node-keys"
 fixture
 printf '18\n' > "$HB_T/aide.rc"
-refused "aide --init fails" "HOST_BASELINE stays unset"
+refused "aide --init fails" "no part of it is left"
 check "aide --init fails: no partial database left" "no no" "$(yn test -e "$ADB") $(yn test -e "${ADB}.new")"
 if [[ $ROOT_OK == 1 ]]; then
     fixture
