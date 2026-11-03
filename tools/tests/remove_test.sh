@@ -767,4 +767,20 @@ done
   _rm_build_account ) > "$T/out" 2>&1
 check "no build account: nothing done" "" "$(cat "$T/out" "$T/order")"
 
+# KEYS
+# --- the shred note: shred is not decommissioning, said once per run ----------
+mkfixture
+remove_keys <<< "DELETE" > "$T/out" 2>&1
+check "shred note: the destruction sentence, once" 1 \
+    "$(grep -c 'Decommissioning a host that held a validator key means destroying or crypto-erasing its disk and deleting every snapshot and image taken from it; shred alone does not do that.' "$T/out")"
+check "shred note: the best-effort sentence still once" 1 "$(grep -c 'best effort on SSDs, copy-on-write and cloud disks' "$T/out")"
+check "shred note: several files were shredded in that run" yes \
+    "$([[ "$(grep -c '^shred -u' "$CALLS")" -gt 1 ]] && echo yes || echo no)"
+# A later shred in the same run prints nothing more.
+printf 'x\n' > "$R/etc/second.txt"
+_rm_shred "$R/etc/second.txt" > "$T/out2" 2>&1
+check_has "shred note: the later file was shredded" "shred -u -- $R/etc/second.txt" "$(calls)"
+check "shred note: not repeated later in the run" "0 0" \
+    "$(grep -c 'Decommissioning a host' "$T/out2") $(grep -c 'best effort on SSDs' "$T/out2")"
+
 finish
