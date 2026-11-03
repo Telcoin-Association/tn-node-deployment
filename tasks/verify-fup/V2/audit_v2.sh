@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218  # cat is wrapped by a function later in this harness; the calls above it run the binary, as intended
 # =============================================================================
 # V2 independent harness, AUDIT package, library part: tn_host_baseline_install,
 # _refresh, _remove, _status and the tn_host_audit lines, with recording stubs
