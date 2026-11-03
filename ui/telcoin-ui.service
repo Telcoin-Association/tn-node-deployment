@@ -51,6 +51,8 @@ OOMScoreAdjust=500
 ProtectHome=false
 ProtectSystem=false
 PrivateTmp=yes
+# No core dumps (the helpers it runs inherit this): one would hold the UI token or a setup passphrase.
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target

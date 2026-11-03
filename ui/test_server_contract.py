@@ -1196,6 +1196,20 @@ class FirewallStatusTest(ServerTestCase):
         self.assertEqual(body["error"], "sudo: a password is required")
 
 
+class UiUnitTest(unittest.TestCase):
+    """ui/telcoin-ui.service: no core dumps, and no NoNewPrivileges (sudo needs
+    its setuid transition)."""
+
+    def test_core_dumps_are_off_and_sudo_still_works(self):
+        lines = read(os.path.join(HERE, "telcoin-ui.service")).splitlines()
+        directives = [ln for ln in lines if ln and not ln.startswith("#")]
+        self.assertEqual([ln for ln in directives if ln.startswith("LimitCORE=")], ["LimitCORE=0"])
+        self.assertFalse([ln for ln in directives if ln.startswith("NoNewPrivileges")])
+        self.assertTrue(any("NoNewPrivileges is intentionally NOT set" in ln for ln in lines))
+        service = lines[lines.index("[Service]"):lines.index("[Install]")]
+        self.assertIn("LimitCORE=0", service)
+
+
 class NetworkStatusLinkTest(ServerTestCase):
     """/api/network/status names the network's public status page in
     `status_page`: testnet's page, nothing for mainnet (no page yet), devnet
