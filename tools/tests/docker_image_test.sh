@@ -538,6 +538,39 @@ res "resolve: short digest refused" "${R}@sha256:abc" 1 ""
 res "resolve: the release workflow's repository by digest taken as given" "${GH}@sha256:${D64}" 0 "${GH}@sha256:${D64} "
 res "resolve: release tag on the release workflow's repository" "${GH}:v0.17.0-adiri" 0 "${R}@sha256:${D64} v0.17.0-adiri"
 res "resolve: a third repository by digest refused" "ghcr.io/someone-else/telcoin-network@sha256:${D64}" 1 ""
+# Mainnet, a digest given alone: testnet shares the ghcr repository, so the digest
+# is taken only when .node-meta records a mainnet release tag for it (a real
+# .node-meta under TN_ROOT_PREFIX here, read by the library's own meta_get).
+MAINNET_DIGEST_OFF="Image refused: on mainnet an image is named by its release tag, so the digest comes from the signed release; sha256:${D64} is not the image of a mainnet release this node has installed. Give the mainnet release tag instead."
+mkdir -p "$T/mroot/etc/telcoin"
+TN_ROOT_PREFIX="$T/mroot"
+mmeta() { printf '%s\n' "NETWORK=mainnet" "$@" > "$T/mroot/etc/telcoin/.node-meta"; }
+mres() {  # mres NAME EXPECTED-RC EXPECTED-OUT [REASON]
+    local rc=0 o
+    o="$(tn_docker_resolve_ref mainnet "${GH}@sha256:${D64}" 2>"$T/err")" || rc=$?
+    check "$1" "$2 $3" "$rc $o"
+    if [[ -n "${4:-}" ]]; then
+        check_has "$1: the reason on stderr" "$(printf '%s' "$4" | sed 's/^/  [WARN] /')" "$(sed 's/\x1b\[[0-9;]*m//g' "$T/err")"
+    fi
+}
+mmeta
+mres "resolve, mainnet: a digest with nothing recorded refused" 1 "" "$MAINNET_DIGEST_OFF"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:${D64}" "RELEASE_TAG=v1.0.0"
+mres "resolve, mainnet: a digest recorded as v1.0.0 taken, with its tag" 0 "${GH}@sha256:${D64} v1.0.0"
+check "resolve, mainnet: a recorded release: no warning" "" "$(cat "$T/err")"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:$(printf '%s' "$D64" | tr 0 e)" "RELEASE_TAG=v1.0.0"
+mres "resolve, mainnet: another digest recorded: refused" 1 "" "$MAINNET_DIGEST_OFF"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:${D64}" "RELEASE_TAG=v0.16.0-adiri"
+mres "resolve, mainnet: a testnet tag recorded for it: refused" 1 "" "$MAINNET_DIGEST_OFF"
+mmeta "DOCKER_IMAGE_DIGEST=sha256:${D64}"
+mres "resolve, mainnet: the digest recorded without a release tag: refused" 1 "" "$MAINNET_DIGEST_OFF"
+# Testnet keeps taking the same digest alone, with the warning, against the same file.
+printf 'NETWORK=testnet\n' > "$T/mroot/etc/telcoin/.node-meta"
+rc=0; o="$(tn_docker_resolve_ref testnet "${GH}@sha256:${D64}" 2>"$T/err")" || rc=$?
+check "resolve, testnet: a digest with nothing recorded still taken" "0 ${GH}@sha256:${D64} " "$rc $o"
+check "resolve, testnet: still warns the checks cannot be applied" yes "$(grep -q 'digest alone.*cannot be applied' "$T/err" && echo yes || echo no)"
+TN_ROOT_PREFIX=""
+unset -f mmeta mres
 # A digest given alone: the release .node-meta records for that digest, else a
 # warning that the downgrade and oldest-release checks cannot be applied.
 META_DIGEST="" META_TAG=""

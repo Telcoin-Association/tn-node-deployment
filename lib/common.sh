@@ -7776,9 +7776,11 @@ tn_docker_image_for_tag() {
 # as given. Prints "<repo>@sha256:<digest> <tag>". For a digest given alone the
 # tag is the release .node-meta records for that digest (tn_docker_recorded_tag),
 # else empty, with a warning that the downgrade and oldest-release checks cannot
-# be applied. rc 1, with the reason on stderr, for anything else:
-# another repository, a tag that is not a release tag of NETWORK, latest, a
-# leading "-". Nothing is pulled.
+# be applied. On mainnet a digest given alone is refused unless .node-meta records
+# a mainnet release tag for it: testnet and mainnet share the ghcr repository, so
+# only the signed release says which digest is a mainnet image. rc 1, with the
+# reason on stderr, for anything else: another repository, a tag that is not a
+# release tag of NETWORK, latest, a leading "-". Nothing is pulled.
 tn_docker_resolve_ref() {
     local net="${1:-}" arg="${2:-}" fn="${3:-}" repo tag="" img=""
     repo="$(tn_docker_repo_for "$net")" || return 1
@@ -7814,6 +7816,10 @@ tn_docker_resolve_ref() {
     if [[ -z "$tag" ]]; then
         tag="$(tn_docker_recorded_tag "$img")" || tag=""
         tn_release_tag_ok "$net" "$tag" || tag=""
+        if [[ -z "$tag" && "$net" == "mainnet" ]]; then
+            print_warn "Image refused: on mainnet an image is named by its release tag, so the digest comes from the signed release; ${img##*@} is not the image of a mainnet release this node has installed. Give the mainnet release tag instead." >&2
+            return 1
+        fi
         if [[ -z "$tag" && "$net" == "devnet" ]]; then
             _tn_c4_say warn "${img} is given by digest alone, as every devnet image is, so the release it holds is unknown: the downgrade check cannot be applied to it." "$fn"
         elif [[ -z "$tag" ]]; then
