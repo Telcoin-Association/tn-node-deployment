@@ -288,8 +288,8 @@ if [[ $ROOT_OK == 1 ]]; then
     chmod 0700 "$FX/var/lib/aide"
     chown 65534 "$FX/var/lib/aide"
     refused "/var/lib/aide owned by another account" "/var/lib/aide is not a directory owned and writable by root alone"
-    check "/var/lib/aide owned by another account: aide never ran, no aide config" "no no" \
-        "$(grep -q '^aide ' "$HB_LOG" 2>/dev/null && echo yes || echo no) $(yn test -e "$ACONF")"
+    check "/var/lib/aide owned by another account: refused before anything is written" "no no no" \
+        "$(grep -q '^a' "$HB_LOG" 2>/dev/null && echo yes || echo no) $(yn test -e "$ACONF") $(yn test -e "$RULES")"
     chown 0 "$FX/var/lib/aide"
     tn_host_baseline_install say_log > /dev/null 2>&1
     chown 65534 "$FX/var/lib/aide"
