@@ -889,4 +889,22 @@ gone "p2p limit: json unit" "$SD/telcoin-p2p-limit.service"
 check "p2p limit: json table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
 rm -f "$NFT_TABLE_FILE"
 
+# NET-2 gap: the custom-container scan must also see a node running the ghcr image
+# (by digest or by a mainnet tag), not only the testnet repositories.
+custom_container_lines_drv() {
+    docker() {
+        printf 'tn-old\tus-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri\tExited (0)\n'
+        printf 'tn-main\tghcr.io/telcoin-association/telcoin-network@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 3 days\n'
+        printf 'tn-tag\tghcr.io/telcoin-association/telcoin-network:v1.0.0\tUp 1 hour\n'
+        printf 'web\tnginx:1.27\tUp 2 days\n'
+    }
+    timeout() { shift 3; "$@"; }
+    custom_container_lines
+}
+CTR="$(custom_container_lines_drv)"
+check "custom scan: the legacy adiri container is listed" yes "$(printf '%s\n' "$CTR" | grep -q '^tn-old' && echo yes || echo no)"
+check "custom scan: a ghcr image by digest is listed" yes "$(printf '%s\n' "$CTR" | grep -q '^tn-main' && echo yes || echo no)"
+check "custom scan: a ghcr image by mainnet tag is listed" yes "$(printf '%s\n' "$CTR" | grep -q '^tn-tag' && echo yes || echo no)"
+check "custom scan: an unrelated container is not listed" no "$(printf '%s\n' "$CTR" | grep -q '^web' && echo yes || echo no)"
+
 finish

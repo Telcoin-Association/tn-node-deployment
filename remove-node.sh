@@ -1378,6 +1378,15 @@ custom_is_excluded_path() {
 # (the new telcoin unit, either legacy unit, or the Node Manager UI) and so must
 # not be reported as a "custom" install. The node names come from
 # tn_all_node_services so no legacy literal is hardcoded here.
+# custom_container_lines -- every container (name, image, status; tab separated)
+# that runs a node image of the testnet repositories, the legacy adiri image or
+# the ghcr repository testnet and mainnet releases are published to, whatever
+# its name; scan_custom_installs offers each one for removal and asks first.
+custom_container_lines() {
+    timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
+        | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri|ghcr\.io/telcoin-association/telcoin-network' || true  # network-gated: image repositories of every network; the scan reads only and each removal asks first
+}
+
 custom_is_managed_name() {
     local name="$1" n
     [[ "$name" == "telcoin-ui" ]] && return 0
@@ -1431,8 +1440,7 @@ scan_custom_installs() {
             # Skip the containers this tooling manages (telcoin / legacy names).
             custom_is_managed_name "$cname" && continue
             custom_ctrs+=("$cline")
-        done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
-                   | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)  # network-gated: finds leftover testnet-image containers on any host; each removal asks first
+        done < <(custom_container_lines)
         for cline in ${custom_ctrs[@]+"${custom_ctrs[@]}"}; do
             IFS=$'\t' read -r cname cimage cstatus <<< "$cline"
             found=true
