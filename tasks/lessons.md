@@ -459,7 +459,11 @@ cover it. Grep every new `stat -c`, `awk -v` with newlines, `sed -i`, `date -d`,
 and `sha256sum` in fixtures and in library lines a fixture exercises; keep the test library's
 shim table complete (`tools/tests/lib.sh`, now with `%Y`); watch the macOS job after every push
 and read its FAIL lines, not only the local counts. A `check_has` on the whole line prints the
-actual output in the CI log; a yes/no `check` hides it.
+actual output in the CI log; a yes/no `check` hides it. The update lock is the other BSD
+difference: macOS has no `flock`, so the library takes its mkdir fallback and removes the lock
+directory on release; a fixture that infers "the lock was taken" from what persists after the
+run passes only with flock. Record the lock kind from inside the locked call instead, and run
+the fixture once in `bash:3.2` with `flock` removed (`rm -f /usr/bin/flock`) to see the fallback.
 
 ### Verifier harness files are tracked scripts: CI lints them
 
