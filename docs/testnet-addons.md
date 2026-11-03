@@ -71,12 +71,15 @@ Read this before enabling anything, especially the VPN.
 - **Centralized logging** ships your node's logs off the box. reth logs are
   operational (block numbers, peer counts, errors); they do **not** contain key
   material. Logs go only to the URL in `lib/testnet-addons.env`
-  (`https://obs.adiri.telcoin.network/loki/api/v1/push`) and authenticate with a
-  per-operator token you paste at setup. The token is stored only in
-  `/etc/telcoin/alloy/telcoin-alloy.env` (root, mode 0600), which the `telcoin-alloy`
-  unit reads when it starts Alloy; it is never committed or written to `.node-meta`. On
+  (`https://obs.adiri.telcoin.network/loki/api/v1/push`) and authenticate with the
+  ingest token you paste at setup. Today the hub accepts one token that the Association
+  hands to every operator, so the token identifies the hub, not you. It is stored only in
+  `/etc/telcoin/alloy/ingest-token` (root:telcoin-alloy, mode 0640), which Alloy reads as
+  a file; it is never in Alloy's environment, a unit file, a command line, `.node-meta`
+  or git. Alloy pushes over TLS 1.3 only, checked against the push URL's host name. On
   binary and source installs Alloy runs as its own `telcoin-alloy` account and cannot see
-  the node's data directory, the credential store or the passphrase file.
+  the node's data directory, the passphrase credential
+  (`/etc/telcoin/bls-passphrase.cred`) or the passphrase file.
 
 - **Metrics shipping** sends your node's Prometheus metrics (block height, peer counts,
   CPU/memory) to the Association's central Prometheus
@@ -144,6 +147,9 @@ sudo bash setup-observability.sh
 # The same, scripted: the token goes on stdin, never on the command line
 printf '%s\n' "$TOKEN" | sudo bash setup-observability.sh --json --enable-logs --enable-metrics --token-stdin
 
+# Replace the ingest token; restarts Alloy, not the node
+printf '%s\n' "$NEW_TOKEN" | sudo bash setup-observability.sh --rotate-token --token-stdin
+
 # VPN admin SSH
 sudo bash setup-vpn.sh                 # interactive enable
 sudo bash setup-vpn.sh --disable       # tear it all down
@@ -189,6 +195,51 @@ still point `--log.file.directory` at `/var/log/telcoin`, which the node can no 
 write. Enabling logs again moves the flag to the node log directory, and the next
 update-node.sh update does the same.
 
+### The ingest token file
+
+The token lives in `/etc/telcoin/alloy/ingest-token`: one line, root:telcoin-alloy 0640.
+Alloy reads it with `bearer_token_file`, from `$CREDENTIALS_DIRECTORY/ingest-token`, on
+both push endpoints. `/etc/telcoin/alloy/telcoin-alloy.env` (root 0600) keeps the identity
+labels, the push URLs and their host names (`OBS_PUSH_HOST`, `OBS_METRICS_PUSH_HOST`), and
+no token. Both endpoints pin TLS: `tls_config` sets `server_name` to the push URL's host
+and `min_version = "TLS13"`, so a hub that offers TLS 1.2 or another certificate name is
+refused.
+
+To replace the token, run `--rotate-token` (or menu entry 8, "Rotate the ingest token"):
+
+```bash
+printf '%s\n' "$NEW_TOKEN" | sudo bash setup-observability.sh --rotate-token --token-stdin
+sudo bash setup-observability.sh --rotate-token      # asks for it, hidden, on a terminal
+```
+
+`--token VALUE` and `TN_OBS_TOKEN` work too; the stored token is never reused. Add
+`--json` for JSON events (the done event carries `"applied":["token:rotated"]`). The
+rotation writes the token file, renders `config.alloy`, the env file and the unit again,
+restarts Alloy only (the node keeps running, so there is no quorum check or epoch wait)
+and checks that Alloy stays active for 5 seconds. If it does not, the previous token
+file, env file, `config.alloy` and unit go back, Alloy restarts on them, and the run
+exits 1. It refuses, with nothing changed, when both pipelines are off or Alloy's unit
+is not installed, and it cannot be combined with an enable or disable flag. A wrong
+token keeps Alloy running while the hub answers 401 to every push, so check the counters
+the success message names (`loki_write_sent_bytes_total`,
+`prometheus_remote_storage_samples_total` on `127.0.0.1:12345/metrics`) and look for 401
+lines in `journalctl -u telcoin-alloy.service -n 20`.
+
+A host set up with an older script release still has `OBS_INGEST_TOKEN=` in
+`telcoin-alloy.env`. It keeps working until the next enable, partial disable or
+`--rotate-token`, which moves the token into the token file and says so once. The
+status screen (and `check-node.sh`) warns until then; run `--rotate-token` with the same
+token to move it now. A full disable (both pipelines off) shreds the token file, so
+enabling either pipeline again asks for the token. `remove-node.sh` shreds the token
+file and the env file.
+
+The push URLs come from `--push-url` / `--metrics-push-url` (or `OBS_PUSH_URL` /
+`OBS_METRICS_PUSH_URL`) on the run, else the line already in `telcoin-alloy.env`, else
+the network's default hub in `lib/testnet-addons.env`. So an operator's own hub survives
+a rotation or a partial disable; pass the default URL to go back to the Association hub.
+A render that would leave an enabled pipeline with no URL is refused before anything is
+written.
+
 Both pipelines ride the same host and the same ingest token, and attach the same identity
 labels (`node`, `region`, `validator_address`, `chain`, `network`, `image_version`) so
 your node lights up the shared Grafana dashboards. A node with **neither** enabled passes
@@ -205,9 +256,14 @@ On binary and source installs Alloy is a native binary under `telcoin-alloy.serv
   create it), then enable logging again.
 - The unit keeps the filesystem read-only apart from Alloy's state directory
   `/var/lib/telcoin-alloy`, and makes `/var/lib/telcoin`, the node's data directory,
-  `/etc/credstore.encrypted` and the passphrase file inaccessible to it.
+  the passphrase credential `/etc/telcoin/bls-passphrase.cred` and the passphrase file
+  `/etc/telcoin/bls-passphrase` inaccessible to it. It hands the token over with
+  `LoadCredential=ingest-token:/etc/telcoin/alloy/ingest-token` (Alloy reads
+  `/run/credentials/telcoin-alloy.service/ingest-token`) and sets `LimitCORE=0`, so a
+  crash writes no core dump holding the token.
 - Its configuration, `/etc/telcoin/alloy/config.alloy`, is root:telcoin-alloy 0640 in a
-  root:telcoin-alloy 0750 directory. The token file beside it is root 0600.
+  root:telcoin-alloy 0750 directory. The token file beside it is root:telcoin-alloy
+  0640; the env file is root 0600.
 - A partial disable (logs off while metrics stay on, or the reverse) renders
   `config.alloy` exactly as the enable does (same owner, group and node log path),
   restarts Alloy, then watches the unit for 5 seconds; the enable runs the same check.
@@ -221,9 +277,15 @@ On binary and source installs Alloy is a native binary under `telcoin-alloy.serv
   `SHA256SUMS`. No matching line, no install.
 
 Docker installs run Alloy as the sidecar container `telcoin-alloy`
-(`grafana/alloy:v1.5.1`) under the same unit name. There a partial disable writes
-`config.alloy` root:root with the container's log path, as the enable does, and checks
-the unit for 5 seconds after the restart in the same way.
+(`grafana/alloy:v1.5.1`) under the same unit name. The token file is bind-mounted
+read-only at `/run/credentials/telcoin-alloy/ingest-token` (`--mount ...,readonly`, so a
+missing file stops the start), the env file sets `CREDENTIALS_DIRECTORY` to that
+directory, and the container runs with `--group-add <gid of telcoin-alloy>` and
+`--ulimit core=0`; the unit also sets `LimitCORE=0`. The `telcoin-alloy` account is
+created on Docker installs too, because its group owns the token file. There
+`config.alloy` is root:telcoin-alloy 0640 with the container's log path; a partial
+disable writes it as the enable does and checks the unit for 5 seconds after the
+restart in the same way.
 
 ### Health monitoring
 
@@ -257,6 +319,11 @@ applied until you remove the extra lines.
 
 Disabling health monitoring removes both the Association rule and your extra rules (the
 port stops listening), but keeps `KUMA_EXTRA_SRC` so re-enabling restores your set.
+
+Health monitoring is a testnet and devnet add-on. On any other network
+`firewall-setup.sh`'s status screen shows one line instead of the monitor block: "Health
+port TCP 43174 stays closed", or a warning when a rule opens it anyway, which "Manage
+node ports" (or `--enable`) removes.
 
 ### VPN admin SSH
 
@@ -323,6 +390,39 @@ sudo bash firewall-setup.sh --enable --p2p-from /root/p2p-peers.txt
 - On mainnet, `--enable`, `--reset` and the UI's enable refuse to run without an SSH
   source list, saved or given, unless you pass `--ssh-anywhere`. The interactive enable
   asks for an explicit yes before it keeps SSH open to every address there.
+
+### P2P new-flow limit
+
+When P2P is open to every source (no `--p2p-from`, no `P2P_ALLOW_FROM`, or
+`--p2p-anywhere`) and a node is installed, every enable (`--enable`, `--reset`,
+`--json --enable`, "Enable recommended defaults") and "Manage node ports" load the
+nftables table `inet tn_p2p` after the ufw rules are in place. It drops UDP packets of
+new, not yet answered flows to the node's P2P ports from one source above 20 per minute
+after a burst of 40. A source is one IPv4 address or one IPv6 /64. Once the node answers,
+the flow is established and is never limited. The chain runs at priority -10, before
+ufw's chains, and only drops: every other packet goes on to ufw, which still decides.
+Each set holds at most 65535 sources; a source that sent nothing for 120 seconds (at the
+defaults) leaves it.
+
+```bash
+sudo nft list table inet tn_p2p
+sudo TN_P2P_NEW_FLOW_RATE=30 TN_P2P_NEW_FLOW_BURST=60 bash firewall-setup.sh --enable
+```
+
+`TN_P2P_NEW_FLOW_RATE` and `TN_P2P_NEW_FLOW_BURST` take a whole number from 1 to 100000
+and apply to that run only: nothing stores them, so a later enable without them goes back
+to 20 and 40. A bad value stops the run before anything changes. With a P2P source list,
+or without a node, the table is deleted. Without `nft` the run warns and applies the ufw
+rules as before.
+
+The table comes back at boot from `/etc/telcoin/p2p-limit.nft` (root 0640), which
+`telcoin-p2p-limit.service` (a oneshot unit ordered after `ufw.service`) loads; stopping
+the unit deletes the table. The status screen has a "New-flow limit" line and a "New-flow
+limit at boot" line, and `--json --status` a `p2p_new_flow_limit` object (`active`,
+`rate`, `burst`, `reason`, `persistent`, `persistent_reason`). Every enable and every
+"Manage node ports" change takes the update lock (`/run/telcoin/update.lock`) around ufw,
+the table and its boot copy. `remove-node.sh` removes the unit, the boot copy and the
+table with the last node.
 
 ### Source rules
 
@@ -447,8 +547,8 @@ metrics and health monitoring; `sudo bash setup-vpn.sh --disable` tears down the
 including half-removed ones:
 
 - Alloy: stops and removes `telcoin-alloy.service`, the sidecar container and image,
-  a tarball-installed `/usr/local/bin/alloy`, `/etc/telcoin/alloy`,
-  `/var/lib/telcoin-alloy` and the `telcoin-alloy` account.
+  a tarball-installed `/usr/local/bin/alloy`, shreds the token file and the env file,
+  removes `/etc/telcoin/alloy`, `/var/lib/telcoin-alloy` and the `telcoin-alloy` account.
 - VPN: removes the self-heal units and `/usr/local/sbin/tn-vpn-selfheal` first (so they
   cannot put the drop-in back), brings `wg0` down, removes its config and key, the
   dormant firewall service and files, `/etc/wgvpn/tnadmin.keys`,
@@ -473,13 +573,15 @@ One token covers **both** telemetry pipelines: the Caddy edge gates the Loki pus
 
 1. Generate one: `openssl rand -hex 32`.
 2. Register it on the obs VM so Caddy accepts it. The current Adiri obs VM gates on a
-   single shared token (`adiri-genesis/common/observability/obs-vm/Caddyfile`,
-   `OBS_INGEST_TOKEN`) for both the `/loki/api/v1/push` and `/api/v1/write` routes;
-   admitting per-operator tokens means extending that gate to match a set of tokens.
+   single shared token (`observability/obs-vm/Caddyfile` in deploy-networks-common,
+   `OBS_INGEST_TOKEN`) for both the `/loki/api/v1/push` and `/api/v1/write` routes, so
+   every operator holds the same token and revoking one operator means rotating it for
+   all. Per-node tokens need that gate to check a list of tokens (the rest of #35).
    Coordinate with the obs-stack owner before handing tokens to operators.
 3. Give the operator the token over a private channel. They paste it into
    `setup-observability.sh` (it covers logs and metrics; they need not paste it twice),
-   or pipe it to `--token-stdin` in a scripted run.
+   or pipe it to `--token-stdin` in a scripted run. A new token reaches a running node
+   with `setup-observability.sh --rotate-token`.
 
 Keep these limits in mind on the obs-VM side (they are why this telemetry is
 low-risk to accept from outside operators):
@@ -491,8 +593,8 @@ low-risk to accept from outside operators):
 - **Rate / retention** (from `loki-config.yaml`): ingestion ~16 MB/s (32 MB burst),
   ~14-day retention. The Prometheus `/api/v1/write` route has its own Caddy rate-limit
   zone. Consider per-token stream/rate limits as the operator count grows.
-- Treat the token as **telemetry-push only** (logs + metrics). Rotating it is cheap
-  (re-issue + re-paste).
+- Treat the token as **telemetry-push only** (logs + metrics). Rotating it is cheap:
+  re-issue it, then each operator runs `setup-observability.sh --rotate-token`.
 
 ### Enrolling a node on the WireGuard overlay
 
@@ -539,19 +641,20 @@ operator's `setup-vpn.sh --sync-keys`.
 
 ## Sync note (vendored files)
 
-These files are **vendored** from `adiri-genesis` and must stay in sync:
+These files are **vendored** from the `deploy-networks-common` repository, which
+`adiri-genesis` checks out as its `common/` submodule, and must stay in sync:
 
-| Here (`tn-node-deployment`) | Upstream (`adiri-genesis`) |
+| Here (`tn-node-deployment`) | Upstream (`deploy-networks-common`) |
 |---|---|
-| `observability/config.alloy` (functional blocks) | `common/observability/node-agent/config.alloy` |
-| `lib/wgvpn/wg-node-bootstrap.sh` (below the header) | `common/wgvpn/node/wg-node-bootstrap.sh` |
-| `lib/wgvpn/hub-coordinates.env` | `common/wgvpn/hub/hub-coordinates.env` |
-| `lib/wgvpn/peers/ssh/*.pub` | `common/wgvpn/peers/ssh/*.pub` |
+| `observability/config.alloy` (functional blocks) | `observability/node-agent/config.alloy` |
+| `lib/wgvpn/wg-node-bootstrap.sh` (below the header) | `wgvpn/node/wg-node-bootstrap.sh` |
+| `lib/wgvpn/hub-coordinates.env` | `wgvpn/hub/hub-coordinates.env` |
+| `lib/wgvpn/peers/ssh/*.pub` | `wgvpn/peers/ssh/*.pub` |
 | `lib/wgvpn/peers/ssh/KEYS` | none yet: one line per `.pub` file (see below) |
-| Hub coords / Kuma IP / obs URL in `lib/testnet-addons.env` | `config.sh`, `hub-coordinates.env` |
+| Hub coords / Kuma IP / obs URL in `lib/testnet-addons.env` | `config.sh` (in `adiri-genesis`), `wgvpn/hub/hub-coordinates.env` |
 
-> **`peers/ssh/*.pub` is mirrored for you, `KEYS` is not.** `add-peer.sh` /
-> `remove-peer.sh` in `adiri-genesis` mirror the whole maintainer key set into
+> **`peers/ssh/*.pub` is mirrored for you, `KEYS` is not.** `wgvpn/add-peer.sh` /
+> `wgvpn/remove-peer.sh` in `deploy-networks-common` mirror the whole maintainer key set into
 > `lib/wgvpn/peers/ssh/` on every (de)registration and print the `tn-node-deployment`
 > commit command. Nodes ignore a `.pub` file that `KEYS` does not list, so
 > `add-peer.sh` and `sync-access.sh` must also write the key's `KEYS` line. Until that
@@ -581,16 +684,26 @@ pipeline(s) the operator opted into; for native Alloy the deployed copy also poi
 re-vendor, so unexpected drift is detectable):
 
 ```
-sha256(observability/config.alloy) = 3ed01c5d95c2d47c4d41c8f1ef06e73ecbd19b4776b5347eb681779a453426b4
+sha256(observability/config.alloy) = 555feb26faa015e57992fbf475efe50e1fa0f30d63efff57ad82cb4ce3213157
 ```
+
+The current copy (token file and TLS pin) is vendored from the `deploy-networks-common`
+branch `alloy-token-file-tls`, commit 30a2813 (PR #8), pending merge; the file's header
+says so. Once that branch merges, put the merged commit in the header and the hash above.
+Until then the other upstream consumers of the file (`docker-compose.yml` beside it, and
+the `start-*-node.sh` heredocs in `adiri-genesis`) still pass the token in the
+environment.
 
 Verify the functional blocks against upstream (the file headers differ by design; from
 the first River component to EOF must match exactly, so this diff should be empty):
 
 ```bash
-diff <(sed -n '/^local\.file_match/,$p' <adiri>/common/observability/node-agent/config.alloy) \
+diff <(sed -n '/^local\.file_match/,$p' <deploy-networks-common>/observability/node-agent/config.alloy) \
      <(sed -n '/^local\.file_match/,$p' observability/config.alloy)
 ```
+
+`tools/tests/obs_test.sh` runs the same diff when `TN_UPSTREAM_ALLOY_CONFIG` names the
+upstream file.
 
 **wg-node-bootstrap.sh**: a verbatim copy with two upstream-pushed changes, the
 `WG_NODE_SSHD_HARDEN` and `WG_NODE_SUDOERS` guards (both default `1` = upstream
