@@ -337,11 +337,13 @@ show_detected() {
 
 _RM_SHRED_NOTED=false
 
-# _rm_shred_note -- print, once per run, that the overwrite is best effort.
+# _rm_shred_note -- print, once per run, that the overwrite is best effort and
+# that it does not decommission a host that held a key.
 _rm_shred_note() {
     if [[ "$_RM_SHRED_NOTED" != "true" ]]; then
         _RM_SHRED_NOTED=true
         print_info "Overwriting files with shred before deleting them is best effort on SSDs, copy-on-write and cloud disks."
+        print_info "Decommissioning a host that held a validator key means destroying or crypto-erasing its disk and deleting every snapshot and image taken from it; shred alone does not do that."
     fi
 }
 
