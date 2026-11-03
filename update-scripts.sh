@@ -8,7 +8,8 @@
 # MANIFEST, all together or not at all.
 #
 # USAGE:
-#   bash ~/telcoin-node-scripts/update-scripts.sh
+#   bash ~/telcoin-node-scripts/update-scripts.sh           # update
+#   bash ~/telcoin-node-scripts/update-scripts.sh --check   # report only
 # =============================================================================
 
 set -euo pipefail
@@ -154,6 +155,8 @@ BOOT_SIGNERS=""
 M_RELEASE=""
 M_SERIAL=""
 M_MIN_UPDATER=""
+M_DATE=""
+M_EXPIRES=""
 M_PATHS=()
 M_SHAS=()
 # Work lists, filled by plan_changes.
@@ -220,6 +223,55 @@ version_gt() {
         if ((10#${ver1[i]} < 10#${ver2[i]})); then return 1; fi
     done
     return 1
+}
+
+# ymd_days YYYY-MM-DD -- print the day number (days since 1970-01-01) of a real
+# calendar date from 1970 on; rc 1 for anything else. Pure bash: busybox and
+# macOS date cannot parse a date, and the same text runs in every script that
+# reads a MANIFEST date (tools/tests/release_scripts_test.sh checks the copies).
+ymd_days() {
+    local y m d n
+    [[ "$1" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || return 1
+    y=$((10#${BASH_REMATCH[1]}))
+    m=$((10#${BASH_REMATCH[2]}))
+    d=$((10#${BASH_REMATCH[3]}))
+    n=31
+    if [[ $m -eq 4 || $m -eq 6 || $m -eq 9 || $m -eq 11 ]]; then
+        n=30
+    elif [[ $m -eq 2 ]]; then
+        n=28
+        if (( y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) )); then n=29; fi
+    fi
+    if (( y < 1970 || m < 1 || m > 12 || d < 1 || d > n )); then return 1; fi
+    # Days from the civil date (H. Hinnant's algorithm), the year starting in March.
+    if (( m <= 2 )); then y=$((y - 1)); m=$((m + 9)); else m=$((m - 3)); fi
+    printf '%s\n' "$(( (y / 400) * 146097 + (y % 400) * 365 + (y % 400) / 4 - (y % 400) / 100 \
+        + (153 * m + 2) / 5 + d - 1 - 719468 ))"
+}
+
+# days_text N -- "1 day" or "N days".
+days_text() {
+    if [[ "$1" == "1" ]]; then echo "1 day"; else echo "$1 days"; fi
+}
+
+# days_left EXPIRES -- the days from today (UTC) until the date EXPIRES: 0 or
+# less once that day has come.
+days_left() {
+    local today
+    today="$(ymd_days "$(date -u +%Y-%m-%d)")" || return 1
+    echo $(( $(ymd_days "$1") - today ))
+}
+
+# release_expired EXPIRES -- rc 0 when a release that expires on EXPIRES has
+# expired (today, UTC, is that day or later), printing how long ago: "today",
+# "1 day ago" or "N days ago". rc 1 and nothing printed for an empty EXPIRES or
+# a release that has not expired.
+release_expired() {
+    local left
+    [[ -n "$1" ]] || return 1
+    left="$(days_left "$1")" || return 1
+    (( left <= 0 )) || return 1
+    if (( left == 0 )); then echo "today"; else echo "$(days_text $(( -left ))) ago"; fi
 }
 
 # path_ok P -- rc 0 for a relative path made of [A-Za-z0-9._/-] with no empty,
@@ -337,8 +389,9 @@ bootstrap_signers() {
     fi
 }
 
-# verify_manifest MANIFEST SIG SIGNERS -- rc 0 when SIG is a good signature over
-# MANIFEST by a key SIGNERS lists for release@telcoin.org and tn-node-scripts.
+# verify_manifest MANIFEST SIG SIGNERS [quiet] -- rc 0 when SIG is a good
+# signature over MANIFEST by a key SIGNERS lists for release@telcoin.org and
+# tn-node-scripts. Prints the good-signature line unless the 4th argument is quiet.
 verify_manifest() {
     local out
     if ! command -v ssh-keygen >/dev/null 2>&1; then
@@ -352,7 +405,7 @@ verify_manifest() {
         printf '%s\n' "$out" | sed 's/^/        /'
         return 1
     fi
-    print_ok "$(printf '%s\n' "$out" | head -1)"
+    [[ "${4:-}" == "quiet" ]] || print_ok "$(printf '%s\n' "$out" | head -1)"
 }
 
 manifest_bad() {
@@ -360,14 +413,18 @@ manifest_bad() {
     return 1
 }
 
-# parse_manifest FILE -- fill M_RELEASE, M_SERIAL, M_MIN_UPDATER, M_PATHS and
-# M_SHAS from a verified manifest. Refuses the whole manifest on any line it
-# does not understand, a repeated key or path, or a path outside the tree.
+# parse_manifest FILE -- fill M_RELEASE, M_SERIAL, M_MIN_UPDATER, M_DATE,
+# M_EXPIRES, M_PATHS and M_SHAS from a verified manifest. Refuses the whole
+# manifest on any line it does not understand, a repeated key or path, or a path
+# outside the tree. date= and expires= are optional (the 2.0.0 release has
+# neither); when present each appears once and is a calendar date YYYY-MM-DD.
 parse_manifest() {
-    local line hash path i n_fmt=0 n_rel=0 n_ser=0 n_min=0 fmt=""
+    local line hash path i n_fmt=0 n_rel=0 n_ser=0 n_min=0 n_date=0 n_exp=0 fmt=""
     M_RELEASE=""
     M_SERIAL=""
     M_MIN_UPDATER=""
+    M_DATE=""
+    M_EXPIRES=""
     M_PATHS=()
     M_SHAS=()
     if grep -q $'\r' "$1"; then manifest_bad "CR line endings"; return 1; fi
@@ -377,6 +434,8 @@ parse_manifest() {
             release=*)     n_rel=$((n_rel + 1)); M_RELEASE="${line#release=}" ;;
             serial=*)      n_ser=$((n_ser + 1)); M_SERIAL="${line#serial=}" ;;
             min_updater=*) n_min=$((n_min + 1)); M_MIN_UPDATER="${line#min_updater=}" ;;
+            date=*)        n_date=$((n_date + 1)); M_DATE="${line#date=}" ;;
+            expires=*)     n_exp=$((n_exp + 1)); M_EXPIRES="${line#expires=}" ;;
             sha256\ \ *)
                 if [[ ! "$line" =~ ^sha256\ \ ([0-9a-f]{64})\ \ (.+)$ ]]; then
                     manifest_bad "bad line: ${line}"
@@ -401,6 +460,9 @@ parse_manifest() {
     [[ "$M_RELEASE" =~ $TN_SCRIPTS_TAG_RE ]] || { manifest_bad "release ${M_RELEASE}"; return 1; }
     [[ "$M_SERIAL" =~ ^[1-9][0-9]{0,8}$ ]] || { manifest_bad "serial ${M_SERIAL}"; return 1; }
     [[ "$M_MIN_UPDATER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { manifest_bad "min_updater ${M_MIN_UPDATER}"; return 1; }
+    [[ $n_date -le 1 && $n_exp -le 1 ]] || { manifest_bad "date and expires may each appear once at most"; return 1; }
+    if [[ $n_date -eq 1 ]] && ! ymd_days "$M_DATE" >/dev/null; then manifest_bad "date ${M_DATE}"; return 1; fi
+    if [[ $n_exp -eq 1 ]] && ! ymd_days "$M_EXPIRES" >/dev/null; then manifest_bad "expires ${M_EXPIRES}"; return 1; fi
     [[ -n "$(manifest_sha_for update-scripts.sh)" ]] || { manifest_bad "update-scripts.sh not listed"; return 1; }
     [[ -n "$(manifest_sha_for lib/allowed_signers)" ]] || { manifest_bad "lib/allowed_signers not listed"; return 1; }
 }
@@ -616,6 +678,18 @@ print_plan() {
     echo ""
 }
 
+# warn_expired -- the warning an update run prints when the verified release
+# has expired. An expiry date tells the release signer a newer release is due;
+# the release still verifies, so the run carries on and installs it.
+warn_expired() {
+    local more=""
+    release_expired "$M_EXPIRES" >/dev/null || return 0
+    [[ ${#UPD_PATHS[@]} -eq 0 && ${#DEL_PATHS[@]} -eq 0 ]] || more=" Installing it anyway."
+    print_warn "Script release ${M_RELEASE} expired on ${M_EXPIRES}; a newer signed release is overdue.${more}"
+    print_info "The release still verifies. If no newer one appears soon, tell support@telcoin.org."
+    echo ""
+}
+
 run_update() {
     local signers choice i ui_changed=false svc
 
@@ -670,6 +744,7 @@ run_update() {
         exit 1
     fi
     plan_changes || exit 1
+    warn_expired
 
     if [[ ${#UPD_PATHS[@]} -eq 0 && ${#DEL_PATHS[@]} -eq 0 ]]; then
         if ! cmp -s "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST" 2>/dev/null; then
@@ -730,6 +805,106 @@ run_update() {
 }
 
 # =============================================================================
+# CHECK (--check)
+# =============================================================================
+
+# release_line TAG SERIAL DATE EXPIRES -- one release for the --check report.
+release_line() {
+    local when="released $3" exp="no expiry date"
+    [[ -n "$3" ]] || when="release date not recorded"
+    [[ -z "$4" ]] || exp="expires $4"
+    printf '%s, serial %s, %s, %s\n' "$1" "$2" "$when" "$exp"
+}
+
+# check_release -- the --check report: the installed release (its record checked
+# against lib/allowed_signers), the newest release (RELEASE on main and the
+# signed MANIFEST of the tag it names), whether an update is pending and whether
+# either release has expired. Downloads into a temp dir only and changes nothing
+# in the tree. rc 0 when the installed release is the newest and neither has
+# expired; 1 when an update is pending or a release has expired; 2 when no signed
+# release is installed or the newest release cannot be fetched or verified.
+check_release() {
+    local rc=0 installed=none i_rel="" i_ser="" i_exp="" ago
+    if [[ ! -f "$INSTALLED_MANIFEST" ]]; then
+        print_warn "No signed release is installed in ${SCRIPT_DIR} (no MANIFEST record)."
+    elif [[ ! -f "$SIGNERS_FILE" || ! -f "$INSTALLED_SIG" ]]; then
+        print_error "The installed release record cannot be verified: ${SIGNERS_FILE} or ${INSTALLED_SIG} is missing."
+        reinstall_hint
+        installed=bad
+    elif ! verify_manifest "$INSTALLED_MANIFEST" "$INSTALLED_SIG" "$SIGNERS_FILE" quiet \
+        || ! parse_manifest "$INSTALLED_MANIFEST"; then
+        print_info "That is the installed release record ${INSTALLED_MANIFEST}."
+        reinstall_hint
+        installed=bad
+    else
+        installed=ok
+        i_rel="$M_RELEASE"
+        i_ser="$M_SERIAL"
+        i_exp="$M_EXPIRES"
+        print_info "Installed:  $(release_line "$M_RELEASE" "$M_SERIAL" "$M_DATE" "$M_EXPIRES") (signature verified)"
+    fi
+
+    STAGE="$(mktemp -d "${TMPDIR:-/tmp}/tn-update-check.XXXXXX" 2>/dev/null \
+        || mktemp -d /tmp/tn-update-check.XXXXXX)" || {
+        print_error "Could not create a temp directory for the check."
+        return 2
+    }
+    read_release_tag || return 2
+    fetch_release_file "$RELEASE_TAG" MANIFEST || return 2
+    fetch_release_file "$RELEASE_TAG" MANIFEST.sig || return 2
+    if [[ ! -f "$SIGNERS_FILE" ]]; then
+        print_error "Release ${RELEASE_TAG} cannot be verified: ${SIGNERS_FILE} is missing."
+        return 2
+    fi
+    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/MANIFEST.sig" "$SIGNERS_FILE" quiet || return 2
+    parse_manifest "${STAGE}/MANIFEST" || return 2
+    if [[ "$M_RELEASE" != "$RELEASE_TAG" ]]; then
+        print_error "The manifest is for ${M_RELEASE}, but RELEASE names ${RELEASE_TAG}: the updater refuses it."
+        return 2
+    fi
+    print_info "Newest:     $(release_line "$M_RELEASE" "$M_SERIAL" "$M_DATE" "$M_EXPIRES") (signature verified)"
+    if [[ "$installed" != "ok" ]]; then
+        [[ "$installed" != "none" ]] || print_info "To install it: bash ${SCRIPT_DIR}/update-scripts.sh"
+        return 2
+    fi
+
+    if (( 10#$M_SERIAL < 10#$i_ser )); then
+        print_warn "RELEASE names ${M_RELEASE} (serial ${M_SERIAL}), older than the installed serial ${i_ser}: the updater refuses it."
+        rc=1
+    elif (( 10#$M_SERIAL == 10#$i_ser )) && ! cmp -s "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"; then
+        print_warn "Release ${M_RELEASE} reuses the installed serial ${i_ser} with a different manifest: the updater refuses it."
+        rc=1
+    elif ! plan_changes; then
+        rc=1
+    elif [[ ${#UPD_PATHS[@]} -gt 0 || ${#DEL_PATHS[@]} -gt 0 ]]; then
+        print_warn "Update pending: ${#UPD_PATHS[@]} file(s) to update, ${#DEL_PATHS[@]} to remove. Run: bash ${SCRIPT_DIR}/update-scripts.sh"
+        rc=1
+    elif ! cmp -s "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"; then
+        print_warn "Update pending: every file already matches ${M_RELEASE}, but the record names ${i_rel}. Run: bash ${SCRIPT_DIR}/update-scripts.sh"
+        rc=1
+    else
+        print_ok "No update pending: every file matches ${M_RELEASE}."
+    fi
+
+    if ago="$(release_expired "$i_exp")"; then
+        print_warn "Installed release ${i_rel} expired on ${i_exp} (${ago}); a newer signed release is overdue."
+        rc=1
+    fi
+    if [[ "$M_RELEASE" != "$i_rel" ]] && ago="$(release_expired "$M_EXPIRES")"; then
+        print_warn "Newest release ${M_RELEASE} expired on ${M_EXPIRES} (${ago}); a newer signed release is overdue."
+        rc=1
+    fi
+    if [[ $rc -eq 0 ]]; then
+        if [[ -n "$M_EXPIRES" ]]; then
+            print_ok "Up to date with ${M_RELEASE}; it expires ${M_EXPIRES} (in $(days_text "$(days_left "$M_EXPIRES")"))."
+        else
+            print_ok "Up to date with ${M_RELEASE}; it carries no expiry date."
+        fi
+    fi
+    return "$rc"
+}
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -737,7 +912,7 @@ usage() {
     cat <<EOF
 update-scripts.sh v${SCRIPT_VERSION} -- update the Telcoin Network node scripts
 
-Usage: bash update-scripts.sh [-h | --help]
+Usage: bash update-scripts.sh [--check | -h | --help]
 
 Reads the latest release tag from
   ${TN_RELEASE_POINTER_URL}
@@ -759,32 +934,50 @@ the installed release. On any refusal or failure the tree is left as it was.
 
 The web UI is not redeployed automatically: the updater prints the sudo command.
 
+A release carries an expiry date (expires= in MANIFEST, 90 days after its
+release date unless the release signer chose otherwise). From that day on the
+updater warns "Script release <tag> expired on <date>; a newer signed release
+is overdue." and still installs the release: it verifies as before.
+
 The answer is read from standard input; there is no --yes option. To answer
 from a script: printf 'y\n' | bash update-scripts.sh
 
 Options:
+  --check      Report the installed release and the newest signed release (tag,
+               serial, release date, expiry date), whether an update is pending
+               and whether either release has expired. Installs nothing, needs
+               no root, and asks nothing.
   -h, --help   Show this help and exit without contacting GitHub.
 
 Exit status: 0 when everything is current, updated, or the update is declined;
 1 when GitHub cannot be reached, or a release is refused or fails verification;
 2 for an unknown argument.
+With --check: 0 when the installed release is the newest and neither has
+expired; 1 when an update is pending or the installed or newest release has
+expired; 2 when no signed release is installed, or the newest release cannot
+be fetched or verified.
 EOF
 }
 
 main() {
     # Arguments are handled before anything touches the network. The updater
-    # takes none besides --help; anything else is refused rather than ignored.
-    local arg
+    # takes --check and --help; anything else is refused rather than ignored.
+    local arg mode=update rc=0
     for arg in "$@"; do
         case "$arg" in
             -h|--help) usage; exit 0 ;;
         esac
     done
-    if [[ $# -gt 0 ]]; then
-        printf 'update-scripts.sh: unknown argument: %s\n\n' "$1" >&2
-        usage >&2
-        exit 2
-    fi
+    for arg in "$@"; do
+        case "$arg" in
+            --check) mode=check ;;
+            *)
+                printf 'update-scripts.sh: unknown argument: %s\n\n' "$arg" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
 
     # The staging dir is removed however the run ends. The signal traps turn
     # Ctrl-C, a hangup and SIGTERM into an exit, so the EXIT trap runs on every
@@ -793,6 +986,13 @@ main() {
     trap 'exit 130' INT
     trap 'exit 129' HUP
     trap 'exit 143' TERM
+
+    # The report is meant for a terminal or a cron job alike: no screen clear,
+    # no banner, and the exit status carries the answer.
+    if [[ "$mode" == "check" ]]; then
+        check_release || rc=$?
+        exit "$rc"
+    fi
 
     # Clearing the screen is cosmetic: with TERM unset or unusable `clear` fails,
     # and that must not end the run under set -e.
