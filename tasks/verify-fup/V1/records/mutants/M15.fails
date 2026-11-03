@@ -1,0 +1,27 @@
+FAIL  D1 the log says margin and settle are derived
+FAIL  D3 the log names the 900s margin
+FAIL  D3 the log says 900 and 300 derived
+FAIL  D4 604800 s epoch, 800 s out (inside 900): waits 810, settles 300
+FAIL  D4 the step message carries the derived values
+FAIL  D4 settle 300
+FAIL  D5 the log names the source of each value
+FAIL  D6 the log names TN_EPOCH_SETTLE
+FAIL  D8 TN_EPOCH_WAIT_MAX=100 under derived 900+300: raised with the warning
+FAIL  D8 the raised cap lets the wait and the settle run
+FAIL  D8 the step message says the raised cap
+FAIL  D8 poll 20: the sum uses two polls of 20
+FAIL  D13 epoch length read from the public RPC is used (900 margin): waits
+FAIL  D14 TN_EPOCH_MARGIN='abc' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN=' 300' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='-5' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='1234567890' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='3e2' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN=0300 is 300 from the environment
+FAIL  D14 TN_EPOCH_SETTLE=abc is not used: derived 300
+FAIL  D17 huge epochDuration: clamped to 900/300, far boundary, no wait
+FAIL  D17 epochDuration in hex (0x93a80 = 604800): derived 900/300
+FAIL  D17 18 h epoch: 900 and 270
+FAIL  D17 12 h epoch: 600 and 180 (docs note)
+FAIL  D19 boundary passed long ago: warns, no wait, with the timing sentence
+FAIL  D17 1 s epoch: clamped up to 300 and 90

@@ -1,0 +1,4 @@
+2752c2752
+<         1) update_fail "${msg} Nothing was changed."; return 1 ;;
+---
+>         1) update_wait_say warn "$msg" ;;

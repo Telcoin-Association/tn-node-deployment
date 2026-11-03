@@ -1,0 +1,5 @@
+FAIL  D7 and the cap rises to cover it
+FAIL  D8 TN_EPOCH_WAIT_MAX=100 under derived 900+300: raised with the warning
+FAIL  D8 the step message says the raised cap
+FAIL  D8 poll 20: the sum uses two polls of 20
+FAIL  D9 a cap one short (419): raised to 420

@@ -1,0 +1,4 @@
+FAIL  F1 mainnet: its own RPC, labelled
+FAIL  F1 testnet: its own RPC
+FAIL  F1 devnet: its own RPC
+FAIL  F5 report, mainnet: header names the mainnet public RPC

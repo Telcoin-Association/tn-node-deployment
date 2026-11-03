@@ -1,0 +1,4 @@
+379c379
+<         NETWORK_RPC_LABEL="${NETWORK_RPC} (${NODE_NETWORK} public RPC)"
+---
+>         NETWORK_RPC_LABEL="${NETWORK_RPC}"

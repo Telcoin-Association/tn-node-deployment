@@ -1,0 +1,9 @@
+2683,2690d2682
+<                 if tn_mainnet_enabled; then
+<                     NETWORK="mainnet"
+<                     CHAIN_ID="$MAINNET_CHAIN_ID"
+<                     CHAIN_NAME="$MAINNET_CHAIN_NAME"
+<                     RPC_URL="$MAINNET_RPC_URL"
+<                     EXPLORER_URL="$MAINNET_EXPLORER"
+<                     break
+<                 fi

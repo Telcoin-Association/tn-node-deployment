@@ -1,0 +1,4 @@
+2368c2368
+<             exit 1
+---
+>             rpc="$TESTNET_RPC_URL"

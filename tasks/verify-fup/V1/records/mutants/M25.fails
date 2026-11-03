@@ -1,0 +1,20 @@
+FAIL  A3 json_set_network mainnet (shipped): rc 1
+FAIL  A3 shipped: the refusal message
+FAIL  A3 enabled: mainnet values set
+FAIL  A3 shipped: testnet unchanged
+FAIL  A3 shipped: adiri unchanged
+FAIL  A3 unknown network still refused
+FAIL  A3 e2e: setup-node --json --network mainnet exits 1
+FAIL  A3 e2e: error event carries the message
+FAIL  A3 e2e: ends with done ok:false
+FAIL  A3 e2e: stdout is JSON lines only
+FAIL  E4 setup-node interactive: network chosen, then the mainnet RPC probed
+FAIL  E4 setup-node --json: no menu, the set network probed
+FAIL  G1 mainnet example: the mainnet repository by digest
+FAIL  G2 'testnet' example unchanged from before the round
+FAIL  G2 'devnet' example unchanged from before the round
+FAIL  G2 '' example unchanged from before the round
+FAIL  G3 json_check_install_flags, mainnet, bad --docker-image: example is mainnet's
+FAIL  G3 finalize_install_inputs, mainnet, bad recorded image: example is mainnet's
+FAIL  G3 _preflight_docker, mainnet, a bad entry: the example is mainnet's
+FAIL  G4 devnet caller still names the devnet repository

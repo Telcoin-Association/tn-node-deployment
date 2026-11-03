@@ -1,0 +1,12 @@
+FAIL  C1 mainnet digest, nothing recorded: refused, nothing on stdout
+FAIL  C1 mainnet digest, nothing recorded: the reason on stderr
+FAIL  C3 mainnet digest, another digest recorded: refused
+FAIL  C4 mainnet digest recorded with tag 'v0.16.0-adiri' (not a mainnet release): refused
+FAIL  C4 mainnet digest recorded with tag 'v1.0.0-rc1' (not a mainnet release): refused
+FAIL  C4 mainnet digest recorded with tag '' (not a mainnet release): refused
+FAIL  C7 json_prepare_docker: mainnet digest refused, nothing pulled
+FAIL  C7 prepare_docker_update: mainnet digest refused, nothing pulled
+FAIL  C7 set_docker_image: mainnet digest refused with the mainnet message
+FAIL  C7 set_docker_image: nothing pulled
+FAIL  C7 edit_docker_image: mainnet digest refused, nothing pulled
+FAIL  C9 launch library: tn_docker_resolve_ref refuses the bare mainnet digest

@@ -1,0 +1,5 @@
+4528,4531d4527
+<     if [[ "${TN_EPOCH_MARGIN:-}" =~ ^[0-9]{1,9}$ ]]; then
+<         margin=$(( 10#$TN_EPOCH_MARGIN ))
+<         msrc="env"
+<     fi

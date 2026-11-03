@@ -1,0 +1,4 @@
+FAIL  D12 CvvActive, epoch unreadable: continues without a wait
+FAIL  D16 epochDuration negative: no wait (unreadable epoch info)
+FAIL  D16 epochDuration missing: no wait
+FAIL  D17 a 19-digit epochDuration is unreadable: no wait

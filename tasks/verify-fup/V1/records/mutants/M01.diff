@@ -1,0 +1,4 @@
+42c42
+<     [[ "$TN_MAINNET_ENABLED" == "1" ]]
+---
+>     true

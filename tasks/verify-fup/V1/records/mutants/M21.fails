@@ -1,0 +1,10 @@
+FAIL  E3 NETWORK '': fails closed (exit 1)
+FAIL  E3 NETWORK '': curl never runs
+FAIL  E3 NETWORK '-unset': fails closed (exit 1)
+FAIL  E3 NETWORK '-unset': curl never runs
+FAIL  E3 NETWORK 'adiri': fails closed (exit 1)
+FAIL  E3 NETWORK 'adiri': curl never runs
+FAIL  E3 NETWORK 'MAINNET': fails closed (exit 1)
+FAIL  E3 NETWORK 'MAINNET': curl never runs
+FAIL  E3 NETWORK ' mainnet': fails closed (exit 1)
+FAIL  E3 NETWORK ' mainnet': curl never runs

@@ -1,0 +1,4 @@
+4627c4627
+<             _tn_wait_blind "$fn" "$margin" "$settle" "$cap" "$poll" "$out"
+---
+>             _tn_wait_blind "$fn" "$margin" "$settle" 1800 "$poll" "$out"

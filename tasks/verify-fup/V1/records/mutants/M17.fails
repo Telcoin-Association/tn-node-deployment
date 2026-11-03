@@ -1,0 +1,5 @@
+FAIL  D5 TN_EPOCH_MARGIN=120 wins over the derived 900: no wait at 800 s
+FAIL  D5 the log names the source of each value
+FAIL  D7 an explicit margin above the clamp is used as given (5000): waits
+FAIL  D7 and the cap rises to cover it
+FAIL  D14 TN_EPOCH_MARGIN=0300 is 300 from the environment
