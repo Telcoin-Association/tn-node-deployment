@@ -12,7 +12,7 @@ DOCS-A checkpoint (Markdown docs of scripts-v2.1.0 except the partner guide).
 - [ ] 6. README.md changelog (one ### <script> v2.1.0 per bumped file)
 - [ ] 7. followup.md
 - [ ] 8. CHANGELOG/scripts-v2.1.0.md
-- [ ] 9. Gates (done for README/OPERATOR/AGENTS/testnet-addons: no mainnet-ops, no file:line refs in added lines, relative links and anchors resolve, sync sha = sha256sum, check-network-hits rc 0; still to run on followup.md and CHANGELOG/scripts-v2.1.0.md) (mainnet-ops grep, line refs, commands, links, sha, check-network-hits)
+- [ ] 9. Gates (done for README/OPERATOR/AGENTS/testnet-addons: no private-path mention, no file:line refs in added lines, relative links and anchors resolve, sync sha = sha256sum, check-network-hits rc 0; still to run on followup.md and CHANGELOG/scripts-v2.1.0.md) (mainnet-ops grep, line refs, commands, links, sha, check-network-hits)
 
 ## Commits
 - 9f02b6e docs: testnet add-ons (token file, rotation, TLS pin, P2P limit, sync note, credential path). WGVPN.md: no fact changed (checked).

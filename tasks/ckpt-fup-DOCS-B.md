@@ -8,7 +8,7 @@ Package DOCS-B: partner guide 1.6 (docs/partner/mno-node-guide/mno-node-guide.md
 - [x] 2. mno-node-guide.md edits (chapters per the deliverable list)
 - [x] 3. metadata.yaml bump (1.6, November 2026)
 - [x] 4. PDF build twice, cmp, pdftotext headings (73 pages, sha256 a2a25c266c66f2468663c6b9c9b92e244d390bbeaff7f38f07378d2aea5e9ab0 both builds; second run "PDF unchanged" and its fresh build/ output cmp-identical; pdftotext lists "3.10 Host baseline (optional)" and "5.9 Key lifecycle", "Version 1.6")
-- [x] 5. Gates (mainnet-ops grep empty in md/yaml/pdf text; no line refs; no em dashes; bash -n on every new bash block; code lines <= 90; heading links checked by the build; no support@/grant@) and commit 0d8a3b0
+- [x] 5. Gates (private-path grep empty in md/yaml/pdf text; no line refs; no em dashes; bash -n on every new bash block; code lines <= 90; heading links checked by the build; no support@/grant@) and commit 0d8a3b0
 
 ## Operator-visible changes
 (none: docs only)

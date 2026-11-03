@@ -8,7 +8,7 @@ Order of work: 8 first (so the README entries can link to it), then 6, then 7, t
 - [x] 8. CHANGELOG/scripts-v2.1.0.md (0fa6be5)
 - [x] 6. README.md changelog (14 entries, 415808a)
 - [x] 7. followup.md (dfda90d)
-- [x] 9. Gates: mainnet-ops grep empty on the three files; no line-number refs in added prose (and the three old ones in followup.md replaced); links resolve (CHANGELOG/scripts-v2.1.0.md, scripts-v2.0.0.md#before-you-update, #host-baseline-43); quoted commands parse (bash -n) and their flags exist (--check, --rotate-token, --token-stdin, --enable, --host-baseline, --expires, --require-fresh); check-network-hits clean 146/24 rc 0; no code file touched
+- [x] 9. Gates: private-path grep empty on the three files; no line-number refs in added prose (and the three old ones in followup.md replaced); links resolve (CHANGELOG/scripts-v2.1.0.md, scripts-v2.0.0.md#before-you-update, #host-baseline-43); quoted commands parse (bash -n) and their flags exist (--check, --rotate-token, --token-stdin, --enable, --host-baseline, --expires, --require-fresh); check-network-hits clean 146/24 rc 0; no code file touched
 
 ## Facts gathered (for a resumed agent)
 - Integration branch hardening-followups (read-only) has moved past this worktree's base 17bd2d8:
