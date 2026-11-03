@@ -594,12 +594,17 @@ remove_chain_data() {
 # bls-passphrase and the TPM-sealed bls-tpm.pub / bls-tpm.priv of very old
 # installs. The caller removes CONFIG_DIR.
 shred_key_files() {
-    local keys_dir="$1" config_dir="$2" d
+    local keys_dir="$1" config_dir="$2" keep="${5:-}" d
     local user="${3:-${SERVICE_USER:-telcoin}}" group="${4:-${SERVICE_GROUP:-telcoin}}"
+    # KEEP (optional): a file under CONFIG_DIR left alone (_rm_p2p_keep).
+    local -a skip=()
+    if [[ -n "$keep" ]]; then
+        skip=(! -path "$keep")
+    fi
     _rm_shred_tree "$keys_dir" "$user" "$group"
     _rm_dir "$keys_dir"
     if [[ ! -L "$config_dir" ]]; then
-        _rm_shred_tree "$config_dir" "$user" "$group"
+        _rm_shred_tree "$config_dir" "$user" "$group" ${skip[@]+"${skip[@]}"}
     fi
     d="${TN_RM_ROOT}/etc/telcoin"
     _rm_shred "${d}/bls-passphrase.cred" "${d}/bls-passphrase" "${d}/bls-tpm.pub" "${d}/bls-tpm.priv"
@@ -662,6 +667,29 @@ _rm_build_account() {
     else
         print_warn "Could not remove the tn-build account (userdel failed; a process of it may still run). Remove it by hand: sudo userdel tn-build"
     fi
+    return 0
+}
+
+# _rm_p2p_keep CONFIG_DIR SELF -- print CONFIG_DIR/p2p-limit.nft, the ruleset of
+# firewall-setup.sh's P2P new-flow limit, when it is there and a node unit other
+# than SELF remains: that node keeps the limit (its boot unit loads the file), so
+# a removal of SELF's keys and config leaves the file. Nothing otherwise.
+_rm_p2p_keep() {
+    local f="${1%/}/p2p-limit.nft"
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    [[ -n "$(other_node_unit_files "$2")" ]] || return 0
+    printf '%s\n' "$f"
+}
+
+# _rm_config_dir CONFIG_DIR [KEEP] -- remove CONFIG_DIR, or, when KEEP names a file
+# in it, everything in it but KEEP (the directory stays, holding KEEP).
+_rm_config_dir() {
+    local dir="$1" keep="${2:-}"
+    if [[ -z "$keep" ]]; then
+        rm -rf "$dir" 2>/dev/null || true
+        return 0
+    fi
+    find "$dir" -mindepth 1 -maxdepth 1 ! -path "$keep" -exec rm -rf -- {} + 2>/dev/null || true
     return 0
 }
 
@@ -764,9 +792,11 @@ remove_node_host_files() {
 # /var/backups/telcoin, the data dir /var/lib/telcoin, the start scripts in a
 # real /usr/local/libexec/telcoin directory, or unit backups and drop-ins of a
 # node unit whose unit file is gone. rc 1 when none of them is.
+# The boot unit of the P2P new-flow limit (telcoin-p2p-limit.service) counts too.
 rm_leftovers_present() {
     local r="$TN_RM_ROOT" p m f
-    for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin"; do
+    for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin" \
+             "${r}/etc/systemd/system/telcoin-p2p-limit.service"; do
         if [[ -e "$p" || -L "$p" ]]; then
             return 0
         fi
@@ -823,6 +853,9 @@ remove_leftovers() {
     done
     if [[ -e "${r}/var/backups/telcoin" || -L "${r}/var/backups/telcoin" ]]; then
         shown+=("/var/backups/telcoin")
+    fi
+    if [[ -e "${r}/etc/systemd/system/telcoin-p2p-limit.service" || -L "${r}/etc/systemd/system/telcoin-p2p-limit.service" ]]; then
+        shown+=("/etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)")
     fi
     if remove_unit_leftovers "" check; then
         shown+=("unit backups and drop-ins in /etc/systemd/system")
@@ -1709,11 +1742,15 @@ json_remove() {
     fi
 
     if [[ "$scope" == "keys" ]]; then
-        local config_dir
+        local config_dir keep
         config_dir="$(tn_resolve_config_dir)"
         json_event step "Removing keys and config ${config_dir} (key and passphrase files are shredded)"
-        shred_key_files "${data_dir}/node-keys" "$config_dir" "$svc_user" "$svc_group"
-        rm -rf "$config_dir" 2>/dev/null || true
+        keep="$(_rm_p2p_keep "$config_dir" "$svc")"
+        if [[ -n "$keep" ]]; then
+            json_event step "Keeping ${keep#"$TN_RM_ROOT"}: another node unit remains here, and the P2P new-flow limit stays whole for it"
+        fi
+        shred_key_files "${data_dir}/node-keys" "$config_dir" "$svc_user" "$svc_group" "$keep"
+        _rm_config_dir "$config_dir" "$keep"
 
         # Full removal: tear down the testnet add-ons too -- the Alloy log shipper holds
         # the ingest token file (0640), and the WireGuard overlay leaves a sudo tnadmin user
