@@ -229,6 +229,11 @@ check "prompt mainnet: short one asked again" "long-enough-pass-16" "$(cat "$REC
 check_rc "prompt: end of input stops" 1 "$(prompt /dev/null testnet)"
 
 # ---- --network mainnet: recorded, and the mainnet passphrase rule applies -----------------
+# The shipped library does not offer mainnet yet (TN_MAINNET_ENABLED=0), so
+# json_set_network refuses it; from here on tn_mainnet_enabled says yes, standing for
+# the launch release (network_detect_test.sh covers the gate itself).
+check "mainnet, not enabled in this release: json_set_network refuses" "1" "$( (json_set_network mainnet) >/dev/null 2>&1; echo $? )"
+tn_mainnet_enabled() { return 0; }
 check "mainnet: json_set_network" "mainnet 487" "$( json_set_network mainnet; printf '%s %s' "$NETWORK" "$CHAIN_ID" )"
 KGM=()
 for a in "${KG[@]}"; do
