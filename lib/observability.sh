@@ -1658,7 +1658,9 @@ obs_rotate_token() {
 }
 
 # obs_disable -- FULL teardown: stop + disable the shipper, record BOTH pipelines off,
-# shred the ingest token file (and an env file that still holds the token).
+# shred the ingest token file (and an env file that still holds the token). rc 1 (said,
+# naming the file) when a file that holds the token is still there afterwards; the
+# shipper is stopped and both pipelines are recorded off all the same.
 # Leaves the node writing JSON logs / serving --metrics locally (harmless); remove-node.sh
 # fully cleans config + data dirs + the node flags.
 obs_disable() {
@@ -1671,11 +1673,21 @@ obs_disable() {
         meta_set ENABLE_METRICS false "$meta"
     fi
     # The ingest token goes with the shipper (and an env file that still holds it).
+    local tokf envf="${OBS_ETC_DIR}/telcoin-alloy.env" left=""
+    tokf="$(obs_token_file)"
     if [[ -n "$(_obs_env_token)" ]]; then
-        _tn_shred "${OBS_ETC_DIR}/telcoin-alloy.env"
+        _tn_shred "$envf"
+        [[ ! -e "$envf" && ! -L "$envf" ]] || left="$envf"
     fi
-    _tn_shred "$(obs_token_file)"
+    _tn_shred "$tokf"
+    if [[ -e "$tokf" || -L "$tokf" ]]; then
+        left="${left:+${left} }${tokf}"
+    fi
     print_ok "Telemetry shipper stopped + disabled (${OBS_ALLOY_UNIT})."
+    if [[ -n "$left" ]]; then
+        print_warn "Could not delete ${left}, which still holds the ingest token; remove it by hand (sudo shred -u ${left})."
+        return 1
+    fi
     print_info "The ingest token file was shredded; enabling logs or metrics again asks for the token."
     print_info "The node keeps writing JSON logs / serving --metrics locally (harmless). remove-node.sh removes all obs files."
     return 0
