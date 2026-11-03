@@ -1420,6 +1420,8 @@ set_docker_image() {
     if ! out="$(tn_docker_resolve_ref "$net" "$value" edit_wait_say)"; then
         if [[ "$net" == "devnet" ]]; then
             edit_error "image refused: ${value} (give a devnet image by digest: <repository>@sha256:<digest>; devnet has no signed releases)"
+        elif [[ "$net" == "mainnet" ]]; then
+            edit_error "image refused: ${value} (give a mainnet release tag; a digest alone is taken only for a mainnet release this node has installed)"
         else
             edit_error "image refused: ${value} (give a ${net} release tag, or this network's image by digest: <repository>@sha256:<digest>)"
         fi

@@ -1530,7 +1530,9 @@ docker_current_tag() {
 # digest. A release tag of NETWORK, alone or as <repo>:<tag> of the network's
 # repository, resolves to that release's digest (tn_docker_image_for_tag: the
 # signed release's IMAGE_DIGEST, else on testnet the registry's); a
-# <repo>@sha256:<digest> reference is taken as given. Sets DOCKER_TARGET_IMAGE and
+# <repo>@sha256:<digest> reference is taken as given, except on mainnet, where a
+# digest alone is taken only when .node-meta records it as the image of a mainnet
+# release this node installed. Sets DOCKER_TARGET_IMAGE and
 # DOCKER_TARGET_TAG (empty for a digest given alone), through
 # tn_docker_resolve_ref. rc 1, with the reason on stderr, for anything else:
 # another repository, a tag that is not a release tag of NETWORK, latest, a
