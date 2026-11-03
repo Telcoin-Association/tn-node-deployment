@@ -105,6 +105,41 @@ path_ok() {
     return 0
 }
 
+# ymd_days YYYY-MM-DD -- print the day number (days since 1970-01-01) of a real
+# calendar date from 1970 on; rc 1 for anything else. Pure bash: busybox and
+# macOS date cannot parse a date, and the same text runs in every script that
+# reads a MANIFEST date (tools/tests/release_scripts_test.sh checks the copies).
+ymd_days() {
+    local y m d n
+    [[ "$1" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || return 1
+    y=$((10#${BASH_REMATCH[1]}))
+    m=$((10#${BASH_REMATCH[2]}))
+    d=$((10#${BASH_REMATCH[3]}))
+    n=31
+    if [[ $m -eq 4 || $m -eq 6 || $m -eq 9 || $m -eq 11 ]]; then
+        n=30
+    elif [[ $m -eq 2 ]]; then
+        n=28
+        if (( y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) )); then n=29; fi
+    fi
+    if (( y < 1970 || m < 1 || m > 12 || d < 1 || d > n )); then return 1; fi
+    # Days from the civil date (H. Hinnant's algorithm), the year starting in March.
+    if (( m <= 2 )); then y=$((y - 1)); m=$((m + 9)); else m=$((m - 3)); fi
+    printf '%s\n' "$(( (y / 400) * 146097 + (y % 400) * 365 + (y % 400) / 4 - (y % 400) / 100 \
+        + (153 * m + 2) / 5 + d - 1 - 719468 ))"
+}
+
+# warn_expired TAG EXPIRES: an expired release (today, UTC, on or after EXPIRES)
+# is still installed, with a warning that a newer signed release is overdue.
+warn_expired() {
+    local today
+    [[ -n "$2" ]] || return 0
+    today="$(ymd_days "$(date -u +%Y-%m-%d)")" || return 0
+    (( today >= $(ymd_days "$2") )) || return 0
+    print_warn "Script release $1 expired on $2; a newer signed release is overdue. Installing it anyway."
+    print_info "The release still verifies. If no newer one appears soon, tell support@telcoin.org."
+}
+
 # fetch URL DEST: download over HTTPS only.
 fetch() {
     if [[ "$DOWNLOADER" == "curl" ]]; then
@@ -171,10 +206,11 @@ confirm_overwrite() {
 # verify_release SRC TREE: check SRC/MANIFEST.sig against the embedded signers
 # and that the manifest names this installer's tag, then copy every listed file
 # whose hash matches into TREE (with MANIFEST and MANIFEST.sig). Returns only
-# when every file verified; any failure exits.
+# when every file verified; any failure exits. date= and expires= are optional
+# (the 2.0.0 release has neither); when present each is a calendar date.
 verify_release() {
     local src="$1" tree="$2" signers="${STAGE}/allowed_signers"
-    local line key val fmt="" rel="" serial="" n=0 hash path have seen
+    local line key val fmt="" rel="" serial="" rdate="" expires="" n=0 hash path have seen
 
     tn_allowed_signers > "$signers"
     grep -qvE '^[[:space:]]*(#|$)' "$signers" \
@@ -193,7 +229,7 @@ verify_release() {
     mkdir -p "$tree"
     while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in
-            format=*|release=*|serial=*|min_updater=*)
+            format=*|release=*|serial=*|min_updater=*|date=*|expires=*)
                 key="${line%%=*}"
                 val="${line#*=}"
                 if grep -qx "h:${key}" "$seen"; then fail "MANIFEST repeats ${key}=."; fi
@@ -202,6 +238,8 @@ verify_release() {
                     format) fmt="$val" ;;
                     release) rel="$val" ;;
                     serial) serial="$val" ;;
+                    date) rdate="$val" ;;
+                    expires) expires="$val" ;;
                 esac
                 ;;
             sha256\ \ *)
@@ -229,6 +267,12 @@ verify_release() {
     [[ "$fmt" == "1" ]] || fail "MANIFEST format ${fmt:-missing} is not supported by this installer."
     [[ "$rel" == "$TN_SCRIPTS_TAG" ]] || fail "MANIFEST is for ${rel:-no release}, expected ${TN_SCRIPTS_TAG}."
     [[ "$serial" =~ ^[1-9][0-9]{0,8}$ ]] || fail "MANIFEST serial is malformed."
+    if grep -qx 'h:date' "$seen" && ! ymd_days "$rdate" >/dev/null; then
+        fail "MANIFEST date=${rdate} is not a calendar date YYYY-MM-DD."
+    fi
+    if grep -qx 'h:expires' "$seen" && ! ymd_days "$expires" >/dev/null; then
+        fail "MANIFEST expires=${expires} is not a calendar date YYYY-MM-DD."
+    fi
     [[ $n -gt 0 ]] || fail "MANIFEST lists no files."
     grep -qx 'p:update-scripts.sh' "$seen" || fail "MANIFEST does not list update-scripts.sh."
     grep -qx 'p:lib/allowed_signers' "$seen" || fail "MANIFEST does not list lib/allowed_signers."
@@ -236,6 +280,7 @@ verify_release() {
     cp "${src}/MANIFEST.sig" "${tree}/MANIFEST.sig"
     find "$tree" -type f -name '*.sh' -exec chmod +x {} +
     print_ok "All ${n} files match the signed MANIFEST (serial ${serial})"
+    warn_expired "$rel" "$expires"
 }
 
 parse_args() {
