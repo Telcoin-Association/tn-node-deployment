@@ -1680,6 +1680,182 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
+### update-scripts v2.1.0 — release expiry and a read-only --check
+`update-scripts.sh v2.1.0` installs `scripts-v2.1.0`, the second signed release (serial 2).
+
+- `MANIFEST` can carry `date=YYYY-MM-DD` and `expires=YYYY-MM-DD` after `min_updater=`; each
+  appears once at most and must be a real calendar date, or the manifest is malformed. Updaters
+  and installers of 2.0.0 ignore both keys (#40).
+- From the day `expires=` names (UTC), an update run warns `Script release <tag> expired on
+  <date>; a newer signed release is overdue. Installing it anyway.` and installs it: expiry asks
+  for a newer release, it revokes nothing. install.sh prints the same warning.
+- New `bash ~/telcoin-node-scripts/update-scripts.sh --check` reports the installed and the newest
+  signed release (tag, serial, release date, expiry), a pending update and an expired release. It
+  needs no root, asks nothing and installs nothing. Exit status 0 when current and fresh, 1 when
+  an update is pending or a release has expired, 2 when a release is missing, cannot be fetched or
+  does not verify, or the updater would refuse it.
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### lib/common.sh v2.1.0 — mainnet switch, release floor everywhere, epoch-length margins, host baseline
+- `readonly TN_MAINNET_ENABLED=0` gates mainnet (`tn_mainnet_enabled`). While it is 0 the network
+  menu loops on "Mainnet has not launched yet." and a `--json` setup on mainnet is refused before
+  anything changes; the release that pins the mainnet chain configs flips it (#45).
+- `tn_ref_min_check`, the release floor, now runs on update and image-change paths too (#51).
+- On mainnet a Docker image is named by its release tag. A digest given alone is taken only when
+  `.node-meta` records it as the image of a mainnet release this node installed, since testnet and
+  mainnet share the ghcr repository (#46).
+- `tn_wait_restart_window` derives the margin (epoch length / 72, held to 300-900 s) and the
+  settle time (epoch length / 240, held to 90-300 s) from the epoch length; adiri keeps 300 and
+  90. A value you set is used as given, and a `TN_EPOCH_WAIT_MAX` you set is kept and warned about
+  when it is shorter than margin + settle + two polls (#49).
+- `check_internet` probes the chosen network's public RPC, not adiri's on every network (#47).
+- New host baseline functions (`tn_host_baseline_install`, the refresh, the status lines in
+  `tn_host_audit`) (#43).
+- `tn_keytool_has` counts a wrapper that fails (busybox `setpriv`, a docker error) as a probe that
+  could not run, not as "not listed" (#32).
+- The setup prompts call the ingest token the hub's token from the Association, and the systemd
+  floor messages say that Ubuntu 24.04 ships 255 (#34).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### telcoin-ui v2.1.0 — P2P sources, the P2P new-flow limit, status link per network
+- The firewall card's enable form takes "P2P sources" beside "SSH sources" (at most 16 addresses
+  or CIDRs of /8 or narrower). The card shows the kept list and a "P2P new-flow limit" row, with
+  "(not restored at boot)" when it would not come back after a reboot (#41).
+- A source error names its list (`SSH sources: ...`, `P2P sources: ...`); a list that is not text
+  is refused.
+- The Network tab links the status page of the node's network: testnet has one; mainnet, devnet
+  and an unknown network show no link (#47).
+- The helper takes `firewall-enable [<ssh-sources>|-] [<p2p-sources>]` and refuses mainnet setups
+  while the library says mainnet is not enabled (#45). The sudoers file is unchanged.
+- `ui/telcoin-ui.service` has `LimitCORE=0`.
+
+Run the `sudo bash ui/install-ui.sh --update` that update-scripts prints. Full release note:
+[CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### install-ui v2.1.0 — sudoers comment
+The comment in the sudoers file it writes names no testnet tag (#47). The rules are unchanged.
+
+### lib/observability.sh v2.1.0 — ingest token in a file, TLS 1.3, push URL overrides
+`lib/observability.sh` (testnet add-on, used by setup-observability.sh):
+
+- The hub ingest token lives in `/etc/telcoin/alloy/ingest-token` (root:telcoin-alloy 0640), never
+  in `telcoin-alloy.env`, the unit, a command line or Alloy's environment. Native Alloy reads it
+  with `LoadCredential=`; the Docker sidecar gets a read-only bind mount and `--group-add`. Both
+  units carry `LimitCORE=0` (#35).
+- `observability/config.alloy` reads the token with `bearer_token_file` and pins TLS 1.3 with the
+  push URL's host as the server name.
+- A host still on the env-file token moves to the file at the next enable, partial disable or
+  token rotation; the status warns until then.
+- A push URL given with `--push-url` / `--metrics-push-url` is recorded with
+  `OBS_PUSH_URL_SOURCE=override` (`OBS_METRICS_PUSH_URL_SOURCE=override`) and kept;
+  `--push-url default` drops it. Without an override the URL follows the release default, and an
+  env file written by 2.0.x counts as the default.
+- A full disable shreds the token file. The native unit's `InaccessiblePaths=` names
+  `/etc/telcoin/bls-passphrase.cred`.
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### setup-node v2.1.0 — --host-baseline, mainnet refusals, network-keyed checks
+- New `--host-baseline` installs `auditd` and `aide` (no recommended packages), loads audit
+  watches on the node keys, `/etc/telcoin` and the unit, and makes an AIDE baseline of the node's
+  files (`/etc/aide/telcoin-node.conf`, `/var/lib/aide/telcoin-node.db`). On an installed node the
+  flag alone makes the baseline and changes nothing else. A failure is a warning, and a failed run
+  leaves no rules, config or marker behind (#43).
+- `--json --network mainnet` is refused while mainnet is not enabled (#45).
+- On mainnet a `--docker-image` digest, or one typed at the prompt, is taken only for a mainnet
+  release this node recorded: `on mainnet give the release tag with --release-tag, so the image
+  comes from the signed release` (#46). The image examples on mainnet show the ghcr repository.
+- The connectivity check probes the chosen network's public RPC and runs after the network is
+  selected (#47).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### update-node v2.1.0 — release floor on every prepare, baseline refresh
+- Every prepare path (source, release, Docker; interactive and `--json`) refuses a target below
+  the network's oldest supported release before anything is fetched (#51), and on mainnet a
+  digest alone only for a mainnet release this node recorded (#46).
+- After each verified apply on a host with `HOST_BASELINE=true` it makes the AIDE baseline again;
+  a failure is a warning (#43).
+- `--help` says the restart margin follows the epoch length (#49).
+- The post-update check is unchanged: a node still catching up when the vote window ends keeps the
+  new release and a `--json` apply ends `"ok":true` with `"voting":false`;
+  `TN_UPDATE_VOTE_ROLLBACK=1` fails the check instead. The docs now describe that case (#33).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### edit-config v2.1.0 — keytool verify before a passphrase write, floor on image changes
+- The passphrase change, `--reseal` and `--migrate-credential` check the passphrase with
+  `keytool verify` before the first write, on a node release that lists it (telcoin-network
+  #1730). None does yet, so today the run logs `keytool verify is not in this release; skipped`. A
+  passphrase that does not open the key stops the action with nothing changed (#32).
+- The Docker image change (menu and `--set docker_image=`) applies the release floor, and on
+  mainnet asks for a mainnet release tag (#46, #51).
+- On a host with `HOST_BASELINE=true` it makes the baseline again after a restart that came back,
+  the menu's "Restart node", and a passphrase action that went through (#43).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### install-caddy v2.1.0 — baseline refresh after an RPC change
+After an rpc-enable or rpc-disable that went through, a host with `HOST_BASELINE=true` makes the
+AIDE baseline again (#43). The dashboard site writes nothing the baseline covers.
+
+### check-node v2.1.0 — the network's own RPC, the script release block
+- The comparison RPC is the public RPC of the node's network. When the network is unknown and no
+  `--network-rpc` is given, the comparison is skipped (`Network RPC:  none (network unknown; give
+  --network-rpc URL to compare)`) instead of made against adiri (#47).
+- New `Checking the script release...` block: the installed release, its age and its expiry. An
+  expired release or a missing record is a warning that names the command to run; it never counts
+  as a health issue (#40).
+- `--audit` shows the host baseline lines (#43), and the observability status shows the ingest
+  token file (#35).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### firewall-setup v2.1.0 — P2P new-flow limit, the update lock on every apply
+- With P2P open to every source on a host with a node, every enable path and "Manage node ports"
+  load the nftables table `inet tn_p2p`: at most 20 packets of new, not yet answered P2P flows per
+  minute from one IPv4 address or IPv6 /64, after a burst of 40. Answered flows are never limited,
+  and ufw still decides every other packet. `TN_P2P_NEW_FLOW_RATE` and `TN_P2P_NEW_FLOW_BURST`
+  override the numbers for one run (#41).
+- `/etc/telcoin/p2p-limit.nft` and `telcoin-p2p-limit.service` load the table again at boot. A
+  limit that already matches is not rewritten. With a P2P source list, or without `nft`, there is
+  no table (a warning when `nft` is missing).
+- Every enable path and "Manage node ports" take the update lock.
+- The status screen and `--json --status` (`p2p_new_flow_limit`) report the limit. The health-port
+  block shows on testnet and devnet only (#47).
+- A change that went through makes the host baseline again (#43).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### setup-vpn v2.1.0 — baseline refresh
+On a host with `HOST_BASELINE=true`, an enable, a `--sync-keys` that grants or revokes maintainer
+root, and a `--disable` make the AIDE baseline again (#43).
+
+### remove-node v2.1.0 — baseline, P2P limit and token teardown; the decommissioning note
+- With the last node unit it removes the host baseline (rules, AIDE config and databases, marker;
+  the packages stay) and the P2P new-flow limit (unit, boot copy, table). While another node unit
+  remains, both stay whole for it, in the menu and with `--json` (#41, #43).
+- It shreds the Alloy ingest token file with the add-ons (#35).
+- The shred note adds that decommissioning a validator host means destroying or crypto-erasing
+  its disk and deleting every snapshot and image of it (#32).
+- It also offers to remove containers that run the ghcr repository image (#46).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
+### setup-observability v2.1.0 — --rotate-token, the token file
+- New `--rotate-token` (menu entry 8; Exit is now 9) replaces the ingest token and restarts Alloy
+  only, never the node; when Alloy does not stay up it puts the old files back and exits 1. Pipe
+  the token in: `printf '%s\n' "$NEW_TOKEN" | sudo bash setup-observability.sh --rotate-token
+  --token-stdin` (#35).
+- After update-scripts, run it once with the same token to move the token out of
+  `telcoin-alloy.env` into `/etc/telcoin/alloy/ingest-token` (lib/observability.sh v2.1.0).
+- TERM, INT and HUP remove an interrupted token write and release the update lock.
+- A change that went through makes the host baseline again; the token file stays out of it (#43).
+
+Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
 ### lib/common v2.0.1 — devnet Docker images by digest
 Devnet can run as a Docker install. `TN_DEVNET_IMAGE_REPO` is the legacy Artifact Registry
 repository `us-docker.pkg.dev/telcoin-network/tn-public/adiri`, and `TN_DEVNET_IMAGE_REPOS` also
