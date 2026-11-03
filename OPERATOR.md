@@ -1119,7 +1119,7 @@ The scripts' own changes do not show up as differences: these runs make the base
 
 A refused or failed run does not refresh.
 The report of `setup-node.sh --audit` and `check-node.sh --audit` (section 1.2) shows the state; `make it again: sudo ./setup-node.sh --host-baseline` in a warning is the fix.
-`remove-node.sh` removes the rules (and unloads them), the AIDE config, both databases and the marker with the last node unit on the host; while another node unit remains it keeps them and says so.
+`remove-node.sh` removes the rules (and unloads them), the AIDE config, both databases and the marker with the last node unit on the host; while another node unit remains it keeps them and says so. The kept rules and AIDE config still name the removed unit and its data directory, so after removing one node of two run `sudo ./setup-node.sh --host-baseline` again to make a baseline of what is left.
 The packages stay (`sudo apt-get purge auditd aide` removes them).
 
 ## 5. Public RPC (https + wss)
