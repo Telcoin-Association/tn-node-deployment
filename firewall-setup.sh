@@ -2019,9 +2019,11 @@ caddy_serves_public_edge() {
 # desired_firewall_rules -- print the rule set THIS host should have, one per line:
 #   <spec>\t<label>\t<source>
 # <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
-# (anywhere|restricted|<cidr>). Node P2P (one rule per fw_p2p_ports line) on every
-# install; overlay SSH only when the VPN is active; 80/443 only when Caddy manages
-# the dashboard.
+# (anywhere|restricted|<cidr>[,<cidr>...]): the SSH and the P2P rows name their
+# source list (--ssh-from / --p2p-from of this run, else SSH_ALLOW_FROM /
+# P2P_ALLOW_FROM in .node-meta) joined with commas, and say anywhere without one.
+# Node P2P (one rule per fw_p2p_ports line) on every install; overlay SSH only
+# when the VPN is active; 80/443 only when Caddy manages the dashboard.
 desired_firewall_rules() {
     local ssh_port has_node=false p2p port label nworkers
     ssh_port="$(get_ssh_port)"
@@ -2036,11 +2038,13 @@ desired_firewall_rules() {
         printf '%s\t%s\t%s\n' "${UPTIME_KUMA_PORT}/tcp" "Uptime Kuma health" "restricted"
     fi
     if [[ "$has_node" == "true" ]]; then
+        local p2p_src
+        p2p_src="$(fw_sources p2p 2>/dev/null | paste -sd, -)" || p2p_src=""
         p2p="$(fw_p2p_ports)"
         nworkers="$(grep -c ' worker-' <<< "$p2p" || true)"
         while read -r port label; do
             [[ -n "$port" ]] || continue
-            printf '%s\t%s\t%s\n' "${port}/udp" "Node P2P ($(fw_p2p_what "$label" "$nworkers"))" "anywhere"
+            printf '%s\t%s\t%s\n' "${port}/udp" "Node P2P ($(fw_p2p_what "$label" "$nworkers"))" "${p2p_src:-anywhere}"
         done <<< "$p2p"
     fi
     if vpn_active; then
