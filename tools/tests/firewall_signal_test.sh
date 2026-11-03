@@ -301,8 +301,10 @@ release_lock() {
         rm -rf "${TN_UPDATE_LOCK_FILE}.d"
     fi
 }
+# A testnet host, where these runs need no source list and would otherwise apply.
 for args in "--reset" "--enable" "--reset --ssh-from 203.0.113.0/24" "--json --enable"; do
     fixture
+    printf 'NETWORK=testnet\nSERVICE_NAME=telcoin\nOWNERSHIP_LAYOUT=2\n' > "$R/etc/telcoin/.node-meta"
     before_st="$(state)"
     before_tbl="$(table)"
     before_boot="$(boot)"
