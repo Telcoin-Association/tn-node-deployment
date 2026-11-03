@@ -5015,8 +5015,8 @@ def _update_stream(argv, env=None, on_close=None, stdin_data=None, redact=()):
 
     If the client goes away, the generator stops without yielding again; the
     child gets 2 s to finish and is then terminated. `env`, when given, fully
-    replaces the child environment (Setup passes TN_SETUP_* and
-    TN_BLS_PASSPHRASE this way). `on_close` runs once when the response is
+    replaces the child environment (Setup passes TN_SETUP_* this way; the
+    passphrase never travels in it). `on_close` runs once when the response is
     closed, after the child has exited or been stopped (Setup releases its
     single-flight guard with it). `stdin_data`, when given, is written to the
     child's stdin, which is then closed (the setup passphrase, the dashboard

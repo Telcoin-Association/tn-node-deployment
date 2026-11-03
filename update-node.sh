@@ -20,9 +20,11 @@
 # file is backed up first and restored if the update rolls back.
 #
 # Before APPLY stops a node that is voting in the current committee, it waits
-# for the epoch to close and settle when the boundary is within five minutes,
-# so the node is not down for the epoch change. The wait is capped at 30
-# minutes. A rollback restart never waits.
+# for the epoch to close and settle when the boundary is within the restart
+# margin (five minutes on testnet; derived from the epoch length elsewhere, up
+# to 15 minutes), so the node is not down for the epoch change. The wait is
+# capped at TN_EPOCH_WAIT_MAX (30 minutes by default). A rollback restart never
+# waits.
 #
 # ONE-WAY UPDATES: when the node runs a release older than v0.16.0 and the
 # target is v0.16.0 or newer (or a branch or a commit), APPLY cannot be undone
