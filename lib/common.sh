@@ -6407,6 +6407,10 @@ tn_host_baseline_install() {
         _tn_hb_say warn "No node keys at ${data}/node-keys; the host baseline was not made." "$fn"
         return 1
     fi
+    # An AIDE directory another account owns is refused before anything is written.
+    if [[ -e "${p}/var/lib/aide" || -L "${p}/var/lib/aide" ]] && ! _tn_hb_db_dir_ok "$fn"; then
+        return 1
+    fi
 
     _tn_hb_say step "Installing auditd and aide (no recommended packages)" "$fn"
     if ! _tn_hb_apt_install; then
