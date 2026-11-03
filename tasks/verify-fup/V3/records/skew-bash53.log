@@ -1,0 +1,27 @@
+ok    skew obs: --rotate-token stops with rc 2
+ok    skew obs: names the library
+ok    skew obs: names update-scripts.sh
+ok    skew obs: names obs_rotate_token
+ok    skew obs json: rc 2
+ok    skew obs json: one done ok:false event, no other non-empty line
+FAIL  skew obs json: stdout carries no blank line either (pre-existing gate)
+      expected (<) vs actual (>):
+      1c1
+      < 0
+      ---
+      > 2
+ok    skew obs json enable: rc 2 (the gate covers every run)
+ok    skew common: --rotate-token stops with rc 2
+ok    skew common: names the library
+ok    skew common: names update-scripts.sh
+ok    skew common json: rc 2
+ok    skew common json: one done ok:false event, no other non-empty line
+FAIL  skew common json: stdout carries no blank line either (pre-existing gate)
+      expected (<) vs actual (>):
+      1c1
+      < 0
+      ---
+      > 2
+ok    skew common json enable: rc 2 (the gate covers every run)
+
+15 checks, 2 failures, 0 skipped

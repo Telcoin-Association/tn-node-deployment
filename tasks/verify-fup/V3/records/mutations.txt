@@ -1,0 +1,44 @@
+# V3 mutation run 2026-11-03T19:13:19Z on b3a9a5e
+baseline lib   212 checks, 5 failures, 1 skipped
+baseline lib32 211 checks, 5 failures, 2 skipped
+baseline skew  15 checks, 2 failures, 0 skipped
+baseline e2e   80 checks, 3 failures, 0 skipped
+M01 token mode 0644                                        KILLED (lib) by: migration: token file 0640 telcoin-alloy;token file: mode 640 (as written);
+M02 token written through a pipe                           KILLED (lib) by: token write: through tn_write_root_file in this shell (no pipe subshell)
+M03 token through a here-string (bash 3.2 temp file)       KILLED (lib32) by: rotate up: token written via a pipe (process substitution);token write: stdin is a pipe (process substitution), not a here-string temp file
+M04 env file keeps OBS_INGEST_TOKEN                        KILLED (lib) by: enable: env file without the token;env file (docker): no token;
+M05 env file without OBS_PUSH_HOST                         KILLED (lib) by: devnet env: push host without the port;env file: OBS_PUSH_HOST
+M06 env CREDENTIALS_DIRECTORY for every method             KILLED (lib) by: env file (native): no CREDENTIALS_DIRECTORY
+M07 native unit without LoadCredential                     KILLED (lib) by: native unit: LoadCredential;partial disable: unit now has LoadCredential
+M08 native unit without LimitCORE                          KILLED (lib) by: native unit: LimitCORE=0
+M09 InaccessiblePaths back to credstore                    KILLED (lib) by: native unit: InaccessiblePaths names the .cred with a - prefix;native unit: no credstore
+M10 docker without the token mount                         KILLED (lib) by: docker enable: unit mounts it;docker ExecStart: token file mounted read-only at the fixed path;
+M11 docker without --group-add                             KILLED (lib) by: docker ExecStart: --group-add gid;docker unit: the host group's gid goes into --group-add
+M12 docker without --ulimit core=0                         KILLED (lib) by: docker ExecStart: --ulimit core=0
+M13 docker unit without LimitCORE                          KILLED (lib) by: docker unit: LimitCORE=0
+M14 docker token via -e                                    KILLED (lib) by: docker ExecStart: no -e;docker unit: no token variable
+M15 vendored logs endpoint back to bearer_token env        KILLED (lib) by: fallback endpoint blocks == vendored endpoint blocks;fallback functional body == vendored (comments/whitespace ignored);
+M16 vendored metrics tls_config min_version TLS12          KILLED (lib) by: fallback endpoint blocks == vendored endpoint blocks;fallback functional body == vendored (comments/whitespace ignored);
+M17 vendored server_name literal                           KILLED (lib) by: fallback endpoint blocks == vendored endpoint blocks;fallback functional body == vendored (comments/whitespace ignored);
+M18 fallback logs without tls_config                       KILLED (lib) by: fallback both: logs server_name;fallback both: TLS13 twice;
+M19 migration does not move the legacy token               KILLED (lib) by: existing token: the token file first;migration: token file 0640 telcoin-alloy;
+M20 migration said every time                              SURVIVED (lib) 212 checks, 5 failures, 1 skipped
+M21 existing token: legacy line first                      KILLED (lib) by: existing token: token file beats the legacy line
+M22 rotate: no rollback of the files                       KILLED (lib) by: rotate dead: files as before;rotate flapping: restored token file keeps its mode and group;
+M23 rotate: no restart after the rollback                  KILLED (lib) by: rotate dead: two restarts;rotate flapping: OBS_ROTATE_MSG says the previous token runs again;
+M24 settle: one is-active read                             KILLED (lib) by: rotate flapping: OBS_ROTATE_MSG says the previous token runs again;rotate flapping: rc 1;
+M25 rotate: restart result not checked                     KILLED (lib) by: rotate dead: files as before;rotate dead: rc 1;
+M26 rotate: no refusal without the unit                    KILLED (lib) by: rotate without the unit: nothing changed;rotate without the unit: rc 1
+M27 rotate: no trim                                        KILLED (lib) by: rotate adversarial 1: token file exact;rotate adversarial 2: token file exact;
+M28 disable keeps the token file                           KILLED (lib) by: disable: token file gone
+M29 status without the token line                          KILLED (lib) by: status: legacy token still in env;status: missing;
+M30 host keeps the port                                    KILLED (lib) by: devnet env: metrics host without the port (URL without a path);devnet env: push host without the port;
+M31 remove-node without the token shred                    KILLED (e2e) by: E15: shred ran on the legacy env file;E15: shred ran on the token file
+M32 rotate combined with enable allowed                    KILLED (e2e) by: E8 --disable-metrics: nothing changed;E8 --enable-health: nothing changed;
+M33 rotate cli: no non-tty refusal                         KILLED (e2e) by: E2: said
+M34 json rotate: no token:rotated                          KILLED (e2e) by: E6 json: rc 0;E6: last line done ok:true with token:rotated
+M35 json_on_exit without tn_remove_inflight_tmp            KILLED (e2e) by: E13 json: no temp copy of the new token left in /etc/telcoin/alloy
+M36 gate without obs_rotate_token                          KILLED (skew) by: skew obs json enable: rc 2 (the gate covers every run);skew obs json: rc 2;
+M37 disable does not shred a legacy env                    KILLED (lib) by: disable: env holding the legacy token shredded
+M38 rotate token file written 0640 root:root               KILLED (lib) by: docker enable: token file group telcoin-alloy;migration: token file 0640 telcoin-alloy;
+37 of 38 mutants killed

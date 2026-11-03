@@ -1,0 +1,8 @@
+bash5.3    lib-bash53.log               rc=1  213 checks, 5 failures, 0 skipped
+bash3.2    lib-bash32.log               rc=1  212 checks, 5 failures, 1 skipped
+ubuntu     lib-ubuntu.log               rc=1  212 checks, 5 failures, 1 skipped
+bash5.3    skew-bash53.log              rc=1  15 checks, 2 failures, 0 skipped
+bash3.2    skew-bash32.log              rc=1  15 checks, 2 failures, 0 skipped
+ubuntu     skew-ubuntu.log              rc=1  15 checks, 2 failures, 0 skipped
+bash5.3    e2e-host.log                 rc=0  0 checks, 0 failures, 1 skipped
+ubuntu     e2e-ubuntu.log               rc=1  80 checks, 3 failures, 0 skipped
