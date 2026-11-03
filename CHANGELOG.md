@@ -7,6 +7,49 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Partner guide 1.5 and technical specification 1.2, November 2026 -- the documents describe telcoin-network main at 7167e7800
+`main` (28a7cc7: the mainnet hardening round and scripts-v2.0.0, the devnet Docker images, a
+dependabot bump) is merged into the `docs/technical-specification` branch; the conflicts in
+`AGENTS.md`, `CHANGELOG.md`, `OPERATOR.md`, `followup.md`, the guide and the task notes keep
+both sides. The guide (1.5) and the specification (1.2) now describe telcoin-network `main` at
+7167e7800 (2 November 2026, 27 commits past `v0.16.0-adiri`, still the newest tag; the
+specification's cover prints `Protocol v0.16.0-adiri, main at 7167e7800`, and its Introduction
+says so). Where an operator acts differently on the two, the guide, OPERATOR.md and README.md
+name the release ("on `v0.16.0-adiri`", "from the next release"); a committee node takes the
+tndb update from a terminal, because the Node Manager UI's `--json` apply rolls back on its own
+after a failed check.
+Corrected: a committee member whose newest epoch record is for a later epoch starts the epoch
+as `CvvInactive` (2635e26a); a `CvvInactive` node refuses new `eth_sendRawTransaction` calls with
+`validator is inactive; retry another endpoint` instead of holding them (#1553); the certifier
+and vote-barrier lines end `; ending the epoch (the node stops if its stores cannot write)`,
+after which the node exits with status 1 and systemd restarts it (#1558); a dial tries a peer's
+signed addresses in turn, 10 seconds each, four at most, 45 seconds in all (#1690); committee
+members count against the fixed connection ceilings (128 per swarm, 8 per peer); the release
+hand check reads the `gpgv --status-fd 1` status lines, because `gpgv` prints `Good signature
+from` and exits 0 on an expired or revoked key (#694). Added: the consensus database of the next
+release is tndb at `consensus-db/tndb/{epoch,kad,cache}`, migrated from MDBX on its first start,
+one way; the `Cannot check database (epoch)` check and its remedy exist from that release only, and
+`v0.16.0-adiri` has no such check (#1572, #1558); the QUIC
+receive windows (2 MiB per stream, 4 MiB per connection, 256 streams) and the gossip frame
+limits (#1677 and the security merges); the sync-stream admission tiers with slots reserved for
+the committee and the Mild penalty for a held slot; gossip from authors outside a replayed
+epoch's allowlist is dropped without penalty; workers serve batches for their own epoch and the
+one before (#1737) and the batch requester's time bounds (#1740); a bare `--healthcheck <port>`
+binds loopback from the next release (#1696); `admission` and `serve_budget` join the opt-in
+`network-config` keys; a lowered worker count hands the removed workers' transactions to worker
+0 (#1544-#1546); mainnet is planned with six-hour epochs (#1559); the `Commit SHA` and
+`Build Features` lines of `--version` in the release hand check; three host settings from the
+hardware page (ext4 or xfs, no address-space limit, power saving off). The fork table, the
+hardware figures, the clock-drift rule, the rejoin window, the chain-config pins and the stdin
+passphrase delivery are unchanged. `--bls-passphrase-source credential` and
+`--bootstrap-peers-file` (#1715) are script follow-ups, not document changes.
+Both covers print the month only ("November 2026", never a day); the guide template now guards
+its `dcterms` tags like the specification's, so a month-only date leaves the PDFs without a
+creation date and the build byte-reproducible. The guide's contact is `devs@telcoin.org`
+throughout (main's guide 1.3.3 said `support@telcoin.org`); OPERATOR.md and README.md keep
+`support@telcoin.org`. Both PDFs are rebuilt in the `tn-pdf-tools` container (pandoc 3.8.3,
+WeasyPrint 70.0). Nothing updater-tracked changed.
+
 ### Devnet Docker images, October 2026 -- lib/common v2.0.1, setup-node v2.0.1, update-node v2.0.1, edit-config v2.0.1, telcoin-ui v2.0.1
 A devnet node can now run as a Docker install. lib/common, setup-node, update-node and
 edit-config are 2.0.1. The UI server is 2.0.1 too (`UI_VERSION`), but only to keep its copies
@@ -133,6 +176,37 @@ The mainnet image repository is now set: ghcr.io, as for testnet. The mainnet ge
 committee and parameters hashes are not set yet, so no mainnet release can be verified and
 mainnet installs, Docker installs among them, are refused until they are. The mainnet public
 RPC is set at launch.
+
+### Partner guide 1.4, October 2026 -- the guide describes telcoin-network main
+The MNO node guide (`docs/partner/mno-node-guide/`, version 1.4) now describes telcoin-network
+`main` at 98849a221, three merges past `v0.16.0-adiri` (#1622, #1647 and #1572, the epoch
+restart recovery). Corrected: a validator holds its vote on a header timestamped ahead of its
+clock, up to one second on adiri, and rejects one more than five to six seconds ahead (its drift
+tolerance plus the five-second vote timeout); the old "rejects more than a second ahead" line was
+wrong. Added: a committee node stopped inside the
+epoch-boundary window repairs its epoch records on restart and logs warnings that need no
+action; a node whose epoch database fails its start-up check stops with `Cannot check database
+(epoch)` and the Service and keys row gives the remedy (move `consensus-db/epoch`, the epoch in
+progress, aside once the network has closed that epoch, never `consensus-db/epochs`); the
+`initiating node shutdown` line after which the node keeps running but cannot vote until it is
+restarted; a `CvvInactive` member rejoins within 20 rounds of the newest commit and logs
+`attempting to rejoin consensus`; a worker the network has dropped answers
+`eth_sendRawTransaction` with `-32000` `worker is inactive`; bootstrap peers are
+discovery hints only; and a short note on the opt-in `network-config` keys (`process_budget`,
+`source_admission`, `trusted_nodes`, `committee_peers`). OPERATOR.md and README.md carry the
+same facts in their own style. Nothing updater-tracked changed.
+
+### Partner documents, October 2026 -- docs/partner/ reorganised, technical specification added
+`docs/partner/` now holds one directory per partner document plus a shared `assets/` tree.
+The MNO node guide moved unchanged into `docs/partner/mno-node-guide/` (version 1.3: the
+partner contact is `devs@telcoin.org`). `docs/partner/technical-specification/` is new: the
+Telcoin Network Technical Specification the Association hands to partners, transcribed from
+the April 2026 document into Markdown, brought up to telcoin-network `v0.16.0-adiri`
+(`protocol:` in its `metadata.yaml`), and rendered with its own template and theme (Inter,
+the light lavender palette, the card cover) into a committed PDF. `tools/build-partner-pdf.sh`
+takes the document name or `--all`; the reference toolchain is pandoc 3.12.1, WeasyPrint
+70.0 and poppler 26.10.0. AGENTS.md "Partner documents" has the rules. Nothing updater-tracked
+changed.
 
 ### v0.16.0-adiri round, October 2026 -- update-scripts v1.1.72
 Full release note: [CHANGELOG/v0.16.0-adiri.md](CHANGELOG/v0.16.0-adiri.md).

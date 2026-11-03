@@ -17,10 +17,12 @@ and is **never shipped to operators**. None of it exists on an operator box. Ass
 any path under `common/` or `devnet-genesis/` is absent at runtime for a real operator.
 
 `OPERATOR.md` at the repo root is the operator runbook; `README.md` is the reference.
-`docs/partner/mno-node-guide.md` is the partner guide for mobile network operators, the
-source of the branded PDF beside it. When a change alters operator-visible behaviour
-(flags, prompts, paths, ports), update `OPERATOR.md`, the README and the partner guide
-together, then rebuild the PDF (see "Partner guide (MNO PDF)" below).
+The partner documents are the guide for mobile network operators
+(`docs/partner/mno-node-guide/mno-node-guide.md`) and the Telcoin Network Technical
+Specification (`docs/partner/technical-specification/technical-specification.md`), each the
+source of the branded PDF beside it. When a change alters operator-visible behaviour (flags,
+prompts, paths, ports), update `OPERATOR.md`, the README and the partner guide together, then
+rebuild the PDF (see "Partner documents" below).
 
 ## The boundary rule
 
@@ -199,46 +201,66 @@ environment; the script removes `TN_BLS_PASSPHRASE` from its own environment bef
 runs. Future agents must keep it that way: do not add a send, a signing step or a key prompt to
 it.
 
-## Partner guide (MNO PDF)
+## Partner documents
 
-`docs/partner/mno-node-guide.pdf` is the guide the Association hands to prospective mobile
-network operators. It is generated, never edited by hand. The source is
-`docs/partner/mno-node-guide.md`; the look comes from `docs/partner/template.html`,
-`docs/partner/theme.css` and the vendored logos and fonts under `docs/partner/assets/`;
-the version, date and subtitle live in `docs/partner/metadata.yaml`.
+`docs/partner/` holds one directory per partner document plus a shared `assets/` tree:
 
-- Rebuild with `bash tools/build-partner-pdf.sh` after changing the Markdown,
-  `metadata.yaml`, `template.html`, `theme.css` or anything under `assets/`. Preview the
-  HTML without WeasyPrint using `--html-only --open`. Where WeasyPrint cannot run natively,
-  build in the `tn-pdf-tools` container from the repo root. `tn-pdf-tools` is a locally built
-  image (Debian 12, pandoc 3.8.3, WeasyPrint 70.0); no Dockerfile for it is committed.
+- `docs/partner/mno-node-guide/` is the guide the Association hands to prospective mobile
+  network operators.
+- `docs/partner/technical-specification/` is the Telcoin Network Technical Specification
+  handed to partners. It describes the protocol as of the telcoin-network release named by
+  `protocol:` in its `metadata.yaml`; refresh it with every protocol release.
+
+Each directory holds `<name>.md` (the source), `<name>.pdf` (generated, never edited by hand,
+committed), `metadata.yaml` (version, date, subtitle, contact and `toc-depth`; the
+specification also sets `protocol` and `confidentiality`), `template.html` and `theme.css`.
+The shared `docs/partner/assets/` is vendored: the fonts (Geist and Geist Mono under
+`fonts/geist/` for the guide, Inter under `fonts/inter/` for the specification, all under the
+SIL Open Font License 1.1 with their licence files beside them), the logos (the two white
+wordmarks `telcoin-network-light.svg` and `telcoin-association-white.svg` for dark
+backgrounds, the two `-dark` ones for light backgrounds) and `covers/`. Record the provenance
+of every vendored file in `docs/partner/assets/README.md`.
+
+- Rebuild with `bash tools/build-partner-pdf.sh <name>` after changing a document's Markdown,
+  `metadata.yaml`, `template.html` or `theme.css`, and with `--all` after a change under
+  `assets/`, which can move both PDFs. Preview the HTML without WeasyPrint using
+  `--html-only --open`. Scratch output goes to `docs/partner/<name>/build/`, which is
+  gitignored. Where WeasyPrint cannot run natively, build in the `tn-pdf-tools` container
+  from the repo root (its toolchain is in the reference-toolchain item below):
 
   ```
-  docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w tn-pdf-tools bash tools/build-partner-pdf.sh
+  docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w tn-pdf-tools bash tools/build-partner-pdf.sh --all
   ```
 
-- Bump `version` and `date` in `metadata.yaml` with every content change. The build warns
-  when the Markdown changed and the metadata did not.
+- Bump `version` and `date` in the document's `metadata.yaml` with every content change. The
+  build warns when the Markdown changed and the metadata did not.
 - The document title is the single `#` heading in the Markdown. Do not add a `title:` key
   to `metadata.yaml`, and keep no prose between the `#` heading and the first `##`.
-- Partner readers never see legacy installs. The guide carries no `--observer`,
-  `migrate-node-naming`, `setup-observer.sh` or `setup-validator.sh` material and no
-  "legacy" wording, and its only contact is `support@telcoin.org`. The build script refuses
-  the source otherwise.
-- Links to other files in this repo are absolute URLs under
-  `https://github.com/Telcoin-Association/tn-node-deployment/blob/main/`, because the PDF
-  has no repo around it. Cross-references inside the guide are heading links such as
-  `[Back up the keys now](#back-up-the-keys-now)`. Headings and prose carry no manual
-  numbers; pandoc numbers the chapters at build time.
+- The build refuses partner-unsafe text in either document, in the Markdown and (when
+  `pdftotext` is present) in the PDF text: `--observer`, `migrate-node-naming`,
+  `setup-observer.sh`, `setup-validator.sh`, personal addresses and repo-relative links.
+  The guide may not say "legacy" either, because partner readers never see legacy installs;
+  the specification may, since EVM legacy transactions are part of the protocol.
+- The only contact in either document is `devs@telcoin.org`, the script's `CONTACT`. Each
+  `metadata.yaml` must set `contact` to it, the guide's Markdown must mention it, and the
+  specification carries it only on its cover. The build fails on any other value.
+- Links to repository files are absolute URLs under `https://github.com/Telcoin-Association/`
+  (for this repo, `https://github.com/Telcoin-Association/tn-node-deployment/blob/main/`),
+  because the PDF has no repo around it. Cross-references inside a document are heading
+  links such as `[Back up the keys now](#back-up-the-keys-now)`, and the build fails on one
+  that matches no heading. Headings and prose carry no manual numbers; pandoc numbers the
+  chapters at build time.
 - Commit the PDF together with the sources that produced it. If only the toolchain changed
-  (a pandoc or WeasyPrint upgrade), the script keeps the committed PDF and says so; pass
-  `--force` to overwrite it deliberately.
-- Reference toolchain: pandoc 3.11 and WeasyPrint 70.0 from Homebrew (`brew install pandoc
-  weasyprint`). The script checks for pandoc 3.8+ and WeasyPrint 61+. Same inputs and same
-  toolchain give byte-identical output; a second run prints "PDF unchanged".
+  (a pandoc or WeasyPrint upgrade), the script keeps the committed PDF and warns "toolchain
+  drift"; pass `--force` to overwrite it deliberately. Same inputs and same toolchain give
+  byte-identical output; a second run prints "PDF unchanged".
+- Reference toolchain: pandoc 3.12.1, WeasyPrint 70.0 and poppler 26.10.0 from Homebrew
+  (`brew install pandoc weasyprint poppler`). poppler provides `pdftotext` for the checks on
+  the PDF text and is optional. The `tn-pdf-tools` container is a locally built Debian 12
+  image with pandoc 3.8.3 and WeasyPrint 70.0; no Dockerfile for it is committed. The script
+  checks for pandoc 3.8+ and WeasyPrint 61+.
 - Nothing under `docs/partner/` or `tools/` is updater-tracked or carries a `.sha256`
-  sidecar. The fonts are Geist and Geist Mono under the SIL Open Font License 1.1; keep
-  `OFL.txt` beside them and record provenance in `docs/partner/assets/README.md`.
+  sidecar.
 
 ## Vendored files
 
@@ -346,13 +368,14 @@ with the tree only on a release change or a release tag.
 `AGENTS.md` itself is intentionally untracked (docs are not shipped to nodes), so it
 has no sidecar and is absent from the updater arrays. Keep it that way.
 The same holds for the other docs and the maintainer tooling: `OPERATOR.md`, `followup.md`,
-`CHANGELOG.md`, `CHANGELOG/`, `README.md`, `docs/` (the partner guide and its build inputs
-included), `tasks/`, `.github/`, `tools/` (the lints, `gen-checksums.sh`, `release-scripts.sh`
-and `tools/tests/` included) and the Node Manager UI's tests and dev runner (`ui/tests/`,
-`ui/dev/`, `ui/test_*.py`) are documentation or maintainer tooling, are not updater-tracked,
-carry no `.sha256` sidecar, and must never be added to the updater arrays. `RELEASE`,
-`MANIFEST` and `MANIFEST.sig` are release metadata, not tracked files: the updater reads them
-from the tag and keeps the installed `MANIFEST` and `MANIFEST.sig` as its record.
+`CHANGELOG.md`, `CHANGELOG/`, `README.md`, `docs/` (the partner documents and their build
+inputs included), `tasks/`, `.github/`, `tools/` (the lints, `gen-checksums.sh`,
+`release-scripts.sh` and `tools/tests/` included) and the Node Manager UI's tests and dev
+runner (`ui/tests/`, `ui/dev/`, `ui/test_*.py`) are documentation or maintainer tooling, are
+not updater-tracked, carry no `.sha256` sidecar, and must never be added to the updater
+arrays. `RELEASE`, `MANIFEST` and `MANIFEST.sig` are release metadata, not tracked files: the
+updater reads them from the tag and keeps the installed `MANIFEST` and `MANIFEST.sig` as its
+record.
 `README.md` must stay at the repo root, because `update-scripts.sh` HEAD-probes it as its
 connectivity check.
 

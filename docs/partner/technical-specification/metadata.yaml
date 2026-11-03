@@ -1,0 +1,27 @@
+# Cover and PDF metadata for docs/partner/technical-specification/technical-specification.md.
+# The title is NOT set here: it comes from the document's single "# " heading.
+# Bump `version` and `date` whenever the content changes. `date` is printed on the
+# cover and in the running footer as written and names the month only ("November 2026",
+# never a day). pandoc cannot normalise a month-only date, so `date-meta` stays unset,
+# the template emits no dcterms tags and the PDF carries no creation date; that keeps
+# the build byte-reproducible.
+# The cover prints `cover-title` as its large line and `subtitle` beneath it, as the
+# original does; the document title (the Markdown "# " heading) runs the header and TOC.
+cover-title: Telcoin Network
+subtitle: Technical Specification
+version: "1.2"
+date: November 2026
+# The telcoin-network release the text describes, and the main commit it reads up to.
+protocol: v0.16.0-adiri, main at 7167e7800
+# The running footer prints this, followed by the date.
+confidentiality: Telcoin Association Confidential and Proprietary Information.
+author: Telcoin Association
+description: >-
+  Technical specification of the Telcoin Network protocol: consensus and execution
+  chains, epoch boundaries, validator lifecycle, node modes, networking,
+  cryptographic primitives and trustless synchronization.
+contact: devs@telcoin.org
+repo-url: https://github.com/Telcoin-Association/telcoin-network
+lang: en-GB
+toc-title: Table of Contents
+toc-depth: 3

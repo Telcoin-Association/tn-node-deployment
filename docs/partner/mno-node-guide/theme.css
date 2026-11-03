@@ -1,10 +1,13 @@
 /* =============================================================================
- * docs/partner/theme.css -- print stylesheet for the MNO partner guide
+ * docs/partner/mno-node-guide/theme.css -- print stylesheet for the MNO
+ * partner guide
  *
  * Rendered by WeasyPrint (CSS paged media) from the HTML that pandoc writes to
- * docs/partner/build/. Font paths are relative to this file. Built by
- * tools/build-partner-pdf.sh; open build/mno-node-guide.html in a browser for a
- * rough screen preview (paged-media rules only apply in the PDF).
+ * docs/partner/mno-node-guide/build/. Font paths are relative to this file; the
+ * build copies this stylesheet into build/ with those paths adjusted.
+ * Built by tools/build-partner-pdf.sh mno-node-guide; open
+ * build/mno-node-guide.html in a browser for a rough screen preview (paged-media
+ * rules only apply in the PDF).
  *
  * Brand tokens (tel3.telcoin.network):
  *   navy gradient   #183988 -> #080821      accent (rules only)  #14C8FF
@@ -16,21 +19,21 @@
  * Layout uses normal flow and absolute positioning only (no flexbox).
  * ============================================================================= */
 
-/* ---- Fonts (Geist / Geist Mono, OFL 1.1, see assets/README.md) ------------- */
+/* ---- Fonts (Geist / Geist Mono, OFL 1.1, see ../assets/README.md) ---------- */
 @font-face { font-family: "Geist"; font-style: normal; font-weight: 400;
-  src: url("assets/fonts/Geist-Regular.woff2") format("woff2"); }
+  src: url("../assets/fonts/geist/Geist-Regular.woff2") format("woff2"); }
 @font-face { font-family: "Geist"; font-style: italic; font-weight: 400;
-  src: url("assets/fonts/Geist-Italic.woff2") format("woff2"); }
+  src: url("../assets/fonts/geist/Geist-Italic.woff2") format("woff2"); }
 @font-face { font-family: "Geist"; font-style: normal; font-weight: 500;
-  src: url("assets/fonts/Geist-Medium.woff2") format("woff2"); }
+  src: url("../assets/fonts/geist/Geist-Medium.woff2") format("woff2"); }
 @font-face { font-family: "Geist"; font-style: normal; font-weight: 600;
-  src: url("assets/fonts/Geist-SemiBold.woff2") format("woff2"); }
+  src: url("../assets/fonts/geist/Geist-SemiBold.woff2") format("woff2"); }
 @font-face { font-family: "Geist"; font-style: normal; font-weight: 700;
-  src: url("assets/fonts/Geist-Bold.woff2") format("woff2"); }
+  src: url("../assets/fonts/geist/Geist-Bold.woff2") format("woff2"); }
 @font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 400;
-  src: url("assets/fonts/GeistMono-Regular.woff2") format("woff2"); }
+  src: url("../assets/fonts/geist/GeistMono-Regular.woff2") format("woff2"); }
 @font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 600;
-  src: url("assets/fonts/GeistMono-SemiBold.woff2") format("woff2"); }
+  src: url("../assets/fonts/geist/GeistMono-SemiBold.woff2") format("woff2"); }
 
 /* ---- Pages ------------------------------------------------------------------ */
 @page {

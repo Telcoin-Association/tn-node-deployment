@@ -366,3 +366,80 @@ failure after it was hidden by `|| true`.
 values itself (from `.node-meta`) and takes no optional arguments for them; callers that need a
 different file call a different helper. A restart whose success the caller reports must be
 checked (is-active for a few seconds) and its failure propagated, never `|| true`.
+
+
+## Partner documents round (2026-10-15): WeasyPrint determinism, review scope, agent conventions
+
+- **WeasyPrint names raster image objects after `md5(url)` of the resolved file URL** (images.py
+  line 327 in 70.0), so a stylesheet that references a PNG by path makes the PDF's bytes depend on
+  the checkout path: the guide (fonts and SVG logos only) was byte-identical from any path, the
+  specification (cover PNG) was not, and a fresh clone reported "toolchain drift" for unchanged
+  sources. Fonts are embedded by content and SVGs are drawn as vectors. Fix at build time: stage
+  the stylesheet beside the HTML with raster `url()`s inlined as data URIs (10b666e). Test
+  "byte-identical" claims from a second worktree at a different path, not with a second run in
+  the same tree.
+- **Re-verify every PR pointer in an approved plan against `git log <old>..<new>` before briefing
+  agents.** The plan listed the region-aware committee draw (#1279); #1328 removed it before the
+  tag. The facts preamble (`tasks/spec-refresh-facts.md`) caught it in two minutes and no agent
+  wrote it up.
+- **"Missing" findings inflate a refresh.** Eight reviewers returned 40 additions beside 108
+  corrections and the document grew from 493 to 742 lines (25 to 38 pages) before the fidelity
+  reviewer classified every addition (5 partner-needed, 18 out of scope). Next time: brief
+  reviewers that `missing` means a fact without which a corrected sentence is untrue, and have
+  consolidators apply only riders attached to a correction, with standalone additions listed for
+  triage instead of applied.
+- **Two transcribers diverged on one rule.** T1 and T2 got the same code-span instruction and
+  applied it differently (type names, status names); the consolidators had to harmonise and C1's
+  reading had to be relayed to C2 mid-flight. Give a convention as an explicit list with examples
+  of both sides, not a principle.
+- **Independent reviewers converged on the same error from different chapters** (the committee
+  "N+2" sentence, found by Q1 from chapter 6's wording and by Q2a and Q2b from the contract).
+  Cross-chapter consistency checks in the review briefs paid for themselves; keep them.
+- **A reference artefact captured mid-stream caused a false alarm.** The pdftotext reference was
+  taken at 35 pages, one sentence tightening later made it stale, and a `diff && commit` chain
+  silently skipped the commit. Compare against the committed object (`git show HEAD:path`), and
+  never chain a commit behind a check whose failure is silent.
+- **Splitting the consolidation into two agents on scratch copies joined at a chapter heading**
+  (C1: title and chapters 1-5, C2: chapters 6-10, each with its own log) kept both under 220k
+  tokens and let C1 start before the last reviewer finished. The join was one `sed` and a diff
+  of the untouched half. Reuse the pattern for long documents.
+
+## Guide 1.4 refresh (2026-10-15): numbers in a facts preamble need the code line that computes them
+
+- **A figure derived from doc prose plus one code constant was wrong.** The plan computed the
+  header reject threshold as "1 s rounded tolerance + 5 s vote timeout = 6 s" from the upstream
+  hardware page and `vote_timeout`'s default. The code rounds the tolerance only for the hold
+  check and adds `vote_timeout` to the raw 250 ms for the reject check (handler.rs:775-788), so
+  the honest figure is 5.25 s on a current config and 6 s only on an older one. The verifier
+  caught it because its brief said "re-derive from the source FIRST, then read the facts file".
+  Rule: every number in a facts preamble cites the line that performs the arithmetic, not the
+  prose that describes it, and the verifier always reads the code before the writers' notes.
+- **A PR title is not a cause.** "#1543 worker RPC keeps its port bound" became "a node with
+  more workers than the network requires", but the code only deactivates a worker that was
+  active and then dropped by a lower on-chain count; an extra worker is never initialised.
+  Rule: for a troubleshooting row, read the code path that produces the symptom, not the
+  change description.
+- **"Shutdown" in a log line is not process exit.** `initiating node shutdown` fires a per-epoch
+  notifier; the process stays up with a sticky failure latch. Leaving the row's wording
+  deliberately neutral and giving the verifier the exact trace (task manager exit arms, the
+  epoch loop, the latch) settled it in one pass. Rule: when a plan says "the verifier settles
+  it", hand the verifier the file list and the question, and keep the writer's text neutral.
+
+## Partner documents refresh to main (2026-11-03): a release-vs-main wording needs each fact checked at the tag
+
+**Symptom:** the orchestrator's decision for the writers said "on `v0.16.0-adiri` move
+`consensus-db/epoch` aside" for the `Cannot check database (epoch)` row. Two verifiers found the
+tag has no such check at all (`epoch_db_recovery.rs` came with #1572, after the tag), so the
+"today's behaviour" half of the sentence described a release that never prints the line. The
+same gap hit the six opt-in `network-config` keys, the two `-32000` worker messages and the
+62 GiB reservation: all main-only, all written as if the tag had them.
+
+**Cause:** the facts units were told to cite main at the pinned sha, and the earlier guide (1.4)
+had already described main at 98849a221 as current behaviour. When the new round added "name
+the release where an operator acts differently", nobody checked which side of the tag each
+fact sat on; the decision was written from the facts file, not from `git grep <string> <tag>`.
+
+**Rule:** a document that names a release for "today's behaviour" needs, for every such fact, a
+citation at that tag (`git -C <wt> show <tag>:<path>` or `git grep -n '<string>' <tag>`) beside
+the one at main. The facts units record both or say "absent at the tag". A wording decision that
+contrasts two releases is itself a fact to verify, and the verifier's brief lists the tag check.

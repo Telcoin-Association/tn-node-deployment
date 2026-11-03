@@ -10,8 +10,10 @@ $endfor$
 $if(description-meta)$
   <meta name="description" content="$description-meta$" />
 $endif$
+$if(date-meta)$
   <meta name="dcterms.created" content="$date-meta$" />
   <meta name="dcterms.modified" content="$date-meta$" />
+$endif$
 $for(css)$
   <link rel="stylesheet" href="$css$" />
 $endfor$

@@ -1,0 +1,315 @@
+/* =============================================================================
+ * docs/partner/technical-specification/theme.css -- print stylesheet for the
+ * Telcoin Network Technical Specification
+ *
+ * Rendered by WeasyPrint (CSS paged media) from the HTML that pandoc writes to
+ * docs/partner/technical-specification/build/. Font and cover paths here are
+ * relative to this file; the build copies this stylesheet into build/ with those
+ * paths adjusted and the cover art inlined, so the PDF bytes do not depend on the
+ * checkout path. The template's logo paths are relative to build/.
+ * Built by tools/build-partner-pdf.sh technical-specification; open
+ * build/technical-specification.html in a browser for a rough screen preview
+ * (paged-media rules only apply in the PDF).
+ *
+ * The look follows the April 2026 Google Docs original: a light lavender page
+ * header band with a white logo tab, a footer pill, Inter throughout, black
+ * body text and lavender tables. Geometry is in mm on A4 with 25.4 mm side
+ * margins, as the original.
+ *
+ * Colour tokens:
+ *   body text, headings   #000000      cover title, footer site   #424761
+ *   cover subtitle/meta   #7981A4      confidentiality line       #666666
+ *   hairlines             #C9CFED      footer divider             #D9D9D9
+ *   table header          #C9CFED      table cells, code blocks   #F4F5FF
+ *   header band           #EFEFFF -> #FFFFFF
+ *   footer wash           #FFFFFF -> #E9E9FF
+ *
+ * The header and footer are running elements (.run-head, .run-foot) shown in
+ * @top-center and @bottom-center, because a margin box cannot scale a url()
+ * image; they reach past the margin box to the page edges with negative
+ * margins. Layout uses normal flow, tables and absolute positioning only (no
+ * flexbox).
+ * ============================================================================= */
+
+/* ---- Fonts (Inter and Geist Mono, OFL 1.1, see ../assets/README.md) -------- */
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400;
+  src: url("../assets/fonts/inter/Inter-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: italic; font-weight: 400;
+  src: url("../assets/fonts/inter/Inter-Italic.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 500;
+  src: url("../assets/fonts/inter/Inter-Medium.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600;
+  src: url("../assets/fonts/inter/Inter-SemiBold.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 700;
+  src: url("../assets/fonts/inter/Inter-Bold.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: italic; font-weight: 700;
+  src: url("../assets/fonts/inter/Inter-BoldItalic.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 400;
+  src: url("../assets/fonts/geist/GeistMono-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 600;
+  src: url("../assets/fonts/geist/GeistMono-SemiBold.woff2") format("woff2"); }
+
+/* ---- Pages ------------------------------------------------------------------ */
+@page {
+  size: A4;
+  margin: 25.4mm 25.4mm 42mm;
+  @top-center {
+    content: element(head);
+    width: 159.2mm;                 /* the whole text width: one box, no siblings */
+    vertical-align: top;
+  }
+  @bottom-center {
+    content: element(foot);
+    width: 159.2mm;
+    vertical-align: top;
+  }
+}
+
+@page cover {
+  margin: 0;
+  background: #EEEAFB url("../assets/covers/technical-specification.png") no-repeat center / cover;
+  @top-center    { content: none; }
+  @bottom-center { content: none; }
+}
+
+/* ---- Base ------------------------------------------------------------------- */
+html {
+  font-family: "Inter", sans-serif;
+  font-size: 11pt;
+  font-weight: 400;
+  line-height: 15.3pt;
+  color: #000;
+}
+body { margin: 0; }
+p { margin: 0 0 15.3pt; }
+p, li { orphans: 3; widows: 3; }
+strong { font-weight: 700; }
+img { max-width: 100%; }
+
+/* ---- Running header: band, title, white logo tab ---------------------------- */
+/* A 19.8 mm band across the page; the white tab runs from 120.2 mm to the right
+   edge, with the logo centred in it, as the original. */
+.run-head {
+  position: running(head);
+  display: table;
+  table-layout: fixed;
+  width: 210mm;
+  margin-left: -25.4mm;             /* from the margin box edge to the page edge */
+  background: linear-gradient(#EFEFFF, #FFFFFF);
+  font: 400 9pt/1.21 "Inter", sans-serif;
+  color: #000;
+}
+.run-title, .run-tab {
+  display: table-cell;
+  height: 19.8mm;
+  box-sizing: border-box;
+  vertical-align: top;
+  border-bottom: .4pt solid #C9CFED;
+}
+.run-title { padding: 8.2mm 0 0 25.4mm; }
+.run-tab {
+  width: 89.8mm;
+  padding-top: 8.2mm;
+  text-align: center;
+  background: #FFF;
+  border-left: .4pt solid #C9CFED;
+  border-bottom-left-radius: 3.2mm;
+}
+.run-tab img { display: inline-block; height: 5.2mm; width: auto; vertical-align: top; }
+
+/* ---- Running footer: confidentiality line and the pill ---------------------- */
+/* The footer starts 42 mm above the page bottom (255 mm): grey 7.4pt line from
+   258.9 mm, pill 268.8 to 285 mm and 6.6 mm from either page edge, as the
+   original. */
+.run-foot {
+  position: running(foot);
+  width: 210mm;
+  height: 42mm;                     /* the whole bottom margin */
+  box-sizing: border-box;
+  margin-left: -25.4mm;
+  padding-top: 3.9mm;
+  /* The lavender wash from the pill's middle down to the page edge. A plain
+     two-stop gradient sized to that strip: WeasyPrint bends the curve of a
+     gradient whose first stop is not at 0. */
+  background: linear-gradient(#FFFFFF, #E9E9FF) no-repeat 0 100% / 100% 51%;
+  font: 400 10pt/1.21 "Inter", sans-serif;
+  color: #000;
+}
+.run-conf {
+  margin: 0;
+  text-align: center;
+  font: 400 7.4pt/1.21 "Inter", sans-serif;
+  color: #666;
+}
+.run-pill {
+  display: table;
+  table-layout: fixed;
+  width: 196.3mm;
+  height: 16.2mm;
+  box-sizing: border-box;
+  margin: 6.75mm 0 0 6.6mm;
+  background: #FFF;
+  border: .4pt solid #C9CFED;
+  border-radius: 3.5mm;
+}
+.run-org, .run-site, .run-page {
+  display: table-cell;
+  height: 15.9mm;                   /* WeasyPrint gives an anonymous row no extra height */
+  vertical-align: middle;
+}
+.run-org { width: 57.5mm; padding-left: 6.6mm; box-sizing: border-box; }
+.run-org img { display: block; height: 6mm; width: auto; }
+.run-site { font: 400 12pt/1.21 "Inter", sans-serif; color: #424761; }
+.run-rule {
+  display: inline-block;
+  width: 0; height: 5mm;
+  margin-right: 6mm;
+  vertical-align: middle;
+  border-left: .5pt solid #D9D9D9;
+}
+/* The original's counter sits 2.9pt above the pill's middle: lift it with a
+   bottom padding taken out of the cell height, so the row keeps its height. */
+.run-page { height: 13.9mm; padding: 0 18.5mm 2mm 0; text-align: right; }
+.run-page::after { content: "Page | " counter(page) " / " counter(pages); }
+
+/* ---- Cover: text on the white card of the cover artwork --------------------- */
+.cover {
+  page: cover;
+  break-after: page;
+  position: relative;
+  height: 297mm;                    /* A4 height: the cover owns the whole page */
+  margin: 0;
+}
+.cover p { margin: 0; }
+.cover-logo {
+  position: absolute; left: 27.9mm; top: 72mm;
+  width: 64mm; height: auto;
+}
+/* Title 41pt and subtitle 16pt, their tops at 106.3 mm and 133.5 mm, as the
+   original. With line-height 1.21 (Inter's ascent plus descent) each line box
+   is the glyph box, so these tops are the measured ones. The title block flows,
+   so a longer title pushes the subtitle down instead of overlapping it; at 41pt,
+   126 mm holds "Telcoin Network" on one line. */
+.cover-head {
+  position: absolute; left: 25.4mm; top: 106.3mm;
+  width: 126mm;
+}
+.cover-title {
+  font: 700 41pt/1.21 "Inter", sans-serif;
+  color: #424761;
+}
+.cover .cover-subtitle {
+  margin-top: 9.7mm;
+  font: 500 16pt/1.21 "Inter", sans-serif;
+  color: #7981A4;
+}
+.cover-meta {
+  position: absolute; left: 25.4mm; top: 214mm;
+  width: 126mm;
+  font: 400 10pt/1.6 "Inter", sans-serif;
+  color: #7981A4;
+}
+.cover-meta a { color: #424761; text-decoration: none; }
+
+/* ---- Contents --------------------------------------------------------------- */
+nav#TOC { break-after: page; line-height: 16.3pt; }
+.toc-title {
+  bookmark-level: 1; bookmark-label: "Contents";
+  margin: 0 0 22pt;
+  font: 400 20pt/1.21 "Inter", sans-serif;
+}
+#TOC ul { list-style: none; margin: 0; padding: 0; }
+#TOC > ul > li { margin-top: 16.3pt; font-weight: 700; break-inside: avoid; }
+#TOC > ul > li:first-child { margin-top: 0; }
+#TOC li li { margin-left: 12.7mm; font-weight: 400; }
+#TOC li li li { margin-left: 6.35mm; }
+#TOC a { color: #000; text-decoration: none; }
+#TOC a::after { content: leader(" ") target-counter(attr(href), page); }
+/* Only chapters are numbered, as "N." (pandoc numbers every level). */
+#TOC li li .toc-section-number { display: none; }
+#TOC > ul > li > a > .toc-section-number::after { content: "."; }
+
+/* ---- Headings --------------------------------------------------------------- */
+/* Regular weight and black, as the original; sizes measured from it. */
+h1, h2, h3 { break-after: avoid; font-weight: 400; color: #000; }
+main h1 {
+  break-before: page;
+  margin: 0 0 8.6pt;
+  font: 400 20pt/1.21 "Inter", sans-serif;
+}
+main h2 { margin: 17pt 0 5.6pt; font: 400 14pt/1.21 "Inter", sans-serif; }
+main h3 { margin: 15pt 0 5pt;   font: 400 12pt/1.21 "Inter", sans-serif; }
+main h2 > .header-section-number,
+main h3 > .header-section-number { display: none; }
+main h1 > .header-section-number::after { content: "."; }
+
+/* ---- Text ------------------------------------------------------------------- */
+main p { text-align: justify; }
+main a { color: #000; text-decoration: underline; }
+
+/* ---- Lists ------------------------------------------------------------------ */
+main ul, main ol { margin: 0 0 15.3pt; padding-left: 12.7mm; }
+main li { margin: 0 0 3.5mm; }
+main li > p { margin-bottom: 3.5mm; }
+/* The original's round bullet sits 18pt before the text, 4.8pt across, centred
+   3.75pt above the baseline. A ::marker string would butt against the text, so
+   draw the bullet as a positioned ::before (Inter's "●" is 0.74 em of ink). */
+main ul > li { list-style: none; position: relative; }
+main ul > li::before {
+  content: "●";
+  position: absolute; left: -18pt; top: 4.8pt;
+  font-size: 6.5pt; line-height: 1;
+}
+
+/* ---- Code ------------------------------------------------------------------- */
+code {
+  font-family: "Geist Mono", monospace;
+  font-size: 9.5pt;
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
+pre {
+  margin: 0 0 15.3pt;
+  padding: 3mm 4mm;
+  background: #F4F5FF;
+  font: 400 9.5pt/1.45 "Geist Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  break-inside: avoid;
+  break-before: avoid;              /* keep the lead-in sentence with its code */
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
+pre code { font-size: inherit; }
+
+/* ---- Tables ----------------------------------------------------------------- */
+table {
+  width: 100%;
+  margin: 0 0 15.3pt;
+  border-collapse: separate;
+  border-spacing: 1pt;              /* the white gutters between cells */
+  font-size: 10.5pt;
+  line-height: 14.6pt;
+  font-feature-settings: "calt" 0;  /* keep literal "->" and the like */
+  break-before: avoid;              /* keep the lead-in sentence with its table */
+}
+thead { display: table-header-group; }   /* a table split across pages repeats its header */
+tr { break-inside: avoid; }
+/* A split leaves at least two body rows on each page, never one stray row. */
+tbody tr:first-child { break-after: avoid; }
+tbody tr:last-child { break-before: avoid; }
+th, td { padding: 5pt 5.2pt; vertical-align: top; text-align: left; }
+th { background: #C9CFED; font-weight: 700; }
+td { background: #F4F5FF; }
+td code { overflow-wrap: break-word; }
+td p { margin: 0; }
+
+/* ---- Callouts and misc ------------------------------------------------------ */
+blockquote {
+  margin: 0 0 15.3pt;
+  padding: 3mm 4mm;
+  background: #F4F5FF;
+  border-left: 2pt solid #C9CFED;
+}
+blockquote > :last-child { margin-bottom: 0; }
+hr { border: none; border-top: .4pt solid #C9CFED; margin: 5mm 0; }

@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tools/build-partner-pdf.sh -- build the branded MNO partner guide PDF
+# tools/build-partner-pdf.sh -- build a branded partner document PDF
 #
-# Renders docs/partner/mno-node-guide.md into docs/partner/mno-node-guide.pdf in
-# two steps: pandoc turns the Markdown into HTML (docs/partner/template.html for
-# the cover and contents, docs/partner/metadata.yaml for the cover fields), then
-# WeasyPrint lays that HTML out as A4 pages using docs/partner/theme.css (CSS
-# paged media: running header and footer, page numbers, TOC leaders). Fonts and
-# logos are vendored under docs/partner/assets/ so the build never hits the
-# network. Scratch output (HTML preview, candidate PDF, WeasyPrint log) goes to
-# docs/partner/build/, which is gitignored.
+# Builds one partner document, chosen by name, or every one of them with --all:
+#   mno-node-guide            the guide for mobile network operators
+#   technical-specification   the Telcoin Network technical specification
+#
+# Each document lives in its own directory, docs/partner/<doc>/:
+#   <doc>.md        the source; its single "# " heading is the title
+#   metadata.yaml   cover fields, plus toc-depth, contact and (spec) confidentiality
+#   template.html   pandoc HTML5 template: cover, contents, body
+#   theme.css       WeasyPrint paged-media stylesheet
+#   <doc>.pdf       the generated PDF, committed
+# docs/partner/assets/ (fonts, logos, covers) is shared by both documents. It is
+# vendored, so the build never hits the network.
+#
+# pandoc turns the Markdown into HTML with the document's template and metadata,
+# then WeasyPrint lays that HTML out as pages using its theme.css (CSS paged
+# media: running header and footer, page numbers, TOC leaders). The stylesheet
+# is staged beside the HTML with its raster images inlined, so the PDF's bytes
+# do not depend on where the repo is checked out. Scratch output (HTML preview,
+# staged stylesheet, candidate PDF, WeasyPrint log) goes to
+# docs/partner/<doc>/build/, which is gitignored.
 #
 # Before rendering, the Markdown is linted for things that must never reach a
 # partner: personal addresses, removed flags and scripts, repo-relative links,
-# and "legacy" material. The committed PDF is only replaced when a source file
+# and (guide only) "legacy" material. Presentation settings come from the
+# document's metadata.yaml; the partner-safety policy (contact address,
+# forbidden text, page bounds) stays in this script, so no metadata edit can
+# switch a check off. The committed PDF is only replaced when a source file
 # changed (or with --force), so a pandoc/WeasyPrint upgrade that shifts bytes
 # without changing the page does not churn the repo.
 #
@@ -22,7 +37,8 @@
 # associative arrays or mapfile) so it runs on stock macOS too.
 #
 # USAGE:
-#   bash tools/build-partner-pdf.sh [--html-only] [--open] [--force]
+#   bash tools/build-partner-pdf.sh <mno-node-guide|technical-specification|--all>
+#                                   [--html-only] [--open] [--force]
 #   bash tools/build-partner-pdf.sh --help
 # =============================================================================
 
@@ -34,12 +50,20 @@ cd "$REPO_ROOT"
 
 usage() {
     cat <<'EOF'
-Usage: bash tools/build-partner-pdf.sh [--html-only] [--open] [--force]
+Usage: bash tools/build-partner-pdf.sh <document|--all> [--html-only] [--open] [--force]
 
-Build docs/partner/mno-node-guide.pdf from docs/partner/mno-node-guide.md.
+Build docs/partner/<document>/<document>.pdf from docs/partner/<document>/<document>.md,
+using that directory's metadata.yaml, template.html and theme.css and the shared
+docs/partner/assets/.
+
+Documents:
+  mno-node-guide            The guide for mobile network operators.
+  technical-specification   The Telcoin Network technical specification.
+  --all                     Every document in turn. Keeps going after a failure and
+                            exits 1 at the end if any document failed.
 
 Options:
-  --html-only   Lint and run pandoc only; write docs/partner/build/mno-node-guide.html
+  --html-only   Lint and run pandoc only; write docs/partner/<document>/build/<document>.html
                 (a browser preview) and stop before WeasyPrint.
   --open        Open the result when done (the HTML with --html-only, else the PDF).
   --force       Replace the committed PDF even if no source file changed since the
@@ -47,57 +71,134 @@ Options:
   -h, --help    Show this help.
 
 Environment:
-  PARTNER_MD    Build a different Markdown file instead of the guide, for testing
-                the pipeline. Output goes to docs/partner/build/<name>.{html,pdf},
-                the committed PDF is never touched, and the page-count check only
-                warns. Example: PARTNER_MD=/tmp/test.md bash tools/build-partner-pdf.sh
+  PARTNER_MD    Build a different Markdown file with the chosen document's template,
+                theme and metadata, for testing the pipeline. Output goes to
+                docs/partner/<document>/build/<name>.{html,pdf}, the committed PDF is
+                never touched, and the page-count check only warns. Not with --all.
+                Example: PARTNER_MD=/tmp/test.md bash tools/build-partner-pdf.sh mno-node-guide
 
-Requires pandoc >= 3.8, WeasyPrint >= 61 and python3.
-  macOS:          brew install pandoc weasyprint
+Requires pandoc >= 3.8, WeasyPrint >= 61 and python3. pdftotext (poppler) is optional
+and adds the checks on the PDF text.
+  macOS:          brew install pandoc weasyprint poppler
   Debian/Ubuntu:  pandoc .deb from https://github.com/jgm/pandoc/releases (apt's is
                   too old); sudo apt-get install weasyprint (Ubuntu 24.04+) or
-                  pipx install weasyprint
+                  pipx install weasyprint; sudo apt-get install poppler-utils
 
 Exit status: 0 success, 1 lint or build failure, 2 usage error.
 EOF
 }
 
+_usage_error() {
+    echo "error: $*" >&2
+    usage >&2
+    exit 2
+}
+
+# The partner documents, in --all order. Keep in step with the case "$DOC" below.
+declare -a DOCS=(mno-node-guide technical-specification)
+
+DOC=""
+ALL=0
 HTML_ONLY=0
 OPEN=0
 FORCE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --all)       ALL=1 ;;
         --html-only) HTML_ONLY=1 ;;
         --open)      OPEN=1 ;;
         --force)     FORCE=1 ;;
         -h|--help)   usage; exit 0 ;;
+        -*)          _usage_error "unknown option: $1" ;;
         *)
-            echo "error: unknown option: $1" >&2
-            usage >&2
-            exit 2
+            if [[ -n "$DOC" ]]; then
+                _usage_error "one document at a time (got ${DOC} and $1); use --all for every document"
+            fi
+            DOC="$1"
             ;;
     esac
     shift
 done
 
+# ---- --all: run this script once per document -------------------------------
+
+if [[ $ALL -eq 1 ]]; then
+    if [[ -n "$DOC" ]]; then
+        _usage_error "--all builds every document; drop the document name (${DOC})"
+    fi
+    if [[ -n "${PARTNER_MD:-}" ]]; then
+        _usage_error "PARTNER_MD builds one test file; name the document instead of --all"
+    fi
+    declare -a PASS_FLAGS=()
+    if [[ $HTML_ONLY -eq 1 ]]; then PASS_FLAGS+=(--html-only); fi
+    if [[ $OPEN -eq 1 ]]; then PASS_FLAGS+=(--open); fi
+    if [[ $FORCE -eq 1 ]]; then PASS_FLAGS+=(--force); fi
+    # Re-run by absolute path with the same bash: the script has left the
+    # caller's directory, and the file is not executable.
+    self="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+    failed=""
+    for d in "${DOCS[@]}"; do
+        echo "==> ${d}"
+        if ! "$BASH" "$self" "$d" ${PASS_FLAGS[@]+"${PASS_FLAGS[@]}"}; then
+            failed="${failed} ${d}"
+        fi
+    done
+    if [[ -n "$failed" ]]; then
+        echo "error: --all: failed:${failed}" >&2
+        exit 1
+    fi
+    echo "--all: built ${#DOCS[@]} documents"
+    exit 0
+fi
+
+if [[ -z "$DOC" ]]; then
+    _usage_error "name the document to build (${DOCS[*]}), or pass --all"
+fi
+
+# Per-document lint switches. Policy, not presentation, so they live here rather
+# than in metadata.yaml.
+#   LINT_LEGACY            fail on the word "legacy" (the guide carries no legacy-
+#                          install material; the spec, an EVM document, may say
+#                          "legacy transactions")
+#   CONTACT_IN_MD          the Markdown must name CONTACT (the spec's contact is
+#                          the cover mailto: from metadata.yaml)
+#   NEED_CONFIDENTIALITY   metadata.yaml must set a confidentiality label
+case "$DOC" in
+    mno-node-guide)
+        LINT_LEGACY=1
+        CONTACT_IN_MD=1
+        NEED_CONFIDENTIALITY=0
+        ;;
+    technical-specification)
+        LINT_LEGACY=0
+        CONTACT_IN_MD=0
+        NEED_CONFIDENTIALITY=1
+        ;;
+    *)
+        _usage_error "unknown document: ${DOC} (known: ${DOCS[*]})"
+        ;;
+esac
+readonly DOC LINT_LEGACY CONTACT_IN_MD NEED_CONFIDENTIALITY
+
 readonly PARTNER_DIR="docs/partner"
-readonly DEFAULT_MD="${PARTNER_DIR}/mno-node-guide.md"
-readonly MD="${PARTNER_MD:-$DEFAULT_MD}"
-readonly META="${PARTNER_DIR}/metadata.yaml"
-readonly TEMPLATE="${PARTNER_DIR}/template.html"
-readonly CSS="${PARTNER_DIR}/theme.css"
 readonly ASSETS_DIR="${PARTNER_DIR}/assets"
-readonly BUILD_DIR="${PARTNER_DIR}/build"
-readonly PDF="${PARTNER_DIR}/mno-node-guide.pdf"
-readonly CONTACT="support@telcoin.org"
+readonly DOC_DIR="${PARTNER_DIR}/${DOC}"
+readonly DEFAULT_MD="${DOC_DIR}/${DOC}.md"
+readonly MD="${PARTNER_MD:-$DEFAULT_MD}"
+readonly META="${DOC_DIR}/metadata.yaml"
+readonly TEMPLATE="${DOC_DIR}/template.html"
+readonly CSS="${DOC_DIR}/theme.css"
+readonly BUILD_DIR="${DOC_DIR}/build"
+readonly PDF="${DOC_DIR}/${DOC}.pdf"
+readonly CONTACT="devs@telcoin.org"
 readonly MIN_PAGES=15
 readonly MAX_PAGES=150
 readonly MAX_CODE_LINE=90
 
 # Scratch output is named after the source, so a PARTNER_MD test build never
-# overwrites the guide's own preview, candidate PDF or log.
+# overwrites the document's own preview, candidate PDF or log.
 OVERRIDE=0
-NAME="mno-node-guide"
+NAME="$DOC"
 WP_LOG="${BUILD_DIR}/weasyprint.log"
 if [[ "$MD" != "$DEFAULT_MD" ]]; then
     OVERRIDE=1
@@ -112,7 +213,7 @@ readonly PDF_NEW="${BUILD_DIR}/${NAME}.pdf"
 # last wrote the PDF means a rebuild is real, not toolchain drift.
 declare -a SOURCES=("$DEFAULT_MD" "$META" "$TEMPLATE" "$CSS" "$ASSETS_DIR" "tools/build-partner-pdf.sh")
 
-# Text that must never appear in the guide. Personal addresses, the removed
+# Text that must never appear in a partner document. Personal addresses, the removed
 # --observer flag and its scripts, and links that only resolve inside this repo.
 declare -a FORBIDDEN=(
     "grant@"
@@ -127,6 +228,16 @@ declare -a FORBIDDEN=(
 )
 
 # ---- helpers ----------------------------------------------------------------
+
+# _meta FILE KEY: print the scalar value of top-level KEY in a flat YAML file,
+# without quotes or a trailing comment; print nothing when KEY is absent.
+_meta() {
+    awk -v k="$2" 'index($0, k ":") == 1 {
+        v = substr($0, length(k) + 2); sub(/[[:space:]]+#.*$/, "", v)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+        if (v ~ /^".*"$/ || v ~ /^'\''.*'\''$/) v = substr(v, 2, length(v) - 2)
+        print v; exit }' "$1"
+}
 
 # _version_ge A B: succeed if dotted version A >= B (missing parts count as 0).
 _version_ge() {
@@ -154,7 +265,7 @@ _install_hint() {
     local tool="$1"
     case "$(uname -s)" in
         Darwin)
-            echo "  install: brew install pandoc weasyprint"
+            echo "  install: brew install pandoc weasyprint poppler"
             ;;
         Linux)
             if [[ "$tool" == "pandoc" ]]; then
@@ -249,6 +360,41 @@ print(pages, mailto)
 PY
 }
 
+# Copy the document's theme.css beside the HTML with its asset references adjusted.
+# Raster images (the cover art) become data: URIs, because WeasyPrint names every
+# image object in the PDF after the hash of the image's URL, so a file: URL would
+# make the PDF's bytes depend on the checkout path and every fresh clone would see
+# "toolchain drift". Every other url("../assets/...") gains one level, since the
+# copy sits one directory deeper than the committed file. Fonts are embedded by
+# content and need no inlining.
+_stage_css() {   # _stage_css SRC DST
+    python3 - "$1" "$2" <<'PY'
+import base64
+import re
+import sys
+from pathlib import Path
+
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+assets = src.parent.parent / "assets"
+raster = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+          ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def swap(match):
+    rel = match.group(2)
+    mime = raster.get(Path(rel).suffix.lower())
+    if mime is None:
+        return f'url("../../assets/{rel}")'
+    data = base64.b64encode((assets / rel).read_bytes()).decode("ascii")
+    return f'url("data:{mime};base64,{data}")'
+
+
+text = src.read_text(encoding="utf-8")
+pattern = r'url\((["\']?)\.\./assets/([^"\')]+)\1\)'
+dst.write_text(re.sub(pattern, swap, text), encoding="utf-8")
+PY
+}
+
 # Succeed if no source changed (tracked or untracked) since commit $1.
 _sources_clean_since() {
     local base="$1"
@@ -264,10 +410,10 @@ WP_VER="not run"
 if [[ $HTML_ONLY -eq 0 ]]; then
     _need weasyprint 61.0
     WP_VER="$(_tool_version weasyprint)"
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "error: python3 not found on PATH (used for the PDF sanity check)" >&2
-        exit 1
-    fi
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: python3 not found on PATH (used to stage the stylesheet and for the PDF sanity check)" >&2
+    exit 1
 fi
 
 for f in "$MD" "$META" "$TEMPLATE" "$CSS"; do
@@ -293,11 +439,11 @@ for pat in "${FORBIDDEN[@]}"; do
         printf '%s\n' "$hits" | sed 's/^/    line /' >&2
     fi
 done
-if hits="$(grep -n -i -w -e "legacy" "$MD")"; then
+if [[ $LINT_LEGACY -eq 1 ]] && hits="$(grep -n -i -w -e "legacy" "$MD")"; then
     _lint_error "${MD} mentions 'legacy' (drop legacy material from the partner guide):"
     printf '%s\n' "$hits" | sed 's/^/    line /' >&2
 fi
-if ! grep -q -F -e "$CONTACT" "$MD"; then
+if [[ $CONTACT_IN_MD -eq 1 ]] && ! grep -q -F -e "$CONTACT" "$MD"; then
     _lint_error "${MD} never mentions ${CONTACT}"
 fi
 
@@ -315,7 +461,25 @@ if ! grep -q '^date:' "$META"; then
     _lint_error "${META} has no 'date:' line"
 fi
 if grep -q '^title:' "$META"; then
-    _lint_error "${META} sets 'title:'; the title must come from the guide's '# ' heading"
+    _lint_error "${META} sets 'title:'; the title must come from the document's '# ' heading"
+fi
+
+TOC_DEPTH="$(_meta "$META" toc-depth)"
+META_CONTACT="$(_meta "$META" contact)"
+CONFIDENTIALITY="$(_meta "$META" confidentiality)"
+readonly TOC_DEPTH META_CONTACT CONFIDENTIALITY
+case "$TOC_DEPTH" in
+    1|2|3) ;;
+    "") _lint_error "${META} has no 'toc-depth:' line (contents depth, 1 to 3)" ;;
+    *)  _lint_error "${META} sets toc-depth '${TOC_DEPTH}'; it must be 1, 2 or 3" ;;
+esac
+if [[ -z "$META_CONTACT" ]]; then
+    _lint_error "${META} has no 'contact:' line; partner documents use ${CONTACT}"
+elif [[ "$META_CONTACT" != "$CONTACT" ]]; then
+    _lint_error "${META} sets contact '${META_CONTACT}'; partner documents use ${CONTACT}"
+fi
+if [[ $NEED_CONFIDENTIALITY -eq 1 && -z "$CONFIDENTIALITY" ]]; then
+    _lint_error "${META} has no 'confidentiality:' line; the ${DOC} pages carry that label"
 fi
 
 if [[ $lint_failed -ne 0 ]]; then
@@ -332,14 +496,18 @@ fi
 # ---- 3. pandoc --------------------------------------------------------------
 
 mkdir -p "$BUILD_DIR"
-rm -f "$HTML"
+rm -f "$HTML" "${BUILD_DIR}/theme.css"
+if ! _stage_css "$CSS" "${BUILD_DIR}/theme.css"; then
+    echo "error: could not stage ${CSS} into ${BUILD_DIR}/ (missing asset?)" >&2
+    exit 1
+fi
 if ! pandoc "$MD" \
         --from=gfm --to=html5 --standalone \
         --template="$TEMPLATE" \
         --metadata-file="$META" \
-        --shift-heading-level-by=-1 --number-sections --toc --toc-depth=2 \
+        --shift-heading-level-by=-1 --number-sections --toc --toc-depth="$TOC_DEPTH" \
         --syntax-highlighting=none \
-        --css=../theme.css -V asset-dir=../assets \
+        --css=theme.css -V asset-dir=../../assets \
         --fail-if-warnings \
         --output="$HTML"; then
     echo "error: pandoc failed on ${MD}" >&2
@@ -365,7 +533,7 @@ if [[ $HTML_ONLY -eq 1 ]]; then
     if [[ $OPEN -eq 1 ]]; then
         _open "$HTML"
     fi
-    echo "Done: pandoc ${PANDOC_VER}, WeasyPrint ${WP_VER}; HTML preview: ${HTML}"
+    echo "Done (${DOC}): pandoc ${PANDOC_VER}, WeasyPrint ${WP_VER}; HTML preview: ${HTML}"
     exit 0
 fi
 
@@ -415,7 +583,7 @@ if command -v pdftotext >/dev/null 2>&1; then
             text_failed=1
         fi
     done
-    if grep -q -i -w -e "legacy" "$txt"; then
+    if [[ $LINT_LEGACY -eq 1 ]] && grep -q -i -w -e "legacy" "$txt"; then
         echo "error: the PDF text mentions 'legacy'" >&2
         text_failed=1
     fi
@@ -426,6 +594,12 @@ if command -v pdftotext >/dev/null 2>&1; then
     if [[ $text_failed -ne 0 ]]; then
         exit 1
     fi
+    # Layout may reflow or restyle the label, so a miss only warns.
+    if [[ -n "$CONFIDENTIALITY" ]] && ! grep -q -i -F -e "$CONFIDENTIALITY" "$txt"; then
+        echo "warn: the PDF text never shows the confidentiality label '${CONFIDENTIALITY}'" >&2
+    fi
+else
+    echo "note: pdftotext not found; skipped the checks on the PDF text (poppler)" >&2
 fi
 
 # ---- 7. anti-churn: replace the committed PDF only for a real change --------
@@ -462,4 +636,4 @@ fi
 
 # ---- 8. summary -------------------------------------------------------------
 
-echo "Done: pandoc ${PANDOC_VER}, WeasyPrint ${WP_VER}; HTML preview: ${HTML}"
+echo "Done (${DOC}): pandoc ${PANDOC_VER}, WeasyPrint ${WP_VER}; HTML preview: ${HTML}"
