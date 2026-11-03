@@ -961,6 +961,95 @@ report_testnet_addons() {
     fi
 }
 
+# ymd_days YYYY-MM-DD -- print the day number (days since 1970-01-01) of a real
+# calendar date from 1970 on; rc 1 for anything else. Pure bash: busybox and
+# macOS date cannot parse a date, and the same text runs in every script that
+# reads a MANIFEST date (tools/tests/release_scripts_test.sh checks the copies).
+ymd_days() {
+    local y m d n
+    [[ "$1" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || return 1
+    y=$((10#${BASH_REMATCH[1]}))
+    m=$((10#${BASH_REMATCH[2]}))
+    d=$((10#${BASH_REMATCH[3]}))
+    n=31
+    if [[ $m -eq 4 || $m -eq 6 || $m -eq 9 || $m -eq 11 ]]; then
+        n=30
+    elif [[ $m -eq 2 ]]; then
+        n=28
+        if (( y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) )); then n=29; fi
+    fi
+    if (( y < 1970 || m < 1 || m > 12 || d < 1 || d > n )); then return 1; fi
+    # Days from the civil date (H. Hinnant's algorithm), the year starting in March.
+    if (( m <= 2 )); then y=$((y - 1)); m=$((m + 9)); else m=$((m - 3)); fi
+    printf '%s\n' "$(( (y / 400) * 146097 + (y % 400) * 365 + (y % 400) / 4 - (y % 400) / 100 \
+        + (153 * m + 2) / 5 + d - 1 - 719468 ))"
+}
+
+# cn_days N -- "1 day" or "N days".
+cn_days() {
+    if [[ "$1" == "1" ]]; then echo "1 day"; else echo "$1 days"; fi
+}
+
+# cn_manifest_key FILE KEY -- the value of the first KEY= line in FILE, or "".
+cn_manifest_key() {
+    awk -F= -v k="$2" '$1 == k {sub(/^[^=]*=/, ""); print; exit}' "$1" 2>/dev/null
+}
+
+# report_scripts_release -- the signed script release these scripts came from,
+# read from the MANIFEST record that update-scripts.sh and install.sh keep in
+# the scripts directory: tag, serial, release date and age, and the expiry
+# date. Reads the record only: no signature check and no network
+# (update-scripts.sh --check does both). An expired release and a tree with no
+# record are warnings, not health issues.
+report_scripts_release() {
+    local m="${SCRIPT_DIR}/MANIFEST" rel serial rdate expires today day age
+    echo ""
+    print_step "Checking the script release..."
+    if [[ ! -f "$m" ]]; then
+        print_warn "No signed release installed: ${SCRIPT_DIR} has no MANIFEST record."
+        print_info "  Bring the scripts to the latest signed release: bash ${SCRIPT_DIR}/update-scripts.sh"
+        return 0
+    fi
+    rel="$(cn_manifest_key "$m" release)"
+    serial="$(cn_manifest_key "$m" serial)"
+    rdate="$(cn_manifest_key "$m" date)"
+    expires="$(cn_manifest_key "$m" expires)"
+    if [[ ! "$rel" =~ ^scripts-v[0-9]+\.[0-9]+\.[0-9]+$ || ! "$serial" =~ ^[1-9][0-9]{0,8}$ ]]; then
+        print_warn "The release record ${m} names no release and serial."
+        print_info "  Check it: bash ${SCRIPT_DIR}/update-scripts.sh --check"
+        return 0
+    fi
+    today="$(ymd_days "$(date -u +%Y-%m-%d)")" || today=""
+    if [[ -n "$today" ]] && day="$(ymd_days "$rdate")"; then
+        age=$((today - day))
+        if (( age < 0 )); then
+            age="dated ahead of this host's clock"
+        elif (( age == 0 )); then
+            age="today"
+        else
+            age="$(cn_days "$age") ago"
+        fi
+        print_info "Scripts release: ${rel} (serial ${serial}), released ${rdate}, ${age}"
+    else
+        print_info "Scripts release: ${rel} (serial ${serial}), release date not recorded"
+    fi
+    if [[ -z "$expires" ]]; then
+        print_info "  The release carries no expiry date."
+    elif [[ -z "$today" ]] || ! day="$(ymd_days "$expires")"; then
+        print_warn "The release record has an unreadable expiry date: expires=${expires}"
+    elif (( day > today )); then
+        print_ok "Scripts release expires ${expires} (in $(cn_days $((day - today))))"
+    else
+        if (( day == today )); then
+            age="today"
+        else
+            age="$(cn_days $((today - day))) ago"
+        fi
+        print_warn "Scripts release ${rel} expired ${age} (on ${expires}): a newer signed release is overdue."
+        print_info "  Check for it: bash ${SCRIPT_DIR}/update-scripts.sh --check"
+    fi
+}
+
 # read_advertised_rpc <node-info.yaml> -- echo "<http> <ws>": the worker RPC
 # endpoint advertised in node-info.yaml (p2p_info -> worker 0 -> rpc -> http/ws),
 # "none" for a field that is absent or null. Plain awk text parsing (no
@@ -2560,6 +2649,11 @@ report_testnet_addons
 # 9.6 PUBLIC RPC (Caddy tn-rpc vhost / https + wss probes / worker.rpc advert)
 # =============================================================================
 report_public_rpc
+
+# =============================================================================
+# 9.7 SCRIPT RELEASE (the installed signed release and its expiry)
+# =============================================================================
+report_scripts_release
 
 # =============================================================================
 # 10. SUMMARY
