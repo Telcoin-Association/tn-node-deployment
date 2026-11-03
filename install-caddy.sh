@@ -396,6 +396,19 @@ caddy_wait_say() {
     return 0
 }
 
+# caddy_baseline_refresh -- at the end of an rpc-enable or rpc-disable that went
+# through (.node-meta, the node launch and node-info.yaml written, the restart back):
+# make the host baseline again (tn_host_baseline_refresh, a no-op without
+# HOST_BASELINE=true in .node-meta or with a lib/common.sh that lacks it). Its
+# warnings go through caddy_wait_say, so they are events before the done event in
+# --json runs. The dashboard site changes no file the baseline covers. Never fails.
+caddy_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh caddy_wait_say
+    fi
+    return 0
+}
+
 # caddy_lib_has <what-happens-instead> <fn>... -- 0 when lib/common.sh defines every
 # <fn>. Otherwise warn once per first-named helper that this run falls back to the
 # older behaviour described by <what-happens-instead>, and return 1. The soft guard
@@ -2713,6 +2726,7 @@ do_rpc_enable() {
     caddy_node_info_advertise set "$domain" "$CADDY_WS_OK"
     if [[ "$CADDY_WS_OK" == "true" ]]; then caddy_ws_verify "$ws_port" "$domain"; fi
     caddy_meta_record "$domain" "$CADDY_WS_OK"
+    caddy_baseline_refresh
     caddy_node_unlock
 }
 
@@ -2742,6 +2756,7 @@ do_rpc_disable() {
     CADDY_LOCK_NOTE="The public RPC site is removed, but node-info.yaml still advertises it; run rpc-disable again later (once any update in progress has finished)."
     CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || die "the public RPC site is removed, but there is no usable reth HTTP port to check the node with (see above), so node-info.yaml was not changed and still advertises it."
     caddy_node_info_advertise clear
+    caddy_baseline_refresh
     caddy_node_unlock
 }
 
