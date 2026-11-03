@@ -1658,6 +1658,9 @@ obs_rotate_token() {
         _OBS_SNAP_BODY=()
         OBS_ROTATE_MSG=""
         print_ok "Ingest token rotated: ${OBS_ALLOY_UNIT} restarted on the new token and stayed running. The node was not restarted."
+        print_info "Check that it ships: a wrong token keeps Alloy running while the hub refuses every push. In a minute, journalctl -u ${OBS_ALLOY_UNIT} -n 20 shows no 401, and these counters grow:"
+        [[ "$ENABLE_OBSERVABILITY" == "true" ]] && print_info "  logs:    curl -s ${OBS_HTTP_ADDR}/metrics | grep loki_write_sent_bytes_total"
+        [[ "$ENABLE_METRICS" == "true" ]] && print_info "  metrics: curl -s ${OBS_HTTP_ADDR}/metrics | grep prometheus_remote_storage_samples_total"
         return 0
     fi
     print_error "${OBS_ALLOY_UNIT} did not stay running on the new token; putting the previous token and files back."
