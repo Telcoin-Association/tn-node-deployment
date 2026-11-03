@@ -2909,6 +2909,7 @@ restart_node() {
         sleep 3
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
+            edit_baseline_refresh
         else
             print_error "Node failed to restart. Check logs:"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
