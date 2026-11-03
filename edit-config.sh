@@ -1380,6 +1380,29 @@ set_private_forward_targets() {
     return 0
 }
 
+# edit_floor_check ARG NETWORK -- hold an image change to the oldest release these
+# scripts support on NETWORK (tn_ref_min_check), before the image is resolved or
+# pulled: a release tag, alone or as <repo>:<tag>, as given; a digest given alone
+# by the release .node-meta records for it (tn_docker_recorded_tag). Anything else
+# is not checked here: tn_docker_resolve_ref refuses what is not a release tag of
+# NETWORK, and warns that the check cannot be applied to a digest with no recorded
+# release. rc 1, with the reason (edit_error), when the release is older; a
+# warning when tn_ref_min_check cannot tell; rc 0 otherwise.
+edit_floor_check() {
+    local ref="${1:-}" msg="" rc=0
+    if [[ "$ref" == *@sha256:* ]]; then
+        ref="$(tn_docker_recorded_tag "$ref" 2>/dev/null)" || return 0
+    fi
+    tn_release_tag_ok "${2:-}" "${ref##*:}" || return 0
+    msg="$(tn_ref_min_check "$ref" "${2:-}")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) edit_error "${msg} The image is not changed."; return 1 ;;
+        *) edit_warn "$msg" ;;
+    esac
+    return 0
+}
+
 # set_docker_image IMAGE -- pull IMAGE and swap it into the launch file (Docker
 # installs only). Mirrors edit_docker_image. The same image is a no-op. The network
 # is _tn_guard_network's, so a devnet node (NETWORK=devnet in .node-meta) changes
@@ -1393,6 +1416,7 @@ set_docker_image() {
     fi
     # A release tag resolves to the release's digest; a digest reference must be
     # this network's repository. Tags are never written into the start script.
+    edit_floor_check "$value" "$net" || return 1
     if ! out="$(tn_docker_resolve_ref "$net" "$value" edit_wait_say)"; then
         if [[ "$net" == "devnet" ]]; then
             edit_error "image refused: ${value} (give a devnet image by digest: <repository>@sha256:<digest>; devnet has no signed releases)"
@@ -2496,6 +2520,11 @@ edit_docker_image() {
     read -r -p "  Release tag or image: " input
     if [[ -z "$input" || "$input" == "$current_image" ]]; then
         print_info "Image unchanged."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
+    if ! edit_floor_check "$input" "$net"; then
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return

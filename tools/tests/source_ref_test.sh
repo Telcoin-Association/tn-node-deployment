@@ -227,6 +227,116 @@ mc "floor: an image by its release tag" "${GAR_IMAGE_BASE}:v0.16.0-adiri" testne
 mc "floor: an image by digest only warns" "${GAR_IMAGE_BASE}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" testnet 2
 check "mainnet release tags carry no suffix" "" "$NETWORK_TAG_SUFFIX_MAINNET"
 
+# --- the oldest-release floor at every update and image-change entry point ---------------
+# A copy of the library with MIN_SOURCE_VERSION_MAINNET="1.0.0" stands for the launch
+# release (the floor is empty on mainnet today). Each entry point runs in a child bash
+# from that copy, with what comes after the floor stubbed: installed_source_ref (the
+# first call past the floor in a binary prepare) leaves "past the floor" in the log,
+# and every fetch (source_checkout, release_stage, tn_docker_resolve_ref,
+# tn_docker_image_for_tag) leaves "fetch: ...". A refusal leaves the log empty.
+mkdir -p "$T/fl"
+cp -R "$TN_TEST_REPO/lib" "$T/fl/lib"
+sed 's/^readonly MIN_SOURCE_VERSION_MAINNET=""/readonly MIN_SOURCE_VERSION_MAINNET="1.0.0"/' \
+    "$TN_TEST_REPO/lib/common.sh" > "$T/fl/lib/common.sh"
+check "the launch copy sets a mainnet floor" yes \
+    "$(grep -q '^readonly MIN_SOURCE_VERSION_MAINNET="1.0.0"' "$T/fl/lib/common.sh" && echo yes || echo no)"
+for s in update-node edit-config; do
+    grep -v '^main "\$@"$' "$TN_TEST_REPO/${s}.sh" > "$T/fl/${s}.sh"
+done
+# FL_IMG is the image the node runs, FL_NEW another digest of the same repository.
+FL_IMG="ghcr.io/telcoin-association/telcoin-network@sha256:$(printf '%064d' 0)"
+FL_NEW="ghcr.io/telcoin-association/telcoin-network@sha256:$(printf '%064d' 1)"
+# shellcheck disable=SC2016
+cat > "$T/fl/drv.sh" <<'DRV'
+# drv.sh DIR SCRIPT NETWORK FN REF LOG -- run by a child bash: source DIR/SCRIPT.sh,
+# stub what comes after the floor, run FN with REF (on stdin for edit_docker_image).
+# The stubs read FLD_* globals: the functions they stand in for run inside callers
+# with locals such as net and ref, which would hide plain names.
+FLD_DIR="$1"; FLD_SCRIPT="$2"; FLD_NET="$3"; FLD_FN="$4"; FLD_REF="$5"; FLD_LOG="$6"
+source "$FLD_DIR/${FLD_SCRIPT}.sh" >/dev/null 2>&1
+set +e
+exec 3>&1
+case "$FLD_FN" in json_*|set_*) JSON_MODE=true ;; *) JSON_MODE=false ;; esac
+SERVICE_NAME=telcoin
+detect_network() { printf '%s\n' "$FLD_NET"; }
+image_network() { printf '%s\n' "$FLD_NET"; }
+_tn_guard_network() { printf '%s\n' "$FLD_NET"; }
+tn_docker_network_ok() { return 0; }
+detect_current_docker_image() { printf '%s\n' "$FL_IMG"; }
+read_launch_line() { printf 'docker run --rm %s\n' "$FL_IMG"; }
+launch_docker_image() { printf '%s\n' "$FL_IMG"; }
+installed_source_ref() { echo "past the floor" >> "$FLD_LOG"; }
+source_checkout() { echo "fetch: source_checkout $1" >> "$FLD_LOG"; return 1; }
+release_stage() { echo "fetch: release_stage $1" >> "$FLD_LOG"; return 1; }
+tn_docker_resolve_ref() { echo "fetch: tn_docker_resolve_ref $2" >> "$FLD_LOG"; return 1; }
+tn_docker_image_for_tag() { echo "fetch: tn_docker_image_for_tag $2" >> "$FLD_LOG"; return 1; }
+if [[ "$FLD_FN" == edit_docker_image ]]; then
+    "$FLD_FN" <<< "$FLD_REF"
+else
+    "$FLD_FN" "$FLD_REF"
+fi
+DRV
+# floor NAME SCRIPT NETWORK FN REF EXPECT -- EXPECT "refused": rc 1, the log empty
+# and the floor's reason printed; any other EXPECT is the first log line.
+floor() {
+    local out rc=0
+    : > "$T/fl/log"
+    out="$(TN_ROOT_PREFIX="$T/root" FL_IMG="$FL_IMG" "$BASH" "$T/fl/drv.sh" "$T/fl" "$2" "$3" "$4" "$5" "$T/fl/log" 2>&1 </dev/null)" || rc=$?
+    if [[ "$6" == refused ]]; then
+        check "$1" "1 [] yes" "$rc [$(cat "$T/fl/log")] $(has "$out" "is older than v")"
+    else
+        check "$1" "$6" "$(head -n 1 "$T/fl/log")"
+    fi
+}
+for fn in prepare_source_build prepare_release_update json_prepare_source json_prepare_release; do
+    s=update-node
+    floor "${fn}: mainnet v0.9.0 refused before any fetch" "$s" mainnet "$fn" v0.9.0 refused
+    floor "${fn}: mainnet v1.0.0 passes the floor" "$s" mainnet "$fn" v1.0.0 "past the floor"
+    floor "${fn}: testnet v0.12.0-adiri refused before any fetch" "$s" testnet "$fn" v0.12.0-adiri refused
+    floor "${fn}: testnet v0.13.0-adiri passes the floor" "$s" testnet "$fn" v0.13.0-adiri "past the floor"
+done
+floor "json_prepare_release: mainnet v1.0.0 goes on to the download" update-node mainnet json_prepare_release v1.0.0 "past the floor"
+check "json_prepare_release: mainnet v1.0.0 goes on to the download (fetch)" "fetch: release_stage v1.0.0" "$(sed -n 2p "$T/fl/log")"
+for pair in update-node:prepare_docker_update update-node:json_prepare_docker \
+            edit-config:edit_docker_image edit-config:set_docker_image; do
+    s="${pair%%:*}"; fn="${pair#*:}"
+    floor "${fn}: mainnet v0.9.0 refused before it is resolved" "$s" mainnet "$fn" v0.9.0 refused
+    floor "${fn}: mainnet <repo>:v0.9.0 refused before it is resolved" "$s" mainnet "$fn" "ghcr.io/telcoin-association/telcoin-network:v0.9.0" refused
+    floor "${fn}: mainnet v1.0.0 goes on to be resolved" "$s" mainnet "$fn" v1.0.0 "fetch: tn_docker_resolve_ref v1.0.0"
+    floor "${fn}: testnet v0.12.0-adiri refused before it is resolved" "$s" testnet "$fn" v0.12.0-adiri refused
+    floor "${fn}: testnet v0.13.0-adiri goes on to be resolved" "$s" testnet "$fn" v0.13.0-adiri "fetch: tn_docker_resolve_ref v0.13.0-adiri"
+    floor "${fn}: a digest with no recorded release goes on to be resolved" "$s" mainnet "$fn" "$FL_NEW" "fetch: tn_docker_resolve_ref ${FL_NEW}"
+done
+# A digest given alone is held to the floor by the release .node-meta records for it.
+printf 'NETWORK=mainnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v0.9.0\n' "${FL_NEW##*@}" > "$META"
+floor "json_prepare_docker: a digest recorded as v0.9.0 refused" update-node mainnet json_prepare_docker "$FL_NEW" refused
+floor "set_docker_image: a digest recorded as v0.9.0 refused" edit-config mainnet set_docker_image "$FL_NEW" refused
+floor "edit_docker_image: a digest recorded as v0.9.0 refused" edit-config mainnet edit_docker_image "$FL_NEW" refused
+printf 'NETWORK=mainnet\nDOCKER_IMAGE_DIGEST=%s\nRELEASE_TAG=v1.0.0\n' "${FL_NEW##*@}" > "$META"
+floor "json_prepare_docker: a digest recorded as v1.0.0 goes on" update-node mainnet json_prepare_docker "$FL_NEW" "fetch: tn_docker_resolve_ref ${FL_NEW}"
+printf 'NETWORK=testnet\n' > "$META"
+# The --json refusals: an error event with the reason.
+: > "$T/fl/log"
+out="$(TN_ROOT_PREFIX="$T/root" FL_IMG="$FL_IMG" "$BASH" "$T/fl/drv.sh" "$T/fl" update-node mainnet json_prepare_release v0.9.0 "$T/fl/log" 2>/dev/null </dev/null)"
+check "json_prepare_release v0.9.0: the error event names the floor" yes \
+    "$(has "$out" '{"event":"error","msg":"v0.9.0 is older than v1.0.0, the oldest mainnet release these scripts support')"
+out="$(TN_ROOT_PREFIX="$T/root" FL_IMG="$FL_IMG" "$BASH" "$T/fl/drv.sh" "$T/fl" edit-config mainnet set_docker_image v0.9.0 "$T/fl/log" 2>/dev/null </dev/null)"
+check "set_docker_image v0.9.0: the error event names the floor" yes \
+    "$(has "$out" '{"event":"error","msg":"v0.9.0 is older than v1.0.0, the oldest mainnet release these scripts support')"
+# A Docker value that is not a release tag is left to the resolver, which refuses
+# it: no floor warning first.
+: > "$T/fl/log"
+out="$(TN_ROOT_PREFIX="$T/root" FL_IMG="$FL_IMG" "$BASH" "$T/fl/drv.sh" "$T/fl" edit-config testnet set_docker_image latest "$T/fl/log" 2>&1 </dev/null)"
+check "set_docker_image latest: left to the resolver" "fetch: tn_docker_resolve_ref latest" "$(head -n 1 "$T/fl/log")"
+check "set_docker_image latest: no floor warning" no "$(has "$out" "minimum")"
+# The shipped library has no mainnet floor: v0.9.0 passes it.
+: > "$T/fl/log"
+mkdir -p "$T/fl0"
+ln -s "$TN_TEST_REPO/lib" "$T/fl0/lib"
+cp "$T/fl/update-node.sh" "$T/fl0/update-node.sh"
+TN_ROOT_PREFIX="$T/root" FL_IMG="$FL_IMG" "$BASH" "$T/fl/drv.sh" "$T/fl0" update-node mainnet json_prepare_release v0.9.0 "$T/fl/log" >/dev/null 2>&1 </dev/null
+check "shipped library, no mainnet floor: v0.9.0 passes it" "past the floor" "$(head -n 1 "$T/fl/log")"
+
 # --- rustup-init pinned by sha256 ------------------------------------------------------
 : > "$T/setpriv.log"
 rc=0; tn_rustup_ensure >/dev/null 2>&1 || rc=$?

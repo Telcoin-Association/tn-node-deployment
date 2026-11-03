@@ -1545,6 +1545,21 @@ docker_resolve_target() {
     return 0
 }
 
+# docker_floor_check ARG NETWORK -- update_floor_check for a Docker target, before
+# it is resolved or pulled: a release tag, alone or as <repo>:<tag>, as given; a
+# digest given alone by the release .node-meta records for it
+# (tn_docker_recorded_tag). Anything else is not checked here: tn_docker_resolve_ref
+# refuses what is not a release tag of NETWORK, and warns that the check cannot be
+# applied to a digest with no recorded release.
+docker_floor_check() {
+    local ref="${1:-}"
+    if [[ "$ref" == *@sha256:* ]]; then
+        ref="$(tn_docker_recorded_tag "$ref" 2>/dev/null)" || return 0
+    fi
+    tn_release_tag_ok "${2:-}" "${ref##*:}" || return 0
+    update_floor_check "$ref" "${2:-}"
+}
+
 # docker_pull_target IMAGE CURRENT TAG -- pull IMAGE (a digest reference) with the
 # log in a fresh file, check that Docker holds it under that digest (RepoDigests),
 # and write the pending state: OLD_IMAGE CURRENT, NEW_IMAGE IMAGE, PULLED_IMAGE_ID,
@@ -1600,6 +1615,7 @@ prepare_docker_update() {
         print_error "Could not read current Docker image from the ${SERVICE_NAME} launch config (wrapper or unit)"
         return 1
     }
+    docker_floor_check "$arg" "$net" || return 1
     docker_resolve_target "$arg" "$net" || return 1
     update_downgrade_check "$(docker_current_tag "$current")" "$DOCKER_TARGET_TAG" || return 1
     print_info "Current image: ${current}"
@@ -1928,6 +1944,7 @@ binary_prepare() {
         update_fail "${refusal} Nothing was changed."
         return 1
     fi
+    update_floor_check "$tag" "$net" || return 1
     running="$(installed_source_ref)"
     update_downgrade_check "$running" "$tag" || return 1
     update_wait_say log "Running release: ${running:-unknown}; target: ${tag}"
@@ -2720,6 +2737,22 @@ update_ref_refusal() {
     return 1
 }
 
+# update_floor_check <ref> <network> -- hold an update target to the oldest
+# release these scripts support on <network> (tn_ref_min_check): rc 1, with the
+# reason reported (update_fail), when it is older; a warning when it cannot be
+# checked (not a release tag); rc 0 otherwise. Every prepare calls it once the
+# target is final, before anything is fetched, built or written.
+update_floor_check() {
+    local msg="" rc=0
+    msg="$(tn_ref_min_check "${1:-}" "${2:-}")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) update_fail "${msg} Nothing was changed."; return 1 ;;
+        *) update_wait_say warn "$msg" ;;
+    esac
+    return 0
+}
+
 # latest_source_ref [DIR] -- the newest final release tag of this node's network on
 # origin, for --check (source installs; DIR defaults to TN_SOURCE_DIR). origin's tags are fetched into refs/tn-remote-tags/
 # (pruned; local tags are never moved), and the highest one by tn_release_tag_key
@@ -2946,6 +2979,7 @@ json_prepare_docker() {
     # A release tag (alone or on this network's repository) resolves to its digest
     # (the signed release's IMAGE_DIGEST); a digest reference must be this network's
     # repository. Nothing else is pulled. Devnet takes a digest reference only.
+    docker_floor_check "$arg" "$net" || return 1
     if ! docker_resolve_target "$arg" "$net"; then
         if [[ "$net" == "devnet" ]]; then
             json_event error "image refused: ${arg} is not a devnet image by digest (<repository>@sha256:<digest>; devnet has no signed releases); nothing pulled"; return 1
