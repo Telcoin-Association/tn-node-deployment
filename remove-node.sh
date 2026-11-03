@@ -1086,6 +1086,8 @@ remove_testnet_addons() {
         rm -f "${p}/usr/local/bin/alloy"   # native tarball install path (no-op for apt/docker installs)
         systemctl daemon-reload 2>/dev/null || true
     fi
+    # The ingest token file, and an env file from before it that may still hold the token.
+    _rm_shred "${p}/etc/telcoin/alloy/ingest-token" "${p}/etc/telcoin/alloy/telcoin-alloy.env"
     rm -rf "${p}/etc/telcoin/alloy" "${p}/var/lib/telcoin-alloy"
     if id -u telcoin-alloy >/dev/null 2>&1; then
         userdel telcoin-alloy >/dev/null 2>&1 || true
