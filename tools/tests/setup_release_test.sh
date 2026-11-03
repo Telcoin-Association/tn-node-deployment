@@ -57,6 +57,32 @@ flags "docker image and release tag together refused" 1 testnet docker v0.16.0-a
 flags "unknown install method refused" 1 testnet binary "" "" ""
 flags "docker on mainnet (no mainnet release verifies yet) refused" 1 mainnet docker "" "" ""
 check "docker on mainnet: the refusal says no mainnet release can be verified" yes "$(grep -q 'No mainnet release can be verified yet' "$T/sn.err" && echo yes || echo no)"
+# Once Docker is allowed on mainnet (the launch release pins the chain configs), a
+# digest alone of the shared ghcr repository is taken only when .node-meta records
+# it as a mainnet release's image: _preflight_docker refuses it before any docker
+# call, for --docker-image and for a typed image alike; an image resolved from a
+# release tag passes, and testnet is unchanged. The docker stub records its calls.
+MR="ghcr.io/telcoin-association/telcoin-network"
+PD_STUBS="tn_docker_network_ok() { return 0; }; _setup_docker_apt() { :; }; _setup_docker_live_restore() { :; }; docker() { echo DOCKER_RAN; return 0; }; tn_docker_release_tag_for() { return 1; }; latest_docker_image() { return 1; }"
+refused() { grep -q 'is not the image of a mainnet release this node has installed' "$T/sn.err" && echo yes || echo no; }
+rc="$(sn "NETWORK=mainnet RELEASE_TAG= DOCKER_IMAGE='${MR}@sha256:${D64}'; ${PD_STUBS}; _preflight_docker")"
+check_rc "mainnet preflight: a digest alone of no installed mainnet release is refused" 1 "$rc"
+check "mainnet preflight: the refusal says to give the release tag" yes "$(grep -q 'give the release tag with --release-tag' "$T/sn.err" && echo yes || echo no)"
+check "mainnet preflight: refused before any docker call" no "$(grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+printf 'NETWORK=mainnet\nRELEASE_TAG=v1.0.0\nDOCKER_IMAGE_DIGEST=sha256:%s\n' "$D64" > "$T/root/etc/telcoin/.node-meta"
+rc="$(sn "NETWORK=mainnet RELEASE_TAG= DOCKER_IMAGE='${MR}@sha256:${D64}'; ${PD_STUBS}; _preflight_docker")"
+check "mainnet preflight: the digest of the recorded mainnet release passes the rule" no "$(refused)"
+check "mainnet preflight: the recorded release image goes on to docker" yes "$(grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+rm -f "$T/root/etc/telcoin/.node-meta"
+# The interactive prompt: read is replaced by a stub that hands out INPUTS one
+# at a time ("|" separated) and ends the subshell with rc 99 when they run out,
+# so a prompt loop that never accepts an input cannot hang the test.
+READ_STUB='read() { local a n v; for a in "$@"; do n="$a"; done; [[ -n "${INPUTS:-}" ]] || exit 99; case "$INPUTS" in *"|"*) v="${INPUTS%%|*}"; INPUTS="${INPUTS#*|}" ;; *) v="$INPUTS"; INPUTS="" ;; esac; printf -v "$n" "%s" "$v"; }'
+rc="$(sn "NETWORK=mainnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; tn_docker_image_for_tag() { printf '%s\\n' '${MR}@sha256:${D64}'; }; INPUTS='${MR}@sha256:${D64}|v1.0.0'; ${READ_STUB}; _preflight_docker")"
+check "mainnet prompt: a typed digest of no installed release is refused" yes "$(refused)"
+check "mainnet prompt: the release tag typed next is accepted" yes "$( [[ "$rc" != 99 ]] && grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE='${R}@sha256:${D64}'; ${PD_STUBS}; _preflight_docker")"
+check "testnet preflight: a digest alone is taken as before" no "$(refused)"
 flags "docker on devnet without --docker-image refused (no signed release to take the newest from)" 1 devnet docker "" "" ""
 check "docker on devnet without --docker-image: the refusal asks for one" yes "$(grep -q 'A devnet Docker install needs --docker-image' "$T/sn.err" && echo yes || echo no)"
 # Devnet: an image by digest from TN_DEVNET_IMAGE_REPOS, never a tag; no

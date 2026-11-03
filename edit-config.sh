@@ -2511,6 +2511,9 @@ edit_docker_image() {
         # Devnet has no signed releases: an image is named by digest only.
         print_info "Enter the devnet image by digest, such as ${repo}@sha256:<digest>"
         print_info "(devnet has no signed releases, so no release tag names an image)."
+    elif [[ "$net" == "mainnet" ]]; then
+        print_info "Enter a mainnet release tag (such as v1.0.0) to run that release's image by"
+        print_info "digest. A digest alone is taken only for a mainnet release this node has installed."
     else
         print_info "Enter a ${net} release tag (such as ${DEFAULT_DOCKER_TAG}) to run that release's"
         print_info "image by digest, or the image itself as ${repo}@sha256:<digest>."
@@ -2535,6 +2538,8 @@ edit_docker_image() {
         print_error "Image refused: ${input}"
         if [[ "$net" == "devnet" ]]; then
             print_info "Give the devnet image by digest: ${repo}@sha256:<digest>."
+        elif [[ "$net" == "mainnet" ]]; then
+            print_info "Give a mainnet release tag; a digest alone is taken only for a mainnet release this node has installed."
         else
             print_info "Give a ${net} release tag, or ${repo}@sha256:<digest>."
         fi

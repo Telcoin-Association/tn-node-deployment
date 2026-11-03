@@ -927,6 +927,15 @@ print(json.dumps(d, indent=2))
 # signed release, else on testnet from the registry); without either, the newest
 # release image by digest (latest_docker_image). Never a tag, never latest. Devnet
 # has no signed releases: there --docker-image is required and --release-tag refused.
+# _setup_mainnet_digest_ok IMAGE -- rc 0 unless NETWORK is mainnet and IMAGE is a
+# digest reference that tn_docker_resolve_ref refuses (a digest no mainnet release
+# this node installed names; the reason goes to stderr). A release tag, and every
+# image on another network, is rc 0 here: the callers resolve those themselves.
+_setup_mainnet_digest_ok() {
+    [[ "$NETWORK" == "mainnet" && "${1:-}" == *@sha256:* ]] || return 0
+    tn_docker_resolve_ref "$NETWORK" "$1" >/dev/null
+}
+
 _preflight_docker() {
     print_step "Setting up Docker..."
 
@@ -963,6 +972,11 @@ _preflight_docker() {
     echo ""
 
     if [[ -n "$DOCKER_IMAGE" ]]; then
+        # On mainnet a digest alone is taken only for a mainnet release this node
+        # has installed (tn_docker_resolve_ref): the image comes from the signed
+        # release, so a testnet image of the shared repository never runs here.
+        _setup_mainnet_digest_ok "$DOCKER_IMAGE" \
+            || setup_fail "Image refused (see above): on mainnet give the release tag with --release-tag, so the image comes from the signed release. Nothing on this host was changed."
         # By digest alone: the release that digest belongs to (.node-meta's record,
         # else the registry's release tags), if found, is held to the oldest
         # supported release; otherwise that check only warns.
@@ -992,7 +1006,10 @@ _preflight_docker() {
                 DOCKER_IMAGE="$input"
                 typed="$input"
             fi
-            [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" && break
+            # A typed digest meets the mainnet rule; an image resolved from a release
+            # tag, or the newest release's, already comes from a signed release.
+            [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" \
+                && { [[ -z "$typed" ]] || _setup_mainnet_digest_ok "$DOCKER_IMAGE"; } && break
             typed=""
             print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as $(_setup_image_example)."
         done
