@@ -7,6 +7,49 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Partner guide 1.5 and technical specification 1.2, November 2026 -- the documents describe telcoin-network main at 7167e7800
+`main` (28a7cc7: the mainnet hardening round and scripts-v2.0.0, the devnet Docker images, a
+dependabot bump) is merged into the `docs/technical-specification` branch; the conflicts in
+`AGENTS.md`, `CHANGELOG.md`, `OPERATOR.md`, `followup.md`, the guide and the task notes keep
+both sides. The guide (1.5) and the specification (1.2) now describe telcoin-network `main` at
+7167e7800 (2 November 2026, 27 commits past `v0.16.0-adiri`, still the newest tag; the
+specification's cover prints `Protocol v0.16.0-adiri, main at 7167e7800`, and its Introduction
+says so). Where an operator acts differently on the two, the guide, OPERATOR.md and README.md
+name the release ("on `v0.16.0-adiri`", "from the next release"); a committee node takes the
+tndb update from a terminal, because the Node Manager UI's `--json` apply rolls back on its own
+after a failed check.
+Corrected: a committee member whose newest epoch record is for a later epoch starts the epoch
+as `CvvInactive` (2635e26a); a `CvvInactive` node refuses new `eth_sendRawTransaction` calls with
+`validator is inactive; retry another endpoint` instead of holding them (#1553); the certifier
+and vote-barrier lines end `; ending the epoch (the node stops if its stores cannot write)`,
+after which the node exits with status 1 and systemd restarts it (#1558); a dial tries a peer's
+signed addresses in turn, 10 seconds each, four at most, 45 seconds in all (#1690); committee
+members count against the fixed connection ceilings (128 per swarm, 8 per peer); the release
+hand check reads the `gpgv --status-fd 1` status lines, because `gpgv` prints `Good signature
+from` and exits 0 on an expired or revoked key (#694). Added: the consensus database of the next
+release is tndb at `consensus-db/tndb/{epoch,kad,cache}`, migrated from MDBX on its first start,
+one way; the `Cannot check database (epoch)` check and its remedy exist from that release only, and
+`v0.16.0-adiri` has no such check (#1572, #1558); the QUIC
+receive windows (2 MiB per stream, 4 MiB per connection, 256 streams) and the gossip frame
+limits (#1677 and the security merges); the sync-stream admission tiers with slots reserved for
+the committee and the Mild penalty for a held slot; gossip from authors outside a replayed
+epoch's allowlist is dropped without penalty; workers serve batches for their own epoch and the
+one before (#1737) and the batch requester's time bounds (#1740); a bare `--healthcheck <port>`
+binds loopback from the next release (#1696); `admission` and `serve_budget` join the opt-in
+`network-config` keys; a lowered worker count hands the removed workers' transactions to worker
+0 (#1544-#1546); mainnet is planned with six-hour epochs (#1559); the `Commit SHA` and
+`Build Features` lines of `--version` in the release hand check; three host settings from the
+hardware page (ext4 or xfs, no address-space limit, power saving off). The fork table, the
+hardware figures, the clock-drift rule, the rejoin window, the chain-config pins and the stdin
+passphrase delivery are unchanged. `--bls-passphrase-source credential` and
+`--bootstrap-peers-file` (#1715) are script follow-ups, not document changes.
+Both covers print the month only ("November 2026", never a day); the guide template now guards
+its `dcterms` tags like the specification's, so a month-only date leaves the PDFs without a
+creation date and the build byte-reproducible. The guide's contact is `devs@telcoin.org`
+throughout (main's guide 1.3.3 said `support@telcoin.org`); OPERATOR.md and README.md keep
+`support@telcoin.org`. Both PDFs are rebuilt in the `tn-pdf-tools` container (pandoc 3.8.3,
+WeasyPrint 70.0). Nothing updater-tracked changed.
+
 ### Devnet Docker images, October 2026 -- lib/common v2.0.1, setup-node v2.0.1, update-node v2.0.1, edit-config v2.0.1, telcoin-ui v2.0.1
 A devnet node can now run as a Docker install. lib/common, setup-node, update-node and
 edit-config are 2.0.1. The UI server is 2.0.1 too (`UI_VERSION`), but only to keep its copies

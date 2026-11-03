@@ -208,6 +208,16 @@ yet; this file gains the issue numbers when they are.
   fails after a passing dry run, Alloy runs a pipeline the node does not feed and `.node-meta`
   keeps the old `ENABLE_*` values. Accepted for now; closes when Alloy is rolled back on that
   failure.
+- From the first release that carries telcoin-network #1696 (d2a0b525), a bare `--healthcheck
+  <port>` binds `127.0.0.1` instead of `0.0.0.0`, and a bind that fails stops the node.
+  `setup-observability.sh` (lines 130 and 315-318 on main) and `docs/testnet-addons.md` (68 and
+  230-233) say the health port is open on every interface, and the start script passes the bare
+  `43174`, so the Association monitor, the overlay and the Google health-check ranges would be
+  refused; `v0.16.0-adiri` rejects the address form (`--healthcheck 0.0.0.0:43174`, which logs a
+  WARN on main). The local probes (`curl 127.0.0.1:43174`, the UI helper, Docker with
+  `--network=host`) keep working either way. Closes when the scripts choose the flag form by node
+  release and the add-on docs say which interface the port binds. (guide-1.5)
+  Why: an outside monitor goes dark, without a message, on the first release with the change.
 
 ## UI
 
@@ -327,6 +337,14 @@ yet; this file gains the issue numbers when they are.
 - A source build's `--version` check looks at the "Build Features" line only; tags made with the
   pre-release tooling report version 0.1.0, so the version is not compared. Closes when release
   builds report their tag.
+- Once a release carries telcoin-network #1715 (8958c3c8), `--bls-passphrase-source credential`
+  reads the passphrase from `$CREDENTIALS_DIRECTORY/<name>` (`--bls-passphrase-credential`), so the
+  start script could drop the `exec <` redirection and the rule that a passphrase cannot end in
+  whitespace; the switch needs a version floor, because older binaries reject `credential`, and
+  Docker installs stay on `stdin`. The same release adds `--bootstrap-peers-file`, so the start
+  script could stop expanding the peers map onto the command line, which would also drop the
+  character limit on a custom config directory. (guide-1.5)
+  Why: both flags exist on main only; nothing the scripts write changes until a tag carries them.
 
 ### edit-config
 
@@ -373,10 +391,28 @@ yet; this file gains the issue numbers when they are.
   <ref>; discard it or check the node" instead of backing up the new binary as the old one.
 - `update-node.sh`'s one-way failure message (line 1080, "Not rolled back: the previous release
   cannot open the migrated data dir") sends the operator to the journal but does not say that a
-  `Cannot check database (epoch)` line there has its own remedy (move `consensus-db/epoch`, the
-  epoch in progress, aside once the network has closed that epoch), which the guide's Service and
-  keys table now carries. A script change, so a version bump and sidecar. (guide-1.4)
+  `Cannot migrate the consensus DB from MDBX: Cannot check database (epoch)` line there (the next
+  release's first start; `v0.16.0-adiri` has no such check) has its own remedy (move
+  `consensus-db/epoch`, the epoch in progress, aside once the network has closed that epoch), which
+  the guide's Service and keys table carries. A script change, so a version bump and sidecar.
+  (guide-1.5)
   Why: the message's only remedy is the pre-update snapshot, which that case does not need.
+- `STORAGE_MIGRATION_FLOOR` knows one one-way step, the 0.16.0 epoch packs. telcoin-network main
+  (8aedf72e, #1558) adds a second: the first start of the next release copies the MDBX consensus
+  tables into tndb (`consensus-db/tndb/{epoch,kad,cache}`), deletes the MDBX files and writes
+  `consensus-db/tndb/mdbx-migrated`. `v0.16.0-adiri` after a downgrade is not refused, but starts
+  with empty epoch tables, which a committee member must not do. Closes when update-node treats
+  the first tndb release as a second floor (no automatic rollback across it; the snapshot note
+  names it) and the one-way failure message stops offering the `consensus-db/epoch` remedy on a
+  tndb node, where removing `consensus-db/tndb/epoch` beside the marker is refused at the next
+  start. (guide-1.5)
+  Why: the only way back across that step is the pre-update snapshot.
+- The `existing` hand check that update-node prints (lines 285 and 300 on main) runs plain `gpgv`,
+  which prints `Good signature from` and exits 0 on an expired or revoked key; OPERATOR 4.2 and 4.10
+  and README now tell the operator to add `--status-fd 1` and read the status lines. Closes when the
+  printed block carries `--status-fd 1` and the rule. A script change, so a version bump and sidecar.
+  (guide-1.5)
+  Why: the printed command cannot show the `EXPKEYSIG` the sentence after it asks for.
 
 ### remove-node and migrate-node-naming
 
@@ -411,6 +447,10 @@ yet; this file gains the issue numbers when they are.
   release that allows more workers, a listener per worker and a keytool command that adds one.
 - The wss probe's limit for a silent server is 15 polls of `sleep 0.1`; `read -t 0.1` would be
   tighter but needs bash 4. Accepted.
+- telcoin-network #1693 (942d08cd) exports `tn_primary_last_commit_timestamp_seconds` and the
+  quorum-shortfall counters; check-node or the observability add-on could read them to tell a
+  committee short of quorum from a node that lags. (guide-1.5)
+  Why: from the node's own log the two look the same.
 
 ### prepare-stake
 
@@ -499,21 +539,30 @@ yet; this file gains the issue numbers when they are.
   verified. Verify it or soften the sentence.
 - OPERATOR.md keeps the hidden anchor `64-export-the-stake-calldata-on-the-node`; README's link to
   "Stake by hand" has shipped and nothing else links to it, so it can go.
-- Guide 1.4 describes telcoin-network `main` at 98849a221 (three merges past `v0.16.0-adiri`:
-  #1622, #1647, #1572) as current behaviour. When the next tag ships, re-check the guide against
-  it (the `Cannot check database (epoch)` text, the boundary-window repair lines, the rejoin
-  window, the `worker is inactive` error, the `network-config` keys) and refresh the
-  specification's `protocol:` in its `metadata.yaml`. Until then a partner on the
-  `v0.16.0-adiri` image sees the older panic text and no boundary-window repair. (guide-1.4)
-  Why: the guide is ahead of the shipped image by three merges.
-- The guide's "Where things land" table has no row for `<data dir>/consensus-db/epoch`, the
-  epoch database that holds only the epoch in progress; the Service and keys remedy names it
-  without that introduction. (guide-1.4)
-  Why: an operator told to move the directory aside has nowhere in the guide that says what it is.
-- Upstream changes between `v0.16.0-adiri` and 98849a221 that the guide leaves out on purpose:
-  Kademlia record retention; the new `tn_network_*` metric series and the `class` and `outcome`
-  labels on `peer_penalties_total`; the WARN `inbound connections keep being refused by
-  connection limits`; `kad_replication_interval` now a no-op; the `process_budget` start-up
-  errors; the late-upgrader discard path (dormant while the sub-second fork is unarmed). Add
-  any of them if operators ask, with the then-current citations. (guide-1.4)
+- Guide 1.5 and specification 1.2 describe telcoin-network `main` at 7167e7800 (27 commits past
+  `v0.16.0-adiri`, which is still the newest tag) as current behaviour, and name the release ("on
+  `v0.16.0-adiri`", "from the next release") only where an operator would act differently: the
+  `Cannot check database (epoch)` check and its remedy (the tag has neither), the certifier row
+  (the node now stops), the tndb one-way migration, the opt-in `network-config` keys, the health
+  listener bind and the `validator is inactive` refusal. When the next tag
+  ships, replace "the next release" with its name in the guide, OPERATOR.md and README.md, refresh
+  the specification's `protocol:` in its `metadata.yaml`, and check what the tag carries beyond
+  7167e7800: staging 10-27 (#1747, #1752, #1738, #1749, #1698, #1721, #1744) and the worker gateway
+  (#1617 `--forward-txs`, `feat/worker-gateway-*`) are not on main and are not described. (guide-1.5)
+  Why: the documents are ahead of the shipped image by 27 commits, and no tag yet proves the
+  "next release" wording.
+- Upstream has no documented remedy for `Cannot check database (epoch)` on a node that has migrated
+  to tndb: removing `consensus-db/tndb/epoch` beside `mdbx-migrated` is refused at the next start,
+  and moving both aside is untested there. Worth an upstream issue; until it is answered the guide
+  says to email first. (guide-1.5)
+  Why: the only tested remedy is the `v0.16.0-adiri` one.
+- Upstream changes between `v0.16.0-adiri` and 7167e7800 that the guide leaves out on purpose:
+  Kademlia record retention and the identical-record weighting; the `tn_network_*`,
+  `tn_storage_tndb_*` and #1693 liveness series and their dashboards; the WARNs `inbound
+  connections keep being refused by connection limits`, `repeated network diagnostics suppressed`
+  and `active worker refused retired worker transactions; discarding`; `kad_replication_interval`
+  now a no-op; the `process_budget` start-up errors; the late-upgrader discard path (dormant while
+  the sub-second fork is unarmed); `db tndb-stat`; the peer-exchange and IHAVE caps; what
+  `admission: Closed` admits; the extra disk the tndb copy needs. Add any of them if operators
+  ask, with the then-current citations. (guide-1.5)
   Why: the guide names only what an operator acts on; these are maintainer or dashboard facts.

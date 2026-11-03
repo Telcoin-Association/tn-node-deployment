@@ -1,3 +1,112 @@
+## Review: main merged into docs/technical-specification; guide 1.5 and specification 1.2 against telcoin-network main 7167e7800 (2026-11-03)
+
+Branch `docs/technical-specification` (PR #58, draft). Two commits on top of 619f80f: the merge of
+`origin/main` 28a7cc7 (58665ac) and the refresh commit. Plan in `tasks/plan.md`; facts in
+`tasks/spec-refresh-2026-11-facts.md` (preamble, orchestrator decisions, the F1-F3 parts, the
+gpgv test); the specification's change log in `tasks/ckpt-spec-refresh-2-log.md`; the guide's
+and the operator docs' logs in `tasks/ckpt-refresh-S2.md` and `tasks/ckpt-refresh-S3.md`; the
+verifiers' reports in `tasks/ckpt-refresh-V1{a,b,c}.md`.
+
+### Merge
+
+- 265 commits from main (the mainnet hardening round and scripts-v2.0.0, the devnet Docker
+  images, a dependabot bump). `git merge-tree` predicted nine content conflicts plus the old-path
+  guide PDF; README.md auto-merged. The mechanical files (guide `metadata.yaml`, the old-path
+  PDF, `tasks/lessons.md`, `tasks/plan.md`, `tasks/todo.md`) were resolved by the orchestrator;
+  A1 (`AGENTS.md`, `CHANGELOG.md`, `followup.md`), A2 (`OPERATOR.md`, `README.md`) and A3 (the
+  guide) kept both sides with main's text as the base. A2 found the one auto-merge mistake: the
+  branch's epoch-change paragraph had landed at the end of main's new "Backups and the update
+  lock" section and went back beside the epoch-wait paragraph. A3: only two `support@telcoin.org`
+  were left to sweep (git carried the branch's earlier sweep); all 20 branch hunks and all 306
+  lines main added survive; the guide's 12 README anchors resolve against main's README.
+- No script, library, UI file, sidecar, `MANIFEST`, `RELEASE` or `install.sh` differs from main;
+  `tools/build-partner-pdf.sh` is the branch's. `git diff --check` reports one trailing space in
+  main's own `tools/tests/passphrase_print_test.sh:112` (a fixture line; left alone).
+
+### Facts and writers
+
+- F1 (storage, sync, restart), F2 (networking) and F3 (consensus, epoch, execution, CLI, release)
+  read a detached worktree of telcoin-network at 7167e7800, read-only, and wrote their parts with
+  `path:line` citations; the orchestrator joined them under a decisions section (release wording,
+  nothing off main, numbers copied, optional additions, contacts, logs, open points). F1: 3
+  corrections, 8 additions; F2: 3 corrections, 17 additions (10 optional); F3: 5 corrections, 6
+  additions, 3 follow-ups. The fork table, the hardware figures, the clock-drift rule, the rejoin
+  window, the chain-config pins and the stdin passphrase delivery are unchanged.
+- S1 (specification): 23 statements (6 corrections, 6 additions, 8 optional additions applied, the
+  edition sentence). S2 (guide): 31 logged changes and checks. S3 (OPERATOR.md, README.md): 29
+  changed statements (20 and 9). All three built or checked clean before handing back.
+- Two writer judgment calls the orchestrator reversed: both had replaced main's `v0.17.0-adiri`
+  (the planned first signed release) with "the next release"; the name is restored as "planned as
+  `v0.17.0-adiri`", which keeps main's information and says it is a plan. One the orchestrator
+  kept: the durability-barrier row names both releases (on `v0.16.0-adiri` the node keeps running
+  after `; initiating node shutdown`; from the next release it exits with status 1 and systemd
+  restarts it), per decision 2.
+- The orchestrator settled one open point locally: with gpg and gpgv 2.4.8, plain `gpgv` prints
+  `Good signature from` and exits 0 on an expired key; `--status-fd 1` prints `EXPKEYSIG` and
+  `VALIDSIG` and no `GOODSIG`. The hand-check rule in all three documents follows that.
+
+### Verification
+
+- V1a (specification): 37 statements checked, all match the code; 3 defects (two imprecise, one
+  convention), fixed by the orchestrator: "by default at most 128" with the `process_budget`
+  override, "fixed" dropped from the Peer scoring ceilings, the `CvvInactive` exception limited to a
+  record that still names the key (the observer check runs first), the commit hash in a code span.
+  Open points settled from the code: the refusal is `-32603` (jsonrpsee-types 0.26.0
+  `INTERNAL_ERROR_CODE`; `crates/tn-reth/src/rpc_fee_cap.rs:68-77`), a demoted node keeps the
+  transactions it already holds (no pool clearing on a mode change), and every printed figure has
+  its computing line (45 s = 5 s slack + 4 × 10 s; 24,579 = max(12,000 + 512, 16,384 + 3) + 8,192;
+  21,600 s from the mainnet genesis storage word).
+- V1b (guide): 51 statements, 12 defective in 9 defects, 2 of them wrong. The decisive one:
+  `v0.16.0-adiri` has no `Cannot check database (epoch)` check (`epoch_db_recovery.rs` came with
+  #1572, after the tag; a damaged epoch row panics `Invalid bytes!`), so decision 2's "on
+  `v0.16.0-adiri` move `consensus-db/epoch` aside" was wrong; also "count as unset when `null` or
+  `{}`" was false (a configuration error). The six opt-in `network-config` keys, the two `-32000`
+  worker messages and the 62 GiB reservation are main-only and now say "from the next release";
+  `epochs/` also holds the pack of the epoch in progress; the gpgv rule adds `ERRSIG`; the tag's
+  vote lines end `; initiating node shutdown: <e>`; "on bare metal".
+- V1c (OPERATOR.md, README.md): 52 statements, 7 defects (1 wrong, the same epoch-check premise; 6
+  imprecise), plus the safety point that a `--json` apply (the Node Manager UI) rolls back without
+  asking after a failed check, so a committee node takes the tndb update from a terminal. The
+  `--version` lines, the annotated signed tags (`^{commit}`), the UI's one-way warning (fires only
+  across the 0.16.0 floor) and the scripts' `ERRSIG` handling (any code other than 9 refuses) were
+  confirmed from the scripts and the release pipeline.
+- X2 (guide, D1-D10) and X3 (OPERATOR.md, README.md, D1-D7 plus the shared V1b items) applied the
+  fixes; the orchestrator fixed the spec, two guide bullets (the rollback exception and the UI
+  one-way bullet) and two operator-docs sentences. V2 re-checked all 29 fixes against the code at
+  7167e7800, the tag and the scripts: 29 resolved, none still wrong, none new. Its two remaining
+  items (the guide's "email first" lead on the move-aside case; "failed health check" narrower than
+  the code) were applied by the orchestrator. The facts file carries the correction to decision 2
+  and `tasks/lessons.md` the rule (check each "today's behaviour" fact at the tag).
+
+### Build
+
+- Built in the `tn-pdf-tools` container (pandoc 3.8.3, WeasyPrint 70.0) from the repo root with
+  `--all`: lint clean, WeasyPrint log empty, guide 61 pages, specification 37 pages. A second run
+  printed `PDF unchanged` for both. `pdftotext` in the container: both covers read "November 2026"
+  (guide `Version 1.5 · November 2026`; spec `Version 1.2 · November 2026` and
+  `Protocol v0.16.0-adiri, main at 7167e7800`), no "October 2026" anywhere, `devs@telcoin.org` on
+  every guide page and on the spec cover, no `support@telcoin.org` in either PDF, no CreationDate
+  in either file (the guide template's dcterms tags are now behind `$if(date-meta)$`, as the spec's
+  were; a month-only date leaves `date-meta` unset).
+
+### Agent budgets
+
+- Merge units: A1 122k, A2 105k, A3 96k tokens. Facts units: F1 293k, F2 387k, F3 368k, each past
+  the 250k guideline; they finished, but a facts unit that reads many crates for many PRs needs a
+  narrower scope (by PR group, five or six PRs per unit, not by topic). Writers: S1 222k, S2 245k,
+  S3 261k. Verifiers: V1a 286k, V1b 259k, V1c 269k, V2 206k. Fixers: X2 127k, X3 148k.
+
+### Follow-ups recorded in followup.md
+
+The `STORAGE_MIGRATION_FLOOR` second floor (tndb), the health listener bind change against the
+health-monitor add-on, `--bls-passphrase-source credential` and `--bootstrap-peers-file` once a
+release carries them, the liveness metric for check-node, update-node's printed hand check
+without `--status-fd 1`, the re-check at the next tag (staging 10-27 and the worker gateway are
+not described), the upstream issue for the tndb remedy, and the list of upstream changes the guide
+leaves out on purpose.
+
+---
+
 ## Review: the five defects of the 2026-10-28 review of PR #11 (2026-10-30)
 
 Branch `mainnet-hardening`, d8c138f + 18 fix commits (ff5a34b..963f0f8) + the release-prep commit

@@ -1,3 +1,59 @@
+# Plan: merge main into docs/technical-specification, refresh the partner documents against telcoin-network main, update PR #58 (2026-11-03)
+
+Branch `docs/technical-specification` (PR #58, draft). Base was 037c810; main at 28a7cc7
+(265 commits: the mainnet hardening round, scripts-v2.0.0, the devnet Docker images, a
+dependabot bump). Protocol facts refreshed to telcoin-network main at 7167e7800 (2 Nov 2026,
+27 commits past `v0.16.0-adiri`, still the newest tag). Facts: `tasks/spec-refresh-2026-11-facts.md`
+(preamble) joined from the F1-F3 parts; the change log of the spec is
+`tasks/ckpt-spec-refresh-2-log.md`; checkpoints are `tasks/ckpt-merge-A*.md`,
+`tasks/ckpt-facts-F*.md`, `tasks/ckpt-refresh-S*.md`, `tasks/ckpt-refresh-V1.md`.
+
+## W0 Setup (orchestrator)
+- [x] project-context agent; fetch main and the branch; check the branch out
+- [x] pin telcoin-network main (7167e7800) in a detached worktree under the session scratchpad
+- [x] `git merge-tree` dry run (9 content conflicts + the old-path PDF, README auto-merged)
+- [x] `git merge --no-commit --no-ff origin/main`; resolve the mechanical files myself:
+      guide `metadata.yaml` (branch's), old-path PDF (`git rm`), `tasks/lessons.md` (main's
+      then the branch's sections), `tasks/plan.md` and `tasks/todo.md` (main's, `---`, the branch's)
+- [x] checkpoint stubs and the facts-file preamble
+
+## W1 Merge conflicts (A1-A3, opus, parallel)
+- [x] A1 `AGENTS.md`, `CHANGELOG.md`, `followup.md`
+- [x] A2 `OPERATOR.md` (2 regions) and `README.md` (auto-merge checked; one paragraph moved back)
+- [x] A3 the guide (3 regions), hunk survival both ways, contact sweep, `--html-only` build
+- [x] no markers, `git diff --check` (one trailing space in main's own fixture), no script
+      differs from main except `tools/build-partner-pdf.sh`; merge committed as 58665ac
+
+## F Facts against telcoin-network main (F1-F3, opus, parallel, read-only worktree)
+- [x] F1 storage, sync, restart recovery (#1558, #1767, #1737, #1740, #1648, #1572)
+- [x] F2 networking (seven security merges, #1534, #1677, #1679, #1690, #1691, #1692, #1695,
+      #1696, #1736, #1739, #1651, #1652, #1553)
+- [x] F3 consensus, epoch, execution, CLI, release docs (#1544-#1546, #1556, #1557, #1693,
+      #1559, #1715, #694)
+- [x] join the parts into `tasks/spec-refresh-2026-11-facts.md`
+
+## W2 Content refresh (S1-S3, opus, parallel; then V1)
+- [x] S1 spec writer (log in `tasks/ckpt-spec-refresh-2-log.md`; Introduction edition sentence)
+- [x] S2 guide writer (devs@telcoin.org only)
+- [x] S3 OPERATOR.md and README.md (support@telcoin.org there; `--all` in the README paragraph)
+- [x] V1a/V1b/V1c re-derive every changed statement from the worktree (one per document); X2 and X3
+      fix; the orchestrator fixes the spec; V2 re-checks the fixes
+
+## W3 Metadata, build, verify, commit, push, PR
+- [x] guide 1.5 / spec 1.2, `date: November 2026`, `protocol: v0.16.0-adiri, main at 7167e7800`
+- [x] guide template: `$if(date-meta)$` guard on the two dcterms tags
+- [x] CHANGELOG top entry; followup items (credential source, bootstrap-peers file, tndb one-way,
+      health listener bind vs the health-monitor add-on, staging 10-27 and the worker gateway)
+- [x] container build `--all`: lint clean, WeasyPrint clean, pages in 15-150, `Wrote` both; run
+      again: both `PDF unchanged`
+- [x] `pdftotext`: "November 2026" on both covers, no "October 2026" cover line,
+      `devs@telcoin.org` present, the spec's protocol line carries the sha
+- [x] `tasks/todo.md` review section; `tasks/lessons.md` (the tag-check rule, after V1b/V1c corrected decision 2)
+- [ ] commit 2 (no trailer), push (fast-forward), PR body via `gh pr edit 58 --body-file`
+- [ ] `gh pr view 58`: MERGEABLE; remove the telcoin-network worktree; back to `mainnet-hardening`
+
+---
+
 # Plan: mainnet hardening round (2026-10-15)
 
 Done on branch `mainnet-hardening`, forked from `main` at 037c810: 155 commits up to 417fbe2,

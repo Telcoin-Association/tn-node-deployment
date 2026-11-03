@@ -424,3 +424,22 @@ checked (is-active for a few seconds) and its failure propagated, never `|| true
   deliberately neutral and giving the verifier the exact trace (task manager exit arms, the
   epoch loop, the latch) settled it in one pass. Rule: when a plan says "the verifier settles
   it", hand the verifier the file list and the question, and keep the writer's text neutral.
+
+## Partner documents refresh to main (2026-11-03): a release-vs-main wording needs each fact checked at the tag
+
+**Symptom:** the orchestrator's decision for the writers said "on `v0.16.0-adiri` move
+`consensus-db/epoch` aside" for the `Cannot check database (epoch)` row. Two verifiers found the
+tag has no such check at all (`epoch_db_recovery.rs` came with #1572, after the tag), so the
+"today's behaviour" half of the sentence described a release that never prints the line. The
+same gap hit the six opt-in `network-config` keys, the two `-32000` worker messages and the
+62 GiB reservation: all main-only, all written as if the tag had them.
+
+**Cause:** the facts units were told to cite main at the pinned sha, and the earlier guide (1.4)
+had already described main at 98849a221 as current behaviour. When the new round added "name
+the release where an operator acts differently", nobody checked which side of the tag each
+fact sat on; the decision was written from the facts file, not from `git grep <string> <tag>`.
+
+**Rule:** a document that names a release for "today's behaviour" needs, for every such fact, a
+citation at that tag (`git -C <wt> show <tag>:<path>` or `git grep -n '<string>' <tag>`) beside
+the one at main. The facts units record both or say "absent at the tag". A wording decision that
+contrasts two releases is itself a fact to verify, and the verifier's brief lists the tag check.

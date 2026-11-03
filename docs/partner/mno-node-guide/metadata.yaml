@@ -1,11 +1,13 @@
 # Cover and PDF metadata for docs/partner/mno-node-guide/mno-node-guide.md.
 # The title is NOT set here: it comes from the guide's single "# " heading.
 # Bump `version` and `date` whenever the guide's content changes. `date` is printed
-# on the cover as written; pandoc also normalises it to YYYY-MM-DD for the PDF's
-# creation and modification dates, so keep a form it can parse ("1 October 2026").
+# on the cover as written and names the month only ("November 2026", never a day).
+# pandoc cannot normalise a month-only date, so `date-meta` stays unset, the template
+# emits no dcterms tags and the PDF carries no creation date; that keeps the build
+# byte-reproducible.
 subtitle: Deploy, sync, stake and operate a node
-version: "1.4"
-date: 15 October 2026
+version: "1.5"
+date: November 2026
 author: Telcoin Association
 description: >-
   Operator guide for mobile network operators running a Telcoin Network node:

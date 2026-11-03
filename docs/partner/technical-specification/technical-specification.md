@@ -8,6 +8,7 @@ Batches admit legacy, EIP-2930 and EIP-1559 transactions; blob transactions and 
 Validators are mobile network operators and their affiliates, vetted through Telcoin governance.
 
 This document describes the protocol's architecture, consensus mechanics, execution rules, validator lifecycle, and networking layer.
+This edition describes the protocol as of release `v0.16.0-adiri` and the changes merged to telcoin-network `main` up to commit `7167e7800` (November 2026).
 It assumes familiarity with proof-of-stake systems and the EVM.
 
 - The reference implementation is open source at [github.com/telcoin-association/telcoin-network](https://github.com/telcoin-association/telcoin-network) under a dual Apache 2.0 and MIT license.
@@ -124,6 +125,8 @@ Every batch produced by a worker carries the following metadata:
 - Transactions: the ordered set of transactions in the batch
 
 Scaling the number of workers is configurable through on-chain governance at each epoch boundary.
+When governance lowers the worker count, each removed lane stops admitting transactions at the epoch boundary and hands every transaction it holds to the first lane (worker 0), which takes them under its normal validation and capacity limits and discards any it refuses.
+A removed lane keeps its RPC endpoint open for reads, and if a later epoch raises the count again it reopens with an empty pool.
 The DAG and ordering layers are agnostic to the number of workers per validator and operate solely over certificates that reference batches regardless of origin.
 The design leaves room for workers dedicated to other execution environments, though every worker carries EVM transactions.
 
@@ -245,6 +248,7 @@ As owner, it approves validators, sets the stake versions and committee size, fu
 
 Epochs are timestamp-based intervals whose duration is governed by the `epochDuration` parameter in the `ConsensusRegistry` contract.
 On the Adiri testnet, epochs last about six hours.
+Mainnet's genesis is planned with the same six-hour epochs.
 Governance can change the duration from the governance Safe, a multisig, by publishing a new stake configuration, and each epoch keeps the duration in force when it opened.
 An epoch boundary is reached when a committed sub-DAG's commit timestamp, in whole seconds, reaches the epoch's end time: the epoch's start plus its duration.
 When this happens, a `close_epoch` flag triggers a deterministic sequence of system calls.
@@ -412,8 +416,9 @@ The mode determines which protocol responsibilities the node performs and how it
 ### CvvActive
 
 A node operates in `CvvActive` (Committee-Voting Validator, Active) mode when it holds a staked authority identity that is a member of the current committee and is keeping up with the current consensus round.
-A committee member enters this mode at the start of each epoch without first checking that it is caught up, and drops to `CvvInactive` if it finds itself behind.
-It stays `CvvInactive` instead if it is still catching up from the previous epoch, and runs as an observer if the newest epoch record it holds already names a next committee without its key.
+A committee member enters this mode at the start of each epoch, and at startup, without first checking that it is caught up, and drops to `CvvInactive` if it finds itself behind.
+The exception is a member whose newest epoch record still names it in the next committee but is for a later epoch than the one it is entering: that record proves it is behind, so it starts as `CvvInactive` and catches up before it votes.
+It also stays `CvvInactive` if it is still catching up from the previous epoch, and runs as an observer if the newest epoch record it holds already names a next committee without its key.
 
 A `CvvActive` node participates directly in consensus by producing batches, voting on proposals, generating certificates, and advancing consensus rounds.
 It executes each block as the consensus protocol commits it.
@@ -444,7 +449,7 @@ It does not subscribe to the committee's batch gossip, because it receives batch
 ### Mode detection
 
 At each epoch boundary, a node determines its mode for the new epoch by reading the current committee from the execution state.
-If the node's key is in the new committee, it enters `CvvActive`, unless the newest epoch record it holds names a next committee without that key, in which case it runs as an observer.
+If the node's key is in the new committee, it enters `CvvActive`, with two exceptions that come from the newest epoch record it holds: if that record names a next committee without the key, the node runs as an observer, and if the record still names the key but is for a later epoch than the one it is entering, the node enters `CvvInactive` and catches up before it votes.
 If the key is not in the committee, the node enters `Observer` mode.
 A node that is `CvvInactive` at the epoch boundary stays `CvvInactive` until it has caught up.
 It then checks the committee again: it becomes `CvvActive` if its key is in the current committee and an observer if not.
@@ -461,12 +466,13 @@ A `CvvInactive` node that finishes catching up transitions to `CvvActive`, or to
 | Consensus voting | Yes | No | No |
 | Certificate production | Yes | No | No |
 | Batch production | Yes | No | No |
-| Transaction intake | Seals into batches | Holds in its pool until active | Forwards to committee validators |
+| Transaction intake | Seals into batches | Refuses new submissions | Forwards to committee validators |
 | Block execution | Yes | Yes | Yes |
 | Consensus output streaming | No (direct participant) | Yes | Yes |
 | Epoch chain sync | Yes | Yes | Yes |
 
-Transaction intake follows the committee seat rather than the mode: a node outside the current committee forwards transactions, and a committee member that is not `CvvActive` holds them in its pool.
+Transaction intake follows the mode: a `CvvActive` node seals transactions into batches, an observer forwards them to committee validators (one that still holds a seat in the current committee keeps them in its pool), and a `CvvInactive` node refuses new submissions until it has caught up.
+A `CvvInactive` node answers `eth_sendRawTransaction` and `eth_sendRawTransactionSync` with the error `validator is inactive; retry another endpoint` before the transaction reaches its pool, keeps the transactions it already holds until it can seal them again, and reads its mode on every request, so it accepts submissions again as soon as it rejoins consensus as `CvvActive`.
 
 ## Networking
 
@@ -483,7 +489,12 @@ Node addresses follow the multiaddr convention:
 ```
 
 Connections maintain periodic keep-alive probes to prevent NAT and firewall timeouts.
-A connection attempt, handshake included, is abandoned after about ten seconds, and a connection whose peer stops answering is closed by the QUIC idle timeout within about half a minute.
+Each address of a peer gets ten seconds to complete the QUIC handshake; a dial tries the peer's signed addresses in order, at most four, and gives up after 45 seconds.
+A connection whose peer stops answering is closed by the QUIC idle timeout within about half a minute.
+
+Each of a node's swarms, one for the primary and one for each worker, accepts by default at most 128 established connections in total, in both directions and from every kind of peer, and at most eight from any one peer; an operator `process_budget` in the network configuration replaces both limits.
+Committee members have no exemption from either ceiling.
+An inbound handshake holds one of at most 1,024 pending slots per swarm, for no longer than its ten-second window.
 
 ### Identity and discovery
 
@@ -499,6 +510,7 @@ The BLS signature covers the chain id and the role (primary or worker id), so a 
 The DHT uses standard Kademlia routing with a K-bucket size of 20.
 Bucket inserts are performed manually with record filtering to prevent pollution.
 Nodes target more connected peers than the K-bucket size to maintain routing table coverage.
+Because every inbound DHT record costs a BLS signature check, a node checks at most about two records per second from peers outside the previous, current and next committees and the peers its operator configured, and drops the excess without penalizing the sender.
 
 ### Gossipsub topics
 
@@ -514,7 +526,13 @@ Each topic accepts messages only from an allowlist of BLS keys that the node ref
 | `tn-worker-{chain_id}-{worker_id}` | Current committee | Batch digest announcements for one worker; only committee members subscribe |
 
 Each topic enforces message validation rules specific to its payload type.
+A gossip message carries at most 12,000 bytes of payload on any topic.
+Each received frame is checked on its raw bytes before any message in it is decoded or any signature verified: a frame larger than 24,579 bytes, or carrying more than eight messages or more than 16 KiB of control data, closes the stream, and none of its messages is delivered.
 Messages that fail validation result in peer score penalties that may result in a node temporarily banning a peer.
+
+Topic names carry no epoch, so the live committee of a later epoch publishes on the same topics as the committee of an epoch a node is still replaying.
+A node replaying an epoch the network has already closed therefore drops gossip from authors outside that epoch's allowlists without penalizing them.
+It treats an epoch as closed when it enters that epoch already holding its verified, certified epoch record; in any other epoch an author outside the allowlist is penalized, and in every epoch an oversized message is charged to the peer that relayed it.
 
 ### Transaction forwarding
 
@@ -542,6 +560,14 @@ This protocol supports direct peer messaging for operations that require targete
 Bulk transfers do not use request-response.
 Missing certificates, epoch consensus data, a single consensus output by its consensus number, and worker batches by digest travel over a separate sync-stream protocol, where one request opens a stream that the responder fills and then closes.
 
+A responder admits sync streams in two tiers, the members of the current and next committees and every other peer, and lets one peer hold at most two streams at once.
+Once a stream opens, a committee-tier peer has five seconds to send its request and any other peer one second.
+Each request class (epoch consensus data, missing certificates and consensus outputs on a primary, batches on a worker) is served from its own pool of five slots open to any peer plus four reserved for the committee tier, and a full pool answers at once that it is at capacity, so peers outside the committee cannot crowd out a committee member that is catching up, nor one class another.
+A serve of an epoch's consensus pack to a peer outside the committee tier is cut off after 200 seconds.
+
+A worker serves batches only for its own epoch and the one before it, and refuses a request for any other epoch before it reads storage; batches of older epochs reach a syncing node inside that epoch's consensus pack (see [Step 2: Sync consensus headers](#step-2-sync-consensus-headers)).
+A worker that fetches missing batches asks current-committee peers first, bounds each exchange (five seconds to send the request, five for the peer's acknowledgement, 210 for the data) and ends the whole fetch after 480 seconds, so a peer that accepts the stream and never reads the request cannot hold it.
+
 Each protocol interaction enforces a maximum message size to bound resource consumption.
 A message whose declared length exceeds the limit is rejected from its length prefix, before the node allocates memory for it, and the peer that sent it is penalized.
 
@@ -557,6 +583,9 @@ Penalties reduce a peer's score for specific infractions:
 - Propagating invalid or malformed messages
 - Failing message validation on gossipsub topics
 - Violating protocol expectations
+- Holding a sync stream open without making progress (peers outside the current and next committees only)
+
+That penalty is mild, one point, and is charged for a silent, unreadable, unexpected or late opening request, for a stalled serve and for a consensus-pack serve cut off at 200 seconds; a prompt refusal at capacity is never charged.
 
 Three reputation levels derive from the current score:
 
@@ -572,7 +601,9 @@ A ban therefore lasts at least that long, unless the peer joins a tracked commit
 The peer is refused new connections throughout and is unbanned once decay lifts its score above -50.
 
 Members of the previous, current and next committees are exempt from scoring: penalties and bans do not apply to them, and they may connect beyond the normal peer limits.
+They still count against each swarm's connection ceilings (see [Transport](#transport)).
 When a validator joins a tracked committee, any ban on it is lifted and its score is reset to the maximum.
+A node also never prunes a tracked committee member's peer record, which ties the member's peer ID to its BLS key.
 
 ## Cryptographic primitives
 
@@ -690,6 +721,7 @@ After processing all available records, the node has committee membership for ev
 
 The newest record is certified only after the following epoch has begun: its outgoing committee signs it then, and the network does not wait for the certificate before it starts the new epoch.
 A syncing node accepts a record only with its certificate, so the newest checkpoint becomes available once that certificate has been gathered.
+A peer that holds a record but not yet its certificate says so at once, and the node asks another peer.
 
 Because the network produces one epoch record per epoch, and an epoch lasts hours rather than seconds (six hours in the Adiri testnet genesis; governance can later change the epoch length), this step completes quickly even after years of operation.
 
@@ -697,8 +729,11 @@ Because the network produces one epoch record per epoch, and an epoch lasts hour
 
 For each completed epoch, the node downloads that epoch's consensus pack, its consensus headers together with their batches, from a peer.
 It checks each header's parent link forward from the previous record's `final_consensus` and keeps the pack only if its last header matches the epoch record's `final_consensus`.
+It takes the pack's outputs strictly in order, each with exactly the next consensus number, so a peer cannot stall the import by repeating an output.
+The last header is checked against `final_consensus` as soon as it arrives, before its batches are read, and each batch must be the next one its header declares and within the per-batch size cap.
 For the epoch in progress, it walks backwards from the latest verified hash, and when it is more than a few outputs behind it first downloads a verified prefix of that epoch's pack.
 On that backward walk the node requests each consensus output by its number, confirms that its header digest matches the verified hash, and takes the header's `parent_hash` as the verified hash for the next number down.
+A peer that does not yet hold the requested output says so at once, and the node asks another peer.
 This repeats until every consensus header of the epoch is downloaded.
 A header is trusted because its digest chains to a certified epoch record or to a committee-attested consensus hash.
 For each output that carries batches, the node also checks that every certificate author belongs to that epoch's committee.
@@ -735,4 +770,5 @@ Four mechanisms secure the synchronization process:
 
 A node that restarts mid-epoch does not repeat full synchronization.
 It rebuilds the epoch's gas accounting, leader reward counts and leader schedule from its locally stored blocks and consensus data.
-It then replays any consensus output that was committed but not yet executed, and resumes in the mode its committee membership gives it: a committee member resumes as `CvvActive`, unless the epoch records it syncs already rotate it out, and drops to `CvvInactive` if it finds itself behind; a node outside the committee resumes as an observer.
+It then replays any consensus output that was committed but not yet executed, and resumes in the mode its committee membership gives it: a committee member resumes as `CvvActive`, unless the epoch records it syncs already rotate it out (it then runs as an observer) or are already past its epoch (it then starts as `CvvInactive`), and drops to `CvvInactive` if it finds itself behind; a node outside the committee resumes as an observer.
+A node whose own storage can no longer make writes durable stops rather than run on, and a restart reopens its stores.
