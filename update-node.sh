@@ -3376,8 +3376,9 @@ main() {
             --allow-dirty) ALLOW_DIRTY=true; shift ;;
             --allow-downgrade) ALLOW_DOWNGRADE=true; shift ;;
             -h|--help)
-                # The header block only: everything up to its closing rule.
-                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "$0"
+                # The header block only: everything up to its closing rule, without
+                # the network-gated: marker lines (tools/check-network-hits.sh).
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } /^#[ \t]*network-gated:/ { next } { sub(/^# ?/, ""); print }' "$0"
                 if [[ "$JSON_MODE" == "true" ]]; then
                     json_emit '{"event":"done","ok":true,"phase":"help","msg":"usage printed on stderr"}'
                 fi

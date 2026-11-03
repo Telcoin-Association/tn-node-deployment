@@ -3408,8 +3408,9 @@ main() {
             --audit)               AUDIT_ONLY=true; shift ;;
             --host-baseline)       HOST_BASELINE=true; shift ;;
             -h|--help)
-                # The header block only: everything up to its closing rule.
-                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+                # The header block only: everything up to its closing rule, without
+                # the network-gated: marker lines (tools/check-network-hits.sh).
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } /^#[ \t]*network-gated:/ { next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
                 if json_mode; then
                     json_done '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
                 fi
