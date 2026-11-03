@@ -415,10 +415,14 @@ chmod +x "$BIN/date"
 export TODAY=""
 
 # with_headers DIR LINE... -- put the header LINEs after min_updater= in DIR/MANIFEST.
+# Plain bash: BSD awk (macOS) refuses a newline in an -v value.
 with_headers() {
-    local d="$1"
+    local d="$1" line
     shift
-    awk -v extra="$(printf '%s\n' "$@")" '{print} /^min_updater=/ {printf "%s\n", extra}' "$d/MANIFEST" > "$d/MANIFEST.new"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        printf '%s\n' "$line"
+        if [[ "$line" == min_updater=* && $# -gt 0 ]]; then printf '%s\n' "$@"; fi
+    done < "$d/MANIFEST" > "$d/MANIFEST.new"
     mv -f "$d/MANIFEST.new" "$d/MANIFEST"
 }
 # run_check -- run INST's updater with --check (TMPDIR in the test dir), OUT/RC.

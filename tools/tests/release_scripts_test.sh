@@ -28,7 +28,7 @@ mkdir -p "$BIN" "$W" "$T/archives"
 # ymd_days and days_ymd, cut from the tool, against day numbers computed with
 # GNU date; and every script that reads a MANIFEST date carries the same
 # ymd_days text.
-eval "$(sed -n '/^ymd_days() {/,/^}/p; /^days_ymd() {/,/^}/p' "$REPO/tools/release-scripts.sh")"
+eval "$(sed -n -e '/^ymd_days() {/,/^}/p' -e '/^days_ymd() {/,/^}/p' "$REPO/tools/release-scripts.sh")"
 bad=""
 for pair in 1970-01-01:0 1970-03-01:59 2000-02-29:11016 2000-03-01:11017 2024-02-29:19782 \
             2026-11-03:20760 2027-02-01:20850 2100-02-28:47540 2100-03-01:47541 \
