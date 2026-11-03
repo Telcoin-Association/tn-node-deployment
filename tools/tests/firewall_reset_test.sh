@@ -4,13 +4,21 @@
 # rule order (every allow before the default deny), SSH and P2P source lists,
 # the mainnet refusals, and the fail-safe: a ufw call that fails at any step
 # leaves the previous rule files and ufw state in place (rc 2), and a restore
-# that fails too is rc 3 with a "DISABLED" message.
+# that fails too is rc 3 with a "DISABLED" message. Then the per-source new-flow
+# limit on the P2P ports (nftables table inet tn_p2p): written in one transaction
+# when no P2P source list is set, deleted with a list (comma list, IPv6 CIDR,
+# list file, stored list) and on --reset without a node, TN_P2P_NEW_FLOW_RATE /
+# TN_P2P_NEW_FLOW_BURST and their refusals, the warning without nft, and the
+# status line and the --json status field p2p_new_flow_limit.
 #
 #   bash tools/tests/firewall_reset_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/firewall_reset_test.sh
 #
-# ufw, sshd and systemctl are PATH stubs (tools/tests/fwstub.sh); ufw keeps its
-# state in files under a fixture TN_ROOT_PREFIX. Nothing touches the host.
+# ufw, sshd, systemctl and nft are PATH stubs (tools/tests/fwstub.sh); ufw and nft
+# keep their state in files under a fixture TN_ROOT_PREFIX. Nothing touches the
+# host. When a real nft can run `nft -c` here (root with CAP_NET_ADMIN, as in
+# `docker run --cap-add NET_ADMIN ubuntu:24.04` with nftables installed), the
+# rendered table is also checked by it; otherwise that check is a SKIP.
 # =============================================================================
 
 set -u
@@ -22,7 +30,10 @@ set -u
 T="$TN_TEST_TMP"
 export TN_ROOT_PREFIX="$T/root"
 export UFW_LOG="$T/ufw.log"
+export NFT_LOG="$T/nft.log"
 export TN_FW_SNAP_PARENT="$T/snap"
+# A real nft for the parse check, found before the stub directory goes on PATH.
+REAL_NFT="$(PATH="${PATH}:/usr/sbin:/sbin"; command -v nft 2>/dev/null || true)"
 mkdir -p "$TN_ROOT_PREFIX/etc/telcoin" "$TN_ROOT_PREFIX/etc/ufw" "$TN_ROOT_PREFIX/etc/default" \
     "$TN_ROOT_PREFIX/etc/ssh" "$TN_FW_SNAP_PARENT" "$T/fw"
 fw_stub_install "$T/bin"
@@ -253,6 +264,205 @@ UFW_FAIL_FROM=4 run_apply --reset
 check_rc "restore fails too rc 3" 3 "$RC"
 check_has "restore failure says DISABLED" "yes" "$(grep -q 'DISABLED' "$T/out" && echo yes)"
 rm -rf "${TN_FW_SNAP_PARENT:?}"/*
+
+# --- the P2P new-flow limit (nftables table inet tn_p2p) -------------------------
+TABLE="$TN_ROOT_PREFIX/.nft.table"
+nft_reset() { rm -f "$TABLE"; : > "$NFT_LOG"; }
+nft_table() { cat "$TABLE" 2>/dev/null; }
+# nft_prog -- the program of the last `nft -f -` call in the log, without the "| ".
+nft_prog() { awk '/^nft -f -$/ { n++; p = "" } /^\| / && n { p = p substr($0, 3) "\n" } END { printf "%s", p }' "$NFT_LOG"; }
+nft_applies() { grep -c '^nft -f -$' "$NFT_LOG" | tr -d ' '; }
+# status_field -- the p2p_new_flow_limit object of json_fw_status.
+status_field() {
+    json_fw_status 3>"$T/status.json" >/dev/null 2>&1
+    grep -o '"p2p_new_flow_limit":{[^}]*}' "$T/status.json"
+}
+V4_RULE='ct state new udp dport { 49590, 49594 } update @tn_p2p_src4 { ip saddr limit rate over 20/minute burst 40 packets } drop'
+V6_RULE='ct state new udp dport { 49590, 49594 } update @tn_p2p_src6 { ip6 saddr limit rate over 20/minute burst 40 packets } drop'
+trim() { sed 's/^[[:space:]]*//'; }
+
+printf 'NETWORK=testnet\n' > "$META"
+NETWORK=testnet; fresh_flags; reset_state yes; nft_reset
+run_apply --reset
+check_rc "limit: open P2P reset rc 0" 0 "$RC"
+tbl="$(nft_table | trim)"
+check_has "limit: v4 meter on both ports, defaults" "$V4_RULE" "$tbl"
+check_has "limit: v6 meter on both ports, defaults" "$V6_RULE" "$tbl"
+check_has "limit: input hook ahead of ufw" "type filter hook input priority -10; policy accept;" "$tbl"
+check_has "limit: v4 set keyed by address" "type ipv4_addr" "$tbl"
+check_has "limit: v6 set keyed by address" "type ipv6_addr" "$tbl"
+check_has "limit: entries expire after a refill (40 at 20/minute)" "timeout 120s" "$tbl"
+check "limit: every rule matches new flows only" "2 2" \
+    "$(grep -c 'dport' <<< "$tbl" | tr -d ' ') $(grep -c '^ct state new udp dport' <<< "$tbl" | tr -d ' ')"
+check_lacks "limit: no rule accepts" "accept" "$(grep 'dport' <<< "$tbl")"
+check "limit: one nft transaction" "1" "$(nft_applies)"
+check "limit: program adds, deletes, then writes the table" "table inet tn_p2p
+delete table inet tn_p2p
+table inet tn_p2p {" "$(nft_prog | grep -v '^#' | head -n 3)"
+check_has "limit: says what it applied" "  ->  P2P new-flow limit: UDP 49590 and 49594 accept at most 20 new flows per minute from one address after a burst of 40 (nftables table inet tn_p2p)." "$OUT"
+check "limit: ufw rules still complete" "ENABLED=yes" "$(cat "$TN_ROOT_PREFIX/etc/ufw/ufw.conf")"
+check_has "limit: ufw still opens the P2P port" "allow 49590/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+cp "$TABLE" "$T/table.default"
+if [[ -n "$REAL_NFT" ]] && "$REAL_NFT" -c -f - >/dev/null 2>&1 <<'NFTPROBE'
+table inet tn_probe
+NFTPROBE
+then
+    fw_p2p_limit_text 20 40 > "$T/rendered.nft"
+    "$REAL_NFT" -c -f "$T/rendered.nft" >"$T/nftc.out" 2>&1
+    check_rc "limit: real nft -c -f accepts the rendered table" 0 "$?"
+    fw_p2p_limit_text 1 100000 > "$T/rendered.nft"
+    "$REAL_NFT" -c -f "$T/rendered.nft" >"$T/nftc.out" 2>&1
+    check_rc "limit: real nft -c -f accepts rate 1 burst 100000" 0 "$?"
+else
+    skip "limit: real nft -c -f on the rendered table" "no nft here that can run -c (needs root with CAP_NET_ADMIN)"
+fi
+
+# A second enable rewrites the table whole, still one transaction.
+: > "$NFT_LOG"
+fresh_flags
+run_apply
+check_rc "limit: re-enable rc 0" 0 "$RC"
+check "limit: re-enable leaves the same table" "$(cat "$T/table.default")" "$(nft_table)"
+check "limit: re-enable is one transaction" "1" "$(nft_applies)"
+
+# Overrides.
+export TN_P2P_NEW_FLOW_RATE=30 TN_P2P_NEW_FLOW_BURST=90
+fresh_flags; reset_state yes; nft_reset
+run_apply
+check_rc "limit: env overrides rc 0" 0 "$RC"
+tbl="$(nft_table | trim)"
+check_has "limit: env rate and burst (v4)" "ct state new udp dport { 49590, 49594 } update @tn_p2p_src4 { ip saddr limit rate over 30/minute burst 90 packets } drop" "$tbl"
+check_has "limit: env rate and burst (v6)" "ct state new udp dport { 49590, 49594 } update @tn_p2p_src6 { ip6 saddr limit rate over 30/minute burst 90 packets } drop" "$tbl"
+check_has "limit: timeout follows the refill (90 at 30/minute)" "timeout 180s" "$tbl"
+check "limit: status field with the overrides" '"p2p_new_flow_limit":{"active":true,"rate":30,"burst":90,"reason":null}' "$(status_field)"
+unset TN_P2P_NEW_FLOW_RATE TN_P2P_NEW_FLOW_BURST
+check "limit: timeout floor is a minute" "timeout 60s" "$(fw_p2p_limit_text 100 5 | grep -o 'timeout [0-9]*s' | head -n 1)"
+check "limit: timeout cap is a day" "timeout 86400s" "$(fw_p2p_limit_text 1 100000 | grep -o 'timeout [0-9]*s' | head -n 1)"
+
+# Bad values stop the run before anything changes.
+for var in TN_P2P_NEW_FLOW_RATE TN_P2P_NEW_FLOW_BURST; do
+    for bad in 0 020 100001 abc -5 1.5 " 7" "7 "; do
+        export "$var=$bad"
+        fresh_flags; reset_state yes; nft_reset
+        run_apply --reset
+        unset "$var"
+        check_rc "limit: ${var}='${bad}' rc 1" 1 "$RC"
+        check "limit: ${var}='${bad}' no ufw change" "" "$(mutating)"
+        check "limit: ${var}='${bad}' no nft call" "" "$(cat "$NFT_LOG")"
+        check_has "limit: ${var}='${bad}' named" "yes" "$(grep -q "${var} is '${bad}', not a whole number from 1 to 100000" "$T/out" && echo yes)"
+    done
+done
+export TN_P2P_NEW_FLOW_RATE=100000 TN_P2P_NEW_FLOW_BURST=1
+fresh_flags; reset_state yes; nft_reset
+run_apply
+unset TN_P2P_NEW_FLOW_RATE TN_P2P_NEW_FLOW_BURST
+check_rc "limit: rate 100000 burst 1 accepted" 0 "$RC"
+
+# A ufw step that fails never reaches the table.
+cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"
+fresh_flags; reset_state yes
+UFW_FAIL_AT=3 run_apply --reset
+check_rc "limit: ufw fails at call 3 rc 2" 2 "$RC"
+check "limit: ufw failure leaves the table" "$(cat "$T/table.default")" "$(nft_table)"
+check "limit: ufw failure makes no nft call" "" "$(cat "$NFT_LOG")"
+
+# A P2P source list (IPv4 and IPv6 CIDRs) replaces the limit: the table goes.
+for how in comma file stored; do
+    printf 'NETWORK=testnet\n' > "$META"
+    fresh_flags; reset_state yes
+    cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"
+    case "$how" in
+        comma) FW_P2P_FROM="10.0.0.0/8,2001:db8::/32" ;;
+        file)  printf '# peers\n10.0.0.0/8, 2001:db8::/32  # two ranges\n\n' > "$T/p2p.list"; FW_P2P_FROM="$T/p2p.list" ;;
+        stored) printf 'NETWORK=testnet\nP2P_ALLOW_FROM=10.0.0.0/8,2001:db8::/32\n' > "$META" ;;
+    esac
+    run_apply --reset
+    check_rc "limit: P2P list (${how}) rc 0" 0 "$RC"
+    rules="$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+    check_has "limit: P2P list (${how}) v4 source rule" "allow from 10.0.0.0/8 to any port 49590 proto udp" "$rules"
+    check_has "limit: P2P list (${how}) v6 source rule" "allow from 2001:db8::/32 to any port 49594 proto udp" "$rules"
+    check_lacks "limit: P2P list (${how}) no open P2P rule" "allow 49590/udp" "$rules"
+    check "limit: P2P list (${how}) table deleted" "" "$(nft_table)"
+    check "limit: P2P list (${how}) delete program" "table inet tn_p2p
+delete table inet tn_p2p" "$(nft_prog)"
+    check_lacks "limit: P2P list (${how}) writes no meter" "limit rate" "$(cat "$NFT_LOG")"
+done
+# With the list and no table, nothing is applied (only the tables are listed).
+: > "$NFT_LOG"
+fresh_flags
+run_apply
+check_rc "limit: list, no table rc 0" 0 "$RC"
+check "limit: list, no table: no nft transaction" "0" "$(nft_applies)"
+check "limit: status with a stored list" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"p2p-list"}' "$(status_field)"
+check_has "limit: status line with a list" "  ->  New-flow limit: not used; the P2P ports take only the P2P source list (P2P_ALLOW_FROM)" "$(fw_p2p_limit_report 2>&1)"
+# --p2p-anywhere drops the stored list and the limit comes back.
+fresh_flags; FW_P2P_ANYWHERE=true; reset_state yes; : > "$NFT_LOG"
+run_apply
+check_rc "limit: --p2p-anywhere rc 0" 0 "$RC"
+check "limit: --p2p-anywhere writes the table" "$(cat "$T/table.default")" "$(nft_table)"
+printf 'NETWORK=testnet\n' > "$META"
+
+# --reset without a node deletes the table.
+detect_installed_nodes() { echo "none"; }
+fresh_flags; reset_state yes; cp "$T/table.default" "$TABLE"; : > "$NFT_LOG"
+run_apply --reset
+check_rc "limit: reset without a node rc 0" 0 "$RC"
+check "limit: reset without a node deletes the table" "" "$(nft_table)"
+detect_installed_nodes() { echo "telcoin.service"; }
+
+# nft refuses the program: a warning, rc 0, the table it had stays.
+fresh_flags; reset_state yes
+printf 'table inet tn_p2p {\n    chain old {\n    }\n}\n' > "$TABLE"; : > "$NFT_LOG"
+NFT_FAIL=1 run_apply
+check_rc "limit: nft refuses rc 0" 0 "$RC"
+check_has "limit: nft refusal warned" "yes" "$(grep -q 'nft did not load the P2P new-flow limit (exit 1: Error: Could not process rule: Operation not supported); table inet tn_p2p stays as it was. The ufw rules are applied.' "$T/out" && echo yes)"
+check "limit: nft refusal keeps the old table" "table inet tn_p2p {
+    chain old {
+    }
+}" "$(nft_table)"
+check "limit: status: a table without the limit rule" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"unreadable"}' "$(status_field)"
+check_has "limit: ufw applied despite nft" "allow 49594/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+
+# Status field and line for each state.
+cp "$T/table.default" "$TABLE"
+check "limit: status active" '"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null}' "$(status_field)"
+check_has "limit: status line active" "  [OK]  New-flow limit: at most 20 new P2P flows per minute from one address after a burst of 40 (nftables table inet tn_p2p)" "$(fw_p2p_limit_report 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+if command -v python3 >/dev/null 2>&1; then
+    check "limit: status object parses as JSON" "True 20 40 None" \
+        "$(python3 -c 'import json,sys; d=json.load(sys.stdin)["p2p_new_flow_limit"]; print(d["active"], d["rate"], d["burst"], d["reason"])' < "$T/status.json" 2>&1)"
+else
+    skip "limit: status object parses as JSON" "no python3 here"
+fi
+rm -f "$TABLE"
+check "limit: status not applied" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"not-applied"}' "$(status_field)"
+check_has "limit: status line not applied" "  [WARN] New-flow limit: not applied; run Enable recommended defaults (or --enable) to add it" "$(fw_p2p_limit_report 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+export NFT_LIST_FAIL=1
+check "limit: status unreadable" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"unreadable"}' "$(status_field)"
+unset NFT_LIST_FAIL
+view_status </dev/null >"$T/view.out" 2>&1
+check_has "limit: view_status shows the limit line" "yes" "$(grep -q "New-flow limit: not applied" "$T/view.out" && echo yes)"
+
+# nft absent: one warning, rc 0, ufw rules applied, status says so.
+mv "$T/bin/nft" "$T/bin/nft.off"; hash -r
+if command -v nft >/dev/null 2>&1; then
+    skip "limit: nft absent" "an nft other than the stub is on PATH ($(command -v nft))"
+else
+    fresh_flags; reset_state yes; : > "$NFT_LOG"
+    run_apply --reset
+    check_rc "limit: nft absent rc 0" 0 "$RC"
+    check "limit: nft absent warns once" "1" "$(grep -c 'nftables (nft) is not installed, so the P2P new-flow limit is not applied; P2P stays open to every source' "$T/out" | tr -d ' ')"
+    check_has "limit: nft absent, ufw rules applied" "allow 49590/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
+    check "limit: nft absent, ufw enabled" "ENABLED=yes" "$(cat "$TN_ROOT_PREFIX/etc/ufw/ufw.conf")"
+    check "limit: status nft missing" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"nft-missing"}' "$(status_field)"
+    check_has "limit: status line nft missing" "  [WARN] New-flow limit: not applied; nftables (nft) is not installed, so P2P stays open to every source" "$(fw_p2p_limit_report 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+    # With a list set, a missing nft is not worth a warning.
+    fresh_flags; FW_P2P_FROM="10.0.0.0/8"; reset_state yes
+    run_apply --reset
+    check_rc "limit: nft absent with a list rc 0" 0 "$RC"
+    check_lacks "limit: nft absent with a list: no warning" "nftables (nft) is not installed" "$OUT"
+fi
+mv "$T/bin/nft.off" "$T/bin/nft"; hash -r
+rm -f "$TABLE"
 
 # --- fw_persist_sources -----------------------------------------------------------
 META_CALLS="$T/meta.calls"
