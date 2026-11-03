@@ -65,9 +65,15 @@ jobs:
           exit "$fail"
       - name: bash-3.2 lint (BSD awk)
         run: git ls-files -z '*.sh' | xargs -0 /bin/bash tools/check-bash32.sh
-      # The UI helper's test suite is pure bash and must pass under 3.2 too.
+      # The UI's shell tests are pure bash and must pass under 3.2 too. As a
+      # user (not root), install_ui_test.sh checks only that the installer
+      # refuses to run; its ownership and mode cases need root.
       - name: UI helper tests under bash 3.2
         run: /bin/bash ui/tests/helper_test.sh
+      - name: UI installer tests under bash 3.2
+        run: /bin/bash ui/tests/install_ui_test.sh
+      - name: open-ui.sh tests under bash 3.2
+        run: /bin/bash ui/tests/open_ui_test.sh
 
   shellcheck:
     name: shellcheck
@@ -123,15 +129,15 @@ jobs:
       # (a value piped into a command's standard input, comments) are in the test.
       - name: Passphrase-print lint
         run: bash tools/tests/passphrase_print_test.sh
-      # No perl program may expand a shell variable inside its code. The lint
-      # arrives with its own change; until then this step reports that it is absent.
+      # No perl program may expand a shell variable inside its code.
       - name: perl interpolation lint
-        run: |
-          if [ -f tools/check-perl-interp.sh ]; then
-            git ls-files -z '*.sh' | xargs -0 bash tools/check-perl-interp.sh
-          else
-            echo "::notice::tools/check-perl-interp.sh is not in the tree yet; skipped."
-          fi
+        run: git ls-files -z '*.sh' | xargs -0 bash tools/check-perl-interp.sh
+      # Every scanned line that names the testnet (adiri, the add-on hub hosts
+      # and addresses) must carry a `network-gated:` comment that says why it
+      # is safe on mainnet. The scanned files and the marker rules are in the
+      # tool's header.
+      - name: network hits
+        run: bash tools/check-network-hits.sh
 
   manifest:
     name: release manifest
@@ -194,19 +200,16 @@ jobs:
       - name: Install the UI's pinned dependencies
         run: |
           python -m pip install --require-hashes -r ui/requirements.txt
-          if [ -f ui/tests/requirements-dev.txt ]; then
-            python -m pip install --require-hashes -r ui/tests/requirements-dev.txt
-          fi
+          python -m pip install --require-hashes -r ui/tests/requirements-dev.txt
       # No network, no sudo: the tests stub the privileged helper and the node.
       - name: Server contract, chain logic and public read-only tests
-        run: |
-          if python -c 'import pytest' 2>/dev/null; then
-            python -m pytest -q ui
-          else
-            python -m unittest discover -s ui -p 'test_*.py' -v
-          fi
+        run: python -m pytest -q ui
       - name: UI helper tests under bash 5
         run: bash ui/tests/helper_test.sh
+      - name: UI installer tests under bash 5
+        run: bash ui/tests/install_ui_test.sh
+      - name: open-ui.sh tests under bash 5
+        run: bash ui/tests/open_ui_test.sh
 
   checksums:
     name: checksum freshness
