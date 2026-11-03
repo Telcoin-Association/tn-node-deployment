@@ -1106,6 +1106,59 @@ class FirewallEnableTest(ServerTestCase):
         self.assertIn("firewall-enable *", rules)
 
 
+class NetworkStatusLinkTest(ServerTestCase):
+    """/api/network/status names the network's public status page in
+    `status_page`: testnet's page, nothing for mainnet (no page yet), devnet
+    and an unknown slug, whether the status data is fresh, cached or
+    unreachable."""
+
+    TESTNET_PAGE = "https://status.adiri.telcoin.network/"
+
+    def setUp(self):
+        super().setUp()
+        server._network_cache.clear()
+        self.addCleanup(server._network_cache.clear)
+        self.kuma = {"config": {"title": "Status"}}
+        self.patch(server, "_http_get_json", lambda url: self.kuma)
+
+    def status(self, slug):
+        return self.client.get("/api/network/status?slug=" + slug).get_json()
+
+    def test_each_network_gets_its_own_link(self):
+        for slug, want in (("testnet", self.TESTNET_PAGE), ("mainnet", ""), ("devnet", "")):
+            with self.subTest(slug=slug):
+                body = self.status(slug)
+                self.assertTrue(body["available"])
+                self.assertEqual(body["status_page"], want)
+                self.assertEqual(self.status(slug)["status_page"], want, "the cached answer too")
+
+    def test_an_unreachable_status_page_keeps_the_link(self):
+        self.kuma = None
+        for slug, want in (("testnet", self.TESTNET_PAGE), ("mainnet", ""), ("devnet", "")):
+            with self.subTest(slug=slug):
+                body = self.status(slug)
+                self.assertFalse(body["available"])
+                self.assertEqual(body["status_page"], want)
+
+    def test_an_unknown_network_has_no_link(self):
+        body = self.status("adiri-staging")
+        self.assertFalse(body["configured"])
+        self.assertEqual(body["status_page"], "")
+
+    def test_only_known_networks_have_a_link_and_each_is_https(self):
+        self.assertEqual(server.status_page_link("testnet"), self.TESTNET_PAGE)
+        self.assertLessEqual(set(server.STATUS_PAGE_LINKS), server.KNOWN_SLUGS)
+        self.assertNotIn("mainnet", server.STATUS_PAGE_LINKS)
+        self.assertNotIn("devnet", server.STATUS_PAGE_LINKS)
+        for url in server.STATUS_PAGE_LINKS.values():
+            self.assertRegex(url, r"^https://[^\s\"'<>]+$")
+
+    def test_the_adiri_page_line_carries_the_network_gated_marker(self):
+        lines = [ln for ln in read(SERVER_PY).splitlines() if "status.adiri.telcoin.network" in ln]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("# network-gated: status page per network", lines[0])
+
+
 class RpcExposureTest(ServerTestCase):
 
     def engine_summary(self, domain):

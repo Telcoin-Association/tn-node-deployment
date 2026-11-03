@@ -5524,6 +5524,15 @@ KNOWN_SLUGS = {m["slug"] for m in NETWORKS.values()}
 
 STATUS_PAGE_BASE = "https://status.telscan.xyz"
 
+# The public status page the Network tab links to, per network slug. A network
+# without one (mainnet until its page is published, devnet) shows no link.
+STATUS_PAGE_LINKS = {"testnet": "https://status.adiri.telcoin.network/"}  # network-gated: status page per network
+
+
+def status_page_link(slug):
+    """The public status page URL of a network slug, or '' when it has none."""
+    return STATUS_PAGE_LINKS.get(slug, "")
+
 
 def status_page_config_url(slug):
     return f"{STATUS_PAGE_BASE}/api/status-page/{slug}"
@@ -5720,6 +5729,7 @@ def _build_network_status(slug, title_default):
     return {
         "title": title,
         "slug": slug,
+        "status_page": status_page_link(slug),
         "overall": overall,
         "monitors": monitors,
         "consensus_block": consensus,
@@ -5737,6 +5747,7 @@ def api_network_status():
             "configured": False,
             "available": False,
             "slug": slug,
+            "status_page": "",
             "overall": "unknown",
             "monitors": [],
             "consensus_block": None,
@@ -5763,6 +5774,7 @@ def api_network_status():
             "configured": True,
             "available": False,
             "slug": slug,
+            "status_page": status_page_link(slug),
             "title": title_default,
             "overall": "unknown",
             "monitors": [],

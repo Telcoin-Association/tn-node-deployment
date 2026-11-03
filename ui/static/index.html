@@ -1527,11 +1527,21 @@ async function augmentDashboardNetstat(){
 }
 
 // =============================================================================
-// NETWORK TAB -- Adiri Testnet status panel (moved off the Dashboard). Pulls
-// the public status page (cached 60s server-side); refreshes on the 15s tick;
-// degrades to a grey "status unavailable" state, never an error. Same page
-// layout style as the Dashboard (.dash container).
+// NETWORK TAB -- the selected node's network status panel (moved off the
+// Dashboard). Pulls the public status page (cached 60s server-side); refreshes
+// on the 15s tick; degrades to a grey "status unavailable" state, never an
+// error. Same page layout style as the Dashboard (.dash container).
 // =============================================================================
+
+// The "status page" link: the server's status_page for the network (an https
+// URL), or nothing when the network has no public page (mainnet until it is
+// published, devnet).
+function statusPageLink(d){
+  const url = String((d && d.status_page) || '');
+  if(!/^https:\/\/[^\s"'<>]+$/.test(url)) return '';
+  return `<a href="${esc(url)}" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>`;
+}
+
 async function renderNetwork(){
   const c = $('#view-network');
   if(!c) return;
@@ -1600,7 +1610,7 @@ async function renderNetwork(){
       <div class="svc-row" style="margin-bottom:10px">
         <h3 style="margin:0">${esc(d.title||(netName+' Network Status'))}</h3>
         ${pill}
-        <a href="https://status.adiri.telcoin.network/" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px">status page ↗</a>
+        ${statusPageLink(d)}
       </div>
       ${consensusRow}
       <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));margin-top:12px">${cells}</div>

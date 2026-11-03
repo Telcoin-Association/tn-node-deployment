@@ -75,6 +75,19 @@ class FirewallEnableTest(unittest.TestCase):
         self.assertIn("mask<8", body)
 
 
+class StatusPageLinkTest(unittest.TestCase):
+
+    def test_the_link_comes_from_the_server_never_from_the_page(self):
+        self.assertNotIn("status.adiri.telcoin.network", page())
+        self.assertIn("${statusPageLink(d)}", function_body("renderNetwork"))
+        body = function_body("statusPageLink")
+        self.assertIn("d.status_page", body)
+        # Only an https URL becomes a link; anything else (mainnet, devnet) shows none.
+        self.assertIn("if(!/^https:\\/\\/[^\\s\"'<>]+$/.test(url)) return '';", body)
+        self.assertIn('href="${esc(url)}"', body)
+        self.assertIn('rel="noopener"', body)
+
+
 class HostAuditCardTest(unittest.TestCase):
 
     def test_the_system_panel_loads_the_audit_read_only(self):
