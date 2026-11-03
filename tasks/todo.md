@@ -597,3 +597,42 @@ HEAD = 7fb7c8d (not pushed). Two commits on main: e20500c (support address, setu
 - Row 10c leaves out the ERROR-level sibling line at close_epoch.rs:653-662 (also no action).
 - "which waits for the epoch boundary" for edit-config menu item 12 is the guide's existing
   shorthand (waits only for a `CvvActive` node inside `TN_EPOCH_MARGIN`).
+
+## Review: follow-ups round, scripts-v2.1.0 (2026-11-03 to 2026-11-04)
+
+Plan of 2026-11-02 executed on branch `hardening-followups` (draft PR #59, 166 commits over main
+1187ddb). Specs in `tasks/spec-fup-*.md`; checkpoints `tasks/ckpt-fup-*.md` and
+`tasks/ckpt-verify-*.md`; verifier harnesses `tasks/verify-fup/V1..V6/`; the orchestrator's
+own notes in `tasks/ckpt-fup-ORCH.md`.
+
+- Wave 0: Dependabot #53 to #57 merged (two over SSH, since both tokens refuse workflow-file
+  merges); 16 issue status comments; #34 closed; specs; draft PR.
+- Wave 1 and 2: nine packages (LIB-A, LIB-B, KEYS, AUDIT, OBS, REL, FW, UI-S, NET-2, GOV),
+  AUDIT-2 for the add-on refresh hooks, and nine follow-up rounds from the verifiers and the
+  whole-range review; six independent verifiers (harness first), 170 mutants, 169 caught.
+- The review (`/code-review high`, eight angles) found seven seam issues, all fixed: the
+  interactive key removal and the host baseline on multi-node hosts, the push-URL override
+  intent, the explicit epoch-wait cap, a held firewall lock, an unconditional table rewrite,
+  a failed baseline install leaving rules loaded.
+- Release prep: 14 version constants at 2.1.0, sidecars regenerated twice (after the fixes).
+- Final gates on f0a47c8: fixture suite 61 files, 0 failed under bash 5.3, bash:3.2 (with and
+  without flock) and ubuntu:24.04; helper 548/548 under bash 5 and 3.2; pytest 281 on Python
+  3.10 and 3.12; shellcheck 0.9 and 0.11, check-bash32, bash -n under 3.2, perl, passphrase,
+  root-write-pipe and network-hits lints clean; actionlint clean; the vendored Alloy config
+  identical to upstream from the first River component; sync-note sha matching; no attribution
+  trailers; no private-path mention.
+- CI: all nine jobs and Integration green on dbec6cb; the final tip's run is linked from the
+  PR body.
+- Docs: README, OPERATOR.md (key lifecycle 4.12, host baseline 4.13), AGENTS.md (mainnet switch,
+  contributing, CI, lints), docs/testnet-addons.md, followup.md, CHANGELOG/scripts-v2.1.0.md,
+  partner guide 1.6 with a byte-identical PDF.
+- Upstream: deploy-networks-common PR #8 (config.alloy token file and TLS 1.3), pending merge.
+- Lessons recorded in `tasks/lessons.md` (BSD userland on the macOS runner, the lock fallback,
+  linted verifier records, tree-wide lints on orchestrator commits, commit messages through a
+  file, verifier rounds back to the owning implementer).
+
+Left to the maintainer (commands in the closing report): the github-pages tag policy,
+`scripts-v2.0.0` cut and signed from main before this merges, the #30 rulesets and settings
+(JSON with the two missing contexts and a second approver), telcoin-network PR #1716, the
+deploy-networks-common PR #8 merge, the values for the second code owner, mainnet epoch
+timing and the nft rate, and `scripts-v2.1.0` with `--serial 2` after the merge.
