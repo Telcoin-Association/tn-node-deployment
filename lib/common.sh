@@ -1529,7 +1529,8 @@ readonly GAR_TAGS_URL="https://us-docker.pkg.dev/v2/telcoin-network/tn-public/ad
 # network-gated: the testnet fallback image (latest_docker_image, testnet only)
 # registry answers: v0.16.0-adiri by digest (the Docker-Content-Digest the legacy
 # registry served for that tag on 2026-10-15).
-readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"  # network-gated: testnet fallback tag (latest_docker_image, testnet only)
+# network-gated: testnet fallback tag, used only on testnet paths (latest_docker_image, tn_docker_release_tag_for, _setup_tag_example, edit_docker_image)
+readonly DEFAULT_DOCKER_TAG="v0.16.0-adiri"
 readonly DEFAULT_DOCKER_IMAGE="${GAR_IMAGE_BASE}@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea"
 
 # The GitHub Releases API of telcoin-network: the source of each channel's newest release.
