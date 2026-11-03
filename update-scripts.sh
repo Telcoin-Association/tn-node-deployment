@@ -817,12 +817,15 @@ release_line() {
 }
 
 # check_release -- the --check report: the installed release (its record checked
-# against lib/allowed_signers), the newest release (RELEASE on main and the
-# signed MANIFEST of the tag it names), whether an update is pending and whether
-# either release has expired. Downloads into a temp dir only and changes nothing
-# in the tree. rc 0 when the installed release is the newest and neither has
-# expired; 1 when an update is pending or a release has expired; 2 when no signed
-# release is installed or the newest release cannot be fetched or verified.
+# against lib/allowed_signers) and whether it has expired, then the newest
+# release (RELEASE on main and the signed MANIFEST of the tag it names), whether
+# an update is pending and whether the newest release has expired. Downloads
+# into a temp dir only and changes nothing in the tree. rc 0 when the installed
+# release is the newest and neither has expired; 1 when an update is pending or
+# a release has expired; 2 when no signed release is installed, the installed
+# record does not verify, or the newest release cannot be fetched or verified or
+# would be refused. 2 wins over 1; the installed release's expiry is reported
+# before anything is fetched, so it is printed in every case.
 check_release() {
     local rc=0 installed=none i_rel="" i_ser="" i_exp="" ago
     if [[ ! -f "$INSTALLED_MANIFEST" ]]; then
@@ -842,6 +845,10 @@ check_release() {
         i_ser="$M_SERIAL"
         i_exp="$M_EXPIRES"
         print_info "Installed:  $(release_line "$M_RELEASE" "$M_SERIAL" "$M_DATE" "$M_EXPIRES") (signature verified)"
+        if ago="$(release_expired "$i_exp")"; then
+            print_warn "Installed release ${i_rel} expired on ${i_exp} (${ago}); a newer signed release is overdue."
+            rc=1
+        fi
     fi
 
     STAGE="$(mktemp -d "${TMPDIR:-/tmp}/tn-update-check.XXXXXX" 2>/dev/null \
@@ -868,14 +875,19 @@ check_release() {
         return 2
     fi
 
+    # A release the updater would refuse is a failed check, not a pending update:
+    # a pointer that goes back to an older or a different manifest can mean
+    # tampering.
     if (( 10#$M_SERIAL < 10#$i_ser )); then
-        print_warn "RELEASE names ${M_RELEASE} (serial ${M_SERIAL}), older than the installed serial ${i_ser}: the updater refuses it."
-        rc=1
+        print_error "RELEASE names ${M_RELEASE} (serial ${M_SERIAL}), older than the installed release (serial ${i_ser}): the updater refuses it."
+        print_info "A release pointer that goes back can mean tampering: tell support@telcoin.org."
+        return 2
     elif (( 10#$M_SERIAL == 10#$i_ser )) && ! cmp -s "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"; then
-        print_warn "Release ${M_RELEASE} reuses the installed serial ${i_ser} with a different manifest: the updater refuses it."
-        rc=1
+        print_error "Release ${M_RELEASE} reuses the installed serial ${i_ser} with a different manifest: the updater refuses it."
+        print_info "Two manifests with one serial can mean tampering: tell support@telcoin.org."
+        return 2
     elif ! plan_changes; then
-        rc=1
+        return 2
     elif [[ ${#UPD_PATHS[@]} -gt 0 || ${#DEL_PATHS[@]} -gt 0 ]]; then
         print_warn "Update pending: ${#UPD_PATHS[@]} file(s) to update, ${#DEL_PATHS[@]} to remove. Run: bash ${SCRIPT_DIR}/update-scripts.sh"
         rc=1
@@ -886,10 +898,6 @@ check_release() {
         print_ok "No update pending: every file matches ${M_RELEASE}."
     fi
 
-    if ago="$(release_expired "$i_exp")"; then
-        print_warn "Installed release ${i_rel} expired on ${i_exp} (${ago}); a newer signed release is overdue."
-        rc=1
-    fi
     if [[ "$M_RELEASE" != "$i_rel" ]] && ago="$(release_expired "$M_EXPIRES")"; then
         print_warn "Newest release ${M_RELEASE} expired on ${M_EXPIRES} (${ago}); a newer signed release is overdue."
         rc=1
@@ -952,10 +960,18 @@ Options:
 Exit status: 0 when everything is current, updated, or the update is declined;
 1 when GitHub cannot be reached, or a release is refused or fails verification;
 2 for an unknown argument.
-With --check: 0 when the installed release is the newest and neither has
-expired; 1 when an update is pending or the installed or newest release has
-expired; 2 when no signed release is installed, or the newest release cannot
-be fetched or verified.
+With --check:
+  0  the installed release is the newest and neither has expired.
+  1  an update is pending, or the installed or the newest release has expired.
+  2  no signed release is installed; the installed release record does not
+     verify; the newest release cannot be fetched or verified (no RELEASE, a
+     network error, a bad signature, a malformed manifest); or the updater
+     would refuse it (a lower serial than the installed one, the installed
+     serial with a different manifest, or a listed file that is not a regular
+     file here).
+  When a case of 2 and one of 1 both hold, the exit status is 2. The expiry of
+  the installed release is checked before anything is downloaded, so its
+  warning is printed in every case.
 EOF
 }
 

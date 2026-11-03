@@ -473,6 +473,37 @@ TODAY=2027-02-01 run_check
 check_rc "check, expires today: exits 1" 1 "$RC"
 check_has "check, expires today: says today" "  [WARN] Installed release scripts-v1.5.0 expired on 2027-02-01 (today); a newer signed release is overdue." "$(plain "$OUT")"
 
+# --check: the installed release has expired and the newest cannot be fetched:
+# the expiry warning comes first, from the record alone, and rc is 2.
+TODAY=2027-02-04 CURL_FAIL=1 run_check
+check_rc "check, installed expired, fetch fails: exits 2" 2 "$RC"
+check_has "check, installed expired, fetch fails: still warns" "  [WARN] Installed release scripts-v1.5.0 expired on 2027-02-01 (3 days ago); a newer signed release is overdue." "$(plain "$OUT")"
+check "check, installed expired, fetch fails: the warning before the fetch error" "yes" \
+    "$(plain "$OUT" | awk '/expired on 2027-02-01/ {w = NR} /network error/ {e = NR} END {print (w && e && w < e) ? "yes" : "no"}')"
+
+# --check: a release the updater would refuse is rc 2.
+publish "$R2" scripts-v1.1.0
+TODAY=2026-11-03 run_check
+check_rc "check, RELEASE goes back to a lower serial: exits 2" 2 "$RC"
+check_has "check, lower serial: says so" "  [ERROR] RELEASE names scripts-v1.1.0 (serial 101), older than the installed release (serial 102): the updater refuses it." "$(plain "$OUT")"
+check_has "check, lower serial: names the risk" "  ->  A release pointer that goes back can mean tampering: tell support@telcoin.org." "$(plain "$OUT")"
+S3="$SRC/r3same"; rm -rf "$S3"; cp -R "$R3" "$S3"
+printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION="1.2.1"\n' > "$S3/setup-node.sh"
+write_manifest "$S3" scripts-v1.5.0 102 1.0.0; with_headers "$S3" date=2026-11-03 expires=2027-02-01
+sign "$S3" key1; sidecars "$S3"
+publish "$S3" scripts-v1.5.0
+TODAY=2027-02-04 run_check
+check_rc "check, same serial, another manifest: exits 2" 2 "$RC"
+check_has "check, same serial: says so" "  [ERROR] Release scripts-v1.5.0 reuses the installed serial 102 with a different manifest: the updater refuses it." "$(plain "$OUT")"
+check_has "check, same serial and expired: the expiry still warned" "  [WARN] Installed release scripts-v1.5.0 expired on 2027-02-01 (3 days ago); a newer signed release is overdue." "$(plain "$OUT")"
+install_release "$R2"
+publish "$R3" scripts-v1.5.0
+rm -f "$INST/setup-node.sh"; mkdir "$INST/setup-node.sh"
+TODAY=2026-11-03 run_check
+check_rc "check, a listed file is a directory here: exits 2" 2 "$RC"
+says "check, a listed file is a directory here" "setup-node.sh is not a regular file"
+install_release "$R3"
+
 # An expired release is still installed, with the warning.
 install_release "$R2"
 TODAY=2027-02-02 run_updater y
