@@ -2065,12 +2065,102 @@ edit_cred_pcrs() {
     return 0
 }
 
+# edit_keytool_verify_run SPEC DATA_DIR -- the keytool verify command line, kept
+# in this one place because its shape is not final upstream (telcoin-network
+# #1730). tn_keytool runs it as the service user, adds the global --datadir and
+# --bls-passphrase-source stdin, and writes TN_KEYTOOL_PASS to its standard input.
+edit_keytool_verify_run() {
+    tn_keytool "$1" "$2" verify
+}
+
+# edit_keytool_verify WHAT [FILE] -- before a credential action writes anything,
+# prove that the passphrase it is about to keep opens the node's BLS key, with
+# keytool verify of the release that starts the node, when that release has it
+# (tn_keytool_has). The passphrase is TN_CRED_PASS or, with FILE, the one line of
+# that root-only plaintext file (what a migration reads; a file the migration
+# would refuse is left to it). It reaches keytool only on its standard input.
+# WHAT names it in the refusal ("The new passphrase"). rc 0 when the key opens,
+# or when no check can be made: keytool verify is not in this release (a log
+# line), or the release cannot be told or probed (a warning). rc 1 when keytool
+# verify ran and did not succeed: the reason is reported (never the passphrase),
+# TN_CRED_PASS is cleared and the caller writes nothing.
+edit_keytool_verify() {
+    local what="${1:-The passphrase}" file="${2:-}" spec dd out first rc=0 cr=$'\r'
+    spec="$(tn_launch_runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || spec=""
+    if [[ -z "$spec" ]]; then
+        edit_warn "Cannot tell which node release starts ${TARGET_SERVICE} from ${TARGET_LAUNCH_FILE:-its launch file}; keytool verify skipped"
+        return 0
+    fi
+    tn_keytool_has "$spec" verify || rc=$?
+    case "$rc" in
+        0) ;;
+        1)
+            edit_log "keytool verify is not in this release; skipped"
+            return 0
+            ;;
+        *)
+            edit_warn "Could not run the node binary of ${spec} to see whether it has keytool verify; skipped"
+            return 0
+            ;;
+    esac
+    # A plain shell variable (an inherited exported one is dropped first), so
+    # tn_keytool accepts it.
+    unset TN_KEYTOOL_PASS
+    if [[ -n "$file" ]]; then
+        if ! _tn_cred_plain_ok "$file" || ! _tn_passfile_trim_safe "$file"; then
+            return 0
+        fi
+        TN_KEYTOOL_PASS=""
+        IFS= read -r TN_KEYTOOL_PASS < "$file" || true
+        TN_KEYTOOL_PASS="${TN_KEYTOOL_PASS%"$cr"}"
+    else
+        TN_KEYTOOL_PASS="${TN_CRED_PASS:-}"
+    fi
+    if [[ -z "$TN_KEYTOOL_PASS" ]]; then
+        unset TN_KEYTOOL_PASS
+        return 0
+    fi
+    if ! dd="$(detect_data_dir)" || [[ -z "$dd" ]]; then
+        unset TN_KEYTOOL_PASS
+        TN_CRED_PASS=""
+        edit_error "keytool verify cannot run: the node data dir cannot be read from .node-meta (see above); nothing was changed"
+        return 1
+    fi
+    rc=0
+    out="$(edit_keytool_verify_run "$spec" "$dd" 2>&1)" || rc=$?
+    # Only the first line of keytool's output is ever shown, and not even that
+    # when it holds the passphrase.
+    first="$(printf '%s\n' "$out" | awk 'NF { print; exit }')"
+    [[ "$first" != *"$TN_KEYTOOL_PASS"* ]] || first=""
+    out=""
+    unset TN_KEYTOOL_PASS
+    case "$rc" in
+        0)
+            edit_log "keytool verify: the passphrase opens the BLS key in ${dd}"
+            return 0
+            ;;
+        4|125|126|127)
+            # tn_keytool or docker could not start it.
+            TN_CRED_PASS=""
+            edit_error "keytool verify could not run (exit ${rc}${first:+: ${first}}); nothing was changed. Fix the cause and try again."
+            return 1
+            ;;
+        *)
+            TN_CRED_PASS=""
+            edit_error "${what} does not open the BLS key in ${dd} (keytool verify, exit ${rc}); nothing was changed. Use the passphrase the key was created with."
+            return 1
+            ;;
+    esac
+}
+
 # edit_migrate_credential -- --migrate-credential and the menu: move the node to the
 # current unit and start script with its passphrase in the encrypted credential
 # (tn_migrate_credential), read from the root-only file or from a unit that holds
 # it (tn_migrate_embedded_passphrase); the passphrase is asked for when neither can
 # be read. Below systemd 250 a unit that holds it moves to the root-only file
-# (testnet only). Old copies are shredded once the node is back. rc as the helpers.
+# (testnet only). keytool verify checks the passphrase against the key first
+# (edit_keytool_verify). Old copies are shredded once the node is back. rc as the
+# helpers.
 edit_migrate_credential() {
     local conf rc=0
     conf="$(tn_resolve_config_dir)"
@@ -2082,12 +2172,20 @@ edit_migrate_credential() {
             edit_warn "the passphrase in ${TARGET_SERVICE_FILE} cannot be read back as one plain value; type it instead"
             edit_cred_type_pass || return 1
         fi
+        edit_keytool_verify "The passphrase" || return 1
         tn_migrate_embedded_passphrase "$TARGET_SERVICE_FILE" edit_wait_say || rc=$?
     else
         if [[ ! -f "${conf}/bls-passphrase" ]] \
             && ! [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "credential" && -f "${conf}/bls-passphrase.cred" ]]; then
             edit_warn "no stored passphrase to move (${conf}/bls-passphrase is missing); type it instead"
             edit_cred_type_pass || return 1
+        fi
+        # A typed passphrase, else the file the migration reads. With neither,
+        # the node already reads the encrypted credential and nothing is written.
+        if [[ -n "$TN_CRED_PASS" ]]; then
+            edit_keytool_verify "The passphrase" || return 1
+        elif [[ -f "${conf}/bls-passphrase" ]]; then
+            edit_keytool_verify "The passphrase in ${conf}/bls-passphrase" "${conf}/bls-passphrase" || return 1
         fi
         tn_migrate_credential edit_wait_say || rc=$?
     fi
@@ -2101,9 +2199,10 @@ edit_migrate_credential() {
 # key as it is now (the TPM when there is a usable one) and the PCR choice
 # (--bind-pcrs LIST, --bind-pcrs none, else the recorded one): after a TPM change, a
 # PCR policy change, or a move between host and host+tpm2. The value is decrypted
-# into a pipe, never a file; when it no longer decrypts here it is asked for. Then
-# the restart steps of a migration, with the old credential put back if the node
-# does not come up. rc as _tn_cred_switch.
+# into a pipe, never a file; when it no longer decrypts here it is asked for, and
+# keytool verify checks it against the key (edit_keytool_verify). Then the restart
+# steps of a migration, with the old credential put back if the node does not come
+# up. rc as _tn_cred_switch.
 edit_reseal() {
     local cred net key pcrs rc=0 restart=yes
     cred="$(tn_resolve_config_dir)/bls-passphrase.cred"
@@ -2131,6 +2230,7 @@ edit_reseal() {
         return 1
     fi
     pcrs="$(edit_cred_pcrs "$key")"
+    edit_keytool_verify "The passphrase" || return 1
     systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
     _tn_cred_switch credential "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
     TN_CRED_PASS=""
@@ -2194,7 +2294,8 @@ edit_bls_passphrase() {
 # encrypted credential where systemd-creds works, else in the root-only file, then
 # restart through the committee guard and the epoch wait; the old files come back if
 # the node does not unlock its key. Keys are not re-encrypted: they must already be
-# wrapped with the new passphrase.
+# wrapped with the new passphrase, which keytool verify checks before anything is
+# written (edit_keytool_verify).
 edit_change_passphrase() {
     print_warn "Changing the BLS passphrase updates the stored passphrase used"
     print_warn "to decrypt your keys at startup. This does NOT re-encrypt your"
@@ -2244,6 +2345,13 @@ edit_change_passphrase() {
             return 0
         fi
         pcrs="$(edit_cred_pcrs "$key")"
+    fi
+    # The key files are not re-encrypted, so the key must already open with the
+    # new passphrase; if it does not, the node cannot open its key at its next start.
+    if ! edit_keytool_verify "The new passphrase"; then
+        print_info "Passphrase unchanged."
+        edit_pause
+        return 0
     fi
     systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
     _tn_cred_switch "$target" "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
