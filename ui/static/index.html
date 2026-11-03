@@ -2400,10 +2400,12 @@ async function fillUpdateStatus(){
     actions = `<p style="color:var(--text2);font-size:13px;margin-top:12px">Install method
       <strong>${esc(method)}</strong> can't be updated from here — only release, source and Docker installs are supported.</p>`;
   } else {
+    // network-gated: testnet and mainnet examples side by side
+    const refHint = 'release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)';
     actions = `
       <div class="field"><label>Target release tag</label>
         <input id="updRef" value="${esc(u.latest_ref || u.current_ref || '')}"
-          placeholder="release tag, e.g. v0.16.0-adiri (testnet) or v1.0.0 (mainnet)"></div>  <!-- network-gated: testnet and mainnet examples side by side -->
+          placeholder="${refHint}"></div>
       <div class="svc-row" style="margin-top:14px">
         <button class="btn btn-green" id="updPrepare">⬇ Prepare</button>
         ${pending?'<button class="btn btn-out" id="updApply">▶ Apply pending</button>':''}
@@ -3597,11 +3599,12 @@ function hwInfoRow(hw, pf){
 }
 
 function stepNetwork(body){
+  // network-gated: the testnet card; the wizard names testnet adiri, which the helper reads as testnet
+  const testnetCard = {net: 'adiri', label: 'Adiri Testnet'};
   body.innerHTML = `<h3>Step 2 · Network</h3>
     <div class="radio-cards">
-      <!-- network-gated: the testnet card; the helper reads adiri as testnet -->
-      <div class="rcard ${state.setup.network==='adiri'?'sel':''}" data-net="adiri">
-        <div class="rt">Adiri Testnet</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>  <!-- network-gated: label of the testnet card -->
+      <div class="rcard ${state.setup.network===testnetCard.net?'sel':''}" data-net="${testnetCard.net}">
+        <div class="rt">${testnetCard.label}</div><div class="rd">Telcoin's public test network. Recommended for new nodes.</div></div>
       ${SETUP_MAINNET_ENABLED
         ? `<div class="rcard ${state.setup.network==='mainnet'?'sel':''}" data-net="mainnet">
         <div class="rt">Mainnet</div><div class="rd">Production network. Installs a signed release and logs to the systemd journal by default.</div></div>`
