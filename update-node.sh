@@ -1375,6 +1375,17 @@ update_wait_say() {
     return 0
 }
 
+# update_baseline_refresh -- after an apply that verified: make the host baseline
+# again (tn_host_baseline_refresh, a no-op without HOST_BASELINE=true in .node-meta
+# or with a lib/common.sh that lacks it). Its warnings are events in --json mode,
+# before the done event. Never fails.
+update_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh update_wait_say
+    fi
+    return 0
+}
+
 # update_quorum_guard -- the committee check before a stop (tn_committee_down_guard):
 # rc 1 (with the reason) when stopping this node now would leave the committee one
 # member short of a halt, or the count cannot be made on a staked mainnet node.
@@ -1692,6 +1703,7 @@ apply_docker_update() {
     if verify_health_after_restart && verify_running_image_id "$pulled_image_id" && verify_consensus_participation; then
         clear_pending_state
         docker_record_meta "$new_image" "$new_ref"
+        update_baseline_refresh
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
@@ -2193,6 +2205,7 @@ apply_source_update() {
         # Record the now-running release so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
         record_installed_ref "$new_ref"
+        update_baseline_refresh
         if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
             print_warn "Service is not enabled for auto-start on reboot."
             print_info "  Enable it: systemctl enable ${SERVICE_NAME}"
@@ -3073,6 +3086,7 @@ json_apply_source() {
         # Record the now-running release so the UI reports the installed binary's
         # version (not the source checkout, which has moved to new_ref).
         record_installed_ref "$new_ref"
+        update_baseline_refresh
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_ref\":\"$(json_escape "$new_ref")\",\"new_version\":\"$(json_escape "$new_version")\"$(update_vote_field)}"
         return 0
     fi
@@ -3173,6 +3187,7 @@ json_apply_docker() {
     if [[ "$verify_ok" == "true" ]]; then
         clear_pending_state
         docker_record_meta "$new_image" "$new_ref"
+        update_baseline_refresh
         json_emit "{\"event\":\"done\",\"ok\":true,\"phase\":\"apply\",\"new_image\":\"$(json_escape "$new_image")\"$(update_vote_field)}"
         return 0
     fi

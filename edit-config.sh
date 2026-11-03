@@ -947,6 +947,17 @@ edit_wait_say() {
     return 0
 }
 
+# edit_baseline_refresh -- after an edit the restarted node runs with: make the
+# host baseline again (tn_host_baseline_refresh, a no-op without HOST_BASELINE=true
+# in .node-meta or with a lib/common.sh that lacks it). Its warnings are events in
+# --json mode, before the done event. Never fails.
+edit_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh edit_wait_say
+    fi
+    return 0
+}
+
 # edit_epoch_wait -- called just before the node restarts (before it stops, for
 # the BLS passphrase), after the lock is held, and never before a rollback
 # restart. When the node votes in the current committee and the epoch boundary
@@ -1578,6 +1589,7 @@ apply_changes() {
         sleep 3
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
+            edit_baseline_refresh
         else
             print_error "Node failed to restart. Check logs:"
             print_info "  sudo tail -30 /var/log/telcoin/${TARGET_SERVICE}.log"
@@ -2983,6 +2995,7 @@ run_set() {
     rc=0
     edit_restart || rc=$?
     if [[ $rc -eq 0 ]]; then
+        edit_baseline_refresh
         edit_done true "$field" "$value" "applied and ${TARGET_SERVICE} healthy"
         return 0
     fi
