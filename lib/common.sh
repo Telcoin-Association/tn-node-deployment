@@ -9532,6 +9532,10 @@ tn_node_has_flag() {
 # tn_keytool_has SPEC WORD [SUBCMD...] — rc 0 when `keytool SUBCMD... --help` of
 # SPEC lists WORD, an option (--rpc-http) or a subcommand (set-rpc); 1 when it does
 # not or the subcommand is unknown to this release; 4 when the probe could not run.
+# A probe that exits 1 or 2 is the release's answer only when the output is clap's
+# own (its help or an error, both with a "Usage:" line naming keytool); any other
+# output, such as a privilege-drop wrapper or docker failing with 1, is rc 4: an
+# unreadable answer is not a "no".
 tn_keytool_has() {
     local spec="${1:-}" word="${2:-}" out rc
     [[ $# -ge 2 && -n "$word" ]] || return 1
@@ -9540,7 +9544,12 @@ tn_keytool_has() {
     out="$(_tn_runner_probe "$spec" keytool "$@" --help 2>&1)" || rc=$?
     case "$rc" in
         0) ;;
-        1|2) return 1 ;;
+        1|2)
+            case "$out" in
+                *Usage:*keytool*) return 1 ;;
+            esac
+            return 4
+            ;;
         *) return 4 ;;
     esac
     _tn_help_lists "$word" "$out"
