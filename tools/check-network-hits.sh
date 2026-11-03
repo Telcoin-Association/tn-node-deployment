@@ -22,7 +22,8 @@
 #
 # Scanned, relative to the repository root: lib/*.sh (the top level only, so
 # the vendored lib/wgvpn/ is not), the *.sh files at the root, ui/server.py,
-# ui/telcoin-ui-helper.sh, ui/static/index.html and observability/config.alloy.
+# ui/telcoin-ui-helper.sh, ui/install-ui.sh, ui/static/index.html and
+# observability/config.alloy.
 # Everything else is out of scope: common/, tools/, the tests, CHANGELOG*,
 # tasks/, followup.md, docs/, every *.md, lib/testnet-addons.env itself and the
 # .sha256 sidecars. A named file that is missing is an error (exit 2), so a
@@ -89,8 +90,8 @@ usage: tools/check-network-hits.sh [--list] [ROOT]
 Report lines that name the testnet (adiri, compared without case) or a hub or
 monitor address of lib/testnet-addons.env without saying why they are safe on
 mainnet. Scans lib/*.sh, the root *.sh, ui/server.py, ui/telcoin-ui-helper.sh,
-ui/static/index.html and observability/config.alloy under ROOT (default: the
-repository this tool lives in). Each unannotated hit prints as
+ui/install-ui.sh, ui/static/index.html and observability/config.alloy under
+ROOT (default: the repository this tool lives in). Each unannotated hit prints as
   FILE:LINE: <the line>
 A hit passes when it carries a marker with a reason, or when the line right
 above it is nothing but the marker comment:
@@ -289,7 +290,7 @@ for var in OBS_PUSH_URL_TESTNET OBS_METRICS_PUSH_URL_TESTNET TN_WG_HUB_ENDPOINT 
 done
 
 files=()
-for f in lib/*.sh *.sh ui/server.py ui/telcoin-ui-helper.sh ui/static/index.html observability/config.alloy; do
+for f in lib/*.sh *.sh ui/server.py ui/telcoin-ui-helper.sh ui/install-ui.sh ui/static/index.html observability/config.alloy; do
     case "$f" in
         'lib/*.sh'|'*.sh') continue ;;
     esac
