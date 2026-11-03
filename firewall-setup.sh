@@ -1197,16 +1197,23 @@ view_status() {
         fi
         fw_p2p_limit_report
 
-        # Uptime Kuma is required across all node types (Telcoin Association
-        # health monitoring runs against every deployed node).
+        # Uptime Kuma health monitoring is a testnet add-on (the Telcoin Association
+        # monitor probes testnet and devnet nodes); on any other network the port
+        # stays closed by design, so only an open one is worth a line.
         echo ""
-        print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}"
-        if ufw_active; then
-            case "$(kuma_rule_state)" in
-                restricted) print_ok    "TCP ${UPTIME_KUMA_PORT} $(kuma_restricted_desc)" ;;
-                anywhere)   print_warn  "TCP ${UPTIME_KUMA_PORT} open to Anywhere -- consider restricting to ${TN_KUMA_SRC} (menu: Manage node ports)" ;;
-                closed)     print_error "TCP ${UPTIME_KUMA_PORT} is CLOSED -- health monitoring will fail" ;;
-            esac
+        if is_testnet_like; then
+            print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}"
+            if ufw_active; then
+                case "$(kuma_rule_state)" in
+                    restricted) print_ok    "TCP ${UPTIME_KUMA_PORT} $(kuma_restricted_desc)" ;;
+                    anywhere)   print_warn  "TCP ${UPTIME_KUMA_PORT} open to Anywhere -- consider restricting to ${TN_KUMA_SRC} (menu: Manage node ports)" ;;
+                    closed)     print_error "TCP ${UPTIME_KUMA_PORT} is CLOSED -- health monitoring will fail" ;;
+                esac
+            fi
+        elif ufw_active && [[ "$(kuma_rule_state)" != "closed" ]]; then
+            print_warn "Health port TCP ${UPTIME_KUMA_PORT} is open, although no monitor uses it on this network; Manage node ports (or --enable) closes it"
+        else
+            print_info "Health port TCP ${UPTIME_KUMA_PORT} stays closed: health monitoring is a testnet-only add-on"
         fi
     fi
 
