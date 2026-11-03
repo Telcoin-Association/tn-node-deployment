@@ -1716,7 +1716,7 @@ json_remove() {
         rm -rf "$config_dir" 2>/dev/null || true
 
         # Full removal: tear down the testnet add-ons too -- the Alloy log shipper holds
-        # the mode-600 ingest token, and the WireGuard overlay leaves a sudo tnadmin user
+        # the ingest token file (0640), and the WireGuard overlay leaves a sudo tnadmin user
         # + maintainer keys behind. Under --json, remove_testnet_addons' print_* output
         # goes to stderr (benign); it never writes to the JSON fd.
         if declare -f remove_testnet_addons >/dev/null 2>&1; then
