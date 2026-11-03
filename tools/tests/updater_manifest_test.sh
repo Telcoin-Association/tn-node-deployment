@@ -605,6 +605,22 @@ check_rc "real date, expired 2019-12-31: exits 1" 1 "$RC"
 check "real date, expired 2019-12-31: days ago counted" "yes" \
     "$(plain "$OUT" | grep -qE '^  \[WARN\] Installed release scripts-v1\.6\.0 expired on 2019-12-31 \([0-9]+ days ago\); a newer signed release is overdue\.$' && echo yes || echo no)"
 
+# An expired release that ships a new updater: the running updater downloads and
+# verifies first, then the release copy runs and prints the warning, once.
+UE="$SRC/selfexp"; rm -rf "$UE"; cp -R "$U" "$UE"
+write_manifest "$UE" scripts-v1.7.0 104 1.0.0; with_headers "$UE" date=2026-11-03 expires=2027-02-01
+sign "$UE" key1; sidecars "$UE"
+publish "$UE" scripts-v1.7.0
+install_release "$R2"
+rm -f "$MARK"
+TODAY=2027-02-02 run_updater y
+check_rc "self-update, expired: exits 0" 0 "$RC"
+check "self-update, expired: release copy ran once" "ran" "$(cat "$MARK" 2>/dev/null)"
+check "self-update, expired: installed" "$(_h "$UE/MANIFEST")" "$(_h "$INST/MANIFEST")"
+check "self-update, expired: one warning" "1" "$(plain "$OUT" | grep -c 'expired on 2027-02-01; a newer signed release is overdue')"
+check "self-update, expired: the release copy warns, after the files are verified" "yes" \
+    "$(plain "$OUT" | awk '/Running the scripts-v1.7.0 copy/ {r = NR} /expired on 2027-02-01/ {w = NR} END {print (r && w && r < w) ? "yes" : "no"}')"
+
 # A 2.0.0 updater (main 1187ddb, before this change) installs a release whose
 # manifest carries date= and expires=: it ignores header keys it does not know,
 # then hands over to the release copy of the updater.
