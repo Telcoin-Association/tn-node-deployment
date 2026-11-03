@@ -49,6 +49,26 @@ if [ "$tool" = systemctl ] && [ "\${1:-}" = is-active ]; then exit 3; fi
 exit 0
 STUB
 done
+# nft: table inet tn_p2p is the file NFT_TABLE_FILE (no file: no table), so no
+# real nft ever runs here. NFT_FAIL=1 makes `-f` fail.
+NFT_TABLE_FILE="$T/nft.table"
+export NFT_TABLE_FILE
+cat > "$T/bin/nft" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "nft $*" >> "$CALLS"
+case "$*" in
+    "list tables")
+        if [ -f "$NFT_TABLE_FILE" ]; then echo "table inet tn_p2p"; fi
+        exit 0 ;;
+    "-f -")
+        prog="$(cat)"
+        printf '%s\n' "$prog" | sed 's/^/nft| /' >> "$CALLS"
+        [ -z "${NFT_FAIL:-}" ] || exit 1
+        if printf '%s\n' "$prog" | grep -qx 'delete table inet tn_p2p'; then rm -f "$NFT_TABLE_FILE"; fi
+        exit 0 ;;
+esac
+exit 0
+STUB
 cat > "$T/bin/shred" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "shred $*" >> "$CALLS"
@@ -805,5 +825,68 @@ gone "add-on teardown: the token file" "$AL/ingest-token"
 gone "add-on teardown: the Alloy config dir" "$AL"
 gone "add-on teardown: the Alloy unit" "$SD/telcoin-alloy.service"
 check_lacks "add-on teardown: the token is not printed" "obs-token-0123456789abcdef" "$(cat "$T/out")"
+
+# FW
+# --- the P2P new-flow limit goes with the last node: unit, ruleset, table -------
+# p2p_limit_fixture -- the boot unit and ruleset firewall-setup.sh writes, and the table.
+p2p_limit_fixture() {
+    mkdir -p "$SD" "$ETC"
+    printf '[Unit]\nDescription=limit\n' > "$SD/telcoin-p2p-limit.service"
+    printf 'table inet tn_p2p\ndelete table inet tn_p2p\n' > "$ETC/p2p-limit.nft"
+    printf 'table inet tn_p2p {\n}\n' > "$NFT_TABLE_FILE"
+    : > "$CALLS"
+}
+mkfixture; p2p_limit_fixture
+remove_node_host_files > "$T/out" 2>&1
+gone "p2p limit unit" "$SD/telcoin-p2p-limit.service"
+gone "p2p limit ruleset" "$ETC/p2p-limit.nft"
+check "p2p limit: table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+check_has "p2p limit: unit disabled and stopped" "systemctl disable --now telcoin-p2p-limit.service" "$(calls)"
+check_has "p2p limit: daemon-reload" "systemctl daemon-reload" "$(calls)"
+check "p2p limit: one delete transaction" "nft| table inet tn_p2p
+nft| delete table inet tn_p2p" "$(grep '^nft| ' "$CALLS")"
+check_has "p2p limit: said" "yes" "$(grep -q 'Deleted the P2P new-flow limit (nftables table inet tn_p2p)' "$T/out" && echo yes)"
+kept "p2p limit: other unit" "$SD/telcoin.service"
+# Nothing of it here: no systemctl call for it and no nft transaction.
+mkfixture; : > "$CALLS"; rm -f "$NFT_TABLE_FILE"
+remove_node_host_files > /dev/null 2>&1
+check_lacks "p2p limit absent: no unit call" "telcoin-p2p-limit" "$(calls)"
+check_lacks "p2p limit absent: no nft transaction" "nft -f" "$(calls)"
+# nft refuses the delete: a warning, and the rest of the removal goes on.
+mkfixture; p2p_limit_fixture
+NFT_FAIL=1 remove_node_host_files > "$T/out" 2>&1
+check_has "p2p limit: refused delete warned" "yes" "$(grep -q 'Could not delete the nftables table inet tn_p2p; remove it with: sudo nft delete table inet tn_p2p' "$T/out" && echo yes)"
+gone "p2p limit: refused delete, unit still removed" "$SD/telcoin-p2p-limit.service"
+gone "p2p limit: refused delete, node.env still removed" "$ETC/node.env"
+# Without nft the files still go (a PATH without the sbin directories).
+mv "$T/bin/nft" "$T/bin/nft.off"
+SAVED_PATH="$PATH"
+PATH="$T/bin:/usr/local/bin:/usr/bin:/bin"
+hash -r
+if command -v nft >/dev/null 2>&1; then
+    skip "p2p limit without nft" "an nft other than the stub is on PATH ($(command -v nft))"
+else
+    mkfixture; p2p_limit_fixture
+    remove_node_host_files > /dev/null 2>&1
+    gone "p2p limit without nft: unit" "$SD/telcoin-p2p-limit.service"
+    gone "p2p limit without nft: ruleset" "$ETC/p2p-limit.nft"
+    check_lacks "p2p limit without nft: no nft call" "nft " "$(calls)"
+fi
+PATH="$SAVED_PATH"
+mv "$T/bin/nft.off" "$T/bin/nft"; hash -r
+# Another node remains: the limit stays (its P2P ports are still open).
+mkfixture; p2p_limit_fixture
+INSTALLED_UNITS=(telcoin telcoin-validator)
+remove_shared_components > /dev/null 2>&1
+kept "p2p limit while another node remains: unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit while another node remains: table" "yes" "$(exists "$NFT_TABLE_FILE")"
+INSTALLED_UNITS=()
+# The JSON full removal takes it too.
+mkfixture; p2p_limit_fixture
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "p2p limit: json keys rc 0" 0 "$rc"
+gone "p2p limit: json unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit: json table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+rm -f "$NFT_TABLE_FILE"
 
 finish
