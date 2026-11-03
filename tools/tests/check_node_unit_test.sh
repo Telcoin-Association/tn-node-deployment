@@ -203,7 +203,7 @@ TODAY=2026-11-22 relrep
 check_has "scripts, bad expires: warns" "  [WARN] The release record has an unreadable expiry date: expires=2027-02-30" "$OUT"
 record format=1 serial=2
 relrep
-check_has "scripts, no release= line: warns" "  [WARN] The release record $T/scripts/MANIFEST names no release and serial." "$OUT"
+check_has "scripts, no release= line: warns" "  [WARN] The release record $T/scripts/MANIFEST lacks a valid release= or serial= line." "$OUT"
 
 rm -f "$T/scripts/MANIFEST"
 relrep

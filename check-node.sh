@@ -1015,7 +1015,7 @@ report_scripts_release() {
     rdate="$(cn_manifest_key "$m" date)"
     expires="$(cn_manifest_key "$m" expires)"
     if [[ ! "$rel" =~ ^scripts-v[0-9]+\.[0-9]+\.[0-9]+$ || ! "$serial" =~ ^[1-9][0-9]{0,8}$ ]]; then
-        print_warn "The release record ${m} names no release and serial."
+        print_warn "The release record ${m} lacks a valid release= or serial= line."
         print_info "  Check it: bash ${SCRIPT_DIR}/update-scripts.sh --check"
         return 0
     fi
