@@ -357,7 +357,6 @@ step_preflight() {
             json_event log "WARNING: hardware below the minimum for: ${TN_HW_GAPS} (setup continues)"
         fi
     fi
-    check_internet
     # Core node ports + the ports the optional features use (Caddy dashboard 80/443,
     # WireGuard VPN 51820, health monitor 43174) so conflicts surface up front.
     check_ports \
@@ -383,6 +382,8 @@ step_preflight() {
     echo ""
     print_step "Selecting network..."
     json_mode || select_network
+    # After the network is chosen: check_internet probes that network's own RPC.
+    check_internet
 
     # The systemd floor: 247 everywhere (LoadCredential=), 255 on mainnet
     # (TN_MAINNET_MIN_SYSTEMD: the encrypted credential; Ubuntu 24.04). Below 250
