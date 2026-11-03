@@ -87,6 +87,7 @@ cat > "$T/bin/auditctl" <<'STUB'
 #!/bin/sh
 printf 'auditctl %s\n' "$*" >> "$HB_LOG"
 [ "$1" = -l ] && cat "$HB_T/kernel.rules" 2>/dev/null
+[ "$1" = -W ] && exit "$(cat "$HB_T/auditctl.rc" 2>/dev/null || echo 0)"
 exit 0
 STUB
 cat > "$T/bin/aide" <<'STUB'
@@ -137,6 +138,11 @@ done
 mkdir -p "$last" && { [ -z "$m" ] || chmod "$m" "$last"; }
 STUB
     chmod 0755 "$T/bin/install"
+fi
+if [[ $ROOT_OK != 1 ]]; then
+    # The fixture tree is not root-owned here: the ownership check of /var/lib/aide
+    # and the database runs for real only as root (the cases below).
+    _tn_hb_db_dir_ok() { return 0; }
 fi
 
 RULES="$FX/etc/audit/rules.d/telcoin-node.rules"
@@ -269,12 +275,37 @@ fixture
 printf '18\n' > "$HB_T/aide.rc"
 refused "aide --init fails" "HOST_BASELINE stays unset"
 check "aide --init fails: no partial database left" "no no" "$(yn test -e "$ADB") $(yn test -e "${ADB}.new")"
-fixture
-mkdir -p "$FX/var/lib/aide"
-ln -s "$T/elsewhere" "${ADB}.new"
-refused "a symlink in place of the new database" "is a symlink or a directory"
-check "symlink: aide never ran" no "$(grep -q '^aide ' "$HB_LOG" 2>/dev/null && echo yes || echo no)"
-rm -f "${ADB:?}.new"
+if [[ $ROOT_OK == 1 ]]; then
+    fixture
+    mkdir -p "$FX/var/lib/aide"
+    ln -s "$T/elsewhere" "${ADB}.new"
+    refused "a symlink in place of the new database" "is a symlink, not a regular file, or not owned by root"
+    check "symlink: aide never ran" no "$(grep -q '^aide ' "$HB_LOG" 2>/dev/null && echo yes || echo no)"
+    rm -f "${ADB:?}.new"
+    # /var/lib/aide owned by another account (aide-common: _aide:root 0700).
+    fixture
+    mkdir -p "$FX/var/lib/aide"
+    chmod 0700 "$FX/var/lib/aide"
+    chown 65534 "$FX/var/lib/aide"
+    refused "/var/lib/aide owned by another account" "/var/lib/aide is not a directory owned and writable by root alone"
+    check "/var/lib/aide owned by another account: aide never ran, no aide config" "no no" \
+        "$(grep -q '^aide ' "$HB_LOG" 2>/dev/null && echo yes || echo no) $(yn test -e "$ACONF")"
+    chown 0 "$FX/var/lib/aide"
+    tn_host_baseline_install say_log > /dev/null 2>&1
+    chown 65534 "$FX/var/lib/aide"
+    : > "$HB_LOG"; : > "$T/say.log"
+    tn_host_baseline_refresh say_log > /dev/null 2>&1
+    check "refresh, /var/lib/aide owned by another account: refused, database untouched" "yes no db init" \
+        "$(said '/var/lib/aide is not a directory owned and writable by root alone') $(grep -q '^aide ' "$HB_LOG" && echo yes || echo no) $(cat "$ADB")"
+    chown 0 "$FX/var/lib/aide"
+    chown 65534 "$ADB"
+    : > "$T/say.log"
+    tn_host_baseline_refresh say_log > /dev/null 2>&1
+    check "refresh, database owned by another account: refused" yes "$(said 'telcoin-node.db is a symlink, not a regular file, or not owned by root')"
+else
+    skip "a symlink in place of the new database" "needs root and GNU mv -T"
+    skip "/var/lib/aide or the database owned by another account" "needs root and GNU mv -T"
+fi
 # No apt-get on PATH: a PATH of the plain tools the library needs, without the stubs.
 mkdir -p "$T/noapt"
 for c in sed cat grep awk mkdir chmod rm mv stat id date tr head cut dirname mktemp sort sh bash; do
@@ -328,6 +359,31 @@ check "refresh, config missing: warns, aide not run" "yes no" \
 # Without FN the warning is a print_warn line.
 out="$(tn_host_baseline_refresh 2>&1)"
 check "refresh without FN: print_warn" yes "$([[ "$out" == *"[WARN]"*"is missing"* ]] && echo yes || echo no)"
+
+# HOST_BASELINE on two lines: refresh and status warn, remove clears both.
+fixture
+tn_host_baseline_install say_log > /dev/null 2>&1
+printf 'HOST_BASELINE=true\n' >> "$META"
+: > "$HB_LOG"; : > "$T/say.log"
+tn_host_baseline_refresh say_log > /dev/null 2>&1
+check "refresh, marker twice: warns, aide not run" "yes no" \
+    "$(said '^warn|HOST_BASELINE is set more than once in .node-meta') $(grep -q '^aide ' "$HB_LOG" && echo yes || echo no)"
+out="$(tn_host_baseline_status)"; rc=$?
+check "status, marker twice: one warning, rc 1" "1 yes 1" \
+    "$rc $([[ "$out" == "warn  host baseline: HOST_BASELINE is set more than once in .node-meta"* ]] && echo yes || echo no) $(printf '%s\n' "$out" | grep -c .)"
+tn_host_baseline_remove say_log > /dev/null 2>&1
+check "remove, marker twice: both lines gone, files gone" "0 no" "$(grep -c '^HOST_BASELINE=' "$META") $(yn test -e "$RULES")"
+# A .node-meta this user cannot read (root 0600 on a node, --audit without sudo).
+if [[ $IS_ROOT == 1 ]]; then
+    skip "status, unreadable .node-meta: not checked" "root reads every file"
+else
+    fixture
+    printf 'HOST_BASELINE=true\n' >> "$META"
+    chmod 000 "$META"
+    out="$(tn_host_baseline_status)"; rc=$?
+    chmod 0600 "$META"
+    check "status, unreadable .node-meta: not checked, rc 0" "0 info  host baseline: not checked (.node-meta is readable by root only)" "$rc $out"
+fi
 
 # =============================================================================
 # tn_host_baseline_status and tn_host_audit
@@ -406,6 +462,32 @@ tn_host_baseline_remove say_log > /dev/null 2>&1
 check "remove, reload fails: warns, files still gone" "yes no" \
     "$(said '^warn|augenrules --load failed') $(yn test -e "$RULES")"
 rm -f "${HB_T:?}/augenrules.rc"
+# Without augenrules: each watch is dropped with auditctl -W; a failed -W warns.
+mkdir -p "$T/noaug"
+for c in apt-get auditctl aide install; do
+    if [[ -e "$T/bin/$c" ]]; then ln -sf "$T/bin/$c" "$T/noaug/$c"; fi
+done
+fixture
+tn_host_baseline_install say_log > /dev/null 2>&1
+: > "$HB_LOG"; : > "$T/say.log"
+PATH_SAVE="$PATH"
+PATH="$T/noaug:${PATH#"$T/bin:"}"
+tn_host_baseline_remove say_log > /dev/null 2>&1
+PATH="$PATH_SAVE"
+check "remove without augenrules: each watch dropped with auditctl -W" "auditctl -W /var/lib/telcoin/node-keys -p rwxa -k telcoin-keys
+auditctl -W /etc/telcoin -p wa -k telcoin-config
+auditctl -W /etc/systemd/system/telcoin.service -p wa -k telcoin-unit" "$(cat "$HB_LOG")"
+check "remove without augenrules: says so, rules file gone" "yes no" \
+    "$(said '^log|augenrules is missing: the node.s audit watches were dropped one by one with auditctl -W') $(yn test -e "$RULES")"
+tn_host_baseline_install say_log > /dev/null 2>&1
+printf '1\n' > "$HB_T/auditctl.rc"
+: > "$T/say.log"
+PATH="$T/noaug:${PATH#"$T/bin:"}"
+tn_host_baseline_remove say_log > /dev/null 2>&1
+PATH="$PATH_SAVE"
+rm -f "${HB_T:?}/auditctl.rc"
+check "remove without augenrules, auditctl -W fails: warns about the next boot, rules file gone" "yes no" \
+    "$(said '^warn|augenrules is missing and auditctl -W could not drop the node.s audit watches: they stay loaded until the next boot') $(yn test -e "$RULES")"
 
 # =============================================================================
 # The scripts, each in its own bash (each sources lib/common.sh once): a copy
@@ -544,9 +626,12 @@ for f in edit_require_root resolve_target edit_lock edit_reset_backups set_field
 done
 edit_field_known() { return 0; }
 TARGET_SERVICE=telcoin
+menu_lock() { return 0; }
 if [[ "$1" == set ]]; then
     EDIT_SET_PAIR="metrics=127.0.0.1:9101"
     run_set
+elif [[ "$1" == restart ]]; then
+    restart_node < /dev/null
 elif [[ "$1" == cred ]]; then
     edit_cred_report "$2" "credential moved"
 else
@@ -560,6 +645,8 @@ ecrun() {  # ecrun set|menu
 }
 ecrun set
 check "edit-config --set: refresh after a healthy restart, before done" "refresh edit_wait_say done true " "$(calls)"
+ecrun restart
+check "edit-config menu Restart node: refresh after a successful restart" "refresh edit_wait_say " "$(calls)"
 ecrun menu
 check "edit-config menu: refresh after a successful restart" "refresh edit_wait_say " "$(calls)"
 export HB_RESTART_RC=1
@@ -567,6 +654,8 @@ ecrun set
 check "edit-config --set, restart failed: no refresh" "done false " "$(calls)"
 ecrun menu
 check "edit-config menu, restart failed: no refresh" "" "$(calls)"
+ecrun restart
+check "edit-config menu Restart node, restart failed: no refresh" "" "$(calls)"
 export HB_RESTART_RC=2
 ecrun set
 check "edit-config --set, committee refused the restart: no refresh" "done false " "$(calls)"
@@ -618,5 +707,38 @@ unset HB_FAKE_WRITE
 check "remove-node, real teardown: rules, aide config, database and marker gone" "no no no none" \
     "$(yn test -e "$RULES") $(yn test -e "$ACONF") $(yn test -e "$ADB") $(meta_get HOST_BASELINE "$META" 2>/dev/null || echo none)"
 check "remove-node, real teardown: says the packages stay" yes "$(grep -q 'auditd and aide packages stay installed' "$T/rm.out" && echo yes || echo no)"
+# --json: the teardown's lines are events on the JSON stream.
+fixture
+tn_host_baseline_install say_log > /dev/null 2>&1
+cat > "$T/remove-node/drv3.sh" <<'DRV'
+source "$HB_DRV/remove-node/remove-node.sh"
+set +e
+systemctl() { return 0; }
+if [[ -n "${HB_FAKE_WRITE:-}" ]]; then
+    tn_write_root_file() { cat > "$1"; }
+fi
+exec 3>> "$HB_T/rm.json"
+RM_JSON=true
+stop_and_disable_service telcoin
+DRV
+if [[ $ROOT_OK != 1 ]]; then
+    export HB_FAKE_WRITE=1
+fi
+bash "$T/remove-node/drv3.sh" > /dev/null 2>&1
+unset HB_FAKE_WRITE
+RJ="$(cat "$HB_T/rm.json" 2>/dev/null)"
+check_has "remove-node --json: the teardown step is an event" '{"event":"step","msg":"Removing the host baseline (audit rules and AIDE baseline)"}' "$RJ"
+check_has "remove-node --json: the packages line is an event" '{"event":"log","msg":"Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide"}' "$RJ"
+check "remove-node --json: files and marker gone" "no none" "$(yn test -e "$RULES") $(meta_get HOST_BASELINE "$META" 2>/dev/null || echo none)"
+
+# setup-node.sh with a lib/common.sh that lacks tn_host_baseline_install: the
+# one-message refusal of the version gate, not "command not found" later.
+mkdir -p "$T/skew"
+cp "$TN_TEST_REPO/setup-node.sh" "$T/skew/setup-node.sh"
+cp -R "$TN_TEST_REPO/lib" "$T/skew/lib"
+sed 's/^tn_host_baseline_install() {/_tn_gone_install() {/' "$TN_TEST_REPO/lib/common.sh" > "$T/skew/lib/common.sh"
+rc=0; bash "$T/skew/setup-node.sh" --help > /dev/null 2> "$T/skew.err" < /dev/null || rc=$?
+check "setup-node with a lib lacking tn_host_baseline_install: refused up front" "1 yes" \
+    "$rc $(grep -q 'is older than this setup-node.sh: run update-scripts.sh' "$T/skew.err" && echo yes || echo no)"
 
 finish
