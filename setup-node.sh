@@ -117,7 +117,21 @@
 #                            by +, e.g. 7). A firmware or Secure Boot change to them stops
 #                            the node from starting until edit-config.sh --reseal runs.
 #   --audit                  Print a summary of the host's hardening (disk encryption,
-#                            core dumps, ptrace scope, passphrase storage) and exit.
+#                            core dumps, ptrace scope, passphrase storage, host baseline)
+#                            and exit.
+#   --host-baseline          Once the node is installed, install auditd and aide (apt,
+#                            no recommended packages), load audit rules that watch the
+#                            node keys, /etc/telcoin and the node unit
+#                            (/etc/audit/rules.d/telcoin-node.rules), and make an AIDE
+#                            baseline of the node's files with its own config and
+#                            database (/etc/aide/telcoin-node.conf,
+#                            /var/lib/aide/telcoin-node.db). .node-meta records
+#                            HOST_BASELINE=true; update-node.sh and edit-config.sh make
+#                            the baseline again after a change they apply, and
+#                            remove-node.sh removes it. Off by default and never asked.
+#                            In a --json run it takes effect at finalize. On a host
+#                            whose node is already installed, --host-baseline alone
+#                            makes (or makes again) the baseline and changes nothing else.
 #
 # LOGS AND RESTARTS
 #   --log-target journal|file  Where the node logs: the systemd journal (default on
@@ -236,6 +250,8 @@ CREDENTIAL_KEY=""           # host+tpm2 | host (the credential's systemd-creds k
 ALLOW_NO_TPM=false          # --allow-no-tpm
 BIND_PCRS=""                # --bind-pcrs
 AUDIT_ONLY=false            # --audit
+HOST_BASELINE=false         # --host-baseline
+HOST_BASELINE_STATE=""      # installed | failed, set by step_host_baseline ('' = not asked)
 LOG_TARGET=""                        # journal | file (--log-target; empty: by network)
 # The BLS key passphrase lives in TN_SETUP_PASS, a plain shell variable: the top of
 # this file fills it from TN_BLS_PASSPHRASE (then unset), main from --passphrase-stdin,
@@ -2729,6 +2745,48 @@ step_public_rpc() {
     return 0
 }
 
+# step_host_baseline -- --host-baseline: install auditd and aide, the node's audit
+# rules and its AIDE baseline (tn_host_baseline_install) under the update lock. It
+# runs after public RPC and the add-ons, which write into /etc/telcoin too, so the
+# baseline holds their files. A failure is a warning and setup goes on: the node is
+# already installed. Sets HOST_BASELINE_STATE.
+step_host_baseline() {
+    [[ "$HOST_BASELINE" == "true" ]] || return 0
+    print_header "Host baseline -- auditd watches and an AIDE baseline"
+    if json_mode; then
+        json_event step "Installing the host baseline (auditd and AIDE)"
+    fi
+    setup_take_lock
+    if tn_host_baseline_install setup_progress; then
+        HOST_BASELINE_STATE=installed
+        print_ok "Host baseline in place (HOST_BASELINE=true in .node-meta)."
+    else
+        HOST_BASELINE_STATE=failed
+        setup_warn "The host baseline was not made (see above); the node runs without it. Try again with: sudo ./setup-node.sh --host-baseline"
+    fi
+    setup_release_lock
+    return 0
+}
+
+# setup_host_baseline_only -- setup-node.sh --host-baseline on a host whose node is
+# already installed: make the host baseline (again) and change nothing else. rc of
+# tn_host_baseline_install.
+setup_host_baseline_only() {
+    local rc=0
+    check_root
+    print_header "Host baseline -- auditd watches and an AIDE baseline"
+    print_info "A node is installed here, so --host-baseline makes the host baseline and changes nothing else. To run the whole setup again, leave --host-baseline out."
+    setup_take_lock
+    tn_host_baseline_install setup_progress || rc=$?
+    setup_release_lock
+    if [[ $rc -eq 0 ]]; then
+        print_ok "Host baseline in place (HOST_BASELINE=true in .node-meta)."
+    else
+        print_error "The host baseline was not made (see above). Nothing else on this host was changed."
+    fi
+    return "$rc"
+}
+
 step_final_summary() {
     # The P2P ports node-info.yaml advertises (keytool wrote them at keygen, one per
     # worker), or the configured ports when the file cannot be read.
@@ -3049,7 +3107,7 @@ finalize_install_inputs() {
 }
 
 json_phase_finalize() {
-    local v
+    local v hb=false
     json_refuse_installed finalize
     finalize_install_inputs
     # The node binds to these; an empty one would start a node with no listener.
@@ -3069,7 +3127,11 @@ json_phase_finalize() {
         json_event step "Enabling public RPC for ${PUBLIC_RPC_DOMAIN}"
         step_public_rpc
     fi
-    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"observer\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"operator_guide\":\"$(json_escape "$TN_OPERATOR_GUIDE_URL")\",\"public_rpc\":$(public_rpc_json),\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
+    step_host_baseline
+    if [[ "$HOST_BASELINE_STATE" == "installed" ]]; then
+        hb=true
+    fi
+    json_done "{\"event\":\"done\",\"ok\":true,\"phase\":\"finalize\",\"node_type\":\"observer\",\"service\":\"${SERVICE_NAME}\",\"rpc_port\":\"${RPC_PORT}\",\"operator_guide\":\"$(json_escape "$TN_OPERATOR_GUIDE_URL")\",\"public_rpc\":$(public_rpc_json),\"host_baseline\":${hb},\"msg\":\"${SERVICE_NAME} finalized and started -- following consensus as a full node; staking to validate is optional (see docs)\"}"
 }
 
 # The public RPC this run set up, as finalize's done event carries it: "enabled" is
@@ -3323,6 +3385,7 @@ main() {
             --allow-no-tpm)        ALLOW_NO_TPM=true; shift ;;
             --bind-pcrs)           BIND_PCRS="${2:-}"; shift 2 ;;
             --audit)               AUDIT_ONLY=true; shift ;;
+            --host-baseline)       HOST_BASELINE=true; shift ;;
             -h|--help)
                 # The header block only: everything up to its closing rule.
                 awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
@@ -3339,6 +3402,12 @@ main() {
     if [[ "$AUDIT_ONLY" == "true" ]]; then
         TN_SETUP_PASS=""
         tn_host_audit
+        exit $?
+    fi
+    # --host-baseline over an installed node: the baseline alone, nothing else.
+    if [[ "$HOST_BASELINE" == "true" ]] && ! json_mode && tn_resolve_service >/dev/null 2>&1; then
+        TN_SETUP_PASS=""
+        setup_host_baseline_only
         exit $?
     fi
     case "${LOG_TARGET:-}" in
@@ -3368,6 +3437,7 @@ main() {
     setup_release_lock
     step_public_rpc
     step_testnet_addons
+    step_host_baseline
     step_final_summary
 }
 
