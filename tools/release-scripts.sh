@@ -278,7 +278,7 @@ rewrite_installer() {
 
 prepare() {
     local tag="$1" serial="$2" min="$3" date="$4" days="$5"
-    local prev_serial="" prev_min="" uver tmp day expires
+    local prev_serial="" prev_min="" uver tmp day expires today
 
     [[ "$tag" =~ $TAG_RE ]] || die "release tag must look like scripts-v1.2.3, got: ${tag}"
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git work tree"
@@ -314,6 +314,7 @@ prepare() {
         die "--expires takes a number of days from 1 to 3650, got: ${days}"
     fi
     expires="$(days_ymd "$((day + 10#$days))")"
+    today="$(ymd_days "$(date -u +%Y-%m-%d)")" || die "cannot read today's date"
 
     check_sidecars || exit 1
     local p
@@ -359,6 +360,10 @@ Release signer, on the machine that holds the hardware key:
        git tag -a ${tag} -m "${tag}" <merge commit>
        git push origin ${tag}
 EOF
+    if (( day + 10#$days <= today )); then
+        printf 'release-scripts.sh: WARN %s expires %s, on or before today (%s): every updater, installer and check-node will report it as expired. Prepare it again with a later --date or a longer --expires before signing.\n' \
+            "$tag" "$expires" "$(days_ymd "$today")" >&2
+    fi
 }
 
 check() {

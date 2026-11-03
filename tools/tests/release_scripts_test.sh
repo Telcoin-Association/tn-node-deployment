@@ -292,8 +292,16 @@ printf '# next\n' >> "$W/open-ui.sh"
 commit_all "change"
 tool scripts-v2.0.1 --serial 200
 check_rc "next release with a serial not above 200: refused" 1 "$RC"
-tool scripts-v2.0.1 --date 2026-10-16 --expires 30
+TODAY=2026-11-03 tool scripts-v2.0.1 --date 2026-10-04 --expires 30
+check_rc "prepare, expires today: still exits 0" 0 "$RC"
+check_has "prepare, expires today: warns" "release-scripts.sh: WARN scripts-v2.0.1 expires 2026-11-03, on or before today (2026-11-03): every updater, installer and check-node will report it as expired. Prepare it again with a later --date or a longer --expires before signing." "$OUT"
+gitc checkout -q -- .
+TODAY=2026-11-03 tool scripts-v2.0.1 --date 2020-01-01
+check_has "prepare, --date 2020-01-01: warns" "release-scripts.sh: WARN scripts-v2.0.1 expires 2020-03-31, on or before today (2026-11-03): every updater, installer and check-node will report it as expired. Prepare it again with a later --date or a longer --expires before signing." "$OUT"
+gitc checkout -q -- .
+TODAY=2026-11-02 tool scripts-v2.0.1 --date 2026-10-16 --expires 30
 check_rc "next release: exits 0" 0 "$RC"
+check_lacks "next release, expires ahead: no warning" "WARN" "$OUT"
 check "next release: serial 201" "serial=201" "$(grep '^serial=' "$W/MANIFEST")"
 check "next release: --expires 30" "$(printf 'date=2026-10-16\nexpires=2026-11-15')" "$(grep -E '^(date|expires)=' "$W/MANIFEST")"
 check "next release: old signature removed" "absent" "$([[ -e "$W/MANIFEST.sig" ]] && echo present || echo absent)"
