@@ -2853,6 +2853,7 @@ _docker_image_cache = {}     # network -> {"expires", "data"}
 
 # Mainnet in the setup wizard stays off until the mainnet release (the page's
 # SETUP_MAINNET_ENABLED); until then no mainnet image is looked up or offered.
+# Follows lib/common.sh `readonly TN_MAINNET_ENABLED`; ui/test_mainnet_flag.py fails when they differ.
 TN_MAINNET_ENABLED = False
 
 
