@@ -1092,14 +1092,16 @@ check "devnet rotate with an empty URL: nothing written, no restart" "0 0" "$(wc
 
 # The menu and --rotate-token own an EXIT trap that removes an interrupted write.
 ( check_root() { :; }; detect_distro() { :; }; so_lock_begin() { :; }
-  main_menu() { trap -p EXIT > "$T/menu-trap"; }; main </dev/null ) >/dev/null 2>&1
+  main_menu() { trap -p > "$T/menu-trap"; }; main </dev/null ) >/dev/null 2>&1
 check "menu: the EXIT trap is so_on_exit" "yes" "$(yn grep -q so_on_exit "$T/menu-trap")"
+check "menu: TERM ends the run through exit, so the EXIT trap runs" "yes" "$(yn grep -q 'exit 143' "$T/menu-trap")"
 # A SIGTERM while the token file's temp copy is written (chown made slow) leaves no
-# temp file holding the new token.
+# temp file holding the new token, under bash 3.2 too (where this subshell of a shell
+# with an EXIT trap needs the TERM trap to run its own).
 rot_fixture "$NATIVE"
 rm -f "$T/in-chown"
 ( eval "$REAL_TWRF"
-  chown() { : > "$T/in-chown"; sleep 5; }
+  chown() { : > "$T/in-chown"; sleep 3; }
   check_root() { :; }; detect_distro() { :; }; addon_meta_write_begin() { return 0; }
   main --rotate-token --token-stdin <<< "$NEWTOK" ) >"$T/term.out" 2>&1 &
 TERM_PID=$!
