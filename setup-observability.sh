@@ -5,14 +5,18 @@
 # Opt-in, testnet-only. Independently enable/disable shipping this node's logs (Grafana
 # Alloy -> central Loki) and its Prometheus metrics (Alloy -> central Prometheus), plus
 # the health-monitor endpoint. Re-runnable at any time. Logs and metrics share ONE
-# per-operator ingest token, pasted here (hidden) and stored ONLY in the mode-600 Alloy
-# env file -- never in git/.node-meta.
+# per-operator ingest token, pasted here (hidden) and stored ONLY in the token file
+# /etc/telcoin/alloy/ingest-token (root:telcoin-alloy 0640) -- never in git, .node-meta,
+# Alloy's environment or a unit file.
 #
 # USAGE:
 #   sudo bash setup-observability.sh
 #   printf '%s\n' "$TOKEN" | sudo bash setup-observability.sh --json --enable-logs --token-stdin
 #     (--token-stdin reads the ingest token from one line of stdin; --token VALUE
 #     still works but puts the token on the command line, where local users can see it)
+#   printf '%s\n' "$NEW_TOKEN" | sudo bash setup-observability.sh --rotate-token --token-stdin
+#     (replaces the token in place and restarts Alloy, not the node; without a token
+#     source it asks for one; add --json for JSON events)
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -270,6 +274,24 @@ disable_metrics() {
     pause
 }
 
+# rotate_token -- menu: ask for the new ingest token (hidden) and replace the stored one
+# in place (obs_rotate_token: Alloy restarts and is watched, the node does not restart;
+# a failed restart puts the previous token back).
+rotate_token() {
+    local tok=""
+    print_header "Rotate the ingest token"
+    addon_meta_write_begin || { pause; return 0; }
+    print_info "Replaces the ingest token Alloy sends to the hub. Alloy restarts; the node does not."
+    read -r -s -p "  New token (input hidden): " tok; echo ""
+    if [[ -z "$tok" ]]; then
+        print_warn "No token entered; nothing was changed."
+    elif ! obs_rotate_token "$tok"; then
+        print_error "The ingest token was not rotated (see messages above)."
+    fi
+    tok=""
+    pause
+}
+
 enable_health() {
     print_header "Enable health monitoring"
     print_info "Adds --healthcheck ${TN_KUMA_PORT} to the node launch and source-restricts the"
@@ -418,6 +440,8 @@ json_done() { JSON_DONE_EMITTED=true; json_emit "$1"; }
 # yields done:false, with the last error event's message when there was one.
 json_on_exit() {
     local rc=$? msg
+    # A token file write stopped before its rename leaves no temp copy behind.
+    tn_remove_inflight_tmp 2>/dev/null || true
     tn_release_update_lock 2>/dev/null || true
     [[ "$JSON_DONE_EMITTED" == "true" ]] && return
     msg="$JSON_LAST_ERROR"
@@ -578,6 +602,22 @@ json_disable_health() {
     JSON_DID+=("health:disabled")
 }
 
+# json_rotate_token -- --json --rotate-token: replace the ingest token in place with the
+# one from --token-stdin, --token or TN_OBS_TOKEN (never the stored one), through
+# obs_rotate_token. A refusal, or a restart that failed and was rolled back, ends the
+# run with an error event that says which (OBS_ROTATE_MSG), then done ok:false.
+json_rotate_token() {
+    local new="${JSON_TOKEN:-${TN_OBS_TOKEN:-}}"
+    [[ -n "$new" ]] || json_fail "rotating the ingest token needs the new token (--token-stdin, --token or TN_OBS_TOKEN); nothing was changed"
+    OBS_ROTATE_MSG=""
+    if ! obs_rotate_token "$new"; then
+        new=""
+        json_fail "the ingest token was not rotated: ${OBS_ROTATE_MSG:-see the server log}"
+    fi
+    new=""
+    JSON_DID+=("token:rotated")
+}
+
 # run_json_mode — bootstrap (root/distro/context/gate) then apply requested toggles.
 # Enables need a token (--token-stdin, --token or TN_OBS_TOKEN); a missing one is a
 # clear json error.
@@ -626,9 +666,12 @@ run_json_mode() {
         json_enable_pipes "$token" "${JSON_ENABLE_LOGS:-false}" "${JSON_ENABLE_METRICS:-false}"
     fi
     [[ "${JSON_ENABLE_HEALTH:-false}" == "true" ]]   && json_enable_health
+    if [[ "${JSON_ROTATE_TOKEN:-false}" == "true" ]]; then
+        json_rotate_token
+    fi
 
     if [[ "${#JSON_DID[@]}" -eq 0 ]]; then
-        json_fail "no observability action requested (use --enable-logs/--enable-metrics/--enable-health or the --disable-* variants)"
+        json_fail "no observability action requested (use --enable-logs/--enable-metrics/--enable-health, the --disable-* variants or --rotate-token)"
     fi
 
     # The done summary lists what changed.
@@ -648,10 +691,11 @@ main_menu() {
         echo "  5) Enable health monitoring (--healthcheck + firewall rule)"
         echo "  6) Disable health monitoring"
         echo "  7) Show status"
-        echo "  8) Exit"
+        echo "  8) Rotate the ingest token (Alloy restarts, the node does not)"
+        echo "  9) Exit"
         echo ""
         local choice
-        read -r -p "  Enter choice [1-8]: " choice
+        read -r -p "  Enter choice [1-9]: " choice
         case "$choice" in
             1) enable_logging ;;
             2) disable_logging ;;
@@ -660,8 +704,9 @@ main_menu() {
             5) enable_health ;;
             6) disable_health ;;
             7) show_status ;;
-            8) echo ""; print_info "Exiting."; exit 0 ;;
-            *) print_warn "Please enter 1-8."; sleep 1 ;;
+            8) rotate_token ;;
+            9) echo ""; print_info "Exiting."; exit 0 ;;
+            *) print_warn "Please enter 1-9."; sleep 1 ;;
         esac
     done
 }
@@ -695,7 +740,8 @@ addons_require_lib() {
         declare -F "$fn" >/dev/null 2>&1 || missing="${missing:+${missing}, }${fn}"
     done
     [[ -n "$missing" ]] && lib="lib/common.sh"
-    for fn in obs_lib_check obs_inject_flags obs_restart_window obs_quorum_guard obs_node_log_dir; do
+    for fn in obs_lib_check obs_inject_flags obs_restart_window obs_quorum_guard obs_node_log_dir \
+              obs_rotate_token; do
         if ! declare -F "$fn" >/dev/null 2>&1; then
             missing="${missing:+${missing}, }${fn}"
             case "$lib" in
@@ -723,8 +769,28 @@ so_read_token_stdin() {
     JSON_TOKEN="$line"
 }
 
+# run_rotate_cli -- --rotate-token without --json: the new token from --token-stdin,
+# --token or TN_OBS_TOKEN, else asked for (hidden) when stdin is a terminal. Exits 0
+# when rotated, 1 when refused or rolled back (said).
+run_rotate_cli() {
+    local tok="${JSON_TOKEN:-${TN_OBS_TOKEN:-}}"
+    if [[ -z "$tok" ]]; then
+        if [[ ! -t 0 ]]; then
+            print_error "--rotate-token needs the new token: pipe it in with --token-stdin, or run this from a terminal to type it. Nothing was changed."
+            exit 1
+        fi
+        read -r -s -p "  New ingest token (input hidden): " tok; echo ""
+    fi
+    if ! obs_rotate_token "$tok"; then
+        tok=""
+        exit 1
+    fi
+    tok=""
+    exit 0
+}
+
 main() {
-    local arg token_stdin=false token_argv=false
+    local arg token_stdin=false token_argv=false rotate=false
     # --json is found before anything else runs: from here stdout carries JSON only, and
     # json_on_exit closes the run with a done event whatever stops it, a bad argument too.
     for arg in "$@"; do
@@ -748,6 +814,7 @@ main() {
             --disable-logs)      JSON_DISABLE_LOGS=true; shift ;;
             --disable-metrics)   JSON_DISABLE_METRICS=true; shift ;;
             --disable-health)    JSON_DISABLE_HEALTH=true; shift ;;
+            --rotate-token)      rotate=true; JSON_ROTATE_TOKEN=true; shift ;;
             --token-stdin)       token_stdin=true; shift ;;
             --region|--token|--push-url|--metrics-push-url)
                 # A value flag needs a value; the next option is not one.
@@ -764,9 +831,14 @@ main() {
             *) shift ;;
         esac
     done
+    if [[ "$rotate" == "true" ]]; then
+        case "${JSON_ENABLE_LOGS:-}${JSON_ENABLE_METRICS:-}${JSON_ENABLE_HEALTH:-}${JSON_DISABLE_LOGS:-}${JSON_DISABLE_METRICS:-}${JSON_DISABLE_HEALTH:-}" in
+            *true*) arg_fail "--rotate-token runs on its own; run the enable or disable separately." ;;
+        esac
+    fi
     if [[ "$token_stdin" == "true" ]]; then
         [[ "$token_argv" != "true" ]] || arg_fail "--token and --token-stdin cannot be combined; give the token one way."
-        json_mode || arg_fail "--token-stdin goes with --json (the menu asks for the token)."
+        json_mode || [[ "$rotate" == "true" ]] || arg_fail "--token-stdin goes with --json or --rotate-token (the menu asks for the token)."
         so_read_token_stdin || arg_fail "--token-stdin: no token on stdin."
     elif [[ "$token_argv" == "true" ]]; then
         addons_say warn "--token puts the ingest token on the command line, where other local users can read it while this runs; pipe it in with --token-stdin instead."
@@ -775,6 +847,15 @@ main() {
     if json_mode; then
         run_json_mode
         exit $?
+    fi
+
+    if [[ "$rotate" == "true" ]]; then
+        check_root
+        detect_distro
+        load_node_context
+        require_testnet
+        so_write_begin
+        run_rotate_cli
     fi
 
     check_root
