@@ -11,7 +11,8 @@
 #   docker installs -> Alloy as a docker sidecar (container telcoin-alloy)
 #   binary/source   -> native Alloy binary under systemd
 # Both are supervised by one systemd unit (telcoin-alloy.service) so status/teardown
-# are uniform. The per-operator ingest token lives ONLY in the mode-600 env file.
+# are uniform. The per-operator ingest token lives ONLY in ${OBS_ETC_DIR}/ingest-token
+# (root:telcoin-alloy 0640), never in the environment, argv or a unit file.
 # See docs/testnet-addons.md.
 # =============================================================================
 
@@ -25,9 +26,14 @@ __OBS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 OBS_CONFIG_SRC="${__OBS_LIB_DIR}/../observability/config.alloy"
 
 # Layout (remove-node.sh tears these down).
-OBS_ETC_DIR="/etc/telcoin/alloy"          # config.alloy + mode-600 env file
+OBS_ETC_DIR="/etc/telcoin/alloy"          # config.alloy, the env file, the token file
 OBS_DATA_DIR="/var/lib/telcoin-alloy"     # Alloy WAL / positions
 OBS_ALLOY_UNIT="telcoin-alloy.service"
+# The ingest token file is ${OBS_ETC_DIR}/${OBS_TOKEN_NAME}. config.alloy reads
+# $CREDENTIALS_DIRECTORY/ingest-token: the native unit hands the file over with
+# LoadCredential=, the docker sidecar sees it read-only in OBS_DOCKER_CRED_DIR.
+OBS_TOKEN_NAME="ingest-token"
+OBS_DOCKER_CRED_DIR="/run/credentials/telcoin-alloy"
 # Seconds obs_restart_alloy watches the unit after a restart (one is-active read a second).
 OBS_ALLOY_SETTLE_SECS=5
 OBS_HTTP_ADDR="127.0.0.1:12345"           # Alloy's own metrics/UI (localhost only)
@@ -328,7 +334,8 @@ _obs_alloy_fallback() {
     cat <<'ALLOY_EOF'
 // Fallback copy (canonical: observability/config.alloy, byte-identical to adiri).
 // Env: TN_NODE TN_REGION TN_VALIDATOR_ADDRESS TN_CHAIN TN_IMAGE_VERSION
-//      OBS_PUSH_URL OBS_INGEST_TOKEN TN_METRICS_ADDR OBS_METRICS_PUSH_URL
+//      OBS_PUSH_URL OBS_PUSH_HOST TN_METRICS_ADDR OBS_METRICS_PUSH_URL
+//      OBS_METRICS_PUSH_HOST CREDENTIALS_DIRECTORY (token: $CREDENTIALS_DIRECTORY/ingest-token)
 local.file_match "tn_logs" {
   path_targets = [{
     __path__ = "/var/log/telcoin/telcoin-network-logs/reth.log*",
@@ -375,8 +382,13 @@ loki.process "tn" {
 
 loki.write "central" {
   endpoint {
-    url          = sys.env("OBS_PUSH_URL")
-    bearer_token = sys.env("OBS_INGEST_TOKEN")
+    url               = sys.env("OBS_PUSH_URL")
+    bearer_token_file = sys.env("CREDENTIALS_DIRECTORY") + "/ingest-token"
+
+    tls_config {
+      server_name = sys.env("OBS_PUSH_HOST")
+      min_version = "TLS13"
+    }
   }
 }
 
@@ -427,48 +439,135 @@ prometheus.relabel "tn" {
 
 prometheus.remote_write "central" {
   endpoint {
-    url          = sys.env("OBS_METRICS_PUSH_URL")
-    bearer_token = sys.env("OBS_INGEST_TOKEN")
+    url               = sys.env("OBS_METRICS_PUSH_URL")
+    bearer_token_file = sys.env("CREDENTIALS_DIRECTORY") + "/ingest-token"
+
+    tls_config {
+      server_name = sys.env("OBS_METRICS_PUSH_HOST")
+      min_version = "TLS13"
+    }
   }
 }
 ALLOY_EOF
 }
 
-# _obs_write_env_file <dest> <token> — mode-600 file with identity labels + push URL +
-# ingest token. Consumed by the native unit (EnvironmentFile=) and the docker unit
-# (--env-file). When metrics is enabled it ALSO emits TN_METRICS_ADDR (the scrape target)
-# and OBS_METRICS_PUSH_URL — the metrics pipeline reuses OBS_INGEST_TOKEN (one shared
-# token, by hub design). The token lives ONLY here (never in git or .node-meta). Created
-# inside a umask-077 subshell so it is never briefly world-readable.
+# obs_token_file -- the path of the ingest token file.
+obs_token_file() {
+    printf '%s\n' "${OBS_ETC_DIR}/${OBS_TOKEN_NAME}"
+}
+
+# obs_url_host <url> -- the host of a push URL (no scheme, user, port or path), the TLS
+# server name config.alloy pins; empty for an empty URL.
+obs_url_host() {
+    local h="${1#*://}"
+    h="${h%%/*}"
+    h="${h%%\?*}"
+    h="${h%%#*}"
+    h="${h##*@}"
+    if [[ "$h" == \[* ]]; then
+        h="${h#\[}"
+        h="${h%%\]*}"
+    else
+        h="${h%%:*}"
+    fi
+    printf '%s\n' "$h"
+}
+
+# _obs_trim_token <value> -- the value without leading and trailing whitespace (a stray
+# paste newline otherwise yields silent 401s).
+_obs_trim_token() {
+    local t="$1"
+    t="${t#"${t%%[![:space:]]*}"}"
+    t="${t%"${t##*[![:space:]]}"}"
+    printf '%s' "$t"
+}
+
+# _obs_token_warn <token> -- warn about a token that looks mistyped (internal
+# whitespace, fewer than 16 characters). Never prints the token.
+_obs_token_warn() {
+    if [[ "$1" =~ [[:space:]] ]]; then
+        print_warn "Ingest token contains internal whitespace — check you pasted it correctly."
+    elif (( ${#1} < 16 )); then
+        print_warn "Ingest token looks short (${#1} chars) — check you pasted the full token."
+    fi
+    return 0
+}
+
+# obs_write_token_file <token> -- write the ingest token, one line, to obs_token_file as
+# root:telcoin-alloy 0640 (tn_write_root_file). The value reaches the writer on a
+# process substitution run in this shell, never on argv, a pipe or a here-string (bash
+# before 5.1 keeps a here-string in a temporary file). rc 1 (said) when it fails.
+obs_write_token_file() {
+    local f
+    f="$(obs_token_file)"
+    if ! tn_write_root_file "$f" 0640 "$OBS_ALLOY_USER" < <(trap - ERR; printf '%s\n' "$1"); then
+        print_error "Could not write the ingest token file ${f} as root:${OBS_ALLOY_USER} 0640."
+        return 1
+    fi
+    return 0
+}
+
+# _obs_env_token -- the OBS_INGEST_TOKEN value an env file written before the token
+# file existed still holds; empty when there is none.
+_obs_env_token() {
+    local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
+    [[ -f "$envf" && -r "$envf" ]] || return 0
+    sed -n 's/^OBS_INGEST_TOKEN=//p' "$envf" 2>/dev/null | head -n 1
+}
+
+OBS_TOKEN_MOVED_SAID=false
+
+# _obs_write_env_file -- write ${OBS_ETC_DIR}/telcoin-alloy.env (root 0600) for this
+# installation: identity labels, OBS_PUSH_URL and OBS_PUSH_HOST (the TLS server name),
+# and with ENABLE_METRICS=true TN_METRICS_ADDR, OBS_METRICS_PUSH_URL and
+# OBS_METRICS_PUSH_HOST. A docker install (INSTALL_METHOD from .node-meta) also gets
+# CREDENTIALS_DIRECTORY, where the sidecar sees the token file; systemd sets it for the
+# native unit. The token is never written here. An env file from before the token file
+# that still holds OBS_INGEST_TOKEN= is migrated: its value goes to the token file when
+# there is none yet, the rewrite drops the line, and one line per run says so. rc 1
+# (said) when INSTALL_METHOD is set twice in .node-meta or a write fails.
 _obs_write_env_file() {
-    local dest="$1" token="$2"
+    local envf="${OBS_ETC_DIR}/telcoin-alloy.env" method legacy tokf
+    local push_url metrics_url text
+    method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
     obs_label_sourcing
-    install -d -m 0750 "$(dirname "$dest")"
+    install -d -m 0750 "$OBS_ETC_DIR"
+    tokf="$(obs_token_file)"
+    legacy="$(_obs_env_token)"
+    if [[ -n "$legacy" && ! -s "$tokf" ]]; then
+        obs_write_token_file "$legacy" || return 1
+    fi
+    legacy="${legacy:+yes}"
     # Effective push URLs: explicit OBS_PUSH_URL/OBS_METRICS_PUSH_URL override wins,
     # else _DEVNET when NETWORK=devnet, else _TESTNET (unchanged for testnet).
-    local push_url metrics_url
     push_url="$(obs_effective_push_url)"
     metrics_url="$(obs_effective_metrics_url)"
-    ( umask 077
-      {
-        cat <<EOF
-TN_NODE=${TN_NODE}
+    text="TN_NODE=${TN_NODE}
 TN_REGION=${TN_REGION}
 TN_VALIDATOR_ADDRESS=${TN_VALIDATOR_ADDRESS}
 TN_CHAIN=${TN_CHAIN}
 TN_IMAGE_VERSION=${TN_IMAGE_VERSION}
 OBS_PUSH_URL=${push_url}
-OBS_INGEST_TOKEN=${token}
-EOF
-        if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
-            cat <<EOF
+OBS_PUSH_HOST=$(obs_url_host "$push_url")"
+    if [[ "${ENABLE_METRICS:-false}" == "true" ]]; then
+        text="${text}
 TN_METRICS_ADDR=$(obs_metrics_addr)
 OBS_METRICS_PUSH_URL=${metrics_url}
-EOF
-        fi
-      } > "$dest"
-    )
-    chmod 600 "$dest"
+OBS_METRICS_PUSH_HOST=$(obs_url_host "$metrics_url")"
+    fi
+    if [[ "$method" == "docker" ]]; then
+        text="${text}
+CREDENTIALS_DIRECTORY=${OBS_DOCKER_CRED_DIR}"
+    fi
+    if ! tn_write_root_file "$envf" 0600 <<< "$text"; then
+        print_error "Could not write ${envf}."
+        return 1
+    fi
+    if [[ -n "$legacy" && "$OBS_TOKEN_MOVED_SAID" != "true" ]]; then
+        OBS_TOKEN_MOVED_SAID=true
+        print_info "${envf} no longer holds the ingest token: it is in ${tokf} (root:${OBS_ALLOY_USER} 0640), which Alloy reads as a file, not from its environment."
+    fi
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -631,13 +730,15 @@ obs_alloy_account() {
 # obs_alloy_unit_text <alloy-binary> <env-file> <supplementary-group|""> [dir...] —
 # print the native unit. Alloy runs as OBS_ALLOY_USER with its state in
 # StateDirectory= (systemd re-owns an older state dir to that account), reads the
-# node logs through the supplementary group (telcoin-log), and cannot see the node's
-# data dir(s) given as [dir...], /var/lib/telcoin, the credential store or the
-# passphrase file.
+# node logs through the supplementary group (telcoin-log), gets the ingest token file
+# as the credential ingest-token (LoadCredential=; config.alloy reads it from
+# $CREDENTIALS_DIRECTORY), writes no core dump, and cannot see the node's data dir(s)
+# given as [dir...], /var/lib/telcoin, the BLS passphrase credential or the passphrase
+# file.
 obs_alloy_unit_text() {
     local bin="$1" envf="$2" grp="${3:-}" hidden d
     shift 3
-    hidden="-/var/lib/telcoin -/etc/credstore.encrypted -/etc/telcoin/bls-passphrase"
+    hidden="-/var/lib/telcoin -/etc/telcoin/bls-passphrase.cred -/etc/telcoin/bls-passphrase"
     for d in "$@"; do
         if [[ -n "$d" && "$d" != /var/lib/telcoin ]]; then
             hidden="${hidden} -${d}"
@@ -660,6 +761,7 @@ obs_alloy_unit_text() {
     fi
     printf '%s\n' \
         "EnvironmentFile=${envf}" \
+        "LoadCredential=${OBS_TOKEN_NAME}:$(obs_token_file)" \
         "ExecStart=${bin} run --server.http.listen-addr=${OBS_HTTP_ADDR} --storage.path=${OBS_DATA_DIR} ${OBS_ETC_DIR}/config.alloy" \
         "StateDirectory=${OBS_DATA_DIR##*/}" \
         'StateDirectoryMode=0750' \
@@ -678,19 +780,20 @@ obs_alloy_unit_text() {
         'MemoryMax=512M' \
         'CPUQuota=50%' \
         'TasksMax=256' \
+        'LimitCORE=0' \
         '' \
         '[Install]' \
         'WantedBy=multi-user.target'
 }
 
-# obs_write_alloy_native_unit <token> — native unit (obs_alloy_unit_text, root 0644)
-# + its mode-600 env file, which systemd reads as root. Alloy joins the telcoin-log
-# group when it exists. rc 1 when the unit could not be written.
+# obs_write_alloy_native_unit -- native unit (obs_alloy_unit_text, root 0644) + its env
+# file (_obs_write_env_file), which systemd reads as root. Alloy joins the telcoin-log
+# group when it exists. rc 1 when the env file or the unit could not be written.
 obs_write_alloy_native_unit() {
-    local token="$1" grp="" dd text
+    local grp="" dd text
     local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
     local bin; bin="$(command -v alloy 2>/dev/null || echo /usr/bin/alloy)"
-    _obs_write_env_file "$envf" "$token"
+    _obs_write_env_file || return 1
     if getent group telcoin-log >/dev/null 2>&1; then
         grp="telcoin-log"
     fi
@@ -700,11 +803,19 @@ obs_write_alloy_native_unit() {
     systemctl daemon-reload
 }
 
-# obs_run_alloy_docker <token> <log_host_dir> — docker-sidecar unit + its mode-600 env
-# file. Mirrors the adiri start-validator-node.sh sidecar (container telcoin-alloy,
-# host network, RO config + logs), but supervised by systemd so it is greppable and
-# restarts with the host. The ExecStart uses backslash continuations that bash collapses
-# to one line on render (same as the node units) — valid for systemd.
+# obs_alloy_docker_unit_text <env-file> <log_host_dir> <gid> -- print the docker-sidecar
+# unit. Mirrors the adiri start-validator-node.sh sidecar (container telcoin-alloy, host
+# network, RO config + logs), but supervised by systemd so it is greppable and restarts
+# with the host. The ExecStart uses backslash continuations that bash collapses to one
+# line on render (same as the node units), which systemd accepts.
+#
+# The ingest token file is bind-mounted read-only at ${OBS_DOCKER_CRED_DIR}/ingest-token
+# (the env file sets CREDENTIALS_DIRECTORY there, so the one config.alloy serves both
+# runtimes). --mount, not -v: a missing source file stops the start instead of docker
+# creating a directory in its place. The image runs as uid 0 with every capability
+# dropped, which reads the root-owned 0640 file as its owner; --group-add <gid of
+# telcoin-alloy> also lets an image that runs as its own alloy user (473) read it. No
+# core dumps: LimitCORE=0 covers the docker client, --ulimit core=0 the container.
 #
 # Storage dir is bind-mounted at the SAME absolute path inside the container
 # (${OBS_DATA_DIR}:${OBS_DATA_DIR}) and passed verbatim to --storage.path, matching the
@@ -713,11 +824,9 @@ obs_write_alloy_native_unit() {
 # container-root cannot traverse it -> Alloy dies with "mkdir /var/lib/alloy/data:
 # permission denied". /var/lib (root:root) is traversable, so this placement keeps every
 # hardening flag intact.
-obs_run_alloy_docker() {
-    local token="$1" log_host_dir="$2"
-    local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
-    _obs_write_env_file "$envf" "$token"
-    cat > "/etc/systemd/system/${OBS_ALLOY_UNIT}" <<EOF
+obs_alloy_docker_unit_text() {
+    local envf="$1" log_host_dir="$2" gid="$3"
+    cat <<EOF
 [Unit]
 Description=Telcoin node log shipper (Grafana Alloy sidecar -> central Loki)
 After=network-online.target docker.service
@@ -734,10 +843,13 @@ ExecStart=/usr/bin/docker run --rm --name telcoin-alloy \
 --memory=512m \
 --cpus=0.50 \
 --pids-limit=256 \
+--ulimit core=0 \
 --cap-drop=ALL \
 --security-opt=no-new-privileges \
+--group-add ${gid} \
 --env-file ${envf} \
 -v ${OBS_ETC_DIR}/config.alloy:/etc/alloy/config.alloy:ro \
+--mount type=bind,source=$(obs_token_file),target=${OBS_DOCKER_CRED_DIR}/${OBS_TOKEN_NAME},readonly \
 -v ${log_host_dir}:/var/log/telcoin:ro \
 -v ${OBS_DATA_DIR}:${OBS_DATA_DIR} \
 ${TN_ALLOY_IMAGE} run \
@@ -747,11 +859,60 @@ ${TN_ALLOY_IMAGE} run \
 ExecStop=/usr/bin/docker stop telcoin-alloy
 Restart=on-failure
 RestartSec=10
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+# obs_run_alloy_docker <log_host_dir> -- the docker-sidecar unit
+# (obs_alloy_docker_unit_text, root 0644) + its env file (_obs_write_env_file). rc 1
+# (said) when the telcoin-alloy group is missing or a write fails.
+obs_run_alloy_docker() {
+    local log_host_dir="$1" gid text
+    local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
+    _obs_write_env_file || return 1
+    gid="$(getent group "$OBS_ALLOY_USER" 2>/dev/null | cut -d: -f3)"
+    if [[ ! "$gid" =~ ^[0-9]+$ ]]; then
+        print_error "There is no ${OBS_ALLOY_USER} group, so the Alloy sidecar could not read the ingest token file."
+        return 1
+    fi
+    text="$(obs_alloy_docker_unit_text "$envf" "$log_host_dir" "$gid")"
+    tn_write_root_file "${TN_ROOT_PREFIX:-}/etc/systemd/system/${OBS_ALLOY_UNIT}" 0644 <<< "$text" || return 1
     systemctl daemon-reload
+}
+
+# obs_write_alloy_units -- the env file and the unit for this installation
+# (INSTALL_METHOD from .node-meta): the sidecar unit for docker (logs from
+# <data dir>/logs), the native unit otherwise. rc 1 (said) when .node-meta repeats
+# INSTALL_METHOD or DATA_DIR, or a write fails.
+obs_write_alloy_units() {
+    local method dd
+    method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
+    if [[ "$method" == "docker" ]]; then
+        dd="$(_obs_data_dir "$(node_meta_path || true)")" || return 1
+        obs_run_alloy_docker "${dd}/logs"
+        return
+    fi
+    obs_write_alloy_native_unit
+}
+
+# obs_render_alloy -- every file Alloy runs from, for this installation: config.alloy
+# (obs_render_config_alloy, following ENABLE_OBSERVABILITY / ENABLE_METRICS), the env
+# file and the unit (obs_write_alloy_units, which also moves a token still in the env
+# file into the token file), after making sure the telcoin-alloy account exists (its
+# group owns the token file on docker installs too). The partial disables and
+# --rotate-token use it, so a host still on the env-file token is migrated whenever
+# Alloy is restarted. rc 1 (said) when a step fails.
+obs_render_alloy() {
+    obs_alloy_account || return 1
+    obs_render_config_alloy || return 1
+    if ! obs_write_alloy_units; then
+        print_error "Could not write the ${OBS_ALLOY_UNIT} unit or its env file."
+        return 1
+    fi
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -1200,15 +1361,9 @@ obs_enable() {
     local token="${1:-}" progress="${2:-}"
     OBS_FLAG_ERROR=""
     OBS_ALLOY_TOUCHED=false
-    # Trim leading/trailing whitespace (a stray paste newline otherwise yields silent 401s).
-    token="${token#"${token%%[![:space:]]*}"}"
-    token="${token%"${token##*[![:space:]]}"}"
+    token="$(_obs_trim_token "$token")"
     [[ -n "$token" ]] || { print_error "obs_enable: empty ingest token."; return 1; }
-    if [[ "$token" =~ [[:space:]] ]]; then
-        print_warn "Ingest token contains internal whitespace — check you pasted it correctly."
-    elif (( ${#token} < 16 )); then
-        print_warn "Ingest token looks short (${#token} chars) — check you pasted the full token."
-    fi
+    _obs_token_warn "$token"
 
     local logs_on="${ENABLE_OBSERVABILITY:-false}" metrics_on="${ENABLE_METRICS:-false}"
     if [[ "$logs_on" != "true" && "$metrics_on" != "true" ]]; then
@@ -1247,23 +1402,25 @@ obs_enable() {
     [[ -n "$method" ]] || method="binary"
 
     if [[ "$method" != "docker" ]]; then
-        # Native Alloy: its own account, reading the node log dir through telcoin-log.
+        # Native Alloy reads the node log dir through the telcoin-log group.
         if [[ "$logs_on" == "true" ]]; then
             nld="$(obs_prepare_node_log_dir)" || return 1
             NODE_LOG_DIR="$nld"
             # Recorded before the node's unit is re-rendered for it (obs_ensure_reth_flags).
             [[ -z "$meta" ]] || meta_set NODE_LOG_DIR "$nld" "$meta"
         fi
-        obs_alloy_account || return 1
         if ! getent group telcoin-log >/dev/null 2>&1; then
             print_warn "There is no telcoin-log group on this host, so Alloy cannot read the node logs. Run update-node.sh or edit-config.sh once (they move the host to the root-owned layout and create the group), then this enable again."
         fi
     fi
+    # Native Alloy runs as this account; on docker its group owns the token file.
+    obs_alloy_account || return 1
 
     OBS_ALLOY_TOUCHED=true
     if [[ "$method" == "docker" ]]; then
         install -d -m 0750 "$OBS_ETC_DIR"
         obs_render_config_alloy || return 1
+        obs_write_token_file "$token" || return 1
         local log_host_dir
         dd="$(_obs_data_dir "$meta")" || return 1
         log_host_dir="${dd}/logs"
@@ -1273,16 +1430,17 @@ obs_enable() {
             return 1
         fi
         install -d -m 0750 "$OBS_DATA_DIR"
-        obs_run_alloy_docker "$token" "$log_host_dir"
+        obs_run_alloy_docker "$log_host_dir" || { print_error "Could not write the ${OBS_ALLOY_UNIT} unit."; return 1; }
     else
         install -d -m 0750 -o root -g "$OBS_ALLOY_USER" "$OBS_ETC_DIR"
         chgrp "$OBS_ALLOY_USER" "$OBS_ETC_DIR" 2>/dev/null || true
         obs_render_config_alloy || return 1
+        obs_write_token_file "$token" || return 1
         if ! obs_install_alloy_native; then
             print_error "Could not install Alloy natively (apt + tarball both failed, or the download did not verify)."
             return 1
         fi
-        obs_write_alloy_native_unit "$token" || { print_error "Could not write the ${OBS_ALLOY_UNIT} unit."; return 1; }
+        obs_write_alloy_native_unit || { print_error "Could not write the ${OBS_ALLOY_UNIT} unit."; return 1; }
     fi
 
     # enable (boot) + restart (now): restart also reloads a rewritten config/env when the
@@ -1316,16 +1474,139 @@ obs_enable() {
     return 0
 }
 
-# obs_existing_token — echo the OBS_INGEST_TOKEN already stored in the mode-600 Alloy env
-# file, if any, so a second pipeline can be enabled without re-pasting the shared token.
-# Stays local (returned to the caller, never logged). Empty if no env file / no token.
+# obs_existing_token -- echo the ingest token already stored on this node, so a second
+# pipeline can be enabled without re-pasting the shared token: the first line of the
+# token file, else the OBS_INGEST_TOKEN line of an env file written before the token
+# file existed. Stays local (returned to the caller, never logged). Empty if neither
+# holds one.
 obs_existing_token() {
-    local envf="${OBS_ETC_DIR}/telcoin-alloy.env"
-    [[ -r "$envf" ]] || return 0
-    sed -n 's/^OBS_INGEST_TOKEN=//p' "$envf" 2>/dev/null | head -1
+    local f t=""
+    f="$(obs_token_file)"
+    if [[ -f "$f" && ! -L "$f" && -r "$f" ]]; then
+        t="$(head -n 1 -- "$f" 2>/dev/null)" || t=""
+    fi
+    [[ -n "$t" ]] || t="$(_obs_env_token)"
+    [[ -z "$t" ]] || printf '%s\n' "$t"
+    return 0
 }
 
-# obs_disable — FULL teardown: stop + disable the shipper, record BOTH pipelines off.
+# _obs_snapshot FILE... -- remember each FILE's content, mode and group, or that it is
+# absent, for _obs_restore (the files obs_rotate_token rewrites). Held in shell
+# variables only. rc 1 when a file cannot be read.
+_OBS_SNAP_PATH=()
+_OBS_SNAP_MODE=()
+_OBS_SNAP_GRP=()
+_OBS_SNAP_BODY=()
+_obs_snapshot() {
+    local f st body
+    _OBS_SNAP_PATH=()
+    _OBS_SNAP_MODE=()
+    _OBS_SNAP_GRP=()
+    _OBS_SNAP_BODY=()
+    for f in "$@"; do
+        _OBS_SNAP_PATH+=("$f")
+        if [[ -f "$f" && ! -L "$f" ]]; then
+            st="$(stat -c '%a %G' -- "$f" 2>/dev/null)" || return 1
+            body="$(cat -- "$f")" || return 1
+            _OBS_SNAP_MODE+=("${st%% *}")
+            _OBS_SNAP_GRP+=("${st#* }")
+            _OBS_SNAP_BODY+=("$body")
+        else
+            _OBS_SNAP_MODE+=("-")
+            _OBS_SNAP_GRP+=("")
+            _OBS_SNAP_BODY+=("")
+        fi
+    done
+    return 0
+}
+
+# _obs_restore -- put back every file _obs_snapshot remembered, with its mode and group
+# (tn_write_root_file, fed like obs_write_token_file), shred one that was absent, then
+# reload systemd and forget the copies. rc 1 when a write failed.
+_obs_restore() {
+    local i=0 rc=0
+    while [[ "$i" -lt "${#_OBS_SNAP_PATH[@]}" ]]; do
+        if [[ "${_OBS_SNAP_MODE[$i]}" == "-" ]]; then
+            _tn_shred "${_OBS_SNAP_PATH[$i]}"
+        elif ! tn_write_root_file "${_OBS_SNAP_PATH[$i]}" "${_OBS_SNAP_MODE[$i]}" "${_OBS_SNAP_GRP[$i]}" \
+                < <(trap - ERR; printf '%s\n' "${_OBS_SNAP_BODY[$i]}"); then
+            print_error "Could not put ${_OBS_SNAP_PATH[$i]} back."
+            rc=1
+        fi
+        i=$((i + 1))
+    done
+    _OBS_SNAP_BODY=()
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    return "$rc"
+}
+
+# obs_rotate_token <token> -- replace the ingest token in place: write the token file,
+# render every Alloy file for this installation (obs_render_alloy, which also moves a
+# token still in the env file out of it), then restart Alloy and watch it
+# (obs_restart_alloy). Only Alloy restarts, never the node, so there is no committee
+# guard or epoch wait. When a write fails, or Alloy does not stay running, the token
+# file, the env file, config.alloy and the unit are put back as they were and Alloy is
+# restarted on them (rollback). Pipelines follow .node-meta. rc 0 rotated; rc 1 (said)
+# refused with nothing changed, or rolled back; OBS_ROTATE_MSG then says which in one
+# sentence (setup-observability.sh --json reports it).
+OBS_ROTATE_MSG=""
+obs_rotate_token() {
+    local token unitf
+    OBS_ROTATE_MSG="nothing was changed (see the messages above)"
+    token="$(_obs_trim_token "${1:-}")"
+    if [[ -z "$token" ]]; then
+        OBS_ROTATE_MSG="no ingest token was given; nothing was changed"
+        print_error "No ingest token given; nothing was changed."
+        return 1
+    fi
+    _obs_token_warn "$token"
+    ENABLE_OBSERVABILITY="$(addon_meta_get ENABLE_OBSERVABILITY false)" || return 1
+    ENABLE_METRICS="$(addon_meta_get ENABLE_METRICS false)" || return 1
+    if [[ "$ENABLE_OBSERVABILITY" != "true" && "$ENABLE_METRICS" != "true" ]]; then
+        OBS_ROTATE_MSG="log and metrics shipping are both off on this node; nothing was changed"
+        print_error "Log and metrics shipping are both off on this node, so there is no token to rotate; enable logs or metrics instead. Nothing was changed."
+        return 1
+    fi
+    unitf="${TN_ROOT_PREFIX:-}/etc/systemd/system/${OBS_ALLOY_UNIT}"
+    if [[ ! -f "$unitf" ]]; then
+        OBS_ROTATE_MSG="${OBS_ALLOY_UNIT} is not installed; nothing was changed"
+        print_error "${OBS_ALLOY_UNIT} is not installed; enable logs or metrics first. Nothing was changed."
+        return 1
+    fi
+    obs_alloy_account || return 1
+    if ! _obs_snapshot "$(obs_token_file)" "${OBS_ETC_DIR}/telcoin-alloy.env" "${OBS_ETC_DIR}/config.alloy" "$unitf"; then
+        _OBS_SNAP_BODY=()
+        OBS_ROTATE_MSG="the current Alloy files could not be read; nothing was changed"
+        print_error "Could not read the current Alloy files; nothing was changed."
+        return 1
+    fi
+    print_step "Rotating the ingest token"
+    if ! obs_write_token_file "$token" || ! obs_render_alloy; then
+        OBS_ROTATE_MSG="the new token could not be written; the previous files were put back and Alloy was not restarted"
+        print_error "The new token could not be put in place; putting the previous files back (Alloy was not restarted)."
+        _obs_restore || OBS_ROTATE_MSG="the new token could not be written, and a previous file could not be put back (see the server log)"
+        return 1
+    fi
+    if obs_restart_alloy; then
+        _OBS_SNAP_BODY=()
+        OBS_ROTATE_MSG=""
+        print_ok "Ingest token rotated: ${OBS_ALLOY_UNIT} restarted on the new token and stayed running. The node was not restarted."
+        return 0
+    fi
+    print_error "${OBS_ALLOY_UNIT} did not stay running on the new token; putting the previous token and files back."
+    _obs_restore || true
+    if obs_restart_alloy; then
+        OBS_ROTATE_MSG="${OBS_ALLOY_UNIT} did not stay running on the new token; the previous token was put back and Alloy runs on it again"
+        print_warn "Rolled back: ${OBS_ALLOY_UNIT} runs on the previous token again. Check journalctl -u ${OBS_ALLOY_UNIT} -n 50, then rotate again."
+    else
+        OBS_ROTATE_MSG="${OBS_ALLOY_UNIT} did not stay running on the new token, and does not stay running on the previous token either; check journalctl -u ${OBS_ALLOY_UNIT}"
+        print_error "Rolled back the files, but ${OBS_ALLOY_UNIT} does not stay running on the previous token either. Check: journalctl -u ${OBS_ALLOY_UNIT} -n 50"
+    fi
+    return 1
+}
+
+# obs_disable -- FULL teardown: stop + disable the shipper, record BOTH pipelines off,
+# shred the ingest token file (and an env file that still holds the token).
 # Leaves the node writing JSON logs / serving --metrics locally (harmless); remove-node.sh
 # fully cleans config + data dirs + the node flags.
 obs_disable() {
@@ -1337,14 +1618,20 @@ obs_disable() {
         meta_set ENABLE_OBSERVABILITY false "$meta"
         meta_set ENABLE_METRICS false "$meta"
     fi
+    # The ingest token goes with the shipper (and an env file that still holds it).
+    if [[ -n "$(_obs_env_token)" ]]; then
+        _tn_shred "${OBS_ETC_DIR}/telcoin-alloy.env"
+    fi
+    _tn_shred "$(obs_token_file)"
     print_ok "Telemetry shipper stopped + disabled (${OBS_ALLOY_UNIT})."
+    print_info "The ingest token file was shredded; enabling logs or metrics again asks for the token."
     print_info "The node keeps writing JSON logs / serving --metrics locally (harmless). remove-node.sh removes all obs files."
     return 0
 }
 
 # obs_disable_logs — turn OFF log shipping but KEEP metrics if it is on: render
-# config.alloy metrics-only exactly as obs_enable renders it (obs_render_config_alloy:
-# same owner, group and paths), record ENABLE_OBSERVABILITY=false in .node-meta, then
+# config.alloy metrics-only exactly as obs_enable renders it, with the env file and the
+# unit (obs_render_alloy: same owner, group and paths), record ENABLE_OBSERVABILITY=false in .node-meta, then
 # restart Alloy and watch it (obs_restart_alloy). The choice is recorded before the
 # restart because the next render reads it back. rc 1 (said) when the render fails
 # (nothing recorded, no restart), when .node-meta cannot be written, or when Alloy does
@@ -1357,7 +1644,7 @@ obs_disable_logs() {
     if [[ "$metrics_on" == "true" ]]; then
         print_step "Disabling log shipping (metrics stays on)"
         ENABLE_OBSERVABILITY=false; ENABLE_METRICS=true
-        obs_render_config_alloy || return 1
+        obs_render_alloy || return 1
         if [[ -n "$meta" ]]; then
             if meta_set ENABLE_OBSERVABILITY false "$meta"; then
                 where="config.alloy and .node-meta"
@@ -1380,8 +1667,8 @@ obs_disable_logs() {
 }
 
 # obs_disable_metrics — turn OFF metrics shipping but KEEP logs if it is on: render
-# config.alloy logs-only exactly as obs_enable renders it (obs_render_config_alloy: same
-# owner, group and node log path), record ENABLE_METRICS=false in .node-meta, then
+# config.alloy logs-only exactly as obs_enable renders it, with the env file and the
+# unit (obs_render_alloy: same owner, group and node log path), record ENABLE_METRICS=false in .node-meta, then
 # restart Alloy and watch it (obs_restart_alloy). The choice is recorded before the
 # restart because the next render reads it back. rc 1 (said) when the render fails
 # (nothing recorded, no restart), when .node-meta cannot be written, or when Alloy does
@@ -1394,7 +1681,7 @@ obs_disable_metrics() {
     if [[ "$logs_on" == "true" ]]; then
         print_step "Disabling metrics shipping (logs stays on)"
         ENABLE_OBSERVABILITY=true; ENABLE_METRICS=false
-        obs_render_config_alloy || return 1
+        obs_render_alloy || return 1
         if [[ -n "$meta" ]]; then
             if meta_set ENABLE_METRICS false "$meta"; then
                 where="config.alloy and .node-meta"
@@ -1414,6 +1701,27 @@ obs_disable_metrics() {
         return "$rc"
     fi
     obs_disable
+}
+
+# _obs_token_status -- one status line about the ingest token file: present with the
+# expected owner and mode, wrong owner or mode, still in the env file, or missing.
+# Never prints the token.
+_obs_token_status() {
+    local f st envf="${OBS_ETC_DIR}/telcoin-alloy.env"
+    f="$(obs_token_file)"
+    if [[ -f "$f" && ! -L "$f" ]]; then
+        st="$(stat -c '%a %U:%G' -- "$f" 2>/dev/null)" || st="unreadable"
+        if [[ "$st" == "640 root:${OBS_ALLOY_USER}" ]]; then
+            print_ok "Ingest token file present (0640 root:${OBS_ALLOY_USER}): ${f}"
+        else
+            print_warn "Ingest token file ${f} is ${st}, not 0640 root:${OBS_ALLOY_USER}; run setup-observability.sh --rotate-token to write it again."
+        fi
+    elif [[ -n "$(_obs_env_token)" ]]; then
+        print_warn "The ingest token is still in ${envf}; run setup-observability.sh --rotate-token (the same token is fine) to move it into ${f}."
+    else
+        print_warn "No ingest token file at ${f}, so Alloy cannot authenticate to the hub; run setup-observability.sh --rotate-token."
+    fi
+    return 0
 }
 
 # obs_status — human-readable status: configured flags (logs + metrics), Alloy unit state,
@@ -1441,6 +1749,7 @@ obs_status() {
     else
         print_warn "${OBS_ALLOY_UNIT} is installed but NOT active (journalctl -u ${OBS_ALLOY_UNIT})"
     fi
+    _obs_token_status
 
     # Pull Alloy's own /metrics once; read both pipelines' progress out of it.
     local alloy_metrics
