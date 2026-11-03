@@ -384,13 +384,37 @@ else
     skip "limit: real nft -c -f on the rendered table" "no nft here that can run -c (needs root with CAP_NET_ADMIN)"
 fi
 
-# A second enable rewrites the table whole, still one transaction.
-: > "$NFT_LOG"
+# A second enable with the table and its boot copy as wanted changes neither: no
+# nft write (its sets keep their counts), no boot copy write, no systemctl call.
+: > "$NFT_LOG"; : > "$WRITES"; : > "$SYSTEMCTL_LOG"
 fresh_flags
 run_apply
 check_rc "limit: re-enable rc 0" 0 "$RC"
 check "limit: re-enable leaves the same table" "$(cat "$T/table.default")" "$(nft_table)"
-check "limit: re-enable is one transaction" "1" "$(nft_applies)"
+check "limit: re-enable, nothing to change: no nft write" "0" "$(nft_applies)"
+check "limit: re-enable, nothing to change: no boot copy write" "" "$(cat "$WRITES")"
+check "limit: re-enable, nothing to change: no unit change" "" "$(grep -v '^is-enabled' "$SYSTEMCTL_LOG")"
+check_has "limit: re-enable, nothing to change: said" "  ->  P2P new-flow limit unchanged: UDP 49590 and 49594 already accept at most 20 packets of new, not yet answered flows per minute from one IPv4 address or IPv6 /64 after a burst of 40, and its boot copy is current." "$OUT"
+check "limit: re-enable, nothing to change: FW_LIMIT_CHANGED" "false" "$FW_LIMIT_CHANGED"
+# --reset rewrites anyway, by design.
+: > "$NFT_LOG"; : > "$WRITES"
+fresh_flags
+run_apply --reset
+check "limit: reset rewrites a matching table" "1" "$(nft_applies)"
+check_has "limit: reset rewrites the boot copy" "$LIMITF 0640" "$(cat "$WRITES")"
+check "limit: reset: FW_LIMIT_CHANGED" "true" "$FW_LIMIT_CHANGED"
+# A stale boot copy (another program in the file) or a unit that is not enabled is
+# rewritten on a plain enable.
+printf '%s\n' "# older" "$(cat "$LIMITF")" > "$LIMITF.tmp"; mv "$LIMITF.tmp" "$LIMITF"
+: > "$NFT_LOG"; : > "$WRITES"
+fresh_flags
+run_apply
+check "limit: stale boot copy: rewritten" "1" "$(nft_applies)"
+check "limit: stale boot copy: now the program" "$(nft_prog)" "$(cat "$LIMITF")"
+rm -f "$TN_ROOT_PREFIX/.systemctl.enabled"; : > "$NFT_LOG"
+fresh_flags
+run_apply
+check "limit: unit not enabled: rewritten and enabled" "1 yes" "$(nft_applies) $(grep -qx 'telcoin-p2p-limit.service' "$TN_ROOT_PREFIX/.systemctl.enabled" && echo yes)"
 
 # Overrides.
 export TN_P2P_NEW_FLOW_RATE=30 TN_P2P_NEW_FLOW_BURST=90
@@ -730,6 +754,29 @@ check "menu, ports already open: no P2P rule change" "" "$(mutating | grep udp)"
 check_has "menu, ports already open: table rewritten with every port" "ct state new udp dport { 49590, 49594, 49595 } update @tn_p2p_src4 { ip saddr limit rate over 20/minute burst 40 packets } drop" "$(nft_table | trim)"
 check "menu, ports already open: boot copy rewritten" "$(nft_prog)" "$(cat "$LIMITF" 2>/dev/null)"
 check "menu, ports already open: lock released" "kind=" "$(cat "$T/menu.lock")"
+# Ports open and the table and boot copy already as wanted: nothing is rewritten.
+: > "$UFW_LOG"; : > "$NFT_LOG"; : > "$WRITES"; : > "$SYSTEMCTL_LOG"
+fresh_flags
+( confirm() { return 1; }; manage_node_ports; echo "changed=${FW_LIMIT_CHANGED} kind=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.lock" ) </dev/null > "$T/mnp.out" 2>&1
+check "menu, nothing to change: no nft write" "0" "$(nft_applies)"
+check "menu, nothing to change: no boot copy write" "" "$(cat "$WRITES")"
+check "menu, nothing to change: no unit change" "" "$(grep -E 'telcoin-p2p-limit|daemon-reload' "$SYSTEMCTL_LOG" | grep -v '^is-enabled')"
+check "menu, nothing to change: no P2P rule change" "" "$(mutating | grep udp)"
+check "menu, nothing to change: FW_LIMIT_CHANGED false, lock released" "changed=false kind=" "$(cat "$T/menu.lock")"
+check_has "menu, nothing to change: said" "yes" "$(grep -q 'P2P new-flow limit unchanged: UDP 49590, 49594 and 49595 already accept' "$T/mnp.out" && echo yes)"
+# The ownership migration refuses after the lock was taken: rc 1, the lock free again.
+( addon_meta_write_begin() { return 1; }
+  FW_SSH_FROM="203.0.113.0/24"
+  fw_menu_p2p_apply telcoin.service false > /dev/null 2>&1
+  r=$?
+  free=no
+  if command -v flock >/dev/null 2>&1; then
+      if flock -n "$TN_UPDATE_LOCK_FILE" true; then free=yes; fi
+  elif [ ! -d "${TN_UPDATE_LOCK_FILE}.d" ]; then
+      free=yes
+  fi
+  echo "rc=$r kind=${TN_UPDATE_LOCK_KIND:-} free=$free" ) > "$T/menu.lock" 2>&1
+check "menu, migration refused after the lock: rc 1, lock released" "rc=1 kind= free=yes" "$(cat "$T/menu.lock")"
 fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n'; }
 printf 'NETWORK=testnet\n' > "$META"
 NETWORK=testnet
