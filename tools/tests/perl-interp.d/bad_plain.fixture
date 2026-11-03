@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: $var, $1 and mixed quoting.
+# Expected findings: lines 7, 8, 9, 10 and 11.
+
+from="$1"
+to="$2"
+perl -pe "s/$from/$to/" "$3"
+perl -E "say $1" "$3"
+perl -pe 's/^/'"$to"'/' "$3"
+perl -e "print \$x, $to"
+perl -pe "s/a/b/" -e "s/c/$to/" "$3"

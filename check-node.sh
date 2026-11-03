@@ -38,7 +38,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="2.0.0"
 readonly STALE_THRESHOLD_SECONDS=60
 # WorkerConfigs system contract: numWorkers() is the number of workers every
 # committee member must run.
@@ -59,6 +59,7 @@ VALIDATOR_ADDRESS_SRC="--address"
 AUTHORITY_ID=""
 NETWORK_RPC=""
 QUERY_NETWORK=true
+RUN_AUDIT=false
 
 # The network this node belongs to, set by resolve_network: NODE_NETWORK is
 # testnet, mainnet or devnet ("" when unknown), NETWORK_SRC says where that came
@@ -181,6 +182,7 @@ while [[ $# -gt 0 ]]; do
         --authority-id) AUTHORITY_ID="$2";      shift 2 ;;
         --network-rpc)  NETWORK_RPC="$2";       shift 2 ;;
         --no-network)   QUERY_NETWORK=false;    shift ;;
+        --audit)        RUN_AUDIT=true;         shift ;;
         -h|--help)
             cat <<EOF
 
@@ -192,6 +194,8 @@ Usage: $0 [OPTIONS]
                            .node-meta: testnet ${TESTNET_RPC_URL}, devnet ${DEVNET_RPC_URL},
                            mainnet ${MAINNET_RPC_URL})
   --no-network             Skip the network RPC query (local-only mode)
+  --audit                  Only audit this host's node security settings (systemd floor,
+                           passphrase delivery, credential, unit) and exit 1 on any warning
   --service <name>         systemd service name override
   --address <0x...>        Validator address for on-chain status check
   --authority-id <BASE58>  Authority ID to look for in the consensus headers when the local
@@ -242,21 +246,37 @@ PARTICIPATION_SRC=""
 # =============================================================================
 
 # Detect this node's data directory from .node-meta so disk checks land on
-# the actual chain-data mount, not just /var/lib/telcoin. Always returns 0
-# (echoes the default path if nothing else found) so set -e doesn't fire.
+# the actual chain-data mount, not just /var/lib/telcoin: DATA_DIR (meta_get)
+# when it names an existing directory, else tn_resolve_data_dir's answer. When
+# .node-meta sets DATA_DIR more than once there is no single data dir: nothing
+# is printed and rc is 2 (the disk section reports it). Otherwise rc 0.
 detect_data_dir() {
-    local meta; meta="$(node_meta_path || true)"
-    local default; default="$(tn_resolve_data_dir)"
+    local meta default data_dir="" rc=0
+    meta="$(node_meta_path || true)"
     if [[ -n "$meta" ]] && [[ -f "$meta" ]]; then
-        local data_dir
-        data_dir=$(grep "^DATA_DIR=" "$meta" 2>/dev/null | cut -d= -f2 || true)
+        data_dir="$(meta_get DATA_DIR "$meta" 2>/dev/null)" || rc=$?
+        [[ $rc -ne 2 ]] || return 2
         if [[ -n "$data_dir" ]] && [[ -d "$data_dir" ]]; then
             echo "$data_dir"
             return 0
         fi
     fi
+    default="$(tn_resolve_data_dir 2>/dev/null)" || return 2
     echo "$default"
     return 0
+}
+
+# meta_flag KEY META -- an ENABLE_* value from .node-meta, false when absent. A key
+# set more than once warns and reads as unknown, so neither copy is trusted.
+meta_flag() {
+    local v rc=0
+    v="$(meta_get "$1" "$2" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "$1 is set more than once in $2; not checked until the extra lines are removed" >&2
+        printf 'unknown\n'
+        return 0
+    fi
+    printf '%s\n' "${v:-false}"
 }
 
 # have_fns <name>... -- rc 0 when lib/common.sh defines every named function.
@@ -270,6 +290,16 @@ have_fns() {
     done
     return 0
 }
+
+# --audit: the host audit alone (tn_host_audit), its rc as the exit status.
+if [[ "$RUN_AUDIT" == "true" ]]; then
+    if have_fns tn_host_audit; then
+        tn_host_audit
+        exit $?
+    fi
+    echo "error: --audit needs a newer lib/common.sh (no tn_host_audit); run update-scripts.sh" >&2
+    exit 2
+fi
 
 # lower <text> -- the text in lower case (bash 3.2 has no ${v,,}).
 lower() {
@@ -890,7 +920,7 @@ report_testnet_addons() {
 
     # Health-monitor endpoint.
     local hc
-    hc="$(meta_get ENABLE_HEALTHCHECK_MONITOR "$meta" 2>/dev/null || echo false)"
+    hc="$(meta_flag ENABLE_HEALTHCHECK_MONITOR "$meta")"
     if [[ "$hc" == "true" ]]; then
         if curl -fsS "http://127.0.0.1:${TN_KUMA_PORT}" >/dev/null 2>&1; then
             print_ok "Health endpoint responds on 127.0.0.1:${TN_KUMA_PORT}"
@@ -901,7 +931,7 @@ report_testnet_addons() {
 
     # WireGuard admin overlay.
     local vpn
-    vpn="$(meta_get ENABLE_VPN "$meta" 2>/dev/null || echo false)"
+    vpn="$(meta_flag ENABLE_VPN "$meta")"
     if [[ "$vpn" == "true" || "$vpn" == "pending" ]]; then
         if ip link show wg0 >/dev/null 2>&1; then
             if command -v wg >/dev/null 2>&1 && wg show wg0 2>/dev/null | grep -qE 'latest handshake'; then
@@ -1609,6 +1639,401 @@ report_participation() {
 }
 
 # =============================================================================
+# HARDENING CHECKS: BLS KEY FILES, UPDATE LOCK, OWNERSHIP LAYOUT
+# =============================================================================
+# Called from the service section through have_fns. Each prints its own lines
+# and counts a failure in HEALTH_ISSUES; what this account cannot read is
+# reported as not checked (run with sudo). Paths honour TN_ROOT_PREFIX (fixture
+# tests). tn_update_lock_path and tn_start_script_path arrive with lib/common.sh
+# 2.0.0: with an older library the checks that need them are skipped, and
+# cn_report_skipped says so once.
+
+# A check whose helpers the library lacks adds its name to CN_SKIPPED_CHECKS and
+# returns without a line; cn_report_skipped then prints one warning for all.
+CN_SKIPPED_CHECKS=""
+
+# cn_report_skipped -- one warning naming the checks an older lib/common.sh
+# turned off, when there are any.
+cn_report_skipped() {
+    [[ -n "${CN_SKIPPED_CHECKS:-}" ]] || return 0
+    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than this check-node.sh, so these checks were skipped:${CN_SKIPPED_CHECKS}. Run update-scripts.sh."
+    return 0
+}
+
+# check_bls_cleartext -- the BLS key on disk: a failure when node-keys/bls.key
+# (the key in the clear) exists without bls.kw (the passphrase-wrapped key), a
+# warning when both exist, OK with bls.kw alone.
+check_bls_cleartext() {
+    local dd keys has_key=0 has_kw=0
+    dd="$(detect_data_dir)" || return 0
+    keys="${dd}/node-keys"
+    if { [[ -d "$dd" ]] && [[ ! -x "$dd" ]]; } || { [[ -d "$keys" ]] && { [[ ! -r "$keys" ]] || [[ ! -x "$keys" ]]; }; }; then
+        print_info "BLS key files not checked: ${keys} is not readable by this account (run with sudo)."
+        return 0
+    fi
+    [[ -d "$keys" ]] || return 0
+    if [[ -e "${keys}/bls.key" || -L "${keys}/bls.key" ]]; then
+        has_key=1
+    fi
+    if [[ -e "${keys}/bls.kw" || -L "${keys}/bls.kw" ]]; then
+        has_kw=1
+    fi
+    if [[ $has_key == 1 && $has_kw == 0 ]]; then
+        print_error "BLS key stored in the clear: ${keys}/bls.key exists and there is no bls.kw, so the key has no passphrase."
+        print_info "  Anyone who can read the data dir can read the key. setup-node.sh now generates keys with a passphrase only."
+        (( ++HEALTH_ISSUES ))
+    elif [[ $has_key == 1 ]]; then
+        print_warn "A cleartext copy of the BLS key (${keys}/bls.key) sits beside the wrapped key bls.kw. Keep it in offline storage and delete it from this host."
+    elif [[ $has_kw == 1 ]]; then
+        print_ok "BLS key is passphrase-wrapped (node-keys/bls.kw, no cleartext bls.key)"
+    fi
+    return 0
+}
+
+# check_update_lock -- the update lock every setup, update and edit takes
+# (tn_update_lock_path): its directory must be root-owned and writable by root
+# only, the lock file a regular root-owned file, mode 0600 (any account that can
+# open it can hold the lock; the next setup, update or edit repairs the mode, so
+# a looser mode warns). Reports the mode, and the holder's PID (the number the
+# holder wrote into the file) while the lock is held; held means a flock on the
+# file in /proc/locks, or the mkdir fallback's <lock>.d.
+check_update_lock() {
+    local path dir owner mode="" ino held="" holder="" cmd="" note=""
+    if ! have_fns tn_update_lock_path tn_root_dir_ok; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_update_lock"
+        return 0
+    fi
+    path="$(tn_update_lock_path)"
+    dir="${path%/*}"
+    [[ -n "$dir" ]] || dir=/
+    if [[ -n "${TN_UPDATE_LOCK_FILE:-}" ]]; then
+        note=" (TN_UPDATE_LOCK_FILE override; ownership not checked)"
+    elif [[ ! -e "$dir" && ! -L "$dir" ]]; then
+        print_info "Update lock: ${path} not created yet; the next setup, update or edit creates it."
+        return 0
+    elif ! tn_root_dir_ok "$dir"; then
+        print_error "Update lock directory ${dir} is not a root-owned directory writable by root only (or a parent is a symlink): another account could hold or replace the lock."
+        print_info "  Fix: sudo rm -rf -- ${dir}  (the next setup, update or edit makes it again, root 0755)"
+        (( ++HEALTH_ISSUES ))
+        return 0
+    elif [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -f "$path" ]]; }; then
+        print_error "Update lock ${path} is a symlink or not a regular file; every update refuses it."
+        (( ++HEALTH_ISSUES ))
+        return 0
+    elif [[ -e "$path" ]]; then
+        owner="$(stat -c '%u' -- "$path" 2>/dev/null || true)"
+        if [[ "$owner" != 0 ]]; then
+            print_error "Update lock ${path} is not owned by root; every update refuses it."
+            (( ++HEALTH_ISSUES ))
+            return 0
+        fi
+    fi
+    if [[ -f "$path" && ! -L "$path" ]]; then
+        mode="$(stat -c '%a' -- "$path" 2>/dev/null || true)"
+        if [[ -z "$note" && -n "$mode" && "$mode" != 600 ]]; then
+            print_warn "Update lock ${path} is mode ${mode}, not 0600: any account that can read it can hold the lock and block updates."
+            print_info "  The next setup, update or edit sets it to 0600 (or now: sudo chmod 0600 ${path})"
+        fi
+        [[ -z "$mode" ]] || note="${note} (mode ${mode})"
+    fi
+    if [[ -f "$path" && ! -L "$path" && -r /proc/locks ]]; then
+        ino="$(stat -c '%i' -- "$path" 2>/dev/null || true)"
+        if [[ "$ino" =~ ^[0-9]+$ ]] && awk -v ino="$ino" '
+            $2 == "FLOCK" { n = split($6, a, ":"); if (a[n] == ino) f = 1 }
+            END { exit !f }' /proc/locks 2>/dev/null; then
+            held=1
+            holder="$(head -n 1 -- "$path" 2>/dev/null || true)"
+        fi
+    fi
+    if [[ -d "${path}.d" && ! -L "${path}.d" ]]; then
+        held=1
+        holder="$(head -n 1 -- "${path}.d/pid" 2>/dev/null || true)"
+    fi
+    [[ "$holder" =~ ^[0-9]+$ ]] || holder=""
+    if [[ -z "$held" ]]; then
+        print_ok "Update lock: ${path} is free${note}"
+    elif [[ -n "$holder" && -d "/proc/${holder}" ]]; then
+        cmd="$(ps -o args= -p "$holder" 2>/dev/null | cut -c1-80 || true)"
+        print_info "Update lock: held by PID ${holder}${cmd:+ (${cmd})}: a setup, update or edit is running${note}"
+    else
+        print_warn "Update lock: held, but the PID it names (${holder:-none}) is not running: a leftover child process keeps it.${note}"
+        print_info "  See who holds it: sudo fuser -v ${path}"
+    fi
+    return 0
+}
+
+# _cn_own PATH OWNER GROUP MODE -- add a line to CN_OWN_BAD when PATH is a
+# symlink or is not exactly OWNER:GROUP with MODE (octal, as stat prints it).
+CN_OWN_BAD=""
+_cn_own() {
+    local got want="${2}:${3} ${4#0}"
+    if [[ -L "$1" ]]; then
+        CN_OWN_BAD="${CN_OWN_BAD}  ${1}: a symlink"$'\n'
+        return 0
+    fi
+    got="$(stat -c '%U:%G %a' -- "$1" 2>/dev/null || echo unreadable)"
+    if [[ "$got" != "$want" ]]; then
+        CN_OWN_BAD="${CN_OWN_BAD}  ${1}: ${got}, expected ${want}"$'\n'
+    fi
+    return 0
+}
+
+# check_ownership_layout -- OWNERSHIP_LAYOUT=2 in .node-meta (the root-owned
+# layout setup-node.sh writes and tn_migrate_ownership moves an older install
+# to), then the owners and modes of that layout: install, config and start
+# script paths root's, .node-meta and the passphrase file root 0600, backups
+# root 0700, the data dir the service account's 0700, the log dir
+# root:telcoin-log 0750, the node log dir (NODE_LOG_DIR, when it exists) the
+# service account's with group telcoin-log 2750 (setgid), nothing under the install, config and start-script
+# trees owned by another account. The old layout warns (on mainnet it fails: a
+# mainnet host is installed fresh); a drifted layout 2 fails.
+check_ownership_layout() {
+    local pre="${TN_ROOT_PREFIX:-}" meta layout rc=0 net v suser sgroup method
+    local inst etc libexec start dd logd d extra
+    if ! have_fns tn_root_dir_ok tn_start_script_path tn_detect_network; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_ownership_layout"
+        return 0
+    fi
+    meta="$(node_meta_path 2>/dev/null || true)"
+    [[ -n "$meta" && -f "$meta" ]] || return 0
+    if [[ "$meta" != "${pre}${DEFAULT_CONFIG_DIR}/.node-meta" ]]; then
+        print_info "Ownership layout not checked: legacy per-role install (migrate-node-naming.sh moves it to the unified layout first)."
+        return 0
+    fi
+    if [[ ! -r "$meta" ]]; then
+        print_info "Ownership layout not checked: ${meta} is readable by root only (run with sudo)."
+        return 0
+    fi
+    layout="$(meta_get OWNERSHIP_LAYOUT "$meta" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_error "OWNERSHIP_LAYOUT is set more than once in ${meta}; remove the extra lines."
+        (( ++HEALTH_ISSUES ))
+        return 0
+    fi
+    if [[ "$layout" != "2" ]]; then
+        net="$(tn_detect_network "$meta" 2>/dev/null || true)"
+        if [[ "$net" == "mainnet" ]]; then
+            print_error "Old file ownership layout: the service account owns the install and config trees. A mainnet host is not migrated in place; install it fresh with this release."
+            (( ++HEALTH_ISSUES ))
+        else
+            print_warn "Old file ownership layout: the service account owns the install and config trees. The next update-node.sh or edit-config.sh run moves them to root ownership."
+        fi
+        return 0
+    fi
+
+    suser="${SERVICE_USER:-telcoin}"
+    v="$(meta_get HOST_SERVICE_USER "$meta" 2>/dev/null || true)"
+    [[ -z "$v" ]] || suser="$v"
+    sgroup="$(meta_get HOST_SERVICE_GROUP "$meta" 2>/dev/null || true)"
+    [[ -n "$sgroup" ]] || sgroup="$(id -gn "$suser" 2>/dev/null || echo "$suser")"
+    method="$(meta_get INSTALL_METHOD "$meta" 2>/dev/null || true)"
+    inst="${pre}${DEFAULT_INSTALL_DIR}"
+    etc="${pre}${DEFAULT_CONFIG_DIR}"
+    logd="${pre}${DEFAULT_LOG_DIR}"
+    if [[ "$method" == "docker" ]]; then
+        start="${pre}$(tn_start_script_path docker)"
+    else
+        start="${pre}$(tn_start_script_path source)"
+    fi
+    libexec="${start%/*}"
+
+    CN_OWN_BAD=""
+    for d in "$inst" "$etc" "$libexec"; do
+        if [[ -e "$d" || -L "$d" ]] && ! tn_root_dir_ok "$d"; then
+            CN_OWN_BAD="${CN_OWN_BAD}  ${d}: not a root-owned directory writable by root only (or a parent is a symlink)"$'\n'
+        fi
+    done
+    [[ ! -e "$inst" ]] || _cn_own "$inst" root root 0755
+    [[ ! -e "$etc" ]] || _cn_own "$etc" root root 0755
+    [[ ! -e "$libexec" ]] || _cn_own "$libexec" root root 0755
+    if [[ -e "$start" || -L "$start" ]]; then
+        # Both forms are root 0755: neither holds a secret.
+        _cn_own "$start" root root 0755
+    else
+        CN_OWN_BAD="${CN_OWN_BAD}  ${start}: missing (the unit starts the node through it)"$'\n'
+    fi
+    if [[ "$method" != "docker" ]]; then
+        v="$(meta_get BINARY_PATH "$meta" 2>/dev/null || true)"
+        [[ -n "$v" ]] || v="${DEFAULT_INSTALL_DIR}/telcoin-network"
+        [[ ! -e "${pre}${v}" && ! -L "${pre}${v}" ]] || _cn_own "${pre}${v}" root root 0755
+    fi
+    [[ ! -e "${inst}/telcoin-network.version" ]] || _cn_own "${inst}/telcoin-network.version" root root 0644
+    _cn_own "$meta" root root 0600
+    [[ ! -e "${etc}/.pending-update" && ! -L "${etc}/.pending-update" ]] || _cn_own "${etc}/.pending-update" root root 0600
+    [[ ! -e "${etc}/node.env" && ! -L "${etc}/node.env" ]] || _cn_own "${etc}/node.env" root root 0644
+    [[ ! -e "${etc}/bls-passphrase" && ! -L "${etc}/bls-passphrase" ]] || _cn_own "${etc}/bls-passphrase" root root 0600
+    [[ ! -e "${etc}/bls-passphrase.cred" && ! -L "${etc}/bls-passphrase.cred" ]] || _cn_own "${etc}/bls-passphrase.cred" root root 0600
+    [[ ! -e "${pre}/var/backups/telcoin" ]] || _cn_own "${pre}/var/backups/telcoin" root root 0700
+    if dd="$(detect_data_dir)" && [[ -e "$dd" || -L "$dd" ]]; then
+        _cn_own "$dd" "$suser" "$sgroup" 0700
+    fi
+    [[ ! -e "$logd" && ! -L "$logd" ]] || _cn_own "$logd" root "${TN_LOG_GROUP:-telcoin-log}" 0750
+    v="$(meta_get NODE_LOG_DIR "$meta" 2>/dev/null || true)"
+    if [[ -n "$v" ]] && [[ -e "${pre}${v}" || -L "${pre}${v}" ]]; then
+        _cn_own "${pre}${v}" "$suser" "${TN_LOG_GROUP:-telcoin-log}" 2750
+    fi
+    while IFS= read -r extra; do
+        [[ -z "$extra" ]] || CN_OWN_BAD="${CN_OWN_BAD}  ${extra}: not owned by root"$'\n'
+    done < <(find -P "$inst" "$etc" "$libexec" -xdev ! -user 0 -print 2>/dev/null | head -n 10)
+
+    if [[ -z "$CN_OWN_BAD" ]]; then
+        print_ok "Ownership layout 2: install, config and start-script paths are root's; the data dir is ${suser}'s"
+        return 0
+    fi
+    print_error "Ownership layout 2 is recorded, but these paths differ from it (a hand edit, or a change to review):"
+    printf '%s' "$CN_OWN_BAD"
+    print_info "  update-node.sh, edit-config.sh and setup-node.sh refuse root writes into paths like these."
+    (( ++HEALTH_ISSUES ))
+    return 0
+}
+
+# _cn_launch_file -- the installed node's launch file (tn_node_launch_target), or
+# nothing.
+_cn_launch_file() {
+    local line
+    line="$(tn_node_launch_target 2>/dev/null)" || return 1
+    printf '%s\n' "${line##* }"
+}
+
+# check_unit_environ -- how the BLS passphrase reaches the node, read from the
+# unit and the start script (never from /proc/<pid>/environ: the node's own scrub
+# leaves the variable's name there). A failure when the unit's environment or an
+# EnvironmentFile= carries TN_BLS_PASSPHRASE, or when the start script exports
+# it or hands it to docker with -e; OK when the node line reads it from stdin or
+# a systemd credential.
+check_unit_environ() {
+    local unit envs="" files="" f launch src="" bad=0
+    if ! have_fns tn_node_launch_target tn_launch_flag_get; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_unit_environ"
+        return 0
+    fi
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
+    [[ -f "$unit" ]] || return 0
+    if [[ -z "${TN_ROOT_PREFIX:-}" ]] && command -v systemctl >/dev/null 2>&1; then
+        envs="$(systemctl show -p Environment --value "$SERVICE_NAME" 2>/dev/null || true)"
+        files="$(systemctl show -p EnvironmentFiles --value "$SERVICE_NAME" 2>/dev/null | awk '{print $1}' || true)"
+    else
+        envs="$(grep -E '^Environment=' "$unit" 2>/dev/null || true)"
+        files="$(sed -n 's/^EnvironmentFile=-\{0,1\}//p' "$unit" 2>/dev/null)"
+    fi
+    if printf '%s\n' "$envs" | grep -q 'TN_BLS_PASSPHRASE='; then
+        print_error "The unit ${SERVICE_NAME}.service sets TN_BLS_PASSPHRASE in its environment: the passphrase is readable with systemctl show."
+        print_info "  Run update-node.sh or edit-config.sh to move it to a systemd credential."
+        bad=1
+    fi
+    for f in $files; do
+        f="${TN_ROOT_PREFIX:-}${f}"
+        if [[ -r "$f" ]] && grep -q 'TN_BLS_PASSPHRASE=' "$f" 2>/dev/null; then
+            print_error "${f} (an EnvironmentFile= of the unit) holds TN_BLS_PASSPHRASE."
+            bad=1
+        fi
+    done
+    launch="$(_cn_launch_file)" || launch=""
+    if [[ -n "$launch" && -r "$launch" ]]; then
+        if grep -qE '(^|[[:space:]])(export[[:space:]]+TN_BLS_PASSPHRASE|-e[[:space:]]+"?TN_BLS_PASSPHRASE)' "$launch"; then
+            print_error "The start script ${launch} passes the passphrase through the environment (it stays in the node's process environment)."
+            print_info "  update-node.sh and edit-config.sh rewrite it to hand the passphrase to the node on stdin."
+            bad=1
+        fi
+        src="$(tn_launch_flag_get "$launch" --bls-passphrase-source 2>/dev/null || true)"
+    fi
+    if [[ $bad -ne 0 ]]; then
+        (( ++HEALTH_ISSUES ))
+    elif [[ "$src" == "stdin" || "$src" == "credential" ]]; then
+        print_ok "BLS passphrase reaches the node on ${src}, not through its environment"
+    else
+        print_info "BLS passphrase delivery not confirmed (no --bls-passphrase-source on the node line of ${launch:-the launch file})."
+    fi
+    return 0
+}
+
+# check_unit_sandbox -- the confinement of the node. A binary install's unit
+# must carry the sandbox directives tn_write_node_unit writes; a Docker install's
+# start script the container hardening flags. Missing ones are warnings (the
+# node runs, with a larger blast radius).
+check_unit_sandbox() {
+    local unit text d missing="" launch method
+    unit="${TN_ROOT_PREFIX:-}/etc/systemd/system/${SERVICE_NAME}.service"
+    [[ -r "$unit" ]] || return 0
+    method="$(meta_get INSTALL_METHOD 2>/dev/null || true)"
+    if [[ "$method" == "docker" ]]; then
+        launch="$(_cn_launch_file 2>/dev/null)" || launch=""
+        [[ -n "$launch" && -r "$launch" ]] || return 0
+        text="$(tr '\n' ' ' < "$launch")"
+        for d in "--cap-drop ALL" "--security-opt no-new-privileges" "--read-only" "--pids-limit" \
+            "--log-opt max-size=" "--pull=never"; do
+            [[ "$text" == *" ${d}"* ]] || missing="${missing} ${d}"
+        done
+        if [[ -n "$missing" ]]; then
+            print_warn "The Docker start script lacks container hardening:${missing} (update-node.sh rewrites it)."
+        else
+            print_ok "Docker container runs with dropped capabilities, no-new-privileges and a read-only root"
+        fi
+        return 0
+    fi
+    text="$(cat "$unit")"
+    for d in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=yes \
+        ProtectKernelTunables=yes ProtectKernelModules=yes ProtectControlGroups=yes RestrictSUIDSGID=yes \
+        LockPersonality=yes RestrictNamespaces=yes LimitCORE=0 CapabilityBoundingSet=; do
+        printf '%s\n' "$text" | grep -qxF -- "$d" || missing="${missing} ${d}"
+    done
+    # 0027 since the node's JSON logs are group-readable; an older render has 0077.
+    printf '%s\n' "$text" | grep -qxE -- 'UMask=00[27]7' || missing="${missing} UMask=0027"
+    if [[ -n "$missing" ]]; then
+        print_warn "The unit ${SERVICE_NAME}.service lacks sandbox settings:${missing} (update-node.sh rewrites it)."
+    else
+        print_ok "Node unit sandbox in place (ProtectSystem=strict, no capabilities, no core dumps)"
+    fi
+    return 0
+}
+
+# check_health_score -- systemd's exposure score of a binary install's unit
+# (systemd-analyze security): a warning above 3.0. Docker units run the docker
+# client as root and are not scored.
+check_health_score() {
+    local unit score
+    [[ -z "${TN_ROOT_PREFIX:-}" ]] || return 0
+    command -v systemd-analyze >/dev/null 2>&1 || return 0
+    [[ "$(meta_get INSTALL_METHOD 2>/dev/null || true)" != "docker" ]] || return 0
+    unit="/etc/systemd/system/${SERVICE_NAME}.service"
+    [[ -r "$unit" ]] || return 0
+    score="$(systemd-analyze security --no-pager "${SERVICE_NAME}.service" 2>/dev/null \
+        | grep -o 'Overall exposure level for [^:]*: [0-9.]*' | awk '{print $NF}')"
+    if [[ ! "$score" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        print_info "Unit exposure score not available (systemd-analyze security gave none)."
+    elif awk -v s="$score" 'BEGIN { exit !(s + 0 <= 3.0) }'; then
+        print_ok "Unit exposure score ${score} (3.0 or lower)"
+    else
+        print_warn "Unit exposure score ${score} is above 3.0: the node's sandbox is weaker than the deployment scripts write (update-node.sh rewrites the unit)."
+    fi
+    return 0
+}
+
+# check_healthcheck_on_mainnet -- the testnet health monitor never runs on a
+# mainnet node: a failure when the node line has --healthcheck or .node-meta
+# has ENABLE_HEALTHCHECK_MONITOR=true there.
+check_healthcheck_on_mainnet() {
+    local launch v="" flag=""
+    if ! have_fns tn_detect_network tn_launch_flag_get; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_healthcheck_on_mainnet"
+        return 0
+    fi
+    [[ "$(tn_detect_network 2>/dev/null || true)" == "mainnet" ]] || return 0
+    launch="$(_cn_launch_file 2>/dev/null)" || launch=""
+    if [[ -n "$launch" && -r "$launch" ]] && tn_launch_flag_get "$launch" --healthcheck >/dev/null 2>&1; then
+        flag="yes"
+    fi
+    v="$(meta_get ENABLE_HEALTHCHECK_MONITOR 2>/dev/null || true)"
+    if [[ -n "$flag" || "$v" == "true" ]]; then
+        print_error "The testnet health monitor is on for this mainnet node (--healthcheck on the node line or ENABLE_HEALTHCHECK_MONITOR=true); remove it."
+        (( ++HEALTH_ISSUES ))
+    else
+        print_ok "No testnet health monitor on this mainnet node"
+    fi
+    return 0
+}
+
+# =============================================================================
 # REPORT HEADER
 # =============================================================================
 
@@ -1647,8 +2072,8 @@ else
 fi
 [[ "$QUERY_NETWORK" == "true" ]] && print_info "Network RPC:  ${NETWORK_RPC}"
 print_info "Time:         $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-if ! version_gte "${COMMON_VERSION:-0}" "1.6.0"; then
-    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 1.6.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
+if ! version_gte "${COMMON_VERSION:-0}" "2.0.0"; then
+    print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 2.0.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
 fi
 echo ""
 
@@ -1677,6 +2102,13 @@ report_node_config
 # checked against VALIDATOR_ADDRESS in .node-meta before anything relies on either.
 resolve_identity
 report_address_mismatch
+# Hardening checks. Each function lands with its own package; a missing one is skipped.
+for _hc in check_bls_cleartext check_update_lock check_ownership_layout check_unit_environ \
+           check_unit_sandbox check_health_score check_healthcheck_on_mainnet; do
+    have_fns "$_hc" && "$_hc"
+done
+unset _hc
+cn_report_skipped
 
 # =============================================================================
 # 2. LOCAL RPC PROBE (probed before the report header; rendered here)
@@ -2019,7 +2451,11 @@ fi
 # 8. DISK
 # =============================================================================
 print_step "Checking disk space..."
-DATA_DIR=$(detect_data_dir)
+if ! DATA_DIR="$(detect_data_dir)"; then
+    print_error "DATA_DIR is set more than once in .node-meta, so there is no single data dir to check. Remove the extra lines."
+    (( ++HEALTH_ISSUES ))
+    DATA_DIR=""
+fi
 # Find the mount point that contains the data dir. df_line parses POSIX
 # `df -Pk`, so this works with GNU df (Linux) and BSD df (macOS) alike.
 DATA_MOUNT=""

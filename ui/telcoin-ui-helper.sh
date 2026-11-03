@@ -5,10 +5,33 @@
 # Installed to /usr/local/sbin/telcoin-ui-helper (root:root, 0755, NOT writable
 # by the telcoin-ui service user). This is the SINGLE privileged entry point the
 # UI is allowed to invoke via sudo. Every privileged operation (Jaeger, the node
-# wrapper and service, updates, config edits, setup, Caddy, the firewall) goes
-# through here, so the sudoers whitelist written by install-ui.sh pins one binary
-# and lists the subcommands it may run. Arguments are validated here before
-# anything runs.
+# start script and service, updates, config edits, setup, Caddy, the firewall)
+# goes through here, so the sudoers whitelist written by install-ui.sh pins one
+# binary and lists the subcommands it may run.
+#
+# Arguments: the dispatcher accepts only the subcommands in its `case`, refuses
+# more arguments than a subcommand takes, and refuses any argument that is empty
+# where a value is needed, holds whitespace or a control character, or starts
+# with "-" (two documented values excepted: the "-" placeholder of rpc-enable and
+# a -v.. verbosity, both checked again by their own pattern). Each subcommand then
+# checks every argument against its own pattern. No argument reaches a shell
+# string, and secrets (the BLS passphrase, the dashboard password) arrive on
+# stdin, never in arguments or sudo's environment.
+#
+# Audit: each state-changing call is logged, after its arguments pass the
+# generic check, to syslog (logger -t telcoin-ui-helper) and appended as one JSON
+# line to the root-only /var/log/telcoin-ui/audit.log, with the subcommand, its
+# arguments and the calling uid; a refusal adds a second line. Secrets are never
+# logged because they never arrive as arguments.
+#
+# Library: helpers from the root-owned engine copy of lib/common.sh
+# (/opt/telcoin-ui-update/lib) are called in a subshell, so the library never
+# replaces a function of this file. The checks the engine owns (release tags,
+# Docker images, the service account, the passphrase rule, log rotation, the
+# committee guard) come only from the library: when it or the function is
+# missing the call is refused with "run update-scripts.sh". The file-handling
+# primitives keep a local copy of the same steps. An engine script without the
+# stdin flags (--passphrase-stdin, --password-stdin) is refused the same way.
 #
 # Helper API 2 (printed by `helper-version`). The node subcommands take no
 # observer|validator argument: the helper resolves the installed node the way
@@ -22,21 +45,27 @@
 #   telcoin-ui-helper jaeger-start
 #   telcoin-ui-helper jaeger-stop
 #   telcoin-ui-helper jaeger-status
-#   telcoin-ui-helper tracing-enable
-#   telcoin-ui-helper tracing-disable
+#   telcoin-ui-helper service         <stop|restart> [allow-quorum-risk]
+#   telcoin-ui-helper tracing-enable  [allow-quorum-risk]
+#   telcoin-ui-helper tracing-disable [allow-quorum-risk]
 #   telcoin-ui-helper update-check
-#   telcoin-ui-helper update-prepare  <ref>
+#   telcoin-ui-helper update-prepare  <release tag>
 #   telcoin-ui-helper update-apply
 #   telcoin-ui-helper update-discard
 #   telcoin-ui-helper restart-count
+#   telcoin-ui-helper quorum-check                              (read-only)
 #   telcoin-ui-helper log-clear
-#   telcoin-ui-helper config-set      <field> <value>
-#   telcoin-ui-helper set-hostname    <name>
+#   telcoin-ui-helper journal-tail    <lines>                   (read-only)
+#   telcoin-ui-helper journal-follow                            (read-only)
+#   telcoin-ui-helper config-set      <field> <value> [allow-port-mismatch]
+#   telcoin-ui-helper credential      <migrate|reseal>
+#   telcoin-ui-helper set-hostname    <name> [allow-quorum-risk]
 #   telcoin-ui-helper set-logrotate   <size e.g. 1G>
+#   telcoin-ui-helper logrotate-seed                            (root only; install-ui.sh)
 #   telcoin-ui-helper clear-rotated
 #   telcoin-ui-helper caddy-status
 #   telcoin-ui-helper caddy-dns-check <domain> [inbound-public-ip]
-#   telcoin-ui-helper caddy-enable    <domain> <username> [inbound-public-ip]   (password via TN_CADDY_PASSWORD)
+#   telcoin-ui-helper caddy-enable    <domain> <username> [inbound-public-ip]   (password on stdin)
 #   telcoin-ui-helper caddy-disable
 #   telcoin-ui-helper rpc-status
 #   telcoin-ui-helper rpc-dns-check   <domain> [inbound-public-ip]
@@ -44,10 +73,13 @@
 #   telcoin-ui-helper rpc-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
+#   telcoin-ui-helper firewall-enable [<ssh-source>[,<ssh-source>...]]
 #   telcoin-ui-helper addons-status                             (read-only)
 #   telcoin-ui-helper meta-cat                                  (read-only)
-#   telcoin-ui-helper setup-keygen                              (config via TN_SETUP_*)
-#   telcoin-ui-helper setup-finalize                            (config via TN_SETUP_*)
+#   telcoin-ui-helper node-env-cat                              (read-only)
+#   telcoin-ui-helper host-audit                                (read-only)
+#   telcoin-ui-helper setup-keygen                              (settings via TN_SETUP_*, passphrase on stdin)
+#   telcoin-ui-helper setup-finalize                            (settings via TN_SETUP_*)
 #   telcoin-ui-helper docker-detect
 #   telcoin-ui-helper docker-status    <container>
 #   telcoin-ui-helper docker-logs      <container> [lines]
@@ -66,7 +98,7 @@ set -euo pipefail
 # Printed by `helper-version`. ui/server.py 1.9.0 and later need 2: node
 # subcommands without the role argument, rpc-enable with a dashboard move, and
 # setup reading TN_SETUP_RPC_DOMAIN.
-HELPER_API=2
+HELPER_API=3
 
 JAEGER_NAME="jaeger"
 JAEGER_IMAGE="jaegertracing/all-in-one:latest"
@@ -74,13 +106,15 @@ TRACING_URL="http://127.0.0.1:4317"
 
 # The node's layout, as lib/fallback.sh resolves it: systemd unit files, the
 # config dir holding .node-meta (legacy installs keep one per role underneath),
-# the default data dir, the node logs, and the install dir with the wrapper
-# script and the binary.
+# the default data dir, the node logs, and the install dir with the legacy
+# wrapper script and the binary. Current installs start the node from a
+# root-owned script in LIBEXEC_DIR (tn-start, or tn-start-docker for Docker).
 UNIT_DIR="/etc/systemd/system"
 ETC_DIR="/etc/telcoin"
 VAR_DIR="/var/lib/telcoin"
 LOG_DIR="/var/log/telcoin"
 OPT_DIR="/opt/telcoin"
+LIBEXEC_DIR="/usr/local/libexec/telcoin"
 
 # update-node.sh + its lib/ are shipped here (root-owned) by install-ui.sh so the
 # helper can drive updates without reaching into any user-writable location.
@@ -90,18 +124,237 @@ UPDATE_SCRIPT="/opt/telcoin-ui-update/update-node.sh"
 CONFIG_SCRIPT="/opt/telcoin-ui-update/edit-config.sh"
 # firewall-setup.sh, same root-owned dir, same --json pattern.
 FIREWALL_SCRIPT="/opt/telcoin-ui-update/firewall-setup.sh"
-# setup-node.sh, same root-owned dir. Config arrives via TN_SETUP_* env vars (and
-# the BLS passphrase via TN_BLS_PASSPHRASE) which the server sets and sudoers
-# env_keeps -- so the sudoers lines stay fixed-arg and no secret touches argv.
+# setup-node.sh, same root-owned dir. Settings arrive in TN_SETUP_* variables
+# (kept across sudo for the two setup subcommands only); the BLS passphrase
+# arrives on stdin.
 SETUP_SCRIPT="/opt/telcoin-ui-update/setup-node.sh"
+# install-caddy.sh, same root-owned dir.
+CADDY_SCRIPT="/opt/telcoin-ui-update/install-caddy.sh"
+# check-node.sh, same root-owned dir; only its read-only --audit mode is used.
+CHECK_SCRIPT="/opt/telcoin-ui-update/check-node.sh"
+# The engine copy of the shared library. Used only when it and its directory
+# are root-owned and not writable by group or others (LIB_REQUIRE_ROOT=1).
+HELPER_LIB="/opt/telcoin-ui-update/lib/common.sh"
+LIB_REQUIRE_ROOT=1
 
-die() { echo "$*" >&2; exit 1; }
+# Node-log rotation config (one for every node unit).
+LOGROTATE_CONF="/etc/logrotate.d/telcoin"
+# The group that may read node logs on current installs.
+LOG_GROUP="telcoin-log"
+
+# Audit trail of state-changing calls. AUDIT_LOGGER is the syslog command;
+# empty turns syslog off (the tests do).
+AUDIT_LOG="/var/log/telcoin-ui/audit.log"
+AUDIT_LOGGER="logger"
+# Subcommand and arguments of the running call, for the audit lines.
+AUDIT_SUB=""
+AUDIT_ARGS=""
+
+die() {
+    echo "$*" >&2
+    if [[ -n "$AUDIT_SUB" ]]; then
+        audit_line refused "$*"
+    fi
+    exit 1
+}
 
 # =============================================================================
-# Node resolution. lib/fallback.sh is not shipped beside this standalone helper,
-# so its order is repeated here. The helper never takes the node's role from its
-# caller: a box runs one node, and its role follows on-chain committee
-# membership.
+# Argument checks and the audit trail
+# =============================================================================
+
+# _arg_ok <arg> -- the generic check every argument passes before dispatch: at
+# most 512 bytes, no whitespace or control character, and no leading "-" except
+# the rpc-enable placeholder "-" and a verbosity value -v .. -vvvvv.
+_arg_ok() {
+    local a="${1-}"
+    [[ ${#a} -le 512 ]] || return 1
+    case "$a" in
+        *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+    esac
+    if [[ "$a" == -* ]]; then
+        [[ "$a" == "-" || "$a" =~ ^-v{1,5}$ ]] || return 1
+    fi
+    return 0
+}
+
+# Minimal JSON string escaper (this helper has no json lib): backslash and
+# double quote escaped, every control character (a refused argument may hold
+# one) written as a space.
+_json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//[[:cntrl:]]/ }"; }
+
+# The subcommands that change state; each is audited.
+is_mutating() {
+    case "${1:-}" in
+        jaeger-start|jaeger-stop|tracing-enable|tracing-disable|service) return 0 ;;
+        update-prepare|update-apply|update-discard|log-clear|config-set) return 0 ;;
+        credential) return 0 ;;
+        set-hostname|set-logrotate|logrotate-seed|clear-rotated) return 0 ;;
+        caddy-enable|caddy-disable|rpc-enable|rpc-disable|firewall-port) return 0 ;;
+        firewall-enable) return 0 ;;
+        setup-keygen|setup-finalize) return 0 ;;
+    esac
+    return 1
+}
+
+# audit_line <phase> [detail] -- one JSON line for the running call to syslog and
+# to AUDIT_LOG. The log directory must be a real directory owned by this uid;
+# a write that fails is reported on stderr and does not stop the call.
+audit_line() {
+    local phase="$1" detail="${2:-}" dir line ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+    line="{\"ts\":\"${ts}\",\"sub\":\"$(_json_str "$AUDIT_SUB")\",\"args\":\"$(_json_str "$AUDIT_ARGS")\",\"phase\":\"${phase}\",\"sudo_uid\":\"$(_json_str "${SUDO_UID:-}")\""
+    if [[ -n "$detail" ]]; then
+        line="${line},\"detail\":\"$(_json_str "${detail:0:300}")\""
+    fi
+    line="${line}}"
+    if [[ -n "$AUDIT_LOGGER" ]] && command -v "$AUDIT_LOGGER" >/dev/null 2>&1; then
+        "$AUDIT_LOGGER" -t telcoin-ui-helper -- "$line" 2>/dev/null || true
+    fi
+    dir="${AUDIT_LOG%/*}"
+    if [[ -L "$dir" || -L "$AUDIT_LOG" ]]; then
+        echo "audit: ${AUDIT_LOG} or its directory is a symlink; not written" >&2
+        return 0
+    fi
+    if [[ ! -d "$dir" ]]; then
+        (umask 027; mkdir -p "$dir") 2>/dev/null || true
+    fi
+    if [[ "$(stat -c %u "$dir" 2>/dev/null)" != "$(id -u)" ]]; then
+        echo "audit: ${dir} is not owned by uid $(id -u); not written" >&2
+        return 0
+    fi
+    { (umask 077; printf '%s\n' "$line" >> "$AUDIT_LOG"); } 2>/dev/null \
+        || echo "audit: could not append to ${AUDIT_LOG}" >&2
+    return 0
+}
+
+# =============================================================================
+# The shared library, called in a subshell
+# =============================================================================
+
+# _lib_usable -- rc 0 when HELPER_LIB may be sourced: a regular file (not a
+# symlink) and, with LIB_REQUIRE_ROOT=1, it and its directory owned by uid 0
+# and not writable by group or others.
+_lib_usable() {
+    local d st
+    [[ -f "$HELPER_LIB" && ! -L "$HELPER_LIB" ]] || return 1
+    [[ "$LIB_REQUIRE_ROOT" == 1 ]] || return 0
+    d="${HELPER_LIB%/*}"
+    [[ ! -L "$d" ]] || return 1
+    for st in "$(stat -c '%u %a' "$HELPER_LIB" 2>/dev/null)" "$(stat -c '%u %a' "$d" 2>/dev/null)"; do
+        [[ "${st%% *}" == 0 ]] || return 1
+        case "${st##* }" in
+            *[2367]?|*[2367]) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# _lib_call <function> [args...] -- run a library function in a subshell and
+# return its status; 127 when the library or the function is not there, so the
+# caller uses its local copy, or refuses (_lib_req). SERVICE_USER/SERVICE_GROUP set by the caller (for
+# tn_as_service_user) survive the library's own defaults.
+_lib_call() {
+    _lib_usable || return 127
+    ( _lib_run "$@" )
+}
+
+# _lib_run <function> [args...] -- the body of _lib_call: source the library
+# into this shell and run the function. Only ever run in a subshell, after
+# _lib_usable.
+_lib_run() {
+    local fn="$1" su_keep="${SERVICE_USER:-}" sg_keep="${SERVICE_GROUP:-}"
+    shift
+    # shellcheck source=/dev/null
+    source "$HELPER_LIB" >/dev/null 2>&1 || exit 127
+    [[ -n "$su_keep" ]] && SERVICE_USER="$su_keep"
+    [[ -n "$sg_keep" ]] && SERVICE_GROUP="$sg_keep"
+    set +e
+    declare -F "$fn" >/dev/null || exit 127
+    "$fn" "$@"
+}
+
+# lib_missing <function> -- refuse the running call: the engine library is
+# missing, not root-owned, or older than this helper.
+lib_missing() {
+    die "the engine library (${HELPER_LIB}) is missing or has no ${1}: run update-scripts.sh, then try again"
+}
+
+# _lib_req <function> [args...] -- _lib_call for a check only the library holds:
+# its status, or the call refused (lib_missing) when the function is not there.
+# The refusal goes to stderr, so a caller may silence the function's stdout.
+_lib_req() {
+    local rc=0
+    _lib_call "$@" || rc=$?
+    [[ $rc -ne 127 ]] || lib_missing "$1"
+    return $rc
+}
+
+# engine_has <script> <flag> -- refuse the running call when the engine copy of
+# <script> does not know <flag> (it is older than this helper).
+engine_has() {
+    grep -q -- "$2" "$1" 2>/dev/null \
+        || die "${1##*/} in the engine copy has no ${2} (it is older than this helper): run update-scripts.sh, then try again"
+}
+
+# _run_as <user> <group> <command...> -- run a command as an unprivileged account
+# (never uid 0), with TN_BLS_PASSPHRASE stripped from its environment. Uses the
+# library's tn_as_service_user; the fallback does the same with setpriv or runuser.
+_run_as() {
+    local u="$1" g="$2" uid rc
+    shift 2
+    uid="$(id -u "$u" 2>/dev/null || true)"
+    [[ "$uid" =~ ^[0-9]+$ && ! "$uid" =~ ^0+$ ]] || { echo "refusing to run as '${u}'" >&2; return 126; }
+    rc=0
+    SERVICE_USER="$u" SERVICE_GROUP="$g" _lib_call tn_as_service_user "$@" || rc=$?
+    [[ $rc -eq 127 ]] || return $rc
+    if command -v setpriv >/dev/null 2>&1 && setpriv --help 2>&1 | grep -q -- '--reuid'; then
+        env -u TN_BLS_PASSPHRASE setpriv --reuid "$uid" --regid "$(getent group "$g" | cut -d: -f3)" \
+            --clear-groups --no-new-privs -- "$@"
+        return
+    fi
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$u" -g "$g" -- env -u TN_BLS_PASSPHRASE "$@"
+        return
+    fi
+    echo "neither setpriv nor runuser is installed" >&2
+    return 126
+}
+
+# _root_dir_ok <dir> -- the library's tn_root_dir_ok: DIR and every parent are
+# real directories owned by uid 0 and not group/other-writable. Fallback: the
+# same walk.
+_root_dir_ok() {
+    local d="$1" rc=0 st
+    _lib_call tn_root_dir_ok "$d" || rc=$?
+    [[ $rc -eq 127 ]] || return $rc
+    [[ "$d" == /* ]] || return 1
+    while :; do
+        [[ -L "$d" || ! -d "$d" ]] && return 1
+        st="$(stat -c '%u %a' "$d" 2>/dev/null)" || return 1
+        [[ "${st%% *}" == 0 ]] || return 1
+        case "${st##* }" in
+            *[2367]?|*[2367]) return 1 ;;
+        esac
+        [[ "$d" == / ]] && return 0
+        d="${d%/*}"
+        [[ -n "$d" ]] || d=/
+    done
+}
+
+# Run a long engine job (update, setup) in its own transient systemd scope, so
+# the UI unit's resource caps (MemoryMax, TasksMax, CPUQuota) do not hold a
+# source build. Without systemd-run (tests, containers) it runs directly. Never
+# returns.
+exec_job() {
+    if [[ $EUID -eq 0 ]] && command -v systemd-run >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+        exec systemd-run --scope --quiet --collect --description="Telcoin UI job" -- "$@"
+    fi
+    exec "$@"
+}
+
+# =============================================================================
+# Node resolution. The helper never takes the node's role from its caller: a box
+# runs one node, and its role follows on-chain committee membership.
 # =============================================================================
 
 # The node's systemd unit (base name), in tn_resolve_service order: the unified
@@ -134,6 +387,25 @@ node_meta_path() {
     echo "${ETC_DIR}/.node-meta"
 }
 
+# meta_value <KEY> -- the value of KEY in the node's .node-meta, CR stripped.
+# Empty when the file or the key is absent; a key set more than once is an
+# error (rc 2, nothing printed), as in lib/common.sh meta_get.
+meta_value() {
+    local meta n line cr
+    meta="$(node_meta_path)"
+    [[ -f "$meta" ]] || return 0
+    n="$(grep -c -E "^${1}=" "$meta" 2>/dev/null || true)"
+    case "$n" in
+        ""|0) return 0 ;;
+        1) ;;
+        *) echo "${1} is set ${n} times in ${meta}" >&2; return 2 ;;
+    esac
+    line="$(grep -m1 -E "^${1}=" "$meta" 2>/dev/null || true)"
+    cr=$'\r'
+    line="${line%"$cr"}"
+    printf '%s\n' "${line#*=}"
+}
+
 # The node's data dir (where network-config + node-info.yaml live): the DATA_DIR=
 # its .node-meta records when that is an absolute path, else /var/lib/telcoin for
 # a unified meta (or none) and /var/lib/telcoin/<role> for a legacy role meta.
@@ -143,9 +415,7 @@ node_meta_path() {
 node_data_dir() {
     local meta dd=""
     meta="$(node_meta_path)"
-    if [[ -f "$meta" ]]; then
-        dd="$(grep -m1 '^DATA_DIR=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
-    fi
+    dd="$(meta_value DATA_DIR)" || die "cannot resolve the data dir: DATA_DIR is set more than once in ${meta}"
     if [[ "$dd" == /* ]]; then
         echo "$dd"; return 0
     fi
@@ -156,8 +426,9 @@ node_data_dir() {
     esac
 }
 
-# The wrapper script the node unit's ExecStart points at, falling back to the
-# conventional path. Mirrors server.py's wrapper_path().
+# The start script the node unit's ExecStart points at: a legacy wrapper ending
+# in .sh, or the root-owned tn-start / tn-start-docker in LIBEXEC_DIR. Falls back
+# to the conventional legacy path. Mirrors server.py's wrapper_path().
 node_wrapper() {
     local svc unit exec_line path
     svc="$(node_service)"
@@ -166,12 +437,21 @@ node_wrapper() {
         exec_line="$(grep -m1 '^ExecStart=' "$unit" 2>/dev/null || true)"
         path="${exec_line#ExecStart=}"
         path="${path%% *}"
-        if [[ "$path" == *.sh && -f "$path" ]]; then
-            echo "$path"
-            return 0
-        fi
+        case "$path" in
+            *.sh|"${LIBEXEC_DIR}/tn-start"|"${LIBEXEC_DIR}/tn-start-docker")
+                if [[ -f "$path" ]]; then
+                    echo "$path"
+                    return 0
+                fi
+                ;;
+        esac
     fi
     echo "${OPT_DIR}/start-${svc}.sh"
+}
+
+# path_owner <path> -- "user:group" owning PATH (stat), empty when unknown.
+path_owner() {
+    stat -c '%U:%G' "$1" 2>/dev/null || true
 }
 
 # The node's main log file, from its unit (StandardOutput=append:<path>), falling
@@ -187,12 +467,16 @@ node_log_path() {
     echo "$p"
 }
 
-# Validate a docker container name before it reaches `docker`. Docker's own name
-# charset is [A-Za-z0-9][A-Za-z0-9_.-]*; reject anything else so a bad arg dies
-# cleanly here rather than reaching the daemon.
+# Validate a docker container name before it reaches `docker`: docker's own name
+# charset, and one of the Telcoin Network containers docker-detect reports, so
+# the read-only docker subcommands can only look at the node's own container.
 require_container() {
-    [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
-        || die "invalid container name: ${1:-<empty>}"
+    local name="${1:-}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+        || die "invalid container name: ${name:-<empty>}"
+    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    cmd_docker_detect | grep -qxF -- "$name" \
+        || die "not a Telcoin Network container: $name"
 }
 
 # Strict hostname rule, the same in ui/server.py and the browser: at most 253
@@ -217,23 +501,78 @@ same_host() {
     [[ -n "$a" && "$a" == "$b" ]]
 }
 
+# node_network -- testnet or mainnet, from the library's tn_detect_network (meta
+# NETWORK, else the genesis chain id); the fallback reads NETWORK from .node-meta
+# (adiri counts as testnet). Prints nothing and returns 1 for anything else.
+node_network() {
+    local net rc=0
+    net="$(_lib_call tn_detect_network "$(node_meta_path)" 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        case "$net" in testnet|mainnet) echo "$net"; return 0 ;; esac
+        return 1
+    fi
+    [[ $rc -eq 127 ]] || return 1
+    net="$(meta_value NETWORK 2>/dev/null)" || return 1
+    case "$net" in
+        testnet|adiri) echo testnet ;;
+        mainnet) echo mainnet ;;
+        *) return 1 ;;
+    esac
+}
+
+# release_tag_ok <network> <tag> -- the library's tn_release_tag_ok (testnet
+# vX.Y.Z-adiri or its release candidate vX.Y.Z-adiri-rcN, mainnet vX.Y.Z).
+release_tag_ok() {
+    _lib_req tn_release_tag_ok "$1" "$2"
+}
+
 cmd_helper_version() {
     echo "$HELPER_API"
 }
 
-# Truncate (NOT delete) the node's log file, preserving the inode so the running
-# service keeps writing to the same handle. Restricted to /var/log/telcoin/*.log
-# (LOG_DIR).
+# =============================================================================
+# Node logs
+# =============================================================================
+
+# Truncate (NOT delete) the node's log file, keeping the inode so the running
+# service keeps writing to the same handle. Only a regular file directly in
+# LOG_DIR named *.log, never a symlink. In a root-owned log dir root truncates
+# it; in a legacy dir owned by the service user the truncate runs as that
+# account, so a planted symlink can never point root at another file.
 cmd_log_clear() {
-    local logf
+    local logf owner
     logf="$(node_log_path)"
     case "$logf" in
+        "${LOG_DIR}"/*/*) die "refusing to clear non-standard log path: $logf" ;;
         "${LOG_DIR}"/*.log) ;;
         *) die "refusing to clear non-standard log path: $logf" ;;
     esac
+    [[ ! -L "$LOG_DIR" ]] || die "refusing: ${LOG_DIR} is a symlink"
+    [[ ! -L "$logf" ]] || die "refusing: $logf is a symlink"
     [[ -f "$logf" ]] || die "log file not found: $logf"
-    : > "$logf" 2>/dev/null || die "could not truncate $logf"
+    if _root_dir_ok "$LOG_DIR"; then
+        : > "$logf" 2>/dev/null || die "could not truncate $logf"
+    else
+        owner="$(path_owner "$LOG_DIR")"
+        [[ -n "$owner" && "$owner" != root:* ]] || die "refusing: ${LOG_DIR} is neither root-only nor owned by the node's account"
+        _run_as "${owner%%:*}" "${owner#*:}" truncate -s 0 -- "$logf" \
+            || die "could not truncate $logf as ${owner%%:*}"
+    fi
     echo "ok"
+}
+
+# The node unit's journal, for installs that log there (LOG_TARGET=journal):
+# the last <lines> lines (1 to 200000), or a live follow that ends when the
+# caller closes it.
+cmd_journal_tail() {
+    local lines="${1:-}"
+    [[ "$lines" =~ ^[1-9][0-9]{0,5}$ && "$lines" -le 200000 ]] \
+        || die "invalid line count: ${lines:-<empty>} (1 to 200000)"
+    exec journalctl -u "$(node_service)" -o cat -n "$lines" --no-pager
+}
+
+cmd_journal_follow() {
+    exec journalctl -u "$(node_service)" -o cat -n 0 -f --no-pager
 }
 
 jaeger_state() {
@@ -249,21 +588,31 @@ jaeger_state() {
     fi
 }
 
+# Create the Jaeger container. --restart no: Jaeger is an on-demand tracing
+# tool, NOT a service. It must not auto-start on boot or linger -- it runs only
+# while explicitly enabled from the Tracing tab, and stays down after a reboot.
+# Ports are published on loopback only; the container gets no capabilities and
+# bounded memory and pids.
+jaeger_run() {
+    docker run -d --name "$JAEGER_NAME" --restart no \
+        -p 127.0.0.1:16686:16686 -p 127.0.0.1:4317:4317 \
+        --memory 512m --pids-limit 256 --cap-drop ALL \
+        --security-opt no-new-privileges "$JAEGER_IMAGE" >/dev/null \
+        || die "failed to create jaeger container"
+}
+
 cmd_jaeger_start() {
     command -v docker >/dev/null 2>&1 || die "docker not installed"
     local state
     state="$(jaeger_state)"
     case "$state" in
         running) echo "already running" ;;
-        stopped) docker start "$JAEGER_NAME" >/dev/null || die "failed to start existing jaeger container" ;;
-        absent)
-            # --restart no: Jaeger is an on-demand tracing tool, NOT a service. It
-            # must not auto-start on boot or linger -- it runs only while explicitly
-            # enabled from the Tracing tab, and stays down after a reboot.
-            docker run -d --name "$JAEGER_NAME" --restart no \
-                -p 16686:16686 -p 4317:4317 "$JAEGER_IMAGE" >/dev/null \
-                || die "failed to create jaeger container"
-            ;;
+        stopped)
+            # Recreate rather than restart, so a container an older helper made
+            # (published on every interface) never comes back.
+            docker rm -f "$JAEGER_NAME" >/dev/null || die "failed to remove the old jaeger container"
+            jaeger_run ;;
+        absent) jaeger_run ;;
     esac
     echo "ok"
 }
@@ -283,62 +632,268 @@ cmd_jaeger_status() {
     jaeger_state
 }
 
-cmd_tracing_enable() {
-    local wrapper svc
-    wrapper="$(node_wrapper)"
-    [[ -f "$wrapper" ]] || die "wrapper script not found: $wrapper"
+# =============================================================================
+# Node stops and restarts. A stop or restart from the UI, and the edits that
+# need one (the tracing flags, the advertised name), run the way the engine
+# scripts restart the node, in one subshell with the engine library loaded
+# (_lib_call): take the update lock (refused while an update or another change
+# holds it), make the edit, run the committee check (tn_committee_down_guard),
+# the epoch wait (tn_wait_restart_window) and the committee check again, then
+# stop or restart the unit. A refusal, or a cancelled request (the page went
+# away), puts the edit back and leaves the node as it was. The lock is released
+# when the subshell exits. Progress goes to stdout as JSON events ending with one
+# done event, which the server streams to the page. The committee check is
+# overridden (TN_ALLOW_QUORUM_RISK=1) only by a trailing allow-quorum-risk
+# argument, which the server sends when the operator chose a coordinated restart.
+# =============================================================================
 
-    cp -p "$wrapper" "${wrapper}.bak.$(date +%s)" || die "failed to back up wrapper"
+# 1 when the call ended in allow-quorum-risk (main takes it off the arguments).
+QUORUM_OVERRIDE=""
 
-    if grep -q -- '--tracing-url' "$wrapper"; then
-        echo "already enabled"
-    else
-        # Insert the tracing flags immediately after the `telcoin-network node`
-        # token on the exec line. Anchored to the exec line so single-line and
-        # backslash-continued multi-line wrappers are both handled. The node name
-        # is `telcoin` whatever the node's role, which changes with committee
-        # membership.
-        sed -i -E \
-            "s#(^exec .*telcoin-network node)#\1 --tracing-url ${TRACING_URL} --node-name telcoin#" \
-            "$wrapper" || die "failed to edit wrapper"
-        grep -q -- '--tracing-url' "$wrapper" || die "tracing flags not inserted (no matching exec line?)"
+# The pending edit, read by the edit functions in the subshell. EDIT_SAVED is a
+# root-only temp copy of the launch file taken before a tracing edit.
+EDIT_FILE=""
+EDIT_SAVED=""
+EDIT_MODE=""
+EDIT_DONE_MSG=""
+TRACING_ON=""
+HN_NAME=""
+HN_USER=""
+HN_GROUP=""
+HN_META=""
+HN_HAD=0
+HN_OLD=""
+
+# ui_event <event> <msg> -- one JSON event on stdout.
+ui_event() {
+    printf '{"event":"%s","msg":"%s"}\n' "$1" "$(_json_str "$2")"
+}
+
+# ui_done <true|false> <msg> [quorum] -- the closing event. "quorum":true marks a
+# refusal by the committee check, which the page offers to override.
+ui_done() {
+    local qmark=""
+    [[ -z "${3:-}" ]] || qmark=',"quorum":true'
+    printf '{"event":"done","ok":%s,"msg":"%s"%s}\n' "$1" "$(_json_str "$2")" "$qmark"
+}
+
+# ui_say <step|log|warn> <msg> -- progress printer for the library's committee
+# check and epoch wait.
+ui_say() {
+    case "${1:-}" in
+        step|warn) ui_event "$1" "${2:-}" ;;
+        *)         ui_event log "${2:-}" ;;
+    esac
+    return 0
+}
+
+# node_rpc_url -- the node's local RPC (RPC_PORT in .node-meta, default 8545).
+node_rpc_url() {
+    local port
+    port="$(meta_value RPC_PORT 2>/dev/null || true)"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || port=8545
+    echo "http://127.0.0.1:${port}"
+}
+
+# _ui_cleanup -- EXIT trap of the locked subshell: drop the saved copy, release
+# the lock.
+_ui_cleanup() {
+    [[ -z "$EDIT_SAVED" ]] || rm -f -- "$EDIT_SAVED"
+    tn_release_update_lock
+}
+
+# _ui_cancel <edit-fn> -- TERM/INT/HUP before the stop or restart: put the edit
+# back and end the subshell.
+_ui_cancel() {
+    trap '' TERM INT HUP
+    [[ -z "${1:-}" ]] || "$1" undo
+    ui_done false "Cancelled before the node was touched; nothing was stopped or restarted."
+    exit 1
+}
+
+# _ui_locked <stop|restart> <unit> <rpc-url> [edit-fn] -- the body of every UI
+# stop and restart; runs inside _lib_call, so the library is loaded. EDIT-FN
+# takes apply (rc 0 changed, 1 nothing to change: a done event says so and the
+# node is left alone, 2 failed: a done event says why), undo and commit (run
+# after the checks pass, right before the restart). rc 0 done, 1 refused or
+# failed, 127 the library lacks a step.
+_ui_locked() {
+    local action="$1" svc="$2" url="$3" edit="${4:-}" rc=0 f past="restarted" verb="Restarting"
+    for f in tn_acquire_update_lock tn_release_update_lock tn_committee_down_guard tn_wait_restart_window; do
+        declare -F "$f" >/dev/null || return 127
+    done
+    if [[ "$action" == stop ]]; then
+        past="stopped"
+        verb="Stopping"
     fi
+    TN_ALLOW_QUORUM_RISK=0
+    [[ "$QUORUM_OVERRIDE" == 1 ]] && TN_ALLOW_QUORUM_RISK=1
+    export TN_ALLOW_QUORUM_RISK
+    # shellcheck disable=SC2034  # read by tn_acquire_update_lock: this EXIT trap releases the lock
+    TN_EXIT_TRAP_OWNED=1
+    trap _ui_cleanup EXIT
+    # A stream the page has closed must not end this shell between an edit and
+    # its undo.
+    trap '' PIPE
+    if ! tn_acquire_update_lock >&2; then
+        ui_done false "An update or another node change is running (it holds the update lock); try again when it has finished."
+        return 1
+    fi
+    # shellcheck disable=SC2064  # the edit function is fixed now
+    trap "_ui_cancel '${edit}'" TERM INT HUP
+    if [[ -n "$edit" ]]; then
+        "$edit" apply || rc=$?
+        case "$rc" in
+            0) ;;
+            1) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    ui_event step "Checking the committee before the node is ${past}"
+    tn_committee_down_guard "$url" ui_say || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        tn_wait_restart_window "$url" ui_say || true
+        tn_committee_down_guard "$url" ui_say || rc=$?
+    fi
+    if [[ $rc -ne 0 ]]; then
+        trap '' TERM INT HUP
+        [[ -z "$edit" ]] || "$edit" undo
+        ui_done false "Not ${past}: the committee check refused it (other committee members look down, or the committee could not be read). Try again later, or override the check for a restart the fleet has coordinated." quorum
+        return 1
+    fi
+    trap '' TERM INT HUP
+    [[ -z "$edit" ]] || "$edit" commit
+    ui_event step "${verb} ${svc}"
+    if ! systemctl "$action" "$svc" >&2; then
+        ui_done false "systemctl ${action} ${svc} failed; see journalctl -u ${svc}"
+        return 1
+    fi
+    ui_done true "${EDIT_DONE_MSG:-${svc} ${past}}"
+    return 0
+}
 
-    # Non-blocking: the durable change is the wrapper edit above. --no-block
-    # returns as soon as the restart job is queued, so the caller never waits on
-    # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
+# ui_restart <stop|restart> [edit-fn] -- run _ui_locked for the node's unit in
+# the library's subshell and end the call: exit 0 when done, 1 (audited) when
+# refused or failed. Refused outright when the library lacks a step. The
+# subshell runs in the background so that a TERM, INT or HUP this call gets (the
+# server stops it when the page goes away) is passed on to it: it puts the edit
+# back and ends without touching the node, unless the stop or restart has begun.
+# It is an explicit ( ) subshell: bash before 5.1 does not run an EXIT trap set
+# inside a function started with & on its own, and _ui_locked's EXIT trap is
+# what releases the update lock.
+UI_JOB=""
+ui_restart() {
+    local rc=0 svc url
     svc="$(node_service)"
-    systemctl restart --no-block "$svc" || die "failed to restart $svc"
-    echo "ok"
+    url="$(node_rpc_url)"
+    _lib_usable || lib_missing "tn_wait_restart_window"
+    ( _lib_run _ui_locked "$1" "$svc" "$url" "${2:-}" ) &
+    UI_JOB=$!
+    trap 'kill -TERM "$UI_JOB" 2>/dev/null || true' TERM INT HUP
+    wait "$UI_JOB" || rc=$?
+    while kill -0 "$UI_JOB" 2>/dev/null; do
+        rc=0
+        wait "$UI_JOB" || rc=$?
+    done
+    trap - TERM INT HUP
+    [[ $rc -ne 127 ]] || lib_missing "tn_wait_restart_window"
+    if [[ $rc -ne 0 ]]; then
+        audit_line refused "service ${1} not done (rc ${rc})"
+        exit 1
+    fi
+    exit 0
+}
+
+# service <stop|restart> -- stop or restart the node through the checks above.
+# Starting needs no check and stays a direct systemctl call of the server.
+cmd_service() {
+    case "${1:-}" in
+        stop|restart) ;;
+        *) die "service takes stop or restart: ${1:-<empty>}" ;;
+    esac
+    [[ -f "${UNIT_DIR}/$(node_service).service" ]] || die "no node service is installed"
+    ui_restart "$1"
+}
+
+# tracing_edit <apply|undo|commit> -- add (TRACING_ON=1) or remove (0) the
+# tracing flags, --tracing-url and --node-name telcoin (the name stays telcoin
+# whatever the node's role), in the node command of EDIT_FILE, the start script.
+# The library's launch-file editor finds the node command in the Docker start
+# script and in a script running the binary under any name, and writes through
+# tn_write_root_file: owner, group and mode kept, one rename, no copy left
+# beside the script. apply keeps a root-only temp copy for undo.
+tracing_edit() {
+    local rc=0 rc2=0 st what
+    case "$1" in
+        apply)
+            # Owner group and mode to put back, group and other write dropped.
+            st="$(stat -c '%a %g' -- "$EDIT_FILE" 2>/dev/null)" || st=""
+            EDIT_SAVED="$(mktemp 2>/dev/null)" || EDIT_SAVED=""
+            if [[ -z "$st" || -z "$EDIT_SAVED" ]] || ! cat -- "$EDIT_FILE" > "$EDIT_SAVED"; then
+                ui_done false "could not keep a copy of ${EDIT_FILE}; nothing was changed"
+                return 2
+            fi
+            EDIT_MODE="$(printf '%04o' "$(( 8#${st%% *} & ~8#022 ))") ${st##* }"
+            if [[ "$TRACING_ON" == 1 ]]; then
+                what="on"
+                tn_launch_flag_set "$EDIT_FILE" --tracing-url "$TRACING_URL" || rc=$?
+                [[ $rc -gt 1 ]] || tn_launch_flag_set "$EDIT_FILE" --node-name telcoin || rc2=$?
+            else
+                what="off"
+                tn_launch_flag_unset "$EDIT_FILE" --tracing-url || rc=$?
+                [[ $rc -gt 1 ]] || tn_launch_flag_unset "$EDIT_FILE" --node-name || rc2=$?
+            fi
+            if [[ $rc -le 1 && $rc2 -le 1 ]]; then
+                if [[ $rc -eq 1 && $rc2 -eq 1 ]]; then
+                    ui_done true "Tracing is already ${what}; the node was not restarted."
+                    return 1
+                fi
+                EDIT_DONE_MSG="Tracing ${what}; the node restarted."
+                return 0
+            fi
+            [[ $rc -gt 1 ]] || rc=$rc2
+            tracing_edit undo
+            case "$rc" in
+                2) ui_done false "no node command with --http in ${EDIT_FILE}; nothing was changed" ;;
+                3) ui_done false "the node command in ${EDIT_FILE} cannot be edited safely (a trailing comment, an unbalanced quote, or a staged copy that failed its checks); nothing was changed" ;;
+                *) ui_done false "could not read or write ${EDIT_FILE}; nothing was changed" ;;
+            esac
+            return 2
+            ;;
+        undo)
+            [[ -n "$EDIT_SAVED" && -f "$EDIT_SAVED" ]] || return 0
+            cmp -s -- "$EDIT_SAVED" "$EDIT_FILE" && return 0
+            if ! tn_write_root_file "$EDIT_FILE" "${EDIT_MODE%% *}" "${EDIT_MODE##* }" < "$EDIT_SAVED"; then
+                ui_event error "could not put ${EDIT_FILE} back; its earlier content is in ${EDIT_SAVED}"
+                EDIT_SAVED=""
+                return 1
+            fi
+            ui_event log "Put ${EDIT_FILE} back as it was."
+            ;;
+    esac
+    return 0
+}
+
+cmd_tracing_enable() {
+    EDIT_FILE="$(node_wrapper)"
+    [[ -f "$EDIT_FILE" ]] || die "start script not found: $EDIT_FILE"
+    TRACING_ON=1
+    ui_restart restart tracing_edit
 }
 
 cmd_tracing_disable() {
-    local wrapper svc
-    wrapper="$(node_wrapper)"
-    [[ -f "$wrapper" ]] || die "wrapper script not found: $wrapper"
-
-    cp -p "$wrapper" "${wrapper}.bak.$(date +%s)" || die "failed to back up wrapper"
-
-    # Strip ` --tracing-url <nonspace>` and ` --node-name <nonspace>` wherever
-    # they appear on the exec line. No-op if already absent.
-    sed -i -E \
-        -e 's# --tracing-url[[:space:]]+[^[:space:]\\]+##g' \
-        -e 's# --node-name[[:space:]]+[^[:space:]\\]+##g' \
-        "$wrapper" || die "failed to edit wrapper"
-
-    # Non-blocking: the durable change is the wrapper edit above. --no-block
-    # returns as soon as the restart job is queued, so the caller never waits on
-    # the node's stop window (TimeoutStopSec up to 90s). Fires only if enqueue fails.
-    svc="$(node_service)"
-    systemctl restart --no-block "$svc" || die "failed to restart $svc"
-    echo "ok"
+    EDIT_FILE="$(node_wrapper)"
+    [[ -f "$EDIT_FILE" ]] || die "start script not found: $EDIT_FILE"
+    TRACING_ON=0
+    ui_restart restart tracing_edit
 }
+
 
 # =============================================================================
 # Update subcommands -- thin wrappers around update-node.sh --json. They never
 # embed update logic themselves; all the building/swapping/restarting lives in
-# update-node.sh, which finds the node itself. <ref> is validated against a
-# strict tag/branch/commit pattern (no wildcards reach the shell).
+# update-node.sh, which finds the node itself. The ref must be a release tag of
+# the node's network; branch names and commit ids are refused.
 # =============================================================================
 
 update_script_ready() {
@@ -351,18 +906,20 @@ cmd_update_check() {
 }
 
 cmd_update_prepare() {
-    local ref="$1"
+    local ref="$1" net
     update_script_ready
     [[ -n "$ref" ]] || die "missing ref"
-    [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || die "invalid ref: $ref"
-    exec bash "$UPDATE_SCRIPT" --json --prepare --ref "$ref"
+    net="$(node_network)" || die "cannot tell this node's network (NETWORK in .node-meta must be testnet or mainnet)"
+    release_tag_ok "$net" "$ref" \
+        || die "ref must be a release tag of ${net} (vX.Y.Z$([[ "$net" == testnet ]] && echo -adiri)); branches and commit ids are refused: $ref"
+    exec_job bash "$UPDATE_SCRIPT" --json --prepare --ref "$ref"
 }
 
 cmd_update_apply() {
     update_script_ready
     # --yes: in JSON mode this stands in for the interactive typed CONFIRM and is
     # required for validators. The UI shows the downtime warning before calling.
-    exec bash "$UPDATE_SCRIPT" --json --apply --yes
+    exec_job bash "$UPDATE_SCRIPT" --json --apply --yes
 }
 
 cmd_update_discard() {
@@ -397,38 +954,97 @@ cmd_restart_count() {
         | grep -c "Started ${svc}.service" || true
 }
 
+# Committee quorum check behind the UI's restart badge: the library's
+# tn_committee_down_guard against the node's local RPC. Prints one JSON line,
+# {"available":true,"rc":N,"detail":"..."}: rc 0 a restart is safe, 1 it would
+# put the committee at risk, 2 the committee could not be read. Refused when the
+# library has no such check. Read-only.
+cmd_quorum_check() {
+    local url rc=0 detail
+    url="$(node_rpc_url)"
+    detail="$(TN_ALLOW_QUORUM_RISK=0 _lib_call tn_committee_down_guard "$url" 2>&1 >/dev/null)" || rc=$?
+    [[ $rc -ne 127 ]] || lib_missing tn_committee_down_guard
+    detail="$(printf '%s' "$detail" | tr '\n' ' ' | sed 's/\x1b\[[0-9;]*m//g')"
+    printf '{"available":true,"rc":%d,"detail":"%s"}\n' "$rc" "$(_json_str "${detail:0:300}")"
+}
+
 # =============================================================================
 # Config subcommand -- thin wrapper around edit-config.sh --json. The field is
 # checked against the editable allowlist and the value against a per-field regex
 # HERE before the script runs (edit-config.sh re-validates with its own
-# validators). The sudoers line wildcards the arguments; the field is fixed by
-# this allowlist, so a bad field never reaches the script.
+# validators). The Docker image is not editable from the UI: it changes only
+# through a verified update or the root menu.
 # =============================================================================
 
 config_script_ready() {
     [[ -f "$CONFIG_SCRIPT" ]] || die "config script not found: $CONFIG_SCRIPT"
 }
 
+# udp_port <multiaddr> -- the UDP port of a multiaddr (/ip4/../udp/<port>/..),
+# 1 to 65535; rc 1 when it has none. lib/common.sh _tn_multiaddr_udp_port.
+udp_port() {
+    local re='/udp/([0-9]{1,5})(/|$)' port
+    [[ "${1:-}" =~ $re ]] || return 1
+    port=$(( 10#${BASH_REMATCH[1]} ))
+    (( port >= 1 && port <= 65535 )) || return 1
+    printf '%s\n' "$port"
+}
+
+# listener_port_advertised <field> <multiaddr> -- edit-config.sh's rule, with its
+# messages: a listener's UDP port must be the port of the external address
+# .node-meta records for it (EXTERNAL_PRIMARY_ADDR or EXTERNAL_WORKER_ADDR, the
+# port peers dial). No recorded address (an older install) passes; a recorded
+# one without a UDP port, or set more than once, refuses the call. A third
+# argument "allow" accepts a different port (a NAT or port forward maps it);
+# edit-config.sh then gets --allow-port-mismatch and warns.
+listener_port_advertised() {
+    local key label ext rc=0 want got allow="${3:-}"
+    case "$1" in
+        primary_listener) key=EXTERNAL_PRIMARY_ADDR; label="primary" ;;
+        *) key=EXTERNAL_WORKER_ADDR; label="worker" ;;
+    esac
+    ext="$(meta_value "$key" 2>/dev/null)" || rc=$?
+    [[ $rc -ne 2 ]] || die "${key} is set more than once in .node-meta; remove the extra lines first"
+    [[ -n "$ext" ]] || return 0
+    want="$(udp_port "$ext")" \
+        || die "${key} in .node-meta (${ext}) has no UDP port to compare the ${label} listener with"
+    got="$(udp_port "$2")" || got=""
+    [[ "$got" != "$want" && -n "$got" && "$allow" == "allow" ]] && return 0
+    [[ "$got" == "$want" ]] \
+        || die "the ${label} listener port ${got:-?} must match the advertised external port ${want} (${key} in .node-meta), which is the port peers dial. If a NAT or port forward maps external UDP ${want} to local UDP ${got:-?}, allow the mismatch: edit-config.sh --allow-port-mismatch (TN_ALLOW_PORT_MISMATCH=1), or confirm it in the Node Manager"
+}
+
 cmd_config_set() {
-    local field="$1" value="$2"
+    local field="$1" value="$2" opt="${3:-}" allow="" extra=()
     config_script_ready
     [[ -n "$field" ]] || die "missing field"
     [[ -n "$value" ]] || die "missing value"
+    # The one option: allow-port-mismatch, for a listener only (the operator
+    # confirmed that a NAT or port forward maps the advertised port to it).
+    if [[ -n "$opt" ]]; then
+        [[ "$opt" == "allow-port-mismatch" ]] || die "config-set takes allow-port-mismatch as its only option, not: ${opt}"
+        case "$field" in
+            primary_listener|worker_listener) ;;
+            *) die "allow-port-mismatch applies to primary_listener and worker_listener only" ;;
+        esac
+        engine_has "$CONFIG_SCRIPT" --allow-port-mismatch
+        allow=allow
+        extra=(--allow-port-mismatch)
+    fi
 
     # Per-field value validation (first line of defence; edit-config.sh repeats it).
     case "$field" in
         primary_listener|worker_listener)
             [[ "$value" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] \
-                || die "invalid multiaddr: $value" ;;
+                || die "invalid multiaddr: $value"
+            listener_port_advertised "$field" "$value" "$allow" ;;
         metrics)
-            # off removes --metrics.
-            [[ "$value" =~ ^(off|([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5})$ ]] \
-                || die "invalid metrics address (IPv4:PORT or off): $value" ;;
+            # off removes --metrics. The endpoint stays on loopback; a public
+            # bind needs a root operator (edit-config.sh --allow-public-metrics).
+            [[ "$value" =~ ^(off|127\.0\.0\.1:[0-9]{1,5})$ ]] \
+                || die "invalid metrics address (127.0.0.1:PORT or off): $value" ;;
         verbosity)
-            [[ "$value" =~ ^-v{1,5}$ ]] || die "invalid verbosity: $value" ;;
-        docker_image)
-            [[ "$value" =~ ^[A-Za-z0-9._/:@-]+$ && "$value" == *:* ]] \
-                || die "invalid docker image: $value" ;;
+            [[ "$value" =~ ^-v{1,3}$ ]] || die "invalid verbosity (-v to -vvv): $value" ;;
         bootstrap_peers)
             # An absolute path to a peers file already on the node (this helper
             # cannot upload one), or none to remove the flag and the file.
@@ -448,104 +1064,179 @@ cmd_config_set() {
             die "field not editable: $field" ;;
     esac
 
-    exec bash "$CONFIG_SCRIPT" --json --set "${field}=${value}"
+    exec bash "$CONFIG_SCRIPT" --json ${extra[@]+"${extra[@]}"} --set "${field}=${value}"
+}
+
+# The BLS passphrase credential: edit-config.sh --json --migrate-credential
+# (move the passphrase into the encrypted systemd credential) or --reseal
+# (encrypt the credential again with this host's key as it is now). No other
+# argument reaches the engine. It reads the stored passphrase itself; stdin is
+# closed, so it never waits for a typed one. Both restart the node and stream
+# JSON events ending in a done event.
+cmd_credential() {
+    local verb="$1" flag
+    config_script_ready
+    case "$verb" in
+        migrate) flag=--migrate-credential ;;
+        reseal)  flag=--reseal ;;
+        *) die "credential takes migrate or reseal, not: ${verb:-<empty>}" ;;
+    esac
+    engine_has "$CONFIG_SCRIPT" "$flag"
+    exec_job bash "$CONFIG_SCRIPT" --json "$flag" </dev/null
 }
 
 # Set the "Advertised Node Name" -- the `hostname` field in the node's
-# network-config YAML -- and restart the node so it reads the new value. Name is
-# charset-validated here (the server validates too). Mirrors the network-config
-# created by the node itself; only the hostname line is touched.
+# network-config YAML -- and restart the node so it reads the new value, through
+# the locked, checked restart above. The data dir belongs to the node's service
+# account, so every read and write of network-config runs as that account (never
+# root); .node-meta, root-owned in /etc/telcoin, is updated by root through the
+# library's meta_set once the checks have passed.
 cmd_set_hostname() {
-    local name="$1" dd nc owner meta svc
+    local name="$1" dd owner
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid name: ${name:-<empty>}"
 
     dd="$(node_data_dir)"
-    [[ -d "$dd" ]] || die "data dir not found: $dd"
-    nc="${dd}/network-config"
+    [[ -d "$dd" && ! -L "$dd" ]] || die "data dir not found: $dd"
+    owner="$(path_owner "$dd")"
+    HN_USER="${owner%%:*}"; HN_GROUP="${owner#*:}"
+    [[ -n "$owner" && "$HN_USER" != root && "$HN_USER" != "UNKNOWN" ]] \
+        || die "refusing: ${dd} is not owned by the node's service account"
+    HN_NAME="$name"
+    EDIT_FILE="${dd}/network-config"
+    HN_META="$(node_meta_path)"
+    ui_restart restart hostname_edit
+}
 
-    if [[ -f "$nc" ]]; then
-        if grep -qE '^hostname:' "$nc"; then
-            sed -i -E "s#^hostname:.*#hostname: \"${name}\"#" "$nc" || die "failed to edit $nc"
-        else
-            printf 'hostname: "%s"\n' "$name" >> "$nc" || die "failed to append to $nc"
-        fi
-    else
-        # No file yet (node hasn't created it): a minimal file is fine -- the node
-        # fills every other field from its serde defaults on read.
-        printf 'hostname: "%s"\n' "$name" > "$nc" || die "failed to create $nc"
+# _hn_write <content> -- replace EDIT_FILE with CONTENT as the service account
+# (a temp file beside it, then a rename).
+_hn_write() {
+    printf '%s' "$1" | _run_as "$HN_USER" "$HN_GROUP" tee -- "${EDIT_FILE}.tn-new" >/dev/null \
+        && _run_as "$HN_USER" "$HN_GROUP" mv -f -- "${EDIT_FILE}.tn-new" "$EDIT_FILE"
+}
+
+# hostname_edit <apply|undo|commit> -- the set-hostname edit of EDIT_FILE
+# (network-config): the first hostname: line is replaced, or one is added at the
+# end. undo writes the earlier content back (or removes a file apply created);
+# commit records ADVERTISED_NODE_NAME in .node-meta.
+hostname_edit() {
+    local line new="" done_line=0
+    case "$1" in
+        apply)
+            HN_HAD=0
+            HN_OLD=""
+            if _run_as "$HN_USER" "$HN_GROUP" test -e "$EDIT_FILE"; then
+                HN_HAD=1
+                if ! HN_OLD="$(_run_as "$HN_USER" "$HN_GROUP" cat -- "$EDIT_FILE")"; then
+                    ui_done false "could not read ${EDIT_FILE} as ${HN_USER}; nothing was changed"
+                    return 2
+                fi
+            fi
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                if [[ "$line" == hostname:* ]]; then
+                    [[ $done_line -eq 0 ]] && new="${new}hostname: \"${HN_NAME}\""$'\n'
+                    done_line=1
+                    continue
+                fi
+                new="${new}${line}"$'\n'
+            done <<< "$HN_OLD"
+            [[ -z "$HN_OLD" ]] && new=""
+            [[ $done_line -eq 1 ]] || new="${new}hostname: \"${HN_NAME}\""$'\n'
+            if ! _hn_write "$new"; then
+                hostname_edit undo
+                ui_done false "could not write ${EDIT_FILE} as ${HN_USER}; nothing was changed"
+                return 2
+            fi
+            EDIT_DONE_MSG="Advertised name set to ${HN_NAME}; the node restarted."
+            ;;
+        undo)
+            if [[ $HN_HAD -eq 1 ]]; then
+                new=""
+                [[ -z "$HN_OLD" ]] || new="${HN_OLD}"$'\n'
+                _hn_write "$new" || { ui_event error "could not put ${EDIT_FILE} back"; return 1; }
+            else
+                _run_as "$HN_USER" "$HN_GROUP" rm -f -- "$EDIT_FILE" "${EDIT_FILE}.tn-new" || true
+            fi
+            ui_event log "Put ${EDIT_FILE} back as it was."
+            ;;
+        commit)
+            [[ -f "$HN_META" && ! -L "$HN_META" ]] || return 0
+            if declare -F meta_set >/dev/null; then
+                meta_set ADVERTISED_NODE_NAME "$HN_NAME" "$HN_META" >/dev/null 2>&1 \
+                    || ui_event warn "could not record ADVERTISED_NODE_NAME in ${HN_META}"
+            else
+                sed -i '/^ADVERTISED_NODE_NAME=/d' "$HN_META" 2>/dev/null || true
+                printf 'ADVERTISED_NODE_NAME=%s\n' "$HN_NAME" >> "$HN_META"
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# Node-log rotation. One config for every node unit (copytruncate: the node
+# holds the log open). The library's tn_install_logrotate is the only writer; it
+# writes LOGROTATE_CONF (passed as TN_LOGROTATE_FILE).
+
+# logrotate_refused RC -- stop a logrotate write that failed with RC. The
+# library refuses (rc 1) while the log group does not exist yet, which means the
+# node's file-ownership migration has not run on this host; say how to run it.
+logrotate_refused() {
+    local rc="$1"
+    if [[ "$rc" -eq 1 ]] && ! getent group "$LOG_GROUP" >/dev/null 2>&1; then
+        die "could not write ${LOGROTATE_CONF}: the ${LOG_GROUP} group does not exist yet. Run update-node.sh or edit-config.sh once (as root) to migrate the node's file ownership, then try again."
     fi
+    die "could not write ${LOGROTATE_CONF} (rc ${rc})"
+}
 
-    # Keep ownership matching the data dir so the (unprivileged) node can read it.
-    owner="$(stat -c '%U:%G' "$dd" 2>/dev/null || true)"
-    [[ -n "$owner" ]] && chown "$owner" "$nc" 2>/dev/null || true
-
-    # Record in .node-meta as the persistent source of truth (survives data reads
-    # and is available if a future version needs it re-applied on each start).
-    meta="$(node_meta_path)"
-    if [[ -f "$meta" ]]; then
-        sed -i '/^ADVERTISED_NODE_NAME=/d' "$meta" 2>/dev/null || true
-        printf 'ADVERTISED_NODE_NAME=%s\n' "$name" >> "$meta"
-    fi
-
-    # Restart so the node reads the new network-config. --no-block returns once
-    # the restart job is queued (validators have a long stop window).
-    svc="$(node_service)"
-    systemctl restart --no-block "$svc" || die "failed to restart $svc"
+# set-logrotate SIZE: rewrite the config with SIZE. logrotate-seed (root only,
+# install-ui.sh): keep an existing config, else write the default (100M).
+cmd_set_logrotate() {
+    local size="$1" rc=0
+    [[ "$size" =~ ^[0-9]+[KMG]$ ]] || die "invalid size: ${size:-<empty>} (e.g. 500M, 1G)"
+    TN_LOGROTATE_FILE="$LOGROTATE_CONF" _lib_req tn_install_logrotate "$size" >/dev/null || rc=$?
+    [[ $rc -eq 0 ]] || logrotate_refused "$rc"
     echo "ok"
 }
 
-# Node-log rotation. One config for every node unit (the unit appends to
-# /var/log/telcoin/*.log). copytruncate is required: the node holds the log open
-# (StandardOutput=append:), so logrotate must copy-then-truncate in place rather
-# than rename, or the node keeps writing to the rotated-away inode.
-LOGROTATE_CONF="/etc/logrotate.d/telcoin"
-
-write_logrotate_conf() {
-    local size="$1"
-    cat > "$LOGROTATE_CONF" <<EOF
-# Managed by the Telcoin Node Manager. Node logs rotate when they reach 'size'.
-/var/log/telcoin/*.log {
-    size ${size}
-    rotate 3
-    missingok
-    notifempty
-    compress
-    delaycompress
-    copytruncate
-}
-EOF
-    chmod 644 "$LOGROTATE_CONF"
-}
-
-cmd_set_logrotate() {
-    local size="$1"
-    [[ "$size" =~ ^[0-9]+[KMG]$ ]] || die "invalid size: ${size:-<empty>} (e.g. 500M, 1G)"
-    write_logrotate_conf "$size"
+cmd_logrotate_seed() {
+    local rc=0
+    TN_LOGROTATE_FILE="$LOGROTATE_CONF" _lib_req tn_install_logrotate >/dev/null || rc=$?
+    [[ $rc -eq 0 ]] || logrotate_refused "$rc"
     echo "ok"
 }
 
 # Delete rotated node logs only (telcoin-*.log.1, telcoin-*.log.2.gz, ...).
 # Never the live *.log: the node holds it open via StandardOutput=append:, so
 # removing it wouldn't free space until a restart and would break logging. The
-# fixed glob can't be steered to a non-standard path, so no path validation is
-# needed. Prints the count removed.
+# fixed glob can't be steered to a non-standard path, and rm removes a symlink
+# itself, never its target. Prints the count removed.
 cmd_clear_rotated() {
     local n=0 f
+    [[ ! -L "$LOG_DIR" ]] || die "refusing: ${LOG_DIR} is a symlink"
     shopt -s nullglob
     for f in "${LOG_DIR}"/*.log.[0-9]*; do
-        [[ -f "$f" ]] && rm -f "$f" && n=$((n+1))
+        if [[ -f "$f" || -L "$f" ]]; then
+            rm -f -- "$f" && n=$((n+1))
+        fi
     done
     shopt -u nullglob
     echo "removed ${n}"
 }
 
+# read_secret -- one line from stdin (the server writes the secret and closes
+# the pipe), into the global SECRET. Never echoed, never an argument.
+SECRET=""
+read_secret() {
+    SECRET=""
+    IFS= read -r SECRET || [[ -n "$SECRET" ]] || return 1
+    [[ -n "$SECRET" ]]
+}
+
 # =============================================================================
 # External dashboard access (Caddy) -- thin wrappers around install-caddy.sh
 # --json phases. status/check-dns emit one JSON object; enable/disable stream
-# JSON events. The dashboard password arrives via TN_CADDY_PASSWORD (env only --
-# env_keep'd by sudoers, never argv/logs), like the BLS passphrase.
+# JSON events. The dashboard password arrives on the helper's stdin and goes to
+# install-caddy.sh on its stdin (--password-stdin).
 # =============================================================================
-CADDY_SCRIPT="/opt/telcoin-ui-update/install-caddy.sh"
 
 caddy_script_ready() { [[ -f "$CADDY_SCRIPT" ]] || die "caddy script not found: $CADDY_SCRIPT"; }
 
@@ -571,10 +1262,18 @@ cmd_caddy_enable() {
     valid_hostname "$domain" || die "invalid domain: ${domain:-<empty>}"
     [[ -n "$username" && "$username" =~ ^[A-Za-z0-9._-]{2,32}$ ]] || die "invalid username"
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
-    [[ -n "${TN_CADDY_PASSWORD:-}" ]] || die "TN_CADDY_PASSWORD not set"
+    read_secret || die "the dashboard password must arrive on stdin"
+    # install-caddy.sh's rule: at least 16 bytes, no control characters.
+    local n
+    n="$(printf '%s' "$SECRET" | LC_ALL=C wc -c | tr -d ' ')"
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 16 )) || die "the dashboard password must be at least 16 characters"
+    case "$SECRET" in
+        *[[:cntrl:]]*) die "the dashboard password must not contain control characters" ;;
+    esac
     local -a args=( --json --phase=enable --domain "$domain" --username "$username" )
     [[ -n "$public_ip" ]] && args+=( --public-ip "$public_ip" )
-    exec bash "$CADDY_SCRIPT" "${args[@]}"
+    engine_has "$CADDY_SCRIPT" --password-stdin
+    exec bash "$CADDY_SCRIPT" "${args[@]}" --password-stdin <<< "$SECRET"
 }
 
 # =============================================================================
@@ -621,7 +1320,9 @@ cmd_rpc_enable() {
 
 # =============================================================================
 # Firewall subcommands -- thin wrappers around firewall-setup.sh --json. Only
-# the three node ports may be toggled; SSH/policy/etc are never reachable here.
+# the three node ports may be toggled. firewall-enable applies the engine's
+# lockout-safe defaults (SSH stays allowed, from the given sources when there
+# are some); no other SSH or policy setting is reachable here.
 # =============================================================================
 
 firewall_script_ready() {
@@ -645,16 +1346,35 @@ cmd_firewall_port() {
     exec bash "$FIREWALL_SCRIPT" --json --port "$spec" "$pstate"
 }
 
-# =============================================================================
-# Testnet add-ons status -- READ-ONLY. Surfaces the state of the dev team's opt-in
-# add-ons (health monitor / centralized logging / VPN admin SSH) for the UI's
-# management-side status card. Reads the .node-meta keys their setup scripts write
-# (root-only, mode 600) and probes the running services. Mutates nothing; all
-# enabling/disabling stays on the CLI (setup-observability.sh / setup-vpn.sh).
-# =============================================================================
+# firewall-enable [<sources>] -- firewall-setup.sh --json --enable. <sources> is
+# the SSH source list, passed as --ssh-from: at most 16 addresses or CIDRs
+# joined by commas, each accepted by the library's validate_health_src (never
+# /0, the unspecified address or a mask shorter than /8). Without it the engine
+# uses the list .node-meta keeps; on mainnet it refuses when there is none, and
+# its done event says so. Runs from / so the list is never read as a file path.
+cmd_firewall_enable() {
+    local list="${1:-}" s n=0
+    local -a args=( --json --enable ) srcs=()
+    firewall_script_ready
+    if [[ -n "$list" ]]; then
+        [[ "$list" =~ ^[^,]+(,[^,]+)*$ ]] || die "invalid SSH source list (addresses or CIDRs joined by commas): $list"
+        IFS=, read -r -a srcs <<< "$list"
+        for s in "${srcs[@]}"; do
+            n=$((n + 1))
+            [[ "$s" =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] && _lib_req validate_health_src "$s" \
+                || die "invalid SSH source: $s (an address, or a CIDR of /8 or narrower; never /0)"
+        done
+        (( n <= 16 )) || die "too many SSH sources: $n (at most 16)"
+        engine_has "$FIREWALL_SCRIPT" --ssh-from
+        args+=( --ssh-from "$list" )
+    fi
+    cd / || die "cannot change to /"
+    exec bash "$FIREWALL_SCRIPT" "${args[@]}" </dev/null
+}
 
-# Minimal JSON string escaper (this helper has no json lib; values here are simple).
-_addons_json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s//$'\n'/ }"; }
+# =============================================================================
+# Read-only views: testnet add-ons status, .node-meta, node.env.
+# =============================================================================
 
 # Read KEY=value from the node's root-owned .node-meta. Empty when absent.
 _addons_meta() {
@@ -671,7 +1391,26 @@ _addons_meta() {
 cmd_meta_cat() {
     local meta
     meta="$(node_meta_path)"
-    [[ -f "$meta" ]] && cat "$meta" || true
+    [[ -f "$meta" && ! -L "$meta" ]] && cat "$meta" || true
+}
+
+# The node's listener addresses and RPC address from /etc/telcoin/node.env
+# (current installs keep them there, outside the start script). Only the three
+# known keys are printed. Empty output (rc 0) when the file is absent.
+cmd_node_env_cat() {
+    local f="${ETC_DIR}/node.env"
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    grep -E '^(PRIMARY_LISTENER_MULTIADDR|WORKER_LISTENER_MULTIADDR|TN_RPC_ADDR)=' "$f" 2>/dev/null || true
+}
+
+# check-node.sh --audit: the host hardening summary, one "ok|warn|info  text"
+# line per fact (the systemd floor, how the BLS passphrase is kept -- never its
+# value --, TPM2, disk encryption, core dumps, ptrace scope). Exit 0 when nothing
+# warned, 1 otherwise. Read-only; stdin closed.
+cmd_host_audit() {
+    [[ -f "$CHECK_SCRIPT" ]] || die "check script not found: $CHECK_SCRIPT (run update-scripts.sh)"
+    engine_has "$CHECK_SCRIPT" --audit
+    exec bash "$CHECK_SCRIPT" --audit </dev/null
 }
 
 cmd_addons_status() {
@@ -698,29 +1437,52 @@ cmd_addons_status() {
     fi
 
     printf '{"network":"%s","region":"%s","health":{"enabled":%s,"responding":%s,"port":43174,"extra_src":"%s"},"logging":{"enabled":%s,"running":%s},"vpn":{"state":"%s","wg_up":%s,"handshake":%s,"overlay_ip":"%s","pubkey":"%s"}}\n' \
-        "$(_addons_json_str "$network")" "$(_addons_json_str "$region")" \
-        "$hc_enabled" "$hc_ok" "$(_addons_json_str "$extra")" \
+        "$(_json_str "$network")" "$(_json_str "$region")" \
+        "$hc_enabled" "$hc_ok" "$(_json_str "$extra")" \
         "$obs_enabled" "$alloy" \
-        "$(_addons_json_str "$vpn")" "$wg_up" "$wg_hs" \
-        "$(_addons_json_str "$overlay")" "$(_addons_json_str "$pubkey")"
+        "$(_json_str "$vpn")" "$wg_up" "$wg_hs" \
+        "$(_json_str "$overlay")" "$(_json_str "$pubkey")"
 }
 
 # =============================================================================
 # Setup subcommands -- thin wrappers around setup-node.sh --json --phase=...
-# Config comes from TN_SETUP_* env (validated here); the BLS passphrase stays in
-# TN_BLS_PASSPHRASE (env only, never argv) and is inherited by the exec'd script.
-# Public RPC is requested by TN_SETUP_RPC_DOMAIN alone: a hostname becomes
-# --rpc-domain, and --rpc-public is never sent (without a domain it only printed
-# a notice).
+# Settings come from TN_SETUP_* (validated here); the BLS passphrase arrives on
+# stdin (keygen only) and goes to setup-node.sh on its stdin
+# (--passphrase-stdin). Public RPC is requested by TN_SETUP_RPC_DOMAIN alone: a
+# hostname becomes --rpc-domain, and --rpc-public is never sent.
+# TN_SETUP_BUILD_REF is the release tag (--release-tag) of a release or source
+# install, or the release whose image a Docker install runs (by digest);
+# TN_SETUP_DOCKER_IMAGE is the image by digest. TN_SETUP_LOG_TARGET is journal
+# or file (journal when empty on mainnet); TN_SETUP_ALLOW_NO_TPM=1 sends
+# --allow-no-tpm on mainnet.
 # =============================================================================
+
+# service_account_ok <user> <group> -- the library's tn_service_user_ok: a plain
+# lowercase name, never root or telcoin-ui, an existing account a system account
+# without admin groups (its reason goes to stderr).
+service_account_ok() {
+    _lib_req tn_service_user_ok "$1" "$2" >/dev/null
+}
+
+# docker_image_ok <image> <network> -- the library's tn_docker_image_allowed
+# with digests required: <repository>@sha256:<digest>, the repository one the
+# network's images may come from (on testnet either testnet repository).
+docker_image_ok() {
+    TN_DOCKER_REQUIRE_DIGEST=1 _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null
+}
+
+# passphrase_ok <value> <network> -- the library's tn_passphrase_ok (no CR/LF,
+# no whitespace at either end, 16 bytes or more on mainnet).
+passphrase_ok() {
+    _lib_req tn_passphrase_ok "$1" "$2"
+}
 
 cmd_setup() {
     local phase="$1"
     [[ -f "$SETUP_SCRIPT" ]] || die "setup script not found: $SETUP_SCRIPT"
 
-    local network="${TN_SETUP_NETWORK:-testnet}"
+    local network="${TN_SETUP_NETWORK:-}"
     local method="${TN_SETUP_INSTALL_METHOD:-}"
-    local passm="${TN_SETUP_PASSPHRASE_METHOD:-loadcredential}"
     local addr="${TN_SETUP_ADDRESS:-}"
     local build_ref="${TN_SETUP_BUILD_REF:-}"
     local image="${TN_SETUP_DOCKER_IMAGE:-}"
@@ -734,29 +1496,71 @@ cmd_setup() {
     local svc_group="${TN_SETUP_SERVICE_GROUP:-}"
     local adv_name="${TN_SETUP_ADVERTISED_NAME:-}"
     local data_dir="${TN_SETUP_DATA_DIR:-}"
+    local log_target="${TN_SETUP_LOG_TARGET:-}"
+    local allow_no_tpm="${TN_SETUP_ALLOW_NO_TPM:-}"
+    local net_rule
+
+    # An installed node is never set up again from the UI: both phases stop when
+    # a node unit exists (unified or legacy), and keygen also when any
+    # .node-meta exists (finalize reads the one keygen wrote).
+    local unit meta
+    for unit in telcoin telcoin-validator telcoin-observer; do
+        if [[ -e "${UNIT_DIR}/${unit}.service" || -L "${UNIT_DIR}/${unit}.service" ]]; then
+            die "a node is already installed (${UNIT_DIR}/${unit}.service); use edit-config.sh, or remove-node.sh first"
+        fi
+    done
+    meta="$(node_meta_path)"
+    if [[ "$phase" == keygen && ( -e "$meta" || -L "$meta" ) ]]; then
+        die "a node install already started (${meta}); finish it with setup-finalize, or remove-node.sh first"
+    fi
 
     # Validate every value before it reaches the setup script.
-    case "$network" in testnet|adiri) ;; *) die "invalid network: $network" ;; esac
-    case "$method" in source|docker|existing|"") ;; *) die "invalid install method: $method" ;; esac
-    case "$passm" in loadcredential|tpm) ;; *) die "invalid passphrase method: $passm" ;; esac
+    case "$network" in
+        testnet|adiri) net_rule=testnet ;;
+        mainnet) net_rule=mainnet ;;
+        "") die "missing network (TN_SETUP_NETWORK)" ;;
+        *) die "invalid network: $network" ;;
+    esac
+    case "$method" in source|docker|existing|release|"") ;; *) die "invalid install method: $method" ;; esac
     [[ -z "$addr"      || "$addr"      =~ ^0x[0-9a-fA-F]{40}$ ]]            || die "invalid address"
-    [[ -z "$build_ref" || "$build_ref" =~ ^[A-Za-z0-9._/-]+$ ]]            || die "invalid build ref"
-    [[ -z "$image"     || ( "$image"   =~ ^[A-Za-z0-9._/:@-]+$ && "$image" == *:* ) ]] || die "invalid docker image"
-    local m
+    [[ -z "$build_ref" ]] || release_tag_ok "$net_rule" "$build_ref" \
+        || die "invalid build ref (a ${net_rule} release tag): $build_ref"
+    [[ -z "$image" ]] || docker_image_ok "$image" "$net_rule" \
+        || die "invalid docker image for ${net_rule} (its repository by digest; a release goes in TN_SETUP_BUILD_REF): $image"
+    [[ -z "$image" || -z "$build_ref" ]] || die "give the Docker image by digest or its release tag, not both"
+    case "$log_target" in
+        ""|journal|file) ;;
+        *) die "invalid log target (journal or file): $log_target" ;;
+    esac
+    [[ -n "$log_target" || "$net_rule" != mainnet ]] || log_target=journal
+    case "$allow_no_tpm" in
+        ""|0|1) ;;
+        *) die "invalid TN_SETUP_ALLOW_NO_TPM (1, 0 or empty): $allow_no_tpm" ;;
+    esac
+    # These values skip _arg_ok (they arrive in TN_SETUP_*), so the address
+    # part refuses whitespace and control characters itself.
+    local m ma_re='^/(ip4|ip6)/[^/[:space:][:cntrl:]]+/udp/[0-9]+/quic-v1$'
     for m in "$ext_primary" "$ext_worker" "$lis_primary" "$lis_worker"; do
-        [[ -z "$m" || "$m" =~ ^/(ip4|ip6)/[^/]+/udp/[0-9]+/quic-v1$ ]] || die "invalid multiaddr: $m"
+        [[ -z "$m" || "$m" =~ $ma_re ]] || die "invalid multiaddr: $m"
     done
+    if [[ "$phase" == finalize ]]; then
+        [[ -n "$lis_primary" && -n "$lis_worker" ]] \
+            || die "finalize needs both listener multiaddrs (TN_SETUP_LIS_PRIMARY, TN_SETUP_LIS_WORKER)"
+    fi
     [[ -z "$public_ip" || "$public_ip" =~ ^[0-9a-fA-F.:]+$ ]] || die "invalid public ip"
     [[ -z "$rpc_domain" ]] || valid_hostname "$rpc_domain" || die "invalid rpc domain: $rpc_domain"
-    [[ -z "$svc_user"  || "$svc_user"  =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service user"
-    [[ -z "$svc_group" || "$svc_group" =~ ^[a-zA-Z][a-zA-Z0-9_-]{0,31}$ ]] || die "invalid service group"
+    service_account_ok "${svc_user:-telcoin}" "${svc_group:-${svc_user:-telcoin}}" \
+        || die "invalid service account: ${svc_user:-telcoin}:${svc_group:-} (not root or telcoin-ui, no login account, not in sudo, adm or docker)"
     [[ -z "$adv_name"  || "$adv_name"  =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid advertised name"
-    [[ -z "$data_dir"  || ( "$data_dir" =~ ^/[A-Za-z0-9._/-]+$ && "$data_dir" != *".."* ) ]] || die "invalid data directory"
+    if [[ -n "$data_dir" ]]; then
+        [[ "$data_dir" =~ ^/var/lib/telcoin(/[A-Za-z0-9._-]+)*$ && "$data_dir" != *".."* ]] \
+            || die "invalid data directory (/var/lib/telcoin or a path under it): $data_dir"
+    fi
 
-    local -a args=( --json "--phase=${phase}" --network "$network" --passphrase-method "$passm" )
+    local -a args=( --json "--phase=${phase}" --network "$network" )
     [[ -n "$method" ]]      && args+=( --install-method "$method" )
     [[ -n "$addr" ]]        && args+=( --address "$addr" )
-    [[ -n "$build_ref" ]]   && args+=( --build-ref "$build_ref" )
+    [[ -n "$build_ref" ]]   && args+=( --release-tag "$build_ref" )
     [[ -n "$image" ]]       && args+=( --docker-image "$image" )
     [[ -n "$ext_primary" ]] && args+=( --external-primary "$ext_primary" )
     [[ -n "$ext_worker" ]]  && args+=( --external-worker "$ext_worker" )
@@ -768,8 +1572,21 @@ cmd_setup() {
     [[ -n "$svc_group" ]]   && args+=( --service-group "$svc_group" )
     [[ -n "$adv_name" ]]    && args+=( --advertised-name "$adv_name" )
     [[ -n "$data_dir" ]]    && args+=( --data-dir "$data_dir" )
+    [[ -n "$log_target" ]]  && args+=( --log-target "$log_target" )
+    if [[ "$allow_no_tpm" == 1 && "$net_rule" == mainnet ]]; then
+        args+=( --allow-no-tpm )
+    fi
+    [[ -z "$build_ref" ]]  || engine_has "$SETUP_SCRIPT" --release-tag
+    [[ -z "$log_target" ]] || engine_has "$SETUP_SCRIPT" --log-target
 
-    exec bash "$SETUP_SCRIPT" "${args[@]}"
+    if [[ "$phase" != keygen ]]; then
+        exec_job bash "$SETUP_SCRIPT" "${args[@]}" </dev/null
+    fi
+    read_secret || die "the BLS passphrase must arrive on stdin"
+    passphrase_ok "$SECRET" "$net_rule" \
+        || die "the BLS passphrase is not usable (no line breaks, no spaces or tabs at either end$([[ "$net_rule" == mainnet ]] && echo ', 16 bytes or more on mainnet'))"
+    engine_has "$SETUP_SCRIPT" --passphrase-stdin
+    exec_job bash "$SETUP_SCRIPT" "${args[@]}" --passphrase-stdin <<< "$SECRET"
 }
 
 cmd_setup_keygen()   { cmd_setup keygen; }
@@ -780,62 +1597,78 @@ cmd_setup_finalize() { cmd_setup finalize; }
 # monitor a Telcoin Network node deployed as a dev-team docker container (not
 # under systemd). Every one only inspects/reads (docker ps / inspect / logs /
 # cat node-info.yaml); none can start, stop, or otherwise mutate a container or
-# the host. The container name arg is charset-validated by require_container.
+# the host. The container argument must be one docker-detect reports.
 # =============================================================================
 
-# Image substrings that identify a dev-team Telcoin Network container.
-DOCKER_TN_IMAGE_RE='us-docker\.pkg\.dev/telcoin-network/tn-public|telcoin-network/tn-public|/tn-public/'
+# _docker_tn_names -- read "<name><TAB><image>" lines on stdin and print each
+# name whose image, by tag or by digest, comes from a repository the library
+# accepts testnet or mainnet images from (tn_docker_repo_ok). Runs inside the
+# library (_lib_call).
+_docker_tn_names() {
+    local name img repo
+    while IFS=$'\t' read -r name img; do
+        repo="${img%%@*}"
+        case "${repo##*/}" in
+            *:*) repo="${repo%:*}" ;;
+        esac
+        if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo"; then
+            printf '%s\n' "$name"
+        fi
+    done
+}
 
-# Print the names of running Telcoin Network containers, one per line. Empty
-# output (rc 0) when docker is absent or no matching container runs.
+# Print the names of running Telcoin Network containers, one per line: those
+# running an image of the library's testnet or mainnet repositories. Empty
+# output (rc 0) when docker is absent, no matching container runs, or the
+# library cannot be read.
 cmd_docker_detect() {
     command -v docker >/dev/null 2>&1 || return 0
     docker ps --no-trunc --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
-        | grep -E "$DOCKER_TN_IMAGE_RE" \
-        | cut -f1 || true
+        | _lib_call _docker_tn_names || true
 }
 
-# Full `docker inspect` JSON for one container (a single-element array, as docker
-# emits). Used by the server to read State/Config/HostConfig.
+# The fields of `docker inspect` the UI reads, as a one-element JSON array in
+# docker's own shape: Name, State, RestartCount, Config.Image, Config.Cmd,
+# HostConfig.Binds, HostConfig.NetworkMode, NetworkSettings.Ports. Never
+# Config.Env, which can hold secrets.
+DOCKER_STATUS_FORMAT='[{"Name":{{json .Name}},"State":{{json .State}},"RestartCount":{{json .RestartCount}},"Config":{"Image":{{json .Config.Image}},"Cmd":{{json .Config.Cmd}}},"HostConfig":{"Binds":{{json .HostConfig.Binds}},"NetworkMode":{{json .HostConfig.NetworkMode}}},"NetworkSettings":{"Ports":{{json .NetworkSettings.Ports}}}}]'
+
 cmd_docker_status() {
     local name="$1"; require_container "$name"
-    command -v docker >/dev/null 2>&1 || die "docker not installed"
-    docker inspect "$name" 2>/dev/null || die "container not found: $name"
+    docker inspect --format "$DOCKER_STATUS_FORMAT" "$name" 2>/dev/null || die "container not found: $name"
 }
 
 # Tail the container's stdout/stderr log (combined). Second arg = line count
-# (default 100), validated as a bare integer.
+# (default 100, at most 200000), validated as a bare integer.
 cmd_docker_logs() {
     local name="$1" lines="${2:-100}"
     require_container "$name"
-    [[ "$lines" =~ ^[0-9]+$ ]] || die "invalid line count: $lines"
-    command -v docker >/dev/null 2>&1 || die "docker not installed"
+    [[ "$lines" =~ ^[1-9][0-9]{0,5}$ && "$lines" -le 200000 ]] || die "invalid line count: $lines"
     docker logs --tail "$lines" "$name" 2>&1 || die "could not read logs for $name"
 }
 
-# Full container log (no tail limit) -- backs the "Download full log" action.
+# The container log for the "Download full log" action, capped at the last
+# 200000 lines.
 cmd_docker_logs_full() {
     local name="$1"; require_container "$name"
-    command -v docker >/dev/null 2>&1 || die "docker not installed"
-    docker logs "$name" 2>&1 || die "could not read logs for $name"
+    docker logs --tail 200000 "$name" 2>&1 || die "could not read logs for $name"
 }
 
 # Print the container's node-info.yaml, prefixed with a classifying
 # `node_type:` line. The file lives in a host bind-mount; we resolve the first
-# bind whose host path holds node-info.yaml.
+# bind whose host path holds node-info.yaml (a regular file, not a symlink).
 #
 # Node type comes from config, NOT command-line flags (team deployments don't
 # pass --validator): a non-empty proof_of_possession field means this node is a
 # validator, otherwise it's an observer.
 cmd_docker_node_info() {
     local name="$1"; require_container "$name"
-    command -v docker >/dev/null 2>&1 || die "docker not installed"
     local binds host b info=""
     binds="$(docker inspect -f '{{range .HostConfig.Binds}}{{println .}}{{end}}' "$name" 2>/dev/null || true)"
     while IFS= read -r b; do
         [[ -z "$b" ]] && continue
         host="${b%%:*}"
-        if [[ -f "${host}/node-info.yaml" ]]; then
+        if [[ "$host" == /* && -f "${host}/node-info.yaml" && ! -L "${host}/node-info.yaml" ]]; then
             info="${host}/node-info.yaml"
             break
         fi
@@ -858,7 +1691,6 @@ cmd_docker_node_info() {
 # separated so the server can split cleanly. `--no-stream` takes ~1s to sample.
 cmd_docker_stats() {
     local name="$1"; require_container "$name"
-    command -v docker >/dev/null 2>&1 || die "docker not installed"
     docker stats "$name" --no-stream \
         --format '{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}' 2>/dev/null
 }
@@ -873,11 +1705,19 @@ cmd_internal_ip() {
 # root-owned, so the stat() must run here. Prints 0 when the file is missing.
 cmd_docker_log_size() {
     local name="$1"; require_container "$name"
-    command -v docker >/dev/null 2>&1 || die "docker not installed"
     local log_path
     log_path="$(docker inspect "$name" --format='{{.LogPath}}' 2>/dev/null)"
     [[ -n "$log_path" ]] || die "could not determine log path for $name"
     stat -c%s "$log_path" 2>/dev/null || echo 0
+}
+
+# takes_override <subcommand> -- rc 0 for the subcommands that stop or restart
+# the node through the committee check, which take a trailing allow-quorum-risk.
+takes_override() {
+    case "${1:-}" in
+        service|tracing-enable|tracing-disable|set-hostname) return 0 ;;
+    esac
+    return 1
 }
 
 # How many arguments a node subcommand takes once the old role argument is gone.
@@ -892,10 +1732,44 @@ legacy_arity() {
     esac
 }
 
+# The most arguments each subcommand takes. Unknown subcommands fail.
+max_args() {
+    case "${1:-}" in
+        helper-version|jaeger-start|jaeger-stop|jaeger-status) echo 0 ;;
+        tracing-enable|tracing-disable|update-check|update-apply|update-discard) echo 0 ;;
+        restart-count|quorum-check|log-clear|journal-follow|clear-rotated) echo 0 ;;
+        logrotate-seed|caddy-status|caddy-disable|rpc-status|rpc-disable) echo 0 ;;
+        firewall-status|addons-status|meta-cat|node-env-cat|host-audit) echo 0 ;;
+        setup-keygen|setup-finalize|docker-detect|internal-ip) echo 0 ;;
+        update-prepare|journal-tail|set-hostname|set-logrotate|credential) echo 1 ;;
+        firewall-enable|service) echo 1 ;;
+        docker-status|docker-logs-full|docker-node-info|docker-stats|docker-log-size) echo 1 ;;
+        caddy-dns-check|rpc-dns-check|firewall-port|docker-logs) echo 2 ;;
+        config-set|caddy-enable|rpc-enable) echo 3 ;;
+        *) return 1 ;;
+    esac
+}
+
 main() {
-    local sub="${1:-}" arity
+    local sub="${1:-}" arity max a last=""
     if [[ $# -gt 0 ]]; then
         shift
+    fi
+    max="$(max_args "$sub")" || die "unknown subcommand: ${sub:-<empty>}"
+    # A state-changing call is audited from here on, so a refusal by the checks
+    # below leaves a "refused" line too. Its arguments are recorded once they
+    # have passed those checks.
+    if is_mutating "$sub"; then
+        AUDIT_SUB="$sub"
+    fi
+    # A trailing allow-quorum-risk overrides the committee check of a restart
+    # (QUORUM_OVERRIDE); it is not one of the subcommand's arguments.
+    if takes_override "$sub"; then
+        for a in "$@"; do last="$a"; done
+        if [[ "$last" == allow-quorum-risk ]]; then
+            QUORUM_OVERRIDE=1
+            set -- "${@:1:$(($# - 1))}"
+        fi
     fi
 
     # ui/server.py before 1.9.0 puts observer|validator in front of a node
@@ -906,7 +1780,14 @@ main() {
         if [[ $# -gt $arity ]]; then
             case "$1" in observer|validator) shift ;; esac
         fi
-        [[ $# -le $arity ]] || die "too many arguments for ${sub}: $*"
+    fi
+    [[ $# -le $max ]] || die "too many arguments for ${sub}: $*"
+    for a in "$@"; do
+        _arg_ok "$a" || die "invalid argument for ${sub}"
+    done
+    if [[ -n "$AUDIT_SUB" ]]; then
+        AUDIT_ARGS="$*${QUORUM_OVERRIDE:+ allow-quorum-risk}"
+        audit_line start
     fi
 
     case "$sub" in
@@ -916,15 +1797,21 @@ main() {
         jaeger-status)   cmd_jaeger_status ;;
         tracing-enable)  cmd_tracing_enable ;;
         tracing-disable) cmd_tracing_disable ;;
+        service)         cmd_service "${1:-}" ;;
         update-check)    cmd_update_check ;;
         update-prepare)  cmd_update_prepare "${1:-}" ;;
         update-apply)    cmd_update_apply ;;
         update-discard)  cmd_update_discard ;;
         restart-count)   cmd_restart_count ;;
+        quorum-check)    cmd_quorum_check ;;
         log-clear)       cmd_log_clear ;;
-        config-set)      cmd_config_set "${1:-}" "${2:-}" ;;
+        journal-tail)    cmd_journal_tail "${1:-}" ;;
+        journal-follow)  cmd_journal_follow ;;
+        config-set)      cmd_config_set "${1:-}" "${2:-}" "${3:-}" ;;
+        credential)      cmd_credential "${1:-}" ;;
         set-hostname)    cmd_set_hostname "${1:-}" ;;
         set-logrotate)   cmd_set_logrotate "${1:-}" ;;
+        logrotate-seed)  cmd_logrotate_seed ;;
         clear-rotated)   cmd_clear_rotated ;;
         caddy-status)    cmd_caddy_status ;;
         caddy-dns-check) cmd_caddy_dns_check "${1:-}" "${2:-}" ;;
@@ -932,14 +1819,15 @@ main() {
         caddy-disable)   cmd_caddy_disable ;;
         rpc-status)      cmd_rpc_status ;;
         rpc-dns-check)   cmd_rpc_dns_check "${1:-}" "${2:-}" ;;
-        rpc-enable)
-            [[ $# -le 3 ]] || die "too many arguments for rpc-enable: $*"
-            cmd_rpc_enable "${1:-}" "${2:-}" "${3:-}" ;;
+        rpc-enable)      cmd_rpc_enable "${1:-}" "${2:-}" "${3:-}" ;;
         rpc-disable)     cmd_rpc_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   cmd_firewall_port "${1:-}" "${2:-}" ;;
+        firewall-enable) cmd_firewall_enable "${1:-}" ;;
         addons-status)   cmd_addons_status ;;
         meta-cat)        cmd_meta_cat ;;
+        node-env-cat)    cmd_node_env_cat ;;
+        host-audit)      cmd_host_audit ;;
         setup-keygen)    cmd_setup_keygen ;;
         setup-finalize)  cmd_setup_finalize ;;
         docker-detect)    cmd_docker_detect ;;

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: ${var} inside a double-quoted
+# perl program. Expected findings: lines 7 and 12.
+
+swap_image() {
+    local old_image="$1" new_image="$2" launch_file="$3"
+    perl -i -pe "s|\Q${old_image}\E|${new_image}|g" "$launch_file"
+}
+
+rename_key() {
+    local key="$1" file="$2"
+    perl -pi -e "s/^${key}=/OLD_${key}=/" "$file"
+}

@@ -1,3 +1,185 @@
+## Review: the five defects of the 2026-10-28 review of PR #11 (2026-10-30)
+
+Branch `mainnet-hardening`, d8c138f + 18 fix commits (ff5a34b..963f0f8) + the release-prep commit
+3fb57d1 (sidecars, partner guide 1.3.3) + this note. Each item has a fixture that fails on d8c138f
+and passes on the tip.
+
+### What landed
+
+- [x] Quorum stop guard (`lib/common.sh`, ff5a34b): a node whose own `tn_nodeMode` cannot be read
+      is counted as still voting; it is counted among the down only when `tn_info` on its own RPC
+      returns an authority id that authored nothing in the counted commit (`_tn_commit_has_author`,
+      `tn_node_authority_id`; the public RPC is never asked). The refusal stays under the UI
+      helper's 300-character cut. `quorum_guard_test.sh` 85 checks (28 fail on d8c138f).
+- [x] One-way update failure (`update-node.sh`, 69b866b..e86ee71): a started one-way apply records
+      `STORAGE_MIGRATION_STARTED=true` in the pending state; a failed health check clears the state
+      without restoring the unit, start script or `node.env` (`clear_pending_after_start`) and says
+      so; a later `--discard` keeps them too and prints the manual way back (`pending_undo_hint`;
+      `--json` done carries `"storage_migration":true`). New `storage_migration_test.sh` (96 checks,
+      126 as root; 40+ fail on d8c138f).
+- [x] VPN enable sudoers (`setup-vpn.sh`, 9774caf; vendored bootstrap eed4faa): the consent-matching
+      `/etc/sudoers.d/90-tnadmin` is written before the vendored bootstrap runs, which now honours
+      `WG_NODE_SUDOERS=0` (default 1 keeps upstream behaviour); after the bootstrap the rule is
+      rewritten only when it differs (`vpn_sudoers_current`). The enable order and every
+      SSH-related step are unchanged. The guard is mirrored in the upstream checkout
+      (deploy-networks-common, branch `wgvpn-sudoers-guard`, commit 9b2c8f2, unpushed) and the
+      vendored header records its sha. New `vpn_enable_test.sh` (45 checks; 12 fail on d8c138f).
+- [x] Alloy partial disable (`lib/observability.sh`, 69c3afd; `setup-observability.sh`, 294e980):
+      one `obs_render_config_alloy` derives owner, group and the node log path from the installation
+      for the enable and both partial disables; `obs_restart_alloy` restarts and watches `is-active`
+      for 5 s; a disable records its choice, restarts through the helper, and exits non-zero when
+      Alloy does not stay up (menu says so; `--json` ends `done ok:false` without the marker).
+      `obs_test.sh` 103 -> 170 checks (39 fail on d8c138f).
+- [x] Update lock after a removal (`remove-node.sh`, 3b48813): `/run/telcoin` and the lock file stay
+      (the deferred unlink in the EXIT trap is gone), so no second operation can lock an unlinked
+      inode. `remove_test.sh`: same inode before and after, a fresh acquire succeeds (9 fail on
+      d8c138f).
+- [x] Docs: OPERATOR.md, README.md, CHANGELOG/scripts-v2.0.0.md, WGVPN.md, docs/testnet-addons.md
+      (the provenance header is 14 lines, `sed '2,15d'`), AGENTS.md, partner guide 1.3.3 (PDF
+      57 pages).
+
+### Gates on the tip
+
+- `tools/tests/run.sh`: 59 files, 0 failed under bash 5.3, bash 3.2.57 and as root in Ubuntu 24.04.
+- `ui/tests/helper_test.sh`: 494 checks under bash 5 and bash 3.2; `install_ui_test.sh` 1/1;
+  pytest 258 passed (python:3.10-slim).
+- `bash -n` (bash 5 and 3.2), `tools/check-bash32.sh`, shellcheck 0.9 and 0.11 `--severity=error`:
+  clean on the 13 touched files; `tools/check-perl-interp.sh` clean (100 files).
+- Sidecars fresh; no version constant changed; no `Co-Authored-By` or "Generated with" in any
+  commit; the vendored bootstrap body is byte-identical to the mirror
+  (f6e22378569c5f79bb24127dacaa14794f392aa1cececa037641f1e5f07f80d5).
+
+### Left to the user
+
+- Done 2026-10-30: `wgvpn-sudoers-guard` merged in `deploy-networks-common` (PR #6, `main` 4a2925c);
+  the vendored header records it and its sha equals the merged file. The superproject branch of
+  the same name (df30349) only moves the `common` pin; fold it into the next pin bump.
+- Re-request the review if the token could not; sign `MANIFEST` and commit `lib/allowed_signers`
+  plus `MANIFEST*`/`RELEASE` on the final tip before merging #11.
+- The follow-ups added to `followup.md` (UI display of the one-way discard note, the quorum-check
+  timeout in `server.py`, a re-apply after a started one-way update, the `--json` done after a
+  failed add-on action).
+
+### Assumptions
+
+- 2.0.0 is unreleased, so a pending-state key unknown to an older dev build needs no shim.
+- `obs_enable` now takes about 4 s longer and fails when Alloy exits within 5 s of the restart.
+- The partner guide version is a document version, not a script version.
+
+## Review: close-out of the hardening round (2026-10-21)
+
+Branch `mainnet-hardening`, b02735a + 24 commits (last code commit c960f96; this note on top): the four red CI jobs fixed, the
+maintainer release key shipped, and the scripts aligned with the signed-release pipeline of
+telcoin-network PR #694. Issues for every item are open in both repositories (tn-node-deployment
+#12-#51, telcoin-network #1723-#1735).
+
+### What landed
+
+- [x] CI: shellcheck 0.9 directives where a stub replaces a sourced function; the UI helper's
+      locked stop or restart runs in a subshell so the lock is released under bash 3.2; BSD
+      stand-ins in the fixture harness (`stat -c`, `mv -T`, `chmod MODE --`, `timeout`, `TMPDIR`)
+      and reasoned skips for `/proc`, `getent`, `PATH` and a 0700 `TMPDIR`; the VM job restores
+      stock modes on `/opt` and `/usr/local` that the runner image leaves world-writable.
+- [x] `lib/release-keys/grantkee.asc` ships (SCRIPTS row, sidecar, README with the refresh rule).
+- [x] Signature policy: one good signature by a shipped key accepts; `BADSIG`, `EXPKEYSIG`,
+      `REVKEYSIG`, `EXPSIG` refuse; an unshipped co-signer beside a good signature warns.
+- [x] Release candidates on testnet when named; every "newest" pick takes finals only; tags are
+      ordered by release (rc1 < rc2 < final) in the downgrade check and the pickers.
+- [x] Images from `ghcr.io/telcoin-association/telcoin-network` for both networks; "newest" from
+      the GitHub Releases API with the digest from the signed `IMAGE_DIGEST`; ghcr's anonymous
+      token for lookups; the Artifact Registry tag listing only as the testnet fallback while no
+      release exists; mainnet Docker refused up front until its pins exist.
+- [x] UI: the default image comes from the library; both testnet repositories and the mainnet one
+      are accepted by digest; no registry hardcode left in `server.py` or the helper.
+- [x] Docs: README, `OPERATOR.md`, changelog and release note, partner guide (PDF 1.3.2).
+
+### Gates on the tip
+
+- `tools/tests/run.sh`: 57 files, 0 failed under bash 5, bash 3.2 and as root in Ubuntu 24.04.
+- `ui/tests/helper_test.sh`: 494 checks, 0 failed under bash 5 and bash 3.2; `install_ui_test` 1/0;
+  pytest 258 passed (python 3.10).
+- shellcheck 0.9.0 and 0.11 error-clean; `check-bash32`, `check-perl-interp` (98 files) and the
+  passphrase-print lint clean; sidecars fresh; no attribution trailers.
+- GitHub: every CI and Integration job green (https://github.com/Telcoin-Association/tn-node-deployment/actions/runs/39637763432 and the Integration run https://github.com/Telcoin-Association/tn-node-deployment/actions/runs/39637763301).
+- Independent verifier over b02735a..c960f96: all seven sections pass with no error; the three warnings it raised (an rc-unaware update check, an unsigned registry fallback for a release the GitHub API lists, an unshipped tag signer refusing instead of warning on testnet) are closed in the follow-up commits ending at c960f96.
+
+### Left as-is (deliberate)
+
+- `DEFAULT_DOCKER_IMAGE` and `DEFAULT_DOCKER_TAG` stay at `v0.16.0-adiri` on Artifact Registry
+  until the first signed release (`v0.17.0-adiri`) exists; `TN_TESTNET_IMAGE_REPOS` keeps both.
+- Product code keeps the GNU forms (`chmod MODE --`, `stat -c`, `mv -T`, `timeout`); only the test
+  harness carries BSD stand-ins.
+- `ui/dev/serve.py` still fakes a registry tag for the dev server (predates the round).
+
+## Review: mainnet hardening round (2026-10-15)
+
+Branch `mainnet-hardening`, forked from `main` at 037c810: 208 commits (code packages, one
+independent verification per package with its fix pass, docs, the scripts-v2.0.0 release prep,
+and a whole-range review with its fix pass). The packages, merge order and per-package gates are in `tasks/plan.md`;
+what remains is in `followup.md`.
+
+### What landed
+
+- [x] Root-owned install tree: `/etc/telcoin`, `.node-meta`, the start scripts and the binary
+      belong to root, the data directory is the only tree the service account owns, and
+      `tn_migrate_ownership` converts an existing host under the lock (`OWNERSHIP_LAYOUT=2`).
+- [x] One update lock at `/run/telcoin/update.lock` for every root script that writes the
+      install. Every restart waits for the epoch window, and one that would cost the committee
+      its quorum is refused unless `--allow-quorum-risk` is given.
+- [x] The BLS passphrase is a `systemd-creds` credential (`host+tpm2` or `host`) or, in the
+      interim, a root-only file; the root-owned start script feeds it to the node on stdin. It
+      is never on a command line or in a unit `Environment=` line. The TPM unseal method is
+      gone; `edit-config.sh --migrate-credential` and `--reseal` convert and reseal.
+- [x] Generated `node.env`, start script under `/usr/local/libexec/telcoin/` and a sandboxed
+      unit; the listeners moved out of the launch line.
+- [x] Script updates install only from a signed `MANIFEST` under a `scripts-v*` tag;
+      `install.sh` is pinned to a release tag; `tools/release-scripts.sh` and the CI jobs that
+      check them.
+- [x] Node releases are checked with `gpgv` against `lib/release-keys/`; release tags only;
+      source builds run as `tn-build` with a pinned rustup; Docker comes from Docker's apt
+      repository and images run by digest; downgrades are refused; update-node checks after an
+      update that the node votes again.
+- [x] Testnet genesis, committee and parameters files pinned by hash; mainnet needs systemd 255.
+- [x] Add-ons: a fail-safe firewall with SSH and P2P source lists and an sshd drop-in, a `KEYS`
+      file and self-heal for the testnet VPN, the Caddy admin API on a unix socket, Alloy under
+      its own account.
+- [x] Node Manager UI: per-install token, Host and Origin checks, a JSON-only API, checked helper
+      arguments, a hashed venv, and `http://127.0.0.1:8080` as the address.
+- [x] remove-node takes the lock, shreds secrets and can finish an interrupted removal.
+- [x] telcoin-network: the credential passphrase source, the chain 487 guard and the release
+      pipeline, each attested and pushed.
+
+### Gates at the final merge (417fbe2)
+
+- [x] `tools/tests/run.sh`: 51 test files green under bash 5 (2800 checks, 0 failures, 40
+      skipped because they need root), under `bash:3.2`, and as root in `ubuntu:24.04`.
+- [x] `ui/tests/helper_test.sh` 327 checks, 0 failures. UI pytest 189, `install_ui_test.sh` 13
+      and `open_ui_test.sh` 9 at the UI fix pass.
+- [x] `tools/check-perl-interp.sh`, the passphrase-print lint, `tools/check-bash32.sh` and
+      `shellcheck -x --severity=error` clean.
+- [x] VM assertions in an `ubuntu:24.04` container as root, at the updater fix pass: five
+      passed; the perl-lint one skipped because the lint had not merged yet. Its skip guard is
+      satisfied on 417fbe2, but it has not run since.
+- [x] No co-author trailer in `037c810..417fbe2`.
+- [x] telcoin-network: 238 tests on the credential branch; 523 and 122 on the chain 487 guard,
+      clippy clean with both feature sets; all three branches attested.
+
+### What remains
+
+- [ ] Release prep: versions, the new tracked files in the updater arrays,
+      `tools/gen-checksums.sh`, the signed `MANIFEST` and the `scripts-v2.0.0` tag.
+- [ ] User steps: a GPG key in `lib/release-keys/`, an SSH signing key in `lib/allowed_signers`,
+      the `github-pages` environment allowing `scripts-v*` tags, a second CODEOWNERS owner, the
+      rulesets.
+- [ ] Post the drafted issues; open this repo's PR and the two telcoin-network draft PRs; update
+      PR #694.
+- [ ] Merge the pending UI follow-up pass and the release-install fix pass.
+- [ ] Review the whole range.
+- [ ] Mainnet constants, the host soak, the upstream items and the rest: `followup.md`.
+
+---
+
+
 # Review — Technical Specification as a partner document (2026-10-15, branch docs/technical-specification)
 
 Nothing is pushed. Branch `docs/technical-specification` off `main` (037c810), six commits:

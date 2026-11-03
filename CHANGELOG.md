@@ -7,6 +7,133 @@ For recent entries (v1.1.40 onwards), see the Changelog section of README.md.
 
 ## Unreleased
 
+### Devnet Docker images, October 2026 -- lib/common v2.0.1, setup-node v2.0.1, update-node v2.0.1, edit-config v2.0.1, telcoin-ui v2.0.1
+A devnet node can now run as a Docker install. lib/common, setup-node, update-node and
+edit-config are 2.0.1. The UI server is 2.0.1 too (`UI_VERSION`), but only to keep its copies
+of the library rules in step: it still refuses devnet. Testnet and mainnet behave as before,
+except that `tn_docker_repo_ok` now refuses a repository string containing whitespace and
+refusal messages mention the devnet grammar.
+
+#### Image repositories
+`TN_DEVNET_IMAGE_REPO` is the public legacy Artifact Registry repository,
+`us-docker.pkg.dev/telcoin-network/tn-public/adiri`. `TN_DEVNET_IMAGE_REPOS` also allows
+`ghcr.io/telcoin-association/telcoin-network`, the way `TN_TESTNET_IMAGE_REPOS` does on testnet,
+and `tn_docker_repo_ok` reads the network's list on testnet and devnet. A devnet image runs by
+digest, `<repository>@sha256:<64 hex>`, and the devnet fleet always pins it that way.
+
+#### Devnet tags
+Devnet tags end in `-devnet`, such as `v0.2.0-devnet`: `tn_release_tag_ok` takes
+`^[A-Za-z0-9][A-Za-z0-9._-]*-devnet$` on devnet (ASCII letters and digits only, in every
+locale), and ui/server.py has the same rule. The rule is there for named tags and to match the
+UI. `tn_release_tag_final` is false on devnet, so no newest-release pick runs there, and an
+image named by tag is still refused unless `TN_DOCKER_REQUIRE_DIGEST=0`.
+`setup-node.sh --release-tag` is refused on devnet, because a devnet tag has no signed release.
+
+#### Network checks
+`update-node.sh --json --ref <repository>@sha256:...`, the chain id check after an apply and an
+image change in edit-config.sh now take the network from `_tn_guard_network` instead of
+`detect_network`, and so does the image comparison in `update-node.sh --check`.
+`_tn_guard_network` also reads `NETWORK=devnet` from `.node-meta`, so a devnet host can change
+its image by digest: `update-node.sh --json --prepare --ref <repository>@sha256:<digest>`, then
+`update-node.sh --json --apply --yes`, or `edit-config.sh --set docker_image=`. The
+interactive update picker offers no digest. `--check` does not find a newer image on devnet:
+`latest_docker_ref` goes through `detect_network` and devnet has no release feed, so the
+comparison is never reached there. `tn_docker_image_allowed`, and so `validate_docker_image`,
+falls back to
+`_tn_guard_network` when neither its argument nor the `NETWORK` global names a network. Before,
+it fell back to `tn_detect_network`, so the checks that pass no network (edit-config's
+start-script swap, update-node's pending `NEW_IMAGE`) refused every devnet image.
+`tn_detect_network` is unchanged and still returns 1 on devnet.
+
+#### Caveat
+`tn-public/adiri` also holds the testnet images, so the allow-list cannot stop a testnet image
+from being pinned on a devnet node. The real guard is the digest pin together with the
+`telcoin --version` probe in the devnet fleet tooling.
+
+### Mainnet hardening round, October 2026 -- scripts-v2.0.0, update-scripts v2.0.0
+Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
+
+This round prepares the scripts for mainnet and is the first tagged, signed script release,
+`scripts-v2.0.0`. Every operator script moves to 2.0.0, with lib/common 2.0.0, lib/fallback
+1.1.0, lib/observability 2.0.0, testnet add-ons 1.1.0, telcoin-ui 2.0.0 (`HELPER_API` 3) and
+install-ui 2.0.0. The Changelog section of README.md has one entry per script; this summary
+goes by area.
+
+#### Signed script updates
+update-scripts reads `RELEASE` on main and installs a `scripts-v*` tag only when its
+`MANIFEST.sig` verifies against `lib/allowed_signers`. It refuses a lower serial, or the same
+serial with different content, and stages and checks every changed file before it installs
+all of them or none. install.sh is pinned to one tag and carries the signer list; the copy on
+main refuses to run. The updater no longer redeploys the UI by itself: it prints
+`sudo bash ui/install-ui.sh --update`.
+
+#### Root-owned layout
+Root owns `/opt/telcoin`, `/etc/telcoin`, the start script (now
+`/usr/local/libexec/telcoin/tn-start`, or `tn-start-docker`) and the node binary; the service
+account owns only the data dir. Listener addresses move to `/etc/telcoin/node.env`, the log
+dir becomes root:telcoin-log, backups go to `/var/backups/telcoin` and the update lock to
+`/run/telcoin/update.lock`. The first root run of update-node, edit-config, install-caddy or
+`prepare-stake --rotate-address` migrates an existing testnet host in place; a mainnet host on
+the old layout is refused and installed fresh. The service account is no longer forced to UID
+1101.
+
+#### BLS passphrase
+The passphrase is an encrypted systemd credential, `/etc/telcoin/bls-passphrase.cred`
+(`host+tpm2` when the host has a TPM, else `host`), and the start script feeds it to the node
+on stdin. It is never on a command line or in a unit `Environment=`. setup-node takes it with
+`--passphrase-stdin`; `edit-config.sh --migrate-credential` moves an existing install, and
+`--reseal` re-encrypts it. Mainnet needs systemd 255 (Ubuntu 24.04). The old TPM-unseal method
+is gone.
+
+#### Node releases and images
+Releases are checked with `gpgv` against the keys in `lib/release-keys/`, and the tarball,
+`IMAGE_DIGEST` and chain-config hashes against `SHA256SUMS`. The first key ships with this
+release: `lib/release-keys/grantkee.asc` (primary `4E36D35A4AB61B589861D01AC7173F2377CA7573`,
+expires 2028-10-16), tracked by the updater like the scripts; the UI's copy takes it with
+`install-ui.sh --update`. A release needs a good signature by a shipped key; a BADSIG by any
+key, an expired or revoked key and an expired signature refuse it, and a further signature by
+a key that has not shipped yet is a warning that names its key id. Updates take release tags only
+(testnet `vX.Y.Z-adiri`, mainnet `vX.Y.Z`), refuse downgrades and check afterwards that a
+voting node votes again. Testnet also takes a release candidate, `vX.Y.Z-adiri-rcN`, when it is
+named; no newest-release pick takes one, and an rc sorts below its final. Source builds run as
+`tn-build`. Docker images run by digest from `ghcr.io/telcoin-association/telcoin-network`, where
+the release pipeline publishes them for both networks (testnet also takes the legacy Artifact
+Registry repository), and the newest image is the one the signed `IMAGE_DIGEST` of the newest
+release on GitHub names. On testnet, while there is no release on GitHub, the scripts fall back
+to the legacy repository and then `DEFAULT_DOCKER_IMAGE` (`v0.16.0-adiri`), with a warning.
+Docker comes from its own apt repository after a key check, and `live-restore` is on.
+
+#### Restarts and the committee
+Before setup-node, update-node, edit-config, migrate-node-naming or an add-on stops or
+restarts a committee node, it checks that the members already down plus this one would not
+halt consensus; `--allow-quorum-risk` overrides the check for a coordinated restart. The node
+unit and the Docker container run sandboxed, and mainnet logs to the journal by default.
+
+#### Firewall and add-ons
+firewall-setup takes `--ssh-from` and `--p2p-from` source lists (mainnet needs one for SSH),
+puts the old rules back on any failure, and hardens sshd through a drop-in. The VPN add-on
+reads revocable maintainer keys from a `KEYS` file and gives `tnadmin` a recovery command list
+instead of full root. Observability runs Alloy as its own account. Caddy pins its apt key,
+moves its admin API to a socket and needs a 16-character dashboard password.
+
+#### Node Manager UI
+The UI needs a per-install token on every call; `open-ui.sh` opens
+`http://127.0.0.1:8080/#t=<token>`. install-ui builds root-owned trees and a hashed venv. The
+wizard's default Docker image comes from the library's newest-image pick, never a release
+candidate.
+
+#### Before you update
+Run `update-scripts.sh` once, then let the next update-node or edit-config run migrate the
+layout, and run `sudo bash edit-config.sh --migrate-credential` when it suits you. UI hosts run
+the printed `install-ui.sh --update`. The release note has the full order and the new
+refusals.
+
+#### Still open
+The mainnet image repository is now set: ghcr.io, as for testnet. The mainnet genesis,
+committee and parameters hashes are not set yet, so no mainnet release can be verified and
+mainnet installs, Docker installs among them, are refused until they are. The mainnet public
+RPC is set at launch.
+
 ### Partner guide 1.4, October 2026 -- the guide describes telcoin-network main
 The MNO node guide (`docs/partner/mno-node-guide/`, version 1.4) now describes telcoin-network
 `main` at 98849a221, three merges past `v0.16.0-adiri` (#1622, #1647 and #1572, the epoch

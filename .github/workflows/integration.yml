@@ -1,0 +1,53 @@
+name: Integration
+
+# Host-level assertions on a fresh Ubuntu 24.04 VM (the GitHub-hosted runner is
+# a full VM with systemd and passwordless sudo). Each tools/tests/vm.d/P0-*.sh
+# runs as root and checks one hardening item on a fake install that needs no
+# node binary; an item whose code is not in the tree yet reports SKIP. The full
+# matrix (install methods, networks, a real node binary from the release
+# workflow) is a separate, later job.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  vm-assertions:
+    name: Ubuntu 24.04 VM assertions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # P0-09 checks the logrotate files with logrotate -d; P0-16 needs ufw and
+      # sshd. A package already on the image is left as it is.
+      - name: Install the tools the assertions use
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends logrotate ufw openssh-server
+      # The runner image differs from stock Ubuntu here: /opt, /usr/local and
+      # /usr/local/bin are not root 0755. Put the stock owner and mode back on
+      # those three directories (not recursive) before the assertions.
+      - name: Restore stock Ubuntu modes on /opt and /usr/local
+        run: |
+          stat -c '%U:%G %a %n' /opt /usr/local /usr/local/bin
+          sudo chown root:root /opt /usr/local /usr/local/bin
+          sudo chmod 0755 /opt /usr/local /usr/local/bin
+      - name: Run tools/tests/vm.d as root
+        run: |
+          fail=0
+          for f in tools/tests/vm.d/P0-*.sh; do
+            echo "::group::$f"
+            if ! sudo TN_VM_TEST=1 bash "$f"; then
+              echo "::error file=$f::VM assertions failed"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$fail"

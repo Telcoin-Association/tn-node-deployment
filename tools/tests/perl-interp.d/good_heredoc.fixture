@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fixture for tools/tests/perl_interp_test.sh: quoted heredoc programs and
+# heredocs that are data. Expected: no findings.
+
+perl - "$1" <<'EOF2'
+my $x = shift;
+print "${x}\n";
+EOF2
+
+perl <<"EOF2"
+print "$0\n";
+EOF2
+
+cat <<EOF2 | perl -ne 'print'
+$HOME
+${USER:-nobody}
+EOF2
+
+cat > "$2" <<EOF2
+perl -pe "s/a/b/"
+EOF2
