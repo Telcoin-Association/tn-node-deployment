@@ -9,7 +9,7 @@
 #     pip-compile --quiet --generate-hashes --allow-unsafe --strip-extras \
 #       --no-emit-index-url --no-header --output-file requirements.txt /tmp/req.in'
 # then put this comment back on top. ui/tests/requirements-dev.txt (pytest, for
-# CI only) is generated the same way from "pytest>=8,<9" with "-c ../requirements.txt".
+# CI only) is generated the same way from "pytest>=9,<10" with "-c ../requirements.txt".
 #
 blinker==1.9.0 \
     --hash=sha256:b4ce2265a7abece45e7cc896e98dbebe6cead56bcf805a3d23136d145f5445bf \
