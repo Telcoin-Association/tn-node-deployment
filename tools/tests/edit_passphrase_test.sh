@@ -390,6 +390,14 @@ case " \$* " in
     *" keytool --help "*)
         case "\$KT_MODE" in
             probe4) exit 125 ;;
+            dockerfail)
+                printf 'docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n' >&2
+                exit 1
+                ;;
+            claperr)
+                printf "error: unrecognized subcommand 'verify'\n\nUsage: telcoin-network keytool <COMMAND>\n\nFor more information, try '--help'.\n" >&2
+                exit 2
+                ;;
             lacks) printf 'Usage: telcoin keytool <COMMAND>\n\nCommands:\n  generate  Generate keys\n  set-rpc   Set the RPC\n  help      Print help\n' ;;
             *) printf 'Usage: telcoin keytool <COMMAND>\n\nCommands:\n  generate  Generate keys\n  verify    Check that the passphrase opens the BLS key\n  help      Print help\n' ;;
         esac
@@ -515,6 +523,50 @@ kt_run edit_bls_passphrase $'1\nkey-pass-correct-1\nkey-pass-correct-1\n'
 check "change, verify cannot start: refused with tn_keytool's reason" yes \
     "$(has "$OUT" "keytool verify could not run (exit 4: tn_keytool: data dir")"
 kt_unchanged "change, verify cannot start"
+
+# The probe's rc 1 or 2 is "not listed" only when the output is clap's own (a
+# Usage: line naming keytool); a runner or privilege-drop wrapper failing with 1
+# is rc 4 (busybox setpriv rejects --reuid with exit 1).
+KT_BIN="binary:$T/bin/telcoin-network"
+cp "$T/bin/setpriv" "$T/setpriv.wrapper" 2>/dev/null || : > "$T/setpriv.wrapper"
+cat > "$T/bin/setpriv.fail" <<STUB
+#!/bin/sh
+printf '%s\n' "setpriv \$*" >> "$ALL_ARGV"
+printf "setpriv: unrecognized option '--reuid'\n" >&2
+exit 1
+STUB
+chmod 0755 "$T/bin/setpriv.fail"
+_tn_root_binary_ok() { TN_ROOT_BINARY_REAL="$1"; return 0; }
+kt_has_rc() { local rc=0; tn_keytool_has "$1" verify >/dev/null 2>&1 || rc=$?; printf '%s\n' "$rc"; }
+for m in has lacks claperr probe4 dockerfail; do
+    KT_MODE="$m"
+    eval "KT_RC_${m}=\$(kt_has_rc docker:img:verify)"
+done
+check "tn_keytool_has: listed / not listed / clap error / docker 125 / docker 1 with its own message" \
+    "0 1 1 4 4" "${KT_RC_has} ${KT_RC_lacks} ${KT_RC_claperr} ${KT_RC_probe4} ${KT_RC_dockerfail}"
+mv -f "$T/bin/setpriv.fail" "$T/bin/setpriv"
+check "tn_keytool_has: a binary whose privilege drop fails with 1 could not be probed" 4 "$(kt_has_rc "$KT_BIN")"
+
+# The menu's change on that host: a warning, not "not in this release", and the
+# probe-rc-4 path (no check, the write goes ahead as without keytool verify).
+KT_MODE=has; kt_fixture stdin
+tn_launch_runner() { printf '%s\n' "$KT_BIN"; }
+kt_run edit_bls_passphrase $'1\nwrong-new-pass-2\nwrong-new-pass-2\n'
+check "change, privilege drop fails: warns that the probe could not run" yes \
+    "$(has "$OUT" "Could not run the node binary of ${KT_BIN} to see whether it has keytool verify; skipped")"
+check "change, privilege drop fails: not taken for a release without verify" no "$(has "$OUT" "not in this release")"
+check "change, privilege drop fails: the probe-rc-4 path (no check, then the write)" "write switch nomatch" "$(kt_calls)"
+cp "$T/setpriv.wrapper" "$T/bin/setpriv"
+[[ -s "$T/bin/setpriv" ]] || rm -f "$T/bin/setpriv"
+unset -f _tn_root_binary_ok
+
+# A clap error from the release is its answer: verify is not in it.
+KT_MODE=claperr; kt_fixture stdin
+tn_launch_runner() { printf 'docker:img:verify\n'; }
+kt_run edit_bls_passphrase $'1\nanything-value-3x\nanything-value-3x\n'
+check "change, clap error from the probe: the log line, no warning" "yes no" \
+    "$(has "$OUT" "keytool verify is not in this release; skipped") $(has "$OUT" "Could not run the node binary")"
+check "change, clap error from the probe: written without a check" "write switch nomatch" "$(kt_calls)"
 
 KT_MODE=has; kt_fixture stdin
 tn_launch_runner() { return 2; }
