@@ -1,0 +1,124 @@
+V6 verification of NET-2 (issue #47) and GOV (issues #30, #31, #47), tip 02adda6
+==================================================================================
+
+Harness counts
+- net2_harness.sh (own fixture tree, lint contract): bash 5.3 51 pass / 1 fail;
+  bash:3.2 (busybox awk/grep) 50 / 1 + 1 skip (root); ubuntu:24.04 (mawk) 50 / 1 + 1 skip.
+  The one FAIL is N1 below, the same in all three.
+- Real lint on the tree: clean, 148 annotated hits in 23 files (bash 5.3, bash:3.2, ubuntu:24.04).
+  On 170b079 (pre-sweep): 140 of 141 unannotated, rc 1 (matches the NET-2 claim).
+- tools/tests/network_hits_test.sh 53 checks, ci_pins_test.sh 49 checks: exit 0 under
+  bash 5.3, bash:3.2 and ubuntu:24.04.
+- gov_harness.sh 3b760cc..02adda6: 77 / 0. gov_mutation.sh: 8 / 8 required mutations caught,
+  4 probes missed (N5).
+- UI shell tests: host bash 5.3 548 / 1 / 9 checks (helper / install_ui / open_ui);
+  bash:3.2 as root 548 / 24 / 9; bash:3.2 non-root install_ui 1 check;
+  python:3.10-slim pytest 281 passed + 548 / 13 / 9.
+- --require-hashes install of both requirement files: pip freeze --all identical (19 lines)
+  between 3b760cc and 02adda6; non-comment lines identical.
+- actionlint 1.7.7: rc 0 on all three workflows (tip and 3b760cc); pyyaml parses all three.
+
+No-code-change proof (annotation commit 6d5401f against its parent 170b079)
+- bash --pretty-print identical for 8 of 10 .sh; lib/common.sh differs by blank lines only
+  (top-level comment lines); lib/observability.sh gains one Alloy comment line inside the
+  quoted heredoc of _obs_alloy_fallback (disclosed in the commit; N3).
+- ui/server.py AST identical with docstrings blanked; only the latest_source_tag docstring
+  changed (disclosed).
+- ui/static/index.html and observability/config.alloy identical once markers are stripped;
+  three HTML markers sit inside JS template literals (N2).
+- --help of setup-node, edit-config, update-node: byte-identical at b38afbd, 170b079,
+  6d5401f and 02adda6, under bash 5.3 and bash:3.2.
+
+Gaps NET-2 reported, on the tip
+- edit-config.sh edit_docker_image has a mainnet arm ("such as v1.0.0"): fixed.
+- remove-node.sh custom_container_lines matches ghcr.io/telcoin-association/telcoin-network: fixed.
+- Variables: DEFAULT_DOCKER_TAG, TESTNET_RPC_URL, GAR_IMAGE_BASE, TN_TESTNET_LEGACY_IMAGE_REPO,
+  DEFAULT_DOCKER_IMAGE: every message use is in a testnet arm or behind tn_release_tag_ok.
+  TN_KUMA_SRC is not (W3).
+
+Findings
+--------
+WARN W1 .github/CODEOWNERS line 1 / issue #30
+  CODEOWNERS says the issue #30 ruleset "requires a review from a code owner once it is
+  enabled"; the ruleset JSON in issue #30 sets "require_code_owner_review": false.
+  Repro: gh issue view 30 --repo Telcoin-Association/tn-node-deployment --json body -q .body | grep -n require_code_owner_review
+  Fix: set require_code_owner_review to true in the issue's ruleset JSON before it is applied.
+
+WARN W2 GOV docs note, ci_pins_test.sh required list / issue #30
+  The docs note and ci_pins_test.sh treat ten display names as the ruleset's required
+  contexts; the issue #30 JSON lists eight (no "fixture tests (macOS bash 3.2)", no
+  "Ubuntu 24.04 VM assertions"), and its first paragraph still names job ids
+  (parse-linux, parse-macos, shellcheck, ui-tests, checksums).
+  Repro: gh issue view 30 --repo Telcoin-Association/tn-node-deployment --json body -q .body | grep -c '"context"'   -> 8
+  Fix: add the two contexts to the issue JSON and rewrite its prose with display names.
+
+WARN W3 firewall-setup.sh view_status (FW owns it)
+  On NETWORK=mainnet the status view prints "[ERROR] TCP 43174 is CLOSED -- health
+  monitoring will fail" for the port that is closed by design there, and with the port open
+  to Anywhere it suggests "consider restricting to 104.155.184.201/32", the testnet monitor
+  (TN_KUMA_SRC through a variable, which the lint cannot see).
+  Repro: bash tasks/verify-fup/V6/kuma_mainnet_repro.sh
+  Fix: show the Uptime Kuma block only when is_testnet_like, else say the health port stays closed.
+
+NOTE N1 tools/check-network-hits.sh AWK_PROG (prev rule)
+  A line that starts with a marker comment and has code after the closing --> or */ still
+  counts as a marker line and covers the next line; the header and docs say the line above
+  must be nothing but the marker comment. No such line in the tree today.
+  Repro: bash tasks/verify-fup/V6/net2_harness.sh   (FAIL "html: a marker line that also holds code ...")
+  Fix: set prev only when nothing but blanks follows the closing --> or */ of the marker.
+
+NOTE N2 ui/static/index.html:2406, :3602, :3604
+  Three <!-- network-gated: --> markers are inside JS template literals assigned to
+  innerHTML, so they are rendered as comment nodes; the commit says the page script is
+  unchanged. No functional effect (the cards are found by querySelectorAll).
+  Repro: sed -n 3600,3604p ui/static/index.html
+  Fix: put those reasons on a // line above the template expression.
+
+NOTE N3 lib/observability.sh _obs_alloy_fallback
+  The marker line inside the quoted heredoc is written into the fallback config.alloy.
+  Repro: diff <(git show 170b079:lib/observability.sh | bash --pretty-print /dev/stdin) <(git show 6d5401f:lib/observability.sh | bash --pretty-print /dev/stdin)
+  Fix: reword the heredoc's "byte-identical to adiri" so the line names no testnet and needs no marker.
+
+NOTE N4 marker lines that split a comment sentence
+  The markers at lib/common.sh:1753, :2002, :4925 and observability/config.alloy:9, :14.
+  Repro: sed -n 1752,1756p lib/common.sh
+  Fix: rewrap so the marker sits at a sentence boundary.
+
+NOTE N5 tools/tests/ci_pins_test.sh
+  It does not catch a required check that still names its command but no longer gates:
+  "|| true" on the network-hits run, "if: false" on that step, continue-on-error on a
+  required job outside hardening-lint/ui-tests/parse-macos (fixture-tests), "if: false" on
+  a required job (a skipped required check passes).
+  Repro: bash tasks/verify-fup/V6/gov_mutation.sh   (4 MISSED probes)
+  Fix: check continue-on-error and if: false in every required job, and no "|| true" on the checked runs.
+
+NOTE N6 lint scope
+  ui/install-ui.sh (updater-tracked, UI_BUNDLE) has a hit at :442 and is not scanned
+  (NET-2 reported it with lib/release-keys/README).
+  Repro: grep -n adiri ui/install-ui.sh
+  Fix: add ui/install-ui.sh to the scan list.
+
+NOTE N7 messages seen on mainnet that name testnet forms (annotated truthfully)
+  edit-config.sh:2603/2633/2635, setup-node.sh:1228-1333 and the require_node_flag labels,
+  update-node.sh:298, check-node.sh:772, install-caddy.sh:788/793/2970/3036.
+  Repro: grep -n 'shown on every network' tasks/verify-fup/V6/network_hits_list_02adda6.txt
+  Fix: a network-neutral example host and per-network tag examples (NET-2 follow-up).
+
+NOTE N8 ci.yml ui-tests
+  install_ui_test.sh runs as the runner user, where it is 1 check (13 as Debian root, 24 in
+  bash:3.2 root).
+  Repro: docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/w" -w /w bash:3.2 bash ui/tests/install_ui_test.sh | tail -n 1
+  Fix: run it with sudo on the Linux runner if its root cases are meant to gate.
+
+Docs-note corrections
+- NET-2 "the line right above is a marker line (nothing but the marker comment)": the lint
+  takes any line that starts with the marker comment (N1); fix the lint or say "starts with".
+- NET-2: add that an HTML marker inside a JS template literal is rendered into the page.
+- NET-2 exit 2 list: also a missing lib/testnet-addons.env, a ROOT that is not a directory,
+  two ROOTs.
+- GOV "Required status checks ... ten names" and the Contributing draft: issue #30's JSON
+  requires eight and no code-owner review (W1, W2); true only once the issue JSON changes.
+- GOV "no continue-on-error step": the check rejects continue-on-error anywhere in those
+  three jobs, job level included.
+- GOV "pip freeze identical, 18 packages": pip freeze --all prints 19 lines in
+  python:3.10-slim; identical either way.
