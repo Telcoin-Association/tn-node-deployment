@@ -165,7 +165,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/dev/null 2>&1 \
     || ! tn_require_fns tn_migrate_ownership tn_passphrase_ok tn_update_lock_path \
         tn_write_root_file tn_write_start_script tn_write_node_unit tn_write_node_env \
-        tn_committee_down_guard tn_service_user_ok tn_service_user_can_run \
+        tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
