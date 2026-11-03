@@ -101,6 +101,8 @@ hash -r
 
 eval "$(tn_test_source_common)"
 set +e
+# The library's own root writer, for the cases that interrupt a real write.
+REAL_TWRF="$(declare -f tn_write_root_file)"
 
 WRITES="$T/writes"
 : > "$WRITES"
@@ -489,11 +491,12 @@ pd_reset() { # pd_reset META -- META into .node-meta; no config, empty chown and
     : > "$CHOWN_LOG"
     : > "$SYSTEMCTL_LOG"
 }
-pd() { # pd FUNC META [ENV=VAL...] -- FUNC in a subshell (sleep stubbed); output in $T/pd.out; its rc
+pd() { # pd FUNC META [ENV=VAL...] -- FUNC in a subshell (sleep stubbed, NETWORK=testnet as
+    # setup-observability.sh loads it from .node-meta); output in $T/pd.out; its rc
     local fn="$1"
     pd_reset "$2"
     shift 2
-    ( sleep() { :; }; for kv in "$@"; do export "${kv?}"; done; "$fn" ) >"$T/pd.out" 2>&1
+    ( sleep() { :; }; NETWORK=testnet; for kv in "$@"; do export "${kv?}"; done; "$fn" ) >"$T/pd.out" 2>&1
 }
 yn() { if "$@"; then echo yes; else echo no; fi; }
 cfg_has() { yn grep -qF -- "$1" "$CFG"; }
@@ -525,7 +528,7 @@ check_has "native logs disable: recorded" "ENABLE_OBSERVABILITY=false" "$(cat "$
 
 pd obs_disable_metrics "$DOCKER"; rc=$?
 check_rc "docker metrics disable: rc 0" 0 "$rc"
-check "docker metrics disable: root:root" "root:root $CFG" "$(cat "$CHOWN_LOG")"
+check "docker metrics disable: root:telcoin-alloy, like the token file" "root:telcoin-alloy $CFG" "$(cat "$CHOWN_LOG")"
 check "docker metrics disable: vendored __path__" "yes" "$(cfg_has "$VENDPATH")"
 
 pd obs_disable_metrics "$NATIVE" NODE_LOG_DIR=/srv/tn/node; rc=$?
@@ -602,7 +605,7 @@ check_lacks "native enable, Alloy does not stay up: not recorded as enabled" "EN
 oe 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=docker' true true; rc=$?
 check_rc "docker enable: rc 0" 0 "$rc"
 check "docker enable: the vendored file, byte for byte" "$(cat "$SRC")" "$(cat "$CFG")"
-check "docker enable: root:root" "root:root $CFG" "$(cat "$CHOWN_LOG")"
+check "docker enable: root:telcoin-alloy, like the token file" "root:telcoin-alloy $CFG" "$(cat "$CHOWN_LOG")"
 
 # The menu and --json callers say when a partial disable did not finish.
 ( confirm() { return 0; }; pause() { :; }; addon_meta_write_begin() { return 0; }
@@ -792,7 +795,7 @@ check_lacks "docker enable: the token is not printed" "$NEWTOK" "$(cat "$T/tk.ou
 tk_reset "$NATIVE"
 printf 'TN_NODE=old\nOBS_INGEST_TOKEN=%s\n' "$OLDTOK" > "$ENVF"
 printf 'OLD UNIT\n' > "$UNITF"
-( sleep() { :; }; obs_disable_metrics ) >"$T/tk.out" 2>&1
+( sleep() { :; }; NETWORK=testnet; obs_disable_metrics ) >"$T/tk.out" 2>&1
 check_rc "legacy host, metrics disable: rc 0" 0 $?
 check "legacy host, metrics disable: the token moved to the token file" "$OLDTOK" "$(cat "$TOKF" 2>/dev/null)"
 check_lacks "legacy host, metrics disable: no token line left" "OBS_INGEST_TOKEN" "$(cat "$ENVF")"
@@ -815,10 +818,11 @@ printf 'OBS_INGEST_TOKEN=%s\n' "$OLDTOK" > "$ENVF"
 check "obs_disable: an env file that holds the token is gone" "no" "$(yn test -e "$ENVF")"
 
 # obs_status: the token file line, never the value.
-tk_status() { # tk_status [STAT-OUTPUT] -- _obs_token_status with stat answering STAT-OUTPUT
+tk_status() { # tk_status [STAT-OUTPUT [LOGS METRICS]] -- _obs_token_status with stat
+    # answering STAT-OUTPUT, the pipelines on unless LOGS / METRICS say otherwise
     ( TK_STAT="${1:-}"
       if [[ -n "$TK_STAT" ]]; then stat() { printf '%s\n' "$TK_STAT"; }; fi
-      _obs_token_status ) >"$T/tk.out" 2>&1
+      _obs_token_status "${2:-true}" "${3:-true}" ) >"$T/tk.out" 2>&1
 }
 tk_reset "$NATIVE"
 printf '%s\n' "$NEWTOK" > "$TOKF"
@@ -867,7 +871,7 @@ rot_fixture() { # rot_fixture META [legacy] -- installed Alloy files on OLDTOK
     cp "$CFG" "$T/before/cfg"
     cp "$UNITF" "$T/before/unit"
 }
-rot() { ( sleep() { :; }; for kv in "$@"; do export "${kv?}"; done; obs_rotate_token "$NEWTOK" ) >"$T/tk.out" 2>&1; }
+rot() { ( sleep() { :; }; NETWORK=testnet; for kv in "$@"; do export "${kv?}"; done; obs_rotate_token "$NEWTOK" ) >"$T/tk.out" 2>&1; }
 rot_said() { yn grep -qF -- "$1" "$T/tk.out"; }
 restarts() { grep -c '^restart telcoin-alloy.service$' "$SYSTEMCTL_LOG"; }
 rot_fixture "$NATIVE"
@@ -942,7 +946,7 @@ check_has "docker rotate: CREDENTIALS_DIRECTORY in the env file" "CREDENTIALS_DI
 
 # setup-observability.sh --rotate-token: menu, one-shot, --json.
 rot_fixture "$NATIVE"
-( sleep() { :; }; addon_meta_write_begin() { return 0; }; rotate_token <<< "$NEWTOK" ) >"$T/tk.out" 2>&1
+( sleep() { :; }; NETWORK=testnet; addon_meta_write_begin() { return 0; }; rotate_token <<< "$NEWTOK" ) >"$T/tk.out" 2>&1
 check "menu rotate: the new token in the token file" "$NEWTOK" "$(cat "$TOKF")"
 check "menu rotate: said" "yes" "$(rot_said 'Ingest token rotated')"
 rot_fixture "$NATIVE"
@@ -1017,6 +1021,159 @@ check_rc "json rotate without a token: rc 1" 1 "$RC"
 check "json rotate without a token: said" "yes" "$(yn grep -qF 'rotating the ingest token needs the new token' "$T/ev")"
 check "json rotate without a token: done ok:false" "yes" "$(yn grep -qF '"event":"done","ok":false' "$T/ev")"
 check "json rotate without a token: the token file is untouched" "$OLDTOK" "$(cat "$TOKF")"
+
+
+# --- an override given at enable survives later renders; an empty URL is refused -----------
+# en META [ENV=VAL...] -- obs_enable (account, flags and the log dir stubbed) on a fresh
+# fixture with META; output in $T/tk.out; its rc.
+en() {
+    local m="$1"
+    shift
+    tk_reset "$m"
+    ( sleep() { :; }; obs_check_reth_flags() { return 0; }; obs_alloy_account() { return 0; }
+      obs_ensure_reth_flags() { return 0; }; _obs_data_dir() { printf '%s\n' "$T/dd"; }
+      tn_as_service_user() { return 0; }; obs_prepare_node_log_dir() { printf '%s\n' /var/log/telcoin/node; }
+      obs_install_alloy_native() { return 0; }
+      ENABLE_OBSERVABILITY=true; ENABLE_METRICS=false
+      for kv in "$@"; do export "${kv?}"; done
+      obs_enable "$NEWTOK" ) >"$T/tk.out" 2>&1
+}
+envf_has() { yn grep -qxF -- "$1" "$ENVF"; }
+DEVHUB="https://devhub.example:8443/loki/api/v1/push"
+en 'NETWORK=devnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=docker' NETWORK=devnet OBS_PUSH_URL="$DEVHUB"
+check_rc "devnet enable with --push-url: rc 0" 0 $?
+check "devnet enable: the URL in the env file" "yes" "$(envf_has "OBS_PUSH_URL=${DEVHUB}")"
+( sleep() { :; }; NETWORK=devnet; obs_rotate_token "other-token-0123456789abcdef" ) >"$T/tk.out" 2>&1
+check_rc "devnet rotate without --push-url: rc 0" 0 $?
+check "devnet rotate: the URL kept" "yes" "$(envf_has "OBS_PUSH_URL=${DEVHUB}")"
+check "devnet rotate: the host kept" "yes" "$(envf_has "OBS_PUSH_HOST=devhub.example")"
+OWNL="https://own.example/loki/api/v1/push"
+OWNM="https://own.example/api/v1/write"
+en 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=binary\nNODE_LOG_DIR=/var/log/telcoin/node' \
+    NETWORK=testnet ENABLE_METRICS=true OBS_PUSH_URL="$OWNL" OBS_METRICS_PUSH_URL="$OWNM"
+check_rc "testnet enable with an own hub: rc 0" 0 $?
+( sleep() { :; }; NETWORK=testnet; obs_disable_metrics ) >"$T/tk.out" 2>&1
+check_rc "own hub, metrics disable: rc 0" 0 $?
+check "own hub, metrics disable: the logs URL kept" "yes" "$(envf_has "OBS_PUSH_URL=${OWNL}")"
+check "own hub, metrics disable: the logs host kept" "yes" "$(envf_has "OBS_PUSH_HOST=own.example")"
+check "own hub, metrics disable: no metrics lines" "no" "$(yn grep -q '^OBS_METRICS_PUSH_URL=' "$ENVF")"
+check "own hub, metrics disable: the success line names the own hub" "yes" "$(yn grep -qF "logs still shipping → ${OWNL}" "$T/tk.out")"
+en 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=binary\nNODE_LOG_DIR=/var/log/telcoin/node' \
+    NETWORK=testnet ENABLE_METRICS=true OBS_PUSH_URL="$OWNL" OBS_METRICS_PUSH_URL="$OWNM"
+( sleep() { :; }; NETWORK=testnet; obs_disable_logs ) >"$T/tk.out" 2>&1
+check "own hub, logs disable: the metrics URL kept" "yes" "$(envf_has "OBS_METRICS_PUSH_URL=${OWNM}")"
+check "own hub, logs disable: the metrics host kept" "yes" "$(envf_has "OBS_METRICS_PUSH_HOST=own.example")"
+# A second enable without the flag keeps the first one's URL too.
+en 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=docker' NETWORK=testnet OBS_PUSH_URL="$OWNL"
+( sleep() { :; }; obs_check_reth_flags() { return 0; }; obs_alloy_account() { return 0; }
+  obs_ensure_reth_flags() { return 0; }; _obs_data_dir() { printf '%s\n' "$T/dd"; }
+  tn_as_service_user() { return 0; }
+  NETWORK=testnet; ENABLE_OBSERVABILITY=true; ENABLE_METRICS=true
+  obs_enable "$NEWTOK" ) >"$T/tk.out" 2>&1
+check "own hub, metrics enabled later: the logs URL kept" "yes" "$(envf_has "OBS_PUSH_URL=${OWNL}")"
+check "own hub, metrics enabled later: metrics on the default hub" "yes" "$(envf_has "OBS_METRICS_PUSH_URL=${OBS_METRICS_PUSH_URL_TESTNET}")"
+# No URL for an enabled pipeline: refused before anything is written.
+tk_reset 'NETWORK=devnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=docker'
+( NETWORK=devnet; ENABLE_OBSERVABILITY=true; ENABLE_METRICS=false; _obs_write_env_file ) >"$T/tk.out" 2>&1
+check_rc "devnet render without a logs URL: refused" 1 $?
+check "devnet render without a logs URL: names the pipeline" "yes" "$(yn grep -qF "There is no logs push URL for network 'devnet'" "$T/tk.out")"
+check "devnet render without a logs URL: names --push-url" "yes" "$(yn grep -qF 'Pass --push-url' "$T/tk.out")"
+check "devnet render without a logs URL: no env file" "no" "$(yn test -e "$ENVF")"
+( NETWORK=devnet; ENABLE_OBSERVABILITY=false; ENABLE_METRICS=true; obs_render_alloy ) >"$T/tk.out" 2>&1
+check_rc "devnet render without a metrics URL: refused" 1 $?
+check "devnet render without a metrics URL: names --metrics-push-url" "yes" "$(yn grep -qF 'Pass --metrics-push-url' "$T/tk.out")"
+check "devnet render without a metrics URL: nothing written" "" "$(cat "$TW")$(ls "$CFG" 2>/dev/null)"
+rot_fixture 'NETWORK=devnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=docker\nENABLE_OBSERVABILITY=true'
+printf 'TN_NODE=old\nOBS_PUSH_URL=\nOBS_PUSH_HOST=\n' > "$ENVF"
+( sleep() { :; }; NETWORK=devnet; obs_rotate_token "$NEWTOK" ) >"$T/tk.out" 2>&1
+check_rc "devnet rotate with an empty URL: refused" 1 $?
+check "devnet rotate with an empty URL: the token file untouched" "$OLDTOK" "$(cat "$TOKF")"
+check "devnet rotate with an empty URL: nothing written, no restart" "0 0" "$(wc -l < "$TW" | tr -d ' ') $(restarts)"
+
+# The menu and --rotate-token own an EXIT trap that removes an interrupted write.
+( check_root() { :; }; detect_distro() { :; }; so_lock_begin() { :; }
+  main_menu() { trap -p EXIT > "$T/menu-trap"; }; main </dev/null ) >/dev/null 2>&1
+check "menu: the EXIT trap is so_on_exit" "yes" "$(yn grep -q so_on_exit "$T/menu-trap")"
+# A SIGTERM while the token file's temp copy is written (chown made slow) leaves no
+# temp file holding the new token.
+rot_fixture "$NATIVE"
+rm -f "$T/in-chown"
+( eval "$REAL_TWRF"
+  chown() { : > "$T/in-chown"; sleep 5; }
+  check_root() { :; }; detect_distro() { :; }; addon_meta_write_begin() { return 0; }
+  main --rotate-token --token-stdin <<< "$NEWTOK" ) >"$T/term.out" 2>&1 &
+TERM_PID=$!
+i=0
+while [[ ! -e "$T/in-chown" && "$i" -lt 20 ]]; do sleep 1; i=$((i + 1)); done
+kill -TERM "$TERM_PID" 2>/dev/null
+wait "$TERM_PID"
+check_rc "SIGTERM during the token write: the run ends 143" 143 $?
+check "SIGTERM during the token write: it was in the write" "yes" "$(yn test -e "$T/in-chown")"
+check "SIGTERM during the token write: no temp file left" "" "$(ls -A "$OBS_ETC_DIR" | grep '^\.tn\.')"
+check "SIGTERM during the token write: the token file still holds the old token" "$OLDTOK" "$(cat "$TOKF")"
+
+# obs_disable says so, and returns 1, when the token file is still there.
+tk_reset "$NATIVE"
+printf '%s\n' "$NEWTOK" > "$TOKF"
+( _tn_shred() { :; }; obs_disable ) >"$T/tk.out" 2>&1
+check_rc "obs_disable, the token file stays: rc 1" 1 $?
+check "obs_disable, the token file stays: named" "yes" "$(yn grep -qF "Could not delete ${TOKF}, which still holds the ingest token" "$T/tk.out")"
+check_lacks "obs_disable, the token file stays: no shredded line" "ingest token file was shredded" "$(cat "$T/tk.out")"
+check_has "obs_disable, the token file stays: both pipelines still recorded off" "ENABLE_OBSERVABILITY=false" "$(cat "$META")"
+tk_reset 'NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=binary\nENABLE_OBSERVABILITY=true\nENABLE_METRICS=false'
+printf '%s\n' "$NEWTOK" > "$TOKF"
+: > "$T/ev"
+( check_root() { :; }; detect_distro() { :; }; addon_meta_write_begin() { return 0; }
+  json_setup_fds() { exec 3>>"$T/ev"; }; _tn_shred() { :; }
+  main --json --disable-logs </dev/null ) >"$T/tk.out" 2>&1
+check_rc "json disable, the token file stays: rc 1" 1 $?
+check "json disable, the token file stays: done ok:false" "yes" "$(yn grep -qF '"event":"done","ok":false' "$T/ev")"
+if [[ "$(id -u)" != 0 ]]; then
+    tk_reset "$NATIVE"
+    printf '%s\n' "$NEWTOK" > "$TOKF"
+    chmod 0555 "$OBS_ETC_DIR"
+    ( obs_disable ) >"$T/tk.out" 2>&1
+    rc=$?
+    chmod 0755 "$OBS_ETC_DIR"
+    check_rc "obs_disable in a read-only Alloy dir: rc 1" 1 "$rc"
+    check "obs_disable in a read-only Alloy dir: the file is named" "yes" "$(yn grep -qF "Could not delete ${TOKF}" "$T/tk.out")"
+else
+    skip "obs_disable in a read-only Alloy dir: rc 1" "root writes into a read-only directory"
+fi
+
+# A first write that fails puts nothing back that did not change; a rollback is byte-exact.
+rot_fixture "$NATIVE"
+rot TRF_FAIL=ingest-token; rc=$?
+check_rc "rotate, the token write fails: rc 1" 1 "$rc"
+check "rotate, the token write fails: no file is put back" "0" "$(grep -c 'Could not put' "$T/tk.out")"
+check "rotate, the token write fails: only the failed write was tried" "$TOKF 0640 telcoin-alloy" "$(cat "$TW")"
+check "rotate, the token write fails: no restart" "0" "$(restarts)"
+rot_fixture "$NATIVE"
+printf 'TN_NODE=old' > "$ENVF"
+printf 'OLD CONFIG\n\n\n' > "$CFG"
+cp "$ENVF" "$T/before/env"
+cp "$CFG" "$T/before/cfg"
+rot ALLOY_RESTART_FAILS=1; rc=$?
+check_rc "rotate rollback, odd trailing newlines: rc 1" 1 "$rc"
+check "rotate rollback: the env file without a final newline, byte for byte" "yes" "$(yn cmp -s "$T/before/env" "$ENVF")"
+check "rotate rollback: config.alloy with three final newlines, byte for byte" "yes" "$(yn cmp -s "$T/before/cfg" "$CFG")"
+
+# With both pipelines off, a missing token is expected: information, no --rotate-token advice.
+tk_reset "$NATIVE"
+tk_status "" false false
+check "status, both pipelines off, no token: information" "yes" "$(yn grep -qF 'No ingest token file: log and metrics shipping are off' "$T/tk.out")"
+check_lacks "status, both pipelines off, no token: no --rotate-token advice" "--rotate-token" "$(cat "$T/tk.out")"
+printf 'OBS_INGEST_TOKEN=%s\n' "$OLDTOK" > "$ENVF"
+tk_status "" false false
+check "status, both pipelines off, token in the env file: delete it or enable" "yes" "$(yn grep -qF 'although log and metrics shipping are off' "$T/tk.out")"
+check_lacks "status, both pipelines off, token in the env file: no --rotate-token advice" "--rotate-token" "$(cat "$T/tk.out")"
+
+# The rotate success line says how to check that Alloy ships.
+rot_fixture "$NATIVE"
+rot; rc=$?
+check "rotate: says to check that it ships" "yes" "$(rot_said 'Check that it ships')"
+check "rotate: the logs counter to read" "yes" "$(rot_said 'grep loki_write_sent_bytes_total')"
+check "rotate: the metrics counter to read" "yes" "$(rot_said 'grep prometheus_remote_storage_samples_total')"
 
 OBS_ETC_DIR="$SAVED_OBS_ETC_DIR"
 
