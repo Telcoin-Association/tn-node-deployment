@@ -12,7 +12,8 @@
 # were read at run time), and an unannotated adiri line in every excluded path.
 # Checks the exact findings and exit 1, the --list reasons, exit 0 and the
 # count once every hit is annotated, the default root (the tree the lint lives
-# in), and the exit-2 errors. bash 3.2 safe.
+# in), the exit-2 errors, and last the repository itself: every hit of the
+# shipped files must carry a reason. bash 3.2 safe.
 # =============================================================================
 
 set -u
@@ -286,5 +287,13 @@ rc=$?
 check_rc "a scanned file is missing: exit 2" 2 "$rc"
 check_has "a scanned file is missing: said" \
     "check-network-hits: $E/ui/server.py is missing; the lint scans it by name" "$out"
+
+# --- the tree --------------------------------------------------------------------
+
+# Every testnet name and hub address of the shipped files carries a reason.
+out="$("$SH" "$LINT" "$TN_TEST_REPO" 2> "$T/err")"
+rc=$?
+check_rc "the tree: exit 0" 0 "$rc"
+check "the tree: no unannotated hit" "" "$out"
 
 finish
