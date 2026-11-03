@@ -1177,6 +1177,65 @@ check "rotate: says to check that it ships" "yes" "$(rot_said 'Check that it shi
 check "rotate: the logs counter to read" "yes" "$(rot_said 'grep loki_write_sent_bytes_total')"
 check "rotate: the metrics counter to read" "yes" "$(rot_said 'grep prometheus_remote_storage_samples_total')"
 
+
+# --- an override is recorded as intent; a stored default follows the release default -------
+# A release that changes the default hub is modelled by OBS_PUSH_URL_TESTNET /
+# OBS_METRICS_PUSH_URL_TESTNET (what lib/testnet-addons.env sets) holding another URL
+# on the later run.
+NEWHUBL="https://newhub.example/loki/api/v1/push"
+NEWHUBM="https://newhub.example/api/v1/write"
+NATIVE_EN='NETWORK=testnet\nOWNERSHIP_LAYOUT=2\nINSTALL_METHOD=binary\nNODE_LOG_DIR=/var/log/telcoin/node'
+rot2() { # rot2 [ENV=VAL...] -- obs_rotate_token on the current fixture; output in $T/tk.out; its rc
+    ( sleep() { :; }; NETWORK=testnet; for kv in "$@"; do export "${kv?}"; done
+      obs_rotate_token "other-token-0123456789abcdef" ) >"$T/tk.out" 2>&1
+}
+en "$NATIVE_EN" NETWORK=testnet ENABLE_METRICS=true
+check_rc "default enable: rc 0" 0 $?
+check "default enable: the release default URL" "yes" "$(envf_has "OBS_PUSH_URL=${OBS_PUSH_URL_TESTNET}")"
+check "default enable: no override marker" "no" "$(yn grep -q '_SOURCE=' "$ENVF")"
+rot2 OBS_PUSH_URL_TESTNET="$NEWHUBL" OBS_METRICS_PUSH_URL_TESTNET="$NEWHUBM"
+check_rc "default, then the release default changes, then rotate: rc 0" 0 $?
+check "the new release default reaches the host (logs)" "yes" "$(envf_has "OBS_PUSH_URL=${NEWHUBL}")"
+check "the new release default reaches the host (logs host)" "yes" "$(envf_has "OBS_PUSH_HOST=newhub.example")"
+check "the new release default reaches the host (metrics)" "yes" "$(envf_has "OBS_METRICS_PUSH_URL=${NEWHUBM}")"
+check "the change is said (logs)" "yes" \
+    "$(yn grep -qF "The logs push URL follows the release default: ${NEWHUBL} (was ${OBS_PUSH_URL_TESTNET})." "$T/tk.out")"
+check "the change is said (metrics)" "yes" "$(yn grep -qF "The metrics push URL follows the release default: ${NEWHUBM}" "$T/tk.out")"
+rot2 OBS_PUSH_URL_TESTNET="$NEWHUBL" OBS_METRICS_PUSH_URL_TESTNET="$NEWHUBM"
+check "an unchanged URL is not said again" "no" "$(yn grep -q 'push URL' "$T/tk.out")"
+
+en "$NATIVE_EN" NETWORK=testnet ENABLE_METRICS=true OBS_PUSH_URL="$OWNL" OBS_METRICS_PUSH_URL="$OWNM"
+check "override enable: the logs marker" "yes" "$(envf_has 'OBS_PUSH_URL_SOURCE=override')"
+check "override enable: the metrics marker" "yes" "$(envf_has 'OBS_METRICS_PUSH_URL_SOURCE=override')"
+check "the marker never carries the token" "override override" "$(sed -n 's/^OBS_[A-Z_]*_SOURCE=//p' "$ENVF" | paste -sd' ' -)"
+check_lacks "the env file never carries the token" "$NEWTOK" "$(cat "$ENVF")"
+rot2 OBS_PUSH_URL_TESTNET="$NEWHUBL" OBS_METRICS_PUSH_URL_TESTNET="$NEWHUBM"
+check_rc "override, then the release default changes, then rotate: rc 0" 0 $?
+check "the override is kept (logs)" "yes" "$(envf_has "OBS_PUSH_URL=${OWNL}")"
+check "the override is kept (metrics)" "yes" "$(envf_has "OBS_METRICS_PUSH_URL=${OWNM}")"
+check "the override is still marked" "yes" "$(envf_has 'OBS_PUSH_URL_SOURCE=override')"
+check "a kept override is not said" "no" "$(yn grep -q 'push URL' "$T/tk.out")"
+rot2 OBS_PUSH_URL=default
+check_rc "--push-url default: rc 0" 0 $?
+check "--push-url default: back on the release default" "yes" "$(envf_has "OBS_PUSH_URL=${OBS_PUSH_URL_TESTNET}")"
+check "--push-url default: the logs marker is gone" "no" "$(yn grep -q '^OBS_PUSH_URL_SOURCE=' "$ENVF")"
+check "--push-url default: the metrics override stays" "yes" "$(envf_has 'OBS_METRICS_PUSH_URL_SOURCE=override')"
+check "--push-url default: said" "yes" "$(yn grep -qF "The logs push URL follows the release default: ${OBS_PUSH_URL_TESTNET} (was ${OWNL})." "$T/tk.out")"
+rot2 OBS_METRICS_PUSH_URL=https://other.example/api/v1/write
+check "a new override is said with its flag" "yes" \
+    "$(yn grep -qF 'The metrics push URL is now https://other.example/api/v1/write (set with --metrics-push-url; was' "$T/tk.out")"
+
+# An env file from 2.0.x has no marker: its URL counts as the default.
+rot_fixture "$NATIVE" legacy
+printf 'TN_NODE=old\nOBS_PUSH_URL=%s\nOBS_INGEST_TOKEN=%s\nTN_METRICS_ADDR=127.0.0.1:9101\nOBS_METRICS_PUSH_URL=%s\n' "$OWNL" "$OLDTOK" "$OWNM" > "$ENVF"
+rot2
+check_rc "2.0.x env file, rotate: rc 0" 0 $?
+check "2.0.x env file: its URL counts as the default (logs)" "yes" "$(envf_has "OBS_PUSH_URL=${OBS_PUSH_URL_TESTNET}")"
+check "2.0.x env file: its URL counts as the default (metrics)" "yes" "$(envf_has "OBS_METRICS_PUSH_URL=${OBS_METRICS_PUSH_URL_TESTNET}")"
+check "2.0.x env file: the switch is said" "yes" "$(yn grep -qF "The logs push URL follows the release default: ${OBS_PUSH_URL_TESTNET} (was ${OWNL})." "$T/tk.out")"
+check "2.0.x env file: no marker written" "no" "$(yn grep -q '_SOURCE=' "$ENVF")"
+check_lacks "2.0.x env file: the token left the env file" "$OLDTOK" "$(cat "$ENVF")"
+
 OBS_ETC_DIR="$SAVED_OBS_ETC_DIR"
 
 finish
