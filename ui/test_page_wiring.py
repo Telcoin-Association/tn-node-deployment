@@ -89,7 +89,10 @@ class FirewallEnableTest(unittest.TestCase):
         self.assertIn("'every address'", kept)
         self.assertIn("f.p2p_sources_note", kept)
         limit = function_body("fwNewFlowLimitText")
-        self.assertIn("' new flows per minute per source after a burst of '", limit)
+        self.assertIn("' packets per minute of new, unanswered flows per source after a burst of '", limit)
+        self.assertNotIn("new flows per minute", limit)
+        self.assertIn('title="Counts the packets of P2P flows this node has not answered yet, per source '
+                      '(an IPv4 address or an IPv6 /64); answered flows are not limited."', card)
         self.assertIn("l.persistent===false ? ' (not restored at boot)'", limit)
         text = page()
         for reason, words in (("p2p-list", "a P2P source list is set"),
