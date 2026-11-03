@@ -347,8 +347,7 @@ if [[ $IS_ROOT == 1 ]]; then
 else
     check_has "status: rules loaded not checked without root" "info  audit rules loaded: not checked (auditctl -l needs root)" "$out"
 fi
-check "status: baseline and its age" yes \
-    "$(printf '%s\n' "$out" | grep -q '^ok    AIDE baseline: /var/lib/aide/telcoin-node.db, made 0 day(s) ago' && echo yes || echo no)"
+check_has "status: baseline and its age" "ok    AIDE baseline: /var/lib/aide/telcoin-node.db, made 0 day(s) ago (check: sudo aide --config=/etc/aide/telcoin-node.conf --check)" "$out"
 if [[ $IS_ROOT == 1 ]]; then
     : > "$HB_T/kernel.rules"
     out="$(tn_host_baseline_status)"; rc=$?
