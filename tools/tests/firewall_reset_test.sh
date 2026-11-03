@@ -11,8 +11,8 @@
 # TN_P2P_NEW_FLOW_BURST and their refusals, the warning without nft, the boot
 # copy (/etc/telcoin/p2p-limit.nft and telcoin-p2p-limit.service, written and
 # enabled with the table, disabled and removed with it), "Manage node ports"
-# rewriting it, and the status line and the --json status field
-# p2p_new_flow_limit.
+# rewriting it, the status line and the --json status field p2p_new_flow_limit,
+# and the expected rules naming the P2P source list.
 #
 #   bash tools/tests/firewall_reset_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/firewall_reset_test.sh
@@ -595,6 +595,37 @@ fw_p2p_ports() { printf '49590 primary\n49594 worker-0\n'; }
 printf 'NETWORK=testnet\n' > "$META"
 NETWORK=testnet
 rm -f "$TABLE"; boot_reset
+
+# --- the expected rules name the P2P source list ------------------------------------
+# desired_p2p SPEC -- the desired-rule object of SPEC in the --json status.
+desired_p2p() {
+    json_fw_status 3>"$T/status.json" >/dev/null 2>&1
+    grep -o "{\"spec\":\"$1\",[^}]*}" "$T/status.json"
+}
+mkdir -p "$TN_ROOT_PREFIX/etc/systemd/system"
+printf '[Service]\n' > "$TN_ROOT_PREFIX/etc/systemd/system/telcoin.service"
+printf 'NETWORK=testnet\nP2P_ALLOW_FROM=10.0.0.0/8,2001:db8::/32\n' > "$META"
+NETWORK=testnet; fresh_flags; reset_state yes
+check "expected: P2P primary row names the stored list" '{"spec":"49590/udp","label":"Node P2P (primary)","source":"10.0.0.0/8,2001:db8::/32","ok":false}' "$(desired_p2p 49590/udp)"
+check "expected: P2P worker row names the stored list" '{"spec":"49594/udp","label":"Node P2P (worker)","source":"10.0.0.0/8,2001:db8::/32","ok":false}' "$(desired_p2p 49594/udp)"
+check "expected: SSH row without a list says anywhere" '{"spec":"22/tcp","label":"SSH","source":"anywhere","ok":true}' "$(desired_p2p 22/tcp)"
+fresh_flags; FW_P2P_FROM="198.51.100.0/24"
+check_has "expected: the run's --p2p-from list wins" "$(printf '49590/udp\tNode P2P (primary)\t198.51.100.0/24')" "$(desired_firewall_rules 2>/dev/null)"
+fresh_flags; FW_P2P_ANYWHERE=true
+check_has "expected: --p2p-anywhere says anywhere" "$(printf '49590/udp\tNode P2P (primary)\tanywhere')" "$(desired_firewall_rules 2>/dev/null)"
+printf 'NETWORK=testnet\n' > "$META"
+fresh_flags; reset_state yes
+printf 'allow 22/tcp\nallow 49590/udp\nallow 49594/udp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+check "expected: P2P row without a list says anywhere" '{"spec":"49590/udp","label":"Node P2P (primary)","source":"anywhere","ok":true}' "$(desired_p2p 49590/udp)"
+view_status </dev/null > "$T/view.out" 2>&1
+check_has "expected: status screen row" "yes" "$(grep -q 'Node P2P (primary) (49590/udp)' "$T/view.out" && echo yes)"
+printf 'NETWORK=testnet\nP2P_ALLOW_FROM=10.0.0.0/8\n' > "$META"
+printf 'allow 22/tcp\n' > "$TN_ROOT_PREFIX/etc/ufw/user.rules"
+view_status </dev/null > "$T/view.out" 2>&1
+check_has "expected: status screen names the list of a missing rule" "yes" "$(grep -q 'Node P2P (primary) (49590/udp) -- MISSING (expected from 10.0.0.0/8)' "$T/view.out" && echo yes)"
+rm -f "$TN_ROOT_PREFIX/etc/systemd/system/telcoin.service"
+printf 'NETWORK=testnet\n' > "$META"
+fresh_flags
 
 # --- fw_persist_sources -----------------------------------------------------------
 META_CALLS="$T/meta.calls"
