@@ -58,7 +58,10 @@ class FirewallEnableTest(unittest.TestCase):
     def test_the_form_posts_the_sources_and_shows_the_engine_message(self):
         body = function_body("enableFirewall")
         self.assertIn("'/api/firewall/enable'", body)
-        self.assertIn("JSON.stringify({ssh_from: src.list})", body)
+        self.assertIn("JSON.stringify({ssh_from: src.list, p2p_from: p2p.list})", body)
+        self.assertIn("fwSources(($('#fwSshFrom')||{}).value, 'SSH')", body)
+        self.assertIn("fwSources(($('#fwP2pFrom')||{}).value, 'P2P')", body)
+        self.assertIn("peers outside that list cannot reach this node", body)
         # The engine's refusal (r.error) is shown as text, not as markup.
         self.assertIn("show(r.error||'firewall enable failed')", body)
         self.assertIn("errBox.textContent=msg", body)
@@ -67,12 +70,31 @@ class FirewallEnableTest(unittest.TestCase):
         body = function_body("loadFirewall")
         self.assertIn("(!f.active && !isReadonly())", body)
         self.assertIn('id="fwSshFrom"', body)
+        self.assertIn('id="fwP2pFrom"', body)
         self.assertNotIn("select option 2", body)
 
     def test_the_page_rule_matches_the_server_limits(self):
-        body = function_body("fwSshSources")
+        self.assertNotIn("fwSshSources", page())
+        body = function_body("fwSources")
         self.assertIn("items.length > 16", body)
         self.assertIn("mask<8", body)
+        self.assertIn("'at most 16 '+what+' sources'", body)
+
+    def test_the_card_shows_the_kept_p2p_list_and_the_new_flow_limit(self):
+        card = function_body("loadFirewall")
+        self.assertIn("esc(fwP2pSourcesText(f))", card)
+        self.assertIn("fwNewFlowLimitText(f.p2p_new_flow_limit)", card)
+        self.assertIn("esc(limitText)", card)
+        self.assertIn("'every address'", function_body("fwP2pSourcesText"))
+        limit = function_body("fwNewFlowLimitText")
+        self.assertIn("' new flows per minute per source after a burst of '", limit)
+        self.assertIn("l.persistent===false ? ' (not restored at boot)'", limit)
+        text = page()
+        for reason, words in (("p2p-list", "a P2P source list is set"),
+                              ("nft-missing", "nftables is not installed"),
+                              ("not-applied", "not applied yet; enable the firewall"),
+                              ("unreadable", "state could not be read")):
+            self.assertIn("'%s': '%s'," % (reason, words), text)
 
 
 class StatusPageLinkTest(unittest.TestCase):

@@ -4073,14 +4073,31 @@ def api_clear_rotated(node_type):
 FIREWALL_PORTS = ("49590/udp", "49594/udp", "43174/tcp")
 
 
+def p2p_sources_kept():
+    """The P2P source list .node-meta keeps (P2P_ALLOW_FROM) as a list, [] when
+    it keeps none (P2P open to every address), None when .node-meta cannot be
+    read."""
+    meta = read_meta()
+    if not meta:
+        return None
+    return [x.strip() for x in meta.get("P2P_ALLOW_FROM", "").split(",") if x.strip()]
+
+
 @app.route("/api/firewall")
 def api_firewall():
+    """firewall-setup.sh --json --status as the engine prints it (with
+    p2p_new_flow_limit when the engine reports it), plus `p2p_sources`: the P2P
+    source list the node keeps, from .node-meta."""
     rc, out, err = run(["sudo", "-n", HELPER, "firewall-status"], timeout=20)
     if rc == 0 and out:
         try:
-            return jsonify(json.loads(out.splitlines()[-1]))
+            d = json.loads(out.splitlines()[-1])
         except (ValueError, json.JSONDecodeError):
-            pass
+            d = None
+        if isinstance(d, dict):
+            if "p2p_sources" not in d:
+                d["p2p_sources"] = p2p_sources_kept()
+            return jsonify(d)
     # Helper/sudo/ufw unavailable -- degrade gracefully (no 500).
     return jsonify({
         "installed": False, "active": False, "default_incoming": "",
@@ -4118,10 +4135,11 @@ def api_firewall_port():
     return jsonify({"ok": False, "error": err or out or "firewall update failed"})
 
 
-# SSH sources for firewall-setup.sh --ssh-from, as lib/common.sh
-# validate_health_src takes them: an address, or a CIDR with a mask of /8 or
-# narrower (no leading zeros); never the unspecified address or /0. At most 16;
-# the page may separate them with commas, spaces or new lines.
+# SSH and P2P sources for firewall-setup.sh --ssh-from / --p2p-from, as
+# lib/common.sh validate_health_src takes them: an address, or a CIDR with a mask
+# of /8 or narrower (no leading zeros); never the unspecified address or /0. At
+# most 16 in each list; the page may separate them with commas, spaces or new
+# lines.
 FW_SSH_SOURCES_MAX = 16
 _FW_SRC_CHARS_RE = re.compile(r"[0-9A-Fa-f.:]+(?:/[0-9]{1,3})?")
 _FW_MASK_RE = re.compile(r"[1-9][0-9]{0,2}")
@@ -4145,27 +4163,39 @@ def ssh_source_ok(src):
     return True
 
 
-def ssh_source_list(text):
-    """(comma list, None) for the operator's SSH sources ("" when none were
-    given), or (None, error)."""
+def fw_source_list(text, field, what):
+    """(comma list, None) for the operator's `what` sources sent in `field` (""
+    when none were given), or (None, error)."""
     if not isinstance(text, str):
-        return None, "ssh_from must be text"
+        return None, "%s must be text" % field
     items = [x for x in re.split(r"[\s,]+", text) if x]
     if len(items) > FW_SSH_SOURCES_MAX:
-        return None, "at most %d SSH sources" % FW_SSH_SOURCES_MAX
+        return None, "at most %d %s sources" % (FW_SSH_SOURCES_MAX, what)
     for item in items:
         if not ssh_source_ok(item):
-            return None, ("not an address or a CIDR of /8 or narrower: %s" % item)[:200]
+            return None, ("%s sources: not an address or a CIDR of /8 or narrower: %s"
+                          % (what, item))[:200]
     return ",".join(items), None
+
+
+def ssh_source_list(text):
+    return fw_source_list(text, "ssh_from", "SSH")
+
+
+def p2p_source_list(text):
+    return fw_source_list(text, "p2p_from", "P2P")
 
 
 @app.route("/api/firewall/enable", methods=["POST"])
 def api_firewall_enable():
     """Enable ufw with firewall-setup.sh's lockout-safe defaults. POST
-    {"ssh_from": "<sources>"}: the sources become --ssh-from, so SSH is allowed
-    from them only; without them the engine uses the list .node-meta keeps, and
-    on mainnet refuses when there is none. The engine's message comes back as
-    is in `error`."""
+    {"ssh_from": "<sources>", "p2p_from": "<sources>"}, both optional: the SSH
+    sources become --ssh-from, so SSH is allowed from them only; the P2P sources
+    become --p2p-from, so the node's P2P ports accept them only. Without a list
+    the engine uses the one .node-meta keeps (on mainnet it refuses when there is
+    no SSH list); without any P2P list the P2P ports stay open to every address.
+    The helper gets `firewall-enable [<ssh>|-] [<p2p>]`. The engine's message
+    comes back as is in `error`."""
     data, err = _json_body()
     if err:
         return err
@@ -4175,10 +4205,16 @@ def api_firewall_enable():
     ssh_from, error = ssh_source_list(data.get("ssh_from") or "")
     if error:
         return jsonify({"ok": False, "error": error}), 400
+    p2p_from, error = p2p_source_list(data.get("p2p_from") or "")
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
     argv = ["sudo", "-n", HELPER, "firewall-enable"]
-    if ssh_from:
-        argv.append(ssh_from)
+    if ssh_from or p2p_from:
+        argv.append(ssh_from or "-")
+    if p2p_from:
+        argv.append(p2p_from)
     rc, out, err = run(argv, timeout=180)
+    clear_meta_cache()      # the engine may have rewritten SSH_ALLOW_FROM / P2P_ALLOW_FROM
     done = _parse_json_tail(out)
     if isinstance(done, dict) and "ok" in done:
         ok = done.get("ok") is True

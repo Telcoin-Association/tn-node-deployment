@@ -441,6 +441,9 @@ class CrossFileContractTest(ServerTestCase):
                                                    "state": state})
         c.post("/api/firewall/enable", json={})
         c.post("/api/firewall/enable", json={"ssh_from": "203.0.113.7/32, 2001:db8::/48"})
+        c.post("/api/firewall/enable", json={"ssh_from": "203.0.113.7/32",
+                                             "p2p_from": "198.51.100.0/24, 2001:db8::/32"})
+        c.post("/api/firewall/enable", json={"p2p_from": "198.51.100.0/24"})
         server._write_times.clear()     # the write rate limit would refuse the rest
         c.post("/api/setup/observer/keygen", json=FULL_SETUP, buffered=True)
         c.post("/api/setup/observer/finalize", json=FULL_SETUP, buffered=True)
@@ -1104,6 +1107,93 @@ class FirewallEnableTest(ServerTestCase):
         rules = helper_rules(split_transitional(sudoers_text())[0])
         self.assertIn("firewall-enable", rules)
         self.assertIn("firewall-enable *", rules)
+        for args in ([], ["203.0.113.7"], ["203.0.113.7", "198.51.100.0/24"], ["-", "198.51.100.0/24"]):
+            with self.subTest(args=args):
+                self.assertTrue(sudo_allows(["sudo", "-n", HELPER_PATH, "firewall-enable"] + args, rules))
+
+    def test_a_p2p_list_comes_after_the_ssh_list(self):
+        for body, want in (
+                ({"ssh_from": "203.0.113.7", "p2p_from": "198.51.100.0/24, 2001:db8::/32"},
+                 ["203.0.113.7", "198.51.100.0/24,2001:db8::/32"]),
+                ({"p2p_from": "198.51.100.7"}, ["-", "198.51.100.7"]),
+                ({"ssh_from": " ", "p2p_from": "198.51.100.7\n198.51.100.8"},
+                 ["-", "198.51.100.7,198.51.100.8"]),
+                ({"ssh_from": "203.0.113.7", "p2p_from": ""}, ["203.0.113.7"]),
+                ({"ssh_from": "203.0.113.7", "p2p_from": None}, ["203.0.113.7"]),
+                ({"p2p_from": "  "}, [])):
+            with self.subTest(body=body):
+                self.assertTrue(self.post(body).get_json()["ok"])
+                self.assertEqual(self.helper_calls(),
+                                 [["sudo", "-n", HELPER_PATH, "firewall-enable"] + want])
+
+    def test_bad_p2p_sources_never_reach_the_helper(self):
+        bad = ["0.0.0.0/0", "0.0.0.0", "::/0", "::", "10.0.0.0/7", "010.0.0.1", "10.0.0.256",
+               "10.0.0.1/33", "2001:db8::/129", "/etc/passwd", "/10.0.0.0/8", "-",
+               "fe80::1%eth0", "10.0.0.1;id", "node.example.org",
+               ",".join("10.0.0.%d" % i for i in range(1, 18))]
+        for raw in bad + [["10.0.0.1"], 7]:
+            with self.subTest(raw=raw):
+                resp = self.post({"ssh_from": "203.0.113.7", "p2p_from": raw})
+                self.assertEqual(resp.status_code, 400)
+                self.assertFalse(resp.get_json()["ok"])
+                self.assertEqual(self.helper_calls(), [])
+        self.assertEqual(self.post({"p2p_from": ["10.0.0.1"]}).get_json()["error"],
+                         "p2p_from must be text")
+        self.assertEqual(self.post({"p2p_from": "0.0.0.0/0"}).get_json()["error"],
+                         "P2P sources: not an address or a CIDR of /8 or narrower: 0.0.0.0/0")
+        self.assertEqual(self.post({"p2p_from": ",".join("10.0.0.%d" % i for i in range(1, 18))})
+                         .get_json()["error"], "at most 16 P2P sources")
+        self.assertEqual(self.post({"ssh_from": "10.0.0.0/7"}).get_json()["error"],
+                         "SSH sources: not an address or a CIDR of /8 or narrower: 10.0.0.0/7")
+        self.assertEqual(server.p2p_source_list(",".join("10.0.0.%d" % i for i in range(1, 17)))[1], None)
+
+
+class FirewallStatusTest(ServerTestCase):
+    """/api/firewall: the engine's status as it prints it (p2p_new_flow_limit
+    included) and `p2p_sources`, the P2P list .node-meta keeps."""
+
+    LIMIT_ON = {"active": True, "rate": 20, "burst": 40, "reason": None, "persistent": True}
+    LIMIT_OFF = {"active": False, "rate": None, "burst": None, "reason": "p2p-list",
+                 "persistent": False}
+
+    def status(self, meta, limit=None):
+        reply = {"installed": True, "active": True, "ssh_port": "22"}
+        if limit is not None:
+            reply["p2p_new_flow_limit"] = limit
+        self.helper_replies["firewall-status"] = (0, json.dumps(reply), "")
+        self.helper_replies["meta-cat"] = (0, meta, "")
+        server.clear_meta_cache()
+        return self.client.get("/api/firewall").get_json()
+
+    def test_the_kept_p2p_list_is_reported(self):
+        for meta, want in (("NETWORK=testnet\nP2P_ALLOW_FROM=198.51.100.0/24,2001:db8::/32\n",
+                            ["198.51.100.0/24", "2001:db8::/32"]),
+                           ("NETWORK=testnet\n", []),
+                           ("NETWORK=testnet\nP2P_ALLOW_FROM=\n", []),
+                           ("", None)):
+            with self.subTest(meta=meta):
+                self.assertEqual(self.status(meta)["p2p_sources"], want)
+
+    def test_the_new_flow_limit_passes_through_unchanged(self):
+        for limit in (self.LIMIT_ON, self.LIMIT_OFF):
+            with self.subTest(limit=limit):
+                body = self.status("NETWORK=testnet\n", limit)
+                self.assertEqual(body["p2p_new_flow_limit"], limit)
+        self.assertNotIn("p2p_new_flow_limit", self.status("NETWORK=testnet\n"))
+
+    def test_an_enable_drops_the_cached_meta(self):
+        self.status("P2P_ALLOW_FROM=10.0.0.0/8\n")
+        self.helper_replies["meta-cat"] = (0, "P2P_ALLOW_FROM=198.51.100.0/24\n", "")
+        server._write_times.clear()
+        self.client.post("/api/firewall/enable", json={"p2p_from": "198.51.100.0/24"})
+        self.assertEqual(self.client.get("/api/firewall").get_json()["p2p_sources"],
+                         ["198.51.100.0/24"])
+
+    def test_an_unavailable_engine_still_degrades(self):
+        self.helper_replies["firewall-status"] = (1, "", "sudo: a password is required")
+        body = self.client.get("/api/firewall").get_json()
+        self.assertFalse(body["installed"])
+        self.assertEqual(body["error"], "sudo: a password is required")
 
 
 class NetworkStatusLinkTest(ServerTestCase):

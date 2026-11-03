@@ -3234,6 +3234,36 @@ function fwExtraPorts(f){
   return out;
 }
 
+// The P2P source list the node keeps (the server's p2p_sources, from
+// .node-meta): the list, "every address" when it keeps none, "—" when unknown.
+function fwP2pSourcesText(f){
+  const l = f && f.p2p_sources;
+  if(!Array.isArray(l)) return '—';
+  const items = l.filter(x=>typeof x==='string' && x);
+  return items.length ? items.join(', ') : 'every address';
+}
+
+// The P2P new-flow limit firewall-setup.sh reports in p2p_new_flow_limit:
+// {active, rate (new flows a minute per source), burst, reason, persistent}.
+// Inactive: reason is p2p-list, nft-missing, not-applied or unreadable. A
+// source is an IPv4 address or an IPv6 /64. '' when the engine reports none.
+const FW_LIMIT_REASONS = {
+  'p2p-list': 'a P2P source list is set',
+  'nft-missing': 'nftables is not installed',
+  'not-applied': 'not applied yet; enable the firewall',
+  'unreadable': 'state could not be read',
+};
+function fwNewFlowLimitText(l){
+  if(!l || typeof l!=='object') return '';
+  const n = v => (Number.isInteger(v) && v>0) ? String(v) : '?';
+  if(l.active===true){
+    return 'active, '+n(l.rate)+' new flows per minute per source after a burst of '+n(l.burst)
+      + (l.persistent===false ? ' (not restored at boot)' : '');
+  }
+  const r = typeof l.reason==='string' ? l.reason : '';
+  return 'inactive' + (r ? ': '+(FW_LIMIT_REASONS[r] || r) : '');
+}
+
 async function loadFirewall(){
   const card=$('#fwCard'); if(!card) return;
   const f = await api('/api/firewall');
@@ -3243,6 +3273,7 @@ async function loadFirewall(){
   }
   const ports = f.ports||{};
   const active = !!f.active && !isReadonly();
+  const limitText = fwNewFlowLimitText(f.p2p_new_flow_limit);
 
   // Port rows: interactive when ufw is active; dimmed + button-less when not
   // (or when the selected node is external/read-only).
@@ -3283,7 +3314,7 @@ async function loadFirewall(){
   // ufw off: enable it here with firewall-setup.sh's lockout-safe defaults. The
   // SSH sources the operator enters go to the engine as --ssh-from; a mainnet
   // node without them (and without a stored list) is refused by the engine, and
-  // its message is shown as is.
+  // its message is shown as is. The P2P sources go as --p2p-from.
   const enableForm = (!f.active && !isReadonly())
     ? `<div class="note" style="margin-top:12px;border-color:rgba(255,217,61,0.35);background:rgba(255,217,61,0.07)">
         UFW is ${f.installed?'not active':'not installed'}. Port management is disabled until the firewall is enabled.
@@ -3291,10 +3322,14 @@ async function loadFirewall(){
         (SSH, the node ports, then deny everything else).
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <input id="fwSshFrom" style="flex:1;min-width:220px" placeholder="SSH sources, e.g. 203.0.113.7/32, 198.51.100.0/24" autocomplete="off">
+          <input id="fwP2pFrom" style="flex:1;min-width:220px" placeholder="P2P sources (optional), e.g. 198.51.100.0/24" autocomplete="off">
           <button class="btn btn-green" id="fwEnable">Enable firewall</button>
         </div>
         <div class="muted" style="font-size:12px;margin-top:6px">SSH sources: addresses or CIDRs (/8 or narrower), separated by commas.
           When given, SSH is allowed from these only. Required on mainnet unless the node already has a stored list.</div>
+        <div class="muted" style="font-size:12px;margin-top:4px">P2P sources: the same form, at most 16. When given, the node's P2P ports accept these only,
+          so peers outside the list cannot reach this node. When empty, the list the node already keeps is used, else every address,
+          with new flows limited per source.</div>
         <div id="fwEnableErr" style="display:none;margin-top:8px;color:var(--red);font-size:13px"></div>
       </div>`
     : '';
@@ -3322,6 +3357,8 @@ async function loadFirewall(){
     ${enableForm}
     <div class="kv"><span class="k">Default inbound</span><span class="v">${esc(f.default_incoming||'—')}</span></div>
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
+    <div class="kv"><span class="k">P2P sources</span><span class="v mono" style="overflow-wrap:anywhere">${esc(fwP2pSourcesText(f))}</span></div>
+    ${limitText?`<div class="kv"><span class="k" title="A source is an IPv4 address or an IPv6 /64.">P2P new-flow limit</span><span class="v">${esc(limitText)}</span></div>`:''}
     ${portRows}
     ${extraRows}
     ${expectedBlock}
@@ -3348,12 +3385,12 @@ async function loadHostAudit(){
     ${a.items.map(i=>`<div class="kv" style="align-items:center"><span class="k" style="flex:0 0 auto">${badge(i.level)}</span><span class="v" style="text-align:left;overflow-wrap:anywhere">${esc(i.text)}</span></div>`).join('')}`;
 }
 
-// The SSH sources as the server checks them: addresses or CIDRs (/8 or
-// narrower), split on commas, spaces or new lines, at most 16. The server and
-// the helper check them again; the engine has the last word.
-function fwSshSources(text){
+// The SSH or P2P sources (what) as the server checks them: addresses or CIDRs
+// (/8 or narrower), split on commas, spaces or new lines, at most 16. The server
+// and the helper check them again; the engine has the last word.
+function fwSources(text, what){
   const items = String(text||'').split(/[\s,]+/).filter(Boolean);
-  if(items.length > 16) return {error:'at most 16 SSH sources'};
+  if(items.length > 16) return {error:'at most 16 '+what+' sources'};
   for(const it of items){
     const m = /^([0-9A-Fa-f.:]+)(?:\/([1-9][0-9]{0,2}))?$/.exec(it);
     const v4 = m && /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/.test(m[1]);
@@ -3361,7 +3398,7 @@ function fwSshSources(text){
     const mask = m && m[2] ? Number(m[2]) : null;
     const bad = !m || (!v4 && !v6) || m[1]==='0.0.0.0' || m[1]==='::'
       || (mask!==null && (mask<8 || mask>(v4?32:128)));
-    if(bad) return {error:'not an address or a CIDR of /8 or narrower: '+it};
+    if(bad) return {error:what+' sources: not an address or a CIDR of /8 or narrower: '+it};
   }
   return {list: items.join(',')};
 }
@@ -3369,15 +3406,20 @@ function fwSshSources(text){
 async function enableFirewall(btn){
   const errBox=$('#fwEnableErr');
   const show = msg => { if(errBox){ errBox.textContent=msg; errBox.style.display=msg?'block':'none'; } };
-  const src = fwSshSources(($('#fwSshFrom')||{}).value);
+  const src = fwSources(($('#fwSshFrom')||{}).value, 'SSH');
   if(src.error){ show(src.error); return; }
+  const p2p = fwSources(($('#fwP2pFrom')||{}).value, 'P2P');
+  if(p2p.error){ show(p2p.error); return; }
   show('');
   const who = src.list ? 'SSH will be allowed only from '+src.list.split(',').join(', ')+'.' : 'SSH stays open (or limited to the list this node already keeps).';
-  if(!confirm('Enable the firewall with the recommended defaults? '+who+' Everything else inbound is denied.')) return;
+  const peers = p2p.list
+    ? ' The P2P ports will accept only '+p2p.list.split(',').join(', ')+'; peers outside that list cannot reach this node.'
+    : ' The P2P ports stay open to every address (or limited to the list this node already keeps).';
+  if(!confirm('Enable the firewall with the recommended defaults? '+who+peers+' Everything else inbound is denied.')) return;
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span>'; }
   const r = await api('/api/firewall/enable', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ssh_from: src.list}),
+    body:JSON.stringify({ssh_from: src.list, p2p_from: p2p.list}),
   });
   if(r.ok){ toast('Firewall enabled','success'); loadFirewall(); return; }
   if(btn){ btn.disabled=false; btn.textContent='Enable firewall'; }
