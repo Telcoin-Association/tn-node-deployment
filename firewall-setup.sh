@@ -42,6 +42,11 @@ readonly FW_IAP_SSH_CIDR="35.235.240.0/20"
 # TN_P2P_NEW_FLOW_BURST override them for a run.
 readonly FW_P2P_RATE_DEFAULT="20"
 readonly FW_P2P_BURST_DEFAULT="40"
+# What brings the limit back at boot (fw_p2p_limit_persist): the nft program, and
+# the oneshot unit that loads it after ufw.
+readonly FW_P2P_LIMIT_FILE="${TN_ROOT_PREFIX:-}/etc/telcoin/p2p-limit.nft"
+readonly FW_P2P_LIMIT_SVC="telcoin-p2p-limit.service"
+readonly FW_P2P_LIMIT_UNIT="${TN_ROOT_PREFIX:-}/etc/systemd/system/${FW_P2P_LIMIT_SVC}"
 
 # Source lists for this run: --ssh-from / --p2p-from (comma lists or a file), and
 # --ssh-anywhere / --p2p-anywhere (drop a stored list). Empty = not given.
@@ -560,12 +565,13 @@ fw_p2p_limit_load() {
 # tn_p2p in one transaction (nft -f applies a file as one batch: all of it or none
 # of it). Its first line adds the table, a no-op when it exists, so the delete
 # after it cannot fail; then the table comes back whole: one dynamic set per
-# address family keyed by the source address, whose entries expire once an
-# address has opened no new flow for the time an empty burst takes to refill (at
-# least a minute, at most a day), and one input chain at priority -10, ahead of
-# ufw's chains at 0. Its two rules match only packets of new UDP flows (ct state
-# new) to the ports of fw_p2p_ports, and drop those of an address above RATE per
-# minute once its burst of BURST is spent. Packets of established flows never
+# address family, keyed by the source address for IPv4 and by the source's /64
+# for IPv6 (one host commonly holds a whole /64, so each of its addresses is the
+# same entry), whose entries expire once a source has opened no new flow for the
+# time an empty burst takes to refill (at least a minute, at most a day), and one
+# input chain at priority -10, ahead of ufw's chains at 0. Its two rules match
+# only packets of new UDP flows (ct state new) to the ports of fw_p2p_ports, and
+# drop those of a source above RATE per minute once its burst of BURST is spent. Packets of established flows never
 # match, and the chain accepts nothing itself: every packet it does not drop goes
 # on to ufw's rules, which still decide what is let in.
 fw_p2p_limit_text() {
@@ -600,37 +606,111 @@ table inet tn_p2p {
     chain input {
         type filter hook input priority -10; policy accept;
         ct state new udp dport { ${dports} } update @tn_p2p_src4 { ip saddr limit rate over ${rate}/minute burst ${burst} packets } drop
-        ct state new udp dport { ${dports} } update @tn_p2p_src6 { ip6 saddr limit rate over ${rate}/minute burst ${burst} packets } drop
+        ct state new udp dport { ${dports} } update @tn_p2p_src6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over ${rate}/minute burst ${burst} packets } drop
     }
 }
 NFT
 }
 
+# fw_p2p_limit_unit_text NFT -- the unit that loads FW_P2P_LIMIT_FILE at boot with
+# the nft binary NFT (an absolute path): a oneshot after ufw that stays active, so
+# stopping it deletes the table again (a missing table is not an error there).
+fw_p2p_limit_unit_text() {
+    cat <<UNIT
+# Written by firewall-setup.sh: loads the per-source limit on new P2P flows
+# (nftables table inet tn_p2p) at boot. firewall-setup.sh rewrites
+# /etc/telcoin/p2p-limit.nft with the table and removes both files when the
+# limit is not wanted.
+[Unit]
+Description=Telcoin Network per-source limit on new P2P flows (nftables table inet tn_p2p)
+After=ufw.service network-pre.target
+ConditionPathExists=/etc/telcoin/p2p-limit.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${1} -f /etc/telcoin/p2p-limit.nft
+ExecStop=-${1} delete table inet tn_p2p
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
+# fw_p2p_limit_persist PROGRAM -- make the table come back at boot: PROGRAM (the
+# text just loaded) to FW_P2P_LIMIT_FILE (root 0640) and the unit to
+# FW_P2P_LIMIT_UNIT (root 0644), both through tn_write_root_file, with the nft
+# that `command -v` finds now; then daemon-reload and enable the unit (not start:
+# the table is loaded already). rc 1 with a warning when a step fails; the table
+# loaded now is not affected.
+fw_p2p_limit_persist() {
+    local prog="$1" nft_bin why=""
+    nft_bin="$(command -v nft 2>/dev/null)" || nft_bin=""
+    if [[ "$nft_bin" != /* ]]; then
+        why="nft is not at an absolute path (${nft_bin:-not found})"
+    elif ! tn_write_root_file "$FW_P2P_LIMIT_FILE" 0640 <<< "$prog"; then
+        why="${FW_P2P_LIMIT_FILE#"${TN_ROOT_PREFIX:-}"} could not be written"
+    elif ! tn_write_root_file "$FW_P2P_LIMIT_UNIT" 0644 <<< "$(fw_p2p_limit_unit_text "$nft_bin")"; then
+        why="${FW_P2P_LIMIT_UNIT#"${TN_ROOT_PREFIX:-}"} could not be written"
+    elif ! systemctl daemon-reload >/dev/null 2>&1 || ! systemctl enable "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1; then
+        why="systemctl could not enable ${FW_P2P_LIMIT_SVC}"
+    fi
+    if [[ -n "$why" ]]; then
+        print_warn "The P2P new-flow limit is loaded now but will not come back after a reboot: ${why}. Fix that and run --enable again."
+        return 1
+    fi
+    print_info "${FW_P2P_LIMIT_SVC} loads it again at boot (from ${FW_P2P_LIMIT_FILE#"${TN_ROOT_PREFIX:-}"})."
+    return 0
+}
+
+# fw_p2p_limit_unpersist -- the limit is not wanted: disable and stop
+# FW_P2P_LIMIT_SVC (stopping it deletes the table) and remove the unit and
+# FW_P2P_LIMIT_FILE. Nothing to do when neither file is there. Never fails.
+fw_p2p_limit_unpersist() {
+    local f
+    if [[ -e "$FW_P2P_LIMIT_UNIT" || -L "$FW_P2P_LIMIT_UNIT" ]]; then
+        systemctl disable --now "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1 || true
+        rm -f -- "$FW_P2P_LIMIT_UNIT"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    f="$FW_P2P_LIMIT_FILE"
+    if [[ -e "$f" || -L "$f" ]]; then
+        rm -f -- "$f"
+    fi
+    return 0
+}
+
 # fw_p2p_limit_sync NODES -- bring table inet tn_p2p in line with this run, once the
 # ufw rules are complete: written (fw_p2p_limit_text, one `nft -f -` transaction)
-# when a node is installed and no P2P source list is set, else deleted when it is
-# there (a source list replaces the limit; without a node there are no P2P ports).
-# Without nft it warns when the limit is wanted and changes nothing. A write or
-# delete that nft refuses is a warning, and the table stays as nft had it. Always
-# rc 0: the ufw rules are in place whatever happens here.
+# and kept for boot (fw_p2p_limit_persist) when a node is installed and no P2P
+# source list is set, else deleted when it is there and its boot unit and file
+# removed (fw_p2p_limit_unpersist; a source list replaces the limit, and without a
+# node there are no P2P ports). Without nft it warns when the limit is wanted and
+# removes the boot unit, which could not run. A write or delete that nft refuses
+# is a warning, and the table and its boot files stay as they were. Always rc 0:
+# the ufw rules are in place whatever happens here.
 fw_p2p_limit_sync() {
-    local nodes="$1" err first rc tables
+    local nodes="$1" prog err first rc tables
     if [[ "$nodes" != "none" && ${#FW_P2P_SRCS[@]} -eq 0 ]]; then
         if ! command -v nft >/dev/null 2>&1; then
             print_warn "nftables (nft) is not installed, so the P2P new-flow limit is not applied; P2P stays open to every source"
+            fw_p2p_limit_unpersist
             return 0
         fi
+        prog="$(fw_p2p_limit_text "$FW_P2P_RATE" "$FW_P2P_BURST")"
         rc=0
-        err="$(fw_p2p_limit_text "$FW_P2P_RATE" "$FW_P2P_BURST" | nft -f - 2>&1)" || rc=$?
+        err="$(nft -f - 2>&1 <<< "$prog")" || rc=$?
         if [[ "$rc" -ne 0 ]]; then
             first=""
             IFS= read -r first <<< "$err" || true
             print_warn "nft did not load the P2P new-flow limit (exit ${rc}: ${first}); table inet tn_p2p stays as it was. The ufw rules are applied."
             return 0
         fi
-        print_info "P2P new-flow limit: UDP $(fw_p2p_port_text) accept at most ${FW_P2P_RATE} new flows per minute from one address after a burst of ${FW_P2P_BURST} (nftables table inet tn_p2p)."
+        print_info "P2P new-flow limit: UDP $(fw_p2p_port_text) accept at most ${FW_P2P_RATE} new flows per minute from one IPv4 address or IPv6 /64 after a burst of ${FW_P2P_BURST} (nftables table inet tn_p2p)."
+        fw_p2p_limit_persist "$prog" || true
         return 0
     fi
+    fw_p2p_limit_unpersist
     command -v nft >/dev/null 2>&1 || return 0
     tables="$(nft list tables 2>/dev/null)" || return 0
     grep -qx 'table inet tn_p2p' <<< "$tables" || return 0
@@ -644,13 +724,33 @@ fw_p2p_limit_sync() {
     return 0
 }
 
-# fw_p2p_limit_state -- print the state of the P2P new-flow limit: "on RATE BURST"
-# when table inet tn_p2p holds it (the values nft lists), else "off REASON":
-# p2p-list (a P2P source list is set, which replaces the limit), nft-missing
-# (nftables is not installed), not-applied (no table: no enable has written it),
-# unreadable (nft cannot list the tables, the stored source list cannot be read,
-# or the table holds no tn_p2p_src4 limit rule).
+# fw_p2p_limit_state -- print the state of the P2P new-flow limit: "on RATE BURST
+# BOOT" when table inet tn_p2p holds it (the values nft lists), else "off REASON
+# BOOT": p2p-list (a P2P source list is set, which replaces the limit),
+# nft-missing (nftables is not installed), not-applied (no table: no enable has
+# written it, or a reboot dropped it), unreadable (nft cannot list the tables, the
+# stored source list cannot be read, or the table holds no tn_p2p_src4 limit
+# rule). BOOT is fw_p2p_limit_boot: yes or no.
 fw_p2p_limit_state() {
+    local st boot
+    boot="$(fw_p2p_limit_boot)"
+    st="$(fw_p2p_limit_live)"
+    printf '%s %s\n' "$st" "$boot"
+}
+
+# fw_p2p_limit_boot -- "yes" when the limit comes back at boot: FW_P2P_LIMIT_FILE
+# is there and systemd reports FW_P2P_LIMIT_SVC enabled; else "no".
+fw_p2p_limit_boot() {
+    if [[ -f "$FW_P2P_LIMIT_FILE" ]] && systemctl is-enabled "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1; then
+        echo yes
+    else
+        echo no
+    fi
+}
+
+# fw_p2p_limit_live -- the live part of fw_p2p_limit_state: "on RATE BURST" or
+# "off REASON".
+fw_p2p_limit_live() {
     local tables text vals listed=false lerr=false
     if fw_load_p2p_srcs 2>/dev/null; then
         if [[ ${#FW_P2P_SRCS[@]} -gt 0 ]]; then
@@ -692,14 +792,22 @@ fw_p2p_limit_state() {
     return 0
 }
 
-# fw_p2p_limit_report -- the status screen's line for the P2P new-flow limit.
+# fw_p2p_limit_report -- the status screen's lines for the P2P new-flow limit.
 fw_p2p_limit_report() {
-    local st what a b
+    local st what a b boot
     st="$(fw_p2p_limit_state)"
-    read -r what a b <<< "$st"
+    read -r what a b boot <<< "$st"
+    if [[ "$what" == "off" ]]; then
+        boot="$b"
+    fi
     case "${what} ${a}" in
         "on "*)
-            print_ok "New-flow limit: at most ${a} new P2P flows per minute from one address after a burst of ${b} (nftables table inet tn_p2p)" ;;
+            print_ok "New-flow limit: at most ${a} new P2P flows per minute from one IPv4 address or IPv6 /64 after a burst of ${b} (nftables table inet tn_p2p)"
+            if [[ "$boot" == "yes" ]]; then
+                print_ok "New-flow limit at boot: loaded by ${FW_P2P_LIMIT_SVC} (enabled)"
+            else
+                print_warn "New-flow limit at boot: not restored after a reboot (${FW_P2P_LIMIT_SVC} is not enabled); run Enable recommended defaults (or --enable) again"
+            fi ;;
         "off p2p-list")
             print_info "New-flow limit: not used; the P2P ports take only the P2P source list (P2P_ALLOW_FROM)" ;;
         "off nft-missing")
@@ -709,6 +817,9 @@ fw_p2p_limit_report() {
         *)
             print_warn "New-flow limit: unknown; nft cannot list table inet tn_p2p, or P2P_ALLOW_FROM in .node-meta cannot be read" ;;
     esac
+    if [[ "$what" == "off" && "$boot" == "yes" ]]; then
+        print_warn "New-flow limit at boot: ${FW_P2P_LIMIT_SVC} is enabled but the table is not loaded; check: systemctl status ${FW_P2P_LIMIT_SVC}"
+    fi
 }
 
 # fw_on_gce -- 0 on a Google Compute Engine VM (DMI product name), where IAP TCP
@@ -1076,9 +1187,10 @@ view_status() {
 # rules of sources a replaced --ssh-from / --p2p-from list no longer holds, and
 # `ufw --force enable`. Every allow comes before the default deny, so there is
 # never a window with SSH closed. Once ufw is complete, fw_p2p_limit_sync writes
-# the per-source new-flow limit on the P2P ports (nftables table inet tn_p2p) or
-# deletes it when a P2P source list is set; that step only warns, and a failed ufw
-# step never reaches it, so the table changes only with a complete rule set.
+# the per-source new-flow limit on the P2P ports (nftables table inet tn_p2p) and
+# the unit that loads it at boot, or deletes both when a P2P source list is set;
+# that step only warns, and a failed ufw step never reaches it, so the table
+# changes only with a complete rule set.
 #
 # RECONCILE by default: it only ENSURES the managed rules + policies exist, so a
 # re-run keeps an operator's custom rules. "--reset" first runs `ufw --force
@@ -1600,6 +1712,11 @@ manage_node_ports() {
     elif confirm "Open UDP ports ${p2p_text} for node P2P?"; then
         if fw_p2p_allow; then
             print_ok "UDP ports ${p2p_text} opened"
+            # The port set may have changed: rewrite the new-flow limit (or delete
+            # it when a P2P source list is set) and its boot copy.
+            if fw_p2p_limit_load; then
+                fw_p2p_limit_sync "$nodes"
+            fi
         fi
     fi
     echo ""
@@ -2174,11 +2291,13 @@ fw_on_exit() {
 # default ports are listed; nothing is expected to be allowed yet). A default
 # policy that cannot be read is "unknown". "p2p_new_flow_limit" is the per-source
 # limit on new P2P flows (fw_p2p_limit_state): {"active":true,"rate":20,
-# "burst":40,"reason":null} when nftables table inet tn_p2p holds it (rate: new
-# flows per minute from one address, burst: the flows one address may open before
-# the rate applies, both as nft lists them), else {"active":false,"rate":null,
-# "burst":null,"reason":R} with R one of "p2p-list", "nft-missing", "not-applied",
-# "unreadable".
+# "burst":40,"reason":null,"persistent":P} when nftables table inet tn_p2p holds
+# it (rate: new flows per minute from one IPv4 address or IPv6 /64, burst: the
+# flows one source may open before the rate applies, both as nft lists them),
+# else {"active":false,"rate":null,"burst":null,"reason":R,"persistent":P} with R
+# one of "p2p-list", "nft-missing", "not-applied", "unreadable". P is true when
+# telcoin-p2p-limit.service is enabled and /etc/telcoin/p2p-limit.nft is there,
+# so the limit comes back at boot.
 json_fw_status() {
     local installed=false active=false default_in="" ssh_port
     if ufw_installed; then installed=true; fi
@@ -2241,13 +2360,19 @@ json_fw_status() {
     local kuma_state="closed"
     [[ "$active" == "true" ]] && kuma_state="$(kuma_rule_state)"
 
-    local limit_json lst lwhat la lb
+    local limit_json lst lwhat la lb lboot persistent=false
     lst="$(fw_p2p_limit_state)"
-    read -r lwhat la lb <<< "$lst"
+    read -r lwhat la lb lboot <<< "$lst"
+    if [[ "$lwhat" == "off" ]]; then
+        lboot="$lb"
+    fi
+    if [[ "$lboot" == "yes" ]]; then
+        persistent=true
+    fi
     if [[ "$lwhat" == "on" ]]; then
-        limit_json="{\"active\":true,\"rate\":${la},\"burst\":${lb},\"reason\":null}"
+        limit_json="{\"active\":true,\"rate\":${la},\"burst\":${lb},\"reason\":null,\"persistent\":${persistent}}"
     else
-        limit_json="{\"active\":false,\"rate\":null,\"burst\":null,\"reason\":\"$(json_escape "$la")\"}"
+        limit_json="{\"active\":false,\"rate\":null,\"burst\":null,\"reason\":\"$(json_escape "$la")\",\"persistent\":${persistent}}"
     fi
 
     # Operator-chosen health sources (layered on top of the TA baseline), as a JSON array.
