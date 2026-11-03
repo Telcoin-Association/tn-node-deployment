@@ -31,9 +31,9 @@ The repository's [README](https://github.com/Telcoin-Association/tn-node-deploym
 This guide is the path through them, in the order you need them:
 
 - [Before you start](#before-you-start): hardware, operating system, ports, networks and what to have ready.
-- [Install](#install): fetch and check the scripts, run setup, see how the passphrase is stored and where files land, back up the keys, set up the firewall, check the host hardening, and choose the optional node flags and the log target.
+- [Install](#install): fetch and check the scripts, run setup, see how the passphrase is stored and where files land, back up the keys, set up the firewall, check the host hardening, add the optional host baseline, and choose the optional node flags and the log target.
 - [Confirm the node is syncing, then synced](#confirm-the-node-is-syncing-then-synced): how to tell a healthy node from a stuck one, how long sync takes, and what the health check says about epochs and the committee.
-- [Day-2 operations](#day-2-operations): script and node updates, one-way updates, restarts around the epoch boundary, configuration changes, service commands, the Node Manager UI, testnet add-ons and removal.
+- [Day-2 operations](#day-2-operations): script and node updates, one-way updates, restarts around the epoch boundary, configuration changes, service commands, the Node Manager UI, testnet add-ons, the keys over the node's life, and removal.
 - [Public RPC (https and wss)](#public-rpc-https-and-wss): serve JSON-RPC and WebSocket on your own DNS name.
 - [Validators: stake and activate](#validators-stake-and-activate): checking the node with `prepare-stake.sh`, staking, activation, committee seats, rewards and exit.
 - [Automation](#automation): run setup and the other scripts without prompts.
@@ -136,7 +136,8 @@ It does not check for ECC memory or NVMe.
 ### Operating system
 
 Use Ubuntu 24.04 LTS.
-A mainnet node installs only on systemd 255 or newer, which means Ubuntu 24.04, and on testnet the same system keeps the BLS passphrase encrypted on disk (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)).
+A mainnet node installs only on systemd 255 or newer, which means Ubuntu 24.04.
+On testnet, systemd 250 or newer is enough to keep the BLS passphrase encrypted on disk (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)).
 `setup-node.sh` reads the systemd version during preflight, once you have picked the network:
 
 | systemd | For example | What setup does |
@@ -213,6 +214,16 @@ Until a scripts release fills them in, a mainnet install stops: the chain-config
 The mainnet image repository is set: `ghcr.io/telcoin-association/telcoin-network`, the same as testnet's.
 The interactive network menu marks mainnet as coming soon.
 
+Mainnet cannot be selected in this scripts release.
+One switch in the scripts' shared library, `TN_MAINNET_ENABLED` in `lib/common.sh`, stays 0 until launch, and while it is 0 every way to a mainnet install refuses before anything on the server changes:
+
+- The setup menu's `2) Mainnet` prints `Mainnet has not launched yet.` and returns you to the menu.
+- `setup-node.sh --json --network mainnet` stops with `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.`
+- The Node Manager UI keeps its Mainnet card disabled, and its helper refuses a mainnet setup.
+
+The scripts release that launches mainnet sets the switch to 1, together with the chain-config pins and the oldest mainnet node release the scripts accept; `update-scripts.sh` brings it (see [Keep the scripts current](#keep-the-scripts-current)).
+Setting the switch by hand gains nothing: without the pins, the chain-config check still refuses a mainnet install.
+
 The public RPCs sit behind a load balancer and answer JSON-RPC over HTTPS only; a WebSocket upgrade gets HTTP 405.
 For `wss://`, use a node that serves public RPC (see [Public RPC (https and wss)](#public-rpc-https-and-wss)).
 
@@ -253,7 +264,9 @@ Nothing the scripts install is taken from a branch on trust.
 - The scripts come from a signed release tag, `scripts-vX.Y.Z`. Each release carries a `MANIFEST` with the SHA-256 of every file and a signature, `MANIFEST.sig`. The installer holds the release signing key and the tag it installs. It checks the signature with `ssh-keygen -Y verify`, then every file against its manifest hash, and installs nothing if one check fails. `update-scripts.sh` checks each later release the same way against `lib/allowed_signers` in your install.
 - Node releases are checked against the GPG keys in `lib/release-keys/*.asc`, which arrive with the signed scripts. A release publishes `SHA256SUMS` and its signature `SHA256SUMS.asc`. The scripts run `gpgv` on them and accept the release only when a key they ship signed it. A bad, expired or revoked signature refuses it; a further signature by a key that has not shipped yet only draws a warning. `SHA256SUMS` lists the binary tarball, the Docker image digest (`IMAGE_DIGEST`) and the release's three chain-config files, and the scripts check what they use against it.
 - The node runs release tags only: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet. A branch, a commit id or `latest` is refused at setup and at every update. On testnet a release candidate, `vX.Y.Z-adiri-rcN`, runs only when you name its tag; no default picks one.
+- Setup, `update-node.sh` and the image change in `edit-config.sh` hold every release to the oldest one the scripts support on the network, `v0.13.0-adiri` on testnet; mainnet gets its floor at launch. An older release is refused before the node changes.
 - Docker installs run the image by digest (`<repository>@sha256:<digest>`), so a tag that moves later cannot change what the node runs.
+- On mainnet a Docker image is named by its release tag, and the digest comes from the signed release. Testnet and mainnet images share one repository, so a digest given alone does not say which network it belongs to: setup, `update-node.sh` and `edit-config.sh` take one on mainnet only when `.node-meta` records it as the image of a mainnet release the node has installed.
 - The chain configs (`genesis.yaml`, `committee.yaml` and `parameters.yaml`) are checked against SHA-256 pins that ship with the scripts before setup copies them.
 
 ### Run setup
@@ -278,7 +291,7 @@ Yes/no prompts default to No.
 10. Configuration ("Step 6 of 8"). Checks `genesis.yaml`, `committee.yaml` and `parameters.yaml` against the pinned hashes and copies them into the data directory. If it cannot find them, it prints where to get them and waits for you to copy them in.
 11. Service ("Step 7 of 8"). Writes `/etc/telcoin/node.env`, the start script, the systemd unit and `/etc/telcoin/.node-meta`, then asks `Start the node now?`. Only if you answer yes and the service comes up does it ask `Enable auto-start on server reboot?`. Answer yes to both.
 12. Public RPC, only if you gave a domain and the node started. Setup checks DNS and enables the endpoint. If DNS is not ready yet, setup still finishes and prints the exact command to run later.
-13. The testnet add-ons you opted into are applied. Log or metrics shipping asks for your ingest token (hidden; leave it blank to skip).
+13. The testnet add-ons you opted into are applied. Log or metrics shipping asks for your ingest token (hidden; leave it blank to skip). With `--host-baseline`, the host baseline comes next (see [Host baseline (optional)](#host-baseline-optional)).
 14. A summary with the paths, how the passphrase is kept, the P2P ports `node-info.yaml` advertises (every worker), a firewall reminder for those ports, the next steps and a link to the operator runbook.
 
 `sudo bash ~/telcoin-node-scripts/setup-node.sh --help` lists the public RPC flags, the install and release flags, the node flags, and the passphrase and log options.
@@ -317,11 +330,12 @@ Root on the server can still decrypt the credential, so it protects the passphra
 | none | `host+tpm2` when the server has a usable TPM, else `host`. On testnet `host` only warns. |
 | `--allow-no-tpm` | Mainnet: accept `host` on a server with no usable TPM. Without it, a mainnet install stops. |
 | `--bind-pcrs <list>` | Also bind the credential to these TPM PCRs, joined by `+` (for example `7`). Needs a TPM. A firmware or Secure Boot change to those PCRs stops the node from starting until you run `edit-config.sh --reseal`. |
-| `--passphrase-method stdin` | Testnet only: keep the passphrase in the root-only file `/etc/telcoin/bls-passphrase` (mode 600) instead. Setup does this by itself below systemd 250. |
+| `--passphrase-method stdin` | Testnet and devnet; refused on mainnet. Keep the passphrase in the root-only file `/etc/telcoin/bls-passphrase` (mode 600) instead. Setup does this by itself below systemd 250. |
 | `--passphrase-stdin` | Read the passphrase from standard input (one line, no echo) instead of prompting for it. |
 
 To change the stored passphrase, or to seal the credential again after a TPM or firmware change, use `edit-config.sh` (see [Change the configuration](#change-the-configuration)).
 Neither re-encrypts the keys, so keep the passphrase the keys were generated with.
+On a node release whose keytool has a `verify` command, `edit-config.sh` checks that the passphrase opens the BLS key before it stores anything; on a release without it, nothing checks this.
 
 ### Where things land
 
@@ -417,6 +431,19 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh --enable \
 - On mainnet, an enable with no SSH list stored or given stops with `Mainnet: give the SSH sources with --ssh-from CIDR[,CIDR] (or --ssh-anywhere to keep SSH open to every address); nothing was changed.`
 - On Google Cloud, the IAP range `35.235.240.0/20` joins the SSH sources, so the console's SSH button keeps working.
 
+When the P2P ports stay open to every address (no `--p2p-from` list), every enable, the menu's included, also limits new P2P flows per source.
+One IPv4 address, or one IPv6 /64, may send at most 20 packets of new, not yet answered UDP flows to the P2P ports per minute, after a burst of 40; packets above that are dropped.
+A flow the node has answered is never limited, so peers the node already talks to are not slowed.
+The limit is an nftables table, `inet tn_p2p`, that runs before `ufw`, only drops, and leaves every other decision to `ufw`.
+The enable prints it, for example `P2P new-flow limit: UDP 49590 and 49594 accept at most 20 packets of new, not yet answered flows per minute from one IPv4 address or IPv6 /64 after a burst of 40 (nftables table inet tn_p2p).`
+It also writes `/etc/telcoin/p2p-limit.nft` and enables `telcoin-p2p-limit.service`, which loads the table again at every boot, after `ufw`.
+
+- With a `--p2p-from` list the limit is not used, and the enable removes it: the list is the stricter rule.
+- Without nftables (`nft`), the enable warns that the limit is not applied and sets up the `ufw` rules alone.
+- `TN_P2P_NEW_FLOW_RATE` and `TN_P2P_NEW_FLOW_BURST` (whole numbers from 1 to 100000) change the 20 and 40 for one run. Pass them through `sudo`, for example `sudo TN_P2P_NEW_FLOW_RATE=30 TN_P2P_NEW_FLOW_BURST=60 bash ~/telcoin-node-scripts/firewall-setup.sh --enable`. A value outside that range stops the run before anything changes.
+- The two values are not stored, so a later enable without them, the Node Manager UI's included, goes back to 20 and 40.
+- `1) View current firewall status` shows a `New-flow limit:` line under the P2P ports, and whether the limit comes back at boot.
+
 `3) Manage SSH access` hardens sshd through a drop-in, `/etc/ssh/sshd_config.d/00-telcoin-hardening.conf`.
 `1) Disable password authentication (keys only)` writes `PasswordAuthentication no` and `KbdInteractiveAuthentication no`, and `2) Disable root login` writes `PermitRootLogin no`.
 The script checks the result with `sshd -t` and puts the previous configuration back if sshd rejects it.
@@ -441,10 +468,56 @@ sudo bash ~/telcoin-node-scripts/check-node.sh --audit
 - a passphrase held in the unit;
 - whether systemd can use a TPM;
 - disk encryption under the data and config directories;
-- core dumps (`LimitCORE=0` on the unit, `fs.suid_dumpable`, `kernel.core_pattern`) and `kernel.yama.ptrace_scope`.
+- core dumps (`LimitCORE=0` on the unit, `fs.suid_dumpable`, `kernel.core_pattern`) and `kernel.yama.ptrace_scope`;
+- the host baseline (see [Host baseline (optional)](#host-baseline-optional)).
 
 It exits 0 when nothing warned and 1 otherwise.
 `setup-node.sh --audit` prints the same summary and exits, so you can run it before an install.
+
+### Host baseline (optional)
+
+The host baseline records who touches the node's keys and which of its files change.
+It is off by default, and setup never asks for it:
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-node.sh --host-baseline
+```
+
+On a server whose node is already installed, that command makes the baseline, or makes it again, and changes nothing else.
+Added to a new install, it runs after the node, public RPC and the testnet add-ons are in place; in a `--json` run it takes effect at finalize, and the `done` event carries `"host_baseline":true` or `false`.
+It needs apt, so it works on Ubuntu and Debian only.
+
+It does four things:
+
+1. Installs `auditd` and `aide` with apt, without their recommended packages, so neither a daily whole-system AIDE check nor a mail server comes with them.
+2. Writes the audit rules `/etc/audit/rules.d/telcoin-node.rules` and loads them. The kernel's audit log then records every access to `<data dir>/node-keys` (key `telcoin-keys`) and every write to `/etc/telcoin` (`telcoin-config`) and to the node's unit file (`telcoin-unit`).
+3. Writes its own AIDE configuration, `/etc/aide/telcoin-node.conf`, for `/opt/telcoin`, the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin` and the unit, and makes the baseline database `/var/lib/aide/telcoin-node.db`. The passphrase files and the ingest token are left out, because they change when you rotate them.
+4. Records `HOST_BASELINE=true` in `.node-meta`.
+
+A step that fails only warns, `The host baseline was not made (see above); the node runs without it. Try again with: sudo ./setup-node.sh --host-baseline`, leaves nothing of the baseline behind (no rules, no AIDE configuration, no marker), and setup goes on.
+
+The scripts make the AIDE baseline again after each change they apply, so their own writes do not show up as differences:
+
+- `update-node.sh` after an update that passed its checks;
+- `edit-config.sh` after an edit whose restart came back healthy, after `12) Restart node`, and after a passphrase change, `--reseal` or `--migrate-credential`;
+- `install-caddy.sh`, `firewall-setup.sh`, `setup-vpn.sh` and `setup-observability.sh` after a change that went through.
+
+A refused or failed change, or a rollback, leaves the baseline as it was.
+Nothing runs the check on a schedule, so run it yourself.
+A refresh takes in every file as it is at that moment, so to see a change made since the last refresh, check before you update or edit:
+
+```bash
+sudo aide --config=/etc/aide/telcoin-node.conf --check
+sudo ausearch -k telcoin-keys
+```
+
+`aide --check` exits 0 when nothing changed and otherwise lists each file that did.
+`ausearch -k telcoin-keys` lists the recorded accesses to the keys; `-k telcoin-config` and `-k telcoin-unit` do the same for the configuration and the unit.
+
+`check-node.sh --audit` shows the baseline's state.
+Without it the line reads `host baseline: off (sudo ./setup-node.sh --host-baseline adds auditd watches and an AIDE baseline)`.
+With it, the audit shows `HOST_BASELINE=true`, the rules file, whether the kernel has the rules loaded (only as root) and how many days old the AIDE database is; a missing piece is a `warn` line that names the command to make it again.
+`remove-node.sh` removes the rules, the AIDE configuration and database and the marker together with the last node on the server; the `auditd` and `aide` packages stay, and `sudo apt-get purge auditd aide` removes them.
 
 ### Optional node flags
 
@@ -596,6 +669,22 @@ sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update
 Run the updater before every node update.
 `update-node.sh` learns how to handle new releases through these updates.
 
+From `scripts-v2.1.0` on, each scripts release records its release date and an expiry date in its `MANIFEST`, 90 days later unless the signer chose otherwise.
+An expiry date is a reminder that a newer signed release is due, not a refusal.
+From that day on, `update-scripts.sh` and the installer warn `Script release <tag> expired on <date>; a newer signed release is overdue. Installing it anyway.` and still install the release, which verifies as before.
+If no newer release appears soon after, email devs@telcoin.org.
+
+To see where you stand without changing anything:
+
+```bash
+bash ~/telcoin-node-scripts/update-scripts.sh --check
+```
+
+`--check` installs nothing, needs no root and asks nothing.
+It prints the installed release and the newest signed one, each with its serial, release date and expiry date, says whether an update is pending, and warns when either release has expired.
+It exits 0 when the installed release is the newest and neither has expired, 1 when an update is pending or a release has expired, and 2 when no signed release is installed, a release cannot be fetched or does not verify, or the updater would refuse the newest one.
+`check-node.sh` reports the installed release too, in its `Checking the script release...` block, from the installed record alone; an expired release there is a warning, not a health issue.
+
 ### Update the node
 
 ```bash
@@ -626,31 +715,43 @@ What else to expect:
 - The apply writes the start script and the unit again from `.node-meta` while the node is stopped, so hand edits outside the node's launch line do not survive it.
 - After the restart it waits up to 45 seconds (600 on a one-way update) for the service to be active and for the node to answer `tn_latestConsensusHeader`. When many nodes restart at once, quorum takes longer to form. Raise the window with `TN_UPDATE_VERIFY_TIMEOUT`, in seconds, for example `sudo TN_UPDATE_VERIFY_TIMEOUT=120 bash ~/telcoin-node-scripts/update-node.sh`. A number you set always wins, on a one-way update too, so leave it unset there or give it 600 or more.
 - It then checks that the node follows consensus: the consensus header has to advance, and a node that was voting (`CvvActive`) before the update has to vote again, within `TN_UPDATE_VOTE_TIMEOUT` seconds (600 by default).
+- When that window runs out while the unit is active and the node still answers `eth_chainId`, the update does not fail: catching up after the restart can take longer than the window. The new release keeps running, nothing is rolled back, and the script warns `... Not rolled back: the unit is active and its RPC answers, so the new release keeps running while it catches up. ...`. An interactive run ends with `telcoin runs the new release but is not following consensus or voting yet; it was not rolled back.`, and a `--json` apply ends `"ok":true` with `"voting":false`. Run `check-node.sh` again a few minutes later. To count this case as a failed check, which then offers the rollback (a `--json` apply rolls back on its own), set `TN_UPDATE_VOTE_ROLLBACK=1` through `sudo`: `sudo TN_UPDATE_VOTE_ROLLBACK=1 bash ~/telcoin-node-scripts/update-node.sh`. Only the value `1` turns it on. Leave it unset for the one-way update to the next release, whose rollback you decline (see below). A wrong chain ID, a unit that is no longer active or an RPC that no longer answers fails the check whatever the setting.
 - If a check fails, it offers to roll back to the previous binary or image, except after the one-way update to `v0.16.0-adiri` (next item). After the one-way update to the next release it still offers the rollback, which you decline (the item after).
 - When the node runs a release older than `v0.16.0-adiri` and the target is `v0.16.0-adiri` or newer, the update is one-way. The new release migrates the consensus store on its first start, and older releases cannot open the data directory afterwards. Snapshot the data directory before you apply (see [One-way updates](#one-way-updates)). The script says the update is one-way, warns when the free space under `consensus-db/epochs` is less than twice its largest `epoch-N` directory, asks whether you have a snapshot, and waits up to 600 seconds. If the check fails it does not roll back and does not stop the node, which may still be migrating, and it leaves the unit, start script and `node.env` on the new release. When the script cannot read which release the node runs, it treats the update as one-way.
 - An update from `v0.16.0-adiri` to the next release or a later one is one-way too: from the next release the node keeps its consensus database in a new format, and its first start moves the database over (see [One-way updates](#one-way-updates)). Snapshot the data directory before you apply, whether or not the script asks about a snapshot. On a committee node, apply this update from a terminal, without `TN_ASSUME_YES`, not from the Node Manager UI: the UI's apply rolls back on its own after a failed check, which would start `v0.16.0-adiri` with empty epoch tables. If a check fails after this update and the script asks `Roll back to previous binary?` or `Roll back to previous image (<image>)?`, answer no, and email devs@telcoin.org before you go back.
 - Downgrades are refused: `<new> is older than the running <current>: downgrades are refused.` On testnet, an interactive run with `--allow-downgrade` goes ahead anyway.
+- A target older than the oldest release the scripts support on the network (`v0.13.0-adiri` on testnet) is refused on every install method, before anything is fetched: `<ref> is older than v0.13.0, the oldest testnet release these scripts support (...). Pick v0.13.0 or a newer release. Nothing was changed.`
+- On mainnet, a Docker update takes the release tag; a digest alone is taken only when `.node-meta` records it as the image of a mainnet release the node has installed (see [How the scripts and releases are checked](#how-the-scripts-and-releases-are-checked)).
 - Only one update runs at a time. A second run stops with `Another update is already running (PID N).`
 - It never touches the keys, `node-info.yaml`, the BLS passphrase, the chain configuration, or the listener addresses.
 
 The script does not update `existing` installs.
 For one, it stops, names the binary the node runs (recorded as `BINARY_PATH` in `.node-meta`), and prints how to check a release by hand.
-On the server, in an empty directory, with the release you want as `TAG`.
+On the server, as your normal user (not root), in an empty directory, with the release you want as `TAG`.
 Signed releases are planned to start with `v0.17.0-adiri`; `v0.16.0-adiri` and older have no release page.
 
 ```bash
 TAG=vX.Y.Z-adiri   # a published release
 base=https://github.com/Telcoin-Association/telcoin-network/releases/download/$TAG
 tgz=telcoin-network-$TAG-x86_64-unknown-linux-gnu.tar.gz
-curl -fsSL -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.asc" -O "$base/$tgz"
+curl -fsSL -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.asc" -O "$base/IMAGE_DIGEST" \
+  -O "$base/$tgz"
 cat ~/telcoin-node-scripts/lib/release-keys/*.asc | gpg --dearmor > release-keys.gpg
 gpgv --status-fd 1 --keyring ./release-keys.gpg SHA256SUMS.asc SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS
+git clone --quiet https://github.com/Telcoin-Association/telcoin-network.git tn-main
+git -C tn-main archive "refs/tags/$TAG" chain-configs | tar -xf -
+sha256sum --check --ignore-missing SHA256SUMS
 tar -xzf "$tgz"
+telcoin-network-$TAG-x86_64-unknown-linux-gnu/telcoin-network --version
+git -C tn-main rev-parse "refs/tags/$TAG^{commit}"
 ```
 
-Go on only if `gpgv` prints a `GOODSIG` line and no `BADSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG` or `ERRSIG` line, and `sha256sum` reports the tarball `OK`.
-Read those status lines rather than the summary, because `gpgv` also prints `Good signature from`, and exits 0, when the signing key has expired or been revoked.
+Go on only if all of these hold:
+
+- `gpgv` prints a `GOODSIG` line and no `BADSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG` or `ERRSIG` line. Read those status lines rather than the summary, because `gpgv` also prints `Good signature from`, and exits 0, when the signing key has expired or been revoked.
+- `sha256sum` prints `OK` for all five files `SHA256SUMS` lists: the tarball, `IMAGE_DIGEST`, and the chain configs `chain-configs/testnet/genesis.yaml`, `committee.yaml` and `parameters.yaml` (`chain-configs/mainnet/` for a mainnet tag). The `git archive` line puts the tagged chain configs at those paths; without it, `--ignore-missing` skips them without a word.
+- `--version` prints `telcoin-network-cli Version: X.Y.Z` with the tag's version, a `Commit SHA:` equal to the commit the last line prints, and `Build Features:` `adiri` (possibly with `faucet`) on an `-adiri` tag, empty on a mainnet tag.
+
 Then stop the node, install the new binary over that file, and start the node again:
 
 ```bash
@@ -706,7 +807,14 @@ If stopping this node as well would halt consensus, the script refuses and chang
 When the members cannot be counted, testnet and devnet go ahead with a warning, and mainnet refuses for a staked node.
 `--allow-quorum-risk` (`TN_ALLOW_QUORUM_RISK=1` for `install-caddy.sh` and `setup-observability.sh`) turns the refusal into a warning; use it only for a restart you have coordinated with the other operators.
 
-When the node reports `CvvActive` and the boundary is five minutes away or less, the script waits until the epoch closes, then 90 seconds more for the new committee to settle, never longer than 30 minutes in all.
+When the node reports `CvvActive` and the boundary is within the margin, the script waits until the epoch closes, then for the settle time while the new committee forms, never longer than 30 minutes in all.
+Both follow the epoch length, which the script reads together with the boundary:
+
+- margin: the epoch length divided by 72, held between 300 and 900 seconds;
+- settle time: the epoch length divided by 240, held between 90 and 300 seconds.
+
+On testnet's six-hour epochs (21600 seconds) that gives five minutes and 90 seconds; a seven-day epoch gives 900 and 300 seconds.
+The wait's lines end with the values and their source, for example `Margin 300s and settle 90s, derived from a 21600 s epoch.`
 It prints a line that starts `Waiting for epoch <N> to close before restarting`, with the time to the boundary and the limit, then a progress line every 15 seconds.
 Nodes outside the committee, staked validators between seats included, are not delayed, and a restart that rolls back a failed change never waits.
 
@@ -721,10 +829,10 @@ These environment variables tune the wait:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TN_SKIP_EPOCH_WAIT` | unset | `1` skips the wait. |
-| `TN_EPOCH_MARGIN` | 300 | Seconds before the boundary inside which a restart waits. |
-| `TN_EPOCH_SETTLE` | 90 | Seconds to wait after the epoch changes. |
+| `TN_EPOCH_MARGIN` | Epoch length / 72, 300 to 900 (300 on testnet) | Seconds before the boundary inside which a restart waits. A whole number you set is used as given. |
+| `TN_EPOCH_SETTLE` | Epoch length / 240, 90 to 300 (90 on testnet) | Seconds to wait after the epoch changes. A whole number you set is used as given. |
 | `TN_EPOCH_JITTER_MAX` | 30 | Then a random pause of up to this many seconds, so nodes that waited for the same boundary do not restart together. `0` turns it off. The committee check runs again after the wait. |
-| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. |
+| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. A cap you set is kept as set; when it is shorter than the margin, the settle time and two progress intervals together (420 seconds on testnet with the defaults), the script warns that the restart may come before the epoch has settled and suggests a larger cap or `TN_SKIP_EPOCH_WAIT=1`. |
 | `TN_EPOCH_POLL` | 15 | Seconds between progress lines, held between 5 and 20. |
 
 The Node Manager UI runs the same scripts, so an update or a config save there can wait too (see [Node Manager UI](#node-manager-ui)).
@@ -741,9 +849,9 @@ sudo bash ~/telcoin-node-scripts/edit-config.sh
 | `2) Metrics address` | The `--metrics` address; `off` removes the flag. |
 | `3) Log verbosity` | `-v` to `-vvvvv`. |
 | `4) RPC access` | `1) Private (recommended)` keeps reth on `127.0.0.1`; `2) Public` binds it to `0.0.0.0`, which mainnet refuses. Not for public RPC (see the cautions below). |
-| `5) BLS passphrase` | `1) Change the stored passphrase`, or `2) Seal the credential again (TPM or PCR change)`. It never re-encrypts the keys. |
+| `5) BLS passphrase` | `1) Change the stored passphrase`, or `2) Seal the credential again (TPM or PCR change)`. It never re-encrypts the keys. On a release whose keytool has `verify`, it checks the passphrase against the key first (below). |
 | `6) P2P ports` | The P2P listener ports. |
-| `7) Docker image` | The image a Docker install runs, as a release tag (resolved to its digest) or a digest. |
+| `7) Docker image` | The image a Docker install runs, as a release tag (resolved to its digest) or a digest. On mainnet, a release tag. |
 | `8) Bootstrap peers` | A peers map in place of the genesis list (see [Optional node flags](#optional-node-flags)), or none. |
 | `9) State export` | Off, every epoch's export, or the last N epochs. |
 | `10) Private forward targets` | `allow_private_forward_targets` in `parameters.yaml`; private networks only. |
@@ -769,7 +877,7 @@ When the value is already in place, nothing is written and the node is not resta
 | `primary_listener`, `worker_listener` | A multiaddr: `/ip4/<addr>/udp/<port>/quic-v1` or `/ip6/...`. The UDP port must match the external address the node advertises. |
 | `metrics` | `<IPv4>:<port>` adds or changes `--metrics`; `off` removes it. The address is `127.0.0.1` unless you pass `--allow-public-metrics`, which `--json` runs do not take. |
 | `verbosity` | `-v`, `-vv`, `-vvv`, `-vvvv` or `-vvvvv`; `--json` runs stop at `-vvv`. |
-| `docker_image` | A release tag of the node's network, resolved to its digest, or `<repository>@sha256:<digest>` from the network's repository. `latest` and other repositories are refused. Docker installs only. The image is pulled first. |
+| `docker_image` | A release tag of the node's network, resolved to its digest, or `<repository>@sha256:<digest>` from the network's repository. `latest` and other repositories are refused, and so is a release older than the network's oldest supported one (`v0.13.0-adiri` on testnet). On mainnet a digest alone is taken only for a mainnet release the node has installed, so give the release tag. Docker installs only. The image is pulled first. |
 | `bootstrap_peers` | An absolute path to a peers map, checked as at setup and installed as `/etc/telcoin/bootstrap-peers.yaml`, or `none` to remove the flag and the file. Needs `v0.15.0-adiri` or later. |
 | `state_export` | `off`, `unlimited` (every export kept; `v0.13.0-adiri` or later) or a number of epochs to keep, 1 to 999999 (`v0.15.0-adiri` or later). |
 | `allow_private_forward_targets` | `true` or `false`. `true` lets the node forward transactions to committee RPC endpoints on private addresses. `edit-config.sh` refuses `true` on testnet and mainnet, so it is for private networks such as a devnet. |
@@ -783,6 +891,11 @@ If the quorum check refuses, the edit is put back.
 Add `--bind-pcrs <list>|none` to change the PCR binding, or `--allow-no-tpm` on mainnet to seal it with the host key alone.
 When the old credential no longer decrypts on the server, it asks you to type the passphrase.
 It restarts the node the same way an edit does and puts the old credential back if the node cannot unlock its key.
+
+Before `5) BLS passphrase`, `--reseal` or `--migrate-credential` writes anything, `edit-config.sh` asks the node release whether its keytool has a `verify` command.
+When it has, the script runs `keytool verify` as the service account, with the passphrase on standard input: the new passphrase for a change, the one being moved for `--migrate-credential`, and for a reseal the one the credential holds, or the one you type when it no longer decrypts.
+A passphrase that does not open the BLS key stops the action with `... does not open the BLS key in <data dir> (keytool verify, exit N); nothing was changed. Use the passphrase the key was created with.`
+On a release without the command, the script logs `keytool verify is not in this release; skipped` and goes on as before, so there the passphrase is stored without a check against the key.
 
 `11) Refresh chain configs` takes the network from `.node-meta`, refuses files that do not match the SHA-256 pins that ship with the scripts (new pins arrive with a signed scripts release), and refuses unless the node's genesis and the new one declare the same chain ID.
 On a source build checked out at a release tag, `git pull` fails and the refresh stops with `git pull failed in /opt/telcoin-source. Chain configs unchanged.`
@@ -862,7 +975,9 @@ What to expect from the UI:
 - The setup wizard installs a signed release, a source build of a release tag, or Docker. The tag field starts at the latest release tag; the Docker field takes a release tag or an image digest and refuses `latest`. The Mainnet card stays disabled until the mainnet release.
 - The Config tab has no fields for bootstrap peers, state export or private forward targets yet; set those with `edit-config.sh` (see [Change the configuration](#change-the-configuration)).
 - The Config tab can re-seal the passphrase credential (`Re-seal the passphrase credential`, the same as `edit-config.sh --reseal`), for example after a firmware update changed the TPM state. It runs the quorum check and the epoch wait before it restarts the node.
-- The System tab shows the Host Security Audit (`check-node.sh --audit`). When the firewall is off, its card asks for the SSH sources (addresses or CIDRs, /8 or narrower, at most 16) and enables the firewall with them as `--ssh-from`; on mainnet an empty list is refused. Use `firewall-setup.sh` for `--p2p-from` or `--ssh-anywhere`.
+- The System tab shows the Host Security Audit (`check-node.sh --audit`). When the firewall is off, its card asks for the SSH sources (addresses or CIDRs, /8 or narrower, at most 16) and enables the firewall with them as `--ssh-from`; on mainnet an empty list is refused.
+- The same enable form has an optional `P2P sources` field, which takes the same kind of list and passes it as `--p2p-from`. When you fill it in, the P2P ports accept only those sources, so peers outside the list cannot reach the node. Left empty, the enable keeps the list the node already has, or opens the P2P ports to every address with the new-flow limit (see [Firewall](#firewall)). The field is in the enable form only, which shows while the firewall is off: to set, change or drop a P2P list once the firewall is on, run `firewall-setup.sh --enable --p2p-from <list>` or `--p2p-anywhere` on the server, and use `firewall-setup.sh` for `--ssh-anywhere` too. The firewall card shows the kept list as `P2P sources` and the limit's state as `P2P new-flow limit`.
+- The Network tab links the network's public status page: on testnet, `https://status.adiri.telcoin.network/`. On mainnet and devnet it shows no status link.
 - Before public RPC is enabled, the page shows the same exposure summary `install-caddy.sh` prints and waits for you to confirm.
 - The update panel reports a refused downgrade, a node that is not voting after an update, and a release tag that now points at another commit.
 - When the copy of the scripts the UI runs is older than the UI needs, an action stops with a message to run `update-scripts.sh` and then `install-ui.sh --update`.
@@ -888,6 +1003,26 @@ If a flag cannot be added, for example because the node command ends in a `#` co
 Add the flags and run it again.
 The health monitor also needs `ufw` active (see [Firewall](#firewall)).
 
+Log and metrics shipping share one ingest token, which you get from the Association.
+The token belongs to the Association's hub, not to your node: the hub checks one shared token, so when the Association replaces it, rotate it on each node that ships.
+Setup keeps it in its own file, `/etc/telcoin/alloy/ingest-token` (root, group `telcoin-alloy`, mode 0640), which Alloy reads as a file; it is never in Alloy's environment, its unit or its command line.
+To replace it, pass the new token on standard input:
+
+```bash
+read -rs TOKEN   # paste the new ingest token; nothing is shown
+printf '%s\n' "$TOKEN" | sudo bash ~/telcoin-node-scripts/setup-observability.sh \
+  --rotate-token --token-stdin
+unset TOKEN
+```
+
+The rotation writes the token file, restarts Alloy alone (the node keeps running), and checks that Alloy stays up; if it does not, the old token and files go back and the run exits 1.
+Run from a terminal without `--token-stdin`, it asks for the token without showing it, and the menu has the same action as `8) Rotate the ingest token (Alloy restarts, the node does not)`.
+A wrong token keeps Alloy running while the hub refuses every push, so check the shipping counters the run prints afterwards.
+
+A server set up before `scripts-v2.1.0` keeps the token in `/etc/telcoin/alloy/telcoin-alloy.env` until the next enable, partial disable or rotation moves it into the token file, which prints `/etc/telcoin/alloy/telcoin-alloy.env no longer holds the ingest token: ...`.
+Until then `7) Show status` in `setup-observability.sh` and `check-node.sh` warn, and a rotation with the same token is enough to move it.
+Turning off both log and metrics shipping shreds the token file, so turning either on again asks for the token.
+
 The health monitor gives the node the port alone, `--healthcheck 43174`.
 On `v0.16.0-adiri` the node then listens on every interface, and the `ufw` rule limits the port to the Association monitor.
 From the next release, given the port alone, it listens on `127.0.0.1` only.
@@ -898,6 +1033,42 @@ From the next release a bind that fails, because the port is in use or the addre
 
 Read the [testnet add-ons guide](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/docs/testnet-addons.md) for what each one shares and how to turn it off.
 Read the [WireGuard VPN guide](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/WGVPN.md) before you enrol in the VPN.
+
+### Key lifecycle
+
+The node's identity is `node-keys/` and `node-info.yaml` in the data directory.
+The BLS key in `node-keys/` is wrapped with your BLS passphrase, so the key files and the passphrase together are the key in the clear.
+The stored passphrase, `/etc/telcoin/bls-passphrase.cred`, is not part of a backup: it is sealed to the server that wrote it (its host key, plus the TPM with `host+tpm2`) and decrypts nowhere else.
+
+- Backup. Copy `node-keys/` and `node-info.yaml` off the server as in [Back up the keys now](#back-up-the-keys-now), and keep the passphrase offline, apart from them. A backup must not sit on the node's own disk, or in a snapshot or image of it. No script makes the backup for you.
+- Snapshots are copies. A disk snapshot or image of the node holds the keys and the stored passphrase, and so does a copy of the data directory such as `/var/lib/telcoin.pre-update` (see [One-way updates](#one-way-updates)). With `CREDENTIAL_KEY=host` the host key that decrypts the credential, `/var/lib/systemd/credential.secret`, is on the same disk, so the snapshot alone can start the validator on another machine. Keep every snapshot and image as safe as the backup, never boot a machine from one while the node runs, and delete them all when you retire the node.
+- Restore, only once the old server is gone and cannot start again. Two servers that run one BLS key sign conflicting votes, and no script detects a second copy. The steps follow this list.
+- Rotation. The BLS key cannot be rotated: new keys are a new validator, with a new ConsensusNFT and a new execution address (see [What not to do](#what-not-to-do)). Before you stake, `prepare-stake.sh --rotate-address` moves the keys to another execution address (see [Change the execution address before you stake](#change-the-execution-address-before-you-stake)). `edit-config.sh` `5) BLS passphrase` changes only the stored copy of the passphrase and never re-encrypts the key, so it takes only the passphrase the key was created with; on a release whose keytool has `verify`, it refuses one that does not open the key (see [Change the configuration](#change-the-configuration)).
+- Decommissioning. `remove-node.sh` shreds the keys, `/etc/telcoin` and `/var/backups/telcoin`, and says itself that this is not enough: shred is best effort on SSDs, copy-on-write and cloud disks, and `Decommissioning a host that held a validator key means destroying or crypto-erasing its disk and deleting every snapshot and image taken from it; shred alone does not do that.` Do both. Leaving the validator set is a separate, on-chain step (see [Rewards and exit](#rewards-and-exit)).
+- Lost passphrase. Without the passphrase the wrapped key cannot be opened, so the key is lost. While the server that sealed the credential still decrypts it, root can read the passphrase back there with `sudo systemd-creds decrypt --name=bls-passphrase /etc/telcoin/bls-passphrase.cred -`. That prints the passphrase, so run it only on that server, in a private terminal, and store the result offline. Otherwise, before you stake, generate new keys; after you stake, exit with the execution wallet (`beginExit()`, then `unstake`; neither needs the BLS key) and start again as a new validator after talking to the Association.
+
+To restore on a new server, create the service account and the data directory before setup, put the backup into the data directory as that account's, and write the passphrase into the root-only file setup reads.
+For the archive made in [Back up the keys now](#back-up-the-keys-now), copied into your home directory on the new server, with the default account and paths:
+
+```bash
+sudo groupadd --system telcoin
+sudo useradd --system --no-create-home --shell /bin/false --gid telcoin telcoin
+sudo install -d -o telcoin -g telcoin -m 0700 /var/lib/telcoin
+sudo tar -C /var/lib/telcoin -xzf ~/telcoin-keys.tgz
+sudo chown -R telcoin:telcoin /var/lib/telcoin/node-keys /var/lib/telcoin/node-info.yaml
+sudo install -d -m 0755 /etc/telcoin
+read -rs PASS   # type the BLS passphrase; nothing is shown
+printf '%s\n' "$PASS" | sudo sh -c 'umask 077; cat > /etc/telcoin/bls-passphrase'
+unset PASS
+sudo bash ~/telcoin-node-scripts/setup-node.sh
+```
+
+Answer No to `Overwrite existing keys?`.
+Setup keeps the keys and, on a server with encrypted credentials, moves the passphrase file into a new credential sealed on this server and shreds the file.
+Do not copy the old server's `.cred`: setup keeps a credential it finds without decrypting it.
+A `--json` setup refuses existing keys, so a restore runs interactively.
+Setup does not check the passphrase against the key; a wrong one shows when the node cannot decrypt its key at start (see [Service and keys](#service-and-keys)).
+Delete `~/telcoin-keys.tgz` from the new server with `shred -u` once the node runs.
 
 ### Remove a node
 
@@ -914,6 +1085,7 @@ Deleting the keys needs you to type `DELETE`.
 The keys, the passphrase credential and the rest of the configuration are shredded, not just deleted.
 Do not delete the keys of a staked validator unless you hold a tested backup.
 Testnet add-ons are removed without a question.
+The host baseline and the P2P new-flow limit go with the last node on the server; while another node unit remains, both stay for it.
 If you keep the service user, it asks before it removes the `telcoin-log` group.
 A removal that stopped part way can be finished: run the script again, and it lists the files left behind and asks before it removes them.
 Menu option `2) Wipe chain data only (keeps keys and config)` keeps the keys and configuration and makes the node resync from scratch.
@@ -1183,7 +1355,7 @@ The script hands the passphrase to keytool on standard input.
 If keytool fails or its result is wrong, the script puts `node-info.yaml` back and exits 4; a wrong passphrase is the usual cause.
 
 The passphrase comes from `TN_BLS_PASSPHRASE` first, then from `/etc/telcoin/bls-passphrase` when that file exists with mode 600, then from a prompt on a terminal.
-The script does not read the encrypted credential, and only a testnet node below systemd 250 keeps the plain file (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)).
+The script does not read the encrypted credential, and only a testnet or devnet node keeps the plain file: one below systemd 250, or one set up with `--passphrase-method stdin` (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)).
 So on most nodes, type the passphrase at the prompt, or pass the variable through `sudo`, which otherwise drops it:
 
 ```bash
@@ -1393,12 +1565,12 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh \
 - Finalize's `done` adds `operator_guide` (the URL of the operator runbook) and `public_rpc` (`enabled`, `domain`, `http`, `ws`).
 - The inputs are checked before anything runs as root. A flag with no value, an unknown phase, network or install method, a malformed URL, a `--docker-image` that is not `<repository>@sha256:<digest>`, a relative `--binary-path`, and a `--release-tag` that is not a release tag of the network or is older than `v0.13.0-adiri` each stop the run with an `error` event. A keygen run also stops there when `--address`, one of the four multiaddr flags or the passphrase is missing, or when a source or release install has no `--release-tag`.
 - Finalize stops when a flag differs from what keygen recorded (install method, data directory, image or binary path); give the keygen value or leave the flag out.
-- `--network` takes `testnet` (or `adiri`), `mainnet` or `devnet`. A mainnet install stops until mainnet is set up in the scripts (see [Networks and endpoints](#networks-and-endpoints)).
+- `--network` takes `testnet` (or `adiri`), `mainnet` or `devnet`. `--network mainnet` stops with `Mainnet is not enabled in this script release ...` until the scripts release that launches mainnet (see [Networks and endpoints](#networks-and-endpoints)).
 - `--install-method` takes `source` or `release`, each with `--release-tag <tag>` (`--build-ref` is the older name), `docker` or `existing`. For Docker, `--release-tag` picks that release's image by digest and `--docker-image` takes a digest; give one or the other, not both. With neither, keygen picks the newest release image and records its digest.
 - For `existing`, `--binary-path <path>` (absolute) names the binary and, in `--json` mode, implies `existing`. Without it, keygen searches PATH, `/usr/local/bin`, `/opt` and `/home`, and stops when it finds none.
 - Node flags: `--bootstrap-peers <file>`, `--enable-state-export` and `--state-export-keep <n>` (see [Optional node flags](#optional-node-flags)).
 - Passphrase and log flags: `--passphrase-method credential|stdin`, `--allow-no-tpm` and `--bind-pcrs <list>` (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)), and `--log-target journal|file` (see [Logs](#logs)).
-- Other flags: `--data-dir`, `--public-ip`, `--advertised-name`, `--service-user`, `--service-group`, `--genesis-dir`, `--enable-healthcheck-monitor`, and the public RPC flags from [Public RPC (https and wss)](#public-rpc-https-and-wss).
+- Other flags: `--data-dir`, `--public-ip`, `--advertised-name`, `--service-user`, `--service-group`, `--genesis-dir`, `--enable-healthcheck-monitor`, `--host-baseline` (see [Host baseline (optional)](#host-baseline-optional); keygen ignores it), and the public RPC flags from [Public RPC (https and wss)](#public-rpc-https-and-wss).
 
 ### Advertised RPC URL flags
 
@@ -1423,12 +1595,13 @@ If an explicit URL differs from the domain, setup warns that `rpc-enable` will r
 | Script | Non-interactive forms |
 |---|---|
 | `install-caddy.sh` | `--phase=rpc-status`, `rpc-check-dns`, `rpc-enable`, `rpc-disable` and the dashboard phases `status`, `check-dns`, `enable`, `disable`, with or without `--json`. Outside a terminal and without `--json`, `rpc-enable` needs `--yes`. The dashboard password comes on standard input with `--password-stdin` and needs at least 16 characters. |
-| `update-node.sh` | `--json --check`, `--json --prepare --ref <tag>`, `--json --apply --yes [--no-epoch-wait] [--allow-quorum-risk]`, `--json --discard`. `--ref` takes a release tag of the network or, on a Docker install, the network's image by digest; it cannot start with `-`. A failed apply rolls back; its `done` line carries `"ok":false` and a boolean `rolled_back` (`true` when the rollback succeeded), and `"voting":false` when the node did not take part in consensus. A one-way apply (see [One-way updates](#one-way-updates)) never rolls back: its failed `done` carries `"rolled_back":false` and `"storage_migration":true`, and `--json --check` adds the same boolean, `true` when updating to `latest_ref` is one-way. A `--json --discard` after such an apply had started the new release keeps the launch files, sends a `warn` event, and its `done` carries `"storage_migration":true`. A refused downgrade's `done` carries `"downgrade":true`. |
-| `firewall-setup.sh` | `--enable` or `--reset`, with `--ssh-from`, `--p2p-from`, `--ssh-anywhere` or `--p2p-anywhere`; `--json --status`, `--json --enable`, `--json --port <49590/udp\|49594/udp\|43174/tcp> <on\|off>`. `--json --status` adds `p2p_ports`, one object per P2P port with `port`, `proto`, `label` and `allowed` (`null` while `ufw` is off). Exit 0 is done, 1 refused with nothing changed, 2 a step failed and the previous rules are back, 3 the put-back failed too (the message names the saved rule files). |
+| `update-node.sh` | `--json --check`, `--json --prepare --ref <tag>`, `--json --apply --yes [--no-epoch-wait] [--allow-quorum-risk]`, `--json --discard`. `--ref` takes a release tag of the network or, on a Docker install, the network's image by digest; it cannot start with `-`. A failed apply rolls back; its `done` line carries `"ok":false` and a boolean `rolled_back` (`true` when the rollback succeeded), and `"voting":false` when the node did not take part in consensus. An apply whose node was still catching up when the consensus check ran out of time ends `"ok":true` with `"voting":false` (see [Update the node](#update-the-node)). A one-way apply (see [One-way updates](#one-way-updates)) never rolls back: its failed `done` carries `"rolled_back":false` and `"storage_migration":true`, and `--json --check` adds the same boolean, `true` when updating to `latest_ref` is one-way. A `--json --discard` after such an apply had started the new release keeps the launch files, sends a `warn` event, and its `done` carries `"storage_migration":true`. A refused downgrade's `done` carries `"downgrade":true`. |
+| `firewall-setup.sh` | `--enable` or `--reset`, with `--ssh-from`, `--p2p-from`, `--ssh-anywhere` or `--p2p-anywhere`; `--json --status`, `--json --enable`, `--json --port <49590/udp\|49594/udp\|43174/tcp> <on\|off>`. `--json --status` adds `p2p_ports`, one object per P2P port with `port`, `proto`, `label` and `allowed` (`null` while `ufw` is off), and `p2p_new_flow_limit` with `active`, `rate`, `burst` and whether the limit comes back at boot (`persistent`). Exit 0 is done, 1 refused with nothing changed, 2 a step failed and the previous rules are back, 3 the put-back failed too (the message names the saved rule files). |
 | `edit-config.sh` | `--set <field>=<value>`, with or without `--json`, for the fields in [Change the configuration](#change-the-configuration); `--reseal`; `--no-epoch-wait`, `--allow-quorum-risk`. |
 | `check-node.sh` | `--audit` (see [Check the host hardening](#check-the-host-hardening)), `--network-rpc <URL>`, `--address <0x...>`. |
+| `update-scripts.sh` | `--check` reports the installed and the newest scripts release without installing anything; exit 0, 1 or 2 (see [Keep the scripts current](#keep-the-scripts-current)). |
 | `prepare-stake.sh` | `--json`, `--network-rpc <URL>`, and `--rotate-address <0xNEW> --yes [--no-restart]`. With `--json` it prints one JSON object at the end; the exit codes are in [Check the node with prepare-stake.sh](#check-the-node-with-prepare-stakesh). |
-| `setup-observability.sh` | `--json` with `--enable-logs`, `--enable-metrics`, `--enable-health` or the matching `--disable-...`; `--token-stdin` takes the ingest token on standard input. Testnet only. |
+| `setup-observability.sh` | `--json` with `--enable-logs`, `--enable-metrics`, `--enable-health` or the matching `--disable-...`; `--token-stdin` takes the ingest token on standard input. `--rotate-token --token-stdin`, with or without `--json`, replaces the token and runs on its own (see [Testnet add-ons](#testnet-add-ons)). Testnet only. |
 | `remove-node.sh` | `--json --remove observer\|validator --scope service\|data\|keys --yes [--remove-ui]`. The `--remove` value is a UI slot name, not a role; either one removes the node. |
 
 The status and DNS-check phases and `update-node.sh --json --check` print a single JSON object instead of an event stream.
@@ -1462,11 +1635,13 @@ The tables below group the common symptoms by area.
 |---|---|---|
 | Preflight prints `[WARN] <role>: below minimum` | The server is under that role's minimum. | A warning only. The check counts physical cores, so a cloud instance with hyperthreads has half as many as its vCPUs. |
 | `systemd <N> is too old: the node needs 247 or later ...`, or `systemd <N> is below the mainnet floor (255, Ubuntu 24.04) ...` | The OS is older than the network needs (see [Operating system](#operating-system)). | Move to Ubuntu 24.04. |
-| `systemd <N> cannot encrypt credentials (needs 250, Ubuntu 24.04) ...` | A testnet server below systemd 250. A warning: the passphrase stays in a root-only file. | Move to Ubuntu 24.04 to keep it encrypted. |
+| `systemd <N> cannot encrypt credentials (needs 250, Ubuntu 24.04) ...` | A testnet server below systemd 250. A warning: the passphrase stays in a root-only file. Encryption needs systemd 250 or newer; Ubuntu 24.04 ships 255. | Upgrade to systemd 250 or newer, such as Ubuntu 24.04, then encrypt the passphrase with `sudo bash ~/telcoin-node-scripts/edit-config.sh --migrate-credential`. |
 | `No usable TPM2 on this host: on mainnet pass --allow-no-tpm ...` | A mainnet server with no TPM the credential can use. | Give the server a TPM or vTPM, or accept the host key alone with `--allow-no-tpm` (see [How setup stores the passphrase](#how-setup-stores-the-passphrase)). |
 | `<tag> is not a testnet release tag ...` | A branch, a commit, `latest` or a mistyped tag. | Give a release tag such as `v0.16.0-adiri`. |
 | `No release signing key in <dir> (*.asc) ...`, or `Release <tag> did not verify (see above); nothing was installed.` | The scripts carry no key for the release (one added or renewed after your scripts release), or the release's `SHA256SUMS` signature or a hash did not check out. | Run `update-scripts.sh` for the current keys and try again. If it still fails, email devs@telcoin.org with the output and do not install that release. |
 | `mainnet has no pinned sha256 for genesis.yaml yet ...` | Mainnet has not launched, so the scripts have no pins for its chain configs. | Install on testnet (see [Networks and endpoints](#networks-and-endpoints)). |
+| `Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed.` | Mainnet has not launched, and this scripts release does not offer it. | Install on testnet, and take the release that launches mainnet with `update-scripts.sh` when it comes (see [Networks and endpoints](#networks-and-endpoints)). |
+| `The host baseline was not made (see above); the node runs without it. ...` | A step of `--host-baseline` failed: no apt, the unit still holds the passphrase, or a package, write or AIDE step failed. The lines above it say which. | Fix that cause, then run `sudo bash ~/telcoin-node-scripts/setup-node.sh --host-baseline` (see [Host baseline (optional)](#host-baseline-optional)). |
 | `CVE-2026-31431 (Copy Fail) -- setup cannot continue` | The `algif_aead` module is not blocked, or is still loaded. | Apply the mitigation from <https://copy.fail>, unload the module or reboot, then re-run setup. |
 | `Port <port>/<proto> (...) is already in use.` | Another process holds the port. | Find it with `sudo ss -lunp` (UDP) or `sudo ss -ltnp` (TCP), then stop it or choose another port. |
 | `--bootstrap-peers needs telcoin-network v0.15.0-adiri or later, and ... does not have it.` (setup), or `the installed release has no --bootstrap-peers; update the node first` (`edit-config.sh`) | The node release lacks the flag. The same messages name `--enable-state-export` (`v0.13.0-adiri`) and `--state-export-keep` (`v0.15.0-adiri`). | Pick a newer release, update the node (see [Update the node](#update-the-node)), or leave the flag out. |
@@ -1482,6 +1657,10 @@ The tables below group the common symptoms by area.
 | `Release <tag> needs update-scripts.sh <version> or newer ...` | The release needs a newer updater than the one installed. | Run the installer command the message prints, then `update-scripts.sh` again. |
 | `an update is in progress (PID <N>); try again when it has finished` (`edit-config.sh`), or `Refused: an update is in progress ...` (`prepare-stake.sh --rotate-address`) | `update-node.sh` holds the update lock. | Wait for the update to finish, then run it again. |
 | `Invalid ref "<ref>": a ref cannot start with "-".`, or `<ref> is not a testnet release tag ...` | `update-node.sh` takes release tags only. | Use a release tag such as `v0.16.0-adiri`. |
+| `<ref> is older than v0.13.0, the oldest testnet release these scripts support (...)` | `update-node.sh`, or the image change in `edit-config.sh`, got a release below the network's floor. | Pick `v0.13.0-adiri` or a newer release. |
+| `Image refused: on mainnet an image is named by its release tag, ...` | A mainnet Docker image given by digest alone, which `.node-meta` does not record as the image of a mainnet release the node has installed. | Give the mainnet release tag; the scripts take the digest from the signed release. |
+| `Script release <tag> expired on <date>; a newer signed release is overdue.` | The scripts release is past the expiry date in its manifest. | Nothing to fix now: the release still verifies and installs. Check with `update-scripts.sh --check`; if no newer release appears soon, email devs@telcoin.org. |
+| `update-node.sh` warns `... Not rolled back: the unit is active and its RPC answers, so the new release keeps running while it catches up. ...` | The node had not advanced its consensus header, or was not voting again, within `TN_UPDATE_VOTE_TIMEOUT` after the restart. | Run `check-node.sh` again in a few minutes. If it does not catch up, see [Sync and node mode](#sync-and-node-mode). |
 | `... Refused: wait until the others are back, or, for a coordinated restart, run again with --allow-quorum-risk.` | Stopping this node now, with the committee members that are already down, would halt consensus. | Wait until the other members are back. Use `--allow-quorum-risk` only for a restart coordinated with the other operators (see [Restarts and the epoch boundary](#restarts-and-the-epoch-boundary)). |
 | `<new> is older than the running <current>: downgrades are refused.` | The release you picked is older than the one the node runs. | Pick the running release or a newer one. On testnet an interactive run with `--allow-downgrade` goes ahead, but never below `v0.16.0-adiri` on a migrated data directory, and never back to `v0.16.0-adiri` on a committee node that has run the next release (see [One-way updates](#one-way-updates)). |
 | `update-node.sh` ends `... Not rolled back: the previous release cannot open the migrated data dir.` | A one-way update to `v0.16.0-adiri` or later did not pass its health check, often because the first start is still migrating the consensus store. | Watch `journalctl -u telcoin -f`. A node that is still migrating comes up without help; a node that stopped says why in the journal. To go back, restore the pre-update snapshot (see [One-way updates](#one-way-updates)). |
@@ -1507,6 +1686,7 @@ The tables below group the common symptoms by area.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | The node cannot decrypt its BLS key at start | The stored passphrase is not the one the keys were generated with. | Store the right one with `edit-config.sh` item `5) BLS passphrase`, `1) Change the stored passphrase`, using the copy you keep offline. It never re-encrypts the keys. |
+| `... does not open the BLS key in <data dir> (keytool verify, exit N); nothing was changed. Use the passphrase the key was created with.` | `edit-config.sh` checked the passphrase with the release's `keytool verify`, and it does not open the key. | Give the passphrase the key was created with, from your offline copy. If it is lost, see [Key lifecycle](#key-lifecycle). |
 | The service fails before the node starts after a firmware, Secure Boot or TPM change | The credential is bound to the TPM or to PCRs that changed, so systemd cannot decrypt it. | `sudo bash ~/telcoin-node-scripts/edit-config.sh --reseal`. When the old credential no longer decrypts, it asks for the passphrase, so have your offline copy ready. |
 | The node will not start; the log shows `another telcoin process (pid <N>) holds the lock on this data directory` | `v0.16.0-adiri` and later lock `<data directory>/telcoin.pid`, and another node process, such as one started by hand, runs on the same data directory. | Stop the other process, then start the service. Do not delete `telcoin.pid`: the lock is released when its holder exits. |
 | From the next release, the node stops at every start, and the journal shows `Cannot check database (epoch): epoch table <table> holds <n> row(s) this binary cannot decode, the first at key <key> with header epoch <N> ...`; on the first start the line begins `Cannot migrate the consensus DB from MDBX: Cannot check database (epoch)`. On `v0.16.0-adiri`, the node stops at every start with a panic `Invalid bytes!` while it opens its database | From the next release, each start checks the epoch database, which holds only the epoch in progress. It holds a row this release cannot read and every retry finds the same row, so systemd restarts the node every 10 seconds and it can end in `start-limit-hit`. On the first start, before the node has moved its database to the new format, the line names `consensus-db/epoch`; once it has moved, the line names `consensus-db/tndb/epoch`. `v0.16.0-adiri` runs no such check: a damaged row in its epoch database makes the node panic as it opens the database, with the same restarts. | When the line begins `Cannot migrate the consensus DB from MDBX` and names `consensus-db/epoch`, stop the node (`sudo systemctl stop telcoin`) and move that directory out of the data directory, for example `sudo mv /var/lib/telcoin/consensus-db/epoch /var/lib/telcoin.epoch-<N>`, and keep `consensus-db/epochs` and `db` in place. That directory also held the node's guards against voting or proposing twice in epoch `<N>`, so start the node again only once the network has closed that epoch: compare `<N>` with the current epoch (see [The epoch section](#the-epoch-section)). When the line names `consensus-db/tndb/epoch`, do not remove or move it, even though the journal line suggests it: the next start refuses an epoch database that is missing or empty beside the marker `consensus-db/tndb/mdbx-migrated`, so wait for an answer from devs@telcoin.org. On `v0.16.0-adiri`, send the journal lines with the `Invalid bytes!` panic and wait for an answer. A node with state export on can instead be restored into a fresh data directory with `db load-state`. |
@@ -1539,7 +1719,7 @@ Include:
 - The full output of `sudo bash ~/telcoin-node-scripts/check-node.sh`.
 - For staking questions, the output of `sudo bash ~/telcoin-node-scripts/prepare-stake.sh`.
 - The last 200 log lines: `journalctl -u telcoin -n 200 --no-pager`.
-- The node release (`RELEASE_TAG` in `/etc/telcoin/.node-meta`, or the binary's `--version` on an `existing` install) and the scripts release that `update-scripts.sh` reports.
+- The node release (`RELEASE_TAG` in `/etc/telcoin/.node-meta`, or the binary's `--version` on an `existing` install) and the output of `bash ~/telcoin-node-scripts/update-scripts.sh --check`.
 - The network (testnet or devnet) and your install method.
 
 > [!WARNING]
