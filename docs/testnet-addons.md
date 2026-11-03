@@ -234,13 +234,17 @@ enabling either pipeline again asks for the token. `remove-node.sh` shreds the t
 file and the env file.
 
 A push URL given with `--push-url` / `--metrics-push-url` (or `OBS_PUSH_URL` /
-`OBS_METRICS_PUSH_URL`) is an override: `telcoin-alloy.env` records it with a marker, and
-a rotation or a partial disable keeps it. Without an override the URL follows the script
-release's default hub in `lib/testnet-addons.env`, so a hub change in a later release
-reaches the host at the next enable, rotation or partial disable (the log says "push URL
-follows the release default"). An env file written by a 2.0.x release counts as the
-default. To drop an override, re-enable with the flag omitted. A render that would leave
-an enabled pipeline with no URL is refused before anything is written.
+`OBS_METRICS_PUSH_URL`) is an override: `telcoin-alloy.env` records it with a marker
+(`OBS_PUSH_URL_SOURCE=override`), and a rotation or the other pipeline's enable keeps it.
+Without an override the URL follows the script release's default hub in
+`lib/testnet-addons.env`, so a hub change in a later release reaches the host at the next
+enable, rotation or partial disable (the log says "The logs push URL follows the release
+default: ..."). An env file written by a 2.0.x release counts as the default, so a 2.0.x
+install that pointed at its own hub moves to the release default at its next render and
+the log says to pass `--push-url` again. To drop an override, pass `--push-url default`
+(or `--metrics-push-url default`). Disabling a pipeline forgets its override: pass the
+flag again when enabling it. A render that would leave an enabled pipeline with no URL is
+refused before anything is written.
 
 Both pipelines ride the same host and the same ingest token, and attach the same identity
 labels (`node`, `region`, `validator_address`, `chain`, `network`, `image_version`) so

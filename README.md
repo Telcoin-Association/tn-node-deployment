@@ -1620,8 +1620,9 @@ which moves it (`/etc/telcoin/alloy/telcoin-alloy.env no longer holds the ingest
 is in /etc/telcoin/alloy/ingest-token ...`); the status screen and `check-node.sh` warn
 until then, so run `--rotate-token` with the same token after updating. A full disable
 shreds the token file; `remove-node.sh` shreds it and the env file. A push URL given with
-`--push-url` / `--metrics-push-url` is an override that rotations and partial disables
-keep; without one the URL follows the release default. See
+`--push-url` / `--metrics-push-url` is an override that rotations keep (disabling a pipeline
+forgets its own); `--push-url default` drops it, and without one the URL follows the release
+default. See
 [docs/testnet-addons.md](docs/testnet-addons.md#the-ingest-token-file).
 
 Enabling the VPN requires explicit consent (you type `I CONSENT`); it never touches your
