@@ -83,7 +83,13 @@ ok    remove: says the packages stay
 ok    remove: /etc/aide and /var/lib/aide stay
 ok    remove again: silent, rc 0
 ok    remove without augenrules: rules file gone, rc 0
-ok    remove without augenrules: says the watches stay loaded until reboot
+FAIL  [finding A-6] remove without augenrules: says the watches stay loaded until reboot
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.kLOMEC/expected
+      +++ /tmp/tn_test.kLOMEC/actual
+      @@ -1 +1 @@
+      -yes
+      +no
 ok    refresh without the marker: nothing, rc 0
 ok    status without the marker: one info line, rc 0
 ok    refresh, marker but aide not installed: warning, rc 0
@@ -94,29 +100,30 @@ ok    status, marker but no rules file: warn line
 SKIP  status as a user (this run is root (the user run is the bash 5.3 host run))
 FAIL  [finding A-2] duplicated HOST_BASELINE: refresh says why it did nothing
       expected (<) vs actual (>):
-      --- /tmp/tn_test.DnaEiH/expected
-      +++ /tmp/tn_test.DnaEiH/actual
+      --- /tmp/tn_test.kLOMEC/expected
+      +++ /tmp/tn_test.kLOMEC/actual
       @@ -1 +1 @@
       -yes
       +no
 FAIL  [finding A-2] duplicated HOST_BASELINE: status does not say off
       expected (<) vs actual (>):
-      --- /tmp/tn_test.DnaEiH/expected
-      +++ /tmp/tn_test.DnaEiH/actual
+      --- /tmp/tn_test.kLOMEC/expected
+      +++ /tmp/tn_test.kLOMEC/actual
       @@ -1 +1 @@
       -no
       +yes
 ok    duplicated HOST_BASELINE: remove takes the files
 FAIL  [finding A-2] duplicated HOST_BASELINE: remove clears the marker lines
       expected (<) vs actual (>):
-      --- /tmp/tn_test.DnaEiH/expected
-      +++ /tmp/tn_test.DnaEiH/actual
+      --- /tmp/tn_test.kLOMEC/expected
+      +++ /tmp/tn_test.kLOMEC/actual
       @@ -1 +1 @@
       -0
       +2
 SIGTERM during aide --init leaves: marker=1 rules=root:root 640 conf=root:root 600 db=absent new=absent tmp=0
 ok    SIGTERM during aide --init: no root-writer temp file left in /etc/telcoin
 ok    SIGTERM during aide --init: status warns (marker set, database missing)
+ok    tn_host_audit: rc 0 with a clean baseline, rc 1 when only the baseline warns
 ok    the library defines the four entry points
 
-99 checks, 3 failures, 1 skipped
+100 checks, 4 failures, 1 skipped

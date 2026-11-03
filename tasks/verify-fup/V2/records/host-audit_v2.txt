@@ -54,6 +54,7 @@ FAIL  [finding A-2] duplicated HOST_BASELINE: status does not say off
       > yes
 ok    duplicated HOST_BASELINE: remove takes the files
 SKIP  SIGTERM during aide --init (needs root)
+ok    tn_host_audit: rc 0 with a clean baseline, rc 1 when only the baseline warns
 ok    the library defines the four entry points
 
-39 checks, 3 failures, 2 skipped
+40 checks, 3 failures, 2 skipped

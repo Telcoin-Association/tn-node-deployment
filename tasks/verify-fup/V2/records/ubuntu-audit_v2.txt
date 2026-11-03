@@ -83,7 +83,12 @@ ok    remove: says the packages stay
 ok    remove: /etc/aide and /var/lib/aide stay
 ok    remove again: silent, rc 0
 ok    remove without augenrules: rules file gone, rc 0
-ok    remove without augenrules: says the watches stay loaded until reboot
+FAIL  [finding A-6] remove without augenrules: says the watches stay loaded until reboot
+      expected (<) vs actual (>):
+      1c1
+      < yes
+      ---
+      > no
 ok    refresh without the marker: nothing, rc 0
 ok    status without the marker: one info line, rc 0
 ok    refresh, marker but aide not installed: warning, rc 0
@@ -114,6 +119,7 @@ FAIL  [finding A-2] duplicated HOST_BASELINE: remove clears the marker lines
 SIGTERM during aide --init leaves: marker=1 rules=root:root 640 conf=root:root 600 db=absent new=absent tmp=0
 ok    SIGTERM during aide --init: no root-writer temp file left in /etc/telcoin
 ok    SIGTERM during aide --init: status warns (marker set, database missing)
+ok    tn_host_audit: rc 0 with a clean baseline, rc 1 when only the baseline warns
 ok    the library defines the four entry points
 
-99 checks, 3 failures, 1 skipped
+100 checks, 4 failures, 1 skipped

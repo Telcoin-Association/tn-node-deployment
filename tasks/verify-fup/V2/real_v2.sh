@@ -42,6 +42,8 @@ printf 'src\n' > /opt/telcoin-source/README
 printf '#!/bin/bash\nexec docker run img telcoin node --http\n' > /usr/local/libexec/telcoin/tn-start-docker
 printf 'cred-v1\n' > /etc/telcoin/bls-passphrase.cred; chmod 0600 /etc/telcoin/bls-passphrase.cred
 printf 'token-v1\n' > /etc/telcoin/alloy/ingest-token; chmod 0640 /etc/telcoin/alloy/ingest-token
+# Where lib/observability.sh keeps the ingest token at this tip (_obs_write_env_file).
+printf 'OBS_INGEST_TOKEN=V2-ingest-token-1\n' > /etc/telcoin/alloy/telcoin-alloy.env; chmod 0600 /etc/telcoin/alloy/telcoin-alloy.env
 printf 'RPC_PORT=8545\n' > /etc/telcoin/node.env
 printf 'key\n' > /var/lib/telcoin/node-keys/bls.key
 
@@ -69,6 +71,8 @@ check "real: auditctl parses each rule line" "" "$(grep '^-w' /etc/audit/rules.d
 
 cc=0; aide --config="$CONF" --config-check >/dev/null 2>&1 || cc=$?
 check_rc "real: aide --config-check of the node config" 0 "$cc"
+check "real: database root 0600, /var/lib/aide root 0700, /etc/aide root 0755" "root:root 600 root:root 700 root:root 755" \
+    "$(stat -c '%U:%G %a' /var/lib/aide/telcoin-node.db) $(stat -c '%U:%G %a' /var/lib/aide) $(stat -c '%U:%G %a' /etc/aide)"
 check "real: database made, no .new left" "yes no" "$([[ -s /var/lib/aide/telcoin-node.db ]] && echo yes || echo no) $([[ -e /var/lib/aide/telcoin-node.db.new ]] && echo yes || echo no)"
 db="$(cat /var/lib/aide/telcoin-node.db)"
 inc() { case "$db" in *"$1 "*|*"$1"$'\n'*) echo yes ;; *) echo no ;; esac; }
@@ -78,6 +82,7 @@ check "real: database holds the unit" yes "$(inc /etc/systemd/system/telcoin.ser
 check "real: database holds .node-meta and node.env" "yes yes" "$(inc /etc/telcoin/.node-meta) $(inc /etc/telcoin/node.env)"
 check "real: database leaves out the credential" no "$(inc /etc/telcoin/bls-passphrase.cred)"
 check "real: database leaves out the ingest token" no "$(inc /etc/telcoin/alloy/ingest-token)"
+check "[finding N-2] real: database leaves out the Alloy env file that holds the token at this tip" no "$(inc /etc/telcoin/alloy/telcoin-alloy.env)"
 check "real: database leaves out /opt/telcoin-source" no "$(inc /opt/telcoin-source/README)"
 check "real: database leaves out the node keys and the data dir" no "$(inc /var/lib/telcoin/node-keys/bls.key)"
 check "real: database holds no other unit" no "$(case "$db" in *"/etc/systemd/system/"[!t]*) echo yes ;; *) echo no ;; esac)"

@@ -312,11 +312,11 @@ if [[ $IS_ROOT == 1 ]]; then
 
     # Adversarial: augenrules gone at remove time (aide stays): the rules file goes,
     # and the kernel watches stay loaded until reboot.
-    fx; tn_host_baseline_install >/dev/null 2>&1; rm -f "${IBIN:?}/augenrules"; : > "$LOG/calls"
+    fx; tn_host_baseline_install >/dev/null 2>&1; rm -f "${IBIN:?}/augenrules"; hash -r; : > "$LOG/calls"
     out="$(tn_host_baseline_remove 2>&1)"; rc=$?
     check "remove without augenrules: rules file gone, rc 0" "absent rc=0" "$(omode "$RULES") rc=$rc"
     V2_REMOVE_NO_AUGEN_OUT="$out"
-    check "remove without augenrules: says the watches stay loaded until reboot" yes "$(has "$out" "stay loaded until the next boot")"
+    check "[finding A-6] remove without augenrules: says the watches stay loaded until reboot" yes "$(has "$out" "stay loaded until the next boot")"
 else
     skip "install happy path, refresh, remove (rename-based writes)" "tn_write_root_file needs a root-owned tree"
 fi
@@ -401,6 +401,25 @@ if [[ $IS_ROOT == 1 ]]; then
 else
     skip "SIGTERM during aide --init" "needs root"
 fi
+
+# tn_host_audit's rc follows the baseline lines: the rest of the audit is made clean
+# (systemd 259, sysctls 0/1, no unit), then the status is stubbed ok and warn.
+fx; rm -f "${FX:?}/etc/systemd/system/telcoin.service"
+tn_systemd_version() { printf '259\n'; }
+cat() {
+    case "${1:-}" in
+        /proc/sys/fs/suid_dumpable) printf '0\n' ;;
+        /proc/sys/kernel/yama/ptrace_scope) printf '1\n' ;;
+        /proc/sys/kernel/core_pattern) printf 'core\n' ;;
+        *) "$REAL_CAT" "$@" ;;
+    esac
+}
+tn_host_baseline_status() { printf '%-5s %s\n' ok "stub"; return 0; }
+out="$(tn_host_audit 2>&1)"; rc_ok=$?
+tn_host_baseline_status() { printf '%-5s %s\n' warn "stub"; return 1; }
+out="$(tn_host_audit 2>&1)"; rc_warn=$?
+unset -f cat
+check "tn_host_audit: rc 0 with a clean baseline, rc 1 when only the baseline warns" "0 1" "$rc_ok $rc_warn"
 
 # A library without tn_host_baseline_*: the script hooks are no-ops (see hooks_v2.sh).
 check "the library defines the four entry points" "4" "$(declare -F | "$REAL_GREP" -cE ' tn_host_baseline_(install|refresh|remove|status)$')"
