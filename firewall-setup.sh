@@ -69,6 +69,10 @@ FW_P2P_BURST=""
 # or reports a change the run was stopped in (fw_p2p_limit_on_exit).
 FW_LIMIT_INFLIGHT=""
 FW_LIMIT_PROG=""
+# Set by fw_p2p_limit_sync: true when it wrote or deleted the table or its boot
+# copy, false when nothing needed changing (so a refresh of what covers those
+# files can be skipped).
+FW_LIMIT_CHANGED=false
 # Filled by fw_preflight: sources of the stored lists that this run's lists
 # replace (fw_stale_sources); their per-source rules are deleted on --enable.
 FW_SSH_STALE=()
@@ -675,28 +679,49 @@ fw_p2p_limit_persist() {
 fw_p2p_limit_unpersist() {
     local f
     if [[ -e "$FW_P2P_LIMIT_UNIT" || -L "$FW_P2P_LIMIT_UNIT" ]]; then
+        FW_LIMIT_CHANGED=true
         systemctl disable --now "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1 || true
         rm -f -- "$FW_P2P_LIMIT_UNIT"
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
     f="$FW_P2P_LIMIT_FILE"
     if [[ -e "$f" || -L "$f" ]]; then
+        FW_LIMIT_CHANGED=true
         rm -f -- "$f"
     fi
     return 0
 }
 
-# fw_p2p_limit_sync NODES -- bring table inet tn_p2p in line with this run, once the
+# fw_p2p_limit_current PROGRAM -- rc 0 when nothing needs writing for PROGRAM: the
+# loaded table has its rate, burst and ports (fw_p2p_limit_live), FW_P2P_LIMIT_FILE
+# holds PROGRAM exactly, the unit file is what fw_p2p_limit_unit_text gives for
+# the nft found now, and systemd reports the unit enabled. rc 1 otherwise.
+fw_p2p_limit_current() {
+    local prog="$1" want nft_bin
+    want="$(fw_p2p_limit_params <<< "$prog")" || want=""
+    [[ -n "$want" ]] || return 1
+    [[ "$(fw_p2p_limit_live)" == "on ${want}" ]] || return 1
+    [[ -f "$FW_P2P_LIMIT_FILE" && "$(cat -- "$FW_P2P_LIMIT_FILE" 2>/dev/null)" == "$prog" ]] || return 1
+    nft_bin="$(command -v nft 2>/dev/null)" || return 1
+    [[ -f "$FW_P2P_LIMIT_UNIT" && "$(cat -- "$FW_P2P_LIMIT_UNIT" 2>/dev/null)" == "$(fw_p2p_limit_unit_text "$nft_bin")" ]] || return 1
+    systemctl is-enabled "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1
+}
+
+# fw_p2p_limit_sync NODES [always] -- bring table inet tn_p2p in line with this run, once the
 # ufw rules are complete: written (fw_p2p_limit_text, one `nft -f -` transaction)
 # and kept for boot (fw_p2p_limit_persist) when a node is installed and no P2P
 # source list is set, else deleted when it is there and its boot unit and file
 # removed (fw_p2p_limit_unpersist; a source list replaces the limit, and without a
 # node there are no P2P ports). Without nft it warns when the limit is wanted and
 # removes the boot unit, which could not run. A write or delete that nft refuses
-# is a warning, and the table and its boot files stay as they were. Always rc 0:
-# the ufw rules are in place whatever happens here.
+# is a warning, and the table and its boot files stay as they were. When the
+# table and its boot copy are already what this run would write
+# (fw_p2p_limit_current), nothing is rewritten and it says so, unless the second
+# argument is "always" (--reset). FW_LIMIT_CHANGED says whether anything changed.
+# Always rc 0: the ufw rules are in place whatever happens here.
 fw_p2p_limit_sync() {
-    local nodes="$1" prog err first rc
+    local nodes="$1" mode="${2:-}" prog err first rc
+    FW_LIMIT_CHANGED=false
     if [[ "$nodes" != "none" && ${#FW_P2P_SRCS[@]} -eq 0 ]]; then
         if ! command -v nft >/dev/null 2>&1; then
             print_warn "nftables (nft) is not installed, so the P2P new-flow limit is not applied; P2P stays open to every source"
@@ -706,6 +731,13 @@ fw_p2p_limit_sync() {
             return 0
         fi
         prog="$(fw_p2p_limit_text "$FW_P2P_RATE" "$FW_P2P_BURST")"
+        # Everything already as wanted: leave the table alone (rewriting it would
+        # empty its sets, so every source's count and spent burst would start
+        # over) and the boot copy too. MODE always (--reset) rewrites anyway.
+        if [[ "$mode" != "always" ]] && fw_p2p_limit_current "$prog"; then
+            print_info "P2P new-flow limit unchanged: UDP $(fw_p2p_port_text) already accept at most ${FW_P2P_RATE} packets of new, not yet answered flows per minute from one IPv4 address or IPv6 /64 after a burst of ${FW_P2P_BURST}, and its boot copy is current."
+            return 0
+        fi
         # From here until the boot copy is written, a stop is finished or reported
         # by fw_on_exit, so the table and its boot copy never silently disagree.
         FW_LIMIT_PROG="$prog"
@@ -719,6 +751,7 @@ fw_p2p_limit_sync() {
             print_warn "nft did not load the P2P new-flow limit (exit ${rc}: ${first}); table inet tn_p2p stays as it was. The ufw rules are applied."
             return 0
         fi
+        FW_LIMIT_CHANGED=true
         print_info "P2P new-flow limit: UDP $(fw_p2p_port_text) accept at most ${FW_P2P_RATE} packets of new, not yet answered flows per minute from one IPv4 address or IPv6 /64 after a burst of ${FW_P2P_BURST} (nftables table inet tn_p2p)."
         fw_p2p_limit_persist "$prog" || true
         FW_LIMIT_INFLIGHT=""
@@ -741,6 +774,7 @@ fw_p2p_limit_drop() {
     tables="$(nft list tables 2>/dev/null)" || return 0
     grep -qx 'table inet tn_p2p' <<< "$tables" || return 0
     rc=0
+    FW_LIMIT_CHANGED=true
     err="$(printf 'table inet tn_p2p\ndelete table inet tn_p2p\n' | nft -f - 2>&1)" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         first=""
@@ -1337,7 +1371,11 @@ apply_recommended_firewall() {
     fi
     FW_APPLY_INFLIGHT=false
     fw_snapshot_drop
-    fw_p2p_limit_sync "$nodes"
+    if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
+        fw_p2p_limit_sync "$nodes" always
+    else
+        fw_p2p_limit_sync "$nodes"
+    fi
     if [[ "$keep_web" == "true" ]]; then
         if [[ "$web_was_open" == "true" ]]; then
             print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
@@ -1522,7 +1560,12 @@ fw_baseline_refresh() {
 # rule failed (said).
 fw_menu_p2p_apply() {
     local nodes="$1" open="$2" rc=0
-    fw_meta_lock || return 1
+    if ! fw_meta_lock; then
+        # fw_meta_lock can fail after it took the lock (the ownership migration
+        # refused): never keep it for the rest of the menu session.
+        tn_release_update_lock
+        return 1
+    fi
     if [[ "$open" == "true" ]]; then
         if ! fw_p2p_allow; then
             rc=1
