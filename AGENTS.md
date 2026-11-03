@@ -129,6 +129,17 @@ Code that runs as root keeps it that way:
   a here-string in a temporary file, which would put the passphrase on disk.
 - A script that owns its EXIT trap calls `tn_remove_inflight_tmp` from it, so an interrupted
   write leaves no temp file behind (`TN_INFLIGHT_TMP` names it until the rename).
+- On a host with `HOST_BASELINE=true` in `.node-meta` (`setup-node.sh --host-baseline`), the
+  AIDE database `/var/lib/aide/telcoin-node.db` (config `/etc/aide/telcoin-node.conf`) hashes
+  `/opt/telcoin`, `/usr/local/libexec/telcoin`, `/etc/telcoin` and the node unit. A script that
+  changes one of them calls `tn_host_baseline_refresh <say-fn>` once its change went through,
+  before it releases the update lock, as update-node, edit-config and the four add-ons do
+  (guarded with `declare -F` in the add-ons, which run against older libraries). It is a no-op
+  without the marker and only ever warns. Files that change on their own schedule stay out of
+  the AIDE config: `bls-passphrase`, `bls-passphrase.cred`, `alloy/ingest-token` and the
+  writers' `.tn.*` temp files. The Alloy ingest token is root:telcoin-alloy 0640 in
+  `/etc/telcoin/alloy/ingest-token`, written with `tn_write_root_file`, and never goes into an
+  environment file, a unit or argv.
 
 ## The BLS key passphrase
 
