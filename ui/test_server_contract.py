@@ -1066,7 +1066,7 @@ class FirewallEnableTest(ServerTestCase):
                                  [["sudo", "-n", HELPER_PATH, "firewall-enable", want]])
 
     def test_no_sources_sends_none(self):
-        for body in ({}, {"ssh_from": ""}, {"ssh_from": "  "}):
+        for body in ({}, {"ssh_from": ""}, {"ssh_from": "  "}, {"ssh_from": None, "p2p_from": None}):
             with self.subTest(body=body):
                 self.post(body)
                 self.assertEqual(self.helper_calls(), [["sudo", "-n", HELPER_PATH, "firewall-enable"]])
@@ -1146,6 +1146,15 @@ class FirewallEnableTest(ServerTestCase):
         self.assertEqual(self.post({"ssh_from": "10.0.0.0/7"}).get_json()["error"],
                          "SSH sources: not an address or a CIDR of /8 or narrower: 10.0.0.0/7")
         self.assertEqual(server.p2p_source_list(",".join("10.0.0.%d" % i for i in range(1, 17)))[1], None)
+
+    def test_a_list_that_is_not_text_is_refused_even_when_falsy(self):
+        for field in ("ssh_from", "p2p_from"):
+            for raw in (0, False, [], {}, 0.0, 7, True, ["10.0.0.1"]):
+                with self.subTest(field=field, raw=raw):
+                    resp = self.post({field: raw})
+                    self.assertEqual(resp.status_code, 400)
+                    self.assertEqual(resp.get_json(), {"ok": False, "error": field + " must be text"})
+                    self.assertEqual(self.helper_calls(), [])
 
 
 class FirewallStatusTest(ServerTestCase):

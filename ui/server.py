@@ -4179,7 +4179,10 @@ def ssh_source_ok(src):
 
 def fw_source_list(text, field, what):
     """(comma list, None) for the operator's `what` sources sent in `field` (""
-    when none were given), or (None, error)."""
+    when none were given: absent or null), or (None, error) for anything that
+    is not text (0, false and [] included) or not a valid list."""
+    if text is None:
+        text = ""
     if not isinstance(text, str):
         return None, "%s must be text" % field
     items = [x for x in re.split(r"[\s,]+", text) if x]
@@ -4216,10 +4219,10 @@ def api_firewall_enable():
     det = detect_nodes()
     if not any(det.get(t, {}).get("mode") == "scripts" for t in NODE_TYPES):
         return jsonify({"ok": False, "error": "read-only (external node)"}), 403
-    ssh_from, error = ssh_source_list(data.get("ssh_from") or "")
+    ssh_from, error = ssh_source_list(data.get("ssh_from"))
     if error:
         return jsonify({"ok": False, "error": error}), 400
-    p2p_from, error = p2p_source_list(data.get("p2p_from") or "")
+    p2p_from, error = p2p_source_list(data.get("p2p_from"))
     if error:
         return jsonify({"ok": False, "error": error}), 400
     argv = ["sudo", "-n", HELPER, "firewall-enable"]
