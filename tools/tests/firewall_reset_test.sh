@@ -668,13 +668,26 @@ release_lock() {
     fi
 }
 # menu ANSWER -- run "Manage node ports" with every prompt answered ANSWER (yes|no)
-# in a subshell; it records whether the update lock is still held afterwards.
+# in a subshell; it records whether the update lock is still held afterwards
+# (menu.lock) and which lock kind was held while the limit was synced (menu.held:
+# the sync runs inside the locked apply, so this is the evidence that the lock was
+# taken, on hosts with flock and on hosts with the mkdir fallback alike).
 menu() {
+    rm -f "$T/menu.held"
     if [[ "$1" == yes ]]; then
-        ( confirm() { return 0; }; manage_node_ports; echo "kind=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.lock" ) </dev/null > "$T/mnp.out" 2>&1
+        ( confirm() { return 0; }; menu_record_sync; manage_node_ports; echo "kind=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.lock" ) </dev/null > "$T/mnp.out" 2>&1
     else
-        ( confirm() { return 1; }; manage_node_ports; echo "kind=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.lock" ) </dev/null > "$T/mnp.out" 2>&1
+        ( confirm() { return 1; }; menu_record_sync; manage_node_ports; echo "kind=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.lock" ) </dev/null > "$T/mnp.out" 2>&1
     fi
+}
+# menu_record_sync -- wrap fw_p2p_limit_sync so it notes the lock kind held at the
+# moment it runs, then does its real work.
+menu_record_sync() {
+    eval "menu_sync_real() $(declare -f fw_p2p_limit_sync | sed '1d')"
+    fw_p2p_limit_sync() {
+        echo "held=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.held"
+        menu_sync_real "$@"
+    }
 }
 printf 'NETWORK=mainnet\n' > "$META"
 NETWORK=mainnet
@@ -705,7 +718,7 @@ fresh_flags; : > "$UFW_LOG"; : > "$NFT_LOG"
 menu yes
 check_has "menu: third port opened under the lock" "allow 49595/udp" "$(cat "$TN_ROOT_PREFIX/etc/ufw/user.rules")"
 check "menu: lock released after the change" "kind=" "$(cat "$T/menu.lock")"
-check_has "menu: the lock was taken" "yes" "$([[ -s "$TN_UPDATE_LOCK_FILE" || -d "${TN_UPDATE_LOCK_FILE}.d" ]] && echo yes)"
+check "menu: the lock was taken" "yes" "$(grep -qE '^held=(flock|mkdir)$' "$T/menu.held" 2>/dev/null && echo yes || echo no)"
 check "menu: boot copy follows" "$(nft_prog)" "$(cat "$LIMITF" 2>/dev/null)"
 
 # All ports already open, the table older (two ports): the menu rewrites it.
