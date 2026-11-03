@@ -4355,12 +4355,19 @@ _tn_wait_say() {
 # _tn_wait_say, on stderr) is called as `fn step|log|warn MESSAGE`; JSON-mode
 # callers pass one that emits events. url defaults to tn_local_rpc_url.
 #
-# Environment: TN_SKIP_EPOCH_WAIT=1 skips the wait; TN_EPOCH_MARGIN (300) is how
-# close the boundary must be before waiting; TN_EPOCH_SETTLE (90) is the pause
-# after the epoch changes; TN_EPOCH_WAIT_MAX (1800) caps the whole wait, settle
-# included, and 0 turns the wait off; TN_EPOCH_POLL (15, clamped to 5-20) is the
-# poll and heartbeat interval. Each epoch read while waiting may take at most
-# 30 - poll seconds, so two heartbeats are never more than 30 s apart.
+# Environment: TN_SKIP_EPOCH_WAIT=1 skips the wait; TN_EPOCH_MARGIN is how close
+# the boundary must be before waiting; TN_EPOCH_SETTLE is the pause after the
+# epoch changes. Left unset, both follow the epoch length once an epoch read
+# gives it (_tn_epoch_timing): margin epochDuration/72 clamped to 300-900 s,
+# settle epochDuration/240 clamped to 90-300 s, which is 300 and 90 for a 6 h
+# epoch and 900 and 300 for a 7-day one; a whole number of seconds set in the
+# environment is used as given. Until the epoch length is known (the blind wait)
+# they are 300 and 90. TN_EPOCH_WAIT_MAX (1800) caps the whole wait, settle
+# included, and 0 turns the wait off; once the epoch length is known, a cap
+# shorter than margin + settle + two polls is raised to that sum with a warning.
+# TN_EPOCH_POLL (15, clamped to 5-20) is the poll and heartbeat interval. Each
+# epoch read while waiting may take at most 30 - poll seconds, so two heartbeats
+# are never more than 30 s apart.
 # TN_EPOCH_JITTER_MAX (30, 0 off) bounds a random pause after the settle, so
 # nodes that waited for the same boundary do not stop on the same second.
 # Callers run the committee guard again after this returns: the wait can be long.
@@ -4374,13 +4381,15 @@ _tn_wait_say() {
 #      the public RPC does not answer; otherwise log and return.
 #   2. Time to the boundary unreadable: warn and return; but for a node whose
 #      mode was unreadable (step 1), warn and wait TN_EPOCH_MARGIN +
-#      TN_EPOCH_SETTLE seconds, at most TN_EPOCH_WAIT_MAX (_tn_wait_blind). More
-#      than the margin away: log and return. Passed more than the margin ago
+#      TN_EPOCH_SETTLE seconds (300 + 90 unless set), at most TN_EPOCH_WAIT_MAX
+#      as set (_tn_wait_blind). Otherwise margin and settle follow the epoch length
+#      read with the boundary, and the cap is checked against them. More than
+#      the margin away: log and return. Passed more than the margin ago
 #      with the epoch still open (stalled, or this node far behind): warn once
 #      and return.
 #   3. Otherwise one step message, then poll until the epoch id rises, with a log
 #      heartbeat every poll. Two failed reads in a row, or the cap: warn, return.
-#   4. Settle for TN_EPOCH_SETTLE seconds with heartbeats, inside the cap, then
+#   4. Settle for the settle time with heartbeats, inside the cap, then
 #      pause a random 0 to TN_EPOCH_JITTER_MAX seconds, also inside the cap.
 # A signal the caller traps (TERM, INT, HUP) runs its trap at once, not after the
 # current sleep (_tn_nap); when that trap returns instead of exiting, the wait
@@ -4453,11 +4462,68 @@ _tn_wait_blind() {
     return 0
 }
 
+# _tn_epoch_timing DUR -- the margin and settle of tn_wait_restart_window for an
+# epoch of DUR seconds (0 when the length is not known), printed as
+#   <margin> <margin-source> <settle> <settle-source>
+# A TN_EPOCH_MARGIN or TN_EPOCH_SETTLE that is a whole number of seconds is used
+# as given, never clamped (source "env"). Otherwise margin is DUR/72 clamped to
+# 300-900 and settle DUR/240 clamped to 90-300 (source "derived"); with DUR 0 the
+# fixed 300 and 90 apply (source "default").
+_tn_epoch_timing() {
+    local dur="${1:-0}" margin settle msrc ssrc
+    [[ "$dur" =~ ^[0-9]{1,18}$ ]] || dur=0
+    dur=$(( 10#$dur ))
+    msrc="derived"
+    ssrc="derived"
+    if (( dur == 0 )); then
+        msrc="default"
+        ssrc="default"
+    fi
+    margin=$(( dur / 72 ))
+    if (( margin < 300 )); then margin=300; fi
+    if (( margin > 900 )); then margin=900; fi
+    settle=$(( dur / 240 ))
+    if (( settle < 90 )); then settle=90; fi
+    if (( settle > 300 )); then settle=300; fi
+    if [[ "${TN_EPOCH_MARGIN:-}" =~ ^[0-9]{1,9}$ ]]; then
+        margin=$(( 10#$TN_EPOCH_MARGIN ))
+        msrc="env"
+    fi
+    if [[ "${TN_EPOCH_SETTLE:-}" =~ ^[0-9]{1,9}$ ]]; then
+        settle=$(( 10#$TN_EPOCH_SETTLE ))
+        ssrc="env"
+    fi
+    printf '%s %s %s %s\n' "$margin" "$msrc" "$settle" "$ssrc"
+}
+
+# _tn_epoch_timing_text MARGIN MSRC SETTLE SSRC DUR -- one sentence for the wait's
+# messages saying which margin and settle are in effect and where they came from.
+_tn_epoch_timing_text() {
+    local margin="$1" msrc="$2" settle="$3" ssrc="$4" dur="$5"
+    if [[ "$msrc" == "derived" && "$ssrc" == "derived" ]]; then
+        printf 'Margin %ss and settle %ss, derived from a %s s epoch.' "$margin" "$settle" "$dur"
+        return 0
+    fi
+    printf 'Margin %s; settle %s.' \
+        "$(_tn_epoch_source_text "$margin" "$msrc" TN_EPOCH_MARGIN "$dur")" \
+        "$(_tn_epoch_source_text "$settle" "$ssrc" TN_EPOCH_SETTLE "$dur")"
+}
+
+# _tn_epoch_source_text VALUE SOURCE NAME DUR -- "300s from TN_EPOCH_MARGIN",
+# "900s derived from a 604800 s epoch" or "300s by default".
+_tn_epoch_source_text() {
+    case "$2" in
+        env)     printf '%ss from %s' "$1" "$3" ;;
+        derived) printf '%ss derived from a %s s epoch' "$1" "$4" ;;
+        *)       printf '%ss by default' "$1" ;;
+    esac
+}
+
 tn_wait_restart_window() {
     local url="${1:-}" fn="${2:-}"
     local margin settle cap poll mode out rc secs epoch boundary dur
     local start now waited slept remaining nap nrc due fails cur info note settle_left
-    local fallback="" must_wait=""
+    local fallback="" must_wait="" msrc ssrc need timing
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)" || url="http://127.0.0.1:0"
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="_tn_wait_say"
@@ -4533,18 +4599,27 @@ tn_wait_restart_window() {
         "$fn" warn "This node is in the committee, but the epoch timing answer was not understood (${out}). Continuing without waiting." || true
         return 0
     fi
+    # The epoch length is known now: margin and settle follow it unless set.
+    [[ "$dur" =~ ^[0-9]{1,18}$ ]] || dur=0
+    read -r margin msrc settle ssrc <<<"$(_tn_epoch_timing "$dur")"
+    timing="$(_tn_epoch_timing_text "$margin" "$msrc" "$settle" "$ssrc" "$dur")"
+    need=$(( margin + settle + 2 * poll ))
+    if (( cap < need )); then
+        "$fn" warn "TN_EPOCH_WAIT_MAX ${cap} is shorter than the wait it bounds (margin ${margin} + settle ${settle} + two polls); using ${need}." || true
+        cap="$need"
+    fi
     if (( secs > margin )); then
-        "$fn" log "Epoch ${epoch} ends in $(_tn_fmt_secs "$secs"), outside the ${margin}s margin; no need to wait." || true
+        "$fn" log "Epoch ${epoch} ends in $(_tn_fmt_secs "$secs"), outside the ${margin}s margin; no need to wait. ${timing}" || true
         return 0
     fi
     # The boundary passed longer ago than the margin and the epoch is still open:
     # it is stalled or this node is far behind, and waiting cannot help either.
     if (( secs < -margin )); then
-        "$fn" warn "Epoch ${epoch} should have ended $(_tn_fmt_secs "$(( -secs ))") ago and has not; not waiting." || true
+        "$fn" warn "Epoch ${epoch} should have ended $(_tn_fmt_secs "$(( -secs ))") ago and has not; not waiting. ${timing}" || true
         return 0
     fi
 
-    "$fn" step "Waiting for epoch ${epoch} to close before restarting: this node is in the committee and the boundary is $(_tn_due_text "$secs"). Waiting at most ${cap}s (TN_EPOCH_WAIT_MAX); set TN_SKIP_EPOCH_WAIT=1 to skip." || true
+    "$fn" step "Waiting for epoch ${epoch} to close before restarting: this node is in the committee and the boundary is $(_tn_due_text "$secs"). Waiting at most ${cap}s (TN_EPOCH_WAIT_MAX); set TN_SKIP_EPOCH_WAIT=1 to skip. ${timing}" || true
     start="$(_tn_now)"
     slept=0
     fails=0
