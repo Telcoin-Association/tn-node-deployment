@@ -66,6 +66,26 @@ nothing reads it to choose a view. Do not write it back. `tn_resolve_node_type` 
 `lib/fallback.sh` has no callers and stays one more release only as a deprecated stub; do not
 add callers.
 
+## The mainnet switch
+
+`readonly TN_MAINNET_ENABLED=0` in `lib/common.sh` keeps mainnet out of every setup path:
+option 2 of the interactive network menu (`select_network`), `--network mainnet` in a
+setup-node `--json` run, and a Node Manager UI setup on mainnet (the helper asks
+`tn_mainnet_enabled`, and an older library without that function refuses too). Each refuses
+before anything on the host changes. `ui/server.py` `TN_MAINNET_ENABLED` and
+`ui/static/index.html` `const SETUP_MAINNET_ENABLED` mirror it, and `ui/test_mainnet_flag.py`
+fails unless the three agree. The launch release flips all three in one change, together with
+the mainnet chain-config pins (`tn_chain_config_pin`) and `MIN_SOURCE_VERSION_MAINNET`.
+
+Testnet and mainnet images share one repository (`ghcr.io/telcoin-association/telcoin-network`),
+so on mainnet an image is named by its release tag and the digest comes from the signed
+release. `tn_docker_resolve_ref` refuses a bare digest on mainnet unless `.node-meta` records
+it as the image of a mainnet release (`DOCKER_IMAGE_DIGEST` with a mainnet `RELEASE_TAG`), and
+setup-node's `--docker-image` and image prompt apply the same rule. The release floor
+(`tn_ref_min_check`, `MIN_SOURCE_VERSION_<NETWORK>`) applies to setup-node, to every update-node
+prepare path and to edit-config's Docker image change; new code that picks a node release
+calls it too.
+
 ## Ownership: root owns the install
 
 On a node host the service account (`telcoin` by default) owns one tree: the data dir
@@ -142,12 +162,27 @@ Rules for code that handles the passphrase:
 A committee node restarted just before an epoch boundary can miss the epoch transition.
 `tn_wait_restart_window` in `lib/common.sh` holds the restart of a node that votes in the
 current committee (`tn_nodeMode` `CvvActive`): when the boundary is within `TN_EPOCH_MARGIN`
-seconds (default 300), it waits for the epoch to close and then `TN_EPOCH_SETTLE` seconds (90),
-never longer than `TN_EPOCH_WAIT_MAX` (1800; 0 turns the wait off). `TN_SKIP_EPOCH_WAIT=1`, and
-`--no-epoch-wait` where a script offers it, skip the wait. A node whose mode cannot be read
-still waits when it is staked (or, on mainnet or an unknown network, when its stake cannot be
-read either). When the boundary cannot be read from the node or from the network's public RPC,
-it waits `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds, capped by `TN_EPOCH_WAIT_MAX`.
+seconds, it waits for the epoch to close and then `TN_EPOCH_SETTLE` seconds, never longer than
+`TN_EPOCH_WAIT_MAX` (1800; 0 turns the wait off). `TN_SKIP_EPOCH_WAIT=1`, and
+`--no-epoch-wait` where a script offers it, skip the wait.
+
+Margin and settle follow the epoch length (`epochDuration` of `tn_getCurrentEpochInfo`, read
+with the boundary): margin is epochDuration / 72 held to 300-900 s, settle epochDuration / 240
+held to 90-300 s (`_tn_epoch_timing`, integer division). adiri's 6 h epoch gives 300 and 90, a
+12 h epoch 600 and 180, a 7-day epoch 900 and 300. A whole number of seconds in
+`TN_EPOCH_MARGIN` or `TN_EPOCH_SETTLE` is used as given and never clamped. The messages end
+with one sentence naming the values and where they came from ("Margin 300s and settle 90s,
+derived from a 21600 s epoch."). Once the epoch length is known, a `TN_EPOCH_WAIT_MAX` other
+than 0 that is shorter than margin + settle + two polls (`TN_EPOCH_POLL`, 15, held to 5-20) is
+raised to that sum with a warning; the default 1800 covers the largest derived sum, 1240. The
+shares and clamps are interim: the node team's mainnet epoch length and restart margins
+replace them (#49).
+
+A node whose mode cannot be read still waits when it is staked (or, on mainnet or an unknown
+network, when its stake cannot be read either). When the boundary cannot be read from the node
+or from the network's public RPC, it waits `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds (300 +
+90 unless set), capped by `TN_EPOCH_WAIT_MAX` as set: this blind wait does not raise the cap. A
+`CvvActive` node whose epoch answer cannot be read continues without a wait.
 
 Stopping a committee member can also cost the committee its quorum. `tn_committee_down_guard`
 counts the members that authored no header in the latest consensus commit (a slow member
@@ -264,7 +299,8 @@ of every vendored file in `docs/partner/assets/README.md`.
 
 ## Vendored files
 
-Some files are **vendored from `adiri-genesis`** and kept in sync by hand:
+Some files are **vendored from `deploy-networks-common`** (the repository `adiri-genesis`
+checks out as its `common/` submodule) and kept in sync by hand:
 
 - `lib/wgvpn/*` — the WireGuard node bootstrap and hub coordinates
 - `observability/config.alloy`
@@ -285,8 +321,13 @@ Operators install and update the scripts from signed releases only. A release is
 `scripts-vX.Y.Z` tag on a commit of main. That commit carries `MANIFEST` and `MANIFEST.sig` at
 the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the current tag.
 
-- `MANIFEST` holds `format=1`, `release=<tag>`, `serial=<n>` and `min_updater=<version>`, then
-  one `sha256  <hash>  <path>` line per file. `tools/release-scripts.sh` builds it from the
+- `MANIFEST` holds `format=1`, `release=<tag>`, `serial=<n>`, `min_updater=<version>`,
+  `date=YYYY-MM-DD` and `expires=YYYY-MM-DD`, then one `sha256  <hash>  <path>` line per file.
+  `date=` and `expires=` are optional, each at most once, and must be real calendar dates in
+  that form with ASCII digits; a repeated, empty or malformed one makes the updater refuse the
+  manifest and the installer refuse the release. Updaters and installers of 2.0.0 ignore both
+  keys (unknown header keys are ignored), so a manifest with them needs no `min_updater` bump.
+  `tools/release-scripts.sh` builds it from the
   `SCRIPTS`, `UI_BUNDLE` and `TESTNET_ADDONS_BUNDLE` arrays in `update-scripts.sh`, plus
   `install.sh`, `open-ui.sh` and `lib/allowed_signers`. The three arrays stay the single
   source of truth for what operators receive.
@@ -325,6 +366,17 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   sidecars stay: `tools/gen-checksums.sh` still writes them from the three arrays, the
   `checksums` CI job fails on a stale or missing one, and `release-scripts.sh` requires a fresh
   sidecar for every array file and for `lib/allowed_signers`.
+- Expiry: a release has expired from the day `expires=` names (UTC). It is a reminder that a
+  newer signed release is due, not a revocation: nothing refuses an expired release. The
+  updater warns on every update run ("Script release <tag> expired on <date>; a newer signed
+  release is overdue.") and installs as usual; `install.sh` warns the same way before it
+  installs; check-node's "Checking the script release..." block reports the installed record
+  (tag, serial, release date, expiry) and never counts an issue.
+  `bash update-scripts.sh --check` reports the installed and the newest release without
+  installing anything, needing root or asking anything: exit 0 when the installed release is
+  the newest and neither has expired, 1 when an update is pending or either release has
+  expired, 2 when no signed release is installed, the installed record or the newest release
+  cannot be verified or fetched, or the updater would refuse the newest one (2 wins over 1).
 - Rotating a signing key: updaters verify a new release against the signer list they already
   have, while `install.sh` and `release-scripts.sh --check` verify it against the list the
   release ships. A release that changes `lib/allowed_signers` must therefore be signed by a key
@@ -333,12 +385,17 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
 To cut a release:
 
 1. On a clean checkout of the release branch, run
-   `bash tools/release-scripts.sh [--serial N] [--min-updater X.Y.Z] scripts-vX.Y.Z`
-   (`--serial` is required for the first release). It writes `MANIFEST`, `RELEASE` and the tag
-   and signer block in `install.sh`, removes the previous `MANIFEST.sig`, and prints the
-   signing commands. It never signs.
+   `bash tools/release-scripts.sh [--serial N] [--min-updater X.Y.Z] [--date YYYY-MM-DD] [--expires DAYS] scripts-vX.Y.Z`
+   (`--serial` is required for the first release). `--date` (default today, UTC) goes into
+   `RELEASE` and `MANIFEST` `date=`; `expires=` is that date plus `--expires` days (default 90,
+   1 to 3650). It writes `MANIFEST`, `RELEASE` and the tag and signer block in `install.sh`,
+   removes the previous `MANIFEST.sig`, prints the release and expiry dates and the signing
+   commands, and warns when the expiry is on or before today. It never signs.
 2. The release signer signs `MANIFEST` on the machine that holds the hardware key and checks
-   the result with `bash tools/release-scripts.sh --check --tag scripts-vX.Y.Z`.
+   the result with `bash tools/release-scripts.sh --check --tag scripts-vX.Y.Z`. `--check`
+   prints the release date and expiry, fails when `RELEASE` and `MANIFEST` disagree on the
+   date or `expires=` is not after `date=`, and only warns about an expired release unless
+   `--require-fresh` is given (CI does not pass it).
 3. Commit `MANIFEST`, `MANIFEST.sig`, `RELEASE` and `install.sh` and open the release pull
    request. The `manifest` CI job runs `release-scripts.sh --check --require-sig` on it.
 4. Right after it merges, tag the merge commit on main (`git tag -a scripts-vX.Y.Z`) and push
@@ -438,33 +495,80 @@ straight into a consuming command's standard input (unless that command is `tee`
 a feed function whose output the caller pipes into the consumer, such as `_tn_feed_pass`.
 Redirection to a file or to stderr is always flagged.
 
+The network-hits lint, `tools/check-network-hits.sh [--list] [ROOT]`, reports every line that
+names the testnet (`adiri` in any case) or a hub or monitor address of
+`lib/testnet-addons.env` (the obs hub host, the WireGuard hub address without its port, the
+Kuma monitor address without its prefix; read as text, never sourced) without a reason why it
+is safe on mainnet. It scans `lib/*.sh` (not `lib/wgvpn/`), the root `*.sh`, `ui/server.py`,
+`ui/telcoin-ui-helper.sh`, `ui/install-ui.sh`, `ui/static/index.html` and
+`observability/config.alloy`; docs, tests, `tools/` and `common/` are out of scope. ROOT
+defaults to the repository the tool lives in. A hit passes when its line carries the marker,
+or when the line right above it is nothing but the marker comment:
+
+```
+# network-gated: <reason>          shell, Python
+// network-gated: <reason>         JavaScript, Alloy
+<!-- network-gated: <reason> -->   HTML outside scripts
+```
+
+The reason must hold a letter or a digit. A trailing marker covers its own line only. Some
+places cannot hold a marker. Inside a JavaScript template literal an HTML marker becomes part
+of the page and `//` is plain text, so move the testnet text into a constant below a `//`
+marker line. Inside a heredoc the marker is written into the file the heredoc makes, so
+reword the line to name no testnet. Inside a Python docstring the marker is docstring text,
+so put the name on the docstring's first line and the marker comment between `def` and the
+docstring. In the `--help` header of setup-node, edit-config and update-node a marker line is
+fine: their help printers leave `# network-gated:` lines out. Exit status: 0 clean (a summary
+on stderr), 1 unannotated hits (one `FILE:LINE: <line>` each on stdout), 2 for a usage error,
+a missing or unreadable scanned file, or a `testnet-addons.env` value it cannot read.
+`--list` prints every hit with its reason. `tools/tests/network_hits_test.sh` tests the lint
+and runs it over the tree.
+
 The two lints under `tools/tests/` run with the fixture tests. The CI job `hardening-lint`
-runs the passphrase-print lint and the perl lint on every tracked `*.sh`.
+runs the passphrase-print lint, the perl lint on every tracked `*.sh` and the network-hits
+lint.
 
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes to main, on `scripts-v*` tags and on pull requests.
 Every action is pinned to a full commit SHA with its tag in a comment, the workflow token gets
 no permissions by default (`permissions: {}`) and each job asks for `contents: read`; checkouts set
-`persist-credentials: false`. `tools/tests/ci_pins_test.sh` checks these rules. The jobs:
+`persist-credentials: false`. `tools/tests/ci_pins_test.sh` checks these rules, and also that the hardening lints job
+runs the passphrase-print, perl and network-hits lints; the fixture jobs run
+`tools/tests/run.sh` (the macOS one under `/bin/bash`); the checksum job runs
+`tools/gen-checksums.sh`; the UI job installs the test requirements by hash and runs pytest;
+the UI and macOS jobs run the three UI shell tests; the hardening lints and UI jobs have no
+`if [ -f` fallback and the UI job no unittest fallback; no required job, and no step of one,
+carries an `if:` or a `continue-on-error` (other than `false`), except the advisory
+shellcheck step "shellcheck (warnings -- advisory)"; no run line in a required job ends with
+`|| true`, `|| :` or `|| exit 0`; and `publish-installer.yml` writes no `.nojekyll`. A
+skipped required check counts as passed on GitHub, and `continue-on-error` turns a failure
+into a pass. The jobs:
 
-- `parse-linux`: `bash -n` on every tracked `*.sh`, then `tools/check-bash32.sh` under
-  Ubuntu's bash (with mawk).
-- `parse-macos`: the same two checks under macOS `/bin/bash` 3.2 (with BSD awk), then
-  `ui/tests/helper_test.sh` under 3.2.
-- `shellcheck`: `shellcheck -x --severity=error` blocks; a second run at warning severity is
-  advisory.
-- `fixture-tests`: `bash tools/tests/run.sh` under bash 5.
-- `fixture-tests-macos`: the same suite under macOS `/bin/bash` 3.2.
-- `hardening-lint`: the passphrase-print lint and `tools/check-perl-interp.sh`.
-- `manifest`: on a `scripts-v*` tag, `release-scripts.sh --check --tag <tag>`; on a change
-  that touches `MANIFEST`, `MANIFEST.sig` or `RELEASE`, `release-scripts.sh --check
-  --require-sig`; otherwise nothing is compared.
-- `ui-tests`: on Python 3.10, installs `ui/requirements.txt` (and
-  `ui/tests/requirements-dev.txt`) with `--require-hashes`, runs the UI's Python tests (pytest,
-  or unittest when pytest is absent), then `ui/tests/helper_test.sh` under bash 5.
-- `checksums`: runs `tools/gen-checksums.sh` and fails on a stale, missing or uncommitted
-  sidecar.
+- `parse-linux` ("bash -n (Linux)"): `bash -n` on every tracked `*.sh`, then
+  `tools/check-bash32.sh` under Ubuntu's bash (with mawk).
+- `parse-macos` ("bash -n and bash-3.2 lint (macOS bash 3.2)"): the same two checks under
+  macOS `/bin/bash` 3.2 (with BSD awk), then `ui/tests/helper_test.sh`,
+  `ui/tests/install_ui_test.sh` and `ui/tests/open_ui_test.sh` under `/bin/bash` 3.2.
+- `shellcheck` ("shellcheck"): `shellcheck -x --severity=error` blocks; a second run at
+  warning severity is advisory (the one `continue-on-error` in the required jobs).
+- `fixture-tests` ("fixture tests (Linux bash 5)"): `bash tools/tests/run.sh` under bash 5,
+  `tools/tests/network_hits_test.sh` included.
+- `fixture-tests-macos` ("fixture tests (macOS bash 3.2)"): the same suite under macOS
+  `/bin/bash` 3.2.
+- `hardening-lint` ("hardening lints"): the passphrase-print lint,
+  `tools/check-perl-interp.sh` on every tracked `*.sh`, and `tools/check-network-hits.sh`
+  (step "network hits").
+- `manifest` ("release manifest"): on a `scripts-v*` tag, `release-scripts.sh --check --tag
+  <tag>`; on a change that touches `MANIFEST`, `MANIFEST.sig` or `RELEASE`,
+  `release-scripts.sh --check --require-sig`; otherwise nothing is compared.
+- `ui-tests` ("Node Manager UI tests"): on Python 3.10, installs `ui/requirements.txt` and
+  `ui/tests/requirements-dev.txt` with `--require-hashes`, runs `python -m pytest -q ui` (there
+  is no unittest fallback), then the three UI shell tests under bash 5. As the runner user,
+  not root, `install_ui_test.sh` checks only that the installer refuses a non-root run; its
+  ownership and mode cases need root (run them in `bash:3.2`, which runs as root).
+- `checksums` ("checksum freshness"): runs `tools/gen-checksums.sh` and fails on a stale,
+  missing or uncommitted sidecar.
 
 `.github/workflows/integration.yml` has one job, `vm-assertions`: on an Ubuntu 24.04 runner
 (a full VM with systemd), it installs logrotate, ufw and openssh-server and runs every
@@ -472,10 +576,31 @@ assertion file in `tools/tests/vm.d/` as root with `TN_VM_TEST=1`.
 
 `.github/workflows/publish-installer.yml` runs on a `scripts-v*` tag (or by hand on one). Its
 `build` job checks that the tag is on main and that `release-scripts.sh --check --tag` passes,
-then assembles the Pages site from `install.sh`; `deploy` publishes it to GitHub Pages.
+then assembles the Pages site (`index.html`, `install.sh` and `CNAME`; no `.nojekyll`, since
+`upload-pages-artifact` v4 and later drop dotfiles and artifact deploys never run Jekyll);
+`deploy` publishes it to GitHub Pages.
 
-Required status checks in branch protection match the jobs' display names (their `name:`
-lines, such as "bash -n (Linux)"), not the job ids.
+Required status checks match the jobs' display names (their `name:` lines, such as "bash -n
+(Linux)"), not the job ids. The main-branch ruleset in issue #30 lists eight: "bash -n
+(Linux)", "bash -n and bash-3.2 lint (macOS bash 3.2)", "shellcheck", "fixture tests (Linux
+bash 5)", "hardening lints", "release manifest", "Node Manager UI tests" and "checksum
+freshness". `tools/tests/ci_pins_test.sh` guards those and two more, "fixture tests (macOS
+bash 3.2)" and "Ubuntu 24.04 VM assertions", so either can be made required without a
+rename: each of the ten must be the display name of exactly one job in its workflow. Do not
+rename a job without changing the ruleset and `tools/tests/ci_pins_test.sh` in the same
+change; a renamed job leaves a required check that never reports.
+
+## Contributing
+
+Pull requests to main need the required checks above green. Once the main-branch ruleset of
+issue #30 is on, a pull request also needs one approving review (a later push dismisses an
+approval, and the last push must be approved by someone other than its pusher) and signed
+commits: sign every commit (`git commit -S`, or `commit.gpgsign=true` with an SSH or GPG
+signing key registered on GitHub). It will need that review from a code owner
+(`.github/CODEOWNERS`) once a second owner is listed there and the ruleset's
+`require_code_owner_review` is set to true. Do not rename a CI job and do not make a
+required job skippable (`if:`) or non-blocking (`continue-on-error`, `|| true`):
+`ci_pins_test.sh` rejects both.
 
 ## Fixture tests (`tools/tests/`)
 
