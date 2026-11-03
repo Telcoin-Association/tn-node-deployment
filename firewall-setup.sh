@@ -1378,6 +1378,37 @@ fw_meta_lock() {
     addon_meta_write_begin
 }
 
+# fw_baseline_say <step|log|warn> <msg> -- the printer handed to
+# tn_host_baseline_refresh: an event of that kind in a --json run (log for the
+# others), a print_* line otherwise.
+fw_baseline_say() {
+    if [[ "${JSON_MODE:-false}" == "true" ]]; then
+        case "${1:-}" in
+            step|warn) json_event "$1" "${2:-}" ;;
+            *)         json_event log "${2:-}" ;;
+        esac
+    else
+        case "${1:-}" in
+            step) print_step "${2:-}" ;;
+            warn) print_warn "${2:-}" ;;
+            *)    print_info "${2:-}" ;;
+        esac
+    fi
+    return 0
+}
+
+# fw_baseline_refresh -- after a change of this run went through that wrote a file
+# the host baseline covers (/etc/telcoin/p2p-limit.nft, or the source lists and
+# KUMA_EXTRA_SRC in .node-meta): make the baseline again (tn_host_baseline_refresh,
+# a no-op without HOST_BASELINE=true in .node-meta or with a lib/common.sh that
+# lacks it). In a --json run its lines are events before the done event. Never fails.
+fw_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh fw_baseline_say
+    fi
+    return 0
+}
+
 enable_firewall() {
     print_header "Enable Firewall with Recommended Defaults"
 
@@ -1483,6 +1514,7 @@ enable_firewall() {
     if fw_wants_meta_write; then
         fw_persist_sources || true
     fi
+    fw_baseline_refresh
 
     print_ok "Firewall enabled with recommended defaults"
     [[ -n "$reset_arg" ]] && print_info "Existing rules were reset to a clean slate"
@@ -1716,6 +1748,7 @@ manage_node_ports() {
             # it when a P2P source list is set) and its boot copy.
             if fw_p2p_limit_load; then
                 fw_p2p_limit_sync "$nodes"
+                fw_baseline_refresh
             fi
         fi
     fi
@@ -1829,6 +1862,7 @@ manage_health_extra_ips() {
                     print_warn "No input -- nothing added."
                 elif kuma_extra_add "$new_src"; then
                     print_ok "Allowed ${new_src} -> ${UPTIME_KUMA_PORT}/tcp (persisted)"
+                    fw_baseline_refresh
                 else
                     print_warn "Invalid IP/CIDR: ${new_src} -- not added."
                 fi
@@ -1844,6 +1878,7 @@ manage_health_extra_ips() {
                     if [[ -n "$del_src" ]] && printf '%s\n' $extras2 | grep -qxF "$del_src"; then
                         kuma_extra_remove "$del_src"
                         print_ok "Removed ${del_src} from ${UPTIME_KUMA_PORT}/tcp"
+                        fw_baseline_refresh
                     else
                         print_warn "Not in the list: ${del_src}"
                     fi
@@ -2453,6 +2488,7 @@ json_fw_enable() {
     if fw_wants_meta_write; then
         fw_persist_sources || true
     fi
+    fw_baseline_refresh
     ufw_active && active=true
     json_emit "{\"event\":\"done\",\"ok\":${active},\"action\":\"enable\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"ufw enabled with recommended lockout-safe defaults (SSH + overlay + kuma pre-allowed)\"}"
 }
@@ -2562,6 +2598,7 @@ main() {
         if fw_wants_meta_write; then
             fw_persist_sources || true
         fi
+        fw_baseline_refresh
         if [[ "$reset_mode" == "true" ]]; then
             print_ok "Firewall reset to a clean slate and re-enabled with recommended defaults"
         else
