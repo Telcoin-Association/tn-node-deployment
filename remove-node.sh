@@ -483,6 +483,11 @@ remove_unit_leftovers() {
 # loaded, and the leftovers of all of them are removed.
 stop_and_disable_service() {
     local service_name="${1:-}" n
+    # The host baseline (auditd rules, AIDE baseline) goes with the node unit,
+    # before the directories do; nothing happens on a host without one.
+    if declare -F tn_host_baseline_remove >/dev/null 2>&1; then
+        tn_host_baseline_remove
+    fi
     if [[ -z "$service_name" ]]; then
         print_step "Stopping any node unit systemd still has loaded..."
         while IFS= read -r n; do
