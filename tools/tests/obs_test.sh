@@ -836,6 +836,14 @@ check_lacks "status: never the legacy token" "$OLDTOK" "$(cat "$T/tk.out")"
 rm -f "$ENVF"
 tk_status
 check "status: no token file is said" "yes" "$(yn grep -qF 'No ingest token file at' "$T/tk.out")"
+if [[ "$(id -u)" != 0 ]]; then
+    chmod 0600 "$OBS_ETC_DIR"
+    tk_status
+    chmod 0755 "$OBS_ETC_DIR"
+    check "status without access to the Alloy dir: not checked, said" "yes" "$(yn grep -qF 'Ingest token file not checked' "$T/tk.out")"
+else
+    skip "status without access to the Alloy dir: not checked, said" "root can enter any directory"
+fi
 printf '%s\n' "$NEWTOK" > "$TOKF"
 ( curl() { return 22; }; obs_status ) >"$T/tk.out" 2>&1
 check "obs_status: the token line under the unit state" "yes" "$(yn grep -qF 'Ingest token file' "$T/tk.out")"
