@@ -183,17 +183,18 @@ held to 90-300 s (`_tn_epoch_timing`, integer division). adiri's 6 h epoch gives
 12 h epoch 600 and 180, a 7-day epoch 900 and 300. A whole number of seconds in
 `TN_EPOCH_MARGIN` or `TN_EPOCH_SETTLE` is used as given and never clamped. The messages end
 with one sentence naming the values and where they came from ("Margin 300s and settle 90s,
-derived from a 21600 s epoch."). Once the epoch length is known, a `TN_EPOCH_WAIT_MAX` other
-than 0 that is shorter than margin + settle + two polls (`TN_EPOCH_POLL`, 15, held to 5-20) is
-raised to that sum with a warning; the default 1800 covers the largest derived sum, 1240. The
-shares and clamps are interim: the node team's mainnet epoch length and restart margins
+derived from a 21600 s epoch."). A `TN_EPOCH_WAIT_MAX` set in the environment is kept as set,
+never raised: when it is shorter than margin + settle + two polls (`TN_EPOCH_POLL`, 15, held to
+5-20), the script warns that the restart may land before the epoch has settled and suggests a
+larger cap or `TN_SKIP_EPOCH_WAIT=1`. The default 1800 covers the largest derived sum, 1240.
+The shares and clamps are interim: the node team's mainnet epoch length and restart margins
 replace them (#49).
 
 A node whose mode cannot be read still waits when it is staked (or, on mainnet or an unknown
 network, when its stake cannot be read either). When the boundary cannot be read from the node
 or from the network's public RPC, it waits `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds (300 +
-90 unless set), capped by `TN_EPOCH_WAIT_MAX` as set: this blind wait does not raise the cap. A
-`CvvActive` node whose epoch answer cannot be read continues without a wait.
+90 unless set), capped by `TN_EPOCH_WAIT_MAX`. A `CvvActive` node whose epoch answer cannot be
+read continues without a wait.
 
 Stopping a committee member can also cost the committee its quorum. `tn_committee_down_guard`
 counts the members that authored no header in the latest consensus commit (a slow member

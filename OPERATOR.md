@@ -893,7 +893,8 @@ Do not delete the keys of a staked validator unless you hold a tested backup.
 
 Secrets are overwritten with `shred` before they are deleted: the passphrase credential and file, the keys when you delete them, and the backups in `/var/backups/telcoin`, which can hold unit and passphrase copies.
 Overwriting is best effort on SSDs, copy-on-write and cloud disks, and the script says so: `Decommissioning a host that held a validator key means destroying or crypto-erasing its disk and deleting every snapshot and image taken from it; shred alone does not do that.` (section 4.12).
-With the node unit it removes the host baseline (section 4.13), the Alloy ingest token file (shredded) and, with the last node, the P2P new-flow limit (`telcoin-p2p-limit.service`, `/etc/telcoin/p2p-limit.nft` and the nftables table).
+It shreds the Alloy ingest token file with the add-ons.
+With the last node unit on the host it also removes the host baseline (section 4.13) and the P2P new-flow limit (`telcoin-p2p-limit.service`, `/etc/telcoin/p2p-limit.nft` and the nftables table); while another node unit remains, both stay whole for that node, and the run says so.
 It also offers to remove any container that runs a node image from the ghcr repository, whatever its name.
 When no other node install remains, it also removes the host files every install shares: the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin/node.env` (and `/etc/telcoin` once it is empty), `/var/backups/telcoin`, the logrotate file, the journald, needrestart and apt drop-ins, `/var/lib/telcoin-staging`, the `tn-build` account with `/var/lib/tn-build` (its processes are stopped first, and a failed `userdel` is reported).
 `/run/telcoin` stays until reboot: it holds the update lock.
@@ -1084,6 +1085,7 @@ sudo bash ~/telcoin-node-scripts/setup-node.sh --host-baseline
 On a host whose node is installed, the flag alone makes the baseline, or makes it again, and changes nothing else.
 In a full setup it runs once the node is installed, after public RPC and the testnet add-ons; `--json --phase=finalize --host-baseline` reports `"host_baseline":true|false` in its `done` event.
 A failure is a warning (`The host baseline was not made (see above); the node runs without it. Try again with: sudo ./setup-node.sh --host-baseline`), and setup goes on.
+A failed or refused run leaves nothing behind: the audit rules are written and loaded only after the AIDE prerequisites pass and are removed again on a later failure, so the host then has no rules, no AIDE config and no `HOST_BASELINE` marker.
 
 It installs `auditd` and `aide` with `apt-get install --no-install-recommends` (so no daily whole-system AIDE timer and no mail packages come with them) and writes:
 
@@ -1117,7 +1119,8 @@ The scripts' own changes do not show up as differences: these runs make the base
 
 A refused or failed run does not refresh.
 The report of `setup-node.sh --audit` and `check-node.sh --audit` (section 1.2) shows the state; `make it again: sudo ./setup-node.sh --host-baseline` in a warning is the fix.
-`remove-node.sh` removes the rules (and unloads them), the AIDE config and both databases with the node unit; the packages stay (`sudo apt-get purge auditd aide` removes them).
+`remove-node.sh` removes the rules (and unloads them), the AIDE config, both databases and the marker with the last node unit on the host; while another node unit remains it keeps them and says so.
+The packages stay (`sudo apt-get purge auditd aide` removes them).
 
 ## 5. Public RPC (https + wss)
 
@@ -1625,11 +1628,11 @@ These environment variables tune it; pass them through `sudo`, as in `sudo TN_SK
 | `TN_EPOCH_MARGIN` | epoch length / 72, held to 300-900 (300 on testnet) | Seconds before the boundary inside which a restart waits. A whole number you set is used as given. Before the epoch length is known (the blind wait, below the table), 300. |
 | `TN_EPOCH_SETTLE` | epoch length / 240, held to 90-300 (90 on testnet) | Seconds to wait after the epoch changes. A whole number you set is used as given. Before the epoch length is known, 90. |
 | `TN_EPOCH_JITTER_MAX` | 30 | Then a random pause of up to this many seconds, so nodes that waited for the same boundary do not restart together. `0` turns it off. The committee check runs again after the wait. |
-| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. Once the epoch length is known, a cap shorter than margin + settle + two polls is raised to that sum with the warning `TN_EPOCH_WAIT_MAX <N> is shorter than the wait it bounds (margin <M> + settle <S> + two polls); using <X>.` (on testnet any cap below 420). |
+| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. A cap you set is kept as set: when it is shorter than margin + settle + two polls (420 seconds on testnet), the script warns that the restart may land before the epoch has settled and suggests a larger cap or `TN_SKIP_EPOCH_WAIT=1`. |
 | `TN_EPOCH_POLL` | 15 | Seconds between progress lines, held between 5 and 20. |
 
 The epoch length comes with the boundary, from the node or from the network's public RPC.
-When neither answers for a staked node whose mode cannot be read, the restart waits blind: `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds (300 + 90 unless set), at most `TN_EPOCH_WAIT_MAX` as set, which is not raised there.
+When neither answers for a staked node whose mode cannot be read, the restart waits blind: `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds (300 + 90 unless set), at most `TN_EPOCH_WAIT_MAX`.
 A node that votes in the committee but whose epoch answer cannot be read restarts without a wait.
 
 ## 8. Legacy installs

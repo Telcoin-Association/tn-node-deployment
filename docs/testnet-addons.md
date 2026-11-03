@@ -233,12 +233,14 @@ token to move it now. A full disable (both pipelines off) shreds the token file,
 enabling either pipeline again asks for the token. `remove-node.sh` shreds the token
 file and the env file.
 
-The push URLs come from `--push-url` / `--metrics-push-url` (or `OBS_PUSH_URL` /
-`OBS_METRICS_PUSH_URL`) on the run, else the line already in `telcoin-alloy.env`, else
-the network's default hub in `lib/testnet-addons.env`. So an operator's own hub survives
-a rotation or a partial disable; pass the default URL to go back to the Association hub.
-A render that would leave an enabled pipeline with no URL is refused before anything is
-written.
+A push URL given with `--push-url` / `--metrics-push-url` (or `OBS_PUSH_URL` /
+`OBS_METRICS_PUSH_URL`) is an override: `telcoin-alloy.env` records it with a marker, and
+a rotation or a partial disable keeps it. Without an override the URL follows the script
+release's default hub in `lib/testnet-addons.env`, so a hub change in a later release
+reaches the host at the next enable, rotation or partial disable (the log says "push URL
+follows the release default"). An env file written by a 2.0.x release counts as the
+default. To drop an override, re-enable with the flag omitted. A render that would leave
+an enabled pipeline with no URL is refused before anything is written.
 
 Both pipelines ride the same host and the same ingest token, and attach the same identity
 labels (`node`, `region`, `validator_address`, `chain`, `network`, `image_version`) so
@@ -399,7 +401,9 @@ When P2P is open to every source (no `--p2p-from`, no `P2P_ALLOW_FROM`, or
 nftables table `inet tn_p2p` after the ufw rules are in place. It drops UDP packets of
 new, not yet answered flows to the node's P2P ports from one source above 20 per minute
 after a burst of 40. A source is one IPv4 address or one IPv6 /64. Once the node answers,
-the flow is established and is never limited. The chain runs at priority -10, before
+the flow is established and is never limited. When the loaded table and its boot copy
+already match what the run would write, nothing is rewritten and the run says the limit
+is unchanged. The chain runs at priority -10, before
 ufw's chains, and only drops: every other packet goes on to ufw, which still decides.
 Each set holds at most 65535 sources; a source that sent nothing for 120 seconds (at the
 defaults) leaves it.
@@ -422,7 +426,8 @@ limit at boot" line, and `--json --status` a `p2p_new_flow_limit` object (`activ
 `rate`, `burst`, `reason`, `persistent`, `persistent_reason`). Every enable and every
 "Manage node ports" change takes the update lock (`/run/telcoin/update.lock`) around ufw,
 the table and its boot copy. `remove-node.sh` removes the unit, the boot copy and the
-table with the last node.
+table with the last node; while another node unit remains on the host they stay whole for
+it.
 
 ### Source rules
 
