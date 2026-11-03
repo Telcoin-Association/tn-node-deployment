@@ -350,8 +350,7 @@ _obs_slice_alloy() {
 # in sync with observability/config.alloy (and thus adiri).
 _obs_alloy_fallback() {
     cat <<'ALLOY_EOF'
-// network-gated: names the upstream node agent config, not an endpoint
-// Fallback copy (canonical: observability/config.alloy, byte-identical to adiri).
+// Fallback copy (canonical: observability/config.alloy, the vendored node-agent file).
 // Env: TN_NODE TN_REGION TN_VALIDATOR_ADDRESS TN_CHAIN TN_IMAGE_VERSION
 //      OBS_PUSH_URL OBS_PUSH_HOST TN_METRICS_ADDR OBS_METRICS_PUSH_URL
 //      OBS_METRICS_PUSH_HOST CREDENTIALS_DIRECTORY (token: $CREDENTIALS_DIRECTORY/ingest-token)
