@@ -881,6 +881,37 @@ remove_shared_components > /dev/null 2>&1
 kept "p2p limit while another node remains: unit" "$SD/telcoin-p2p-limit.service"
 check "p2p limit while another node remains: table" "yes" "$(exists "$NFT_TABLE_FILE")"
 INSTALLED_UNITS=()
+# The JSON keys removal with another node unit left keeps the limit whole: the
+# ruleset stays (not shredded), so do the boot unit and the table.
+mkfixture; p2p_limit_fixture
+printf '[Service]\n' > "$SD/telcoin-validator.service"
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "p2p limit, another node left: json keys rc 0" 0 "$rc"
+kept "p2p limit, another node left: ruleset" "$ETC/p2p-limit.nft"
+check "p2p limit, another node left: ruleset untouched" "table inet tn_p2p
+delete table inet tn_p2p" "$(cat "$ETC/p2p-limit.nft" 2>/dev/null)"
+check_lacks "p2p limit, another node left: ruleset not shredded" "$ETC/p2p-limit.nft" "$(calls)"
+kept "p2p limit, another node left: boot unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit, another node left: table" "yes" "$(exists "$NFT_TABLE_FILE")"
+gone "p2p limit, another node left: the passphrase still goes" "$ETC/bls-passphrase.cred"
+gone "p2p limit, another node left: .node-meta still goes" "$ETC/.node-meta"
+check_has "p2p limit, another node left: said in the log" "yes" \
+    "$(grep -q 'Keeping /etc/telcoin/p2p-limit.nft: another node unit remains here, and the P2P new-flow limit stays whole for it' "$T/json" && echo yes)"
+rm -f "$SD/telcoin-validator.service"
+# Only the boot unit and the table are left: the leftover path finds and removes them.
+rm -rf "$R"; mkdir -p "$SD" "$R/run/telcoin"
+printf '[Unit]\nDescription=limit\n' > "$SD/telcoin-p2p-limit.service"
+printf 'table inet tn_p2p {\n}\n' > "$NFT_TABLE_FILE"
+: > "$CALLS"
+check_rc "leftovers, only the limit: found" 0 "$(rm_leftovers_present; echo $?)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "leftovers, only the limit: rc 0" "rc=0" "$(cat "$T/out")"
+check_has "leftovers, only the limit: listed" "yes" \
+    "$(grep -qF '  /etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)' "$T/out" && echo yes)"
+gone "leftovers, only the limit: boot unit" "$SD/telcoin-p2p-limit.service"
+check "leftovers, only the limit: table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
 # The JSON full removal takes it too.
 mkfixture; p2p_limit_fixture
 ( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
