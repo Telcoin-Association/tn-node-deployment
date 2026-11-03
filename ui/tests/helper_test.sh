@@ -1129,7 +1129,7 @@ for bad in 0.0.0.0/0 0.0.0.0 ::/0 :: 10.0.0.0/7 10.0.0.0/0 010.0.0.1 10.0.0.256 
            "10.0.0.1;id" 'a$(id)' "$seventeen" "10.0.0.1/8/8"; do
     refused "firewall-enable refuses '$(label "$bad")'" firewall-enable "$bad"
 done
-refused "firewall-enable refuses a second argument" firewall-enable 10.0.0.1 10.0.0.2
+refused "firewall-enable refuses a third argument" firewall-enable 10.0.0.1 10.0.0.2 10.0.0.3
 refused "firewall-enable refuses --ssh-anywhere" firewall-enable --ssh-anywhere
 make_fake "$T/engine/firewall-old.sh" firewall-old
 t="$(FIREWALL_SCRIPT="$T/engine/firewall-old.sh"; trace firewall-enable 10.0.0.1)"
@@ -1417,6 +1417,71 @@ else
     printf 'SKIP  set-logrotate vs tn_install_logrotate (needs root, TN_UI_TEST_ROOT=1 and the telcoin-log group)\n'
 fi
 HELPER_LIB="$LIB_SAVE"
+
+# UI-S firewall
+# ---- firewall-enable: a P2P source list after the SSH one -----------------------------
+# The second argument is the P2P list, passed as --p2p-from with the SSH list's
+# checks; "-" (or nothing) in the first place means no SSH list. A list that
+# starts with / is refused before the per-entry checks: the engine would read it
+# as a file.
+# shellcheck disable=SC2016
+make_fake "$T/engine/firewall-setup.sh" firewall-setup '# --ssh-from --p2p-from
+echo "cwd [$(pwd)]" >> "'"$T"'/calls.log"'
+fixture unified
+t="$(trace firewall-enable 203.0.113.7)"
+check_has "firewall-enable with SSH only" "firewall-setup [--json] [--enable] [--ssh-from] [203.0.113.7]" "$t"
+check_lacks "firewall-enable with SSH only passes no P2P list" "[--p2p-from]" "$t"
+t="$(trace firewall-enable 203.0.113.0/24 198.51.100.0/24,2001:db8::/32)"
+check_has "firewall-enable with SSH and P2P lists" \
+    "firewall-setup [--json] [--enable] [--ssh-from] [203.0.113.0/24] [--p2p-from] [198.51.100.0/24,2001:db8::/32]" "$t"
+check_has "firewall-enable with a P2P list runs the engine from /" "cwd [/]" "$t"
+t="$(trace firewall-enable - 198.51.100.7)"
+check_has "firewall-enable with a P2P list alone ('-' for SSH)" \
+    "firewall-setup [--json] [--enable] [--p2p-from] [198.51.100.7]" "$t"
+t="$(trace firewall-enable "" 198.51.100.7)"
+check_has "firewall-enable with a P2P list alone (empty SSH)" \
+    "firewall-setup [--json] [--enable] [--p2p-from] [198.51.100.7]" "$t"
+t="$(trace firewall-enable -)"
+check_has "firewall-enable with '-' alone gives no list" "firewall-setup [--json] [--enable]" "$t"
+check_lacks "firewall-enable with '-' alone passes no --ssh-from" "[--ssh-from]" "$t"
+t="$(trace firewall-enable - "${sixteen%,}")"
+check_has "firewall-enable takes 16 P2P sources" "rc=0" "$t"
+for bad in 0.0.0.0/0 0.0.0.0 ::/0 :: 10.0.0.0/7 010.0.0.1 10.0.0.256 10.0.0.1/33 2001:db8::/129 \
+           etc/passwd 10.0.0.1,,10.0.0.2 ,10.0.0.1 10.0.0.1, "10.0.0.1;id" 'a$(id)' "$seventeen" \
+           "10.0.0.1/8/8" - --p2p-anywhere /etc/passwd /10.0.0.0/8 /; do
+    refused "firewall-enable refuses the P2P list '$(label "$bad")'" firewall-enable 203.0.113.7 "$bad"
+done
+t="$(trace firewall-enable 203.0.113.7 /etc/tn-p2p-sources)"
+check_has "a P2P list that starts with / is refused as a file path" \
+    "invalid P2P source list: /etc/tn-p2p-sources (a file path is not taken here; give addresses or CIDRs joined by commas)" "$t"
+check_lacks "a P2P file path never reaches the engine" "firewall-setup [" "$t"
+t="$(trace firewall-enable /etc/tn-ssh-sources)"
+check_has "an SSH list that starts with / is refused as a file path" \
+    "invalid SSH source list: /etc/tn-ssh-sources (a file path is not taken here; give addresses or CIDRs joined by commas)" "$t"
+t="$(trace firewall-enable - 10.0.0.1,,10.0.0.2)"
+check_has "a P2P value that is not a comma list is refused" \
+    "invalid P2P source list (addresses or CIDRs joined by commas): 10.0.0.1,,10.0.0.2" "$t"
+t="$(trace firewall-enable - 10.0.0.0/7)"
+check_has "a bad P2P entry is named" \
+    "invalid P2P source: 10.0.0.0/7 (an address, or a CIDR of /8 or narrower; never /0)" "$t"
+t="$(trace firewall-enable - "$seventeen")"
+check_has "seventeen P2P sources are refused" "too many P2P sources: 17 (at most 16)" "$t"
+t="$(trace firewall-enable 0.0.0.0/0 198.51.100.7)"
+check_has "a bad SSH list is refused before the P2P list" \
+    "invalid SSH source: 0.0.0.0/0 (an address, or a CIDR of /8 or narrower; never /0)" "$t"
+check_lacks "a bad SSH list with a good P2P list runs nothing" "firewall-setup [" "$t"
+make_fake "$T/engine/firewall-ssh-only.sh" firewall-ssh-only '# --ssh-from'
+t="$(FIREWALL_SCRIPT="$T/engine/firewall-ssh-only.sh"; trace firewall-enable 10.0.0.1 10.0.0.2)"
+check_has "firewall-enable with a P2P list refuses an engine without --p2p-from" \
+    "firewall-ssh-only.sh in the engine copy has no --p2p-from (it is older than this helper): run update-scripts.sh, then try again" "$t"
+check_lacks "an engine without --p2p-from is not run" "firewall-ssh-only [" "$t"
+t="$(HELPER_LIB="$T/nolib/common.sh"; trace firewall-enable - 10.0.0.1)"
+check_has "firewall-enable with a P2P list needs the library check" \
+    "the engine library ($T/nolib/common.sh) is missing or has no validate_health_src: run update-scripts.sh, then try again" "$t"
+t="$(trace firewall-enable 203.0.113.7 198.51.100.7)"
+check "the audit log records both lists" "yes" \
+    "$(grep -q '"sub":"firewall-enable","args":"203.0.113.7 198.51.100.7","phase":"start"' "$AUDIT_LOG" && echo yes)"
+make_fake "$T/engine/firewall-setup.sh" firewall-setup
 
 # ---- No engine call carries a role flag ---------------------------------------------
 all_calls="$(cat "$T/all-calls.log")"

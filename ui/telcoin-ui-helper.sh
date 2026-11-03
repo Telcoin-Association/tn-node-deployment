@@ -73,7 +73,7 @@
 #   telcoin-ui-helper rpc-disable
 #   telcoin-ui-helper firewall-status
 #   telcoin-ui-helper firewall-port   <port>/<proto> <on|off>   (node ports only)
-#   telcoin-ui-helper firewall-enable [<ssh-source>[,<ssh-source>...]]
+#   telcoin-ui-helper firewall-enable [<ssh-source>[,<ssh-source>...]|-] [<p2p-source>[,<p2p-source>...]]
 #   telcoin-ui-helper addons-status                             (read-only)
 #   telcoin-ui-helper meta-cat                                  (read-only)
 #   telcoin-ui-helper node-env-cat                              (read-only)
@@ -1322,7 +1322,8 @@ cmd_rpc_enable() {
 # Firewall subcommands -- thin wrappers around firewall-setup.sh --json. Only
 # the three node ports may be toggled. firewall-enable applies the engine's
 # lockout-safe defaults (SSH stays allowed, from the given sources when there
-# are some); no other SSH or policy setting is reachable here.
+# are some; the P2P ports from the given P2P sources when there are some); no
+# other SSH or policy setting is reachable here.
 # =============================================================================
 
 firewall_script_ready() {
@@ -1346,27 +1347,47 @@ cmd_firewall_port() {
     exec bash "$FIREWALL_SCRIPT" --json --port "$spec" "$pstate"
 }
 
-# firewall-enable [<sources>] -- firewall-setup.sh --json --enable. <sources> is
-# the SSH source list, passed as --ssh-from: at most 16 addresses or CIDRs
-# joined by commas, each accepted by the library's validate_health_src (never
-# /0, the unspecified address or a mask shorter than /8). Without it the engine
-# uses the list .node-meta keeps; on mainnet it refuses when there is none, and
-# its done event says so. Runs from / so the list is never read as a file path.
+# _fw_check_sources <SSH|P2P> <list> -- refuse the running call unless <list> is
+# at most 16 addresses or CIDRs joined by commas, each accepted by the library's
+# validate_health_src (never /0, the unspecified address or a mask shorter than
+# /8). A list that starts with / is refused first: the engine would read it as
+# a file, and this helper never hands it one.
+_fw_check_sources() {
+    local what="$1" list="$2" s n=0
+    local -a srcs=()
+    [[ "$list" != /* ]] || die "invalid ${what} source list: $list (a file path is not taken here; give addresses or CIDRs joined by commas)"
+    [[ "$list" =~ ^[^,]+(,[^,]+)*$ ]] || die "invalid ${what} source list (addresses or CIDRs joined by commas): $list"
+    IFS=, read -r -a srcs <<< "$list"
+    for s in "${srcs[@]}"; do
+        n=$((n + 1))
+        [[ "$s" =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] && _lib_req validate_health_src "$s" \
+            || die "invalid ${what} source: $s (an address, or a CIDR of /8 or narrower; never /0)"
+    done
+    (( n <= 16 )) || die "too many ${what} sources: $n (at most 16)"
+}
+
+# firewall-enable [<ssh-sources>|-] [<p2p-sources>] -- firewall-setup.sh --json
+# --enable. <ssh-sources> is passed as --ssh-from and <p2p-sources> as
+# --p2p-from, each checked by _fw_check_sources; "-" or nothing for the SSH list
+# gives none, so a P2P list can come alone. Without a list the engine uses the
+# one .node-meta keeps (SSH_ALLOW_FROM, P2P_ALLOW_FROM); on mainnet it refuses
+# when there is no SSH list, and its done event says so. Without any P2P list
+# the P2P ports stay open to every address. Runs from / so a list is never
+# read as a file path.
 cmd_firewall_enable() {
-    local list="${1:-}" s n=0
-    local -a args=( --json --enable ) srcs=()
+    local ssh="${1:-}" p2p="${2:-}"
+    local -a args=( --json --enable )
     firewall_script_ready
-    if [[ -n "$list" ]]; then
-        [[ "$list" =~ ^[^,]+(,[^,]+)*$ ]] || die "invalid SSH source list (addresses or CIDRs joined by commas): $list"
-        IFS=, read -r -a srcs <<< "$list"
-        for s in "${srcs[@]}"; do
-            n=$((n + 1))
-            [[ "$s" =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] && _lib_req validate_health_src "$s" \
-                || die "invalid SSH source: $s (an address, or a CIDR of /8 or narrower; never /0)"
-        done
-        (( n <= 16 )) || die "too many SSH sources: $n (at most 16)"
+    [[ "$ssh" != "-" ]] || ssh=""
+    if [[ -n "$ssh" ]]; then
+        _fw_check_sources SSH "$ssh"
         engine_has "$FIREWALL_SCRIPT" --ssh-from
-        args+=( --ssh-from "$list" )
+        args+=( --ssh-from "$ssh" )
+    fi
+    if [[ -n "$p2p" ]]; then
+        _fw_check_sources P2P "$p2p"
+        engine_has "$FIREWALL_SCRIPT" --p2p-from
+        args+=( --p2p-from "$p2p" )
     fi
     cd / || die "cannot change to /"
     exec bash "$FIREWALL_SCRIPT" "${args[@]}" </dev/null
@@ -1747,9 +1768,9 @@ max_args() {
         firewall-status|addons-status|meta-cat|node-env-cat|host-audit) echo 0 ;;
         setup-keygen|setup-finalize|docker-detect|internal-ip) echo 0 ;;
         update-prepare|journal-tail|set-hostname|set-logrotate|credential) echo 1 ;;
-        firewall-enable|service) echo 1 ;;
+        service) echo 1 ;;
         docker-status|docker-logs-full|docker-node-info|docker-stats|docker-log-size) echo 1 ;;
-        caddy-dns-check|rpc-dns-check|firewall-port|docker-logs) echo 2 ;;
+        caddy-dns-check|rpc-dns-check|firewall-port|firewall-enable|docker-logs) echo 2 ;;
         config-set|caddy-enable|rpc-enable) echo 3 ;;
         *) return 1 ;;
     esac
@@ -1828,7 +1849,7 @@ main() {
         rpc-disable)     cmd_rpc_disable ;;
         firewall-status) cmd_firewall_status ;;
         firewall-port)   cmd_firewall_port "${1:-}" "${2:-}" ;;
-        firewall-enable) cmd_firewall_enable "${1:-}" ;;
+        firewall-enable) cmd_firewall_enable "${1:-}" "${2:-}" ;;
         addons-status)   cmd_addons_status ;;
         meta-cat)        cmd_meta_cat ;;
         node-env-cat)    cmd_node_env_cat ;;
