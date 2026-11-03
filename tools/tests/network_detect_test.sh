@@ -317,4 +317,64 @@ check_rc "built binary: directory refused" 1 "$RC"
 run tn_built_binary_ok "$T/built" 4242
 check_rc "built binary: another owner refused" 1 "$RC"
 
+# ---- LIB-B: check_internet probes the node's own network ----------------------------
+# A recording curl answers only for the URLs in CURL_OK. check_internet exits, so
+# it runs in a subshell and the log file carries what it did.
+CURL_OK=""
+curl() {
+    local u
+    for u in "$@"; do :; done
+    printf '%s\n' "$u" >> "$T/curl.log"
+    case " $CURL_OK " in
+        *" $u "*) return 0 ;;
+    esac
+    return 7
+}
+SAVED_NETWORK="${NETWORK:-}"
+# net_probe NETWORK -- one check_internet: RC, PROBED (the URLs curl was given, in
+# order) and its output in ci.out.
+net_probe() {
+    rm -f "$T/curl.log"
+    NETWORK="$1"
+    RC=0
+    ( check_internet ) > "$T/ci.out" 2>&1 || RC=$?
+    PROBED="$(cat "$T/curl.log" 2>/dev/null || true)"
+}
+CURL_OK="$MAINNET_RPC_URL"
+net_probe mainnet
+check_rc "check_internet: mainnet answers" 0 "$RC"
+check "check_internet: mainnet probes its own RPC only" "$MAINNET_RPC_URL" "$PROBED"
+CURL_OK="https://1.1.1.1"
+net_probe mainnet
+check "check_internet: mainnet RPC down, then 1.1.1.1" "$(printf '%s\n%s' "$MAINNET_RPC_URL" https://1.1.1.1)" "$PROBED"
+check_lacks "check_internet: mainnet never probes adiri" "adiri" "$PROBED"
+CURL_OK="$DEVNET_RPC_URL"
+net_probe devnet
+check "check_internet: devnet probes the devnet RPC" "$DEVNET_RPC_URL" "$PROBED"
+CURL_OK="$TESTNET_RPC_URL"
+net_probe testnet
+check "check_internet: testnet probes the testnet RPC" "$TESTNET_RPC_URL" "$PROBED"
+CURL_OK=""
+net_probe testnet
+check_rc "check_internet: nothing answers: exit 1" 1 "$RC"
+check "check_internet: nothing answers: said so" yes "$(grep -qF 'No internet connection detected.' "$T/ci.out" && echo yes || echo no)"
+CURL_OK="https://1.1.1.1"
+net_probe ""
+check_rc "check_internet: NETWORK empty fails closed" 1 "$RC"
+check "check_internet: NETWORK empty: curl not called" "" "$PROBED"
+check "check_internet: NETWORK empty: the message names NETWORK" yes "$(grep -qF 'NETWORK must be testnet, mainnet or devnet (it is empty)' "$T/ci.out" && echo yes || echo no)"
+net_probe adiri
+check_rc "check_internet: unknown NETWORK fails closed" 1 "$RC"
+check "check_internet: unknown NETWORK: curl not called" "" "$PROBED"
+unset -f curl
+NETWORK="$SAVED_NETWORK"
+# setup-node's preflight sets NETWORK (the prompt, or --network in a --json run)
+# before its connectivity check runs.
+check "setup-node: the network is chosen before check_internet" yes "$(awk '
+    /^step_preflight\(\) \{/ { f = 1 }
+    f && /^}/ { exit }
+    f && /^[[:space:]]*json_mode \|\| select_network/ { s = NR }
+    f && /^[[:space:]]*check_internet[[:space:]]*$/ { c = NR }
+    END { print (s && c && s < c) ? "yes" : "no" }' "$TN_TEST_REPO/setup-node.sh")"
+
 finish

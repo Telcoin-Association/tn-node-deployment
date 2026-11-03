@@ -2338,9 +2338,23 @@ check_ports() {
     done
 }
 
+# check_internet -- reach the public RPC of the node's network (NETWORK: testnet,
+# mainnet or devnet), else https://1.1.1.1; exit 1 when neither answers. An empty
+# or unknown NETWORK exits 1 before anything is contacted: no network's RPC is
+# guessed, so a mainnet setup never probes the testnet endpoint.
 check_internet() {
+    local rpc=""
     print_step "Checking internet connectivity..."
-    if curl -s --max-time 10 "$TESTNET_RPC_URL" &>/dev/null || \
+    case "${NETWORK:-}" in
+        testnet) rpc="$TESTNET_RPC_URL" ;;
+        mainnet) rpc="$MAINNET_RPC_URL" ;;
+        devnet)  rpc="$DEVNET_RPC_URL" ;;
+        *)
+            print_error "Cannot check internet connectivity: NETWORK must be testnet, mainnet or devnet (it is ${NETWORK:-empty}), so no network RPC was probed."
+            exit 1
+            ;;
+    esac
+    if curl -s --max-time 10 "$rpc" &>/dev/null || \
        curl -s --max-time 10 "https://1.1.1.1" &>/dev/null; then
         print_ok "Internet connectivity confirmed"
     else
