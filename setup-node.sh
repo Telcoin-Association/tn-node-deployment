@@ -573,14 +573,20 @@ _setup_tag_example() {
 }
 
 # _setup_image_example -- an image by digest of NETWORK's form, for messages: on
-# devnet its repository with a <digest> placeholder (devnet images are pinned by
-# digest and none is a default here), elsewhere DEFAULT_DOCKER_IMAGE.
+# devnet and mainnet the network's repository with a <digest> placeholder (devnet
+# images are pinned by digest and none is a default here; on mainnet the default
+# image is a testnet one, which a mainnet message must not suggest), elsewhere
+# DEFAULT_DOCKER_IMAGE.
 _setup_image_example() {
-    if [[ "$NETWORK" == "devnet" ]]; then
-        printf '%s@sha256:<digest>' "$TN_DEVNET_IMAGE_REPO"
-    else
-        printf '%s' "$DEFAULT_DOCKER_IMAGE"
-    fi
+    local repo
+    case "$NETWORK" in
+        devnet) printf '%s@sha256:<digest>' "$TN_DEVNET_IMAGE_REPO" ;;
+        mainnet)
+            repo="$(tn_docker_repo_for mainnet 2>/dev/null)" || repo="<repository>"
+            printf '%s@sha256:<digest>' "$repo"
+            ;;
+        *) printf '%s' "$DEFAULT_DOCKER_IMAGE" ;;
+    esac
 }
 
 # _setup_install_staged STAGED TAG -- install the staged node binary (tn_stage_binary)

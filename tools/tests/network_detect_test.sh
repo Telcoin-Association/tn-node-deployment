@@ -377,4 +377,21 @@ check "setup-node: the network is chosen before check_internet" yes "$(awk '
     f && /^[[:space:]]*check_internet[[:space:]]*$/ { c = NR }
     END { print (s && c && s < c) ? "yes" : "no" }' "$TN_TEST_REPO/setup-node.sh")"
 
+# ---- LIB-B: setup-node's image example names the node's own network ------------------
+sed -n '/^_setup_image_example() {/,/^}/p' "$TN_TEST_REPO/setup-node.sh" > "$T/img.sh"
+# shellcheck source=/dev/null
+. "$T/img.sh"
+SAVED_NETWORK="${NETWORK:-}"
+NETWORK=mainnet
+img="$(_setup_image_example)"
+check "image example: mainnet is the mainnet repository by digest" "$(tn_docker_repo_for mainnet)@sha256:<digest>" "$img"
+check "image example: mainnet is a ghcr.io image" yes "$([[ "$img" == ghcr.io/* ]] && echo yes || echo no)"
+check_lacks "image example: mainnet names no adiri image" "adiri" "$img"
+check_lacks "image example: mainnet is not the testnet default" "$DEFAULT_DOCKER_IMAGE" "$img"
+NETWORK=testnet
+check "image example: testnet unchanged" "$DEFAULT_DOCKER_IMAGE" "$(_setup_image_example)"
+NETWORK=devnet
+check "image example: devnet unchanged" "${TN_DEVNET_IMAGE_REPO}@sha256:<digest>" "$(_setup_image_example)"
+NETWORK="$SAVED_NETWORK"
+
 finish
