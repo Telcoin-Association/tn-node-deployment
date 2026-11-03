@@ -33,6 +33,7 @@ export TN_KUMA_SRC="192.0.2.5/32"
 EOF
     : > "$R/ui/server.py"
     : > "$R/ui/telcoin-ui-helper.sh"
+    : > "$R/ui/install-ui.sh"
     : > "$R/ui/static/index.html"
     : > "$R/observability/config.alloy"
 }
@@ -153,7 +154,7 @@ else
     bad "html: a marker line that also holds code does not cover the next line" \
         "contract: the line above must be nothing but the marker comment; index.html:14 passed"
 fi
-has "summary on stderr counts files" "in 9 file(s) scanned" "$err"
+has "summary on stderr counts files" "in 10 file(s) scanned" "$err"
 
 # ---- --list ---------------------------------------------------------------
 run --list "$R"
@@ -190,7 +191,7 @@ printf 'a="adiri"  # network-gated: ok\n' > "$R/lib/a.sh"
 run "$R"
 eq "clean: exit 0" 0 "$rc"
 eq "clean: stdout empty" "" "$out"
-eq "clean: count on stderr" "check-network-hits: clean, 1 annotated hit(s) in 5 file(s) scanned" "$err"
+eq "clean: count on stderr" "check-network-hits: clean, 1 annotated hit(s) in 6 file(s) scanned" "$err"
 mk_tree
 printf 'a="nothing here"\n' > "$R/lib/a.sh"
 run "$R"

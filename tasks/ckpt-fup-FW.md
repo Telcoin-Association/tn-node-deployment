@@ -76,6 +76,15 @@ status: done
   ascending (`{ 49600, 49590, 49594 }` -> `{ 49590, 49594, 49600 }`), does not merge consecutive
   ports. firewall-setup.sh has no --help text (no usage function, `*) shift`).
 
+## Round 4 (V6 W3: the health-port block of the status screen on mainnet)
+
+- [x] Q1 firewall-setup.sh view_status: the Uptime Kuma block only when is_testnet_like; else one
+      line that the health port stays closed here, and a warning without the testnet address when
+      it is open anyway (commit 3ab7ed5)
+- [x] Q2 firewall_reset_test.sh: mainnet closed, mainnet open (anywhere, monitor rule), testnet
+      unchanged (336 checks; the 10 new mainnet checks fail on e32088a) (commit c7a2246)
+- [x] Q3 gates
+
 ## Operator-visible changes
 
 - Every enable path (`--enable`, `--reset`, `--json --enable`, the menu's "Enable recommended
@@ -213,7 +222,38 @@ status: done
   once, an invalid entry; every enable refuses such a list too). The SSH row does the same:
   `unknown (SSH source list not usable)`. The MISSING line says `-- MISSING (expected from <list>)`.
 - firewall-setup.sh has no `--help` text, so no help wording to change.
+- Status screen, health port (round 4): the "Uptime Kuma health monitoring -- TCP 43174" block
+  shows only on testnet and devnet (unchanged there: `[ERROR] TCP 43174 is CLOSED -- health
+  monitoring will fail`, `[OK]  TCP 43174 open to the Association monitor only (...)`, `[WARN] TCP
+  43174 open to Anywhere -- consider restricting to <monitor> (menu: Manage node ports)`). On any
+  other network (mainnet) one line instead:
+  `->  Health port TCP 43174 stays closed: health monitoring is a testnet-only add-on`, or, when a
+  rule opens it anyway (to anywhere or to the monitor),
+  `[WARN] Health port TCP 43174 is open, although no monitor uses it on this network; Manage node ports (or --enable) closes it`
+  (no testnet address; the raw ufw rule list above it still shows whatever rule exists).
+- UI (from the coordinator): the UI card shows `persistent` with "(not restored at boot)" and does
+  not render `persistent_reason` yet; the field is in the JSON for operators, and the card change
+  is a UI-S follow-up.
 - "The signed address-manifest reader waits on the Association's format" (spec: hand over as is).
+
+## Tests run (round 4, committed tip c7a2246)
+
+- bash 5.3.9: firewall_reset 336/0/1 skip; firewall_signal 220/0/0; remove_test 340/0/0;
+  root_write_pipe 2/0.
+- bash:3.2 and ubuntu:24.04 (root): firewall_reset 334/0/3 skips; firewall_signal 220; remove_test
+  340; root_write_pipe 2; all 0 failed.
+- bash -n (5.3, 3.2), check-bash32, shellcheck 0.11 and v0.9.0 on firewall-setup.sh and the reset
+  test: clean; no new warning-level findings; systemd-analyze verify on the unit: rc 0.
+- The 10 new mainnet checks fail on e32088a; the V6 repro (`tasks/verify-fup/V6/kuma_mainnet_repro.sh`
+  from the integration branch) prints the testnet address and the CLOSED error before, and neither
+  after (the new lines: `[WARN] Health port TCP 43174 is open, although no monitor uses it on this
+  network; Manage node ports (or --enable) closes it` / `->  Health port TCP 43174 stays closed:
+  health monitoring is a testnet-only add-on`).
+- Integration check: `hardening-followups` 224a6a4 exported, `git diff e32088a HEAD --
+  firewall-setup.sh tools/tests/` applies cleanly (`git apply --check`, full context);
+  check-network-hits clean (148 annotated hits, 23 files) rc 0; the V6 repro there shows neither
+  line; full suite 61 files, 0 failed.
+- Full suite on fup/FW (bash 5.3.9): 59 files, 0 failed.
 
 ## Tests run (round 3, committed tip e32088a)
 
