@@ -6,14 +6,16 @@
 // d07d7706; an earlier copy of this file wrongly called the metrics blocks "dormant".)
 //
 // CANONICAL COPY. The log-shipping AND metrics blocks below are kept BYTE-IDENTICAL
+// to the core team's node agent, so external-operator telemetry lands in the SAME
+// Loki/Prometheus label schema + dashboards.
 // network-gated: names the upstream node agent config in the testnet repository, not an endpoint
-// to adiri-genesis/common/observability/node-agent/config.alloy (the core team's node
-// agent) so external-operator telemetry lands in the SAME Loki/Prometheus label schema
-// + dashboards. lib/observability.sh renders only the pipeline(s) the operator opted
-// into (ENABLE_OBSERVABILITY = logs, ENABLE_METRICS = metrics); when both are on it
+// Upstream: adiri-genesis/common/observability/node-agent/config.alloy.
+// lib/observability.sh renders only the pipeline(s) the operator opted into
+// (ENABLE_OBSERVABILITY = logs, ENABLE_METRICS = metrics); when both are on it
+// deploys this file verbatim.
 // network-gated: names the upstream repository, not an endpoint
-// deploys this file verbatim. If you edit the blocks, mirror the change in adiri-genesis
-// and keep the diff clean (the sync note in docs/testnet-addons.md explains how to verify).
+// If you edit the blocks, mirror the change in adiri-genesis and keep the diff
+// clean (the sync note in docs/testnet-addons.md explains how to verify).
 //
 // Node identity and the push endpoints come from the environment (the telcoin-alloy
 // systemd unit's EnvironmentFile for native installs, or the container --env-file for

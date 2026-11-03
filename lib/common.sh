@@ -1749,10 +1749,10 @@ _tn_release_tag_key() {
 # tn_release_tag_key TAG -- print TAG's sort key "X Y Z R", each field nine
 # digits, zero-padded, so keys order the same as text (LC_ALL=C sort) and as
 # numbers: R is N for the release candidate -rcN and 999999999 for a final, so
-# rc1 < rc2 < the final of the same X.Y.Z < any rc of a higher X.Y.Z. TAG is
+# rc1 < rc2 < the final of the same X.Y.Z < any rc of a higher X.Y.Z.
 # network-gated: the testnet suffix tn_release_tag_key orders; the network is judged elsewhere
-# vX.Y.Z with an optional -adiri and an optional -rcN (the network is not
-# judged here: that is tn_release_tag_ok). rc 1 and nothing for anything else.
+# TAG is vX.Y.Z with an optional -adiri and an optional -rcN (the network is
+# not judged here: that is tn_release_tag_ok). rc 1 and nothing for anything else.
 tn_release_tag_key() {
     _tn_release_tag_key "${1:-}" || return 1
     printf '%s\n' "$TN_RELEASE_TAG_KEY"
@@ -1988,20 +1988,21 @@ rpc_url_is_private() {
 }
 
 # tn_ref_min_check <ref> <network> — check a release ref against the network's
-# oldest supported release (MIN_SOURCE_VERSION_*). <ref> is a git ref
+# oldest supported release (MIN_SOURCE_VERSION_*).
 # network-gated: example refs in the testnet form; no endpoint
-# (v0.13.0-adiri, main, a commit) or a docker image reference, which is judged
-# network-gated: example image ref in the testnet form; no endpoint
-# on the part after its last ":" (…/adiri:v0.15.0-adiri). Prints one message on
-# stdout when rc is not 0:
+# <ref> is a git ref (v0.13.0-adiri, main, a commit) or a docker image (…/adiri:v0.15.0-adiri),
+# which is judged on the part after its last ":". Prints one message on stdout
+# when rc is not 0:
 #   rc 0  allowed: a release tag at or above the floor, or no floor for <network>
 #   rc 1  refused: an empty ref, or a version below the floor whatever its suffix
 #   rc 2  allowed with a warning: not a release tag (main, a commit, a digest, or
 #         a pre-release such as v0.13.0-rc1 on mainnet), so the version is unknown
-# A release tag is one tn_release_tag_ok accepts for <network> (testnet
-# network-gated: the testnet tag form, and adiri as another name for testnet
-# vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z). <network> is testnet (or adiri), mainnet or
-# devnet; devnet, and an empty or unknown network, have no floor.
+# A release tag is one tn_release_tag_ok accepts for <network>.
+# network-gated: the testnet tag forms, beside the mainnet one
+# Those are testnet vX.Y.Z-adiri and vX.Y.Z-adiri-rcN, mainnet vX.Y.Z.
+# network-gated: adiri is read as testnet
+# <network> is testnet (or adiri), mainnet or devnet; devnet, and an empty or
+# unknown network, have no floor.
 tn_ref_min_check() {
     local ref="${1:-}" network="${2:-}" floor example tag ver tag_re
     if [[ -z "$ref" ]]; then
@@ -4921,9 +4922,9 @@ _tn_word_fits() {
 #   word 4 isRetired         bool
 #   word 5 stakeVersion      uint8
 #   word 6 region            uint8
-# (IConsensusRegistry.ValidatorInfo in tn-contracts 10cc12b7, the commit
+# The layout is IConsensusRegistry.ValidatorInfo in tn-contracts 10cc12b7.
 # network-gated: the tn-contracts commit the testnet releases pin; no endpoint
-# v0.16.0-adiri pins, as v0.15.0-adiri did.) The decode is strict: exactly
+# v0.16.0-adiri pins that commit, as v0.15.0-adiri did. The decode is strict: exactly
 # seven words, each zero above its type, isRetired 0 or 1, status within the
 # enum, and status 6 (Any) only with isRetired set: retiring a validator writes
 # Any plus isRetired, the record kept as a tombstone, and nothing writes Any
