@@ -576,6 +576,7 @@ bad_headers "date not zero-padded" "The release manifest is malformed (date 2026
 bad_headers "expires twice" "date and expires may each appear once at most" expires=2027-02-01 expires=2027-03-01
 bad_headers "date twice" "date and expires may each appear once at most" date=2026-11-03 date=2026-11-04
 bad_headers "expires empty" "The release manifest is malformed (expires )" expires=
+bad_headers "a blank before =" "The release manifest is malformed (bad line: expires =2027-02-01)" "expires =2027-02-01"
 # A manifest with expires= and no date= is fine.
 D2="$SRC/expiresonly"; rm -rf "$D2"; cp -R "$R3" "$D2"
 write_manifest "$D2" scripts-v1.5.0 102 1.0.0; with_headers "$D2" expires=2027-02-01

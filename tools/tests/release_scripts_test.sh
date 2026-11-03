@@ -250,6 +250,10 @@ reheader date= expires=2027-01-13
 tool --check
 check_rc "check, date= empty: fails" 1 "$RC"
 check_has "check, date= empty: says why" "release-scripts.sh: MANIFEST: date= is not a calendar date YYYY-MM-DD" "$OUT"
+reheader date=2026-10-15 "expires =2027-01-13"
+tool --check
+check_rc "check, a blank before =: fails" 1 "$RC"
+check_has "check, a blank before =: the line is not a known header" "-expires =2027-01-13" "$OUT"
 reheader date=2026-10-15 expires=2026-10-15
 tool --check
 check_rc "check, expires not after date: fails" 1 "$RC"

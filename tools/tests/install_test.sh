@@ -348,6 +348,7 @@ bad_headers "expires empty" "MANIFEST expires= is not a calendar date YYYY-MM-DD
 bad_headers "date in another format" "MANIFEST date=03/11/2026 is not a calendar date YYYY-MM-DD." date=03/11/2026 expires=2027-02-01
 bad_headers "expires twice" "MANIFEST repeats expires=." expires=2027-02-01 expires=2027-03-01
 bad_headers "date twice" "MANIFEST repeats date=." date=2026-11-03 date=2026-11-04
+bad_headers "a blank before =" "MANIFEST line is malformed: expires =2027-02-01" "expires =2027-02-01"
 TODAY=""
 
 # --- an installer with no key lines ----------------------------------------------------

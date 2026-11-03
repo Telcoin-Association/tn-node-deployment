@@ -452,7 +452,9 @@ parse_manifest() {
                 M_PATHS+=("$path")
                 M_SHAS+=("$hash")
                 ;;
-            [a-z]*=*) ;;   # a header key a later release adds; covered by the signature
+            # A header key a later release adds (covered by the signature); a key
+            # with a blank in it, such as "expires =", is malformed.
+            [a-z]*=*) [[ "${line%%=*}" != *[[:space:]]* ]] || { manifest_bad "bad line: ${line}"; return 1; } ;;
             *) manifest_bad "bad line: ${line}"; return 1 ;;
         esac
     done < "$1"

@@ -262,7 +262,9 @@ verify_release() {
                 cp "${src}/${path}" "${tree}/${path}"
                 n=$((n + 1))
                 ;;
-            [a-z]*=*) ;;   # a header key a later format adds; covered by the signature
+            # A header key a later format adds (covered by the signature); a key
+            # with a blank in it, such as "expires =", is malformed.
+            [a-z]*=*) [[ "${line%%=*}" != *[[:space:]]* ]] || fail "MANIFEST line is malformed: ${line}" ;;
             *) fail "MANIFEST line is malformed: ${line}" ;;
         esac
     done < "${src}/MANIFEST"
