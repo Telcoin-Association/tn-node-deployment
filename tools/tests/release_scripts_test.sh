@@ -49,6 +49,21 @@ while [[ $n -le 120000 ]]; do
     n=$((n + 293))
 done
 check "dates: day number to date and back, 1970 to 2298" "" "$bad"
+# Digits other than 0-9 (full-width, Arabic-Indic) are a clean refusal in a
+# UTF-8 locale too, never an arithmetic error: en_US.UTF-8 where it exists, else
+# C.UTF-8.
+loc=C.UTF-8
+if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then
+    loc=en_US.UTF-8
+fi
+fw="$(printf '\357\274\222\357\274\220\357\274\222\357\274\226')"   # full-width 2026
+ar="$(printf '\331\242')"                                                  # Arabic-Indic 2
+for f in tools/release-scripts.sh update-scripts.sh install.sh check-node.sh; do
+    fn="$(sed -n '/^ymd_days() {/,/^}/p' "$REPO/$f")"
+    out="$(LC_ALL="$loc" "$BASH" -c 'eval "$1"; shift
+        for d in "$@"; do ymd_days "$d"; echo "rc=$?"; done' _ "$fn" "${fw}-11-03" "2026-1${ar}-03" 2026-11-03 2>&1)"
+    check "dates, $loc: $f refuses non-ASCII digits cleanly" "$(printf 'rc=1\nrc=1\n20760\nrc=0')" "$out"
+done
 ref="$(sed -n '/^ymd_days() {/,/^}/p' "$REPO/tools/release-scripts.sh")"
 for f in update-scripts.sh install.sh check-node.sh; do
     check "dates: $f carries the same ymd_days" "$ref" "$(sed -n '/^ymd_days() {/,/^}/p' "$REPO/$f")"

@@ -967,9 +967,11 @@ report_testnet_addons() {
 # calendar date from 1970 on; rc 1 for anything else. Pure bash: busybox and
 # macOS date cannot parse a date, and the same text runs in every script that
 # reads a MANIFEST date (tools/tests/release_scripts_test.sh checks the copies).
+# The digits are listed one by one: in a UTF-8 locale [0-9] can match other
+# digits, such as full-width ones, that bash arithmetic cannot read.
 ymd_days() {
     local y m d n
-    [[ "$1" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || return 1
+    [[ "$1" =~ ^([0123456789]{4})-([0123456789]{2})-([0123456789]{2})$ ]] || return 1
     y=$((10#${BASH_REMATCH[1]}))
     m=$((10#${BASH_REMATCH[2]}))
     d=$((10#${BASH_REMATCH[3]}))
