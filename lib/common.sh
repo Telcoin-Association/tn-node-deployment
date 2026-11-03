@@ -4427,9 +4427,10 @@ _tn_wait_say() {
 # settle epochDuration/240 clamped to 90-300 s, which is 300 and 90 for a 6 h
 # epoch and 900 and 300 for a 7-day one; a whole number of seconds set in the
 # environment is used as given. Until the epoch length is known (the blind wait)
-# they are 300 and 90. TN_EPOCH_WAIT_MAX (1800) caps the whole wait, settle
-# included, and 0 turns the wait off; once the epoch length is known, a cap
-# shorter than margin + settle + two polls is raised to that sum with a warning.
+# they are 300 and 90. TN_EPOCH_WAIT_MAX (1800) caps the whole wait as set,
+# settle included, and 0 turns the wait off; once the epoch length is known, a
+# cap shorter than margin + settle + two polls is kept and warned about, since
+# the wait may then end before the epoch has settled.
 # TN_EPOCH_POLL (15, clamped to 5-20) is the poll and heartbeat interval. Each
 # epoch read while waiting may take at most 30 - poll seconds, so two heartbeats
 # are never more than 30 s apart.
@@ -4670,8 +4671,7 @@ tn_wait_restart_window() {
     timing="$(_tn_epoch_timing_text "$margin" "$msrc" "$settle" "$ssrc" "$dur")"
     need=$(( margin + settle + 2 * poll ))
     if (( cap < need )); then
-        "$fn" warn "TN_EPOCH_WAIT_MAX ${cap} is shorter than the wait it bounds (margin ${margin} + settle ${settle} + two polls); using ${need}." || true
-        cap="$need"
+        "$fn" warn "TN_EPOCH_WAIT_MAX ${cap} is shorter than margin ${margin} + settle ${settle} + two polls; the restart may land before the epoch has settled. Set it to at least ${need}, or TN_SKIP_EPOCH_WAIT=1 to skip the wait on purpose." || true
     fi
     if (( secs > margin )); then
         "$fn" log "Epoch ${epoch} ends in $(_tn_fmt_secs "$secs"), outside the ${margin}s margin; no need to wait. ${timing}" || true

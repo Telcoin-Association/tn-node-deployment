@@ -4,7 +4,8 @@
 # pauses a random 0 to TN_EPOCH_JITTER_MAX seconds after the settle, inside the
 # TN_EPOCH_WAIT_MAX cap (0 turns the pause off). The margin and settle follow
 # the epoch length read with the boundary unless TN_EPOCH_MARGIN or
-# TN_EPOCH_SETTLE is set, and a cap shorter than the wait it bounds is raised.
+# TN_EPOCH_SETTLE is set, and a cap shorter than the wait it bounds is kept with
+# a warning.
 #
 # migrate-node-naming's stop_legacy runs from the functions cut out of the
 # script; setup-node's restart is checked in its source. Sleeps are counted, not
@@ -47,7 +48,7 @@ for seed in 1 2 3 4 5 6 7 8 9 10; do
     (( n > hi )) && hi=$n
 done
 check "the pause stays inside TN_EPOCH_WAIT_MAX" "yes" "$([[ $hi -le 60 ]] && echo yes || echo "no ${hi}")"
-check "a cap equal to the wait it bounds is not raised" no "$(grep -q 'is shorter than the wait it bounds' "$T/say" && echo yes || echo no)"
+check "a cap equal to the wait it bounds: no warning" no "$(grep -q 'is shorter than margin' "$T/say" && echo yes || echo no)"
 check "the default is at most 30s" "yes" \
     "$(n="$(unset TN_EPOCH_JITTER_MAX; naps)"; [[ $n -ge 35 && $n -le 65 ]] && echo yes || echo "no ${n}")"
 check "no epoch length: the fixed margin, the settle from the environment" yes \
@@ -66,6 +67,9 @@ check "timing: a value that is not a number is ignored" "900 derived 300 derived
     "$(TN_EPOCH_MARGIN=abc _tn_epoch_timing 604800)"
 EPOCH_ANSWER=""
 tn_epoch_secs_left() { printf '%s\n' "$EPOCH_ANSWER"; }
+# EPOCH_NOW is the epoch the polls read: 6 closes epoch 5 at the first poll.
+EPOCH_NOW=6
+tn_epoch_info() { printf '%s 0 0\n' "$EPOCH_NOW"; }
 # win SECS-LEFT EPOCH-LENGTH -- one wait in this shell (no pause after the settle,
 # poll 15); NAPPED and the say file tell what it did.
 win() {
@@ -82,7 +86,7 @@ check "7-day epoch: the log says margin 900 and settle 300 are derived" yes \
 win 600 604800
 check "7-day epoch, boundary inside 900 s: waits one poll and the 300 s settle" 315 "$NAPPED"
 check "7-day epoch: the step says why" yes "$(said 'Waiting at most 1800s (TN_EPOCH_WAIT_MAX); set TN_SKIP_EPOCH_WAIT=1 to skip. Margin 900s and settle 300s, derived from a 604800 s epoch.')"
-check "7-day epoch: the default cap is not raised" no "$(said 'is shorter than the wait it bounds')"
+check "7-day epoch, TN_EPOCH_WAIT_MAX unset: no warning" no "$(grep -q '^warn ' "$T/say" && echo yes || echo no)"
 TN_EPOCH_MARGIN=120 win 600 604800
 check "TN_EPOCH_MARGIN=120 wins over the derived 900" 0 "$NAPPED"
 check "the log names TN_EPOCH_MARGIN" yes \
@@ -90,12 +94,30 @@ check "the log names TN_EPOCH_MARGIN" yes \
 TN_EPOCH_MARGIN=1000 TN_EPOCH_SETTLE=20 win 950 21600
 check "an explicit margin above 900 and settle below 90 are used as given" 35 "$NAPPED"
 TN_EPOCH_WAIT_MAX=100 win 600 604800
-check "TN_EPOCH_WAIT_MAX=100 is raised with a warning" yes \
-    "$(said 'warn TN_EPOCH_WAIT_MAX 100 is shorter than the wait it bounds (margin 900 + settle 300 + two polls); using 1230.')"
-check "the raised cap is the one the step reports" yes "$(said 'Waiting at most 1230s (TN_EPOCH_WAIT_MAX)')"
-check "the raised cap leaves the whole settle" 315 "$NAPPED"
+check "TN_EPOCH_WAIT_MAX=100 is kept at 100 with the warning" yes \
+    "$(said 'warn TN_EPOCH_WAIT_MAX 100 is shorter than margin 900 + settle 300 + two polls; the restart may land before the epoch has settled. Set it to at least 1230, or TN_SKIP_EPOCH_WAIT=1 to skip the wait on purpose.')"
+check "the kept cap is the one the step reports" yes "$(said 'Waiting at most 100s (TN_EPOCH_WAIT_MAX)')"
+check "TN_EPOCH_WAIT_MAX=100: one poll and a settle cut to fit, 100 s in all" 100 "$NAPPED"
+EPOCH_NOW=5
+TN_EPOCH_WAIT_MAX=100 win 600 604800
+check "TN_EPOCH_WAIT_MAX=100, the epoch never closes: the wait stops at 100 s" 100 "$NAPPED"
+check "TN_EPOCH_WAIT_MAX=100, the epoch never closes: the cap is named" yes \
+    "$(said 'has not closed after 100s (limit 100s, TN_EPOCH_WAIT_MAX)')"
+EPOCH_NOW=6
+hi=0
+for seed in 1 2 3 4 5; do
+    RANDOM=$seed
+    EPOCH_ANSWER="600 5 1600 604800"
+    NAPPED=0
+    TN_EPOCH_JITTER_MAX=30 TN_EPOCH_WAIT_MAX=100 TN_EPOCH_POLL=15 tn_wait_restart_window "http://127.0.0.1:8545" say
+    (( NAPPED > hi )) && hi=$NAPPED
+done
+check "TN_EPOCH_WAIT_MAX=100 with the pause on: never more than 100 s" yes "$([[ $hi -le 100 ]] && echo yes || echo "no ${hi}")"
 TN_EPOCH_WAIT_MAX=1230 win 600 604800
-check "a cap equal to margin + settle + two polls stands" no "$(said 'is shorter than the wait it bounds')"
+check "a cap equal to margin + settle + two polls: no warning" no "$(said 'is shorter than margin')"
+TN_EPOCH_MARGIN=2000 win 5000 604800
+check "the default cap below an explicit margin + settle + two polls: kept and warned" yes \
+    "$(said 'warn TN_EPOCH_WAIT_MAX 1800 is shorter than margin 2000 + settle 300 + two polls; the restart may land before the epoch has settled. Set it to at least 2330, or TN_SKIP_EPOCH_WAIT=1 to skip the wait on purpose.')"
 win 5000 21600
 check "6 h epoch: margin 300 and settle 90 as before" yes \
     "$(said 'outside the 300s margin; no need to wait. Margin 300s and settle 90s, derived from a 21600 s epoch.')"
