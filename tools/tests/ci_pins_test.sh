@@ -10,9 +10,11 @@
 # CODEOWNERS and dependabot.yml exist. Each display name the main-branch
 # ruleset requires names exactly one job; the hardening lints, the UI tests
 # and the macOS job run the lints and the UI shell tests directly, with no
-# fallback for a missing file; the Pages site gets no .nojekyll. Plain text
-# checks (no YAML parser), so they assume the two-space layout the workflows
-# use. bash 3.2 safe.
+# fallback for a missing file; no required job, and no step of one, carries
+# an if: or a continue-on-error, except the advisory shellcheck run; no run
+# line in them ends a failure with || true, || : or || exit 0; the Pages site
+# gets no .nojekyll. Plain text checks (no YAML parser), so they assume the
+# two-space layout the workflows use. bash 3.2 safe.
 # =============================================================================
 
 set -u
@@ -59,20 +61,34 @@ check "ci.yml keeps the ruleset check names" "" "$(for j in parse-linux parse-ma
     grep -q "^  ${j}:$" "$GH/workflows/ci.yml" || echo "$j"
 done)"
 
-# job_names FILE -- the display name of each job of FILE (its name: key at
-# four spaces under jobs:), quotes removed.
-job_names() {
+# job_table FILE -- "id|display name" for each named job of FILE (the job key
+# at two spaces under jobs:, its name: key at four), quotes removed.
+job_table() {
     awk -v q="'" '
         /^jobs:/ { injobs = 1; next }
         /^[^[:space:]#]/ { injobs = 0 }
+        injobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { id = $1; sub(/:$/, "", id); next }
         injobs && /^    name:[[:space:]]/ {
             sub(/^    name:[[:space:]]*/, ""); sub(/[[:space:]]+$/, "")
             c = substr($0, 1, 1)
             if (length($0) > 1 && (c == "\"" || c == q) && substr($0, length($0), 1) == c)
                 $0 = substr($0, 2, length($0) - 2)
-            print
+            print id "|" $0
         }
     ' "$1"
+}
+
+# job_names FILE -- the display name of each job of FILE.
+job_names() {
+    job_table "$1" | sed 's/^[^|]*|//'
+}
+
+# job_id FILE NAME -- the id of the job of FILE whose display name is NAME.
+job_id() {
+    job_table "$1" | awk -v n="$2" '{
+        i = index($0, "|")
+        if (substr($0, i + 1) == n) { print substr($0, 1, i - 1); exit }
+    }'
 }
 
 # job_body FILE JOB -- the lines of job JOB of FILE (its key at two spaces
@@ -96,13 +112,55 @@ has() {
     if printf '%s\n' "$2" | grep -qF -- "$1"; then echo yes; else echo no; fi
 }
 
+# job_gates JOB -- read the lines of job JOB (job_body) and print each if: and
+# each continue-on-error other than false, on the job ("JOB: job: KEY: VALUE")
+# or on a step ("JOB: step \"NAME\": KEY: VALUE"). Job keys sit at four
+# spaces, step keys after "      - " or at eight spaces.
+job_gates() {
+    awk -v job="$1" '
+        function val(line) {
+            sub(/^[^:]*:[[:space:]]*/, "", line); sub(/[[:space:]]+$/, "", line)
+            return line
+        }
+        function key(line,   v) {
+            v = val(line)
+            if (line ~ /^name:/) sname = v
+            else if (line ~ /^if:/) flags = flags SUBSEP "if: " v
+            else if (line ~ /^continue-on-error:/ && v != "false") flags = flags SUBSEP "continue-on-error: " v
+        }
+        function flush(   n, i, f) {
+            if (instep && flags != "") {
+                n = split(substr(flags, 2), f, SUBSEP)
+                for (i = 1; i <= n; i++) print job ": step \"" sname "\": " f[i]
+            }
+            instep = 0; sname = ""; flags = ""
+        }
+        /^    [A-Za-z_-]+:/ {
+            flush()
+            if ($0 ~ /^    if:/) print job ": job: if: " val($0)
+            if ($0 ~ /^    continue-on-error:/ && val($0) != "false")
+                print job ": job: continue-on-error: " val($0)
+            next
+        }
+        /^      - / { flush(); instep = 1; key(substr($0, 9)); next }
+        instep && /^        [A-Za-z_-]+:/ { key(substr($0, 9)) }
+        END { flush() }
+    '
+}
+
 # The ruleset requires status checks by display name, not job id, so a renamed
 # job (or two jobs with one name) leaves a required check that never reports.
 all_names="$(for f in "${workflows[@]}"; do job_names "$f"; done)"
+req_jobs=""
+n_req=0
 while IFS='|' read -r wf name; do
+    n_req=$((n_req + 1))
     in_wf="$(job_names "$GH/workflows/$wf")"
     check "$wf: required check \"$name\" names exactly one job" "$wf=1 all=1" \
         "$wf=$(count_line "$name" "$in_wf") all=$(count_line "$name" "$all_names")"
+    id="$(job_id "$GH/workflows/$wf" "$name")"
+    [[ -n "$id" ]] && req_jobs="${req_jobs}${wf}|${id}
+"
 done <<'EOF'
 ci.yml|bash -n (Linux)
 ci.yml|bash -n and bash-3.2 lint (macOS bash 3.2)
@@ -116,10 +174,13 @@ ci.yml|checksum freshness
 integration.yml|Ubuntu 24.04 VM assertions
 EOF
 
+check "every required check names a job" "$n_req" "$(printf '%s' "$req_jobs" | grep -c .)"
+
 lint_job="$(job_body "$GH/workflows/ci.yml" hardening-lint)"
 ui_job="$(job_body "$GH/workflows/ci.yml" ui-tests)"
 mac_job="$(job_body "$GH/workflows/ci.yml" parse-macos)"
 
+check "hardening-lint runs the passphrase-print lint" "yes" "$(has 'bash tools/tests/passphrase_print_test.sh' "$lint_job")"
 check "hardening-lint runs the network-hits lint" "yes" "$(has 'bash tools/check-network-hits.sh' "$lint_job")"
 check "hardening-lint runs the perl interpolation lint" "yes" "$(has 'bash tools/check-perl-interp.sh' "$lint_job")"
 check_lacks "hardening-lint: no fallback for a missing lint" "if [ -f" "$lint_job"
@@ -132,9 +193,25 @@ for t in helper_test.sh install_ui_test.sh open_ui_test.sh; do
     check "ui-tests runs ui/tests/$t" "yes" "$(has "bash ui/tests/$t" "$ui_job")"
     check "parse-macos runs ui/tests/$t under /bin/bash" "yes" "$(has "/bin/bash ui/tests/$t" "$mac_job")"
 done
-for j in hardening-lint ui-tests parse-macos; do
-    check_lacks "$j: every step blocks" "continue-on-error" "$(job_body "$GH/workflows/ci.yml" "$j")"
-done
+check "fixture-tests runs the suite" "yes" "$(has 'bash tools/tests/run.sh' "$(job_body "$GH/workflows/ci.yml" fixture-tests)")"
+check "fixture-tests-macos runs the suite under /bin/bash" "yes" \
+    "$(has '/bin/bash tools/tests/run.sh' "$(job_body "$GH/workflows/ci.yml" fixture-tests-macos)")"
+check "checksums regenerates the sidecars" "yes" "$(has 'bash tools/gen-checksums.sh' "$(job_body "$GH/workflows/ci.yml" checksums)")"
+
+# A skipped required check counts as passed, and continue-on-error turns a
+# failure into a pass, so neither may sit on a required job or on a step of
+# one. The one exception is the advisory shellcheck run at warning severity.
+check "required jobs: no if:, no continue-on-error but the advisory shellcheck run" \
+    'shellcheck: step "shellcheck (warnings -- advisory)": continue-on-error: true' \
+    "$(printf '%s' "$req_jobs" | while IFS='|' read -r wf id; do
+        job_body "$GH/workflows/$wf" "$id" | job_gates "$id"
+    done)"
+check "required jobs: no run line ends a failure with || true, || : or || exit 0" "" \
+    "$(printf '%s' "$req_jobs" | while IFS='|' read -r wf id; do
+        job_body "$GH/workflows/$wf" "$id" |
+            grep -E '[|][|][[:space:]]*(true|:|exit[[:space:]]+0)([[:space:];)]|$)' |
+            sed "s/^[[:space:]]*/${id}: /"
+    done)"
 
 check "publish-installer: no .nojekyll" "0" "$(grep -c '\.nojekyll' "$GH/workflows/publish-installer.yml")"
 
