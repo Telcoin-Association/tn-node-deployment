@@ -1576,8 +1576,11 @@ fw_menu_p2p_apply() {
     fi
     if [[ "$rc" -eq 0 ]]; then
         fw_p2p_limit_sync "$nodes"
-        # The table or its boot copy changed: make the host baseline again, under the lock.
-        fw_baseline_refresh
+        # The table or its boot copy changed: make the host baseline again, under the
+        # lock. An unchanged limit (FW_LIMIT_CHANGED false) wrote nothing AIDE watches.
+        if [[ "$FW_LIMIT_CHANGED" == "true" ]]; then
+            fw_baseline_refresh
+        fi
     fi
     tn_release_update_lock
     return "$rc"

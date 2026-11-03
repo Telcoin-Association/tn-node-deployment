@@ -757,7 +757,10 @@ check "menu, ports already open: lock released" "kind=" "$(cat "$T/menu.lock")"
 # Ports open and the table and boot copy already as wanted: nothing is rewritten.
 : > "$UFW_LOG"; : > "$NFT_LOG"; : > "$WRITES"; : > "$SYSTEMCTL_LOG"
 fresh_flags
-( confirm() { return 1; }; manage_node_ports; echo "changed=${FW_LIMIT_CHANGED} kind=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.lock" ) </dev/null > "$T/mnp.out" 2>&1
+rm -f "$T/hb.calls"
+( tn_host_baseline_refresh() { printf 'refresh %s\n' "${1:-}" >> "$T/hb.calls"; }
+  confirm() { return 1; }; manage_node_ports; echo "changed=${FW_LIMIT_CHANGED} kind=${TN_UPDATE_LOCK_KIND:-}" > "$T/menu.lock" ) </dev/null > "$T/mnp.out" 2>&1
+check "menu, nothing to change: no host baseline refresh" "" "$(cat "$T/hb.calls" 2>/dev/null)"
 check "menu, nothing to change: no nft write" "0" "$(nft_applies)"
 check "menu, nothing to change: no boot copy write" "" "$(cat "$WRITES")"
 check "menu, nothing to change: no unit change" "" "$(grep -E 'telcoin-p2p-limit|daemon-reload' "$SYSTEMCTL_LOG" | grep -v '^is-enabled')"
