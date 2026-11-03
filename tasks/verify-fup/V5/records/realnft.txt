@@ -1,0 +1,37 @@
+info  nftables v1.0.9 (Old Doc Yak #3) at /usr/sbin/nft; kernel 7.0.0-38-generic
+ok    N1 nft -c -f on the rendered program
+ok    N2 first load (no table yet)
+ok    N3 second load (table present): idempotent
+ok    N4 listing has set tn_p2p_src4
+ok    N5 listing has set tn_p2p_src6
+ok    N6 listing keeps the /64 mask
+ok    N7 listing: exactly one chain, two rules with ct state new
+ok    N8 a second load did not duplicate the rules
+ok    N9 fw_p2p_limit_live parses the real listing
+ok    N10 delete-only program, table present
+ok    N11 delete-only program, table absent
+ok    N12 table gone after the delete
+info  N13 plain 'nft delete table' on an absent table rc=1 (ExecStop has the - prefix)
+ok    N14 ports [49590] load
+ok    N14 ports [49590,49594,49595] load
+ok    N15 rate/burst 1 100000 loads
+ok    N15 rate/burst 100000 1 loads
+ok    N15 rate/burst 100000 100000 loads
+ok    N15 rate/burst 1 1 loads
+ok    N16 a non-numeric port is refused by nft
+ok    N17 the refused program left the previous table (20/40)
+ok    N18 fw_p2p_limit_sync writes it with the real nft
+ok    N19 boot program written and loadable
+ok    N20 with a list the sync deletes it
+info  N21 60 new IPv4 flows from 127.0.0.1: 40 delivered (burst 40, 20/minute)
+ok    N21 the v4 meter lets about the burst through and drops the rest
+ok    N22 v4 set keyed per address
+info  N23 30 + 30 IPv6 flows from ::5 and ::6 of one /64: 30 + 10 delivered
+ok    N23 two addresses of one /64 share the burst
+ok    N24 v6 set holds the /64 (2001:db8:1:2::)
+ok    N25 v6 set holds no full address
+ok    N26 one flow the receiver answers (established after the reply): all 60 datagrams delivered
+info  N27 one flow never answered: 40 of 60 datagrams delivered (ct state stays new until a reply)
+ok    N27 (finding) an unanswered flow is metered per packet, not per flow
+
+30 checks, 0 failures, 0 skipped

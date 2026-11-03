@@ -1,0 +1,824 @@
+
+== tools/tests/firewall_reset_test.sh (bash 5.2.21(1)-release)
+ok    testnet reset rc 0
+ok    blanket ssh rule
+ok    kuma monitor rule
+ok    p2p 49594 open
+ok    every allow before the default deny
+ok    enable is the last call
+ok    custom rule gone after reset
+ok    ufw active after reset
+ok    no snapshot left behind
+ok    mainnet no --ssh-from rc 1
+ok    mainnet refusal makes no ufw change
+ok    mainnet refusal leaves state
+ok    mainnet refusal names --ssh-from
+ok    mainnet --ssh-from rc 0
+ok    ssh v4 source rule
+ok    ssh v6 source rule
+ok    mainnet adds no blanket ssh
+ok    mainnet adds no health rule
+ok    mainnet adds no health port at all
+ok    p2p source rule
+ok    p2p open rule deleted
+ok    p2p never opened to all
+ok    blanket ssh deleted after the source rule
+ok    final rules lack the blanket ssh
+ok    mainnet re-enable from stored lists rc 0
+ok    re-enable adds no blanket ssh
+ok    re-enable final rules lack blanket ssh
+ok    replaced lists rc 0
+ok    new SSH source rule
+ok    dropped SSH source rule gone
+ok    kept P2P source rule
+ok    new P2P source rule
+ok    dropped P2P source rules gone
+ok    dropped SSH source deleted after the new one is in
+ok    replaced lists: enable is the last call
+ok    --ssh-anywhere over a stored list rc 0
+ok    --ssh-anywhere: blanket rule
+ok    --ssh-anywhere: stored source rule gone
+ok    GCE replaced list rc 0
+ok    GCE: IAP rule kept
+ok    GCE: dropped source gone
+ok    duplicated SSH_ALLOW_FROM rc 1
+ok    duplicated SSH_ALLOW_FROM makes no change
+ok    --ssh-from 0.0.0.0/0 rc 1
+ok    --ssh-from 0.0.0.0/0 no change
+ok    --ssh-from 010.0.113.0/24 rc 1
+ok    --ssh-from 010.0.113.0/24 no change
+ok    --p2p-from 010.0.113.0/24 rc 1
+ok    --p2p-from 010.0.113.0/24 no change
+ok    --ssh-from 203.0.113.07 rc 1
+ok    --ssh-from 203.0.113.07 no change
+ok    --p2p-from 203.0.113.07 rc 1
+ok    --p2p-from 203.0.113.07 no change
+ok    --ssh-from 128.0.0.0/1 rc 1
+ok    --ssh-from 128.0.0.0/1 no change
+ok    --p2p-from 128.0.0.0/1 rc 1
+ok    --p2p-from 128.0.0.0/1 no change
+ok    --ssh-from 2000::/3 rc 1
+ok    --ssh-from 2000::/3 no change
+ok    --p2p-from 2000::/3 rc 1
+ok    --p2p-from 2000::/3 no change
+ok    sshd port 70000 rc 1
+ok    sshd port 70000 no change
+ok    stored ::/0 health source rc 1
+ok    stored ::/0 health source no change
+ok    ufw absent rc 1
+ok    fail at each of 13 calls (ufw yes): previous or complete rule set
+ok    fail at each of 13 calls (ufw no): previous or complete rule set
+ok    no snapshot left after restores
+ok    mainnet health deletes: clean run rc 0
+ok    mainnet run deletes three health rules
+ok    mainnet health delete fails at call 4: rc 2
+ok    mainnet health delete fails at call 4: old rules back
+ok    mainnet health delete fails at call 4: named
+ok    mainnet health delete fails at call 5: rc 2
+ok    mainnet health delete fails at call 5: old rules back
+ok    mainnet health delete fails at call 5: named
+ok    mainnet health delete fails at call 6: rc 2
+ok    mainnet health delete fails at call 6: old rules back
+ok    mainnet health delete fails at call 6: named
+ok    restore fails too rc 3
+ok    restore failure says DISABLED
+ok    limit: open P2P reset rc 0
+ok    limit: v4 meter on both ports, defaults
+ok    limit: v6 meter on both ports, defaults
+ok    limit: input hook ahead of ufw
+ok    limit: v4 set keyed by address
+ok    limit: v6 set keyed by address
+ok    limit: entries expire after a refill (40 at 20/minute)
+ok    limit: every rule matches new flows only
+ok    limit: no rule accepts
+ok    limit: one nft transaction
+ok    limit: program adds, deletes, then writes the table
+ok    limit: says what it applied
+ok    limit: v6 set keyed on the /64
+ok    limit: boot copy is the program nft loaded
+ok    limit: boot copy written root 0640
+ok    limit: unit written root 0644
+ok    limit: unit text
+ok    limit: daemon-reload then enable, never a start
+ok    limit: says it comes back at boot
+ok    limit: status active and persistent
+ok    limit: status line at boot
+SKIP  limit: systemd-analyze verify on the unit (no systemd here)
+ok    limit: ufw rules still complete
+ok    limit: ufw still opens the P2P port
+SKIP  limit: real nft -c -f on the rendered table (no nft here that can run -c (needs root with CAP_NET_ADMIN))
+ok    limit: re-enable rc 0
+ok    limit: re-enable leaves the same table
+ok    limit: re-enable is one transaction
+ok    limit: env overrides rc 0
+ok    limit: env rate and burst (v4)
+ok    limit: env rate and burst (v6)
+ok    limit: timeout follows the refill (90 at 30/minute)
+ok    limit: status field with the overrides
+ok    limit: the boot copy follows the overrides
+ok    limit: timeout floor is a minute
+ok    limit: timeout cap is a day
+ok    limit: TN_P2P_NEW_FLOW_RATE='0' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE='0' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE='0' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE='0' named
+ok    limit: TN_P2P_NEW_FLOW_RATE='020' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE='020' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE='020' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE='020' named
+ok    limit: TN_P2P_NEW_FLOW_RATE='100001' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE='100001' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE='100001' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE='100001' named
+ok    limit: TN_P2P_NEW_FLOW_RATE='abc' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE='abc' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE='abc' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE='abc' named
+ok    limit: TN_P2P_NEW_FLOW_RATE='-5' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE='-5' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE='-5' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE='-5' named
+ok    limit: TN_P2P_NEW_FLOW_RATE='1.5' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE='1.5' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE='1.5' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE='1.5' named
+ok    limit: TN_P2P_NEW_FLOW_RATE=' 7' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE=' 7' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE=' 7' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE=' 7' named
+ok    limit: TN_P2P_NEW_FLOW_RATE='7 ' rc 1
+ok    limit: TN_P2P_NEW_FLOW_RATE='7 ' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_RATE='7 ' no nft call
+ok    limit: TN_P2P_NEW_FLOW_RATE='7 ' named
+ok    limit: TN_P2P_NEW_FLOW_BURST='0' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST='0' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST='0' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST='0' named
+ok    limit: TN_P2P_NEW_FLOW_BURST='020' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST='020' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST='020' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST='020' named
+ok    limit: TN_P2P_NEW_FLOW_BURST='100001' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST='100001' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST='100001' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST='100001' named
+ok    limit: TN_P2P_NEW_FLOW_BURST='abc' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST='abc' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST='abc' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST='abc' named
+ok    limit: TN_P2P_NEW_FLOW_BURST='-5' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST='-5' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST='-5' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST='-5' named
+ok    limit: TN_P2P_NEW_FLOW_BURST='1.5' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST='1.5' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST='1.5' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST='1.5' named
+ok    limit: TN_P2P_NEW_FLOW_BURST=' 7' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST=' 7' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST=' 7' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST=' 7' named
+ok    limit: TN_P2P_NEW_FLOW_BURST='7 ' rc 1
+ok    limit: TN_P2P_NEW_FLOW_BURST='7 ' no ufw change
+ok    limit: TN_P2P_NEW_FLOW_BURST='7 ' no nft call
+ok    limit: TN_P2P_NEW_FLOW_BURST='7 ' named
+ok    limit: rate 100000 burst 1 accepted
+ok    limit: ufw fails at call 3 rc 2
+ok    limit: ufw failure leaves the table
+ok    limit: ufw failure makes no nft call
+ok    limit: ufw failure writes no boot copy
+ok    limit: P2P list (comma) rc 0
+ok    limit: P2P list (comma) v4 source rule
+ok    limit: P2P list (comma) v6 source rule
+ok    limit: P2P list (comma) no open P2P rule
+ok    limit: P2P list (comma) table deleted
+ok    limit: P2P list (comma) delete program
+ok    limit: P2P list (comma) writes no meter
+ok    limit: P2P list (comma) unit removed
+ok    limit: P2P list (comma) boot copy removed
+ok    limit: P2P list (comma) unit disabled and stopped, then daemon-reload
+ok    limit: P2P list (comma) writes no boot copy
+ok    limit: P2P list (file) rc 0
+ok    limit: P2P list (file) v4 source rule
+ok    limit: P2P list (file) v6 source rule
+ok    limit: P2P list (file) no open P2P rule
+ok    limit: P2P list (file) table deleted
+ok    limit: P2P list (file) delete program
+ok    limit: P2P list (file) writes no meter
+ok    limit: P2P list (file) unit removed
+ok    limit: P2P list (file) boot copy removed
+ok    limit: P2P list (file) unit disabled and stopped, then daemon-reload
+ok    limit: P2P list (file) writes no boot copy
+ok    limit: P2P list (stored) rc 0
+ok    limit: P2P list (stored) v4 source rule
+ok    limit: P2P list (stored) v6 source rule
+ok    limit: P2P list (stored) no open P2P rule
+ok    limit: P2P list (stored) table deleted
+ok    limit: P2P list (stored) delete program
+ok    limit: P2P list (stored) writes no meter
+ok    limit: P2P list (stored) unit removed
+ok    limit: P2P list (stored) boot copy removed
+ok    limit: P2P list (stored) unit disabled and stopped, then daemon-reload
+ok    limit: P2P list (stored) writes no boot copy
+ok    limit: list, no table rc 0
+ok    limit: list, no table: no nft transaction
+ok    limit: status with a stored list
+ok    limit: status line with a list
+ok    limit: --p2p-anywhere rc 0
+ok    limit: --p2p-anywhere writes the table
+ok    limit: --p2p-anywhere writes the boot copy
+ok    limit: reset without a node rc 0
+ok    limit: reset without a node deletes the table
+ok    limit: reset without a node removes the boot copy
+ok    limit: reset without a node disables the unit
+ok    limit: nft refuses rc 0
+ok    limit: nft refusal warned
+ok    limit: nft refusal keeps the old table
+ok    limit: nft refusal writes no boot copy
+ok    limit: status: a table without the limit rule
+ok    limit: ufw applied despite nft
+ok    limit: status active, no boot copy
+ok    limit: status line active
+ok    limit: status line, not restored at boot
+SKIP  limit: status object parses as JSON (no python3 here)
+ok    limit: status not applied
+ok    limit: status line not applied
+ok    limit: status, unit enabled but no table
+ok    limit: status line, unit enabled but no table
+ok    limit: status unreadable
+ok    limit: view_status shows the limit line
+ok    limit: nft absent rc 0
+ok    limit: nft absent removes a boot copy that could not run
+ok    limit: nft absent warns once
+ok    limit: nft absent, ufw rules applied
+ok    limit: nft absent, ufw enabled
+ok    limit: status nft missing
+ok    limit: status line nft missing
+ok    limit: nft absent with a list rc 0
+ok    limit: nft absent with a list: no warning
+ok    limit: boot file write fails rc 0
+ok    limit: boot file write fails: table loaded
+ok    limit: boot file write fails: warned
+ok    limit: boot file write fails: no unit
+ok    limit: boot file write fails: nothing enabled
+ok    limit: boot file write fails: status not persistent
+ok    limit: boot unit write fails rc 0
+ok    limit: boot unit write fails: table loaded
+ok    limit: boot unit write fails: warned
+ok    limit: boot unit write fails: nothing enabled
+ok    limit: boot unit write fails: status not persistent
+ok    menu: third P2P port opened
+ok    menu: table rewritten with the third port
+ok    menu: boot copy rewritten
+ok    menu: unit enabled
+ok    menu with a list: source rule
+ok    menu with a list: table deleted
+ok    menu with a list: boot copy removed
+ok    menu declined: no nft call
+ok    expected: P2P primary row names the stored list
+ok    expected: P2P worker row names the stored list
+ok    expected: SSH row without a list says anywhere
+ok    expected: the run's --p2p-from list wins
+ok    expected: --p2p-anywhere says anywhere
+ok    expected: P2P row without a list says anywhere
+ok    expected: status screen row
+ok    expected: status screen names the list of a missing rule
+ok    persist writes the lists
+
+281 checks, 0 failures, 3 skipped
+== tools/tests/firewall_reset_test.sh: exit 0
+
+== tools/tests/firewall_signal_test.sh (bash 5.2.21(1)-release)
+ok    cli clean run rc 0
+ok    cli clean run writes the boot copy of the limit
+ok    cli clean run enables the boot unit
+ok    cli clean run writes the new-flow limit
+ok    cli TERM (pid) at ufw call 2: held call reached
+ok    cli TERM (pid) at ufw call 2: script stopped (rc not 0)
+ok    cli TERM (pid) at ufw call 2: rules are the old or the complete new set
+ok    cli TERM (pid) at ufw call 2: ufw left enabled
+ok    cli TERM (pid) at ufw call 2: SSH never closed
+ok    cli TERM (pid) at ufw call 2: no saved rule files left
+ok    cli TERM (pid) at ufw call 2: update lock released
+ok    cli TERM (pid) at ufw call 2: table left as it was
+ok    cli TERM (pid) at ufw call 2: boot copy left as it was
+ok    cli TERM (pid) at ufw call 2: no nft transaction
+ok    cli TERM (pid) at ufw call 2: says the old rules were put back
+ok    cli TERM (group) at ufw call 2: held call reached
+ok    cli TERM (group) at ufw call 2: script stopped (rc not 0)
+ok    cli TERM (group) at ufw call 2: rules are the old or the complete new set
+ok    cli TERM (group) at ufw call 2: ufw left enabled
+ok    cli TERM (group) at ufw call 2: SSH never closed
+ok    cli TERM (group) at ufw call 2: no saved rule files left
+ok    cli TERM (group) at ufw call 2: update lock released
+ok    cli TERM (group) at ufw call 2: table left as it was
+ok    cli TERM (group) at ufw call 2: boot copy left as it was
+ok    cli TERM (group) at ufw call 2: no nft transaction
+ok    cli TERM (group) at ufw call 2: says the old rules were put back
+ok    cli TERM (pid) at ufw call 3: held call reached
+ok    cli TERM (pid) at ufw call 3: script stopped (rc not 0)
+ok    cli TERM (pid) at ufw call 3: rules are the old or the complete new set
+ok    cli TERM (pid) at ufw call 3: ufw left enabled
+ok    cli TERM (pid) at ufw call 3: SSH never closed
+ok    cli TERM (pid) at ufw call 3: no saved rule files left
+ok    cli TERM (pid) at ufw call 3: update lock released
+ok    cli TERM (pid) at ufw call 3: table left as it was
+ok    cli TERM (pid) at ufw call 3: boot copy left as it was
+ok    cli TERM (pid) at ufw call 3: no nft transaction
+ok    cli TERM (pid) at ufw call 3: says the old rules were put back
+ok    cli TERM (group) at ufw call 3: held call reached
+ok    cli TERM (group) at ufw call 3: script stopped (rc not 0)
+ok    cli TERM (group) at ufw call 3: rules are the old or the complete new set
+ok    cli TERM (group) at ufw call 3: ufw left enabled
+ok    cli TERM (group) at ufw call 3: SSH never closed
+ok    cli TERM (group) at ufw call 3: no saved rule files left
+ok    cli TERM (group) at ufw call 3: update lock released
+ok    cli TERM (group) at ufw call 3: table left as it was
+ok    cli TERM (group) at ufw call 3: boot copy left as it was
+ok    cli TERM (group) at ufw call 3: no nft transaction
+ok    cli TERM (group) at ufw call 3: says the old rules were put back
+ok    cli TERM (pid) at ufw call 5: held call reached
+ok    cli TERM (pid) at ufw call 5: script stopped (rc not 0)
+ok    cli TERM (pid) at ufw call 5: rules are the old or the complete new set
+ok    cli TERM (pid) at ufw call 5: ufw left enabled
+ok    cli TERM (pid) at ufw call 5: SSH never closed
+ok    cli TERM (pid) at ufw call 5: no saved rule files left
+ok    cli TERM (pid) at ufw call 5: update lock released
+ok    cli TERM (pid) at ufw call 5: table left as it was
+ok    cli TERM (pid) at ufw call 5: boot copy left as it was
+ok    cli TERM (pid) at ufw call 5: no nft transaction
+ok    cli TERM (pid) at ufw call 5: says the old rules were put back
+ok    cli TERM (group) at ufw call 5: held call reached
+ok    cli TERM (group) at ufw call 5: script stopped (rc not 0)
+ok    cli TERM (group) at ufw call 5: rules are the old or the complete new set
+ok    cli TERM (group) at ufw call 5: ufw left enabled
+ok    cli TERM (group) at ufw call 5: SSH never closed
+ok    cli TERM (group) at ufw call 5: no saved rule files left
+ok    cli TERM (group) at ufw call 5: update lock released
+ok    cli TERM (group) at ufw call 5: table left as it was
+ok    cli TERM (group) at ufw call 5: boot copy left as it was
+ok    cli TERM (group) at ufw call 5: no nft transaction
+ok    cli TERM (group) at ufw call 5: says the old rules were put back
+ok    cli TERM (pid) during the nft transaction: held call reached
+ok    cli TERM (pid) during the nft transaction: script stopped (rc not 0)
+ok    cli TERM (pid) during the nft transaction: rules are the old or the complete new set
+ok    cli TERM (pid) during the nft transaction: ufw left enabled
+ok    cli TERM (pid) during the nft transaction: SSH never closed
+ok    cli TERM (pid) during the nft transaction: no saved rule files left
+ok    cli TERM (pid) during the nft transaction: update lock released
+ok    cli TERM (pid) during the nft transaction: ufw rules are the complete new set
+ok    cli TERM (pid) during the nft transaction: nft finished, table is the complete new state
+ok    cli TERM (pid) during the nft transaction: one nft transaction
+ok    cli TERM (pid) during the nft transaction: boot copy is the old or the complete new one
+ok    cli TERM (group) during the nft transaction: held call reached
+ok    cli TERM (group) during the nft transaction: script stopped (rc not 0)
+ok    cli TERM (group) during the nft transaction: rules are the old or the complete new set
+ok    cli TERM (group) during the nft transaction: ufw left enabled
+ok    cli TERM (group) during the nft transaction: SSH never closed
+ok    cli TERM (group) during the nft transaction: no saved rule files left
+ok    cli TERM (group) during the nft transaction: update lock released
+ok    cli TERM (group) during the nft transaction: ufw rules are the complete new set
+ok    cli TERM (group) during the nft transaction: nft killed, table is the old one
+ok    cli TERM (group) during the nft transaction: one nft transaction
+ok    cli TERM (group) during the nft transaction: boot copy is the old or the complete new one
+ok    json clean run rc 0
+ok    json clean run deletes the new-flow limit (P2P list)
+ok    json clean run removes the boot copy
+ok    json TERM (pid) at ufw call 2: held call reached
+ok    json TERM (pid) at ufw call 2: script stopped (rc not 0)
+ok    json TERM (pid) at ufw call 2: rules are the old or the complete new set
+ok    json TERM (pid) at ufw call 2: ufw left enabled
+ok    json TERM (pid) at ufw call 2: SSH never closed
+ok    json TERM (pid) at ufw call 2: no saved rule files left
+ok    json TERM (pid) at ufw call 2: update lock released
+ok    json TERM (pid) at ufw call 2: table left as it was
+ok    json TERM (pid) at ufw call 2: boot copy left as it was
+ok    json TERM (pid) at ufw call 2: no nft transaction
+ok    json TERM (pid) at ufw call 2: stdout ends with a done event
+ok    json TERM (group) at ufw call 2: held call reached
+ok    json TERM (group) at ufw call 2: script stopped (rc not 0)
+ok    json TERM (group) at ufw call 2: rules are the old or the complete new set
+ok    json TERM (group) at ufw call 2: ufw left enabled
+ok    json TERM (group) at ufw call 2: SSH never closed
+ok    json TERM (group) at ufw call 2: no saved rule files left
+ok    json TERM (group) at ufw call 2: update lock released
+ok    json TERM (group) at ufw call 2: table left as it was
+ok    json TERM (group) at ufw call 2: boot copy left as it was
+ok    json TERM (group) at ufw call 2: no nft transaction
+ok    json TERM (group) at ufw call 2: stdout ends with a done event
+ok    json TERM (pid) at ufw call 3: held call reached
+ok    json TERM (pid) at ufw call 3: script stopped (rc not 0)
+ok    json TERM (pid) at ufw call 3: rules are the old or the complete new set
+ok    json TERM (pid) at ufw call 3: ufw left enabled
+ok    json TERM (pid) at ufw call 3: SSH never closed
+ok    json TERM (pid) at ufw call 3: no saved rule files left
+ok    json TERM (pid) at ufw call 3: update lock released
+ok    json TERM (pid) at ufw call 3: table left as it was
+ok    json TERM (pid) at ufw call 3: boot copy left as it was
+ok    json TERM (pid) at ufw call 3: no nft transaction
+ok    json TERM (pid) at ufw call 3: stdout ends with a done event
+ok    json TERM (group) at ufw call 3: held call reached
+ok    json TERM (group) at ufw call 3: script stopped (rc not 0)
+ok    json TERM (group) at ufw call 3: rules are the old or the complete new set
+ok    json TERM (group) at ufw call 3: ufw left enabled
+ok    json TERM (group) at ufw call 3: SSH never closed
+ok    json TERM (group) at ufw call 3: no saved rule files left
+ok    json TERM (group) at ufw call 3: update lock released
+ok    json TERM (group) at ufw call 3: table left as it was
+ok    json TERM (group) at ufw call 3: boot copy left as it was
+ok    json TERM (group) at ufw call 3: no nft transaction
+ok    json TERM (group) at ufw call 3: stdout ends with a done event
+ok    json TERM (pid) at ufw call 5: held call reached
+ok    json TERM (pid) at ufw call 5: script stopped (rc not 0)
+ok    json TERM (pid) at ufw call 5: rules are the old or the complete new set
+ok    json TERM (pid) at ufw call 5: ufw left enabled
+ok    json TERM (pid) at ufw call 5: SSH never closed
+ok    json TERM (pid) at ufw call 5: no saved rule files left
+ok    json TERM (pid) at ufw call 5: update lock released
+ok    json TERM (pid) at ufw call 5: table left as it was
+ok    json TERM (pid) at ufw call 5: boot copy left as it was
+ok    json TERM (pid) at ufw call 5: no nft transaction
+ok    json TERM (pid) at ufw call 5: stdout ends with a done event
+ok    json TERM (group) at ufw call 5: held call reached
+ok    json TERM (group) at ufw call 5: script stopped (rc not 0)
+ok    json TERM (group) at ufw call 5: rules are the old or the complete new set
+ok    json TERM (group) at ufw call 5: ufw left enabled
+ok    json TERM (group) at ufw call 5: SSH never closed
+ok    json TERM (group) at ufw call 5: no saved rule files left
+ok    json TERM (group) at ufw call 5: update lock released
+ok    json TERM (group) at ufw call 5: table left as it was
+ok    json TERM (group) at ufw call 5: boot copy left as it was
+ok    json TERM (group) at ufw call 5: no nft transaction
+ok    json TERM (group) at ufw call 5: stdout ends with a done event
+ok    json TERM (pid) during the nft transaction: held call reached
+ok    json TERM (pid) during the nft transaction: script stopped (rc not 0)
+ok    json TERM (pid) during the nft transaction: rules are the old or the complete new set
+ok    json TERM (pid) during the nft transaction: ufw left enabled
+ok    json TERM (pid) during the nft transaction: SSH never closed
+ok    json TERM (pid) during the nft transaction: no saved rule files left
+ok    json TERM (pid) during the nft transaction: update lock released
+ok    json TERM (pid) during the nft transaction: ufw rules are the complete new set
+ok    json TERM (pid) during the nft transaction: nft finished, table is the complete new state
+ok    json TERM (pid) during the nft transaction: one nft transaction
+ok    json TERM (pid) during the nft transaction: boot copy is the old or the complete new one
+ok    json TERM (pid) during the nft transaction: stdout ends with a done event
+ok    json TERM (group) during the nft transaction: held call reached
+ok    json TERM (group) during the nft transaction: script stopped (rc not 0)
+ok    json TERM (group) during the nft transaction: rules are the old or the complete new set
+ok    json TERM (group) during the nft transaction: ufw left enabled
+ok    json TERM (group) during the nft transaction: SSH never closed
+ok    json TERM (group) during the nft transaction: no saved rule files left
+ok    json TERM (group) during the nft transaction: update lock released
+ok    json TERM (group) during the nft transaction: ufw rules are the complete new set
+ok    json TERM (group) during the nft transaction: nft killed, table is the old one
+ok    json TERM (group) during the nft transaction: one nft transaction
+ok    json TERM (group) during the nft transaction: boot copy is the old or the complete new one
+ok    json TERM (group) during the nft transaction: stdout ends with a done event
+
+185 checks, 0 failures, 0 skipped
+== tools/tests/firewall_signal_test.sh: exit 0
+
+== tools/tests/remove_test.sh (bash 5.2.21(1)-release)
+ok    unit: gone
+ok    unit .service.bak: gone
+ok    unit .bak: gone
+ok    drop-in dir: gone
+ok    backup-named symlink: gone
+ok    symlink target outside the tree: kept
+ok    another unit's backup: kept
+ok    another unit: kept
+ok    unit .service.bak shredded
+ok    unit .bak shredded
+ok    symlink never shredded
+ok    systemctl stop
+ok    systemctl disable
+ok    systemctl daemon-reload
+ok    drop-in symlink: gone
+ok    drop-in symlink target: kept
+ok    failing shred still deletes: gone
+ok    failing shred was tried
+ok    _rm_shred unlinks a symlink: gone
+ok    _rm_shred leaves the link target: kept
+ok    _rm_shred leaves a directory: kept
+ok    bls-passphrase.cred shredded
+ok    bls-passphrase shredded
+ok    bls-tpm.pub shredded
+ok    bls-tpm.priv shredded
+ok    node key shredded
+ok    nested node key shredded
+ok    temp copy in the config dir shredded
+ok    .node-meta shredded
+ok    config dir: gone
+ok    node-keys dir: gone
+ok    chain data (not the keys prompt's business): kept
+ok    shred note printed once
+ok    keys kept without DELETE: kept
+ok    passphrase kept without DELETE: kept
+ok    nothing shredded without DELETE
+ok    legacy passphrase shredded
+ok    legacy key shredded
+ok    top-level credential shredded
+ok    legacy config dir: gone
+ok    data dir: gone
+ok    chain-data removal shreds node keys
+ok    chain-data removal does not shred the db
+ok    private tree: decoy behind the newline name intact
+ok    private tree: symlink target intact
+ok    private tree: data dir: gone
+ok    private tree: key shredded
+ok    private tree: nested key shredded
+ok    private tree: no account switch
+ok    private tree: the symlink is never handed to shred
+ok    service-owned tree: find runs as the service account
+ok    service-owned tree: key shredded
+ok    service-owned tree: decoy behind the newline name intact
+ok    service-owned tree: symlink target intact
+ok    service-owned tree: data dir: gone
+ok    account gone: nothing shredded
+ok    account gone: no account switch
+ok    account gone: note printed
+ok    account gone: decoy behind the newline name intact
+ok    account gone: symlink target intact
+ok    account gone: data dir: gone
+ok    json keys (service-owned tree) rc 0
+ok    json service-owned tree: decoy behind the newline name intact
+ok    json service-owned tree: symlink target intact
+ok    json: keys shredded before the account is removed
+ok    tn-start: gone
+ok    tn-start-docker: gone
+ok    empty libexec dir: gone
+ok    node.env: gone
+ok    backups dir: gone
+ok    logrotate file: gone
+ok    journald drop-in: gone
+ok    lock dir stays: kept
+ok    lock file stays: kept
+ok    says /run/telcoin stays
+ok    release staging dir: gone
+ok    build account home: gone
+ok    no userdel under a fixture root
+ok    needrestart rule: gone
+ok    apt rule: gone
+ok    other needrestart rule: kept
+ok    other apt rule: kept
+ok    /etc/telcoin/other.txt: kept
+ok    passphrase (not a host file): kept
+ok    other logrotate file: kept
+ok    other journald drop-in: kept
+ok    backup symlink target: kept
+ok    backup shredded
+ok    unit backup shredded
+ok    backup symlink never shredded
+ok    libexec dir holding another file: kept
+ok    tn-start beside another file: gone
+ok    host files kept while another node remains: kept
+ok    backups kept while another node remains: kept
+ok    host files removed with the last node: gone
+ok    backups removed with the last node: gone
+ok    /etc/telcoin left empty: gone
+ok    symlinked libexec: file behind it: kept
+ok    symlinked libexec: the link: kept
+ok    symlinked libexec: warned
+ok    only a symlinked libexec left: rc 1
+ok    only a symlinked libexec left: no node installed
+ok    old backup telcoin.service.bak: gone
+ok    old backup telcoin.service.bak shredded
+ok    old backup telcoin.bak: gone
+ok    old backup telcoin.bak shredded
+ok    old backup telcoin-validator.service.bak.1: gone
+ok    old backup telcoin-validator.service.bak.1 shredded
+ok    old backup telcoin-observer.bak.2: gone
+ok    old backup telcoin-observer.bak.2 shredded
+ok    old backup telcoin-observer.service.bak: gone
+ok    old backup telcoin-observer.service.bak shredded
+ok    drop-in dir of a legacy name with no unit: gone
+ok    an installed unit's backup: kept
+ok    an installed unit's drop-in dir: kept
+ok    the installed unit: kept
+ok    lock holder ready
+ok    json while another run holds the lock: rc 1
+ok    json names the lock
+ok    json while locked: nothing removed
+ok    json while locked: no call
+ok    menu while locked: nothing removed
+ok    menu while locked: said why
+ok    leftovers while locked: rc 1
+ok    leftovers while locked: nothing removed
+ok    lock inode read
+ok    json keys with the lock in /run/telcoin: rc 0
+ok    lock inode unchanged by a removal
+ok    json: lock dir stays: kept
+ok    json: lock file stays: kept
+ok    json: says /run/telcoin stays
+ok    json: the library EXIT trap releases the lock
+ok    json: no mkdir lock left behind: gone
+ok    json: the lock is free after the run
+ok    json: config temp copy shredded
+ok    telcoin-log removed
+ok    declined service group kept
+ok    kept user: telcoin-log question asked
+ok    kept user, declined: telcoin-log kept
+ok    kept user: no userdel
+ok    kept user, accepted: telcoin-log removed
+ok    user removed: no telcoin-log question
+ok    user removed: telcoin-log removed
+ok    telcoin-log with another member kept
+ok    kept group recorded
+ok    kept group reported
+ok    telcoin-log kept while another node remains
+ok    kept group recorded (other node)
+ok    absent telcoin-log rc 0
+ok    absent telcoin-log: no groupdel
+ok    dup HOST_SERVICE_USER: unit blocked
+ok    dup HOST_SERVICE_USER: error names the key
+ok    dup HOST_SERVICE_USER: remove_node_unit refused
+ok    dup HOST_SERVICE_USER: nothing deleted (interactive)
+ok    dup HOST_SERVICE_USER: no systemctl call
+ok    dup HOST_SERVICE_USER: json_remove rc 1
+ok    dup HOST_SERVICE_USER: json error names the key
+ok    dup HOST_SERVICE_USER: nothing deleted (json)
+ok    dup HOST_SERVICE_USER: json made no call
+ok    dup HOST_SERVICE_USER: json shredded nothing
+ok    dup HOST_SERVICE_GROUP: unit blocked
+ok    dup HOST_SERVICE_GROUP: error names the key
+ok    dup HOST_SERVICE_GROUP: remove_node_unit refused
+ok    dup HOST_SERVICE_GROUP: nothing deleted (interactive)
+ok    dup HOST_SERVICE_GROUP: no systemctl call
+ok    dup HOST_SERVICE_GROUP: json_remove rc 1
+ok    dup HOST_SERVICE_GROUP: json error names the key
+ok    dup HOST_SERVICE_GROUP: nothing deleted (json)
+ok    dup HOST_SERVICE_GROUP: json made no call
+ok    dup HOST_SERVICE_GROUP: json shredded nothing
+ok    dup INSTALL_METHOD: unit blocked
+ok    dup INSTALL_METHOD: error names the key
+ok    dup INSTALL_METHOD: remove_node_unit refused
+ok    dup INSTALL_METHOD: nothing deleted (interactive)
+ok    dup INSTALL_METHOD: no systemctl call
+ok    dup INSTALL_METHOD: json_remove rc 1
+ok    dup INSTALL_METHOD: json error names the key
+ok    dup INSTALL_METHOD: nothing deleted (json)
+ok    dup INSTALL_METHOD: json made no call
+ok    dup INSTALL_METHOD: json shredded nothing
+ok    dup DATA_DIR: unit blocked
+ok    dup DATA_DIR: error names the key
+ok    dup DATA_DIR: remove_node_unit refused
+ok    dup DATA_DIR: nothing deleted (interactive)
+ok    dup DATA_DIR: no systemctl call
+ok    dup DATA_DIR: json_remove rc 1
+ok    dup DATA_DIR: json error names the key
+ok    dup DATA_DIR: nothing deleted (json)
+ok    dup DATA_DIR: json made no call
+ok    dup DATA_DIR: json shredded nothing
+ok    dup DATA_DIR: detect_data_dir rc 2
+ok    dup DATA_DIR: detect_data_dir prints no path
+ok    json keys rc 0 under set -e
+ok    json done event
+ok    json /etc/systemd/system/telcoin.service: gone
+ok    json /etc/systemd/system/telcoin.service.bak.20240101: gone
+ok    json /etc/systemd/system/telcoin.bak.1: gone
+ok    json /etc/systemd/system/telcoin.service.d: gone
+ok    json /etc/systemd/system/telcoin.service.bak.link: gone
+ok    json /etc/telcoin: gone
+ok    json /var/lib/telcoin: gone
+ok    json /usr/local/libexec/telcoin: gone
+ok    json /var/backups/telcoin: gone
+ok    json /etc/logrotate.d/telcoin: gone
+ok    json /etc/systemd/journald.conf.d/50-telcoin.conf: gone
+ok    json: /run/telcoin stays: kept
+ok    json: symlink target outside the tree: kept
+ok    json: backup symlink target: kept
+ok    json: another unit's backup: kept
+ok    json: other logrotate file: kept
+ok    json: other journald drop-in: kept
+ok    json shredded /etc/systemd/system/telcoin.service.bak.20240101
+ok    json shredded /etc/telcoin/bls-passphrase.cred
+ok    json shredded /etc/telcoin/bls-passphrase
+ok    json shredded /etc/telcoin/bls-tpm.pub
+ok    json shredded /etc/telcoin/bls-tpm.priv
+ok    json shredded /var/lib/telcoin/node-keys/bls.key
+ok    json shredded /var/backups/telcoin/bls-passphrase.Ef34Gh
+ok    json telcoin-log removed
+ok    json reports the log group
+ok    resume json keys: rc 0
+ok    resume json keys: done event
+ok    resume json keys: no error event
+ok    resume json keys /etc/systemd/system/telcoin.service.bak.20240101: gone
+ok    resume json keys /etc/systemd/system/telcoin.bak.1: gone
+ok    resume json keys /etc/systemd/system/telcoin.service.d: gone
+ok    resume json keys /etc/telcoin: gone
+ok    resume json keys /var/lib/telcoin: gone
+ok    resume json keys /usr/local/libexec/telcoin: gone
+ok    resume json keys /var/backups/telcoin: gone
+ok    resume json keys /etc/logrotate.d/telcoin: gone
+ok    resume json keys /etc/systemd/journald.conf.d/50-telcoin.conf: gone
+ok    resume json keys shredded /etc/systemd/system/telcoin.service.bak.20240101
+ok    resume json keys shredded /etc/telcoin/bls-passphrase.cred
+ok    resume json keys shredded /var/lib/telcoin/node-keys/bls.key
+ok    resume json keys shredded /var/backups/telcoin/bls-passphrase.Ef34Gh
+ok    resume json keys: another unit's backup: kept
+ok    resume json keys: symlink target outside the tree: kept
+ok    nothing left: rc 1
+ok    nothing left: no node installed
+ok    nothing left: no call
+ok    scripts and backups left: rc 0
+ok    scripts and backups left: start scripts: gone
+ok    scripts and backups left: backups: gone
+ok    resume json service: rc 0
+ok    resume json service: done event
+ok    resume json service: unit backup: gone
+ok    resume json service: node key: kept
+ok    resume json service: passphrase: kept
+ok    leftovers: rc 0
+ok    leftovers: listed /var/lib/telcoin
+ok    leftovers: listed /srv/tn-data
+ok    leftovers: listed /etc/telcoin
+ok    leftovers: listed /usr/local/libexec/telcoin/tn-start
+ok    leftovers: listed /usr/local/libexec/telcoin/tn-start-docker
+ok    leftovers: listed /var/backups/telcoin
+ok    leftovers: listed unit backups and drop-ins in /etc/systemd/system
+ok    leftovers /var/lib/telcoin: gone
+ok    leftovers /srv/tn-data: gone
+ok    leftovers /etc/telcoin: gone
+ok    leftovers /usr/local/libexec/telcoin: gone
+ok    leftovers /var/backups/telcoin: gone
+ok    leftovers /etc/systemd/system/telcoin.service.bak.20240101: gone
+ok    leftovers /etc/systemd/system/telcoin.service.d: gone
+ok    leftovers /etc/logrotate.d/telcoin: gone
+ok    leftovers /etc/systemd/journald.conf.d/50-telcoin.conf: gone
+ok    leftovers shredded /var/lib/telcoin/node-keys/bls.key
+ok    leftovers shredded /var/lib/telcoin/validator/node-keys/bls.key
+ok    leftovers shredded /srv/tn-data/node-keys/bls.key
+ok    leftovers shredded /etc/telcoin/bls-passphrase.cred
+ok    leftovers shredded /etc/telcoin/bls-passphrase
+ok    leftovers shredded /etc/telcoin/.node-meta
+ok    leftovers shredded /var/backups/telcoin/bls-passphrase.Ef34Gh
+ok    leftovers shredded /etc/systemd/system/telcoin.service.bak.20240101
+ok    leftovers: chain db not shredded
+ok    leftovers: a file beside the custom data dir: kept
+ok    leftovers: another unit's backup: kept
+ok    leftovers: backup symlink target: kept
+ok    leftovers declined: rc 0
+ok    leftovers declined: nothing removed
+ok    leftovers with a duplicated key: rc 1
+ok    leftovers with a duplicated key: nothing removed
+ok    no leftovers: rc 3
+ok    menu leftovers: exits 0
+ok    menu leftovers: config tree: gone
+ok    menu leftovers: custom data dir: gone
+ok    menu leftovers: start scripts: gone
+ok    menu leftovers: scan declined
+ok    json service rc 0
+ok    json service: unit backup: gone
+ok    json service: passphrase: kept
+ok    json service: start script: kept
+ok    json service: backups: kept
+ok    json service: no groupdel
+ok    build account, userdel rc 1: processes stopped, then userdel
+ok    userdel failed: no OK
+ok    userdel failed: a warning with the manual step
+ok    build account, userdel rc 0: processes stopped, then userdel
+ok    userdel succeeded: OK
+ok    no build account: nothing done
+ok    shred note: the destruction sentence, once
+ok    shred note: the best-effort sentence still once
+ok    shred note: several files were shredded in that run
+ok    shred note: the later file was shredded
+ok    shred note: not repeated later in the run
+ok    add-on teardown: rc 0
+ok    add-on teardown: the token file shredded
+ok    add-on teardown: the env file (may hold an older token) shredded
+ok    add-on teardown: config.alloy is removed, not shredded
+ok    add-on teardown: the token file: gone
+ok    add-on teardown: the Alloy config dir: gone
+ok    add-on teardown: the Alloy unit: gone
+ok    add-on teardown: the token is not printed
+ok    p2p limit unit: gone
+ok    p2p limit ruleset: gone
+ok    p2p limit: table deleted
+ok    p2p limit: unit disabled and stopped
+ok    p2p limit: daemon-reload
+ok    p2p limit: one delete transaction
+ok    p2p limit: said
+ok    p2p limit: other unit: kept
+ok    p2p limit absent: no unit call
+ok    p2p limit absent: no nft transaction
+ok    p2p limit: refused delete warned
+ok    p2p limit: refused delete, unit still removed: gone
+ok    p2p limit: refused delete, node.env still removed: gone
+ok    p2p limit without nft: unit: gone
+ok    p2p limit without nft: ruleset: gone
+ok    p2p limit without nft: no nft call
+ok    p2p limit while another node remains: unit: kept
+ok    p2p limit while another node remains: table
+ok    p2p limit: json keys rc 0
+ok    p2p limit: json unit: gone
+ok    p2p limit: json table deleted
+
+334 checks, 0 failures, 0 skipped
+== tools/tests/remove_test.sh: exit 0
+
+tools/tests/firewall_reset_test.sh   exit 0
+tools/tests/firewall_signal_test.sh  exit 0
+tools/tests/remove_test.sh           exit 0
+3 test file(s), 0 failed (bash 5.2.21(1)-release)
+rc=0

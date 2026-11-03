@@ -1,0 +1,205 @@
+info  writer: lib tn_write_root_file (root) prefix=/root/v5fx.gMLHhJ
+ok    A1 first statements add, delete, re-add table inet tn_p2p
+ok    A2 two rules, each ct state new udp dport { 49590, 49594 }
+ok    A3 every rule line (update/drop) starts with ct state new
+ok    A4 v4 meter keyed per saddr, defaults 20/40
+ok    A5 v6 meter keyed per /64, defaults 20/40
+ok    A6 no accept verdict except the chain policy
+ok    A7 input hook at priority -10 (before ufw at 0), policy accept
+ok    A8 set types ipv4_addr / ipv6_addr, dynamic,timeout
+ok    A9 timeout = ceil(burst*60/rate) = 120s for 20/40
+ok    A10 timeout floor 60s (rate 100000 burst 1)
+ok    A11 timeout cap 86400s (rate 1 burst 100000)
+ok    A12 no drop of anything but the two new-flow rules
+ok    A13 one port: dport { 49590 }
+ok    A14 three ports (second worker)
+ok    A15 a non-numeric port line goes into the program as is (nft must refuse it)
+ok    B1 enable without lists rc 0
+ok    B2 one nft -f - write
+ok    B3 the program nft got is fw_p2p_limit_text 20 40
+ok    B4 nft write after ufw --force enable
+ok    B5 no ufw call after the nft write
+ok    B6 table present
+ok    B7 info line names the rate and burst
+ok    B8 a ufw call failing at any step: no nft write, no boot copy (over 9 calls)
+ok    B9 ufw failure with a failed restore (rc 3) never reaches nft
+ok    C1 boot program == the loaded program
+ok    C2 boot program mode 0640
+ok    C3 unit mode 0644
+ok    C4 both written through tn_write_root_file
+ok    C4b unit through tn_write_root_file
+ok    C4c owner root:root (real writer)
+ok    C5 unit has Type=oneshot
+ok    C5 unit has RemainAfterExit=yes
+ok    C5 unit has After=ufw.service
+ok    C5 unit has ConditionPathExists=/etc/telcoin/p2p-limit.nft
+ok    C5 unit has ExecStart=/tmp/tn_test.KAgmcJ/bin/nft -f /etc/telcoin/p2p-limit.nft
+ok    C5 unit has ExecStop=-/tmp/tn_test.KAgmcJ/bin/nft delete table inet tn_p2p
+ok    C5 unit has WantedBy=multi-user.target
+ok    C6 ExecStart/ExecStop use an absolute nft
+ok    C7 daemon-reload
+ok    C8 enable the unit
+ok    C9 enable, never start/restart/--now
+ok    C10 unit enabled
+ok    C11 boot file not writable: rc 0
+ok    C12 boot file not writable: warning
+ok    C13 boot file not writable: table still loaded, unit not enabled
+ok    C14 unit not writable: warning names it
+ok    C14b unit not writable: rc 0
+ok    C15 enable fails: warning
+ok    C15b enable fails: rc 0, table loaded
+ok    C16 no systemctl: rc 0, table loaded
+ok    C17 no systemctl: warning
+ok    C18 no systemctl: --json says active, not persistent
+ok    C19 no systemctl: boot files left behind (written before enable failed)
+ok    D --p2p-from comma list: rc 0
+ok    D --p2p-from comma list: table gone, boot files gone, unit not enabled
+ok    D --p2p-from comma list: no table write
+ok    D --p2p-from comma list: unit disabled and stopped
+ok    D list: ufw allow from 10.0.0.0/8 to any port 49590 proto udp
+ok    D list: ufw allow from 2001:db8::/32 to any port 49590 proto udp
+ok    D list: ufw allow from 10.0.0.0/8 to any port 49594 proto udp
+ok    D list: ufw allow from 2001:db8::/32 to any port 49594 proto udp
+ok    D list: ufw delete allow 49590/udp
+ok    D list: ufw delete allow 49594/udp
+ok    D --p2p-from list file: rc 0
+ok    D --p2p-from list file: table gone, boot files gone, unit not enabled
+ok    D --p2p-from list file: no table write
+ok    D --p2p-from list file: unit disabled and stopped
+ok    D file: v6 entry from the file
+ok    D P2P_ALLOW_FROM in .node-meta: rc 0
+ok    D P2P_ALLOW_FROM in .node-meta: table gone, boot files gone, unit not enabled
+ok    D P2P_ALLOW_FROM in .node-meta: no table write
+ok    D P2P_ALLOW_FROM in .node-meta: unit disabled and stopped
+ok    D no node: rc 0
+ok    D no node: table gone, boot files gone, unit not enabled
+ok    D no node: no table write
+ok    D no node: unit disabled and stopped
+ok    D --reset to a list: rc 0
+ok    D --reset to a list: table gone, boot files gone, unit not enabled
+ok    D --reset to a list: no table write
+ok    D --reset to a list: unit disabled and stopped
+ok    D reset to a list: ufw reset ran first
+ok    D --reset without a list: one write, table present
+ok    D --p2p-anywhere after a list: table written, boot copy enabled
+ok    D --p2p-anywhere: the stale per-source rule is deleted
+ok    D nft refuses the delete: rc 0
+ok    D nft refuses the delete: warning names the command
+ok    D nft refuses the write: rc 0
+ok    D nft refuses the write: warning
+ok    D nft refuses the write: table and boot copy unchanged
+ok    E1 no nft: rc 0
+ok    E2 no nft: the warning once
+ok    E3 no nft: ufw P2P rules applied
+ok    E4 no nft: ufw enabled
+ok    E5 no nft: boot unit and file removed
+ok    E6 no nft: --json reason nft-missing
+ok    F1 every bad rate/burst: rc 1, message names it, no ufw or nft change
+ok    F2 empty values = defaults
+ok    F3 override 5/10 on both rules
+ok    F4 override 5/10: json reads them back
+ok    F5 bound 1 accepted
+ok    F5 bound 100000 accepted
+ok    G1 active + persistent
+ok    G1r status: active line
+ok    G1r status: at boot line
+ok    G1v view_status shows the New-flow limit line
+ok    G2 active + not persistent (unit not enabled)
+ok    G2r status: not restored at boot
+ok    G3 unit enabled but ruleset file missing: not persistent
+ok    G4 ruleset file present, unit missing: not persistent
+ok    G5 not-applied (no table), boot copy enabled
+ok    G5r status warns the enabled unit has no table
+ok    G6 not-applied, nothing at boot
+ok    G6r status: not applied
+ok    G7 p2p-list
+ok    G7r status: p2p-list
+ok    G8 two P2P_ALLOW_FROM lines, no table: unreadable
+ok    G9 nft cannot list: unreadable (boot copy still reported)
+ok    G9r status: unknown
+ok    G10 nft-missing
+ok    G10r status: nft missing
+ok    G11 nft missing but a list is set: p2p-list
+ok    G12 table without the src4 rule: unreadable
+ok    G13 the --json status line parses as one JSON object
+ok    H1 --p2p-from: both rows carry the list
+ok    H2 stored list
+ok    H3 --p2p-anywhere over a stored list: anywhere
+ok    H4 no list: anywhere
+FAIL  H5 (adversarial) two P2P_ALLOW_FROM lines: the row must not claim anywhere
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.KAgmcJ/expected
+      +++ /tmp/tn_test.KAgmcJ/actual
+      @@ -1 +1 @@
+      -no
+      +yes
+info  H5 rows source with a doubled P2P_ALLOW_FROM: [anywhere anywhere]
+ok    H6 (adversarial) two P2P_ALLOW_FROM lines: enable refuses before any change
+ok    H6b refusal message
+FAIL  H7 (adversarial) --json desired with a doubled P2P_ALLOW_FROM does not say anywhere for P2P
+      unexpected: "spec":"49590/udp","label":"Node P2P (primary)","source":"anywhere"
+      in:
+        {"installed":true,"active":true,"default_incoming":"unknown","ssh_port":"22","kuma":"closed","kuma_extra":[],"caddy_managed":false,"desired":[{"spec":"22/tcp","label":"SSH","source":"anywhere","ok":true},{"spec":"43174/tcp","label":"Uptime Kuma health","source":"restricted","ok":false},{"spec":"49590/udp","label":"Node P2P (primary)","source":"anywhere","ok":false},{"spec":"49594/udp","label":"Node P2P (worker)","source":"anywhere","ok":false}],"unexpected":[],"ports":{"49590/udp":false,"49594/udp":false,"43174/tcp":false},"p2p_ports":[{"port":49590,"proto":"udp","label":"primary","allowed":false},{"port":49594,"proto":"udp","label":"worker-0","allowed":false}],"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"unreadable","persistent":false}}
+ok    I1 Manage node ports opens P2P and writes the table and boot copy
+ok    I1b ufw rules opened
+ok    I2 a second worker port reaches the table
+ok    I3 Manage node ports with a stored list: table and boot copy deleted
+info  I4 ports already open: nft writes=0 table=no
+ok    I5 menu path with a bad rate: ufw P2P rules were opened
+FAIL  I6 (adversarial) menu path with a bad rate does not claim nothing was changed
+      unexpected: nothing was changed
+      in:
+        
+        ================================================================
+          Manage Node Ports
+        ================================================================
+        
+          ->  Detected node: telcoin.service
+        
+          Every node needs UDP ports 49590 and 49594 open inbound for consensus P2P.
+          The role is decided on-chain -- a node that stakes must already be reachable.
+        
+          [OK]  UDP ports 49590 and 49594 opened
+        
+          [ERROR] TN_P2P_NEW_FLOW_RATE is '0', not a whole number from 1 to 100000 (new P2P flows per minute from one address); nothing was changed.
+        
+        
+        
+          ->  Uptime Kuma health monitoring -- TCP 43174.
+          ->  The Telcoin Association uptime monitor probes this port to confirm your node is up.
+          ->  TCP 43174 is currently closed
+        
+          How should the health port be reachable?
+            1) Association monitor only        -- from 104.155.184.201/32  [recommended]
+            2) Association monitor + your IPs  -- TA plus a list you manage
+            3) Leave as-is
+          (The health port is never opened to every address.)
+        
+          ->  Left 43174/tcp as-is.
+        
+          ->  Public dashboard (HTTP/HTTPS -- TCP 80/443):
+          ->  Not enabled. Run install-caddy.sh to serve the dashboard over HTTPS;
+          ->  it opens 80/443 itself. The firewall no longer toggles them here.
+ok    J1 SIGTERM mid-sync: exit 143
+ok    J2 SIGTERM after the nft write: live table is the new one (rate 10)
+ok    J3 SIGTERM: the boot copy was not rewritten (still rate 20)
+info  J4 after the SIGTERM: "p2p_new_flow_limit":{"active":true,"rate":10,"burst":40,"reason":null,"persistent":true}
+FAIL  J4 (adversarial) persistent is not true while the boot copy differs from the live table
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.KAgmcJ/expected
+      +++ /tmp/tn_test.KAgmcJ/actual
+      @@ -1 +1 @@
+      -no
+      +yes
+ok    J5 no temp file left beside the boot copy
+info  K concurrent: A rc=0 B rc=0 table rate=over 30/minute boot rate=over 10/minute
+FAIL  K1 (adversarial) concurrent enables leave the live table and the boot copy agreeing
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.KAgmcJ/expected
+      +++ /tmp/tn_test.KAgmcJ/actual
+      @@ -1 +1 @@
+      -over 30/minute
+      +over 10/minute
+ok    K2 B ran to completion while A held nft (no lock without a list)
+
+144 checks, 5 failures, 0 skipped

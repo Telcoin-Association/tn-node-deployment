@@ -1,0 +1,17 @@
+ok    H1 no lists
+ok    H2 SSH only
+ok    H3 SSH + P2P
+ok    H4 '-' + P2P
+ok    H5 empty SSH + P2P
+ok    H6 '-' alone
+ok    H7 every bad P2P list refused, engine not run
+ok    H8 leading / names the file-path refusal
+ok    H9 bad SSH list with a good P2P list refused, says SSH
+ok    H10 16 P2P sources taken
+ok    H11 17 P2P sources refused
+ok    H12 a third argument refused
+ok    H13 engine without --p2p-from refused with the update hint
+ok    H14 old engine still takes an SSH list alone
+info  H15 link-local P2P source fe80::1: rc=0 engine=[engine [--json] [--enable] [--ssh-from] [203.0.113.7] [--p2p-from] [fe80::1] cwd=[/]]
+
+14 checks, 0 failures
