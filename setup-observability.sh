@@ -769,6 +769,14 @@ so_read_token_stdin() {
     JSON_TOKEN="$line"
 }
 
+# so_on_exit -- the EXIT trap of the menu and of --rotate-token without --json: remove a
+# root file write stopped before its rename (the temp copy of the token file holds the
+# new token), then release the update lock, as json_on_exit does for --json.
+so_on_exit() {
+    tn_remove_inflight_tmp 2>/dev/null || true
+    tn_release_update_lock 2>/dev/null || true
+}
+
 # run_rotate_cli -- --rotate-token without --json: the new token from --token-stdin,
 # --token or TN_OBS_TOKEN, else asked for (hidden) when stdin is a terminal. Exits 0
 # when rotated, 1 when refused or rolled back (said).
@@ -849,6 +857,9 @@ main() {
         exit $?
     fi
 
+    # The menu and --rotate-token own the EXIT trap from here (so_on_exit).
+    TN_EXIT_TRAP_OWNED=1
+    trap so_on_exit EXIT
     if [[ "$rotate" == "true" ]]; then
         check_root
         detect_distro
