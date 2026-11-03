@@ -27,7 +27,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 
 # Root prepended to the systemd unit directory and to the host files removed
 # beside the node (unit backups and drop-ins, start scripts, node.env, backups,

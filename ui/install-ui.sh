@@ -42,7 +42,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 
 INSTALL_DIR="/opt/telcoin-ui"
 VENV_DIR="/opt/telcoin-ui-venv"

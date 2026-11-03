@@ -110,7 +110,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.1"
+readonly SCRIPT_VERSION="2.1.0"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.

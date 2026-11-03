@@ -36,7 +36,7 @@ if [ -r "${SCRIPT_DIR}/lib/fallback.sh" ]; then
     source "${SCRIPT_DIR}/lib/fallback.sh" 2>/dev/null || true
 fi
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly TN_REPO_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-node-deployment"
 # main serves only the RELEASE pointer and the connectivity probe; every release
 # file is fetched from the tag RELEASE names.
