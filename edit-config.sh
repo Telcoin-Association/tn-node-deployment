@@ -2052,10 +2052,11 @@ edit_cred_type_pass() {
 }
 
 # edit_cred_report RC WHAT -- report how a passphrase move (_tn_cred_switch and the
-# migrations) ended.
+# migrations) ended. rc 0 rewrote the unit, the start script and .node-meta, so the
+# host baseline is made again (edit_baseline_refresh, a no-op without the marker).
 edit_cred_report() {
     case "${1:-}" in
-        0) edit_ok "${2:-done}" ;;
+        0) edit_ok "${2:-done}"; edit_baseline_refresh ;;
         1) edit_error "nothing was changed (see above)" ;;
         2) edit_error "${TARGET_SERVICE} did not come back with the new passphrase delivery; its previous files are back and it runs on them" ;;
         *) edit_error "${TARGET_SERVICE} did not come back on its previous files either; see the backups named above and journalctl -u ${TARGET_SERVICE}" ;;

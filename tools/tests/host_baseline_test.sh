@@ -548,6 +548,8 @@ TARGET_SERVICE=telcoin
 if [[ "$1" == set ]]; then
     EDIT_SET_PAIR="metrics=127.0.0.1:9101"
     run_set
+elif [[ "$1" == cred ]]; then
+    edit_cred_report "$2" "credential moved"
 else
     apply_changes < /dev/null
 fi
@@ -570,6 +572,12 @@ export HB_RESTART_RC=2
 ecrun set
 check "edit-config --set, committee refused the restart: no refresh" "done false " "$(calls)"
 unset HB_RESTART_RC
+# A passphrase move (edit_cred_report: --migrate-credential, --reseal, the passphrase
+# change) rewrote the unit, the start script and .node-meta when its rc is 0.
+rm -f "${HB_T:?}/calls"; bash "$T/edit-config/drv.sh" cred 0 > "$T/ec.out" 2>&1 || true
+check "edit-config credential move done: refresh" "refresh edit_wait_say " "$(calls)"
+rm -f "${HB_T:?}/calls"; bash "$T/edit-config/drv.sh" cred 2 > "$T/ec.out" 2>&1 || true
+check "edit-config credential move rolled back: no refresh" "" "$(calls)"
 
 # --- remove-node.sh: the teardown goes with the node unit --------------------------
 cat > "$T/remove-node/drv.sh" <<'DRV'
