@@ -116,6 +116,88 @@ check "duplicate NETWORK: nothing printed" "" "$OUT"
 check "duplicate NETWORK: named on stderr" yes "$(has "$ERR" "NETWORK is set 2 times")"
 
 # -----------------------------------------------------------------------------
+# The mainnet gate (TN_MAINNET_ENABLED): the interactive menu's option 2 and
+# setup-node's --network mainnet refuse while it is 0. $T/on holds a copy of
+# lib/common.sh with the constant set to 1, standing for the launch release;
+# each case runs in a child bash, as this shell has the library loaded already.
+# -----------------------------------------------------------------------------
+check "TN_MAINNET_ENABLED is 0 in this release" "0" "${TN_MAINNET_ENABLED-unset}"
+run tn_mainnet_enabled
+check_rc "tn_mainnet_enabled: rc 1 while it is 0" 1 "$RC"
+mkdir -p "$T/off" "$T/on"
+ln -s "$TN_TEST_REPO/lib" "$T/off/lib"
+cp -R "$TN_TEST_REPO/lib" "$T/on/lib"
+sed 's/^readonly TN_MAINNET_ENABLED=0$/readonly TN_MAINNET_ENABLED=1/' "$TN_TEST_REPO/lib/common.sh" > "$T/on/lib/common.sh"
+check "the launch copy sets TN_MAINNET_ENABLED=1" yes \
+    "$(grep -qx 'readonly TN_MAINNET_ENABLED=1' "$T/on/lib/common.sh" && echo yes || echo no)"
+for d in off on; do
+    cp "$TN_TEST_REPO/setup-node.sh" "$T/$d/setup-node-run.sh"
+    grep -v '^main "\$@"$' "$TN_TEST_REPO/setup-node.sh" > "$T/$d/setup-node.sh"
+done
+
+# pick DIR INPUT -- select_network from DIR's library with INPUT (printf %b) on
+# stdin: what it printed, then "picked: NETWORK|CHAIN_ID|CHAIN_NAME|RPC_URL|EXPLORER_URL".
+pick() {
+    # shellcheck disable=SC2016
+    printf '%b' "$2" | "$BASH" -c 'source "$1/lib/common.sh" >/dev/null 2>&1; set +e
+        select_network
+        printf "picked: %s|%s|%s|%s|%s\n" "$NETWORK" "$CHAIN_ID" "$CHAIN_NAME" "$RPC_URL" "$EXPLORER_URL"' _ "$1" 2>&1
+}
+TESTNET_PICK="picked: testnet|2017|adiri|https://rpc.adiri.tel|https://telscan.io"
+MAINNET_PICK="picked: mainnet|487|telcoin|https://rpc.telcoin.network|https://telscan.io"
+# "2", then one line for the Enter prompt, then "1": no "Please enter 1 or 2."
+# shows that the Enter prompt took the second line. Every input ends in "1", so
+# the menu returns whatever it does with "2" (at end of input it would ask forever).
+OUT="$(pick "$T/off" '2\nx\n1\n')"
+check "menu, disabled: option 2 is coming soon" yes "$(has "$OUT" "-- for production (coming soon)")"
+check "menu, disabled: 2 says mainnet has not launched" yes "$(has "$OUT" "Mainnet has not launched yet.")"
+check "menu, disabled: 2 waits for Enter, then asks again" no "$(has "$OUT" "Please enter 1 or 2.")"
+check_has "menu, disabled: 2 then 1 gives testnet" "$TESTNET_PICK" "$OUT"
+# The same input: "x" and "1" stay unread when 2 is taken.
+OUT="$(pick "$T/on" '2\nx\n1\n')"
+check_has "menu, enabled: 2 gives mainnet" "$MAINNET_PICK" "$OUT"
+check "menu, enabled: no coming soon" no "$(has "$OUT" "coming soon")"
+check "menu, enabled: no not-launched note" no "$(has "$OUT" "has not launched")"
+OUT="$(pick "$T/on" '1\n')"
+check_has "menu, enabled: 1 still gives testnet" "$TESTNET_PICK" "$OUT"
+
+# jsn DIR NETWORK -- setup-node's json_set_network NETWORK from DIR's copy in
+# --json mode: the JSON events, then "set: ..." as pick prints it when it returns.
+jsn() {
+    # shellcheck disable=SC2016
+    "$BASH" -c 'source "$1/setup-node.sh" >/dev/null 2>&1; set +e
+        JSON_MODE=true; exec 3>&1
+        json_set_network "$2"
+        printf "set: %s|%s|%s|%s|%s\n" "$NETWORK" "$CHAIN_ID" "$CHAIN_NAME" "$RPC_URL" "$EXPLORER_URL"' _ "$1" "$2" 2>/dev/null
+}
+MAINNET_OFF="Mainnet is not enabled in this script release (lib/common.sh TN_MAINNET_ENABLED); nothing on this host was changed."
+run jsn "$T/off" mainnet
+check_rc "json_set_network mainnet, disabled: rc 1" 1 "$RC"
+check_has "json_set_network mainnet, disabled: error event" "{\"event\":\"error\",\"msg\":\"${MAINNET_OFF}\"}" "$OUT"
+check_has "json_set_network mainnet, disabled: done event" "{\"event\":\"done\",\"ok\":false,\"msg\":\"${MAINNET_OFF}\"}" "$OUT"
+check "json_set_network mainnet, disabled: no network set" no "$(has "$OUT" "set: ")"
+run jsn "$T/off" testnet
+check_has "json_set_network testnet, disabled: testnet" "set: testnet|2017|adiri|https://rpc.adiri.tel|https://telscan.io" "$OUT"
+run jsn "$T/on" mainnet
+check_rc "json_set_network mainnet, enabled: rc 0" 0 "$RC"
+check_has "json_set_network mainnet, enabled: the mainnet values" "set: mainnet|487|telcoin|https://rpc.telcoin.network|https://telscan.io" "$OUT"
+
+# The whole script: --network mainnet stops at the gate, before the install
+# flags are even read (the launch copy goes on to ask for --install-method).
+rm -rf "$T/fx-setup"
+mkdir -p "$T/fx-setup"
+OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/off/setup-node-run.sh" --json --phase=keygen --network mainnet </dev/null 2>/dev/null)"
+RC=$?
+check_rc "setup-node --json --network mainnet, disabled: rc 1" 1 "$RC"
+check "setup-node --json --network mainnet, disabled: ends with the refusal" \
+    "{\"event\":\"done\",\"ok\":false,\"msg\":\"${MAINNET_OFF}\"}" "$(printf '%s\n' "$OUT" | tail -n 1)"
+check "setup-node --json --network mainnet, disabled: nothing written" "" "$(find "$T/fx-setup" -mindepth 1 2>/dev/null)"
+OUT="$(TN_ROOT_PREFIX="$T/fx-setup" "$BASH" "$T/on/setup-node-run.sh" --json --phase=keygen --network mainnet </dev/null 2>/dev/null)"
+check "setup-node --json --network mainnet, enabled: past the gate" \
+    "{\"event\":\"done\",\"ok\":false,\"msg\":\"--install-method is missing (expected source, release, docker or existing)\"}" \
+    "$(printf '%s\n' "$OUT" | tail -n 1)"
+
+# -----------------------------------------------------------------------------
 # image_network: the network of a Docker image change (_tn_guard_network):
 # detect_network's, or devnet from NETWORK=devnet in .node-meta (detect_network
 # itself stays rc 1 there). Nothing else is guessed.

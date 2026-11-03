@@ -28,6 +28,20 @@ readonly MAINNET_CHAIN_NAME="telcoin"
 readonly MAINNET_RPC_URL="https://rpc.telcoin.network"
 readonly MAINNET_EXPLORER="https://telscan.io"
 
+# Mainnet is offered only when this is 1: option 2 of the interactive network
+# menu (select_network), --network mainnet in a setup-node --json run, and a
+# Node Manager UI setup on mainnet (the UI helper asks tn_mainnet_enabled). At
+# 0 each of them refuses before anything on the host changes. It is flipped to 1
+# at launch, in the same release that pins the mainnet chain configs
+# (tn_chain_config_pin) and sets MIN_SOURCE_VERSION_MAINNET.
+readonly TN_MAINNET_ENABLED=0
+
+# tn_mainnet_enabled -- rc 0 when this script release offers mainnet
+# (TN_MAINNET_ENABLED is 1), rc 1 otherwise.
+tn_mainnet_enabled() {
+    [[ "$TN_MAINNET_ENABLED" == "1" ]]
+}
+
 readonly DEVNET_CHAIN_ID="32285"
 readonly DEVNET_CHAIN_NAME="devnet"
 # Devnet now has a global load balancer in front of all five nodes, so it has a
@@ -2646,7 +2660,11 @@ select_network() {
     echo "  Which network do you want to connect to?"
     echo ""
     echo "  1) Adiri Testnet  (Chain ID: ${TESTNET_CHAIN_ID})  -- for testing"
-    echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production (coming soon)"
+    if tn_mainnet_enabled; then
+        echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production"
+    else
+        echo "  2) Mainnet        (Chain ID: ${MAINNET_CHAIN_ID})  -- for production (coming soon)"
+    fi
     echo ""
 
     local choice
@@ -2662,6 +2680,14 @@ select_network() {
                 break
                 ;;
             2)
+                if tn_mainnet_enabled; then
+                    NETWORK="mainnet"
+                    CHAIN_ID="$MAINNET_CHAIN_ID"
+                    CHAIN_NAME="$MAINNET_CHAIN_NAME"
+                    RPC_URL="$MAINNET_RPC_URL"
+                    EXPLORER_URL="$MAINNET_EXPLORER"
+                    break
+                fi
                 echo ""
                 print_warn "Mainnet has not launched yet."
                 print_info "Mainnet configuration will be available once the network goes live."
