@@ -19,6 +19,10 @@ Follow-up round (V3 findings, 2026-11-03):
 - [x] F5 W4: missing token with both pipelines off reported as info
 - [x] F6 N1/N6/N3/N4: docker config.alloy root:telcoin-alloy; remove-node comment; rotate success hint; docs note
 - [x] F7 tests + gates
+Round 3 (review: push-URL precedence records intent):
+- [x] R1 lib: OBS_*_PUSH_URL_SOURCE=override marker; stored URL wins only with it; `default` word clears; log line on change
+- [x] R2 tests: default change reaches the host, override kept, 2.0.x env = default, marker never carries the token, clear with `default`
+- [x] R3 gates + checkpoint + hand-back
 
 ## Progress notes
 - S0 Alloy 1.5 reference (archive.grafana.com/docs/alloy/v1.5/reference/components/loki/loki.write/ and .../prometheus/prometheus.remote_write/): endpoint takes `bearer_token_file` (string) and `bearer_token` (secret); at most one of bearer_token, bearer_token_file, authorization, basic_auth, oauth2 (+sigv4, azuread for remote_write). Nested `endpoint > tls_config` with `server_name` (string) and `min_version` (string; one of "TLS10","TLS11","TLS12","TLS13"; default Go's TLS 1.2). Syntax page (.../get-started/configuration-syntax/expressions/operators/): `+` under String operators = "Concatenate two strings".
@@ -56,6 +60,15 @@ Cherry-pick check: `git merge-tree --write-tree --merge-base=6d08cef hardening-f
 Mutation check of the new fixtures (scratch copies): read-back removed 5 FAIL, EXIT trap removed 2, disable check removed 7, restore-always 2, no sentinel 3, off-info removed 2, URL check in obs_render_alloy removed 1. All killed.
 Real image N1: config.alloy 0640 0:4999 + token 0640 0:4999, --cap-drop=ALL --group-add 4999: as uid 0 and as --user 473:473 both run, 0 config/permission errors, 0 credential errors (only DNS). The docker storage dir /var/lib/telcoin-alloy (root:root 0750) would still stop an image that switched to user 473; this unit does not run one.
 F2 finding: bash 3.2 skips a shell's EXIT trap when SIGTERM kills it by default and its parent shell has an EXIT trap (reproduced in a 10-line probe). Fixed by trapping TERM/INT/HUP with exit 143/130/129 in both the --json and the menu/--rotate-token paths.
+
+## Round 3 results (push-URL intent)
+Commits on fup/OBS after ed35f48:
+- 75d6fc3 lib/observability: record a push URL override as intent, so a changed default reaches the host
+- 4d37f61 tests: a changed release default reaches the host, an override stays, 2.0.x counts as default
+Design: telcoin-alloy.env carries OBS_PUSH_URL_SOURCE=override / OBS_METRICS_PUSH_URL_SOURCE=override only when the URL came from an override (on that run, or carried from a recorded one). obs_effective_*: override on this run (any value but "default") > a stored URL whose marker says override > the current release default (devnet/testnet). "default" clears. No marker (release default, 2.0.x env file, or this round's earlier unreleased files) = default. A URL change at render is said once per render and pipeline. The empty-URL refusal (_obs_urls_ok) is unchanged. A partial disable drops the disabled pipeline's lines, so its override is forgotten: pass the flag again when re-enabling it.
+Mutation check: marker ignored 9 FAIL, marker not written 11, "default" not handled 3, change line removed 5. All killed.
+Cherry-pick check: merge-tree onto hardening-followups (base ed35f48) clean (tree 0803fcc); merged tree: check-network-hits.sh clean (146 annotated hits, rc 0), obs_test 434/0/0, remove_test 352/0/0, network_hits_test 59/0/0.
+Gates at 4d37f61 (TN_UPSTREAM_ALLOY_CONFIG set): bash 5.3 obs 434/0/0, remove 313/0/0, root_write_pipe 2/0, passphrase_print 4/0; bash:3.2 obs 427/0/4 skipped, 313, 2, 4; ubuntu:24.04 obs 427/0/4 skipped, 313, 2, 4. bash -n both, check-bash32, shellcheck 0.11 + v0.9.0, perl lint: clean. systemd-analyze verify: ok. Sync-note diff empty, sha256 unchanged 4c1527db...53a3. Full suite bash 5.3: 59 files, 0 failed.
 
 ## Operator-visible changes
 - The hub ingest token is in /etc/telcoin/alloy/ingest-token (root:telcoin-alloy 0640, one line), never in telcoin-alloy.env, the unit text, argv, Alloy's environment or `docker inspect`.
@@ -109,6 +122,13 @@ Follow-up docs notes (V3):
 - After "Ingest token rotated": "Check that it ships: a wrong token keeps Alloy running while the hub refuses every push. In a minute, journalctl -u telcoin-alloy.service -n 20 shows no 401, and these counters grow:" then "logs: curl -s 127.0.0.1:12345/metrics | grep loki_write_sent_bytes_total" and/or "metrics: ... | grep prometheus_remote_storage_samples_total".
 - A --rotate-token interrupted after the token write and before the restart leaves the new token and the re-rendered files in place with no rollback (Alloy keeps running on the old ones until it restarts): re-run --rotate-token (with the new or the old token). An interruption during the token write itself leaves nothing behind (the EXIT trap removes the temp copy).
 - The menu, --rotate-token and --json runs end on TERM/INT/HUP with 143/130/129 after removing an interrupted write and releasing the update lock.
+
+Round-3 docs notes (push URL override):
+- Set an override: `--push-url URL` / `--metrics-push-url URL` (or OBS_PUSH_URL / OBS_METRICS_PUSH_URL) on an enable or a --rotate-token run. It is recorded in /etc/telcoin/alloy/telcoin-alloy.env as `OBS_PUSH_URL_SOURCE=override` / `OBS_METRICS_PUSH_URL_SOURCE=override` (the marker holds only the word "override") and kept by every later render (rotate, partial disable, the other pipeline's enable) until changed.
+- Clear it: `--push-url default` / `--metrics-push-url default` (I chose the word; re-enabling without the flag keeps the override). The URL then follows the release default.
+- Without an override the URL follows the release default (OBS_PUSH_URL_TESTNET / OBS_METRICS_PUSH_URL_TESTNET from lib/testnet-addons.env, devnet: OBS_*_PUSH_URL_DEVNET): a default that a script release changes reaches the host at the next render (enable, partial disable, --rotate-token), with "The logs push URL follows the release default: <new> (was <old>). Pass --push-url to setup-observability.sh to ship somewhere else." (metrics: --metrics-push-url). A new override says "The logs push URL is now <new> (set with --push-url; was <old>)."
+- Migration: an env file from 2.0.x has no marker, so its URL counts as the default: a 2.0.x install that had its own hub moves to the release default at the next render, with the line above; run with --push-url again to keep the own hub. On devnet (no default) the render is refused with the "There is no logs push URL ..." message instead.
+- Disabling a pipeline drops its URL lines, so its override is forgotten; pass the flag again when re-enabling it.
 
 Remainder of #35: one shared ingest token for every operator; per-node tokens (and revoking one operator) need the hub's Caddy to check a per-node token list instead of the single OBS_INGEST_TOKEN for /loki/api/v1/push and /api/v1/write. Not done here.
 

@@ -10,14 +10,20 @@ Package LIB-B (issues #49, #47, #33). Branch fup/LIB-B. Base 0a9db45.
 - [x] S4 (ad481ed) setup-node _setup_image_example mainnet arm, test case
 - [x] S5 #33 late-case docs paragraph (checkpoint only, verified in update-node.sh)
 - [x] S6 gates: bash 5.3 + 3.2 fixtures, bash -n both, check-bash32, shellcheck 0.11 + 0.9, full suite bash 5.3
+- [x] S7 (2542f49) (follow-up from review) TN_EPOCH_WAIT_MAX kept as set: no raise; a cap shorter than margin + settle + two polls is kept with a warning; contract comment + restart_window_test.sh LIB-B cases
+- [x] S8 gates for S7: restart_window/keytool/network_detect under bash 5.3, bash:3.2, ubuntu:24.04; bash -n both; check-bash32; shellcheck 0.11 + 0.9 on lib/common.sh; full suite bash 5.3
 
 ## Operator-visible changes
 
 - S1: the epoch wait's margin and settle follow the epoch length read with the boundary
   (6 h testnet epoch: 300/90 unchanged; 7-day: 900/300). Messages "outside the Ns margin",
   "should have ended", and the "Waiting for epoch N to close" step end with one sentence
-  naming the values and their source. A cap below margin + settle + two polls is raised
-  with a warning (read path only).
+  naming the values and their source. (S1 raised a short cap; S7 replaced that: the cap is
+  kept as set and a short one is warned about, read path only.)
+- S7: TN_EPOCH_WAIT_MAX is never raised. A cap shorter than margin + settle + two polls is
+  kept, with the warning "TN_EPOCH_WAIT_MAX N is shorter than margin M + settle S + two
+  polls; the restart may land before the epoch has settled. Set it to at least X, or
+  TN_SKIP_EPOCH_WAIT=1 to skip the wait on purpose." The step line reports the cap as set.
 - S2: check_internet probes the chosen network's own RPC (testnet rpc.adiri.tel, mainnet
   rpc.telcoin.network, devnet DEVNET_RPC_URL), then https://1.1.1.1. NETWORK empty or
   unknown: "Cannot check internet connectivity: NETWORK must be testnet, mainnet or devnet
@@ -52,16 +58,21 @@ Package LIB-B (issues #49, #47, #33). Branch fup/LIB-B. Base 0a9db45.
 - Before the epoch length is known (the blind wait of a staked node whose mode and epoch
   timing could not be read) the fixed 300 and 90 apply as before: the blind wait is
   `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` (300 + 90 unless set), at most `TN_EPOCH_WAIT_MAX`
-  as set (the cap is NOT raised on that path).
-- Cap rule: once the epoch length is known, if `TN_EPOCH_WAIT_MAX` is not 0 and is shorter
-  than margin + settle + two polls (`TN_EPOCH_POLL`, 15 by default, held to 5-20), it is
-  raised to that sum with the warning
-  `TN_EPOCH_WAIT_MAX <N> is shorter than the wait it bounds (margin <M> + settle <S> + two polls); using <X>.`
-  Example: `TN_EPOCH_WAIT_MAX=100` on a 7-day epoch -> `using 1230` (900 + 300 + 30). The
-  default 1800 always covers the derived maximum 900 + 300 + 2x20 = 1240, so it is never
-  raised unless the margin or settle is set above the clamps. A cap equal to the sum stands.
-  On testnet with defaults the sum is 300 + 90 + 30 = 420: a `TN_EPOCH_WAIT_MAX` below 420
-  is now raised to 420 with that warning.
+  as set, with no warning (unchanged).
+- Cap rule (S7, replaces S1's raise). Sentence for AGENTS.md "Restarts and the epoch
+  boundary", README and OPERATOR: "`TN_EPOCH_WAIT_MAX` caps the whole wait as set; a cap
+  shorter than margin + settle + two polls is kept and warned about." Detail: once the epoch
+  length is known, a `TN_EPOCH_WAIT_MAX` that is not 0 and is shorter than margin + settle +
+  two polls (`TN_EPOCH_POLL`, 15 by default, held to 5-20) stays in force and the script warns
+  `TN_EPOCH_WAIT_MAX <N> is shorter than margin <M> + settle <S> + two polls; the restart may land before the epoch has settled. Set it to at least <X>, or TN_SKIP_EPOCH_WAIT=1 to skip the wait on purpose.`
+  Example: `TN_EPOCH_WAIT_MAX=100` on a 7-day epoch -> waits at most 100 s, "Set it to at
+  least 1230" (900 + 300 + 30). On testnet with the defaults the sum is 300 + 90 + 30 = 420,
+  so a cap below 420 draws the warning. A cap equal to the sum draws none. The default 1800
+  covers the largest derived wait, 900 + 300 + 2x20 = 1240, so an unset cap never warns
+  unless `TN_EPOCH_MARGIN` or `TN_EPOCH_SETTLE` is set above the clamps (e.g. margin 2000:
+  "TN_EPOCH_WAIT_MAX 1800 is shorter than margin 2000 + settle 300 + two polls; ... at least
+  2330"). The warning is printed whenever the epoch length was read, also when the boundary
+  is far away and no wait follows.
 - `TN_EPOCH_WAIT_MAX=0` still turns the wait off, with no warning.
 - Messages: "Epoch N ends in X, outside the Ms margin; no need to wait.", "Epoch N should
   have ended X ago and has not; not waiting." and the step "Waiting for epoch N to close
@@ -140,6 +151,16 @@ holds: nothing in update-node.sh was edited.
 
 ## Tests run
 
+- S8 (tip 2542f49): restart_window 43/0, keytool 45/0, network_detect 121/0 under bash 5.3.9,
+  bash:3.2 (3.2.57) and ubuntu:24.04 (5.2.21, root): 3 files 0 failed in each. Full suite
+  bash 5.3: 59 files, 0 failed (3770 checks, 0 failures, 49 skipped); keytool's "mode read,
+  epoch unreadable: continues without a blind wait" and "the blind wait is capped by
+  TN_EPOCH_WAIT_MAX" pass. bash -n under 5.3 and 3.2, check-bash32, shellcheck 0.11.0 and
+  0.9.0 (--severity=error) clean on lib/common.sh and restart_window_test.sh. Mutation: 7 of
+  the new checks FAIL against ad481ed (the raise). The commit's patch applies cleanly on an
+  export of hardening-followups (aa643a1), and there restart_window 43/0, keytool 45/0,
+  network_detect 143/0.
+
 - S6 final (tip ad481ed): full suite `bash tools/tests/run.sh` under bash 5.3.9: 59 test
   files, 0 failed (3766 checks, 0 failures, 49 skipped), incl. keytool_test.sh "wait: mode
   read, epoch unreadable: continues without a blind wait" and "wait: the blind wait is
@@ -185,12 +206,17 @@ holds: nothing in update-node.sh was edited.
   LIB-A or AUDIT edit step_preflight near "Selecting network...", expect a trivial
   conflict there.
 
-- Spec conflict (resolved, flag for orchestrator): Required behaviour 2 read literally
-  ("after margin, settle and poll are final ... raise") would also raise the cap on the
-  blind-wait path, which breaks keytool_test.sh "wait: the blind wait is capped by
-  TN_EPOCH_WAIT_MAX" (expects 100). The brief says keytool cases pass unchanged, and
-  item 1 says the blind path behaves "as today", so the cap check runs only once the epoch
-  length is known (read path). The blind wait is margin + settle, at most the cap as set.
+- Spec conflict (S1, now moot after S7): Required behaviour 2's raise would have broken
+  keytool_test.sh's blind-wait cap pin; S1 raised on the read path only. S7 removed the raise
+  entirely (review follow-up): the cap is kept as set everywhere, and the read path warns.
+- S7 choice to flag: the coordinator's rule was "explicit cap that is short: keep and warn;
+  default cap: no raise needed". S7 compares the cap with margin + settle + two polls
+  whatever its source, so the one case the rule did not cover (cap unset, TN_EPOCH_MARGIN or
+  TN_EPOCH_SETTLE set above the clamps, sum over 1800) also warns instead of silently cutting
+  the wait. With derived values an unset cap never warns (pinned by the fixture).
+- restart_window_test.sh's jitter case still uses TN_EPOCH_MARGIN=10 and cap 60 (S1); with
+  no raise, main's original cap-40 form would also pass. Left as is to keep S7 inside the
+  LIB-B block; its "no warning" check now greps the new text.
 - restart_window_test.sh's existing "the pause stays inside TN_EPOCH_WAIT_MAX" used cap 40
   with margin 300 + settle 20 + 2x15 = 350, which the new rule raises; the case now uses
   TN_EPOCH_MARGIN=10 and cap 60 (= the sum, not raised) and checks <= 60.

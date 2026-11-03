@@ -85,6 +85,18 @@ status: done
       unchanged (336 checks; the 10 new mainnet checks fail on e32088a) (commit c7a2246)
 - [x] Q3 gates
 
+## Round 5 (whole-range review: remove_keys keep, menu lock release, unchanged limit)
+
+- [x] P1 firewall-setup.sh: fw_menu_p2p_apply releases the lock when fw_meta_lock fails after
+      taking it; fw_p2p_limit_sync skips the rewrite when the live table, the boot file, the unit
+      and its enable state already match ("P2P new-flow limit unchanged"; FW_LIMIT_CHANGED says
+      whether anything changed); --reset always rewrites (6b66c41; tests a03addb)
+- [x] P2 tests for P1 (reset test, signal test)
+- [x] P3 remove-node.sh: remove_keys gets the _rm_p2p_keep keep and its log line (remove_keys
+      takes the unit; remove_node_unit passes it) (9b0108c; tests 8d1db2d)
+- [x] P4 remove_test.sh `# FW` block: menu path, two units
+- [x] P5 gates (+ bash:3.2 without flock, integration copy, network-hits, full suites)
+
 ## Operator-visible changes
 
 - Every enable path (`--enable`, `--reset`, `--json --enable`, the menu's "Enable recommended
@@ -234,7 +246,39 @@ status: done
 - UI (from the coordinator): the UI card shows `persistent` with "(not restored at boot)" and does
   not render `persistent_reason` yet; the field is in the JSON for operators, and the card change
   is a UI-S follow-up.
+- Unchanged limit (round 5): an enable (`--enable`, `--json --enable`, the menu's "Enable
+  recommended defaults") or "Manage node ports" leaves table inet tn_p2p and its boot copy alone
+  when the loaded table already has the wanted rate, burst and ports, /etc/telcoin/p2p-limit.nft
+  holds the program exactly, the unit file is the one it would write and the unit is enabled; it
+  prints `->  P2P new-flow limit unchanged: UDP 49590 and 49594 already accept at most 20 packets of new, not yet answered flows per minute from one IPv4 address or IPv6 /64 after a burst of 40, and its boot copy is current.`
+  So the sets keep every source's count and spent burst, and nothing is rewritten, reloaded or
+  re-enabled. Anything that differs (port set, rate, burst, a missing or stale boot copy, a unit
+  that is not enabled) is rewritten as before. `--reset` always rewrites.
+- remove-node menu path (round 5): removing one node of two from the menu (remove_node_unit ->
+  remove_keys) keeps /etc/telcoin/p2p-limit.nft (not shredded, not removed with the config
+  directory) while another node unit remains, and prints
+  `->  Keeping /etc/telcoin/p2p-limit.nft: another node unit remains here, and the P2P new-flow limit stays whole for it`
+  (the same text the `--json` keys removal logs as a step). The last node's removal takes the
+  ruleset, the unit and the table.
 - "The signed address-manifest reader waits on the Association's format" (spec: hand over as is).
+
+## Tests run (round 5, committed tip 2f5101a)
+
+- fup/FW: bash 5.3.9 firewall_reset 353/0/1 skip, firewall_signal 220/0/0, remove_test 350/0/0,
+  root_write_pipe 2/0; bash:3.2 and ubuntu:24.04: 351/0/3, 220, 350, 2; bash:3.2 with
+  /usr/bin/flock removed (mkdir lock fallback): 351/0/3, 220, 350, 2, all 0 failed.
+- bash -n (both), check-bash32, shellcheck 0.11 and v0.9.0 (error severity) clean; warning
+  severity: one new SC2034 "FW_LIMIT_CHANGED appears unused" on fup/FW only (the reader is the
+  refresh guard on the integration branch, below); systemd-analyze verify rc 0.
+- Full suite fup/FW (bash 5.3.9): 59 files, 0 failed.
+- The new checks fail on c7a2246: 12 in firewall_reset (unchanged path, FW_LIMIT_CHANGED, the
+  menu lock release), 3 in remove_test (menu keep).
+- Integration copy: `hardening-followups` 3dd93a6 + `git diff c7a2246 8d1db2d` (round 5 without
+  2f5101a, which the integration already has as menu_record_sync) applies cleanly; plus the refresh
+  guard in fw_menu_p2p_apply and a "no host baseline refresh" check: bash 5.3 firewall_reset
+  357/0/1, signal 239, remove 362, root_write_pipe 2; bash:3.2, ubuntu:24.04 and bash:3.2 without
+  flock 355/0/3, 239, 362, 2; check-network-hits clean (146 annotated hits, 24 files) rc 0; full
+  suite 61 files, 0 failed. Without the guard the new check fails (proved).
 
 ## Tests run (round 4, committed tip c7a2246)
 
