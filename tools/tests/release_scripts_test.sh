@@ -98,7 +98,10 @@ git -C "$W" init -q
 commit_all "fixture"
 
 # --- check on a tree without MANIFEST ------------------------------------------
+# The fixture starts before any release: no release record and no signer key,
+# also once main carries a release.
 rm -f "$W/MANIFEST" "$W/MANIFEST.sig" "$W/RELEASE"
+grep -E '^[[:space:]]*(#|$)' "$REPO/lib/allowed_signers" > "$W/lib/allowed_signers"
 commit_all "no release yet" || true
 tool --check
 check_rc "no MANIFEST: check passes" 0 "$RC"
