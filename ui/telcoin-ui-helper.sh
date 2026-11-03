@@ -1521,6 +1521,11 @@ cmd_setup() {
         "") die "missing network (TN_SETUP_NETWORK)" ;;
         *) die "invalid network: $network" ;;
     esac
+    # Mainnet only when the engine library offers it (tn_mainnet_enabled); an
+    # older library without the function (rc 127) counts as not offering it.
+    if [[ "$net_rule" == mainnet ]] && ! _lib_call tn_mainnet_enabled >/dev/null 2>&1; then
+        die "mainnet is not enabled in this script release (TN_MAINNET_ENABLED in ${HELPER_LIB}); nothing was changed"
+    fi
     case "$method" in source|docker|existing|release|"") ;; *) die "invalid install method: $method" ;; esac
     [[ -z "$addr"      || "$addr"      =~ ^0x[0-9a-fA-F]{40}$ ]]            || die "invalid address"
     [[ -z "$build_ref" ]] || release_tag_ok "$net_rule" "$build_ref" \

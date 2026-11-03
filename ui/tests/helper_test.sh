@@ -152,6 +152,11 @@ tn_write_root_file() {
     printf 'lib tn_write_root_file [%s] [%s] [%s]\n' "$1" "$2" "${3:-root}" >> "$HT_CALLS"
     cat > "$1.ht-tmp" && mv -f "$1.ht-tmp" "$1"
 }
+# tn_mainnet_enabled answers TN_TEST_MAINNET_RC when a case sets it, else the
+# library's own answer (rc 1 while TN_MAINNET_ENABLED is 0).
+if [[ -n "${TN_TEST_MAINNET_RC:-}" ]]; then
+    tn_mainnet_enabled() { return "$TN_TEST_MAINNET_RC"; }
+fi
 EOF
 
 # make_fake <path> <label> [shell line] -- a command that appends
@@ -774,9 +779,41 @@ export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}:v0.16.
 refused "setup-keygen without a passphrase on stdin" setup-keygen < /dev/null
 printf ' padded \n' > "$T/pass-bad"
 refused "setup-keygen with a padded passphrase" setup-keygen < "$T/pass-bad"
-export TN_SETUP_NETWORK=mainnet; printf 'short-pass\n' > "$T/pass-short"
+export TN_SETUP_NETWORK=mainnet TN_TEST_MAINNET_RC=0; printf 'short-pass\n' > "$T/pass-short"
 refused "mainnet setup-keygen with a 10-byte passphrase" setup-keygen < "$T/pass-short"
-export TN_SETUP_NETWORK=testnet
+check_has "the 10-byte mainnet passphrase is what is refused" \
+    "the BLS passphrase is not usable (no line breaks, no spaces or tabs at either end, 16 bytes or more on mainnet)" \
+    "$(trace setup-keygen < "$T/pass-short")"
+unset TN_TEST_MAINNET_RC; export TN_SETUP_NETWORK=testnet
+# Mainnet only when the engine library offers it (tn_mainnet_enabled): refused
+# by the library's own answer (TN_MAINNET_ENABLED is 0 in this release), when the
+# function returns 1, and when the library has no such function (rc 127).
+export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0
+printf 'a good mainnet passphrase\n' > "$T/pass-main"
+MAINNET_OFF="mainnet is not enabled in this script release (TN_MAINNET_ENABLED in ${HELPER_LIB}); nothing was changed"
+refused "mainnet setup-keygen refused while TN_MAINNET_ENABLED is 0" setup-keygen < "$T/pass-main"
+check_has "the mainnet refusal names the library constant" "$MAINNET_OFF" "$(trace setup-keygen < "$T/pass-main")"
+export TN_TEST_MAINNET_RC=1
+refused "mainnet setup-keygen refused when tn_mainnet_enabled returns 1" setup-keygen < "$T/pass-main"
+check_has "tn_mainnet_enabled rc 1: the refusal names the constant" "$MAINNET_OFF" "$(trace setup-keygen < "$T/pass-main")"
+t="$(export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize </dev/null)"
+check_has "mainnet setup-finalize refused when tn_mainnet_enabled returns 1" "$MAINNET_OFF" "$t"
+check_lacks "mainnet setup-finalize: setup-node.sh never runs" "setup-node [" "$t"
+unset TN_TEST_MAINNET_RC
+mkdir -p "$T/lib-old"
+printf 'source "%s"\nunset -f tn_mainnet_enabled\n' "$T/lib/common.sh" > "$T/lib-old/common.sh"
+HELPER_LIB="$T/lib-old/common.sh"
+check "an engine library without tn_mainnet_enabled: _lib_call gives 127" "127" \
+    "$(_lib_call tn_mainnet_enabled >/dev/null 2>&1; echo $?)"
+refused "mainnet setup-keygen refused when the library has no tn_mainnet_enabled" setup-keygen < "$T/pass-main"
+check_has "rc 127: the refusal names the constant" \
+    "mainnet is not enabled in this script release (TN_MAINNET_ENABLED in ${T}/lib-old/common.sh); nothing was changed" \
+    "$(trace setup-keygen < "$T/pass-main")"
+HELPER_LIB="$T/lib/common.sh"
+t="$(export TN_TEST_MAINNET_RC=0; trace setup-keygen < "$T/pass-main")"
+check_has "mainnet setup-keygen runs setup-node.sh when tn_mainnet_enabled says yes" \
+    "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [journal] [--passphrase-stdin]" "$t"
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_BUILD_REF; export TN_SETUP_NETWORK=testnet
 refused "setup-finalize without listener multiaddrs (NC-2)" setup-finalize < /dev/null
 DIGEST="$(printf '%064d' 0 | tr 0 a)"
 t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
@@ -788,12 +825,12 @@ check_has "setup-keygen names the look-alike image it refuses" \
     "invalid docker image for testnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${GHCR_REPO}-fork@sha256:${DIGEST}" \
     "$(trace setup-keygen < "$T/pass-in")"
 unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
-export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}"
+export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}" TN_TEST_MAINNET_RC=0
 refused_in "setup-keygen refuses the legacy repository on mainnet" setup-keygen
 check_has "setup-keygen names the legacy image it refuses on mainnet" \
     "invalid docker image for mainnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${LEGACY_REPO}@sha256:${DIGEST}" \
     "$(trace setup-keygen < "$T/pass-in")"
-unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE; export TN_SETUP_NETWORK=testnet
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE TN_TEST_MAINNET_RC; export TN_SETUP_NETWORK=testnet
 fixture unified
 refused_in "setup-keygen refused on an installed node" setup-keygen
 export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1
@@ -821,10 +858,10 @@ unset TN_SETUP_NETWORK
 
 # Release installs, the log target, --allow-no-tpm and the Docker image.
 fixture none
-t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
+t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0 TN_TEST_MAINNET_RC=0; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
 check_has "mainnet release keygen: --release-tag and the journal by default" \
     "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [journal] [--passphrase-stdin]" "$t"
-t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0 TN_SETUP_LOG_TARGET=file TN_SETUP_ALLOW_NO_TPM=1; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
+t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0 TN_SETUP_LOG_TARGET=file TN_SETUP_ALLOW_NO_TPM=1 TN_TEST_MAINNET_RC=0; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
 check_has "mainnet: an explicit file target and --allow-no-tpm" \
     "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [file] [--allow-no-tpm] [--passphrase-stdin]" "$t"
 t="$(export TN_SETUP_NETWORK=testnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v0.16.0-adiri TN_SETUP_ALLOW_NO_TPM=1; printf 'a good passphrase\n' | trace setup-keygen)"
