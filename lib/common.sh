@@ -6515,7 +6515,7 @@ tn_host_baseline_status() {
     if [[ -d "${p}/var/lib/aide" && ! -x "${p}/var/lib/aide" ]]; then
         printf '%-5s %s\n' info "AIDE baseline: not checked (/var/lib/aide is readable by root only)"
     elif [[ -f "$db" && ! -L "$db" ]]; then
-        mt="$(stat -c %Y -- "$db" 2>/dev/null)" || mt=""
+        mt="$(stat -c %Y -- "$db" 2>/dev/null || stat -f %m -- "$db" 2>/dev/null)" || mt=""
         now="$(date +%s 2>/dev/null)" || now=""
         if [[ "$mt" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] && (( now >= mt )); then
             age="$(( (now - mt) / 86400 ))"
