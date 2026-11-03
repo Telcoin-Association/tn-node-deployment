@@ -8,8 +8,9 @@
 # backups, logrotate, journald, needrestart and apt files; the lock directory and
 # its lock file stay; a symlinked libexec dir left alone), the log-reader group,
 # the JSON path, finishing a removal that stopped part way (JSON and the menu's
-# leftover path), the update lock, and the refusal to remove anything when
-# .node-meta sets a key more than once.
+# leftover path), the update lock, the refusal to remove anything when
+# .node-meta sets a key more than once, and the Alloy ingest token file shredded
+# by the add-on teardown.
 #
 #   bash tools/tests/remove_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/remove_test.sh
@@ -782,5 +783,27 @@ _rm_shred "$R/etc/second.txt" > "$T/out2" 2>&1
 check_has "shred note: the later file was shredded" "shred -u -- $R/etc/second.txt" "$(calls)"
 check "shred note: not repeated later in the run" "0 0" \
     "$(grep -c 'Decommissioning a host' "$T/out2") $(grep -c 'best effort on SSDs' "$T/out2")"
+
+# OBS
+# --- the add-on teardown shreds the Alloy ingest token file -----------------------
+# The real remove_testnet_addons (stubbed above for the other cases), taken from the
+# sourced copy; ufw is reported absent so no host firewall rule is touched.
+REAL_RTA="$(awk '/^remove_testnet_addons\(\) \{/,/^}/' "$T/h/remove-node.sh")"
+AL="$R/etc/telcoin/alloy"
+mkdir -p "$AL" "$SD"
+printf 'obs-token-0123456789abcdef\n' > "$AL/ingest-token"
+printf 'TN_NODE=n\nOBS_INGEST_TOKEN=legacy-token-0123456789\n' > "$AL/telcoin-alloy.env"
+printf 'loki.write "central" {}\n' > "$AL/config.alloy"
+printf '[Service]\n' > "$SD/telcoin-alloy.service"
+: > "$CALLS"
+( ufw_installed() { return 1; }; eval "$REAL_RTA"; remove_testnet_addons ) > "$T/out" 2>&1
+check_rc "add-on teardown: rc 0" 0 $?
+check_has "add-on teardown: the token file shredded" "shred -u -- $AL/ingest-token" "$(calls)"
+check_has "add-on teardown: the env file (may hold an older token) shredded" "shred -u -- $AL/telcoin-alloy.env" "$(calls)"
+check_lacks "add-on teardown: config.alloy is removed, not shredded" "$AL/config.alloy" "$(calls)"
+gone "add-on teardown: the token file" "$AL/ingest-token"
+gone "add-on teardown: the Alloy config dir" "$AL"
+gone "add-on teardown: the Alloy unit" "$SD/telcoin-alloy.service"
+check_lacks "add-on teardown: the token is not printed" "obs-token-0123456789abcdef" "$(cat "$T/out")"
 
 finish
