@@ -11,7 +11,7 @@
 #   docker installs -> Alloy as a docker sidecar (container telcoin-alloy)
 #   binary/source   -> native Alloy binary under systemd
 # Both are supervised by one systemd unit (telcoin-alloy.service) so status/teardown
-# are uniform. The per-operator ingest token lives ONLY in ${OBS_ETC_DIR}/ingest-token
+# are uniform. The hub's ingest token lives ONLY in ${OBS_ETC_DIR}/ingest-token
 # (root:telcoin-alloy 0640), never in the environment, argv or a unit file.
 # See docs/testnet-addons.md.
 # =============================================================================

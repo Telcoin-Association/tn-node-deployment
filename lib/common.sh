@@ -5428,7 +5428,7 @@ tn_os_floor_check() {
         return 1
     fi
     if (( v < TN_CRED_MIN_SYSTEMD )); then
-        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (needs ${TN_CRED_MIN_SYSTEMD}, Ubuntu 24.04): the BLS passphrase stays in a root-only file (${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bls-passphrase)." "$fn"
+        _tn_guard_say warn "systemd ${v} cannot encrypt credentials (needs ${TN_CRED_MIN_SYSTEMD}; Ubuntu 24.04 ships 255): the BLS passphrase stays in a root-only file (${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}/bls-passphrase)." "$fn"
     fi
     return 0
 }
@@ -5857,7 +5857,7 @@ _tn_cred_switch() {
         systemctl is-active --quiet "$svc" 2>/dev/null && restart=yes
     fi
     if [[ "$target" != "credential" && "$(tn_detect_network 2>/dev/null || true)" != "testnet" && "$(meta_get NETWORK 2>/dev/null || true)" != "devnet" ]]; then
-        _tn_guard_say warn "Off testnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04); nothing changed." "$fn"
+        _tn_guard_say warn "Off testnet and devnet the passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later; Ubuntu 24.04 ships 255); nothing changed." "$fn"
         return 1
     fi
     m_method="$(_tn_meta_keep PASSPHRASE_METHOD)" || p=PASSPHRASE_METHOD
@@ -10255,7 +10255,7 @@ prompt_testnet_addons() {
     echo ""
     print_step "Centralized logging"
     print_info "Ships your node's logs to the Association's Loki so we can help you debug."
-    print_info "Needs a per-operator ingest token (you'll paste it, hidden, at the end of setup)."
+    print_info "Needs the hub's ingest token from the Association (you'll paste it, hidden, at the end of setup)."
     if confirm "Enable log shipping?"; then
         ENABLE_OBSERVABILITY="true"
     fi
@@ -10329,7 +10329,7 @@ step_testnet_addons() {
         print_step "Centralized telemetry — ${what} (Alloy)"
         if declare -F obs_enable >/dev/null 2>&1; then
             local token=""
-            print_info "Paste the per-operator obs ingest token (hidden input; leave blank to skip)."
+            print_info "Paste the obs ingest token from the Association (hidden input; leave blank to skip)."
             print_info "One token covers both logs and metrics."
             read -r -s -p "  Obs ingest token: " token; echo ""
             if [[ -n "$token" ]]; then

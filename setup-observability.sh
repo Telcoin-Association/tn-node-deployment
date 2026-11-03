@@ -5,7 +5,7 @@
 # Opt-in, testnet-only. Independently enable/disable shipping this node's logs (Grafana
 # Alloy -> central Loki) and its Prometheus metrics (Alloy -> central Prometheus), plus
 # the health-monitor endpoint. Re-runnable at any time. Logs and metrics share ONE
-# per-operator ingest token, pasted here (hidden) and stored ONLY in the token file
+# the hub's ingest token, pasted here (hidden) and stored ONLY in the token file
 # /etc/telcoin/alloy/ingest-token (root:telcoin-alloy 0640) -- never in git, .node-meta,
 # Alloy's environment or a unit file.
 #
@@ -209,7 +209,7 @@ _obs_collect_token() {
         print_info "Reusing the ingest token already stored on this node (one token covers logs + metrics)."
         return 0
     fi
-    print_info "Paste the per-operator obs ingest token from the Association (input hidden):"
+    print_info "Paste the obs ingest token from the Association (input hidden):"
     read -r -s -p "  Token: " _OBS_TOKEN; echo ""
     [[ -n "$_OBS_TOKEN" ]] || { print_warn "No token entered -- aborting."; return 1; }
     return 0
@@ -223,7 +223,7 @@ enable_logging() {
     addon_meta_write_begin || { pause; return 0; }
     print_info "Ships this node's logs to the Telcoin Association's Loki:"
     print_info "  ${OBS_PUSH_URL_TESTNET}"
-    print_info "You need a per-operator ingest token from the Association (docs/testnet-addons.md)."
+    print_info "You need the ingest token from the Association (docs/testnet-addons.md)."
     addons_lib_check
     echo ""
     # Turn logs on; preserve any existing metrics opt-in so obs_enable renders both.

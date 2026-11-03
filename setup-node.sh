@@ -488,12 +488,12 @@ setup_passphrase_method() {
             [[ "$supported" == "true" ]] && PASSPHRASE_METHOD=credential
             ;;
         credential)
-            [[ "$supported" == "true" ]] || setup_fail "--passphrase-method credential needs systemd ${TN_CRED_MIN_SYSTEMD} or later with systemd-creds (Ubuntu 24.04)."
+            [[ "$supported" == "true" ]] || setup_fail "--passphrase-method credential needs systemd ${TN_CRED_MIN_SYSTEMD} or later with systemd-creds (Ubuntu 24.04 ships 255)."
             ;;
     esac
     if [[ "$PASSPHRASE_METHOD" == "stdin" ]]; then
         if [[ "$NETWORK" != "testnet" && "$NETWORK" != "devnet" ]]; then
-            setup_fail "On ${NETWORK} the BLS passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later, Ubuntu 24.04)."
+            setup_fail "On ${NETWORK} the BLS passphrase is kept only as an encrypted credential (systemd ${TN_CRED_MIN_SYSTEMD} or later; Ubuntu 24.04 ships 255)."
         fi
         if [[ -n "$BIND_PCRS" ]]; then
             setup_fail "--bind-pcrs needs the encrypted credential, which this host cannot make (systemd ${TN_CRED_MIN_SYSTEMD} or later)."
@@ -1854,7 +1854,7 @@ init_node_inputs() {
     case "$PASSPHRASE_METHOD" in
         ""|credential|stdin) ;;
         loadcredential) PASSPHRASE_METHOD=stdin ;;
-        tpm) setup_fail "--passphrase-method tpm is no longer offered: the passphrase is kept as an encrypted systemd credential (credential) or, below systemd ${TN_CRED_MIN_SYSTEMD} on testnet, in a root-only file (stdin)." ;;
+        tpm) setup_fail "--passphrase-method tpm is no longer offered: the passphrase is kept as an encrypted systemd credential (credential) or, below systemd ${TN_CRED_MIN_SYSTEMD} on testnet and devnet, in a root-only file (stdin)." ;;
         *) setup_fail "unknown --passphrase-method ${PASSPHRASE_METHOD} (expected credential or stdin)" ;;
     esac
     if [[ -n "$BIND_PCRS" ]] && ! tn_pcrs_ok "$BIND_PCRS"; then
