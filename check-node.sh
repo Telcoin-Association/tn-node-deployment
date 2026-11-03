@@ -68,6 +68,11 @@ NODE_NETWORK=""
 NETWORK_SRC=""
 NETWORK_NOTE=""
 EXPECTED_CHAIN_ID=""
+# Also set by resolve_network: NETWORK_RPC_LABEL is the report header's network
+# RPC line ("" with --no-network); NETWORK_SKIP_WHY says why the network RPC is
+# not queried when QUERY_NETWORK is false.
+NETWORK_RPC_LABEL=""
+NETWORK_SKIP_WHY="--no-network"
 
 # The node's own identity, set by resolve_identity: the authority id that
 # consensus headers carry as author, and the execution address that committees
@@ -192,7 +197,7 @@ Usage: $0 [OPTIONS]
   --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:<RPC_PORT from .node-meta, or ${DEFAULT_RPC_PORT}>)
   --network-rpc <URL>      Network RPC for ground truth (default: the public RPC of the network in
                            .node-meta: testnet ${TESTNET_RPC_URL}, devnet ${DEVNET_RPC_URL},
-                           mainnet ${MAINNET_RPC_URL})
+                           mainnet ${MAINNET_RPC_URL}; none when the network is unknown)
   --no-network             Skip the network RPC query (local-only mode)
   --audit                  Only audit this host's node security settings (systemd floor,
                            passphrase delivery, credential, unit) and exit 1 on any warning
@@ -336,7 +341,9 @@ chain_network() {
 # (LOCAL_CHAIN_ID, probed before the report starts) stands in for it. With
 # neither, EXPECTED_CHAIN_ID stays empty and any Telcoin chain id is accepted.
 # NETWORK_RPC keeps a --network-rpc value; otherwise it becomes the public RPC of
-# that network, or the testnet RPC when the network is unknown.
+# that network. When the network is unknown and no --network-rpc was given there
+# is no RPC to compare with (another network's would be the wrong yardstick):
+# QUERY_NETWORK becomes false and NETWORK_SKIP_WHY says why.
 resolve_network() {
     local meta net chain_dec
     meta="$(node_meta_path 2>/dev/null || true)"
@@ -365,9 +372,18 @@ resolve_network() {
         [[ -z "$NODE_NETWORK" ]] || NETWORK_SRC="the local chain id"
     fi
     EXPECTED_CHAIN_ID="$(network_chain_id "$NODE_NETWORK")"
-    if [[ -z "$NETWORK_RPC" ]]; then
+    if [[ -n "$NETWORK_RPC" ]]; then
+        NETWORK_RPC_LABEL="${NETWORK_RPC} (--network-rpc, for ${NODE_NETWORK:-an unknown network})"
+    else
         NETWORK_RPC="$(network_rpc_url "$NODE_NETWORK")"
-        NETWORK_RPC="${NETWORK_RPC:-$TESTNET_RPC_URL}"
+        NETWORK_RPC_LABEL="${NETWORK_RPC} (${NODE_NETWORK} public RPC)"
+    fi
+    if [[ "$QUERY_NETWORK" != "true" ]]; then
+        NETWORK_RPC_LABEL=""
+    elif [[ -z "$NETWORK_RPC" ]]; then
+        QUERY_NETWORK=false
+        NETWORK_SKIP_WHY="network unknown; give --network-rpc URL to compare"
+        NETWORK_RPC_LABEL="none (${NETWORK_SKIP_WHY})"
     fi
     return 0
 }
@@ -1376,7 +1392,7 @@ report_worker_count() {
 # network_gap_reason -- why the network RPC is not being used this run.
 network_gap_reason() {
     if [[ "$QUERY_NETWORK" != "true" ]]; then
-        echo "--no-network"
+        echo "$NETWORK_SKIP_WHY"
     elif [[ "$NETWORK_WRONG_CHAIN" == "true" ]]; then
         echo "the network RPC serves another chain"
     else
@@ -2070,7 +2086,7 @@ if [[ -n "$NODE_NETWORK" ]]; then
 else
     print_info "Network:      unknown (${NETWORK_NOTE:-not recorded}; any Telcoin chain id is accepted)"
 fi
-[[ "$QUERY_NETWORK" == "true" ]] && print_info "Network RPC:  ${NETWORK_RPC}"
+[[ -z "$NETWORK_RPC_LABEL" ]] || print_info "Network RPC:  ${NETWORK_RPC_LABEL}"
 print_info "Time:         $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 if ! version_gte "${COMMON_VERSION:-0}" "2.0.0"; then
     print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 2.0.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
@@ -2195,7 +2211,7 @@ if [[ "$QUERY_NETWORK" == "true" ]]; then
         (( ++HEALTH_ISSUES ))
     fi
 else
-    print_info "Network query skipped (--no-network)"
+    print_info "Network query skipped (${NETWORK_SKIP_WHY})"
 fi
 
 # =============================================================================

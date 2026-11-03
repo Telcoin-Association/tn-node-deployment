@@ -86,4 +86,59 @@ check_has "mainnet with the monitor in .node-meta: an issue" "issues=1" "$OUT"
 printf 'NETWORK=testnet\nENABLE_HEALTHCHECK_MONITOR=true\n' > "$T/fx/etc/telcoin/.node-meta"
 runc check_healthcheck_on_mainnet
 check "testnet: not checked" "issues=0" "$(printf '%s' "$OUT" | tail -n 1)"
+
+# ---- LIB-B: resolve_network picks the network's own RPC, never another's -------------
+# resolve_network and the helpers it calls, cut from check-node.sh, over the
+# fixture .node-meta; LOCAL_CHAIN_ID stands in for the local RPC's chain id.
+{
+    for f in network_chain_id network_rpc_url chain_network hex_to_dec resolve_network network_gap_reason; do
+        sed -n "/^${f}() {/,/^}/p" "$CN"
+    done
+} > "$T/net.sh"
+# shellcheck source=/dev/null
+. "$T/net.sh"
+NWMETA="$T/fx/etc/telcoin/.node-meta"
+# resolve META-LINE NETWORK-RPC QUERY -- one resolve_network from a clean state.
+resolve() {
+    if [[ -n "$1" ]]; then printf '%s\n' "$1" > "$NWMETA"; else rm -f "$NWMETA"; fi
+    NODE_NETWORK="" NETWORK_SRC="" NETWORK_NOTE="" EXPECTED_CHAIN_ID=""
+    NETWORK_RPC="$2" QUERY_NETWORK="$3" NETWORK_RPC_LABEL="" NETWORK_SKIP_WHY="--no-network"
+    NETWORK_WRONG_CHAIN=""
+    LOCAL_CHAIN_ID=""
+    resolve_network
+}
+resolve "NETWORK=mainnet" "" true
+check "mainnet: its own public RPC" "$MAINNET_RPC_URL" "$NETWORK_RPC"
+check "mainnet: the header line names the network" "$MAINNET_RPC_URL (mainnet public RPC)" "$NETWORK_RPC_LABEL"
+check "mainnet: the network is queried" true "$QUERY_NETWORK"
+resolve "NETWORK=testnet" "" true
+check "testnet: its own public RPC" "$TESTNET_RPC_URL" "$NETWORK_RPC"
+resolve "NETWORK=devnet" "" true
+check "devnet: its own public RPC" "$DEVNET_RPC_URL" "$NETWORK_RPC"
+resolve "" "" true
+check "unknown network: no network RPC" "" "$NETWORK_RPC"
+check "unknown network: not queried" false "$QUERY_NETWORK"
+check "unknown network: the skip note" "network unknown; give --network-rpc URL to compare" "$NETWORK_SKIP_WHY"
+check "unknown network: the reason other sections give" "network unknown; give --network-rpc URL to compare" "$(network_gap_reason)"
+check "unknown network: the header line says none" "none (network unknown; give --network-rpc URL to compare)" "$NETWORK_RPC_LABEL"
+resolve "NETWORK=adiri" "" true
+check "NETWORK not a known name: no network RPC" "" "$NETWORK_RPC"
+check_lacks "NETWORK not a known name: never the testnet RPC" "adiri.tel" "$NETWORK_RPC $NETWORK_RPC_LABEL"
+resolve "" "https://rpc.example.org" true
+check "unknown network, --network-rpc: used" "https://rpc.example.org" "$NETWORK_RPC"
+check "unknown network, --network-rpc: queried" true "$QUERY_NETWORK"
+check "unknown network, --network-rpc: the header line" "https://rpc.example.org (--network-rpc, for an unknown network)" "$NETWORK_RPC_LABEL"
+resolve "NETWORK=mainnet" "https://rpc.example.org" true
+check "mainnet, --network-rpc wins" "https://rpc.example.org" "$NETWORK_RPC"
+check "mainnet, --network-rpc: the header line" "https://rpc.example.org (--network-rpc, for mainnet)" "$NETWORK_RPC_LABEL"
+resolve "" "" false
+check "--no-network, unknown network: no header line" "" "$NETWORK_RPC_LABEL"
+check "--no-network: the reason stays --no-network" "--no-network" "$(network_gap_reason)"
+rm -f "$NWMETA"
+NODE_NETWORK="" NETWORK_RPC="" QUERY_NETWORK=true LOCAL_CHAIN_ID="0x$(printf '%x' "$MAINNET_CHAIN_ID")"
+resolve_network
+check "no .node-meta, a mainnet chain id: the mainnet RPC" "$MAINNET_RPC_URL" "$NETWORK_RPC"
+# The report prints the header line and the section 3 skip from these variables.
+check "the report header prints NETWORK_RPC_LABEL" 1 "$(grep -c 'print_info "Network RPC:  ${NETWORK_RPC_LABEL}"' "$CN")"
+check "the section 3 skip prints NETWORK_SKIP_WHY" 1 "$(grep -c 'print_info "Network query skipped (${NETWORK_SKIP_WHY})"' "$CN")"
 finish
