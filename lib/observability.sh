@@ -273,7 +273,8 @@ obs_write_config_alloy() {
 # obs_render_config_alloy — write ${OBS_ETC_DIR}/config.alloy for this installation; the
 # one entry point obs_enable and both partial disables use, so every path renders the
 # same file. The pipelines follow ENABLE_OBSERVABILITY / ENABLE_METRICS (set them first).
-# Docker: root:root with the vendored __path__ (the sidecar mounts the logs there).
+# Docker: group telcoin-alloy, like the token file, with the vendored __path__ (the
+# sidecar mounts the logs there).
 # Native: group telcoin-alloy, and while logs ship __path__ points at the node log dir
 # (obs_node_log_dir; the NODE_LOG_DIR global wins over .node-meta). rc 1 when
 # INSTALL_METHOD, or NODE_LOG_DIR when it is read, is set twice in .node-meta (said,
@@ -283,7 +284,7 @@ obs_render_config_alloy() {
     method="$(addon_meta_get INSTALL_METHOD binary)" || return 1
     [[ -n "$method" ]] || method="binary"
     if [[ "$method" == "docker" ]]; then
-        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy"
+        obs_write_config_alloy "${OBS_ETC_DIR}/config.alloy" "" "$OBS_ALLOY_USER"
         return
     fi
     if [[ "${ENABLE_OBSERVABILITY:-false}" == "true" ]]; then
@@ -858,9 +859,10 @@ obs_write_alloy_native_unit() {
 # (the env file sets CREDENTIALS_DIRECTORY there, so the one config.alloy serves both
 # runtimes). --mount, not -v: a missing source file stops the start instead of docker
 # creating a directory in its place. The image runs as uid 0 with every capability
-# dropped, which reads the root-owned 0640 file as its owner; --group-add <gid of
-# telcoin-alloy> also lets an image that runs as its own alloy user (473) read it. No
-# core dumps: LimitCORE=0 covers the docker client, --ulimit core=0 the container.
+# dropped, which reads the token file and config.alloy (both root:telcoin-alloy 0640) as
+# their owner; --group-add <gid of telcoin-alloy> lets it read them through the group
+# too, as an image that runs as its own alloy user (473) would have to. No core dumps:
+# LimitCORE=0 covers the docker client, --ulimit core=0 the container.
 #
 # Storage dir is bind-mounted at the SAME absolute path inside the container
 # (${OBS_DATA_DIR}:${OBS_DATA_DIR}) and passed verbatim to --storage.path, matching the
