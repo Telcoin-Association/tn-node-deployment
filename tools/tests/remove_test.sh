@@ -912,6 +912,28 @@ check_has "leftovers, only the limit: listed" "yes" \
     "$(grep -qF '  /etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)' "$T/out" && echo yes)"
 gone "leftovers, only the limit: boot unit" "$SD/telcoin-p2p-limit.service"
 check "leftovers, only the limit: table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+# The menu removes one node of two: its keys removal keeps the ruleset (not
+# shredded, not removed), so the remaining node's boot unit still finds it; the
+# removal of the last node then takes the unit, the ruleset and the table.
+mkfixture; p2p_limit_fixture
+printf '[Service]\n' > "$SD/telcoin-validator.service"
+INSTALLED_UNITS=(telcoin telcoin-validator)
+remove_node_unit telcoin <<< "DELETE" > "$T/out" 2>&1
+check "p2p limit, menu, one of two: ruleset kept as it was" "table inet tn_p2p
+delete table inet tn_p2p" "$(cat "$ETC/p2p-limit.nft" 2>/dev/null)"
+check_lacks "p2p limit, menu, one of two: ruleset not shredded" "$ETC/p2p-limit.nft" "$(calls)"
+kept "p2p limit, menu, one of two: boot unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit, menu, one of two: table" "yes" "$(exists "$NFT_TABLE_FILE")"
+gone "p2p limit, menu, one of two: the passphrase still goes" "$ETC/bls-passphrase.cred"
+gone "p2p limit, menu, one of two: the removed unit" "$SD/telcoin.service"
+check_has "p2p limit, menu, one of two: said" "yes" \
+    "$(grep -q 'Keeping /etc/telcoin/p2p-limit.nft: another node unit remains here, and the P2P new-flow limit stays whole for it' "$T/out" && echo yes)"
+INSTALLED_UNITS=(telcoin-validator)
+remove_node_unit telcoin-validator <<< "DELETE" > "$T/out" 2>&1
+gone "p2p limit, menu, the last node: ruleset" "$ETC/p2p-limit.nft"
+gone "p2p limit, menu, the last node: boot unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit, menu, the last node: table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+INSTALLED_UNITS=()
 # The JSON full removal takes it too.
 mkfixture; p2p_limit_fixture
 ( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
