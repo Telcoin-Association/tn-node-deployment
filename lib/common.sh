@@ -8166,6 +8166,64 @@ tn_docker_holds_digest() {
     docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null | grep -qxF -- "$1"
 }
 
+# tn_docker_image_network_ok NETWORK IMAGE [progress-fn] -- rc 0 when the node
+# binary in IMAGE (<repo>@sha256:<digest>, already pulled) was built for NETWORK.
+# IMAGE's /usr/local/bin/telcoin (the binary the release pipeline checks) runs
+# once with --version in a throwaway container with no network and no
+# capabilities, 60 s at most where timeout exists, and its "Build Features:"
+# line is judged as tn_release_version_ok judges a release binary's: exactly one
+# such line, listing nothing on mainnet and on testnet the testnet feature
+# (faucet allowed, nothing else). Devnet images are not checked: rc 0 with an
+# info line. rc 1, with a message that names IMAGE, the features found and
+# NETWORK, when the image does not run, the line is missing or doubled, or the
+# features are not NETWORK's. Callers run it after the pull and before any
+# container starts or .node-meta names IMAGE, and stop on rc 1.
+tn_docker_image_network_ok() {
+    local net="${1:-}" img="${2:-}" fn="${3:-}" out n feats want rc=0
+    local -a tmo
+    case "$net" in
+        devnet)
+            _tn_c4_say info "Devnet images are not checked for their build features: ${img} is used as given." "$fn"
+            return 0
+            ;;
+        testnet|mainnet) ;;
+        *)
+            _tn_c4_say warn "No build-feature rule for network '${net}', so ${img:-the image} is not used." "$fn"
+            return 1
+            ;;
+    esac
+    if [[ "$img" != *@sha256:* || "$img" == -* || "$img" =~ [[:space:]] ]]; then
+        _tn_c4_say warn "Image refused: ${img:-(empty)} is not an image by digest, so its build features are not read and it is not used." "$fn"
+        return 1
+    fi
+    tmo=()
+    if command -v timeout >/dev/null 2>&1; then
+        tmo=(timeout 60)
+    fi
+    out="$(${tmo[@]+"${tmo[@]}"} docker run --rm --pull=never --network none --cap-drop ALL \
+        --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin \
+        "$img" --version </dev/null 2>/dev/null 9>&-)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _tn_c4_say warn "Could not run ${img} to read its build features (docker run exited ${rc}), so it is not used and nothing was changed. Check that Docker is running and holds the image, then try again." "$fn"
+        return 1
+    fi
+    n="$(printf '%s\n' "$out" | grep -c '^Build Features:')" || n=0
+    feats="$(printf '%s\n' "$out" | sed -n 's/^Build Features:[[:space:]]*//p' | tr -d '[:space:]')"
+    if [[ "$n" != "1" ]]; then
+        _tn_c4_say warn "Image refused: ${img} prints ${n} \"Build Features:\" lines with --version, not one, so whether it is a ${net} image cannot be told. It is not used and nothing was changed; if a ${net} release names this image, report it to the node team." "$fn"
+        return 1
+    fi
+    if ! tn_release_version_ok "$out" "$net" "" >/dev/null 2>&1; then
+        want="none"
+        # network-gated: names the testnet build features in the testnet refusal only
+        [[ "$net" != "testnet" ]] || want="adiri, and faucet at most"
+        feats="${feats//,/, }"
+        _tn_c4_say warn "Image refused: ${img} was built with the features ${feats:-none}, and a ${net} image has ${want}, so it is not a ${net} image. It is not used and nothing was changed; if a ${net} release names this image, report it to the node team." "$fn"
+        return 1
+    fi
+    return 0
+}
+
 # _tn_tag_sig_check DIR TAG -- check the signature on release tag TAG in the git
 # checkout DIR against the keys in lib/release-keys (git verify-tag with gpg, in
 # a throwaway GNUPGHOME), judged by _tn_gpg_status_verdict as release files are.

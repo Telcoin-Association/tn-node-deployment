@@ -168,7 +168,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
-        tn_docker_pull_repo_ok tn_docker_pull_repos_for >/dev/null; then
+        tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -1050,6 +1050,11 @@ _preflight_docker() {
         setup_fail "Docker does not hold ${DOCKER_IMAGE} under that digest after the pull (digest mismatch); the image was not used."
     fi
     print_ok "Docker image pulled: ${DOCKER_IMAGE}"
+    # The image's binary must be built for this network (its Build Features line)
+    # before any container of it starts or .node-meta names it.
+    if ! tn_docker_image_network_ok "$NETWORK" "$DOCKER_IMAGE" setup_progress; then
+        setup_fail "Refusing the image ${DOCKER_IMAGE}: it is not a ${NETWORK} image (see above). No container was started and .node-meta was not written."
+    fi
 
     BINARY_PATH="docker"
 }

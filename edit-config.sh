@@ -101,7 +101,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_write_node_env tn_rerender_node_launch tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
         tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
-        tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network >/dev/null; then
+        tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -1457,6 +1457,12 @@ set_docker_image() {
         edit_error "Docker does not hold ${new_image} under that digest after the pull (digest mismatch)"
         return 1
     fi
+    # Built for this network (its Build Features line) before the start script
+    # names it, the node restarts on it or .node-meta records it.
+    if ! tn_docker_image_network_ok "$net" "$new_image" edit_wait_say; then
+        edit_error "refusing ${new_image}: it is not a ${net} image (see above); the image is not changed"
+        return 1
+    fi
     swap_docker_image "$new_image" || return 1
     edit_record_image "$new_image" "$new_tag"
 }
@@ -2569,6 +2575,12 @@ edit_docker_image() {
         return
     fi
     print_ok "Image pulled successfully"
+    if ! tn_docker_image_network_ok "$net" "$new_image"; then
+        print_error "Refusing ${new_image}: it is not a ${net} image (see above). The image is not changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
 
     menu_lock || return 0
     backup_edit_targets || return 0

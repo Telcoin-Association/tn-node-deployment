@@ -300,6 +300,51 @@ meta $'NETWORK=foo\n'
 jpd "${GH}@sha256:${D64}"
 check "json prepare, network unknown: refused before any pull" "1 yes no" \
     "$RC $(has "$(cat "$T/json.log")" "cannot tell which network") $(exists "$T/pulled")"
+# docker_pull_target (update-node's Docker prepare, interactive and --json): after
+# the pull and its digest check the image's build features are checked for the
+# node's network (tn_docker_image_network_ok, stubbed here: FEAT_RC=1 refuses),
+# before the pending state is written; a refusal writes none and the --json
+# prepare ends with an error event (the exit trap then sends done).
+dpt_stubbed() {
+    detect_current_docker_image() { printf '%s@sha256:%s\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+    build_log_file() { printf '%s\n' "$T/pull.log"; }
+    docker() { printf '%s\n' "$*" >> "$T/order.log"; }
+    tn_docker_holds_digest() { echo held >> "$T/order.log"; return 0; }
+    tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/order.log"; return "${FEAT_RC:-0}"; }
+    write_pending_state() { echo pending >> "$T/order.log"; cat > "$T/pending"; }
+    storage_migration_begin() { :; }
+    json_prepare_docker "$1"
+}
+dpt() {  # dpt ARG -> JSON events in $T/json.log; the calls in $T/order.log; RC
+    rm -f "$T/pending"
+    : > "$T/order.log"
+    exec 3>"$T/json.log"
+    JSON_MODE=true
+    run dpt_stubbed "$1"
+    JSON_MODE=false
+    exec 3>&-
+}
+order() { grep -v '^image inspect' "$T/order.log" | tr '\n' '|' | sed 's/|$//'; }
+meta $'NETWORK=testnet\n'
+dpt "${R}@sha256:${D64}"
+check "docker prepare: pull, digest check, feature check, then the pending state" \
+    "0 pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}|pending" "$RC $(order)"
+check "docker prepare: the pending state names the new image" yes "$(has "$(cat "$T/pending" 2>/dev/null)" "NEW_IMAGE=${R}@sha256:${D64}")"
+FEAT_RC=1
+dpt "${R}@sha256:${D64}"
+check "docker prepare, feature check refuses: rc 1, no pending state" "1 no" "$RC $(exists "$T/pending")"
+check "docker prepare, feature check refuses: nothing after the check" \
+    "pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}" "$(order)"
+check "docker prepare, feature check refuses: a warn event says nothing was prepared" yes \
+    "$(has "$(cat "$T/json.log")" "\"event\":\"warn\",\"msg\":\"The image ${R}@sha256:${D64} is not a testnet image (see above); nothing was prepared and the node was not touched.\"")"
+check "docker prepare, feature check refuses: then an error event" yes \
+    "$(has "$(cat "$T/json.log")" "\"event\":\"error\",\"msg\":\"the image ${R}@sha256:${D64} was not prepared (see the warning above)\"")"
+check "docker prepare, feature check refuses: no done ok event" no "$(has "$(cat "$T/json.log")" '"ok":true')"
+unset FEAT_RC
+meta $'NETWORK=devnet\n'
+dpt "${R}@sha256:${D64}"
+check "docker prepare, devnet: the check is asked for devnet" "0 yes" "$RC $(has "$(order)" "check devnet ${R}@sha256:${D64}")"
+unset -f dpt_stubbed dpt order
 unset -f jpd_stubbed jpd loud_tags pk
 
 # -----------------------------------------------------------------------------

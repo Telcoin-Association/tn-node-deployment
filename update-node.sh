@@ -92,7 +92,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_restore_backup tn_install_root_binary tn_release_stage tn_source_build \
         tn_docker_resolve_ref tn_docker_local_digest tn_release_tags_sort tn_release_tag_newer \
         tn_release_newest_tag tn_registry_tags tn_release_tag_final tn_release_tag_grammar \
-        _tn_guard_network >/dev/null; then
+        _tn_guard_network tn_docker_image_network_ok >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this update-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -1595,13 +1595,15 @@ docker_floor_check() {
     update_floor_check "$ref" "${2:-}"
 }
 
-# docker_pull_target IMAGE CURRENT TAG -- pull IMAGE (a digest reference) with the
-# log in a fresh file, check that Docker holds it under that digest (RepoDigests),
-# and write the pending state: OLD_IMAGE CURRENT, NEW_IMAGE IMAGE, PULLED_IMAGE_ID,
-# OLD_REF/NEW_REF the running and target release tags when known. rc 1 with the
-# reason reported (update_wait_say) on any failure.
+# docker_pull_target IMAGE CURRENT TAG NETWORK -- pull IMAGE (a digest reference)
+# with the log in a fresh file, check that Docker holds it under that digest
+# (RepoDigests) and that its binary was built for NETWORK
+# (tn_docker_image_network_ok), and write the pending state: OLD_IMAGE CURRENT,
+# NEW_IMAGE IMAGE, PULLED_IMAGE_ID, OLD_REF/NEW_REF the running and target
+# release tags when known. rc 1 with the reason reported (update_wait_say) on any
+# failure; nothing is written to the pending state then.
 docker_pull_target() {
-    local img="$1" current="$2" tag="${3:-}" old_tag pull_log pulled_id state
+    local img="$1" current="$2" tag="${3:-}" net="${4:-}" old_tag pull_log pulled_id state
     if ! pull_log="$(build_log_file)"; then
         update_wait_say warn "Could not create a log file for the image pull; nothing pulled."
         return 1
@@ -1615,6 +1617,10 @@ docker_pull_target() {
     rm -f -- "$pull_log"
     if ! tn_docker_holds_digest "$img"; then
         update_wait_say warn "Docker does not hold ${img} under that digest after the pull (digest mismatch); nothing was prepared."
+        return 1
+    fi
+    if ! tn_docker_image_network_ok "$net" "$img" update_wait_say; then
+        update_wait_say warn "The image ${img} is not a ${net:-known network} image (see above); nothing was prepared and the node was not touched."
         return 1
     fi
     # Image ID of what was pulled: apply checks the restarted container runs it.
@@ -1660,7 +1666,7 @@ prepare_docker_update() {
         print_info "Cancelled."
         return 1
     fi
-    docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG" || return 1
+    docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG" "$net" || return 1
     print_ok "Image pulled. Service still running on ${current}."
     print_ok "Pending update saved: $(pending_state_path)"
 }
@@ -3028,7 +3034,7 @@ json_prepare_docker() {
     fi
     cur_tag="$(docker_current_tag "$current")"
     update_downgrade_check "$cur_tag" "$DOCKER_TARGET_TAG" || return 1
-    if ! docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG"; then
+    if ! docker_pull_target "$DOCKER_TARGET_IMAGE" "$current" "$DOCKER_TARGET_TAG" "$net"; then
         json_event error "the image ${DOCKER_TARGET_IMAGE} was not prepared (see the warning above)"; return 1
     fi
     # The UI cannot ask at apply time, so a one-way target is announced here.

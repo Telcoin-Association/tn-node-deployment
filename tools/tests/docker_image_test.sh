@@ -24,7 +24,10 @@
 # refused before any download), tn_docker_resolve_ref (devnet: digests only; the
 # other network's package and the old single package refused on every network),
 # tn_docker_release_tag_for on devnet (the .node-meta record only, no registry
-# call) and tn_docker_holds_digest.
+# call), tn_docker_holds_digest and, against a docker shim that prints a canned
+# --version per image, tn_docker_image_network_ok (mainnet: no build features;
+# testnet: adiri, faucet allowed; the line missing or doubled refused; a run that
+# fails refused; devnet not checked).
 #
 #   bash tools/tests/docker_image_test.sh
 #
@@ -746,5 +749,97 @@ rc=0; tn_docker_holds_digest "${R}@sha256:$(printf '%s' "$D64" | tr 0 e)" || rc=
 check_rc "holds digest: another digest refused" 1 "$rc"
 rc=0; tn_docker_holds_digest "${R}:v0.16.0-adiri" || rc=$?
 check_rc "holds digest: a tag is not a digest" 1 "$rc"
+
+# --- tn_docker_image_network_ok (docker shim) ------------------------------------------
+# docker run logs its argv to $REC/run.log and prints $REC/ver.<image> (the image
+# with / : @ as _), or exits 125 when there is none, as for an image Docker does
+# not hold.
+cat > "$T/bin/docker" <<'SH'
+#!/bin/sh
+[ "$1" = run ] || exit 1
+printf '%s\n' "$*" >> "$REC/run.log"
+img=""
+prev=""
+for a in "$@"; do
+    [ "$a" = "--version" ] && img="$prev"
+    prev="$a"
+done
+f="$REC/ver.$(printf '%s' "$img" | tr '/:@' '___')"
+[ -f "$f" ] || exit 125
+cat "$f"
+SH
+chmod 0755 "$T/bin/docker"
+# ver IMAGE FEATURES... -- the canned --version of IMAGE: one Build Features line
+# per FEATURES argument; none at all with no argument.
+ver() {
+    local img="$1" f feats
+    shift
+    f="$REC/ver.$(printf '%s' "$img" | tr '/:@' '___')"
+    printf 'telcoin-network-cli Version: 0.17.0\nCommit SHA: abc1234\n' > "$f"
+    for feats in "$@"; do
+        printf 'Build Features: %s\n' "$feats" >> "$f"
+    done
+    printf 'Build Profile: maxperf\n' >> "$f"
+}
+inok() {  # inok NAME EXPECTED-RC NETWORK IMAGE -- the rc; the message in $T/err
+    local rc=0
+    tn_docker_image_network_ok "$3" "$4" 2>"$T/err" || rc=$?
+    check_rc "$1" "$2" "$rc"
+}
+MI="${GM}@sha256:${D64}"
+TI="${GH}@sha256:${D64}"
+ver "$MI" ""
+: > "$REC/run.log"
+inok "features, mainnet: none listed, accepted" 0 mainnet "$MI"
+check "features: one docker run" "1" "$(wc -l < "$REC/run.log" | tr -d ' ')"
+check_has "features: run with no network, no capabilities, the release binary as entrypoint" \
+    "run --rm --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" "$(cat "$REC/run.log")"
+check "features, mainnet accepted: nothing said" "" "$(cat "$T/err")"
+ver "$MI" "adiri"
+inok "features, mainnet: adiri refused" 1 mainnet "$MI"
+check_has "features, mainnet: the refusal names the image, the features and the network" "1" \
+    "$(grep -cF "Image refused: ${MI} was built with the features adiri, and a mainnet image has none, so it is not a mainnet image." "$T/err")"
+ver "$MI" "faucet"
+inok "features, mainnet: faucet refused" 1 mainnet "$MI"
+ver "$MI" "adiri,faucet"
+inok "features, mainnet: adiri and faucet refused" 1 mainnet "$MI"
+check_has "features, mainnet: both features named" "1" "$(grep -cF "built with the features adiri, faucet, and a mainnet image has none" "$T/err")"
+ver "$MI" "metrics"
+inok "features, mainnet: any feature refused" 1 mainnet "$MI"
+ver "$TI" "adiri"
+inok "features, testnet: adiri accepted" 0 testnet "$TI"
+ver "$TI" "adiri,faucet"
+inok "features, testnet: adiri and faucet accepted" 0 testnet "$TI"
+ver "$TI" ""
+inok "features, testnet: none listed refused" 1 testnet "$TI"
+check_has "features, testnet: the refusal says what a testnet image has" "1" \
+    "$(grep -cF "Image refused: ${TI} was built with the features none, and a testnet image has adiri, and faucet at most, so it is not a testnet image." "$T/err")"
+ver "$TI" "faucet"
+inok "features, testnet: faucet without adiri refused" 1 testnet "$TI"
+ver "$TI" "adiri,metrics"
+inok "features, testnet: another feature beside adiri refused" 1 testnet "$TI"
+ver "$TI"
+inok "features: no Build Features line refused" 1 testnet "$TI"
+check_has "features: the missing line is said" "1" "$(grep -cF "Image refused: ${TI} prints 0 \"Build Features:\" lines with --version, not one" "$T/err")"
+ver "$MI" "" ""
+inok "features: two Build Features lines refused" 1 mainnet "$MI"
+check_has "features: the doubled line is said" "1" "$(grep -cF "prints 2 \"Build Features:\" lines" "$T/err")"
+inok "features: an image docker cannot run refused" 1 testnet "${GH}@sha256:$(printf '%s' "$D64" | tr 0 9)"
+check_has "features: the failed run is said, with docker's exit code" "1" "$(grep -cF "(docker run exited 125), so it is not used and nothing was changed" "$T/err")"
+: > "$REC/run.log"
+inok "features: devnet is not checked" 0 devnet "${R}@sha256:${D64}"
+check "features, devnet: docker never ran" "" "$(cat "$REC/run.log")"
+check_has "features, devnet: an info line says so" "1" "$(grep -cF "Devnet images are not checked for their build features" "$T/err")"
+inok "features: a network without a rule refused" 1 foo "$TI"
+inok "features: a tag refused before docker runs" 1 testnet "${GH}:v0.17.0-adiri"
+inok "features: a leading dash refused" 1 testnet "-${TI}"
+check "features: no docker run for the refusals before it" "" "$(cat "$REC/run.log")"
+# The progress-fn gets the refusal as a warn.
+say_rec() { printf '%s %s\n' "$1" "$2" >> "$REC/say.log"; }
+: > "$REC/say.log"
+ver "$MI" "adiri"
+rc=0; tn_docker_image_network_ok mainnet "$MI" say_rec 2>/dev/null || rc=$?
+check "features: the refusal goes to the progress-fn as a warn" "1 1" "$rc $(grep -c '^warn Image refused' "$REC/say.log")"
+unset -f ver inok say_rec
 
 finish

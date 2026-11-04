@@ -10,7 +10,10 @@
 # already-set file alone and stops on a file that is not a JSON object; and
 # edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
 # a digest, and records the image in .node-meta; on a devnet host (NETWORK=devnet in
-# .node-meta) it takes a digest only.
+# .node-meta) it takes a digest only. In both, the image's build-feature check
+# (tn_docker_image_network_ok, stubbed here and tested in docker_image_test.sh)
+# runs after the pull and its digest check and before anything uses the image; a
+# refusal stops the install or the change.
 #
 # Copies of setup-node.sh and edit-config.sh without their last line are sourced in
 # subshells (both source lib/common.sh, whose readonly constants cannot be set
@@ -37,6 +40,8 @@ sn() {
       set +e
       setup_fail() { printf '%s\n' "$*" >&2; exit 1; }
       setup_warn() { :; }
+      # The build-feature check: logged beside the docker calls; FEAT_RC=1 refuses.
+      tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/docker.log"; return "${FEAT_RC:-0}"; }
       eval "$1" ) >"$T/sn.out" 2>"$T/sn.err"
     printf '%s' "$?"
 }
@@ -135,6 +140,25 @@ check "pulled image not held under its digest: setup stops" "1 yes" "$rc $(grep 
 check_has "the image was pulled by digest" "pull ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
 rc="$(sn "$PD; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s' \"\$BINARY_PATH\" > \"\$T/bp\"")"
 check "pulled image held under its digest: setup goes on" "0 docker" "$rc $(cat "$T/bp" 2>/dev/null)"
+# The order: the release tag resolved, the image pulled, its digest checked, then
+# its build features; a refusal stops setup before BINARY_PATH is set, so no
+# container of it starts and .node-meta never names it.
+FEAT='tn_docker_image_for_tag() { printf "resolve %s\n" "$2" >> "$T/docker.log"; printf "%s@sha256:%s\n" "$R" "$D64"; }; tn_docker_holds_digest() { echo held >> "$T/docker.log"; [ "$1" = "$DOCKER_IMAGE" ]; }; RELEASE_TAG=v0.17.0-adiri DOCKER_IMAGE='
+: > "$T/docker.log"; rm -f "$T/bp"
+rc="$(sn "$PD; $FEAT; _preflight_docker; printf '%s' \"\$BINARY_PATH\" > \"\$T/bp\"")"
+check "feature check: resolve, pull, digest check, feature check, then setup goes on" \
+    "0 docker resolve v0.17.0-adiri|pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}" \
+    "$rc $(cat "$T/bp" 2>/dev/null) $(tr '\n' '|' < "$T/docker.log" | sed 's/|$//')"
+: > "$T/docker.log"; rm -f "$T/bp"
+rc="$(sn "$PD; $FEAT; FEAT_RC=1; _preflight_docker; printf '%s' \"\$BINARY_PATH\" > \"\$T/bp\"")"
+check "feature check refused: setup stops before BINARY_PATH is set" "1 none" "$rc $(cat "$T/bp" 2>/dev/null || echo none)"
+check "feature check refused: the reason says no container started" yes \
+    "$(grep -qF "Refusing the image ${R}@sha256:${D64}: it is not a testnet image (see above). No container was started and .node-meta was not written." "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "$PD; NETWORK=mainnet; tn_docker_network_ok() { return 0; }; _setup_mainnet_digest_ok() { return 0; }; tn_docker_release_tag_for() { return 1; }; tn_docker_holds_digest() { return 0; }; DOCKER_IMAGE='${MR}@sha256:${D64}'; _preflight_docker")"
+check "feature check on mainnet: asked for the mainnet network" "0 yes" \
+    "$rc $(grep -qxF "check mainnet ${MR}@sha256:${D64}" "$T/docker.log" && echo yes || echo no)"
+unset FEAT
 # Devnet by digest: pulled as given, no release tag looked up in a registry.
 : > "$T/docker.log"; rm -f "$T/bp" "$T/loud"
 rc="$(sn "$PD; NETWORK=devnet DOCKER_IMAGE=\"\${R}@sha256:\${D64}\"; tn_registry_tags() { echo tags > \"\$T/loud\"; return 1; }; tn_registry_digest() { echo digest > \"\$T/loud\"; return 1; }; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s %s' \"\$BINARY_PATH\" \"\${RELEASE_TAG:-none}\" > \"\$T/bp\"")"
@@ -238,7 +262,8 @@ ec() {
       tn_docker_image_for_tag() { printf '%s@sha256:%s\n' "$R" "$D64"; }
       tn_docker_holds_digest() { return 0; }
       docker() { printf '%s\n' "$*" >> "$T/docker.log"; }
-      swap_docker_image() { printf '%s\n' "$1" > "$T/swapped"; }
+      tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/docker.log"; return "${FEAT_RC:-0}"; }
+      swap_docker_image() { printf '%s\n' "$1" > "$T/swapped"; printf 'swap %s\n' "$1" >> "$T/docker.log"; }
       meta_set() { printf '%s=%s\n' "$1" "$2" >> "$T/meta.log"; }
       meta_unset() { printf 'unset %s\n' "$1" >> "$T/meta.log"; }
       edit_error() { printf '%s\n' "$*" >&2; }
@@ -247,9 +272,18 @@ ec() {
     printf '%s' "$?"
 }
 rm -f "$T/swapped" "$T/meta.log"
+: > "$T/docker.log"
 rc="$(ec v0.17.0-adiri)"
 check "edit: a release tag runs its digest" "0 ${R}@sha256:${D64}" "$rc $(cat "$T/swapped" 2>/dev/null)"
 check "edit: .node-meta records image, digest and tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+check "edit: pull, feature check, then the swap" "pull ${R}@sha256:${D64}|check testnet ${R}@sha256:${D64}|swap ${R}@sha256:${D64}" \
+    "$(tr '\n' '|' < "$T/docker.log" | sed 's/|$//')"
+rm -f "$T/swapped" "$T/meta.log"
+rc="$(FEAT_RC=1 ec v0.17.0-adiri)"
+check "edit: the feature check refuses: nothing swapped, nothing recorded" "1 no no" \
+    "$rc $([[ -e "$T/swapped" ]] && echo yes || echo no) $([[ -e "$T/meta.log" ]] && echo yes || echo no)"
+check "edit: the refusal says the image is not changed" yes \
+    "$(grep -qF "refusing ${R}@sha256:${D64}: it is not a testnet image (see above); the image is not changed" "$T/ec.err" && echo yes || echo no)"
 rm -f "$T/swapped" "$T/meta.log"
 rc="$(ec "${R}:latest")"
 check "edit: latest refused, nothing swapped" "1 no" "$rc $([[ -e "$T/swapped" ]] && echo yes || echo no)"
@@ -278,6 +312,7 @@ ecd() {
       tn_fetch_release_image() { echo fetched > "$T/fetched"; return 1; }
       tn_docker_holds_digest() { return 0; }
       docker() { printf '%s\n' "$*" >> "$T/docker.log"; }
+      tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/docker.log"; return "${FEAT_RC:-0}"; }
       swap_docker_image() { printf '%s\n' "$1" > "$T/swapped"; }
       meta_set() { printf '%s=%s\n' "$1" "$2" >> "$T/meta.log"; }
       meta_unset() { printf 'unset %s\n' "$1" >> "$T/meta.log"; }
@@ -289,8 +324,10 @@ ecd() {
 swapped() { [[ -e "$T/swapped" ]] && cat "$T/swapped" || echo none; }
 ECD_META=devnet
 rm -f "$T/swapped" "$T/meta.log" "$T/fetched"
+: > "$T/docker.log"
 rc="$(ecd "${R}@sha256:${D64}")"
 check "edit, devnet: a legacy-repository digest runs as given" "0 ${R}@sha256:${D64}" "$rc $(swapped)"
+check_has "edit, devnet: the feature check is asked for devnet (which skips it)" "check devnet ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
 check "edit, devnet: .node-meta records image and digest, no tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} unset RELEASE_TAG" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
 for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.16.0-adiri "${R}:main-0123abc" "docker.io/library/busybox@sha256:${D64}" "${R}:latest" "${GH}@sha256:${D64}"; do
     rm -f "$T/swapped"
