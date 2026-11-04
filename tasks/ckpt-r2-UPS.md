@@ -15,6 +15,7 @@ release-packages-per-network from origin/main a0d6e6e26.
 - [x] V8 fix round: W3 PR body wording; N1 not built, PR body and guide say the rerun is a full rebuild
 - [x] V8 fix round: matrix + shellcheck + release-lint + mdbook re-run
 - [x] V8 re-verification notes: N16 fail closed on unclear inspect failures, N15 private-with-tag stops before the build (7ae07a950)
+- [x] V8 N19: 403 Forbidden counts as the login not seeing the tag (6e63be065)
 - [x] PR body tasks/pr-body-UPS.md (title "release: per-network image packages tn-mainnet and tn-testnet")
 
 ## Changes
@@ -101,6 +102,12 @@ release-packages-per-network from origin/main a0d6e6e26.
   as the maintainer guide says), then run make release-build TAG=... again, with
   RELEASE_REBUILD=1 if the tag must be rebuilt". releasing.md failure-table row rewritten to
   match. PR body: first-push paragraph, guarantee kept and extended, testing line.
+
+- V8 N19 (6e63be065): login_digest's "does not see the tag" patterns gain `*"403 forbidden"*`
+  (case-insensitive; ghcr's anonymous answer for a never-pushed package is "failed to fetch
+  anonymous token: ... 403 Forbidden"). "permission denied" stays matched first (exit 3).
+  Matrix: 403 line + RELEASE_FIRST_PUSH=tn-mainnet continues; 403 + RELEASE_YES=1 only exits 2.
+  PR body: the two sentences listing the accepted answers and the testing line name 403.
 
 ## Docs notes
 
@@ -245,6 +252,13 @@ with the docker login, ghcr.io/telcoin-association/tn-mainnet:v0.1.0 does not re
 warning: RELEASE_FIRST_PUSH=tn-mainnet: pushing ghcr.io/telcoin-association/tn-mainnet:v0.1.0 as the first image of the package; build stops after the push until the pack
 reached the build step (git worktree add)
 -- registry answers denied, RELEASE_FIRST_PUSH=tn-mainnet: exit 0
+with the docker login, ghcr.io/telcoin-association/tn-mainnet:v0.1.0 does not resolve: ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from
+warning: RELEASE_FIRST_PUSH=tn-mainnet: pushing ghcr.io/telcoin-association/tn-mainnet:v0.1.0 as the first image of the package; build stops after the push until the pack
+reached the build step (git worktree add)
+-- registry answers 403 Forbidden, RELEASE_FIRST_PUSH=tn-mainnet: exit 0
+with the docker login, ghcr.io/telcoin-association/tn-mainnet:v0.1.0 does not resolve: ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from
+error: ghcr.io/telcoin-association/tn-mainnet refuses anonymous reads and the docker login does not see ghcr.io/telcoin-association/tn-mainnet:v0.1.0: if this is the firs
+-- registry answers 403 Forbidden, no RELEASE_FIRST_PUSH: exit 2
 (retry after sleep 5)
 (retry after sleep 5)
 error: cannot ask the registry for ghcr.io/telcoin-association/tn-mainnet:v0.1.0 with the docker login after 3 attempts: ERROR: failed to do request: Head "https://ghcr.i
@@ -266,15 +280,16 @@ error: docker buildx imagetools inspect ghcr.io/telcoin-association/tn-mainnet:v
   cmd_build code (cmd_build up to `git worktree add`, where the git stub exits 0).
   Not run: the push itself, the post-push stop and publish's alias assertion (they need a
   registry write, which this round forbids); all were read in context.
-- Re-run on the final tree (7ae07a950): same results as below, plus the matrix above (36
-  cases, all as expected).
+- Re-run on the final tree (6e63be065): shellcheck 0.11 -S style clean, bash -n OK under 5.3 and
+  3.2, matrix above (38 cases, all as expected). On 7ae07a950: make release-lint exit 0,
+  mdbook build docs exit 0 (no docs or workflow change since).
 - V8 re-run on 57b8ec90a: host shellcheck 0.11 `-x -S style etc/release.sh`
   clean; `bash -n` OK under 5.3 and bash:3.2; `make release-lint` exit 0; `mdbook build docs`
   exit 0; matrix above.
 
 ## Open issues
 
-1. Ten commits now (six from the first pass, four from the V8 rounds): 848a47b5f is a wording fix to the S2 refusal ("is a adiri tag"),
+1. Eleven commits now (six from the first pass, five from the V8 rounds): 848a47b5f is a wording fix to the S2 refusal ("is a adiri tag"),
    found while writing the S5 docs that quote it. Squash into 930afd05d if one per section is
    wanted (the implementer may not rebase).
 2. (V8: now RELEASE_FIRST_PUSH=<package> plus a login re-check; RELEASE_YES no longer answers
@@ -284,9 +299,9 @@ error: docker buildx imagetools inspect ghcr.io/telcoin-association/tn-mainnet:v
    probe before build's push would have stopped the first build into a new package. The
    decision code is exercised with stubs; the push and the post-push stop are not (need a
    registry write). Unverified assumption: an authenticated `docker buildx imagetools
-   inspect` of a never-pushed ghcr package answers "not found" or "denied". If ghcr answers
-   something else there (for example a bare 401), the first push stops with exit 3 and the
-   classifier in login_digest needs that answer added; it fails closed either way.
+   inspect` of a never-pushed ghcr package answers "not found", "denied" or "403 Forbidden".
+   If ghcr answers something else there (for example a bare 401), the first push stops with
+   exit 3 and the classifier in login_digest needs that answer added; it fails closed either way.
 3. After the first push the rerun needs RELEASE_REBUILD=1, i.e. one full rebuild per network
    the first time. V8's optional N1 (RELEASE_RESUME) was not built; the guide and the PR body
    say the rerun is a full rebuild.
