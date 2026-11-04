@@ -5,7 +5,8 @@
 # sudoers file, account, overlay ufw rules) goes even when wg0.conf and the wg0
 # link are gone; the sudoers file goes even when the tnadmin account is gone;
 # the self-heal stops before the drop-in it watches is removed; files outside
-# the list stay.
+# the list stay, the private alerts among them (they are no testnet add-on);
+# remove_alerts takes those on a tree whose lib/ has no alerts.sh.
 #
 #   bash tools/tests/remove_addons_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/remove_addons_test.sh
@@ -71,9 +72,13 @@ LISTED="/etc/systemd/system/telcoin-alloy.service /usr/local/bin/alloy /etc/telc
 /etc/ssh/sshd_config.d/15-tnadmin-overlay.conf /etc/systemd/system/tn-nftables.service
 /etc/wgvpn/nftables-node.nft /usr/local/sbin/tn-node-ssh-lockdown /etc/wgvpn/tnadmin.keys
 /etc/wgvpn/tnadmin.revoked /etc/wgvpn/tnadmin.authorized_keys /etc/sudoers.d/90-tnadmin"
-KEEP="/etc/wireguard/other.conf /etc/ssh/sshd_config.d/00-telcoin-hardening.conf
+ALERTS="/etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service
+/usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts/targets /etc/telcoin/alerts/alerts.env
+/var/lib/private/telcoin-heartbeat/state"
+KEEP_BASE="/etc/wireguard/other.conf /etc/ssh/sshd_config.d/00-telcoin-hardening.conf
 /etc/ssh/sshd_config.d/50-cloud-init.conf /usr/local/sbin/keep-me /etc/systemd/system/telcoin.service
 /etc/telcoin/.node-meta /etc/sudoers.d/91-other /etc/wgvpn/other"
+KEEP="$KEEP_BASE $ALERTS"
 
 # fixture LIST... -- a fresh tree holding the named files plus the KEEP set.
 fixture() {
@@ -133,5 +138,32 @@ check_rc "clean host: rc 0" 0 $?
 check "clean host: files outside the list kept" "$(echo $KEEP)" "$(present $KEEP)"
 check_lacks "clean host: no userdel" "userdel" "$(cat "$CALLS")"
 check_lacks "clean host: no sshd reload" "reload ssh" "$(cat "$CALLS")"
+check_lacks "clean host: the alerts files are no testnet add-on" "Testnet add-ons found" "$(cat "$T/out")"
+check_lacks "clean host: the add-on teardown leaves the heartbeat alone" "heartbeat" "$(cat "$CALLS")"
+
+# --- remove_alerts on a tree whose lib/ has no alerts.sh and no tn-heartbeat.sh -------------
+# (an updater that installed remove-node.sh and not the library). A fresh bash
+# sources a copy of remove-node.sh beside such a lib/ and runs remove_alerts.
+mkdir -p "$T/rn2"
+cp "$T/rn/remove-node.sh" "$T/rn2/remove-node.sh"
+cp -R "${TN_TEST_REPO}/lib" "$T/rn2/lib"
+rm -f "$T/rn2/lib/alerts.sh" "$T/rn2/lib/tn-heartbeat.sh"
+fixture
+ln -s private/telcoin-heartbeat "$R/var/lib/telcoin-heartbeat"
+bash -c 'source "$1" >/dev/null 2>&1 || exit 9
+         set +e
+         remove_alerts; rc=$?
+         declare -F | awk "{print \$3}" | grep -E "^(alerts|hb)_" > "$2"
+         exit "$rc"' _ "$T/rn2/remove-node.sh" "$T/fns" >"$T/out" 2>&1
+check_rc "no alerts library: rc 0" 0 $?
+check "no alerts library: no alerts_* or hb_* function loaded" "" "$(cat "$T/fns" 2>/dev/null)"
+# shellcheck disable=SC2086
+check "no alerts library: every alerts file removed" "" "$(present $ALERTS)"
+check "no alerts library: the config dir removed" "" "$(present /etc/telcoin/alerts /var/lib/private/telcoin-heartbeat)"
+check "no alerts library: the state link removed" "no" "$([ -L "$R/var/lib/telcoin-heartbeat" ] && echo yes || echo no)"
+# shellcheck disable=SC2086
+check "no alerts library: the other files kept" "$(echo $KEEP_BASE)" "$(present $KEEP_BASE)"
+check_has "no alerts library: the timer disabled" "systemctl disable --now telcoin-heartbeat.timer [dropin=no]" "$(cat "$CALLS")"
+check "no alerts library: the hint" "1" "$(grep -c "Pause or delete this node's monitor: a push monitor alerts on silence." "$T/out")"
 
 finish

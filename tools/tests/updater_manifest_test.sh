@@ -744,6 +744,79 @@ else
 fi
 TODAY=""
 
+# ALERTS
+# --- the private alerts: three tracked rows, and the --refresh hint ---------------------------
+# The rows sit right after setup-observability.sh, each with its version
+# variable (update-scripts.sh sourced without its main call, in a subshell).
+grep -v '^main "\$@"$' "$REPO/update-scripts.sh" > "$T/us-lib.sh"
+ROWS="$( (source "$T/us-lib.sh" >/dev/null 2>&1 || exit 1
+          for p in setup-alerts.sh lib/alerts.sh lib/tn-heartbeat.sh; do
+              printf '%s=%s\n' "$p" "$(version_var_for "$p")"
+          done
+          printf '%s\n' "${SCRIPTS[@]}" | awk '/^setup-observability\.sh:/ {n = NR} n && NR > n && NR <= n + 3') )"
+check "alerts rows: version_var_for" "setup-alerts.sh=SCRIPT_VERSION
+lib/alerts.sh=ALERTS_VERSION
+lib/tn-heartbeat.sh=HEARTBEAT_VERSION
+setup-alerts.sh:setup-alerts.sh:SCRIPT_VERSION
+lib/alerts.sh:lib/alerts.sh:ALERTS_VERSION
+lib/tn-heartbeat.sh:lib/tn-heartbeat.sh:HEARTBEAT_VERSION" "$ROWS"
+# Where the files are in the tree, the version the updater shows is the file's
+# own assignment (_file_version takes the first match anywhere in the file).
+for row in setup-alerts.sh:SCRIPT_VERSION lib/alerts.sh:ALERTS_VERSION lib/tn-heartbeat.sh:HEARTBEAT_VERSION; do
+    f="${row%%:*}"; var="${row#*:}"
+    if [[ -f "$REPO/$f" ]]; then
+        want="$(grep -E "^(readonly )?${var}=\"" "$REPO/$f" | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+        got="$( (source "$T/us-lib.sh" >/dev/null 2>&1 || exit 1; _file_version "$REPO/$f" "$var") )"
+        check "alerts rows: ${f} shows ${var} ${want:-?}" "yes" "$([[ -n "$want" && "$got" == "$want" ]] && echo yes || echo "no (${got})")"
+    else
+        skip "alerts rows: ${f} version" "${f} is not in this tree"
+    fi
+done
+
+# The hint: printed (never run) when lib/tn-heartbeat.sh or lib/alerts.sh changed
+# and the timer unit exists under TN_ROOT_PREFIX; otherwise not printed.
+HBROOT="$T/hbroot"
+mkdir -p "$HBROOT/etc/systemd/system"
+HB="$SRC/hb"; cp -R "$R2" "$HB"
+printf '#!/usr/bin/env bash\nHEARTBEAT_VERSION="1.0.0"\n' > "$HB/lib/tn-heartbeat.sh"
+write_manifest "$HB" scripts-v1.8.0 110 1.0.0; sign "$HB" key1; sidecars "$HB"
+HB2="$SRC/hb2"; cp -R "$R2" "$HB2"
+printf '#!/usr/bin/env bash\nALERTS_VERSION="1.0.0"\n' > "$HB2/lib/alerts.sh"
+write_manifest "$HB2" scripts-v1.9.0 111 1.0.0; sign "$HB2" key1; sidecars "$HB2"
+HINT1="  ->  The heartbeat runner or its library changed. Reinstall them on the host:"
+# hint_count -- how often the last run printed the two hint lines.
+hint_count() {
+    printf '%s %s\n' "$(plain "$OUT" | grep -cxF -- "$HINT1")" \
+        "$(plain "$OUT" | grep -cE '^  ->    sudo bash .*/setup-alerts\.sh --refresh$')"
+}
+export TN_ROOT_PREFIX="$HBROOT"
+: > "$HBROOT/etc/systemd/system/telcoin-heartbeat.timer"
+rm -f "$T/sudo.log"
+install_release "$R2"
+publish "$HB" scripts-v1.8.0
+run_updater y
+check_rc "alerts hint, runner changed, timer present: exits 0" 0 "$RC"
+check "alerts hint, runner changed, timer present: printed once" "1 1" "$(hint_count)"
+check_has "alerts hint: names this tree" "  ->    sudo bash $(cd "$INST" && pwd)/setup-alerts.sh --refresh" "$(plain "$OUT")"
+check "alerts hint: sudo never run" "" "$(cat "$T/sudo.log" 2>/dev/null)"
+install_release "$R2"
+publish "$HB2" scripts-v1.9.0
+run_updater y
+check_rc "alerts hint, library changed, timer present: exits 0" 0 "$RC"
+check "alerts hint, library changed, timer present: printed once" "1 1" "$(hint_count)"
+install_release "$R1"
+publish "$R2" scripts-v1.1.0
+run_updater y
+check_rc "alerts hint, neither changed, timer present: exits 0" 0 "$RC"
+check "alerts hint, neither changed, timer present: not printed" "0 0" "$(hint_count)"
+rm -f "$HBROOT/etc/systemd/system/telcoin-heartbeat.timer"
+install_release "$R2"
+publish "$HB" scripts-v1.8.0
+run_updater y
+check_rc "alerts hint, runner changed, no timer: exits 0" 0 "$RC"
+check "alerts hint, runner changed, no timer: not printed" "0 0" "$(hint_count)"
+unset TN_ROOT_PREFIX
+
 # --- no release published yet ---------------------------------------------------------------
 rm -f "$RAW/main/RELEASE"
 install_release "$R1"

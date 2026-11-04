@@ -285,6 +285,9 @@ declare -a SCRIPTS=(
     "lib/observability.sh:lib/observability.sh:OBSERVABILITY_VERSION"
     "setup-vpn.sh:setup-vpn.sh:SCRIPT_VERSION"
     "setup-observability.sh:setup-observability.sh:SCRIPT_VERSION"
+    "setup-alerts.sh:setup-alerts.sh:SCRIPT_VERSION"
+    "lib/alerts.sh:lib/alerts.sh:ALERTS_VERSION"
+    "lib/tn-heartbeat.sh:lib/tn-heartbeat.sh:HEARTBEAT_VERSION"
     "ui/server.py:ui/server.py:UI_VERSION"
     "lib/release-keys/README:lib/release-keys/README:NONE"
     "lib/release-keys/grantkee.asc:lib/release-keys/grantkee.asc:NONE"
@@ -940,7 +943,7 @@ warn_expired() {
 }
 
 run_update() {
-    local keys choice i ui_changed=false svc
+    local keys choice i ui_changed=false alerts_changed=false svc
 
     print_info "Checking for a signed script release..."
     print_info "Repository: ${TN_REPO_RAW}"
@@ -1029,6 +1032,9 @@ run_update() {
 
     for ((i = 0; i < ${#UPD_PATHS[@]}; i++)); do
         [[ "${UPD_PATHS[i]}" != ui/* ]] || ui_changed=true
+        case "${UPD_PATHS[i]}" in
+            lib/tn-heartbeat.sh|lib/alerts.sh) alerts_changed=true ;;
+        esac
     done
     install_pass || exit 1
 
@@ -1048,6 +1054,14 @@ run_update() {
             print_info "UI source updated. To set up the web UI:"
             print_info "  sudo bash ${SCRIPT_DIR}/ui/install-ui.sh"
         fi
+        echo ""
+    fi
+    # The private alerts timer runs a root-owned copy of the heartbeat runner
+    # (/usr/local/libexec/telcoin/tn-heartbeat), so a new runner or library takes
+    # effect only once setup-alerts.sh --refresh reinstalls it. Printed, never run.
+    if [[ "$alerts_changed" == "true" && -e "${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-heartbeat.timer" ]]; then
+        print_info "The heartbeat runner or its library changed. Reinstall them on the host:"
+        print_info "  sudo bash ${SCRIPT_DIR}/setup-alerts.sh --refresh"
         echo ""
     fi
 }
