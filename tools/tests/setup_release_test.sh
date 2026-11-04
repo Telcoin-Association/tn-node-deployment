@@ -3,7 +3,8 @@
 # setup: --release-tag/--build-ref take release tags of the network only and must
 # agree, --docker-image takes a digest reference only (never with --release-tag),
 # --install-method release is known, --allow-dirty is refused in --json; on devnet
-# (no signed releases) --docker-image takes a digest of TN_DEVNET_IMAGE_REPOS and is
+# (no signed releases) --docker-image takes a digest of the devnet repository (the
+# old single ghcr package is recognised but never pulled) and is
 # required at keygen, --release-tag and source or release installs are refused; the
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
@@ -58,11 +59,11 @@ flags "unknown install method refused" 1 testnet binary "" "" ""
 flags "docker on mainnet (no mainnet release verifies yet) refused" 1 mainnet docker "" "" ""
 check "docker on mainnet: the refusal says no mainnet release can be verified" yes "$(grep -q 'No mainnet release can be verified yet' "$T/sn.err" && echo yes || echo no)"
 # Once Docker is allowed on mainnet (the launch release pins the chain configs), a
-# digest alone of the shared ghcr repository is taken only when .node-meta records
-# it as a mainnet release's image: _preflight_docker refuses it before any docker
+# digest alone of the mainnet package is taken only when .node-meta records it as
+# a mainnet release's image: _preflight_docker refuses it before any docker
 # call, for --docker-image and for a typed image alike; an image resolved from a
 # release tag passes, and testnet is unchanged. The docker stub records its calls.
-MR="ghcr.io/telcoin-association/telcoin-network"
+MR="ghcr.io/telcoin-association/tn-mainnet"
 PD_STUBS="tn_docker_network_ok() { return 0; }; _setup_docker_apt() { :; }; _setup_docker_live_restore() { :; }; docker() { echo DOCKER_RAN; return 0; }; tn_docker_release_tag_for() { return 1; }; latest_docker_image() { return 1; }"
 refused() { grep -q 'is not the image of a mainnet release this node has installed' "$T/sn.err" && echo yes || echo no; }
 rc="$(sn "NETWORK=mainnet RELEASE_TAG= DOCKER_IMAGE='${MR}@sha256:${D64}'; ${PD_STUBS}; _preflight_docker")"
@@ -85,13 +86,17 @@ rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE='${R}@sha256:${D64}'; ${PD_S
 check "testnet preflight: a digest alone is taken as before" no "$(refused)"
 flags "docker on devnet without --docker-image refused (no signed release to take the newest from)" 1 devnet docker "" "" ""
 check "docker on devnet without --docker-image: the refusal asks for one" yes "$(grep -q 'A devnet Docker install needs --docker-image' "$T/sn.err" && echo yes || echo no)"
-# Devnet: an image by digest from TN_DEVNET_IMAGE_REPOS, never a tag; no
-# --release-tag, and no install that needs a signed release.
+# Devnet: an image by digest from the devnet repository, never a tag; no
+# --release-tag, and no install that needs a signed release. The old single ghcr
+# package is in TN_DEVNET_IMAGE_REPOS to recognise a container, never to pull.
 GH="ghcr.io/telcoin-association/telcoin-network"
 flags "devnet: docker by a legacy-repository digest" 0 devnet docker "" "" "${R}@sha256:${D64}"
-flags "devnet: docker by a ghcr digest" 0 devnet docker "" "" "${GH}@sha256:${D64}"
+flags "devnet: docker by a digest of the old single ghcr package refused" 1 devnet docker "" "" "${GH}@sha256:${D64}"
 flags "devnet: docker by another repository's digest refused" 1 devnet docker "" "" "docker.io/library/busybox@sha256:${D64}"
-check "devnet: the refusal names the devnet repositories" yes "$(grep -qF "the repository one of: ${R} ${GH})" "$T/sn.err" && echo yes || echo no)"
+check "devnet: the refusal names the repository a devnet pull takes" yes "$(grep -qF "the repository one of: ${R})" "$T/sn.err" && echo yes || echo no)"
+flags "testnet: docker by a digest of the old single ghcr package refused" 1 testnet docker "" "" "${GH}@sha256:${D64}"
+flags "testnet: docker by a digest of the testnet package" 0 testnet docker "" "" "ghcr.io/telcoin-association/tn-testnet@sha256:${D64}"
+flags "testnet: docker by a digest of the mainnet package refused" 1 testnet docker "" "" "${MR}@sha256:${D64}"
 flags "devnet: docker by a devnet tag refused" 1 devnet docker "" "" "${R}:v0.2.0-devnet"
 flags "devnet: docker by main-<sha> refused" 1 devnet docker "" "" "${R}:main-0123abc"
 flags "devnet: docker by a testnet release tag refused" 1 devnet docker "" "" "${R}:v0.16.0-adiri"
@@ -132,9 +137,9 @@ rc="$(sn "$PD; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _
 check "pulled image held under its digest: setup goes on" "0 docker" "$rc $(cat "$T/bp" 2>/dev/null)"
 # Devnet by digest: pulled as given, no release tag looked up in a registry.
 : > "$T/docker.log"; rm -f "$T/bp" "$T/loud"
-rc="$(sn "$PD; NETWORK=devnet DOCKER_IMAGE=\"\${GH}@sha256:\${D64}\"; tn_registry_tags() { echo tags > \"\$T/loud\"; return 1; }; tn_registry_digest() { echo digest > \"\$T/loud\"; return 1; }; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s %s' \"\$BINARY_PATH\" \"\${RELEASE_TAG:-none}\" > \"\$T/bp\"")"
+rc="$(sn "$PD; NETWORK=devnet DOCKER_IMAGE=\"\${R}@sha256:\${D64}\"; tn_registry_tags() { echo tags > \"\$T/loud\"; return 1; }; tn_registry_digest() { echo digest > \"\$T/loud\"; return 1; }; tn_docker_holds_digest() { [ \"\$1\" = \"\$DOCKER_IMAGE\" ]; }; _preflight_docker; printf '%s %s' \"\$BINARY_PATH\" \"\${RELEASE_TAG:-none}\" > \"\$T/bp\"")"
 check "devnet by digest: setup goes on, no release tag recorded" "0 docker none" "$rc $(cat "$T/bp" 2>/dev/null)"
-check_has "devnet by digest: the image was pulled by digest" "pull ${GH}@sha256:${D64}" "$(cat "$T/docker.log")"
+check_has "devnet by digest: the image was pulled by digest" "pull ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
 check "devnet by digest: no registry lookup" "no" "$([[ -e "$T/loud" ]] && echo yes || echo no)"
 
 # _preflight_docker: an image given by digest alone is held to the oldest supported
@@ -257,8 +262,8 @@ rc="$( ( set +e; source "$T/ec/edit-config.sh" >/dev/null 2>&1; set +e; edit_err
 check "edit: swap_docker_image refuses a tag before touching anything" "1 no" "$rc $([[ -e "$T/lcf" ]] && echo yes || echo no)"
 
 # edit-config on a devnet host: tn_detect_network names no network and .node-meta
-# says NETWORK=devnet (_tn_guard_network). Images by digest only, from
-# TN_DEVNET_IMAGE_REPOS; a devnet tag names no image (the real
+# says NETWORK=devnet (_tn_guard_network). Images by digest only, from the devnet
+# repository (the old single ghcr package is never pulled); a devnet tag names no image (the real
 # tn_docker_image_for_tag refuses it before any release is fetched).
 ecd() {
     ( set +e
@@ -284,13 +289,10 @@ ecd() {
 swapped() { [[ -e "$T/swapped" ]] && cat "$T/swapped" || echo none; }
 ECD_META=devnet
 rm -f "$T/swapped" "$T/meta.log" "$T/fetched"
-rc="$(ecd "${GH}@sha256:${D64}")"
-check "edit, devnet: a ghcr digest runs as given" "0 ${GH}@sha256:${D64}" "$rc $(swapped)"
-check "edit, devnet: .node-meta records image and digest, no tag" "DOCKER_IMAGE=${GH}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} unset RELEASE_TAG" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
-rm -f "$T/swapped" "$T/meta.log"
 rc="$(ecd "${R}@sha256:${D64}")"
 check "edit, devnet: a legacy-repository digest runs as given" "0 ${R}@sha256:${D64}" "$rc $(swapped)"
-for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.16.0-adiri "${R}:main-0123abc" "docker.io/library/busybox@sha256:${D64}" "${R}:latest"; do
+check "edit, devnet: .node-meta records image and digest, no tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} unset RELEASE_TAG" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.16.0-adiri "${R}:main-0123abc" "docker.io/library/busybox@sha256:${D64}" "${R}:latest" "${GH}@sha256:${D64}"; do
     rm -f "$T/swapped"
     rc="$(ecd "$bad")"
     check "edit, devnet: ${bad} refused, nothing swapped" "1 none yes" "$rc $(swapped) $(grep -q 'give a devnet image by digest' "$T/ec.err" && echo yes || echo no)"
@@ -315,7 +317,7 @@ swap_probe() {
     printf '%s %s' "$?" "$([[ -e "$T/lcf" ]] && echo yes || echo no)"
 }
 ECD_META=devnet
-check "swap, devnet: a ghcr digest reaches the rewrite" "1 yes" "$(swap_probe "${GH}@sha256:${D64}")"
+check "swap, devnet: a digest of the old single ghcr package (recognised) reaches the rewrite" "1 yes" "$(swap_probe "${GH}@sha256:${D64}")"
 check "swap, devnet: another repository stops before it" "1 no" "$(swap_probe "docker.io/library/busybox@sha256:${D64}")"
 ECD_META=""
 check "swap, network unknown: stops before the rewrite" "1 no" "$(swap_probe "${GH}@sha256:${D64}")"

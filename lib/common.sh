@@ -1532,16 +1532,27 @@ validate_multiaddr() {
     return 1
 }
 
-# Image repositories. The release pipeline publishes every channel's images to
-# ghcr.io (TN_GHCR_IMAGE_REPO): the testnet and mainnet repository. The testnet
+# Image repositories. Each network has its own package, and the channel is a
+# function of the release tag: the release pipeline publishes a vX.Y.Z release to
+# TN_MAINNET_IMAGE_REPO and a testnet release (tn_release_tag_ok) to
+# TN_TESTNET_IMAGE_REPO. Every stage derives the network's package again from the
+# network (tn_docker_repo_for), so a mainnet path never names the testnet package
+# and the reverse.
+readonly TN_MAINNET_IMAGE_REPO="ghcr.io/telcoin-association/tn-mainnet"
+readonly TN_TESTNET_IMAGE_REPO="ghcr.io/telcoin-association/tn-testnet"
+# The single package earlier script releases named for both networks. No release
+# was ever published there. It stays in the testnet and devnet lists
+# (TN_TESTNET_IMAGE_REPOS, TN_DEVNET_IMAGE_REPOS) only so that a container already
+# running from it is recognised (remove-node, the status screens); a new pull never
+# takes it (tn_docker_pull_repo_ok), and mainnet never accepts it.
+readonly TN_GHCR_LEGACY_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
 # network-gated: documents the legacy testnet repository; tn_docker_repos_for never gives it to mainnet
-# images of the releases made before signed releases, v0.16.0-adiri among them,
+# The testnet images of the releases made before signed releases, v0.16.0-adiri among them,
 # network-gated: names the legacy testnet repository; no mainnet path takes it
 # are in the Artifact Registry adiri repository (TN_TESTNET_LEGACY_IMAGE_REPO;
 # GAR_IMAGE_BASE is its older name, kept for the scripts and tests that read it).
 # The legacy repository is read only while the testnet channel has no release on
 # GitHub, and for images recorded from it.
-readonly TN_GHCR_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
 # network-gated: legacy testnet repository; tn_docker_repos_for lists it for testnet and devnet, never mainnet
 readonly TN_TESTNET_LEGACY_IMAGE_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 readonly GAR_IMAGE_BASE="$TN_TESTNET_LEGACY_IMAGE_REPO"
@@ -6975,24 +6986,26 @@ pick_action() {
 # (tn_docker_repos_for: TN_TESTNET_IMAGE_REPOS on testnet, TN_DEVNET_IMAGE_REPOS
 # on devnet) and run by digest.
 
-# Image repository per network: testnet and mainnet TN_GHCR_IMAGE_REPO, where the
-# release pipeline publishes; devnet the Artifact Registry repository its fleet's
-# images are pushed to (TN_TESTNET_LEGACY_IMAGE_REPO). Devnet has no signed
-# releases: its images are named by digest only, from TN_DEVNET_IMAGE_REPOS, and
-# no newest-release pick runs there (tn_release_tag_final).
-readonly TN_MAINNET_IMAGE_REPO="$TN_GHCR_IMAGE_REPO"
+# Image repository per network: mainnet TN_MAINNET_IMAGE_REPO and testnet
+# TN_TESTNET_IMAGE_REPO, the packages the release pipeline publishes to; devnet the
+# Artifact Registry repository its fleet's images are pushed to
+# (TN_TESTNET_LEGACY_IMAGE_REPO). Devnet has no signed releases: its images are
+# named by digest only, from TN_DEVNET_IMAGE_REPOS, and no newest-release pick
+# runs there (tn_release_tag_final).
 readonly TN_DEVNET_IMAGE_REPO="$TN_TESTNET_LEGACY_IMAGE_REPO"
 
 # Every repository a testnet image may come from, space separated: the legacy
 # Artifact Registry repository of the releases before signed releases (and of
-# DEFAULT_DOCKER_IMAGE) and the one the release pipeline publishes to, which
-# tn_docker_repo_for prints. A signed release's IMAGE_DIGEST names one of them.
-# Mainnet takes only its own constant.
-readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ghcr.io/telcoin-association/telcoin-network"
+# DEFAULT_DOCKER_IMAGE), the old single ghcr.io package (TN_GHCR_LEGACY_IMAGE_REPO,
+# for recognising a container that runs from it, never for a new pull) and the
+# testnet package, which tn_docker_repo_for prints. Mainnet takes only its own
+# constant.
+readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO} ${TN_TESTNET_IMAGE_REPO}"
 # Every repository a devnet image may come from, space separated: the devnet
-# repository (tn_docker_repo_for prints it) and ghcr.io. The allow-list for the
-# digests the devnet fleet pins.
-readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_IMAGE_REPO}"
+# repository (tn_docker_repo_for prints it) and the old single ghcr.io package,
+# for recognising a container that runs from it. The allow-list for the digests
+# the devnet fleet pins.
+readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO}"
 
 # Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
 readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
@@ -7011,16 +7024,16 @@ readonly TN_RUSTUP_INIT_SHA256_X86_64="dda7234360b7f578ca8b0ddcb80145646fa61a67c
 readonly TN_RUSTUP_INIT_SHA256_AARCH64="15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433"
 readonly TN_RUST_TOOLCHAIN="1.94"
 
-# tn_docker_repo_for NETWORK -- print NETWORK's image repository: testnet the
-# ghcr.io repository the release pipeline publishes to; mainnet and devnet their
-# constants (TN_MAINNET_IMAGE_REPO, TN_DEVNET_IMAGE_REPO). This is the repository
-# messages and examples name; every repository NETWORK's images may come from is
-# tn_docker_repos_for's. rc 1 with the reason on stderr when the constant is
-# empty, and for any other NETWORK.
+# tn_docker_repo_for NETWORK -- print NETWORK's image repository: its constant,
+# TN_TESTNET_IMAGE_REPO, TN_MAINNET_IMAGE_REPO or TN_DEVNET_IMAGE_REPO. The
+# testnet and mainnet ones are the packages the release pipeline publishes to.
+# This is the repository messages and examples name; every repository NETWORK's
+# images may come from is tn_docker_repos_for's. rc 1 with the reason on stderr
+# when the constant is empty, and for any other NETWORK.
 tn_docker_repo_for() {
     local net="${1:-}" repo=""
     case "$net" in
-        testnet) repo="$TN_GHCR_IMAGE_REPO" ;;
+        testnet) repo="$TN_TESTNET_IMAGE_REPO" ;;
         mainnet) repo="$TN_MAINNET_IMAGE_REPO" ;;
         devnet) repo="$TN_DEVNET_IMAGE_REPO" ;;
         *)
@@ -7068,8 +7081,9 @@ tn_docker_network_ok() {
 # tn_docker_repo_ok NETWORK REPO -- rc 0 when REPO is one of the repositories
 # NETWORK's images may come from (tn_docker_repos_for): on testnet any in
 # TN_TESTNET_IMAGE_REPOS, on devnet any in TN_DEVNET_IMAGE_REPOS, on mainnet
-# TN_MAINNET_IMAGE_REPO alone. A REPO with whitespace in it is never one. rc 1
-# otherwise, and for a network without one.
+# TN_MAINNET_IMAGE_REPO alone. An exact match: a REPO with whitespace in it is
+# never one. This recognises what a node runs; a new pull asks
+# tn_docker_pull_repo_ok. rc 1 otherwise, and for a network without one.
 tn_docker_repo_ok() {
     local net="${1:-}" repo="${2:-}" repos
     [[ -n "$repo" && ! "$repo" =~ [[:space:]] ]] || return 1
@@ -7078,6 +7092,29 @@ tn_docker_repo_ok() {
         *" ${repo} "*) return 0 ;;
     esac
     return 1
+}
+
+# tn_docker_pull_repos_for NETWORK -- print every repository a new pull for
+# NETWORK may take an image from, space separated: tn_docker_repos_for's list
+# without TN_GHCR_LEGACY_IMAGE_REPO, which holds no release. rc 1, with the reason
+# on stderr, for a network without a repository.
+tn_docker_pull_repos_for() {
+    local net="${1:-}" repos r out=""
+    repos="$(tn_docker_repos_for "$net")" || return 1
+    for r in $repos; do
+        [[ "$r" != "$TN_GHCR_LEGACY_IMAGE_REPO" ]] || continue
+        out="${out:+${out} }${r}"
+    done
+    printf '%s\n' "$out"
+}
+
+# tn_docker_pull_repo_ok NETWORK REPO -- rc 0 when a new install, update or image
+# change on NETWORK may pull from REPO: tn_docker_repo_ok, and REPO is not
+# TN_GHCR_LEGACY_IMAGE_REPO. An exact match. rc 1 otherwise. Prints nothing.
+tn_docker_pull_repo_ok() {
+    local net="${1:-}" repo="${2:-}"
+    [[ "$repo" != "$TN_GHCR_LEGACY_IMAGE_REPO" ]] || return 1
+    tn_docker_repo_ok "$net" "$repo"
 }
 
 # tn_registry_token REPO -- print the anonymous pull token REPO's registry wants:
@@ -7569,19 +7606,23 @@ tn_fetch_verified_release() {
 
 # tn_fetch_release_image TAG NETWORK [BASE_URL] [progress-fn] -- the release's
 # image by digest: IMAGE_DIGEST from a release checked as in
-# tn_fetch_verified_release (no tarball), which must name a repository NETWORK's
-# images may come from (tn_docker_image_allowed: on testnet any of
-# TN_TESTNET_IMAGE_REPOS). Prints <repo>@sha256:<digest>; the staging directory
-# is removed. rc as tn_fetch_verified_release; 1 also when the image is not
-# NETWORK's.
+# tn_fetch_verified_release (no tarball), which must name an image by digest of a
+# repository a new pull for NETWORK takes (tn_docker_image_allowed and
+# tn_docker_pull_repo_ok: on mainnet TN_MAINNET_IMAGE_REPO alone, on testnet
+# TN_TESTNET_IMAGE_REPO or the legacy Artifact Registry repository, never
+# TN_GHCR_LEGACY_IMAGE_REPO). Prints <repo>@sha256:<digest>; the staging
+# directory is removed. rc as tn_fetch_verified_release; 1 also when the image is
+# not NETWORK's, with a message that names it and the repository it must be from.
 tn_fetch_release_image() {
-    local tag="${1:-}" net="${2:-}" fn="${4:-}" stg img rc=0
+    local tag="${1:-}" net="${2:-}" fn="${4:-}" stg img want rc=0
     stg="$(_tn_release_fetch "$tag" "$net" "${3:-}" image "$fn")" || rc=$?
     [[ $rc -eq 0 ]] || return $rc
     img="$(cat -- "${stg}/IMAGE_DIGEST")" || img=""
     _tn_release_cleanup "$stg"
-    if ! TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$img" "$net"; then
-        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img}, which is not in a ${net} image repository these scripts accept." "$fn"
+    if ! TN_DOCKER_REQUIRE_DIGEST=1 tn_docker_image_allowed "$img" "$net" \
+        || ! tn_docker_pull_repo_ok "$net" "${img%%@*}"; then
+        want="$(tn_docker_pull_repos_for "$net" 2>/dev/null)" || want=""
+        _tn_c4_say warn "Release ${tag}: IMAGE_DIGEST names ${img:-nothing}, but a ${net} release image is <repository>@sha256:<digest> from ${want// / or }. The release is refused and nothing was pulled; report it to the node team." "$fn"
         return 1
     fi
     printf '%s\n' "$img"
@@ -7994,26 +8035,37 @@ tn_docker_image_for_tag() {
     return 1
 }
 
-# tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names, by
-# digest: a release tag of NETWORK, alone or as <repo>:<tag> of a repository
-# NETWORK's images may come from (tn_docker_repo_ok), resolved with
+# tn_docker_resolve_ref NETWORK ARG [progress-fn] -- the image ARG names for a new
+# pull, by digest: a release tag of NETWORK, alone or as <repo>:<tag> of a
+# repository a new pull for NETWORK takes (tn_docker_pull_repo_ok), resolved with
 # tn_docker_image_for_tag; or <repo>@sha256:<digest> of such a repository, taken
-# as given. Prints "<repo>@sha256:<digest> <tag>". For a digest given alone the
+# as given. TN_GHCR_LEGACY_IMAGE_REPO holds no release and is refused on every
+# network. Prints "<repo>@sha256:<digest> <tag>". For a digest given alone the
 # tag is the release .node-meta records for that digest (tn_docker_recorded_tag),
 # else empty, with a warning that the downgrade and oldest-release checks cannot
 # be applied. On mainnet a digest given alone is refused unless .node-meta records
-# a mainnet release tag for it: testnet and mainnet share the ghcr repository, so
-# only the signed release says which digest is a mainnet image. rc 1, with the
-# reason on stderr, for anything else: another repository, a tag that is not a
-# release tag of NETWORK, latest, a leading "-". Nothing is pulled.
+# a mainnet release tag for it: only the signed release says which digest is a
+# mainnet release image, and the mainnet package may hold images no release names.
+# rc 1, with the reason on stderr, for anything else: another repository, a tag
+# that is not a release tag of NETWORK, latest, a leading "-". Nothing is pulled.
 tn_docker_resolve_ref() {
     local net="${1:-}" arg="${2:-}" fn="${3:-}" repo tag="" img=""
     repo="$(tn_docker_repo_for "$net")" || return 1
     case "$arg" in
+        "$TN_GHCR_LEGACY_IMAGE_REPO"@*|"$TN_GHCR_LEGACY_IMAGE_REPO":*)
+            if [[ "$net" == "devnet" ]]; then
+                print_warn "Image refused: ${arg}. No release was ever published to ${TN_GHCR_LEGACY_IMAGE_REPO}, so no image is pulled from it; give the devnet image by digest, ${repo}@sha256:<digest>." >&2
+            else
+                print_warn "Image refused: ${arg}. No release was ever published to ${TN_GHCR_LEGACY_IMAGE_REPO}, so no image is pulled from it; ${net} images come from ${repo}. Give the ${net} release tag instead." >&2
+            fi
+            return 1
+            ;;
+    esac
+    case "$arg" in
         ""|-*) ;;
         *@sha256:*) img="$arg" ;;
         */*:*)
-            if [[ "${arg%:*}" != *@* ]] && tn_docker_repo_ok "$net" "${arg%:*}"; then
+            if [[ "${arg%:*}" != *@* ]] && tn_docker_pull_repo_ok "$net" "${arg%:*}"; then
                 tag="${arg##*:}"
             fi
             ;;
@@ -8027,9 +8079,10 @@ tn_docker_resolve_ref() {
         fi
         img="$(tn_docker_image_for_tag "$net" "$tag" "$fn")" || return 1
     fi
-    if [[ -z "$img" ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$img" "$net"; then
+    if [[ -z "$img" ]] || ! TN_DOCKER_REQUIRE_DIGEST=1 validate_docker_image "$img" "$net" \
+        || ! tn_docker_pull_repo_ok "$net" "${img%%@*}"; then
         if [[ "$net" == "devnet" ]]; then
-            print_warn "Image refused: ${arg:-(empty)}. A devnet node runs an image by digest, <repository>@sha256:<digest>, from one of these repositories: $(tn_docker_repos_for devnet 2>/dev/null)." >&2
+            print_warn "Image refused: ${arg:-(empty)}. A devnet node runs an image by digest, <repository>@sha256:<digest>, from one of these repositories: $(tn_docker_pull_repos_for devnet 2>/dev/null)." >&2
         else
             print_warn "Image refused: ${arg:-(empty)}. A node runs ${repo}@sha256:<digest>, or a ${net} release tag resolved to its digest." >&2
         fi

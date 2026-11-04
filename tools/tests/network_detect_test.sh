@@ -240,7 +240,7 @@ pk() {  # pk NAME EXPECTED-RC IMAGE
     check_rc "$1" "$2" "$rc"
 }
 meta $'NETWORK=devnet\n'
-pk "pending NEW_IMAGE, devnet: a ghcr digest" 0 "${GH}@sha256:${D64}"
+pk "pending NEW_IMAGE, devnet: a digest of the old single ghcr package (recognised)" 0 "${GH}@sha256:${D64}"
 pk "pending NEW_IMAGE, devnet: a legacy-repository digest" 0 "${R}@sha256:${D64}"
 pk "pending NEW_IMAGE, devnet: another repository refused" 1 "docker.io/library/busybox@sha256:${D64}"
 pk "pending NEW_IMAGE, devnet: a devnet tag refused" 1 "${R}:v0.2.0-devnet"
@@ -270,8 +270,9 @@ rc=0; out="$(loud_tags testnet)" || rc=$?
 check "fetch_docker_tags testnet (control): the stub's final testnet tag" "0 v0.17.0-adiri" "$rc $out"
 check "fetch_docker_tags testnet (control): the registry asked" yes "$(exists "$T/loud.log")"
 
-# json_prepare_docker on a devnet host: a digest from TN_DEVNET_IMAGE_REPOS goes on
-# to the pull; a tag (devnet or testnet) or another repository is refused first.
+# json_prepare_docker on a devnet host: a digest of the devnet repository goes on
+# to the pull; a tag (devnet or testnet), another repository or the old single
+# ghcr package (recognised, never pulled) is refused first.
 # jpd_stubbed ARG -- json_prepare_docker with the running image and the pull
 # stubbed (in run's subshell, so the real functions stay for later cases).
 jpd_stubbed() {
@@ -288,9 +289,9 @@ jpd() {  # jpd ARG -> JSON events in $T/json.log; RC
     exec 3>&-
 }
 meta $'NETWORK=devnet\n'
-jpd "${GH}@sha256:${D64}"
-check "json prepare, devnet: a ghcr digest reaches the pull" "1 ${GH}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
-for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.17.0-adiri "docker.io/library/busybox@sha256:${D64}"; do
+jpd "${R}@sha256:${D64}"
+check "json prepare, devnet: a devnet repository digest reaches the pull" "1 ${R}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
+for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.17.0-adiri "docker.io/library/busybox@sha256:${D64}" "${GH}@sha256:${D64}"; do
     jpd "$bad"
     check "json prepare, devnet: ${bad} refused before any pull" "1 yes no" \
         "$RC $(has "$(cat "$T/json.log")" "is not a devnet image by digest") $(exists "$T/pulled")"
@@ -467,7 +468,9 @@ SAVED_NETWORK="${NETWORK:-}"
 NETWORK=mainnet
 img="$(_setup_image_example)"
 check "image example: mainnet is the mainnet repository by digest" "$(tn_docker_repo_for mainnet)@sha256:<digest>" "$img"
-check "image example: mainnet is a ghcr.io image" yes "$([[ "$img" == ghcr.io/* ]] && echo yes || echo no)"
+check "image example: mainnet is the tn-mainnet package" "ghcr.io/telcoin-association/tn-mainnet@sha256:<digest>" "$img"
+check_lacks "image example: mainnet names no testnet package" "tn-testnet" "$img"
+check_lacks "image example: mainnet names not the old single package" "telcoin-association/telcoin-network" "$img"
 check_lacks "image example: mainnet names no adiri image" "adiri" "$img"
 check_lacks "image example: mainnet is not the testnet default" "$DEFAULT_DOCKER_IMAGE" "$img"
 NETWORK=testnet

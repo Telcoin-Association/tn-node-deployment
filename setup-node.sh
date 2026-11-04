@@ -167,7 +167,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_write_root_file tn_write_start_script tn_write_node_unit tn_write_node_env \
         tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
-        tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled >/dev/null; then
+        tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
+        tn_docker_pull_repo_ok tn_docker_pull_repos_for >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -927,8 +928,9 @@ print(json.dumps(d, indent=2))
 }
 
 # Docker installs: the engine from Docker's apt repository (fingerprint-pinned key),
-# live-restore on, and the node's image by digest: <repository>@sha256:<digest> in the
-# network's repositories (tn_docker_repo_ok). --docker-image takes a digest reference;
+# live-restore on, and the node's image by digest: <repository>@sha256:<digest> in a
+# repository a new pull for the network takes (tn_docker_pull_repo_ok; never the old
+# single ghcr.io package, which holds no release). --docker-image takes a digest reference;
 # --release-tag takes the release's image digest (tn_docker_image_for_tag: from the
 # signed release, else on testnet from the registry); without either, the newest
 # release image by digest (latest_docker_image). Never a tag, never latest. Devnet
@@ -980,7 +982,7 @@ _preflight_docker() {
     if [[ -n "$DOCKER_IMAGE" ]]; then
         # On mainnet a digest alone is taken only for a mainnet release this node
         # has installed (tn_docker_resolve_ref): the image comes from the signed
-        # release, so a testnet image of the shared repository never runs here.
+        # release, so a digest no mainnet release names never runs here.
         _setup_mainnet_digest_ok "$DOCKER_IMAGE" \
             || setup_fail "Image refused (see above): on mainnet give the release tag with --release-tag, so the image comes from the signed release. Nothing on this host was changed."
         # By digest alone: the release that digest belongs to (.node-meta's record,
@@ -1015,6 +1017,7 @@ _preflight_docker() {
             # A typed digest meets the mainnet rule; an image resolved from a release
             # tag, or the newest release's, already comes from a signed release.
             [[ -n "$DOCKER_IMAGE" ]] && validate_docker_image "$DOCKER_IMAGE" "$NETWORK" \
+                && tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}" \
                 && { [[ -z "$typed" ]] || _setup_mainnet_digest_ok "$DOCKER_IMAGE"; } && break
             typed=""
             print_warn "Not usable: ${input:-${default_image:-(none)}}. Give a ${NETWORK} release tag such as $(_setup_tag_example), or the image by digest, such as $(_setup_image_example)."
@@ -1025,7 +1028,8 @@ _preflight_docker() {
             check_release_floor "$typed"
         fi
     fi
-    if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+    if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK" \
+        || ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
         setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>."
     fi
     # The release tag goes into .node-meta beside the digest, so update-node.sh
@@ -3234,9 +3238,10 @@ json_check_install_flags() {
         if [[ -n "$RELEASE_TAG" ]]; then
             setup_fail "Give --docker-image or --release-tag, not both."
         fi
-        if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK"; then
+        if ! validate_docker_image "$DOCKER_IMAGE" "$NETWORK" \
+            || ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
             if [[ "$NETWORK" == "devnet" ]]; then
-                setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give a devnet image by digest (<repository>@sha256:<digest>, the repository one of: ${TN_DEVNET_IMAGE_REPOS:-}), such as $(_setup_image_example)"
+                setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give a devnet image by digest (<repository>@sha256:<digest>, the repository one of: $(tn_docker_pull_repos_for devnet 2>/dev/null)), such as $(_setup_image_example)"
             fi
             setup_fail "invalid --docker-image ${DOCKER_IMAGE} -- give this network's image by digest (<repository>@sha256:<digest>), such as $(_setup_image_example), or its release tag with --release-tag"
         fi
