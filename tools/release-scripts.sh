@@ -6,18 +6,22 @@
 #   bash tools/release-scripts.sh --check [--tag TAG] [--require-sig] [--require-fresh]
 #
 # TAG is scripts-vX.Y.Z. A release is the commit that tag names. That commit
-# carries MANIFEST and MANIFEST.sig at the repository root, and RELEASE on main
+# carries MANIFEST and MANIFEST.asc at the repository root, and RELEASE on main
 # names the tag. update-scripts.sh and install.sh install a release only when
-# MANIFEST.sig verifies against lib/allowed_signers and every file matches its
-# MANIFEST hash.
+# MANIFEST.asc holds good OpenPGP signatures over MANIFEST by at least
+# TN_SIG_THRESHOLD of the keys in lib/release-keys/*.asc (see RELEASE
+# SIGNATURES below) and every file matches its MANIFEST hash.
 #
-# Prepare mode needs a clean git tree. It writes:
-#   install.sh  the TN_SCRIPTS_TAG line and the embedded copy of lib/allowed_signers
+# Prepare mode needs a clean git tree and at least one lib/release-keys/*.asc,
+# each an armored public key that is a row of an updater array. It writes:
+#   install.sh  the TN_SCRIPTS_TAG line and the embedded copy of the release
+#               keys (every lib/release-keys/*.asc, sorted by name)
 #   RELEASE     one line, "<tag> <date>": the pointer update-scripts.sh reads from main
 #   MANIFEST    format=1, release=, serial=, min_updater=, date=, expires=, then one
 #               line per file: "sha256  <64 hex>  <path>", sorted by path
-# and removes a MANIFEST.sig left over from the previous release. It never signs:
-# it prints the ssh-keygen commands the release signer runs with the hardware key.
+# and removes a MANIFEST.asc left over from the previous release. It never
+# signs: it prints the gpg command the release signer runs with the release
+# key. tools/cut-release.sh prep runs the whole sequence step by step.
 #
 #   --serial N          default: the previous MANIFEST's serial + 1 (required for
 #                       the first release). Must be higher than the previous one.
@@ -34,21 +38,25 @@
 #
 # The file list is every path in the SCRIPTS, UI_BUNDLE and TESTNET_ADDONS_BUNDLE
 # arrays of update-scripts.sh (read as text, the way tools/gen-checksums.sh reads
-# them), plus install.sh, open-ui.sh and lib/allowed_signers. Every array file and
-# lib/allowed_signers must have a fresh .sha256 sidecar: updaters older than the
-# manifest flow still read the sidecars, and the first signed release delivers
-# lib/allowed_signers through its sidecar.
+# them), plus install.sh and open-ui.sh; the release keys are SCRIPTS rows like
+# any other file. Every array file must have a fresh .sha256 sidecar: updaters
+# older than the manifest flow still read the sidecars, and a host's first
+# signed release fetches the release keys through theirs.
 #
 # Check mode regenerates the file lines from the tree and compares them with
-# MANIFEST, checks RELEASE, the install.sh tag and embedded signers, the sidecars,
-# and verifies MANIFEST.sig when it is present. It prints the release date and
+# MANIFEST, checks RELEASE, the install.sh tag and embedded keys, the release
+# keys and the sidecars, and verifies MANIFEST.asc against lib/release-keys
+# when it is present. It prints the release date and
 # the expiry date, and warns when the release has expired (date= and expires= are
 # optional: the manifests of 2.0.0 have neither). Without MANIFEST it reports that
 # there is nothing to check and exits 0, unless --tag, --require-sig or
 # --require-fresh is given. --tag also requires release= to equal TAG; --tag and
-# --require-sig require a MANIFEST.sig that verifies; --require-fresh fails the
+# --require-sig require a MANIFEST.asc that verifies; --require-fresh fails the
 # check when the release has expired (today, UTC, is on or after expires=). CI
 # runs check mode on release changes and tags, without --require-fresh.
+#
+# Needs gpgv to check a signature, and gpg only to print the key fingerprints
+# in the signing command.
 #
 # Exit status: 0 done or check passed; 1 refused or check failed; 2 usage error.
 #
@@ -58,10 +66,8 @@
 
 set -euo pipefail
 
-readonly SIGNER_PRINCIPAL="release@telcoin.org"
-readonly SIGNER_NAMESPACE="tn-node-scripts"
 readonly TAG_RE='^scripts-v[0-9]+\.[0-9]+\.[0-9]+$'
-readonly SIGNERS_HEREDOC="TN_ALLOWED_SIGNERS"
+readonly KEYS_HEREDOC="TN_RELEASE_KEYS"
 
 # =============================================================================
 # RELEASE SIGNATURES
@@ -349,7 +355,7 @@ path_ok() {
         */./*|*/../*|*//*) return 1 ;;
     esac
     case "$p" in
-        MANIFEST|MANIFEST.sig) return 1 ;;
+        MANIFEST|MANIFEST.asc) return 1 ;;
     esac
     return 0
 }
@@ -367,7 +373,7 @@ array_paths() {
 
 # release_paths: the sorted, de-duplicated list MANIFEST covers.
 release_paths() {
-    { array_paths; printf '%s\n' install.sh open-ui.sh lib/allowed_signers; } | LC_ALL=C sort -u
+    { array_paths; printf '%s\n' install.sh open-ui.sh; } | LC_ALL=C sort -u
 }
 
 # manifest_lines: one "sha256  <hash>  <path>" line per release path, or rc 1
@@ -389,8 +395,8 @@ manifest_lines() {
     return "$bad"
 }
 
-# check_sidecars: every array file and lib/allowed_signers has a sidecar whose
-# first field is the file's hash.
+# check_sidecars: every array file has a sidecar whose first field is the
+# file's hash.
 check_sidecars() {
     local p want have bad=0
     while IFS= read -r p; do
@@ -402,11 +408,80 @@ check_sidecars() {
             printf 'release-scripts.sh: stale or missing sidecar: %s.sha256\n' "$p" >&2
             bad=1
         fi
-    done < <({ array_paths; printf '%s\n' lib/allowed_signers; } | LC_ALL=C sort -u)
+    done < <(array_paths | LC_ALL=C sort -u)
     if [[ $bad -ne 0 ]]; then
-        printf 'release-scripts.sh: lib/allowed_signers needs a row in an updater array; then run bash tools/gen-checksums.sh and commit the sidecars.\n' >&2
+        printf 'release-scripts.sh: run bash tools/gen-checksums.sh and commit the sidecars.\n' >&2
         return 1
     fi
+}
+
+# key_files: every lib/release-keys/*.asc of the tree, sorted by name.
+key_files() {
+    local f
+    for f in "${TN_KEYS_DIR}"/*.asc; do
+        if [[ -f "$f" ]]; then printf '%s\n' "$f"; fi
+    done | LC_ALL=C sort
+}
+
+# keys_concat: the release key files, one after the other in name order: the
+# text install.sh embeds.
+keys_concat() {
+    local f
+    while IFS= read -r f; do
+        cat "$f"
+    done < <(key_files)
+}
+
+# check_keys: rc 0 when lib/release-keys holds at least one *.asc, every one
+# is an armored public key that decodes, and every one is a row of an updater
+# array (so it ships, with a sidecar). Messages on stderr.
+check_keys() {
+    local f err tracked bad=0
+    if [[ -z "$(key_files)" ]]; then
+        printf 'release-scripts.sh: %s holds no release key (*.asc): add the release signer public key first\n' "$TN_KEYS_DIR" >&2
+        return 1
+    fi
+    if ! err="$(tn_dearmor_keys "$TN_KEYS_DIR" 2>&1 > /dev/null)"; then
+        printf 'release-scripts.sh: %s\n' "$err" >&2
+        bad=1
+    fi
+    tracked="$(array_paths)"
+    while IFS= read -r f; do
+        if ! printf '%s\n' "$tracked" | grep -qxF -- "$f"; then
+            printf 'release-scripts.sh: %s is not in an updater array: add the row "%s:%s:NONE" to SCRIPTS in update-scripts.sh so it ships, then run bash tools/gen-checksums.sh\n' "$f" "$f" "$f" >&2
+            bad=1
+        fi
+    done < <(key_files)
+    return "$bad"
+}
+
+# key_fpr FILE: the primary fingerprint of every key in FILE, one per line,
+# from gpg in a throwaway GnuPG home; rc 1 when gpg is missing or reads none.
+key_fpr() {
+    local home f
+    command -v gpg >/dev/null 2>&1 || return 1
+    home="$(mktemp -d "${TMPDIR:-/tmp}/tn-gpg.XXXXXX")" || return 1
+    f="$(GNUPGHOME="$home" gpg --batch --no-tty --quiet --with-colons --import-options show-only \
+        --import < "$1" 2>/dev/null | awk -F: '$1 == "pub" { want = 1; next } $1 == "fpr" && want { print $10; want = 0 }')" || f=""
+    rm -rf "$home"
+    [[ -n "$f" ]] || return 1
+    printf '%s\n' "$f"
+}
+
+# sign_commands: the gpg command that signs MANIFEST, once per release key.
+sign_commands() {
+    local f fprs fpr
+    while IFS= read -r f; do
+        if fprs="$(key_fpr "$f")"; then
+            for fpr in $fprs; do
+                printf '       gpg --armor --detach-sign --local-user %s! --output %s MANIFEST   # %s\n' \
+                    "$fpr" "$TN_SIG_FILE" "$f"
+            done
+        else
+            printf '       gpg --armor --detach-sign --local-user "<the fingerprint of %s>!" --output %s MANIFEST\n' \
+                "$f" "$TN_SIG_FILE"
+        fi
+    done < <(key_files)
 }
 
 # header FILE KEY: the value of KEY=... in FILE; rc 1 when absent or repeated.
@@ -426,13 +501,9 @@ updater_version() {
     sed -n 's/^readonly SCRIPT_VERSION="\([0-9][0-9.]*\)"$/\1/p' update-scripts.sh | head -1
 }
 
-signer_keys() {
-    grep -cvE '^[[:space:]]*(#|$)' lib/allowed_signers || true
-}
-
-# embedded_signers: the allowed-signers copy embedded in install.sh.
-embedded_signers() {
-    awk -v m="$SIGNERS_HEREDOC" -v q="'" '
+# embedded_keys: the release keys embedded in install.sh.
+embedded_keys() {
+    awk -v m="$KEYS_HEREDOC" -v q="'" '
         $0 == m { inblock = 0 }
         inblock { print }
         index($0, "<<" q m q) { inblock = 1 }
@@ -443,20 +514,36 @@ installer_tag() {
     sed -n 's/^readonly TN_SCRIPTS_TAG="\([^"]*\)".*$/\1/p' install.sh | head -1
 }
 
+# verify_sig: verify MANIFEST.asc with the keys of lib/release-keys. Prints
+# the tn_verify_manifest verdict line, or NOKEYS when the keys cannot be read,
+# and returns 0 only for a good verdict.
 verify_sig() {
-    command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen not found: cannot verify MANIFEST.sig"
-    ssh-keygen -Y verify -f lib/allowed_signers -I "$SIGNER_PRINCIPAL" \
-        -n "$SIGNER_NAMESPACE" -s MANIFEST.sig < MANIFEST
+    local kr v rc=0
+    kr="$(mktemp "${TMPDIR:-/tmp}/tn-release-keys.XXXXXX")" || { echo "NOKEYS"; return 1; }
+    if ! tn_dearmor_keys "$TN_KEYS_DIR" > "$kr" 2>/dev/null; then
+        rm -f "$kr"
+        echo "NOKEYS"
+        return 1
+    fi
+    v="$(tn_verify_manifest "$kr" "$TN_SIG_FILE" MANIFEST)" || rc=$?
+    rm -f "$kr"
+    printf '%s\n' "$v"
+    return "$rc"
 }
 
-# rewrite_installer TAG: set TN_SCRIPTS_TAG and replace the embedded signers.
+# rewrite_installer TAG: set TN_SCRIPTS_TAG and replace the embedded release keys.
 rewrite_installer() {
-    local tag="$1" tmp
-    grep -qx "$SIGNERS_HEREDOC" lib/allowed_signers && die "lib/allowed_signers contains the heredoc marker line ${SIGNERS_HEREDOC}"
+    local tag="$1" tmp keys
+    keys="$(mktemp "${TMPDIR:-/tmp}/tn-release-keys.XXXXXX")" || die "could not create a temp file"
+    keys_concat > "$keys"
+    if grep -qx "$KEYS_HEREDOC" "$keys"; then
+        rm -f "$keys"
+        die "a release key file contains the heredoc marker line ${KEYS_HEREDOC}"
+    fi
     [[ "$(grep -c '^readonly TN_SCRIPTS_TAG=' install.sh)" == "1" ]] || die "install.sh: expected one readonly TN_SCRIPTS_TAG= line"
-    [[ "$(grep -c "^${SIGNERS_HEREDOC}\$" install.sh)" == "1" ]] || die "install.sh: expected one ${SIGNERS_HEREDOC} heredoc"
+    [[ "$(grep -c "^${KEYS_HEREDOC}\$" install.sh)" == "1" ]] || die "install.sh: expected one ${KEYS_HEREDOC} heredoc"
     tmp="$(mktemp "install.sh.XXXXXX")"
-    awk -v tag="$tag" -v m="$SIGNERS_HEREDOC" -v sf="lib/allowed_signers" -v q="'" '
+    awk -v tag="$tag" -v m="$KEYS_HEREDOC" -v sf="$keys" -v q="'" '
         /^readonly TN_SCRIPTS_TAG=/ {
             print "readonly TN_SCRIPTS_TAG=\"" tag "\"   # written by tools/release-scripts.sh"
             next
@@ -470,6 +557,7 @@ rewrite_installer() {
             skipping = 1
         }
     ' install.sh > "$tmp"
+    rm -f "$keys"
     chmod 755 "$tmp"
     mv -f "$tmp" install.sh
 }
@@ -481,8 +569,7 @@ prepare() {
     [[ "$tag" =~ $TAG_RE ]] || die "release tag must look like scripts-v1.2.3, got: ${tag}"
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git work tree"
     [[ -z "$(git status --porcelain)" ]] || die "the tree has uncommitted changes; commit or stash them first"
-    [[ -f lib/allowed_signers ]] || die "lib/allowed_signers is missing"
-    [[ "$(signer_keys)" -gt 0 ]] || die "lib/allowed_signers lists no key: add the release signer public key line first"
+    check_keys || exit 1
 
     uver="$(updater_version)"
     [[ "$uver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read SCRIPT_VERSION from update-scripts.sh"
@@ -535,28 +622,29 @@ prepare() {
     } > "$tmp" || { rm -f "$tmp"; die "could not hash the release files"; }
     chmod 644 "$tmp"
     mv -f "$tmp" MANIFEST
-    rm -f MANIFEST.sig
+    rm -f "$TN_SIG_FILE"
 
     cat <<EOF
 Prepared ${tag}: serial ${serial}, min_updater ${min}, $(grep -c '^sha256 ' MANIFEST) files.
 Release date ${date}; the release expires ${expires} (${days} days later).
-Wrote MANIFEST, RELEASE and install.sh (tag and embedded signers). Nothing is signed yet.
+Wrote MANIFEST, RELEASE and install.sh (tag and embedded release keys). Nothing is signed yet.
 
-Release signer, on the machine that holds the hardware key:
+Release signer, with the release key (its YubiKey here, or through a forwarded gpg-agent):
 
   1. Review the change:            git diff -- install.sh RELEASE; cat MANIFEST
-  2. Sign the manifest (touch the key when it blinks):
-       ssh-keygen -Y sign -f ~/.ssh/id_ed25519_sk -n ${SIGNER_NAMESPACE} MANIFEST
-     (-f names your key handle file; the command writes MANIFEST.sig)
-  3. Check the signature against the signer list the release ships:
-       ssh-keygen -Y verify -f lib/allowed_signers -I ${SIGNER_PRINCIPAL} -n ${SIGNER_NAMESPACE} -s MANIFEST.sig < MANIFEST
-       bash tools/release-scripts.sh --check --tag ${tag}
+  2. Sign the manifest (touch the key when it blinks); ${TN_SIG_THRESHOLD} of these keys must sign:
+$(sign_commands)
+     A further signer appends to it: the same command with --output - MANIFEST >> ${TN_SIG_FILE}
+  3. Check the signature against the keys the release ships:
+       bash tools/release-scripts.sh --check --require-sig --tag ${tag}
   4. Commit and open the release pull request:
-       git add MANIFEST MANIFEST.sig RELEASE install.sh
-       git commit -m "Release ${tag}"
+       git add MANIFEST ${TN_SIG_FILE} RELEASE install.sh
+       git commit -S -m "release: ${tag}"
   5. After it merges, tag the merge commit on main and push the tag:
-       git tag -a ${tag} -m "${tag}" <merge commit>
+       git tag -s ${tag} <merge commit> -m ${tag}
        git push origin ${tag}
+
+bash tools/cut-release.sh prep ${tag} (and, after the merge, tag ${tag}) runs these steps one by one.
 EOF
     if (( day + 10#$days <= today )); then
         printf 'release-scripts.sh: WARN %s expires %s, on or before today (%s): every updater, installer and check-node will report it as expired. Prepare it again with a later --date or a longer --expires before signing.\n' \
@@ -566,7 +654,7 @@ EOF
 
 check() {
     local tag="$1" require_sig="$2" require_fresh="$3"
-    local fmt rel serial min rdate="" expires="" n uver itag rtag bad=0 tmp
+    local fmt rel serial min rdate="" expires="" n uver itag rtag bad=0 tmp v
 
     if [[ ! -f MANIFEST ]]; then
         if [[ -n "$tag" || "$require_sig" == "1" || "$require_fresh" == "1" ]]; then
@@ -638,25 +726,29 @@ check() {
         echo "FAIL install.sh TN_SCRIPTS_TAG is ${itag:-empty}, MANIFEST is ${rel}" >&2
         bad=1
     fi
-    if [[ "$(embedded_signers)" != "$(cat lib/allowed_signers)" ]]; then
-        echo "FAIL the signers embedded in install.sh differ from lib/allowed_signers" >&2
+    if [[ "$(embedded_keys)" != "$(keys_concat)" ]]; then
+        echo "FAIL the release keys embedded in install.sh differ from ${TN_KEYS_DIR}/*.asc" >&2
         bad=1
     fi
+    check_keys || bad=1
     check_sidecars || bad=1
     check_expiry "$rel" "$rdate" "$expires" "$require_fresh" || bad=1
 
-    if [[ -f MANIFEST.sig ]]; then
-        if verify_sig; then
-            echo "MANIFEST.sig verifies against lib/allowed_signers."
+    if [[ -f "$TN_SIG_FILE" ]]; then
+        if v="$(verify_sig)"; then
+            echo "${TN_SIG_FILE} verifies: signed by ${v#GOOD } (${TN_SIG_THRESHOLD} release key(s) needed)."
+        elif [[ "$v" == "NOKEYS" ]]; then
+            echo "FAIL ${TN_SIG_FILE} cannot be checked: ${TN_KEYS_DIR} holds no readable release key" >&2
+            bad=1
         else
-            echo "FAIL MANIFEST.sig does not verify against lib/allowed_signers" >&2
+            echo "FAIL ${TN_SIG_FILE} does not verify against ${TN_KEYS_DIR}: $(tn_sig_reason "$v")" >&2
             bad=1
         fi
     elif [[ -n "$tag" || "$require_sig" == "1" ]]; then
-        echo "FAIL no MANIFEST.sig" >&2
+        echo "FAIL no ${TN_SIG_FILE}" >&2
         bad=1
     else
-        echo "WARN no MANIFEST.sig yet (unsigned release candidate)" >&2
+        echo "WARN no ${TN_SIG_FILE} yet (unsigned release candidate)" >&2
     fi
 
     if [[ $bad -ne 0 ]]; then
