@@ -1,3 +1,85 @@
+## Review: private alerts, a heartbeat pushed from the node host (issue #60, branch private-alerts, 2026-11-04)
+
+Base `hardening-followups` at 4a2cf6e (rebased onto its head before the PR). Shared spec
+`tasks/spec-alerts-shared.md` (section 13 records the decisions taken during the round), package
+specs `tasks/spec-alerts-<PKG>.md`, checkpoints `tasks/ckpt-alerts-<PKG>.md`.
+
+### What landed
+
+- `lib/tn-heartbeat.sh` (new, `HEARTBEAT_VERSION` 2.1.0): the runner systemd starts from
+  `telcoin-heartbeat.timer` under `DynamicUser`. Five checks in order (service state from
+  `systemctl show`, loopback RPC and chain id, the top-level consensus header number advancing,
+  node mode with a CvvInactive window plus block and epoch, `/health/network`), first down wins;
+  pushes to up to five Kuma, healthchecks or webhook targets with the URL handed to curl through
+  `-K`; state in the `StateDirectory` read through a key whitelist; exit 0/1/2. Sources nothing.
+- `lib/alerts.sh` (new, `ALERTS_VERSION` 2.1.0): targets file (root 0600 from a process
+  substitution), `alerts.env`, runner install, the two units, test heartbeat, enable with a test
+  and a rollback that leaves `.node-meta` byte for byte as it was, targets change with restore,
+  refresh that replaces only the values given, disable, status with an issue count (quiet one
+  line on a host without alerts; `unknown (run with sudo)` without root). Sourced at the end of
+  `lib/common.sh` behind the same guard as observability.
+- `setup-alerts.sh` (new, 2.1.0): a 7-item menu with hidden URL input and `--json` with exactly
+  one of `--status`, `--enable`, `--test`, `--refresh`, `--disable`; targets from
+  `--targets-stdin`, `TN_ALERT_TARGETS` or a warned `--target`; `--interval`, `--stall-after`,
+  `--inactive-after` (derived defaults max(180, 3 x interval), max(900, stall)), `--label`,
+  `--allow-http`; exit 0/1/2/3; the lock and the baseline refresh, never a node restart.
+- setup-node offers it on every network (`ENABLE_ALERTS` pending, `step_alerts` runs the child
+  once the node is active, the value is read back on a re-run); check-node runs `alerts_status`
+  and checks the four alerts paths' owners and modes; remove-node removes the alerts before the
+  node stops at every scope and on the leftover path, with fixed paths; update-scripts tracks
+  the three files and prints the `--refresh` command.
+- Docs: OPERATOR.md 4.14 and short additions, README section and rows and changelog, the
+  release note (closes #47 and #60), docs/testnet-addons.md, followup.md (UI card, retiring the
+  pull monitor, the maintenance marker, two side findings, a test-flake note), AGENTS.md rules
+  and a `## Private alerts` section, the partner guide 1.7 with its PDF (77 pages, second build
+  "PDF unchanged").
+- Tests: heartbeat_test 187, alerts_test 279 (271 as root), setup_alerts_test 209 (204 without
+  python3), setup_node_alerts_test 48, `tools/tests/vm.d/P0-alerts.sh` for the CI VM; updated
+  host_baseline, check_node_hardening, remove, remove_addons, updater_manifest, addon_gates,
+  addon_oldlib tests.
+
+### Verification
+
+- V1 (code): no E, 3 W (the rollback left an `ENABLE_ALERTS=false` line on a host without the
+  key; status without root said "off"; four runner mutants survived), 6 N (a healthchecks
+  `#fragment` would ping the success URL; `OnBootSec` fires once at enable; the base branch moved
+  on). V1d (docs): 2 E (a `done` field documented on every action that only an enable and a
+  test send), 14 W (fixed thresholds documented where the code derives them; a prompt quoted on
+  one line; log order; "nothing else is sent" understated), 22 N. 59 runner mutants, 46 killed
+  before the fixes; the four survivors that mattered die now (F-B), plus three more.
+- Fixes: F-A (undo via `alerts_disable keep-meta` and `meta_unset`; status `unknown (run with
+  sudo)` with `systemctl is-enabled`; `alerts_refresh [INTERVAL STALL INACTIVE]` and explicit
+  values on an enabled node, two-item `applied`), F-B (fragment refusal, the four scenarios),
+  F-C and F-D (every docs finding). V2 re-check: every fix proven end to end with the real
+  script and library as root in ubuntu:24.04 (`.node-meta` same bytes, inode and mtime after a
+  failed enable), no E, 1 W and 9 N, all applied by the orchestrator (docs wording, `network`
+  null in a non-root status, two stray files removed).
+- Final tree: fixture suite 65 files in bash 5.3.9, `bash:3.2` and `ubuntu:24.04` (as root);
+  `bash -n` under both bashes, `check-bash32`, `shellcheck --severity=error`, the perl,
+  passphrase-print, root-write-pipe, network-hits and ci_pins lints clean; `systemd-analyze
+  verify` on both units and the data-dir variant, `security` exposure 1.5; sidecars regenerated.
+- Not proven locally: `P0-alerts.sh` end to end (Docker cannot supply a `LoadCredential=`
+  directory); the "Ubuntu 24.04 VM assertions" job proves DynamicUser, LoadCredential,
+  `systemctl show` under the sandbox and the push from inside it.
+
+### Process notes
+
+- Agent budgets: A1b (342k), V1 (336k), V1d (312k), F-A (308k), A2 (299k) and V2 (265k) ran past
+  the 250k guideline. The library package carried the library, the common.sh block, the fixture
+  test and the VM assertion; the verifiers carried every gate plus a mutant run. Next round:
+  split a library package from its tests, and a verifier's gates from its mutants.
+- The docs agents wrote before the code existed and the verifier found 38 docs-versus-code
+  items; a second docs pass after the code fixers landed caught the rest. Writing docs from the
+  spec in parallel saved wall-clock time but cost one extra docs pass.
+
+### Left to the maintainer
+
+- Merge this PR into `hardening-followups` before `scripts-v2.1.0` is cut (the three new files
+  must be in that release); then PR #59 into main; then the cut.
+- After the first real install: enable with a Kuma push URL, stop the node once, see the `down`
+  reach the monitor; confirm the VM job passed on this PR.
+- Follow-ups in followup.md: the UI card, retiring the pull monitor, the maintenance marker.
+
 ## Review: main merged into docs/technical-specification; guide 1.5 and specification 1.2 against telcoin-network main 7167e7800 (2026-11-03)
 
 Branch `docs/technical-specification` (PR #58, draft). Two commits on top of 619f80f: the merge of
