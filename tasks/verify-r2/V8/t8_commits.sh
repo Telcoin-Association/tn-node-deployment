@@ -6,9 +6,10 @@ set -u
 # shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 RANGE=origin/main..release-packages-per-network
-# The tip under test and its commit count: 0ba57016d (6) in the first round, 57b8ec90a (9) now.
-WANT_TIP=${V8_TIP:-57b8ec90a}
-WANT_N=${V8_COMMITS:-9}
+# The tip under test and its commit count: 0ba57016d (6) in the first round, 57b8ec90a (9) in
+# the second, 7ae07a950 (10) at the final tip.
+WANT_TIP=${V8_TIP:-7ae07a950}
+WANT_N=${V8_COMMITS:-10}
 git -C "$TN" log --format='%h %s' "$RANGE" | tee "$OUT/t8-subjects.txt"
 expect commits-count 0 "$WANT_N" -- bash -c "git -C '$TN' rev-list --count '$RANGE'"
 expect commits-tip 0 "$WANT_TIP" -- git -C "$TN" rev-parse --short=9 release-packages-per-network

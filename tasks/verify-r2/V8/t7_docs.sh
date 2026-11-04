@@ -67,7 +67,9 @@ expect docs-first-push-command 0 'run `RELEASE_FIRST_PUSH=tn-testnet make releas
 expect docs-first-push-not-yes 0 '`RELEASE_YES=1` never stands in for it' -- grep -F 'RELEASE_YES=1` never stands in for it' "$RM"
 expect docs-full-rebuild 0 "This is a full rebuild, so the first release of each network builds twice" -- grep -F 'This is a full rebuild' "$RM"
 expect docs-row-asks 0 '`release-build` stops and asks for `RELEASE_FIRST_PUSH`' -- grep -F 'stops and asks for `RELEASE_FIRST_PUSH`' "$RM"
-expect docs-row-private 0 "warns that the package is private, not new" -- grep -F 'private, not new' "$RM"
+expect docs-row-private 0 '`release-build` stops before the build: the package is private, not new, and already holds `:<TAG>`' -- grep -F 'private, not new' "$RM"
+expect docs-row-private-setup-first 0 'step 2 first (make the package public and set its access lists), then run step 4 again, with `RELEASE_REBUILD=1` if the tag must be rebuilt' -- grep -F 'private, not new' "$RM"
+expect docs-row-private-no-warn-wording 1 "" -- grep -F 'warns that the package is private' "$RM"
 expect docs-old-prompt-gone 1 "" -- grep -n -E 'asks whether to push|answer no and make it public' "$RM" "$TN/.github/ACTIONS.md"
 expect docs-actions-first-push 0 'only with `RELEASE_FIRST_PUSH` set to the package' -- grep -F 'RELEASE_FIRST_PUSH' "$TN/.github/ACTIONS.md"
 # The refusal the guide quotes is the start of what the code prints for that case.

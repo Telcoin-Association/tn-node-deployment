@@ -60,3 +60,14 @@ None (verifier). The PR-body wording fixes are W3.
 451/451 pass at 57b8ec90a. W1, W2, W3, N3 fixed; N4 resolved. New: no ERROR, no WARN;
 NOTEs N14 (NUL byte), N15 (private + RELEASE_REBUILD builds into a dead end), N16 (any inspect
 failure reads as "not seen"; qualifies one PR guarantee), N17, N18. Ready for the draft PR.
+
+## Final tip 7ae07a950 (round 2c)
+- [x] F0 read 7ae07a950
+- [x] F1 tx1 99->129 (private exit 2 before build; login sorting; retries; LOGIN msg:/LOGIN_SEQ; sleep stubbed), t7 +2, t8 pins 7ae07a950/10
+- [x] F2 run_all green: 484/484
+- [x] F3 REPORT.md 'Final tip 7ae07a950' section
+
+### Round 2c result
+484/484 pass at 7ae07a950. N15, N16 fixed. New NOTE N19: the anonymous 403 text
+("failed to authorize ... 403 Forbidden") sorts as retryable -> exit 3; fails closed, may block
+a first push if the authenticated answer reads the same; one-line fix suggested. No ERROR/WARN.

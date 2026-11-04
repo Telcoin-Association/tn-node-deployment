@@ -1,6 +1,6 @@
 # V8 report: UPS round 2, per-network image packages (telcoin-network)
 
-This report covers two rounds. The re-verification at `57b8ec90a` comes first and is the current status. The first-round sections below it, at `0ba57016d`, are kept as the record of what was found then.
+This report covers three rounds. The final tip, `7ae07a950` (draft PR Telcoin-Association/telcoin-network#1784), comes first and is the current status. The re-verification at `57b8ec90a` and the first round at `0ba57016d` follow as the record of what was found then.
 
 Target: `~/coding/telcoin/tn-r2-packages`, branch `release-packages-per-network`, tip `0ba57016d`, six
 commits over origin/main `a0d6e6e26` (e595f9809, 930afd05d, a883fed98, 60d00d284, 848a47b5f,
@@ -8,6 +8,62 @@ commits over origin/main `a0d6e6e26` (e595f9809, 930afd05d, a883fed98, 60d00d284
 Verified 2026-11-04 against `spec-r2-UPS.md` and `spec-r2-V8.md`. I built the harness before
 reading the implementer's checkpoint and PR body.
 
+
+
+## Final tip 7ae07a950 (2026-11-04)
+
+The branch gained one commit, 7ae07a950 "release: stop the first-push check on anything but a clear answer", which touches `etc/release.sh` (`login_digest`, `cmd_build`) and one failure-table row in `docs/src/maintainers/releasing.md`. The branch now has ten commits and the same nine files, all on the spec's list, with no trailers. The worktree is untouched (`?? tasks/` only).
+
+Result of `bash run_all.sh` at 7ae07a950: **484 assertions, 484 pass, exit 0.**
+
+```text
+t1_matrix: 37 passed, 0 failed
+t2_package: 148 passed, 0 failed
+t3_env: 35 passed, 0 failed
+t4_alias: 11 passed, 0 failed
+t5_make: 13 passed, 0 failed
+t6_lint: 7 passed, 0 failed
+t7_docs: 43 passed, 0 failed
+t8_commits: 19 passed, 0 failed
+tx1_build: 129 passed, 0 failed
+tx2_draft: 42 passed, 0 failed
+SKIP tx3_ghcr_probe (opt-in, V8_NETWORK=1)
+```
+
+The 57b8ec90a harness gave 437 pass and 17 fail on this commit, and every failure was one of the intended changes. The harness changes for 7ae07a950:
+- `drive.sh`: `sleep` is stubbed in the build scenario, because `login_digest` now retries with `sleep 5`. New `LOGIN=msg:<text>` gives any inspect error, and `LOGIN_SEQ` gives one answer per attempt.
+- `tx1_build.sh`: the private and login-error groups are rewritten, and the new answer-sorting cases are added (99 cases became 129).
+- `t7_docs.sh`: the new private row.
+- `t8_commits.sh`: the pins are now tip `7ae07a950` and 10 commits.
+
+The harness still passes shellcheck 0.11 and 0.9 at `--severity=error`, and `bash -n`.
+
+### N15 and N16: fixed
+
+**N15, fixed.** When the login sees the tag in a package that refuses anonymous reads, build now exits 2 before any build or push, whatever `RELEASE_REBUILD`, `RELEASE_FIRST_PUSH` and `RELEASE_YES` say (tx1 `*-private`, `*-private-rebuild`, `*-private-rebuild-no-push`, `*-private-everything`). The refusal reads: `<IMAGE> is private, not new, and already holds <IMAGE>:<TAG> (<digest>): do the one-time setup first (make the package public and set its access list, as the maintainer guide says), then run make release-build TAG=<TAG> again, with RELEASE_REBUILD=1 if the tag must be rebuilt`. The guide's failure-table row now says the same (t7 `docs-row-private*`).
+
+**N16, fixed.** `login_digest` sorts failed inspects.
+- These answers count as "the login does not see the tag": `not found`, `manifest unknown`, `name unknown`, and `denied`, matched case-insensitively. Without `RELEASE_FIRST_PUSH` the run exits 2; with the matching value it pushes and stops at exit 2 (tx1 `*-login-*-not-seen`, `*-fp-pushes`).
+- Everything else is tried 3 times, with 2 waits, and then exits 3 with `cannot ask the registry for <IMAGE>:<TAG> with the docker login after 3 attempts: <last line> (check the network, and run make docker-login if the login expired)`. That covers a DNS failure, `401 Unauthorized`, and a local `permission denied`, which is matched before `denied`. None of them pushes, even with `RELEASE_FIRST_PUSH` (tx1 `*-login-error*`, `*-login-unauthorized`, `*-login-local-permission-denied`).
+- A failure followed by `not found` counts as not seen. A failure followed by the digest counts as private (tx1 `*-login-flaky-then-*`).
+
+The PR body (`tasks/pr-body-UPS.md`) already describes both changes, and its guarantee now carries the qualifier "only after the registry answered that the tag is not found or denied".
+
+### N19, new NOTE: the sorting depends on the registry's wording
+
+Last round, an anonymous inspect of `ghcr.io/telcoin-association/tn-mainnet:v0.1.0` (tx3) answered `ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://ghcr.io/token?...: 403 Forbidden`. That text contains neither `denied` nor `not found`, so the sorter treats such an answer as a retryable failure and exits 3 (tx1 `*-login-403-forbidden`).
+
+The authenticated answer for a never-pushed package was not exercised here, because that needs the maintainer's login. ghcr probably answers a logged-in pull of a package that does not exist with `denied` or `not found`, which the sorter handles. If it answers with this 403 text instead, a network's first push cannot start. It would stop with exit 3, quoting that line, so this fails closed and is not unsafe.
+
+Optional one-line fix: add `*"403 forbidden"*` to the not-seen patterns. That stays safe, because a 403 means the login cannot read the tag, so it can never be the "sees the tag" case, and the push still needs `RELEASE_FIRST_PUSH=<package>`. Otherwise, watch the first `release-build` of each network.
+
+The opposite slip also exists: a local error whose text contains `not found` (for example a missing helper binary) would read as "not seen". It still needs `RELEASE_FIRST_PUSH` to continue, and the build step would then fail on the same missing tool.
+
+### Verdict at 7ae07a950
+
+W1, W2, W3, N3 and N4 from the earlier rounds and N15 and N16 from the second are fixed and covered by the harness: 484 of 484 pass. Nothing at ERROR or WARN remains. The open NOTEs are N14, N17, N18 and N19, plus the first-round NOTEs N1, N2 and N5-N13. They are optional hardening, and none blocks the draft PR, which is open as #1784.
+
+---
 
 ## Re-verification at 57b8ec90a (2026-11-04)
 

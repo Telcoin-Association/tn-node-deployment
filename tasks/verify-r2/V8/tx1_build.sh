@@ -68,18 +68,40 @@ for spec in "v0.1.0 mainnet tn-mainnet tn-testnet CARGO_FEATURES= adiri" "v0.17.
     before "$n-fp" "docker run --rm --network none" "docker push"
     expect "$n-fp-with-yes" 2 "$stop" "release_upload" -- bld "$tag" RELEASE_YES=1 RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied,denied
     expect "$n-fp-badfeat" 1 "" "docker push" -- bld "$tag" RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied,denied OUT_FEATURES="$badfeat"
-    # Any failed inspect counts as "the login does not see the tag" (N16).
-    expect "$n-fp-login-error-unset" 2 "$ask" "docker buildx build" -- bld "$tag" LOGIN=error REG_SEQ=denied
-    expect "$n-fp-login-error-pushes" 2 "docker push $img:$tag" -- bld "$tag" LOGIN=error RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied,denied
+    # 7ae07a950 (N16): only "not found", "manifest unknown", "name unknown" or "denied" mean the
+    # login does not see the tag; anything else is retried 3 times, then exit 3 with its last line.
+    retry="cannot ask the registry for $img:$tag with the docker login after 3 attempts"
+    expect "$n-login-error" 3 "$retry: ERROR: failed to do request: dial tcp: lookup ghcr.io: no such host (check the network, and run make docker-login if the login expired)" \
+        "docker buildx build" -- bld "$tag" LOGIN=error REG_SEQ=denied
+    expect "$n-login-error-fp-no-push" 3 "$retry" "docker push" -- bld "$tag" LOGIN=error RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied,denied
+    expect "$n-login-error-retries" 3 "sleep 5" -- bld "$tag" LOGIN=error REG_SEQ=denied
+    expect "$n-login-error-three" 0 "3" -- bash -c "grep -c 'imagetools inspect' '$OUT/$n-login-error-retries.txt'"
+    expect "$n-login-unauthorized" 3 "$retry: ERROR: failed to authorize: 401 Unauthorized" "docker buildx build" -- \
+        bld "$tag" LOGIN="msg:failed to authorize: 401 Unauthorized" RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied
+    expect "$n-login-local-permission-denied" 3 "$retry: ERROR: permission denied while trying to connect to the Docker daemon socket" "docker buildx build" -- \
+        bld "$tag" LOGIN="msg:permission denied while trying to connect to the Docker daemon socket" RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied
+    # The text ghcr gave an anonymous inspect of tn-mainnet (tx3): neither "denied" nor "not found" (N19).
+    expect "$n-login-403-forbidden" 3 "$retry: ERROR: failed to authorize: failed to fetch oauth token: unexpected status from GET request to https://ghcr.io/token: 403 Forbidden" \
+        "docker buildx build" -- bld "$tag" LOGIN="msg:failed to authorize: failed to fetch oauth token: unexpected status from GET request to https://ghcr.io/token: 403 Forbidden" RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied
+    for ans in "manifest unknown" "name unknown" "denied: requested access to the resource is denied" "NOT FOUND"; do
+        a=$(printf '%s' "$ans" | cut -d' ' -f1-2 | tr ' :' '--')
+        expect "$n-login-$a-not-seen" 2 "$ask" "docker buildx build" -- bld "$tag" LOGIN="msg:$img:$tag: $ans" REG_SEQ=denied
+        expect "$n-login-$a-fp-pushes" 2 "$stop" "release_upload" -- \
+            bld "$tag" LOGIN="msg:$img:$tag: $ans" RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied,denied
+    done
+    expect "$n-login-flaky-then-none" 2 "$ask" "docker buildx build" -- bld "$tag" LOGIN_SEQ=error,none REG_SEQ=denied
+    expect "$n-login-flaky-then-seen" 2 "is private, not new" "docker buildx build" -- bld "$tag" LOGIN_SEQ=error,error,D REG_SEQ=denied
 
-    # Denied, and the login sees the tag: private, not new; the RELEASE_REBUILD rule applies.
-    private="warning: $img is private, not new: it refuses anonymous reads, but the docker login sees $img:$tag at $DG; make the package public as the maintainer guide's one-time setup says"
+    # Denied, and the login sees the tag (7ae07a950, N15): exit 2 before the build, whatever
+    # RELEASE_REBUILD, RELEASE_FIRST_PUSH or RELEASE_YES say.
     exists="$img:$tag already exists ($DG); set RELEASE_REBUILD=1 to rebuild it"
-    expect "$n-private" 1 "$exists" "docker buildx build" -- bld "$tag" LOGIN=D REG_SEQ=denied
-    expect "$n-private-warn" 1 "$private" -- bld "$tag" LOGIN=D REG_SEQ=denied
-    expect "$n-private-yes-fp" 1 "$exists" "docker buildx build" -- bld "$tag" LOGIN=D RELEASE_YES=1 RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied
-    expect "$n-private-rebuild" 2 "$stop" "release_upload" -- bld "$tag" LOGIN=D RELEASE_REBUILD=1 REG_SEQ=denied,denied
-    expect "$n-private-rebuild-builds" 2 "docker buildx build" -- bld "$tag" LOGIN=D RELEASE_REBUILD=1 REG_SEQ=denied,denied
+    private="$img is private, not new, and already holds $img:$tag ($DG): do the one-time setup first (make the package public and set its access list, as the maintainer guide says), then run make release-build TAG=$tag again, with RELEASE_REBUILD=1 if the tag must be rebuilt"
+    expect "$n-private" 2 "$private" "docker buildx build" -- bld "$tag" LOGIN=D REG_SEQ=denied
+    expect "$n-private-yes-fp" 2 "$private" "docker buildx build" -- bld "$tag" LOGIN=D RELEASE_YES=1 RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied
+    expect "$n-private-rebuild" 2 "$private" "docker buildx build" -- bld "$tag" LOGIN=D RELEASE_REBUILD=1 REG_SEQ=denied,denied
+    expect "$n-private-rebuild-no-push" 2 "$private" "docker push" -- bld "$tag" LOGIN=D RELEASE_REBUILD=1 REG_SEQ=denied,denied
+    expect "$n-private-everything" 2 "$private" "docker buildx build" -- \
+        bld "$tag" LOGIN=D RELEASE_YES=1 RELEASE_REBUILD=1 RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied,denied
     # An inspect that answers without a digest stops with exit 1.
     expect "$n-login-nodigest" 1 "docker buildx imagetools inspect $img:$tag answered without a digest" "docker buildx build" -- \
         bld "$tag" LOGIN=nodigest RELEASE_FIRST_PUSH="$pkg" REG_SEQ=denied
@@ -106,5 +128,5 @@ done
 for f in build-v0.1.0-fp-badfeat build-v0.17.0-adiri-fp-badfeat build-v0.1.0-normal-badfeat build-v0.17.0-adiri-normal-badfeat; do
     expect "$f-is-feature-refusal" 0 "Build Features" -- grep -E '^error: .*(cargo features|without the adiri feature)' "$OUT/$f.txt"
 done
-grep -h -E '^(error|warning):' "$OUT/build-v0.1.0-fp-unset.txt" "$OUT/build-v0.1.0-fp.txt" "$OUT/build-v0.1.0-private-warn.txt" "$OUT/build-v0.1.0-fp-other-package.txt" | tee "$OUT/tx1-first-push-messages.txt"
+grep -h -E '^(error|warning):' "$OUT/build-v0.1.0-fp-unset.txt" "$OUT/build-v0.1.0-fp.txt" "$OUT/build-v0.1.0-private.txt" "$OUT/build-v0.1.0-login-error.txt" "$OUT/build-v0.1.0-fp-other-package.txt" | tee "$OUT/tx1-first-push-messages.txt"
 summary tx1_build

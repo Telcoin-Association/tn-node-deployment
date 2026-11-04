@@ -208,6 +208,7 @@ case "$scenario" in
         # digest), none (404), denied (401/403: "denied" with first-push, else the real die),
         # or a literal digest.
         uname() { case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac; }
+        sleep() { rec "sleep $*"; }
         need() { :; }
         require_docker() { :; }
         require_registry_login() { rec "require_registry_login"; }
@@ -263,9 +264,17 @@ case "$scenario" in
                         inspect) printf 'Name: default\nDriver: docker\n' ;;
                         imagetools)
                             # login_digest: what the docker login sees for $4 (IMAGE:TAG).
-                            # LOGIN: D (the digest), none (not found), error (a network
-                            # failure), nodigest, d-then-warning, or a literal answer.
-                            case "${LOGIN:-none}" in
+                            # LOGIN (every attempt) or LOGIN_SEQ (comma list, one per attempt):
+                            # D (the digest), none (not found), error (DNS failure), nodigest,
+                            # d-then-warning, msg:<text> (fails with "ERROR: <text>"), or a
+                            # literal answer printed with exit 0.
+                            lm=${LOGIN:-none}
+                            if [ -n "${LOGIN_SEQ:-}" ]; then
+                                ln=$(($(cat "$WORK/loginn" 2>/dev/null || echo 0) + 1))
+                                echo "$ln" >"$WORK/loginn"
+                                lm=$(printf '%s\n' "$LOGIN_SEQ" | tr ',' '\n' | sed -n "${ln}p")
+                            fi
+                            case "$lm" in
                                 D) printf '%s\n' "$FAKE_D" ;;
                                 none)
                                     printf 'ERROR: %s: not found\n' "$4" >&2
@@ -277,7 +286,11 @@ case "$scenario" in
                                     ;;
                                 nodigest) printf 'Name: %s\n' "$4" ;;
                                 d-then-warning) printf '%s\nWARNING: attestation manifest not found\n' "$FAKE_D" ;;
-                                *) printf '%s\n' "$LOGIN" ;;
+                                msg:*)
+                                    printf 'ERROR: %s\n' "${lm#msg:}" >&2
+                                    return 1
+                                    ;;
+                                *) printf '%s\n' "$lm" ;;
                             esac
                             ;;
                     esac
