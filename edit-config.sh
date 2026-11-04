@@ -11,9 +11,9 @@
 # An edit is refused while update-node.sh is applying an update (the two share
 # the update lock). Before restarting a node that votes in the current
 # committee, the script waits for the epoch to close and settle when the
-# boundary is within the restart margin (five minutes on testnet; derived from
-# the epoch length elsewhere, up to 15 minutes), at most TN_EPOCH_WAIT_MAX (30
-# minutes by default). A rollback restart never waits.
+# boundary is within the restart margin (five minutes for the six-hour epochs of
+# mainnet and testnet; derived from the epoch length, up to 15 minutes), at most
+# TN_EPOCH_WAIT_MAX (30 minutes by default). A rollback restart never waits.
 #
 # USAGE:
 #   sudo bash edit-config.sh                          # interactive menu
