@@ -5,7 +5,9 @@
 # TN_EPOCH_WAIT_MAX cap (0 turns the pause off). The margin and settle follow
 # the epoch length read with the boundary unless TN_EPOCH_MARGIN or
 # TN_EPOCH_SETTLE is set, and a cap shorter than the wait it bounds is kept with
-# a warning.
+# a warning. When no epoch length can be read (the blind wait), they derive the
+# same way from the network's epoch constant (tn_network_epoch_duration), and
+# the warning names where each value came from.
 #
 # migrate-node-naming's stop_legacy runs from the functions cut out of the
 # script; setup-node's restart is checked in its source. Sleeps are counted, not
@@ -129,6 +131,56 @@ TN_EPOCH_WAIT_MAX=0 win 200 604800
 check "TN_EPOCH_WAIT_MAX=0 still turns the wait off" 0 "$NAPPED"
 check "TN_EPOCH_WAIT_MAX=0: said so" yes "$(said 'epoch wait disabled by TN_EPOCH_WAIT_MAX=0')"
 check "TN_EPOCH_WAIT_MAX=0: no warning" no "$(grep -q '^warn ' "$T/say" && echo yes || echo no)"
+
+# ---- tn_wait_restart_window: the blind wait follows the network's epoch constant -------
+check "mainnet epoch constant: 6 h" 21600 "$(tn_network_epoch_duration mainnet)"
+check "testnet epoch constant: 6 h" 21600 "$(tn_network_epoch_duration testnet)"
+check "devnet has no epoch constant" "" "$(tn_network_epoch_duration devnet)"
+check "no constant for a name that is not a network" "" "$(tn_network_epoch_duration other)"
+# The node mode cannot be read, the node must wait (keytool_test covers that
+# decision) and no RPC gives the epoch timing: the wait is margin + settle with
+# nothing to poll. The network is the real tn_detect_network's answer for
+# NETWORK in a .node-meta under TN_ROOT_PREFIX; naps are counted.
+TN_ROOT_PREFIX="$T/root"
+mkdir -p "$T/root/etc/telcoin"
+tn_node_mode() { printf 'rpc down'; return 1; }
+_tn_mode_unknown_wait_url() { printf 'http://127.0.0.1:8545\n'; return 3; }
+tn_epoch_secs_left() { printf 'connection refused'; return 1; }
+# blind NETWORK -- one blind wait on a node whose .node-meta says NETWORK=NETWORK.
+blind() {
+    printf 'NETWORK=%s\n' "$1" > "$T/root/etc/telcoin/.node-meta"
+    rm -f "$T/say"
+    NAPPED=0
+    TN_EPOCH_JITTER_MAX=0 TN_EPOCH_POLL=15 tn_wait_restart_window "http://127.0.0.1:8545" say 2>/dev/null
+}
+check "the blind wait sees the network of the .node-meta" mainnet \
+    "$(printf 'NETWORK=mainnet\n' > "$T/root/etc/telcoin/.node-meta"; tn_detect_network 2>/dev/null)"
+blind mainnet
+check "mainnet blind wait derives from the 6 h constant: 300 + 90" 390 "$NAPPED"
+check "mainnet blind wait: the warning names the network default" yes \
+    "$(said 'Waiting 390s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip. Margin 300s and settle 90s (network default: epoch 21600 s).')"
+blind testnet
+check "testnet blind wait derives from its constant: 300 + 90" 390 "$NAPPED"
+check "testnet blind wait: the warning names the network default" yes \
+    "$(said 'Margin 300s and settle 90s (network default: epoch 21600 s).')"
+blind devnet
+check "devnet blind wait keeps the fixed default: 300 + 90" 390 "$NAPPED"
+check "devnet blind wait: the warning says default" yes "$(said 'Margin 300s and settle 90s (default).')"
+check "devnet blind wait: no network default named" no "$(said 'network default')"
+TN_EPOCH_MARGIN=120 blind mainnet
+check "env margin wins over the constant: 120 + 90" 210 "$NAPPED"
+check "env margin: each value names its source" yes \
+    "$(said 'Waiting 210s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip. Margin 120s (TN_EPOCH_MARGIN) and settle 90s (network default: epoch 21600 s).')"
+TN_EPOCH_MARGIN=120 TN_EPOCH_SETTLE=30 blind mainnet
+check "env margin and settle both win: 120 + 30" 150 "$NAPPED"
+check "env margin and settle: both named" yes "$(said 'Margin 120s and settle 30s (TN_EPOCH_MARGIN, TN_EPOCH_SETTLE).')"
+TN_EPOCH_SETTLE=30 blind devnet
+check "devnet with an env settle: 300 + 30" 330 "$NAPPED"
+check "devnet with an env settle: each value names its source" yes \
+    "$(said 'Margin 300s (default) and settle 30s (TN_EPOCH_SETTLE).')"
+TN_EPOCH_WAIT_MAX=100 blind mainnet
+check "mainnet blind wait: TN_EPOCH_WAIT_MAX still caps it" 100 "$NAPPED"
+TN_ROOT_PREFIX=""
 
 # ---- migrate-node-naming: stop_legacy ------------------------------------------------
 {
