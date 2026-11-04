@@ -4448,11 +4448,13 @@ _tn_wait_say() {
 # gives it (_tn_epoch_timing): margin epochDuration/72 clamped to 300-900 s,
 # settle epochDuration/240 clamped to 90-300 s, which is 300 and 90 for a 6 h
 # epoch and 900 and 300 for a 7-day one; a whole number of seconds set in the
-# environment is used as given. Until the epoch length is known (the blind wait)
-# they are 300 and 90. TN_EPOCH_WAIT_MAX (1800) caps the whole wait as set,
-# settle included, and 0 turns the wait off; once the epoch length is known, a
-# cap shorter than margin + settle + two polls is kept and warned about, since
-# the wait may then end before the epoch has settled.
+# environment is used as given. When no epoch read gives the length (the blind
+# wait) they follow the network's epoch constant the same way
+# (tn_network_epoch_duration: 21600 s on mainnet and testnet, so 300 and 90),
+# and are 300 and 90 on a network without one. TN_EPOCH_WAIT_MAX (1800) caps
+# the whole wait as set, settle included, and 0 turns the wait off; once the
+# epoch length is known, a cap shorter than margin + settle + two polls is kept
+# and warned about, since the wait may then end before the epoch has settled.
 # TN_EPOCH_POLL (15, clamped to 5-20) is the poll and heartbeat interval. Each
 # epoch read while waiting may take at most 30 - poll seconds, so two heartbeats
 # are never more than 30 s apart.
@@ -4469,7 +4471,8 @@ _tn_wait_say() {
 #      the public RPC does not answer; otherwise log and return.
 #   2. Time to the boundary unreadable: warn and return; but for a node whose
 #      mode was unreadable (step 1), warn and wait TN_EPOCH_MARGIN +
-#      TN_EPOCH_SETTLE seconds (300 + 90 unless set), at most TN_EPOCH_WAIT_MAX
+#      TN_EPOCH_SETTLE seconds (unless set, derived from the network's epoch
+#      constant: 300 + 90 on mainnet and testnet), at most TN_EPOCH_WAIT_MAX
 #      as set (_tn_wait_blind). Otherwise margin and settle follow the epoch length
 #      read with the boundary, and the cap is checked against them. More than
 #      the margin away: log and return. Passed more than the margin ago
@@ -4525,16 +4528,18 @@ _tn_mode_unknown_wait_url() {
     return "$rc"
 }
 
-# _tn_wait_blind FN MARGIN SETTLE CAP POLL WHY -- the epoch timing of a node
-# that must wait could not be read anywhere: warn, then wait MARGIN + SETTLE
+# _tn_wait_blind FN MARGIN SETTLE CAP POLL WHY [TIMING] -- the epoch timing of a
+# node that must wait could not be read anywhere: warn, then wait MARGIN + SETTLE
 # seconds (at most CAP) in naps of POLL seconds with a heartbeat each, so the
-# restart does not land on a boundary that could not be seen. A signal the
-# caller traps and returns from ends the wait with a warning. Always rc 0.
+# restart does not land on a boundary that could not be seen. TIMING, the
+# sentence saying where MARGIN and SETTLE came from (_tn_blind_timing_text),
+# ends the warning. A signal the caller traps and returns from ends the wait
+# with a warning. Always rc 0.
 _tn_wait_blind() {
-    local fn="$1" margin="$2" settle="$3" cap="$4" poll="$5" why="$6" total slept=0 nap nrc
+    local fn="$1" margin="$2" settle="$3" cap="$4" poll="$5" why="$6" timing="${7:-}" total slept=0 nap nrc
     total=$(( margin + settle ))
     if (( total > cap )); then total="$cap"; fi
-    "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${why}). Waiting ${total}s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip." || true
+    "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${why}). Waiting ${total}s (TN_EPOCH_MARGIN + TN_EPOCH_SETTLE, at most TN_EPOCH_WAIT_MAX) so the restart does not land on it; set TN_SKIP_EPOCH_WAIT=1 to skip.${timing:+ ${timing}}" || true
     while (( slept < total )); do
         nap="$poll"
         if (( nap > total - slept )); then nap=$(( total - slept )); fi
@@ -4607,17 +4612,41 @@ _tn_epoch_source_text() {
     esac
 }
 
+# _tn_blind_timing_text MARGIN MSRC SETTLE SSRC DUR -- the blind wait's sentence
+# naming the margin and settle in effect and where each came from: the network's
+# epoch constant DUR (tn_network_epoch_duration, source "derived"),
+# TN_EPOCH_MARGIN or TN_EPOCH_SETTLE ("env"), or the fixed default when the
+# network has no constant ("default"). "Margin 300s and settle 90s (network
+# default: epoch 21600 s)." or "Margin 120s (TN_EPOCH_MARGIN) and settle 90s
+# (network default: epoch 21600 s)."
+_tn_blind_timing_text() {
+    local margin="$1" msrc="$2" settle="$3" ssrc="$4" dur="$5" m="default" s="default"
+    case "$msrc" in
+        env)     m="TN_EPOCH_MARGIN" ;;
+        derived) m="network default: epoch ${dur} s" ;;
+    esac
+    case "$ssrc" in
+        env)     s="TN_EPOCH_SETTLE" ;;
+        derived) s="network default: epoch ${dur} s" ;;
+    esac
+    if [[ "$m" == "$s" ]]; then
+        printf 'Margin %ss and settle %ss (%s).' "$margin" "$settle" "$m"
+    elif [[ "$msrc" == "env" && "$ssrc" == "env" ]]; then
+        printf 'Margin %ss and settle %ss (%s, %s).' "$margin" "$settle" "$m" "$s"
+    else
+        printf 'Margin %ss (%s) and settle %ss (%s).' "$margin" "$m" "$settle" "$s"
+    fi
+}
+
 tn_wait_restart_window() {
     local url="${1:-}" fn="${2:-}"
     local margin settle cap poll mode out rc secs epoch boundary dur
     local start now waited slept remaining nap nrc due fails cur info note settle_left
-    local fallback="" must_wait="" msrc ssrc need timing
+    local fallback="" must_wait="" msrc ssrc need timing net
     [[ -n "$url" ]] || url="$(tn_local_rpc_url)" || url="http://127.0.0.1:0"
     if [[ -z "$fn" ]] || ! declare -F "$fn" >/dev/null 2>&1; then
         fn="_tn_wait_say"
     fi
-    margin="$(_tn_env_uint TN_EPOCH_MARGIN 300)"
-    settle="$(_tn_env_uint TN_EPOCH_SETTLE 90)"
     cap="$(_tn_env_uint TN_EPOCH_WAIT_MAX 1800)"
     poll="$(_tn_env_uint TN_EPOCH_POLL 15)"
     if (( poll < 5 )); then poll=5; fi
@@ -4672,7 +4701,13 @@ tn_wait_restart_window() {
     fi
     if [[ "$rc" -ne 0 ]]; then
         if [[ -n "$must_wait" ]]; then
-            _tn_wait_blind "$fn" "$margin" "$settle" "$cap" "$poll" "$out"
+            # No epoch read gave the length: margin and settle follow the
+            # network's epoch constant, unless set, as they would a read one.
+            net="$(tn_detect_network 2>/dev/null)" || net=""
+            dur="$(tn_network_epoch_duration "$net")"
+            read -r margin msrc settle ssrc <<<"$(_tn_epoch_timing "$dur")"
+            timing="$(_tn_blind_timing_text "$margin" "$msrc" "$settle" "$ssrc" "$dur")"
+            _tn_wait_blind "$fn" "$margin" "$settle" "$cap" "$poll" "$out" "$timing"
             return 0
         fi
         "$fn" warn "This node is in the committee, but the time to the next epoch boundary could not be read (${out}). Continuing without waiting." || true
