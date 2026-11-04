@@ -369,21 +369,33 @@ def passphrase_ok(value, network=""):
     return True
 
 
-# Image repositories (lib/common.sh): TN_GHCR_IMAGE_REPO, where the release
-# pipeline publishes the testnet and mainnet images, and
-# TN_TESTNET_LEGACY_IMAGE_REPO, which holds the testnet images of the releases
-# made before signed releases (DEFAULT_DOCKER_IMAGE among them).
-GHCR_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
+# Image repositories (lib/common.sh). Each network has its own package, and the
+# channel is a function of the release tag: TN_MAINNET_IMAGE_REPO holds the
+# vX.Y.Z releases, TN_TESTNET_IMAGE_REPO the testnet ones.
+# TN_GHCR_LEGACY_IMAGE_REPO, the single package earlier script releases named,
+# never held a release: it is recognised on testnet and devnet, never pulled.
+# TN_TESTNET_LEGACY_IMAGE_REPO holds the testnet images of the releases made
+# before signed releases (DEFAULT_DOCKER_IMAGE among them).
+MAINNET_IMAGE_REPO = "ghcr.io/telcoin-association/tn-mainnet"
+TESTNET_IMAGE_REPO = "ghcr.io/telcoin-association/tn-testnet"
+GHCR_LEGACY_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
 # network-gated: legacy testnet repository; DOCKER_REPO lists it for testnet and devnet, never mainnet
 TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 # Every repository a network's images may come from (tn_docker_repo_ok,
-# tn_docker_repos_for): on testnet TN_TESTNET_IMAGE_REPOS (the legacy repository
-# and ghcr.io), on devnet TN_DEVNET_IMAGE_REPOS (the same two; devnet images run
-# by digest only), on mainnet TN_MAINNET_IMAGE_REPO alone.
+# tn_docker_repos_for): on testnet TN_TESTNET_IMAGE_REPOS (the legacy repository,
+# the old single package and the testnet package), on devnet
+# TN_DEVNET_IMAGE_REPOS (the legacy repository and the old single package; devnet
+# images run by digest only), on mainnet TN_MAINNET_IMAGE_REPO alone.
 DOCKER_REPO = {
-    "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
-    "mainnet": (GHCR_IMAGE_REPO,),
-    "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
+    "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_LEGACY_IMAGE_REPO, TESTNET_IMAGE_REPO),
+    "mainnet": (MAINNET_IMAGE_REPO,),
+    "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_LEGACY_IMAGE_REPO),
+}
+# The repository each network's messages and examples name (tn_docker_repo_for).
+IMAGE_REPO = {
+    "testnet": TESTNET_IMAGE_REPO,
+    "mainnet": MAINNET_IMAGE_REPO,
+    "devnet": TESTNET_LEGACY_IMAGE_REPO,
 }
 # Fallback for testnet only, when the library cannot name the newest image:
 # network-gated: the testnet fallback image; latest_docker_image takes it on testnet only
@@ -411,11 +423,26 @@ def image_allowed(image, network):
     return re.fullmatch(r"[0-9a-f]{64}", rest) is not None and docker_repo_ok(network, repo)
 
 
+def docker_pull_repo_ok(network, repo):
+    """Twin of tn_docker_pull_repo_ok: a new install or image change may pull
+    from REPO: docker_repo_ok, and never the old single package
+    (GHCR_LEGACY_IMAGE_REPO), which holds no release."""
+    return repo != GHCR_LEGACY_IMAGE_REPO and docker_repo_ok(network, repo)
+
+
+def pull_image_allowed(image, network):
+    """image_allowed for a new pull: the image's repository also passes
+    docker_pull_repo_ok."""
+    return image_allowed(image, network) and docker_pull_repo_ok(network, image.split("@", 1)[0])
+
+
 def docker_image_choice(value, network):
     """The wizard's Docker image field: a release tag of the network (bare, or
     after one of the network's repositories and a colon) or the network's image
-    by digest. Returns (release_tag, digest_image, None) with one of the two set,
-    ("", "", None) when empty, or (None, None, error). latest is refused."""
+    by digest, as tn_docker_resolve_ref takes them for a new pull: the old single
+    package (GHCR_LEGACY_IMAGE_REPO) is refused. Returns (release_tag,
+    digest_image, None) with one of the two set, ("", "", None) when empty, or
+    (None, None, error). latest is refused."""
     v = str(value or "").strip()
     if not v:
         return "", "", None
@@ -425,14 +452,19 @@ def docker_image_choice(value, network):
         return v, "", None
     # <repository>:<tag>, as tn_docker_resolve_ref splits it at the last colon.
     repo, colon, tag = v.rpartition(":")
-    if colon and docker_repo_ok(network, repo) and release_tag_ok(network, tag):
+    if colon and docker_pull_repo_ok(network, repo) and release_tag_ok(network, tag):
         return tag, "", None
-    if image_allowed(v, network):
+    if pull_image_allowed(v, network):
         return "", v, None
+    if v.startswith(GHCR_LEGACY_IMAGE_REPO + "@") or v.startswith(GHCR_LEGACY_IMAGE_REPO + ":"):
+        return None, None, (f"docker image refused: no release was ever published to {GHCR_LEGACY_IMAGE_REPO}, "
+                            f"so no image is pulled from it; {network} images come from "
+                            f"{IMAGE_REPO.get(network, 'the network package')}")
     # network-gated: example in the testnet form, chosen when the network is testnet
     example = "v1.2.3-adiri" if network == "testnet" else "v1.2.3"
+    repo_hint = IMAGE_REPO.get(network, "<repository>")
     return None, None, (f"docker image must be a {network} release tag such as {example}, "
-                        "or the network's image by digest (<repository>@sha256:<digest>)")
+                        f"or the network's image by digest ({repo_hint}@sha256:<digest>)")
 
 
 # Service account rule (lib/common.sh tn_service_user_ok): a plain lowercase
@@ -2885,7 +2917,7 @@ def latest_docker_image(network="testnet"):
     devnet or `latest` tag), its image from the release's signed IMAGE_DIGEST
     only (on testnet the library names DEFAULT_DOCKER_IMAGE when that release's
     signed files cannot be downloaded or checked, nothing when the release fails
-    a check, and the legacy repository while the channel has no release). The answer must pass image_allowed.
+    a check, and the legacy repository while the channel has no release). The answer must pass pull_image_allowed.
     Testnet falls back to DEFAULT_DOCKER_IMAGE when the library names nothing;
     mainnet never falls back, and gives '' while TN_MAINNET_ENABLED is off; any
     other network '' (devnet included: it has no releases, its images are named
@@ -2905,7 +2937,7 @@ def latest_docker_image(network="testnet"):
 
 def _latest_docker_image_probe(network):
     """(image, True) when the library's latest_docker_image NETWORK names an
-    image image_allowed accepts (the last line of its output); otherwise
+    image pull_image_allowed accepts (the last line of its output); otherwise
     (DEFAULT_DOCKER_IMAGE, False) on testnet and ("", False) elsewhere. The
     library stages the release's signed files in TN_RELEASE_STAGING_DIR: a
     fresh 0700 directory of this server's own user, removed afterwards (its
@@ -2928,7 +2960,7 @@ def _latest_docker_image_probe(network):
         shutil.rmtree(staging, ignore_errors=True)
     lines = out.splitlines() if rc == 0 else []
     image = lines[-1].strip() if lines else ""
-    if image_allowed(image, network):
+    if pull_image_allowed(image, network):
         return image, True
     return fallback, False
 

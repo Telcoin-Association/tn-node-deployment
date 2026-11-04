@@ -193,15 +193,19 @@ lock_state() {
         echo free
     fi
 }
-# Image repositories the library accepts (TN_GHCR_IMAGE_REPO for testnet and
-# mainnet, TN_TESTNET_LEGACY_IMAGE_REPO for testnet only).
+# Image repositories the library recognises (TN_GHCR_LEGACY_IMAGE_REPO, the old
+# single package, and TN_TESTNET_LEGACY_IMAGE_REPO for testnet; the per-network
+# packages TN_TESTNET_IMAGE_REPO and TN_MAINNET_IMAGE_REPO).
 GHCR_REPO="ghcr.io/telcoin-association/telcoin-network"
 LEGACY_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-# docker ps lists two Telcoin Network containers: tn-node runs the ghcr.io image
-# by digest, observer a legacy image by tag. fork runs a look-alike repository
+TESTNET_PKG="ghcr.io/telcoin-association/tn-testnet"
+MAINNET_PKG="ghcr.io/telcoin-association/tn-mainnet"
+# docker ps lists four Telcoin Network containers: tn-node runs the old ghcr.io
+# package by digest, observer a legacy image by tag, tnt the testnet package by
+# tag and tnm the mainnet package by digest. fork runs a look-alike repository
 # and other an unrelated image.
-DOCKER_PS="$(printf 'tn-node\t%s@sha256:%064d\nobserver\t%s:v0.16.0-adiri\nfork\t%s-fork:v0.16.0-adiri\nother\tbusybox:latest' \
-    "$GHCR_REPO" 0 "$LEGACY_REPO" "$GHCR_REPO")"
+DOCKER_PS="$(printf 'tn-node\t%s@sha256:%064d\nobserver\t%s:v0.16.0-adiri\ntnt\t%s:v0.17.0-adiri\ntnm\t%s@sha256:%064d\nfork\t%s-fork:v0.16.0-adiri\nother\tbusybox:latest' \
+    "$GHCR_REPO" 0 "$LEGACY_REPO" "$TESTNET_PKG" "$MAINNET_PKG" 1 "$GHCR_REPO")"
 printf '%s\n' "$DOCKER_PS" > "$T/docker-ps.out"
 # shellcheck disable=SC2016
 make_fake "$T/bin/docker" docker \
@@ -1323,7 +1327,7 @@ refused_after_ps() {
 }
 t="$(trace docker-detect)"
 check "docker-detect lists the containers of the library's repositories, by digest or by tag" \
-    "$(printf 'rc=0\ntn-node\nobserver')" "$(printf '%s\n' "$t" | sed -n '1,/^--- calls$/p' | sed '$d')"
+    "$(printf 'rc=0\ntn-node\nobserver\ntnt\ntnm')" "$(printf '%s\n' "$t" | sed -n '1,/^--- calls$/p' | sed '$d')"
 refused_after_ps "docker-status refuses a container docker-detect does not list" docker-status other
 refused_after_ps "docker-status refuses a look-alike repository" docker-status fork
 t="$(trace docker-status observer)"

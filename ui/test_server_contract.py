@@ -376,7 +376,7 @@ class ServerTestCase(unittest.TestCase):
 
 FULL_SETUP = {
     "network": "testnet", "install_method": "docker",
-    "docker_image": "ghcr.io/telcoin-association/telcoin-network:v0.15.0-adiri",
+    "docker_image": "ghcr.io/telcoin-association/tn-testnet:v0.15.0-adiri",
     "passphrase_method": "loadcredential", "address": "0x" + "ab" * 20,
     "external_primary": "/ip4/203.0.113.10/udp/49590/quic-v1",
     "external_worker": "/ip4/203.0.113.10/udp/49594/quic-v1",

@@ -3628,6 +3628,10 @@ function stepSourceField(){
       <select id="mSourceMode"><option value="tag" selected>${esc(sref)} — latest release</option></select></div>`;
 }
 
+// The image package of each network (server.py IMAGE_REPO, lib/common.sh
+// TN_MAINNET_IMAGE_REPO and TN_TESTNET_IMAGE_REPO), named in the image field.
+const IMAGE_REPO = {mainnet:'ghcr.io/telcoin-association/tn-mainnet', testnet:'ghcr.io/telcoin-association/tn-testnet'};
+
 // The Docker image field takes a release tag of the network (the engine runs
 // that release's image by digest) or the image by digest; latest is refused.
 function dockerImageError(v){
@@ -3657,7 +3661,7 @@ function stepMethod(body){
   const methodField = (m==='source' || m==='release')
     ? stepSourceField()
     // network-gated: example tag in the testnet form, chosen unless the wizard's network is mainnet
-    : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (…@sha256:…); latest is refused</label>
+    : `<div class="field"><label>Docker image: a release tag (${mainnet?'v1.2.3':'v0.16.0-adiri'}) or the image by digest (${esc(IMAGE_REPO[mainnet?'mainnet':'testnet'])}@sha256:…); latest is refused</label>
         <input id="mDockerImage" placeholder="${mainnet?'v1.2.3':'v0.16.0-adiri'}" value="${esc(state.setup.dockerImage||'')}"></div>`;  // network-gated: the same example, chosen by network
   body.innerHTML = `<h3>Step 3 · Install Method</h3>
     <div class="radio-cards" style="grid-template-columns:1fr 1fr">

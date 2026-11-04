@@ -16,6 +16,7 @@ refuses a cross-site form POST before any helper call.
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -390,6 +391,8 @@ class SetupRefusalTest(ServerTestCase):
             ({"docker_image": "docker.io/library/busybox:latest"}, "docker image"),
             ({"docker_image": "us-docker.pkg.dev/telcoin-network/tn-public/adiri:latest"}, "docker image"),
             ({"docker_image": "ghcr.io/telcoin-association/telcoin-network:latest"}, "docker image"),
+            ({"docker_image": "ghcr.io/telcoin-association/tn-testnet:latest"}, "docker image"),
+            ({"docker_image": "ghcr.io/telcoin-association/telcoin-network@sha256:" + "a" * 64}, "docker image"),
             ({"passphrase": " padded "}, "passphrase required"),
         ]
         for over, message in cases:
@@ -441,7 +444,7 @@ class MainnetAndImagesTest(ServerTestCase):
         self.patch(server.urllib.request, "urlopen", urlopen)
 
     def test_latest_docker_image_asks_the_library_only(self):
-        image = server.GHCR_IMAGE_REPO + "@sha256:" + "c" * 64
+        image = server.TESTNET_IMAGE_REPO + "@sha256:" + "c" * 64
         seen = []
 
         def run(cmd, timeout=10):
@@ -469,8 +472,10 @@ class MainnetAndImagesTest(ServerTestCase):
 
     def test_an_image_the_rule_refuses_falls_back_to_the_default(self):
         self.no_registry()
-        for out in ("", server.GHCR_IMAGE_REPO + ":v0.17.0-adiri", "busybox@sha256:" + "a" * 64,
-                    server.GHCR_IMAGE_REPO + "@sha256:" + "A" * 64):
+        for out in ("", server.TESTNET_IMAGE_REPO + ":v0.17.0-adiri", "busybox@sha256:" + "a" * 64,
+                    server.TESTNET_IMAGE_REPO + "@sha256:" + "A" * 64,
+                    server.GHCR_LEGACY_IMAGE_REPO + "@sha256:" + "a" * 64,
+                    server.MAINNET_IMAGE_REPO + "@sha256:" + "a" * 64):
             with self.subTest(out=out):
                 server._docker_image_cache.clear()
                 self.patch(server, "run", lambda cmd, timeout=10, o=out: (0, o, ""))
@@ -486,10 +491,13 @@ class MainnetAndImagesTest(ServerTestCase):
         self.assertEqual(server.latest_docker_image("mainnet"), "")
         self.assertEqual(server.latest_docker_image("devnet"), "")
         self.assertEqual(calls, [], "nothing is looked up for mainnet while it is off")
-        ghcr = server.GHCR_IMAGE_REPO + "@sha256:" + "e" * 64
+        ghcr = server.MAINNET_IMAGE_REPO + "@sha256:" + "e" * 64
         legacy = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + "e" * 64
+        testnet_pkg = server.TESTNET_IMAGE_REPO + "@sha256:" + "e" * 64
+        old_pkg = server.GHCR_LEGACY_IMAGE_REPO + "@sha256:" + "e" * 64
         self.patch(server, "TN_MAINNET_ENABLED", True)
-        for rc, out, want in ((1, "", ""), (0, legacy, ""), (0, ghcr, ghcr)):
+        for rc, out, want in ((1, "", ""), (0, legacy, ""), (0, testnet_pkg, ""), (0, old_pkg, ""),
+                              (0, ghcr, ghcr)):
             with self.subTest(rc=rc, out=out):
                 server._docker_image_cache.clear()
                 self.patch(server, "run", lambda cmd, timeout=10, r=rc, o=out: calls.append(cmd) or (r, o, ""))
@@ -504,7 +512,7 @@ class MainnetAndImagesTest(ServerTestCase):
 
     def test_latest_docker_image_is_cached_with_bounded_probes(self):
         timeouts = []
-        lib_image = server.GHCR_IMAGE_REPO + "@sha256:" + "d" * 64
+        lib_image = server.TESTNET_IMAGE_REPO + "@sha256:" + "d" * 64
 
         def run(cmd, timeout=10):
             timeouts.append(("run", timeout))
@@ -626,39 +634,96 @@ class MainnetAndImagesTest(ServerTestCase):
 
     @unittest.skipUnless(shutil.which("bash"), "bash not installed")
     def test_image_repositories_match_the_library(self):
-        script = ('source "$1" >/dev/null 2>&1; printf "%s\\n" "$TN_GHCR_IMAGE_REPO" '
+        script = ('source "$1" >/dev/null 2>&1; printf "%s\\n" "$TN_TESTNET_IMAGE_REPO" '
                   '"$TN_TESTNET_LEGACY_IMAGE_REPO" "$TN_MAINNET_IMAGE_REPO" "$DEFAULT_DOCKER_IMAGE" '
-                  '"$TN_TESTNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPO"')
+                  '"$TN_TESTNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPO" '
+                  '"$TN_GHCR_LEGACY_IMAGE_REPO"')
         out = subprocess.run(["bash", "-c", script, "_", LIB],
                              capture_output=True, text=True, timeout=20).stdout.splitlines()
-        self.assertEqual(out[:4], [server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO,
-                                   server.DOCKER_REPO["mainnet"][0], server.DEFAULT_DOCKER_IMAGE])
-        self.assertEqual(server.DOCKER_REPO["mainnet"], (server.GHCR_IMAGE_REPO,))
+        self.assertEqual(out[:4], [server.TESTNET_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO,
+                                   server.MAINNET_IMAGE_REPO, server.DEFAULT_DOCKER_IMAGE])
+        self.assertEqual(server.DOCKER_REPO["mainnet"], (server.MAINNET_IMAGE_REPO,))
         self.assertEqual(sorted(out[4].split()), sorted(server.DOCKER_REPO["testnet"]))
         self.assertEqual(sorted(out[5].split()), sorted(server.DOCKER_REPO["devnet"]))
         self.assertEqual(out[6], server.TESTNET_LEGACY_IMAGE_REPO, "devnet's repository is the legacy one")
         self.assertIn(out[6], server.DOCKER_REPO["devnet"])
+        self.assertEqual(out[7], server.GHCR_LEGACY_IMAGE_REPO)
+        self.assertEqual(server.MAINNET_IMAGE_REPO, "ghcr.io/telcoin-association/tn-mainnet")
+        self.assertEqual(server.TESTNET_IMAGE_REPO, "ghcr.io/telcoin-association/tn-testnet")
+        self.assertNotIn(server.GHCR_LEGACY_IMAGE_REPO, server.DOCKER_REPO["mainnet"])
+
+    @unittest.skipUnless(shutil.which("bash"), "bash not installed")
+    def test_network_package_and_pull_rule_match_the_library(self):
+        # tn_docker_repo_for is IMAGE_REPO; tn_docker_pull_repos_for is DOCKER_REPO
+        # without what docker_pull_repo_ok refuses (the old single package).
+        script = ('source "$1" >/dev/null 2>&1; set +e; for n in testnet mainnet devnet; do '
+                  'tn_docker_repo_for "$n" 2>/dev/null; tn_docker_pull_repos_for "$n" 2>/dev/null; done')
+        out = subprocess.run(["bash", "-c", script, "_", LIB],
+                             capture_output=True, text=True, timeout=20).stdout.splitlines()
+        self.assertEqual(len(out), 6)
+        for i, net in enumerate(("testnet", "mainnet", "devnet")):
+            with self.subTest(network=net):
+                self.assertEqual(out[2 * i], server.IMAGE_REPO[net])
+                pull = [r for r in server.DOCKER_REPO[net] if server.docker_pull_repo_ok(net, r)]
+                self.assertEqual(out[2 * i + 1].split(), pull)
+                self.assertNotIn(server.GHCR_LEGACY_IMAGE_REPO, pull)
+        repos = sorted({r for v in server.DOCKER_REPO.values() for r in v} | {"busybox", ""})
+        vectors = [(n, r) for n in ("testnet", "mainnet", "devnet", "foo") for r in repos]
+        script = ('source "$1" >/dev/null 2>&1; set +e; shift; while [ $# -gt 1 ]; do '
+                  'tn_docker_pull_repo_ok "$1" "$2" 2>/dev/null; echo $?; shift 2; done')
+        args = [a for v in vectors for a in v]
+        out = subprocess.run(["bash", "-c", script, "_", LIB] + args,
+                             capture_output=True, text=True, timeout=60).stdout.splitlines()
+        self.assertEqual(len(out), len(vectors))
+        for (net, repo), rc in zip(vectors, out):
+            with self.subTest(net=net, repo=repo):
+                self.assertEqual(server.docker_pull_repo_ok(net, repo), rc == "0")
+
+    def test_page_names_the_network_packages(self):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html")) as f:
+            page = f.read()
+        m = re.search(r"const IMAGE_REPO = \{mainnet:'([^']*)', testnet:'([^']*)'\};", page)
+        self.assertIsNotNone(m, "index.html defines IMAGE_REPO")
+        self.assertEqual((m.group(1), m.group(2)), (server.IMAGE_REPO["mainnet"], server.IMAGE_REPO["testnet"]))
+        self.assertNotIn(server.GHCR_LEGACY_IMAGE_REPO, page, "the page never offers the old single package")
 
     def test_image_rule(self):
         hexd = "a" * 64
-        ghcr = server.GHCR_IMAGE_REPO + "@sha256:" + hexd
+        ghcr = server.TESTNET_IMAGE_REPO + "@sha256:" + hexd
+        main = server.MAINNET_IMAGE_REPO + "@sha256:" + hexd
+        old = server.GHCR_LEGACY_IMAGE_REPO + "@sha256:" + hexd
         legacy = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + hexd
         self.assertTrue(server.image_allowed(ghcr, "testnet"))
         self.assertTrue(server.image_allowed(legacy, "testnet"))
-        self.assertTrue(server.image_allowed(ghcr, "mainnet"))
+        self.assertTrue(server.image_allowed(old, "testnet"), "the old single package is recognised")
+        self.assertFalse(server.image_allowed(main, "testnet"), "the mainnet package is not testnet's")
+        self.assertTrue(server.image_allowed(main, "mainnet"))
+        self.assertFalse(server.image_allowed(ghcr, "mainnet"), "the testnet package is not mainnet's")
+        self.assertFalse(server.image_allowed(old, "mainnet"), "the old single package is never mainnet's")
         self.assertFalse(server.image_allowed(legacy, "mainnet"), "the legacy repository is testnet only")
+        # A new pull never takes the old single package, on any network.
+        self.assertTrue(server.pull_image_allowed(ghcr, "testnet"))
+        self.assertTrue(server.pull_image_allowed(legacy, "testnet"))
+        self.assertTrue(server.pull_image_allowed(main, "mainnet"))
+        self.assertTrue(server.pull_image_allowed(legacy, "devnet"))
+        for net in ("testnet", "mainnet", "devnet"):
+            with self.subTest(network=net):
+                self.assertFalse(server.pull_image_allowed(old, net))
         # A tag is never an image to run; the wizard sends it as the release.
-        for base in (server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO):
+        for base in (server.TESTNET_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO):
             for bad in (base + ":v0.16.0-adiri", base + ":latest", base + ":v0.16.0-devnet",
                         "busybox:v0.16.0-adiri", base + "@sha256:" + "A" * 64, "-" + base + "@sha256:" + hexd,
                         base + "-fork@sha256:" + hexd, base + "@sha256:" + hexd + "\n",
                         base + ":v0.16.0-adiri@sha256:" + hexd):
                 with self.subTest(image=bad):
                     self.assertFalse(server.image_allowed(bad, "testnet"))
-        # Devnet: by digest from TN_DEVNET_IMAGE_REPOS (the same two repositories).
-        self.assertTrue(server.image_allowed(ghcr, "devnet"))
+        # Devnet: by digest from TN_DEVNET_IMAGE_REPOS (the legacy repository and the
+        # old single package); neither network package.
+        self.assertTrue(server.image_allowed(old, "devnet"))
         self.assertTrue(server.image_allowed(legacy, "devnet"))
-        for base in (server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO):
+        self.assertFalse(server.image_allowed(ghcr, "devnet"))
+        self.assertFalse(server.image_allowed(main, "devnet"))
+        for base in (server.GHCR_LEGACY_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO):
             for bad in (base + ":v0.2.0-devnet", base + ":v0.16.0-adiri", base + ":main-0123abc",
                         base + ":latest", "busybox@sha256:" + hexd, base + "-fork@sha256:" + hexd,
                         "ghcr.io/someone-else/telcoin-network@sha256:" + hexd, base + "@sha256:" + "A" * 64,
@@ -672,8 +737,8 @@ class MainnetAndImagesTest(ServerTestCase):
     def test_image_rule_matches_the_library(self):
         hexd = "b" * 64
         images = []
-        for base in (server.GHCR_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO, "busybox",
-                     server.GHCR_IMAGE_REPO + "-fork"):
+        for base in (server.TESTNET_IMAGE_REPO, server.MAINNET_IMAGE_REPO, server.GHCR_LEGACY_IMAGE_REPO,
+                     server.TESTNET_LEGACY_IMAGE_REPO, "busybox", server.TESTNET_IMAGE_REPO + "-fork"):
             images += [base + "@sha256:" + hexd, base + ":v0.16.0-adiri", base + ":v1.0.0",
                        base + "@sha256:" + "B" * 64, base + "@sha256:" + hexd[:63],
                        base + ":v0.2.0-devnet", base + ":main-0123abc"]
@@ -690,9 +755,13 @@ class MainnetAndImagesTest(ServerTestCase):
                 self.assertEqual(server.image_allowed(image, net), rc == "0")
 
     def test_wizard_image_field(self):
-        ghcr = server.GHCR_IMAGE_REPO
+        ghcr = server.TESTNET_IMAGE_REPO
+        main = server.MAINNET_IMAGE_REPO
+        old = server.GHCR_LEGACY_IMAGE_REPO
         legacy = server.TESTNET_LEGACY_IMAGE_REPO
         digest = ghcr + "@sha256:" + "a" * 64
+        main_digest = main + "@sha256:" + "a" * 64
+        old_digest = old + "@sha256:" + "a" * 64
         legacy_digest = legacy + "@sha256:" + "a" * 64
         choice = server.docker_image_choice
         for value, net, want in (
@@ -704,9 +773,8 @@ class MainnetAndImagesTest(ServerTestCase):
                 (digest, "testnet", ("", digest, None)),
                 (legacy_digest, "testnet", ("", legacy_digest, None)),
                 ("v1.0.0", "mainnet", ("v1.0.0", "", None)),
-                (ghcr + ":v1.0.0", "mainnet", ("v1.0.0", "", None)),
-                (digest, "mainnet", ("", digest, None)),
-                (digest, "devnet", ("", digest, None)),
+                (main + ":v1.0.0", "mainnet", ("v1.0.0", "", None)),
+                (main_digest, "mainnet", ("", main_digest, None)),
                 (legacy_digest, "devnet", ("", legacy_digest, None)),
                 ("", "testnet", ("", "", None))):
             with self.subTest(image=value, network=net):
@@ -717,12 +785,22 @@ class MainnetAndImagesTest(ServerTestCase):
                          ("busybox@sha256:" + "a" * 64, "testnet"), (ghcr + "-fork:v0.16.0-adiri", "testnet"),
                          ("v0.16.0-adiri", "devnet"), (legacy + ":v0.16.0-adiri", "devnet"),
                          (ghcr + ":main-0123abc", "devnet"), ("busybox@sha256:" + "a" * 64, "devnet"),
-                         (digest, "foo")):
+                         (digest, "foo"),
+                         # The other network's package, and the old single package anywhere.
+                         (main_digest, "testnet"), (main + ":v1.0.0", "testnet"), (digest, "mainnet"),
+                         (ghcr + ":v1.0.0", "mainnet"), (ghcr + ":v0.17.0-adiri", "mainnet"),
+                         (digest, "devnet"), (main_digest, "devnet"),
+                         (old_digest, "testnet"), (old + ":v0.17.0-adiri", "testnet"),
+                         (old_digest, "mainnet"), (old + ":v1.0.0", "mainnet"), (old_digest, "devnet")):
             with self.subTest(image=bad, network=net):
                 tag, img, err = choice(bad, net)
                 self.assertIsNone(tag)
                 self.assertIn("docker image", err)
         self.assertIn("latest is refused", choice(ghcr + ":latest", "testnet")[2])
+        err = choice(old_digest, "testnet")[2]
+        self.assertIn("no release was ever published to " + old, err)
+        self.assertIn("testnet images come from " + ghcr, err)
+        self.assertIn(main + "@sha256:<digest>", choice("main", "mainnet")[2], "the hint names the network package")
 
     def test_wizard_env_log_target_and_tpm(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -744,7 +822,7 @@ class MainnetAndImagesTest(ServerTestCase):
             self.assertIn("required for a release install", err)
 
     def test_wizard_env_for_each_image_form(self):
-        ghcr = server.GHCR_IMAGE_REPO
+        ghcr = server.TESTNET_IMAGE_REPO
         digest = ghcr + "@sha256:" + "b" * 64
         legacy_digest = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + "b" * 64
         with mock.patch.dict(os.environ, {}, clear=True):
