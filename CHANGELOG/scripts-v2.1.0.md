@@ -70,8 +70,9 @@ section says what is left on each.
 - `TN_EPOCH_MARGIN` and `TN_EPOCH_SETTLE` follow the epoch length (`epochDuration`, read with the
   boundary from the node or the network's public RPC) when they are not set: the margin is the
   epoch length / 72, held to 300-900 seconds, and the settle time the epoch length / 240, held to
-  90-300 seconds. adiri's 6 h epoch keeps 300 and 90; a 12 h epoch gives 600 and 180, a 7-day
-  epoch 900 and 300. A whole number of seconds set in the environment is used as given.
+  90-300 seconds. The 6 h epoch of mainnet and testnet keeps 300 and 90; a 12 h epoch gives 600
+  and 180, a 7-day epoch 900 and 300. A whole number of seconds set in the environment is used as
+  given.
 - The wait messages end with one sentence naming the values and where they came from, for
   example `Margin 300s and settle 90s, derived from a 21600 s epoch.`
 - A `TN_EPOCH_WAIT_MAX` you set is kept as set and never raised. When it is shorter than margin +
@@ -79,10 +80,14 @@ section says what is left on each.
   <S> + two polls; the restart may land before the epoch has settled. Set it to at least <X>, or
   TN_SKIP_EPOCH_WAIT=1 to skip the wait on purpose.` The default 1800 covers the largest derived
   sum, 1240.
-- Before the epoch length is known (the blind wait of a staked node whose mode cannot be read),
-  the wait is still 300 + 90 seconds unless set, at most `TN_EPOCH_WAIT_MAX`.
-- The 1/72 and 1/240 shares are interim. The node team's mainnet epoch length and restart margins
-  replace them.
+- When the epoch length cannot be read (the blind wait of a staked node whose mode cannot be
+  read), margin and settle derive the same way from the network's epoch length in `lib/common.sh`
+  (`MAINNET_EPOCH_DURATION` and `TESTNET_EPOCH_DURATION`, 21600 s each), so the wait is still
+  300 + 90 seconds unless set, at most `TN_EPOCH_WAIT_MAX`. Devnet has no constant and keeps the
+  fixed 300 + 90. The warning ends with the source of each value, for example `Margin 300s and
+  settle 90s (network default: epoch 21600 s).`
+- Mainnet's epoch is 6 hours (21600 s, telcoin-network's `MAINNET_EPOCH_DURATION_SECS`), the same
+  as testnet's, so the 1/72 and 1/240 shares stand and the restart margins stay derived.
 
 ### setup-node 2.1.0
 
@@ -396,4 +401,5 @@ Each tracker stays open with what is left on it; `followup.md` lists the smaller
 - #45, #46, #51: the mainnet chain-config pins and `MIN_SOURCE_VERSION_MAINNET` (set with the
   switch), the confirmation of the mainnet tag scheme and image pipeline (telcoin-network #1728,
   U-6), and the final mainnet artifacts (telcoin-network #1735, U-13).
-- #49: the node team's mainnet epoch length and restart margins.
+- #49: nothing is left on it in this repository: mainnet's 6-hour epoch is confirmed and the
+  restart margins stay derived from the epoch length.

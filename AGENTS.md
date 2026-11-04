@@ -179,22 +179,28 @@ seconds, it waits for the epoch to close and then `TN_EPOCH_SETTLE` seconds, nev
 
 Margin and settle follow the epoch length (`epochDuration` of `tn_getCurrentEpochInfo`, read
 with the boundary): margin is epochDuration / 72 held to 300-900 s, settle epochDuration / 240
-held to 90-300 s (`_tn_epoch_timing`, integer division). adiri's 6 h epoch gives 300 and 90, a
-12 h epoch 600 and 180, a 7-day epoch 900 and 300. A whole number of seconds in
-`TN_EPOCH_MARGIN` or `TN_EPOCH_SETTLE` is used as given and never clamped. The messages end
+held to 90-300 s (`_tn_epoch_timing`, integer division). The 6 h epoch of mainnet and testnet
+gives 300 and 90, a 12 h epoch 600 and 180, a 7-day epoch 900 and 300. A whole number of seconds
+in `TN_EPOCH_MARGIN` or `TN_EPOCH_SETTLE` is used as given and never clamped. The messages end
 with one sentence naming the values and where they came from ("Margin 300s and settle 90s,
 derived from a 21600 s epoch."). A `TN_EPOCH_WAIT_MAX` set in the environment is kept as set,
 never raised: when it is shorter than margin + settle + two polls (`TN_EPOCH_POLL`, 15, held to
 5-20), the script warns that the restart may land before the epoch has settled and suggests a
 larger cap or `TN_SKIP_EPOCH_WAIT=1`. The default 1800 covers the largest derived sum, 1240.
-The shares and clamps are interim: the node team's mainnet epoch length and restart margins
-replace them (#49).
+Mainnet's epoch is 6 h, equal to telcoin-network's `MAINNET_EPOCH_DURATION_SECS` (#49), so the
+shares and clamps stand. Each network's epoch length is a constant at the top of `lib/common.sh`
+(`MAINNET_EPOCH_DURATION` and `TESTNET_EPOCH_DURATION`, 21600; `DEVNET_EPOCH_DURATION` empty,
+since no devnet genesis is kept here), read through `tn_network_epoch_duration`.
 
 A node whose mode cannot be read still waits when it is staked (or, on mainnet or an unknown
 network, when its stake cannot be read either). When the boundary cannot be read from the node
-or from the network's public RPC, it waits `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds (300 +
-90 unless set), capped by `TN_EPOCH_WAIT_MAX`. A `CvvActive` node whose epoch answer cannot be
-read continues without a wait.
+or from the network's public RPC, it waits `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds, capped
+by `TN_EPOCH_WAIT_MAX`. Unless set, both derive the same way from the epoch constant of the
+network `tn_detect_network` reports (300 + 90 on mainnet and testnet), and are the fixed 300 +
+90 when there is none (devnet, or a network that cannot be told), so changing a constant moves
+the blind wait with it. Its warning ends with the source of each value ("Margin 300s and settle
+90s (network default: epoch 21600 s)."). A `CvvActive` node whose epoch answer cannot be read
+continues without a wait.
 
 Stopping a committee member can also cost the committee its quorum. `tn_committee_down_guard`
 counts the members that authored no header in the latest consensus commit (a slow member

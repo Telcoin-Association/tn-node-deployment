@@ -71,9 +71,6 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   release the node installed. What is left is the tag scheme and the image pipeline: the node
   team confirms that mainnet releases are tagged `vX.Y.Z` and publish their image digest (#46,
   telcoin-network #1728). Closes when that is confirmed and the first mainnet release verifies.
-- The restart margins derive from the epoch length (`epochDuration` / 72 held to 300-900 s, / 240
-  held to 90-300 s in `tn_wait_restart_window`). The shares are interim. Closes when the node team
-  sets mainnet's epoch length and restart margins and the constants follow them (#49).
 - Mainnet operators see testnet tag forms and adiri host names as examples in messages annotated
   `# network-gated: shown on every network`: edit-config's bootstrap-peers "Needs v0.15.0-adiri or
   later." and the state-export labels, setup-node's `require_node_flag` refusals and the
