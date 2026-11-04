@@ -1,0 +1,244 @@
+# V8 report: UPS round 2, per-network image packages (telcoin-network)
+
+Target: `~/coding/telcoin/tn-r2-packages`, branch `release-packages-per-network`, tip `0ba57016d`, six
+commits over origin/main `a0d6e6e26` (e595f9809, 930afd05d, a883fed98, 60d00d284, 848a47b5f,
+0ba57016d). Treated as read-only: after every run `git status --porcelain` there is `?? tasks/` only.
+Verified 2026-11-04 against `spec-r2-UPS.md` and `spec-r2-V8.md`. I built the harness before
+reading the implementer's checkpoint and PR body.
+
+## Harness
+
+Everything is in this directory. Each script has a shebang and passes `bash -n`, host shellcheck
+0.11 and `koalaman/shellcheck:v0.9.0` with `-x --severity=error`. Rerun everything with
+`bash run_all.sh`. Output goes to the session scratchpad (`$SCRATCH/out/<case>.txt`).
+
+- `lib.sh`: paths and `expect NAME RC WANT [NOT] -- CMD`.
+- `drive.sh SCENARIO TAG`: sources `etc/release.sh` (sourcing only defines functions) and replaces
+  only the calls that reach git, gh, docker, gpg, curl or the registry. Everything else runs the
+  real functions: `parse_tag`, `init_env`, `check_digest_package`, `check_sums_package`,
+  `check_image_digest_file`, `check_release_files`, `confirm`, `image_binary`,
+  `check_version_output`, `write_sums`, `registry_digest` (curl stubbed), `cmd_build`,
+  `cmd_sign`, `cmd_verify`, `cmd_publish`, `cmd_draft` and `cmd_check_tag`.
+- `t1_matrix.sh` (check 1), `t2_package.sh` (2), `t3_env.sh` (3), `t4_alias.sh` (4),
+  `t5_make.sh` (5), `t6_lint.sh` (6), `t7_docs.sh` (7), `t8_commits.sh` (8),
+  `tx1_build.sh` (first-push path, and `check_version_output` before the push),
+  `tx2_draft.sh` (draft fail-closed), `tx3_ghcr_probe.sh` (anonymous ghcr reads, only with
+  `V8_NETWORK=1`).
+
+Result of `bash run_all.sh`:
+
+```text
+t1_matrix: 37 passed, 0 failed
+t2_package: 82 passed, 0 failed
+t3_env: 35 passed, 0 failed
+t4_alias: 11 passed, 0 failed
+t5_make: 13 passed, 0 failed
+t6_lint: 7 passed, 0 failed
+t7_docs: 32 passed, 0 failed
+t8_commits: 15 passed, 0 failed
+tx1_build: 53 passed, 0 failed
+tx2_draft: 16 passed, 6 failed      <- W1
+SKIP tx3_ghcr_probe (ran once with V8_NETWORK=1, output under N9)
+```
+
+Of 301 assertions, 295 pass. All 6 failures are finding W1.
+
+## Findings
+
+### ERROR
+
+None. I found no path that pushes a mainnet image into tn-testnet (or the reverse), skips the
+version and feature check, signs or verifies an IMAGE_DIGEST from another package, or moves an
+alias outside the tag's package.
+
+### WARN
+
+**W1. `draft` still drops a malformed digest without a word when the repository is right.**
+`etc/release.sh`, `cmd_draft`.
+- Command: `bash tx2_draft.sh`, cases `draft-*-bad-digest-fails`, `-crlf-fails` and
+  `-empty-digest-fails`. Single case: `GITHUB_ACTIONS=true GITHUB_REPOSITORY=Telcoin-Association/telcoin-network IDG='@SELF@@sha256:XYZ' bash drive.sh draft v0.1.0`.
+- Expected (the claim as briefed, "draft now fails when an existing draft's IMAGE_DIGEST names
+  another package or is malformed"): exit 1 before the body is rendered or edited.
+- Actual: exit 0. The output is `render_notes digest=[]`, then `gh release edit v0.1.0 ... --notes-file`,
+  then `draft release v0.1.0 is ready`. The same happens for a trailing CR (`...@sha256:<hex>\r`)
+  and for an empty digest (`<IMAGE>@`), on both channels.
+- Draft does fail closed for another network's package, the old `telcoin-network` package,
+  another owner, a tag reference without `@`, an empty file and two lines (16 PASS). The cause:
+  `check_digest_package` checks only the repository, and the next line,
+  `if ! [[ "$digest" =~ $DIGEST_RE ]]; then digest=; fi`, still drops the digest silently.
+- Impact: low. sign, verify and publish all refuse a malformed digest (through
+  `check_image_digest_file`, t2 `file-*-bad-digest`, `verify-*-bad-digest`). The implementer's
+  checkpoint says this was kept "as before". But the PR body calls `check_digest_package` "the one
+  place that decides whether an IMAGE_DIGEST is acceptable: a single line `<IMAGE>@<digest>`",
+  and a file that was not written by build is still accepted here.
+- Fix: replace the silent drop with
+  `die 1 "IMAGE_DIGEST holds a malformed digest: $digest; ..."`, or let `check_digest_package`
+  also check `DIGEST_RE` so that every caller gets it. Alternatively, reword the PR body.
+
+**W2. On the first-push path, a private package that already holds `:TAG` is rebuilt and pushed
+over without `RELEASE_REBUILD=1`, and `RELEASE_YES=1` answers the one prompt where the guide says
+to answer no.** `etc/release.sh`, `cmd_build`, `registry_digest ... first-push`.
+- Command: `RELEASE_YES=1 REG_SEQ=denied,denied bash drive.sh build v0.1.0`
+  (tx1 `build-*-private-existing-overwritten`), compared with `REG_SEQ=D bash drive.sh build v0.1.0`
+  (tx1 `build-*-rerun-no-rebuild`).
+- Expected: a tag that already exists in the package is rebuilt only with `RELEASE_REBUILD=1`.
+- Actual: for an anonymous 401/403, build sets `existing=` and skips the `RELEASE_REBUILD` rule.
+  It then prints `RELEASE_YES=1: continuing without a prompt`, builds, and runs
+  `docker push ghcr.io/telcoin-association/tn-mainnet:v0.1.0`. Only after the push does it stop,
+  with exit 2 (`... is pushed, but the package is not public ...`). The public-package case
+  stops at exit 1 (`... already exists (sha256:...); set RELEASE_REBUILD=1 to rebuild it`)
+  before any build.
+- Why: the anonymous probe cannot tell "never pushed" from "private". tx3 measured 403 for both.
+  The prompt also says "Push ... as the first image of the package", which is false for a private
+  package. The guide's failure table says to answer yes only on a network's first release. That
+  judgement is exactly what `RELEASE_YES=1` skips. Before this branch, build had no prompt that
+  `RELEASE_YES` could answer.
+- Impact is bounded, and the stop is fail-closed (tx1):
+  - build refuses a published release and a draft with `SHA256SUMS.asc` before the probe.
+  - It writes no IMAGE_DIGEST or SHA256SUMS and uploads nothing after the stop.
+  - Older assets on the draft now disagree with the registry, so verify and sign refuse them
+    (t2 `file-*-registry-differs`).
+  - Rerunning before the setup is done repeats the full build and push each time.
+- Fix: when the anonymous read is denied, ask the registry with the login that build already
+  requires (`require_registry_login`), for example `docker buildx imagetools inspect "$IMAGE:$TAG"`.
+  - If it resolves, the tag exists: apply the `RELEASE_REBUILD` rule and tell the operator the
+    package is private.
+  - Only otherwise, ask the first-push question.
+  - Have a dedicated variable answer that question (for example `RELEASE_FIRST_PUSH=<package>`)
+    instead of `RELEASE_YES`, as `check_build_sums_hash` already does for sign.
+
+**W3. Two PR-body sentences claim more than the code does.** `tasks/pr-body-UPS.md`.
+- "The package depends on the tag alone. No variable, flag or `make` setting chooses it outside a
+  dry run." Actual (t3 `repo-other-owner`, `repo-ci-fork`): outside a dry run,
+  `RELEASE_REPO=Someone-Else/telcoin-network` gives `IMAGE=ghcr.io/someone-else/tn-mainnet`, and
+  so does `GITHUB_REPOSITORY` in a fork. That is the spec's design (S1: OWNER from REPO), and only
+  the package name depends on the tag alone. The body's own earlier bullet says so; the guarantee
+  should too.
+- "`check_digest_package` is the one place that decides whether an IMAGE_DIGEST is acceptable: a
+  single line `<IMAGE>@<digest>`." Actual: it checks the repository and that there is one line.
+  `check_image_digest_file` checks the digest form and the line count separately (N4), and draft
+  does not check the digest form at all (W1).
+- Fix: reword both, or fix W1 so that the second becomes true.
+
+### NOTE
+
+- **N1. A cheaper safe rerun after the first-push stop exists.** Today the rerun is a full
+  `--no-cache` rebuild with `RELEASE_REBUILD=1`. Builds are not reproducible, so it also leaves
+  the first image untagged in the package. A resume can stay as safe as long as all of these
+  hold:
+  - the registry now serves `$IMAGE:$TAG` at digest E;
+  - the local `$IMAGE:$TAG` has `RepoDigests` containing `$IMAGE@E` (docker push records it);
+  - its labels `org.opencontainers.image.revision` and `.version` equal `$COMMIT` and `$TAG`.
+
+  Under those conditions build can skip `buildx build` and `docker push` and keep everything
+  after them: `image_binary`, `check_version_output`, the tarball from the image,
+  the `RepoDigests` comparison, IMAGE_DIGEST, `write_sums`, the uploads and `cmd_verify 1`, which
+  pulls by digest and compares the binaries. Anyone who could swap the local image could also
+  tamper with a rebuild, so nothing is lost. Make it explicit (`RELEASE_RESUME=1`) rather than
+  automatic.
+- **N2.** `check_sums_package` in `cmd_sign` and `cmd_verify` cannot be the check that refuses
+  another package in the real flow: `check_release_files` runs first, and through
+  `check_image_digest_file` it already refuses one (t2 `sign-*-other` shows the default advice,
+  not "do not sign it"). The new check is only reached with `check_release_files` stubbed (t2
+  `*-iso-*`). It is harmless defence in depth, and the guide's "checks once more right before it
+  signs" is accurate.
+- **N3.** Spec V8 check 2 asks that "each refusal names the channel and both packages". Only the
+  wrong-package refusal does: `IMAGE_DIGEST names an image in ghcr.io/telcoin-association/tn-testnet, but v0.1.0 is on the mainnet channel, whose images are published only in ghcr.io/telcoin-association/tn-mainnet; ...`.
+  The other three name less:
+  - a missing `@`: `names '...', not an image by digest; expected <IMAGE>@sha256:<hex>`, with
+    no channel;
+  - two lines: `IMAGE_DIGEST must be a single line`, with neither;
+  - a malformed digest: `holds a malformed digest: sha256:XYZ`, with neither.
+
+  The UPS spec asks for the channel and the packages only on the mismatch, so this is a NOTE.
+  Appending "(the <channel> channel's images are in <IMAGE>)" would cover all of them.
+- **N4.** There are two definitions of "single line":
+  - `check_digest_package` looks for a newline after `$(cat)` has stripped trailing newlines;
+  - `check_image_digest_file` uses `awk 'END { print NR }'`.
+
+  A file with a trailing blank line passes the first and fails the second (t2
+  `file-*-trailing-blank`). The second runs at every gate, so nothing slips through.
+- **N5.** A dry run uses one `RELEASE_IMAGE` for both channels (t3 `dry-image-*`: both give
+  `IMAGE=localhost:5000/x`), so a rehearsal cannot show the package split. This is per spec.
+  Appending `/$PACKAGE` in dry runs would be a spec change and is the orchestrator's call.
+- **N6.** `RELEASE_REPO` is honoured outside a dry run and sets the image owner, with a
+  `warning: using repository ...` line. This is unchanged from origin/main, where the image was
+  `ghcr.io/lower(REPO)`. The draft lookup uses the same repository, so the release and the
+  package stay consistent. It can never change the package name: `RELEASE_REPO=Telcoin-Association/tn-testnet`
+  on a mainnet tag still gives `tn-mainnet` (t3 `repo-named-like-package*`).
+- **N7.** `GHCR_IMAGE` can be overridden on the make command line (t5 `make-override-possible`).
+  The recipes hard-code the `:dev-<flavor>-$(TAG)` tag, so even an override cannot write
+  `:vX.Y.Z`, `:latest` or `:adiri`. The package access list is the real control. The PR's
+  "ad-hoc targets cannot write a release package" holds for release tags.
+- **N8.** The operator image-check block, on the install page and in every release body, prints
+  its refusal on stderr and exits 0. This is unchanged from origin/main, and harmless for
+  copy-paste use.
+- **N9.** The premise holds. Anonymous reads on 2026-11-04 (`V8_NETWORK=1 bash tx3_ghcr_probe.sh`)
+  got token 403 for tn-mainnet, tn-testnet, tn-dev, telcoin-network and a made-up name. The
+  public `orhun/git-cliff/git-cliff` got token 200, manifest 200 for an existing tag and 404 for
+  a missing one. `registry_digest` maps a 403 from the token endpoint to `denied` (tx1
+  `reg-token-403-first-push`). A curl failure (000) and a 500 stay retryable outages, exit 3,
+  never `denied`.
+- **N10.** The stop after the first push is the only reminder of the access-list step in the
+  one-time setup. If a new package ever answered anonymously right after its first push, build
+  would continue without that reminder. A `warn` naming the access-list step whenever the
+  pre-push probe was denied would cost one line.
+- **N11.** The draft refusal's advice ("rebuild the draft with make release-build TAG=...") is
+  not enough on its own when the draft already holds `SHA256SUMS.asc`, or when `:TAG` exists:
+  build then refuses. The guide's "failed `release-verify`" row has the full recipe, and the
+  message could point there.
+- **N12.** The implementer's checkpoint lists two paths as "not exercised end to end": the
+  first-push path and publish's alias assertion. With stubbed I/O they are covered here (tx1, 53
+  cases; t4, 11 cases), including `check_version_output` running before `docker push` on both
+  channels (tx1 `*-order`, `*-badfeat`).
+- **N13.** 848a47b5f only rewords the refusal from 930afd05d (implementer open issue 1). The
+  first-push change is in 930afd05d, and that commit's message describes it.
+
+## Matrix (check 1, `./etc/release.sh parse TAG`; IMAGE from `init_env`, default environment)
+
+| tag | rc | CHANNEL | PACKAGE | IMAGE | ALIAS | PRERELEASE | FEATURES |
+|---|---|---|---|---|---|---|---|
+| `v0.1.0` | 0 | mainnet | tn-mainnet | ghcr.io/telcoin-association/tn-mainnet | latest | false | (none) |
+| `v0.1.0-rc1` | 0 | mainnet | tn-mainnet | ghcr.io/telcoin-association/tn-mainnet | (none) | true | (none) |
+| `v0.17.0-adiri` | 0 | adiri | tn-testnet | ghcr.io/telcoin-association/tn-testnet | adiri | true | adiri |
+| `v0.17.0-adiri-rc2` | 0 | adiri | tn-testnet | ghcr.io/telcoin-association/tn-testnet | (none) | true | adiri |
+| `v0.1.0-mainnet` | 2 | `error: not a release tag: 'v0.1.0-mainnet' (expected vX.Y.Z, vX.Y.Z-rcN, vX.Y.Z-adiri or vX.Y.Z-adiri-rcN)` | | | | | |
+| `v0.1.0-adiri-adiri` | 2 | refused, same message | | | | | |
+| `V0.1.0` | 2 | refused, same message | | | | | |
+| `v01.0.0` | 2 | refused, same message | | | | | |
+| extra: `v0.1.0-rc0`, `v0.1.0-rc1-adiri`, `v0.1.0-testnet`, `"v0.1.0 "`, `v0.1.0<LF>x`, `v0.1`, `""` | 2 | refused, same message | | | | | |
+
+## Results by check
+
+| check | script | result | key actual output |
+|---|---|---|---|
+| 1 parse matrix | t1_matrix.sh | 37/37 | table above |
+| 2 sign/verify-time package checks | t2_package.sh | 82/82 | wrong package (other network, old package, other owner, upper case, `:tag@digest`): exit 1 with the refusal quoted in N3; checked before `registry_digest` and `docker pull`; cmd_sign stops before `confirm` and `gpg`; a two-line file gives `single line`; a malformed digest gives `holds a malformed digest`; SHA256SUMS missing, twice or with a wrong hash gives `does not list the IMAGE_DIGEST beside it exactly once with its hash`; the right package reaches `gpg` / `verified v0.1.0 commit=...` |
+| 3 RELEASE_IMAGE / RELEASE_REPO | t3_env.sh | 35/35 | dry run gives `IMAGE=localhost:5000/x`; without it (set, empty, `=0`; init_env and the real CLI for check-tag, build, sign, verify, publish): exit 2 `RELEASE_IMAGE is honoured only in a dry run (RELEASE_DRY_RUN=1)`; a ghcr RELEASE_IMAGE in a dry run is refused; RELEASE_REPO changes the owner, never the package (N6); check-tag logs `PACKAGE=` and `IMAGE=` |
+| 4 alias in package | t4_alias.sh | 11/11 | release.sh line 2110 `docker buildx imagetools create --prefer-index=false --tag "$IMAGE:$ALIAS" "$IMAGE@$D"`; publish v0.1.0 moves `tn-mainnet:latest` to `tn-mainnet@sha256:aa..`; v0.17.0-adiri moves `tn-testnet:adiri`; rc tags: `alias=none`; a moved or missing `:TAG`: exit 1 before `imagetools create` |
+| 5 Makefile | t5_make.sh | 13/13 | `make -n docker-adiri/devnet/push` give `ghcr.io/telcoin-association/tn-dev:dev-...`; the only push lines are 453, 458 and 462 on `$(GHCR_IMAGE)`; release-* run `./etc/release.sh <step> "TAG"`; no recipe names tn-mainnet or tn-testnet |
+| 6 lints | t6_lint.sh | 7/7 | `bash -n` (5.3 and bash:3.2), host `shellcheck -x -S style etc/release.sh`, host actionlint, `make release-lint` (pinned images, `--network none`, ro mount): all clean; bash:3.2 `parse` works on the branch and on origin/main |
+| 7 docs | t7_docs.sh | 32/32 | two remaining old-package mentions, both "never held a release and is no longer used" (ACTIONS.md:477, releasing.md:35); SECURITY.md and etc/README.md do not name the package; the install-page block and the release-body block accept only `tn-mainnet@sha256:` for mainnet tags and `tn-testnet@sha256:` for adiri tags (look-alike, tag reference and old package refused); the rollback `case` refuses the other package; mdbook 0.5.4 builds branch and origin/main with 0 warnings each |
+| 8 commits / scope | t8_commits.sh | 15/15 | six commits, linear, prefixes release/make/ci/docs, no trailers (`git interpret-trailers --parse` empty), no attribution; 9 files changed, all on the spec's list |
+| X1 first-push | tx1_build.sh | 53/53 | without a TTY or RELEASE_YES: exit 2 before any build; with RELEASE_YES=1: build with the channel's `CARGO_FEATURES`, `--version` check, then `docker push <channel package>:TAG`, then exit 2 `... is pushed, but the package is not public: do its one-time setup (maintainer guide), then run make release-build TAG=... again with RELEASE_REBUILD=1`; no IMAGE_DIGEST, upload or verify; bad features stop before the push on both paths and both channels; see W2 |
+| X2 draft | tx2_draft.sh | 16/22 | another package, no `@`, empty, two lines: exit 1 before render or edit, with `::error::`; a malformed digest in the right package: exit 0, digest dropped (W1) |
+| X3 premise | tx3_ghcr_probe.sh | ran once | N9 |
+
+## Verdict
+
+The branch does what the UPS spec asks. The package is a pure function of the tag. Every stage
+that reads or writes IMAGE_DIGEST refuses another package, and does so before any pull,
+signature or alias move. The alias moves only inside the channel's package. The Makefile writes
+only tn-dev. Lints, mdbook and commit hygiene are clean. The first-push path is fail-closed: it
+writes no IMAGE_DIGEST and no SHA256SUMS, uploads nothing, and exits 2, after a push that is
+gated by the same version and feature check as the normal path.
+
+The branch is ready for a draft PR once two small changes are made:
+- W1: make `draft` refuse a malformed digest, a one-line `die`, or else reword the claim.
+- W3: correct the two PR-body sentences.
+
+W2 deserves a fix before the PR leaves draft, or at least before the first real release of
+either network: use the authenticated registry probe, and a dedicated answer instead of
+`RELEASE_YES`. That path runs exactly once per network and is the one place where an operator's
+judgement is meant to stop it. N1, a resume instead of a rebuild, is an optional improvement on
+the same path.
