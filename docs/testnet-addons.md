@@ -12,6 +12,10 @@ nothing else about your node), and **reversible**. None of them runs on mainnet;
 | **Metrics shipping** | Your node's Prometheus metrics in their dashboards | Runs the Alloy metrics pipeline; the node serves a loopback `--metrics` endpoint |
 | **VPN admin SSH** | SSH into your node over a private overlay to recover it | Adds a `tnadmin` user that can log in only from the maintainers' overlay range, with sudo for a short list of recovery commands |
 
+Private alerts are not a testnet add-on. `setup-alerts.sh` pushes a heartbeat from your
+host to a monitor you own, on every network, and the Association is not involved; see
+[OPERATOR.md §4.14](../OPERATOR.md#414-private-alerts).
+
 Logging and metrics are independent (pick either, both, or neither) and they share a
 single ingest token. You can opt in during `setup-node.sh` (you're asked right after
 picking the network), or any time afterward with `setup-observability.sh` and
@@ -54,6 +58,8 @@ clean up after themselves:
   `/etc/sudoers.d/90-tnadmin`, the self-heal units or helper), observability
   (`telcoin-alloy.service`), or a Caddyfile written by install-caddy.sh. Remove them
   first; see [Removing the add-ons](#removing-the-add-ons).
+- Private alerts (`setup-alerts.sh`) are not an add-on and work on mainnet too. They do
+  not count as an add-on when setup-node checks a host for a mainnet install.
 
 ---
 
@@ -294,6 +300,12 @@ disable writes it as the enable does and checks the unit for 5 seconds after the
 restart in the same way.
 
 ### Health monitoring
+
+The push heartbeat of private alerts is the way forward for watching a node: a timer on
+your host pushes the node's status to a monitor you own, on every network, with no port
+opened, and it alerts you, not the Association. See
+[OPERATOR.md §4.14](../OPERATOR.md#414-private-alerts). The pull probe below stays for
+the Association's monitor on testnet and devnet.
 
 The Association runs an uptime monitor that TCP-probes port `43174`. Enabling health
 monitoring adds `--healthcheck 43174` to the node and restricts the firewall rule to
@@ -565,6 +577,11 @@ including half-removed ones:
   `/etc/sudoers.d/90-tnadmin` and the scoped sshd drop-in, deletes the overlay SSH ufw
   rules for both the maintainers' range and the whole overlay, and removes the
   `tnadmin` account. Ask the Association to de-enroll your overlay peer afterwards.
+
+remove-node.sh also removes private alerts (the heartbeat timer and service, the runner,
+`/etc/telcoin/alerts` and the runner's state), before it stops the node, so the heartbeat
+does not report the stop as a failure. Pause or delete the node's monitor afterwards: a
+push monitor alerts on silence.
 
 remove-node.sh does not touch Caddy. Turn the dashboard and public RPC off with
 `sudo bash install-caddy.sh`; once no managed site remains it restores the Caddyfile you

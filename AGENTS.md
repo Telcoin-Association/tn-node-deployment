@@ -31,8 +31,8 @@ covers:
 
 `setup-node.sh`, `edit-config.sh`, `prepare-stake.sh`, `migrate-node-naming.sh`,
 `check-node.sh`, `update-node.sh`, `update-scripts.sh`, `firewall-setup.sh`, `setup-vpn.sh`,
-`setup-observability.sh`, `install-caddy.sh`, `remove-node.sh`, `install.sh`, `open-ui.sh`
-(it runs on the operator's own computer), the deprecated `setup-observer.sh` and
+`setup-observability.sh`, `setup-alerts.sh`, `install-caddy.sh`, `remove-node.sh`, `install.sh`,
+`open-ui.sh` (it runs on the operator's own computer), the deprecated `setup-observer.sh` and
 `setup-validator.sh` shims, and everything under `lib/` and `ui/`.
 
 A comment in one of these may *mention* a `common/` script for provenance, but only
@@ -114,7 +114,11 @@ and config dirs (`/opt/telcoin`, `/etc/telcoin`, root 0755), `.node-meta` (root 
 `node.env` (0644), the passphrase files, the start scripts under `/usr/local/libexec/telcoin`,
 the node binary and every directory above it, the log dir (`/var/log/telcoin`,
 root:telcoin-log 0750), `/var/backups/telcoin`, `/var/lib/telcoin-staging` and the update lock
-under `/run/telcoin`. `.node-meta` records the layout as `OWNERSHIP_LAYOUT=2`, `check-node.sh`
+under `/run/telcoin`. One more tree is not root's: the state dir of the private alerts runner
+(`/var/lib/private/telcoin-heartbeat`, 0700), which systemd creates for the heartbeat service's
+dynamic user (`DynamicUser=yes`, `StateDirectory=telcoin-heartbeat`). Only the runner writes in
+it; the teardown removes it with `systemctl clean --what=state` (see "Private alerts").
+`.node-meta` records the layout as `OWNERSHIP_LAYOUT=2`, `check-node.sh`
 checks the owners and modes (`check_ownership_layout`), and the README has the full table.
 Code that runs as root keeps it that way:
 
@@ -136,9 +140,10 @@ Code that runs as root keeps it that way:
   `tn_migrate_ownership` before its first write, because `meta_set` and `meta_unset` refuse on
   a host still laid out by an older release. setup-node (on a re-run), update-node, edit-config
   and prepare-stake call it right after they take the lock; install-caddy, firewall-setup,
-  setup-vpn and setup-observability go through `addon_meta_write_begin`. A teardown or a read
-  that must also work on the old layout takes the lock alone (`addon_meta_lock`). On mainnet
-  the migration refuses with rc 3: a mainnet host on the old layout is installed fresh.
+  setup-vpn, setup-observability and setup-alerts go through `addon_meta_write_begin`. A
+  teardown or a read that must also work on the old layout takes the lock alone
+  (`addon_meta_lock`). On mainnet the migration refuses with rc 3: a mainnet host on the old
+  layout is installed fresh.
 - Feed a root writer (`tn_write_root_file`, `write_pending_state`, `_tn_meta_write`) from a
   here-string, a here-document or a file, never from a pipe. The right-hand side of a pipe runs
   in a forked subshell that can outlive the script and finish its write after the update lock
@@ -153,7 +158,7 @@ Code that runs as root keeps it that way:
   AIDE database `/var/lib/aide/telcoin-node.db` (config `/etc/aide/telcoin-node.conf`) hashes
   `/opt/telcoin`, `/usr/local/libexec/telcoin`, `/etc/telcoin` and the node unit. A script that
   changes one of them calls `tn_host_baseline_refresh <say-fn>` once its change went through,
-  before it releases the update lock, as update-node, edit-config and the four add-ons do
+  before it releases the update lock, as update-node, edit-config and the five add-ons do
   (guarded with `declare -F` in the add-ons, which run against older libraries). It is a no-op
   without the marker and only ever warns. Files that change on their own schedule stay out of
   the AIDE config: `bls-passphrase`, `bls-passphrase.cred`, `alloy/ingest-token` and the
@@ -233,10 +238,11 @@ turns both refusals into a warning, for a restart the fleet coordinator has chec
 update-node, edit-config (the credential switch included), setup-node on a re-run over a
 running node, migrate-node-naming, install-caddy and the observability add-on run the guard
 and then the wait, once they hold the update lock; `prepare-stake.sh --rotate-address` runs
-the wait. update-node runs both just before it stops the node. edit-config, install-caddy and
-the observability add-on write their files first and run both right before the restart. When
-the guard refuses, nothing restarts: update-node leaves the running node as it was, and
-edit-config and install-caddy put back what they wrote. `--no-epoch-wait` and
+the wait. setup-alerts runs neither, because it never stops or restarts the node. update-node
+runs both just before it stops the node. edit-config, install-caddy and the observability
+add-on write their files first and run both right before the restart. When the guard refuses,
+nothing restarts: update-node leaves the running node as it was, and edit-config and
+install-caddy put back what they wrote. `--no-epoch-wait` and
 `TN_SKIP_EPOCH_WAIT=1` skip the wait, never the guard. Rollback restarts run neither. Any new
 code that stops or restarts the node runs the guard, then the wait, right before the stop:
 "wait first, then stop" is about the stop, not about every file edit. A script that owns its
@@ -277,6 +283,74 @@ that re-signs the proof of possession for `--rotate-address`, on keytool's stand
 environment; the script removes `TN_BLS_PASSPHRASE` from its own environment before anything
 runs. Future agents must keep it that way: do not add a send, a signing step or a key prompt to
 it.
+
+## Private alerts
+
+`setup-alerts.sh` installs a push heartbeat. A timer (`telcoin-heartbeat.timer`) runs
+`telcoin-heartbeat.service`, a oneshot that checks the node on this host (the service state,
+the local RPC, the consensus header, the node mode and `/health/network`) and pushes up or down
+with a reason to at most five monitors the operator owns (Uptime Kuma push URLs, healthchecks.io
+ping URLs, JSON webhooks). No port opens and the Telcoin Association is not involved. The
+library is `lib/alerts.sh`; the runner is `lib/tn-heartbeat.sh`, installed root 0755 as
+`/usr/local/libexec/telcoin/tn-heartbeat` with `tn_install_root_binary` after `bash -n`.
+`.node-meta` records `ENABLE_ALERTS=true|pending|false` (absent means false). Rules:
+
+- Every network. `setup-alerts.sh`, `lib/alerts.sh` and `lib/tn-heartbeat.sh` call neither
+  `require_testnet` nor `is_testnet`/`is_testnet_like`. The alerts are not a testnet add-on:
+  `tn_testnet_addons_present` does not report them, and their files never join
+  `TESTNET_ADDONS_BUNDLE`. They are three `SCRIPTS` rows with their own version variables
+  (`SCRIPT_VERSION`, `ALERTS_VERSION`, `HEARTBEAT_VERSION`); `_file_version` reads the first
+  assignment of that name in the file, so keep the real one first.
+- The runner sources nothing, `lib/common.sh` included. It holds `hb_*` functions only and runs
+  `hb_main` only when it is executed, not when it is sourced; `lib/alerts.sh` sources it for the
+  shared parsers (`hb_target_normalize`, `hb_url_host`, `hb_header_number`, `hb_state_get`). It
+  reads its settings from `/etc/telcoin/alerts/alerts.env` (validated key by key), finds its
+  tools on `PATH` and parses JSON with `[[ =~ ]]`, `grep`, `sed` and POSIX awk only.
+- A target URL is a secret: it carries the monitor's token. It lives only in
+  `/etc/telcoin/alerts/targets` (root 0600, one `<kind> <url>` line each, written with
+  `tn_write_root_file` from a process substitution run in the main shell), which systemd hands to
+  the runner as a credential (`LoadCredential=targets:/etc/telcoin/alerts/targets`). curl gets
+  each URL through `-K <(printf 'url = "%s"\n' "$url")`, because `/proc/<pid>/cmdline` is
+  readable by every account. A URL never goes on a command line (the operator's own `--target`
+  is the one exception, and it warns), into the environment of a child, a log line, a JSON
+  event, the state file or `.node-meta`; `TN_ALERT_TARGETS` is copied and unset before anything
+  else runs. Wherever a target is shown or logged, it is `kind@host` (`kuma@kuma.example.org`).
+- The service runs as a dynamic user (`DynamicUser=yes`, never `User=`) with
+  `StateDirectory=telcoin-heartbeat` and the sandbox of `alerts_unit_text`
+  (`InaccessiblePaths=` covers the data dir and the passphrase files). Its state file
+  (`/var/lib/private/telcoin-heartbeat/state`) is written by the runner only, never sourced, and
+  checked key by key when read. That state dir is the one exception to root ownership besides
+  the data dir (see "Ownership").
+- Enabling, changing the targets, testing, refreshing and disabling never stop or restart the
+  node, so they run neither `tn_committee_down_guard` nor `tn_wait_restart_window`. A write takes
+  the update lock through `addon_meta_write_begin`, `--test` takes `addon_meta_lock`, `--status`
+  takes none, and a change that went through calls `tn_host_baseline_refresh` behind a
+  `declare -F` guard. An enable or a target change that no monitor accepts is undone,
+  `.node-meta` included: the undo of a failed fresh enable writes back the `ENABLE_ALERTS` value
+  it read at the start (setup-node records `pending` before it runs the enable), or removes the
+  key when it was absent, and never writes a hard `false`; only an operator's disable does. Exit
+  1 from setup-alerts then means nothing on the host changed, so that path needs no baseline
+  refresh.
+- remove-node.sh removes the alerts (`remove_alerts`) before the node stops, at every scope of
+  the menu and of `--json` and on the leftover path, but not in the chain-data-only wipe, which
+  keeps the node. It then prints "Pause or delete this node's monitor: a push monitor alerts on
+  silence." `remove_alerts` uses fixed paths and calls nothing in `lib/alerts.sh`, so it works
+  on a host that has the script without the library; with no alerts file on the host it does
+  and says nothing.
+- update-scripts.sh never reinstalls the runner. When `lib/tn-heartbeat.sh` or `lib/alerts.sh`
+  changed and the timer unit exists, it prints `sudo bash <dir>/setup-alerts.sh --refresh`, and
+  the installed copy stays as it was until the operator runs that.
+- What a push carries is an operator-visible contract: up or down and the reason (the node mode,
+  block and epoch on an up run, the problem on a down run), to every kind. Kuma gets `status`,
+  `msg` and `ping` (the local RPC's answer time in ms); healthchecks gets `<url>` or `<url>/fail`
+  with a `<status>: <message>` body; the webhook JSON has the keys `status`, `reason`, `node` (the
+  host's label), `network`, `mode`, `block`, `epoch`, `ts` and `changed`, in that order. Nothing
+  else leaves the host. Adding, renaming or removing a field is an operator-visible
+  change: update `OPERATOR.md`, the README and the partner guide with it.
+
+The fixture tests are `tools/tests/heartbeat_test.sh` (the runner), `tools/tests/alerts_test.sh`
+(the library) and `tools/tests/setup_alerts_test.sh` (the script); `tools/tests/vm.d/P0-alerts.sh`
+runs the whole path on a VM with systemd.
 
 ## Partner documents
 
@@ -590,8 +664,8 @@ with `declare -F` before anything else and stop with one message naming `update-
 are missing is skipped, and one warning at the end names every skipped check
 (`cn_report_skipped`). The add-on scripts do the same as the entry scripts through their own
 `*_require_lib` (`caddy_require_lib`, `fw_require_lib`, `vpn_require_lib`,
-`addons_require_lib`), which exit 2 with one message. When a script starts calling a library
-helper it did not call before, add the helper to that script's list.
+`addons_require_lib`, `alerts_require_lib`), which exit 2 with one message. When a script
+starts calling a library helper it did not call before, add the helper to that script's list.
 
 ## Lints
 
@@ -715,7 +789,8 @@ into a pass. The jobs:
 
 `.github/workflows/integration.yml` has one job, `vm-assertions`: on an Ubuntu 24.04 runner
 (a full VM with systemd), it installs logrotate, ufw and openssh-server and runs every
-assertion file in `tools/tests/vm.d/` as root with `TN_VM_TEST=1`.
+`tools/tests/vm.d/P0-*.sh` assertion file as root with `TN_VM_TEST=1`. Only that glob runs: a
+new assertion file needs the `P0-` prefix.
 
 `.github/workflows/publish-installer.yml` runs on a `scripts-v*` tag (or by hand on one). Its
 `build` job checks that the tag is on main and that `release-scripts.sh --check --tag` passes,
@@ -774,8 +849,9 @@ line.
 
 - `tools/tests/vm.d/` holds host-level assertions for a disposable VM: they create users,
   write under `/etc`, `/opt` and `/usr/local` and change the firewall. They refuse to run
-  unless they run as root with `TN_VM_TEST=1`; `integration.yml` runs them. An item whose code
-  is not in the tree reports SKIP. Do not run them on a machine you care about.
+  unless they run as root with `TN_VM_TEST=1`; `integration.yml` runs the `P0-*.sh` ones. An
+  item whose code is not in the tree reports SKIP. Do not run them on a machine you care
+  about.
 - `tools/tests/genesis.d/testnet/` holds `genesis.yaml`, `committee.yaml` and
   `parameters.yaml` from telcoin-network at the pinned tag (`TESTNET_CHAIN_CONFIGS_TAG`),
   unchanged. `genesis_hash_test.sh` checks them against the `TESTNET_*_SHA256` pins in
