@@ -156,12 +156,10 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   the maintainer repo.
 - devnet-genesis still picks `setup-observer.sh` and `setup-validator.sh` in `devnet-lib.sh`.
   Closes when it calls `setup-node.sh`; then the shims can leave this repo and the updater.
-- `observability/config.alloy` is vendored from deploy-networks-common branch
-  `alloy-token-file-tls` (30a2813, PR #8), which is not merged yet; its header says "pending
-  merge". The other consumers of that file upstream (`docker-compose.yml` and the start-script
-  heredocs) still pass the token in the environment, so a compose self-host on the new config
-  fails every push. Closes when PR #8 merges with those consumers moved to the token file, and the
-  header and the sync-note sha in `docs/testnet-addons.md` name the merged commit.
+- `observability/config.alloy` is vendored from deploy-networks-common main 18f8485 (PR #8,
+  merged 2026-11-04). The other consumers of that file upstream (`docker-compose.yml` and the
+  start-script heredocs) still pass the token in the environment, so a compose self-host on the
+  new config fails every push. Closes when those consumers move to the token file upstream.
 
 ## Host soak
 

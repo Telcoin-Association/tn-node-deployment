@@ -626,7 +626,8 @@ own notes in `tasks/ckpt-fup-ORCH.md`.
 - Docs: README, OPERATOR.md (key lifecycle 4.12, host baseline 4.13), AGENTS.md (mainnet switch,
   contributing, CI, lints), docs/testnet-addons.md, followup.md, CHANGELOG/scripts-v2.1.0.md,
   partner guide 1.6 with a byte-identical PDF.
-- Upstream: deploy-networks-common PR #8 (config.alloy token file and TLS 1.3), pending merge.
+- Upstream: deploy-networks-common PR #8 (config.alloy token file and TLS 1.3), merged 2026-11-04
+  as 18f8485; the vendored header and sync note name it.
 - Lessons recorded in `tasks/lessons.md` (BSD userland on the macOS runner, the lock fallback,
   linted verifier records, tree-wide lints on orchestrator commits, commit messages through a
   file, verifier rounds back to the owning implementer).

@@ -693,15 +693,14 @@ pipeline(s) the operator opted into; for native Alloy the deployed copy also poi
 re-vendor, so unexpected drift is detectable):
 
 ```
-sha256(observability/config.alloy) = 555feb26faa015e57992fbf475efe50e1fa0f30d63efff57ad82cb4ce3213157
+sha256(observability/config.alloy) = 3fa5266154aec8b0a2713c30f27cc6c6c4ec6994f9aedd235ad085a5c5200db7
 ```
 
-The current copy (token file and TLS pin) is vendored from the `deploy-networks-common`
-branch `alloy-token-file-tls`, commit 30a2813 (PR #8), pending merge; the file's header
-says so. Once that branch merges, put the merged commit in the header and the hash above.
-Until then the other upstream consumers of the file (`docker-compose.yml` beside it, and
-the `start-*-node.sh` heredocs in `adiri-genesis`) still pass the token in the
-environment.
+The current copy (token file and TLS pin) is vendored from `deploy-networks-common` main
+at 18f8485 (PR #8, merged 2026-11-04); the file's header says so. The other upstream
+consumers of the file (`docker-compose.yml` beside it, and the `start-*-node.sh` heredocs
+in `adiri-genesis`) still pass the token in the environment; that is tracked in
+`followup.md`.
 
 Verify the functional blocks against upstream (the file headers differ by design; from
 the first River component to EOF must match exactly, so this diff should be empty):

@@ -30,7 +30,7 @@
 // read-only at /run/credentials/telcoin-alloy/ingest-token (docker). The *_PUSH_HOST
 // variables are the hub's TLS server name (the push URL's host); TLS 1.3 is required.
 //
-// Vendored from upstream branch alloy-token-file-tls 30a2813, pending merge.
+// Vendored from upstream main 18f8485 (PR #8 merged 2026-11-04).
 // =============================================================================
 
 // reth writes <log.file.directory>/telcoin-network-logs/reth.log, rotated to
