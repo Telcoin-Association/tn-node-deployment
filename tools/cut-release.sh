@@ -385,7 +385,7 @@ wait_runs() {
         i=0
         while :; do
             line="$(_gh run list --workflow "$wf" --branch "$tag" --limit 1 --json status,conclusion,url \
-                --jq '.[0] | [.status, .conclusion, .url] | join(" ")' 2>/dev/null || true)"
+                --jq '.[0] | [.status, (.conclusion // ""), .url] | join(" ")' 2>/dev/null || true)"
             st="${line%% *}"
             if [[ "$st" == completed ]]; then
                 break
@@ -494,7 +494,7 @@ status_report() {
     fi
     for wf in ci.yml publish-installer.yml; do
         line="$(_gh run list --workflow "$wf" --branch "$tag" --limit 1 --json status,conclusion,url \
-            --jq '.[0] | [.status, .conclusion, .url] | join(" ")' 2>/dev/null || true)"
+            --jq '.[0] | [.status, (.conclusion // ""), .url] | join(" ")' 2>/dev/null || true)"
         echo "  ${wf}: ${line:-no run found}"
     done
 }
