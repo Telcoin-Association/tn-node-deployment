@@ -132,9 +132,15 @@ else
 fi
 readonly VERIFY_TIMEOUT_EXPLICIT
 # The newest release that migrates the consensus store one way on its first
-# start (v0.16.0: epoch packs v1 -> v2); older releases cannot open the
-# migrated data dir. Raise it when a release does.
-readonly STORAGE_MIGRATION_FLOOR="0.16.0"
+# start, per network; older releases cannot open the migrated data dir. Raise a
+# network's floor when one of its releases does. Testnet: v0.16.0 (epoch packs
+# v1 -> v2). Mainnet and devnet: none (empty), as MIN_SOURCE_VERSION_MAINNET is
+# for the source floor: their version lines start below v0.16.0 and no release
+# of theirs migrates one way yet, so no update there is one way and no downgrade
+# is refused for the storage reason. Read through storage_migration_floor.
+readonly STORAGE_MIGRATION_FLOOR_TESTNET="0.16.0"
+readonly STORAGE_MIGRATION_FLOOR_MAINNET=""
+readonly STORAGE_MIGRATION_FLOOR_DEVNET=""
 # Health window for such an update: the first start migrates before it answers.
 readonly STORAGE_MIGRATION_VERIFY_SECONDS=600
 # Set by storage_migration_begin on each apply: true when this update is one way.
@@ -964,28 +970,50 @@ installed_source_ref() {
     return 0
 }
 
-# storage_migrating_upgrade <running> <target> -- rc 0 when going from <running>
-# to <target> crosses STORAGE_MIGRATION_FLOOR one way: the target is at or above
-# it (no x.y.z, such as a branch or a commit, counts as newest) and the running
-# release is below it (no x.y.z counts as unknown, and so as older). Each side is
-# judged on its first x.y.z, so pass docker images as name:tag (${image##*/}) or
-# a registry host:port would be read as a version.
+# storage_migration_floor [NETWORK] -- print NETWORK's storage migration floor
+# (x.y.z: STORAGE_MIGRATION_FLOOR_TESTNET, _MAINNET or _DEVNET), or an empty line
+# when NETWORK has none. NETWORK defaults to this node's (_tn_guard_network:
+# detect_network, or NETWORK=devnet in .node-meta). A node whose network cannot
+# be told takes the testnet floor, the one every network had before the floors
+# were split. Always rc 0.
+storage_migration_floor() {
+    local net="${1:-}"
+    if [[ -z "$net" ]]; then
+        net="$(_tn_guard_network 2>/dev/null)" || net=""
+    fi
+    case "$net" in
+        mainnet) printf '%s\n' "$STORAGE_MIGRATION_FLOOR_MAINNET" ;;
+        devnet) printf '%s\n' "$STORAGE_MIGRATION_FLOOR_DEVNET" ;;
+        *) printf '%s\n' "$STORAGE_MIGRATION_FLOOR_TESTNET" ;;
+    esac
+}
+
+# storage_migrating_upgrade <running> <target> [NETWORK] -- rc 0 when going from
+# <running> to <target> crosses NETWORK's storage migration floor one way
+# (storage_migration_floor; NETWORK defaults to this node's): the target is at or
+# above it (no x.y.z, such as a branch or a commit, counts as newest) and the
+# running release is below it (no x.y.z counts as unknown, and so as older). A
+# network without a floor never has a one-way update (rc 1). Each side is judged
+# on its first x.y.z, so pass docker images as name:tag (${image##*/}) or a
+# registry host:port would be read as a version.
 storage_migrating_upgrade() {
-    local ver_re run_v new_v
+    local ver_re run_v new_v floor
     ver_re='([0-9]+\.[0-9]+\.[0-9]+)'
     run_v=""
     new_v=""
+    floor="$(storage_migration_floor "${3:-}")"
+    [[ -n "$floor" ]] || return 1
     if [[ "${2:-}" =~ $ver_re ]]; then
         new_v="${BASH_REMATCH[1]}"
     fi
-    if [[ -n "$new_v" ]] && ! version_gte "$new_v" "$STORAGE_MIGRATION_FLOOR"; then
+    if [[ -n "$new_v" ]] && ! version_gte "$new_v" "$floor"; then
         return 1
     fi
     if [[ "${1:-}" =~ $ver_re ]]; then
         run_v="${BASH_REMATCH[1]}"
     fi
     [[ -n "$run_v" ]] || return 0
-    ! version_gte "$run_v" "$STORAGE_MIGRATION_FLOOR"
+    ! version_gte "$run_v" "$floor"
 }
 
 # update_verify_window -- the post-restart health window in seconds: an explicit
@@ -1799,12 +1827,14 @@ update_fail() {
 # form compares as that final). Either without an x.y.z: rc 0, nothing to compare;
 # a RUNNING without one, when TARGET has one, is said in a warning. A downgrade is refused
 # (rc 1): an error event and a done event carrying "downgrade":true and
-# "storage_downgrade" (true when RUNNING is at or above STORAGE_MIGRATION_FLOOR and
-# TARGET below it: the older release cannot open the migrated data dir) in --json
-# mode, [ERROR] lines otherwise. --allow-downgrade, which only an interactive run on
+# "storage_downgrade" (true when RUNNING is at or above the node's storage
+# migration floor, storage_migration_floor, and TARGET below it: the older
+# release cannot open the migrated data dir; never on a network without a floor,
+# mainnet and devnet today) in --json mode, [ERROR] lines otherwise.
+# --allow-downgrade, which only an interactive run on
 # testnet takes, lets it through with a warning.
 update_downgrade_check() {
-    local run="${1:-}" new="${2:-}" re rv nv rt nt storage=false msg net
+    local run="${1:-}" new="${2:-}" re rv nv rt nt storage=false msg net floor
     re='([0-9]+[.][0-9]+[.][0-9]+)'
     if [[ ! "$run" =~ $re ]]; then
         if [[ "$new" =~ $re ]]; then
@@ -1822,20 +1852,21 @@ update_downgrade_check() {
     if ! tn_release_tag_newer "$rt" "$nt"; then
         return 0
     fi
-    if version_gte "$rv" "$STORAGE_MIGRATION_FLOOR" && ! version_gte "$nv" "$STORAGE_MIGRATION_FLOOR"; then
+    floor="$(storage_migration_floor)"
+    if [[ -n "$floor" ]] && version_gte "$rv" "$floor" && ! version_gte "$nv" "$floor"; then
         storage=true
     fi
     net="$(detect_network 2>/dev/null)" || net=""
     if [[ "$ALLOW_DOWNGRADE" == "true" && "$JSON_MODE" != "true" && "$net" == "testnet" ]]; then
         print_warn "Downgrade from ${run} to ${new}, allowed by --allow-downgrade."
         if [[ "$storage" == "true" ]]; then
-            print_warn "${new} cannot open a data dir that v${STORAGE_MIGRATION_FLOOR} or later has migrated: restore a snapshot taken before that migration first."
+            print_warn "${new} cannot open a data dir that v${floor} or later has migrated: restore a snapshot taken before that migration first."
         fi
         return 0
     fi
     msg="${new} is older than the running ${run}: downgrades are refused."
     if [[ "$storage" == "true" ]]; then
-        msg="${msg} ${new} is below v${STORAGE_MIGRATION_FLOOR} and cannot open the data dir the running release has migrated."
+        msg="${msg} ${new} is below v${floor} and cannot open the data dir the running release has migrated."
     fi
     msg="${msg} Nothing was changed."
     if [[ "$JSON_MODE" == "true" ]]; then

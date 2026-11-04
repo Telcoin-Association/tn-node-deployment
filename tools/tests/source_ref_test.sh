@@ -6,6 +6,9 @@
 # whose key is not shipped among them: _tn_tag_sig_check rc 4 naming its key id, so
 # testnet builds it with a warning); it fetches a tag origin added. update-node.sh refuses a branch or commit ref and a downgrade
 # (with "downgrade" and "storage_downgrade" in the --json done event) before any git.
+# The storage migration floor is the network's (storage_migration_floor: testnet
+# v0.16.0, none on mainnet and devnet), so a mainnet update or downgrade is never
+# one way or refused for the storage reason.
 # tn_rustup_ensure never runs a rustup-init whose sha256 is not the pinned one (curl
 # shim). tn_source_build runs rustup and cargo through tn_as_build_user with an empty
 # environment (setpriv shim; recording stubs in the build account's cargo bin).
@@ -208,6 +211,55 @@ dg "--allow-downgrade in --json: refused" v0.17.0-adiri v0.16.0-adiri 1
 JSON_MODE=false
 ALLOW_DOWNGRADE=false
 unset -f installed_source_ref
+
+# The storage migration floor by network (storage_migration_floor): testnet
+# v0.16.0, none on mainnet and devnet; a node whose network cannot be told keeps
+# the testnet floor. Without a floor no update is one way and no downgrade is
+# refused for the storage reason.
+check "storage floor: testnet" "0.16.0" "$(storage_migration_floor testnet)"
+check "storage floor: mainnet has none" "" "$(storage_migration_floor mainnet)"
+check "storage floor: devnet has none" "" "$(storage_migration_floor devnet)"
+check "storage floor: an unknown network keeps the testnet floor" "0.16.0" "$(storage_migration_floor foo)"
+printf 'NETWORK=mainnet\n' > "$META"
+check "storage floor: this node's network (mainnet)" "" "$(storage_migration_floor)"
+printf 'NETWORK=devnet\n' > "$META"
+check "storage floor: this node's network (devnet, from .node-meta)" "" "$(storage_migration_floor)"
+printf 'NETWORK=testnet\n' > "$META"
+check "storage floor: this node's network (testnet)" "0.16.0" "$(storage_migration_floor)"
+smu() {  # smu NAME RUNNING TARGET NETWORK EXPECTED-RC
+    local rc=0
+    storage_migrating_upgrade "$2" "$3" "$4" || rc=$?
+    check_rc "$1" "$5" "$rc"
+}
+smu "one way: testnet v0.15.0 to v0.16.0" v0.15.0-adiri v0.16.0-adiri testnet 0
+smu "one way: testnet, the running release unknown" "" v0.16.0-adiri testnet 0
+smu "not one way: testnet v0.16.0 to v0.17.0" v0.16.0-adiri v0.17.0-adiri testnet 1
+smu "not one way: testnet, both below the floor" v0.14.0-adiri v0.15.0-adiri testnet 1
+smu "not one way: mainnet v0.1.3 to v0.2.0" v0.1.3 v0.2.0 mainnet 1
+smu "not one way: mainnet, the running release unknown" "" v0.2.0 mainnet 1
+smu "not one way: mainnet v0.15.0 to v0.16.0" v0.15.0 v0.16.0 mainnet 1
+smu "not one way: devnet" v0.1.0-devnet v0.2.0-devnet devnet 1
+printf 'NETWORK=mainnet\n' > "$META"
+smu "not one way: this node's network (mainnet) v0.1.3 to v0.2.0" v0.1.3 v0.2.0 "" 1
+STORAGE_MIGRATION=true
+storage_migration_begin v0.1.3 v0.2.0 >/dev/null 2>&1
+check "begin, mainnet v0.1.3 to v0.2.0: not one way, no warning asked" false "$STORAGE_MIGRATION"
+JSON_MODE=true
+: > "$T/json.log"
+dg "mainnet: v0.2.0 to v0.1.3 refused as a downgrade" v0.2.0 v0.1.3 1
+check "mainnet downgrade: not refused for the storage reason" yes \
+    "$(grep -q '"downgrade":true,"storage_downgrade":false' "$T/json.log" && echo yes || echo no)"
+: > "$T/json.log"
+dg "mainnet: v0.17.0 to v0.15.0 refused as a downgrade" v0.17.0 v0.15.0 1
+check "mainnet downgrade across v0.16.0: still not the storage reason" "yes no" \
+    "$(grep -q '"storage_downgrade":false' "$T/json.log" && echo yes || echo no) $(grep -q 'cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+printf 'NETWORK=testnet\n' > "$META"
+: > "$T/json.log"
+dg "testnet: v0.16.0 to v0.15.0 refused" v0.16.0-adiri v0.15.0-adiri 1
+check "testnet downgrade across the floor: the storage reason" "yes yes" \
+    "$(grep -q '"storage_downgrade":true' "$T/json.log" && echo yes || echo no) $(grep -q 'is below v0.16.0 and cannot open the data dir' "$T/json.log" && echo yes || echo no)"
+JSON_MODE=false
+unset -f smu
 
 # tn_ref_min_check judges release tags by tn_release_tag_ok: mainnet tags have no
 # suffix, testnet ones end in -adiri; anything else only warns (rc 2).
