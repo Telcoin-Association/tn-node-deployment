@@ -45,3 +45,18 @@ None (verifier). The PR-body wording fixes are W3.
 ## Open issues
 - W1 and W3 should be fixed before the draft PR; W2 before the PR leaves draft or the first
   real release of either network.
+
+## Re-verification at 57b8ec90a (round 2b)
+- [x] R0 inspect new commits (e68eac852, d93aba218, 57b8ec90a)
+- [x] R1 run_all.sh as-is: failures only from changed wording / intended behaviour (t2 28, t8 2, tx1 18, tx2 6)
+- [x] R2 W1: t2 148/148, tx2 42/42 (draft exits 1 on malformed digest, CR, empty digest)
+- [x] R3 N3: every refusal asserted with the full shape in t2/tx2
+- [x] R4 W2: tx1 99/99 (login sees -> exit 1 w/o REBUILD even with YES+FIRST_PUSH; not seen -> exit 2 unless RELEASE_FIRST_PUSH==PACKAGE; YES never reaches; no-digest inspect -> exit 1)
+- [x] R5 version check before push (both paths, both channels), exit 2 stop, t1 37/37, t6 7/7, mdbook 0 warnings, t7 41/41
+- [x] R6 pr-body: W3 fixed; one guarantee needs a qualifier (N16)
+- [x] R7 REPORT.md 'Re-verification at 57b8ec90a' section; run_all 451/451
+
+### Round 2b result
+451/451 pass at 57b8ec90a. W1, W2, W3, N3 fixed; N4 resolved. New: no ERROR, no WARN;
+NOTEs N14 (NUL byte), N15 (private + RELEASE_REBUILD builds into a dead end), N16 (any inspect
+failure reads as "not seen"; qualifies one PR guarantee), N17, N18. Ready for the draft PR.

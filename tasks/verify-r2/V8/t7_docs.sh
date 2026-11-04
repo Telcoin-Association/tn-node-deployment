@@ -61,6 +61,21 @@ expect rollback-mainnet-other 1 "not an image in $G/tn-mainnet" "PASSES" -- rb "
 expect anchor-one-time-setup 0 "### One-time setup" -- grep -F '### One-time setup' "$TN/docs/src/maintainers/releasing.md"
 expect anchor-registry-access 0 "## Registry access on the build server" -- grep -F '## Registry access on the build server' "$TN/docs/src/maintainers/yubikey-setup.md"
 
+# 57b8ec90a: the first push needs RELEASE_FIRST_PUSH; the docs say so and the old prompt is gone.
+RM=$TN/docs/src/maintainers/releasing.md
+expect docs-first-push-command 0 'run `RELEASE_FIRST_PUSH=tn-testnet make release-build TAG=<tag>`' -- grep -F 'RELEASE_FIRST_PUSH=tn-testnet make release-build' "$RM"
+expect docs-first-push-not-yes 0 '`RELEASE_YES=1` never stands in for it' -- grep -F 'RELEASE_YES=1` never stands in for it' "$RM"
+expect docs-full-rebuild 0 "This is a full rebuild, so the first release of each network builds twice" -- grep -F 'This is a full rebuild' "$RM"
+expect docs-row-asks 0 '`release-build` stops and asks for `RELEASE_FIRST_PUSH`' -- grep -F 'stops and asks for `RELEASE_FIRST_PUSH`' "$RM"
+expect docs-row-private 0 "warns that the package is private, not new" -- grep -F 'private, not new' "$RM"
+expect docs-old-prompt-gone 1 "" -- grep -n -E 'asks whether to push|answer no and make it public' "$RM" "$TN/.github/ACTIONS.md"
+expect docs-actions-first-push 0 'only with `RELEASE_FIRST_PUSH` set to the package' -- grep -F 'RELEASE_FIRST_PUSH' "$TN/.github/ACTIONS.md"
+# The refusal the guide quotes is the start of what the code prints for that case.
+quoted=$(sed -n 's/.*as in `\(IMAGE_DIGEST names an image in [^`]*\)`.*/\1/p' "$RM" | head -n 1)
+expect docs-quoted-refusal-matches 1 "$quoted" -- \
+    env -u RELEASE_REPO -u GITHUB_ACTIONS IDG="ghcr.io/telcoin-association/tn-mainnet@@D@" bash "$V8_DIR/drive.sh" file v0.17.0-adiri
+expect docs-env-header 0 "RELEASE_FIRST_PUSH=PACKAGE" -- grep -F 'RELEASE_FIRST_PUSH=PACKAGE' "$REL"
+
 # mdbook, output outside the worktree; origin/main's book from git archive for comparison.
 if command -v mdbook >/dev/null 2>&1; then
     rm -rf "$SCRATCH/book-branch" "$SCRATCH/book-main" "$SCRATCH/main-tree"

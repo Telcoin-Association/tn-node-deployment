@@ -1,12 +1,115 @@
 # V8 report: UPS round 2, per-network image packages (telcoin-network)
 
+This report covers two rounds. The re-verification at `57b8ec90a` comes first and is the current status. The first-round sections below it, at `0ba57016d`, are kept as the record of what was found then.
+
 Target: `~/coding/telcoin/tn-r2-packages`, branch `release-packages-per-network`, tip `0ba57016d`, six
 commits over origin/main `a0d6e6e26` (e595f9809, 930afd05d, a883fed98, 60d00d284, 848a47b5f,
 0ba57016d). Treated as read-only: after every run `git status --porcelain` there is `?? tasks/` only.
 Verified 2026-11-04 against `spec-r2-UPS.md` and `spec-r2-V8.md`. I built the harness before
 reading the implementer's checkpoint and PR body.
 
-## Harness
+
+## Re-verification at 57b8ec90a (2026-11-04)
+
+Three commits were added on top of `0ba57016d`:
+- e68eac852 release: check the whole IMAGE_DIGEST line in one place
+- d93aba218 release: make the first push of a package explicit
+- 57b8ec90a docs: the first push needs RELEASE_FIRST_PUSH
+
+Together they touch `etc/release.sh`, `docs/src/maintainers/releasing.md` and `.github/ACTIONS.md`. The branch now has nine commits and nine files, all on the spec's list, with no trailers. The worktree is still read-only (`?? tasks/` only).
+
+Result of `bash run_all.sh` at 57b8ec90a: **451 assertions, 451 pass, exit 0.**
+
+```text
+t1_matrix: 37 passed, 0 failed
+t2_package: 148 passed, 0 failed
+t3_env: 35 passed, 0 failed
+t4_alias: 11 passed, 0 failed
+t5_make: 13 passed, 0 failed
+t6_lint: 7 passed, 0 failed
+t7_docs: 41 passed, 0 failed
+t8_commits: 18 passed, 0 failed
+tx1_build: 99 passed, 0 failed
+tx2_draft: 42 passed, 0 failed
+SKIP tx3_ghcr_probe (run once with V8_NETWORK=1, see below)
+```
+
+Run unchanged against the new tip, the first-round harness gave 54 failures. All of them were the reworded refusal texts, the tip and commit count, or the new first-push rules; no exit code was wrong. I then extended the harness:
+- `drive.sh`: `LOGIN` modes for `docker buildx imagetools inspect` (D, none, error, nodigest, d-then-warning, or a literal answer), and `IDG_RAW=1`, which writes the file without a final newline.
+- `t2_package.sh`: rewritten so that every refusal is matched against the whole refusal shape. It covers 22 IMAGE_DIGEST shapes (2 accepted, 19 refused, 1 NUL case) through both check functions on both channels, plus cmd_sign and cmd_verify for three refusals.
+- `tx1_build.sh`: the first-push half rewritten for `login_digest` and `RELEASE_FIRST_PUSH`.
+- `tx2_draft.sh`: updated to the new refusal shape.
+- `t7_docs.sh`: 9 new assertions on the new docs text.
+- `t8_commits.sh`: the expected tip and commit count are parameters (`V8_TIP`, `V8_COMMITS`).
+- `tx3_ghcr_probe.sh`: also runs anonymous `imagetools inspect` reads.
+
+All harness files still pass shellcheck 0.11 and 0.9 at `--severity=error`, and `bash -n`.
+
+### Status of the first-round findings
+
+| finding | status | evidence at 57b8ec90a |
+|---|---|---|
+| W1 draft dropped a malformed digest | **fixed** | tx2 42/42. `cmd_draft` now exits 1, with `::error::` and before render or edit, on each of these: `<IMAGE>@sha256:XYZ`, a trailing CR, `<IMAGE>@`, a 0-byte file, an empty line, two lines, another package, the old package, a tag reference without `@`. A well-formed line, with or without its final newline, keeps its digest in the body. |
+| W2 first-push guard | **fixed** | tx1 99/99, details below. |
+| W3 PR-body overstatements | **fixed** | The rewritten `tasks/pr-body-UPS.md` now says only the package name comes from the tag and the owner from `RELEASE_REPO` or `GITHUB_REPOSITORY` (t3 still shows `ghcr.io/someone-else/tn-mainnet`). It describes `check_digest_package` accurately (one line, the repository before the first `@`, `sha256:<64 hex>`), with the registry match left to `check_image_digest_file`. It says "This rerun is a full rebuild, so the first release of each network builds twice". One guarantee needs a qualifier: N16. |
+| N3 refusal shape | **fixed** | t2 148/148 and tx2. Every refusal reads `IMAGE_DIGEST <problem>, but <TAG> is on the <channel> channel, whose images are published only in <IMAGE> (expected the one line <IMAGE>@sha256:<64 hex>); <advice>`. The problem is one of `names an image in <repo>`, `names '<line>', which is not an image by digest`, `holds <N> lines`, or `names <IMAGE> with the malformed digest '<digest>'` (non-printing bytes shown as `?`). The guide quotes this refusal for one case, and t7 checks that the quote is a verbatim prefix of what the code prints for it. |
+| N4 two "single line" rules | **resolved** | Only `awk 'END { print NR }'` in `check_digest_package` remains: a trailing blank line gives `holds 2 lines`, and a 0-byte file gives `holds 0 lines`. |
+| N1 cheaper resume | not built | Now documented: the first release of each network builds twice (guide one-time setup step 3, PR body step 4). |
+| N2, N5-N13 | unchanged | As in the first round. |
+
+### W2 in detail (tx1, both channels)
+
+When the anonymous read is denied, `build` asks the login with `docker buildx imagetools inspect <IMAGE>:<TAG> --format '{{println .Manifest.Digest}}'`, for the channel's package only. The public paths never call it (`*-normal`: no `imagetools inspect` among the calls).
+
+**The login sees the tag.** build warns `<IMAGE> is private, not new: it refuses anonymous reads, but the docker login sees <IMAGE>:<TAG> at <digest>; make the package public as the maintainer guide's one-time setup says`. It then exits 1 with `... already exists (<digest>); set RELEASE_REBUILD=1 to rebuild it` before any build. That happens even with `RELEASE_YES=1 RELEASE_FIRST_PUSH=<package>`.
+
+**The login does not see the tag.**
+- With no `RELEASE_FIRST_PUSH`, with only `RELEASE_YES=1`, and with `RELEASE_YES=1 RELEASE_REBUILD=1`: exit 2 before any build, with `<IMAGE> refuses anonymous reads and the docker login does not see <IMAGE>:<TAG>: if this is the first release image of the package <package>, run again with RELEASE_FIRST_PUSH=<package>; otherwise make the package public (maintainer guide, one-time setup)`. `RELEASE_YES=1: continuing without a prompt` never appears; cmd_build has no `confirm` any more.
+- With the other network's package, the full image name, the upper-case name or `1`: exit 2 `RELEASE_FIRST_PUSH is <value>, but <TAG> is on the <channel> channel, whose package is <package>`.
+- Only the matching value continues. It warns, builds with the channel's `CARGO_FEATURES`, runs `--version`, pushes `<IMAGE>:<TAG>`, and stops with exit 2, `... is pushed, but the package is not public: ...`, with no IMAGE_DIGEST, upload or verify.
+
+**The inspect answers without a valid digest** (other text, `sha256:XYZ`, or a warning after the digest): exit 1 `docker buildx imagetools inspect <IMAGE>:<TAG> answered without a digest: ...`, before any build.
+
+`RELEASE_FIRST_PUSH` changes nothing on a public package. With the tag already present, the run still exits 1 without `RELEASE_REBUILD`.
+
+### Re-checked at 57b8ec90a
+
+- `check_version_output` still runs before `docker push` on the first-push path and on the normal path, for both channels (tx1 `*-fp-order`, `*-normal-order`). Wrong build features stop the run before the push on both paths, and the error is the feature refusal (`*-badfeat`, `*-is-feature-refusal`).
+- The stop after the push is still exit 2 (tx1 `*-fp`, `*-post-denied`, `*-private-rebuild`).
+- The check 1 matrix is unchanged (t1 37/37, table below).
+- Lints, t6 7/7: `bash -n` under 5.3 and bash:3.2, host `shellcheck -x -S style etc/release.sh`, host actionlint, and `make release-lint` with the cached pinned images and `--network none`. bash:3.2 `parse` works.
+- `mdbook build docs` (0.5.4) succeeds on the branch and on origin/main, 0 warnings each.
+- Docs, t7 41/41:
+  - the `RELEASE_FIRST_PUSH=tn-testnet make release-build` command;
+  - "`RELEASE_YES=1` never stands in for it";
+  - "This is a full rebuild, so the first release of each network builds twice";
+  - the two new failure-table rows ("stops and asks for `RELEASE_FIRST_PUSH`" and "private, not new");
+  - the old "asks whether to push" prompt is gone from releasing.md and ACTIONS.md;
+  - ACTIONS.md item 3 names `RELEASE_FIRST_PUSH`;
+  - the `etc/release.sh` header documents `RELEASE_FIRST_PUSH=PACKAGE`.
+
+Anonymous reads (`V8_NETWORK=1 bash tx3_ghcr_probe.sh`, with an empty `DOCKER_CONFIG`, so no credential is used):
+- The token endpoint still answers 403 for tn-mainnet, tn-testnet, tn-dev, telcoin-network and a made-up name.
+- `imagetools inspect ghcr.io/orhun/git-cliff/git-cliff:2.10.1 --format '{{println .Manifest.Digest}}'` exits 0 and prints only `sha256:6ba0d1fc...` (the digest `etc/release.sh` pins), which is what `login_digest` parses.
+- A missing tag gives rc 1 `ERROR: ...: not found`.
+- tn-mainnet gives rc 1 `failed to authorize: ... 403 Forbidden`.
+- The authenticated answer for a private or never-pushed package was not exercised: that would need the maintainer's login.
+
+### New at 57b8ec90a: no ERROR, no WARN; NOTEs
+
+- **N14.** `$(cat)` in bash drops a NUL byte ("ignored null byte"), so `<IMAGE>@sha256:<hex>` followed by a NUL passes `check_digest_package` (t2 `file-*-nul-byte-accepted`). Every reader sees the same well-formed reference: release.sh, and the operator block's `$(cat IMAGE_DIGEST)`. SHA256SUMS hashes the bytes and build never writes such a file, so nothing is gained by it. A strict byte check would close it; this is optional.
+- **N15. A private package with `RELEASE_REBUILD=1` builds into a dead end.** When the login sees the tag, the run's last error line says `set RELEASE_REBUILD=1`. Following it rebuilds and pushes into the still-private package, and the run then stops at exit 2 (tx1 `*-private-rebuild`), whose message asks for another `RELEASE_REBUILD=1` run: two full builds. The guide's row has the right order (make the package public, then rebuild if needed). Exiting 2 before the build when the login sees the tag would save both, because that run cannot finish anyway.
+- **N16.** `login_digest` reads any failed inspect as "the login does not see the tag". With a DNS failure and `RELEASE_FIRST_PUSH=<package>`, build goes on and pushes (tx1 `*-fp-login-error-pushes`); without the variable it exits 2 as it should. Reaching the push needs two things together: an operator who sets `RELEASE_FIRST_PUSH` on a package that already holds the tag, and a transient inspect failure. A login that cannot read a package cannot push to it either. So the PR guarantee "build never overwrites a tag that the registry holds without `RELEASE_REBUILD=1`, a private package included" holds whenever the inspect answers. To close it, either exit 3 on inspect failures other than not-found/denied, or qualify the guarantee.
+- **N17.** An inspect that prints anything after the digest exits 1 (tx1 `*-login-d-then-warning`). That is fail-closed; the real buildx printed only the digest.
+- **N18.** The refusals print the repository part, and a line without `@`, as the file holds them. Only the digest is sanitised, so a CR in the repository part reaches the log as is. Cosmetic.
+
+### Verdict at 57b8ec90a
+
+W1, W2, W3 and N3 are fixed and covered by the extended harness (451/451). The first-push path can no longer be answered by `RELEASE_YES`. It needs the exact package name, never bypasses the `RELEASE_REBUILD` rule when the login can see the tag, and still gates the push behind the version and feature check. It still stops with exit 2 before anything reaches the draft. Docs and the PR body match the code. **The branch is ready for the draft PR.** The remaining items are NOTEs. N15 and N16 are one-line hardening options for the implementer or the orchestrator to take or leave, and N16 may instead be answered by qualifying one PR-body guarantee.
+
+---
+
+## Harness (first round, at 0ba57016d; extended at 57b8ec90a as above)
 
 Everything is in this directory. Each script has a shebang and passes `bash -n`, host shellcheck
 0.11 and `koalaman/shellcheck:v0.9.0` with `-x --severity=error`. Rerun everything with
@@ -25,7 +128,7 @@ Everything is in this directory. Each script has a shebang and passes `bash -n`,
   `tx2_draft.sh` (draft fail-closed), `tx3_ghcr_probe.sh` (anonymous ghcr reads, only with
   `V8_NETWORK=1`).
 
-Result of `bash run_all.sh`:
+Result of `bash run_all.sh` in the first round, at 0ba57016d:
 
 ```text
 t1_matrix: 37 passed, 0 failed
@@ -43,7 +146,7 @@ SKIP tx3_ghcr_probe (ran once with V8_NETWORK=1, output under N9)
 
 Of 301 assertions, 295 pass. All 6 failures are finding W1.
 
-## Findings
+## Findings (first round, at 0ba57016d)
 
 ### ERROR
 
@@ -194,7 +297,7 @@ to answer no.** `etc/release.sh`, `cmd_build`, `registry_digest ... first-push`.
 - **N13.** 848a47b5f only rewords the refusal from 930afd05d (implementer open issue 1). The
   first-push change is in 930afd05d, and that commit's message describes it.
 
-## Matrix (check 1, `./etc/release.sh parse TAG`; IMAGE from `init_env`, default environment)
+## Matrix (check 1; same output at 0ba57016d and 57b8ec90a; `./etc/release.sh parse TAG`; IMAGE from `init_env`, default environment)
 
 | tag | rc | CHANNEL | PACKAGE | IMAGE | ALIAS | PRERELEASE | FEATURES |
 |---|---|---|---|---|---|---|---|
@@ -208,7 +311,7 @@ to answer no.** `etc/release.sh`, `cmd_build`, `registry_digest ... first-push`.
 | `v01.0.0` | 2 | refused, same message | | | | | |
 | extra: `v0.1.0-rc0`, `v0.1.0-rc1-adiri`, `v0.1.0-testnet`, `"v0.1.0 "`, `v0.1.0<LF>x`, `v0.1`, `""` | 2 | refused, same message | | | | | |
 
-## Results by check
+## Results by check (first round, at 0ba57016d)
 
 | check | script | result | key actual output |
 |---|---|---|---|
@@ -224,7 +327,7 @@ to answer no.** `etc/release.sh`, `cmd_build`, `registry_digest ... first-push`.
 | X2 draft | tx2_draft.sh | 16/22 | another package, no `@`, empty, two lines: exit 1 before render or edit, with `::error::`; a malformed digest in the right package: exit 0, digest dropped (W1) |
 | X3 premise | tx3_ghcr_probe.sh | ran once | N9 |
 
-## Verdict
+## Verdict (first round, at 0ba57016d)
 
 The branch does what the UPS spec asks. The package is a pure function of the tag. Every stage
 that reads or writes IMAGE_DIGEST refuses another package, and does so before any pull,

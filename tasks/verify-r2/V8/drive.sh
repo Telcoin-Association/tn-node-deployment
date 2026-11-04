@@ -34,12 +34,17 @@ finish() {
 trap finish EXIT
 
 # The IMAGE_DIGEST content: IDG with @SELF@ replaced by IMAGE and @D@ by a valid digest;
-# printf %b turns \n into a second line. Default: the right package and a valid digest.
+# printf %b turns \n into a second line and \r, \0 into those bytes. Default: the right
+# package and a valid digest, then a newline (IDG_RAW=1: no final newline).
 write_idg() {
     local idg=${IDG-@SELF@@@D@}
     idg=${idg//@SELF@/$IMAGE}
     idg=${idg//@D@/$FAKE_D}
-    printf '%b\n' "$idg" >"$1"
+    if [ "${IDG_RAW:-}" = 1 ]; then
+        printf '%b' "$idg" >"$1"
+    else
+        printf '%b\n' "$idg" >"$1"
+    fi
 }
 
 # A release directory: IMAGE_DIGEST, an empty tarball, and SHA256SUMS listing IMAGE_DIGEST as
@@ -253,7 +258,30 @@ case "$scenario" in
         docker() {
             rec "docker $*"
             case "$1" in
-                buildx) if [ "$2" = inspect ]; then printf 'Name: default\nDriver: docker\n'; fi ;;
+                buildx)
+                    case "$2" in
+                        inspect) printf 'Name: default\nDriver: docker\n' ;;
+                        imagetools)
+                            # login_digest: what the docker login sees for $4 (IMAGE:TAG).
+                            # LOGIN: D (the digest), none (not found), error (a network
+                            # failure), nodigest, d-then-warning, or a literal answer.
+                            case "${LOGIN:-none}" in
+                                D) printf '%s\n' "$FAKE_D" ;;
+                                none)
+                                    printf 'ERROR: %s: not found\n' "$4" >&2
+                                    return 1
+                                    ;;
+                                error)
+                                    printf 'ERROR: failed to do request: dial tcp: lookup ghcr.io: no such host\n' >&2
+                                    return 1
+                                    ;;
+                                nodigest) printf 'Name: %s\n' "$4" ;;
+                                d-then-warning) printf '%s\nWARNING: attestation manifest not found\n' "$FAKE_D" ;;
+                                *) printf '%s\n' "$LOGIN" ;;
+                            esac
+                            ;;
+                    esac
+                    ;;
                 image)
                     case "$*" in
                         *Entrypoint*) printf '%s\n' 'null ["telcoin","node"]' ;;

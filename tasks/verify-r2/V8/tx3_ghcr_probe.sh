@@ -31,3 +31,22 @@ probe() {
     probe orhun/git-cliff/git-cliff 2.10.1
     probe orhun/git-cliff/git-cliff v0-no-such-tag
 } | tee "$OUT/tx3-probe.txt"
+
+# What login_digest parses: docker buildx imagetools inspect --format '{{println .Manifest.Digest}}'
+# with stderr merged, as login_digest runs it. An empty DOCKER_CONFIG keeps every credential out:
+# these are anonymous reads, the login itself is not exercised.
+anon=$SCRATCH/docker-anon
+mkdir -p "$anon"
+printf '{}\n' >"$anon/config.json"
+inspect() {
+    local rc=0 out
+    out=$(DOCKER_CONFIG=$anon docker buildx imagetools inspect "$1" --format '{{println .Manifest.Digest}}' 2>&1) || rc=$?
+    printf '%-52s rc=%s out=[%s]\n' "$1" "$rc" "$(printf '%s' "$out" | tr '\n' '|')"
+}
+if docker buildx version >/dev/null 2>&1; then
+    {
+        inspect ghcr.io/orhun/git-cliff/git-cliff:2.10.1
+        inspect ghcr.io/orhun/git-cliff/git-cliff:v0-no-such-tag
+        inspect ghcr.io/telcoin-association/tn-mainnet:v0.1.0
+    } | tee "$OUT/tx3-inspect.txt"
+fi
