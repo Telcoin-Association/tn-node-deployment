@@ -63,6 +63,202 @@ readonly SIGNER_NAMESPACE="tn-node-scripts"
 readonly TAG_RE='^scripts-v[0-9]+\.[0-9]+\.[0-9]+$'
 readonly SIGNERS_HEREDOC="TN_ALLOWED_SIGNERS"
 
+# =============================================================================
+# RELEASE SIGNATURES
+# =============================================================================
+# The same text in update-scripts.sh, install.sh and tools/release-scripts.sh,
+# from the banner above to the end-of-block line below
+# (tools/tests/release_scripts_test.sh checks that the copies match). Each of
+# them runs where lib/ may not exist yet, so none of them sources lib/common.sh.
+#
+# MANIFEST.asc holds detached OpenPGP signatures over MANIFEST, one armored
+# block per signer. A release is signed when gpgv, given a keyring made from
+# lib/release-keys/*.asc and nothing else (the keys that also sign
+# telcoin-network releases), reports good signatures by at least
+# TN_SIG_THRESHOLD distinct primary keys: the keyring is the allowlist. The
+# status lines are judged the way _tn_gpg_status_verdict in lib/common.sh
+# judges a node release:
+#   - GOODSIG followed by VALIDSIG counts once for the primary key fingerprint
+#     that ends the VALIDSIG line;
+#   - BADSIG (by any key), EXPKEYSIG, REVKEYSIG or EXPSIG refuses;
+#   - ERRSIG with code 9, or NO_PUBKEY, is a signature by a key that is not in
+#     lib/release-keys: it counts for nothing and refuses nothing (a warning
+#     names its key id); any other ERRSIG refuses.
+# TN_SIG_THRESHOLD is the number of distinct release keys that must sign; a
+# 2-of-N signing policy raises it.
+readonly TN_SIG_FILE="MANIFEST.asc"
+readonly TN_SIG_THRESHOLD=1
+readonly TN_KEYS_DIR="lib/release-keys"
+
+# _tn_b64d -- decode the base64 on stdin. An older macOS base64 decodes only
+# with -D.
+_tn_b64d() {
+    if [[ "$(printf 'eA==' | base64 -d 2>/dev/null)" == "x" ]]; then
+        base64 -d
+    else
+        base64 -D
+    fi
+}
+
+# _tn_armor_body N -- the base64 lines of the Nth public key block on stdin:
+# the armor header lines up to the first blank line, the "=" checksum line and
+# the END line left out. rc 1 when there is no Nth block, it has no blank line
+# or no END line, its body is empty, or a body line is not base64.
+_tn_armor_body() {
+    LC_ALL=C awk -v want="$1" '
+        { sub(/\r$/, "") }
+        st == 0 && $0 == "-----BEGIN PGP PUBLIC KEY BLOCK-----" { if (++n == want) st = 1; next }
+        st == 0 { next }
+        st == 1 && /^[ \t]*$/ { st = 2; next }
+        st == 1 && /^-----/ { exit 1 }
+        st == 1 { next }
+        $0 == "-----END PGP PUBLIC KEY BLOCK-----" { ok = 1; exit }
+        /^=/ && length($0) == 5 { next }
+        $0 ~ "^[A-Za-z0-9+/]+=*$" { print; body++; next }
+        { exit 1 }
+        END { if (!ok || !body) exit 1 }
+    '
+}
+
+# tn_dearmor_keys DIR... -- write the binary OpenPGP keys of every DIR/*.asc
+# to stdout, a keyring for gpgv --keyring. A key file holds one or more
+# ASCII-armored public key blocks; only base64 is needed to read them, no gpg.
+# rc 1, with a message on stderr, when no DIR holds a *.asc file, or a file
+# holds no public key block, a malformed one, or one whose body does not
+# decode.
+tn_dearmor_keys() {
+    local dir f n=0 blocks i
+    for dir in "$@"; do
+        for f in "$dir"/*.asc; do
+            [[ -f "$f" && ! -L "$f" ]] || continue
+            blocks="$(grep -c '^-----BEGIN PGP PUBLIC KEY BLOCK-----' "$f" 2>/dev/null)" || blocks=0
+            if [[ "$blocks" -eq 0 ]]; then
+                printf '%s is not an ASCII-armored OpenPGP public key\n' "$f" >&2
+                return 1
+            fi
+            i=1
+            while [[ $i -le $blocks ]]; do
+                if ! _tn_armor_body "$i" < "$f" > /dev/null; then
+                    printf '%s: public key block %s is malformed\n' "$f" "$i" >&2
+                    return 1
+                fi
+                if ! _tn_armor_body "$i" < "$f" | _tn_b64d; then
+                    printf '%s: public key block %s does not decode\n' "$f" "$i" >&2
+                    return 1
+                fi
+                i=$((i + 1))
+            done
+            n=$((n + 1))
+        done
+    done
+    if [[ $n -eq 0 ]]; then
+        printf 'no release key file (*.asc) in %s\n' "$*" >&2
+        return 1
+    fi
+}
+
+# tn_sig_verdict -- judge the gpgv status lines on stdin. rc 0 and the line
+# "GOOD <fpr>..." (the distinct primary fingerprints that made a good
+# signature) when at least TN_SIG_THRESHOLD keys did and nothing refuses.
+# Otherwise rc 1 and one line: "BADSIG <key id>", "EXPKEYSIG <key id>",
+# "REVKEYSIG <key id>", "EXPSIG <key id>", "ERRSIG <key id> <code>", "NOSIG"
+# when no release key made a good signature, or "THRESHOLD <n> <fpr>..." when
+# fewer than TN_SIG_THRESHOLD did. The key ids of signatures by keys that are
+# not release keys go to stderr, each once.
+tn_sig_verdict() {
+    local tag kw rest id x code fpr good=0 n=0 bad="" fprs="" unknown=""
+    while read -r tag kw rest; do
+        [[ "$tag" == "[GNUPG:]" ]] || continue
+        case "$kw" in
+            BADSIG|EXPKEYSIG|REVKEYSIG|EXPSIG)
+                read -r id x <<< "$rest"
+                [[ -n "$bad" ]] || bad="$kw ${id}"
+                ;;
+            NO_PUBKEY|ERRSIG)
+                # ERRSIG <keyid> <pkalgo> <hashalgo> <class> <time> <code> [<fpr>]
+                read -r id x x x x code x <<< "$rest"
+                [[ "$kw" == NO_PUBKEY ]] && code=9
+                if [[ "$code" != 9 || ! "$id" =~ ^[0-9A-F]{16,40}$ ]]; then
+                    [[ -n "$bad" ]] || bad="ERRSIG ${id} ${code}"
+                else
+                    case " ${unknown} " in
+                        *" ${id} "*) ;;
+                        *) unknown="${unknown:+${unknown} }${id}" ;;
+                    esac
+                fi
+                ;;
+            GOODSIG) good=1 ;;
+            VALIDSIG)
+                fpr="${rest##* }"
+                if [[ "$good" -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]]; then
+                    case " ${fprs} " in
+                        *" ${fpr} "*) ;;
+                        *) fprs="${fprs:+${fprs} }${fpr}"; n=$((n + 1)) ;;
+                    esac
+                fi
+                good=0
+                ;;
+        esac
+    done
+    for id in $unknown; do
+        printf 'a signature by key %s, which is not a release key, was not checked\n' "$id" >&2
+    done
+    if [[ -n "$bad" ]]; then
+        printf '%s\n' "$bad"
+        return 1
+    fi
+    if [[ $n -eq 0 ]]; then
+        printf 'NOSIG\n'
+        return 1
+    fi
+    if [[ $n -lt $TN_SIG_THRESHOLD ]]; then
+        printf 'THRESHOLD %s %s\n' "$n" "$fprs"
+        return 1
+    fi
+    printf 'GOOD %s\n' "$fprs"
+}
+
+# tn_verify_manifest KEYRING SIG FILE -- run gpgv over FILE with the detached
+# signatures in SIG and the keys in KEYRING (made by tn_dearmor_keys), in a
+# throwaway GnuPG home, and judge its status lines with tn_sig_verdict: that
+# line on stdout and that rc. gpgv's own messages go to stderr when the
+# verdict refuses. rc 1 and "NOGPGV" when gpgv is not installed.
+tn_verify_manifest() {
+    local kr="$1" home out rc=0
+    if ! command -v gpgv >/dev/null 2>&1; then
+        printf 'NOGPGV\n'
+        return 1
+    fi
+    [[ "$kr" == /* ]] || kr="$(pwd)/${kr}"
+    home="$(mktemp -d "${TMPDIR:-/tmp}/tn-gpgv.XXXXXX")" || { printf 'NOTEMP\n'; return 1; }
+    out="$(GNUPGHOME="$home" gpgv --status-fd 1 --keyring "$kr" "$2" "$3" 2> "${home}/log")" || true
+    printf '%s\n' "$out" | tn_sig_verdict || rc=$?
+    if [[ $rc -ne 0 && -s "${home}/log" ]]; then
+        sed 's/^/    /' "${home}/log" >&2
+    fi
+    rm -rf "$home"
+    return "$rc"
+}
+
+# tn_sig_reason VERDICT -- why a tn_verify_manifest verdict line refuses, as a
+# phrase for a message.
+tn_sig_reason() {
+    local kw a b
+    read -r kw a b <<< "$1"
+    case "$kw" in
+        BADSIG) printf 'the signature by key %s does not match MANIFEST: one of the two was changed\n' "$a" ;;
+        EXPKEYSIG) printf 'it is signed by release key %s, which has expired\n' "$a" ;;
+        REVKEYSIG) printf 'it is signed by release key %s, which has been revoked\n' "$a" ;;
+        EXPSIG) printf 'the signature by key %s has expired\n' "$a" ;;
+        ERRSIG) printf 'gpgv could not check the signature by key %s (error %s)\n' "$a" "$b" ;;
+        NOSIG) printf 'no release key in %s made a good signature\n' "$TN_KEYS_DIR" ;;
+        THRESHOLD) printf 'good signatures by %s release key(s), %s needed\n' "$a" "$TN_SIG_THRESHOLD" ;;
+        NOGPGV) printf 'gpgv is not installed\n' ;;
+        *) printf 'gpgv could not run\n' ;;
+    esac
+}
+# --- end of RELEASE SIGNATURES (the same text in all three scripts) ---
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
