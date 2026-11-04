@@ -296,8 +296,8 @@ for s in update-node edit-config; do
     grep -v '^main "\$@"$' "$TN_TEST_REPO/${s}.sh" > "$T/fl/${s}.sh"
 done
 # FL_IMG is the image the node runs, FL_NEW another digest of the same repository.
-FL_IMG="ghcr.io/telcoin-association/telcoin-network@sha256:$(printf '%064d' 0)"
-FL_NEW="ghcr.io/telcoin-association/telcoin-network@sha256:$(printf '%064d' 1)"
+FL_IMG="ghcr.io/telcoin-association/tn-mainnet@sha256:$(printf '%064d' 0)"
+FL_NEW="ghcr.io/telcoin-association/tn-mainnet@sha256:$(printf '%064d' 1)"
 # shellcheck disable=SC2016
 cat > "$T/fl/drv.sh" <<'DRV'
 # drv.sh DIR SCRIPT NETWORK FN REF LOG -- run by a child bash: source DIR/SCRIPT.sh,
@@ -353,7 +353,7 @@ for pair in update-node:prepare_docker_update update-node:json_prepare_docker \
             edit-config:edit_docker_image edit-config:set_docker_image; do
     s="${pair%%:*}"; fn="${pair#*:}"
     floor "${fn}: mainnet v0.9.0 refused before it is resolved" "$s" mainnet "$fn" v0.9.0 refused
-    floor "${fn}: mainnet <repo>:v0.9.0 refused before it is resolved" "$s" mainnet "$fn" "ghcr.io/telcoin-association/telcoin-network:v0.9.0" refused
+    floor "${fn}: mainnet <repo>:v0.9.0 refused before it is resolved" "$s" mainnet "$fn" "ghcr.io/telcoin-association/tn-mainnet:v0.9.0" refused
     floor "${fn}: mainnet v1.0.0 goes on to be resolved" "$s" mainnet "$fn" v1.0.0 "fetch: tn_docker_resolve_ref v1.0.0"
     floor "${fn}: testnet v0.12.0-adiri refused before it is resolved" "$s" testnet "$fn" v0.12.0-adiri refused
     floor "${fn}: testnet v0.13.0-adiri goes on to be resolved" "$s" testnet "$fn" v0.13.0-adiri "fetch: tn_docker_resolve_ref v0.13.0-adiri"

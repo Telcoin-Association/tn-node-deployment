@@ -83,8 +83,8 @@ H_U="$(hex64 c)"
 H_S="$(hex64 d)"
 H_E="$(hex64 e)"
 H_I="$(hex64 f)"
-IMG_OLD="ghcr.io/telcoin-association/telcoin-network@sha256:$(hex64 1)"
-IMG_NEW="ghcr.io/telcoin-association/telcoin-network@sha256:$(hex64 2)"
+IMG_OLD="ghcr.io/telcoin-association/tn-testnet@sha256:$(hex64 1)"
+IMG_NEW="ghcr.io/telcoin-association/tn-testnet@sha256:$(hex64 2)"
 
 IS_ROOT=0
 [[ "$(id -u)" == 0 ]] && IS_ROOT=1

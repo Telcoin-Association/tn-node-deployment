@@ -4,7 +4,8 @@
 # and its refusal stops the apply before the node is stopped; a duplicated
 # RPC_PORT stops detect_node instead of guessing a port; json_prepare_docker
 # resolves a release tag to its digest, refuses any other image before it pulls,
-# checks the pulled digest, refuses a downgrade, and logs the pull to a fresh
+# checks the pulled digest and then the image's build features (the check itself
+# is stubbed; docker_image_test.sh tests it), refuses a downgrade, and logs the pull to a fresh
 # file; a run that ends with the node stopped says so in its exit trap; --check
 # (json_check) reports an update only for a newer release by release order
 # (release, source and Docker installs; a node on a release candidate is not
@@ -92,6 +93,9 @@ docker() {
     esac
     return 0
 }
+# The build-feature check runs the image with the docker binary itself (under
+# timeout), so it is stubbed here: it records its arguments; FEAT_RC=1 refuses.
+tn_docker_image_network_ok() { printf '%s %s\n' "$1" "$2" > "$T/featcheck"; return "${FEAT_RC:-0}"; }
 prep_case() {  # prep_case NAME RC ARG PULLED
     local rc=0
     rm -f "$T/pulled" "$T/pending"
@@ -114,9 +118,18 @@ prep_case "older release refused as a downgrade" 1 "v0.14.0-adiri" none
 check "downgrade: done event says so" yes "$(grep -q '"phase":"prepare","downgrade":true' "$T/json.log" && echo yes || echo no)"
 HELD="${REPO}@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 rm -f "$T/pending"
+rm -f "$T/featcheck"
 prep_case "digest mismatch after the pull refused" 1 v0.16.0-adiri "${REPO}@${DIG}"
 check "digest mismatch: no pending state" no "$([[ -e "$T/pending" ]] && echo yes || echo no)"
+check "digest mismatch: the build features are not read" no "$([[ -e "$T/featcheck" ]] && echo yes || echo no)"
 HELD="${REPO}@${DIG}"
+prep_case "build features checked after the pull" 0 v0.16.0-adiri "${REPO}@${DIG}"
+check "build features: checked for the node's network and the pulled image" "testnet ${REPO}@${DIG}" "$(cat "$T/featcheck" 2>/dev/null)"
+FEAT_RC=1
+prep_case "build features refused after the pull" 1 v0.16.0-adiri "${REPO}@${DIG}"
+check "build features refused: no pending state" no "$([[ -e "$T/pending" ]] && echo yes || echo no)"
+check "build features refused: an error event" yes "$(grep -q '"event":"error","msg":"the image .* was not prepared' "$T/json.log" && echo yes || echo no)"
+unset FEAT_RC
 check_lacks "pull log is not a fixed /tmp name" "/tmp/tn-update-build.log" "$(cat "$TN_TEST_REPO/update-node.sh")"
 # update_node_log_dir: an observability host's JSON logs move off the root-owned dir.
 LF="$T/tn-start"
