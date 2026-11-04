@@ -3,10 +3,11 @@
 # install.sh -- Telcoin Network Node Scripts Installer
 #
 # Downloads one signed release of the node scripts (the tag in TN_SCRIPTS_TAG
-# below), checks MANIFEST.sig against the release signers embedded in this file
-# and every file against its MANIFEST hash, and only then puts the verified
-# files in ~/telcoin-node-scripts. On any failure nothing is installed and an
-# existing install is left as it was.
+# below), checks MANIFEST.asc (OpenPGP signatures over MANIFEST) with gpgv
+# against the release keys embedded in this file and every file against its
+# MANIFEST hash, and only then puts the verified files in
+# ~/telcoin-node-scripts. On any failure nothing is installed and an existing
+# install is left as it was.
 #
 # USAGE:
 #   curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
@@ -14,19 +15,17 @@
 #   To overwrite an existing install without the prompt:
 #   curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes
 #
-# Needs curl or wget, tar, and ssh-keygen (OpenSSH 8.2 or later), which stock
-# Ubuntu and macOS provide. All the work happens in main(), which the last line
-# calls, so a download that stops part way runs nothing.
+# Needs curl or wget, tar, base64 and gpgv (Ubuntu/Debian: sudo apt-get install
+# -y gpgv; macOS: brew install gnupg). All the work happens in main(), which
+# the last line calls, so a download that stops part way runs nothing.
 #
-# tools/release-scripts.sh writes TN_SCRIPTS_TAG and the signer block in the
-# release commit; a copy with no tag refuses to run.
+# tools/release-scripts.sh writes TN_SCRIPTS_TAG and the release key block in
+# the release commit; a copy with no tag refuses to run.
 # =============================================================================
 
 set -euo pipefail
 
 readonly TN_SCRIPTS_TAG=""   # written by tools/release-scripts.sh
-readonly TN_SIGNER_PRINCIPAL="release@telcoin.org"
-readonly TN_SIGNER_NAMESPACE="tn-node-scripts"
 readonly TN_ARCHIVE_BASE="https://github.com/Telcoin-Association/tn-node-deployment/archive/refs/tags"
 readonly TN_INSTALLER_URL="https://install.telcoin.network"
 readonly INSTALL_DIR="${HOME}/telcoin-node-scripts"
@@ -236,35 +235,54 @@ tn_sig_reason() {
 }
 # --- end of RELEASE SIGNATURES (the same text in all three scripts) ---
 
-# The keys that may sign a release: an exact copy of lib/allowed_signers at the
-# release tag (tools/tests/install_test.sh checks that the two match).
-tn_allowed_signers() {
-    cat <<'TN_ALLOWED_SIGNERS'
-# lib/allowed_signers -- the keys that may sign a tn-node-deployment script release
-#
-# update-scripts.sh and install.sh install a release only when its MANIFEST.sig
-# verifies against this file:
-#
-#   ssh-keygen -Y verify -f lib/allowed_signers -I release@telcoin.org \
-#       -n tn-node-scripts -s MANIFEST.sig < MANIFEST
-#
-# Format: the ALLOWED SIGNERS section of ssh-keygen(1), one key per line:
-#
-#   release@telcoin.org namespaces="tn-node-scripts" <key type> <base64 public key> <comment>
-#
-# The principal is always release@telcoin.org and the namespace always
-# tn-node-scripts. A release signer uses a hardware-backed key, key type
-# sk-ssh-ed25519@openssh.com; the comment names the signer. Lines starting with
-# # are comments and blank lines are ignored.
-#
-# A host replaces this file only from a release whose MANIFEST verifies against
-# the copy it already has, so adding or removing a signer takes a signature from
-# a key the host already trusts. install.sh carries an identical copy (written
-# by tools/release-scripts.sh); tools/tests/install_test.sh checks the two match.
-#
-# No release key is listed yet. Until a signer's public key line is added below,
-# no manifest verifies and neither the updater nor the installer installs anything.
-TN_ALLOWED_SIGNERS
+# The keys that may sign a release: an exact copy of every lib/release-keys/*.asc
+# at the release tag, one after the other in name order (tools/release-scripts.sh
+# writes them; tools/tests/install_test.sh checks that the two match). They are
+# the trust root of this installer: a release that adds a key must still be
+# signed by these.
+tn_release_keys() {
+    cat <<'TN_RELEASE_KEYS'
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+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
+UCSTfWt1Wcur2Ao+qSBhYqGAepAAtTzFdAy96Q==
+=duaR
+-----END PGP PUBLIC KEY BLOCK-----
+TN_RELEASE_KEYS
 }
 
 print_ok()    { echo -e "  ${GREEN}[OK]${RESET}  $*"; }
@@ -296,7 +314,7 @@ path_ok() {
         */./*|*/../*|*//*) return 1 ;;
     esac
     case "$p" in
-        MANIFEST|MANIFEST.sig) return 1 ;;
+        MANIFEST|MANIFEST.asc) return 1 ;;
     esac
     return 0
 }
@@ -364,14 +382,15 @@ check_dependencies() {
     fi
     print_ok "downloader available (${DOWNLOADER})"
     command -v tar >/dev/null 2>&1 || fail "Need tar to unpack the release. Ubuntu/Debian: sudo apt-get install -y tar"
-    # The release signature is checked with ssh-keygen -Y verify. Without it
-    # nothing can be verified, so the installer stops rather than skip the check.
-    command -v ssh-keygen >/dev/null 2>&1 \
-        || fail "Need ssh-keygen (OpenSSH) to verify the release signature. Ubuntu/Debian: sudo apt-get install -y openssh-client"
+    # The release signature is checked with gpgv. Without it nothing can be
+    # verified, so the installer stops rather than skip the check.
+    command -v gpgv >/dev/null 2>&1 \
+        || fail "Need gpgv (GnuPG) to verify the release signature. Ubuntu/Debian: sudo apt-get install -y gpgv. macOS: brew install gnupg"
+    command -v base64 >/dev/null 2>&1 || fail "Need base64 to read the release keys. Ubuntu/Debian: sudo apt-get install -y coreutils"
     if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
         fail "Need sha256sum or shasum to check the release files."
     fi
-    print_ok "tar, ssh-keygen and a SHA-256 tool are available"
+    print_ok "tar, gpgv, base64 and a SHA-256 tool are available"
 }
 
 # confirm_overwrite: when an install exists, ask (or take --yes) before going on.
@@ -401,25 +420,34 @@ confirm_overwrite() {
     fi
 }
 
-# verify_release SRC TREE: check SRC/MANIFEST.sig against the embedded signers
-# and that the manifest names this installer's tag, then copy every listed file
-# whose hash matches into TREE (with MANIFEST and MANIFEST.sig). Returns only
-# when every file verified; any failure exits. date= and expires= are optional
-# (the 2.0.0 release has neither); when present each is a calendar date.
+# verify_release SRC TREE: check SRC/MANIFEST.asc against the embedded release
+# keys and that the manifest names this installer's tag, then copy every
+# listed file whose hash matches into TREE (with MANIFEST and MANIFEST.asc).
+# The release's own lib/release-keys/*.asc are listed files, so they are in
+# TREE only when they match the signed MANIFEST. Returns only when every file
+# verified; any failure exits. date= and expires= are optional (the 2.0.0
+# release has neither); when present each is a calendar date.
 verify_release() {
-    local src="$1" tree="$2" signers="${STAGE}/allowed_signers"
-    local line key val fmt="" rel="" serial="" rdate="" expires="" n=0 hash path have seen
+    local src="$1" tree="$2" kdir="${STAGE}/keys" kr="${STAGE}/release-keys.gpg"
+    local line key val fmt="" rel="" serial="" rdate="" expires="" n=0 hash path have seen verdict err
 
-    tn_allowed_signers > "$signers"
-    grep -qvE '^[[:space:]]*(#|$)' "$signers" \
-        || fail "This installer lists no release signing key, so it cannot verify anything. Use the published installer: ${TN_INSTALLER_URL}"
-    [[ -f "${src}/MANIFEST" && ! -L "${src}/MANIFEST" ]] || fail "The release ${TN_SCRIPTS_TAG} has no MANIFEST."
-    [[ -f "${src}/MANIFEST.sig" && ! -L "${src}/MANIFEST.sig" ]] || fail "The release ${TN_SCRIPTS_TAG} has no MANIFEST.sig."
-    if ! ssh-keygen -Y verify -f "$signers" -I "$TN_SIGNER_PRINCIPAL" -n "$TN_SIGNER_NAMESPACE" \
-        -s "${src}/MANIFEST.sig" < "${src}/MANIFEST" >/dev/null 2>&1; then
-        fail "The release signature does not verify against the Telcoin release keys. Nothing was installed."
+    # One file per armored block: tn_dearmor_keys reads a directory of *.asc.
+    mkdir -p "$kdir"
+    tn_release_keys | LC_ALL=C awk -v d="$kdir" '
+        $0 == "-----BEGIN PGP PUBLIC KEY BLOCK-----" { n++; f = d "/key-" n ".asc" }
+        f { print > f }
+        $0 == "-----END PGP PUBLIC KEY BLOCK-----" && f { close(f); f = "" }
+    '
+    if ! err="$(tn_dearmor_keys "$kdir" 2>&1 > "$kr")"; then
+        print_error "${err}"
+        fail "This installer carries no readable release key, so it cannot verify anything. Use the published installer: ${TN_INSTALLER_URL}"
     fi
-    print_ok "Release signature verified (${TN_SIGNER_PRINCIPAL})"
+    [[ -f "${src}/MANIFEST" && ! -L "${src}/MANIFEST" ]] || fail "The release ${TN_SCRIPTS_TAG} has no MANIFEST."
+    [[ -f "${src}/${TN_SIG_FILE}" && ! -L "${src}/${TN_SIG_FILE}" ]] || fail "The release ${TN_SCRIPTS_TAG} has no ${TN_SIG_FILE}."
+    if ! verdict="$(tn_verify_manifest "$kr" "${src}/${TN_SIG_FILE}" "${src}/MANIFEST")"; then
+        fail "The release signature does not verify against the Telcoin release keys ($(tn_sig_reason "$verdict")). Nothing was installed."
+    fi
+    print_ok "Release signature verified (release key ${verdict#GOOD })"
 
     if grep -q $'\r' "${src}/MANIFEST"; then fail "MANIFEST is malformed (CR line endings)."; fi
     seen="${STAGE}/seen"
@@ -475,9 +503,9 @@ verify_release() {
     fi
     [[ $n -gt 0 ]] || fail "MANIFEST lists no files."
     grep -qx 'p:update-scripts.sh' "$seen" || fail "MANIFEST does not list update-scripts.sh."
-    grep -qx 'p:lib/allowed_signers' "$seen" || fail "MANIFEST does not list lib/allowed_signers."
+    grep -q "^p:${TN_KEYS_DIR}/[^/]*\.asc\$" "$seen" || fail "MANIFEST does not list a release key (${TN_KEYS_DIR}/*.asc)."
     cp "${src}/MANIFEST" "${tree}/MANIFEST"
-    cp "${src}/MANIFEST.sig" "${tree}/MANIFEST.sig"
+    cp "${src}/${TN_SIG_FILE}" "${tree}/${TN_SIG_FILE}"
     find "$tree" -type f -name '*.sh' -exec chmod +x {} +
     print_ok "All ${n} files match the signed MANIFEST (serial ${serial})"
     warn_expired "$rel" "$expires"
