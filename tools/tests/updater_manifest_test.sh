@@ -8,11 +8,11 @@
 #
 # A fixture "remote" directory stands in for raw.githubusercontent.com: a curl
 # shim on PATH maps each URL to a file under it (rc 22 when the file is absent)
-# and logs the URL. Releases are signed with a throwaway ed25519 key made with
-# ssh-keygen -N '' in the temp dir. Where ssh-keygen is absent (the bash:3.2
-# image) a fake ssh-keygen with the same -Y sign / -Y verify interface stands
-# in, so the updater's bash 3.2 path still runs; the real-signature case is then
-# reported as SKIP.
+# and logs the URL. Releases are signed with throwaway OpenPGP keys made with
+# gpg in a temp GNUPGHOME (tools/tests/signing.sh). Where GnuPG is absent (the
+# bash:3.2 and ubuntu:24.04 images) a fake gpg and gpgv with the same
+# interfaces and status lines stand in, so the updater's status parser still
+# runs; the real-signature check is then reported as SKIP.
 #
 # Every refusal must leave the install tree byte-identical: the test compares
 # a listing of every path plus the hash of every file before and after.
@@ -80,12 +80,15 @@ exit 1
 EOF
 chmod +x "$BIN/curl" "$BIN/sudo"
 
-# --- signing: real ssh-keygen, else a fake with the same interface ------------
+# --- signing: real gpg, else a fake with the same interface -------------------
 # shellcheck source=tools/tests/signing.sh
 . "$TN_TEST_DIR/signing.sh"
 export PATH="$BIN:$PATH"
-KEY1_LINE="$(newkey key1)"
-newkey key2 >/dev/null   # a valid key the signer list does not name
+FPR1="$(newkey key1)"
+newkey key2 >/dev/null   # a valid key that is not a release key
+FPR3="$(newkey key3)"
+newkey kexp --expired >/dev/null
+newkey krev --revoked >/dev/null
 
 # --- release fixtures ----------------------------------------------------------
 
@@ -94,12 +97,10 @@ newkey key2 >/dev/null   # a valid key the signer list does not name
 SRC="$T/src"
 
 base_tree() {   # base_tree DIR
-    mkdir -p "$1/lib" "$1/ui"
+    mkdir -p "$1/lib/release-keys" "$1/ui"
     cp "$REPO/update-scripts.sh" "$1/update-scripts.sh"
-    {
-        printf '# test signers\n'
-        printf '%s\n' "$KEY1_LINE"
-    } > "$1/lib/allowed_signers"
+    cp "$T/key1.asc" "$1/lib/release-keys/key1.asc"
+    printf 'release keys\n' > "$1/lib/release-keys/README"
     printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION="1.0.0"\n' > "$1/setup-node.sh"
     printf '#!/usr/bin/env bash\nreadonly COMMON_VERSION="1.0.0"\n' > "$1/lib/common.sh"
     printf 'UI_VERSION = "1.0.0"\n' > "$1/ui/server.py"
@@ -111,15 +112,17 @@ write_manifest() {
     local d="$1" p
     {
         printf 'format=1\nrelease=%s\nserial=%s\nmin_updater=%s\n' "$2" "$3" "$4"
-        (cd "$d" && find . -type f ! -name MANIFEST ! -name 'MANIFEST.sig' ! -name '*.sha256' | sed 's|^\./||' | LC_ALL=C sort) \
+        (cd "$d" && find . -type f ! -name MANIFEST ! -name 'MANIFEST.asc' ! -name '*.sha256' | sed 's|^\./||' | LC_ALL=C sort) \
             | while IFS= read -r p; do
                 printf 'sha256  %s  %s\n' "$(_h "$d/$p")" "$p"
             done
     } > "$d/MANIFEST"
 }
 
-sign() {   # sign DIR KEYNAME
-    sign_file "$1/MANIFEST" "$2"
+sign() {   # sign DIR KEYNAME...
+    local d="$1"
+    shift
+    sign_file "$d/MANIFEST" "$@"
 }
 
 sidecars() {   # sidecars DIR -- a .sha256 beside every listed file
@@ -188,10 +191,10 @@ rm -f "$R2/ui/dropped.txt"
 write_manifest "$R2" scripts-v1.1.0 101 1.0.0; sign "$R2" key1; sidecars "$R2"
 rm -f "$R2/lib/new.env.sha256"   # a file without a sidecar: the manifest is authoritative
 
-if [[ $REAL_SSH -eq 1 ]]; then
-    check "signer: real ssh-keygen in use" "1" "$REAL_SSH"
+if [[ $REAL_GPG -eq 1 ]]; then
+    check "signer: real gpg and gpgv in use" "1" "$REAL_GPG"
 else
-    skip "real ssh-keygen signatures" "ssh-keygen absent: a fake signer stands in"
+    skip "real OpenPGP signatures" "gpg absent: a fake gpg and gpgv stand in"
 fi
 
 # --- good: R1 -> R2 ------------------------------------------------------------
@@ -203,7 +206,8 @@ check "good: setup-node.sh is the R2 copy" "$(_h "$R2/setup-node.sh")" "$(_h "$I
 check "good: new file installed" "NEW=1" "$(cat "$INST/lib/new.env" 2>/dev/null)"
 check "good: dropped file removed" "absent" "$([[ -e "$INST/ui/dropped.txt" ]] && echo present || echo absent)"
 check "good: MANIFEST record is R2" "$(_h "$R2/MANIFEST")" "$(_h "$INST/MANIFEST")"
-check "good: MANIFEST.sig record is R2" "$(_h "$R2/MANIFEST.sig")" "$(_h "$INST/MANIFEST.sig")"
+check "good: MANIFEST.asc record is R2" "$(_h "$R2/MANIFEST.asc")" "$(_h "$INST/MANIFEST.asc")"
+check_has "good: names the release key" "  [OK]  Release manifest signed by release key ${FPR1}" "$(plain "$OUT")"
 check "good: no staging dir left" "" "$(cd "$INST" && find . -name '.tn-update.*')"
 check "good: setup-node.sh executable" "yes" "$([[ -x "$INST/setup-node.sh" ]] && echo yes || echo no)"
 check "good: sudo never run" "" "$(cat "$T/sudo.log" 2>/dev/null)"
@@ -230,7 +234,14 @@ W="$SRC/wrong"; cp -R "$R2" "$W"; sign "$W" key2
 publish "$W" scripts-v1.1.0
 install_release "$R1"
 refused "wrong signer"
-check_has "wrong signer: says why" "  [ERROR] The release manifest is not signed by a Telcoin release key; nothing was changed." "$(plain "$OUT")"
+check_has "wrong signer: says why" "  [ERROR] The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed." "$(plain "$OUT")"
+
+# --- no MANIFEST.asc published -----------------------------------------------------
+NS="$SRC/nosig"; cp -R "$R2" "$NS"; rm -f "$NS/MANIFEST.asc"
+publish "$NS" scripts-v1.1.0
+install_release "$R1"
+refused "no signature"
+says "no signature" "Release scripts-v1.1.0 has no MANIFEST.asc; nothing was changed."
 
 # --- tampered MANIFEST (signed, then one hash changed) -------------------------------
 X="$SRC/tampered"; cp -R "$R2" "$X"
@@ -240,7 +251,7 @@ publish "$X" scripts-v1.1.0
 install_release "$R1"
 printf 'local edit\n' >> "$INST/setup-node.sh"
 refused "tampered manifest"
-says "tampered manifest" "not signed by a Telcoin release key"
+says "tampered manifest" "not signed by a Telcoin release key (the signature by key ${FPR1:24} does not match MANIFEST: one of the two was changed)"
 
 # --- tampered file whose forged sidecar matches it ------------------------------------
 F="$SRC/forged"; cp -R "$R2" "$F"
@@ -308,13 +319,55 @@ refused "path outside the tree"
 says "path outside the tree" "bad path: ../escape.sh"
 check "path outside the tree: nothing written beside the tree" "absent" "$([[ -e "$T/escape.sh" ]] && echo present || echo absent)"
 
-# --- manifest without lib/allowed_signers ------------------------------------------------------
-N="$SRC/nosigners"; cp -R "$R2" "$N"
-grep -v '  lib/allowed_signers$' "$R2/MANIFEST" > "$N/MANIFEST"; sign "$N" key1
+# --- manifest without a release key --------------------------------------------------------------
+N="$SRC/nokeys"; cp -R "$R2" "$N"
+grep -v '  lib/release-keys/key1\.asc$' "$R2/MANIFEST" > "$N/MANIFEST"; sign "$N" key1
 publish "$N" scripts-v1.1.0
 install_release "$R1"
-refused "signer list not listed"
-says "signer list not listed" "lib/allowed_signers not listed"
+refused "release key not listed"
+says "release key not listed" "The release manifest is malformed (no release key (lib/release-keys/*.asc) listed)"
+
+# --- the release keys: expired, revoked, two signatures, threshold 2 ------------------------------
+# K1 ships four keys: key1, key3, kexp (expired) and krev (revoked). Each
+# release below is signed differently and published over a K1 install.
+K1="$SRC/k1"; cp -R "$R1" "$K1"
+cp "$T/key3.asc" "$T/kexp.asc" "$T/krev.asc" "$K1/lib/release-keys/"
+write_manifest "$K1" scripts-v1.0.0 100 1.0.0; sign "$K1" key1; sidecars "$K1"
+K2="$SRC/k2"; cp -R "$K1" "$K2"
+printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION="1.1.0"\n' > "$K2/setup-node.sh"
+write_manifest "$K2" scripts-v1.1.0 101 1.0.0; sidecars "$K2"
+publish_signed() {   # publish_signed KEYNAME... -- K2 signed by these keys, served
+    sign "$K2" "$@"
+    publish "$K2" scripts-v1.1.0
+    install_release "$K1"
+}
+publish_signed kexp
+refused "expired release key"
+says "expired release key" "(it is signed by release key $(fpr_of kexp | cut -c25-40), which has expired)"
+publish_signed key1 kexp
+refused "expired release key beside a good one"
+says "expired release key beside a good one" "which has expired"
+publish_signed krev
+refused "revoked release key"
+says "revoked release key" "(it is signed by release key $(fpr_of krev | cut -c25-40), which has been revoked)"
+publish_signed key1 key3
+run_updater y
+check_rc "two release keys: exits 0" 0 "$RC"
+check_has "two release keys: both counted, in signature order" "  [OK]  Release manifest signed by release key ${FPR1} ${FPR3}" "$(plain "$OUT")"
+# Threshold 2: the updater of K1 and of the release, with TN_SIG_THRESHOLD=2.
+sed 's/^readonly TN_SIG_THRESHOLD=1$/readonly TN_SIG_THRESHOLD=2/' "$REPO/update-scripts.sh" > "$T/us2"
+cp "$T/us2" "$K1/update-scripts.sh"; write_manifest "$K1" scripts-v1.0.0 100 1.0.0; sign "$K1" key1 key3; sidecars "$K1"
+cp "$T/us2" "$K2/update-scripts.sh"; write_manifest "$K2" scripts-v1.1.0 101 1.0.0; sidecars "$K2"
+publish_signed key1
+refused "threshold 2, one signature"
+says "threshold 2, one signature" "(good signatures by 1 release key(s), 2 needed)"
+publish_signed key1 key1
+refused "threshold 2, one key twice"
+says "threshold 2, one key twice" "(good signatures by 1 release key(s), 2 needed)"
+publish_signed key1 key3
+run_updater y
+check_rc "threshold 2, two keys: exits 0" 0 "$RC"
+check "threshold 2, two keys: installed" "$(_h "$K2/setup-node.sh")" "$(_h "$INST/setup-node.sh")"
 
 # --- self-update: the release ships a different updater ------------------------------------
 # The release copy appends a line to $MARK each time it runs.
@@ -371,36 +424,70 @@ install_release "$R1"
 refused "self-update below min_updater"
 says "self-update below min_updater" "needs update-scripts.sh 99.0.0 or newer"
 
-# --- first signed release on an old tree: signer list through its sidecar ------------------
-install_release "$R1"
-rm -f "$INST/MANIFEST" "$INST/MANIFEST.sig" "$INST/lib/allowed_signers"
+# --- first signed release on a bare host: release keys through their sidecars -----------------
+# bare -- INST as R1 without the record and without any release key.
+bare() {
+    install_release "$R1"
+    rm -f "$INST/MANIFEST" "$INST/MANIFEST.asc" "$INST"/lib/release-keys/*.asc
+}
+bare
 publish "$R2" scripts-v1.1.0
 run_updater y
 check_rc "bootstrap: exits 0" 0 "$RC"
-check "bootstrap: signer list installed" "$(_h "$R2/lib/allowed_signers")" "$(_h "$INST/lib/allowed_signers" 2>/dev/null)"
+says "bootstrap" "First signed release on this host: fetching the release keys through their published checksums (one time only)."
+check "bootstrap: release key installed" "$(_h "$R2/lib/release-keys/key1.asc")" "$(_h "$INST/lib/release-keys/key1.asc" 2>/dev/null)"
 check "bootstrap: release recorded" "$(_h "$R2/MANIFEST")" "$(_h "$INST/MANIFEST" 2>/dev/null)"
+check "bootstrap: no staging dir left" "" "$(cd "$INST" && find . -name '.tn-update.*')"
 
-install_release "$R1"
-rm -f "$INST/MANIFEST" "$INST/MANIFEST.sig" "$INST/lib/allowed_signers"
+bare
 G="$SRC/bootbad"; cp -R "$R2" "$G"
-printf '%s  lib/allowed_signers\n' "$(_h "$R1/setup-node.sh")" > "$G/lib/allowed_signers.sha256"
+printf '%s  lib/release-keys/key1.asc\n' "$(_h "$R1/setup-node.sh")" > "$G/lib/release-keys/key1.asc.sha256"
 publish "$G" scripts-v1.1.0
-refused "bootstrap: signer sidecar mismatch"
-says "bootstrap: signer sidecar mismatch" "does not match its published checksum"
+refused "bootstrap: key sidecar mismatch"
+says "bootstrap: key sidecar mismatch" "lib/release-keys/key1.asc of release scripts-v1.1.0 does not match its published checksum; nothing was changed."
 
-install_release "$R1"
-rm -f "$INST/MANIFEST" "$INST/MANIFEST.sig" "$INST/lib/allowed_signers"
+bare
 H="$SRC/bootmalformed"; cp -R "$R2" "$H"
-printf 'nothash  lib/allowed_signers\n' > "$H/lib/allowed_signers.sha256"
+printf 'nothash  lib/release-keys/key1.asc\n' > "$H/lib/release-keys/key1.asc.sha256"
 publish "$H" scripts-v1.1.0
-refused "bootstrap: malformed signer sidecar"
-says "bootstrap: malformed signer sidecar" "The published checksum for lib/allowed_signers in release scripts-v1.1.0 is malformed"
+refused "bootstrap: malformed key sidecar"
+says "bootstrap: malformed key sidecar" "The published checksum for lib/release-keys/key1.asc in release scripts-v1.1.0 is malformed"
+
+bare
+NSC="$SRC/bootnoside"; cp -R "$R2" "$NSC"
+rm -f "$NSC/lib/release-keys/key1.asc.sha256"
+publish "$NSC" scripts-v1.1.0
+refused "bootstrap: no key sidecar"
+says "bootstrap: no key sidecar" "No checksum is published for lib/release-keys/key1.asc in release scripts-v1.1.0"
+
+# The key file and its sidecar agree and the manifest verifies with that key,
+# but the manifest lists another hash for it.
+bare
+HM="$SRC/boothash"; cp -R "$R2" "$HM"
+awk -v h="$(_h "$R1/setup-node.sh")" '$3 == "lib/release-keys/key1.asc" { $0 = "sha256  " h "  lib/release-keys/key1.asc" } { print }' \
+    "$R2/MANIFEST" > "$HM/MANIFEST"
+sign "$HM" key1
+publish "$HM" scripts-v1.1.0
+refused "bootstrap: key hash not the listed one"
+says "bootstrap: key hash not the listed one" "The release key lib/release-keys/key1.asc fetched by checksum is not the one release scripts-v1.1.0 lists; nothing was changed."
+
+# A release signed by a key other than the one it ships, on a bare host.
+bare
+BF="$SRC/bootforeign"; cp -R "$R2" "$BF"; sign "$BF" key2
+publish "$BF" scripts-v1.1.0
+refused "bootstrap: signed by another key"
+says "bootstrap: signed by another key" "no release key in lib/release-keys made a good signature"
 
 install_release "$R1"
-rm -f "$INST/lib/allowed_signers"
+rm -f "$INST"/lib/release-keys/*.asc
 publish "$R2" scripts-v1.1.0
-refused "signer list deleted after a signed install"
-says "signer list deleted after a signed install" "lib/allowed_signers is missing"
+refused "release keys deleted after a signed install"
+says "release keys deleted after a signed install" "lib/release-keys holds no release key (*.asc), so no release can be verified; nothing was changed."
+
+install_release "$R1"
+printf 'not a key\n' > "$INST/lib/release-keys/key1.asc"
+refused "installed key file that is not a key"
+says "installed key file that is not a key" "cannot be read, so no release can be verified; nothing was changed."
 
 # --- REL: release date and expiry (date=, expires=) and --check ------------------------------
 # A date shim on PATH answers `date -u +%Y-%m-%d` with TODAY when it is set, so
@@ -533,7 +620,7 @@ check_rc "check, no expiry: exits 0" 0 "$RC"
 check_has "check, no expiry: says so" "  [OK]  Up to date with scripts-v1.1.0; it carries no expiry date." "$(plain "$OUT")"
 
 # --check: nothing installed, no RELEASE, a network failure, a tampered record.
-rm -f "$INST/MANIFEST" "$INST/MANIFEST.sig"
+rm -f "$INST/MANIFEST" "$INST/MANIFEST.asc"
 TODAY=2026-11-03 run_check
 check_rc "check, nothing installed: exits 2" 2 "$RC"
 check_has "check, nothing installed: says so" "  [WARN] No signed release is installed in $INST (no MANIFEST record)." "$(plain "$OUT")"
@@ -621,19 +708,18 @@ check "self-update, expired: one warning" "1" "$(plain "$OUT" | grep -c 'expired
 check "self-update, expired: the release copy warns, after the files are verified" "yes" \
     "$(plain "$OUT" | awk '/Running the scripts-v1.7.0 copy/ {r = NR} /expired on 2027-02-01/ {w = NR} END {print (r && w && r < w) ? "yes" : "no"}')"
 
-# A 2.0.0 updater (main 1187ddb, before this change) installs a release whose
-# manifest carries date= and expires=: it ignores header keys it does not know,
-# then hands over to the release copy of the updater.
+# The 2.0.0 updater on main (1187ddb) checked an SSH signature file that an
+# OpenPGP-signed release does not carry: it refuses the release and changes
+# nothing, and the host takes the release with the installer.
 if command -v git >/dev/null 2>&1 && git -C "$REPO" cat-file -e 1187ddb:update-scripts.sh 2>/dev/null; then
     publish "$R3" scripts-v1.5.0
     install_release "$R2"
+    rm -f "$INST/MANIFEST" "$INST/MANIFEST.asc"
     git -C "$REPO" show 1187ddb:update-scripts.sh > "$INST/update-scripts.sh"
-    TODAY=2026-11-03 run_updater y
-    check_rc "2.0.0 updater, manifest with expires=: exits 0" 0 "$RC"
-    check "2.0.0 updater: release installed" "$(_h "$R3/MANIFEST")" "$(_h "$INST/MANIFEST")"
-    check "2.0.0 updater: replaced by the release copy" "$(_h "$R3/update-scripts.sh")" "$(_h "$INST/update-scripts.sh")"
+    TODAY=2026-11-03 refused "2.0.0 updater, OpenPGP-signed release"
+    says "2.0.0 updater, OpenPGP-signed release" "Release scripts-v1.5.0 has no MANIFEST"
 else
-    skip "2.0.0 updater and expires=" "git or commit 1187ddb not available"
+    skip "2.0.0 updater and an OpenPGP-signed release" "git or commit 1187ddb not available"
 fi
 TODAY=""
 
