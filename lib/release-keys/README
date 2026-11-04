@@ -44,6 +44,20 @@ refuses the build on every network. A tag that cannot be checked (no key here,
 gpg missing, an unsigned tag, or a signer whose key is not here) refuses the
 build on mainnet and builds with a warning on testnet.
 
+Script releases
+---------------
+
+The same keys sign the script releases of this repository. A release's
+MANIFEST.asc holds detached OpenPGP signatures over its MANIFEST, and
+update-scripts.sh and install.sh (whose embedded copy of these files is its
+trust root) run gpgv --status-fd 1 against a keyring made from these files
+alone. The release is accepted when at least TN_SIG_THRESHOLD of these keys
+(one today) made a good signature and no signature is bad, expired or revoked;
+the same status rules as above apply. These files are listed in the signed
+MANIFEST like any script, so a script release that adds or removes a key must
+be signed by a key the host already has. tools/release-scripts.sh prepares and
+checks a release; tools/cut-release.sh runs the release steps.
+
 Format
 ------
 

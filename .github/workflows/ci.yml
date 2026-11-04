@@ -1,7 +1,8 @@
 name: CI
 
 # Operators install and update these scripts from signed releases (a
-# scripts-vX.Y.Z tag whose MANIFEST.sig verifies against lib/allowed_signers).
+# scripts-vX.Y.Z tag whose MANIFEST.asc holds good OpenPGP signatures over
+# MANIFEST by the release keys in lib/release-keys).
 # These gates keep main releasable and check every release change.
 #
 # Every action is pinned to a full commit SHA with its tag in a comment
@@ -149,10 +150,11 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      # A release change (MANIFEST, MANIFEST.sig or RELEASE touched) and a
+      # A release change (MANIFEST, MANIFEST.asc or RELEASE touched) and a
       # scripts-v* tag must carry a MANIFEST that matches the tree and a
-      # MANIFEST.sig that verifies against lib/allowed_signers. Other changes
-      # leave the previous release's MANIFEST in place, so it is not compared.
+      # MANIFEST.asc that verifies with gpgv (preinstalled on the runner)
+      # against lib/release-keys. Other changes leave the previous release's
+      # MANIFEST in place, so it is not compared.
       - name: Check the release manifest
         env:
           EVENT: ${{ github.event_name }}
@@ -176,7 +178,7 @@ jobs:
             echo "::notice::No base commit to compare with; MANIFEST check skipped."
             exit 0
           fi
-          if git diff --name-only "$base" HEAD | grep -qxE 'MANIFEST|MANIFEST\.sig|RELEASE'; then
+          if git diff --name-only "$base" HEAD | grep -qxE 'MANIFEST|MANIFEST\.asc|RELEASE'; then
             bash tools/release-scripts.sh --check --require-sig
           else
             echo "Not a release change: MANIFEST is not compared with the tree."
@@ -221,8 +223,9 @@ jobs:
         with:
           persist-credentials: false
       # Updaters older than the signed-manifest flow still verify each file
-      # against its .sha256 sidecar, and the first signed release delivers
-      # lib/allowed_signers through one, so the sidecars stay fresh. Regenerate
+      # against its .sha256 sidecar, and a host's first signed release fetches
+      # the release keys (lib/release-keys/*.asc) through theirs, so the
+      # sidecars stay fresh. Regenerate
       # them and fail if anything changed. `git status --porcelain` (not
       # `git diff`) also catches new untracked sidecars.
       - name: Regenerate sidecars and verify they are committed & fresh

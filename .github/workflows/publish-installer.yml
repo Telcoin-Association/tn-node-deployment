@@ -2,9 +2,9 @@ name: Publish installer
 
 # Publishes install.sh to GitHub Pages (custom domain: install.telcoin.network)
 # from a signed script release only: a scripts-vX.Y.Z tag on a commit of main
-# whose MANIFEST matches the tree and whose MANIFEST.sig verifies against
-# lib/allowed_signers. The served installer names that tag and carries the
-# release signer list, and verifies the release itself before installing.
+# whose MANIFEST matches the tree and whose MANIFEST.asc verifies with gpgv
+# against lib/release-keys. The served installer names that tag and carries the
+# release keys, and verifies the release itself before installing.
 # The site root returns the installer body verbatim, so
 # `curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash` works.
 on:
