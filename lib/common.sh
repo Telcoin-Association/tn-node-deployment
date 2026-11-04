@@ -50,6 +50,28 @@ readonly DEVNET_CHAIN_NAME="devnet"
 readonly DEVNET_RPC_URL="${DEVNET_RPC_URL:-https://rpc.devnet.telcoin.network}"
 readonly DEVNET_EXPLORER="${DEVNET_EXPLORER:-}"
 
+# Epoch length in seconds per network, for when a node's own epoch timing cannot
+# be read (the blind wait of tn_wait_restart_window). Mainnet's equals
+# MAINNET_EPOCH_DURATION_SECS in telcoin-network; testnet runs 6-hour epochs
+# today. Devnet's is not known: no devnet genesis is kept in this repository.
+readonly MAINNET_EPOCH_DURATION="21600"
+readonly TESTNET_EPOCH_DURATION="21600"
+readonly DEVNET_EPOCH_DURATION=""
+
+# tn_network_epoch_duration NETWORK -- the epoch length in seconds this release
+# knows for NETWORK (mainnet, testnet or devnet), or nothing when it knows none
+# (devnet, any other name, or no name). Always rc 0.
+tn_network_epoch_duration() {
+    local dur=""
+    case "${1:-}" in
+        mainnet) dur="$MAINNET_EPOCH_DURATION" ;;
+        testnet) dur="$TESTNET_EPOCH_DURATION" ;;
+        devnet)  dur="$DEVNET_EPOCH_DURATION" ;;
+    esac
+    [[ -z "$dur" ]] || printf '%s\n' "$dur"
+    return 0
+}
+
 readonly DEFAULT_P2P_PORT="49590"
 readonly DEFAULT_WORKER_PORT="49594"
 readonly DEFAULT_RPC_PORT="8545"
