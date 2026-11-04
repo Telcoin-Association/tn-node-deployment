@@ -5,7 +5,9 @@
 # check_update_lock (free, held with the holder's PID, a dead holder, the mkdir
 # fallback, an unsafe lock directory, the lock file's mode),
 # check_ownership_layout (old layout warns, or fails on mainnet; a recorded
-# layout 2 is checked path by path) and detect_data_dir's duplicated DATA_DIR.
+# layout 2 is checked path by path, the private alerts files included),
+# check_alerts (alerts_status's issue count, the skip without lib/alerts.sh)
+# and detect_data_dir's duplicated DATA_DIR.
 #
 #   bash tools/tests/check_node_hardening_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/check_node_hardening_test.sh
@@ -207,6 +209,44 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# check_alerts: alerts_status (lib/alerts.sh) is a stand-in here
+# -----------------------------------------------------------------------------
+check "check_alerts cut out of check-node.sh and in the hardening loop" "yes yes" \
+    "$(declare -F check_alerts >/dev/null && echo yes || echo no) $(sed -n '/^for _hc in check_bls_cleartext/,/; do$/p' "$CN" | grep -q 'check_alerts; do$' && echo yes || echo no)"
+alerts_status() { printf 'Private alerts: on (stand-in)\n'; return "${STUB_ALERTS_RC:-0}"; }
+TIMER="${TN_ROOT_PREFIX}/etc/systemd/system/telcoin-heartbeat.timer"
+meta "NETWORK=testnet" "ENABLE_ALERTS=true"
+STUB_ALERTS_RC=0
+run check_alerts
+check "alerts: no issue, alerts_status's lines shown" "yes 0" "$(has "$OUT" "Private alerts: on (stand-in)") $ADDED"
+STUB_ALERTS_RC=3
+run check_alerts
+check "alerts: alerts_status's issue count goes into HEALTH_ISSUES" "yes 3" "$(has "$OUT" "Private alerts: on (stand-in)") $ADDED"
+unset STUB_ALERTS_RC
+unset -f alerts_status
+CN_SKIPPED_CHECKS=""
+meta "NETWORK=testnet"
+run check_alerts
+check "alerts: no lib/alerts.sh and no alerts here: silent, not listed as skipped" "|0|" "${OUT}|${ADDED}|${CN_SKIPPED_CHECKS}"
+meta "NETWORK=testnet" "ENABLE_ALERTS=false"
+run check_alerts
+check "alerts: no lib/alerts.sh, ENABLE_ALERTS=false: not listed as skipped" "|0|" "${OUT}|${ADDED}|${CN_SKIPPED_CHECKS}"
+for v in true pending; do
+    CN_SKIPPED_CHECKS=""
+    meta "NETWORK=testnet" "ENABLE_ALERTS=${v}"
+    run check_alerts
+    check "alerts: no lib/alerts.sh, ENABLE_ALERTS=${v}: listed as skipped" "|0| check_alerts" "${OUT}|${ADDED}|${CN_SKIPPED_CHECKS}"
+done
+CN_SKIPPED_CHECKS=""
+meta "NETWORK=testnet"
+mkdir -p "${TIMER%/*}"
+: > "$TIMER"
+run check_alerts
+check "alerts: no lib/alerts.sh, the timer unit is there: listed as skipped" "|0| check_alerts" "${OUT}|${ADDED}|${CN_SKIPPED_CHECKS}"
+rm -f "$TIMER"
+CN_SKIPPED_CHECKS=""
+
+# -----------------------------------------------------------------------------
 # check_ownership_layout: layout 2, path by path (root only)
 # -----------------------------------------------------------------------------
 if [[ $IS_ROOT == 1 ]]; then
@@ -250,6 +290,39 @@ if [[ -n "$RB" && -n "$SVC_GROUP" ]] && chmod 0700 "$RB" && tn_root_dir_ok "$RB"
     run check_ownership_layout
     check "layout 2: a missing start script fails" "yes 1" "$(has "$OUT" "tn-start: missing") $ADDED"
     install -o root -g root -m 0755 /dev/null "$F/usr/local/libexec/telcoin/tn-start"
+    # The private alerts files: each checked only when it exists, against its row.
+    install -o root -g root -m 0755 /dev/null "$F/usr/local/libexec/telcoin/tn-heartbeat"
+    install -d -o root -g root -m 0755 "$F/etc/telcoin/alerts"
+    install -o root -g root -m 0600 /dev/null "$F/etc/telcoin/alerts/targets"
+    install -o root -g root -m 0644 /dev/null "$F/etc/telcoin/alerts/alerts.env"
+    run check_ownership_layout
+    check "layout 2: the private alerts files hold" "yes 0" "$(has "$OUT" "Ownership layout 2: install") $ADDED"
+    chown nobody "$F/usr/local/libexec/telcoin/tn-heartbeat"
+    chmod 0700 "$F/etc/telcoin/alerts"
+    chmod 0644 "$F/etc/telcoin/alerts/targets"
+    chmod 0600 "$F/etc/telcoin/alerts/alerts.env"
+    run check_ownership_layout
+    check "layout 2: drifted private alerts files fail" "yes 1" "$(has "$OUT" "differ from it") $ADDED"
+    check "layout 2: a service-account heartbeat runner listed" yes \
+        "$(has "$OUT" "${F}/usr/local/libexec/telcoin/tn-heartbeat: nobody:root 755, expected root:root 755")"
+    check "layout 2: a loose alerts dir listed" yes \
+        "$(has "$OUT" "${F}/etc/telcoin/alerts: root:root 700, expected root:root 755")"
+    check "layout 2: a readable targets file listed" yes \
+        "$(has "$OUT" "${F}/etc/telcoin/alerts/targets: root:root 644, expected root:root 600")"
+    check "layout 2: alerts.env with the wrong mode listed" yes \
+        "$(has "$OUT" "${F}/etc/telcoin/alerts/alerts.env: root:root 600, expected root:root 644")"
+    chown root "$F/usr/local/libexec/telcoin/tn-heartbeat"
+    chmod 0755 "$F/etc/telcoin/alerts"
+    chmod 0644 "$F/etc/telcoin/alerts/alerts.env"
+    rm -f "$F/etc/telcoin/alerts/targets"
+    ln -s /etc/hostname "$F/etc/telcoin/alerts/targets"
+    run check_ownership_layout
+    check "layout 2: a symlinked targets file fails" "yes 1" \
+        "$(has "$OUT" "${F}/etc/telcoin/alerts/targets: a symlink") $ADDED"
+    rm -f "$F/etc/telcoin/alerts/targets"
+    run check_ownership_layout
+    check "layout 2: no targets file, the rest of the alerts files hold" "yes 0" "$(has "$OUT" "Ownership layout 2: install") $ADDED"
+    rm -rf "${F:?}/etc/telcoin/alerts" "${F:?}/usr/local/libexec/telcoin/tn-heartbeat"
     if _tn_log_group_ensure 2>/dev/null; then
         install -d -o root -g root -m 0755 "$F/var/log"
         install -d -o root -g telcoin-log -m 0750 "$F/var/log/telcoin"
