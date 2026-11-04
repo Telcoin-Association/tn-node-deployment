@@ -198,8 +198,10 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 - The P2P new-flow limit (`inet tn_p2p`) keeps at most 65535 sources per address family. A
   spoofed flood of distinct sources can fill a set; new sources then go on to ufw unlimited, as
   before the limit. Accepted; closes if the limit gains a fallback for a full set.
-- The optional committee allowlist of #41, a reader of the Association's signed address manifest
-  that feeds `--p2p-from`, is deferred: it waits for the manifest's format.
+- The optional committee allowlist of #41, a reader of the Association's signed address manifest,
+  is deferred. A format proposal (`p2p/<network>.manifest` plus a detached OpenPGP signature,
+  serial and expiry, listed sources unmetered, unlisted sources kept on the metered path) is in
+  the issue (comment of 2026-11-04); the reader follows once the format is agreed.
 - firewall-setup's health-port edits in "Manage node ports" (`apply_kuma_rule`, `KUMA_EXTRA_SRC`)
   run after the P2P part and outside the update lock, behind a prompt. Closes if they take the
   lock too.
