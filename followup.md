@@ -26,17 +26,13 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `lib/allowed_signers.sha256` cannot bootstrap hosts still on update-scripts 1.1.72 or older).
   From then on, a release that changes `lib/allowed_signers` must be signed by a key that is in
   both the old and the new list.
-- Two repository settings are user steps. The `github-pages` environment's deployment policy must
-  allow `scripts-v*` tags, or `publish-installer.yml` cannot publish `install.sh`. And
-  `.github/CODEOWNERS` names a single owner on every line, including `/RELEASE` and
-  `/MANIFEST*`. Closes when the policy allows the tags and a second owner is added.
 - The main-branch ruleset of #30 is a user step. Its JSON in the issue requires eight contexts:
   "fixture tests (macOS bash 3.2)" and "Ubuntu 24.04 VM assertions" are not in it, although
-  `tools/tests/ci_pins_test.sh` guards both names. `require_code_owner_review` is false until a
-  second owner is listed in `.github/CODEOWNERS`, and with one maintainer,
-  `required_approving_review_count` 1 plus `require_last_push_approval` means the maintainer's own
-  pull requests need an approval from another account with write access. Closes when the ruleset
-  is on with the contexts it should require and the second owner is named.
+  `tools/tests/ci_pins_test.sh` guards both names. `.github/CODEOWNERS` now lists three owners
+  on every line, so `require_code_owner_review` can be true, and `required_approving_review_count`
+  1 plus `require_last_push_approval` means a pull request needs an approval from an owner other
+  than its last pusher. Closes when the ruleset is on with the contexts it should require. (The
+  `github-pages` deployment policy for `scripts-v*` tags was set on 2026-11-04.)
 - Release signatures are 1-of-1: `lib/allowed_signers` holds one signer, and the updater accepts
   a manifest signed by any listed key. 2-of-N signatures (#40) are deferred until a second signer
   key exists.

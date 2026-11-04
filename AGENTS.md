@@ -608,11 +608,11 @@ Pull requests to main need the required checks above green. Once the main-branch
 issue #30 is on, a pull request also needs one approving review (a later push dismisses an
 approval, and the last push must be approved by someone other than its pusher) and signed
 commits: sign every commit (`git commit -S`, or `commit.gpgsign=true` with an SSH or GPG
-signing key registered on GitHub). It will need that review from a code owner
-(`.github/CODEOWNERS`) once a second owner is listed there and the ruleset's
-`require_code_owner_review` is set to true. Do not rename a CI job and do not make a
-required job skippable (`if:`) or non-blocking (`continue-on-error`, `|| true`):
-`ci_pins_test.sh` rejects both.
+signing key registered on GitHub). `.github/CODEOWNERS` lists three owners on every line,
+so the ruleset can require that review from a code owner (`require_code_owner_review`);
+`ci_pins_test.sh` requires at least two owners on every owned path. Do not rename a CI job
+and do not make a required job skippable (`if:`) or non-blocking (`continue-on-error`,
+`|| true`): `ci_pins_test.sh` rejects both.
 
 ## Fixture tests (`tools/tests/`)
 

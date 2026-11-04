@@ -56,6 +56,9 @@ check "publish-installer: checks the signed manifest" "1" \
     "$(grep -c 'bash tools/release-scripts.sh --check --tag "$TAG"' "$GH/workflows/publish-installer.yml")"
 check "publish-installer: pages write only on deploy" "1" "$(grep -c 'pages: write' "$GH/workflows/publish-installer.yml")"
 check "CODEOWNERS exists with a default owner" "1" "$(grep -cE '^\*[[:space:]]+@' "$GH/CODEOWNERS" 2>/dev/null)"
+check "CODEOWNERS: every owned path names at least two owners" "0" \
+    "$(grep -E '^[*/]' "$GH/CODEOWNERS" 2>/dev/null | grep -cvE '@[A-Za-z0-9-]+[[:space:]]+@[A-Za-z0-9-]+')"
+check "CODEOWNERS: no owner placeholder is left" "0" "$(grep -ci 'TODO' "$GH/CODEOWNERS" 2>/dev/null)"
 check "dependabot covers github-actions and pip" "2" "$(grep -cE 'package-ecosystem: (github-actions|pip)$' "$GH/dependabot.yml" 2>/dev/null)"
 check "ci.yml keeps the ruleset check names" "" "$(for j in parse-linux parse-macos shellcheck ui-tests checksums; do
     grep -q "^  ${j}:$" "$GH/workflows/ci.yml" || echo "$j"
