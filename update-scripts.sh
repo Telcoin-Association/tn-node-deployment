@@ -3,9 +3,10 @@
 # update-scripts.sh -- Telcoin Network Script Updater
 #
 # Brings the node scripts to the latest signed release: reads the release tag
-# from RELEASE on main, verifies that tag's MANIFEST.sig against
-# lib/allowed_signers, and installs every file whose hash differs from the
-# MANIFEST, all together or not at all.
+# from RELEASE on main, verifies that tag's MANIFEST.asc (OpenPGP signatures
+# over MANIFEST) with gpgv against the release keys in lib/release-keys, and
+# installs every file whose hash differs from the MANIFEST, all together or
+# not at all.
 #
 # USAGE:
 #   bash ~/telcoin-node-scripts/update-scripts.sh           # update
@@ -43,8 +44,6 @@ readonly TN_REPO_RAW="https://raw.githubusercontent.com/Telcoin-Association/tn-n
 readonly GITHUB_RAW="${TN_REPO_RAW}/main"
 readonly TN_RELEASE_POINTER_URL="${GITHUB_RAW}/RELEASE"
 readonly TN_SCRIPTS_TAG_RE='^scripts-v[0-9]+\.[0-9]+\.[0-9]+$'
-readonly TN_SIGNER_PRINCIPAL="release@telcoin.org"
-readonly TN_SIGNER_NAMESPACE="tn-node-scripts"
 readonly TN_INSTALLER_URL="https://install.telcoin.network"
 
 # =============================================================================
@@ -287,7 +286,6 @@ declare -a SCRIPTS=(
     "setup-vpn.sh:setup-vpn.sh:SCRIPT_VERSION"
     "setup-observability.sh:setup-observability.sh:SCRIPT_VERSION"
     "ui/server.py:ui/server.py:UI_VERSION"
-    "lib/allowed_signers:lib/allowed_signers:NONE"
     "lib/release-keys/README:lib/release-keys/README:NONE"
     "lib/release-keys/grantkee.asc:lib/release-keys/grantkee.asc:NONE"
 )
@@ -329,12 +327,13 @@ declare -a TESTNET_ADDONS_BUNDLE=(
 # the next `setup-vpn.sh --sync-keys` would then bake an INCOMPLETE maintainer set.
 # When the admin add-peer.sh mirrors a new maintainer key into this repo, add a row here.
 
-# The installed release record: the signed MANIFEST and MANIFEST.sig of the
+# The installed release record: the signed MANIFEST and MANIFEST.asc of the
 # release this tree was last brought to. The install pass writes them last, so
-# they name a release only once every file of it is in place.
+# they name a release only once every file of it is in place. KEYS_DIR holds
+# the release keys that verify the next release.
 readonly INSTALLED_MANIFEST="${SCRIPT_DIR}/MANIFEST"
-readonly INSTALLED_SIG="${SCRIPT_DIR}/MANIFEST.sig"
-readonly SIGNERS_FILE="${SCRIPT_DIR}/lib/allowed_signers"
+readonly INSTALLED_SIG="${SCRIPT_DIR}/${TN_SIG_FILE}"
+readonly KEYS_DIR="${SCRIPT_DIR}/${TN_KEYS_DIR}"
 
 # This run's staging directory, inside SCRIPT_DIR so that installing a verified
 # file is a rename on the same filesystem. The EXIT trap removes it however the
@@ -347,7 +346,7 @@ INSTALLING=0
 # The verified manifest, filled by parse_manifest. Declared at top level so they
 # are globals on macOS /bin/bash 3.2, which has no `declare -g`.
 RELEASE_TAG=""
-BOOT_SIGNERS=""
+BOOT_KEYS=""
 M_RELEASE=""
 M_SERIAL=""
 M_MIN_UPDATER=""
@@ -474,7 +473,7 @@ release_expired() {
 
 # path_ok P -- rc 0 for a relative path made of [A-Za-z0-9._/-] with no empty,
 # "." or ".." component and no leading "-". A manifest naming anything else is
-# refused whole. MANIFEST and MANIFEST.sig are the record, never a listed file.
+# refused whole. MANIFEST and MANIFEST.asc are the record, never a listed file.
 path_ok() {
     local p="$1"
     [[ "$p" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]] || return 1
@@ -482,9 +481,18 @@ path_ok() {
         */./*|*/../*|*//*) return 1 ;;
     esac
     case "$p" in
-        MANIFEST|MANIFEST.sig) return 1 ;;
+        MANIFEST|MANIFEST.asc) return 1 ;;
     esac
     return 0
+}
+
+# have_keys DIR -- rc 0 when DIR holds at least one release key file (*.asc).
+have_keys() {
+    local f
+    for f in "$1"/*.asc; do
+        [[ -f "$f" && ! -L "$f" ]] && return 0
+    done
+    return 1
 }
 
 # tag_url TAG PATH -- the raw URL of PATH at release tag TAG.
@@ -559,51 +567,88 @@ fetch_release_file() {
     fi
 }
 
-# bootstrap_signers TAG -- the first signed release reaching a tree that has
-# neither lib/allowed_signers nor a MANIFEST record fetches the signer list once
-# through its published .sha256, the channel that delivered this updater. From
-# then on a new signer list arrives only in a manifest that verifies against the
-# installed one.
-bootstrap_signers() {
-    local url want rc=0
-    BOOT_SIGNERS="${STAGE}/allowed_signers.bootstrap"
-    url="$(tag_url "$1" lib/allowed_signers)"
-    print_warn "First signed release on this host: fetching the release signer list through its published checksum (one time only)."
-    if ! fetch "$url" "$BOOT_SIGNERS"; then
-        print_error "Could not download lib/allowed_signers of release $1; nothing was changed."
-        return 1
-    fi
-    want="$(fetch_published_sha "$url")" || rc=$?
-    if [[ $rc -eq 3 ]]; then
-        print_error "The published checksum for lib/allowed_signers in release $1 is malformed; nothing was changed."
-        return 1
-    elif [[ $rc -ne 0 ]]; then
-        print_error "No checksum is published for lib/allowed_signers in release $1; nothing was changed."
-        return 1
-    fi
-    if [[ "$want" != "$(_sha256 "$BOOT_SIGNERS")" ]]; then
-        print_error "lib/allowed_signers of release $1 does not match its published checksum; nothing was changed."
+# bootstrap_keys TAG -- the first signed release reaching a tree that has
+# neither a release key (lib/release-keys/*.asc) nor a MANIFEST record takes
+# the release keys once from the release itself: every key file the fetched,
+# not yet verified, MANIFEST lists, each checked against its published .sha256,
+# the channel that delivered this updater. run_update then verifies the
+# manifest with those keys and requires their hashes to be the ones it lists.
+# From then on a new key set arrives only in a manifest that verifies against
+# the installed keys.
+bootstrap_keys() {
+    local tag="$1" a h p url want rc n=0
+    BOOT_KEYS="${STAGE}/bootstrap-keys"
+    mkdir -p "$BOOT_KEYS" || return 1
+    print_warn "First signed release on this host: fetching the release keys through their published checksums (one time only)."
+    while read -r a h p; do
+        [[ "$a" == sha256 && "$p" == "${TN_KEYS_DIR}/"*.asc ]] || continue
+        if ! path_ok "$p" || [[ "${p#"${TN_KEYS_DIR}"/}" == */* ]]; then
+            print_error "The release manifest names a bad key path ${p}; nothing was changed."
+            return 1
+        fi
+        url="$(tag_url "$tag" "$p")"
+        if ! fetch "$url" "${BOOT_KEYS}/${p##*/}"; then
+            print_error "Could not download ${p} of release ${tag}; nothing was changed."
+            return 1
+        fi
+        rc=0
+        want="$(fetch_published_sha "$url")" || rc=$?
+        if [[ $rc -eq 3 ]]; then
+            print_error "The published checksum for ${p} in release ${tag} is malformed; nothing was changed."
+            return 1
+        elif [[ $rc -ne 0 ]]; then
+            print_error "No checksum is published for ${p} in release ${tag}; nothing was changed."
+            return 1
+        fi
+        if [[ "$want" != "$(_sha256 "${BOOT_KEYS}/${p##*/}")" ]]; then
+            print_error "${p} of release ${tag} does not match its published checksum; nothing was changed."
+            return 1
+        fi
+        n=$((n + 1))
+    done < "${STAGE}/MANIFEST"
+    if [[ $n -eq 0 ]]; then
+        print_error "Release ${tag} lists no release key (${TN_KEYS_DIR}/*.asc); nothing was changed."
         return 1
     fi
 }
 
-# verify_manifest MANIFEST SIG SIGNERS [quiet] -- rc 0 when SIG is a good
-# signature over MANIFEST by a key SIGNERS lists for release@telcoin.org and
-# tn-node-scripts. Prints the good-signature line unless the 4th argument is quiet.
+# check_boot_keys -- after the manifest verified with the bootstrap keys:
+# every key file fetched must hash to the line the verified manifest lists.
+check_boot_keys() {
+    local f
+    for f in "${BOOT_KEYS}"/*.asc; do
+        [[ -f "$f" ]] || continue
+        if [[ "$(_sha256 "$f")" != "$(manifest_sha_for "${TN_KEYS_DIR}/${f##*/}")" ]]; then
+            print_error "The release key ${TN_KEYS_DIR}/${f##*/} fetched by checksum is not the one release ${M_RELEASE} lists; nothing was changed."
+            return 1
+        fi
+    done
+}
+
+# verify_manifest MANIFEST SIG KEYDIR [quiet] -- rc 0 when SIG holds good
+# signatures over MANIFEST by at least TN_SIG_THRESHOLD of the release keys in
+# KEYDIR/*.asc (see RELEASE SIGNATURES). Prints the fingerprints that signed
+# unless the 4th argument is quiet.
 verify_manifest() {
-    local out
-    if ! command -v ssh-keygen >/dev/null 2>&1; then
-        print_error "ssh-keygen (OpenSSH) is needed to verify script releases and is not installed; nothing was changed."
-        print_info "  Ubuntu/Debian: sudo apt-get install -y openssh-client"
+    local kr verdict err rc=0
+    if ! command -v gpgv >/dev/null 2>&1; then
+        print_error "gpgv (GnuPG) is needed to verify script releases and is not installed; nothing was changed."
+        print_info "  Ubuntu/Debian: sudo apt-get install -y gpgv     macOS: brew install gnupg"
         return 1
     fi
-    if ! out="$(ssh-keygen -Y verify -f "$3" -I "$TN_SIGNER_PRINCIPAL" -n "$TN_SIGNER_NAMESPACE" \
-        -s "$2" < "$1" 2>&1)"; then
-        print_error "The release manifest is not signed by a Telcoin release key; nothing was changed."
-        printf '%s\n' "$out" | sed 's/^/        /'
+    kr="${STAGE}/release-keys.gpg"
+    if ! err="$(tn_dearmor_keys "$3" 2>&1 > "$kr")"; then
+        print_error "The release keys in $3 cannot be read, so no release can be verified; nothing was changed."
+        printf '%s\n' "$err" | sed 's/^/        /'
         return 1
     fi
-    [[ "${4:-}" == "quiet" ]] || print_ok "$(printf '%s\n' "$out" | head -1)"
+    verdict="$(tn_verify_manifest "$kr" "$2" "$1")" || rc=$?
+    rm -f "$kr"
+    if [[ $rc -ne 0 ]]; then
+        print_error "The release manifest is not signed by a Telcoin release key ($(tn_sig_reason "$verdict")); nothing was changed."
+        return 1
+    fi
+    [[ "${4:-}" == "quiet" ]] || print_ok "Release manifest signed by release key ${verdict#GOOD }"
 }
 
 manifest_bad() {
@@ -664,7 +709,11 @@ parse_manifest() {
     if [[ $n_date -eq 1 ]] && ! ymd_days "$M_DATE" >/dev/null; then manifest_bad "date ${M_DATE}"; return 1; fi
     if [[ $n_exp -eq 1 ]] && ! ymd_days "$M_EXPIRES" >/dev/null; then manifest_bad "expires ${M_EXPIRES}"; return 1; fi
     [[ -n "$(manifest_sha_for update-scripts.sh)" ]] || { manifest_bad "update-scripts.sh not listed"; return 1; }
-    [[ -n "$(manifest_sha_for lib/allowed_signers)" ]] || { manifest_bad "lib/allowed_signers not listed"; return 1; }
+    for ((i = 0; i < ${#M_PATHS[@]}; i++)); do
+        [[ "${M_PATHS[i]}" != "${TN_KEYS_DIR}/"*.asc ]] || return 0
+    done
+    manifest_bad "no release key (${TN_KEYS_DIR}/*.asc) listed"
+    return 1
 }
 
 # manifest_sha_for PATH -- the hash the verified manifest lists for PATH, or "".
@@ -848,7 +897,7 @@ install_pass() {
     for ((i = 0; i < ${#DEL_PATHS[@]}; i++)); do
         rm -f "${SCRIPT_DIR:?}/${DEL_PATHS[i]}"
     done
-    mv -f "${STAGE}/MANIFEST.sig" "$INSTALLED_SIG"
+    mv -f "${STAGE}/${TN_SIG_FILE}" "$INSTALLED_SIG"
     mv -f "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"
     INSTALLING=0
 }
@@ -891,7 +940,7 @@ warn_expired() {
 }
 
 run_update() {
-    local signers choice i ui_changed=false svc
+    local keys choice i ui_changed=false svc
 
     print_info "Checking for a signed script release..."
     print_info "Repository: ${TN_REPO_RAW}"
@@ -914,28 +963,27 @@ run_update() {
     read_release_tag || exit 1
     print_info "Latest release: ${RELEASE_TAG}"
     fetch_release_file "$RELEASE_TAG" MANIFEST || exit 1
-    fetch_release_file "$RELEASE_TAG" MANIFEST.sig || exit 1
+    fetch_release_file "$RELEASE_TAG" "$TN_SIG_FILE" || exit 1
 
-    signers="$SIGNERS_FILE"
-    if [[ ! -f "$signers" ]]; then
+    keys="$KEYS_DIR"
+    if ! have_keys "$keys"; then
         if [[ -f "$INSTALLED_MANIFEST" ]]; then
-            print_error "lib/allowed_signers is missing, so no release can be verified; nothing was changed."
+            print_error "${TN_KEYS_DIR} holds no release key (*.asc), so no release can be verified; nothing was changed."
             reinstall_hint
             exit 1
         fi
-        bootstrap_signers "$RELEASE_TAG" || exit 1
-        signers="$BOOT_SIGNERS"
+        bootstrap_keys "$RELEASE_TAG" || exit 1
+        keys="$BOOT_KEYS"
     fi
 
-    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/MANIFEST.sig" "$signers" || exit 1
+    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/${TN_SIG_FILE}" "$keys" || exit 1
     parse_manifest "${STAGE}/MANIFEST" || exit 1
     if [[ "$M_RELEASE" != "$RELEASE_TAG" ]]; then
         print_error "The manifest is for ${M_RELEASE}, but RELEASE names ${RELEASE_TAG}: refusing; nothing was changed."
         exit 1
     fi
-    if [[ "$signers" == "$BOOT_SIGNERS" && "$(_sha256 "$signers")" != "$(manifest_sha_for lib/allowed_signers)" ]]; then
-        print_error "The signer list fetched by checksum is not the one release ${M_RELEASE} lists; nothing was changed."
-        exit 1
+    if [[ "$keys" == "$BOOT_KEYS" ]]; then
+        check_boot_keys || exit 1
     fi
     check_serial || exit 1
     self_update || exit 1
@@ -948,7 +996,7 @@ run_update() {
 
     if [[ ${#UPD_PATHS[@]} -eq 0 && ${#DEL_PATHS[@]} -eq 0 ]]; then
         if ! cmp -s "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST" 2>/dev/null; then
-            mv -f "${STAGE}/MANIFEST.sig" "$INSTALLED_SIG"
+            mv -f "${STAGE}/${TN_SIG_FILE}" "$INSTALLED_SIG"
             mv -f "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"
             print_info "Every file already matches ${M_RELEASE}; recorded it as the installed release."
         fi
@@ -1017,7 +1065,7 @@ release_line() {
 }
 
 # check_release -- the --check report: the installed release (its record checked
-# against lib/allowed_signers) and whether it has expired, then the newest
+# against the release keys in lib/release-keys) and whether it has expired, then the newest
 # release (RELEASE on main and the signed MANIFEST of the tag it names), whether
 # an update is pending and whether the newest release has expired. Downloads
 # into a temp dir only and changes nothing in the tree. rc 0 when the installed
@@ -1028,13 +1076,19 @@ release_line() {
 # before anything is fetched, so it is printed in every case.
 check_release() {
     local rc=0 installed=none i_rel="" i_ser="" i_exp="" ago
+    # The temp dir comes first: verifying the installed record needs it too.
+    STAGE="$(mktemp -d "${TMPDIR:-/tmp}/tn-update-check.XXXXXX" 2>/dev/null \
+        || mktemp -d /tmp/tn-update-check.XXXXXX)" || {
+        print_error "Could not create a temp directory for the check."
+        return 2
+    }
     if [[ ! -f "$INSTALLED_MANIFEST" ]]; then
         print_warn "No signed release is installed in ${SCRIPT_DIR} (no MANIFEST record)."
-    elif [[ ! -f "$SIGNERS_FILE" || ! -f "$INSTALLED_SIG" ]]; then
-        print_error "The installed release record cannot be verified: ${SIGNERS_FILE} or ${INSTALLED_SIG} is missing."
+    elif ! have_keys "$KEYS_DIR" || [[ ! -f "$INSTALLED_SIG" ]]; then
+        print_error "The installed release record cannot be verified: ${KEYS_DIR} holds no release key (*.asc) or ${INSTALLED_SIG} is missing."
         reinstall_hint
         installed=bad
-    elif ! verify_manifest "$INSTALLED_MANIFEST" "$INSTALLED_SIG" "$SIGNERS_FILE" quiet \
+    elif ! verify_manifest "$INSTALLED_MANIFEST" "$INSTALLED_SIG" "$KEYS_DIR" quiet \
         || ! parse_manifest "$INSTALLED_MANIFEST"; then
         print_info "That is the installed release record ${INSTALLED_MANIFEST}."
         reinstall_hint
@@ -1051,19 +1105,14 @@ check_release() {
         fi
     fi
 
-    STAGE="$(mktemp -d "${TMPDIR:-/tmp}/tn-update-check.XXXXXX" 2>/dev/null \
-        || mktemp -d /tmp/tn-update-check.XXXXXX)" || {
-        print_error "Could not create a temp directory for the check."
-        return 2
-    }
     read_release_tag || return 2
     fetch_release_file "$RELEASE_TAG" MANIFEST || return 2
-    fetch_release_file "$RELEASE_TAG" MANIFEST.sig || return 2
-    if [[ ! -f "$SIGNERS_FILE" ]]; then
-        print_error "Release ${RELEASE_TAG} cannot be verified: ${SIGNERS_FILE} is missing."
+    fetch_release_file "$RELEASE_TAG" "$TN_SIG_FILE" || return 2
+    if ! have_keys "$KEYS_DIR"; then
+        print_error "Release ${RELEASE_TAG} cannot be verified: ${KEYS_DIR} holds no release key (*.asc)."
         return 2
     fi
-    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/MANIFEST.sig" "$SIGNERS_FILE" quiet || return 2
+    verify_manifest "${STAGE}/MANIFEST" "${STAGE}/${TN_SIG_FILE}" "$KEYS_DIR" quiet || return 2
     parse_manifest "${STAGE}/MANIFEST" || return 2
     if [[ "$M_RELEASE" != "$RELEASE_TAG" ]]; then
         print_error "The manifest is for ${M_RELEASE}, but RELEASE names ${RELEASE_TAG}: the updater refuses it."
@@ -1124,9 +1173,14 @@ Usage: bash update-scripts.sh [--check | -h | --help]
 
 Reads the latest release tag from
   ${TN_RELEASE_POINTER_URL}
-downloads that release's MANIFEST and MANIFEST.sig, and checks the signature
-against lib/allowed_signers in
+downloads that release's MANIFEST and MANIFEST.asc, and checks the OpenPGP
+signatures with gpgv against the release keys (lib/release-keys/*.asc) in
   ${SCRIPT_DIR}
+At least ${TN_SIG_THRESHOLD} release key(s) must have signed; a bad, expired or
+revoked signature refuses the release. A host with no release key and no
+installed release takes the keys once from the release, each checked against
+its published .sha256. Needs gpgv (Ubuntu/Debian: apt-get install gpgv; macOS:
+brew install gnupg).
 It refuses a release older than the installed one (the serial in MANIFEST), and
 a release whose min_updater is newer than both this updater and the release's
 own copy of it.
