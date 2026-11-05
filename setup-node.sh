@@ -102,9 +102,35 @@
 #                            the previous export while the next one is written. Turns on
 # network-gated: release named in the testnet tag form; require_node_flag asks the release on any network
 #                            --enable-state-export as well (v0.15.0-adiri and later).
+#   --admission open|grace|closed  The node's connection admission mode, written into the
+#                            data dir's network-config (admission.mode Open, Grace or
+#                            Closed) with trusted_nodes from --trusted-nodes and
+#                            committee_peers from the --bootstrap-peers map (each left
+#                            out when its flag is). Closed admits only the previous,
+#                            current and next committees, the trusted nodes and the
+#                            bootstrap peers; Grace enforces nothing beyond Open and
+#                            differs only in the status the node reports. Needs a node
+#                            release 0.17.0 or later: setup stops on an older one. Without
+#                            --admission, and with no earlier choice recorded (see
+#                            below), setup leaves the admission settings of
+#                            network-config alone on every network, mainnet validators
+#                            included. Mainnet validators are expected to run
+#                            --admission closed --trusted-nodes <hubs>; on mainnet,
+#                            closed without a trusted nodes map gets a warning.
+#   --trusted-nodes <file>   The trusted hubs, given with --admission or over a recorded
+#                            mode (see below): a YAML map keyed by BLS public key, each
+#                            entry the node's primary {network_address, network_key}
+#                            and its workers by id ({<id>: {network_address,
+#                            network_key}}). At most 64 KiB, and readable by other users
+#                            (chmod 644). Setup installs it, world-readable, as
+#                            /etc/telcoin/trusted-nodes.yaml and writes it into
+#                            network-config under trusted_nodes.
 # In a --json finalize run, a flag left out is read back from what keygen recorded in
 # .node-meta: BOOTSTRAP_PEERS_FILE for --bootstrap-peers, STATE_EXPORT for the two state
-# export flags.
+# export flags, ADMISSION_MODE for --admission and TRUSTED_NODES_FILE for
+# --trusted-nodes. An interactive run over an earlier install reads the last two back
+# the same way, and with an admission mode BOOTSTRAP_PEERS_FILE too (committee_peers
+# comes from that map), so a re-run keeps the admission settings it does not name.
 #
 # BLS KEY PASSPHRASE (key generation). Interactive setup asks for it twice. A --json
 # keygen takes it from standard input (--passphrase-stdin) or, as before, from the
@@ -181,7 +207,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
         tn_committee_down_guard tn_service_user_ok tn_service_user_can_run tn_host_baseline_install \
         tn_docker_release_tag_for tn_release_stage tn_source_build tn_install_logrotate \
         tn_os_floor_check tn_docker_network_ok tn_release_tag_grammar tn_mainnet_enabled \
-        tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok >/dev/null; then
+        tn_docker_pull_repo_ok tn_docker_pull_repos_for tn_docker_image_network_ok \
+        tn_network_config_render tn_node_supports_admission >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this setup-node.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -231,6 +258,10 @@ BOOTSTRAP_PEERS_SRC=""      # --bootstrap-peers FILE: the peers map to install (
 STATE_EXPORT_ENABLE=false   # --enable-state-export
 STATE_EXPORT_KEEP=""        # --state-export-keep N
 STATE_EXPORT=""             # off | unlimited | N (keep the newest N); '' = no flag given
+# The node admission settings of network-config (--admission, --trusted-nodes), checked
+# by init_node_extra_flags and written by setup_admission_config.
+ADMISSION_MODE=""           # open | grace | closed; '' = no flag given
+TRUSTED_NODES_SRC=""        # --trusted-nodes FILE: the trusted hubs map to install ('' = none)
 NODE_EXTRA_FLAGS=""
 NODE_EXTRA_FLAGS_SPEC=""    # the runner spec prepare_node_extra_flags last checked
 NODE_FLAG_WARNINGS=()       # notes on the node flags, printed by node_flag_warnings
@@ -1442,10 +1473,34 @@ init_install_flags() {
 # release knows each flag, and whether it accepts the peers map, is asked later by
 # prepare_node_extra_flags, once the binary or image is known. Warnings wait in
 # NODE_FLAG_WARNINGS: --json prints them here, interactive setup after the welcome screen.
+# --admission takes open, grace or closed (or the node's own Open, Grace, Closed), kept
+# in lower case; --trusted-nodes names a file as --bootstrap-peers does and comes with
+# --admission, except where the run can take a recorded mode (admission_read_back): a
+# --json finalize takes keygen's, an interactive run an earlier install's, and the pair
+# is checked after that read-back. A --release-tag known here is held to
+# MIN_ADMISSION_VERSION in this preflight, before a build or a download;
+# prepare_node_extra_flags asks again about the release the run installs.
 init_node_extra_flags() {
-    local msg=""
+    local msg="" rc=0
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
         msg="$(peers_file_ok "$BOOTSTRAP_PEERS_SRC")" || setup_fail "--bootstrap-peers: ${msg}."
+    fi
+    case "$ADMISSION_MODE" in
+        "") ;;
+        open|Open) ADMISSION_MODE=open ;;
+        grace|Grace) ADMISSION_MODE=grace ;;
+        closed|Closed) ADMISSION_MODE=closed ;;
+        *) setup_fail "--admission takes open, grace or closed, not ${ADMISSION_MODE}." ;;
+    esac
+    if [[ -n "$ADMISSION_MODE" && -n "$RELEASE_TAG" ]]; then
+        tn_node_supports_admission "$RELEASE_TAG" || rc=$?
+        [[ $rc -ne 1 ]] || admission_release_refused "$RELEASE_TAG"
+    fi
+    if [[ -n "$TRUSTED_NODES_SRC" ]]; then
+        msg="$(trusted_nodes_file_ok "$TRUSTED_NODES_SRC")" || setup_fail "--trusted-nodes: ${msg}."
+        if [[ -z "$ADMISSION_MODE" ]] && json_mode && [[ "$JSON_PHASE" != "finalize" ]]; then
+            setup_fail "--trusted-nodes needs --admission open, grace or closed: the trusted nodes go into network-config together with the admission mode."
+        fi
     fi
     if [[ -n "$STATE_EXPORT_KEEP" ]]; then
         if [[ ! "$STATE_EXPORT_KEEP" =~ ^[1-9][0-9]{0,5}$ ]]; then
@@ -1482,7 +1537,22 @@ node_flag_warnings() {
 # on the command line of the node binary, where other local users can see it. Otherwise
 # 1, with the reason on stdout.
 peers_file_ok() {
-    local f="$1" size="" mode=""
+    _setup_map_file_ok "$1" peers "the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it"
+}
+
+# 0 when FILE can hold a trusted nodes map, by the rules of a peers map: the map never
+# reaches a command line, but it does not stay private either (the installed copy is
+# 0644, so the service user can read it), and a list of hubs never comes near 64 KiB.
+# Otherwise 1, with the reason on stdout.
+trusted_nodes_file_ok() {
+    _setup_map_file_ok "$1" "trusted nodes" "the installed copy is world-readable (0644)"
+}
+
+# _setup_map_file_ok FILE KIND WHY -- the checks of peers_file_ok and
+# trusted_nodes_file_ok. KIND names the map in the refusals ("a KIND file", "a KIND
+# map"); WHY ends the refusal of a file that other users cannot read.
+_setup_map_file_ok() {
+    local f="$1" kind="$2" why="$3" size="" mode=""
     if [[ ! -e "$f" ]]; then
         printf '%s does not exist' "$f"
         return 1
@@ -1505,7 +1575,7 @@ peers_file_ok() {
         return 1
     fi
     if (( (8#$mode & 8#044) != 8#044 )); then
-        printf '%s is mode %s: other users cannot read it. Setup accepts only a peers file that others can already read, because the installed copy is world-readable (0644) and the check passes the map on the command line of the node binary, where other users can see it. Run chmod 644 %s first' "$f" "$mode" "$f"
+        printf '%s is mode %s: other users cannot read it. Setup accepts only a %s file that others can already read, because %s. Run chmod 644 %s first' "$f" "$mode" "$kind" "$why" "$f"
         return 1
     fi
     size="$(wc -c < "$f" 2>/dev/null)" || size=""
@@ -1515,7 +1585,7 @@ peers_file_ok() {
         return 1
     fi
     if [[ "$size" -gt 65536 ]]; then
-        printf '%s is %s bytes; a peers map may have at most 65536 (64 KiB)' "$f" "$size"
+        printf '%s is %s bytes; a %s map may have at most 65536 (64 KiB)' "$f" "$size" "$kind"
         return 1
     fi
     return 0
@@ -1526,14 +1596,8 @@ peers_file_ok() {
 # or absent: none) and STATE_EXPORT is off, unlimited or N (absent: off). A recorded value
 # that no longer holds stops the run before anything is written.
 finalize_node_extra_flags() {
-    local meta="${CONFIG_DIR}/.node-meta" v msg=""
-    if [[ -z "$BOOTSTRAP_PEERS_SRC" ]]; then
-        setup_meta_read v BOOTSTRAP_PEERS_FILE "$meta"
-        if [[ -n "$v" ]]; then
-            msg="$(peers_file_ok "$v")" || setup_fail "BOOTSTRAP_PEERS_FILE in ${meta}: ${msg}. Put the file back, or pass --bootstrap-peers FILE."
-            BOOTSTRAP_PEERS_SRC="$v"
-        fi
-    fi
+    local meta="${CONFIG_DIR}/.node-meta" v
+    peers_read_back
     if [[ -z "$STATE_EXPORT" ]]; then
         setup_meta_read v STATE_EXPORT "$meta"
         case "$v" in
@@ -1545,6 +1609,54 @@ finalize_node_extra_flags() {
                 ;;
         esac
         STATE_EXPORT="${v:-off}"
+    fi
+    admission_read_back
+    return 0
+}
+
+# --bootstrap-peers left out: BOOTSTRAP_PEERS_SRC from BOOTSTRAP_PEERS_FILE in .node-meta,
+# the installed peers map (empty or absent: none). A recorded map that no longer holds
+# stops the run before anything is written.
+peers_read_back() {
+    local meta="${CONFIG_DIR}/.node-meta" v msg=""
+    [[ -z "$BOOTSTRAP_PEERS_SRC" ]] || return 0
+    setup_meta_read v BOOTSTRAP_PEERS_FILE "$meta"
+    if [[ -n "$v" ]]; then
+        msg="$(peers_file_ok "$v")" || setup_fail "BOOTSTRAP_PEERS_FILE in ${meta}: ${msg}. Put the file back, or pass --bootstrap-peers FILE."
+        BOOTSTRAP_PEERS_SRC="$v"
+    fi
+    return 0
+}
+
+# The admission flags a run leaves out come from .node-meta: ADMISSION_MODE (open,
+# grace or closed; empty or absent: none) and TRUSTED_NODES_FILE (the installed trusted
+# nodes map; empty or absent: none). A --json finalize reads what keygen recorded
+# (finalize_node_extra_flags); an interactive run reads what an earlier install wrote
+# into network-config (prepare_node_extra_flags), so a re-run never drops it without a
+# word. With a mode, the bootstrap peers map is read back too (peers_read_back; a
+# finalize has done so already): committee_peers comes from it, so a re-run that keeps
+# the mode keeps the committee peers it was written with. A recorded value that no
+# longer holds, or a trusted nodes map with no mode, stops the run before anything is
+# written.
+admission_read_back() {
+    local meta="${CONFIG_DIR}/.node-meta" v msg=""
+    if [[ -z "$ADMISSION_MODE" ]]; then
+        setup_meta_read v ADMISSION_MODE "$meta"
+        case "$v" in
+            ""|open|grace|closed) ADMISSION_MODE="$v" ;;
+            *) setup_fail "ADMISSION_MODE=${v} in ${meta} is not open, grace or closed. Fix the line, or pass --admission." ;;
+        esac
+    fi
+    [[ -z "$ADMISSION_MODE" ]] || peers_read_back
+    if [[ -z "$TRUSTED_NODES_SRC" ]]; then
+        setup_meta_read v TRUSTED_NODES_FILE "$meta"
+        if [[ -n "$v" ]]; then
+            msg="$(trusted_nodes_file_ok "$v")" || setup_fail "TRUSTED_NODES_FILE in ${meta}: ${msg}. Put the file back, or pass --trusted-nodes FILE."
+            TRUSTED_NODES_SRC="$v"
+        fi
+    fi
+    if [[ -n "$TRUSTED_NODES_SRC" && -z "$ADMISSION_MODE" ]]; then
+        setup_fail "A trusted nodes map (${TRUSTED_NODES_SRC}) but no admission mode: pass --admission open, grace or closed."
     fi
     return 0
 }
@@ -2312,14 +2424,28 @@ _setup_copied_configs_ok() {
 # as text: the host reads the file at each start, never during setup. Runs from
 # step_create_infrastructure, so keygen stops before it makes keys, and again before the
 # start wrapper is written (a --json finalize is a new process); a second run in one
-# process, for the same release, does nothing.
+# process, for the same release, does nothing. The admission settings go the same way:
+# an interactive run first reads back the ones it was not given (admission_read_back),
+# the release must read them (require_admission_release), the trusted nodes map is
+# installed root-owned 0644 as CONFIG_DIR/trusted-nodes.yaml, and .node-meta records
+# ADMISSION_MODE and TRUSTED_NODES_FILE; setup_admission_config writes them into
+# network-config. Mainnet validators are expected to run --admission closed
+# --trusted-nodes <hubs>, so closed without a trusted nodes map on mainnet warns.
 prepare_node_extra_flags() {
     local spec flags="" peers="${CONFIG_DIR}/bootstrap-peers.yaml" path_re='^/[A-Za-z0-9._/+-]+$' w
+    local trusted="${CONFIG_DIR}/trusted-nodes.yaml"
     spec="$(node_runner_spec)"
     if [[ "$NODE_EXTRA_FLAGS_SPEC" == "$spec" ]]; then
         return 0
     fi
     node_flag_warnings
+    json_mode || admission_read_back
+    if [[ -n "$ADMISSION_MODE" ]]; then
+        require_admission_release
+    fi
+    if [[ "$NETWORK" == "mainnet" && "$ADMISSION_MODE" == "closed" && -z "$TRUSTED_NODES_SRC" ]]; then
+        setup_warn "Admission closed without --trusted-nodes: the node admits only the previous, current and next committees and the bootstrap peers. Mainnet validators are expected to run --admission closed --trusted-nodes <hubs>."
+    fi
     if [[ -n "$BOOTSTRAP_PEERS_SRC" ]]; then
         # The path lands in the wrapper unquoted, inside "$(cat ...)". Only a config
         # directory chosen at the prompt can fail this; the default always passes.
@@ -2361,8 +2487,13 @@ prepare_node_extra_flags() {
         install_bootstrap_peers "$spec" "$BOOTSTRAP_PEERS_SRC" "$peers"
         BOOTSTRAP_PEERS_SRC="$peers"
     fi
+    if [[ -n "$TRUSTED_NODES_SRC" ]]; then
+        install_trusted_nodes "$TRUSTED_NODES_SRC" "$trusted"
+        TRUSTED_NODES_SRC="$trusted"
+    fi
     NODE_EXTRA_FLAGS="$flags"
-    write_node_meta "BOOTSTRAP_PEERS_FILE=${BOOTSTRAP_PEERS_SRC:+${peers}}" "STATE_EXPORT=${STATE_EXPORT:-off}"
+    write_node_meta "BOOTSTRAP_PEERS_FILE=${BOOTSTRAP_PEERS_SRC:+${peers}}" "STATE_EXPORT=${STATE_EXPORT:-off}" \
+        "ADMISSION_MODE=${ADMISSION_MODE}" "TRUSTED_NODES_FILE=${TRUSTED_NODES_SRC:+${trusted}}"
     if [[ -n "$flags" ]]; then
         print_ok "Node flags: ${flags}"
         if json_mode; then
@@ -2469,6 +2600,84 @@ install_bootstrap_peers() {
     return 0
 }
 
+# The release this run installs, as tn_node_supports_admission judges it: RELEASE_TAG
+# when the run knows it; for a Docker install the release that names the image
+# (tn_docker_release_tag_for), else the image itself; otherwise the first line of the
+# version marker beside the binary. Empty when none of them is known.
+node_release_version() {
+    local v=""
+    if [[ -n "${RELEASE_TAG:-}" ]]; then
+        printf '%s\n' "$RELEASE_TAG"
+    elif [[ "${INSTALL_METHOD:-}" == "docker" ]]; then
+        v="$(tn_docker_release_tag_for "$NETWORK" "${DOCKER_IMAGE:-}" 2>/dev/null)" || v=""
+        printf '%s\n' "${v:-${DOCKER_IMAGE:-}}"
+    elif [[ -f "${BINARY_PATH:-}.version" ]]; then
+        head -n 1 "${BINARY_PATH}.version" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# Stop setup: the release VERSION this run installs is older than MIN_ADMISSION_VERSION.
+admission_release_refused() {
+    setup_fail "--admission needs node release ${MIN_ADMISSION_VERSION} or later, and this run installs ${1}, which ignores the admission settings of network-config. Pick a newer release, or leave --admission and --trusted-nodes out."
+}
+
+# Stop setup when the release this run installs is older than MIN_ADMISSION_VERSION
+# (tn_node_supports_admission): it ignores the admission settings of network-config, so
+# the host would look configured while the node admits as it always did. A release that
+# cannot be told (a digest no release names, a binary without a version marker, a build
+# of a branch) warns and goes on: that is not an older release.
+require_admission_release() {
+    local ver rc=0
+    ver="$(node_release_version)"
+    tn_node_supports_admission "$ver" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) admission_release_refused "$ver" ;;
+        *) setup_warn "Could not tell whether $(node_release_label) is release ${MIN_ADMISSION_VERSION} or later, which --admission needs (an older release ignores the admission settings); writing them anyway." ;;
+    esac
+    return 0
+}
+
+# Install the trusted nodes map SRC as DEST, root-owned 0644, with tn_write_root_file
+# (a temp file beside DEST, then one rename), so the service user can read it when
+# setup_admission_config writes it into network-config. SRC is checked again just
+# before it is read. SRC that is DEST already (a re-run, or a finalize that read
+# keygen's record back) stays as it is.
+install_trusted_nodes() {
+    local src="$1" dest="$2" msg=""
+    msg="$(trusted_nodes_file_ok "$src")" || setup_fail "--trusted-nodes: ${msg}."
+    if [[ "$src" == "$dest" ]]; then
+        return 0
+    fi
+    if ! tn_write_root_file "$dest" 0644 < "$src"; then
+        setup_fail "Could not install ${dest} (see the message above)."
+    fi
+    print_ok "Trusted nodes map installed: ${dest}"
+    return 0
+}
+
+# Write the admission settings into the data dir's network-config
+# (tn_network_config_render, as the service user): the mode, the installed trusted
+# nodes map under trusted_nodes, and the installed bootstrap peers map under
+# committee_peers; a map this run does not use is left out of the file. Runs after
+# prepare_node_extra_flags, which checked the release and installed both maps. No
+# admission mode: nothing is written, and network-config keeps what it holds.
+setup_admission_config() {
+    local trusted=none committee=none rc=0
+    [[ -n "$ADMISSION_MODE" ]] || return 0
+    [[ -z "$TRUSTED_NODES_SRC" ]] || trusted="${CONFIG_DIR}/trusted-nodes.yaml"
+    [[ -z "$BOOTSTRAP_PEERS_SRC" ]] || committee="${CONFIG_DIR}/bootstrap-peers.yaml"
+    tn_network_config_render "$DATA_DIR" "$ADMISSION_MODE" "$trusted" "$committee" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        setup_fail "The admission settings were not written to ${DATA_DIR}/network-config (see the message above), so setup stops before the node is started."
+    fi
+    if json_mode; then
+        json_event log "admission: ${ADMISSION_MODE}, trusted nodes ${trusted}, committee peers ${committee}"
+    fi
+    return 0
+}
+
 # Make the start script's directory (/usr/local/libexec/telcoin) a root:root 0755
 # directory, creating it when absent, and refuse a script path that is a symlink or a
 # directory. Stops setup otherwise.
@@ -2528,6 +2737,9 @@ step_create_service() {
     fi
 
     prepare_node_extra_flags
+    # here rather than in step_write_config: a --json finalize runs that step before
+    # prepare_node_extra_flags has installed the maps the settings name
+    setup_admission_config
 
     # Where the node logs: the journal (default on mainnet) or the two files in the
     # root-owned log dir. Recorded in .node-meta below, so every later rewrite of the
@@ -2938,6 +3150,12 @@ step_final_summary() {
         unlimited) node_flags+=("State export=every epoch, none deleted") ;;
         *) node_flags+=("State export=every epoch, newest ${STATE_EXPORT} kept") ;;
     esac
+    if [[ -n "$ADMISSION_MODE" ]]; then
+        node_flags+=("Admission=${ADMISSION_MODE}")
+    fi
+    if [[ -n "$TRUSTED_NODES_SRC" ]]; then
+        node_flags+=("Trusted nodes=${TRUSTED_NODES_SRC}")
+    fi
 
     print_summary "Node Setup Complete" \
         "Network=${NETWORK} (Chain ID: ${CHAIN_ID})" \
@@ -3550,7 +3768,7 @@ main() {
                 fi
                 ;;
             # An empty value is a mistake here too, not a way of saying "none".
-            --bootstrap-peers|--state-export-keep)
+            --bootstrap-peers|--state-export-keep|--admission|--trusted-nodes)
                 if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
                     setup_fail "$1 requires a value"
                 fi
@@ -3609,6 +3827,9 @@ main() {
             --bootstrap-peers)     BOOTSTRAP_PEERS_SRC="${2:-}"; shift 2 ;;
             --enable-state-export) STATE_EXPORT_ENABLE=true; shift ;;
             --state-export-keep)   STATE_EXPORT_KEEP="${2:-}"; shift 2 ;;
+            # The node admission settings, checked by init_node_extra_flags too.
+            --admission)           ADMISSION_MODE="${2:-}"; shift 2 ;;
+            --trusted-nodes)       TRUSTED_NODES_SRC="${2:-}"; shift 2 ;;
             --passphrase-stdin)    PASSPHRASE_STDIN=true; shift ;;
             --log-target)          LOG_TARGET="${2:-}"; shift 2 ;;
             --allow-quorum-risk)   TN_ALLOW_QUORUM_RISK=1; shift ;;
