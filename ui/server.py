@@ -375,21 +375,24 @@ def passphrase_ok(value, network=""):
 # TN_GHCR_LEGACY_IMAGE_REPO, the single package earlier script releases named,
 # never held a release: it is recognised on testnet and devnet, never pulled.
 # TN_TESTNET_LEGACY_IMAGE_REPO holds the testnet images of the releases made
-# before signed releases (DEFAULT_DOCKER_IMAGE among them).
+# before signed releases (DEFAULT_DOCKER_IMAGE among them). TN_DEV_IMAGE_REPO
+# holds the dev images: devnet only, by digest.
 MAINNET_IMAGE_REPO = "ghcr.io/telcoin-association/tn-mainnet"
 TESTNET_IMAGE_REPO = "ghcr.io/telcoin-association/tn-testnet"
 GHCR_LEGACY_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
+DEV_IMAGE_REPO = "ghcr.io/telcoin-association/tn-dev"
 # network-gated: legacy testnet repository; DOCKER_REPO lists it for testnet and devnet, never mainnet
 TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 # Every repository a network's images may come from (tn_docker_repo_ok,
 # tn_docker_repos_for): on testnet TN_TESTNET_IMAGE_REPOS (the legacy repository,
 # the old single package and the testnet package), on devnet
-# TN_DEVNET_IMAGE_REPOS (the legacy repository and the old single package; devnet
-# images run by digest only), on mainnet TN_MAINNET_IMAGE_REPO alone.
+# TN_DEVNET_IMAGE_REPOS (the legacy repository, the old single package and the
+# dev package; devnet images run by digest only), on mainnet TN_MAINNET_IMAGE_REPO
+# alone.
 DOCKER_REPO = {
     "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_LEGACY_IMAGE_REPO, TESTNET_IMAGE_REPO),
     "mainnet": (MAINNET_IMAGE_REPO,),
-    "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_LEGACY_IMAGE_REPO),
+    "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_LEGACY_IMAGE_REPO, DEV_IMAGE_REPO),
 }
 # The repository each network's messages and examples name (tn_docker_repo_for).
 IMAGE_REPO = {

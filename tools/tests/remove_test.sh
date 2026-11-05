@@ -944,7 +944,8 @@ rm -f "$NFT_TABLE_FILE"
 
 # NET-2 gap: the custom-container scan must also see a node running a ghcr.io
 # image, not only the testnet repositories: the old single package (by digest or
-# by tag), the testnet package and the mainnet package.
+# by tag), the testnet package, the mainnet package and the dev package devnet
+# nodes run from.
 custom_container_lines_drv() {
     docker() {
         printf 'tn-old\tus-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri\tExited (0)\n'
@@ -954,6 +955,7 @@ custom_container_lines_drv() {
         printf 'tn-testnet-dig\tghcr.io/telcoin-association/tn-testnet@sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 5 hours\n'
         printf 'tn-mainnet-pkg\tghcr.io/telcoin-association/tn-mainnet@sha256:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 2 hours\n'
         printf 'tn-mainnet-tag\tghcr.io/telcoin-association/tn-mainnet:v1.0.0\tExited (0)\n'
+        printf 'tn-devnet\tghcr.io/telcoin-association/tn-dev@sha256:3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 4 hours\n'
         printf 'other-ghcr\tghcr.io/someone-else/telcoin-network:v1.0.0\tUp 1 hour\n'
         printf 'web\tnginx:1.27\tUp 2 days\n'
     }
@@ -969,6 +971,7 @@ check "custom scan: a testnet package image by tag is listed" yes "$(listed tn-t
 check "custom scan: a testnet package image by digest is listed" yes "$(listed tn-testnet-dig)"
 check "custom scan: a mainnet package image by digest is listed" yes "$(listed tn-mainnet-pkg)"
 check "custom scan: a mainnet package image by tag is listed" yes "$(listed tn-mainnet-tag)"
+check "custom scan: a dev package image (a devnet node) is listed" yes "$(listed tn-devnet)"
 check "custom scan: another owner's ghcr.io image is not listed" no "$(listed other-ghcr)"
 check "custom scan: an unrelated container is not listed" no "$(listed web)"
 unset -f listed

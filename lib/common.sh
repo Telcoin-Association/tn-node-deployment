@@ -1546,6 +1546,10 @@ readonly TN_TESTNET_IMAGE_REPO="ghcr.io/telcoin-association/tn-testnet"
 # running from it is recognised (remove-node, the status screens); a new pull never
 # takes it (tn_docker_pull_repo_ok), and mainnet never accepts it.
 readonly TN_GHCR_LEGACY_IMAGE_REPO="ghcr.io/telcoin-association/telcoin-network"
+# The package the node team's dev images (devnet among them) are pushed to. Devnet
+# only, by digest: TN_DEVNET_IMAGE_REPOS lists it for a running container and for
+# a new pull; testnet and mainnet never accept it.
+readonly TN_DEV_IMAGE_REPO="ghcr.io/telcoin-association/tn-dev"
 # network-gated: documents the legacy testnet repository; tn_docker_repos_for never gives it to mainnet
 # The testnet images of the releases made before signed releases, v0.16.0-adiri among them,
 # network-gated: names the legacy testnet repository; no mainnet path takes it
@@ -6990,8 +6994,9 @@ pick_action() {
 # TN_TESTNET_IMAGE_REPO, the packages the release pipeline publishes to; devnet the
 # Artifact Registry repository its fleet's images are pushed to
 # (TN_TESTNET_LEGACY_IMAGE_REPO). Devnet has no signed releases: its images are
-# named by digest only, from TN_DEVNET_IMAGE_REPOS, and no newest-release pick
-# runs there (tn_release_tag_final).
+# named by digest only, from TN_DEVNET_IMAGE_REPOS (the dev package
+# TN_DEV_IMAGE_REPO among them), and no newest-release pick runs there
+# (tn_release_tag_final).
 readonly TN_DEVNET_IMAGE_REPO="$TN_TESTNET_LEGACY_IMAGE_REPO"
 
 # Every repository a testnet image may come from, space separated: the legacy
@@ -7002,10 +7007,10 @@ readonly TN_DEVNET_IMAGE_REPO="$TN_TESTNET_LEGACY_IMAGE_REPO"
 # constant.
 readonly TN_TESTNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO} ${TN_TESTNET_IMAGE_REPO}"
 # Every repository a devnet image may come from, space separated: the devnet
-# repository (tn_docker_repo_for prints it) and the old single ghcr.io package,
-# for recognising a container that runs from it. The allow-list for the digests
-# the devnet fleet pins.
-readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO}"
+# repository (tn_docker_repo_for prints it), the old single ghcr.io package (for
+# recognising a container that runs from it, never for a new pull) and the dev
+# package TN_DEV_IMAGE_REPO. The allow-list for the digests the devnet fleet pins.
+readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO} ${TN_DEV_IMAGE_REPO}"
 
 # Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
 readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
@@ -8054,7 +8059,7 @@ tn_docker_resolve_ref() {
     case "$arg" in
         "$TN_GHCR_LEGACY_IMAGE_REPO"@*|"$TN_GHCR_LEGACY_IMAGE_REPO":*)
             if [[ "$net" == "devnet" ]]; then
-                print_warn "Image refused: ${arg}. No release was ever published to ${TN_GHCR_LEGACY_IMAGE_REPO}, so no image is pulled from it; give the devnet image by digest, ${repo}@sha256:<digest>." >&2
+                print_warn "Image refused: ${arg}. No release was ever published to ${TN_GHCR_LEGACY_IMAGE_REPO}, so no image is pulled from it; give the devnet image by digest, <repository>@sha256:<digest>, from one of these repositories: $(tn_docker_pull_repos_for devnet 2>/dev/null)." >&2
             else
                 print_warn "Image refused: ${arg}. No release was ever published to ${TN_GHCR_LEGACY_IMAGE_REPO}, so no image is pulled from it; ${net} images come from ${repo}. Give the ${net} release tag instead." >&2
             fi

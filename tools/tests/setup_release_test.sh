@@ -91,14 +91,18 @@ rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE='${R}@sha256:${D64}'; ${PD_S
 check "testnet preflight: a digest alone is taken as before" no "$(refused)"
 flags "docker on devnet without --docker-image refused (no signed release to take the newest from)" 1 devnet docker "" "" ""
 check "docker on devnet without --docker-image: the refusal asks for one" yes "$(grep -q 'A devnet Docker install needs --docker-image' "$T/sn.err" && echo yes || echo no)"
-# Devnet: an image by digest from the devnet repository, never a tag; no
-# --release-tag, and no install that needs a signed release. The old single ghcr
-# package is in TN_DEVNET_IMAGE_REPOS to recognise a container, never to pull.
+# Devnet: an image by digest from the devnet repository or the dev package, never
+# a tag; no --release-tag, and no install that needs a signed release. The old
+# single ghcr package is in TN_DEVNET_IMAGE_REPOS to recognise a container, never
+# to pull. The dev package is devnet's only.
 GH="ghcr.io/telcoin-association/telcoin-network"
+GD="ghcr.io/telcoin-association/tn-dev"
 flags "devnet: docker by a legacy-repository digest" 0 devnet docker "" "" "${R}@sha256:${D64}"
+flags "devnet: docker by a dev package digest" 0 devnet docker "" "" "${GD}@sha256:${D64}"
 flags "devnet: docker by a digest of the old single ghcr package refused" 1 devnet docker "" "" "${GH}@sha256:${D64}"
 flags "devnet: docker by another repository's digest refused" 1 devnet docker "" "" "docker.io/library/busybox@sha256:${D64}"
-check "devnet: the refusal names the repository a devnet pull takes" yes "$(grep -qF "the repository one of: ${R})" "$T/sn.err" && echo yes || echo no)"
+check "devnet: the refusal names the repositories a devnet pull takes" yes "$(grep -qF "the repository one of: ${R} ${GD})" "$T/sn.err" && echo yes || echo no)"
+flags "testnet: docker by a dev package digest refused" 1 testnet docker "" "" "${GD}@sha256:${D64}"
 flags "testnet: docker by a digest of the old single ghcr package refused" 1 testnet docker "" "" "${GH}@sha256:${D64}"
 flags "testnet: docker by a digest of the testnet package" 0 testnet docker "" "" "ghcr.io/telcoin-association/tn-testnet@sha256:${D64}"
 flags "testnet: docker by a digest of the mainnet package refused" 1 testnet docker "" "" "${MR}@sha256:${D64}"
@@ -289,6 +293,8 @@ rc="$(ec "${R}:latest")"
 check "edit: latest refused, nothing swapped" "1 no" "$rc $([[ -e "$T/swapped" ]] && echo yes || echo no)"
 rc="$(ec "docker.io/library/busybox@sha256:${D64}")"
 check "edit: another repository refused" "1 no" "$rc $([[ -e "$T/swapped" ]] && echo yes || echo no)"
+rc="$(ec "${GD}@sha256:${D64}")"
+check "edit: the dev package refused on testnet" "1 no" "$rc $([[ -e "$T/swapped" ]] && echo yes || echo no)"
 rm -f "$T/meta.log"
 rc="$(ec "${R}@sha256:$(printf '%s' "$D64" | tr 0 a)")"
 check "edit: a digest alone runs as given, tag removed from .node-meta" "0 yes" "$rc $(grep -qx 'unset RELEASE_TAG' "$T/meta.log" && echo yes || echo no)"
@@ -329,6 +335,9 @@ rc="$(ecd "${R}@sha256:${D64}")"
 check "edit, devnet: a legacy-repository digest runs as given" "0 ${R}@sha256:${D64}" "$rc $(swapped)"
 check_has "edit, devnet: the feature check is asked for devnet (which skips it)" "check devnet ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
 check "edit, devnet: .node-meta records image and digest, no tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} unset RELEASE_TAG" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+rm -f "$T/swapped" "$T/meta.log"
+rc="$(ecd "${GD}@sha256:${D64}")"
+check "edit, devnet: a dev package digest runs as given" "0 ${GD}@sha256:${D64}" "$rc $(swapped)"
 for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.16.0-adiri "${R}:main-0123abc" "docker.io/library/busybox@sha256:${D64}" "${R}:latest" "${GH}@sha256:${D64}"; do
     rm -f "$T/swapped"
     rc="$(ecd "$bad")"

@@ -637,7 +637,7 @@ class MainnetAndImagesTest(ServerTestCase):
         script = ('source "$1" >/dev/null 2>&1; printf "%s\\n" "$TN_TESTNET_IMAGE_REPO" '
                   '"$TN_TESTNET_LEGACY_IMAGE_REPO" "$TN_MAINNET_IMAGE_REPO" "$DEFAULT_DOCKER_IMAGE" '
                   '"$TN_TESTNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPOS" "$TN_DEVNET_IMAGE_REPO" '
-                  '"$TN_GHCR_LEGACY_IMAGE_REPO"')
+                  '"$TN_GHCR_LEGACY_IMAGE_REPO" "$TN_DEV_IMAGE_REPO"')
         out = subprocess.run(["bash", "-c", script, "_", LIB],
                              capture_output=True, text=True, timeout=20).stdout.splitlines()
         self.assertEqual(out[:4], [server.TESTNET_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO,
@@ -648,6 +648,11 @@ class MainnetAndImagesTest(ServerTestCase):
         self.assertEqual(out[6], server.TESTNET_LEGACY_IMAGE_REPO, "devnet's repository is the legacy one")
         self.assertIn(out[6], server.DOCKER_REPO["devnet"])
         self.assertEqual(out[7], server.GHCR_LEGACY_IMAGE_REPO)
+        self.assertEqual(out[8], server.DEV_IMAGE_REPO)
+        self.assertEqual(server.DEV_IMAGE_REPO, "ghcr.io/telcoin-association/tn-dev")
+        self.assertIn(server.DEV_IMAGE_REPO, server.DOCKER_REPO["devnet"])
+        for net in ("testnet", "mainnet"):
+            self.assertNotIn(server.DEV_IMAGE_REPO, server.DOCKER_REPO[net], "the dev package is devnet's only")
         self.assertEqual(server.MAINNET_IMAGE_REPO, "ghcr.io/telcoin-association/tn-mainnet")
         self.assertEqual(server.TESTNET_IMAGE_REPO, "ghcr.io/telcoin-association/tn-testnet")
         self.assertNotIn(server.GHCR_LEGACY_IMAGE_REPO, server.DOCKER_REPO["mainnet"])
@@ -692,7 +697,15 @@ class MainnetAndImagesTest(ServerTestCase):
         ghcr = server.TESTNET_IMAGE_REPO + "@sha256:" + hexd
         main = server.MAINNET_IMAGE_REPO + "@sha256:" + hexd
         old = server.GHCR_LEGACY_IMAGE_REPO + "@sha256:" + hexd
+        dev = server.DEV_IMAGE_REPO + "@sha256:" + hexd
         legacy = server.TESTNET_LEGACY_IMAGE_REPO + "@sha256:" + hexd
+        # The dev package: devnet only, for a running container and a new pull.
+        self.assertTrue(server.image_allowed(dev, "devnet"))
+        self.assertTrue(server.pull_image_allowed(dev, "devnet"))
+        for net in ("testnet", "mainnet"):
+            with self.subTest(network=net, image="dev"):
+                self.assertFalse(server.image_allowed(dev, net))
+                self.assertFalse(server.pull_image_allowed(dev, net))
         self.assertTrue(server.image_allowed(ghcr, "testnet"))
         self.assertTrue(server.image_allowed(legacy, "testnet"))
         self.assertTrue(server.image_allowed(old, "testnet"), "the old single package is recognised")
@@ -738,7 +751,8 @@ class MainnetAndImagesTest(ServerTestCase):
         hexd = "b" * 64
         images = []
         for base in (server.TESTNET_IMAGE_REPO, server.MAINNET_IMAGE_REPO, server.GHCR_LEGACY_IMAGE_REPO,
-                     server.TESTNET_LEGACY_IMAGE_REPO, "busybox", server.TESTNET_IMAGE_REPO + "-fork"):
+                     server.DEV_IMAGE_REPO, server.TESTNET_LEGACY_IMAGE_REPO, "busybox",
+                     server.TESTNET_IMAGE_REPO + "-fork"):
             images += [base + "@sha256:" + hexd, base + ":v0.16.0-adiri", base + ":v1.0.0",
                        base + "@sha256:" + "B" * 64, base + "@sha256:" + hexd[:63],
                        base + ":v0.2.0-devnet", base + ":main-0123abc"]
@@ -762,6 +776,7 @@ class MainnetAndImagesTest(ServerTestCase):
         digest = ghcr + "@sha256:" + "a" * 64
         main_digest = main + "@sha256:" + "a" * 64
         old_digest = old + "@sha256:" + "a" * 64
+        dev_digest = server.DEV_IMAGE_REPO + "@sha256:" + "a" * 64
         legacy_digest = legacy + "@sha256:" + "a" * 64
         choice = server.docker_image_choice
         for value, net, want in (
@@ -776,6 +791,7 @@ class MainnetAndImagesTest(ServerTestCase):
                 (main + ":v1.0.0", "mainnet", ("v1.0.0", "", None)),
                 (main_digest, "mainnet", ("", main_digest, None)),
                 (legacy_digest, "devnet", ("", legacy_digest, None)),
+                (dev_digest, "devnet", ("", dev_digest, None)),
                 ("", "testnet", ("", "", None))):
             with self.subTest(image=value, network=net):
                 self.assertEqual(choice(value, net), want)
@@ -791,7 +807,11 @@ class MainnetAndImagesTest(ServerTestCase):
                          (ghcr + ":v1.0.0", "mainnet"), (ghcr + ":v0.17.0-adiri", "mainnet"),
                          (digest, "devnet"), (main_digest, "devnet"),
                          (old_digest, "testnet"), (old + ":v0.17.0-adiri", "testnet"),
-                         (old_digest, "mainnet"), (old + ":v1.0.0", "mainnet"), (old_digest, "devnet")):
+                         (old_digest, "mainnet"), (old + ":v1.0.0", "mainnet"), (old_digest, "devnet"),
+                         # The dev package is devnet's only.
+                         (dev_digest, "testnet"), (dev_digest, "mainnet"),
+                         (server.DEV_IMAGE_REPO + ":v0.17.0-adiri", "testnet"),
+                         (server.DEV_IMAGE_REPO + ":v1.0.0", "mainnet")):
             with self.subTest(image=bad, network=net):
                 tag, img, err = choice(bad, net)
                 self.assertIsNone(tag)

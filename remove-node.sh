@@ -1425,11 +1425,12 @@ custom_is_excluded_path() {
 # custom_container_lines -- every container (name, image, status; tab separated)
 # that runs a node image of the testnet repositories, the legacy testnet image,
 # the ghcr.io packages the mainnet and testnet releases are published to
-# (tn-mainnet, tn-testnet) or the old single ghcr.io package, whatever its name;
-# scan_custom_installs offers each one for removal and asks first.
+# (tn-mainnet, tn-testnet), the dev package devnet nodes run from (tn-dev) or the
+# old single ghcr.io package, whatever its name; scan_custom_installs offers each
+# one for removal and asks first.
 custom_container_lines() {
     timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
-        | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri|ghcr\.io/telcoin-association/(telcoin-network|tn-mainnet|tn-testnet)' || true  # network-gated: image repositories of every network; the scan reads only and each removal asks first
+        | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri|ghcr\.io/telcoin-association/(telcoin-network|tn-mainnet|tn-testnet|tn-dev)' || true  # network-gated: image repositories of every network; the scan reads only and each removal asks first
 }
 
 custom_is_managed_name() {

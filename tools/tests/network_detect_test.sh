@@ -270,9 +270,10 @@ rc=0; out="$(loud_tags testnet)" || rc=$?
 check "fetch_docker_tags testnet (control): the stub's final testnet tag" "0 v0.17.0-adiri" "$rc $out"
 check "fetch_docker_tags testnet (control): the registry asked" yes "$(exists "$T/loud.log")"
 
-# json_prepare_docker on a devnet host: a digest of the devnet repository goes on
-# to the pull; a tag (devnet or testnet), another repository or the old single
-# ghcr package (recognised, never pulled) is refused first.
+# json_prepare_docker on a devnet host: a digest of the devnet repository or of
+# the dev package goes on to the pull; a tag (devnet or testnet), another
+# repository or the old single ghcr package (recognised, never pulled) is refused
+# first. On a testnet host the dev package is refused.
 # jpd_stubbed ARG -- json_prepare_docker with the running image and the pull
 # stubbed (in run's subshell, so the real functions stay for later cases).
 jpd_stubbed() {
@@ -291,6 +292,14 @@ jpd() {  # jpd ARG -> JSON events in $T/json.log; RC
 meta $'NETWORK=devnet\n'
 jpd "${R}@sha256:${D64}"
 check "json prepare, devnet: a devnet repository digest reaches the pull" "1 ${R}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
+GD="ghcr.io/telcoin-association/tn-dev"
+jpd "${GD}@sha256:${D64}"
+check "json prepare, devnet: a dev package digest reaches the pull" "1 ${GD}@sha256:${D64} " "$RC $(cat "$T/pulled" 2>/dev/null)"
+meta $'NETWORK=testnet\n'
+jpd "${GD}@sha256:${D64}"
+check "json prepare, testnet: the dev package refused before any pull" "1 yes no" \
+    "$RC $(has "$(cat "$T/json.log")" "is not a testnet release tag or this network's image by digest") $(exists "$T/pulled")"
+meta $'NETWORK=devnet\n'
 for bad in v0.2.0-devnet "${R}:v0.2.0-devnet" v0.17.0-adiri "docker.io/library/busybox@sha256:${D64}" "${GH}@sha256:${D64}"; do
     jpd "$bad"
     check "json prepare, devnet: ${bad} refused before any pull" "1 yes no" \
