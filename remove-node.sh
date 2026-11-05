@@ -479,8 +479,9 @@ remove_unit_leftovers() {
     [[ "$check" != "check" ]]
 }
 
-# rm_baseline_say step|log|warn MSG -- the printer for tn_host_baseline_remove: a
-# JSON event of the same name in a --json run, a print_* line otherwise.
+# rm_baseline_say step|log|warn MSG -- the printer for tn_host_baseline_remove and
+# remove_alerts: a JSON event of the same name in a --json run, a print_* line
+# otherwise.
 rm_baseline_say() {
     if [[ "$RM_JSON" == "true" ]]; then
         json_event "${1:-log}" "${2:-}"
@@ -803,11 +804,13 @@ remove_node_host_files() {
 # /var/backups/telcoin, the data dir /var/lib/telcoin, the start scripts in a
 # real /usr/local/libexec/telcoin directory, or unit backups and drop-ins of a
 # node unit whose unit file is gone. rc 1 when none of them is.
-# The boot unit of the P2P new-flow limit (telcoin-p2p-limit.service) counts too.
+# The boot unit of the P2P new-flow limit (telcoin-p2p-limit.service) and the
+# private alerts timer (telcoin-heartbeat.timer) count too.
 rm_leftovers_present() {
     local r="$TN_RM_ROOT" p m f
     for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin" \
-             "${r}/etc/systemd/system/telcoin-p2p-limit.service"; do
+             "${r}/etc/systemd/system/telcoin-p2p-limit.service" \
+             "${r}/etc/systemd/system/telcoin-heartbeat.timer"; do
         if [[ -e "$p" || -L "$p" ]]; then
             return 0
         fi
@@ -825,10 +828,11 @@ rm_leftovers_present() {
 
 # remove_leftovers -- the menu with no node unit installed: list what a node
 # install left behind (an earlier removal stopped part way, or kept the keys or
-# the data), ask once, then remove it all. The node keys under the data dirs
-# are shredded as the service account (.node-meta HOST_SERVICE_USER, else the
-# default), the config tree /etc/telcoin is shredded, and the shared host files
-# go through remove_node_host_files. A DATA_DIR that .node-meta records outside
+# the data), ask once, then remove it all. The private alerts go first
+# (remove_alerts). The node keys under the data dirs are shredded as the
+# service account (.node-meta HOST_SERVICE_USER, else the default), the config
+# tree /etc/telcoin is shredded, and the shared host files go through
+# remove_node_host_files. A DATA_DIR that .node-meta records outside
 # /var/lib/telcoin is listed and removed too. rc 0 done or kept at the
 # operator's word; 1 refused before any change (a key set more than once in
 # .node-meta, or another run holds the update lock); 3 nothing found.
@@ -868,6 +872,9 @@ remove_leftovers() {
     if [[ -e "${r}/etc/systemd/system/telcoin-p2p-limit.service" || -L "${r}/etc/systemd/system/telcoin-p2p-limit.service" ]]; then
         shown+=("/etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)")
     fi
+    if [[ -e "${r}/etc/systemd/system/telcoin-heartbeat.timer" || -L "${r}/etc/systemd/system/telcoin-heartbeat.timer" ]]; then
+        shown+=("/etc/systemd/system/telcoin-heartbeat.timer (private alerts)")
+    fi
     if remove_unit_leftovers "" check; then
         shown+=("unit backups and drop-ins in /etc/systemd/system")
     fi
@@ -888,6 +895,7 @@ remove_leftovers() {
         return 0
     fi
     rm_take_lock || return 1
+    remove_alerts
 
     # The keys first: every file under a node-keys dir in the data dirs (as the
     # service account that owns them), then the whole config tree.
@@ -1244,14 +1252,82 @@ remove_testnet_addons() {
 }
 
 # =============================================================================
+# REMOVE PRIVATE ALERTS (the heartbeat timer of setup-alerts.sh)
+# =============================================================================
+
+# rm_alerts_present -- rc 0 when a file of the private alerts is on this host:
+# the heartbeat timer or service unit, the installed runner, the config dir
+# /etc/telcoin/alerts, the runner's state dir or the service-state file
+# /run/telcoin/heartbeat-service; rc 1 when none is. Reads only.
+rm_alerts_present() {
+    local r="$TN_RM_ROOT" p
+    for p in /etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service \
+             /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts \
+             /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat \
+             /run/telcoin/heartbeat-service; do
+        if [[ -e "${r}${p}" || -L "${r}${p}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# remove_alerts -- tear down the private alerts setup-alerts.sh installs, the
+# way setup-alerts.sh --disable does: the timer disabled and stopped, the
+# service stopped, its state cleaned (systemctl clean, then the state dir and
+# its link removed when they are still there), the targets file shredded (it
+# holds the push URLs, as does a writer's .tn.* temp copy), the env file, the
+# config dir, both units, the runner and the service-state file the unit's
+# ExecStartPre= writes in /run/telcoin removed (never /run/telcoin itself, which
+# holds the update lock), systemd reloaded, and
+# ENABLE_ALERTS=false written to .node-meta while that file is still here (best
+# effort). It ends with the hint to pause the monitor. The callers run it before
+# the node stops, so the heartbeat never pushes the planned stop as a failure.
+# Fixed paths under TN_RM_ROOT and no lib/alerts.sh call: it works on a host
+# whose updater installed this script and not that library. Says and does
+# nothing when no alerts file is here (rm_alerts_present). Always returns 0.
+remove_alerts() {
+    local r="$TN_RM_ROOT" sd ad meta
+    rm_alerts_present || return 0
+    sd="${r}/etc/systemd/system"
+    ad="${r}/etc/telcoin/alerts"
+    rm_baseline_say step "Removing private alerts (telcoin-heartbeat)"
+    systemctl disable --now telcoin-heartbeat.timer >/dev/null 2>&1 || true
+    systemctl stop telcoin-heartbeat.service >/dev/null 2>&1 || true
+    systemctl clean --what=state telcoin-heartbeat.service >/dev/null 2>&1 || true
+    _rm_dir "${r}/var/lib/private/telcoin-heartbeat"
+    _rm_dir "${r}/var/lib/telcoin-heartbeat"
+    if [[ -d "$ad" && ! -L "$ad" ]]; then
+        _rm_shred "${ad}/targets" "${ad}/".tn.*
+        rm -f -- "${ad}/alerts.env" 2>/dev/null || true
+        rmdir -- "$ad" 2>/dev/null || true
+    elif [[ -L "$ad" ]]; then
+        rm -f -- "$ad" 2>/dev/null || true
+    fi
+    rm -f -- "${sd}/telcoin-heartbeat.timer" "${sd}/telcoin-heartbeat.service" \
+             "${r}/usr/local/libexec/telcoin/tn-heartbeat" \
+             "${r}/run/telcoin/heartbeat-service" "${r}/run/telcoin/heartbeat-service.tmp" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed telcoin-heartbeat.service >/dev/null 2>&1 || true
+    meta="$(tn_resolve_config_dir 2>/dev/null)" || meta=""
+    meta="${meta:+${meta}/.node-meta}"
+    if [[ -n "$meta" && -f "$meta" && ! -L "$meta" ]]; then
+        meta_set ENABLE_ALERTS false "$meta" >/dev/null 2>&1 || true
+    fi
+    rm_baseline_say log "Pause or delete this node's monitor: a push monitor alerts on silence."
+    return 0
+}
+
+# =============================================================================
 # REMOVE A NODE  (drives the unit/container/dir teardown from the resolvers)
 # =============================================================================
 
-# Tear down a SINGLE installed node unit and everything tied to it: the systemd
-# unit, the docker container (when the install method is docker), chain data,
-# keys/config, the host-wide testnet add-ons, shared components, and the service
-# user. $1 is the unit base name (the new "telcoin" unit or a legacy unit name)
-# discovered by detect_node_installs; its dirs come from the resolvers.
+# Tear down a SINGLE installed node unit and everything tied to it: the private
+# alerts (before the node stops), the systemd unit, the docker container (when
+# the install method is docker), chain data, keys/config, the host-wide testnet
+# add-ons, shared components, and the service user. $1 is the unit base name
+# (the new "telcoin" unit or a legacy unit name) discovered by
+# detect_node_installs; its dirs come from the resolvers.
 # Prunes the unit from INSTALLED_UNITS so a follow-on remove_shared_components
 # sees the correct remaining count.
 remove_node_unit() {
@@ -1274,6 +1350,10 @@ remove_node_unit() {
     local key_user="$svc_user" key_group="$svc_group"
     [[ -n "$key_user" && "$key_user" != "root" ]] || key_user="${SERVICE_USER:-telcoin}"
     [[ -n "$key_group" && "$key_group" != "root" ]] || key_group="${SERVICE_GROUP:-telcoin}"
+
+    # The private alerts go before the node stops, so the heartbeat does not
+    # push the stop as a failure.
+    remove_alerts
 
     # Stop service
     stop_and_disable_service "$unit"
@@ -1618,8 +1698,9 @@ main_menu() {
 # Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper.
 # DESTRUCTIVE: requires --yes, and the server gates it behind a typed "DELETE"
 # confirmation. Scope is cumulative:
-#   service -> stop+disable+rm unit, its old backups (shredded) and drop-in dir
-#              (+ docker container)
+#   service -> remove the private alerts (remove_alerts, before the node stops),
+#              then stop+disable+rm unit, its old backups (shredded) and
+#              drop-in dir (+ docker container)
 #   data    -> service + remove chain data (node keys inside it shredded)
 #   keys    -> data + shred keys and passphrase files, remove config/.node-meta,
 #              the service account, the log-reader group and, when no other
@@ -1725,6 +1806,9 @@ json_remove() {
         json_event error "another node operation holds the update lock${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}; run this again when it has finished (nothing was removed)"
         return 1
     fi
+
+    # The private alerts first, before the node stops (every scope).
+    remove_alerts
 
     # The unit, its old backups (shredded) and its drop-in directory.
     if [[ -n "$svc" ]]; then

@@ -158,6 +158,7 @@ It changes nothing, prints one `ok`, `warn` or `info` line per item and exits 1 
 | 9101 | TCP | Loopback only | Prometheus metrics. |
 | 43174 | TCP | 104.155.184.201/32 (plus any monitoring hosts you add) | Health-check endpoint, an add-on of testnet and devnet. The node listens on it only when you enable the health monitor. On `v0.16.0-adiri` it listens on every interface; from the next release the bare port the scripts pass listens on `127.0.0.1` only, out of the monitor's reach (section 4.6). |
 | 22 (or your SSH port) | TCP | Your admin IPs | SSH. |
+| 443 (or your monitor's port) | TCP | Outbound only, to your monitor | Private alerts (section 4.14), when you enable them. No inbound port opens for them. |
 
 Open the two UDP ports on every node, including nodes that may never validate.
 A node that stakes later behind a closed port cannot reach the committee and misses consensus without any obvious error.
@@ -245,7 +246,7 @@ Directories must be absolute paths of letters, digits and `. _ / -`, without `..
 1. Welcome. Answer `y` to `Ready to begin node setup?`.
 2. Preflight ("Step 1 of 8"). Setup checks that it runs as root, takes the update lock (`/run/telcoin/update.lock`), detects the distribution, tells needrestart not to restart the node and unattended upgrades not to reboot the host, and runs the CVE-2026-31431 gate. It lists your mounted filesystems and physical disks, then asks `Data directory [/var/lib/telcoin]`. Enter a path on your data drive if you have one. It then runs the hardware check, an internet check, a port check (in-use ports only warn), installs `curl` and `git` if missing, and checks the systemd floor for the network (section 1.2).
 3. Network. Choose `1) Adiri Testnet (Chain ID: 2017)`. `2) Mainnet (Chain ID: 487)` is marked coming soon and returns you to the menu. Devnet is not offered interactively.
-4. Testnet add-ons (testnet only). Each is off by default: the health-monitor endpoint on TCP 43174, log shipping, metrics shipping, a region label if you turned either shipping option on, and VPN admin SSH. The region label keeps only letters, digits, `_` and `-`, up to 32 characters; setup warns when it shortens one. See [docs/testnet-addons.md](docs/testnet-addons.md) before you opt in.
+4. Testnet add-ons (testnet only). Each is off by default: the health-monitor endpoint on TCP 43174, log shipping, metrics shipping, a region label if you turned either shipping option on, and VPN admin SSH. The region label keeps only letters, digits, `_` and `-`, up to 32 characters; setup warns when it shortens one. See [docs/testnet-addons.md](docs/testnet-addons.md) before you opt in. Then, on every network, setup asks `Set up private alerts once the node is running?` (section 4.14): a yes only marks them pending, and the monitor URLs are asked for at step 13.
 5. Install method. See section 2.3. Source builds first ask `Install missing packages now?` if build dependencies are missing (answer y; No exits), then show a picker of the network's release tags (`vX.Y.Z-adiri` on testnet); a branch or a commit id is refused. The build runs as the `tn-build` account, so stay attached to the session for the 20 to 40 minutes it takes. `2) Signed release` asks for the release tag and downloads and checks it (section 2.3). Docker installs ask for the image: a release tag, the image by digest, or Enter for the newest release (section 2.3); setup resolves a tag to its digest and runs the image by digest only. A testnet release candidate (`vX.Y.Z-adiri-rcN`) is installed only when you type or pass its tag; no default offers one. "I already have it" first offers a binary it finds (`Use this binary?`) and asks `Full path to telcoin binary:` only if it finds none or you decline.
 6. Passphrase storage. There is no menu. At the end of preflight setup picks how the node will keep the BLS passphrase: as an encrypted systemd credential, `/etc/telcoin/bls-passphrase.cred`, wherever systemd-creds works (systemd 250 or later), sealed with the TPM2 as well when the host has a usable one; otherwise, on testnet and devnet only, in the root-only file `/etc/telcoin/bls-passphrase`. A mainnet host with no usable TPM2 stops unless you pass `--allow-no-tpm`. Section 2.8 covers the flags.
 7. Node configuration ("Step 3 of 8"). First, RPC access: `1) Private` keeps RPC on `127.0.0.1`; `2) Public` asks for the node's DNS name, then always asks for an optional inbound public IP (Enter auto-detects; set it behind NAT; section 5). Then the ports: P2P primary `49590`, P2P worker `49594`, RPC `8545`, metrics `9101`. Then `Use these default paths?` for the config, log and install directories, and an optional advertised node name.
@@ -254,7 +255,7 @@ Directories must be absolute paths of letters, digits and `. _ / -`, without `..
 10. Configuration ("Step 6 of 8"). Copies `genesis.yaml`, `committee.yaml` and `parameters.yaml` into the data directory after checking each against the SHA-256 the script release pins for the network (on testnet, the files of `v0.16.0-adiri`). If it cannot find them, it prints where to get them and waits for you to copy them in.
 11. Service ("Step 7 of 8"). Stores the passphrase (step 6), then writes `/etc/telcoin/node.env` (the listener addresses), the start script `/usr/local/libexec/telcoin/tn-start` (`tn-start-docker` for Docker), the systemd unit and `/etc/telcoin/.node-meta`, then asks `Start the node now?`. Only if you answer yes and the service comes up does it ask `Enable auto-start on server reboot?`. Answer yes to both.
 12. Public RPC, only if you gave a domain and the node started. Setup checks DNS and enables the endpoint. If DNS is not ready yet, setup still finishes and prints the exact command to run later.
-13. Testnet add-ons you opted into are applied. Log or metrics shipping asks for your ingest token (hidden; leave it blank to skip).
+13. Testnet add-ons you opted into are applied. Log or metrics shipping asks for your ingest token (hidden; leave it blank to skip). If you asked for private alerts and the node is running, setup then runs `setup-alerts.sh --enable`, which asks for the monitor URLs and sends a test heartbeat; otherwise they stay pending, and the summary says `Private alerts: pending. To finish: sudo bash setup-alerts.sh`.
 14. A summary with the paths, the P2P ports `node-info.yaml` advertises (every worker), a firewall reminder for those ports, the next steps and a link to this runbook.
 
 `sudo bash ~/telcoin-node-scripts/setup-node.sh --help` lists the public RPC flags and the node flags.
@@ -550,6 +551,12 @@ When the UI files changed, it prints the command; run it yourself:
 
 ```bash
 sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update
+```
+
+In the same way, when the release changes the private alerts runner or its library on a host that has them (section 4.14), it prints `The heartbeat runner or its library changed. Reinstall them on the host:` and the command:
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-alerts.sh --refresh
 ```
 
 A host on `update-scripts.sh` 1.1.72 or older moves to signed releases once: its old updater takes the new `update-scripts.sh` through the old checksum channel (hashes from `main`, unsigned), which then fetches the release keys once through their published checksums (it warns `First signed release on this host: ...`), and from then on every update is a verified manifest.
@@ -860,6 +867,7 @@ sudo bash ~/telcoin-node-scripts/setup-vpn.sh             # VPN admin SSH
 Read [docs/testnet-addons.md](docs/testnet-addons.md) for what each one shares and how to turn it off, and [WGVPN.md](WGVPN.md) before enrolling in the VPN.
 
 The add-ons are for testnet and devnet only: on mainnet every one of them is refused, and a mainnet setup refuses to start while any add-on is installed.
+For alerts that reach you, on every network, see section 4.14.
 
 Turning on the health monitor, log shipping or metrics shipping adds flags to the node command (`--healthcheck`, `--log.file.format json`, `--metrics`) and restarts the node.
 The health monitor adds `--healthcheck 43174`, a bare port.
@@ -906,6 +914,7 @@ Do not delete the keys of a staked validator unless you hold a tested backup.
 Secrets are overwritten with `shred` before they are deleted: the passphrase credential and file, the keys when you delete them, and the backups in `/var/backups/telcoin`, which can hold unit and passphrase copies.
 Overwriting is best effort on SSDs, copy-on-write and cloud disks, and the script says so: `Decommissioning a host that held a validator key means destroying or crypto-erasing its disk and deleting every snapshot and image taken from it; shred alone does not do that.` (section 4.12).
 It shreds the Alloy ingest token file with the add-ons.
+It removes private alerts (section 4.14) first, before the node stops, so the removal sends your monitor no down heartbeat; after that the monitor gets none at all, so pause or delete it, as the script reminds you: `Pause or delete this node's monitor: a push monitor alerts on silence.`
 With the last node unit on the host it also removes the host baseline (section 4.13) and the P2P new-flow limit (`telcoin-p2p-limit.service`, `/etc/telcoin/p2p-limit.nft` and the nftables table); while another node unit remains, both stay whole for that node, and the run says so.
 It also offers to remove any container that runs a node image from the ghcr.io packages (`tn-mainnet`, `tn-testnet`, `tn-dev` or the old `telcoin-network`), whatever its name.
 When no other node install remains, it also removes the host files every install shares: the start scripts in `/usr/local/libexec/telcoin`, `/etc/telcoin/node.env` (and `/etc/telcoin` once it is empty), `/var/backups/telcoin`, the logrotate file, the journald, needrestart and apt drop-ins, `/var/lib/telcoin-staging`, the `tn-build` account with `/var/lib/tn-build` (its processes are stopped first, and a failed `userdel` is reported).
@@ -914,6 +923,7 @@ If you keep the service user, it asks `Also remove the log-reader group 'telcoin
 
 A removal that stopped part way can be finished: run `remove-node.sh` again, and it removes what is left while `/etc/telcoin`, the backups, the data directory or the start scripts remain.
 Menu option `2) Wipe chain data only` keeps the keys and configuration and makes the node resync from scratch.
+It leaves private alerts on, so pause the node's monitor for the resync.
 
 ### 4.8 Move a unit-started node to the start script
 
@@ -1149,6 +1159,230 @@ A refused or failed run does not refresh.
 The report of `setup-node.sh --audit` and `check-node.sh --audit` (section 1.2) shows the state; `make it again: sudo ./setup-node.sh --host-baseline` in a warning is the fix.
 `remove-node.sh` removes the rules (and unloads them), the AIDE config, both databases and the marker with the last node unit on the host; while another node unit remains it keeps them and says so. The kept rules and AIDE config still name the removed unit and its data directory, so after removing one node of two run `sudo ./setup-node.sh --host-baseline` again to make a baseline of what is left.
 The packages stay (`sudo apt-get purge auditd aide` removes them).
+
+### 4.14 Private alerts
+
+`setup-alerts.sh` puts a heartbeat on the node host.
+A systemd timer runs a small checker every 60 seconds, and each run pushes the node's status, up or down with a reason, to a monitor you own: an Uptime Kuma push monitor, a healthchecks.io check or a JSON webhook.
+The monitor alerts you when a heartbeat says down, and also when the heartbeats stop, so a host that crashed or lost its network shows up too.
+
+Private alerts work on every network, mainnet included.
+They are not one of the testnet add-ons of section 4.6: the Telcoin Association is not involved and receives nothing.
+No inbound port opens; the heartbeat leaves the host over HTTPS to the monitor you name (section 1.3).
+
+What each run checks.
+The runner checks the node from the host, in this order, and the first check that finds the node down gives the reason:
+
+| Check | Down when | Reason the monitor gets | Default threshold |
+|---|---|---|---|
+| Service | The node unit does not exist | `service telcoin not found` | At once |
+| Service | The unit restarted after a failure since the last run | `service telcoin restarted after a failure (NRestarts N)` | One run; the next run is up again when all else is fine |
+| Service | The unit is stopped or failed, or systemd is waiting to restart it | `service telcoin inactive (dead)` (or `failed`, `auto-restart`) | At once |
+| Service | The unit is still starting or stopping | `service telcoin activating for Ns` (or `deactivating`) | 120 seconds in that state |
+| Local RPC | `eth_chainId` on the node's own RPC gets no answer, or no chain ID | `rpc 127.0.0.1:8545 not answering (refused)` (or `timeout`, `dns`, `http NNN`, `malformed`, `curl N`) | 120 seconds after the unit started; at once on a node that has been up longer |
+| Chain | The RPC reports another chain than the node's network | `wrong chain: rpc reports N, expected M` | At once |
+| Consensus | The latest consensus header has not moved, or none has been read | `consensus stalled at header N for Ns` (or `consensus header unreadable for Ns` when no header was ever read) | 180 seconds, or three intervals when that is longer (`--stall-after`) |
+| Committee | The node holds a committee seat but does not vote (`CvvInactive`) | `CvvInactive for Ns: committee member not voting` | 900 seconds, or the stall threshold when that is longer (`--inactive-after`) |
+| Health | The node's health endpoint answers 503 | `health 503: node reports the network unreachable` | At once |
+
+`telcoin` in these reasons is the node's service name, and `127.0.0.1:8545` the address of its RPC.
+When the RPC does not answer, the checks below it are skipped.
+The consensus check is skipped on a node release without `tn_latestConsensusHeader`, and the health check on a node that serves no health endpoint (section 4.6); a health answer other than 200 or 503 only adds `(health <code>)` to an up reason, and one that times out `(health timeout)`.
+A node that is up reports its mode, block and epoch, such as `CvvActive block 1234567 epoch 42` (a part the node does not report is left out, and `rpc answering` stands in when none is known).
+In the first 120 seconds after the unit starts, a run reports up with `service telcoin restarting (activating, 30s)` or `starting: rpc not answering yet`.
+
+What leaves the host.
+A heartbeat carries the status, the reason (which names the node mode, block and epoch), and, in a webhook, this host's label (`--label`, by default the host name), the network, the time of the run and whether the status changed.
+A Kuma push also carries the local RPC's response time in milliseconds.
+Nothing else is sent: no key, no execution address, no log line.
+The monitor also sees the request itself: the host's IP address and the user agent `tn-heartbeat/<version>`.
+
+A monitor URL holds the token that lets anyone push to that monitor, so the scripts treat it as a secret.
+The URLs stay in `/etc/telcoin/alerts/targets` (root 0600), reach the runner as a systemd credential, and never go on a command line the scripts run (only your own `--target` puts one there, and it warns) or into the journal, the state file, `.node-meta` or a JSON event.
+Wherever the scripts name a target, they show its provider and host only, as `kuma@kuma.example.org`.
+
+Targets.
+You can give up to five; each run pushes to every one, in the order given.
+
+| Provider | URL to give | What each run sends |
+|---|---|---|
+| `kuma` (Uptime Kuma) | In Uptime Kuma, add a monitor of type Push and paste the push URL from the monitor's page, such as `https://kuma.example.org/api/push/AbC123xyz?status=up&msg=OK&ping=`. The part from `?` on is dropped, so the stored URL is `https://kuma.example.org/api/push/AbC123xyz`. | A GET with `status=up` or `status=down`, `msg=<reason>` and, when the RPC answered, `ping=<milliseconds>`. |
+| `healthchecks` (healthchecks.io) | The check's ping URL, such as `https://hc-ping.com/<uuid>`. A trailing `/fail`, `/start` or `/log` is dropped; a query string or a fragment (`?` or `#`) is refused. | A POST to the URL when up and to `<url>/fail` when down, with the body `up: <reason>` or `down: <reason>`. |
+| `webhook` | Any HTTPS URL that takes a JSON POST, such as `https://hooks.example.net/telcoin/node-1`. It is used as given. | A POST with the JSON body below. |
+
+The webhook body has exactly these keys, in this order:
+
+```json
+{"status":"up","reason":"CvvActive block 1234567 epoch 42","node":"node-1","network":"testnet","mode":"CvvActive","block":1234567,"epoch":42,"ts":1762257600,"changed":false}
+```
+
+`node` is the label and `ts` the time of the run in seconds since 1970 (UTC).
+`changed` is `true` when the status differs from the previous run's, and on the first run.
+`block` and `epoch` are `null`, and `mode` is `unknown`, when the node does not report them.
+
+A URL must start with `https://`.
+`http://` is taken for `127.0.0.1`, `[::1]` and `localhost`, and elsewhere only with `--allow-http`, because the token then travels in clear text.
+A URL holds no quote, backslash or space, and is at most 512 characters.
+Redirects are not followed, so give the final URL.
+A push counts as accepted on a 2xx answer; from Kuma, the answer must not say `"ok":false` either.
+
+Enable.
+Open the menu:
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-alerts.sh
+```
+
+```
+1) Status
+2) Enable private alerts
+3) Change targets
+4) Send a test heartbeat now
+5) Refresh after a script update
+6) Disable private alerts
+7) Exit
+```
+
+`2) Enable private alerts` asks for one target at a time: `Where should the heartbeat go?` with `1) Uptime Kuma push URL`, `2) healthchecks.io ping URL` and `3) JSON webhook`, then `Provider [1-3]:` and `URL (input hidden):`.
+It checks the URL, says why when it refuses one and asks again, shows the target back as `kind@host` only, and asks `Add another? [y/N]`, up to five.
+An empty URL stops the questions.
+Then it asks `Interval in seconds [60]:`.
+
+From a script, pipe the targets in, one `<provider> <url>` per line:
+
+```bash
+printf 'kuma https://kuma.example.org/api/push/AbC123xyz\n' | sudo bash ~/telcoin-node-scripts/setup-alerts.sh --json --enable --targets-stdin
+```
+
+`TN_ALERT_TARGETS`, with the same lines, works too, and so does `--target kuma=<url>` (repeat it per target), which warns: `--target puts the URL on the command line, where other local users can read it while this runs; pipe it in with --targets-stdin instead.`
+Give the targets from one source only.
+
+Before it writes anything, an enable checks that it runs as root, that the node is installed (`.node-meta` and the node unit), that systemd is 247 or later (for `LoadCredential=`), and that the node command has `--http`, without which it says `The node command has no --http, so the runner cannot read the local RPC; add it with edit-config.sh and run this again. Nothing was changed.`
+Then it writes the files below and sends a test heartbeat.
+Only when at least one target accepts it does it start the timer and record `ENABLE_ALERTS=true` in `.node-meta`.
+Otherwise it removes what it wrote, leaves `.node-meta` as it was and says `No target accepted the test heartbeat; private alerts were not enabled. Check the URLs and run this again.`
+
+The menu asks only the interval, 30 to 3600 seconds, and sets the stall threshold to three intervals (at least 180 seconds) and the inactive threshold to 900 seconds (at least the stall threshold).
+A run with `--enable` (with or without `--json`) takes `--interval N` (default 60, 30 to 3600), `--stall-after N` (default the larger of 180 and three intervals; at least the interval plus 30, at most 86400) and `--inactive-after N` (default the larger of 900 and the stall threshold; at least the stall threshold, at most 86400), and `--label X` (letters, digits, `.`, `_` and `-`, starting with a letter or digit, up to 64 characters).
+A value out of range is refused, and nothing changes.
+
+During setup.
+`setup-node.sh` asks `Set up private alerts once the node is running?` on every network (section 2.2), and a yes records `ENABLE_ALERTS=pending`.
+When the node is running at the end of setup, setup runs `setup-alerts.sh --enable`, which asks for the targets.
+When it is not, the alerts stay pending, and setup says `The node is not running yet, so private alerts stay pending. Once it runs: sudo bash setup-alerts.sh`.
+An enable that does not finish leaves them pending too, and setup names the same command.
+A `--json` setup and `TN_ASSUME_YES=true` do not ask; enable the alerts afterwards with the stdin form above.
+
+Set up the monitor.
+After an enable, or a run that changes the interval, the script says `Set the monitor's heartbeat interval to about <2 x interval> s with 1-2 retries: a node update or a restart you run yourself shows as a short down.`
+With the 60-second default, that is a heartbeat interval of about 120 seconds on the monitor, with one or two retries.
+
+Updates and restarts you run yourself.
+A node update (section 4.2), a configuration change that restarts the node (section 4.3), an add-on that restarts it and `systemctl restart telcoin` all stop the node for a moment.
+A heartbeat that lands in that moment says down, such as `service telcoin inactive (dead)`; in the first 120 seconds after the start it says up, `service telcoin restarting (activating, ...)` or `starting: rpc not answering yet`.
+With the monitor set as above, a planned restart shows as a short down at most.
+For longer work, pause the monitor first; no script pauses it for you.
+
+Test.
+`4) Send a test heartbeat now` runs the heartbeat once, now, and prints each target's result, such as `Target 1 kuma@kuma.example.org: accepted (200)` or `Target 2 webhook@hooks.example.net: failed (000 timeout)`, and what the node read as.
+The same without the menu:
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-alerts.sh --test
+```
+
+Add `--json` for a JSON `done` line (section 7.3).
+The test exits 0 when a target accepted the heartbeat and 1 otherwise.
+When no fresh result appears, it points at `journalctl -u telcoin-heartbeat -n 20`.
+
+Change the targets.
+`3) Change targets`, or the stdin form of the enable on a node whose alerts are on, replaces the whole list, so give every target you want to keep.
+It sends a test heartbeat, and when no target accepts it, the old list goes back: `No target accepted the test heartbeat; the previous targets were put back.`
+An enable without targets on a node whose alerts are on does a refresh.
+
+Refresh after a script update.
+When a script update changes the runner or its library on a host with the alerts installed, `update-scripts.sh` prints `The heartbeat runner or its library changed. Reinstall them on the host:` and the command (section 4.1):
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-alerts.sh --refresh
+```
+
+A refresh (`5) Refresh after a script update`) reinstalls the runner, writes `alerts.env` and both units again with the interval, thresholds and label already set, and restarts the timer.
+Run it too after you change the node's RPC address or port, or its service name; the status reports the difference.
+With the alerts off it says `Private alerts are off; nothing to refresh.`
+
+Change the interval, the thresholds or the label.
+On a node whose alerts are on, `--interval`, `--stall-after`, `--inactive-after` and `--label` replace the values already set, given with `--refresh` or with `--enable` (with or without targets); there is no need to disable first:
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-alerts.sh --refresh --interval 120
+```
+
+A value you leave out keeps the one already set, except that with `--interval` each threshold you leave out follows the new interval as in an enable (360 and 900 seconds for an interval of 120), even one you set before; give it again to keep it.
+A threshold you give must fit the ones kept: a `--stall-after` above the inactive threshold already set is refused (`Refused: --inactive-after must be a whole number of seconds from <stall> (the stall time) to 86400. Nothing was changed.`); give `--inactive-after` with it.
+The run writes `alerts.env` and both units again and restarts the timer; with `--json`, its `done` line lists `alerts:refreshed` and the new `interval` (section 7.3).
+When the same run gives targets, the new values apply only once a target has accepted the test heartbeat, and `alerts:targets-changed` comes first in `applied`.
+If the targets changed but the values could not be applied, it exits 3 with `The new targets are in place, but the new settings were not fully applied; run setup-alerts.sh --refresh with the same options again.`
+Then set the monitor's heartbeat interval to about twice the new interval.
+
+Disable.
+Pause or delete the node's monitor first: a push monitor alerts on silence, so heartbeats that stop look like a dead node.
+Then choose `6) Disable private alerts`, or:
+
+```bash
+sudo bash ~/telcoin-node-scripts/setup-alerts.sh --disable
+```
+
+It stops and removes the timer, the service, the runner and its state, shreds the targets file, removes `alerts.env` and `/etc/telcoin/alerts`, records `ENABLE_ALERTS=false`, and ends with `Pause or delete this node's monitor: a push monitor alerts on silence.`
+A disable that cannot remove the targets file exits 3.
+`remove-node.sh` removes the alerts the same way, before it stops the node (section 4.7).
+
+The files:
+
+| File | Owner, mode | What |
+|---|---|---|
+| `/usr/local/libexec/telcoin/tn-heartbeat` | root 0755 | The runner, a copy of `lib/tn-heartbeat.sh`. |
+| `/etc/systemd/system/telcoin-heartbeat.service` | root 0644 | Runs the runner once; the timer starts it. |
+| `/etc/systemd/system/telcoin-heartbeat.timer` | root 0644 | Starts the service every interval, the first time 120 seconds after boot. |
+| `/etc/telcoin/alerts/` | root 0755 | The two files below. |
+| `/etc/telcoin/alerts/targets` | root 0600 | One `<provider> <url>` per line, at most five. The only secret. |
+| `/etc/telcoin/alerts/alerts.env` | root 0644 | The node's service name and local RPC URL, the network and its chain ID, the label, the health port, the interval and the thresholds. No URL of a monitor. |
+| `/var/lib/private/telcoin-heartbeat/state` | the runner's account, directory 0700 | What the runner remembers between runs: the last status and reason, the consensus header it last saw, and each target's last result. Never a URL. |
+| `/run/telcoin/heartbeat-service` | root 0644 | The node service's state (`systemctl show` of `telcoin.service`). The service rewrites it as root before each run, and the runner reads it. Gone after a reboot until the next run. |
+| `ENABLE_ALERTS` in `.node-meta` | | `true`, `pending` (asked for during setup, not enabled yet) or `false`. Absent means off. |
+
+The runner runs as an account systemd makes for each run (`DynamicUser=yes`).
+It reads the targets through `LoadCredential=`, cannot read the data directory or the passphrase files, holds no capabilities and writes only its state directory.
+That directory is the one path the alerts add that root does not own.
+Such an account cannot ask systemd for the node's service state, so before each run the service writes that state, as root, to `/run/telcoin/heartbeat-service`; that one step does nothing else.
+
+Enable, change, refresh and disable take the update lock, so each refuses while another script holds it; the test takes it too, and the status takes none and needs no root.
+On a host with the host baseline (section 4.13), a change that went through makes the baseline again.
+None of them stops or restarts the node, so they run neither the quorum check (section 4.11) nor the epoch wait (section 4.2).
+
+What check-node reports.
+`check-node.sh` shows the same status as `1) Status`: `Private alerts: on`, `pending` or `off`, the timer, and, run with `sudo`, the last run (`last run Ns ago: up, CvvActive block ... epoch ...`) and each target as `kind@host` with its last result; without `sudo` it says `last run not checked (run with sudo)` and `alerts.env not compared with the node (run with sudo)`.
+Without `sudo` it cannot read `.node-meta` (root 0600) either, so on a host with the timer installed it says `Private alerts: unknown (run with sudo)` and tells whether the alerts are on from `systemctl is-enabled telcoin-heartbeat.timer`.
+On a host without private alerts it prints one line, `Private alerts: off (enable them with setup-alerts.sh)`, and counts nothing.
+Each of these counts as an issue: the alerts are on but the timer is inactive or not installed; no run is recorded, or the last run is older than three intervals plus 30 seconds; the last run recorded no target, or no target accepted it; the targets file is missing, is not a regular file or is not `0600 root:root`; `ENABLE_ALERTS` is set twice in `.node-meta`; the runner is missing or its version differs from the scripts' copy; `alerts.env` is missing or names another service or RPC address than the node's.
+Each warning names its fix, most often `sudo bash setup-alerts.sh --refresh`.
+Its ownership check covers the runner and the files in `/etc/telcoin/alerts`.
+
+Troubleshooting.
+
+```bash
+systemctl status telcoin-heartbeat.timer
+journalctl -u telcoin-heartbeat -n 20
+sudo cat /var/lib/private/telcoin-heartbeat/state
+```
+
+Each run logs one line, `up: <reason> | <pushes>` or `down: <reason> | <pushes>`, such as `up: CvvActive block 1234567 epoch 42 | 1 kuma@kuma.example.org ok 200, 2 webhook@hooks.example.net fail 000 timeout`.
+When the status changed, a line `status up -> down: <reason>` comes before it (`status none -> up: <reason>` on the first run), and `every target failed` follows it when no target accepted the heartbeat.
+A failed push says why: `timeout`, `refused`, `dns`, `tls`, `too-large`, `body` (Kuma answered `"ok":false`), `http` (the code says which) or `curl-N`; code `000` means no answer came.
+A run in which every target failed leaves the service failed, and the timer keeps starting it.
+A `config:` line means the runner refused its settings or its targets and sent nothing: run `setup-alerts.sh --refresh`, or give the targets again with `3) Change targets`.
+When the heartbeat stays up while the node is stopped, check that `cat /run/telcoin/heartbeat-service` shows `ActiveState=` after a run: without that file the runner cannot see the service and only the RPC checks decide, so run `sudo bash setup-alerts.sh --refresh` to install the current unit.
+The state file holds `key=value` lines: the last run, status, reason, mode, block and epoch, and `push_1` to `push_5` (`<provider> ok|fail <code> [why] <host>`).
 
 ## 5. Public RPC (https + wss)
 
@@ -1641,6 +1875,7 @@ If an explicit URL differs from the domain, setup warns that `rpc-enable` will r
 | `remove-node.sh` | `--json --remove observer\|validator --scope service\|data\|keys --yes [--remove-ui]`. The `--remove` value is a UI slot name, not a role; either one removes the node. |
 | `migrate-node-naming.sh` | `--yes`, `--allow-quorum-risk`. |
 | `setup-observability.sh` | `--json`, with the ingest token on standard input (`--token-stdin`); `--token <value>` still works but warns. |
+| `setup-alerts.sh` | `--json` with exactly one of `--status`, `--enable`, `--test`, `--refresh`, `--disable` (two or none are refused); without `--json` each action prints plain text, and with no action the menu opens. `--enable` takes its targets from one of `--targets-stdin` (one `<provider> <url>` per line), `TN_ALERT_TARGETS` (the same lines) or `--target <provider>=<url>` (repeatable; warns), plus `--interval`, `--stall-after`, `--inactive-after`, `--label` and `--allow-http`; `--refresh` takes `--interval`, `--stall-after`, `--inactive-after` and `--label` too, and on a node whose alerts are on either action replaces the values it is given (section 4.14). Every `done` with `ok:true` carries `applied` and `network`. `applied` holds `alerts:enabled`, `alerts:targets-changed`, `alerts:refreshed`, `alerts:tested` or `alerts:disabled`; `alerts:targets-changed` then `alerts:refreshed` when one run changed the targets and the settings; and nothing for a status or for a refresh with the alerts off, which adds no `interval` either. An enable or a test adds `node_status`, `node_reason` and `targets` (one object per target with `n`, `provider`, `host`, `result` and `code`, plus `why` for a failed push), and an enable or a refresh adds `interval`. `--status` takes no lock and needs no root; it carries `enabled` (`true`, `pending` or `false`, or `null` when it cannot read `.node-meta`, as without root), `timer` (`active`, `inactive` or `absent`), `last_run`, `last_status` and `last_reason` (`null` without root), `runner_version`, `issues` and `targets`. Exit status: 0 done; 1 nothing changed, `.node-meta` included: a refusal, an enable whose test heartbeat no target accepted, or a test that no target accepted or that recorded no run; 2 a library gap; 3 a step failed after something changed, such as a disable that left the targets file. An unknown argument is refused. |
 | `check-node.sh` | `--audit` (section 1.2). |
 
 The status and DNS-check phases and `update-node.sh --json --check` print a single JSON object instead of an event stream.

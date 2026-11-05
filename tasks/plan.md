@@ -1,3 +1,39 @@
+# Plan: private alerts, a heartbeat pushed from the node host (setup-alerts.sh), issue #60 (2026-11-04)
+
+Branch `private-alerts` off `hardening-followups` (4a2cf6e); PR base `hardening-followups`;
+folded into the unreleased `scripts-v2.1.0` note. Shared spec `tasks/spec-alerts-shared.md`,
+package specs `tasks/spec-alerts-<PKG>.md`, checkpoints `tasks/ckpt-alerts-<PKG>.md`.
+
+## W0 Setup (orchestrator)
+- [x] `.claude/project-context.md` regenerated; branch created; issue #60 opened
+- [x] shared spec, eight package specs, checkpoint stubs, this plan block
+
+## W1 Implementation (opus, parallel, one checkout, no commits)
+- [x] A1a `lib/tn-heartbeat.sh` + `tools/tests/heartbeat_test.sh`
+- [x] A1b `lib/alerts.sh` + the common.sh source block + `tools/tests/alerts_test.sh` + `tools/tests/vm.d/P0-alerts.sh`
+- [x] A3a setup-node.sh + check-node.sh + host_baseline_test, check_node_hardening_test, setup_node_alerts_test
+- [x] A3b remove-node.sh + update-scripts.sh + AGENTS.md + remove_test, remove_addons_test, updater_manifest_test, addon_gates_test
+- [x] A4a OPERATOR.md §4.14 and the short additions; README section, rows, changelog
+- [x] A4b CHANGELOG/scripts-v2.1.0.md, docs/testnet-addons.md, followup.md, partner guide 1.7 Markdown + metadata
+
+## W2 Script (opus)
+- [x] A2 `setup-alerts.sh` + `tools/tests/setup_alerts_test.sh` + addon_oldlib_test row
+
+## W3 Verification (opus)
+- [x] V1 (code) and V1d (docs) gates in all three environments, lints, systemd-analyze, AGENTS-rule sweep, runner mutants, docs vs code
+
+## W4 Fixes
+- [x] fixers F-A (library, setup-alerts), F-B (runner), F-C (OPERATOR, README), F-D (release note, guide, add-ons doc, follow-ups, AGENTS.md); V2 re-checks
+
+## W5 Release prep and PR (orchestrator)
+- [x] `tools/gen-checksums.sh`; guide PDF built twice in the container ("PDF unchanged")
+- [x] `git diff --check`; nine commits in the planned order, no trailers
+- [x] push; PR #61 against `hardening-followups` ("Closes #60"); comment on #59 about the cut order
+- [x] CI round: the VM job's dbus finding (root pre-step), two BSD test fixes, three rebases (guide 1.8); force-push
+- [x] `tasks/todo.md` review section (the checkout stays on `private-alerts`: another worktree holds `hardening-followups`)
+
+---
+
 # Plan: round 2 on PR #59 (2026-11-04)
 
 GPG-signed script releases, per-network image packages, three code owners, a mainnet epoch

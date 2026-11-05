@@ -275,18 +275,43 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   keeps the old `ENABLE_*` values. Accepted for now; closes when Alloy is rolled back on that
   failure.
 - From the first release that carries telcoin-network #1696 (d2a0b525), a bare `--healthcheck
-  <port>` binds `127.0.0.1` instead of `0.0.0.0`, and a bind that fails stops the node.
-  `setup-observability.sh` (its health-check comments) and `docs/testnet-addons.md` (its
-  health-check paragraphs) say the health port is open on every interface, and the start script passes the bare
-  `43174`, so the Association monitor, the overlay and the Google health-check ranges would be
-  refused; `v0.16.0-adiri` rejects the address form (`--healthcheck 0.0.0.0:43174`, which logs a
-  WARN on main). The local probes (`curl 127.0.0.1:43174`, the UI helper, Docker with
-  `--network=host`) keep working either way. Closes when the scripts choose the flag form by node
-  release and the add-on docs say which interface the port binds. (guide-1.5)
-  Why: an outside monitor goes dark, without a message, on the first release with the change.
+  <port>` binds `127.0.0.1` instead of `0.0.0.0`, and a bind that fails stops the node. This
+  concerns only the bind form the Association monitor's pull probe needs: the start script passes
+  the bare `43174`, so that monitor, the overlay and the Google health-check ranges would be
+  refused, and `v0.16.0-adiri` rejects the address form (`--healthcheck 0.0.0.0:43174`, which logs
+  a WARN on main). `setup-observability.sh` (its health-check comments) and
+  `docs/testnet-addons.md` (its health-check paragraphs) say the port is open on every interface.
+  Local probes keep working either way: `curl 127.0.0.1:43174`, the UI helper, Docker with
+  `--network=host`, and the private alerts runner, which reads
+  `http://127.0.0.1:<port>/health/network`. Closes when the scripts choose the flag form by node
+  release for the Association monitor, or that monitor retires (below), and the add-on docs say
+  which interface the port binds. (guide-1.5)
+  Why: the Association's outside monitor goes dark, without a message, on the first release with
+  the change.
+- The health monitoring add-on's pull probe (the Association monitor TCP-probing port `43174`
+  through a ufw rule) can retire once the Association's Uptime Kuma takes pushes: the push
+  heartbeat of `setup-alerts.sh` needs no open port and works on every network. Closes when the
+  Association's monitor takes pushes and the add-on is retired or moved onto the heartbeat
+  (from #60).
+- A stop the operator plans shows on their monitor as a short down. update-node, edit-config,
+  setup-observability, install-caddy, `prepare-stake.sh --rotate-address` and the chain-data wipe
+  stop or restart the node, and the next heartbeat reports the unit inactive or the RPC not
+  answering. Pausing the timer would not help: a push monitor alerts on silence. Closes with a
+  maintenance marker under `/run/telcoin` (bounded in size and age, root 0644) that those scripts
+  write before their own stop and remove after it, which the runner reports as
+  `up maintenance: ...` while the marker is fresh (from #60).
 
 ## UI
 
+- A heartbeat run in flight when the node stops reports the starting grace once (its root
+  pre-step read the service before the stop, and the RPC then fails within `ALERTS_RESTART_GRACE`),
+  so the first `down` arrives one interval later than the stop. Accepted: the monitor's
+  heartbeat interval already allows one missed push. Closes when the runner re-reads the
+  service state after an RPC failure, or when the maintenance marker above lands.
+- The Node Manager UI has no private alerts card. Closes when a card shows
+  `setup-alerts.sh --json --status` and can enable, test and change targets through the helper,
+  with the target URLs on the helper's standard input (`--targets-stdin`), never on its command
+  line or in its environment (from #60).
 - The Node Manager UI's discard button reports only the helper's exit code; the `done` line of a
   discard after a started one-way update carries `"storage_migration":true` and a warning that the
   launch files were kept, which the UI does not show yet. Closes when the discard route streams or
@@ -411,6 +436,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   before keeping it.
 - A `--json` finalize cannot undo the bootstrap-peers or state-export choices made at keygen:
   there is no `--bootstrap-peers none` and no `--no-state-export`.
+- A re-run of setup-node writes `ENABLE_HEALTHCHECK_MONITOR`, `ENABLE_OBSERVABILITY`,
+  `ENABLE_METRICS` and `ENABLE_VPN` from this run's answers, so a re-run that does not opt in again
+  records `false` over a live `true` or `pending` while the add-on keeps running. Pre-existing;
+  `ENABLE_ALERTS` reads its value back from `.node-meta` and keeps `true` or `pending`. Closes when
+  the add-on keys are read back the same way.
 - The warning that `--binary-path` is used only with `--install-method existing` is printed before
   the welcome screen clears the terminal. Closes when it goes through `NODE_FLAG_WARNINGS`.
 - Source builds now build in `/var/lib/tn-build/target`; a host that built from source before keeps
@@ -491,6 +521,12 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   tndb node, where removing `consensus-db/tndb/epoch` beside the marker is refused at the next
   start. (guide-1.5)
   Why: the only way back across that step is the pre-update snapshot.
+- The python-less fallback of `_uc_header_number` (`tn_json_field ... number`) takes the first
+  `"number"` in a `tn_latestConsensusHeader` answer, which can be the nested
+  `latest_execution_block.number` of the `sub_dag` (serialised before the header's own `number`)
+  rather than the header's. Closes when it walks the braces as `hb_header_number` in
+  `lib/tn-heartbeat.sh` does and takes the number at the result's own depth. A script change, so a
+  version bump and sidecar.
 - The `existing` hand check that update-node prints (interactive and `--json`) runs plain `gpgv`,
   which prints `Good signature from` and exits 0 on an expired or revoked key; OPERATOR 4.2 and 4.10
   and README now tell the operator to add `--status-fd 1` and read the status lines. Closes when the
@@ -607,7 +643,8 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   test is strict.
 - `check_has` and `check_lacks` in `tools/tests/lib.sh` pipe into `grep -q` with pipefail on, so on a
   large text under bash 3.2 `check_has` can fail and `check_lacks` can pass by mistake. Use
-  `grep -qxF -- "$2" <<<"$3"`.
+  `grep -qxF -- "$2" <<<"$3"`. The same pipe shape in `tools/tests/host_baseline_test.sh` (the
+  two `rj | grep -q` checks near its end) fails under load when several suites run at once.
 - `tools/check-bash32.sh` misses `read -N`, `shopt -s globstar`, `{1..10..2}`, `local -`,
   `declare -I`, `unset 'a[-1]'`, `$'\u...'` and a redirection before `declare`, and a `# bash32-ok`
   inside a string also hides its line.

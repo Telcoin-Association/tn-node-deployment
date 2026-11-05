@@ -144,6 +144,13 @@
 #                            whose node is already installed, --host-baseline alone
 #                            makes (or makes again) the baseline and changes nothing else.
 #
+# PRIVATE ALERTS (optional, every network). Interactive setup asks whether this host
+# should push a heartbeat to a monitor you own (an Uptime Kuma push URL, a healthchecks.io
+# ping URL or a JSON webhook). Once the node runs, setup starts setup-alerts.sh --enable,
+# which asks for the URLs and sends a test heartbeat; .node-meta records ENABLE_ALERTS
+# (true, or pending until that is done). A --json run never asks: enable them afterwards
+# with setup-alerts.sh --json --enable --targets-stdin.
+#
 # LOGS AND RESTARTS
 #   --log-target journal|file  Where the node logs: the systemd journal (default on
 #                            mainnet; capped at 4G by a journald drop-in) or the two files
@@ -282,6 +289,9 @@ ENABLE_VPN="false"          # true | pending | false
 VPN_OVERLAY_IP=""
 VPN_NODE_PUBKEY=""
 REGION=""
+# Private alerts (setup-alerts.sh), offered on every network: prompt_alerts records
+# pending, step_alerts runs setup-alerts.sh once the node runs, .node-meta keeps the value.
+ENABLE_ALERTS="false"       # true | pending | false
 
 # =============================================================================
 # STEPS
@@ -435,6 +445,14 @@ step_preflight() {
             print_warn "Region label kept as ${REGION} (letters, digits, _ and - only)."
         fi
     fi
+    # Private alerts, on every network. A re-run keeps the value an earlier run or
+    # setup-alerts.sh recorded (true or pending), so it never turns live alerts off.
+    local alerts_meta=""
+    setup_meta_read alerts_meta ENABLE_ALERTS "${CONFIG_DIR}/.node-meta"
+    case "$alerts_meta" in
+        true|pending) ENABLE_ALERTS="$alerts_meta" ;;
+    esac
+    json_mode || prompt_alerts
 
     echo ""
     print_step "Selecting install method..."
@@ -2600,6 +2618,7 @@ step_create_service() {
         "ENABLE_VPN=${ENABLE_VPN:-false}" \
         "VPN_OVERLAY_IP=${VPN_OVERLAY_IP:-}" \
         "VPN_NODE_PUBKEY=${VPN_NODE_PUBKEY:-}" \
+        "ENABLE_ALERTS=${ENABLE_ALERTS:-false}" \
         "PUBLIC_RPC_URL=${PUBLIC_RPC_URL:-}" \
         "PUBLIC_WS_URL=${PUBLIC_WS_URL:-}" \
         "LOG_TARGET=${LOG_TARGET}" \
@@ -2799,6 +2818,56 @@ step_public_rpc() {
     return 0
 }
 
+# prompt_alerts -- interactive setup, every network: offer private alerts, a heartbeat
+# this host pushes to a monitor the operator owns (setup-alerts.sh). Yes records
+# ENABLE_ALERTS=pending, no records false; step_alerts asks for the URLs once the node
+# runs. Asks nothing under TN_ASSUME_YES, without setup-alerts.sh beside this script, or
+# when private alerts are already on.
+prompt_alerts() {
+    [[ "${TN_ASSUME_YES:-false}" == "true" ]] && return 0
+    [[ -f "${SCRIPT_DIR}/setup-alerts.sh" ]] || return 0
+    [[ "$ENABLE_ALERTS" == "true" ]] && return 0
+    print_header "Private alerts (optional)"
+    print_info "A timer on this host pushes a heartbeat to a monitor you own, through an Uptime Kuma push URL, a healthchecks.io ping URL or a JSON webhook."
+    print_info "Each heartbeat says up or down with the reason (node mode, block and epoch); a webhook also gets this host's label and the network. Nothing else is sent."
+    print_info "No port opens on this host, and the Telcoin Association is not involved."
+    print_info "Setup asks for the monitor URLs once the node is running."
+    if confirm "Set up private alerts once the node is running?"; then
+        ENABLE_ALERTS="pending"
+    else
+        ENABLE_ALERTS="false"
+    fi
+    return 0
+}
+
+# step_alerts -- interactive setup, after the add-ons: when prompt_alerts recorded pending
+# and the node runs, run setup-alerts.sh --enable, which asks for the URLs, sends a test
+# heartbeat and takes the update lock itself (setup has released it). A node that is not
+# running, or an enable that did not finish, leaves private alerts pending with the
+# command that finishes them. It never stops or restarts the node.
+step_alerts() {
+    local rc=0
+    json_mode && return 0
+    [[ "$ENABLE_ALERTS" == "pending" ]] || return 0
+    print_header "Private alerts"
+    if [[ ! -f "${SCRIPT_DIR}/setup-alerts.sh" ]]; then
+        print_warn "setup-alerts.sh is missing (${SCRIPT_DIR}/setup-alerts.sh), so private alerts stay pending. Restore it with update-scripts.sh, then run: sudo bash setup-alerts.sh"
+        return 0
+    fi
+    if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        print_warn "The node is not running yet, so private alerts stay pending. Once it runs: sudo bash setup-alerts.sh"
+        return 0
+    fi
+    bash "${SCRIPT_DIR}/setup-alerts.sh" --enable 3>&- || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        ENABLE_ALERTS="true"
+        print_ok "Private alerts are on."
+    else
+        print_warn "Private alerts were not set up (setup-alerts.sh exit ${rc}, see above); they stay pending. To finish: sudo bash setup-alerts.sh"
+    fi
+    return 0
+}
+
 # step_host_baseline -- --host-baseline: install auditd and aide, the node's audit
 # rules and its AIDE baseline (tn_host_baseline_install) under the update lock. It
 # runs after public RPC and the add-ons, which write into /etc/telcoin too, so the
@@ -2913,6 +2982,17 @@ step_final_summary() {
         print_info "Keep inbound TCP 80 + 443 open to this server (cloud firewall too): Caddy"
         print_info "uses them to obtain and renew the TLS certificate."
     fi
+    # Private alerts, when they were asked for (prompt_alerts) or are already on.
+    case "${ENABLE_ALERTS:-false}" in
+        true)
+            echo ""
+            print_ok "Private alerts: on"
+            ;;
+        pending)
+            echo ""
+            print_warn "Private alerts: pending. To finish: sudo bash setup-alerts.sh"
+            ;;
+    esac
     echo ""
     echo "  Useful commands:"
     echo ""
@@ -3588,6 +3668,7 @@ main() {
     setup_release_lock
     step_public_rpc
     step_testnet_addons
+    step_alerts
     step_host_baseline
     step_final_summary
 }

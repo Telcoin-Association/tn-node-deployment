@@ -2,7 +2,8 @@
 # =============================================================================
 # tools/tests/addon_gates_test.sh -- the add-on gates in lib/common.sh:
 # validate_health_src, the health-port rules (apply_kuma_rule and the operator
-# extras), allow_overlay_ssh, addon_meta_get and tn_testnet_addons_present.
+# extras), allow_overlay_ssh, addon_meta_get and tn_testnet_addons_present
+# (which never counts the private alerts).
 #
 #   bash tools/tests/addon_gates_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/addon_gates_test.sh
@@ -151,6 +152,16 @@ P="$TN_ROOT_PREFIX"
 out="$(tn_testnet_addons_present)"; rc=$?
 check_rc "addons none rc 1" 1 "$rc"
 check "addons none output" "" "$out"
+# The private alerts run on every network and are no testnet add-on: their
+# files alone count for nothing, here and in the lists below.
+mkdir -p "$P/etc/systemd/system" "$P/usr/local/libexec/telcoin" "$P/etc/telcoin/alerts"
+for f in /etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service \
+         /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts/targets /etc/telcoin/alerts/alerts.env; do
+    : > "$P$f"
+done
+out="$(tn_testnet_addons_present)"; rc=$?
+check_rc "addons, private alerts alone: rc 1" 1 "$rc"
+check "addons, private alerts alone: no output" "" "$out"
 mkdir -p "$P/etc/systemd/system" "$P/etc/caddy" "$P/etc/wireguard"
 : > "$P/etc/systemd/system/telcoin-alloy.service"
 printf '# Managed by the Telcoin Node Manager\n' > "$P/etc/caddy/Caddyfile"

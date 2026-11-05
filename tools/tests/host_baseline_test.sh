@@ -596,7 +596,7 @@ setup_release_lock() { rec unlock; }
 for f in setup_read_passphrase init_public_rpc_flags init_install_flags init_node_inputs init_node_extra_flags \
          json_check_install_flags json_refuse_installed finalize_install_inputs finalize_node_extra_flags \
          step_welcome step_preflight step_config step_create_infrastructure step_generate_keys \
-         step_write_config step_create_service step_public_rpc step_testnet_addons step_final_summary; do
+         step_write_config step_create_service step_public_rpc step_testnet_addons step_alerts step_final_summary; do
     eval "${f}() { rec ${f}; return 0; }"
 done
 main "$@"
@@ -613,7 +613,7 @@ snrun --host-baseline --audit
 check "setup-node: --host-baseline is parsed" "audit HOST_BASELINE=true unlock " "$(calls)"
 snrun --host-baseline
 check "setup-node: full setup runs the baseline last, under the lock, before the summary" \
-    "setup_read_passphrase init_public_rpc_flags init_install_flags init_node_inputs init_node_extra_flags step_welcome step_preflight step_config step_create_infrastructure step_generate_keys step_write_config step_create_service unlock step_public_rpc step_testnet_addons lock install setup_progress unlock step_final_summary unlock " \
+    "setup_read_passphrase init_public_rpc_flags init_install_flags init_node_inputs init_node_extra_flags step_welcome step_preflight step_config step_create_infrastructure step_generate_keys step_write_config step_create_service unlock step_public_rpc step_testnet_addons step_alerts lock install setup_progress unlock step_final_summary unlock " \
     "$(calls)"
 snrun
 check "setup-node: without the flag no baseline" no "$([[ "$(calls)" == *"install setup_progress"* ]] && echo yes || echo no)"

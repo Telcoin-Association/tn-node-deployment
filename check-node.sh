@@ -10,6 +10,8 @@
 # error. The network RPC is the public RPC of the network recorded in
 # .node-meta. Falls back gracefully if the local RPC is unreachable -- the
 # network's view of your node is still reported. Runs on Linux and macOS.
+# Private alerts (setup-alerts.sh), when this host has them, are checked too:
+# the timer, the last heartbeat and its pushes, the files' owners and modes.
 #
 # USAGE:
 #   bash check-node.sh                              # check the installed node
@@ -1894,12 +1896,15 @@ _cn_own() {
 # script paths root's, .node-meta and the passphrase file root 0600, backups
 # root 0700, the data dir the service account's 0700, the log dir
 # root:telcoin-log 0750, the node log dir (NODE_LOG_DIR, when it exists) the
-# service account's with group telcoin-log 2750 (setgid), nothing under the install, config and start-script
-# trees owned by another account. The old layout warns (on mainnet it fails: a
-# mainnet host is installed fresh); a drifted layout 2 fails.
+# service account's with group telcoin-log 2750 (setgid), the private alerts
+# files root's when they exist (the heartbeat runner 0755, /etc/telcoin/alerts
+# 0755, its targets file 0600, alerts.env 0644), nothing under the install,
+# config and start-script trees owned by another account. The old layout
+# warns (on mainnet it fails: a mainnet host is installed fresh); a drifted
+# layout 2 fails.
 check_ownership_layout() {
     local pre="${TN_ROOT_PREFIX:-}" meta layout rc=0 net v suser sgroup method
-    local inst etc libexec start dd logd d extra
+    local inst etc libexec start dd logd d extra hb
     if ! have_fns tn_root_dir_ok tn_start_script_path tn_detect_network; then
         CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_ownership_layout"
         return 0
@@ -1973,6 +1978,14 @@ check_ownership_layout() {
     [[ ! -e "${etc}/node.env" && ! -L "${etc}/node.env" ]] || _cn_own "${etc}/node.env" root root 0644
     [[ ! -e "${etc}/bls-passphrase" && ! -L "${etc}/bls-passphrase" ]] || _cn_own "${etc}/bls-passphrase" root root 0600
     [[ ! -e "${etc}/bls-passphrase.cred" && ! -L "${etc}/bls-passphrase.cred" ]] || _cn_own "${etc}/bls-passphrase.cred" root root 0600
+    # Private alerts (setup-alerts.sh): the runner and its config. The targets file
+    # holds the monitor URLs, which are secrets. The runner's own state lives in its
+    # systemd StateDirectory, outside this table.
+    hb="${pre}/usr/local/libexec/telcoin/tn-heartbeat"
+    [[ ! -e "$hb" && ! -L "$hb" ]] || _cn_own "$hb" root root 0755
+    [[ ! -e "${etc}/alerts" && ! -L "${etc}/alerts" ]] || _cn_own "${etc}/alerts" root root 0755
+    [[ ! -e "${etc}/alerts/targets" && ! -L "${etc}/alerts/targets" ]] || _cn_own "${etc}/alerts/targets" root root 0600
+    [[ ! -e "${etc}/alerts/alerts.env" && ! -L "${etc}/alerts/alerts.env" ]] || _cn_own "${etc}/alerts/alerts.env" root root 0644
     [[ ! -e "${pre}/var/backups/telcoin" ]] || _cn_own "${pre}/var/backups/telcoin" root root 0700
     if dd="$(detect_data_dir)" && [[ -e "$dd" || -L "$dd" ]]; then
         _cn_own "$dd" "$suser" "$sgroup" 0700
@@ -2143,6 +2156,27 @@ check_healthcheck_on_mainnet() {
     return 0
 }
 
+# check_alerts -- private alerts (setup-alerts.sh, every network). alerts_status
+# (lib/alerts.sh) prints its own lines and returns the number of issues it found
+# (the timer off while alerts are on, a stale last run, every push failing, a
+# loose targets file, an outdated runner); they count in HEALTH_ISSUES. Without
+# lib/alerts.sh the check is skipped, and named in the skipped-checks warning only
+# when this host has private alerts (the timer unit exists, or .node-meta says
+# ENABLE_ALERTS=true or pending).
+check_alerts() {
+    local n=0 v=""
+    if ! have_fns alerts_status; then
+        v="$(meta_get ENABLE_ALERTS 2>/dev/null || true)"
+        if [[ -e "${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-heartbeat.timer" || "$v" == "true" || "$v" == "pending" ]]; then
+            CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_alerts"
+        fi
+        return 0
+    fi
+    alerts_status || n=$?
+    HEALTH_ISSUES=$(( HEALTH_ISSUES + n ))
+    return 0
+}
+
 # =============================================================================
 # REPORT HEADER
 # =============================================================================
@@ -2214,7 +2248,7 @@ resolve_identity
 report_address_mismatch
 # Hardening checks. Each function lands with its own package; a missing one is skipped.
 for _hc in check_bls_cleartext check_update_lock check_ownership_layout check_unit_environ \
-           check_unit_sandbox check_health_score check_healthcheck_on_mainnet; do
+           check_unit_sandbox check_health_score check_healthcheck_on_mainnet check_alerts; do
     have_fns "$_hc" && "$_hc"
 done
 unset _hc

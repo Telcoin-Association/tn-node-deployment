@@ -10616,4 +10616,7 @@ step_testnet_addons() {
 if [[ -f "${__COMMON_DIR}/observability.sh" ]]; then
     source "${__COMMON_DIR}/observability.sh"
 fi
+if [[ -f "${__COMMON_DIR}/alerts.sh" ]]; then
+    source "${__COMMON_DIR}/alerts.sh"
+fi
 : # ensure common.sh always sources with status 0

@@ -9,8 +9,10 @@
 # its lock file stay; a symlinked libexec dir left alone), the log-reader group,
 # the JSON path, finishing a removal that stopped part way (JSON and the menu's
 # leftover path), the update lock, the refusal to remove anything when
-# .node-meta sets a key more than once, and the Alloy ingest token file shredded
-# by the add-on teardown.
+# .node-meta sets a key more than once, the Alloy ingest token file shredded
+# by the add-on teardown, and the private alerts removed before the node stops
+# (every scope, the menu, the leftover path; not the chain-data-only wipe; also
+# with no lib/alerts.sh).
 #
 #   bash tools/tests/remove_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/remove_test.sh
@@ -941,6 +943,209 @@ check_rc "p2p limit: json keys rc 0" 0 "$rc"
 gone "p2p limit: json unit" "$SD/telcoin-p2p-limit.service"
 check "p2p limit: json table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
 rm -f "$NFT_TABLE_FILE"
+
+# ALERTS
+# --- the private alerts go before the node stops, at every scope -----------------
+# mkalerts -- add to the fixture what setup-alerts.sh installs: both heartbeat
+# units, the runner, the config dir with the targets (holding a push token) and
+# env files, the runner's state dir and the link systemd keeps beside it, the
+# service-state file (and the .tmp of an interrupted write) the unit's root
+# ExecStartPre= leaves in /run/telcoin beside the update lock, and
+# ENABLE_ALERTS=true in .node-meta.
+HB_TOKEN="hbtok0123456789abcdefXYZ"
+# One line: BSD awk refuses a -v value that holds a newline.
+ALERT_PATHS="/etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp"
+HB_HINT="Pause or delete this node's monitor: a push monitor alerts on silence."
+mkalerts() {
+    mkdir -p "$SD" "$LX" "$ETC/alerts" "$R/var/lib/private/telcoin-heartbeat" "$R/run/telcoin"
+    printf 'ActiveState=active\nSubState=running\n' > "$R/run/telcoin/heartbeat-service"
+    printf 'ActiveState=active\n' > "$R/run/telcoin/heartbeat-service.tmp"
+    printf '[Timer]\nOnUnitActiveSec=60\n' > "$SD/telcoin-heartbeat.timer"
+    printf '[Service]\nDynamicUser=yes\n' > "$SD/telcoin-heartbeat.service"
+    printf '#!/usr/bin/env bash\nHEARTBEAT_VERSION="2.1.0"\n' > "$LX/tn-heartbeat"
+    printf 'kuma https://kuma.example.org/api/push/%s\n' "$HB_TOKEN" > "$ETC/alerts/targets"
+    printf 'ALERTS_SERVICE=telcoin\nALERTS_INTERVAL=60\n' > "$ETC/alerts/alerts.env"
+    printf 'last_status=up\n' > "$R/var/lib/private/telcoin-heartbeat/state"
+    ln -s private/telcoin-heartbeat "$R/var/lib/telcoin-heartbeat"
+    if [[ -f "$ETC/.node-meta" ]]; then printf 'ENABLE_ALERTS=true\n' >> "$ETC/.node-meta"; fi
+    : > "$CALLS"
+}
+# alerts_gone NAME -- every alerts path is gone.
+alerts_gone() {
+    local p
+    for p in $ALERT_PATHS; do
+        gone "$1: ${p}" "$R$p"
+    done
+}
+# drop_alerts -- the snapshot on stdin without the alerts paths: the tree the
+# shared contract's alerts_disable leaves (everything else as it was).
+drop_alerts() {
+    awk -v r="$R" -v l="$ALERT_PATHS" '
+        BEGIN { n = split(l, a, " ") }
+        { for (i = 1; i <= n; i++) { p = r a[i]; if ($0 == p || index($0, p "/") == 1) next } print }'
+}
+# alerts_before_stop NAME -- in the call log, the timer was disabled before the
+# node unit was stopped.
+alerts_before_stop() {
+    local a s
+    a="$(grep -n -x 'systemctl disable --now telcoin-heartbeat.timer' "$CALLS" | head -n 1 | cut -d: -f1)"
+    s="$(grep -n -x 'systemctl stop telcoin' "$CALLS" | head -n 1 | cut -d: -f1)"
+    check "$1: alerts removed before the node stops" yes \
+        "$([[ -n "$a" && -n "$s" && $a -lt $s ]] && echo yes || echo "no (alerts at ${a:-none}, stop at ${s:-none})")"
+}
+# meta_set logs instead of writing: the fixture tree is not root-owned, so the
+# real one refuses; remove_alerts' best-effort write is checked in the call log.
+meta_set() { printf 'meta_set %s\n' "$*" >> "$CALLS"; }
+
+# remove_alerts alone: the contract's remaining tree, the order of the calls,
+# the targets file shredded, the meta value, one hint and no token printed.
+mkfixture; mkalerts
+before="$(snapshot)"
+remove_alerts > "$T/out" 2>&1; rc=$?
+check_rc "remove_alerts: rc 0" 0 "$rc"
+alerts_gone "remove_alerts"
+check "remove_alerts: the rest of the tree as it was" "$(printf '%s\n' "$before" | drop_alerts)" "$(snapshot)"
+kept "remove_alerts: /var/lib/private stays" "$R/var/lib/private"
+kept "remove_alerts: /run/telcoin stays" "$R/run/telcoin"
+kept "remove_alerts: the update lock stays" "$R/run/telcoin/update.lock"
+check "remove_alerts: systemctl calls in order" "systemctl disable --now telcoin-heartbeat.timer
+systemctl stop telcoin-heartbeat.service
+systemctl clean --what=state telcoin-heartbeat.service
+systemctl daemon-reload
+systemctl reset-failed telcoin-heartbeat.service" "$(grep '^systemctl ' "$CALLS")"
+check_has "remove_alerts: targets shredded" "shred -u -- $ETC/alerts/targets" "$(calls)"
+check_has "remove_alerts: ENABLE_ALERTS=false written" "meta_set ENABLE_ALERTS false $ETC/.node-meta" "$(calls)"
+check "remove_alerts: the hint once" 1 "$(grep -cF "$HB_HINT" "$T/out")"
+check "remove_alerts: says what it removes" yes "$(grep -qF 'Removing private alerts (telcoin-heartbeat)' "$T/out" && echo yes || echo no)"
+check_lacks "remove_alerts: the token is not printed" "$HB_TOKEN" "$(cat "$T/out")"
+
+# The library's alerts_disable, where this tree has it, leaves the same tree.
+after="$(snapshot)"
+if declare -F alerts_disable >/dev/null 2>&1; then
+    mkfixture; mkalerts
+    ( alerts_disable "" no-hint ) > "$T/out" 2>&1
+    check "alerts_disable leaves the tree remove_alerts leaves" "$after" "$(snapshot)"
+else
+    skip "alerts_disable leaves the tree remove_alerts leaves" "lib/alerts.sh is not in this tree"
+fi
+
+# Only the service-state file is left (the units already gone): it counts as
+# alerts, and it goes without the lock dir.
+mkfixture
+printf 'ActiveState=active\n' > "$R/run/telcoin/heartbeat-service"
+: > "$CALLS"
+check_rc "only the service-state file: alerts present" 0 "$(rm_alerts_present; echo $?)"
+remove_alerts > "$T/out" 2>&1
+gone "only the service-state file: removed" "$R/run/telcoin/heartbeat-service"
+kept "only the service-state file: /run/telcoin stays" "$R/run/telcoin"
+kept "only the service-state file: the update lock stays" "$R/run/telcoin/update.lock"
+
+# Nothing of it here: nothing said, nothing called.
+mkfixture
+remove_alerts > "$T/out" 2>&1; rc=$?
+check_rc "no alerts: rc 0" 0 "$rc"
+check "no alerts: prints nothing" "" "$(cat "$T/out")"
+check_lacks "no alerts: no heartbeat call" "heartbeat" "$(calls)"
+check_lacks "no alerts: no meta write" "meta_set" "$(calls)"
+
+# A symlinked config dir: the link goes, what it points at stays.
+mkfixture
+mkdir -p "$OUT/alerts"
+printf 'kuma https://kuma.example.org/api/push/%s\n' "$HB_TOKEN" > "$OUT/alerts/targets"
+ln -s "$OUT/alerts" "$ETC/alerts"
+: > "$CALLS"
+remove_alerts > /dev/null 2>&1
+gone "symlinked alerts dir: the link" "$ETC/alerts"
+check "symlinked alerts dir: the target file intact" "kuma https://kuma.example.org/api/push/${HB_TOKEN}" "$(cat "$OUT/alerts/targets" 2>/dev/null)"
+check_lacks "symlinked alerts dir: nothing shredded through it" "shred" "$(calls)"
+
+# --json, every scope: the step comes before the stop, the hint is a log event
+# (RM_JSON is what run_json_mode sets before it calls json_remove).
+for scope in service data keys; do
+    mkfixture; mkalerts
+    ( set -e; RM_JSON=true; json_remove validator "$scope" ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+    check_rc "alerts json ${scope}: rc 0" 0 "$rc"
+    alerts_gone "alerts json ${scope}"
+    alerts_before_stop "alerts json ${scope}"
+    check_has "alerts json ${scope}: step event" '{"event":"step","msg":"Removing private alerts (telcoin-heartbeat)"}' "$(cat "$T/json")"
+    check_has "alerts json ${scope}: hint event" "{\"event\":\"log\",\"msg\":\"${HB_HINT}\"}" "$(cat "$T/json")"
+    n_a="$(grep -n 'Removing private alerts' "$T/json" | head -n 1 | cut -d: -f1)"
+    n_s="$(grep -n 'Stopping and disabling telcoin' "$T/json" | head -n 1 | cut -d: -f1)"
+    check "alerts json ${scope}: the alerts step before the stop step" yes \
+        "$([[ -n "$n_a" && -n "$n_s" && $n_a -lt $n_s ]] && echo yes || echo no)"
+    check_has "alerts json ${scope}: targets shredded" "shred -u -- $ETC/alerts/targets" "$(calls)"
+    check_lacks "alerts json ${scope}: the token is not in the JSON" "$HB_TOKEN" "$(cat "$T/json")"
+    check_lacks "alerts json ${scope}: the token is not printed" "$HB_TOKEN" "$(cat "$T/out")"
+done
+kept "alerts json keys: /var/lib/private stays" "$R/var/lib/private"
+
+# The menu's removal of a node.
+mkfixture; mkalerts
+remove_node_unit telcoin <<< "" > "$T/out" 2>&1
+alerts_gone "alerts menu"
+alerts_before_stop "alerts menu"
+check "alerts menu: the hint once" 1 "$(grep -cF "$HB_HINT" "$T/out")"
+check_has "alerts menu: ENABLE_ALERTS=false written" "meta_set ENABLE_ALERTS false $ETC/.node-meta" "$(calls)"
+check_lacks "alerts menu: the token is not printed" "$HB_TOKEN" "$(cat "$T/out")"
+INSTALLED_UNITS=()
+
+# The leftover path: listed, removed before the node units are stopped.
+mkinterrupted; mkalerts
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "alerts leftovers: rc 0" "rc=0" "$(cat "$T/out")"
+check_has "alerts leftovers: the timer listed" "yes" \
+    "$(grep -qF '  /etc/systemd/system/telcoin-heartbeat.timer (private alerts)' "$T/out" && echo yes)"
+alerts_gone "alerts leftovers"
+alerts_before_stop "alerts leftovers"
+check "alerts leftovers: the hint once" 1 "$(grep -cF "$HB_HINT" "$T/out")"
+
+# Only the timer is left: it is a leftover, and the leftover path removes it.
+rm -rf "$R"; mkdir -p "$SD" "$R/run/telcoin"
+printf '[Timer]\n' > "$SD/telcoin-heartbeat.timer"
+: > "$CALLS"
+check_rc "only the timer left: a leftover" 0 "$(rm_leftovers_present; echo $?)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "only the timer left: rc 0" "rc=0" "$(cat "$T/out")"
+gone "only the timer left: the timer" "$SD/telcoin-heartbeat.timer"
+check_has "only the timer left: disabled" "systemctl disable --now telcoin-heartbeat.timer" "$(calls)"
+rm -rf "$R"; mkdir -p "$R"
+check_rc "nothing left: no leftover" 1 "$(rm_leftovers_present; echo $?)"
+
+# The chain-data-only wipe keeps the node, so it keeps the alerts too.
+mkfixture; mkalerts
+before="$(snapshot)"
+( INSTALLED_UNITS=(telcoin); CONFIRM_ANSWER=yes; wipe_chain_data_only ) < /dev/null > "$T/out" 2>&1
+check_has "chain-data wipe: the node restarted" "systemctl start telcoin" "$(calls)"
+check_lacks "chain-data wipe: no heartbeat call" "heartbeat" "$(calls)"
+for p in $ALERT_PATHS; do
+    kept "chain-data wipe: ${p}" "$R$p"
+done
+gone "chain-data wipe: the chain db" "$DATA/db"
+
+# A refusal before the lock (a key set twice) leaves the alerts as they are.
+mkfixture; mkalerts
+printf 'HOST_SERVICE_USER=a\nHOST_SERVICE_USER=b\n' >> "$ETC/.node-meta"
+before="$(snapshot)"
+json_remove validator keys 3> "$T/json" > /dev/null 2>&1; rc=$?
+check_rc "alerts, dup key: json refused" 1 "$rc"
+check "alerts, dup key: nothing removed" "$before" "$(snapshot)"
+check_lacks "alerts, dup key: no heartbeat call" "heartbeat" "$(calls)"
+
+# Without lib/alerts.sh: remove-node.sh calls nothing of it (or of the runner),
+# so a removal with every alerts_* and hb_* function gone still takes the alerts.
+check "remove-node.sh calls no alerts_* or hb_* function" "" \
+    "$(grep -v '^[[:space:]]*#' "$TN_TEST_REPO/remove-node.sh" | grep -oE '(^|[^A-Za-z0-9_])(alerts|hb)_[A-Za-z0-9_]+' | sort -u)"
+mkfixture; mkalerts
+( for f in $(declare -F | awk '{print $3}' | grep -E '^(alerts|hb)_'); do unset -f "$f"; done
+  set -e; RM_JSON=true; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "no alerts library: json keys rc 0" 0 "$rc"
+alerts_gone "no alerts library"
+check_has "no alerts library: hint event" "{\"event\":\"log\",\"msg\":\"${HB_HINT}\"}" "$(cat "$T/json")"
+unset -f meta_set
 
 # NET-2 gap: the custom-container scan must also see a node running a ghcr.io
 # image, not only the testnet repositories: the old single package (by digest or
