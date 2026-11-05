@@ -11,7 +11,22 @@ status: done
 
 - [x] F2 IMG fix round (follow-up 2 of 2) -- f5e48b4 (facts checked in tnd-r2-IMG2 at 9ce9f15)
 
+- [x] F3 finalize --docker-image override (follow-up 3) -- b585759 (facts checked in tnd-r2-IMG2 at cc72dcb)
+
 ## Docs written (where each fact lives)
+
+F3 (b585759):
+- README flag row `--json --phase=keygen|finalize`: "except a Docker image (below)", refusal text now
+  "to replace it, run finalize again with --docker-image ...", override sentence (keygen's steps,
+  .node-meta keys, RELEASE_TAG removal, refusal leaves .node-meta unchanged, install method/data
+  dir/binary path not replaceable).
+- OPERATOR 7.1: finalize bullet list without "image"; image bullet says it does not pull the
+  recorded image; new override bullet with the refusal endings and the "or run keygen again" note
+  for the other three values. Section 9: recorded-image refusal row now points at the override
+  (node-keys move-aside advice removed); new row for the override's own refusals; "Could not run"
+  row unchanged.
+- CHANGELOG/scripts-v2.1.0.md images section: finalize bullet text updated, + override bullet.
+- Partner guide: finalize bullet without "image", + override bullet. PDF rebuilt (guide stays 1.7).
 
 F2 (f5e48b4):
 - README: Docker Install Notes (old package recognised on testnet and devnet only, mainnet never);
@@ -90,6 +105,11 @@ README Keeping Scripts paragraph on hosts that cloned main, README changelog v2.
 
 ## PDF hashes
 
+After F3 (b585759), same container and command, 73 pages:
+- build 1: 8c390446a452741b469435aaded7474b36454cfd7bfc29690cb1662922a67fde
+- build 2 (--force, "PDF unchanged"): 8c390446a452741b469435aaded7474b36454cfd7bfc29690cb1662922a67fde
+
+Before F3 (a84d5f6):
 Built in tn-pdf-tools:latest (pandoc 3.8.3, WeasyPrint 70.0), 73 pages:
 `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w tn-pdf-tools:latest bash tools/build-partner-pdf.sh mno-node-guide`
 - build 1: 9ad09451665e2c986cc00d21e8034fe68e0e27d1efdf56d7db37da438bceb843
@@ -117,7 +137,7 @@ Lint passed both times; pdftotext shows "Version 1.7 · November 2026" and no SS
 - "Merge the release PR with a merge commit" is the orchestrator's instruction; nothing in
   cut-release.sh enforces it (tag checks MANIFEST/MANIFEST.asc content only). Written as a step
   in AGENTS and followup.md with the reason "so the signed release commit stays on main".
-- setup-node finalize's refusal says "run --phase=keygen again with a <net> image", but keygen
+- RESOLVED by IMG-2 cc72dcb (finalize --docker-image override), docs in b585759. Was: setup-node finalize's refusal says "run --phase=keygen again with a <net> image", but keygen
   refuses non-interactively while node-keys exist ("node-keys already exist ... refusing to
   overwrite in non-interactive mode"), as does finalize_same_as_keygen's "or run keygen again".
   OPERATOR's Fix column says to move node-keys aside only when never staked. A code follow-up could
