@@ -200,12 +200,14 @@ GHCR_REPO="ghcr.io/telcoin-association/telcoin-network"
 LEGACY_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 TESTNET_PKG="ghcr.io/telcoin-association/tn-testnet"
 MAINNET_PKG="ghcr.io/telcoin-association/tn-mainnet"
-# docker ps lists four Telcoin Network containers: tn-node runs the old ghcr.io
+DEV_PKG="ghcr.io/telcoin-association/tn-dev"
+# docker ps lists five Telcoin Network containers: tn-node runs the old ghcr.io
 # package by digest, observer a legacy image by tag, tnt the testnet package by
-# tag and tnm the mainnet package by digest. fork runs a look-alike repository
-# and other an unrelated image.
-DOCKER_PS="$(printf 'tn-node\t%s@sha256:%064d\nobserver\t%s:v0.16.0-adiri\ntnt\t%s:v0.17.0-adiri\ntnm\t%s@sha256:%064d\nfork\t%s-fork:v0.16.0-adiri\nother\tbusybox:latest' \
-    "$GHCR_REPO" 0 "$LEGACY_REPO" "$TESTNET_PKG" "$MAINNET_PKG" 1 "$GHCR_REPO")"
+# tag, tnm the mainnet package by digest and tnd the dev package (TN_DEV_IMAGE_REPO,
+# on the devnet list) by digest. fork runs a look-alike repository and other an
+# unrelated image.
+DOCKER_PS="$(printf 'tn-node\t%s@sha256:%064d\nobserver\t%s:v0.16.0-adiri\ntnt\t%s:v0.17.0-adiri\ntnm\t%s@sha256:%064d\ntnd\t%s@sha256:%064d\nfork\t%s-fork:v0.16.0-adiri\nother\tbusybox:latest' \
+    "$GHCR_REPO" 0 "$LEGACY_REPO" "$TESTNET_PKG" "$MAINNET_PKG" 1 "$DEV_PKG" 2 "$GHCR_REPO")"
 printf '%s\n' "$DOCKER_PS" > "$T/docker-ps.out"
 # shellcheck disable=SC2016
 make_fake "$T/bin/docker" docker \
@@ -1346,11 +1348,13 @@ refused_after_ps() {
 }
 t="$(trace docker-detect)"
 check "docker-detect lists the containers of the library's repositories, by digest or by tag" \
-    "$(printf 'rc=0\ntn-node\nobserver\ntnt\ntnm')" "$(printf '%s\n' "$t" | sed -n '1,/^--- calls$/p' | sed '$d')"
+    "$(printf 'rc=0\ntn-node\nobserver\ntnt\ntnm\ntnd')" "$(printf '%s\n' "$t" | sed -n '1,/^--- calls$/p' | sed '$d')"
 refused_after_ps "docker-status refuses a container docker-detect does not list" docker-status other
 refused_after_ps "docker-status refuses a look-alike repository" docker-status fork
 t="$(trace docker-status observer)"
 check_has "docker-status takes a legacy-repository container" "rc=0" "$t"
+t="$(trace docker-status tnd)"
+check_has "docker-status takes a dev package container" "rc=0" "$t"
 refused_after_ps "docker-logs refuses an unknown container" docker-logs nope 10
 refused_after_ps "docker-logs refuses a zero line count" docker-logs tn-node 0
 t="$(trace docker-status tn-node)"
