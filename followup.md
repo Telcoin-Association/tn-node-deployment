@@ -303,6 +303,11 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 
 ## UI
 
+- A heartbeat run in flight when the node stops reports the starting grace once (its root
+  pre-step read the service before the stop, and the RPC then fails within `ALERTS_RESTART_GRACE`),
+  so the first `down` arrives one interval later than the stop. Accepted: the monitor's
+  heartbeat interval already allows one missed push. Closes when the runner re-reads the
+  service state after an RPC failure, or when the maintenance marker above lands.
 - The Node Manager UI has no private alerts card. Closes when a card shows
   `setup-alerts.sh --json --status` and can enable, test and change targets through the helper,
   with the target URLs on the helper's standard input (`--targets-stdin`), never on its command

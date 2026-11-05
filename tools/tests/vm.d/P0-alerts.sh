@@ -214,6 +214,16 @@ check_lacks "enable: the journal holds no webhook path" "18080/hook" "$journal"
 check_lacks "enable: setup-alerts.sh printed no push token" "vmtest1" "$out$(cat "$T/enable.err")"
 
 # --- the node stops: the next run says why ----------------------------------------
+# The timer fired a run at the enable (OnBootSec is long past), so a run may still
+# be in flight; its pre-step read the service while it ran. Stop the timer and
+# let that run finish, so the explicit start below is a fresh run that sees the
+# stopped node. (A run in flight when a node stops reports the starting grace
+# once; the next run is down.)
+systemctl stop telcoin-heartbeat.timer
+i=0
+while [[ "$(systemctl is-active telcoin-heartbeat.service 2>/dev/null)" == "activating" && $i -lt 150 ]]; do
+    sleep 1; i=$((i + 1))
+done
 systemctl stop telcoin.service
 timeout 200 systemctl start telcoin-heartbeat.service
 check "node stopped: the run says the service is inactive" "service telcoin inactive (dead)" \
