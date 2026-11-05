@@ -514,10 +514,11 @@ command_exists() {
 # other-writable. Group write is refused in the directories these scripts own
 # and everything below them (/var/log/telcoin, /etc/telcoin, /opt/telcoin,
 # /usr/local/libexec/telcoin, /var/backups/telcoin, /var/lib/telcoin-staging,
-# /run/telcoin, also under TN_ROOT_PREFIX). Above them, and in system paths the
-# scripts do not own, a group-writable directory passes only when its group is a
-# system group (gid below 1000): stock Ubuntu ships /var/log root:syslog 0775. A
-# path with a "." or ".." component is refused. Reads only; prints nothing.
+# /var/lib/telcoin-p2p-allow, /run/telcoin, also under TN_ROOT_PREFIX). Above
+# them, and in system paths the scripts do not own, a group-writable directory
+# passes only when its group is a system group (gid below 1000): stock Ubuntu
+# ships /var/log root:syslog 0775. A path with a "." or ".." component is
+# refused. Reads only; prints nothing.
 # (Copied into the VPN self-heal helper with declare -f: keep it self-contained.)
 tn_root_dir_ok() {
     local d="${1:-}" st uid gid mode rel
@@ -547,7 +548,7 @@ tn_root_dir_ok() {
                 fi
                 case "${rel}/" in
                     /var/log/telcoin/*|/etc/telcoin/*|/opt/telcoin/*|/usr/local/libexec/telcoin/*|\
-                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/run/telcoin/*)
+                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/var/lib/telcoin-p2p-allow/*|/run/telcoin/*)
                         return 1 ;;
                 esac
                 (( 10#$gid < 1000 )) || return 1
