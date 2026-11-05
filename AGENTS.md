@@ -321,6 +321,18 @@ library is `lib/alerts.sh`; the runner is `lib/tn-heartbeat.sh`, installed root 
   (`/var/lib/private/telcoin-heartbeat/state`) is written by the runner only, never sourced, and
   checked key by key when read. That state dir is the one exception to root ownership besides
   the data dir (see "Ownership").
+- The node service's state comes from root. A dynamic user cannot use the system bus
+  (`dbus-daemon` drops a connection from a uid it cannot resolve), so the runner's own
+  `systemctl show` fails. The unit's `ExecStartPre=-+/bin/sh -c '...'` line, right after
+  `ExecStart=`, runs as root outside the sandbox and rewrites `/run/telcoin/heartbeat-service`
+  (root 0644, in the root 0755 update-lock dir) before each run: it removes the old file, writes
+  `systemctl show` of `${ALERTS_SERVICE}.service` to a `.tmp` and renames it. The runner reads
+  that file when it is a regular file, not a symlink, through the same key whitelist
+  (`_hb_svc_field`), and asks `systemctl show` itself only when the file is absent.
+  `alerts_disable` and `remove_alerts` remove the file and its `.tmp`, never `/run/telcoin`.
+  This is the one root write outside the `lib/common.sh` primitives, and systemd, not a script,
+  makes it. Never give the runner bus access (no static `User=`, no D-Bus policy) or any other
+  root helper beyond this one line, and keep the line reading the service state and nothing else.
 - Enabling, changing the targets, testing, refreshing and disabling never stop or restart the
   node, so they run neither `tn_committee_down_guard` nor `tn_wait_restart_window`. A write takes
   the update lock through `addon_meta_write_begin`, `--test` takes `addon_meta_lock`, `--status`

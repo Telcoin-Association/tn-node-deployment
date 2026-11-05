@@ -459,6 +459,12 @@ host. That field set is an operator-visible contract: monitors and webhook recei
   system, the data dir and the passphrase files out of reach, at most 64 MB of memory and 20% of a
   CPU. Its state is in `/var/lib/private/telcoin-heartbeat`, the one path the scripts set up that
   root does not own. Its journal is `journalctl -u telcoin-heartbeat`.
+- A dynamic user cannot reach the system bus, so the runner cannot ask systemd for the node's
+  service state itself. Before each run the unit's one root step (`ExecStartPre=-+/bin/sh -c
+  '...'`) removes the last answer and writes `systemctl show` of the node's unit to
+  `/run/telcoin/heartbeat-service` (root 0644), which the runner reads; without that file it falls
+  back to `systemctl show`. A disable and `remove-node.sh` remove the file and leave `/run/telcoin`
+  in place.
 - Enable, change targets, test, refresh and disable never stop or restart the node, so they run
   neither the quorum guard nor the epoch wait. They take the update lock and, on a host with
   `HOST_BASELINE=true`, make the baseline again after a change that went through (#43).
@@ -578,6 +584,7 @@ node update or a restart you run yourself shows as a short down.
 | `/etc/telcoin/alerts/targets` (root 0600) | The monitor URLs, one `<kind> <url>` per line, at most five; the runner's credential |
 | `/etc/telcoin/alerts/alerts.env` (root 0644) | The runner's settings: node unit, local RPC, network, chain id, label, health port, interval and thresholds |
 | `/var/lib/private/telcoin-heartbeat/state` (dynamic user, dir 0700) | The runner's last run, status, reason and per-target results |
+| `/run/telcoin/heartbeat-service` (root 0644) | The node unit's `systemctl show`, rewritten as root by the heartbeat service before each run and read by the runner |
 | `ENABLE_ALERTS=true\|pending\|false` in `.node-meta` | Private alerts on, waiting for the node to run, or off; absent means off |
 
 ## New environment variables

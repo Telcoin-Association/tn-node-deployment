@@ -322,6 +322,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/libexec/telcoin/tn-heartbeat
+ExecStartPre=-+/bin/sh -c 'umask 022; install -d -o root -g root -m 0755 /run/telcoin && rm -f /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp && systemctl show --no-pager -p LoadState -p ActiveState -p SubState -p NRestarts -p ActiveEnterTimestampMonotonic -p StateChangeTimestampMonotonic "${ALERTS_SERVICE}.service" > /run/telcoin/heartbeat-service.tmp && mv -f /run/telcoin/heartbeat-service.tmp /run/telcoin/heartbeat-service'
 DynamicUser=yes
 EnvironmentFile=/etc/telcoin/alerts/alerts.env
 LoadCredential=targets:/etc/telcoin/alerts/targets
@@ -369,6 +370,17 @@ for bad in 'User=' 'Group=' 'IPAddressDeny' 'PrivateNetwork' 'ProcSubset' 'Persi
 done
 check "unit: data dir /var/lib/telcoin adds nothing" "$EXP_UNIT" "$(alerts_unit_text /usr/local/libexec/telcoin/tn-heartbeat /var/lib/telcoin)"
 check "unit: a data dir under /var/lib/telcoin adds nothing" "$EXP_UNIT" "$(alerts_unit_text /usr/local/libexec/telcoin/tn-heartbeat /var/lib/telcoin/sub/)"
+# The service state comes from root: a dynamic user cannot reach the system bus.
+pre="$(grep -F -e 'ExecStartPre=-+/bin/sh -c' <<< "$UNIT")"
+check "unit: exactly one ExecStartPre=-+/bin/sh -c line" "1" "$(grep -c -F -e 'ExecStartPre=-+/bin/sh -c' <<< "$UNIT")"
+check "unit: the only ExecStartPre= line" "1" "$(grep -c -e '^ExecStartPre=' <<< "$UNIT")"
+check "unit: the pre-step comes right after ExecStart=" "ExecStart=/usr/local/libexec/telcoin/tn-heartbeat
+${pre}" "$(grep -A1 -e '^ExecStart=' <<< "$UNIT")"
+check "unit: the pre-step names the node service" "yes" "$(has "$pre" '"${ALERTS_SERVICE}.service"')"
+check "unit: the pre-step writes /run/telcoin/heartbeat-service" "yes yes" \
+    "$(has "$pre" '> /run/telcoin/heartbeat-service.tmp') $(has "$pre" 'mv -f /run/telcoin/heartbeat-service.tmp /run/telcoin/heartbeat-service')"
+check "unit: the pre-step removes the last answer first" "yes" \
+    "$(has "$pre" '&& rm -f /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp && systemctl show')"
 check "unit: a data dir elsewhere is hidden too" \
     "InaccessiblePaths=-/var/lib/telcoin -/etc/telcoin/bls-passphrase.cred -/etc/telcoin/bls-passphrase -/srv/tn-data" \
     "$(alerts_unit_text /x /srv/tn-data/ | grep '^InaccessiblePaths=')"
@@ -1033,9 +1045,18 @@ echo ok > "$T/scenario"
 ln -s private/telcoin-heartbeat "$RP/var/lib/telcoin-heartbeat"
 # A temp copy an interrupted write left: it holds the URLs and would stop the rmdir.
 cp "$ALERTS_D/targets" "$ALERTS_D/.tn.AbC123"
+# The service state the unit's root pre-step wrote, beside the update lock.
+mkdir -p "$RP/run/telcoin"
+printf 'ActiveState=active\n' > "$RP/run/telcoin/heartbeat-service"
+printf 'ActiveState=active\n' > "$RP/run/telcoin/heartbeat-service.tmp"
+: > "$RP/run/telcoin/update.lock"
 : > "$T/calls"
 run alerts_disable
 check_rc "disable: rc 0" 0 "$RC"
+check "disable: the service-state file and its .tmp gone" "no no" \
+    "$(exists "$RP/run/telcoin/heartbeat-service") $(exists "$RP/run/telcoin/heartbeat-service.tmp")"
+check "disable: /run/telcoin and the update lock stay" "yes yes" \
+    "$(exists "$RP/run/telcoin") $(exists "$RP/run/telcoin/update.lock")"
 check "disable: the interrupted write's temp copy is gone" "no" "$(exists "$ALERTS_D/.tn.AbC123")"
 check "disable: systemctl steps in order" "disable --now telcoin-heartbeat.timer
 stop telcoin-heartbeat.service

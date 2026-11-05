@@ -13,9 +13,11 @@
 # must leave the timer active and a state file written by the dynamic user (uid
 # 61184-65519) saying up, with the Kuma push accepted; the listener must have
 # seen the Kuma GET and the webhook POST, and the journal must not hold the URLs.
+# The unit's root ExecStartPre= must have written /run/telcoin/heartbeat-service
+# (root 0644), the node service's state the dynamic user cannot ask the bus for.
 # With the node stopped, a heartbeat run says "service telcoin inactive (dead)".
-# setup-alerts.sh --json --disable must leave no unit, runner, config dir or
-# state. On exit everything this file made is removed and the files it replaced
+# setup-alerts.sh --json --disable must leave no unit, runner, config dir,
+# state or service-state file. On exit everything this file made is removed and the files it replaced
 # are put back.
 #
 # Skips without python3, without systemd as the init system, or while
@@ -64,7 +66,7 @@ vm_cleanup() {
     rm -f "$UNIT_D/telcoin-heartbeat.service" "$UNIT_D/telcoin-heartbeat.timer" \
         /usr/local/libexec/telcoin/tn-heartbeat
     rm -rf /etc/telcoin/alerts /var/lib/private/telcoin-heartbeat
-    rm -f /var/lib/telcoin-heartbeat
+    rm -f /var/lib/telcoin-heartbeat /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp
     if [[ -n "$LISTENER_PID" ]]; then kill "$LISTENER_PID" 2>/dev/null || true; fi
     for f in "${SAVED[@]}"; do
         if [[ -e "$T/saved/$i" ]]; then cp -p "$T/saved/$i" "$f"; else rm -f "$f"; fi
@@ -197,6 +199,13 @@ check "enable: the state file belongs to the dynamic user" "yes" \
     "$([[ "$uid" =~ ^[0-9]+$ ]] && (( uid >= 61184 && uid <= 65519 )) && echo yes)"
 check "enable: targets root:root 0600" "0:0 600" "$(stat -c '%u:%g %a' /etc/telcoin/alerts/targets 2>/dev/null)"
 check "enable: .node-meta says ENABLE_ALERTS=true" "ENABLE_ALERTS=true" "$(grep '^ENABLE_ALERTS=' /etc/telcoin/.node-meta)"
+SVC_STATE=/run/telcoin/heartbeat-service
+check "enable: the service-state file is a regular file" "yes" \
+    "$([[ -f "$SVC_STATE" && ! -L "$SVC_STATE" ]] && echo yes || echo no)"
+check "enable: the service-state file is root:root 0644" "0:0 644" "$(stat -c '%u:%g %a' "$SVC_STATE" 2>/dev/null)"
+check "enable: the service-state file says active" "ActiveState=active" "$(grep '^ActiveState=' "$SVC_STATE" 2>/dev/null)"
+check "enable: no .tmp left beside it" "no" "$([[ -e "${SVC_STATE}.tmp" ]] && echo yes || echo no)"
+check "enable: /run/telcoin is root 0755" "0:0 755" "$(stat -c '%u:%g %a' /run/telcoin 2>/dev/null)"
 journal="$(journalctl -u telcoin-heartbeat.service --no-pager -o cat 2>/dev/null)"
 check "enable: the journal has the run line" "yes" "$(grep -q 'kuma@127.0.0.1:18080 ok 200' <<< "$journal" && echo yes)"
 check_lacks "enable: the journal holds no push URL" "/api/push/" "$journal"
@@ -210,6 +219,8 @@ timeout 200 systemctl start telcoin-heartbeat.service
 check "node stopped: the run says the service is inactive" "service telcoin inactive (dead)" \
     "$(sed -n 's/^last_reason=//p' "$STATE" 2>/dev/null)"
 check "node stopped: down" "down" "$(sed -n 's/^last_status=//p' "$STATE" 2>/dev/null)"
+check "node stopped: the service-state file says inactive (dead)" "ActiveState=inactive SubState=dead" \
+    "$(grep -E '^(ActiveState|SubState)=' "$SVC_STATE" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
 check "node stopped: the Kuma push still reaches the monitor" "yes" "$(grep -q 'status=down' "$T/pushes" && echo yes)"
 
 # --- disable -----------------------------------------------------------------------
@@ -219,10 +230,12 @@ check_rc "setup-alerts.sh --json --disable" 0 "$rc" || { printf '%s\n' "$out"; t
 left=""
 for f in "$UNIT_D/telcoin-heartbeat.service" "$UNIT_D/telcoin-heartbeat.timer" \
     /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts /var/lib/private/telcoin-heartbeat \
-    /var/lib/telcoin-heartbeat; do
+    /var/lib/telcoin-heartbeat "$SVC_STATE" "${SVC_STATE}.tmp"; do
     if [[ -e "$f" || -L "$f" ]]; then left="${left} ${f}"; fi
 done
 check "disable: no unit, runner, config dir or state left" "" "$left"
+check "disable: the service-state file is gone" "no" "$([[ -e "$SVC_STATE" || -L "$SVC_STATE" ]] && echo yes || echo no)"
+check "disable: /run/telcoin stays" "yes" "$([[ -d /run/telcoin ]] && echo yes || echo no)"
 check "disable: the timer is gone" "no" "$(systemctl cat telcoin-heartbeat.timer >/dev/null 2>&1 && echo yes || echo no)"
 check "disable: .node-meta says ENABLE_ALERTS=false" "ENABLE_ALERTS=false" "$(grep '^ENABLE_ALERTS=' /etc/telcoin/.node-meta)"
 

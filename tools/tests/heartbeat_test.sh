@@ -7,8 +7,10 @@
 # invalid and symlinked state files.
 #
 # Runner mode: `bash lib/tn-heartbeat.sh` with STATE_DIRECTORY,
-# CREDENTIALS_DIRECTORY, TN_HB_NOW and TN_HB_MONO pointing at a private tree and
-# two stand-ins first on PATH. systemctl prints the SVC_* fields the test sets.
+# CREDENTIALS_DIRECTORY, TN_HB_NOW, TN_HB_MONO and TN_HB_SERVICE_STATE pointing
+# at a private tree and two stand-ins first on PATH. systemctl prints the SVC_*
+# fields the test sets; the service-state file (what the unit's root
+# ExecStartPre= writes) is absent unless a case writes it.
 # curl never runs for real: a push (-K FILE) is recorded from the url line of
 # its config file and its options to $T/pushes and fails per host when
 # $T/fail/<host> says so; an RPC call answers from $T/rpc/<method>; the health
@@ -21,7 +23,8 @@
 T="$TN_TEST_TMP"
 RUNNER="$TN_TEST_REPO/lib/tn-heartbeat.sh"
 SH="${BASH:-bash}"
-mkdir -p "$T/bin" "$T/state" "$T/cred" "$T/rpc" "$T/fail" "$T/lib"
+mkdir -p "$T/bin" "$T/state" "$T/cred" "$T/rpc" "$T/fail" "$T/lib" "$T/svc"
+SVC_FILE="$T/svc/heartbeat-service"
 
 # --- library mode -----------------------------------------------------------
 
@@ -299,7 +302,8 @@ run_hb() {
     fi
     : > "$T/argv.log"
     env HBT="$T" PATH="$T/bin:$PATH" STATE_DIRECTORY="$T/state" CREDENTIALS_DIRECTORY="$T/cred" \
-        TN_HB_NOW="$NOW" TN_HB_MONO="$MONO" SVC_LOAD="$SVC_LOAD" SVC_ACTIVE="$SVC_ACTIVE" \
+        TN_HB_NOW="$NOW" TN_HB_MONO="$MONO" TN_HB_SERVICE_STATE="$SVC_FILE" \
+        SVC_LOAD="$SVC_LOAD" SVC_ACTIVE="$SVC_ACTIVE" \
         SVC_SUB="$SVC_SUB" SVC_NRESTARTS="$SVC_NRESTARTS" SVC_AET="$SVC_AET" SVC_SCT="$SVC_SCT" \
         SVC_EMPTY="$SVC_EMPTY" "$SH" "$RUNNER" > "$T/out" 2> "$T/err" || RC=$?
     OUT="$(cat "$T/out")"
@@ -441,6 +445,96 @@ rm -f "$T/rpc/eth_chainId"
 tick
 run_hb
 check_has "systemctl prints nothing: no grace for a dead RPC" "<4>down: rpc 127.0.0.1:8545 not answering (refused) | 1 kuma@kuma.example.org ok 200, 2 webhook@hooks.example.net ok 200" "$OUT"
+
+# --- the service-state file (the unit's root ExecStartPre=) ---------------------
+#
+# A dynamic user cannot reach the system bus, so the unit writes the node
+# service's systemctl show to /run/telcoin/heartbeat-service as root before each
+# run. The runner reads it when it is a regular file, not a symlink, and asks
+# systemctl only when it is absent or unusable. The stand-in is set to say the
+# opposite of the file, so each case shows which source decided.
+
+# svc_file ACTIVE SUB [EXTRA_LINE] -- the file as the pre-step writes it.
+svc_file() {
+    {
+        printf 'LoadState=loaded\nActiveState=%s\nSubState=%s\nNRestarts=0\n' "$1" "$2"
+        printf 'ActiveEnterTimestampMonotonic=%s\nStateChangeTimestampMonotonic=%s\n' "$SVC_AET" "$SVC_SCT"
+        if [[ -n "${3:-}" ]]; then
+            printf '%s\n' "$3"
+        fi
+    } > "$SVC_FILE"
+}
+# svc_calls -- how many times the systemctl stand-in has run so far.
+svc_calls() {
+    if [[ -f "$T/systemctl.log" ]]; then
+        wc -l < "$T/systemctl.log" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+UP_LINE="<6>up: ${UP_MSG} | 1 kuma@kuma.example.org ok 200, 2 webhook@hooks.example.net ok 200"
+DEAD_LINE="<4>down: service telcoin inactive (dead) | 1 kuma@kuma.example.org ok 200, 2 webhook@hooks.example.net ok 200"
+
+fresh
+svc_file active running
+SVC_ACTIVE=inactive SVC_SUB=dead
+c0="$(svc_calls)"
+run_hb
+check_has "state file: active in the file wins over the stand-in" "$UP_LINE" "$OUT"
+check "state file: systemctl not called" "$c0" "$(svc_calls)"
+check "state file: svc_since from the file" "6400" "$(st svc_since)"
+
+tick
+svc_file inactive dead
+SVC_ACTIVE=active SVC_SUB=running
+c0="$(svc_calls)"
+run_hb
+check "state file: inactive (dead) in the file is down" "<5>status up -> down: service telcoin inactive (dead)
+${DEAD_LINE}" "$OUT"
+check "state file: the down reason recorded" "down service telcoin inactive (dead)" "$(st last_status) $(st last_reason)"
+check "state file: still no systemctl call" "$c0" "$(svc_calls)"
+
+fresh
+run_hb
+tick
+svc_file inactive dead
+mv "$SVC_FILE" "$T/svc/real"
+ln -s "$T/svc/real" "$SVC_FILE"
+c0="$(svc_calls)"
+run_hb
+check_has "state file a symlink: ignored, systemctl decides (up)" "$UP_LINE" "$OUT"
+check "state file a symlink: systemctl called once" "$(( c0 + 1 ))" "$(svc_calls)"
+rm -f "$SVC_FILE" "$T/svc/real"
+
+tick
+SVC_ACTIVE=inactive SVC_SUB=dead
+c0="$(svc_calls)"
+run_hb
+check_has "state file absent: systemctl decides (down)" "$DEAD_LINE" "$OUT"
+check "state file absent: systemctl called once" "$(( c0 + 1 ))" "$(svc_calls)"
+
+fresh
+run_hb
+tick
+: > "$SVC_FILE"
+SVC_ACTIVE=inactive SVC_SUB=dead
+c0="$(svc_calls)"
+run_hb
+check_has "state file empty: systemctl decides" "$DEAD_LINE" "$OUT"
+check "state file empty: systemctl called once" "$(( c0 + 1 ))" "$(svc_calls)"
+
+fresh
+run_hb
+advance
+svc_file active running "Bogus=inactive"
+printf 'ActiveStateX=failed\nX=$(touch %s/svc/sentinel)\n' "$T" >> "$SVC_FILE"
+SVC_ACTIVE=inactive SVC_SUB=dead
+c0="$(svc_calls)"
+run_hb
+check_has "state file with unknown keys: those lines ignored, up" "$UP_LINE" "$OUT"
+check "state file with unknown keys: systemctl not called" "$c0" "$(svc_calls)"
+check "state file with unknown keys: nothing ran" "absent" "$([[ -e "$T/svc/sentinel" ]] && echo present || echo absent)"
+rm -f "$SVC_FILE"
 
 # --- RPC ------------------------------------------------------------------------
 

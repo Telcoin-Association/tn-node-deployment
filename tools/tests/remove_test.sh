@@ -948,14 +948,18 @@ rm -f "$NFT_TABLE_FILE"
 # --- the private alerts go before the node stops, at every scope -----------------
 # mkalerts -- add to the fixture what setup-alerts.sh installs: both heartbeat
 # units, the runner, the config dir with the targets (holding a push token) and
-# env files, the runner's state dir and the link systemd keeps beside it, and
+# env files, the runner's state dir and the link systemd keeps beside it, the
+# service-state file (and the .tmp of an interrupted write) the unit's root
+# ExecStartPre= leaves in /run/telcoin beside the update lock, and
 # ENABLE_ALERTS=true in .node-meta.
 HB_TOKEN="hbtok0123456789abcdefXYZ"
 # One line: BSD awk refuses a -v value that holds a newline.
-ALERT_PATHS="/etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat"
+ALERT_PATHS="/etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp"
 HB_HINT="Pause or delete this node's monitor: a push monitor alerts on silence."
 mkalerts() {
-    mkdir -p "$SD" "$LX" "$ETC/alerts" "$R/var/lib/private/telcoin-heartbeat"
+    mkdir -p "$SD" "$LX" "$ETC/alerts" "$R/var/lib/private/telcoin-heartbeat" "$R/run/telcoin"
+    printf 'ActiveState=active\nSubState=running\n' > "$R/run/telcoin/heartbeat-service"
+    printf 'ActiveState=active\n' > "$R/run/telcoin/heartbeat-service.tmp"
     printf '[Timer]\nOnUnitActiveSec=60\n' > "$SD/telcoin-heartbeat.timer"
     printf '[Service]\nDynamicUser=yes\n' > "$SD/telcoin-heartbeat.service"
     printf '#!/usr/bin/env bash\nHEARTBEAT_VERSION="2.1.0"\n' > "$LX/tn-heartbeat"
@@ -1002,6 +1006,8 @@ check_rc "remove_alerts: rc 0" 0 "$rc"
 alerts_gone "remove_alerts"
 check "remove_alerts: the rest of the tree as it was" "$(printf '%s\n' "$before" | drop_alerts)" "$(snapshot)"
 kept "remove_alerts: /var/lib/private stays" "$R/var/lib/private"
+kept "remove_alerts: /run/telcoin stays" "$R/run/telcoin"
+kept "remove_alerts: the update lock stays" "$R/run/telcoin/update.lock"
 check "remove_alerts: systemctl calls in order" "systemctl disable --now telcoin-heartbeat.timer
 systemctl stop telcoin-heartbeat.service
 systemctl clean --what=state telcoin-heartbeat.service
@@ -1022,6 +1028,17 @@ if declare -F alerts_disable >/dev/null 2>&1; then
 else
     skip "alerts_disable leaves the tree remove_alerts leaves" "lib/alerts.sh is not in this tree"
 fi
+
+# Only the service-state file is left (the units already gone): it counts as
+# alerts, and it goes without the lock dir.
+mkfixture
+printf 'ActiveState=active\n' > "$R/run/telcoin/heartbeat-service"
+: > "$CALLS"
+check_rc "only the service-state file: alerts present" 0 "$(rm_alerts_present; echo $?)"
+remove_alerts > "$T/out" 2>&1
+gone "only the service-state file: removed" "$R/run/telcoin/heartbeat-service"
+kept "only the service-state file: /run/telcoin stays" "$R/run/telcoin"
+kept "only the service-state file: the update lock stays" "$R/run/telcoin/update.lock"
 
 # Nothing of it here: nothing said, nothing called.
 mkfixture

@@ -1347,11 +1347,13 @@ The files:
 | `/etc/telcoin/alerts/targets` | root 0600 | One `<provider> <url>` per line, at most five. The only secret. |
 | `/etc/telcoin/alerts/alerts.env` | root 0644 | The node's service name and local RPC URL, the network and its chain ID, the label, the health port, the interval and the thresholds. No URL of a monitor. |
 | `/var/lib/private/telcoin-heartbeat/state` | the runner's account, directory 0700 | What the runner remembers between runs: the last status and reason, the consensus header it last saw, and each target's last result. Never a URL. |
+| `/run/telcoin/heartbeat-service` | root 0644 | The node service's state (`systemctl show` of `telcoin.service`). The service rewrites it as root before each run, and the runner reads it. Gone after a reboot until the next run. |
 | `ENABLE_ALERTS` in `.node-meta` | | `true`, `pending` (asked for during setup, not enabled yet) or `false`. Absent means off. |
 
 The runner runs as an account systemd makes for each run (`DynamicUser=yes`).
 It reads the targets through `LoadCredential=`, cannot read the data directory or the passphrase files, holds no capabilities and writes only its state directory.
 That directory is the one path the alerts add that root does not own.
+Such an account cannot ask systemd for the node's service state, so before each run the service writes that state, as root, to `/run/telcoin/heartbeat-service`; that one step does nothing else.
 
 Enable, change, refresh and disable take the update lock, so each refuses while another script holds it; the test takes it too, and the status takes none and needs no root.
 On a host with the host baseline (section 4.13), a change that went through makes the baseline again.
@@ -1378,6 +1380,7 @@ When the status changed, a line `status up -> down: <reason>` comes before it (`
 A failed push says why: `timeout`, `refused`, `dns`, `tls`, `too-large`, `body` (Kuma answered `"ok":false`), `http` (the code says which) or `curl-N`; code `000` means no answer came.
 A run in which every target failed leaves the service failed, and the timer keeps starting it.
 A `config:` line means the runner refused its settings or its targets and sent nothing: run `setup-alerts.sh --refresh`, or give the targets again with `3) Change targets`.
+When the heartbeat stays up while the node is stopped, check that `cat /run/telcoin/heartbeat-service` shows `ActiveState=` after a run: without that file the runner cannot see the service and only the RPC checks decide, so run `sudo bash setup-alerts.sh --refresh` to install the current unit.
 The state file holds `key=value` lines: the last run, status, reason, mode, block and epoch, and `push_1` to `push_5` (`<provider> ok|fail <code> [why] <host>`).
 
 ## 5. Public RPC (https + wss)

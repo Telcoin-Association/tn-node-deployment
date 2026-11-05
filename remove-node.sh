@@ -1257,12 +1257,14 @@ remove_testnet_addons() {
 
 # rm_alerts_present -- rc 0 when a file of the private alerts is on this host:
 # the heartbeat timer or service unit, the installed runner, the config dir
-# /etc/telcoin/alerts or the runner's state dir; rc 1 when none is. Reads only.
+# /etc/telcoin/alerts, the runner's state dir or the service-state file
+# /run/telcoin/heartbeat-service; rc 1 when none is. Reads only.
 rm_alerts_present() {
     local r="$TN_RM_ROOT" p
     for p in /etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service \
              /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts \
-             /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat; do
+             /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat \
+             /run/telcoin/heartbeat-service; do
         if [[ -e "${r}${p}" || -L "${r}${p}" ]]; then
             return 0
         fi
@@ -1275,7 +1277,9 @@ rm_alerts_present() {
 # service stopped, its state cleaned (systemctl clean, then the state dir and
 # its link removed when they are still there), the targets file shredded (it
 # holds the push URLs, as does a writer's .tn.* temp copy), the env file, the
-# config dir, both units and the runner removed, systemd reloaded, and
+# config dir, both units, the runner and the service-state file the unit's
+# ExecStartPre= writes in /run/telcoin removed (never /run/telcoin itself, which
+# holds the update lock), systemd reloaded, and
 # ENABLE_ALERTS=false written to .node-meta while that file is still here (best
 # effort). It ends with the hint to pause the monitor. The callers run it before
 # the node stops, so the heartbeat never pushes the planned stop as a failure.
@@ -1301,7 +1305,8 @@ remove_alerts() {
         rm -f -- "$ad" 2>/dev/null || true
     fi
     rm -f -- "${sd}/telcoin-heartbeat.timer" "${sd}/telcoin-heartbeat.service" \
-             "${r}/usr/local/libexec/telcoin/tn-heartbeat" 2>/dev/null || true
+             "${r}/usr/local/libexec/telcoin/tn-heartbeat" \
+             "${r}/run/telcoin/heartbeat-service" "${r}/run/telcoin/heartbeat-service.tmp" 2>/dev/null || true
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed telcoin-heartbeat.service >/dev/null 2>&1 || true
     meta="$(tn_resolve_config_dir 2>/dev/null)" || meta=""

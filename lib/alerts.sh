@@ -20,10 +20,13 @@
 #   /usr/local/libexec/telcoin/tn-heartbeat    root 0755: lib/tn-heartbeat.sh
 #   /etc/systemd/system/telcoin-heartbeat.service   oneshot, DynamicUser=yes
 #   /etc/systemd/system/telcoin-heartbeat.timer     WantedBy=timers.target
-# and records ENABLE_ALERTS=true in .node-meta. The runner reads the targets file
-# as its credential "targets" (LoadCredential=) and keeps its state in its
-# StateDirectory=, /var/lib/private/telcoin-heartbeat, which belongs to the
-# dynamic user: the one directory of this add-on that root does not own.
+# and records ENABLE_ALERTS=true in .node-meta. Before each run the service's
+# ExecStartPre= (as root) rewrites /run/telcoin/heartbeat-service, root 0644: the
+# node service's state, which the runner reads (alerts_unit_text says why). The
+# runner reads the targets file as its credential "targets" (LoadCredential=)
+# and keeps its state in its StateDirectory=, /var/lib/private/telcoin-heartbeat,
+# which belongs to the dynamic user: the one directory of this add-on that root
+# does not own.
 #
 # A monitor URL carries the monitor's token. It never goes on a command line,
 # into an environment, a log line, a message or .node-meta: a target is shown as
@@ -63,6 +66,9 @@ ALERTS_UNIT="telcoin-heartbeat.service"
 ALERTS_TIMER="telcoin-heartbeat.timer"
 ALERTS_STATE_DIR="/var/lib/private/telcoin-heartbeat"
 ALERTS_STATE_LINK="/var/lib/telcoin-heartbeat"
+# The node service's systemctl show, written as root by the unit's ExecStartPre=
+# before each run and read by the runner (it cannot reach the system bus).
+ALERTS_SVC_STATE="/run/telcoin/heartbeat-service"
 ALERTS_MAX_TARGETS=5
 ALERTS_DEFAULT_INTERVAL=60
 ALERTS_DEFAULT_STALL=180
@@ -493,6 +499,15 @@ alerts_install_runner() {
 # under a dynamic user that gets the targets as a credential, keeps its state in
 # its own StateDirectory= and cannot see the node's data dir (DATA_DIR too when
 # it is outside /var/lib/telcoin) or the BLS passphrase.
+#
+# A dynamic user cannot talk to the system bus (dbus-daemon drops a connection
+# from a uid it cannot resolve), so the runner's own systemctl show fails. The
+# ExecStartPre= line runs as root outside the sandbox ("+"; "-" lets the run go
+# on when it fails): it removes the last answer, writes the node service's
+# systemctl show to a .tmp file and renames it to ALERTS_SVC_STATE, root 0644
+# in the root 0755 /run/telcoin (the update-lock dir), where the runner can read
+# it and cannot write. The line is the only thing that runs as root, and it
+# reads the service state and nothing else.
 alerts_unit_text() {
     local runner="$1" dd="${2:-}" hidden
     hidden="-/var/lib/telcoin -/etc/telcoin/bls-passphrase.cred -/etc/telcoin/bls-passphrase"
@@ -511,6 +526,7 @@ alerts_unit_text() {
         '[Service]' \
         'Type=oneshot' \
         "ExecStart=${runner}" \
+        "ExecStartPre=-+/bin/sh -c 'umask 022; install -d -o root -g root -m 0755 /run/telcoin && rm -f ${ALERTS_SVC_STATE} ${ALERTS_SVC_STATE}.tmp && systemctl show --no-pager -p LoadState -p ActiveState -p SubState -p NRestarts -p ActiveEnterTimestampMonotonic -p StateChangeTimestampMonotonic \"\${ALERTS_SERVICE}.service\" > ${ALERTS_SVC_STATE}.tmp && mv -f ${ALERTS_SVC_STATE}.tmp ${ALERTS_SVC_STATE}'" \
         'DynamicUser=yes' \
         "EnvironmentFile=${ALERTS_ETC_DIR}/alerts.env" \
         "LoadCredential=targets:${ALERTS_ETC_DIR}/targets" \
@@ -1037,7 +1053,8 @@ alerts_refresh() {
 # disable the timer, stop the service, remove its state (systemctl clean, or rm
 # when the directory is still there), shred the targets file and any .tn.* temp
 # copy an interrupted write left beside it, remove alerts.env, its directory,
-# both units and the runner, reload systemd and record ENABLE_ALERTS=false (a
+# the service-state file in /run/telcoin (never the directory), both units and
+# the runner, reload systemd and record ENABLE_ALERTS=false (a
 # failure is a warning). Then the monitor hint. The words after FN, in either
 # order: no-hint leaves the hint out; keep-meta leaves .node-meta alone (the
 # rollback of a failed enable puts ENABLE_ALERTS back itself). rc 1 when the
@@ -1067,6 +1084,9 @@ alerts_disable() {
     # A temp copy a writer left when it was stopped mid-write holds the URLs too.
     _tn_shred "$(alerts_etc_dir)"/.tn.*
     rm -f -- "$(alerts_env_file)" 2>/dev/null || true
+    # The service state the unit's ExecStartPre= wrote; /run/telcoin stays (the
+    # update lock lives there).
+    rm -f -- "${TN_ROOT_PREFIX:-}${ALERTS_SVC_STATE}" "${TN_ROOT_PREFIX:-}${ALERTS_SVC_STATE}.tmp" 2>/dev/null || true
     rmdir -- "$(alerts_etc_dir)" 2>/dev/null || true
     rm -f -- "$(alerts_unit_path)" "$(alerts_timer_path)" "$(alerts_runner_path)" 2>/dev/null || true
     systemctl daemon-reload >/dev/null 2>&1 || true

@@ -20,13 +20,20 @@
 #                               one "<kind> <url>" line per target, at most 5
 #   $STATE_DIRECTORY/state      what the last run saw (StateDirectory=); written
 #                               by this runner only, never sourced
+#   /run/telcoin/heartbeat-service
+#                               the node service's systemctl show, root 0644,
+#                               rewritten before each run by the unit's root
+#                               ExecStartPre= (a dynamic user cannot reach the
+#                               system bus); read only, never sourced. When it
+#                               is absent the runner asks systemctl itself.
 #
 # A target URL holds the monitor's token. It reaches curl only in a config file
 # read from a process substitution (-K), never on a command line or in the
 # environment of a child, and it is shown and logged only as kind@host.
 #
 # The checks run in this order and the first one that finds a problem decides
-# the reason of a down heartbeat: the node's systemd service (systemctl show),
+# the reason of a down heartbeat: the node's systemd service (the state file
+# above, or systemctl show),
 # the local RPC (eth_chainId, and the chain id when ALERTS_CHAIN_ID is set), the
 # consensus header advancing within ALERTS_STALL_AFTER seconds, a committee
 # member not left CvvInactive for ALERTS_INACTIVE_AFTER seconds, and the node's
@@ -50,7 +57,8 @@
 # This file sources nothing.
 #
 # Test hooks (tools/tests/heartbeat_test.sh): TN_HB_NOW (epoch seconds of the
-# run), TN_HB_MONO (seconds since boot), STATE_DIRECTORY,
+# run), TN_HB_MONO (seconds since boot), TN_HB_SERVICE_STATE (the service-state
+# file, default /run/telcoin/heartbeat-service), STATE_DIRECTORY,
 # CREDENTIALS_DIRECTORY, and curl and systemctl stand-ins first on PATH.
 #
 # bash 3.2 safe; POSIX awk; no python.
@@ -447,7 +455,8 @@ _hb_env_ok() {
     return 1
 }
 
-# _hb_svc_field KEY VALUE -- keep one Key=Value line of systemctl show.
+# _hb_svc_field KEY VALUE -- keep one Key=Value line of systemctl show (or of
+# the service-state file); any other key is ignored.
 _hb_svc_field() {
     case "$1" in
         LoadState) s_load="$2" ;;
@@ -459,14 +468,25 @@ _hb_svc_field() {
     esac
 }
 
-# _hb_check_service -- step 1: the node's systemd unit. Skipped (the RPC
-# checks decide) when systemctl prints nothing or fails.
+# _hb_check_service -- step 1: the node's systemd unit. Its state comes from the
+# file the unit's root ExecStartPre= wrote just before this run
+# (TN_HB_SERVICE_STATE, default /run/telcoin/heartbeat-service), used only when
+# it is a regular file, not a symlink, that this user can read and that is not
+# empty. Otherwise the runner asks systemctl show itself, which works for the
+# fixture tests and a static user but fails under DynamicUser= (no bus). Skipped
+# (the RPC checks decide) when neither gives an answer.
 _hb_check_service() {
-    local out rc=0 line s_load="" s_active="" s_sub="" s_nrestarts="" s_aet="" s_sct=""
-    local since="" age
-    out="$(systemctl show --no-pager -p LoadState -p ActiveState -p SubState -p NRestarts \
-        -p ActiveEnterTimestampMonotonic -p StateChangeTimestampMonotonic "${svc_base}.service" \
-        2>/dev/null)" || rc=$?
+    local out="" rc=0 line s_load="" s_active="" s_sub="" s_nrestarts="" s_aet="" s_sct=""
+    local since="" age sf
+    sf="${TN_HB_SERVICE_STATE:-/run/telcoin/heartbeat-service}"
+    if [[ -f "$sf" && ! -L "$sf" && -r "$sf" ]]; then
+        { out="$(< "$sf")"; } 2>/dev/null || out=""
+    fi
+    if [[ -z "$out" ]]; then
+        out="$(systemctl show --no-pager -p LoadState -p ActiveState -p SubState -p NRestarts \
+            -p ActiveEnterTimestampMonotonic -p StateChangeTimestampMonotonic "${svc_base}.service" \
+            2>/dev/null)" || rc=$?
+    fi
     if [[ $rc -ne 0 || -z "$out" ]]; then
         return 0
     fi
