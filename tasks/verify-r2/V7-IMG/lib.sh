@@ -16,7 +16,8 @@
 # whose last argument is --version prints $V7_CANNED/<digest> (exit
 # $V7_RUN_RC, default 0), or exits 125 when no canned file exists; any other
 # `run` exits 0; `ps` prints $V7_PS. v7_timeout_stub DIR writes DIR/timeout,
-# which logs and either runs the command or exits $V7_TMO_RC.
+# which logs and runs the command without its -k option and duration, or, for a
+# `docker run` while V7_TMO_RC is set, exits $V7_TMO_RC instead (a run cut short).
 #
 # bash 3.2 safe.
 # =============================================================================
@@ -96,10 +97,11 @@ v7_timeout_stub() {
     cat > "$1/timeout" <<'SH'
 #!/bin/sh
 printf 'timeout %s\n' "$*" >> "$V7_DLOG"
-if [ -n "${V7_TMO_RC:-}" ]; then
+[ "$1" = -k ] && shift 2
+shift
+if [ -n "${V7_TMO_RC:-}" ] && [ "$1 $2" = "docker run" ]; then
     exit "$V7_TMO_RC"
 fi
-shift
 exec "$@"
 SH
     chmod 0755 "$1/timeout"

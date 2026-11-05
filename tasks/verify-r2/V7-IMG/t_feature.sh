@@ -4,13 +4,14 @@
 # itself: tn_docker_image_network_ok against a docker stand-in on PATH that
 # prints a canned --version per image digest. Mainnet: no features only; testnet:
 # adiri, faucet allowed, nothing else; one Build Features line exactly; a run
-# that fails, or a timeout (rc 124), refuses (fail closed); devnet is not
-# checked; an unknown network and an image not given by digest refuse before
-# any docker call; the docker run carries --pull=never, --network none,
-# --cap-drop ALL, no-new-privileges, --read-only and --entrypoint
-# /usr/local/bin/telcoin, under `timeout 60` where timeout exists; the message
-# names the image, the features found and the network; a progress function
-# gets the message.
+# that fails, or a timeout (rc 124, or 137 after the KILL), refuses (fail
+# closed), and a timed-out run removes its container (docker rm -f <name>, under
+# timeout -k 5 30); devnet is not checked; an unknown network and an image not
+# given by digest refuse before any docker call; the docker run carries --init,
+# --name tn-feature-check-<pid>-<n>, --pull=never, --network none, --cap-drop
+# ALL, no-new-privileges, --read-only and --entrypoint /usr/local/bin/telcoin,
+# under `timeout -k 5 60` where timeout exists; the message names the image, the
+# features found and the network; a progress function gets the message.
 #
 #   bash tasks/verify-r2/V7-IMG/t_feature.sh
 #
@@ -74,16 +75,31 @@ check_rc "feature: docker run exit 1 refused even with a good line" 1 "$rc"
 check_has "feature: run failure says it was not used" "yes" "$(grep -q 'docker run exited 1), so it is not used' "$T/err" && echo yes || echo no)"
 rc=0; tn_docker_image_network_ok mainnet "${GM}@sha256:$(v7_digest 901)" 2>"$T/err" || rc=$?
 check_rc "feature: image not held (docker exit 125) refused" 1 "$rc"
-# timeout: a stand-in that logs its arguments; V7_TMO_RC=124 plays a hang that timed out.
+# v7_name LINE -- the --name in LINE; v7_unname LINE -- LINE with that name as NAME.
+v7_name() { printf '%s\n' "$1" | sed -n 's/.* --name \([^ ]*\) .*/\1/p'; }
+v7_unname() { printf '%s\n' "$1" | sed 's/ --name [^ ]* / --name NAME /'; }
+# timeout: a stand-in that logs its arguments; V7_TMO_RC=124 (or 137) plays a hang
+# that timed out (or was killed after the TERM).
 if command -v timeout >/dev/null 2>&1; then
     v7_timeout_stub "$T/bin"
     : > "$V7_DLOG"
     rc=0; tn_docker_image_network_ok mainnet "${GM}@sha256:${d}" 2>"$T/err" || rc=$?
     check_rc "feature: under timeout, good image accepted" 0 "$rc"
-    check "feature: the run goes through timeout 60" "timeout 60 docker run --rm --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${GM}@sha256:${d} --version" "$(head -n 1 "$V7_DLOG")"
-    rc=0; V7_TMO_RC=124 tn_docker_image_network_ok mainnet "${GM}@sha256:${d}" 2>"$T/err" || rc=$?
-    check_rc "feature: timeout (rc 124) refused" 1 "$rc"
-    check_has "feature: timeout message names rc 124" "yes" "$(grep -q 'docker run exited 124' "$T/err" && echo yes || echo no)"
+    check "feature: the run goes through timeout -k 5 60, behind --init, named" "timeout -k 5 60 docker run --rm --init --name NAME --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${GM}@sha256:${d} --version" "$(v7_unname "$(head -n 1 "$V7_DLOG")")"
+    check "feature: the container name is tn-feature-check-<pid>-<n>" yes \
+        "$(v7_name "$(head -n 1 "$V7_DLOG")" | grep -qE '^tn-feature-check-[0-9]+-[0-9]+$' && echo yes || echo no)"
+    check "feature: a run that finished removes nothing" 0 "$(grep -c 'docker rm' "$V7_DLOG")"
+    for trc in 124 137; do
+        : > "$V7_DLOG"
+        rc=0; V7_TMO_RC="$trc" tn_docker_image_network_ok mainnet "${GM}@sha256:${d}" 2>"$T/err" || rc=$?
+        check_rc "feature: timeout (rc ${trc}) refused" 1 "$rc"
+        check_has "feature: timeout message names the limit and rc ${trc}" "yes" \
+            "$(grep -q "did not finish --version within 60 seconds (docker run exited ${trc} under timeout)" "$T/err" && echo yes || echo no)"
+        nm="$(v7_name "$(head -n 1 "$V7_DLOG")")"
+        check "feature: rc ${trc}: docker rm -f of that container, under timeout, after the run" \
+            "timeout -k 5 30 docker rm -f ${nm}|rm -f ${nm}" "$(sed -n '2p;3p' "$V7_DLOG" | tr '\n' '|' | sed 's/|$//')"
+    done
+    unset trc nm
     rm -f "$T/bin/timeout"
 else
     skip "feature: timeout cases" "no timeout on this host"
@@ -91,7 +107,7 @@ fi
 : > "$V7_DLOG"
 rc=0; PATH="$T/bin:/usr/bin:/bin" tn_docker_image_network_ok mainnet "${GM}@sha256:${d}" 2>/dev/null || rc=$?
 check_rc "feature: good image accepted" 0 "$rc"
-check_has "feature: docker run flags" "run --rm --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${GM}@sha256:${d} --version" "$(cat "$V7_DLOG")"
+check_has "feature: docker run flags" "run --rm --init --name NAME --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${GM}@sha256:${d} --version" "$(v7_unname "$(cat "$V7_DLOG")")"
 # before any docker call
 for img in "${GM}:v1.0.0" "-${GM}@sha256:${d}" "${GM}@sha256:${d} --privileged" "" "${GM}"; do
     : > "$V7_DLOG"

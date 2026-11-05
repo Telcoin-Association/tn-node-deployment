@@ -126,9 +126,9 @@ mut_apply() {
         M04) mut_sub "$d/lib/common.sh" "$FN_IMG" '        testnet|mainnet) ;;' '        *) ;;' ;;
         M05) mut_sub "$d/lib/common.sh" "$FN_IMG" 'if [[ "$img" != *@sha256:* || "$img" == -* || "$img" =~ [[:space:]] ]]; then' 'if false; then' ;;
         M06) mut_sub "$d/lib/common.sh" "$FN_IMG" '        devnet)' '        devnet|testnet)' ;;
-        M07) mut_sub "$d/lib/common.sh" "$FN_IMG" 'docker run --rm --pull=never --network none' 'docker run --rm --network none' ;;
-        M08) mut_sub "$d/lib/common.sh" "$FN_IMG" 'docker run --rm --pull=never --network none' 'docker run --rm --pull=never' ;;
-        M09) mut_sub "$d/lib/common.sh" "$FN_IMG" 'tmo=(timeout 60)' 'tmo=()' ;;
+        M07) mut_sub "$d/lib/common.sh" "$FN_IMG" '--name "$name" --pull=never --network none' '--name "$name" --network none' ;;
+        M08) mut_sub "$d/lib/common.sh" "$FN_IMG" '--name "$name" --pull=never --network none' '--name "$name" --pull=never' ;;
+        M09) mut_sub "$d/lib/common.sh" "$FN_IMG" 'tmo=(timeout -k 5 "$limit")' 'tmo=()' ;;
         M10) mut_sub "$d/lib/common.sh" "$FN_VER" 'if [[ -n "$feats" ]]; then' 'if false; then' ;;
         M11) mut_sub "$d/lib/common.sh" "$FN_VER" 'if [[ "$has_adiri" -ne 1 ]]; then' 'if false; then' ;;
         M12) mut_sub "$d/lib/common.sh" 'a testnet build has adiri (and faucet) only." >&2' '                        return 1' '                        :' ;;
