@@ -1009,9 +1009,10 @@ _preflight_docker() {
         default_image="$(latest_docker_image "$NETWORK")" || default_image=""
         while true; do
             # At the end of input there is nothing more to ask: stop, rather than
-            # take the default no one confirmed or ask again for ever.
+            # take the default no one confirmed or ask again for ever. A last line
+            # without a newline still counts (read fails but fills input).
             if ! read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
-  [${default_image:-none}]: " input; then
+  [${default_image:-none}]: " input && [[ -z "$input" ]]; then
                 echo ""
                 setup_fail "The input ended at the Docker image prompt, so no usable image was given and the Docker install stops. Nothing was pulled and no container was started."
             fi

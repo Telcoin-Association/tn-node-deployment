@@ -12,7 +12,7 @@
 # the listener and node-flag checks, as --release-tag there replaces it with the
 # release's image (mainnet: the only way, and the way its refusals name); the
 # interactive image
-# prompt stops at the end of input; the
+# prompt stops at the end of input (a last line without a newline still counts); the
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
 # edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
@@ -110,6 +110,23 @@ check "image prompt at the end of input: no docker call" no "$(grep -q DOCKER_RA
 rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; latest_docker_image() { printf '%s\\n' '${R}@sha256:${D64}'; }; ${EOF_READ}; _preflight_docker" < /dev/null)"
 check "image prompt at the end of input, with a default: refused too, the default not taken" "1 0 no" \
     "$rc $(not_usable) $(grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+# A last line without a newline is still the answer: read fails at the end of
+# input but has filled the variable, so the typed image is taken (pulled, held,
+# checked) rather than refused as the end of input.
+TT="ghcr.io/telcoin-association/tn-testnet@sha256:${D64}"
+printf '%s' "$TT" > "$T/nonl"
+: > "$T/docker.log"
+# shellcheck disable=SC2016
+N4_STUBS='docker() { printf "docker %s\n" "$*" >> "$T/docker.log"; }; tn_docker_holds_digest() { return 0; }'
+# shellcheck disable=SC2016
+rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; ${N4_STUBS}; ${EOF_READ}; _preflight_docker; "'printf "image=%s\n" "$DOCKER_IMAGE"' < "$T/nonl")"
+check "image prompt, a last line without a newline: taken, not refused as the end of input" "0 0 no" \
+    "$rc $(not_usable) $(grep -q 'The input ended at the Docker image prompt' "$T/sn.err" && echo yes || echo no)"
+check "image prompt, a last line without a newline: that image pulled and checked" \
+    "docker pull ${TT}|check testnet ${TT}" "$(tr '\n' '|' < "$T/docker.log" | sed 's/|$//')"
+check_has "image prompt, a last line without a newline: the image setup goes on with" "image=${TT}" "$(cat "$T/sn.out")"
+rm -f "$T/nonl"
+unset TT N4_STUBS
 unset -f not_usable
 unset EOF_READ
 flags "docker on devnet without --docker-image refused (no signed release to take the newest from)" 1 devnet docker "" "" ""
