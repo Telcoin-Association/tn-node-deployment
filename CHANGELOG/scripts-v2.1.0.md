@@ -82,9 +82,9 @@ warning); it is a release file, not an updater entry.
   images go. The pipeline side is telcoin-network draft PR #1784, which publishes each channel
   to its package in `etc/release.sh`; the scheme was confirmed on 2026-11-04.
 - The old single package `ghcr.io/telcoin-association/telcoin-network`
-  (`TN_GHCR_LEGACY_IMAGE_REPO`) never held a release. It is recognised for a container that
-  already runs from it (remove-node, the status screens), and every new pull refuses it on
-  every network: `Image refused: <image>. No release was ever published to
+  (`TN_GHCR_LEGACY_IMAGE_REPO`) never held a release. On testnet and devnet it is recognised for
+  a container that already runs from it (remove-node, the status screens); mainnet never accepts
+  it, and every new pull refuses it on every network: `Image refused: <image>. No release was ever published to
   ghcr.io/telcoin-association/telcoin-network, so no image is pulled from it; <network> images
   come from <package>. Give the <network> release tag instead.`
 - A signed release's `IMAGE_DIGEST` must name a repository a new pull for the network takes, and
@@ -106,6 +106,19 @@ warning); it is a release file, not an updater entry.
   0.16.0, and mainnet and devnet have none, so an update there is never one-way and a downgrade
   there is never refused for the storage reason (`"storage_downgrade":false`). Before, every
   network had the 0.16.0 floor, so any mainnet `v0.1.x` image counted as below it.
+- `setup-node --json --phase=finalize` holds the Docker image keygen recorded in `.node-meta` to
+  the same pull rule and build-feature check as keygen's preflight, before the config, the unit
+  or the container is written or started, and never pulls: `Refusing the image <image>: ... No
+  container was started; run --phase=keygen again with a <network> image.` An image removed
+  since keygen stops it with `Could not run <image> to read its build features ... Check that
+  Docker is running and holds the image, then try again.`
+- setup-node's interactive image prompt stops at the end of input instead of asking again: `The
+  input ended at the Docker image prompt, so no usable image was given and the Docker install
+  stops. Nothing was pulled and no container was started.` Only Enter takes the default.
+- The UI helper's `docker-detect` lists containers whose image comes from any repository the
+  library recognises for testnet, mainnet or devnet, so a dev-team container from `tn-dev` shows
+  in the Node Manager as remove-node's scan lists it; `docker-status` and `docker-logs` accept
+  those names too.
 - The UI twins follow: `ui/server.py` `DOCKER_REPO`, `docker_pull_repo_ok` and
   `pull_image_allowed`, and the wizard's Docker image field names the network's package;
   `ui/test_csrf.py` keeps the server's repositories equal to the library's.
