@@ -33,8 +33,9 @@
 #   1 fetch    git fetch origin, then print the commit origin/main names: steps
 #              2 to 5 check, tag and push that commit, never a later one
 #   2 main     that commit carries the release: its MANIFEST names TAG, its
-#              MANIFEST and MANIFEST.asc are the release branch's (when that
-#              branch is still here), and the check with --require-sig --tag TAG
+#              MANIFEST and MANIFEST.asc are those of origin's release/TAG (of
+#              the local release/TAG when origin has none; not compared when
+#              neither is here), and the check with --require-sig --tag TAG
 #              passes in a clean temporary worktree of it
 #   3 tag      git tag -s --local-user=FPR! -m TAG TAG <that commit>; refused,
 #              with nothing tagged, when origin/main has moved since step 1
@@ -486,7 +487,10 @@ prep() {
 }
 
 # main_has_release TAG SHA -- the commit SHA (origin/main at step 1 of tag)
-# carries release TAG (see step 2 of tag).
+# carries release TAG (see step 2 of tag). The release branch compared is
+# origin's, as step 1 fetched it, so a stale local copy (prepared again
+# elsewhere, then merged) does not refuse the release; the local branch counts
+# only when origin has none.
 main_has_release() {
     local tag="$1" sha="$2" branch="release/$1" ref="" c f rel
     rel="$(_git show "${sha}:MANIFEST" 2>/dev/null | awk -F= '$1 == "release" { print $2; exit }' || true)"
@@ -495,7 +499,7 @@ main_has_release() {
             "$tag" "${rel:-no release}" >&2
         return 1
     fi
-    for c in "refs/heads/${branch}" "refs/remotes/origin/${branch}"; do
+    for c in "refs/remotes/origin/${branch}" "refs/heads/${branch}"; do
         if _git rev-parse -q --verify "$c" > /dev/null; then
             ref="$c"
             break

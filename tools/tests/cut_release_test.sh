@@ -274,9 +274,27 @@ check_rc "a local tag signed by another key: refused" 1 "$RC"
 has "a local tag signed by another key: says why" "$TAG carries no good signature by a key of lib/release-keys/*.asc on origin/main"
 check "a local tag signed by another key: not pushed" "absent" "$(git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$TAG" >/dev/null && echo present || echo absent)"
 gitw tag -d "$TAG" >/dev/null
+
+# Step 2 compares main with origin's release branch, the local one only when
+# origin has none. A local commit that changes MANIFEST.asc after the push,
+# pushed to origin's release branch: refused, naming origin's branch.
+pushed="$(gitw rev-parse "$BR")"
+printf '\n' >> "$W/MANIFEST.asc"
+gitw commit -q -am "a later change of the release branch"
+gitw push -q origin "$BR" 2>/dev/null
+cut tag "$TAG" --yes
+check_rc "origin's release branch differs from main: refused" 1 "$RC"
+has "origin's release branch differs from main: says why" "   the MANIFEST.asc on origin/main is not the one on origin/$BR"
+check "origin's release branch differs from main: no tag" "absent" "$(gitw rev-parse -q --verify "refs/tags/$TAG" >/dev/null && echo present || echo absent)"
+# Origin's release branch back to what merged; the local one stays stale for
+# the next run, which must pass.
+git -C "$ORIGIN" update-ref "refs/heads/$BR" "$pushed"
+gitw fetch -q origin
+
 : > "$T/gpg.log"
 SERVED_TAG="$TAG" cut tag "$TAG" --yes
 check_rc "tag: exits 0" 0 "$RC"
+check "tag: a stale local release branch is not compared" "" "$(printf '%s\n' "$OUT" | grep 'is not the one on')"
 order "tag: the steps in order" "] fetch origin" "] origin/main carries release $TAG" "] make the signed tag" \
     "] verify the tag signature" "] push the tag" "] wait for CI" "] the published installer names $TAG"
 has "tag: the check ran on origin/main" "MANIFEST check passed for $TAG (serial 1, min_updater"
@@ -288,6 +306,10 @@ has "tag: CI conclusion" "   ci.yml: success https://github.example.invalid/run/
 has "tag: publish conclusion" "   publish-installer.yml: success https://github.example.invalid/run/1"
 has "tag: the installer serves the tag" "   https://install.telcoin.network serves $TAG"
 check "tag: no temporary worktree left" "1" "$(gitw worktree list | wc -l | tr -d ' ')"
+# The local release branch back on what origin has.
+gitw checkout -q --detach
+gitw branch -q -f "$BR" "$pushed"
+gitw checkout -q "$BR"
 
 SERVED_TAG="$TAG" cut tag "$TAG" --yes
 check_rc "tag again: exits 0" 0 "$RC"
