@@ -96,11 +96,17 @@ comes from the signed release: `tn_docker_resolve_ref` refuses a bare digest on 
 rule is defence in depth: only the signed release says which digest of `tn-mainnet` is a
 release image. After the pull and the digest check, and before any container starts or any
 launch file or `.node-meta` line names the image, `tn_docker_image_network_ok` runs the image's
-`/usr/local/bin/telcoin --version` once (no network, no capabilities, read-only, 60 s at most)
-and judges its one `Build Features:` line: none on mainnet, `adiri` on testnet (`faucet`
-allowed, nothing else); devnet images are not checked. setup-node, update-node's Docker
-prepare and edit-config's image change stop on a refusal, in `--json` mode with an error event
-and then `done`. The UI's `DOCKER_REPO` and the library's `tn_docker_repo_for` must agree, and
+`/usr/local/bin/telcoin --version` once (no network, no capabilities, read-only, `--init`; under
+`timeout -k 5 60` where coreutils `timeout` exists, else with no limit; on rc 124 or 137 it runs
+`docker rm -f` on the named container and refuses) and judges its one `Build Features:` line:
+none on mainnet, `adiri` on testnet (`faucet` allowed, nothing else); devnet images are not
+checked. setup-node (keygen's preflight, and finalize for the recorded image or the one its
+`--release-tag` or `--docker-image` override names), update-node's Docker prepare and
+edit-config's image change stop on a refusal, in `--json` mode with an error event and then
+`done`. A changed image is recorded in `.node-meta` in one order everywhere (finalize's
+override, update-node, edit-config): the old `RELEASE_TAG` removed, `DOCKER_IMAGE` and
+`DOCKER_IMAGE_DIGEST` written, the new `RELEASE_TAG` last, so a run stopped half way never
+pairs a new digest with the old release. The UI's `DOCKER_REPO` and the library's `tn_docker_repo_for` must agree, and
 `ui/test_csrf.py` pins that. The release floor
 (`tn_ref_min_check`, `MIN_SOURCE_VERSION_<NETWORK>`) applies to setup-node, to every update-node
 prepare path and to edit-config's Docker image change; new code that picks a node release
@@ -404,11 +410,14 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   `REVKEYSIG`, so a check of the exit status would accept a release signed by an expired or
   revoked key. Keep the `|| true` after the `gpgv` call and the verdict on the parser in every
   copy.
-- Key files use LF line endings, as `gpg --armor --export` writes them. `release-scripts.sh`
-  (prepare and `--check`) refuses a key file with CR ("<file> has CR line endings: write it with
-  LF line endings (as gpg --armor --export does)") and, where gpg is installed, a key file gpg
-  reads no primary key from ("gpg reads no primary key from <file>: export the key again with
-  gpg --armor --export <fingerprint>"), so neither can ship. The updater's dearmor and the
+- Key files use LF line endings and end with a newline, as `gpg --armor --export` writes them.
+  `release-scripts.sh` (prepare and `--check`) refuses a key file with CR ("<file> has CR line
+  endings: write it with LF line endings (as gpg --armor --export does)"), one without a final
+  newline ("<file> does not end with a newline: export the key again with gpg --armor --export
+  <fingerprint> > <file> (install.sh embeds the key files one after the other)") and, where gpg
+  is installed, a key file gpg reads no primary key from ("gpg reads no primary key from
+  <file>: export the key again with gpg --armor --export <fingerprint>"), so none of them can
+  ship. The updater's dearmor and the
   installer's splitter of its embedded keys read CRLF too.
 - `install.sh` carries every key file, sorted by name, in its `TN_RELEASE_KEYS` heredoc, which
   `release-scripts.sh` writes in the release commit. That embedded set is the installer's trust
@@ -424,8 +433,10 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   (`$SCRIPT_DIR/.tn-update.XXXXXX`) and checks each one against its MANIFEST hash, its
   `.sha256` sidecar when one is published, and `bash -n`. Only when every file passes does it
   install them, all together. It removes files the release no longer lists and writes
-  `MANIFEST` and `MANIFEST.asc` last, as the record of the installed release. A refusal or a
-  failure leaves the tree as it was. The updater takes no lock, and it no longer redeploys the
+  `MANIFEST` and `MANIFEST.asc` last, as the record of the installed release, and only after
+  every move and removal succeeded: after a failed one the old record stays ("The release record
+  was not updated: run the updater again.") and the next run records the new release. A refusal
+  or a failure before the install pass leaves the tree as it was. The updater takes no lock, and it no longer redeploys the
   Node Manager UI: it prints `sudo bash ui/install-ui.sh --update` for the operator to run.
 - When the release lists a different `update-scripts.sh`, the running updater stages and
   verifies the whole release first, then runs the release's copy from the staging dir with
@@ -481,8 +492,10 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
 
 To cut a release, use `tools/cut-release.sh` from a clean clone of the repository: untracked
 files count as uncommitted changes, as for `release-scripts.sh` prepare. Every step prints its
-command and asks `[Enter] run / s skip / q quit` (`--yes` runs every step without asking). A
-step whose result is already there is reported as "already done" and passed over, so running
+command and asks `[Enter] run / s skip / q quit` (`--yes` runs every step without asking). The
+three checks (prep step 6, tag steps 2 and 4) ask `[Enter] run / q quit` and cannot be skipped,
+because the steps after them push, tag or publish what they check. A step whose result is
+already there is reported as "already done" and passed over, so running
 the same command again carries on where a run stopped. The tool never sets `commit.gpgsign` or
 `user.signingkey`: the commit and the tag name the key with `-S` and `--local-user`.
 `TN_CUT_POLL_SECONDS` (default 30) and `TN_CUT_POLL_TRIES` (default 120) pace its waits.
@@ -495,7 +508,12 @@ the same command again carries on where a run stopped. The tool never sets `comm
    lib/release-keys/*.asc on origin/main") and creates nothing; creates
    `release/scripts-vX.Y.Z` from `origin/main`, or switches to it; checks that the card answers
    (`gpg --card-status`); prepares the release with
-   `bash tools/release-scripts.sh [--serial N] scripts-vX.Y.Z`; signs `MANIFEST` with
+   `bash tools/release-scripts.sh [--serial N] scripts-vX.Y.Z` (when `release/TAG` already holds
+   a `MANIFEST` for the tag with another serial than `--serial N`, step 4 refuses and names both
+   serials: rerun with the prepared serial, or delete the branch with the commands it prints,
+   `rm -f MANIFEST MANIFEST.asc RELEASE && git checkout -f main && git branch -D release/TAG`
+   and, when origin has the branch too, `git push origin --delete release/TAG`); signs
+   `MANIFEST` with
    `gpg --armor --detach-sign --local-user <FPR>! --output MANIFEST.asc MANIFEST`; runs
    `bash tools/release-scripts.sh --check --require-sig --tag scripts-vX.Y.Z`; stages and
    commits `MANIFEST`, `MANIFEST.asc`, `RELEASE` and `install.sh` in one prompt
@@ -523,17 +541,21 @@ the same command again carries on where a run stopped. The tool never sets `comm
    pull request. Merge it with a merge commit, so the signed release commit stays on main as
    it was made.
 3. Right after the merge, `bash tools/cut-release.sh tag scripts-vX.Y.Z [--key FPR] [--yes]`
-   tags it. It checks that `origin/main` carries the release (its `MANIFEST` names the tag,
-   `MANIFEST` and `MANIFEST.asc` are the release branch's when that branch is still there, and
-   `--check --require-sig --tag` passes in a clean temporary worktree of `origin/main`); makes
-   the signed tag (`git tag -s --local-user=<FPR>! -m TAG TAG origin/main`); checks it with
-   `git verify-tag --raw`, whose status lines must show a good signature (`GOODSIG` then
-   `VALIDSIG`) by a key of `lib/release-keys/*.asc` on `origin/main` and no `BADSIG`,
-   `EXPKEYSIG`, `REVKEYSIG`, `EXPSIG` or `ERRSIG` (an existing tag passes only this way too; it
-   refuses with "<TAG> carries no good signature by a key of lib/release-keys/*.asc on
-   origin/main" and reports "<TAG> is signed by release key <FPR>" when it passes); pushes it;
-   waits for the tag's `ci.yml` and `publish-installer.yml` runs
-   and prints their conclusions; and checks that `https://install.telcoin.network` names the
+   tags it. Right after the fetch it prints the commit `origin/main` names ("origin/main is
+   <sha>: steps 2 to 5 check, tag and push this commit"), and works on that commit only. It
+   checks that the commit carries the release (its `MANIFEST` names the tag; its `MANIFEST` and
+   `MANIFEST.asc` are those of origin's `release/TAG` as fetched, or of the local branch when
+   origin has none, and are not compared when neither exists; and `--check --require-sig --tag`
+   passes in a clean temporary worktree of it, which an interrupted run removes); makes the
+   signed tag (`git tag -s --local-user=<FPR>! -m TAG TAG <sha>`), refusing with nothing tagged
+   when `origin/main` has moved since step 1; checks it with `git verify-tag --raw`, whose
+   status lines must show a good signature (`GOODSIG` then `VALIDSIG`) by a key of
+   `lib/release-keys/*.asc` at that commit and no `BADSIG`, `EXPKEYSIG`, `REVKEYSIG`, `EXPSIG` or
+   `ERRSIG` (an existing tag passes only this way too; it refuses with "<TAG> carries no good
+   signature by a key of lib/release-keys/*.asc on origin/main <sha>" and reports "<TAG> is
+   signed by release key <FPR>" when it passes); pushes it, and the pushed tag must name that
+   commit; waits for the tag's `ci.yml` and `publish-installer.yml` runs and prints their
+   conclusions; and checks that `https://install.telcoin.network` names the
    tag in its `TN_SCRIPTS_TAG` line. `RELEASE` on main names the tag from the merge on, and
    until the tag exists every updater that reads it fails to fetch the release, including the
    first signed run on a host that has just bootstrapped.

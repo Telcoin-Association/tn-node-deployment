@@ -93,15 +93,19 @@ warning); it is a release file, not an updater entry.
   nothing was pulled; report it to the node team.`
 - After the pull and the digest check, and before any container starts or `.node-meta` names
   the image, `tn_docker_image_network_ok` runs the image's `/usr/local/bin/telcoin --version`
-  once (`docker run --rm --pull=never --network none --cap-drop ALL --security-opt
-  no-new-privileges --read-only`, 60 s at most where `timeout` exists) and judges its one
+  once (`docker run --rm --init --name tn-feature-check-<pid>-<n> --pull=never --network none
+  --cap-drop ALL --security-opt no-new-privileges --read-only`, under `timeout -k 5 60` where
+  coreutils `timeout` exists, as on Ubuntu, and with no limit elsewhere) and judges its one
   `Build Features:` line: none on mainnet, `adiri` on testnet (`faucet` allowed, nothing else).
   Devnet images are not checked (an info line says so). setup-node (interactive and `--json`),
   update-node's Docker prepare (interactive and `--json`) and edit-config's image change (menu
   and `--set`) stop on a refusal, and a `--json` run ends with an error event and `done`:
   `Image refused: <image> was built with the features <list>, and a <network> image has <none |
   adiri, and faucet at most>, so it is not a <network> image. It is not used and nothing was
-  changed; if a <network> release names this image, report it to the node team.`
+  changed; if a <network> release names this image, report it to the node team.` A run cut
+  short by the limit (rc 124 or 137) has its container removed with `docker rm -f <name>` and is
+  refused: `Image refused: <image> did not finish --version within 60 seconds (docker run exited
+  <rc> under timeout), so its build features are not known. ...`
 - The storage migration floor is per network (update-node): `STORAGE_MIGRATION_FLOOR_TESTNET` is
   0.16.0, and mainnet and devnet have none, so an update there is never one-way and a downgrade
   there is never refused for the storage reason (`"storage_downgrade":false`). Before, every
@@ -109,18 +113,27 @@ warning); it is a release file, not an updater entry.
 - `setup-node --json --phase=finalize` holds the Docker image keygen recorded in `.node-meta` to
   the same pull rule and build-feature check as keygen's preflight, before the config, the unit
   or the container is written or started, and does not pull it: `Refusing the image <image>:
-  ... No container was started; to replace it, run finalize again with --docker-image
-  <repository>@sha256:<digest> (a <network> image).` An image removed since keygen stops it with
+  ... No container was started; to replace it, run finalize again with ...`, naming the way out
+  per network (mainnet `--release-tag <tag>`; testnet `--docker-image <repo>@sha256:<digest>` or
+  `--release-tag <tag>`; devnet `--docker-image`). An image removed since keygen stops it with
   `Could not run <image> to read its build features ... Check that Docker is running and holds
   the image, then try again.`
-- Finalize's `--docker-image` with another image than the recorded one replaces it: the image
-  goes through keygen's steps (pull rule and mainnet digest rule, release floor, pull by digest
-  and digest check, build-feature check), and only then are `DOCKER_IMAGE`,
-  `DOCKER_IMAGE_DIGEST` and `RELEASE_TAG` written to `.node-meta` (a stale `RELEASE_TAG` is
-  removed when no release names the image); a refusal leaves `.node-meta` unchanged.
-- setup-node's interactive image prompt stops at the end of input instead of asking again: `The
-  input ended at the Docker image prompt, so no usable image was given and the Docker install
-  stops. Nothing was pulled and no container was started.` Only Enter takes the default.
+- Finalize's `--release-tag <tag>`, or a `--docker-image` that names another image than the
+  recorded one, replaces it (both flags together are refused; on mainnet only `--release-tag`
+  works, since a digest alone is not taken there). Finalize runs every other input check first,
+  then takes the image through keygen's steps (pull rule, release lookup and mainnet digest
+  rule, release floor, pull by digest and digest check, build-feature check), and only then
+  writes `.node-meta`: the old `RELEASE_TAG` removed, `DOCKER_IMAGE` and `DOCKER_IMAGE_DIGEST`,
+  the new `RELEASE_TAG` last. A refusal leaves `.node-meta` unchanged, for example `Refusing the
+  image of release <tag> given with --release-tag (see above). No container was started and
+  .node-meta was not changed.`
+- update-node and edit-config record a changed image in the same order (old `RELEASE_TAG`
+  removed first, image and digest written, new tag last), so a failure half way never pairs a
+  new digest with an old release tag.
+- setup-node's interactive image prompt stops at the end of input with nothing typed instead of
+  asking again: `The input ended at the Docker image prompt, so no usable image was given and
+  the Docker install stops. Nothing was pulled and no container was started.` A last line typed
+  without a newline still counts, and only Enter takes the default.
 - The UI helper's `docker-detect` lists containers whose image comes from any repository the
   library recognises for testnet, mainnet or devnet, so a dev-team container from `tn-dev` shows
   in the Node Manager as remove-node's scan lists it; `docker-status` and `docker-logs` accept
@@ -243,8 +256,11 @@ warning); it is a release file, not an updater entry.
   need `gpgv` (Ubuntu ships it; `sudo apt-get install -y gpgv`, macOS `brew install gnupg`) and
   no longer `ssh-keygen`. The installer embeds every key file (its trust root, `TN_RELEASE_KEYS`)
   and installs the release's own key files only when they match the signed `MANIFEST`. Key files
-  must use LF line endings: `release-scripts.sh` refuses a key file with CR, and one gpg reads no
-  primary key from, before it can ship.
+  must use LF line endings and end with a newline: `release-scripts.sh` refuses a key file with
+  CR, one without a final newline, and one gpg reads no primary key from, before it can ship.
+- The updater records a release (`MANIFEST.asc`, then `MANIFEST`) only after every move and
+  removal of the install pass succeeded; after a failed one the old record stays, and the next
+  run records the new release.
 - A host with no release key and no installed release (one on update-scripts 1.1.72 or older)
   takes the key files once from the release, each through its published `.sha256`, verifies
   `MANIFEST.asc` with them and requires them to match the verified `MANIFEST`: `First signed
@@ -260,10 +276,14 @@ warning); it is a release file, not an updater entry.
   FPR] [--sig-from FILE] [--yes]` checks the signing key against `lib/release-keys`, makes the
   `release/TAG` branch, prepares, signs (the YubiKey here or through a forwarded gpg-agent;
   `--sig-from` copies a signature made elsewhere), checks, commits signed, pushes and opens the
-  pull request; `tag TAG` checks that main carries the release, makes and verifies the signed tag
-  (its signature must be by a release key, read from the status lines), pushes it, waits for CI
-  and the installer publish and checks that `https://install.telcoin.network` serves it; `status`
-  reports the newest release branch and tag. It never changes git configuration.
+  pull request, and refuses a `--serial` that differs from the one already prepared on the
+  branch; `tag TAG` prints the commit `origin/main` names after the fetch and works on that
+  commit only (it refuses to tag when `origin/main` has moved since), checks that it carries the
+  release, makes and verifies the signed tag (its signature must be by a release key, read from
+  the status lines), pushes it, waits for CI and the installer publish and checks that
+  `https://install.telcoin.network` serves it; `status` reports the newest release branch and
+  tag. The three checks (prep step 6, tag steps 2 and 4) cannot be skipped. It never changes git
+  configuration.
 - `tools/release-scripts.sh` needs at least one key file, embeds the keys in `install.sh`, prints
   the `gpg --armor --detach-sign --local-user <FPR>! --output MANIFEST.asc MANIFEST` command,
   and `--check` verifies `MANIFEST.asc` (`--require-sig` and `--tag` require a verifying one) and
