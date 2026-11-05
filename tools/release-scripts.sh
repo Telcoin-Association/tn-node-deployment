@@ -13,7 +13,8 @@
 # SIGNATURES below) and every file matches its MANIFEST hash.
 #
 # Prepare mode needs a clean git tree and at least one lib/release-keys/*.asc,
-# each an armored public key that is a row of an updater array. It writes:
+# each an armored public key with LF line endings and a final newline that is
+# a row of an updater array. It writes:
 #   install.sh  the TN_SCRIPTS_TAG line and the embedded copy of the release
 #               keys (every lib/release-keys/*.asc, sorted by name)
 #   RELEASE     one line, "<tag> <date>": the pointer update-scripts.sh reads from main
@@ -424,20 +425,24 @@ key_files() {
 }
 
 # keys_concat: the release key files, one after the other in name order: the
-# text install.sh embeds.
+# text install.sh embeds. A file whose last byte is not a newline gets one, so
+# its END line never runs into the BEGIN line of the next file.
 keys_concat() {
     local f
     while IFS= read -r f; do
         cat "$f"
+        if [[ -n "$(tail -c 1 "$f")" ]]; then
+            echo ""
+        fi
     done < <(key_files)
 }
 
 # check_keys: rc 0 when lib/release-keys holds at least one *.asc, every one
-# is an armored public key that decodes, has LF line endings (install.sh
-# embeds it as text), holds a primary key gpg can read (checked where gpg is
-# installed: a block that decodes to something else makes gpgv drop the whole
-# keyring), and is a row of an updater array (so it ships, with a sidecar).
-# Messages on stderr.
+# is an armored public key that decodes, has LF line endings and ends with a
+# newline (install.sh embeds the files one after the other as text), holds a
+# primary key gpg can read (checked where gpg is installed: a block that
+# decodes to something else makes gpgv drop the whole keyring), and is a row
+# of an updater array (so it ships, with a sidecar). Messages on stderr.
 check_keys() {
     local f err tracked bad=0
     if [[ -z "$(key_files)" ]]; then
@@ -452,6 +457,10 @@ check_keys() {
     while IFS= read -r f; do
         if grep -q $'\r' "$f"; then
             printf 'release-scripts.sh: %s has CR line endings: write it with LF line endings (as gpg --armor --export does)\n' "$f" >&2
+            bad=1
+        fi
+        if [[ -n "$(tail -c 1 "$f")" ]]; then
+            printf 'release-scripts.sh: %s does not end with a newline: export the key again with gpg --armor --export <fingerprint> > %s (install.sh embeds the key files one after the other)\n' "$f" "$f" >&2
             bad=1
         fi
         if command -v gpg >/dev/null 2>&1 && ! key_fpr "$f" > /dev/null; then
