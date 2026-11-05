@@ -54,7 +54,9 @@
 # the CI runs of the tag.
 #
 # Every step prints its command and asks "[Enter] run / s skip / q quit"; --yes
-# runs every step without asking. A step whose result is already there (the
+# runs every step without asking. The checks (prep step 6, tag steps 2 and 4)
+# ask "[Enter] run / q quit" and refuse s: the steps after them push, tag or
+# publish what they check. A step whose result is already there (the
 # branch, a prepared or verifying MANIFEST, the release commit, the pushed
 # branch, the open pull request, the tag, the pushed tag) is reported and
 # passed over, so running the same command again carries on where a run
@@ -82,6 +84,7 @@ YES=0
 TMP=""
 STEP_TOTAL=0
 SHOW_AS=""
+CHECK_STEP=0
 CARD=1
 FPR=""
 FPR_FILE=""
@@ -121,41 +124,63 @@ show() {
     printf '%s\n' "$out"
 }
 
-# ask -- rc 0 to run the step, 1 to skip it; q stops the run. --yes runs it.
+# ask [check] -- rc 0 to run the step, 1 to skip it; q stops the run. --yes
+# runs it. A check (ask check) cannot be skipped: s is refused and the
+# question asked again.
 ask() {
-    local ans=""
+    local kind="${1:-}" ans="" prompt="   [Enter] run / s skip / q quit: "
+    if [[ "$kind" == check ]]; then
+        prompt="   [Enter] run / q quit: "
+    fi
     if [[ $YES -eq 1 ]]; then
         return 0
     fi
-    if ! read -r -p "   [Enter] run / s skip / q quit: " ans; then
-        ans=q
-        echo ""
-    fi
-    case "$ans" in
-        s|S)
-            echo "   skipped"
-            return 1
-            ;;
-        q|Q)
-            echo "Stopped. Run the same command again to carry on from here."
-            exit 0
-            ;;
-    esac
-    return 0
+    while :; do
+        if ! read -r -p "$prompt" ans; then
+            ans=q
+            echo ""
+        fi
+        case "$ans" in
+            s|S)
+                if [[ "$kind" == check ]]; then
+                    echo "   a check cannot be skipped: the steps after it act on what it checks (Enter runs it, q quits)"
+                    continue
+                fi
+                echo "   skipped"
+                return 1
+                ;;
+            q|Q)
+                echo "Stopped. Run the same command again to carry on from here."
+                exit 0
+                ;;
+        esac
+        return 0
+    done
 }
 
 # step N DESC CMD... -- print the step and its command (SHOW_AS instead, when
 # set), ask, run it. rc 1 when skipped; a command that fails ends the run.
 step() {
-    local n="$1" desc="$2" shown
+    local n="$1" desc="$2" shown kind=""
     shift 2
     shown="${SHOW_AS:-$(show "$@")}"
     SHOW_AS=""
+    if [[ $CHECK_STEP -eq 1 ]]; then
+        kind=check
+    fi
+    CHECK_STEP=0
     printf '\n[%s/%s] %s\n   $ %s\n' "$n" "$STEP_TOTAL" "$desc" "$shown"
-    ask || return 1
+    ask "$kind" || return 1
     if ! "$@"; then
         die "step ${n} (${desc}) failed: ${shown}"
     fi
+}
+
+# check_step N DESC CMD... -- a step whose result the steps after it act on:
+# it cannot be skipped (s is refused), and a failure ends the run.
+check_step() {
+    CHECK_STEP=1
+    step "$@"
 }
 
 # done_step N DESC WHAT -- a step whose result is already there.
@@ -425,7 +450,7 @@ prep() {
         wait_for_sig
     fi
 
-    step 6 "check the release" bash tools/release-scripts.sh --check --require-sig --tag "$tag" || true
+    check_step 6 "check the release" bash tools/release-scripts.sh --check --require-sig --tag "$tag"
 
     if [[ "$(_git log -1 --format=%s)" == "release: ${tag}" && -z "$(_git status --porcelain -- MANIFEST "$SIG_FILE" RELEASE install.sh)" ]]; then
         done_step 7 "commit" "$(_git log -1 --format='%s (%h)')"
@@ -574,7 +599,7 @@ tag_release() {
     printf '   origin/main is %s: steps 2 to 5 check, tag and push this commit\n' "$main_sha"
 
     SHOW_AS="git worktree add --detach <temp dir> ${main_sha}; cd <temp dir>; bash tools/release-scripts.sh --check --require-sig --tag ${tag}"
-    step 2 "origin/main carries release ${tag}" main_has_release "$tag" "$main_sha" || true
+    check_step 2 "origin/main carries release ${tag}" main_has_release "$tag" "$main_sha"
 
     if _git rev-parse -q --verify "refs/tags/${tag}" > /dev/null; then
         [[ "$(_git rev-parse "${tag}^{commit}")" == "$main_sha" ]] \
@@ -587,7 +612,7 @@ tag_release() {
     fi
 
     SHOW_AS="git verify-tag --raw ${tag} (a good signature by a key of ${KEYS_DIR}/*.asc on origin/main ${short})"
-    step 4 "verify the tag signature" tag_signed_by_release_key "$tag" "$main_sha" "origin/main ${short}" || true
+    check_step 4 "verify the tag signature" tag_signed_by_release_key "$tag" "$main_sha" "origin/main ${short}"
 
     remote="$(_git ls-remote origin "refs/tags/${tag}" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
     local_obj="$(_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null || true)"

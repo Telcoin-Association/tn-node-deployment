@@ -252,6 +252,21 @@ git -C "$ORIGIN" update-ref refs/heads/main "$checked"
 gitw fetch -q origin
 check "origin/main is back on the release commit" "$checked" "$(gitw rev-parse origin/main)"
 
+# The checks cannot be skipped: s at step 2 or step 4 is refused and asked again.
+OUT="$(cd "$W" && printf '\ns\nq\n' | bash tools/cut-release.sh tag "$TAG" 2>&1)"
+RC=$?
+check_rc "tag, s at step 2: q still stops" 0 "$RC"
+has "tag, s at step 2: refused" "   a check cannot be skipped: the steps after it act on what it checks (Enter runs it, q quits)"
+check "tag, s at step 2: step 3 never shown" "" "$(printf '%s\n' "$OUT" | grep '^\[3/7\]')"
+check "tag, s at step 2: no tag" "absent" "$(gitw rev-parse -q --verify "refs/tags/$TAG" >/dev/null && echo present || echo absent)"
+OUT="$(cd "$W" && printf '\n\n\ns\nq\n' | bash tools/cut-release.sh tag "$TAG" 2>&1)"
+RC=$?
+check_rc "tag, s at step 4: q still stops" 0 "$RC"
+has "tag, s at step 4: refused" "   a check cannot be skipped: the steps after it act on what it checks (Enter runs it, q quits)"
+check "tag, s at step 4: step 5 never shown" "" "$(printf '%s\n' "$OUT" | grep '^\[5/7\]')"
+check "tag, s at step 4: not pushed" "absent" "$(git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$TAG" >/dev/null && echo present || echo absent)"
+gitw tag -d "$TAG" >/dev/null
+
 # A tag already here, signed by a key that is not a release key: refused, not pushed.
 gitw tag -s --local-user="${FPR2}!" -m "$TAG" "$TAG" origin/main
 SERVED_TAG="$TAG" cut tag "$TAG" --yes
@@ -307,5 +322,17 @@ has "--sig-from: the card is not checked" "WARN the card is not checked: the sig
 has "--sig-from: the check says why" "FAIL MANIFEST.asc does not verify against lib/release-keys: the signature by key ${FPR1:24} does not match MANIFEST"
 check "--sig-from: nothing committed" "$(gitw rev-parse origin/main)" "$(gitw rev-parse HEAD)"
 check "--sig-from: nothing pushed" "absent" "$(git -C "$ORIGIN" rev-parse -q --verify refs/heads/release/scripts-v2.1.1 >/dev/null && echo present || echo absent)"
+
+# --- prep: s at the check (step 6) is refused; Enter then runs it --------------------------
+(cd "$W" && rm -f MANIFEST MANIFEST.asc RELEASE && git checkout -q -f main)
+OUT="$(cd "$W" && printf '\n\n\n\n\ns\n\nq\n' | bash tools/cut-release.sh prep scripts-v2.1.2 2>&1)"
+RC=$?
+check_rc "prep, s at step 6: q at step 7 stops" 0 "$RC"
+has "prep, s at step 6: refused" "   a check cannot be skipped: the steps after it act on what it checks (Enter runs it, q quits)"
+has "prep, s at step 6: Enter runs the check" "MANIFEST check passed for scripts-v2.1.2 (serial 2,"
+order "prep, s at step 6: refused, then checked, then stopped at step 7" "] check the release" "a check cannot be skipped" \
+    "MANIFEST check passed for scripts-v2.1.2" "[7/9] commit the release files" "Stopped."
+check "prep, s at step 6: nothing committed" "$(gitw rev-parse origin/main)" "$(gitw rev-parse HEAD)"
+check "prep, s at step 6: nothing pushed" "absent" "$(git -C "$ORIGIN" rev-parse -q --verify refs/heads/release/scripts-v2.1.2 >/dev/null && echo present || echo absent)"
 
 finish
