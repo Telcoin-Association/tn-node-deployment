@@ -8,6 +8,17 @@ status: done
 - [x] S6 CI and workflows (e23f4d3)
 - [x] S7 Tests (3fa0904)
 
+Fix round V7 (on top of 3fa0904):
+- [x] F1 W1 + N1 (f7e1003): install.sh splitter strips CR; release-scripts check_keys refuses CR and,
+      where gpg exists, a key file gpg reads no primary key from; fixtures in install_test and
+      release_scripts_test (the install case fails against the splitter without the CR strip)
+- [x] F2 W2 + W3 + N11 (e2981c4): --check against a newest release signed by another key (rc 2;
+      fails with the newest-release verify_manifest removed); a junk .asc beside a good key; a
+      MANIFEST listing MANIFEST.asc ("bad path: MANIFEST.asc")
+- [x] F3 N6 + N7 + tag key (a73a2be): cut-release key check before the branch (keys of the branch to
+      be: origin/main for a new one); step 7 one prompt; tag step 4 and status require a tag signature
+      by a lib/release-keys key (git verify-tag --raw, VALIDSIG rule)
+
 ## Operator-visible changes
 
 - Script releases are signed with OpenPGP: MANIFEST.asc (ASCII-armored detached signatures over
@@ -44,10 +55,33 @@ status: done
   carries no readable release key, so it cannot verify anything. Use the published installer:
   https://install.telcoin.network". Embedded keys (TN_RELEASE_KEYS heredoc) are its trust root; a
   release may add a key (installed when it matches the signed MANIFEST).
+- (V7) release-scripts.sh prepare and --check also refuse a key file with CR line endings
+  ("release-scripts.sh: <file> has CR line endings: write it with LF line endings (as gpg --armor
+  --export does)") and, where gpg is installed, one gpg reads no primary key from ("release-scripts.sh:
+  gpg reads no primary key from <file>: export the key again with gpg --armor --export
+  <fingerprint>"). install.sh reads an embedded key with CR line endings.
+- (V7) cut-release.sh: the signing-key refusal now comes before release/TAG is made ("the signing key
+  <FPR> is not a primary key of lib/release-keys/*.asc on origin/main: ..."); step 7 is one prompt
+  (git add ... && git commit -S<FPR>! ...); tag step 4 requires a good tag signature by a key of
+  lib/release-keys on origin/main ("<TAG> carries no good signature by a key of lib/release-keys/*.asc
+  on origin/main"; "the signature of <TAG> is refused: gpg reports <KW>"; ok: "<TAG> is signed by
+  release key <FPR>"); status prints "tag signature: <TAG> is signed by release key <FPR>".
 - lib/allowed_signers and its sidecar are deleted from the tree and from SCRIPTS; a host that has
   the file keeps it (the updater only removes files an installed record lists), unused.
 
 ## Docs notes
+
+V7 additions (N4, N5):
+- Invariant for AGENTS.md: all three verifiers (update-scripts.sh, install.sh, tools/release-scripts.sh,
+  and cut-release.sh for tags) take the verdict from the gpgv/gpg status lines (tn_sig_verdict; the
+  VALIDSIG rule for tags), never from the exit status: gpgv 2.4.8 exits 0 on EXPKEYSIG and REVKEYSIG.
+- Key expiry: the release key's primary (grantkee, 4E36D35A4AB61B589861D01AC7173F2377CA7573) expires
+  2028-10-16. The extended key must ship in a script release that verifies against the installed copy
+  (signed while the old expiry is still ahead) before that date; after it, gpgv reports EXPKEYSIG for
+  every release signed with it, updaters refuse, and hosts re-run the installer.
+- Key files must have LF line endings (prepare and --check refuse CR) and, where gpg is installed,
+  must hold a primary key gpg reads; cut-release step 7 is one prompt; an existing tag passes `tag`
+  only with a good signature by a lib/release-keys key.
 
 Integrity contract (AGENTS.md "Self-update and integrity contract", README "How updates are
 verified", OPERATOR):
@@ -149,6 +183,13 @@ lib/wgvpn/peers/ssh/KEYS, vpn_selfheal_test.sh (VPN key fingerprints, unrelated)
   release_scripts_test 146+1 skip, updater_manifest_test 214+1 skip (2.0.0 case runs).
 - Full suite (bash tools/tests/run.sh, all 62 files): host bash 5.3 5404 checks 0 failures 54 skipped;
   bash:3.2 5191 checks 0 failures 60 skipped; ubuntu:24.04 5454 checks 0 failures 27 skipped.
+- V7 fix round, the four fixtures (release_scripts / updater_manifest / install / cut_release):
+  host real gpg 155/223/112/76, 0 failures, 0 skipped; host TN_TEST_FAKE_GPG=1 155/222+1/111+1/76;
+  bash:3.2 46+2/219+2/111+1/SKIP; ubuntu:24.04 46+2/219+2/111+1/SKIP; bash:3.2 with git (apk, main
+  .git read-only) 154+1/222+1/111+1/76. Mutants killed: install.sh splitter without the CR strip
+  (2 failures), check_release without the newest-release verify_manifest (4 failures). Lints clean
+  (check-bash32, shellcheck 0.11 and 0.9, bash -n 5.3 and 3.2, check-network-hits, check-perl-interp);
+  the RELEASE SIGNATURES block is unchanged and identical in the three scripts; e2e rerun rc 0/0/0.
 - End-to-end host run (SIG/e2e.sh in the scratchpad): throwaway ed25519 key in a temp GNUPGHOME ->
   `bash tools/release-scripts.sh --serial 1 --date 2026-11-04 scripts-v2.1.0` -> `gpg --armor
   --detach-sign --local-user <FPR>! --output MANIFEST.asc MANIFEST` -> `bash tools/release-scripts.sh
