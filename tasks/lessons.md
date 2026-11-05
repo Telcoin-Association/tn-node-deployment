@@ -507,3 +507,19 @@ file; the orchestrator fixed only the seams between packages.
 Packages that append test blocks to the same fixture file conflict trivially at the tail; a
 "# PKG" block header and a note to append before `finish` made every one a keep-both
 resolution. The order of cherry-picks only changes which side is HEAD.
+
+## Round 2 on PR #59 (2026-11-04): a `printf | grep -q` check under an inherited pipefail
+
+**Symptom:** `remove_test.sh` under `bash:3.2` reported `FAIL legacy key shredded` with
+`missing line: shred -u -- …/bls.key` while the very same line was the first line of the
+output it printed, plus `tools/tests/lib.sh: line 182: printf: write error: Broken pipe`.
+One run in ten; never on the host.
+
+**Cause:** the fixture sources `remove-node.sh`, which sources `lib/common.sh`, which sets
+`pipefail`. `check_has` ran `printf '%s\n' "$3" | grep -qxF -- "$2"`: grep matched the first
+line and exited, printf got EPIPE on the rest, and with pipefail the pipeline failed.
+
+**Rule:** a test helper that feeds a `grep -q` never uses a pipe; use a here-string
+(`grep -qxF -- "$2" <<< "$3"`) or a file. More generally, assume every fixture runs with
+pipefail inherited from the library it exercises, and grep the test library for
+`| grep -q` after adding a helper.
