@@ -876,9 +876,26 @@ stage_files() {
     done
 }
 
+# record_release -- move the verified MANIFEST.asc, then MANIFEST, into place
+# as the installed release record. rc 1 with a message when a move fails: the
+# caller stops, and the next run of the updater records the release once every
+# file matches it.
+record_release() {
+    if ! mv -f "${STAGE}/${TN_SIG_FILE}" "$INSTALLED_SIG"; then
+        print_error "Could not install ${TN_SIG_FILE}. The release record was not updated: run the updater again."
+        return 1
+    fi
+    if ! mv -f "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"; then
+        print_error "Could not install MANIFEST, so the release record does not match ${TN_SIG_FILE}: run the updater again."
+        return 1
+    fi
+}
+
 # install_pass -- move every staged file into place, remove the files the
 # release dropped, then write the release record. Runs only after stage_files
-# verified every file.
+# verified every file. It runs as `install_pass || exit 1`, where errexit is
+# off, so every move and removal is checked here: a release half moved into
+# place is never recorded as installed.
 install_pass() {
     local i p dest
     INSTALLING=1
@@ -895,10 +912,16 @@ install_pass() {
         fi
     done
     for ((i = 0; i < ${#DEL_PATHS[@]}; i++)); do
-        rm -f "${SCRIPT_DIR:?}/${DEL_PATHS[i]}"
+        if ! rm -f "${SCRIPT_DIR:?}/${DEL_PATHS[i]}"; then
+            print_error "Could not remove ${DEL_PATHS[i]}. The release record was not updated: run the updater again."
+            INSTALLING=0
+            return 1
+        fi
     done
-    mv -f "${STAGE}/${TN_SIG_FILE}" "$INSTALLED_SIG"
-    mv -f "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"
+    if ! record_release; then
+        INSTALLING=0
+        return 1
+    fi
     INSTALLING=0
 }
 
@@ -996,8 +1019,7 @@ run_update() {
 
     if [[ ${#UPD_PATHS[@]} -eq 0 && ${#DEL_PATHS[@]} -eq 0 ]]; then
         if ! cmp -s "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST" 2>/dev/null; then
-            mv -f "${STAGE}/${TN_SIG_FILE}" "$INSTALLED_SIG"
-            mv -f "${STAGE}/MANIFEST" "$INSTALLED_MANIFEST"
+            record_release || exit 1
             print_info "Every file already matches ${M_RELEASE}; recorded it as the installed release."
         fi
         print_ok "All scripts are up to date (${M_RELEASE}, serial ${M_SERIAL})"
