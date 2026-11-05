@@ -13,7 +13,24 @@ status: done
 
 - [x] F3 finalize --docker-image override (follow-up 3) -- b585759 (facts checked in tnd-r2-IMG2 at cc72dcb)
 
+- [x] F4 review fix rounds (follow-up 4) -- 98d594b (facts checked in tnd-r2-IMG3 52d276e and tnd-r2-SIG2 feddc7f)
+
 ## Docs written (where each fact lives)
+
+F4 (98d594b):
+- Feature check limit (timeout -k 5 60 where coreutils timeout exists, --init, named container,
+  docker rm -f on rc 124/137, refusal text): README Docker Install Notes bullet, AGENTS images
+  paragraph, CHANGELOG images section, OPERATOR troubleshooting (+ row).
+- Finalize override by --release-tag or --docker-image, per-network way out, input checks first,
+  .node-meta write order, mainnet --release-tag only: README flag row, OPERATOR 7.1 bullet +
+  two troubleshooting rows, AGENTS images paragraph, CHANGELOG images section, partner guide
+  finalize bullet. update-node/edit-config record order: AGENTS images paragraph + CHANGELOG.
+- Image prompt last line without newline: OPERATOR troubleshooting row, CHANGELOG.
+- cut-release tag pins the origin/main commit, refuses when it moved, compares with origin's
+  release branch, temp worktree removed; prep serial refusal with commands; three checks not
+  skippable: AGENTS release steps (intro, step 1, step 3), CHANGELOG cut-release bullet.
+- Key files end with a newline: AGENTS integrity contract bullet, CHANGELOG SIG bullet.
+- Updater records only after every move/removal: AGENTS integrity contract bullet, CHANGELOG.
 
 F3 (b585759):
 - README flag row `--json --phase=keygen|finalize`: "except a Docker image (below)", refusal text now
@@ -105,6 +122,11 @@ README Keeping Scripts paragraph on hosts that cloned main, README changelog v2.
 
 ## PDF hashes
 
+After F4 (98d594b), same container and command, 73 pages:
+- build 1: febfc6bf76844d201df08271e2cc980b915ec6c484d511bf7c042eddd0f3ebaf
+- build 2 (--force, "PDF unchanged"): febfc6bf76844d201df08271e2cc980b915ec6c484d511bf7c042eddd0f3ebaf
+
+Earlier:
 After F3 (b585759), same container and command, 73 pages:
 - build 1: 8c390446a452741b469435aaded7474b36454cfd7bfc29690cb1662922a67fde
 - build 2 (--force, "PDF unchanged"): 8c390446a452741b469435aaded7474b36454cfd7bfc29690cb1662922a67fde
