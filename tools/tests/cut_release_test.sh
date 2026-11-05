@@ -199,8 +199,43 @@ check "tag before the merge: no tag" "absent" "$(gitw rev-parse -q --verify "ref
 
 # --- the merge, then tag -------------------------------------------------------------------
 gitw push -q origin "$BR:main" 2>/dev/null
-# A tag already here, signed by a key that is not a release key: refused, not pushed.
 gitw fetch -q origin
+
+# origin/main moves between the check (step 2) and the tag (step 3): another
+# clone pushes a commit to main and this clone fetches it while step 3 waits
+# for Enter. The run refuses at step 3; nothing is tagged, here or on origin.
+checked="$(gitw rev-parse origin/main)"
+git clone -q "$ORIGIN" "$T/main-clone" 2>/dev/null
+mkfifo "$T/moved.in"
+(
+    exec 4> "$T/moved.in"
+    printf '\n\n' >&4
+    i=0
+    while ! grep -q '^\[3/7\]' "$T/moved.out" 2>/dev/null && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+    printf '# a later change\n' >> "$T/main-clone/setup-node.sh"
+    git -C "$T/main-clone" -c user.name=other -c user.email=other@example.invalid commit -q -am "a later change on main"
+    git -C "$T/main-clone" push -q origin main 2>/dev/null
+    gitw fetch -q origin
+    printf '\n\n\n\n\n' >&4
+) &
+(cd "$W" && SERVED_TAG="$TAG" TN_CUT_POLL_SECONDS=0 TN_CUT_POLL_TRIES=3 bash tools/cut-release.sh tag "$TAG" < "$T/moved.in" > "$T/moved.out" 2>&1)
+RC=$?
+wait
+OUT="$(cat "$T/moved.out")"
+moved="$(git -C "$T/main-clone" rev-parse HEAD)"
+check_rc "origin/main moves after the check: refused" 1 "$RC"
+has "origin/main moves after the check: step 1 names the commit" "   origin/main is $checked: steps 2 to 5 check, tag and push this commit"
+has "origin/main moves after the check: step 2 checked it" "MANIFEST check passed for $TAG"
+has "origin/main moves after the check: step 3 shows it" "\$ git tag -s --local-user=${FPR1}\\! -m $TAG $TAG $checked"
+has "origin/main moves after the check: says why" "   origin/main moved from $checked to $moved since step 1: nothing was tagged."
+check "origin/main moves after the check: no tag here" "absent" "$(gitw rev-parse -q --verify "refs/tags/$TAG" >/dev/null && echo present || echo absent)"
+check "origin/main moves after the check: no tag on origin" "absent" "$(git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$TAG" >/dev/null && echo present || echo absent)"
+# origin's main back on the release commit for the rest of the file
+git -C "$ORIGIN" update-ref refs/heads/main "$checked"
+gitw fetch -q origin
+check "origin/main is back on the release commit" "$checked" "$(gitw rev-parse origin/main)"
+
+# A tag already here, signed by a key that is not a release key: refused, not pushed.
 gitw tag -s --local-user="${FPR2}!" -m "$TAG" "$TAG" origin/main
 SERVED_TAG="$TAG" cut tag "$TAG" --yes
 check_rc "a local tag signed by another key: refused" 1 "$RC"
@@ -214,6 +249,7 @@ order "tag: the steps in order" "] fetch origin" "] origin/main carries release 
     "] verify the tag signature" "] push the tag" "] wait for CI" "] the published installer names $TAG"
 has "tag: the check ran on origin/main" "MANIFEST check passed for $TAG (serial 1, min_updater"
 check "tag: origin has the tag on main" "$(git -C "$ORIGIN" rev-parse main)" "$(git -C "$ORIGIN" rev-parse "refs/tags/$TAG^{commit}" 2>/dev/null)"
+check "tag: the tag names the commit step 1 printed" "$checked" "$(git -C "$ORIGIN" rev-parse "refs/tags/$TAG^{commit}" 2>/dev/null)"
 check "tag: the tag is signed" "1" "$(git -C "$ORIGIN" cat-file tag "$TAG" 2>/dev/null | grep -c '^-----BEGIN PGP SIGNATURE-----$')"
 check "tag: signed with the release key" "yes" "$(grep -qF -- "-bsau ${FPR1}!" "$T/gpg.log" && echo yes || echo no)"
 has "tag: CI conclusion" "   ci.yml: success https://github.example.invalid/run/1"

@@ -28,17 +28,19 @@
 #   9 pr       gh pr create --base main --head release/TAG --title "release: TAG"
 #
 # tag TAG, once the pull request has merged:
-#   1 fetch    git fetch origin
-#   2 main     origin/main carries the release: its MANIFEST names TAG, its
+#   1 fetch    git fetch origin, then print the commit origin/main names: steps
+#              2 to 5 check, tag and push that commit, never a later one
+#   2 main     that commit carries the release: its MANIFEST names TAG, its
 #              MANIFEST and MANIFEST.asc are the release branch's (when that
 #              branch is still here), and the check with --require-sig --tag TAG
-#              passes in a clean temporary worktree of origin/main
-#   3 tag      git tag -s --local-user=FPR! -m TAG TAG origin/main
+#              passes in a clean temporary worktree of it
+#   3 tag      git tag -s --local-user=FPR! -m TAG TAG <that commit>; refused,
+#              with nothing tagged, when origin/main has moved since step 1
 #   4 verify   git verify-tag --raw TAG must report a good signature (GOODSIG
 #              then VALIDSIG) whose primary fingerprint is a key of
-#              lib/release-keys/*.asc on origin/main, and no bad, expired or
+#              lib/release-keys/*.asc at that commit, and no bad, expired or
 #              revoked one; an existing tag passes only this way too
-#   5 push     git push origin TAG
+#   5 push     git push origin TAG; the tag must name that commit
 #   6 ci       wait for the ci.yml and publish-installer.yml runs of the tag and
 #              print their conclusions (gh run list)
 #   7 served   curl -fsSL https://install.telcoin.network must name TAG in its
@@ -197,17 +199,17 @@ release_key_list() {
     rm -rf "$d"
 }
 
-# pick_key WANT [REF] -- set FPR and FPR_FILE to the release key to sign with:
-# the primary key of a lib/release-keys/*.asc file (in the working tree, or at
-# REF) that WANT names (a fingerprint, or a long key id of 16 or more hex
-# digits, with or without a trailing !), or the one key there when WANT is
-# empty.
+# pick_key WANT [REF [LABEL]] -- set FPR and FPR_FILE to the release key to
+# sign with: the primary key of a lib/release-keys/*.asc file (in the working
+# tree, or at REF) that WANT names (a fingerprint, or a long key id of 16 or
+# more hex digits, with or without a trailing !), or the one key there when
+# WANT is empty. Messages name REF as LABEL (default REF).
 pick_key() {
-    local want="$1" ref="${2:-}" where p f n=0 first="" first_file=""
+    local want="$1" ref="${2:-}" label="${3:-${2:-}}" where p f n=0 first="" first_file=""
     want="${want%!}"
     want="${want#0x}"
     want="$(printf '%s' "$want" | tr 'abcdef' 'ABCDEF')"
-    where="${KEYS_DIR}/*.asc${ref:+ on ${ref}}"
+    where="${KEYS_DIR}/*.asc${ref:+ on ${label}}"
     FPR=""
     FPR_FILE=""
     while read -r p f; do
@@ -231,13 +233,14 @@ pick_key() {
     [[ -n "$FPR" ]] || die "the signing key ${want} is not a primary key of ${where}: sign with a listed key (--key FPR), or add its key file in a release first"
 }
 
-# tag_signed_by_release_key TAG REF -- rc 0 when git verify-tag --raw TAG
-# reports a good signature (GOODSIG, then VALIDSIG) whose primary fingerprint
-# (the last VALIDSIG field) is a key of lib/release-keys/*.asc at REF, and no
-# BADSIG, EXPKEYSIG, REVKEYSIG, EXPSIG or ERRSIG; it prints which key signed.
-# The verdict comes from the status lines, never from the exit status.
+# tag_signed_by_release_key TAG REF [LABEL] -- rc 0 when git verify-tag --raw
+# TAG reports a good signature (GOODSIG, then VALIDSIG) whose primary
+# fingerprint (the last VALIDSIG field) is a key of lib/release-keys/*.asc at
+# REF, and no BADSIG, EXPKEYSIG, REVKEYSIG, EXPSIG or ERRSIG; it prints which
+# key signed. The verdict comes from the status lines, never from the exit
+# status. Messages name REF as LABEL (default REF).
 tag_signed_by_release_key() {
-    local tag="$1" ref="$2" keys raw t kw rest fpr good=0 ok="" bad=""
+    local tag="$1" ref="$2" label="${3:-$2}" keys raw t kw rest fpr good=0 ok="" bad=""
     keys="$(release_key_list "$ref" | awk '{ print $1 }')"
     raw="$(_git verify-tag --raw "$tag" 2>&1 > /dev/null || true)"
     while read -r t kw rest; do
@@ -259,7 +262,7 @@ tag_signed_by_release_key() {
         return 1
     fi
     if [[ -z "$ok" ]]; then
-        printf '   %s carries no good signature by a key of %s/*.asc on %s\n' "$tag" "$KEYS_DIR" "$ref" >&2
+        printf '   %s carries no good signature by a key of %s/*.asc on %s\n' "$tag" "$KEYS_DIR" "$label" >&2
         return 1
     fi
     printf '   %s is signed by release key %s\n' "$tag" "$ok"
@@ -433,10 +436,11 @@ prep() {
     printf '\nRelease %s is prepared on %s. Once its pull request has merged, run:\n  bash tools/cut-release.sh tag %s\n' "$tag" "$branch" "$tag"
 }
 
-# main_has_release TAG -- origin/main carries release TAG (see step 2 of tag).
+# main_has_release TAG SHA -- the commit SHA (origin/main at step 1 of tag)
+# carries release TAG (see step 2 of tag).
 main_has_release() {
-    local tag="$1" branch="release/$1" ref="" c f rel
-    rel="$(_git show origin/main:MANIFEST 2>/dev/null | awk -F= '$1 == "release" { print $2; exit }' || true)"
+    local tag="$1" sha="$2" branch="release/$1" ref="" c f rel
+    rel="$(_git show "${sha}:MANIFEST" 2>/dev/null | awk -F= '$1 == "release" { print $2; exit }' || true)"
     if [[ "$rel" != "$tag" ]]; then
         printf '   origin/main does not carry release %s (its MANIFEST names %s): merge the release pull request first\n' \
             "$tag" "${rel:-no release}" >&2
@@ -450,13 +454,37 @@ main_has_release() {
     done
     if [[ -n "$ref" ]]; then
         for f in MANIFEST "$SIG_FILE"; do
-            if [[ "$(_git rev-parse "origin/main:${f}" 2>/dev/null || true)" != "$(_git rev-parse "${ref}:${f}" 2>/dev/null || true)" ]]; then
+            if [[ "$(_git rev-parse "${sha}:${f}" 2>/dev/null || true)" != "$(_git rev-parse "${ref}:${f}" 2>/dev/null || true)" ]]; then
                 printf '   the %s on origin/main is not the one on %s\n' "$f" "${ref#refs/*/}" >&2
                 return 1
             fi
         done
     fi
-    check_in_worktree origin/main "$tag"
+    check_in_worktree "$sha" "$tag"
+}
+
+# make_tag TAG SHA -- the signed tag TAG on SHA, the commit step 2 checked.
+# Refused, with nothing tagged, when origin/main no longer names SHA (a fetch
+# since step 1 moved it): the new commit has not been checked.
+make_tag() {
+    local tag="$1" sha="$2" now
+    now="$(_git rev-parse -q --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
+    if [[ "$now" != "$sha" ]]; then
+        printf '   origin/main moved from %s to %s since step 1: nothing was tagged. Run again: it checks the new origin/main before it tags anything.\n' \
+            "$sha" "${now:-nothing}" >&2
+        return 1
+    fi
+    _git tag -s --local-user="${FPR}!" -m "$tag" "$tag" "$sha"
+}
+
+# push_tag TAG SHA -- push TAG, which must name SHA (the commit step 2 checked).
+push_tag() {
+    local tag="$1" sha="$2"
+    if [[ "$(_git rev-parse -q --verify "refs/tags/${tag}^{commit}" 2>/dev/null || true)" != "$sha" ]]; then
+        printf '   %s does not name %s, the commit step 2 checked: nothing was pushed\n' "$tag" "$sha" >&2
+        return 1
+    fi
+    _git push origin "$tag"
 }
 
 # wait_runs TAG -- wait for the ci.yml and publish-installer.yml runs of TAG to
@@ -509,34 +537,41 @@ served_tag() {
 }
 
 tag_release() {
-    local tag="$1" key="$2" main_sha remote local_obj
+    local tag="$1" key="$2" main_sha short remote local_obj
     STEP_TOTAL=7
 
     step 1 "fetch origin" _git fetch origin || true
 
-    SHOW_AS="git worktree add --detach <temp dir> origin/main; cd <temp dir>; bash tools/release-scripts.sh --check --require-sig --tag ${tag}"
-    step 2 "origin/main carries release ${tag}" main_has_release "$tag" || true
+    # The commit to check, tag and push, resolved once: a fetch after this
+    # point (another terminal, an editor) cannot change what gets tagged.
+    main_sha="$(_git rev-parse -q --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
+    [[ -n "$main_sha" ]] || die "there is no origin/main here: run again and let step 1 fetch origin"
+    short="$(_git rev-parse --short "$main_sha")"
+    printf '   origin/main is %s: steps 2 to 5 check, tag and push this commit\n' "$main_sha"
 
-    main_sha="$(_git rev-parse origin/main)"
+    SHOW_AS="git worktree add --detach <temp dir> ${main_sha}; cd <temp dir>; bash tools/release-scripts.sh --check --require-sig --tag ${tag}"
+    step 2 "origin/main carries release ${tag}" main_has_release "$tag" "$main_sha" || true
+
     if _git rev-parse -q --verify "refs/tags/${tag}" > /dev/null; then
         [[ "$(_git rev-parse "${tag}^{commit}")" == "$main_sha" ]] \
-            || die "tag ${tag} exists here and names $(_git rev-parse --short "${tag}^{commit}"), not origin/main $(_git rev-parse --short "$main_sha")"
-        done_step 3 "tag" "${tag} names origin/main $(_git rev-parse --short "$main_sha")"
+            || die "tag ${tag} exists here and names $(_git rev-parse --short "${tag}^{commit}"), not origin/main ${short}"
+        done_step 3 "tag" "${tag} names origin/main ${short}"
     else
-        pick_key "${key:-$(_git config --get user.signingkey 2>/dev/null || true)}" origin/main
-        step 3 "make the signed tag with release key ${FPR}" \
-            _git tag -s --local-user="${FPR}!" -m "$tag" "$tag" origin/main || true
+        pick_key "${key:-$(_git config --get user.signingkey 2>/dev/null || true)}" "$main_sha" "origin/main ${short}"
+        SHOW_AS="$(show _git tag -s --local-user="${FPR}!" -m "$tag" "$tag" "$main_sha")"
+        step 3 "make the signed tag with release key ${FPR}" make_tag "$tag" "$main_sha" || true
     fi
 
-    SHOW_AS="git verify-tag --raw ${tag} (a good signature by a key of ${KEYS_DIR}/*.asc on origin/main)"
-    step 4 "verify the tag signature" tag_signed_by_release_key "$tag" origin/main || true
+    SHOW_AS="git verify-tag --raw ${tag} (a good signature by a key of ${KEYS_DIR}/*.asc on origin/main ${short})"
+    step 4 "verify the tag signature" tag_signed_by_release_key "$tag" "$main_sha" "origin/main ${short}" || true
 
     remote="$(_git ls-remote origin "refs/tags/${tag}" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
     local_obj="$(_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null || true)"
     if [[ -n "$remote" && "$remote" == "$local_obj" ]]; then
         done_step 5 "push" "origin has ${tag}"
     else
-        step 5 "push the tag" _git push origin "$tag" || true
+        SHOW_AS="$(show _git push origin "$tag")"
+        step 5 "push the tag" push_tag "$tag" "$main_sha" || true
     fi
 
     SHOW_AS="gh run list --workflow ci.yml --branch ${tag}; gh run list --workflow publish-installer.yml --branch ${tag} (every ${POLL_SECONDS} s until both finish)"
