@@ -194,6 +194,8 @@ mig() {  # mig AFTER-RC -- the order of one stop_legacy and its exit status
         eval "tn_committee_down_guard() { ORDER=\"\${ORDER} guard\"; case \"\$ORDER\" in *wait*) return $1 ;; esac; return 0; }"
         tn_wait_restart_window() { ORDER="${ORDER} wait"; }
         systemctl() { [[ "$1" == stop ]] && ORDER="${ORDER} stop"; return 0; }
+        # stop_legacy removes the legacy container after the stop; never the host's docker.
+        docker() { :; }
         migrate_drop_snapshot() { :; }
         print_step() { :; }
         print_ok() { :; }
