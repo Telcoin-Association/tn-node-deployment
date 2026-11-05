@@ -24,6 +24,9 @@ NETWORK=testnet
 CONFIG_DIR="$T/conf"
 printf 'stored\n' > "$CONFIG_DIR/bls-passphrase"
 check_binary_path() { return 0; }
+# The recorded image's build-feature check runs the image (docker_image_test.sh and
+# setup_release_test.sh test it): here it only records what it was asked.
+tn_docker_image_network_ok() { printf '%s %s\n' "$1" "$2" >> "$T/featcheck"; return 0; }
 # Images run by digest (TN_DOCKER_REQUIRE_DIGEST defaults to 1); IMG_TAG is the
 # older tag form, which a keygen record may still hold and finalize refuses.
 IMG="${GAR_IMAGE_BASE}@sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -69,6 +72,7 @@ fin() {
 keygen_meta "INSTALL_METHOD=docker" "DATA_DIR=/mnt/tn" "DOCKER_IMAGE=${IMG}"
 fin
 check "docker: no flags take the keygen record" "0 docker|/mnt/tn|${IMG}|" "$RC $GOT"
+check "docker: the recorded image gets the build-feature check" "testnet ${IMG}" "$(cat "$T/featcheck" 2>/dev/null)"
 fin INSTALL_METHOD=docker DATA_DIR=/mnt/tn DOCKER_IMAGE="$IMG"
 check "docker: the same values as flags pass" "0 docker|/mnt/tn|${IMG}|" "$RC $GOT"
 fin INSTALL_METHOD=source

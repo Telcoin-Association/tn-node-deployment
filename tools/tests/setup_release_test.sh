@@ -5,7 +5,9 @@
 # --install-method release is known, --allow-dirty is refused in --json; on devnet
 # (no signed releases) --docker-image takes a digest of the devnet repository (the
 # old single ghcr package is recognised but never pulled) and is
-# required at keygen, --release-tag and source or release installs are refused; the
+# required at keygen, --release-tag and source or release installs are refused;
+# finalize holds the image keygen recorded to the pull rule and the build-feature
+# check before the config, the unit and the container; the
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
 # edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
@@ -181,6 +183,44 @@ printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.12.0-adiri\n' "$D64" > "$T
 rc="$(sn "$PDW; _preflight_docker")"
 check "digest alone, recorded as a release below the floor: refused" "1 yes" "$rc $(grep -q 'older than v' "$T/sn.err" && echo yes || echo no)"
 rm -f "$T/root/etc/telcoin/.node-meta"
+
+# Finalize (--json --phase=finalize) is a new process: the image keygen recorded in
+# .node-meta meets the rules keygen's preflight applied (finalize_install_inputs),
+# before the config, the unit and the container: a repository a new pull for the
+# network takes (the old single package is refused) and the build-feature check.
+# The steps after it are logged beside the check.
+printf 'stored\n' > "$T/root/etc/telcoin/bls-passphrase"
+fin_meta() { printf 'PASSPHRASE_METHOD=stdin\nINSTALL_METHOD=docker\nDOCKER_IMAGE=%s\n' "$1" > "$T/root/etc/telcoin/.node-meta"; }
+FIN='CONFIG_DIR="$T/root/etc/telcoin" JSON_MODE=true INSTALL_METHOD= DOCKER_IMAGE= BINARY_PATH=; PRIMARY_LISTENER_MULTIADDR=/ip4/127.0.0.1/udp/49590/quic-v1; WORKER_LISTENER_MULTIADDR=/ip4/127.0.0.1/udp/49594/quic-v1; json_event() { :; }; finalize_node_extra_flags() { :; }; setup_release_lock() { :; }; step_host_baseline() { :; }; step_write_config() { echo config >> "$T/docker.log"; }; step_create_service() { echo service >> "$T/docker.log"; }; json_done() { echo done >> "$T/docker.log"; }; json_phase_finalize'
+fin_calls() { tr '\n' '|' < "$T/docker.log" | sed 's/|$//'; }
+fin_meta "${GH}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; $FIN")"
+check "finalize, testnet: a recorded image of the old single package refused before anything" "1 " "$rc $(fin_calls)"
+check "finalize: the refusal names the image and the repository" yes \
+    "$(grep -qF "Refusing the image ${GH}@sha256:${D64}: setup runs only ghcr.io/telcoin-association/tn-testnet@sha256:<digest>. No container was started; run --phase=keygen again with a testnet image." "$T/sn.err" && echo yes || echo no)"
+fin_meta "${R}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; $FIN")"
+check "finalize, testnet: a good recorded image is checked, then config, unit and start" \
+    "0 check testnet ${R}@sha256:${D64}|config|service|done" "$rc $(fin_calls)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; FEAT_RC=1; $FIN")"
+check "finalize, the feature check refuses: nothing after it" "1 check testnet ${R}@sha256:${D64}" "$rc $(fin_calls)"
+check "finalize, the feature check refuses: no container started" yes \
+    "$(grep -qF "Refusing the image ${R}@sha256:${D64}: it is not a testnet image (see above). No container was started; run --phase=keygen again with a testnet image." "$T/sn.err" && echo yes || echo no)"
+fin_meta "${GD}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=devnet; $FIN")"
+check "finalize, devnet: a dev package image is asked for devnet, then config, unit and start" \
+    "0 check devnet ${GD}@sha256:${D64}|config|service|done" "$rc $(fin_calls)"
+fin_meta "${GH}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=devnet; $FIN")"
+check "finalize, devnet: the old single package refused before anything" "1 " "$rc $(fin_calls)"
+rm -f "$T/root/etc/telcoin/.node-meta" "$T/root/etc/telcoin/bls-passphrase"
+unset -f fin_meta fin_calls
+unset FIN
 
 # live-restore merge (tn_write_root_file and systemctl stubbed).
 LR='tn_write_root_file() { cat > "$1"; }; systemctl() { printf "%s\n" "$*" >> "$T/systemctl.log"; }; _setup_docker_live_restore'

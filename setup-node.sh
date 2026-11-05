@@ -3095,9 +3095,13 @@ finalize_same_as_keygen() {
 # binary come from its flags or, for any the flags leave out, from what keygen recorded
 # in .node-meta; a flag that differs from the recorded value stops it. --data-dir is
 # compared only when it is not the default, which is what an absent flag leaves.
-# Stops when the node would have nothing to run, before anything is written.
+# Stops when the node would have nothing to run, before anything is written. The
+# docker image meets the rules keygen's preflight applied before any container of
+# it starts: a repository a new pull for the network takes (tn_docker_pull_repo_ok)
+# and a binary built for the network (tn_docker_image_network_ok, on the image
+# keygen pulled; it never pulls).
 finalize_install_inputs() {
-    local meta="${CONFIG_DIR}/.node-meta" rec=""
+    local meta="${CONFIG_DIR}/.node-meta" rec="" repo
     # The passphrase form keygen recorded wins over a flag: the stored file is that one.
     local pm=""
     setup_meta_read pm PASSPHRASE_METHOD "$meta"
@@ -3134,6 +3138,14 @@ finalize_install_inputs() {
         fi
         if ! validate_docker_image "$DOCKER_IMAGE"; then
             setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as $(_setup_image_example); pass --docker-image."
+        fi
+        repo="$(tn_docker_repo_for "$NETWORK")" \
+            || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
+        if ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>. No container was started; run --phase=keygen again with a ${NETWORK} image."
+        fi
+        if ! tn_docker_image_network_ok "$NETWORK" "$DOCKER_IMAGE" setup_progress; then
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: it is not a ${NETWORK} image (see above). No container was started; run --phase=keygen again with a ${NETWORK} image."
         fi
         return 0
     fi

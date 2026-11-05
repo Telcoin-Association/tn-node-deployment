@@ -254,6 +254,9 @@ step_config() { :; }
 step_write_config() { : > "$REC/wrote-config"; }
 step_create_service() { : > "$REC/wrote-service"; }
 json_refuse_installed() { :; }
+# finalize runs the recorded image's build-feature check (docker_image_test.sh and
+# setup_release_test.sh test it); here it passes without running docker.
+tn_docker_image_network_ok() { return 0; }
 FZ=(--json --phase=finalize --network testnet --install-method docker
     --docker-image "$DEFAULT_DOCKER_IMAGE" --data-dir "$T/data")
 # What keygen leaves for finalize: the passphrase form in .node-meta and the stored
