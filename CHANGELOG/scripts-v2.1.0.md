@@ -108,10 +108,16 @@ warning); it is a release file, not an updater entry.
   network had the 0.16.0 floor, so any mainnet `v0.1.x` image counted as below it.
 - `setup-node --json --phase=finalize` holds the Docker image keygen recorded in `.node-meta` to
   the same pull rule and build-feature check as keygen's preflight, before the config, the unit
-  or the container is written or started, and never pulls: `Refusing the image <image>: ... No
-  container was started; run --phase=keygen again with a <network> image.` An image removed
-  since keygen stops it with `Could not run <image> to read its build features ... Check that
-  Docker is running and holds the image, then try again.`
+  or the container is written or started, and does not pull it: `Refusing the image <image>:
+  ... No container was started; to replace it, run finalize again with --docker-image
+  <repository>@sha256:<digest> (a <network> image).` An image removed since keygen stops it with
+  `Could not run <image> to read its build features ... Check that Docker is running and holds
+  the image, then try again.`
+- Finalize's `--docker-image` with another image than the recorded one replaces it: the image
+  goes through keygen's steps (pull rule and mainnet digest rule, release floor, pull by digest
+  and digest check, build-feature check), and only then are `DOCKER_IMAGE`,
+  `DOCKER_IMAGE_DIGEST` and `RELEASE_TAG` written to `.node-meta` (a stale `RELEASE_TAG` is
+  removed when no release names the image); a refusal leaves `.node-meta` unchanged.
 - setup-node's interactive image prompt stops at the end of input instead of asking again: `The
   input ended at the Docker image prompt, so no usable image was given and the Docker install
   stops. Nothing was pulled and no container was started.` Only Enter takes the default.
