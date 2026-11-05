@@ -517,7 +517,7 @@ rm -f "$T/swapped" "$T/meta.log"
 : > "$T/docker.log"
 rc="$(ec v0.17.0-adiri)"
 check "edit: a release tag runs its digest" "0 ${R}@sha256:${D64}" "$rc $(cat "$T/swapped" 2>/dev/null)"
-check "edit: .node-meta records image, digest and tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+check "edit: .node-meta drops the old release, then records image, digest and tag" "unset RELEASE_TAG DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
 check "edit: pull, feature check, then the swap" "pull ${R}@sha256:${D64}|check testnet ${R}@sha256:${D64}|swap ${R}@sha256:${D64}" \
     "$(tr '\n' '|' < "$T/docker.log" | sed 's/|$//')"
 rm -f "$T/swapped" "$T/meta.log"
@@ -538,6 +538,42 @@ rc="$(ec "${R}@sha256:$(printf '%s' "$D64" | tr 0 a)")"
 check "edit: a digest alone runs as given, tag removed from .node-meta" "0 yes" "$rc $(grep -qx 'unset RELEASE_TAG' "$T/meta.log" && echo yes || echo no)"
 rc="$( ( set +e; source "$T/ec/edit-config.sh" >/dev/null 2>&1; set +e; edit_error() { :; }; launch_current_form() { echo called > "$T/lcf"; }; swap_docker_image "${R}:v0.16.0-adiri" ) >/dev/null 2>&1; printf '%s' "$?")"
 check "edit: swap_docker_image refuses a tag before touching anything" "1 no" "$rc $([[ -e "$T/lcf" ]] && echo yes || echo no)"
+# edit_record_image on a real .node-meta (the real meta_set and meta_unset,
+# tn_write_root_file stubbed): the old RELEASE_TAG goes first and the new one last,
+# each write only after the one before it, so with a write failing (meta_set
+# wrapped to fail for FAIL_KEY) no digest is left beside a release that is not its
+# own.
+EMETA="$T/root/etc/telcoin/.node-meta"
+ENEW="${R}@sha256:$(printf '%s' "$D64" | tr 0 b)"
+erec() {  # erec FAIL-KEY -- edit_record_image ENEW v0.17.0-adiri on the old record
+    printf 'NETWORK=testnet\nDOCKER_IMAGE=%s@sha256:%s\nDOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.16.0-adiri\n' "$R" "$D64" "$D64" > "$EMETA"
+    : > "$T/ewarn"
+    ( set +e
+      # shellcheck source=/dev/null
+      source "$T/ec/edit-config.sh" >/dev/null 2>&1
+      set +e
+      tn_write_root_file() { cat > "$1"; }
+      eval "$(declare -f meta_set | sed '1s/^meta_set /real_meta_set /')"
+      meta_set() { [ "$1" != "$FAIL_KEY" ] || return 2; real_meta_set "$@"; }
+      edit_wait_say() { printf '%s %s\n' "$1" "$2" >> "$T/ewarn"; }
+      FAIL_KEY="$1"
+      edit_record_image "$ENEW" v0.17.0-adiri ) >/dev/null 2>&1
+}
+erec_line() { printf '%s %s %s' "$(grep '^DOCKER_IMAGE=' "$EMETA")" "$(grep '^DOCKER_IMAGE_DIGEST=' "$EMETA")" "$(grep '^RELEASE_TAG=' "$EMETA" || echo none)"; }
+erec ""
+check "edit_record_image: image, digest and the new release" \
+    "DOCKER_IMAGE=${ENEW} DOCKER_IMAGE_DIGEST=${ENEW##*@} RELEASE_TAG=v0.17.0-adiri" "$(erec_line)"
+erec RELEASE_TAG
+check "edit_record_image, the RELEASE_TAG write fails: no RELEASE_TAG left beside the new digest" \
+    "DOCKER_IMAGE=${ENEW} DOCKER_IMAGE_DIGEST=${ENEW##*@} none" "$(erec_line)"
+check "edit_record_image, the RELEASE_TAG write fails: it warns" yes \
+    "$(grep -q '^warn Could not record the image in .node-meta' "$T/ewarn" && echo yes || echo no)"
+erec DOCKER_IMAGE_DIGEST
+check "edit_record_image, the digest write fails: no release beside either digest" none \
+    "$(grep '^RELEASE_TAG=' "$EMETA" || echo none)"
+rm -f "$EMETA" "$T/ewarn"
+unset -f erec erec_line
+unset EMETA ENEW
 
 # The interactive image menu (edit_docker_image) on testnet: the release tag typed
 # at the prompt resolves to its digest, the image is pulled and held under it, its
@@ -570,8 +606,8 @@ rm -f "$T/meta.log"
 ecm v0.17.0-adiri
 check "edit menu: pull, digest check, feature check, then lock, swap and apply" \
     "pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}|lock|backup|swap ${R}@sha256:${D64}|apply" "$(calls)"
-check "edit menu: .node-meta records image, digest and tag" \
-    "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" 2>/dev/null | sed 's/ $//')"
+check "edit menu: .node-meta drops the old release, then records image, digest and tag" \
+    "unset RELEASE_TAG DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" 2>/dev/null | sed 's/ $//')"
 rm -f "$T/meta.log"
 : > "$T/docker.log"
 FEAT_RC=1 ecm v0.17.0-adiri
@@ -615,7 +651,7 @@ rm -f "$T/swapped" "$T/meta.log" "$T/fetched"
 rc="$(ecd "${R}@sha256:${D64}")"
 check "edit, devnet: a legacy-repository digest runs as given" "0 ${R}@sha256:${D64}" "$rc $(swapped)"
 check_has "edit, devnet: the feature check is asked for devnet (which skips it)" "check devnet ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
-check "edit, devnet: .node-meta records image and digest, no tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} unset RELEASE_TAG" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+check "edit, devnet: .node-meta drops the old release, then records image and digest, no tag" "unset RELEASE_TAG DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64}" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
 rm -f "$T/swapped" "$T/meta.log"
 rc="$(ecd "${GD}@sha256:${D64}")"
 check "edit, devnet: a dev package digest runs as given" "0 ${GD}@sha256:${D64}" "$rc $(swapped)"
