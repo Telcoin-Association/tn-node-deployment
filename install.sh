@@ -432,8 +432,10 @@ verify_release() {
     local line key val fmt="" rel="" serial="" rdate="" expires="" n=0 hash path have seen verdict err
 
     # One file per armored block: tn_dearmor_keys reads a directory of *.asc.
+    # A CR at a line end is dropped first, as tn_dearmor_keys drops it.
     mkdir -p "$kdir"
     tn_release_keys | LC_ALL=C awk -v d="$kdir" '
+        { sub(/\r$/, "") }
         $0 == "-----BEGIN PGP PUBLIC KEY BLOCK-----" { n++; f = d "/key-" n ".asc" }
         f { print > f }
         $0 == "-----END PGP PUBLIC KEY BLOCK-----" && f { close(f); f = "" }

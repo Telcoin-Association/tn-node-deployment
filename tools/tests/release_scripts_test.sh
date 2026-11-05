@@ -254,6 +254,20 @@ commit_all "a key file that is not a key"
 tool scripts-v2.0.0 --serial 200
 check_rc "key file that is not a key: refused" 1 "$RC"
 check_has "key file that is not a key: says why" "release-scripts.sh: lib/release-keys/grantkee.asc is not an ASCII-armored OpenPGP public key" "$OUT"
+awk '{ printf "%s\r\n", $0 }' "$T/key1.keep" > "$W/lib/release-keys/grantkee.asc"
+(cd "$W" && bash tools/gen-checksums.sh >/dev/null)
+commit_all "a key file with CR line endings"
+tool scripts-v2.0.0 --serial 200
+check_rc "key file with CR line endings: refused" 1 "$RC"
+check_has "key file with CR line endings: says why" "release-scripts.sh: lib/release-keys/grantkee.asc has CR line endings: write it with LF line endings (as gpg --armor --export does)" "$OUT"
+# A block that decodes, but to bytes that are no key: gpgv would drop the
+# whole keyring, so gpg (real or the stand-in) must read a fingerprint.
+armor "$T/dearmor/raw1" > "$W/lib/release-keys/grantkee.asc"
+(cd "$W" && bash tools/gen-checksums.sh >/dev/null)
+commit_all "a key file that decodes to no key"
+tool scripts-v2.0.0 --serial 200
+check_rc "key file that decodes to no key: refused" 1 "$RC"
+check_has "key file that decodes to no key: says why" "release-scripts.sh: gpg reads no primary key from lib/release-keys/grantkee.asc: export the key again with gpg --armor --export <fingerprint>" "$OUT"
 cp "$T/key1.keep" "$W/lib/release-keys/grantkee.asc"
 (cd "$W" && bash tools/gen-checksums.sh >/dev/null)
 commit_all "track the key"
@@ -425,6 +439,12 @@ tool --check
 check_rc "check, embedded keys edited: fails" 1 "$RC"
 check_has "check, embedded keys edited: says why" "FAIL the release keys embedded in install.sh differ from lib/release-keys/*.asc" "$OUT"
 cat "$T/install.keep" > "$W/install.sh"
+cp "$W/lib/release-keys/grantkee.asc" "$T/key1.keep"
+awk '{ printf "%s\r\n", $0 }' "$T/key1.keep" > "$W/lib/release-keys/grantkee.asc"
+tool --check --require-sig --tag scripts-v2.0.0
+check_rc "check, a key file with CR line endings: fails" 1 "$RC"
+check_has "check, a key file with CR line endings: says why" "release-scripts.sh: lib/release-keys/grantkee.asc has CR line endings: write it with LF line endings (as gpg --armor --export does)" "$OUT"
+cp "$T/key1.keep" "$W/lib/release-keys/grantkee.asc"
 commit_all "release: scripts-v2.0.0"
 
 # --- install the release with the installer the tool wrote ---------------------------

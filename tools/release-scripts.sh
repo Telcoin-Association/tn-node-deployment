@@ -433,8 +433,11 @@ keys_concat() {
 }
 
 # check_keys: rc 0 when lib/release-keys holds at least one *.asc, every one
-# is an armored public key that decodes, and every one is a row of an updater
-# array (so it ships, with a sidecar). Messages on stderr.
+# is an armored public key that decodes, has LF line endings (install.sh
+# embeds it as text), holds a primary key gpg can read (checked where gpg is
+# installed: a block that decodes to something else makes gpgv drop the whole
+# keyring), and is a row of an updater array (so it ships, with a sidecar).
+# Messages on stderr.
 check_keys() {
     local f err tracked bad=0
     if [[ -z "$(key_files)" ]]; then
@@ -447,6 +450,14 @@ check_keys() {
     fi
     tracked="$(array_paths)"
     while IFS= read -r f; do
+        if grep -q $'\r' "$f"; then
+            printf 'release-scripts.sh: %s has CR line endings: write it with LF line endings (as gpg --armor --export does)\n' "$f" >&2
+            bad=1
+        fi
+        if command -v gpg >/dev/null 2>&1 && ! key_fpr "$f" > /dev/null; then
+            printf 'release-scripts.sh: gpg reads no primary key from %s: export the key again with gpg --armor --export <fingerprint>\n' "$f" >&2
+            bad=1
+        fi
         if ! printf '%s\n' "$tracked" | grep -qxF -- "$f"; then
             printf 'release-scripts.sh: %s is not in an updater array: add the row "%s:%s:NONE" to SCRIPTS in update-scripts.sh so it ships, then run bash tools/gen-checksums.sh\n' "$f" "$f" "$f" >&2
             bad=1

@@ -407,6 +407,15 @@ bad_headers "date twice" "MANIFEST repeats date=." date=2026-11-03 date=2026-11-
 bad_headers "a blank before =" "MANIFEST line is malformed: expires =2027-02-01" "expires =2027-02-01"
 TODAY=""
 
+# --- an installer whose embedded key has CR line endings verifies as one with LF ---------------
+awk '{ printf "%s\r\n", $0 }' "$T/key1.asc" > "$T/key1crlf"
+tagged_installer "$TAG" "$T/key1crlf" "$T/install-crlf.sh"
+check "a CRLF embedded key: the installer carries the CRs" "yes" "$(grep -q "$(printf '\r')" "$T/install-crlf.sh" && echo yes || echo no)"
+pack "$REL" "$TAG"
+run_installer "$T/install-crlf.sh" --yes
+check_rc "a CRLF embedded key: exits 0" 0 "$RC"
+check_has "a CRLF embedded key: verified with it" "  [OK]  Release signature verified (release key ${FPR1})" "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+
 # --- an installer with no key, or a key block that is not a key -------------------------------
 printf '# no keys\n' > "$T/nokeys"
 tagged_installer "$TAG" "$T/nokeys" "$T/install-nokeys.sh"
