@@ -816,7 +816,8 @@ Both follow the epoch length, which the script reads together with the boundary:
 - margin: the epoch length divided by 72, held between 300 and 900 seconds;
 - settle time: the epoch length divided by 240, held between 90 and 300 seconds.
 
-On testnet's six-hour epochs (21600 seconds) that gives five minutes and 90 seconds; a seven-day epoch gives 900 and 300 seconds.
+On the six-hour epochs of mainnet and testnet (21600 seconds) that gives five minutes and 90 seconds; a seven-day epoch would give 900 and 300 seconds.
+When the boundary cannot be read at all, the wait is the margin plus the settle time for the network's six-hour epoch, and the warning ends with `Margin 300s and settle 90s (network default: epoch 21600 s).`
 The wait's lines end with the values and their source, for example `Margin 300s and settle 90s, derived from a 21600 s epoch.`
 It prints a line that starts `Waiting for epoch <N> to close before restarting`, with the time to the boundary and the limit, then a progress line every 15 seconds.
 Nodes outside the committee, staked validators between seats included, are not delayed, and a restart that rolls back a failed change never waits.
@@ -832,10 +833,10 @@ These environment variables tune the wait:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TN_SKIP_EPOCH_WAIT` | unset | `1` skips the wait. |
-| `TN_EPOCH_MARGIN` | Epoch length / 72, 300 to 900 (300 on testnet) | Seconds before the boundary inside which a restart waits. A whole number you set is used as given. |
-| `TN_EPOCH_SETTLE` | Epoch length / 240, 90 to 300 (90 on testnet) | Seconds to wait after the epoch changes. A whole number you set is used as given. |
+| `TN_EPOCH_MARGIN` | Epoch length / 72, 300 to 900 (300 on mainnet and testnet) | Seconds before the boundary inside which a restart waits. A whole number you set is used as given. |
+| `TN_EPOCH_SETTLE` | Epoch length / 240, 90 to 300 (90 on mainnet and testnet) | Seconds to wait after the epoch changes. A whole number you set is used as given. |
 | `TN_EPOCH_JITTER_MAX` | 30 | Then a random pause of up to this many seconds, so nodes that waited for the same boundary do not restart together. `0` turns it off. The committee check runs again after the wait. |
-| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. A cap you set is kept as set; when it is shorter than the margin, the settle time and two progress intervals together (420 seconds on testnet with the defaults), the script warns that the restart may come before the epoch has settled and suggests a larger cap or `TN_SKIP_EPOCH_WAIT=1`. |
+| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. A cap you set is kept as set; when it is shorter than the margin, the settle time and two progress intervals together (420 seconds on mainnet and testnet with the defaults), the script warns that the restart may come before the epoch has settled and suggests a larger cap or `TN_SKIP_EPOCH_WAIT=1`. |
 | `TN_EPOCH_POLL` | 15 | Seconds between progress lines, held between 5 and 20. |
 
 The Node Manager UI runs the same scripts, so an update or a config save there can wait too (see [Node Manager UI](#node-manager-ui)).

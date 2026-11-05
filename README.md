@@ -824,7 +824,7 @@ Only a node that reports `CvvActive` from `tn_nodeMode` waits, and only when the
 
 Pass a variable through sudo on the command line, for example `sudo TN_SKIP_EPOCH_WAIT=1 bash ~/telcoin-node-scripts/install-caddy.sh --phase=rpc-disable`. When the node's mode cannot be read, a staked node (or, on mainnet or an unknown network, one whose stake cannot be read) still waits, with the epoch timing taken from the network's public RPC; when no RPC answers, the script warns and waits the margin and settle time, capped by `TN_EPOCH_WAIT_MAX`. A restart by hand (`sudo systemctl restart telcoin`) never waits, so on a committee node check the time to the next boundary with `check-node.sh` first.
 
-The epoch length is `epochDuration` from `tn_getCurrentEpochInfo`, read with the boundary. Testnet's 6-hour epoch (21600 s) gives the old 300 and 90; a 12-hour epoch gives 600 and 180, a 7-day epoch 900 and 300. Before the epoch length is known (the blind wait above) margin and settle are 300 and 90. The messages end with one sentence naming the values and their source, such as `Margin 300s and settle 90s, derived from a 21600 s epoch.` or `Margin 120s from TN_EPOCH_MARGIN; settle 300s derived from a 604800 s epoch.` The shares and clamps are interim; the node team's mainnet epoch length and restart margins replace them (#49).
+The epoch length is `epochDuration` from `tn_getCurrentEpochInfo`, read with the boundary. The 6-hour epoch of mainnet and testnet (21600 s) gives 300 and 90; a 12-hour epoch gives 600 and 180, a 7-day epoch 900 and 300. In the blind wait above, margin and settle derive the same way from the epoch length the release knows for the network (`MAINNET_EPOCH_DURATION` and `TESTNET_EPOCH_DURATION`, 21600 s, so 300 and 90), and are 300 and 90 on a network without one (devnet). The messages end with one sentence naming the values and their source, such as `Margin 300s and settle 90s, derived from a 21600 s epoch.`, `Margin 120s from TN_EPOCH_MARGIN; settle 300s derived from a 604800 s epoch.` or, in the blind wait, `Margin 300s and settle 90s (network default: epoch 21600 s).` Mainnet's epoch length is confirmed at 6 hours (#49), so the shares and clamps stand.
 
 A committee node that is stopped while the epoch changes anyway (a crash, a restart by hand or a skipped wait) repairs its epoch records when it starts again, and the warnings it logs about them need no action; [OPERATOR.md, Troubleshooting](OPERATOR.md#9-troubleshooting) lists them. It still misses the epoch votes while it is down, so keep to the wait.
 
@@ -1742,8 +1742,9 @@ Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
   before anything uses it: none on mainnet, `adiri` on testnet (`faucet` allowed); devnet is not
   checked.
 - `tn_wait_restart_window` derives the margin (epoch length / 72, held to 300-900 s) and the
-  settle time (epoch length / 240, held to 90-300 s) from the epoch length; adiri keeps 300 and
-  90. A value you set is used as given, and a `TN_EPOCH_WAIT_MAX` you set is kept and warned about
+  settle time (epoch length / 240, held to 90-300 s) from the epoch length; mainnet and testnet
+  (6-hour epochs) keep 300 and 90, and so does the blind wait, which derives them from the
+  network's epoch constant (`MAINNET_EPOCH_DURATION`, `TESTNET_EPOCH_DURATION`). A value you set is used as given, and a `TN_EPOCH_WAIT_MAX` you set is kept and warned about
   when it is shorter than margin + settle + two polls (#49).
 - `check_internet` probes the chosen network's public RPC, not adiri's on every network (#47).
 - New host baseline functions (`tn_host_baseline_install`, the refresh, the status lines in

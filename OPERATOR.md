@@ -651,8 +651,8 @@ After the migration the epoch database is `consensus-db/tndb/epoch`; do not move
 When the node votes in the current committee (`tn_nodeMode` is `CvvActive`) and the epoch boundary is within the restart margin, the apply waits before it stops the node, so the node is not down for the epoch change.
 It waits until the epoch closes, then a settle time for the new committee, never longer than 30 minutes in all, and prints a progress line every 15 seconds.
 The margin and the settle time follow the epoch length the node reports: the margin is 1/72 of the epoch, held between 300 and 900 seconds, and the settle time 1/240 of it, held between 90 and 300 seconds.
-Testnet's 6-hour epoch gives 300 and 90 seconds, a 7-day epoch 900 and 300.
-These shares are interim: the node team's mainnet epoch length and restart margins replace them (#49).
+Mainnet and testnet both run 6-hour epochs (21600 seconds), which give 300 and 90 seconds; a 7-day epoch would give 900 and 300.
+Mainnet's epoch length is confirmed (#49), so these shares stand.
 The step line names the values and where they came from:
 
 ```text
@@ -1652,14 +1652,16 @@ These environment variables tune it; pass them through `sudo`, as in `sudo TN_SK
 | Variable | Default | Meaning |
 |---|---|---|
 | `TN_SKIP_EPOCH_WAIT` | unset | `1` skips the wait. |
-| `TN_EPOCH_MARGIN` | epoch length / 72, held to 300-900 (300 on testnet) | Seconds before the boundary inside which a restart waits. A whole number you set is used as given. Before the epoch length is known (the blind wait, below the table), 300. |
-| `TN_EPOCH_SETTLE` | epoch length / 240, held to 90-300 (90 on testnet) | Seconds to wait after the epoch changes. A whole number you set is used as given. Before the epoch length is known, 90. |
+| `TN_EPOCH_MARGIN` | epoch length / 72, held to 300-900 (300 on mainnet and testnet) | Seconds before the boundary inside which a restart waits. A whole number you set is used as given. In the blind wait (below the table) it is derived from the epoch length this release knows for the network: 300 on mainnet and testnet, and 300 where none is known. |
+| `TN_EPOCH_SETTLE` | epoch length / 240, held to 90-300 (90 on mainnet and testnet) | Seconds to wait after the epoch changes. A whole number you set is used as given. In the blind wait it is derived the same way: 90. |
 | `TN_EPOCH_JITTER_MAX` | 30 | Then a random pause of up to this many seconds, so nodes that waited for the same boundary do not restart together. `0` turns it off. The committee check runs again after the wait. |
-| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. A cap you set is kept as set: when it is shorter than margin + settle + two polls (420 seconds on testnet), the script warns that the restart may land before the epoch has settled and suggests a larger cap or `TN_SKIP_EPOCH_WAIT=1`. |
+| `TN_EPOCH_WAIT_MAX` | 1800 | Cap on the whole wait, settling included. `0` turns the wait off. A cap you set is kept as set: when it is shorter than margin + settle + two polls (420 seconds on mainnet and testnet), the script warns that the restart may land before the epoch has settled and suggests a larger cap or `TN_SKIP_EPOCH_WAIT=1`. |
 | `TN_EPOCH_POLL` | 15 | Seconds between progress lines, held between 5 and 20. |
 
 The epoch length comes with the boundary, from the node or from the network's public RPC.
-When neither answers for a staked node whose mode cannot be read, the restart waits blind: `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds (300 + 90 unless set), at most `TN_EPOCH_WAIT_MAX`.
+When neither answers for a staked node whose mode cannot be read, the restart waits blind: `TN_EPOCH_MARGIN` + `TN_EPOCH_SETTLE` seconds, at most `TN_EPOCH_WAIT_MAX`.
+Unless you set them, both derive from the epoch length this release knows for the network (6 hours on mainnet and testnet, so 300 + 90), and are 300 + 90 on a network without one (devnet).
+The warning ends with where each value came from, for example `Margin 300s and settle 90s (network default: epoch 21600 s).`
 A node that votes in the committee but whose epoch answer cannot be read restarts without a wait.
 
 ## 8. Legacy installs
