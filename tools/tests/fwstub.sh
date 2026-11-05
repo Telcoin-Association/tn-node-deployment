@@ -3,7 +3,8 @@
 # =============================================================================
 # tools/tests/fwstub.sh -- PATH stubs for the firewall and sshd fixture tests.
 #
-#   fw_stub_install BIN_DIR    write ufw, sshd, systemctl and nft stubs into BIN_DIR
+#   fw_stub_install BIN_DIR    write ufw, sshd, systemctl, nft and tn-p2p-allow-sync
+#                              stubs into BIN_DIR
 #
 # ufw keeps its state in files under $TN_ROOT_PREFIX, like the real one:
 # etc/ufw/user.rules (one normalized rule per line), etc/ufw/ufw.conf
@@ -64,6 +65,26 @@
 # {"prefix": {"addr": A, "len": N}} per CIDR), its chains, then their rules.
 # `-j list tables [FAMILY]` lists the tables the same way. A missing table, set
 # or counter fails as nft does.
+#
+# tn-p2p-allow-sync is a #!/bin/sh stand-in for the P2P committee allowlist sync
+# tool; copy it to TN_P2P_ALLOW_BIN, or into a release tarball, to run it there.
+# With REC set, every call writes its arguments one per line to $REC.argv, its
+# environment to $REC.env and, with TN_P2P_STUB_STDIN=1, its standard input to
+# $REC.stdin (else that file is left empty and nothing is read), replacing what
+# the last call wrote, and appends its arguments on one line to $REC.log.
+# Without REC only --version runs; anything else exits 2. --version prints the
+# five lines of a release (tn-p2p-allow-sync $TN_P2P_STUB_VERSION, default 0.1.0,
+# then commit, target, snapshot-versions 1, config-version 1), or
+# $TN_P2P_STUB_VERSION_TEXT whenever that is set, and exits
+# $TN_P2P_STUB_RC_VERSION (default 0). Every other call is keyed by its command:
+# SYNC, CHECK, STATUS, STATUS_JSON (status --json), RENDER or CAPTURE_FLOOR; an
+# unknown or missing command exits $TN_P2P_STUB_RC_USAGE (default 2). It prints
+# $TN_P2P_STUB_OUT_<KEY> when that is set, else $TN_P2P_STUB_OUT, on stdout
+# (nothing when empty), and exits $TN_P2P_STUB_RC_<KEY>, else $TN_P2P_STUB_RC,
+# else 0. A sync that exits neither 1 (refused) nor 4 (busy) writes
+# $TN_P2P_STUB_STATUS, when set, as the status file of --state-dir (default
+# $TN_ROOT_PREFIX/var/lib/telcoin-p2p-allow), and exits 2 when that directory is
+# missing, as the tool does.
 # Not updater-tracked. bash 3.2 safe.
 # =============================================================================
 
@@ -636,5 +657,80 @@ elif printf '%s\n' "$prog" | grep -qx 'delete table inet tn_p2p'; then
 fi
 exit 0
 STUB
-    chmod +x "$bin/ufw" "$bin/sshd" "$bin/systemctl" "$bin/nft"
+    cat > "$bin/tn-p2p-allow-sync" <<'STUB'
+#!/bin/sh
+# tn-p2p-allow-sync stand-in (tools/tests/fwstub.sh): records each call, answers
+# from the TN_P2P_STUB_* knobs.
+state="${TN_ROOT_PREFIX:-}/var/lib/telcoin-p2p-allow"
+key="" json=false next=""
+for a in "$@"; do
+    if [ -n "$next" ]; then
+        [ "$next" = state ] && state="$a"
+        next=""
+        continue
+    fi
+    case "$a" in
+        --state-dir) next=state ;;
+        --state-dir=*) state="${a#--state-dir=}" ;;
+        --nft) next=skip ;;
+        --json) json=true ;;
+        --version) [ -n "$key" ] || key=VERSION ;;
+        -*) ;;
+        *)
+            if [ -z "$key" ]; then
+                case "$a" in
+                    sync) key=SYNC ;;
+                    check) key=CHECK ;;
+                    status) key=STATUS ;;
+                    render) key=RENDER ;;
+                    capture-floor) key=CAPTURE_FLOOR ;;
+                    *) key=USAGE ;;
+                esac
+            fi
+            ;;
+    esac
+done
+[ -n "$key" ] || key=USAGE
+if [ "$key" = STATUS ] && [ "$json" = true ]; then
+    key=STATUS_JSON
+fi
+if [ -n "${REC:-}" ]; then
+    : > "$REC.argv"
+    for a in "$@"; do printf '%s\n' "$a" >> "$REC.argv"; done
+    if [ "${TN_P2P_STUB_STDIN:-}" = 1 ]; then cat > "$REC.stdin"; else : > "$REC.stdin"; fi
+    env > "$REC.env"
+    printf '%s\n' "$*" >> "$REC.log"
+elif [ "$key" != VERSION ]; then
+    echo "tn-p2p-allow-sync stub: REC is not set" >&2
+    exit 2
+fi
+if [ "$key" = VERSION ]; then
+    if [ -n "${TN_P2P_STUB_VERSION_TEXT+x}" ]; then
+        [ -z "$TN_P2P_STUB_VERSION_TEXT" ] || printf '%s\n' "$TN_P2P_STUB_VERSION_TEXT"
+    else
+        printf 'tn-p2p-allow-sync %s\n' "${TN_P2P_STUB_VERSION:-0.1.0}"
+        printf 'commit 0123456789abcdef0123456789abcdef01234567\n'
+        printf 'target x86_64-unknown-linux-musl\nsnapshot-versions 1\nconfig-version 1\n'
+    fi
+    exit "${TN_P2P_STUB_RC_VERSION:-0}"
+fi
+if [ "$key" = USAGE ]; then
+    echo "tn-p2p-allow-sync stub: unknown command: $*" >&2
+    exit "${TN_P2P_STUB_RC_USAGE:-2}"
+fi
+# key is one of the fixed names above, so the knob names are safe to expand.
+rc=0 out=""
+eval "rc=\${TN_P2P_STUB_RC_${key}:-\${TN_P2P_STUB_RC:-0}}"
+eval "out=\${TN_P2P_STUB_OUT_${key}-\${TN_P2P_STUB_OUT-}}"
+if [ "$key" = SYNC ] && [ -n "${TN_P2P_STUB_STATUS+x}" ] && [ "$rc" != 1 ] && [ "$rc" != 4 ]; then
+    if [ ! -d "$state" ]; then
+        echo "tn-p2p-allow-sync stub: state directory $state is missing" >&2
+        exit 2
+    fi
+    printf '%s\n' "$TN_P2P_STUB_STATUS" > "$state/status"
+fi
+[ -z "$out" ] || printf '%s\n' "$out"
+exit "$rc"
+STUB
+    chmod +x "$bin/ufw" "$bin/sshd" "$bin/systemctl" "$bin/nft" "$bin/tn-p2p-allow-sync"
 }

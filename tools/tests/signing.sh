@@ -24,6 +24,7 @@
 # go into BIN, with the interfaces the scripts and tools use:
 #   gpg --armor --detach-sign [-u|--local-user KEY] [--output|-o OUT] FILE
 #   gpg --with-colons --import-options show-only --import < KEYFILE
+#   gpg --dearmor [-o|--output OUT] [KEYFILE]   (stdin without KEYFILE)
 #   gpg --card-status            (rc 1 when FAKE_NO_CARD=1)
 #   gpg --status-fd=N -bsau KEY  and  gpg --status-fd=N --verify SIG -   (git)
 #   gpgv --status-fd 1 --keyring KEYRING SIG FILE
@@ -68,6 +69,7 @@ mode="" key="" out="" sfd="" file="" sig=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --card-status) mode=card ;;
+        --dearmor) mode=dearmor ;;
         --import) mode=show ;;
         --detach-sign|-b) [ "$mode" = verify ] || mode=sign ;;
         -bsau) mode=sign; key="$2"; shift ;;
@@ -91,6 +93,11 @@ case "$mode" in
     show)
         sed -n '/^-----BEGIN PGP PUBLIC KEY BLOCK-----/,/^-----END/p' | grep -E '^[A-Za-z0-9+/]+=*$' | b64d \
             | awk '$1 == "FAKEKEY" { print "pub:u:255:22:" substr($2, 25) ":1793750400:::u:::scSC::::::23::0:"; print "fpr:::::::::" $2 ":" }' ;;
+    dearmor)
+        # the key text the fake gpgv reads from a keyring
+        if [ -n "$file" ] && [ "$file" != - ]; then exec < "$file"; fi
+        if [ -n "$out" ] && [ "$out" != - ]; then exec > "$out"; fi
+        sed -n '/^-----BEGIN PGP PUBLIC KEY BLOCK-----/,/^-----END/p' | grep -E '^[A-Za-z0-9+/]+=*$' | b64d ;;
     sign)
         if [ -z "$file" ] || [ "$file" = - ]; then d="$(h)"; else d="$(h < "$file")"; fi
         body="$(printf -- '-----BEGIN PGP SIGNATURE-----\n\nFAKESIG %s %s\n-----END PGP SIGNATURE-----' "$key" "$d")"

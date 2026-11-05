@@ -48,6 +48,11 @@ readonly FW_P2P_BURST_DEFAULT="40"
 readonly FW_P2P_LIMIT_FILE="${TN_ROOT_PREFIX:-}/etc/telcoin/p2p-limit.nft"
 readonly FW_P2P_LIMIT_SVC="telcoin-p2p-limit.service"
 readonly FW_P2P_LIMIT_UNIT="${TN_ROOT_PREFIX:-}/etc/systemd/system/${FW_P2P_LIMIT_SVC}"
+# The state directory of the P2P committee allowlist (tn-p2p-allow-sync
+# --state-dir), root 0700. It sits outside /etc/telcoin so that a sync every few
+# minutes touches nothing auditd or AIDE watch. These scripts write its config;
+# the tool writes everything else in it.
+readonly FW_ALLOW_DIR="${TN_ROOT_PREFIX:-}/var/lib/telcoin-p2p-allow"
 
 # Source lists for this run: --ssh-from / --p2p-from (comma lists or a file), and
 # --ssh-anywhere / --p2p-anywhere (drop a stored list). Empty = not given.
@@ -941,6 +946,132 @@ fw_p2p_limit_report() {
     if [[ "$what" == "off" && "$boot_ok" == "yes" ]]; then
         print_warn "New-flow limit at boot: ${FW_P2P_LIMIT_SVC} is enabled but the table is not loaded; check: systemctl status ${FW_P2P_LIMIT_SVC}"
     fi
+}
+
+# fw_allow_src_dropped ENTRY -- rc 0 when ENTRY, an entry fw_src_list passed, is a
+# host that tn-p2p-allow-sync refuses in P2P_ALLOW_FROM as never a peer's source:
+# an address, or a full-length prefix (/32, /128), that is unspecified, multicast
+# (224.0.0.0/4, ff00::/8) or link-local (169.254.0.0/16, fe80::/10). An
+# IPv4-mapped address written in hex (::ffff:a9fe:101) is judged as the IPv4
+# address it maps to, as the tool judges it. A network is never refused here,
+# whatever its range, because the tool takes it.
+fw_allow_src_dropped() {
+    local e="${1:-}" ip mask hi lo
+    ip="${e%%/*}"
+    if [[ "$e" == */* ]]; then
+        mask="${e#*/}"
+        if validate_ipv4 "$ip"; then
+            [[ "$mask" == "32" ]] || return 1
+        else
+            [[ "$mask" == "128" ]] || return 1
+        fi
+    fi
+    ip="$(tr 'A-F' 'a-f' <<< "$ip")"
+    if [[ "$ip" =~ ^[0:]*:ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$ ]]; then
+        hi=$((16#${BASH_REMATCH[1]}))
+        lo=$((16#${BASH_REMATCH[2]}))
+        ip="$((hi >> 8)).$((hi & 255)).$((lo >> 8)).$((lo & 255))"
+    fi
+    if validate_ipv4 "$ip"; then
+        [[ "$ip" == "0.0.0.0" || "$ip" == 169.254.* || "$ip" =~ ^(22[4-9]|23[0-9])\. ]]
+        return
+    fi
+    # a first group of four digits: ff02:: is multicast, ff:: (00ff) is not
+    [[ "$ip" =~ ^[0:]+$ || "$ip" =~ ^ff[0-9a-f]{2}: || "$ip" =~ ^fe[89ab][0-9a-f]: ]]
+}
+
+# fw_allow_write_config -- write FW_ALLOW_DIR/config, the one input file of
+# tn-p2p-allow-sync, root 0600 (tn_write_root_file), from what the node runs with
+# now, in the tool's KEY=VALUE grammar (no quotes, no spaces, every key once):
+# CONFIG_VERSION (TN_P2P_ALLOW_CONFIG_VERSION), RPC_PORT (the port
+# tn_local_rpc_url gives at each call, the node's own resolution: RPC_PORT from
+# .node-meta, else the RPC_PORT variable, else 8545), P2P_PORTS (fw_p2p_ports,
+# comma-joined in their order, a port listed twice written once, since the tool
+# refuses a repeat) and P2P_ALLOW_FROM (from .node-meta, every entry checked by
+# fw_src_list, comma-joined; empty without a list). rc 0 written; 1 RPC_PORT is
+# set twice in .node-meta, a P2P port is not a port, an entry is not valid or is
+# a host fw_allow_src_dropped names, or FW_ALLOW_DIR is missing or the write
+# failed; the reason is on stderr and the old file stays.
+fw_allow_write_config() {
+    local url port portlist="" p label stored list="" s text
+    if ! url="$(tn_local_rpc_url)"; then
+        print_error "The RPC port in .node-meta cannot be read, so the P2P committee allowlist config was not written." >&2
+        return 1
+    fi
+    port="${url##*:}"
+    while read -r p label; do
+        [[ -n "$p" ]] || continue
+        if ! fw_port_ok "$p"; then
+            print_error "The ${label} P2P port '${p}' is not a port number, so the P2P committee allowlist config was not written." >&2
+            return 1
+        fi
+        case ",${portlist}," in
+            *",${p},"*) continue ;;
+        esac
+        portlist="${portlist:+${portlist},}${p}"
+    done < <(fw_p2p_ports)
+    if [[ -z "$portlist" ]]; then
+        print_error "No P2P port is known, so the P2P committee allowlist config was not written." >&2
+        return 1
+    fi
+    stored="$(addon_meta_get P2P_ALLOW_FROM)" || return 1
+    if [[ -n "$stored" ]]; then
+        if ! s="$(fw_src_list "$stored")"; then
+            print_error "P2P_ALLOW_FROM in .node-meta holds an invalid entry, so the P2P committee allowlist config was not written; pass --p2p-from again." >&2
+            return 1
+        fi
+        while IFS= read -r p; do
+            if fw_allow_src_dropped "$p"; then
+                print_error "P2P_ALLOW_FROM in .node-meta lists ${p}, an unspecified, multicast or link-local address that is never a peer's source, so the P2P committee allowlist config was not written; pass --p2p-from again without it." >&2
+                return 1
+            fi
+            list="${list:+${list},}${p}"
+        done <<< "$s"
+    fi
+    text="# tn-p2p-allow-sync config, written by firewall-setup.sh
+CONFIG_VERSION=${TN_P2P_ALLOW_CONFIG_VERSION}
+RPC_PORT=${port}
+P2P_PORTS=${portlist}
+P2P_ALLOW_FROM=${list}"
+    if ! tn_write_root_file "${FW_ALLOW_DIR}/config" 0600 <<< "$text"; then
+        print_error "${FW_ALLOW_DIR#"${TN_ROOT_PREFIX:-}"}/config could not be written; the P2P committee allowlist keeps the config it had." >&2
+        return 1
+    fi
+    return 0
+}
+
+# fw_allow_capture_floor -- have tn-p2p-allow-sync write FW_ALLOW_DIR/floor, the
+# addresses the allowlist never drops, from the peers the node dials at start:
+# <config dir>/bootstrap-peers.yaml when it exists, else the bootstrap servers of
+# the genesis committee.yaml in the data dir (setup-node copies it there). The
+# file must be a regular file, not a symlink. TN_P2P_ALLOW_BIN runs here, as root
+# and outside the sync unit's sandbox (which keeps the tool out of /etc/telcoin
+# and the data dir), with stdin closed, no file descriptor above 2 (not the
+# update lock, not the --json channel) and without TN_BLS_PASSPHRASE. rc 0
+# captured; 1 no such file, or the data dir cannot be resolved; else the tool's
+# exit code (the floor it had stays); the reason is on stderr.
+fw_allow_capture_floor() {
+    local src dd rc=0
+    src="$(tn_resolve_config_dir)/bootstrap-peers.yaml"
+    if [[ ! -e "$src" && ! -L "$src" ]]; then
+        if ! dd="$(tn_resolve_data_dir)"; then
+            print_error "The data dir cannot be resolved, so the genesis committee cannot be read and the P2P committee allowlist floor was not captured." >&2
+            return 1
+        fi
+        src="${dd}/genesis/committee.yaml"
+    fi
+    if [[ -L "$src" || ! -f "$src" ]]; then
+        print_error "${src#"${TN_ROOT_PREFIX:-}"} is missing or not a regular file, so the P2P committee allowlist floor was not captured." >&2
+        return 1
+    fi
+    (
+        unset TN_BLS_PASSPHRASE 2>/dev/null || true
+        _tn_exec_closed "$TN_P2P_ALLOW_BIN" --state-dir "$FW_ALLOW_DIR" capture-floor "$src"
+    ) < /dev/null || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        print_error "tn-p2p-allow-sync capture-floor ${src#"${TN_ROOT_PREFIX:-}"} failed (exit ${rc}); the P2P committee allowlist keeps the floor it had." >&2
+    fi
+    return $rc
 }
 
 # fw_on_gce -- 0 on a Google Compute Engine VM (DMI product name), where IAP TCP
