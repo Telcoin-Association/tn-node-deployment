@@ -1487,11 +1487,14 @@ service_account_ok() {
     _lib_req tn_service_user_ok "$1" "$2" >/dev/null
 }
 
-# docker_image_ok <image> <network> -- the library's tn_docker_image_allowed
-# with digests required: <repository>@sha256:<digest>, the repository one the
-# network's images may come from (on testnet either testnet repository).
+# docker_image_ok <image> <network> -- an image a new install may pull, by the
+# rule setup-node applies: the library's tn_docker_image_allowed with digests
+# required (<repository>@sha256:<digest> of a repository the network's images may
+# come from), and tn_docker_pull_repo_ok for its repository, so the old single
+# ghcr.io package, which holds no release, is refused here as setup-node refuses it.
 docker_image_ok() {
-    TN_DOCKER_REQUIRE_DIGEST=1 _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null
+    TN_DOCKER_REQUIRE_DIGEST=1 _lib_req tn_docker_image_allowed "$1" "$2" >/dev/null \
+        && _lib_req tn_docker_pull_repo_ok "$2" "${1%%@*}" >/dev/null
 }
 
 # passphrase_ok <value> <network> -- the library's tn_passphrase_ok (no CR/LF,

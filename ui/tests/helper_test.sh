@@ -820,8 +820,21 @@ check_has "mainnet setup-keygen runs setup-node.sh when tn_mainnet_enabled says 
 unset TN_SETUP_INSTALL_METHOD TN_SETUP_BUILD_REF; export TN_SETUP_NETWORK=testnet
 refused "setup-finalize without listener multiaddrs (NC-2)" setup-finalize < /dev/null
 DIGEST="$(printf '%064d' 0 | tr 0 a)"
-t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
-check_has "setup-keygen accepts the testnet image by digest" "rc=0" "$t"
+t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${TESTNET_PKG}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
+check_has "setup-keygen accepts the testnet package image by digest" "rc=0" "$t"
+# The pull rule, as setup-node applies it: the old single package is recognised in
+# a running container but never pulled, so setup-keygen refuses it; the mainnet
+# and dev packages are not testnet's.
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}"
+refused_in "setup-keygen refuses the old single ghcr package (never pulled)" setup-keygen
+check_has "setup-keygen names the old-package image it refuses" \
+    "invalid docker image for testnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${GHCR_REPO}@sha256:${DIGEST}" \
+    "$(trace setup-keygen < "$T/pass-in")"
+export TN_SETUP_DOCKER_IMAGE="${MAINNET_PKG}@sha256:${DIGEST}"
+refused_in "setup-keygen refuses the mainnet package on testnet" setup-keygen
+export TN_SETUP_DOCKER_IMAGE="ghcr.io/telcoin-association/tn-dev@sha256:${DIGEST}"
+refused_in "setup-keygen refuses the dev package on testnet" setup-keygen
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE
 t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
 check_has "setup-keygen accepts a legacy testnet image by digest" "rc=0" "$t"
 export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}-fork@sha256:${DIGEST}"; refused_in "setup-keygen refuses a look-alike repository" setup-keygen
@@ -834,6 +847,12 @@ refused_in "setup-keygen refuses the legacy repository on mainnet" setup-keygen
 check_has "setup-keygen names the legacy image it refuses on mainnet" \
     "invalid docker image for mainnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${LEGACY_REPO}@sha256:${DIGEST}" \
     "$(trace setup-keygen < "$T/pass-in")"
+for img in "${TESTNET_PKG}" "${GHCR_REPO}" "ghcr.io/telcoin-association/tn-dev"; do
+    export TN_SETUP_DOCKER_IMAGE="${img}@sha256:${DIGEST}"
+    refused_in "setup-keygen refuses ${img##*/} on mainnet" setup-keygen
+done
+t="$(export TN_SETUP_DOCKER_IMAGE="${MAINNET_PKG}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-main")"
+check_has "setup-keygen accepts the mainnet package image by digest on mainnet" "rc=0" "$t"
 unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE TN_TEST_MAINNET_RC; export TN_SETUP_NETWORK=testnet
 fixture unified
 refused_in "setup-keygen refused on an installed node" setup-keygen
