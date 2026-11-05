@@ -111,7 +111,7 @@ Finished telcoin-heartbeat.service - Telcoin node heartbeat (private alerts).
 GET /api/push/<token>?status=down&msg=service+telcoin+inactive+%28dead%29&ping=0
 → Overall exposure level for telcoin-heartbeat.service: 1.5 OK :-)
 verify-rc=0
-ExecStartPre={ path=/bin/sh ; argv[]=/bin/sh -c umask 022; install -d -o root -g root -m 0755 /run/telcoin && rm -f /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp && systemctl show 
+ExecStartPre={ path=/bin/sh ; argv[]=/bin/sh -c umask 022; install -d -o root -g root -m 0755 /run/telcoin && rm -f /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp && systemctl show
 == control: no pre-step, telcoin.service inactive
 heartbeat rc=0
 -- state file present: no

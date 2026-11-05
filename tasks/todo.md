@@ -72,6 +72,11 @@ specs `tasks/spec-alerts-<PKG>.md`, checkpoints `tasks/ckpt-alerts-<PKG>.md`.
   fixture job failed two new tests on BSD tools (`grep -o` with `\|` alternation, an awk `-v` value
   holding a newline); and the base branch had moved on (rebased twice, three conflicts resolved:
   update-scripts' `local` line, the release note's #49 bullet, the sidecars).
+- The base moved a third time while the fix landed (eight round-2 docs commits, among them a
+  partner-guide bump to 1.7 for OpenPGP signing and image packages), so the guide with private
+  alerts is 1.8 (the guide commit's title still says 1.7; its metadata and PDF say 1.8). GitHub
+  runs no `pull_request` workflow while a PR conflicts, which is why the push before that rebase
+  had no CI run.
 - Every other check was green on the first run: bash -n on both bashes, shellcheck, the Linux
   fixture suite, the hardening lints, the release manifest, checksum freshness, the UI tests.
 
