@@ -523,3 +523,48 @@ line and exited, printf got EPIPE on the rest, and with pipefail the pipeline fa
 (`grep -qxF -- "$2" <<< "$3"`) or a file. More generally, assume every fixture runs with
 pipefail inherited from the library it exercises, and grep the test library for
 `| grep -q` after adding a helper.
+
+## Round 2 on PR #59 (2026-11-04/05): budgets, refused report files, load flakes
+
+### Package sizes were wrong by a factor of two
+
+**Symptom:** the three main implementers finished at 430k (SIG), 458k (IMG) and 312k (UPS)
+tokens against a "well under 250k" budget; the two V7 verifiers at 366k and 401k. None stopped
+to checkpoint and hand back; all finished green.
+
+**Rule:** a package that touches three self-contained scripts plus their fixtures (SIG) or six
+call sites plus UI twins (IMG) is two packages. Split by file ownership before spawning
+(release-scripts + install.sh / update-scripts + cut-release; library + UI / call sites), and
+give a verifier one package, not two. When an agent is over budget at hand-back, spawn a fresh
+agent for its fix round from the integration tip instead of resuming it (IMG-2 did this).
+
+### A verifier may be refused its own report file; plan the hand-back
+
+**Symptom:** both V7 verifiers had `Write` refused for `tasks/verify-r2/<name>/REPORT.md`
+("report-file rule") while their harness scripts wrote fine; V8 wrote its report without issue.
+They returned the full text in the final answer and the orchestrator saved it unchanged.
+
+**Rule:** every verifier brief says what to do when Write is refused (return the complete text,
+never work around it), and the orchestrator budgets the save: one heredoc per report, then lint
+and commit the records together.
+
+### Fixture flakes under host load are not package failures
+
+**Symptom:** with four agents running fixture suites at once (load average around 20),
+`host_baseline_test`, `docker_image_test` and `remove_test` each failed one run and passed every
+rerun; the macOS CI job failed one check with an empty captured output on a commit whose code
+had been green before and was green after.
+
+**Rule:** a single failing run under load is rerun alone before anything is changed; a CI
+failure on a commit that touches no code the failing fixture exercises is confirmed against the
+next push before it is investigated. Record the flake, not a fix.
+
+### An agent that mounts `$PWD` into a container must be in its worktree
+
+**Symptom:** a backgrounded subshell in IMG lost its `cd` and ran two container fixture suites
+against the main checkout (another stream's tree) instead of the worktree; read-only, but the
+results were for the wrong tree and had to be discarded.
+
+**Rule:** in agent briefs, every docker command uses the worktree's absolute path
+(`-v /home/.../tnd-r2-<pkg>:/w`), never `$PWD`, and a hand-back names the tree each count was
+measured on.
