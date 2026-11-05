@@ -9,7 +9,22 @@ status: done
 - [x] S5 CHANGELOG/scripts-v2.1.0.md -- b51ccd3 (intro: first signed, serial 1, 2.0.0 never tagged; new sections 'Signed script releases with OpenPGP (#40)' and 'Image packages per network and the image feature check (#46)'; per-script bullets setup/update/edit-config/remove-node; update-scripts section line; CODEOWNERS bullet; Alloy 18f8485 bullet; new-files table; Before you update step 1; refusals table +6 rows; Left open #30/#31, #40, #41, #45/#46/#51)
 - [x] S6 Partner guide 1.7 + PDF -- a84d5f6 (metadata.yaml version 1.7, date November 2026 kept; guide text changed in S1-S3)
 
+- [x] F2 IMG fix round (follow-up 2 of 2) -- f5e48b4 (facts checked in tnd-r2-IMG2 at 9ce9f15)
+
 ## Docs written (where each fact lives)
+
+F2 (f5e48b4):
+- README: Docker Install Notes (old package recognised on testnet and devnet only, mainnet never);
+  setup-node flags table row `--json --phase=keygen|finalize` (finalize's image check, never pulls,
+  refusal text); Web UI Security model (new docker-detect bullet: testnet/mainnet/devnet repos, tn-dev,
+  status and logs only, docker-status/docker-logs take only detected names); changelog lib/common
+  2.1.0 bullet (testnet and devnet only).
+- OPERATOR: 7.1 finalize bullet (image check before config/unit/container, never pulls); 4.5 bullet
+  (external Docker nodes incl. tn-dev); section 9: "Could not run" row extended for finalize (pull the
+  recorded digest by hand, finalize again), + finalize refusal row, + image-prompt end-of-input row.
+- CHANGELOG/scripts-v2.1.0.md images section: old package testnet/devnet only; + finalize check,
+  + prompt stop, + docker-detect bullets.
+- Partner guide unchanged in F2, so the PDF is unchanged (hash still 9ad09451...b843).
 
 S1 (f40547d):
 - README: What's Included row (lib/release-keys/ only); Quick Start installer paragraph (gpgv, base64);
@@ -102,5 +117,10 @@ Lint passed both times; pdftotext shows "Version 1.7 · November 2026" and no SS
 - "Merge the release PR with a merge commit" is the orchestrator's instruction; nothing in
   cut-release.sh enforces it (tag checks MANIFEST/MANIFEST.asc content only). Written as a step
   in AGENTS and followup.md with the reason "so the signed release commit stays on main".
+- setup-node finalize's refusal says "run --phase=keygen again with a <net> image", but keygen
+  refuses non-interactively while node-keys exist ("node-keys already exist ... refusing to
+  overwrite in non-interactive mode"), as does finalize_same_as_keygen's "or run keygen again".
+  OPERATOR's Fix column says to move node-keys aside only when never staked. A code follow-up could
+  let finalize take a corrected --docker-image, or say how to re-run keygen.
 - The ubuntu:24.04 image does have gpgv (apt depends on it), contrary to spec-r2-shared.md's
   test-environment note; only matters for the fixtures' REAL_GPG detection (it also needs gpg).
