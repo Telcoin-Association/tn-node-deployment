@@ -953,6 +953,26 @@ print_plan() {
     echo ""
 }
 
+# p2p_allow_hint -- after the install pass: when it changed firewall-setup.sh or
+# lib/common.sh and the P2P committee allowlist's timer unit exists (under
+# TN_ROOT_PREFIX), print the command that brings the allowlist up to date. The
+# allowlist runs the tool release lib/common.sh pins, from units firewall-setup.sh
+# writes, so a new copy of either file takes effect there only once
+# --p2p-committee sync rewrites the units and reinstalls the tool. Printed, never
+# run.
+p2p_allow_hint() {
+    local i changed=false
+    for ((i = 0; i < ${#UPD_PATHS[@]}; i++)); do
+        case "${UPD_PATHS[i]}" in
+            firewall-setup.sh|lib/common.sh) changed=true ;;
+        esac
+    done
+    [[ "$changed" == "true" && -e "${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-p2p-allow-sync.timer" ]] || return 0
+    print_info "The firewall script or its library changed. Bring the P2P committee allowlist up to date:"
+    print_info "  sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+    echo ""
+}
+
 # warn_expired -- the warning an update run prints when the verified release
 # has expired. An expiry date tells the release signer a newer release is due;
 # the release still verifies, so the run carries on and installs it.
@@ -1066,6 +1086,7 @@ run_update() {
     svc="$(tn_resolve_service 2>/dev/null || echo telcoin)"
     print_info "  sudo systemctl restart ${svc}"
     echo ""
+    p2p_allow_hint
     # The web UI runs from a root-owned copy. The updater never runs sudo itself:
     # it prints the command that redeploys (or installs) the UI from this tree.
     if [[ "$ui_changed" == "true" ]]; then

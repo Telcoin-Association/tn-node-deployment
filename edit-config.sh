@@ -963,6 +963,42 @@ edit_baseline_refresh() {
     return 0
 }
 
+# edit_committee_resync -- after an edit the restarted node runs with: bring the
+# P2P committee allowlist in step with it when the edit changed one of its inputs
+# (node.env, which holds the P2P listener addresses, or bootstrap-peers.yaml) or
+# recorded no backup (the chain-config refresh, which replaces the genesis
+# committee.yaml its floor falls back on), and P2P_COMMITTEE is on in .node-meta.
+# The sync is firewall-setup.sh --p2p-committee sync, run once this run has
+# released the update lock, because that run takes the lock itself. A no-op while
+# P2P_COMMITTEE is off. A failure is a warning, before the done event, naming the
+# command to run. Never fails.
+edit_committee_resync() {
+    local f mode rc=0 hit=false
+    [[ ${#EDIT_BK_FILES[@]} -gt 0 ]] || hit=true
+    for f in ${EDIT_BK_FILES[@]+"${EDIT_BK_FILES[@]}"}; do
+        case "${f##*/}" in
+            node.env|bootstrap-peers.yaml) hit=true ;;
+        esac
+    done
+    [[ "$hit" == "true" ]] || return 0
+    mode="$(meta_get P2P_COMMITTEE 2>/dev/null)" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        edit_warn "P2P_COMMITTEE is set more than once in .node-meta, so the P2P committee allowlist was not synced with this edit; remove the extra lines, then run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+        return 0
+    fi
+    [[ "$mode" == "on" ]] || return 0
+    edit_unlock
+    edit_step "Syncing the P2P committee allowlist with the edit"
+    rc=0
+    bash "${SCRIPT_DIR}/firewall-setup.sh" --p2p-committee sync < /dev/null 3>&- || rc=$?
+    case "$rc" in
+        0) ;;
+        3) edit_warn "The P2P committee allowlist keeps its last-good set for now (the node may not answer yet after its restart); telcoin-p2p-allow-sync.timer syncs it again within 5 minutes." ;;
+        *) edit_warn "The P2P committee allowlist was not synced with this edit (firewall-setup.sh exit ${rc}); run: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync" ;;
+    esac
+    return 0
+}
+
 # edit_epoch_wait -- called just before the node restarts (before it stops, for
 # the BLS passphrase), after the lock is held, and never before a rollback
 # restart. When the node votes in the current committee and the epoch boundary
@@ -1628,6 +1664,7 @@ apply_changes() {
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
             edit_baseline_refresh
+            edit_committee_resync
         else
             print_error "Node failed to restart. Check logs:"
             print_info "  sudo tail -30 /var/log/telcoin/${TARGET_SERVICE}.log"
@@ -2924,6 +2961,8 @@ restart_node() {
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
             edit_baseline_refresh
+            # an edit saved with "restart later" reaches the node only now
+            edit_committee_resync
         else
             print_error "Node failed to restart. Check logs:"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
@@ -3055,6 +3094,7 @@ run_set() {
     edit_restart || rc=$?
     if [[ $rc -eq 0 ]]; then
         edit_baseline_refresh
+        edit_committee_resync
         edit_done true "$field" "$value" "applied and ${TARGET_SERVICE} healthy"
         return 0
     fi

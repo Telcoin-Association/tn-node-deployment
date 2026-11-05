@@ -7,6 +7,8 @@
 # puts the legacy layout back. Also the stops before any change: a duplicated
 # DATA_DIR or RPC_PORT in the legacy .node-meta, a held update lock, and the
 # committee check refusing the stop (with --allow-quorum-risk overriding it).
+# Last, the P2P committee allowlist resync: run after the RPC_PORT rewrite with
+# the update lock released when P2P_COMMITTEE is on, never when it is off.
 #
 #   docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash tools/tests/migrate_naming_test.sh
 #
@@ -25,6 +27,8 @@ set -u
 
 T="$TN_TEST_TMP"
 REPO="$TN_TEST_REPO"
+# The script under test; the allowlist cases run a copy beside a stub firewall-setup.sh.
+MIG="$REPO/migrate-node-naming.sh"
 PATHS="/etc/telcoin /opt/telcoin /var/lib/telcoin /usr/local/libexec/telcoin /var/backups/telcoin /etc/systemd/system/telcoin.service /etc/systemd/system/telcoin-observer.service"
 
 why=""
@@ -197,7 +201,7 @@ legacy() {
 # migrate [ARG...] -- run the script with --yes and ARGs; RC, OUT.
 migrate() {
     OUT="$(PATH="$T/bin:$PATH" TN_UPDATE_LOCK_FILE="$T/update.lock" TN_EPOCH_POLL=5 \
-        bash "$REPO/migrate-node-naming.sh" --yes "$@" 2>&1)"
+        bash "$MIG" --yes "$@" 2>&1)"
     RC=$?
 }
 has() {
@@ -404,5 +408,67 @@ check "lock held: nothing stopped, nothing backed up" "no no" \
     "$(has "$(cat "$EV")" "systemctl stop") $([[ -e /var/backups/telcoin ]] && echo yes || echo no)"
 check "lock held: legacy layout untouched" "yes yes" \
     "$([[ -d /etc/telcoin/observer ]] && echo yes || echo no) $([[ -d /var/lib/telcoin/observer ]] && echo yes || echo no)"
+
+# -----------------------------------------------------------------------------
+# The P2P committee allowlist resync: a copy of the script beside a stub
+# firewall-setup.sh, which logs its arguments, the RPC_PORT line of .node-meta
+# and whether the update lock is free when it runs (exit FW_STUB_RC).
+# -----------------------------------------------------------------------------
+MT="$T/mtree"
+mkdir -p "$MT"
+cp "$REPO/migrate-node-naming.sh" "$MT/migrate-node-naming.sh"
+ln -s "$REPO/lib" "$MT/lib"
+cat > "$MT/firewall-setup.sh" <<FWS
+#!/bin/bash
+lock=held
+if flock -n "\$TN_UPDATE_LOCK_FILE" true 2>/dev/null; then lock=free; fi
+printf 'firewall-setup %s %s lock=%s\n' "\$*" "\$(grep '^RPC_PORT=' /etc/telcoin/.node-meta)" "\$lock" >> "$EV"
+exit "\${FW_STUB_RC:-0}"
+FWS
+MIG="$MT/migrate-node-naming.sh"
+SYNC="firewall-setup --p2p-committee sync RPC_PORT=8545 lock=free"
+VERIFIED="curl eth_chainId http://127.0.0.1:8545"
+
+legacy "${META_TEXT}
+P2P_COMMITTEE=on"
+migrate
+check_rc "allowlist on: rc" 0 "$RC"
+check "allowlist on: one sync, on the rewritten RPC_PORT, with the update lock released" "$SYNC" "$(grep "^firewall-setup " "$EV")"
+check "allowlist on: after the verified start" yes \
+    "$([[ $(line_of "$VERIFIED") -gt 0 && $(line_of "$SYNC") -gt $(line_of "$VERIFIED") ]] && echo yes || echo no)"
+check "allowlist on: P2P_COMMITTEE kept in .node-meta" "P2P_COMMITTEE=on" "$(grep '^P2P_COMMITTEE=' /etc/telcoin/.node-meta)"
+check "allowlist on: no warning" no "$(has "$OUT" "was not synced")"
+check "allowlist on: lock released" yes "$(lock_free)"
+
+legacy "${META_TEXT}
+P2P_COMMITTEE=off"
+migrate
+check "allowlist off: migrated, no sync" "0 no" "${RC} $(has "$(cat "$EV")" "firewall-setup")"
+
+legacy
+migrate
+check "allowlist key absent: migrated, no sync" "0 no" "${RC} $(has "$(cat "$EV")" "firewall-setup")"
+
+legacy "${META_TEXT}
+P2P_COMMITTEE=on"
+FW_STUB_RC=2 migrate
+check "allowlist sync failed: the migration stands" "0 yes no" \
+    "${RC} $([[ -f /etc/systemd/system/telcoin.service ]] && echo yes || echo no) $(has "$OUT" "Rolled back")"
+check "allowlist sync failed: warned with the command" yes \
+    "$(has "$OUT" "was not synced with the new layout (firewall-setup.sh exit 2); run: sudo bash ${MT}/firewall-setup.sh --p2p-committee sync")"
+
+legacy "${META_TEXT}
+P2P_COMMITTEE=on"
+FW_STUB_RC=3 migrate
+check "allowlist stale (exit 3): migrated, synced, no warning of its own" "0 1 no" \
+    "${RC} $(grep -cxF -- "$SYNC" "$EV") $(has "$OUT" "was not synced")"
+
+legacy "${META_TEXT}
+P2P_COMMITTEE=on
+P2P_COMMITTEE=on"
+migrate
+check "allowlist key twice: migrated, no sync, says why" "0 no yes" \
+    "${RC} $(has "$(cat "$EV")" "firewall-setup") $(has "$OUT" "P2P_COMMITTEE is set more than once in .node-meta")"
+MIG="$REPO/migrate-node-naming.sh"
 
 finish
