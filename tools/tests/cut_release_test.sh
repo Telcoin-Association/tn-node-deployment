@@ -311,6 +311,33 @@ gitw checkout -q --detach
 gitw branch -q -f "$BR" "$pushed"
 gitw checkout -q "$BR"
 
+# TERM during the check in the temporary worktree (sent to the whole process
+# group, as Ctrl-C is): the worktree, git's entry for it and the temp
+# directory are removed. A gpgv that waits holds the check in the worktree.
+mkdir -p "$T/holdbin" "$T/cuttmp"
+cat > "$T/holdbin/gpgv" <<EOF
+#!/usr/bin/env bash
+: > "$T/gpgv.held"
+sleep 30
+exec "$BIN/gpgv" "\$@"
+EOF
+chmod +x "$T/holdbin/gpgv"
+set -m
+(cd "$W" && PATH="$T/holdbin:$PATH" TMPDIR="$T/cuttmp" SERVED_TAG="$TAG" exec bash tools/cut-release.sh tag "$TAG" --yes > "$T/held.out" 2>&1) &
+held=$!
+set +m
+i=0
+while [[ ! -f "$T/gpgv.held" && $i -lt 600 ]]; do sleep 0.1; i=$((i + 1)); done
+check "TERM during the check: the check is running in its worktree" "yes 2" \
+    "$([[ -f "$T/gpgv.held" ]] && echo yes || echo no) $(gitw worktree list | wc -l | tr -d ' ')"
+kill -TERM -- "-$held" 2>/dev/null
+wait "$held" 2>/dev/null
+RC=$?
+check_rc "TERM during the check: exits 143" 143 "$RC"
+check "TERM during the check: no worktree left" "1" "$(gitw worktree list | wc -l | tr -d ' ')"
+check "TERM during the check: no worktree entry left" "" "$(ls "$W/.git/worktrees" 2>/dev/null)"
+check "TERM during the check: no temp directory of cut-release.sh left" "" "$(cd "$T/cuttmp" && ls -d tn-cut-release.* 2>/dev/null)"
+
 SERVED_TAG="$TAG" cut tag "$TAG" --yes
 check_rc "tag again: exits 0" 0 "$RC"
 has "tag again: the tag is already there" "already done: $TAG names origin/main"

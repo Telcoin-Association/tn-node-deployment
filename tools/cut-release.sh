@@ -83,6 +83,7 @@ readonly POLL_TRIES="${TN_CUT_POLL_TRIES:-120}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 YES=0
 TMP=""
+WT=""
 STEP_TOTAL=0
 SHOW_AS=""
 CHECK_STEP=0
@@ -100,7 +101,20 @@ usage() {
     sed -n '5,7p' "${BASH_SOURCE[0]}" | sed 's/^#//'
 }
 
+# remove_worktree -- remove the temporary worktree WT, if one is there, and
+# the entry git keeps for it in .git/worktrees.
+remove_worktree() {
+    [[ -n "$WT" ]] || return 0
+    _git worktree remove --force "$WT" > /dev/null 2>&1 || true
+    rm -rf "$WT"
+    _git worktree prune > /dev/null 2>&1 || true
+    WT=""
+}
+
+# cleanup -- on every exit (Ctrl-C and TERM too): the temporary worktree,
+# then the temp directory.
 cleanup() {
+    remove_worktree
     if [[ -n "$TMP" ]]; then
         rm -rf "$TMP"
     fi
@@ -329,17 +343,22 @@ manifest_value() {
 }
 
 # check_in_worktree REF [TAG] -- run the release check with --require-sig (and
-# --tag TAG) in a temporary worktree of REF; its rc.
+# --tag TAG) in a temporary worktree of REF; its rc. The worktree is WT until
+# it is removed, so an interrupted run removes it too (cleanup).
 check_in_worktree() {
     local ref="$1" wt="${TMP}/worktree" rc=0
     rm -rf "$wt"
-    _git worktree add --detach "$wt" "$ref" > /dev/null 2>&1 || return 1
+    WT="$wt"
+    if ! _git worktree add --detach "$wt" "$ref" > /dev/null 2>&1; then
+        remove_worktree
+        return 1
+    fi
     if [[ -n "${2:-}" ]]; then
         (cd "$wt" && bash tools/release-scripts.sh --check --require-sig --tag "$2") || rc=$?
     else
         (cd "$wt" && bash tools/release-scripts.sh --check --require-sig) || rc=$?
     fi
-    _git worktree remove --force "$wt" > /dev/null 2>&1 || true
+    remove_worktree
     return "$rc"
 }
 
