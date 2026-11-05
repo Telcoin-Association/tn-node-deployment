@@ -153,7 +153,7 @@ SNA_STDIN="$T/yes" drv prompt
 mv "$T/sn/setup-alerts.sh.away" "$T/sn/setup-alerts.sh"
 check "prompt: without setup-alerts.sh asks nothing" "ENABLE_ALERTS=false" "$OUT"
 check "prompt: no testnet gate in prompt_alerts or step_alerts" "0" \
-    "$(sed -n '/^prompt_alerts() {/,/^}/p; /^step_alerts() {/,/^}/p' "$SN" | grep -c 'is_testnet\|require_testnet')"
+    "$(sed -n '/^prompt_alerts() {/,/^}/p; /^step_alerts() {/,/^}/p' "$SN" | grep -cE 'is_testnet|require_testnet')"
 
 # -----------------------------------------------------------------------------
 # The read-back in step_preflight
@@ -161,7 +161,7 @@ check "prompt: no testnet gate in prompt_alerts or step_alerts" "0" \
 check "read-back: cut out of step_preflight" yes \
     "$(grep -q 'setup_meta_read alerts_meta ENABLE_ALERTS' "$T/sn/readback.sh" && echo yes || echo no)"
 check "read-back: after the add-on prompt, before the install method" "prompt_testnet_addons setup_meta_read alerts_meta prompt_alerts Selecting" \
-    "$(sed -n '/^step_preflight() {/,/^}/p' "$SN" | grep -o 'json_mode || prompt_testnet_addons\|setup_meta_read alerts_meta\|json_mode || prompt_alerts\|"Selecting install method' \
+    "$(sed -n '/^step_preflight() {/,/^}/p' "$SN" | grep -oE 'json_mode \|\| prompt_testnet_addons|setup_meta_read alerts_meta|json_mode \|\| prompt_alerts|"Selecting install method' \
         | sed 's/json_mode || //; s/^"//; s/ install method$//' | tr '\n' ' ' | sed 's/ $//')"
 rm -f "$T/fx/etc/telcoin/.node-meta"
 SNA_STDIN="$T/no" drv readback
@@ -233,7 +233,7 @@ mv "$T/sn/setup-alerts.sh.away" "$T/sn/setup-alerts.sh"
 check "step: setup-alerts.sh missing, stays pending" "ENABLE_ALERTS=pending yes" \
     "$(printf '%s\n' "$OUT" | tail -n 1) $(has "$OUT" "setup-alerts.sh is missing (${T}/sn/setup-alerts.sh), so private alerts stay pending. Restore it with update-scripts.sh, then run: sudo bash setup-alerts.sh")"
 check "step: main runs it after the add-ons, before the host baseline" "step_testnet_addons step_alerts step_host_baseline" \
-    "$(sed -n '/^main() {/,/^}/p' "$SN" | grep -o '^    step_testnet_addons$\|^    step_alerts$\|^    step_host_baseline$' | tr -d ' ' | tr '\n' ' ' | sed 's/ $//')"
+    "$(sed -n '/^main() {/,/^}/p' "$SN" | grep -oE '^    (step_testnet_addons|step_alerts|step_host_baseline)$' | tr -d ' ' | tr '\n' ' ' | sed 's/ $//')"
 
 # -----------------------------------------------------------------------------
 # step_final_summary
