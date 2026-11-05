@@ -1,4 +1,4 @@
-status: in-progress
+status: done
 
 IMG-3: review fix round (REV findings M3, L1, L2, L3, L5, N4) on r2/IMG3 (base f9e22fb).
 
@@ -11,10 +11,10 @@ IMG-3: review fix round (REV findings M3, L1, L2, L3, L5, N4) on r2/IMG3 (base f
 - [x] Lints, fixtures 5.3 + 3.2, sentinel-docker full suite (see Tests run)
 
 Second round (coordinator):
-- [ ] R1 update-node docker_record_meta + edit-config edit_record_image: ordered record + fixtures
-- [ ] R2 restart_window_test: docker stub in mig(); sentinel full suite clean
-- [ ] R3 tasks/verify-r2/V7-IMG t_feature.sh + t_mutants.sh for M3 (one tasks: commit)
-- [ ] R4 lints, fixtures 5.3 + 3.2, sentinel full suite
+- [x] R1 update-node docker_record_meta + edit-config edit_record_image: ordered record + fixtures (0785452; mutants: old order UP 2 / EC 5 FAIL, unset-first-no-chain UP 1 / EC 1 FAIL)
+- [x] R2 restart_window_test: docker stub in mig(); sentinel full suite clean (f231e96; sentinel alone on restart_window: empty)
+- [x] R3 tasks/verify-r2/V7-IMG t_feature.sh + t_mutants.sh for M3 (one tasks: commit) (2ca2a76; t_feature 50 checks green 5.3 + 3.2; t_mutants M07 M08 M09 caught 3/3 by fixtures and harness)
+- [x] R4 lints, fixtures 5.3 + 3.2, sentinel full suite (63 files rc 0, 5742 checks, sentinel log empty)
 
 ## Operator-visible changes
 
@@ -47,6 +47,13 @@ Second round (coordinator):
   (`printf 'v0.17.0-adiri' | setup-node.sh`) instead of stopping.
 
 ## Docs notes
+
+- Second round: update-node (after a Docker update) and edit-config (after an image
+  change) now record .node-meta in the same order as the finalize override: RELEASE_TAG
+  removed, DOCKER_IMAGE and DOCKER_IMAGE_DIGEST written, the new RELEASE_TAG last, each
+  only after the one before succeeded. Warnings unchanged ("Could not record the new image
+  in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)." / "Could not record the
+  image in .node-meta (...)"). No operator-facing text changed.
 
 Exact texts (setup-node.sh, --json finalize, Docker install):
 - Recorded image fails the pull rule: "Refusing the image <img>: setup runs only
@@ -106,9 +113,28 @@ Fixtures (bash tools/tests/run.sh; bash:3.2 with the worktree mounted at its abs
   L5 old order 13; L1 no lookup 6; L2 old record order 2; L3 override skipped 7 + 2
   (finalize_inputs), mainnet way out 2; N4 old condition 3. All caught.
 
+Second round (bash tools/tests/run.sh):
+- Lints on update-node.sh, edit-config.sh, tools/tests/{update_guard,setup_release,
+  restart_window}_test.sh and tasks/verify-r2/V7-IMG/{lib,t_feature,t_mutants}.sh:
+  check-bash32, shellcheck 0.11 and 0.9 (-x --severity=error), bash -n 5.3 and 3.2 clean;
+  check-network-hits clean (147), check-perl-interp clean (181), git diff --check clean.
+- bash 5.3: update_guard 78, setup_release 180, restart_window 62, network_detect 161,
+  storage_migration 96 (7 skipped), pending_state 82 (6 skipped): 0 failures.
+- bash:3.2: update_guard 78, setup_release 165 (3 skipped), restart_window 62,
+  network_detect 161, storage_migration 96 (7 skipped), pending_state 99: 0 failures.
+- V7-IMG t_feature.sh: 50 checks, 0 failures (bash 5.3 and bash:3.2); other V7-IMG t_*.sh
+  green (t_repos 217, t_floor 29, t_digest 33, t_order 73, t_scan 29, t_leak 18).
+- V7-IMG t_mutants.sh M07 M08 M09: applied 3/3, caught by the fixtures 3/3 and by the
+  harness 3/3 (docker_image, t_feature).
+- Sentinel run 2 (tip 2ca2a76, bash 5.3): 62 tools/tests files + ui/tests/helper_test.sh,
+  63 rc 0, 5742 checks; sentinel log empty (0 bytes).
+- Mutants (scratch copies): update-node old order 2 FAIL (update_guard), edit-config old
+  order 5 FAIL (setup_release); unset first but no chain: 1 FAIL each.
+
 ## Open issues
 
-1. Verifier harness tasks/verify-r2/V7-IMG/t_feature.sh pins the old argv and its stand-in
+1. (Resolved in 2ca2a76: lib.sh stand-in, t_feature.sh pins, t_mutants M07/M08/M09
+   anchors.) Verifier harness tasks/verify-r2/V7-IMG/t_feature.sh pinned the old argv and its stand-in
    (lib.sh v7_timeout_stub: `shift; exec "$@"`) does not drop `-k 5`: 3 FAIL now
    ("under timeout, good image accepted", "the run goes through timeout 60", "docker run
    flags"). New argv: `timeout -k 5 60 docker run --rm --init --name
@@ -117,7 +143,7 @@ Fixtures (bash tools/tests/run.sh; bash:3.2 with the worktree mounted at its abs
    stand-in needs `[ "$1" = -k ] && shift 2; shift; exec "$@"`. The rc-124 message still
    contains "docker run exited 124". V7-IMG t_mutants M09 anchor (`tmo=(timeout 60)`) no
    longer matches: new anchor `tmo=(timeout -k 5 "$limit")`.
-2. Same L2 pattern outside my files: update-node.sh docker_record_meta and edit-config.sh
+2. (Resolved in 0785452.) Same L2 pattern outside my files: update-node.sh docker_record_meta and edit-config.sh
    edit_record_image write DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, then set or unset RELEASE_TAG;
    a failed or interrupted RELEASE_TAG write leaves the new digest with the old release. Fix:
    `meta_unset RELEASE_TAG` first, then the two image keys, then `meta_set RELEASE_TAG "$2"`
@@ -129,7 +155,7 @@ Fixtures (bash tools/tests/run.sh; bash:3.2 with the worktree mounted at its abs
    override (pull, checks, record) instead of "no override" as an equal --docker-image does;
    idempotent, and it makes RELEASE_TAG match.
 5. Sidecars: lib/common.sh and setup-node.sh .sha256 need regenerating at integration.
-6. Pre-existing real docker call (not IMG): tools/tests/restart_window_test.sh runs
+6. (Resolved in f231e96.) Pre-existing real docker call (not IMG): tools/tests/restart_window_test.sh runs
    migrate-node-naming.sh stop_legacy with LEGACY_CONTAINER=x and no docker stub, so the
    host's `docker rm -f x` runs (IMG-2 saw a similar call from obs_test.sh, which no longer
    hits). A `docker() { :; }` stub inside its mig() subshell would close it.
