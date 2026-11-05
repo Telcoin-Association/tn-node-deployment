@@ -229,6 +229,41 @@ run_updater n
 check_rc "declined: exits 0" 0 "$RC"
 check "declined: tree unchanged" "$before" "$(tree_sig)"
 
+# --- the record move fails: the old record stays ----------------------------------
+# The install pass runs with errexit off (install_pass || exit 1): a failed
+# move of the staged MANIFEST.asc must stop it before MANIFEST moves. The
+# files are in place, the installed record is still R1's, and the next run
+# records R2.
+install_release "$R1"
+REAL_MV="$(type -P mv)"
+mkdir -p "$T/mvbin"
+cat > "$T/mvbin/mv" <<EOF
+#!/bin/sh
+# mv stand-in: moving the staged MANIFEST.asc fails; every other move is the real mv.
+for a in "\$@"; do
+    case "\$a" in
+        */.tn-update.*/MANIFEST.asc) echo "mv: cannot move \$a: Permission denied" >&2; exit 1 ;;
+    esac
+done
+exec $REAL_MV "\$@"
+EOF
+chmod +x "$T/mvbin/mv"
+saved_path="$PATH"
+PATH="$T/mvbin:$PATH"
+run_updater y
+PATH="$saved_path"
+check_rc "MANIFEST.asc cannot be moved: exits 1" 1 "$RC"
+says "MANIFEST.asc cannot be moved" "Could not install MANIFEST.asc. The release record was not updated: run the updater again."
+check "MANIFEST.asc cannot be moved: the MANIFEST record is still R1" "$(_h "$R1/MANIFEST")" "$(_h "$INST/MANIFEST")"
+check "MANIFEST.asc cannot be moved: the MANIFEST.asc record is still R1" "$(_h "$R1/MANIFEST.asc")" "$(_h "$INST/MANIFEST.asc")"
+check "MANIFEST.asc cannot be moved: the files are R2's" "$(_h "$R2/setup-node.sh")" "$(_h "$INST/setup-node.sh")"
+check "MANIFEST.asc cannot be moved: not reported as installed" "" "$(plain "$OUT" | grep -F 'Installed scripts-v1.1.0')"
+run_updater y
+check_rc "the run after: exits 0" 0 "$RC"
+says "the run after" "Every file already matches scripts-v1.1.0; recorded it as the installed release."
+check "the run after: the MANIFEST record is R2" "$(_h "$R2/MANIFEST")" "$(_h "$INST/MANIFEST")"
+check "the run after: the MANIFEST.asc record is R2" "$(_h "$R2/MANIFEST.asc")" "$(_h "$INST/MANIFEST.asc")"
+
 # --- wrong signer ------------------------------------------------------------------
 W="$SRC/wrong"; cp -R "$R2" "$W"; sign "$W" key2
 publish "$W" scripts-v1.1.0

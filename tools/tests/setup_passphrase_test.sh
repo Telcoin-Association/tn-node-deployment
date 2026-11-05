@@ -254,14 +254,21 @@ step_config() { :; }
 step_write_config() { : > "$REC/wrote-config"; }
 step_create_service() { : > "$REC/wrote-service"; }
 json_refuse_installed() { :; }
+# finalize runs the recorded image's build-feature check (docker_image_test.sh and
+# setup_release_test.sh test it); here it passes without running docker. docker
+# itself is a stub that leaves a marker: keygen recorded the same image as the
+# flag names, so finalize pulls nothing.
+tn_docker_image_network_ok() { return 0; }
+docker() { : > "$REC/docker-ran"; return 1; }
 FZ=(--json --phase=finalize --network testnet --install-method docker
     --docker-image "$DEFAULT_DOCKER_IMAGE" --data-dir "$T/data")
 # What keygen leaves for finalize: the passphrase form in .node-meta and the stored
-# passphrase (finalize checks both before the listeners).
+# passphrase (finalize checks both after the listeners, so the listener refusal
+# here is not one of theirs either way).
 CONFIG_DIR_SAVED="$CONFIG_DIR"
 CONFIG_DIR="$T/cfg"
 mkdir -p "$CONFIG_DIR"
-printf 'PASSPHRASE_METHOD=stdin\n' > "$CONFIG_DIR/.node-meta"
+printf 'PASSPHRASE_METHOD=stdin\nINSTALL_METHOD=docker\nDOCKER_IMAGE=%s\n' "$DEFAULT_DOCKER_IMAGE" > "$CONFIG_DIR/.node-meta"
 : > "$CONFIG_DIR/bls-passphrase"
 for case_args in none empty; do
     reset
@@ -275,7 +282,10 @@ for case_args in none empty; do
         "$(grep -q '"event":"done","ok":false,"msg":"finalize needs --listener-primary and --listener-worker' "$T/out" && echo yes)"
     check "finalize docker, listeners ${case_args}: no config, no start script or unit written" "no no" \
         "$([[ -e "$REC/wrote-config" ]] && echo yes || echo no) $([[ -e "$REC/wrote-service" ]] && echo yes || echo no)"
+    check "finalize docker, listeners ${case_args}: the recorded image is not pulled again" no \
+        "$([[ -e "$REC/docker-ran" ]] && echo yes || echo no)"
 done
+unset -f docker
 CONFIG_DIR="$CONFIG_DIR_SAVED"
 
 # ---- a signal ends the run: the done event names it, with the status ---------------------

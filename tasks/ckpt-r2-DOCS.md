@@ -9,7 +9,54 @@ status: done
 - [x] S5 CHANGELOG/scripts-v2.1.0.md -- b51ccd3 (intro: first signed, serial 1, 2.0.0 never tagged; new sections 'Signed script releases with OpenPGP (#40)' and 'Image packages per network and the image feature check (#46)'; per-script bullets setup/update/edit-config/remove-node; update-scripts section line; CODEOWNERS bullet; Alloy 18f8485 bullet; new-files table; Before you update step 1; refusals table +6 rows; Left open #30/#31, #40, #41, #45/#46/#51)
 - [x] S6 Partner guide 1.7 + PDF -- a84d5f6 (metadata.yaml version 1.7, date November 2026 kept; guide text changed in S1-S3)
 
+- [x] F2 IMG fix round (follow-up 2 of 2) -- f5e48b4 (facts checked in tnd-r2-IMG2 at 9ce9f15)
+
+- [x] F3 finalize --docker-image override (follow-up 3) -- b585759 (facts checked in tnd-r2-IMG2 at cc72dcb)
+
+- [x] F4 review fix rounds (follow-up 4) -- 98d594b (facts checked in tnd-r2-IMG3 52d276e and tnd-r2-SIG2 feddc7f)
+
 ## Docs written (where each fact lives)
+
+F4 (98d594b):
+- Feature check limit (timeout -k 5 60 where coreutils timeout exists, --init, named container,
+  docker rm -f on rc 124/137, refusal text): README Docker Install Notes bullet, AGENTS images
+  paragraph, CHANGELOG images section, OPERATOR troubleshooting (+ row).
+- Finalize override by --release-tag or --docker-image, per-network way out, input checks first,
+  .node-meta write order, mainnet --release-tag only: README flag row, OPERATOR 7.1 bullet +
+  two troubleshooting rows, AGENTS images paragraph, CHANGELOG images section, partner guide
+  finalize bullet. update-node/edit-config record order: AGENTS images paragraph + CHANGELOG.
+- Image prompt last line without newline: OPERATOR troubleshooting row, CHANGELOG.
+- cut-release tag pins the origin/main commit, refuses when it moved, compares with origin's
+  release branch, temp worktree removed; prep serial refusal with commands; three checks not
+  skippable: AGENTS release steps (intro, step 1, step 3), CHANGELOG cut-release bullet.
+- Key files end with a newline: AGENTS integrity contract bullet, CHANGELOG SIG bullet.
+- Updater records only after every move/removal: AGENTS integrity contract bullet, CHANGELOG.
+
+F3 (b585759):
+- README flag row `--json --phase=keygen|finalize`: "except a Docker image (below)", refusal text now
+  "to replace it, run finalize again with --docker-image ...", override sentence (keygen's steps,
+  .node-meta keys, RELEASE_TAG removal, refusal leaves .node-meta unchanged, install method/data
+  dir/binary path not replaceable).
+- OPERATOR 7.1: finalize bullet list without "image"; image bullet says it does not pull the
+  recorded image; new override bullet with the refusal endings and the "or run keygen again" note
+  for the other three values. Section 9: recorded-image refusal row now points at the override
+  (node-keys move-aside advice removed); new row for the override's own refusals; "Could not run"
+  row unchanged.
+- CHANGELOG/scripts-v2.1.0.md images section: finalize bullet text updated, + override bullet.
+- Partner guide: finalize bullet without "image", + override bullet. PDF rebuilt (guide stays 1.7).
+
+F2 (f5e48b4):
+- README: Docker Install Notes (old package recognised on testnet and devnet only, mainnet never);
+  setup-node flags table row `--json --phase=keygen|finalize` (finalize's image check, never pulls,
+  refusal text); Web UI Security model (new docker-detect bullet: testnet/mainnet/devnet repos, tn-dev,
+  status and logs only, docker-status/docker-logs take only detected names); changelog lib/common
+  2.1.0 bullet (testnet and devnet only).
+- OPERATOR: 7.1 finalize bullet (image check before config/unit/container, never pulls); 4.5 bullet
+  (external Docker nodes incl. tn-dev); section 9: "Could not run" row extended for finalize (pull the
+  recorded digest by hand, finalize again), + finalize refusal row, + image-prompt end-of-input row.
+- CHANGELOG/scripts-v2.1.0.md images section: old package testnet/devnet only; + finalize check,
+  + prompt stop, + docker-detect bullets.
+- Partner guide unchanged in F2, so the PDF is unchanged (hash still 9ad09451...b843).
 
 S1 (f40547d):
 - README: What's Included row (lib/release-keys/ only); Quick Start installer paragraph (gpgv, base64);
@@ -75,6 +122,16 @@ README Keeping Scripts paragraph on hosts that cloned main, README changelog v2.
 
 ## PDF hashes
 
+After F4 (98d594b), same container and command, 73 pages:
+- build 1: febfc6bf76844d201df08271e2cc980b915ec6c484d511bf7c042eddd0f3ebaf
+- build 2 (--force, "PDF unchanged"): febfc6bf76844d201df08271e2cc980b915ec6c484d511bf7c042eddd0f3ebaf
+
+Earlier:
+After F3 (b585759), same container and command, 73 pages:
+- build 1: 8c390446a452741b469435aaded7474b36454cfd7bfc29690cb1662922a67fde
+- build 2 (--force, "PDF unchanged"): 8c390446a452741b469435aaded7474b36454cfd7bfc29690cb1662922a67fde
+
+Before F3 (a84d5f6):
 Built in tn-pdf-tools:latest (pandoc 3.8.3, WeasyPrint 70.0), 73 pages:
 `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w tn-pdf-tools:latest bash tools/build-partner-pdf.sh mno-node-guide`
 - build 1: 9ad09451665e2c986cc00d21e8034fe68e0e27d1efdf56d7db37da438bceb843
@@ -102,5 +159,10 @@ Lint passed both times; pdftotext shows "Version 1.7 · November 2026" and no SS
 - "Merge the release PR with a merge commit" is the orchestrator's instruction; nothing in
   cut-release.sh enforces it (tag checks MANIFEST/MANIFEST.asc content only). Written as a step
   in AGENTS and followup.md with the reason "so the signed release commit stays on main".
+- RESOLVED by IMG-2 cc72dcb (finalize --docker-image override), docs in b585759. Was: setup-node finalize's refusal says "run --phase=keygen again with a <net> image", but keygen
+  refuses non-interactively while node-keys exist ("node-keys already exist ... refusing to
+  overwrite in non-interactive mode"), as does finalize_same_as_keygen's "or run keygen again".
+  OPERATOR's Fix column says to move node-keys aside only when never staked. A code follow-up could
+  let finalize take a corrected --docker-image, or say how to re-run keygen.
 - The ubuntu:24.04 image does have gpgv (apt depends on it), contrary to spec-r2-shared.md's
   test-environment note; only matters for the fixtures' REAL_GPG detection (it also needs gpg).

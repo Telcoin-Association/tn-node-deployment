@@ -5,12 +5,20 @@
 # --install-method release is known, --allow-dirty is refused in --json; on devnet
 # (no signed releases) --docker-image takes a digest of the devnet repository (the
 # old single ghcr package is recognised but never pulled) and is
-# required at keygen, --release-tag and source or release installs are refused; the
+# required at keygen, --release-tag and source or release installs are refused;
+# finalize holds the image keygen recorded to the pull rule and the build-feature
+# check before the config, the unit and the container, and --docker-image there
+# replaces it through keygen's checks, recorded only when all pass and only after
+# the listener and node-flag checks, as --release-tag there replaces it with the
+# release's image (mainnet: the only way, and the way its refusals name); the
+# interactive image
+# prompt stops at the end of input (a last line without a newline still counts); the
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
 # edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
-# a digest, and records the image in .node-meta; on a devnet host (NETWORK=devnet in
-# .node-meta) it takes a digest only. In both, the image's build-feature check
+# a digest, and records the image in .node-meta, as its interactive menu
+# (edit_docker_image) does; on a devnet host (NETWORK=devnet in .node-meta) it
+# takes a digest only. In all of them, the image's build-feature check
 # (tn_docker_image_network_ok, stubbed here and tested in docker_image_test.sh)
 # runs after the pull and its digest check and before anything uses the image; a
 # refusal stops the install or the change.
@@ -89,6 +97,38 @@ check "mainnet prompt: a typed digest of no installed release is refused" yes "$
 check "mainnet prompt: the release tag typed next is accepted" yes "$( [[ "$rc" != 99 ]] && grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
 rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE='${R}@sha256:${D64}'; ${PD_STUBS}; _preflight_docker")"
 check "testnet preflight: a digest alone is taken as before" no "$(refused)"
+# At the end of input (stdin /dev/null) the image prompt stops with a refusal, with
+# or without a default, instead of asking again: read is wrapped so that a prompt
+# loop ends the subshell with rc 99 at the fourth prompt rather than spinning.
+EOF_READ='read() { EOF_N=$((${EOF_N:-0} + 1)); [ "$EOF_N" -le 3 ] || exit 99; builtin read "$@"; }'
+not_usable() { cat "$T/sn.out" "$T/sn.err" | grep -c 'Not usable'; }
+rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; ${EOF_READ}; _preflight_docker" < /dev/null)"
+check "image prompt at the end of input, no default: refused, not asked again" "1 0" "$rc $(not_usable)"
+check "image prompt at the end of input: says no usable image was given" yes \
+    "$(grep -qF 'The input ended at the Docker image prompt, so no usable image was given and the Docker install stops.' "$T/sn.err" && echo yes || echo no)"
+check "image prompt at the end of input: no docker call" no "$(grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; latest_docker_image() { printf '%s\\n' '${R}@sha256:${D64}'; }; ${EOF_READ}; _preflight_docker" < /dev/null)"
+check "image prompt at the end of input, with a default: refused too, the default not taken" "1 0 no" \
+    "$rc $(not_usable) $(grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+# A last line without a newline is still the answer: read fails at the end of
+# input but has filled the variable, so the typed image is taken (pulled, held,
+# checked) rather than refused as the end of input.
+TT="ghcr.io/telcoin-association/tn-testnet@sha256:${D64}"
+printf '%s' "$TT" > "$T/nonl"
+: > "$T/docker.log"
+# shellcheck disable=SC2016
+N4_STUBS='docker() { printf "docker %s\n" "$*" >> "$T/docker.log"; }; tn_docker_holds_digest() { return 0; }'
+# shellcheck disable=SC2016
+rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; ${N4_STUBS}; ${EOF_READ}; _preflight_docker; "'printf "image=%s\n" "$DOCKER_IMAGE"' < "$T/nonl")"
+check "image prompt, a last line without a newline: taken, not refused as the end of input" "0 0 no" \
+    "$rc $(not_usable) $(grep -q 'The input ended at the Docker image prompt' "$T/sn.err" && echo yes || echo no)"
+check "image prompt, a last line without a newline: that image pulled and checked" \
+    "docker pull ${TT}|check testnet ${TT}" "$(tr '\n' '|' < "$T/docker.log" | sed 's/|$//')"
+check_has "image prompt, a last line without a newline: the image setup goes on with" "image=${TT}" "$(cat "$T/sn.out")"
+rm -f "$T/nonl"
+unset TT N4_STUBS
+unset -f not_usable
+unset EOF_READ
 flags "docker on devnet without --docker-image refused (no signed release to take the newest from)" 1 devnet docker "" "" ""
 check "docker on devnet without --docker-image: the refusal asks for one" yes "$(grep -q 'A devnet Docker install needs --docker-image' "$T/sn.err" && echo yes || echo no)"
 # Devnet: an image by digest from the devnet repository or the dev package, never
@@ -111,6 +151,12 @@ flags "devnet: docker by main-<sha> refused" 1 devnet docker "" "" "${R}:main-01
 flags "devnet: docker by a testnet release tag refused" 1 devnet docker "" "" "${R}:v0.16.0-adiri"
 flags "devnet: finalize of a docker install without --docker-image (keygen recorded it)" 0 devnet docker "" "" "" finalize
 flags "devnet: finalize with no install method (read back from .node-meta)" 0 devnet "" "" "" "" finalize
+flags "finalize takes --docker-image (it replaces the recorded image)" 0 testnet docker "" "" "${R}@sha256:${D64}" finalize
+flags "finalize: --docker-image of the old single package refused" 1 testnet docker "" "" "ghcr.io/telcoin-association/telcoin-network@sha256:${D64}" finalize
+flags "finalize takes --release-tag for a docker install (its image replaces the recorded one)" 0 testnet docker v0.17.0-adiri "" "" finalize
+flags "finalize: --docker-image and --release-tag together refused" 1 testnet docker v0.17.0-adiri "" "${R}@sha256:${D64}" finalize
+check "finalize: both flags, the refusal says to give one" yes "$(grep -qF 'Give --docker-image or --release-tag, not both.' "$T/sn.err" && echo yes || echo no)"
+flags "finalize: --release-tag below the oldest supported release refused" 1 testnet docker v0.12.0-adiri "" "" finalize
 flags "devnet: --release-tag x-devnet refused" 1 devnet docker x-devnet "" ""
 check "devnet: the --release-tag refusal says devnet has no signed releases" yes "$(grep -q -- '--release-tag x-devnet is refused on devnet: devnet has no signed releases' "$T/sn.err" && echo yes || echo no)"
 flags "devnet: --release-tag x-devnet refused at finalize too" 1 devnet docker x-devnet "" "" finalize
@@ -180,6 +226,198 @@ printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.12.0-adiri\n' "$D64" > "$T
 rc="$(sn "$PDW; _preflight_docker")"
 check "digest alone, recorded as a release below the floor: refused" "1 yes" "$rc $(grep -q 'older than v' "$T/sn.err" && echo yes || echo no)"
 rm -f "$T/root/etc/telcoin/.node-meta"
+
+# Finalize (--json --phase=finalize) is a new process: the image keygen recorded in
+# .node-meta meets the rules keygen's preflight applied (finalize_install_inputs),
+# before the config, the unit and the container: a repository a new pull for the
+# network takes (the old single package is refused) and the build-feature check.
+# The steps are logged beside the check: the node-flag check ("flags", stubbed;
+# EXTRA_RC=1 refuses), the resolve (the real tn_docker_resolve_ref, wrapped), the
+# release lookup of a digest given alone (tn_docker_release_tag_for, stubbed: it
+# names LOOKUP_TAG, or nothing when that is empty), a release tag's image
+# (tn_docker_image_for_tag, stubbed: TAG_IMG, or a refusal when that is empty),
+# the pull, the digest check,
+# every .node-meta write ("record", through
+# tn_write_root_file), the config (which also keeps the DOCKER_IMAGE line
+# .node-meta holds at that moment), the unit and the start. FIN_LP replaces the
+# primary listener.
+printf 'stored\n' > "$T/root/etc/telcoin/bls-passphrase"
+FMETA="$T/root/etc/telcoin/.node-meta"
+fin_meta() { printf 'PASSPHRASE_METHOD=stdin\nINSTALL_METHOD=docker\nDOCKER_IMAGE=%s\n' "$1" > "$FMETA"; }
+# shellcheck disable=SC2016
+FIN_WRAP='eval "$(declare -f tn_docker_resolve_ref | sed "1s/^tn_docker_resolve_ref /real_resolve_ref /")"; tn_docker_resolve_ref() { printf "resolve %s\n" "$2" >> "$T/docker.log"; real_resolve_ref "$@"; }'
+# shellcheck disable=SC2016
+FIN='CONFIG_DIR="$T/root/etc/telcoin" JSON_MODE=true INSTALL_METHOD= BINARY_PATH=; PRIMARY_LISTENER_MULTIADDR=${FIN_LP:-/ip4/127.0.0.1/udp/49590/quic-v1}; WORKER_LISTENER_MULTIADDR=/ip4/127.0.0.1/udp/49594/quic-v1; json_event() { :; }; finalize_node_extra_flags() { echo flags >> "$T/docker.log"; [ "${EXTRA_RC:-0}" = 0 ] || setup_fail "a node flag refused"; }; setup_release_lock() { :; }; step_host_baseline() { :; }; docker() { printf "%s\n" "$*" >> "$T/docker.log"; }; tn_docker_holds_digest() { echo held >> "$T/docker.log"; return 0; }; tn_docker_release_tag_for() { echo "lookup $2" >> "$T/docker.log"; [ -n "${LOOKUP_TAG:-}" ] && printf "%s\n" "$LOOKUP_TAG"; }; tn_docker_image_for_tag() { echo "image-for $1 $2" >> "$T/docker.log"; [ -n "${TAG_IMG:-}" ] && printf "%s\n" "$TAG_IMG"; }; tn_write_root_file() { echo record >> "$T/docker.log"; cat > "$1"; }; step_write_config() { echo config >> "$T/docker.log"; grep "^DOCKER_IMAGE=" "$T/root/etc/telcoin/.node-meta" > "$T/meta-at-config"; }; step_create_service() { echo service >> "$T/docker.log"; }; json_done() { echo done >> "$T/docker.log"; }; '"${FIN_WRAP}"'; json_phase_finalize'
+fin_calls() { uniq "$T/docker.log" | tr '\n' '|' | sed 's/|$//'; }
+meta_same() { cmp -s "$FMETA" "$T/meta.before" && echo same || echo changed; }
+fin_meta "${GH}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; $FIN")"
+check "finalize, testnet: a recorded image of the old single package refused before anything it changes" "1 flags" "$rc $(fin_calls)"
+check "finalize: the refusal names the image, the repository and the way out" yes \
+    "$(grep -qF "Refusing the image ${GH}@sha256:${D64}: setup runs only ghcr.io/telcoin-association/tn-testnet@sha256:<digest>. No container was started; to replace it, run finalize again with --docker-image ghcr.io/telcoin-association/tn-testnet@sha256:<digest> or --release-tag <tag> (a testnet image or release)." "$T/sn.err" && echo yes || echo no)"
+fin_meta "${R}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; $FIN")"
+check "finalize, testnet: a good recorded image is checked, then config, unit and start" \
+    "0 flags|check testnet ${R}@sha256:${D64}|config|service|done" "$rc $(fin_calls)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; FEAT_RC=1; $FIN")"
+check "finalize, the feature check refuses: nothing after it" "1 flags|check testnet ${R}@sha256:${D64}" "$rc $(fin_calls)"
+check "finalize, the feature check refuses: no container started, the way out named" yes \
+    "$(grep -qF "Refusing the image ${R}@sha256:${D64}: it is not a testnet image (see above). No container was started; to replace it, run finalize again with --docker-image ghcr.io/telcoin-association/tn-testnet@sha256:<digest> or --release-tag <tag> (a testnet image or release)." "$T/sn.err" && echo yes || echo no)"
+fin_meta "${GD}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=devnet; $FIN")"
+check "finalize, devnet: a dev package image is asked for devnet, then config, unit and start" \
+    "0 flags|check devnet ${GD}@sha256:${D64}|config|service|done" "$rc $(fin_calls)"
+fin_meta "${GH}@sha256:${D64}"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=devnet; $FIN")"
+check "finalize, devnet: the old single package refused before anything it changes" "1 flags" "$rc $(fin_calls)"
+check "finalize, devnet: the way out is a devnet digest only (no signed releases)" yes \
+    "$(grep -qF "No container was started; to replace it, run finalize again with --docker-image ${R}@sha256:<digest> (a devnet image)." "$T/sn.err" && echo yes || echo no)"
+# --docker-image at finalize naming another image than the recorded one replaces it
+# through keygen's checks: resolved (the pull rule), pulled by digest, held under it,
+# checked for its build features, and only then recorded in .node-meta (image,
+# digest, and the release tag removed when none names it), before the config. A
+# refusal leaves .node-meta as it was; the recorded image itself is no override.
+OV="ghcr.io/telcoin-association/tn-testnet@sha256:$(printf '%s' "$D64" | tr 0 e)"
+fin_meta "${GH}@sha256:${D64}"
+printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.16.0-adiri\n' "$D64" >> "$FMETA"
+: > "$T/docker.log"; rm -f "$T/meta-at-config"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; $FIN")"
+check "finalize --docker-image: resolve, pull, digest check, feature check, record, then config, unit and start" \
+    "0 flags|resolve ${OV}|lookup ${OV}|pull ${OV}|held|check testnet ${OV}|record|config|service|done" "$rc $(fin_calls)"
+check "finalize --docker-image: .node-meta names the new image when the config is written" \
+    "DOCKER_IMAGE=${OV}" "$(cat "$T/meta-at-config" 2>/dev/null)"
+check_has "finalize --docker-image: the new digest recorded" "DOCKER_IMAGE_DIGEST=${OV##*@}" "$(cat "$FMETA")"
+check_lacks "finalize --docker-image: the old release tag removed" "RELEASE_TAG=" "$(cat "$FMETA")"
+fin_meta "${R}@sha256:${D64}"
+cp "$FMETA" "$T/meta.before"
+OLDPKG="${GH}@sha256:$(printf '%s' "$D64" | tr 0 d)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OLDPKG}'; $FIN")"
+check "finalize --docker-image of the old single package: refused at the resolve, nothing after it" \
+    "1 flags|resolve ${OLDPKG}" "$rc $(fin_calls)"
+check "finalize --docker-image of the old single package: .node-meta as it was" same "$(meta_same)"
+check "finalize --docker-image refused: says .node-meta was not changed" yes \
+    "$(grep -qF "Refusing the image ${OLDPKG} given with --docker-image (see above). No container was started and .node-meta was not changed." "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; FEAT_RC=1; $FIN")"
+check "finalize --docker-image, the feature check refuses: nothing after it" \
+    "1 flags|resolve ${OV}|lookup ${OV}|pull ${OV}|held|check testnet ${OV}" "$rc $(fin_calls)"
+check "finalize --docker-image, the feature check refuses: .node-meta as it was" same "$(meta_same)"
+check "finalize --docker-image, the feature check refuses: says .node-meta was not changed" yes \
+    "$(grep -qF "Refusing the image ${OV}: it is not a testnet image (see above). No container was started and .node-meta was not changed." "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${R}@sha256:${D64}'; $FIN")"
+check "finalize --docker-image equal to the recorded image: no override, as without the flag" \
+    "0 flags|check testnet ${R}@sha256:${D64}|config|service|done same" "$rc $(fin_calls) $(meta_same)"
+# A digest given alone gets keygen's release lookup before the oldest-release
+# check: a digest the registry names as a release below it is refused like
+# keygen refuses it, before the pull; one it names as a newer release is
+# recorded with that release.
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; LOOKUP_TAG=v0.12.0-adiri; $FIN")"
+check "finalize --docker-image of a release below the oldest supported: refused after the lookup, nothing pulled" \
+    "1 flags|resolve ${OV}|lookup ${OV}" "$rc $(fin_calls)"
+check "finalize --docker-image of a release below the oldest supported: .node-meta as it was" same "$(meta_same)"
+check "finalize --docker-image of a release below the oldest supported: the floor refusal" yes \
+    "$(grep -q 'older than v' "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; LOOKUP_TAG=v0.17.0-adiri; $FIN")"
+check "finalize --docker-image of a newer release: recorded with the release the lookup names" "0 RELEASE_TAG=v0.17.0-adiri" \
+    "$rc $(grep '^RELEASE_TAG=' "$FMETA")"
+check_has "finalize --docker-image of a newer release: the digest beside it" "DOCKER_IMAGE_DIGEST=${OV##*@}" "$(cat "$FMETA")"
+# The record never pairs the new digest with the old release: RELEASE_TAG goes
+# first, the image and its digest next, the new RELEASE_TAG last. meta_set is
+# wrapped to fail for FAIL_KEY, as a write that fails (or a run stopped there)
+# would leave it.
+# shellcheck disable=SC2016
+FAIL_SET='eval "$(declare -f meta_set | sed "1s/^meta_set /real_meta_set /")"; meta_set() { [ "$1" != "$FAIL_KEY" ] || return 2; real_meta_set "$@"; }'
+for fk in RELEASE_TAG DOCKER_IMAGE_DIGEST; do
+    fin_meta "${R}@sha256:${D64}"
+    printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.16.0-adiri\n' "$D64" >> "$FMETA"
+    : > "$T/docker.log"
+    rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; LOOKUP_TAG=v0.17.0-adiri; FAIL_KEY=${fk}; ${FAIL_SET}; $FIN")"
+    check "finalize --docker-image, the ${fk} write fails: refused, no config" "1 no" \
+        "$rc $(grep -q '^config$' "$T/docker.log" && echo yes || echo no)"
+    check "finalize --docker-image, the ${fk} write fails: no RELEASE_TAG left beside the digest" "" \
+        "$(grep '^RELEASE_TAG=' "$FMETA")"
+    check "finalize --docker-image, the ${fk} write fails: the refusal names the key" yes \
+        "$(grep -qF "Could not write ${fk} to ${FMETA}." "$T/sn.err" && echo yes || echo no)"
+    if [[ "$fk" == RELEASE_TAG ]]; then
+        check_has "finalize --docker-image, the RELEASE_TAG write fails: the new digest is there, with no release" \
+            "DOCKER_IMAGE_DIGEST=${OV##*@}" "$(cat "$FMETA")"
+    fi
+done
+unset fk FAIL_SET
+fin_meta "${R}@sha256:${D64}"
+cp "$FMETA" "$T/meta.before"
+# Every other input check refuses before the override: a bad listener or a node
+# flag finalize refuses stops it before the resolve, the pull and any .node-meta
+# write.
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; FIN_LP=/ip4/127.0.0.1/tcp/49590; $FIN")"
+check "finalize --docker-image, a bad listener: refused before the override, nothing pulled" "1 " "$rc $(fin_calls)"
+check "finalize --docker-image, a bad listener: .node-meta as it was" same "$(meta_same)"
+check "finalize --docker-image, a bad listener: the listener refusal" yes \
+    "$(grep -qF "finalize needs --listener-primary and --listener-worker" "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; EXTRA_RC=1; $FIN")"
+check "finalize --docker-image, a node flag refused: refused before the override, nothing pulled" "1 flags" "$rc $(fin_calls)"
+check "finalize --docker-image, a node flag refused: .node-meta as it was" same "$(meta_same)"
+# --release-tag at finalize names the release whose image replaces the recorded
+# one: resolved to the digest its signed release names, then the same pull,
+# digest check, feature check and record, with RELEASE_TAG the given release.
+: > "$T/docker.log"; rm -f "$T/meta-at-config"
+rc="$(sn "NETWORK=testnet; RELEASE_TAG=v0.17.0-adiri; TAG_IMG='${OV}'; $FIN")"
+check "finalize --release-tag: resolve, the release's image, pull, digest check, feature check, record, then config, unit and start" \
+    "0 flags|resolve v0.17.0-adiri|image-for testnet v0.17.0-adiri|pull ${OV}|held|check testnet ${OV}|record|config|service|done" "$rc $(fin_calls)"
+check "finalize --release-tag: .node-meta names the release's image when the config is written" \
+    "DOCKER_IMAGE=${OV}" "$(cat "$T/meta-at-config" 2>/dev/null)"
+check "finalize --release-tag: the digest and the release recorded together" "DOCKER_IMAGE_DIGEST=${OV##*@} RELEASE_TAG=v0.17.0-adiri" \
+    "$(grep '^DOCKER_IMAGE_DIGEST=' "$FMETA") $(grep '^RELEASE_TAG=' "$FMETA")"
+fin_meta "${R}@sha256:${D64}"
+cp "$FMETA" "$T/meta.before"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; RELEASE_TAG=v0.17.0-adiri; TAG_IMG=; $FIN")"
+check "finalize --release-tag with no image for it: refused at the resolve, nothing pulled" \
+    "1 flags|resolve v0.17.0-adiri|image-for testnet v0.17.0-adiri" "$rc $(fin_calls)"
+check "finalize --release-tag with no image for it: .node-meta as it was" same "$(meta_same)"
+check "finalize --release-tag refused: names the release and the flag, says .node-meta was not changed" yes \
+    "$(grep -qF "Refusing the image of release v0.17.0-adiri given with --release-tag (see above). No container was started and .node-meta was not changed." "$T/sn.err" && echo yes || echo no)"
+# Mainnet (standing for the launch release, when Docker is allowed there): a new
+# image is named by --release-tag only, so that is the way out a refusal of the
+# recorded image names; a digest alone of no recorded mainnet release is refused.
+MRE="${MR}@sha256:$(printf '%s' "$D64" | tr 0 e)"
+fin_meta "${MR}@sha256:${D64}"
+printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v1.0.0\n' "$D64" >> "$FMETA"
+cp "$FMETA" "$T/meta.before"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=mainnet; FEAT_RC=1; $FIN")"
+check "finalize, mainnet: the feature check refuses the recorded image, nothing after it" \
+    "1 flags|check mainnet ${MR}@sha256:${D64}" "$rc $(fin_calls)"
+check "finalize, mainnet: the way out is --release-tag" yes \
+    "$(grep -qF "Refusing the image ${MR}@sha256:${D64}: it is not a mainnet image (see above). No container was started; to replace it, run finalize again with --release-tag <tag> (a mainnet release, such as v1.0.0)." "$T/sn.err" && echo yes || echo no)"
+check "finalize, mainnet: the way out does not offer a digest" no \
+    "$(grep -q 'run finalize again with --docker-image' "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=mainnet; DOCKER_IMAGE='${MRE}'; $FIN")"
+check "finalize --docker-image, mainnet: a digest of no recorded release refused at the resolve" \
+    "1 flags|resolve ${MRE} same" "$rc $(fin_calls) $(meta_same)"
+check "finalize --docker-image, mainnet: the resolve says to give the release tag" yes \
+    "$(grep -q 'Give the mainnet release tag instead' "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=mainnet; RELEASE_TAG=v1.1.0; TAG_IMG='${MRE}'; $FIN")"
+check "finalize --release-tag, mainnet: the release's image replaces the recorded one" \
+    "0 flags|resolve v1.1.0|image-for mainnet v1.1.0|pull ${MRE}|held|check mainnet ${MRE}|record|config|service|done" "$rc $(fin_calls)"
+check "finalize --release-tag, mainnet: recorded with its release" "DOCKER_IMAGE=${MRE} DOCKER_IMAGE_DIGEST=${MRE##*@} RELEASE_TAG=v1.1.0" \
+    "$(grep '^DOCKER_IMAGE=' "$FMETA") $(grep '^DOCKER_IMAGE_DIGEST=' "$FMETA") $(grep '^RELEASE_TAG=' "$FMETA")"
+rm -f "$FMETA" "$T/root/etc/telcoin/bls-passphrase" "$T/meta.before" "$T/meta-at-config"
+unset -f fin_meta fin_calls meta_same
+unset FIN FIN_WRAP FMETA OV OLDPKG MRE
 
 # live-restore merge (tn_write_root_file and systemctl stubbed).
 LR='tn_write_root_file() { cat > "$1"; }; systemctl() { printf "%s\n" "$*" >> "$T/systemctl.log"; }; _setup_docker_live_restore'
@@ -279,7 +517,7 @@ rm -f "$T/swapped" "$T/meta.log"
 : > "$T/docker.log"
 rc="$(ec v0.17.0-adiri)"
 check "edit: a release tag runs its digest" "0 ${R}@sha256:${D64}" "$rc $(cat "$T/swapped" 2>/dev/null)"
-check "edit: .node-meta records image, digest and tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+check "edit: .node-meta drops the old release, then records image, digest and tag" "unset RELEASE_TAG DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
 check "edit: pull, feature check, then the swap" "pull ${R}@sha256:${D64}|check testnet ${R}@sha256:${D64}|swap ${R}@sha256:${D64}" \
     "$(tr '\n' '|' < "$T/docker.log" | sed 's/|$//')"
 rm -f "$T/swapped" "$T/meta.log"
@@ -300,6 +538,85 @@ rc="$(ec "${R}@sha256:$(printf '%s' "$D64" | tr 0 a)")"
 check "edit: a digest alone runs as given, tag removed from .node-meta" "0 yes" "$rc $(grep -qx 'unset RELEASE_TAG' "$T/meta.log" && echo yes || echo no)"
 rc="$( ( set +e; source "$T/ec/edit-config.sh" >/dev/null 2>&1; set +e; edit_error() { :; }; launch_current_form() { echo called > "$T/lcf"; }; swap_docker_image "${R}:v0.16.0-adiri" ) >/dev/null 2>&1; printf '%s' "$?")"
 check "edit: swap_docker_image refuses a tag before touching anything" "1 no" "$rc $([[ -e "$T/lcf" ]] && echo yes || echo no)"
+# edit_record_image on a real .node-meta (the real meta_set and meta_unset,
+# tn_write_root_file stubbed): the old RELEASE_TAG goes first and the new one last,
+# each write only after the one before it, so with a write failing (meta_set
+# wrapped to fail for FAIL_KEY) no digest is left beside a release that is not its
+# own.
+EMETA="$T/root/etc/telcoin/.node-meta"
+ENEW="${R}@sha256:$(printf '%s' "$D64" | tr 0 b)"
+erec() {  # erec FAIL-KEY -- edit_record_image ENEW v0.17.0-adiri on the old record
+    printf 'NETWORK=testnet\nDOCKER_IMAGE=%s@sha256:%s\nDOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.16.0-adiri\n' "$R" "$D64" "$D64" > "$EMETA"
+    : > "$T/ewarn"
+    ( set +e
+      # shellcheck source=/dev/null
+      source "$T/ec/edit-config.sh" >/dev/null 2>&1
+      set +e
+      tn_write_root_file() { cat > "$1"; }
+      eval "$(declare -f meta_set | sed '1s/^meta_set /real_meta_set /')"
+      meta_set() { [ "$1" != "$FAIL_KEY" ] || return 2; real_meta_set "$@"; }
+      edit_wait_say() { printf '%s %s\n' "$1" "$2" >> "$T/ewarn"; }
+      FAIL_KEY="$1"
+      edit_record_image "$ENEW" v0.17.0-adiri ) >/dev/null 2>&1
+}
+erec_line() { printf '%s %s %s' "$(grep '^DOCKER_IMAGE=' "$EMETA")" "$(grep '^DOCKER_IMAGE_DIGEST=' "$EMETA")" "$(grep '^RELEASE_TAG=' "$EMETA" || echo none)"; }
+erec ""
+check "edit_record_image: image, digest and the new release" \
+    "DOCKER_IMAGE=${ENEW} DOCKER_IMAGE_DIGEST=${ENEW##*@} RELEASE_TAG=v0.17.0-adiri" "$(erec_line)"
+erec RELEASE_TAG
+check "edit_record_image, the RELEASE_TAG write fails: no RELEASE_TAG left beside the new digest" \
+    "DOCKER_IMAGE=${ENEW} DOCKER_IMAGE_DIGEST=${ENEW##*@} none" "$(erec_line)"
+check "edit_record_image, the RELEASE_TAG write fails: it warns" yes \
+    "$(grep -q '^warn Could not record the image in .node-meta' "$T/ewarn" && echo yes || echo no)"
+erec DOCKER_IMAGE_DIGEST
+check "edit_record_image, the digest write fails: no release beside either digest" none \
+    "$(grep '^RELEASE_TAG=' "$EMETA" || echo none)"
+rm -f "$EMETA" "$T/ewarn"
+unset -f erec erec_line
+unset EMETA ENEW
+
+# The interactive image menu (edit_docker_image) on testnet: the release tag typed
+# at the prompt resolves to its digest, the image is pulled and held under it, its
+# build features are checked, and only then is the menu locked, the start script
+# swapped and the image recorded (edit_record_image, through meta_set). A refusal
+# leaves all three alone.
+ecm() {
+    ( set +e
+      # shellcheck source=/dev/null
+      source "$T/ec/edit-config.sh" >/dev/null 2>&1
+      set +e
+      TARGET_LAUNCH_FILE="$T/tn-start-docker"
+      tn_detect_network() { printf 'testnet\n'; }
+      read_launch_line() { printf 'exec docker run --rm %s@sha256:%s telcoin node --http\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+      tn_docker_image_for_tag() { printf '%s@sha256:%s\n' "$R" "$D64"; }
+      docker() { printf '%s\n' "$*" >> "$T/docker.log"; }
+      tn_docker_holds_digest() { echo held >> "$T/docker.log"; return 0; }
+      tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/docker.log"; return "${FEAT_RC:-0}"; }
+      menu_lock() { echo lock >> "$T/docker.log"; }
+      backup_edit_targets() { echo backup >> "$T/docker.log"; }
+      swap_docker_image() { printf 'swap %s\n' "$1" >> "$T/docker.log"; }
+      meta_set() { printf '%s=%s\n' "$1" "$2" >> "$T/meta.log"; }
+      meta_unset() { printf 'unset %s\n' "$1" >> "$T/meta.log"; }
+      apply_changes() { echo apply >> "$T/docker.log"; }
+      edit_docker_image ) <<< "$1" > "$T/ec.out" 2>&1
+}
+calls() { tr '\n' '|' < "$T/docker.log" | sed 's/|$//'; }
+rm -f "$T/meta.log"
+: > "$T/docker.log"
+ecm v0.17.0-adiri
+check "edit menu: pull, digest check, feature check, then lock, swap and apply" \
+    "pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}|lock|backup|swap ${R}@sha256:${D64}|apply" "$(calls)"
+check "edit menu: .node-meta drops the old release, then records image, digest and tag" \
+    "unset RELEASE_TAG DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" 2>/dev/null | sed 's/ $//')"
+rm -f "$T/meta.log"
+: > "$T/docker.log"
+FEAT_RC=1 ecm v0.17.0-adiri
+check "edit menu, the feature check refuses: nothing after the check" \
+    "pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}" "$(calls)"
+check "edit menu, the feature check refuses: .node-meta untouched" no "$([[ -e "$T/meta.log" ]] && echo yes || echo no)"
+check "edit menu, the feature check refuses: the image is not changed" yes \
+    "$(grep -qF "Refusing ${R}@sha256:${D64}: it is not a testnet image (see above). The image is not changed." "$T/ec.out" && echo yes || echo no)"
+unset -f ecm calls
 
 # edit-config on a devnet host: tn_detect_network names no network and .node-meta
 # says NETWORK=devnet (_tn_guard_network). Images by digest only, from the devnet
@@ -334,7 +651,7 @@ rm -f "$T/swapped" "$T/meta.log" "$T/fetched"
 rc="$(ecd "${R}@sha256:${D64}")"
 check "edit, devnet: a legacy-repository digest runs as given" "0 ${R}@sha256:${D64}" "$rc $(swapped)"
 check_has "edit, devnet: the feature check is asked for devnet (which skips it)" "check devnet ${R}@sha256:${D64}" "$(cat "$T/docker.log")"
-check "edit, devnet: .node-meta records image and digest, no tag" "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} unset RELEASE_TAG" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
+check "edit, devnet: .node-meta drops the old release, then records image and digest, no tag" "unset RELEASE_TAG DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64}" "$(tr '\n' ' ' < "$T/meta.log" | sed 's/ $//')"
 rm -f "$T/swapped" "$T/meta.log"
 rc="$(ecd "${GD}@sha256:${D64}")"
 check "edit, devnet: a dev package digest runs as given" "0 ${GD}@sha256:${D64}" "$rc $(swapped)"

@@ -4,7 +4,8 @@
 # the source prepare's build features: CRLF .node-meta, the genesis chain id
 # fallback, a duplicated or unknown NETWORK (fail closed, no git, no cargo),
 # image_network (devnet from NETWORK=devnet in .node-meta) and the devnet image
-# paths that use it (pending NEW_IMAGE, fetch_docker_tags, json_prepare_docker),
+# paths that use it (pending NEW_IMAGE, fetch_docker_tags, json_prepare_docker and
+# the interactive prepare_docker_update, whose build-feature check gets it),
 # duplicated INSTALL_METHOD and BINARY_PATH, the build log and the build
 # output check.
 #
@@ -353,7 +354,38 @@ unset FEAT_RC
 meta $'NETWORK=devnet\n'
 dpt "${R}@sha256:${D64}"
 check "docker prepare, devnet: the check is asked for devnet" "0 yes" "$RC $(has "$(order)" "check devnet ${R}@sha256:${D64}")"
-unset -f dpt_stubbed dpt order
+# The interactive prepare (prepare_docker_update) hands the node's network to
+# docker_pull_target too: the check is asked for "<network> <image>", and a good
+# image leaves the pending state.
+ipd_stubbed() {
+    detect_current_docker_image() { printf '%s@sha256:%s\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+    build_log_file() { printf '%s\n' "$T/pull.log"; }
+    docker() { printf '%s\n' "$*" >> "$T/order.log"; }
+    tn_docker_holds_digest() { echo held >> "$T/order.log"; return 0; }
+    tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/order.log"; return "${FEAT_RC:-0}"; }
+    write_pending_state() { echo pending >> "$T/order.log"; cat > "$T/pending"; }
+    confirm() { return 0; }
+    prepare_docker_update "$1"
+}
+ipd() {  # ipd ARG -> OUT, ERR, RC; the calls in $T/order.log
+    rm -f "$T/pending"
+    : > "$T/order.log"
+    run ipd_stubbed "$1"
+}
+for net in testnet devnet; do
+    meta "NETWORK=${net}"$'\n'
+    ipd "${R}@sha256:${D64}"
+    check "interactive docker prepare, ${net}: pull, digest check, the check for ${net}, then the pending state" \
+        "0 pull ${R}@sha256:${D64}|held|check ${net} ${R}@sha256:${D64}|pending" "$RC $(order)"
+    check "interactive docker prepare, ${net}: the pending state names the new image" yes \
+        "$(has "$(cat "$T/pending" 2>/dev/null)" "NEW_IMAGE=${R}@sha256:${D64}")"
+done
+meta $'NETWORK=testnet\n'
+FEAT_RC=1
+ipd "${R}@sha256:${D64}"
+check "interactive docker prepare, the check refuses: rc 1, no pending state" "1 no" "$RC $(exists "$T/pending")"
+unset FEAT_RC
+unset -f dpt_stubbed dpt order ipd_stubbed ipd
 unset -f jpd_stubbed jpd loud_tags pk
 
 # -----------------------------------------------------------------------------

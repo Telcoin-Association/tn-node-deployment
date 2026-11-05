@@ -1673,16 +1673,17 @@ prepare_docker_update() {
 
 # docker_record_meta IMAGE TAG -- after a verified Docker update, .node-meta names
 # what runs: DOCKER_IMAGE IMAGE, DOCKER_IMAGE_DIGEST its digest, RELEASE_TAG TAG
-# (removed when TAG is empty: an image given by digest alone). A failed write warns.
+# (none when TAG is empty: an image given by digest alone). The old RELEASE_TAG goes
+# first and TAG last, each write only once the one before it succeeded, so a failed
+# or interrupted write leaves the digest with no release (unknown), never with the
+# release of another image. A failed write warns.
 docker_record_meta() {
     local ok=true
-    meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 || ok=false
-    meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 || ok=false
-    if [[ -n "${2:-}" ]]; then
-        meta_set RELEASE_TAG "$2" >/dev/null 2>&1 || ok=false
-    else
-        meta_unset RELEASE_TAG >/dev/null 2>&1 || ok=false
-    fi
+    meta_unset RELEASE_TAG >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 \
+        && { [[ -z "${2:-}" ]] || meta_set RELEASE_TAG "$2" >/dev/null 2>&1; } \
+        || ok=false
     if [[ "$ok" != "true" ]]; then
         update_wait_say warn "Could not record the new image in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)."
     fi

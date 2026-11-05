@@ -1633,8 +1633,9 @@ cmd_setup_finalize() { cmd_setup finalize; }
 
 # _docker_tn_names -- read "<name><TAB><image>" lines on stdin and print each
 # name whose image, by tag or by digest, comes from a repository the library
-# accepts testnet or mainnet images from (tn_docker_repo_ok). Runs inside the
-# library (_lib_call).
+# recognises testnet, mainnet or devnet images from (tn_docker_repo_ok): the
+# devnet list holds the dev package tn-dev, where the node team's dev images
+# go. Runs inside the library (_lib_call).
 _docker_tn_names() {
     local name img repo
     while IFS=$'\t' read -r name img; do
@@ -1642,15 +1643,16 @@ _docker_tn_names() {
         case "${repo##*/}" in
             *:*) repo="${repo%:*}" ;;
         esac
-        if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo"; then
+        if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo" \
+            || tn_docker_repo_ok devnet "$repo"; then
             printf '%s\n' "$name"
         fi
     done
 }
 
 # Print the names of running Telcoin Network containers, one per line: those
-# running an image of the library's testnet or mainnet repositories. Empty
-# output (rc 0) when docker is absent, no matching container runs, or the
+# running an image of the library's testnet, mainnet or devnet repositories.
+# Empty output (rc 0) when docker is absent, no matching container runs, or the
 # library cannot be read.
 cmd_docker_detect() {
     command -v docker >/dev/null 2>&1 || return 0

@@ -179,6 +179,17 @@ else
     skip "dearmor: the shipped key against gpg --dearmor" "gpg absent"
 fi
 
+# keys_concat (every bash): the text install.sh embeds. A key file without a
+# final newline still has its last line end before the next file begins.
+mkdir -p "$T/concat/lib/release-keys"
+printf -- '-----END PGP PUBLIC KEY BLOCK-----' > "$T/concat/lib/release-keys/a.asc"
+printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\n' > "$T/concat/lib/release-keys/b.asc"
+# shellcheck disable=SC2016  # the inner bash expands the program
+check "keys_concat: a file without a final newline ends its last line" \
+    "$(printf -- '-----END PGP PUBLIC KEY BLOCK-----\n-----BEGIN PGP PUBLIC KEY BLOCK-----')" \
+    "$(cd "$T/concat" && "$BASH" -c 'TN_KEYS_DIR=lib/release-keys; eval "$1"; keys_concat' _ \
+        "$(sed -n -e '/^key_files() {/,/^}/p' -e '/^keys_concat() {/,/^}/p' "$REPO/tools/release-scripts.sh")")"
+
 if ! command -v git >/dev/null 2>&1 || ! git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     skip "release-scripts.sh" "git absent or not a git checkout"
     finish
@@ -498,5 +509,48 @@ check_lacks "next release, expires ahead: no warning" "WARN" "$OUT"
 check "next release: serial 201" "serial=201" "$(grep '^serial=' "$W/MANIFEST")"
 check "next release: --expires 30" "$(printf 'date=2026-10-16\nexpires=2026-11-15')" "$(grep -E '^(date|expires)=' "$W/MANIFEST")"
 check "next release: old signature removed" "absent" "$([[ -e "$W/MANIFEST.asc" ]] && echo present || echo absent)"
+
+# --- two release keys, the first by name without a final newline -----------------------------
+# install.sh embeds the key files one after the other: a file without a final
+# newline would run its END line into the BEGIN line of the next, and the
+# published installer would read no key at all. prepare refuses such a file;
+# once it ends with a newline, the installer the tool writes reads both keys
+# and installs a release signed by the one that lacked it.
+gitc checkout -q -- .
+FPR2="$(newkey key2)"
+printf '%s' "$(cat "$T/key2.asc")" > "$W/lib/release-keys/a-second.asc"
+awk '{ print }
+     index($0, "\"lib/release-keys/grantkee.asc:") { print "    \"lib/release-keys/a-second.asc:lib/release-keys/a-second.asc:NONE\"" }' \
+    "$W/update-scripts.sh" > "$T/updater.tmp"
+cat "$T/updater.tmp" > "$W/update-scripts.sh"
+(cd "$W" && bash tools/gen-checksums.sh >/dev/null)
+commit_all "a second release key, without a final newline"
+TODAY=2026-11-02 tool scripts-v2.0.2 --date 2026-10-17
+check_rc "a key file without a final newline: refused" 1 "$RC"
+check_has "a key file without a final newline: says why" "release-scripts.sh: lib/release-keys/a-second.asc does not end with a newline: export the key again with gpg --armor --export <fingerprint> > lib/release-keys/a-second.asc (install.sh embeds the key files one after the other)" "$OUT"
+check "a key file without a final newline: nothing prepared" "" "$(git -C "$W" status --porcelain)"
+tool --check
+check_rc "a key file without a final newline: --check fails" 1 "$RC"
+check_has "a key file without a final newline: --check says why" "release-scripts.sh: lib/release-keys/a-second.asc does not end with a newline: export the key again with gpg --armor --export <fingerprint> > lib/release-keys/a-second.asc (install.sh embeds the key files one after the other)" "$OUT"
+printf '\n' >> "$W/lib/release-keys/a-second.asc"
+(cd "$W" && bash tools/gen-checksums.sh >/dev/null)
+commit_all "the second release key ends with a newline"
+TODAY=2026-11-02 tool scripts-v2.0.2 --date 2026-10-17
+check_rc "two release keys: prepare exits 0" 0 "$RC"
+embedded="$(awk '$0 == "TN_RELEASE_KEYS" { b = 0 } b { print } index($0, "<<'"'"'TN_RELEASE_KEYS'"'"'") { b = 1 }' "$W/install.sh")"
+check "two release keys: install.sh embeds both, each armor line on a line of its own" "2 2" \
+    "$(printf '%s\n' "$embedded" | grep -cx -- '-----BEGIN PGP PUBLIC KEY BLOCK-----') $(printf '%s\n' "$embedded" | grep -cx -- '-----END PGP PUBLIC KEY BLOCK-----')"
+sign_file "$W/MANIFEST" key2
+tool --check --require-sig --tag scripts-v2.0.2
+check_rc "two release keys: check --require-sig --tag passes" 0 "$RC"
+commit_all "release: scripts-v2.0.2"
+gitc archive --format=tar.gz --prefix=tn-node-deployment-scripts-v2.0.2/ -o "$T/archives/scripts-v2.0.2.tar.gz" HEAD
+mkdir -p "$T/home2"
+OUT="$(HOME="$T/home2" TERM=dumb bash "$W/install.sh" < /dev/null 2>&1)"
+RC=$?
+check_rc "two release keys: the installer the tool wrote installs the release" 0 "$RC"
+check "two release keys: the installer verified the second key's signature" "yes" \
+    "$(printf '%s\n' "$OUT" | grep -qF "Release signature verified (release key ${FPR2})" && echo yes || echo no)"
+check "two release keys: both key files installed" "2" "$(ls "$T/home2/telcoin-node-scripts/lib/release-keys/"*.asc 2>/dev/null | wc -l | tr -d ' ')"
 
 finish

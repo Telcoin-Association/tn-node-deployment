@@ -72,7 +72,13 @@
 #                            and untracked files in /opt/telcoin-source instead of stopping.
 # Source builds run as the unprivileged tn-build account with its own Rust toolchain
 # (rustup-init pinned by version and sha256); root only installs the result. Docker
-# images run by digest from the network's repository.
+# images run by digest from the network's repository. In a --json finalize run of a
+# Docker install, --release-tag <tag> (that release's image, by the digest the signed
+# release names) or --docker-image <repository>@sha256:<digest> naming another image
+# than the one keygen recorded replaces it: once every other finalize input has been
+# checked, it is checked and pulled as keygen's would be, and recorded in .node-meta
+# before the config, the unit and the container. On mainnet a new image is named by
+# --release-tag only (a digest alone is taken only for a release this node recorded).
 #
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
@@ -1020,8 +1026,14 @@ _preflight_docker() {
         local default_image typed=""
         default_image="$(latest_docker_image "$NETWORK")" || default_image=""
         while true; do
-            read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
-  [${default_image:-none}]: " input
+            # At the end of input there is nothing more to ask: stop, rather than
+            # take the default no one confirmed or ask again for ever. A last line
+            # without a newline still counts (read fails but fills input).
+            if ! read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
+  [${default_image:-none}]: " input && [[ -z "$input" ]]; then
+                echo ""
+                setup_fail "The input ended at the Docker image prompt, so no usable image was given and the Docker install stops. Nothing was pulled and no container was started."
+            fi
             tag=""
             if [[ -z "$input" ]]; then
                 DOCKER_IMAGE="$default_image"
@@ -3175,9 +3187,17 @@ finalize_same_as_keygen() {
 # binary come from its flags or, for any the flags leave out, from what keygen recorded
 # in .node-meta; a flag that differs from the recorded value stops it. --data-dir is
 # compared only when it is not the default, which is what an absent flag leaves.
-# Stops when the node would have nothing to run, before anything is written.
+# Stops when the node would have nothing to run, before anything is written. The
+# docker image meets the rules keygen's preflight applied before any container of
+# it starts: a repository a new pull for the network takes (tn_docker_pull_repo_ok)
+# and a binary built for the network (tn_docker_image_network_ok, on the image
+# keygen pulled; it never pulls). A --release-tag, or a --docker-image that names
+# another image than the recorded one, replaces it (finalize_docker_override), so a
+# recorded image that fails those rules can be corrected without a new keygen; the
+# refusals say which of the two flags does that on the network
+# (_finalize_image_way_out).
 finalize_install_inputs() {
-    local meta="${CONFIG_DIR}/.node-meta" rec=""
+    local meta="${CONFIG_DIR}/.node-meta" rec="" repo way
     # The passphrase form keygen recorded wins over a flag: the stored file is that one.
     local pm=""
     setup_meta_read pm PASSPHRASE_METHOD "$meta"
@@ -3207,13 +3227,31 @@ finalize_install_inputs() {
     esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
         setup_meta_read rec DOCKER_IMAGE "$meta"
-        finalize_same_as_keygen docker-image "$DOCKER_IMAGE" "$rec"
-        DOCKER_IMAGE="${DOCKER_IMAGE:-$rec}"
+        repo="$(tn_docker_repo_for "$NETWORK")" \
+            || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
+        # --release-tag names the release whose image runs (never given together
+        # with --docker-image: json_check_install_flags refuses that).
+        if [[ -n "$RELEASE_TAG" ]]; then
+            finalize_docker_override "$rec" --release-tag "$RELEASE_TAG"
+            return 0
+        fi
+        if [[ -n "$DOCKER_IMAGE" && "$DOCKER_IMAGE" != "$rec" ]]; then
+            finalize_docker_override "$rec" --docker-image "$DOCKER_IMAGE"
+            return 0
+        fi
+        DOCKER_IMAGE="$rec"
         if [[ -z "$DOCKER_IMAGE" ]]; then
             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
         fi
         if ! validate_docker_image "$DOCKER_IMAGE"; then
             setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as $(_setup_image_example); pass --docker-image."
+        fi
+        way="$(_finalize_image_way_out "$repo")"
+        if ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>. No container was started; to replace it, ${way}."
+        fi
+        if ! tn_docker_image_network_ok "$NETWORK" "$DOCKER_IMAGE" setup_progress; then
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: it is not a ${NETWORK} image (see above). No container was started; to replace it, ${way}."
         fi
         return 0
     fi
@@ -3232,10 +3270,71 @@ finalize_install_inputs() {
     return 0
 }
 
+# _finalize_image_way_out REPO -- the advice that ends a finalize refusal of the
+# recorded image: the finalize flags that replace it on NETWORK. Mainnet takes a new
+# image by release tag only (a digest alone passes only for a release this node
+# recorded), devnet by digest only (it has no signed releases), testnet by either.
+_finalize_image_way_out() {
+    case "$NETWORK" in
+        mainnet) printf 'run finalize again with --release-tag <tag> (a mainnet release, such as %s)' "$(_setup_tag_example)" ;;
+        devnet) printf 'run finalize again with --docker-image %s@sha256:<digest> (a devnet image)' "$1" ;;
+        *) printf 'run finalize again with --docker-image %s@sha256:<digest> or --release-tag <tag> (a %s image or release)' "$1" "$NETWORK" ;;
+    esac
+}
+
+# finalize_docker_override RECORDED FLAG REF -- finalize's --release-tag REF (FLAG),
+# or its --docker-image REF naming another image than RECORDED (the one keygen wrote
+# to .node-meta), replaces RECORDED: REF goes through keygen's preflight
+# (tn_docker_resolve_ref: the pull rule, a release tag resolved to the digest its
+# signed release names, and on mainnet the digest rule; for a digest given alone
+# its release, as keygen looks it up; the oldest supported release; the pull by
+# digest and its digest check; the build-feature check), then the image is recorded
+# in .node-meta, so the config, the unit and the container use it: RELEASE_TAG
+# removed, DOCKER_IMAGE and DOCKER_IMAGE_DIGEST written, then RELEASE_TAG written
+# when a release names the image. A refusal at any step stops before .node-meta is
+# written.
+finalize_docker_override() {
+    local rec="${1:-}" flag="${2:-}" ref="${3:-}" meta="${CONFIG_DIR}/.node-meta" what out img tag
+    what="the image ${ref}"
+    [[ "$flag" != "--release-tag" ]] || what="the image of release ${ref}"
+    setup_progress step "Replacing the recorded image ${rec:-(none)} with ${what}"
+    out="$(tn_docker_resolve_ref "$NETWORK" "$ref" setup_progress)" \
+        || setup_fail "Refusing ${what} given with ${flag} (see above). No container was started and .node-meta was not changed."
+    img="${out%% *}"
+    tag="${out#* }"
+    # A digest given alone: the release it belongs to, looked up as keygen's
+    # preflight does (.node-meta's record, else the registry's release tags), so
+    # the oldest supported release holds for it and RELEASE_TAG names it.
+    if [[ -z "$tag" ]]; then
+        tag="$(tn_docker_release_tag_for "$NETWORK" "$img" 2>/dev/null)" || tag=""
+        [[ -z "$tag" ]] || setup_progress info "The registry names ${img} as the image of release ${tag}."
+    fi
+    check_release_floor "${tag:-$img}"
+    print_step "Pulling Docker image: ${img}..."
+    if ! docker pull "$img" 9>&-; then
+        setup_fail "Failed to pull Docker image: ${img}. No container was started and .node-meta was not changed."
+    fi
+    if ! tn_docker_holds_digest "$img"; then
+        setup_fail "Docker does not hold ${img} under that digest after the pull (digest mismatch); the image was not used and .node-meta was not changed."
+    fi
+    if ! tn_docker_image_network_ok "$NETWORK" "$img" setup_progress; then
+        setup_fail "Refusing the image ${img}: it is not a ${NETWORK} image (see above). No container was started and .node-meta was not changed."
+    fi
+    DOCKER_IMAGE="$img"
+    RELEASE_TAG="$tag"
+    # The old release goes first and the new one last: a run stopped between these
+    # writes leaves the new digest with no release (unknown), never with the
+    # release of the image it replaces.
+    meta_unset RELEASE_TAG "$meta" || setup_fail "Could not remove RELEASE_TAG from ${meta}."
+    write_node_meta "DOCKER_IMAGE=${img}" "DOCKER_IMAGE_DIGEST=${img##*@}"
+    [[ -z "$tag" ]] || write_node_meta "RELEASE_TAG=${tag}"
+    setup_progress info "Recorded ${img} in ${meta}; finalize runs it."
+    return 0
+}
+
 json_phase_finalize() {
     local v hb=false
     json_refuse_installed finalize
-    finalize_install_inputs
     # The node binds to these; an empty one would start a node with no listener.
     for v in "$PRIMARY_LISTENER_MULTIADDR" "$WORKER_LISTENER_MULTIADDR"; do
         if [[ -z "$v" ]] || ! validate_multiaddr "$v"; then
@@ -3243,6 +3342,10 @@ json_phase_finalize() {
         fi
     done
     finalize_node_extra_flags
+    # Last before the config: a finalize image override (finalize_docker_override)
+    # pulls and rewrites .node-meta, so every other input check refuses first and
+    # leaves .node-meta as keygen wrote it.
+    finalize_install_inputs
     json_event step "Writing configuration"
     step_write_config
     json_event step "Creating service and starting node"

@@ -737,3 +737,45 @@ Left to the maintainer (commands in the closing report): the github-pages tag po
 (JSON with the two missing contexts and a second approver), telcoin-network PR #1716, the
 deploy-networks-common PR #8 merge, the values for the second code owner, mainnet epoch
 timing and the nft rate, and `scripts-v2.1.0` with `--serial 2` after the merge.
+
+## Review: round 2 on PR #59 (2026-11-04/05)
+
+Plan of 2026-11-04 (`tasks/plan.md`), specs `tasks/spec-r2-*.md`, checkpoints `tasks/ckpt-r2-*.md`,
+verifier records `tasks/verify-r2/{V7,V7-IMG,V8}/`. Last code commit ee641df (90 commits over 4a2cf6e, plus the records); CI and Integration green on
+the final tip; the whole-range review (`tasks/verify-r2/REV/REPORT.md`): no ERROR, three MEDIUM
+(the tag step could sign a moved origin/main, a rerun ignored `--serial`, the feature-check
+timeout could not stop a container ignoring SIGTERM), six LOW and six NOTEs; every MEDIUM and
+LOW fixed in the SIG-2 and IMG-3 rounds, the NOTEs recorded.
+
+What landed:
+- SIG: OpenPGP-signed script releases (`MANIFEST.asc`, `lib/release-keys/*.asc` as the allowlist,
+  one RELEASE SIGNATURES block in update-scripts, install.sh and release-scripts, shell dearmor,
+  gpgv status policy, `TN_SIG_THRESHOLD` 1, installer-embedded keys, bootstrap through sidecars,
+  CR and non-key refusals), `tools/cut-release.sh prep|tag|status`, CI and VM gates, fixtures with
+  real gpg and fakes. First signed release: scripts-v2.1.0, serial 1; scripts-v2.0.0 never tagged.
+- IMG: `tn-mainnet` and `tn-testnet` packages, old package recognition-only, `tn-dev` for devnet,
+  pull rule beside the recognition rule, IMAGE_DIGEST package rule, storage floor by network,
+  build-feature check before any container start (setup, update, edit, finalize), UI twins,
+  docker-detect counts devnet repositories, the image prompt stops at end of input.
+- EPOCH: `MAINNET_EPOCH_DURATION`/`TESTNET_EPOCH_DURATION` 21600 s; the blind wait derives from
+  the network's constant.
+- Owners: three code owners; Alloy header at deploy-networks-common main 18f8485.
+- Upstream: telcoin-network draft PR #1784 (packages per channel in etc/release.sh, Makefile
+  tn-dev, docs), V8-verified (484 assertions at the final tip).
+- Docs: README, OPERATOR, AGENTS, lib/release-keys/README, both changelogs, followup, partner
+  guide 1.7 (PDF byte-identical twice). Comments on #41 (manifest proposal) and #46 (scheme).
+- Test library: `check_has`/`check_lacks` read a here-string (a pipefail flake).
+
+Verification: V7 SIG (0 ERROR, 3 WARN fixed, 39 mutants: 36 caught by the fixtures, 39 with the
+harness), V7-IMG (0 ERROR, five fixture gaps and the docker-detect gap fixed, 48 counting mutants
+all caught by the fixtures after the fix round), V8 on the upstream branch (0 ERROR, 3 WARN
+fixed, 484/484 at the final tip); full suite 62 files x 4 environments (bash 5.3, bash 3.2 with
+and without flock, Ubuntu 24.04), helper 557 x 2 shells, pytest 283 x 2 interpreters, every
+lint, a sentinel-docker run of the whole suite (no fixture reaches the host docker), CI on every
+push, the review.
+
+Left to the maintainer: rulesets (#30) with `require_code_owner_review`; the signing environment
+(forwarded gpg-agent) and a test signature; after the merge the ceremony (`cut-release.sh prep
+scripts-v2.1.0 --serial 1`, merge, `tag`); PR #1784 review and the package access lists after the
+first pushes; a one-time check that `DEFAULT_DOCKER_IMAGE` prints `Build Features: adiri`;
+closing #49 if wanted.

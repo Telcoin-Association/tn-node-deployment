@@ -257,5 +257,40 @@ jo "release: running release not recorded: update" release "" v0.17.0-adiri true
 jo "source: no marker (an older release), checkout at the newest: update" source "" v0.17.0-adiri true
 jo "source: a running value with an x.y.z only compares as that final" source 0.17.0 v0.17.0-adiri false
 
+# docker_record_meta on a real .node-meta (the library's meta_set, taken from its
+# source since the stub above was unset, and meta_unset; tn_write_root_file
+# stubbed): the old RELEASE_TAG goes first and the new one last,
+# so with every write after the digest's failing (meta_set wrapped to fail for
+# RELEASE_TAG) the new digest is never left beside the old release; a digest given
+# alone leaves no release either.
+DA64="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+NEWIMG="${R}@sha256:$(printf '%s' "$DA64" | tr 0 c)"
+rec_case() {  # rec_case TAG FAIL-KEY -- docker_record_meta NEWIMG TAG on the old record
+    printf 'NETWORK=testnet\nDOCKER_IMAGE=%s@sha256:%s\nDOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.16.0-adiri\n' "$R" "$DA64" "$DA64" > "$META"
+    : > "$T/recwarn"
+    ( tn_write_root_file() { cat > "$1"; }
+      eval "$(sed -n '/^meta_set() {/,/^}/p' "$TN_TEST_REPO/lib/common.sh" | sed '1s/^meta_set()/real_meta_set()/')"
+      meta_set() { [ "$1" != "$FAIL_KEY" ] || return 2; real_meta_set "$@"; }
+      update_wait_say() { printf '%s %s\n' "$1" "$2" >> "$T/recwarn"; }
+      FAIL_KEY="$2"
+      docker_record_meta "$NEWIMG" "$1" ) >/dev/null 2>&1
+}
+rec_line() { printf '%s %s %s' "$(grep '^DOCKER_IMAGE=' "$META")" "$(grep '^DOCKER_IMAGE_DIGEST=' "$META")" "$(grep '^RELEASE_TAG=' "$META" || echo none)"; }
+rec_case v0.17.0-adiri ""
+check "docker_record_meta: image, digest and the new release" \
+    "DOCKER_IMAGE=${NEWIMG} DOCKER_IMAGE_DIGEST=${NEWIMG##*@} RELEASE_TAG=v0.17.0-adiri" "$(rec_line)"
+rec_case v0.17.0-adiri RELEASE_TAG
+check "docker_record_meta, the RELEASE_TAG write fails: no RELEASE_TAG left beside the new digest" \
+    "DOCKER_IMAGE=${NEWIMG} DOCKER_IMAGE_DIGEST=${NEWIMG##*@} none" "$(rec_line)"
+check "docker_record_meta, the RELEASE_TAG write fails: it warns" yes \
+    "$(grep -q '^warn Could not record the new image in .node-meta' "$T/recwarn" && echo yes || echo no)"
+rec_case v0.17.0-adiri DOCKER_IMAGE_DIGEST
+check "docker_record_meta, the digest write fails: no release beside either digest" none \
+    "$(grep '^RELEASE_TAG=' "$META" || echo none)"
+rec_case "" ""
+check "docker_record_meta, a digest alone: the old release removed" \
+    "DOCKER_IMAGE=${NEWIMG} DOCKER_IMAGE_DIGEST=${NEWIMG##*@} none" "$(rec_line)"
+unset -f rec_case rec_line
+unset DA64 NEWIMG
 
 finish
