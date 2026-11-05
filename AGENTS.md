@@ -77,11 +77,31 @@ before anything on the host changes. `ui/server.py` `TN_MAINNET_ENABLED` and
 fails unless the three agree. The launch release flips all three in one change, together with
 the mainnet chain-config pins (`tn_chain_config_pin`) and `MIN_SOURCE_VERSION_MAINNET`.
 
-Testnet and mainnet images share one repository (`ghcr.io/telcoin-association/telcoin-network`),
-so on mainnet an image is named by its release tag and the digest comes from the signed
-release. `tn_docker_resolve_ref` refuses a bare digest on mainnet unless `.node-meta` records
-it as the image of a mainnet release (`DOCKER_IMAGE_DIGEST` with a mainnet `RELEASE_TAG`), and
-setup-node's `--docker-image` and image prompt apply the same rule. The release floor
+Each network has its own image package, and the channel follows the release tag: mainnet
+`ghcr.io/telcoin-association/tn-mainnet` (`TN_MAINNET_IMAGE_REPO`, tags `vX.Y.Z`), testnet
+`ghcr.io/telcoin-association/tn-testnet` (`TN_TESTNET_IMAGE_REPO`, tags `vX.Y.Z-adiri`), and
+every stage derives the package from the network again (`tn_docker_repo_for`). Testnet also
+takes the legacy Artifact Registry repository; devnet pulls by digest from that repository or
+from `ghcr.io/telcoin-association/tn-dev` (`TN_DEV_IMAGE_REPO`, the node team's dev images).
+The old single package `ghcr.io/telcoin-association/telcoin-network`
+(`TN_GHCR_LEGACY_IMAGE_REPO`) never held a release: it stays in the testnet and devnet lists
+only so a running container is recognised (remove-node, the status screens), and every new
+pull refuses it on every network (`tn_docker_pull_repo_ok`, `tn_docker_pull_repos_for`; the UI
+twins are `docker_pull_repo_ok` and `pull_image_allowed`). A signed release's `IMAGE_DIGEST`
+must name a repository a new pull for the network takes (on mainnet exactly `tn-mainnet`), or
+the release is refused. On mainnet an image is still named by its release tag and the digest
+comes from the signed release: `tn_docker_resolve_ref` refuses a bare digest on mainnet unless
+`.node-meta` records it as the image of a mainnet release (`DOCKER_IMAGE_DIGEST` with a mainnet
+`RELEASE_TAG`), and setup-node's `--docker-image` and image prompt apply the same rule. That
+rule is defence in depth: only the signed release says which digest of `tn-mainnet` is a
+release image. After the pull and the digest check, and before any container starts or any
+launch file or `.node-meta` line names the image, `tn_docker_image_network_ok` runs the image's
+`/usr/local/bin/telcoin --version` once (no network, no capabilities, read-only, 60 s at most)
+and judges its one `Build Features:` line: none on mainnet, `adiri` on testnet (`faucet`
+allowed, nothing else); devnet images are not checked. setup-node, update-node's Docker
+prepare and edit-config's image change stop on a refusal, in `--json` mode with an error event
+and then `done`. The UI's `DOCKER_REPO` and the library's `tn_docker_repo_for` must agree, and
+`ui/test_csrf.py` pins that. The release floor
 (`tn_ref_min_check`, `MIN_SOURCE_VERSION_<NETWORK>`) applies to setup-node, to every update-node
 prepare path and to edit-config's Docker image change; new code that picks a node release
 calls it too.
@@ -228,11 +248,15 @@ EXIT trap sets `TN_EXIT_TRAP_OWNED=1` before `tn_acquire_update_lock` and calls
 The first start of v0.16.0-adiri migrates the consensus store (`<data dir>/consensus-db/epochs`,
 epoch packs v1 to v2), and older releases cannot open the data dir afterwards (`invalid
 version`). So update-node (since 1.2.1) never rolls back on its own across the 0.16.0 floor
-(`STORAGE_MIGRATION_FLOOR`). `storage_migrating_upgrade` judges the running release from the
-image tag on Docker installs (for an image run by digest, the `RELEASE_TAG` recorded with that
-`DOCKER_IMAGE_DIGEST`) and from the root-owned `/opt/telcoin/telcoin-network.version` on source
-and release installs, never from the checkout's `git describe`; an unreadable running release
-counts as older. A failed check does not stop the node or restore the old binary or image,
+(`STORAGE_MIGRATION_FLOOR_TESTNET`, read through `storage_migration_floor`). The floor is per
+network: mainnet and devnet have none (`STORAGE_MIGRATION_FLOOR_MAINNET` and `_DEVNET` are
+empty), so no update there is one way and no downgrade there is refused for the storage
+reason (the `--json` downgrade refusal carries `"storage_downgrade":false`). A node whose
+network cannot be told takes the testnet floor. `storage_migrating_upgrade` judges the running
+release from the image tag on Docker installs (for an image run by digest, the `RELEASE_TAG`
+recorded with that `DOCKER_IMAGE_DIGEST`) and from the root-owned
+`/opt/telcoin/telcoin-network.version` on source and release installs, never from the
+checkout's `git describe`; an unreadable running release counts as older. A failed check does not stop the node or restore the old binary or image,
 clears the pending state, keeps the version marker, prints the snapshot-restore steps and
 leaves the launch files as the apply wrote them; a later `--discard` keeps them too
 (`STORAGE_MIGRATION_STARTED` in the pending state). In `--json` mode it ends with a `done`

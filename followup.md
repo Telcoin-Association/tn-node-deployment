@@ -76,12 +76,18 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   `ui/static/index.html`, which `ui/test_mainnet_flag.py` keeps in step. Closes at launch (#45):
   the release that sets the mainnet chain-config pins and `MIN_SOURCE_VERSION_MAINNET` flips all
   three.
-- Mainnet images come from the repository testnet uses, `ghcr.io/telcoin-association/telcoin-network`
-  (`TN_MAINNET_IMAGE_REPO`), and on mainnet an image is named by its release tag, with the digest
-  from the signed release; a digest alone is taken only when `.node-meta` records it for a mainnet
-  release the node installed. What is left is the tag scheme and the image pipeline: the node
-  team confirms that mainnet releases are tagged `vX.Y.Z` and publish their image digest (#46,
-  telcoin-network #1728). Closes when that is confirmed and the first mainnet release verifies.
+- Each network has its own image package: mainnet `ghcr.io/telcoin-association/tn-mainnet`
+  (`TN_MAINNET_IMAGE_REPO`, tags `vX.Y.Z`), testnet `ghcr.io/telcoin-association/tn-testnet`
+  (`TN_TESTNET_IMAGE_REPO`, tags `vX.Y.Z-adiri`), dev images in
+  `ghcr.io/telcoin-association/tn-dev`; the retired single package is recognised for running
+  containers only. On mainnet an image is still named by its release tag, with the digest from
+  the signed release. The scheme was confirmed on 2026-11-04 (#46); the release pipeline side is
+  telcoin-network draft PR #1784, which publishes each channel to its package in
+  `etc/release.sh` (telcoin-network #1728). Closes when PR #1784 merges and the first mainnet
+  release verifies.
+- The image feature check (`tn_docker_image_network_ok`) reads the `Build Features:` line only;
+  it does not compare the image's `Version:` line with the release tag. Closes if the check
+  passes the tag where it is known and asks `tn_release_version_ok` for both.
 - Mainnet operators see testnet tag forms and adiri host names as examples in messages annotated
   `# network-gated: shown on every network`: edit-config's bootstrap-peers "Needs v0.15.0-adiri or
   later." and the state-export labels, setup-node's `require_node_flag` refusals and the
@@ -473,7 +479,9 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   the guide's Service and keys table carries. A script change, so a version bump and sidecar.
   (guide-1.5)
   Why: the message's only remedy is the pre-update snapshot, which that case does not need.
-- `STORAGE_MIGRATION_FLOOR` knows one one-way step, the 0.16.0 epoch packs. telcoin-network main
+- `STORAGE_MIGRATION_FLOOR_TESTNET` knows one one-way step, the 0.16.0 epoch packs (mainnet and
+  devnet have no floor; a mainnet release that migrates one way sets
+  `STORAGE_MIGRATION_FLOOR_MAINNET`). telcoin-network main
   (8aedf72e, #1558) adds a second: the first start of the next release copies the MDBX consensus
   tables into tndb (`consensus-db/tndb/{epoch,kad,cache}`), deletes the MDBX files and writes
   `consensus-db/tndb/mdbx-migrated`. `v0.16.0-adiri` after a downgrade is not refused, but starts
