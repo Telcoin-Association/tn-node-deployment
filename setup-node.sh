@@ -3180,8 +3180,9 @@ finalize_install_inputs() {
 # finalize_docker_override RECORDED -- finalize's --docker-image (DOCKER_IMAGE) names
 # another image than RECORDED, the one keygen wrote to .node-meta: take it through
 # keygen's preflight for a given image (tn_docker_resolve_ref: the pull rule, and on
-# mainnet the digest rule; the oldest supported release; the pull by digest and its
-# digest check; the build-feature check), then record it in .node-meta (DOCKER_IMAGE,
+# mainnet the digest rule; for a digest given alone its release, as keygen looks it
+# up; the oldest supported release; the pull by digest and its digest check; the
+# build-feature check), then record it in .node-meta (DOCKER_IMAGE,
 # DOCKER_IMAGE_DIGEST, and RELEASE_TAG, removed when no release names the image), so
 # the config, the unit and the container use it. A refusal at any step stops before
 # .node-meta is written.
@@ -3192,6 +3193,13 @@ finalize_docker_override() {
         || setup_fail "Refusing the image ${DOCKER_IMAGE} given with --docker-image (see above). No container was started and .node-meta was not changed."
     img="${out%% *}"
     tag="${out#* }"
+    # A digest given alone: the release it belongs to, looked up as keygen's
+    # preflight does (.node-meta's record, else the registry's release tags), so
+    # the oldest supported release holds for it and RELEASE_TAG names it.
+    if [[ -z "$tag" ]]; then
+        tag="$(tn_docker_release_tag_for "$NETWORK" "$img" 2>/dev/null)" || tag=""
+        [[ -z "$tag" ]] || setup_progress info "The registry names ${img} as the image of release ${tag}."
+    fi
     check_release_floor "${tag:-$img}"
     print_step "Pulling Docker image: ${img}..."
     if ! docker pull "$img" 9>&-; then
