@@ -147,7 +147,9 @@ gitw checkout -q -- README.md
 
 cut prep "$TAG" --serial 1 --key "$FPR2" --yes
 check_rc "a key that is not a release key: refused" 1 "$RC"
-has "a key that is not a release key: says why" "cut-release.sh: the signing key ${FPR2} is not a primary key of lib/release-keys/*.asc"
+has "a key that is not a release key: says why" "cut-release.sh: the signing key ${FPR2} is not a primary key of lib/release-keys/*.asc on origin/main"
+check "a key that is not a release key: refused before the branch is made" "absent" "$(gitw rev-parse -q --verify "refs/heads/$BR" >/dev/null && echo present || echo absent)"
+check "a key that is not a release key: still on main" "main" "$(gitw rev-parse --abbrev-ref HEAD)"
 check "a key that is not a release key: nothing prepared" "absent" "$([[ -e "$W/MANIFEST" ]] && echo present || echo absent)"
 check "a key that is not a release key: nothing signed" "" "$(grep -e '--detach-sign' "$T/gpg.log" 2>/dev/null)"
 
@@ -155,9 +157,11 @@ check "a key that is not a release key: nothing signed" "" "$(grep -e '--detach-
 : > "$T/gpg.log"
 cut prep "$TAG" --serial 1 --yes
 check_rc "prep: exits 0" 0 "$RC"
-order "prep: the steps in order" "] fetch origin" "] release branch" "signing key ${FPR1}" "] prepare MANIFEST" \
-    "] sign MANIFEST" "] check the release" "] stage the release files" "] commit, signed" "] push the release branch" \
+order "prep: the steps in order" "] fetch origin" "] create the release branch from origin/main" "signing key ${FPR1}" "] prepare MANIFEST" \
+    "] sign MANIFEST" "] check the release" "] commit the release files, signed" "] push the release branch" \
     "] open the release pull request"
+check "prep: one prompt for step 7" "1" "$(printf '%s\n' "$OUT" | grep -c '^\[7/9\]')"
+has "prep: step 7 shows both commands" "\$ git add MANIFEST MANIFEST.asc RELEASE install.sh && git commit -S${FPR1}\\! -F "
 has "prep: prints the signing command" "\$ gpg --armor --detach-sign --local-user ${FPR1}\\! --output MANIFEST.asc MANIFEST"
 has "prep: prints the prepare command" "\$ bash tools/release-scripts.sh --serial 1 ${TAG}"
 check "prep: card, then the manifest signature, then the signed commit" "yes" "$(awk -v f="${FPR1}!" '
@@ -195,6 +199,14 @@ check "tag before the merge: no tag" "absent" "$(gitw rev-parse -q --verify "ref
 
 # --- the merge, then tag -------------------------------------------------------------------
 gitw push -q origin "$BR:main" 2>/dev/null
+# A tag already here, signed by a key that is not a release key: refused, not pushed.
+gitw fetch -q origin
+gitw tag -s --local-user="${FPR2}!" -m "$TAG" "$TAG" origin/main
+SERVED_TAG="$TAG" cut tag "$TAG" --yes
+check_rc "a local tag signed by another key: refused" 1 "$RC"
+has "a local tag signed by another key: says why" "$TAG carries no good signature by a key of lib/release-keys/*.asc on origin/main"
+check "a local tag signed by another key: not pushed" "absent" "$(git -C "$ORIGIN" rev-parse -q --verify "refs/tags/$TAG" >/dev/null && echo present || echo absent)"
+gitw tag -d "$TAG" >/dev/null
 : > "$T/gpg.log"
 SERVED_TAG="$TAG" cut tag "$TAG" --yes
 check_rc "tag: exits 0" 0 "$RC"
@@ -213,6 +225,7 @@ SERVED_TAG="$TAG" cut tag "$TAG" --yes
 check_rc "tag again: exits 0" 0 "$RC"
 has "tag again: the tag is already there" "already done: $TAG names origin/main"
 has "tag again: already pushed" "already done: origin has $TAG"
+has "tag again: the existing tag is checked for the release key" "   $TAG is signed by release key ${FPR1}"
 
 SERVED_TAG=scripts-v2.0.0 cut tag "$TAG" --yes
 check_rc "the installer serves another tag: fails" 1 "$RC"
@@ -227,7 +240,7 @@ check_rc "status: exits 0" 0 "$RC"
 has "status: the release branch" "Release branch: $BR"
 has "status: the signature" "signature: MANIFEST.asc verifies (release check passes)"
 has "status: the tag" "Release tag: $TAG on "
-has "status: the tag signature" "tag signature: good"
+has "status: the tag signature" "tag signature: $TAG is signed by release key ${FPR1}"
 has "status: the CI run" "ci.yml: completed success https://github.example.invalid/run/1"
 
 # --- --sig-from a signature over other content: the check refuses, nothing is committed ----

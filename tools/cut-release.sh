@@ -10,19 +10,20 @@
 #   1 fetch    git fetch origin
 #   2 branch   create release/TAG from origin/main, or switch to it; a tree with
 #              uncommitted changes is refused (untracked files count, as for
-#              tools/release-scripts.sh)
-#   3 key      the signing key must be a primary key of a lib/release-keys/*.asc
-#              file: --key FPR, else git config user.signingkey, else the one key
-#              there. gpg --card-status checks that the card answers, here or
-#              through a forwarded gpg-agent (skipped with --sig-from)
+#              tools/release-scripts.sh). Before the branch is made or entered,
+#              the signing key must be a primary key of a lib/release-keys/*.asc
+#              file of the branch to be (origin/main for a new one): --key FPR,
+#              else git config user.signingkey, else the one key there
+#   3 key      gpg --card-status checks that the card answers, here or through a
+#              forwarded gpg-agent (skipped with --sig-from)
 #   4 prepare  bash tools/release-scripts.sh [--serial N] TAG
 #   5 sign     gpg --armor --detach-sign --local-user FPR! --output MANIFEST.asc MANIFEST;
 #              with --sig-from FILE the signature is copied from FILE; when no card
 #              answers, the run waits until MANIFEST.asc appears (sign MANIFEST on
 #              the machine with the key and copy the file here)
 #   6 check    bash tools/release-scripts.sh --check --require-sig --tag TAG
-#   7 commit   git add MANIFEST MANIFEST.asc RELEASE install.sh, then
-#              git commit -S<FPR>! with the message "release: TAG"
+#   7 commit   git add MANIFEST MANIFEST.asc RELEASE install.sh &&
+#              git commit -S<FPR>! with the message "release: TAG" (one prompt)
 #   8 push     git push -u origin release/TAG
 #   9 pr       gh pr create --base main --head release/TAG --title "release: TAG"
 #
@@ -33,7 +34,10 @@
 #              branch is still here), and the check with --require-sig --tag TAG
 #              passes in a clean temporary worktree of origin/main
 #   3 tag      git tag -s --local-user=FPR! -m TAG TAG origin/main
-#   4 verify   git verify-tag TAG
+#   4 verify   git verify-tag --raw TAG must report a good signature (GOODSIG
+#              then VALIDSIG) whose primary fingerprint is a key of
+#              lib/release-keys/*.asc on origin/main, and no bad, expired or
+#              revoked one; an existing tag passes only this way too
 #   5 push     git push origin TAG
 #   6 ci       wait for the ci.yml and publish-installer.yml runs of the tag and
 #              print their conclusions (gh run list)
@@ -42,7 +46,8 @@
 #
 # status prints what exists for the newest release/* branch and scripts-v* tag:
 # the branch and its commit, the MANIFEST serial, whether MANIFEST.asc verifies,
-# the tag signature and the CI runs of the tag.
+# which release key signed the tag (a key of lib/release-keys at the tag) and
+# the CI runs of the tag.
 #
 # Every step prints its command and asks "[Enter] run / s skip / q quit"; --yes
 # runs every step without asking. A step whose result is already there (the
@@ -165,38 +170,99 @@ key_fprs() {
     rm -rf "$home"
 }
 
-# pick_key WANT -- set FPR and FPR_FILE to the release key to sign with: the
-# primary key of a lib/release-keys/*.asc file that WANT names (a fingerprint,
-# or a long key id of 16 or more hex digits, with or without a trailing !), or
-# the one key there when WANT is empty.
+# release_key_list [REF] -- one line "<fingerprint> <file>" per primary key of
+# every lib/release-keys/*.asc: in the working tree, or at the git REF.
+release_key_list() {
+    local ref="${1:-}" f p d
+    if [[ -z "$ref" ]]; then
+        for f in "$KEYS_DIR"/*.asc; do
+            [[ -f "$f" ]] || continue
+            for p in $(key_fprs "$f"); do
+                printf '%s %s\n' "$p" "$f"
+            done
+        done
+        return 0
+    fi
+    d="$(mktemp -d "${TMP}/keys.XXXXXX")"
+    while IFS= read -r f; do
+        case "$f" in
+            "${KEYS_DIR}"/*.asc) ;;
+            *) continue ;;
+        esac
+        _git show "${ref}:${f}" > "${d}/key.asc" 2>/dev/null || continue
+        for p in $(key_fprs "${d}/key.asc"); do
+            printf '%s %s\n' "$p" "$f"
+        done
+    done < <(_git ls-tree --name-only "$ref" "${KEYS_DIR}/" 2>/dev/null || true)
+    rm -rf "$d"
+}
+
+# pick_key WANT [REF] -- set FPR and FPR_FILE to the release key to sign with:
+# the primary key of a lib/release-keys/*.asc file (in the working tree, or at
+# REF) that WANT names (a fingerprint, or a long key id of 16 or more hex
+# digits, with or without a trailing !), or the one key there when WANT is
+# empty.
 pick_key() {
-    local want="$1" f p n=0 first="" first_file=""
+    local want="$1" ref="${2:-}" where p f n=0 first="" first_file=""
     want="${want%!}"
     want="${want#0x}"
     want="$(printf '%s' "$want" | tr 'abcdef' 'ABCDEF')"
+    where="${KEYS_DIR}/*.asc${ref:+ on ${ref}}"
     FPR=""
     FPR_FILE=""
-    for f in "$KEYS_DIR"/*.asc; do
-        [[ -f "$f" ]] || continue
-        for p in $(key_fprs "$f"); do
-            n=$((n + 1))
-            if [[ -z "$first" ]]; then
-                first="$p"
-                first_file="$f"
-            fi
-            if [[ -n "$want" && ${#want} -ge 16 && "$p" == *"$want" ]]; then
-                FPR="$p"
-                FPR_FILE="$f"
-            fi
-        done
-    done
-    [[ $n -gt 0 ]] || die "gpg reads no primary key from ${KEYS_DIR}/*.asc"
+    while read -r p f; do
+        [[ -n "$p" ]] || continue
+        n=$((n + 1))
+        if [[ -z "$first" ]]; then
+            first="$p"
+            first_file="$f"
+        fi
+        if [[ -n "$want" && ${#want} -ge 16 && "$p" == *"$want" ]]; then
+            FPR="$p"
+            FPR_FILE="$f"
+        fi
+    done < <(release_key_list "$ref")
+    [[ $n -gt 0 ]] || die "gpg reads no primary key from ${where}"
     if [[ -z "$want" ]]; then
-        [[ $n -eq 1 ]] || die "${KEYS_DIR} holds ${n} keys: name the signing key with --key FPR"
+        [[ $n -eq 1 ]] || die "${where} holds ${n} keys: name the signing key with --key FPR"
         FPR="$first"
         FPR_FILE="$first_file"
     fi
-    [[ -n "$FPR" ]] || die "the signing key ${want} is not a primary key of ${KEYS_DIR}/*.asc: sign with a listed key (--key FPR), or add its key file in a release first"
+    [[ -n "$FPR" ]] || die "the signing key ${want} is not a primary key of ${where}: sign with a listed key (--key FPR), or add its key file in a release first"
+}
+
+# tag_signed_by_release_key TAG REF -- rc 0 when git verify-tag --raw TAG
+# reports a good signature (GOODSIG, then VALIDSIG) whose primary fingerprint
+# (the last VALIDSIG field) is a key of lib/release-keys/*.asc at REF, and no
+# BADSIG, EXPKEYSIG, REVKEYSIG, EXPSIG or ERRSIG; it prints which key signed.
+# The verdict comes from the status lines, never from the exit status.
+tag_signed_by_release_key() {
+    local tag="$1" ref="$2" keys raw t kw rest fpr good=0 ok="" bad=""
+    keys="$(release_key_list "$ref" | awk '{ print $1 }')"
+    raw="$(_git verify-tag --raw "$tag" 2>&1 > /dev/null || true)"
+    while read -r t kw rest; do
+        [[ "$t" == "[GNUPG:]" ]] || continue
+        case "$kw" in
+            BADSIG|EXPKEYSIG|REVKEYSIG|EXPSIG|ERRSIG) bad="${bad:-$kw}" ;;
+            GOODSIG) good=1 ;;
+            VALIDSIG)
+                fpr="${rest##* }"
+                if [[ $good -eq 1 && "$fpr" =~ ^[0-9A-F]{40}$ ]] && printf '%s\n' "$keys" | grep -qxF -- "$fpr"; then
+                    ok="$fpr"
+                fi
+                good=0
+                ;;
+        esac
+    done <<< "$raw"
+    if [[ -n "$bad" ]]; then
+        printf '   the signature of %s is refused: gpg reports %s\n' "$tag" "$bad" >&2
+        return 1
+    fi
+    if [[ -z "$ok" ]]; then
+        printf '   %s carries no good signature by a key of %s/*.asc on %s\n' "$tag" "$KEYS_DIR" "$ref" >&2
+        return 1
+    fi
+    printf '   %s is signed by release key %s\n' "$tag" "$ok"
 }
 
 # card_check -- set CARD to 1 when gpg reaches a card (here or through a
@@ -246,6 +312,11 @@ check_in_worktree() {
     return "$rc"
 }
 
+# commit_release -- stage the release files and make the signed release commit.
+commit_release() {
+    _git add MANIFEST "$SIG_FILE" RELEASE install.sh && _git commit -S"${FPR}!" -F "${TMP}/commit-msg"
+}
+
 # wait_for_sig -- wait until MANIFEST.asc is in the tree.
 wait_for_sig() {
     while [[ ! -s "$SIG_FILE" ]]; do
@@ -255,7 +326,7 @@ wait_for_sig() {
 }
 
 prep() {
-    local tag="$1" serial="$2" key="$3" sigfrom="$4" branch="release/$1" cur dirty url
+    local tag="$1" serial="$2" key="$3" sigfrom="$4" branch="release/$1" cur dirty url keyref=""
     local -a args
     STEP_TOTAL=9
     args=()
@@ -265,17 +336,30 @@ prep() {
 
     step 1 "fetch origin" _git fetch origin || true
 
+    # The tree and the signing key are checked before the branch is made or
+    # entered; the key against the key files of the branch to be.
     cur="$(_git rev-parse --abbrev-ref HEAD)"
     dirty="$(_git status --porcelain)"
     if [[ "$cur" == "$branch" ]]; then
         if [[ -n "$dirty" ]] && ! only_release_files "$dirty"; then
             die "the tree has changes outside MANIFEST, MANIFEST.asc, RELEASE and install.sh: commit or stash them first"
         fi
-        done_step 2 "release branch" "on ${branch}"
     else
         [[ -z "$dirty" ]] || die "the tree has uncommitted changes: commit or stash them first"
-        if _git rev-parse -q --verify "refs/heads/${branch}" > /dev/null \
-            || _git rev-parse -q --verify "refs/remotes/origin/${branch}" > /dev/null; then
+        if _git rev-parse -q --verify "refs/heads/${branch}" > /dev/null; then
+            keyref="refs/heads/${branch}"
+        elif _git rev-parse -q --verify "refs/remotes/origin/${branch}" > /dev/null; then
+            keyref="refs/remotes/origin/${branch}"
+        else
+            keyref="origin/main"
+        fi
+    fi
+    pick_key "${key:-$(_git config --get user.signingkey 2>/dev/null || true)}" "$keyref"
+
+    if [[ "$cur" == "$branch" ]]; then
+        done_step 2 "release branch" "on ${branch}"
+    else
+        if [[ "$keyref" != origin/main ]]; then
             step 2 "switch to the release branch" _git checkout "$branch" || true
         else
             step 2 "create the release branch from origin/main" _git checkout -b "$branch" origin/main || true
@@ -283,8 +367,6 @@ prep() {
         [[ "$(_git rev-parse --abbrev-ref HEAD)" == "$branch" ]] \
             || die "not on ${branch}: run again and let step 2 create or switch to it"
     fi
-
-    pick_key "${key:-$(_git config --get user.signingkey 2>/dev/null || true)}"
     if [[ -n "$sigfrom" ]]; then
         printf '\n[3/%s] signing key %s (%s)\n   WARN the card is not checked: the signature comes from %s\n' \
             "$STEP_TOTAL" "$FPR" "$FPR_FILE" "$sigfrom"
@@ -321,9 +403,9 @@ prep() {
     if [[ "$(_git log -1 --format=%s)" == "release: ${tag}" && -z "$(_git status --porcelain -- MANIFEST "$SIG_FILE" RELEASE install.sh)" ]]; then
         done_step 7 "commit" "$(_git log -1 --format='%s (%h)')"
     else
-        step 7 "stage the release files" _git add MANIFEST "$SIG_FILE" RELEASE install.sh || true
         printf 'release: %s\n' "$tag" > "${TMP}/commit-msg"
-        step 7 "commit, signed with the release key" _git commit -S"${FPR}!" -F "${TMP}/commit-msg" || true
+        SHOW_AS="$(show _git add MANIFEST "$SIG_FILE" RELEASE install.sh) && $(show _git commit -S"${FPR}!" -F "${TMP}/commit-msg")"
+        step 7 "commit the release files, signed with the release key" commit_release || true
     fi
 
     if [[ "$(_git rev-parse -q --verify "refs/remotes/origin/${branch}" 2>/dev/null || true)" == "$(_git rev-parse HEAD)" ]]; then
@@ -441,12 +523,13 @@ tag_release() {
             || die "tag ${tag} exists here and names $(_git rev-parse --short "${tag}^{commit}"), not origin/main $(_git rev-parse --short "$main_sha")"
         done_step 3 "tag" "${tag} names origin/main $(_git rev-parse --short "$main_sha")"
     else
-        pick_key "${key:-$(_git config --get user.signingkey 2>/dev/null || true)}"
+        pick_key "${key:-$(_git config --get user.signingkey 2>/dev/null || true)}" origin/main
         step 3 "make the signed tag with release key ${FPR}" \
             _git tag -s --local-user="${FPR}!" -m "$tag" "$tag" origin/main || true
     fi
 
-    step 4 "verify the tag signature" _git verify-tag "$tag" || true
+    SHOW_AS="git verify-tag --raw ${tag} (a good signature by a key of ${KEYS_DIR}/*.asc on origin/main)"
+    step 4 "verify the tag signature" tag_signed_by_release_key "$tag" origin/main || true
 
     remote="$(_git ls-remote origin "refs/tags/${tag}" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
     local_obj="$(_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null || true)"
@@ -487,10 +570,10 @@ status_report() {
         return 0
     fi
     echo "Release tag: ${tag} on $(_git rev-parse --short "${tag}^{commit}")"
-    if _git verify-tag "$tag" > /dev/null 2>&1; then
-        echo "  tag signature: good"
+    if line="$(tag_signed_by_release_key "$tag" "$tag" 2>/dev/null)"; then
+        echo "  tag signature: ${line#   }"
     else
-        echo "  tag signature: does not verify here (git verify-tag ${tag})"
+        echo "  tag signature: no good signature by a key of ${KEYS_DIR}/*.asc at ${tag} (git verify-tag --raw ${tag})"
     fi
     for wf in ci.yml publish-installer.yml; do
         line="$(_gh run list --workflow "$wf" --branch "$tag" --limit 1 --json status,conclusion,url \
