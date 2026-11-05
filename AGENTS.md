@@ -336,8 +336,9 @@ shows the command), and keep both files in `TESTNET_ADDONS_BUNDLE`.
 ## Self-update and integrity contract
 
 Operators install and update the scripts from signed releases only. A release is a
-`scripts-vX.Y.Z` tag on a commit of main. That commit carries `MANIFEST` and `MANIFEST.sig` at
+`scripts-vX.Y.Z` tag on a commit of main. That commit carries `MANIFEST` and `MANIFEST.asc` at
 the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the current tag.
+`scripts-v2.1.0` is the first signed release (serial 1); `scripts-v2.0.0` was never tagged.
 
 - `MANIFEST` holds `format=1`, `release=<tag>`, `serial=<n>`, `min_updater=<version>`,
   `date=YYYY-MM-DD` and `expires=YYYY-MM-DD`, then one `sha256  <hash>  <path>` line per file.
@@ -347,25 +348,59 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   keys (unknown header keys are ignored), so a manifest with them needs no `min_updater` bump.
   `tools/release-scripts.sh` builds it from the
   `SCRIPTS`, `UI_BUNDLE` and `TESTNET_ADDONS_BUNDLE` arrays in `update-scripts.sh`, plus
-  `install.sh`, `open-ui.sh` and `lib/allowed_signers`. The three arrays stay the single
-  source of truth for what operators receive.
-- The release signer signs `MANIFEST` with a hardware-backed SSH key
-  (`ssh-keygen -Y sign -f <key> -n tn-node-scripts MANIFEST`), which writes `MANIFEST.sig`.
-  Hosts verify it with
-  `ssh-keygen -Y verify -f lib/allowed_signers -I release@telcoin.org -n tn-node-scripts`.
-  `lib/allowed_signers` lists the keys allowed to sign, and `install.sh` carries an identical
+  `install.sh` and `open-ui.sh`. The release keys `lib/release-keys/*.asc` are `SCRIPTS` rows
+  like any other file. The three arrays stay the single source of truth for what operators
+  receive.
+- `MANIFEST.asc` holds detached OpenPGP signatures over `MANIFEST`, one armored block per
+  signer, by the maintainer release keys in `lib/release-keys/*.asc`: the same keys, and the
+  same `gpgv` status policy (`_tn_gpg_status_verdict`), that the scripts trust for
+  telcoin-network releases. The first signer runs
+  `gpg --armor --detach-sign --local-user <FPR>! --output MANIFEST.asc MANIFEST`; a further
+  signer appends with `--output - MANIFEST >> MANIFEST.asc`. Hosts run
+  `gpgv --status-fd 1 --keyring <keyring> MANIFEST.asc MANIFEST` with a keyring made from
+  `lib/release-keys/*.asc` alone: the keyring is the allowlist, and there is no separate allow
+  file. A release is accepted when at least `TN_SIG_THRESHOLD` (1) distinct primary keys made a
+  `GOODSIG` followed by a `VALIDSIG` (whose last field is the primary fingerprint). Any
+  `BADSIG`, `EXPKEYSIG`, `REVKEYSIG` or `EXPSIG`, or an `ERRSIG` with a code other than 9,
+  refuses. `ERRSIG` code 9 or `NO_PUBKEY` (a key that is not in `lib/release-keys`) counts for
+  nothing, refuses nothing and is named in a warning. `TN_SIG_THRESHOLD` is the hook for a
+  2-of-N signing policy (#40).
+- The RELEASE SIGNATURES block (`TN_SIG_FILE`, `TN_SIG_THRESHOLD`, `TN_KEYS_DIR`,
+  `tn_dearmor_keys`, `tn_sig_verdict`, `tn_verify_manifest`, `tn_sig_reason`) is the same text
+  in `update-scripts.sh`, `install.sh` and `tools/release-scripts.sh`;
+  `tools/tests/release_scripts_test.sh` checks that the three copies match. None of them sources
+  `lib/common.sh`, because each runs where `lib/` may not exist yet. `tn_dearmor_keys` makes the
+  binary keyring in shell (awk and `base64`, with the armor headers, the CRC line and the END
+  line dropped), so the updater and the installer need `gpgv` (apt `gpgv`, brew `gnupg`) and
+  never `gpg`.
+- Invariant: every verifier takes its verdict from the gpg or `gpgv` status lines, never from
+  the exit status: `update-scripts.sh`, `install.sh` and `tools/release-scripts.sh` through
+  `tn_sig_verdict`, `tools/cut-release.sh` for a tag's signature (`git verify-tag --raw`), and
+  `lib/common.sh` for node releases and source tags. `gpgv` 2.4.8 exits 0 on `EXPKEYSIG` and
+  `REVKEYSIG`, so a check of the exit status would accept a release signed by an expired or
+  revoked key. Keep the `|| true` after the `gpgv` call and the verdict on the parser in every
   copy.
+- Key files use LF line endings, as `gpg --armor --export` writes them. `release-scripts.sh`
+  (prepare and `--check`) refuses a key file with CR ("<file> has CR line endings: write it with
+  LF line endings (as gpg --armor --export does)") and, where gpg is installed, a key file gpg
+  reads no primary key from ("gpg reads no primary key from <file>: export the key again with
+  gpg --armor --export <fingerprint>"), so neither can ship. The updater's dearmor and the
+  installer's splitter of its embedded keys read CRLF too.
+- `install.sh` carries every key file, sorted by name, in its `TN_RELEASE_KEYS` heredoc, which
+  `release-scripts.sh` writes in the release commit. That embedded set is the installer's trust
+  root: it verifies `MANIFEST.asc` with it, then installs only files that match the signed
+  `MANIFEST`, the release's own `lib/release-keys/*.asc` among them, so a release may add a key.
 - `serial` rises with every release. The updater refuses a serial lower than the installed
   one, and the same serial with a different manifest. `min_updater` is the oldest
   `update-scripts.sh` that can install the release (`--min-updater`; by default the previous
   release's value, and never above the tree's own `SCRIPT_VERSION`). A host whose updater and
   the release's copy of it are both older is told to rerun the installer one-liner.
-- `update-scripts.sh` reads `RELEASE`, fetches `MANIFEST` and `MANIFEST.sig` from that tag and
+- `update-scripts.sh` reads `RELEASE`, fetches `MANIFEST` and `MANIFEST.asc` from that tag and
   verifies them, then downloads every changed file from the tag into a staging dir
   (`$SCRIPT_DIR/.tn-update.XXXXXX`) and checks each one against its MANIFEST hash, its
   `.sha256` sidecar when one is published, and `bash -n`. Only when every file passes does it
   install them, all together. It removes files the release no longer lists and writes
-  `MANIFEST` and `MANIFEST.sig` last, as the record of the installed release. A refusal or a
+  `MANIFEST` and `MANIFEST.asc` last, as the record of the installed release. A refusal or a
   failure leaves the tree as it was. The updater takes no lock, and it no longer redeploys the
   Node Manager UI: it prints `sudo bash ui/install-ui.sh --update` for the operator to run.
 - When the release lists a different `update-scripts.sh`, the running updater stages and
@@ -376,14 +411,26 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   staging dir as the install. `tools/tests/updater_manifest_test.sh` checks it.
 - The one-time bootstrap: hosts on update-scripts 1.1.72 or older know nothing of manifests.
   They fetch each tracked file from main and check it against its `<file>.sha256` sidecar, so
-  their next run installs update-scripts 2.0.0 that way (unsigned, hashes from main), and every
-  update after that is a signed manifest. The first signed run on a tree with neither
-  `lib/allowed_signers` nor an installed `MANIFEST` fetches `lib/allowed_signers` once, through
-  its sidecar on the tag, and checks it against its MANIFEST line. From then on a new signer
-  list arrives only inside a manifest that verifies against the installed one. That is why the
-  sidecars stay: `tools/gen-checksums.sh` still writes them from the three arrays, the
-  `checksums` CI job fails on a stale or missing one, and `release-scripts.sh` requires a fresh
-  sidecar for every array file and for `lib/allowed_signers`.
+  their next run installs the current `update-scripts.sh` that way (unsigned, hashes from
+  main), and every update after that is a signed manifest. The first signed run on a tree with
+  neither `lib/release-keys/*.asc` nor an installed `MANIFEST` warns "First signed release on
+  this host: fetching the release keys through their published checksums (one time only).",
+  takes the key files the not yet verified `MANIFEST` lists, each through its `.sha256`
+  sidecar on the tag (which must exist and match), verifies `MANIFEST.asc` with them, and
+  requires their hashes to be the lines of the verified `MANIFEST`. That is trust on first use,
+  by design; hosts that already carry `lib/release-keys/grantkee.asc` (shipped for node
+  releases) never bootstrap. From then on a new key set arrives only inside a manifest that
+  verifies against the installed keys. That is why the sidecars stay: `tools/gen-checksums.sh`
+  still writes them from the three arrays, the `checksums` CI job fails on a stale or missing
+  one, and `release-scripts.sh` requires a fresh sidecar for every array file, the key files
+  included.
+- Hosts whose updater is the SSH-signature flow of main before `scripts-v2.1.0`
+  (update-scripts 2.0.0, never tagged, but on hosts that cloned main) refuse the
+  OpenPGP-signed release with "Release scripts-v2.1.0 has no MANIFEST.sig; nothing was
+  changed." and need the installer once
+  (`curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes`).
+  The retired `lib/allowed_signers` stays on such a host, unused: the updater removes only
+  files an installed `MANIFEST` lists.
 - Expiry: a release has expired from the day `expires=` names (UTC). It is a reminder that a
   newer signed release is due, not a revocation: nothing refuses an expired release. The
   updater warns on every update run ("Script release <tag> expired on <date>; a newer signed
@@ -395,36 +442,90 @@ the repository root, and `RELEASE` on main (one line, `<tag> <date>`) names the 
   the newest and neither has expired, 1 when an update is pending or either release has
   expired, 2 when no signed release is installed, the installed record or the newest release
   cannot be verified or fetched, or the updater would refuse the newest one (2 wins over 1).
-- Rotating a signing key: updaters verify a new release against the signer list they already
-  have, while `install.sh` and `release-scripts.sh --check` verify it against the list the
-  release ships. A release that changes `lib/allowed_signers` must therefore be signed by a key
-  that is in both the old and the new list.
+- Rotating a signing key: updaters verify a new release against the keys they already have
+  (`lib/release-keys/*.asc` on the host), `install.sh` against its embedded keys, and
+  `release-scripts.sh --check` against the tree's `lib/release-keys`. A release that adds,
+  removes or replaces a key must therefore be signed by a key that is in both the old and the
+  new set.
+- Key expiry: the release key's primary (`4E36D35A4AB61B589861D01AC7173F2377CA7573`) expires
+  2028-10-16. From that date `gpgv` reports `EXPKEYSIG` for it on a host whose installed copy
+  is the old one, and that host refuses every later release, script or node. Only a release
+  that verifies against the installed copy can renew it, so the extended key (re-exported
+  with the new expiry) must ship in a script release signed before that date. A host that has
+  not installed that release by then re-runs the installer, whose embedded keys are the
+  extended ones.
 
-To cut a release:
+To cut a release, use `tools/cut-release.sh` from a clean clone of the repository: untracked
+files count as uncommitted changes, as for `release-scripts.sh` prepare. Every step prints its
+command and asks `[Enter] run / s skip / q quit` (`--yes` runs every step without asking). A
+step whose result is already there is reported as "already done" and passed over, so running
+the same command again carries on where a run stopped. The tool never sets `commit.gpgsign` or
+`user.signingkey`: the commit and the tag name the key with `-S` and `--local-user`.
+`TN_CUT_POLL_SECONDS` (default 30) and `TN_CUT_POLL_TRIES` (default 120) pace its waits.
 
-1. On a clean checkout of the release branch, run
-   `bash tools/release-scripts.sh [--serial N] [--min-updater X.Y.Z] [--date YYYY-MM-DD] [--expires DAYS] scripts-vX.Y.Z`
-   (`--serial` is required for the first release). `--date` (default today, UTC) goes into
-   `RELEASE` and `MANIFEST` `date=`; `expires=` is that date plus `--expires` days (default 90,
-   1 to 3650). It writes `MANIFEST`, `RELEASE` and the tag and signer block in `install.sh`,
-   removes the previous `MANIFEST.sig`, prints the release and expiry dates and the signing
-   commands, and warns when the expiry is on or before today. It never signs.
-2. The release signer signs `MANIFEST` on the machine that holds the hardware key and checks
-   the result with `bash tools/release-scripts.sh --check --tag scripts-vX.Y.Z`. `--check`
-   prints the release date and expiry, fails when `RELEASE` and `MANIFEST` disagree on the
-   date or `expires=` is not after `date=`, and only warns about an expired release unless
-   `--require-fresh` is given (CI does not pass it).
-3. Commit `MANIFEST`, `MANIFEST.sig`, `RELEASE` and `install.sh` and open the release pull
-   request. The `manifest` CI job runs `release-scripts.sh --check --require-sig` on it.
-4. Right after it merges, tag the merge commit on main (`git tag -a scripts-vX.Y.Z`) and push
-   the tag. `RELEASE` on main names the tag from the merge on, and until the tag exists every
-   updater that reads it fails to fetch the release, including the first signed run on a host
-   that has just bootstrapped.
-5. The tag push runs `publish-installer.yml`, which checks that the tag is on main and that
+1. `bash tools/cut-release.sh prep scripts-vX.Y.Z [--serial N] [--key FPR] [--sig-from FILE] [--yes]`
+   opens the release pull request. It fetches origin; checks the signing key (`--key`, else
+   `git config user.signingkey`, else the one key in `lib/release-keys/`) before it creates or
+   enters any branch: the key must be the primary key of a `lib/release-keys/*.asc` file of
+   the branch to be (`origin/main` for a new one), else it refuses ("... is not a primary key of
+   lib/release-keys/*.asc on origin/main") and creates nothing; creates
+   `release/scripts-vX.Y.Z` from `origin/main`, or switches to it; checks that the card answers
+   (`gpg --card-status`); prepares the release with
+   `bash tools/release-scripts.sh [--serial N] scripts-vX.Y.Z`; signs `MANIFEST` with
+   `gpg --armor --detach-sign --local-user <FPR>! --output MANIFEST.asc MANIFEST`; runs
+   `bash tools/release-scripts.sh --check --require-sig --tag scripts-vX.Y.Z`; stages and
+   commits `MANIFEST`, `MANIFEST.asc`, `RELEASE` and `install.sh` in one prompt
+   (`git add ... && git commit -S<FPR>! -F ...`, message `release: scripts-vX.Y.Z`); pushes the
+   branch; and opens the pull request with `gh pr create --base main`.
+   - The signing key is the maintainer's YubiKey. When the tool runs on a remote host, the card
+     answers through a gpg-agent forwarded from the maintainer's client. When no card answers,
+     the sign step prints the gpg command and waits until `MANIFEST.asc` appears: sign
+     `MANIFEST` on the machine with the key and copy the file in. `--sig-from FILE` copies a
+     signature made elsewhere and skips the card check with a warning; the commit is still
+     signed with `-S`, so the key must answer for that step.
+   - The prepare step (`release-scripts.sh`, which never signs) takes `--serial N` (required
+     for the first release), `--min-updater X.Y.Z`, `--date YYYY-MM-DD` (default today, UTC,
+     written to `RELEASE` and to `MANIFEST` `date=`) and `--expires DAYS` (`expires=` is the
+     date plus DAYS, default 90, 1 to 3650). It needs at least one `lib/release-keys/*.asc`,
+     each an armored public key and a row of an updater array. It writes `MANIFEST`, `RELEASE`
+     and the tag and the `TN_RELEASE_KEYS` block in `install.sh`, removes the previous
+     `MANIFEST.asc`, prints the release and expiry dates and the signing command for each key,
+     and warns when the expiry is on or before today. `--check` prints the release date and
+     expiry, fails when `RELEASE` and `MANIFEST` disagree on the date, `expires=` is not after
+     `date=`, or the keys embedded in `install.sh` differ from `lib/release-keys/*.asc`, and
+     only warns about an expired release unless `--require-fresh` is given (CI does not pass
+     it).
+2. The "release manifest" CI job runs `release-scripts.sh --check --require-sig` on the release
+   pull request. Merge it with a merge commit, so the signed release commit stays on main as
+   it was made.
+3. Right after the merge, `bash tools/cut-release.sh tag scripts-vX.Y.Z [--key FPR] [--yes]`
+   tags it. It checks that `origin/main` carries the release (its `MANIFEST` names the tag,
+   `MANIFEST` and `MANIFEST.asc` are the release branch's when that branch is still there, and
+   `--check --require-sig --tag` passes in a clean temporary worktree of `origin/main`); makes
+   the signed tag (`git tag -s --local-user=<FPR>! -m TAG TAG origin/main`); checks it with
+   `git verify-tag --raw`, whose status lines must show a good signature (`GOODSIG` then
+   `VALIDSIG`) by a key of `lib/release-keys/*.asc` on `origin/main` and no `BADSIG`,
+   `EXPKEYSIG`, `REVKEYSIG`, `EXPSIG` or `ERRSIG` (an existing tag passes only this way too; it
+   refuses with "<TAG> carries no good signature by a key of lib/release-keys/*.asc on
+   origin/main" and reports "<TAG> is signed by release key <FPR>" when it passes); pushes it;
+   waits for the tag's `ci.yml` and `publish-installer.yml` runs
+   and prints their conclusions; and checks that `https://install.telcoin.network` names the
+   tag in its `TN_SCRIPTS_TAG` line. `RELEASE` on main names the tag from the merge on, and
+   until the tag exists every updater that reads it fails to fetch the release, including the
+   first signed run on a host that has just bootstrapped.
+4. The tag push runs `publish-installer.yml`, which checks that the tag is on main and that
    `release-scripts.sh --check --tag` passes, then publishes that tag's `install.sh` to GitHub
    Pages as `https://install.telcoin.network`. The `github-pages` environment must allow
-   `scripts-v*` tags. `install.sh` is pinned to its tag and carries the signer list; a copy
+   `scripts-v*` tags. `install.sh` is pinned to its tag and carries the release keys; a copy
    without a tag refuses ("names no release").
+5. `bash tools/cut-release.sh status` prints what exists for the newest `release/*` branch and
+   `scripts-v*` tag: the branch and its commit, the `MANIFEST` serial, whether `MANIFEST.asc`
+   verifies, which release key signed the tag (a key of `lib/release-keys` at the tag) and the
+   tag's CI runs.
+
+The first ceremony: after PR #59 merges, run `bash tools/cut-release.sh prep scripts-v2.1.0
+--serial 1`, merge the release pull request with a merge commit, then run
+`bash tools/cut-release.sh tag scripts-v2.1.0`.
 
 So after you edit any tracked file:
 
@@ -448,8 +549,8 @@ inputs included), `tasks/`, `.github/`, `tools/` (the lints, `gen-checksums.sh`,
 `release-scripts.sh` and `tools/tests/` included) and the Node Manager UI's tests and dev
 runner (`ui/tests/`, `ui/dev/`, `ui/test_*.py`) are documentation or maintainer tooling, are
 not updater-tracked, carry no `.sha256` sidecar, and must never be added to the updater
-arrays. `RELEASE`, `MANIFEST` and `MANIFEST.sig` are release metadata, not tracked files: the
-updater reads them from the tag and keeps the installed `MANIFEST` and `MANIFEST.sig` as its
+arrays. `RELEASE`, `MANIFEST` and `MANIFEST.asc` are release metadata, not tracked files: the
+updater reads them from the tag and keeps the installed `MANIFEST` and `MANIFEST.asc` as its
 record.
 `README.md` must stay at the repo root, because `update-scripts.sh` HEAD-probes it as its
 connectivity check.
@@ -578,7 +679,7 @@ into a pass. The jobs:
   `tools/check-perl-interp.sh` on every tracked `*.sh`, and `tools/check-network-hits.sh`
   (step "network hits").
 - `manifest` ("release manifest"): on a `scripts-v*` tag, `release-scripts.sh --check --tag
-  <tag>`; on a change that touches `MANIFEST`, `MANIFEST.sig` or `RELEASE`,
+  <tag>`; on a change that touches `MANIFEST`, `MANIFEST.asc` or `RELEASE`,
   `release-scripts.sh --check --require-sig`; otherwise nothing is compared.
 - `ui-tests` ("Node Manager UI tests"): on Python 3.10, installs `ui/requirements.txt` and
   `ui/tests/requirements-dev.txt` with `--require-hashes`, runs `python -m pytest -q ui` (there
@@ -616,7 +717,9 @@ approval, and the last push must be approved by someone other than its pusher) a
 commits: sign every commit (`git commit -S`, or `commit.gpgsign=true` with an SSH or GPG
 signing key registered on GitHub). `.github/CODEOWNERS` lists three owners on every line,
 so the ruleset can require that review from a code owner (`require_code_owner_review`);
-`ci_pins_test.sh` requires at least two owners on every owned path. Do not rename a CI job
+`ci_pins_test.sh` requires at least two owners on every owned path. The release path has lines
+of its own, among them `/lib/release-keys/`, `/tools/release-scripts.sh`,
+`/tools/cut-release.sh`, `/MANIFEST`, `/MANIFEST.asc` and `/RELEASE`. Do not rename a CI job
 and do not make a required job skippable (`if:`) or non-blocking (`continue-on-error`,
 `|| true`): `ci_pins_test.sh` rejects both.
 
@@ -654,8 +757,14 @@ line.
   unchanged. `genesis_hash_test.sh` checks them against the `TESTNET_*_SHA256` pins in
   `lib/common.sh`; refresh the files and the pins together.
 - `tools/tests/perl-interp.d/` holds the perl lint's fixtures, and `tools/tests/signing.sh`
-  the release-signing helpers of the updater and installer tests (with a stand-in
-  `ssh-keygen` where the real one is absent).
+  the OpenPGP release-signing helpers of `updater_manifest_test.sh`, `install_test.sh`,
+  `release_scripts_test.sh` and `cut_release_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,
+  `sign_file FILE KEYNAME...` and `sign_file_bad FILE KEYNAME`, with throwaway keys in a
+  temporary `GNUPGHOME`. `REAL_GPG` is 1 when the real `gpg` and `gpgv` work there; elsewhere
+  (the `bash:3.2` and `ubuntu:24.04` images), or with `TN_TEST_FAKE_GPG=1`, stand-in `gpg` and
+  `gpgv` print the real status lines, so the status parser runs in every environment.
+  `cut_release_test.sh` drives `cut-release.sh` against a bare repository on disk with
+  stand-in `gh`, `gpg` and `curl`.
 
 Nothing under `tools/tests/` is updater-tracked or carries a sidecar. The UI's own tests live
 in `ui/tests/` (`helper_test.sh`, `open_ui_test.sh`, `install_ui_test.sh`) and `ui/test_*.py`.

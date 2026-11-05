@@ -19,13 +19,23 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 
 ## Release prep
 
-- `lib/allowed_signers` holds only comments, and there is no `RELEASE`, `MANIFEST` or
-  `MANIFEST.sig` yet, so the signed updater has nothing to install. Closes at release prep: the
-  release signer adds their SSH signing key, signs `MANIFEST` with the hardware key, and pushes the
-  `scripts-v2.0.0` tag right after the release merges (a tag without
-  `lib/allowed_signers.sha256` cannot bootstrap hosts still on update-scripts 1.1.72 or older).
-  From then on, a release that changes `lib/allowed_signers` must be signed by a key that is in
-  both the old and the new list.
+- There is no `RELEASE`, `MANIFEST` or `MANIFEST.asc` on main yet, so the signed updater has
+  nothing to install. `scripts-v2.1.0` is the first signed release (serial 1), signed with
+  OpenPGP by the release key in `lib/release-keys/` that already signs node releases;
+  `scripts-v2.0.0` was never tagged. Closes at the first release ceremony: after PR #59 merges,
+  `bash tools/cut-release.sh prep scripts-v2.1.0 --serial 1`, merge the release pull request with
+  a merge commit, then `bash tools/cut-release.sh tag scripts-v2.1.0` (a tag without the key
+  files' `.sha256` sidecars cannot bootstrap hosts still on update-scripts 1.1.72 or older). From
+  then on, a release that changes `lib/release-keys/` must be signed by a key that is in both
+  the old and the new set.
+- Hosts that cloned main while update-scripts 2.0.0 (the SSH-signature flow) was there refuse
+  `scripts-v2.1.0` ("has no MANIFEST.sig; nothing was changed.") and need the installer once.
+  A leftover `lib/allowed_signers` stays on them, unused. Closes when those hosts have re-run
+  the installer.
+- The release key's primary (`4E36D35A4AB61B589861D01AC7173F2377CA7573`) expires 2028-10-16.
+  The extended key must ship in a script release that hosts install before that date, since
+  only a release that verifies against the installed copy can renew it; hosts that miss it
+  re-run the installer. Closes when the extended key ships.
 - The main-branch ruleset of #30 is a user step. Its JSON in the issue requires eight contexts:
   "fixture tests (macOS bash 3.2)" and "Ubuntu 24.04 VM assertions" are not in it, although
   `tools/tests/ci_pins_test.sh` guards both names. `.github/CODEOWNERS` now lists three owners
@@ -33,15 +43,16 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
   1 plus `require_last_push_approval` means a pull request needs an approval from an owner other
   than its last pusher. Closes when the ruleset is on with the contexts it should require. (The
   `github-pages` deployment policy for `scripts-v*` tags was set on 2026-11-04.)
-- Release signatures are 1-of-1: `lib/allowed_signers` holds one signer, and the updater accepts
-  a manifest signed by any listed key. 2-of-N signatures (#40) are deferred until a second signer
-  key exists.
-- The `.sha256` sidecars stay for the transition. update-scripts 2.0.0 still checks a published
-  sidecar against the signed manifest and needs one to fetch `lib/allowed_signers` the first
-  time; older updaters use the sidecars as their only check. Closes when no host runs
-  update-scripts 1.1.72 or older: then drop the sidecars, `tools/gen-checksums.sh` from the
-  release steps, and the sidecar reads in `update-scripts.sh` (`fetch_published_sha`,
-  `bootstrap_signers`).
+- Release signatures are 1-of-1: `lib/release-keys/` holds one key, and `TN_SIG_THRESHOLD` is 1
+  in the three verifiers (`update-scripts.sh`, `install.sh`, `tools/release-scripts.sh`). 2-of-N
+  signatures (#40) are deferred until a second release key exists; then the constant rises to the
+  number of distinct keys that must sign.
+- The `.sha256` sidecars stay for the transition. update-scripts 2.1.0 still checks a published
+  sidecar against the signed manifest and needs the key files' sidecars to fetch the release keys
+  the first time on a host that has none; older updaters use the sidecars as their only check.
+  Closes when no host runs update-scripts 1.1.72 or older: then drop the sidecars,
+  `tools/gen-checksums.sh` from the release steps, and the sidecar reads in `update-scripts.sh`
+  (`fetch_published_sha`, `bootstrap_keys`).
 
 - The testnet fallbacks for a time without a signed release can go once `v0.17.0-adiri` is
   published and installed everywhere: the legacy Artifact Registry tag listing in

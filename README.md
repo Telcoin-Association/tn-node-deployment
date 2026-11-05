@@ -30,7 +30,7 @@ There is one node identity. Every node installs validator-capable and follows co
 | `setup-observability.sh` | Opt-in centralized logging + health monitoring (testnet add-on) |
 | `setup-vpn.sh` | Opt-in WireGuard admin SSH for the Telcoin Association (testnet add-on) |
 | `lib/common.sh` | Shared functions used by the above scripts (not run directly) |
-| `lib/allowed_signers`, `lib/release-keys/` | The keys a script release and a node release must be signed with (see [How updates are verified](#how-updates-are-verified)) |
+| `lib/release-keys/` | The OpenPGP keys a script release and a node release must be signed with (see [How updates are verified](#how-updates-are-verified)) |
 | `open-ui.sh` | Run on your own computer: opens the SSH tunnel to the [web UI](#web-ui-optional) and the browser |
 
 > `setup-observer.sh` and `setup-validator.sh` still exist as thin deprecated shims that forward to `setup-node.sh`.
@@ -142,7 +142,7 @@ All scripts are interactive and guide you through each step. Work through these 
 curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
 ```
 
-The installer downloads one signed release of these scripts, checks its `MANIFEST.sig` against the release signers built into the installer and every file against its `MANIFEST` hash, and only then puts the files in `~/telcoin-node-scripts`. When any check fails nothing is installed, and an existing install stays as it was. To replace an existing install without the prompt, end the line with `| bash -s -- --yes`. It needs curl or wget, tar, and `ssh-keygen` from OpenSSH 8.2 or later, which stock Ubuntu and macOS have. This is the only install path: a copy of `install.sh` taken from the `main` branch names no release and refuses to run, and a plain `git clone` of `main` is not a verified release. See [How updates are verified](#how-updates-are-verified).
+The installer downloads one signed release of these scripts, checks its `MANIFEST.asc` with `gpgv` against the release keys built into the installer and every file against its `MANIFEST` hash, and only then puts the files in `~/telcoin-node-scripts`. When any check fails nothing is installed, and an existing install stays as it was. To replace an existing install without the prompt, end the line with `| bash -s -- --yes`. It needs curl or wget, tar, `base64`, a SHA-256 tool and `gpgv`, which stock Ubuntu has (otherwise `sudo apt-get install -y gpgv`; on macOS `brew install gnupg`). This is the only install path: a copy of `install.sh` taken from the `main` branch names no release and refuses to run, and a plain `git clone` of `main` is not a verified release. See [How updates are verified](#how-updates-are-verified).
 
 **2. Run the guided setup**
 ```bash
@@ -327,7 +327,7 @@ The scripts follow Linux security best practices:
 - **Strict file permissions**: key files are mode 600 (readable only by the service user). The node-keys directory and the data directory are mode 700.
 - **Passphrase never on a command line, in the unit or in the start script**: systemd hands the node its BLS passphrase from an encrypted credential, and the node reads it from its standard input. See [Passphrase delivery](#passphrase-delivery).
 - **Systemd hardening**: a source, release or existing-binary install runs in a systemd sandbox: `NoNewPrivileges`, `ProtectSystem=strict` with the data directory the only writable path (plus the node log directory with observability on), `ProtectHome`, `PrivateTmp`, `PrivateDevices`, an empty capability set, `RestrictAddressFamilies`, `MemoryDenyWriteExecute` and a system-call filter, among others. A Docker install's container drops every capability, runs with `no-new-privileges`, a read-only root filesystem, a process limit and a memory cap. `check-node.sh` reports the unit's `systemd-analyze security` score.
-- **Verified releases**: a script update installs only a release signed by a key in `lib/allowed_signers`, and a node release is installed or run only after its GPG signature and hashes check out. See [How updates are verified](#how-updates-are-verified).
+- **Verified releases**: a script update installs only a release whose `MANIFEST` carries a good OpenPGP signature by a key in `lib/release-keys/`, and a node release is installed or run only after its signature by those same keys and its hashes check out. See [How updates are verified](#how-updates-are-verified).
 - **RPC localhost only**: the RPC port defaults to 127.0.0.1 (localhost only). It is never exposed to the internet by default, and on mainnet `edit-config.sh` refuses to bind it to `0.0.0.0`; serve a public endpoint through Caddy instead.
 - **CVE-2026-31431 check**: the setup scripts check for the Copy Fail mitigation during preflight and will not proceed until it is applied.
 
@@ -1019,13 +1019,13 @@ Store your BLS passphrase separately from the key files — in a password manage
 bash ~/telcoin-node-scripts/update-scripts.sh
 ```
 
-The updater installs the latest signed release of these scripts. It reads the release tag from `RELEASE` on `main`, downloads that tag's `MANIFEST` and `MANIFEST.sig`, and checks the signature against `lib/allowed_signers` (see [How updates are verified](#how-updates-are-verified)). It then lists the files whose hash differs from the manifest and asks `Install these changes? [Y/n]` (Enter means yes). Every changed file is downloaded from the release tag and checked before any is installed: it must match its `MANIFEST` hash, its `.sha256` sidecar when one is published, and `bash -n` when it is a script. Then all the changed files are installed together, files the release no longer ships are removed, and `MANIFEST` and `MANIFEST.sig` in the install directory record the installed release. On any refusal or failure the tree is left exactly as it was.
+The updater installs the latest signed release of these scripts. It reads the release tag from `RELEASE` on `main`, downloads that tag's `MANIFEST` and `MANIFEST.asc`, and checks the signature with `gpgv` against the release keys in `lib/release-keys/` (see [How updates are verified](#how-updates-are-verified)). It then lists the files whose hash differs from the manifest and asks `Install these changes? [Y/n]` (Enter means yes). Every changed file is downloaded from the release tag and checked before any is installed: it must match its `MANIFEST` hash, its `.sha256` sidecar when one is published, and `bash -n` when it is a script. Then all the changed files are installed together, files the release no longer ships are removed, and `MANIFEST` and `MANIFEST.asc` in the install directory record the installed release. On any refusal or failure the tree is left exactly as it was.
 
 When a release ships a new `update-scripts.sh`, the running updater first downloads and verifies every changed file, the new updater among them, and then runs the release's verified copy from its staging directory. That copy installs the whole release, itself included, in one pass.
 
 The updater refuses, with nothing changed:
 
-- a manifest whose signature does not verify against `lib/allowed_signers`, or that is malformed or names a different release than `RELEASE`;
+- a manifest that no release key in `lib/release-keys/` signed, or that carries a bad, expired or revoked signature (`The release manifest is not signed by a Telcoin release key (<reason>); nothing was changed.`), or that is malformed or names a different release than `RELEASE`;
 - a release older than the installed one (a lower `serial`), or a different manifest that reuses the installed serial;
 - a release whose `min_updater` is newer than both the running updater and the release's own copy of it. It then prints the installer one-liner, which installs a current release from scratch.
 
@@ -1037,7 +1037,7 @@ sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update
 
 (or `sudo bash ~/telcoin-node-scripts/ui/install-ui.sh` when the UI is not installed yet). It also prints `sudo systemctl restart telcoin`; on a committee node, restart with `edit-config.sh` menu item 12 (Restart node) instead, which waits for the epoch boundary.
 
-**Release check.** `bash ~/telcoin-node-scripts/update-scripts.sh --check` reports without changing anything: it needs no root, installs nothing, asks nothing and prints no banner (it downloads into a temporary directory under `$TMPDIR` and removes it). It prints `Installed:` and `Newest:` lines (tag, serial, release date, expiry, each `(signature verified)` against `lib/allowed_signers`), then `No update pending: every file matches <tag>.` or `Update pending: N file(s) to update, M to remove. Run: bash <dir>/update-scripts.sh`, and on success `Up to date with <tag>; it expires <date> (in N days).` Exit status:
+**Release check.** `bash ~/telcoin-node-scripts/update-scripts.sh --check` reports without changing anything: it needs no root, installs nothing, asks nothing and prints no banner (it downloads into a temporary directory under `$TMPDIR` and removes it). It prints `Installed:` and `Newest:` lines (tag, serial, release date, expiry, each `(signature verified)` against `lib/release-keys/`), then `No update pending: every file matches <tag>.` or `Update pending: N file(s) to update, M to remove. Run: bash <dir>/update-scripts.sh`, and on success `Up to date with <tag>; it expires <date> (in N days).` Exit status:
 
 | Code | Meaning |
 |---|---|
@@ -1047,9 +1047,17 @@ sudo bash ~/telcoin-node-scripts/ui/install-ui.sh --update
 
 **Release expiry.** Each release's `MANIFEST` carries `date=` (the release date) and `expires=` (90 days later unless the release signer chose another). From the expiry day on (UTC) the release has expired: a newer signed release is overdue, but the old one still verifies and still installs. An update run warns `Script release <tag> expired on <date>; a newer signed release is overdue. Installing it anyway.` and `The release still verifies. If no newer one appears soon, tell support@telcoin.org.`, then goes on; `install.sh` prints the same before it installs, and `--check` warns `Installed release <tag> expired on <date> (N days ago); a newer signed release is overdue.` A 2.0.0 release has no expiry and is reported as such.
 
-`update-scripts.sh --help` prints the usage without contacting GitHub, and any other argument is refused with exit status 2. The updater exits 0 when everything is current, updated, or the update is declined, and 1 when GitHub cannot be reached or a release is refused or fails verification. It reads its confirmation from standard input and has no `--yes` option; to answer from a script, run `printf 'y\n' | bash update-scripts.sh`. It needs `ssh-keygen` from OpenSSH 8.2 or later, and runs under macOS `/bin/bash` 3.2 as well as Linux bash.
+`update-scripts.sh --help` prints the usage without contacting GitHub, and any other argument is refused with exit status 2. The updater exits 0 when everything is current, updated, or the update is declined, and 1 when GitHub cannot be reached or a release is refused or fails verification. It reads its confirmation from standard input and has no `--yes` option; to answer from a script, run `printf 'y\n' | bash update-scripts.sh`. It needs `gpgv` (`sudo apt-get install -y gpgv` where it is missing; `brew install gnupg` on macOS), and runs under macOS `/bin/bash` 3.2 as well as Linux bash. Without `gpgv` it stops with `gpgv (GnuPG) is needed to verify script releases and is not installed; nothing was changed.`
 
-**The first update from an older install.** A host whose updater is 1.1.72 or older does not know signed releases yet. Its next `update-scripts.sh` run takes update-scripts 2.0.0 through the old channel, where each file is checked against the `.sha256` sidecar published on `main` but nothing is signed; `lib/allowed_signers` arrives once through its sidecar the same way. From then on every update is a signed manifest. To skip that unsigned step, reinstall with the installer one-liner instead: it replaces the whole install directory with a verified release, so local edits to the scripts are lost.
+**The first update from an older install.** A host whose updater is 1.1.72 or older does not know signed releases yet. Its next `update-scripts.sh` run takes the current `update-scripts.sh` through the old channel, where each file is checked against the `.sha256` sidecar published on `main` but nothing is signed. The new updater then finds no release key and no installed release, warns `First signed release on this host: fetching the release keys through their published checksums (one time only).`, takes the key files the release lists through their sidecars on the tag, verifies `MANIFEST.asc` with them and requires them to match the verified `MANIFEST`. From then on every update is a signed manifest checked against the installed keys. To skip that unsigned step, reinstall with the installer one-liner instead: it replaces the whole install directory with a verified release, so local edits to the scripts are lost.
+
+**A host that cloned `main` before `scripts-v2.1.0`.** Its updater, update-scripts 2.0.0 (never released as a tag), checks SSH signatures, which no release carries: it stops with `Release scripts-v2.1.0 has no MANIFEST.sig; nothing was changed.` Run the installer once, with `--yes` to replace the old install:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash -s -- --yes
+```
+
+The retired `lib/allowed_signers` file stays in the install directory, unused; you may delete it.
 
 After that update, the first root run of `update-node.sh`, `edit-config.sh`, `install-caddy.sh` or `prepare-stake.sh` moves the host to the root-owned layout (see [System Layout](#system-layout)), and `sudo bash edit-config.sh --migrate-credential`, at a time you choose, moves the passphrase to the encrypted credential (see [Passphrase delivery](#passphrase-delivery)). Docker installs take the new start script and unit with their next `update-node.sh` run.
 
@@ -1062,19 +1070,25 @@ After that update, the first root run of `update-node.sh`, `edit-config.sh`, `in
 A script release is a `scripts-vX.Y.Z` tag of this repository; `RELEASE` on `main` names the latest one and its date. The tag holds two files besides the scripts:
 
 - `MANIFEST`: `format=1`, `release=<tag>`, a `serial` that every release raises, `min_updater` (the oldest `update-scripts.sh` that may install it), from `scripts-v2.1.0` on `date=YYYY-MM-DD` (the release date) and `expires=YYYY-MM-DD` (see [Keeping Scripts Up to Date](#keeping-scripts-up-to-date)), and one `sha256  <hash>  <path>` line for every file in the release. Updaters and installers of 2.0.0 ignore the two date keys.
-- `MANIFEST.sig`: an SSH signature over `MANIFEST` by a key listed in `lib/allowed_signers`, with principal `release@telcoin.org` and namespace `tn-node-scripts`.
+- `MANIFEST.asc`: detached OpenPGP signatures over `MANIFEST`, one armored block per signer, by the release keys in `lib/release-keys/*.asc`. These are the same keys that sign node releases (below). `scripts-v2.1.0` is the first signed release (serial 1).
 
-The installer and the updater install a release only when the signature verifies, every file matches its manifest line, and the serial is not lower than the installed one. They install all of it or none of it. The installer carries its own copy of the signer list, written into it at the release tag; the updater uses the `lib/allowed_signers` already on the host, so a release that changes the signer list must be signed by a key that is in both the old list and the new one. To check the installed release by hand:
+The installer and the updater install a release only when the signature verifies, every file matches its manifest line, and the serial is not lower than the installed one. They install all of it or none of it. A signature verifies when `gpgv`, given a keyring made from `lib/release-keys/*.asc` alone, reports good signatures by at least `TN_SIG_THRESHOLD` of those keys (one today) and no bad, expired or revoked one: the status rules are the ones for node releases below. The installer carries its own copy of the keys, written into it at the release tag; the updater uses the `lib/release-keys/*.asc` already on the host, so a release that changes the key set must be signed by a key that is in both the old set and the new one. Both read the key files with `base64` and need `gpgv`, not `gpg`.
+
+To check a release by hand you need `gpg` and `gpgv`. Make the keyring once, in an empty directory, from the keys you already trust; the node release check below uses the same keyring:
 
 ```bash
-cd ~/telcoin-node-scripts
-ssh-keygen -Y verify -f lib/allowed_signers -I release@telcoin.org \
-    -n tn-node-scripts -s MANIFEST.sig < MANIFEST
-awk '$1 == "sha256" { print $2 "  " $3 }' MANIFEST | sha256sum -c
-grep -E '^(release|serial|date|expires)=' MANIFEST
+for f in ~/telcoin-node-scripts/lib/release-keys/*.asc; do gpg --dearmor < "$f"; done > release-keys.gpg
 ```
 
-`ssh-keygen` must print a line that starts `Good "tn-node-scripts" signature for release@telcoin.org`, every file must print `OK`, and the last line shows which release it is and until when it is current. To check a release tag before you install it, clone the tag (`git clone --quiet --branch scripts-vX.Y.Z https://github.com/Telcoin-Association/tn-node-deployment.git tnd-check`) and run the same commands in it, verifying against the `lib/allowed_signers` you already trust (`-f ~/telcoin-node-scripts/lib/allowed_signers`); [OPERATOR.md section 4.10](OPERATOR.md#410-verifying-a-release-by-hand) walks through it.
+Then check the installed release:
+
+```bash
+gpgv --status-fd 1 --keyring ./release-keys.gpg ~/telcoin-node-scripts/MANIFEST.asc ~/telcoin-node-scripts/MANIFEST
+(cd ~/telcoin-node-scripts && awk '$1 == "sha256" { print $2 "  " $3 }' MANIFEST | sha256sum -c)
+grep -E '^(release|serial|date|expires)=' ~/telcoin-node-scripts/MANIFEST
+```
+
+`gpgv` must print a `[GNUPG:] GOODSIG` line and its `[GNUPG:] VALIDSIG` line, which ends in the primary fingerprint of a shipped key (`4E36D35A4AB61B589861D01AC7173F2377CA7573` today), and no `BADSIG`, `EXPSIG`, `EXPKEYSIG`, `REVKEYSIG` or `ERRSIG` line. Read those status lines, not the exit status: `gpgv` exits 0 for an expired or revoked key. Every file must print `OK`, and the last line shows which release it is and until when it is current. To check a release tag before you install it, clone the tag (`git clone --quiet --branch scripts-vX.Y.Z https://github.com/Telcoin-Association/tn-node-deployment.git tnd-check`) and run the same `gpgv` and `sha256sum` lines on its `MANIFEST.asc` and `MANIFEST`, with the keyring made from the keys you already trust; [OPERATOR.md section 4.10](OPERATOR.md#410-verifying-a-release-by-hand) walks through it.
 
 ### Node releases
 
@@ -1101,7 +1115,7 @@ TAG=vX.Y.Z-adiri   # a published release tag
 base=https://github.com/Telcoin-Association/telcoin-network/releases/download/$TAG
 curl -fsSL -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.asc" -O "$base/IMAGE_DIGEST" \
   -O "$base/telcoin-network-$TAG-x86_64-unknown-linux-gnu.tar.gz"
-cat ~/telcoin-node-scripts/lib/release-keys/*.asc | gpg --dearmor > release-keys.gpg
+for f in ~/telcoin-node-scripts/lib/release-keys/*.asc; do gpg --dearmor < "$f"; done > release-keys.gpg
 gpgv --status-fd 1 --keyring ./release-keys.gpg SHA256SUMS.asc SHA256SUMS
 git clone --quiet https://github.com/Telcoin-Association/telcoin-network.git tn-main
 git -C tn-main archive "refs/tags/$TAG" chain-configs | tar -xf -
@@ -1680,8 +1694,19 @@ prints the exact fix command.
 > independently, so entries are titled `<script> vX.Y.Z`. Earlier entries used
 > a flat "all scripts bumped to vX.Y.Z" convention.
 
-### update-scripts v2.1.0 — release expiry and a read-only --check
-`update-scripts.sh v2.1.0` installs `scripts-v2.1.0`, the second signed release (serial 2).
+### update-scripts v2.1.0 — OpenPGP-signed releases, release expiry and a read-only --check
+`update-scripts.sh v2.1.0` installs `scripts-v2.1.0`, the first signed script release (serial 1).
+
+- Releases are signed with OpenPGP: `MANIFEST.asc` holds detached signatures over `MANIFEST` by
+  the release keys in `lib/release-keys/*.asc`, the keys that already sign node releases, and
+  `gpgv` checks them with the status rules node releases use. At least `TN_SIG_THRESHOLD` keys
+  (one) must sign; a bad, expired or revoked signature refuses. The updater needs `gpgv`, not
+  `ssh-keygen`. `lib/allowed_signers` and `MANIFEST.sig` are retired.
+- A host with no release key and no installed release takes the keys once from the release,
+  each through its published `.sha256`, and requires them to match the verified `MANIFEST`.
+- A host running update-scripts 2.0.0 from `main` (the retired SSH-signature flow, never tagged)
+  stops with `Release scripts-v2.1.0 has no MANIFEST.sig; nothing was changed.` and needs the
+  installer run once (`... | bash -s -- --yes`).
 
 - `MANIFEST` can carry `date=YYYY-MM-DD` and `expires=YYYY-MM-DD` after `min_updater=`; each
   appears once at most and must be a real calendar date, or the manifest is malformed. Updaters
@@ -1896,6 +1921,11 @@ The server's copies of the release tag rule and the image repositories match lib
 The UI still refuses devnet, and it never looks up a newest release or image for it.
 
 ### update-scripts v2.0.0 — signed script releases, all-or-nothing install
+> Retired: `scripts-v2.0.0` was never tagged, and the SSH-signature scheme this entry describes
+> (`MANIFEST.sig`, `lib/allowed_signers`, `ssh-keygen -Y verify`) never signed a release. The
+> first signed release is `scripts-v2.1.0`, signed with OpenPGP (see update-scripts v2.1.0
+> above). The rest of this entry is kept as history.
+
 `update-scripts.sh v2.0.0` installs the first signed script release, `scripts-v2.0.0`, which
 moves every operator script to 2.0.0 (entries below). From this release on the updater reads
 `RELEASE` on main (tag and date), fetches `MANIFEST` and `MANIFEST.sig` from that `scripts-v*`
@@ -3397,9 +3427,11 @@ For older entries (v1.1.39 and earlier), see [CHANGELOG.md](./CHANGELOG.md).
 Operators install and update these scripts from signed `scripts-vX.Y.Z` release tags (see
 [How updates are verified](#how-updates-are-verified)), not from `main`: a merge reaches them
 only once a maintainer cuts a release, signs its `MANIFEST` with a key in
-`lib/allowed_signers` and pushes the tag. `main` still serves `RELEASE`, the pointer to the
-latest tag, and the `.sha256` sidecars that older updaters read once on their way to the first
-signed release. `tools/release-scripts.sh` prepares a release and `--check` verifies one. The
+`lib/release-keys/` (`MANIFEST.asc`) and pushes the tag. `main` still serves `RELEASE`, the
+pointer to the latest tag, and the `.sha256` sidecars that older updaters read once on their way
+to the first signed release. `tools/cut-release.sh` runs the release steps (`prep`, then `tag`
+after the release pull request merges; see AGENTS.md), `tools/release-scripts.sh` prepares a
+release and `--check` verifies one. The
 CI gates in `.github/workflows/ci.yml` run on every pull request and push to `main`:
 
 - **Shell parse + lint** — `bash -n` on every script under both modern bash and macOS's

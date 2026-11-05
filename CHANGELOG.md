@@ -96,6 +96,12 @@ from being pinned on a devnet node. The real guard is the digest pin together wi
 ### Mainnet hardening round, October 2026 -- scripts-v2.0.0, update-scripts v2.0.0
 Full release note: [CHANGELOG/scripts-v2.0.0.md](CHANGELOG/scripts-v2.0.0.md).
 
+Note (November 2026): `scripts-v2.0.0` was never tagged. The SSH signatures below
+(`MANIFEST.sig` against `lib/allowed_signers`) are retired, and the single image package named
+below never held a release. The first signed script release is `scripts-v2.1.0` (serial 1),
+signed with OpenPGP (`MANIFEST.asc`, `lib/release-keys/`), and from it each network has its own
+image package; see [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
+
 This round prepares the scripts for mainnet and is the first tagged, signed script release,
 `scripts-v2.0.0`. Every operator script moves to 2.0.0, with lib/common 2.0.0, lib/fallback
 1.1.0, lib/observability 2.0.0, testnet add-ons 1.1.0, telcoin-ui 2.0.0 (`HELPER_API` 3) and

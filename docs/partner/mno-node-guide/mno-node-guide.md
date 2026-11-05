@@ -252,7 +252,7 @@ Run the installer as your normal user, without `sudo`, so the scripts land in yo
 curl --proto '=https' --tlsv1.2 -fsSL https://install.telcoin.network | bash
 ```
 
-The installer needs `curl` or `wget`, `tar`, `sha256sum` (or `shasum`) and `ssh-keygen` from OpenSSH 8.2 or later.
+The installer needs `curl` or `wget`, `tar`, `base64`, `sha256sum` (or `shasum`) and `gpgv`; stock Ubuntu has them all, and `sudo apt-get install -y gpgv` adds `gpgv` where it is missing.
 If `~/telcoin-node-scripts` already exists, it asks `Re-install and overwrite? [y/N]`; `| bash -s -- --yes` answers yes without asking.
 It moves the old tree aside first and puts it back if the new one does not install.
 To pick up newer scripts on an existing install, run `bash ~/telcoin-node-scripts/update-scripts.sh` instead (see [Keep the scripts current](#keep-the-scripts-current)).
@@ -261,8 +261,8 @@ To pick up newer scripts on an existing install, run `bash ~/telcoin-node-script
 
 Nothing the scripts install is taken from a branch on trust.
 
-- The scripts come from a signed release tag, `scripts-vX.Y.Z`. Each release carries a `MANIFEST` with the SHA-256 of every file and a signature, `MANIFEST.sig`. The installer holds the release signing key and the tag it installs. It checks the signature with `ssh-keygen -Y verify`, then every file against its manifest hash, and installs nothing if one check fails. `update-scripts.sh` checks each later release the same way against `lib/allowed_signers` in your install.
-- Node releases are checked against the GPG keys in `lib/release-keys/*.asc`, which arrive with the signed scripts. A release publishes `SHA256SUMS` and its signature `SHA256SUMS.asc`. The scripts run `gpgv` on them and accept the release only when a key they ship signed it. A bad, expired or revoked signature refuses it; a further signature by a key that has not shipped yet only draws a warning. `SHA256SUMS` lists the binary tarball, the Docker image digest (`IMAGE_DIGEST`) and the release's three chain-config files, and the scripts check what they use against it.
+- The scripts come from a signed release tag, `scripts-vX.Y.Z`. Each release carries a `MANIFEST` with the SHA-256 of every file and an OpenPGP signature over it, `MANIFEST.asc`, by the Telcoin release keys. The installer holds those keys and the tag it installs. It checks the signature with `gpgv`, then every file against its manifest hash, and installs nothing if one check fails. `update-scripts.sh` checks each later release the same way against the keys in `lib/release-keys/` of your install. A bad, expired or revoked signature refuses the release.
+- Node releases are checked against the same keys, the GPG keys in `lib/release-keys/*.asc`, which arrive with the signed scripts. A release publishes `SHA256SUMS` and its signature `SHA256SUMS.asc`. The scripts run `gpgv` on them and accept the release only when a key they ship signed it. A bad, expired or revoked signature refuses it; a further signature by a key that has not shipped yet only draws a warning. `SHA256SUMS` lists the binary tarball, the Docker image digest (`IMAGE_DIGEST`) and the release's three chain-config files, and the scripts check what they use against it.
 - The node runs release tags only: `vX.Y.Z-adiri` on testnet, `vX.Y.Z` on mainnet. A branch, a commit id or `latest` is refused at setup and at every update. On testnet a release candidate, `vX.Y.Z-adiri-rcN`, runs only when you name its tag; no default picks one.
 - Setup, `update-node.sh` and the image change in `edit-config.sh` hold every release to the oldest one the scripts support on the network, `v0.13.0-adiri` on testnet; mainnet gets its floor at launch. An older release is refused before the node changes.
 - Docker installs run the image by digest (`<repository>@sha256:<digest>`), so a tag that moves later cannot change what the node runs.
@@ -645,7 +645,8 @@ bash ~/telcoin-node-scripts/update-scripts.sh
 ```
 
 Run it as your normal user, without `sudo`.
-It looks up the newest scripts release, downloads its `MANIFEST` and `MANIFEST.sig`, and checks the signature against `lib/allowed_signers` in your install.
+It looks up the newest scripts release, downloads its `MANIFEST` and `MANIFEST.asc`, and checks the signature with `gpgv` against the release keys in `lib/release-keys/` of your install.
+If it stops with `gpgv (GnuPG) is needed to verify script releases and is not installed`, run `sudo apt-get install -y gpgv` and run it again.
 It refuses a release older than the one you have (each manifest carries a serial number), and one that reuses your serial with different content.
 It lists what changes and asks `Install these changes? [Y/n]`, then downloads every changed file and checks each against its manifest hash before it installs any of them.
 The files install together or not at all: on any refusal or failed check the tree stays as it was, and the run exits 1.

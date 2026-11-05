@@ -47,8 +47,10 @@ build on mainnet and builds with a warning on testnet.
 Script releases
 ---------------
 
-The same keys sign the script releases of this repository. A release's
-MANIFEST.asc holds detached OpenPGP signatures over its MANIFEST, and
+The same maintainer key signs node releases and script releases: these keys
+sign the script releases of this repository too, from scripts-v2.1.0, the
+first signed one. A release's MANIFEST.asc holds detached OpenPGP signatures
+over its MANIFEST, and
 update-scripts.sh and install.sh (whose embedded copy of these files is its
 trust root) run gpgv --status-fd 1 against a keyring made from these files
 alone. The release is accepted when at least TN_SIG_THRESHOLD of these keys
@@ -83,7 +85,10 @@ Before a key expires, its maintainer extends the expiry, re-exports the public
 key and ships the new file in a script release, the same way a key is added
 below. Hosts must install that script release before the old expiry date: from
 that date gpgv reports EXPKEYSIG for every release signed with the key, and the
-scripts refuse those releases.
+scripts refuse those releases, script releases included. Only a script release
+that verifies against the copy a host already has can renew it, so a host that
+misses the window re-runs the installer, whose embedded keys are the renewed
+ones. grantkee.asc expires 2028-10-16.
 
 Adding or removing a key
 ------------------------
