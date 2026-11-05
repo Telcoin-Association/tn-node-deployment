@@ -7,7 +7,8 @@
 # old single ghcr package is recognised but never pulled) and is
 # required at keygen, --release-tag and source or release installs are refused;
 # finalize holds the image keygen recorded to the pull rule and the build-feature
-# check before the config, the unit and the container; the
+# check before the config, the unit and the container; the interactive image
+# prompt stops at the end of input; the
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
 # edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
@@ -92,6 +93,21 @@ check "mainnet prompt: a typed digest of no installed release is refused" yes "$
 check "mainnet prompt: the release tag typed next is accepted" yes "$( [[ "$rc" != 99 ]] && grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
 rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE='${R}@sha256:${D64}'; ${PD_STUBS}; _preflight_docker")"
 check "testnet preflight: a digest alone is taken as before" no "$(refused)"
+# At the end of input (stdin /dev/null) the image prompt stops with a refusal, with
+# or without a default, instead of asking again: read is wrapped so that a prompt
+# loop ends the subshell with rc 99 at the fourth prompt rather than spinning.
+EOF_READ='read() { EOF_N=$((${EOF_N:-0} + 1)); [ "$EOF_N" -le 3 ] || exit 99; builtin read "$@"; }'
+not_usable() { cat "$T/sn.out" "$T/sn.err" | grep -c 'Not usable'; }
+rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; ${EOF_READ}; _preflight_docker" < /dev/null)"
+check "image prompt at the end of input, no default: refused, not asked again" "1 0" "$rc $(not_usable)"
+check "image prompt at the end of input: says no usable image was given" yes \
+    "$(grep -qF 'The input ended at the Docker image prompt, so no usable image was given and the Docker install stops.' "$T/sn.err" && echo yes || echo no)"
+check "image prompt at the end of input: no docker call" no "$(grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+rc="$(sn "NETWORK=testnet RELEASE_TAG= DOCKER_IMAGE=; JSON_MODE=false; ${PD_STUBS}; latest_docker_image() { printf '%s\\n' '${R}@sha256:${D64}'; }; ${EOF_READ}; _preflight_docker" < /dev/null)"
+check "image prompt at the end of input, with a default: refused too, the default not taken" "1 0 no" \
+    "$rc $(not_usable) $(grep -q DOCKER_RAN "$T/sn.out" && echo yes || echo no)"
+unset -f not_usable
+unset EOF_READ
 flags "docker on devnet without --docker-image refused (no signed release to take the newest from)" 1 devnet docker "" "" ""
 check "docker on devnet without --docker-image: the refusal asks for one" yes "$(grep -q 'A devnet Docker install needs --docker-image' "$T/sn.err" && echo yes || echo no)"
 # Devnet: an image by digest from the devnet repository or the dev package, never

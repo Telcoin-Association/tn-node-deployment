@@ -1002,8 +1002,13 @@ _preflight_docker() {
         local default_image typed=""
         default_image="$(latest_docker_image "$NETWORK")" || default_image=""
         while true; do
-            read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
-  [${default_image:-none}]: " input
+            # At the end of input there is nothing more to ask: stop, rather than
+            # take the default no one confirmed or ask again for ever.
+            if ! read -r -p "  Docker image: a release tag, ${repo}@sha256:<digest>, or Enter for
+  [${default_image:-none}]: " input; then
+                echo ""
+                setup_fail "The input ended at the Docker image prompt, so no usable image was given and the Docker install stops. Nothing was pulled and no container was started."
+            fi
             tag=""
             if [[ -z "$input" ]]; then
                 DOCKER_IMAGE="$default_image"
