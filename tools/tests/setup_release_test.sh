@@ -9,8 +9,9 @@
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
 # edit-config.sh's set_docker_image resolves a release tag to its digest, runs only
-# a digest, and records the image in .node-meta; on a devnet host (NETWORK=devnet in
-# .node-meta) it takes a digest only. In both, the image's build-feature check
+# a digest, and records the image in .node-meta, as its interactive menu
+# (edit_docker_image) does; on a devnet host (NETWORK=devnet in .node-meta) it
+# takes a digest only. In all of them, the image's build-feature check
 # (tn_docker_image_network_ok, stubbed here and tested in docker_image_test.sh)
 # runs after the pull and its digest check and before anything uses the image; a
 # refusal stops the install or the change.
@@ -300,6 +301,49 @@ rc="$(ec "${R}@sha256:$(printf '%s' "$D64" | tr 0 a)")"
 check "edit: a digest alone runs as given, tag removed from .node-meta" "0 yes" "$rc $(grep -qx 'unset RELEASE_TAG' "$T/meta.log" && echo yes || echo no)"
 rc="$( ( set +e; source "$T/ec/edit-config.sh" >/dev/null 2>&1; set +e; edit_error() { :; }; launch_current_form() { echo called > "$T/lcf"; }; swap_docker_image "${R}:v0.16.0-adiri" ) >/dev/null 2>&1; printf '%s' "$?")"
 check "edit: swap_docker_image refuses a tag before touching anything" "1 no" "$rc $([[ -e "$T/lcf" ]] && echo yes || echo no)"
+
+# The interactive image menu (edit_docker_image) on testnet: the release tag typed
+# at the prompt resolves to its digest, the image is pulled and held under it, its
+# build features are checked, and only then is the menu locked, the start script
+# swapped and the image recorded (edit_record_image, through meta_set). A refusal
+# leaves all three alone.
+ecm() {
+    ( set +e
+      # shellcheck source=/dev/null
+      source "$T/ec/edit-config.sh" >/dev/null 2>&1
+      set +e
+      TARGET_LAUNCH_FILE="$T/tn-start-docker"
+      tn_detect_network() { printf 'testnet\n'; }
+      read_launch_line() { printf 'exec docker run --rm %s@sha256:%s telcoin node --http\n' "$R" "$(printf '%s' "$D64" | tr 0 b)"; }
+      tn_docker_image_for_tag() { printf '%s@sha256:%s\n' "$R" "$D64"; }
+      docker() { printf '%s\n' "$*" >> "$T/docker.log"; }
+      tn_docker_holds_digest() { echo held >> "$T/docker.log"; return 0; }
+      tn_docker_image_network_ok() { printf 'check %s %s\n' "$1" "$2" >> "$T/docker.log"; return "${FEAT_RC:-0}"; }
+      menu_lock() { echo lock >> "$T/docker.log"; }
+      backup_edit_targets() { echo backup >> "$T/docker.log"; }
+      swap_docker_image() { printf 'swap %s\n' "$1" >> "$T/docker.log"; }
+      meta_set() { printf '%s=%s\n' "$1" "$2" >> "$T/meta.log"; }
+      meta_unset() { printf 'unset %s\n' "$1" >> "$T/meta.log"; }
+      apply_changes() { echo apply >> "$T/docker.log"; }
+      edit_docker_image ) <<< "$1" > "$T/ec.out" 2>&1
+}
+calls() { tr '\n' '|' < "$T/docker.log" | sed 's/|$//'; }
+rm -f "$T/meta.log"
+: > "$T/docker.log"
+ecm v0.17.0-adiri
+check "edit menu: pull, digest check, feature check, then lock, swap and apply" \
+    "pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}|lock|backup|swap ${R}@sha256:${D64}|apply" "$(calls)"
+check "edit menu: .node-meta records image, digest and tag" \
+    "DOCKER_IMAGE=${R}@sha256:${D64} DOCKER_IMAGE_DIGEST=sha256:${D64} RELEASE_TAG=v0.17.0-adiri" "$(tr '\n' ' ' < "$T/meta.log" 2>/dev/null | sed 's/ $//')"
+rm -f "$T/meta.log"
+: > "$T/docker.log"
+FEAT_RC=1 ecm v0.17.0-adiri
+check "edit menu, the feature check refuses: nothing after the check" \
+    "pull ${R}@sha256:${D64}|held|check testnet ${R}@sha256:${D64}" "$(calls)"
+check "edit menu, the feature check refuses: .node-meta untouched" no "$([[ -e "$T/meta.log" ]] && echo yes || echo no)"
+check "edit menu, the feature check refuses: the image is not changed" yes \
+    "$(grep -qF "Refusing ${R}@sha256:${D64}: it is not a testnet image (see above). The image is not changed." "$T/ec.out" && echo yes || echo no)"
+unset -f ecm calls
 
 # edit-config on a devnet host: tn_detect_network names no network and .node-meta
 # says NETWORK=devnet (_tn_guard_network). Images by digest only, from the devnet
