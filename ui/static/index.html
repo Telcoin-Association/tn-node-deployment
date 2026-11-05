@@ -3240,11 +3240,20 @@ function fwExtraPorts(f){
 
 // The P2P source list the node keeps (the server's p2p_sources, from
 // .node-meta): the list, "every address" when it keeps none, the server's
-// p2p_sources_note when the list cannot be used, else "—" (unknown).
+// p2p_sources_note when the list cannot be used, else "—" (unknown). With P2P
+// committee mode on (p2p_committee.enabled), the P2P ports take the committee
+// allowlist, which also holds the kept list, so the text says so first.
 function fwP2pSourcesText(f){
   const l = f && f.p2p_sources;
-  if(!Array.isArray(l)) return (f && typeof f.p2p_sources_note==='string' && f.p2p_sources_note) || '—';
+  const c = f && f.p2p_committee;
+  const committee = !!(c && typeof c==='object' && c.enabled===true);
+  if(!Array.isArray(l)){
+    const note = (f && typeof f.p2p_sources_note==='string' && f.p2p_sources_note) || '';
+    if(committee) return 'committee allowlist' + (note ? ' ('+note+')' : '');
+    return note || '—';
+  }
   const items = l.filter(x=>typeof x==='string' && x);
+  if(committee) return 'committee allowlist' + (items.length ? ', plus '+items.join(', ') : '');
   return items.length ? items.join(', ') : 'every address';
 }
 
@@ -3252,9 +3261,11 @@ function fwP2pSourcesText(f){
 // {active, rate, burst, reason, persistent}. The meter counts packets of new
 // flows the node has not answered yet: rate is such packets a minute per
 // source, after a burst of burst packets; established flows are not limited.
-// Inactive: reason is p2p-list, nft-missing, not-applied or unreadable. A
-// source is an IPv4 address or an IPv6 /64. '' when the engine reports none.
+// Inactive: reason is committee, p2p-list, nft-missing, not-applied or
+// unreadable. A source is an IPv4 address or an IPv6 /64. '' when the engine
+// reports none.
 const FW_LIMIT_REASONS = {
+  'committee': 'the P2P committee allowlist replaces it',
   'p2p-list': 'a P2P source list is set',
   'nft-missing': 'nftables is not installed',
   'not-applied': 'not applied yet; enable the firewall',
@@ -3271,6 +3282,44 @@ function fwNewFlowLimitText(l){
   return 'inactive' + (r ? ': '+(FW_LIMIT_REASONS[r] || r) : '');
 }
 
+// The P2P committee allowlist firewall-setup.sh reports in p2p_committee:
+// enabled (P2P committee mode is on), persistent (loaded again at boot), timer
+// (the sync timer runs, so the list follows the committee) and reason, then,
+// when reason is null, the status of tn-p2p-allow-sync: loaded (its nftables
+// table is there), allowed_v4 and allowed_v6 (addresses let through, the
+// bootstrap floor included), static (networks of the P2P source list), floor,
+// age_secs (since the last good sync), stale (older than two epochs) and
+// stale_reason. A reason means the tool's keys are absent: off, unreadable,
+// tool-missing or tool-error. '' when the engine reports none.
+const FW_COMMITTEE_REASONS = {
+  'off': 'off',
+  'unreadable': 'unknown; P2P_COMMITTEE is set more than once in .node-meta',
+  'tool-missing': 'on, but tn-p2p-allow-sync is missing; run firewall-setup.sh --p2p-committee sync on the server',
+  'tool-error': 'on, but tn-p2p-allow-sync could not report its status',
+};
+function fwCommitteeText(c){
+  if(!c || typeof c!=='object') return '';
+  if(c.enabled===false) return 'off';
+  const r = typeof c.reason==='string' ? c.reason : '';
+  if(r) return FW_COMMITTEE_REASONS[r] || 'unknown: '+r;
+  if(c.enabled!==true) return 'unknown';
+  const n = v => (Number.isInteger(v) && v>=0) ? v : null;
+  const cnt = v => n(v)==null ? '?' : String(v);
+  const ago = s => s<120 ? s+' s' : s<7200 ? Math.round(s/60)+' min' : Math.round(s/3600)+' h';
+  const allowed = (n(c.allowed_v4)==null || n(c.allowed_v6)==null) ? '?' : String(c.allowed_v4+c.allowed_v6);
+  const why = typeof c.stale_reason==='string' ? c.stale_reason : '';
+  const parts = [
+    c.loaded===true ? 'on' : c.loaded===false ? 'on, but its table is not loaded, so P2P is open to every source' : 'on, table state unknown',
+    allowed+' addresses allowed ('+cnt(c.floor)+' bootstrap floor), '+cnt(c.static)+' static networks',
+    n(c.age_secs)==null ? 'no good sync yet' : 'last good sync '+ago(c.age_secs)+' ago',
+  ];
+  if(c.stale===true) parts.push('stale'+(why ? ': '+why : ''));
+  else if(/^(rpc-method-missing|snapshot-version-)/.test(why)) parts.push('last sync failed: '+why);
+  if(c.persistent===false) parts.push('not restored at boot');
+  if(c.timer===false) parts.push('the sync timer is not running');
+  return parts.join('; ');
+}
+
 async function loadFirewall(){
   const card=$('#fwCard'); if(!card) return;
   const f = await api('/api/firewall');
@@ -3281,6 +3330,7 @@ async function loadFirewall(){
   const ports = f.ports||{};
   const active = !!f.active && !isReadonly();
   const limitText = fwNewFlowLimitText(f.p2p_new_flow_limit);
+  const committeeText = fwCommitteeText(f.p2p_committee);
 
   // Port rows: interactive when ufw is active; dimmed + button-less when not
   // (or when the selected node is external/read-only).
@@ -3366,6 +3416,7 @@ async function loadFirewall(){
     <div class="kv"><span class="k">SSH port</span><span class="v">${esc(f.ssh_port||'—')}</span></div>
     <div class="kv"><span class="k">P2P sources</span><span class="v mono" style="overflow-wrap:anywhere">${esc(fwP2pSourcesText(f))}</span></div>
     ${limitText?`<div class="kv"><span class="k" title="Counts the packets of P2P flows this node has not answered yet, per source (an IPv4 address or an IPv6 /64); answered flows are not limited.">P2P new-flow limit</span><span class="v">${esc(limitText)}</span></div>`:''}
+    ${committeeText?`<div class="kv"><span class="k" title="Turned on and off on the server with firewall-setup.sh --p2p-committee: the P2P ports take only the current committee, the bootstrap floor and the P2P source list, refreshed every 5 minutes.">P2P committee allowlist</span><span class="v">${esc(committeeText)}</span></div>`:''}
     ${portRows}
     ${extraRows}
     ${expectedBlock}

@@ -3635,6 +3635,66 @@ fw_on_exit() {
     return "$rc"
 }
 
+# json_fw_committee -- the "p2p_committee" object of --json --status: four keys
+# of its own first, then the keys of tn-p2p-allow-sync. enabled is true when
+# P2P_COMMITTEE is on in .node-meta, false when it is not, and null when it is
+# set more than once; persistent is true when telcoin-p2p-allow.service is
+# there and enabled, so a reboot loads the allowlist; timer is true when
+# telcoin-p2p-allow-sync.timer is there, enabled and active, so the allowlist
+# follows the committee. With committee mode on, reason is null and the one
+# line of `tn-p2p-allow-sync status --json` (fw_allow_run) follows it, spliced
+# into the same object. Otherwise only the four keys are sent and reason says
+# why: "off", "unreadable" (P2P_COMMITTEE is set more than once),
+# "tool-missing" (the binary is not there) or "tool-error" (it exited non-zero,
+# or its answer is not one line holding a single object whose members are
+# "key":value, the value true, false, null, an integer, a string in the grammar
+# of its status values or one nested object of such scalar members, or it
+# carries one of the four keys, which the tool never sends). The shape check is
+# structural, one regular expression over the whole line, and keeps a bad
+# answer from breaking the whole status object, since nothing here parses JSON.
+json_fw_committee() {
+    local mode enabled persistent=false timer=false reason="" bin json="" rc=0 re v m
+    if ! mode="$(addon_meta_get P2P_COMMITTEE off 2>/dev/null)"; then
+        enabled=null
+        reason="unreadable"
+    elif [[ "$mode" == "on" ]]; then
+        enabled=true
+    else
+        enabled=false
+        reason="off"
+    fi
+    if [[ -f "$(fw_allow_unit_path "$FW_ALLOW_SVC")" ]] && systemctl is-enabled "$FW_ALLOW_SVC" >/dev/null 2>&1; then
+        persistent=true
+    fi
+    if [[ -f "$(fw_allow_unit_path "$FW_ALLOW_TIMER")" ]] && systemctl is-enabled "$FW_ALLOW_TIMER" >/dev/null 2>&1 \
+        && systemctl is-active "$FW_ALLOW_TIMER" >/dev/null 2>&1; then
+        timer=true
+    fi
+    if [[ "$enabled" == "true" ]]; then
+        bin="${TN_P2P_ALLOW_BIN:-}"
+        if [[ -n "$bin" && -f "$bin" && -x "$bin" ]] && declare -F _tn_exec_closed >/dev/null 2>&1; then
+            json="$(fw_allow_run status --json 2>/dev/null)" || rc=$?
+            v='(true|false|null|-?[0-9]+|"[A-Za-z0-9._:-]*")'
+            m='"[a-z0-9_]+":('"$v"'|[{]"[a-z0-9_]+":'"$v"'(,"[a-z0-9_]+":'"$v"')*[}])'
+            re='^[{]'"$m"'(,'"$m"')*[}]$'
+            if [[ $rc -eq 0 && "$json" =~ $re ]]; then
+                case "$json" in
+                    *'"enabled":'*|*'"persistent":'*|*'"timer":'*|*'"reason":'*) reason="tool-error" ;;
+                esac
+            else
+                reason="tool-error"
+            fi
+        else
+            reason="tool-missing"
+        fi
+    fi
+    if [[ -n "$reason" ]]; then
+        printf '{"enabled":%s,"persistent":%s,"timer":%s,"reason":"%s"}' "$enabled" "$persistent" "$timer" "$reason"
+    else
+        printf '{"enabled":true,"persistent":%s,"timer":%s,"reason":null,%s' "$persistent" "$timer" "${json#\{}"
+    fi
+}
+
 # Single-object status: installed/active, default inbound policy, ssh port (read
 # only -- shown for context, never changed), the open/closed state of each
 # JSON_NODE_PORTS port, and "p2p_ports": one object per fw_p2p_ports line, in
@@ -3654,6 +3714,11 @@ fw_on_exit() {
 # /etc/telcoin/p2p-limit.nft is there and, while the table is loaded, holds its
 # rate, burst and ports, so a reboot loads the same limit; Q is then null, else
 # one of "boot-file-missing", "unit-not-enabled", "boot-copy-differs".
+# "p2p_committee", the last key, is the P2P committee allowlist
+# (json_fw_committee): {"enabled":E,"persistent":P,"timer":T,"reason":null,
+# "loaded":...,"counters":{...}} with tn-p2p-allow-sync's status keys after the
+# four of its own while committee mode is on, else the four alone with reason
+# "off", "unreadable", "tool-missing" or "tool-error".
 json_fw_status() {
     local installed=false active=false default_in="" ssh_port
     if ufw_installed; then installed=true; fi
@@ -3732,6 +3797,9 @@ json_fw_status() {
         limit_json="{\"active\":false,\"rate\":null,\"burst\":null,\"reason\":\"$(json_escape "$la")\",\"persistent\":${persistent},\"persistent_reason\":${preason}}"
     fi
 
+    local committee_json
+    committee_json="$(json_fw_committee)"
+
     # Operator-chosen health sources (layered on top of the TA baseline), as a JSON array.
     local kuma_extra_json="" efirst=true esrc
     for esrc in $(kuma_extra_list); do
@@ -3740,7 +3808,7 @@ json_fw_status() {
         efirst=false
     done
 
-    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}},\"p2p_ports\":[${p2p_json}],\"p2p_new_flow_limit\":${limit_json}}"
+    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}},\"p2p_ports\":[${p2p_json}],\"p2p_new_flow_limit\":${limit_json},\"p2p_committee\":${committee_json}}"
     JSON_DONE_SENT=true
 }
 

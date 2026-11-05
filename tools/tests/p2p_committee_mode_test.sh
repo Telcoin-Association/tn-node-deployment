@@ -46,7 +46,8 @@
 # in-flight on or off finished by fw_allow_on_exit, the dispatch with its
 # refusals and its exit codes, a TERM in flight, --enable and --reset with
 # committee mode on (the limit stays off, config rewritten, one resync), the
-# menu's node ports, the preflight and the status screen.
+# menu's node ports, the preflight, the status screen, and the p2p_committee
+# object of --json --status (the splice, a bad or failing tool, no binary).
 #
 # Maintainer tooling (not updater-tracked, no sidecar). bash 3.2 safe.
 # =============================================================================
@@ -1003,5 +1004,104 @@ check_in "status screen: the committee report" "P2P committee allowlist: on" "$O
 fixture
 run view_status < /dev/null
 check_in "status screen (off): the committee line" "P2P committee allowlist: off" "$OUT"
+
+# --- --json --status: the p2p_committee object -------------------------------------------
+# the last key of the status object: firewall-setup.sh's four keys come first,
+# then, with committee mode on, the one line the tool prints for `status --json`
+# spliced into the same object; otherwise the four alone, with reason saying
+# why; nothing parses JSON here: the exact bytes are compared, each key is
+# counted, and tn_json_field (the library's JSON matcher) reads every value back.
+# pc TEXT -- the p2p_committee object of a --json --status line (the last key).
+pc() { local s="$1"; s="${s#*\"p2p_committee\":}"; printf '%s\n' "${s%\}}"; }
+jstatus() { JS="$(bash "$T/fw/driver.sh" --json --status 2>/dev/null)"; PC="$(pc "$JS")"; }
+# jfields OBJ KEY... -- what tn_json_field reads for each KEY in OBJ, "-" where it
+# reads nothing (null, an object, an array or no such key).
+jfields() {
+    local o="$1" k v out=""
+    shift
+    for k in "$@"; do
+        v="$(tn_json_field "$o" "$k")" || v="-"
+        out="$out $v"
+    done
+    printf '%s\n' "${out# }"
+}
+# shape TEXT -- one line, as many "{" as "}" and "[" as "]", no empty member.
+shape() {
+    local s="$1" ob cb os cs
+    ob="${s//[!\{]/}"; cb="${s//[!\}]/}"; os="${s//[!\[]/}"; cs="${s//[!\]]/}"
+    if [[ "$s" == *$'\n'* || ${#ob} -ne ${#cb} || ${#os} -ne ${#cs} || "$s" == *',}'* || "$s" == *'{,'* || "$s" == *',,'* ]]; then
+        echo bad
+    else
+        echo ok
+    fi
+}
+TOOL_LINE='{"loaded":true,"epoch":42,"allowed_v4":10,"allowed_v6":2,"static":3,"floor":1,"keys":7,"dns_skipped":0,"last_good":1762300000,"age_secs":120,"stale":false,"stale_since":null,"stale_reason":null,"counters":{"accepted":1234,"dropped":56}}'
+ALL_KEYS="enabled persistent timer reason loaded epoch allowed_v4 allowed_v6 static floor keys dns_skipped last_good age_secs stale stale_since stale_reason counters accepted dropped"
+fixture
+jstatus
+check "json committee off: four keys only, reason off" '{"enabled":false,"persistent":false,"timer":false,"reason":"off"}' "$PC"
+check "json committee off: the line keeps its shape" ok "$(shape "$JS")"
+check "json committee off: read back" "false false false off" "$(jfields "$PC" enabled persistent timer reason)"
+check "json committee off: no tool call" "" "$(reclog)"
+check_in "json committee off: the limit is on" '"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null' "$JS"
+drun --p2p-committee on
+check_rc "json committee on: rc 0" 0 "$RC"
+simulate_apply
+rm -f "$REC.log"
+export TN_P2P_STUB_OUT_STATUS_JSON="$TOOL_LINE"
+jstatus
+check "json committee on: the four keys first, then the tool's line" '{"enabled":true,"persistent":true,"timer":true,"reason":null,'"${TOOL_LINE#\{}" "$PC"
+check "json committee on: the line keeps its shape" ok "$(shape "$JS")"
+check "json committee on: one status --json call" "--state-dir ${D} status --json" "$(reclog)"
+check "json committee on: the tool's lock was free" "" "$(lock_held)"
+check_in "json committee on: limit reason committee" '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"committee"' "$JS"
+for k in $ALL_KEYS; do
+    n="$(grep -o "\"$k\":" <<< "$PC" | wc -l | tr -d ' ')"
+    check "json committee on: key $k once" 1 "$n"
+done
+# shellcheck disable=SC2086
+check "json committee on: read back" "true true true - true 42 10 2 3 1 7 0 1762300000 120 false - - - 1234 56" "$(jfields "$PC" $ALL_KEYS)"
+# a line that is not one object in the grammar of the tool's values, or that
+# carries one of the four keys, is never spliced.
+for bad in '' '{}' ' {"loaded":true}' "$(printf '{"loaded":true}\n{"loaded":false}')" '{"loaded":true,"reason":"x"}' \
+    '{"loaded":true,"timer":1}' '{"enabled":false}' '{"loaded":true,"persistent":true}' '{"loaded":true' 'loaded=true' \
+    '{"loaded":"a b"}' '{"loaded":"a\"b"}' '{"loaded":true,"counters":{"accepted":1}' '{"loaded":true}}' \
+    '{"a":1},{"b":2}' '{"loaded":true,}' '{"loaded":}' '{"loaded"}' '{"loaded":tru}' '{"loaded":true"x":1}' \
+    '{"loaded"::true}' '{"loaded":"}' '{"a":{,"b":1}}' '{"a":1}{"b":2}'; do
+    export TN_P2P_STUB_OUT_STATUS_JSON="$bad"
+    jstatus
+    check "json committee on, line [$bad]: tool-error" '{"enabled":true,"persistent":true,"timer":true,"reason":"tool-error"}' "$PC"
+    check "json committee on, line [$bad]: the line keeps its shape" ok "$(shape "$JS")"
+done
+export TN_P2P_STUB_OUT_STATUS_JSON="$TOOL_LINE"
+for rc in 1 2 3 4 101; do
+    TN_P2P_STUB_RC_STATUS_JSON=$rc jstatus
+    check "json committee on, tool exit $rc: tool-error" '{"enabled":true,"persistent":true,"timer":true,"reason":"tool-error"}' "$PC"
+done
+mv "$TN_P2P_ALLOW_BIN" "$T/bin.away"
+rm -f "$REC.log"
+jstatus
+check "json committee on, binary missing: tool-missing" '{"enabled":true,"persistent":true,"timer":true,"reason":"tool-missing"}' "$PC"
+check "json committee on, binary missing: read back" "true true true tool-missing" "$(jfields "$PC" enabled persistent timer reason)"
+check "json committee on, binary missing: no tool call" "" "$(reclog)"
+mv "$T/bin.away" "$TN_P2P_ALLOW_BIN"
+printf 'P2P_COMMITTEE=on\n' >> "$META"
+jstatus
+check "json P2P_COMMITTEE twice: unreadable, enabled null" '{"enabled":null,"persistent":true,"timer":true,"reason":"unreadable"}' "$PC"
+check "json P2P_COMMITTEE twice: the line keeps its shape" ok "$(shape "$JS")"
+grep -v '^P2P_COMMITTEE=on$' "$META" > "$T/meta.tmp"
+printf 'P2P_COMMITTEE=on\n' >> "$T/meta.tmp"
+cat "$T/meta.tmp" > "$META"
+# the systemctl stub answers is-active for every unit, so disabling is what
+# makes the timer read false.
+systemctl disable "$FW_ALLOW_TIMER" > /dev/null
+systemctl disable "$FW_ALLOW_SVC" > /dev/null
+jstatus
+check "json committee on, units disabled: persistent and timer false" '{"enabled":true,"persistent":false,"timer":false,"reason":null,'"${TOOL_LINE#\{}" "$PC"
+rm -f "$TIMERU"
+systemctl enable "$FW_ALLOW_TIMER" > /dev/null
+jstatus
+check "json committee on, timer unit file gone: timer false" '{"enabled":true,"persistent":false,"timer":false,"reason":null,'"${TOOL_LINE#\{}" "$PC"
+unset TN_P2P_STUB_OUT_STATUS_JSON
 
 finish

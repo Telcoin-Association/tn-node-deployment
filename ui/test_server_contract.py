@@ -1159,16 +1159,46 @@ class FirewallEnableTest(ServerTestCase):
 
 class FirewallStatusTest(ServerTestCase):
     """/api/firewall: the engine's status as it prints it (p2p_new_flow_limit
-    included) and `p2p_sources`, the P2P list .node-meta keeps."""
+    and p2p_committee included) and `p2p_sources`, the P2P list .node-meta
+    keeps."""
 
     LIMIT_ON = {"active": True, "rate": 20, "burst": 40, "reason": None, "persistent": True}
     LIMIT_OFF = {"active": False, "rate": None, "burst": None, "reason": "p2p-list",
                  "persistent": False}
+    LIMIT_COMMITTEE = {"active": False, "rate": None, "burst": None, "reason": "committee",
+                       "persistent": False, "persistent_reason": "boot-file-missing"}
+    COMMITTEE_ON = {"enabled": True, "persistent": True, "timer": True, "reason": None,
+                    "loaded": True, "epoch": 42, "allowed_v4": 10, "allowed_v6": 2, "static": 3,
+                    "floor": 1, "keys": 7, "dns_skipped": 0, "last_good": 1762300000,
+                    "age_secs": 120, "stale": False, "stale_since": None, "stale_reason": None,
+                    "counters": {"accepted": 1234, "dropped": 56}}
+    COMMITTEE_OFF = {"enabled": False, "persistent": False, "timer": False, "reason": "off"}
+    # the line firewall-setup.sh --json --status prints with committee mode on,
+    # byte for byte as tools/tests/p2p_committee_mode_test.sh produces it: the
+    # engine's four p2p_committee keys, then the tool's status line spliced into
+    # the same object by printf.
+    ENGINE_ON_LINE = (
+        '{"installed":true,"active":true,"default_incoming":"unknown","ssh_port":"22",'
+        '"kuma":"closed","kuma_extra":[],"caddy_managed":false,'
+        '"desired":[{"spec":"22/tcp","label":"SSH","source":"anywhere","ok":true},'
+        '{"spec":"49590/udp","label":"Node P2P (primary)","source":"committee allowlist","ok":true},'
+        '{"spec":"49594/udp","label":"Node P2P (worker)","source":"committee allowlist","ok":true}],'
+        '"unexpected":[],"ports":{"49590/udp":true,"49594/udp":true,"43174/tcp":false},'
+        '"p2p_ports":[{"port":49590,"proto":"udp","label":"primary","allowed":true},'
+        '{"port":49594,"proto":"udp","label":"worker-0","allowed":true}],'
+        '"p2p_new_flow_limit":{"active":false,"rate":null,"burst":null,"reason":"committee",'
+        '"persistent":false,"persistent_reason":"boot-file-missing"},'
+        '"p2p_committee":{"enabled":true,"persistent":true,"timer":true,"reason":null,'
+        '"loaded":true,"epoch":42,"allowed_v4":10,"allowed_v6":2,"static":3,"floor":1,"keys":7,'
+        '"dns_skipped":0,"last_good":1762300000,"age_secs":120,"stale":false,"stale_since":null,'
+        '"stale_reason":null,"counters":{"accepted":1234,"dropped":56}}}')
 
-    def status(self, meta, limit=None):
+    def status(self, meta, limit=None, committee=None):
         reply = {"installed": True, "active": True, "ssh_port": "22"}
         if limit is not None:
             reply["p2p_new_flow_limit"] = limit
+        if committee is not None:
+            reply["p2p_committee"] = committee
         self.helper_replies["firewall-status"] = (0, json.dumps(reply), "")
         self.helper_replies["meta-cat"] = (0, meta, "")
         server.clear_meta_cache()
@@ -1221,6 +1251,30 @@ class FirewallStatusTest(ServerTestCase):
                 body = self.status("NETWORK=testnet\n", limit)
                 self.assertEqual(body["p2p_new_flow_limit"], limit)
         self.assertNotIn("p2p_new_flow_limit", self.status("NETWORK=testnet\n"))
+
+    def test_the_committee_allowlist_passes_through_unchanged(self):
+        for committee in (self.COMMITTEE_ON, self.COMMITTEE_OFF,
+                          {"enabled": None, "persistent": True, "timer": True, "reason": "unreadable"},
+                          {"enabled": True, "persistent": True, "timer": True, "reason": "tool-missing"},
+                          {"enabled": True, "persistent": False, "timer": False, "reason": "tool-error"}):
+            with self.subTest(committee=committee):
+                body = self.status("NETWORK=testnet\nP2P_ALLOW_FROM=198.51.100.0/24\n",
+                                   self.LIMIT_COMMITTEE, committee)
+                self.assertEqual(body["p2p_committee"], committee)
+                self.assertEqual(body["p2p_new_flow_limit"], self.LIMIT_COMMITTEE)
+                self.assertEqual(body["p2p_sources"], ["198.51.100.0/24"])
+        self.assertNotIn("p2p_committee", self.status("NETWORK=testnet\n"))
+
+    def test_the_spliced_engine_line_parses(self):
+        self.helper_replies["firewall-status"] = (0, self.ENGINE_ON_LINE + "\n", "")
+        self.helper_replies["meta-cat"] = (0, "NETWORK=testnet\n", "")
+        server.clear_meta_cache()
+        body = self.client.get("/api/firewall").get_json()
+        self.assertNotIn("error", body)
+        self.assertEqual(body["p2p_committee"], self.COMMITTEE_ON)
+        self.assertEqual(body["p2p_new_flow_limit"], self.LIMIT_COMMITTEE)
+        self.assertEqual(body["p2p_sources"], [])
+        self.assertEqual(set(body) - {"p2p_sources"}, set(json.loads(self.ENGINE_ON_LINE)))
 
     def test_an_enable_drops_the_cached_meta(self):
         self.status("P2P_ALLOW_FROM=10.0.0.0/8\n")
