@@ -16,7 +16,9 @@
 #              else git config user.signingkey, else the one key there
 #   3 key      gpg --card-status checks that the card answers, here or through a
 #              forwarded gpg-agent (skipped with --sig-from)
-#   4 prepare  bash tools/release-scripts.sh [--serial N] TAG
+#   4 prepare  bash tools/release-scripts.sh [--serial N] TAG; a MANIFEST that
+#              already names TAG with another serial than --serial N is
+#              refused (the message says how to go on or start again)
 #   5 sign     gpg --armor --detach-sign --local-user FPR! --output MANIFEST.asc MANIFEST;
 #              with --sig-from FILE the signature is copied from FILE; when no card
 #              answers, the run waits until MANIFEST.asc appears (sign MANIFEST on
@@ -320,6 +322,24 @@ commit_release() {
     _git add MANIFEST "$SIG_FILE" RELEASE install.sh && _git commit -S"${FPR}!" -F "${TMP}/commit-msg"
 }
 
+# serial_differs BRANCH HAVE WANT -- stop: MANIFEST on BRANCH names the
+# release with serial HAVE, and --serial asked for WANT. Says how to go on with
+# HAVE, or how to drop the prepared branch and start again with WANT.
+serial_differs() {
+    local branch="$1" have="$2" want="$3"
+    {
+        printf 'cut-release.sh: MANIFEST on %s was prepared with serial %s, not %s (--serial): this run signed, committed and pushed nothing\n' \
+            "$branch" "$have" "$want"
+        printf '  to go on with serial %s, run again with --serial %s\n' "$have" "$have"
+        printf '  to prepare serial %s instead, delete the release branch, then run again with --serial %s:\n' "$want" "$want"
+        printf '    rm -f MANIFEST MANIFEST.asc RELEASE && git checkout -f main && git branch -D %s\n' "$branch"
+        if _git rev-parse -q --verify "refs/remotes/origin/${branch}" > /dev/null; then
+            printf '    git push origin --delete %s   (origin has it too; close its pull request if one is open)\n' "$branch"
+        fi
+    } >&2
+    exit 1
+}
+
 # wait_for_sig -- wait until MANIFEST.asc is in the tree.
 wait_for_sig() {
     while [[ ! -s "$SIG_FILE" ]]; do
@@ -329,7 +349,7 @@ wait_for_sig() {
 }
 
 prep() {
-    local tag="$1" serial="$2" key="$3" sigfrom="$4" branch="release/$1" cur dirty url keyref=""
+    local tag="$1" serial="$2" key="$3" sigfrom="$4" branch="release/$1" cur dirty url keyref="" have
     local -a args
     STEP_TOTAL=9
     args=()
@@ -379,7 +399,11 @@ prep() {
     fi
 
     if [[ "$(manifest_value release)" == "$tag" ]]; then
-        done_step 4 "prepare" "MANIFEST names ${tag}"
+        have="$(manifest_value serial)"
+        if [[ -n "$serial" && "$have" != "$serial" ]]; then
+            serial_differs "$branch" "$have" "$serial"
+        fi
+        done_step 4 "prepare" "MANIFEST names ${tag} (serial ${have})"
     else
         step 4 "prepare MANIFEST, RELEASE and install.sh" bash tools/release-scripts.sh ${args[@]+"${args[@]}"} "$tag" || true
     fi

@@ -153,6 +153,23 @@ check "a key that is not a release key: still on main" "main" "$(gitw rev-parse 
 check "a key that is not a release key: nothing prepared" "absent" "$([[ -e "$W/MANIFEST" ]] && echo present || echo absent)"
 check "a key that is not a release key: nothing signed" "" "$(grep -e '--detach-sign' "$T/gpg.log" 2>/dev/null)"
 
+# --- a release branch prepared with another serial: refused --------------------------------
+OUT="$(cd "$W" && printf '\n\n\n\nq\n' | bash tools/cut-release.sh prep "$TAG" --serial 7 2>&1)"
+RC=$?
+check_rc "prep --serial 7, q at the signature: exits 0" 0 "$RC"
+check "prep --serial 7: prepared" "serial=7" "$(grep '^serial=' "$W/MANIFEST" 2>/dev/null)"
+cut prep "$TAG" --serial 1 --yes
+check_rc "prep --serial 1 over serial 7: refused" 1 "$RC"
+has "prep --serial 1 over serial 7: names both serials" "cut-release.sh: MANIFEST on $BR was prepared with serial 7, not 1 (--serial)"
+has "prep --serial 1 over serial 7: how to go on" "  to go on with serial 7, run again with --serial 7"
+has "prep --serial 1 over serial 7: how to start again" "    rm -f MANIFEST MANIFEST.asc RELEASE && git checkout -f main && git branch -D $BR"
+check "prep --serial 1 over serial 7: still serial 7" "serial=7" "$(grep '^serial=' "$W/MANIFEST" 2>/dev/null)"
+check "prep --serial 1 over serial 7: nothing signed" "absent" "$([[ -e "$W/MANIFEST.asc" ]] && echo present || echo absent)"
+check "prep --serial 1 over serial 7: nothing committed" "$(gitw rev-parse origin/main)" "$(gitw rev-parse HEAD)"
+check "prep --serial 1 over serial 7: nothing pushed" "absent" "$(git -C "$ORIGIN" rev-parse -q --verify "refs/heads/$BR" >/dev/null && echo present || echo absent)"
+(cd "$W" && rm -f MANIFEST MANIFEST.asc RELEASE && git checkout -q -f main && git branch -q -D "$BR")
+check "prep --serial 1 over serial 7: the commands it names leave a clean main" "main:" "$(gitw rev-parse --abbrev-ref HEAD):$(gitw status --porcelain)"
+
 # --- prep ----------------------------------------------------------------------------------
 : > "$T/gpg.log"
 cut prep "$TAG" --serial 1 --yes
