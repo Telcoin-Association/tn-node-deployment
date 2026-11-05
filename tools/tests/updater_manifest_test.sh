@@ -317,6 +317,14 @@ publish "$B" scripts-v1.1.0
 install_release "$R1"
 refused "path outside the tree"
 says "path outside the tree" "bad path: ../escape.sh"
+# The signature file is the record, never a listed file.
+BS="$SRC/badsigpath"; cp -R "$R2" "$BS"
+printf 'sha256  %s  MANIFEST.asc\n' "$(_h "$R2/setup-node.sh")" >> "$BS/MANIFEST"
+sign "$BS" key1
+publish "$BS" scripts-v1.1.0
+install_release "$R1"
+refused "MANIFEST.asc listed as a file"
+says "MANIFEST.asc listed as a file" "The release manifest is malformed (bad path: MANIFEST.asc)"
 check "path outside the tree: nothing written beside the tree" "absent" "$([[ -e "$T/escape.sh" ]] && echo present || echo absent)"
 
 # --- manifest without a release key --------------------------------------------------------------
@@ -634,6 +642,19 @@ printf 'serial=999\n' >> "$INST/MANIFEST"
 run_check
 check_rc "check, tampered record: exits 2" 2 "$RC"
 says "check, tampered record" "The release manifest is not signed by a Telcoin release key"
+# The installed record verifies; the newest release (serial 101) is signed by a
+# key that is not a release key: --check fails the check, it reports no update.
+install_release "$R1"
+publish "$SRC/wrong" scripts-v1.1.0
+before="$(tree_sig)"
+run_check
+check_rc "check, newest signed by another key: exits 2" 2 "$RC"
+check_has "check, newest signed by another key: says why" "  [ERROR] The release manifest is not signed by a Telcoin release key (no release key in lib/release-keys made a good signature); nothing was changed." "$(plain "$OUT")"
+check_lacks "check, newest signed by another key: no newest line" "Newest:" "$(plain "$OUT")"
+check_lacks "check, newest signed by another key: no pending update" "Update pending" "$(plain "$OUT")"
+check "check, newest signed by another key: tree byte-identical" "$before" "$(tree_sig)"
+publish "$R2" scripts-v1.1.0
+install_release "$R2"
 install_release "$R2"
 mv "$RAW/main/RELEASE" "$T/RELEASE.keep"
 run_check

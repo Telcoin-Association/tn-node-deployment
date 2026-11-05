@@ -154,6 +154,10 @@ check "dearmor: two blocks in one file, both decoded in order" "yes" "$(cmp -s "
 printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOv5 not a pgp key\n' > "$T/dearmor/ssh.asc"
 check "dearmor: a file that is not a key is refused" "yes" \
     "$(dearmor "$T/dearmor/ssh.asc" | grep -q 'ssh.asc is not an ASCII-armored OpenPGP public key' && echo yes || echo no)"
+out="$(dearmor "$T/dearmor/plain.asc" "$T/dearmor/ssh.asc")"
+check "dearmor: a file that is not a key beside a good key refuses the whole set" "rc 1" "$(printf '%s\n' "$out" | tail -n 1)"
+check "dearmor: a file that is not a key beside a good key is named" "yes" \
+    "$(printf '%s\n' "$out" | grep -q 'ssh.asc is not an ASCII-armored OpenPGP public key' && echo yes || echo no)"
 sed 's/^-----BEGIN PGP PUBLIC KEY BLOCK-----$/-----BEGIN PGP SIGNATURE-----/' "$T/dearmor/plain.asc" > "$T/dearmor/sig.asc"
 check "dearmor: a signature block is not a key" "rc 1" "$(dearmor "$T/dearmor/sig.asc" | tail -n 1)"
 awk 'NR == 3 { $0 = "not*base64!" } { print }' "$T/dearmor/plain.asc" > "$T/dearmor/junk.asc"
