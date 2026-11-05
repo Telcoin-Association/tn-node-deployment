@@ -29,7 +29,8 @@
 # call), tn_docker_holds_digest and, against a docker shim that prints a canned
 # --version per image, tn_docker_image_network_ok (mainnet: no build features;
 # testnet: adiri, faucet allowed; the line missing or doubled refused; a run that
-# fails refused; devnet not checked).
+# fails refused; the run under timeout 60 where timeout exists, and a run that
+# timed out (rc 124) refused; devnet not checked).
 #
 #   bash tools/tests/docker_image_test.sh
 #
@@ -900,6 +901,30 @@ inok "features: a network without a rule refused" 1 foo "$TI"
 inok "features: a tag refused before docker runs" 1 testnet "${GH}:v0.17.0-adiri"
 inok "features: a leading dash refused" 1 testnet "-${TI}"
 check "features: no docker run for the refusals before it" "" "$(cat "$REC/run.log")"
+# The run is limited to 60 s where timeout exists. A stand-in timeout on PATH
+# logs its arguments and runs the command without the duration, or exits 124 (a
+# run that timed out) while $REC/timeout.124 exists; it is removed after these cases.
+cat > "$T/bin/timeout" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$REC/timeout.log"
+[ -f "$REC/timeout.124" ] && exit 124
+shift
+exec "$@"
+SH
+chmod 0755 "$T/bin/timeout"
+hash -r
+: > "$REC/timeout.log"; : > "$REC/run.log"
+ver "$MI" ""
+inok "features, under timeout: a mainnet image accepted" 0 mainnet "$MI"
+check "features: the run goes through timeout 60" \
+    "60 docker run --rm --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" \
+    "$(cat "$REC/timeout.log")"
+: > "$REC/timeout.124"; : > "$REC/timeout.log"
+inok "features: a run that timed out (rc 124) refused" 1 mainnet "$MI"
+check_has "features: the timed-out run is said, with its exit code" "1" "$(grep -cF "(docker run exited 124), so it is not used and nothing was changed" "$T/err")"
+check "features: the timed-out run went through timeout once" "1" "$(wc -l < "$REC/timeout.log" | tr -d ' ')"
+rm -f "$T/bin/timeout" "$REC/timeout.124"
+hash -r
 # The progress-fn gets the refusal as a warn.
 say_rec() { printf '%s %s\n' "$1" "$2" >> "$REC/say.log"; }
 : > "$REC/say.log"
