@@ -6,7 +6,7 @@
 # emits no dcterms tags and the PDF carries no creation date; that keeps the build
 # byte-reproducible.
 subtitle: Deploy, sync, stake and operate a node
-version: "1.5"
+version: "1.8"
 date: November 2026
 author: Telcoin Association
 description: >-

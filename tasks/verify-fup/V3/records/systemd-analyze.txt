@@ -1,0 +1,14 @@
+--- systemd-analyze verify --man=no (n: native as rendered)
+/usr/lib/systemd/system/xfs_scrub_all.service:26: Support for option CPUAccounting= has been removed and it is ignored
+/usr/lib/systemd/system/system-xfs_scrub.slice:15: Support for option CPUAccounting= has been removed and it is ignored
+telcoin-alloy.service: Command /usr/bin/alloy is not executable: No such file or directory
+rc=1
+--- systemd-analyze verify --man=no (d: docker sidecar as rendered)
+/usr/lib/systemd/system/xfs_scrub_all.service:26: Support for option CPUAccounting= has been removed and it is ignored
+/usr/lib/systemd/system/system-xfs_scrub.slice:15: Support for option CPUAccounting= has been removed and it is ignored
+rc=0
+--- systemd-analyze verify --man=no (n2: native, ExecStart binary -> /usr/bin/true)
+/usr/lib/systemd/system/xfs_scrub_all.service:26: Support for option CPUAccounting= has been removed and it is ignored
+/usr/lib/systemd/system/system-xfs_scrub.slice:15: Support for option CPUAccounting= has been removed and it is ignored
+rc=0
+systemd 259 (259.5-0ubuntu3.4)

@@ -1,0 +1,4 @@
+FAIL  B prepare_docker_update: mainnet digest recorded as v0.9.0 refused by the floor
+FAIL  B prepare_docker_update: testnet digest recorded as v0.12.0-adiri refused by the floor
+FAIL  B json_prepare_docker: mainnet digest recorded as v0.9.0 refused by the floor
+FAIL  B json_prepare_docker: testnet digest recorded as v0.12.0-adiri refused by the floor

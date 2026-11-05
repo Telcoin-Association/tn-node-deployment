@@ -1,0 +1,73 @@
+== installing auditd and aide (real packages)
+apt-get rc=0
+versions: AIDE 0.18.6 | 1:3.1.2-2.1ubuntu0.1
+ok    real: aide, augenrules, auditctl installed
+ok    real: no recommended packages pulled (no mail server, no aide-common cron)
+== tn_host_baseline_install (real)
+  | 
+  | >>> Installing auditd and aide (no recommended packages)
+  | 
+  | >>> Writing the audit rules /etc/audit/rules.d/telcoin-node.rules
+  |   [WARN] The audit rules in /etc/audit/rules.d/telcoin-node.rules did not load now (no kernel audit on this host, or the loaded rules are locked with -e 2); auditd loads them at the next boot. Check with: sudo auditctl -l | grep telcoin
+  | 
+  | >>> Making the AIDE baseline of the node's files
+  |   ->  AIDE baseline made: /var/lib/aide/telcoin-node.db. Check the node's files against it with: sudo aide --config=/etc/aide/telcoin-node.conf --check
+install rc=0 in 2s
+ok    real: install rc 0
+ok    real: HOST_BASELINE=true
+ok    real: rules file root 0640
+augenrules --load rc=4, auditctl -l rc=255 (no kernel audit in a container)
+ok    real: the install said the rules did not load now
+ok    real: augenrules accepts the rules file (it is in audit.rules)
+ok    real: auditctl parses each rule line
+ok    real: aide --config-check of the node config
+ok    real: database root 0600, /var/lib/aide root 0700, /etc/aide root 0755
+ok    real: database made, no .new left
+ok    real: database holds /opt/telcoin/telcoin-network
+ok    real: database holds the start script
+ok    real: database holds the unit
+ok    real: database holds .node-meta and node.env
+ok    real: database leaves out the credential
+ok    real: database leaves out the ingest token
+FAIL  [finding N-2] real: database leaves out the Alloy env file that holds the token at this tip
+      expected (<) vs actual (>):
+      1c1
+      < no
+      ---
+      > yes
+ok    real: database leaves out /opt/telcoin-source
+ok    real: database leaves out the node keys and the data dir
+ok    real: database holds no other unit
+database entries: 10
+== aide --check exit codes
+ok    real: --check right after install: 0
+ok    real: --check after the binary changed: rc 4
+  |   ->  AIDE baseline made again after the change: /var/lib/aide/telcoin-node.db
+ok    real: refresh rc 0
+ok    real: --check after the refresh: 0
+ok    real: --check after credential, token, temp files and /opt/telcoin-source changed: 0
+ok    real: --check after node.env changed: 4
+ok    real: --check after a file was added to /etc/telcoin: 1
+ok    real: --check after the unit changed: 4
+ok    real: another unit in /etc/systemd/system is not watched
+ok    real: --check after the start script changed: 4
+ok    real: --check after a mode change: 4
+ok    real: --check after a meta_set (rename write): 4 (.node-meta is watched)
+ok    real: after a refresh the check is clean again
+== status and remove (real)
+  | ok    host baseline: HOST_BASELINE=true in .node-meta
+  | ok    audit rules: /etc/audit/rules.d/telcoin-node.rules
+  | warn  audit rules not loaded (auditctl -l lists no telcoin-keys): sudo augenrules --load, and check that auditd runs
+  | ok    AIDE baseline: /var/lib/aide/telcoin-node.db, made 0 day(s) ago (check: sudo aide --config=/etc/aide/telcoin-node.conf --check)
+ok    real: status rc 1 (rules not loaded in a container)
+  | 
+  | >>> Removing the host baseline (audit rules and AIDE baseline)
+  |   [WARN] augenrules --load failed: the node's audit watches stay loaded until the next boot.
+  |   ->  Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide
+ok    real: remove rc 0
+ok    real: remove: files gone
+ok    real: remove: packages still installed
+ok    real: remove: the rules are out of audit.rules after augenrules
+ok    real: remove: marker gone
+
+40 checks, 1 failures, 0 skipped

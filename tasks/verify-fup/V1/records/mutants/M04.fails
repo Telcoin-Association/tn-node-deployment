@@ -1,0 +1,10 @@
+FAIL  A4 helper setup mainnet, library 'ship': refused
+FAIL  A4 helper 'ship': the message names the constant and the library
+FAIL  A4 helper 'ship': setup-node never ran
+FAIL  A4 helper setup mainnet, library 'one': refused
+FAIL  A4 helper 'one': the message names the constant and the library
+FAIL  A4 helper 'one': setup-node never ran
+FAIL  A4 helper setup mainnet, library 'nomain': refused
+FAIL  A4 helper 'nomain': the message names the constant and the library
+FAIL  A4 helper 'nomain': setup-node never ran
+FAIL  A4 helper 'missing': the message names the constant and the library

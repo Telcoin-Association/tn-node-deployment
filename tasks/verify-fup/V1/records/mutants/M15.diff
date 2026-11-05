@@ -1,0 +1,4 @@
+4644c4644
+<     read -r margin msrc settle ssrc <<<"$(_tn_epoch_timing "$dur")"
+---
+>     msrc=default; ssrc=default

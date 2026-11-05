@@ -1,0 +1,11 @@
+--- hub TLS 1.3 (openssl s_client -tls1_3)
+subject=CN=obs.adiri.telcoin.network
+Protocol: TLSv1.3
+Verify return code: 0 (ok)
+    Protocol  : TLSv1.3
+--- hub TLS 1.2 only (should still connect; the pin is client-side)
+Protocol: TLSv1.2
+    Protocol  : TLSv1.2
+--- docker --mount with a missing source
+docker: Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /nonexistent-v3-token
+

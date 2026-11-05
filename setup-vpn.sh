@@ -37,7 +37,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly WGVPN_DIR="${SCRIPT_DIR}/lib/wgvpn"
 # The maintainer key directory (KEYS + <name>.pub files). Not readonly: the fixture
 # tests point it at a scratch copy.
@@ -1094,6 +1094,18 @@ persist_state() {
     meta_set VPN_MAINTAINER_ROOT "$root" "$VPN_META"
 }
 
+# vpn_baseline_refresh -- after an enable, a --sync-keys that stored the root grant,
+# or a --disable went through (each writes .node-meta): make the host baseline again
+# (tn_host_baseline_refresh, a no-op without HOST_BASELINE=true in .node-meta or with
+# a lib/common.sh that lacks it). This script has no --json mode, so the library
+# prints its lines (print_step, print_info, print_warn). Never fails.
+vpn_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh
+    fi
+    return 0
+}
+
 print_enrollment() {
     local node_name today
     node_name="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo node)"
@@ -1111,6 +1123,7 @@ EOF
     print_info "but the hub won't accept your peer yet."
     echo ""
     print_info "For the Association admin -- ONE command registers this node (run from the"
+    # network-gated: enrollment note of the testnet-only VPN (require_testnet); names the core team's repository
     print_info "adiri-genesis checkout; it stamps the enrollment date and pushes the hub):"
     cat <<EOF
 
@@ -1150,6 +1163,7 @@ do_enable() {
     do_apply_firewall
     persist_state "$root"
     install_selfheal_units || true
+    vpn_baseline_refresh
     nudge_handshake
     print_enrollment
 }
@@ -1200,6 +1214,7 @@ do_sync_keys() {
     write_tnadmin_sudoers "$root" || true
     if [[ -n "$ROOT_GRANT" && -n "$VPN_META" ]]; then
         meta_set VPN_MAINTAINER_ROOT "$root" "$VPN_META"
+        vpn_baseline_refresh
     fi
     install_selfheal_units || true
     nudge_handshake
@@ -1471,6 +1486,7 @@ do_disable() {
     if [[ -n "$VPN_META" ]] && ! meta_set ENABLE_VPN false "$VPN_META"; then
         print_warn "ENABLE_VPN=false could not be written to ${VPN_META} (a host laid out by an older release refuses the write until its ownership is migrated); the VPN itself is torn down."
     fi
+    vpn_baseline_refresh
     print_ok "VPN admin SSH disabled. Your own SSH is unchanged."
     print_info "Ask the Telcoin Association to remove your peer from the overlay registry."
 }

@@ -3,7 +3,9 @@
 # --phase=finalize (finalize_install_inputs). The install method, data dir,
 # docker image and binary path come from the finalize flags or, when a flag
 # leaves one out, from what keygen recorded in .node-meta; a flag that differs
-# from the recorded value stops finalize before anything is written. An
+# from the recorded value stops finalize before anything is written, except
+# --docker-image, which goes to the override that replaces the recorded image, as
+# --release-tag does for a docker install. An
 # installed node is refused before the update lock and its layout migration
 # (run_json_mode). A copy of setup-node.sh without its last line is sourced at
 # the top level. Maintainer tooling (not updater-tracked). bash 3.2 safe.
@@ -24,6 +26,9 @@ NETWORK=testnet
 CONFIG_DIR="$T/conf"
 printf 'stored\n' > "$CONFIG_DIR/bls-passphrase"
 check_binary_path() { return 0; }
+# The recorded image's build-feature check runs the image (docker_image_test.sh and
+# setup_release_test.sh test it): here it only records what it was asked.
+tn_docker_image_network_ok() { printf '%s %s\n' "$1" "$2" >> "$T/featcheck"; return 0; }
 # Images run by digest (TN_DOCKER_REQUIRE_DIGEST defaults to 1); IMG_TAG is the
 # older tag form, which a keygen record may still hold and finalize refuses.
 IMG="${GAR_IMAGE_BASE}@sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -46,10 +51,11 @@ keygen_meta() { printf '%s\n' "PASSPHRASE_METHOD=stdin" "$@" > "$CONFIG_DIR/.nod
 # (The body is a function of its own: bash 3.2 misreads a case inside $(...).)
 fin_body() {
     local kv
-    INSTALL_METHOD="" DATA_DIR="$DEFAULT_DATA_DIR" DOCKER_IMAGE="" BINARY_PATH=""
+    INSTALL_METHOD="" DATA_DIR="$DEFAULT_DATA_DIR" DOCKER_IMAGE="" BINARY_PATH="" RELEASE_TAG=""
     for kv in "$@"; do
         case "$kv" in
             INSTALL_METHOD=*) INSTALL_METHOD="${kv#*=}" ;;
+            RELEASE_TAG=*) RELEASE_TAG="${kv#*=}" ;;
             DATA_DIR=*) DATA_DIR="${kv#*=}" ;;
             DOCKER_IMAGE=*) DOCKER_IMAGE="${kv#*=}" ;;
             BINARY_PATH=*) BINARY_PATH="${kv#*=}" ;;
@@ -69,6 +75,7 @@ fin() {
 keygen_meta "INSTALL_METHOD=docker" "DATA_DIR=/mnt/tn" "DOCKER_IMAGE=${IMG}"
 fin
 check "docker: no flags take the keygen record" "0 docker|/mnt/tn|${IMG}|" "$RC $GOT"
+check "docker: the recorded image gets the build-feature check" "testnet ${IMG}" "$(cat "$T/featcheck" 2>/dev/null)"
 fin INSTALL_METHOD=docker DATA_DIR=/mnt/tn DOCKER_IMAGE="$IMG"
 check "docker: the same values as flags pass" "0 docker|/mnt/tn|${IMG}|" "$RC $GOT"
 fin INSTALL_METHOD=source
@@ -78,9 +85,25 @@ check "the refusal says nothing changed" yes "$(has "$ERR" "Nothing was changed"
 fin DATA_DIR=/mnt/other
 check_rc "--data-dir other than keygen's: refused" 1 "$RC"
 check "data dir refusal names both" yes "$(has "$ERR" "--data-dir /mnt/other differs from /mnt/tn")"
+# A --docker-image other than keygen's replaces it (finalize_docker_override, tested
+# in setup_release_test.sh): handed over with the recorded image and the flag; the
+# recorded image's own checks do not run. So does --release-tag.
+finalize_docker_override() { printf '%s %s %s\n' "$1" "$2" "$3" > "$T/override"; }
+: > "$T/featcheck"
 fin DOCKER_IMAGE="$IMG_OTHER"
-check_rc "--docker-image other than keygen's: refused" 1 "$RC"
-check "image refusal names both" yes "$(has "$ERR" "--docker-image ${IMG_OTHER} differs from ${IMG}")"
+check "--docker-image other than keygen's: handed to the override with the recorded image" \
+    "0 ${IMG} --docker-image ${IMG_OTHER}" "$RC $(cat "$T/override" 2>/dev/null)"
+check "--docker-image other than keygen's: the recorded image is not checked" "" "$(cat "$T/featcheck")"
+rm -f "$T/override"
+fin DOCKER_IMAGE="$IMG"
+check "--docker-image equal to keygen's: no override" "0 none" "$RC $(cat "$T/override" 2>/dev/null || echo none)"
+: > "$T/featcheck"
+fin RELEASE_TAG=v0.17.0-adiri
+check "--release-tag, docker install: handed to the override with the recorded image" \
+    "0 ${IMG} --release-tag v0.17.0-adiri" "$RC $(cat "$T/override" 2>/dev/null)"
+check "--release-tag, docker install: the recorded image is not checked" "" "$(cat "$T/featcheck")"
+rm -f "$T/override"
+unset -f finalize_docker_override
 # A keygen record that names the image by tag is refused, pointing at the digest form.
 keygen_meta "INSTALL_METHOD=docker" "DATA_DIR=/mnt/tn" "DOCKER_IMAGE=${IMG_TAG}"
 fin

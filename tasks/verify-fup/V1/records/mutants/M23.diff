@@ -1,0 +1,4 @@
+378c378
+<         NETWORK_RPC="$(network_rpc_url "$NODE_NETWORK")"
+---
+>         NETWORK_RPC="$(network_rpc_url "$NODE_NETWORK")"; NETWORK_RPC="${NETWORK_RPC:-$TESTNET_RPC_URL}"

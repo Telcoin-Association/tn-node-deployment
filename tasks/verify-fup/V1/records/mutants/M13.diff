@@ -1,0 +1,5 @@
+7819,7822d7818
+<         if [[ -z "$tag" && "$net" == "mainnet" ]]; then
+<             print_warn "Image refused: on mainnet an image is named by its release tag, so the digest comes from the signed release; ${img##*@} is not the image of a mainnet release this node has installed. Give the mainnet release tag instead." >&2
+<             return 1
+<         fi

@@ -1,0 +1,56 @@
+PASS exit 1 with unannotated hits
+PASS exact unannotated findings (scan order, trimmed text)
+PASS alloy: url2 below a code line is reported
+PASS alloy: url below the marker passes
+PASS port alone (51820) is not a hit
+PASS a marker line naming adiri is not reported
+PASS marker line itself not reported (b.sh)
+PASS CRLF marker line covers CRLF line below
+PASS no-space #network-gated: marker accepted
+PASS excluded paths not reported
+PASS testnet-addons.env not scanned
+FAIL html: a marker line that also holds code does not cover the next line
+     contract: the line above must be nothing but the marker comment; index.html:14 passed
+PASS summary on stderr counts files
+PASS --list exit 1
+PASS --list trailing reason
+PASS --list above-line reason
+PASS --list unannotated form
+PASS --list marker line lists own reason
+PASS --list html closing --> stripped
+PASS --list js trailing
+PASS --list python above
+PASS --list patterns on stderr (port/prefix stripped, lower case)
+PASS --list excluded never listed
+PASS --list prints one line per hit
+PASS -- ROOT form exit 1
+PASS ROOT before --list same output
+PASS --help exit 0
+PASS --help usage line
+PASS -h exit 0
+PASS clean: exit 0
+PASS clean: stdout empty
+PASS clean: count on stderr
+PASS no hits: exit 0
+PASS no hits: count 0
+PASS unknown option: exit 2
+PASS two ROOTs: exit 2
+PASS ROOT not a directory: exit 2
+PASS missing ui/server.py: exit 2
+PASS missing ui/server.py: named
+PASS missing ui/telcoin-ui-helper.sh: exit 2
+PASS missing ui/telcoin-ui-helper.sh: named
+PASS missing ui/static/index.html: exit 2
+PASS missing ui/static/index.html: named
+PASS missing observability/config.alloy: exit 2
+PASS missing observability/config.alloy: named
+PASS missing testnet-addons.env: exit 2
+PASS env without OBS_PUSH_URL_TESTNET: exit 2
+PASS env without OBS_METRICS_PUSH_URL_TESTNET: exit 2
+PASS env without TN_WG_HUB_ENDPOINT: exit 2
+PASS env without TN_KUMA_SRC: exit 2
+PASS non-literal env value: exit 2
+PASS unreadable scanned file: exit 2
+INFO marker inside a string: rc=0 (0 = accepted)
+
+51 passed, 1 failed

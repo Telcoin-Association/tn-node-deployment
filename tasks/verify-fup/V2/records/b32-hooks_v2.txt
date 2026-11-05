@@ -1,0 +1,134 @@
+== AUDIT hooks: update-node
+ok    update-node docker interactive, verified: rc 0
+ok    update-node docker interactive, verified: refreshed once with the script's printer
+ok    update-node docker interactive, verified: refresh after the new release is recorded
+ok    update-node docker interactive, verified: the refresh warning printed
+ok    update-node docker interactive, verify failed and rolled back: no refresh
+ok    update-node docker interactive, verify failed, operator keeps the new release: no refresh
+ok    update-node docker interactive, committee refused the stop: rc 1, no stop, no refresh
+ok    update-node docker interactive, one-way verify failed: no refresh
+ok    update-node docker interactive, library without tn_host_baseline_*: rc 0, no error
+ok    update-node docker json, verified: rc 0
+ok    update-node docker json, verified: refreshed once with the script's printer
+ok    update-node docker json, verified: refresh after the new release is recorded
+ok    update-node docker json, verified: stdout is JSON events only
+ok    update-node docker json, verified: the refresh warning is an event before done
+ok    update-node docker json, verified: done ok true
+ok    update-node docker json, verify failed and rolled back: no refresh
+ok    update-node docker json, committee refused the stop: rc 1, no stop, no refresh
+ok    update-node docker json, one-way verify failed: no refresh
+ok    update-node docker json, library without tn_host_baseline_*: rc 0, no error
+ok    update-node source interactive, verified: rc 0
+ok    update-node source interactive, verified: refreshed once with the script's printer
+ok    update-node source interactive, verified: refresh after the new release is recorded
+ok    update-node source interactive, verified: the refresh warning printed
+ok    update-node source interactive, verify failed and rolled back: no refresh
+ok    update-node source interactive, verify failed, operator keeps the new release: no refresh
+ok    update-node source interactive, committee refused the stop: rc 1, no stop, no refresh
+ok    update-node source interactive, one-way verify failed: no refresh
+ok    update-node source interactive, library without tn_host_baseline_*: rc 0, no error
+ok    update-node source json, verified: rc 0
+ok    update-node source json, verified: refreshed once with the script's printer
+ok    update-node source json, verified: refresh after the new release is recorded
+ok    update-node source json, verified: stdout is JSON events only
+ok    update-node source json, verified: the refresh warning is an event before done
+ok    update-node source json, verified: done ok true
+ok    update-node source json, verify failed and rolled back: no refresh
+ok    update-node source json, committee refused the stop: rc 1, no stop, no refresh
+ok    update-node source json, one-way verify failed: no refresh
+ok    update-node source json, library without tn_host_baseline_*: rc 0, no error
+ok    update-node release interactive, verified: rc 0
+ok    update-node release interactive, verified: refreshed once with the script's printer
+ok    update-node release interactive, verified: refresh after the new release is recorded
+ok    update-node release interactive, verified: the refresh warning printed
+ok    update-node release interactive, verify failed and rolled back: no refresh
+ok    update-node release interactive, verify failed, operator keeps the new release: no refresh
+ok    update-node release interactive, committee refused the stop: rc 1, no stop, no refresh
+ok    update-node release interactive, one-way verify failed: no refresh
+ok    update-node release interactive, library without tn_host_baseline_*: rc 0, no error
+ok    update-node release json, verified: rc 0
+ok    update-node release json, verified: refreshed once with the script's printer
+ok    update-node release json, verified: refresh after the new release is recorded
+ok    update-node release json, verified: stdout is JSON events only
+ok    update-node release json, verified: the refresh warning is an event before done
+ok    update-node release json, verified: done ok true
+ok    update-node release json, verify failed and rolled back: no refresh
+ok    update-node release json, committee refused the stop: rc 1, no stop, no refresh
+ok    update-node release json, one-way verify failed: no refresh
+ok    update-node release json, library without tn_host_baseline_*: rc 0, no error
+== AUDIT hooks: edit-config
+ok    edit-config --set, healthy restart: refreshed once
+ok    edit-config --set, unhealthy restart rolled back: no refresh
+ok    edit-config --set, committee refused: no refresh, put back
+ok    edit-config --set, library without tn_host_baseline_*: rc 0, no error
+ok    edit-config --set --json, healthy restart: refreshed once
+ok    edit-config --set --json: stdout JSON only
+ok    edit-config --set --json: refresh warning before done
+ok    edit-config --set --json, unhealthy restart rolled back: no refresh
+ok    edit-config --set --json, committee refused: no refresh, put back
+ok    edit-config --set --json, library without tn_host_baseline_*: rc 0, no error
+ok    edit-config menu restart, active: refreshed once
+ok    edit-config menu restart, not active: no refresh
+ok    edit-config menu 'restart later': no refresh
+ok    edit-config menu, committee refused (no backups): no refresh
+ok    edit-config menu, committee refused (put back): no refresh
+FAIL  [finding A-5] edit-config menu Restart node (after a 'restart later' edit): refresh
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.PbOboA/expected
+      +++ /tmp/tn_test.PbOboA/actual
+      @@ -1 +1 @@
+      -1
+      +0
+ok    edit-config passphrase move rc 0 (c4322d4): refreshes 1
+ok    edit-config passphrase move rc 1 (c4322d4): refreshes 0
+ok    edit-config passphrase move rc 2 (c4322d4): refreshes 0
+ok    edit-config passphrase move rc 3 (c4322d4): refreshes 0
+ok    edit-config passphrase move, library without tn_host_baseline_*: no error
+== AUDIT hooks: remove-node
+ok    remove-node stop_and_disable_service: teardown first, unit and dirs still there
+ok    remove-node stop_and_disable_service: teardown before the stop
+ok    remove-node stop_and_disable_service '' (leftovers): teardown
+ok    remove-node, library without tn_host_baseline_*: no error
+ok    remove-node --json --scope service: teardown once, before the dirs go
+ok    remove-node --json --scope service: stdout JSON only
+ok    remove-node --json --scope data: teardown once, before the dirs go
+ok    remove-node --json --scope data: stdout JSON only
+ok    remove-node --json --scope keys: teardown once, before the dirs go
+ok    remove-node --json --scope keys: stdout JSON only
+ok    remove-node --json (real teardown): baseline files gone
+ok    remove-node --json (real teardown): marker gone
+FAIL  [finding A-4] remove-node --json (real teardown): the event stream says the packages stay
+      expected (<) vs actual (>):
+      --- /tmp/tn_test.PbOboA/expected
+      +++ /tmp/tn_test.PbOboA/actual
+      @@ -1 +1 @@
+      -yes
+      +no
+ok    remove-node menu removal: teardown before the dirs go
+ok    remove-node leftovers: teardown runs
+== AUDIT hooks: setup-node
+ok    setup-node step_host_baseline: install called with setup_progress
+ok    setup-node step_host_baseline: state installed, lock released
+ok    setup-node step_host_baseline, install failed: state failed, setup goes on
+ok    setup-node step_host_baseline, install failed: warns with the re-run
+ok    setup-node without --host-baseline: install not called
+ok    setup-node --json finalize, install rc 0: done carries host_baseline true
+ok    setup-node --json finalize, install rc 0: stdout JSON only
+ok    setup-node --json finalize, install rc 0: install after the service exists
+ok    setup-node --json finalize, install rc 1: done carries host_baseline false
+ok    setup-node --json finalize, install rc 1: stdout JSON only
+ok    setup-node --json finalize, install rc 1: install after the service exists
+ok    setup-node --json finalize, install failed: WARNING log event
+ok    setup-node --json finalize without the flag: host_baseline false, no install
+ok    setup-node --host-baseline on an installed node: baseline only
+ok    setup-node --host-baseline on an installed node, failed: rc 1, says nothing else changed
+ok    setup-node --host-baseline with no node: the full setup runs
+== the library of 0a9db45 behind the new scripts
+old lib, un docker: driver rc 0, case rc 0, first error: 
+ok    old lib 0a9db45 behind new un: no 'command not found' from the hooks
+old lib, ec cred: driver rc 0, case rc 0, first error: 
+ok    old lib 0a9db45 behind new ec: no 'command not found' from the hooks
+old lib, rm stop: driver rc 0, case rc 0, first error: 
+ok    old lib 0a9db45 behind new rm: no 'command not found' from the hooks
+
+112 checks, 2 failures, 0 skipped

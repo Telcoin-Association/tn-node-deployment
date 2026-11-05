@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tools/tests/install_test.sh -- install.sh: pinned tag, embedded signers,
+# tools/tests/install_test.sh -- install.sh: pinned tag, embedded release keys,
 # truncation safety and verification of a signed fixture release
 #
 #   bash tools/tests/install_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/install_test.sh
 #
 # Static checks on install.sh, then runs of a tagged copy (TN_SCRIPTS_TAG and
-# the signer block rewritten the way tools/release-scripts.sh does) with HOME in
-# the temp dir and a curl shim that serves a fixture release archive and logs
-# every URL. Signing as in updater_manifest_test.sh (tools/tests/signing.sh).
+# the release key block rewritten the way tools/release-scripts.sh does) with
+# HOME in the temp dir and a curl shim that serves a fixture release archive and
+# logs every URL. Signing as in updater_manifest_test.sh (tools/tests/signing.sh:
+# real gpg, or a fake gpg and gpgv where GnuPG is absent).
 # No network, no root, nothing outside the temp dir.
 # =============================================================================
 
@@ -38,11 +39,13 @@ check "no refs/heads/main in install.sh" "0" "$(grep -c 'refs/heads/main' "$INST
 check "last line calls main" 'main "$@"' "$(tail -n 1 "$INSTALLER")"
 check "one main call" "1" "$(grep -c '^main "\$@"$' "$INSTALLER")"
 embedded="$(awk -v q="'" '
-    $0 == "TN_ALLOWED_SIGNERS" { inblock = 0 }
+    $0 == "TN_RELEASE_KEYS" { inblock = 0 }
     inblock { print }
-    index($0, "<<" q "TN_ALLOWED_SIGNERS" q) { inblock = 1 }
+    index($0, "<<" q "TN_RELEASE_KEYS" q) { inblock = 1 }
 ' "$INSTALLER")"
-check "embedded signers identical to lib/allowed_signers" "$(cat "$REPO/lib/allowed_signers")" "$embedded"
+check "embedded release keys identical to lib/release-keys/*.asc, in name order" \
+    "$(for f in $(cd "$REPO" && ls lib/release-keys/*.asc | LC_ALL=C sort); do cat "$REPO/$f"; done)" "$embedded"
+check "needs gpgv, not ssh" "0" "$(grep -c 'ssh-''keygen' "$INSTALLER")"
 # A curl or wget in command position (line start, or after ; & | ( or $( ).
 check "curl runs only https-only" "" "$(grep -nE '(^|[;&|(])[[:space:]]*curl ' "$INSTALLER" | grep -v -- "--proto '=https' --tlsv1.2")"
 check "wget runs only https-only" "" "$(grep -nE '(^|[;&|(])[[:space:]]*wget ' "$INSTALLER" | grep -v -- '--https-only')"
@@ -88,24 +91,25 @@ chmod +x "$BIN/curl" "$BIN/git" "$BIN/wget"
 # shellcheck source=tools/tests/signing.sh
 . "$TN_TEST_DIR/signing.sh"
 export PATH="$BIN:$PATH"
-KEY1_LINE="$(newkey key1)"
-newkey key2 >/dev/null
+FPR1="$(newkey key1)"
+FPR2="$(newkey key2)"
+newkey kexp --expired >/dev/null
 
-if [[ $REAL_SSH -eq 1 ]]; then
-    check "signer: real ssh-keygen in use" "1" "$REAL_SSH"
+if [[ $REAL_GPG -eq 1 ]]; then
+    check "signer: real gpg and gpgv in use" "1" "$REAL_GPG"
 else
-    skip "real ssh-keygen signatures" "ssh-keygen absent: a fake signer stands in"
+    skip "real OpenPGP signatures" "gpg absent: a fake gpg and gpgv stand in"
 fi
 
-# tagged_installer TAG SIGNERS_FILE OUT -- install.sh with the tag and signer
-# block written in, as tools/release-scripts.sh does at release time.
+# tagged_installer TAG KEYS_FILE OUT -- install.sh with the tag and the release
+# key block written in, as tools/release-scripts.sh does at release time.
 tagged_installer() {
     awk -v tag="$1" -v sf="$2" -v q="'" '
         /^readonly TN_SCRIPTS_TAG=/ { print "readonly TN_SCRIPTS_TAG=\"" tag "\""; next }
-        skipping && $0 == "TN_ALLOWED_SIGNERS" { skipping = 0 }
+        skipping && $0 == "TN_RELEASE_KEYS" { skipping = 0 }
         skipping { next }
         { print }
-        index($0, "<<" q "TN_ALLOWED_SIGNERS" q) {
+        index($0, "<<" q "TN_RELEASE_KEYS" q) {
             while ((getline line < sf) > 0) print line
             close(sf)
             skipping = 1
@@ -113,20 +117,22 @@ tagged_installer() {
     ' "$INSTALLER" > "$3"
 }
 
-# make_release TAG SERIAL DIR -- a release tree in DIR with MANIFEST, signed
-# with key1; extra files not in MANIFEST stand in for docs and tools.
+# make_release TAG SERIAL DIR [HEADER...] -- a release tree in DIR with
+# MANIFEST (HEADER lines after min_updater=), signed with key1; extra files not
+# in MANIFEST stand in for docs and tools.
 make_release() {
     local d="$3" p
-    mkdir -p "$d/lib" "$d/ui" "$d/tools"
+    mkdir -p "$d/lib/release-keys" "$d/ui" "$d/tools"
     cp "$REPO/update-scripts.sh" "$d/update-scripts.sh"
-    printf '# test signers\n%s\n' "$KEY1_LINE" > "$d/lib/allowed_signers"
+    cp "$T/key1.asc" "$d/lib/release-keys/key1.asc"
     printf '#!/usr/bin/env bash\necho setup\n' > "$d/setup-node.sh"
     printf 'UI_VERSION = "1.0.0"\n' > "$d/ui/server.py"
     printf 'docs\n' > "$d/README.md"
     printf '#!/usr/bin/env bash\n' > "$d/tools/unlisted.sh"
     {
         printf 'format=1\nrelease=%s\nserial=%s\nmin_updater=1.0.0\n' "$1" "$2"
-        for p in lib/allowed_signers setup-node.sh ui/server.py update-scripts.sh; do
+        if [[ $# -gt 3 ]]; then printf '%s\n' "${@:4}"; fi
+        for p in lib/release-keys/key1.asc setup-node.sh ui/server.py update-scripts.sh; do
             printf 'sha256  %s  %s\n' "$(_h "$d/$p")" "$p"
         done
     } > "$d/MANIFEST"
@@ -156,10 +162,8 @@ staged_left() {
 }
 
 TAG=scripts-v1.0.0
-SIGNERS="$T/signers"
-printf '# test signers\n%s\n' "$KEY1_LINE" > "$SIGNERS"
 GOOD="$T/install-good.sh"
-tagged_installer "$TAG" "$SIGNERS" "$GOOD"
+tagged_installer "$TAG" "$T/key1.asc" "$GOOD"
 REL="$T/rel"
 make_release "$TAG" 100 "$REL"
 pack "$REL" "$TAG"
@@ -200,8 +204,9 @@ check "copy without its last 5 lines: nothing installed" "absent" "$([[ -e "$HOM
 run_installer "$GOOD"
 check_rc "good: exits 0" 0 "$RC"
 DEST="$HOME_DIR/telcoin-node-scripts"
-check "good: listed files and the record, nothing else" "$(printf '%s\n' MANIFEST MANIFEST.sig lib/allowed_signers setup-node.sh ui/server.py update-scripts.sh)" \
+check "good: listed files and the record, nothing else" "$(printf '%s\n' MANIFEST MANIFEST.asc lib/release-keys/key1.asc setup-node.sh ui/server.py update-scripts.sh)" \
     "$(cd "$DEST" 2>/dev/null && find . -type f | sed 's|^\./||' | LC_ALL=C sort)"
+check_has "good: names the release key" "  [OK]  Release signature verified (release key ${FPR1})" "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
 check "good: setup-node.sh verified copy" "$(_h "$REL/setup-node.sh")" "$(_h "$DEST/setup-node.sh" 2>/dev/null)"
 check "good: scripts executable" "yes" "$([[ -x "$DEST/setup-node.sh" && -x "$DEST/update-scripts.sh" ]] && echo yes || echo no)"
 check "good: fetched only the tag archive" "$ARCHIVE_URL_BASE/$TAG.tar.gz" "$(cat "$T/curl.log")"
@@ -280,17 +285,146 @@ make_release scripts-v0.9.0 90 "$O"
 pack "$O" "$TAG"
 expect_refusal "manifest for another release" "$GOOD"
 
-# --- no MANIFEST.sig -----------------------------------------------------------------
+# --- no MANIFEST.asc -----------------------------------------------------------------
 Z="$T/rel-nosig"
 cp -R "$REL" "$Z"
-rm -f "$Z/MANIFEST.sig"
+rm -f "$Z/MANIFEST.asc"
 pack "$Z" "$TAG"
 expect_refusal "unsigned release" "$GOOD"
+check_has "unsigned release: says why" "  [ERROR] The release $TAG has no MANIFEST.asc." "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
 
-# --- an installer with no key lines ----------------------------------------------------
+# --- the MANIFEST changed after signing --------------------------------------------------
+X2="$T/rel-badsig"
+cp -R "$REL" "$X2"
+printf 'note=changed after signing\n' >> "$X2/MANIFEST"
+pack "$X2" "$TAG"
+expect_refusal "MANIFEST changed after signing" "$GOOD"
+check_has "MANIFEST changed after signing: says why" "  [ERROR] The release signature does not verify against the Telcoin release keys (the signature by key ${FPR1:24} does not match MANIFEST: one of the two was changed). Nothing was installed." \
+    "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+
+# --- a manifest that lists no release key --------------------------------------------------
+NK="$T/rel-nokey"
+cp -R "$REL" "$NK"
+grep -v '  lib/release-keys/key1\.asc$' "$REL/MANIFEST" > "$NK/MANIFEST"
+sign_file "$NK/MANIFEST" key1
+pack "$NK" "$TAG"
+expect_refusal "no release key listed" "$GOOD"
+check_has "no release key listed: says why" "  [ERROR] MANIFEST does not list a release key (lib/release-keys/*.asc)." "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+
+# --- a release that adds a key: the embedded key verifies it, both keys install ------------
+AK="$T/rel-addkey"
+make_release "$TAG" 100 "$AK"
+cp "$T/key2.asc" "$AK/lib/release-keys/key2.asc"
+printf 'sha256  %s  lib/release-keys/key2.asc\n' "$(_h "$AK/lib/release-keys/key2.asc")" >> "$AK/MANIFEST"
+sign_file "$AK/MANIFEST" key1
+pack "$AK" "$TAG"
+run_installer "$GOOD" --yes
+check_rc "a release that adds a key: exits 0" 0 "$RC"
+check "a release that adds a key: the new key is installed" "$(_h "$T/key2.asc")" "$(_h "$DEST/lib/release-keys/key2.asc" 2>/dev/null)"
+sign_file "$AK/MANIFEST" key2
+pack "$AK" "$TAG"
+expect_refusal "a release signed only by the key it adds" "$GOOD"
+
+# --- two embedded keys, two signatures; an expired embedded key -----------------------------
+cat "$T/key1.asc" "$T/key2.asc" > "$T/keys12"
+TWO="$T/install-two.sh"
+tagged_installer "$TAG" "$T/keys12" "$TWO"
+sign_file "$AK/MANIFEST" key1 key2
+pack "$AK" "$TAG"
+run_installer "$TWO" --yes
+check_rc "two signatures: exits 0" 0 "$RC"
+check_has "two signatures: both keys named" "  [OK]  Release signature verified (release key ${FPR1} ${FPR2})" "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+cat "$T/key1.asc" "$T/kexp.asc" > "$T/keys1exp"
+EXP="$T/install-exp.sh"
+tagged_installer "$TAG" "$T/keys1exp" "$EXP"
+sign_file "$REL/MANIFEST" key1 kexp
+pack "$REL" "$TAG"
+expect_refusal "a signature by an expired release key" "$EXP"
+check "a signature by an expired release key: says why" "yes" \
+    "$(printf '%s\n' "$OUT" | grep -qF "(it is signed by release key $(fpr_of kexp | cut -c25-40), which has expired). Nothing was installed." && echo yes || echo no)"
+sign_file "$REL/MANIFEST" key1
+pack "$REL" "$TAG"
+
+# --- REL: release date and expiry (date=, expires=) -------------------------------------
+# A date shim answers `date -u +%Y-%m-%d` with TODAY; other calls run the real date.
+REAL_DATE="$(type -P date)"
+cat > "$BIN/date" <<EOF
+#!/bin/sh
+if [ -n "\${TODAY:-}" ] && [ "\$*" = "-u +%Y-%m-%d" ]; then echo "\$TODAY"; exit 0; fi
+exec $REAL_DATE "\$@"
+EOF
+chmod +x "$BIN/date"
+export TODAY=""
+ESC="$(printf '\033')"
+# plain TEXT -- TEXT without colour escapes.
+plain() {
+    printf '%s\n' "$1" | sed "s/${ESC}\[[0-9;]*m//g"
+}
+EXPIRED_LINE="  [WARN] Script release $TAG expired on 2027-02-01; a newer signed release is overdue. Installing it anyway."
+E="$T/rel-expires"
+make_release "$TAG" 100 "$E" date=2026-11-03 expires=2027-02-01
+check "expires: fixture header" "$(printf 'min_updater=1.0.0\ndate=2026-11-03\nexpires=2027-02-01')" "$(sed -n '4,6p' "$E/MANIFEST")"
+pack "$E" "$TAG"
+TODAY=2026-11-03 run_installer "$GOOD" --yes
+check_rc "expires, fresh: exits 0" 0 "$RC"
+check_lacks "expires, fresh: no warning" "expired" "$OUT"
+check "expires, fresh: the record is the release MANIFEST" "$(_h "$E/MANIFEST")" "$(_h "$DEST/MANIFEST" 2>/dev/null)"
+TODAY=2027-01-31 run_installer "$GOOD" --yes
+check_lacks "expires, the day before: no warning" "expired" "$OUT"
+TODAY=2027-02-01 run_installer "$GOOD" --yes
+check_rc "expired: exits 0" 0 "$RC"
+check_has "expired: the warning" "$EXPIRED_LINE" "$(plain "$OUT")"
+check "expired: installed anyway" "$(_h "$E/setup-node.sh")" "$(_h "$DEST/setup-node.sh" 2>/dev/null)"
+check "expired: warned before installing" "yes" \
+    "$(plain "$OUT" | awk -v w="$EXPIRED_LINE" '$0 == w {seen = 1} /Installing to / && seen {print "yes"; exit}')"
+# Far-off dates under this host's real date (GNU, busybox or macOS).
+make_release "$TAG" 100 "$E" expires=2019-12-31
+pack "$E" "$TAG"
+run_installer "$GOOD" --yes
+check_has "real date, expired 2019-12-31: the warning" "  [WARN] Script release $TAG expired on 2019-12-31; a newer signed release is overdue. Installing it anyway." "$(plain "$OUT")"
+make_release "$TAG" 100 "$E" expires=2999-12-31
+pack "$E" "$TAG"
+run_installer "$GOOD" --yes
+check_rc "real date, expires 2999-12-31: exits 0" 0 "$RC"
+check_lacks "real date, expires 2999-12-31: no warning" "expired" "$OUT"
+
+# Malformed or repeated date= / expires= refuse the release.
+# bad_headers NAME PHRASE HEADER... -- a signed release with these lines is refused.
+bad_headers() {
+    local name="$1" phrase="$2" d="$T/rel-hdr"
+    shift 2
+    rm -rf "$d"
+    make_release "$TAG" 100 "$d" "$@"
+    pack "$d" "$TAG"
+    expect_refusal "$name" "$GOOD"
+    check_has "$name: says why" "  [ERROR] $phrase" "$(plain "$OUT")"
+}
+bad_headers "expires not a calendar date" "MANIFEST expires=2027-02-30 is not a calendar date YYYY-MM-DD." date=2026-11-03 expires=2027-02-30
+bad_headers "expires empty" "MANIFEST expires= is not a calendar date YYYY-MM-DD." expires=
+bad_headers "date in another format" "MANIFEST date=03/11/2026 is not a calendar date YYYY-MM-DD." date=03/11/2026 expires=2027-02-01
+bad_headers "expires twice" "MANIFEST repeats expires=." expires=2027-02-01 expires=2027-03-01
+bad_headers "date twice" "MANIFEST repeats date=." date=2026-11-03 date=2026-11-04
+bad_headers "a blank before =" "MANIFEST line is malformed: expires =2027-02-01" "expires =2027-02-01"
+TODAY=""
+
+# --- an installer whose embedded key has CR line endings verifies as one with LF ---------------
+awk '{ printf "%s\r\n", $0 }' "$T/key1.asc" > "$T/key1crlf"
+tagged_installer "$TAG" "$T/key1crlf" "$T/install-crlf.sh"
+check "a CRLF embedded key: the installer carries the CRs" "yes" "$(grep -q "$(printf '\r')" "$T/install-crlf.sh" && echo yes || echo no)"
+pack "$REL" "$TAG"
+run_installer "$T/install-crlf.sh" --yes
+check_rc "a CRLF embedded key: exits 0" 0 "$RC"
+check_has "a CRLF embedded key: verified with it" "  [OK]  Release signature verified (release key ${FPR1})" "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+
+# --- an installer with no key, or a key block that is not a key -------------------------------
 printf '# no keys\n' > "$T/nokeys"
 tagged_installer "$TAG" "$T/nokeys" "$T/install-nokeys.sh"
 pack "$REL" "$TAG"
 expect_refusal "installer without keys" "$T/install-nokeys.sh"
+check_has "installer without keys: says why" "  [ERROR] This installer carries no readable release key, so it cannot verify anything. Use the published installer: https://install.telcoin.network" \
+    "$(printf '%s\n' "$OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+sed 's/^[A-Za-z0-9+\/]\{20\}/!!!!/' "$T/key1.asc" > "$T/badkey"
+tagged_installer "$TAG" "$T/badkey" "$T/install-badkey.sh"
+expect_refusal "installer whose key does not decode" "$T/install-badkey.sh"
 
 finish

@@ -1,0 +1,3 @@
+SKIP  e2e (real /etc paths) (needs a disposable container as root (V3_DISPOSABLE=1))
+
+0 checks, 0 failures, 1 skipped

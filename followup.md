@@ -7,28 +7,52 @@ closed the backlog items those rewrites touched. What is below is what it could 
 repo, chose not to change, or found along the way, re-checked against the code at the end of the
 round. Each item says what it is, where it lives and what closes it.
 
-U-numbers name the telcoin-network items of the round. Their issues are drafted but not posted
-yet; this file gains the issue numbers when they are.
+The follow-ups round of 2026-11-03 (`scripts-v2.1.0`, see
+[CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md)) removed the items it closed and added
+the ones it found or left for later. Its trackers in this repository stay open with what is left
+on each; that release note's "Left open" section lists them.
+
+U-numbers name the telcoin-network items of the round. Their issues are telcoin-network #1725
+(U-3) to #1735 (U-13): U-3 #1725, U-4 #1726, U-5 #1727, U-6 #1728, U-7 #1729, U-8 #1730, U-9
+#1731, U-10 #1732, U-11 #1733, U-12 #1734, U-13 #1735. U-1 and U-2 merged as telcoin-network PR
+#1715.
 
 ## Release prep
 
-- `lib/allowed_signers` holds only comments, and there is no `RELEASE`, `MANIFEST` or
-  `MANIFEST.sig` yet, so the signed updater has nothing to install. Closes at release prep: the
-  release signer adds their SSH signing key, signs `MANIFEST` with the hardware key, and pushes the
-  `scripts-v2.0.0` tag right after the release merges (a tag without
-  `lib/allowed_signers.sha256` cannot bootstrap hosts still on update-scripts 1.1.72 or older).
-  From then on, a release that changes `lib/allowed_signers` must be signed by a key that is in
-  both the old and the new list.
-- Two repository settings are user steps. The `github-pages` environment's deployment policy must
-  allow `scripts-v*` tags, or `publish-installer.yml` cannot publish `install.sh`. And
-  `.github/CODEOWNERS` names a single owner on every line, including `/RELEASE` and
-  `/MANIFEST*`. Closes when the policy allows the tags and a second owner is added.
-- The `.sha256` sidecars stay for the transition. update-scripts 2.0.0 still checks a published
-  sidecar against the signed manifest and needs one to fetch `lib/allowed_signers` the first
-  time; older updaters use the sidecars as their only check. Closes when no host runs
-  update-scripts 1.1.72 or older: then drop the sidecars, `tools/gen-checksums.sh` from the
-  release steps, and the sidecar reads in `update-scripts.sh` (`fetch_published_sha`,
-  `bootstrap_signers`).
+- There is no `RELEASE`, `MANIFEST` or `MANIFEST.asc` on main yet, so the signed updater has
+  nothing to install. `scripts-v2.1.0` is the first signed release (serial 1), signed with
+  OpenPGP by the release key in `lib/release-keys/` that already signs node releases;
+  `scripts-v2.0.0` was never tagged. Closes at the first release ceremony: after PR #59 merges,
+  `bash tools/cut-release.sh prep scripts-v2.1.0 --serial 1`, merge the release pull request with
+  a merge commit, then `bash tools/cut-release.sh tag scripts-v2.1.0` (a tag without the key
+  files' `.sha256` sidecars cannot bootstrap hosts still on update-scripts 1.1.72 or older). From
+  then on, a release that changes `lib/release-keys/` must be signed by a key that is in both
+  the old and the new set.
+- Hosts that cloned main while update-scripts 2.0.0 (the SSH-signature flow) was there refuse
+  `scripts-v2.1.0` ("has no MANIFEST.sig; nothing was changed.") and need the installer once.
+  A leftover `lib/allowed_signers` stays on them, unused. Closes when those hosts have re-run
+  the installer.
+- The release key's primary (`4E36D35A4AB61B589861D01AC7173F2377CA7573`) expires 2028-10-16.
+  The extended key must ship in a script release that hosts install before that date, since
+  only a release that verifies against the installed copy can renew it; hosts that miss it
+  re-run the installer. Closes when the extended key ships.
+- The main-branch ruleset of #30 is a user step. Its JSON in the issue requires eight contexts:
+  "fixture tests (macOS bash 3.2)" and "Ubuntu 24.04 VM assertions" are not in it, although
+  `tools/tests/ci_pins_test.sh` guards both names. `.github/CODEOWNERS` now lists three owners
+  on every line, so `require_code_owner_review` can be true, and `required_approving_review_count`
+  1 plus `require_last_push_approval` means a pull request needs an approval from an owner other
+  than its last pusher. Closes when the ruleset is on with the contexts it should require. (The
+  `github-pages` deployment policy for `scripts-v*` tags was set on 2026-11-04.)
+- Release signatures are 1-of-1: `lib/release-keys/` holds one key, and `TN_SIG_THRESHOLD` is 1
+  in the three verifiers (`update-scripts.sh`, `install.sh`, `tools/release-scripts.sh`). 2-of-N
+  signatures (#40) are deferred until a second release key exists; then the constant rises to the
+  number of distinct keys that must sign.
+- The `.sha256` sidecars stay for the transition. update-scripts 2.1.0 still checks a published
+  sidecar against the signed manifest and needs the key files' sidecars to fetch the release keys
+  the first time on a host that has none; older updaters use the sidecars as their only check.
+  Closes when no host runs update-scripts 1.1.72 or older: then drop the sidecars,
+  `tools/gen-checksums.sh` from the release steps, and the sidecar reads in `update-scripts.sh`
+  (`fetch_published_sha`, `bootstrap_keys`).
 
 - The testnet fallbacks for a time without a signed release can go once `v0.17.0-adiri` is
   published and installed everywhere: the legacy Artifact Registry tag listing in
@@ -47,10 +71,30 @@ yet; this file gains the issue numbers when they are.
 
 ## Mainnet launch
 
-- No mainnet image repository is set: `tn_docker_repo_for mainnet` returns nothing
-  (`TN_MAINNET_IMAGE_REPO` is empty in `lib/common.sh`), so Docker installs and updates are
-  refused on mainnet. Closes when the repository that publishes mainnet images is named and the
-  constant is set.
+- Mainnet is switched off by one constant: `readonly TN_MAINNET_ENABLED=0` in `lib/common.sh`,
+  with `TN_MAINNET_ENABLED` in `ui/server.py` and `SETUP_MAINNET_ENABLED` in
+  `ui/static/index.html`, which `ui/test_mainnet_flag.py` keeps in step. Closes at launch (#45):
+  the release that sets the mainnet chain-config pins and `MIN_SOURCE_VERSION_MAINNET` flips all
+  three.
+- Each network has its own image package: mainnet `ghcr.io/telcoin-association/tn-mainnet`
+  (`TN_MAINNET_IMAGE_REPO`, tags `vX.Y.Z`), testnet `ghcr.io/telcoin-association/tn-testnet`
+  (`TN_TESTNET_IMAGE_REPO`, tags `vX.Y.Z-adiri`), dev images in
+  `ghcr.io/telcoin-association/tn-dev`; the retired single package is recognised for running
+  containers only. On mainnet an image is still named by its release tag, with the digest from
+  the signed release. The scheme was confirmed on 2026-11-04 (#46); the release pipeline side is
+  telcoin-network draft PR #1784, which publishes each channel to its package in
+  `etc/release.sh` (telcoin-network #1728). Closes when PR #1784 merges and the first mainnet
+  release verifies.
+- The image feature check (`tn_docker_image_network_ok`) reads the `Build Features:` line only;
+  it does not compare the image's `Version:` line with the release tag. Closes if the check
+  passes the tag where it is known and asks `tn_release_version_ok` for both.
+- Mainnet operators see testnet tag forms and adiri host names as examples in messages annotated
+  `# network-gated: shown on every network`: edit-config's bootstrap-peers "Needs v0.15.0-adiri or
+  later." and the state-export labels, setup-node's `require_node_flag` refusals and the
+  public-RPC prompt and errors (`node7.adiri.telcoin.network`), update-node's
+  `existing_update_refusal`, check-node's `--observer` warning, install-caddy's domain prompts and
+  same-domain messages, and the page's `DEFAULT_RPC_HOST` placeholder. Closes when they use a
+  neutral example host (`node1.example.com`) and per-network tag examples, and the markers go.
 - `MAINNET_GENESIS_SHA256`, `MAINNET_COMMITTEE_SHA256` and `MAINNET_PARAMETERS_SHA256` in
   `lib/common.sh` are empty, so every mainnet install stops at the chain-config check and a
   mainnet release refuses its chain-config lines in `SHA256SUMS`. Closes after the genesis
@@ -63,25 +107,24 @@ yet; this file gains the issue numbers when they are.
 
 ## Upstream and maintainer repos
 
-- U-1 and U-2, the credential passphrase source and `--bootstrap-peers-file`: telcoin-network
-  branch `credential-passphrase-source`, attested and pushed; the draft PR is not open yet. Until
-  a node release carries it, the start script reads the credential and feeds the node with
+- U-1 and U-2, the credential passphrase source and `--bootstrap-peers-file`: merged on
+  telcoin-network main as PR #1715; no release carries it yet. Until one does, the start script reads the credential and feeds the node with
   `--bls-passphrase-source stdin`, and expands the peer map from
   `/etc/telcoin/bootstrap-peers.yaml` onto the command line. Closes when it ships in a release and
   the start script switches to `--bls-passphrase-source credential` (gated on `--version`) and
   `--bootstrap-peers-file`.
 - U-3 and U-5, the chain 487 guard (faucet opt-in, build features in `--version` and the startup
-  line, cleartext BLS key refused on 487): branch `mainnet-chain-guard`, attested and pushed; the
-  draft PR is not open yet. The devnet deployment runs a faucet image on a chain-487 genesis and
+  line, cleartext BLS key refused on 487): issues #1725 and #1727, branch `mainnet-chain-guard`,
+  telcoin-network PR #1716 (open). The devnet deployment runs a faucet image on a chain-487 genesis and
   must set `TN_ALLOW_FAUCET_ON_CHAIN_487=true` before it takes a release with the guard. Closes
   when it merges and the devnet deployment is updated.
-- U-4, part of U-6 and the release side of U-12, the release pipeline: telcoin-network PR #694,
-  draft. Still open there: the `v*` tag ruleset (a repository setting), a build-provenance
-  attestation, and the node refusing fork-epoch overrides on chains 487 and 2017, plus the
-  release check that depends on it (the rest of U-12). The telcoin-network README, SECURITY,
-  validator-operations and maintainers pages still describe a release as the tarball and
-  `IMAGE_DIGEST`, without the chain-config lines. Closes when #694 merges with the ruleset set and
-  those parts land.
+- U-4, part of U-6 and the release side of U-12, the release pipeline: telcoin-network PR #694
+  merged on 2026-10-28, and U-4 (#1726) is closed. Still open: the node refusing fork-epoch
+  overrides on chains 487 and 2017, and the release check that depends on it (U-12, #1734). When
+  last checked (the scripts-v2.0.0 round), the telcoin-network README, SECURITY,
+  validator-operations and maintainers pages described a release as the tarball and
+  `IMAGE_DIGEST`, without the chain-config lines. Closes when #1734 lands and those pages name the
+  chain-config lines.
   Closed in 2.0.1 (2026-10-30): the devnet image repository, the rest of U-6. Devnet Docker
   installs take `us-docker.pkg.dev/telcoin-network/tn-public/adiri` (`TN_DEVNET_IMAGE_REPO`) or
   ghcr.io (`TN_DEVNET_IMAGE_REPOS`), by digest only, and devnet tags end in `-devnet`. There is no
@@ -91,18 +134,19 @@ yet; this file gains the issue numbers when they are.
 - Node releases publish an x86_64 tarball only. On aarch64 a release install or update stops
   with "Release TAG has no aarch64-unknown-linux-gnu tarball". Closes when the release pipeline
   publishes an aarch64 tarball; the scripts already map the architecture.
-- U-7: `--healthcheck.addr` (default `127.0.0.1`) and a health server that serves connections
-  concurrently. Open.
-- U-8: `keytool verify` and `keytool rewrap`, so a passphrase can be checked and changed without
-  regenerating keys. Open.
-- U-9: a `tn` RPC method that says whether this node signed in recent rounds. Until it exists,
+- U-7 (#1729): `--healthcheck.addr` (default `127.0.0.1`) and a health server that serves
+  connections concurrently. Open.
+- U-8 (#1730): `keytool verify` and `keytool rewrap`, so a passphrase can be checked and changed
+  without regenerating keys. Open. edit-config 2.1.0 already runs `keytool verify` before a
+  passphrase write on a release that lists it; until then it logs that it skipped the check.
+- U-9 (#1731): a `tn` RPC method that says whether this node signed in recent rounds. Until it exists,
   update-node's post-update check (`verify_consensus_participation`) infers voting from
   `tn_nodeMode` and an advancing `tn_latestConsensusHeader`. Closes when the method ships and the
   check uses it.
-- U-10: a non-dumpable node process, with the key pages locked and excluded from core dumps.
-  Open.
-- U-11: a remote signer with an equivocation guard. Needs a design proposal first.
-- U-13: the final mainnet genesis embedded as `MAINNET_GENESIS`, with its hash logged at INFO
+- U-10 (#1732): a non-dumpable node process, with the key pages locked and excluded from core
+  dumps. Open.
+- U-11 (#1733): a remote signer with an equivocation guard. Needs a design proposal first.
+- U-13 (#1735): the final mainnet genesis embedded as `MAINNET_GENESIS`, with its hash logged at INFO
   (the chain 487 guard branch adds the startup line). Waits for the genesis ceremony.
 - The operator docs backlog merged upstream as telcoin-network #1573, but README and OPERATOR.md
   still warn that the upstream stake and unstake signatures are out of date. Closes when
@@ -122,6 +166,10 @@ yet; this file gains the issue numbers when they are.
   the maintainer repo.
 - devnet-genesis still picks `setup-observer.sh` and `setup-validator.sh` in `devnet-lib.sh`.
   Closes when it calls `setup-node.sh`; then the shims can leave this repo and the updater.
+- `observability/config.alloy` is vendored from deploy-networks-common main 18f8485 (PR #8,
+  merged 2026-11-04). The other consumers of that file upstream (`docker-compose.yml` and the
+  start-script heredocs) still pass the token in the environment, so a compose self-host on the
+  new config fails every push. Closes when those consumers move to the token file upstream.
 
 ## Host soak
 
@@ -161,10 +209,28 @@ yet; this file gains the issue numbers when they are.
 - firewall-setup writes no `DOCKER-USER` block to `/etc/ufw/after.rules`, so ports Docker
   publishes are not filtered by the ufw rules. Closes when firewall-setup adds the block and the
   fixture tests cover it.
-- Without a `--p2p-from` list, `fw_p2p_allow` opens the P2P ports to everyone with plain
-  `ufw allow`, with no per-source rate limit. ufw's `limit` keeps one list for all sources, so a
-  per-source limit needs nftables beside ufw. Closes with a decision on that and its
-  implementation.
+- The P2P new-flow limit (`inet tn_p2p`) keeps at most 65535 sources per address family. A
+  spoofed flood of distinct sources can fill a set; new sources then go on to ufw unlimited, as
+  before the limit. Accepted; closes if the limit gains a fallback for a full set.
+- The optional committee allowlist of #41, a reader of the Association's signed address manifest,
+  is deferred. A format proposal (`p2p/<network>.manifest` plus a detached OpenPGP signature,
+  serial and expiry, listed sources unmetered, unlisted sources kept on the metered path) is in
+  the issue (comment of 2026-11-04); the reader follows once the format is agreed.
+- firewall-setup's health-port edits in "Manage node ports" (`apply_kuma_rule`, `KUMA_EXTRA_SRC`)
+  run after the P2P part and outside the update lock, behind a prompt. Closes if they take the
+  lock too.
+- Host baseline (#43): nothing runs `aide --check` on a schedule, so a difference shows only when
+  someone runs it or reads `--audit`. The baseline covers neither the scripts' checkout
+  (`~/telcoin-node-scripts`) nor `/opt/telcoin-ui-update`. On a host whose ingest token is still
+  in `telcoin-alloy.env`, the AIDE database (root 0600) holds that file's hashes until
+  `--rotate-token` moves the token. Closes with a timer or a check-node line, and a decision on
+  the two trees.
+- Per-node ingest tokens (#35): one token serves every operator, so one operator cannot be
+  revoked alone. Closes when the hub's Caddy checks a per-node token list for `/loki/api/v1/push`
+  and `/api/v1/write`.
+- A `--rotate-token` stopped after the token write and before Alloy's restart keeps the new token
+  and the files rendered for it, with no rollback; Alloy runs on the old ones until it restarts.
+  Running `--rotate-token` again fixes it. Closes if an interrupted rotation rolls back.
 - The native Alloy install checks the tarball against the `SHA256SUMS` downloaded from the same
   release (`_obs_install_alloy_tarball`); there are no pinned per-architecture hashes for
   `TN_ALLOY_NATIVE_VERSION`. Closes when the hashes are constants in `lib/observability.sh`.
@@ -209,18 +275,43 @@ yet; this file gains the issue numbers when they are.
   keeps the old `ENABLE_*` values. Accepted for now; closes when Alloy is rolled back on that
   failure.
 - From the first release that carries telcoin-network #1696 (d2a0b525), a bare `--healthcheck
-  <port>` binds `127.0.0.1` instead of `0.0.0.0`, and a bind that fails stops the node.
-  `setup-observability.sh` (lines 130 and 315-318 on main) and `docs/testnet-addons.md` (68 and
-  230-233) say the health port is open on every interface, and the start script passes the bare
-  `43174`, so the Association monitor, the overlay and the Google health-check ranges would be
-  refused; `v0.16.0-adiri` rejects the address form (`--healthcheck 0.0.0.0:43174`, which logs a
-  WARN on main). The local probes (`curl 127.0.0.1:43174`, the UI helper, Docker with
-  `--network=host`) keep working either way. Closes when the scripts choose the flag form by node
-  release and the add-on docs say which interface the port binds. (guide-1.5)
-  Why: an outside monitor goes dark, without a message, on the first release with the change.
+  <port>` binds `127.0.0.1` instead of `0.0.0.0`, and a bind that fails stops the node. This
+  concerns only the bind form the Association monitor's pull probe needs: the start script passes
+  the bare `43174`, so that monitor, the overlay and the Google health-check ranges would be
+  refused, and `v0.16.0-adiri` rejects the address form (`--healthcheck 0.0.0.0:43174`, which logs
+  a WARN on main). `setup-observability.sh` (its health-check comments) and
+  `docs/testnet-addons.md` (its health-check paragraphs) say the port is open on every interface.
+  Local probes keep working either way: `curl 127.0.0.1:43174`, the UI helper, Docker with
+  `--network=host`, and the private alerts runner, which reads
+  `http://127.0.0.1:<port>/health/network`. Closes when the scripts choose the flag form by node
+  release for the Association monitor, or that monitor retires (below), and the add-on docs say
+  which interface the port binds. (guide-1.5)
+  Why: the Association's outside monitor goes dark, without a message, on the first release with
+  the change.
+- The health monitoring add-on's pull probe (the Association monitor TCP-probing port `43174`
+  through a ufw rule) can retire once the Association's Uptime Kuma takes pushes: the push
+  heartbeat of `setup-alerts.sh` needs no open port and works on every network. Closes when the
+  Association's monitor takes pushes and the add-on is retired or moved onto the heartbeat
+  (from #60).
+- A stop the operator plans shows on their monitor as a short down. update-node, edit-config,
+  setup-observability, install-caddy, `prepare-stake.sh --rotate-address` and the chain-data wipe
+  stop or restart the node, and the next heartbeat reports the unit inactive or the RPC not
+  answering. Pausing the timer would not help: a push monitor alerts on silence. Closes with a
+  maintenance marker under `/run/telcoin` (bounded in size and age, root 0644) that those scripts
+  write before their own stop and remove after it, which the runner reports as
+  `up maintenance: ...` while the marker is fresh (from #60).
 
 ## UI
 
+- A heartbeat run in flight when the node stops reports the starting grace once (its root
+  pre-step read the service before the stop, and the RPC then fails within `ALERTS_RESTART_GRACE`),
+  so the first `down` arrives one interval later than the stop. Accepted: the monitor's
+  heartbeat interval already allows one missed push. Closes when the runner re-reads the
+  service state after an RPC failure, or when the maintenance marker above lands.
+- The Node Manager UI has no private alerts card. Closes when a card shows
+  `setup-alerts.sh --json --status` and can enable, test and change targets through the helper,
+  with the target URLs on the helper's standard input (`--targets-stdin`), never on its command
+  line or in its environment (from #60).
 - The Node Manager UI's discard button reports only the helper's exit code; the `done` line of a
   discard after a started one-way update carries `"storage_migration":true` and a warning that the
   launch files were kept, which the UI does not show yet. Closes when the discard route streams or
@@ -244,8 +335,18 @@ yet; this file gains the issue numbers when they are.
 - The Config tab's credential migration and re-seal cannot pass `--allow-no-tpm`, so on a mainnet
   host without a TPM2 they are refused and the operator runs `edit-config.sh` on the server.
   Closes when the Config tab offers the flag the way the setup wizard does.
-- The System tab's firewall form takes an SSH source list only; it has no field for
-  `--p2p-from`, `--ssh-anywhere` or `--p2p-anywhere`. Closes when the form offers them.
+- The System tab's firewall form has fields for the SSH and P2P source lists, but only in the
+  enable form, shown while ufw is off: the UI cannot set or change a list once the firewall is on,
+  and has no `--ssh-anywhere` or `--p2p-anywhere`. The firewall card shows `persistent` as "(not
+  restored at boot)" but not `persistent_reason`, and `ui/dev/serve.py` has no
+  `p2p_new_flow_limit` in its fixture. Closes when the card edits the lists on an active firewall
+  and renders the reason.
+- The UI has no action for `setup-observability.sh --rotate-token`, and the setup wizard does not
+  pass `--host-baseline` (`cmd_setup` in `ui/telcoin-ui-helper.sh`). Closes with a rotate action
+  and a baseline toggle.
+- #39, the UI helper as templated root oneshots and a sandboxed UI unit, is deferred to its own
+  pull request. This release only adds `LimitCORE=0` to `ui/telcoin-ui.service`; the sudoers file
+  and the rest of the unit are unchanged.
 - `ui/server.py` keeps its own front-line copies of rules the library and helper also enforce
   (`passphrase_ok`, `image_allowed`, `release_tag_ok`). They have to change together
   with the library. Closes when the server asks the helper instead, or a test compares the
@@ -292,8 +393,10 @@ yet; this file gains the issue numbers when they are.
   `error` (install-caddy's `die` triggers it). Closes when the tail is skipped after a child error.
 - After a successful RPC enable, disable or withdraw, the card re-renders and the stream log, with
   any warnings in it, disappears.
-- The Network tab links `https://status.adiri.telcoin.network/`, while the server's
-  `STATUS_PAGE_BASE` and the page's other link use `https://status.telscan.xyz`. One is wrong.
+- The Network tab links a status page on testnet only (`STATUS_PAGE_LINKS`,
+  `https://status.adiri.telcoin.network/`), while the status data comes from `STATUS_PAGE_BASE`,
+  `https://status.telscan.xyz`, which the page names when it cannot reach it. Closes when the two
+  hosts are confirmed or made one.
 - The live log tail sends bare `data:` lines and keepalives with no end event, and the page leaves
   the LIVE badge on when the stream drops. Closes with an end event the page reacts to.
 - `/api/addons/status` still returns 400 without `?node_type=`, which the helper no longer uses.
@@ -327,8 +430,17 @@ yet; this file gains the issue numbers when they are.
 - Answering Yes to "Overwrite existing keys?" always ends "Key generation failed", because the
   keytool refuses a non-empty `node-keys/` and setup-node passes no `--force`. Closes when the old
   `node-keys/` and `node-info.yaml` are moved aside as the service account first.
+- `setup_keep_stored_passphrase` keeps a `.cred` it finds without decrypting it or checking it
+  against the key, so a credential copied from another host, or one that does not open the key,
+  is kept as found. Closes when it decrypts the credential and runs `keytool verify` (#1730)
+  before keeping it.
 - A `--json` finalize cannot undo the bootstrap-peers or state-export choices made at keygen:
   there is no `--bootstrap-peers none` and no `--no-state-export`.
+- A re-run of setup-node writes `ENABLE_HEALTHCHECK_MONITOR`, `ENABLE_OBSERVABILITY`,
+  `ENABLE_METRICS` and `ENABLE_VPN` from this run's answers, so a re-run that does not opt in again
+  records `false` over a live `true` or `pending` while the add-on keeps running. Pre-existing;
+  `ENABLE_ALERTS` reads its value back from `.node-meta` and keeps `true` or `pending`. Closes when
+  the add-on keys are read back the same way.
 - The warning that `--binary-path` is used only with `--install-method existing` is printed before
   the welcome screen clears the terminal. Closes when it goes through `NODE_FLAG_WARNINGS`.
 - Source builds now build in `/var/lib/tn-build/target`; a host that built from source before keeps
@@ -389,7 +501,7 @@ yet; this file gains the issue numbers when they are.
 - A second `--apply` while the pending state holds `STORAGE_MIGRATION_STARTED=true` (an apply killed
   after its first start) is not refused; it should stop with "the previous apply already started
   <ref>; discard it or check the node" instead of backing up the new binary as the old one.
-- `update-node.sh`'s one-way failure message (line 1080, "Not rolled back: the previous release
+- `update-node.sh`'s one-way failure message ("Not rolled back: the previous release
   cannot open the migrated data dir") sends the operator to the journal but does not say that a
   `Cannot migrate the consensus DB from MDBX: Cannot check database (epoch)` line there (the next
   release's first start; `v0.16.0-adiri` has no such check) has its own remedy (move
@@ -397,7 +509,9 @@ yet; this file gains the issue numbers when they are.
   the guide's Service and keys table carries. A script change, so a version bump and sidecar.
   (guide-1.5)
   Why: the message's only remedy is the pre-update snapshot, which that case does not need.
-- `STORAGE_MIGRATION_FLOOR` knows one one-way step, the 0.16.0 epoch packs. telcoin-network main
+- `STORAGE_MIGRATION_FLOOR_TESTNET` knows one one-way step, the 0.16.0 epoch packs (mainnet and
+  devnet have no floor; a mainnet release that migrates one way sets
+  `STORAGE_MIGRATION_FLOOR_MAINNET`). telcoin-network main
   (8aedf72e, #1558) adds a second: the first start of the next release copies the MDBX consensus
   tables into tndb (`consensus-db/tndb/{epoch,kad,cache}`), deletes the MDBX files and writes
   `consensus-db/tndb/mdbx-migrated`. `v0.16.0-adiri` after a downgrade is not refused, but starts
@@ -407,7 +521,13 @@ yet; this file gains the issue numbers when they are.
   tndb node, where removing `consensus-db/tndb/epoch` beside the marker is refused at the next
   start. (guide-1.5)
   Why: the only way back across that step is the pre-update snapshot.
-- The `existing` hand check that update-node prints (lines 285 and 300 on main) runs plain `gpgv`,
+- The python-less fallback of `_uc_header_number` (`tn_json_field ... number`) takes the first
+  `"number"` in a `tn_latestConsensusHeader` answer, which can be the nested
+  `latest_execution_block.number` of the `sub_dag` (serialised before the header's own `number`)
+  rather than the header's. Closes when it walks the braces as `hb_header_number` in
+  `lib/tn-heartbeat.sh` does and takes the number at the result's own depth. A script change, so a
+  version bump and sidecar.
+- The `existing` hand check that update-node prints (interactive and `--json`) runs plain `gpgv`,
   which prints `Good signature from` and exits 0 on an expired or revoked key; OPERATOR 4.2 and 4.10
   and README now tell the operator to add `--status-fd 1` and read the status lines. Closes when the
   printed block carries `--status-fd 1` and the rule. A script change, so a version bump and sidecar.
@@ -422,12 +542,17 @@ yet; this file gains the issue numbers when they are.
 - On a host with both a legacy unit and the unified layout, `config_dir_for_unit` ignores the unit
   and returns the unified config dir, so the legacy unit's container and account are left behind;
   the menu has no entry for removing one of several nodes.
+- A `--json` keys removal of a node whose config dir is `/etc/telcoin`, while a legacy unit with
+  `/etc/telcoin/<role>` remains, removes that other node's config too (everything but
+  `p2p-limit.nft`). Closes when the removal keeps the other node's config dir.
 - migrate-node-naming does not call `tn_migrate_ownership`; the entries it moves keep their owners
   until the next update-node or edit-config run converts them.
 - migrate-node-naming opens 49590 and 49594 (`open_consensus_ports`) instead of the node's own
   P2P ports.
-- Nodes migrated by migrate-node-naming 1.2.0 keep `NODE_TYPE=observer` in `.node-meta`; nothing
-  reads it and nothing but setup-node removes it.
+- Nodes migrated by migrate-node-naming 1.2.0 keep `NODE_TYPE=observer` in `.node-meta`.
+  migrate-node-naming 2.0.0 removes it when it migrates a legacy node and setup-node when it runs
+  again, but nothing removes it from a host 1.2.0 already migrated. Only the deprecated
+  `tn_resolve_node_type` stub in `lib/fallback.sh` reads it.
 
 ### check-node
 
@@ -468,15 +593,24 @@ yet; this file gains the issue numbers when they are.
   it.
 - update-scripts needs curl and reports a missing curl as a connection failure, while `install.sh`
   accepts wget.
+- A `serial=` written in non-ASCII digits (full-width, in a UTF-8 locale) stops the updater with
+  an arithmetic error instead of "malformed", and the same holds for `--expires DAYS` in
+  `tools/release-scripts.sh`. It fails closed (nothing is installed) and needs a signed manifest or
+  a hand-edited record. Closes when the serial check spells out its digits (`[0123456789]`), as
+  `ymd_days` does for the dates.
+- The updater and the installer accept a signed manifest whose `expires=` is on or before its
+  `date=`: the release is expired from the start. Only `tools/release-scripts.sh --check` refuses
+  it, and prepare warns when the expiry it computes is already past. Accepted; closes if the
+  updater refuses it too.
 
 ### Library
 
 - The update lock falls back to a `mkdir` lock at `${TMPDIR:-/tmp}/telcoin-update.lock.d` when
   `/run` is missing (stock macOS), which any account can create. Dev hosts only; check-node does not
   look there.
-- `_tn_release_sig_ok` refuses a release when any signature on `SHA256SUMS.asc` reports
-  `NO_PUBKEY` or `ERRSIG`, even with a good signature from an allowed key, while tag checks accept an
-  unknown second signer. Decide whether a second, unknown signer should refuse a release.
+- `tn_node_has_flag` maps a probe exit 1 or 2 to "flag absent", the shape `tn_keytool_has` had
+  before 2.1.0, so a wrapper that fails (busybox `setpriv`, a docker error) reads as a release
+  without the flag. Closes when it checks for the node's own usage text, as `tn_keytool_has` does.
 - `tn_as_service_user` ends with a bare `return` after `setpriv` and `runuser`; it returns the
   command's status anyway, but `return $?` would say so.
 - Delete the deprecated `tn_resolve_node_type` stub in `lib/fallback.sh` (no callers remain) once the
@@ -509,14 +643,20 @@ yet; this file gains the issue numbers when they are.
   test is strict.
 - `check_has` and `check_lacks` in `tools/tests/lib.sh` pipe into `grep -q` with pipefail on, so on a
   large text under bash 3.2 `check_has` can fail and `check_lacks` can pass by mistake. Use
-  `grep -qxF -- "$2" <<<"$3"`.
+  `grep -qxF -- "$2" <<<"$3"`. The same pipe shape in `tools/tests/host_baseline_test.sh` (the
+  two `rj | grep -q` checks near its end) fails under load when several suites run at once.
 - `tools/check-bash32.sh` misses `read -N`, `shopt -s globstar`, `{1..10..2}`, `local -`,
   `declare -I`, `unset 'a[-1]'`, `$'\u...'` and a redirection before `declare`, and a `# bash32-ok`
   inside a string also hides its line.
 - The same lint trips on valid code: an array literal containing the word `mapfile`, a case arm such
   as `a)#it's`, and a heredoc opened on a line whose quote spans lines.
-- CI has no test of the page's JavaScript or a browser walk-through, and runs neither
-  `ui/tests/install_ui_test.sh` nor `ui/tests/open_ui_test.sh`.
+- CI has no test of the page's JavaScript or a browser walk-through. It runs
+  `ui/tests/install_ui_test.sh` as the runner user, so only its check that a non-root run is
+  refused gates; its ownership and mode cases run as root in `bash:3.2`, outside CI.
+- About 34 `# network-gated:` marker lines sit after a comment line that does not end a sentence,
+  so the marker splits the sentence. Cosmetic; closes when they are rewrapped as the
+  `tn_ref_min_check` paragraph was. The lint's scope leaves out `lib/release-keys/README`, shipped
+  prose that names the adiri repository.
 - `shellcheck -x --severity=warning` reports 175 warnings in 46 files, 136 of them in
   `tools/tests/`. Outside the tests: 29 SC2034, 4 SC2206, 3 SC2178/SC2128 in firewall-setup, one
   SC2155, and 2 SC2115 in remove-node (`rm -rf "/home/${user}"` without `${var:?}`). The CI step is

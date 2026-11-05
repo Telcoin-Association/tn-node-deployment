@@ -11,8 +11,9 @@
 # An edit is refused while update-node.sh is applying an update (the two share
 # the update lock). Before restarting a node that votes in the current
 # committee, the script waits for the epoch to close and settle when the
-# boundary is within five minutes, at most 30 minutes. A rollback restart
-# never waits.
+# boundary is within the restart margin (five minutes for the six-hour epochs of
+# mainnet and testnet; derived from the epoch length, up to 15 minutes), at most
+# TN_EPOCH_WAIT_MAX (30 minutes by default). A rollback restart never waits.
 #
 # USAGE:
 #   sudo bash edit-config.sh                          # interactive menu
@@ -67,14 +68,17 @@
 #                                     by BLS public key, at most 64 KiB. The
 #                                     node binary checks it, then it is
 #                                     installed as /etc/telcoin/bootstrap-peers.yaml.
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     Needs v0.15.0-adiri or later and a start
 #                                     wrapper (a node started straight from its
 #                                     systemd unit is refused). none removes
 #                                     the flag and the file.
 #   state_export=off|unlimited|N      write the execution state at each epoch
 #                                     boundary (--enable-state-export,
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     v0.13.0-adiri or later); N keeps only the
 #                                     last N epochs (1 to 999999,
+# network-gated: release named in the testnet tag form; edit_need_flag asks the installed release on any network
 #                                     --state-export-keep, v0.15.0-adiri or later)
 #   allow_private_forward_targets=true|false
 #                                     parameters.yaml: whether the node may
@@ -96,7 +100,8 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
     || ! tn_require_fns tn_migrate_ownership tn_update_lock_path tn_write_start_script \
         tn_write_node_env tn_rerender_node_launch tn_committee_down_guard tn_backup_file \
         tn_restore_backup tn_migrate_credential _tn_cred_switch _tn_multiaddr_udp_port \
-        tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network >/dev/null; then
+        tn_launch_runner tn_keytool_has tn_keytool _tn_cred_plain_ok _tn_passfile_trim_safe \
+        tn_docker_resolve_ref tn_docker_network_ok _tn_guard_network tn_docker_image_network_ok >/dev/null; then
     _tn_old="lib/common.sh ${COMMON_VERSION:-unknown} is older than this edit-config.sh: run update-scripts.sh and try again."
     case " $* " in
         *" --json "*) printf '{"event":"error","msg":"%s"}\n{"event":"done","ok":false,"msg":"%s"}\n' "$_tn_old" "$_tn_old" ;;
@@ -106,7 +111,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.1"
+readonly SCRIPT_VERSION="2.1.0"
 
 # The largest bootstrap peers file accepted. A map of a few dozen peers is a
 # few KiB, and the whole map travels as one command-line argument.
@@ -947,6 +952,17 @@ edit_wait_say() {
     return 0
 }
 
+# edit_baseline_refresh -- after an edit the restarted node runs with: make the
+# host baseline again (tn_host_baseline_refresh, a no-op without HOST_BASELINE=true
+# in .node-meta or with a lib/common.sh that lacks it). Its warnings are events in
+# --json mode, before the done event. Never fails.
+edit_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh edit_wait_say
+    fi
+    return 0
+}
+
 # edit_epoch_wait -- called just before the node restarts (before it stops, for
 # the BLS passphrase), after the lock is held, and never before a rollback
 # restart. When the node votes in the current committee and the epoch boundary
@@ -1369,6 +1385,29 @@ set_private_forward_targets() {
     return 0
 }
 
+# edit_floor_check ARG NETWORK -- hold an image change to the oldest release these
+# scripts support on NETWORK (tn_ref_min_check), before the image is resolved or
+# pulled: a release tag, alone or as <repo>:<tag>, as given; a digest given alone
+# by the release .node-meta records for it (tn_docker_recorded_tag). Anything else
+# is not checked here: tn_docker_resolve_ref refuses what is not a release tag of
+# NETWORK, and warns that the check cannot be applied to a digest with no recorded
+# release. rc 1, with the reason (edit_error), when the release is older; a
+# warning when tn_ref_min_check cannot tell; rc 0 otherwise.
+edit_floor_check() {
+    local ref="${1:-}" msg="" rc=0
+    if [[ "$ref" == *@sha256:* ]]; then
+        ref="$(tn_docker_recorded_tag "$ref" 2>/dev/null)" || return 0
+    fi
+    tn_release_tag_ok "${2:-}" "${ref##*:}" || return 0
+    msg="$(tn_ref_min_check "$ref" "${2:-}")" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) edit_error "${msg} The image is not changed."; return 1 ;;
+        *) edit_warn "$msg" ;;
+    esac
+    return 0
+}
+
 # set_docker_image IMAGE -- pull IMAGE and swap it into the launch file (Docker
 # installs only). Mirrors edit_docker_image. The same image is a no-op. The network
 # is _tn_guard_network's, so a devnet node (NETWORK=devnet in .node-meta) changes
@@ -1382,9 +1421,12 @@ set_docker_image() {
     fi
     # A release tag resolves to the release's digest; a digest reference must be
     # this network's repository. Tags are never written into the start script.
+    edit_floor_check "$value" "$net" || return 1
     if ! out="$(tn_docker_resolve_ref "$net" "$value" edit_wait_say)"; then
         if [[ "$net" == "devnet" ]]; then
             edit_error "image refused: ${value} (give a devnet image by digest: <repository>@sha256:<digest>; devnet has no signed releases)"
+        elif [[ "$net" == "mainnet" ]]; then
+            edit_error "image refused: ${value} (give a mainnet release tag; a digest alone is taken only for a mainnet release this node has installed)"
         else
             edit_error "image refused: ${value} (give a ${net} release tag, or this network's image by digest: <repository>@sha256:<digest>)"
         fi
@@ -1415,24 +1457,31 @@ set_docker_image() {
         edit_error "Docker does not hold ${new_image} under that digest after the pull (digest mismatch)"
         return 1
     fi
+    # Built for this network (its Build Features line) before the start script
+    # names it, the node restarts on it or .node-meta records it.
+    if ! tn_docker_image_network_ok "$net" "$new_image" edit_wait_say; then
+        edit_error "refusing ${new_image}: it is not a ${net} image (see above); the image is not changed"
+        return 1
+    fi
     swap_docker_image "$new_image" || return 1
     edit_record_image "$new_image" "$new_tag"
 }
 
 # edit_record_image IMAGE TAG -- after the start script runs IMAGE: .node-meta
-# DOCKER_IMAGE and DOCKER_IMAGE_DIGEST name it, RELEASE_TAG names TAG (removed when
-# TAG is empty: an image given by digest alone). A failed write warns. Only
-# informational: the start script stays what runs, and readers of RELEASE_TAG
-# check DOCKER_IMAGE_DIGEST against it first.
+# DOCKER_IMAGE and DOCKER_IMAGE_DIGEST name it, RELEASE_TAG names TAG (none when
+# TAG is empty: an image given by digest alone). The old RELEASE_TAG goes first and
+# TAG last, each write only once the one before it succeeded, so a failed or
+# interrupted write leaves the digest with no release (unknown), never with the
+# release of another image. A failed write warns. Only informational: the start
+# script stays what runs, and readers of RELEASE_TAG check DOCKER_IMAGE_DIGEST
+# against it first.
 edit_record_image() {
     local ok=true
-    meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 || ok=false
-    meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 || ok=false
-    if [[ -n "${2:-}" ]]; then
-        meta_set RELEASE_TAG "$2" >/dev/null 2>&1 || ok=false
-    else
-        meta_unset RELEASE_TAG >/dev/null 2>&1 || ok=false
-    fi
+    meta_unset RELEASE_TAG >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE "${1:-}" >/dev/null 2>&1 \
+        && meta_set DOCKER_IMAGE_DIGEST "${1##*@}" >/dev/null 2>&1 \
+        && { [[ -z "${2:-}" ]] || meta_set RELEASE_TAG "$2" >/dev/null 2>&1; } \
+        || ok=false
     if [[ "$ok" != "true" ]]; then
         edit_wait_say warn "Could not record the image in .node-meta (DOCKER_IMAGE, DOCKER_IMAGE_DIGEST, RELEASE_TAG)."
     fi
@@ -1578,6 +1627,7 @@ apply_changes() {
         sleep 3
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
+            edit_baseline_refresh
         else
             print_error "Node failed to restart. Check logs:"
             print_info "  sudo tail -30 /var/log/telcoin/${TARGET_SERVICE}.log"
@@ -2040,10 +2090,11 @@ edit_cred_type_pass() {
 }
 
 # edit_cred_report RC WHAT -- report how a passphrase move (_tn_cred_switch and the
-# migrations) ended.
+# migrations) ended. rc 0 rewrote the unit, the start script and .node-meta, so the
+# host baseline is made again (edit_baseline_refresh, a no-op without the marker).
 edit_cred_report() {
     case "${1:-}" in
-        0) edit_ok "${2:-done}" ;;
+        0) edit_ok "${2:-done}"; edit_baseline_refresh ;;
         1) edit_error "nothing was changed (see above)" ;;
         2) edit_error "${TARGET_SERVICE} did not come back with the new passphrase delivery; its previous files are back and it runs on them" ;;
         *) edit_error "${TARGET_SERVICE} did not come back on its previous files either; see the backups named above and journalctl -u ${TARGET_SERVICE}" ;;
@@ -2065,12 +2116,102 @@ edit_cred_pcrs() {
     return 0
 }
 
+# edit_keytool_verify_run SPEC DATA_DIR -- the keytool verify command line, kept
+# in this one place because its shape is not final upstream (telcoin-network
+# #1730). tn_keytool runs it as the service user, adds the global --datadir and
+# --bls-passphrase-source stdin, and writes TN_KEYTOOL_PASS to its standard input.
+edit_keytool_verify_run() {
+    tn_keytool "$1" "$2" verify
+}
+
+# edit_keytool_verify WHAT [FILE] -- before a credential action writes anything,
+# prove that the passphrase it is about to keep opens the node's BLS key, with
+# keytool verify of the release that starts the node, when that release has it
+# (tn_keytool_has). The passphrase is TN_CRED_PASS or, with FILE, the one line of
+# that root-only plaintext file (what a migration reads; a file the migration
+# would refuse is left to it). It reaches keytool only on its standard input.
+# WHAT names it in the refusal ("The new passphrase"). rc 0 when the key opens,
+# or when no check can be made: keytool verify is not in this release (a log
+# line), or the release cannot be told or probed (a warning). rc 1 when keytool
+# verify ran and did not succeed: the reason is reported (never the passphrase),
+# TN_CRED_PASS is cleared and the caller writes nothing.
+edit_keytool_verify() {
+    local what="${1:-The passphrase}" file="${2:-}" spec dd out first rc=0 cr=$'\r'
+    spec="$(tn_launch_runner "$TARGET_LAUNCH_FILE" 2>/dev/null)" || spec=""
+    if [[ -z "$spec" ]]; then
+        edit_warn "Cannot tell which node release starts ${TARGET_SERVICE} from ${TARGET_LAUNCH_FILE:-its launch file}; keytool verify skipped"
+        return 0
+    fi
+    tn_keytool_has "$spec" verify || rc=$?
+    case "$rc" in
+        0) ;;
+        1)
+            edit_log "keytool verify is not in this release; skipped"
+            return 0
+            ;;
+        *)
+            edit_warn "Could not run the node binary of ${spec} to see whether it has keytool verify; skipped"
+            return 0
+            ;;
+    esac
+    # A plain shell variable (an inherited exported one is dropped first), so
+    # tn_keytool accepts it.
+    unset TN_KEYTOOL_PASS
+    if [[ -n "$file" ]]; then
+        if ! _tn_cred_plain_ok "$file" || ! _tn_passfile_trim_safe "$file"; then
+            return 0
+        fi
+        TN_KEYTOOL_PASS=""
+        IFS= read -r TN_KEYTOOL_PASS < "$file" || true
+        TN_KEYTOOL_PASS="${TN_KEYTOOL_PASS%"$cr"}"
+    else
+        TN_KEYTOOL_PASS="${TN_CRED_PASS:-}"
+    fi
+    if [[ -z "$TN_KEYTOOL_PASS" ]]; then
+        unset TN_KEYTOOL_PASS
+        return 0
+    fi
+    if ! dd="$(detect_data_dir)" || [[ -z "$dd" ]]; then
+        unset TN_KEYTOOL_PASS
+        TN_CRED_PASS=""
+        edit_error "keytool verify cannot run: the node data dir cannot be read from .node-meta (see above); nothing was changed"
+        return 1
+    fi
+    rc=0
+    out="$(edit_keytool_verify_run "$spec" "$dd" 2>&1)" || rc=$?
+    # Only the first line of keytool's output is ever shown, and not even that
+    # when it holds the passphrase.
+    first="$(printf '%s\n' "$out" | awk 'NF { print; exit }')"
+    [[ "$first" != *"$TN_KEYTOOL_PASS"* ]] || first=""
+    out=""
+    unset TN_KEYTOOL_PASS
+    case "$rc" in
+        0)
+            edit_log "keytool verify: the passphrase opens the BLS key in ${dd}"
+            return 0
+            ;;
+        4|125|126|127)
+            # tn_keytool or docker could not start it.
+            TN_CRED_PASS=""
+            edit_error "keytool verify could not run (exit ${rc}${first:+: ${first}}); nothing was changed. Fix the cause and try again."
+            return 1
+            ;;
+        *)
+            TN_CRED_PASS=""
+            edit_error "${what} does not open the BLS key in ${dd} (keytool verify, exit ${rc}); nothing was changed. Use the passphrase the key was created with."
+            return 1
+            ;;
+    esac
+}
+
 # edit_migrate_credential -- --migrate-credential and the menu: move the node to the
 # current unit and start script with its passphrase in the encrypted credential
 # (tn_migrate_credential), read from the root-only file or from a unit that holds
 # it (tn_migrate_embedded_passphrase); the passphrase is asked for when neither can
 # be read. Below systemd 250 a unit that holds it moves to the root-only file
-# (testnet only). Old copies are shredded once the node is back. rc as the helpers.
+# (testnet only). keytool verify checks the passphrase against the key first
+# (edit_keytool_verify). Old copies are shredded once the node is back. rc as the
+# helpers.
 edit_migrate_credential() {
     local conf rc=0
     conf="$(tn_resolve_config_dir)"
@@ -2082,12 +2223,20 @@ edit_migrate_credential() {
             edit_warn "the passphrase in ${TARGET_SERVICE_FILE} cannot be read back as one plain value; type it instead"
             edit_cred_type_pass || return 1
         fi
+        edit_keytool_verify "The passphrase" || return 1
         tn_migrate_embedded_passphrase "$TARGET_SERVICE_FILE" edit_wait_say || rc=$?
     else
         if [[ ! -f "${conf}/bls-passphrase" ]] \
             && ! [[ "$(meta_get PASSPHRASE_METHOD 2>/dev/null || true)" == "credential" && -f "${conf}/bls-passphrase.cred" ]]; then
             edit_warn "no stored passphrase to move (${conf}/bls-passphrase is missing); type it instead"
             edit_cred_type_pass || return 1
+        fi
+        # A typed passphrase, else the file the migration reads. With neither,
+        # the node already reads the encrypted credential and nothing is written.
+        if [[ -n "$TN_CRED_PASS" ]]; then
+            edit_keytool_verify "The passphrase" || return 1
+        elif [[ -f "${conf}/bls-passphrase" ]]; then
+            edit_keytool_verify "The passphrase in ${conf}/bls-passphrase" "${conf}/bls-passphrase" || return 1
         fi
         tn_migrate_credential edit_wait_say || rc=$?
     fi
@@ -2101,9 +2250,10 @@ edit_migrate_credential() {
 # key as it is now (the TPM when there is a usable one) and the PCR choice
 # (--bind-pcrs LIST, --bind-pcrs none, else the recorded one): after a TPM change, a
 # PCR policy change, or a move between host and host+tpm2. The value is decrypted
-# into a pipe, never a file; when it no longer decrypts here it is asked for. Then
-# the restart steps of a migration, with the old credential put back if the node
-# does not come up. rc as _tn_cred_switch.
+# into a pipe, never a file; when it no longer decrypts here it is asked for, and
+# keytool verify checks it against the key (edit_keytool_verify). Then the restart
+# steps of a migration, with the old credential put back if the node does not come
+# up. rc as _tn_cred_switch.
 edit_reseal() {
     local cred net key pcrs rc=0 restart=yes
     cred="$(tn_resolve_config_dir)/bls-passphrase.cred"
@@ -2131,6 +2281,7 @@ edit_reseal() {
         return 1
     fi
     pcrs="$(edit_cred_pcrs "$key")"
+    edit_keytool_verify "The passphrase" || return 1
     systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
     _tn_cred_switch credential "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
     TN_CRED_PASS=""
@@ -2194,7 +2345,8 @@ edit_bls_passphrase() {
 # encrypted credential where systemd-creds works, else in the root-only file, then
 # restart through the committee guard and the epoch wait; the old files come back if
 # the node does not unlock its key. Keys are not re-encrypted: they must already be
-# wrapped with the new passphrase.
+# wrapped with the new passphrase, which keytool verify checks before anything is
+# written (edit_keytool_verify).
 edit_change_passphrase() {
     print_warn "Changing the BLS passphrase updates the stored passphrase used"
     print_warn "to decrypt your keys at startup. This does NOT re-encrypt your"
@@ -2244,6 +2396,13 @@ edit_change_passphrase() {
             return 0
         fi
         pcrs="$(edit_cred_pcrs "$key")"
+    fi
+    # The key files are not re-encrypted, so the key must already open with the
+    # new passphrase; if it does not, the node cannot open its key at its next start.
+    if ! edit_keytool_verify "The new passphrase"; then
+        print_info "Passphrase unchanged."
+        edit_pause
+        return 0
     fi
     systemctl is-active --quiet "$TARGET_SERVICE" 2>/dev/null || restart=no
     _tn_cred_switch "$target" "$key" "$pcrs" edit_wait_say "$restart" || rc=$?
@@ -2364,6 +2523,9 @@ edit_docker_image() {
         # Devnet has no signed releases: an image is named by digest only.
         print_info "Enter the devnet image by digest, such as ${repo}@sha256:<digest>"
         print_info "(devnet has no signed releases, so no release tag names an image)."
+    elif [[ "$net" == "mainnet" ]]; then
+        print_info "Enter a mainnet release tag (such as v1.0.0) to run that release's image by"
+        print_info "digest. A digest alone is taken only for a mainnet release this node has installed."
     else
         print_info "Enter a ${net} release tag (such as ${DEFAULT_DOCKER_TAG}) to run that release's"
         print_info "image by digest, or the image itself as ${repo}@sha256:<digest>."
@@ -2379,10 +2541,17 @@ edit_docker_image() {
         read -r -p "  Press Enter to return to menu..."
         return
     fi
+    if ! edit_floor_check "$input" "$net"; then
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
     if ! out="$(tn_docker_resolve_ref "$net" "$input")"; then
         print_error "Image refused: ${input}"
         if [[ "$net" == "devnet" ]]; then
             print_info "Give the devnet image by digest: ${repo}@sha256:<digest>."
+        elif [[ "$net" == "mainnet" ]]; then
+            print_info "Give a mainnet release tag; a digest alone is taken only for a mainnet release this node has installed."
         else
             print_info "Give a ${net} release tag, or ${repo}@sha256:<digest>."
         fi
@@ -2407,6 +2576,12 @@ edit_docker_image() {
         return
     fi
     print_ok "Image pulled successfully"
+    if ! tn_docker_image_network_ok "$net" "$new_image"; then
+        print_error "Refusing ${new_image}: it is not a ${net} image (see above). The image is not changed."
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
 
     menu_lock || return 0
     backup_edit_targets || return 0
@@ -2438,6 +2613,7 @@ edit_bootstrap_peers() {
     print_info "A bootstrap peers file is a YAML or JSON map of peers keyed by BLS public"
     print_info "key, at most 64 KiB. The node dials them at start instead of the genesis"
     print_info "bootstrap servers. The node binary checks the file, then it is installed"
+    # network-gated: release named in the testnet tag form, shown on every network; edit_need_flag asks the installed release
     print_info "as ${peers}. Needs v0.15.0-adiri or later."
     echo ""
 
@@ -2467,7 +2643,9 @@ edit_state_export() {
     print_info "boundary to <data dir>/consensus-db/state_exports/epoch-N/."
     echo ""
     echo "  1) Off"
+    # network-gated: release named in the testnet tag form, shown on every network
     echo "  2) On, keep every epoch's export     (v0.13.0-adiri or later)"
+    # network-gated: release named in the testnet tag form, shown on every network
     echo "  3) On, keep only the last N epochs   (v0.15.0-adiri or later)"
     echo ""
 
@@ -2745,6 +2923,7 @@ restart_node() {
         sleep 3
         if systemctl is-active --quiet "$TARGET_SERVICE"; then
             print_ok "Node restarted successfully"
+            edit_baseline_refresh
         else
             print_error "Node failed to restart. Check logs:"
             print_info "  journalctl -u ${TARGET_SERVICE} --no-pager -n 30"
@@ -2875,6 +3054,7 @@ run_set() {
     rc=0
     edit_restart || rc=$?
     if [[ $rc -eq 0 ]]; then
+        edit_baseline_refresh
         edit_done true "$field" "$value" "applied and ${TARGET_SERVICE} healthy"
         return 0
     fi
@@ -2961,9 +3141,10 @@ main() {
                 shift 2
                 ;;
             -h|--help)
-                # The header block only: everything up to its closing rule. Read
+                # The header block only: everything up to its closing rule, without
+                # the network-gated: marker lines (tools/check-network-hits.sh). Read
                 # from this file, not "$0", which names the caller when sourced.
-                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+                awk 'NR == 1 { next } /^# =+$/ { if (++rules == 2) exit; next } /^#[ \t]*network-gated:/ { next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
                 if [[ "$JSON_MODE" == "true" ]]; then
                     json_emit '{"event":"done","ok":true,"msg":"usage printed on stderr"}'
                 fi

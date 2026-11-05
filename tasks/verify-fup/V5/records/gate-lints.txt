@@ -1,0 +1,14 @@
+## shellcheck 0.11 --severity=error
+rc=0
+## shellcheck v0.9.0 --severity=error
+rc=0
+## check-bash32
+check-bash32: clean, 4 file(s) scanned
+rc=0
+## bash -n 5.3 / 3.2
+rc=0
+## py_compile
+[Errno 13] Permission denied: 'ui/__pycache__/server.cpython-314.pyc.135624065841184'rc=1
+## shellcheck v0.9.0 on V5 harness (warnings info only)
+rc=0
+py_compile (PYTHONPYCACHEPREFIX, host Python 3.14.4) rc=0

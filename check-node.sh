@@ -10,6 +10,8 @@
 # error. The network RPC is the public RPC of the network recorded in
 # .node-meta. Falls back gracefully if the local RPC is unreachable -- the
 # network's view of your node is still reported. Runs on Linux and macOS.
+# Private alerts (setup-alerts.sh), when this host has them, are checked too:
+# the timer, the last heartbeat and its pushes, the files' owners and modes.
 #
 # USAGE:
 #   bash check-node.sh                              # check the installed node
@@ -38,7 +40,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # else should abort the run.
 set +e
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly STALE_THRESHOLD_SECONDS=60
 # WorkerConfigs system contract: numWorkers() is the number of workers every
 # committee member must run.
@@ -68,6 +70,11 @@ NODE_NETWORK=""
 NETWORK_SRC=""
 NETWORK_NOTE=""
 EXPECTED_CHAIN_ID=""
+# Also set by resolve_network: NETWORK_RPC_LABEL is the report header's network
+# RPC line ("" with --no-network); NETWORK_SKIP_WHY says why the network RPC is
+# not queried when QUERY_NETWORK is false.
+NETWORK_RPC_LABEL=""
+NETWORK_SKIP_WHY="--no-network"
 
 # The node's own identity, set by resolve_identity: the authority id that
 # consensus headers carry as author, and the execution address that committees
@@ -192,7 +199,7 @@ Usage: $0 [OPTIONS]
   --rpc <URL>              Local RPC endpoint (default: http://127.0.0.1:<RPC_PORT from .node-meta, or ${DEFAULT_RPC_PORT}>)
   --network-rpc <URL>      Network RPC for ground truth (default: the public RPC of the network in
                            .node-meta: testnet ${TESTNET_RPC_URL}, devnet ${DEVNET_RPC_URL},
-                           mainnet ${MAINNET_RPC_URL})
+                           mainnet ${MAINNET_RPC_URL}; none when the network is unknown)
   --no-network             Skip the network RPC query (local-only mode)
   --audit                  Only audit this host's node security settings (systemd floor,
                            passphrase delivery, credential, unit) and exit 1 on any warning
@@ -336,7 +343,9 @@ chain_network() {
 # (LOCAL_CHAIN_ID, probed before the report starts) stands in for it. With
 # neither, EXPECTED_CHAIN_ID stays empty and any Telcoin chain id is accepted.
 # NETWORK_RPC keeps a --network-rpc value; otherwise it becomes the public RPC of
-# that network, or the testnet RPC when the network is unknown.
+# that network. When the network is unknown and no --network-rpc was given there
+# is no RPC to compare with (another network's would be the wrong yardstick):
+# QUERY_NETWORK becomes false and NETWORK_SKIP_WHY says why.
 resolve_network() {
     local meta net chain_dec
     meta="$(node_meta_path 2>/dev/null || true)"
@@ -365,9 +374,18 @@ resolve_network() {
         [[ -z "$NODE_NETWORK" ]] || NETWORK_SRC="the local chain id"
     fi
     EXPECTED_CHAIN_ID="$(network_chain_id "$NODE_NETWORK")"
-    if [[ -z "$NETWORK_RPC" ]]; then
+    if [[ -n "$NETWORK_RPC" ]]; then
+        NETWORK_RPC_LABEL="${NETWORK_RPC} (--network-rpc, for ${NODE_NETWORK:-an unknown network})"
+    else
         NETWORK_RPC="$(network_rpc_url "$NODE_NETWORK")"
-        NETWORK_RPC="${NETWORK_RPC:-$TESTNET_RPC_URL}"
+        NETWORK_RPC_LABEL="${NETWORK_RPC} (${NODE_NETWORK} public RPC)"
+    fi
+    if [[ "$QUERY_NETWORK" != "true" ]]; then
+        NETWORK_RPC_LABEL=""
+    elif [[ -z "$NETWORK_RPC" ]]; then
+        QUERY_NETWORK=false
+        NETWORK_SKIP_WHY="network unknown; give --network-rpc URL to compare"
+        NETWORK_RPC_LABEL="none (${NETWORK_SKIP_WHY})"
     fi
     return 0
 }
@@ -740,6 +758,7 @@ fetch_node_mode() {
 }
 
 # report_legacy_observer_flag -- warn when the node launch file (start wrapper, or
+# network-gated: release history of --observer; no endpoint
 # the unit of a legacy docker install) still passes --observer. v0.15.0-adiri
 # ignores the flag, but later releases reject it, so the node would not start
 # after a binary/image update. Warn-only: never touches HEALTH_ISSUES, and silent
@@ -751,6 +770,7 @@ report_legacy_observer_flag() {
     read -r svc _ file <<<"$target"
     [[ -n "$file" && -r "$file" ]] || return 0
     tn_node_has_observer_flag "$file" || return 0
+    # network-gated: warns about the retired --observer, which only installs of older script releases carry; names a testnet tag
     print_warn "Launch file ${file} still passes --observer; releases after v0.15.0-adiri reject it and the node will not start after an update."
     print_info "Fix: bash ${SCRIPT_DIR}/update-scripts.sh && sudo bash ${SCRIPT_DIR}/update-node.sh (strips the flag),"
     print_info "     or delete the --observer token from ${file} and restart ${svc}."
@@ -942,6 +962,97 @@ report_testnet_addons() {
         else
             print_warn "VPN recorded as '${vpn}' in .node-meta but wg0 is not up -- run setup-vpn.sh"
         fi
+    fi
+}
+
+# ymd_days YYYY-MM-DD -- print the day number (days since 1970-01-01) of a real
+# calendar date from 1970 on; rc 1 for anything else. Pure bash: busybox and
+# macOS date cannot parse a date, and the same text runs in every script that
+# reads a MANIFEST date (tools/tests/release_scripts_test.sh checks the copies).
+# The digits are listed one by one: in a UTF-8 locale [0-9] can match other
+# digits, such as full-width ones, that bash arithmetic cannot read.
+ymd_days() {
+    local y m d n
+    [[ "$1" =~ ^([0123456789]{4})-([0123456789]{2})-([0123456789]{2})$ ]] || return 1
+    y=$((10#${BASH_REMATCH[1]}))
+    m=$((10#${BASH_REMATCH[2]}))
+    d=$((10#${BASH_REMATCH[3]}))
+    n=31
+    if [[ $m -eq 4 || $m -eq 6 || $m -eq 9 || $m -eq 11 ]]; then
+        n=30
+    elif [[ $m -eq 2 ]]; then
+        n=28
+        if (( y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) )); then n=29; fi
+    fi
+    if (( y < 1970 || m < 1 || m > 12 || d < 1 || d > n )); then return 1; fi
+    # Days from the civil date (H. Hinnant's algorithm), the year starting in March.
+    if (( m <= 2 )); then y=$((y - 1)); m=$((m + 9)); else m=$((m - 3)); fi
+    printf '%s\n' "$(( (y / 400) * 146097 + (y % 400) * 365 + (y % 400) / 4 - (y % 400) / 100 \
+        + (153 * m + 2) / 5 + d - 1 - 719468 ))"
+}
+
+# cn_days N -- "1 day" or "N days".
+cn_days() {
+    if [[ "$1" == "1" ]]; then echo "1 day"; else echo "$1 days"; fi
+}
+
+# cn_manifest_key FILE KEY -- the value of the first KEY= line in FILE, or "".
+cn_manifest_key() {
+    awk -F= -v k="$2" '$1 == k {sub(/^[^=]*=/, ""); print; exit}' "$1" 2>/dev/null
+}
+
+# report_scripts_release -- the signed script release these scripts came from,
+# read from the MANIFEST record that update-scripts.sh and install.sh keep in
+# the scripts directory: tag, serial, release date and age, and the expiry
+# date. Reads the record only: no signature check and no network
+# (update-scripts.sh --check does both). An expired release and a tree with no
+# record are warnings, not health issues.
+report_scripts_release() {
+    local m="${SCRIPT_DIR}/MANIFEST" rel serial rdate expires today day age
+    echo ""
+    print_step "Checking the script release..."
+    if [[ ! -f "$m" ]]; then
+        print_warn "No signed release installed: ${SCRIPT_DIR} has no MANIFEST record."
+        print_info "  Bring the scripts to the latest signed release: bash ${SCRIPT_DIR}/update-scripts.sh"
+        return 0
+    fi
+    rel="$(cn_manifest_key "$m" release)"
+    serial="$(cn_manifest_key "$m" serial)"
+    rdate="$(cn_manifest_key "$m" date)"
+    expires="$(cn_manifest_key "$m" expires)"
+    if [[ ! "$rel" =~ ^scripts-v[0-9]+\.[0-9]+\.[0-9]+$ || ! "$serial" =~ ^[1-9][0-9]{0,8}$ ]]; then
+        print_warn "The release record ${m} lacks a valid release= or serial= line."
+        print_info "  Check it: bash ${SCRIPT_DIR}/update-scripts.sh --check"
+        return 0
+    fi
+    today="$(ymd_days "$(date -u +%Y-%m-%d)")" || today=""
+    if [[ -n "$today" ]] && day="$(ymd_days "$rdate")"; then
+        age=$((today - day))
+        if (( age < 0 )); then
+            age="dated ahead of this host's clock"
+        elif (( age == 0 )); then
+            age="today"
+        else
+            age="$(cn_days "$age") ago"
+        fi
+        print_info "Scripts release: ${rel} (serial ${serial}), released ${rdate}, ${age}"
+    else
+        print_info "Scripts release: ${rel} (serial ${serial}), release date not recorded"
+    fi
+    if [[ -z "$expires" ]]; then
+        print_info "  The release carries no expiry date."
+    elif [[ -z "$today" ]] || ! day="$(ymd_days "$expires")"; then
+        print_warn "The release record has an unreadable expiry date: expires=${expires}"
+    elif (( day > today )); then
+        print_ok "Scripts release expires ${expires} (in $(cn_days $((day - today))))"
+    else
+        if (( day == today )); then
+            age="today"
+        else
+            age="$(cn_days $((today - day))) ago"
+        fi
+        print_warn "Scripts release ${rel} expired ${age} (on ${expires}): a newer signed release is overdue."
+        print_info "  Check for it: bash ${SCRIPT_DIR}/update-scripts.sh --check"
     fi
 }
 
@@ -1250,6 +1361,7 @@ report_public_rpc() {
 # check_network_chain -- read the network RPC's own eth_chainId (§3). When it is
 # not the chain this node's network uses, the endpoint is the wrong yardstick
 # (today https://rpc.telcoin.network, the planned mainnet RPC, still serves the
+# network-gated: documents which chain the mainnet RPC serves today; no endpoint
 # Adiri testnet, chain 2017): warn, set NETWORK_WRONG_CHAIN and let §3 skip the
 # comparison instead of blaming the node. Says nothing when the chain id cannot
 # be read; the consensus probe that follows reports an endpoint that is down.
@@ -1376,7 +1488,7 @@ report_worker_count() {
 # network_gap_reason -- why the network RPC is not being used this run.
 network_gap_reason() {
     if [[ "$QUERY_NETWORK" != "true" ]]; then
-        echo "--no-network"
+        echo "$NETWORK_SKIP_WHY"
     elif [[ "$NETWORK_WRONG_CHAIN" == "true" ]]; then
         echo "the network RPC serves another chain"
     else
@@ -1784,12 +1896,15 @@ _cn_own() {
 # script paths root's, .node-meta and the passphrase file root 0600, backups
 # root 0700, the data dir the service account's 0700, the log dir
 # root:telcoin-log 0750, the node log dir (NODE_LOG_DIR, when it exists) the
-# service account's with group telcoin-log 2750 (setgid), nothing under the install, config and start-script
-# trees owned by another account. The old layout warns (on mainnet it fails: a
-# mainnet host is installed fresh); a drifted layout 2 fails.
+# service account's with group telcoin-log 2750 (setgid), the private alerts
+# files root's when they exist (the heartbeat runner 0755, /etc/telcoin/alerts
+# 0755, its targets file 0600, alerts.env 0644), nothing under the install,
+# config and start-script trees owned by another account. The old layout
+# warns (on mainnet it fails: a mainnet host is installed fresh); a drifted
+# layout 2 fails.
 check_ownership_layout() {
     local pre="${TN_ROOT_PREFIX:-}" meta layout rc=0 net v suser sgroup method
-    local inst etc libexec start dd logd d extra
+    local inst etc libexec start dd logd d extra hb
     if ! have_fns tn_root_dir_ok tn_start_script_path tn_detect_network; then
         CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_ownership_layout"
         return 0
@@ -1863,6 +1978,14 @@ check_ownership_layout() {
     [[ ! -e "${etc}/node.env" && ! -L "${etc}/node.env" ]] || _cn_own "${etc}/node.env" root root 0644
     [[ ! -e "${etc}/bls-passphrase" && ! -L "${etc}/bls-passphrase" ]] || _cn_own "${etc}/bls-passphrase" root root 0600
     [[ ! -e "${etc}/bls-passphrase.cred" && ! -L "${etc}/bls-passphrase.cred" ]] || _cn_own "${etc}/bls-passphrase.cred" root root 0600
+    # Private alerts (setup-alerts.sh): the runner and its config. The targets file
+    # holds the monitor URLs, which are secrets. The runner's own state lives in its
+    # systemd StateDirectory, outside this table.
+    hb="${pre}/usr/local/libexec/telcoin/tn-heartbeat"
+    [[ ! -e "$hb" && ! -L "$hb" ]] || _cn_own "$hb" root root 0755
+    [[ ! -e "${etc}/alerts" && ! -L "${etc}/alerts" ]] || _cn_own "${etc}/alerts" root root 0755
+    [[ ! -e "${etc}/alerts/targets" && ! -L "${etc}/alerts/targets" ]] || _cn_own "${etc}/alerts/targets" root root 0600
+    [[ ! -e "${etc}/alerts/alerts.env" && ! -L "${etc}/alerts/alerts.env" ]] || _cn_own "${etc}/alerts/alerts.env" root root 0644
     [[ ! -e "${pre}/var/backups/telcoin" ]] || _cn_own "${pre}/var/backups/telcoin" root root 0700
     if dd="$(detect_data_dir)" && [[ -e "$dd" || -L "$dd" ]]; then
         _cn_own "$dd" "$suser" "$sgroup" 0700
@@ -2033,6 +2156,27 @@ check_healthcheck_on_mainnet() {
     return 0
 }
 
+# check_alerts -- private alerts (setup-alerts.sh, every network). alerts_status
+# (lib/alerts.sh) prints its own lines and returns the number of issues it found
+# (the timer off while alerts are on, a stale last run, every push failing, a
+# loose targets file, an outdated runner); they count in HEALTH_ISSUES. Without
+# lib/alerts.sh the check is skipped, and named in the skipped-checks warning only
+# when this host has private alerts (the timer unit exists, or .node-meta says
+# ENABLE_ALERTS=true or pending).
+check_alerts() {
+    local n=0 v=""
+    if ! have_fns alerts_status; then
+        v="$(meta_get ENABLE_ALERTS 2>/dev/null || true)"
+        if [[ -e "${TN_ROOT_PREFIX:-}/etc/systemd/system/telcoin-heartbeat.timer" || "$v" == "true" || "$v" == "pending" ]]; then
+            CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_alerts"
+        fi
+        return 0
+    fi
+    alerts_status || n=$?
+    HEALTH_ISSUES=$(( HEALTH_ISSUES + n ))
+    return 0
+}
+
 # =============================================================================
 # REPORT HEADER
 # =============================================================================
@@ -2070,7 +2214,7 @@ if [[ -n "$NODE_NETWORK" ]]; then
 else
     print_info "Network:      unknown (${NETWORK_NOTE:-not recorded}; any Telcoin chain id is accepted)"
 fi
-[[ "$QUERY_NETWORK" == "true" ]] && print_info "Network RPC:  ${NETWORK_RPC}"
+[[ -z "$NETWORK_RPC_LABEL" ]] || print_info "Network RPC:  ${NETWORK_RPC_LABEL}"
 print_info "Time:         $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 if ! version_gte "${COMMON_VERSION:-0}" "2.0.0"; then
     print_warn "lib/common.sh ${COMMON_VERSION:-unknown} is older than 2.0.0: checks that need its newer helpers are skipped. Run update-scripts.sh."
@@ -2104,7 +2248,7 @@ resolve_identity
 report_address_mismatch
 # Hardening checks. Each function lands with its own package; a missing one is skipped.
 for _hc in check_bls_cleartext check_update_lock check_ownership_layout check_unit_environ \
-           check_unit_sandbox check_health_score check_healthcheck_on_mainnet; do
+           check_unit_sandbox check_health_score check_healthcheck_on_mainnet check_alerts; do
     have_fns "$_hc" && "$_hc"
 done
 unset _hc
@@ -2195,7 +2339,7 @@ if [[ "$QUERY_NETWORK" == "true" ]]; then
         (( ++HEALTH_ISSUES ))
     fi
 else
-    print_info "Network query skipped (--no-network)"
+    print_info "Network query skipped (${NETWORK_SKIP_WHY})"
 fi
 
 # =============================================================================
@@ -2544,6 +2688,11 @@ report_testnet_addons
 # 9.6 PUBLIC RPC (Caddy tn-rpc vhost / https + wss probes / worker.rpc advert)
 # =============================================================================
 report_public_rpc
+
+# =============================================================================
+# 9.7 SCRIPT RELEASE (the installed signed release and its expiry)
+# =============================================================================
+report_scripts_release
 
 # =============================================================================
 # 10. SUMMARY

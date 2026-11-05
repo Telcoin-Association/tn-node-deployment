@@ -1,0 +1,5 @@
+4647,4650d4646
+<     if (( cap < need )); then
+<         "$fn" warn "TN_EPOCH_WAIT_MAX ${cap} is shorter than the wait it bounds (margin ${margin} + settle ${settle} + two polls); using ${need}." || true
+<         cap="$need"
+<     fi

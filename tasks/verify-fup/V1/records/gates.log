@@ -1,0 +1,13 @@
+# V1 repository gate cross-check on ac9a605 (2026-11-03)
+## bash tools/tests/run.sh (bash 5.3)
+60 test file(s), 0 failed (bash 5.3.9(1)-release)
+4050 checks, 0 failures, 50 skipped (summed over the files)
+## bash:3.2 tools/tests/run.sh
+60 test file(s), 0 failed (bash 3.2.57(1)-release)
+3975 checks, 0 failures, 48 skipped (summed over the files)
+## ui/tests/helper_test.sh (bash 5.3)
+505 checks, 0 failed (bash 5.3.9(1)-release)
+## ui/tests/helper_test.sh (bash:3.2)
+505 checks, 0 failed (bash 3.2.57(1)-release)
+## shellcheck 0.11 and koalaman 0.9 -x --severity=error; tools/check-bash32.sh; bash -n 5.3 and 3.2
+lib/common.sh setup-node.sh update-node.sh edit-config.sh check-node.sh ui/telcoin-ui-helper.sh: all clean (rc 0; check-bash32: clean, 6 file(s) scanned)

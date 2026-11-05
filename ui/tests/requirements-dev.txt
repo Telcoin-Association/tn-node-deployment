@@ -26,7 +26,7 @@ pygments==2.21.0 \
 pytest==9.2.0 \
     --hash=sha256:07acdcf88ec174f907dc01af70bf52d49b014bbab03faeeade31c96b18c2e588 \
     --hash=sha256:97c4f3b1f3c7414aa36465e09b8220f1d03627993bd51b1282e193753c80557b
-    # via pytest>=8,<9
+    # via pytest>=9,<10
 tomli==2.5.0 \
     --hash=sha256:069435bd5480429b98c5e5afb02ab21c219b6f0064680671c6dc0d46817346ea \
     --hash=sha256:0dc598040da8d42cf20f0be588ed7004f46db12a0ac6c32e03a59dccedaaadcd \

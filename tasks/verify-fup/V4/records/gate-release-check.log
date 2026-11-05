@@ -1,0 +1,17 @@
+== tip 7924f26: ls MANIFEST MANIFEST.sig RELEASE
+ls: cannot access 'MANIFEST': No such file or directory
+ls: cannot access 'MANIFEST.sig': No such file or directory
+ls: cannot access 'RELEASE': No such file or directory
+== bash tools/release-scripts.sh --check
+No MANIFEST in the tree: nothing to check.
+rc=0
+== bash tools/release-scripts.sh --check --require-sig
+release-scripts.sh: no MANIFEST in the tree
+rc=1
+== bash tools/release-scripts.sh --check --require-fresh
+release-scripts.sh: no MANIFEST in the tree
+rc=1
+== bash tools/release-scripts.sh --help (head)
+Usage:
+   bash tools/release-scripts.sh [--serial N] [--min-updater X.Y.Z] [--date YYYY-MM-DD] [--expires DAYS] TAG
+   bash tools/release-scripts.sh --check [--tag TAG] [--require-sig] [--require-fresh]

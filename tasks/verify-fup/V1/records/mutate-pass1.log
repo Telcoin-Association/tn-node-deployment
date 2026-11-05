@@ -1,0 +1,35 @@
+Terminated                 V1_REPO="$d/tree" bash "$here/v1_test.sh" > "$d/log" 2>&1
+sed: -e expression #1, char 66: unterminated `s' command
+sed: -e expression #1, char 41: unterminated address regex
+sed: -e expression #1, char 41: unterminated address regex
+sed: -e expression #1, char 41: unterminated address regex
+sed: -e expression #1, char 45: unterminated `s' command
+M01 caught       12  FAIL  tn_mainnet_enabled always rc 0 (lib/common.sh)
+M02 caught       0   FAIL  select_network option 2 never takes mainnet (LIB-A 2 reverted) (lib/common.sh)
+M03 caught       4   FAIL  json_set_network refusal removed (LIB-A 3 reverted) (setup-node.sh)
+M04 caught       10  FAIL  helper cmd_setup gate removed (LIB-A 4 reverted) (ui/telcoin-ui-helper.sh)
+M05 caught       4   FAIL  helper takes rc 127 (no function) as enabled (ui/telcoin-ui-helper.sh)
+M06 caught       3   FAIL  setup-node gate no longer needs tn_mainnet_enabled (setup-node.sh)
+M07 NOT-APPLIED  | return 1$/d|binary_prepare floor call removed (4 sites) (update-node.sh)
+M08 NOT-APPLIED  | return 1$/d|update-node Docker floor calls removed (2 sites) (update-node.sh)
+M09 NOT-APPLIED  | return 1$/d|set_docker_image floor call removed (edit-config.sh)
+M10 caught       9   FAIL  edit_docker_image floor call removed (edit-config.sh)
+M11 caught       27  FAIL  update_floor_check rc 1 only warns (update-node.sh)
+M12 NOT-APPLIED  | return 0$/        return 0/|docker_floor_check ignores the recorded release of a digest (update-node.sh)
+M13 caught       12  FAIL  mainnet digest rule removed (LIB-A 6 reverted) (lib/common.sh)
+M14 NOT-APPLIED  | tag=""$/        :/|digest arm takes any recorded tag (lib/common.sh)
+M15 caught       25  FAIL  derivation removed (LIB-B 1 reverted) (lib/common.sh)
+M16 caught       16  FAIL  margin upper clamp removed (lib/common.sh)
+M17 caught       5   FAIL  explicit TN_EPOCH_MARGIN ignored by the derivation (lib/common.sh)
+M18 caught       7   FAIL  cap raise removed (LIB-B 2 reverted) (lib/common.sh)
+M19 caught       5   FAIL  cap raise without the two polls (lib/common.sh)
+M20 caught       3   FAIL  check_internet probes testnet on mainnet (lib/common.sh)
+M21 caught       10  FAIL  check_internet fails open on an unknown NETWORK (lib/common.sh)
+M22 caught       1   FAIL  setup-node checks connectivity before the network is chosen (setup-node.sh)
+M23 caught       6   FAIL  check-node falls back to the testnet RPC again (check-node.sh)
+M24 caught       4   FAIL  check-node label without its network (check-node.sh)
+M25 caught       20  FAIL  _setup_image_example mainnet arm removed (LIB-B 5 reverted) (setup-node.sh)
+M26 caught       1   FAIL  blind wait ignores the cap (lib/common.sh)
+M27 caught       4   FAIL  keytool pin broken: a voting node with unreadable epoch info waits blind (lib/common.sh)
+M28 caught       14  FAIL  shipped with mainnet enabled (lib/common.sh)
+23/28 caught

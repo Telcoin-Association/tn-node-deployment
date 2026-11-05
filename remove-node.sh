@@ -27,7 +27,7 @@ if ! version_gte "${COMMON_VERSION:-0}" 2.0.0 || ! declare -F tn_require_fns >/d
 fi
 unset _tn_old
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 
 # Root prepended to the systemd unit directory and to the host files removed
 # beside the node (unit backups and drop-ins, start scripts, node.env, backups,
@@ -37,6 +37,9 @@ readonly SCRIPT_VERSION="2.0.0"
 # /opt/telcoin-source, /var/log/telcoin) are prefixed only in remove_leftovers;
 # remove_shared_components and the scan use them as they are.
 TN_RM_ROOT="${TN_ROOT_PREFIX:-}"
+
+# RM_JSON -- true in a --json run (run_json_mode), so rm_baseline_say sends events.
+RM_JSON=false
 
 # rm_take_lock -- take the update lock (tn_acquire_update_lock) right before the
 # first change, once per run, so no update or other node operation runs while
@@ -337,11 +340,13 @@ show_detected() {
 
 _RM_SHRED_NOTED=false
 
-# _rm_shred_note -- print, once per run, that the overwrite is best effort.
+# _rm_shred_note -- print, once per run, that the overwrite is best effort and
+# that it does not decommission a host that held a key.
 _rm_shred_note() {
     if [[ "$_RM_SHRED_NOTED" != "true" ]]; then
         _RM_SHRED_NOTED=true
         print_info "Overwriting files with shred before deleting them is best effort on SSDs, copy-on-write and cloud disks."
+        print_info "Decommissioning a host that held a validator key means destroying or crypto-erasing its disk and deleting every snapshot and image taken from it; shred alone does not do that."
     fi
 }
 
@@ -474,6 +479,22 @@ remove_unit_leftovers() {
     [[ "$check" != "check" ]]
 }
 
+# rm_baseline_say step|log|warn MSG -- the printer for tn_host_baseline_remove and
+# remove_alerts: a JSON event of the same name in a --json run, a print_* line
+# otherwise.
+rm_baseline_say() {
+    if [[ "$RM_JSON" == "true" ]]; then
+        json_event "${1:-log}" "${2:-}"
+    else
+        case "${1:-}" in
+            step) print_step "${2:-}" ;;
+            warn) print_warn "${2:-}" ;;
+            *)    print_info "${2:-}" ;;
+        esac
+    fi
+    return 0
+}
+
 # stop_and_disable_service UNIT -- stop and disable UNIT, remove its unit file
 # and what lies beside it (remove_unit_leftovers), and reload systemd. An empty
 # UNIT means no node unit file is left (an earlier removal stopped part way):
@@ -481,6 +502,16 @@ remove_unit_leftovers() {
 # loaded, and the leftovers of all of them are removed.
 stop_and_disable_service() {
     local service_name="${1:-}" n
+    # The host baseline (auditd rules, AIDE baseline) goes with the last node
+    # unit, before the directories do; while another node unit remains here it
+    # stays for that node. Nothing happens on a host without one.
+    if declare -F tn_host_baseline_remove >/dev/null 2>&1; then
+        if [[ -z "$(other_node_unit_files "$service_name")" ]]; then
+            tn_host_baseline_remove rm_baseline_say
+        elif declare -F tn_host_baseline_present >/dev/null 2>&1 && tn_host_baseline_present; then
+            rm_baseline_say log "Host baseline kept: another node unit remains here"
+        fi
+    fi
     if [[ -z "$service_name" ]]; then
         print_step "Stopping any node unit systemd still has loaded..."
         while IFS= read -r n; do
@@ -569,24 +600,31 @@ remove_chain_data() {
 # bls-passphrase and the TPM-sealed bls-tpm.pub / bls-tpm.priv of very old
 # installs. The caller removes CONFIG_DIR.
 shred_key_files() {
-    local keys_dir="$1" config_dir="$2" d
+    local keys_dir="$1" config_dir="$2" keep="${5:-}" d
     local user="${3:-${SERVICE_USER:-telcoin}}" group="${4:-${SERVICE_GROUP:-telcoin}}"
+    # KEEP (optional): a file under CONFIG_DIR left alone (_rm_p2p_keep).
+    local -a skip=()
+    if [[ -n "$keep" ]]; then
+        skip=(! -path "$keep")
+    fi
     _rm_shred_tree "$keys_dir" "$user" "$group"
     _rm_dir "$keys_dir"
     if [[ ! -L "$config_dir" ]]; then
-        _rm_shred_tree "$config_dir" "$user" "$group"
+        _rm_shred_tree "$config_dir" "$user" "$group" ${skip[@]+"${skip[@]}"}
     fi
     d="${TN_RM_ROOT}/etc/telcoin"
     _rm_shred "${d}/bls-passphrase.cred" "${d}/bls-passphrase" "${d}/bls-tpm.pub" "${d}/bls-tpm.priv"
 }
 
-# remove_keys [USER GROUP] -- ask (typed DELETE), then shred and remove the node
-# keys (as USER:GROUP, see shred_key_files) and the config dir. The warning is
+# remove_keys [USER GROUP [UNIT]] -- ask (typed DELETE), then shred and remove the node
+# keys (as USER:GROUP, see shred_key_files) and the config dir; while a node unit
+# other than UNIT remains, the P2P new-flow limit's ruleset in it stays
+# (_rm_p2p_keep), so that node keeps the limit at the next boot. The warning is
 # the same for every node: the role is decided on-chain, so nothing on this
 # server says whether these keys are staked to validate.
 remove_keys() {
-    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}"
-    local data_dir keys_dir config_dir
+    local user="${1:-${SERVICE_USER:-telcoin}}" group="${2:-${SERVICE_GROUP:-telcoin}}" self="${3:-}"
+    local data_dir keys_dir config_dir keep
     if ! data_dir="$(detect_data_dir)" || [[ -z "$data_dir" ]]; then
         print_error "Keys not removed: the data directory is unknown."
         return 1
@@ -615,8 +653,12 @@ remove_keys() {
         local confirm_text
         read -r -p "  Type DELETE to confirm permanent key removal, or Enter to skip: " confirm_text
         if [[ "$confirm_text" == "DELETE" ]]; then
-            shred_key_files "$keys_dir" "$config_dir" "$user" "$group"
-            rm -rf "$config_dir"
+            keep="$(_rm_p2p_keep "$config_dir" "$self")"
+            if [[ -n "$keep" ]]; then
+                print_info "Keeping ${keep#"$TN_RM_ROOT"}: another node unit remains here, and the P2P new-flow limit stays whole for it"
+            fi
+            shred_key_files "$keys_dir" "$config_dir" "$user" "$group" "$keep"
+            _rm_config_dir "$config_dir" "$keep"
             print_ok "Keys and passphrase removed"
         else
             print_info "Keys kept -- skipping key removal"
@@ -636,6 +678,56 @@ _rm_build_account() {
         print_ok "Removed the tn-build account"
     else
         print_warn "Could not remove the tn-build account (userdel failed; a process of it may still run). Remove it by hand: sudo userdel tn-build"
+    fi
+    return 0
+}
+
+# _rm_p2p_keep CONFIG_DIR SELF -- print CONFIG_DIR/p2p-limit.nft, the ruleset of
+# firewall-setup.sh's P2P new-flow limit, when it is there and a node unit other
+# than SELF remains: that node keeps the limit (its boot unit loads the file), so
+# a removal of SELF's keys and config leaves the file. Nothing otherwise.
+_rm_p2p_keep() {
+    local f="${1%/}/p2p-limit.nft"
+    [[ -f "$f" && ! -L "$f" ]] || return 0
+    [[ -n "$(other_node_unit_files "$2")" ]] || return 0
+    printf '%s\n' "$f"
+}
+
+# _rm_config_dir CONFIG_DIR [KEEP] -- remove CONFIG_DIR, or, when KEEP names a file
+# in it, everything in it but KEEP (the directory stays, holding KEEP).
+_rm_config_dir() {
+    local dir="$1" keep="${2:-}"
+    if [[ -z "$keep" ]]; then
+        rm -rf "$dir" 2>/dev/null || true
+        return 0
+    fi
+    find "$dir" -mindepth 1 -maxdepth 1 ! -path "$keep" -exec rm -rf -- {} + 2>/dev/null || true
+    return 0
+}
+
+# _rm_p2p_limit -- remove firewall-setup.sh's per-source limit on new P2P flows:
+# disable and stop telcoin-p2p-limit.service, remove it and
+# /etc/telcoin/p2p-limit.nft, and delete the nftables table inet tn_p2p when nft
+# is installed and the table is there. Never fails.
+_rm_p2p_limit() {
+    local r="$TN_RM_ROOT" unit=/etc/systemd/system/telcoin-p2p-limit.service f=/etc/telcoin/p2p-limit.nft tables
+    if [[ -e "${r}${unit}" || -L "${r}${unit}" ]]; then
+        systemctl disable --now telcoin-p2p-limit.service >/dev/null 2>&1 || true
+        rm -f -- "${r}${unit}" 2>/dev/null || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        print_ok "Removed ${unit}"
+    fi
+    if [[ -e "${r}${f}" || -L "${r}${f}" ]]; then
+        rm -f -- "${r}${f}" 2>/dev/null || true
+        print_ok "Removed ${f}"
+    fi
+    command -v nft >/dev/null 2>&1 || return 0
+    tables="$(nft list tables 2>/dev/null)" || return 0
+    grep -qx 'table inet tn_p2p' <<< "$tables" || return 0
+    if nft -f - >/dev/null 2>&1 <<< $'table inet tn_p2p\ndelete table inet tn_p2p'; then
+        print_ok "Deleted the P2P new-flow limit (nftables table inet tn_p2p)"
+    else
+        print_warn "Could not delete the nftables table inet tn_p2p; remove it with: sudo nft delete table inet tn_p2p"
     fi
     return 0
 }
@@ -676,6 +768,8 @@ remove_node_host_files() {
             print_ok "Removed ${f#"$r"}"
         fi
     done
+    # The P2P new-flow limit firewall-setup.sh keeps for this node, and its boot unit.
+    _rm_p2p_limit
     if [[ ! -L "$lx" ]]; then
         rmdir "$lx" 2>/dev/null || true
     fi
@@ -710,9 +804,13 @@ remove_node_host_files() {
 # /var/backups/telcoin, the data dir /var/lib/telcoin, the start scripts in a
 # real /usr/local/libexec/telcoin directory, or unit backups and drop-ins of a
 # node unit whose unit file is gone. rc 1 when none of them is.
+# The boot unit of the P2P new-flow limit (telcoin-p2p-limit.service) and the
+# private alerts timer (telcoin-heartbeat.timer) count too.
 rm_leftovers_present() {
     local r="$TN_RM_ROOT" p m f
-    for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin"; do
+    for p in "${r}/etc/telcoin" "${r}/var/backups/telcoin" "${r}/var/lib/telcoin" \
+             "${r}/etc/systemd/system/telcoin-p2p-limit.service" \
+             "${r}/etc/systemd/system/telcoin-heartbeat.timer"; do
         if [[ -e "$p" || -L "$p" ]]; then
             return 0
         fi
@@ -730,10 +828,11 @@ rm_leftovers_present() {
 
 # remove_leftovers -- the menu with no node unit installed: list what a node
 # install left behind (an earlier removal stopped part way, or kept the keys or
-# the data), ask once, then remove it all. The node keys under the data dirs
-# are shredded as the service account (.node-meta HOST_SERVICE_USER, else the
-# default), the config tree /etc/telcoin is shredded, and the shared host files
-# go through remove_node_host_files. A DATA_DIR that .node-meta records outside
+# the data), ask once, then remove it all. The private alerts go first
+# (remove_alerts). The node keys under the data dirs are shredded as the
+# service account (.node-meta HOST_SERVICE_USER, else the default), the config
+# tree /etc/telcoin is shredded, and the shared host files go through
+# remove_node_host_files. A DATA_DIR that .node-meta records outside
 # /var/lib/telcoin is listed and removed too. rc 0 done or kept at the
 # operator's word; 1 refused before any change (a key set more than once in
 # .node-meta, or another run holds the update lock); 3 nothing found.
@@ -770,6 +869,12 @@ remove_leftovers() {
     if [[ -e "${r}/var/backups/telcoin" || -L "${r}/var/backups/telcoin" ]]; then
         shown+=("/var/backups/telcoin")
     fi
+    if [[ -e "${r}/etc/systemd/system/telcoin-p2p-limit.service" || -L "${r}/etc/systemd/system/telcoin-p2p-limit.service" ]]; then
+        shown+=("/etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)")
+    fi
+    if [[ -e "${r}/etc/systemd/system/telcoin-heartbeat.timer" || -L "${r}/etc/systemd/system/telcoin-heartbeat.timer" ]]; then
+        shown+=("/etc/systemd/system/telcoin-heartbeat.timer (private alerts)")
+    fi
     if remove_unit_leftovers "" check; then
         shown+=("unit backups and drop-ins in /etc/systemd/system")
     fi
@@ -790,6 +895,7 @@ remove_leftovers() {
         return 0
     fi
     rm_take_lock || return 1
+    remove_alerts
 
     # The keys first: every file under a node-keys dir in the data dirs (as the
     # service account that owns them), then the whole config tree.
@@ -1079,6 +1185,8 @@ remove_testnet_addons() {
         rm -f "${p}/usr/local/bin/alloy"   # native tarball install path (no-op for apt/docker installs)
         systemctl daemon-reload 2>/dev/null || true
     fi
+    # The ingest token file, and an env file from before it that may still hold the token.
+    _rm_shred "${p}/etc/telcoin/alloy/ingest-token" "${p}/etc/telcoin/alloy/telcoin-alloy.env"
     rm -rf "${p}/etc/telcoin/alloy" "${p}/var/lib/telcoin-alloy"
     if id -u telcoin-alloy >/dev/null 2>&1; then
         userdel telcoin-alloy >/dev/null 2>&1 || true
@@ -1144,14 +1252,82 @@ remove_testnet_addons() {
 }
 
 # =============================================================================
+# REMOVE PRIVATE ALERTS (the heartbeat timer of setup-alerts.sh)
+# =============================================================================
+
+# rm_alerts_present -- rc 0 when a file of the private alerts is on this host:
+# the heartbeat timer or service unit, the installed runner, the config dir
+# /etc/telcoin/alerts, the runner's state dir or the service-state file
+# /run/telcoin/heartbeat-service; rc 1 when none is. Reads only.
+rm_alerts_present() {
+    local r="$TN_RM_ROOT" p
+    for p in /etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service \
+             /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts \
+             /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat \
+             /run/telcoin/heartbeat-service; do
+        if [[ -e "${r}${p}" || -L "${r}${p}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# remove_alerts -- tear down the private alerts setup-alerts.sh installs, the
+# way setup-alerts.sh --disable does: the timer disabled and stopped, the
+# service stopped, its state cleaned (systemctl clean, then the state dir and
+# its link removed when they are still there), the targets file shredded (it
+# holds the push URLs, as does a writer's .tn.* temp copy), the env file, the
+# config dir, both units, the runner and the service-state file the unit's
+# ExecStartPre= writes in /run/telcoin removed (never /run/telcoin itself, which
+# holds the update lock), systemd reloaded, and
+# ENABLE_ALERTS=false written to .node-meta while that file is still here (best
+# effort). It ends with the hint to pause the monitor. The callers run it before
+# the node stops, so the heartbeat never pushes the planned stop as a failure.
+# Fixed paths under TN_RM_ROOT and no lib/alerts.sh call: it works on a host
+# whose updater installed this script and not that library. Says and does
+# nothing when no alerts file is here (rm_alerts_present). Always returns 0.
+remove_alerts() {
+    local r="$TN_RM_ROOT" sd ad meta
+    rm_alerts_present || return 0
+    sd="${r}/etc/systemd/system"
+    ad="${r}/etc/telcoin/alerts"
+    rm_baseline_say step "Removing private alerts (telcoin-heartbeat)"
+    systemctl disable --now telcoin-heartbeat.timer >/dev/null 2>&1 || true
+    systemctl stop telcoin-heartbeat.service >/dev/null 2>&1 || true
+    systemctl clean --what=state telcoin-heartbeat.service >/dev/null 2>&1 || true
+    _rm_dir "${r}/var/lib/private/telcoin-heartbeat"
+    _rm_dir "${r}/var/lib/telcoin-heartbeat"
+    if [[ -d "$ad" && ! -L "$ad" ]]; then
+        _rm_shred "${ad}/targets" "${ad}/".tn.*
+        rm -f -- "${ad}/alerts.env" 2>/dev/null || true
+        rmdir -- "$ad" 2>/dev/null || true
+    elif [[ -L "$ad" ]]; then
+        rm -f -- "$ad" 2>/dev/null || true
+    fi
+    rm -f -- "${sd}/telcoin-heartbeat.timer" "${sd}/telcoin-heartbeat.service" \
+             "${r}/usr/local/libexec/telcoin/tn-heartbeat" \
+             "${r}/run/telcoin/heartbeat-service" "${r}/run/telcoin/heartbeat-service.tmp" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed telcoin-heartbeat.service >/dev/null 2>&1 || true
+    meta="$(tn_resolve_config_dir 2>/dev/null)" || meta=""
+    meta="${meta:+${meta}/.node-meta}"
+    if [[ -n "$meta" && -f "$meta" && ! -L "$meta" ]]; then
+        meta_set ENABLE_ALERTS false "$meta" >/dev/null 2>&1 || true
+    fi
+    rm_baseline_say log "Pause or delete this node's monitor: a push monitor alerts on silence."
+    return 0
+}
+
+# =============================================================================
 # REMOVE A NODE  (drives the unit/container/dir teardown from the resolvers)
 # =============================================================================
 
-# Tear down a SINGLE installed node unit and everything tied to it: the systemd
-# unit, the docker container (when the install method is docker), chain data,
-# keys/config, the host-wide testnet add-ons, shared components, and the service
-# user. $1 is the unit base name (the new "telcoin" unit or a legacy unit name)
-# discovered by detect_node_installs; its dirs come from the resolvers.
+# Tear down a SINGLE installed node unit and everything tied to it: the private
+# alerts (before the node stops), the systemd unit, the docker container (when
+# the install method is docker), chain data, keys/config, the host-wide testnet
+# add-ons, shared components, and the service user. $1 is the unit base name
+# (the new "telcoin" unit or a legacy unit name) discovered by
+# detect_node_installs; its dirs come from the resolvers.
 # Prunes the unit from INSTALLED_UNITS so a follow-on remove_shared_components
 # sees the correct remaining count.
 remove_node_unit() {
@@ -1175,6 +1351,10 @@ remove_node_unit() {
     [[ -n "$key_user" && "$key_user" != "root" ]] || key_user="${SERVICE_USER:-telcoin}"
     [[ -n "$key_group" && "$key_group" != "root" ]] || key_group="${SERVICE_GROUP:-telcoin}"
 
+    # The private alerts go before the node stops, so the heartbeat does not
+    # push the stop as a failure.
+    remove_alerts
+
     # Stop service
     stop_and_disable_service "$unit"
 
@@ -1190,7 +1370,7 @@ remove_node_unit() {
     # Chain data, then the keys (separate explicit confirmation). Both run before
     # the service account is removed: the node keys are shredded as that account.
     remove_chain_data "$key_user" "$key_group"
-    remove_keys "$key_user" "$key_group"
+    remove_keys "$key_user" "$key_group" "$unit"
 
     # Testnet add-ons (Alloy log shipper + WireGuard admin overlay)
     remove_testnet_addons
@@ -1322,6 +1502,17 @@ custom_is_excluded_path() {
 # (the new telcoin unit, either legacy unit, or the Node Manager UI) and so must
 # not be reported as a "custom" install. The node names come from
 # tn_all_node_services so no legacy literal is hardcoded here.
+# custom_container_lines -- every container (name, image, status; tab separated)
+# that runs a node image of the testnet repositories, the legacy testnet image,
+# the ghcr.io packages the mainnet and testnet releases are published to
+# (tn-mainnet, tn-testnet), the dev package devnet nodes run from (tn-dev) or the
+# old single ghcr.io package, whatever its name; scan_custom_installs offers each
+# one for removal and asks first.
+custom_container_lines() {
+    timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
+        | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri|ghcr\.io/telcoin-association/(telcoin-network|tn-mainnet|tn-testnet|tn-dev)' || true  # network-gated: image repositories of every network; the scan reads only and each removal asks first
+}
+
 custom_is_managed_name() {
     local name="$1" n
     [[ "$name" == "telcoin-ui" ]] && return 0
@@ -1375,8 +1566,7 @@ scan_custom_installs() {
             # Skip the containers this tooling manages (telcoin / legacy names).
             custom_is_managed_name "$cname" && continue
             custom_ctrs+=("$cline")
-        done < <(timeout -k 2 5 docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
-                   | grep -E 'telcoin-network/tn-public|/tn-public/|-adiri' || true)
+        done < <(custom_container_lines)
         for cline in ${custom_ctrs[@]+"${custom_ctrs[@]}"}; do
             IFS=$'\t' read -r cname cimage cstatus <<< "$cline"
             found=true
@@ -1508,8 +1698,9 @@ main_menu() {
 # Used by the Telcoin Node Manager UI through the root-owned telcoin-ui-helper.
 # DESTRUCTIVE: requires --yes, and the server gates it behind a typed "DELETE"
 # confirmation. Scope is cumulative:
-#   service -> stop+disable+rm unit, its old backups (shredded) and drop-in dir
-#              (+ docker container)
+#   service -> remove the private alerts (remove_alerts, before the node stops),
+#              then stop+disable+rm unit, its old backups (shredded) and
+#              drop-in dir (+ docker container)
 #   data    -> service + remove chain data (node keys inside it shredded)
 #   keys    -> data + shred keys and passphrase files, remove config/.node-meta,
 #              the service account, the log-reader group and, when no other
@@ -1616,6 +1807,9 @@ json_remove() {
         return 1
     fi
 
+    # The private alerts first, before the node stops (every scope).
+    remove_alerts
+
     # The unit, its old backups (shredded) and its drop-in directory.
     if [[ -n "$svc" ]]; then
         json_event step "Stopping and disabling ${svc}"
@@ -1645,14 +1839,18 @@ json_remove() {
     fi
 
     if [[ "$scope" == "keys" ]]; then
-        local config_dir
+        local config_dir keep
         config_dir="$(tn_resolve_config_dir)"
         json_event step "Removing keys and config ${config_dir} (key and passphrase files are shredded)"
-        shred_key_files "${data_dir}/node-keys" "$config_dir" "$svc_user" "$svc_group"
-        rm -rf "$config_dir" 2>/dev/null || true
+        keep="$(_rm_p2p_keep "$config_dir" "$svc")"
+        if [[ -n "$keep" ]]; then
+            json_event step "Keeping ${keep#"$TN_RM_ROOT"}: another node unit remains here, and the P2P new-flow limit stays whole for it"
+        fi
+        shred_key_files "${data_dir}/node-keys" "$config_dir" "$svc_user" "$svc_group" "$keep"
+        _rm_config_dir "$config_dir" "$keep"
 
         # Full removal: tear down the testnet add-ons too -- the Alloy log shipper holds
-        # the mode-600 ingest token, and the WireGuard overlay leaves a sudo tnadmin user
+        # the ingest token file (0640), and the WireGuard overlay leaves a sudo tnadmin user
         # + maintainer keys behind. Under --json, remove_testnet_addons' print_* output
         # goes to stderr (benign); it never writes to the JSON fd.
         if declare -f remove_testnet_addons >/dev/null 2>&1; then
@@ -1724,6 +1922,7 @@ json_remove() {
 
 run_json_mode() {
     json_setup_fds
+    RM_JSON=true
     check_root
     if [[ "$JSON_YES" != "true" ]]; then
         json_event error "refusing destructive removal without --yes"

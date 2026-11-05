@@ -53,7 +53,9 @@
 #     address: Caddy needs a DNS name for the certificate); only the normalised name is
 #     written anywhere.
 #   - Same-domain rule: the dashboard and the public RPC endpoint need DIFFERENT
+# network-gated: example hostname in the testnet domain; documentation only
 #     hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) carries RPC;
+# network-gated: example hostname in the testnet domain; documentation only
 #     the dashboard goes on another name (e.g. dashboard.nodeN.adiri.telcoin.network).
 #     A clash dies before anything is written; the dashboard block is never dropped.
 #     rpc-enable --move-dashboard-to <host> moves a dashboard sitting on the RPC
@@ -133,7 +135,7 @@ die() {
     exit 1
 }
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 # basic_auth (the dashboard block) and heredocs (the RPC block page) need Caddy 2.8.0.
 readonly CADDY_MIN_VERSION="2.8.0"
 # Timestamped Caddyfile backups kept by caddy_prune_backups.
@@ -391,6 +393,19 @@ caddy_wait_say() {
         warn) caddy_say warn "${2:-}" ;;
         *)    caddy_say info "${2:-}" ;;
     esac
+    return 0
+}
+
+# caddy_baseline_refresh -- at the end of an rpc-enable or rpc-disable that went
+# through (.node-meta, the node launch and node-info.yaml written, the restart back):
+# make the host baseline again (tn_host_baseline_refresh, a no-op without
+# HOST_BASELINE=true in .node-meta or with a lib/common.sh that lacks it). Its
+# warnings go through caddy_wait_say, so they are events before the done event in
+# --json runs. The dashboard site changes no file the baseline covers. Never fails.
+caddy_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh caddy_wait_say
+    fi
     return 0
 }
 
@@ -782,10 +797,12 @@ caddy_domain_clash() {
     if [[ "$kind" == "rpc" ]]; then
         other="$(caddy_current_dashboard_domain)"
         caddy_same_host "$domain" "$other" || return 1
+        # network-gated: example hostnames in a message shown on every network; the operator's own names are checked
         printf '%s' "${domain} already serves the Node Manager dashboard -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint, with the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed. To move the dashboard (same login) and enable RPC in one step, first create the DNS A record for dashboard.${domain} pointing at this server (Caddy requests a certificate for it), then run: sudo bash ${SCRIPT_DIR}/install-caddy.sh --phase=rpc-enable --rpc-domain ${domain} --move-dashboard-to dashboard.${domain}"
     else
         other="$(caddy_current_rpc_domain)"
         caddy_same_host "$domain" "$other" || return 1
+        # network-gated: example hostnames in a message shown on every network; the operator's own names are checked
         printf '%s' "${domain} already serves the public RPC endpoint -- the dashboard and the public RPC endpoint need DIFFERENT hostnames. The node's public name (e.g. nodeN.adiri.telcoin.network) should carry the RPC endpoint; put the dashboard on another hostname (e.g. dashboard.${domain}). Nothing was changed."
     fi
     return 0
@@ -2709,6 +2726,7 @@ do_rpc_enable() {
     caddy_node_info_advertise set "$domain" "$CADDY_WS_OK"
     if [[ "$CADDY_WS_OK" == "true" ]]; then caddy_ws_verify "$ws_port" "$domain"; fi
     caddy_meta_record "$domain" "$CADDY_WS_OK"
+    caddy_baseline_refresh
     caddy_node_unlock
 }
 
@@ -2738,6 +2756,7 @@ do_rpc_disable() {
     CADDY_LOCK_NOTE="The public RPC site is removed, but node-info.yaml still advertises it; run rpc-disable again later (once any update in progress has finished)."
     CADDY_RPC_PORT="$(caddy_node_port --http.port RPC_PORT 8545)" || die "the public RPC site is removed, but there is no usable reth HTTP port to check the node with (see above), so node-info.yaml was not changed and still advertises it."
     caddy_node_info_advertise clear
+    caddy_baseline_refresh
     caddy_node_unlock
 }
 
@@ -2962,6 +2981,7 @@ dashboard_enable_interactive() {
 
     local domain username pw pw2 clash why
     while true; do
+        # network-gated: example hostname in a prompt shown on every network; the operator types their own
         read -r -p "  Dashboard domain (e.g. admin.node1.adiri.telcoin.network): " domain
         domain="$(caddy_norm_host "$domain")"
         why="$(caddy_domain_problem "$domain")"
@@ -3027,6 +3047,7 @@ rpc_enable_interactive() {
 
     local domain move_to="" ans why
     while true; do
+        # network-gated: example hostname in a prompt shown on every network; the operator types their own
         read -r -p "  Public RPC domain (e.g. node1.adiri.telcoin.network): " domain
         domain="$(caddy_norm_host "$domain")"
         why="$(caddy_domain_problem "$domain")"

@@ -1,0 +1,2 @@
+--- alloy with OBS_METRICS_PUSH_URL empty (what a devnet rotate without --push-url renders)
+running: true exit=0

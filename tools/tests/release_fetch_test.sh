@@ -397,13 +397,28 @@ check_rc "IMAGE_DIGEST by tag refused" 1 "$RC"
 stage_empty "IMAGE_DIGEST by tag"
 cp "$T/img.good" "$REL/IMAGE_DIGEST"
 
-# --- image in the repository the release workflow publishes to ----------------------------------
-printf 'ghcr.io/telcoin-association/telcoin-network@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
+# --- image in the package the release workflow publishes testnet releases to ---------------------
+printf 'ghcr.io/telcoin-association/tn-testnet@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
 write_sums
 sign "$FA"
 rc=0; img="$(tn_fetch_release_image "$TAG" testnet "https://fixture.invalid/$TAG" 2>/dev/null)" || rc=$?
-check "image in ghcr.io/telcoin-association/telcoin-network: taken" "0 ghcr.io/telcoin-association/telcoin-network@sha256:${D64}" "$rc $img"
-stage_empty "ghcr repository"
+check "image in ghcr.io/telcoin-association/tn-testnet: taken" "0 ghcr.io/telcoin-association/tn-testnet@sha256:${D64}" "$rc $img"
+stage_empty "testnet package"
+# The old single package holds no release: a signed IMAGE_DIGEST naming it is refused.
+printf 'ghcr.io/telcoin-association/telcoin-network@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
+write_sums
+sign "$FA"
+rc=0; img="$(tn_fetch_release_image "$TAG" testnet "https://fixture.invalid/$TAG" 2>"$T/err")" || rc=$?
+check "image in the old single ghcr package refused" "1 " "$rc $img"
+check_has "old single package: the refusal names the image and the packages a testnet release comes from" "1" \
+    "$(grep -cF "IMAGE_DIGEST names ghcr.io/telcoin-association/telcoin-network@sha256:${D64}, but a testnet release image is <repository>@sha256:<digest> from ${GAR_IMAGE_BASE} or ghcr.io/telcoin-association/tn-testnet." "$T/err")"
+stage_empty "old single package"
+printf 'ghcr.io/telcoin-association/tn-mainnet@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
+write_sums
+sign "$FA"
+rc=0; img="$(tn_fetch_release_image "$TAG" testnet "https://fixture.invalid/$TAG" 2>/dev/null)" || rc=$?
+check "image in the mainnet package refused on testnet" "1 " "$rc $img"
+stage_empty "mainnet package on testnet"
 printf 'ghcr.io/someone-else/telcoin-network@sha256:%s\n' "$D64" > "$REL/IMAGE_DIGEST"
 write_sums
 sign "$FA"
@@ -461,6 +476,32 @@ tar -czf "$T/bad2/$TARBALL" -C "$T/bad2" "telcoin-network-${TAG}-${TRIPLE}"
 rc=0; tn_release_extract_binary "$T/bad2/$TARBALL" "$T/bad2.bin" 2>/dev/null || rc=$?
 check_rc "extract: symlinked binary refused" 1 "$rc"
 check "extract: nothing written for a symlink" "0" "$( [[ -e "$T/bad2.bin" ]] && echo 1 || echo 0)"
+
+# --- the IMAGE_DIGEST package on mainnet ----------------------------------------------------------
+# No mainnet chain configs are pinned yet, so no mainnet release verifies end to
+# end: _tn_release_fetch is stubbed to stage an IMAGE_DIGEST as a verified release
+# would, and tn_fetch_release_image's own package check is what runs.
+mimg() {  # mimg IMAGE -> "<rc> <printed image>"; the warning in $T/err
+    local rc=0 o
+    o="$( _tn_release_fetch() {
+              local d="$T/mstage"
+              rm -rf "$d"; mkdir -p "$d"
+              printf '%s\n' "$MIMG" > "$d/IMAGE_DIGEST"
+              printf '%s\n' "$d"
+          }
+          _tn_release_cleanup() { rm -rf "$1"; }
+          MIMG="$1" tn_fetch_release_image v1.0.0 mainnet "https://fixture.invalid/v1.0.0" 2>"$T/err" )" || rc=$?
+    printf '%s %s' "$rc" "$o"
+}
+check "mainnet: an image in the mainnet package taken" "0 ghcr.io/telcoin-association/tn-mainnet@sha256:${D64}" \
+    "$(mimg "ghcr.io/telcoin-association/tn-mainnet@sha256:${D64}")"
+check "mainnet: an image in the testnet package refused" "1 " "$(mimg "ghcr.io/telcoin-association/tn-testnet@sha256:${D64}")"
+check_has "mainnet: the refusal names the image and the mainnet package" "1" \
+    "$(grep -cF "Release v1.0.0: IMAGE_DIGEST names ghcr.io/telcoin-association/tn-testnet@sha256:${D64}, but a mainnet release image is <repository>@sha256:<digest> from ghcr.io/telcoin-association/tn-mainnet. The release is refused and nothing was pulled" "$T/err")"
+check "mainnet: an image in the old single package refused" "1 " "$(mimg "ghcr.io/telcoin-association/telcoin-network@sha256:${D64}")"
+check "mainnet: an image in the legacy testnet repository refused" "1 " "$(mimg "${GAR_IMAGE_BASE}@sha256:${D64}")"
+check "mainnet: an image by tag in the mainnet package refused" "1 " "$(mimg "ghcr.io/telcoin-association/tn-mainnet:v1.0.0")"
+check "mainnet: an empty IMAGE_DIGEST refused" "1 " "$(mimg "")"
 
 gpgconf --kill all >/dev/null 2>&1 || true
 finish

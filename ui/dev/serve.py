@@ -128,6 +128,11 @@ FIREWALL = {
     ],
     "unexpected": [],
     "ports": {"49590/udp": True, "49594/udp": True, "43174/tcp": False},
+    # firewall-setup 2.1.0: the stored P2P source list ([] = every address) and the
+    # per-source new-flow limit, as the server passes them to the System tab card.
+    "p2p_sources": [],
+    "p2p_new_flow_limit": {"active": True, "rate": 20, "burst": 40, "reason": None,
+                           "persistent": True},
 }
 
 SCENARIOS = {

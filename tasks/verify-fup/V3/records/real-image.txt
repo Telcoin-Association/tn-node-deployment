@@ -1,0 +1,35 @@
+# real-image proof 2026-11-03T19:07:28Z image grafana/alloy:v1.5.1 (sha256:01a63f4e032c) default user=''
+F  alloy fmt logs=true metrics=true: rc=0 0 error lines
+F  alloy fmt logs=true metrics=false: rc=0 0 error lines
+F  alloy fmt logs=false metrics=true: rc=0 0 error lines
+token file on the host: 640 0:990
+config for R1/R2: 0644 (isolates the token file); R0/R3/R4: root:root 0640, as obs_render_config_alloy writes it for docker
+R0 --user 473:473 --group-add 990, production config: container running after 40 s: false restarts=0; cat of the token inside: rc=1
+R0 --user 473:473 --group-add 990, production config: hub saw 0 pushes; with the token: 0; first: 
+R0 --user 473:473 --group-add 990, production config: first alloy error: 
+R0 --user 473:473 --group-add 990, production config: log lines holding the token value: 0
+R0 --user 473:473 --group-add 990, production config: docker inspect lines holding the token value: 0
+R1 --user 473:473, no --group-add: container running after 40 s: true restarts=0; cat of the token inside: rc=1
+R1 --user 473:473, no --group-add: hub saw 0 pushes; with the token: 0; first: 
+R1 --user 473:473, no --group-add: first alloy error: err="Post \"https://127.0.0.1:18443/api/v1/write\": unable to read authorization credentials: unable to read file /run/credentials/telcoin-alloy/ingest-token: open /run/credentials/telcoin-alloy/ingest-token: permission denied"
+R1 --user 473:473, no --group-add: log lines holding the token value: 0
+R1 --user 473:473, no --group-add: docker inspect lines holding the token value: 0
+R2 --user 473:473 --group-add 990: container running after 40 s: true restarts=0; cat of the token inside: rc=0
+R2 --user 473:473 --group-add 990: hub saw 2 pushes; with the token: 2; first: POST /api/v1/write auth=Bearer <token> tls=TLSv1.3
+R2 --user 473:473 --group-add 990: first alloy error: 
+R2 --user 473:473 --group-add 990: log lines holding the token value: 0
+R2 --user 473:473 --group-add 990: docker inspect lines holding the token value: 0
+R3 rendered flags (image user, --cap-drop=ALL, --group-add 990, --ulimit core=0): container running after 40 s: true restarts=0; cat of the token inside: rc=0
+R3 rendered flags (image user, --cap-drop=ALL, --group-add 990, --ulimit core=0): hub saw 2 pushes; with the token: 2; first: POST /api/v1/write auth=Bearer <token> tls=TLSv1.3
+R3 rendered flags (image user, --cap-drop=ALL, --group-add 990, --ulimit core=0): first alloy error: 
+R3 rendered flags (image user, --cap-drop=ALL, --group-add 990, --ulimit core=0): log lines holding the token value: 0
+R3 rendered flags (image user, --cap-drop=ALL, --group-add 990, --ulimit core=0): docker inspect lines holding the token value: 0
+R4 TLS 1.2-only hub, rendered flags: container running after 40 s: true restarts=0; cat of the token inside: rc=0
+R4 TLS 1.2-only hub, rendered flags: hub saw 0 pushes; with the token: 0; first: 
+R4 TLS 1.2-only hub, rendered flags: first alloy error: err="Post \"https://127.0.0.1:18444/api/v1/write\": remote error: tls: protocol version not supported"
+R4 TLS 1.2-only hub, rendered flags: log lines holding the token value: 0
+R4 TLS 1.2-only hub, rendered flags: docker inspect lines holding the token value: 0
+commands: see runit() in tasks/verify-fup/V3/real_image.sh (docker run -d --network=host <flags> --env-file ... --mount type=bind,...,readonly grafana/alloy:v1.5.1 run ...)
+--- R0 standalone: --user 473:473 --group-add 990 with config.alloy root:root 0640 (the docker render) and the token root:990 0640
+Error: reading config path "/etc/alloy/config.alloy": open /etc/alloy/config.alloy: permission denied
+rc=1

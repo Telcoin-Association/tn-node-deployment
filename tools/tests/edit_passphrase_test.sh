@@ -5,7 +5,9 @@
 # unknown network read as mainnet), the root 0600 write (a host without
 # systemd-creds keeps the root-only file), the move of a legacy Docker unit
 # that embeds the value, the refusal of every other edit on such a unit, a
-# committee check refusing the restart (edit put back, update lock released), and
+# committee check refusing the restart (edit put back, update lock released),
+# keytool verify before each credential action writes (change, reseal, the three
+# kinds of move: refused, passed, absent from the release, probe failed), and
 # that the value never reaches a child process's argument list or environment.
 #
 #   bash tools/tests/edit_passphrase_test.sh
@@ -357,6 +359,315 @@ for v in "${USED[@]}"; do
     check "argv never holds '${v}'" no "$(has "$(cat "$ALL_ARGV")" "$v")"
     check "environment never holds '${v}'" no "$(has "$(cat "$ENV_LOG")" "$v")"
 done
+
+# -----------------------------------------------------------------------------
+# KEYS: keytool verify before a credential action writes (edit_keytool_verify).
+# The docker wrapper stands in for the node image: its `keytool --help` lists
+# verify (KT_MODE=has), does not (lacks), or fails like docker (probe4, exit
+# 125); `keytool verify` succeeds when its stdin is the key's passphrase
+# ($T/kt.key). The write entry points are stubs that record the call and then
+# rewrite the file the action would change, so a refusal shows as unchanged
+# bytes and mtime and a pass as a recorded write.
+# -----------------------------------------------------------------------------
+KT_CALLS="$T/kt.calls"
+export KT_CALLS KT_MODE=has
+printf 'key-pass-correct-1\n' > "$T/kt.key"
+SU_SAVE="$SERVICE_USER"
+SG_SAVE="$SERVICE_GROUP"
+if [[ $IS_ROOT == 1 ]]; then
+    SERVICE_USER=nobody
+    SERVICE_GROUP="$(id -gn nobody 2>/dev/null || echo nogroup)"
+else
+    SERVICE_USER="$(id -un)"
+    SERVICE_GROUP="$(id -gn)"
+fi
+cat > "$T/bin/docker" <<STUB
+#!/bin/sh
+printf '%s\n' "docker \$*" >> "$ARGV_LOG"
+printf '%s\n' "docker \$*" >> "$ALL_ARGV"
+"$REAL_ENV" >> "$ENV_LOG"
+case " \$* " in
+    *" keytool --help "*)
+        case "\$KT_MODE" in
+            probe4) exit 125 ;;
+            dockerfail)
+                printf 'docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n' >&2
+                exit 1
+                ;;
+            claperr)
+                printf "error: unrecognized subcommand 'verify'\n\nUsage: telcoin-network keytool <COMMAND>\n\nFor more information, try '--help'.\n" >&2
+                exit 2
+                ;;
+            lacks) printf 'Usage: telcoin keytool <COMMAND>\n\nCommands:\n  generate  Generate keys\n  set-rpc   Set the RPC\n  help      Print help\n' ;;
+            *) printf 'Usage: telcoin keytool <COMMAND>\n\nCommands:\n  generate  Generate keys\n  verify    Check that the passphrase opens the BLS key\n  help      Print help\n' ;;
+        esac
+        exit 0
+        ;;
+    *" keytool verify "*)
+        IFS= read -r p || p=""
+        if [ "\$p" = "\$(cat "$T/kt.key")" ]; then
+            printf 'verify ok\n' >> "\$KT_CALLS"
+            exit 0
+        fi
+        printf 'verify bad\n' >> "\$KT_CALLS"
+        printf 'error: the passphrase does not decrypt the BLS key\n' >&2
+        exit 1
+        ;;
+esac
+exit 0
+STUB
+chmod 0755 "$T/bin/docker"
+# systemd-creds: the credential is "CRED:<value>"; decrypt prints the value.
+cat > "$T/bin/systemd-creds" <<STUB
+#!/bin/sh
+printf '%s\n' "systemd-creds \$*" >> "$ARGV_LOG"
+printf '%s\n' "systemd-creds \$*" >> "$ALL_ARGV"
+case "\$1" in
+    decrypt) sed 's/^CRED://' "\$3" ;;
+    *) exit 1 ;;
+esac
+STUB
+chmod 0755 "$T/bin/systemd-creds"
+
+tn_launch_runner() { printf 'docker:img:verify\n'; }
+tn_creds_supported() { [[ "${KT_CREDS:-0}" == 1 ]]; }
+# The fixture files stand in for root-owned ones.
+_tn_cred_plain_ok() { [[ -f "$1" && ! -L "$1" ]]; }
+# kt_write NAME -- what a write entry point records: its name, and "match" when
+# the passphrase it is about to keep is the key's (the same as was verified).
+kt_write() {
+    local m=nomatch
+    [[ "$TN_CRED_PASS" == "$(cat "$T/kt.key")" ]] && m=match
+    printf 'write %s %s\n' "$1" "$m" >> "$KT_CALLS"
+    printf 'CRED:rewritten\n' > "$CRED"
+}
+_tn_cred_switch() { kt_write switch; return 0; }
+tn_migrate_embedded_passphrase() { kt_write embedded; return 0; }
+# The plaintext file is what this one reads, as the real one does.
+tn_migrate_credential() {
+    if [[ -z "$TN_CRED_PASS" ]]; then
+        IFS= read -r TN_CRED_PASS < "$PASSFILE" || true
+    fi
+    kt_write migrate
+    TN_CRED_PASS=""
+    return 0
+}
+mtime() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1" 2>/dev/null; }
+# kt_fixture METHOD -- a testnet node with METHOD recorded, a data dir owned by
+# the service user, a credential and a passphrase file dated 2020.
+kt_fixture() {
+    fixture "$BASE"
+    set_network testnet
+    printf 'PASSPHRASE_METHOD=%s\nDATA_DIR=%s\n' "$1" "$FXB/data" >> "$FXB/etc/telcoin/.node-meta"
+    mkdir -p "$FXB/data"
+    [[ $IS_ROOT == 1 ]] && chown nobody "$FXB/data"
+    CRED="$FXB/etc/telcoin/bls-passphrase.cred"
+    printf 'CRED:%s\n' "${KT_SEALED:-sealed-before-7}" > "$CRED"
+    touch -t 202001010000 "$CRED" "$PASSFILE"
+    CRED_BEFORE="$(cat "$CRED") $(mtime "$CRED")"
+    PASS_BEFORE="$(cat "$PASSFILE") $(mtime "$PASSFILE")"
+    TARGET_LAUNCH_FILE="$TARGET_SERVICE_FILE"
+    : > "$KT_CALLS"
+}
+kt_calls() { tr '\n' '|' < "$KT_CALLS" | sed 's/|$//'; }
+# kt_unchanged LABEL -- the credential and the passphrase file kept their bytes
+# and mtime, and no write entry point ran.
+kt_unchanged() {
+    check "$1: credential bytes and mtime unchanged" "$CRED_BEFORE" "$(cat "$CRED") $(mtime "$CRED")"
+    check "$1: passphrase file bytes and mtime unchanged" "$PASS_BEFORE" "$(cat "$PASSFILE") $(mtime "$PASSFILE")"
+    check_lacks "$1: nothing written" "write" "$(kt_calls)"
+}
+# kt_run FN STDIN -- run FN with STDIN; RC and OUT as edit.
+kt_run() {
+    printf '%s' "$2" > "$T/in"
+    RC=0
+    "$1" < "$T/in" > "$T/out" 2>&1 || RC=$?
+    OUT="$(cat "$T/out")"
+    cat "$T/out" >> "$T/kt.allout"
+    edit_unlock
+}
+: > "$T/kt.allout"
+USED_KT=(key-pass-correct-1 wrong-new-pass-2 sealed-wrong-pass-4 typed-wrong-pass-5 unit-wrong-pass-6 plain-wrong-pass-8)
+
+# --- edit_change_passphrase (menu 5, 1): the new passphrase is verified --------
+KT_MODE=has; kt_fixture stdin
+kt_run edit_bls_passphrase $'1\nwrong-new-pass-2\nwrong-new-pass-2\n'
+check "change, verify fails: the refusal says the new passphrase does not open the key" yes \
+    "$(has "$OUT" "The new passphrase does not open the BLS key in ${FXB}/data")"
+check "change, verify fails: passphrase unchanged" yes "$(has "$OUT" "Passphrase unchanged.")"
+check "change, verify fails: keytool verify saw the typed value on stdin (and refused it)" "verify bad" "$(kt_calls)"
+kt_unchanged "change, verify fails"
+check "change, verify fails: the update lock is released" false "$EDIT_LOCK_HELD"
+
+kt_fixture stdin
+kt_run edit_bls_passphrase $'1\nkey-pass-correct-1\nkey-pass-correct-1\n'
+check "change, verify passes: verified, then written" "verify ok|write switch match" "$(kt_calls)"
+check "change, verify passes: says so" yes "$(has "$OUT" "keytool verify: the passphrase opens the BLS key")"
+check "change, verify passes: keytool reads the passphrase on stdin" yes "$(has "$(cat "$ALL_ARGV")" "--bls-passphrase-source stdin keytool verify")"
+
+KT_MODE=lacks; kt_fixture stdin
+kt_run edit_bls_passphrase $'1\nanything-value-3x\nanything-value-3x\n'
+check "change, no verify in the release: written without a check" "write switch nomatch" "$(kt_calls)"
+check "change, no verify in the release: the log line" yes "$(has "$OUT" "keytool verify is not in this release; skipped")"
+check "change, no verify in the release: no warning" no "$(has "$OUT" "Could not run the node binary")"
+
+KT_MODE=probe4; kt_fixture stdin
+kt_run edit_bls_passphrase $'1\nanything-value-3x\nanything-value-3x\n'
+check "change, probe fails: written without a check" "write switch nomatch" "$(kt_calls)"
+check "change, probe fails: warns that the probe could not run" yes "$(has "$OUT" "Could not run the node binary of docker:img:verify to see whether it has keytool verify; skipped")"
+
+# keytool verify is in the release but cannot start (no data dir): stop.
+KT_MODE=has; kt_fixture stdin
+rm -rf "$FXB/data"
+kt_run edit_bls_passphrase $'1\nkey-pass-correct-1\nkey-pass-correct-1\n'
+check "change, verify cannot start: refused with tn_keytool's reason" yes \
+    "$(has "$OUT" "keytool verify could not run (exit 4: tn_keytool: data dir")"
+kt_unchanged "change, verify cannot start"
+
+# The probe's rc 1 or 2 is "not listed" only when the output is clap's own (a
+# Usage: line naming keytool); a runner or privilege-drop wrapper failing with 1
+# is rc 4 (busybox setpriv rejects --reuid with exit 1).
+KT_BIN="binary:$T/bin/telcoin-network"
+cp "$T/bin/setpriv" "$T/setpriv.wrapper" 2>/dev/null || : > "$T/setpriv.wrapper"
+cat > "$T/bin/setpriv.fail" <<STUB
+#!/bin/sh
+printf '%s\n' "setpriv \$*" >> "$ALL_ARGV"
+printf "setpriv: unrecognized option '--reuid'\n" >&2
+exit 1
+STUB
+chmod 0755 "$T/bin/setpriv.fail"
+_tn_root_binary_ok() { TN_ROOT_BINARY_REAL="$1"; return 0; }
+kt_has_rc() { local rc=0; tn_keytool_has "$1" verify >/dev/null 2>&1 || rc=$?; printf '%s\n' "$rc"; }
+for m in has lacks claperr probe4 dockerfail; do
+    KT_MODE="$m"
+    eval "KT_RC_${m}=\$(kt_has_rc docker:img:verify)"
+done
+check "tn_keytool_has: listed / not listed / clap error / docker 125 / docker 1 with its own message" \
+    "0 1 1 4 4" "${KT_RC_has} ${KT_RC_lacks} ${KT_RC_claperr} ${KT_RC_probe4} ${KT_RC_dockerfail}"
+mv -f "$T/bin/setpriv.fail" "$T/bin/setpriv"
+check "tn_keytool_has: a binary whose privilege drop fails with 1 could not be probed" 4 "$(kt_has_rc "$KT_BIN")"
+
+# The menu's change on that host: a warning, not "not in this release", and the
+# probe-rc-4 path (no check, the write goes ahead as without keytool verify).
+KT_MODE=has; kt_fixture stdin
+tn_launch_runner() { printf '%s\n' "$KT_BIN"; }
+kt_run edit_bls_passphrase $'1\nwrong-new-pass-2\nwrong-new-pass-2\n'
+check "change, privilege drop fails: warns that the probe could not run" yes \
+    "$(has "$OUT" "Could not run the node binary of ${KT_BIN} to see whether it has keytool verify; skipped")"
+check "change, privilege drop fails: not taken for a release without verify" no "$(has "$OUT" "not in this release")"
+check "change, privilege drop fails: the probe-rc-4 path (no check, then the write)" "write switch nomatch" "$(kt_calls)"
+cp "$T/setpriv.wrapper" "$T/bin/setpriv"
+[[ -s "$T/bin/setpriv" ]] || rm -f "$T/bin/setpriv"
+unset -f _tn_root_binary_ok
+
+# A clap error from the release is its answer: verify is not in it.
+KT_MODE=claperr; kt_fixture stdin
+tn_launch_runner() { printf 'docker:img:verify\n'; }
+kt_run edit_bls_passphrase $'1\nanything-value-3x\nanything-value-3x\n'
+check "change, clap error from the probe: the log line, no warning" "yes no" \
+    "$(has "$OUT" "keytool verify is not in this release; skipped") $(has "$OUT" "Could not run the node binary")"
+check "change, clap error from the probe: written without a check" "write switch nomatch" "$(kt_calls)"
+
+KT_MODE=has; kt_fixture stdin
+tn_launch_runner() { return 2; }
+kt_run edit_bls_passphrase $'1\nanything-value-3x\nanything-value-3x\n'
+tn_launch_runner() { printf 'docker:img:verify\n'; }
+check "change, runner unknown: written without a check" "write switch nomatch" "$(kt_calls)"
+check "change, runner unknown: warns" yes "$(has "$OUT" "keytool verify skipped")"
+
+# --- edit_reseal (--reseal, and menu 5, 2): the decrypted value is verified ----
+KT_CREDS=1
+KT_MODE=has; KT_SEALED=sealed-wrong-pass-4; kt_fixture credential
+kt_run edit_reseal ""
+check_rc "reseal, verify fails: rc 1" 1 "$RC"
+check "reseal, verify fails: the refusal" yes "$(has "$OUT" "The passphrase does not open the BLS key")"
+check "reseal, verify fails: keytool verify refused the sealed value" "verify bad" "$(kt_calls)"
+kt_unchanged "reseal, verify fails"
+
+KT_SEALED=key-pass-correct-1; kt_fixture credential
+kt_run edit_reseal ""
+check_rc "reseal, verify passes: rc 0" 0 "$RC"
+check "reseal, verify passes: verified, then sealed again" "verify ok|write switch match" "$(kt_calls)"
+
+KT_MODE=lacks; KT_SEALED=sealed-before-7; kt_fixture credential
+kt_run edit_reseal ""
+check "reseal, no verify in the release: sealed again without a check" "write switch nomatch" "$(kt_calls)"
+check "reseal, no verify in the release: the log line" yes "$(has "$OUT" "keytool verify is not in this release; skipped")"
+
+KT_MODE=probe4; kt_fixture credential
+kt_run edit_reseal ""
+check "reseal, probe fails: sealed again without a check" "write switch nomatch" "$(kt_calls)"
+check "reseal, probe fails: the warning" yes "$(has "$OUT" "to see whether it has keytool verify; skipped")"
+
+# The same refusal reached from the menu.
+KT_MODE=has; KT_SEALED=sealed-wrong-pass-4; kt_fixture credential
+kt_run edit_bls_passphrase $'2\n'
+check "menu reseal, verify fails: the refusal" yes "$(has "$OUT" "The passphrase does not open the BLS key")"
+kt_unchanged "menu reseal, verify fails"
+KT_CREDS=0
+KT_SEALED=""
+
+# --- edit_migrate_credential: the file it reads, a typed value, a unit's value --
+KT_MODE=has; kt_fixture stdin
+printf 'plain-wrong-pass-8\n' > "$PASSFILE"
+touch -t 202001010000 "$PASSFILE"
+PASS_BEFORE="$(cat "$PASSFILE") $(mtime "$PASSFILE")"
+kt_run edit_migrate_credential ""
+check_rc "migrate file, verify fails: rc 1" 1 "$RC"
+check "migrate file, verify fails: the refusal names the file" yes \
+    "$(has "$OUT" "The passphrase in ${FXB}/etc/telcoin/bls-passphrase does not open the BLS key")"
+check "migrate file, verify fails: keytool verify refused the file's value" "verify bad" "$(kt_calls)"
+kt_unchanged "migrate file, verify fails"
+
+kt_fixture stdin
+printf 'key-pass-correct-1\n' > "$PASSFILE"
+kt_run edit_migrate_credential ""
+check_rc "migrate file, verify passes: rc 0" 0 "$RC"
+check "migrate file, verify passes: verified, then moved" "verify ok|write migrate match" "$(kt_calls)"
+
+KT_MODE=lacks; kt_fixture stdin
+kt_run edit_migrate_credential ""
+check "migrate file, no verify in the release: moved without a check" "write migrate nomatch" "$(kt_calls)"
+check "migrate file, no verify in the release: the log line" yes "$(has "$OUT" "keytool verify is not in this release; skipped")"
+
+KT_MODE=probe4; kt_fixture stdin
+kt_run edit_migrate_credential ""
+check "migrate file, probe fails: moved without a check" "write migrate nomatch" "$(kt_calls)"
+check "migrate file, probe fails: the warning" yes "$(has "$OUT" "to see whether it has keytool verify; skipped")"
+
+# No stored passphrase: the typed one is verified.
+KT_MODE=has; kt_fixture stdin
+rm -f "$PASSFILE"
+PASS_BEFORE=" "
+kt_run edit_migrate_credential $'typed-wrong-pass-5\n'
+check "migrate typed, verify fails: refused" "1 verify bad" "${RC} $(kt_calls)"
+kt_unchanged "migrate typed, verify fails"
+
+# A legacy unit that holds the value, from the menu's move.
+for kt in unit-wrong-pass-6 key-pass-correct-1; do
+    kt_fixture stdin
+    printf '[Service]\nExecStart=/usr/bin/docker run --rm -e TN_BLS_PASSPHRASE=%s img:v1 telcoin node\n' "$kt" > "$TARGET_SERVICE_FILE"
+    kt_run edit_bls_passphrase $'y\n'
+    if [[ "$kt" == key-pass-correct-1 ]]; then
+        check "migrate unit, verify passes: verified, then moved" "verify ok|write embedded match" "$(kt_calls)"
+    else
+        check "migrate unit, verify fails: the refusal" yes "$(has "$OUT" "The passphrase does not open the BLS key")"
+        kt_unchanged "migrate unit, verify fails"
+    fi
+done
+
+# The passphrase reached keytool on stdin only: never an argument or an
+# environment value of anything the actions ran.
+check "control: keytool verify ran through docker" yes "$(has "$(cat "$ALL_ARGV")" " keytool verify")"
+for v in "${USED_KT[@]}"; do
+    check "KEYS: output never holds '${v}'" no "$(has "$(cat "$T/kt.allout")" "$v")"
+    check "KEYS: argv never holds '${v}'" no "$(has "$(cat "$ALL_ARGV")" "$v")"
+    check "KEYS: environment never holds '${v}'" no "$(has "$(cat "$ENV_LOG")" "$v")"
+done
+SERVICE_USER="$SU_SAVE"
+SERVICE_GROUP="$SG_SAVE"
+unset -f tn_launch_runner tn_creds_supported _tn_cred_plain_ok _tn_cred_switch \
+    tn_migrate_embedded_passphrase tn_migrate_credential
 
 PATH="$ORIG_PATH"
 finish

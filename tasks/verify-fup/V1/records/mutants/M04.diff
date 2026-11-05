@@ -1,0 +1,4 @@
+1526,1528d1525
+<     if [[ "$net_rule" == mainnet ]] && ! _lib_call tn_mainnet_enabled >/dev/null 2>&1; then
+<         die "mainnet is not enabled in this script release (TN_MAINNET_ENABLED in ${HELPER_LIB}); nothing was changed"
+<     fi

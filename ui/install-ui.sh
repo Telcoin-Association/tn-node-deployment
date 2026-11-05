@@ -42,7 +42,7 @@
 #
 set -euo pipefail
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 
 INSTALL_DIR="/opt/telcoin-ui"
 VENV_DIR="/opt/telcoin-ui-venv"
@@ -438,8 +438,8 @@ ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enabl
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-enable allow-quorum-risk
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper tracing-disable allow-quorum-risk
-# Updates. update-prepare takes one release tag of the node's network
-# (vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet); the helper refuses anything else.
+# Updates. update-prepare takes one release tag of the node's network, in the
+# form tn_release_tag_ok accepts for that network; the helper refuses anything else.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-check
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-prepare *
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/sbin/telcoin-ui-helper update-apply

@@ -1,0 +1,23 @@
+rc=0
+--- env at enable
+TN_NODE=v3node
+TN_REGION=eu
+TN_VALIDATOR_ADDRESS=
+TN_CHAIN=devnet
+TN_IMAGE_VERSION=unknown
+OBS_PUSH_URL=https://d.example:8443/loki/api/v1/push
+OBS_PUSH_HOST=d.example
+TN_METRICS_ADDR=127.0.0.1:9101
+OBS_METRICS_PUSH_URL=https://d.example:8443/api/v1/write
+OBS_METRICS_PUSH_HOST=d.example
+--- env after rotate
+TN_NODE=v3node
+TN_REGION=eu
+TN_VALIDATOR_ADDRESS=
+TN_CHAIN=devnet
+TN_IMAGE_VERSION=unknown
+OBS_PUSH_URL=
+OBS_PUSH_HOST=
+TN_METRICS_ADDR=127.0.0.1:9101
+OBS_METRICS_PUSH_URL=
+OBS_METRICS_PUSH_HOST=

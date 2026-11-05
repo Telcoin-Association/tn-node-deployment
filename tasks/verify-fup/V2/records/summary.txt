@@ -1,0 +1,15 @@
+V2 harness runs on ac9a605 (verify/V2), 2026-11-03. Every FAIL line in the records is a finding check:
+  [finding A-2] dup HOST_BASELINE, [finding A-3] unreadable .node-meta as a user, [finding A-4] remove-node --json event stream,
+  [finding A-5] menu Restart node, [finding A-6] remove without augenrules, [finding N-2] Alloy env file in the AIDE db,
+  and in bash:3.2 the four "binary spec: change" FAILs = K-1 (busybox setpriv: the probe fails rc 1, read as "not in this release").
+host    keys_v2.sh     rc=0  371 checks, 0 failures, 4 skipped
+host    audit_v2.sh    rc=1  40 checks, 3 failures, 2 skipped    (A-2 x2, A-3)
+host    hooks_v2.sh    rc=1  101 checks, 1 failures, 1 skipped   (A-5)
+b32     keys_v2.sh     rc=1  831 checks, 4 failures, 0 skipped   (K-1 x4)
+b32     audit_v2.sh    rc=1  100 checks, 4 failures, 1 skipped   (A-2 x3, A-6)
+b32     hooks_v2.sh    rc=1  112 checks, 2 failures, 0 skipped   (A-4, A-5)
+ubuntu  keys_v2.sh     rc=0  831 checks, 0 failures, 0 skipped
+ubuntu  audit_v2.sh    rc=1  100 checks, 4 failures, 1 skipped   (A-2 x3, A-6)
+ubuntu  hooks_v2.sh    rc=1  112 checks, 2 failures, 0 skipped   (A-4, A-5)
+ubuntu  real_v2.sh     rc=1  40 checks, 1 failures, 0 skipped    (N-2)
+totals: host 512, bash:3.2 1043, ubuntu:24.04 1083 (2638 checks)

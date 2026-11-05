@@ -8,8 +8,11 @@
 # backups, logrotate, journald, needrestart and apt files; the lock directory and
 # its lock file stay; a symlinked libexec dir left alone), the log-reader group,
 # the JSON path, finishing a removal that stopped part way (JSON and the menu's
-# leftover path), the update lock, and the refusal to remove anything when
-# .node-meta sets a key more than once.
+# leftover path), the update lock, the refusal to remove anything when
+# .node-meta sets a key more than once, the Alloy ingest token file shredded
+# by the add-on teardown, and the private alerts removed before the node stops
+# (every scope, the menu, the leftover path; not the chain-data-only wipe; also
+# with no lib/alerts.sh).
 #
 #   bash tools/tests/remove_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/remove_test.sh
@@ -48,6 +51,26 @@ if [ "$tool" = systemctl ] && [ "\${1:-}" = is-active ]; then exit 3; fi
 exit 0
 STUB
 done
+# nft: table inet tn_p2p is the file NFT_TABLE_FILE (no file: no table), so no
+# real nft ever runs here. NFT_FAIL=1 makes `-f` fail.
+NFT_TABLE_FILE="$T/nft.table"
+export NFT_TABLE_FILE
+cat > "$T/bin/nft" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "nft $*" >> "$CALLS"
+case "$*" in
+    "list tables")
+        if [ -f "$NFT_TABLE_FILE" ]; then echo "table inet tn_p2p"; fi
+        exit 0 ;;
+    "-f -")
+        prog="$(cat)"
+        printf '%s\n' "$prog" | sed 's/^/nft| /' >> "$CALLS"
+        [ -z "${NFT_FAIL:-}" ] || exit 1
+        if printf '%s\n' "$prog" | grep -qx 'delete table inet tn_p2p'; then rm -f "$NFT_TABLE_FILE"; fi
+        exit 0 ;;
+esac
+exit 0
+STUB
 cat > "$T/bin/shred" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "shred $*" >> "$CALLS"
@@ -766,5 +789,396 @@ done
   : > "$T/order"
   _rm_build_account ) > "$T/out" 2>&1
 check "no build account: nothing done" "" "$(cat "$T/out" "$T/order")"
+
+# KEYS
+# --- the shred note: shred is not decommissioning, said once per run ----------
+mkfixture
+remove_keys <<< "DELETE" > "$T/out" 2>&1
+check "shred note: the destruction sentence, once" 1 \
+    "$(grep -c 'Decommissioning a host that held a validator key means destroying or crypto-erasing its disk and deleting every snapshot and image taken from it; shred alone does not do that.' "$T/out")"
+check "shred note: the best-effort sentence still once" 1 "$(grep -c 'best effort on SSDs, copy-on-write and cloud disks' "$T/out")"
+check "shred note: several files were shredded in that run" yes \
+    "$([[ "$(grep -c '^shred -u' "$CALLS")" -gt 1 ]] && echo yes || echo no)"
+# A later shred in the same run prints nothing more.
+printf 'x\n' > "$R/etc/second.txt"
+_rm_shred "$R/etc/second.txt" > "$T/out2" 2>&1
+check_has "shred note: the later file was shredded" "shred -u -- $R/etc/second.txt" "$(calls)"
+check "shred note: not repeated later in the run" "0 0" \
+    "$(grep -c 'Decommissioning a host' "$T/out2") $(grep -c 'best effort on SSDs' "$T/out2")"
+
+# OBS
+# --- the add-on teardown shreds the Alloy ingest token file -----------------------
+# The real remove_testnet_addons (stubbed above for the other cases), taken from the
+# sourced copy; ufw is reported absent so no host firewall rule is touched.
+REAL_RTA="$(awk '/^remove_testnet_addons\(\) \{/,/^}/' "$T/h/remove-node.sh")"
+AL="$R/etc/telcoin/alloy"
+mkdir -p "$AL" "$SD"
+printf 'obs-token-0123456789abcdef\n' > "$AL/ingest-token"
+printf 'TN_NODE=n\nOBS_INGEST_TOKEN=legacy-token-0123456789\n' > "$AL/telcoin-alloy.env"
+printf 'loki.write "central" {}\n' > "$AL/config.alloy"
+printf '[Service]\n' > "$SD/telcoin-alloy.service"
+: > "$CALLS"
+( ufw_installed() { return 1; }; eval "$REAL_RTA"; remove_testnet_addons ) > "$T/out" 2>&1
+check_rc "add-on teardown: rc 0" 0 $?
+check_has "add-on teardown: the token file shredded" "shred -u -- $AL/ingest-token" "$(calls)"
+check_has "add-on teardown: the env file (may hold an older token) shredded" "shred -u -- $AL/telcoin-alloy.env" "$(calls)"
+check_lacks "add-on teardown: config.alloy is removed, not shredded" "$AL/config.alloy" "$(calls)"
+gone "add-on teardown: the token file" "$AL/ingest-token"
+gone "add-on teardown: the Alloy config dir" "$AL"
+gone "add-on teardown: the Alloy unit" "$SD/telcoin-alloy.service"
+check_lacks "add-on teardown: the token is not printed" "obs-token-0123456789abcdef" "$(cat "$T/out")"
+
+# FW
+# --- the P2P new-flow limit goes with the last node: unit, ruleset, table -------
+# p2p_limit_fixture -- the boot unit and ruleset firewall-setup.sh writes, and the table.
+p2p_limit_fixture() {
+    mkdir -p "$SD" "$ETC"
+    printf '[Unit]\nDescription=limit\n' > "$SD/telcoin-p2p-limit.service"
+    printf 'table inet tn_p2p\ndelete table inet tn_p2p\n' > "$ETC/p2p-limit.nft"
+    printf 'table inet tn_p2p {\n}\n' > "$NFT_TABLE_FILE"
+    : > "$CALLS"
+}
+mkfixture; p2p_limit_fixture
+remove_node_host_files > "$T/out" 2>&1
+gone "p2p limit unit" "$SD/telcoin-p2p-limit.service"
+gone "p2p limit ruleset" "$ETC/p2p-limit.nft"
+check "p2p limit: table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+check_has "p2p limit: unit disabled and stopped" "systemctl disable --now telcoin-p2p-limit.service" "$(calls)"
+check_has "p2p limit: daemon-reload" "systemctl daemon-reload" "$(calls)"
+check "p2p limit: one delete transaction" "nft| table inet tn_p2p
+nft| delete table inet tn_p2p" "$(grep '^nft| ' "$CALLS")"
+check_has "p2p limit: said" "yes" "$(grep -q 'Deleted the P2P new-flow limit (nftables table inet tn_p2p)' "$T/out" && echo yes)"
+kept "p2p limit: other unit" "$SD/telcoin.service"
+# Nothing of it here: no systemctl call for it and no nft transaction.
+mkfixture; : > "$CALLS"; rm -f "$NFT_TABLE_FILE"
+remove_node_host_files > /dev/null 2>&1
+check_lacks "p2p limit absent: no unit call" "telcoin-p2p-limit" "$(calls)"
+check_lacks "p2p limit absent: no nft transaction" "nft -f" "$(calls)"
+# nft refuses the delete: a warning, and the rest of the removal goes on.
+mkfixture; p2p_limit_fixture
+NFT_FAIL=1 remove_node_host_files > "$T/out" 2>&1
+check_has "p2p limit: refused delete warned" "yes" "$(grep -q 'Could not delete the nftables table inet tn_p2p; remove it with: sudo nft delete table inet tn_p2p' "$T/out" && echo yes)"
+gone "p2p limit: refused delete, unit still removed" "$SD/telcoin-p2p-limit.service"
+gone "p2p limit: refused delete, node.env still removed" "$ETC/node.env"
+# Without nft the files still go (a PATH without the sbin directories).
+mv "$T/bin/nft" "$T/bin/nft.off"
+SAVED_PATH="$PATH"
+PATH="$T/bin:/usr/local/bin:/usr/bin:/bin"
+hash -r
+if command -v nft >/dev/null 2>&1; then
+    skip "p2p limit without nft" "an nft other than the stub is on PATH ($(command -v nft))"
+else
+    mkfixture; p2p_limit_fixture
+    remove_node_host_files > /dev/null 2>&1
+    gone "p2p limit without nft: unit" "$SD/telcoin-p2p-limit.service"
+    gone "p2p limit without nft: ruleset" "$ETC/p2p-limit.nft"
+    check_lacks "p2p limit without nft: no nft call" "nft " "$(calls)"
+fi
+PATH="$SAVED_PATH"
+mv "$T/bin/nft.off" "$T/bin/nft"; hash -r
+# Another node remains: the limit stays (its P2P ports are still open).
+mkfixture; p2p_limit_fixture
+INSTALLED_UNITS=(telcoin telcoin-validator)
+remove_shared_components > /dev/null 2>&1
+kept "p2p limit while another node remains: unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit while another node remains: table" "yes" "$(exists "$NFT_TABLE_FILE")"
+INSTALLED_UNITS=()
+# The JSON keys removal with another node unit left keeps the limit whole: the
+# ruleset stays (not shredded), so do the boot unit and the table.
+mkfixture; p2p_limit_fixture
+printf '[Service]\n' > "$SD/telcoin-validator.service"
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "p2p limit, another node left: json keys rc 0" 0 "$rc"
+kept "p2p limit, another node left: ruleset" "$ETC/p2p-limit.nft"
+check "p2p limit, another node left: ruleset untouched" "table inet tn_p2p
+delete table inet tn_p2p" "$(cat "$ETC/p2p-limit.nft" 2>/dev/null)"
+check_lacks "p2p limit, another node left: ruleset not shredded" "$ETC/p2p-limit.nft" "$(calls)"
+kept "p2p limit, another node left: boot unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit, another node left: table" "yes" "$(exists "$NFT_TABLE_FILE")"
+gone "p2p limit, another node left: the passphrase still goes" "$ETC/bls-passphrase.cred"
+gone "p2p limit, another node left: .node-meta still goes" "$ETC/.node-meta"
+check_has "p2p limit, another node left: said in the log" "yes" \
+    "$(grep -q 'Keeping /etc/telcoin/p2p-limit.nft: another node unit remains here, and the P2P new-flow limit stays whole for it' "$T/json" && echo yes)"
+rm -f "$SD/telcoin-validator.service"
+# Only the boot unit and the table are left: the leftover path finds and removes them.
+rm -rf "$R"; mkdir -p "$SD" "$R/run/telcoin"
+printf '[Unit]\nDescription=limit\n' > "$SD/telcoin-p2p-limit.service"
+printf 'table inet tn_p2p {\n}\n' > "$NFT_TABLE_FILE"
+: > "$CALLS"
+check_rc "leftovers, only the limit: found" 0 "$(rm_leftovers_present; echo $?)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "leftovers, only the limit: rc 0" "rc=0" "$(cat "$T/out")"
+check_has "leftovers, only the limit: listed" "yes" \
+    "$(grep -qF '  /etc/systemd/system/telcoin-p2p-limit.service (the P2P new-flow limit, and its nftables table)' "$T/out" && echo yes)"
+gone "leftovers, only the limit: boot unit" "$SD/telcoin-p2p-limit.service"
+check "leftovers, only the limit: table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+# The menu removes one node of two: its keys removal keeps the ruleset (not
+# shredded, not removed), so the remaining node's boot unit still finds it; the
+# removal of the last node then takes the unit, the ruleset and the table.
+mkfixture; p2p_limit_fixture
+printf '[Service]\n' > "$SD/telcoin-validator.service"
+INSTALLED_UNITS=(telcoin telcoin-validator)
+remove_node_unit telcoin <<< "DELETE" > "$T/out" 2>&1
+check "p2p limit, menu, one of two: ruleset kept as it was" "table inet tn_p2p
+delete table inet tn_p2p" "$(cat "$ETC/p2p-limit.nft" 2>/dev/null)"
+check_lacks "p2p limit, menu, one of two: ruleset not shredded" "$ETC/p2p-limit.nft" "$(calls)"
+kept "p2p limit, menu, one of two: boot unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit, menu, one of two: table" "yes" "$(exists "$NFT_TABLE_FILE")"
+gone "p2p limit, menu, one of two: the passphrase still goes" "$ETC/bls-passphrase.cred"
+gone "p2p limit, menu, one of two: the removed unit" "$SD/telcoin.service"
+check_has "p2p limit, menu, one of two: said" "yes" \
+    "$(grep -q 'Keeping /etc/telcoin/p2p-limit.nft: another node unit remains here, and the P2P new-flow limit stays whole for it' "$T/out" && echo yes)"
+INSTALLED_UNITS=(telcoin-validator)
+remove_node_unit telcoin-validator <<< "DELETE" > "$T/out" 2>&1
+gone "p2p limit, menu, the last node: ruleset" "$ETC/p2p-limit.nft"
+gone "p2p limit, menu, the last node: boot unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit, menu, the last node: table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+INSTALLED_UNITS=()
+# The JSON full removal takes it too.
+mkfixture; p2p_limit_fixture
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "p2p limit: json keys rc 0" 0 "$rc"
+gone "p2p limit: json unit" "$SD/telcoin-p2p-limit.service"
+check "p2p limit: json table deleted" "no" "$(exists "$NFT_TABLE_FILE")"
+rm -f "$NFT_TABLE_FILE"
+
+# ALERTS
+# --- the private alerts go before the node stops, at every scope -----------------
+# mkalerts -- add to the fixture what setup-alerts.sh installs: both heartbeat
+# units, the runner, the config dir with the targets (holding a push token) and
+# env files, the runner's state dir and the link systemd keeps beside it, the
+# service-state file (and the .tmp of an interrupted write) the unit's root
+# ExecStartPre= leaves in /run/telcoin beside the update lock, and
+# ENABLE_ALERTS=true in .node-meta.
+HB_TOKEN="hbtok0123456789abcdefXYZ"
+# One line: BSD awk refuses a -v value that holds a newline.
+ALERT_PATHS="/etc/systemd/system/telcoin-heartbeat.timer /etc/systemd/system/telcoin-heartbeat.service /usr/local/libexec/telcoin/tn-heartbeat /etc/telcoin/alerts /var/lib/private/telcoin-heartbeat /var/lib/telcoin-heartbeat /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp"
+HB_HINT="Pause or delete this node's monitor: a push monitor alerts on silence."
+mkalerts() {
+    mkdir -p "$SD" "$LX" "$ETC/alerts" "$R/var/lib/private/telcoin-heartbeat" "$R/run/telcoin"
+    printf 'ActiveState=active\nSubState=running\n' > "$R/run/telcoin/heartbeat-service"
+    printf 'ActiveState=active\n' > "$R/run/telcoin/heartbeat-service.tmp"
+    printf '[Timer]\nOnUnitActiveSec=60\n' > "$SD/telcoin-heartbeat.timer"
+    printf '[Service]\nDynamicUser=yes\n' > "$SD/telcoin-heartbeat.service"
+    printf '#!/usr/bin/env bash\nHEARTBEAT_VERSION="2.1.0"\n' > "$LX/tn-heartbeat"
+    printf 'kuma https://kuma.example.org/api/push/%s\n' "$HB_TOKEN" > "$ETC/alerts/targets"
+    printf 'ALERTS_SERVICE=telcoin\nALERTS_INTERVAL=60\n' > "$ETC/alerts/alerts.env"
+    printf 'last_status=up\n' > "$R/var/lib/private/telcoin-heartbeat/state"
+    ln -s private/telcoin-heartbeat "$R/var/lib/telcoin-heartbeat"
+    if [[ -f "$ETC/.node-meta" ]]; then printf 'ENABLE_ALERTS=true\n' >> "$ETC/.node-meta"; fi
+    : > "$CALLS"
+}
+# alerts_gone NAME -- every alerts path is gone.
+alerts_gone() {
+    local p
+    for p in $ALERT_PATHS; do
+        gone "$1: ${p}" "$R$p"
+    done
+}
+# drop_alerts -- the snapshot on stdin without the alerts paths: the tree the
+# shared contract's alerts_disable leaves (everything else as it was).
+drop_alerts() {
+    awk -v r="$R" -v l="$ALERT_PATHS" '
+        BEGIN { n = split(l, a, " ") }
+        { for (i = 1; i <= n; i++) { p = r a[i]; if ($0 == p || index($0, p "/") == 1) next } print }'
+}
+# alerts_before_stop NAME -- in the call log, the timer was disabled before the
+# node unit was stopped.
+alerts_before_stop() {
+    local a s
+    a="$(grep -n -x 'systemctl disable --now telcoin-heartbeat.timer' "$CALLS" | head -n 1 | cut -d: -f1)"
+    s="$(grep -n -x 'systemctl stop telcoin' "$CALLS" | head -n 1 | cut -d: -f1)"
+    check "$1: alerts removed before the node stops" yes \
+        "$([[ -n "$a" && -n "$s" && $a -lt $s ]] && echo yes || echo "no (alerts at ${a:-none}, stop at ${s:-none})")"
+}
+# meta_set logs instead of writing: the fixture tree is not root-owned, so the
+# real one refuses; remove_alerts' best-effort write is checked in the call log.
+meta_set() { printf 'meta_set %s\n' "$*" >> "$CALLS"; }
+
+# remove_alerts alone: the contract's remaining tree, the order of the calls,
+# the targets file shredded, the meta value, one hint and no token printed.
+mkfixture; mkalerts
+before="$(snapshot)"
+remove_alerts > "$T/out" 2>&1; rc=$?
+check_rc "remove_alerts: rc 0" 0 "$rc"
+alerts_gone "remove_alerts"
+check "remove_alerts: the rest of the tree as it was" "$(printf '%s\n' "$before" | drop_alerts)" "$(snapshot)"
+kept "remove_alerts: /var/lib/private stays" "$R/var/lib/private"
+kept "remove_alerts: /run/telcoin stays" "$R/run/telcoin"
+kept "remove_alerts: the update lock stays" "$R/run/telcoin/update.lock"
+check "remove_alerts: systemctl calls in order" "systemctl disable --now telcoin-heartbeat.timer
+systemctl stop telcoin-heartbeat.service
+systemctl clean --what=state telcoin-heartbeat.service
+systemctl daemon-reload
+systemctl reset-failed telcoin-heartbeat.service" "$(grep '^systemctl ' "$CALLS")"
+check_has "remove_alerts: targets shredded" "shred -u -- $ETC/alerts/targets" "$(calls)"
+check_has "remove_alerts: ENABLE_ALERTS=false written" "meta_set ENABLE_ALERTS false $ETC/.node-meta" "$(calls)"
+check "remove_alerts: the hint once" 1 "$(grep -cF "$HB_HINT" "$T/out")"
+check "remove_alerts: says what it removes" yes "$(grep -qF 'Removing private alerts (telcoin-heartbeat)' "$T/out" && echo yes || echo no)"
+check_lacks "remove_alerts: the token is not printed" "$HB_TOKEN" "$(cat "$T/out")"
+
+# The library's alerts_disable, where this tree has it, leaves the same tree.
+after="$(snapshot)"
+if declare -F alerts_disable >/dev/null 2>&1; then
+    mkfixture; mkalerts
+    ( alerts_disable "" no-hint ) > "$T/out" 2>&1
+    check "alerts_disable leaves the tree remove_alerts leaves" "$after" "$(snapshot)"
+else
+    skip "alerts_disable leaves the tree remove_alerts leaves" "lib/alerts.sh is not in this tree"
+fi
+
+# Only the service-state file is left (the units already gone): it counts as
+# alerts, and it goes without the lock dir.
+mkfixture
+printf 'ActiveState=active\n' > "$R/run/telcoin/heartbeat-service"
+: > "$CALLS"
+check_rc "only the service-state file: alerts present" 0 "$(rm_alerts_present; echo $?)"
+remove_alerts > "$T/out" 2>&1
+gone "only the service-state file: removed" "$R/run/telcoin/heartbeat-service"
+kept "only the service-state file: /run/telcoin stays" "$R/run/telcoin"
+kept "only the service-state file: the update lock stays" "$R/run/telcoin/update.lock"
+
+# Nothing of it here: nothing said, nothing called.
+mkfixture
+remove_alerts > "$T/out" 2>&1; rc=$?
+check_rc "no alerts: rc 0" 0 "$rc"
+check "no alerts: prints nothing" "" "$(cat "$T/out")"
+check_lacks "no alerts: no heartbeat call" "heartbeat" "$(calls)"
+check_lacks "no alerts: no meta write" "meta_set" "$(calls)"
+
+# A symlinked config dir: the link goes, what it points at stays.
+mkfixture
+mkdir -p "$OUT/alerts"
+printf 'kuma https://kuma.example.org/api/push/%s\n' "$HB_TOKEN" > "$OUT/alerts/targets"
+ln -s "$OUT/alerts" "$ETC/alerts"
+: > "$CALLS"
+remove_alerts > /dev/null 2>&1
+gone "symlinked alerts dir: the link" "$ETC/alerts"
+check "symlinked alerts dir: the target file intact" "kuma https://kuma.example.org/api/push/${HB_TOKEN}" "$(cat "$OUT/alerts/targets" 2>/dev/null)"
+check_lacks "symlinked alerts dir: nothing shredded through it" "shred" "$(calls)"
+
+# --json, every scope: the step comes before the stop, the hint is a log event
+# (RM_JSON is what run_json_mode sets before it calls json_remove).
+for scope in service data keys; do
+    mkfixture; mkalerts
+    ( set -e; RM_JSON=true; json_remove validator "$scope" ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+    check_rc "alerts json ${scope}: rc 0" 0 "$rc"
+    alerts_gone "alerts json ${scope}"
+    alerts_before_stop "alerts json ${scope}"
+    check_has "alerts json ${scope}: step event" '{"event":"step","msg":"Removing private alerts (telcoin-heartbeat)"}' "$(cat "$T/json")"
+    check_has "alerts json ${scope}: hint event" "{\"event\":\"log\",\"msg\":\"${HB_HINT}\"}" "$(cat "$T/json")"
+    n_a="$(grep -n 'Removing private alerts' "$T/json" | head -n 1 | cut -d: -f1)"
+    n_s="$(grep -n 'Stopping and disabling telcoin' "$T/json" | head -n 1 | cut -d: -f1)"
+    check "alerts json ${scope}: the alerts step before the stop step" yes \
+        "$([[ -n "$n_a" && -n "$n_s" && $n_a -lt $n_s ]] && echo yes || echo no)"
+    check_has "alerts json ${scope}: targets shredded" "shred -u -- $ETC/alerts/targets" "$(calls)"
+    check_lacks "alerts json ${scope}: the token is not in the JSON" "$HB_TOKEN" "$(cat "$T/json")"
+    check_lacks "alerts json ${scope}: the token is not printed" "$HB_TOKEN" "$(cat "$T/out")"
+done
+kept "alerts json keys: /var/lib/private stays" "$R/var/lib/private"
+
+# The menu's removal of a node.
+mkfixture; mkalerts
+remove_node_unit telcoin <<< "" > "$T/out" 2>&1
+alerts_gone "alerts menu"
+alerts_before_stop "alerts menu"
+check "alerts menu: the hint once" 1 "$(grep -cF "$HB_HINT" "$T/out")"
+check_has "alerts menu: ENABLE_ALERTS=false written" "meta_set ENABLE_ALERTS false $ETC/.node-meta" "$(calls)"
+check_lacks "alerts menu: the token is not printed" "$HB_TOKEN" "$(cat "$T/out")"
+INSTALLED_UNITS=()
+
+# The leftover path: listed, removed before the node units are stopped.
+mkinterrupted; mkalerts
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "alerts leftovers: rc 0" "rc=0" "$(cat "$T/out")"
+check_has "alerts leftovers: the timer listed" "yes" \
+    "$(grep -qF '  /etc/systemd/system/telcoin-heartbeat.timer (private alerts)' "$T/out" && echo yes)"
+alerts_gone "alerts leftovers"
+alerts_before_stop "alerts leftovers"
+check "alerts leftovers: the hint once" 1 "$(grep -cF "$HB_HINT" "$T/out")"
+
+# Only the timer is left: it is a leftover, and the leftover path removes it.
+rm -rf "$R"; mkdir -p "$SD" "$R/run/telcoin"
+printf '[Timer]\n' > "$SD/telcoin-heartbeat.timer"
+: > "$CALLS"
+check_rc "only the timer left: a leftover" 0 "$(rm_leftovers_present; echo $?)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "only the timer left: rc 0" "rc=0" "$(cat "$T/out")"
+gone "only the timer left: the timer" "$SD/telcoin-heartbeat.timer"
+check_has "only the timer left: disabled" "systemctl disable --now telcoin-heartbeat.timer" "$(calls)"
+rm -rf "$R"; mkdir -p "$R"
+check_rc "nothing left: no leftover" 1 "$(rm_leftovers_present; echo $?)"
+
+# The chain-data-only wipe keeps the node, so it keeps the alerts too.
+mkfixture; mkalerts
+before="$(snapshot)"
+( INSTALLED_UNITS=(telcoin); CONFIRM_ANSWER=yes; wipe_chain_data_only ) < /dev/null > "$T/out" 2>&1
+check_has "chain-data wipe: the node restarted" "systemctl start telcoin" "$(calls)"
+check_lacks "chain-data wipe: no heartbeat call" "heartbeat" "$(calls)"
+for p in $ALERT_PATHS; do
+    kept "chain-data wipe: ${p}" "$R$p"
+done
+gone "chain-data wipe: the chain db" "$DATA/db"
+
+# A refusal before the lock (a key set twice) leaves the alerts as they are.
+mkfixture; mkalerts
+printf 'HOST_SERVICE_USER=a\nHOST_SERVICE_USER=b\n' >> "$ETC/.node-meta"
+before="$(snapshot)"
+json_remove validator keys 3> "$T/json" > /dev/null 2>&1; rc=$?
+check_rc "alerts, dup key: json refused" 1 "$rc"
+check "alerts, dup key: nothing removed" "$before" "$(snapshot)"
+check_lacks "alerts, dup key: no heartbeat call" "heartbeat" "$(calls)"
+
+# Without lib/alerts.sh: remove-node.sh calls nothing of it (or of the runner),
+# so a removal with every alerts_* and hb_* function gone still takes the alerts.
+check "remove-node.sh calls no alerts_* or hb_* function" "" \
+    "$(grep -v '^[[:space:]]*#' "$TN_TEST_REPO/remove-node.sh" | grep -oE '(^|[^A-Za-z0-9_])(alerts|hb)_[A-Za-z0-9_]+' | sort -u)"
+mkfixture; mkalerts
+( for f in $(declare -F | awk '{print $3}' | grep -E '^(alerts|hb)_'); do unset -f "$f"; done
+  set -e; RM_JSON=true; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "no alerts library: json keys rc 0" 0 "$rc"
+alerts_gone "no alerts library"
+check_has "no alerts library: hint event" "{\"event\":\"log\",\"msg\":\"${HB_HINT}\"}" "$(cat "$T/json")"
+unset -f meta_set
+
+# NET-2 gap: the custom-container scan must also see a node running a ghcr.io
+# image, not only the testnet repositories: the old single package (by digest or
+# by tag), the testnet package, the mainnet package and the dev package devnet
+# nodes run from.
+custom_container_lines_drv() {
+    docker() {
+        printf 'tn-old\tus-docker.pkg.dev/telcoin-network/tn-public/adiri:v0.15.0-adiri\tExited (0)\n'
+        printf 'tn-main\tghcr.io/telcoin-association/telcoin-network@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 3 days\n'
+        printf 'tn-tag\tghcr.io/telcoin-association/telcoin-network:v1.0.0\tUp 1 hour\n'
+        printf 'tn-testnet-pkg\tghcr.io/telcoin-association/tn-testnet:v0.17.0-adiri\tUp 1 hour\n'
+        printf 'tn-testnet-dig\tghcr.io/telcoin-association/tn-testnet@sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 5 hours\n'
+        printf 'tn-mainnet-pkg\tghcr.io/telcoin-association/tn-mainnet@sha256:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 2 hours\n'
+        printf 'tn-mainnet-tag\tghcr.io/telcoin-association/tn-mainnet:v1.0.0\tExited (0)\n'
+        printf 'tn-devnet\tghcr.io/telcoin-association/tn-dev@sha256:3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tUp 4 hours\n'
+        printf 'other-ghcr\tghcr.io/someone-else/telcoin-network:v1.0.0\tUp 1 hour\n'
+        printf 'web\tnginx:1.27\tUp 2 days\n'
+    }
+    timeout() { shift 3; "$@"; }
+    custom_container_lines
+}
+CTR="$(custom_container_lines_drv)"
+listed() { printf '%s\n' "$CTR" | awk -F '\t' -v n="$1" '$1 == n { f = 1 } END { print f ? "yes" : "no" }'; }
+check "custom scan: the legacy adiri container is listed" yes "$(listed tn-old)"
+check "custom scan: an old ghcr package image by digest is listed" yes "$(listed tn-main)"
+check "custom scan: an old ghcr package image by mainnet tag is listed" yes "$(listed tn-tag)"
+check "custom scan: a testnet package image by tag is listed" yes "$(listed tn-testnet-pkg)"
+check "custom scan: a testnet package image by digest is listed" yes "$(listed tn-testnet-dig)"
+check "custom scan: a mainnet package image by digest is listed" yes "$(listed tn-mainnet-pkg)"
+check "custom scan: a mainnet package image by tag is listed" yes "$(listed tn-mainnet-tag)"
+check "custom scan: a dev package image (a devnet node) is listed" yes "$(listed tn-devnet)"
+check "custom scan: another owner's ghcr.io image is not listed" no "$(listed other-ghcr)"
+check "custom scan: an unrelated container is not listed" no "$(listed web)"
+unset -f listed
 
 finish

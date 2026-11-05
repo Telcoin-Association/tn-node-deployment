@@ -1,0 +1,19 @@
+[Unit]
+Description=Telcoin node log shipper (Grafana Alloy sidecar -> central Loki)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f telcoin-alloy
+ExecStart=/usr/bin/docker run --rm --name telcoin-alloy --network=host --memory=512m --cpus=0.50 --pids-limit=256 --ulimit core=0 --cap-drop=ALL --security-opt=no-new-privileges --group-add 999 --env-file /etc/telcoin/alloy/telcoin-alloy.env -v /etc/telcoin/alloy/config.alloy:/etc/alloy/config.alloy:ro --mount type=bind,source=/etc/telcoin/alloy/ingest-token,target=/run/credentials/telcoin-alloy/ingest-token,readonly -v /var/lib/telcoin/logs:/var/log/telcoin:ro -v /var/lib/telcoin-alloy:/var/lib/telcoin-alloy grafana/alloy:v1.5.1 run --server.http.listen-addr=127.0.0.1:12345 --storage.path=/var/lib/telcoin-alloy /etc/alloy/config.alloy
+ExecStop=/usr/bin/docker stop telcoin-alloy
+Restart=on-failure
+RestartSec=10
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+
+== tools/tests/passphrase_print_test.sh (bash 5.3.9(1)-release)
+ok    rule: every bad line flagged
+ok    rule: no good line flagged
+ok    tree: scripts found
+ok    tree: no script prints a passphrase variable
+
+4 checks, 0 failures, 0 skipped
+== tools/tests/passphrase_print_test.sh: exit 0
+
+== tools/tests/root_write_pipe_test.sh (bash 5.3.9(1)-release)
+ok    fixture: pipes flagged, here-strings and || not
+ok    no pipe into a root writer in the shipped scripts
+
+2 checks, 0 failures, 0 skipped
+== tools/tests/root_write_pipe_test.sh: exit 0
+
+tools/tests/passphrase_print_test.sh exit 0
+tools/tests/root_write_pipe_test.sh  exit 0
+2 test file(s), 0 failed (bash 5.3.9(1)-release)
+rc=0

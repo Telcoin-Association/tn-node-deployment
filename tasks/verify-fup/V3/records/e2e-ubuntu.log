@@ -1,0 +1,124 @@
+ok    seed: token file 640 root:telcoin-alloy
+ok    E1 cli stdin: rc 0
+ok    E1: token file holds the new token
+ok    E1: token file 640 root:telcoin-alloy (real owner, group, mode)
+ok    E1: env file 600 root:root
+ok    E1: env file without the token
+ok    E1: unit LoadCredential
+ok    E1: token never in any argv (all tools wrapped), systemctl or docker
+ok    E1: token never printed
+ok    E1: one Alloy restart, nothing else restarted
+ok    E1: no temp file left in /etc/telcoin/alloy
+ok    E1: said rotated
+ok    E2 non-tty, no token: rc 1
+ok    E2: said
+ok    E2: nothing changed
+ok    E2: no restart
+ok    E3 tty prompt: rc 0
+ok    E3: prompt shown
+ok    E3: typed token not echoed
+ok    E3: token file holds the typed token
+ok    E3 menu: entry 8 listed
+ok    E3 menu: token rotated
+ok    E3 menu: token not echoed
+ok    E4 TN_OBS_TOKEN: rc 0
+ok    E4: rotated
+ok    E5 --token: rc 0
+ok    E5: warned about the command line
+ok    E6 json: rc 0
+ok    E6: every stdout line is JSON
+ok    E6: last line done ok:true with token:rotated
+ok    E6: token not in JSON or stderr
+ok    E7 json rollback: rc 1
+ok    E7: done ok:false last
+ok    E7: error event names the rollback
+ok    E7: files, owners and modes as before
+ok    E7: restarted twice (new, then previous)
+ok    E8 --rotate-token --enable-logs: rc 1
+ok    E8 --enable-logs: nothing changed
+ok    E8 json --enable-logs: done ok:false
+ok    E8 --rotate-token --disable-metrics: rc 1
+ok    E8 --disable-metrics: nothing changed
+ok    E8 json --disable-metrics: done ok:false
+ok    E8 --rotate-token --enable-health: rc 1
+ok    E8 --enable-health: nothing changed
+ok    E8 json --enable-health: done ok:false
+ok    E9 json no token: rc 1
+ok    E9: done ok:false names the token sources
+ok    E9: nothing changed
+ok    E10 legacy rotate: rc 0
+ok    E10: env without OBS_INGEST_TOKEN
+ok    E10: migration said once
+ok    E11 docker rotate: rc 0
+ok    E11: --group-add the real gid
+ok    E11: env CREDENTIALS_DIRECTORY
+ok    E11: token file 640 root:telcoin-alloy
+ok    E12 cli: SIGTERM ends the run (rc 143 or the trap's rc)
+ok    E12 cli: what is left: the new token file, no rollback
+ok    E12 cli: no temp file left
+ok    E12 json: SIGTERM ends the run (rc 143 or the trap's rc)
+ok    E12 json: what is left: the new token file, no rollback
+ok    E12 json: no temp file left
+ok    E12 json: a done event closes the run
+ok    E13 cli: token file still the old one
+FAIL  E13 cli: no temp copy of the new token left in /etc/telcoin/alloy
+      expected (<) vs actual (>):
+      1c1
+      < 
+      ---
+      > .tn.inqV2G
+ok    E13 json: token file still the old one
+ok    E13 json: no temp copy of the new token left in /etc/telcoin/alloy
+--- E12 cli: rc=143
+token file: NEW (640 root:telcoin-alloy)
+temp files: 
+restarts: 1
+output tail:
+
+>>> Detecting operating system...
+  [OK]  OS: ubuntu 24.04 (package manager: apt)
+
+>>> Rotating the ingest token
+--- E12 json: rc=143
+token file: NEW (640 root:telcoin-alloy)
+temp files: 
+restarts: 1
+output tail:
+>>> Detecting operating system...
+  [OK]  OS: ubuntu 24.04 (package manager: apt)
+
+>>> Rotating the ingest token
+{"event":"done","ok":false,"msg":"observability setup exited early (rc=0) -- see server logs / journalctl"}
+--- E13 cli: rc=143
+token file: old-e2e-token-0123456789abcdef
+temp files: .tn.inqV2G
+  .tn.inqV2G 600 root:telcoin-alloy holds-new-token=yes
+--- E13 json: rc=143
+token file: old-e2e-token-0123456789abcdef
+temp files: 
+ok    E14 ro dir rotate: rc 1
+ok    E14 ro rotate: old token kept
+ok    E14 ro rotate: no restart
+ok    E14 ro rotate: said
+FAIL  E14 ro rotate: no claim that an unchanged file could not be put back
+      expected (<) vs actual (>):
+      1c1
+      < 0
+      ---
+      > 3
+ok    E14 ro disable: the token file is still there
+FAIL  E14 ro disable: does not claim it shredded the token
+      expected (<) vs actual (>):
+      1c1
+      < 0
+      ---
+      > 1
+ok    E15 remove: rc 0
+ok    E15: token file gone
+ok    E15: Alloy dir gone
+ok    E15: shred ran on the token file
+ok    E15: shred ran on the legacy env file
+ok    E15 remove with no token file: rc 0
+ok    E15 no token file: no error printed
+
+80 checks, 3 failures, 0 skipped

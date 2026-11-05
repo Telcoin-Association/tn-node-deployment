@@ -1,0 +1,3 @@
+FAIL  H1 the gate's JSON error names the library as older
+FAIL  H1 interactive: exits 1
+FAIL  H1 interactive: [ERROR] line on stderr

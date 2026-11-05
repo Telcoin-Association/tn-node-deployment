@@ -1,0 +1,7 @@
+M02 caught       2   FAIL  select_network option 2 never takes mainnet (LIB-A 2 reverted) (lib/common.sh)
+M07 caught       26  FAIL  binary_prepare floor call removed (4 sites) (update-node.sh)
+M08 caught       19  FAIL  update-node Docker floor calls removed (2 sites) (update-node.sh)
+M09 caught       10  FAIL  set_docker_image floor call removed (edit-config.sh)
+M12 caught       4   FAIL  docker_floor_check ignores the recorded release of a digest (update-node.sh)
+M14 caught       3   FAIL  digest arm takes any recorded tag (lib/common.sh)
+6/6 caught

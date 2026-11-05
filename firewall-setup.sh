@@ -12,7 +12,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly SSH_CONFIG="${TN_ROOT_PREFIX:-}/etc/ssh/sshd_config"
 
 # Ports required for a fully working Telcoin node deployment.
@@ -36,6 +36,18 @@ readonly FW_UFW_DEFAULT="${TN_ROOT_PREFIX:-}/etc/default/ufw"
 readonly FW_SSHD_DROPIN="${TN_ROOT_PREFIX:-}/etc/ssh/sshd_config.d/00-telcoin-hardening.conf"
 # Google Cloud IAP TCP forwarding range: kept in the SSH source list on a GCE VM.
 readonly FW_IAP_SSH_CIDR="35.235.240.0/20"
+# The per-source limit on new P2P flows (nftables table inet tn_p2p, see
+# fw_p2p_limit_text): packets of new, not yet answered UDP flows per minute from
+# one IPv4 address or IPv6 /64, and the burst of them one source may send before
+# that rate applies. TN_P2P_NEW_FLOW_RATE and TN_P2P_NEW_FLOW_BURST override them
+# for a run.
+readonly FW_P2P_RATE_DEFAULT="20"
+readonly FW_P2P_BURST_DEFAULT="40"
+# What brings the limit back at boot (fw_p2p_limit_persist): the nft program, and
+# the oneshot unit that loads it after ufw.
+readonly FW_P2P_LIMIT_FILE="${TN_ROOT_PREFIX:-}/etc/telcoin/p2p-limit.nft"
+readonly FW_P2P_LIMIT_SVC="telcoin-p2p-limit.service"
+readonly FW_P2P_LIMIT_UNIT="${TN_ROOT_PREFIX:-}/etc/systemd/system/${FW_P2P_LIMIT_SVC}"
 
 # Source lists for this run: --ssh-from / --p2p-from (comma lists or a file), and
 # --ssh-anywhere / --p2p-anywhere (drop a stored list). Empty = not given.
@@ -49,6 +61,18 @@ FW_SSH_PORTS=()
 FW_SSH_SRCS=()
 FW_P2P_SRCS=()
 FW_P2P_LOADED=false
+# Filled by fw_preflight (fw_p2p_limit_load): the new-flow rate and burst of this run.
+FW_P2P_RATE=""
+FW_P2P_BURST=""
+# Set by fw_p2p_limit_sync while it changes the table and its boot copy: "write"
+# (with FW_LIMIT_PROG, the program being loaded) or "delete". fw_on_exit finishes
+# or reports a change the run was stopped in (fw_p2p_limit_on_exit).
+FW_LIMIT_INFLIGHT=""
+FW_LIMIT_PROG=""
+# Set by fw_p2p_limit_sync: true when it wrote or deleted the table or its boot
+# copy, false when nothing needed changing (so a refresh of what covers those
+# files can be skipped).
+FW_LIMIT_CHANGED=false
 # Filled by fw_preflight: sources of the stored lists that this run's lists
 # replace (fw_stale_sources); their per-source rules are deleted on --enable.
 FW_SSH_STALE=()
@@ -518,6 +542,407 @@ fw_load_p2p_srcs() {
     FW_P2P_LOADED=true
 }
 
+# fw_count_ok VALUE -- 0 when VALUE is a whole number 1-100000 without leading
+# zeros. The kernel refuses a limit whose burst is too large for its rate (one
+# minute in nanoseconds over the rate, times the burst, must fit 64 bits); this
+# range always fits.
+fw_count_ok() {
+    [[ "${1:-}" =~ ^[1-9][0-9]{0,5}$ ]] && (( ${1} <= 100000 ))
+}
+
+# fw_p2p_limit_load -- set FW_P2P_RATE and FW_P2P_BURST from TN_P2P_NEW_FLOW_RATE
+# and TN_P2P_NEW_FLOW_BURST, or from the defaults (20 and 40) when they are unset
+# or empty. rc 1 with an error (fw_error) when a value is not a whole number from
+# 1 to 100000.
+fw_p2p_limit_load() {
+    local rate burst
+    rate="${TN_P2P_NEW_FLOW_RATE:-$FW_P2P_RATE_DEFAULT}"
+    burst="${TN_P2P_NEW_FLOW_BURST:-$FW_P2P_BURST_DEFAULT}"
+    if ! fw_count_ok "$rate"; then
+        fw_error "TN_P2P_NEW_FLOW_RATE is '${rate}', not a whole number from 1 to 100000 (packets of new, not yet answered P2P flows per minute from one IPv4 address or IPv6 /64); nothing was changed."
+        return 1
+    fi
+    if ! fw_count_ok "$burst"; then
+        fw_error "TN_P2P_NEW_FLOW_BURST is '${burst}', not a whole number from 1 to 100000 (packets of new, not yet answered P2P flows one source may send before the per-minute rate applies); nothing was changed."
+        return 1
+    fi
+    FW_P2P_RATE="$rate"
+    FW_P2P_BURST="$burst"
+    return 0
+}
+
+# fw_p2p_limit_text RATE BURST -- print the nft program that replaces table inet
+# tn_p2p in one transaction (nft -f applies a file as one batch: all of it or none
+# of it). Its first line adds the table, a no-op when it exists, so the delete
+# after it cannot fail; then the table comes back whole: one dynamic set per
+# address family, keyed by the source address for IPv4 and by the source's /64
+# for IPv6 (one host commonly holds a whole /64, so each of its addresses is the
+# same entry), whose entries expire once a source has opened no new flow for the
+# time an empty burst takes to refill (at least a minute, at most a day), and one
+# input chain at priority -10, ahead of ufw's chains at 0. Its two rules match
+# only packets of new UDP flows (ct state new) to the ports of fw_p2p_ports, and
+# drop those of a source above RATE per minute once its burst of BURST is spent. Packets of established flows never
+# match, and the chain accepts nothing itself: every packet it does not drop goes
+# on to ufw's rules, which still decide what is let in.
+fw_p2p_limit_text() {
+    local rate="$1" burst="$2" port label dports="" t
+    while read -r port label; do
+        [[ -n "$port" ]] || continue
+        dports="${dports:+${dports}, }${port}"
+    done < <(fw_p2p_ports)
+    t=$(( (burst * 60 + rate - 1) / rate ))
+    if (( t < 60 )); then
+        t=60
+    elif (( t > 86400 )); then
+        t=86400
+    fi
+    cat <<NFT
+# firewall-setup.sh: the per-source limit on new P2P flows, replaced whole on each run.
+table inet tn_p2p
+delete table inet tn_p2p
+table inet tn_p2p {
+    set tn_p2p_src4 {
+        type ipv4_addr
+        size 65535
+        flags dynamic,timeout
+        timeout ${t}s
+    }
+    set tn_p2p_src6 {
+        type ipv6_addr
+        size 65535
+        flags dynamic,timeout
+        timeout ${t}s
+    }
+    chain input {
+        type filter hook input priority -10; policy accept;
+        ct state new udp dport { ${dports} } update @tn_p2p_src4 { ip saddr limit rate over ${rate}/minute burst ${burst} packets } drop
+        ct state new udp dport { ${dports} } update @tn_p2p_src6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over ${rate}/minute burst ${burst} packets } drop
+    }
+}
+NFT
+}
+
+# fw_p2p_limit_unit_text NFT -- the unit that loads FW_P2P_LIMIT_FILE at boot with
+# the nft binary NFT (an absolute path): a oneshot after ufw that stays active, so
+# stopping it deletes the table again (a missing table is not an error there).
+fw_p2p_limit_unit_text() {
+    cat <<UNIT
+# Written by firewall-setup.sh: loads the per-source limit on new P2P flows
+# (nftables table inet tn_p2p) at boot. firewall-setup.sh rewrites
+# /etc/telcoin/p2p-limit.nft with the table and removes both files when the
+# limit is not wanted.
+[Unit]
+Description=Telcoin Network per-source limit on new P2P flows (nftables table inet tn_p2p)
+After=ufw.service network-pre.target
+ConditionPathExists=/etc/telcoin/p2p-limit.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${1} -f /etc/telcoin/p2p-limit.nft
+ExecStop=-${1} delete table inet tn_p2p
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
+# fw_p2p_limit_persist PROGRAM -- make the table come back at boot: PROGRAM (the
+# text just loaded) to FW_P2P_LIMIT_FILE (root 0640) and the unit to
+# FW_P2P_LIMIT_UNIT (root 0644), both through tn_write_root_file, with the nft
+# that `command -v` finds now; then daemon-reload and enable the unit (not start:
+# the table is loaded already). rc 1 with a warning when a step fails; the table
+# loaded now is not affected.
+fw_p2p_limit_persist() {
+    local prog="$1" nft_bin why=""
+    nft_bin="$(command -v nft 2>/dev/null)" || nft_bin=""
+    if [[ "$nft_bin" != /* ]]; then
+        why="nft is not at an absolute path (${nft_bin:-not found})"
+    elif ! tn_write_root_file "$FW_P2P_LIMIT_FILE" 0640 <<< "$prog"; then
+        why="${FW_P2P_LIMIT_FILE#"${TN_ROOT_PREFIX:-}"} could not be written"
+    elif ! tn_write_root_file "$FW_P2P_LIMIT_UNIT" 0644 <<< "$(fw_p2p_limit_unit_text "$nft_bin")"; then
+        why="${FW_P2P_LIMIT_UNIT#"${TN_ROOT_PREFIX:-}"} could not be written"
+    elif ! systemctl daemon-reload >/dev/null 2>&1 || ! systemctl enable "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1; then
+        why="systemctl could not enable ${FW_P2P_LIMIT_SVC}"
+    fi
+    if [[ -n "$why" ]]; then
+        print_warn "The P2P new-flow limit is loaded now but will not come back after a reboot: ${why}. Fix that and run --enable again."
+        return 1
+    fi
+    print_info "${FW_P2P_LIMIT_SVC} loads it again at boot (from ${FW_P2P_LIMIT_FILE#"${TN_ROOT_PREFIX:-}"})."
+    return 0
+}
+
+# fw_p2p_limit_unpersist -- the limit is not wanted: disable and stop
+# FW_P2P_LIMIT_SVC (stopping it deletes the table) and remove the unit and
+# FW_P2P_LIMIT_FILE. Nothing to do when neither file is there. Never fails.
+fw_p2p_limit_unpersist() {
+    local f
+    if [[ -e "$FW_P2P_LIMIT_UNIT" || -L "$FW_P2P_LIMIT_UNIT" ]]; then
+        FW_LIMIT_CHANGED=true
+        systemctl disable --now "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1 || true
+        rm -f -- "$FW_P2P_LIMIT_UNIT"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    f="$FW_P2P_LIMIT_FILE"
+    if [[ -e "$f" || -L "$f" ]]; then
+        FW_LIMIT_CHANGED=true
+        rm -f -- "$f"
+    fi
+    return 0
+}
+
+# fw_p2p_limit_current PROGRAM -- rc 0 when nothing needs writing for PROGRAM: the
+# loaded table has its rate, burst and ports (fw_p2p_limit_live), FW_P2P_LIMIT_FILE
+# holds PROGRAM exactly, the unit file is what fw_p2p_limit_unit_text gives for
+# the nft found now, and systemd reports the unit enabled. rc 1 otherwise.
+fw_p2p_limit_current() {
+    local prog="$1" want nft_bin
+    want="$(fw_p2p_limit_params <<< "$prog")" || want=""
+    [[ -n "$want" ]] || return 1
+    [[ "$(fw_p2p_limit_live)" == "on ${want}" ]] || return 1
+    [[ -f "$FW_P2P_LIMIT_FILE" && "$(cat -- "$FW_P2P_LIMIT_FILE" 2>/dev/null)" == "$prog" ]] || return 1
+    nft_bin="$(command -v nft 2>/dev/null)" || return 1
+    [[ -f "$FW_P2P_LIMIT_UNIT" && "$(cat -- "$FW_P2P_LIMIT_UNIT" 2>/dev/null)" == "$(fw_p2p_limit_unit_text "$nft_bin")" ]] || return 1
+    systemctl is-enabled "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1
+}
+
+# fw_p2p_limit_sync NODES [always] -- bring table inet tn_p2p in line with this run, once the
+# ufw rules are complete: written (fw_p2p_limit_text, one `nft -f -` transaction)
+# and kept for boot (fw_p2p_limit_persist) when a node is installed and no P2P
+# source list is set, else deleted when it is there and its boot unit and file
+# removed (fw_p2p_limit_unpersist; a source list replaces the limit, and without a
+# node there are no P2P ports). Without nft it warns when the limit is wanted and
+# removes the boot unit, which could not run. A write or delete that nft refuses
+# is a warning, and the table and its boot files stay as they were. When the
+# table and its boot copy are already what this run would write
+# (fw_p2p_limit_current), nothing is rewritten and it says so, unless the second
+# argument is "always" (--reset). FW_LIMIT_CHANGED says whether anything changed.
+# Always rc 0: the ufw rules are in place whatever happens here.
+fw_p2p_limit_sync() {
+    local nodes="$1" mode="${2:-}" prog err first rc
+    FW_LIMIT_CHANGED=false
+    if [[ "$nodes" != "none" && ${#FW_P2P_SRCS[@]} -eq 0 ]]; then
+        if ! command -v nft >/dev/null 2>&1; then
+            print_warn "nftables (nft) is not installed, so the P2P new-flow limit is not applied; P2P stays open to every source"
+            FW_LIMIT_INFLIGHT="delete"
+            fw_p2p_limit_unpersist
+            FW_LIMIT_INFLIGHT=""
+            return 0
+        fi
+        prog="$(fw_p2p_limit_text "$FW_P2P_RATE" "$FW_P2P_BURST")"
+        # Everything already as wanted: leave the table alone (rewriting it would
+        # empty its sets, so every source's count and spent burst would start
+        # over) and the boot copy too. MODE always (--reset) rewrites anyway.
+        if [[ "$mode" != "always" ]] && fw_p2p_limit_current "$prog"; then
+            print_info "P2P new-flow limit unchanged: UDP $(fw_p2p_port_text) already accept at most ${FW_P2P_RATE} packets of new, not yet answered flows per minute from one IPv4 address or IPv6 /64 after a burst of ${FW_P2P_BURST}, and its boot copy is current."
+            return 0
+        fi
+        # From here until the boot copy is written, a stop is finished or reported
+        # by fw_on_exit, so the table and its boot copy never silently disagree.
+        FW_LIMIT_PROG="$prog"
+        FW_LIMIT_INFLIGHT="write"
+        rc=0
+        err="$(nft -f - 2>&1 <<< "$prog")" || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            FW_LIMIT_INFLIGHT=""
+            first=""
+            IFS= read -r first <<< "$err" || true
+            print_warn "nft did not load the P2P new-flow limit (exit ${rc}: ${first}); table inet tn_p2p stays as it was. The ufw rules are applied."
+            return 0
+        fi
+        FW_LIMIT_CHANGED=true
+        print_info "P2P new-flow limit: UDP $(fw_p2p_port_text) accept at most ${FW_P2P_RATE} packets of new, not yet answered flows per minute from one IPv4 address or IPv6 /64 after a burst of ${FW_P2P_BURST} (nftables table inet tn_p2p)."
+        fw_p2p_limit_persist "$prog" || true
+        FW_LIMIT_INFLIGHT=""
+        FW_LIMIT_PROG=""
+        return 0
+    fi
+    FW_LIMIT_INFLIGHT="delete"
+    fw_p2p_limit_drop
+    FW_LIMIT_INFLIGHT=""
+    return 0
+}
+
+# fw_p2p_limit_drop -- the limit is not wanted: its boot copy goes
+# (fw_p2p_limit_unpersist), then the table when nft lists it. A delete nft refuses
+# is a warning. Always rc 0; running it again changes nothing more.
+fw_p2p_limit_drop() {
+    local err first rc tables
+    fw_p2p_limit_unpersist
+    command -v nft >/dev/null 2>&1 || return 0
+    tables="$(nft list tables 2>/dev/null)" || return 0
+    grep -qx 'table inet tn_p2p' <<< "$tables" || return 0
+    rc=0
+    FW_LIMIT_CHANGED=true
+    err="$(printf 'table inet tn_p2p\ndelete table inet tn_p2p\n' | nft -f - 2>&1)" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        first=""
+        IFS= read -r first <<< "$err" || true
+        print_warn "The P2P new-flow limit (nftables table inet tn_p2p) could not be removed (exit ${rc}: ${first}); remove it with: sudo nft delete table inet tn_p2p"
+    fi
+    return 0
+}
+
+# fw_p2p_limit_on_exit RC -- the run is ending (exit RC) while fw_p2p_limit_sync
+# was changing the table and its boot copy. A delete is finished (its boot copy
+# may be gone already). After a write, the boot copy is written when the table
+# nft lists now is the one this run loaded (same rate, burst and ports), and both
+# are left as they were when it is not (nft did not get to load it). Reported
+# with fw_error either way.
+fw_p2p_limit_on_exit() {
+    local rc="$1" what="$FW_LIMIT_INFLIGHT" live want
+    FW_LIMIT_INFLIGHT=""
+    if [[ "$what" == "delete" ]]; then
+        fw_p2p_limit_drop
+        fw_error "Stopped (exit ${rc}) while the P2P new-flow limit was being removed; the removal was finished."
+        return 0
+    fi
+    live="$(nft list table inet tn_p2p 2>/dev/null | fw_p2p_limit_params)" || live=""
+    want="$(fw_p2p_limit_params <<< "$FW_LIMIT_PROG")" || want=""
+    if [[ -n "$want" && "$live" == "$want" ]]; then
+        if fw_p2p_limit_persist "$FW_LIMIT_PROG" >/dev/null 2>&1; then
+            fw_error "Stopped (exit ${rc}) after the P2P new-flow limit was loaded; its boot copy was written too."
+        else
+            fw_error "Stopped (exit ${rc}) after the P2P new-flow limit was loaded, and its boot copy could not be written, so a reboot would not load it; run --enable again."
+        fi
+    else
+        fw_error "Stopped (exit ${rc}) before the P2P new-flow limit was loaded; the previous limit and its boot copy stay as they were."
+    fi
+    FW_LIMIT_PROG=""
+    return 0
+}
+
+# fw_p2p_limit_params -- read an nft program or listing of table inet tn_p2p on
+# stdin and print "RATE BURST PORTS" of its tn_p2p_src4 rule, PORTS the P2P ports
+# in ascending order joined with commas (nft lists one port without braces and
+# sorts a set). Nothing when there is no such rule.
+fw_p2p_limit_params() {
+    awk 'match($0, /udp dport (\{ [0-9, ]+ \}|[0-9]+) update @tn_p2p_src4 \{ ip saddr limit rate over [0-9]+\/minute burst [0-9]+ packets/) {
+             s = substr($0, RSTART, RLENGTH)
+             p = s; sub(/^udp dport /, "", p); sub(/ update .*/, "", p); gsub(/[{} ]/, "", p)
+             n = split(p, a, ",")
+             for (i = 2; i <= n; i++) {
+                 v = a[i]; j = i - 1
+                 while (j >= 1 && a[j] + 0 > v + 0) { a[j + 1] = a[j]; j-- }
+                 a[j + 1] = v
+             }
+             ports = a[1]
+             for (i = 2; i <= n; i++) ports = ports "," a[i]
+             r = s; sub(/.*limit rate over /, "", r); split(r, b, /[\/ ]/)
+             print b[1], b[4], ports
+             exit
+         }'
+}
+
+# fw_p2p_limit_boot LIVE -- whether the limit comes back at boot as it is now,
+# given LIVE (fw_p2p_limit_live): "yes" when FW_P2P_LIMIT_FILE is there, systemd
+# reports FW_P2P_LIMIT_SVC enabled and, while the table is loaded, the file holds
+# its rate, burst and ports; else "no REASON" with REASON boot-file-missing,
+# unit-not-enabled or boot-copy-differs.
+fw_p2p_limit_boot() {
+    local live="${1:-}" have
+    if [[ ! -f "$FW_P2P_LIMIT_FILE" ]]; then
+        echo "no boot-file-missing"
+        return 0
+    fi
+    if ! systemctl is-enabled "$FW_P2P_LIMIT_SVC" >/dev/null 2>&1; then
+        echo "no unit-not-enabled"
+        return 0
+    fi
+    if [[ "$live" == "on "* ]]; then
+        have="$(fw_p2p_limit_params < "$FW_P2P_LIMIT_FILE")" || have=""
+        if [[ "$have" != "${live#on }" ]]; then
+            echo "no boot-copy-differs"
+            return 0
+        fi
+    fi
+    echo yes
+    return 0
+}
+
+# fw_p2p_limit_live -- the state of the loaded limit: "on RATE BURST PORTS" when
+# table inet tn_p2p holds it (fw_p2p_limit_params of what nft lists), else "off
+# REASON": p2p-list (a P2P source list is set, which replaces the limit),
+# nft-missing (nftables is not installed), not-applied (no table: no enable has
+# written it, or a reboot dropped it), unreadable (nft cannot list the tables, the
+# stored source list cannot be read, or the table holds no tn_p2p_src4 limit
+# rule).
+fw_p2p_limit_live() {
+    local tables text vals listed=false lerr=false
+    if fw_load_p2p_srcs 2>/dev/null; then
+        if [[ ${#FW_P2P_SRCS[@]} -gt 0 ]]; then
+            listed=true
+        fi
+    else
+        lerr=true
+    fi
+    if ! command -v nft >/dev/null 2>&1; then
+        if [[ "$listed" == "true" ]]; then
+            echo "off p2p-list"
+        else
+            echo "off nft-missing"
+        fi
+        return 0
+    fi
+    if ! tables="$(nft list tables 2>/dev/null)"; then
+        echo "off unreadable"
+        return 0
+    fi
+    if ! grep -qx 'table inet tn_p2p' <<< "$tables"; then
+        if [[ "$listed" == "true" ]]; then
+            echo "off p2p-list"
+        elif [[ "$lerr" == "true" ]]; then
+            echo "off unreadable"
+        else
+            echo "off not-applied"
+        fi
+        return 0
+    fi
+    text="$(nft list table inet tn_p2p 2>/dev/null)" || text=""
+    vals="$(fw_p2p_limit_params <<< "$text")" || vals=""
+    if [[ -n "$vals" ]]; then
+        echo "on ${vals}"
+    else
+        echo "off unreadable"
+    fi
+    return 0
+}
+
+# fw_p2p_limit_report -- the status screen's lines for the P2P new-flow limit.
+fw_p2p_limit_report() {
+    local live boot what a b boot_ok why
+    live="$(fw_p2p_limit_live)"
+    boot="$(fw_p2p_limit_boot "$live")"
+    read -r what a b _ <<< "$live"
+    read -r boot_ok why <<< "$boot"
+    case "${what} ${a}" in
+        "on "*)
+            print_ok "New-flow limit: at most ${a} packets of new, not yet answered P2P flows per minute from one IPv4 address or IPv6 /64 after a burst of ${b} (nftables table inet tn_p2p)"
+            case "${boot_ok} ${why}" in
+                "yes ")
+                    print_ok "New-flow limit at boot: loaded by ${FW_P2P_LIMIT_SVC} (enabled)" ;;
+                "no boot-copy-differs")
+                    print_warn "New-flow limit at boot: ${FW_P2P_LIMIT_FILE#"${TN_ROOT_PREFIX:-}"} holds another rate, burst or port set than the loaded table, so a reboot would load that one; run Enable recommended defaults (or --enable) again" ;;
+                "no boot-file-missing")
+                    print_warn "New-flow limit at boot: not restored after a reboot (${FW_P2P_LIMIT_FILE#"${TN_ROOT_PREFIX:-}"} is missing); run Enable recommended defaults (or --enable) again" ;;
+                *)
+                    print_warn "New-flow limit at boot: not restored after a reboot (${FW_P2P_LIMIT_SVC} is not enabled); run Enable recommended defaults (or --enable) again" ;;
+            esac ;;
+        "off p2p-list")
+            print_info "New-flow limit: not used; the P2P ports take only the P2P source list (P2P_ALLOW_FROM)" ;;
+        "off nft-missing")
+            print_warn "New-flow limit: not applied; nftables (nft) is not installed, so P2P stays open to every source" ;;
+        "off not-applied")
+            print_warn "New-flow limit: not applied; run Enable recommended defaults (or --enable) to add it" ;;
+        *)
+            print_warn "New-flow limit: unknown; nft cannot list table inet tn_p2p, or P2P_ALLOW_FROM in .node-meta cannot be read" ;;
+    esac
+    if [[ "$what" == "off" && "$boot_ok" == "yes" ]]; then
+        print_warn "New-flow limit at boot: ${FW_P2P_LIMIT_SVC} is enabled but the table is not loaded; check: systemctl status ${FW_P2P_LIMIT_SVC}"
+    fi
+}
+
 # fw_on_gce -- 0 on a Google Compute Engine VM (DMI product name), where IAP TCP
 # forwarding is the console SSH path.
 fw_on_gce() {
@@ -616,6 +1041,7 @@ fw_preflight() {
             return 1
         fi
     done < <(fw_p2p_ports)
+    fw_p2p_limit_load || return 1
     return 0
 }
 
@@ -803,17 +1229,25 @@ view_status() {
                 fi
             done <<< "$p2p"
         fi
+        fw_p2p_limit_report
 
-        # Uptime Kuma is required across all node types (Telcoin Association
-        # health monitoring runs against every deployed node).
+        # Uptime Kuma health monitoring is a testnet add-on (the Telcoin Association
+        # monitor probes testnet and devnet nodes); on any other network the port
+        # stays closed by design, so only an open one is worth a line.
         echo ""
-        print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}"
-        if ufw_active; then
-            case "$(kuma_rule_state)" in
-                restricted) print_ok    "TCP ${UPTIME_KUMA_PORT} $(kuma_restricted_desc)" ;;
-                anywhere)   print_warn  "TCP ${UPTIME_KUMA_PORT} open to Anywhere -- consider restricting to ${TN_KUMA_SRC} (menu: Manage node ports)" ;;
-                closed)     print_error "TCP ${UPTIME_KUMA_PORT} is CLOSED -- health monitoring will fail" ;;
-            esac
+        if is_testnet_like; then
+            print_info "Uptime Kuma health monitoring -- TCP ${UPTIME_KUMA_PORT}"
+            if ufw_active; then
+                case "$(kuma_rule_state)" in
+                    restricted) print_ok    "TCP ${UPTIME_KUMA_PORT} $(kuma_restricted_desc)" ;;
+                    anywhere)   print_warn  "TCP ${UPTIME_KUMA_PORT} open to Anywhere -- consider restricting to ${TN_KUMA_SRC} (menu: Manage node ports)" ;;
+                    closed)     print_error "TCP ${UPTIME_KUMA_PORT} is CLOSED -- health monitoring will fail" ;;
+                esac
+            fi
+        elif ufw_active && [[ "$(kuma_rule_state)" != "closed" ]]; then
+            print_warn "Health port TCP ${UPTIME_KUMA_PORT} is open, although no monitor uses it on this network; Manage node ports (or --enable) closes it"
+        else
+            print_info "Health port TCP ${UPTIME_KUMA_PORT} stays closed: health monitoring is a testnet-only add-on"
         fi
     fi
 
@@ -880,7 +1314,11 @@ view_status() {
 # the deletion of the blanket SSH rule (with a source list), the deletion of the
 # rules of sources a replaced --ssh-from / --p2p-from list no longer holds, and
 # `ufw --force enable`. Every allow comes before the default deny, so there is
-# never a window with SSH closed.
+# never a window with SSH closed. Once ufw is complete, fw_p2p_limit_sync writes
+# the per-source new-flow limit on the P2P ports (nftables table inet tn_p2p) and
+# the unit that loads it at boot, or deletes both when a P2P source list is set;
+# that step only warns, and a failed ufw step never reaches it, so the table
+# changes only with a complete rule set.
 #
 # RECONCILE by default: it only ENSURES the managed rules + policies exist, so a
 # re-run keeps an operator's custom rules. "--reset" first runs `ufw --force
@@ -933,6 +1371,11 @@ apply_recommended_firewall() {
     fi
     FW_APPLY_INFLIGHT=false
     fw_snapshot_drop
+    if [[ "$do_reset" == "--reset" || "$do_reset" == "reset" ]]; then
+        fw_p2p_limit_sync "$nodes" always
+    else
+        fw_p2p_limit_sync "$nodes"
+    fi
     if [[ "$keep_web" == "true" ]]; then
         if [[ "$web_was_open" == "true" ]]; then
             print_info "Kept TCP 80/443 open -- Caddy serves the public RPC/dashboard on this box."
@@ -1060,11 +1503,87 @@ fw_wants_meta_write() {
     node_meta_path >/dev/null 2>&1
 }
 
-# fw_meta_lock -- when this run will write .node-meta: take the update lock and
-# migrate an old ownership layout (addon_meta_write_begin). rc 1 when refused.
+# fw_meta_lock -- take the update lock for an apply: every enable, --reset and
+# "Manage node ports" change holds it around ufw, the new-flow limit and its boot
+# copy, so two runs never interleave (fw_on_exit releases it; the interactive
+# paths release it when their change is done). When this run will write
+# .node-meta, also migrate an old ownership layout (addon_meta_write_begin). rc 1
+# when refused: another run holds the lock (said; an error event in --json mode),
+# or the migration refused.
 fw_meta_lock() {
+    if [[ -z "${TN_UPDATE_LOCK_KIND:-}" ]] && ! tn_acquire_update_lock; then
+        if [[ "${JSON_MODE:-false}" == "true" ]]; then
+            json_event error "Another update is already running${TN_UPDATE_LOCK_HOLDER:+ (PID ${TN_UPDATE_LOCK_HOLDER})}, or the update lock cannot be taken; nothing was changed. Run this again when it has finished."
+        fi
+        return 1
+    fi
     fw_wants_meta_write || return 0
     addon_meta_write_begin
+}
+
+# fw_baseline_say <step|log|warn> <msg> -- the printer handed to
+# tn_host_baseline_refresh: an event of that kind in a --json run (log for the
+# others), a print_* line otherwise.
+fw_baseline_say() {
+    if [[ "${JSON_MODE:-false}" == "true" ]]; then
+        case "${1:-}" in
+            step|warn) json_event "$1" "${2:-}" ;;
+            *)         json_event log "${2:-}" ;;
+        esac
+    else
+        case "${1:-}" in
+            step) print_step "${2:-}" ;;
+            warn) print_warn "${2:-}" ;;
+            *)    print_info "${2:-}" ;;
+        esac
+    fi
+    return 0
+}
+
+# fw_baseline_refresh -- after a change of this run went through that wrote a file
+# the host baseline covers (/etc/telcoin/p2p-limit.nft, or the source lists and
+# KUMA_EXTRA_SRC in .node-meta): make the baseline again (tn_host_baseline_refresh,
+# a no-op without HOST_BASELINE=true in .node-meta or with a lib/common.sh that
+# lacks it). In a --json run its lines are events before the done event. Never fails.
+fw_baseline_refresh() {
+    if declare -F tn_host_baseline_refresh >/dev/null 2>&1; then
+        tn_host_baseline_refresh fw_baseline_say
+    fi
+    return 0
+}
+
+# fw_menu_p2p_apply NODES OPEN -- the change of "Manage node ports", under the update
+# lock: open the P2P ports when OPEN is true (fw_p2p_allow), then bring the
+# new-flow limit and its boot copy in line with the ports (fw_p2p_limit_sync, so a
+# changed port set always reaches the table). The lock is released after. rc 1
+# when the lock is held elsewhere, the P2P source list cannot be read or a ufw
+# rule failed (said).
+fw_menu_p2p_apply() {
+    local nodes="$1" open="$2" rc=0
+    if ! fw_meta_lock; then
+        # fw_meta_lock can fail after it took the lock (the ownership migration
+        # refused): never keep it for the rest of the menu session.
+        tn_release_update_lock
+        return 1
+    fi
+    if [[ "$open" == "true" ]]; then
+        if ! fw_p2p_allow; then
+            rc=1
+        fi
+    elif ! fw_load_p2p_srcs; then
+        print_error "P2P_ALLOW_FROM in .node-meta cannot be read; the new-flow limit was not changed."
+        rc=1
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+        fw_p2p_limit_sync "$nodes"
+        # The table or its boot copy changed: make the host baseline again, under the
+        # lock. An unchanged limit (FW_LIMIT_CHANGED false) wrote nothing AIDE watches.
+        if [[ "$FW_LIMIT_CHANGED" == "true" ]]; then
+            fw_baseline_refresh
+        fi
+    fi
+    tn_release_update_lock
+    return "$rc"
 }
 
 enable_firewall() {
@@ -1165,6 +1684,7 @@ enable_firewall() {
     # Stage the lockout-safe ruleset + enable (shared with --json --enable). SSH + overlay +
     # kuma are allowed before enable, so this can't sever the IAP door or the overlay.
     if ! fw_meta_lock || ! apply_recommended_firewall "$reset_arg"; then
+        tn_release_update_lock
         echo ""
         read -r -p "  Press Enter to return to menu..."
         return
@@ -1172,6 +1692,8 @@ enable_firewall() {
     if fw_wants_meta_write; then
         fw_persist_sources || true
     fi
+    fw_baseline_refresh
+    tn_release_update_lock
 
     print_ok "Firewall enabled with recommended defaults"
     [[ -n "$reset_arg" ]] && print_info "Existing rules were reset to a clean slate"
@@ -1396,10 +1918,17 @@ manage_node_ports() {
     echo "  Every node needs UDP ports ${p2p_text} open inbound for consensus P2P."
     echo "  The role is decided on-chain -- a node that stakes must already be reachable."
     echo ""
+    # The new-flow rate and burst first: a bad value refuses before any change.
+    if ! fw_p2p_limit_load; then
+        echo ""
+        read -r -p "  Press Enter to return to menu..."
+        return
+    fi
     if fw_p2p_all_open; then
         print_ok "UDP ports ${p2p_text} are already open"
+        fw_menu_p2p_apply "$nodes" false || true
     elif confirm "Open UDP ports ${p2p_text} for node P2P?"; then
-        if fw_p2p_allow; then
+        if fw_menu_p2p_apply "$nodes" true; then
             print_ok "UDP ports ${p2p_text} opened"
         fi
     fi
@@ -1513,6 +2042,7 @@ manage_health_extra_ips() {
                     print_warn "No input -- nothing added."
                 elif kuma_extra_add "$new_src"; then
                     print_ok "Allowed ${new_src} -> ${UPTIME_KUMA_PORT}/tcp (persisted)"
+                    fw_baseline_refresh
                 else
                     print_warn "Invalid IP/CIDR: ${new_src} -- not added."
                 fi
@@ -1528,6 +2058,7 @@ manage_health_extra_ips() {
                     if [[ -n "$del_src" ]] && printf '%s\n' $extras2 | grep -qxF "$del_src"; then
                         kuma_extra_remove "$del_src"
                         print_ok "Removed ${del_src} from ${UPTIME_KUMA_PORT}/tcp"
+                        fw_baseline_refresh
                     else
                         print_warn "Not in the list: ${del_src}"
                     fi
@@ -1703,9 +2234,13 @@ caddy_serves_public_edge() {
 # desired_firewall_rules -- print the rule set THIS host should have, one per line:
 #   <spec>\t<label>\t<source>
 # <spec> is "<port>/<proto>" or the literal "overlay-ssh"; <source> is a hint
-# (anywhere|restricted|<cidr>). Node P2P (one rule per fw_p2p_ports line) on every
-# install; overlay SSH only when the VPN is active; 80/443 only when Caddy manages
-# the dashboard.
+# (anywhere|restricted|<cidr>[,<cidr>...]): the SSH and the P2P rows name their
+# source list (--ssh-from / --p2p-from of this run, else SSH_ALLOW_FROM /
+# P2P_ALLOW_FROM in .node-meta) joined with commas, say anywhere without one, and
+# say "unknown (... source list not usable)" when the list cannot be read (a key
+# set more than once, an invalid entry), which every enable also refuses.
+# Node P2P (one rule per fw_p2p_ports line) on every install; overlay SSH only
+# when the VPN is active; 80/443 only when Caddy manages the dashboard.
 desired_firewall_rules() {
     local ssh_port has_node=false p2p port label nworkers
     ssh_port="$(get_ssh_port)"
@@ -1714,17 +2249,19 @@ desired_firewall_rules() {
     fi
 
     local ssh_src
-    ssh_src="$(fw_sources ssh 2>/dev/null | paste -sd, -)" || ssh_src=""
+    ssh_src="$(fw_sources ssh 2>/dev/null | paste -sd, -)" || ssh_src="unknown (SSH source list not usable)"
     printf '%s\t%s\t%s\n' "${ssh_port}/tcp"         "SSH"                "${ssh_src:-anywhere}"
     if is_testnet_like; then
         printf '%s\t%s\t%s\n' "${UPTIME_KUMA_PORT}/tcp" "Uptime Kuma health" "restricted"
     fi
     if [[ "$has_node" == "true" ]]; then
+        local p2p_src
+        p2p_src="$(fw_sources p2p 2>/dev/null | paste -sd, -)" || p2p_src="unknown (P2P source list not usable)"
         p2p="$(fw_p2p_ports)"
         nworkers="$(grep -c ' worker-' <<< "$p2p" || true)"
         while read -r port label; do
             [[ -n "$port" ]] || continue
-            printf '%s\t%s\t%s\n' "${port}/udp" "Node P2P ($(fw_p2p_what "$label" "$nworkers"))" "anywhere"
+            printf '%s\t%s\t%s\n' "${port}/udp" "Node P2P ($(fw_p2p_what "$label" "$nworkers"))" "${p2p_src:-anywhere}"
         done <<< "$p2p"
     fi
     if vpn_active; then
@@ -1928,8 +2465,10 @@ json_event() {
 # HUP are turned into an exit, so they end here too). When the run ends while
 # apply_recommended_firewall is changing rules (FW_APPLY_INFLIGHT), it puts the
 # saved rule files back and returns ufw to its earlier state (fw_restore), then
-# removes them; when that fails it keeps them and names them. Then it releases
-# the update lock. In --json mode, when the run ends without its final answer
+# removes them; when that fails it keeps them and names them. When it ends while
+# fw_p2p_limit_sync is changing the new-flow limit (FW_LIMIT_INFLIGHT), it
+# finishes or reports that change (fw_p2p_limit_on_exit). Then it releases the
+# update lock. In --json mode, when the run ends without its final answer
 # (a signal, a failing command, not root), it sends {"event":"done","ok":false,
 # "error":...,"msg":...} with the last error event's message, so every --json run
 # ends with one parseable answer; the "error" key is what the UI's firewall card
@@ -1953,6 +2492,9 @@ fw_on_exit() {
         fi
     fi
     fw_snapshot_drop
+    if [[ -n "$FW_LIMIT_INFLIGHT" ]]; then
+        fw_p2p_limit_on_exit "$rc"
+    fi
     if [[ -n "${TN_UPDATE_LOCK_KIND:-}" ]]; then
         tn_release_update_lock 2>/dev/null || true
     fi
@@ -1973,7 +2515,18 @@ fw_on_exit() {
 # allowed is true/false from the ufw rule table, or null when ufw is inactive or
 # not installed (the table cannot be read then) or when no node is installed (the
 # default ports are listed; nothing is expected to be allowed yet). A default
-# policy that cannot be read is "unknown".
+# policy that cannot be read is "unknown". "p2p_new_flow_limit" is the per-source
+# limit on new P2P flows (fw_p2p_limit_live, fw_p2p_limit_boot):
+# {"active":true,"rate":20,"burst":40,"reason":null,"persistent":P,
+# "persistent_reason":Q} when nftables table inet tn_p2p holds it (rate: packets of
+# new, not yet answered flows per minute from one IPv4 address or IPv6 /64, burst:
+# the packets one source may send before the rate applies, both as nft lists
+# them), else {"active":false,"rate":null,"burst":null,"reason":R,"persistent":P,
+# "persistent_reason":Q} with R one of "p2p-list", "nft-missing", "not-applied",
+# "unreadable". P is true when telcoin-p2p-limit.service is enabled,
+# /etc/telcoin/p2p-limit.nft is there and, while the table is loaded, holds its
+# rate, burst and ports, so a reboot loads the same limit; Q is then null, else
+# one of "boot-file-missing", "unit-not-enabled", "boot-copy-differs".
 json_fw_status() {
     local installed=false active=false default_in="" ssh_port
     if ufw_installed; then installed=true; fi
@@ -2036,6 +2589,22 @@ json_fw_status() {
     local kuma_state="closed"
     [[ "$active" == "true" ]] && kuma_state="$(kuma_rule_state)"
 
+    local limit_json llive lboot lwhat la lb lok lwhy persistent=false preason=null
+    llive="$(fw_p2p_limit_live)"
+    lboot="$(fw_p2p_limit_boot "$llive")"
+    read -r lwhat la lb _ <<< "$llive"
+    read -r lok lwhy <<< "$lboot"
+    if [[ "$lok" == "yes" ]]; then
+        persistent=true
+    else
+        preason="\"$(json_escape "$lwhy")\""
+    fi
+    if [[ "$lwhat" == "on" ]]; then
+        limit_json="{\"active\":true,\"rate\":${la},\"burst\":${lb},\"reason\":null,\"persistent\":${persistent},\"persistent_reason\":${preason}}"
+    else
+        limit_json="{\"active\":false,\"rate\":null,\"burst\":null,\"reason\":\"$(json_escape "$la")\",\"persistent\":${persistent},\"persistent_reason\":${preason}}"
+    fi
+
     # Operator-chosen health sources (layered on top of the TA baseline), as a JSON array.
     local kuma_extra_json="" efirst=true esrc
     for esrc in $(kuma_extra_list); do
@@ -2044,7 +2613,7 @@ json_fw_status() {
         efirst=false
     done
 
-    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}},\"p2p_ports\":[${p2p_json}]}"
+    json_emit "{\"installed\":${installed},\"active\":${active},\"default_incoming\":\"$(json_escape "${default_in}")\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"kuma\":\"$(json_escape "${kuma_state}")\",\"kuma_extra\":[${kuma_extra_json}],\"caddy_managed\":${caddy_managed},\"desired\":[${desired_json}],\"unexpected\":[${unexpected_json}],\"ports\":{${ports_json}},\"p2p_ports\":[${p2p_json}],\"p2p_new_flow_limit\":${limit_json}}"
     JSON_DONE_SENT=true
 }
 
@@ -2110,6 +2679,7 @@ json_fw_enable() {
     if fw_wants_meta_write; then
         fw_persist_sources || true
     fi
+    fw_baseline_refresh
     ufw_active && active=true
     json_emit "{\"event\":\"done\",\"ok\":${active},\"action\":\"enable\",\"ssh_port\":\"$(json_escape "${ssh_port}")\",\"active\":${active},\"msg\":\"ufw enabled with recommended lockout-safe defaults (SSH + overlay + kuma pre-allowed)\"}"
 }
@@ -2219,6 +2789,7 @@ main() {
         if fw_wants_meta_write; then
             fw_persist_sources || true
         fi
+        fw_baseline_refresh
         if [[ "$reset_mode" == "true" ]]; then
             print_ok "Firewall reset to a clean slate and re-enabled with recommended defaults"
         else

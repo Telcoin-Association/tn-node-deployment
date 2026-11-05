@@ -1,0 +1,41 @@
+baseline (run.sh at the tip): fw_v5_test.sh FAILs H5 H7 I6 J4 K1 (findings); rm_v5_test.sh FAIL R3b (finding); helper/pytest/node 0
+run1 (mutate.py, host bash 5.3 + docker): the three server-* lines below are a parser miss (pytest 9 SUBFAILED(...) lines); run2 supersedes them
+fw-no-ct-state-new         KILLED fw_v5_test.sh  new FAILs: A2 two rules, each ct state new udp dport { 49590, 49594 }; A3 every rule line (update/drop) starts with ct state new
+fw-v6-no-64-mask           KILLED fw_v5_test.sh  new FAILs: A5 v6 meter keyed per /64, defaults 20/40
+fw-priority-0              KILLED fw_v5_test.sh  new FAILs: A7 input hook at priority -10 (before ufw at 0), policy accept
+fw-no-delete-in-txn        KILLED fw_v5_test.sh  new FAILs: A1 first statements add, delete, re-add table inet tn_p2p
+fw-accept-verdict          KILLED fw_v5_test.sh  new FAILs: A6 no accept verdict except the chain policy
+fw-no-sync-in-apply        KILLED fw_v5_test.sh  new FAILs: B2 one nft -f - write; B3 the program nft got is fw_p2p_limit_text 20 40; B4 nft write after ufw --force enable; B5 no ufw call after the nft write; B6 table present; B7 info line names the rate and burst; C1 boot program == the loaded program; C10 unit enabled; C12 boot file not writable: warning; 
+fw-sync-before-ufw         KILLED fw_v5_test.sh  new FAILs: B4 nft write after ufw --force enable; B5 no ufw call after the nft write; B8 a ufw call failing at any step: no nft write, no boot copy (over 9 calls); B9 ufw failure with a failed restore (rc 3) never reaches nft
+fw-no-env-validation       KILLED fw_v5_test.sh  new FAILs: F1 every bad rate/burst: rc 1, message names it, no ufw or nft change
+fw-count-ok-loose          KILLED fw_v5_test.sh  new FAILs: F1 every bad rate/burst: rc 1, message names it, no ufw or nft change
+fw-no-nft-warning          KILLED fw_v5_test.sh  new FAILs: E2 no nft: the warning once
+fw-no-persist              KILLED fw_v5_test.sh  new FAILs: C1 boot program == the loaded program; C10 unit enabled; C12 boot file not writable: warning; C14 unit not writable: warning names it; C15 enable fails: warning; C17 no systemctl: warning; C19 no systemctl: boot files left behind (written before enable failed); C2 boot program mode 0640; C3 unit mod
+fw-no-unpersist            KILLED fw_v5_test.sh  new FAILs: D --p2p-from comma list: table gone, boot files gone, unit not enabled; D --p2p-from comma list: unit disabled and stopped; D --p2p-from list file: table gone, boot files gone, unit not enabled; D --p2p-from list file: unit disabled and stopped; D --reset to a list: table gone, boot files gone, unit
+fw-enable-now              KILLED fw_v5_test.sh  new FAILs: C8 enable the unit; C9 enable, never start/restart/--now
+fw-file-mode-0644          KILLED fw_v5_test.sh  new FAILs: C2 boot program mode 0640; C4 both written through tn_write_root_file
+fw-json-no-persistent      KILLED fw_v5_test.sh  new FAILs: C18 no systemctl: --json says active, not persistent; F4 override 5/10: json reads them back; G1 active + persistent; G2 active + not persistent (unit not enabled); G3 unit enabled but ruleset file missing: not persistent; G4 ruleset file present, unit missing: not persistent
+fw-desired-anywhere        KILLED fw_v5_test.sh  new FAILs: H1 --p2p-from: both rows carry the list; H2 stored list
+fw-menu-no-sync            KILLED fw_v5_test.sh  new FAILs: I1 Manage node ports opens P2P and writes the table and boot copy; I2 a second worker port reaches the table
+fw-boot-ignores-unit       KILLED fw_v5_test.sh  new FAILs: C18 no systemctl: --json says active, not persistent; G2 active + not persistent (unit not enabled); G2r status: not restored at boot; G3 unit enabled but ruleset file missing: not persistent; G4 ruleset file present, unit missing: not persistent
+rm-no-teardown             KILLED rm_v5_test.sh  new FAILs: R2 json keys: the table delete program; R2 json keys: unit disabled and stopped; R2 json keys: unit, file and table gone; R5 menu, last node: limit removed; R5 menu: says so; R6 leftovers: rc 0, limit removed
+rm-no-table-delete         KILLED rm_v5_test.sh  new FAILs: R2 json keys: the table delete program; R2 json keys: unit, file and table gone; R5 menu, last node: limit removed; R6 leftovers: rc 0, limit removed; R8 warning names the command
+helper-no-p2p-arg          KILLED helper_v5_test.sh  new FAILs: H3 SSH + P2P; H4 '-' + P2P; H5 empty SSH + P2P
+helper-no-slash-check      KILLED helper_v5_test.sh  new FAILs: H8 leading / names the file-path refusal
+helper-no-engine-check     KILLED helper_v5_test.sh  new FAILs: H13 engine without --p2p-from refused with the update hint
+server-no-dash             SURVIVED pytest  new FAILs: 
+server-no-p2p-check        SURVIVED pytest  new FAILs: 
+server-no-status-page      SURVIVED pytest  new FAILs: 
+server-keeps-meta-cache    KILLED pytest  new FAILs: tasks/verify-fup/V5/test_v5_ui.py::FirewallStatusP2P::test_meta_cache_dropped_after_enable
+unit-no-limitcore          KILLED pytest  new FAILs: tasks/verify-fup/V5/test_v5_ui.py::PageAndUnitSource::test_unit_limitcore_and_nonewprivileges_comment
+page-adiri-link            KILLED pytest  new FAILs: tasks/verify-fup/V5/test_v5_ui.py::StatusPageLink::test_page_names_no_adiri_status_host
+baseline pytest             FAILs at tip: 0 []
+server-no-dash             KILLED pytest  new FAILs: SUBFAILED(body={'p2p_from': '10.0.0.1,'}) tasks/verify-fup/V5/test_v5_ui.py::FirewallEnableP2P::test_argv_shapes; SUBFAILED(body={'p2p_from': '198.51.100.0/24, 2001:db8::/48'}) tasks/verify-fup/V5/test_v5_ui.py::FirewallEnableP2P::test_argv_shapes
+server-no-p2p-check        KILLED pytest  new FAILs: SUBFAILED(body={'p2p_from': '10.0.0.1,'}) tasks/verify-fup/V5/test_v5_ui.py::FirewallEnableP2P::test_argv_shapes; SUBFAILED(body={'p2p_from': '198.51.100.0/24, 2001:db8::/48'}) tasks/verify-fup/V5/test_v5_ui.py::FirewallEnableP2P::test_argv_shapes; SUBFAILED(body={'ssh_from': '203.0.113.7', 'p2p_fro
+server-no-status-page      KILLED pytest  new FAILs: SUBFAILED(slug='devnet') tasks/verify-fup/V5/test_v5_ui.py::StatusPageLink::test_unreachable_answer_per_network; SUBFAILED(slug='mainnet') tasks/verify-fup/V5/test_v5_ui.py::StatusPageLink::test_unreachable_answer_per_network; SUBFAILED(slug='testnet') tasks/verify-fup/V5/test_v5_ui.py::StatusPageLi
+server-keeps-meta-cache    KILLED pytest  new FAILs: FAILED tasks/verify-fup/V5/test_v5_ui.py::FirewallStatusP2P::test_meta_cache_dropped_after_enable
+unit-no-limitcore          KILLED pytest  new FAILs: FAILED tasks/verify-fup/V5/test_v5_ui.py::PageAndUnitSource::test_unit_limitcore_and_nonewprivileges_comment
+page-adiri-link            KILLED pytest  new FAILs: FAILED tasks/verify-fup/V5/test_v5_ui.py::StatusPageLink::test_page_names_no_adiri_status_host
+baseline node               FAILs at tip: 0 []
+page-http-link             KILLED node  new FAILs: J18 http refused; J19 javascript: refused; J20 quote refused
+page-no-boot-note          KILLED node  new FAILs: J2 active + not persistent

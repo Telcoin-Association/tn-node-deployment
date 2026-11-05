@@ -1,0 +1,22 @@
+table inet tn_p2p {
+	set tn_p2p_src4 {
+		type ipv4_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2m
+		elements = { 127.0.0.1 limit rate over 20/minute burst 40 packets expires 1m59s495ms }
+	}
+
+	set tn_p2p_src6 {
+		type ipv6_addr
+		size 65535
+		flags dynamic,timeout
+		timeout 2m
+	}
+
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		ct state new udp dport { 49590, 49594 } update @tn_p2p_src4 { ip saddr limit rate over 20/minute burst 40 packets } drop
+		ct state new udp dport { 49590, 49594 } update @tn_p2p_src6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over 20/minute burst 40 packets } drop
+	}
+}

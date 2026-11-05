@@ -1,0 +1,16 @@
+FAIL  D3 604800 s epoch, 1000 s out: no wait
+FAIL  D3 the log names the 900s margin
+FAIL  D3 the log says 900 and 300 derived
+FAIL  D4 the step message carries the derived values
+FAIL  D6 the log names TN_EPOCH_SETTLE
+FAIL  D8 TN_EPOCH_WAIT_MAX=100 under derived 900+300: raised with the warning
+FAIL  D8 the step message says the raised cap
+FAIL  D8 poll 20: the sum uses two polls of 20
+FAIL  D14 TN_EPOCH_MARGIN='abc' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN=' 300' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='-5' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='1234567890' is not used: derived 900 (1000 s out: no wait)
+FAIL  D14 TN_EPOCH_MARGIN='3e2' is not used: derived 900 (1000 s out: no wait)
+FAIL  D17 huge epochDuration: clamped to 900/300, far boundary, no wait
+FAIL  D17 epochDuration in hex (0x93a80 = 604800): derived 900/300

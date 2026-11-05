@@ -1,0 +1,4 @@
+  [WARN] No ingest token file at /tmp/tn_test.k0SXWv/root/etc/telcoin/alloy/ingest-token, so Alloy cannot authenticate to the hub; run setup-observability.sh --rotate-token.
+--- rotate after the disable: rc=1
+
+  [ERROR] Log and metrics shipping are both off on this node, so there is no token to rotate; enable logs or metrics instead. Nothing was changed.

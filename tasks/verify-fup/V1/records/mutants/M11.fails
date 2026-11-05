@@ -1,0 +1,27 @@
+FAIL  B prepare_source_build: mainnet v0.9.0 refused before any fetch
+FAIL  B prepare_source_build: testnet v0.12.0-adiri refused before any fetch
+FAIL  B prepare_source_build: testnet rc below the floor: no fetch
+FAIL  B prepare_release_update: mainnet v0.9.0 refused before any fetch
+FAIL  B prepare_release_update: testnet v0.12.0-adiri refused before any fetch
+FAIL  B prepare_release_update: testnet rc below the floor: no fetch
+FAIL  B prepare_docker_update: mainnet v0.9.0 refused before any fetch
+FAIL  B prepare_docker_update: testnet v0.12.0-adiri refused before any fetch
+FAIL  B prepare_docker_update: testnet rc below the floor: no fetch
+FAIL  B json_prepare_source: mainnet v0.9.0 refused before any fetch
+FAIL  B json_prepare_source: the refusal is an error event
+FAIL  B json_prepare_source: testnet v0.12.0-adiri refused before any fetch
+FAIL  B json_prepare_source: testnet rc below the floor: no fetch
+FAIL  B json_prepare_release: mainnet v0.9.0 refused before any fetch
+FAIL  B json_prepare_release: the refusal is an error event
+FAIL  B json_prepare_release: testnet v0.12.0-adiri refused before any fetch
+FAIL  B json_prepare_release: testnet rc below the floor: no fetch
+FAIL  B json_prepare_docker: mainnet v0.9.0 refused before any fetch
+FAIL  B json_prepare_docker: the refusal is an error event
+FAIL  B json_prepare_docker: testnet v0.12.0-adiri refused before any fetch
+FAIL  B json_prepare_docker: testnet rc below the floor: no fetch
+FAIL  B prepare_docker_update: mainnet <repo>:v0.9.0 refused before resolution
+FAIL  B prepare_docker_update: mainnet digest recorded as v0.9.0 refused by the floor
+FAIL  B prepare_docker_update: testnet digest recorded as v0.12.0-adiri refused by the floor
+FAIL  B json_prepare_docker: mainnet <repo>:v0.9.0 refused before resolution
+FAIL  B json_prepare_docker: mainnet digest recorded as v0.9.0 refused by the floor
+FAIL  B json_prepare_docker: testnet digest recorded as v0.12.0-adiri refused by the floor

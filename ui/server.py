@@ -75,7 +75,7 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 # of the update engine copies in /opt/telcoin-ui-update/ (install-caddy 1.3.0).
 # 1.8.8: on-chain stake status (getValidator) selects the validator view;
 # warn-only hardware preflight; refreshes the engine copies
-UI_VERSION = "2.0.1"
+UI_VERSION = "2.1.0"
 
 NODE_TYPES = ("observer", "validator")
 
@@ -280,7 +280,9 @@ def bad_type():
 # IMAGE_DIGEST).
 # =============================================================================
 
+# network-gated: the testnet tag form, documented beside the mainnet one
 # Release tags (lib/common.sh tn_release_tag_ok): testnet vX.Y.Z-adiri or its
+# network-gated: the testnet release candidate form
 # release candidate vX.Y.Z-adiri-rcN (N from 1, no leading zero), mainnet
 # vX.Y.Z (finals only); X, Y and Z are 0 or have no leading zero, as the
 # release pipeline's TAG_RE has them. Devnet: a name of letters, digits and
@@ -292,6 +294,7 @@ def bad_type():
 # release takes finals only (release_tag_final), ordered by release_tag_key.
 _TAG_PART = r"(?:0|[1-9][0-9]*)"
 RELEASE_TAG_RE = {
+    # network-gated: testnet tag form, the testnet entry of RELEASE_TAG_RE
     "testnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}-adiri(?:-rc[1-9][0-9]*)?"),
     "mainnet": re.compile(rf"v{_TAG_PART}\.{_TAG_PART}\.{_TAG_PART}"),
     "devnet": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*-devnet"),
@@ -318,9 +321,11 @@ def release_tag_final(network, tag):
     return release_tag_ok(network, tag) and re.search(r"-rc[0-9]", tag) is None
 
 
+# network-gated: the testnet suffix release_tag_key orders; release_tag_ok judges the network
 # The release tag forms tn_release_tag_key orders: vX.Y.Z, an optional -adiri
 # and an optional -rcN, each number at most nine digits (N at most eight).
 _RELEASE_TAG_KEY_RE = re.compile(
+    # network-gated: the testnet suffix release_tag_key orders; release_tag_ok judges the network
     r"v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-adiri)?(-rc([1-9][0-9]{0,7}))?")
 _RELEASE_TAG_FINAL_RANK = 999999999
 
@@ -338,8 +343,10 @@ def release_tag_key(tag):
 
 
 def network_rule(value):
+    # network-gated: adiri is read as testnet, as the helper reads it
     """testnet | mainnet for a NETWORK value (adiri is testnet); None otherwise."""
     v = str(value or "").strip()
+    # network-gated: adiri is read as testnet, as the helper reads it
     return {"testnet": "testnet", "adiri": "testnet", "mainnet": "mainnet"}.get(v)
 
 
@@ -362,22 +369,39 @@ def passphrase_ok(value, network=""):
     return True
 
 
-# Image repositories (lib/common.sh): TN_GHCR_IMAGE_REPO, where the release
-# pipeline publishes the testnet and mainnet images, and
-# TN_TESTNET_LEGACY_IMAGE_REPO, which holds the testnet images of the releases
-# made before signed releases (DEFAULT_DOCKER_IMAGE among them).
-GHCR_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
+# Image repositories (lib/common.sh). Each network has its own package, and the
+# channel is a function of the release tag: TN_MAINNET_IMAGE_REPO holds the
+# vX.Y.Z releases, TN_TESTNET_IMAGE_REPO the testnet ones.
+# TN_GHCR_LEGACY_IMAGE_REPO, the single package earlier script releases named,
+# never held a release: it is recognised on testnet and devnet, never pulled.
+# TN_TESTNET_LEGACY_IMAGE_REPO holds the testnet images of the releases made
+# before signed releases (DEFAULT_DOCKER_IMAGE among them). TN_DEV_IMAGE_REPO
+# holds the dev images: devnet only, by digest.
+MAINNET_IMAGE_REPO = "ghcr.io/telcoin-association/tn-mainnet"
+TESTNET_IMAGE_REPO = "ghcr.io/telcoin-association/tn-testnet"
+GHCR_LEGACY_IMAGE_REPO = "ghcr.io/telcoin-association/telcoin-network"
+DEV_IMAGE_REPO = "ghcr.io/telcoin-association/tn-dev"
+# network-gated: legacy testnet repository; DOCKER_REPO lists it for testnet and devnet, never mainnet
 TESTNET_LEGACY_IMAGE_REPO = "us-docker.pkg.dev/telcoin-network/tn-public/adiri"
 # Every repository a network's images may come from (tn_docker_repo_ok,
-# tn_docker_repos_for): on testnet TN_TESTNET_IMAGE_REPOS (the legacy repository
-# and ghcr.io), on devnet TN_DEVNET_IMAGE_REPOS (the same two; devnet images run
-# by digest only), on mainnet TN_MAINNET_IMAGE_REPO alone.
+# tn_docker_repos_for): on testnet TN_TESTNET_IMAGE_REPOS (the legacy repository,
+# the old single package and the testnet package), on devnet
+# TN_DEVNET_IMAGE_REPOS (the legacy repository, the old single package and the
+# dev package; devnet images run by digest only), on mainnet TN_MAINNET_IMAGE_REPO
+# alone.
 DOCKER_REPO = {
-    "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
-    "mainnet": (GHCR_IMAGE_REPO,),
-    "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_IMAGE_REPO),
+    "testnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_LEGACY_IMAGE_REPO, TESTNET_IMAGE_REPO),
+    "mainnet": (MAINNET_IMAGE_REPO,),
+    "devnet": (TESTNET_LEGACY_IMAGE_REPO, GHCR_LEGACY_IMAGE_REPO, DEV_IMAGE_REPO),
+}
+# The repository each network's messages and examples name (tn_docker_repo_for).
+IMAGE_REPO = {
+    "testnet": TESTNET_IMAGE_REPO,
+    "mainnet": MAINNET_IMAGE_REPO,
+    "devnet": TESTNET_LEGACY_IMAGE_REPO,
 }
 # Fallback for testnet only, when the library cannot name the newest image:
+# network-gated: the testnet fallback image; latest_docker_image takes it on testnet only
 # v0.16.0-adiri by digest, as lib/common.sh DEFAULT_DOCKER_IMAGE.
 DEFAULT_DOCKER_IMAGE = (TESTNET_LEGACY_IMAGE_REPO +
                         "@sha256:b905b0982e87d5ca608e2f29192d0c5582793ae0043630074cddb9be1162ffea")
@@ -402,11 +426,26 @@ def image_allowed(image, network):
     return re.fullmatch(r"[0-9a-f]{64}", rest) is not None and docker_repo_ok(network, repo)
 
 
+def docker_pull_repo_ok(network, repo):
+    """Twin of tn_docker_pull_repo_ok: a new install or image change may pull
+    from REPO: docker_repo_ok, and never the old single package
+    (GHCR_LEGACY_IMAGE_REPO), which holds no release."""
+    return repo != GHCR_LEGACY_IMAGE_REPO and docker_repo_ok(network, repo)
+
+
+def pull_image_allowed(image, network):
+    """image_allowed for a new pull: the image's repository also passes
+    docker_pull_repo_ok."""
+    return image_allowed(image, network) and docker_pull_repo_ok(network, image.split("@", 1)[0])
+
+
 def docker_image_choice(value, network):
     """The wizard's Docker image field: a release tag of the network (bare, or
     after one of the network's repositories and a colon) or the network's image
-    by digest. Returns (release_tag, digest_image, None) with one of the two set,
-    ("", "", None) when empty, or (None, None, error). latest is refused."""
+    by digest, as tn_docker_resolve_ref takes them for a new pull: the old single
+    package (GHCR_LEGACY_IMAGE_REPO) is refused. Returns (release_tag,
+    digest_image, None) with one of the two set, ("", "", None) when empty, or
+    (None, None, error). latest is refused."""
     v = str(value or "").strip()
     if not v:
         return "", "", None
@@ -416,13 +455,19 @@ def docker_image_choice(value, network):
         return v, "", None
     # <repository>:<tag>, as tn_docker_resolve_ref splits it at the last colon.
     repo, colon, tag = v.rpartition(":")
-    if colon and docker_repo_ok(network, repo) and release_tag_ok(network, tag):
+    if colon and docker_pull_repo_ok(network, repo) and release_tag_ok(network, tag):
         return tag, "", None
-    if image_allowed(v, network):
+    if pull_image_allowed(v, network):
         return "", v, None
+    if v.startswith(GHCR_LEGACY_IMAGE_REPO + "@") or v.startswith(GHCR_LEGACY_IMAGE_REPO + ":"):
+        return None, None, (f"docker image refused: no release was ever published to {GHCR_LEGACY_IMAGE_REPO}, "
+                            f"so no image is pulled from it; {network} images come from "
+                            f"{IMAGE_REPO.get(network, 'the network package')}")
+    # network-gated: example in the testnet form, chosen when the network is testnet
     example = "v1.2.3-adiri" if network == "testnet" else "v1.2.3"
+    repo_hint = IMAGE_REPO.get(network, "<repository>")
     return None, None, (f"docker image must be a {network} release tag such as {example}, "
-                        "or the network's image by digest (<repository>@sha256:<digest>)")
+                        f"or the network's image by digest ({repo_hint}@sha256:<digest>)")
 
 
 # Service account rule (lib/common.sh tn_service_user_ok): a plain lowercase
@@ -512,7 +557,7 @@ RPC_PUBLIC_NEEDS_HOST = "Public RPC needs a hostname. Enter one or choose Privat
 # instead -- the same privileged path addons-status already uses. Cached briefly
 # since the file only changes on install/remove/settings and read_meta() is
 # called several times per request; clear_meta_cache() drops it after a mutation.
-_meta_cache = {}          # "meta" -> (expires_monotonic, dict)
+_meta_cache = {}          # "meta" -> (expires_monotonic, dict, text or None)
 _META_TTL = 15.0
 
 
@@ -520,19 +565,16 @@ def clear_meta_cache():
     _meta_cache.clear()
 
 
-def read_meta(t=None):
-    """Parse the node's .node-meta (KEY=VALUE lines) via the root helper. {} if
-    missing/unreadable. The helper finds the file itself (the unified
-    /etc/telcoin/.node-meta, else a legacy per-role one), so both presentation
-    slots read the same file; `t` is only checked, never sent."""
-    if t is not None and t not in NODE_TYPES:
-        return {}
+def _meta_load():
+    """(KEY -> value, text) of .node-meta through the root helper's meta-cat,
+    cached for _META_TTL seconds. The text is '' when the node has no
+    .node-meta, and None when meta-cat failed (the dict is then {})."""
     now = time.monotonic()
     cached = _meta_cache.get("meta")
     if cached and cached[0] > now:
-        return cached[1]
+        return cached[1], cached[2]
     if not _may_cache():
-        return {}
+        return {}, None
     out = {}
     rc, text, _ = run(["sudo", "-n", HELPER, "meta-cat"], timeout=10)
     if rc == 0 and text:
@@ -542,8 +584,19 @@ def read_meta(t=None):
                 continue
             k, _, v = line.partition("=")
             out[k.strip()] = v.strip()
-    _meta_cache["meta"] = (now + _META_TTL, out)
-    return out
+    raw = (text or "") if rc == 0 else None
+    _meta_cache["meta"] = (now + _META_TTL, out, raw)
+    return out, raw
+
+
+def read_meta(t=None):
+    """Parse the node's .node-meta (KEY=VALUE lines) via the root helper. {} if
+    missing/unreadable. The helper finds the file itself (the unified
+    /etc/telcoin/.node-meta, else a legacy per-role one), so both presentation
+    slots read the same file; `t` is only checked, never sent."""
+    if t is not None and t not in NODE_TYPES:
+        return {}
+    return _meta_load()[0]
 
 
 def read_node_env():
@@ -1091,6 +1144,7 @@ def _enforce_public_readonly():
 
 
 def _major(version):
+    # network-gated: example version string; no endpoint
     """The major part of a version string ("v0.16.0-adiri" -> "v0"); "" when
     there is none."""
     m = re.match(r"v?(\d+)", str(version or ""))
@@ -1352,13 +1406,14 @@ def node_version(t):
 # link) work on it -- nothing else is hardcoded to testnet.
 NETWORKS = {
     487: {"name": "Telcoin Mainnet", "slug": "mainnet"},
-    2017: {"name": "Adiri Testnet", "slug": "testnet"},
-    32285: {"name": "Adiri Devnet", "slug": "devnet"},
+    2017: {"name": "Adiri Testnet", "slug": "testnet"},  # network-gated: display name of chain 2017, picked by the node's chain id
+    32285: {"name": "Adiri Devnet", "slug": "devnet"},  # network-gated: display name of the devnet chain 32285, picked by the node's chain id
 }
 
 # Public consensus-block RPC endpoints per chain id, tried in order (first
 # success wins). Both networks front their nodes with a global load balancer, so
 # the balanced hostname goes first; devnet keeps its individual nodes as
+# network-gated: documents the testnet public RPC below
 # fallbacks for when the balancer is degraded. Testnet uses rpc.adiri.tel:
 # rpc.telcoin.network is reserved for mainnet, even though it answers for chain
 # 2017 until mainnet launches. A chain id omitted here degrades the "Network
@@ -1367,7 +1422,7 @@ NETWORK_PUBLIC_RPC = {
     # Mainnet (chain 487): the public endpoint is set at launch. Until then the
     # list stays empty and the compare cards show "—".
     487:   [],
-    2017:  ["https://rpc.adiri.tel"],
+    2017:  ["https://rpc.adiri.tel"],  # network-gated: testnet public RPC, looked up by the node's chain id
     32285: [
         "https://rpc.devnet.telcoin.network",
         "https://node1.devnet.telcoin.network",
@@ -2100,6 +2155,7 @@ STAKED_STATUSES = (1, 2, 3, 4)
 
 # The ValidatorInfo struct getValidator returns, as (field, bits of its Solidity
 # type). Order and types follow IConsensusRegistry.sol at tn-contracts 10cc12b,
+# network-gated: the tn-contracts commit the testnet releases pin; no endpoint
 # the commit telcoin-network v0.16.0-adiri pins (as v0.15.0-adiri did), and the
 # node's own binding in crates/tn-reth/src/system_calls.rs. The struct has no
 # dynamic fields, so the eth_call result is these seven words inline, with no
@@ -2853,6 +2909,7 @@ _docker_image_cache = {}     # network -> {"expires", "data"}
 
 # Mainnet in the setup wizard stays off until the mainnet release (the page's
 # SETUP_MAINNET_ENABLED); until then no mainnet image is looked up or offered.
+# Follows lib/common.sh `readonly TN_MAINNET_ENABLED`; ui/test_mainnet_flag.py fails when they differ.
 TN_MAINNET_ENABLED = False
 
 
@@ -2863,7 +2920,7 @@ def latest_docker_image(network="testnet"):
     devnet or `latest` tag), its image from the release's signed IMAGE_DIGEST
     only (on testnet the library names DEFAULT_DOCKER_IMAGE when that release's
     signed files cannot be downloaded or checked, nothing when the release fails
-    a check, and the legacy repository while the channel has no release). The answer must pass image_allowed.
+    a check, and the legacy repository while the channel has no release). The answer must pass pull_image_allowed.
     Testnet falls back to DEFAULT_DOCKER_IMAGE when the library names nothing;
     mainnet never falls back, and gives '' while TN_MAINNET_ENABLED is off; any
     other network '' (devnet included: it has no releases, its images are named
@@ -2883,7 +2940,7 @@ def latest_docker_image(network="testnet"):
 
 def _latest_docker_image_probe(network):
     """(image, True) when the library's latest_docker_image NETWORK names an
-    image image_allowed accepts (the last line of its output); otherwise
+    image pull_image_allowed accepts (the last line of its output); otherwise
     (DEFAULT_DOCKER_IMAGE, False) on testnet and ("", False) elsewhere. The
     library stages the release's signed files in TN_RELEASE_STAGING_DIR: a
     fresh 0700 directory of this server's own user, removed afterwards (its
@@ -2906,7 +2963,7 @@ def _latest_docker_image_probe(network):
         shutil.rmtree(staging, ignore_errors=True)
     lines = out.splitlines() if rc == 0 else []
     image = lines[-1].strip() if lines else ""
-    if image_allowed(image, network):
+    if pull_image_allowed(image, network):
         return image, True
     return fallback, False
 
@@ -2919,8 +2976,9 @@ _source_tag_cache = {}       # network -> {"ts", "data"}
 
 
 def latest_source_tag(network="testnet"):
-    """Latest release git tag of the network from GitHub (via `git ls-remote
-    --tags`, no clone needed): vX.Y.Z-adiri on testnet, vX.Y.Z on mainnet, finals
+    # network-gated: the testnet tag form; the tag is read for the network asked
+    """Latest release git tag of the network, vX.Y.Z-adiri on testnet, vX.Y.Z on
+    mainnet, from GitHub (via `git ls-remote --tags`, no clone needed), finals
     only (release_tag_final, so release candidates and hot-patch tags are never
     picked). The release a source build or a release install takes, matching
     the CLI menu. The newest by release_tag_key wins. Cached 5 min per network.
@@ -4072,14 +4130,46 @@ def api_clear_rotated(node_type):
 FIREWALL_PORTS = ("49590/udp", "49594/udp", "43174/tcp")
 
 
+P2P_SOURCES_DOUBLED = ("P2P_ALLOW_FROM is set more than once in .node-meta; "
+                       "remove the extra lines on the server")
+
+
+def p2p_sources_kept():
+    """(list, note) for the P2P source list .node-meta keeps, read as the
+    engine's meta_get reads P2P_ALLOW_FROM (lines that start with the key). []
+    when there is no such line or no .node-meta (the P2P ports are open to every
+    address); None when meta-cat failed; None with the P2P_SOURCES_DOUBLED note
+    when the key is on more than one line, which the engine refuses."""
+    _, text = _meta_load()
+    if text is None:
+        return None, ""
+    lines = [ln for ln in text.splitlines() if ln.startswith("P2P_ALLOW_FROM=")]
+    if len(lines) > 1:
+        return None, P2P_SOURCES_DOUBLED
+    if not lines:
+        return [], ""
+    value = lines[0][len("P2P_ALLOW_FROM="):].rstrip("\r")
+    return [x.strip() for x in value.split(",") if x.strip()], ""
+
+
 @app.route("/api/firewall")
 def api_firewall():
+    """firewall-setup.sh --json --status as the engine prints it (with
+    p2p_new_flow_limit when the engine reports it), plus `p2p_sources`: the P2P
+    source list the node keeps, from .node-meta (p2p_sources_kept), and
+    `p2p_sources_note` when that list cannot be used."""
     rc, out, err = run(["sudo", "-n", HELPER, "firewall-status"], timeout=20)
     if rc == 0 and out:
         try:
-            return jsonify(json.loads(out.splitlines()[-1]))
+            d = json.loads(out.splitlines()[-1])
         except (ValueError, json.JSONDecodeError):
-            pass
+            d = None
+        if isinstance(d, dict):
+            if "p2p_sources" not in d:
+                d["p2p_sources"], note = p2p_sources_kept()
+                if note:
+                    d["p2p_sources_note"] = note
+            return jsonify(d)
     # Helper/sudo/ufw unavailable -- degrade gracefully (no 500).
     return jsonify({
         "installed": False, "active": False, "default_incoming": "",
@@ -4117,10 +4207,11 @@ def api_firewall_port():
     return jsonify({"ok": False, "error": err or out or "firewall update failed"})
 
 
-# SSH sources for firewall-setup.sh --ssh-from, as lib/common.sh
-# validate_health_src takes them: an address, or a CIDR with a mask of /8 or
-# narrower (no leading zeros); never the unspecified address or /0. At most 16;
-# the page may separate them with commas, spaces or new lines.
+# SSH and P2P sources for firewall-setup.sh --ssh-from / --p2p-from, as
+# lib/common.sh validate_health_src takes them: an address, or a CIDR with a mask
+# of /8 or narrower (no leading zeros); never the unspecified address or /0. At
+# most 16 in each list; the page may separate them with commas, spaces or new
+# lines.
 FW_SSH_SOURCES_MAX = 16
 _FW_SRC_CHARS_RE = re.compile(r"[0-9A-Fa-f.:]+(?:/[0-9]{1,3})?")
 _FW_MASK_RE = re.compile(r"[1-9][0-9]{0,2}")
@@ -4144,40 +4235,61 @@ def ssh_source_ok(src):
     return True
 
 
-def ssh_source_list(text):
-    """(comma list, None) for the operator's SSH sources ("" when none were
-    given), or (None, error)."""
+def fw_source_list(text, field, what):
+    """(comma list, None) for the operator's `what` sources sent in `field` (""
+    when none were given: absent or null), or (None, error) for anything that
+    is not text (0, false and [] included) or not a valid list."""
+    if text is None:
+        text = ""
     if not isinstance(text, str):
-        return None, "ssh_from must be text"
+        return None, "%s must be text" % field
     items = [x for x in re.split(r"[\s,]+", text) if x]
     if len(items) > FW_SSH_SOURCES_MAX:
-        return None, "at most %d SSH sources" % FW_SSH_SOURCES_MAX
+        return None, "at most %d %s sources" % (FW_SSH_SOURCES_MAX, what)
     for item in items:
         if not ssh_source_ok(item):
-            return None, ("not an address or a CIDR of /8 or narrower: %s" % item)[:200]
+            return None, ("%s sources: not an address or a CIDR of /8 or narrower: %s"
+                          % (what, item))[:200]
     return ",".join(items), None
+
+
+def ssh_source_list(text):
+    return fw_source_list(text, "ssh_from", "SSH")
+
+
+def p2p_source_list(text):
+    return fw_source_list(text, "p2p_from", "P2P")
 
 
 @app.route("/api/firewall/enable", methods=["POST"])
 def api_firewall_enable():
     """Enable ufw with firewall-setup.sh's lockout-safe defaults. POST
-    {"ssh_from": "<sources>"}: the sources become --ssh-from, so SSH is allowed
-    from them only; without them the engine uses the list .node-meta keeps, and
-    on mainnet refuses when there is none. The engine's message comes back as
-    is in `error`."""
+    {"ssh_from": "<sources>", "p2p_from": "<sources>"}, both optional: the SSH
+    sources become --ssh-from, so SSH is allowed from them only; the P2P sources
+    become --p2p-from, so the node's P2P ports accept them only. Without a list
+    the engine uses the one .node-meta keeps (on mainnet it refuses when there is
+    no SSH list); without any P2P list the P2P ports stay open to every address.
+    The helper gets `firewall-enable [<ssh>|-] [<p2p>]`. The engine's message
+    comes back as is in `error`."""
     data, err = _json_body()
     if err:
         return err
     det = detect_nodes()
     if not any(det.get(t, {}).get("mode") == "scripts" for t in NODE_TYPES):
         return jsonify({"ok": False, "error": "read-only (external node)"}), 403
-    ssh_from, error = ssh_source_list(data.get("ssh_from") or "")
+    ssh_from, error = ssh_source_list(data.get("ssh_from"))
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    p2p_from, error = p2p_source_list(data.get("p2p_from"))
     if error:
         return jsonify({"ok": False, "error": error}), 400
     argv = ["sudo", "-n", HELPER, "firewall-enable"]
-    if ssh_from:
-        argv.append(ssh_from)
+    if ssh_from or p2p_from:
+        argv.append(ssh_from or "-")
+    if p2p_from:
+        argv.append(p2p_from)
     rc, out, err = run(argv, timeout=180)
+    clear_meta_cache()      # the engine may have rewritten SSH_ALLOW_FROM / P2P_ALLOW_FROM
     done = _parse_json_tail(out)
     if isinstance(done, dict) and "ok" in done:
         ok = done.get("ok") is True
@@ -4938,8 +5050,8 @@ def _update_stream(argv, env=None, on_close=None, stdin_data=None, redact=()):
 
     If the client goes away, the generator stops without yielding again; the
     child gets 2 s to finish and is then terminated. `env`, when given, fully
-    replaces the child environment (Setup passes TN_SETUP_* and
-    TN_BLS_PASSPHRASE this way). `on_close` runs once when the response is
+    replaces the child environment (Setup passes TN_SETUP_* this way; the
+    passphrase never travels in it). `on_close` runs once when the response is
     closed, after the child has exited or been stopped (Setup releases its
     single-flight guard with it). `stdin_data`, when given, is written to the
     child's stdin, which is then closed (the setup passphrase, the dashboard
@@ -5030,6 +5142,7 @@ def api_update_prepare(node_type):
     if net is None:
         return jsonify({"error": "cannot tell this node's network (NETWORK in .node-meta)"}), 400
     if not release_tag_ok(net, ref):
+        # network-gated: example in the testnet form, chosen when the network is testnet
         example = "vX.Y.Z-adiri" if net == "testnet" else "vX.Y.Z"
         return jsonify({"error": f"ref must be a {net} release tag ({example}); "
                                  "branches and commit ids are refused"}), 400
@@ -5523,6 +5636,15 @@ KNOWN_SLUGS = {m["slug"] for m in NETWORKS.values()}
 
 STATUS_PAGE_BASE = "https://status.telscan.xyz"
 
+# The public status page the Network tab links to, per network slug. A network
+# without one (mainnet until its page is published, devnet) shows no link.
+STATUS_PAGE_LINKS = {"testnet": "https://status.adiri.telcoin.network/"}  # network-gated: status page per network
+
+
+def status_page_link(slug):
+    """The public status page URL of a network slug, or '' when it has none."""
+    return STATUS_PAGE_LINKS.get(slug, "")
+
 
 def status_page_config_url(slug):
     return f"{STATUS_PAGE_BASE}/api/status-page/{slug}"
@@ -5719,6 +5841,7 @@ def _build_network_status(slug, title_default):
     return {
         "title": title,
         "slug": slug,
+        "status_page": status_page_link(slug),
         "overall": overall,
         "monitors": monitors,
         "consensus_block": consensus,
@@ -5736,6 +5859,7 @@ def api_network_status():
             "configured": False,
             "available": False,
             "slug": slug,
+            "status_page": "",
             "overall": "unknown",
             "monitors": [],
             "consensus_block": None,
@@ -5762,6 +5886,7 @@ def api_network_status():
             "configured": True,
             "available": False,
             "slug": slug,
+            "status_page": status_page_link(slug),
             "title": title_default,
             "overall": "unknown",
             "monitors": [],

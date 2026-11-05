@@ -1,0 +1,79 @@
+PASS ci.yml: every uses: pin identical (10 lines)
+PASS ci.yml: persist-credentials lines identical (9)
+PASS integration.yml: every uses: pin identical (1 lines)
+PASS integration.yml: persist-credentials lines identical (1)
+PASS publish-installer.yml: every uses: pin identical (3 lines)
+PASS publish-installer.yml: persist-credentials lines identical (1)
+PASS ci.yml workflow permissions {}
+PASS ci.yml checksums name 'checksum freshness'
+PASS ci.yml checksums permissions {'contents': 'read'}
+PASS ci.yml checksums checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml checksums coe []
+PASS ci.yml fixture-tests name 'fixture tests (Linux bash 5)'
+PASS ci.yml fixture-tests permissions {'contents': 'read'}
+PASS ci.yml fixture-tests checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml fixture-tests coe []
+PASS ci.yml fixture-tests-macos name 'fixture tests (macOS bash 3.2)'
+PASS ci.yml fixture-tests-macos permissions {'contents': 'read'}
+PASS ci.yml fixture-tests-macos checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml fixture-tests-macos coe []
+PASS ci.yml hardening-lint name 'hardening lints'
+PASS ci.yml hardening-lint permissions {'contents': 'read'}
+PASS ci.yml hardening-lint checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml hardening-lint coe []
+PASS ci.yml manifest name 'release manifest'
+PASS ci.yml manifest permissions {'contents': 'read'}
+PASS ci.yml manifest checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml manifest coe []
+PASS ci.yml parse-linux name 'bash -n (Linux)'
+PASS ci.yml parse-linux permissions {'contents': 'read'}
+PASS ci.yml parse-linux checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml parse-linux coe []
+PASS ci.yml parse-macos name 'bash -n and bash-3.2 lint (macOS bash 3.2)'
+PASS ci.yml parse-macos permissions {'contents': 'read'}
+PASS ci.yml parse-macos checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml parse-macos coe []
+PASS ci.yml shellcheck name 'shellcheck'
+PASS ci.yml shellcheck permissions {'contents': 'read'}
+PASS ci.yml shellcheck checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml shellcheck coe ['shellcheck (warnings -- advisory)']
+PASS ci.yml ui-tests name 'Node Manager UI tests'
+PASS ci.yml ui-tests permissions {'contents': 'read'}
+PASS ci.yml ui-tests checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS ci.yml ui-tests coe []
+PASS integration.yml workflow permissions {}
+PASS integration.yml vm-assertions name 'Ubuntu 24.04 VM assertions'
+PASS integration.yml vm-assertions permissions {'contents': 'read'}
+PASS integration.yml vm-assertions checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS integration.yml vm-assertions coe []
+PASS publish-installer.yml workflow permissions {}
+PASS publish-installer.yml build name None
+PASS publish-installer.yml build permissions {'contents': 'read'}
+PASS publish-installer.yml build checkouts [('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', False)]
+PASS publish-installer.yml build coe []
+PASS publish-installer.yml deploy name None
+PASS publish-installer.yml deploy permissions {'pages': 'write', 'id-token': 'write'}
+PASS publish-installer.yml deploy checkouts []
+PASS publish-installer.yml deploy coe []
+PASS display name exactly once: bash -n (Linux) 1
+PASS display name exactly once: bash -n and bash-3.2 lint (macOS bash 3.2) 1
+PASS display name exactly once: shellcheck 1
+PASS display name exactly once: fixture tests (Linux bash 5) 1
+PASS display name exactly once: fixture tests (macOS bash 3.2) 1
+PASS display name exactly once: hardening lints 1
+PASS display name exactly once: release manifest 1
+PASS display name exactly once: Node Manager UI tests 1
+PASS display name exactly once: checksum freshness 1
+PASS display name exactly once: Ubuntu 24.04 VM assertions 1
+PASS hardening-lint runs tools/check-network-hits.sh
+PASS ui-tests runs helper_test.sh
+PASS parse-macos runs helper_test.sh under /bin/bash
+PASS ui-tests runs install_ui_test.sh
+PASS parse-macos runs install_ui_test.sh under /bin/bash
+PASS ui-tests runs open_ui_test.sh
+PASS parse-macos runs open_ui_test.sh under /bin/bash
+PASS hardening-lint has no dead fallback
+PASS ui-tests has no dead fallback
+PASS publish-installer writes no .nojekyll
+
+77 passed, 0 failed

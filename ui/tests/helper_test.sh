@@ -152,6 +152,11 @@ tn_write_root_file() {
     printf 'lib tn_write_root_file [%s] [%s] [%s]\n' "$1" "$2" "${3:-root}" >> "$HT_CALLS"
     cat > "$1.ht-tmp" && mv -f "$1.ht-tmp" "$1"
 }
+# tn_mainnet_enabled answers TN_TEST_MAINNET_RC when a case sets it, else the
+# library's own answer (rc 1 while TN_MAINNET_ENABLED is 0).
+if [[ -n "${TN_TEST_MAINNET_RC:-}" ]]; then
+    tn_mainnet_enabled() { return "$TN_TEST_MAINNET_RC"; }
+fi
 EOF
 
 # make_fake <path> <label> [shell line] -- a command that appends
@@ -188,15 +193,21 @@ lock_state() {
         echo free
     fi
 }
-# Image repositories the library accepts (TN_GHCR_IMAGE_REPO for testnet and
-# mainnet, TN_TESTNET_LEGACY_IMAGE_REPO for testnet only).
+# Image repositories the library recognises (TN_GHCR_LEGACY_IMAGE_REPO, the old
+# single package, and TN_TESTNET_LEGACY_IMAGE_REPO for testnet; the per-network
+# packages TN_TESTNET_IMAGE_REPO and TN_MAINNET_IMAGE_REPO).
 GHCR_REPO="ghcr.io/telcoin-association/telcoin-network"
 LEGACY_REPO="us-docker.pkg.dev/telcoin-network/tn-public/adiri"
-# docker ps lists two Telcoin Network containers: tn-node runs the ghcr.io image
-# by digest, observer a legacy image by tag. fork runs a look-alike repository
-# and other an unrelated image.
-DOCKER_PS="$(printf 'tn-node\t%s@sha256:%064d\nobserver\t%s:v0.16.0-adiri\nfork\t%s-fork:v0.16.0-adiri\nother\tbusybox:latest' \
-    "$GHCR_REPO" 0 "$LEGACY_REPO" "$GHCR_REPO")"
+TESTNET_PKG="ghcr.io/telcoin-association/tn-testnet"
+MAINNET_PKG="ghcr.io/telcoin-association/tn-mainnet"
+DEV_PKG="ghcr.io/telcoin-association/tn-dev"
+# docker ps lists five Telcoin Network containers: tn-node runs the old ghcr.io
+# package by digest, observer a legacy image by tag, tnt the testnet package by
+# tag, tnm the mainnet package by digest and tnd the dev package (TN_DEV_IMAGE_REPO,
+# on the devnet list) by digest. fork runs a look-alike repository and other an
+# unrelated image.
+DOCKER_PS="$(printf 'tn-node\t%s@sha256:%064d\nobserver\t%s:v0.16.0-adiri\ntnt\t%s:v0.17.0-adiri\ntnm\t%s@sha256:%064d\ntnd\t%s@sha256:%064d\nfork\t%s-fork:v0.16.0-adiri\nother\tbusybox:latest' \
+    "$GHCR_REPO" 0 "$LEGACY_REPO" "$TESTNET_PKG" "$MAINNET_PKG" 1 "$DEV_PKG" 2 "$GHCR_REPO")"
 printf '%s\n' "$DOCKER_PS" > "$T/docker-ps.out"
 # shellcheck disable=SC2016
 make_fake "$T/bin/docker" docker \
@@ -774,13 +785,58 @@ export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}:v0.16.
 refused "setup-keygen without a passphrase on stdin" setup-keygen < /dev/null
 printf ' padded \n' > "$T/pass-bad"
 refused "setup-keygen with a padded passphrase" setup-keygen < "$T/pass-bad"
-export TN_SETUP_NETWORK=mainnet; printf 'short-pass\n' > "$T/pass-short"
+export TN_SETUP_NETWORK=mainnet TN_TEST_MAINNET_RC=0; printf 'short-pass\n' > "$T/pass-short"
 refused "mainnet setup-keygen with a 10-byte passphrase" setup-keygen < "$T/pass-short"
-export TN_SETUP_NETWORK=testnet
+check_has "the 10-byte mainnet passphrase is what is refused" \
+    "the BLS passphrase is not usable (no line breaks, no spaces or tabs at either end, 16 bytes or more on mainnet)" \
+    "$(trace setup-keygen < "$T/pass-short")"
+unset TN_TEST_MAINNET_RC; export TN_SETUP_NETWORK=testnet
+# Mainnet only when the engine library offers it (tn_mainnet_enabled): refused
+# by the library's own answer (TN_MAINNET_ENABLED is 0 in this release), when the
+# function returns 1, and when the library has no such function (rc 127).
+export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0
+printf 'a good mainnet passphrase\n' > "$T/pass-main"
+MAINNET_OFF="mainnet is not enabled in this script release (TN_MAINNET_ENABLED in ${HELPER_LIB}); nothing was changed"
+refused "mainnet setup-keygen refused while TN_MAINNET_ENABLED is 0" setup-keygen < "$T/pass-main"
+check_has "the mainnet refusal names the library constant" "$MAINNET_OFF" "$(trace setup-keygen < "$T/pass-main")"
+export TN_TEST_MAINNET_RC=1
+refused "mainnet setup-keygen refused when tn_mainnet_enabled returns 1" setup-keygen < "$T/pass-main"
+check_has "tn_mainnet_enabled rc 1: the refusal names the constant" "$MAINNET_OFF" "$(trace setup-keygen < "$T/pass-main")"
+t="$(export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1; trace setup-finalize </dev/null)"
+check_has "mainnet setup-finalize refused when tn_mainnet_enabled returns 1" "$MAINNET_OFF" "$t"
+check_lacks "mainnet setup-finalize: setup-node.sh never runs" "setup-node [" "$t"
+unset TN_TEST_MAINNET_RC
+mkdir -p "$T/lib-old"
+printf 'source "%s"\nunset -f tn_mainnet_enabled\n' "$T/lib/common.sh" > "$T/lib-old/common.sh"
+HELPER_LIB="$T/lib-old/common.sh"
+check "an engine library without tn_mainnet_enabled: _lib_call gives 127" "127" \
+    "$(_lib_call tn_mainnet_enabled >/dev/null 2>&1; echo $?)"
+refused "mainnet setup-keygen refused when the library has no tn_mainnet_enabled" setup-keygen < "$T/pass-main"
+check_has "rc 127: the refusal names the constant" \
+    "mainnet is not enabled in this script release (TN_MAINNET_ENABLED in ${T}/lib-old/common.sh); nothing was changed" \
+    "$(trace setup-keygen < "$T/pass-main")"
+HELPER_LIB="$T/lib/common.sh"
+t="$(export TN_TEST_MAINNET_RC=0; trace setup-keygen < "$T/pass-main")"
+check_has "mainnet setup-keygen runs setup-node.sh when tn_mainnet_enabled says yes" \
+    "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [journal] [--passphrase-stdin]" "$t"
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_BUILD_REF; export TN_SETUP_NETWORK=testnet
 refused "setup-finalize without listener multiaddrs (NC-2)" setup-finalize < /dev/null
 DIGEST="$(printf '%064d' 0 | tr 0 a)"
-t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
-check_has "setup-keygen accepts the testnet image by digest" "rc=0" "$t"
+t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${TESTNET_PKG}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
+check_has "setup-keygen accepts the testnet package image by digest" "rc=0" "$t"
+# The pull rule, as setup-node applies it: the old single package is recognised in
+# a running container but never pulled, so setup-keygen refuses it; the mainnet
+# and dev packages are not testnet's.
+export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}@sha256:${DIGEST}"
+refused_in "setup-keygen refuses the old single ghcr package (never pulled)" setup-keygen
+check_has "setup-keygen names the old-package image it refuses" \
+    "invalid docker image for testnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${GHCR_REPO}@sha256:${DIGEST}" \
+    "$(trace setup-keygen < "$T/pass-in")"
+export TN_SETUP_DOCKER_IMAGE="${MAINNET_PKG}@sha256:${DIGEST}"
+refused_in "setup-keygen refuses the mainnet package on testnet" setup-keygen
+export TN_SETUP_DOCKER_IMAGE="ghcr.io/telcoin-association/tn-dev@sha256:${DIGEST}"
+refused_in "setup-keygen refuses the dev package on testnet" setup-keygen
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE
 t="$(export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-in")"
 check_has "setup-keygen accepts a legacy testnet image by digest" "rc=0" "$t"
 export TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${GHCR_REPO}-fork@sha256:${DIGEST}"; refused_in "setup-keygen refuses a look-alike repository" setup-keygen
@@ -788,12 +844,18 @@ check_has "setup-keygen names the look-alike image it refuses" \
     "invalid docker image for testnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${GHCR_REPO}-fork@sha256:${DIGEST}" \
     "$(trace setup-keygen < "$T/pass-in")"
 unset TN_SETUP_INSTALL_METHOD; unset TN_SETUP_DOCKER_IMAGE
-export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}"
+export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=docker TN_SETUP_DOCKER_IMAGE="${LEGACY_REPO}@sha256:${DIGEST}" TN_TEST_MAINNET_RC=0
 refused_in "setup-keygen refuses the legacy repository on mainnet" setup-keygen
 check_has "setup-keygen names the legacy image it refuses on mainnet" \
     "invalid docker image for mainnet (its repository by digest; a release goes in TN_SETUP_BUILD_REF): ${LEGACY_REPO}@sha256:${DIGEST}" \
     "$(trace setup-keygen < "$T/pass-in")"
-unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE; export TN_SETUP_NETWORK=testnet
+for img in "${TESTNET_PKG}" "${GHCR_REPO}" "ghcr.io/telcoin-association/tn-dev"; do
+    export TN_SETUP_DOCKER_IMAGE="${img}@sha256:${DIGEST}"
+    refused_in "setup-keygen refuses ${img##*/} on mainnet" setup-keygen
+done
+t="$(export TN_SETUP_DOCKER_IMAGE="${MAINNET_PKG}@sha256:${DIGEST}"; trace setup-keygen < "$T/pass-main")"
+check_has "setup-keygen accepts the mainnet package image by digest on mainnet" "rc=0" "$t"
+unset TN_SETUP_INSTALL_METHOD TN_SETUP_DOCKER_IMAGE TN_TEST_MAINNET_RC; export TN_SETUP_NETWORK=testnet
 fixture unified
 refused_in "setup-keygen refused on an installed node" setup-keygen
 export TN_SETUP_LIS_PRIMARY=/ip4/10.0.0.5/udp/49590/quic-v1 TN_SETUP_LIS_WORKER=/ip4/10.0.0.5/udp/49594/quic-v1
@@ -821,10 +883,10 @@ unset TN_SETUP_NETWORK
 
 # Release installs, the log target, --allow-no-tpm and the Docker image.
 fixture none
-t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
+t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0 TN_TEST_MAINNET_RC=0; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
 check_has "mainnet release keygen: --release-tag and the journal by default" \
     "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [journal] [--passphrase-stdin]" "$t"
-t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0 TN_SETUP_LOG_TARGET=file TN_SETUP_ALLOW_NO_TPM=1; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
+t="$(export TN_SETUP_NETWORK=mainnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v1.0.0 TN_SETUP_LOG_TARGET=file TN_SETUP_ALLOW_NO_TPM=1 TN_TEST_MAINNET_RC=0; printf 'a good mainnet passphrase\n' | trace setup-keygen)"
 check_has "mainnet: an explicit file target and --allow-no-tpm" \
     "setup-node [--json] [--phase=keygen] [--network] [mainnet] [--install-method] [release] [--release-tag] [v1.0.0] [--log-target] [file] [--allow-no-tpm] [--passphrase-stdin]" "$t"
 t="$(export TN_SETUP_NETWORK=testnet TN_SETUP_INSTALL_METHOD=release TN_SETUP_BUILD_REF=v0.16.0-adiri TN_SETUP_ALLOW_NO_TPM=1; printf 'a good passphrase\n' | trace setup-keygen)"
@@ -1092,7 +1154,7 @@ for bad in 0.0.0.0/0 0.0.0.0 ::/0 :: 10.0.0.0/7 10.0.0.0/0 010.0.0.1 10.0.0.256 
            "10.0.0.1;id" 'a$(id)' "$seventeen" "10.0.0.1/8/8"; do
     refused "firewall-enable refuses '$(label "$bad")'" firewall-enable "$bad"
 done
-refused "firewall-enable refuses a second argument" firewall-enable 10.0.0.1 10.0.0.2
+refused "firewall-enable refuses a third argument" firewall-enable 10.0.0.1 10.0.0.2 10.0.0.3
 refused "firewall-enable refuses --ssh-anywhere" firewall-enable --ssh-anywhere
 make_fake "$T/engine/firewall-old.sh" firewall-old
 t="$(FIREWALL_SCRIPT="$T/engine/firewall-old.sh"; trace firewall-enable 10.0.0.1)"
@@ -1286,11 +1348,13 @@ refused_after_ps() {
 }
 t="$(trace docker-detect)"
 check "docker-detect lists the containers of the library's repositories, by digest or by tag" \
-    "$(printf 'rc=0\ntn-node\nobserver')" "$(printf '%s\n' "$t" | sed -n '1,/^--- calls$/p' | sed '$d')"
+    "$(printf 'rc=0\ntn-node\nobserver\ntnt\ntnm\ntnd')" "$(printf '%s\n' "$t" | sed -n '1,/^--- calls$/p' | sed '$d')"
 refused_after_ps "docker-status refuses a container docker-detect does not list" docker-status other
 refused_after_ps "docker-status refuses a look-alike repository" docker-status fork
 t="$(trace docker-status observer)"
 check_has "docker-status takes a legacy-repository container" "rc=0" "$t"
+t="$(trace docker-status tnd)"
+check_has "docker-status takes a dev package container" "rc=0" "$t"
 refused_after_ps "docker-logs refuses an unknown container" docker-logs nope 10
 refused_after_ps "docker-logs refuses a zero line count" docker-logs tn-node 0
 t="$(trace docker-status tn-node)"
@@ -1380,6 +1444,71 @@ else
     printf 'SKIP  set-logrotate vs tn_install_logrotate (needs root, TN_UI_TEST_ROOT=1 and the telcoin-log group)\n'
 fi
 HELPER_LIB="$LIB_SAVE"
+
+# UI-S firewall
+# ---- firewall-enable: a P2P source list after the SSH one -----------------------------
+# The second argument is the P2P list, passed as --p2p-from with the SSH list's
+# checks; "-" (or nothing) in the first place means no SSH list. A list that
+# starts with / is refused before the per-entry checks: the engine would read it
+# as a file.
+# shellcheck disable=SC2016
+make_fake "$T/engine/firewall-setup.sh" firewall-setup '# --ssh-from --p2p-from
+echo "cwd [$(pwd)]" >> "'"$T"'/calls.log"'
+fixture unified
+t="$(trace firewall-enable 203.0.113.7)"
+check_has "firewall-enable with SSH only" "firewall-setup [--json] [--enable] [--ssh-from] [203.0.113.7]" "$t"
+check_lacks "firewall-enable with SSH only passes no P2P list" "[--p2p-from]" "$t"
+t="$(trace firewall-enable 203.0.113.0/24 198.51.100.0/24,2001:db8::/32)"
+check_has "firewall-enable with SSH and P2P lists" \
+    "firewall-setup [--json] [--enable] [--ssh-from] [203.0.113.0/24] [--p2p-from] [198.51.100.0/24,2001:db8::/32]" "$t"
+check_has "firewall-enable with a P2P list runs the engine from /" "cwd [/]" "$t"
+t="$(trace firewall-enable - 198.51.100.7)"
+check_has "firewall-enable with a P2P list alone ('-' for SSH)" \
+    "firewall-setup [--json] [--enable] [--p2p-from] [198.51.100.7]" "$t"
+t="$(trace firewall-enable "" 198.51.100.7)"
+check_has "firewall-enable with a P2P list alone (empty SSH)" \
+    "firewall-setup [--json] [--enable] [--p2p-from] [198.51.100.7]" "$t"
+t="$(trace firewall-enable -)"
+check_has "firewall-enable with '-' alone gives no list" "firewall-setup [--json] [--enable]" "$t"
+check_lacks "firewall-enable with '-' alone passes no --ssh-from" "[--ssh-from]" "$t"
+t="$(trace firewall-enable - "${sixteen%,}")"
+check_has "firewall-enable takes 16 P2P sources" "rc=0" "$t"
+for bad in 0.0.0.0/0 0.0.0.0 ::/0 :: 10.0.0.0/7 010.0.0.1 10.0.0.256 10.0.0.1/33 2001:db8::/129 \
+           etc/passwd 10.0.0.1,,10.0.0.2 ,10.0.0.1 10.0.0.1, "10.0.0.1;id" 'a$(id)' "$seventeen" \
+           "10.0.0.1/8/8" - --p2p-anywhere /etc/passwd /10.0.0.0/8 /; do
+    refused "firewall-enable refuses the P2P list '$(label "$bad")'" firewall-enable 203.0.113.7 "$bad"
+done
+t="$(trace firewall-enable 203.0.113.7 /etc/tn-p2p-sources)"
+check_has "a P2P list that starts with / is refused as a file path" \
+    "invalid P2P source list: /etc/tn-p2p-sources (a file path is not taken here; give addresses or CIDRs joined by commas)" "$t"
+check_lacks "a P2P file path never reaches the engine" "firewall-setup [" "$t"
+t="$(trace firewall-enable /etc/tn-ssh-sources)"
+check_has "an SSH list that starts with / is refused as a file path" \
+    "invalid SSH source list: /etc/tn-ssh-sources (a file path is not taken here; give addresses or CIDRs joined by commas)" "$t"
+t="$(trace firewall-enable - 10.0.0.1,,10.0.0.2)"
+check_has "a P2P value that is not a comma list is refused" \
+    "invalid P2P source list (addresses or CIDRs joined by commas): 10.0.0.1,,10.0.0.2" "$t"
+t="$(trace firewall-enable - 10.0.0.0/7)"
+check_has "a bad P2P entry is named" \
+    "invalid P2P source: 10.0.0.0/7 (an address, or a CIDR of /8 or narrower; never /0)" "$t"
+t="$(trace firewall-enable - "$seventeen")"
+check_has "seventeen P2P sources are refused" "too many P2P sources: 17 (at most 16)" "$t"
+t="$(trace firewall-enable 0.0.0.0/0 198.51.100.7)"
+check_has "a bad SSH list is refused before the P2P list" \
+    "invalid SSH source: 0.0.0.0/0 (an address, or a CIDR of /8 or narrower; never /0)" "$t"
+check_lacks "a bad SSH list with a good P2P list runs nothing" "firewall-setup [" "$t"
+make_fake "$T/engine/firewall-ssh-only.sh" firewall-ssh-only '# --ssh-from'
+t="$(FIREWALL_SCRIPT="$T/engine/firewall-ssh-only.sh"; trace firewall-enable 10.0.0.1 10.0.0.2)"
+check_has "firewall-enable with a P2P list refuses an engine without --p2p-from" \
+    "firewall-ssh-only.sh in the engine copy has no --p2p-from (it is older than this helper): run update-scripts.sh, then try again" "$t"
+check_lacks "an engine without --p2p-from is not run" "firewall-ssh-only [" "$t"
+t="$(HELPER_LIB="$T/nolib/common.sh"; trace firewall-enable - 10.0.0.1)"
+check_has "firewall-enable with a P2P list needs the library check" \
+    "the engine library ($T/nolib/common.sh) is missing or has no validate_health_src: run update-scripts.sh, then try again" "$t"
+t="$(trace firewall-enable 203.0.113.7 198.51.100.7)"
+check "the audit log records both lists" "yes" \
+    "$(grep -q '"sub":"firewall-enable","args":"203.0.113.7 198.51.100.7","phase":"start"' "$AUDIT_LOG" && echo yes)"
+make_fake "$T/engine/firewall-setup.sh" firewall-setup
 
 # ---- No engine call carries a role flag ---------------------------------------------
 all_calls="$(cat "$T/all-calls.log")"
