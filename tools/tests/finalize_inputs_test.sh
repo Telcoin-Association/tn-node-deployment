@@ -4,7 +4,8 @@
 # docker image and binary path come from the finalize flags or, when a flag
 # leaves one out, from what keygen recorded in .node-meta; a flag that differs
 # from the recorded value stops finalize before anything is written, except
-# --docker-image, which goes to the override that replaces the recorded image. An
+# --docker-image, which goes to the override that replaces the recorded image, as
+# --release-tag does for a docker install. An
 # installed node is refused before the update lock and its layout migration
 # (run_json_mode). A copy of setup-node.sh without its last line is sourced at
 # the top level. Maintainer tooling (not updater-tracked). bash 3.2 safe.
@@ -50,10 +51,11 @@ keygen_meta() { printf '%s\n' "PASSPHRASE_METHOD=stdin" "$@" > "$CONFIG_DIR/.nod
 # (The body is a function of its own: bash 3.2 misreads a case inside $(...).)
 fin_body() {
     local kv
-    INSTALL_METHOD="" DATA_DIR="$DEFAULT_DATA_DIR" DOCKER_IMAGE="" BINARY_PATH=""
+    INSTALL_METHOD="" DATA_DIR="$DEFAULT_DATA_DIR" DOCKER_IMAGE="" BINARY_PATH="" RELEASE_TAG=""
     for kv in "$@"; do
         case "$kv" in
             INSTALL_METHOD=*) INSTALL_METHOD="${kv#*=}" ;;
+            RELEASE_TAG=*) RELEASE_TAG="${kv#*=}" ;;
             DATA_DIR=*) DATA_DIR="${kv#*=}" ;;
             DOCKER_IMAGE=*) DOCKER_IMAGE="${kv#*=}" ;;
             BINARY_PATH=*) BINARY_PATH="${kv#*=}" ;;
@@ -84,17 +86,23 @@ fin DATA_DIR=/mnt/other
 check_rc "--data-dir other than keygen's: refused" 1 "$RC"
 check "data dir refusal names both" yes "$(has "$ERR" "--data-dir /mnt/other differs from /mnt/tn")"
 # A --docker-image other than keygen's replaces it (finalize_docker_override, tested
-# in setup_release_test.sh): handed over with the recorded image; the recorded
-# image's own checks do not run.
-finalize_docker_override() { printf '%s %s\n' "$1" "$DOCKER_IMAGE" > "$T/override"; }
+# in setup_release_test.sh): handed over with the recorded image and the flag; the
+# recorded image's own checks do not run. So does --release-tag.
+finalize_docker_override() { printf '%s %s %s\n' "$1" "$2" "$3" > "$T/override"; }
 : > "$T/featcheck"
 fin DOCKER_IMAGE="$IMG_OTHER"
 check "--docker-image other than keygen's: handed to the override with the recorded image" \
-    "0 ${IMG} ${IMG_OTHER}" "$RC $(cat "$T/override" 2>/dev/null)"
+    "0 ${IMG} --docker-image ${IMG_OTHER}" "$RC $(cat "$T/override" 2>/dev/null)"
 check "--docker-image other than keygen's: the recorded image is not checked" "" "$(cat "$T/featcheck")"
 rm -f "$T/override"
 fin DOCKER_IMAGE="$IMG"
 check "--docker-image equal to keygen's: no override" "0 none" "$RC $(cat "$T/override" 2>/dev/null || echo none)"
+: > "$T/featcheck"
+fin RELEASE_TAG=v0.17.0-adiri
+check "--release-tag, docker install: handed to the override with the recorded image" \
+    "0 ${IMG} --release-tag v0.17.0-adiri" "$RC $(cat "$T/override" 2>/dev/null)"
+check "--release-tag, docker install: the recorded image is not checked" "" "$(cat "$T/featcheck")"
+rm -f "$T/override"
 unset -f finalize_docker_override
 # A keygen record that names the image by tag is refused, pointing at the digest form.
 keygen_meta "INSTALL_METHOD=docker" "DATA_DIR=/mnt/tn" "DOCKER_IMAGE=${IMG_TAG}"
