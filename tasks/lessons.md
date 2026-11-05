@@ -568,3 +568,15 @@ results were for the wrong tree and had to be discarded.
 **Rule:** in agent briefs, every docker command uses the worktree's absolute path
 (`-v /home/.../tnd-r2-<pkg>:/w`), never `$PWD`, and a hand-back names the tree each count was
 measured on.
+
+### A new real call in a library path reaches every fixture that does not stub it
+
+**Symptom:** IMG-2 moved the image pull and the build-feature check into setup-node's finalize
+path. Two cases of `setup_passphrase_test.sh`, which had never needed a `docker` stub because
+finalize never called docker before, ran a real `docker pull` of `DEFAULT_DOCKER_IMAGE` on the
+host (the image was already there; no container started).
+
+**Rule:** when a change adds a call to a real tool (docker, gpg, systemctl, curl) on a path that
+fixtures drive end to end, run the whole suite once with a sentinel on `PATH` that logs and
+exits 1 for that tool, before the real environment sees the change; V7-IMG's `t_leak.sh` is the
+pattern. A fixture that still reaches the sentinel needs a stub, not a note.
