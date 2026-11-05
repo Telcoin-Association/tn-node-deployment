@@ -28,8 +28,9 @@ package specs `tasks/spec-alerts-<PKG>.md`, checkpoints `tasks/ckpt-alerts-<PKG>
 ## W5 Release prep and PR (orchestrator)
 - [x] `tools/gen-checksums.sh`; guide PDF built twice in the container ("PDF unchanged")
 - [x] `git diff --check`; nine commits in the planned order, no trailers
-- [ ] push; PR against `hardening-followups` ("Closes #60"); comment on #59 about the cut order
-- [ ] `tasks/todo.md` review section; back to `hardening-followups`
+- [x] push; PR #61 against `hardening-followups` ("Closes #60"); comment on #59 about the cut order
+- [x] CI round: the VM job's dbus finding (root pre-step), two BSD test fixes, two rebases; force-push
+- [x] `tasks/todo.md` review section (the checkout stays on `private-alerts`: another worktree holds `hardening-followups`)
 
 ---
 

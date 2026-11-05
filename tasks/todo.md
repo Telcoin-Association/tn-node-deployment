@@ -62,6 +62,19 @@ specs `tasks/spec-alerts-<PKG>.md`, checkpoints `tasks/ckpt-alerts-<PKG>.md`.
   directory); the "Ubuntu 24.04 VM assertions" job proves DynamicUser, LoadCredential,
   `systemctl show` under the sandbox and the push from inside it.
 
+### CI round (2026-11-05)
+
+- The first CI run on PR #61 found three things the local gates could not: the "Ubuntu 24.04 VM
+  assertions" job showed the runner never saw the node's service state (a `DynamicUser` cannot
+  use the system bus: dbus-daemon drops a connection from a uid it cannot resolve, reproduced on
+  systemd 255 and fixed with a root `ExecStartPre=-+` that writes `systemctl show` to
+  `/run/telcoin/heartbeat-service`, proven in a privileged systemd container); the macOS bash 3.2
+  fixture job failed two new tests on BSD tools (`grep -o` with `\|` alternation, an awk `-v` value
+  holding a newline); and the base branch had moved on (rebased twice, three conflicts resolved:
+  update-scripts' `local` line, the release note's #49 bullet, the sidecars).
+- Every other check was green on the first run: bash -n on both bashes, shellcheck, the Linux
+  fixture suite, the hardening lints, the release manifest, checksum freshness, the UI tests.
+
 ### Process notes
 
 - Agent budgets: A1b (342k), V1 (336k), V1d (312k), F-A (308k), A2 (299k) and V2 (265k) ran past

@@ -669,3 +669,20 @@ ENABLE_* defaults :270-277, region block :420-430, `write_node_meta` call :2575-
 - **Undo helper (V1 W1 fix shape).** `alerts_disable` gains a `keep-meta` mode that skips its
   `.node-meta` write; `_alerts_enable_undo` uses it and then restores the start state itself
   (`meta_set` of the value read, or `meta_unset ENABLE_ALERTS` when the key was absent).
+- **The service state comes from root (CI VM finding, decided 2026-11-05).** A dynamic user
+  cannot talk to the system bus: `dbus-daemon` drops a connection from a uid it cannot resolve,
+  so every `systemctl` call from the runner fails with "Transport endpoint is not connected"
+  (reproduced on systemd 255 with `DynamicUser=yes` alone; a static user such as `nobody`
+  works; no other sandbox option matters). The unit therefore gains, right after `ExecStart=`,
+  `ExecStartPre=-+/bin/sh -c 'umask 022; install -d -o root -g root -m 0755 /run/telcoin && rm -f /run/telcoin/heartbeat-service /run/telcoin/heartbeat-service.tmp && systemctl show --no-pager -p LoadState -p ActiveState -p SubState -p NRestarts -p ActiveEnterTimestampMonotonic -p StateChangeTimestampMonotonic "${ALERTS_SERVICE}.service" > /run/telcoin/heartbeat-service.tmp && mv -f /run/telcoin/heartbeat-service.tmp /run/telcoin/heartbeat-service'`
+  (the `+` runs it as root outside the sandbox; `-` tolerates a failure; `/run/telcoin` is the
+  root 0755 update-lock dir, so only root can write there and a symlink attack from the runner
+  is impossible; the file is root 0644). The runner reads
+  `${TN_HB_SERVICE_STATE:-/run/telcoin/heartbeat-service}` when it is a regular file (not a
+  symlink) it can read, parses it through the same key whitelist, and falls back to
+  `systemctl show` when the file is absent (the fixture tests' stubs, an older unit). The pre-step
+  removes the old file before it writes, so a stale answer cannot survive a failed pre-step.
+  `alerts_disable` and remove-node's `remove_alerts` remove `/run/telcoin/heartbeat-service`
+  (never the directory). Proven in a privileged systemd 255 container: the file reads
+  `ActiveState=inactive` / `SubState=dead` after the node stops, the runner cannot write in
+  `/run/telcoin`, `systemd-analyze security` stays at 1.5 and `verify` is clean.
