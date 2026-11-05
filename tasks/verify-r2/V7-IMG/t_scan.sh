@@ -68,7 +68,8 @@ done
 # The differences, pinned as measured on c0716f3 (remove-node: grep -E over the
 # whole line; the UI: an exact tn_docker_repo_ok on testnet or mainnet).
 check "differs: tn-dev counted by remove-node" yes "$(has "$RM_NAMES" c-dev-dig)"
-check "differs: tn-dev not counted by the UI" no "$(has "$UI_NAMES" c-dev-dig)"
+# W2 fixed by IMG-2 (d2fc0b1): docker-detect also counts the devnet repositories.
+check "W2 fixed: tn-dev counted by the UI" yes "$(has "$UI_NAMES" c-dev-dig)"
 check "differs: tn-testnet-evil counted by remove-node (substring)" yes "$(has "$RM_NAMES" c-prefix)"
 check "differs: tn-testnet-evil not counted by the UI" no "$(has "$UI_NAMES" c-prefix)"
 check "differs: a container named *-adiri counted by remove-node" yes "$(has "$RM_NAMES" c-namedadiri-adiri)"

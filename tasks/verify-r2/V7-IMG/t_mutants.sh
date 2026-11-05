@@ -166,7 +166,7 @@ mut_apply() {
         M40) mut_sub "$d/ui/telcoin-ui-helper.sh" "" '&& _lib_req tn_docker_pull_repo_ok "$2" "${1%%@*}" >/dev/null' '&& true' ;;
         M41) mut_sub "$d/remove-node.sh" "" '(telcoin-network|tn-mainnet|tn-testnet|tn-dev)' '(telcoin-network|tn-testnet|tn-dev)' ;;
         M42) mut_sub "$d/remove-node.sh" "" '(telcoin-network|tn-mainnet|tn-testnet|tn-dev)' '(telcoin-network|tn-mainnet|tn-dev)' ;;
-        M43) mut_sub "$d/ui/telcoin-ui-helper.sh" "" 'if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo"; then' 'if tn_docker_repo_ok testnet "$repo"; then' ;;
+        M43) mut_sub "$d/ui/telcoin-ui-helper.sh" "" 'if tn_docker_repo_ok testnet "$repo" || tn_docker_repo_ok mainnet "$repo" \' 'if tn_docker_repo_ok testnet "$repo" \' ;;
         M44) mut_sub "$d/setup-node.sh" "setup_fail() {" '        json_event error "$1"' '        :' ;;
         M45) mut_sub "$d/update-node.sh" "" 'json_event error "the image ${DOCKER_TARGET_IMAGE} was not prepared (see the warning above)"; return 1' 'json_event warn "the image ${DOCKER_TARGET_IMAGE} was not prepared (see the warning above)"' ;;
         M46) mut_sub "$d/edit-config.sh" 'edit_error "refusing ${new_image}: it is not a ${net} image (see above); the image is not changed"' '        return 1' '        return 0' ;;
