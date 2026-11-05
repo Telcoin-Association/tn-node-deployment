@@ -7,7 +7,8 @@
 # old single ghcr package is recognised but never pulled) and is
 # required at keygen, --release-tag and source or release installs are refused;
 # finalize holds the image keygen recorded to the pull rule and the build-feature
-# check before the config, the unit and the container; the interactive image
+# check before the config, the unit and the container, and --docker-image there
+# replaces it through keygen's checks, recorded only when all pass; the interactive image
 # prompt stops at the end of input; the
 # live-restore merge of /etc/docker/daemon.json keeps other settings, leaves an
 # already-set file alone and stops on a file that is not a JSON object; and
@@ -130,6 +131,8 @@ flags "devnet: docker by main-<sha> refused" 1 devnet docker "" "" "${R}:main-01
 flags "devnet: docker by a testnet release tag refused" 1 devnet docker "" "" "${R}:v0.16.0-adiri"
 flags "devnet: finalize of a docker install without --docker-image (keygen recorded it)" 0 devnet docker "" "" "" finalize
 flags "devnet: finalize with no install method (read back from .node-meta)" 0 devnet "" "" "" "" finalize
+flags "finalize takes --docker-image (it replaces the recorded image)" 0 testnet docker "" "" "${R}@sha256:${D64}" finalize
+flags "finalize: --docker-image of the old single package refused" 1 testnet docker "" "" "ghcr.io/telcoin-association/telcoin-network@sha256:${D64}" finalize
 flags "devnet: --release-tag x-devnet refused" 1 devnet docker x-devnet "" ""
 check "devnet: the --release-tag refusal says devnet has no signed releases" yes "$(grep -q -- '--release-tag x-devnet is refused on devnet: devnet has no signed releases' "$T/sn.err" && echo yes || echo no)"
 flags "devnet: --release-tag x-devnet refused at finalize too" 1 devnet docker x-devnet "" "" finalize
@@ -204,17 +207,25 @@ rm -f "$T/root/etc/telcoin/.node-meta"
 # .node-meta meets the rules keygen's preflight applied (finalize_install_inputs),
 # before the config, the unit and the container: a repository a new pull for the
 # network takes (the old single package is refused) and the build-feature check.
-# The steps after it are logged beside the check.
+# The steps after it are logged beside the check: the resolve (the real
+# tn_docker_resolve_ref, wrapped), the pull, the digest check, every .node-meta
+# write ("record", through tn_write_root_file), the config (which also keeps the
+# DOCKER_IMAGE line .node-meta holds at that moment), the unit and the start.
 printf 'stored\n' > "$T/root/etc/telcoin/bls-passphrase"
-fin_meta() { printf 'PASSPHRASE_METHOD=stdin\nINSTALL_METHOD=docker\nDOCKER_IMAGE=%s\n' "$1" > "$T/root/etc/telcoin/.node-meta"; }
-FIN='CONFIG_DIR="$T/root/etc/telcoin" JSON_MODE=true INSTALL_METHOD= DOCKER_IMAGE= BINARY_PATH=; PRIMARY_LISTENER_MULTIADDR=/ip4/127.0.0.1/udp/49590/quic-v1; WORKER_LISTENER_MULTIADDR=/ip4/127.0.0.1/udp/49594/quic-v1; json_event() { :; }; finalize_node_extra_flags() { :; }; setup_release_lock() { :; }; step_host_baseline() { :; }; step_write_config() { echo config >> "$T/docker.log"; }; step_create_service() { echo service >> "$T/docker.log"; }; json_done() { echo done >> "$T/docker.log"; }; json_phase_finalize'
-fin_calls() { tr '\n' '|' < "$T/docker.log" | sed 's/|$//'; }
+FMETA="$T/root/etc/telcoin/.node-meta"
+fin_meta() { printf 'PASSPHRASE_METHOD=stdin\nINSTALL_METHOD=docker\nDOCKER_IMAGE=%s\n' "$1" > "$FMETA"; }
+# shellcheck disable=SC2016
+FIN_WRAP='eval "$(declare -f tn_docker_resolve_ref | sed "1s/^tn_docker_resolve_ref /real_resolve_ref /")"; tn_docker_resolve_ref() { printf "resolve %s\n" "$2" >> "$T/docker.log"; real_resolve_ref "$@"; }'
+# shellcheck disable=SC2016
+FIN='CONFIG_DIR="$T/root/etc/telcoin" JSON_MODE=true INSTALL_METHOD= BINARY_PATH=; PRIMARY_LISTENER_MULTIADDR=/ip4/127.0.0.1/udp/49590/quic-v1; WORKER_LISTENER_MULTIADDR=/ip4/127.0.0.1/udp/49594/quic-v1; json_event() { :; }; finalize_node_extra_flags() { :; }; setup_release_lock() { :; }; step_host_baseline() { :; }; docker() { printf "%s\n" "$*" >> "$T/docker.log"; }; tn_docker_holds_digest() { echo held >> "$T/docker.log"; return 0; }; tn_write_root_file() { echo record >> "$T/docker.log"; cat > "$1"; }; step_write_config() { echo config >> "$T/docker.log"; grep "^DOCKER_IMAGE=" "$T/root/etc/telcoin/.node-meta" > "$T/meta-at-config"; }; step_create_service() { echo service >> "$T/docker.log"; }; json_done() { echo done >> "$T/docker.log"; }; '"${FIN_WRAP}"'; json_phase_finalize'
+fin_calls() { uniq "$T/docker.log" | tr '\n' '|' | sed 's/|$//'; }
+meta_same() { cmp -s "$FMETA" "$T/meta.before" && echo same || echo changed; }
 fin_meta "${GH}@sha256:${D64}"
 : > "$T/docker.log"
 rc="$(sn "NETWORK=testnet; $FIN")"
 check "finalize, testnet: a recorded image of the old single package refused before anything" "1 " "$rc $(fin_calls)"
-check "finalize: the refusal names the image and the repository" yes \
-    "$(grep -qF "Refusing the image ${GH}@sha256:${D64}: setup runs only ghcr.io/telcoin-association/tn-testnet@sha256:<digest>. No container was started; run --phase=keygen again with a testnet image." "$T/sn.err" && echo yes || echo no)"
+check "finalize: the refusal names the image, the repository and the way out" yes \
+    "$(grep -qF "Refusing the image ${GH}@sha256:${D64}: setup runs only ghcr.io/telcoin-association/tn-testnet@sha256:<digest>. No container was started; to replace it, run finalize again with --docker-image ghcr.io/telcoin-association/tn-testnet@sha256:<digest> (a testnet image)." "$T/sn.err" && echo yes || echo no)"
 fin_meta "${R}@sha256:${D64}"
 : > "$T/docker.log"
 rc="$(sn "NETWORK=testnet; $FIN")"
@@ -223,8 +234,8 @@ check "finalize, testnet: a good recorded image is checked, then config, unit an
 : > "$T/docker.log"
 rc="$(sn "NETWORK=testnet; FEAT_RC=1; $FIN")"
 check "finalize, the feature check refuses: nothing after it" "1 check testnet ${R}@sha256:${D64}" "$rc $(fin_calls)"
-check "finalize, the feature check refuses: no container started" yes \
-    "$(grep -qF "Refusing the image ${R}@sha256:${D64}: it is not a testnet image (see above). No container was started; run --phase=keygen again with a testnet image." "$T/sn.err" && echo yes || echo no)"
+check "finalize, the feature check refuses: no container started, the way out named" yes \
+    "$(grep -qF "Refusing the image ${R}@sha256:${D64}: it is not a testnet image (see above). No container was started; to replace it, run finalize again with --docker-image ghcr.io/telcoin-association/tn-testnet@sha256:<digest> (a testnet image)." "$T/sn.err" && echo yes || echo no)"
 fin_meta "${GD}@sha256:${D64}"
 : > "$T/docker.log"
 rc="$(sn "NETWORK=devnet; $FIN")"
@@ -234,9 +245,46 @@ fin_meta "${GH}@sha256:${D64}"
 : > "$T/docker.log"
 rc="$(sn "NETWORK=devnet; $FIN")"
 check "finalize, devnet: the old single package refused before anything" "1 " "$rc $(fin_calls)"
-rm -f "$T/root/etc/telcoin/.node-meta" "$T/root/etc/telcoin/bls-passphrase"
-unset -f fin_meta fin_calls
-unset FIN
+# --docker-image at finalize naming another image than the recorded one replaces it
+# through keygen's checks: resolved (the pull rule), pulled by digest, held under it,
+# checked for its build features, and only then recorded in .node-meta (image,
+# digest, and the release tag removed when none names it), before the config. A
+# refusal leaves .node-meta as it was; the recorded image itself is no override.
+OV="ghcr.io/telcoin-association/tn-testnet@sha256:$(printf '%s' "$D64" | tr 0 e)"
+fin_meta "${GH}@sha256:${D64}"
+printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.16.0-adiri\n' "$D64" >> "$FMETA"
+: > "$T/docker.log"; rm -f "$T/meta-at-config"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; $FIN")"
+check "finalize --docker-image: resolve, pull, digest check, feature check, record, then config, unit and start" \
+    "0 resolve ${OV}|pull ${OV}|held|check testnet ${OV}|record|config|service|done" "$rc $(fin_calls)"
+check "finalize --docker-image: .node-meta names the new image when the config is written" \
+    "DOCKER_IMAGE=${OV}" "$(cat "$T/meta-at-config" 2>/dev/null)"
+check_has "finalize --docker-image: the new digest recorded" "DOCKER_IMAGE_DIGEST=${OV##*@}" "$(cat "$FMETA")"
+check_lacks "finalize --docker-image: the old release tag removed" "RELEASE_TAG=" "$(cat "$FMETA")"
+fin_meta "${R}@sha256:${D64}"
+cp "$FMETA" "$T/meta.before"
+OLDPKG="${GH}@sha256:$(printf '%s' "$D64" | tr 0 d)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OLDPKG}'; $FIN")"
+check "finalize --docker-image of the old single package: refused at the resolve, nothing after it" \
+    "1 resolve ${OLDPKG}" "$rc $(fin_calls)"
+check "finalize --docker-image of the old single package: .node-meta as it was" same "$(meta_same)"
+check "finalize --docker-image refused: says .node-meta was not changed" yes \
+    "$(grep -qF "Refusing the image ${OLDPKG} given with --docker-image (see above). No container was started and .node-meta was not changed." "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; FEAT_RC=1; $FIN")"
+check "finalize --docker-image, the feature check refuses: nothing after it" \
+    "1 resolve ${OV}|pull ${OV}|held|check testnet ${OV}" "$rc $(fin_calls)"
+check "finalize --docker-image, the feature check refuses: .node-meta as it was" same "$(meta_same)"
+check "finalize --docker-image, the feature check refuses: says .node-meta was not changed" yes \
+    "$(grep -qF "Refusing the image ${OV}: it is not a testnet image (see above). No container was started and .node-meta was not changed." "$T/sn.err" && echo yes || echo no)"
+: > "$T/docker.log"
+rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${R}@sha256:${D64}'; $FIN")"
+check "finalize --docker-image equal to the recorded image: no override, as without the flag" \
+    "0 check testnet ${R}@sha256:${D64}|config|service|done same" "$rc $(fin_calls) $(meta_same)"
+rm -f "$FMETA" "$T/root/etc/telcoin/bls-passphrase" "$T/meta.before" "$T/meta-at-config"
+unset -f fin_meta fin_calls meta_same
+unset FIN FIN_WRAP FMETA OV OLDPKG
 
 # live-restore merge (tn_write_root_file and systemctl stubbed).
 LR='tn_write_root_file() { cat > "$1"; }; systemctl() { printf "%s\n" "$*" >> "$T/systemctl.log"; }; _setup_docker_live_restore'

@@ -3,7 +3,8 @@
 # --phase=finalize (finalize_install_inputs). The install method, data dir,
 # docker image and binary path come from the finalize flags or, when a flag
 # leaves one out, from what keygen recorded in .node-meta; a flag that differs
-# from the recorded value stops finalize before anything is written. An
+# from the recorded value stops finalize before anything is written, except
+# --docker-image, which goes to the override that replaces the recorded image. An
 # installed node is refused before the update lock and its layout migration
 # (run_json_mode). A copy of setup-node.sh without its last line is sourced at
 # the top level. Maintainer tooling (not updater-tracked). bash 3.2 safe.
@@ -82,9 +83,19 @@ check "the refusal says nothing changed" yes "$(has "$ERR" "Nothing was changed"
 fin DATA_DIR=/mnt/other
 check_rc "--data-dir other than keygen's: refused" 1 "$RC"
 check "data dir refusal names both" yes "$(has "$ERR" "--data-dir /mnt/other differs from /mnt/tn")"
+# A --docker-image other than keygen's replaces it (finalize_docker_override, tested
+# in setup_release_test.sh): handed over with the recorded image; the recorded
+# image's own checks do not run.
+finalize_docker_override() { printf '%s %s\n' "$1" "$DOCKER_IMAGE" > "$T/override"; }
+: > "$T/featcheck"
 fin DOCKER_IMAGE="$IMG_OTHER"
-check_rc "--docker-image other than keygen's: refused" 1 "$RC"
-check "image refusal names both" yes "$(has "$ERR" "--docker-image ${IMG_OTHER} differs from ${IMG}")"
+check "--docker-image other than keygen's: handed to the override with the recorded image" \
+    "0 ${IMG} ${IMG_OTHER}" "$RC $(cat "$T/override" 2>/dev/null)"
+check "--docker-image other than keygen's: the recorded image is not checked" "" "$(cat "$T/featcheck")"
+rm -f "$T/override"
+fin DOCKER_IMAGE="$IMG"
+check "--docker-image equal to keygen's: no override" "0 none" "$RC $(cat "$T/override" 2>/dev/null || echo none)"
+unset -f finalize_docker_override
 # A keygen record that names the image by tag is refused, pointing at the digest form.
 keygen_meta "INSTALL_METHOD=docker" "DATA_DIR=/mnt/tn" "DOCKER_IMAGE=${IMG_TAG}"
 fin

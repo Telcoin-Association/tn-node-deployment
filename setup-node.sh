@@ -72,7 +72,10 @@
 #                            and untracked files in /opt/telcoin-source instead of stopping.
 # Source builds run as the unprivileged tn-build account with its own Rust toolchain
 # (rustup-init pinned by version and sha256); root only installs the result. Docker
-# images run by digest from the network's repository.
+# images run by digest from the network's repository. In a --json finalize run,
+# --docker-image <repository>@sha256:<digest> naming another image than the one keygen
+# recorded replaces it: it is checked and pulled as keygen's would be, and recorded in
+# .node-meta before the config, the unit and the container.
 #
 # NODE FLAGS (optional). Setup asks the installed release whether it knows each flag
 # given, and stops when it does not.
@@ -3104,7 +3107,9 @@ finalize_same_as_keygen() {
 # docker image meets the rules keygen's preflight applied before any container of
 # it starts: a repository a new pull for the network takes (tn_docker_pull_repo_ok)
 # and a binary built for the network (tn_docker_image_network_ok, on the image
-# keygen pulled; it never pulls).
+# keygen pulled; it never pulls). A --docker-image that names another image than
+# the recorded one replaces it (finalize_docker_override), so a recorded image that
+# fails those rules can be corrected without a new keygen.
 finalize_install_inputs() {
     local meta="${CONFIG_DIR}/.node-meta" rec="" repo
     # The passphrase form keygen recorded wins over a flag: the stored file is that one.
@@ -3136,21 +3141,24 @@ finalize_install_inputs() {
     esac
     if [[ "$INSTALL_METHOD" == "docker" ]]; then
         setup_meta_read rec DOCKER_IMAGE "$meta"
-        finalize_same_as_keygen docker-image "$DOCKER_IMAGE" "$rec"
-        DOCKER_IMAGE="${DOCKER_IMAGE:-$rec}"
+        repo="$(tn_docker_repo_for "$NETWORK")" \
+            || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
+        if [[ -n "$DOCKER_IMAGE" && "$DOCKER_IMAGE" != "$rec" ]]; then
+            finalize_docker_override "$rec"
+            return 0
+        fi
+        DOCKER_IMAGE="$rec"
         if [[ -z "$DOCKER_IMAGE" ]]; then
             setup_fail "No docker image to run: pass --docker-image, or run --phase=keygen first (it records the image in ${meta})."
         fi
         if ! validate_docker_image "$DOCKER_IMAGE"; then
             setup_fail "DOCKER_IMAGE=${DOCKER_IMAGE} in ${meta} is not an image reference such as $(_setup_image_example); pass --docker-image."
         fi
-        repo="$(tn_docker_repo_for "$NETWORK")" \
-            || setup_fail "No ${NETWORK} image repository is set (see above), so a Docker install is refused on ${NETWORK}."
         if ! tn_docker_pull_repo_ok "$NETWORK" "${DOCKER_IMAGE%%@*}"; then
-            setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>. No container was started; run --phase=keygen again with a ${NETWORK} image."
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: setup runs only ${repo}@sha256:<digest>. No container was started; to replace it, run finalize again with --docker-image ${repo}@sha256:<digest> (a ${NETWORK} image)."
         fi
         if ! tn_docker_image_network_ok "$NETWORK" "$DOCKER_IMAGE" setup_progress; then
-            setup_fail "Refusing the image ${DOCKER_IMAGE}: it is not a ${NETWORK} image (see above). No container was started; run --phase=keygen again with a ${NETWORK} image."
+            setup_fail "Refusing the image ${DOCKER_IMAGE}: it is not a ${NETWORK} image (see above). No container was started; to replace it, run finalize again with --docker-image ${repo}@sha256:<digest> (a ${NETWORK} image)."
         fi
         return 0
     fi
@@ -3166,6 +3174,45 @@ finalize_install_inputs() {
         fi
         check_binary_path
     fi
+    return 0
+}
+
+# finalize_docker_override RECORDED -- finalize's --docker-image (DOCKER_IMAGE) names
+# another image than RECORDED, the one keygen wrote to .node-meta: take it through
+# keygen's preflight for a given image (tn_docker_resolve_ref: the pull rule, and on
+# mainnet the digest rule; the oldest supported release; the pull by digest and its
+# digest check; the build-feature check), then record it in .node-meta (DOCKER_IMAGE,
+# DOCKER_IMAGE_DIGEST, and RELEASE_TAG, removed when no release names the image), so
+# the config, the unit and the container use it. A refusal at any step stops before
+# .node-meta is written.
+finalize_docker_override() {
+    local rec="${1:-}" out img tag
+    setup_progress step "Replacing the recorded image ${rec:-(none)} with ${DOCKER_IMAGE}"
+    out="$(tn_docker_resolve_ref "$NETWORK" "$DOCKER_IMAGE" setup_progress)" \
+        || setup_fail "Refusing the image ${DOCKER_IMAGE} given with --docker-image (see above). No container was started and .node-meta was not changed."
+    img="${out%% *}"
+    tag="${out#* }"
+    check_release_floor "${tag:-$img}"
+    print_step "Pulling Docker image: ${img}..."
+    if ! docker pull "$img" 9>&-; then
+        setup_fail "Failed to pull Docker image: ${img}. No container was started and .node-meta was not changed."
+    fi
+    if ! tn_docker_holds_digest "$img"; then
+        setup_fail "Docker does not hold ${img} under that digest after the pull (digest mismatch); the image was not used and .node-meta was not changed."
+    fi
+    if ! tn_docker_image_network_ok "$NETWORK" "$img" setup_progress; then
+        setup_fail "Refusing the image ${img}: it is not a ${NETWORK} image (see above). No container was started and .node-meta was not changed."
+    fi
+    DOCKER_IMAGE="$img"
+    RELEASE_TAG="$tag"
+    write_node_meta "DOCKER_IMAGE=${img}" "DOCKER_IMAGE_DIGEST=${img##*@}"
+    if [[ -n "$tag" ]]; then
+        write_node_meta "RELEASE_TAG=${tag}"
+    else
+        meta_unset RELEASE_TAG "${CONFIG_DIR}/.node-meta" \
+            || setup_fail "Could not remove RELEASE_TAG from ${CONFIG_DIR}/.node-meta."
+    fi
+    setup_progress info "Recorded ${img} in ${CONFIG_DIR}/.node-meta; finalize runs it."
     return 0
 }
 
