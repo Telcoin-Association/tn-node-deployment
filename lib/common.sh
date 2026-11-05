@@ -2690,6 +2690,317 @@ write_advertised_name() {
     print_ok "Advertised node name set: ${name}"
 }
 
+# -----------------------------------------------------------------------------
+# Node admission settings in network-config (admission, trusted_nodes and
+# committee_peers) and the first node release that reads them
+# -----------------------------------------------------------------------------
+
+# The first node release whose network-config reads admission, trusted_nodes and
+# committee_peers. telcoin-network #1534 brought the three keys to main through
+# #1701 (5ccb88e86, 2026-10-16). No release tag contained that merge when this
+# floor was set; the newest, v0.16.0, ignores the keys, so the floor is the next
+# minor release. A floor too low would pass a release that drops the keys without
+# a word while the host looks configured; one too high only refuses a release
+# that would have worked.
+# TODO(node team): confirm
+readonly MIN_ADMISSION_VERSION="0.17.0"
+
+# tn_node_supports_admission VERSION -- whether the node release VERSION reads
+# the admission keys of network-config, that is MIN_ADMISSION_VERSION or later
+# (version_gte). VERSION is a release version or tag (0.17.0, v0.17.0, or either
+# with a suffix such as -rc1) or a docker image, judged on the part after its
+# last ":". Prints nothing.
+#   rc 0  a release at or above the floor
+#   rc 1  a release below the floor: it ignores the keys
+#   rc 2  not a release version (empty, main, a commit id, git describe output
+#         past a tag, a dirty tree): the answer is unknown, which is not a no
+tn_node_supports_admission() {
+    local v="${1:-}" ver
+    local re='^v?([0-9]+[.][0-9]+[.][0-9]+)(-[A-Za-z0-9][A-Za-z0-9.-]*)?$'
+    local past_re='-[0-9]+-g[0-9a-f]+(-dirty)?$'
+    if [[ "$v" == *:* ]]; then
+        v="${v##*:}"
+    fi
+    [[ "$v" =~ $re ]] || return 2
+    ver="${BASH_REMATCH[1]}"
+    if [[ "$v" =~ $past_re || "$v" == *-dirty ]]; then
+        return 2
+    fi
+    version_gte "$ver" "$MIN_ADMISSION_VERSION" || return 1
+}
+
+# tn_network_config_render DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE -- write
+# the node admission settings into DATA_DIR/network-config as three top-level
+# entries, editing the file as the service user (tn_as_service_user) the way
+# write_advertised_name does:
+#   admission        mode: MODE, one of Open, Grace or Closed (open, grace and
+#                    closed mean the same); a snapshot_max_age_secs that the old
+#                    admission entry holds is written again
+#   trusted_nodes    the map in TRUSTED_FILE: BLS public key to {primary:
+#                    {network_address, network_key}, workers: {<id>: {...}}}
+#   committee_peers  the map in COMMITTEE_FILE, in the bootstrap-peers.yaml shape
+# TRUSTED_FILE and COMMITTEE_FILE are absolute paths the service user can read
+# (the installed copies in the config dir are root 0644), or none, which leaves
+# that entry out of the file. A file's lines go under its key two spaces deeper,
+# without its blank lines and a leading "---" line, and without a byte order
+# mark or CRLF line ends, which a map saved on Windows may carry and which would
+# otherwise end up inside its first key and every value. A file that holds no
+# map, or a second YAML document, is refused: a key with nothing under it is a
+# null the node will not start with.
+#
+# The entries are replaced, never appended: the node writes a full default
+# network-config on its first start, which holds all three already, and a key
+# that appears twice stops the node. Block-boundary rule: a top-level key is a
+# line that starts at column 0 with a plain key (a letter, digit or "_", then
+# letters, digits, "_", "." or "-") followed by ":" and then the end of the
+# line, a space or a tab, so both `admission:` and `trusted_nodes: {}` start an
+# entry. An entry runs from its key line to the line before the next top-level
+# key, except that the blank lines and column-0 comments right before that next
+# key stay in the file, as everything outside the three entries does, line for
+# line (a last line without a newline gets one). Each entry is written where
+# its first occurrence was and any later occurrence is dropped; an entry the
+# file did not have goes at the end, in the order above. A file with a
+# column-0 line that is not a top-level key, a comment, a blank line or a line
+# starting with "-" (a flow document "{...}", a quoted or complex key, a
+# directive) is refused, because the rule cannot tell where its entries end; so
+# is a file with an indented line before its first key (a whole document
+# indented, say; a leading "---" is fine), a document marker ("---" or "...")
+# after it, which would make two documents of one, and a top-level key inside a
+# flow value ({...} or [...]) that an earlier line leaves open. network-config
+# itself is kept line for line, so a byte order mark or CRLF line ends there are
+# refused, named, rather than rewritten. A comment is not read as a lease: the
+# snapshot_max_age_secs kept is the one outside a "#" comment.
+#
+# The new text goes to network-config.tn-new, which one rename puts in place,
+# as _hn_write in ui/telcoin-ui-helper.sh does. A missing network-config is
+# created with the three entries alone; the node takes its defaults for the
+# rest. rc 0 written; rc 1 refused before anything was written (an argument, a
+# file the rules above refuse, or a snapshot_max_age_secs that is not a whole
+# number), with the reason on stderr; rc 2 the edit could not run or its write
+# failed. network-config is unchanged on rc 1 and rc 2.
+tn_network_config_render() {
+    local data_dir="${1:-}" mode="${2:-}" trusted="${3:-}" committee="${4:-}"
+    local f nc prog out rc=0
+    if [[ $# -ne 4 ]]; then
+        print_error "tn_network_config_render: expected DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE."
+        return 1
+    fi
+    case "$mode" in
+        Open|open) mode=Open ;;
+        Grace|grace) mode=Grace ;;
+        Closed|closed) mode=Closed ;;
+        *)
+            print_error "Admission mode '${mode}' is not one of open, grace or closed."
+            return 1
+            ;;
+    esac
+    if [[ "$data_dir" != /* || ! -d "$data_dir" || -L "$data_dir" ]]; then
+        print_error "The data dir '${data_dir}' is not a directory."
+        return 1
+    fi
+    for f in "$trusted" "$committee"; do
+        if [[ "$f" != none && "$f" != /* ]]; then
+            print_error "'${f}' is neither an absolute path nor none."
+            return 1
+        fi
+    done
+    nc="${data_dir}/network-config"
+    # the YAML surgery: awk alone (no python3 or yq on a node), run by the
+    # service user on its own file; exit 3 means refused, with the reason on
+    # stderr. The awk text holds no single quote.
+    # shellcheck disable=SC2016
+    prog='
+        function fail(msg) {
+            printf("network-config: %s\n", msg) > "/dev/stderr"
+            failed = 1
+            exit 3
+        }
+        # nest(key, path): key followed by the map in path, two spaces deeper
+        function nest(key, path,    out, s, rc, seen, ended, ln) {
+            out = key ":"
+            seen = 0
+            ended = 0
+            ln = 0
+            while ((rc = (getline s < path)) > 0) {
+                # network-config gets neither: a mark would start the first
+                # key, a carriage return would end every value
+                if (++ln == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+                sub(/\r$/, "", s)
+                if (s ~ /^(---|[.][.][.])[ \t]*$/) {
+                    if (seen) ended = 1
+                    continue
+                }
+                if (s ~ /^[ \t]*$/) continue
+                if (s !~ /^[ \t]*#/) {
+                    if (ended) fail(path " holds more than one YAML document")
+                    if (!seen && s !~ /^[{]/ && s !~ /^[^ \t#{-].*:$/ && s !~ /^[^ \t#{-].*:[ \t]/)
+                        fail(path " does not start with a map keyed by BLS public key")
+                    seen = 1
+                }
+                out = out "\n  " s
+            }
+            if (rc < 0) fail("cannot read " path)
+            close(path)
+            if (!seen) fail(path " holds no map")
+            return out
+        }
+        # flow(s, d): how many flow collections ({...} or [...]) are open after
+        # line s, d of them being open before it. Quoted scalars and a comment
+        # do not count; outside a flow one starts only where a value does (at
+        # the indent, after "- " or after ": "), so a plain scalar such as a{b
+        # opens nothing.
+        function flow(s, d,    t, r) {
+            t = s
+            gsub(/"([^"\\]|\\.)*"/, "", t)
+            gsub(sq "[^" sq "]*" sq, "", t)
+            sub(/(^|[ \t])#.*/, "", t)
+            if (d == 0) {
+                if (match(t, /^[ \t]*(-[ \t]+)*[{[]/) || match(t, /:[ \t]+[{[]/))
+                    t = substr(t, RSTART + RLENGTH - 1)
+                else
+                    return 0
+            }
+            r = d + gsub(/[{[]/, "", t)
+            r -= gsub(/[]}]/, "", t)
+            return r > 0 ? r : 0
+        }
+        function emit(k) {
+            if (k == "admission") {
+                print "admission:"
+                print "  mode: " mode
+                if (age != "") print "  snapshot_max_age_secs: " age
+            } else if (k in body) {
+                print body[k]
+            }
+        }
+        BEGIN {
+            mode = ENVIRON["TN_NC_MODE"]
+            bom = "\357\273\277"
+            sq = "\047"
+            order[1] = "admission"; order[2] = "trusted_nodes"; order[3] = "committee_peers"
+            target["admission"] = 1; target["trusted_nodes"] = 1; target["committee_peers"] = 1
+            if (ENVIRON["TN_NC_TRUSTED"] != "none")
+                body["trusted_nodes"] = nest("trusted_nodes", ENVIRON["TN_NC_TRUSTED"])
+            if (ENVIRON["TN_NC_COMMITTEE"] != "none")
+                body["committee_peers"] = nest("committee_peers", ENVIRON["TN_NC_COMMITTEE"])
+        }
+        { L[++n] = $0 }
+        END {
+            if (failed) exit 3
+            # which entry each line belongs to; "" is outside every entry
+            cur = ""
+            marked = 0
+            open = 0
+            for (i = 1; i <= n; i++) {
+                s = L[i]
+                if (i == 1 && index(s, bom) == 1)
+                    fail("the file starts with a byte order mark; save it as UTF-8 without one")
+                if (s ~ /\r$/)
+                    fail("line " i " ends in a carriage return (CRLF line ends); save the file with LF line ends")
+                if (s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*:$/ || s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*:[ \t]/) {
+                    if (open > 0)
+                        fail("line " i " starts a top-level key inside the flow value that line " opened " leaves open, so its entries cannot be told apart")
+                    cur = s
+                    sub(/:.*/, "", cur)
+                    kind[i] = "key"
+                } else if (s ~ /^[ \t]*$/ || s ~ /^#/) {
+                    kind[i] = "gap"
+                } else if (s ~ /^(---|[.][.][.])([ \t]|$)/) {
+                    if (cur != "" || marked)
+                        fail("line " i " is a document marker (--- or ...) after the document has started: network-config must hold one YAML document")
+                    if (s !~ /^---[ \t]*(#.*)?$/)
+                        fail("line " i " starts at column 0 but is not a plain key, so its entries cannot be told apart")
+                    marked = 1
+                    kind[i] = "gap"
+                } else if (s ~ /^[ \t-]/) {
+                    if (cur == "")
+                        fail("line " i " comes before the first top-level key, so its entries cannot be told apart")
+                    kind[i] = "body"
+                } else {
+                    fail("line " i " starts at column 0 but is not a plain key, so its entries cannot be told apart")
+                }
+                owner[i] = cur
+                if (kind[i] != "gap" || open > 0) {
+                    d = flow(s, open)
+                    if (open == 0 && d > 0) opened = i
+                    open = d
+                }
+            }
+            if (open > 0)
+                fail("the flow value that line " opened " opens is never closed")
+            # blank lines and column-0 comments just before a key, or at the
+            # end, sit between entries and stay
+            between = 1
+            for (i = n; i >= 1; i--) {
+                if (kind[i] != "gap") between = (kind[i] == "key")
+                else if (between) owner[i] = ""
+            }
+            age = ""
+            for (i = 1; i <= n && age == ""; i++) {
+                s = L[i]
+                if (owner[i] != "admission" || kind[i] == "gap" || s ~ /^[ \t]*#/) continue
+                sub(/[ \t]#.*/, "", s)
+                if (match(s, /[{, \t]snapshot_max_age_secs[ \t]*:/)) {
+                    age = substr(s, RSTART + RLENGTH)
+                    sub(/^[ \t]+/, "", age)
+                    if (match(age, /[ \t,}#]/)) age = substr(age, 1, RSTART - 1)
+                    if (age !~ /^[0-9]+$/)
+                        fail("snapshot_max_age_secs of the admission entry is not a whole number: " age)
+                }
+            }
+            for (i = 1; i <= n; i++) {
+                k = owner[i]
+                if (k in target) {
+                    if (kind[i] == "key" && !(k in done)) {
+                        done[k] = 1
+                        emit(k)
+                    }
+                    continue
+                }
+                print L[i]
+            }
+            for (j = 1; j <= 3; j++) {
+                if (!(order[j] in done)) emit(order[j])
+            }
+        }'
+    # shellcheck disable=SC2016
+    out="$(tn_as_service_user sh -c '
+        nc="$1"; new="$1.tn-new"; src="$1"
+        if [ -e "$nc" ] && [ ! -f "$nc" ]; then
+            printf "network-config: %s is not a regular file\n" "$nc" >&2
+            exit 3
+        fi
+        [ -e "$nc" ] || src=/dev/null
+        for f in "$4" "$5"; do
+            if [ "$f" != none ] && { [ ! -f "$f" ] || [ ! -r "$f" ]; }; then
+                printf "network-config: cannot read %s\n" "$f" >&2
+                exit 3
+            fi
+        done
+        rm -f -- "$new" || exit 2
+        TN_NC_MODE="$3" TN_NC_TRUSTED="$4" TN_NC_COMMITTEE="$5" awk "$2" "$src" > "$new"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            rm -f -- "$new"
+            [ "$rc" -eq 3 ] && exit 3
+            exit 2
+        fi
+        mv -f -- "$new" "$nc" || { rm -f -- "$new"; exit 2; }' \
+        sh "$nc" "$prog" "$mode" "$trusted" "$committee" 2>&1)" || rc=$?
+    case "$rc" in
+        0) ;;
+        3)
+            print_error "The admission settings were not written to ${nc}: ${out#network-config: }"
+            return 1
+            ;;
+        *)
+            print_error "Could not write the admission settings to ${nc}${out:+: ${out}}"
+            return 2
+            ;;
+    esac
+    print_ok "Admission settings written to ${nc} (mode ${mode})"
+}
+
 # Record the ref of the source binary that was just installed, in a marker next
 # to the binary (<install_dir>/telcoin-network.version). The UI reads this to show
 # the version of the RUNNING binary instead of `git describe` of the source
