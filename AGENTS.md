@@ -117,7 +117,7 @@ calls it too.
 On a node host the service account (`telcoin` by default) owns one tree: the data dir
 (`/var/lib/telcoin`, 0700). Everything else the scripts install belongs to root: the install
 and config dirs (`/opt/telcoin`, `/etc/telcoin`, root 0755), `.node-meta` (root 0600),
-`node.env` (0644), the passphrase files, the start scripts under `/usr/local/libexec/telcoin`,
+`node.env` (0644), `bootstrap-peers.yaml` and `trusted-nodes.yaml` (0644), the passphrase files, the start scripts under `/usr/local/libexec/telcoin`,
 the node binary and every directory above it, the log dir (`/var/log/telcoin`,
 root:telcoin-log 0750), `/var/backups/telcoin`, `/var/lib/telcoin-staging` and the update lock
 under `/run/telcoin`. One more tree is not root's: the state dir of the private alerts runner
@@ -138,6 +138,10 @@ Code that runs as root keeps it that way:
   by other accounts). Do not write a root file with your own `>`, `cp`, `sed -i` or `mv`.
 - Write inside the data dir as the service user, through `tn_as_service_user` (setpriv or
   runuser, no supplementary groups), never as root.
+- The data dir's `network-config` is the service user's, and the node writes it too.
+  The scripts change it only through `write_advertised_name` (the `hostname` line) and `tn_network_config_render` (the admission entries), both run as the service user, the second through `network-config.tn-new` and one rename.
+  edit-config backs it up and puts it back as that user (`edit_backup_copy`, `edit_restore_one`), so root never opens a path the service user controls.
+- The trusted nodes map is installed with `tn_write_root_file` as `/etc/telcoin/trusted-nodes.yaml` (root 0644): from the operator's file in setup-node (`install_trusted_nodes`), and from a root-only copy that passed the shape check in edit-config (`edit_trusted_install`).
 - Never `chown -R`. `create_directories` sets the owner and mode of each directory it makes
   with `install -d`, and `tn_migrate_ownership` re-owns an older install one entry at a time
   (`chown -h`, parents first). The one recursive chown, in `ui/install-ui.sh`, runs on the temp
@@ -254,6 +258,32 @@ code that stops or restarts the node runs the guard, then the wait, right before
 "wait first, then stop" is about the stop, not about every file edit. A script that owns its
 EXIT trap sets `TN_EXIT_TRAP_OWNED=1` before `tn_acquire_update_lock` and calls
 `tn_release_update_lock` from that trap.
+
+## Node admission settings
+
+The node reads its connection admission settings from three top-level entries of `<data dir>/network-config`: `admission` (mode `Open`, `Grace` or `Closed`), `trusted_nodes` and `committee_peers`.
+setup-node (`--admission`, `--trusted-nodes`: `admission_read_back`, `require_admission_release`, `install_trusted_nodes`, `setup_admission_config`) and edit-config (`--set admission=`, `--set trusted_nodes=`, menu items 11 and 12: `set_admission`, `set_trusted_nodes`, `edit_admission_render`, `edit_admission_record`) write them through `tn_network_config_render` in `lib/common.sh`.
+Rules for any code that touches them:
+
+- Replace, never append.
+  The node writes a full default `network-config` on its first start, which already holds all three entries, and a key that appears twice stops the node.
+  Go through `tn_network_config_render`, which rewrites the three entries where they stand and keeps everything else line for line; never add them with `>>`, `sed` or a second writer.
+  It always writes the three together, so every edit renders the whole set again from what `.node-meta` records.
+- The service user writes `network-config` (`tn_as_service_user`), never root; see "Ownership: root owns the install".
+- The floor gate comes first.
+  Code that writes the settings asks `tn_node_supports_admission` about the release that will read them: rc 1 (below `MIN_ADMISSION_VERSION`) refuses before anything is written, rc 2 (the release cannot be told) warns and writes.
+  `MIN_ADMISSION_VERSION` (0.17.0, marked `TODO(node team): confirm`) changes together with the floor in the `--help` text of setup-node and edit-config and in README, OPERATOR.md and the changelog.
+- The shape check is advisory; the restart-and-verify is the net.
+  The node has no check flag for the trusted nodes map, so `trusted_nodes_shape_ok` (awk, block YAML) refuses the common mistakes before the install, and a map that passes and still stops the node is caught after the restart.
+  An edit that writes `network-config` records it with `edit_backup`, which is what makes `edit_watch_secs` give `edit_verify_up` its `TN_EDIT_VERIFY_TIMEOUT` window (default 60 s, polls of `is-active` and `NRestarts` every 5 s); a failure goes through `edit_rollback_restart`, in `--set` and in the menu.
+  Do not drop the backup or bypass the verify for an admission edit.
+- `.node-meta` keys: `ADMISSION_MODE` (lower case, empty for none) and `TRUSTED_NODES_FILE` (the installed path, or empty); every admission edit records both (`edit_admission_record`; a value already in place is left alone), and setup reads them back on a finalize and on an interactive re-run.
+  An edit whose only change is `.node-meta` keeps it without a restart (`edit_only_meta_changed`).
+- `committee_peers` is the installed bootstrap peers map, when the node command loads one.
+  Anything that changes that map on a node with a recorded mode renders `network-config` again, as `set_bootstrap_peers` does through `edit_admission_follow_peers`.
+- Mainnet closed without a trusted nodes map warns (`edit_admission_closed_warn` and setup's twin), it does not refuse.
+- setup-node and edit-config list `tn_network_config_render` and `tn_node_supports_admission` in their `tn_require_fns` checks.
+- Not wired yet: the UI helper's and `ui/server.py`'s `--set` allowlists, check-node, remove-node's listing and update-node's floor check do not know the settings.
 
 ## One-way storage migration (v0.16.0-adiri)
 

@@ -15,6 +15,7 @@ database. The P2P ports get a per-source limit on new flows. The observability i
 out of Alloy's environment into a file. A script release now expires, and `update-scripts.sh
 --check` reports it. Nothing read from a testnet endpoint is used on another network. New on
 every network, `setup-alerts.sh` sends a heartbeat from the node host to a monitor you own.
+setup-node and edit-config can set the node's connection admission mode, its trusted hubs and its committee launch inventory in `network-config`, for node releases that read them.
 
 It closes #47 and #60. #34, the documentation reconciliation, closed after scripts-v2.0.0 merged;
 the nine wording findings a re-read found afterwards are fixed here. The other issues named below
@@ -188,6 +189,7 @@ warning); it is a release file, not an updater entry.
   ships 255) (#34).
 - One optional question on every network sets up private alerts once the node runs; see
   [Private alerts](#private-alerts-60) (#60).
+- New `--admission open|grace|closed` and `--trusted-nodes <file>`: see [Node admission settings](#node-admission-settings).
 
 ### update-node 2.1.0
 
@@ -223,6 +225,10 @@ warning); it is a release file, not an updater entry.
   (#43).
 - An older `lib/common.sh` without the keytool and credential helpers is refused with one
   message that names `update-scripts.sh`.
+- New `--set admission=open|grace|closed` and `--set trusted_nodes=<path>|none`, and menu items `11) Admission mode` and `12) Trusted nodes`: see [Node admission settings](#node-admission-settings).
+  Refresh chain configs, Restart node and Exit move from 11, 12 and 13 to 13, 14 and 15.
+- A menu edit whose restart does not come back is put back and the node restarted on the previous files, as `--set` has done; an edit kept for a later restart is not checked.
+- An edit that changes only `.node-meta` keeps the change without a restart, in the menu and with `--set`.
 
 ### check-node 2.1.0
 
@@ -421,6 +427,7 @@ when the node's own usage text says so; a wrapper that fails (busybox `setpriv`,
 counts as a probe that could not run. Its setup prompts call the ingest token the hub's token
 from the Association, not a per-operator one (#34). It sources `lib/alerts.sh` at its end when the
 file is there, as it does `lib/observability.sh` (#60).
+The admission renderer and its release gate are new: see [Node admission settings](#node-admission-settings).
 
 ### Host baseline (#43)
 
@@ -559,6 +566,28 @@ host. That field set is an operator-visible contract: monitors and webhook recei
 Set the monitor's heartbeat interval to about twice the push interval, with one or two retries: a
 node update or a restart you run yourself shows as a short down.
 
+### Node admission settings
+
+The node decides which peers it takes connections from by an admission mode it reads, with two maps, from three top-level entries of `<data dir>/network-config`.
+The scripts now write them; nothing changes on a node until you ask for a mode.
+
+- `setup-node.sh --admission open|grace|closed` writes `admission` (mode `Open`, `Grace` or `Closed`), `trusted_nodes` from `--trusted-nodes <file>` and, as `committee_peers`, the installed `bootstrap-peers.yaml`; each map is left out when its flag is.
+  Closed admits only the previous, current and next committees, the trusted nodes and the bootstrap peers; Grace enforces nothing beyond Open and differs only in the status the node reports.
+  Without `--admission`, and with no earlier choice recorded, setup leaves the settings alone on every network.
+- The trusted nodes map is checked like a peers map (a regular file of at most 64 KiB that others can read) and installed as `/etc/telcoin/trusted-nodes.yaml` (root 0644) with `tn_write_root_file`.
+  `.node-meta` records `ADMISSION_MODE` and `TRUSTED_NODES_FILE`; a `--json` finalize reads them back from keygen's record, and an interactive re-run reads them back too, with `BOOTSTRAP_PEERS_FILE` when a mode is in effect.
+- Mainnet validators are expected to run `--admission closed --trusted-nodes <hubs>`; mode closed on mainnet with no trusted nodes map warns, at setup and in edit-config.
+- `edit-config.sh --set admission=...` and `--set trusted_nodes=<path>|none` (menu items 11 and 12) render the three entries again from what `.node-meta` records and the bootstrap peers map the node command loads.
+  The node has no check for the trusted nodes map, so edit-config checks its shape on a root-only copy first: base58 BLS keys of 131 or 132 characters, each once, each entry `primary` (`network_address`, `network_key`) and `workers` (worker ids 0 to 65535, each with its own address and key) and nothing else, in block YAML.
+  `none` removes the map, its entry and its record, and a `bootstrap_peers` edit on a node with a mode writes `network-config` again, so `committee_peers` follows the peers map.
+- An edit that writes `network-config` is watched after its restart for `TN_EDIT_VERIFY_TIMEOUT` seconds (default 60): the service must stay active without restarting by itself (`NRestarts`), checked every 5 seconds.
+  When it does not stay up, `network-config`, the trusted nodes map and `.node-meta` are put back byte for byte and the node is restarted on them.
+- `lib/common.sh` has the renderer, `tn_network_config_render DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE`, which edits `network-config` as the service user through a `network-config.tn-new` file and one rename.
+  It replaces the three entries where the node's default file has them and never appends a second copy, since a key that appears twice stops the node, and keeps a `snapshot_max_age_secs` of the old `admission` entry.
+  It refuses, with the file unchanged, a `network-config` whose top-level entries it cannot tell apart (a flow document, a quoted key, a BOM or CRLF line ends) and a map file that does not start with a key or holds a second document.
+- The release gate `tn_node_supports_admission` compares the release with `MIN_ADMISSION_VERSION`, 0.17.0: no node release reads the entries yet (`v0.16.0-adiri` ignores them), so the floor is the next minor release and waits for the node team to confirm it.
+  Both scripts refuse a release below it and warn, writing anyway, when they cannot tell the release.
+
 ### Node Manager UI 2.1.0 and install-ui 2.1.0
 
 - The Network tab's status page link follows the node's network: testnet links
@@ -625,6 +654,9 @@ node update or a restart you run yourself shows as a short down.
 | `/var/lib/private/telcoin-heartbeat/state` (dynamic user, dir 0700) | The runner's last run, status, reason and per-target results |
 | `/run/telcoin/heartbeat-service` (root 0644) | The node unit's `systemctl show`, rewritten as root by the heartbeat service before each run and read by the runner |
 | `ENABLE_ALERTS=true\|pending\|false` in `.node-meta` | Private alerts on, waiting for the node to run, or off; absent means off |
+| `/etc/telcoin/trusted-nodes.yaml` (root 0644) | The trusted nodes map, with `--trusted-nodes` or `edit-config.sh --set trusted_nodes=` |
+| `ADMISSION_MODE`, `TRUSTED_NODES_FILE` in `.node-meta` | The admission mode (`open`, `grace` or `closed`, or empty) and the installed trusted nodes map (or empty) |
+| `admission`, `trusted_nodes`, `committee_peers` in `<data dir>/network-config` | The node admission settings, written only with an admission mode |
 
 ## New environment variables
 
@@ -634,6 +666,7 @@ node update or a restart you run yourself shows as a short down.
 | `TN_P2P_NEW_FLOW_BURST` | 40 | Such packets one source may send before the rate applies |
 | `TN_EPOCH_MARGIN`, `TN_EPOCH_SETTLE` | derived from the epoch length | Existing names; unset, they now follow the epoch length |
 | `TN_ALERT_TARGETS` | unset | Targets for `setup-alerts.sh --enable`, one `<kind> <url>` per line; copied and unset before anything runs |
+| `TN_EDIT_VERIFY_TIMEOUT` | 60 | Seconds edit-config watches the node after the restart of an edit that writes `network-config` |
 
 ## Before you update
 
@@ -690,6 +723,12 @@ node update or a restart you run yourself shows as a short down.
 | `The new targets are in place, but the new settings were not fully applied` (exit 3) | Run `setup-alerts.sh --refresh` again with the same `--interval`, `--stall-after`, `--inactive-after` and `--label`. |
 | `Pause or delete this node's monitor: a push monitor alerts on silence.` | After a disable or a removal, pause or delete the node's monitor. |
 | `The heartbeat runner or its library changed. Reinstall them on the host:` | Run the `setup-alerts.sh --refresh` line it prints. |
+| `--admission needs node release 0.17.0 or later, and this run installs <release>` (setup), `the admission settings need node release 0.17.0 or later` (edit-config) | Install or update to a release that reads the settings, or leave them out. |
+| `Admission closed without --trusted-nodes: the node admits only the previous, current and next committees and the bootstrap peers.` | On mainnet, give the hubs (`--trusted-nodes`, or `--set trusted_nodes=`). |
+| `<file> is not a trusted nodes map: <reason>.` | Fix the line the reason names; nothing was written. |
+| `trusted_nodes needs an admission mode, which goes into network-config with it` | Set `admission` first. |
+| `The admission settings were not written to <data dir>/network-config: <reason>` | `network-config` is unchanged; fix the line the reason names, or the map file. |
+| `restarted by itself within <n>s of the restart (NRestarts <a> to <b>): it exited` | The node refused the edit and it was rolled back; `journalctl -u telcoin` says why. |
 
 ## Left open
 
@@ -722,3 +761,7 @@ Each tracker stays open with what is left on it, except #60, which this release 
   a private alerts card in the Node Manager UI, retiring the Association's pull monitor once its
   Uptime Kuma takes pushes, and a maintenance marker that a planned update or restart writes, so
   the heartbeat reports it as up instead of a short down.
+- Node admission settings: `MIN_ADMISSION_VERSION` (0.17.0) waits for the node team to name the first release that reads them.
+  `committee_peers` comes from the bootstrap peers map, the right source only when that map lists the committee.
+  A node-side check of the trusted nodes map would replace edit-config's shape check (block YAML only, where setup takes any map).
+  The Node Manager UI, check-node and update-node do not handle the settings yet, and whether 60 seconds of watching suits every node is open.
