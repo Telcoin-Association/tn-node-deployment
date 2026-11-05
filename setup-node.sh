@@ -3182,12 +3182,12 @@ finalize_install_inputs() {
 # keygen's preflight for a given image (tn_docker_resolve_ref: the pull rule, and on
 # mainnet the digest rule; for a digest given alone its release, as keygen looks it
 # up; the oldest supported release; the pull by digest and its digest check; the
-# build-feature check), then record it in .node-meta (DOCKER_IMAGE,
-# DOCKER_IMAGE_DIGEST, and RELEASE_TAG, removed when no release names the image), so
-# the config, the unit and the container use it. A refusal at any step stops before
-# .node-meta is written.
+# build-feature check), then record it in .node-meta, so the config, the unit and
+# the container use it: RELEASE_TAG removed, DOCKER_IMAGE and DOCKER_IMAGE_DIGEST
+# written, then RELEASE_TAG written when a release names the image. A refusal at
+# any step stops before .node-meta is written.
 finalize_docker_override() {
-    local rec="${1:-}" out img tag
+    local rec="${1:-}" meta="${CONFIG_DIR}/.node-meta" out img tag
     setup_progress step "Replacing the recorded image ${rec:-(none)} with ${DOCKER_IMAGE}"
     out="$(tn_docker_resolve_ref "$NETWORK" "$DOCKER_IMAGE" setup_progress)" \
         || setup_fail "Refusing the image ${DOCKER_IMAGE} given with --docker-image (see above). No container was started and .node-meta was not changed."
@@ -3213,14 +3213,13 @@ finalize_docker_override() {
     fi
     DOCKER_IMAGE="$img"
     RELEASE_TAG="$tag"
+    # The old release goes first and the new one last: a run stopped between these
+    # writes leaves the new digest with no release (unknown), never with the
+    # release of the image it replaces.
+    meta_unset RELEASE_TAG "$meta" || setup_fail "Could not remove RELEASE_TAG from ${meta}."
     write_node_meta "DOCKER_IMAGE=${img}" "DOCKER_IMAGE_DIGEST=${img##*@}"
-    if [[ -n "$tag" ]]; then
-        write_node_meta "RELEASE_TAG=${tag}"
-    else
-        meta_unset RELEASE_TAG "${CONFIG_DIR}/.node-meta" \
-            || setup_fail "Could not remove RELEASE_TAG from ${CONFIG_DIR}/.node-meta."
-    fi
-    setup_progress info "Recorded ${img} in ${CONFIG_DIR}/.node-meta; finalize runs it."
+    [[ -z "$tag" ]] || write_node_meta "RELEASE_TAG=${tag}"
+    setup_progress info "Recorded ${img} in ${meta}; finalize runs it."
     return 0
 }
 

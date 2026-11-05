@@ -303,6 +303,29 @@ rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; LOOKUP_TAG=v0.17.0-adiri; $FIN"
 check "finalize --docker-image of a newer release: recorded with the release the lookup names" "0 RELEASE_TAG=v0.17.0-adiri" \
     "$rc $(grep '^RELEASE_TAG=' "$FMETA")"
 check_has "finalize --docker-image of a newer release: the digest beside it" "DOCKER_IMAGE_DIGEST=${OV##*@}" "$(cat "$FMETA")"
+# The record never pairs the new digest with the old release: RELEASE_TAG goes
+# first, the image and its digest next, the new RELEASE_TAG last. meta_set is
+# wrapped to fail for FAIL_KEY, as a write that fails (or a run stopped there)
+# would leave it.
+# shellcheck disable=SC2016
+FAIL_SET='eval "$(declare -f meta_set | sed "1s/^meta_set /real_meta_set /")"; meta_set() { [ "$1" != "$FAIL_KEY" ] || return 2; real_meta_set "$@"; }'
+for fk in RELEASE_TAG DOCKER_IMAGE_DIGEST; do
+    fin_meta "${R}@sha256:${D64}"
+    printf 'DOCKER_IMAGE_DIGEST=sha256:%s\nRELEASE_TAG=v0.16.0-adiri\n' "$D64" >> "$FMETA"
+    : > "$T/docker.log"
+    rc="$(sn "NETWORK=testnet; DOCKER_IMAGE='${OV}'; LOOKUP_TAG=v0.17.0-adiri; FAIL_KEY=${fk}; ${FAIL_SET}; $FIN")"
+    check "finalize --docker-image, the ${fk} write fails: refused, no config" "1 no" \
+        "$rc $(grep -q '^config$' "$T/docker.log" && echo yes || echo no)"
+    check "finalize --docker-image, the ${fk} write fails: no RELEASE_TAG left beside the digest" "" \
+        "$(grep '^RELEASE_TAG=' "$FMETA")"
+    check "finalize --docker-image, the ${fk} write fails: the refusal names the key" yes \
+        "$(grep -qF "Could not write ${fk} to ${FMETA}." "$T/sn.err" && echo yes || echo no)"
+    if [[ "$fk" == RELEASE_TAG ]]; then
+        check_has "finalize --docker-image, the RELEASE_TAG write fails: the new digest is there, with no release" \
+            "DOCKER_IMAGE_DIGEST=${OV##*@}" "$(cat "$FMETA")"
+    fi
+done
+unset fk FAIL_SET
 fin_meta "${R}@sha256:${D64}"
 cp "$FMETA" "$T/meta.before"
 # Every other input check refuses before the override: a bad listener or a node
