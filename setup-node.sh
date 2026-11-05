@@ -3219,7 +3219,6 @@ finalize_docker_override() {
 json_phase_finalize() {
     local v hb=false
     json_refuse_installed finalize
-    finalize_install_inputs
     # The node binds to these; an empty one would start a node with no listener.
     for v in "$PRIMARY_LISTENER_MULTIADDR" "$WORKER_LISTENER_MULTIADDR"; do
         if [[ -z "$v" ]] || ! validate_multiaddr "$v"; then
@@ -3227,6 +3226,10 @@ json_phase_finalize() {
         fi
     done
     finalize_node_extra_flags
+    # Last before the config: a finalize image override (finalize_docker_override)
+    # pulls and rewrites .node-meta, so every other input check refuses first and
+    # leaves .node-meta as keygen wrote it.
+    finalize_install_inputs
     json_event step "Writing configuration"
     step_write_config
     json_event step "Creating service and starting node"

@@ -263,7 +263,8 @@ docker() { : > "$REC/docker-ran"; return 1; }
 FZ=(--json --phase=finalize --network testnet --install-method docker
     --docker-image "$DEFAULT_DOCKER_IMAGE" --data-dir "$T/data")
 # What keygen leaves for finalize: the passphrase form in .node-meta and the stored
-# passphrase (finalize checks both before the listeners).
+# passphrase (finalize checks both after the listeners, so the listener refusal
+# here is not one of theirs either way).
 CONFIG_DIR_SAVED="$CONFIG_DIR"
 CONFIG_DIR="$T/cfg"
 mkdir -p "$CONFIG_DIR"
