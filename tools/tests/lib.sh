@@ -177,9 +177,11 @@ check() {
 }
 
 # check_has <name> <line> <text> -- <text> contains <line> as a whole line.
+# A here-string, not a pipe: the sourced library sets pipefail, and a printf
+# into a grep -q that has already matched fails on the closed pipe.
 check_has() {
     CHECKS=$((CHECKS + 1))
-    if printf '%s\n' "$3" | grep -qxF -- "$2"; then
+    if grep -qxF -- "$2" <<< "$3"; then
         printf 'ok    %s\n' "$1"
         return 0
     fi
@@ -192,7 +194,7 @@ check_has() {
 # check_lacks <name> <string> <text> -- <string> appears nowhere in <text>.
 check_lacks() {
     CHECKS=$((CHECKS + 1))
-    if ! printf '%s\n' "$3" | grep -qF -- "$2"; then
+    if ! grep -qF -- "$2" <<< "$3"; then
         printf 'ok    %s\n' "$1"
         return 0
     fi
