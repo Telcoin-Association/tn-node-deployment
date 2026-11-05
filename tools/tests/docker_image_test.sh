@@ -21,7 +21,8 @@
 # legacy repository's newest final, then the pinned default; nothing on
 # mainnet); tn_docker_local_digest against a docker shim;
 # tn_docker_image_for_tag (signed digest first, the registry's on testnet only
-# when no signed release exists, never after a failed verification; a devnet tag
+# when no signed release exists, asking the testnet package and then the legacy
+# repository, never on mainnet, never after a failed verification; a devnet tag
 # refused before any download), tn_docker_resolve_ref (devnet: digests only; the
 # other network's package and the old single package refused on every network),
 # tn_docker_release_tag_for on devnet (the .node-meta record only, no registry
@@ -558,6 +559,51 @@ check "for_tag: no signed release published (rc 2), testnet: registry digest" "0
 FETCH_RC=1
 rc=0; out="$(tn_docker_image_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
 check "for_tag: a release that fails verification is never replaced" "1 " "$rc $out"
+# The registry fallback, with its lookups recorded: tn_registry_digest logs
+# "<repository> <tag>" to $REC/reg.log and answers with a digest only while
+# $REC/reg.answer exists. It runs on testnet only and asks the testnet package,
+# then the legacy repository; never the old single package or tn-dev. On mainnet
+# a signed release that cannot be fetched (rc 2) is refused with no lookup, with
+# a registry that would answer.
+reg_for_tag() {  # reg_for_tag NETWORK TAG -- tn_docker_image_for_tag, lookups logged
+    tn_registry_digest() {
+        printf '%s %s\n' "$1" "$2" >> "$REC/reg.log"
+        [ -f "$REC/reg.answer" ] || return 1
+        printf 'sha256:%s\n' "$D64"
+    }
+    tn_docker_image_for_tag "$1" "$2"
+}
+regs() { tr '\n' '|' < "$REC/reg.log" | sed 's/|$//'; }
+FETCH_RC=2
+: > "$REC/reg.answer"; : > "$REC/reg.log"; : > "$REC/curl.log"
+rc=0; out="$(reg_for_tag mainnet v1.0.0 2>"$T/err")" || rc=$?
+check "for_tag, mainnet, no signed release to read (rc 2): refused" "1 " "$rc $out"
+check "for_tag, mainnet, rc 2: no registry lookup" "" "$(regs)"
+check "for_tag, mainnet, rc 2: no registry call" "0" "$(grep -c 'ghcr.io\|pkg.dev' "$REC/curl.log")"
+check_lacks "for_tag, mainnet, rc 2: no registry digest offered" "the registry serves" "$(cat "$T/err")"
+: > "$REC/reg.log"
+rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "for_tag, testnet, rc 2: the testnet package answers first" "0 ${GH}@sha256:${D64}" "$rc $out"
+check "for_tag, testnet, rc 2: only the testnet package asked" "${GH} v0.17.0-adiri" "$(regs)"
+rm -f "$REC/reg.answer"
+: > "$REC/reg.log"
+rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>"$T/err")" || rc=$?
+check "for_tag, testnet, rc 2, no registry answers: refused" "1 " "$rc $out"
+check "for_tag, testnet, rc 2: the testnet package, then the legacy repository, nothing else" \
+    "${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$(regs)"
+check_has "for_tag, testnet: the refusal names both repositories" "1" \
+    "$(grep -cF "The registry gave no digest for v0.17.0-adiri in ${GH} or ${R}." "$T/err")"
+rm -f "$T/keys/k.asc"
+: > "$REC/reg.log"
+rc=0; out="$(reg_for_tag testnet v0.17.0-adiri 2>/dev/null)" || rc=$?
+check "for_tag, no release key, testnet: the same two repositories, in order" \
+    "1 ${GH} v0.17.0-adiri|${R} v0.17.0-adiri" "$rc $(regs)"
+: > "$REC/reg.answer"; : > "$REC/reg.log"
+rc=0; out="$(reg_for_tag mainnet v1.0.0 2>/dev/null)" || rc=$?
+check "for_tag, no release key, mainnet: refused, no registry lookup" "1 " "$rc $(regs)"
+rm -f "$REC/reg.answer"
+: > "$T/keys/k.asc"
+unset -f reg_for_tag regs
 FETCH_RC=0
 # Devnet has no signed releases: a devnet tag names no image and is refused
 # before any release is fetched or any registry asked, with a release key present;
