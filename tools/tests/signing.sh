@@ -4,9 +4,10 @@
 # tools/tests/signing.sh -- OpenPGP release-signing helpers for the fixture tests
 #
 # Sourced (never run) by updater_manifest_test.sh, install_test.sh,
-# release_scripts_test.sh and cut_release_test.sh after tools/tests/lib.sh,
-# with BIN set to a directory that is put first on PATH. Keys live in a
-# throwaway GNUPGHOME under TN_TEST_TMP; nothing touches ~/.gnupg.
+# release_scripts_test.sh, cut_release_test.sh and p2p_allow_install_test.sh
+# after tools/tests/lib.sh, with BIN set to a directory that is put first on
+# PATH. Keys live in a throwaway GNUPGHOME under TN_TEST_TMP; nothing touches
+# ~/.gnupg.
 #
 #   REAL_GPG        1 when gpg and gpgv can make, sign with and verify an
 #                   ed25519 key here (and TN_TEST_FAKE_GPG is not 1)

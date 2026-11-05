@@ -212,10 +212,26 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 - The P2P new-flow limit (`inet tn_p2p`) keeps at most 65535 sources per address family. A
   spoofed flood of distinct sources can fill a set; new sources then go on to ufw unlimited, as
   before the limit. Accepted; closes if the limit gains a fallback for a full set.
-- The optional committee allowlist of #41, a reader of the Association's signed address manifest,
-  is deferred. A format proposal (`p2p/<network>.manifest` plus a detached OpenPGP signature,
-  serial and expiry, listed sources unmetered, unlisted sources kept on the metered path) is in
-  the issue (comment of 2026-11-04); the reader follows once the format is agreed.
+- The P2P committee allowlist of #41 (`firewall-setup.sh --p2p-committee`) replaces the signed address manifest for validators, but it cannot be turned on until a scripts release pins `tn-p2p-allow-sync` v0.1.0: `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh` is empty.
+  Closes with that `chore` commit; the first CI run of `tools/tests/vm.d/P0-p2p-allow.sh` after it confirms the named counters across reloads on the runner kernel, the sync unit's sandbox and `systemd-analyze verify` on systemd 255, and whether the boot unit could run with `ProtectKernelModules=yes` (off today, for the first nftables load after boot).
+- A validator that sends from an address its record does not carry (NAT, a multi-homed host, IPv6 temporary addresses) is dropped by every committee-mode peer.
+  The mitigation is the receiver's `P2P_ALLOW_FROM`, which committee mode always admits (OPERATOR.md section 2.10).
+  Closes when the node's record can carry the egress address, or the operator procedure is agreed.
+- On a node without `/etc/telcoin/bootstrap-peers.yaml` the floor comes from the genesis `committee.yaml` copy in the data dir, which the service user can write, so its bootstrap servers enter the floor on trust.
+  Closes when the floor capture checks that copy against the network's chain-config pin (mainnet has no pins yet).
+- The tool ships for `x86_64-unknown-linux-musl` only until the node ships an aarch64 release; confirm no mainnet validator host is arm64 before then, or add the asset.
+  How fast a consumer must follow a key rotation in `tn-release-signing`, and whether a rotated-out key keeps verifying older releases, is still to be agreed.
+- Provider-edge ACLs (cloud security groups, carrier filters) stay out of scope for the host; `current.nft` and the set sizes in `--json --status` are what an operator hook would consume.
+  Closes if that automation is wanted.
+- `notrack` on consensus UDP and a raw-table drop stay a separate item; the allowlist matches on addresses only and adds no conntrack rule.
+- A `setup-node.sh` re-run on a host in committee mode has no resync hook, and neither has an edit saved with "restart later" and restarted with `systemctl`; check-node's drift warning catches both.
+  Closes with a hook in setup-node.
+- A stray `inet tn_p2p` table in committee mode is removed by `firewall-setup.sh --enable`, not by `--p2p-committee sync`, so check-node's fix line names `--enable`.
+  Closes if `sync` drops it too.
+- check-node compares the allowlist's `P2P_PORTS` with `firewall-setup.sh --json --status`, because `fw_p2p_ports` lives in that script; moving it into `lib/common.sh` would let check-node call it directly.
+- With committee mode on and an older `lib/common.sh`, `firewall-setup.sh --enable` prints the resync's error but exits 0, because the `ufw` rules went through.
+  Closes if that becomes a non-zero exit.
+- A `--p2p-committee sync` stopped between a unit rewrite and its `daemon-reload` is not finished by an exit hook (only `on` and `off` are tracked in flight); a rerun repairs it.
 - firewall-setup's health-port edits in "Manage node ports" (`apply_kuma_rule`, `KUMA_EXTRA_SRC`)
   run after the P2P part and outside the update lock, behind a prompt. Closes if they take the
   lock too.

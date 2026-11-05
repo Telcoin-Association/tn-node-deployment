@@ -267,6 +267,7 @@ table below and reports any path that differs.
 | `/usr/local/libexec/telcoin/tn-start` | root | 0755 | What the unit runs on a source, release or existing-binary install. No secret in it |
 | `/usr/local/libexec/telcoin/tn-start-docker` | root | 0755 | The same for a Docker install |
 | `/usr/local/libexec/telcoin/tn-heartbeat` | root | 0755 | The private alerts runner, a copy of `lib/tn-heartbeat.sh`, only with [private alerts](#private-alerts-every-network) on |
+| `/usr/local/libexec/telcoin/tn-p2p-allow-sync` | root | 0755 | The P2P committee allowlist sync tool, from its signed release, only while committee mode is on (see [P2P committee allowlist](#p2p-committee-allowlist)) |
 | `/etc/telcoin/` | root | 0755 | Configuration |
 | `/etc/telcoin/.node-meta` | root | 0600 | Install metadata read by the helper scripts and the UI |
 | `/etc/telcoin/node.env` | root | 0644 | `PRIMARY_LISTENER_MULTIADDR`, `WORKER_LISTENER_MULTIADDR` and `TN_RPC_ADDR`, nothing else. The start script reads these three keys and never sources the file |
@@ -281,12 +282,14 @@ table below and reports any path that differs.
 | `/etc/telcoin/alerts/alerts.env` | root | 0644 | The heartbeat's settings (service, local RPC URL, network, label, interval, thresholds). No URL of a monitor |
 | `/etc/systemd/system/telcoin.service` | root | 0644 | The unit |
 | `/etc/systemd/system/telcoin-heartbeat.service`, `telcoin-heartbeat.timer` | root | 0644 | The private alerts service and the timer that starts it every interval |
+| `/etc/systemd/system/telcoin-p2p-allow.service`, `telcoin-p2p-allow-sync.service`, `telcoin-p2p-allow-sync.timer` | root | 0644 | The allowlist's boot unit, sync service and timer, only while committee mode is on |
 | `/var/lib/telcoin/` | service user | 0700 | The data directory: `node-keys/` (P2P and BLS keys; keep them backed up), `node-info.yaml`, `genesis/`, `parameters.yaml`, `network-config` (the node's network settings; see [Node admission settings](#node-admission-settings)), `db/`, `consensus-db/` (in `epochs/`, the consensus packs of finished epochs and the pack of the epoch in progress, `epoch-N`, open for append; the epoch database of the epoch in progress, peer records and batch caches in the MDBX databases `epoch/`, `kad/` and `cache/` on `v0.16.0-adiri` and in `tndb/` from the next release; `state_exports/epoch-N/` when state export is on) |
 | `/var/log/telcoin/` | root:telcoin-log | 0750 | `telcoin.log` and `telcoin-error.log` (root:telcoin-log, 0640), which systemd writes for the node with `--log-target file` |
 | `/var/log/telcoin/node/` | service user:telcoin-log | 2750 (setgid) | Logs the node writes itself, only with observability on (`NODE_LOG_DIR`); new files take group `telcoin-log` |
 | `/var/backups/telcoin/` | root | 0700 | Copies of files the scripts are about to change (see [Backups and the update lock](#backups-and-the-update-lock)) |
 | `/var/lib/telcoin-staging/` | root | 0700 | Release downloads and build logs while they are checked |
 | `/var/lib/private/telcoin-heartbeat/` | the heartbeat's dynamic user | 0700 | The private alerts runner's `state` file, written only by the runner |
+| `/var/lib/telcoin-p2p-allow/` | root | 0700 | The allowlist's state: `config` (written by `firewall-setup.sh`), `floor`, `current.nft`, `state.json`, `status` and `lock` (written by the tool, each 0600), only while committee mode is on |
 | `/run/telcoin/update.lock` | root | 0600 (directory 0755) | The update lock |
 | `/opt/telcoin-source/` | root | | The telcoin-network checkout, at a release tag (source builds) |
 | `/var/lib/tn-build/` | tn-build | 0700 | The build account's home: its Rust toolchain, cargo cache and build output (source builds) |
@@ -331,6 +334,7 @@ re-run of setup. The keys the scripts read back:
 | `LOG_TARGET`, `NODE_LOG_DIR` | setup-node; the observability add-on | Where the node logs (`journal` or `file`), and the directory for logs the node writes itself |
 | `SSH_ALLOW_FROM`, `P2P_ALLOW_FROM` | firewall-setup | The source lists of [Firewall Setup](#firewall-setup) |
 | `ENABLE_ALERTS` | setup-node, setup-alerts, remove-node | `true`, `pending` (asked for during setup, not enabled yet) or `false`; absent means off. See [Private alerts](#private-alerts-every-network) |
+| `P2P_COMMITTEE` | firewall-setup | `on` while the [P2P committee allowlist](#p2p-committee-allowlist) is on, `off` after `--p2p-committee off`; absent reads as off, and a key set twice is refused |
 
 A `.node-meta` saved with CRLF line endings (edited on Windows, say) is read correctly, and the next script that writes a key rewrites the file with LF endings.
 
@@ -777,14 +781,157 @@ When P2P is open to every address (no `--p2p-from`, no `P2P_ALLOW_FROM`, or `--p
 - It counts the packets of UDP flows to the P2P ports that the node has not answered yet (conntrack state new), per source: one IPv4 address, or one IPv6 /64. Above the rate, after the burst, such packets are dropped. Once the node answers, the flow is established and never matches.
 - The chain runs at priority -10, before ufw's chains, and only drops; every other packet goes on to ufw, which still decides. A source leaves the set after it sent no such packet for `ceil(burst*60/rate)` seconds (at least 60, at most 86400; 120 at the defaults). Each set holds at most 65535 sources; once it is full, new sources go on to ufw unlimited.
 - `TN_P2P_NEW_FLOW_RATE` (default 20 per minute) and `TN_P2P_NEW_FLOW_BURST` (default 40) take a whole number from 1 to 100000 without leading zeros, for one run: nothing stores them, so a later enable without them (a plain `--enable`, the UI's enable, a `sudo` that drops them) goes back to 20 and 40. Through sudo: `sudo TN_P2P_NEW_FLOW_RATE=30 TN_P2P_NEW_FLOW_BURST=60 bash ~/telcoin-node-scripts/firewall-setup.sh --enable`. A bad value refuses before any change on every path: `TN_P2P_NEW_FLOW_RATE is 'X', not a whole number from 1 to 100000 (...); nothing was changed.`
-- With a P2P source list, or without a node, the table is deleted. Without `nft` the run warns `nftables (nft) is not installed, so the P2P new-flow limit is not applied; P2P stays open to every source` and applies the ufw rules (exit 0). A program `nft` refuses leaves the previous table, with a warning.
+- With a P2P source list, in P2P committee mode (see [P2P committee allowlist](#p2p-committee-allowlist)), or without a node, the table is deleted. Without `nft` the run warns `nftables (nft) is not installed, so the P2P new-flow limit is not applied; P2P stays open to every source` and applies the ufw rules (exit 0). A program `nft` refuses leaves the previous table, with a warning.
 - "Manage node ports" writes the table after it opens the P2P ports. When the loaded table and its boot copy already match, nothing is rewritten and the status says the limit is unchanged; a changed port set, rate, burst or boot copy rewrites both.
 - Boot copy: `/etc/telcoin/p2p-limit.nft` (root 0640) and `/etc/systemd/system/telcoin-p2p-limit.service` (an enabled oneshot unit, `After=ufw.service network-pre.target`, `ExecStart=<nft> -f /etc/telcoin/p2p-limit.nft` with the `nft` found at write time, `/usr/sbin/nft` on Ubuntu; stopping it deletes the table). A boot copy that cannot be written is a warning: `The P2P new-flow limit is loaded now but will not come back after a reboot: <why>. Fix that and run --enable again.` When the limit is not wanted, the unit is disabled and both files are removed.
 - A run stopped while the limit changes finishes or reports the change on its way out, for example `Stopped (exit N) after the P2P new-flow limit was loaded; its boot copy was written too.`
-- The status screen shows `New-flow limit:` (active with its rate and burst, `not used` with a P2P list, `not applied`, or `unknown`) and `New-flow limit at boot:` (`loaded by telcoin-p2p-limit.service (enabled)`, or a warning naming the missing file, the unit that is not enabled, or a boot copy that holds another rate, burst or port set). `--json --status` adds `"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null,"persistent":true,"persistent_reason":null}`; inactive, `reason` is `p2p-list`, `nft-missing`, `not-applied` or `unreadable`, and `persistent_reason` is `boot-file-missing`, `unit-not-enabled` or `boot-copy-differs` when `persistent` is false.
+- The status screen shows `New-flow limit:` (active with its rate and burst, `not used` with a P2P list or in committee mode, `not applied`, or `unknown`) and `New-flow limit at boot:` (`loaded by telcoin-p2p-limit.service (enabled)`, or a warning naming the missing file, the unit that is not enabled, or a boot copy that holds another rate, burst or port set). `--json --status` adds `"p2p_new_flow_limit":{"active":true,"rate":20,"burst":40,"reason":null,"persistent":true,"persistent_reason":null}`; inactive, `reason` is `committee` (P2P committee mode is on), `p2p-list`, `nft-missing`, `not-applied` or `unreadable`, and `persistent_reason` is `boot-file-missing`, `unit-not-enabled` or `boot-copy-differs` when `persistent` is false.
 - `remove-node.sh` removes the unit, the boot copy and the table with the last node on the host; while another node unit remains they stay whole for it.
 
 On any network but testnet and devnet the status screen does not show the Uptime Kuma block: `Health port TCP 43174 stays closed: health monitoring is a testnet-only add-on`, or a warning when a rule opens it anyway, which "Manage node ports" (or `--enable`) closes.
+
+### P2P committee allowlist
+
+On a validator, P2P committee mode lets only the sources the node itself lists reach the P2P ports and drops every other source before `ufw` sees it.
+The list comes from the node's admission snapshot (`tn_admissionSnapshot` on its local RPC): every address the snapshot holds, in the primary and every worker swarm, for the committees, the validators the node tracks for a coming seat, and its trusted and bootstrap peers.
+The bootstrap floor and the P2P source list are always in it as well, so a wrong snapshot can never cut the peers the node starts with.
+It is meant for a closed validator (see [Node admission settings](#node-admission-settings)); hubs and observers keep open P2P.
+[OPERATOR.md section 2.10](OPERATOR.md#210-p2p-committee-allowlist-validators) has the procedure, the day-2 steps and the limits.
+
+```bash
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee on      # turn it on
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee status  # what it holds now
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee sync    # bring it in step now
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee off     # the kill switch
+```
+
+`--p2p-committee` goes alone: with `--json`, `--status`, `--enable`, `--reset` or `--port` it exits 1, and so does any verb but `on`, `off`, `sync` and `status`.
+It is a server task: the Node Manager UI shows the allowlist but cannot turn it on or off.
+
+**How it works.**
+
+- The scripts orchestrate and a small Rust tool syncs.
+  `tn-p2p-allow-sync` fetches the snapshot, keeps a per-key memory of the addresses, adds the floor and the static list, and loads the nftables table `inet tn_p2p_allow` with one `nft -f` transaction.
+  `firewall-setup.sh` owns the verbs, the units, the `ufw` and new-flow-limit interplay, `P2P_COMMITTEE` in `.node-meta`, the kill switch and the download and install of the tool.
+- The table's input chain runs at priority -20, before the new-flow limit and `ufw`.
+  A UDP packet to a P2P port from a listed source counts in `tn_accept_p2p_listed` and goes on to `ufw`, which still decides; a packet from any other source counts in `tn_drop_p2p_unlisted` and is dropped.
+  `ufw` keeps its open P2P rules, so a host without the table is back to the earlier state.
+- An nftables accept is not final across base chains: a packet accepted at -20 still meets the limit chain at -10.
+  So committee mode removes the new-flow limit (`inet tn_p2p`, `/etc/telcoin/p2p-limit.nft` and `telcoin-p2p-limit.service`), and `off` brings it back.
+- There is no rule for established flows: the table matches on addresses only, so conntrack is never on the consensus path.
+  A validator in committee mode therefore completes connections only with listed sources, in either direction.
+- It fails open.
+  A snapshot the tool does not take as authoritative (the RPC does not answer, an unknown version, the primary swarm unavailable or under a missing, stale or contradictory fallback, an epoch below the applied one) changes nothing: the last-good program stays loaded and the run is stale (exit 3).
+  Nothing flushes the sets on an error path.
+  A key the snapshot lists without addresses keeps its last-known ones for 3 epochs, and a key an authoritative snapshot no longer lists goes on the second run in a row that omits it.
+- The timer (`telcoin-p2p-allow-sync.timer`) runs one sync two minutes after boot and five minutes after each run; the boot unit loads the last-good program before the node starts.
+
+**The verbs.**
+
+- `on` refuses with nothing changed (exit 1) unless a node is installed, `ufw` is active, `nft` (at an absolute path), `systemctl` and `flock` are there, the new-flow rate and burst and `P2P_ALLOW_FROM` are valid, and the update lock is free.
+  Under the update lock it installs the pinned tool when it is missing or answers another version, makes `/var/lib/telcoin-p2p-allow` (root 0700), writes its `config`, captures the floor, and runs one `tn-p2p-allow-sync sync --require-authoritative --wait 30`.
+  A snapshot the tool does not take as authoritative is a refusal: `P2P committee mode was not turned on: <reason>. Nothing was changed.`, with the state dir and a tool this run installed removed again.
+  The reason names `rpc-method-missing` as `this node release lacks tn_admissionSnapshot; update the node first`, and `empty-set` as `the snapshot lists no addresses beyond the floor and static list`.
+  Otherwise it writes and enables the three units, starts the timer, keeps the open P2P `ufw` rules, removes the new-flow limit, records `P2P_COMMITTEE=on` and makes the host baseline again: `P2P committee mode is on: only the sources the allowlist lists reach UDP <ports> (epoch N: A IPv4 and B IPv6 sources (K keys, F floor, S static)).`
+  A step after the sync that fails turns committee mode off again (exit 2), and exit 3 means that undo did not finish either; the message names `--p2p-committee off`.
+  On a host where committee mode is on already, `on` is a resync.
+- `sync` rewrites `config`, captures the floor again, reinstalls the tool when it is missing or answers another version than the pin, rewrites the units whose text differs and runs one `tn-p2p-allow-sync sync --wait 30`.
+  It exits 0 when the tool reports `result=applied` or `result=unchanged`, 1 when it refused (committee mode is off, the update lock is held, `P2P_COMMITTEE` is set twice), 2 when a step failed (with the tool's `reason=`), and 3 when the tool kept its last-good set (stale) or another run held the tool's lock.
+- `off` is the kill switch.
+  It never runs the tool, so it works with the binary missing or broken and with an older library.
+  It puts the earlier P2P path back first (with a source list the per-source `ufw` rules return and the open rule goes; without one the new-flow limit and its boot copy return), then stops and removes the timer, the sync service and the boot unit, deletes the table and the state dir, removes the tool and only then records `P2P_COMMITTEE=off`.
+  `ufw`'s rule files and the limit files end byte for byte as they were before `on`.
+  Exit 0 off, 1 refused, 3 partly done: the message names the command that finishes it, and while the allowlist is not gone `P2P_COMMITTEE` stays `on`, so a rerun of `off` finishes it.
+- `status` prints the allowlist lines of the status screen (also under "View current firewall status"): whether the table is loaded and what it holds, the last sync and its age, staleness and its reason, the two counters, and whether the timer and the boot unit are in place, each warning with the command that fixes it.
+- Every writer of the tool's inputs resyncs, and only while `P2P_COMMITTEE` is on: `--enable`, `--reset`, the menu's enable and the UI's enable (after the source list is stored), `edit-config.sh` after an edit that changed `/etc/telcoin/node.env` (it holds the P2P listener addresses) or the bootstrap peers, and after the chain-config refresh (the genesis `committee.yaml` feeds the floor), each once the node came back from its restart, the menu's Restart node (an edit saved with "restart later" reaches the node only then), and `migrate-node-naming.sh` after it rewrote `RPC_PORT`.
+  A hook runs `firewall-setup.sh --p2p-committee sync` as a child once it has released its own update lock, and a failure there is a warning naming that command.
+  `update-scripts.sh` prints `sudo bash <tree>/firewall-setup.sh --p2p-committee sync` after an install that changed `firewall-setup.sh` or `lib/common.sh` while the timer unit exists; it never runs it.
+
+**The tool and its pin.**
+`tn-p2p-allow-sync` comes from a signed release of `Telcoin-Association/tn-p2p-allow-sync`, checked against the same keys as node releases (`lib/release-keys`).
+`lib/common.sh` pins it: `TN_P2P_ALLOW_VERSION` names the tag (`v0.1.0`) and `TN_P2P_ALLOW_TARBALL_SHA256` the sha256 of its tarball.
+The scripts never fetch "latest", so the binary changes only with a scripts release.
+`TN_P2P_ALLOW_TARBALL_SHA256` is empty in this release because `v0.1.0` is not published yet; until a scripts release pins it, `on` refuses: `These scripts pin no sha256 for the tn-p2p-allow-sync v0.1.0 tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded.`
+`tn_p2p_allow_install` downloads `SHA256SUMS`, `SHA256SUMS.asc` and the tarball into a root-only staging dir over HTTPS, checks the signature with `gpgv`, the tarball's sha256 against its line and the pin, and its member list, then runs the binary's `--version` as the `tn-build` account.
+The first line must be `tn-p2p-allow-sync` and the tag without its `v`, with a `config-version 1` line and a `snapshot-versions` line that holds 1; `tn_install_root_binary` then installs it as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755).
+A failure at any step leaves an installed binary as it was.
+The release is published for x86_64 only; on another architecture `on` refuses.
+No version file is written: the installed binary's own `--version` is what `on` and `sync` compare with the pin.
+
+**Units.**
+
+| Unit | What it does |
+|---|---|
+| `telcoin-p2p-allow.service` | Enabled oneshot, `After=ufw.service network-pre.target` and before the node unit: loads `/var/lib/telcoin-p2p-allow/current.nft` with `nft -f`, and does nothing without that file (`ConditionPathExists=`). Stopping it deletes `table inet tn_p2p_allow`. `ProtectKernelModules=` stays off, because the first load after boot may need the kernel to load its nftables modules |
+| `telcoin-p2p-allow-sync.service` | One `tn-p2p-allow-sync sync`, after the node and the boot unit; no `[Install]`. `SuccessExitStatus=3 4`, so a stale or busy run is not a failed unit. It keeps `CAP_NET_ADMIN` alone, reaches `localhost` only (`IPAddressAllow=localhost`), writes its state dir only, reads `config` and `floor` read-only and cannot see `/etc/telcoin`, `/var/lib/telcoin` or a data dir elsewhere (`InaccessiblePaths=`). Its journal tag is `tn-p2p-allow` |
+| `telcoin-p2p-allow-sync.timer` | `OnBootSec=2min`, `OnUnitActiveSec=5min`, `RandomizedDelaySec=30s` |
+
+**The state dir.**
+`/var/lib/telcoin-p2p-allow/` (root 0700) sits outside `/etc/telcoin`, so a sync every five minutes touches nothing auditd or AIDE watch.
+The scripts write `config`; the tool writes the rest, each file 0600.
+
+| File | What it holds |
+|---|---|
+| `config` | `CONFIG_VERSION=1`, `RPC_PORT` (the node's RPC port from `.node-meta`), `P2P_PORTS` (the node's P2P ports, each once) and `P2P_ALLOW_FROM` (the stored source list). A multicast, link-local or unspecified host in the list refuses the write, since it is never a peer's source |
+| `floor` | The addresses of `/etc/telcoin/bootstrap-peers.yaml`, or of the genesis `committee.yaml` in the data dir when there is no peers file, captured by `tn-p2p-allow-sync capture-floor` at `on` and every resync |
+| `current.nft` | The last program loaded, which the boot unit loads |
+| `state.json` | The per-key memory |
+| `status` | `KEY=VALUE` lines the scripts read key by key: `RESULT`, `LAST_GOOD`, `EPOCH`, `STALE_SINCE`, `STALE_REASON`, the set sizes and more |
+| `lock` | The tool's own lock; the scripts never hold it while the tool runs, and `off` takes it (`flock -w 30`) to delete the table and the state dir |
+
+**In `--json --status`.**
+The status object ends with `p2p_committee`.
+Its first four keys are the scripts' own: `enabled` (`P2P_COMMITTEE` is on; null when the key is set twice), `persistent` (the boot unit is there and enabled), `timer` (the timer is there, enabled and active) and `reason`.
+With committee mode on and the tool answering, `reason` is null and the one line of `tn-p2p-allow-sync status --json` follows in the same object: `loaded`, `epoch`, `allowed_v4`, `allowed_v6`, `static`, `floor`, `keys`, `dns_skipped`, `last_good`, `age_secs`, `stale`, `stale_since`, `stale_reason` and `counters` (`accepted`, `dropped`); an unknown value is null.
+Otherwise the four keys come alone, with `reason` `off`, `unreadable` (`P2P_COMMITTEE` set twice), `tool-missing` or `tool-error` (the tool failed, or its answer did not pass the shape check).
+
+```json
+"p2p_committee":{"enabled":true,"persistent":true,"timer":true,"reason":null,"loaded":true,"epoch":42,"allowed_v4":12,"allowed_v6":2,"static":1,"floor":2,"keys":10,"dns_skipped":0,"last_good":1793952000,"age_secs":140,"stale":false,"stale_since":null,"stale_reason":null,"counters":{"accepted":51234,"dropped":87}}
+"p2p_committee":{"enabled":false,"persistent":false,"timer":false,"reason":"off"}
+```
+
+**Verify a tool release by hand.**
+Check a release before you extract or run anything from it.
+The commands take the maintainer keys from the signing submodule at the commit the tool repository's `main` records for `release/`, never from the release's tag, so a tag cannot bring its own key.
+Run them in one shell in a new, empty directory, with `TAG` set to the pinned tag:
+
+```sh
+TAG="v0.1.0"
+REPO="Telcoin-Association/tn-p2p-allow-sync"
+TARBALL="tn-p2p-allow-sync-$TAG-x86_64-unknown-linux-musl.tar.gz"
+BASE="https://github.com/$REPO/releases/download/$TAG"
+if [ -n "$(ls -A)" ]; then echo "Run these commands in a new, empty directory" >&2; false; fi &&
+git clone --quiet --depth 1 --branch main --recurse-submodules=release --shallow-submodules "https://github.com/$REPO.git" main &&
+for k in main/release/keys/*.asc; do gpg --dearmor < "$k"; done > release-keys.gpg &&
+gpg --show-keys --with-fingerprint main/release/keys/*.asc &&
+curl -fsSL --fail-early --remote-name-all "$BASE/SHA256SUMS" "$BASE/SHA256SUMS.asc" "$BASE/$TARBALL" &&
+gpgv --status-fd 1 --keyring ./release-keys.gpg SHA256SUMS.asc SHA256SUMS |
+awk '$2 ~ /^(BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG)$/ { bad = 1 } $2 ~ /^(GOODSIG|BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG)$/ { s = $2; print $2 } $2 == "VALIDSIG" && s == "GOODSIG" { print "signed by primary key " $NF; n++ } END { exit (n && !bad) ? 0 : 1 }' &&
+sha256sum --check SHA256SUMS &&
+echo "Signature and hashes verified"
+```
+
+- Without the last line `Signature and hashes verified` the files are not verified: stop, run nothing from the release and report it.
+- The block counts only a `GOODSIG` and fails on any `BADSIG`, `ERRSIG`, `EXPSIG`, `EXPKEYSIG` or `REVKEYSIG`, because `gpgv` prints `Good signature from` and exits 0 even for a revoked or expired key.
+- Every primary key fingerprint `gpg --show-keys` printed must appear in the table in `main/release/KEYS.md` and at `https://github.com/<handle>.gpg`, where `<handle>` is the key file's name without `.asc`; stop on any mismatch.
+
+Then check it against the pin and look inside, in the same directory:
+
+```sh
+grep -E '^readonly TN_P2P_ALLOW_(VERSION|TARBALL_SHA256)=' ~/telcoin-node-scripts/lib/common.sh &&
+sha256sum "$TARBALL" &&
+tar -tzf "$TARBALL" &&
+tar -xzf "$TARBALL" &&
+"${TARBALL%.tar.gz}/tn-p2p-allow-sync" --version
+```
+
+- The tag and the sha256 must equal the two pinned values.
+- `tar -tzf` lists the directory `tn-p2p-allow-sync-<tag>-x86_64-unknown-linux-musl/` with `LICENSE-APACHE`, `LICENSE-MIT`, `NOTICE` and `tn-p2p-allow-sync`, and nothing else.
+- `--version` prints five lines: `tn-p2p-allow-sync` and the tag without its `v`, `commit` and the 40-hex commit the tag names, `target x86_64-unknown-linux-musl`, `snapshot-versions 1` and `config-version 1`.
+  It needs no privileges and touches nothing.
+
+Leave the install to `firewall-setup.sh --p2p-committee sync`, which repeats every check against its own keyring.
+The tool's own repository documents every input and output it exchanges with these scripts (`docs/contract.md`).
 
 ### Important warnings
 
@@ -800,7 +947,9 @@ Run `firewall-setup.sh` after completing node setup and before going live. For p
 
 ### JSON mode (Node Manager UI)
 
-The UI drives the script with `--json --status`, `--json --enable` and `--json --port <port>/<proto> on|off`. On mainnet, `--json --enable` needs `--ssh-from` (or a stored `SSH_ALLOW_FROM`) like the terminal run. A `done` event of `--json --enable` carries `rc` (the exit codes above) and `active`. `--json --status` keeps its `ports` keys and adds `p2p_ports`: one `{"port", "proto", "label", "allowed"}` object per P2P port, with labels `primary` and `worker-N`, and `allowed` set to null while ufw is off (and on a box with no node, where the default ports are listed). When `ufw status verbose` fails, the status object still comes back, with `"default_incoming": "unknown"`. A failed rule step during `--json --enable` ends the run with an `error` event and `done` `ok: false` whose message says the rules added before it stay and ufw was not enabled. The `--port` allowlist is unchanged: 49590/udp, 49594/udp and 43174/tcp. With an older `lib/common.sh` the script stops with one message saying to run `update-scripts.sh`.
+The UI drives the script with `--json --status`, `--json --enable` and `--json --port <port>/<proto> on|off`. On mainnet, `--json --enable` needs `--ssh-from` (or a stored `SSH_ALLOW_FROM`) like the terminal run. A `done` event of `--json --enable` carries `rc` (the exit codes above) and `active`. `--json --status` keeps its `ports` keys and adds `p2p_ports`: one `{"port", "proto", "label", "allowed"}` object per P2P port, with labels `primary` and `worker-N`, and `allowed` set to null while ufw is off (and on a box with no node, where the default ports are listed). When `ufw status verbose` fails, the status object still comes back, with `"default_incoming": "unknown"`. A failed rule step during `--json --enable` ends the run with an `error` event and `done` `ok: false` whose message says the rules added before it stay and ufw was not enabled. The `--port` allowlist is unchanged: 49590/udp, 49594/udp and 43174/tcp.
+The status object ends with `p2p_committee`, the state of the [P2P committee allowlist](#p2p-committee-allowlist); `--p2p-committee` has no JSON form.
+With an older `lib/common.sh` the script stops with one message saying to run `update-scripts.sh`.
 
 ---
 
@@ -1125,7 +1274,9 @@ The script automatically detects what is installed (including legacy per-role la
 - Log directory
 - Service user and group, and the `telcoin-log` group (asked separately when you keep the service user, which may still need it)
 - On a testnet host, the add-ons' leftovers (the VPN self-heal units and helper, the maintainer key files, the overlay SSH rules and the `telcoin-alloy` account); the Alloy ingest token file and `telcoin-alloy.env` are shredded first
-- With the last node unit on the host: the host baseline (the audit rules file, reloaded with `augenrules --load`, the AIDE config, both databases and every `HOST_BASELINE` line: `Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide`) and the P2P new-flow limit (`telcoin-p2p-limit.service`, `/etc/telcoin/p2p-limit.nft`, the nftables table). While another node unit remains, both are kept for it and the run says so After removing one node of two, run `sudo ./setup-node.sh --host-baseline` again: the kept rules and AIDE config still name the removed unit.
+- With the last node unit on the host: the host baseline (the audit rules file, reloaded with `augenrules --load`, the AIDE config, both databases and every `HOST_BASELINE` line: `Host baseline removed. The auditd and aide packages stay installed; remove them with: sudo apt-get purge auditd aide`), the P2P new-flow limit (`telcoin-p2p-limit.service`, `/etc/telcoin/p2p-limit.nft`, the nftables table), and the [P2P committee allowlist](#p2p-committee-allowlist) without running `firewall-setup.sh` or the tool: `telcoin-p2p-allow-sync.timer` first, then `telcoin-p2p-allow-sync.service` and `telcoin-p2p-allow.service` with their unit files, the nftables table `inet tn_p2p_allow` (when nft lists it, or cannot list the tables while something else of the allowlist is there), `/usr/local/libexec/telcoin/tn-p2p-allow-sync` and last `/var/lib/telcoin-p2p-allow`, which stays when nft refused the delete so a later run tries again.
+  While another node unit remains, all three are kept for it and the run says so.
+  After removing one node of two, run `sudo ./setup-node.sh --host-baseline` again: the kept rules and AIDE config still name the removed unit.
 - Any container that runs a node image of the testnet repositories, of `ghcr.io/telcoin-association/tn-mainnet`, of `ghcr.io/telcoin-association/tn-dev` or of the old `ghcr.io/telcoin-association/telcoin-network` package, whatever its name, is offered for removal; each one asks first
 
 The removal takes the update lock before its first change and holds it to the end, so no update or edit runs while it works; it refuses while another script holds the lock. Secrets are overwritten with `shred` before they are deleted: the passphrase credential or file, and the keys and config tree when you remove them. Root-only trees are shredded as root and the data directory as the service user, before that account is removed; the script says that overwriting is best effort on SSDs, copy-on-write and cloud disks. A removal that stopped part way can be finished: run `remove-node.sh` again, and it carries on while `/etc/telcoin`, the backups, the data directory or the start scripts remain. The Node Manager UI's audit log, `/var/log/telcoin-ui/audit.log`, is kept.
@@ -1357,6 +1508,9 @@ Before you confirm public RPC, the page shows the same exposure summary that `in
 The Host Security Audit card shows the output of `check-node.sh --audit`. When the firewall is off, the firewall card can turn it on: it asks for the SSH sources (addresses or CIDRs, /8 or narrower, at most 16) and passes them to `firewall-setup.sh` as `--ssh-from`. On mainnet `firewall-setup.sh` refuses without a list, and the card shows its message as written. The form also has an optional "P2P sources" field with the same rule (at most 16 addresses or CIDRs of /8 or narrower, split on commas, spaces or new lines; never /0 or the unspecified address), passed as `--p2p-from`: when given, the P2P ports accept those sources only, and the confirm dialog says peers outside the list cannot reach the node. When empty, the engine keeps the `P2P_ALLOW_FROM` it has stored, else every address with the new-flow limit. A bad entry is named by its list (`SSH sources: not an address or a CIDR of /8 or narrower: X`, `P2P sources: ...`, `at most 16 P2P sources`). The form shows only while ufw is off, so to set, change or drop a P2P list on a running firewall use `firewall-setup.sh --enable --p2p-from LIST` or `--p2p-anywhere` on the server; the form has no field for `--ssh-anywhere` either.
 
 The firewall card shows the kept P2P list as "P2P sources" ("every address" when `.node-meta` has none, a note when `P2P_ALLOW_FROM` is set more than once) and, when the engine reports it, "P2P new-flow limit": `active, N packets per minute of new, unanswered flows per source after a burst of B`, with ` (not restored at boot)` when the boot copy is missing or differs, or `inactive:` with the reason (`a P2P source list is set`, `nftables is not installed`, `not applied yet; enable the firewall`, `state could not be read`). The card does not show `persistent_reason`; `firewall-setup.sh --json --status` has it.
+A "P2P committee allowlist" row follows the limit row when the engine reports `p2p_committee`: `off`, the reason in words (`on, but tn-p2p-allow-sync is missing; run firewall-setup.sh --p2p-committee sync on the server`, `on, but tn-p2p-allow-sync could not report its status`), or `on` with the addresses allowed, the bootstrap floor, the static networks, the age of the last good sync, staleness and its reason, `not restored at boot` and `the sync timer is not running` when those apply.
+The limit row then reads `the P2P committee allowlist replaces it`, and "P2P sources" reads `committee allowlist`, plus the kept list.
+The card cannot turn the allowlist on or off; see [P2P committee allowlist](#p2p-committee-allowlist).
 
 The Network tab links the network's status page only where one exists: testnet links `https://status.adiri.telcoin.network/`, and mainnet, devnet and an unknown network show no link (`STATUS_PAGE_LINKS` in `ui/server.py`; the page renders only an https link).
 
@@ -1661,6 +1815,9 @@ sudo bash ~/telcoin-node-scripts/firewall-setup.sh
 
 # Private alerts: a heartbeat to a monitor you own (every network)
 sudo bash ~/telcoin-node-scripts/setup-alerts.sh
+
+# P2P committee allowlist (validators): on, off, sync or status
+sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee status
 ```
 
 ### setup-node flags
@@ -1873,6 +2030,7 @@ prints the exact fix command.
   runner or its library on a host with private alerts installed, it prints `The heartbeat runner
   or its library changed. Reinstall them on the host:` and the `setup-alerts.sh --refresh`
   command; it never runs that itself (#60).
+- After an install that changed `firewall-setup.sh` or `lib/common.sh` on a host with the P2P committee allowlist's timer, it prints `sudo bash <tree>/firewall-setup.sh --p2p-committee sync`, which rewrites the units and installs the tool the new scripts pin; it never runs it.
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 
@@ -1939,6 +2097,8 @@ See [Private alerts](#private-alerts-every-network) and
   (#60).
 - New `tn_network_config_render DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE` writes the node admission settings (`admission`, `trusted_nodes`, `committee_peers`) into the data dir's `network-config` as the service user, replacing the three top-level entries in place rather than appending them.
   `tn_node_supports_admission` is the release gate; its floor `MIN_ADMISSION_VERSION` is 0.17.0 and waits for the node team to confirm it.
+- The signed-release fetch serves a second repository: `tn_p2p_allow_install` installs the pinned `tn-p2p-allow-sync` release (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`) as `/usr/local/libexec/telcoin/tn-p2p-allow-sync`, checked against `lib/release-keys` like a node release; the node path's results are unchanged.
+  The tarball pin is empty until that release is published, so the install refuses until a scripts release pins it.
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 
@@ -1957,6 +2117,7 @@ Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
   single package is refused there and never offered as the newest image, and the helper's
   `setup-keygen` checks the image with the same pull rule as setup-node (#46).
 - `ui/telcoin-ui.service` has `LimitCORE=0`.
+- The firewall card has a read-only "P2P committee allowlist" row from `p2p_committee`, and the P2P sources row and the limit's reason say when the committee allowlist replaces them; no helper subcommand, sudoers line or `HELPER_API` change.
 
 Run the `sudo bash ui/install-ui.sh --update` that update-scripts prints. Full release note:
 [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
@@ -2041,6 +2202,7 @@ Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 - New `--set admission=open|grace|closed` and `--set trusted_nodes=<path>|none`, and menu items 11 (Admission mode) and 12 (Trusted nodes); Refresh chain configs, Restart node and Exit move to 13, 14 and 15.
   A trusted nodes map has its shape checked before it is installed, and an edit that writes `network-config` is watched for `TN_EDIT_VERIFY_TIMEOUT` seconds (default 60) after its restart and rolled back when the node does not stay up.
   A menu edit whose restart does not come back is put back as with `--set`, and an edit that changes only `.node-meta` does not restart the node (see [Node admission settings](#node-admission-settings)).
+- With P2P committee mode on, an edit of `node.env` or the bootstrap peers, the chain-config refresh and the menu's Restart node resync the allowlist (`firewall-setup.sh --p2p-committee sync`) once the node came back from the restart; a failed sync is a warning.
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 
@@ -2062,6 +2224,7 @@ AIDE baseline again (#43). The dashboard site writes nothing the baseline covers
   not 0600 root, a runner of another version than the scripts' copy, an `alerts.env` out of step with
   the node). Without the alerts library it is skipped, and named as skipped, only on a host that
   has the alerts. The ownership check covers the runner and `/etc/telcoin/alerts` (#60).
+- With P2P committee mode on, a new check reports a missing tool or table (a failure), a stale allowlist (no good sync for 2 epochs), the stale reasons that never clear on their own, current committee addresses the table lacks (at most five named), record mismatches, and a config that no longer matches the node (see [P2P committee allowlist](#p2p-committee-allowlist)).
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 
@@ -2078,6 +2241,8 @@ Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 - The status screen and `--json --status` (`p2p_new_flow_limit`) report the limit. The health-port
   block shows on testnet and devnet only (#47).
 - A change that went through makes the host baseline again (#43).
+- New `--p2p-committee on|off|sync|status`, the [P2P committee allowlist](#p2p-committee-allowlist) for validators: the nftables table `inet tn_p2p_allow` lets only the sources of the node's admission snapshot, the bootstrap floor and `P2P_ALLOW_FROM` reach the P2P ports, kept in step every 5 minutes by the signed `tn-p2p-allow-sync` tool through `telcoin-p2p-allow-sync.timer`.
+  Committee mode removes the new-flow limit, `off` is the kill switch back to the earlier P2P rules, `P2P_COMMITTEE` in `.node-meta` records the mode, and `--json --status` ends with a `p2p_committee` object.
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 
@@ -2098,6 +2263,7 @@ root, and a `--disable` make the AIDE baseline again (#43).
   it stops the node, in the menu, with `--json` and when it finishes an interrupted removal, and
   leaves them with a chain-data wipe. It then prints `Pause or delete this node's monitor: a push
   monitor alerts on silence.` (#60).
+- With the last node unit it also removes the P2P committee allowlist: its three units, the table `inet tn_p2p_allow`, the tool and `/var/lib/telcoin-p2p-allow`, without running `firewall-setup.sh` or the tool.
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 

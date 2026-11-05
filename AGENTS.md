@@ -119,7 +119,7 @@ On a node host the service account (`telcoin` by default) owns one tree: the dat
 and config dirs (`/opt/telcoin`, `/etc/telcoin`, root 0755), `.node-meta` (root 0600),
 `node.env` (0644), `bootstrap-peers.yaml` and `trusted-nodes.yaml` (0644), the passphrase files, the start scripts under `/usr/local/libexec/telcoin`,
 the node binary and every directory above it, the log dir (`/var/log/telcoin`,
-root:telcoin-log 0750), `/var/backups/telcoin`, `/var/lib/telcoin-staging` and the update lock
+root:telcoin-log 0750), `/var/backups/telcoin`, `/var/lib/telcoin-staging`, the P2P committee allowlist's tool `/usr/local/libexec/telcoin/tn-p2p-allow-sync`, state dir `/var/lib/telcoin-p2p-allow` (0700) and units, and the update lock
 under `/run/telcoin`. One more tree is not root's: the state dir of the private alerts runner
 (`/var/lib/private/telcoin-heartbeat`, 0700), which systemd creates for the heartbeat service's
 dynamic user (`DynamicUser=yes`, `StateDirectory=telcoin-heartbeat`). Only the runner writes in
@@ -142,6 +142,11 @@ Code that runs as root keeps it that way:
   The scripts change it only through `write_advertised_name` (the `hostname` line) and `tn_network_config_render` (the admission entries), both run as the service user, the second through `network-config.tn-new` and one rename.
   edit-config backs it up and puts it back as that user (`edit_backup_copy`, `edit_restore_one`), so root never opens a path the service user controls.
 - The trusted nodes map is installed with `tn_write_root_file` as `/etc/telcoin/trusted-nodes.yaml` (root 0644): from the operator's file in setup-node (`install_trusted_nodes`), and from a root-only copy that passed the shape check in edit-config (`edit_trusted_install`).
+- The P2P committee allowlist (`firewall-setup.sh --p2p-committee`) keeps the same rules.
+  `tn_p2p_allow_install` installs the tool with `tn_install_root_binary` as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755), `_tn_root_layout_dir` makes the state dir `/var/lib/telcoin-p2p-allow` root 0700 (it is on `tn_root_dir_ok`'s strict list), `fw_allow_write_config` writes its `config` 0600 with `tn_write_root_file` from a here-string, and `fw_allow_unit_put` writes `telcoin-p2p-allow.service`, `telcoin-p2p-allow-sync.service` and `telcoin-p2p-allow-sync.timer` root 0644 the same way.
+  The tool writes every other file in the state dir itself; the scripts never write there except `config`, and `off` (`fw_allow_uninstall`) removes the dir only after a `-L` and `-d` check, under the tool's lock.
+  The state dir sits outside `/etc/telcoin` on purpose: a sync every five minutes must not raise an auditd event or need an AIDE refresh.
+  In the fixtures, `tools/tests/fwstub.sh` provides the `tn-p2p-allow-sync` stand-in (a `#!/bin/sh` script driven by `TN_P2P_STUB_*` knobs that records each call) and an nft stub that models `table inet tn_p2p_allow`.
 - Never `chown -R`. `create_directories` sets the owner and mode of each directory it makes
   with `install -d`, and `tn_migrate_ownership` re-owns an older install one entry at a time
   (`chown -h`, parents first). The one recursive chown, in `ui/install-ui.sh`, runs on the temp
@@ -284,6 +289,39 @@ Rules for any code that touches them:
 - Mainnet closed without a trusted nodes map warns (`edit_admission_closed_warn` and setup's twin), it does not refuse.
 - setup-node and edit-config list `tn_network_config_render` and `tn_node_supports_admission` in their `tn_require_fns` checks.
 - Not wired yet: the UI helper's and `ui/server.py`'s `--set` allowlists, check-node, remove-node's listing and update-node's floor check do not know the settings.
+
+## P2P committee allowlist
+
+`firewall-setup.sh --p2p-committee on|off|sync|status` puts the nftables table `inet tn_p2p_allow` in front of `ufw` on a validator: listed sources go on to `ufw`'s P2P rules, every other source to the P2P ports is dropped.
+The list comes from the node's `tn_admissionSnapshot`, the bootstrap floor and `P2P_ALLOW_FROM`, and the Rust tool `tn-p2p-allow-sync` (its own repository, a signed release pinned in `lib/common.sh`) builds and loads it.
+The tool's `docs/contract.md` is the cross-repository contract: every input, output, exit code and reason token the two sides exchange.
+Rules for any code that touches it:
+
+- Bash orchestrates, the binary syncs.
+  The tool owns the fetch, the validation, the per-key memory, the floor, the static list, the render, the apply, `state.json`, `status` and `check`.
+  The scripts own the verbs, the units, the `ufw` and new-flow-limit interplay, `P2P_COMMITTEE` in `.node-meta`, the kill switch and the download, verify and install of the binary.
+  Bash reads the tool only through its exit codes, its one stdout result line (`fw_allow_word`), the `status` file and `status` output key by key (`fw_allow_kv`, `_cn_allow_kv`, value grammar `[A-Za-z0-9._:-]*`) and the one line of `status --json`, spliced whole after a shape check (`json_fw_committee`); it never parses the snapshot, never sources a tool file and never needs python3.
+  The one log-line exception is `check`: check-node reads the `reason=` word of the tool's `error` and `stale` lines, which the contract names as part of it.
+- Never hold the tool's lock (`/var/lib/telcoin-p2p-allow/lock`) while the binary runs: a second open file description conflicts with the tool's own `flock`, and the tool skips its run as busy (exit 4).
+  The timer never takes the update lock either; the verbs take the update lock (`fw_meta_lock`) and pass `--wait 30` to the tool.
+- `off` never runs the binary, so it works with the binary missing or broken and with an older library; it holds `flock -w 30` on the tool's lock itself around the table delete and the removal of the state dir.
+  It puts the non-committee P2P path back (`fw_p2p_allow`, `fw_p2p_limit_sync`) before it removes anything, and writes `P2P_COMMITTEE=off` last, so a partial `off` still reads as on and the next run finishes it.
+- Run the binary only through `fw_allow_run` (or `_cn_allow_run` in check-node): stdin from `/dev/null`, no descriptor above 2 (`_tn_exec_closed`), `TN_BLS_PASSPHRASE` unset, and as root outside the sync unit's sandbox, which hides `/etc/telcoin` and the data dir from it.
+- An exit 0 of `sync` counts only with `result=applied` or `result=unchanged` on its line (`fw_allow_fresh`); a failure names the line's `reason=`.
+  `on` runs `sync --require-authoritative`, so the first table is never built from a snapshot the tool does not trust.
+- The config file is a contract with a version.
+  `fw_allow_write_config` writes exactly `CONFIG_VERSION`, `RPC_PORT`, `P2P_PORTS` and `P2P_ALLOW_FROM`, once each, unquoted, with every P2P port once and no host the tool would refuse (`fw_allow_src_dropped`); `TN_P2P_ALLOW_CONFIG_VERSION` names the version, and the installed binary's `--version` must list it (`_tn_p2p_allow_version_ok`: the first line, `config-version`, `snapshot-versions`).
+  A change to the format moves `CONFIG_VERSION` and the pin together, in one scripts release.
+- Every writer of `RPC_PORT`, the P2P ports, `P2P_ALLOW_FROM` or the floor's sources (`bootstrap-peers.yaml`, the genesis `committee.yaml`) ends with a resync, and only while `P2P_COMMITTEE` is on.
+  Inside firewall-setup that is `fw_committee_sync quiet`, after `fw_persist_sources`; any other script releases its update lock and runs `bash firewall-setup.sh --p2p-committee sync </dev/null` as a child, because firewall-setup.sh runs `main` when sourced and the lock cannot be handed to a child (`edit_committee_resync`, `resync_committee_allowlist`).
+  A failed resync warns with the command to run; it never fails the writer.
+- No `ct state established` rule.
+  The table matches on addresses and never on connection state, so conntrack stays off the consensus path, and a committee-mode validator completes connections only with listed sources in either direction.
+  An `established,related` accept first (counter `tn_accept_p2p_established`) was considered and rejected: it would admit the replies of every peer the node dials, strangers found by discovery included, and put conntrack on the consensus path.
+- Committee mode removes the new-flow limit `inet tn_p2p`: an nftables accept is not final across base chains, so a packet the allowlist accepts at -20 would still meet the limit's drop at -10.
+- The pin (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`) moves only in a `chore` commit of a scripts release; the scripts never fetch "latest".
+  The tarball hash stays empty until the tool release is published, and the install refuses without it.
+- The touched scripts' `.sha256` sidecars are refreshed by the final `chore(release)` commit of a change, never by a feature commit (`tools/gen-checksums.sh`).
 
 ## One-way storage migration (v0.16.0-adiri)
 
@@ -916,19 +954,23 @@ line.
   unless they run as root with `TN_VM_TEST=1`; `integration.yml` runs the `P0-*.sh` ones. An
   item whose code is not in the tree reports SKIP. Do not run them on a machine you care
   about.
+  `vm.d/P0-p2p-allow.sh` installs the pinned `tn-p2p-allow-sync` release from GitHub and drives the P2P committee allowlist on the runner's systemd and kernel; it reports SKIP while `lib/common.sh` pins no tarball sha256 or the release cannot be downloaded.
 - `tools/tests/genesis.d/testnet/` holds `genesis.yaml`, `committee.yaml` and
   `parameters.yaml` from telcoin-network at the pinned tag (`TESTNET_CHAIN_CONFIGS_TAG`),
   unchanged. `genesis_hash_test.sh` checks them against the `TESTNET_*_SHA256` pins in
   `lib/common.sh`; refresh the files and the pins together.
 - `tools/tests/perl-interp.d/` holds the perl lint's fixtures, and `tools/tests/signing.sh`
   the OpenPGP release-signing helpers of `updater_manifest_test.sh`, `install_test.sh`,
-  `release_scripts_test.sh` and `cut_release_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,
+  `release_scripts_test.sh`, `cut_release_test.sh` and `p2p_allow_install_test.sh`: `newkey NAME [EXPIRY|--expired|--revoked]`,
   `sign_file FILE KEYNAME...` and `sign_file_bad FILE KEYNAME`, with throwaway keys in a
   temporary `GNUPGHOME`. `REAL_GPG` is 1 when the real `gpg` and `gpgv` work there; elsewhere
   (the `bash:3.2` and `ubuntu:24.04` images), or with `TN_TEST_FAKE_GPG=1`, stand-in `gpg` and
   `gpgv` print the real status lines, so the status parser runs in every environment.
   `cut_release_test.sh` drives `cut-release.sh` against a bare repository on disk with
   stand-in `gh`, `gpg` and `curl`.
+- The P2P committee allowlist has `p2p_allow_install_test.sh` (the signed install of the tool and every refusal, each leaving an installed binary byte-identical) and `p2p_committee_mode_test.sh` (the verbs, the units, the kill switch, the lock rule and the `p2p_committee` status object), both on the stubs of `tools/tests/fwstub.sh`: a `#!/bin/sh` `tn-p2p-allow-sync` stand-in that records argv, environment and stdin and takes its output and exit codes from `TN_P2P_STUB_*`, and an nft stub that models `table inet tn_p2p_allow`.
+  `edit_config_resync_test.sh` covers edit-config's resync hook and its three call sites.
+- The node admission settings have `network_config_test.sh` (the renderer), `setup_node_admission_test.sh` and `edit_config_admission_test.sh`.
 
 Nothing under `tools/tests/` is updater-tracked or carries a sidecar. The UI's own tests live
 in `ui/tests/` (`helper_test.sh`, `open_ui_test.sh`, `install_ui_test.sh`) and `ui/test_*.py`.
