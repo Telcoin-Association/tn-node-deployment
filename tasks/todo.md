@@ -80,6 +80,21 @@ specs `tasks/spec-alerts-<PKG>.md`, checkpoints `tasks/ckpt-alerts-<PKG>.md`.
 - Every other check was green on the first run: bash -n on both bashes, shellcheck, the Linux
   fixture suite, the hardening lints, the release manifest, checksum freshness, the UI tests.
 
+### Merge of the base (2026-11-04)
+
+The base moved a fourth time (41 round-2 commits: the finalize image override, the
+build-feature run under `timeout -k`, the record-order fix, the checked install pass, the
+cut-release fixes, the review records) and the operator asked for a merge, not a rebase, with
+both sides kept. `origin/hardening-followups` (4a24629) was merged into `private-alerts` as
+01c4eb7. The sources all merged on their own with no contradiction: the base's edits sit in
+the Docker, finalize, release and cut-release areas, mine in the alerts areas; `write_node_meta`
+takes key=value arguments on both sides. The only conflicts were generated files, rebuilt from
+the merged sources: the three sidecars (`tools/gen-checksums.sh`) and the guide PDF (77 pages,
+byte-identical on a second build). The guide stays at 1.8: the base changed the guide text
+twice under 1.7 without a bump, and no PDF with either side's text has shipped. Gates on the
+merge: `bash -n`, the bash 3.2 lint, shellcheck, the perl lint and `git diff --check` clean;
+the fixture suite 66 files, 0 failed in bash 5.3.9, bash 3.2.57 and Ubuntu 24.04.
+
 ### Process notes
 
 - Agent budgets: A1b (342k), V1 (336k), V1d (312k), F-A (308k), A2 (299k) and V2 (265k) ran past
