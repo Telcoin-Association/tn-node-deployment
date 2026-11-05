@@ -71,6 +71,21 @@ has() {
 }
 fwlog() { cat "$FWLOG" 2>/dev/null; }
 SYNC="firewall-setup --p2p-committee sync lock=free fd3=closed stdin=0"
+# fake_backups FILE... -- the backup state edit_backup records for an edit of FILEs:
+# the copy path, a sum that is not the file's (the edit changed it) and a mode, so
+# edit_bk_changed sees a change and the rollback of a failed restart has entries to
+# read. The rollback itself has its own fixture; the restore is a stub here.
+fake_backups() {
+    local f
+    EDIT_BK_FILES=() EDIT_BK_COPIES=() EDIT_BK_SUMS=() EDIT_BK_MODES=()
+    for f in "$@"; do
+        EDIT_BK_FILES+=("$f")
+        EDIT_BK_COPIES+=("$f.bk")
+        EDIT_BK_SUMS+=("0000000000000000000000000000000000000000000000000000000000000000")
+        EDIT_BK_MODES+=("644 root")
+    done
+}
+edit_restore_backups() { EDIT_PENDING=false; return 0; }
 
 # resync MODE FILE... -- P2P_COMMITTEE=MODE (none: no key, twice: two lines), the
 # edit's backups FILE..., the lock held, then edit_committee_resync; OUT and RC.
@@ -82,7 +97,7 @@ resync() {
         twice) printf 'NETWORK=testnet\nP2P_COMMITTEE=on\nP2P_COMMITTEE=on\n' > "$META" ;;
         *)     printf 'NETWORK=testnet\nP2P_COMMITTEE=%s\n' "$mode" > "$META" ;;
     esac
-    EDIT_BK_FILES=("$@")
+    fake_backups "$@"
     : > "$FWLOG"
     : > "$T/json"
     edit_lock
@@ -159,7 +174,7 @@ sleep() { :; }
 TARGET_SERVICE=telcoin
 apply_menu() {
     printf 'NETWORK=testnet\nP2P_COMMITTEE=on\n' > "$META"
-    EDIT_BK_FILES=("$ENVF")
+    fake_backups "$ENVF"
     : > "$FWLOG"
     edit_lock
     apply_changes < /dev/null > "$T/out" 2>&1
@@ -168,6 +183,7 @@ apply_menu() {
 apply_menu
 check "menu: restarted, baseline, then one sync, the lock released" "systemctl daemon-reload
 systemctl restart telcoin
+systemctl show -p NRestarts --value telcoin
 systemctl is-active --quiet telcoin
 baseline
 ${SYNC}" "$(fwlog)"
@@ -187,7 +203,7 @@ edit_unlock
 # leaves it: the backups recorded, the lock released.
 restart_later() {
     printf 'NETWORK=testnet\nP2P_COMMITTEE=on\n' > "$META"
-    EDIT_BK_FILES=("$ENVF")
+    fake_backups "$ENVF"
     edit_lock
     CONFIRM_RC=1 apply_changes < /dev/null > "$T/out" 2>&1
     set +e
@@ -229,7 +245,7 @@ check "restart node, committee mode off: restarted, no sync" "yes no" \
 # --- run_set: the sync comes before the done event ---------------------------------
 edit_require_root() { :; }
 resolve_target() { return 0; }
-set_field() { EDIT_BK_FILES=("$ENVF"); return 0; }
+set_field() { fake_backups "$ENVF"; return 0; }
 edit_any_changed() { return 0; }
 edit_report_backups() { :; }
 edit_restart() { printf 'restart\n' >> "$FWLOG"; return 0; }
@@ -249,7 +265,7 @@ check "--set primary_listener: the sync step, then the done event last" \
     '{"event":"step","msg":"Syncing the P2P committee allowlist with the edit"}
 {"event":"done","ok":true,"field":"primary_listener","value":"/ip4/0.0.0.0/udp/49600/quic-v1","msg":"applied and telcoin healthy"}' \
     "$(grep -v '"msg":"Setting ' "$T/json")"
-set_field() { EDIT_BK_FILES=("$LAUNCH"); return 0; }
+set_field() { fake_backups "$LAUNCH"; return 0; }
 EDIT_SET_PAIR="verbosity=-vv"
 : > "$FWLOG"
 : > "$T/json"
