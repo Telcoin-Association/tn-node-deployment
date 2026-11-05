@@ -8180,11 +8180,12 @@ tn_docker_holds_digest() {
 # such line, listing nothing on mainnet and on testnet the testnet feature
 # (faucet allowed, nothing else). Devnet images are not checked: rc 0 with an
 # info line. rc 1, with a message that names IMAGE, the features found and
-# NETWORK, when the image does not run, the line is missing or doubled, or the
-# features are not NETWORK's. Callers run it after the pull and before any
-# container starts or .node-meta names IMAGE, and stop on rc 1.
+# NETWORK, when the image does not run, does not finish in time, the line is
+# missing or doubled, or the features are not NETWORK's. Callers run it after
+# the pull and before any container starts or .node-meta names IMAGE, and stop
+# on rc 1.
 tn_docker_image_network_ok() {
-    local net="${1:-}" img="${2:-}" fn="${3:-}" out n feats want rc=0
+    local net="${1:-}" img="${2:-}" fn="${3:-}" out n feats want name limit="" rc=0
     local -a tmo
     case "$net" in
         devnet)
@@ -8201,13 +8202,27 @@ tn_docker_image_network_ok() {
         _tn_c4_say warn "Image refused: ${img:-(empty)} is not an image by digest, so its build features are not read and it is not used." "$fn"
         return 1
     fi
+    # The limit: timeout sends TERM at 60 s and KILL 5 s later. docker run passes
+    # the TERM on to the container, where --init puts an init process in front of
+    # the binary: a binary that is PID 1 itself ignores a TERM it has no handler
+    # for. A client killed by the KILL leaves its container running, so a run cut
+    # short (rc 124, or 137 after the KILL) removes the container by its name.
+    # Where timeout is missing (macOS ships none; it comes with coreutils) the run
+    # has no limit, and the check still runs.
+    name="tn-feature-check-$$-${RANDOM}"
     tmo=()
     if command -v timeout >/dev/null 2>&1; then
-        tmo=(timeout 60)
+        limit=60
+        tmo=(timeout -k 5 "$limit")
     fi
-    out="$(${tmo[@]+"${tmo[@]}"} docker run --rm --pull=never --network none --cap-drop ALL \
-        --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin \
+    out="$(${tmo[@]+"${tmo[@]}"} docker run --rm --init --name "$name" --pull=never --network none \
+        --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin \
         "$img" --version </dev/null 2>/dev/null 9>&-)" || rc=$?
+    if [[ -n "$limit" ]] && [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        timeout -k 5 30 docker rm -f "$name" >/dev/null 2>&1 9>&- || true
+        _tn_c4_say warn "Image refused: ${img} did not finish --version within ${limit} seconds (docker run exited ${rc} under timeout), so its build features are not known. It is not used and nothing was changed; docker rm -f ${name} was run to remove its container. Check that Docker is running, then try again; if a ${net} release names this image, report it to the node team." "$fn"
+        return 1
+    fi
     if [[ $rc -ne 0 ]]; then
         _tn_c4_say warn "Could not run ${img} to read its build features (docker run exited ${rc}), so it is not used and nothing was changed. Check that Docker is running and holds the image, then try again." "$fn"
         return 1

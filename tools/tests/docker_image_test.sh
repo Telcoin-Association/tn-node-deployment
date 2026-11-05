@@ -29,8 +29,9 @@
 # call), tn_docker_holds_digest and, against a docker shim that prints a canned
 # --version per image, tn_docker_image_network_ok (mainnet: no build features;
 # testnet: adiri, faucet allowed; the line missing or doubled refused; a run that
-# fails refused; the run under timeout 60 where timeout exists, and a run that
-# timed out (rc 124) refused; devnet not checked).
+# fails refused; the run named, behind --init, under timeout -k 5 60 where
+# timeout exists, and a run that timed out (rc 124, or 137 after the KILL)
+# refused after docker rm -f of its container; devnet not checked).
 #
 #   bash tools/tests/docker_image_test.sh
 #
@@ -820,9 +821,13 @@ check_rc "holds digest: a tag is not a digest" 1 "$rc"
 # --- tn_docker_image_network_ok (docker shim) ------------------------------------------
 # docker run logs its argv to $REC/run.log and prints $REC/ver.<image> (the image
 # with / : @ as _), or exits 125 when there is none, as for an image Docker does
-# not hold.
+# not hold. docker rm logs its argv to $REC/rm.log.
 cat > "$T/bin/docker" <<'SH'
 #!/bin/sh
+if [ "$1" = rm ]; then
+    printf '%s\n' "$*" >> "$REC/rm.log"
+    exit 0
+fi
 [ "$1" = run ] || exit 1
 printf '%s\n' "$*" >> "$REC/run.log"
 img=""
@@ -853,14 +858,20 @@ inok() {  # inok NAME EXPECTED-RC NETWORK IMAGE -- the rc; the message in $T/err
     tn_docker_image_network_ok "$3" "$4" 2>"$T/err" || rc=$?
     check_rc "$1" "$2" "$rc"
 }
+# run_name -- the --name of the last docker run; run_argv -- its argv with that
+# name as NAME.
+run_name() { tail -n 1 "$REC/run.log" | sed -n 's/.* --name \([^ ]*\) .*/\1/p'; }
+run_argv() { tail -n 1 "$REC/run.log" | sed 's/ --name [^ ]* / --name NAME /'; }
 MI="${GM}@sha256:${D64}"
 TI="${GH}@sha256:${D64}"
 ver "$MI" ""
 : > "$REC/run.log"
 inok "features, mainnet: none listed, accepted" 0 mainnet "$MI"
 check "features: one docker run" "1" "$(wc -l < "$REC/run.log" | tr -d ' ')"
-check_has "features: run with no network, no capabilities, the release binary as entrypoint" \
-    "run --rm --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" "$(cat "$REC/run.log")"
+check "features: run behind an init, named, with no network, no capabilities, the release binary as entrypoint" \
+    "run --rm --init --name NAME --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" "$(run_argv)"
+check "features: the container name is tn-feature-check-<pid>-<n>" yes \
+    "$(run_name | grep -qE '^tn-feature-check-[0-9]+-[0-9]+$' && echo yes || echo no)"
 check "features, mainnet accepted: nothing said" "" "$(cat "$T/err")"
 ver "$MI" "adiri"
 inok "features, mainnet: adiri refused" 1 mainnet "$MI"
@@ -901,36 +912,57 @@ inok "features: a network without a rule refused" 1 foo "$TI"
 inok "features: a tag refused before docker runs" 1 testnet "${GH}:v0.17.0-adiri"
 inok "features: a leading dash refused" 1 testnet "-${TI}"
 check "features: no docker run for the refusals before it" "" "$(cat "$REC/run.log")"
-# The run is limited to 60 s where timeout exists. A stand-in timeout on PATH
-# logs its arguments and runs the command without the duration, or exits 124 (a
-# run that timed out) while $REC/timeout.124 exists; it is removed after these cases.
+# The run is limited to 60 s where timeout exists, with a KILL 5 s after the
+# TERM. A stand-in timeout on PATH logs its arguments and runs the command
+# without the options and the duration; while $REC/timeout.rc exists, a docker
+# run under it exits with the code that file holds instead (124: the run timed
+# out; 137: it was killed after the TERM). It is removed after these cases.
 cat > "$T/bin/timeout" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$REC/timeout.log"
-[ -f "$REC/timeout.124" ] && exit 124
+[ "$1" = -k ] && shift 2
 shift
+if [ -f "$REC/timeout.rc" ] && [ "$1 $2" = "docker run" ]; then
+    exit "$(cat "$REC/timeout.rc")"
+fi
 exec "$@"
 SH
 chmod 0755 "$T/bin/timeout"
 hash -r
-: > "$REC/timeout.log"; : > "$REC/run.log"
+: > "$REC/timeout.log"; : > "$REC/run.log"; : > "$REC/rm.log"
 ver "$MI" ""
 inok "features, under timeout: a mainnet image accepted" 0 mainnet "$MI"
-check "features: the run goes through timeout 60" \
-    "60 docker run --rm --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" \
-    "$(cat "$REC/timeout.log")"
-: > "$REC/timeout.124"; : > "$REC/timeout.log"
-inok "features: a run that timed out (rc 124) refused" 1 mainnet "$MI"
-check_has "features: the timed-out run is said, with its exit code" "1" "$(grep -cF "(docker run exited 124), so it is not used and nothing was changed" "$T/err")"
-check "features: the timed-out run went through timeout once" "1" "$(wc -l < "$REC/timeout.log" | tr -d ' ')"
-rm -f "$T/bin/timeout" "$REC/timeout.124"
+check "features: the run goes through timeout -k 5 60" \
+    "-k 5 60 docker run --rm --init --name NAME --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --read-only --entrypoint /usr/local/bin/telcoin ${MI} --version" \
+    "$(sed 's/ --name [^ ]* / --name NAME /' "$REC/timeout.log")"
+check "features, under timeout: a run that finished removes nothing" "" "$(cat "$REC/rm.log")"
+for trc in 124 137; do
+    printf '%s\n' "$trc" > "$REC/timeout.rc"
+    : > "$REC/timeout.log"; : > "$REC/run.log"; : > "$REC/rm.log"
+    inok "features: a run cut short by timeout (rc ${trc}) refused" 1 mainnet "$MI"
+    check_has "features, rc ${trc}: the refusal names the image, the limit and the exit code" "1" \
+        "$(grep -cF "Image refused: ${MI} did not finish --version within 60 seconds (docker run exited ${trc} under timeout), so its build features are not known. It is not used and nothing was changed; docker rm -f " "$T/err")"
+    # The stand-in never ran docker run, so the name comes from its log.
+    nm="$(sed -n '1s/.* --name \([^ ]*\) .*/\1/p' "$REC/timeout.log")"
+    check "features, rc ${trc}: the run, then docker rm -f of its container, both under timeout" \
+        "2 -k 5 30 docker rm -f ${nm}" "$(wc -l < "$REC/timeout.log" | tr -d ' ') $(sed -n 2p "$REC/timeout.log")"
+    check "features, rc ${trc}: docker rm -f got that name" "rm -f ${nm}" "$(cat "$REC/rm.log")"
+    check_has "features, rc ${trc}: the refusal names the removed container" "1" "$(grep -cF "docker rm -f ${nm} was run to remove its container" "$T/err")"
+done
+printf '125\n' > "$REC/timeout.rc"
+: > "$REC/timeout.log"; : > "$REC/rm.log"
+inok "features, under timeout: a run that fails otherwise (rc 125) refused" 1 mainnet "$MI"
+check "features, under timeout, rc 125: no container removed, the failed run said" "0 1" \
+    "$(wc -l < "$REC/rm.log" | tr -d ' ') $(grep -cF "(docker run exited 125), so it is not used and nothing was changed" "$T/err")"
+rm -f "$T/bin/timeout" "$REC/timeout.rc"
 hash -r
+unset trc nm
 # The progress-fn gets the refusal as a warn.
 say_rec() { printf '%s %s\n' "$1" "$2" >> "$REC/say.log"; }
 : > "$REC/say.log"
 ver "$MI" "adiri"
 rc=0; tn_docker_image_network_ok mainnet "$MI" say_rec 2>/dev/null || rc=$?
 check "features: the refusal goes to the progress-fn as a warn" "1 1" "$rc $(grep -c '^warn Image refused' "$REC/say.log")"
-unset -f ver inok say_rec
+unset -f ver inok say_rec run_name run_argv
 
 finish
