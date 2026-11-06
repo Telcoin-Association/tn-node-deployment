@@ -452,7 +452,7 @@ It also writes `/etc/telcoin/p2p-limit.nft` and enables `telcoin-p2p-limit.servi
 A validator can go further with the P2P committee allowlist: `sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee on` lets only the peers its own node lists reach the P2P ports, which are the committees, the validators the node tracks for a coming seat and its trusted and bootstrap peers, plus the bootstrap peers' addresses and any `--p2p-from` list, and drops every other source before `ufw`.
 A timer brings the list in step with the committee every 5 minutes through a small signed tool, `tn-p2p-allow-sync`, which the scripts download, verify against the release keys and install themselves.
 The allowlist takes the place of the new-flow limit, and `--p2p-committee off` puts the earlier rules and the limit back at once.
-It needs a node release that serves the admission snapshot and the scripts release that pins the tool; until then `on` refuses and changes nothing.
+It needs a node release that serves the admission snapshot; until then `on` refuses and changes nothing.
 A validator must send from the address it advertises in `node-info.yaml`: behind NAT, on a host with several addresses or with IPv6 temporary addresses, its packets can come from another address, and peers in committee mode drop them.
 `--p2p-committee status`, `check-node.sh` and the Node Manager UI's firewall card show its state; hubs and observers leave it off.
 The README covers the [P2P committee allowlist](https://github.com/Telcoin-Association/tn-node-deployment/blob/main/README.md#p2p-committee-allowlist) in full.

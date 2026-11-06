@@ -212,8 +212,8 @@ U-numbers name the telcoin-network items of the round. Their issues are telcoin-
 - The P2P new-flow limit (`inet tn_p2p`) keeps at most 65535 sources per address family. A
   spoofed flood of distinct sources can fill a set; new sources then go on to ufw unlimited, as
   before the limit. Accepted; closes if the limit gains a fallback for a full set.
-- The P2P committee allowlist of #41 (`firewall-setup.sh --p2p-committee`) replaces the signed address manifest for validators, but it cannot be turned on until a scripts release pins `tn-p2p-allow-sync` v0.1.0: `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh` is empty.
-  Closes with that `chore` commit; the first CI run of `tools/tests/vm.d/P0-p2p-allow.sh` after it confirms the named counters across reloads on the runner kernel, the sync unit's sandbox and `systemd-analyze verify` on systemd 255, and whether the boot unit could run with `ProtectKernelModules=yes` (off today, for the first nftables load after boot).
+- The P2P committee allowlist of #41 (`firewall-setup.sh --p2p-committee`) replaces the signed address manifest for validators, and some of its behaviour shows only on a live host.
+  Closes with the first CI run of `tools/tests/vm.d/P0-p2p-allow.sh`, which confirms the named counters across reloads on the runner kernel, the sync unit's sandbox and `systemd-analyze verify` on systemd 255, and whether the boot unit could run with `ProtectKernelModules=yes` (off today, for the first nftables load after boot).
 - A validator that sends from an address its record does not carry (NAT, a multi-homed host, IPv6 temporary addresses) is dropped by every committee-mode peer.
   The mitigation is the receiver's `P2P_ALLOW_FROM`, which committee mode always admits (OPERATOR.md section 2.10).
   Closes when the node's record can carry the egress address, or the operator procedure is agreed.

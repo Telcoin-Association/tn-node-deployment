@@ -30,8 +30,9 @@
 # empty: another architecture, a bad signature, a pin mismatch (only the sums
 # downloaded), an extra sums entry, a tarball that does not match its sums line,
 # an extra tarball member, a missing tarball (rc 2), a wrong first --version
-# line, a wrong config-version, no snapshot version 1, a failing --version, and
-# the public entry point with the empty pin (nothing downloaded).
+# line, a wrong config-version, no snapshot version 1, a failing --version, an
+# empty pin (nothing downloaded), and the public entry point, which carries the
+# pinned tag and sha256 of lib/common.sh to the release URL.
 #
 # Maintainer tooling (not updater-tracked, no sidecar). bash 3.2 safe.
 # =============================================================================
@@ -373,16 +374,34 @@ check_rc "snapshot-versions 1,2 taken" 0 "$RC"
 check "snapshot-versions 1,2: installed" "$(sha "$T/relbin")" "$(sha "$INST")"
 cp "$T/old" "$INST"
 
-# the entry point of the scripts: the pin these scripts carry is still empty
+# an empty pin refuses before anything is downloaded
 : > "$REC.curl"
 : > "$T/say"
 say() { printf '%s|%s\n' "$1" "$2" >> "$T/say"; }
 RC=0
-tn_p2p_allow_install say 2>"$T/err" || RC=$?
-check_rc "tn_p2p_allow_install without a pin refused" 1 "$RC"
+_tn_p2p_allow_install "$TAG" "" "" say 2>"$T/err" || RC=$?
+check_rc "an empty pin refused" 1 "$RC"
 check "no pin: the reason goes to the progress function" "warn|These scripts pin no sha256 for the tn-p2p-allow-sync ${TAG} tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded." "$(cat "$T/say")"
 check "no pin: nothing downloaded" "" "$(cat "$REC.curl")"
 kept "no pin"
+
+# the entry point of the scripts carries the pinned tag and sha256 to the release
+# URL: the pin is a sha256, and the first download asked for is the SHA256SUMS of
+# TN_P2P_ALLOW_VERSION under TN_P2P_ALLOW_BASE_URL, which the curl shim does not
+# serve (rc 2, a network failure), so nothing is installed
+: > "$REC.curl"
+: > "$T/say"
+RC=0
+tn_p2p_allow_install say 2>"$T/err" || RC=$?
+check_rc "tn_p2p_allow_install against the release URL: a network failure here" 2 "$RC"
+case "$TN_P2P_ALLOW_TARBALL_SHA256" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) PIN_SHAPE="64 hex" ;;
+    *) PIN_SHAPE="not hex" ;;
+esac
+[[ ${#TN_P2P_ALLOW_TARBALL_SHA256} -eq 64 ]] || PIN_SHAPE="not 64 characters"
+check "the scripts pin a sha256 for the ${TN_P2P_ALLOW_VERSION} tarball" "64 hex" "$PIN_SHAPE"
+check "the entry point asks for the SHA256SUMS of the pinned tag first" "=https ${TN_P2P_ALLOW_BASE_URL}/${TN_P2P_ALLOW_VERSION}/SHA256SUMS" "$(head -n 1 "$REC.curl")"
+kept "the entry point against the release URL"
 
 command -v gpgconf >/dev/null 2>&1 && gpgconf --kill all >/dev/null 2>&1
 

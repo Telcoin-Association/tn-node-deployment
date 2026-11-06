@@ -320,7 +320,7 @@ Rules for any code that touches it:
   An `established,related` accept first (counter `tn_accept_p2p_established`) was considered and rejected: it would admit the replies of every peer the node dials, strangers found by discovery included, and put conntrack on the consensus path.
 - Committee mode removes the new-flow limit `inet tn_p2p`: an nftables accept is not final across base chains, so a packet the allowlist accepts at -20 would still meet the limit's drop at -10.
 - The pin (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`) moves only in a `chore` commit of a scripts release; the scripts never fetch "latest".
-  The tarball hash stays empty until the tool release is published, and the install refuses without it.
+  The install refuses without the tarball hash.
 - The touched scripts' `.sha256` sidecars are refreshed by the final `chore(release)` commit of a change, never by a feature commit (`tools/gen-checksums.sh`).
 
 ## One-way storage migration (v0.16.0-adiri)

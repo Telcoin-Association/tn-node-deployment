@@ -851,7 +851,7 @@ It is a server task: the Node Manager UI shows the allowlist but cannot turn it 
 `tn-p2p-allow-sync` comes from a signed release of `Telcoin-Association/tn-p2p-allow-sync`, checked against the same keys as node releases (`lib/release-keys`).
 `lib/common.sh` pins it: `TN_P2P_ALLOW_VERSION` names the tag (`v0.1.0`) and `TN_P2P_ALLOW_TARBALL_SHA256` the sha256 of its tarball.
 The scripts never fetch "latest", so the binary changes only with a scripts release.
-`TN_P2P_ALLOW_TARBALL_SHA256` is empty in this release because `v0.1.0` is not published yet; until a scripts release pins it, `on` refuses: `These scripts pin no sha256 for the tn-p2p-allow-sync v0.1.0 tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded.`
+Without a pin, `on` refuses: `These scripts pin no sha256 for the tn-p2p-allow-sync v0.1.0 tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded.`
 `tn_p2p_allow_install` downloads `SHA256SUMS`, `SHA256SUMS.asc` and the tarball into a root-only staging dir over HTTPS, checks the signature with `gpgv`, the tarball's sha256 against its line and the pin, and its member list, then runs the binary's `--version` as the `tn-build` account.
 The first line must be `tn-p2p-allow-sync` and the tag without its `v`, with a `config-version 1` line and a `snapshot-versions` line that holds 1; `tn_install_root_binary` then installs it as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755).
 A failure at any step leaves an installed binary as it was.
@@ -2098,7 +2098,7 @@ See [Private alerts](#private-alerts-every-network) and
 - New `tn_network_config_render DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE` writes the node admission settings (`admission`, `trusted_nodes`, `committee_peers`) into the data dir's `network-config` as the service user, replacing the three top-level entries in place rather than appending them.
   `tn_node_supports_admission` is the release gate; its floor `MIN_ADMISSION_VERSION` is 0.17.0 and waits for the node team to confirm it.
 - The signed-release fetch serves a second repository: `tn_p2p_allow_install` installs the pinned `tn-p2p-allow-sync` release (`TN_P2P_ALLOW_VERSION`, `TN_P2P_ALLOW_TARBALL_SHA256`) as `/usr/local/libexec/telcoin/tn-p2p-allow-sync`, checked against `lib/release-keys` like a node release; the node path's results are unchanged.
-  The tarball pin is empty until that release is published, so the install refuses until a scripts release pins it.
+  The tarball pin is set to that release's sha256; without a pin the install refuses.
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 

@@ -572,7 +572,6 @@ The firewall does not depend on the admission mode, though: it filters by the sn
 - The node runs a release that serves `tn_admissionSnapshot`, is synced, and holds an authoritative snapshot: right after a restart it may not have its committee window yet, and `on` refuses until it has.
 - The host is x86_64, the one architecture the tool is published for.
 - These scripts pin the tool's release: `TN_P2P_ALLOW_VERSION` (`v0.1.0`) and `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh`.
-  The hash is empty in this release because `v0.1.0` is not published yet, so `on` refuses until a scripts release pins it (`These scripts pin no sha256 for the tn-p2p-allow-sync v0.1.0 tarball yet, so it cannot be installed`); take that release with `update-scripts.sh` first.
 
 ```bash
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee on
@@ -589,7 +588,7 @@ Then it enables the boot unit and the timer, keeps the open P2P `ufw` rules, rem
 Every refusal changes nothing and exits 1, with a message that says why.
 
 - No node, `ufw` not active, no `nft`, `systemctl` or `flock`, a bad `TN_P2P_NEW_FLOW_RATE` or `TN_P2P_NEW_FLOW_BURST`, an unusable `P2P_ALLOW_FROM`, or the update lock held by another script.
-- The tool could not be installed: `tn-p2p-allow-sync v0.1.0 is not installed, so P2P committee mode was not turned on; nothing was changed.`, after the reason (no pin yet, another architecture, a bad signature, a sums, pin, member or `--version` mismatch); a failed download exits 2.
+- The tool could not be installed: `tn-p2p-allow-sync v0.1.0 is not installed, so P2P committee mode was not turned on; nothing was changed.`, after the reason (no pin, another architecture, a bad signature, a sums, pin, member or `--version` mismatch); a failed download exits 2.
   An installed binary stays as it was.
 - The snapshot is not authoritative: `P2P committee mode was not turned on: <reason>. Nothing was changed.`
   The first table must come from a full view of the committee, because there is no last-good set to fall back on yet.
@@ -649,10 +648,9 @@ The reasons in the consistency lines are the `reason=` word the tool logs on its
 
 **Known limitations.**
 
-- No tool release is pinned yet (above): committee mode cannot be turned on before a scripts release pins `v0.1.0`.
 - The floor trusts the genesis `committee.yaml` copy in the data dir on a node without `bootstrap-peers.yaml`: that copy is writable by the service user, so a compromised node process could add addresses to the floor.
   Checking it against the network's chain-config pin would close this, and mainnet has no such pins yet; give a validator a `--bootstrap-peers` map, which lives root-owned in `/etc/telcoin`.
-- The counters `tn_accept_p2p_listed` and `tn_drop_p2p_unlisted` kept their values across reloads on the kernels tried so far; the Ubuntu runner kernels are confirmed by the first CI run of the VM test (`tools/tests/vm.d/P0-p2p-allow.sh`), which skips until the release is published.
+- The counters `tn_accept_p2p_listed` and `tn_drop_p2p_unlisted` kept their values across reloads on the kernels tried so far; the Ubuntu runner kernels are confirmed by the first CI run of the VM test (`tools/tests/vm.d/P0-p2p-allow.sh`).
   The same first run confirms the sync unit's sandbox on systemd 255, and whether the boot unit could run with `ProtectKernelModules=` on (it is off for the first nftables load after boot).
 - The tool ships for x86_64 only until the node ships an aarch64 release, and how fast a release-key rotation must reach the pin is still to be agreed.
 - An egress address the record does not carry is dropped (above).
