@@ -882,8 +882,14 @@ _tn_parent_ready() {
 # Absent: created with install -d. Present: must be a real directory (not a
 # symlink); only DIR itself gets the owner and mode, never its contents. rc 0, 1
 # refused (DIR a symlink or not a directory, its parent not root-owned), 2 failed.
+# A numeric MODE ends up exactly MODE: GNU chmod and install keep a directory's
+# setuid and setgid bits for a numeric mode of fewer than five digits (an
+# inherited g+s turns 0700 into 02700, which tn-p2p-allow-sync refuses), so it is
+# padded to five digits (00700), which they apply to all twelve bits; BSD and
+# busybox read 00700 as 0700.
 _tn_root_layout_dir() {
     local dir="$1" group="$2" mode="$3" rc=0
+    while [[ "$mode" =~ ^[0-7]{1,4}$ ]]; do mode="0${mode}"; done
     while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
     if [[ "$dir" != /* ]]; then
         print_error "Refusing '${dir}': not an absolute path."
