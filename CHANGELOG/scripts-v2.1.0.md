@@ -440,7 +440,7 @@ file is there, as it does `lib/observability.sh` (#60).
 The admission renderer and its release gate are new: see [Node admission settings](#node-admission-settings).
 The signed-release fetch is split into shared helpers (`_tn_release_tools_ok`, `_tn_release_open`, `_tn_release_fetch_asset`, `_tn_release_sums_shape`) so it serves the node release and the `tn-p2p-allow-sync` release alike; the node path keeps its messages and results.
 `tn_p2p_allow_install` installs the pinned tool release, and `tn_release_extract_binary` and `tn_build_version` take the binary's name.
-`validate_ipv6` follows the grammar of Rust's `Ipv6Addr::from_str`, which `tn-p2p-allow-sync` parses `P2P_ALLOW_FROM` with, instead of taking any string of hex digits and colons: a typo in an IPv6 entry of `--ssh-from` or `--p2p-from` is refused before anything is written, and the source lists refuse a dotted IPv4 tail (`::ffff:192.0.2.1`; write `::ffff:c000:201`).
+`validate_ipv6` follows the grammar of Rust's `Ipv6Addr::from_str`, which `tn-p2p-allow-sync` parses `P2P_ALLOW_FROM` with, instead of taking any string of hex digits and colons, in every locale (a full-width or Arabic-Indic digit is refused under en_US.UTF-8 too): a typo in an IPv6 entry of `--ssh-from` or `--p2p-from` is refused before anything is written, and the source lists refuse a dotted IPv4 tail (`::ffff:192.0.2.1`; write `::ffff:c000:201`).
 `_tn_root_layout_dir` pads a numeric mode to five digits, so an inherited setgid bit is cleared and `/var/lib/telcoin-p2p-allow` ends 0700, not the 02700 the tool refuses.
 
 ### Host baseline (#43)

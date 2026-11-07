@@ -889,7 +889,7 @@ _tn_parent_ready() {
 # busybox read 00700 as 0700.
 _tn_root_layout_dir() {
     local dir="$1" group="$2" mode="$3" rc=0
-    while [[ "$mode" =~ ^[0-7]{1,4}$ ]]; do mode="0${mode}"; done
+    while [[ "$mode" =~ ^[01234567]{1,4}$ ]]; do mode="0${mode}"; done
     while [[ "$dir" == */ && "$dir" != / ]]; do dir="${dir%/}"; done
     if [[ "$dir" != /* ]]; then
         print_error "Refusing '${dir}': not an absolute path."
@@ -1471,10 +1471,12 @@ tn_move_node_log_dir() {
 # INPUT VALIDATION HELPERS
 # -----------------------------------------------------------------------------
 
-# Validate IPv4 dotted-quad. Returns 0 if valid.
+# Validate IPv4 dotted-quad. Returns 0 if valid. The digits are listed one by
+# one: in a UTF-8 locale [0-9] can match other digits, such as full-width ones,
+# that bash arithmetic cannot read.
 validate_ipv4() {
-    local ip="$1"
-    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local ip="$1" d='[0123456789]{1,3}'
+    [[ "$ip" =~ ^(${d})\.(${d})\.(${d})\.(${d})$ ]] || return 1
     local IFS=.
     local -a octets=($ip)
     for octet in "${octets[@]}"; do
@@ -1489,12 +1491,16 @@ validate_ipv4() {
 # that stands for one or more zero groups. The last two groups may be written as
 # a dotted IPv4 address (::ffff:192.0.2.1, 64:ff9b::192.0.2.1) whose octets are
 # 0-255 without a leading zero. No zone (fe80::1%eth0), brackets, prefix or
-# spaces; a single ':' never starts or ends it. Pure bash, no process.
+# spaces; a single ':' never starts or ends it; at most 45 characters, the
+# longest form (ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255), so a long input
+# costs no time. Pure bash, no process. The classes list their characters one by
+# one: in a UTF-8 locale such as en_US.UTF-8, [0-9] and [a-f] also match other
+# characters (full-width digits, Arabic-Indic digits, é) that the tool refuses.
 validate_ipv6() {
-    local ip="${1:-}" v4 part colons n=0 h='[0-9A-Fa-f]{1,4}'
-    local q='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+    local ip="${1:-}" v4 part colons n=0 h='[0123456789ABCDEFabcdef]{1,4}'
+    local q='(25[012345]|2[01234][0123456789]|1[0123456789][0123456789]|[123456789]?[0123456789])'
     local re_v4="^${q}\\.${q}\\.${q}\\.${q}\$" re_part="^${h}(:${h})*\$" re_full="^${h}(:${h}){7}\$"
-    [[ "$ip" == *:* ]] || return 1
+    [[ ${#ip} -le 45 && "$ip" == *:* ]] || return 1
     # A dotted IPv4 tail is the last two groups: check it, then count it as 0:0.
     if [[ "$ip" == *.* ]]; then
         v4="${ip##*:}"
@@ -9471,7 +9477,7 @@ validate_health_src() {
     fi
     [[ "$src" == */* ]] || return 0
     mask="${src#*/}"
-    [[ "$mask" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+    [[ "$mask" =~ ^[123456789][0123456789]{0,2}$ ]] || return 1
     (( mask >= 8 )) || return 1
     if validate_ipv4 "$ip"; then
         (( mask <= 32 ))
