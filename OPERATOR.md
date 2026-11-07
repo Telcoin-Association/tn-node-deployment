@@ -650,6 +650,8 @@ The epoch length it judges staleness by comes from the node's `tn_getCurrentEpoc
 | `The P2P committee allowlist config no longer matches this node`, with `RPC_PORT:`, `P2P_PORTS:` or `P2P_ALLOW_FROM:` lines | warning | `--p2p-committee sync`, which rewrites the config |
 
 The reasons in the consistency lines are the `reason=` word the tool logs on its `error` and `stale` lines, since its result line carries none.
+Only the errors count in the closing verdict's `<N> issue(s) found`; the warnings, the at-once ones included, do not, so a node whose allowlist fails every sync can still end with `All checks passed`.
+Read the lines above the verdict: while the syncs fail the allowlist keeps its last-good set, and a committee address it then lacks is the error.
 
 **Known limitations.**
 

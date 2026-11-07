@@ -2277,7 +2277,11 @@ _cn_src_join() {
 # else 21600 s), with STALE_SINCE; for committee keys whose records list other
 # addresses than their multiaddrs (at most five named); and when the tool's config no longer matches RPC_PORT in
 # .node-meta, the node's P2P ports or P2P_ALLOW_FROM. An info line when the check
-# cannot judge (exit 3).
+# cannot judge (exit 3). Only the failures count in HEALTH_ISSUES; the warnings,
+# the at-once ones included, never do, like check-node's other warn-only lines, so
+# a node whose every sync fails can still end with "All checks passed" below its
+# warning (the allowlist keeps its last-good set, and a committee address it then
+# lacks is the failure).
 check_p2p_committee() {
     local dir meta mode rc=0 fix bin_ok=1 tables="" loaded=unknown st="" cfg=""
     local result reason since base dur line now age out crc res w verdict mtotal xtotal
