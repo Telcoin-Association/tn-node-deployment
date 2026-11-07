@@ -71,6 +71,7 @@ OWNERSHIP_LAYOUT=2" "$(cat "$TN_ROOT_PREFIX/etc/telcoin/.node-meta")"
 
 old_run "firewall --enable" firewall-setup.sh --enable --ssh-from 203.0.113.0/24
 old_run "firewall --reset" firewall-setup.sh --reset --ssh-anywhere
+old_run "firewall --p2p-committee on" firewall-setup.sh --p2p-committee on
 old_run "firewall --json --enable" firewall-setup.sh --json --enable --ssh-from 203.0.113.0/24
 check "firewall --json: stdout is the done event" "yes" \
     "$(tail -n1 "$T/out" | grep -q '^{"event":"done","ok":false,.*update-scripts.sh' && echo yes)"

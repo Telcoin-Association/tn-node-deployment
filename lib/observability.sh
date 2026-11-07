@@ -1153,7 +1153,7 @@ obs_quorum_guard() {
 # obs_restart_hint SVC -- how to restart the node later without landing on an epoch
 # change: edit-config.sh's Restart node waits for the boundary first.
 obs_restart_hint() {
-    printf 'Restart %s with edit-config.sh, menu item 12 (Restart node): sudo bash %s/edit-config.sh. It waits for the epoch boundary first when the node is in the committee. A plain systemctl restart does not wait: use one (or TN_SKIP_EPOCH_WAIT=1) only if you accept restarting the node at an epoch change.' "${1:-telcoin}" "${SCRIPT_DIR:-.}"
+    printf 'Restart %s with edit-config.sh, menu item 14 (Restart node): sudo bash %s/edit-config.sh. It waits for the epoch boundary first when the node is in the committee. A plain systemctl restart does not wait: use one (or TN_SKIP_EPOCH_WAIT=1) only if you accept restarting the node at an epoch change.' "${1:-telcoin}" "${SCRIPT_DIR:-.}"
 }
 
 # obs_inject_flags FILE MARKER_ERE FLAGS [SHOWN] -- add FLAGS to the node command in

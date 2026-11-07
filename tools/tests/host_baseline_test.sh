@@ -1084,7 +1084,7 @@ export HB_NOLIB=1
 addon_run firewall-setup json
 unset HB_NOLIB
 check "firewall-setup --json --enable, lib without tn_host_baseline_refresh: rc 0, done ok, silent" "0 yes yes" "$RC $(done_ok) $(no_cnf)"
-check "firewall-setup: every change that writes a covered file refreshes (menu, --json, CLI, node ports, health sources)" "6" \
+check "firewall-setup: every change that writes a covered file refreshes (menu, --json, CLI, node ports, health sources, P2P committee on, sync and off)" "10" \
     "$(grep -c '^ *fw_baseline_refresh$' "$TN_TEST_REPO/firewall-setup.sh")"
 
 # --- setup-vpn.sh: enable, --sync-keys with a root flag, --disable -----------------

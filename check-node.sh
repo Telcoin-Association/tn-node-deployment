@@ -2177,6 +2177,313 @@ check_alerts() {
     return 0
 }
 
+# The P2P committee allowlist (firewall-setup.sh --p2p-committee): the state dir
+# of tn-p2p-allow-sync (root 0700: config, status, the last-good program) and the
+# timer that runs one sync every 5 minutes. check_p2p_committee reads its files
+# key by key and never sources them.
+
+# _cn_allow_kv KEY TEXT [config] -- print the value of the first KEY=VALUE line of
+# TEXT when it matches the value grammar of tn-p2p-allow-sync's status file,
+# [A-Za-z0-9._:-]* (as fw_allow_kv in firewall-setup.sh reads it), or with
+# "config" that of its config file, which adds the commas and slashes of the port
+# and source lists. rc 1 when there is no such line.
+_cn_allow_kv() {
+    local line re='^[A-Za-z0-9._:-]*$'
+    [[ "${3:-}" != "config" ]] || re='^[A-Za-z0-9._:/,-]*$'
+    while IFS= read -r line; do
+        case "$line" in
+            "$1"=*)
+                line="${line#*=}"
+                [[ "$line" =~ $re ]] || return 1
+                printf '%s\n' "$line"
+                return 0 ;;
+        esac
+    done <<< "${2:-}"
+    return 1
+}
+
+# _cn_pos_int VALUE -- rc 0 when VALUE is a decimal number above 0 (at most 12
+# digits, a unix time or a duration in seconds, so arithmetic on it cannot
+# overflow).
+_cn_pos_int() {
+    [[ "${1:-}" =~ ^[0-9]{1,12}$ ]] && (( 10#$1 > 0 ))
+}
+
+# _cn_allow_run DIR ARG... -- TN_P2P_ALLOW_BIN --state-dir DIR ARG..., as
+# fw_allow_run in firewall-setup.sh runs it: stdin closed, no file descriptor
+# above 2, no TN_BLS_PASSPHRASE. Its stdout and stderr (the log lines) both go to
+# stdout. rc is the tool's.
+_cn_allow_run() {
+    local dir="$1"
+    shift
+    (
+        unset TN_BLS_PASSPHRASE 2>/dev/null || true
+        _tn_exec_closed "$TN_P2P_ALLOW_BIN" --state-dir "$dir" "$@"
+    ) < /dev/null 2>&1
+}
+
+# _cn_fw_p2p_ports -- the node's P2P ports, comma-joined in order, as
+# firewall-setup.sh lists them ("p2p_ports" of --json --status, which is
+# fw_p2p_ports): the P2P_PORTS value fw_allow_write_config writes. Asking the
+# script keeps one rule for the ports the node binds. rc 1 when it is missing,
+# fails or lists none.
+_cn_fw_p2p_ports() {
+    local tool="${SCRIPT_DIR}/firewall-setup.sh" json="" inner list=""
+    local re='"p2p_ports":[[]([^]]*)[]]' port_re='"port":([0-9]+)'
+    [[ -r "$tool" ]] || return 1
+    if command -v timeout >/dev/null 2>&1; then
+        json="$(timeout 20 bash "$tool" --json --status < /dev/null 2>/dev/null | tail -n 1)" || true
+    else
+        json="$(bash "$tool" --json --status < /dev/null 2>/dev/null | tail -n 1)" || true
+    fi
+    [[ "$json" =~ $re ]] || return 1
+    inner="${BASH_REMATCH[1]}"
+    while [[ "$inner" =~ $port_re ]]; do
+        list="${list:+${list},}${BASH_REMATCH[1]}"
+        inner="${inner#*"${BASH_REMATCH[0]}"}"
+    done
+    [[ -n "$list" ]] || return 1
+    printf '%s\n' "$list"
+}
+
+# _cn_src_join LIST -- P2P_ALLOW_FROM as .node-meta holds it, written the way
+# fw_allow_write_config writes it to the config: split at commas, blanks
+# dropped, joined with commas.
+_cn_src_join() {
+    local s out=""
+    local -a parts=()
+    IFS=, read -r -a parts <<< "${1:-}" || true
+    for s in ${parts[@]+"${parts[@]}"}; do
+        s="${s//[[:space:]]/}"
+        [[ -z "$s" ]] || out="${out:+${out},}${s}"
+    done
+    printf '%s\n' "$out"
+}
+
+# check_p2p_committee -- the P2P committee allowlist, when P2P_COMMITTEE=on in
+# .node-meta; silent when it is off and when all is well. A failure when
+# tn-p2p-allow-sync is missing, when nftables has no table inet tn_p2p_allow (P2P
+# is then open to every source), when `tn-p2p-allow-sync check` finds an address
+# of the current committee missing from the allow sets (at most five named), and
+# when that check fails (its reason named). A warning when the sync timer is not
+# enabled and active; when the new-flow limit table inet tn_p2p is loaded as well;
+# when the last good sync is older than 2 epochs (the epoch duration from the
+# node's tn_getCurrentEpochInfo, else EPOCH_DURATION in the status file, else
+# 21600 s), with STALE_SINCE and STALE_REASON; at once for a STALE_REASON that
+# never clears on its own (rpc-method-missing, snapshot-version-*,
+# epoch-regressed, state-invalid); for committee keys whose records list other
+# addresses than their multiaddrs (at most five named); and when the tool's config no longer matches RPC_PORT in
+# .node-meta, the node's P2P ports or P2P_ALLOW_FROM. An info line when the check
+# cannot judge (exit 3).
+check_p2p_committee() {
+    local dir meta mode rc=0 fix bin_ok=1 tables="" loaded=unknown st="" cfg=""
+    local reason since base dur line now age out crc res w verdict mtotal xtotal
+    local miss="" mism="" nmiss=0 nmism=0 named_miss=0 named_mism=0 tok="" l v have want drift=""
+    local reason_re=' reason=([A-Za-z0-9._:-]+) '
+    local -a words=()
+    dir="${TN_ROOT_PREFIX:-}/var/lib/telcoin-p2p-allow"
+    fix="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+    meta="$(node_meta_path 2>/dev/null || true)"
+    if [[ -n "$meta" && -f "$meta" && ! -r "$meta" ]]; then
+        [[ ! -d "$dir" ]] || print_info "P2P committee allowlist not checked: ${meta} is readable by root only (run with sudo)."
+        return 0
+    fi
+    mode="$(meta_get P2P_COMMITTEE 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        print_warn "P2P_COMMITTEE is set more than once in ${meta}; the P2P committee allowlist was not checked (remove the extra lines)."
+        return 0
+    fi
+    [[ "$mode" == "on" ]] || return 0
+    if ! have_fns _tn_exec_closed tn_local_rpc_url || [[ -z "${TN_P2P_ALLOW_BIN:-}" ]]; then
+        CN_SKIPPED_CHECKS="${CN_SKIPPED_CHECKS:-} check_p2p_committee"
+        return 0
+    fi
+    if [[ -e "$dir" ]] && { [[ ! -r "$dir" ]] || [[ ! -x "$dir" ]]; }; then
+        print_info "P2P committee allowlist not checked: ${dir} is readable by root only (run with sudo)."
+        return 0
+    fi
+
+    if [[ ! -f "$TN_P2P_ALLOW_BIN" || ! -x "$TN_P2P_ALLOW_BIN" ]]; then
+        print_error "P2P committee mode is on, but its sync tool ${TN_P2P_ALLOW_BIN} is missing, so nothing keeps the allowlist in step with the committee."
+        print_info "  Fix: ${fix}  (reinstalls the pinned tn-p2p-allow-sync)"
+        (( ++HEALTH_ISSUES ))
+        bin_ok=0
+    fi
+
+    rc=0
+    if command -v nft >/dev/null 2>&1; then
+        tables="$(nft list tables < /dev/null 2>/dev/null)" || rc=$?
+    else
+        rc=127
+    fi
+    if [[ $rc -ne 0 ]]; then
+        print_warn "P2P committee allowlist: nft could not list the nftables tables (exit ${rc}), so table inet tn_p2p_allow was not checked."
+    elif grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
+        loaded=yes
+    else
+        loaded=no
+        print_error "P2P committee mode is on, but nftables has no table inet tn_p2p_allow: P2P is open to every source."
+        print_info "  Fix: ${fix}  (loads the allowlist again)"
+        (( ++HEALTH_ISSUES ))
+    fi
+    if [[ $rc -eq 0 ]] && grep -qx 'table inet tn_p2p' <<< "$tables"; then
+        print_warn "P2P committee mode is on, but the new-flow limit table inet tn_p2p is loaded as well: committee mode removes it, since a source the allowlist accepts still passes through the limit chain."
+        print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable  (in committee mode it removes the limit and its boot copy)"
+    fi
+
+    if ! systemctl is-enabled telcoin-p2p-allow-sync.timer >/dev/null 2>&1 \
+        || ! systemctl is-active telcoin-p2p-allow-sync.timer >/dev/null 2>&1; then
+        print_warn "P2P committee allowlist: telcoin-p2p-allow-sync.timer is not enabled and active, so the allowlist no longer follows the committee."
+        print_info "  Fix: ${fix}"
+    fi
+
+    # Staleness, from the status file the tool writes after every run.
+    if [[ -f "${dir}/status" && ! -L "${dir}/status" ]]; then
+        st="$(cat -- "${dir}/status" 2>/dev/null)" || st=""
+    fi
+    reason="$(_cn_allow_kv STALE_REASON "$st")" || reason=""
+    since="$(_cn_allow_kv STALE_SINCE "$st")" || since=""
+    _cn_pos_int "$since" || since=""
+    case "$reason" in
+        rpc-method-missing)
+            print_warn "P2P committee allowlist: the node has no tn_admissionSnapshot RPC method (this node release predates it), so the allowlist keeps its last-good set; that does not clear on its own."
+            print_info "  Fix: update the node to a release that serves it: sudo bash ${SCRIPT_DIR}/update-node.sh" ;;
+        snapshot-version-*)
+            print_warn "P2P committee allowlist: the node serves admission snapshot version ${reason#snapshot-version-}, which the installed tn-p2p-allow-sync does not read, so the allowlist keeps its last-good set; that does not clear on its own."
+            print_info "  Fix: bash ${SCRIPT_DIR}/update-scripts.sh, then ${fix}  (installs the tool the new scripts pin)" ;;
+        epoch-regressed)
+            print_warn "P2P committee allowlist: the node reports an epoch below the one the allowlist was built from (an epoch from the future was accepted once), so the allowlist keeps its last-good set; that does not clear on its own."
+            print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on  (the allowlist starts again from the node's snapshot)" ;;
+        state-invalid)
+            print_warn "P2P committee allowlist: tn-p2p-allow-sync cannot read its own state.json (state-invalid), so every sync fails and the loaded allowlist no longer follows the committee; that does not clear on its own."
+            print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on  (the allowlist starts again from the node's snapshot)" ;;
+        *)
+            base="$(_cn_allow_kv LAST_GOOD "$st")" || base=""
+            _cn_pos_int "$base" || base="$since"
+            if [[ -n "$base" ]]; then
+                dur=""
+                if have_fns tn_epoch_info && [[ "${LOCAL_RPC_MODE:-}" != "DOWN" ]] \
+                    && line="$(tn_epoch_info "${RPC_URL:-}" "" 5 2>/dev/null)"; then
+                    read -r _ _ dur _ <<< "$line"
+                fi
+                _cn_pos_int "$dur" || dur="$(_cn_allow_kv EPOCH_DURATION "$st")" || dur=""
+                _cn_pos_int "$dur" || dur=21600
+                now="$(date +%s)"
+                age=$(( now - 10#$base ))
+                (( age > 0 )) || age=0
+                if (( age > 2 * 10#$dur )); then
+                    print_warn "P2P committee allowlist is stale: no good sync for $(fmt_secs "$age"), more than 2 epochs of $(fmt_secs "$((10#$dur))")${since:+; failing since $(utc_time "$since")}${reason:+ (${reason})}. It keeps its last-good set, so it no longer follows the committee."
+                    print_info "  Why: journalctl -t tn-p2p-allow -n 20; sync now: ${fix}"
+                fi
+            fi ;;
+    esac
+
+    # Consistency: every current committee address of the node's snapshot in the
+    # live allow sets. Without the binary or the table the lines above said it.
+    if [[ $bin_ok -eq 1 && "$loaded" == "yes" ]]; then
+        crc=0
+        out="$(_cn_allow_run "$dir" check)" || crc=$?
+        res=""
+        while IFS= read -r l; do
+            l="${l#<[0-9]>}"
+            case "$l" in
+                "missing "*)
+                    # at most five named, however many lines the tool prints
+                    v="${l#missing }"
+                    if [[ "$v" =~ ^[0-9A-Fa-f.:]{2,45}$ ]]; then
+                        if (( named_miss < 5 )); then
+                            miss="${miss:+${miss}, }${v}"
+                            named_miss=$(( named_miss + 1 ))
+                        fi
+                        nmiss=$(( nmiss + 1 ))
+                    fi ;;
+                "mismatch 0x"*)
+                    v="${l#mismatch }"
+                    if [[ "$v" =~ ^0x[0-9a-f]{16}$ ]]; then
+                        if (( named_mism < 5 )); then
+                            mism="${mism:+${mism}, }${v}"
+                            named_mism=$(( named_mism + 1 ))
+                        fi
+                        nmism=$(( nmism + 1 ))
+                    fi ;;
+                result=*)
+                    res="$l" ;;
+                "error "*"reason="*|"stale "*"reason="*)
+                    if [[ -z "$tok" && " ${l} " =~ $reason_re ]]; then
+                        tok="${BASH_REMATCH[1]}"
+                    fi ;;
+            esac
+        done <<< "$out"
+        verdict="" mtotal="" xtotal=""
+        read -r -a words <<< "$res" || true
+        for w in ${words[@]+"${words[@]}"}; do
+            case "$w" in
+                result=*) verdict="${w#result=}" ;;
+                missing_total=*) mtotal="${w#missing_total=}" ;;
+                mismatch_total=*) xtotal="${w#mismatch_total=}" ;;
+            esac
+        done
+        [[ "$mtotal" =~ ^[0-9]{1,9}$ ]] || mtotal="$nmiss"
+        [[ "$xtotal" =~ ^[0-9]{1,9}$ ]] || xtotal="$nmism"
+        case "${crc}:${verdict}" in
+            0:ok) ;;
+            1:missing)
+                (( 10#$mtotal <= named_miss )) || miss="${miss}, and $(( 10#$mtotal - named_miss )) more"
+                print_error "P2P committee allowlist lacks ${mtotal} address(es) of the current committee (${miss:-none named}): P2P packets from them are dropped."
+                print_info "  Fix: ${fix}"
+                (( ++HEALTH_ISSUES )) ;;
+            1:absent)
+                print_error "P2P committee mode is on, but tn-p2p-allow-sync check finds no table inet tn_p2p_allow: P2P is open to every source."
+                print_info "  Fix: ${fix}  (loads the allowlist again)"
+                (( ++HEALTH_ISSUES )) ;;
+            3:behind)
+                print_info "P2P committee allowlist not compared with the committee: the last sync is behind the snapshot (a newer epoch, or an address it never held), which the next sync catches up." ;;
+            3:*)
+                print_info "P2P committee allowlist not compared with the committee: the node's admission snapshot cannot be used now${tok:+ (${tok})}." ;;
+            *)
+                tok="${tok:+reason ${tok}}"
+                [[ -n "$tok" ]] || tok="exit ${crc}"
+                print_error "P2P committee allowlist consistency check failed: tn-p2p-allow-sync check ended with ${tok}."
+                print_info "  Fix: ${fix}  (rewrites its config and state dir); details: journalctl -t tn-p2p-allow -n 20"
+                (( ++HEALTH_ISSUES )) ;;
+        esac
+        if [[ -n "$mism" && ( $crc -eq 0 || $crc -eq 1 ) ]]; then
+            (( 10#$xtotal <= named_mism )) || mism="${mism}, and $(( 10#$xtotal - named_mism )) more"
+            print_warn "P2P committee allowlist: ${xtotal} committee key(s) have node records that list other addresses than the ones this node knows them by (${mism}); the allowlist admits both."
+        fi
+    fi
+
+    # Drift: the config the tool reads against what the scripts would write now.
+    if [[ -f "${dir}/config" && ! -L "${dir}/config" ]]; then
+        cfg="$(cat -- "${dir}/config" 2>/dev/null)" || cfg=""
+    fi
+    [[ -n "$cfg" ]] || return 0
+    if want="$(tn_local_rpc_url)"; then
+        want="${want##*:}"
+        have="$(_cn_allow_kv RPC_PORT "$cfg" config)" || have="(none)"
+        [[ "$have" == "$want" ]] || drift="${drift}  RPC_PORT: ${have} in the config, ${want} in .node-meta"$'\n'
+    fi
+    if want="$(_cn_fw_p2p_ports)"; then
+        have="$(_cn_allow_kv P2P_PORTS "$cfg" config)" || have="(none)"
+        [[ "$have" == "$want" ]] || drift="${drift}  P2P_PORTS: ${have} in the config, ${want} on the node"$'\n'
+    else
+        print_info "P2P committee allowlist: its P2P ports were not compared with the node's (firewall-setup.sh --json --status listed none)."
+    fi
+    rc=0
+    v="$(meta_get P2P_ALLOW_FROM)" || rc=$?
+    if [[ $rc -ne 2 ]]; then
+        want="$(_cn_src_join "$v")"
+        have="$(_cn_allow_kv P2P_ALLOW_FROM "$cfg" config)" || have="(none)"
+        [[ "$have" == "$want" ]] || drift="${drift}  P2P_ALLOW_FROM: ${have:-empty} in the config, ${want:-empty} in .node-meta"$'\n'
+    fi
+    if [[ -n "$drift" ]]; then
+        print_warn "The P2P committee allowlist config no longer matches this node (a change that skipped its resync):"
+        printf '%s' "$drift"
+        print_info "  Fix: ${fix}  (rewrites the config)"
+    fi
+    return 0
+}
+
 # =============================================================================
 # REPORT HEADER
 # =============================================================================
@@ -2248,7 +2555,7 @@ resolve_identity
 report_address_mismatch
 # Hardening checks. Each function lands with its own package; a missing one is skipped.
 for _hc in check_bls_cleartext check_update_lock check_ownership_layout check_unit_environ \
-           check_unit_sandbox check_health_score check_healthcheck_on_mainnet check_alerts; do
+           check_unit_sandbox check_health_score check_healthcheck_on_mainnet check_p2p_committee check_alerts; do
     have_fns "$_hc" && "$_hc"
 done
 unset _hc

@@ -514,10 +514,11 @@ command_exists() {
 # other-writable. Group write is refused in the directories these scripts own
 # and everything below them (/var/log/telcoin, /etc/telcoin, /opt/telcoin,
 # /usr/local/libexec/telcoin, /var/backups/telcoin, /var/lib/telcoin-staging,
-# /run/telcoin, also under TN_ROOT_PREFIX). Above them, and in system paths the
-# scripts do not own, a group-writable directory passes only when its group is a
-# system group (gid below 1000): stock Ubuntu ships /var/log root:syslog 0775. A
-# path with a "." or ".." component is refused. Reads only; prints nothing.
+# /var/lib/telcoin-p2p-allow, /run/telcoin, also under TN_ROOT_PREFIX). Above
+# them, and in system paths the scripts do not own, a group-writable directory
+# passes only when its group is a system group (gid below 1000): stock Ubuntu
+# ships /var/log root:syslog 0775. A path with a "." or ".." component is
+# refused. Reads only; prints nothing.
 # (Copied into the VPN self-heal helper with declare -f: keep it self-contained.)
 tn_root_dir_ok() {
     local d="${1:-}" st uid gid mode rel
@@ -547,7 +548,7 @@ tn_root_dir_ok() {
                 fi
                 case "${rel}/" in
                     /var/log/telcoin/*|/etc/telcoin/*|/opt/telcoin/*|/usr/local/libexec/telcoin/*|\
-                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/run/telcoin/*)
+                    /var/backups/telcoin/*|/var/lib/telcoin-staging/*|/var/lib/telcoin-p2p-allow/*|/run/telcoin/*)
                         return 1 ;;
                 esac
                 (( 10#$gid < 1000 )) || return 1
@@ -2687,6 +2688,317 @@ write_advertised_name() {
         return 1
     fi
     print_ok "Advertised node name set: ${name}"
+}
+
+# -----------------------------------------------------------------------------
+# Node admission settings in network-config (admission, trusted_nodes and
+# committee_peers) and the first node release that reads them
+# -----------------------------------------------------------------------------
+
+# The first node release whose network-config reads admission, trusted_nodes and
+# committee_peers. telcoin-network #1534 brought the three keys to main through
+# #1701 (5ccb88e86, 2026-10-16). No release tag contained that merge when this
+# floor was set; the newest, v0.16.0, ignores the keys, so the floor is the next
+# minor release. A floor too low would pass a release that drops the keys without
+# a word while the host looks configured; one too high only refuses a release
+# that would have worked.
+# TODO(node team): confirm
+readonly MIN_ADMISSION_VERSION="0.17.0"
+
+# tn_node_supports_admission VERSION -- whether the node release VERSION reads
+# the admission keys of network-config, that is MIN_ADMISSION_VERSION or later
+# (version_gte). VERSION is a release version or tag (0.17.0, v0.17.0, or either
+# with a suffix such as -rc1) or a docker image, judged on the part after its
+# last ":". Prints nothing.
+#   rc 0  a release at or above the floor
+#   rc 1  a release below the floor: it ignores the keys
+#   rc 2  not a release version (empty, main, a commit id, git describe output
+#         past a tag, a dirty tree): the answer is unknown, which is not a no
+tn_node_supports_admission() {
+    local v="${1:-}" ver
+    local re='^v?([0-9]+[.][0-9]+[.][0-9]+)(-[A-Za-z0-9][A-Za-z0-9.-]*)?$'
+    local past_re='-[0-9]+-g[0-9a-f]+(-dirty)?$'
+    if [[ "$v" == *:* ]]; then
+        v="${v##*:}"
+    fi
+    [[ "$v" =~ $re ]] || return 2
+    ver="${BASH_REMATCH[1]}"
+    if [[ "$v" =~ $past_re || "$v" == *-dirty ]]; then
+        return 2
+    fi
+    version_gte "$ver" "$MIN_ADMISSION_VERSION" || return 1
+}
+
+# tn_network_config_render DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE -- write
+# the node admission settings into DATA_DIR/network-config as three top-level
+# entries, editing the file as the service user (tn_as_service_user) the way
+# write_advertised_name does:
+#   admission        mode: MODE, one of Open, Grace or Closed (open, grace and
+#                    closed mean the same); a snapshot_max_age_secs that the old
+#                    admission entry holds is written again
+#   trusted_nodes    the map in TRUSTED_FILE: BLS public key to {primary:
+#                    {network_address, network_key}, workers: {<id>: {...}}}
+#   committee_peers  the map in COMMITTEE_FILE, in the bootstrap-peers.yaml shape
+# TRUSTED_FILE and COMMITTEE_FILE are absolute paths the service user can read
+# (the installed copies in the config dir are root 0644), or none, which leaves
+# that entry out of the file. A file's lines go under its key two spaces deeper,
+# without its blank lines and a leading "---" line, and without a byte order
+# mark or CRLF line ends, which a map saved on Windows may carry and which would
+# otherwise end up inside its first key and every value. A file that holds no
+# map, or a second YAML document, is refused: a key with nothing under it is a
+# null the node will not start with.
+#
+# The entries are replaced, never appended: the node writes a full default
+# network-config on its first start, which holds all three already, and a key
+# that appears twice stops the node. Block-boundary rule: a top-level key is a
+# line that starts at column 0 with a plain key (a letter, digit or "_", then
+# letters, digits, "_", "." or "-") followed by ":" and then the end of the
+# line, a space or a tab, so both `admission:` and `trusted_nodes: {}` start an
+# entry. An entry runs from its key line to the line before the next top-level
+# key, except that the blank lines and column-0 comments right before that next
+# key stay in the file, as everything outside the three entries does, line for
+# line (a last line without a newline gets one). Each entry is written where
+# its first occurrence was and any later occurrence is dropped; an entry the
+# file did not have goes at the end, in the order above. A file with a
+# column-0 line that is not a top-level key, a comment, a blank line or a line
+# starting with "-" (a flow document "{...}", a quoted or complex key, a
+# directive) is refused, because the rule cannot tell where its entries end; so
+# is a file with an indented line before its first key (a whole document
+# indented, say; a leading "---" is fine), a document marker ("---" or "...")
+# after it, which would make two documents of one, and a top-level key inside a
+# flow value ({...} or [...]) that an earlier line leaves open. network-config
+# itself is kept line for line, so a byte order mark or CRLF line ends there are
+# refused, named, rather than rewritten. A comment is not read as a lease: the
+# snapshot_max_age_secs kept is the one outside a "#" comment.
+#
+# The new text goes to network-config.tn-new, which one rename puts in place,
+# as _hn_write in ui/telcoin-ui-helper.sh does. A missing network-config is
+# created with the three entries alone; the node takes its defaults for the
+# rest. rc 0 written; rc 1 refused before anything was written (an argument, a
+# file the rules above refuse, or a snapshot_max_age_secs that is not a whole
+# number), with the reason on stderr; rc 2 the edit could not run or its write
+# failed. network-config is unchanged on rc 1 and rc 2.
+tn_network_config_render() {
+    local data_dir="${1:-}" mode="${2:-}" trusted="${3:-}" committee="${4:-}"
+    local f nc prog out rc=0
+    if [[ $# -ne 4 ]]; then
+        print_error "tn_network_config_render: expected DATA_DIR MODE TRUSTED_FILE COMMITTEE_FILE."
+        return 1
+    fi
+    case "$mode" in
+        Open|open) mode=Open ;;
+        Grace|grace) mode=Grace ;;
+        Closed|closed) mode=Closed ;;
+        *)
+            print_error "Admission mode '${mode}' is not one of open, grace or closed."
+            return 1
+            ;;
+    esac
+    if [[ "$data_dir" != /* || ! -d "$data_dir" || -L "$data_dir" ]]; then
+        print_error "The data dir '${data_dir}' is not a directory."
+        return 1
+    fi
+    for f in "$trusted" "$committee"; do
+        if [[ "$f" != none && "$f" != /* ]]; then
+            print_error "'${f}' is neither an absolute path nor none."
+            return 1
+        fi
+    done
+    nc="${data_dir}/network-config"
+    # the YAML surgery: awk alone (no python3 or yq on a node), run by the
+    # service user on its own file; exit 3 means refused, with the reason on
+    # stderr. The awk text holds no single quote.
+    # shellcheck disable=SC2016
+    prog='
+        function fail(msg) {
+            printf("network-config: %s\n", msg) > "/dev/stderr"
+            failed = 1
+            exit 3
+        }
+        # nest(key, path): key followed by the map in path, two spaces deeper
+        function nest(key, path,    out, s, rc, seen, ended, ln) {
+            out = key ":"
+            seen = 0
+            ended = 0
+            ln = 0
+            while ((rc = (getline s < path)) > 0) {
+                # network-config gets neither: a mark would start the first
+                # key, a carriage return would end every value
+                if (++ln == 1 && index(s, bom) == 1) s = substr(s, length(bom) + 1)
+                sub(/\r$/, "", s)
+                if (s ~ /^(---|[.][.][.])[ \t]*$/) {
+                    if (seen) ended = 1
+                    continue
+                }
+                if (s ~ /^[ \t]*$/) continue
+                if (s !~ /^[ \t]*#/) {
+                    if (ended) fail(path " holds more than one YAML document")
+                    if (!seen && s !~ /^[{]/ && s !~ /^[^ \t#{-].*:$/ && s !~ /^[^ \t#{-].*:[ \t]/)
+                        fail(path " does not start with a map keyed by BLS public key")
+                    seen = 1
+                }
+                out = out "\n  " s
+            }
+            if (rc < 0) fail("cannot read " path)
+            close(path)
+            if (!seen) fail(path " holds no map")
+            return out
+        }
+        # flow(s, d): how many flow collections ({...} or [...]) are open after
+        # line s, d of them being open before it. Quoted scalars and a comment
+        # do not count; outside a flow one starts only where a value does (at
+        # the indent, after "- " or after ": "), so a plain scalar such as a{b
+        # opens nothing.
+        function flow(s, d,    t, r) {
+            t = s
+            gsub(/"([^"\\]|\\.)*"/, "", t)
+            gsub(sq "[^" sq "]*" sq, "", t)
+            sub(/(^|[ \t])#.*/, "", t)
+            if (d == 0) {
+                if (match(t, /^[ \t]*(-[ \t]+)*[{[]/) || match(t, /:[ \t]+[{[]/))
+                    t = substr(t, RSTART + RLENGTH - 1)
+                else
+                    return 0
+            }
+            r = d + gsub(/[{[]/, "", t)
+            r -= gsub(/[]}]/, "", t)
+            return r > 0 ? r : 0
+        }
+        function emit(k) {
+            if (k == "admission") {
+                print "admission:"
+                print "  mode: " mode
+                if (age != "") print "  snapshot_max_age_secs: " age
+            } else if (k in body) {
+                print body[k]
+            }
+        }
+        BEGIN {
+            mode = ENVIRON["TN_NC_MODE"]
+            bom = "\357\273\277"
+            sq = "\047"
+            order[1] = "admission"; order[2] = "trusted_nodes"; order[3] = "committee_peers"
+            target["admission"] = 1; target["trusted_nodes"] = 1; target["committee_peers"] = 1
+            if (ENVIRON["TN_NC_TRUSTED"] != "none")
+                body["trusted_nodes"] = nest("trusted_nodes", ENVIRON["TN_NC_TRUSTED"])
+            if (ENVIRON["TN_NC_COMMITTEE"] != "none")
+                body["committee_peers"] = nest("committee_peers", ENVIRON["TN_NC_COMMITTEE"])
+        }
+        { L[++n] = $0 }
+        END {
+            if (failed) exit 3
+            # which entry each line belongs to; "" is outside every entry
+            cur = ""
+            marked = 0
+            open = 0
+            for (i = 1; i <= n; i++) {
+                s = L[i]
+                if (i == 1 && index(s, bom) == 1)
+                    fail("the file starts with a byte order mark; save it as UTF-8 without one")
+                if (s ~ /\r$/)
+                    fail("line " i " ends in a carriage return (CRLF line ends); save the file with LF line ends")
+                if (s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*:$/ || s ~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*:[ \t]/) {
+                    if (open > 0)
+                        fail("line " i " starts a top-level key inside the flow value that line " opened " leaves open, so its entries cannot be told apart")
+                    cur = s
+                    sub(/:.*/, "", cur)
+                    kind[i] = "key"
+                } else if (s ~ /^[ \t]*$/ || s ~ /^#/) {
+                    kind[i] = "gap"
+                } else if (s ~ /^(---|[.][.][.])([ \t]|$)/) {
+                    if (cur != "" || marked)
+                        fail("line " i " is a document marker (--- or ...) after the document has started: network-config must hold one YAML document")
+                    if (s !~ /^---[ \t]*(#.*)?$/)
+                        fail("line " i " starts at column 0 but is not a plain key, so its entries cannot be told apart")
+                    marked = 1
+                    kind[i] = "gap"
+                } else if (s ~ /^[ \t-]/) {
+                    if (cur == "")
+                        fail("line " i " comes before the first top-level key, so its entries cannot be told apart")
+                    kind[i] = "body"
+                } else {
+                    fail("line " i " starts at column 0 but is not a plain key, so its entries cannot be told apart")
+                }
+                owner[i] = cur
+                if (kind[i] != "gap" || open > 0) {
+                    d = flow(s, open)
+                    if (open == 0 && d > 0) opened = i
+                    open = d
+                }
+            }
+            if (open > 0)
+                fail("the flow value that line " opened " opens is never closed")
+            # blank lines and column-0 comments just before a key, or at the
+            # end, sit between entries and stay
+            between = 1
+            for (i = n; i >= 1; i--) {
+                if (kind[i] != "gap") between = (kind[i] == "key")
+                else if (between) owner[i] = ""
+            }
+            age = ""
+            for (i = 1; i <= n && age == ""; i++) {
+                s = L[i]
+                if (owner[i] != "admission" || kind[i] == "gap" || s ~ /^[ \t]*#/) continue
+                sub(/[ \t]#.*/, "", s)
+                if (match(s, /[{, \t]snapshot_max_age_secs[ \t]*:/)) {
+                    age = substr(s, RSTART + RLENGTH)
+                    sub(/^[ \t]+/, "", age)
+                    if (match(age, /[ \t,}#]/)) age = substr(age, 1, RSTART - 1)
+                    if (age !~ /^[0-9]+$/)
+                        fail("snapshot_max_age_secs of the admission entry is not a whole number: " age)
+                }
+            }
+            for (i = 1; i <= n; i++) {
+                k = owner[i]
+                if (k in target) {
+                    if (kind[i] == "key" && !(k in done)) {
+                        done[k] = 1
+                        emit(k)
+                    }
+                    continue
+                }
+                print L[i]
+            }
+            for (j = 1; j <= 3; j++) {
+                if (!(order[j] in done)) emit(order[j])
+            }
+        }'
+    # shellcheck disable=SC2016
+    out="$(tn_as_service_user sh -c '
+        nc="$1"; new="$1.tn-new"; src="$1"
+        if [ -e "$nc" ] && [ ! -f "$nc" ]; then
+            printf "network-config: %s is not a regular file\n" "$nc" >&2
+            exit 3
+        fi
+        [ -e "$nc" ] || src=/dev/null
+        for f in "$4" "$5"; do
+            if [ "$f" != none ] && { [ ! -f "$f" ] || [ ! -r "$f" ]; }; then
+                printf "network-config: cannot read %s\n" "$f" >&2
+                exit 3
+            fi
+        done
+        rm -f -- "$new" || exit 2
+        TN_NC_MODE="$3" TN_NC_TRUSTED="$4" TN_NC_COMMITTEE="$5" awk "$2" "$src" > "$new"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            rm -f -- "$new"
+            [ "$rc" -eq 3 ] && exit 3
+            exit 2
+        fi
+        mv -f -- "$new" "$nc" || { rm -f -- "$new"; exit 2; }' \
+        sh "$nc" "$prog" "$mode" "$trusted" "$committee" 2>&1)" || rc=$?
+    case "$rc" in
+        0) ;;
+        3)
+            print_error "The admission settings were not written to ${nc}: ${out#network-config: }"
+            return 1
+            ;;
+        *)
+            print_error "Could not write the admission settings to ${nc}${out:+: ${out}}"
+            return 2
+            ;;
+    esac
+    print_ok "Admission settings written to ${nc} (mode ${mode})"
 }
 
 # Record the ref of the source binary that was just installed, in a marker next
@@ -7015,6 +7327,22 @@ readonly TN_DEVNET_IMAGE_REPOS="${GAR_IMAGE_BASE} ${TN_GHCR_LEGACY_IMAGE_REPO} $
 # Release files live at <TN_RELEASE_BASE_URL>/<tag>/<file>.
 readonly TN_RELEASE_BASE_URL="https://github.com/Telcoin-Association/telcoin-network/releases/download"
 
+# The P2P committee allowlist sync tool (firewall-setup.sh --p2p-committee) comes
+# from a signed release of its own repository, checked against the same keys as
+# the node's (tn_p2p_allow_install): files at <TN_P2P_ALLOW_BASE_URL>/<tag>/<file>.
+# These scripts pin the tag and the sha256 of its tarball, so a binary that runs
+# as root on every validator changes only with a reviewed scripts release, never
+# by fetching "latest".
+readonly TN_P2P_ALLOW_BASE_URL="https://github.com/Telcoin-Association/tn-p2p-allow-sync/releases/download"
+readonly TN_P2P_ALLOW_VERSION="v0.1.0"
+# The sha256 of the TN_P2P_ALLOW_VERSION tarball, from the SHA256SUMS of its signed
+# release; without a pin the install refuses.
+readonly TN_P2P_ALLOW_TARBALL_SHA256="e28b8cb7414028f84e52aabd94e162e2fc294a83c8232e1e05f26bcc13c8080c"
+# The installed binary (root 0755), and the config format firewall-setup.sh writes
+# for it (CONFIG_VERSION=), which its --version must name as its config-version.
+readonly TN_P2P_ALLOW_BIN="${TN_ROOT_PREFIX:-}/usr/local/libexec/telcoin/tn-p2p-allow-sync"
+readonly TN_P2P_ALLOW_CONFIG_VERSION="1"
+
 # The build account and its home (toolchain, cargo cache, target dir). Not under
 # /home, no login shell, member of no other group. Overridable for tests only.
 TN_BUILD_USER="${TN_BUILD_USER:-tn-build}"
@@ -7392,18 +7720,15 @@ _tn_release_sig_ok() {
     _tn_gpg_status_verdict "$d/allow" <<< "$out"
 }
 
-# _tn_release_sums_names FILE TAG NETWORK -- rc 0 when FILE (SHA256SUMS) has only
-# "<64 hex>  <name>" lines naming exactly IMAGE_DIGEST, one
-# telcoin-network-TAG-<triple>.tar.gz and NETWORK's chain-configs/<dir>/
-# committee.yaml, genesis.yaml and parameters.yaml, each once. Prints the reason
-# on rc 1.
-_tn_release_sums_names() {
-    local f="$1" tag="$2" net="$3" cc line name mid n=0 tars=0 seen=" " re
-    case "$net" in
-        testnet) cc="chain-configs/testnet" ;;
-        mainnet) cc="chain-configs/mainnet" ;;
-        *) printf 'no release channel for network %s\n' "$net"; return 1 ;;
-    esac
+# _tn_release_sums_shape FILE PREFIX SUFFIX LABEL WHAT [NAME...] -- rc 0 when FILE
+# (SHA256SUMS) has only "<64 hex>  <name>" lines, each name once, that name
+# exactly the NAMEs and one tarball PREFIX<arch>SUFFIX (<arch> of a-z, 0-9 and _),
+# so SHA256SUMS holds one line more than there are NAMEs. Prints the reason on
+# rc 1: a name outside that set is "not part of a LABEL release", a list short of
+# it "must name exactly WHAT".
+_tn_release_sums_shape() {
+    local f="$1" pre="$2" suf="$3" label="$4" what="$5" line name mid want known n=0 tars=0 seen=" " re
+    shift 5
     re='^[0-9a-f]{64}  [A-Za-z0-9._/-]+$'
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ ! "$line" =~ $re ]]; then
@@ -7415,26 +7740,46 @@ _tn_release_sums_names() {
             *" ${name} "*) printf 'SHA256SUMS names %s twice\n' "$name"; return 1 ;;
         esac
         seen="${seen}${name} "
-        case "$name" in
-            IMAGE_DIGEST|"${cc}/committee.yaml"|"${cc}/genesis.yaml"|"${cc}/parameters.yaml") ;;
-            *)
-                mid="${name#"telcoin-network-${tag}-"}"
-                mid="${mid%-unknown-linux-gnu.tar.gz}"
-                if [[ "$name" == "telcoin-network-${tag}-"*"-unknown-linux-gnu.tar.gz" && "$mid" =~ ^[a-z0-9_]+$ ]]; then
-                    tars=$((tars + 1))
-                else
-                    printf 'SHA256SUMS names %s, which is not part of a %s release\n' "$name" "$net"
-                    return 1
-                fi
-                ;;
-        esac
+        known=false
+        for want in "$@"; do
+            if [[ "$name" == "$want" ]]; then
+                known=true
+            fi
+        done
+        if [[ "$known" != "true" ]]; then
+            mid="${name#"$pre"}"
+            mid="${mid%"$suf"}"
+            if [[ "$name" == "$pre"*"$suf" && "$mid" =~ ^[a-z0-9_]+$ ]]; then
+                tars=$((tars + 1))
+            else
+                printf 'SHA256SUMS names %s, which is not part of a %s release\n' "$name" "$label"
+                return 1
+            fi
+        fi
         n=$((n + 1))
     done < "$f"
-    if [[ "$n" -ne 5 || "$tars" -ne 1 ]]; then
-        printf 'SHA256SUMS must name exactly IMAGE_DIGEST, the tarball and the three %s files\n' "$cc"
+    if [[ "$n" -ne $(($# + 1)) || "$tars" -ne 1 ]]; then
+        printf 'SHA256SUMS must name exactly %s\n' "$what"
         return 1
     fi
     return 0
+}
+
+# _tn_release_sums_names FILE TAG NETWORK -- rc 0 when FILE (SHA256SUMS) has only
+# "<64 hex>  <name>" lines naming exactly IMAGE_DIGEST, one
+# telcoin-network-TAG-<triple>.tar.gz and NETWORK's chain-configs/<dir>/
+# committee.yaml, genesis.yaml and parameters.yaml, each once. Prints the reason
+# on rc 1.
+_tn_release_sums_names() {
+    local f="$1" tag="$2" net="$3" cc
+    case "$net" in
+        testnet) cc="chain-configs/testnet" ;;
+        mainnet) cc="chain-configs/mainnet" ;;
+        *) printf 'no release channel for network %s\n' "$net"; return 1 ;;
+    esac
+    _tn_release_sums_shape "$f" "telcoin-network-${tag}-" "-unknown-linux-gnu.tar.gz" "$net" \
+        "IMAGE_DIGEST, the tarball and the three ${cc} files" \
+        IMAGE_DIGEST "${cc}/committee.yaml" "${cc}/genesis.yaml" "${cc}/parameters.yaml"
 }
 
 # _tn_release_sum FILE NAME -- the hash SHA256SUMS FILE gives NAME.
@@ -7452,38 +7797,28 @@ _tn_release_file_ok() {
     [[ "${got%% *}" == "$want" ]]
 }
 
-# _tn_release_fetch TAG NETWORK BASE_URL MODE [progress-fn] -- download and check
-# a release into a new staging directory (printed on stdout): SHA256SUMS and its
-# signature first (gpgv against lib/release-keys), then the names it lists, the
-# chain-config hashes against this script release's pins, IMAGE_DIGEST and, in
-# MODE full, this host's tarball, each against its line. rc 1 refused, 2
-# network or I/O, 3 TAG is not a NETWORK release tag or NETWORK is devnet,
-# which has no signed releases (nothing is downloaded). The staging directory
-# is removed on every failure.
-_tn_release_fetch() {
-    local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
-    local parent stg why f want got triple tarball cc img sigrc unknown
-    if [[ "$net" == "devnet" ]]; then
-        _tn_c4_say warn "Devnet has no signed releases, so ${tag:-(empty)} names no release to fetch: devnet images run by digest." "$fn"
-        return 3
-    fi
-    if ! tn_release_tag_ok "$net" "$tag"; then
-        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
-        return 3
-    fi
-    [[ -n "$base" ]] || base="${TN_RELEASE_BASE_URL}/${tag}"
-    base="${base%/}"
+# _tn_release_tools_ok [progress-fn] -- rc 0 when curl, gpg, gpgv and sha256sum,
+# which every release check needs, are installed; rc 2 naming the first missing.
+_tn_release_tools_ok() {
+    local f
     for f in curl gpg gpgv sha256sum; do
         if ! command -v "$f" >/dev/null 2>&1; then
-            _tn_c4_say warn "${f} is not installed; a release cannot be checked without it." "$fn"
+            _tn_c4_say warn "${f} is not installed; a release cannot be checked without it." "${1:-}"
             return 2
         fi
     done
-    triple="$(_tn_release_triple)" || triple=""
-    if [[ "$mode" == "full" && -z "$triple" ]]; then
-        _tn_c4_say warn "No release binary is published for this architecture ($(uname -m 2>/dev/null))." "$fn"
-        return 1
-    fi
+    return 0
+}
+
+# _tn_release_open TAG BASE_URL [progress-fn] -- the steps every signed release
+# shares, whatever it holds: a new staging directory (rel.<pid>.XXXXXX under
+# tn_staging_dir, printed on stdout), the keyring of lib/release-keys,
+# SHA256SUMS and SHA256SUMS.asc from BASE_URL (1 MiB and 60 s each) and the
+# signature over SHA256SUMS (_tn_release_sig_ok). TAG names the release in the
+# messages. rc 1 refused, 2 network or I/O; the staging directory is removed on
+# every failure.
+_tn_release_open() {
+    local tag="${1:-}" base="${2:-}" fn="${3:-}" parent stg why f sigrc unknown
     parent="$(tn_staging_dir)" || {
         _tn_c4_say warn "The staging directory is not a root-owned 0700 directory; nothing was downloaded." "$fn"
         return 1
@@ -7532,6 +7867,59 @@ _tn_release_fetch() {
     if [[ -n "$unknown" ]]; then
         _tn_c4_say warn "Release ${tag}: SHA256SUMS.asc also carries a signature by key ${unknown}, which is not in $(_tn_release_keys_dir), so that signature was not checked. The release is taken on the good signature by a listed key; update-scripts.sh brings newer keys." "$fn"
     fi
+    printf '%s\n' "$stg"
+}
+
+# _tn_release_fetch_asset DIR BASE_URL TAG NAME WHAT MAX_BYTES MAX_SECONDS
+# [progress-fn] -- download NAME, which the verified DIR/SHA256SUMS must list,
+# from BASE_URL into DIR (at most MAX_BYTES in MAX_SECONDS) and check it against
+# its line. WHAT names NAME when the list lacks it. rc 1 refused, 2 network or
+# I/O; DIR stays for the caller to remove.
+_tn_release_fetch_asset() {
+    local stg="$1" base="$2" tag="$3" name="$4" what="$5" max="$6" secs="$7" fn="${8:-}"
+    if [[ -z "$(_tn_release_sum "${stg}/SHA256SUMS" "$name")" ]]; then
+        _tn_c4_say warn "Release ${tag} has no ${what}." "$fn"
+        return 1
+    fi
+    if ! _tn_release_get "${base}/${name}" "${stg}/${name}" "$max" "$secs"; then
+        _tn_c4_say warn "Could not download ${base}/${name}." "$fn"
+        return 2
+    fi
+    if ! _tn_release_file_ok "$stg" "$name"; then
+        _tn_c4_say warn "Release ${tag}: ${name} does not match its SHA256SUMS line." "$fn"
+        return 1
+    fi
+    return 0
+}
+
+# _tn_release_fetch TAG NETWORK BASE_URL MODE [progress-fn] -- download and check
+# a node release into a new staging directory (printed on stdout): SHA256SUMS and
+# its signature first (_tn_release_open: gpgv against lib/release-keys), then the
+# names it lists, the chain-config hashes against this script release's pins,
+# IMAGE_DIGEST and, in MODE full, this host's tarball, each against its line. rc 1
+# refused, 2 network or I/O, 3 TAG is not a NETWORK release tag or NETWORK is
+# devnet, which has no signed releases (nothing is downloaded). The staging
+# directory is removed on every failure.
+_tn_release_fetch() {
+    local tag="${1:-}" net="${2:-}" base="${3:-}" mode="${4:-full}" fn="${5:-}"
+    local stg why f want got triple tarball cc img
+    if [[ "$net" == "devnet" ]]; then
+        _tn_c4_say warn "Devnet has no signed releases, so ${tag:-(empty)} names no release to fetch: devnet images run by digest." "$fn"
+        return 3
+    fi
+    if ! tn_release_tag_ok "$net" "$tag"; then
+        _tn_c4_say warn "${tag:-(empty)} is not a ${net:-(no network)} release tag ($(tn_release_tag_grammar))." "$fn"
+        return 3
+    fi
+    [[ -n "$base" ]] || base="${TN_RELEASE_BASE_URL}/${tag}"
+    base="${base%/}"
+    _tn_release_tools_ok "$fn" || return 2
+    triple="$(_tn_release_triple)" || triple=""
+    if [[ "$mode" == "full" && -z "$triple" ]]; then
+        _tn_c4_say warn "No release binary is published for this architecture ($(uname -m 2>/dev/null))." "$fn"
+        return 1
+    fi
+    stg="$(_tn_release_open "$tag" "$base" "$fn")" || return $?
     if ! why="$(_tn_release_sums_names "${stg}/SHA256SUMS" "$tag" "$net")"; then
         _tn_c4_say warn "Release ${tag}: ${why}." "$fn"
         _tn_release_cleanup "$stg"
@@ -7568,21 +7956,11 @@ _tn_release_fetch() {
     fi
     if [[ "$mode" == "full" ]]; then
         tarball="telcoin-network-${tag}-${triple}.tar.gz"
-        if [[ -z "$(_tn_release_sum "${stg}/SHA256SUMS" "$tarball")" ]]; then
-            _tn_c4_say warn "Release ${tag} has no ${triple} tarball." "$fn"
+        _tn_release_fetch_asset "$stg" "$base" "$tag" "$tarball" "${triple} tarball" 1073741824 1800 "$fn" || {
+            f=$?
             _tn_release_cleanup "$stg"
-            return 1
-        fi
-        if ! _tn_release_get "${base}/${tarball}" "${stg}/${tarball}" 1073741824 1800; then
-            _tn_c4_say warn "Could not download ${base}/${tarball}." "$fn"
-            _tn_release_cleanup "$stg"
-            return 2
-        fi
-        if ! _tn_release_file_ok "$stg" "$tarball"; then
-            _tn_c4_say warn "Release ${tag}: ${tarball} does not match its SHA256SUMS line." "$fn"
-            _tn_release_cleanup "$stg"
-            return 1
-        fi
+            return $f
+        }
     fi
     printf '%s\n' "$stg"
     return 0
@@ -7633,30 +8011,31 @@ tn_fetch_release_image() {
     printf '%s\n' "$img"
 }
 
-# tn_release_extract_binary TARBALL OUT -- write the node binary from a verified
-# release TARBALL (telcoin-network-<tag>-<triple>.tar.gz) to OUT, mode 0755. The
-# tarball must list exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and
-# NOTICE under its top directory, the binary as a regular file; nothing else is
-# extracted and no owner or mode is taken from the archive. rc 1 refused, 2 I/O.
+# tn_release_extract_binary TARBALL OUT [BINARY] -- write BINARY (default
+# telcoin-network) from a verified release TARBALL (<project>-<tag>-<triple>.tar.gz)
+# to OUT, mode 0755. The tarball must list exactly BINARY, LICENSE-APACHE,
+# LICENSE-MIT and NOTICE under its top directory, the binary as a regular file;
+# nothing else is extracted and no owner or mode is taken from the archive. rc 1
+# refused, 2 I/O.
 tn_release_extract_binary() {
-    local tarball="${1:-}" out="${2:-}" dir listing want kind
+    local tarball="${1:-}" out="${2:-}" bin="${3:-telcoin-network}" dir listing want kind
     [[ -f "$tarball" && ! -L "$tarball" && -n "$out" && ! -L "$out" ]] || return 1
     dir="${tarball##*/}"
     dir="${dir%.tar.gz}"
     listing="$(tar -tzf "$tarball" 2>/dev/null)" || return 2
     listing="$(printf '%s\n' "$listing" | awk -v d="${dir}/" '$0 != d' | LC_ALL=C sort)"
-    want="$(printf '%s\n' "${dir}/LICENSE-APACHE" "${dir}/LICENSE-MIT" "${dir}/NOTICE" "${dir}/telcoin-network" | LC_ALL=C sort)"
+    want="$(printf '%s\n' "${dir}/LICENSE-APACHE" "${dir}/LICENSE-MIT" "${dir}/NOTICE" "${dir}/${bin}" | LC_ALL=C sort)"
     if [[ "$listing" != "$want" ]]; then
-        print_warn "${tarball##*/} must hold exactly telcoin-network, LICENSE-APACHE, LICENSE-MIT and NOTICE under ${dir}/." >&2
+        print_warn "${tarball##*/} must hold exactly ${bin}, LICENSE-APACHE, LICENSE-MIT and NOTICE under ${dir}/." >&2
         return 1
     fi
-    kind="$(tar -tvzf "$tarball" "${dir}/telcoin-network" 2>/dev/null | head -n 1)" || kind=""
+    kind="$(tar -tvzf "$tarball" "${dir}/${bin}" 2>/dev/null | head -n 1)" || kind=""
     if [[ "${kind:0:1}" != "-" ]]; then
-        print_warn "${dir}/telcoin-network in ${tarball##*/} is not a regular file." >&2
+        print_warn "${dir}/${bin} in ${tarball##*/} is not a regular file." >&2
         return 1
     fi
     rm -f -- "$out"
-    if ! ( umask 077; tar -xzOf "$tarball" "${dir}/telcoin-network" > "$out" ) 2>/dev/null; then
+    if ! ( umask 077; tar -xzOf "$tarball" "${dir}/${bin}" > "$out" ) 2>/dev/null; then
         rm -f -- "$out"
         return 2
     fi
@@ -7944,18 +8323,19 @@ tn_rustup_ensure() {
     return $rc
 }
 
-# tn_build_version BIN -- print BIN --version, run as the build account (30 s at
-# most) on a copy in a fresh directory of the build account's home. BIN must be
-# a regular file of the caller (root's staged copy, tn_stage_binary); anything
-# else is refused (rc 1) and never run.
+# tn_build_version BIN [NAME] -- print BIN --version, run as the build account (30 s
+# at most) on a copy named NAME (default telcoin-network, a plain file name) in a
+# fresh directory of the build account's home. BIN must be a regular file of the
+# caller (root's staged copy, tn_stage_binary); anything else is refused (rc 1)
+# and never run.
 tn_build_version() {
-    local bin="${1:-}" d out rc=0
-    [[ -f "$bin" && ! -L "$bin" ]] || return 1
+    local bin="${1:-}" name="${2:-telcoin-network}" d out rc=0
+    [[ -f "$bin" && ! -L "$bin" && "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
     [[ "$(stat -c '%u' -- "$bin" 2>/dev/null)" == "$(id -u)" ]] || return 1
     d="$(tn_as_build_user mktemp -d "${TN_BUILD_HOME}/probe.XXXXXX")" || return 2
     [[ "$d" == "${TN_BUILD_HOME}/probe."* && "$d" != *[[:space:]]* ]] || return 2
-    if tn_as_build_user sh -c 'cat > "$1" && chmod 0700 "$1"' sh "${d}/telcoin-network" < "$bin"; then
-        out="$(tn_as_build_user timeout 30 "${d}/telcoin-network" --version)" || rc=$?
+    if tn_as_build_user sh -c 'cat > "$1" && chmod 0700 "$1"' sh "${d}/${name}" < "$bin"; then
+        out="$(tn_as_build_user timeout 30 "${d}/${name}" --version)" || rc=$?
     else
         rc=2
     fi
@@ -8493,6 +8873,142 @@ tn_release_stage() {
     _tn_release_cleanup "$rel"
     [[ $rc -eq 0 ]] || return $rc
     printf '%s\n' "$out"
+}
+
+# _tn_p2p_allow_triple -- the target triple of the tn-p2p-allow-sync release for
+# this host's architecture: a static musl binary, published for x86_64 only. rc 1
+# elsewhere.
+_tn_p2p_allow_triple() {
+    case "$(uname -m 2>/dev/null)" in
+        x86_64|amd64) printf 'x86_64-unknown-linux-musl\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _tn_p2p_allow_version_ok TEXT VERSION -- rc 0 when TEXT, a tn-p2p-allow-sync
+# --version output, is the release these scripts pin and speaks their formats:
+# its first line is "tn-p2p-allow-sync VERSION" (the tag without its v), it has
+# one "config-version N" line with N the TN_P2P_ALLOW_CONFIG_VERSION that
+# firewall-setup.sh writes, and one "snapshot-versions" line whose comma- or
+# space-separated list holds 1, the tn_admissionSnapshot version nodes serve.
+# The reason goes to stderr on rc 1.
+_tn_p2p_allow_version_ok() {
+    local text="${1:-}" ver="${2:-}" first n v
+    first=""
+    IFS= read -r first <<< "$text" || true
+    if [[ "$first" != "tn-p2p-allow-sync ${ver}" ]]; then
+        print_warn "The tn-p2p-allow-sync binary's --version starts with '${first}', not 'tn-p2p-allow-sync ${ver}'." >&2
+        return 1
+    fi
+    n="$(grep -c '^config-version ' <<< "$text")" || n=0
+    v="$(sed -n 's/^config-version //p' <<< "$text")"
+    if [[ "$n" != "1" || "$v" != "$TN_P2P_ALLOW_CONFIG_VERSION" ]]; then
+        print_warn "The tn-p2p-allow-sync binary does not read config version ${TN_P2P_ALLOW_CONFIG_VERSION}, the one these scripts write (its --version needs one 'config-version ${TN_P2P_ALLOW_CONFIG_VERSION}' line)." >&2
+        return 1
+    fi
+    n="$(grep -c '^snapshot-versions ' <<< "$text")" || n=0
+    v="$(sed -n 's/^snapshot-versions //p' <<< "$text")"
+    if [[ "$n" != "1" || ! "$v" =~ ^[0-9]+([ ,][0-9]+)*$ ]]; then
+        print_warn "The tn-p2p-allow-sync binary's --version needs one 'snapshot-versions' line listing the snapshot versions it reads." >&2
+        return 1
+    fi
+    case ",${v// /,}," in
+        *,1,*) ;;
+        *)
+            print_warn "The tn-p2p-allow-sync binary does not read snapshot version 1, the one nodes serve (it reads ${v})." >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# _tn_p2p_allow_install_from DIR BASE_URL TAG PIN TRIPLE [progress-fn] -- the steps
+# of _tn_p2p_allow_install after the signature, on the verified SHA256SUMS in DIR:
+# it names exactly the tarball, whose line must carry PIN before the tarball is
+# downloaded and checked against that line; the tarball holds the binary,
+# LICENSE-APACHE, LICENSE-MIT and NOTICE and nothing else; the binary answers
+# --version as the build account with TAG's version and the formats these
+# scripts use; then it is installed. rc as _tn_p2p_allow_install; DIR stays for
+# the caller to remove.
+_tn_p2p_allow_install_from() {
+    local stg="$1" base="$2" tag="$3" pin="$4" triple="$5" fn="${6:-}" name tarball why got ver rc=0
+    name="tn-p2p-allow-sync ${tag}"
+    tarball="tn-p2p-allow-sync-${tag}-${triple}.tar.gz"
+    if ! why="$(_tn_release_sums_shape "${stg}/SHA256SUMS" "tn-p2p-allow-sync-${tag}-" "-unknown-linux-musl.tar.gz" \
+        tn-p2p-allow-sync "the tarball")"; then
+        _tn_c4_say warn "Release ${name}: ${why}." "$fn"
+        return 1
+    fi
+    got="$(_tn_release_sum "${stg}/SHA256SUMS" "$tarball")"
+    if [[ -n "$got" && "$got" != "$pin" ]]; then
+        _tn_c4_say warn "Release ${name}: SHA256SUMS gives ${tarball} the sha256 ${got}, but these scripts pin ${pin}. Update the scripts (update-scripts.sh) before installing it." "$fn"
+        return 1
+    fi
+    _tn_release_fetch_asset "$stg" "$base" "$name" "$tarball" "${triple} tarball" 67108864 600 "$fn" || return $?
+    tn_release_extract_binary "${stg}/${tarball}" "${stg}/tn-p2p-allow-sync" tn-p2p-allow-sync || {
+        rc=$?
+        _tn_c4_say warn "Release ${name}: the binary could not be taken out of ${tarball}." "$fn"
+        return $rc
+    }
+    tn_build_user_ensure "$fn" || return $?
+    # stdin closed: an interactive caller's terminal is no input for the probe
+    if ! ver="$(tn_build_version "${stg}/tn-p2p-allow-sync" tn-p2p-allow-sync 2>/dev/null < /dev/null)" || [[ -z "$ver" ]]; then
+        _tn_c4_say warn "The tn-p2p-allow-sync binary of release ${name} did not answer --version (run as ${TN_BUILD_USER})." "$fn"
+        return 1
+    fi
+    _tn_p2p_allow_version_ok "$ver" "${tag#v}" || return 1
+    tn_install_root_binary "${stg}/tn-p2p-allow-sync" "$TN_P2P_ALLOW_BIN" || return $?
+    return 0
+}
+
+# _tn_p2p_allow_install TAG PIN BASE_URL [progress-fn] -- install release TAG of
+# the P2P committee allowlist sync tool as TN_P2P_ALLOW_BIN, root 0755, from its
+# signed release at BASE_URL (default <TN_P2P_ALLOW_BASE_URL>/TAG), provided its
+# tarball has sha256 PIN. Each step runs only once the one before it passed: TAG
+# is a release tag and PIN is set; SHA256SUMS and its signature go into a new
+# root-only staging directory and are checked like a node release's
+# (_tn_release_open: the keys of lib/release-keys, the same gpgv status policy);
+# then _tn_p2p_allow_install_from (the one tarball, its sha256 against its line
+# and PIN, its member list, the binary's --version run as the build account,
+# tn_install_root_binary). The staging directory is removed on return, and a
+# failure at any step leaves an installed binary as it was. rc 0 installed; 1
+# refused (a bad tag, no pin, an architecture without a release, a bad
+# signature, a sums, pin, member or --version mismatch); 2 network or I/O.
+_tn_p2p_allow_install() {
+    local tag="${1:-}" pin="${2:-}" base="${3:-}" fn="${4:-}" name triple stg rc=0
+    name="tn-p2p-allow-sync ${tag}"
+    if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[0-9]+)?$ ]]; then
+        _tn_c4_say warn "'${tag}' is not a tn-p2p-allow-sync release tag (vX.Y.Z or vX.Y.Z-rcN); nothing was installed." "$fn"
+        return 1
+    fi
+    if [[ -z "$pin" ]]; then
+        _tn_c4_say warn "These scripts pin no sha256 for the ${name} tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded." "$fn"
+        return 1
+    fi
+    if [[ ! "$pin" =~ ^[0-9a-f]{64}$ ]]; then
+        _tn_c4_say warn "The sha256 these scripts pin for the ${name} tarball is not 64 lowercase hex digits; nothing was downloaded." "$fn"
+        return 1
+    fi
+    if ! triple="$(_tn_p2p_allow_triple)"; then
+        _tn_c4_say warn "No tn-p2p-allow-sync release is published for this architecture ($(uname -m 2>/dev/null)); there is one for x86_64 only." "$fn"
+        return 1
+    fi
+    [[ -n "$base" ]] || base="${TN_P2P_ALLOW_BASE_URL}/${tag}"
+    base="${base%/}"
+    _tn_release_tools_ok "$fn" || return 2
+    stg="$(_tn_release_open "$name" "$base" "$fn")" || return $?
+    _tn_p2p_allow_install_from "$stg" "$base" "$tag" "$pin" "$triple" "$fn" || rc=$?
+    _tn_release_cleanup "$stg"
+    [[ $rc -eq 0 ]] || return $rc
+    _tn_c4_say info "Installed ${name} as ${TN_P2P_ALLOW_BIN#"${TN_ROOT_PREFIX:-}"}." "$fn"
+    return 0
+}
+
+# tn_p2p_allow_install [progress-fn] -- install the release these scripts pin,
+# TN_P2P_ALLOW_VERSION with tarball sha256 TN_P2P_ALLOW_TARBALL_SHA256, from
+# GitHub (_tn_p2p_allow_install). rc as _tn_p2p_allow_install.
+tn_p2p_allow_install() {
+    _tn_p2p_allow_install "$TN_P2P_ALLOW_VERSION" "$TN_P2P_ALLOW_TARBALL_SHA256" "" "${1:-}"
 }
 
 # tn_staged_cleanup PATH -- remove the staging directory that holds PATH (a path

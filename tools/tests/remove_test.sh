@@ -51,22 +51,27 @@ if [ "$tool" = systemctl ] && [ "\${1:-}" = is-active ]; then exit 3; fi
 exit 0
 STUB
 done
-# nft: table inet tn_p2p is the file NFT_TABLE_FILE (no file: no table), so no
-# real nft ever runs here. NFT_FAIL=1 makes `-f` fail.
+# nft: table inet tn_p2p is the file NFT_TABLE_FILE and table inet tn_p2p_allow
+# the file NFT_ALLOW_FILE (no file: no table), so no real nft ever runs here.
+# NFT_FAIL=1 makes `-f` fail, NFT_LIST_FAIL=1 `list tables`.
 NFT_TABLE_FILE="$T/nft.table"
-export NFT_TABLE_FILE
+NFT_ALLOW_FILE="$T/nft.allow"
+export NFT_TABLE_FILE NFT_ALLOW_FILE
 cat > "$T/bin/nft" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "nft $*" >> "$CALLS"
 case "$*" in
     "list tables")
+        [ -z "${NFT_LIST_FAIL:-}" ] || exit 1
         if [ -f "$NFT_TABLE_FILE" ]; then echo "table inet tn_p2p"; fi
+        if [ -f "$NFT_ALLOW_FILE" ]; then echo "table inet tn_p2p_allow"; fi
         exit 0 ;;
     "-f -")
         prog="$(cat)"
         printf '%s\n' "$prog" | sed 's/^/nft| /' >> "$CALLS"
         [ -z "${NFT_FAIL:-}" ] || exit 1
         if printf '%s\n' "$prog" | grep -qx 'delete table inet tn_p2p'; then rm -f "$NFT_TABLE_FILE"; fi
+        if printf '%s\n' "$prog" | grep -qx 'delete table inet tn_p2p_allow'; then rm -f "$NFT_ALLOW_FILE"; fi
         exit 0 ;;
 esac
 exit 0
@@ -827,6 +832,164 @@ gone "add-on teardown: the token file" "$AL/ingest-token"
 gone "add-on teardown: the Alloy config dir" "$AL"
 gone "add-on teardown: the Alloy unit" "$SD/telcoin-alloy.service"
 check_lacks "add-on teardown: the token is not printed" "obs-token-0123456789abcdef" "$(cat "$T/out")"
+
+# --- the P2P committee allowlist goes with the last node: units, table, binary, state
+AL_DIR="$R/var/lib/telcoin-p2p-allow"
+AL_BIN="$LX/tn-p2p-allow-sync"
+AL_UNITS="telcoin-p2p-allow.service telcoin-p2p-allow-sync.service telcoin-p2p-allow-sync.timer"
+# A firewall-setup.sh beside the sourced copy and the tool binary log a line if
+# they ever run: the teardown runs neither.
+printf '#!/bin/sh\necho "FWSETUP-RAN $*" >> "$CALLS"\n' > "$T/h/firewall-setup.sh"
+# p2p_allow_fixture -- what firewall-setup.sh --p2p-committee on leaves: the three
+# units, the state dir, the tool binary and the table.
+p2p_allow_fixture() {
+    local u
+    mkdir -p "$SD" "$LX" "$AL_DIR"
+    for u in $AL_UNITS; do
+        printf '[Unit]\nDescription=allow\n' > "$SD/$u"
+    done
+    printf 'RPC_PORT=8545\n' > "$AL_DIR/config"
+    printf 'table inet tn_p2p_allow {\n}\n' > "$AL_DIR/current.nft"
+    : > "$AL_DIR/lock"
+    printf '#!/bin/sh\necho "TOOL-RAN $*" >> "$CALLS"\n' > "$AL_BIN"
+    chmod 0755 "$AL_BIN"
+    printf 'table inet tn_p2p_allow {\n}\n' > "$NFT_ALLOW_FILE"
+    : > "$CALLS"
+}
+# allow_said -- the teardown's own lines from the last output, in order.
+allow_said() {
+    awk '/p2p-allow|tn_p2p_allow/ { i = index($0, "Removed /"); if (!i) i = index($0, "Deleted the P2P"); if (i) print substr($0, i) }' "$T/out"
+}
+mkfixture; p2p_allow_fixture
+remove_node_host_files > "$T/out" 2>&1
+for u in $AL_UNITS; do
+    gone "p2p allow unit $u" "$SD/$u"
+done
+gone "p2p allow state dir" "$AL_DIR"
+gone "p2p allow binary" "$AL_BIN"
+gone "p2p allow: libexec dir removed once empty" "$LX"
+check "p2p allow: table deleted" "no" "$(exists "$NFT_ALLOW_FILE")"
+check "p2p allow: units stopped, the timer first, the sync service only stopped" "systemctl disable --now telcoin-p2p-allow-sync.timer
+systemctl stop telcoin-p2p-allow-sync.service
+systemctl disable --now telcoin-p2p-allow.service" "$(grep 'telcoin-p2p-allow' "$CALLS")"
+check "p2p allow: daemon-reload after the units" "systemctl daemon-reload" \
+    "$(awk 'p { print; exit } $0 == "systemctl disable --now telcoin-p2p-allow.service" { p = 1 }' "$CALLS")"
+check "p2p allow: one delete transaction" "nft| table inet tn_p2p_allow
+nft| delete table inet tn_p2p_allow" "$(grep '^nft| ' "$CALLS")"
+check "p2p allow: said, in order, the state dir last" "Removed /etc/systemd/system/telcoin-p2p-allow-sync.timer
+Removed /etc/systemd/system/telcoin-p2p-allow-sync.service
+Removed /etc/systemd/system/telcoin-p2p-allow.service
+Deleted the P2P committee allowlist (nftables table inet tn_p2p_allow)
+Removed /usr/local/libexec/telcoin/tn-p2p-allow-sync
+Removed /var/lib/telcoin-p2p-allow" "$(allow_said)"
+check_lacks "p2p allow: the tool never runs" "TOOL-RAN" "$(calls)"
+check_lacks "p2p allow: firewall-setup.sh never runs" "FWSETUP-RAN" "$(calls)"
+kept "p2p allow: other unit" "$SD/telcoin.service"
+# Nothing of it here: no unit call and no delete transaction for it.
+mkfixture; : > "$CALLS"; rm -f "$NFT_ALLOW_FILE"
+remove_node_host_files > /dev/null 2>&1
+check_lacks "p2p allow absent: no unit call" "telcoin-p2p-allow" "$(calls)"
+check_lacks "p2p allow absent: no delete transaction" "tn_p2p_allow" "$(calls)"
+# nft refuses the delete: a warning, the rest goes, and the state dir stays for a later run.
+mkfixture; p2p_allow_fixture
+NFT_FAIL=1 remove_node_host_files > "$T/out" 2>&1
+check_has "p2p allow: refused delete warned" "yes" \
+    "$(grep -qF 'Could not delete the nftables table inet tn_p2p_allow, so /var/lib/telcoin-p2p-allow stays for a later removal to try again; remove the table with: sudo nft delete table inet tn_p2p_allow' "$T/out" && echo yes)"
+kept "p2p allow, refused delete: state dir" "$AL_DIR"
+gone "p2p allow, refused delete: timer still removed" "$SD/telcoin-p2p-allow-sync.timer"
+gone "p2p allow, refused delete: binary still removed" "$AL_BIN"
+gone "p2p allow, refused delete: node.env still removed" "$ETC/node.env"
+# A listing that fails is not read as "no table": the delete is tried.
+mkfixture; p2p_allow_fixture
+NFT_LIST_FAIL=1 remove_node_host_files > "$T/out" 2>&1
+check "p2p allow, listing failed: table deleted" "no" "$(exists "$NFT_ALLOW_FILE")"
+gone "p2p allow, listing failed: state dir" "$AL_DIR"
+# ... but only where the allowlist left a unit, the state dir or the binary: with
+# none of them the delete would print a result that says nothing.
+mkfixture; : > "$CALLS"; rm -f "$NFT_ALLOW_FILE"
+NFT_LIST_FAIL=1 remove_node_host_files > "$T/out" 2>&1
+check_lacks "p2p allow absent, listing failed: no delete transaction" "tn_p2p_allow" "$(calls)"
+check_lacks "p2p allow absent, listing failed: nothing said of the table" "tn_p2p_allow" "$(cat "$T/out")"
+mkfixture; : > "$CALLS"; rm -f "$NFT_ALLOW_FILE"
+NFT_LIST_FAIL=1 NFT_FAIL=1 remove_node_host_files > "$T/out" 2>&1
+check_lacks "p2p allow absent, listing and delete failing: no false warning" "Could not delete the nftables table inet tn_p2p_allow" "$(cat "$T/out")"
+for part in "$AL_DIR" "$AL_BIN"; do
+    mkfixture; p2p_allow_fixture
+    for u in $AL_UNITS; do rm -f "$SD/$u"; done
+    [[ "$part" == "$AL_DIR" ]] && rm -f "$AL_BIN"
+    [[ "$part" == "$AL_BIN" ]] && rm -rf "$AL_DIR"
+    NFT_LIST_FAIL=1 remove_node_host_files > "$T/out" 2>&1
+    check "p2p allow, listing failed, only ${part#"$R"} left: the delete is tried" "nft| table inet tn_p2p_allow
+nft| delete table inet tn_p2p_allow|no" "$(grep '^nft| ' "$CALLS")|$(exists "$NFT_ALLOW_FILE")"
+done
+# A symlinked state dir is left, its target untouched, with a warning.
+mkfixture; p2p_allow_fixture
+rm -rf "$AL_DIR"; mkdir -p "$OUT/allow-target"; printf 'x\n' > "$OUT/allow-target/config"
+ln -s "$OUT/allow-target" "$AL_DIR"
+remove_node_host_files > "$T/out" 2>&1
+kept "p2p allow, symlinked state dir: the link" "$AL_DIR"
+kept "p2p allow, symlinked state dir: its target's file" "$OUT/allow-target/config"
+check_has "p2p allow, symlinked state dir: warned" "yes" \
+    "$(grep -qF '/var/lib/telcoin-p2p-allow is a symlink: it is left in place.' "$T/out" && echo yes)"
+# Nothing is removed through a symlinked libexec dir.
+mkfixture; p2p_allow_fixture
+mkdir -p "$OUT/lx"; mv "$AL_BIN" "$OUT/lx/"; rm -rf "$LX"; ln -s "$OUT/lx" "$LX"
+remove_node_host_files > "$T/out" 2>&1
+kept "p2p allow, symlinked libexec: the binary behind it" "$OUT/lx/tn-p2p-allow-sync"
+kept "p2p allow, symlinked libexec: the link" "$LX"
+gone "p2p allow, symlinked libexec: the state dir still goes" "$AL_DIR"
+# Another node remains: the allowlist stays (its P2P ports are still served).
+mkfixture; p2p_allow_fixture
+INSTALLED_UNITS=(telcoin telcoin-validator)
+remove_shared_components > /dev/null 2>&1
+kept "p2p allow while another node remains: timer" "$SD/telcoin-p2p-allow-sync.timer"
+kept "p2p allow while another node remains: state dir" "$AL_DIR"
+kept "p2p allow while another node remains: binary" "$AL_BIN"
+check "p2p allow while another node remains: table" "yes" "$(exists "$NFT_ALLOW_FILE")"
+INSTALLED_UNITS=()
+# The leftover path: only the timer unit and the table are left.
+rm -rf "$R"; mkdir -p "$SD" "$R/run/telcoin"
+printf '[Unit]\nDescription=allow\n' > "$SD/telcoin-p2p-allow-sync.timer"
+printf 'table inet tn_p2p_allow {\n}\n' > "$NFT_ALLOW_FILE"
+: > "$CALLS"
+check_rc "leftovers, only the allowlist timer: found" 0 "$(rm_leftovers_present; echo $?)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "leftovers, only the allowlist timer: rc 0" "rc=0" "$(cat "$T/out")"
+check_has "leftovers, only the allowlist timer: listed" "yes" \
+    "$(grep -qF '  /etc/systemd/system/telcoin-p2p-allow-sync.timer (the P2P committee allowlist, its units and its nftables table)' "$T/out" && echo yes)"
+gone "leftovers, only the allowlist timer: timer" "$SD/telcoin-p2p-allow-sync.timer"
+check "leftovers, only the allowlist timer: table deleted" "no" "$(exists "$NFT_ALLOW_FILE")"
+# Only the state dir, kept by a refused delete: found, and the next run removes it.
+rm -rf "$R"; mkdir -p "$R/run/telcoin"
+p2p_allow_fixture
+NFT_FAIL=1 remove_node_host_files > /dev/null 2>&1
+check "leftovers, after a refused delete: the state dir stays, units and binary gone" "yes no no" \
+    "$(exists "$AL_DIR") $(exists "$SD/telcoin-p2p-allow-sync.timer") $(exists "$AL_BIN")"
+check_rc "leftovers, after a refused delete: found" 0 "$(rm_leftovers_present; echo $?)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "leftovers, only the state dir: rc 0" "rc=0" "$(cat "$T/out")"
+check_has "leftovers, only the state dir: listed" "yes" \
+    "$(grep -qF "  /var/lib/telcoin-p2p-allow (the P2P committee allowlist's state)" "$T/out" && echo yes)"
+gone "leftovers, only the state dir: state dir" "$AL_DIR"
+check "leftovers, only the state dir: table deleted on the second try" "no" "$(exists "$NFT_ALLOW_FILE")"
+# A symlinked state dir alone is not a leftover: the removal would leave it.
+rm -rf "$R" "$OUT"; mkdir -p "$R/var/lib" "$R/run/telcoin" "$OUT/allow-target"
+ln -s "$OUT/allow-target" "$AL_DIR"
+check_rc "leftovers, only a symlinked state dir: not found" 1 "$(rm_leftovers_present; echo $?)"
+# The JSON full removal takes it too.
+mkfixture; p2p_allow_fixture
+( set -e; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "p2p allow: json keys rc 0" 0 "$rc"
+gone "p2p allow: json timer" "$SD/telcoin-p2p-allow-sync.timer"
+gone "p2p allow: json state dir" "$AL_DIR"
+gone "p2p allow: json binary" "$AL_BIN"
+check "p2p allow: json table deleted" "no" "$(exists "$NFT_ALLOW_FILE")"
+rm -f "$NFT_ALLOW_FILE" "$T/h/firewall-setup.sh"
+unset -f p2p_allow_fixture allow_said
 
 # FW
 # --- the P2P new-flow limit goes with the last node: unit, ruleset, table -------

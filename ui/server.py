@@ -4155,9 +4155,9 @@ def p2p_sources_kept():
 @app.route("/api/firewall")
 def api_firewall():
     """firewall-setup.sh --json --status as the engine prints it (with
-    p2p_new_flow_limit when the engine reports it), plus `p2p_sources`: the P2P
-    source list the node keeps, from .node-meta (p2p_sources_kept), and
-    `p2p_sources_note` when that list cannot be used."""
+    p2p_new_flow_limit and p2p_committee when the engine reports them), plus
+    `p2p_sources`: the P2P source list the node keeps, from .node-meta
+    (p2p_sources_kept), and `p2p_sources_note` when that list cannot be used."""
     rc, out, err = run(["sudo", "-n", HELPER, "firewall-status"], timeout=20)
     if rc == 0 and out:
         try:

@@ -532,6 +532,56 @@ printf 'not a key\n' > "$INST/lib/release-keys/key1.asc"
 refused "installed key file that is not a key"
 says "installed key file that is not a key" "cannot be read, so no release can be verified; nothing was changed."
 
+# --- the P2P committee allowlist: the --p2p-committee sync hint ------------------------------
+# Printed (never run) when firewall-setup.sh or lib/common.sh changed and the
+# allowlist timer unit exists under TN_ROOT_PREFIX; otherwise not printed.
+FWROOT="$T/fwroot"
+mkdir -p "$FWROOT/etc/systemd/system"
+FWA="$SRC/fwa"; cp -R "$R2" "$FWA"
+printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION="1.0.0"\n' > "$FWA/firewall-setup.sh"
+write_manifest "$FWA" scripts-v1.20.0 120 1.0.0; sign "$FWA" key1; sidecars "$FWA"
+FWB="$SRC/fwb"; cp -R "$FWA" "$FWB"
+printf '#!/usr/bin/env bash\nreadonly SCRIPT_VERSION="1.1.0"\n' > "$FWB/firewall-setup.sh"
+write_manifest "$FWB" scripts-v1.21.0 121 1.0.0; sign "$FWB" key1; sidecars "$FWB"
+FWC="$SRC/fwc"; cp -R "$FWA" "$FWC"
+printf '#!/usr/bin/env bash\nreadonly COMMON_VERSION="1.1.0"\n' > "$FWC/lib/common.sh"
+write_manifest "$FWC" scripts-v1.22.0 122 1.0.0; sign "$FWC" key1; sidecars "$FWC"
+FW_HINT="  ->  The firewall script or its library changed. Bring the P2P committee allowlist up to date:"
+# fw_hint_count -- how often the last run printed the two hint lines.
+fw_hint_count() {
+    printf '%s %s\n' "$(plain "$OUT" | grep -cxF -- "$FW_HINT")" \
+        "$(plain "$OUT" | grep -cE '^  ->    sudo bash .*/firewall-setup\.sh --p2p-committee sync$')"
+}
+export TN_ROOT_PREFIX="$FWROOT"
+: > "$FWROOT/etc/systemd/system/telcoin-p2p-allow-sync.timer"
+rm -f "$T/sudo.log"
+install_release "$FWA"
+publish "$FWB" scripts-v1.21.0
+run_updater y
+check_rc "allowlist hint, firewall-setup.sh changed, timer present: exits 0" 0 "$RC"
+check "allowlist hint, firewall-setup.sh changed, timer present: installed" "$(_h "$FWB/firewall-setup.sh")" "$(_h "$INST/firewall-setup.sh")"
+check "allowlist hint, firewall-setup.sh changed, timer present: printed once" "1 1" "$(fw_hint_count)"
+check_has "allowlist hint: names this tree" "  ->    sudo bash $(cd "$INST" && pwd)/firewall-setup.sh --p2p-committee sync" "$(plain "$OUT")"
+check "allowlist hint: sudo never run" "" "$(cat "$T/sudo.log" 2>/dev/null)"
+install_release "$FWA"
+publish "$FWC" scripts-v1.22.0
+run_updater y
+check_rc "allowlist hint, library changed, timer present: exits 0" 0 "$RC"
+check "allowlist hint, library changed, timer present: printed once" "1 1" "$(fw_hint_count)"
+install_release "$R1"
+publish "$R2" scripts-v1.1.0
+run_updater y
+check_rc "allowlist hint, neither changed, timer present: exits 0" 0 "$RC"
+check "allowlist hint, neither changed, timer present: not printed" "0 0" "$(fw_hint_count)"
+rm -f "$FWROOT/etc/systemd/system/telcoin-p2p-allow-sync.timer"
+install_release "$FWA"
+publish "$FWB" scripts-v1.21.0
+run_updater y
+check_rc "allowlist hint, firewall-setup.sh changed, no timer: exits 0" 0 "$RC"
+check "allowlist hint, firewall-setup.sh changed, no timer: not printed" "0 0" "$(fw_hint_count)"
+unset TN_ROOT_PREFIX
+unset -f fw_hint_count
+
 # --- REL: release date and expiry (date=, expires=) and --check ------------------------------
 # A date shim on PATH answers `date -u +%Y-%m-%d` with TODAY when it is set, so
 # "today" is fixed for the expiry checks; every other call runs the real date.

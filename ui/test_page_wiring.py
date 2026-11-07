@@ -11,11 +11,23 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.join(HERE, "static", "index.html")
+FIREWALL_SETUP = os.path.join(os.path.dirname(HERE), "firewall-setup.sh")
 
 
 def page():
     with open(INDEX, encoding="utf-8") as f:
         return f.read()
+
+
+def engine_function(name):
+    """The source of the shell function `name() {` in firewall-setup.sh, up to
+    its closing brace at the start of a line."""
+    with open(FIREWALL_SETUP, encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"^" + re.escape(name) + r"\(\) \{\n.*?^\}\n", text, re.S | re.M)
+    if not m:
+        raise AssertionError("function %s not found in firewall-setup.sh" % name)
+    return m.group(0)
 
 
 def function_body(name):
@@ -95,11 +107,46 @@ class FirewallEnableTest(unittest.TestCase):
                       '(an IPv4 address or an IPv6 /64); answered flows are not limited."', card)
         self.assertIn("l.persistent===false ? ' (not restored at boot)'", limit)
         text = page()
-        for reason, words in (("p2p-list", "a P2P source list is set"),
+        for reason, words in (("committee", "the P2P committee allowlist replaces it"),
+                              ("p2p-list", "a P2P source list is set"),
                               ("nft-missing", "nftables is not installed"),
                               ("not-applied", "not applied yet; enable the firewall"),
                               ("unreadable", "state could not be read")):
             self.assertIn("'%s': '%s'," % (reason, words), text)
+
+    def test_the_card_shows_the_p2p_committee_allowlist(self):
+        card = function_body("loadFirewall")
+        self.assertIn("const committeeText = fwCommitteeText(f.p2p_committee);", card)
+        self.assertIn('P2P committee allowlist</span><span class="v">${esc(committeeText)}</span>', card)
+        self.assertIn('title="Turned on and off on the server with firewall-setup.sh --p2p-committee: '
+                      'the P2P ports take only the current committee, the bootstrap floor and the P2P '
+                      'source list, refreshed every 5 minutes."', card)
+        # the row follows the new-flow limit row and comes before the port rows.
+        self.assertLess(card.index("P2P new-flow limit</span>"), card.index("P2P committee allowlist</span>"))
+        self.assertLess(card.index("P2P committee allowlist</span>"), card.index("${portRows}"))
+        body = function_body("fwCommitteeText")
+        self.assertIn("if(c.enabled===false) return 'off';", body)
+        self.assertIn("if(r) return FW_COMMITTEE_REASONS[r] || 'unknown: '+r;", body)
+        self.assertIn("if(c.enabled!==true) return 'unknown';", body)
+        self.assertIn("'on, but its table is not loaded, so P2P is open to every source'", body)
+        self.assertIn("'stale'+(why ? ': '+why : '')", body)
+        self.assertIn("/^(rpc-method-missing|snapshot-version-)/.test(why)", body)
+        self.assertIn("if(c.persistent===false) parts.push('not restored at boot');", body)
+        self.assertIn("if(c.timer===false) parts.push('the sync timer is not running');", body)
+        kept = function_body("fwP2pSourcesText")
+        self.assertIn("const committee = !!(c && typeof c==='object' && c.enabled===true);", kept)
+        self.assertIn("if(committee) return 'committee allowlist' + (items.length ? ', plus '+items.join(', ') : '');",
+                      kept)
+        self.assertIn("if(committee) return 'committee allowlist' + (note ? ' ('+note+')' : '');", kept)
+
+    def test_the_page_words_every_committee_reason_the_engine_sends(self):
+        engine = set(re.findall(r'reason="([a-z-]+)"', engine_function("json_fw_committee")))
+        self.assertEqual(engine, {"off", "unreadable", "tool-missing", "tool-error"})
+        m = re.search(r"^const FW_COMMITTEE_REASONS = \{\n(.*?)^\};", page(), re.S | re.M)
+        self.assertIsNotNone(m, "FW_COMMITTEE_REASONS not found in index.html")
+        self.assertEqual(set(re.findall(r"^  '([a-z-]+)': '", m.group(1), re.M)), engine)
+        self.assertIn("'tool-missing': 'on, but tn-p2p-allow-sync is missing; run firewall-setup.sh "
+                      "--p2p-committee sync on the server',", m.group(1))
 
 
 class StatusPageLinkTest(unittest.TestCase):
