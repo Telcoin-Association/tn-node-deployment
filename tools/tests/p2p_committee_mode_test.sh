@@ -41,7 +41,10 @@
 # kill switch: user.rules and the limit files byte-identical to before on, with
 # and without a static list, the binary, units and state dir gone, no tool
 # call, under flock -w 30), on refusals that change nothing (no snapshot, no
-# node, ufw inactive, no nft, no flock, an older library, a refused install), a
+# node, ufw inactive, no /usr/sbin/nft with an nft on PATH, no nft on PATH, no
+# flock, an older library, a refused install), the reason texts (the
+# rpc-method-missing line byte for byte, the four reasons the report warns of at
+# once), a
 # missing binary installed, a failed step undone, a busy lock on off, an
 # in-flight on or off finished by fw_allow_on_exit, the dispatch with its
 # refusals and its exit codes, a TERM in flight, --enable and --reset with
@@ -136,7 +139,9 @@ D="$FW_ALLOW_DIR"
 BOOTU="$R/etc/systemd/system/telcoin-p2p-allow.service"
 SYNCU="$R/etc/systemd/system/telcoin-p2p-allow-sync.service"
 TIMERU="$R/etc/systemd/system/telcoin-p2p-allow-sync.timer"
-NFTBIN="$T/bin/nft"
+# the nft the tool runs and the boot unit names (FW_ALLOW_NFT); the fixture keeps
+# a copy of the nft stub there, under $R, and the PATH nft stays $T/bin/nft.
+NFTBIN="/usr/sbin/nft"
 # what a successful tool sync loads (the program shape of the tool's render).
 ALLOW_PROG='table inet tn_p2p_allow {
     set allow_v4 { type ipv4_addr; }
@@ -183,6 +188,7 @@ fixture() {
     printf 'DEFAULT_INPUT_POLICY="DROP"\n' > "$R/etc/default/ufw"
     printf '%s\n' "OWNERSHIP_LAYOUT=2" "NETWORK=mainnet" "RPC_PORT=8645" "$@" > "$META"
     cp "$T/bin/tn-p2p-allow-sync" "$TN_P2P_ALLOW_BIN"
+    mkdir -p "$R/usr/sbin" && cp -f "$T/bin/nft" "${R}${NFTBIN}" && chmod 0755 "${R}${NFTBIN}"
     : > "$UFW_LOG"; : > "$NFT_LOG"; : > "$SYSTEMCTL_LOG"; : > "$WRITES"; : > "$INSTALLS"; : > "$FLOCK_LOG"; : > "$LOCK_REC"
     rm -f "$REC.log" "$FLOCK_HELD"
     FW_P2P_LOADED=false; FW_P2P_SRCS=(); FW_P2P_FROM=""; FW_COMMITTEE_ACTIVE=false; FW_ALLOW_INFLIGHT=""; FW_ALLOW_BIN_CHANGED=""
@@ -285,8 +291,8 @@ ConditionPathExists=/var/lib/telcoin-p2p-allow/current.nft
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=${NFTBIN} -f /var/lib/telcoin-p2p-allow/current.nft
-ExecStop=-${NFTBIN} delete table inet tn_p2p_allow
+ExecStart=/usr/sbin/nft -f /var/lib/telcoin-p2p-allow/current.nft
+ExecStop=-/usr/sbin/nft delete table inet tn_p2p_allow
 CapabilityBoundingSet=CAP_NET_ADMIN
 RestrictAddressFamilies=AF_NETLINK AF_UNIX
 IPAddressDeny=any
@@ -373,8 +379,9 @@ Unit=telcoin-p2p-allow-sync.service
 WantedBy=timers.target" "$(cat "$TIMERU")"
 check_has "boot: ConditionPathExists" "ConditionPathExists=/var/lib/telcoin-p2p-allow/current.nft" "$(cat "$BOOTU")"
 check_has "boot: Before node" "Before=telcoin.service" "$(cat "$BOOTU")"
-check_has "boot: ExecStart" "ExecStart=${NFTBIN} -f /var/lib/telcoin-p2p-allow/current.nft" "$(cat "$BOOTU")"
-check_has "boot: ExecStop" "ExecStop=-${NFTBIN} delete table inet tn_p2p_allow" "$(cat "$BOOTU")"
+check_has "boot: ExecStart" "ExecStart=/usr/sbin/nft -f /var/lib/telcoin-p2p-allow/current.nft" "$(cat "$BOOTU")"
+check_has "boot: ExecStop" "ExecStop=-/usr/sbin/nft delete table inet tn_p2p_allow" "$(cat "$BOOTU")"
+check_lacks "boot: not the nft on PATH" "$(command -v nft)" "$(cat "$BOOTU")"
 check_lacks "boot: no ProtectKernelModules" "ProtectKernelModules" "$(cat "$BOOTU")"
 check_has "boot: WantedBy" "WantedBy=multi-user.target" "$(cat "$BOOTU")"
 check_has "sync: After" "After=network-online.target telcoin.service telcoin-p2p-allow.service" "$(cat "$SYNCU")"
@@ -423,6 +430,13 @@ TN_P2P_STUB_RC_SYNC=4 run fw_committee_sync
 check_rc "sync: busy rc 3" 3 "$RC"
 TN_P2P_STUB_RC_SYNC=2 run fw_committee_sync
 check_rc "sync: error rc 2" 2 "$RC"
+# the nft the tool runs gone: sync writes no unit, runs no sync, and names the path
+rm -f "$REC.log"; rm -f "${R}${NFTBIN}"
+run fw_committee_sync
+check_rc "sync: no /usr/sbin/nft rc 2" 2 "$RC"
+check_in "sync: no /usr/sbin/nft names it" "/usr/sbin/nft is missing or not executable (the path tn-p2p-allow-sync runs), so the P2P committee allowlist units were not written" "$OUT"
+check_lacks "sync: no /usr/sbin/nft, no sync run" " sync " " $(reclog) "
+mkdir -p "$R/usr/sbin" && cp -f "$T/bin/nft" "${R}${NFTBIN}" && chmod 0755 "${R}${NFTBIN}"
 # on while on is a resync; a stale one is still rc 0
 rm -f "$REC.log"
 TN_P2P_STUB_RC_SYNC=3 run fw_committee_on
@@ -438,7 +452,23 @@ check_in "report: counters" "5 packets accepted from listed sources, 9 dropped" 
 check_in "report: age" "last good one 31s ago" "$OUT"
 TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=false\nSTALE=true\nSTALE_SINCE=1700000000\nSTALE_REASON=rpc-method-missing')" run fw_committee_report
 check_in "report: not loaded is an error" "is not loaded, so P2P is open to every source" "$OUT"
-check_in "report: rpc-method-missing at once" "lacks tn_admissionSnapshot" "$OUT"
+check_in "report: rpc-method-missing at once" "P2P committee allowlist: this node release lacks tn_admissionSnapshot, or tn is not in its --http.api; update the node or add tn to --http.api; the last-good set stays loaded" "$OUT"
+check "reason text: rpc-method-missing byte for byte" \
+    "this node release lacks tn_admissionSnapshot, or tn is not in its --http.api; update the node or add tn to --http.api" \
+    "$(fw_allow_reason_text rpc-method-missing)"
+# the four reasons check-node reports at once warn here at once too, before the
+# tool reports STALE=true; any other reason waits for it.
+TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=false\nSTALE_SINCE=1700000000\nSTALE_REASON=epoch-regressed')" run fw_committee_report
+check_in "report: epoch-regressed at once" "P2P committee allowlist: the node reports an epoch below the one the allowlist was built from (epoch-regressed); it clears by itself once the node's tracked epoch is back at or above the applied one (after a startup record-sync replay); if it persists past 2 epochs, recover with --p2p-committee off, then --p2p-committee on; the last-good set stays loaded" "$OUT"
+check_lacks "report: epoch-regressed is not reported as stale" "stale since" "$OUT"
+TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=false\nSTALE_SINCE=1700000000\nSTALE_REASON=state-invalid')" run fw_committee_report
+check_in "report: state-invalid at once" "P2P committee allowlist: tn-p2p-allow-sync cannot read its own state.json (state-invalid), so every sync fails; recover with --p2p-committee off, then --p2p-committee on; the last-good set stays loaded" "$OUT"
+TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=false\nSTALE_SINCE=1700000000\nSTALE_REASON=snapshot-version-2')" run fw_committee_report
+check_in "report: snapshot-version-* at once" "P2P committee allowlist: the node serves a snapshot version this tool does not read (snapshot-version-2)" "$OUT"
+TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=false\nSTALE_SINCE=1700000000\nSTALE_REASON=rpc-unreachable')" run fw_committee_report
+check_lacks "report: another reason waits for STALE=true" "rpc-unreachable" "$OUT"
+TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=true\nSTALE_SINCE=1700000000\nSTALE_REASON=rpc-unreachable')" run fw_committee_report
+check_in "report: another reason once STALE=true" "stale since 1700000000: the node RPC does not answer on 127.0.0.1 (rpc-unreachable)" "$OUT"
 
 # --- off: kill switch ------------------------------------------------------------------
 simulate_apply
@@ -497,7 +527,7 @@ fixture
 before="$(snap)"
 TN_P2P_STUB_RC_SYNC=1 TN_P2P_STUB_OUT_SYNC="result=stale reason=rpc-method-missing epoch= v4=0 v6=0 static=0 floor=1 keys=0 dns_skipped=0 unparsed=0" run fw_committee_on
 check_rc "on refused (rpc-method-missing): rc 1" 1 "$RC"
-check_in "on refused: the message" "this node release lacks tn_admissionSnapshot" "$OUT"
+check_in "on refused: the message" "P2P committee mode was not turned on: this node release lacks tn_admissionSnapshot, or tn is not in its --http.api; update the node or add tn to --http.api. Nothing was changed." "$OUT"
 check "on refused: state dir removed" "no" "$([[ -e "$D" ]] && echo yes || echo no)"
 check "on refused: no unit" "no" "$([[ -e "$BOOTU" || -e "$SYNCU" || -e "$TIMERU" ]] && echo yes || echo no)"
 check "on refused: no ufw call" "" "$(grep -v '^status' "$UFW_LOG")"
@@ -546,10 +576,23 @@ if command -v nft > /dev/null 2>&1; then
     skip "on: no nft rc 1" "an nft outside the fixture is on PATH ($(command -v nft))"
 else
     run fw_committee_on
-    check_rc "on: no nft rc 1" 1 "$RC"
-    check_in "on: no nft says why" "nftables (nft) is not installed" "$OUT"
+    check_rc "on: no nft on PATH rc 1" 1 "$RC"
+    check_in "on: no nft on PATH says why" "nft is not on PATH (not found), and firewall-setup.sh runs it from there" "$OUT"
 fi
 mv "$T/nft.off" "$T/bin/nft"; hash -r
+# the nft on PATH is there, the one the tool runs is not: on refuses and names it
+rm -f "${R}${NFTBIN}"
+run fw_committee_on
+check_rc "on: no /usr/sbin/nft rc 1" 1 "$RC"
+check_in "on: no /usr/sbin/nft says why" "The P2P committee allowlist needs /usr/sbin/nft (the path tn-p2p-allow-sync runs); install the nftables package (sudo apt-get install nftables) and run this again. Nothing was changed." "$OUT"
+check "on: no /usr/sbin/nft, no tool call" "" "$(reclog)"
+check "on: no /usr/sbin/nft, no state dir" "no" "$([[ -e "$D" ]] && echo yes || echo no)"
+# not executable counts as missing
+printf '#!/bin/sh\n' > "${R}${NFTBIN}"; chmod 0644 "${R}${NFTBIN}"
+run fw_committee_on
+check_rc "on: /usr/sbin/nft not executable rc 1" 1 "$RC"
+check_in "on: /usr/sbin/nft not executable says why" "needs /usr/sbin/nft (the path tn-p2p-allow-sync runs)" "$OUT"
+mkdir -p "$R/usr/sbin" && cp -f "$T/bin/nft" "${R}${NFTBIN}" && chmod 0755 "${R}${NFTBIN}"
 # no flock: the host's own flock is hidden behind a directory that links every
 # other command of the fixture PATH.
 mkdir -p "$T/pathx"
