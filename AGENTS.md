@@ -307,6 +307,7 @@ Rules for any code that touches it:
 - `off` never runs the binary, so it works with the binary missing or broken and with an older library; it holds `flock -w 30` on the tool's lock itself around the table delete and the removal of the state dir.
   It puts the non-committee P2P path back (`fw_p2p_allow`, `fw_p2p_limit_sync`) before it removes anything, and writes `P2P_COMMITTEE=off` last, so a partial `off` still reads as on and the next run finishes it.
   `remove-node.sh` (`_rm_p2p_allow`) holds it the same way on fd 8; on a busy lock, one it cannot open, or no `flock`, it leaves the table and the state dir for a later run and warns.
+  Both open the lock only when it is missing or a regular file, never through a symlink: a FIFO there would block the open, and a failed `exec 8>>` prints a raw shell error and ends a POSIX-mode shell.
 - The tool runs its `--nft` default, `/usr/sbin/nft` (`FW_ALLOW_NFT`), because neither the units nor the verbs pass `--nft`.
   `on` and `fw_allow_units_write` require that path executable (`fw_allow_nft_ok`) and name it in the refusal, and the boot unit writes it literally; the scripts' own nft calls still use the `nft` on `PATH`.
 - `validate_ipv6` is the grammar of Rust's `Ipv6Addr::from_str`, which the tool parses `P2P_ALLOW_FROM` with, so a source list the scripts store is one the tool reads; `validate_health_src` still refuses a dotted IPv4 tail, because `fw_allow_src_dropped` knows an IPv4-mapped host only in hex.

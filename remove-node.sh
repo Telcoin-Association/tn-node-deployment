@@ -735,15 +735,16 @@ _rm_p2p_limit() {
 # _rm_p2p_allow -- remove firewall-setup.sh's P2P committee allowlist, at its
 # fixed paths and without running firewall-setup.sh or the tool: stop
 # telcoin-p2p-allow-sync.timer, telcoin-p2p-allow-sync.service and
-# telcoin-p2p-allow.service (the timer first, so no sync starts) and remove their
-# unit files. Then, in a real state directory /var/lib/telcoin-p2p-allow, take
-# the tool's own lock as firewall-setup.sh --p2p-committee off does (its lock
-# file on fd 8, created 0600 when missing and never opened through a symlink;
-# flock -w 30), so a run in progress ends first and none loads the table again
-# after the delete. Holding it: delete the nftables table inet tn_p2p_allow when
-# nft lists it, or, when the listing fails, when a unit, the state dir or the
-# binary was found (with none of them there is no sign of a table, and the
-# delete would only print a result that says nothing); remove the tool binary
+# telcoin-p2p-allow.service (the timer first, so no sync starts) and remove
+# their unit files. Then, in a real state directory /var/lib/telcoin-p2p-allow,
+# take the tool's own lock as firewall-setup.sh --p2p-committee off does (its
+# lock file on fd 8, created 0600 when missing, opened only when missing or a
+# regular file, never through a symlink; flock -w 30), so a run in progress ends
+# first and none loads the table again after the delete. Holding it: delete the
+# nftables table inet tn_p2p_allow when nft lists it, or, when the listing
+# fails, when a unit, the state dir or the binary was found (with none of them
+# there is no sign of a table, and the delete would only print a result that
+# says nothing); remove the tool binary
 # /usr/local/libexec/telcoin/tn-p2p-allow-sync (never through a symlinked
 # libexec dir), and last the state directory. That directory goes only when it
 # is a real directory, and it stays when nft refused the delete, so the leftover
@@ -778,9 +779,13 @@ _rm_p2p_allow() {
             print_warn "flock is not installed, so ${dir}/lock cannot be taken: the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; install util-linux, then run this again."
         else
             # umask 077 creates a missing lock 0600, as the tool creates it.
+            # Only a missing lock or a regular file is opened: a FIFO would
+            # block the open, and a failed exec redirection prints a raw shell
+            # error (and ends the script in POSIX mode).
             old_umask="$(umask)"
             umask 077
-            if [[ -L "${r}${dir}/lock" ]] || ! exec 8>>"${r}${dir}/lock"; then
+            if [[ -L "${r}${dir}/lock" ]] || { [[ -e "${r}${dir}/lock" ]] && [[ ! -f "${r}${dir}/lock" ]]; } \
+                || ! { exec 8>>"${r}${dir}/lock"; } 2>/dev/null; then
                 umask "$old_umask"
                 print_warn "${dir}/lock cannot be opened, so the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; check what ${dir}/lock is, then run this again."
             else

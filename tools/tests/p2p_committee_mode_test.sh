@@ -857,6 +857,40 @@ check "off: a lock it creates is 0600 under umask 022, and the umask is back" "2
 umask "$umask_before"
 run fw_committee_off
 
+# --- off opens only a missing or regular lock --------------------------------------------
+# A FIFO at the lock would block the open for good, a directory would print a raw
+# shell error (and end a POSIX-mode shell), a symlink is never followed: each is
+# refused, said, and the table and the state dir stay. A hang is cut off after
+# 10 seconds.
+LOCK_OPEN_FW="/var/lib/telcoin-p2p-allow/lock cannot be opened, so the P2P committee allowlist was left in place."
+for kind in fifo dir dir-posix symlink; do
+    fixture; run fw_committee_on; simulate_apply
+    rm -f "$D/lock"
+    case "$kind" in
+        fifo) mkfifo "$D/lock" ;;
+        dir*) mkdir "$D/lock" ;;
+        symlink) ln -s "$T/lock-target" "$D/lock" ;;
+    esac
+    : > "$FLOCK_LOG"
+    ( [[ "$kind" != *-posix ]] || set -o posix
+      RC=0; fw_allow_uninstall keep-binary || RC=$?; echo "rc=$RC" ) > "$T/out" 2>&1 &
+    pid=$!; n=0
+    while kill -0 "$pid" 2>/dev/null && [[ $n -lt 10 ]]; do sleep 1; n=$((n + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; echo "HUNG" >> "$T/out"; fi
+    wait "$pid" 2>/dev/null
+    OUT="$(cat "$T/out")"
+    check "off, ${kind} lock: no hang, rc 2" "no yes" \
+        "$(grep -q HUNG <<< "$OUT" && echo yes || echo no) $(grep -qx 'rc=2' <<< "$OUT" && echo yes || echo no)"
+    check_in "off, ${kind} lock: said" "$LOCK_OPEN_FW" "$OUT"
+    check_lacks "off, ${kind} lock: no raw shell error" "Is a directory" "$OUT"
+    check "off, ${kind} lock: no lock taken" "" "$(flocks)"
+    check "off, ${kind} lock: the table and the state dir stay" "yes yes" \
+        "$([[ -s "$R/.nft.allow" ]] && echo yes || echo no) $([[ -d "$D" ]] && echo yes || echo no)"
+    check "off, ${kind} lock: nothing made through a symlink" "no" "$([[ -e "$T/lock-target" ]] && echo yes || echo no)"
+    rm -rf "$D/lock"
+    run fw_committee_off
+done
+
 # =============================================================================
 # the real dispatch: firewall-setup.sh --p2p-committee VERB as its own
 # process, through a driver that replaces check_root and the same host probes as

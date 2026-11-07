@@ -425,7 +425,7 @@ warning); it is a release file, not an updater entry.
 - It removes private alerts before it stops the node, then says to pause or delete the monitor
   (#60).
 - With the last node it removes the P2P committee allowlist (`_rm_p2p_allow`): the timer, the sync service and the boot unit with their files, the table `inet tn_p2p_allow`, `/usr/local/libexec/telcoin/tn-p2p-allow-sync` and `/var/lib/telcoin-p2p-allow`, without running `firewall-setup.sh` or the tool.
-  It deletes the table and removes the state dir under `flock -w 30` on the tool's lock (`/var/lib/telcoin-p2p-allow/lock`), as `off` does, so a sync in progress ends first; a lock held for 30 seconds, one that cannot be opened, or no `flock` leaves both for a later run, with a warning, and the binary still goes.
+  It deletes the table and removes the state dir under `flock -w 30` on the tool's lock (`/var/lib/telcoin-p2p-allow/lock`), as `off` does, so a sync in progress ends first; a lock held for 30 seconds, one that cannot be opened or is not a regular file (a FIFO there would block the open), or no `flock` leaves both for a later run, with a warning, and the binary still goes.
   The leftover check counts the timer unit and the state dir.
 
 ### lib/common 2.1.0

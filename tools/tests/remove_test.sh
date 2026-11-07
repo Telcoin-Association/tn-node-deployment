@@ -1048,6 +1048,26 @@ check "p2p allow, lock not openable: no lock taken, no delete" "" "$(lockseq)"
 check "p2p allow, lock not openable: table and state dir stay, node.env goes" "yes yes no" \
     "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR") $(exists "$ETC/node.env")"
 check "p2p allow, lock not openable: fd 8 closed, umask as before" "closed $UMASK0" "$(fd8_state) $(umask)"
+check_lacks "p2p allow, lock not openable: no raw shell error" "Is a directory" "$(cat "$T/out")"
+# In POSIX mode a failed exec redirection ends the shell; the lock is never
+# opened, so the removal goes on.
+mkfixture; p2p_allow_fixture; rm -f "$AL_DIR/lock"; mkdir "$AL_DIR/lock"
+( set -o posix; remove_node_host_files; echo "rc=$?" ) > "$T/out" 2>&1
+check_has "p2p allow, lock not openable, POSIX mode: the removal goes on, rc 0" "rc=0" "$(cat "$T/out")"
+# A FIFO there would block the open for good: it is never opened, and the
+# removal goes on, said (a hang is cut off after 10 seconds).
+mkfixture; p2p_allow_fixture; rm -f "$AL_DIR/lock"; mkfifo "$AL_DIR/lock"
+( remove_node_host_files; echo "rc=$?" ) > "$T/out" 2>&1 &
+pid=$!; n=0
+while kill -0 "$pid" 2>/dev/null && [[ $n -lt 10 ]]; do sleep 1; n=$((n + 1)); done
+if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; echo "HUNG" >> "$T/out"; fi
+wait "$pid" 2>/dev/null
+check "p2p allow, FIFO lock: no hang, rc 0" "no yes" \
+    "$(grep -q HUNG "$T/out" && echo yes || echo no) $(grep -qx 'rc=0' "$T/out" && echo yes || echo no)"
+check "p2p allow, FIFO lock: said" "yes" "$(grep -qF "$LOCK_OPEN_MSG" "$T/out" && echo yes)"
+check "p2p allow, FIFO lock: no lock taken, no delete" "" "$(lockseq)"
+check "p2p allow, FIFO lock: table and state dir stay, binary goes, still a FIFO" "yes yes no yes" \
+    "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR") $(exists "$AL_BIN") $([[ -p "$AL_DIR/lock" ]] && echo yes || echo no)"
 # No flock on PATH (the host's hidden behind a directory that links every other
 # command): said, and the table and the state dir stay.
 mkfixture; p2p_allow_fixture

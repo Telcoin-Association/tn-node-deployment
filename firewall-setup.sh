@@ -1530,8 +1530,9 @@ fw_allow_discard() {
 # never a symlink); a table that cannot be deleted keeps FW_ALLOW_DIR, so the
 # next run tries again. Last TN_P2P_ALLOW_BIN, unless the argument is
 # keep-binary. rc 0; 2 something stays (said): the lock was not free within 30
-# seconds, nft refused the delete, FW_ALLOW_DIR or its lock is a symlink, or a
-# removal failed.
+# seconds, nft refused the delete, FW_ALLOW_DIR or its lock is a symlink, the
+# lock is neither missing nor a regular file or cannot be opened, or a removal
+# failed.
 fw_allow_uninstall() {
     local keep="${1:-}" lock bin old_umask rc=0
     fw_allow_units_remove
@@ -1541,10 +1542,13 @@ fw_allow_uninstall() {
         rc=2
     elif [[ -d "$FW_ALLOW_DIR" ]]; then
         lock="${FW_ALLOW_DIR}/lock"
-        # umask 077 creates a missing lock 0600, as the tool creates it.
+        # umask 077 creates a missing lock 0600, as the tool creates it. Only a
+        # missing lock or a regular file is opened: a FIFO would block the open,
+        # and a failed exec redirection prints a raw shell error (and ends the
+        # script in POSIX mode).
         old_umask="$(umask)"
         umask 077
-        if [[ -L "$lock" ]] || ! exec 8>>"$lock"; then
+        if [[ -L "$lock" ]] || { [[ -e "$lock" ]] && [[ ! -f "$lock" ]]; } || ! { exec 8>>"$lock"; } 2>/dev/null; then
             umask "$old_umask"
             fw_error "${lock#"${TN_ROOT_PREFIX:-}"} cannot be opened, so the P2P committee allowlist was left in place."
             rc=2
