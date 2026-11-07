@@ -1477,12 +1477,38 @@ validate_ipv4() {
     return 0
 }
 
-# Validate IPv6 (loose; accepts standard and compressed forms).
+# validate_ipv6 ADDR -- 0 when ADDR is an IPv6 address in the grammar of Rust's
+# Ipv6Addr::from_str, which tn-p2p-allow-sync and libp2p parse with: groups of 1-4
+# hex digits separated by ':', exactly 8 of them, or at most 7 around one '::'
+# that stands for one or more zero groups. The last two groups may be written as
+# a dotted IPv4 address (::ffff:192.0.2.1, 64:ff9b::192.0.2.1) whose octets are
+# 0-255 without a leading zero. No zone (fe80::1%eth0), brackets, prefix or
+# spaces; a single ':' never starts or ends it. Pure bash, no process.
 validate_ipv6() {
-    local ip="$1"
-    [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] || return 1
-    [[ "$ip" == *":"* ]] || return 1
-    return 0
+    local ip="${1:-}" v4 part colons n=0 h='[0-9A-Fa-f]{1,4}'
+    local q='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+    local re_v4="^${q}\\.${q}\\.${q}\\.${q}\$" re_part="^${h}(:${h})*\$" re_full="^${h}(:${h}){7}\$"
+    [[ "$ip" == *:* ]] || return 1
+    # A dotted IPv4 tail is the last two groups: check it, then count it as 0:0.
+    if [[ "$ip" == *.* ]]; then
+        v4="${ip##*:}"
+        [[ "$v4" =~ $re_v4 ]] || return 1
+        ip="${ip%"$v4"}0:0"
+    fi
+    if [[ "$ip" != *::* ]]; then
+        [[ "$ip" =~ $re_full ]]
+        return
+    fi
+    [[ "$ip" != *:::* && "$ip" != *::*::* ]] || return 1
+    # The groups before and after the one '::', each part empty or 1-4 hex digit
+    # groups joined by single colons, at most 7 in all.
+    for part in "${ip%%::*}" "${ip#*::}"; do
+        [[ -n "$part" ]] || continue
+        [[ "$part" =~ $re_part ]] || return 1
+        colons="${part//[!:]/}"
+        n=$((n + ${#colons} + 1))
+    done
+    [[ $n -le 7 ]]
 }
 
 # Validate a public-facing IP (IPv4 or IPv6).
@@ -9418,10 +9444,13 @@ get_ssh_port() {
 # For a CIDR, split on '/', require a decimal mask without leading zeros, and
 # dispatch by family: IPv4 with mask 8..32, or IPv6 with mask 8..128. For a bare
 # address: IPv4 or IPv6. An IPv4 octet with a leading zero (010.0.0.1) is refused,
-# as ufw refuses it. A /0 mask or the unspecified address (0.0.0.0, ::) means
-# "anywhere" and is refused, and so is any mask shorter than /8. Generalizes the
-# IPv4-only validate_cidr for the operator-chosen health and SSH sources. Returns
-# 0 if valid.
+# as ufw refuses it. An IPv6 address is hex groups only (validate_ipv6, the
+# grammar tn-p2p-allow-sync parses P2P_ALLOW_FROM with): a dotted IPv4 tail
+# (::ffff:192.0.2.1) is refused, because firewall-setup.sh's fw_allow_src_dropped
+# knows an IPv4-mapped host only in hex (::ffff:c000:201). A /0 mask or the
+# unspecified address (0.0.0.0, ::) means "anywhere" and is refused, and so is
+# any mask shorter than /8. Generalizes the IPv4-only validate_cidr for the
+# operator-chosen health and SSH sources. Returns 0 if valid.
 validate_health_src() {
     local src="${1:-}" ip mask
     # Never "anywhere": no /0 mask and no unspecified address.
@@ -9431,7 +9460,7 @@ validate_health_src() {
     ip="${src%%/*}"
     if validate_ipv4 "$ip"; then
         [[ ".${ip}" == *.0[0-9]* ]] && return 1
-    elif ! validate_ipv6 "$ip"; then
+    elif [[ "$ip" == *.* ]] || ! validate_ipv6 "$ip"; then
         return 1
     fi
     [[ "$src" == */* ]] || return 0
