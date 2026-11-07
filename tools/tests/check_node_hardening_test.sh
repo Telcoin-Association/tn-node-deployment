@@ -380,6 +380,7 @@ printf '%s\n' "${CN_FW_JSON:-}"
 STUB
 REC="$T/rec"
 export REC
+export SYSTEMCTL_LOG="$T/systemctl.log"
 printf 'LEAK\n' > "$T/leak"
 # the node's RPC, as the stand-in answers tn_getCurrentEpochInfo
 tn_epoch_info() {
@@ -415,9 +416,9 @@ cn_clean() {
     st_write
     cp "$T/fwbin/tn-p2p-allow-sync" "$TN_P2P_ALLOW_BIN"
     : > "$T/fx/.nft.allow"
-    rm -f "$T/fx/.nft.table" "$REC.log" "$REC.argv" "$REC.env" "$REC.stdin"
+    rm -f "$T/fx/.nft.table" "$REC.log" "$REC.argv" "$REC.env" "$REC.stdin" "$SYSTEMCTL_LOG"
     printf '%s\n' telcoin-p2p-allow-sync.timer telcoin-p2p-allow.service > "$T/fx/.systemctl.enabled"
-    unset NFT_LIST_FAIL LOCAL_RPC_MODE TN_P2P_STUB_RC_CHECK
+    unset NFT_LIST_FAIL LOCAL_RPC_MODE TN_P2P_STUB_RC_CHECK SYSTEMCTL_SHOW
     export CN_FW_JSON="$FW_JSON_OK" TN_P2P_STUB_OUT_CHECK="$CHECK_OK"
     CN_EPOCH_LINE="42 1000 21600 1 -"
 }
@@ -495,23 +496,90 @@ check "committee: stale by age, the live epoch duration" "yes yes 0" \
 LOCAL_RPC_MODE=DOWN run check_p2p_committee
 check "committee: no live duration while the local RPC is down" "" "$OUT"
 
-cn_clean
 st_write RESULT=stale "STALE_SINCE=${NOW}" STALE_REASON=rpc-method-missing
 run check_p2p_committee
-check "committee: rpc-method-missing warned at once" "yes yes no 0" \
-    "$(has "$OUT" "no tn_admissionSnapshot RPC method") $(has "$OUT" "update-node.sh") $(has "$OUT" "is stale:") $ADDED"
+# the operator line, byte for byte as firewall-setup.sh says it
+check "committee: rpc-method-missing warned at once, the method or --http.api" "yes yes no no 0" \
+    "$(has "$OUT" "(rpc-method-missing): this node release lacks tn_admissionSnapshot, or tn is not in its --http.api; update the node or add tn to --http.api. Until then") $(has "$OUT" "Fix: sudo bash ${SCRIPT_DIR}/update-node.sh") $(has "$OUT" "is stale:") $(has "$OUT" "predates it") $ADDED"
 st_write RESULT=stale "STALE_SINCE=${NOW}" STALE_REASON=snapshot-version-2
 run check_p2p_committee
 check "committee: snapshot-version-2 warned at once" "yes yes 0" \
     "$(has "$OUT" "admission snapshot version 2, which the installed tn-p2p-allow-sync does not read") $(has "$OUT" "update-scripts.sh, then sudo bash") $ADDED"
 st_write RESULT=stale "STALE_SINCE=${NOW}" STALE_REASON=epoch-regressed
 run check_p2p_committee
-check "committee: epoch-regressed warned at once, off then on" "yes yes 0" \
-    "$(has "$OUT" "epoch below the one the allowlist was built from") $(has "$OUT" "--p2p-committee off, then --p2p-committee on") $ADDED"
+check "committee: epoch-regressed warned at once, clears by itself, off then on past 2 epochs" "yes yes yes no no 0" \
+    "$(has "$OUT" "epoch below the one the allowlist was built from (epoch-regressed, stale since ") $(has "$OUT" "It clears by itself once the node's tracked epoch is back at or above the applied one (after a startup record-sync replay).") $(has "$OUT" "If it persists past 2 epochs: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on") $(has "$OUT" "clear on its own") $(has "$OUT" "is stale:") $ADDED"
 st_write RESULT=error "STALE_SINCE=${NOW}" STALE_REASON=state-invalid
+export SYSTEMCTL_SHOW='Result=exit-code
+ExecMainStatus=2'
 run check_p2p_committee
 check "committee: state-invalid warned at once, off then on, not as staleness" "yes yes no no 0" \
     "$(has "$OUT" "cannot read its own state.json (state-invalid)") $(has "$OUT" "--p2p-committee off, then --p2p-committee on") $(has "$OUT" "is stale:") $(has "$OUT" "sync now:") $ADDED"
+check "committee: state-invalid with the failed unit is one warning" "1" "$(grep -c 'WARN' "$T/out")"
+
+# A failed run (RESULT=error) is said at once with its reason and the unit's
+# journal, never only once it is 2 epochs old.
+for r in nft-apply-failed state-io-failed floor-invalid reload-failed; do
+    cn_clean
+    st_write RESULT=error "STALE_SINCE=${NOW}" "STALE_REASON=${r}"
+    run check_p2p_committee
+    check "committee: RESULT=error ${r} warned at once with the journal" "yes yes no 0" \
+        "$(has "$OUT" "P2P committee allowlist: its last sync failed (${r}, failing since ") $(has "$OUT" "Why: journalctl -u telcoin-p2p-allow-sync.service -n 20; sync now: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync") $(has "$OUT" "is stale:") $ADDED"
+done
+cn_clean
+st_write RESULT=error "STALE_SINCE=${NOW}" STALE_REASON=config-invalid
+run check_p2p_committee
+check "committee: RESULT=error config-invalid, the resync rewrites the config" "yes yes no 0" \
+    "$(has "$OUT" "its last sync failed (config-invalid, failing since ") $(has "$OUT" "Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync  (rewrites its config)") $(has "$OUT" "journalctl") $ADDED"
+cn_clean
+st_write RESULT=error "LAST_GOOD=$(( NOW - 50000 ))" "STALE_SINCE=$(( NOW - 49000 ))" STALE_REASON=nft-apply-failed
+export SYSTEMCTL_SHOW='ExecMainStatus=2
+Result=exit-code'
+run check_p2p_committee
+check "committee: RESULT=error past 2 epochs and a failed unit, one warning" "yes no 1 0" \
+    "$(has "$OUT" "its last sync failed (nft-apply-failed, failing since ") $(has "$OUT" "is stale:") $(grep -c 'WARN' "$T/out") $ADDED"
+cn_clean
+st_write RESULT=error STALE_REASON=
+run check_p2p_committee
+check "committee: RESULT=error without a reason still warns" "yes yes" \
+    "$(has "$OUT" "its last sync failed, so it keeps its last-good set until a sync succeeds.") $(has "$OUT" "journalctl -u telcoin-p2p-allow-sync.service")"
+
+# The sync unit's last run, as systemd shows it: a failure is said at once,
+# exit 3 and 4 (the unit's SuccessExitStatus) are success.
+cn_clean
+export SYSTEMCTL_SHOW='ExecMainStatus=2
+Result=exit-code'
+run check_p2p_committee
+check "committee: unit Result=exit-code warned at once with the journal" "yes yes no 0" \
+    "$(has "$OUT" "the last run of telcoin-p2p-allow-sync.service failed (it exited with status 2), so the allowlist keeps its last-good set until a sync succeeds.") $(has "$OUT" "Why: journalctl -u telcoin-p2p-allow-sync.service -n 20; sync now: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync") $(has "$OUT" "is stale:") $ADDED"
+check "committee: the unit's Result and ExecMainStatus are asked of systemd" "1" \
+    "$(grep -cx 'show -p Result -p ExecMainStatus telcoin-p2p-allow-sync.service' "$SYSTEMCTL_LOG")"
+export SYSTEMCTL_SHOW='Result=exit-code
+ExecMainStatus=226'
+run check_p2p_committee
+check "committee: a unit that fails before the tool runs warned" "yes 0" \
+    "$(has "$OUT" "telcoin-p2p-allow-sync.service failed (it exited with status 226)") $ADDED"
+export SYSTEMCTL_SHOW='Result=signal
+ExecMainStatus=9'
+run check_p2p_committee
+check "committee: unit killed by a signal warned" "yes" \
+    "$(has "$OUT" "telcoin-p2p-allow-sync.service failed (it was killed by signal 9)")"
+export SYSTEMCTL_SHOW='Result=timeout
+ExecMainStatus=15'
+run check_p2p_committee
+check "committee: unit timed out warned" "yes" \
+    "$(has "$OUT" "telcoin-p2p-allow-sync.service failed (systemd result timeout)")"
+for u in "Result=success ExecMainStatus=0" "Result=success ExecMainStatus=3" "Result=exit-code ExecMainStatus=3" "Result=exit-code ExecMainStatus=4"; do
+    export SYSTEMCTL_SHOW="${u% *}
+${u#* }"
+    run check_p2p_committee
+    check "committee: healthy status, unit ${u}, says nothing" "" "$OUT"
+done
+st_write RESULT=stale "STALE_SINCE=${NOW}" STALE_REASON=rpc-unreachable
+export SYSTEMCTL_SHOW='Result=success
+ExecMainStatus=3'
+run check_p2p_committee
+check "committee: a fresh stale run with the unit's exit 3 says nothing" "" "$OUT"
 
 cn_clean
 export TN_P2P_STUB_RC_CHECK=1 TN_P2P_STUB_OUT_CHECK='missing 192.0.2.10

@@ -2267,17 +2267,21 @@ _cn_src_join() {
 # of the current committee missing from the allow sets (at most five named), and
 # when that check fails (its reason named). A warning when the sync timer is not
 # enabled and active; when the new-flow limit table inet tn_p2p is loaded as well;
-# when the last good sync is older than 2 epochs (the epoch duration from the
-# node's tn_getCurrentEpochInfo, else EPOCH_DURATION in the status file, else
-# 21600 s), with STALE_SINCE and STALE_REASON; at once for a STALE_REASON that
-# never clears on its own (rpc-method-missing, snapshot-version-*,
-# epoch-regressed, state-invalid); for committee keys whose records list other
+# at once when the last run in the status file failed (RESULT=error, its
+# STALE_REASON named) and when systemd's last run of the sync unit failed (a
+# Result other than success); at once for a STALE_REASON that needs the
+# operator (rpc-method-missing, snapshot-version-*, state-invalid) and for
+# epoch-regressed, which clears by itself once the node catches up; for any other
+# STALE_REASON when the last good sync is older than 2 epochs (the epoch duration
+# from the node's tn_getCurrentEpochInfo, else EPOCH_DURATION in the status file,
+# else 21600 s), with STALE_SINCE; for committee keys whose records list other
 # addresses than their multiaddrs (at most five named); and when the tool's config no longer matches RPC_PORT in
 # .node-meta, the node's P2P ports or P2P_ALLOW_FROM. An info line when the check
 # cannot judge (exit 3).
 check_p2p_committee() {
     local dir meta mode rc=0 fix bin_ok=1 tables="" loaded=unknown st="" cfg=""
-    local reason since base dur line now age out crc res w verdict mtotal xtotal
+    local result reason since base dur line now age out crc res w verdict mtotal xtotal
+    local ushow ures ustat why
     local miss="" mism="" nmiss=0 nmism=0 named_miss=0 named_mism=0 tok="" l v have want drift=""
     local reason_re=' reason=([A-Za-z0-9._:-]+) '
     local -a words=()
@@ -2337,26 +2341,38 @@ check_p2p_committee() {
         print_info "  Fix: ${fix}"
     fi
 
-    # Staleness, from the status file the tool writes after every run.
+    # The last run, from the status file the tool writes after every run that
+    # reached a decision: a reason that needs the operator is said at once, a
+    # failed run (RESULT=error) at once with its reason, and any other stale run
+    # once the last good sync is older than 2 epochs.
     if [[ -f "${dir}/status" && ! -L "${dir}/status" ]]; then
         st="$(cat -- "${dir}/status" 2>/dev/null)" || st=""
     fi
+    result="$(_cn_allow_kv RESULT "$st")" || result=""
     reason="$(_cn_allow_kv STALE_REASON "$st")" || reason=""
     since="$(_cn_allow_kv STALE_SINCE "$st")" || since=""
     _cn_pos_int "$since" || since=""
-    case "$reason" in
-        rpc-method-missing)
-            print_warn "P2P committee allowlist: the node has no tn_admissionSnapshot RPC method (this node release predates it), so the allowlist keeps its last-good set; that does not clear on its own."
-            print_info "  Fix: update the node to a release that serves it: sudo bash ${SCRIPT_DIR}/update-node.sh" ;;
-        snapshot-version-*)
+    case "${result}/${reason}" in
+        */rpc-method-missing)
+            print_warn "P2P committee allowlist (rpc-method-missing): this node release lacks tn_admissionSnapshot, or tn is not in its --http.api; update the node or add tn to --http.api. Until then the allowlist keeps its last-good set."
+            print_info "  Fix: sudo bash ${SCRIPT_DIR}/update-node.sh  (a release that serves it), or put tn back in the node's --http.api; the next timer sync then clears it" ;;
+        */snapshot-version-*)
             print_warn "P2P committee allowlist: the node serves admission snapshot version ${reason#snapshot-version-}, which the installed tn-p2p-allow-sync does not read, so the allowlist keeps its last-good set; that does not clear on its own."
             print_info "  Fix: bash ${SCRIPT_DIR}/update-scripts.sh, then ${fix}  (installs the tool the new scripts pin)" ;;
-        epoch-regressed)
-            print_warn "P2P committee allowlist: the node reports an epoch below the one the allowlist was built from (an epoch from the future was accepted once), so the allowlist keeps its last-good set; that does not clear on its own."
-            print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on  (the allowlist starts again from the node's snapshot)" ;;
-        state-invalid)
+        */epoch-regressed)
+            print_warn "P2P committee allowlist: the node reports an epoch below the one the allowlist was built from (epoch-regressed${since:+, stale since $(utc_time "$since")}), so the allowlist keeps its last-good set. It clears by itself once the node's tracked epoch is back at or above the applied one (after a startup record-sync replay)."
+            print_info "  If it persists past 2 epochs: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on  (the allowlist starts again from the node's snapshot)" ;;
+        */state-invalid)
             print_warn "P2P committee allowlist: tn-p2p-allow-sync cannot read its own state.json (state-invalid), so every sync fails and the loaded allowlist no longer follows the committee; that does not clear on its own."
             print_info "  Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee off, then --p2p-committee on  (the allowlist starts again from the node's snapshot)" ;;
+        error/*)
+            why="$reason"
+            [[ -z "$since" ]] || why="${why:+${why}, }failing since $(utc_time "$since")"
+            print_warn "P2P committee allowlist: its last sync failed${why:+ (${why})}, so it keeps its last-good set until a sync succeeds."
+            case "$reason" in
+                config-invalid) print_info "  Fix: ${fix}  (rewrites its config)" ;;
+                *) print_info "  Why: journalctl -u telcoin-p2p-allow-sync.service -n 20; sync now: ${fix}" ;;
+            esac ;;
         *)
             base="$(_cn_allow_kv LAST_GOOD "$st")" || base=""
             _cn_pos_int "$base" || base="$since"
@@ -2377,6 +2393,28 @@ check_p2p_committee() {
                 fi
             fi ;;
     esac
+
+    # The sync unit's last run, as systemd saw it. A timer run can fail without
+    # a status to show for it (in the unit's sandbox before the tool starts, on
+    # an unsafe state dir, without nft); exit 3 and 4 are the unit's
+    # SuccessExitStatus, so systemd counts them as success. A failed run the
+    # status file names (RESULT=error) was said above.
+    if [[ "$result" != "error" ]]; then
+        ushow="$(systemctl show -p Result -p ExecMainStatus telcoin-p2p-allow-sync.service < /dev/null 2>/dev/null)" || ushow=""
+        ures="$(_cn_allow_kv Result "$ushow")" || ures=""
+        ustat="$(_cn_allow_kv ExecMainStatus "$ushow")" || ustat=""
+        case "${ures}:${ustat}" in
+            :*|success:*|exit-code:0|exit-code:3|exit-code:4) ;;
+            *)
+                case "$ures" in
+                    exit-code) why="it exited with status ${ustat:-unknown}" ;;
+                    signal|core-dump) why="it was killed by signal ${ustat:-unknown}" ;;
+                    *) why="systemd result ${ures}" ;;
+                esac
+                print_warn "P2P committee allowlist: the last run of telcoin-p2p-allow-sync.service failed (${why}), so the allowlist keeps its last-good set until a sync succeeds."
+                print_info "  Why: journalctl -u telcoin-p2p-allow-sync.service -n 20; sync now: ${fix}" ;;
+        esac
+    fi
 
     # Consistency: every current committee address of the node's snapshot in the
     # live allow sets. Without the binary or the table the lines above said it.
