@@ -305,6 +305,7 @@ Rules for any code that touches it:
 - Never hold the tool's lock (`/var/lib/telcoin-p2p-allow/lock`) while the binary runs: a second open file description conflicts with the tool's own `flock`, and the tool skips its run as busy (exit 4).
   The timer never takes the update lock either; the verbs take the update lock (`fw_meta_lock`) and pass `--wait 30` to the tool.
 - `off` never runs the binary, so it works with the binary missing or broken and with an older library; it holds `flock -w 30` on the tool's lock itself around the table delete and the removal of the state dir.
+  It puts the non-committee P2P path back (`fw_p2p_allow`, `fw_p2p_limit_sync`) before it removes anything, and writes `P2P_COMMITTEE=off` last, so a partial `off` still reads as on and the next run finishes it.
   `remove-node.sh` (`_rm_p2p_allow`) holds it the same way on fd 8; on a busy lock, one it cannot open, or no `flock`, it leaves the table and the state dir for a later run and warns.
 - The tool runs its `--nft` default, `/usr/sbin/nft` (`FW_ALLOW_NFT`), because neither the units nor the verbs pass `--nft`.
   `on` and `fw_allow_units_write` require that path executable (`fw_allow_nft_ok`) and name it in the refusal, and the boot unit writes it literally; the scripts' own nft calls still use the `nft` on `PATH`.
@@ -312,7 +313,6 @@ Rules for any code that touches it:
   Their character classes list every character (`[0123456789ABCDEFabcdef]`, never `[0-9A-Fa-f]`): in a glibc UTF-8 locale such as en_US.UTF-8 a range also matches look-alikes (full-width digits, Arabic-Indic digits, `é`) that the tool refuses, and `addon_gates_test.sh` checks the grammar in that locale.
 - check-node and `--p2p-committee status` warn at once on `rpc-method-missing`, `snapshot-version-*`, `epoch-regressed` and `state-invalid`; check-node also warns at once on `RESULT=error` and on a failed run of the sync unit (`systemctl show -p Result -p ExecMainStatus`; exit 0, 3 and 4 are success).
   The `rpc-method-missing` text of `fw_allow_reason_text` appears byte for byte in check-node's line, and `p2p_reason_text_test.sh` keeps the two in step.
-  It puts the non-committee P2P path back (`fw_p2p_allow`, `fw_p2p_limit_sync`) before it removes anything, and writes `P2P_COMMITTEE=off` last, so a partial `off` still reads as on and the next run finishes it.
 - Run the binary only through `fw_allow_run` (or `_cn_allow_run` in check-node): stdin from `/dev/null`, no descriptor above 2 (`_tn_exec_closed`), `TN_BLS_PASSPHRASE` unset, and as root outside the sync unit's sandbox, which hides `/etc/telcoin` and the data dir from it.
 - An exit 0 of `sync` counts only with `result=applied` or `result=unchanged` on its line (`fw_allow_fresh`); a failure names the line's `reason=`.
   `on` runs `sync --require-authoritative`, so the first table is never built from a snapshot the tool does not trust.
