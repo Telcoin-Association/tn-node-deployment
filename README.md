@@ -2226,7 +2226,7 @@ AIDE baseline again (#43). The dashboard site writes nothing the baseline covers
   not 0600 root, a runner of another version than the scripts' copy, an `alerts.env` out of step with
   the node). Without the alerts library it is skipped, and named as skipped, only on a host that
   has the alerts. The ownership check covers the runner and `/etc/telcoin/alerts` (#60).
-- With P2P committee mode on, a new check reports a missing tool or table (a failure), a stale allowlist (no good sync for 2 epochs), and at once a failed last sync (its reason and since when), a failed last run of `telcoin-p2p-allow-sync.service`, the stale reasons that need the operator and `epoch-regressed`, which clears by itself once the node is back at the applied epoch; also current committee addresses the table lacks (at most five named), record mismatches, and a config that no longer matches the node (see [P2P committee allowlist](#p2p-committee-allowlist)).
+- With P2P committee mode on, a new check reports a missing tool or table (a failure), a table set dormant by hand, which enforces nothing until a sync wakes it (a failure), a stale allowlist (no good sync for 2 epochs), and at once a failed last sync (its reason and since when), a failed last run of `telcoin-p2p-allow-sync.service`, the stale reasons that need the operator and `epoch-regressed`, which clears by itself once the node is back at the applied epoch; also current committee addresses the table lacks (at most five named), record mismatches, and a config that no longer matches the node (see [P2P committee allowlist](#p2p-committee-allowlist)).
 
 Full release note: [CHANGELOG/scripts-v2.1.0.md](CHANGELOG/scripts-v2.1.0.md).
 

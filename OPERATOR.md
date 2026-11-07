@@ -632,6 +632,7 @@ The epoch length it judges staleness by comes from the node's `tn_getCurrentEpoc
 |---|---|---|
 | `P2P committee mode is on, but its sync tool ... is missing` | error | `--p2p-committee sync`, which reinstalls the pinned tool |
 | `P2P committee mode is on, but nftables has no table inet tn_p2p_allow: P2P is open to every source.` | error | `--p2p-committee sync`, which loads the allowlist again |
+| `P2P committee mode is on, but tn-p2p-allow-sync check finds table inet tn_p2p_allow dormant (set by hand): it enforces nothing, and P2P is open to every source until a sync applies it again.` | error, with any committee address the table lacks on the line below | `--p2p-committee sync`, which applies the allowlist again and wakes the table |
 | `... the new-flow limit table inet tn_p2p is loaded as well` | warning | `firewall-setup.sh --enable`, which removes the limit in committee mode (`sync` does not) |
 | `telcoin-p2p-allow-sync.timer is not enabled and active` | warning | `--p2p-committee sync` |
 | `P2P committee allowlist is stale: no good sync for <age>, more than 2 epochs of <length>; failing since <time> (<reason>)` | warning, only for a run that did not fail and a reason not reported at once below | Read `journalctl -t tn-p2p-allow -n 20`, fix the cause (usually the node's RPC), then `--p2p-committee sync` |
