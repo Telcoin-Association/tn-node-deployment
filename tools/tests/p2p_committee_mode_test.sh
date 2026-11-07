@@ -469,6 +469,51 @@ TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=false\nSTALE_SINCE=17000000
 check_lacks "report: another reason waits for STALE=true" "rpc-unreachable" "$OUT"
 TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=true\nSTALE_SINCE=1700000000\nSTALE_REASON=rpc-unreachable')" run fw_committee_report
 check_in "report: another reason once STALE=true" "stale since 1700000000: the node RPC does not answer on 127.0.0.1 (rpc-unreachable)" "$OUT"
+# A failed last sync (RESULT=error, from the status file when the live answer has
+# none) warns at once with its reason, in check-node's words, before the tool
+# reports STALE=true; the unit's failed run is then not said again.
+FIX="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
+printf 'STATUS_VERSION=1\nRESULT=error\nEPOCH=42\nSTALE_SINCE=1700000000\nSTALE_REASON=nft-apply-failed\n' > "$D/status"
+export SYSTEMCTL_SHOW='Result=exit-code
+ExecMainStatus=2'
+TN_P2P_STUB_OUT_STATUS="$(printf 'LOADED=true\nSTALE=false')" run fw_committee_report
+check_in "report: RESULT=error at once, its reason named" "[WARN] P2P committee allowlist: its last sync failed (nft-apply-failed, failing since 1700000000), so it keeps its last-good set until a sync succeeds; see journalctl -u telcoin-p2p-allow-sync.service -n 20, then run: ${FIX}" "$OUT"
+check_lacks "report: RESULT=error: the failed unit run is not said again" "the last run of" "$OUT"
+TN_P2P_STUB_OUT_STATUS="$(printf 'RESULT=error\nLOADED=true\nSTALE=true\nSTALE_SINCE=1700000000\nSTALE_REASON=config-invalid')" run fw_committee_report
+check_in "report: RESULT=error with STALE=true: the failed sync" "its last sync failed (config-invalid, failing since 1700000000)" "$OUT"
+check_lacks "report: RESULT=error with STALE=true: not also stale" "stale since" "$OUT"
+TN_P2P_STUB_OUT_STATUS="$(printf 'RESULT=error\nLOADED=true\nSTALE=false\nSTALE_SINCE=\nSTALE_REASON=')" run fw_committee_report
+check_in "report: RESULT=error without a reason" "P2P committee allowlist: its last sync failed, so it keeps its last-good set until a sync succeeds; see journalctl" "$OUT"
+TN_P2P_STUB_OUT_STATUS="$(printf 'RESULT=error\nLOADED=true\nSTALE=false\nSTALE_SINCE=1700000000\nSTALE_REASON=state-invalid')" run fw_committee_report
+check_in "report: RESULT=error state-invalid: its own words" "tn-p2p-allow-sync cannot read its own state.json (state-invalid)" "$OUT"
+check_lacks "report: RESULT=error state-invalid: said once" "its last sync failed" "$OUT"
+check_lacks "report: RESULT=error state-invalid: no unit line" "the last run of" "$OUT"
+# A failed run of the sync unit that left no RESULT=error (in the sandbox, on an
+# unsafe state dir) warns at once too, in check-node's words; exit 3 (stale), 4
+# (busy) and 0 are the unit's success.
+printf 'STATUS_VERSION=1\nRESULT=applied\nEPOCH=42\nSTALE_SINCE=\nSTALE_REASON=\n' > "$D/status"
+LIVE_OK="$(printf 'LOADED=true\nSTALE=false\nAGE_SECS=31')"
+TN_P2P_STUB_OUT_STATUS="$LIVE_OK" run fw_committee_report
+check_in "report: failed unit run (exit 2) at once" "[WARN] P2P committee allowlist: the last run of telcoin-p2p-allow-sync.service failed (it exited with status 2), so the allowlist keeps its last-good set until a sync succeeds; see journalctl -u telcoin-p2p-allow-sync.service -n 20, then run: ${FIX}" "$OUT"
+check_lacks "report: failed unit run: no failed sync line" "its last sync failed" "$OUT"
+check_in "report: the unit read asks systemctl for Result and ExecMainStatus" "show -p Result -p ExecMainStatus telcoin-p2p-allow-sync.service" "$(cat "$SYSTEMCTL_LOG")"
+export SYSTEMCTL_SHOW='ExecMainStatus=9
+Result=signal'
+TN_P2P_STUB_OUT_STATUS="$LIVE_OK" run fw_committee_report
+check_in "report: failed unit run (signal)" "telcoin-p2p-allow-sync.service failed (it was killed by signal 9), so" "$OUT"
+export SYSTEMCTL_SHOW='Result=timeout
+ExecMainStatus=0'
+TN_P2P_STUB_OUT_STATUS="$LIVE_OK" run fw_committee_report
+check_in "report: failed unit run (systemd result)" "telcoin-p2p-allow-sync.service failed (systemd result timeout), so" "$OUT"
+for u in 'Result=exit-code ExecMainStatus=3' 'Result=exit-code ExecMainStatus=4' 'Result=exit-code ExecMainStatus=0' 'Result=success ExecMainStatus=0' 'ExecMainStatus=1'; do
+    export SYSTEMCTL_SHOW="${u% *}
+${u#* }"
+    TN_P2P_STUB_OUT_STATUS="$LIVE_OK" run fw_committee_report
+    check_lacks "report: no unit warning for ${u}" "the last run of" "$OUT"
+done
+unset SYSTEMCTL_SHOW
+TN_P2P_STUB_OUT_STATUS="$LIVE_OK" run fw_committee_report
+check_lacks "report: no unit warning when systemd says nothing" "the last run of" "$OUT"
 
 # --- off: kill switch ------------------------------------------------------------------
 simulate_apply

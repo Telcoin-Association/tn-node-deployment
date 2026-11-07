@@ -1936,15 +1936,39 @@ fw_committee_off() {
     return 3
 }
 
+# fw_allow_unit_why SHOW -- SHOW is the output of `systemctl show -p Result -p
+# ExecMainStatus` for FW_ALLOW_SYNC_SVC. When systemd's last run of the sync
+# unit failed, print why in check-node.sh's words ("it exited with status <n>",
+# "it was killed by signal <n>", "systemd result <r>"); rc 1 and nothing printed
+# when it did not fail or systemd does not say. Exit 3 (stale) and 4 (busy) are
+# the unit's SuccessExitStatus, so they count as success, as 0 does.
+fw_allow_unit_why() {
+    local ures ustat
+    ures="$(fw_allow_kv Result "${1:-}")" || ures=""
+    ustat="$(fw_allow_kv ExecMainStatus "${1:-}")" || ustat=""
+    case "${ures}:${ustat}" in
+        :*|success:*|exit-code:0|exit-code:3|exit-code:4) return 1 ;;
+    esac
+    case "$ures" in
+        exit-code) printf 'it exited with status %s' "${ustat:-unknown}" ;;
+        signal|core-dump) printf 'it was killed by signal %s' "${ustat:-unknown}" ;;
+        *) printf 'systemd result %s' "$ures" ;;
+    esac
+}
+
 # fw_committee_report -- the status screen's lines for the P2P committee
 # allowlist: off, or on with what the tool reports. The tool's status file
 # (FW_ALLOW_DIR/status) and `tn-p2p-allow-sync status`, which adds the live keys
 # (LOADED, AGE_SECS, STALE, the counters), are read key by key (fw_allow_kv), the
 # live answer first. As in check-node, rpc-method-missing, snapshot-version-*,
 # epoch-regressed and state-invalid warn at once (they need the operator, or may
-# take epochs to clear); any other reason once the tool reports STALE=true.
+# take epochs to clear), and so do a failed last sync (RESULT=error, its
+# STALE_REASON named) and, when the status names none, a failed last run of the
+# sync unit (fw_allow_unit_why), both in check-node's words; any other reason
+# once the tool reports STALE=true.
 fw_committee_report() {
-    local mode text="" live="" st="${FW_ALLOW_DIR}/status" bin loaded age stale result reason since acc drop
+    local mode text="" live="" st="${FW_ALLOW_DIR}/status" bin loaded age stale result reason since acc drop why
+    local fix="sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync"
     if ! mode="$(addon_meta_get P2P_COMMITTEE off 2>/dev/null)"; then
         print_warn "P2P committee allowlist: unknown; P2P_COMMITTEE is set more than once in .node-meta"
         return 0
@@ -1980,14 +2004,25 @@ fw_committee_report() {
     fi
     reason="$(fw_allow_kv STALE_REASON "$text")" || reason=""
     since="$(fw_allow_kv STALE_SINCE "$text")" || since=""
-    case "$reason" in
-        rpc-method-missing|snapshot-version-*|epoch-regressed|state-invalid)
+    case "${result}/${reason}" in
+        */rpc-method-missing|*/snapshot-version-*|*/epoch-regressed|*/state-invalid)
             print_warn "P2P committee allowlist: $(fw_allow_reason_text "$reason"); the last-good set stays loaded" ;;
+        error/*)
+            why="$reason"
+            [[ -z "$since" ]] || why="${why:+${why}, }failing since ${since}"
+            print_warn "P2P committee allowlist: its last sync failed${why:+ (${why})}, so it keeps its last-good set until a sync succeeds; see journalctl -u ${FW_ALLOW_SYNC_SVC} -n 20, then run: ${fix}" ;;
         *)
             if [[ "$stale" == "true" ]]; then
                 print_warn "P2P committee allowlist: stale${since:+ since ${since}}: $(fw_allow_reason_text "$reason"); the last-good set stays loaded"
             fi ;;
     esac
+    # systemd's last run of the sync unit: a timer run can fail before the tool
+    # writes a status (in the unit's sandbox, on an unsafe state dir, without
+    # nft). A failed run the status names (RESULT=error) was said above.
+    if [[ "$result" != "error" ]] \
+        && why="$(fw_allow_unit_why "$(systemctl show -p Result -p ExecMainStatus "$FW_ALLOW_SYNC_SVC" < /dev/null 2>/dev/null)")"; then
+        print_warn "P2P committee allowlist: the last run of ${FW_ALLOW_SYNC_SVC} failed (${why}), so the allowlist keeps its last-good set until a sync succeeds; see journalctl -u ${FW_ALLOW_SYNC_SVC} -n 20, then run: ${fix}"
+    fi
     acc="$(fw_allow_kv COUNTER_ACCEPT_PACKETS "$text")" || acc=""
     drop="$(fw_allow_kv COUNTER_DROP_PACKETS "$text")" || drop=""
     if [[ -n "$acc" || -n "$drop" ]]; then
