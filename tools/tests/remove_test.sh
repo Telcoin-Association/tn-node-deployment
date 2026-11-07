@@ -10,20 +10,23 @@
 # the JSON path, finishing a removal that stopped part way (JSON and the menu's
 # leftover path), the update lock, the refusal to remove anything when
 # .node-meta sets a key more than once, the Alloy ingest token file shredded
-# by the add-on teardown, and the private alerts removed before the node stops
+# by the add-on teardown, the private alerts removed before the node stops
 # (every scope, the menu, the leftover path; not the chain-data-only wipe; also
-# with no lib/alerts.sh).
+# with no lib/alerts.sh), and the P2P committee allowlist taken down with the
+# last node under the tool's lock (held around the delete and the state dir;
+# busy, not openable or no flock: the table and the state dir stay, said).
 #
 #   bash tools/tests/remove_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash tools/tests/remove_test.sh
 #   docker run --rm -v "$PWD:/w" -w /w ubuntu:24.04 bash tools/tests/remove_test.sh
 #
 # Every path lives under a fixture root (TN_ROOT_PREFIX). shred, systemctl,
-# userdel, groupdel, gpasswd, getent, docker, id, setpriv and runuser are PATH
-# stubs that log their arguments; nothing touches the host's units, groups or
-# accounts. The shred stub overwrites what it opens (following a symlink, as
-# shred does) and then unlinks it; id knows one account, KNOWN_USER (none when
-# empty); setpriv and runuser run the command as the current user.
+# userdel, groupdel, gpasswd, getent, docker, id, setpriv, runuser and nft (and
+# flock in the allowlist section) are PATH stubs that log their arguments;
+# nothing touches the host's units, groups, accounts or firewall. The shred
+# stub overwrites what it opens (following a symlink, as shred does) and then
+# unlinks it; id knows one account, KNOWN_USER (none when empty); setpriv and
+# runuser run the command as the current user.
 # =============================================================================
 
 set -u
@@ -840,6 +843,42 @@ AL_UNITS="telcoin-p2p-allow.service telcoin-p2p-allow-sync.service telcoin-p2p-a
 # A firewall-setup.sh beside the sourced copy and the tool binary log a line if
 # they ever run: the teardown runs neither.
 printf '#!/bin/sh\necho "FWSETUP-RAN $*" >> "$CALLS"\n' > "$T/h/firewall-setup.sh"
+# flock: a stub for this section only (the update lock tests above use the
+# host's flock), so the tool's lock behaves alike under busybox (no -w) and on
+# macOS (no flock). `-w 30 8`, the tool's lock, logs whether fd 8 is open on the
+# lock file (a marker written to fd 8 must show up in it), the lock file's mode
+# and whether the table is still there, and exits FLOCK_RC (default 0); `-u 8`
+# logs whether the state dir and the binary are still there. Every other call
+# (the update lock, fd 9) is logged and exits 0.
+export AL_DIR AL_BIN
+UMASK0="$(umask)"
+cat > "$T/bin/flock" <<'STUB'
+#!/bin/sh
+case "$*" in
+    "-w 30 8")
+        fd8=closed
+        if printf 'fd8\n' 2>/dev/null >&8; then
+            fd8=other
+            if grep -qx fd8 "$AL_DIR/lock" 2>/dev/null; then fd8=lock; fi
+        fi
+        mode="$(ls -ld "$AL_DIR/lock" 2>/dev/null | cut -c1-10)"
+        if [ -f "$NFT_ALLOW_FILE" ]; then t=yes; else t=no; fi
+        printf 'flock -w 30 8 fd8=%s mode=%s table=%s\n' "$fd8" "$mode" "$t" >> "$CALLS"
+        exit "${FLOCK_RC:-0}" ;;
+    "-u 8")
+        if [ -e "$AL_DIR" ]; then d=yes; else d=no; fi
+        if [ -e "$AL_BIN" ]; then b=yes; else b=no; fi
+        printf 'flock -u 8 dir=%s bin=%s\n' "$d" "$b" >> "$CALLS"
+        exit 0 ;;
+esac
+printf 'flock %s\n' "$*" >> "$CALLS"
+exit 0
+STUB
+chmod +x "$T/bin/flock"; hash -r
+# fd8_state -- whether this shell still has fd 8 open; lockseq -- the tool's
+# lock calls and the nft transactions, in order.
+fd8_state() { if { : >&8; } 2>/dev/null; then echo open; else echo closed; fi; }
+lockseq() { grep -E '^flock (-w 30|-u) 8|^nft\| ' "$CALLS"; }
 # p2p_allow_fixture -- what firewall-setup.sh --p2p-committee on leaves: the three
 # units, the state dir, the tool binary and the table.
 p2p_allow_fixture() {
@@ -851,6 +890,7 @@ p2p_allow_fixture() {
     printf 'RPC_PORT=8545\n' > "$AL_DIR/config"
     printf 'table inet tn_p2p_allow {\n}\n' > "$AL_DIR/current.nft"
     : > "$AL_DIR/lock"
+    chmod 0600 "$AL_DIR/lock"
     printf '#!/bin/sh\necho "TOOL-RAN $*" >> "$CALLS"\n' > "$AL_BIN"
     chmod 0755 "$AL_BIN"
     printf 'table inet tn_p2p_allow {\n}\n' > "$NFT_ALLOW_FILE"
@@ -885,6 +925,15 @@ Removed /var/lib/telcoin-p2p-allow" "$(allow_said)"
 check_lacks "p2p allow: the tool never runs" "TOOL-RAN" "$(calls)"
 check_lacks "p2p allow: firewall-setup.sh never runs" "FWSETUP-RAN" "$(calls)"
 kept "p2p allow: other unit" "$SD/telcoin.service"
+# The tool's lock, taken as off takes it (fd 8 on the lock itself, flock -w 30),
+# is held around the delete, the binary and the state dir, then released; the
+# umask and fd 8 are as they were.
+check "p2p allow: the tool's lock held around the delete, the binary and the state dir" "flock -w 30 8 fd8=lock mode=-rw------- table=yes
+nft| table inet tn_p2p_allow
+nft| delete table inet tn_p2p_allow
+flock -u 8 dir=no bin=no" "$(lockseq)"
+check "p2p allow: fd 8 closed again" "closed" "$(fd8_state)"
+check "p2p allow: umask as before" "$UMASK0" "$(umask)"
 # Nothing of it here: no unit call and no delete transaction for it.
 mkfixture; : > "$CALLS"; rm -f "$NFT_ALLOW_FILE"
 remove_node_host_files > /dev/null 2>&1
@@ -929,6 +978,8 @@ ln -s "$OUT/allow-target" "$AL_DIR"
 remove_node_host_files > "$T/out" 2>&1
 kept "p2p allow, symlinked state dir: the link" "$AL_DIR"
 kept "p2p allow, symlinked state dir: its target's file" "$OUT/allow-target/config"
+check "p2p allow, symlinked state dir: no lock taken through it" "" "$(grep -E '^flock (-w 30|-u) 8' "$CALLS")"
+check "p2p allow, symlinked state dir: the table still deleted" "no" "$(exists "$NFT_ALLOW_FILE")"
 check_has "p2p allow, symlinked state dir: warned" "yes" \
     "$(grep -qF '/var/lib/telcoin-p2p-allow is a symlink: it is left in place.' "$T/out" && echo yes)"
 # Nothing is removed through a symlinked libexec dir.
@@ -938,6 +989,87 @@ remove_node_host_files > "$T/out" 2>&1
 kept "p2p allow, symlinked libexec: the binary behind it" "$OUT/lx/tn-p2p-allow-sync"
 kept "p2p allow, symlinked libexec: the link" "$LX"
 gone "p2p allow, symlinked libexec: the state dir still goes" "$AL_DIR"
+# No lock file yet: it is created 0600 (umask 077, as the tool creates it) and held.
+mkfixture; p2p_allow_fixture; rm -f "$AL_DIR/lock"
+remove_node_host_files > "$T/out" 2>&1
+check "p2p allow, no lock file: created 0600 and held around the delete" "flock -w 30 8 fd8=lock mode=-rw------- table=yes
+nft| table inet tn_p2p_allow
+nft| delete table inet tn_p2p_allow
+flock -u 8 dir=no bin=no" "$(lockseq)"
+gone "p2p allow, no lock file: state dir" "$AL_DIR"
+check "p2p allow, no lock file: umask as before" "$UMASK0" "$(umask)"
+# A run holds the tool's lock for 30 seconds (a hand-started sync): the table and
+# the state dir stay, said; the units and the binary still go, the removal goes on
+# with rc 0, and the next run finishes it.
+LOCK_BUSY_MSG='A tn-p2p-allow-sync run held /var/lib/telcoin-p2p-allow/lock for 30 seconds, so the nftables table inet tn_p2p_allow and /var/lib/telcoin-p2p-allow stay for a later removal to try again; run this again when it has finished.'
+rm -rf "$R"; mkdir -p "$R/run/telcoin"
+p2p_allow_fixture
+FLOCK_RC=1 remove_node_host_files > "$T/out" 2>&1; rc=$?
+check_rc "p2p allow, lock busy: rc 0" 0 "$rc"
+check "p2p allow, lock busy: said" "yes" "$(grep -qF "$LOCK_BUSY_MSG" "$T/out" && echo yes)"
+check "p2p allow, lock busy: no delete transaction, no unlock" "flock -w 30 8 fd8=lock mode=-rw------- table=yes" "$(lockseq)"
+check "p2p allow, lock busy: table and state dir stay" "yes yes yes" \
+    "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR") $(exists "$AL_DIR/config")"
+check "p2p allow, lock busy: units and binary still removed" "no no no no" \
+    "$(exists "$SD/telcoin-p2p-allow-sync.timer") $(exists "$SD/telcoin-p2p-allow-sync.service") $(exists "$SD/telcoin-p2p-allow.service") $(exists "$AL_BIN")"
+check_lacks "p2p allow, lock busy: no delete said" "Deleted the P2P committee allowlist" "$(cat "$T/out")"
+check "p2p allow, lock busy: fd 8 closed" "closed" "$(fd8_state)"
+check "p2p allow, lock busy: umask as before" "$UMASK0" "$(umask)"
+check_rc "leftovers, after a busy lock: found" 0 "$(rm_leftovers_present; echo $?)"
+CONFIRM_ANSWER=yes
+( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
+CONFIRM_ANSWER=no
+check_has "leftovers, after a busy lock: rc 0" "rc=0" "$(cat "$T/out")"
+check "leftovers, after a busy lock: table and state dir removed" "no no" "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR")"
+# The JSON removal with the lock busy: the rest goes, and it still ends ok.
+mkfixture; p2p_allow_fixture
+( set -e; export FLOCK_RC=1; json_remove validator keys ) 3> "$T/json" > "$T/out" 2>&1; rc=$?
+check_rc "p2p allow, lock busy: json keys rc 0" 0 "$rc"
+check "p2p allow, lock busy: json done ok" "yes" "$(grep -q '"event":"done","ok":true' "$T/json" && echo yes)"
+check "p2p allow, lock busy: json said" "yes" "$(grep -qF "$LOCK_BUSY_MSG" "$T/out" && echo yes)"
+check "p2p allow, lock busy: json table, state dir, node.env" "yes yes no" \
+    "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR") $(exists "$ETC/node.env")"
+# A lock that is a symlink is never opened (nothing is created through it), and
+# one that cannot be opened is said: either way the table and the state dir stay.
+LOCK_OPEN_MSG='/var/lib/telcoin-p2p-allow/lock cannot be opened, so the nftables table inet tn_p2p_allow and /var/lib/telcoin-p2p-allow stay for a later removal to try again; check what /var/lib/telcoin-p2p-allow/lock is, then run this again.'
+mkfixture; p2p_allow_fixture; rm -f "$AL_DIR/lock"; ln -s "$OUT/lock-target" "$AL_DIR/lock"
+remove_node_host_files > "$T/out" 2>&1; rc=$?
+check_rc "p2p allow, symlinked lock: rc 0" 0 "$rc"
+check "p2p allow, symlinked lock: nothing created through it" "no" "$(exists "$OUT/lock-target")"
+check "p2p allow, symlinked lock: no lock taken, no delete" "" "$(lockseq)"
+check "p2p allow, symlinked lock: said" "yes" "$(grep -qF "$LOCK_OPEN_MSG" "$T/out" && echo yes)"
+check "p2p allow, symlinked lock: table and state dir stay, binary goes" "yes yes no" \
+    "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR") $(exists "$AL_BIN")"
+mkfixture; p2p_allow_fixture; rm -f "$AL_DIR/lock"; mkdir "$AL_DIR/lock"
+remove_node_host_files > "$T/out" 2>&1; rc=$?
+check_rc "p2p allow, lock not openable: rc 0" 0 "$rc"
+check "p2p allow, lock not openable: said" "yes" "$(grep -qF "$LOCK_OPEN_MSG" "$T/out" && echo yes)"
+check "p2p allow, lock not openable: no lock taken, no delete" "" "$(lockseq)"
+check "p2p allow, lock not openable: table and state dir stay, node.env goes" "yes yes no" \
+    "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR") $(exists "$ETC/node.env")"
+check "p2p allow, lock not openable: fd 8 closed, umask as before" "closed $UMASK0" "$(fd8_state) $(umask)"
+# No flock on PATH (the host's hidden behind a directory that links every other
+# command): said, and the table and the state dir stay.
+mkfixture; p2p_allow_fixture
+mkdir -p "$T/pathx"
+for d in /usr/local/bin /usr/bin /bin; do
+    [[ -d "$d" ]] && ln -s "$d"/* "$T/pathx/" 2>/dev/null
+done
+rm -f "$T/pathx/flock"
+mv "$T/bin/flock" "$T/flock.off"
+( PATH="$T/bin:$T/pathx"; hash -r
+  if command -v flock > /dev/null 2>&1; then echo "FLOCK-ON-PATH $(command -v flock)"; exit 0; fi
+  remove_node_host_files; echo "rc=$?" ) > "$T/out" 2>&1
+mv "$T/flock.off" "$T/bin/flock"; hash -r
+if grep -q '^FLOCK-ON-PATH' "$T/out"; then
+    skip "p2p allow, no flock" "a flock outside the fixture is on PATH ($(sed -n 's/^FLOCK-ON-PATH //p' "$T/out"))"
+else
+    check_has "p2p allow, no flock: rc 0" "rc=0" "$(cat "$T/out")"
+    check "p2p allow, no flock: said" "yes" \
+        "$(grep -qF 'flock is not installed, so /var/lib/telcoin-p2p-allow/lock cannot be taken: the nftables table inet tn_p2p_allow and /var/lib/telcoin-p2p-allow stay for a later removal to try again; install util-linux, then run this again.' "$T/out" && echo yes)"
+    check "p2p allow, no flock: table and state dir stay, binary goes" "yes yes no" \
+        "$(exists "$NFT_ALLOW_FILE") $(exists "$AL_DIR") $(exists "$AL_BIN")"
+fi
 # Another node remains: the allowlist stays (its P2P ports are still served).
 mkfixture; p2p_allow_fixture
 INSTALLED_UNITS=(telcoin telcoin-validator)
@@ -961,12 +1093,14 @@ check_has "leftovers, only the allowlist timer: listed" "yes" \
     "$(grep -qF '  /etc/systemd/system/telcoin-p2p-allow-sync.timer (the P2P committee allowlist, its units and its nftables table)' "$T/out" && echo yes)"
 gone "leftovers, only the allowlist timer: timer" "$SD/telcoin-p2p-allow-sync.timer"
 check "leftovers, only the allowlist timer: table deleted" "no" "$(exists "$NFT_ALLOW_FILE")"
+check "leftovers, only the allowlist timer: no state dir, so no lock" "" "$(grep -E '^flock (-w 30|-u) 8' "$CALLS")"
 # Only the state dir, kept by a refused delete: found, and the next run removes it.
 rm -rf "$R"; mkdir -p "$R/run/telcoin"
 p2p_allow_fixture
 NFT_FAIL=1 remove_node_host_files > /dev/null 2>&1
 check "leftovers, after a refused delete: the state dir stays, units and binary gone" "yes no no" \
     "$(exists "$AL_DIR") $(exists "$SD/telcoin-p2p-allow-sync.timer") $(exists "$AL_BIN")"
+check "leftovers, after a refused delete: the lock released with the state dir kept" "flock -u 8 dir=yes bin=no" "$(grep '^flock -u 8' "$CALLS")"
 check_rc "leftovers, after a refused delete: found" 0 "$(rm_leftovers_present; echo $?)"
 CONFIRM_ANSWER=yes
 ( remove_leftovers; echo "rc=$?" ) > "$T/out" 2>&1
@@ -989,7 +1123,8 @@ gone "p2p allow: json state dir" "$AL_DIR"
 gone "p2p allow: json binary" "$AL_BIN"
 check "p2p allow: json table deleted" "no" "$(exists "$NFT_ALLOW_FILE")"
 rm -f "$NFT_ALLOW_FILE" "$T/h/firewall-setup.sh"
-unset -f p2p_allow_fixture allow_said
+rm -f "$T/bin/flock"; hash -r
+unset -f p2p_allow_fixture allow_said fd8_state lockseq
 
 # FW
 # --- the P2P new-flow limit goes with the last node: unit, ruleset, table -------

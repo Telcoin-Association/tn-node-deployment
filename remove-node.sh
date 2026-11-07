@@ -736,17 +736,24 @@ _rm_p2p_limit() {
 # fixed paths and without running firewall-setup.sh or the tool: stop
 # telcoin-p2p-allow-sync.timer, telcoin-p2p-allow-sync.service and
 # telcoin-p2p-allow.service (the timer first, so no sync starts) and remove their
-# unit files; delete the nftables table inet tn_p2p_allow when nft lists it, or,
-# when the listing fails, when a unit, the state dir or the binary was found
-# (with none of them there is no sign of a table, and the delete would only
-# print a result that says nothing); remove the tool binary
+# unit files. Then, in a real state directory /var/lib/telcoin-p2p-allow, take
+# the tool's own lock as firewall-setup.sh --p2p-committee off does (its lock
+# file on fd 8, created 0600 when missing and never opened through a symlink;
+# flock -w 30), so a run in progress ends first and none loads the table again
+# after the delete. Holding it: delete the nftables table inet tn_p2p_allow when
+# nft lists it, or, when the listing fails, when a unit, the state dir or the
+# binary was found (with none of them there is no sign of a table, and the
+# delete would only print a result that says nothing); remove the tool binary
 # /usr/local/libexec/telcoin/tn-p2p-allow-sync (never through a symlinked
-# libexec dir), and last the state directory /var/lib/telcoin-p2p-allow.
-# That directory goes only when it is a real directory, and it stays when nft
-# refused the delete, so the leftover check finds it and a later run tries again.
-# Never fails.
+# libexec dir), and last the state directory. That directory goes only when it
+# is a real directory, and it stays when nft refused the delete, so the leftover
+# check finds it and a later run tries again. When the lock cannot be taken (a
+# run held it for 30 seconds, it cannot be opened, or flock is missing), the
+# table and the state directory stay the same way, said, and the binary still
+# goes, as off removes it. With no state directory, or a symlink there, there is
+# no lock to take and the table is deleted without it. Never fails.
 _rm_p2p_allow() {
-    local r="$TN_RM_ROOT" u f any=false tables keep=false try=false
+    local r="$TN_RM_ROOT" u f any=false tables keep=false try=false held=false old_umask
     local dir=/var/lib/telcoin-p2p-allow bin=/usr/local/libexec/telcoin/tn-p2p-allow-sync
     for u in telcoin-p2p-allow-sync.timer telcoin-p2p-allow-sync.service telcoin-p2p-allow.service; do
         f="/etc/systemd/system/${u}"
@@ -764,7 +771,31 @@ _rm_p2p_allow() {
     if [[ "$any" == "true" ]]; then
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
-    if command -v nft >/dev/null 2>&1; then
+    # keep: the table and the state dir stay, for a later removal to try again
+    if [[ -d "${r}${dir}" && ! -L "${r}${dir}" ]]; then
+        keep=true
+        if ! command -v flock >/dev/null 2>&1; then
+            print_warn "flock is not installed, so ${dir}/lock cannot be taken: the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; install util-linux, then run this again."
+        else
+            # umask 077 creates a missing lock 0600, as the tool creates it.
+            old_umask="$(umask)"
+            umask 077
+            if [[ -L "${r}${dir}/lock" ]] || ! exec 8>>"${r}${dir}/lock"; then
+                umask "$old_umask"
+                print_warn "${dir}/lock cannot be opened, so the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; check what ${dir}/lock is, then run this again."
+            else
+                umask "$old_umask"
+                if flock -w 30 8; then
+                    held=true
+                    keep=false
+                else
+                    exec 8>&-
+                    print_warn "A tn-p2p-allow-sync run held ${dir}/lock for 30 seconds, so the nftables table inet tn_p2p_allow and ${dir} stay for a later removal to try again; run this again when it has finished."
+                fi
+            fi
+        fi
+    fi
+    if [[ "$keep" != "true" ]] && command -v nft >/dev/null 2>&1; then
         if tables="$(nft list tables 2>/dev/null)"; then
             if grep -qx 'table inet tn_p2p_allow' <<< "$tables"; then
                 try=true
@@ -792,6 +823,10 @@ _rm_p2p_allow() {
     elif [[ -d "${r}${dir}" && "$keep" != "true" ]]; then
         rm -rf -- "${r}${dir}" 2>/dev/null || true
         print_ok "Removed ${dir}"
+    fi
+    if [[ "$held" == "true" ]]; then
+        flock -u 8 >/dev/null 2>&1 || true
+        exec 8>&-
     fi
     return 0
 }
