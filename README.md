@@ -850,7 +850,7 @@ It is a server task: the Node Manager UI shows the allowlist but cannot turn it 
 **The tool and its pin.**
 `tn-p2p-allow-sync` comes from a signed release of `Telcoin-Association/tn-p2p-allow-sync`, checked against the same keys as node releases (`lib/release-keys`).
 `lib/common.sh` pins it: `TN_P2P_ALLOW_VERSION` names the tag (`v0.1.0`) and `TN_P2P_ALLOW_TARBALL_SHA256` the sha256 of its tarball.
-The scripts never fetch "latest", so the binary changes only with a scripts release.
+The scripts never fetch "latest", so the binary changes only with a scripts release, which moves both values in one `chore` commit (`v0.1.1` is being prepared).
 Without a pin, `on` refuses: `These scripts pin no sha256 for the tn-p2p-allow-sync v0.1.0 tarball yet, so it cannot be installed; update the scripts (update-scripts.sh). Nothing was downloaded.`
 `tn_p2p_allow_install` downloads `SHA256SUMS`, `SHA256SUMS.asc` and the tarball into a root-only staging dir over HTTPS, checks the signature with `gpgv`, the tarball's sha256 against its line and the pin, and its member list, then runs the binary's `--version` as the `tn-build` account.
 The first line must be `tn-p2p-allow-sync` and the tag without its `v`, with a `config-version 1` line and a `snapshot-versions` line that holds 1; `tn_install_root_binary` then installs it as `/usr/local/libexec/telcoin/tn-p2p-allow-sync` (root 0755).

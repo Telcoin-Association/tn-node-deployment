@@ -572,6 +572,7 @@ The firewall does not depend on the admission mode, though: it filters by the sn
 - The node runs a release that serves `tn_admissionSnapshot`, is synced, and holds an authoritative snapshot: right after a restart it may not have its committee window yet, and `on` refuses until it has.
 - The host is x86_64, the one architecture the tool is published for.
 - These scripts pin the tool's release: `TN_P2P_ALLOW_VERSION` (`v0.1.0`) and `TN_P2P_ALLOW_TARBALL_SHA256` in `lib/common.sh`.
+  Both are set; a later script release moves them together (`v0.1.1` is being prepared).
 
 ```bash
 sudo bash ~/telcoin-node-scripts/firewall-setup.sh --p2p-committee on
@@ -1183,7 +1184,8 @@ Install mainnet fresh on Ubuntu 24.04, from a verified `scripts-v*` release (sec
 
 The scripts check every release they install.
 To check one yourself, for an `existing` install or before you trust a download, use the same keys.
-Node releases and script releases are signed by the same release keys, the `lib/release-keys/*.asc` of your installed scripts.
+Node releases, script releases and the `tn-p2p-allow-sync` release that P2P committee mode installs (section 2.10) are signed by the same release keys, the `lib/release-keys/*.asc` of your installed scripts.
+A release key that is rotated or revoked must change in `lib/release-keys` too: a script release does that, and your host takes it with `update-scripts.sh` (section 4.1).
 Work in an empty directory and make the keyring from them once; both checks below use it:
 
 ```bash
