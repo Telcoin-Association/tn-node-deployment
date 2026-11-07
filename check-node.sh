@@ -2474,6 +2474,16 @@ check_p2p_committee() {
                 print_error "P2P committee mode is on, but tn-p2p-allow-sync check finds no table inet tn_p2p_allow: P2P is open to every source."
                 print_info "  Fix: ${fix}  (loads the allowlist again)"
                 (( ++HEALTH_ISSUES )) ;;
+            1:dormant)
+                # `flags dormant` set on the table by hand; a sync re-applies
+                # the program, which declares the table without flags.
+                print_error "P2P committee mode is on, but tn-p2p-allow-sync check finds table inet tn_p2p_allow dormant (set by hand): it enforces nothing, and P2P is open to every source until a sync applies it again."
+                if (( 10#$mtotal > 0 )); then
+                    (( 10#$mtotal <= named_miss )) || miss="${miss}, and $(( 10#$mtotal - named_miss )) more"
+                    print_info "  It also lacks ${mtotal} address(es) of the current committee (${miss:-none named}), which the sync adds back."
+                fi
+                print_info "  Fix: ${fix}  (applies the allowlist again, which wakes the table)"
+                (( ++HEALTH_ISSUES )) ;;
             3:behind)
                 print_info "P2P committee allowlist not compared with the committee: the last sync is behind the snapshot (a newer epoch, or an address it never held), which the next sync catches up." ;;
             3:*)

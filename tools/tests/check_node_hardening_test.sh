@@ -622,6 +622,18 @@ check "committee: six missing lines without a total, five named, the sixth count
 export TN_P2P_STUB_OUT_CHECK='result=absent missing_total=0 mismatch_total=0'
 run check_p2p_committee
 check "committee: check finds no table, P2P open" "yes 1" "$(has "$OUT" "P2P is open to every source") $ADDED"
+# a table set dormant by hand enforces nothing; the sync re-applies and wakes it
+export TN_P2P_STUB_OUT_CHECK='result=dormant missing_total=0 mismatch_total=0'
+run check_p2p_committee
+check "committee: check finds the table dormant, P2P open, sync is the fix" "yes yes no no 1" \
+    "$(has "$OUT" "P2P committee mode is on, but tn-p2p-allow-sync check finds table inet tn_p2p_allow dormant (set by hand): it enforces nothing, and P2P is open to every source until a sync applies it again.") $(has "$OUT" "Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync  (applies the allowlist again, which wakes the table)") $(has "$OUT" "consistency check failed") $(has "$OUT" "lacks") $ADDED"
+check "committee: one error line for the dormant table" "1" "$(grep -c 'ERROR' "$T/out")"
+export TN_P2P_STUB_OUT_CHECK='missing 198.51.100.7
+result=dormant missing_total=1 mismatch_total=0'
+run check_p2p_committee
+check "committee: a dormant table with a missing address says both, as one failure" "yes yes yes 1" \
+    "$(has "$OUT" "finds table inet tn_p2p_allow dormant (set by hand)") $(has "$OUT" "It also lacks 1 address(es) of the current committee (198.51.100.7), which the sync adds back.") $(has "$OUT" "Fix: sudo bash ${SCRIPT_DIR}/firewall-setup.sh --p2p-committee sync") $ADDED"
+check "committee: one error line for the dormant table with a missing address" "1" "$(grep -c 'ERROR' "$T/out")"
 
 cn_clean
 export TN_P2P_STUB_OUT_CHECK='mismatch 0x0123456789abcdef
