@@ -65,6 +65,10 @@ readonly FW_ALLOW_DIR="${TN_ROOT_PREFIX:-}/var/lib/telcoin-p2p-allow"
 readonly FW_ALLOW_SVC="telcoin-p2p-allow.service"
 readonly FW_ALLOW_SYNC_SVC="telcoin-p2p-allow-sync.service"
 readonly FW_ALLOW_TIMER="telcoin-p2p-allow-sync.timer"
+# The nft of the P2P committee allowlist: tn-p2p-allow-sync runs its --nft
+# default, /usr/sbin/nft, because neither its units nor the verbs pass --nft,
+# so `on` requires that path and the boot unit loads the table with it too.
+readonly FW_ALLOW_NFT="/usr/sbin/nft"
 
 # Source lists for this run: --ssh-from / --p2p-from (comma lists or a file), and
 # --ssh-anywhere / --p2p-anywhere (drop a stored list). Empty = not given.
@@ -1228,15 +1232,22 @@ fw_allow_unit_path() {
     printf '%s/etc/systemd/system/%s\n' "${TN_ROOT_PREFIX:-}" "$1"
 }
 
-# fw_allow_unit_boot_text NFT NODE_UNIT -- telcoin-p2p-allow.service: after ufw and
+# fw_allow_nft_ok -- rc 0 when FW_ALLOW_NFT (under TN_ROOT_PREFIX) is an
+# executable file.
+fw_allow_nft_ok() {
+    local f="${TN_ROOT_PREFIX:-}${FW_ALLOW_NFT}"
+    [[ -f "$f" && -x "$f" ]]
+}
+
+# fw_allow_unit_boot_text NODE_UNIT -- telcoin-p2p-allow.service: after ufw and
 # before NODE_UNIT, so the node never starts without the allowlist, it loads the
-# program tn-p2p-allow-sync last applied (FW_ALLOW_DIR/current.nft) with the nft
-# binary NFT (an absolute path); without that file it does nothing, and stopping
-# it deletes the table (a missing table is not an error there). It talks netlink
-# only. ProtectKernelModules= stays off, because the first load after boot may
-# need the kernel to load its nftables modules.
+# program tn-p2p-allow-sync last applied (FW_ALLOW_DIR/current.nft) with
+# FW_ALLOW_NFT, the nft the tool runs; without that file it does nothing, and
+# stopping it deletes the table (a missing table is not an error there). It talks
+# netlink only. ProtectKernelModules= stays off, because the first load after
+# boot may need the kernel to load its nftables modules.
 fw_allow_unit_boot_text() {
-    local nft="$1" node="$2" dir="${FW_ALLOW_DIR#"${TN_ROOT_PREFIX:-}"}"
+    local nft="$FW_ALLOW_NFT" node="$1" dir="${FW_ALLOW_DIR#"${TN_ROOT_PREFIX:-}"}"
     printf '%s\n' \
         '# Written by firewall-setup.sh: loads the P2P committee allowlist (nftables' \
         '# table inet tn_p2p_allow) at boot from the program tn-p2p-allow-sync last' \
@@ -1391,17 +1402,16 @@ fw_allow_unit_put() {
 }
 
 # fw_allow_units_write -- bring the three unit files in line with this host: the
-# nft that `command -v` finds, the node unit (tn_resolve_service) and DATA_DIR from
-# .node-meta. Only a file whose text differs is written (fw_allow_unit_put), and
-# daemon-reload runs when one was (FW_ALLOW_UNITS_CHANGED). Enables nothing. rc 0;
-# 1 refused, nothing written (nft not at an absolute path, no node unit, DATA_DIR
-# set twice); 2 a write or the reload failed (said).
+# node unit (tn_resolve_service) and DATA_DIR from .node-meta. Only a file whose
+# text differs is written (fw_allow_unit_put), and daemon-reload runs when one was
+# (FW_ALLOW_UNITS_CHANGED). Enables nothing. rc 0; 1 refused, nothing written
+# (FW_ALLOW_NFT missing, no node unit, DATA_DIR set twice); 2 a write or the
+# reload failed (said).
 fw_allow_units_write() {
-    local nft_bin svc dd
+    local svc dd
     FW_ALLOW_UNITS_CHANGED=false
-    nft_bin="$(command -v nft 2>/dev/null)" || nft_bin=""
-    if [[ "$nft_bin" != /* ]]; then
-        fw_error "nft is not at an absolute path (${nft_bin:-not found}), so the P2P committee allowlist units were not written."
+    if ! fw_allow_nft_ok; then
+        fw_error "${FW_ALLOW_NFT} is missing or not executable (the path tn-p2p-allow-sync runs), so the P2P committee allowlist units were not written; install the nftables package (sudo apt-get install nftables)."
         return 1
     fi
     if ! svc="$(tn_resolve_service 2>/dev/null)"; then
@@ -1411,7 +1421,7 @@ fw_allow_units_write() {
     if ! dd="$(addon_meta_get DATA_DIR "")"; then
         return 1
     fi
-    fw_allow_unit_put "$FW_ALLOW_SVC" "$(fw_allow_unit_boot_text "$nft_bin" "${svc}.service")" || return 2
+    fw_allow_unit_put "$FW_ALLOW_SVC" "$(fw_allow_unit_boot_text "${svc}.service")" || return 2
     fw_allow_unit_put "$FW_ALLOW_SYNC_SVC" "$(fw_allow_unit_sync_text "${svc}.service" "$dd")" || return 2
     fw_allow_unit_put "$FW_ALLOW_TIMER" "$(fw_allow_unit_timer_text)" || return 2
     if [[ "$FW_ALLOW_UNITS_CHANGED" == "true" ]] && ! systemctl daemon-reload >/dev/null 2>&1; then
@@ -1628,9 +1638,11 @@ fw_allow_summary() {
 # means for the operator.
 fw_allow_reason_text() {
     case "${1:-}" in
-        rpc-method-missing) printf 'this node release lacks tn_admissionSnapshot; update the node first' ;;
+        rpc-method-missing) printf 'this node release lacks tn_admissionSnapshot, or tn is not in its --http.api; update the node or add tn to --http.api' ;;
         empty-set) printf 'the snapshot lists no addresses beyond the floor and static list' ;;
         snapshot-version-*) printf 'the node serves a snapshot version this tool does not read (%s); update the scripts (update-scripts.sh)' "$1" ;;
+        epoch-regressed) printf '%s' "the node reports an epoch below the one the allowlist was built from (epoch-regressed); it clears by itself once the node's tracked epoch is back at or above the applied one (after a startup record-sync replay); if it persists past 2 epochs, recover with --p2p-committee off, then --p2p-committee on" ;;
+        state-invalid) printf 'tn-p2p-allow-sync cannot read its own state.json (state-invalid), so every sync fails; recover with --p2p-committee off, then --p2p-committee on' ;;
         rpc-unreachable) printf 'the node RPC does not answer on 127.0.0.1 (rpc-unreachable)' ;;
         "") printf 'the admission snapshot of the node is not authoritative' ;;
         *) printf 'the admission snapshot of the node is not authoritative (%s)' "$1" ;;
@@ -1639,11 +1651,13 @@ fw_allow_reason_text() {
 
 # fw_committee_on -- firewall-setup.sh --p2p-committee on. Refused with nothing
 # changed (rc 1; 2 for an older library) unless a node is installed, ufw is
-# active, nft (at an absolute path), systemctl and flock are there, and the
-# new-flow rate and burst and the P2P source list are valid; when P2P_COMMITTEE
-# is on already it is a resync (fw_committee_sync; its rc, with a stale or busy
-# sync 0). Under the update lock (fw_meta_lock): the pinned tn-p2p-allow-sync
-# (fw_allow_bin_ensure), FW_ALLOW_DIR root 0700, its config and floor; then one
+# active, FW_ALLOW_NFT (the nft the tool runs) is executable, nft is on PATH at
+# an absolute path (the scripts' own nft calls), systemctl and flock are there,
+# and the new-flow rate and burst and the P2P source list are valid; when
+# P2P_COMMITTEE is on already it is a resync (fw_committee_sync; its rc, with a
+# stale or busy sync 0). Under the update lock (fw_meta_lock): the pinned
+# tn-p2p-allow-sync (fw_allow_bin_ensure), FW_ALLOW_DIR root 0700, its config
+# and floor; then one
 # `sync --require-authoritative --wait 30`, which loads the table and writes
 # current.nft itself, or exits 1 and writes nothing (the snapshot is not
 # authoritative; reason= on its stdout line says why), which is a refusal that
@@ -1673,9 +1687,13 @@ fw_committee_on() {
         fw_error "ufw is not active; turn the firewall on first (sudo bash ${SCRIPT_DIR}/firewall-setup.sh --enable). Nothing was changed."
         return 1
     fi
+    if ! fw_allow_nft_ok; then
+        fw_error "The P2P committee allowlist needs ${FW_ALLOW_NFT} (the path tn-p2p-allow-sync runs); install the nftables package (sudo apt-get install nftables) and run this again. Nothing was changed."
+        return 1
+    fi
     nft_bin="$(command -v nft 2>/dev/null)" || nft_bin=""
     if [[ "$nft_bin" != /* ]]; then
-        fw_error "nftables (nft) is not installed; install it (sudo apt-get install nftables) and run this again. Nothing was changed."
+        fw_error "nft is not on PATH (${nft_bin:-not found}), and firewall-setup.sh runs it from there; run this again with /usr/sbin on PATH. Nothing was changed."
         return 1
     fi
     for t in systemctl flock; do
@@ -1922,7 +1940,9 @@ fw_committee_off() {
 # allowlist: off, or on with what the tool reports. The tool's status file
 # (FW_ALLOW_DIR/status) and `tn-p2p-allow-sync status`, which adds the live keys
 # (LOADED, AGE_SECS, STALE, the counters), are read key by key (fw_allow_kv), the
-# live answer first.
+# live answer first. As in check-node, rpc-method-missing, snapshot-version-*,
+# epoch-regressed and state-invalid warn at once (they need the operator, or may
+# take epochs to clear); any other reason once the tool reports STALE=true.
 fw_committee_report() {
     local mode text="" live="" st="${FW_ALLOW_DIR}/status" bin loaded age stale result reason since acc drop
     if ! mode="$(addon_meta_get P2P_COMMITTEE off 2>/dev/null)"; then
@@ -1961,7 +1981,7 @@ fw_committee_report() {
     reason="$(fw_allow_kv STALE_REASON "$text")" || reason=""
     since="$(fw_allow_kv STALE_SINCE "$text")" || since=""
     case "$reason" in
-        rpc-method-missing|snapshot-version-*)
+        rpc-method-missing|snapshot-version-*|epoch-regressed|state-invalid)
             print_warn "P2P committee allowlist: $(fw_allow_reason_text "$reason"); the last-good set stays loaded" ;;
         *)
             if [[ "$stale" == "true" ]]; then
