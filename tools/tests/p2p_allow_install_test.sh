@@ -475,6 +475,17 @@ wc_run
 check_rc "config: an invalid P2P_ALLOW_FROM entry refused" 1 "$RC"
 check "config: the invalid entry is named" "1" "$(grep -c "not-an-address" "$T/err")"
 check "config: an invalid entry writes nothing" "" "$(cat "$WRITES")"
+# IPv6 entries the tool's Ipv6Addr::from_str refuses, which once made it refuse the
+# whole file; and dotted tails, whose mapped or unspecified hosts
+# fw_allow_src_dropped cannot judge: refused here, the entry named, nothing written
+for e in 2001:db8::1::5 1:2:3 1:2:3:4:5:6:7:8:9 12345::1 fe80::1%eth0 '[2001:db8::1]' \
+    ::ffff:169.254.1.1 ::ffff:224.0.0.1 ::0.0.0.0 ::ffff:10.0.0.1; do
+    printf 'RPC_PORT=8545\nP2P_ALLOW_FROM=203.0.113.0/24,%s\n' "$e" > "$META"
+    wc_run
+    check "config: not the tool's IPv6 refused: $e" "1|1|" \
+        "$RC|$(grep -cF "'${e}'" "$T/err")|$(cat "$WRITES")"
+done
+check "config: a refused IPv6 entry leaves the old file" "$(cat "$T/cfg.before")" "$(cat "$CFG")"
 printf 'RPC_PORT=8545\nP2P_ALLOW_FROM=203.0.113.0/24\nP2P_ALLOW_FROM=198.51.100.9\n' > "$META"
 wc_run
 check_rc "config: P2P_ALLOW_FROM twice refused" 1 "$RC"
