@@ -19,7 +19,9 @@
 # replaces the "port 22" line. systemctl appends to $SYSTEMCTL_LOG; with
 # TN_ROOT_PREFIX set it also keeps the enabled units in
 # $TN_ROOT_PREFIX/.systemctl.enabled (`enable U`, `disable [--now] U`), and
-# `is-enabled U` answers from it (rc 0 "enabled", rc 1 "disabled").
+# `is-enabled U` answers from it (rc 0 "enabled", rc 1 "disabled"). `show ...`
+# prints $SYSTEMCTL_SHOW as it is, whatever unit and properties it names
+# (nothing when it is unset or empty).
 #
 # nft keeps table inet tn_p2p in $TN_ROOT_PREFIX/.nft.table (the table block of
 # the last program it applied; absent when there is no table) and table inet
@@ -155,6 +157,10 @@ STUB
     cat > "$bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+if [ "${1:-}" = show ]; then
+    [ -z "${SYSTEMCTL_SHOW:-}" ] || printf '%s\n' "$SYSTEMCTL_SHOW"
+    exit 0
+fi
 [ -n "${TN_ROOT_PREFIX:-}" ] || exit 0
 en="$TN_ROOT_PREFIX/.systemctl.enabled"
 case "${1:-}" in
